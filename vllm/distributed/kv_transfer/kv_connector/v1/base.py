@@ -7,8 +7,11 @@ The class provides the following primitives:
     Scheduler-side: runs in the scheduler, binds metadata, which
     is used by the worker-side to load/save KV cache.
         get_num_new_matched_tokens() - get number of new tokens
-            that exist in the remote KV cache. Might be called multiple
-            times for a given request and should be side-effect free.
+            that exist in the remote KV cache. Called when the scheduler
+            tries to admit a request, possibly more than once for it, and
+            may record state for it, such as a load to plan.
+        peek_num_new_matched_tokens() - optionally, the same count with no
+            side effects, for ranking waiting requests.
         update_state_after_alloc() - update KVConnector state after
             temporary buffer alloc by the CacheManager.
         update_connector_output() - update KVConnector state after
@@ -553,6 +556,35 @@ class KVConnectorBase_V1(ABC):
 
         """
         pass
+
+    def peek_num_new_matched_tokens(
+        self,
+        request: "Request",
+        num_computed_tokens: int,
+    ) -> int | None:
+        """Get the number of tokens past `num_computed_tokens` that the
+        external KV cache holds for the request, without side effects.
+
+        The scheduler calls this on its thread inside `schedule()`, before
+        `build_connector_meta`, to rank waiting requests for
+        `cache_aware_admission_window`, for at most a few requests a step.
+        Unlike `get_num_new_matched_tokens`, which runs when a request is
+        being admitted, it must prepare nothing: it reserves nothing, records
+        no state for the request and leaves the external cache's eviction
+        order as it is. It must be cheap, with no I/O. It may take the locks
+        the connector's lookups take, released as theirs are.
+
+        Args:
+            request (Request): the request object.
+            num_computed_tokens (int): the number of locally
+                computed tokens for this request
+
+        Returns:
+            The number of tokens, or None if the connector cannot tell
+            without side effects. The default returns None.
+
+        """
+        return None
 
     def get_external_cache_hit_sources(
         self,

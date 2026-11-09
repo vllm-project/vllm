@@ -227,12 +227,21 @@ class SchedulerConfig:
     evict blocks a resident one still needs. 0 (the default) admits strictly in
     arrival order.
 
+    With a KV connector that can count its hits without side effects (the
+    `OffloadingConnector` with its single CPU tier, for full-attention models),
+    the tokens it holds past the prefix cache's hit count as cached too, so a
+    request whose prefix the tier holds ranks with those the GPU holds. A tier
+    token weighs as much as a GPU token, although loading it needs free GPU
+    blocks.
+
     Reordering is confined to the window and to requests that are merely
     waiting, so a request that is blocked or already partially computed keeps
     its position and nothing is moved past it. Requires prefix caching and the
     "fcfs" policy; it is ignored otherwise. Costs one prefix-cache lookup per
     request in the window per step, so prefer the smallest window that spans
-    the usual queue depth."""
+    the usual queue depth; with such a connector, at most two requests a step
+    are also counted by the connector, the others keeping their last count.
+    Nothing bounds how often a request is passed."""
 
     cache_aware_admission_threshold: float = Field(default=0.5, ge=0.0, le=1.0)
     """KV cache usage below which `cache_aware_admission_window` is not applied.

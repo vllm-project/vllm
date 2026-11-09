@@ -206,14 +206,23 @@ class CPUOffloadingManager(OffloadingManager):
         self._get_request_cache_access(req_context)
         return RequestOffloadingContext()
 
-    @override
-    def lookup(self, key: OffloadKey, req_context: ReqContext) -> LookupResult:
+    def _find(self, key: OffloadKey) -> LookupResult:
+        # A plain find: the policy's recency moves on stores, loads and
+        # request finishes, never here.
         chunk = self._policy.get(key)
         if chunk is None:
             return LookupResult.MISS
         if not chunk.is_ready:
             return LookupResult.HIT_PENDING
         return LookupResult.HIT
+
+    @override
+    def lookup(self, key: OffloadKey, req_context: ReqContext) -> LookupResult:
+        return self._find(key)
+
+    @override
+    def peek(self, key: OffloadKey, req_context: ReqContext) -> LookupResult:
+        return self._find(key)
 
     @override
     def get_load_source(

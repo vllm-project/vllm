@@ -1423,6 +1423,34 @@ def test_late_old_completion_does_not_override_newer_request_recency():
     assert output.evicted_keys == [old_keys[-1]]
 
 
+@pytest.mark.parametrize("cache_policy", ["lru", "arc"])
+def test_peek_keeps_the_eviction_order(cache_policy: str):
+    """A peek moves no chunk in the eviction order, so the next store evicts
+    what it would have evicted without the peeks. Loading the same chunks
+    does move them, as the control shows."""
+
+    def evicted_after(touch: str) -> list[OffloadKey]:
+        manager = make_cpu_manager(num_chunks=4, cache_policy=cache_policy)
+        for name, keys in (("old", to_keys([1, 2])), ("new", to_keys([3, 4]))):
+            ctx = make_req_context(name)
+            assert manager.prepare_store(keys, ctx) is not None
+            manager.complete_store(keys, ctx)
+            manager.on_request_finished(ctx)
+        if touch == "peek":
+            waiting = make_req_context("waiting")
+            for _ in range(3):
+                for key in to_keys([1, 2, 9]):
+                    manager.peek(key, waiting)
+        elif touch == "load":
+            reuse_keys(manager, to_keys([1, 2]))
+        output = manager.prepare_store(to_keys([5]), make_req_context("evict"))
+        assert output is not None
+        return output.evicted_keys
+
+    assert evicted_after("peek") == evicted_after("nothing")
+    assert evicted_after("load") != evicted_after("nothing")
+
+
 def test_arc_counts_reuse_once_and_keeps_insertions_in_t1():
     manager = make_cpu_manager(num_chunks=4, cache_policy="arc")
     policy = manager._policy

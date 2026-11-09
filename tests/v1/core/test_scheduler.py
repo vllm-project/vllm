@@ -33,6 +33,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.connector import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import MultiConnector
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
+    OffloadingConnector,
+)
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import (
     MultiModalBatchedField,
@@ -69,6 +72,7 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     SlidingWindowSpec,
 )
+from vllm.v1.kv_offload.base import ReqContext, make_offload_key
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import (
     EMPTY_MODEL_RUNNER_OUTPUT,
@@ -1597,6 +1601,192 @@ def test_cache_aware_admission_is_safe_on_a_mamba_spec():
 def test_cache_aware_admission_requires_fcfs_and_prefix_caching(kwargs: dict):
     scheduler = create_scheduler(cache_aware_admission_window=4, **kwargs)
     assert scheduler.cache_aware_window == 0
+
+
+def _cache_aware_scheduler_with_tier() -> Scheduler:
+    """A scheduler with the window on at any KV cache usage and an
+    `OffloadingConnector` whose CPU tier starts empty. One running slot means
+    a step admits one request, and the sync-load budget admits a request
+    against the tier's copy of its prefix in the same step."""
+    return create_scheduler(
+        enable_prefix_caching=True,
+        cache_aware_admission_window=4,
+        cache_aware_admission_threshold=0,
+        max_num_seqs=1,
+        use_kv_connector="OffloadingConnector",
+        kv_connector_extra_config={
+            "cpu_bytes_to_use": 1 << 20,
+            "sync_load_budget_bytes": 1 << 20,
+        },
+    )
+
+
+def _setup_cache_aware_with_tier(
+    num_requests: int = 2, prompt_logprobs: int | None = None
+):
+    """A scheduler whose `OffloadingConnector` CPU tier holds the first two
+    blocks of the last request's prompt, while the GPU holds nothing for any.
+
+    Returns the scheduler and the requests "a", "b", ..., added in that order;
+    with `prompt_logprobs`, the last one scores its prompt.
+    """
+    scheduler = _cache_aware_scheduler_with_tier()
+    req_ids = [chr(ord("a") + i) for i in range(num_requests)]
+    requests = create_requests(
+        num_requests=num_requests, num_tokens=48, req_ids=req_ids
+    )
+    if prompt_logprobs is not None:
+        # The same prompt, scored.
+        unused = [f"unused{i}" for i in range(num_requests - 1)]
+        requests[-1] = create_requests(
+            num_requests=num_requests,
+            num_tokens=48,
+            prompt_logprobs=prompt_logprobs,
+            req_ids=[*unused, req_ids[-1]],
+        )[-1]
+    for request in requests:
+        scheduler.add_request(request)
+    _hold_in_tier(scheduler, requests[-1])
+
+    assert all(
+        scheduler.kv_cache_manager.get_num_cached_tokens(r) == 0 for r in requests
+    )
+    return scheduler, requests
+
+
+def _hold_in_tier(
+    scheduler: Scheduler, request: Request, first: int = 0, end: int = 2
+) -> None:
+    """Leave blocks `first` to `end` (exclusive) of `request`'s prompt, one
+    chunk each, in the CPU tier, as an earlier turn of its session would."""
+    connector = scheduler.connector
+    assert isinstance(connector, OffloadingConnector)
+    manager = connector.scheduler.manager
+    keys = [make_offload_key(h, 0) for h in request.block_hashes[first:end]]
+    earlier_turn = ReqContext(req_id=f"{request.request_id}-earlier-turn")
+    assert manager.prepare_store(keys, earlier_turn) is not None
+    manager.complete_store(keys, earlier_turn)
+    manager.on_request_finished(earlier_turn)
+
+
+def _rank_waiting(scheduler: Scheduler) -> list[str]:
+    """Rank the window as a step does, close the step's connector region as
+    `schedule()` does, and return the waiting queue's order."""
+    scheduler._reorder_waiting_by_cached_prefix()
+    scheduler.connector.build_connector_meta(SchedulerOutput.make_empty())
+    return [r.request_id for r in scheduler.waiting]
+
+
+def test_cache_aware_admission_counts_connector_hits():
+    """A prefix in a CPU offload tier counts as cached. The GPU holds nothing
+    for either request, so its hits alone would keep arrival order, `a`
+    first; `b`, whose first two blocks the tier holds, goes first and
+    computes only the third."""
+    scheduler, _ = _setup_cache_aware_with_tier()
+
+    output = scheduler.schedule()
+    assert [r.req_id for r in output.scheduled_new_reqs] == ["b"]
+    assert output.num_scheduled_tokens["b"] == 16
+
+
+def test_cache_aware_admission_counts_a_prefix_split_between_gpu_and_tier():
+    """The tier's hit extends the prefix cache's, as in the waiting loop,
+    rather than adding to it: `x` finds two blocks on the GPU and the third
+    in the tier, 48 tokens, and `y` four in the tier, 64, so `y` goes
+    first."""
+    scheduler = _cache_aware_scheduler_with_tier()
+    # Running the seed, whose prompt is the head of x's, leaves that head in
+    # the prefix cache.
+    seed = create_requests(num_requests=2, num_tokens=32, req_ids=["_", "seed"])[1]
+    scheduler.add_request(seed)
+    assert "seed" in scheduler.schedule().num_scheduled_tokens
+    x, y = create_requests(num_requests=3, num_tokens=80, req_ids=["_", "x", "y"])[1:]
+    scheduler.add_request(x)
+    scheduler.add_request(y)
+    _hold_in_tier(scheduler, x, first=2, end=3)
+    _hold_in_tier(scheduler, y, first=0, end=4)
+    assert scheduler.kv_cache_manager.get_num_cached_tokens(x) == 32
+
+    assert _rank_waiting(scheduler) == ["y", "x"]
+
+
+def test_cache_aware_admission_counts_two_connector_hits_a_step():
+    """A connector count walks the request's prefix, so the window counts at
+    most two afresh a step, those never counted first. `c`, whose prefix the
+    tier holds, is counted on the second step, and goes first from then on."""
+    scheduler, _ = _setup_cache_aware_with_tier(num_requests=3)
+
+    assert _rank_waiting(scheduler) == ["a", "b", "c"]
+    assert _rank_waiting(scheduler) == ["c", "a", "b"]
+
+
+def test_cache_aware_admission_recounts_the_least_recently_counted():
+    """Once every request in the window has a count, a step counts afresh the
+    two counted longest ago, so a prefix that reaches the tier after a
+    request's count is seen when its turn comes again."""
+    scheduler, (a, b, c, d) = _setup_cache_aware_with_tier(num_requests=4)
+
+    assert _rank_waiting(scheduler) == ["a", "b", "c", "d"]  # counts a, b
+    assert _rank_waiting(scheduler) == ["d", "a", "b", "c"]  # counts c, d
+    assert _rank_waiting(scheduler) == ["d", "a", "b", "c"]  # counts a, b
+    _hold_in_tier(scheduler, c)
+    # Counts c and d: c now holds as much as d, which keeps its place.
+    assert _rank_waiting(scheduler) == ["d", "c", "a", "b"]
+
+
+def test_cache_aware_admission_counts_gpu_hits_past_a_stale_connector_count():
+    """Between its connector counts a request keeps the last one, but its
+    prefix cache hit is counted afresh each step. Admitting `a` leaves the
+    prompt it shares with `b` on the GPU, and `b` goes first, although that
+    step's connector counts are `c`'s and `d`'s."""
+    scheduler = _cache_aware_scheduler_with_tier()
+    a, b = create_requests(
+        num_requests=2, num_tokens=48, same_prompt=True, req_ids=["a", "b"]
+    )
+    c, d = create_requests(num_requests=3, num_tokens=48, req_ids=["_", "c", "d"])[1:]
+    for request in (a, c, d, b):
+        scheduler.add_request(request)
+
+    assert _rank_waiting(scheduler) == ["a", "c", "d", "b"]  # counts a, c
+    # Counts d and b, then admits a to the one running slot.
+    assert [r.req_id for r in scheduler.schedule().scheduled_new_reqs] == ["a"]
+    assert _rank_waiting(scheduler) == ["b", "c", "d"]  # counts c, d
+
+
+def test_cache_aware_admission_forgets_requests_that_leave_the_window():
+    """A request that leaves the window gives up its count: after `a` is
+    aborted, the next step counts `c`, whose prefix the tier holds, and
+    `b`."""
+    scheduler, _ = _setup_cache_aware_with_tier(num_requests=3)
+
+    assert _rank_waiting(scheduler) == ["a", "b", "c"]  # counts a, b
+    scheduler.finish_requests("a", RequestStatus.FINISHED_ABORTED)
+    assert _rank_waiting(scheduler) == ["c", "b"]
+
+
+def test_cache_aware_admission_ignores_hits_a_request_cannot_read():
+    """A request that scores its prompt may not read external KV, so the
+    tier's copy of its prefix does not move it ahead of `a`."""
+    scheduler, (_, b) = _setup_cache_aware_with_tier(prompt_logprobs=1)
+    assert b.skip_reading_external_kv
+
+    output = scheduler.schedule()
+    assert [r.req_id for r in output.scheduled_new_reqs] == ["a"]
+
+
+def test_cache_aware_admission_keeps_gpu_hits_with_a_connector_without_peek():
+    """A connector that cannot count its hits without side effects, the base
+    class's default, adds nothing, and the prefix cache's hits still order
+    the window."""
+    scheduler, warm, cold = _setup_cache_aware(
+        cache_aware_admission_window=4,
+        use_kv_connector=mock_kv(matched_tokens=0, is_async=False),
+    )
+    scheduler.add_request(cold)
+    scheduler.add_request(warm)
+
+    output = scheduler.schedule()
+    assert [r.req_id for r in output.scheduled_new_reqs] == ["warm", "cold"]
 
 
 def _setup_remote_kv_resume(num_prompt_tokens: int, matched_tokens: int):

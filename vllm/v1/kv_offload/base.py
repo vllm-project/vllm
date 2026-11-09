@@ -221,6 +221,7 @@ and their address.
 
 The class provides the following primitives:
     lookup() - check whether a single block is offloaded and ready.
+    peek() - optionally, the same check without side effects.
     prepare_load() - prepare given blocks to be read.
         The given blocks will be protected from eviction.
         This function returns a LoadSpec which encapsulates
@@ -347,6 +348,25 @@ class OffloadingManager(ABC):
 
         """
         pass
+
+    def peek(self, key: OffloadKey, req_context: ReqContext) -> LookupResult | None:
+        """Checks whether a single block is offloaded, like `lookup`, without
+        side effects.
+
+        A peek leaves the eviction order as it is, starts no transfer and
+        records nothing for the request, so a caller may peek for a request
+        that never loads.
+
+        Args:
+            key: the key identifying the block to lookup.
+            req_context: per-request context (e.g. kv_transfer_params).
+
+        Returns:
+            What `lookup` would return, or None if this manager cannot tell
+            without side effects. The default returns None.
+
+        """
+        return None
 
     def get_load_source(
         self, key: OffloadKey, req_context: ReqContext

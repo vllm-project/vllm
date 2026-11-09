@@ -487,6 +487,20 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
                 to_return = (toks, load_async)
         return to_return
 
+    def peek_num_new_matched_tokens(
+        self,
+        request: "Request",
+        num_computed_tokens: int,
+    ) -> int | None:
+        # As in get_num_new_matched_tokens, the first connector with new
+        # matched tokens would load them; one before it that cannot tell
+        # leaves the count unknown.
+        for c in self._connectors:
+            toks = c.peek_num_new_matched_tokens(request, num_computed_tokens)
+            if toks is None or toks > 0:
+                return toks
+        return 0
+
     def get_external_cache_hit_sources(
         self,
         request: "Request",

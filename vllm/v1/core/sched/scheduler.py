@@ -82,6 +82,10 @@ from vllm.v1.utils import record_function_or_nullcontext
 
 logger = init_logger(__name__)
 
+# How many waiting requests' KV connector hits `cache_aware_admission_window`
+# counts afresh a step; the others keep their last count.
+CACHE_AWARE_CONNECTOR_COUNTS_PER_STEP = 2
+
 
 class Scheduler(SchedulerInterface):
     def __init__(
@@ -436,6 +440,9 @@ class Scheduler(SchedulerInterface):
         self.cache_aware_threshold = (
             self.scheduler_config.cache_aware_admission_threshold
         )
+        # The prefix end the window's last KV connector count found for each
+        # waiting request, least recently counted first.
+        self._cache_aware_connector_ends: dict[str, int] = {}
 
         self.has_mamba_layers = kv_cache_config.has_mamba_layers
         self.needs_kv_cache_zeroing = kv_cache_config.needs_kv_cache_zeroing
@@ -2812,8 +2819,8 @@ class Scheduler(SchedulerInterface):
             return
 
         # Deepest cached prefix first, arrival order breaking ties.
-        get_num_cached = self.kv_cache_manager.get_num_cached_tokens
-        cached = {i: get_num_cached(head[i]) for i in slots}
+        counts = self._count_cached_prefixes([head[i] for i in slots])
+        cached = dict(zip(slots, counts))
         order = sorted(slots, key=lambda i: (-cached[i], i))
         if order == slots:
             return
@@ -2826,6 +2833,39 @@ class Scheduler(SchedulerInterface):
         self.waiting.remove_requests(head)
         for request in reversed(reordered):
             self.waiting.prepend_request(request)
+
+    def _count_cached_prefixes(self, requests: list[Request]) -> list[int]:
+        """How many of each request's tokens need no computing: the prefix
+        cache's hit, extended by what the KV connector holds past it.
+
+        A connector count walks the request's prefix chunk by chunk, so only
+        `CACHE_AWARE_CONNECTOR_COUNTS_PER_STEP` requests are counted afresh a
+        step, those never counted first, then those counted longest ago; the
+        others keep the end their last count found. A connector that cannot
+        count without side effects adds nothing.
+        """
+        counts = [self.kv_cache_manager.get_num_cached_tokens(r) for r in requests]
+        if self.connector is None:
+            return counts
+        ends = self._cache_aware_connector_ends
+        readers = {
+            r.request_id: (r, n)
+            for r, n in zip(requests, counts)
+            if not r.skip_reading_external_kv
+        }
+        for request_id in [rid for rid in ends if rid not in readers]:
+            del ends[request_id]
+        due = [rid for rid in readers if rid not in ends] + list(ends)
+        for request_id in due[:CACHE_AWARE_CONNECTOR_COUNTS_PER_STEP]:
+            request, num_cached = readers[request_id]
+            # As in the waiting loop, the connector is shown a block-aligned hit.
+            block_aligned = num_cached - num_cached % self.block_size
+            num_external = self.connector.peek_num_new_matched_tokens(
+                request, block_aligned
+            )
+            ends.pop(request_id, None)
+            ends[request_id] = block_aligned + (num_external or 0)
+        return [max(n, ends.get(r.request_id, 0)) for r, n in zip(requests, counts)]
 
     def _next_waiting_queue(self, take_async_kv: bool) -> RequestQueue:
         """self.waiting or self.async_kv_waiting, whichever head goes first."""

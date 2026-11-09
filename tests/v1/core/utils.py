@@ -68,6 +68,7 @@ def create_scheduler(
     disable_chunked_mm_input: bool = False,
     mm_encoder_only: bool = False,
     use_kv_connector: None | bool | str | MockKVConfig = None,
+    kv_connector_extra_config: dict | None = None,
     kv_role: str = "kv_both",
     num_blocks: int = 10000,
     block_size: int = 16,
@@ -169,6 +170,7 @@ def create_scheduler(
         kv_transfer_config = KVTransferConfig(
             kv_connector=use_kv_connector,
             kv_role=kv_role,
+            kv_connector_extra_config=kv_connector_extra_config or {},
         )
     elif use_kv_connector:
         kv_transfer_config = KVTransferConfig(

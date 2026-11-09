@@ -901,6 +901,72 @@ class OffloadingConnectorScheduler:
                 )
         return None if defer_lookup or pending_in_window else consecutive_hits
 
+    def _initial_hit_bound(
+        self,
+        req_status: RequestOffloadState,
+        num_computed_tokens: int,
+        max_num_new_tokens: int | None,
+    ) -> int:
+        """The furthest token a load may reach before any group bounds it."""
+        max_hit_tokens = req_status.req.num_tokens
+        if self._sliding_window_groups:
+            # the last prompt token has to be recomputed to get the logprobs
+            # for sliding window attention, we must reduce by 1 to make sure
+            # we still have a hit after reduction. Tighter caps below are
+            # already supported boundaries and are not reduced.
+            max_hit_tokens -= 1
+        if max_num_new_tokens is not None:
+            max_hit_tokens = min(
+                max_hit_tokens, num_computed_tokens + max_num_new_tokens
+            )
+        if req_status.max_load_tokens is not None:
+            max_hit_tokens = min(
+                max_hit_tokens, num_computed_tokens + req_status.max_load_tokens
+            )
+        if self._sliding_window_groups and self._mamba_align_size is not None:
+            # Constrain hit-window to the mamba block size.
+            max_hit_tokens = round_down(max_hit_tokens, self._mamba_align_size)
+        return max_hit_tokens
+
+    def _drops_eagle_tail(self, group_config: GroupOffloadConfig) -> bool:
+        """Whether a hit drops the group's last chunk: legacy EAGLE hashes."""
+        return group_config.is_eagle_group and not self.use_lookahead_block_hashes
+
+    def _group_hit_bound(
+        self,
+        req_status: RequestOffloadState,
+        group_config: GroupOffloadConfig,
+        num_keyed_chunks: int,
+        num_computed_tokens: int,
+        max_hit_tokens: int,
+        query_extra_chunk: bool,
+    ) -> tuple[int, int] | None:
+        """Bound a hit by one group's chunks.
+
+        Returns the furthest token the hit may reach and the end (exclusive) of
+        the chunks to look up, or None if less than a chunk could be loaded.
+        """
+        tokens_per_chunk = group_config.tokens_per_chunk
+        # Constrain to a chunk-aligned boundary for this group.
+        max_hit_tokens = min(max_hit_tokens, num_keyed_chunks * tokens_per_chunk)
+        if req_status.max_load_tokens is not None:
+            max_hit_tokens = round_down(max_hit_tokens, tokens_per_chunk)
+        if max_hit_tokens - num_computed_tokens < tokens_per_chunk:
+            # We can only load less than a chunk, so skip.
+            return None
+        # For legacy EAGLE groups, query one extra chunk that will be
+        # popped. Widening applies to every group type: without it, the
+        # pop after the lookup shrinks the hit past what was queried,
+        # which can push the confirmed boundary under a coarser
+        # sibling group's chunk granularity and zero the whole
+        # request's hit (issue #52735).
+        query_max = max_hit_tokens
+        if query_extra_chunk:
+            query_max = min(
+                max_hit_tokens + tokens_per_chunk, num_keyed_chunks * tokens_per_chunk
+            )
+        return max_hit_tokens, min(cdiv(query_max, tokens_per_chunk), num_keyed_chunks)
+
     def _lookup_complete_chunks(
         self,
         req_status: RequestOffloadState,
@@ -918,27 +984,9 @@ class OffloadingConnectorScheduler:
         narrowed it (None if not reached).
         """
         num_computed_tokens = req_status.num_locally_computed_tokens
-        max_hit_size_tokens: int = req_status.req.num_tokens
-        if self._sliding_window_groups:
-            # the last prompt token has to be recomputed to get the logprobs
-            # for sliding window attention, we must reduce by 1 to make sure
-            # we still have a hit after reduction. Tighter caps below are
-            # already supported boundaries and are not reduced.
-            max_hit_size_tokens -= 1
-        if max_num_new_tokens is not None:
-            max_hit_size_tokens = min(
-                max_hit_size_tokens, num_computed_tokens + max_num_new_tokens
-            )
-        if req_status.max_load_tokens is not None:
-            max_hit_size_tokens = min(
-                max_hit_size_tokens,
-                num_computed_tokens + req_status.max_load_tokens,
-            )
-        if self._sliding_window_groups and self._mamba_align_size is not None:
-            # Constrain hit-window to the mamba block size.
-            max_hit_size_tokens = round_down(
-                max_hit_size_tokens, self._mamba_align_size
-            )
+        max_hit_size_tokens = self._initial_hit_bound(
+            req_status, num_computed_tokens, max_num_new_tokens
+        )
 
         num_hit_tokens: int = 0
         defer_lookup = False
@@ -967,24 +1015,22 @@ class OffloadingConnectorScheduler:
                 )
                 assert len(offload_keys) >= num_keyed_tokens // tokens_per_chunk
 
-                apply_eagle_drop = (
-                    group_config.is_eagle_group and not self.use_lookahead_block_hashes
-                )
+                apply_eagle_drop = self._drops_eagle_tail(group_config)
                 is_eagle_unverified = (
                     apply_eagle_drop and group_idx not in eagle_verified
                 )
 
-                # Constrain to a chunk-aligned boundary for this group.
-                max_hit_size_tokens = min(
-                    max_hit_size_tokens, len(offload_keys) * tokens_per_chunk
+                bound = self._group_hit_bound(
+                    req_status,
+                    group_config,
+                    len(offload_keys),
+                    num_computed_tokens,
+                    max_hit_size_tokens,
+                    is_eagle_unverified,
                 )
-                if req_status.max_load_tokens is not None:
-                    max_hit_size_tokens = round_down(
-                        max_hit_size_tokens, tokens_per_chunk
-                    )
-                if max_hit_size_tokens - num_computed_tokens < tokens_per_chunk:
-                    # We can only load less than a chunk, so skip.
+                if bound is None:
                     return 0, full_attention_hit_boundary
+                max_hit_size_tokens, num_chunks = bound
 
                 sliding_window_size_in_chunks = (
                     group_config.sliding_window_size_in_chunks
@@ -1000,20 +1046,6 @@ class OffloadingConnectorScheduler:
                         else 0
                     )
 
-                # For legacy EAGLE groups, query one extra chunk that will be
-                # popped. Widening applies to every group type: without it, the
-                # pop below shrinks max_hit_size_tokens past what was queried,
-                # which can push the confirmed boundary under a coarser
-                # sibling group's chunk granularity and zero the whole
-                # request's hit (issue #52735).
-                query_max = max_hit_size_tokens
-                if is_eagle_unverified:
-                    query_max = min(
-                        max_hit_size_tokens + tokens_per_chunk,
-                        len(offload_keys) * tokens_per_chunk,
-                    )
-
-                num_chunks = min(cdiv(query_max, tokens_per_chunk), len(offload_keys))
                 start_chunk_idx = num_computed_tokens // tokens_per_chunk
                 offload_keys = offload_keys[start_chunk_idx:num_chunks]
 
@@ -1428,6 +1460,77 @@ class OffloadingConnectorScheduler:
             req_status, num_computed_tokens, num_hit_tokens
         )
         return num_hit_tokens, bool(num_hit_tokens) and not sync_load
+
+    def peek_num_new_matched_tokens(
+        self,
+        request: Request,
+        num_computed_tokens: int,
+        max_num_new_tokens: int | None = None,
+    ) -> int | None:
+        """Count the complete-chunk hit of `get_num_new_matched_tokens`
+        without side effects.
+
+        Counts the chunks held from `num_computed_tokens` to the first one
+        missing, within the bounds the lookup applies, through
+        `OffloadingManager.peek`. Nothing is reserved or recorded. Unlike the
+        lookup, it counts a chunk whose store or load is still in flight as
+        held rather than deferring the request.
+
+        Returns None for sliding-window or Mamba groups, whose hit depends on
+        the window search of the lookup, for a request with transfers in
+        flight, and for a manager that keeps the default `peek`, which is not
+        asked and whose lock is not taken.
+        """
+        req_status = self._req_status.get(request.request_id)
+        if (
+            self._sliding_window_groups
+            or req_status is None
+            or req_status.transfer_jobs
+            or getattr(type(self.manager), "peek", None) is OffloadingManager.peek
+        ):
+            return None
+        if request.skip_reading_external_kv or req_status.load_failed:
+            return 0
+
+        max_hit_tokens = self._initial_hit_bound(
+            req_status, num_computed_tokens, max_num_new_tokens
+        )
+        # Called from schedule(): enter the step's region, which
+        # build_connector_meta closes.
+        self._acquire_step()
+        block_hashes = request.block_hashes
+        for group_config in self.config.kv_group_configs:
+            tokens_per_chunk = group_config.tokens_per_chunk
+            stride = group_config.hashes_per_chunk
+            eagle_drop = int(self._drops_eagle_tail(group_config))
+            bound = self._group_hit_bound(
+                req_status,
+                group_config,
+                len(block_hashes) // stride,
+                num_computed_tokens,
+                max_hit_tokens,
+                bool(eagle_drop),
+            )
+            if bound is None:
+                return 0
+            max_hit_tokens, end_chunk_idx = bound
+            chunk_idx = num_computed_tokens // tokens_per_chunk
+            while chunk_idx < end_chunk_idx:
+                key = make_offload_key(
+                    block_hashes[(chunk_idx + 1) * stride - 1], group_config.group_idx
+                )
+                result = self.manager.peek(key, req_status.req_context)
+                if result is None:
+                    return None
+                if result is LookupResult.MISS or result is LookupResult.RETRY:
+                    break
+                chunk_idx += 1
+            max_hit_tokens = min(
+                max_hit_tokens, (chunk_idx - eagle_drop) * tokens_per_chunk
+            )
+            if max_hit_tokens - num_computed_tokens < tokens_per_chunk:
+                return 0
+        return max_hit_tokens - num_computed_tokens
 
     def _reserve_sync_load(
         self,

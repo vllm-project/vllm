@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import random
 import weakref
 from types import SimpleNamespace
 from typing import Any, cast
@@ -9,6 +10,7 @@ import pytest
 import torch
 
 from tests.v1.kv_connector.unit.offloading_connector.test_config import (
+    _make_kv_cache_config,
     _make_mamba_hybrid_kv_cache_config,
     _make_vllm_config,
 )
@@ -100,6 +102,7 @@ from vllm.v1.kv_offload.base import (
     make_offload_key,
 )
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
+from vllm.v1.kv_offload.cpu.policies.lru import LRUCachePolicy
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
 from vllm.v1.kv_offload.tiering.example.manager import ExampleSecondaryTierManager
@@ -732,6 +735,204 @@ def test_max_load_tokens_caps_tokens_beyond_gpu_prefix():
 
     assert scheduler.get_num_new_matched_tokens(request, 16) == (8, True)
     assert scheduler._req_status["req"].partial_tail_boundary == 24
+
+
+def _make_cpu_tier_scheduler(
+    blocks_per_chunk: int = 1, eagle: bool = False
+) -> OffloadingConnectorScheduler:
+    """A full-attention model's connector over a real LRU CPU tier, with
+    self-describing KV events on so that lookups record them."""
+    config = create_vllm_config(
+        kv_connector="OffloadingConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={
+            "cpu_bytes_to_use": 1 << 20,
+            "blocks_per_chunk": blocks_per_chunk,
+            "self_describing_kv_events": True,
+        },
+    )
+    config.kv_events_config = KVEventsConfig(
+        enable_kv_cache_events=True, publisher="null"
+    )
+    kv_config = _make_kv_cache_config()
+    # With legacy hashes, the lookup drops an EAGLE group's last hit chunk.
+    kv_config.kv_cache_groups[0].is_eagle_group = eagle
+    spec = CPUOffloadingSpec(build_offloading_config(config, kv_config))
+    return OffloadingConnectorScheduler(spec, config, kv_config)
+
+
+def _lookup_state(scheduler: OffloadingConnectorScheduler, request: Request):
+    """What a lookup may change: the tier's LRU state and events, the
+    connector's events, stats and sync-load budget, and the request's state."""
+    manager = scheduler.manager
+    assert isinstance(manager, CPUOffloadingManager)
+    policy = manager._policy
+    assert isinstance(policy, LRUCachePolicy)
+    req_status = scheduler._req_status[request.request_id]
+    return (
+        {key: (chunk.ref_cnt, chunk.chunk_id) for key, chunk in policy.chunks.items()},
+        dict(policy._ranks),
+        set(policy._evictable),
+        sorted(policy._heap),
+        policy._next_rank,
+        len(manager.events or ()),
+        {
+            key: meta.active_residencies
+            for key, meta in scheduler._events_tracker._pending_event_metadata.items()
+        },
+        repr(scheduler._connector_stats.data),
+        set(scheduler._current_batch_sync_loads),
+        scheduler._current_batch_sync_load_bytes,
+        [
+            (
+                tuple(state.offload_keys),
+                state.lookup_hit_end_chunk_idx,
+                state.num_hit_chunks,
+                state.next_stored_chunk_idx,
+            )
+            for state in req_status.group_states
+        ],
+        req_status.num_locally_computed_tokens,
+        req_status.partial_tail_boundary,
+        dict(req_status.req_context._offload_key_positions),
+        request.shared_prefix_boundary,
+    )
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("eagle", [False, True])
+@pytest.mark.parametrize("blocks_per_chunk", [1, 2])
+def test_peek_finds_the_lookup_hit_without_side_effects(
+    blocks_per_chunk: int, eagle: bool
+):
+    """`peek_num_new_matched_tokens` counts what the lookup counts, the
+    chunks held from the GPU hit to the first one missing within the same
+    bounds, and changes nothing a lookup changes: not the tier's LRU order,
+    not the events, not the request's state. The lookup after it does change
+    that state, which shows the check would see a change."""
+    scheduler = _make_cpu_tier_scheduler(blocks_per_chunk, eagle)
+    manager = scheduler.manager
+    rng = random.Random(0)
+    hits = []
+    for case in range(60):
+        request = create_request(num_tokens=200)
+        if rng.random() < 0.25:
+            request.kv_transfer_params = {"max_load_tokens": rng.randrange(120)}
+        scheduler.on_new_request(request)
+        # An earlier turn left most of the request's chunks in the tier; the
+        # rest have been evicted, leaving holes.
+        num_chunks = len(request.block_hashes) // blocks_per_chunk
+        held = [
+            make_offload_key(request.block_hashes[(i + 1) * blocks_per_chunk - 1], 0)
+            for i in range(num_chunks)
+            if rng.random() < 0.85
+        ]
+        earlier_turn = ReqContext(req_id=f"earlier-turn-{case}")
+        stored = manager.prepare_store(held, earlier_turn)
+        assert stored is not None
+        manager.complete_store(stored.keys_to_store, earlier_turn)
+        manager.on_request_finished(earlier_turn)
+        num_gpu_tokens = 16 * rng.randrange(13)
+        bound = rng.choice([None, rng.randrange(200)])
+
+        before = _lookup_state(scheduler, request)
+        peeked = scheduler.peek_num_new_matched_tokens(request, num_gpu_tokens, bound)
+        again = scheduler.peek_num_new_matched_tokens(request, num_gpu_tokens, bound)
+        assert again == peeked
+        assert _lookup_state(scheduler, request) == before
+
+        num_hit_tokens, _ = scheduler.get_num_new_matched_tokens(
+            request, num_gpu_tokens, max_num_new_tokens=bound
+        )
+        assert peeked == num_hit_tokens
+        assert _lookup_state(scheduler, request) != before
+        hits.append(peeked)
+        # The step ends, closing the manager region the peek and the lookup
+        # entered.
+        scheduler.build_connector_meta(SchedulerOutput.make_empty())
+    assert 0 in hits and len(set(hits)) > 3
+
+
+@pytest.mark.cpu_test
+def test_peek_counts_a_chunk_whose_store_is_in_flight():
+    """A chunk whose store has not completed is in the tier: the peek counts
+    it as held, where the lookup defers the request a step."""
+    scheduler = _make_cpu_tier_scheduler()
+    request = create_request(num_tokens=64)
+    scheduler.on_new_request(request)
+    keys = [make_offload_key(block_hash, 0) for block_hash in request.block_hashes]
+    earlier_turn = ReqContext(req_id="earlier-turn")
+    assert scheduler.manager.prepare_store(keys, earlier_turn) is not None
+    scheduler.manager.complete_store(keys[:2], earlier_turn)
+
+    assert scheduler.peek_num_new_matched_tokens(request, 0) == 64
+    assert scheduler.get_num_new_matched_tokens(request, 0) == (None, False)
+
+
+@pytest.mark.cpu_test
+def test_peek_stops_at_the_lookup_bounds():
+    """With all four chunks in the tier, the peek stops where the lookup's
+    bounds stop a hit: `max_num_new_tokens` past the GPU hit, and a request's
+    `max_load_tokens` rounded down to whole chunks."""
+    scheduler = _make_cpu_tier_scheduler()
+    request, capped = create_request(num_tokens=64), create_request(num_tokens=64)
+    capped.kv_transfer_params = {"max_load_tokens": 40}
+    for r in (request, capped):
+        scheduler.on_new_request(r)
+        keys = [make_offload_key(block_hash, 0) for block_hash in r.block_hashes]
+        earlier_turn = ReqContext(req_id=f"earlier-turn-{r.request_id}")
+        stored = scheduler.manager.prepare_store(keys, earlier_turn)
+        assert stored is not None
+        scheduler.manager.complete_store(stored.keys_to_store, earlier_turn)
+
+    assert scheduler.peek_num_new_matched_tokens(request, 0) == 64
+    assert scheduler.peek_num_new_matched_tokens(request, 16, 32) == 32
+    assert scheduler.peek_num_new_matched_tokens(capped, 0) == 32
+
+
+@pytest.mark.cpu_test
+def test_peek_returns_none_where_the_lookup_does_more_than_count_chunks():
+    """None, not a count, where the lookup's answer needs more than a scan of
+    the chunks held: a Mamba group's hit depends on its window search, and a
+    request whose load is in flight is deferred. After its load fails, the
+    request counts nothing, as it loads nothing."""
+    config = create_vllm_config(
+        kv_connector="OffloadingConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={"cpu_bytes_to_use": 1 << 20},
+    )
+    config.cache_config.prefix_match_unit = 4
+    kv_config = _make_mamba_hybrid_kv_cache_config()
+    spec = CPUOffloadingSpec(build_offloading_config(config, kv_config))
+    hybrid = OffloadingConnectorScheduler(spec, config, kv_config)
+    request = create_request(num_tokens=30, block_size=4)
+    hybrid.on_new_request(request)
+    assert hybrid.peek_num_new_matched_tokens(request, 0) is None
+
+    scheduler = _make_cpu_tier_scheduler()
+    request = create_request(num_tokens=64)
+    scheduler.on_new_request(request)
+    keys = [make_offload_key(block_hash, 0) for block_hash in request.block_hashes]
+    earlier_turn = ReqContext(req_id="earlier-turn")
+    assert scheduler.manager.prepare_store(keys, earlier_turn) is not None
+    scheduler.manager.complete_store(keys, earlier_turn)
+    assert scheduler.peek_num_new_matched_tokens(request, 0) == 64
+
+    assert scheduler.get_num_new_matched_tokens(request, 0) == (64, True)
+    blocks = KVCacheBlocks(([KVCacheBlock(block_id) for block_id in range(4)],))
+    scheduler.update_state_after_alloc(request, blocks, num_external_tokens=64)
+    assert scheduler.get_num_new_matched_tokens(request, 0) == (None, False)
+    assert scheduler.peek_num_new_matched_tokens(request, 0) is None
+
+    scheduler.build_connector_meta(SchedulerOutput.make_empty())
+    [job_id] = scheduler._req_status[request.request_id].transfer_jobs
+    failed = OffloadingWorkerMetadata()
+    failed.mark_completed(job_id, success=False)
+    scheduler.update_connector_output(
+        KVConnectorOutput(kv_connector_worker_meta=failed)
+    )
+    assert scheduler.get_num_new_matched_tokens(request, 0) == (0, False)
+    assert scheduler.peek_num_new_matched_tokens(request, 0) == 0
 
 
 def _hybrid_lookup(stored: set[OffloadKey]):
