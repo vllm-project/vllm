@@ -394,6 +394,7 @@ def resolve_kv_cache_layout(
     prefer_block_outer = (
         vllm_config.model_config is not None
         and vllm_config.model_config.is_hybrid
+        and cache_config.mamba_cache_mode == "align"
         and quant_config is not None
         and quant_config.has_layerwise_kv_cache()
         and len(hnc_shapes) > 1

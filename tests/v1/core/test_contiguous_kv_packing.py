@@ -623,9 +623,10 @@ def layerwise_config(tmp_path, request):
             return True
 
     config = VllmConfig(
-        cache_config=CacheConfig(block_size=64, kv_cache_layout="BLHNC"),
+        cache_config=CacheConfig(block_size=64, mamba_cache_mode="align"),
         quant_config=LayerwiseKVConfig(),
     )
+    config.cache_config.kv_cache_layout = "BLHNC"
     config.model_config = ModelConfig(
         model=str(tmp_path), max_model_len=64, skip_tokenizer_init=True
     )
@@ -635,20 +636,24 @@ def layerwise_config(tmp_path, request):
 
 class TestDensePacking:
     @pytest.mark.skip_global_cleanup
-    def test_layerwise_hybrid_prefers_block_outer_layout(self, layerwise_config):
+    @pytest.mark.parametrize("mamba_cache_mode", ["align", "none"])
+    def test_layerwise_hybrid_prefers_block_outer_layout(
+        self, layerwise_config, mamba_cache_mode
+    ):
         config = layerwise_config
         config.cache_config.kv_cache_layout = None
+        config.cache_config.mamba_cache_mode = mamba_cache_mode
         specs = (
             FullAttentionSpec(
                 block_size=64,
-                num_kv_heads=1,
+                num_kv_heads=2,
                 head_size=128,
                 dtype=torch.uint8,
                 kv_quant_mode=KVQuantMode.FP8_PER_TENSOR,
             ),
             FullAttentionSpec(
                 block_size=64,
-                num_kv_heads=1,
+                num_kv_heads=2,
                 head_size=128,
                 dtype=torch.uint8,
                 kv_quant_mode=KVQuantMode.NVFP4,
@@ -659,13 +664,16 @@ class TestDensePacking:
                 block_size=64,
                 shapes=((32_768,),),
                 dtypes=(torch.bfloat16,),
-                mamba_cache_mode="align",
+                mamba_cache_mode=mamba_cache_mode,
             ),
         )
 
         layout = resolve_kv_cache_layout(config, [["LBHNC", "BLHNC"]], specs)
 
-        assert layout is KVCacheLayout.BLHNC
+        expected = (
+            KVCacheLayout.BLHNC if mamba_cache_mode == "align" else KVCacheLayout.LBHNC
+        )
+        assert layout is expected
 
     @pytest.mark.skip_global_cleanup
     def test_layerwise_hybrid_packing_preserves_capacity_and_granularity(

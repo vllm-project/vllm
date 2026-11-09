@@ -796,17 +796,54 @@ class Platform:
             cls._align_hybrid_block_size(vllm_config, backend_classes[0])
 
         if use_packed_hybrid_cache:
+            from math import lcm
+
+            from vllm.config.vllm import get_layers_from_vllm_config
+            from vllm.model_executor.layers.attention_layer_base import (
+                AttentionLayerBase,
+            )
+            from vllm.model_executor.layers.mamba.abstract import (
+                get_mamba_prefill_checkpoint_alignment,
+            )
+            from vllm.v1.attention.backend import MultipleOf
+
+            # Packing removes page-size padding, not the recurrent kernel's
+            # checkpoint grid. The scheduler must only cache exportable states.
+            checkpoint_alignment = (
+                get_mamba_prefill_checkpoint_alignment(vllm_config) or 1
+            )
+            cache_config.block_size = lcm(cache_config.block_size, checkpoint_alignment)
             with set_current_vllm_config(vllm_config):
-                unsupported_backends = [
-                    backend.get_name()
-                    for backend in backend_classes
-                    if not backend.supports_block_size(cache_config.block_size)
-                ]
+                unsupported_backends = []
+                for layer in get_layers_from_vllm_config(
+                    vllm_config,
+                    AttentionLayerBase,  # type: ignore[type-abstract]
+                ).values():
+                    backend = layer.get_attn_backend()
+                    if backend.is_ssm():
+                        continue
+                    spec = layer.get_kv_cache_spec(vllm_config)
+                    if spec is None:
+                        continue
+                    # Packed rows cannot generally be subdivided into kernel
+                    # pages (e.g. multi-head BLHNC), so require a native page.
+                    supported_sizes = backend.get_supported_kernel_block_sizes(spec)
+                    if not any(
+                        cache_config.block_size % size.base == 0
+                        if isinstance(size, MultipleOf)
+                        else cache_config.block_size == size
+                        for size in supported_sizes
+                    ):
+                        unsupported_backends.append(
+                            f"{backend.get_name()} ({supported_sizes})"
+                        )
             if unsupported_backends:
                 raise ValueError(
-                    f"KV cache block size {cache_config.block_size} is not "
-                    f"supported by {'/'.join(unsupported_backends)}. Omit --block-size "
-                    "to use the backend default."
+                    f"Packed KV cache block size {cache_config.block_size} requires "
+                    f"unsupported kernel-page subdivision for "
+                    f"{'/'.join(unsupported_backends)}. Omit --block-size to use "
+                    "the backend default, or select a native kernel block size "
+                    "compatible with recurrent checkpoint alignment."
                 )
 
             cache_config.mamba_block_size = cache_config.block_size
