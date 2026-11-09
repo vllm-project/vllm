@@ -577,3 +577,35 @@ def test_gumbel_combine_preserves_first_nan_and_maximum(dtype):
 
     expected = token_ids.gather(1, maxima.argmax(-1, keepdim=True)).view(-1)
     assert torch.equal(sampled, expected)
+
+
+@pytest.mark.parametrize("use_fp64", [False, True])
+def test_kept_gumbel_sample_matches_masked_logits(use_fp64: bool):
+    """Sampling from the compact kept tokens draws the token that
+    `gumbel_sample` draws from the masked logits, greedy rows included."""
+    from vllm.v1.sample.ops.topk_topp_triton import (
+        apply_top_k_top_p_triton,
+        top_k_top_p_kept_tokens_triton,
+    )
+    from vllm.v1.worker.gpu.sample.gumbel import kept_gumbel_sample
+
+    num_reqs, vocab_size, max_kept = 512, 151936, 256
+    gen = torch.Generator(DEVICE).manual_seed(0)
+    logits = torch.randn(num_reqs, vocab_size, device=DEVICE, generator=gen)
+    k = torch.randint(1, max_kept + 1, (num_reqs,), device=DEVICE, generator=gen)
+    p = torch.rand(num_reqs, device=DEVICE, generator=gen) * 0.9 + 0.1
+    temp = torch.rand(num_reqs, device=DEVICE, generator=gen) + 0.5
+    temp[::7] = 0.0
+    idx_mapping = torch.arange(num_reqs, dtype=torch.int32, device=DEVICE)
+    seed = torch.arange(num_reqs, dtype=torch.int64, device=DEVICE) * 7919
+    pos = torch.arange(num_reqs, dtype=torch.int64, device=DEVICE)
+    args = (idx_mapping, temp, seed, pos)
+
+    k = k.to(torch.int32)
+    kept = top_k_top_p_kept_tokens_triton(logits, k, p, max_kept)
+    masked = apply_top_k_top_p_triton(logits.clone(), k, p)
+    expected = gumbel_sample(
+        masked, *args, apply_temperature=True, is_drafting=False, use_fp64=use_fp64
+    )
+    actual = kept_gumbel_sample(*kept, *args, apply_temperature=True, use_fp64=use_fp64)
+    assert torch.equal(actual, expected)

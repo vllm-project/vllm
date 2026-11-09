@@ -860,6 +860,50 @@ class TestTritonTopkTopp:
         num_kept_ties = kept_ties.sum(dim=-1, keepdim=True)
         assert torch.equal(kept_ties, torch.arange(num_ties) < num_kept_ties)
 
+    @pytest.mark.parametrize("batch_size", [1, 37, 300])
+    @pytest.mark.parametrize("vocab_size", [1024, 151936])
+    @pytest.mark.parametrize("use_topp", [False, True])
+    def test_kept_tokens_match_mask(
+        self, batch_size: int, vocab_size: int, use_topp: bool
+    ):
+        """The compact kept tokens are exactly the tokens the mask keeps, in
+        vocab order, with bf16 ties at the cutoff and grammar-masked rows."""
+        from vllm.v1.sample.ops.topk_topp_triton import (
+            apply_top_k_top_p_triton,
+            top_k_top_p_kept_tokens_triton,
+        )
+
+        max_kept = 256
+        shape = (batch_size, vocab_size)
+        logits = torch.randn(shape, generator=self.generator).bfloat16().float()
+        logits[torch.rand(shape, generator=self.generator) < 0.2] = float("-inf")
+        logits[0, 10:] = float("-inf")  # Fewer finite logits than k.
+        k = torch.randint(1, max_kept + 1, (batch_size,), generator=self.generator)
+        k = k.to(torch.int32)
+        k[0] = 50
+        p = None
+        if use_topp:
+            p = torch.rand(batch_size, generator=self.generator) * 0.9 + 0.1
+            p[::3] = 1.0
+        original = logits.clone()
+
+        expected = apply_top_k_top_p_triton(logits.clone(), k, p) != float("-inf")
+        kept_ids, kept_logits, num_kept = top_k_top_p_kept_tokens_triton(
+            logits, k, p, max_kept
+        )
+
+        assert torch.equal(logits, original)
+        assert torch.equal(num_kept, expected.sum(dim=-1).to(torch.int32))
+        slots = torch.arange(max_kept) < num_kept[:, None]
+        rows = torch.arange(batch_size)[:, None].expand_as(kept_ids)[slots]
+        ids = kept_ids[slots].long()
+        kept = torch.zeros_like(expected)
+        kept[rows, ids] = True
+        assert torch.equal(kept, expected)
+        assert torch.equal(kept_logits[slots], logits[rows, ids])
+        in_vocab_order = (kept_ids[:, 1:] > kept_ids[:, :-1]) | ~slots[:, 1:]
+        assert in_vocab_order.all()
+
 
 # =============================================================================
 # FlashInfer top-k/top-p robustness tests

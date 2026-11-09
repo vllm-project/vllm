@@ -487,3 +487,78 @@ def gumbel_sample(
         PADDED_NUM_BLOCKS=triton.next_power_of_2(num_blocks),
     )
     return sampled
+
+
+def kept_gumbel_sample(
+    kept_ids: torch.Tensor,  # [num_tokens, max_kept]
+    kept_logits: torch.Tensor,  # [num_tokens, max_kept]
+    num_kept: torch.Tensor,  # [num_tokens]
+    expanded_idx_mapping: torch.Tensor,  # [num_tokens]
+    temperature: torch.Tensor,  # [max_num_reqs]
+    seed: torch.Tensor,  # [max_num_reqs]
+    pos: torch.Tensor,  # [num_tokens]
+    apply_temperature: bool,
+    use_fp64: bool = False,
+) -> torch.Tensor:
+    """`gumbel_sample` over each row's kept tokens only, from
+    `top_k_top_p_kept_tokens_triton`. Samples the token that `gumbel_sample`
+    samples from the masked logits, since the noise is keyed by token id."""
+    num_tokens, max_kept = kept_ids.shape
+    sampled = kept_ids.new_empty(num_tokens, dtype=torch.int64)
+    _kept_gumbel_sample_kernel[(num_tokens,)](
+        sampled,
+        kept_ids,
+        kept_logits,
+        num_kept,
+        max_kept,
+        expanded_idx_mapping.contiguous(),
+        temperature,
+        seed,
+        pos.contiguous(),
+        BLOCK_SIZE=triton.next_power_of_2(max_kept),
+        APPLY_TEMPERATURE=apply_temperature,
+        USE_FP64=use_fp64,
+    )
+    return sampled
+
+
+@triton.jit
+def _kept_gumbel_sample_kernel(
+    sampled_ptr,
+    kept_ids_ptr,
+    kept_logits_ptr,
+    num_kept_ptr,
+    max_kept,
+    expanded_idx_mapping_ptr,
+    temp_ptr,
+    seeds_ptr,
+    pos_ptr,
+    BLOCK_SIZE: tl.constexpr,
+    APPLY_TEMPERATURE: tl.constexpr,
+    USE_FP64: tl.constexpr,
+):
+    token_idx = tl.program_id(0).to(tl.int64)
+    row = token_idx * max_kept + tl.arange(0, BLOCK_SIZE)
+    num_kept = tl.minimum(tl.load(num_kept_ptr + token_idx), max_kept)
+    mask = tl.arange(0, BLOCK_SIZE) < num_kept
+    ids = tl.load(kept_ids_ptr + row, mask=mask, other=0)
+    logits = tl.load(kept_logits_ptr + row, mask=mask, other=float("-inf"))
+    req_state_idx = tl.load(expanded_idx_mapping_ptr + token_idx).to(tl.int64)
+    is_valid_req = req_state_idx >= 0
+    temp = tl.load(temp_ptr + req_state_idx, mask=is_valid_req, other=0.0)
+    seed = tl.load(seeds_ptr + req_state_idx, mask=is_valid_req, other=0)
+    pos = tl.load(pos_ptr + token_idx)
+    _, idx = gumbel_noised_argmax(
+        logits,
+        ids,
+        mask,
+        seed,
+        pos,
+        temp.to(tl.float32),
+        IS_DRAFTING=False,
+        USE_FP64=USE_FP64,
+        APPLY_TEMPERATURE=APPLY_TEMPERATURE,
+    )
+    # A row without kept tokens (all -inf) samples token 0, as `gumbel_sample`.
+    sampled = tl.load(kept_ids_ptr + token_idx * max_kept + idx, mask=idx < num_kept)
+    tl.store(sampled_ptr + token_idx, tl.where(idx < num_kept, sampled, 0).to(tl.int64))

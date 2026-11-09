@@ -1827,3 +1827,80 @@ def test_sharded_draft_logits_cache_writes(num_shards: int):
         is_real = owned < max_num_reqs - 1
         expected = cache[slots[owned].long()] * is_real.view(-1, 1, 1)
         assert torch.equal(local_cache, expected)
+
+
+@pytest.mark.parametrize("has_draft_logits", [False, True])
+@pytest.mark.parametrize("use_fp64", [False, True])
+def test_kept_rejection_sample_matches_masked_logits(
+    has_draft_logits: bool, use_fp64: bool
+):
+    """Verifying from the compact kept tokens samples what rejection_sample
+    samples from the masked logits, with greedy rows, placeholder drafts and
+    draft tokens outside the kept set."""
+    from vllm.v1.sample.ops.topk_topp_triton import (
+        apply_top_k_top_p_triton,
+        top_k_top_p_kept_tokens_triton,
+    )
+    from vllm.v1.worker.gpu.spec_decode.kept_rejection_sampler import (
+        kept_rejection_sample,
+    )
+
+    torch.manual_seed(0)
+    device = "cuda"
+    K, num_reqs, vocab_size, max_kept = 7, 128, 151936, 64
+    num_logits = num_reqs * (K + 1)
+    logits = torch.randn(num_logits, vocab_size, device=device) * 3
+    req_top_k = torch.randint(1, max_kept + 1, (num_reqs,), device=device)
+    req_top_p = torch.rand(num_reqs, device=device) * 0.5 + 0.5
+    top_k = req_top_k.to(torch.int32).repeat_interleave(K + 1)
+    top_p = req_top_p.repeat_interleave(K + 1)
+    masked = apply_top_k_top_p_triton(logits.clone(), top_k, top_p)
+    kept = top_k_top_p_kept_tokens_triton(logits, top_k, top_p, max_kept)
+
+    # Draft each token from the target row before it, then replace a few by
+    # tokens outside the kept set and by -1 placeholders.
+    draft_sampled = torch.zeros(num_logits, dtype=torch.int64, device=device)
+    draft_sampled[1:] = torch.multinomial(masked[:-1].softmax(dim=-1), 1).view(-1)
+    random_tokens = torch.randint(0, vocab_size, (num_logits,), device=device)
+    replace = torch.rand(num_logits, device=device) < 0.1
+    draft_sampled = torch.where(replace, random_tokens, draft_sampled)
+    draft_sampled[torch.rand(num_logits, device=device) < 0.02] = -1
+    draft_sampled[:: K + 1] = 0
+    draft_values = None
+    if has_draft_logits:
+        rows = logits.view(num_reqs, K + 1, vocab_size)[:, :K]
+        draft_values = rows + torch.randn_like(rows)
+    temperature = torch.rand(num_reqs, device=device) + 0.5
+    temperature[::8] = 0.0
+    inputs = dict(
+        draft_sampled=draft_sampled,
+        cu_num_logits=torch.arange(num_reqs + 1, device=device, dtype=torch.int32)
+        * (K + 1),
+        pos=torch.arange(num_logits, device=device, dtype=torch.int32),
+        idx_mapping=torch.arange(num_reqs, device=device, dtype=torch.int32),
+        expanded_idx_mapping=torch.arange(
+            num_reqs, device=device, dtype=torch.int32
+        ).repeat_interleave(K + 1),
+        expanded_local_pos=torch.arange(K + 1, device=device, dtype=torch.int32).repeat(
+            num_reqs
+        ),
+        temperature=temperature,
+        seed=torch.arange(num_reqs, device=device, dtype=torch.int64) * 7919,
+        num_speculative_steps=K,
+        use_fp64=use_fp64,
+    )
+
+    ref_sampled, ref_num_sampled = _rejection_sample(
+        target_logits=masked,
+        draft_logits=draft_values,
+        skip_masked_vocab_blocks=True,
+        **inputs,
+    )
+    sampled, num_sampled = kept_rejection_sample(
+        kept, _draft_logits(draft_values), vocab_size=vocab_size, **inputs
+    )
+
+    assert torch.equal(num_sampled, ref_num_sampled)
+    assert 0 < (ref_num_sampled - 1).float().mean() < K
+    valid = torch.arange(K + 1, device=device) < num_sampled.unsqueeze(1)
+    assert torch.equal(sampled[valid], ref_sampled[valid])
