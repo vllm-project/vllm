@@ -2072,7 +2072,7 @@ def test_stale_output_request_reserves_nothing():
 
     output = scheduler.schedule()
     assert output.num_scheduled_tokens == {"prefill": 256}
-    assert stale.num_stale_output_tokens == 2
+    assert stale.num_computed_tokens == 0
 
 
 def test_fair_share_counts_only_reservable_requests():
