@@ -34,6 +34,7 @@ from vllm.distributed import (
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
 from vllm.model_executor.models.utils import extract_layer_index
+from vllm.model_executor.utils import refill_derived
 from vllm.models.deepseek_v4.amd.mono.dims import (
     EXPERTS,
     MAX_TOKENS,
@@ -201,8 +202,8 @@ def _select(layer: "DeepseekV4DecoderLayer", positions, normed, qr) -> None:
 
 class MonoDecodeLayer:
     """One DeepSeek-V4-Pro decoder layer's mono path (`create`: None when the
-    layer is not eligible). Its weights are taken from the layer at the first
-    call or `prepare`, after loading and vLLM's preshuffle."""
+    layer is not eligible). Its weights are taken from the layer at `prepare`,
+    after every load or update and vLLM's preshuffle."""
 
     def __init__(self, hca_width: int) -> None:
         self.hca_width = hca_width
@@ -257,6 +258,7 @@ class MonoDecodeLayer:
         than at its first decode step, which must not allocate, exchange
         handles or sync."""
         _mono_runner(layer.attn_norm.weight.device, self.hca_width)
+        self._weights = None
         self.weights(layer)
 
     def weights(self, layer: "DeepseekV4DecoderLayer"):
@@ -276,15 +278,17 @@ class MonoDecodeLayer:
         attn = AttnWeights(
             layer_id=extract_layer_index(a.prefix),
             wqkv=a.fused_wqa_wkv.weight,
-            wqkv_scale=_mx_scales(a._wqa_wkv_scale),
+            wqkv_scale=refill_derived(
+                self, "_wqkv_scale", _mx_scales(a._wqa_wkv_scale)
+            ),
             q_norm=a.q_norm.weight,
             kv_norm=a.kv_norm.weight,
             wq_b=a.wq_b.weight,
-            wq_b_scale=_block_scale(a.wq_b),
+            wq_b_scale=refill_derived(self, "_wq_b_scale", _block_scale(a.wq_b)),
             wo_a=a.wo_a.weight,
-            wo_a_scale=_block_scale(a.wo_a),
+            wo_a_scale=refill_derived(self, "_wo_a_scale", _block_scale(a.wo_a)),
             wo_b=a.wo_b.weight,
-            wo_b_scale=_mx_scales(a._wo_b_scale),
+            wo_b_scale=refill_derived(self, "_wo_b_scale", _mx_scales(a._wo_b_scale)),
             attn_sink=a.attn_sink,
             cos_sin=a.rotary_emb.cos_sin_cache,
             ratio=a.compress_ratio,
@@ -307,9 +311,9 @@ class MonoDecodeLayer:
             w2=e.w2_weight,
             w2_s=e.w2_weight_scale,
             sgu=sh.gate_up_proj.weight,
-            sgu_s=_mx_scales(sh._gateup_scale),
+            sgu_s=refill_derived(self, "_sgu_s", _mx_scales(sh._gateup_scale)),
             sw2=sh.down_proj.weight,
-            sw2_s=_block_scale(sh.down_proj),
+            sw2_s=refill_derived(self, "_sw2_s", _block_scale(sh.down_proj)),
         )
         self._weights.check(d)
         return self._weights
