@@ -1617,6 +1617,11 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                         num_qo_heads=self.num_qo_heads,
                         num_kv_heads=self.num_kv_heads,
                         head_dim_qk=self.head_dim,
+                        # FlashInfer defaults head_dim_vo to head_dim_qk when
+                        # omitted. Pass it explicitly so asymmetric-head models
+                        # (head_dim_qk != head_dim_vo) cannot silently pick up
+                        # the wrong kernel specialization.
+                        head_dim_vo=self.head_dim,
                         page_size=self.page_size,
                         causal=attn_metadata.causal,
                         sm_scale=self.sm_scale,
