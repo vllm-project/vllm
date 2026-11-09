@@ -26,7 +26,7 @@ meta:
     mi350x: verified
     mi355x: verified
     dgx_station_gb300: verified
-    dgx_spark: verified
+    dgx_spark_gb10: verified
 
 model:
   model_id: "deepseek-ai/DeepSeek-V4.1-Flash"
@@ -1509,7 +1509,7 @@ presets:
 
   dgx_spark_tp3:
     label: "3x Spark TP3 (capacity-first)"
-    hardware: dgx_spark
+    hardware: dgx_spark_gb10
     strategy: multi_node_tp
     variants: [default]
     workload: "Long-context RAG and assistant serving (1M context)"
@@ -1588,7 +1588,7 @@ hardware_notes:
     title: "Weights in Grace memory (UVA offload)"
     body: "Single GB300 with both Engram tables and 60 GiB of routed experts in pinned Grace memory (UVA offload). Measured on a nightly image; vLLM 0.31.0 carries every flag this row uses. The first boot on a new flag set runs a 75-90 min FlashInfer autotune; keep /root/.cache/vllm on a persistent volume."
 
-  dgx_spark:
+  dgx_spark_gb10:
     title: "GB10 unified memory (3x DGX Spark)"
     body: "Three single-GPU GB10 nodes at TP3 need the pinned b12x fork image: mainline vLLM is load-blocked on GB10 for this model, and the fork carries the DeepseekV41 loader, the b12x kernels and runtime TP3 head padding. Unified memory makes host RAM part of the serving budget: the default NCCL buffer sizing pins ~4.7 GiB of unreclaimable host RAM per node (the caps in the preset cut it to ~139 MiB), the engram tables stay disk-resident, and ~2 GiB of headroom per box absorbs the deep-prefill transient. Speculative decode does not survive that transient at this pool size."
 
