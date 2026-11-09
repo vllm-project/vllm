@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for how the backend handles Transformers' dynamic rope updates."""
+"""Tests for how the backend makes Transformers' rope updates static."""
 
 from types import SimpleNamespace
 
@@ -13,10 +13,10 @@ from transformers.models.hunyuan_v1_dense.modeling_hunyuan_v1_dense import (
 from transformers.models.llama.modeling_llama import LlamaRotaryEmbedding
 from transformers.models.phi3.modeling_phi3 import Phi3RotaryEmbedding
 
-from vllm.model_executor.models.transformers.fx_utils import trace
 from vllm.model_executor.models.transformers.utils import (
     can_enable_torch_compile,
     disable_noop_dynamic_rope,
+    freeze_longrope,
 )
 
 MAX_POSITION_EMBEDDINGS = 128
@@ -27,13 +27,6 @@ CONFIG_KWARGS = dict(
     max_position_embeddings=MAX_POSITION_EMBEDDINGS,
 )
 DYNAMIC = {"rope_type": "dynamic", "factor": 4.0, "rope_theta": 1e4}
-LONGROPE = {
-    "rope_type": "longrope",
-    "short_factor": [1.0] * 8,
-    "long_factor": [4.0] * 8,
-    "original_max_position_embeddings": MAX_POSITION_EMBEDDINGS // 2,
-    "rope_theta": 1e4,
-}
 
 
 def make_vllm_config(hf_config, max_model_len: int) -> SimpleNamespace:
@@ -46,11 +39,11 @@ def make_vllm_config(hf_config, max_model_len: int) -> SimpleNamespace:
     [
         (DYNAMIC, MAX_POSITION_EMBEDDINGS, True),
         (DYNAMIC, MAX_POSITION_EMBEDDINGS + 1, False),
-        # The longrope layer type still syncs
+        # Longrope is frozen at init, so only dynamic rope matters
         (
             {"full_attention": DYNAMIC, "sliding_attention": {"rope_type": "longrope"}},
             MAX_POSITION_EMBEDDINGS,
-            False,
+            True,
         ),
     ],
 )
@@ -95,20 +88,29 @@ def test_disable_noop_dynamic_rope(monkeypatch, config, rotary_cls):
     assert all(torch.equal(e, a) for e, a in zip(expected, actual))
 
 
-def test_trace_restores_longrope_state():
-    """Tracing must not leave the proxies `@dynamic_rope_update` writes on the
-    module, or the real forward reads them."""
+@pytest.mark.parametrize("use_long", [False, True])
+def test_freeze_longrope(use_long):
+    """Short positions get the long factors iff `max_model_len` needs them."""
+    original = MAX_POSITION_EMBEDDINGS // 2
     config = Phi3Config(
         **CONFIG_KWARGS,
-        original_max_position_embeddings=MAX_POSITION_EMBEDDINGS // 2,
-        rope_parameters=dict(LONGROPE),
+        original_max_position_embeddings=original,
+        rope_parameters={
+            "rope_type": "longrope",
+            "short_factor": [1.0] * 8,
+            "long_factor": [4.0] * 8,
+            "rope_theta": 1e4,
+        },
     )
+    x = torch.zeros(1)
+    short, long = torch.arange(8)[None], torch.arange(original + 1)[None]
+    expected = Phi3RotaryEmbedding(config)(x, long if use_long else short)
+    expected = [t[:, :8] for t in expected]
+
     rotary_emb = Phi3RotaryEmbedding(config)
-    buffers = dict(rotary_emb.named_buffers())
+    vllm_config = make_vllm_config(config, original + int(use_long))
+    freeze_longrope(rotary_emb, vllm_config)
 
-    trace(rotary_emb)
-
-    after = dict(rotary_emb.named_buffers())
-    assert after.keys() == buffers.keys()
-    assert all(after[name] is buffer for name, buffer in buffers.items())
-    assert "long_inv_freq" not in vars(rotary_emb)
+    assert rotary_emb.rope_type == "default"
+    actual = rotary_emb(x, short)
+    assert all(torch.equal(e, a) for e, a in zip(expected, actual))

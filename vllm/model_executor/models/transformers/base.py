@@ -68,6 +68,7 @@ from vllm.model_executor.models.transformers.utils import (
     attrsetter,
     can_enable_torch_compile,
     disable_noop_dynamic_rope,
+    freeze_longrope,
     get_feature_request_tip,
     init_on_device_without_buffers,
     log_replacement,
@@ -185,6 +186,7 @@ class Base(
         self.pipeline_parallel()
         # Skip the device sync of dynamic rope where it can never rescale
         disable_noop_dynamic_rope(self.model.get_decoder(), vllm_config)
+        freeze_longrope(self.model.get_decoder(), vllm_config)
         # Substitute remaining layers with vLLM's layers as needed
         self.recursive_replace()
         # Create attention instances for KV cache allocation

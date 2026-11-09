@@ -380,10 +380,7 @@ def can_enable_torch_compile(vllm_config: "VllmConfig") -> bool:
     """
     text_config = vllm_config.model_config.hf_config.get_text_config()
     rope_types = {rp["rope_type"] for rp in iter_rope_parameters(text_config)}
-    if "dynamic" not in rope_types:
-        return True
-    # Layer types using longrope still sync, even once dynamic rope is disabled
-    return "longrope" not in rope_types and dynamic_rope_update_is_noop(vllm_config)
+    return "dynamic" not in rope_types or dynamic_rope_update_is_noop(vllm_config)
 
 
 def disable_noop_dynamic_rope(model: nn.Module, vllm_config: "VllmConfig") -> None:
@@ -405,3 +402,33 @@ def disable_noop_dynamic_rope(model: nn.Module, vllm_config: "VllmConfig") -> No
             }
         elif rope_type == "dynamic":
             module.rope_type = "default"
+
+
+def freeze_longrope(model: nn.Module, vllm_config: "VllmConfig") -> None:
+    """Pick longrope's frequencies once from `max_model_len`, like native vLLM.
+
+    `@dynamic_rope_update` switches between the short and long factors per
+    forward, so KV cached under one set would later be read under the other.
+    """
+    from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
+
+    max_model_len = vllm_config.model_config.max_model_len
+    for module in model.modules():
+        rope_type = getattr(module, "rope_type", None)
+        if not hasattr(module, "max_seq_len_cached") or rope_type is None:
+            continue
+        per_layer = isinstance(rope_type, dict)
+        rope_types = dict(rope_type) if per_layer else {None: rope_type}
+        for layer_type in [k for k, v in rope_types.items() if v == "longrope"]:
+            rope_parameters = module.config.rope_parameters
+            if per_layer:
+                rope_parameters = rope_parameters[layer_type]
+            original = rope_parameters["original_max_position_embeddings"]
+            if max_model_len > original:
+                inv_freq, _ = ROPE_INIT_FUNCTIONS["longrope"](
+                    module.config, None, seq_len=original + 1, layer_type=layer_type
+                )
+                prefix = f"{layer_type}_" if per_layer else ""
+                getattr(module, f"{prefix}inv_freq").copy_(inv_freq)
+            rope_types[layer_type] = "default"
+        module.rope_type = rope_types if per_layer else rope_types[None]
