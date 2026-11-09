@@ -45,9 +45,9 @@ use crate::protocol::stats::{KvConnectorStats, MooncakeOperation, SchedulerStats
 use crate::protocol::tensor::{WireArrayData, WireTensor};
 use crate::protocol::utility::{PauseMode, SleepLevel, UtilityOutput, UtilityResultEnvelope};
 use crate::test_utils::{
-    IpcNamespace, setup_bootstrapped_mock_engine, setup_hybrid_mock_engine_sockets,
-    setup_mock_engine_sockets, setup_mock_engine_with_init, spawn_mock_engine_task,
-    spawn_mock_engine_task_with_ready,
+    IpcNamespace, decode_prompt_token_ids, setup_bootstrapped_mock_engine,
+    setup_hybrid_mock_engine_sockets, setup_mock_engine_sockets, setup_mock_engine_with_init,
+    spawn_mock_engine_task, spawn_mock_engine_task_with_ready,
 };
 use crate::transport::ConnectedEngine;
 use crate::{
@@ -160,7 +160,7 @@ fn sample_request() -> EngineCoreRequest {
 fn sample_request_with_id(request_id: &str) -> EngineCoreRequest {
     EngineCoreRequest {
         request_id: request_id.to_string(),
-        prompt_token_ids: Some(vec![11, 22]),
+        prompt_token_ids: Some(vec![11, 22].into()),
         sampling_params: Some(EngineCoreSamplingParams {
             temperature: 0.8,
             watermarking: false,
@@ -195,7 +195,7 @@ fn sample_request_with_id(request_id: &str) -> EngineCoreRequest {
 fn sample_multimodal_request() -> EngineCoreRequest {
     EngineCoreRequest {
         request_id: "req-mm".to_string(),
-        prompt_token_ids: Some(vec![101, 102, 103, 104]),
+        prompt_token_ids: Some(vec![101, 102, 103, 104].into()),
         mm_features: Some(vec![MmFeatureSpec {
             data: Some(BTreeMap::from([(
                 "pixel_values".to_string(),
@@ -2449,7 +2449,7 @@ async fn client_sends_prompt_block_hashes_for_engine_prefix_hash_config() {
     };
     let edge_tokens = [0, 1, 23, 24, 255, 256, 65535, 65536, 151_645, 0x7fff_ffff];
     let request = EngineCoreRequest {
-        prompt_token_ids: Some([edge_tokens.repeat(3), vec![7, 8]].concat()),
+        prompt_token_ids: Some([edge_tokens.repeat(3), vec![7, 8]].concat().into()),
         block_hashes: None,
         ..sample_request()
     };
@@ -3025,6 +3025,240 @@ async fn wake_up_requires_every_engine_to_be_fully_awake() {
     client.shutdown().await.unwrap();
 }
 
+/// Serve utility calls as an engine that is ready unless paused or in a weight
+/// update, in whatever order the client sends them, until `stop` fires.
+async fn serve_readiness_engine(
+    dealer: &mut DealerSocket,
+    push: &mut PushSocket,
+    mut paused: bool,
+    mut stop: oneshot::Receiver<()>,
+) {
+    let mut updating_weights = false;
+    loop {
+        let utility = tokio::select! {
+            utility = recv_engine_message(dealer) => utility,
+            _ = &mut stop => return,
+        };
+        assert_eq!(utility[0].as_ref(), &[0x03]);
+        let payload = decode_value(&utility[1]);
+        let array = payload.as_array().expect("utility payload array");
+        let call_id = array[1].as_u64().expect("call_id");
+        let result = match array[2].as_str().expect("utility method") {
+            "is_inference_ready" => utility_result_value(!paused && !updating_weights),
+            "pause_generation" => {
+                paused = true;
+                utility_result_value(())
+            }
+            "resume_scheduler" | "checkpoint_restore" => {
+                paused = false;
+                utility_result_value(())
+            }
+            "collective_rpc" => {
+                match array[3][0].as_str().expect("worker method") {
+                    "start_weight_update" => updating_weights = true,
+                    "finish_weight_update" => updating_weights = false,
+                    method => panic!("unexpected worker method {method}"),
+                }
+                utility_result_value([()])
+            }
+            method => panic!("unexpected utility call {method}"),
+        };
+        send_outputs(
+            push,
+            UtilityCallOutput {
+                engine_index: 0,
+                timestamp: 0.0,
+                output: UtilityOutput {
+                    call_id: call_id.into(),
+                    failure_message: None,
+                    result: Some(result),
+                },
+            }
+            .into(),
+        )
+        .await;
+    }
+}
+
+/// Connect a client to [`serve_readiness_engine`], with `enable_sleep_mode`
+/// set on the engine when it starts paused.
+async fn connect_readiness_engine(
+    engine_id: &'static [u8],
+    start_paused: bool,
+) -> (
+    EngineCoreClient,
+    IpcNamespace,
+    [oneshot::Sender<()>; 2],
+    tokio::task::JoinHandle<()>,
+) {
+    init_tracing();
+    let ipc = IpcNamespace::new().unwrap();
+    let handshake_address = ipc.handshake_endpoint();
+    let mut ready_response = crate::mock_engine::default_ready_response();
+    ready_response.enable_sleep_mode = start_paused;
+    let (stop_tx, stop_rx) = oneshot::channel();
+    let (shutdown_tx, engine_task) = spawn_mock_engine_task_with_ready(
+        handshake_address.clone(),
+        engine_id.to_vec(),
+        ready_response,
+        move |dealer, push| Box::pin(serve_readiness_engine(dealer, push, start_paused, stop_rx)),
+    );
+    let client = connect_client_with_ipc(
+        handshake_test_config(
+            handshake_address,
+            1,
+            "test-model",
+            Duration::from_secs(2),
+            0,
+            None,
+        ),
+        &ipc,
+    )
+    .await;
+    (client, ipc, [stop_tx, shutdown_tx], engine_task)
+}
+
+async fn shutdown_readiness_engine(
+    client: EngineCoreClient,
+    stop: [oneshot::Sender<()>; 2],
+    engine_task: tokio::task::JoinHandle<()>,
+) {
+    for tx in stop {
+        let _ = tx.send(());
+    }
+    engine_task.await.unwrap();
+    client.shutdown().await.unwrap();
+}
+
+async fn wait_until_ready(readiness: &mut tokio::sync::watch::Receiver<bool>) {
+    timeout(Duration::from_secs(2), readiness.wait_for(|ready| *ready))
+        .await
+        .expect("the engine reports ready")
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn readiness_follows_engine_answers_around_pause() {
+    let (client, _ipc, stop, engine_task) =
+        connect_readiness_engine(b"engine-readiness-pause", false).await;
+    let mut readiness = client.subscribe_readiness();
+    assert!(*readiness.borrow());
+
+    client.pause_generation(PauseMode::Abort, false).await.unwrap();
+    assert!(!*readiness.borrow());
+    client.resume_scheduler().await.unwrap();
+    wait_until_ready(&mut readiness).await;
+
+    shutdown_readiness_engine(client, stop, engine_task).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn readiness_follows_engine_answers_around_weight_update() {
+    let (client, _ipc, stop, engine_task) =
+        connect_readiness_engine(b"engine-readiness-weights", false).await;
+    let mut readiness = client.subscribe_readiness();
+
+    client.start_weight_update().await.unwrap();
+    assert!(!*readiness.borrow());
+    client.finish_weight_update().await.unwrap();
+    wait_until_ready(&mut readiness).await;
+
+    shutdown_readiness_engine(client, stop, engine_task).await;
+}
+
+/// Receive the next utility call, which must be `method`, and return its id.
+async fn recv_utility_call(dealer: &mut DealerSocket, method: &str) -> u64 {
+    let utility = recv_engine_message(dealer).await;
+    assert_eq!(utility[0].as_ref(), &[0x03]);
+    let payload = decode_value(&utility[1]);
+    let array = payload.as_array().expect("utility payload array");
+    assert_eq!(array[2], Value::from(method));
+    array[1].as_u64().expect("call_id")
+}
+
+async fn reply_utility(push: &mut PushSocket, call_id: u64, result: UtilityResultEnvelope) {
+    send_outputs(
+        push,
+        UtilityCallOutput {
+            engine_index: 0,
+            timestamp: 0.0,
+            output: UtilityOutput {
+                call_id: call_id.into(),
+                failure_message: None,
+                result: Some(result),
+            },
+        }
+        .into(),
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cancelled_pause_rechecks_only_after_the_engine_replies() {
+    init_tracing();
+    let ipc = IpcNamespace::new().unwrap();
+    let handshake_address = ipc.handshake_endpoint();
+    let (pause_seen_tx, pause_seen_rx) = oneshot::channel();
+    let (reply_tx, reply_rx) = oneshot::channel::<()>();
+    let (shutdown_tx, engine_task) = spawn_mock_engine_task(
+        handshake_address.clone(),
+        b"engine-readiness-cancel".to_vec(),
+        move |dealer, push| {
+            Box::pin(async move {
+                let pause = recv_utility_call(dealer, "pause_generation").await;
+                pause_seen_tx.send(()).unwrap();
+                reply_rx.await.unwrap();
+                reply_utility(push, pause, utility_result_value(())).await;
+                let ask = recv_utility_call(dealer, "is_inference_ready").await;
+                reply_utility(push, ask, utility_result_value(false)).await;
+            })
+        },
+    );
+    let client = connect_client_with_ipc(
+        handshake_test_config(
+            handshake_address,
+            1,
+            "test-model",
+            Duration::from_secs(2),
+            0,
+            None,
+        ),
+        &ipc,
+    )
+    .await;
+    let readiness = client.subscribe_readiness();
+
+    tokio::select! {
+        _ = client.pause_generation(PauseMode::Wait, false) => {
+            panic!("the pause returned before the engine replied")
+        }
+        _ = pause_seen_rx => {}
+    }
+    // The caller is gone, but the call still waits for the engine.
+    assert!(!client.readiness_recheck_pending());
+    assert!(!*readiness.borrow());
+    reply_tx.send(()).unwrap();
+
+    let _ = shutdown_tx.send(());
+    engine_task.await.unwrap();
+    assert!(!*readiness.borrow());
+    client.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn readiness_starts_from_engine_answer_with_sleep_mode() {
+    // Prepared for a checkpoint on startup.
+    let (client, _ipc, stop, engine_task) =
+        connect_readiness_engine(b"engine-readiness-startup", true).await;
+    let mut readiness = client.subscribe_readiness();
+    assert!(!*readiness.borrow());
+
+    client.checkpoint_restore().await.unwrap();
+    wait_until_ready(&mut readiness).await;
+
+    shutdown_readiness_engine(client, stop, engine_task).await;
+}
+
 /// Render the `vllm:engine_sleep_state` series of one model as
 /// `awake,weights_offloaded,discard_all` for engines 0 and 1.
 fn engine_sleep_state_series(model_name: &str) -> [String; 2] {
@@ -3101,16 +3335,19 @@ async fn sleep_and_wake_calls_record_engine_sleep_state() {
     .await;
 
     let mut series = vec![("connected", engine_sleep_state_series(MODEL))];
-    client.sleep(SleepLevel::OffloadWeights, PauseMode::default()).await.unwrap();
+    client
+        .sleep(SleepLevel::OffloadWeights, PauseMode::default(), true)
+        .await
+        .unwrap();
     series.push(("sleep level 1", engine_sleep_state_series(MODEL)));
     assert!(!client.wake_up(Some(vec!["weights".to_owned()])).await.unwrap());
     series.push(("partial wake", engine_sleep_state_series(MODEL)));
     assert!(client.wake_up(None).await.unwrap());
     series.push(("full wake", engine_sleep_state_series(MODEL)));
-    client.release_kv_cache_memory().await.unwrap();
+    client.release_kv_cache_memory(true).await.unwrap();
     series.push(("release kv cache", engine_sleep_state_series(MODEL)));
     assert!(client.wake_up(None).await.unwrap());
-    client.sleep(SleepLevel::DiscardAll, PauseMode::default()).await.unwrap();
+    client.sleep(SleepLevel::DiscardAll, PauseMode::default(), true).await.unwrap();
     series.push(("sleep level 2", engine_sleep_state_series(MODEL)));
 
     expect_test::expect![[r#"
@@ -3160,6 +3397,69 @@ async fn sleep_and_wake_calls_record_engine_sleep_state() {
         ]
     "#]]
     .assert_debug_eq(&series);
+
+    for (shutdown_tx, engine_task) in engines {
+        let _ = shutdown_tx.send(());
+        engine_task.await.unwrap();
+    }
+    client.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cache_config_info_exports_each_engine_cache_config() {
+    init_tracing();
+    let ipc = IpcNamespace::new().unwrap();
+    let handshake_address = ipc.handshake_endpoint();
+    let mut engines = Vec::new();
+    for engine_index in 0..2_u16 {
+        let ready_response = EngineCoreReadyResponse {
+            cache_config_info: Some(BTreeMap::from([
+                ("block_size".to_string(), "16".to_string()),
+                (
+                    "num_gpu_blocks".to_string(),
+                    (1000 + engine_index).to_string(),
+                ),
+                // Keeps other tests' engines off these series.
+                ("test".to_string(), "cache-config-info".to_string()),
+            ])),
+            ..crate::mock_engine::default_ready_response()
+        };
+        engines.push(spawn_mock_engine_task_with_ready(
+            handshake_address.clone(),
+            EngineId::from_engine_index(engine_index).into_frame().to_vec(),
+            ready_response,
+            |_dealer, _push| Box::pin(async {}),
+        ));
+    }
+    let client = connect_client_with_ipc(
+        handshake_test_config(
+            handshake_address,
+            2,
+            "cache-config-info-model",
+            Duration::from_secs(2),
+            0,
+            None,
+        ),
+        &ipc,
+    )
+    .await;
+
+    let rendered = vllm_metrics::METRICS.render().unwrap();
+    let mut series = rendered
+        .lines()
+        .filter(|line| {
+            line.starts_with("vllm:cache_config_info{")
+                && line.contains("test=\"cache-config-info\"")
+        })
+        .collect::<Vec<_>>();
+    // Family series render in hash order.
+    series.sort();
+    expect_test::expect![[r#"
+        [
+            "vllm:cache_config_info{block_size=\"16\",engine=\"0\",num_gpu_blocks=\"1000\",test=\"cache-config-info\"} 1.0",
+            "vllm:cache_config_info{block_size=\"16\",engine=\"1\",num_gpu_blocks=\"1001\",test=\"cache-config-info\"} 1.0",
+        ]
+    "#]].assert_debug_eq(&series);
 
     for (shutdown_tx, engine_task) in engines {
         let _ = shutdown_tx.send(());
@@ -3539,14 +3839,23 @@ fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
     let lora_request_hex = lines.next().expect("missing LoRA request fixture line");
     let inplace_lora_request_hex =
         lines.next().expect("missing in-place LoRA request fixture line");
+    let simple_cpu_offload_stats_hex =
+        lines.next().expect("missing SimpleCPUOffload stats fixture line");
+    let kv_offload_stats_hex = lines.next().expect("missing kv offload stats fixture line");
 
     let request_bytes = hex::decode(request_hex).unwrap();
     let multimodal_request_bytes = hex::decode(multimodal_request_hex).unwrap();
     let outputs_bytes = hex::decode(outputs_hex).unwrap();
     let sampling_mask_outputs_bytes = hex::decode(sampling_mask_outputs_hex).unwrap();
 
-    let decoded_request: EngineCoreRequest = rmp_serde::from_slice(&request_bytes).unwrap();
+    // Python sends prompt token ids as int32, the Rust frontend as uint32.
+    let mut decoded_request: EngineCoreRequest = rmp_serde::from_slice(&request_bytes).unwrap();
     let expected_request = sample_request();
+    assert_eq!(
+        decode_prompt_token_ids(&decoded_request),
+        Some(vec![11, 22])
+    );
+    decoded_request.prompt_token_ids = expected_request.prompt_token_ids.clone();
     assert_eq!(decoded_request, expected_request);
 
     // All-default sampling params -> empty map; must decode to Python defaults.
@@ -3592,8 +3901,13 @@ fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
         },
     );
 
-    let decoded_multimodal_request: EngineCoreRequest =
+    let mut decoded_multimodal_request: EngineCoreRequest =
         rmp_serde::from_slice(&multimodal_request_bytes).unwrap();
+    assert_eq!(
+        decode_prompt_token_ids(&decoded_multimodal_request),
+        Some(vec![101, 102, 103, 104])
+    );
+    decoded_multimodal_request.prompt_token_ids = sample_multimodal_request().prompt_token_ids;
     assert_eq!(decoded_multimodal_request, sample_multimodal_request());
 
     // The decode assertion above proves Python wire -> Rust struct. Also compare
@@ -3681,6 +3995,9 @@ fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
                                 message: "Generation is paused.",
                                 retryable: true,
                             },
+                        ),
+                        watermarking: Some(
+                            true,
                         ),
                     },
                 ],
@@ -3775,6 +4092,7 @@ fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
     assert!(multi_connector_stats.mooncake_transfer.is_some());
     assert!(multi_connector_stats.mooncake.is_some());
     assert!(multi_connector_stats.umbp.is_some());
+    assert!(multi_connector_stats.simple_cpu_offload.is_some());
     assert!(multi_connector_stats.other.contains_key("UnsupportedConnector"));
     let nixl_stats = multi_connector_stats.nixl.as_ref().expect("NIXL stats decode");
     assert_eq!(nixl_stats.num_failed_handshakes, [1]);
@@ -3825,6 +4143,55 @@ fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
         "vllm:umbp_transfer_bytes_total{model_name=\"test-model\",engine=\"0\",\
          operation=\"load\"} 8192"
     ));
+    assert!(rendered_metrics.contains(
+        "vllm:simple_kv_offload_save_outcomes_total{model_name=\"test-model\",engine=\"0\",\
+         outcome=\"stored\"} 3"
+    ));
+
+    let simple_cpu_offload_stats: KvConnectorStats =
+        rmp_serde::from_slice(&hex::decode(simple_cpu_offload_stats_hex).unwrap()).unwrap();
+    let KvConnectorStats::SimpleCpuOffload(simple_cpu_offload_stats) = simple_cpu_offload_stats
+    else {
+        panic!("Python SimpleCPUOffload stats should decode as SimpleCpuOffload");
+    };
+    expect_test::expect![[r#"
+        SimpleCpuOffloadData {
+            save_outcomes: {
+                [
+                    "skipped_in_flight",
+                ]: 1,
+                [
+                    "stored",
+                ]: 3,
+            },
+            load_blocks: {
+                []: 4,
+            },
+            used_blocks: {
+                []: 9,
+            },
+            pending_store_blocks: {
+                []: 2,
+            },
+            info: {
+                [
+                    "cpu",
+                    "false",
+                    "true",
+                    "64",
+                ]: 1,
+            },
+        }
+    "#]]
+    .assert_debug_eq(&simple_cpu_offload_stats.data);
+
+    // Another connector's `types`/`data` payload is not taken for SimpleCPUOffload.
+    let kv_offload_stats: KvConnectorStats =
+        rmp_serde::from_slice(&hex::decode(kv_offload_stats_hex).unwrap()).unwrap();
+    assert!(matches!(
+        kv_offload_stats,
+        KvConnectorStats::Multi(stats) if stats.simple_cpu_offload.is_none()
+    ));
 
     let map_keys = |bytes: &[u8]| -> BTreeSet<String> {
         match decode_value(bytes) {
@@ -3859,6 +4226,15 @@ fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
     assert!(ready_response.enable_sleep_mode);
     assert!(ready_response.supports_draft_weight_updates);
     assert_eq!(ready_response.effective_attention_block_size, Some(64));
+    assert_eq!(ready_response.config_hash.as_deref(), Some("0123456789"));
+    assert!(ready_response.enable_expert_parallel);
+    assert_eq!(
+        ready_response.cache_config_info,
+        Some(BTreeMap::from([
+            ("block_size".to_string(), "16".to_string()),
+            ("mamba_block_size".to_string(), "None".to_string()),
+        ]))
+    );
     assert_eq!(
         ready_response.vllm_config,
         Some(serde_json::json!({

@@ -7,7 +7,7 @@ import torch
 
 
 def mfma_spinner(n_wg):
-    """``n_wg`` workgroups looping v_mfma_f32_16x16x32_bf16 for ``ticks``
+    """`n_wg` workgroups looping v_mfma_f32_16x16x32_bf16 for `ticks`
     (s_memrealtime, 100 per us).
 
     Launch it on a high-priority stream: on a normal one it can share a hardware

@@ -255,7 +255,7 @@ impl<'a> MessagesLlm<'a> {
         validate_max_output_tokens(
             "max_tokens",
             request.sampling_params.max_tokens,
-            self.chat.engine_core_client().max_model_len(),
+            self.chat.text().llm().info().max_model_len,
         )?;
         let request_id = request.request_id.clone();
         let span = tracing::info_span!("messages", request_id = %request_id, engine_request_id = tracing::field::Empty);

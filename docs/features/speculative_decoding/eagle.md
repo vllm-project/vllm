@@ -56,6 +56,31 @@ for output in outputs:
     print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
 ```
 
+## Pipeline Parallelism
+
+EAGLE3, DFlash, and DSpark support pipeline parallelism on Model Runner V2
+with compatible target models. Auxiliary hidden states are collected from
+the target model and forwarded across pipeline stages to the final stage,
+where the draft model runs.
+
+Supported targets include Llama, Qwen2, dense Qwen3, Qwen3-VL (dense and
+MoE), gpt-oss, Gemma 4, and MiniMax-M3. DeepSeek-V4 and Kimi-K3 are also
+supported on NVIDIA GPUs. Other targets are rejected at startup with
+`<architecture> does not support <method> with pipeline parallelism`.
+
+For example, to run gpt-oss with an EAGLE3 draft model across two pipeline
+stages:
+
+```bash
+vllm serve openai/gpt-oss-20b \
+    --pipeline-parallel-size 2 \
+    --speculative-config '{
+        "method": "eagle3",
+        "model": "RedHatAI/gpt-oss-20b-speculator.eagle3",
+        "num_speculative_tokens": 3
+    }'
+```
+
 ## Pre-Trained Eagle Draft Models
 
 A variety of EAGLE draft models are available on the Hugging Face hub:

@@ -30,9 +30,9 @@ struct ErrorDetail {
 
 fn error_body(error: ApiError) -> ErrorResponse {
     let kind = match error {
-        ApiError::InvalidRequest { .. } | ApiError::JsonParseError { .. } => {
-            "invalid_request_error"
-        }
+        ApiError::InvalidRequest { .. }
+        | ApiError::JsonParseError { .. }
+        | ApiError::InvalidQuery { .. } => "invalid_request_error",
         ApiError::ModelNotFound { .. } | ApiError::NotFound { .. } => "not_found_error",
         ApiError::Conflict { .. } => "conflict_error",
         ApiError::ServiceUnavailable { .. } => "overloaded_error",
