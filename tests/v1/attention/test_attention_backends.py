@@ -20,6 +20,7 @@ from tests.v1.attention.utils import (
     try_get_attention_backend,
 )
 from vllm.config import (
+    AttentionConfig,
     DiffusionConfig,
     ModelConfig,
     SpeculativeConfig,
@@ -144,6 +145,8 @@ def create_and_prepopulate_kv_cache(
     layout: KVCacheLayout,
     randomize_blocks: bool = True,
     kv_cache_dtype: str = "auto",
+    k_scale: float = 1.0,
+    v_scale: float = 1.0,
 ) -> torch.Tensor:
     """Create and prepopulate a KV cache with context data.
 
@@ -162,6 +165,8 @@ def create_and_prepopulate_kv_cache(
         randomize_blocks: Whether to randomly permute blocks
                           or use sequential order
         kv_cache_dtype: Cache dtype string; fp8 caches use fp8 storage
+        k_scale: Scale an fp8 cache's keys are stored with
+        v_scale: Scale an fp8 cache's values are stored with
 
     Returns:
         A 4D tensor in logical ``(num_blocks, num_kv_heads, block_size,
@@ -203,6 +208,8 @@ def create_and_prepopulate_kv_cache(
     start_block_idx = 1
     for i in range(batch_size):
         k_context, v_context = k_contexts[i], v_contexts[i]
+        if fp8_kv_cache:
+            k_context, v_context = k_context / k_scale, v_context / v_scale
         t = torch.arange(k_context.shape[0], device=device)
         blk = start_block_idx + t // block_size
         off = t % block_size
@@ -447,6 +454,7 @@ def _test_backend_correctness(
     max_num_batched_tokens: int | None = None,
     layer_k_scale: float = 1.0,
     layer_v_scale: float = 1.0,
+    attention_config: AttentionConfig | None = None,
 ):
     """Test that all backends produce similar outputs to a reference implementation
     using FlexAttention or an explicit attention-sink reference.
@@ -504,6 +512,8 @@ def _test_backend_correctness(
             method="ngram", num_speculative_tokens=num_speculative_tokens
         )
     vllm_config.cache_config.cache_dtype = kv_cache_dtype
+    if attention_config is not None:
+        vllm_config.attention_config = attention_config
     device = torch.device(f"{DEVICE_TYPE}:0")
 
     kv_cache_spec = create_standard_kv_cache_spec(vllm_config, attn_type)
@@ -533,6 +543,9 @@ def _test_backend_correctness(
     if fp8_kv_cache:
         query_fp8_dtype = current_platform.fp8_dtype()
         kv_fp8_dtype = FP8_KV_CACHE_DTYPES[kv_cache_dtype]
+        model_dtype_query = (
+            vllm_config.attention_config.disable_flashinfer_q_quantization
+        )
         atol = max(atol, 6e-2)
         rtol = max(rtol, 1e-1)
 
@@ -552,9 +565,9 @@ def _test_backend_correctness(
         v_full = torch.randn(s_len, num_kv_heads, head_size, dtype=dtype, device=device)
 
         if fp8_kv_cache:
-            q_ref = q.to(query_fp8_dtype).to(dtype)
-            k_ref = k_full.to(kv_fp8_dtype).to(dtype)
-            v_ref = v_full.to(kv_fp8_dtype).to(dtype)
+            q_ref = q if model_dtype_query else q.to(query_fp8_dtype).to(dtype)
+            k_ref = (k_full / layer_k_scale).to(kv_fp8_dtype).to(dtype) * layer_k_scale
+            v_ref = (v_full / layer_v_scale).to(kv_fp8_dtype).to(dtype) * layer_v_scale
         else:
             q_ref, k_ref, v_ref = q, k_full, v_full
 
@@ -661,6 +674,8 @@ def _test_backend_correctness(
         layout=layout,
         randomize_blocks=True,
         kv_cache_dtype=kv_cache_dtype,
+        k_scale=layer_k_scale,
+        v_scale=layer_v_scale,
     )
 
     # 4. Run vLLM backends and compare
@@ -1808,6 +1823,51 @@ def test_flashinfer_native_prefill_with_sinks(default_vllm_config):
         causal_mask_mod,
         use_sinks=True,
     )
+
+
+@pytest.mark.skipif(
+    AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST,
+    reason="FlashInfer is not available.",
+)
+def test_flashinfer_trtllm_prefill_bf16_query_fp8_kv_scales(default_vllm_config):
+    """TRTLLM prefill with a BF16 query dequantizes the FP8 KV cache with
+    k_scale / v_scale, so the kernel must not apply them a second time."""
+    import unittest.mock
+
+    from vllm.utils.flashinfer import supports_trtllm_attention
+    from vllm.v1.attention.backends import flashinfer as fi
+
+    if not supports_trtllm_attention(is_prefill=True):
+        pytest.skip("TRTLLM prefill requires SM100.")
+
+    def causal_mask_mod(
+        b: torch.Tensor,
+        h: torch.Tensor,
+        q_idx: torch.Tensor,
+        kv_idx: torch.Tensor,
+        *,
+        context_len: int,
+    ):
+        return (q_idx + context_len) >= kv_idx
+
+    # The builder reads the current config, the impl the one passed below.
+    attention_config = AttentionConfig(
+        use_trtllm_attention=True, disable_flashinfer_q_quantization=True
+    )
+    default_vllm_config.attention_config = attention_config
+    name = "trtllm_prefill_attn_kvfp8_dequant"
+    with unittest.mock.patch.object(fi, name, wraps=getattr(fi, name)) as dequant:
+        _test_backend_correctness(
+            BATCH_SPECS["small_prefill"],
+            "Qwen/Qwen3-0.6B",
+            [AttentionBackendEnum.FLASHINFER],
+            causal_mask_mod,
+            kv_cache_dtype="fp8",
+            layer_k_scale=0.5,
+            layer_v_scale=2.0,
+            attention_config=attention_config,
+        )
+    assert dequant.called
 
 
 @pytest.mark.skipif(
