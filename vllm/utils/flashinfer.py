@@ -29,6 +29,13 @@ from vllm.utils.torch_utils import PIN_MEMORY
 logger = init_logger(__name__)
 
 
+def is_flashinfer_autotuning() -> bool:
+    """Whether a FlashInfer autotune(True) context is active."""
+    from flashinfer.autotuner import AutoTuner
+
+    return AutoTuner.get().is_tuning_mode
+
+
 def flashinfer_bf16_mm(
     a: torch.Tensor,
     b: torch.Tensor,
@@ -50,7 +57,7 @@ def flashinfer_bf16_mm(
 
 # This is the storage path for the cubins, it can be replaced
 # with a local path for testing.
-# Referenced from https://github.com/flashinfer-ai/flashinfer/blob/0c9a92c3d9a7e043ab6f3f7b2273269caf6ab044/flashinfer/jit/cubin_loader.py#L35  # noqa: E501
+# Referenced from https://github.com/flashinfer-ai/flashinfer/blob/0c9a92c3d9a7e043ab6f3f7b2273269caf6ab044/flashinfer/jit/cubin_loader.py#L35
 FLASHINFER_CUBINS_REPOSITORY = os.environ.get(
     "FLASHINFER_CUBINS_REPOSITORY",
     "https://edge.urm.nvidia.com/artifactory/sw-kernelinferencelibrary-public-generic-local/",  # noqa: E501
@@ -62,7 +69,7 @@ _DEFAULT_CUDA_HOME = "/usr/local/cuda"
 def _flashinfer_nvcc_path() -> str | None:
     """Return the nvcc FlashInfer's JIT would run, or None if it is missing.
 
-    Mirrors ``flashinfer.jit.cpp_ext.get_cuda_path()`` without importing
+    Mirrors `flashinfer.jit.cpp_ext.get_cuda_path()` without importing
     FlashInfer, whose import initializes CUDA.
     """
     cuda_home = os.environ.get("CUDA_HOME") or os.environ.get("CUDA_PATH")
@@ -370,8 +377,8 @@ autotune = _lazy_import_wrapper(
 
 @functools.cache
 def has_flashinfer_autotune_v2() -> bool:
-    """Return ``True`` if FlashInfer ships the managed-cache autotuner
-    (``flashinfer.autotune_v2``, flashinfer-ai/flashinfer#3861)."""
+    """Return `True` if FlashInfer ships the managed-cache autotuner
+    (`flashinfer.autotune_v2`, flashinfer-ai/flashinfer#3861)."""
     if not has_flashinfer():
         return False
     mod = _get_submodule("flashinfer")
@@ -398,23 +405,20 @@ def has_flashinfer_packed_fused_kda_decode() -> bool:
 
 @functools.cache
 def has_flashinfer_nvlink_two_sided() -> bool:
-    """Return `True` if FlashInfer mnnvl all2all is available."""
+    """Return whether FlashInfer exposes the NVLink two-sided MoE EP wrapper."""
     if not has_flashinfer_comm():
         return False
-
-    # Check if all required functions are available
-    required_functions = [
-        ("flashinfer.comm", "Mapping"),
-        ("flashinfer.comm.mnnvl", "MnnvlMemory"),
-        ("flashinfer.comm.trtllm_alltoall", "MnnvlMoe"),
-        ("flashinfer.comm.trtllm_alltoall", "MoEAlltoallInfo"),
-    ]
-
-    for module_name, attr_name in required_functions:
-        mod = _get_submodule(module_name)
-        if not mod or not hasattr(mod, attr_name):
-            return False
-    return True
+    mod = _get_submodule("flashinfer.moe_ep")
+    return mod is not None and all(
+        hasattr(mod, name)
+        for name in (
+            "BootstrapConfig",
+            "MoEEpCommParams",
+            "NVLinkTwoSidedAlltoAll",
+            "NVLinkTwoSidedConfig",
+            "create_communication",
+        )
+    )
 
 
 @functools.cache
@@ -452,7 +456,7 @@ def has_flashinfer_moe() -> bool:
 def has_flashinfer_sm90_nope_mla() -> bool:
     """FlashInfer SM90 NoPE MLA (FP8 KV with in-kernel dequant, kpe=0).
 
-    Feature-detected via the ``ckv_scale_arr`` run() kwarg introduced with
+    Feature-detected via the `ckv_scale_arr` run() kwarg introduced with
     the SM90 NoPE support (FlashInfer >= 0.6.18), so dev builds carry the
     gate without a version parse.
     """
@@ -476,7 +480,7 @@ def has_flashinfer_sm90_nope_mla() -> bool:
 
 @functools.cache
 def has_flashinfer_sparse_mla_sm120() -> bool:
-    """Return ``True`` if FlashInfer sparse MLA decode support is available."""
+    """Return `True` if FlashInfer sparse MLA decode support is available."""
     if not has_flashinfer():
         return False
     try:
@@ -492,6 +496,59 @@ def has_flashinfer_sparse_mla_sm120() -> bool:
         and callable(trtllm_batch_decode_with_kv_cache_mla)
         and callable(autotune)
     )
+
+
+@functools.cache
+def has_flashinfer_prims_ts_sparse_mla() -> bool:
+    """Return `True` if FlashInfer ships the task-scheduled (prims_ts) sparse
+    MLA decode wrapper with the plan API vLLM calls. Its quantized formats are
+    probed separately by `prims_ts_sparse_mla_format_error` once a device is
+    available."""
+    if not has_flashinfer():
+        return False
+    try:
+        from flashinfer.attention.prims_ts import (
+            BatchSparseMLADecodePagedTSWrapper,
+            get_prims_ts_sparse_mla_decode_workspace_size,
+        )
+    except ImportError:
+        return False
+    if not callable(get_prims_ts_sparse_mla_decode_workspace_size):
+        return False
+    # vLLM passes the plan arguments of FlashInfer after 0.7.3 (max_q_len,
+    # q_dtype); 0.7.3's prims_ts still names them max_seq_len_q, q_data_type.
+    plan_args = inspect.signature(BatchSparseMLADecodePagedTSWrapper.plan).parameters
+    return "max_q_len" in plan_args
+
+
+@functools.cache
+def prims_ts_sparse_mla_format_error(kv_cache_format: str) -> str | None:
+    """Why the installed FlashInfer cannot plan prims_ts sparse MLA (D576, 128
+    E4M3 query heads, LSE) over `kv_cache_format` on this GPU, else None.
+
+    Asks the public workspace-size query, which resolves the plan without
+    allocating or compiling (FlashInfer >= the nightly with PR 7410 for
+    "nvfp4.fp8rope")."""
+    if not has_flashinfer_prims_ts_sparse_mla():
+        return "FlashInfer has no prims_ts sparse MLA decode"
+    from flashinfer.attention.prims_ts import (
+        get_prims_ts_sparse_mla_decode_workspace_size,
+    )
+
+    try:
+        get_prims_ts_sparse_mla_decode_workspace_size(
+            torch.device("cuda", torch.accelerator.current_device_index()),
+            1,
+            128,
+            max_topk=2048,
+            q_dtype=torch.float8_e4m3fn,
+            qk_rope_head_dim=64,
+            kv_cache_format=kv_cache_format,
+            return_lse=True,
+        )
+    except (ValueError, NotImplementedError, KeyError, TypeError) as e:
+        return f"FlashInfer prims_ts sparse MLA rejects {kv_cache_format!r}: {e}"
+    return None
 
 
 @functools.cache
@@ -512,7 +569,7 @@ def has_flashinfer_sparse_mla_sm120_config(num_q_heads: int, top_k: int) -> bool
 
 @functools.cache
 def has_flashinfer_cutedsl() -> bool:
-    """Return ``True`` if FlashInfer cutedsl module is available."""
+    """Return `True` if FlashInfer cutedsl module is available."""
     return (
         has_flashinfer() and importlib.util.find_spec("flashinfer.cute_dsl") is not None
     )
@@ -520,7 +577,7 @@ def has_flashinfer_cutedsl() -> bool:
 
 @functools.cache
 def has_flashinfer_bf16_fp4() -> bool:
-    """Return ``True`` if FlashInfer's CuTe-DSL W4A16 GEMM is available."""
+    """Return `True` if FlashInfer's CuTe-DSL W4A16 GEMM is available."""
     if not has_flashinfer_cutedsl():
         return False
     mod = _get_submodule("flashinfer.gemm")
@@ -593,7 +650,7 @@ def has_flashinfer_cutlass_fused_moe() -> bool:
 
 @functools.cache
 def has_flashinfer_cutedsl_grouped_gemm_nt_masked() -> bool:
-    """Return ``True`` if FlashInfer CUTLASS fused MoE is available."""
+    """Return `True` if FlashInfer CUTLASS fused MoE is available."""
     if not has_flashinfer_cutedsl():
         return False
 
@@ -613,7 +670,7 @@ def has_flashinfer_cutedsl_grouped_gemm_nt_masked() -> bool:
 
 @functools.cache
 def has_flashinfer_cutedsl_moe_nvfp4() -> bool:
-    """Return ``True`` if FlashInfer cute_dsl_fused_moe_nvfp4 is available."""
+    """Return `True` if FlashInfer cute_dsl_fused_moe_nvfp4 is available."""
     if not has_flashinfer_cutedsl():
         return False
     mod = _get_submodule("flashinfer")
@@ -622,10 +679,10 @@ def has_flashinfer_cutedsl_moe_nvfp4() -> bool:
 
 @functools.cache
 def has_flashinfer_localized_moe() -> bool:
-    """Return ``True`` if cute_dsl_fused_moe_nvfp4 accepts the ``localized_*`` args.
+    """Return `True` if cute_dsl_fused_moe_nvfp4 accepts the `localized_*` args.
 
     Locality-domain execution landed in flashinfer-ai/flashinfer#5276 and was
-    adapted to ``torch.cuda.execute_on_streams`` in #6488. Neither is in a
+    adapted to `torch.cuda.execute_on_streams` in #6488. Neither is in a
     FlashInfer 0.7.x release, so probe the signature rather than the version.
     """
     if not has_flashinfer_cutedsl_moe_nvfp4():
@@ -664,7 +721,7 @@ def has_flashinfer_b12x_gemm() -> bool:
 
 @functools.cache
 def has_flashinfer_b12x_moe() -> bool:
-    """Return ``True`` if FlashInfer CuteDSL SM12x fused MoE is available."""
+    """Return `True` if FlashInfer CuteDSL SM12x fused MoE is available."""
     if not has_flashinfer_moe():
         return False
 
@@ -852,7 +909,10 @@ def use_trtllm_attention(
 
 
 if has_flashinfer():
-    from vllm.utils.torch_utils import direct_register_custom_op
+    from vllm.utils.torch_utils import (
+        direct_register_custom_op,
+        eager_bypass_custom_op,
+    )
 
     def _flashinfer_concat_mla_k(
         k: torch.Tensor,
@@ -893,12 +953,7 @@ if has_flashinfer():
         mutates_args=["k"],  # k tensor is modified in-place
     )
 
-    @torch.library.custom_op(
-        "vllm::flashinfer_mm_fp4",
-        mutates_args=[],
-        device_types="cuda",
-    )
-    def flashinfer_mm_fp4(
+    def _flashinfer_mm_fp4(
         A: torch.Tensor,
         B: torch.Tensor,
         A_scale: torch.Tensor,
@@ -925,9 +980,6 @@ if has_flashinfer():
             backend=backend,
         )
 
-    @torch.library.register_fake(
-        "vllm::flashinfer_mm_fp4",
-    )
     def flashinfer_mm_fp4_fake(
         A: torch.Tensor,
         B: torch.Tensor,
@@ -942,12 +994,15 @@ if has_flashinfer():
     ) -> torch.Tensor:
         return torch.empty(A.shape[0], B.shape[1], dtype=dtype, device=A.device)
 
-    @torch.library.custom_op(
-        "vllm::flashinfer_mm_bf16_fp4",
-        mutates_args=[],
-        device_types="cuda",
+    direct_register_custom_op(
+        op_name="flashinfer_mm_fp4",
+        op_func=_flashinfer_mm_fp4,
+        fake_impl=flashinfer_mm_fp4_fake,
     )
-    def flashinfer_mm_bf16_fp4(
+
+    flashinfer_mm_fp4 = eager_bypass_custom_op("flashinfer_mm_fp4", _flashinfer_mm_fp4)
+
+    def _flashinfer_mm_bf16_fp4(
         A: torch.Tensor,
         B: torch.Tensor,
         B_scale: torch.Tensor,
@@ -963,9 +1018,6 @@ if has_flashinfer():
             backend="cute-dsl",
         )
 
-    @torch.library.register_fake(
-        "vllm::flashinfer_mm_bf16_fp4",
-    )
     def flashinfer_mm_bf16_fp4_fake(
         A: torch.Tensor,
         B: torch.Tensor,
@@ -975,12 +1027,16 @@ if has_flashinfer():
         output_size = B.shape[0] if B.dtype == torch.uint8 else B.shape[1] // 2
         return torch.empty(A.shape[0], output_size, dtype=A.dtype, device=A.device)
 
-    @torch.library.custom_op(
-        "vllm::flashinfer_mxfp4_quantize",
-        mutates_args=[],
-        device_types="cuda",
+    direct_register_custom_op(
+        op_name="flashinfer_mm_bf16_fp4",
+        op_func=_flashinfer_mm_bf16_fp4,
+        fake_impl=flashinfer_mm_bf16_fp4_fake,
     )
-    def flashinfer_mxfp4_quantize(
+    flashinfer_mm_bf16_fp4 = eager_bypass_custom_op(
+        "flashinfer_mm_bf16_fp4", _flashinfer_mm_bf16_fp4
+    )
+
+    def _flashinfer_mxfp4_quantize(
         a: torch.Tensor,
         backend: str,
     ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -988,7 +1044,6 @@ if has_flashinfer():
 
         return _mxfp4_quantize(a, backend=backend)
 
-    @torch.library.register_fake("vllm::flashinfer_mxfp4_quantize")
     def flashinfer_mxfp4_quantize_fake(
         a: torch.Tensor,
         backend: str,
@@ -1002,12 +1057,16 @@ if has_flashinfer():
             torch.empty(padded_m, sf_cols, dtype=torch.uint8, device=a.device),
         )
 
-    @torch.library.custom_op(
-        "vllm::bmm_fp8",
-        mutates_args=[],
-        device_types="cuda",
+    direct_register_custom_op(
+        op_name="flashinfer_mxfp4_quantize",
+        op_func=_flashinfer_mxfp4_quantize,
+        fake_impl=flashinfer_mxfp4_quantize_fake,
     )
-    def bmm_fp8(
+    flashinfer_mxfp4_quantize = eager_bypass_custom_op(
+        "flashinfer_mxfp4_quantize", _flashinfer_mxfp4_quantize
+    )
+
+    def _bmm_fp8(
         A: torch.Tensor,
         B: torch.Tensor,
         A_scale: torch.Tensor,
@@ -1019,9 +1078,6 @@ if has_flashinfer():
 
         return bmm_fp8_(A, B, A_scale, B_scale, dtype, None, backend)
 
-    @torch.library.register_fake(
-        "vllm::bmm_fp8",
-    )
     def bmm_fp8_fake(
         A: torch.Tensor,
         B: torch.Tensor,
@@ -1034,12 +1090,14 @@ if has_flashinfer():
             A.shape[0], A.shape[1], B.shape[2], dtype=dtype, device=A.device
         )
 
-    @torch.library.custom_op(
-        "vllm::flashinfer_nvfp4_quantize",
-        mutates_args=[],
-        device_types="cuda",
+    direct_register_custom_op(
+        op_name="bmm_fp8",
+        op_func=_bmm_fp8,
+        fake_impl=bmm_fp8_fake,
     )
-    def flashinfer_nvfp4_quantize(
+    bmm_fp8 = eager_bypass_custom_op("bmm_fp8", _bmm_fp8)
+
+    def _flashinfer_nvfp4_quantize(
         a: torch.Tensor, a_global_sf: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
         from flashinfer import SfLayout
@@ -1049,9 +1107,6 @@ if has_flashinfer():
             a, a_global_sf, sfLayout=SfLayout.layout_8x4, do_shuffle=False
         )
 
-    @torch.library.register_fake(
-        "vllm::flashinfer_nvfp4_quantize",
-    )
     def flashinfer_nvfp4_quantize_fake(
         a: torch.Tensor, a_global_sf: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -1067,12 +1122,16 @@ if has_flashinfer():
             rounded_m, rounded_n, dtype=torch.uint8, device=a.device
         )
 
-    @torch.library.custom_op(
-        "vllm::flashinfer_mxfp8_quantize_8x4",
-        mutates_args=[],
-        device_types="cuda",
+    direct_register_custom_op(
+        op_name="flashinfer_nvfp4_quantize",
+        op_func=_flashinfer_nvfp4_quantize,
+        fake_impl=flashinfer_nvfp4_quantize_fake,
     )
-    def flashinfer_mxfp8_quantize_8x4(
+    flashinfer_nvfp4_quantize = eager_bypass_custom_op(
+        "flashinfer_nvfp4_quantize", _flashinfer_nvfp4_quantize
+    )
+
+    def _flashinfer_mxfp8_quantize_8x4(
         a: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         from flashinfer import SfLayout
@@ -1084,9 +1143,6 @@ if has_flashinfer():
             sf_swizzle_layout=SfLayout.layout_8x4,
         )
 
-    @torch.library.register_fake(
-        "vllm::flashinfer_mxfp8_quantize_8x4",
-    )
     def flashinfer_mxfp8_quantize_8x4_fake(
         a: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -1097,12 +1153,16 @@ if has_flashinfer():
             torch.empty(scale_size, dtype=torch.uint8, device=a.device),
         )
 
-    @torch.library.custom_op(
-        "vllm::mm_mxfp8",
-        mutates_args=[],
-        device_types="cuda",
+    direct_register_custom_op(
+        op_name="flashinfer_mxfp8_quantize_8x4",
+        op_func=_flashinfer_mxfp8_quantize_8x4,
+        fake_impl=flashinfer_mxfp8_quantize_8x4_fake,
     )
-    def mm_mxfp8(
+    flashinfer_mxfp8_quantize_8x4 = eager_bypass_custom_op(
+        "flashinfer_mxfp8_quantize_8x4", _flashinfer_mxfp8_quantize_8x4
+    )
+
+    def _mm_mxfp8(
         A: torch.Tensor,
         B: torch.Tensor,
         A_scale: torch.Tensor,
@@ -1124,9 +1184,6 @@ if has_flashinfer():
             use_8x4_sf_layout=use_8x4_sf_layout,
         )
 
-    @torch.library.register_fake(
-        "vllm::mm_mxfp8",
-    )
     def mm_mxfp8_fake(
         A: torch.Tensor,
         B: torch.Tensor,
@@ -1138,6 +1195,14 @@ if has_flashinfer():
     ) -> torch.Tensor:
         # A is [m, k], B is [k, n] -> output [m, n]
         return torch.empty(A.shape[0], B.shape[1], dtype=out_dtype, device=A.device)
+
+    direct_register_custom_op(
+        op_name="mm_mxfp8",
+        op_func=_mm_mxfp8,
+        fake_impl=mm_mxfp8_fake,
+    )
+
+    mm_mxfp8 = eager_bypass_custom_op("mm_mxfp8", _mm_mxfp8)
 
 
 def flashinfer_scaled_fp4_mm(
@@ -1201,7 +1266,8 @@ def flashinfer_scaled_fp8_mm(
         scale_a,
         scale_b,
         out_dtype,
-        "auto",
+        # Autotuned "auto" can switch backends between M buckets.
+        "cutlass" if envs.VLLM_BATCH_INVARIANT else "auto",
     ).view(a.shape[0], b.shape[1])
 
     if bias is not None:
@@ -1277,9 +1343,9 @@ def is_flashinfer_cudnn_fp8_prefill_attn_supported() -> bool:
     and cuDNN >= 9.17.1.
 
     cuDNN's FP8 SDPA forward path with bf16/fp16 output (used by
-    ``MMEncoderAttention._forward_flashinfer``) gates internally on
-    ``prop.major >= 10``; on Hopper it raises a misleading
-    ``cudnnGraphNotSupportedError: ... cuDNN version 9.13.0 and newer``
+    `MMEncoderAttention._forward_flashinfer`) gates internally on
+    `prop.major >= 10`; on Hopper it raises a misleading
+    `cudnnGraphNotSupportedError: ... cuDNN version 9.13.0 and newer`
     even when the installed cuDNN is new enough. See PR #38065 for the
     original Blackwell-only design intent.
     """
@@ -1310,6 +1376,7 @@ def is_flashinfer_cudnn_fp8_prefill_attn_supported() -> bool:
 __all__ = [
     "has_flashinfer",
     "flashinfer_bf16_mm",
+    "is_flashinfer_autotuning",
     "has_flashinfer_bf16_gemm",
     "has_flashinfer_concat_mla_kv_quant_fp8",
     "is_flashinfer_bf16_gemm_supported",

@@ -6,6 +6,7 @@
 
 - `--enable-scale-out` registers it, with `/render`, `/derender` and `/inference/v1/abort_requests`.
 - `--tokens-only` always registers it, skips loading the tokenizer and forces `detokenize=False`. Stop strings (`sampling_params.stop`) are then rejected with a 400; use `stop_token_ids`.
+- `VLLM_SERVER_DEV_MODE=1` turns `--enable-scale-out` on unless `--disable-scale-out` is passed.
 - With neither flag, it returns 403 `Scale-out endpoints are disabled. Restart vllm serve with --enable-scale-out to enable them.`
 
 ```bash
@@ -86,19 +87,31 @@ print(response["choices"][0]["token_ids"])
 
 ### Derender
 
-`derender` returns the assistant `message` a coupled `/v1/chat/completions` would, without a separate [derender](derenderer.md) call. `/v1/chat/completions/render` and `/v1/messages/render` return `parse_context` on the `GenerateRequest`. Send it back with `output_mode: "derender"`. It carries the tools, `tool_choice`, `include_reasoning`, resolved JSON only `chat_template_kwargs` and the history tool call count. A `parse_context` field this server doesn't know fails a `derender` request and is ignored at the other levels.
+`derender` returns the assistant `message` a coupled `/v1/chat/completions` would, without a separate [derender](derenderer.md) call. `/v1/chat/completions/render` and `/v1/messages/render` return `parse_context` on the `GenerateRequest`. Send it back with `output_mode: "derender"`. It carries the tools, `tool_choice`, `include_reasoning`, `return_tokens_as_token_ids`, resolved JSON only `chat_template_kwargs` and the history tool call count. A `parse_context` field this server doesn't know fails a `derender` request and is ignored at the other levels.
 
 - The parser reads the engine's `text`, so it sees the stop string cut and the post `adjust_request` decode flags. That makes it match coupled chat for parsers whose `adjust_request` changes decoding which `/derender` can't.
 - A server with a tool or reasoning parser needs `parse_context`. Without a parser, `message.content` is the plain text.
 - `parse_context` is ignored at other levels, so a rendered request can go to a prefill leg unchanged.
 - `logprobs` follow coupled chat. `top_logprobs` is cut to `sampling_params.logprobs`, `logprob_token_ids` is honored. When a parser hides the reasoning with `include_reasoning: false`, `logprobs`, `token_ids` and `sampling_mask` are dropped so they don't expose it.
 - `finish_reason` follows coupled chat too. It's `tool_calls` when the message has tool calls except with a named `tool_choice` or a `length` cut.
-- `stream: true` isn't supported yet.
+- With `stream: true`, each choice carries a chat `delta` (`role`, `content`, `reasoning`, `tool_calls`) instead of `text`, and `finish_reason` follows coupled chat. `role` is set on the first chunk of each choice, `n > 1` is supported, and `null` fields are left out of `delta`. A chunk is sent whenever the engine output carries a parsed delta, visible token IDs, logprobs or a `finish_reason`. Parsing runs on the API server event loop, so `--api-server-count` scales it.
 - Cohere grounding citations aren't returned. The parser strips the citation spans from `content`, and the document map can't go over JSON in `parse_context`.
+
+A streamed tool call looks like this, with the usage chunk and `data: [DONE]` framed as at the other levels:
+
+```text
+data: {"request_id": "...", "output_mode": "derender", "choices": [{"index": 0, "token_ids": [151657], "delta": {"role": "assistant", "tool_calls": [{"index": 0, "id": "chatcmpl-tool-...", "type": "function", "function": {"name": "get_weather", "arguments": ""}}]}, "finish_reason": null, ...}]}
+
+data: {"request_id": "...", "output_mode": "derender", "choices": [{"index": 0, "token_ids": [], "delta": {}, "finish_reason": "tool_calls", ...}]}
+```
 
 ### Logprobs
 
 With `output_mode: "tokens"`, logprobs are `GenerateLogProbs` with an integer `token_id` and `rank` per entry and no `token` or `bytes` (see [Generate Output Logprobs](renderer.md#generate-output-logprobs)). With `output_mode: "text"`, they are `ChatCompletionLogProbs` carrying the decoded token strings and their UTF-8 `bytes` for the sampled token and every entry in `top_logprobs`; a server started with `--return-tokens-as-token-ids` returns `token_id:N` placeholders there instead, as `/v1/completions` does.
+
+With `output_mode: "derender"`, `parse_context.return_tokens_as_token_ids` overrides the generate server's `--return-tokens-as-token-ids` when it is not `null`: `true` returns `token_id:N` placeholders with `bytes: null`, and `false` returns decoded tokens and UTF-8 bytes even when the server flag is enabled. An omitted or `null` value uses the generate server's flag. `/render` preserves explicit `true` and `false` without applying the render server's flag, and omits the context field when the request value is omitted or `null`. This setting affects logprobs only; the assistant message is still parsed from text.
+
+Upgrade generate nodes before using explicit request overrides: older generate nodes reject `parse_context.return_tokens_as_token_ids` with a 400 in derender mode. Requests with an omitted or `null` override remain compatible because `/render` leaves that field out. Unknown parse-context fields remain ignored in `tokens` and `text` modes.
 
 ### Errors
 
@@ -106,7 +119,6 @@ The server returns a 400 for:
 
 - `output_mode: "text"` or `"derender"` on a server without a tokenizer (`--tokens-only` or `--skip-tokenizer-init`).
 - `output_mode: "text"` or `"derender"` with `sampling_params.detokenize: false`.
-- `output_mode: "derender"` with `stream: true`.
 - `output_mode: "derender"` without `parse_context` on a server with a tool or reasoning parser or with a named `tool_choice` in `parse_context` that matches none of its `tools`. This is checked before generating.
 - An unsupported `output_mode` value.
 

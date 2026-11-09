@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 from typing import Any
 
 import pytest
@@ -24,6 +24,7 @@ from vllm.model_executor.models.lilicorr import LiLiCorrHead
 from vllm.transformers_utils.configs.eagle import EAGLEConfig
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 from vllm.v1.worker.gpu.spec_decode.dflash2.speculator import CandidateSampler
+from vllm.v1.worker.gpu.spec_decode.draft_logits import DraftLogitsCache
 from vllm.v1.worker.gpu.spec_decode.lilicorr.speculator import LiLiCorrSpeculator
 
 
@@ -228,7 +229,11 @@ def test_candidates_use_global_partition_and_exclude_padding(monkeypatch, tp_siz
         fake = SimpleNamespace(
             scale=1.0,
             soft_cap=None,
+            org_vocab_size=3 * tp_size,
             _apply_head=lambda *args, rank=rank: shards[rank].clone(),
+        )
+        fake._mask_outside_vocab = MethodType(
+            logits_processor.LogitsProcessor._mask_outside_vocab, fake
         )
         lm_head = SimpleNamespace(
             tp_size=tp_size,
@@ -364,8 +369,6 @@ def test_candidate_generation_routes_scores_and_adaptive_inputs(monkeypatch, lil
     spec.seeds = torch.arange(3)
     spec.draft_tokens = torch.empty(3, 2, dtype=torch.long)
     spec.draft_logits = None
-    spec.draft_logits_num_shards = 1
-    spec.draft_logits_shard_idx = 0
     spec.use_fp64_gumbel = False
     spec.enable_adaptive_verification = True
     spec.input_buffers = SimpleNamespace(input_ids=torch.arange(9))
@@ -452,7 +455,9 @@ def test_candidate_walk_preserves_conditional_scores_and_padding(probabilistic):
     scores = torch.randn(batch, steps, top_k, top_k, device=device)
     tokens = torch.full((batch, steps), -1, dtype=torch.long, device=device)
     cache = (
-        torch.full((batch, steps, vocab), -float("inf"), device=device)
+        DraftLogitsCache(
+            batch, steps, vocab, dtype=torch.float32, fill=-float("inf"), device=device
+        )
         if probabilistic
         else None
     )
@@ -494,13 +499,17 @@ def test_candidate_walk_preserves_conditional_scores_and_padding(probabilistic):
                 assert index == realized.argmax().item()
             if cache is not None:
                 torch.testing.assert_close(
-                    cache[state, step, candidates[row, step]], realized
+                    cache.values[state, step, candidates[row, step]], realized
                 )
-                assert cache[state, step, old_candidates[row, step]].isneginf().all()
+                assert (
+                    cache.values[state, step, old_candidates[row, step]]
+                    .isneginf()
+                    .all()
+                )
             previous = index
     assert (tokens[2] == -1).all()
     if cache is not None:
-        assert cache[1].isneginf().all()
+        assert cache.values[1].isneginf().all()
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
@@ -518,7 +527,9 @@ def test_candidate_walk_revisited_position_matches_step_seed(use_fp64):
     seeds = mapping.to(torch.int64)
     positions = torch.arange(21, 21 + steps, device=device).repeat(batch)
     tokens = torch.empty(batch, steps, dtype=torch.int64, device=device)
-    cache = torch.empty(batch, steps, top_k, device=device)
+    cache = DraftLogitsCache(
+        batch, steps, top_k, dtype=torch.float32, fill=0.0, device=device
+    )
     first_round = None
     for start in (21, 22):
         positions.view(batch, steps).copy_(
@@ -545,7 +556,7 @@ def test_candidate_walk_revisited_position_matches_step_seed(use_fp64):
                 positions.view(batch, steps)[:, step] - 1,
                 apply_temperature=True,
                 is_drafting=True,
-                logits_cache=cache,
+                logits_cache=cache.values,
                 logits_cache_col=torch.tensor(step, device=device),
                 use_fp64=use_fp64,
             )
@@ -573,7 +584,7 @@ def test_candidate_walk_revisited_position_matches_step_seed(use_fp64):
         pytest.param(False, "missing_weight_scale_2", True, id="missing-global-scale"),
     ],
 )
-def test_checkpoint_coverage_rejects_incomplete_or_wrong_heads(
+def test_checkpoint_rejects_wrong_heads_and_allows_partial_buckets(
     monkeypatch, convolution, mismatch, quantized
 ):
     from vllm.model_executor.models.lilicorr import LiLiCorr, LiLiCorrForCausalLM
@@ -582,6 +593,7 @@ def test_checkpoint_coverage_rejects_incomplete_or_wrong_heads(
     nn.Module.__init__(wrapper)
     wrapper.model = LiLiCorr.__new__(LiLiCorr)
     nn.Module.__init__(wrapper.model)
+    wrapper.model._context_kv_proj = None  # set by __init__ (no MXFP8 projection)
     wrapper.has_own_lm_head = False
     with set_current_vllm_config(
         VllmConfig(
@@ -649,13 +661,8 @@ def test_checkpoint_coverage_rejects_incomplete_or_wrong_heads(
         wrapper.model, "_build_fused_kv_buffers", lambda: None, raising=False
     )
     supplied = [("model." + name, value) for name, value in weights.items()]
-    if mismatch:
-        message = (
-            "no module or parameter"
-            if mismatch.startswith("extra")
-            else "coverage mismatch"
-        )
-        with pytest.raises(ValueError, match=message):
+    if mismatch and mismatch.startswith("extra"):
+        with pytest.raises(ValueError, match="no module or parameter"):
             wrapper.load_weights(supplied)
     else:
         wrapper.load_weights(supplied)
@@ -730,10 +737,7 @@ def owned_head_model(monkeypatch):
     return build
 
 
-@pytest.mark.parametrize("missing", [None, "weight", "weight_scale", "weight_scale_2"])
-def test_owned_nvfp4_lm_head_loads_required_checkpoint_tensors(
-    owned_head_model, missing
-):
+def test_owned_nvfp4_lm_head_loads_required_checkpoint_tensors(owned_head_model):
     model, _ = owned_head_model()
     assert model.lm_head.weight.dtype == torch.uint8
     assert model.lm_head.weight.shape == (64, 8)
@@ -741,17 +745,12 @@ def test_owned_nvfp4_lm_head_loads_required_checkpoint_tensors(
         name: torch.ones_like(value) for name, value in model.state_dict().items()
     }
     del weights["lm_head.input_scale"]  # Deprecated and unused for W4A16.
-    if missing:
-        del weights[f"lm_head.{missing}"]
-        with pytest.raises(ValueError, match=f"lm_head.{missing}"):
-            model.load_weights(weights.items())
-    else:
-        model.load_weights(weights.items())
-        assert model.has_own_lm_head
-        for name in ("weight", "weight_scale", "weight_scale_2"):
-            torch.testing.assert_close(
-                getattr(model.lm_head, name), weights[f"lm_head.{name}"]
-            )
+    model.load_weights(weights.items())
+    assert model.has_own_lm_head
+    for name in ("weight", "weight_scale", "weight_scale_2"):
+        torch.testing.assert_close(
+            getattr(model.lm_head, name), weights[f"lm_head.{name}"]
+        )
 
 
 @pytest.mark.parametrize("owned", [False, True])

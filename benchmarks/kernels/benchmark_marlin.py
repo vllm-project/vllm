@@ -45,8 +45,8 @@ def bench_run(
     size_n: int,
 ):
     label = "Quant Matmul"
-    sub_label = "{}, q={}, g={}, MKN=({}x{}x{})".format(
-        model, str(quant_type), group_size, size_m, size_k, size_n
+    sub_label = (
+        f"{model}, q={quant_type}, g={group_size}, MKN=({size_m}x{size_k}x{size_n})"
     )
     print(f"Testing: {sub_label}")
 
@@ -150,7 +150,7 @@ def bench_run(
 
     results.append(
         benchmark.Timer(
-            stmt="output = marlin_gemm(a, None, marlin_q_w, None, marlin_s, None, marlin_s2, marlin_zp, marlin_workspace.scratch, quant_type, size_m, size_n, size_k, False, False, False)",  # noqa: E501
+            stmt="output = marlin_gemm(a, None, marlin_q_w, None, marlin_s, marlin_s2, marlin_zp, marlin_workspace.scratch, quant_type, size_m, size_n, size_k, False, False, False)",  # noqa: E501
             globals=globals,
             label=label,
             sub_label=sub_label,
@@ -160,7 +160,7 @@ def bench_run(
 
     results.append(
         benchmark.Timer(
-            stmt="output = marlin_gemm(a, None, marlin_q_w, None, marlin_s, None, marlin_s2, marlin_zp, marlin_workspace.scratch, quant_type, size_m, size_n, size_k, False, True, False)",  # noqa: E501
+            stmt="output = marlin_gemm(a, None, marlin_q_w, None, marlin_s, marlin_s2, marlin_zp, marlin_workspace.scratch, quant_type, size_m, size_n, size_k, False, True, False)",  # noqa: E501
             globals=globals,
             label=label,
             sub_label=sub_label,
