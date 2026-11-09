@@ -16,6 +16,33 @@ _MAX_LOG_ODDS = 40.0
 _INIT_SLOPE = 0.5
 _INIT_BIAS = -0.2
 
+# A refit window with near-zero Fisher information -- either because it
+# genuinely had few observations, or because predictions are already
+# saturated so the IRLS weight p(1-p) vanishes even on real samples --
+# divides a normal-sized gradient by a near-zero Hessian, bounded only by
+# L2. Floor the information terms before dividing, and clip the resulting
+# step, so a single refit can't take an arbitrarily large jump.
+_C_FLOOR = 1.0
+_MAX_STEP_SLOPE = 10.0
+_MAX_STEP_BIAS = 50.0
+
+# The floor above bounds a single step, but a persistently one-directional
+# gradient still drifts, unbounded, refit after refit: this is separation
+# (Albert & Anderson, 1984) -- once a position's samples in a window are
+# (quasi-)perfectly predicted by the current coefficients, its own Fisher
+# information collapses toward zero regardless of how many real samples
+# it saw, and nothing reads that as a reason to stop trusting the step.
+# Track, per position and separately for the shared slope, how many
+# *consecutive* refits its raw (pre-floor) Fisher information has sat
+# below STUCK_THRESHOLD. Once that streak reaches STUCK_LIMIT, discard the
+# computed step and reset that one coefficient to its own cold-start
+# default instead -- the same value (and justification) used at server
+# startup, just applied mid-stream once persistence is confirmed. A single
+# low-information refit does not trigger this: the counter clears the
+# moment the position sees real information again.
+_STUCK_THRESHOLD = 0.1
+_STUCK_LIMIT = 3.0
+
 
 @triton.jit(do_not_specialize=["num_reqs"])
 def _accumulate_kernel(
@@ -94,9 +121,18 @@ def _refit_kernel(
     grad_ptr,
     grad_row_stride,
     counts_ptr,
+    slope_stuck_ptr,
+    pos_stuck_ptr,
     NUM_SPECULATIVE_STEPS: tl.constexpr,
     L2: tl.constexpr,
     DAMPING: tl.constexpr,
+    C_FLOOR: tl.constexpr,
+    MAX_STEP_SLOPE: tl.constexpr,
+    MAX_STEP_BIAS: tl.constexpr,
+    STUCK_THRESHOLD: tl.constexpr,
+    STUCK_LIMIT: tl.constexpr,
+    INIT_SLOPE: tl.constexpr,
+    INIT_BIAS: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
     k = tl.arange(0, BLOCK)
@@ -105,8 +141,15 @@ def _refit_kernel(
     # Load the stats accumulated over this round to solve (XᵀWX + λI) Δθ = Xᵀr.
     a_k = tl.load(info_ptr + k * info_row_stride + 0, mask=mask, other=0.0)
     b_k = tl.load(info_ptr + k * info_row_stride + 1, mask=mask, other=0.0)
-    c_k = tl.load(info_ptr + k * info_row_stride + 2, mask=mask, other=0.0) + L2
-    a = tl.sum(a_k, axis=0) + L2
+    raw_c_k = tl.load(info_ptr + k * info_row_stride + 2, mask=mask, other=0.0)
+    # Floor the information terms by a constant, independent of sample
+    # count, before dividing -- this is what actually bounds the step; see
+    # _C_FLOOR above. The *raw* (pre-floor) values are kept for the stuck
+    # check below, since flooring would otherwise hide the exact signal
+    # that check needs.
+    c_k = tl.maximum(raw_c_k, C_FLOOR) + L2
+    raw_a = tl.sum(a_k, axis=0)
+    a = tl.maximum(raw_a, C_FLOOR) + L2
     g0_k = tl.load(grad_ptr + k * grad_row_stride + 0, mask=mask, other=0.0)
     g1_k = tl.load(grad_ptr + k * grad_row_stride + 1, mask=mask, other=0.0)
     g0 = tl.sum(g0_k, axis=0)
@@ -133,8 +176,19 @@ def _refit_kernel(
     step_w *= total_n / (total_n + DAMPING)
     # Mask out NaNs and steps that would drive the slope negative.
     step_w = tl.where((step_w == step_w) & (w + step_w >= 0.0), step_w, 0.0)
-    # Update the shared slope.
-    new_w = w + step_w
+    # Clip the step's magnitude before applying it.
+    step_w = tl.minimum(tl.maximum(step_w, -MAX_STEP_SLOPE), MAX_STEP_SLOPE)
+    updated_w = w + step_w
+
+    # Circuit breaker for the shared slope: if its raw aggregate
+    # information has sat near-zero for STUCK_LIMIT consecutive refits,
+    # reset it to the cold-start default instead of nudging it further.
+    prev_slope_stuck = tl.load(slope_stuck_ptr)
+    slope_is_stuck = raw_a < STUCK_THRESHOLD
+    new_slope_stuck = tl.where(slope_is_stuck, prev_slope_stuck + 1.0, 0.0)
+    slope_should_reset = new_slope_stuck >= STUCK_LIMIT
+    new_w = tl.where(slope_should_reset, INIT_SLOPE, updated_w)
+    tl.store(slope_stuck_ptr, tl.where(slope_should_reset, 0.0, new_slope_stuck))
 
     # Solve for the per-position intercept deltas, Δβₖ, in the same system.
     step_bias = (g1_k - b_k * step_w) / c_k
@@ -142,8 +196,22 @@ def _refit_kernel(
     step_bias *= n / (n + DAMPING)
     # Mask out NaNs.
     step_bias = tl.where(step_bias == step_bias, step_bias, 0.0)
-    # Update the per-position intercepts.
-    new_bias = bias + step_bias
+    # Same per-position clip, before applying.
+    step_bias = tl.minimum(tl.maximum(step_bias, -MAX_STEP_BIAS), MAX_STEP_BIAS)
+    updated_bias = bias + step_bias
+
+    # Circuit breaker per position: same idea as the slope above, but
+    # keyed on this position's own raw (pre-floor) Fisher information.
+    prev_pos_stuck = tl.load(pos_stuck_ptr + k, mask=mask, other=0.0)
+    pos_is_stuck = raw_c_k < STUCK_THRESHOLD
+    new_pos_stuck = tl.where(pos_is_stuck, prev_pos_stuck + 1.0, 0.0)
+    pos_should_reset = new_pos_stuck >= STUCK_LIMIT
+    new_bias = tl.where(pos_should_reset, INIT_BIAS, updated_bias)
+    tl.store(
+        pos_stuck_ptr + k,
+        tl.where(pos_should_reset, 0.0, new_pos_stuck),
+        mask=mask,
+    )
 
     tl.store(slope_ptr, new_w)
     tl.store(intercepts_ptr + k, new_bias, mask=mask)
@@ -431,6 +499,12 @@ class OnlineAcceptanceEstimator:
         self.counts = torch.zeros(
             num_speculative_steps, dtype=torch.float32, device=device
         )
+        # Consecutive-stuck-refit counters for the circuit breaker: one
+        # scalar for the shared slope, one per position. See _STUCK_LIMIT.
+        self.slope_stuck = torch.zeros(1, dtype=torch.float32, device=device)
+        self.pos_stuck = torch.zeros(
+            num_speculative_steps, dtype=torch.float32, device=device
+        )
 
     def step(
         self,
@@ -484,9 +558,18 @@ class OnlineAcceptanceEstimator:
             self.grad,
             self.grad.stride(0),
             self.counts,
+            self.slope_stuck,
+            self.pos_stuck,
             NUM_SPECULATIVE_STEPS=self.num_speculative_steps,
             L2=self.L2,
             DAMPING=self.DAMPING_OBSERVATIONS,
+            C_FLOOR=_C_FLOOR,
+            MAX_STEP_SLOPE=_MAX_STEP_SLOPE,
+            MAX_STEP_BIAS=_MAX_STEP_BIAS,
+            STUCK_THRESHOLD=_STUCK_THRESHOLD,
+            STUCK_LIMIT=_STUCK_LIMIT,
+            INIT_SLOPE=_INIT_SLOPE,
+            INIT_BIAS=_INIT_BIAS,
             BLOCK=triton.next_power_of_2(self.num_speculative_steps),
         )
 

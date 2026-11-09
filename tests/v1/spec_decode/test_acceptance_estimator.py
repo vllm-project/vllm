@@ -14,7 +14,11 @@ import torch
 
 from vllm.platforms import current_platform
 from vllm.v1.worker.gpu.spec_decode.acceptance_estimator import (
+    _INIT_BIAS,
+    _INIT_SLOPE,
     _MAX_LOG_ODDS,
+    _MAX_STEP_BIAS,
+    _STUCK_LIMIT,
     OnlineAcceptanceEstimator,
     _accumulate_kernel,
     _refit_kernel,
@@ -295,6 +299,153 @@ def test_step_damping_scales_with_the_evidence():
 
     # A round with no observations at all must leave the coefficients alone.
     assert refit_with(0.0) == (0.0, 0.0)
+
+
+def _force_refit(
+    estimator: OnlineAcceptanceEstimator,
+    device,
+    *,
+    stuck_position: int | None,
+) -> None:
+    """Drive one refit round. Every position gets ordinary, well-conditioned
+    statistics (real samples, a real gradient, non-zero own information), so
+    the shared slope's aggregate stays healthy throughout.
+
+    If `stuck_position` is given, that one position's own raw Fisher
+    information (`info[:, 2]`, i.e. raw_c_k) is left at zero while it still
+    carries a real gradient and a real sample count -- separation's
+    signature: the position disagrees with its own prediction on genuine
+    data, but the IRLS weight that should register the disagreement
+    collapses to nothing.
+    """
+    num_steps = estimator.num_speculative_steps
+    estimator.info[:, 0] = 5.0
+    estimator.info[:, 1] = 0.5
+    estimator.info[:, 2] = 5.0
+    estimator.grad[:, 0] = 1.0
+    estimator.grad[:, 1] = 1.0
+    estimator.counts[:] = 50.0
+    if stuck_position is not None:
+        assert 0 <= stuck_position < num_steps
+        estimator.info[stuck_position, 2] = 0.0
+        estimator.grad[stuck_position, 1] = 5.0
+    estimator._steps_since_refit = estimator.REFIT_INTERVAL - 1
+    empty = torch.zeros(0, dtype=torch.int32, device=device)
+    estimator.step(empty, empty, empty)
+
+
+def test_circuit_breaker_resets_a_stuck_position_after_the_limit():
+    """A position whose own raw Fisher information stays near zero, refit
+    after refit, despite a real sample count and a real gradient every
+    time, must reset to its cold-start default on the STUCK_LIMIT-th such
+    refit in a row -- and only then, not on an earlier one.
+    """
+    device = current_platform.device_type
+    estimator = OnlineAcceptanceEstimator(MAX_NUM_REQS, NUM_STEPS, device)
+    estimator.REFIT_INTERVAL = 1
+    stuck = 1
+
+    for i in range(int(_STUCK_LIMIT) - 1):
+        _force_refit(estimator, device, stuck_position=stuck)
+        assert estimator.intercepts[stuck].item() != pytest.approx(_INIT_BIAS), (
+            f"position {stuck} was reset on refit {i + 1}, "
+            f"before STUCK_LIMIT={_STUCK_LIMIT} was reached"
+        )
+        assert estimator.pos_stuck[stuck].item() == pytest.approx(i + 1)
+
+    _force_refit(estimator, device, stuck_position=stuck)
+    assert estimator.intercepts[stuck].item() == pytest.approx(_INIT_BIAS)
+    assert estimator.pos_stuck[stuck].item() == 0.0
+    # Every other position kept taking ordinary steps and was never touched
+    # by the breaker.
+    for k in range(NUM_STEPS):
+        if k != stuck:
+            assert estimator.pos_stuck[k].item() == 0.0
+
+
+def test_circuit_breaker_self_clears_before_the_limit():
+    """A position stuck for fewer than STUCK_LIMIT consecutive refits, that
+    then sees real information again, must not be reset -- the counter
+    clears instead of carrying over into the next stuck streak.
+    """
+    device = current_platform.device_type
+    estimator = OnlineAcceptanceEstimator(MAX_NUM_REQS, NUM_STEPS, device)
+    estimator.REFIT_INTERVAL = 1
+    stuck = 2
+
+    for _ in range(int(_STUCK_LIMIT) - 1):
+        _force_refit(estimator, device, stuck_position=stuck)
+    assert estimator.pos_stuck[stuck].item() == pytest.approx(_STUCK_LIMIT - 1)
+
+    _force_refit(estimator, device, stuck_position=None)  # a healthy refit
+    assert estimator.pos_stuck[stuck].item() == 0.0
+
+    # The streak above must not count toward this one: STUCK_LIMIT - 1 more
+    # stuck refits should again fall just short of a reset.
+    for _ in range(int(_STUCK_LIMIT) - 1):
+        _force_refit(estimator, device, stuck_position=stuck)
+    assert estimator.intercepts[stuck].item() != pytest.approx(_INIT_BIAS), (
+        "stuck_count carried over across the intervening healthy refit"
+    )
+
+
+def test_circuit_breaker_resets_the_shared_slope():
+    """The shared slope has its own breaker, keyed on the aggregate
+    information a = sum(a_k) across every position, not on any single
+    position's c_k. If every position's a_k stays near zero for
+    STUCK_LIMIT consecutive refits, the slope resets to its cold-start
+    default, independently of what the per-position breaker is doing.
+    """
+    device = current_platform.device_type
+    estimator = OnlineAcceptanceEstimator(MAX_NUM_REQS, NUM_STEPS, device)
+    estimator.REFIT_INTERVAL = 1
+    empty = torch.zeros(0, dtype=torch.int32, device=device)
+
+    def starve_the_slope():
+        estimator.info[:, 0] = 0.0  # a_k: starves the shared aggregate `a`
+        estimator.info[:, 1] = 0.0
+        estimator.info[:, 2] = 5.0  # positions themselves stay healthy
+        estimator.grad[:, 0] = 1.0
+        estimator.grad[:, 1] = 1.0
+        estimator.counts[:] = 50.0
+        estimator._steps_since_refit = estimator.REFIT_INTERVAL - 1
+        estimator.step(empty, empty, empty)
+
+    for _ in range(int(_STUCK_LIMIT) - 1):
+        starve_the_slope()
+    assert estimator.slope.item() != pytest.approx(_INIT_SLOPE)
+
+    starve_the_slope()
+    assert estimator.slope.item() == pytest.approx(_INIT_SLOPE)
+    assert estimator.slope_stuck.item() == 0.0
+
+
+def test_step_clip_bounds_a_single_refit_at_near_zero_information():
+    """Before the circuit breaker's reset can ever trigger, the floor and
+    clip must already bound a single refit's step on their own -- this is
+    the safety net the breaker sits on top of, not a substitute for it. A
+    position with near-zero information but a very large real gradient is
+    exactly what an unbounded Newton step divides into a huge jump.
+    """
+    device = current_platform.device_type
+    estimator = OnlineAcceptanceEstimator(MAX_NUM_REQS, NUM_STEPS, device)
+    estimator.REFIT_INTERVAL = 1
+    position = 0
+    estimator.info[:, 0] = 5.0
+    estimator.info[:, 1] = 0.0
+    estimator.info[:, 2] = 5.0
+    estimator.info[position, 2] = 0.0
+    estimator.counts[:] = 50.0
+    estimator.grad[:, 1] = 1e6
+    estimator._steps_since_refit = estimator.REFIT_INTERVAL - 1
+    empty = torch.zeros(0, dtype=torch.int32, device=device)
+    estimator.step(empty, empty, empty)
+
+    step = (estimator.intercepts[position] - _INIT_BIAS).abs().item()
+    assert step <= _MAX_STEP_BIAS + 1e-3, (
+        f"a single refit moved the intercept by {step}, past "
+        f"MAX_STEP_BIAS={_MAX_STEP_BIAS}"
+    )
 
 
 @pytest.mark.parametrize("complement_mass", [1e-3, 1e-6, 1e-12])
