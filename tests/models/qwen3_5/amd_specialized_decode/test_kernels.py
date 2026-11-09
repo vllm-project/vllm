@@ -415,6 +415,9 @@ def _layer_worker(
     w_o6_ref = round_e2m3(_randn(gr, h, ck, scale=0.02))
     w_o6, w_o6s = fp6_pack(w_o6_ref)
     ln_w = _randn(gc, h, scale=0.2)
+    # rm_pack folds the router into the o_proj values that the block
+    # multiplies.
+    w_rm = blocks.rm_pack(mw["w_gate"], ln_w, w_o6_ref, rank)
 
     def agree(t, what):
         outs = [torch.empty_like(t) for _ in range(tp_size)]
@@ -427,7 +430,8 @@ def _layer_worker(
         # (oq, shuffled, og, o6, rm): out_proj on the ASM / Triton FP4 GEMM
         # and the bf16 o_proj with its output gate; with the MXFP6
         # projections, up to Q6_MAX rows, the MXFP6 o_proj with its gate and
-        # out_proj without one
+        # out_proj without one, and up to RM_MAX rows both again with the
+        # router logits through them (rm)
         variants = [
             (True, True, False, False, False),
             (True, False, False, False, False),
@@ -436,6 +440,9 @@ def _layer_worker(
         if s <= L.Q6_MAX:
             variants += [(False, True, True, True, False)]
             variants += [(False, True, False, True, False)]
+        if s <= blocks.RM_MAX:
+            variants += [(False, True, True, True, True)]
+            variants += [(False, True, False, True, True)]
         for slot, (oq, shuffled, og, o6, rm) in enumerate(variants):
             what = ("layer", oq, shuffled, og, o6, rm, s)
             key = blocks.LayerBuild(
@@ -466,6 +473,7 @@ def _layer_worker(
                 residual=residual,
                 w_o=w_l,
                 w_os=ws_l,
+                w_rm=w_rm if rm else None,
                 ln_w=ln_w,
                 out=out,
                 res_out=res_out,
@@ -478,12 +486,12 @@ def _layer_worker(
             torch.accelerator.synchronize()
             agree(out, what)
             agree(res_out, what)
+            gated = core
+            if gate is not None:
+                gated = (core.float() * torch.sigmoid(gate.float())).to(bf)
             if oq:
                 part = F.linear(_mxfp4_qdq(core, shuffled).to(bf), ref_w)
             else:
-                gated = core
-                if gate is not None:
-                    gated = (core.float() * torch.sigmoid(gate.float())).to(bf)
                 part = F.linear(gated, w_o6_ref if key.o6 else w_o)
             o_sum = _all_reduce_fp32(part)
             x_ref, res_ref = _gemma_norm(o_sum, residual, ln_w)
@@ -495,7 +503,19 @@ def _layer_worker(
             ar = scratch[xo : xo + s * h * 2].view(bf).view(s, h)
             x, res_got = _gemma_norm(ar, residual, ln_w)
             assert torch.equal(res_got, res_out), (what, "residual out")
-            ids = _check_route(scratch, scr["route"], x.clone(), mw)
+            rm_logits = None
+            if rm:
+                # rm's logits as the block computes them: this rank's w_rm
+                # times its core rows and its slice of the residual in fp32,
+                # summed over the ranks, times the norm's rstd, in bf16.
+                v = ar.float() + residual.float()
+                rstd = torch.rsqrt(v.pow(2).mean(-1, keepdim=True) + 1e-6)
+                piece = slice(rank * blocks.RM_K, (rank + 1) * blocks.RM_K)
+                rows = torch.cat([gated, residual[:, piece]], dim=1).float()
+                part_rm = rows @ w_rm.float().T
+                dist.all_reduce(part_rm)
+                rm_logits = (part_rm * rstd).to(bf)
+            ids = _check_route(scratch, scr["route"], x.clone(), mw, rm_logits)
             emu = _moe_emulation(x.clone(), mw, ids)
             assert _cos(out, emu) > COS_MIN, (what, _cos(out, emu))
             exact = _moe_exact(x.clone(), mw, ids)

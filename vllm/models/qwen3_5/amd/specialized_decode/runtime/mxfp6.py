@@ -202,10 +202,42 @@ def projections(layer) -> list:
     return out
 
 
+def rm_weight(mlp) -> torch.Tensor | None:
+    """The layer block's ``rm`` router weight that ``prepare`` made for a
+    layer's MoE block, None if it has none."""
+    return getattr(mlp, "specialized_decode_rm", None)
+
+
 def fp6_copy(linear) -> tuple[torch.Tensor, torch.Tensor] | None:
     """The MXFP6 copy (weight bytes, scale bytes) that ``prepare`` packed for
     ``linear``, None if it has none."""
     return getattr(linear, "specialized_decode_fp6", None)
+
+
+@torch.no_grad()
+def make_rm(model) -> None:
+    """Makes ``specialized_decode_rm``, the router weight of the layer
+    block's ``rm`` (``blocks.rm_pack``), for every layer from the values
+    that the layer block multiplies: the MXFP6 values of out_proj or o_proj.
+    round_e2m3 leaves the values that ``round_projections`` already rounded
+    unchanged."""
+    from vllm.distributed import get_tensor_model_parallel_rank
+    from vllm.models.qwen3_5.amd.specialized_decode.mono.blocks import rm_pack
+    from vllm.models.qwen3_5.amd.specialized_decode.runtime.guards import o_proj
+
+    rank = get_tensor_model_parallel_rank()
+    for layer in model.layers:
+        layer.mlp.specialized_decode_rm = rm_pack(
+            layer.mlp.gate.weight,
+            layer.post_attention_layernorm.weight,
+            round_e2m3(o_proj(layer).weight.data),
+            rank,
+        )
+    if rank == 0:
+        logger.info(
+            "Qwen3.8 specialized decode: made the rm router weights of %d layers",
+            len(model.layers),
+        )
 
 
 @torch.no_grad()
@@ -236,6 +268,7 @@ def prepare(model, rows: int = 1024) -> None:
             lin.specialized_decode_fp6 = fp6
             count += 1
             nbytes += fp6[0].numel() + fp6[1].numel()
+    make_rm(model)
     if get_tensor_model_parallel_rank() == 0:
         logger.info(
             "Qwen3.8 specialized decode: packed MXFP6 copies of %d projections, "

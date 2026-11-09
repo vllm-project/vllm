@@ -23,7 +23,10 @@ from vllm.models.qwen3_5.amd.specialized_decode.runtime.guards import (
     o_proj,
     routed_experts,
 )
-from vllm.models.qwen3_5.amd.specialized_decode.runtime.mxfp6 import fp6_copy
+from vllm.models.qwen3_5.amd.specialized_decode.runtime.mxfp6 import (
+    fp6_copy,
+    rm_weight,
+)
 from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
@@ -139,6 +142,7 @@ class Launcher:
             residual=residual,
             w_o=w_o,
             w_os=w_os,
+            w_rm=rm_weight(mlp) if key.rm else None,
             ln_w=layer.post_attention_layernorm.weight,
             w_gate=mlp.gate.weight,
             w_sg=mlp.shared_expert_gate.weight,
@@ -242,13 +246,19 @@ class Launcher:
 
     def layer_key(self, layer, s: int) -> blocks.LayerBuild:
         shuffled = mxfp4_shuffled(o_proj(layer))
+        oq = shuffled is not None
         return blocks.LayerBuild(
             tokens=s,
             eps=layer.post_attention_layernorm.variance_epsilon,
-            oq=shuffled is not None,
+            oq=oq,
             og=layer.layer_type != "linear_attention",
             shuffled=shuffled is not False,
             o6=fp6_copy(o_proj(layer)) is not None,
+            # rm needs the layer's rm weight, which is made from the MXFP6
+            # o_proj values, so an MXFP4 o_proj runs without it. From 6 rows
+            # the router tasks after the norm are faster (the layer stage
+            # benchmark).
+            rm=not oq and s <= blocks.RM_MAX and rm_weight(layer.mlp) is not None,
         )
 
 

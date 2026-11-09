@@ -287,10 +287,16 @@ def _route_and_shared(x, mw, ids=None):
     return wts, ids
 
 
-def _check_route(scratch, region, x, mw):
+def _check_route(scratch, region, x, mw, rm_logits=None):
     """The kernel's ROUTE: each token's picks a top-10 of the bf16 logits up
     to ties (the kernel's logit sums round to bf16 in another order, and equal
     keys go to the lower expert), their weights the renormalized softmax.
+    With ``rm`` the kernel's logits are ``rm_logits``. They are other fp32
+    sums than the bf16 GEMM's, so a logit can round to the next bf16 value.
+    At the test's top logits that step can move a weight by more than the
+    tolerance below. So the picks are checked against the router's logits,
+    where the slack allows two such steps, and the weights against the
+    softmax of ``rm_logits``.
     Returns the picks, so the numerics compare on the same experts."""
     from vllm.models.qwen3_5.amd.specialized_decode.mono.layout import TOPK
 
@@ -304,6 +310,11 @@ def _check_route(scratch, region, x, mw):
     slack = 2 * 2.0**-7 * tenth.abs()
     assert (logits.gather(-1, ids) >= tenth - slack).all(), "picks not a top-10"
     assert all(len(set(r.tolist())) == TOPK for r in ids), "repeated pick"
+    if rm_logits is not None:
+        want = torch.softmax(rm_logits.float(), dim=-1).gather(-1, ids)
+        want = want / want.sum(-1, keepdim=True)
+        torch.testing.assert_close(wts, want, rtol=1e-2, atol=1e-3)
+        return ids
     want = _route_and_shared(x, mw, ids)[0][:, :TOPK]
     # a renormalized weight moves by its logit's rounding minus the picks'
     # weighted mean of theirs: up to two bf16 ulps of the largest pick
