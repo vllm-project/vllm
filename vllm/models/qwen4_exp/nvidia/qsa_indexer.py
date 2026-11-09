@@ -90,9 +90,9 @@ def _supports_fused_pre_indexer(
 class QSAIndexer(nn.Module):
     """QSA projection weights, indexer caches, and paged, weight-free selection.
 
-    ``prefix`` must be the checkpoint's indexer prefix, normally
-    ``model.layers.N.self_attn.indexer``.  Consequently the trainable names are
-    ``index_qk_proj``, ``q_layernorm`` and ``k_layernorm`` under that prefix.
+    `prefix` must be the checkpoint's indexer prefix, normally
+    `model.layers.N.self_attn.indexer`.  Consequently the trainable names are
+    `index_qk_proj`, `q_layernorm` and `k_layernorm` under that prefix.
     """
 
     def __init__(
@@ -223,15 +223,15 @@ class QSAIndexer(nn.Module):
         """Update indexer caches and select token indices from pre-projected Q/K.
 
         Returns the packed buffer of shape [num_tokens, output_width + 1]:
-        the leading ``output_width`` columns are ``-1``-padded
+        the leading `output_width` columns are `-1`-padded
         request-relative token indices, and the trailing column is the row's
         valid-entry count (the attention kernel's loop bound, never a token
         index).
 
-        With ``attn.use_fused_qsa_prepare``, the same launch also writes
-        ``attn``'s K/V into ``main_kv_cache`` at ``slot_mapping`` and prepares
-        its Q and gate from ``qkv``, returned as the second element (None
-        otherwise). ``qkv``, ``slot_mapping`` and ``main_kv_cache`` are only
+        With `attn.use_fused_qsa_prepare`, the same launch also writes
+        `attn`'s K/V into `main_kv_cache` at `slot_mapping` and prepares
+        its Q and gate from `qkv`, returned as the second element (None
+        otherwise). `qkv`, `slot_mapping` and `main_kv_cache` are only
         read in that mode.
         """
         metadata = self._metadata()

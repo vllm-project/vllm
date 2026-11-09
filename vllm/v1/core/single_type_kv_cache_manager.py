@@ -87,7 +87,7 @@ class SingleTypeKVCacheManager(ABC):
             enable_caching: Whether prefix caching is enabled.
             kv_cache_group_id: The id of the kv cache group of this manager.
             scheduler_block_size: The scheduling granularity (LCM of all group
-                block sizes); a multiple of this manager's ``block_size``.
+                block sizes); a multiple of this manager's `block_size`.
             dcp_world_size: Decode context parallel world size.
             pcp_world_size: Prefill context parallel world size.
             needs_kv_cache_zeroing: Whether worker-side KV cache zeroing needs
@@ -438,7 +438,7 @@ class SingleTypeKVCacheManager(ABC):
     ) -> list[tuple[str, int, KVCacheBlock, int]]:
         """Drain producer boundary-state hand-offs.
 
-        Entries are ``(req_id, group_id, block, boundary_tokens)``.
+        Entries are `(req_id, group_id, block, boundary_tokens)`.
 
         Only mamba "align" populates this. The blocks are not kept alive by
         the request block table for the whole request, so a caller that reads
@@ -467,8 +467,8 @@ class SingleTypeKVCacheManager(ABC):
         """Redirect a partial prefix-cache hit to a private CoW block.
 
         Both copy endpoints stay retained until the copy has run on the worker,
-        so a same-step free cannot recycle them: ``source_block`` keeps its
-        hit-ref, ``cow_block`` takes an extra ref beyond the one handed to the
+        so a same-step free cannot recycle them: `source_block` keeps its
+        hit-ref, `cow_block` takes an extra ref beyond the one handed to the
         request.
         """
         req_blocks = self.req_to_blocks[request_id]
@@ -493,12 +493,12 @@ class SingleTypeKVCacheManager(ABC):
             request: The request.
             num_tokens: The total number of tokens that need to be cached
                 (including tokens that are already cached).
-            retention_interval: Sparse local-checkpoint granularity. ``None``
-                keeps dense checkpointing; ``0`` keeps only the latest replay
-                boundary; a positive multiple of ``scheduler_block_size`` keeps
+            retention_interval: Sparse local-checkpoint granularity. `None`
+                keeps dense checkpointing; `0` keeps only the latest replay
+                boundary; a positive multiple of `scheduler_block_size` keeps
                 a tail once per that-sized segment. Only SWA acts on it.
             replay_boundaries: Positions a later request replaying this prompt
-                can resume at, from ``replay_boundaries``.
+                can resume at, from `replay_boundaries`.
 
         """
         if not self.kv_cache_spec.prefix_cacheable:
@@ -559,15 +559,15 @@ class SingleTypeKVCacheManager(ABC):
         dcp_world_size: int = 1,
         final_segment_end_block: int | None = None,
     ) -> list[bool] | None:
-        """Per-block mask for ``cache_full_blocks``. ``None`` means cache
+        """Per-block mask for `cache_full_blocks`. `None` means cache
         every (non-null) block — the default for full attention.
 
         Subclasses with sparse hit semantics (SWA / Mamba) override this to skip
         blocks that can never serve a hit at any alignment-aligned prefix length.
-        ``reachable_boundaries`` are token positions whose reachable tail must be
+        `reachable_boundaries` are token positions whose reachable tail must be
         retained; the base (dense) policy ignores them.
-        ``final_segment_end_block`` is the exclusive end of the request's final
-        segment. It may be later than ``end_block`` while prefill is still in
+        `final_segment_end_block` is the exclusive end of the request's final
+        segment. It may be later than `end_block` while prefill is still in
         progress. Non-EAGLE sparse managers may keep its reachable tail. The
         base policy already keeps every block, so it ignores this value.
         """
@@ -663,7 +663,7 @@ class SingleTypeKVCacheManager(ABC):
         first_block: int,
         last_block: int,
     ) -> None:
-        """Free blocks in ``[first_block, last_block)`` and replace with null_block.
+        """Free blocks in `[first_block, last_block)` and replace with null_block.
 
         Iterates backward so newly-evictable tail blocks are reached even after
         earlier blocks in the range were nulled in a prior call.
@@ -905,7 +905,7 @@ class FullAttentionManager(SingleTypeKVCacheManager):
 class RSWAManager(FullAttentionManager):
     """KV cache manager for Reference Sliding Window Attention (R-SWA).
 
-    When ``num_prompt_tokens`` is supplied to ``remove_skipped_blocks``, frees
+    When `num_prompt_tokens` is supplied to `remove_skipped_blocks`, frees
     gap blocks between the prefill tail and the current decode window.  This
     bounds per-request KV memory at O(prefix_len + rswa_window) instead of
     growing linearly with decode length.
@@ -1169,7 +1169,7 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         attention computation since they are outside the sliding window.
         Thus, get_num_skipped_tokens(7) == 4.
 
-        The trailing edge of the window is extended by ``extra_retained_tokens``
+        The trailing edge of the window is extended by `extra_retained_tokens`
         so that those extra trailing tokens' blocks are retained (but not
         attended). This is needed for multi-module spec decoding which can
         re-prefill the last num_spec_prefill_tokens - 1 tokens from the end
@@ -1565,13 +1565,13 @@ class MambaManager(SingleTypeKVCacheManager):
     ) -> list[bool] | None:
         """Sparse Mamba state-snapshot retention.
 
-        ``retention_interval``:
+        `retention_interval`:
 
-          ``None`` -> dense (cache every block; default, unchanged behavior)
-          ``0``    -> keep only the ``reachable_boundaries`` states
-          ``> 0``  -> keep one state per ``retention_interval``-sized segment
+          `None` -> dense (cache every block; default, unchanged behavior)
+          `0`    -> keep only the `reachable_boundaries` states
+          `> 0`  -> keep one state per `retention_interval`-sized segment
 
-        ``reachable_boundaries`` are proven reuse points (the replay boundary and
+        `reachable_boundaries` are proven reuse points (the replay boundary and
         any cross-request shared-prefix junction, Marconi-style APC); their
         boundary state is always kept so sparse retention does not defeat reuse.
         """
@@ -2621,8 +2621,8 @@ class HiSparseResidentManager(_HiSparseAuxiliaryManager):
         return None if block.is_null else block
 
     def get_residency_row(self, request_id: str, start: int = 0) -> list[KVCacheBlock]:
-        """The request's row from ``start`` with residency changes applied. Unlike
-        ``get_resident_page``, host-only pages stay as the null block."""
+        """The request's row from `start` with residency changes applied. Unlike
+        `get_resident_page`, host-only pages stay as the null block."""
         blocks = self.req_to_blocks.get(request_id, [])[start:]
         changes = self.residency_changes.get(request_id)
         if not changes:

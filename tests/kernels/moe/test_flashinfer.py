@@ -822,7 +822,7 @@ def test_trtllm_fp8_block_moe_deferred_finalize(
     m: int, block_shape: list[int], transposed: bool, workspace_init
 ):
     """TRTLLM-Gen block-FP8 and MXFP8 modular experts can leave the top-k
-    finalize to the caller. For fp8-block, ``transposed`` toggles the oracle's
+    finalize to the caller. For fp8-block, `transposed` toggles the oracle's
     is_scale_transposed column-major activation-scale layout."""
     if block_shape != [128, 128] and transposed:
         pytest.skip("column-major scales apply to fp8 [128, 128] block only")

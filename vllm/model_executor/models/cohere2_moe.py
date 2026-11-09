@@ -411,8 +411,8 @@ def _make_dual_stream(vllm_config: VllmConfig) -> torch.cuda.Stream | None:
 class _DualStreamState:
     """Dual-stream state of one decoder layer.
 
-    ``stream`` is the model's single side stream, shared by every layer; the
-    events and ``join_pending`` are per layer, since a layer has at most one
+    `stream` is the model's single side stream, shared by every layer; the
+    events and `join_pending` are per layer, since a layer has at most one
     fork in flight. DBO would need one state per ubatch."""
 
     stream: torch.cuda.Stream

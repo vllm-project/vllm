@@ -50,8 +50,8 @@ footprint. Host-pool metrics are listed in
 
 ## QSA models
 
-For Qwen4Exp QSA models, configuring `HiSparseConnector` enables main K/V
-offloading and selects Model Runner V2:
+For Qwen4Exp QSA models, configure `HiSparseConnector` to offload the main K/V
+cache.
 
 ```bash
 vllm serve QSA_MODEL \
