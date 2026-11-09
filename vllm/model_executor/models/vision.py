@@ -114,9 +114,9 @@ def get_vit_attn_backend(
 
 
 def get_multimodal_config() -> MultiModalConfig | None:
-    """Return the current ``MultiModalConfig``, or ``None`` when no engine
+    """Return the current `MultiModalConfig`, or `None` when no engine
     config context is active (e.g., during unit tests) or when the current
-    ``model_config`` does not carry a ``multimodal_config`` (e.g., minimal
+    `model_config` does not carry a `multimodal_config` (e.g., minimal
     stubs used in tests)."""
     vllm_config = get_current_vllm_config_or_none()
     if vllm_config is None or vllm_config.model_config is None:
@@ -126,10 +126,10 @@ def get_multimodal_config() -> MultiModalConfig | None:
 
 def get_fp8_padded_hidden_size(num_heads: int, head_dim: int) -> int | None:
     """Return the padded hidden size for FP8 ViT encoder attention, or
-    ``None`` when FP8 is not enabled.
+    `None` when FP8 is not enabled.
 
-    cuDNN FP8 prefill attention requires ``head_dim`` to be a multiple of
-    16. For non-aligned ``head_dim`` (e.g. 72), Q/K/V are padded to the
+    cuDNN FP8 prefill attention requires `head_dim` to be a multiple of
+    16. For non-aligned `head_dim` (e.g. 72), Q/K/V are padded to the
     nearest multiple of 16.
     """
     mm_cfg = get_multimodal_config()
@@ -482,7 +482,12 @@ def run_dp_sharded_mrope_vision_model(
     # to work
     max_len_per_rank = max(grouped_pixel_values_len) // embed_dim_reduction_factor
     local_grid_thw_list = [grid_thw_list[i] for i in image_idxs_local]
-    embed_dtype = next(vision_model.parameters()).dtype
+    # Ranks without images all-gather placeholders of this dtype, so it must
+    # match the output dtype of ranks with images; the first parameter's dtype
+    # can differ (e.g. an fp32 patch embedding in a bf16 tower).
+    embed_dtype = (
+        getattr(vision_model, "dtype", None) or next(vision_model.parameters()).dtype
+    )
 
     # Run the vision model on the local pixel_values_local
     if rope_type == "rope_2d":

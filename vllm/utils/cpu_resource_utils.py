@@ -115,6 +115,16 @@ def get_cgroup_memory_usage() -> int | None:
     return None
 
 
+def get_available_memory() -> int:
+    """Return available host memory, honoring cgroup limits."""
+    available = psutil.virtual_memory().available
+    cgroup_limit = get_cgroup_memory_limit()
+    if cgroup_limit is None:
+        return available
+    cgroup_usage = get_cgroup_memory_usage()
+    return min(available, max(0, cgroup_limit - (cgroup_usage or 0)))
+
+
 def check_cgroup_memory_available(
     required_bytes: int,
     allocation_name: str,
@@ -249,18 +259,26 @@ def get_allowed_cpu_list() -> list[LogicalCPUInfo]:
     return cpu_list
 
 
-def get_visible_memory_node() -> list[int]:
+def get_visible_memory_node(assigned_node_ids: list[int] | None = None) -> list[int]:
+    """Memory nodes visible to this process.
+
+    assigned_node_ids is the per-DP-rank list of NUMA node ids from
+    parallel_config.assigned_physical_gpu_ids. It takes priority over the
+    CPU_VISIBLE_MEMORY_NODES env var, which still applies when it is None.
+    """
     if sys.platform == "darwin":
         return [0]
 
     allowed_memory_node_list = get_memory_affinity()
 
+    if "VLLM_CPU_SIM_MULTI_NUMA" in os.environ:
+        return allowed_memory_node_list
+
+    if assigned_node_ids is not None:
+        return [node for node in assigned_node_ids if node in allowed_memory_node_list]
+
     env_key = DEVICE_CONTROL_ENV_VAR
-    if (
-        ("VLLM_CPU_SIM_MULTI_NUMA" not in os.environ)
-        and env_key in os.environ
-        and os.environ[env_key] != ""
-    ):
+    if env_key in os.environ and os.environ[env_key] != "":
         visible_nodes = [int(s) for s in os.environ[env_key].split(",")]
         visible_nodes = [
             node for node in visible_nodes if node in allowed_memory_node_list
@@ -268,6 +286,23 @@ def get_visible_memory_node() -> list[int]:
         return visible_nodes
 
     return allowed_memory_node_list
+
+
+def get_worker_memory_nodes(assigned_node_ids: list[int] | None) -> list[int]:
+    """get_visible_memory_node for a CPU worker. Raises a clear error when
+    none of the NUMA nodes assigned to the worker exists on this host."""
+    nodes = get_visible_memory_node(assigned_node_ids)
+    if not nodes:
+        raise ValueError(
+            f"None of the NUMA nodes {assigned_node_ids} assigned to this CPU "
+            f"worker is available; this process can use NUMA nodes "
+            f"{get_memory_affinity()}. Each CPU worker on a host needs its own "
+            "NUMA node, so the data-parallel ranks on this host times "
+            "tensor_parallel_size times pipeline_parallel_size must not exceed "
+            "the host's NUMA nodes. To share NUMA nodes for debugging, set "
+            "VLLM_CPU_SIM_MULTI_NUMA=1 with VLLM_CPU_OMP_THREADS_BIND=auto."
+        )
+    return nodes
 
 
 @cache

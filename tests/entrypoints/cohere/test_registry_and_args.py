@@ -3,12 +3,12 @@
 """Sanity tests for the small registry / CLI-arg / config additions made
 by the Cohere v2 chat API:
 
-* ``vllm/renderers/registry.py``: new ``"cohere"`` renderer entry.
-* ``vllm/tokenizers/registry.py``: new ``"cohere"`` tokenizer entry
+* `vllm/renderers/registry.py`: new `"cohere"` renderer entry.
+* `vllm/tokenizers/registry.py`: new `"cohere"` tokenizer entry
   (aliased to the cached HF tokenizer).
-* ``vllm/entrypoints/openai/cli_args.py``: new
-  ``cohere_is_reasoning_model`` field.
-* ``vllm/config/model.py``: ``"cohere"`` added to ``TokenizerMode``
+* `vllm/entrypoints/common/cli_args.py`: new
+  `cohere_is_reasoning_model` field.
+* `vllm/config/model.py`: `"cohere"` added to `TokenizerMode`
   Literal.
 """
 
@@ -18,7 +18,7 @@ import typing
 import pytest
 
 from vllm.config.model import TokenizerMode
-from vllm.entrypoints.launchers.cli_args import BaseFrontendArgs, make_arg_parser
+from vllm.entrypoints.common.cli_args import BaseFrontendArgs, make_arg_parser
 from vllm.renderers.registry import RENDERER_REGISTRY
 from vllm.tokenizers.registry import TokenizerRegistry
 from vllm.utils.argparse_utils import FlexibleArgumentParser
@@ -56,9 +56,9 @@ class TestTokenizerModeLiteral:
 
 
 class TestCohereCliArg:
-    """Verifies the new ``--cohere-is-reasoning-model`` flag end-to-end
-    through ``make_arg_parser`` — mirrors the pattern used in
-    :mod:`tests.entrypoints.openai.test_cli_args`.
+    """Verifies the new `--cohere-is-reasoning-model` flag end-to-end
+    through `make_arg_parser` — mirrors the pattern used in
+    `tests.entrypoints.openai.test_cli_args`.
     """
 
     def test_default_value_on_dataclass_is_true(self):

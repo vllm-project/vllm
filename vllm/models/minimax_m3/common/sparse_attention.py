@@ -2,15 +2,16 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Main block-sparse GQA attention for MiniMax M3 sparse layers.
 
-The lightning indexer (``indexer.py``) selects the top-k KV blocks (written into
-the shared ``layer.topk_indices_buffer``); this module holds the main attention
+The lightning indexer (`indexer.py`) selects the top-k KV blocks (written into
+the shared `layer.topk_indices_buffer`); this module holds the main attention
 that attends only to those blocks: the paged K/V cache backend, its metadata +
-builder, and the impl that reads the indexer's top-k from that buffer. The Triton
-attend kernel lives here; the SM100 (MSA)
-``build_k2q_csr`` + ``sparse_atten_func`` attend lives in
-``nvidia/sparse_attention_msa.py``.
+builder, and the impl that reads the indexer's top-k from that buffer. The generic
+Triton attend kernel lives in `common/ops`; Hopper uses the query-tiled prefill
+kernel in `nvidia/ops`. The SM100 (MSA)
+`build_k2q_csr` + `sparse_atten_func` attend lives in
+`nvidia/sparse_attention_msa.py`.
 
-``MiniMaxM3SparseBackend`` and ``MiniMaxM3SparseMetadata`` are referenced by the
+`MiniMaxM3SparseBackend` and `MiniMaxM3SparseMetadata` are referenced by the
 attention-backend registry (by dotted path) and by spec-decode, so they must
 keep these names and stay in this module.
 """
@@ -28,12 +29,20 @@ from vllm.logger import init_logger
 from vllm.models.minimax_m3.common.ops.sparse_attn import SPARSE_BLOCK_SIZE
 from vllm.platforms import current_platform
 
-# AMD/ROCm uses the gfx942/gfx950-optimized block-sparse kernels in amd.ops;
+# AMD/ROCm uses the gfx942/gfx950-optimized block-sparse kernels in amd.ops.
+# Hopper uses query-tiled NVIDIA prefill and the common split-K decode kernel;
 # every other platform uses the generic common.ops implementation.
 if current_platform.is_rocm():
     from vllm.models.minimax_m3.amd.ops.sparse_attn import (
         minimax_m3_sparse_attn,
         minimax_m3_sparse_attn_decode,
+    )
+elif current_platform.is_cuda() and current_platform.is_device_capability_family(90):
+    from vllm.models.minimax_m3.common.ops.sparse_attn import (
+        minimax_m3_sparse_attn_decode,
+    )
+    from vllm.models.minimax_m3.nvidia.ops.sparse_prefill import (
+        minimax_m3_sparse_attn,
     )
 else:
     from vllm.models.minimax_m3.common.ops.sparse_attn import (
@@ -74,7 +83,7 @@ def minimax_m3_rebase_slots_to_page16(
 ) -> torch.Tensor:
     """Rebase a token slot mapping onto AITER's page-16 page numbering.
 
-    AITER's KV writer derives the destination page from ``slot // 16`` and
+    AITER's KV writer derives the destination page from `slot // 16` and
     assumes pages are numbered consecutively. When the resolved layout stores
     both K/V sides inside a block, a block spans twice as many pages, so only
     the block component of the slot doubles -- the offset within the page must
@@ -125,7 +134,9 @@ def minimax_m3_use_aiter_sparse_pa(
         raise ValueError(
             "MiniMax M3 AITER sparse paged attention requires "
             f"num_kv_heads == 1 per tensor-parallel rank, got {num_kv_heads}, "
-            "unless the indexer emits the attend's page table."
+            "unless the AITER indexer emits the attend's page table. It is not "
+            "in use here; the 'MiniMax M3 indexer: AITER unavailable' log line "
+            "says why."
         )
     return requested
 
@@ -183,7 +194,7 @@ class MiniMaxM3SparseBackend(AttentionBackend):
 
 @dataclass
 class MiniMaxM3SparsePrefillMetadata:
-    """Per-prefill state; ``cu_seqlens_k``/``total_kv_blocks`` feed the MSA CSR."""
+    """Per-prefill state; `cu_seqlens_k`/`total_kv_blocks` feed the MSA CSR."""
 
     cu_seqlens_q: torch.Tensor  # [num_prefills + 1] int32, rebased to 0
     cu_seqlens_k: torch.Tensor  # [num_prefills + 1] int32, cumulative KV lengths
@@ -203,7 +214,7 @@ class MiniMaxM3SparsePrefillMetadata:
 
 @dataclass
 class MiniMaxM3SparseDecodeMetadata:
-    """Per-decode state (cudagraph-safe). ``decode_query_len`` is the uniform
+    """Per-decode state (cudagraph-safe). `decode_query_len` is the uniform
     per-request query length (1, or 1 + num_speculative_tokens)."""
 
     seq_lens: torch.Tensor  # [num_decodes] int32
@@ -253,7 +264,7 @@ class MiniMaxM3SparseMetadataBuilder(AttentionMetadataBuilder[MiniMaxM3SparseMet
     ) -> None:
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
         self._init_reorder_batch_threshold(1, supports_spec_as_decode=True)
-        # Stable context-length buffer for decode cudagraph replays.
+        # Stable context-length buffer for the prefill metadata.
         self.context_len_buffer = torch.empty(
             vllm_config.scheduler_config.max_num_batched_tokens,
             dtype=torch.int32,
@@ -295,14 +306,13 @@ class MiniMaxM3SparseMetadataBuilder(AttentionMetadataBuilder[MiniMaxM3SparseMet
         assert num_decodes + num_prefills == num_reqs
         assert num_decode_tokens + num_prefill_tokens == num_tokens
 
-        # Decode-first batch: context lengths into the stable cudagraph buffer.
-        context_lens = self.context_len_buffer[:num_reqs]
-        context_lens.copy_(
-            common_attn_metadata.compute_num_computed_tokens(), non_blocking=True
-        )
-
         prefill_metadata: MiniMaxM3SparsePrefillMetadata | None = None
         if num_prefills > 0:
+            # Only prefill reads the context lengths; decode-only steps skip it.
+            context_lens = self.context_len_buffer[:num_reqs]
+            context_lens.copy_(
+                common_attn_metadata.compute_num_computed_tokens(), non_blocking=True
+            )
             seq_lens_cpu = common_attn_metadata.seq_lens_cpu_upper_bound
             assert seq_lens_cpu is not None
             prefill_seq_lens_cpu = seq_lens_cpu[num_decodes:]
@@ -315,10 +325,7 @@ class MiniMaxM3SparseMetadataBuilder(AttentionMetadataBuilder[MiniMaxM3SparseMet
             prefill_cu_seqlens_k = torch.empty(
                 num_prefills + 1, dtype=torch.int32, device=seq_lens.device
             )
-            if current_platform.is_rocm():
-                prefill_cu_seqlens_k[:1].zero_()
-            else:
-                prefill_cu_seqlens_k[0] = 0
+            prefill_cu_seqlens_k[:1].zero_()
             torch.cumsum(prefill_kv_lens, dim=0, out=prefill_cu_seqlens_k[1:])
             prefill_cu_seqlens_q = (
                 query_start_loc[num_decodes:] - num_decode_tokens
@@ -385,10 +392,10 @@ class MiniMaxM3SparseMetadataBuilder(AttentionMetadataBuilder[MiniMaxM3SparseMet
 class MiniMaxM3SparseImpl(AttentionImplBase[MiniMaxM3SparseMetadata]):
     """Abstract base for block-sparse GQA over the indexer-selected blocks.
 
-    Inherits ``AttentionImplBase`` for a custom forward signature (the layer
+    Inherits `AttentionImplBase` for a custom forward signature (the layer
     pre-inserts K/V and runs the indexer, which writes the selected blocks into
-    the shared ``layer.topk_indices_buffer``; the attend reads them back from
-    there). The Triton and MSA subclasses each own a full ``forward`` -- no
+    the shared `layer.topk_indices_buffer`; the attend reads them back from
+    there). The Triton and MSA subclasses each own a full `forward` -- no
     shared forward code.
     """
 
@@ -428,14 +435,15 @@ class MiniMaxM3SparseImpl(AttentionImplBase[MiniMaxM3SparseMetadata]):
         query: torch.Tensor,
         kv_cache: torch.Tensor,
         output: torch.Tensor,
-        *,
-        query_fp8: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Attend the queries to the indexer-selected blocks. Per kernel.
 
+        `query` is E4M3 for impls with `use_cutlass_decode`, else the model
+        dtype.
+
         The indexer has already written the top-k block ids into
-        ``layer.topk_indices_buffer`` (decode at ``[:, :nd]``, prefill at
-        ``[:, nd:num_tokens]``); the attend reads them from there.
+        `layer.topk_indices_buffer` (decode at `[:, :nd]`, prefill at
+        `[:, nd:num_tokens]`); the attend reads them from there.
         """
         raise NotImplementedError
 
@@ -444,7 +452,7 @@ class MiniMaxM3SparseImpl(AttentionImplBase[MiniMaxM3SparseMetadata]):
 
 
 class MiniMaxM3SparseTritonImpl(MiniMaxM3SparseImpl):
-    """Triton block-sparse attend (``minimax_m3_sparse_attn``) + Triton decode."""
+    """Triton block-sparse attend (`minimax_m3_sparse_attn`) + Triton decode."""
 
     def forward(
         self,
@@ -452,8 +460,6 @@ class MiniMaxM3SparseTritonImpl(MiniMaxM3SparseImpl):
         query: torch.Tensor,
         kv_cache: torch.Tensor,
         output: torch.Tensor,
-        *,
-        query_fp8: torch.Tensor | None = None,
     ) -> torch.Tensor:
         attn_metadata = get_forward_context().attn_metadata
         if not isinstance(attn_metadata, dict):
@@ -552,6 +558,17 @@ def select_main_backend_and_impl_cls(
             "MiniMax M3 sparse attention supports only the 'nvfp4' NVFP4 KV "
             f"cache dtype, got {kv_cache_dtype}"
         )
+    if use_nvfp4 and current_platform.is_rocm():
+        from vllm.models.minimax_m3.amd.sparse_attention_nvfp4 import (
+            MiniMaxM3SparseRocmNvfp4Backend,
+            MiniMaxM3SparseRocmNvfp4Impl,
+        )
+
+        logger.info_once(
+            "MiniMax M3 sparse attention selected ROCm NVFP4 (topk_blocks=%s)",
+            topk_blocks,
+        )
+        return MiniMaxM3SparseRocmNvfp4Backend, MiniMaxM3SparseRocmNvfp4Impl
     if use_nvfp4 and (use_aiter_sparse_pa or not use_msa):
         raise ValueError(
             "MiniMax M3 sparse attention supports an NVFP4 KV cache only with "
@@ -579,10 +596,11 @@ def select_main_backend_and_impl_cls(
             MiniMaxM3SparseMSABackend,
             MiniMaxM3SparseMSAImpl,
             MiniMaxM3SparseMSANvfp4Backend,
+            MiniMaxM3SparseMSANvfp4Impl,
         )
 
         if use_nvfp4:
-            return MiniMaxM3SparseMSANvfp4Backend, MiniMaxM3SparseMSAImpl
+            return MiniMaxM3SparseMSANvfp4Backend, MiniMaxM3SparseMSANvfp4Impl
         return MiniMaxM3SparseMSABackend, MiniMaxM3SparseMSAImpl
     return MiniMaxM3SparseBackend, MiniMaxM3SparseTritonImpl
 

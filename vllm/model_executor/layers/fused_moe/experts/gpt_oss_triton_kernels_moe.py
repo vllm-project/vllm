@@ -46,10 +46,11 @@ def _triton_kernel_moe_supports_current_device() -> bool:
     p = current_platform
     if p.is_cuda():
         cap = p.get_device_capability()
-        # Hopper SM90, datacenter Blackwell SM100/103 and consumer Blackwell
-        # SM120/121. SM12x needs the opt-flag constraints applied by
-        # `_swizzle_mxfp4` and `_constrain_sm12x_block_m` to fit its 99KB of
-        # shared memory; it is still ordered after MARLIN by the selector.
+        # Hopper SM90, datacenter Blackwell SM100/103, Jetson Thor SM110 and
+        # consumer Blackwell SM120/121. SM110 and SM12x need the opt-flag
+        # constraints applied by `_swizzle_mxfp4` (SM12x also
+        # `_constrain_sm12x_block_m` to fit its 99KB of shared memory); both
+        # are still ordered after MARLIN by the selector.
         return cap is not None and (9, 0) <= (cap.major, cap.minor) < (13, 0)
     if p.is_rocm():
         from vllm.platforms.rocm import on_gfx1x, on_gfx9
@@ -245,16 +246,16 @@ def _patch_legacy_routing_for_nonpow2_topk() -> None:
     """Monkey-patch the legacy (v3.5.1) triton_kernels routing path to support
     non-power-of-2 top_k (e.g. DeepSeek-V4 top_k=6).
 
-    The bundled ``_routing_compute_indx`` does ``tl.arange(0, N_EXPTS_ACT *
-    BLOCK_M)``, which fails to compile when ``N_EXPTS_ACT`` (top_k) is not a
+    The bundled `_routing_compute_indx` does `tl.arange(0, N_EXPTS_ACT *
+    BLOCK_M)`, which fails to compile when `N_EXPTS_ACT` (top_k) is not a
     power of 2 (6 * 32 = 192). This installs a pow2-safe variant that pads the
-    ``tl.arange`` to the next power of 2, strides by the real per-block size,
+    `tl.arange` to the next power of 2, strides by the real per-block size,
     and masks the padded tail so it neither loads the next block's gates nor
     writes any output. For power-of-2 top_k it is identical to the original.
 
-    A matching ``sort_tokens`` is installed that threads the padded size into
+    A matching `sort_tokens` is installed that threads the padded size into
     the patched kernel. Only needed on the legacy path; the v3.6+ SparseMatrix
-    path is handled by ``_patch_make_bitmatrix_metadata``.
+    path is handled by `_patch_make_bitmatrix_metadata`.
     """
     import triton
     import triton.language as tl
@@ -847,6 +848,20 @@ def triton_kernel_fused_experts(
     return output_tensor
 
 
+def _tk38_routing_data(
+    col_sum: torch.Tensor,
+    order: torch.Tensor,
+    flat_w: torch.Tensor,
+    topk: int,
+) -> tuple["RoutingData", torch.Tensor, torch.Tensor]:
+    """Build 3.8 routing from per-expert counts and the stable expert order."""
+    nrows = order.shape[0]
+    ragged = make_ragged_tensor_metadata(col_sum, nrows)
+    gather_tok = (order // topk).to(torch.int32)
+    routing = RoutingData(ragged, flat_w[order], gather_tok, topk, nrows)
+    return routing, gather_tok, gather_tok
+
+
 def make_routing_data(
     topk_ids: torch.Tensor,
     topk_weights: torch.Tensor,
@@ -854,21 +869,18 @@ def make_routing_data(
 ) -> tuple["RoutingData", torch.Tensor, torch.Tensor]:
     if triton_kernels_version == "3.8":
         _, topk = topk_ids.shape
-        flat_e = topk_ids.reshape(-1)
-        valid = flat_e >= 0
-        flat_e = flat_e.to(torch.int64).clamp(min=0)
-        flat_w = topk_weights.reshape(-1).to(torch.float32) * valid.to(torch.float32)
-        nrows = flat_e.shape[0]
-        order = torch.argsort(flat_e, stable=True)
-        col_sum = torch.zeros(
-            num_local_experts, dtype=torch.int32, device=flat_e.device
+        flat_ids = topk_ids.reshape(-1)
+        # -1 (non-local) slots go to expert 0 with zero weight.
+        keys = flat_ids.clamp(min=0)
+        sorted_keys, order = torch.sort(keys, stable=True)
+        experts = torch.arange(
+            num_local_experts + 1, dtype=keys.dtype, device=keys.device
         )
-        col_sum.scatter_add_(0, flat_e, torch.ones_like(flat_e, dtype=torch.int32))
-        ragged = make_ragged_tensor_metadata(col_sum, nrows)
-        gather_tok = (order // topk).to(torch.int32)
-        gammas = flat_w[order]
-        routing = RoutingData(ragged, gammas, gather_tok, topk, nrows)
-        return routing, gather_tok, gather_tok
+        edges = torch.searchsorted(sorted_keys, experts, out_int32=True)
+        col_sum = edges[1:] - edges[:-1]
+        valid = (flat_ids >= 0).to(torch.float32)
+        flat_w = topk_weights.reshape(-1).to(torch.float32) * valid
+        return _tk38_routing_data(col_sum, order, flat_w, topk)
 
     topk_ids = topk_ids.to(torch.int16)
     topk_weights = topk_weights.to(torch.bfloat16)
@@ -927,17 +939,23 @@ def routing_data_from_sparse_topk(
     sparse_topk,  # SparseMatrix
     n_expts: int,
 ) -> tuple["RoutingData", "GatherIndx", "ScatterIndx"]:
-    """Build routing structures from the ``SparseMatrix`` returned by
-    ``triton_kernels.topk``, reusing its precomputed bitmatrix metadata.
+    """Build routing structures from the `SparseMatrix` returned by
+    `triton_kernels.topk`, reusing its precomputed bitmatrix metadata.
 
-    ``make_routing_data`` re-packs a bitmatrix from the topk ids and
-    constructs a second ``SparseMatrix``, recomputing metadata the topk
+    `make_routing_data` re-packs a bitmatrix from the topk ids and
+    constructs a second `SparseMatrix`, recomputing metadata the topk
     call already produced; when the topk ids are used as-is (no expert-map
     remapping) that work is redundant.
     """
     if triton_kernels_version == "3.8":
-        # 3.8 routing is rebuilt from raw ids; no SparseMatrix reuse.
-        return make_routing_data(sparse_topk.indx, sparse_topk.vals, n_expts)
+        # topk ids have no -1 slots, so the topk metadata matches make_routing_data.
+        mask_metadata = sparse_topk.mask_metadata
+        return _tk38_routing_data(
+            mask_metadata.col_sum,
+            mask_metadata.col_sorted_indx,
+            sparse_topk.vals.reshape(-1).to(torch.float32),
+            sparse_topk.indx.shape[1],
+        )
 
     dispatch_indx = sparse_topk.mask_metadata.row_sorted_indx
     combine_indx = sparse_topk.mask_metadata.col_sorted_indx

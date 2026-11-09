@@ -142,6 +142,7 @@ def _make_builder():
     # SparseMLACommonMetadataBuilder state consumed by its build() method.
     builder.cp_kv_cache_interleave_size = 1
     builder.use_pcp = False
+    builder.use_shardq = False
     builder._prefill_backend = None
 
     def cpu_token_to_req(metadata):
@@ -219,11 +220,11 @@ def _make_mixed_common_metadata():
 
 
 def _patch_build_deps(monkeypatch, events=None):
-    """Stub the aiter kernel, triton helper and CUDA sync so ``build()`` runs
+    """Stub the aiter kernel, triton helper and CUDA sync so `build()` runs
     on CPU."""
 
     def fake_generate_sparse_seqlen_triton(
-        query_lens, seq_lens, cu_query_lens, topk_token, num_tokens, max_query_len
+        seq_lens, cu_query_lens, topk_token, num_tokens, max_query_len
     ):
         return torch.zeros(num_tokens, dtype=torch.int32, device="cpu")
 
@@ -274,6 +275,25 @@ def test_build_populates_mixed_split_fields(monkeypatch):
     assert md.num_decode_tokens == 1
     assert md.prefill_max_seq_len == 0
     assert md.prefill is None
+
+
+def test_build_fills_paged_kv_indptr_tail(monkeypatch):
+    """Rows past num_tokens must read as empty: the tail repeats the total."""
+    builder = _make_builder()
+    _patch_build_deps(monkeypatch)
+    monkeypatch.setattr(
+        sparse_mod,
+        "generate_sparse_seqlen_triton",
+        lambda *args, **kwargs: torch.tensor([3, 5], dtype=torch.int32),
+    )
+    builder.paged_kv_indptr[1:].fill_(-1)
+
+    md = builder.build(
+        common_prefix_len=0, common_attn_metadata=_make_common_metadata()
+    )
+
+    assert md.paged_kv_indptr.tolist() == [0, 3, 8]
+    assert builder.paged_kv_indptr.tolist() == [0, 3, 8, 8, 8, 8, 8, 8, 8]
 
 
 def test_sink_build_skips_persistent_metadata(monkeypatch):
@@ -342,7 +362,7 @@ def test_dense_prefill_builds_sparse_metadata_for_decode_subset(monkeypatch):
     A mixed batch is routed as sparse MQA for its leading decode requests and
     dense MHA for its trailing short prefill requests.  The AITER metadata
     buffers therefore must describe only the decode subset; including prefill
-    tokens would mismatch the query passed to ``forward_mqa``.
+    tokens would mismatch the query passed to `forward_mqa`.
     """
     builder = _make_builder()
     builder.vllm_config = SimpleNamespace(
@@ -385,10 +405,10 @@ def test_dense_prefill_builds_sparse_metadata_for_decode_subset(monkeypatch):
     sparse_call: dict[str, torch.Tensor] = {}
 
     def fake_generate_sparse_seqlen(
-        query_lens, sparse_seq_lens, sparse_query_start_loc, topk, num_tokens, max_q
+        sparse_seq_lens, sparse_query_start_loc, topk, num_tokens, max_q
     ):
         sparse_call.update(
-            query_lens=query_lens.clone(),
+            query_lens=torch.diff(sparse_query_start_loc),
             seq_lens=sparse_seq_lens.clone(),
             query_start_loc=sparse_query_start_loc.clone(),
             num_tokens=num_tokens,
@@ -471,10 +491,10 @@ def test_long_prefill_shares_full_sparse_metadata_with_decode(monkeypatch):
     sparse_call: dict[str, torch.Tensor] = {}
 
     def fake_generate_sparse_seqlen(
-        query_lens, sparse_seq_lens, sparse_query_start_loc, topk, num_tokens, max_q
+        sparse_seq_lens, sparse_query_start_loc, topk, num_tokens, max_q
     ):
         sparse_call.update(
-            query_lens=query_lens.clone(),
+            query_lens=torch.diff(sparse_query_start_loc),
             seq_lens=sparse_seq_lens.clone(),
             query_start_loc=sparse_query_start_loc.clone(),
             num_tokens=num_tokens,
@@ -514,7 +534,7 @@ def test_long_prefill_shares_full_sparse_metadata_with_decode(monkeypatch):
 def test_forward_mqa_slices_full_batch_metadata_to_query_tokens(monkeypatch):
     """The sparse kernel inputs must have the same token extent as its query.
 
-    In a mixed dense-prefill batch, ``forward_mqa`` receives only decode query
+    In a mixed dense-prefill batch, `forward_mqa` receives only decode query
     tokens while some metadata buffers may represent the full batch.  This
     guards the slicing that prevents the index conversion from writing beyond
     the decode-sized output.
@@ -523,6 +543,8 @@ def test_forward_mqa_slices_full_batch_metadata_to_query_tokens(monkeypatch):
     impl.kv_cache_dtype = "auto"
     impl.num_heads = 4
     impl.topk_indices_buffer = torch.arange(48, dtype=torch.int32).view(12, 4)
+    impl.owns_indexer = True
+    impl.index_epoch = 0
     expected_output = torch.zeros(2, 4, 512, dtype=torch.bfloat16)
     forward_mla = Mock(return_value=(expected_output, None))
     monkeypatch.setattr(impl, "_forward_mla", forward_mla)
@@ -570,6 +592,8 @@ def test_forward_mqa_slices_decode_subset_for_bf16_and_fp8(monkeypatch, kv_cache
     impl.kv_cache_dtype = kv_cache_dtype
     impl.num_heads = 4
     impl.topk_indices_buffer = torch.arange(48, dtype=torch.int32).view(12, 4)
+    impl.owns_indexer = True
+    impl.index_epoch = 0
     expected_output = torch.zeros(2, 4, 512, dtype=torch.bfloat16)
     forward_mla = Mock(return_value=(expected_output, None))
     monkeypatch.setattr(impl, "_forward_mla", forward_mla)
@@ -695,7 +719,7 @@ def test_sparse_metadata_workload_length_dtype_matrix(
     monkeypatch.setattr(
         sparse_mod,
         "generate_sparse_seqlen_triton",
-        lambda *args, **kwargs: torch.ones(args[4], dtype=torch.int32),
+        lambda *args, **kwargs: torch.ones(args[3], dtype=torch.int32),
     )
     get_persistent_metadata = Mock()
     fake_aiter = _FakeAiter("aiter")

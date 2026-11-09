@@ -8,13 +8,17 @@ validated by this test module.
 """
 
 import asyncio
+from collections import OrderedDict
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import numpy as np
 import pytest
 import torch
 
 from tests.v1.attention.utils import dense_kv_cache_views
+from vllm import SamplingParams
 from vllm.config import set_current_vllm_config
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector import (
     KVConnectorRole,
@@ -25,8 +29,16 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector im
     SendBlockMeta,
     TransferRegion,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl.push_scheduler import (
+    NixlPushConnectorScheduler,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl.scheduler import (
+    NixlConnectorScheduler,
+)
+from vllm.utils.hashing import sha256
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
+from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
@@ -34,25 +46,36 @@ from vllm.v1.kv_cache_interface import (
     KVCacheLayout,
     MambaSpec,
 )
+from vllm.v1.request import Request
 
 from .test_mooncake_connector import patch_worker_dependencies
-from .utils import create_request, create_vllm_config, maybe_update_block_size
+from .utils import (
+    create_request,
+    create_scheduler,
+    create_vllm_config,
+    maybe_update_block_size,
+    set_mtp_config,
+)
 
 
 def noop_shutdown():
     pass
 
 
-def make_hybrid_gdn_kv_cache_config(block_size: int) -> KVCacheConfig:
+def make_hybrid_gdn_kv_cache_config(
+    block_size: int, num_blocks: int = 16, mamba_cache_mode: str = "none"
+) -> KVCacheConfig:
     gdn_spec = MambaSpec(
         block_size=block_size,
         shapes=((6, 3), (1, 2, 2)),
         dtypes=(torch.float16, torch.float16),
         mamba_type=MambaAttentionBackendEnum.GDN_ATTN,
+        mamba_cache_mode=mamba_cache_mode,
     )
     assert gdn_spec.mamba_type == MambaAttentionBackendEnum.GDN_ATTN
     return KVCacheConfig(
-        num_blocks=16,
+        num_blocks=num_blocks,
+        hash_block_size=block_size,
         kv_cache_tensors=[],
         kv_cache_groups=[
             KVCacheGroupSpec(
@@ -101,6 +124,67 @@ def test_hybrid_gdn_remote_prefill_uses_mamba_n_minus_one():
 
 
 @pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    "kv_role,expected_attn_pull_blocks",
+    [
+        # The local attention prefix is kept; only the suffix and GDN state move.
+        ("kv_consumer", 2),
+        # Roles that prefill locally keep the reconciled lookup: no local hit.
+        ("kv_both", 6),
+    ],
+)
+def test_hybrid_gdn_remote_prefill_keeps_local_attention_prefix(
+    kv_role: str, expected_attn_pull_blocks: int
+):
+    vllm_config = create_vllm_config(kv_connector="MooncakeConnector", kv_role=kv_role)
+    vllm_config.scheduler_config.disable_hybrid_kv_cache_manager = False
+    vllm_config.cache_config.mamba_cache_mode = "align"
+    block_size = vllm_config.cache_config.block_size
+    kv_cache_config = make_hybrid_gdn_kv_cache_config(
+        block_size, num_blocks=64, mamba_cache_mode="align"
+    )
+    scheduler = create_scheduler(
+        vllm_config,
+        num_blocks=kv_cache_config.num_blocks,
+        kv_cache_config=kv_cache_config,
+    )
+    manager = scheduler.kv_cache_manager
+
+    # Cache a 4-block prefix, then evict its GDN states: the attention blocks
+    # stay hit while no block boundary has a local recurrent state.
+    prefix_len = 4 * block_size
+    fill = create_request(num_tokens=prefix_len, common_prefix_len=prefix_len)
+    computed_blocks, num_computed, _ = manager.get_computed_blocks(fill)
+    assert num_computed == 0
+    gdn_ids = []
+    for i in range(4):
+        manager.allocate_slots(
+            fill, block_size, new_computed_blocks=computed_blocks if i == 0 else None
+        )
+        fill.num_computed_tokens += block_size
+        gdn_ids.append(manager.get_block_ids(fill.request_id)[1][i])
+    manager.free(fill)
+    manager.block_pool.evict_blocks(set(gdn_ids))
+
+    replay = create_request(
+        num_tokens=6 * block_size, common_prefix_len=prefix_len, max_tokens=1
+    )
+    replay.kv_transfer_params = dict(
+        do_remote_prefill=True,
+        remote_engine_id="prefill-engine",
+        remote_bootstrap_addr="prefill-host:8998",
+        transfer_id="xfer-0",
+    )
+    scheduler.add_request(replay)
+    output = scheduler.schedule()
+
+    [pull] = output.kv_connector_metadata.reqs_to_recv["prefill-engine"].values()
+    attn_pull, gdn_pull = pull.local_block_ids
+    assert len(attn_pull) == expected_attn_pull_blocks
+    assert len(gdn_pull) == 1
+
+
+@pytest.mark.cpu_test
 def test_hybrid_gdn_remote_decode_truncates_prefill_before_cache_lookup():
     vllm_config = create_vllm_config(
         kv_connector="MooncakeConnector",
@@ -140,6 +224,79 @@ def test_hybrid_gdn_remote_decode_truncates_prefill_before_cache_lookup():
 
     assert num_new_tokens == 0
     assert is_async is False
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    "hash_block_size, num_lookahead, nixl_kept",
+    [(16, 0, 2), (16, 1, 2), (16, 5, 2), (4, 9, 1), (4, 17, 0)],
+)
+@pytest.mark.parametrize("use_embeds", [False, True])
+@pytest.mark.parametrize(
+    "scheduler_cls, connector_name",
+    [
+        (MooncakeConnectorScheduler, "MooncakeConnector"),
+        (NixlConnectorScheduler, "NixlConnector"),
+        (NixlPushConnectorScheduler, "NixlPushConnector"),
+    ],
+)
+def test_lookahead_hashes_follow_truncated_prefill(
+    scheduler_cls, connector_name, hash_block_size, num_lookahead, nixl_kept, use_embeds
+):
+    """P-side hashes must describe the shortened prompt and actual sampled token."""
+    block_size = 16
+    config = create_vllm_config(
+        kv_connector=connector_name,
+        kv_role="kv_producer",
+    )
+    if num_lookahead:
+        set_mtp_config(config, num_lookahead)
+    config.cache_config.prefix_match_unit = hash_block_size
+    kv_config = make_hybrid_gdn_kv_cache_config(block_size)
+    kv_config.hash_block_size = hash_block_size
+    group = kv_config.kv_cache_groups[1]
+    group.kv_cache_spec = replace(group.kv_cache_spec, mamba_cache_mode="align")
+    scheduler = scheduler_cls(config, "test-engine", kv_config)
+    init_none_hash(sha256)
+    hasher = get_request_block_hasher(hash_block_size, sha256, num_lookahead)
+    tokens = list(range(3 * hash_block_size + num_lookahead))
+    request = Request(
+        request_id="prefill",
+        prompt_token_ids=None if use_embeds else tokens,
+        prompt_embeds=(
+            torch.arange(len(tokens) * 4).reshape(-1, 4).float() if use_embeds else None
+        ),
+        sampling_params=SamplingParams(max_tokens=1),
+        pooling_params=None,
+        block_hasher=hasher,
+    )
+    request.kv_transfer_params = {"do_remote_decode": True}
+    original_hashes = request.block_hashes.copy()
+    assert len(original_hashes) == 3
+
+    scheduler.on_new_request(request)
+
+    kept = 2 if scheduler_cls is MooncakeConnectorScheduler else nixl_kept
+    assert request.block_hashes == original_hashes[:kept]
+    assert all(a is b for a, b in zip(request.block_hashes, original_hashes))
+    shortened_tokens = list(request.all_token_ids)
+    request.append_output_token_ids(999)
+    reference = Request(
+        request_id="reference",
+        prompt_token_ids=None if use_embeds else shortened_tokens,
+        prompt_embeds=request.prompt_embeds,
+        sampling_params=SamplingParams(max_tokens=1),
+        pooling_params=None,
+        block_hasher=hasher,
+    )
+    reference.append_output_token_ids(999)
+    assert request.block_hashes == reference.block_hashes
+    assert request.block_hashes != original_hashes
+    scheduler.on_new_request(request)
+    assert request.num_prompt_tokens == len(shortened_tokens)
+    assert request.block_hashes == reference.block_hashes
+    if isinstance(scheduler, (NixlConnectorScheduler, NixlPushConnectorScheduler)):
+        scheduler.shutdown()
 
 
 def test_register_kv_caches_emits_fa_and_gdn_regions(monkeypatch):
@@ -239,12 +396,19 @@ def test_register_kv_caches_scales_attention_len_to_kernel_block(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_build_transfer_params_uses_non_overlapping_physical_pages():
+@pytest.mark.parametrize(
+    "block_offsets",
+    [(0,), (1, 0), (2, 1, 0, 3, 4)],
+    ids=["single", "descending", "descending-prefix-ascending-tail"],
+)
+async def test_build_transfer_params_uses_non_overlapping_physical_pages(block_offsets):
     kv_cache_config = make_hybrid_gdn_kv_cache_config(block_size=16)
     worker = object.__new__(MooncakeConnectorWorker)
     worker.shutdown = noop_shutdown
-    # __new__ skips __init__, where this cache is created. register_kv_caches clears it.
+    # __new__ skips __init__, where these caches are created.
     worker._prepared_transfer_regions = {}
+    worker._layout_by_peer = OrderedDict()
+    worker._acked_layout_peers = set()
     worker.use_mla = False
     worker.engine = SimpleNamespace(batch_register_memory=lambda *_: 0)
     worker.is_kv_consumer = True
@@ -296,11 +460,15 @@ async def test_build_transfer_params_uses_non_overlapping_physical_pages():
 
     local_logical_block = 2
     remote_logical_block = 5
+    num_kernel_blocks = len(block_offsets) * ratio
     transfer_id = "xfer-physical-attention-pages"
     send_meta = SendBlockMeta(
         p_req_id="p-physical-attention-pages",
         transfer_id=transfer_id,
-        local_block_ids=[[local_logical_block], []],
+        local_block_ids=[
+            [local_logical_block + offset for offset in block_offsets],
+            [],
+        ],
         ready=asyncio.Event(),
     )
     xfer_meta = MooncakeXferMetadata(
@@ -311,7 +479,7 @@ async def test_build_transfer_params_uses_non_overlapping_physical_pages():
         req_blocks={
             "d-physical-attention-pages": (
                 transfer_id,
-                [[remote_logical_block], []],
+                [[remote_logical_block + offset for offset in block_offsets], []],
             )
         },
         kv_caches_base_addr=[],
@@ -340,16 +508,14 @@ async def test_build_transfer_params_uses_non_overlapping_physical_pages():
     assert dst_ptrs == [
         remote_base_addr + remote_logical_block * ratio * physical_page_bytes
     ]
-    assert lengths == [ratio * physical_page_bytes]
+    assert lengths == [num_kernel_blocks * physical_page_bytes]
 
     def split_contiguous_blocks(src_ids, dst_ids):
-        return [[block_id] for block_id in src_ids], [
-            [block_id] for block_id in dst_ids
-        ]
+        return np.arange(len(src_ids)), np.ones(len(src_ids), dtype=np.int64)
 
     with patch(
         "vllm.distributed.kv_transfer.kv_connector.v1.mooncake."
-        "mooncake_connector.group_concurrent_contiguous",
+        "mooncake_connector._contiguous_runs",
         side_effect=split_contiguous_blocks,
     ):
         (
@@ -368,17 +534,17 @@ async def test_build_transfer_params_uses_non_overlapping_physical_pages():
     expected_src_ptrs = [
         fa_cache.data_ptr()
         + (local_logical_block * ratio + offset) * physical_page_bytes
-        for offset in range(ratio)
+        for offset in range(num_kernel_blocks)
     ]
     expected_dst_ptrs = [
         remote_base_addr + (remote_logical_block * ratio + offset) * physical_page_bytes
-        for offset in range(ratio)
+        for offset in range(num_kernel_blocks)
     ]
     assert err_reqs == []
     assert err_msg is None
     assert src_ptrs == expected_src_ptrs
     assert dst_ptrs == expected_dst_ptrs
-    assert lengths == [physical_page_bytes] * ratio
+    assert lengths == [physical_page_bytes] * num_kernel_blocks
     assert all(
         next_ptr - ptr == physical_page_bytes
         for ptr, next_ptr in zip(src_ptrs, src_ptrs[1:])

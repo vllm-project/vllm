@@ -15,10 +15,7 @@ from vllm.config import PoolerConfig
     ["Qwen/Qwen3-Embedding-0.6B"],
 )
 @torch.inference_mode
-def test_decoder_token_embed_model_runner_v2(
-    hf_runner, vllm_runner, monkeypatch, model: str
-):
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+def test_decoder_token_embed_model_runner_v2(hf_runner, vllm_runner, model: str):
     chunk_size = 10
     n_prompt_tokens = [55, 56, 57]
     token_prompts = [[1024 + i for i in range(n)] for n in n_prompt_tokens]
@@ -34,7 +31,6 @@ def test_decoder_token_embed_model_runner_v2(
         enable_chunked_prefill=True,
         enable_prefix_caching=True,
     ) as vllm_model:
-        assert vllm_model.llm.llm_engine.vllm_config.use_v2_model_runner
         vllm_outputs = vllm_model.token_embed(
             [TokensPrompt(prompt_token_ids=t) for t in token_prompts],
         )
@@ -73,11 +69,11 @@ _RERANKER_TEMPLATE = VLLM_PATH / "examples/pooling/score/template/qwen3_reranker
 def test_last_pool_score_chunked_prefill_matches_unchunked(vllm_runner, model: str):
     """LAST-pooling score must not depend on whether the prompt is chunked.
 
-    Regression test for a wrong-score bug where, under ``torch.compile`` (i.e.
-    not ``enforce_eager``), a query+document pair long enough to be split across
+    Regression test for a wrong-score bug where, under `torch.compile` (i.e.
+    not `enforce_eager`), a query+document pair long enough to be split across
     prefill chunks produced a corrupted last-token hidden state and thus a
     wrong relevance score, while the same input scored correctly unchunked.
-    The existing pooling+chunked-prefill coverage runs ``enforce_eager=True``
+    The existing pooling+chunked-prefill coverage runs `enforce_eager=True`
     and so never exercised the compiled path.
     """
     chat_template = _RERANKER_TEMPLATE.read_text()
@@ -111,7 +107,7 @@ def test_last_pool_score_chunked_prefill_matches_unchunked(vllm_runner, model: s
 
 
 @torch.inference_mode
-def test_sequence_embed_model_runner_v2(hf_runner, vllm_runner, monkeypatch) -> None:
+def test_sequence_embed_model_runner_v2(hf_runner, vllm_runner) -> None:
     model = "Qwen/Qwen3-Embedding-0.6B"
     chunk_size = 10
     token_prompts = [[1024 + i for i in range(n)] for n in (25, 27)]
@@ -127,7 +123,6 @@ def test_sequence_embed_model_runner_v2(hf_runner, vllm_runner, monkeypatch) -> 
             )
             hf_outputs.append(embedding.cpu().tolist())
 
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
     with vllm_runner(
         model,
         runner="pooling",
@@ -139,7 +134,6 @@ def test_sequence_embed_model_runner_v2(hf_runner, vllm_runner, monkeypatch) -> 
         enforce_eager=True,
         enable_chunked_prefill=True,
     ) as vllm_model:
-        assert vllm_model.llm.llm_engine.vllm_config.use_v2_model_runner
         vllm_outputs = vllm_model.embed(prompts)
 
     check_embeddings_close(

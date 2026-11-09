@@ -3,11 +3,11 @@
 """Kimi-K3 specialization of GDN attention metadata.
 
 The request classification and cudagraph staging intentionally mirror
-``GDNAttentionMetadataBuilder``. Kimi-K3 builds the metadata required by its
+`GDNAttentionMetadataBuilder`. Kimi-K3 builds the metadata required by its
 prefill KDA kernel internally, so this builder omits the shared FLA chunk
 metadata construction.
 
-For Kimi-K3 speculative decoding, ``--use-replayssm`` selects the simplified
+For Kimi-K3 speculative decoding, `--use-replayssm` selects the simplified
 RecoverSSM path implemented here instead of the Mamba2 ReplaySSM kernel.
 """
 
@@ -47,94 +47,6 @@ if TYPE_CHECKING:
 @cache
 def _metadata_launch_pdl() -> bool:
     return current_platform.is_arch_support_pdl()
-
-
-@triton.jit(do_not_specialize=["num_requests"])
-def _get_aligned_state_indices_kernel(
-    block_table_ptr,
-    seq_lens_ptr,
-    state_indices_ptr,
-    block_table_stride_0: tl.constexpr,
-    block_table_stride_1: tl.constexpr,
-    seq_lens_stride: tl.constexpr,
-    state_indices_stride_0: tl.constexpr,
-    state_indices_stride_1: tl.constexpr,
-    num_requests,
-    CACHE_BLOCK_SIZE: tl.constexpr,
-    NUM_STATE_SLOTS: tl.constexpr,
-    BLOCK_STATE_SLOTS: tl.constexpr,
-    BLOCK_ROWS: tl.constexpr,
-    launch_pdl: tl.constexpr,
-):
-    if launch_pdl:
-        tl.extra.cuda.gdc_wait()
-        tl.extra.cuda.gdc_launch_dependents()
-
-    rows = tl.program_id(0) * BLOCK_ROWS + tl.arange(0, BLOCK_ROWS)
-    valid_row = rows < num_requests
-    seq_lens = tl.load(
-        seq_lens_ptr + rows * seq_lens_stride,
-        mask=valid_row,
-        other=1,
-    )
-    # Triton truncates signed division toward zero, unlike PyTorch floor
-    # division. Clamping makes both semantics equivalent for seq_lens <= 0.
-    first_state_slot = tl.maximum((seq_lens - 1) // CACHE_BLOCK_SIZE, 0)
-
-    state_slots = tl.arange(0, BLOCK_STATE_SLOTS)
-    valid_state_slot = state_slots < NUM_STATE_SLOTS
-    state_indices = tl.load(
-        block_table_ptr
-        + rows[:, None] * block_table_stride_0
-        + (first_state_slot[:, None] + state_slots[None, :]) * block_table_stride_1,
-        mask=valid_row[:, None] & valid_state_slot[None, :],
-    )
-    tl.store(
-        state_indices_ptr
-        + rows[:, None] * state_indices_stride_0
-        + state_slots[None, :] * state_indices_stride_1,
-        state_indices,
-        mask=valid_row[:, None] & valid_state_slot[None, :],
-    )
-
-
-def _mamba_get_block_table_tensor(
-    block_table: torch.Tensor,
-    seq_lens: torch.Tensor,
-    kv_cache_spec: MambaSpec,
-    mamba_cache_mode: str,
-) -> torch.Tensor:
-    if mamba_cache_mode == "none":
-        return block_table
-
-    assert block_table.is_cuda and seq_lens.is_cuda
-    num_requests = block_table.shape[0]
-    num_state_slots = 1 + kv_cache_spec.num_speculative_blocks
-    state_indices = torch.empty(
-        (num_requests, num_state_slots),
-        dtype=block_table.dtype,
-        device=block_table.device,
-    )
-    BLOCK_ROWS = 32
-    grid = (triton.cdiv(num_requests, BLOCK_ROWS),)
-    _get_aligned_state_indices_kernel[grid](
-        block_table,
-        seq_lens,
-        state_indices,
-        block_table.stride(0),
-        block_table.stride(1),
-        seq_lens.stride(0),
-        state_indices.stride(0),
-        state_indices.stride(1),
-        num_requests,
-        CACHE_BLOCK_SIZE=kv_cache_spec.block_size,
-        NUM_STATE_SLOTS=num_state_slots,
-        BLOCK_STATE_SLOTS=triton.next_power_of_2(num_state_slots),
-        BLOCK_ROWS=BLOCK_ROWS,
-        num_warps=1,
-        launch_pdl=_metadata_launch_pdl(),
-    )
-    return state_indices
 
 
 @triton.jit(do_not_specialize=["num_spec_decodes", "batch_size"])
@@ -305,6 +217,10 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
     # so one k+1 graph replays any 1..k+1 mix.
     _cudagraph_support = AttentionCGSupport.ALWAYS
     mamba_aligned_state_indices: torch.Tensor | None = None
+    # Set by the specialized decode's deferred RecoverSSM (recoverssm/state.py).
+    recoverssm_pending: torch.Tensor | None
+    recoverssm_request_slots: torch.Tensor | None
+    recoverssm_record_rows: torch.Tensor
 
     def __init__(
         self,
@@ -351,6 +267,7 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
             layers,
             spec_query_len=1 + self.vllm_config.num_speculative_tokens,
             max_num_reqs=self.vllm_config.scheduler_config.max_num_seqs,
+            backend=layers[0].recoverssm_backend,
         )
         self.recoverssm_context = context
         return context
@@ -373,19 +290,10 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
         #   indices = (start[:, None] + offsets).to(torch.int64)
         #   block_table_tensor = torch.gather(block_table, 1, indices)
         if self.vllm_config.cache_config.mamba_cache_mode == "align":
-            if self.mamba_aligned_state_indices is not None:
-                block_table_tensor = self.mamba_aligned_state_indices[: m.num_reqs]
-            else:
-                assert not self.vllm_config.use_v2_model_runner, (
-                    "Aligned Mamba state indices must be precomputed"
-                )
-                # TODO: remove this MRV1 fallback once MRV2 is the default runner.
-                block_table_tensor = _mamba_get_block_table_tensor(
-                    m.block_table_tensor,
-                    m.seq_lens,
-                    self.kv_cache_spec,
-                    self.vllm_config.cache_config.mamba_cache_mode,
-                )
+            assert self.mamba_aligned_state_indices is not None, (
+                "Aligned Mamba state indices must be precomputed"
+            )
+            block_table_tensor = self.mamba_aligned_state_indices[: m.num_reqs]
         else:
             block_table_tensor = m.block_table_tensor
 
@@ -403,9 +311,12 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
                     query_start_loc_cpu.diff() > 0
                 )
                 spec_sequence_masks_cpu |= active_decode_mask_cpu
-                # Adaptive's cost-table profiler probes eager dummy rows longer than
-                # RecoverSSM's num_spec+1 activation capacity; route them out instead
-                # of tripping the capacity check below.
+                # A row wider than RecoverSSM's num_spec+1 activation capacity is
+                # not a verify; route it to the non-spec path instead of tripping
+                # the capacity check below. Real rows never are (V2 marks them
+                # draft -1), but PIECEWISE capture dummies past
+                # max_num_seqs * (num_spec+1) tokens and adaptive's cost-table
+                # profiler rows are, and neither is prefilling.
                 spec_sequence_masks_cpu &= (
                     query_start_loc_cpu.diff() <= self.num_spec + 1
                 )

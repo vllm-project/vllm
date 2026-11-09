@@ -46,9 +46,12 @@ class DecoderReplayCudaGraphManager(CudaGraphManager):
             )
         compilation.cudagraph_capture_sizes = sizes
         compilation.max_cudagraph_capture_size = max(sizes)
+        compilation.prefill_cudagraph_capture_token_sizes = sizes
         replay_config = copy(vllm_config)
         replay_config.compilation_config = compilation
-        super().__init__(replay_config, device, CUDAGraphMode.PIECEWISE, 1)
+        super().__init__(
+            replay_config, device, CUDAGraphMode.PIECEWISE, {1: scheduler.max_num_seqs}
+        )
         self.layers = layers
         self.breakable_cg_runner: BreakableCUDAGraphWrapper = BreakableCUDAGraphWrapper(
             layers.run_layers, replay_config
@@ -68,9 +71,21 @@ class DecoderReplayCudaGraphManager(CudaGraphManager):
         ]
 
     def capture_replay_graphs(
-        self, prepare: Callable[[BatchExecutionDescriptor], None]
+        self,
+        prepare: Callable[[BatchExecutionDescriptor], None],
+        stream: torch.cuda.Stream | None = None,
     ) -> None:
-        """Capture each size on the replay batch ``prepare`` sets on the layers."""
+        """Capture each size on the replay batch `prepare` sets on the layers.
+
+        On the model graphs' `stream` they share its free blocks of the graph
+        pool: a replay graph runs in a model graph's eager break, after it has
+        gathered its inputs into `input_buffers` and before the model graph
+        reads its outputs from the break's own buffers, so no model graph
+        tensor in the pool is live while it runs. Aux hidden states captured
+        before the replay layers would be, so with those it keeps its own.
+        """
+        if self.layers.has_early_aux():
+            stream = None
 
         def create_forward_fn(desc: BatchExecutionDescriptor, warmup: bool):
             prepare(desc)
@@ -86,11 +101,11 @@ class DecoderReplayCudaGraphManager(CudaGraphManager):
 
             return forward_fn
 
-        self.capture(create_forward_fn, "Capturing decoder replay CUDA graphs")
+        self.capture(create_forward_fn, "Capturing decoder replay CUDA graphs", stream)
         self.layers.replay_batch = None
 
     def run(self, rows: torch.Tensor, inputs: tuple) -> tuple[torch.Tensor, ...]:
-        """Replay the forward context's graph on ``rows`` of ``inputs``."""
+        """Replay the forward context's graph on `rows` of `inputs`."""
         num_rows = rows.shape[0]
         for buf, t in zip(self.input_buffers, inputs):
             torch.index_select(t, 0, rows, out=buf[:num_rows])

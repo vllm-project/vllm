@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any, Final, Literal
 
 from pydantic import Field, field_validator
 
-from vllm.config.utils import config, get_hash_factors, hash_factors
+from vllm.config.utils import CompileFactors, config, get_compile_factors
 from vllm.logger import init_logger
 
 if TYPE_CHECKING:
@@ -37,14 +37,14 @@ class IrOpPriorityConfig:
     gelu_and_mul_sparse: list[str] = Field(default_factory=list)
     """Priority list for vllm.ir.ops.gelu_and_mul_sparse"""
 
-    def compute_hash(self) -> str:
+    def compile_factors(self) -> CompileFactors:
         """Produces a hash unique to the pass configuration.
         Any new fields that affect compilation should be added to the hash.
         Any future fields that don't affect compilation should be excluded.
 
         Also, manually add IR op impl UUIDs to make sure they affect the compile cache.
         """
-        factors = get_hash_factors(self, set())
+        factors = get_compile_factors(self, set())
 
         # Implementations are hidden from Dynamo,
         # so they don't show up in the traced files list.
@@ -61,7 +61,7 @@ class IrOpPriorityConfig:
             for name, p in asdict(self).items()  # type: ignore[call-overload]
         }
 
-        return hash_factors(factors)
+        return factors
 
     @field_validator("*", mode="before")
     @classmethod
@@ -139,6 +139,7 @@ MoEBackend = Literal[
     "aiter",
     "aiter_mega_moe",
     "aiter_triton_mxfp4_bf16",
+    "aiter_triton_mxfp4_mxfp4",
     "flydsl",
     "hpc",
     "emulation",
@@ -179,6 +180,8 @@ SparseIndexerTopkBackend = Literal[
     "aiter",
 ]
 
+FlashInferSparseMLAKernel = Literal["auto", "trtllm", "prims_ts"]
+
 # DeepGEMM consumes the DeepSeek-V4 MXFP4 checkpoint recipe. CuTeDSL is
 # selected by quantization methods and is not architecture-specific.
 FLASHINFER_MOE_EP_ARCHITECTURES = frozenset(
@@ -193,14 +196,14 @@ FLASHINFER_MOE_EP_ARCHITECTURES = frozenset(
 def bind_passthrough_all2all_backend(
     moe_backend: str, parallel_config: "ParallelConfig"
 ) -> None:
-    """Bind ``all2all_backend="passthrough"`` to MoE backends that own their
+    """Bind `all2all_backend="passthrough"` to MoE backends that own their
     expert-parallel communication (currently the FlashInfer MoE-EP megakernels).
 
-    Such a deployment gets ``passthrough`` when the all2all backend is left at
+    Such a deployment gets `passthrough` when the all2all backend is left at
     its default and rejects any other explicit choice; the value is meaningless
     with a MoE backend that relies on the framework to communicate. The CLI does
     not offer the value; the early return keeps repeated
-    ``set_platform_defaults`` calls idempotent.
+    `set_platform_defaults` calls idempotent.
     """
     a2a = parallel_config.all2all_backend
     if moe_backend in FLASHINFER_MOE_EP_BACKENDS:
@@ -266,6 +269,9 @@ LinearBackend = Literal[
 ]
 
 
+RDNAHybridW4A16PrefillDequantMode = Literal["enable", "disable"]
+
+
 @config
 class KernelConfig:
     """Configuration for kernel selection and warmup behavior."""
@@ -274,13 +280,23 @@ class KernelConfig:
     """
     vLLM IR op priority for dispatching/lowering during the forward pass.
     Platform defaults appended automatically during VllmConfig.__post_init__.
+
+    Deprecated: vLLM IR is being removed, and this option will be removed in
+    v0.34.0. Kernels will be selected by the platform, as for other custom ops.
     """
 
     enable_flashinfer_autotune: bool = None  # type: ignore[assignment]
-    """If True, run FlashInfer autotuning during kernel warmup."""
+    """Benchmark FlashInfer kernel implementations during warmup and use the
+    fastest. Enabled by default except at `-O0`; disable for faster startup."""
 
     enable_rocm_segmented_attn_autotune: bool = False
     """If True, autotune ROCm segmented attention during kernel warmup on RDNA GPUs."""
+
+    enable_rocm_aiter_gemm_warmup: bool = False
+    """If True, run a dummy forward at every AITER tuned-GEMM token bucket up to
+    `max_num_batched_tokens` during kernel warmup on ROCm, so AITER builds those
+    kernels at startup instead of stalling the first requests that hit each
+    bucket. Costs one dummy forward per bucket (164 at 8192 tokens)."""
 
     # TODO(roberto): Remove after registered CuTeDSL warmups are migrated
     # to the shared JIT warmup infrastructure.
@@ -290,6 +306,15 @@ class KernelConfig:
 
     enable_jit_warmup: bool = True
     """If True, run JIT compile warmup during kernel warmup."""
+
+    monokernel: bool = False
+    """If True, run the eligible layers of decode steps on the model's
+    MonoKernel: a persistent kernel that runs most or all of one decoder layer
+    in a single launch (DeepSeek-V4.1 on MI355X, DeepSeek-V4-Pro at TP8 on
+    MI355X; Muse Spark MXFP4 on MI355X with tensor parallel size 8, expert
+    parallelism and a 7-token DSpark draft, for speculative verify steps of 1-16
+    requests, with bf16 MoE activations instead of the checkpoint's MXFP4). A
+    deployment that cannot run it is refused at startup."""
 
     moe_backend: MoEBackend = "auto"
     """Backend for MoE expert computation kernels. Available options:
@@ -323,6 +348,8 @@ class KernelConfig:
       DeepSeek-V4 only)
     - "aiter_triton_mxfp4_bf16": Use the AITER Triton MXFP4 W4A16
       (moe_gemm_a16w4) MoE kernel (ROCm gfx942/gfx950/gfx1250)
+    - "aiter_triton_mxfp4_mxfp4": Use the AITER Triton/Gluon MXFP4 W4A4
+      (moe_gemm_a4w4) MoE kernel (ROCm gfx1250)
     - "flydsl": Use AMD FlyDSL kernels (ROCm only)
     - "rdna3": Use the fused RDNA3 W4A16 HIP kernel (ROCm gfx1100 only)
     - "hpc": Use HPC kernels (FP8 and Hopper only)
@@ -345,6 +372,21 @@ class KernelConfig:
       requires VLLM_ROCM_USE_AITER)
 
     Explicit values raise RuntimeError when their constraints are not met.
+
+    On SM100 decode without DCP, cooperative and persistent (including auto
+    selecting them) read BF16 logits directly and widen scores inside the
+    kernel, avoiding a full FP32 logits copy.
+    """
+
+    flashinfer_sparse_mla_kernel: FlashInferSparseMLAKernel = "auto"
+    """Kernel of the SM100 FLASHINFER_MLA_SPARSE backend for D576 sparse MLA.
+    Available options:
+
+    - "auto": prims_ts for nvfp4_ds_mla, and for a per-tensor fp8 cache under
+      DCP (decode_context_parallel_size > 1) when it can run; else trtllm-gen
+    - "trtllm": trtllm-gen; nvfp4_ds_mla caches cannot use this backend
+    - "prims_ts": FlashInfer's task-scheduled sparse MLA decode, also for a
+      per-tensor fp8 cache
     """
 
     linear_backend: LinearBackend = "auto"
@@ -380,8 +422,24 @@ class KernelConfig:
         default=None, min_length=1
     )
     """Backend overrides keyed by linear quantization scheme. Overrides take
-    precedence over ``linear_backend``; for example,
-    ``{"nvfp4_w4a16": "humming"}``."""
+    precedence over `linear_backend`; for example,
+    `{"nvfp4_w4a16": "humming"}`."""
+
+    rdna_hybrid_w4a16_prefill_dequant: RDNAHybridW4A16PrefillDequantMode = "disable"
+    """Cache a dense dequantized copy of each weight for the RDNA hybrid W4A16
+    linear kernel's prefill GEMM. Applies only on gfx11/gfx12 RDNA GPUs, where
+    that kernel is selected; a no-op for every other kernel. Prefill GEMMs
+    then run on the dense copy instead of dequantizing int4 every step,
+    cutting TTFT by 20-25% on gfx1151 for Qwen3 and Gemma-4. Decode stays on
+    int4, so TPOT is unchanged. The copy is ~4x the size of the int4 weight
+    and comes out of the gpu_memory_utilization budget, leaving less room for
+    KV cache, so it suits unified-memory parts where TTFT matters more than KV
+    capacity. Available options:
+
+    - "disable": Keep prefill on the int4 path (default)
+    - "enable": Cache every layer's copy; startup fails if they do not fit in
+      the budget
+    """
 
     @field_validator("moe_backend", mode="before")
     @classmethod
@@ -404,7 +462,14 @@ class KernelConfig:
             return value.lower().replace("-", "_")
         return value
 
-    def compute_hash(self) -> str:
+    @field_validator("rdna_hybrid_w4a16_prefill_dequant", mode="before")
+    @classmethod
+    def _normalize_rdna_hybrid_w4a16_prefill_dequant(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            return value.lower().replace("-", "_")
+        return value
+
+    def compile_factors(self) -> CompileFactors:
         """Produces a hash unique to the pass configuration.
         Any new fields that affect compilation should be added to the hash.
         Any future fields that don't affect compilation should be excluded.
@@ -414,13 +479,11 @@ class KernelConfig:
             "enable_jit_warmup",
             "enable_flashinfer_autotune",
             "enable_rocm_segmented_attn_autotune",
-            "ir_op_priority",  # handled separately below
+            "enable_rocm_aiter_gemm_warmup",
         }
         if self.linear_backend_per_quant is None:
             ignored_factors.add("linear_backend_per_quant")
-        factors = get_hash_factors(self, ignored_factors)
-        factors["ir_op_priority"] = self.ir_op_priority.compute_hash()
-        return hash_factors(factors)
+        return get_compile_factors(self, ignored_factors)
 
     @field_validator(
         "enable_flashinfer_autotune",
