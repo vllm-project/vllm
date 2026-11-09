@@ -25,14 +25,13 @@ logger = init_logger(__name__)
 
 # An unknown transfer state or failed unregistration must not turn into a
 # use-after-free when the failed load drops its mover and destination tensors.
-_retained_copies: list[tuple[object, list[int], list[torch.Tensor]]] = []
+_retained_copies: list[tuple[object, list[torch.Tensor]]] = []
 
 
 class RdmaMover(WeightMover):
     """Pull storages through the Mooncake TransferEngine."""
 
     name = RDMA_BACKEND
-    is_node_local = False
 
     def __init__(self, protocol: str = "rdma"):
         self.protocol = protocol
@@ -102,25 +101,15 @@ class RdmaMover(WeightMover):
             ret = engine.batch_transfer_sync_read(
                 session, local_pointers, remote_pointers, lengths
             )
-        except Exception as e:
-            _retained_copies.append((engine, local_pointers, buffers))
-            raise RuntimeError(
-                "Mooncake transfer raised; source and mirror buffers were retained"
-            ) from e
-        if ret != 0:
-            # A failed or timed-out synchronous call may leave tasks in flight.
-            _retained_copies.append((engine, local_pointers, buffers))
-            raise RuntimeError(
-                f"Mooncake read returned {ret}; source and mirror buffers were retained"
-            )
-
-        ret = engine.batch_unregister_memory(local_pointers)
-        if ret != 0:
-            _retained_copies.append((engine, local_pointers, buffers))
-            raise RuntimeError(
-                "Mooncake failed to unregister mirror storages with status "
-                f"{ret}; buffers and registrations were retained"
-            )
+            if ret != 0:
+                raise RuntimeError(f"Mooncake weight-cache read failed: {ret}")
+            ret = engine.batch_unregister_memory(local_pointers)
+            if ret != 0:
+                raise RuntimeError(f"Mooncake mirror unregistration failed: {ret}")
+        except Exception:
+            # A failed call may leave tasks or registrations using the buffers.
+            _retained_copies.append((engine, buffers))
+            raise
 
     def release(self) -> None:
         if self._engine is not None and self._registered:

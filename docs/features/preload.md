@@ -213,15 +213,11 @@ addresses with Unix socket paths in one list. The remote form pulls over
 Mooncake RDMA and requires `--seed-token`.
 
 !!! warning
-    The seed listener is a network service. It is JSON only and
-    authenticates before it decodes a payload, so an unauthenticated peer
-    cannot reach the daemon's pickle protocol, but it is **unencrypted and
-    unauthenticated beyond the shared token**. Only read-only seed requests
-    are served remotely; exporting IPC handles and releasing weights stay on
-    the local, owner-verified Unix socket. Seed peers are served on their own
-    thread and get 10 seconds to send their request, so a stalled or
-    unauthenticated peer cannot hold up the engines loading from the daemon.
-    Keep the listener on a trusted network and treat the token as a secret.
+    The remote control plane accepts JSON seed requests after authenticating
+    the shared token; it never uses pickle. The connection is unencrypted, so
+    use it only on a trusted network and keep the token secret. Exporting IPC
+    handles and releasing weights remain local operations over the
+    owner-verified Unix socket.
 
 ## Sharing warmup caches through Mooncake (optional)
 

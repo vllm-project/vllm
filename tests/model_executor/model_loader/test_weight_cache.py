@@ -11,6 +11,7 @@ import importlib.util
 import json
 import multiprocessing
 import os
+import select
 import shutil
 import signal
 import socket
@@ -21,7 +22,6 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -1742,7 +1742,6 @@ def _exercise_lease_release(
     manifest = payload["manifest"]
     assert len(manifest["storages"]) > 1
 
-    release_response = None
     if shutdown:
         assert source._proc is not None
         source._proc.terminate()
@@ -1751,33 +1750,27 @@ def _exercise_lease_release(
         release_sock.settimeout(300)
         release_sock.connect(control_socket)
         send_msg(release_sock, {"cmd": "release"})
-    with ThreadPoolExecutor(max_workers=1) as executor:
-        if not shutdown:
-            release_response = executor.submit(recv_msg, release_sock)
-        source.wait_for_log("waiting for 1 weight-cache copy acknowledgement(s)")
-        if release_response is not None:
-            assert not release_response.done(), "source released before the copy ack"
-        else:
-            assert source._proc is not None
-            assert source._proc.poll() is None, "source exited before the copy ack"
+    source.wait_for_log("waiting for 1 weight-cache copy acknowledgement(s)")
+    if shutdown:
+        assert source._proc is not None
+        assert source._proc.poll() is None, "source exited before the copy ack"
+    else:
+        assert not select.select([release_sock], [], [], 0)[0], (
+            "source released before the copy ack"
+        )
 
-        copy_succeeded = False
-        try:
-            mover = get_mover(backend)
-            device = torch.device(
-                current_platform.device_type, torch.accelerator.current_device_index()
-            )
-            tensors = mover.fill(manifest, payload["seed"], device)
-            assert len(tensors) == len(manifest["tensors"])
-            copy_succeeded = True
-        finally:
-            acknowledge_lease(transport, payload, copy_succeeded=copy_succeeded)
-        if release_response is not None:
-            assert release_response.result(timeout=30)["status"] == "ok"
-
+    mover = get_mover(backend)
+    device = torch.device(
+        current_platform.device_type, torch.accelerator.current_device_index()
+    )
+    tensors = mover.fill(manifest, payload["seed"], device)
+    assert len(tensors) == len(manifest["tensors"])
+    acknowledge_lease(transport, payload)
     if shutdown:
         assert source.wait_for_exit(timeout_s=30) == 128 + signal.SIGTERM
     else:
+        release_sock.settimeout(30)
+        assert recv_msg(release_sock)["status"] == "ok"
         release_sock.close()
         source.wait_for_log("released cached weights")
         response = transport.request({"kind": "weights", "seed_backend": backend})
@@ -1788,10 +1781,8 @@ def _exercise_lease_release(
 
 @create_new_process_for_each_test()
 @pytest.mark.distributed(num_gpus=2)
-@pytest.mark.parametrize(
-    "case", [QWEN_CASE, QWEN_MTP_CASE], ids=["qwen3.5", "qwen3.5-mtp"]
-)
-def test_d2d_weight_seeding_same_host(vllm_runner, monkeypatch, case):
+def test_d2d_weight_seeding_same_host(vllm_runner, monkeypatch):
+    case = QWEN_MTP_CASE
     """Seed target and draft shards over IPC despite different visible ordinals.
 
     The source sees only physical GPU 1 as ordinal 0. The mirror and the test
@@ -1817,26 +1808,24 @@ def test_d2d_weight_seeding_same_host(vllm_runner, monkeypatch, case):
     ) as source:
         source.wait_until_ready()
         source_sock = _daemon_socket(source)
-        if case is QWEN_MTP_CASE:
-            _daemon_socket(source, is_draft=True)
+        _daemon_socket(source, is_draft=True)
 
-        if case is QWEN_CASE:
-            with WeightCacheDaemon(
-                case.model,
-                tp_size=1,
-                extra_args=[
-                    *case.daemon_args,
-                    "--dtype",
-                    "float16",
-                    "--weight-cache-seed",
-                    source_sock,
-                ],
-                env_extra=mirror_env,
-            ) as rejected:
-                assert rejected.wait_for_exit() != 0
-                assert "'dtype'" in rejected.logs
-                assert "refusing to mirror a different weight shard" in rejected.logs
-                assert "Mirrored " not in rejected.logs
+        with WeightCacheDaemon(
+            case.model,
+            tp_size=1,
+            extra_args=[
+                *case.daemon_args,
+                "--dtype",
+                "float16",
+                "--weight-cache-seed",
+                source_sock,
+            ],
+            env_extra=mirror_env,
+        ) as rejected:
+            assert rejected.wait_for_exit() != 0
+            assert "'dtype'" in rejected.logs
+            assert "refusing to mirror a different weight shard" in rejected.logs
+            assert "Mirrored " not in rejected.logs
 
         with WeightCacheDaemon(
             case.model,
@@ -1846,10 +1835,8 @@ def test_d2d_weight_seeding_same_host(vllm_runner, monkeypatch, case):
         ) as mirror:
             mirror.wait_until_ready()
             _daemon_socket(mirror)
-            expected_copies = 1
-            if case is QWEN_MTP_CASE:
-                _daemon_socket(mirror, is_draft=True)
-                expected_copies = 2
+            _daemon_socket(mirror, is_draft=True)
+            expected_copies = 2
             transfers = re.findall(
                 r"Mirrored .* in (\d+) storage\(s\) over peer_ipc in ([\d.]+)s",
                 mirror.logs,
@@ -1889,9 +1876,9 @@ def test_d2d_weight_seeding_cross_host(vllm_runner, monkeypatch):
     survive the JSON fingerprint round trip. Mooncake's dmabuf path supports
     GPU-buffer registration without a working nvidia-peermem module.
     """
+    _wait_for_previous_engines()
     _set_visible_devices(monkeypatch, "1")
     monkeypatch.setenv("WITH_NVIDIA_PEERMEM", "0")
-    _wait_for_previous_engines()
 
     kernel_config = {"linear_backend_per_quant": {"fp8": "cutlass"}}
     engine_case = replace(

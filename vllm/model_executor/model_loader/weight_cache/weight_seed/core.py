@@ -34,7 +34,6 @@ def parse_seed_backend(value: Any) -> SeedBackend:
 def acknowledge_lease(
     transport: Any,
     payload: Any,
-    copy_succeeded: bool,
 ) -> None:
     """Tell the source whether it may release one resolved weight lease."""
     if transport is None:
@@ -52,7 +51,6 @@ def acknowledge_lease(
             "kind": "weights",
             "seed_backend": seed.get("backend"),
             "lease_id": lease_id,
-            "copy_succeeded": copy_succeeded,
         }
     )
     if response is None:
@@ -68,8 +66,6 @@ class WeightMover(ABC):
     """One mover that copies weight storages from a source daemon."""
 
     name: SeedBackend
-    is_node_local: bool
-    """Whether the mover can only reach a peer on the same host."""
 
     @abstractmethod
     def prepare_seed(self, storages: list[torch.UntypedStorage]) -> dict[str, Any]:

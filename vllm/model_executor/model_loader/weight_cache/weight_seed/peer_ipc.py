@@ -21,7 +21,6 @@ class PeerIpcMover(WeightMover):
     """Copy storages through CUDA IPC handles on the same host."""
 
     name = PEER_IPC_BACKEND
-    is_node_local = True
 
     def __init__(self, device_index: int | None = None):
         # The D2D serving thread never set a device, and an IPC handle must

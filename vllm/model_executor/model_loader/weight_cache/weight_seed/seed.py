@@ -40,7 +40,7 @@ WEIGHT_COPY_LEASE_TIMEOUT_S = 300.0
 
 def _reject_lease(transport: Any, payload: Any) -> None:
     try:
-        acknowledge_lease(transport, payload, copy_succeeded=False)
+        acknowledge_lease(transport, payload)
     except Exception as e:
         logger.warning("Could not reject weight-cache lease: %s", e)
 
@@ -70,8 +70,7 @@ class WeightShardSeed(Seedable):
         self._daemon = daemon
         self._movers: dict[SeedBackend, WeightMover] = {}
         self._outstanding: set[str] = set()
-        self._lease_condition = threading.Condition()
-        self._release_lock = threading.Lock()
+        self._lease_condition = threading.Condition(daemon._state_lock)
         self._release_pending = False
 
     def _mover(self, backend: SeedBackend) -> WeightMover:
@@ -83,28 +82,26 @@ class WeightShardSeed(Seedable):
 
     def release(self) -> None:
         """Wait for copies, then drop source state without blocking their acks."""
-        with self._release_lock:
-            with self._daemon._state_lock:
-                self._release_pending = True
-            deadline = time.monotonic() + WEIGHT_COPY_LEASE_TIMEOUT_S
-            with self._lease_condition:
-                if self._outstanding:
-                    logger.info(
-                        "Weight cache %s daemon rank %d waiting for %d "
-                        "weight-cache copy acknowledgement(s)",
-                        self._daemon.role,
-                        self._daemon.global_rank,
-                        len(self._outstanding),
+        deadline = time.monotonic() + WEIGHT_COPY_LEASE_TIMEOUT_S
+        with self._lease_condition:
+            self._release_pending = True
+            if self._outstanding:
+                logger.info(
+                    "Weight cache %s daemon rank %d waiting for %d "
+                    "weight-cache copy acknowledgement(s)",
+                    self._daemon.role,
+                    self._daemon.global_rank,
+                    len(self._outstanding),
+                )
+            while self._outstanding:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError(
+                        f"Timed out waiting for {len(self._outstanding)} "
+                        "weight-cache copy acknowledgement(s); cached "
+                        "weights and NIC registrations were retained"
                     )
-                while self._outstanding:
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0:
-                        raise TimeoutError(
-                            f"Timed out waiting for {len(self._outstanding)} "
-                            "weight-cache copy acknowledgement(s); cached "
-                            "weights and NIC registrations were retained"
-                        )
-                    self._lease_condition.wait(remaining)
+                self._lease_condition.wait(remaining)
             # A failed release stays pending: some regions may have been
             # unregistered, so publishing the old bookkeeping is unsafe.
             for mover in self._movers.values():
@@ -119,8 +116,6 @@ class WeightShardSeed(Seedable):
                 raise ValueError(f"Unknown weight-cache lease {lease_id}")
             self._outstanding.remove(lease_id)
             self._lease_condition.notify_all()
-        if not request.get("copy_succeeded", False):
-            logger.warning("Weight-cache mirror failed copy for lease %s", lease_id)
         return {"lease_id": lease_id}
 
     def validate_remote(self, request: dict[str, Any]) -> None:

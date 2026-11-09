@@ -179,14 +179,14 @@ class WeightCacheDaemon:
         parallel_config = vllm_config.parallel_config
         if parallel_config.enable_eplb:
             raise ValueError("The weight cache daemon does not support EPLB.")
-        self.warmup_caches = [FlashInferWarmupCache(warmup_cache_stores)]
-        self.weight_seed = WeightShardSeed(self)
-        self.d2d = SeedTransport([*self.warmup_caches, self.weight_seed], seed_config)
         # Seed peers are served on their own thread; this serializes their
         # reads of the state with the local socket's requests. Reentrant
         # because the local "seed" command re-enters it through
         # WeightShardSeed.resolve.
         self._state_lock = threading.RLock()
+        self.warmup_caches = [FlashInferWarmupCache(warmup_cache_stores)]
+        self.weight_seed = WeightShardSeed(self)
+        self.d2d = SeedTransport([*self.warmup_caches, self.weight_seed], seed_config)
         self.tp_size = parallel_config.tensor_parallel_size
         self.pp_size = parallel_config.pipeline_parallel_size
         self.dp_size = parallel_config.data_parallel_size
@@ -340,11 +340,6 @@ class WeightCacheDaemon:
             return loader.load_model(
                 vllm_config, model_config, payload=payload, transport=self.d2d
             )
-        if getattr(loader, "loads_pre_processed_weights", False):
-            # The loader fetches fully post-processed weights from a peer
-            # daemon and builds the model around them itself, handling
-            # dtype, device and post-processing internally.
-            return loader.load_model(vllm_config, model_config)
         with set_default_torch_dtype(model_config.dtype):
             with target_device:
                 model = loader.create_model(vllm_config, model_config)

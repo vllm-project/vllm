@@ -21,9 +21,10 @@ import struct
 import tempfile
 import time
 from dataclasses import asdict, dataclass, fields
-from typing import Any, Literal, NamedTuple, TypeVar, get_args, get_origin
+from typing import Any, Literal, NamedTuple, TypeVar
 
 import torch
+from pydantic import TypeAdapter
 from torch.multiprocessing.reductions import rebuild_cuda_tensor, reduce_tensor
 from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 
@@ -460,17 +461,15 @@ class TensorEntry:
             return cls(kind=kind, ipc_args=ipc_args)
         return cls(kind=kind, cpu_tensor=tensor.cpu())
 
-    def rebuild(self, device_index: int, *, retarget: bool = True) -> torch.Tensor:
+    def rebuild(self, device_index: int) -> torch.Tensor:
         if self.ipc_args is None:
             assert self.cpu_tensor is not None
             return self.cpu_tensor
         args = list(self.ipc_args)
         # Index 6 of the args from reduce_tensor is the device index. It must
         # be retargeted to the local index since the daemon and the engine may
-        # have different CUDA_VISIBLE_DEVICES mappings. A seeding daemon
-        # instead leaves it at the source index while opening a peer handle.
-        if retarget:
-            args[6] = device_index
+        # have different CUDA_VISIBLE_DEVICES mappings.
+        args[6] = device_index
         return rebuild_cuda_tensor(*args)
 
 
@@ -492,35 +491,15 @@ def parse_seed_address(address: str) -> str | tuple[str, int]:
     return split_host_port(address)
 
 
-def _json_to_tuple(declared_type: Any, value: Any) -> tuple:
-    if not isinstance(value, (list, tuple)):
-        raise ValueError(f"Expected an array for {declared_type}")
-    args = get_args(declared_type)
-    variadic = len(args) == 2 and args[1] is Ellipsis
-    if not variadic and len(value) != len(args):
-        raise ValueError(f"Expected {len(args)} items, got {len(value)}")
-    item_types = (args[0],) * len(value) if variadic else args
-    return tuple(
-        _json_to_tuple(item_type, item) if get_origin(item_type) is tuple else item
-        for item_type, item in zip(item_types, value)
-    )
-
-
 def json_to_dataclass(cls: type[_DataclassT], payload: Any) -> _DataclassT:
     """Rebuild a flat dataclass, restoring tuples nested by JSON."""
     if not isinstance(payload, dict):
         raise ValueError(f"Expected a JSON object for {cls.__name__}")
-    declared = {f.name: f for f in fields(cls)}  # type: ignore[arg-type]
-    unknown = set(payload) - set(declared)
+    declared = {f.name for f in fields(cls)}  # type: ignore[arg-type]
+    unknown = set(payload) - declared
     if unknown:
         raise ValueError(f"Unknown {cls.__name__} fields: {sorted(unknown)}")
-    values = {}
-    for name, value in payload.items():
-        declared_type = declared[name].type
-        if get_origin(declared_type) is tuple:
-            value = _json_to_tuple(declared_type, value)
-        values[name] = value
-    return cls(**values)
+    return TypeAdapter(cls).validate_python(payload)
 
 
 def dataclass_to_json(instance: Any) -> dict[str, Any]:

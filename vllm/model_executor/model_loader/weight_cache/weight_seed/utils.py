@@ -139,49 +139,36 @@ def seed_mismatches(
     return mismatched
 
 
-def split_addresses(value: str | None) -> list[str]:
-    return [address.strip() for address in (value or "").split(",") if address.strip()]
+SeedAddress = str | tuple[str, int]
+
+
+def parse_seed_addresses(value: str | None) -> list[SeedAddress]:
+    return [
+        parse_seed_address(address)
+        for address in (value or "").split(",")
+        if address.strip()
+    ]
 
 
 def seed_address(
-    value: str | None,
+    addresses: list[SeedAddress],
     local_rank: int,
     global_rank: int,
     port_offset: int = 0,
     *,
     node_rank: int = 0,
     is_draft: bool = False,
-) -> str | tuple[str, int] | None:
+) -> SeedAddress | None:
     """Resolve one daemon's rank-matched source socket or remote endpoint."""
-    addresses = [parse_seed_address(address) for address in split_addresses(value)]
     if not addresses:
         return None
-    has_unix = any(isinstance(address, str) for address in addresses)
-    has_remote = any(not isinstance(address, str) for address in addresses)
-    if has_unix and has_remote:
-        raise ValueError(
-            "--weight-cache-seed cannot mix Unix socket paths and "
-            "host:base_port addresses"
-        )
-    if has_unix:
-        if len(addresses) > 1:
-            if local_rank >= len(addresses):
-                raise ValueError(
-                    f"--weight-cache-seed has {len(addresses)} addresses but local "
-                    f"GPU {local_rank} needs one; pass one address per local GPU"
-                )
-            address = addresses[local_rank]
-        else:
-            address = addresses[0]
+    address = addresses[0]
+    if isinstance(address, str):
+        address = addresses[local_rank]
         assert isinstance(address, str)
         if is_draft:
             return f"{address.removesuffix('.sock')}_draft.sock"
         return address
-    if node_rank >= len(addresses):
-        raise ValueError(
-            f"--weight-cache-seed has {len(addresses)} remote addresses but node "
-            f"rank {node_rank} needs one; pass one host:base_port per source node"
-        )
     address = addresses[node_rank]
     assert not isinstance(address, str)
     host, port = address
@@ -202,12 +189,11 @@ def peer_cache_config(config: "VllmConfig", *, is_draft: bool) -> "VllmConfig":
     )
 
 
-def mirror_device_indices(seed_value: str, num_local: int) -> list[int]:
+def mirror_device_indices(addresses: list[SeedAddress], num_local: int) -> list[int]:
     """A same-host mirror's GPU indices: the free ones past the source's."""
     source_uuids = set()
-    for address in split_addresses(seed_value):
+    for path in addresses:
         # The launcher only calls this for the all-Unix-socket form.
-        path = parse_seed_address(address)
         assert isinstance(path, str)
         verify_socket_owner(path, strict_perms=False)
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:

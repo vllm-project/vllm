@@ -43,13 +43,13 @@ from vllm.entrypoints.common.startup import VLLM_SUBCMD_PARSER_EPILOG
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.weight_cache.protocol import (
     check_ipc_platform_support,
-    parse_seed_address,
 )
 from vllm.model_executor.model_loader.weight_cache.weight_seed.utils import (
+    SeedAddress,
     mirror_device_indices,
+    parse_seed_addresses,
     peer_cache_config,
     seed_address,
-    split_addresses,
 )
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.network_utils import get_distributed_init_method, get_open_port
@@ -119,6 +119,7 @@ def _validate_seed_args(
     num_groups: int,
     nnodes: int,
     local_world_size: int,
+    addresses: list[SeedAddress],
 ) -> None:
     """Validate the seed CLI options before any daemon spawns."""
     for flag, host, port in (
@@ -131,26 +132,22 @@ def _validate_seed_args(
         raise ValueError(
             "--weight-cache-seed conflicts with --seed-source-host/--seed-source-port"
         )
-    parsed = [
-        parse_seed_address(address)
-        for address in split_addresses(args.weight_cache_seed)
-    ]
-    unix_seed = any(isinstance(address, str) for address in parsed)
-    remote_seed = any(not isinstance(address, str) for address in parsed)
+    unix_seed = any(isinstance(address, str) for address in addresses)
+    remote_seed = any(not isinstance(address, str) for address in addresses)
     if unix_seed and remote_seed:
         raise ValueError(
             "--weight-cache-seed cannot mix Unix socket paths and "
             "host:base_port addresses"
         )
-    if unix_seed and len(parsed) != local_world_size:
+    if unix_seed and len(addresses) != local_world_size:
         raise ValueError(
             "Unix --weight-cache-seed requires one target socket per local "
-            f"GPU; expected {local_world_size}, got {len(parsed)}"
+            f"GPU; expected {local_world_size}, got {len(addresses)}"
         )
-    if remote_seed and len(parsed) != nnodes:
+    if remote_seed and len(addresses) != nnodes:
         raise ValueError(
             "Remote --weight-cache-seed requires one host:base_port per source "
-            f"node in node_rank order; expected {nnodes}, got {len(parsed)}"
+            f"node in node_rank order; expected {nnodes}, got {len(addresses)}"
         )
     # A token only protects the TCP planes: the listener and a remote source.
     has_remote = (
@@ -166,7 +163,7 @@ def _validate_seed_args(
     for base_port in (
         args.seed_listen_port,
         args.seed_source_port,
-        *(address[1] for address in parsed if isinstance(address, tuple)),
+        *(address[1] for address in addresses if isinstance(address, tuple)),
     ):
         if base_port is None:
             continue
@@ -390,12 +387,14 @@ class PreloadSubcommand(CLISubcommand):
                 groups, placements
             )
         }
+        seed_addresses = parse_seed_addresses(args.weight_cache_seed)
         _validate_seed_args(
             args,
             world_size=world_size,
             num_groups=len(groups),
             nnodes=nnodes,
             local_world_size=local_world_size,
+            addresses=seed_addresses,
         )
         warmup_cache_stores = [
             name.strip()
@@ -412,15 +411,12 @@ class PreloadSubcommand(CLISubcommand):
             return host, base_port + offset
 
         mirror_devices = None
-        seed_addresses = split_addresses(args.weight_cache_seed)
         if seed_addresses and all(
-            isinstance(parse_seed_address(address), str) for address in seed_addresses
+            isinstance(address, str) for address in seed_addresses
         ):
             # Same-host mirror: place every local daemon on a GPU the
             # source replica does not use, inferred from the source's GPUs.
-            mirror_devices = mirror_device_indices(
-                args.weight_cache_seed, local_world_size
-            )
+            mirror_devices = mirror_device_indices(seed_addresses, local_world_size)
 
         procs: list[BaseProcess] = []
         for group_index, (is_draft, config, init_method) in enumerate(groups):
@@ -431,7 +427,7 @@ class PreloadSubcommand(CLISubcommand):
                 global_rank = dp_rank * pp_size * tp_size + pp_rank * tp_size + tp_rank
                 offset = port_offset + global_rank
                 peer_source = seed_address(
-                    args.weight_cache_seed,
+                    seed_addresses,
                     local_rank,
                     global_rank,
                     port_offset,
