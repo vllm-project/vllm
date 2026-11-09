@@ -49,10 +49,17 @@ def _make_src(layout: str, dtype: torch.dtype) -> torch.Tensor:
         # Transpose view narrowed along the sharded dim (TP>1): unit inner
         # stride with a padded row pitch.
         return base.transpose(-1, -2).narrow(0, 8, 16)
+    if layout == "double_strided":
+        # Strided in both dims, e.g. from a packed/interleaved checkpoint
+        # layout: neither this view nor its transpose is dense, so
+        # _copy_h2d_dst_strided falls through to a gather on dst's side.
+        return base[::2, ::2]
     raise ValueError(layout)
 
 
-@pytest.mark.parametrize("layout", ["contiguous", "transposed", "tp_narrowed"])
+@pytest.mark.parametrize(
+    "layout", ["contiguous", "transposed", "tp_narrowed", "double_strided"]
+)
 @pytest.mark.parametrize("dtype", CPU_DTYPES)
 def test_same_device_matches_plain_copy(layout: str, dtype: torch.dtype):
     src = _make_src(layout, dtype)
@@ -63,7 +70,9 @@ def test_same_device_matches_plain_copy(layout: str, dtype: torch.dtype):
     assert _same_bytes(actual, expected)
 
 
-@pytest.mark.parametrize("layout", ["contiguous", "transposed", "tp_narrowed"])
+@pytest.mark.parametrize(
+    "layout", ["contiguous", "transposed", "tp_narrowed", "double_strided"]
+)
 @pytest.mark.parametrize("dtype", CUDA_DTYPES)
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 def test_h2d_matches_plain_copy(layout: str, dtype: torch.dtype):
@@ -110,7 +119,9 @@ def test_h2d_dtype_conversion():
     assert _same_bytes(actual, expected)
 
 
-@pytest.mark.parametrize("layout", ["contiguous", "transposed", "tp_narrowed"])
+@pytest.mark.parametrize(
+    "layout", ["contiguous", "transposed", "tp_narrowed", "double_strided"]
+)
 @pytest.mark.parametrize("dtype", CPU_DTYPES)
 def test_strided_destination_matches_plain_copy(layout: str, dtype: torch.dtype):
     """A strided destination must still land byte-identical.
@@ -156,6 +167,41 @@ def test_bounded_copy_splits_strided_writes(monkeypatch):
     monkeypatch.undo()
 
     assert len(calls) == cdiv(src.nbytes, _H2D_CHUNK_BYTES)
+    assert torch.equal(strided_dst, src)
+
+
+def test_bounded_copy_splits_wide_rows(monkeypatch):
+    """A single row wider than the chunk-byte bound still gets split.
+
+    `dst.chunk(num_chunks, dim=0)` cannot produce more chunks than rows, so
+    when the chunkable dimension is small relative to the byte budget (few,
+    wide rows, e.g. a TP-narrowed slab with a large hidden dim), a whole-row
+    chunk can still exceed `_H2D_CHUNK_BYTES` unless the inner dimension is
+    split too.
+    """
+    cols = cdiv(_H2D_CHUNK_BYTES, 4) + 1024  # > 1 MiB per row, float32
+    src = torch.arange(2 * cols, dtype=torch.float32).reshape(2, cols)
+    row_bytes = src.nbytes // src.shape[0]
+    assert row_bytes > _H2D_CHUNK_BYTES
+
+    strided_dst = torch.empty(cols, 2).transpose(0, 1)
+    assert not strided_dst.is_contiguous()
+
+    calls = []
+    real_copy = torch.Tensor.copy_
+
+    def counting_copy(self, *args, **kwargs):
+        calls.append(self.nbytes)
+        return real_copy(self, *args, **kwargs)
+
+    monkeypatch.setattr(torch.Tensor, "copy_", counting_copy)
+    _copy_h2d_bounded(strided_dst, src)
+    monkeypatch.undo()
+
+    # Every issued copy must respect the byte bound; without splitting the
+    # inner dimension, a whole-row copy would be `row_bytes`, well over it.
+    assert all(n <= _H2D_CHUNK_BYTES for n in calls)
+    assert len(calls) > src.shape[0]
     assert torch.equal(strided_dst, src)
 
 

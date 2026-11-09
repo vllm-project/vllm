@@ -69,7 +69,9 @@ def _copy_h2d_bounded(dst: torch.Tensor, src: torch.Tensor) -> None:
 
     When ``dst`` is a strided view, such as a padded TP slice, a single
     ``copy_`` can stage the entire view on the device at once. Splitting along
-    the outermost dimension caps that staging buffer instead.
+    the outermost dimension caps that staging buffer, unless a single
+    outermost slice is itself over the bound (few, wide rows), in which case
+    the innermost dimension is split too.
     """
     if dst.is_contiguous() or dst.shape != src.shape:
         # A contiguous destination needs no bound. A shape mismatch means copy_
@@ -79,10 +81,23 @@ def _copy_h2d_bounded(dst: torch.Tensor, src: torch.Tensor) -> None:
         return
 
     num_chunks = max(cdiv(src.nbytes, _H2D_CHUNK_BYTES), 1)
+    row_bytes = src.nbytes // max(src.shape[0], 1)
+    inner_chunks = max(cdiv(row_bytes, _H2D_CHUNK_BYTES), 1) if src.ndim > 1 else 1
     for dst_chunk, src_chunk in zip(
         dst.chunk(num_chunks, dim=0), src.chunk(num_chunks, dim=0), strict=True
     ):
-        dst_chunk.copy_(src_chunk)
+        if inner_chunks == 1:
+            dst_chunk.copy_(src_chunk)
+            continue
+        # dst.chunk(num_chunks, dim=0) cannot split below one row per chunk, so
+        # a row wider than the bound on its own still overshoots it. Split
+        # that row along the innermost dimension too.
+        for dst_sub, src_sub in zip(
+            dst_chunk.chunk(inner_chunks, dim=-1),
+            src_chunk.chunk(inner_chunks, dim=-1),
+            strict=True,
+        ):
+            dst_sub.copy_(src_sub)
 
 
 def _copy_h2d_dst_strided(dst: torch.Tensor, src: torch.Tensor) -> None:
@@ -767,6 +782,9 @@ class RoutedExperts(PluggableLayer):
                     loaded_weight,
                     hidden_dim=0,
                 )
+                # Biases are 1D, so a checkpoint source is always dense; the
+                # dst-strided flip in _copy_h2d_dst_strided has nothing to gain
+                # here and a plain copy_ is used instead.
                 expert_data.copy_(loaded_weight)
             else:
                 self._load_w13(
