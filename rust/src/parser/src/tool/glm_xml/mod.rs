@@ -10,7 +10,7 @@ use winnow::token::{literal, rest, take_until, take_while};
 
 use super::parameters::ToolSchemas;
 use super::utils::{MarkerScanState, parse_buffered_event, safe_text_len_mul, take_until_marker};
-use super::{Result, ToolCallDelta, ToolParserError, ToolParserOutput};
+use super::{JsonStyle, Result, ToolCallDelta, ToolParserError, ToolParserOutput};
 use crate::tool::Tool;
 
 mod glm45_moe;
@@ -94,7 +94,9 @@ impl GlmXmlToolParser {
             GlmEvent::ToolCall { name, raw_params } => {
                 self.mode = GlmMode::AfterToolCall;
                 let arguments = self.tool_parameters.convert_params_with_schema(&name, raw_params);
-                let arguments = serde_json::to_string(&arguments)
+                // The template renders JSON values with Python separators.
+                let arguments = JsonStyle::Spaced
+                    .to_string(&arguments)
                     .map_err(|error| parsing_failed!("failed to serialize arguments: {}", error))?;
 
                 output.push_call(ToolCallDelta {

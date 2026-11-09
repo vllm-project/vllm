@@ -10,7 +10,7 @@ use winnow::token::{literal, take_until};
 
 use super::parameters::ToolSchemas;
 use super::utils::{MarkerScanState, parse_buffered_event, safe_text_len_mul, take_until_marker};
-use super::{Result, ToolCallDelta, ToolParser, ToolParserError, ToolParserOutput};
+use super::{JsonStyle, Result, ToolCallDelta, ToolParser, ToolParserError, ToolParserOutput};
 use crate::tool::{StructuralTagBuilder, Tool};
 
 const TOOL_CALL_START: &str = "<tool_call>";
@@ -125,7 +125,9 @@ impl Qwen3CoderToolParser {
             QwenCoderEvent::ToolCall { name, raw_params } => {
                 self.mode = QwenCoderMode::Text;
                 let arguments = self.tool_parameters.convert_params_with_schema(&name, raw_params);
-                let arguments = serde_json::to_string(&arguments)
+                // The template renders JSON values with Python separators.
+                let arguments = JsonStyle::Spaced
+                    .to_string(&arguments)
                     .map_err(|error| parsing_failed!("failed to serialize arguments: {}", error))?;
 
                 output.push_call(ToolCallDelta {
