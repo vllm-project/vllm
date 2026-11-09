@@ -620,25 +620,6 @@ def has_flashinfer_cutedsl_grouped_gemm_nt_masked() -> bool:
 
 
 @functools.cache
-def has_flashinfer_cutedsl_mxfp8_grouped_gemm_nt_masked() -> bool:
-    """Return `True` if FlashInfer CuteDSL masked MXFP8 MoE is available."""
-    if not has_flashinfer_cutedsl():
-        return False
-
-    required_functions = [
-        ("flashinfer.cute_dsl.blockscaled_gemm", "grouped_gemm_nt_masked"),
-        ("flashinfer", "mxfp8_grouped_quantize"),
-        ("flashinfer", "silu_and_mul_mxfp8_experts_quantize"),
-    ]
-
-    for module_name, attr_name in required_functions:
-        mod = _get_submodule(module_name)
-        if not mod or not hasattr(mod, attr_name):
-            return False
-    return True
-
-
-@functools.cache
 def has_flashinfer_cutedsl_moe_nvfp4() -> bool:
     """Return `True` if FlashInfer cute_dsl_fused_moe_nvfp4 is available."""
     if not has_flashinfer_cutedsl():
@@ -1380,7 +1361,6 @@ __all__ = [
     "has_flashinfer_nvlink_one_sided",
     "has_flashinfer_cutlass_fused_moe",
     "has_flashinfer_cutedsl_grouped_gemm_nt_masked",
-    "has_flashinfer_cutedsl_mxfp8_grouped_gemm_nt_masked",
     "has_flashinfer_recurrent_kda",
     "has_flashinfer_fused_kda_decode",
     "has_flashinfer_cutedsl_moe_nvfp4",

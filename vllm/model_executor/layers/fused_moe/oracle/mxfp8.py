@@ -59,10 +59,10 @@ def _mxfp8_backend_to_kernel_cls(
         return [DeepGemmExperts]
     if backend == Fp8MoeBackend.FLASHINFER_CUTEDSL_BATCHED:
         from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutedsl_batched_moe import (  # noqa: E501
-            FlashInferCuteDSLMxfp8BatchedExperts,
+            FlashInferCuteDSLBatchedExperts,
         )
 
-        return [FlashInferCuteDSLMxfp8BatchedExperts]
+        return [FlashInferCuteDSLBatchedExperts]
     if backend == Fp8MoeBackend.AITER_MXFP8:
         from vllm.model_executor.layers.fused_moe.experts.aiter_mxfp8_moe import (
             AiterMxfp8Experts,
