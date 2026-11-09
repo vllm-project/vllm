@@ -1225,28 +1225,6 @@ class MooncakeConnectorScheduler:
                     else ()
                 )
                 local_block_ids = self.get_sw_clipped_blocks(unhashed_block_ids)
-                if (
-                    self.kv_cache_config.hisparse_host_num_blocks is not None
-                    and num_external_tokens > 0
-                ):
-                    for group_id in self.kv_cache_config.transfer_group_ids:
-                        group = blocks.blocks[group_id]
-                        start = next(
-                            (
-                                i
-                                for i, block in enumerate(group)
-                                if block.block_hash is None and not block.is_null
-                            ),
-                            len(group),
-                        )
-                        if any(
-                            block.block_hash is not None or block.is_null
-                            for block in group[start:]
-                        ):
-                            raise ValueError(
-                                "Mooncake region-mapped imports require an "
-                                "uncached suffix without holes"
-                            )
                 # Get unhashed blocks to pull from remote.
                 self._reqs_need_recv[request.request_id] = (request, local_block_ids)
                 if not any(local_block_ids):
