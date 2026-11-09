@@ -9,7 +9,7 @@ import mmap
 import torch
 
 from vllm.logger import init_logger
-from vllm.utils.math_utils import round_up
+from vllm.utils.math_utils import round_down, round_up
 
 logger = init_logger(__name__)
 
@@ -55,10 +55,11 @@ def host_tensor_offsets(
     *,
     page_size: int = mmap.PAGESIZE,
 ) -> list[int]:
+    chunk_bytes = round_down(max_chunk_bytes, page_size)
     offsets = []
     chunk_start = offset = 0
     for size in tensor_sizes:
-        if offset + size - chunk_start > max_chunk_bytes - page_size:
+        if offset + size - chunk_start > chunk_bytes:
             offset = chunk_start = round_up(offset, page_size)
         offsets.append(offset)
         offset += size
