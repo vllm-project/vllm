@@ -867,6 +867,22 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             linears.append(self.indexer.wq_b)
         return can_fuse_query_quant(linears)
 
+    @cached_property
+    def _can_fuse_rocm_query_quant(self) -> bool:
+        """ROCm q/indexer projections that read row-major MXFP8 scales.
+
+        Kept off `_can_fuse_query_quant` so the CUDA specialized-decode path,
+        which consumes swizzled scales, does not take this producer.
+        """
+        from vllm.models.deepseek_v41.common.ops.query_quant import (
+            can_fuse_query_quant,
+        )
+
+        linears = [self.wq_b]
+        if self.indexer is not None:
+            linears.append(self.indexer.wq_b)
+        return can_fuse_query_quant(linears, row_major=True)
+
     def _split_qkv_and_norm(
         self, qr_kv: torch.Tensor
     ) -> tuple[torch.Tensor | QuantizedActivation, torch.Tensor | None, torch.Tensor]:
@@ -876,7 +892,9 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         other projection backends consume the normalized Q directly.
         """
         qr, kv = qr_kv.split([self.q_lora_rank, self.head_dim], dim=-1)
-        if self.q_lora_rank % 32 == 0 and self._can_fuse_query_quant:
+        if self.q_lora_rank % 32 == 0 and (
+            self._can_fuse_query_quant or self._can_fuse_rocm_query_quant
+        ):
             from vllm.models.deepseek_v41.common.ops.query_quant import (
                 fused_q_kv_rmsnorm_quant,
             )
