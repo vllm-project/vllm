@@ -348,5 +348,6 @@ def mamba_chunk_scan_combined_varlen(
         final_state_indices=final_state_indices,
     )
     if final_states is not None and final_states_out is not None:
-        final_states_out[final_state_indices] = final_states
+        assert final_state_indices is not None
+        final_states_out.index_copy_(0, final_state_indices.long(), final_states)
     return checkpoint_states
