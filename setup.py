@@ -908,6 +908,7 @@ class precompiled_wheel_utils:
         "CMakeLists.txt",
         "pyproject.toml",
         "vllm/_custom_ops.py",
+        "vllm/_cpu_ops.py",
     )
     # Changes here are usually harmless for an older wheel.
     WHEEL_WARNING_PATHS = ("rust", "setup.py")
@@ -1118,7 +1119,6 @@ class precompiled_wheel_utils:
                             "vllm/_C.abi3.so",
                             "vllm/_C_stable_libtorch.abi3.so",
                             "vllm/_moe_C_stable_libtorch.abi3.so",
-                            "vllm/_qutlass_C.abi3.so",
                             "vllm/_flashmla_C.abi3.so",
                             "vllm/_flashmla_extension_C.abi3.so",
                             "vllm/_flashkda_C.abi3.so",
@@ -1532,8 +1532,8 @@ def get_rocm_device_requirements() -> list[str]:
     """GPU kernel packages for TheRock builds.
 
     TheRock ships GPU kernels as separate per-arch wheels selected through
-    ``[device-<arch>]`` extras on torch, torchvision and rocm. Require them for
-    every arch this wheel was compiled for, so ``pip install vllm`` works on
+    `[device-<arch>]` extras on torch, torchvision and rocm. Require them for
+    every arch this wheel was compiled for, so `pip install vllm` works on
     any supported GPU.
     """
     if not _is_hip() or importlib.util.find_spec("rocm_sdk") is None:
@@ -1596,7 +1596,6 @@ if _is_cuda():
         # DeepGEMM requires CUDA 12.3+ (SM90/SM100)
         # Optional since it won't build on unsupported architectures
         ext_modules.append(CMakeExtension(name="vllm._deep_gemm_C", optional=True))
-        ext_modules.append(CMakeExtension(name="vllm._qutlass_C", optional=True))
     # fmha_sm100 is a Python/CuTe-DSL package installed into vllm.third_party.
     ext_modules.append(CMakeExtension(name="vllm.fmha_sm100", optional=True))
     # tml-fa4 is copied into an isolated vllm.third_party package.
@@ -1717,9 +1716,9 @@ setup(
     install_requires=get_requirements(),
     extras_require={
         # AMD Zen CPU optimizations via zentorch
-        "zen": ["zentorch==2.14.0.1"],
+        "zen": ["zentorch==2.14.0.2"],
         "bench": ["pandas", "matplotlib", "seaborn", "datasets", "scipy", "plotly"],
-        "tensorizer": ["tensorizer==2.10.1"],
+        "tensorizer": ["tensorizer==2.12.1"],
         "fastsafetensors": ["fastsafetensors >= 0.3.3"],
         "instanttensor": ["instanttensor >= 0.2.2"],
         "runai": ["runai-model-streamer[s3,gcs,azure] >= 0.17.1"],
