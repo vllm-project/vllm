@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from transformers import PreTrainedConfig
 
 from tests.v1.kv_connector.umbp_test_utils import (
     MemoryRuntime,
@@ -93,7 +94,7 @@ def _uniform_type_kv_cache_config(
 ) -> KVCacheConfig:
     """One UniformTypeKVCacheSpecs group whose two layers have unequal pages.
 
-    Without ``block_stride`` each layer is laid out layer-major with its own
+    Without `block_stride` each layer is laid out layer-major with its own
     page as the block stride; with it both pages share one block-major stride.
     """
     specs = {"layer1": _LAYER1_SPEC, "layer2": layer2}
@@ -219,6 +220,28 @@ def test_namespace_distinguishes_draft_models():
     assert namespace(draft("drafter-a")) == namespace(draft("drafter-a"))
     assert namespace(draft("drafter-a")) != namespace(draft("drafter-b"))
     assert namespace(draft("drafter-a")) != namespace(draft("drafter-a", "v2"))
+
+
+def test_namespace_distinguishes_effective_model_configs():
+    """Overridden RoPE, quantization or dtype must not reuse the defaults' KV."""
+    config = _kv_cache_config()
+
+    def namespace(rope_theta=1e6, quantization=None, dtype=torch.float16, **hf):
+        vllm_config = _vllm_config({"mode": "standalone"})
+        vllm_config.model_config.hf_config = PreTrainedConfig(
+            rope_parameters={"rope_theta": rope_theta, "rope_type": "default"},
+            **hf,
+        )
+        vllm_config.model_config.quantization = quantization
+        vllm_config.model_config.dtype = dtype
+        return UMBPNamespace.from_vllm_config(vllm_config, config).value
+
+    default = namespace()
+    assert namespace() == default
+    assert namespace(name_or_path="/mnt/another-copy") == default
+    assert namespace(rope_theta=1e4) != default
+    assert namespace(quantization="fp8") != default
+    assert namespace(dtype=torch.bfloat16) != default
 
 
 def test_layout_planner_sizes_uniform_type_layers_independently():
@@ -1013,16 +1036,17 @@ def test_scheduler_resumed_request_replaces_stale_block_table():
         SimpleNamespace(get_block_ids=lambda group_ids: ([1, 2],)),
         0,
     )
+    # Preemption frees the blocks; re-admission passes the whole new table.
+    scheduler.update_state_after_alloc(
+        request,
+        SimpleNamespace(get_block_ids=lambda group_ids: ([7, 8],)),
+        0,
+    )
+    scheduled = SimpleNamespace(
+        req_id="resumed", num_computed_tokens=0, block_ids=([7, 8],)
+    )
     metadata = scheduler.build_connector_meta(
-        make_scheduler_output(
-            cached_reqs=SimpleNamespace(
-                req_ids=["resumed"],
-                new_block_ids=[([7, 8],)],
-                num_computed_tokens=[31],
-                resumed_req_ids={"resumed"},
-            ),
-            scheduled_tokens={"resumed": 1},
-        )
+        make_scheduler_output(new_reqs=[scheduled], scheduled_tokens={"resumed": 32})
     )
 
     tracker = scheduler._request_trackers["resumed"]
@@ -1054,7 +1078,6 @@ def test_scheduler_stores_from_cores_current_block_table():
                 req_ids=["r"],
                 new_block_ids=[None],
                 num_computed_tokens=[0],
-                resumed_req_ids=set(),
             ),
             scheduled_tokens={"r": 32},
             block_state=SimpleNamespace(
@@ -1115,7 +1138,6 @@ def test_scheduler_readmission_after_failed_load_uses_new_blocks():
                 req_ids=["readmitted"],
                 new_block_ids=[None],
                 num_computed_tokens=[0],
-                resumed_req_ids=set(),
             ),
             scheduled_tokens={"readmitted": 32},
         )
@@ -1147,6 +1169,37 @@ def test_worker_polls_async_load_without_forward_execution(fail_load):
 
     assert worker.get_finished(set()) == (None, {"req"})
     assert worker.get_block_ids_with_load_errors() == ({1} if fail_load else set())
+
+
+@pytest.mark.parametrize("bulk", [False, True])
+@pytest.mark.parametrize("fail_load", [False, True])
+def test_sync_load_finishes_before_forward_without_layer_hooks(
+    bulk, fail_load, monkeypatch
+):
+    """FULL graph replay skips layer hooks, so sync loads must settle on entry."""
+
+    class _SyncLoadHandle(_WaitRecordingDelayedLoadHandle):
+        def wait(self, job):
+            if not fail_load:
+                return super().wait(job)
+            self.waited.append(job)
+            job.fail(job.keys, "injected load failure")
+            return job
+
+    handle = _SyncLoadHandle()
+    if bulk:
+        monkeypatch.setattr(handle, "load_blocks", handle.load, raising=False)
+    worker = UMBPStoreConnectorWorker(handle)
+    batch = BlockLoadBatch(["sync-load"], [7], [0], "req")
+
+    worker.start_load_kv(None, UMBPConnectorMetadata(load_requests={"req": batch}))
+
+    assert handle.waited == [handle.load_job]
+    assert worker.get_finished(set()) == (None, None)
+    assert worker.get_block_ids_with_load_errors() == ({7} if fail_load else set())
+    stats = worker.get_kv_connector_stats().reduce()
+    assert stats["load_completed"] == (0 if fail_load else 1)
+    assert stats["load_failed"] == (1 if fail_load else 0)
 
 
 def test_forward_does_not_wait_for_async_loads():

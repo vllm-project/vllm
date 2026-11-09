@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """KV cache helper for store."""
 
+import time
 from collections.abc import Iterator
 from dataclasses import dataclass
 from itertools import chain
@@ -21,7 +22,7 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import AttentionBackend
-from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig, iter_layer_specs
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 
 if TYPE_CHECKING:
@@ -323,8 +324,9 @@ def yield_req_data(
     """Yields:
     (req_id, block_id_groups, is_full_table)
 
-    ``is_full_table`` is True when ``block_id_groups`` is the request's whole
-    block table (new and resumed requests) rather than this step's additions.
+    `is_full_table` is True when `block_id_groups` is the request's whole
+    block table (new and resumed requests, which are both in
+    `scheduled_new_reqs`) rather than this step's additions.
     """
     # new requests
     for req_data in scheduler_output.scheduled_new_reqs:
@@ -332,11 +334,8 @@ def yield_req_data(
 
     # cached requests
     cached_reqs = scheduler_output.scheduled_cached_reqs
-    yield from zip(
-        cached_reqs.req_ids,
-        cached_reqs.new_block_ids,
-        (req_id in cached_reqs.resumed_req_ids for req_id in cached_reqs.req_ids),
-    )
+    for req_id, block_id_groups in zip(cached_reqs.req_ids, cached_reqs.new_block_ids):
+        yield req_id, block_id_groups, False
 
 
 def get_current_attn_backends(
@@ -384,7 +383,7 @@ def get_current_attn_backends_and_specs(
     kv_cache_config: KVCacheConfig,
     fallback: list[type[AttentionBackend]],
 ) -> tuple[list[type[AttentionBackend]], list[AttentionSpec | None]]:
-    """Distinct (backend, spec) pairs of the transfer layers, else ``fallback``.
+    """Distinct (backend, spec) pairs of the transfer layers, else `fallback`.
 
     Compressed caches are skipped: their kernel pages never split transferred
     blocks.
@@ -397,8 +396,6 @@ def get_current_attn_backends_and_specs(
         for name, layer in layers.items():
             spec = specs.get(name, group.kv_cache_spec)
             if isinstance(spec, AttentionSpec) and spec.tokens_per_state > 1:
-                layout = vllm_config.cache_config.get_resolved_kv_cache_layout()
-                assert layout.is_block_outermost, "Compressed caches must be packed"
                 continue
             if not isinstance(spec, AttentionSpec):
                 spec = None
@@ -406,6 +403,26 @@ def get_current_attn_backends_and_specs(
     if not pairs:
         return fallback, [None] * len(fallback)
     return [backend for backend, _ in pairs], [spec for _, spec in pairs]
+
+
+def check_compressed_kernel_split(
+    vllm_config: VllmConfig, kv_cache_config: KVCacheConfig, kernel_block_size: int
+) -> None:
+    """A layer-outer layout cannot split compressed pages into kernel blocks."""
+    if vllm_config.cache_config.get_resolved_kv_cache_layout().is_block_outermost:
+        return
+    for group in kv_cache_config.transfer_groups:
+        for spec in iter_layer_specs(group.kv_cache_spec):
+            if (
+                isinstance(spec, AttentionSpec)
+                and spec.tokens_per_state > 1
+                and spec.block_size % kernel_block_size == 0
+                and spec.block_size != kernel_block_size
+            ):
+                raise NotImplementedError(
+                    "Compressed KV caches cannot be split into kernel blocks "
+                    "with a layer-outermost KV cache layout."
+                )
 
 
 def get_current_attn_backend(
@@ -422,7 +439,7 @@ def get_current_attn_backend(
 class EngineTransferInfo:
     """Common per-remote-engine transfer state, computed at handshake.
 
-    Stored per ``(engine_id, pp_rank)`` inside ``TransferTopology._engines``.
+    Stored per `(engine_id, pp_rank)` inside `TransferTopology._engines`.
     """
 
     remote_tp_size: int
@@ -510,8 +527,8 @@ class TransferTopology:
     def dcp_rank(self) -> int:
         """This rank's DCP coverage rank.
 
-        with ``dcp_size in (1, tp_size)`` enforced at the connector boundary, a
-        rank's DCP identity is always exactly ``tp_rank % dcp_size``.
+        with `dcp_size in (1, tp_size)` enforced at the connector boundary, a
+        rank's DCP identity is always exactly `tp_rank % dcp_size`.
         """
         return self.tp_rank % self.dcp_size
 
@@ -523,7 +540,7 @@ class TransferTopology:
         """Calculate the tensor parallel ratio between local and remote TP.
 
         Positive when local_tp >= remote_tp (local workers read from the
-        same remote worker in groups of size ``tp_ratio``).  Negative when
+        same remote worker in groups of size `tp_ratio`).  Negative when
         remote_tp > local_tp (ratio is flipped).
         """
         if self.tp_size >= remote_tp_size:
@@ -569,10 +586,10 @@ class TransferTopology:
         return self.is_mla or self.tp_size > self.total_num_kv_heads
 
     def dcp_source_ranks(self, remote_tp_size: int, remote_dcp_size: int) -> list[int]:
-        """Remote ranks whose DCP slice overlaps mine (MLA, ``remote_dcp_size > 1``).
+        """Remote ranks whose DCP slice overlaps mine (MLA, `remote_dcp_size > 1`).
 
-        Shared by ``handshake_target_ranks`` (who to query metadata from) and
-        ``compute_tp_mapping`` (who to actually read from) — for MLA the two
+        Shared by `handshake_target_ranks` (who to query metadata from) and
+        `compute_tp_mapping` (who to actually read from) — for MLA the two
         questions have the identical answer, since DCP sharding is the only
         thing keeping a remote rank from being interchangeable with any other.
         """
@@ -597,12 +614,12 @@ class TransferTopology:
         its KV cache) sizes — does not require the remote engine to be
         registered yet.
 
-        DCP support is scoped to ``dcp_size in (1, tp_size)`` on each side
+        DCP support is scoped to `dcp_size in (1, tp_size)` on each side
         and DCP sizes that divide one another: neither side ever has a
         partially-duplicated, partially-sharded KV cache. When the
-        remote is not sharded (``remote_dcp_size == 1``) this reduces
+        remote is not sharded (`remote_dcp_size == 1`) this reduces
         exactly to the DTP>=PTP case, since a sharded local side
-        already has ``tp_size == dcp_size``.
+        already has `tp_size == dcp_size`.
         """
         if remote_dcp_size > 1:
             return self.dcp_source_ranks(remote_tp_size, remote_dcp_size)
@@ -617,9 +634,9 @@ class TransferTopology:
         """How many local ranks (in aggregate) read from a given remote rank.
 
         Used by the producer side to know how many reader notifications to
-        wait for before freeing a request's blocks. Reuses ``tp_ratio``
+        wait for before freeing a request's blocks. Reuses `tp_ratio`
         whenever the remote isn't sharded — a sharded local side already
-        has ``tp_size == dcp_size``, so the existing TP-ratio formula is
+        has `tp_size == dcp_size`, so the existing TP-ratio formula is
         already correct there unmodified.
         """
         if remote_dcp_size > 1:
@@ -662,3 +679,54 @@ class TransferTopology:
             f"local_rank={self.tp_rank}, "
             f"remote_block_len={info.remote_block_len})"
         )
+
+
+class CircuitBreaker:
+    """Opens for `cooldown_s` after `failure_threshold` consecutive
+    failures; callers skip requests while it is open. After the cooldown,
+    `allow()` admits a single probe and holds others for `probe_window_s`:
+    a failed probe reopens the breaker, a success closes it, and a probe that
+    never reports back lets the next request probe once the window passes."""
+
+    def __init__(
+        self,
+        name: str,
+        cooldown_s: float,
+        failure_threshold: int,
+        probe_window_s: float,
+    ):
+        assert cooldown_s > 0 and failure_threshold > 0 and probe_window_s > 0
+        self.name = name
+        self.cooldown_s = cooldown_s
+        self.failure_threshold = failure_threshold
+        self.probe_window_s = probe_window_s
+        self._failures = 0
+        self._open_until = 0.0
+
+    @property
+    def is_open(self) -> bool:
+        return time.monotonic() < self._open_until
+
+    def allow(self) -> bool:
+        now = time.monotonic()
+        if now < self._open_until:
+            return False
+        if self._failures >= self.failure_threshold:
+            self._open_until = now + self.probe_window_s
+        return True
+
+    def record_failure(self) -> None:
+        self._failures += 1
+        if self._failures >= self.failure_threshold:
+            self._open_until = time.monotonic() + self.cooldown_s
+            logger.warning(
+                "%s circuit breaker opened after %d consecutive failures; "
+                "skipping requests for %s seconds",
+                self.name,
+                self._failures,
+                self.cooldown_s,
+            )
+
+    def record_success(self) -> None:
+        self._failures = 0
+        self._open_until = 0.0

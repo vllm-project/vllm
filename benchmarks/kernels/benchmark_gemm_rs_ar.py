@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Benchmark the SM100 GEMM-RS/AR kernel against the model's unfused path.
+r"""Benchmark the SM100 GEMM-RS/AR kernel against the model's unfused path.
 
 The baseline is what a model runs without the fusion: the projection's own
-linear kernel followed by vLLM's collective (``sp_reduce_scatter`` for RS,
-``tensor_model_parallel_all_reduce`` for AR), with the collective backend
+linear kernel followed by vLLM's collective (`sp_reduce_scatter` for RS,
+`tensor_model_parallel_all_reduce` for AR), with the collective backend
 chosen by vLLM's dispatch exactly as in serving. The same two kernels are also
 timed bare (the GEMM alone, the collective alone on a precomputed partial);
 their max is the floor a perfectly overlapped fused kernel could reach.
@@ -14,10 +14,15 @@ projections with:
 
     torchrun --nproc-per-node=8 -- benchmarks/kernels/benchmark_gemm_rs_ar.py
 
-or the DeepSeek-V4.1 MXFP8 ``wo_b`` projection at TP4 with:
+or the DeepSeek-V4.1 MXFP8 `wo_b` projection at TP4 with:
 
     torchrun --nproc-per-node=4 -- benchmarks/kernels/benchmark_gemm_rs_ar.py \
         --model deepseek_v41 --backend flashinfer_cutedsl
+
+or the MiniMax-M3 MXFP8 attention O-proj and dense down-proj at TP4 with:
+
+    torchrun --nproc-per-node=4 -- benchmarks/kernels/benchmark_gemm_rs_ar.py \
+        --model minimax_m3 --backend flashinfer_cutedsl
 """
 
 import argparse
@@ -45,10 +50,12 @@ from vllm.models.common.ops.sequence_parallel import sp_reduce_scatter
 
 # Per model: (hidden size N, global input widths K). Kimi-K3 lists the
 # shared-expert down-proj and attention O-proj; DeepSeek-V4.1 lists the
-# ``wo_b`` output projection (o_groups * o_lora_rank).
+# ``wo_b`` output projection (o_groups * o_lora_rank). MiniMax-M3 lists the
+# attention O-proj and the dense-layer down-proj.
 _MODEL_PROJECTIONS = {
     "kimi_k3": (7168, (6144, 12288)),
     "deepseek_v41": (5120, (8192,)),
+    "minimax_m3": (6144, (8192, 12288)),
 }
 
 

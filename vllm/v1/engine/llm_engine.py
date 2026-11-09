@@ -325,6 +325,12 @@ class LLMEngine:
         # 1) Get EngineCoreOutput from the EngineCore.
         with record_function_or_nullcontext("llm_engine step: get_output"):
             outputs = self.engine_core.get_output()
+            if self.dp_group is not None and not getattr(
+                self.engine_core, "last_step_model_executed", True
+            ):
+                # Each DP rank joins one forward's DP sync per step; a step that
+                # ran no forward joins with a dummy batch, as DPEngineCoreProc.
+                self.engine_core.execute_dummy_batch()
 
         # 2) Process EngineCoreOutputs.
         with record_function_or_nullcontext("llm_engine step: process_outputs"):
@@ -417,17 +423,19 @@ class LLMEngine:
         """
         self.engine_core.reset_encoder_cache()
 
-    def sleep(self, level: int = 1, mode: PauseMode = "abort"):
+    def sleep(
+        self, level: int = 1, mode: PauseMode = "abort", reset_connector: bool = True
+    ):
         if level >= 1:
             self.renderer.clear_mm_cache()
-        self.engine_core.sleep(level, mode)
+        self.engine_core.sleep(level, mode, reset_connector)
 
         if self.logger_manager is not None:
             self.logger_manager.record_sleep_state(1, level)
 
-    def release_kv_cache_memory(self) -> None:
+    def release_kv_cache_memory(self, reset_connector: bool = True) -> None:
         self.renderer.clear_mm_cache()
-        self.engine_core.release_kv_cache_memory()
+        self.engine_core.release_kv_cache_memory(reset_connector)
 
         if self.logger_manager is not None:
             self.logger_manager.record_sleep_state(1, 0)
