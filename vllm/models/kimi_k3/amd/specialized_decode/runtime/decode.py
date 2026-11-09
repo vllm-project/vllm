@@ -3,11 +3,11 @@
 """The Kimi-K3 specialized decode executor (layer mode): one routing decision per
 step, then the layer kernels inside the stock layer loop.
 
-Built by the model state once the weights are loaded (``KimiK3ModelState``): checks
-the loaded weights, builds the per-rank launch state (``runner``) and the layer
+Built by the model state once the weights are loaded (`KimiK3ModelState`): checks
+the loaded weights, builds the per-rank launch state (`runner`) and the layer
 kernels of every width, and compiles every build, before memory profiling and graph
-capture. ``prepare_kv`` binds it to every KV cache vLLM allocates. Each step
-``plan`` returns a ``Step`` or None; ``Step.layer(i)`` is the kernel replacing
+capture. `prepare_kv` binds it to every KV cache vLLM allocates. Each step
+`plan` returns a `Step` or None; `Step.layer(i)` is the kernel replacing
 decoder layer i (None for vLLM's layers). Weight reloads are not supported."""
 
 from collections.abc import Callable, Mapping
@@ -50,7 +50,7 @@ Kernel = WholeLayer | FfnLayer | MlaOpsLayer
 
 
 class Step(NamedTuple):
-    """A planned step: ``width`` rows of whole uniform spec-verify requests."""
+    """A planned step: `width` rows of whole uniform spec-verify requests."""
 
     width: int
     attn_metadata: Mapping[str, Any]  # by layer name
@@ -66,7 +66,7 @@ def step_reason(
     attn_metadata, kda_prefix: str, width: int, mla_prefix: str = ""
 ) -> str | None:
     """None if a step's KDA and MLA metadata (identical on every TP rank) are a
-    pure spec-verify step of whole uniform requests filling ``width`` rows, else
+    pure spec-verify step of whole uniform requests filling `width` rows, else
     why not."""
     if not isinstance(attn_metadata, dict):
         return "no metadata"
@@ -95,7 +95,7 @@ def step_reason(
 
 
 def agree(reasons: list[str], group, what: str) -> None:
-    """Raises on every TP rank if any rank has ``reasons``: a rank that refused
+    """Raises on every TP rank if any rank has `reasons`: a rank that refused
     alone would leave the others spinning in-kernel."""
     if not tp_agree(not reasons, group):
         why = "; ".join(reasons) if reasons else "another TP rank refused"
@@ -131,6 +131,10 @@ class SpecializedDecode:
         if m1:
             why = mla_weight_reasons(backbone)
             m1 = tp_agree(not why, tp.cpu_group)
+            if not m1 and dcp.world_size == 1:
+                # DCP1 runs M1c only (``runtime.step_reasons``)
+                agree(why or ["another TP rank's MLA layers"], tp.cpu_group,
+                      "DCP1 without M1")  # fmt: skip
             if not m1:
                 logger.info(
                     "Kimi-K3 specialized decode: the MLA layers run vLLM's "
@@ -212,9 +216,9 @@ class SpecializedDecode:
         - pipeline-parallel stage inputs, and steps before a KV cache is bound
           (profiling, dummy runs);
         - PIECEWISE steps (captured without attention metadata);
-        - widths without kernels (more than MAX_ROWS rows);
+        - widths without kernels (more than max_num_seqs requests);
         - steps that are not pure spec-verify steps of whole uniform requests
-          (``step_reason``).
+          (`step_reason`).
 
         Eager steps run the kernels too. Every predicate is the same on all TP
         ranks: the kernels' mailboxes need every rank on one path. Under FULL

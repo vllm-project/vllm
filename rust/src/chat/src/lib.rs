@@ -39,8 +39,8 @@ pub use reasoning::EffortValue;
 pub use renderer::hf::ChatTemplateContentFormatOption;
 pub use renderer::{
     ChatRenderer, DeepSeekV4ChatRenderer, DeepSeekV32ChatRenderer, DeepSeekV41ChatRenderer,
-    DynChatRenderer, HarmonyChatRenderer, InklingChatRenderer, KimiK3ChatRenderer, MediaPartSource,
-    RenderedPrompt, RendererSelection,
+    DynChatRenderer, HarmonyChatRenderer, InklingChatRenderer, KimiK3ChatRenderer, KimiK3Variant,
+    MediaPartSource, RenderedPrompt, RendererSelection,
 };
 pub use request::{
     ChatContent, ChatContentPart, ChatMessage, ChatOptions, ChatRequest, ChatRole, ChatTool,
@@ -63,9 +63,9 @@ mod request;
 mod stream;
 
 use std::collections::HashMap;
+use std::num::NonZeroU32;
 
 use tracing::warn;
-use vllm_engine_core_client::EngineCoreClient;
 use vllm_engine_core_client::protocol::dtype::ModelDtype;
 use vllm_engine_core_client::protocol::request::ReasoningParserKwargs;
 use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputBackend;
@@ -98,12 +98,12 @@ pub struct ChatRequestProcessor {
 static OUTPUT_GRAMMAR_SKIPPED_ONCE: Once = Once::new();
 
 impl ChatRequestProcessor {
-    /// Create a processor with multimodal support using the effective model
-    /// dtype reported by the engine.
-    fn new(backend: DynChatBackend, model_dtype: ModelDtype, max_model_len: u32) -> Self {
+    /// Create a processor using the effective model dtype and context length
+    /// reported by the engine. Multimodal inputs need the model dtype.
+    fn new(backend: DynChatBackend, model_dtype: Option<ModelDtype>, max_model_len: u32) -> Self {
         Self {
             backend,
-            model_dtype: Some(model_dtype),
+            model_dtype,
             max_model_len: Some(max_model_len as usize),
             tool_call_parser: ParserSelection::Auto,
             reasoning_parser: ParserSelection::Auto,
@@ -282,33 +282,42 @@ impl ChatRequestProcessor {
 
     /// Prepare one chat request without submitting it to an engine.
     ///
-    /// The returned text request is already tokenized: the output processor
-    /// is initialized from the final prompt token IDs and its grammar, if any,
-    /// is applied to the request before it is handed to `text_processor` again
-    /// for lowering.
+    /// The returned text request is already tokenized: the output processors
+    /// are initialized from the final prompt token IDs and their grammar, if
+    /// any, is applied to the request before it is handed to `text_processor`
+    /// again for lowering. The prompt is rendered once; each of the `n`
+    /// samples gets its own output processor, since parsing is stateful.
     pub async fn prepare(
         &self,
         mut request: ChatRequest,
+        n: NonZeroU32,
         text_processor: &TextRequestProcessor,
     ) -> Result<PreparedChatRequest> {
         request.validate()?;
         self.map_reasoning_effort(&mut request);
 
-        let mut output_processor = self.backend.new_chat_output_processor(
-            &mut request,
-            NewChatOutputProcessorOptions {
-                tool_call_parser: &self.tool_call_parser,
-                reasoning_parser: &self.reasoning_parser,
-                tool_strict_level: self.tool_strict_level,
-            },
-        )?;
+        let mut output_processors = (0..n.get())
+            .map(|_| {
+                self.backend.new_chat_output_processor(
+                    &mut request,
+                    NewChatOutputProcessorOptions {
+                        tool_call_parser: &self.tool_call_parser,
+                        reasoning_parser: &self.reasoning_parser,
+                        tool_strict_level: self.tool_strict_level,
+                    },
+                )
+            })
+            .collect::<Result<Vec<_>>>()?;
         let (mut text_request, prompt_text) = self.prepare_text_request(request).await?;
 
-        // Initialize the output processor from the final prompt token IDs and apply
-        // the output grammar to the request, if any.
+        // Initialize the output processors from the final prompt token IDs and
+        // apply the output grammar to the request, if any. The processors of
+        // one request build the same grammar, so the first one's is applied.
         let prompt_token_ids = text_processor.tokenize_in_place(&mut text_request)?;
-        output_processor.initialize(prompt_token_ids)?;
-        let grammar = output_processor.build_output_grammar()?;
+        for output_processor in &mut output_processors {
+            output_processor.initialize(prompt_token_ids)?;
+        }
+        let grammar = output_processors[0].build_output_grammar()?;
         // Output grammars are xgrammar structural tags. With another backend the
         // request keeps its own constraint and parsing runs unconstrained.
         match text_processor.structured_outputs_backend() {
@@ -328,7 +337,7 @@ impl ChatRequestProcessor {
 
         Ok(PreparedChatRequest {
             text_request,
-            output_processor,
+            output_processors,
             prompt_text,
         })
     }
@@ -338,8 +347,8 @@ impl ChatRequestProcessor {
 pub struct PreparedChatRequest {
     /// The tokenized text request, with any output grammar applied.
     pub text_request: TextRequest,
-    /// Request-scoped processor for the decoded output.
-    pub output_processor: DynChatOutputProcessor,
+    /// Request-scoped processors for the decoded output, one per sample.
+    pub output_processors: Vec<DynChatOutputProcessor>,
     /// The rendered prompt text, when the request asked for it and the
     /// renderer produced text.
     pub prompt_text: Option<String>,
@@ -359,18 +368,15 @@ impl ChatLlm {
     /// Create a new chat facade from a text-generation facade plus a chat
     /// backend.
     pub fn new(text: TextLlm, backend: DynChatBackend) -> Self {
-        let model_dtype = text.engine_core_client().model_dtype();
-        let max_model_len = text.engine_core_client().max_model_len();
+        let info = text.llm().info();
+        let processor = ChatRequestProcessor::new(backend, info.model_dtype, info.max_model_len);
 
-        Self {
-            text,
-            processor: ChatRequestProcessor::new(backend, model_dtype, max_model_len),
-        }
+        Self { text, processor }
     }
 
     /// Convenience constructor for one shared backend object that implements
     /// both text and chat responsibilities.
-    pub fn from_shared_backend(llm: Llm, backend: DynChatTextBackend) -> Self {
+    pub fn from_shared_backend(llm: impl Llm, backend: DynChatTextBackend) -> Self {
         let text = TextLlm::new(llm, backend.clone());
         Self::new(text, backend)
     }
@@ -442,12 +448,6 @@ impl ChatLlm {
         self.text.model_id()
     }
 
-    /// Expose the underlying engine-core client for low-level utility/admin
-    /// calls.
-    pub fn engine_core_client(&self) -> &EngineCoreClient {
-        self.text.engine_core_client()
-    }
-
     /// Whether the loaded backend has a registered multimodal processor.
     pub fn supports_multimodal(&self) -> bool {
         self.processor.backend.multimodal_model_info().is_some()
@@ -476,17 +476,39 @@ impl ChatLlm {
 
     /// Render, tokenize, and submit one chat request.
     pub async fn chat(&self, request: ChatRequest) -> Result<ChatEventStream> {
+        let mut streams = self.chat_n(request, NonZeroU32::MIN).await?;
+        Ok(streams.pop().expect("one event stream per sample"))
+    }
+
+    /// Render and tokenize one chat request once, submit it as `n` parallel
+    /// samples, and return one event stream per sample, in index order.
+    pub async fn chat_n(
+        &self,
+        request: ChatRequest,
+        n: NonZeroU32,
+    ) -> Result<Vec<ChatEventStream>> {
         let PreparedChatRequest {
             text_request,
-            output_processor,
+            output_processors,
             prompt_text,
-        } = self.processor.prepare(request, self.text.request_processor()).await?;
+        } = self.processor.prepare(request, n, self.text.request_processor()).await?;
         let request_id = text_request.request_id.clone();
-        let decoded_stream = self.text.generate(text_request).await?.map_err(Error::from).boxed();
+        let prepared = self.text.request_processor().prepare(text_request)?;
+        let sampling = prepared.effective_sampling();
+        let decoded_streams = self.text.generate_prepared_n(prepared, n).await?;
 
-        let structured_stream = output_processor.process(decoded_stream)?;
-
-        Ok(ChatEventStream::new(request_id, structured_stream).with_prompt_text(prompt_text))
+        output_processors
+            .into_iter()
+            .zip(decoded_streams)
+            .map(|(output_processor, decoded_stream)| {
+                let structured_stream =
+                    output_processor.process(decoded_stream.map_err(Error::from).boxed())?;
+                Ok(
+                    ChatEventStream::new(request_id.clone(), sampling, structured_stream)
+                        .with_prompt_text(prompt_text.clone()),
+                )
+            })
+            .collect()
     }
 
     /// Abort in-flight requests by their external (user-supplied) request ids.
@@ -543,7 +565,7 @@ mod tests {
         )
         .unwrap_err();
 
-        expect_test::expect!["tool parser `definitely_missing_tool_parser` is not registered (choose from: beam, deepseek_v3, deepseek_v31, deepseek_v32, deepseek_v4, deepseek_v41, gemma4, glm45, glm47, granite4, hermes, hf, hy_v3, hy_v4, inkling, internlm, kimi_k2, kimi_k3, llama3_json, llama4_json, mimo, minimax_m2, minimax_m3, mistral, muse, musespark1x, phi4_mini_json, qwen3_coder, qwen3_json, qwen3_xml, seed_oss, step5)"].assert_eq(&error.to_report_string());
+        expect_test::expect!["tool parser `definitely_missing_tool_parser` is not registered (choose from: beam, deepseek_v3, deepseek_v31, deepseek_v32, deepseek_v4, deepseek_v41, gemma4, glm45, glm47, granite4, hermes, hf, hy_v3, hy_v4, inkling, internlm, kimi_k2, kimi_k3, llama3_json, llama4_json, mimo, minimax_m2, minimax_m3, mistral, muse, musespark, phi4_mini_json, qwen3_coder, qwen3_json, qwen3_xml, seed_oss, step5)"].assert_eq(&error.to_report_string());
     }
 
     #[test]
@@ -554,6 +576,6 @@ mod tests {
         )
         .unwrap_err();
 
-        expect_test::expect!["reasoning parser `definitely_missing_reasoning_parser` is not registered (choose from: beam, cohere_cmd, deepseek_r1, deepseek_v3, deepseek_v4, deepseek_v41, gemma4, glm45, glm47, hf, hy_v3, hy_v4, inkling, kimi, kimi_k2, kimi_k3, mimo, minimax_m2, minimax_m3, muse, musespark1x, nemotron_v3, qwen3, seed_oss, step3, step3p5, step5)"].assert_eq(&error.to_report_string());
+        expect_test::expect!["reasoning parser `definitely_missing_reasoning_parser` is not registered (choose from: beam, cohere_cmd, deepseek_r1, deepseek_v3, deepseek_v4, deepseek_v41, gemma4, glm45, glm47, hf, hy_v3, hy_v4, inkling, kimi, kimi_k2, kimi_k3, mimo, minimax_m2, minimax_m3, muse, musespark, nemotron_v3, qwen3, seed_oss, step3, step3p5, step5)"].assert_eq(&error.to_report_string());
     }
 }

@@ -1,16 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The layer kernels: each takes and returns what
-``KimiDecoderLayer.forward`` does with AttnRes, ``(prefix_sum, block_residual,
-prefix_delta)``.
+`KimiDecoderLayer.forward` does with AttnRes, `(prefix_sum, block_residual,
+prefix_delta)`.
 
-- ``WholeLayer`` (KDA layers): K1 (AttnRes, in_proj, f_b, spec conv, the KDA
+- `WholeLayer` (KDA layers): K1 (AttnRes, in_proj, f_b, spec conv, the KDA
   recurrence, the gated norm) writes o_proj's input; K2 runs o_proj, its
   all-reduce, the MLP AttnRes and the latent MoE.
-- ``FfnLayer`` (MLA layers): M1a (AttnRes, the query prologue, the KV write
+- `FfnLayer` (MLA layers): M1a (AttnRes, the query prologue, the KV write
   and, at DCP8, the query gather), AITER's decode, M1b (at DCP8 the LSE
   combine, W_UV and the gate), then K2.
-- ``MlaOpsLayer`` (MLA layers M1 cannot serve, ``m1_reasons``): vLLM's AttnRes
+- `MlaOpsLayer` (MLA layers M1 cannot serve, `m1_reasons`): vLLM's AttnRes
   and MLA attention ops, then K2.
 
 Weights are views of the loaded parameters, taken at every launch.
@@ -28,7 +28,7 @@ if TYPE_CHECKING:
 
 
 def _k2_key(layer, runner: MonoRunner, tokens: int, reset: bool, m1b: bool = False):
-    """``m1b``: an MLA layer's K2 that runs its M1b first (``runner.fuse_m1b``)."""
+    """`m1b`: an MLA layer's K2 that runs its M1b first (`runner.fuse_m1b`)."""
     from vllm.models.kimi_k3.amd.specialized_decode.mono import layer as k2
 
     m = layer.mlp
@@ -56,9 +56,10 @@ def _k2_key(layer, runner: MonoRunner, tokens: int, reset: bool, m1b: bool = Fal
 
 
 def m1c_at(runner: MonoRunner, width: int) -> bool:
-    """``runner.m1c`` at this width: M1c's KV splits must share out evenly over
-    the requests (qlen 4 has 80: a 12-row width, 3 requests, runs the asm
-    decode instead)."""
+    """`runner.m1c` at this width: M1c's KV splits must share out evenly over
+    the requests (qlen 4 has 80: a 12-row width, 3 requests, can't). DCP1 runs
+    M1c only, so startup refuses a max_num_seqs with such a width
+    (`runtime.step_reasons`)."""
     from vllm.models.kimi_k3.amd.specialized_decode.mono.attention import (
         mla_attn_geom,
     )
@@ -68,7 +69,7 @@ def m1c_at(runner: MonoRunner, width: int) -> bool:
 
 
 def m1c_splits(runner: MonoRunner, width: int) -> int:
-    """M1b's ``splits``: M1c's, when K2 runs it at this width (else 0)."""
+    """M1b's `splits`: M1c's, when K2 runs it at this width (else 0)."""
     from vllm.models.kimi_k3.amd.specialized_decode.mono.attention import (
         mla_attn_geom,
     )
@@ -86,10 +87,10 @@ def _k2(
     m1b_in=None,
     m1c_in=None,
 ):
-    """K2 from ``core`` (o_proj's input): ``prefix`` updated in place (written,
-    when ``reset``), the MoE output returned. ``m1b_in``: ``mla_post``'s inputs,
-    when this launch runs M1b and writes ``core`` itself; ``m1c_in``: M1c's
-    (``mla_attn.host_args``'s), when it runs M1c before."""
+    """K2 from `core` (o_proj's input): `prefix` updated in place (written,
+    when `reset`), the MoE output returned. `m1b_in`: `mla_post`'s inputs,
+    when this launch runs M1b and writes `core` itself; `m1c_in`: M1c's
+    (`mla_attn.host_args`'s), when it runs M1c before."""
     from vllm.models.kimi_k3.amd.specialized_decode.mono import layer as k2
     from vllm.models.kimi_k3.amd.specialized_decode.mono.attention.kda import HIDDEN
     from vllm.models.kimi_k3.amd.specialized_decode.mono.stages import moe
@@ -131,8 +132,8 @@ def _k2(
 
 
 def compile_build(key) -> None:
-    """Compiles one launch's kernel (a ``K2Build``, ``KdaPreBuild``,
-    ``MlaPreBuild`` or ``MlaPostBuild``) without running it: FlyDSL's
+    """Compiles one launch's kernel (a `K2Build`, `KdaPreBuild`,
+    `MlaPreBuild` or `MlaPostBuild`) without running it: FlyDSL's
     compile-only mode returns before the launch."""
     import os
 
@@ -285,7 +286,7 @@ class FfnLayer(_Layer):
 
     def _cprr_heads(self) -> int:
         """The head count AITER's cprr decode pads the gathered query to, 0 if
-        it doesn't pad. The warm-up's guess; ``launch`` reads the step's."""
+        it doesn't pad. The warm-up's guess; `launch` reads the step's."""
         from vllm.models.kimi_k3.amd.specialized_decode.mono.attention.mla import NH
         from vllm.v1.attention.backends.mla import rocm_aiter_mla as am
 

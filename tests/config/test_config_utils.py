@@ -10,7 +10,8 @@ from vllm.config.cache import CacheConfig
 from vllm.config.scheduler import SchedulerConfig
 from vllm.config.utils import (
     get_attr_docs,
-    get_hash_factors,
+    get_compile_factors,
+    hash_config,
     hash_factors,
     normalize_value,
 )
@@ -32,7 +33,7 @@ def expected_path(p_str: str = ".") -> str:
     return p.expanduser().resolve().as_posix()
 
 
-# Minimal dataclass to test get_hash_factors.
+# Minimal dataclass to test get_compile_factors.
 # Avoid importing heavy vLLM configs.
 @dataclass
 class SimpleConfig:
@@ -143,8 +144,8 @@ def test_enum_vs_int_disambiguation():
     assert enum_val == "raw_logits"
 
     # Build factor dicts from configs with int vs enum
-    f_int = get_hash_factors(SimpleConfig(1), set())
-    f_enum = get_hash_factors(SimpleConfig(DummyLogprobsMode.RAW_LOGITS), set())
+    f_int = get_compile_factors(SimpleConfig(1), set())
+    f_enum = get_compile_factors(SimpleConfig(DummyLogprobsMode.RAW_LOGITS), set())
     # The int case remains a primitive value
     assert f_int["a"] == 1
     # The enum case becomes a tagged tuple ("module.QualName", "raw_logits")
@@ -159,6 +160,36 @@ def test_enum_vs_int_disambiguation():
     h_enum = hash_factors(f_enum)
     assert isinstance(h_int, str) and len(h_int) == 64
     assert isinstance(h_enum, str) and len(h_enum) == 64
+
+
+@dataclass
+class NestedConfig:
+    graph_field: int = 0
+    runtime_field: int = 0
+
+    def compile_factors(self):
+        return {"graph_field": self.graph_field}
+
+
+def test_nested_config_uses_its_compile_factors():
+    """Nested configs (directly or in containers) hash only their own factors,
+    so parents need no special cases for them."""
+    base = get_compile_factors(SimpleConfig(NestedConfig(), [NestedConfig()]), set())
+    runtime = get_compile_factors(
+        SimpleConfig(NestedConfig(runtime_field=1), [NestedConfig(runtime_field=1)]),
+        set(),
+    )
+    graph = get_compile_factors(SimpleConfig(NestedConfig(graph_field=1)), set())
+    assert base["a"] == {"graph_field": 0}
+    assert hash_factors(base) == hash_factors(runtime)
+    assert hash_factors(base) != hash_factors(graph)
+
+
+def test_unknown_ignored_factor_raises():
+    """A typo in ignored_factors must not silently hash the field it meant to
+    exclude."""
+    with pytest.raises(ValueError, match="unknown fields"):
+        get_compile_factors(SimpleConfig(1), {"not_a_field"})
 
 
 def test_classes_are_types():
@@ -188,11 +219,11 @@ def test_ir_config_hash_initializes_provider_and_tracks_implementation(monkeypat
 
     monkeypatch.setattr(current_platform, "import_ir_kernels", import_ir_kernels)
     config = IrOpPriorityConfig(rms_norm=["test_lazy_provider"])
-    first_hash = config.compute_hash()
-    assert config.compute_hash() == first_hash
+    first_hash = hash_config(config)
+    assert hash_config(config) == first_hash
 
     implementation.uuid = lambda: "changed-implementation"
-    assert config.compute_hash() != first_hash
+    assert hash_config(config) != first_hash
 
 
 def test_get_attr_docs_includes_inherited_fields():
@@ -264,44 +295,57 @@ def test_cache_config_hash_ignores_kv_cache_sizing_knobs():
     documented fast-boot knob silently invalidates the torch.compile cache
     and forces a full recompile.
     """
-    base_hash = CacheConfig().compute_hash()
-    assert CacheConfig(kv_cache_memory_bytes=1 << 30).compute_hash() == base_hash
-    assert CacheConfig(gpu_memory_utilization=0.5).compute_hash() == base_hash
+    base_hash = hash_config(CacheConfig())
+    assert hash_config(CacheConfig(kv_cache_memory_bytes=1 << 30)) == base_hash
+    assert hash_config(CacheConfig(gpu_memory_utilization=0.5)) == base_hash
     config = CacheConfig()
     config.effective_attention_block_size = 64
-    assert config.compute_hash() == base_hash
+    assert hash_config(config) == base_hash
 
 
 def test_scheduler_config_hash_includes_max_num_seqs():
     """Per-request workspace sizes must invalidate compiled graphs."""
-    base_hash = SchedulerConfig(
-        max_model_len=8192,
-        is_encoder_decoder=False,
-        max_num_batched_tokens=8192,
-        max_num_seqs=128,
-    ).compute_hash()
-    larger_batch_hash = SchedulerConfig(
-        max_model_len=8192,
-        is_encoder_decoder=False,
-        max_num_batched_tokens=8192,
-        max_num_seqs=1024,
-    ).compute_hash()
+    base_hash = hash_config(
+        SchedulerConfig(
+            max_model_len=8192,
+            is_encoder_decoder=False,
+            max_num_batched_tokens=8192,
+            max_num_seqs=128,
+        )
+    )
+    larger_batch_hash = hash_config(
+        SchedulerConfig(
+            max_model_len=8192,
+            is_encoder_decoder=False,
+            max_num_batched_tokens=8192,
+            max_num_seqs=1024,
+        )
+    )
 
     assert larger_batch_hash != base_hash
 
 
+def test_cache_config_default_block_size():
+    config = CacheConfig()
+    assert config.block_size == CacheConfig.DEFAULT_BLOCK_SIZE
+    assert config.user_specified_block_size is False
+    explicit = CacheConfig(block_size=16)
+    assert explicit.block_size == 16
+    assert explicit.user_specified_block_size is True
+
+
 def test_cache_config_hash_ignores_prefix_cache_retention_interval():
-    base_hash = CacheConfig().compute_hash()
-    assert CacheConfig(prefix_cache_retention_interval=64).compute_hash() == base_hash
+    base_hash = hash_config(CacheConfig())
+    assert hash_config(CacheConfig(prefix_cache_retention_interval=64)) == base_hash
 
 
 def test_cache_config_hash_ignores_runtime_offload_sizing():
     config = CacheConfig()
-    base_hash = config.compute_hash()
+    base_hash = hash_config(config)
 
     config.simple_cpu_offload_num_blocks = 42
 
-    assert config.compute_hash() == base_hash
+    assert hash_config(config) == base_hash
 
 
 def test_envs_compile_factors_relocation_invariant(tmp_path):

@@ -5,8 +5,7 @@ import uuid
 from dataclasses import field
 from typing import Any, Literal, get_args
 
-from vllm.config.utils import config
-from vllm.utils.hashing import safe_hash
+from vllm.config.utils import CompileFactors, config
 
 KVProducer = Literal["kv_producer", "kv_both"]
 KVConsumer = Literal["kv_consumer", "kv_both"]
@@ -50,7 +49,12 @@ def hisparse_host_pool_gib(
 # Connectors that register the device KV cache with an RDMA engine whatever
 # their buffer device; NIXL is checked separately as it can stage through host.
 _KV_CACHE_REGISTERING_CONNECTORS = frozenset(
-    {"MooncakeConnector", "MooncakeStoreConnector", "MoRIIOConnector"}
+    {
+        "MooncakeConnector",
+        "MooncakeStoreConnector",
+        "MoRIIOConnector",
+        "UMBPStoreConnector",
+    }
 )
 
 
@@ -98,22 +102,14 @@ class KVTransferConfig:
     'recompute': reschedule the request to recompute failed blocks
     'fail': immediately fail the request with an error finish reason (default)"""
 
-    def compute_hash(self) -> str:
-        """WARNING: Whenever a new field is added to this config,
-        ensure that it is included in the factors list if
-        it affects the computation graph.
+    def compile_factors(self) -> CompileFactors:
+        """This config does not affect the compiled graph.
 
-        Provide a hash that uniquely identifies all the configs
-        that affect the structure of the computation
-        graph from input ids/embeddings to the final hidden states,
-        excluding anything before input ids/embeddings and after
-        the final hidden states.
+        If a field starts affecting it, return
+        `get_compile_factors(self, ignored_factors)` with every other field in
+        `ignored_factors`.
         """
-        # no factors to consider.
-        # this config will not affect the computation graph.
-        factors: list[Any] = []
-        hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()
-        return hash_str
+        return {}
 
     def __post_init__(self) -> None:
         if self.engine_id is None:
@@ -169,24 +165,30 @@ class KVTransferConfig:
             ]
         return any(config.get("custom_mem_pool") for config in configs)
 
+    def _connector_children(self) -> list[dict[str, Any]]:
+        if self.kv_connector == "MultiConnector":
+            return self.kv_connector_extra_config.get("connectors", [])
+        return [{"kv_connector": self.kv_connector}]
+
+    def uses_nixl_on_device_memory(self) -> bool:
+        """Whether NIXL transfers the device KV cache itself, directly or in
+        MultiConnector. With a CPU kv_buffer_device it uses host staging buffers."""
+        return any(
+            (child.get("kv_connector") or "").startswith("Nixl")
+            and child.get("kv_buffer_device", self.kv_buffer_device) != "cpu"
+            for child in self._connector_children()
+        )
+
     def registers_kv_cache_memory(self) -> bool:
         """Whether a connector registers the device KV cache itself with UCX or
-        RDMA (NIXL, Mooncake, MoRIIO), directly or in MultiConnector. NIXL with
-        a CPU kv_buffer_device registers only its host staging buffers."""
-        children = [{"kv_connector": self.kv_connector}]
-        if self.kv_connector == "MultiConnector":
-            children = self.kv_connector_extra_config.get("connectors", [])
-        for child in children:
-            name = child.get("kv_connector") or ""
-            if name in _KV_CACHE_REGISTERING_CONNECTORS:
-                return True
-            buffer_device = child.get("kv_buffer_device", self.kv_buffer_device)
-            if name.startswith("Nixl") and buffer_device != "cpu":
-                return True
-        return False
+        RDMA (NIXL, Mooncake, MoRIIO, UMBP), directly or in MultiConnector."""
+        return self.uses_nixl_on_device_memory() or any(
+            child.get("kv_connector") in _KV_CACHE_REGISTERING_CONNECTORS
+            for child in self._connector_children()
+        )
 
     def has_connector(self, connector_name: str) -> bool:
-        """Whether ``connector_name`` is configured, directly or in MultiConnector."""
+        """Whether `connector_name` is configured, directly or in MultiConnector."""
         if self.kv_connector == connector_name:
             return True
         return self.kv_connector == "MultiConnector" and any(
