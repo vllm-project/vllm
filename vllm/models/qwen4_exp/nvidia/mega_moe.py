@@ -6,12 +6,12 @@ Routed experts stored as MXFP8, MXFP4 or BF16 load straight into the kernel
 layout. `--quantization` / `--quantization-config` can force another MegaMoE
 format, and the experts are then requantized as they load. Block-FP8 experts,
 which MegaMoE cannot run, are requantized to MXFP8 unless a format is forced.
-The MTP drafter's config does not carry the online config. The sigmoid-gated
-shared expert stays unfused and runs on an aux stream next to the router.
+The MTP drafter's config does not carry the online config, so its experts
+take the default format. The sigmoid-gated shared expert stays unfused and runs
+on an aux stream next to the router.
 """
 
 from collections.abc import Iterable
-from importlib import import_module
 
 import torch
 from torch import nn
@@ -71,26 +71,7 @@ _SHARD_TENSORS = {
 _ONLINE_FORMATS = {kMxfp8Static: MEGA_MOE_MXFP8, kMxfp4Static: MEGA_MOE_MXFP4}
 
 
-def dequantize_experts(
-    weight: torch.Tensor, scale: torch.Tensor | None, checkpoint_format: str
-) -> torch.Tensor:
-    """Dequantize `[N, K]` checkpoint expert weights to FP32."""
-    if checkpoint_format == "bf16":
-        return weight.float()
-    assert scale is not None
-    if checkpoint_format == "mxfp4":
-        values = break_fp4_bytes(weight.view(torch.uint8), torch.float32)
-    else:
-        values = weight.float()
-    if checkpoint_format != "fp8_block":
-        # UE8M0 exponents.
-        scale = (scale.view(torch.uint8).to(torch.int32) << 23).view(torch.float32)
-    rows, cols = values.shape
-    scale = scale.float().repeat_interleave(rows // scale.shape[0], 0)
-    return values * scale.repeat_interleave(cols // scale.shape[1], 1)
-
-
-def requantize_experts(
+def _requantize(
     weight: torch.Tensor,
     scale: torch.Tensor | None,
     checkpoint_format: str,
@@ -98,18 +79,27 @@ def requantize_experts(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Requantize `[N, K]` checkpoint expert weights to MXFP8 or MXFP4.
 
-    Rounds as DeepGEMM's own casts and returns the scales as `[N, K // 32]`
-    UE8M0 exponents.
+    Dequantizes to FP32, rounds as DeepGEMM's own casts and returns the scales
+    as `[N, K // 32]` UE8M0 exponents.
     """
-    utils = import_module(f"{_import_deep_gemm().__name__}.utils")
+    if checkpoint_format == "mxfp4":
+        x = break_fp4_bytes(weight.view(torch.uint8), torch.float32)
+    else:
+        x = weight.float()
+    if scale is not None:
+        if checkpoint_format != "fp8_block":
+            # UE8M0 exponents.
+            scale = (scale.view(torch.uint8).to(torch.int32) << 23).view(torch.float32)
+        rows, cols = x.shape
+        scale = scale.float().repeat_interleave(rows // scale.shape[0], 0)
+        x = x * scale.repeat_interleave(cols // scale.shape[1], 1)
+    deep_gemm = _import_deep_gemm()
     cast = (
-        utils.per_token_cast_to_fp4
+        deep_gemm.per_token_cast_to_fp4
         if weight_format is MEGA_MOE_MXFP4
-        else utils.per_token_cast_to_fp8
+        else deep_gemm.per_token_cast_to_fp8
     )
-    values, sf = cast(
-        dequantize_experts(weight, scale, checkpoint_format), use_ue8m0=True, gran_k=32
-    )
+    values, sf = cast(x, use_ue8m0=True, gran_k=32)
     # Power-of-two FP32 scales: the exponent bits are the UE8M0 value.
     return values, (sf.view(torch.int32) >> 23).to(torch.uint8)
 
@@ -194,8 +184,8 @@ def mega_moe_expert_formats(
 
 
 class _CheckLoaded(QuantizeMethodBase):
-    """Fails on expert shards that got their weight but not their scale, or
-    the reverse."""
+    """Run by vLLM after loading: fails if an expert shard got its weight but
+    not its scale, or the reverse, instead of leaving that expert zeroed."""
 
     requires_device_loading = False
     supports_pre_processed_weights = True
@@ -296,7 +286,7 @@ class Qwen4ExpMegaMoEExperts(DeepGemmMegaMoEExperts):
         scale = None
         if self.checkpoint_format != "bf16":
             scale = pending[self._shard_tensors[1]].to(self._device)
-        weight, scale = requantize_experts(
+        weight, scale = _requantize(
             pending["weight"].to(self._device),
             scale,
             self.checkpoint_format,
