@@ -196,6 +196,56 @@ def test_with_ngram_gpu_spec_decoding(monkeypatch: pytest.MonkeyPatch):
     run_tests(monkeypatch, MODEL, test_configs, [{}])
 
 
+@single_gpu_only
+def test_async_spec_decode_structured_output(vllm_runner):
+    """Test async scheduling with speculative decoding and structured output.
+    Exercises both when a structured output request has sampling deferred and not.
+    """
+    with vllm_runner(
+        MODEL,
+        max_model_len=20,
+        max_num_seqs=1,
+        async_scheduling=True,
+        enforce_eager=True,
+        disable_log_stats=False,
+        structured_outputs_config={"backend": "xgrammar"},
+        speculative_config={
+            "method": "ngram_gpu",
+            "prompt_lookup_max": 1,
+            "prompt_lookup_min": 1,
+            "num_speculative_tokens": 7,
+        },
+    ) as runner:
+        assert runner.llm.llm_engine.vllm_config.scheduler_config.async_scheduling
+        # After prefill, batch A proposes `a a a a a a a`.
+        # Batch B accepts `a a a a b` and proposes `c d`.
+        # Batch C is empty due to max_model_len.
+        # Batch D accepts `c e`.
+        prompt = "a a a a a a a a b c d"
+        constrained_output = "a a a a a b c e"
+        prompt_token_ids = runner.llm.get_tokenizer().encode(
+            prompt, add_special_tokens=False
+        )
+        assert len(prompt_token_ids) == 11
+        metrics_before = runner.llm.get_metrics()
+        outputs = runner.llm.generate(
+            runner.get_inputs([prompt_token_ids]),
+            SamplingParams(
+                temperature=0,
+                structured_outputs=StructuredOutputsParams(regex=constrained_output),
+            ),
+            use_tqdm=False,
+        )
+        metrics_after = runner.llm.get_metrics()
+
+    assert len(outputs) == 1
+    assert outputs[0].finished
+    assert outputs[0].outputs
+    assert outputs[0].outputs[0].finish_reason == "stop"
+    assert outputs[0].outputs[0].text == constrained_output
+    assert _get_count(metrics_before, metrics_after, "vllm:spec_decode_num_drafts") > 0
+
+
 @dynamo_config.patch(cache_size_limit=16)
 def run_tests(
     monkeypatch: pytest.MonkeyPatch,
