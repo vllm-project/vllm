@@ -84,6 +84,11 @@ class DeepseekV32DecoderLayer(torch.nn.Module):
             and parallel_config.pipeline_parallel_size == 1
         )
         self.replicate_attn = envs.VLLM_DSA_REPLICATE_ATTN
+        if self.replicate_attn:
+            # Nothing re-syncs ranks after a replicated block: autotune must agree.
+            from vllm.triton_utils.tp_synced_autotune import install
+
+            install()
         if self.replicate_attn and (
             parallel_config.use_sequence_parallel_moe
             or parallel_config.decode_context_parallel_size > 1
