@@ -117,13 +117,13 @@ class FusedMoEActivationFormat(Enum):
     PaddedStandard = ("padded_standard",)
 
     def is_superset(self, pf_format: "FusedMoEActivationFormat") -> bool:
-        """Whether this (experts) format is a superset of ``pf_format``, i.e.
-        an experts kernel declaring ``self`` can consume activations produced
-        by a prepare/finalize step in ``pf_format``.
+        """Whether this (experts) format is a superset of `pf_format`, i.e.
+        an experts kernel declaring `self` can consume activations produced
+        by a prepare/finalize step in `pf_format`.
 
-        The relation is directional: ``self`` is the experts format and
-        ``pf_format`` is the prepare/finalize format. ``PaddedStandard`` is a
-        superset of ``Standard`` (a padding-aware kernel treats unpadded input
+        The relation is directional: `self` is the experts format and
+        `pf_format` is the prepare/finalize format. `PaddedStandard` is a
+        superset of `Standard` (a padding-aware kernel treats unpadded input
         as the zero-padding case), but not vice versa. All other formats are
         only supersets of themselves.
         """
@@ -136,7 +136,7 @@ class FusedMoEActivationFormat(Enum):
 
     @property
     def is_batched(self) -> bool:
-        """Whether this is the disjoint ``BatchedExperts`` format."""
+        """Whether this is the disjoint `BatchedExperts` format."""
         return self == FusedMoEActivationFormat.BatchedExperts
 
 
@@ -312,9 +312,9 @@ class FusedMoEPrepareAndFinalize(ABC):
         return self.supports_async()
 
     def supports_deferred_moe_finalize(self) -> bool:
-        """Whether ``finalize`` can be skipped for a deferring consumer.
+        """Whether `finalize` can be skipped for a deferring consumer.
 
-        An implementation opts in only if everything it does in ``finalize``
+        An implementation opts in only if everything it does in `finalize`
         -- the top-k reduction, and any combine or reduce-scatter -- is work
         the consumer takes over.
         """
@@ -578,8 +578,8 @@ class FusedMoEExperts(ABC):
     kept_constants: tuple[str, ...] = ()
 
     def keep_constants(self, layer: torch.nn.Module, prefix: str = "_experts_") -> None:
-        """Point ``kept_constants`` at tensors kept on ``layer`` (as ``prefix +
-        name.lstrip("_")``), refilled in place: every post-load rerun builds a
+        """Point `kept_constants` at tensors kept on `layer` (as `prefix +
+        name.lstrip("_")`), refilled in place: every post-load rerun builds a
         new experts object, and captured CUDA graphs read the first one's."""
         for name in self.kept_constants:
             value = getattr(self, name, None)
@@ -624,8 +624,8 @@ class FusedMoEExperts(ABC):
     @abstractmethod
     def activation_format() -> FusedMoEActivationFormat:
         """The activation format this experts kernel consumes. A kernel declaring
-        ``PaddedStandard`` also accepts ``Standard`` input (see
-        ``FusedMoEActivationFormat.is_superset``).
+        `PaddedStandard` also accepts `Standard` input (see
+        `FusedMoEActivationFormat.is_superset`).
         """
         raise NotImplementedError
 
@@ -1112,7 +1112,7 @@ class FusedMoEExpertsMonolithic(FusedMoEExperts):
         """Whether this expert supports routing replay capture.
 
         Subclasses backed by a kernel that exposes routed expert IDs
-        (e.g. FlashInfer's ``routing_replay_out``) should override.
+        (e.g. FlashInfer's `routing_replay_out`) should override.
         """
         return False
 
@@ -1134,12 +1134,12 @@ class FusedMoEExpertsMonolithic(FusedMoEExperts):
         topk_group: int | None = None,
         routing_replay_out: torch.Tensor | None = None,
     ) -> torch.Tensor | UnfinalizedMoEOutput:
-        """Same as ``FusedMoEExperts.apply``, except uses router_logits as opposed
+        """Same as `FusedMoEExperts.apply`, except uses router_logits as opposed
         to the topk_ids and topk_weights. This is useful for kernels
         with fused router and fused_experts (e.g. FLASHINFER_TRTLLM).
 
-        Kernels that ``supports_routing_replay_capture`` write each token's
-        routed expert ids into the leading rows of ``routing_replay_out``.
+        Kernels that `supports_routing_replay_capture` write each token's
+        routed expert ids into the leading rows of `routing_replay_out`.
         """
         raise NotImplementedError
 

@@ -563,7 +563,7 @@ def group_leader_block_sum(
     warps: cutlass.Constexpr[int],
     leader_stride: cutlass.Constexpr[int],
 ) -> Float32:
-    """Block sum of the values held by every ``leader_stride``-th lane."""
+    """Block sum of the values held by every `leader_stride`-th lane."""
     lane = cute.arch.lane_idx()
     warp = cute.arch.warp_idx()
     for offset in cutlass.range_constexpr(1, WARP_SIZE):
@@ -657,7 +657,7 @@ def to_cute(tensor: torch.Tensor, assumed_align: int = 16) -> cute.Tensor:
 def to_cute_dynamic(
     tensor: torch.Tensor, alignment: int, *, divisibility: int
 ) -> cute.Tensor:
-    """A 1-D view whose length is a runtime shape divisible by ``divisibility``."""
+    """A 1-D view whose length is a runtime shape divisible by `divisibility`."""
     return to_cute(tensor, alignment).mark_compact_shape_dynamic(
         mode=0, divisibility=divisibility
     )
