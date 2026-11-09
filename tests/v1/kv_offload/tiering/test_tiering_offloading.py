@@ -10,6 +10,7 @@ These tests verify:
 5. Eviction coordination between tiers
 """
 
+import os
 import threading
 import uuid
 from collections.abc import Iterable
@@ -1997,7 +1998,8 @@ def test_tiering_spec_rejects_a_tier_that_declares_the_reserved_tier_label():
 
 
 def test_tiering_spec_segments_region_and_skips_scheduler_prefault(monkeypatch):
-    """The scheduler maps the workers' segments without pre-faulting them."""
+    """The scheduler maps the workers' segments without pre-faulting or pinning
+    them, and releasing its mapping leaves the workers' files in place."""
     page = region_module.mmap.PAGESIZE
     monkeypatch.setattr(region_module, "_MIN_SEGMENT_BYTES", page)
     populated: list[int] = []
@@ -2020,12 +2022,13 @@ def test_tiering_spec_segments_region_and_skips_scheduler_prefault(monkeypatch):
     spec = TieringOffloadingSpec(config)
     try:
         worker_populated = len(populated)
-        spec.get_manager()
+        manager = spec.get_manager()
         scheduler = spec._scheduler_mmap
         assert worker_populated > 0 and len(populated) == worker_populated
         assert len(scheduler._segments) > 1
         assert scheduler._segments == worker._segments
+        assert not scheduler.is_pinned
+        manager.shutdown()
+        assert all(os.path.exists(path) for path, _, _ in worker._segments)
     finally:
-        if spec._manager is not None:
-            spec._manager.shutdown()
         worker.cleanup()
