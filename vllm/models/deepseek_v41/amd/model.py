@@ -306,6 +306,10 @@ class DeepseekV4DecoderLayer(nn.Module):
             # reduces it on the others.
             self.attn.wo_b.reduce_results = False
 
+    def process_weights_after_loading(self) -> None:
+        if self.mono is not None:
+            self.mono.build_runner(self.attn_norm.weight.device)
+
     @staticmethod
     def _hc_collapse(x: torch.Tensor, pre_mix: torch.Tensor) -> torch.Tensor:
         """Hyper-connection collapse used by DSpark on ROCm."""
