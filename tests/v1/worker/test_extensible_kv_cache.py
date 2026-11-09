@@ -770,3 +770,34 @@ def test_capture_gets_the_memory_warmup_committed(vmm, vllm_runner, monkeypatch)
     # Only the null block stays committed for capture.
     assert committed_at_capture == [1]
     assert outputs[True] == outputs[False]
+
+
+@requires_cuda
+def test_drafter_capture_writes_kv_only_to_the_null_block(
+    vmm, vllm_runner, monkeypatch
+):
+    """CUDA graph capture's dummy steps, the drafter's included, write KV only
+    to the null block: with warmup's blocks unmapped, a write through the
+    block-table rows warmup left behind faults."""
+    from vllm.v1.worker.gpu.model_runner import GPUModelRunner
+
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    capture_model = GPUModelRunner.capture_model
+
+    def capture_with_only_the_null_block(self, *args, **kwargs):
+        self.extensible_kv_cache.commit(1, shrink=True)
+        return capture_model(self, *args, **kwargs)
+
+    monkeypatch.setattr(
+        GPUModelRunner, "capture_model", capture_with_only_the_null_block
+    )
+    with vllm_runner(
+        "Qwen/Qwen3.5-0.8B",
+        max_model_len=1024,
+        max_num_seqs=1,
+        enable_chunked_prefill=True,
+        enable_prefix_caching=True,
+        enable_extensible_kv_cache=True,
+        speculative_config={"method": "mtp", "num_speculative_tokens": 3},
+    ) as runner:
+        runner.generate_greedy(["The capital of France is"], max_tokens=16)
