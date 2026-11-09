@@ -376,14 +376,16 @@ def can_enable_torch_compile(vllm_config: "VllmConfig") -> bool:
     Defaults to `True` but is disabled in the following situations:
 
     - The model uses dynamic rope scaling that can still rescale within
-      `max_model_len` (otherwise `freeze_rope_updates` removes it).
+      `max_model_len` (otherwise `maybe_disable_dynamic_rope_update` removes it).
     """
     text_config = vllm_config.model_config.hf_config.get_text_config()
     rope_types = {rp["rope_type"] for rp in iter_rope_parameters(text_config)}
     return "dynamic" not in rope_types or dynamic_rope_update_is_noop(vllm_config)
 
 
-def freeze_rope_updates(model: nn.Module, vllm_config: "VllmConfig") -> None:
+def maybe_disable_dynamic_rope_update(
+    model: nn.Module, vllm_config: "VllmConfig"
+) -> None:
     """Skip `@dynamic_rope_update` in rotary modules where `inv_freq` can be fixed.
 
     The update syncs on `torch.max(position_ids)` every forward, which breaks

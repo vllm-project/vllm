@@ -15,7 +15,7 @@ from transformers.models.phi3.modeling_phi3 import Phi3RotaryEmbedding
 
 from vllm.model_executor.models.transformers.utils import (
     can_enable_torch_compile,
-    freeze_rope_updates,
+    maybe_disable_dynamic_rope_update,
 )
 
 MAX_POSITION_EMBEDDINGS = 128
@@ -70,14 +70,14 @@ def test_can_enable_torch_compile(rope_parameters, max_model_len, compilable):
         ),
     ],
 )
-def test_freeze_noop_dynamic_rope(monkeypatch, config, rotary_cls):
+def test_disable_noop_dynamic_rope(monkeypatch, config, rotary_cls):
     """The update no longer syncs and the frequencies are unchanged."""
     inputs = torch.zeros(1, 8, 64), torch.arange(8)[None, :]
     rotary_emb = rotary_cls(config)
     expected = rotary_emb(*inputs)
 
     vllm_config = make_vllm_config(config, MAX_POSITION_EMBEDDINGS)
-    freeze_rope_updates(rotary_emb, vllm_config)
+    maybe_disable_dynamic_rope_update(rotary_emb, vllm_config)
 
     def no_sync(*args, **kwargs):
         raise AssertionError("dynamic rope update still runs")
@@ -108,7 +108,7 @@ def test_freeze_longrope(use_long):
 
     rotary_emb = Phi3RotaryEmbedding(config)
     vllm_config = make_vllm_config(config, original + int(use_long))
-    freeze_rope_updates(rotary_emb, vllm_config)
+    maybe_disable_dynamic_rope_update(rotary_emb, vllm_config)
 
     assert rotary_emb.rope_type == "default"
     actual = rotary_emb(x, short)
