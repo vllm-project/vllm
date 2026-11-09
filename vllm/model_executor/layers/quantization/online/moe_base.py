@@ -18,6 +18,9 @@ from vllm.model_executor.layers.quantization.online.arrival import OnlineArrival
 from vllm.model_executor.layers.quantization.online.requantization import (
     OnlineRequantizationMixin,
 )
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    amax_for_moe_weight_quant,
+)
 from vllm.model_executor.model_loader.reload.layerwise import (
     initialize_online_processing,
 )
@@ -35,6 +38,14 @@ class OnlineMoEMethodBase(
 
     def __init__(self, moe: FusedMoEConfig):
         super().__init__(moe)
+
+    def all_reduce_amax(self, amax: torch.Tensor) -> torch.Tensor:
+        return amax_for_moe_weight_quant(amax, self.moe.tp_size)
+
+    def _w2_scale_reduced(self, name: str) -> bool:
+        """For per-row w2 scales: under expert TP they span the sharded
+        intermediate dim, so they are reduced across ranks."""
+        return name == "w2_weight" and self.moe.tp_size > 1
 
     def create_weights(
         self,
@@ -140,9 +151,9 @@ class OnlineMoEMethodBase(
         initialize_online_processing(layer)
 
     def _row_local(self, layer: torch.nn.Module, name: str, group: int) -> int | None:
-        """``group`` if parameter ``name`` can be quantized on arrival: its
+        """`group` if parameter `name` can be quantized on arrival: its
         loads copy only checkpoint rows (the base loader, which also leaves
-        padding zero) at ``group``-aligned row offsets."""
+        padding zero) at `group`-aligned row offsets."""
         param = getattr(layer, name, None)
         if name not in ("w13_weight", "w2_weight") or not hasattr(
             param, "weight_loader_numel"

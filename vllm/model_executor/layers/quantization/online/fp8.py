@@ -140,6 +140,9 @@ class OnlineLinearBase(OnlineArrivalMixin, OnlineRequantizationMixin, LinearMeth
         self.out_dtype = torch.get_default_dtype()
         self.input_dtype = get_current_vllm_config().model_config.dtype
 
+    def all_reduce_amax(self, amax: torch.Tensor) -> torch.Tensor:
+        return amax_for_tp_weight_quant(amax, True)
+
     def get_weight_for_quantization(self, layer: torch.nn.Module) -> torch.Tensor:
         if self.requantization_source is None:
             return layer.weight
@@ -520,7 +523,7 @@ class Fp8PtpcOnlineLinearMethod(OnlineLinearBase):
         self, layer: Module, name: str, weight: torch.Tensor
     ) -> tuple[torch.Tensor, ...]:
         amax = weight_amax(weight, dim=-1, keepdim=True)
-        amax = amax_for_tp_weight_quant(amax, self.reduces_across_ranks(layer, name))
+        amax = self.reduce_amax(layer, name, amax)
         weight_scale = _fp8_channel_scale(amax)
         return _fp8_quant_per_channel(weight, weight_scale), weight_scale
 
@@ -875,17 +878,16 @@ class Fp8PtpcOnlineMoEMethod(_Fp8OnlineMoEBase):
         return self._row_local(layer, name, 1)
 
     def reduces_across_ranks(self, layer: Module, name: str) -> bool:
-        # w2's scale is reduced over the ranks sharding its input dim
-        return name == "w2_weight" and self.moe.tp_size > 1
+        return self._w2_scale_reduced(name)
 
     def quantize_param(
         self, layer: Module, name: str, weight: torch.Tensor
     ) -> tuple[torch.Tensor, ...]:
         qweight = torch.empty_like(weight, dtype=current_platform.fp8_dtype())
         if name == "w2_weight":
-            amax = weight_amax(weight, dim=-1, keepdim=True)
-            if self.reduces_across_ranks(layer, name):
-                amax = amax_for_moe_weight_quant(amax, self.moe.tp_size)
+            amax = self.reduce_amax(
+                layer, name, weight_amax(weight, dim=-1, keepdim=True)
+            )
             scale = _fp8_channel_scale(amax)
             for expert in range(weight.shape[0]):
                 qweight[expert] = _fp8_quant_per_channel(weight[expert], scale[expert])

@@ -168,18 +168,15 @@ class _OnlineMethod(_Method):
 
 
 class _RowwiseOnlineMethod(OnlineArrivalMixin, _OnlineMethod):
-    """An online scheme with one int8 scale per ``group`` rows: a direct
+    """An online scheme with one int8 scale per `group` rows: a direct
     reload quantizes each arriving shard at once."""
 
-    def __init__(self, group, reduces=False):
+    def __init__(self, group):
         super().__init__(self._quantize)
-        self.group, self.reduces = group, reduces
+        self.group = group
 
     def arrival_row_group(self, layer, name):
         return self.group if name == "weight" else None
-
-    def reduces_across_ranks(self, layer, name):
-        return self.reduces
 
     def quantize_param(self, layer, name, weight):
         rows, cols = weight.shape
@@ -530,18 +527,14 @@ class TestOnlineStaging:
             param.weight_loader(param, torch.ones(param.shape[1:]), expert_id=expert)
             assert layer.quant_method.processed == (i == len(loads) - 1)
 
-    @pytest.mark.parametrize(
-        "group,reduces,on_arrival",
-        [(1, False, True), (2, False, True), (4, False, False), (1, True, False)],
-    )
+    @pytest.mark.parametrize("group,on_arrival", [(1, True), (2, True), (4, False)])
     def test_row_local_scheme_quantizes_shards_on_arrival(
-        self, monkeypatch, group, reduces, on_arrival
+        self, monkeypatch, group, on_arrival
     ):
         # a scheme whose scales cover only their own rows quantizes each
         # arriving shard (here the two halves of a merged weight) at once,
-        # holding no high-precision copy; a shard that splits a group of rows,
-        # or a scale reduced across ranks, is buffered instead; either way the
-        # result equals a cold start
+        # holding no high-precision copy; a shard that splits a group of rows
+        # is buffered instead; either way the result equals a cold start
         init = _ToyModel.__init__
 
         def merged(param, loaded_weight, rows=None):
@@ -550,7 +543,7 @@ class TestOnlineStaging:
         def with_rowwise_scheme(self):
             init(self)
             online = self.deq.online
-            online.quant_method = _RowwiseOnlineMethod(group, reduces)
+            online.quant_method = _RowwiseOnlineMethod(group)
             self.deq.quant_method = _Method(lambda layer: None)
             online.weight.weight_loader = merged
             initialize_online_processing(online)
@@ -615,7 +608,7 @@ def _scheme(cls, **attrs):
     return method
 
 
-def _schemes():
+def _schemes(tp_size=1):
     from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import Mxfp4MoeBackend
     from vllm.model_executor.layers.quantization.online.fp8 import (
         Fp8PerBlockOnlineLinearMethod,
@@ -636,7 +629,7 @@ def _schemes():
     )
 
     moe = SimpleNamespace(
-        tp_size=1,
+        tp_size=tp_size,
         intermediate_size_per_partition_unpadded=256,
         hidden_dim_unpadded=256,
     )
@@ -656,21 +649,21 @@ def _schemes():
     }
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="quantization kernels")
-@pytest.mark.parametrize(
-    "scheme",
-    [
-        "fp8-per-channel-linear",
-        "fp8-per-block-linear",
-        "mxfp8-linear",
-        "mxfp4-linear",
-        "fp8-per-channel-moe",
-        "fp8-per-block-moe",
-        "mxfp8-moe",
-        "mxfp4-moe",
-        "int8-moe",
-    ],
+_SCHEMES = (
+    "fp8-per-channel-linear",
+    "fp8-per-block-linear",
+    "mxfp8-linear",
+    "mxfp4-linear",
+    "fp8-per-channel-moe",
+    "fp8-per-block-moe",
+    "mxfp8-moe",
+    "mxfp4-moe",
+    "int8-moe",
 )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="quantization kernels")
+@pytest.mark.parametrize("scheme", _SCHEMES)
 def test_row_local_scheme_quantizes_on_arrival_as_whole(scheme):
     # each real scheme with row-local scales: quantizing the arriving shards
     # into the outputs (no high-precision buffer) gives the bytes quantizing
@@ -679,6 +672,58 @@ def test_row_local_scheme_quantizes_on_arrival_as_whole(scheme):
     moe = scheme.endswith("moe")
     for name in ("w13_weight", "w2_weight") if moe else ("weight",):
         _check_arrival_equals_whole(method, moe, name)
+
+
+def _arrival_layer(method, moe, tp_size=1):
+    """A layer of `method` with 256 x 256 weights, row parallel at `tp_size`."""
+    shape = (2, 256, 256) if moe else (256, 256)
+    layer = torch.nn.Module()
+    layer.quant_method = method
+    layer.tp_size, layer.logical_widths = tp_size, [128, 128]
+    layer.input_size, layer.input_size_per_partition = 256 * tp_size, 256
+    layer.output_size = layer.output_size_per_partition = 256
+    for name in ("w13_weight", "w2_weight") if moe else ("weight",):
+        meta = torch.empty(shape, device="meta", dtype=torch.bfloat16)
+        param = torch.nn.Parameter(meta, False)
+        param.weight_loader_numel = param.numel()
+        layer.register_parameter(name, param)
+    return layer, shape
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="quantization kernels")
+@pytest.mark.parametrize("scheme", list(_SCHEMES))
+def test_scale_reduced_across_ranks_is_buffered(monkeypatch, scheme):
+    # at TP 2 (row parallel, expert TP) each real scheme's `quantize_param`
+    # reduces a scale across ranks exactly when its `reduces_across_ranks`
+    # says so, and such a parameter is not quantized on arrival
+    from vllm.model_executor.layers.quantization.utils import quant_utils
+    from vllm.model_executor.model_loader.reload.layerwise import (
+        _quantize_on_arrival,
+    )
+    from vllm.model_executor.model_loader.reload.types import (
+        LayerReloadingInfo,
+        RecordedCopies,
+    )
+
+    reduced: list[torch.Tensor] = []
+    monkeypatch.setattr(
+        torch.distributed, "all_reduce", lambda t, **_: reduced.append(t)
+    )
+    group = SimpleNamespace(device_group=None)
+    monkeypatch.setattr(quant_utils, "get_tp_group", lambda: group)
+    monkeypatch.setattr(quant_utils, "get_ep_group", lambda: group)
+    method = _schemes(tp_size=2)[scheme]
+    moe = scheme.endswith("moe")
+    layer, shape = _arrival_layer(method, moe, tp_size=2)
+    for name in ("w13_weight", "w2_weight") if moe else ("weight",):
+        reduced.clear()
+        weight = torch.randn(shape, dtype=torch.bfloat16, device="cuda")
+        method.quantize_param(layer, name, weight)
+        reduces = method.reduces_across_ranks(layer, name)
+        assert bool(reduced) is reduces, name
+        info = LayerReloadingInfo(({}, {}), torch.device("cuda"))
+        if reduces:
+            assert not _quantize_on_arrival(layer, info, name, RecordedCopies())
 
 
 def _check_arrival_equals_whole(method, moe, name):
@@ -690,15 +735,7 @@ def _check_arrival_equals_whole(method, moe, name):
         RecordedCopies,
     )
 
-    shape = (2, 256, 256) if moe else (256, 256)
-    layer = torch.nn.Module()
-    layer.quant_method = method
-    layer.tp_size, layer.logical_widths = 1, [128, 128]
-    for param_name in ("w13_weight", "w2_weight") if moe else (name,):
-        meta = torch.empty(shape, device="meta", dtype=torch.bfloat16)
-        param = torch.nn.Parameter(meta, False)
-        param.weight_loader_numel = param.numel()
-        layer.register_parameter(param_name, param)
+    layer, shape = _arrival_layer(method, moe)
     param = getattr(layer, name)
     group = method.arrival_row_group(layer, name)
     assert group is not None

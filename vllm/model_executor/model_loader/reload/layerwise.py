@@ -14,6 +14,7 @@ from vllm.config import ModelConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import is_deferred_attention_layer
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
+from vllm.model_executor.layers.quantization.online.arrival import OnlineArrivalMixin
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     finalize_model_weights,
@@ -385,9 +386,9 @@ def _on_current_stream(tensor: torch.Tensor) -> None:
 def _row_box(
     param: torch.Tensor, size, stride, offset: int, group: int
 ) -> tuple[tuple[int, ...], tuple[int, ...], int, int, int] | None:
-    """Where a copy into ``param`` (contiguous, rows on dim -2) landed:
+    """Where a copy into `param` (contiguous, rows on dim -2) landed:
     (leading starts, leading sizes, first row, end row, columns), if it is a
-    box of whole ``group``-aligned rows from column 0. None otherwise."""
+    box of whole `group`-aligned rows from column 0. None otherwise."""
     shape, strides, ndim = param.shape, param.stride(), len(size)
     if param.dim() < 2 or not param.is_contiguous() or not 0 < ndim <= param.dim():
         return None
@@ -412,12 +413,13 @@ def _quantize_on_arrival(
     name: str,
     copies: RecordedCopies,
 ) -> bool:
-    """Quantize the rows a load copied into parameter ``name`` straight into
+    """Quantize the rows a load copied into parameter `name` straight into
     its quantized outputs, if its scheme quantizes rows apart: nothing of the
     load is then buffered. False if the parameter needs its whole tensor."""
     method = layer.quant_method
-    row_group = getattr(method, "arrival_row_group", None)
-    group = row_group(layer, name) if row_group is not None else None
+    if not isinstance(method, OnlineArrivalMixin):
+        return False
+    group = method.arrival_row_group(layer, name)
     if group is None or method.reduces_across_ranks(layer, name):
         return False
     if any(buffered == name for buffered, _ in info.loaded_weights):

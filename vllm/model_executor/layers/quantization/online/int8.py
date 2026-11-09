@@ -23,7 +23,6 @@ from vllm.model_executor.layers.quantization.online.moe_base import (
     OnlineMoEMethodBase,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    amax_for_moe_weight_quant,
     kInt8DynamicTokenSym,
     kInt8StaticChannelSym,
     weight_amax,
@@ -63,22 +62,19 @@ class Int8OnlineMoEMethod(OnlineMoEMethodBase):
         return self._row_local(layer, name, 1)
 
     def reduces_across_ranks(self, layer: Module, name: str) -> bool:
-        # w2's scale is reduced over the ranks sharding its input dim
-        return name == "w2_weight" and self.moe.tp_size > 1
+        return self._w2_scale_reduced(name)
 
     def quantize_param(
         self, layer: Module, name: str, weight: torch.Tensor
     ) -> tuple[torch.Tensor, ...]:
-        """Per-row int8; the scale as ``(experts, rows, 1)``."""
+        """Per-row int8; the scale as `(experts, rows, 1)`."""
         vmax = torch.iinfo(torch.int8).max
         qweight = torch.empty_like(weight, dtype=torch.int8)
         scale = torch.zeros(
             *weight.shape[:2], 1, device=weight.device, dtype=torch.float32
         )
         if name == "w2_weight":
-            amax = weight_amax(weight, dim=-1)
-            if self.reduces_across_ranks(layer, name):
-                amax = amax_for_moe_weight_quant(amax, self.moe.tp_size)
+            amax = self.reduce_amax(layer, name, weight_amax(weight, dim=-1))
         for expert in range(weight.shape[0]):
             w = weight[expert, :, :]
             if name == "w2_weight":
