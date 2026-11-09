@@ -28,7 +28,7 @@ physical experts.
 import threading
 import time
 from collections import deque
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
 import torch
@@ -40,7 +40,6 @@ from vllm.distributed.parallel_state import (
     GroupCoordinator,
     get_ep_group,
     get_eplb_group,
-    get_node_count,
     in_the_same_node_as,
 )
 from vllm.distributed.stateless_coordinator import StatelessGroupCoordinator
@@ -54,7 +53,7 @@ from vllm.utils.torch_utils import PIN_MEMORY
 from .async_worker import start_async_worker
 from .eplb_communicator import EplbCommunicator, create_eplb_communicator
 from .eplb_utils import CpuGpuEvent
-from .policy import EPLB_POLICIES, AbstractEplbPolicy, DefaultEplbPolicy
+from .policy import EPLB_POLICIES, AbstractEplbPolicy
 from .rebalance_execute import (
     AsyncEplbLayerResult,
     copy_rows,
@@ -79,8 +78,7 @@ class EplbStats:
 
     global_expert_load_window: torch.Tensor
     """
-    Experts load window.
-    Shape: (window_size, num_moe_layers, num_physical_experts)
+    Aggregate logical-expert loads, shape (num_moe_layers, num_logical_experts).
     """
     num_replicas: int
     """
@@ -251,16 +249,13 @@ class EplbState:
         self.parallel_config = parallel_config
         self.device = device
         self.model_states: dict[str, EplbModelState] = {}
-        self.policy: type[AbstractEplbPolicy] = DefaultEplbPolicy
-        """
-        Selected EPLB algorithm class
-        """
+        self.policy = self.create_policy()
         self.expert_load_window_step: int = 0
         """
         Current step in the sliding window.
 
-        Different from `expert_rearrangement_step`, 
-        each EP rank may have its own `expert_load_window_step`.
+        Different from `expert_rearrangement_step`, each EP rank may have its
+        own `expert_load_window_step`.
         """
         self.expert_load_window_size: int = 0
         """
@@ -315,15 +310,17 @@ class EplbState:
         """
         Background thread handling async transfers.
         """
+        self._stop_async = threading.Event()
         self.async_worker_error: Exception | None = None
         """
         Exception that stopped the async worker thread, if any.
         """
+
         self.device_index: int | None = None
         """
         Device index for the async EPLB worker thread.
         """
-        if self.device.type in ("cuda", "xpu"):
+        if self.device.type != "cpu":
             self.device_index = self.device.index
             if self.device_index is None and torch.accelerator.is_available():
                 self.device_index = torch.accelerator.current_device_index()
@@ -378,6 +375,68 @@ class EplbState:
                 f"{new_model.num_redundant_experts} {new_model.num_physical_experts} "
                 f"{new_model.num_logical_experts} {new_model.num_expert_groups}"
             )
+
+    def create_model_communicator(
+        self,
+        model: MixtureOfExperts,
+        expert_buffer: list[torch.Tensor] | None,
+        group_coordinator: GroupCoordinator,
+    ) -> EplbCommunicator:
+        """Create the communicator used by a model's EPLB transfers."""
+        backend = self.parallel_config.eplb_config.communicator
+        assert backend is not None
+        return create_eplb_communicator(
+            group_coordinator, backend, model.expert_weights, expert_buffer
+        )
+
+    def create_policy(self) -> AbstractEplbPolicy:
+        """Create the policy shared by every model in this EPLB state."""
+        return EPLB_POLICIES[self.parallel_config.eplb_config.policy]()
+
+    def rebalance_experts(
+        self,
+        model_state: EplbModelState,
+        weight: torch.Tensor,
+        num_replicas: int,
+        num_groups: int,
+        num_nodes: int,
+        num_ranks: int,
+        old_global_expert_indices: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Plan a model's placement through the existing policy interface."""
+        target = self.policy.rebalance_experts(
+            weight,
+            num_replicas,
+            num_groups,
+            num_nodes,
+            num_ranks,
+            old_global_expert_indices,
+        )
+        valid_dtype = target.dtype in (torch.int32, torch.int64)
+        if target.device.type != "cpu" or not valid_dtype:
+            raise ValueError("EPLB policy target must be a CPU int32 or int64 tensor")
+        return target
+
+    def _commit_rebalance(
+        self,
+        model_state: EplbModelState,
+        new_physical_to_logical_map: torch.Tensor,
+        layer_idx: int | None = None,
+    ) -> None:
+        committed_layers: Sequence[int]
+        if layer_idx is None:
+            _commit_eplb_maps(model_state, new_physical_to_logical_map)
+            committed_layers = range(model_state.model.num_moe_layers)
+        else:
+            _commit_eplb_maps_for_layer(
+                model_state,
+                new_physical_to_logical_map,
+                layer_idx,
+            )
+            committed_layers = (layer_idx,)
+
+        for committed_layer in committed_layers:
+            self.on_layer_committed(model_state, committed_layer)
 
     def add_model(
         self,
@@ -497,10 +556,6 @@ class EplbState:
         )
         self.expert_rearrangement_step_interval = eplb_step_interval
 
-        policy_type = self.parallel_config.eplb_config.policy
-        self.policy = EPLB_POLICIES[policy_type]
-        logger.debug("Selected EPLB policy: %s", policy_type)
-
         # num_ubatches is 0 when DBO is disabled.
         num_ubatches = max(1, self.parallel_config.num_ubatches)
         num_unpadded_tokens_tensors = [
@@ -524,11 +579,8 @@ class EplbState:
             if backend == "symm_mem"
             else [torch.empty_like(w) for w in model.expert_weights[0]]
         )
-        communicator = create_eplb_communicator(
-            group_coordinator=get_eplb_group(),
-            backend=backend,
-            expert_weights=model.expert_weights,
-            expert_buffer=expert_buffer,
+        communicator = self.create_model_communicator(
+            model, expert_buffer, get_eplb_group()
         )
         expert_buffer = communicator.owned_expert_buffer or expert_buffer
         assert expert_buffer is not None
@@ -722,6 +774,7 @@ class EplbState:
                     _move_to_workspace(
                         model_state=eplb_model_state,
                         ep_rank=ep_group.rank(),
+                        commit_rebalance=self._commit_rebalance,
                     )
                     if not self._async_rearrangement_in_progress():
                         # Start the next interval after the final commit, allowing
@@ -780,6 +833,8 @@ class EplbState:
                 (progress == slowest).nonzero().flatten().tolist(),
                 stage,
             )
+    def on_layer_committed(self, model_state: EplbModelState, layer_idx: int) -> None:
+        """Run device-specific work after the maps and weights are committed."""
 
     def _maybe_log_balancedness(self) -> None:
         pending = self._pending_balancedness
@@ -914,7 +969,7 @@ class EplbState:
             physical_to_logical = eplb_model_state.physical_to_logical_map
             invalid_idx = eplb_model_state.model.num_logical_experts
             logical_expert_load_window = torch.zeros(
-                self.expert_load_window_size,
+                expert_load_window.shape[0],
                 eplb_model_state.model.num_moe_layers,
                 invalid_idx + 1,
                 dtype=eplb_model_state.expert_load_window.dtype,
@@ -955,16 +1010,11 @@ class EplbState:
                 num_replicas // ep_group.size() * num_gpus
             )  # handle num replicas change
         else:
-            num_nodes = get_node_count()
-            num_gpus = ep_group.size()
-
-        if num_gpus % num_nodes != 0:
-            num_nodes = 1
-            logger.warning_once(
-                f"num_gpus % num_nodes != 0, "
-                "not using hierarchical rearrangement algorithm.\n"
-                f"{num_gpus=}, {num_nodes=}"
+            num_nodes = _node_count_with_rank_mapping(
+                get_eplb_group().cpu_group,
+                {rank: rank for rank in range(ep_group.size())},
             )
+            num_gpus = ep_group.size()
 
         # Get new expert mappings
         for eplb_model_state, global_expert_load_window in zip(
@@ -980,7 +1030,8 @@ class EplbState:
                     old_physical_to_logical_map = (
                         eplb_model_state.physical_to_logical_map.cpu()
                     )
-                new_physical_to_logical_map = self.policy.rebalance_experts(
+                new_physical_to_logical_map = self.rebalance_experts(
+                    eplb_model_state,
                     load_window_cpu,
                     num_replicas,
                     num_groups,
@@ -1057,9 +1108,9 @@ class EplbState:
                     )
 
                     if not is_profile:
-                        _commit_eplb_maps(
+                        self._commit_rebalance(
                             eplb_model_state,
-                            new_physical_to_logical_map=new_physical_to_logical_map,
+                            new_physical_to_logical_map,
                         )
 
                 if is_main_rank:
@@ -1092,6 +1143,32 @@ class EplbState:
             self.rearrange_event.record()
         return None
 
+    def wait_for_rearrangement(self, stream: torch.Stream | None) -> bool:
+        """Wait for a cycle while allowing an idle worker to stop."""
+        while not self._stop_async.is_set():
+            if self.rearrange_event.wait(stream=stream, timeout=0.1):
+                return True
+        return False
+
+    def stop_async_loop(self, timeout: float = 30.0) -> None:
+        """Stop after all ranks have drained their outstanding transfers.
+
+        Communicator resources must remain alive until this method succeeds.
+        """
+        worker = self.async_worker
+        if worker is None:
+            return
+        if any(
+            model_state.rebalanced or model_state.pending_result is not None
+            for model_state in self.model_states.values()
+        ):
+            raise RuntimeError("Drain outstanding EPLB transfers before stopping.")
+        self._stop_async.set()
+        worker.join(timeout=timeout)
+        if worker.is_alive():
+            raise TimeoutError("EPLB background worker did not stop.")
+        self.async_worker = None
+
     def start_async_loop(
         self,
         rank_mapping: dict[int, int] | None = None,
@@ -1100,6 +1177,7 @@ class EplbState:
         if not self.is_async:
             return
         if self.async_worker is None:
+            self._stop_async.clear()
             self.async_worker = start_async_worker(
                 self,
                 is_profile=is_profile,
@@ -1283,13 +1361,8 @@ class EplbState:
         self, model_config: ModelConfig, group_coordinator: GroupCoordinator
     ) -> EplbCommunicator:
         model_state = self.model_states[hash_config_cached(model_config)]
-        backend = self.parallel_config.eplb_config.communicator
-        assert backend is not None
-        return create_eplb_communicator(
-            group_coordinator,
-            backend,
-            model_state.model.expert_weights,
-            model_state.expert_buffer,
+        return self.create_model_communicator(
+            model_state.model, model_state.expert_buffer, group_coordinator
         )
 
     def update_communicator(
@@ -1340,6 +1413,7 @@ def _node_count_with_rank_mapping(
     pg: ProcessGroup | StatelessProcessGroup,
     rank_mapping: dict[int, int],
 ) -> int:
+    """Return count for equal contiguous node blocks in new-rank order; else one."""
     if isinstance(pg, ProcessGroup):
         world_size = torch.distributed.get_world_size(group=pg)
     else:
@@ -1370,7 +1444,18 @@ def _node_count_with_rank_mapping(
             if is_same_node and node_assignment[other_rank] == 0:
                 node_assignment[other_rank] = next_node_id
 
-    return next_node_id
+    node_ids_by_new_rank = [
+        node_assignment[old_rank]
+        for old_rank, new_rank in sorted(rank_mapping.items(), key=lambda item: item[1])
+        if new_rank >= 0
+    ]
+    assert next_node_id, "rank mapping must retain at least one rank"
+    ranks_per_node, remainder = divmod(len(node_ids_by_new_rank), next_node_id)
+    has_uniform_contiguous_blocks = all(
+        len(set(node_ids_by_new_rank[start : start + ranks_per_node])) == 1
+        for start in range(0, len(node_ids_by_new_rank), ranks_per_node)
+    )
+    return next_node_id if not remainder and has_uniform_contiguous_blocks else 1
 
 
 def compute_logical_maps(
@@ -1533,21 +1618,23 @@ def _commit_eplb_maps(
 def _move_to_workspace(
     model_state: EplbModelState,
     ep_rank: int,
+    commit_rebalance: Callable[[EplbModelState, torch.Tensor, int | None], None],
 ) -> None:
     result = model_state.pending_result
     assert result is not None
+    new_physical_to_logical_map = result.new_physical_to_logical_map
     move_from_buffer(
         expert_weights=model_state.model.expert_weights[result.layer_idx],
         expert_weights_buffers=model_state.expert_buffer,
         transfer_metadata=result.transfer_metadata,
-        new_indices=result.new_physical_to_logical_map.numpy(),
+        new_indices=new_physical_to_logical_map.numpy(),
         ep_rank=ep_rank,
     )
 
-    _commit_eplb_maps_for_layer(
+    commit_rebalance(
         model_state,
-        new_physical_to_logical_map=result.new_physical_to_logical_map,
-        layer=result.layer_idx,
+        new_physical_to_logical_map,
+        result.layer_idx,
     )
     model_state.num_committed_layers = result.layer_idx + 1
 

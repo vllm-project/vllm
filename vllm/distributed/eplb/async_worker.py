@@ -39,6 +39,7 @@ def start_async_worker(
                 stream=stream,
                 is_profile=is_profile,
             )
+            stream.synchronize()
         except Exception as exc:
             state.async_worker_error = exc
             logger.exception("async loop error (Rank %d): %s", rank, str(exc))
@@ -55,23 +56,18 @@ def run_rebalance_experts(
     stream: torch.Stream,
 ) -> torch.Tensor:
     assert model_state.eplb_stats is not None
-    eplb_stats = model_state.eplb_stats
-
-    # Move the global expert load window to CPU for computation.
+    stats = model_state.eplb_stats
     with device_stream(stream):
-        global_expert_load_window = eplb_stats.global_expert_load_window.cpu()
-    # Compute new expert mappings for the model
-    new_physical_to_logical_map = eplb_state.policy.rebalance_experts(
-        global_expert_load_window,
-        eplb_stats.num_replicas,
-        eplb_stats.num_groups,
-        eplb_stats.num_nodes,
-        eplb_stats.num_gpus,
+        load_window_cpu = stats.global_expert_load_window.cpu()
+    return eplb_state.rebalance_experts(
+        model_state,
+        load_window_cpu,
+        stats.num_replicas,
+        stats.num_groups,
+        stats.num_nodes,
+        stats.num_gpus,
         physical_to_logical_map_cpu,
     )
-    assert new_physical_to_logical_map.device == torch.device("cpu")
-
-    return new_physical_to_logical_map
 
 
 def transfer_run_periodically(
@@ -82,7 +78,8 @@ def transfer_run_periodically(
     rank = get_eplb_group().device_group.rank()
     while True:
         try:
-            state.rearrange_event.wait(stream=stream)
+            if not state.wait_for_rearrangement(stream):
+                return
             _transfer_cycle(state, stream, is_profile)
         except Exception:
             if not state.parallel_config.enable_fault_tolerance:

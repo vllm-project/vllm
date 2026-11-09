@@ -100,10 +100,10 @@ class EPLBConfig:
     Whether to use non-blocking EPLB.
     """
 
-    policy: EPLBPolicyOption = "default"
-    """The policy type for expert parallel load balancing (EPLB)."""
+    policy: EPLBPolicyOption | str = "default"
+    """Built-in or platform-defined policy name, validated by the platform."""
 
-    communicator: EPLBCommunicatorBackend | None = None
+    communicator: EPLBCommunicatorBackend | str | None = None
     """
     Backend for EPLB expert weight communication:
     - "torch_nccl": Use torch.distributed on the device process group
@@ -127,21 +127,6 @@ class EPLBConfig:
     def migration_batching_enabled(self) -> bool:
         """Whether contention-aware batching is active for this configuration."""
         return self.use_async and self.enable_migration_batching
-
-    @model_validator(mode="after")
-    def _validate_eplb_config(self) -> Self:
-        if self.use_async and self.policy != "default":
-            raise ValueError("Async EPLB is only supported with the default policy.")
-        if self.use_async and self.communicator in ("torch_nccl", "pynccl"):
-            raise ValueError(
-                f"{self.communicator} communicator is incompatible with "
-                "async EPLB due to NCCL multi-stream conflicts. Use "
-                "'torch_gloo' or 'nixl' instead, or leave communicator "
-                "unset for automatic selection."
-            )
-        if self.log_balancedness and self.log_balancedness_interval <= 0:
-            raise ValueError("log_balancedness_interval must be greater than 0.")
-        return self
 
 
 @config
@@ -604,10 +589,10 @@ class ParallelConfig:
             self.numa_bind = True
 
         if self.enable_eplb:
-            if not current_platform.is_cuda_alike() and not current_platform.is_xpu():
+            if not current_platform.supports_eplb():
                 raise ValueError(
-                    "Expert parallelism load balancing is only supported on "
-                    "CUDA devices or ROCm devices or XPU devices now."
+                    "Expert parallelism load balancing is not supported "
+                    "on this platform."
                 )
             if not self.enable_expert_parallel:
                 raise ValueError("enable_expert_parallel must be True to use EPLB.")
@@ -1213,25 +1198,8 @@ class ParallelConfig:
                 "backend is mp, uni or external_launcher."
             )
 
-        if self.enable_eplb and self.eplb_config.communicator is None:
-            # Prefer NIXL when available: zero-copy RDMA reads, compatible
-            # with both async EPLB and elastic EP.
-            # Fallbacks: pynccl for elastic EP (stateless groups need it),
-            # torch_gloo for static EP.  torch_nccl is avoided because NCCL
-            # is incompatible with async EPLB (multi-stream conflicts) and
-            # batched isend/irecv hangs under high load.
-            # See https://github.com/pytorch/pytorch/issues/174288
-            from vllm.distributed.nixl_utils import is_nixl_available
-
-            if current_platform.is_xpu():
-                # On XPU, use the device-native XCCL P2P backend.
-                self.eplb_config.communicator = "torch_xccl"
-            elif is_nixl_available():
-                self.eplb_config.communicator = "nixl"
-            elif self.enable_elastic_ep:
-                self.eplb_config.communicator = "pynccl"
-            else:
-                self.eplb_config.communicator = "torch_gloo"
+        if self.enable_eplb:
+            current_platform.check_and_update_eplb_config(self)
 
     @property
     def use_ray(self) -> bool:
