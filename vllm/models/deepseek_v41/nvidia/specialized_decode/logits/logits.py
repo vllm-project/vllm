@@ -1,14 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Logits of the specialized decode: the low-batch LM head GEMM (``lm_head``)
+"""Logits of the specialized decode: the low-batch LM head GEMM (`lm_head`)
 and vocab-parallel logits gathered with the executor's all-gather.
 
 For decode batches a one-shot all-gather over NVLink multicast is several
-times faster than the NCCL ring. The executor's ``LamportAllGather`` takes the
+times faster than the NCCL ring. The executor's `LamportAllGather` takes the
 logits when they fit, by size alone, so every TP rank takes the same path;
 larger ones go to NCCL. vLLM's custom all-gather is not used: its MNNVL
 Lamport kernel never waits for a rank's own multicast copy (see
-``ops.cute_dsl.all_gather``). The all-gather's mailbox also serves the
+`ops.cute_dsl.all_gather`). The all-gather's mailbox also serves the
 row-sharded indexers, so the logits must be gathered on the forward stream
 after any side stream has rejoined it.
 """
