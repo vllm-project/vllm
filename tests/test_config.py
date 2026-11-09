@@ -21,6 +21,7 @@ from huggingface_hub import ResolvedRevision
 from pydantic import ValidationError
 
 import vllm.config.vllm as vllm_config_module
+import vllm.envs as envs
 from tests.v1.spec_decode.utils import fake_speculative_config
 from vllm.compilation.backends import VllmBackend
 from vllm.config import (
@@ -4381,7 +4382,7 @@ def test_hc_sp_collective_flag_separates_the_compile_cache(flag):
     """The flags choose the collective ops of the compiled graph, so they are
     part of its cache key."""
     assert (
-        ParallelConfig(**{flag: True}).compute_hash() != ParallelConfig().compute_hash()
+        hash_config(ParallelConfig(**{flag: True})) != hash_config(ParallelConfig())
     )
 
 
