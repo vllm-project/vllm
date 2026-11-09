@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import functools
+import itertools
 from types import SimpleNamespace
 
 import pytest
@@ -2785,6 +2786,36 @@ def test_paged_mqa_logits_gate_v41_shuffle_vs_c4a_flat() -> None:
         gated_c4a[:, :seq_len], ref[:, :seq_len], atol=2e-3, rtol=2e-3
     )
 
+    # Explicit cache_layout="NORMAL" forces the block-flat Triton path even at
+    # ratio 1; here through a strided section view (block stride > page bytes,
+    # as in a merged cache). Same bytes as cache_flat must give the C4A result.
+    unit_stride = 50512
+    merged_view = torch.zeros(
+        num_pages * unit_stride, dtype=torch.uint8, device=device
+    ).as_strided(
+        (num_pages, block_size, 1, head_size + 4),
+        (unit_stride, head_size + 4, head_size + 4, 1),
+    )
+    merged_flat = merged_view.reshape(num_pages, -1)
+    merged_flat[:, :scale_off] = values.reshape(num_pages, -1).view(torch.uint8)
+    merged_flat[:, scale_off:] = (
+        scales.contiguous().view(torch.uint8).view(num_pages, -1)
+    )
+    got_normal = rocm_fp8_paged_mqa_logits(
+        q,
+        merged_view,
+        weights,
+        context_lens,
+        block_tables,
+        dummy_sched,
+        max_model_len,
+        compress_ratio=1,
+        cache_layout="NORMAL",
+    )
+    torch.testing.assert_close(
+        got_normal[:, :seq_len], gated_c4a[:, :seq_len], atol=0, rtol=0
+    )
+
 
 def _combine_topk_swa_indices_torch(
     topk_indices,
@@ -2940,3 +2971,258 @@ def test_v41_rocm_combine_uses_shared_kernel() -> None:
     from vllm.models.deepseek_v41.common.ops import cache_utils
 
     assert rocm.combine_topk_swa_indices is cache_utils.combine_topk_swa_indices
+
+
+# --- Merged-cache (MergedMLAIndexerSpec) indexer insert/gather ---------------
+# Per 64-token unit of the merged cache:
+#   [64 x 656B MLA fp8_ds_mla | 64 x 128B indexer fp8 data | 64 x 4B fp32
+#    scales | pad], unit stride 50512B. The indexer section handed to the
+# Triton wrappers is the strided [num_units, 64, 132] view; its block-flat
+# (NORMAL) layout must be requested explicitly via cache_layout.
+_MERGED_UNIT_BYTES = 50512
+_MERGED_BLOCK = 64
+_MERGED_MLA_ROW = 656
+_MERGED_IDX_HEAD_DIM = 128
+_MERGED_IDX_ROW = 132  # 128B fp8 data + 4B fp32 scale (two regions)
+
+
+def _merged_indexer_view(num_units: int, device: torch.device):
+    """Return (flat_buffer, indexer_section_view) for a synthetic merged cache."""
+    flat = torch.zeros(num_units * _MERGED_UNIT_BYTES, dtype=torch.uint8, device=device)
+    view = flat.as_strided(
+        (num_units, _MERGED_BLOCK, _MERGED_IDX_ROW),
+        (_MERGED_UNIT_BYTES, _MERGED_IDX_ROW, 1),
+        storage_offset=_MERGED_BLOCK * _MERGED_MLA_ROW,
+    )
+    return flat, view
+
+
+@requires_gfx950
+@torch.inference_mode()
+def test_indexer_insert_gather_merged_cache_normal_layout() -> None:
+    """cache_layout="NORMAL" round-trips through the strided merged view.
+
+    The insert wrapper auto-selects SHUFFLE when block_size > 1, which would
+    scramble the block-flat merged layout.
+    """
+    from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+        FP8_DTYPE,
+        cp_gather_indexer_k_quant_cache_triton,
+        indexer_k_quant_and_cache_triton,
+    )
+
+    set_random_seed(0)
+    device = torch.device("cuda")
+    num_units = 4
+    flat, idx_view = _merged_indexer_view(num_units, device)
+    # Sentinel-fill so stray writes outside the indexer section are visible.
+    flat.fill_(0xAB)
+
+    num_tokens = 100
+    slots = torch.randperm(num_units * _MERGED_BLOCK, device=device)[:num_tokens]
+    k = (
+        torch.randn(
+            num_tokens, _MERGED_IDX_HEAD_DIM, dtype=torch.bfloat16, device=device
+        )
+        / 4
+    )
+    indexer_k_quant_and_cache_triton(
+        k,
+        idx_view,
+        slots,
+        _MERGED_IDX_HEAD_DIM,
+        "ue8m0",
+        cache_layout="NORMAL",
+    )
+
+    # The merged indexer section is two regions: 64 x 128B data, then
+    # 64 x 4B scales. Read both straight out of the flat buffer.
+    section_off = _MERGED_BLOCK * _MERGED_MLA_ROW
+    data = flat.as_strided(
+        (num_units, _MERGED_BLOCK, _MERGED_IDX_HEAD_DIM),
+        (_MERGED_UNIT_BYTES, _MERGED_IDX_HEAD_DIM, 1),
+        storage_offset=section_off,
+    ).view(FP8_DTYPE)
+    scales = flat.as_strided(
+        (num_units, _MERGED_BLOCK, 4),
+        (_MERGED_UNIT_BYTES, 4, 1),
+        storage_offset=section_off + _MERGED_BLOCK * _MERGED_IDX_HEAD_DIM,
+    ).view(torch.float32)
+    flat_data = data.reshape(-1, _MERGED_IDX_HEAD_DIM)
+    flat_scale = scales.reshape(-1)
+
+    amax = k.float().abs().amax(dim=-1).clamp(min=1e-4)
+    ref_scale = torch.exp2(torch.ceil(torch.log2(amax / 448.0)))
+    assert torch.equal(flat_scale[slots], ref_scale), (
+        "inserted ue8m0 scales mismatch (wrong layout?)"
+    )
+    dequant = flat_data[slots].float() * ref_scale.unsqueeze(-1)
+    torch.testing.assert_close(dequant, k.float(), rtol=0.07, atol=0.07 * 0.25)
+
+    # Gather the whole cache back through a single identity-block-table
+    # request and compare against the inserted tokens.
+    total = num_units * _MERGED_BLOCK
+    k_fp8 = torch.empty(total, _MERGED_IDX_HEAD_DIM, dtype=FP8_DTYPE, device=device)
+    k_scale = torch.empty(total, 4, dtype=torch.uint8, device=device)
+    block_table = torch.arange(num_units, dtype=torch.int32, device=device).unsqueeze(0)
+    cu_seqlen = torch.tensor([0, total], dtype=torch.int32, device=device)
+    token_to_seq = torch.zeros(total, dtype=torch.int32, device=device)
+    cp_gather_indexer_k_quant_cache_triton(
+        idx_view,
+        k_fp8,
+        k_scale,
+        block_table,
+        cu_seqlen,
+        token_to_seq=token_to_seq,
+        cache_layout="NORMAL",
+    )
+    gathered = k_fp8[slots].float() * k_scale[slots].view(torch.float32)
+    torch.testing.assert_close(gathered, k.float(), rtol=0.07, atol=0.07 * 0.25)
+
+    # Insert and gather must not touch the MLA rows or the unit padding.
+    section_end = section_off + _MERGED_BLOCK * _MERGED_IDX_ROW
+    for start, length in (
+        (0, section_off),
+        (section_end, _MERGED_UNIT_BYTES - section_end),
+    ):
+        region = flat.as_strided(
+            (num_units, length), (_MERGED_UNIT_BYTES, 1), storage_offset=start
+        )
+        assert (region == 0xAB).all(), (
+            f"merged-cache bytes at unit offset {start} were clobbered"
+        )
+
+
+@requires_split_decode_arch
+@torch.inference_mode()
+def test_indexer_insert_default_layout_unchanged() -> None:
+    """Without cache_layout, a standalone block_size>1 cache stays SHUFFLE."""
+    from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+        indexer_k_quant_and_cache_triton,
+    )
+
+    set_random_seed(0)
+    device = torch.device("cuda")
+    num_blocks, block_size, head_dim = 4, 64, 128
+    k = torch.randn(block_size, head_dim, dtype=torch.bfloat16, device=device)
+    slots = torch.arange(block_size, device=device)
+
+    def write(cache_layout: str | None) -> torch.Tensor:
+        cache = torch.zeros(
+            num_blocks, block_size, head_dim + 4, dtype=torch.uint8, device=device
+        )
+        indexer_k_quant_and_cache_triton(
+            k, cache, slots, head_dim, "ue8m0", cache_layout=cache_layout
+        )
+        return cache
+
+    default = write(None)
+    assert torch.equal(default, write("SHUFFLE"))
+    assert not torch.equal(default, write("NORMAL"))
+
+
+@requires_gfx950
+@torch.inference_mode()
+def test_sparse_mla_backend_forward_mqa_fp8_ds_mla_merged_cache() -> None:
+    """ROCMAiterMLASparseImpl reads the fp8_ds_mla section of a merged cache:
+    real cache writer in, forward_mqa over ragged top-k, fp32 reference."""
+    import vllm._C_stable_libtorch  # noqa: F401  (registers _C_cache_ops)
+
+    from vllm import _custom_ops as ops
+    from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
+        ROCMAiterMLASparseImpl,
+    )
+
+    set_random_seed(0)
+    device = torch.device("cuda")
+    num_units = 8
+    block = _MERGED_BLOCK
+    kv_lora_rank, rope_dim = 512, 64
+    d_qk = kv_lora_rank + rope_dim
+    num_heads = 16
+    topk = 256
+    scale = d_qk**-0.5
+
+    flat = torch.zeros(num_units * _MERGED_UNIT_BYTES, dtype=torch.uint8, device=device)
+    mla_view = flat.as_strided(
+        (num_units, block, _MERGED_MLA_ROW),
+        (_MERGED_UNIT_BYTES, _MERGED_MLA_ROW, 1),
+    ).view(torch.float8_e4m3fn)
+
+    # Write the MLA section through the real fp8_ds_mla cache writer.
+    num_slots = 300
+    kv_c = torch.randn(num_slots, kv_lora_rank, dtype=torch.bfloat16, device=device)
+    kv_c = kv_c / 8
+    k_pe = torch.randn(num_slots, rope_dim, dtype=torch.bfloat16, device=device)
+    slot_mapping = torch.arange(num_slots, dtype=torch.int64, device=device)
+    ops.concat_and_cache_mla(
+        kv_c,
+        k_pe,
+        mla_view,
+        slot_mapping,
+        kv_cache_dtype="fp8_ds_mla",
+        scale=torch.ones(1, dtype=torch.float32, device=device),
+    )
+
+    # Dequantized fp32 reference rows straight from the cache bytes.
+    mla_u8 = flat.as_strided(
+        (num_units, block, _MERGED_MLA_ROW),
+        (_MERGED_UNIT_BYTES, _MERGED_MLA_ROW, 1),
+    )
+    slot_ids = torch.arange(num_slots, device=device)
+    rows = mla_u8[slot_ids // block, slot_ids % block]  # [slots, 656]
+    lat = rows[:, :kv_lora_rank].view(torch.float8_e4m3fn).float()
+    lat_scale = (
+        rows[:, kv_lora_rank : kv_lora_rank + 16]
+        .view(torch.float32)
+        .repeat_interleave(128, dim=-1)
+    )
+    rope = rows[:, kv_lora_rank + 16 :].view(torch.bfloat16).float()
+    k_all = torch.cat([lat * lat_scale, rope], dim=-1)  # [slots, 576]
+
+    # Per-query top-k rows (local positions; identity block table).
+    lens = [5, 40, 130]
+    num_q = len(lens)
+    topk_buf = torch.full((num_q, topk), -1, dtype=torch.int32, device=device)
+    rows_sel = [
+        torch.randperm(num_slots, device=device)[:count].to(torch.int32)
+        for count in lens
+    ]
+    for i, sel in enumerate(rows_sel):
+        topk_buf[i, : sel.numel()] = sel
+    indptr = torch.tensor(
+        [0] + list(itertools.accumulate(lens)), dtype=torch.int32, device=device
+    )
+
+    impl = object.__new__(ROCMAiterMLASparseImpl)
+    impl.kv_cache_dtype = "fp8_ds_mla"
+    impl.kv_lora_rank = kv_lora_rank
+    impl.qk_rope_head_dim = rope_dim
+    impl.scale = scale
+    impl.sinks = None
+    impl.topk_indices_buffer = topk_buf
+
+    metadata = SimpleNamespace(
+        num_actual_tokens=num_q,
+        topk_tokens=topk,
+        req_id_per_token=torch.zeros(num_q, dtype=torch.int32, device=device),
+        block_table=torch.arange(num_units, dtype=torch.int32, device=device)[None],
+        paged_kv_indptr=indptr,
+        paged_kv_indices=torch.empty(num_q * topk, dtype=torch.int32, device=device),
+        block_size=block,
+        attn_out_dtype=torch.bfloat16,
+    )
+    q = torch.randn(num_q, num_heads, d_qk, dtype=torch.bfloat16, device=device) / 8
+
+    output, lse = impl.forward_mqa(q, mla_view, metadata, layer=None)
+    assert lse is None
+
+    ref = torch.empty(num_q, num_heads, kv_lora_rank, device=device)
+    for i in range(num_q):
+        idx = topk_buf[i, : lens[i]].long()
+        ki = k_all[idx]
+        s = (q[i].float() @ ki.T) * scale
+        ref[i] = torch.softmax(s, dim=-1) @ ki[:, :kv_lora_rank]
+
+    err = (output.float() - ref).abs()
+    assert err.max().item() < 0.02, f"max abs err {err.max().item()}"

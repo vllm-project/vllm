@@ -77,16 +77,21 @@ def dsa_indexer_uses_fp4(vllm_config: VllmConfig) -> bool:
         from vllm._aiter_ops import rocm_aiter_ops
         from vllm.platforms.rocm import get_cdna_version
 
-        # Only DeepSeek-V4 and V4.1 are wired to the ROCm MXFP4 cache; other
-        # DSA models would silently keep their FP8 one.
+        # Reject models whose ROCm path would silently retain its FP8 cache.
         model_config = vllm_config.model_config
-        if model_config is None or model_config.hf_config.model_type not in (
-            "deepseek_v4",
-            "deepseek_v41",
+        kimi_dsa = (
+            model_config is not None
+            and model_config.hf_text_config.model_type
+            in ("kimi_linear", "kimi_k3", "kimi_k31")
+            and getattr(model_config.hf_text_config, "dsa_config", None) is not None
+        )
+        if model_config is None or (
+            not kimi_dsa
+            and model_config.hf_config.model_type not in ("deepseek_v4", "deepseek_v41")
         ):
             raise ValueError(
                 "indexer_kv_dtype='mxfp4' on ROCm is only supported for "
-                "DeepSeek-V4 and DeepSeek-V4.1."
+                "DeepSeek-V4, DeepSeek-V4.1 and Kimi-K3.1."
             )
         if get_cdna_version() != 4:
             raise ValueError(
@@ -705,6 +710,7 @@ class DeepSeekV32IndexerDecodeMetadata:
     decode_is_uniform: bool = True
     write_max_decode_len: int = 0
     indices: torch.Tensor | None = None
+    query_start_loc: torch.Tensor | None = None
 
 
 @dataclass
@@ -1854,6 +1860,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 per_req_decode_lens=self.per_req_decode_lens_buffer[:num_decodes],
                 decode_is_uniform=write_is_uniform,
                 write_max_decode_len=max_decode_len,
+                query_start_loc=common_attn_metadata.query_start_loc[: num_decodes + 1],
             )
 
         attn_metadata = DeepseekV32IndexerMetadata(

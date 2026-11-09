@@ -10,6 +10,7 @@ import torch
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.model_executor.layers.sparse_attn_indexer import MXFP4_BLOCK_SIZE
 from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
+from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
 from vllm.v1.attention.backend import AttentionBackend, CommonAttentionMetadata
@@ -76,6 +77,11 @@ class KimiK3IndexerMetadataBuilder(DeepseekV32IndexerMetadataBuilder):
             raise NotImplementedError("Kimi-K3.1 packed DSA caches with PCP")
         # The K3.1 key format, validated as KimiK3DSAIndexer selects it.
         self.indexer_uses_fp4 = kimi_k3_indexer_uses_fp4(self.vllm_config)
+        if self.indexer_uses_fp4 and current_platform.is_rocm():
+            self._needs_global_row_bounds = self.dcp_world_size > 1
+            # The FP4 prefill op always splits a chunk's query rows over the
+            # DCP ranks, so the chunk planner gets the same per-rank budget.
+            self._rowshard_dcp_prefill = self._needs_global_row_bounds
         self.slot_mapping_buffer = torch.zeros(
             self.vllm_config.scheduler_config.max_num_batched_tokens,
             dtype=torch.int64,
@@ -105,6 +111,17 @@ class KimiK3IndexerMetadataBuilder(DeepseekV32IndexerMetadataBuilder):
             replace(common_attn_metadata, slot_mapping=slot_mapping),
             fast_build,
         )
+        if self.indexer_uses_fp4 and current_platform.is_rocm() and metadata.prefill:
+            from vllm.models.kimi_k3.amd.ops.fp4_indexer_prefill import (
+                prepare_prefill_metadata,
+            )
+
+            metadata.prefill = prepare_prefill_metadata(
+                metadata.prefill,
+                self.dcp_world_size,
+                self.dcp_rank,
+                self.cp_kv_cache_interleave_size,
+            )
         return metadata
 
 

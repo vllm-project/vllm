@@ -516,6 +516,14 @@ steps:
       - vllm/platforms/rocm.py
       - vllm/_aiter_ops.py
       - tests/kernels/attention/test_rocm_triton_attn_dsv4.py
+      - tests/kernels/attention/test_kimi_mxfp4_indexer.py
+      - vllm/models/kimi_k3/amd/ops/fp4_indexer.py
+      - vllm/models/kimi_k3/amd/dsa.py
+      - vllm/models/kimi_k3/amd/ops/fp4_indexer_prefill.py
+      - vllm/models/kimi_k3/common/dsa_cache.py
+      - vllm/v1/attention/backends/mla/rocm_aiter_mla_sparse.py
+      - vllm/model_executor/layers/sparse_attn_indexer.py
+      - vllm/v1/kv_cache_interface.py
       - tests/kernels/attention/test_rocm_aiter_mla_decode.py
       - tests/kernels/attention/test_rocm_aiter_mla_decode_metadata.py
       - tests/kernels/attention/test_rocm_aiter_mla_fp8_support.py
@@ -527,6 +535,7 @@ steps:
       - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_fp8_support.py
       - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_op_registration.py
       - pytest -v -s tests/kernels/attention/test_rocm_triton_attn_dsv4.py::test_dsv41_adaptive_mla_swa_metadata_graph_replay
+      - pytest -v -s tests/kernels/attention/test_kimi_mxfp4_indexer.py
 
 - label: ":nvidia: (L4) Quantization Kernels"
   key: kernels-quantization-test
