@@ -223,6 +223,7 @@ if TYPE_CHECKING:
     VLLM_KIMI_K3_GEMM_AR: bool = True
     VLLM_ENABLE_GEMM_RS: bool = False
     VLLM_GLM5NEXT_REPLICATE_MIXER: str = "0"
+    VLLM_TP_REPLICATION_MIN_KV_TOKENS: int = 0
     VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER: bool = True
     VLLM_USE_FLASHINFER_MOE_INT4: bool = False
     VLLM_USE_LOCALITY_DOMAINS: bool = False
@@ -1761,6 +1762,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_GLM5NEXT_REPLICATE_MIXER": lambda: os.getenv(
         "VLLM_GLM5NEXT_REPLICATE_MIXER", "0"
     ).lower(),
+    # Minimum KV cache capacity, in tokens, to keep when replicating blocks across
+    # TP ranks; startup fails if the replication plan leaves less. 0: no minimum
+    # (replication may use all the memory it needs).
+    "VLLM_TP_REPLICATION_MIN_KV_TOKENS": lambda: int(
+        os.getenv("VLLM_TP_REPLICATION_MIN_KV_TOKENS", "0")
+    ),
     # Allow use of FlashInfer FP8 block-scale GEMM for linear layers.
     # This uses TensorRT-LLM kernels and requires SM90+ (Hopper).
     "VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER": lambda: bool(

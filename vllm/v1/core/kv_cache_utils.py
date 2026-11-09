@@ -1173,6 +1173,15 @@ def update_kv_cache_capacity(
         f"{max_model_len:,}",
         max_concurrency,
     )
+    min_tokens = envs.VLLM_TP_REPLICATION_MIN_KV_TOKENS
+    if min_tokens and num_tokens < min_tokens:
+        # Replicating blocks across TP ranks costs memory (weights, and recurrent
+        # state x TP); refuse to start if it left less context than requested.
+        raise ValueError(
+            f"KV cache holds {num_tokens:,} tokens, below "
+            f"VLLM_TP_REPLICATION_MIN_KV_TOKENS={min_tokens:,}. Replicate fewer "
+            "blocks (or none), or give the KV cache more memory."
+        )
 
 
 class BlockHashListWithBlockSize:
