@@ -824,6 +824,7 @@ class SimpleStreamingState:
     accumulated_logprobs: list[response_output_text.Logprob] = field(
         default_factory=list
     )
+    pending_logprobs: list[response_output_text.Logprob] = field(default_factory=list)
     tool_call_id: str = ""
     tool_call_name: str = ""
     tool_call_namespace: str | None = None
@@ -897,8 +898,10 @@ def emit_simple_content_delta(
     logprobs: list[response_output_text.Logprob] | None = None,
 ) -> list[StreamingResponsesResponse]:
     state.accumulated_text += delta
-    if logprobs:
-        state.accumulated_logprobs.extend(logprobs)
+    if state.pending_logprobs or logprobs:
+        state.accumulated_logprobs.extend(state.pending_logprobs)
+        state.accumulated_logprobs.extend(logprobs or [])
+        state.pending_logprobs.clear()
     return [
         ResponseTextDeltaEvent(
             type="response.output_text.delta",
@@ -954,6 +957,7 @@ def emit_simple_content_done(
         ),
     ]
     state.output_index += 1
+    state.pending_logprobs.clear()
     state.current_state = _StateType.NONE
     return events
 
@@ -1312,6 +1316,15 @@ class SimpleStreamingEventProcessor:
         if delta_message.content:
             return _StateType.CONTENT, None
         return _StateType.NONE, None
+
+    def queue_content_logprobs(
+        self, logprobs: list[response_output_text.Logprob]
+    ) -> None:
+        """Hold logprobs for a token whose incremental text is still empty."""
+        self.state.pending_logprobs.extend(logprobs)
+
+    def clear_pending_logprobs(self) -> None:
+        self.state.pending_logprobs.clear()
 
     def needs_transition(self, target_state: _StateType, tool_call: Any) -> bool:
         """Return True when we must close the current state and open a new one.
