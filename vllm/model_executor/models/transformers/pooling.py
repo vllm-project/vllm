@@ -107,9 +107,10 @@ def probe_classification_head(
     model = copy.deepcopy(head.model)
     for module in model.modules():
         for name, param in list(module.named_parameters(recurse=False)):
-            setattr(module, name, nn.Parameter(torch.randn(param.shape)))
+            data = torch.randn(param.shape, dtype=torch.float32)
+            setattr(module, name, nn.Parameter(data))
     probe = ClassificationHead(model, head.pooled, torch.float32)
-    hidden_states = torch.randn(5, hidden_size)
+    hidden_states = torch.randn(5, hidden_size, dtype=torch.float32)
     try:
         with torch.no_grad():
             if head.pooled:

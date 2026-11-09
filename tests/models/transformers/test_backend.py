@@ -49,6 +49,7 @@ from vllm.model_executor.models.transformers.utils import replace_base_model
 from vllm.model_executor.models.utils import StageMissingLayer
 from vllm.transformers_utils import dynamic_module
 from vllm.transformers_utils.dynamic_module import get_transformers_model_class
+from vllm.utils.torch_utils import set_default_torch_dtype
 
 from ...conftest import HfRunner, VllmRunner
 from ...utils import multi_gpu_test, prep_prompts
@@ -1100,7 +1101,9 @@ def test_classification_head_probe_rejects_wrong_pooling():
     head = classification_head(model.to("meta"), pooled=True)
     reason = probe_classification_head(head, 64, "CLS")
     assert reason is not None and "pool" in reason
-    assert probe_classification_head(head, 64, "MEAN") is None
+    # vLLM builds models with their dtype as the default
+    with set_default_torch_dtype(torch.float16):
+        assert probe_classification_head(head, 64, "MEAN") is None
     assert probe_classification_head(head, 64, None) is None
 
 
