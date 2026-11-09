@@ -556,27 +556,70 @@ def _make_gpu_ctx(
     )
 
 
-def test_replayssm_gpu_copy_layout_preserves_canonical_cpu_copies():
+@pytest.mark.parametrize(
+    "mamba_type,wrapped",
+    [
+        (MambaAttentionBackendEnum.MAMBA2, False),
+        (MambaAttentionBackendEnum.GDN_ATTN, False),
+        (MambaAttentionBackendEnum.GDN_ATTN, True),
+    ],
+)
+def test_replayssm_gpu_copy_layout_preserves_canonical_cpu_copies(mamba_type, wrapped):
     mixer = _TestReplaySSMMixer()
+    mixer.replayssm_buffer_len = 16
+    mixer.replayssm_executed_width = 8
+    mixer.A = torch.ones(2)
+    is_gdn = mamba_type == MambaAttentionBackendEnum.GDN_ATTN
+    ring_len = 32 if is_gdn else 20
+    shapes = (
+        (2, 2),
+        (2, 2, 2),
+        (2, ring_len, 2),
+        (1, ring_len, 2) if is_gdn else (2, ring_len),
+        (2, ring_len) if is_gdn else (1, ring_len, 2),
+    )
+    mixer.kv_cache = tuple(torch.zeros(3, *shape) for shape in shapes)
+    layer_name = "layers.0.mixer"
+    forward_context = {layer_name: mixer}
     spec = MambaSpec(
         block_size=16,
-        shapes=mixer.get_state_shape(),
+        shapes=shapes,
         dtypes=mixer.get_state_dtype(),
+        mamba_type=mamba_type,
     )
     kv_config = KVCacheConfig(
         num_blocks=3,
         kv_cache_tensors=[],
-        kv_cache_groups=[KVCacheGroupSpec(["mixer"], spec)],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                [layer_name],
+                UniformTypeKVCacheSpecs(
+                    block_size=16, kv_cache_specs={layer_name: spec}
+                )
+                if wrapped
+                else spec,
+            )
+        ],
     )
     cfg = _TestConfig(num_layers=1, max_num_reqs=2)
     device = torch.device("cpu")
     canonical = _make_copy_bufs(cfg, kv_config, device)
-    replay = _make_gpu_ctx(cfg, kv_config, device, {"mixer": mixer})
+    replay = _make_gpu_ctx(cfg, kv_config, device, forward_context)
+    initialize_replayssm_ring_trackers(kv_config, forward_context)
+    replay.initialize_from_forward_context(
+        kv_config,
+        forward_context,
+        _COPY_FUNCS,
+        [torch.zeros(cfg.max_num_reqs, 2, dtype=torch.int32)],
+    )
 
     assert canonical.src_ptrs.cpu.numel() == cfg.max_num_reqs * 2
     assert replay.num_states == 5
-    assert replay.state_base_addrs.numel() == 5
-    assert _COPY_FUNCS[MambaAttentionBackendEnum.MAMBA2] == _DEFAULT_COPY_FUNCS
+    assert replay.state_base_addrs.tolist() == [s.data_ptr() for s in mixer.kv_cache]
+    assert replay.state_conv_widths.tolist() == [2, 0, 0, 0, 0]
+    assert replay.replayssm is not None
+    assert replay.replayssm.mamba_type == mamba_type
+    assert _COPY_FUNCS[mamba_type] == _DEFAULT_COPY_FUNCS
 
 
 def test_replayssm_rejects_incompatible_ring_geometry_before_materialization():

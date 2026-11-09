@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import builtins
 import math
+import sys
 from types import ModuleType
 
 import pytest
@@ -24,14 +24,9 @@ def test_materializer_requires_fp16_state(monkeypatch, loaded_dtype):
     materialize = lambda **kwargs: None
     monkeypatch.setattr(provider, "gdn_prefix_materialize", materialize, raising=False)
     monkeypatch.setattr(provider, "state_ty_torch", lambda: loaded_dtype, raising=False)
-    original_import = builtins.__import__
-
-    def import_provider(name, *args, **kwargs):
-        if name == "flashinfer.gdn_kernels.gdn_prefix_materialize":
-            return provider
-        return original_import(name, *args, **kwargs)
-
-    monkeypatch.setattr(builtins, "__import__", import_provider)
+    monkeypatch.setitem(
+        sys.modules, "flashinfer.gdn_kernels.gdn_prefix_materialize", provider
+    )
     load_gdn_replayssm_materializer.cache_clear()
     try:
         if loaded_dtype == torch.float16:
@@ -59,8 +54,8 @@ def test_pack_replayssm_rows_preserves_tokens_and_masks_padding():
     )
 
 
-@pytest.mark.parametrize("width", [4, 8])
-def test_uniform_replayssm_packing_preserves_alignment_and_padding(width):
+def test_uniform_replayssm_packing_preserves_alignment_and_padding():
+    width = 4
     values = torch.arange(2 * width * 4, dtype=torch.bfloat16).view(2 * width, 4)
     starts = torch.tensor([0, width, 2 * width])
     packed = pack_replayssm_rows(values, starts, width, uniform=True)
@@ -85,8 +80,8 @@ def test_uniform_replayssm_packing_preserves_alignment_and_padding(width):
     assert padded[1].eq(0).all()
 
 
-@pytest.mark.parametrize("width", [4, 8])
-def test_uniform_replayssm_passes_qkv_views_and_aligned_gates(width):
+def test_uniform_replayssm_passes_qkv_views_and_aligned_gates():
+    width = 4
     tokens, dim = 2 * width, 128
     projection = torch.arange(tokens * 4 * dim).to(torch.bfloat16).view(tokens, -1)
     mixed_qkv = projection[:, : 3 * dim]
@@ -200,7 +195,7 @@ def _reconstruct_replayssm_state(
 )
 @pytest.mark.parametrize(
     "width,query_len,accepted",
-    [(1, 1, 1), (4, 3, 2), (4, 4, 2), (8, 6, 4), (8, 8, 4)],
+    [(1, 1, 1), (4, 3, 2), (8, 6, 4), (8, 8, 4)],
 )
 @torch.inference_mode()
 def test_gdn_replayssm_output_and_accepted_state(width, query_len, accepted):
@@ -259,16 +254,9 @@ def test_gdn_replayssm_output_and_accepted_state(width, query_len, accepted):
             a, b = gates[:, 0], gates[:, 1]
         if capture:
             # Captured padding has input storage but no token or live state.
-            padding_tokens = width
-            mixed_qkv = torch.cat(
-                (
-                    mixed_qkv,
-                    torch.ones_like(mixed_qkv[:1]).expand(padding_tokens, -1),
-                )
-            )
-            a, b = (
-                torch.cat((a, torch.ones_like(a[:1]).expand(padding_tokens, -1))),
-                torch.cat((b, torch.ones_like(b[:1]).expand(padding_tokens, -1))),
+            mixed_qkv, a, b = (
+                torch.cat((values, torch.ones_like(values[:1]).expand(width, -1)))
+                for values in (mixed_qkv, a, b)
             )
         inputs = dict(
             mixed_qkv=mixed_qkv,

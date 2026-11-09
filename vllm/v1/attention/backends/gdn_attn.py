@@ -4,9 +4,8 @@
 
 import math
 from dataclasses import dataclass, replace
-from typing import Literal, TypeVar
+from typing import Literal
 
-import numpy as np
 import torch
 
 from vllm._aiter_ops import rocm_aiter_ops
@@ -92,23 +91,19 @@ class GDNAttentionBackend(AttentionBackend):
         return True
 
 
-ArrayT = TypeVar("ArrayT", np.ndarray, torch.Tensor)
-
-
 def gdn_replayssm_prefill_rows(
     *,
-    is_prefilling: ArrayT,
-    is_last_prefill: ArrayT,
-    has_prior_state: ArrayT,
-    query_lens: ArrayT,
-    num_draft_tokens: ArrayT | None,
-) -> ArrayT:
+    is_prefilling: torch.Tensor,
+    is_last_prefill: torch.Tensor,
+    has_prior_state: torch.Tensor,
+    query_lens: torch.Tensor,
+    num_draft_tokens: torch.Tensor | None,
+) -> torch.Tensor:
     """Return the rows that GDN ReplaySSM must run as canonical prefill.
 
     Prompt chunks run as prefill, except the last chunk of a prompt that
     already has state when it is shaped like a decode row: one token, or one
-    token plus its draft tokens. That chunk replays instead. Accepts NumPy
-    arrays or CPU tensors.
+    token plus its draft tokens. That chunk replays instead. Inputs are CPU tensors.
     """
     decode_shaped = query_lens == 1
     if num_draft_tokens is not None:

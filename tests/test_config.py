@@ -167,18 +167,10 @@ def _gdn_replayssm_config(
 
     Qwen3_5TextConfig(
         architectures=["Qwen3_5ForCausalLM"],
-        hidden_size=256,
-        intermediate_size=512,
         num_hidden_layers=2,
-        num_attention_heads=2,
-        num_key_value_heads=1,
-        head_dim=128,
-        linear_num_key_heads=1,
-        linear_num_value_heads=2,
         linear_key_head_dim=128,
         linear_value_head_dim=128,
         layer_types=["linear_attention", "full_attention"],
-        vocab_size=128,
         max_position_embeddings=128,
     ).save_pretrained(model_path)
     return VllmConfig(

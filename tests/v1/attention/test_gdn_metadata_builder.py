@@ -152,12 +152,14 @@ def _create_gdn_builder(
     num_speculative_tokens: int = 0,
     full_cuda_graph: bool = False,
     adaptive_verification: bool = False,
+    use_replayssm: bool = False,
 ) -> GDNAttentionMetadataBuilder:
     """Create a GDNAttentionMetadataBuilder with minimal config."""
     vllm_config = create_vllm_config(
         model_name="Qwen/Qwen3.5-0.8B",
         block_size=BLOCK_SIZE,
     )
+    vllm_config.cache_config.use_replayssm = use_replayssm
     vllm_config.compilation_config.cudagraph_mode = (
         CUDAGraphMode.FULL_AND_PIECEWISE if full_cuda_graph else CUDAGraphMode.NONE
     )
@@ -287,19 +289,8 @@ def test_has_initial_state_after_reclassification():
 
 def test_replayssm_captured_indices_remain_valid_after_ragged_batch():
     """A smaller FULL graph must not read stale indices from a ragged step."""
-    config = create_vllm_config(model_name="Qwen/Qwen3.5-0.8B", block_size=BLOCK_SIZE)
-    config.cache_config.use_replayssm = True
-    config.compilation_config.cudagraph_mode = CUDAGraphMode.FULL_AND_PIECEWISE
-    config.speculative_config = SpeculativeConfig(
-        method="ngram", num_speculative_tokens=3
-    )
-    builder = GDNAttentionMetadataBuilder(
-        kv_cache_spec=MambaSpec(
-            block_size=BLOCK_SIZE, shapes=((16, 64),), dtypes=(torch.bfloat16,)
-        ),
-        layer_names=["layer.0"],
-        vllm_config=config,
-        device=DEVICE,
+    builder = _create_gdn_builder(
+        num_speculative_tokens=3, full_cuda_graph=True, use_replayssm=True
     )
     captured = _build(builder, BatchSpec(seq_lens=[80] * 32, query_lens=[4] * 32))
     indices = captured.replayssm_output_indices

@@ -326,10 +326,11 @@ class CacheConfig:
     use_replayssm: bool = False
     """Use a supported ReplaySSM decode kernel: cache recent recurrent inputs
     and skip the per-step full-state store, writing the checkpoint only on flush.
-    Triton and FlashInfer support the 'none' and 'align' Mamba cache modes.
-    Mamba2 speculative decoding requires FlashInfer. Pipeline parallelism is not
-    supported. Flushes are most efficient when mamba_block_size is a
-    multiple of replayssm_buffer_len, but this is not required."""
+    Mamba2 supports Triton and FlashInfer in 'none' and 'align' cache modes.
+    Mamba2 speculative decoding and Qwen3.5 Gated DeltaNet require FlashInfer.
+    Pipeline parallelism is not supported. Flushes are most efficient when
+    mamba_block_size is a multiple of replayssm_buffer_len, but this is not
+    required."""
     use_kda_recoverssm: bool = field(default=False, init=False)
     """Whether Kimi-K3 KDA uses RecoverSSM speculative decode."""
 
