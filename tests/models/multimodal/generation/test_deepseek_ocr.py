@@ -5,12 +5,12 @@
 _encode_local_features must skip processing only for an empty-element
 patches tensor, not for a zero-sum one.
 
-Regression for #64075: the old guard ``torch.sum(patches).item() == 0``
+Regression for #64075: the old guard `torch.sum(patches).item() == 0`
 returned None for a 1536x768 half-white/half-black image whose two
 normalised crop patches cancel to sum==0, causing a shape mismatch in
 _merge_multimodal_embeddings and a fatal EngineCore crash.
 
-The correct guard is ``patches.numel() == 0``.
+The correct guard is `patches.numel() == 0`.
 """
 
 import pytest

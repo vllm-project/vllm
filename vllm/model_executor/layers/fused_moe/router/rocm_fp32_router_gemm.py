@@ -145,7 +145,7 @@ def rocm_fp32_router_gemm(
     hidden_states: torch.Tensor,
     router_weight: torch.Tensor,
 ) -> torch.Tensor:
-    """Compute ``hidden_states @ router_weight.T`` with FP32 accumulation."""
+    """Compute `hidden_states @ router_weight.T` with FP32 accumulation."""
     _validate_inputs(hidden_states, router_weight)
     num_tokens = hidden_states.shape[0]
     hidden_size = hidden_states.shape[1]

@@ -108,7 +108,7 @@ def drafter(tmp_path, dist_init):
 
 
 def _assert_rotated(got, x, table, positions, what) -> None:
-    """``got`` is ``x`` ([tokens, heads, head_dim]) GPT-J-rotated off the table."""
+    """`got` is `x` ([tokens, heads, head_dim]) GPT-J-rotated off the table."""
     cos, sin = table.double()[positions].chunk(2, dim=-1)
     cos, sin = cos[:, None], sin[:, None]
     even, odd = x.double()[..., 0::2], x.double()[..., 1::2]
@@ -135,6 +135,8 @@ def test_dspark_context_keys_use_the_fp32_rope_table(drafter, monkeypatch):
         rows = torch.arange(attn.q_size, attn.q_size + 2 * kv_size)
         weight[rows, torch.randperm(HIDDEN)[: rows.numel()]] = 1
         attn.qkv_proj.weight.copy_(weight)
+    # The loader builds these after loading; this test writes the weights itself.
+    drafter._build_fused_kv_buffers()
     stored: list[torch.Tensor] = []
     for layer in drafter.layers:
         impl = layer.self_attn.attn.impl
