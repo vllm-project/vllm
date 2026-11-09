@@ -15,10 +15,13 @@ import pytest
 import torch
 
 from tests.v1.core.test_prefix_caching import make_request
+from vllm.model_executor.layers.mamba.checkpoint import (
+    compute_mamba_prefill_checkpoints,
+)
 from vllm.utils.hashing import sha256
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.kv_cache_manager import KVCacheManager
-from vllm.v1.core.kv_cache_utils import init_none_hash
+from vllm.v1.core.kv_cache_utils import get_group_id, init_none_hash
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
@@ -139,6 +142,9 @@ def _split(
     num_prefill_checkpoint_blocks: int = 0,
     max_num_scheduled_tokens: int = 16384,
     num_hash_lookahead_tokens: int = 0,
+    hash_block_size: int = ATTN_BLOCK_SIZE,
+    checkpoint_alignment: int = 16,
+    num_new_local_computed_tokens: int = 0,
 ) -> int:
     """Call the real `Scheduler._mamba_block_aligned_split` on a stub self."""
     if use_eagle_block_drop is None:
@@ -153,13 +159,15 @@ def _split(
         # `prefix_match_unit` finer than the block size (#46384).
         mamba_partial_cache_hit=partial_hit,
         mamba_shared_prefix_checkpoint=False,
-        hash_block_size=ATTN_BLOCK_SIZE,
+        hash_block_size=hash_block_size,
         mamba_has_prefill_checkpoint_blocks=(num_prefill_checkpoint_blocks > 0),
         mamba_prefill_checkpoint_alignment=(
-            16 if num_prefill_checkpoint_blocks > 0 else None
+            checkpoint_alignment if num_prefill_checkpoint_blocks > 0 else None
         ),
     )
-    return Scheduler._mamba_block_aligned_split(stub, request, num_new_tokens)
+    return Scheduler._mamba_block_aligned_split(
+        stub, request, num_new_tokens, num_new_local_computed_tokens
+    )
 
 
 @pytest.mark.parametrize(
@@ -385,7 +393,9 @@ def test_poisoning_is_block_size_independent(
 
 
 @pytest.mark.parametrize("partial_hit", [False, True])
-@pytest.mark.parametrize("resume_at", [331, 1599, 1601, 2531, 3011])
+# 32 and 1584 are hash-aligned, as a partial prefix-cache hit is, so an
+# internal checkpoint can be valid for the rest of the prompt.
+@pytest.mark.parametrize("resume_at", [32, 331, 1584, 1599, 1601, 2531, 3011])
 @pytest.mark.parametrize(
     ("num_prefill_checkpoint_blocks", "use_eagle"),
     [(0, True), (1, False)],
@@ -438,3 +448,147 @@ def test_unaligned_resume_never_runs_past_its_block(
             f"intermediate chunk end {end} is neither block-aligned nor the "
             f"partial-tail stop ({tail_stop})"
         )
+
+
+# `--prefix-match-unit 400` on a 1600-token hybrid block with MTP3. The
+# checkpoint grid is lcm(400, FlashInfer GDN's 64) = 1600.
+PREFIX_MATCH_UNIT = 400
+
+
+def _make_partial_hit_kv_cache_manager(retention_interval: int) -> KVCacheManager:
+    config = KVCacheConfig(
+        num_blocks=200,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["full_layer"],
+                FullAttentionSpec(
+                    block_size=MAMBA_BLOCK_SIZE,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["mamba_layer"],
+                MambaSpec(
+                    block_size=MAMBA_BLOCK_SIZE,
+                    shapes=((1, 1),),
+                    dtypes=(torch.float32,),
+                    mamba_cache_mode="align",
+                    num_speculative_blocks=NUM_SPEC,
+                    num_prefill_checkpoint_blocks=1,
+                    prefill_checkpoint_alignment=MAMBA_BLOCK_SIZE,
+                ),
+            ),
+        ],
+        prefix_cache_retention_interval=retention_interval,
+    )
+    return KVCacheManager(
+        config,
+        max_model_len=262144,
+        scheduler_block_size=MAMBA_BLOCK_SIZE,
+        hash_block_size=PREFIX_MATCH_UNIT,
+        enable_caching=True,
+        use_eagle=True,
+    )
+
+
+def _prefill_with_state_oracle(
+    manager: KVCacheManager, request: Request, state_at: dict[int, int]
+) -> int:
+    """Prefill `request` from its prefix-cache hit, one split chunk per step.
+
+    `state_at` maps physical mamba block id -> token offset of the state it
+    holds, updated like the worker: CoW copies run first, then the internal
+    checkpoint (from the real `compute_mamba_prefill_checkpoints`) and the
+    running slot are written. Returns the hit length.
+    """
+    computed_blocks, num_hit, _ = manager.get_computed_blocks(request)
+    start = num_hit
+    while start < request.num_tokens:
+        num_new = _split(
+            request,
+            request.num_tokens - start,
+            partial_hit=True,
+            num_prefill_checkpoint_blocks=1,
+            max_num_scheduled_tokens=32768,
+            hash_block_size=PREFIX_MATCH_UNIT,
+            checkpoint_alignment=MAMBA_BLOCK_SIZE,
+            num_new_local_computed_tokens=start - request.num_computed_tokens,
+        )
+        first_step = request.num_computed_tokens == 0
+        assert (
+            manager.allocate_slots(
+                request,
+                num_new,
+                num_hit if first_step else 0,
+                computed_blocks if first_step else None,
+                num_lookahead_tokens=NUM_SPEC,
+            )
+            is not None
+        )
+        copies, retained = manager.take_kv_cache_block_copies()
+        for copy in copies:
+            state_at[copy.dst_block_id] = state_at.get(copy.src_block_id)
+        manager.block_pool.free_blocks(retained)
+
+        end = start + num_new
+        blocks = manager.get_blocks(request.request_id).blocks[MAMBA_GROUP_ID]
+        (offset,), (col,) = compute_mamba_prefill_checkpoints(
+            [end],
+            [num_new],
+            hash_block_size=PREFIX_MATCH_UNIT,
+            mamba_block_size=MAMBA_BLOCK_SIZE,
+            checkpoint_alignment=MAMBA_BLOCK_SIZE,
+            drop_eagle_block=True,
+            cache_hit_alignment_tokens=PREFIX_MATCH_UNIT,
+        )
+        if offset and not blocks[col].is_null:
+            state_at[blocks[col].block_id] = start + offset
+        state_at[blocks[cdiv(end, MAMBA_BLOCK_SIZE) - 1].block_id] = end
+        request.num_computed_tokens = start = end
+        manager.new_step_starts()
+    return num_hit
+
+
+def _assert_cached_mamba_states_exact(
+    manager: KVCacheManager, state_at: dict[int, int]
+) -> None:
+    for block in manager.block_pool.blocks:
+        if block.block_hash is None or get_group_id(block.block_hash) != MAMBA_GROUP_ID:
+            continue
+        assert state_at.get(block.block_id) == block.block_hash_num_tokens, (
+            f"mamba block {block.block_id} is cached as "
+            f"state@{block.block_hash_num_tokens} but holds "
+            f"state@{state_at.get(block.block_id)}"
+        )
+
+
+def test_partial_hit_resume_with_internal_checkpoint_keeps_states_exact() -> None:
+    """A partial hit resumes mid-block; the internal checkpoint must not let
+    its chunk run past that block.
+
+    The producer leaves its prompt-tail state at 4400. The follow-up resumes
+    there (block 2 holds a CoW copy of state@4400), and its prompt is long
+    enough for the backend to export the prompt checkpoint internally. A chunk
+    running from 4400 to the prompt end leaves block 2 at state@4400 while
+    caching it as the full-block state@4800, the EAGLE replay boundary of a
+    6500-token prompt.
+    """
+    init_none_hash(sha256)
+    manager = _make_partial_hit_kv_cache_manager(retention_interval=0)
+    state_at: dict[int, int] = {}
+    producer_prompt = list(range(5000))
+    producer = make_request("producer", producer_prompt, PREFIX_MATCH_UNIT, sha256)
+    assert _prefill_with_state_oracle(manager, producer, state_at) == 0
+    manager.free(producer)
+
+    follow_up = make_request(
+        "follow_up",
+        producer_prompt + list(range(10**6, 10**6 + 1500)),
+        PREFIX_MATCH_UNIT,
+        sha256,
+    )
+    assert _prefill_with_state_oracle(manager, follow_up, state_at) == 4400
+    _assert_cached_mamba_states_exact(manager, state_at)

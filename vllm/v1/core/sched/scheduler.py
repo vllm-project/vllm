@@ -660,10 +660,8 @@ class Scheduler(SchedulerInterface):
         )
         stops = (
             # Same invariant: a chunk starting mid-block stops at the boundary
-            # rather than running past it.
-            next_block_boundary
-            if start % block_size != 0 and not use_internal_checkpoint
-            else 0,
+            # rather than running past it, internal checkpoint or not.
+            next_block_boundary if start % block_size != 0 else 0,
             # Never run past the last cacheable block boundary mid-chunk.
             last_cache_position,
             # Stop at the prompt checkpoint unless the backend saves it internally.
