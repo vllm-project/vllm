@@ -56,6 +56,12 @@ Key flags (plus all `EngineArgs`):
 - `--iters 20 --samples 5`, `--output-json out.json` (per-rank latency stats,
   `samples_us`, graph-vs-eager check).
 - Defaults: `--load-format dummy`, prefix caching off, no torch.compile.
+- CUDA graph padding follows serving: each case is dispatched by the runner's
+  CUDA graph manager (graphs aren't captured), so it is padded to the graph
+  serving would replay (`num_tokens_after_padding`, `num_reqs_after_padding`,
+  `is_padding`) and runs in its mode (`cudagraph_mode` in the JSON). Match
+  serving's `--max-num-seqs`/`--max-num-batched-tokens`/`-cc` for its capture
+  sizes; `--enforce-eager` times the exact batch. Drafter steps stay unpadded.
 
 Read `median_us` (each replay is already the max over ranks).
 

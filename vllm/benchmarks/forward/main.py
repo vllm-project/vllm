@@ -108,6 +108,8 @@ def _setup_env() -> None:
     os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
     # Each case's eager pass compiles exactly the shapes it needs.
     os.environ.setdefault("VLLM_DEEP_GEMM_WARMUP", "skip")
+    # The runner's CUDA graphs aren't captured (see `_load_without_graphs`).
+    os.environ.setdefault("VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS", "0")
     if "RANK" in os.environ:
         return  # Launched by torchrun.
     with socket.socket() as s:
@@ -123,7 +125,7 @@ def _setup_env() -> None:
 
 
 def _make_engine_args(args: argparse.Namespace, cases: list[BenchCase]):
-    from vllm.config.compilation import CompilationMode, CUDAGraphMode
+    from vllm.config.compilation import CompilationMode
 
     engine_args = EngineArgs.from_cli_args(args)
     engine_args.distributed_executor_backend = "external_launcher"
@@ -133,9 +135,6 @@ def _make_engine_args(args: argparse.Namespace, cases: list[BenchCase]):
         engine_args.distributed_executor_backend = ForwardPipelineExecutor
     engine_args.enable_prefix_caching = False
     engine_args.compilation_config.mode = CompilationMode.NONE
-    engine_args.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
-    if engine_args.max_num_seqs is None:
-        engine_args.max_num_seqs = max(len(c.requests) for c in cases)
     if engine_args.max_num_batched_tokens is None:
         # Prefix hits may replay up to a window more per request.
         engine_args.max_num_batched_tokens = max(
@@ -154,6 +153,27 @@ def _sampling_params(runner) -> SamplingParams:
     if defaults:
         return SamplingParams.from_optional(**defaults)
     return SamplingParams()
+
+
+def _load_without_graphs(engine_args):
+    """Build the engine with serving's CUDA graph dispatch but no graphs.
+
+    The runner resolves its CUDA graph mode and capture sizes as in serving,
+    so each case is padded as serving would pad it; the bench captures its
+    own one-shot graph per case instead of the runner's.
+    """
+    from unittest.mock import patch
+
+    from vllm import LLM
+    from vllm.v1.worker.gpu.model_runner import GPUModelRunner
+
+    with patch.object(GPUModelRunner, "capture_model", return_value=0):
+        llm = LLM.from_engine_args(engine_args)
+    runner = llm.llm_engine.model_executor.driver_worker.worker.model_runner
+    if runner.cudagraph_manager is not None:
+        # Dispatch to the graphs serving would have captured.
+        runner.cudagraph_manager._graphs_captured = True
+    return llm, runner
 
 
 def run_case(
@@ -264,12 +284,10 @@ def main(args: argparse.Namespace) -> None:
         raise ValueError("--kv-len-jitter must be in [0, 1).")
     _setup_env()
 
-    from vllm import LLM
     from vllm.config import set_current_vllm_config
     from vllm.distributed.parallel_state import get_world_group
 
-    llm = LLM.from_engine_args(_make_engine_args(args, cases))
-    runner = llm.llm_engine.model_executor.driver_worker.worker.model_runner
+    llm, runner = _load_without_graphs(_make_engine_args(args, cases))
     # Same draw on every rank: shapes are balanced across DP ranks.
     max_kv_len = runner.model_config.max_model_len
     cases = [

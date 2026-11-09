@@ -136,7 +136,9 @@ def test_synthetic_expert_ids_preserve_inactive_slots(keyword, dtype):
     expected = fixture.to(dtype).clone()
     ids = torch.tensor([[1, 2], [-1, -1], [3, -1], [-1, 4]], dtype=dtype)
     weights = torch.tensor([[0.6, 0.4], [0.0, 0.0], [1.0, 0.0], [0.0, 1.0]])
-    hook = RoutingFixture._substitute_ids(fixture, 1, [0], 0)
+    routing = object.__new__(RoutingFixture)
+    routing._fired, routing._rows, routing._tables = [0], 4, [{"ids": fixture}]
+    hook = routing._substitute_ids(1, 0)
     context = ForwardContext(no_compile_layers={}, attn_metadata={}, slot_mapping={})
     with override_forward_context(context):
         args = (weights,) if keyword else (weights, ids)
@@ -707,7 +709,7 @@ def test_bench_forward(tmp_path):
         "--gpu-memory-utilization",
         "0.5",
         "--case",
-        "decode=8*1@512",
+        "decode=7*1@512",
         "--case",
         "prefill=256",
         "--case",
@@ -739,3 +741,8 @@ def test_bench_forward(tmp_path):
         assert profile["top_kernels"] and profile["span_us"] > 0
         summary = json.loads(Path(profile["summary"]).read_text())
         assert Path(summary["trace"]).exists()
+    # Decodes pad to the next FULL graph, as in serving, with padding marked.
+    decode = results["decode"]["ranks"][0]
+    assert decode["cudagraph_mode"] == "FULL"
+    assert decode["num_tokens_after_padding"] == decode["num_reqs_after_padding"] == 8
+    assert decode["num_padding_tokens"] == 1
