@@ -216,6 +216,7 @@ def test_fused_indexer_q_rope_quant_matches_unfused(
         )
 
     # fp8 tensors aren't directly comparable via torch.equal — reinterpret as int8.
+    assert isinstance(q_quant_fused, torch.Tensor)
     ref_bits = q_quant_ref.view(torch.int8)
     fused_bits = q_quant_fused.view(torch.int8)
     assert torch.equal(ref_bits, fused_bits), (
@@ -443,7 +444,7 @@ def test_indexer_k_inserts_only_valid_groups_into_padded_pages(
     torch.testing.assert_close(storage, expected, rtol=0, atol=0)
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA kernel")
+@pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="CUDA/ROCm kernel")
 @pytest.mark.parametrize("use_fp4", [False, True])
 @torch.inference_mode()
 def test_indexer_k_cuda_graph_replay_reads_current_projection(use_fp4):

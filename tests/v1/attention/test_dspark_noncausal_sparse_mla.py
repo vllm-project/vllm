@@ -117,6 +117,7 @@ def _run_sparse_backend_vs_sdpa(
     block_size: int,
     num_heads: int,
     device: torch.device,
+    monkeypatch: pytest.MonkeyPatch,
     force_future_dominance: bool = False,
     qk_nope_head_dim: int = 128,
     v_head_dim: int = 128,
@@ -178,14 +179,22 @@ def _run_sparse_backend_vs_sdpa(
     )
     del model_config.hf_config.index_topk  # Composite configs only nest this field.
     model_config.dtype = dtype
-    model_config.get_num_attention_heads = MethodType(
-        lambda self, parallel_config: num_heads, model_config
+    monkeypatch.setattr(
+        model_config,
+        "get_num_attention_heads",
+        MethodType(lambda self, parallel_config: num_heads, model_config),
     )
-    model_config.get_num_kv_heads = MethodType(
-        lambda self, parallel_config: 1, model_config
+    monkeypatch.setattr(
+        model_config,
+        "get_num_kv_heads",
+        MethodType(lambda self, parallel_config: 1, model_config),
     )
-    model_config.get_head_size = MethodType(lambda self: head_size, model_config)
-    model_config.get_sliding_window = MethodType(lambda self: None, model_config)
+    monkeypatch.setattr(
+        model_config, "get_head_size", MethodType(lambda self: head_size, model_config)
+    )
+    monkeypatch.setattr(
+        model_config, "get_sliding_window", MethodType(lambda self: None, model_config)
+    )
 
     kv_cache_spec = create_standard_kv_cache_spec(vllm_config)
 
@@ -445,6 +454,7 @@ def test_flashinfer_sparse_mla_adaptive_varlen_graph_matches_sdpa(
     dist_init,
     workspace_init,
     query_lens,
+    monkeypatch,
 ):
     """Replay uses device boundaries, including empty padding, despite stale CPU."""
     backend_cls = FlashInferMLASparseTRTLLMBackend
@@ -469,6 +479,7 @@ def test_flashinfer_sparse_mla_adaptive_varlen_graph_matches_sdpa(
         64,
         16,
         device,
+        monkeypatch=monkeypatch,
         qk_nope_head_dim=192,
         v_head_dim=256,
         stale_cpu_query_lens=[4, 4, 4, 4],
@@ -507,6 +518,7 @@ def test_dspark_noncausal_sparse_mla_matches_sdpa(
     kv_cache_dtype,
     block_size,
     num_heads,
+    monkeypatch,
 ):
     """Non-causal (window ∪ block, future-pointing) per-token indices must match
     a dense SDPA reference over the same indices, for both sparse-MLA backends."""
@@ -541,6 +553,7 @@ def test_dspark_noncausal_sparse_mla_matches_sdpa(
         block_size,
         num_heads,
         device,
+        monkeypatch=monkeypatch,
     )
 
     assert backend_output.shape == sdpa_reference.shape
@@ -567,6 +580,7 @@ def test_dspark_noncausal_differs_from_causal(
     backend_cls,
     config_name,
     block_size,
+    monkeypatch,
 ):
     """Differentiation guard: prove the backend genuinely attends to the
     future-pointing indices (not silently applying a causal mask, and not merely
@@ -600,6 +614,7 @@ def test_dspark_noncausal_differs_from_causal(
         block_size,
         128,
         device,
+        monkeypatch=monkeypatch,
         force_future_dominance=True,
     )
 

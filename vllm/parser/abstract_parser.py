@@ -50,6 +50,7 @@ from vllm.sampling_params import (
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import Tool, ToolParser
 from vllm.tool_parsers.streaming import (
+    RequiredToolCallScanner,
     extract_named_tool_call_streaming,
     extract_required_tool_call_streaming,
 )
@@ -78,6 +79,9 @@ class StreamState:
     # only used for "required" and "named tool" choices,
     # tracks whether function name has been fully returned in the stream yet
     function_name_returned: bool = False
+    required_tool_call_scanner: RequiredToolCallScanner = field(
+        default_factory=RequiredToolCallScanner
+    )
     engine_based: bool = False
 
     def advance(
@@ -118,8 +122,9 @@ class Parser:
     # Subclasses should override these if they use specific parser classes
     reasoning_parser_cls: type[ReasoningParser] | None = None
     tool_parser_cls: type[ToolParser] | None = None
-    # Server-side floor for tool-call structural tags (--tool-strict-level).
-    tool_strict_level: ToolStrictLevel = ToolStrictLevel.AUTO
+    # Server-side floor for tool-call structural tags (--tool-strict-level), or
+    # None for the tool parser's default level.
+    tool_strict_level: ToolStrictLevel | None = None
     always_adjust_request: bool = False
 
     def __init__(
@@ -152,6 +157,12 @@ class Parser:
             self._reasoning_parser is None
             or self._reasoning_parser.engine_based_streaming
         ) and (self._tool_parser is None or self._tool_parser.engine_based_streaming)
+        # Without a tool parser nothing else consumes reasoning markers, so a
+        # grammar that can open reasoning from content parses the whole stream,
+        # as the non-streaming path does, even when the prompt closed reasoning.
+        self._reasoning_engine_streams_all = self._tool_parser is None and getattr(
+            self._reasoning_parser, "opens_reasoning_in_content", False
+        )
         if (
             self._reasoning_parser is None
             and self._tool_parser is not None
@@ -193,6 +204,12 @@ class Parser:
             state.history_tool_call_cnt_initialized = True
             return
         state.history_tool_call_cnt = count_history_tool_calls(request)
+        state.history_tool_call_cnt_initialized = True
+
+    def set_history_tool_call_count(self, count: int) -> None:
+        """Seed the history count when `request.messages` is not available."""
+        state = self._stream_state
+        state.history_tool_call_cnt = count
         state.history_tool_call_cnt_initialized = True
 
     def adjust_request(
@@ -519,10 +536,7 @@ class DelegatingParser(Parser):
         is_auto = request.tool_choice == "auto"
         single_call = request.parallel_tool_calls is False
         strict_level = self.tool_strict_level
-        if (
-            strict_level == ToolStrictLevel.AUTO
-            and tool_parser.default_tool_strict_level is not None
-        ):
+        if strict_level is None:
             strict_level = tool_parser.default_tool_strict_level
         if single_call and not (is_auto and structured_outputs is not None):
             # Limiting the call count needs the call envelope in the grammar.
@@ -749,10 +763,10 @@ class DelegatingParser(Parser):
         if supports_required_and_named and request.tool_choice == "required":
             delta_message, function_name_returned = (
                 extract_required_tool_call_streaming(
-                    previous_text=previous_text,
-                    current_text=current_text,
+                    delta_text=delta_text,
                     tool_call_idx=tool_call_idx,
                     tool_call_id_type=tool_call_id_type,
+                    scanner=self._stream_state.required_tool_call_scanner,
                 )
             )
             return delta_message, function_name_returned
@@ -771,6 +785,10 @@ class DelegatingParser(Parser):
             return False
         return self._reasoning_parser.is_reasoning_end(input_ids)
 
+    def set_prompt_token_ids(self, prompt_token_ids: Sequence[int]) -> None:
+        if self._reasoning_parser is not None:
+            self._reasoning_parser.set_prompt_token_ids(prompt_token_ids)
+
     def _is_reasoning_end_streaming(
         self, input_ids: list[int], delta_ids: list[int]
     ) -> bool:
@@ -786,7 +804,7 @@ class DelegatingParser(Parser):
     def _in_reasoning_phase(self, state: StreamState) -> bool:
         if self._reasoning_parser is None:
             return False
-        return not state.reasoning_ended
+        return not state.reasoning_ended or self._reasoning_engine_streams_all
 
     def _in_tool_call_phase(self, state: StreamState) -> bool:
         if self._tool_parser is None:
@@ -860,6 +878,7 @@ class DelegatingParser(Parser):
 
         if not state.prompt_reasoning_checked and prompt_token_ids is not None:
             state.prompt_reasoning_checked = True
+            self.set_prompt_token_ids(prompt_token_ids)
             if self._reasoning_parser is None or self.is_reasoning_end(
                 prompt_token_ids
             ):
@@ -895,7 +914,7 @@ class DelegatingParser(Parser):
                 should_transition = self._is_reasoning_end_streaming(
                     current_token_ids, delta_token_ids
                 )
-            if should_transition:
+            if should_transition and not self._reasoning_engine_streams_all:
                 state.reasoning_ended = True
                 reasoning_transitioned = True
                 current_token_ids = self._extract_content_ids(delta_token_ids)
@@ -1016,7 +1035,11 @@ class DelegatingParser(Parser):
             # characters from tool-call markup it saw with
             # skip_tool_parsing=True.  Flushing that would leak spurious
             # content (e.g. a stray '"'), so skip it.
-            if parser is self._reasoning_parser and reasoning_ended:
+            if (
+                parser is self._reasoning_parser
+                and reasoning_ended
+                and not self._reasoning_engine_streams_all
+            ):
                 continue
             finish = getattr(parser, "finish_streaming", None)
             if finish is None:

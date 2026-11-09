@@ -14,8 +14,9 @@ processor inserts ``mm:ss`` timestamps between frames so the model can
 reason about temporal order.
 """
 
+import itertools
 import math
-from collections.abc import Hashable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Hashable, Iterable, Mapping, Sequence
 from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Literal
 
 import numpy as np
@@ -37,8 +38,15 @@ from transformers.models.gemma4.configuration_gemma4 import (
 from vllm.config import VllmConfig
 from vllm.config.model import get_served_model_name
 from vllm.config.multimodal import MultiModalDummyOptions, VideoDummyOptions
+from vllm.distributed import (
+    get_tensor_model_parallel_rank,
+    get_tensor_model_parallel_world_size,
+    tensor_model_parallel_all_gather,
+    tensor_model_parallel_all_reduce,
+)
 from vllm.inputs import MultiModalDataDict
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.models.gemma3n_mm import batch_audio_features
@@ -85,6 +93,10 @@ from .utils import (
     WeightsMapper,
     init_vllm_registered_model,
     maybe_prefix,
+    scatter_output_slices,
+)
+from .vision import (
+    get_load_balance_assignment,
 )
 
 if TYPE_CHECKING:
@@ -97,6 +109,28 @@ if TYPE_CHECKING:
     )
 
 logger = init_logger(__name__)
+
+
+def _get_tower_quant_config(
+    tower_config: Any,
+    quant_config: "QuantizationConfig | None",
+) -> "QuantizationConfig | None":
+    # BNB/torchao/compressed-tensors handle arbitrary sizes; other methods
+    # (Marlin, FP8, …) require dimensions divisible by 64.
+    # TODO(mgoin): remove this by fixing kernel padding.
+    if quant_config and quant_config.get_name() in [
+        "bitsandbytes",
+        "torchao",
+        "compressed-tensors",
+    ]:
+        return quant_config
+    # The audio config has no intermediate_size; treat it as always divisible.
+    intermediate_size = getattr(tower_config, "intermediate_size", None)
+    quantizable = tower_config.hidden_size % 64 == 0 and (
+        intermediate_size is None or intermediate_size % 64 == 0
+    )
+    return quant_config if quantizable else None
+
 
 # Video constants — match transformers Gemma4VideoProcessor defaults.
 _SUPPORTED_SOFT_TOKENS = (70, 140, 280, 560, 1120)
@@ -715,10 +749,10 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
             max_tokens = processor.audio_seq_length
             ms_per_tok = processor.audio_ms_per_token
             max_duration_s = max_tokens * ms_per_tok / 1000.0
-            audios = hf_data["audio"]
+            audios: Any = hf_data["audio"]
             if not isinstance(audios, (list, tuple)):
                 audios = [audios]
-            for i, waveform in enumerate(audios):
+            for waveform in audios:
                 duration_s = len(waveform) / sr
                 if duration_s > max_duration_s:
                     logger.warning(
@@ -1020,6 +1054,7 @@ class Gemma4ForConditionalGeneration(
     SupportsEncoderCudaGraph,
 ):
     supports_encoder_cudagraph: ClassVar[Literal[True]] = True
+    supports_encoder_tp_data = True
     # Gemma4 clamps mm_prefix bidirectional ranges to the sliding window
     # in-kernel (HF's (causal OR blockwise) AND sliding_window). The model
     # runner reads this to keep image bidirectional ranges that exceed the
@@ -1027,6 +1062,7 @@ class Gemma4ForConditionalGeneration(
     # causal-only for images larger than the sliding window).
     mm_prefix_clamp_sliding_window: bool = True
     supports_tower_connector_lora = True
+    supports_mm_device_do_normalize = True
 
     packed_modules_mapping: dict[str, list[str]] = {
         "qkv_proj": [
@@ -1070,45 +1106,37 @@ class Gemma4ForConditionalGeneration(
         self._enable_mm_lora = bool(
             lora_config is not None and lora_config.enable_tower_connector_lora
         )
+        self.use_data_parallel = bool(
+            multimodal_config is not None
+            and getattr(multimodal_config, "mm_encoder_tp_mode", None) == "data"
+        )
 
-        # Only quantize towers when the quant method supports their
-        # dimensions.  BNB/torchao handle arbitrary sizes; other methods
-        # (Marlin, FP8, …) require dimensions divisible by 64, which
-        # the vision tower (intermediate_size=4304) does not satisfy.
-        # TODO(mgoin): remove this by fixing kernel padding.
-        tower_quant: QuantizationConfig | None
-        if quant_config and quant_config.get_name() in [
-            "bitsandbytes",
-            "torchao",
-            "compressed-tensors",
-        ]:
-            tower_quant = quant_config
-        else:
-            vision_cfg = config.vision_config
-            quantizable = (
-                vision_cfg.hidden_size % 64 == 0
-                and vision_cfg.intermediate_size % 64 == 0
-            )
-            tower_quant = quant_config if quantizable else None
+        # Apply the dimension check independently because the vision and audio
+        # towers do not necessarily have the same hidden and intermediate sizes.
+        vision_tower_quant = _get_tower_quant_config(config.vision_config, quant_config)
 
         # ---- Vision tower (shared by image and video) ----
         with self._mark_tower_model(vllm_config, {"image", "video"}):
             self.vision_tower = AutoModel.from_config(config=config.vision_config)
+            self.vision_input_norm = build_mm_input_norm(vllm_config.model_config)
             self.embed_vision = Gemma4MultimodalEmbedder(
                 config.vision_config,
                 config.text_config,
-                quant_config=tower_quant,
+                quant_config=vision_tower_quant,
                 prefix=maybe_prefix(prefix, "embed_vision"),
             )
             recursive_replace_linear(
                 self.vision_tower,
-                tower_quant,
+                vision_tower_quant,
                 prefix=maybe_prefix(prefix, "vision_tower"),
             )
 
         # ---- Audio tower (variants with audio_config) ----
         self.embed_audio: Gemma4MultimodalEmbedder | None
         if config.audio_config is not None:
+            audio_tower_quant = _get_tower_quant_config(
+                config.audio_config, quant_config
+            )
             with self._mark_tower_model(vllm_config, "audio"):
                 self.audio_tower = AutoModel.from_config(config=config.audio_config)
                 # AutoModel.from_config does NOT call post_init(),
@@ -1119,12 +1147,12 @@ class Gemma4ForConditionalGeneration(
                 self.embed_audio = Gemma4MultimodalEmbedder(
                     config.audio_config,
                     config.text_config,
-                    quant_config=tower_quant,
+                    quant_config=audio_tower_quant,
                     prefix=maybe_prefix(prefix, "embed_audio"),
                 )
                 recursive_replace_linear(
                     self.audio_tower,
-                    tower_quant,
+                    audio_tower_quant,
                     prefix=maybe_prefix(prefix, "audio_tower"),
                 )
         else:
@@ -1290,11 +1318,180 @@ class Gemma4ForConditionalGeneration(
         cost = patches_per_item * 4 * position_embedding_size * 8
         return max(1, budget // cost) if cost > 0 else 1
 
+    def _embed_patches(
+        self,
+        pixel_values: torch.Tensor,
+        pixel_position_ids: torch.Tensor,
+        padding_positions: torch.Tensor,
+    ) -> torch.Tensor:
+        # With mm_device_do_normalize the processor skips the rescale, so
+        # pixel_values hold raw uint8 patches; the patch embedder expects
+        # [0, 1] floats. Patches are channel-last, so normalize per pixel.
+        num_channels = getattr(self.vision_tower.config, "num_channels", 3)
+        pixel_values = self.vision_input_norm(
+            pixel_values.reshape(-1, num_channels), self.model_dtype
+        ).view(pixel_values.shape)
+        # Inline `Gemma4VisionPatchEmbedder.forward` with the pixel values in
+        # the model dtype. Transformers casts them to `input_proj.weight.dtype`,
+        # which is the storage dtype (e.g. FP8) once `input_proj` is quantized.
+        embedder = self.vision_tower.patch_embedder
+        pixel_values = (2 * (pixel_values - 0.5)).to(self.model_dtype)
+        hidden_states = embedder.input_proj(pixel_values)
+        position_embeddings = embedder._position_embeddings(
+            pixel_position_ids, padding_positions
+        )
+        return (hidden_states + position_embeddings).to(self.model_dtype)
+
+    # ------------------------------------------------------------------ #
+    # Data-parallel ViT execution
+    # ------------------------------------------------------------------ #
+
+    def _dp_execute_and_gather(
+        self,
+        mm_kwargs: dict[str, Any],
+        process_fn: Callable[[dict[str, Any]], list[torch.Tensor]],
+    ) -> list[torch.Tensor]:
+        item_specs = self.get_encoder_cudagraph_item_specs(mm_kwargs)
+        total_items = len(item_specs)
+        if total_items == 0:
+            return []
+
+        per_item_input_sizes = [spec.input_size for spec in item_specs]
+
+        tp_size = get_tensor_model_parallel_world_size()
+        tp_rank = get_tensor_model_parallel_rank()
+
+        (image_rank_assignment, images_per_rank, _) = get_load_balance_assignment(
+            per_item_input_sizes, tp_size
+        )
+
+        cum_images_per_rank = [0, *itertools.accumulate(images_per_rank)]
+        local_indices = image_rank_assignment[
+            cum_images_per_rank[tp_rank] : cum_images_per_rank[tp_rank + 1]
+        ]
+
+        if len(local_indices) == 0:
+            local_outputs = []
+        else:
+            local_mm_kwargs = self.select_encoder_cudagraph_items(
+                mm_kwargs, local_indices
+            )
+            local_outputs = process_fn(local_mm_kwargs)
+
+        device = next(self.parameters()).device
+        local_len_tensor = torch.zeros(total_items, dtype=torch.int64, device=device)
+        for idx, output in zip(local_indices, local_outputs):
+            local_len_tensor[idx] = output.shape[0]
+        actual_item_lens = tensor_model_parallel_all_reduce(local_len_tensor).tolist()
+
+        hidden_size = self.config.text_config.hidden_size
+        max_output_tokens_per_rank = max(
+            sum(
+                actual_item_lens[i]
+                for i in image_rank_assignment[
+                    cum_images_per_rank[r] : cum_images_per_rank[r + 1]
+                ]
+            )
+            for r in range(tp_size)
+        )
+
+        if max_output_tokens_per_rank == 0:
+            return [
+                torch.empty(
+                    (0, hidden_size),
+                    device=device,
+                    dtype=self.model_dtype,
+                )
+                for _ in range(total_items)
+            ]
+
+        if len(local_outputs) > 0:
+            local_concat = torch.cat(local_outputs, dim=0)
+        else:
+            local_concat = torch.empty(
+                (0, hidden_size),
+                device=device,
+                dtype=self.model_dtype,
+            )
+
+        current_len = local_concat.shape[0]
+        if current_len < max_output_tokens_per_rank:
+            padding = torch.empty(
+                (max_output_tokens_per_rank - current_len, hidden_size),
+                dtype=self.model_dtype,
+                device=device,
+            )
+            local_padded = torch.cat([local_concat, padding], dim=0)
+        else:
+            local_padded = local_concat
+
+        gathered = tensor_model_parallel_all_gather(local_padded, dim=0)
+
+        rank_outputs: list[torch.Tensor] = []
+        current_idx = 0
+        for rank in range(tp_size):
+            start = rank * max_output_tokens_per_rank
+            rank_count = images_per_rank[rank]
+            rank_indices = image_rank_assignment[current_idx : current_idx + rank_count]
+            rank_tokens = sum(actual_item_lens[i] for i in rank_indices)
+            current_idx += rank_count
+            rank_outputs.append(gathered[start : start + rank_tokens])
+
+        result: list[torch.Tensor | None] = [None] * total_items
+        current_idx = 0
+        for rank in range(tp_size):
+            count = images_per_rank[rank]
+            if count > 0:
+                rank_items = image_rank_assignment[current_idx : current_idx + count]
+                scatter_output_slices(
+                    rank_outputs[rank],
+                    rank_items,
+                    actual_item_lens,
+                    result,
+                )
+                current_idx += count
+
+        return [res for res in result if res is not None]
+
     # ------------------------------------------------------------------ #
     # Image processing
     # ------------------------------------------------------------------ #
 
+    def _get_max_soft_tokens(self) -> int:
+        max_soft_tokens = int(self.config.vision_config.default_output_length)
+        mm_processor_kwargs = getattr(
+            getattr(self, "multimodal_config", None),
+            "mm_processor_kwargs",
+            None,
+        )
+        if isinstance(mm_processor_kwargs, Mapping):
+            value, _ = _get_max_soft_tokens(mm_processor_kwargs)
+            if isinstance(value, int) and value in _SUPPORTED_SOFT_TOKENS:
+                max_soft_tokens = value
+        return max_soft_tokens
+
     def _process_image_input(
+        self,
+        image_input: Gemma4ImageInputs,
+    ) -> list[torch.Tensor]:
+        if self.use_data_parallel:
+            raw_kwargs = {
+                "pixel_values": image_input["pixel_values"],
+                "pixel_position_ids": image_input["pixel_position_ids"],
+            }
+            return self._dp_execute_and_gather(
+                raw_kwargs,
+                lambda local_kwargs: (
+                    []
+                    if len(local_kwargs.get("pixel_values", [])) == 0
+                    else self._process_image_input_local(
+                        Gemma4ImagePixelInputs(**local_kwargs)
+                    )
+                ),
+            )
+        return self._process_image_input_local(image_input)
+
+    def _process_image_input_local(
         self,
         image_input: Gemma4ImageInputs,
     ) -> list[torch.Tensor]:
@@ -1321,20 +1518,12 @@ class Gemma4ForConditionalGeneration(
             if isinstance(pixel_values, list)
             else pixel_values.shape[0]
         )
+        if total_images == 0:
+            return []
         pool_position_ids = pixel_position_ids
 
         if self._enable_mm_lora:
-            max_soft_tokens = vision_cfg.default_output_length
-            mm_processor_kwargs = getattr(
-                getattr(self, "multimodal_config", None),
-                "mm_processor_kwargs",
-                None,
-            )
-            if isinstance(mm_processor_kwargs, Mapping):
-                value, _ = _get_max_soft_tokens(mm_processor_kwargs)
-                if isinstance(value, int) and value in _SUPPORTED_SOFT_TOKENS:
-                    max_soft_tokens = value
-
+            max_soft_tokens = self._get_max_soft_tokens()
             max_patches = max_soft_tokens * pooling_k2
             padded_position_ids: list[torch.Tensor] = []
             for idx in range(total_images):
@@ -1392,11 +1581,7 @@ class Gemma4ForConditionalGeneration(
                 )
                 pad_tensor = (pp_tensor == -1).all(dim=-1)
 
-                inputs_embeds = vt.patch_embedder(
-                    pv_tensor,
-                    pp_tensor,
-                    pad_tensor,
-                ).to(self.model_dtype)
+                inputs_embeds = self._embed_patches(pv_tensor, pp_tensor, pad_tensor)
                 # HuggingFace's mask builder probes `padding_mask.all()` to
                 # decide whether the mask can be skipped, which syncs.
                 with gpu_sync_allowed():
@@ -1463,6 +1648,28 @@ class Gemma4ForConditionalGeneration(
         self,
         video_input: Gemma4VideoInputs,
     ) -> list[torch.Tensor]:
+        if self.use_data_parallel:
+            raw_kwargs = {
+                "pixel_values_videos": video_input["pixel_values_videos"],
+                "pixel_position_ids_videos": video_input["pixel_position_ids_videos"],
+                "video_frame_counts": video_input["video_frame_counts"],
+            }
+            return self._dp_execute_and_gather(
+                raw_kwargs,
+                lambda local_kwargs: (
+                    []
+                    if len(local_kwargs.get("pixel_values_videos", [])) == 0
+                    else self._process_video_input_local(
+                        Gemma4VideoInputs(**local_kwargs)
+                    )
+                ),
+            )
+        return self._process_video_input_local(video_input)
+
+    def _process_video_input_local(
+        self,
+        video_input: Gemma4VideoInputs,
+    ) -> list[torch.Tensor]:
         """Batch-encode video frames through the vision tower.
 
         Gemma4 has no separate video tower; video frames are images at
@@ -1490,6 +1697,8 @@ class Gemma4ForConditionalGeneration(
             fc_list = list(frame_counts)
 
         total_frames = pixel_values.shape[0]
+        if total_frames == 0 or len(fc_list) == 0:
+            return []
         free, total = torch.accelerator.get_memory_info()
         max_batch_size = min(
             total_frames,
@@ -1510,11 +1719,7 @@ class Gemma4ForConditionalGeneration(
             pp_chunk = pixel_position_ids[i : i + max_batch_size]
             pad_chunk = padding_positions[i : i + max_batch_size]
 
-            inputs_embeds = vt.patch_embedder(
-                pv_chunk,
-                pp_chunk,
-                pad_chunk,
-            ).to(self.model_dtype)
+            inputs_embeds = self._embed_patches(pv_chunk, pp_chunk, pad_chunk)
             # HuggingFace's mask builder probes `padding_mask.all()`.
             with gpu_sync_allowed():
                 encoder_outputs = vt.encoder(
@@ -1654,6 +1859,13 @@ class Gemma4ForConditionalGeneration(
             batch_size, num_patches = src.shape[0], src.shape[1]
             dst[:batch_size, :num_patches].copy_(src)
 
+        configured_max_tokens = self._get_max_soft_tokens()
+        # One graph per row width (soft tokens of one image or video frame),
+        # so a budget's rows are not all padded to the widest image.
+        row_widths = tuple(
+            t for t in _SUPPORTED_SOFT_TOKENS if t <= configured_max_tokens
+        )
+
         return EncoderCudaGraphConfig(
             modalities=["image", "video"],
             buffer_keys=[
@@ -1667,6 +1879,7 @@ class Gemma4ForConditionalGeneration(
                 "pixel_values": pad_pixel_values,
                 "pixel_position_ids": pad_pixel_position_ids,
             },
+            capture_axes=(row_widths,),
         )
 
     def get_encoder_cudagraph_budget_range(
@@ -1703,10 +1916,15 @@ class Gemma4ForConditionalGeneration(
         if modality == "image":
             pixel_values = mm_kwargs["pixel_values"]
             if isinstance(pixel_values, list):
+                # A batch pads its images to the widest one, so pack by that.
+                row_tokens = (
+                    max((pv.shape[0] for pv in pixel_values), default=0) // pool_ratio
+                )
                 return [
                     EncoderItemSpec(
                         input_size=pv.shape[0],
                         output_tokens=pv.shape[0] // pool_ratio,
+                        path_output_tokens={"default": row_tokens},
                     )
                     for pv in pixel_values
                 ]
@@ -1741,10 +1959,25 @@ class Gemma4ForConditionalGeneration(
         mm_kwargs: dict[str, Any],
         indices: list[int],
     ) -> dict[str, Any]:
+        from vllm.v1.worker.encoder_cudagraph_defs import (
+            ENCODER_CUDAGRAPH_AXIS_KEYS_KWARG,
+        )
+
+        vision_cfg = self.vision_tower.config
+        pool_ratio = getattr(vision_cfg, "pooling_kernel_size", 2) ** 2
+
         modality = self.get_input_modality(mm_kwargs)
         if modality == "image":
             pixel_values = mm_kwargs["pixel_values"]
             pixel_position_ids = mm_kwargs["pixel_position_ids"]
+            if isinstance(pixel_values, list):
+                row_patches = max(
+                    (pixel_values[i].shape[0] for i in indices), default=0
+                )
+            else:
+                row_patches = pixel_values.shape[1]
+            axis_keys = (row_patches // pool_ratio,)
+
             if len(indices) == 0:
                 is_pv_list = isinstance(pixel_values, list)
                 is_pp_list = isinstance(pixel_position_ids, list)
@@ -1753,20 +1986,24 @@ class Gemma4ForConditionalGeneration(
                     "pixel_position_ids": (
                         [] if is_pp_list else pixel_position_ids[:0]
                     ),
+                    ENCODER_CUDAGRAPH_AXIS_KEYS_KWARG: axis_keys,
                 }
             if isinstance(pixel_values, list):
                 return {
                     "pixel_values": [pixel_values[i] for i in indices],
                     "pixel_position_ids": [pixel_position_ids[i] for i in indices],
+                    ENCODER_CUDAGRAPH_AXIS_KEYS_KWARG: axis_keys,
                 }
             return {
                 "pixel_values": pixel_values[indices],
                 "pixel_position_ids": pixel_position_ids[indices],
+                ENCODER_CUDAGRAPH_AXIS_KEYS_KWARG: axis_keys,
             }
         elif modality == "video":
             pixel_values_videos = mm_kwargs["pixel_values_videos"]
             pixel_position_ids_videos = mm_kwargs["pixel_position_ids_videos"]
             video_frame_counts = mm_kwargs["video_frame_counts"]
+            axis_keys = (pixel_values_videos.shape[1] // pool_ratio,)
 
             if len(indices) == 0:
                 is_fc_tensor = isinstance(video_frame_counts, torch.Tensor)
@@ -1776,6 +2013,7 @@ class Gemma4ForConditionalGeneration(
                     "video_frame_counts": (
                         video_frame_counts[:0] if is_fc_tensor else []
                     ),
+                    ENCODER_CUDAGRAPH_AXIS_KEYS_KWARG: axis_keys,
                 }
 
             fc_list = (
@@ -1810,6 +2048,7 @@ class Gemma4ForConditionalGeneration(
                 "pixel_values_videos": selected_pv,
                 "pixel_position_ids_videos": selected_pp,
                 "video_frame_counts": selected_fc,
+                ENCODER_CUDAGRAPH_AXIS_KEYS_KWARG: axis_keys,
             }
         raise ValueError(f"Unknown modality: {modality}")
 
@@ -1828,22 +2067,23 @@ class Gemma4ForConditionalGeneration(
             EncoderCudaGraphCaptureInputs,
         )
 
-        dtype = dtype or torch.float32
+        dtype = self.vision_input_norm.input_dtype or dtype or torch.float32
 
-        max_size = max(max_batch_size, max_frames_per_batch)
+        assert axis_keys is not None
+        (per_item_output,) = axis_keys
+        assert isinstance(per_item_output, int)
+
+        # Every row of a batch replayed on this graph is an image or video
+        # frame of per_item_output tokens, so a batch that fits token_budget
+        # never needs more rows than this. Capture needs at least one row.
+        max_size = min(
+            max(max_batch_size, max_frames_per_batch),
+            max(1, token_budget // per_item_output),
+        )
 
         vision_cfg = self.vision_tower.config
         pool_ratio = getattr(vision_cfg, "pooling_kernel_size", 2) ** 2
 
-        # Retrieve the model's actual configured maximum tokens:
-        configured_max_tokens = getattr(
-            self.config.vision_config,
-            "num_soft_tokens",
-            _SUPPORTED_SOFT_TOKENS[2],
-        )
-        # Dynamically compute the slot capacity per item bounded by both the
-        # current graph budget and the user's maximum config:
-        per_item_output = min(token_budget, configured_max_tokens)
         # Satisfy k^2 * per_item_output = per_item_patches
         per_item_patches = per_item_output * pool_ratio
 
@@ -1989,11 +2229,9 @@ class Gemma4ForConditionalGeneration(
         pad_tensor = (pixel_position_ids == -1).all(dim=-1)
 
         vt = self.vision_tower
-        inputs_embeds = vt.patch_embedder(
-            pixel_values,
-            pixel_position_ids,
-            pad_tensor,
-        ).to(self.model_dtype)
+        inputs_embeds = self._embed_patches(
+            pixel_values, pixel_position_ids, pad_tensor
+        )
 
         encoder_outputs = vt.encoder(
             inputs_embeds=inputs_embeds,
@@ -2016,11 +2254,7 @@ class Gemma4ForConditionalGeneration(
             pooled_states = (pooled_states - vt.std_bias) * vt.std_scale
 
         flat_pooled = pooled_states.reshape(-1, pooled_states.shape[-1])
-        gathered_states = flat_pooled[gather_indices]
-
-        # Cast to the projection layer's dtype to resolve mixed-precision crash
-        target_dtype = self.embed_vision.embedding_projection.weight.dtype
-        gathered_states = gathered_states.to(target_dtype)
+        gathered_states = flat_pooled[gather_indices].to(self.model_dtype)
 
         flat_proj_embs = self.embed_vision(
             inputs_embeds=gathered_states.unsqueeze(0)
@@ -2038,11 +2272,11 @@ class Gemma4ForConditionalGeneration(
         if modality == "image":
             image_input = self._parse_and_validate_image_input(**mm_kwargs)
             assert image_input is not None
-            embeddings = self._process_image_input(image_input)
+            embeddings = self._process_image_input_local(image_input)
         elif modality == "video":
             video_input = self._parse_and_validate_video_input(**mm_kwargs)
             assert video_input is not None
-            embeddings = self._process_video_input(video_input)
+            embeddings = self._process_video_input_local(video_input)
         else:
             raise ValueError(f"Unsupported modality: {modality}")
 
@@ -2260,16 +2494,7 @@ class Gemma4ForConditionalGeneration(
 
             if modality == "image":
                 pixel_values_key = "pixel_values"
-                max_soft_tokens = int(vision_config.default_output_length)
-                mm_processor_kwargs = getattr(
-                    getattr(self, "multimodal_config", None),
-                    "mm_processor_kwargs",
-                    None,
-                )
-                if isinstance(mm_processor_kwargs, Mapping):
-                    val, _ = _get_max_soft_tokens(mm_processor_kwargs)
-                    if isinstance(val, int) and val in _SUPPORTED_SOFT_TOKENS:
-                        max_soft_tokens = val
+                max_soft_tokens = self._get_max_soft_tokens()
             else:
                 pixel_values_key = "pixel_values_videos"
                 max_soft_tokens = _VIDEO_MAX_SOFT_TOKENS
@@ -2313,10 +2538,11 @@ class Gemma4ForConditionalGeneration(
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
+        # Must match the tokens targeted in `_get_prompt_updates`.
         if modality == "image":
-            return "<image_soft_token>"
+            return "<|image|>"
         if modality == "audio":
-            return "<audio_soft_token>"
+            return "<|audio|>"
         if modality == "video":
             return "<|video|>"
         raise ValueError(f"Unsupported modality: {modality}")

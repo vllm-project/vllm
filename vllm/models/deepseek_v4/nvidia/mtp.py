@@ -21,10 +21,6 @@ import torch.nn as nn
 import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.config.kernel import NATIVE_MEGA_MOE_BACKENDS
-from vllm.distributed import (
-    get_tensor_model_parallel_rank,
-    get_tensor_model_parallel_world_size,
-)
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.mhc.tilelang import (
@@ -39,9 +35,6 @@ from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
-)
-from vllm.model_executor.model_loader.mtp_validation import (
-    is_mtp_completeness_check_enabled,
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.deepseek_mtp import SharedHead
@@ -305,6 +298,9 @@ class DeepSeekV4MultiTokenPredictor(nn.Module):
 
 
 class DeepSeekV4MTP(nn.Module):
+    # The checkpoint has no MTP embedding, so always reuse the target's.
+    has_own_embed_tokens = False
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         self.config = vllm_config.model_config.hf_config
@@ -385,14 +381,6 @@ class DeepSeekV4MTP(nn.Module):
         ]
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
-
-        # TP for attention
-        tp_size = get_tensor_model_parallel_world_size()
-        tp_rank = get_tensor_model_parallel_rank()
-        n_head = self.config.num_attention_heads
-        n_local_head = n_head // tp_size
-        head_rank_start = n_local_head * tp_rank
-        head_rank_end = n_local_head * (tp_rank + 1)
 
         # Pre-compute expert mapping ONCE.
         first_layer = next(iter(self.model.layers.values()))
@@ -497,12 +485,6 @@ class DeepSeekV4MTP(nn.Module):
                             loaded_params.add(name_mapped)
                             break
                     continue
-                elif "attn_sink" in name:
-                    narrow_weight = loaded_weight[head_rank_start:head_rank_end]
-                    n = narrow_weight.shape[0]
-                    params_dict[name][:n].copy_(narrow_weight)
-                    loaded_params.add(name)
-                    continue
                 else:
                     if name.endswith(".ffn.gate.bias"):
                         # ``e_score_correction_bias`` lives on the gate
@@ -518,24 +500,6 @@ class DeepSeekV4MTP(nn.Module):
                     weight_loader(param, loaded_weight)
                     loaded_params.add(name)
                     continue
-
-        loaded_layers: set[int] = set()
-        for param_name in loaded_params:
-            spec_layer = get_spec_layer_idx_from_weight_name(self.config, param_name)
-            if spec_layer is not None:
-                loaded_layers.add(spec_layer)
-        for layer_idx in range(
-            self.model.mtp_start_layer_idx,
-            self.model.mtp_start_layer_idx + self.model.num_mtp_layers,
-        ):
-            if layer_idx not in loaded_layers and is_mtp_completeness_check_enabled():
-                raise ValueError(
-                    f"MTP speculative decoding layer {layer_idx} weights "
-                    f"missing from checkpoint. The checkpoint may have "
-                    f"been quantized without including the MTP layers. "
-                    f"Use a checkpoint that includes MTP layer weights, "
-                    f"or disable speculative decoding."
-                )
         logger.info_once("MTP draft model loaded: %d params", len(loaded_params))
         return loaded_params
 

@@ -42,10 +42,6 @@ def _disable_distributed_loader_paths(monkeypatch: pytest.MonkeyPatch):
         "fused_moe_make_expert_params_mapping",
         lambda *args, **kwargs: [],
     )
-    monkeypatch.setattr(
-        dspark_module, "get_tensor_model_parallel_world_size", lambda: 1
-    )
-    monkeypatch.setattr(dspark_module, "get_tensor_model_parallel_rank", lambda: 0)
 
 
 @pytest.mark.cpu_test
@@ -63,18 +59,6 @@ def test_deepseek_v4_rocm_dspark_skips_disabled_confidence_head():
     model = _make_uninitialized_model(None)
 
     assert model._remap_dspark_name("mtp.2.confidence_head.proj.weight") is None
-
-
-@pytest.mark.cpu_test
-def test_deepseek_v4_rocm_dspark_disables_unloaded_confidence_head(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    model = _make_uninitialized_model(object())
-    _prepare_loader_model(model, [])
-    _disable_distributed_loader_paths(monkeypatch)
-
-    assert model.load_weights([]) == set()
-    assert model.model.confidence_head is None
 
 
 @pytest.mark.cpu_test
