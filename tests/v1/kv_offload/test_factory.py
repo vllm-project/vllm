@@ -717,6 +717,40 @@ def test_cpu_spec_missing_cpu_bytes_to_use_raises():
         _create_spec(cpu_bytes_to_use=None)
 
 
+@pytest.mark.parametrize("spec_name", ["CPUOffloadingSpec", "TieringOffloadingSpec"])
+@pytest.mark.parametrize(
+    ("extra_config", "load_path"),
+    [({}, "auto"), ({"load_path": "triton"}, "triton")],
+)
+def test_spec_passes_load_path_to_worker(
+    monkeypatch, spec_name, extra_config, load_path
+):
+    import vllm.v1.kv_offload.cpu.spec as cpu_spec_module
+    import vllm.v1.kv_offload.tiering.spec as tiering_spec_module
+
+    worker_calls: list[dict[str, Any]] = []
+    for module in (cpu_spec_module, tiering_spec_module):
+        monkeypatch.setattr(module, "SharedOffloadRegion", MagicMock())
+        monkeypatch.setattr(
+            module, "CPUOffloadingWorker", lambda **kwargs: worker_calls.append(kwargs)
+        )
+
+    spec = _create_spec(
+        spec_name=spec_name,
+        worker_kv_bytes_per_block=4096,
+        extra_config=extra_config,
+    )
+    assert isinstance(spec, CPUOffloadingSpec)
+    spec.create_worker(MagicMock())
+
+    assert worker_calls[0]["load_path"] == load_path
+
+
+def test_cpu_spec_rejects_unknown_load_path():
+    with pytest.raises(ValueError, match="load_path must be 'auto' or 'triton'"):
+        _create_spec(extra_config={"load_path": "dma"})
+
+
 def test_duplicate_registration_raises():
     with pytest.raises(ValueError, match="is already registered"):
         OffloadingSpecFactory.register_spec(
