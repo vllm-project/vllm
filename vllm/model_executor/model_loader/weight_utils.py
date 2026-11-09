@@ -1056,10 +1056,9 @@ def record_checkpoint_files(files: list[str]) -> None:
     _checkpoint_files.update(dict.fromkeys(files))
 
 
-def release_checkpoint_page_cache(directory: str | None = None) -> None:
-    """Advise the kernel to drop every recorded checkpoint file, and every
-    regular file under `directory`, from the OS page cache, then forget the
-    files.
+def release_checkpoint_page_cache() -> None:
+    """Advise the kernel to drop every recorded checkpoint file from the OS
+    page cache, then forget the files.
 
     The worker calls this once all its models are loaded, since a speculative
     drafter such as MTP reads the same files as the target model.
@@ -1069,15 +1068,6 @@ def release_checkpoint_page_cache(directory: str | None = None) -> None:
     that cannot be opened are skipped. No-op on platforms without
     `posix_fadvise`.
     """
-    if directory is not None:
-        record_checkpoint_files(
-            [
-                path
-                for root, _, names in os.walk(directory)
-                for path in (os.path.join(root, name) for name in names)
-                if os.path.isfile(path)
-            ]
-        )
     files = list(_checkpoint_files)
     _checkpoint_files.clear()
     fadvise = getattr(os, "posix_fadvise", None)

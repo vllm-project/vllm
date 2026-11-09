@@ -660,13 +660,9 @@ class Worker(WorkerBase):
         ):
             self.model_runner.load_model(load_dummy_weights=load_dummy_weights)
 
-        load_config = self.vllm_config.load_config
-        if (
-            load_config.release_weight_page_cache
-            or load_config.release_weight_page_cache_dir
-        ):
+        if self.vllm_config.load_config.release_weight_page_cache:
             # After the drafter too, which may read the same checkpoint files.
-            release_checkpoint_page_cache(load_config.release_weight_page_cache_dir)
+            release_checkpoint_page_cache()
 
         if self._external_weight_charges.fallback_bytes:
             self.requested_memory = self._resolve_requested_memory()

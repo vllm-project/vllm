@@ -112,13 +112,6 @@ class LoadConfig:
     them returns the checkpoint's size in host memory to the node; the cost is
     a cold re-read of the files on the next start. Only local files are
     affected. Off by default."""
-    release_weight_page_cache_dir: str | None = None
-    """Directory of model weights to drop from the OS page cache once this
-    worker has loaded its weights, whichever process read them
-    (`posix_fadvise(POSIX_FADV_DONTNEED)` on every regular file under it).
-    Meant for a node-local cache shared by several models, where weights left
-    behind by other models compete with the memory this engine pins after
-    loading. Independent of `release_weight_page_cache`. Off by default."""
     pt_load_map_location: str | dict[str, str] = "cpu"
     """
     The map location for loading pytorch checkpoint, to support loading
