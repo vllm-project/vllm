@@ -345,7 +345,7 @@ def _consumer_wrapper() -> MoRIIOWrapper:
     wrapper.lock = threading.Lock()
     wrapper.done_write_cache_req_ids = []
     wrapper.failed_write_cache_req_ids = []
-    wrapper._write_done_counts = {}
+    wrapper._write_done_senders = {}
     wrapper._terminal_transfer_ids = OrderedDict()
     return wrapper
 
@@ -360,7 +360,7 @@ def test_consumer_completes_after_every_writer_reported(monkeypatch):
 
     wrapper._handle_structured_message(message)
     assert wrapper.pop_finished_write_req_ids() == {"t"}
-    assert wrapper._write_done_counts == {}
+    assert wrapper._write_done_senders == {}
 
     # A peer that does not send num_writers is a single writer.
     wrapper._handle_structured_message({"type": "write_done", "transfer_id": "u"})
@@ -374,5 +374,5 @@ def test_consumer_write_failure_drops_partial_write_count(monkeypatch):
         {"type": "write_done", "transfer_id": "t", "num_writers": 2}
     )
     wrapper._handle_structured_message({"type": "write_failed", "transfer_id": "t"})
-    assert wrapper._write_done_counts == {}
+    assert wrapper._write_done_senders == {}
     assert wrapper.pop_failed_write_req_ids() == {"t"}
