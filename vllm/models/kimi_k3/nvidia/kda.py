@@ -775,6 +775,11 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                 conv_weight_dtype=self.conv1d.weight.dtype,
                 lower_bound=self.gate_lower_bound,
             )
+            # kda_decode_backend "triton" (as set, not as resolved) keeps the
+            # Triton verify and commit.
+            forced_triton = decode_backend == "triton"
+            if forced_triton:
+                supported, reason = False, "kda_decode_backend is triton"
             self.recoverssm_backend = "cute" if supported else "triton"
             bf16, f32 = torch.bfloat16, torch.float32
             dtypes = (
@@ -784,7 +789,8 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                 self.f_b_proj.weight.dtype,
             )
             if (
-                self.recoverssm_backend == "triton"
+                not forced_triton
+                and self.recoverssm_backend == "triton"
                 and current_platform.is_cuda()
                 and current_platform.is_device_capability_family(100)
                 and (self.head_dim, self.conv_size) == (128, 4)
@@ -807,11 +813,12 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                         self.local_num_heads, self.spec_query_len, max_num_seqs
                     )
             if self.recoverssm_backend == "triton":
-                logger.info_once(
-                    "Using the Triton KDA RecoverSSM verify and commit: the CuTe "
-                    "kernels cannot run (%s).",
-                    reason,
-                )
+                if self.deferred_verify is None:
+                    logger.info_once(
+                        "Using the Triton KDA RecoverSSM verify and commit: the "
+                        "CuTe kernels cannot run (%s).",
+                        reason,
+                    )
             else:
                 logger.info_once("Using the CuTe KDA RecoverSSM verify and commit.")
                 self.recoverssm_verify = CuteRecoverSSMVerify(
@@ -1647,7 +1654,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         elif core_attn_out_non_spec is not None:
             # The deferred verify wrote the speculative rows normalized.
             if spec_token_start is not None:
-                rows_out = core_attn_out[:, non_spec_slice]
+                rows_out = core_attn_out[0, non_spec_slice]
                 rows_out.copy_(self.o_norm(rows_out, g2[non_spec_slice]))
             else:
                 assert non_spec_token_indx is not None

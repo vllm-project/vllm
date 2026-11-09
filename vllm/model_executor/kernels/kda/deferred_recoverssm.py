@@ -97,17 +97,19 @@ def _kernel(heads, max_requests, requests, tokens, conv_state, qkv):
 
 # The operands whose leading dimension follows the batch (or the cache's slots).
 _BATCH_OPERANDS = frozenset((0, 3, 4, 5, 8, 9, 10, 11, 14, 15, 16, 17, 18))
+# Compiled kernels by layer shape and operand layouts, shared by every layer.
+_COMPILED: dict[tuple, Callable[..., None]] = {}
 
 
 class KdaDeferredVerify:
     """The deferred RecoverSSM verify of one KDA layer shape (heads, window) for
     steps of up to `max_requests` requests. KdaFusedTC compiles once per operand
-    layout with the batch read at run time; the fallbacks compile per batch."""
+    layout with the batch read at run time; the fallbacks compile per batch. The
+    layers of one shape share the compiled kernels."""
 
     def __init__(self, num_heads: int, window: int, max_requests: int) -> None:
         self.num_heads, self.window = num_heads, window
         self.max_requests = max_requests
-        self._compiled: dict[tuple, Callable[..., None]] = {}
 
     def __call__(
         self,
@@ -162,8 +164,9 @@ class KdaDeferredVerify:
             for i in _BATCH_OPERANDS:
                 shape, stride, dtype = specs[i]
                 specs[i] = ((None, *shape[1:]), stride, dtype)
-        key = (type(kernel), *specs)
-        compiled = self._compiled.get(key)
+        # TC reads the batch at run time: q and max_requests are not in its layouts.
+        key = (self.num_heads, self.window, self.max_requests, type(kernel), *specs)
+        compiled = _COMPILED.get(key)
         if compiled is None:
             fakes = []
             for shape, stride, dtype in specs:
@@ -179,7 +182,7 @@ class KdaDeferredVerify:
                     make_fake_stream(use_tvm_ffi_env_stream=True),
                     options="--enable-tvm-ffi",
                 )
-            self._compiled[key] = compiled
+            _COMPILED[key] = compiled
         # TVM-FFI launch on the current stream, straight from the torch tensors.
         compiled(*operands[:13], lower_bound, K**-0.5, norm_eps, *operands[13:])
         return out
