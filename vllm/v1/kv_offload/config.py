@@ -4,6 +4,7 @@
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+from fractions import Fraction
 from typing import Any
 
 
@@ -19,6 +20,7 @@ class OffloadingGroupConfig:
     # Chunks of this group the tier keeps for one request, or None when
     # attention reaches back without a bound (a full layer).
     sliding_window_size_in_chunks: int | None = None
+    tokens_per_state: tuple[int | Fraction, ...] | None = None
 
 
 @dataclass(frozen=True)

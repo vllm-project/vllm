@@ -359,6 +359,28 @@ def test_replica_rotation_round_trip():
         assert _store_all(mappings, pages, 256, block_id) == reference
 
 
+def test_compressed_mla_certifies():
+    # tokens_per_state=4, block_size=4 -> 1 state per block
+    spec = _mla_spec(tokens_per_state=4)
+    mapping = _mapping(spec, None, _ctx(rank=0, tp=2))
+    assert mapping.parallelism_agnostic
+    # one state row per block: row = page // num_states
+    num_states = spec.block_size // spec.tokens_per_state
+    row = spec.real_page_size_bytes // num_states
+    assert _triples(mapping.runs) == [(0, 0, row)]
+    assert mapping.num_writers == 2  # tp_size // dcp_size
+
+
+def test_compressed_mla_cross_tp_round_trip():
+    """Bytes stored at one TP load correctly at another."""
+    spec = _mla_spec(tokens_per_state=4)
+    reference = bytes((5 + 11 * i) % 256 for i in range(spec.real_page_size_bytes))
+    for tp in (4, 2, 1):
+        mappings = [_mapping(spec, None, _ctx(r, tp=tp)) for r in range(tp)]
+        pages = [_load_one(m, reference) for m in mappings]
+        assert _store_all(mappings, pages, len(reference)) == reference
+
+
 # ---------------------------------------------------------------------------
 # Fail-closed gates
 # ---------------------------------------------------------------------------
@@ -383,7 +405,12 @@ def test_fail_closed_cases():
     # Per-token-head scales are packed with the data
     quant_spec = _full_spec(kv_quant_mode=KVQuantMode.FP8_PER_TOKEN_HEAD)
     assert _try_mapping(quant_spec, _split_nhd_cache(quant_spec), _ctx(0, tp=4)) is None
-    # Compressed MLA slots are not 1:1 with tokens
+    # tokens_per_state must be > 0
+    assert _try_mapping(_mla_spec(tokens_per_state=0), None, _ctx(0, tp=2)) is None
+    # tokens_per_state must divide the block_size
+    assert _try_mapping(_mla_spec(tokens_per_state=3), None, _ctx(0, tp=2)) is None
+    # CP interleave (1 token) is not divisible by tokens_per_state:
+    # a compressed state would straddle CP shard boundaries
     assert (
         _try_mapping(_mla_spec(tokens_per_state=2), None, _ctx(0, tp=2, dcp=2)) is None
     )

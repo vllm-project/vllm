@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Unit tests for FileMapper."""
 
+from fractions import Fraction
 from unittest.mock import MagicMock
 
 from vllm.v1.kv_offload.base import OffloadingSpec, make_offload_key
@@ -24,13 +25,12 @@ def make_mapper_from_offloading_spec(**kwargs) -> FileMapper:
     config = OffloadingConfig(
         groups=tuple(
             OffloadingGroupConfig(
-                tokens_per_block=tokens_per_block,
-                layer_names=(layer_name,),
+                tokens_per_block=entry[0],
+                layer_names=(entry[1],),
                 group_id=group_id,
+                tokens_per_state=entry[2] if len(entry) > 2 else None,
             )
-            for group_id, (tokens_per_block, layer_name) in enumerate(
-                kwargs.get("groups", ())
-            )
+            for group_id, entry in enumerate(kwargs.get("groups", ()))
         ),
         worker_kv_bytes_per_block=0,
         enable_kv_cache_events=False,
@@ -326,3 +326,77 @@ def test_replicated_layout_run_config_tp_invariant():
     tp2 = make_mapper_from_offloading_spec(tp_size=2, world_size=2, rank=0, **shared)
     tp4 = make_mapper_from_offloading_spec(tp_size=4, world_size=4, rank=2, **shared)
     assert tp2.get_run_config() == tp4.get_run_config()
+
+
+# ---------------------------------------------------------------------------
+# tokens_per_state: per-layer compression ratios in the namespace
+# ---------------------------------------------------------------------------
+
+
+def test_tokens_per_state_emitted_for_compressed_groups():
+    fm = make_mapper_from_offloading_spec(
+        groups=((256, "k_cache", (4, 4)),),
+    )
+    assert fm.fields["kv_cache_groups"] == [
+        {
+            "tokens_per_block": 256,
+            "layer_names": ["k_cache"],
+            "tokens_per_state": ["4", "4"],
+        }
+    ]
+
+
+def test_tokens_per_state_omitted_when_all_one():
+    # ratio-1 groups must not grow the hashed fields
+    # preserves digests for existing deployments
+    fm = make_mapper_from_offloading_spec(
+        groups=((64, "layer0", (1, 1)),),
+    )
+    assert fm.fields["kv_cache_groups"] == [
+        {"tokens_per_block": 64, "layer_names": ["layer0"]}
+    ]
+
+
+def test_tokens_per_state_omitted_when_none():
+    fm = make_mapper_from_offloading_spec(
+        groups=((64, "layer0", None),),
+    )
+    assert "tokens_per_state" not in fm.fields["kv_cache_groups"][0]
+
+
+def test_tokens_per_state_mixed_group_emits_all_layers():
+    # heterogeneous group: every layer's ratio is recorded, including the 1s
+    fm = make_mapper_from_offloading_spec(
+        groups=((256, "k_cache", (4, 1)),),
+    )
+    assert fm.fields["kv_cache_groups"][0]["tokens_per_state"] == ["4", "1"]
+
+
+def test_tokens_per_state_fraction_stringified():
+    fm = make_mapper_from_offloading_spec(
+        groups=((256, "k_cache", (Fraction(3, 2),)),),
+    )
+    assert fm.fields["kv_cache_groups"][0]["tokens_per_state"] == ["3/2"]
+
+
+def test_tokens_per_state_forks_namespace():
+    # different compression ratios are different byte layouts
+    compressed = make_mapper_from_offloading_spec(
+        groups=((256, "k_cache", (4, 4)),),
+    )
+    plain = make_mapper_from_offloading_spec(
+        groups=((256, "k_cache", (1, 1)),),
+    )
+    assert compressed.base_path != plain.base_path
+
+
+def test_tokens_per_state_survives_parallel_agnostic_collapse():
+    fm = make_mapper_from_offloading_spec(
+        tp_size=4,
+        rank=2,
+        is_parallelism_agnostic=True,
+        parallel_agnostic=True,
+        groups=((256, "k_cache", (4, 4)),),
+    )
+    assert fm.fields["tp_size"] == 1
+    assert fm.fields["kv_cache_groups"][0]["tokens_per_state"] == ["4", "4"]

@@ -1520,6 +1520,7 @@ class KVCacheGroupSpec:
     # source group after a connector load.
     enable_kv_transfer: bool = True
     role: KVCacheGroupRole = KVCacheGroupRole.DEFAULT
+    layer_tokens_per_state: dict[str, int | Fraction] | None = None
 
 
 @dataclass

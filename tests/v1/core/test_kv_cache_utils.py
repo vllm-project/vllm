@@ -2364,3 +2364,78 @@ def test_null_head_len():
         assert null_head_len(table) == expected
     blocks = KVCacheBlocks(([null] * 4 + real, [null] + real[:1] + [null]))
     assert blocks.get_unhashed_block_ids_all_groups() == [[1, 2, 3], [1]]
+
+
+def _uniform_group_uniform_specs(*specs: KVCacheSpec) -> KVCacheGroupSpec:
+    """Group wrapped in UniformTypeKVCacheSpecs, as workers produce."""
+    return KVCacheGroupSpec(
+        layer_names=[f"l{i}" for i in range(len(specs))],
+        kv_cache_spec=UniformTypeKVCacheSpecs(
+            block_size=64, kv_cache_specs={f"l{i}": s for i, s in enumerate(specs)}
+        ),
+    )
+
+
+def _kv_cache_config(*groups: KVCacheGroupSpec) -> KVCacheConfig:
+    return KVCacheConfig(
+        num_blocks=4,
+        kv_cache_tensors=[],
+        kv_cache_groups=list(groups),
+    )
+
+
+def test_layer_tokens_per_state_populated_on_heterogeneous_ratios():
+    group = _uniform_group_uniform_specs(
+        MLAAttentionSpec(
+            block_size=64,
+            num_kv_heads=1,
+            head_size=576,
+            dtype=torch.bfloat16,
+            tokens_per_state=4,
+        ),
+        MLAAttentionSpec(
+            block_size=64,
+            num_kv_heads=1,
+            head_size=576,
+            dtype=torch.bfloat16,
+            tokens_per_state=1,
+        ),
+    )
+    out = generate_scheduler_kv_cache_config([_kv_cache_config(group)])
+    assert out.kv_cache_groups[0].layer_tokens_per_state == {"l0": 4, "l1": 1}
+
+
+def test_layer_tokens_per_state_none_when_uniform():
+    group = _uniform_group_uniform_specs(
+        MLAAttentionSpec(
+            block_size=64,
+            num_kv_heads=1,
+            head_size=576,
+            dtype=torch.bfloat16,
+            tokens_per_state=4,
+        ),
+        MLAAttentionSpec(
+            block_size=64,
+            num_kv_heads=1,
+            head_size=576,
+            dtype=torch.bfloat16,
+            tokens_per_state=4,
+        ),
+    )
+    out = generate_scheduler_kv_cache_config([_kv_cache_config(group)])
+    assert out.kv_cache_groups[0].layer_tokens_per_state is None
+
+
+def test_layer_tokens_per_state_none_for_plain_group():
+    group = KVCacheGroupSpec(
+        layer_names=["l0"],
+        kv_cache_spec=MLAAttentionSpec(
+            block_size=64,
+            num_kv_heads=1,
+            head_size=576,
+            dtype=torch.bfloat16,
+            tokens_per_state=4,
+        ),
+    )
+    out = generate_scheduler_kv_cache_config([_kv_cache_config(group)])
+    assert out.kv_cache_groups[0].layer_tokens_per_state is None

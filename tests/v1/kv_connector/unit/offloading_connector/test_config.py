@@ -1252,7 +1252,7 @@ def test_parallelism_agnostic_excluded(kv_cache_groups: list[KVCacheGroupSpec]):
             id="uniform-mla-wrapper",
         ),
         pytest.param(
-            [_uniform_group(_mla_spec(head_size=576), _mla_spec(tokens_per_state=2))],
+            [_uniform_group(_mla_spec(head_size=576), _mla_spec(tokens_per_state=3))],
             False,
             id="uniform-uncertifiable-inner",
         ),
@@ -1267,8 +1267,8 @@ def test_canonical_layout_gate(kv_cache_groups, certified):
 
 @pytest.mark.parametrize(
     ("spec"),
-    [_SWA_MLA_SPEC, _mla_spec(tokens_per_state=2)],
-    ids=["swa", "compressed-mla"],
+    [_SWA_MLA_SPEC],
+    ids=["swa"],
 )
 def test_uncertifiable_canonical_layout_resets_replication(spec: KVCacheSpec):
     def _get_offloading_config(canonical: bool):
@@ -1393,3 +1393,81 @@ def test_blocks_per_chunk_must_be_positive():
 
     with pytest.raises(ValueError, match="greater than 0"):
         build_offloading_config(config, _make_kv_cache_config())
+
+
+def test_certifiable_compressed_mla_canonical_layout():
+    spec = _mla_spec(tokens_per_state=2)
+
+    def _get_offloading_config(canonical: bool):
+        config = _make_vllm_config(
+            tensor_parallel_size=2,
+            extra_config={"canonical_layout": True} if canonical else None,
+        )
+        config.model_config.use_mla = True
+        PAGE = spec.page_size_bytes
+        kv_config = KVCacheConfig(
+            num_blocks=4,
+            kv_cache_tensors=[
+                KVCacheTensor(
+                    size=PAGE * 4,
+                    layers=["layer"],
+                    layer_stride=PAGE * 4,
+                    block_stride=PAGE,
+                )
+            ],
+            kv_cache_groups=[KVCacheGroupSpec(["layer"], spec)],
+        )
+        kv_config.kv_tp_replicas = kv_cache_groups_tp_replicas(
+            kv_config.kv_cache_groups,
+            config.parallel_config.tensor_parallel_size,
+            config.parallel_config.decode_context_parallel_size,
+        )
+        return build_offloading_config(config, kv_config)
+
+    # direct layout: replicated MLA optimization, not TP-agnostic
+    offload_config = _get_offloading_config(canonical=False)
+    assert offload_config.replicated_layout
+    assert not offload_config.parallel.is_parallelism_agnostic
+
+    # canonical layout: compressed MLA certifies -> TP-agnostic namespace
+    canon = _get_offloading_config(canonical=True)
+    assert canon.replicated_layout
+    assert canon.parallel.is_parallelism_agnostic
+
+
+def test_tokens_per_state_propagates_to_group_config():
+    config = _make_vllm_config(
+        extra_config={"canonical_layout": True},
+    )
+    specs = UniformTypeKVCacheSpecs(
+        block_size=64,
+        kv_cache_specs={
+            "l0": _mla_spec(tokens_per_state=4),
+            "l1": _mla_spec(tokens_per_state=4),
+        },
+    )
+    kv_config = KVCacheConfig(
+        num_blocks=4,
+        kv_cache_tensors=[],
+        kv_cache_groups=[KVCacheGroupSpec(["l0", "l1"], specs)],
+    )
+    offloading_config = build_offloading_config(config, kv_config)
+    assert offloading_config.groups[0].tokens_per_state == (4, 4)
+
+
+def test_scheduler_config_populates_layer_tokens_per_state():
+    # uniform ratio -> None (spec fallback covers it)
+    uniform = _uniform_group(
+        _mla_spec(tokens_per_state=4), _mla_spec(tokens_per_state=4)
+    )
+    cfg = KVCacheConfig(num_blocks=4, kv_cache_tensors=[], kv_cache_groups=[uniform])
+    out = generate_scheduler_kv_cache_config([cfg])
+    assert out.kv_cache_groups[0].layer_tokens_per_state is None
+
+    # heterogeneous ratios -> per-layer dict survives spec collapse
+    hetero = _uniform_group(
+        _mla_spec(tokens_per_state=4), _mla_spec(tokens_per_state=1)
+    )
+    cfg = KVCacheConfig(num_blocks=4, kv_cache_tensors=[], kv_cache_groups=[hetero])
+    out = generate_scheduler_kv_cache_config([cfg])
+    assert out.kv_cache_groups[0].layer_tokens_per_state == {"l0": 4, "l1": 1}
