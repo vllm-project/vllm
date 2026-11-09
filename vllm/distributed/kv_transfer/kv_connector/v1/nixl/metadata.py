@@ -38,12 +38,12 @@ _I32_MAX = 2**31 - 1
 
 
 def _valid_block_ids(block_ids: object) -> bool:
-    """Return True when *block_ids* is a valid ``BlockIds`` value.
+    """Return True when *block_ids* is a valid `BlockIds` value.
 
     Checks structure (sequence of sequences of ints), non-negativity, and
     that every element fits in int32 — the dtype used by
-    ``_compute_desc_ids``.  Rejects ``None``, non-int entries, negatives,
-    and values that would overflow ``np.int32``.
+    `_compute_desc_ids`.  Rejects `None`, non-int entries, negatives,
+    and values that would overflow `np.int32`.
     """
     if not isinstance(block_ids, (list, tuple)):
         return False
