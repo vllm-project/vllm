@@ -46,9 +46,8 @@ from vllm.models.deepseek_v41.nvidia.ops.mega_mhc import (
     is_mega_mhc_supported,
     mhc_shifted_post_pre_deep_gemm,
 )
-from vllm.models.deepseek_v41.nvidia.ops.mhc import hc_expand
+from vllm.models.deepseek_v41.nvidia.ops.mhc import hc_expand, mhc_boundary_supported
 from vllm.platforms import current_platform
-from vllm.utils.import_utils import has_cutedsl
 from vllm.utils.torch_utils import set_random_seed
 
 DEVICE = current_platform.device_type
@@ -774,18 +773,9 @@ def test_mhc_pre_delayed_custom_op_supports_compile(carried):
 
 
 @pytest.mark.skipif(not HAS_TILELANG_MHC, reason="TileLang MHC support required")
-@pytest.mark.skipif(
-    not current_platform.is_device_capability_family(100),
-    reason="DeepGEMM Mega mHC requires SM100-family CUDA",
-)
-@pytest.mark.parametrize("num_tokens", [0, 1, 17, 128, 1024])
-@pytest.mark.parametrize("hidden_size", [5120, 7168])
-def test_deep_gemm_mega_mhc_correctness(num_tokens, hidden_size):
-    set_random_seed(0)
+def _shifted_post_pre_case(num_tokens: int, hidden_size: int):
+    """Inputs of `mhc_shifted_post_pre_deep_gemm` and the TileLang reference."""
     hc_mult = 4
-    if not is_mega_mhc_supported(hidden_size, 4):
-        pytest.skip("DeepGEMM Mega mHC is not available")
-
     x = torch.randn(num_tokens, hidden_size, dtype=torch.bfloat16, device=DEVICE)
     residual = torch.randn(
         num_tokens, hc_mult, hidden_size, dtype=torch.bfloat16, device=DEVICE
@@ -839,7 +829,6 @@ def test_deep_gemm_mega_mhc_correctness(num_tokens, hidden_size):
         norm_weight,
         7e-6,
     )
-    actual = mhc_shifted_post_pre_deep_gemm(*args)
     expected = (
         expected_residual,
         expected_post_mix,
@@ -847,6 +836,23 @@ def test_deep_gemm_mega_mhc_correctness(num_tokens, hidden_size):
         expected_y_bf16,
         expected_previous_mix,
     )
+    return args, expected
+
+
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(100),
+    reason="DeepGEMM Mega mHC requires SM100-family CUDA",
+)
+@pytest.mark.parametrize("num_tokens", [0, 1, 17, 128, 1024])
+@pytest.mark.parametrize("hidden_size", [5120, 7168])
+def test_deep_gemm_mega_mhc_correctness(num_tokens, hidden_size):
+    set_random_seed(0)
+    if not is_mega_mhc_supported(hidden_size, 4):
+        pytest.skip("DeepGEMM Mega mHC is not available")
+
+    args, expected = _shifted_post_pre_case(num_tokens, hidden_size)
+    x = args[0]
+    actual = mhc_shifted_post_pre_deep_gemm(*args)
     for i, (result, ref) in enumerate(zip(actual, expected, strict=True)):
         # Match the existing mHC BF16 tolerance: post rounding differences
         # can be amplified by cancellation in the carried collapse.
@@ -871,64 +877,25 @@ def test_deep_gemm_mega_mhc_correctness(num_tokens, hidden_size):
         torch.cuda.current_stream().wait_stream(stream)
 
 
+@pytest.mark.skipif(not HAS_TILELANG_MHC, reason="TileLang MHC support required")
 @pytest.mark.parametrize("num_tokens", [1, 17, 128, 196])
 def test_mhc_boundary_correctness(num_tokens):
-    if not (current_platform.is_device_capability_family(100) and has_cutedsl()):
+    if not mhc_boundary_supported(5120, 4):
         pytest.skip("The CuTe DSL mHC boundary needs SM100 and CuTe DSL")
+    set_random_seed(0)
     from vllm.models.deepseek_v41.nvidia.ops.mhc_boundary import (
         mhc_shifted_post_pre_boundary,
-        mhc_sinkhorn,
+        prepare_boundary_weight,
     )
 
-    set_random_seed(0)
-    hidden_size, hc_mult = 5120, 4
-    x = torch.randn(num_tokens, hidden_size, dtype=torch.bfloat16, device=DEVICE)
-    residual = torch.randn(
-        num_tokens, hc_mult, hidden_size, dtype=torch.bfloat16, device=DEVICE
-    )
-    previous_mix = torch.rand(num_tokens, hc_mult, device=DEVICE)
-    post_mix = torch.rand(num_tokens, hc_mult, 1, device=DEVICE)
-    res_mix = torch.rand(num_tokens, hc_mult, hc_mult, device=DEVICE)
-    fn = torch.randn(24, hc_mult * hidden_size, device=DEVICE) * 0.01
-    scale = torch.randn(3, device=DEVICE) * 0.1
-    base = torch.randn(24, device=DEVICE) * 0.1
-    norm_weight = torch.empty(
-        hidden_size, dtype=torch.bfloat16, device=DEVICE
-    ).uniform_(0.9, 1.1)
-
-    expected_residual = mhc_post_tilelang(x, residual, post_mix, res_mix)
-    expected = (
-        expected_residual,
-        *mhc_pre_delayed_tilelang(
-            expected_residual,
-            fn,
-            scale,
-            base,
-            2e-5,
-            3e-4,
-            2e-6,
-            1.25,
-            10,
-            pre_mix=previous_mix,
-            norm_weight=norm_weight,
-            norm_eps=7e-6,
-        ),
-    )
-    args = [x, residual, previous_mix, post_mix, res_mix, fn, scale, base]
-    args += [2e-5, 3e-4, 1.25, 2e-6, 10, norm_weight, 7e-6]
+    args, expected = _shifted_post_pre_case(num_tokens, 5120)
+    fn = args[5]
+    fn.mhc_boundary_weight = prepare_boundary_weight(fn)
     actual = mhc_shifted_post_pre_boundary(*args)
     assert actual is not None
     for i, (result, ref) in enumerate(zip(actual, expected, strict=True)):
         atol, rtol = (1.6e-2, 1e-2) if i in (0, 3) else (1e-6, 1e-3)
         torch.testing.assert_close(result, ref, atol=atol, rtol=rtol)
-
-    # Sinkhorn run apart (as the overlap path does) gives the same comb.
-    args[12] = 0
-    deferred = mhc_shifted_post_pre_boundary(*args)
-    assert deferred is not None
-    mhc_sinkhorn(deferred[2], 2e-6, 10)
-    for result, ref in zip(deferred, actual, strict=True):
-        torch.testing.assert_close(result, ref, atol=0, rtol=0)
 
 
 def sinkhorn_normalize_ref(x: torch.Tensor, repeat: int, eps: float) -> torch.Tensor:

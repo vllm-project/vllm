@@ -8,28 +8,24 @@ The hidden dimension is split into 16 slices. For every token, a slice's CTA upd
 part of the residual stream, collapses it with the lagged pre-mix, and multiplies the
 updated residual with its slice of the mixer weight on BF16 tensor cores. The weight is
 rounded to TF32 and split into BF16 high and low parts that sum to it exactly
-(``prepare_boundary_weight``), so every product equals the TF32 product of DeepGEMM's
+(`prepare_boundary_weight`), so every product equals the TF32 product of DeepGEMM's
 Mega mHC. A 16-CTA cluster owns a tile of tokens and its CTAs push their partial mixes
 and sums of squares to the CTA that owns the token through distributed shared memory, so
-up to ``MAX_TOKENS`` tokens run in one wave of one kernel. Every reduction runs in a
+up to `MAX_TOKENS` tokens run in one wave of one kernel. Every reduction runs in a
 fixed order, so results are deterministic.
 """
 
-import functools
+from collections.abc import Callable
 
 import cutlass
 import cutlass.cute as cute
 import torch
+from cutlass import Float32, Int32, Int64, Uint32
 from cutlass._mlir.dialects import llvm
 from cutlass.cutlass_dsl import T, dsl_user_op
 from cutlass.utils import SmemAllocator
 
-Int32, Int64, Uint32, Float32 = (
-    cutlass.Int32,
-    cutlass.Int64,
-    cutlass.Uint32,
-    cutlass.Float32,
-)
+from vllm.cute_utils.cvt import fp32x2_to_bf16x2
 
 CLUSTER = 16
 THREADS = 640
@@ -208,61 +204,6 @@ def stg_f32(addr, value, *, loc=None, ip=None):
 
 
 @dsl_user_op
-def stg_v2_u32(addr, a, b, *, loc=None, ip=None):
-    _asm(
-        None,
-        [Int64(addr), Uint32(a), Uint32(b)],
-        "st.global.v2.u32 [$0], {$1, $2};",
-        "l,r,r",
-        loc=loc,
-        ip=ip,
-    )
-
-
-@dsl_user_op
-def stg_u8(addr, value, *, loc=None, ip=None):
-    _asm(
-        None,
-        [Int64(addr), Uint32(value)],
-        "st.global.u8 [$0], $1;",
-        "l,r",
-        loc=loc,
-        ip=ip,
-    )
-
-
-@dsl_user_op
-def mxfp8_block(amax, vals, *, loc=None, ip=None):
-    """E4M3 bytes and UE8M0 scale of 8 values of a 32-element MXFP8 block with absolute
-    maximum ``amax``, as ``cvt_warp_fp16_to_mxfp8`` computes them (``exp2f_rcp``
-    scale, IEEE products that keep denormals): two words of E4M3 bytes and the scale
-    in the low byte of a third."""
-    out = _asm(
-        llvm.StructType.get_literal([T.i32()] * 3),
-        [Float32(amax)] + [Float32(v) for v in vals],
-        "{\n.reg .f32 r, sf, os, f<8>;\n.reg .b16 e, h<4>;\n.reg .b32 sb;\n.reg .pred z, p;\n"  # noqa: E501
-        "rcp.approx.ftz.f32 r, 0f43E00000;\nmul.rn.f32 sf, $3, r;\n"
-        "cvt.rp.satfinite.ue8m0x2.f32 e, 0f00000000, sf;\n"
-        # exp2f_rcp: 2^(127 - e), but 1 for e == 0.
-        "cvt.u32.u16 sb, e;\nand.b32 sb, sb, 255;\ncvt.rn.f32.u32 os, sb;\n"
-        "sub.f32 os, 0f42FE0000, os;\nex2.approx.f32 os, os;\n"
-        "setp.eq.u32 p, sb, 0;\nselp.f32 os, 0f3F800000, os, p;\n"
-        "setp.neu.f32 z, $3, 0f00000000;\nselp.f32 os, os, 0f00000000, z;\n"
-        "mul.rn.f32 f0, $4, os;\nmul.rn.f32 f1, $5, os;\nmul.rn.f32 f2, $6, os;\n"
-        "mul.rn.f32 f3, $7, os;\nmul.rn.f32 f4, $8, os;\nmul.rn.f32 f5, $9, os;\n"
-        "mul.rn.f32 f6, $10, os;\nmul.rn.f32 f7, $11, os;\n"
-        "cvt.rn.satfinite.e4m3x2.f32 h0, f1, f0;\ncvt.rn.satfinite.e4m3x2.f32 h1, f3, f2;\n"  # noqa: E501
-        "cvt.rn.satfinite.e4m3x2.f32 h2, f5, f4;\ncvt.rn.satfinite.e4m3x2.f32 h3, f7, f6;\n"  # noqa: E501
-        "mov.b32 $0, {h0, h1};\nmov.b32 $1, {h2, h3};\ncvt.u32.u16 $2, e;\n}",
-        "=r,=r,=r,f,f,f,f,f,f,f,f,f",
-        side_effects=False,
-        loc=loc,
-        ip=ip,
-    )
-    return _fields(out, 3, T.i32(), Uint32, loc, ip)
-
-
-@dsl_user_op
 def bulk_g2s(dst, src, size, bar, *, loc=None, ip=None):
     _asm(
         None,
@@ -276,8 +217,8 @@ def bulk_g2s(dst, src, size, bar, *, loc=None, ip=None):
 
 @dsl_user_op
 def st_async_v4(addr, w, bar, rank, *, loc=None, ip=None):
-    """Store four words at the same shared-memory offset of CTA ``rank``, completing on
-    its ``bar``."""
+    """Store four words at the same shared-memory offset of CTA `rank`, completing on
+    its `bar`."""
     _asm(
         None,
         [Int32(addr)] + [Uint32(v) for v in w] + [Int32(bar), Int32(rank)],
@@ -320,7 +261,7 @@ def mbar_expect_tx(bar, size, *, loc=None, ip=None):
 
 @dsl_user_op
 def mbar_wait(bar, phase, *, scope="cta", loc=None, ip=None):
-    """Wait for ``phase``; ``scope="cluster"`` acquires data that peers delivered with
+    """Wait for `phase`; `scope="cluster"` acquires data that peers delivered with
     st.async."""
     sem = ".acquire.cluster" if scope == "cluster" else ""
     _asm(
@@ -349,20 +290,6 @@ def mma_bf16(a, b, c, *, loc=None, ip=None):
         ip=ip,
     )
     return _fields(out, 4, T.f32(), Float32, loc, ip)
-
-
-@dsl_user_op
-def shfl_xor_f32(value, mask, *, loc=None, ip=None):
-    return Float32(
-        _asm(
-            T.f32(),
-            [Float32(value), Int32(mask)],
-            "shfl.sync.bfly.b32 $0, $1, $2, 0x1f, 0xffffffff;",
-            "=f,f,r",
-            loc=loc,
-            ip=ip,
-        )
-    )
 
 
 @dsl_user_op
@@ -405,31 +332,15 @@ def f32_bits(value, *, loc=None, ip=None):
     )
 
 
-@dsl_user_op
-def pack_bf16x2(lo, hi, *, loc=None, ip=None):
-    """Round two floats to BF16 (nearest even); ``lo`` goes to the low half."""
-    return Uint32(
-        _asm(
-            T.i32(),
-            [Float32(hi), Float32(lo)],
-            "cvt.rn.bf16x2.f32 $0, $1, $2;",
-            "=r,f,f",
-            side_effects=False,
-            loc=loc,
-            ip=ip,
-        )
-    )
-
-
 def sigmoid(v):
-    """``1 / (1 + exp(-v))``; the denominator is clamped below 2^126 so the reciprocal
+    """`1 / (1 + exp(-v))`; the denominator is clamped below 2^126 so the reciprocal
     is exact."""
     return rcp(cute.arch.fmin(Float32(1.0) + cute.math.exp(-v), Float32(2.0**126)))
 
 
 def residual_update(pw, cm, xw, rw):
-    """BF16 pairs of ``bf16(post[s] * x + sum_j comb[j][s] * residual[j])`` for 8 hidden
-    elements per stream ``s``, ``mhc_fused_hc``'s flush-to-zero FMA chain."""
+    """BF16 pairs of `bf16(post[s] * x + sum_j comb[j][s] * residual[j])` for 8 hidden
+    elements per stream `s`, `mhc_fused_hc`'s flush-to-zero FMA chain."""
     xf = [(bf16x2_lo(xw[p]), bf16x2_hi(xw[p])) for p in range(4)]
     rf = [
         [(bf16x2_lo(rw[j][p]), bf16x2_hi(rw[j][p])) for p in range(4)]
@@ -444,13 +355,13 @@ def residual_update(pw, cm, xw, rw):
                 nu = cute.arch.fma_packed_f32x2(
                     (cm[j][s], cm[j][s]), rf[j][p], nu, ftz=True
                 )
-            words.append(pack_bf16x2(nu[0], nu[1]))
+            words.append(fp32x2_to_bf16x2(nu[0], nu[1]))
         cur.append(words)
     return cur
 
 
 def lagged_collapse(cur, pre, ssq_rc, ssq_li):
-    """BF16 pairs of ``li = bf16(sum_j pre[j] * residual_cur[j])`` for 8 hidden
+    """BF16 pairs of `li = bf16(sum_j pre[j] * residual_cur[j])` for 8 hidden
     elements, with the running sums of squares of residual_cur and li."""
     li = []
     for p in range(4):
@@ -459,7 +370,7 @@ def lagged_collapse(cur, pre, ssq_rc, ssq_li):
             v = (bf16x2_lo(cur[j][p]), bf16x2_hi(cur[j][p]))
             ssq_rc = cute.arch.fma_packed_f32x2(v, v, ssq_rc)
             acc = cute.arch.fma_packed_f32x2((pre[j], pre[j]), v, acc)
-        word = pack_bf16x2(acc[0], acc[1])
+        word = fp32x2_to_bf16x2(acc[0], acc[1])
         li.append(word)
         v = (bf16x2_lo(word), bf16x2_hi(word))
         ssq_li = cute.arch.fma_packed_f32x2(v, v, ssq_li)
@@ -467,31 +378,19 @@ def lagged_collapse(cur, pre, ssq_rc, ssq_li):
 
 
 class MhcBoundaryKernel:
-    """``tile`` (at most ``TILE``) tokens per 16-CTA cluster; CTA ``r`` owns hidden ``[r
-    * slice, (r + 1) * slice)``. Each token's arithmetic is the same at every tile
+    """`tile` (at most `TILE`) tokens per 16-CTA cluster; CTA `r` owns hidden `[r
+    * slice, (r + 1) * slice)`. Each token's arithmetic is the same at every tile
     size.
 
-    Mixer GEMM per CTA: ``[48, K slice] x [K slice, tokens]`` with rows 0-23 the high
-    and rows 24-47 the low BF16 part of the weight. Warp ``w < MMA_WARPS`` takes the k16
-    steps ``[w * steps_per_warp, (w + 1) * steps_per_warp)``.
+    Mixer GEMM per CTA: `[48, K slice] x [K slice, tokens]` with rows 0-23 the high
+    and rows 24-47 the low BF16 part of the weight. Warp `w < MMA_WARPS` takes the k16
+    steps `[w * steps_per_warp, (w + 1) * steps_per_warp)`.
     """
 
-    def __init__(
-        self,
-        hidden: int,
-        with_post: bool,
-        sinkhorn_iters: int,
-        mxfp8: bool = False,
-        tile: int = TILE,
-    ):
+    def __init__(self, hidden: int, sinkhorn_iters: int, tile: int):
         self.tile = tile
         self.hidden = hidden
-        self.with_post = with_post
         self.sinkhorn_iters = sinkhorn_iters
-        # Also write layer_input as torch.ops.trtllm.mxfp8_quantize(layer_input, True)
-        # does: E4M3 [B, hidden] and UE8M0 scales in the 128x4 swizzled layout (padding
-        # rows' not written).
-        self.mxfp8 = mxfp8
         self.slice = hidden // CLUSTER
         self.chunks = self.slice // 8
         self.parts = (
@@ -540,11 +439,11 @@ class MhcBoundaryKernel:
         self.smem_bytes = off
 
     @staticmethod
-    def supports(hidden: int) -> bool:
+    def supports(hidden: int, hc_mult: int) -> bool:
         slice_ = hidden // CLUSTER
         return (
-            hidden % 512 == 0
-            and slice_ % 32 == 0
+            hc_mult == MULT
+            and hidden % 512 == 0
             and (MULT * slice_ // 16) % MMA_WARPS == 0
             and TILE * (slice_ // 16) <= THREADS
         )
@@ -566,8 +465,6 @@ class MhcBoundaryKernel:
         pre_out,
         post_out,
         comb_out,
-        mxfp8_out: Int64,
-        mxfp8_scale: Int64,
         rms_eps: Float32,
         hc_eps: Float32,
         sinkhorn_eps: Float32,
@@ -591,8 +488,6 @@ class MhcBoundaryKernel:
             pre_out,
             post_out,
             comb_out,
-            mxfp8_out,
-            mxfp8_scale,
             rms_eps,
             hc_eps,
             sinkhorn_eps,
@@ -623,8 +518,6 @@ class MhcBoundaryKernel:
         pre_out,
         post_out,
         comb_out,
-        mxfp8_out: Int64,
-        mxfp8_scale: Int64,
         rms_eps: Float32,
         hc_eps: Float32,
         sinkhorn_eps: Float32,
@@ -695,14 +588,11 @@ class MhcBoundaryKernel:
         if t < valid:
             gt = Int64(t0 + t)
             pre = ldg_v4_f32(pre_lag.iterator.toint() + gt * 16)
-            pw = pre
-            cm = [pre] * MULT
-            if cutlass.const_expr(self.with_post):
-                pw = ldg_v4_f32(post.iterator.toint() + gt * 16)
-                cm = [
-                    ldg_v4_f32(comb.iterator.toint() + gt * 64 + j * 16)
-                    for j in range(MULT)
-                ]
+            pw = ldg_v4_f32(post.iterator.toint() + gt * 16)
+            cm = [
+                ldg_v4_f32(comb.iterator.toint() + gt * 64 + j * 16)
+                for j in range(MULT)
+            ]
             g_row = residual.iterator.toint() + (gt * MULT * H + hslice) * 2
             g_xrow = x.iterator.toint() + (gt * H + hslice) * 2
             rws = []
@@ -712,22 +602,19 @@ class MhcBoundaryKernel:
                 rws.append(
                     [ldg_v4_u32(g_row + j * H * 2 + c * 16) for j in range(MULT)]
                 )
-                if cutlass.const_expr(self.with_post):
-                    xws.append(ldg_v4_u32(g_xrow + c * 16))
+                xws.append(ldg_v4_u32(g_xrow + c * 16))
             ssq_rc = (Float32(0.0), Float32(0.0))
             ssq_li = (Float32(0.0), Float32(0.0))
             for half in cutlass.range_constexpr(2):
                 c = part + half * PARTS
                 r_addr = s_r + t * self.r_row + (c // 4) * self.r_chunk + (c % 4) * 4
-                cur = rws[half]
-                if cutlass.const_expr(self.with_post):
-                    cur = residual_update(pw, cm, xws[half], rws[half])
-                    for s in cutlass.range_constexpr(MULT):
-                        stg_v4_u32(
-                            residual_out.iterator.toint()
-                            + ((gt * MULT + s) * H + hslice + c * 8) * 2,
-                            cur[s],
-                        )
+                cur = residual_update(pw, cm, xws[half], rws[half])
+                for s in cutlass.range_constexpr(MULT):
+                    stg_v4_u32(
+                        residual_out.iterator.toint()
+                        + ((gt * MULT + s) * H + hslice + c * 8) * 2,
+                        cur[s],
+                    )
                 # Word w of stream s lands in k16 block 2 * s + w // 2, fragment column
                 # half w % 2.
                 for s in cutlass.range_constexpr(MULT):
@@ -903,42 +790,7 @@ class MhcBoundaryKernel:
                 u = tid - 32 + k * (THREADS - 32)
                 tt = u // self.chunks
                 c = u % self.chunks
-                if cutlass.const_expr(self.mxfp8):
-                    # The 4 lanes of a 32-wide MXFP8 block share its maximum by
-                    # shuffles, so every lane computes (past the last token on the
-                    # tile's last row) and valid ones store.
-                    ts = cutlass.min(tt, self.tile - 1)
-                    out = self.layer_input_words(s_x, s_rstd, norm_w, hslice, ts, c)
-                    vals = []
-                    for p in cutlass.range_constexpr(4):
-                        vals.append(bf16x2_lo(out[p]))
-                        vals.append(bf16x2_hi(out[p]))
-                    amax = Float32(0.0)
-                    for v in vals:
-                        amax = cute.arch.fmax(amax, cute.arch.fmax(v, -v))
-                    amax = cute.arch.fmax(amax, shfl_xor_f32(amax, 1))
-                    amax = cute.arch.fmax(amax, shfl_xor_f32(amax, 2))
-                    if tt < valid:
-                        row = Int64(t0 + tt)
-                        stg_v4_u32(
-                            layer_input.iterator.toint()
-                            + (row * H + hslice + c * 8) * 2,
-                            out,
-                        )
-                        w0, w1, sf = mxfp8_block(amax, vals)
-                        stg_v2_u32(mxfp8_out + row * H + hslice + c * 8, w0, w1)
-                        if c % 4 == 0:
-                            kb = (hslice + c * 8) // 32
-                            stg_u8(
-                                mxfp8_scale
-                                + (row // 128) * (H // 128 * 512)
-                                + (kb // 4) * 512
-                                + (row % 32) * 16
-                                + (row % 128) // 32 * 4
-                                + kb % 4,
-                                sf,
-                            )
-                elif tt < valid:
+                if tt < valid:
                     out = self.layer_input_words(s_x, s_rstd, norm_w, hslice, tt, c)
                     stg_v4_u32(
                         layer_input.iterator.toint()
@@ -950,8 +802,8 @@ class MhcBoundaryKernel:
 
     @cute.jit
     def layer_input_words(self, s_x, s_rstd, norm_w, hslice, tt, c):
-        """BF16 pairs of ``li * rstd * norm_w`` for 8-wide chunk ``c`` of tile token
-        ``tt``."""
+        """BF16 pairs of `li * rstd * norm_w` for 8-wide chunk `c` of tile token
+        `tt`."""
         li = lds_v4_u32(s_x + tt * self.x_row + c * 16)
         nw = ldg_v4_u32(norm_w.iterator.toint() + hslice * 2 + c * 16)
         rstd = lds_f32(s_rstd + tt * 4)
@@ -959,7 +811,7 @@ class MhcBoundaryKernel:
         for p in cutlass.range_constexpr(4):
             lo = (bf16x2_lo(li[p]) * rstd) * bf16x2_lo(nw[p])
             hi = (bf16x2_hi(li[p]) * rstd) * bf16x2_hi(nw[p])
-            out.append(pack_bf16x2(lo, hi))
+            out.append(fp32x2_to_bf16x2(lo, hi))
         return out
 
     @cute.jit
@@ -980,13 +832,11 @@ class MhcBoundaryKernel:
         eps: Float32,
         post_mult: Float32,
     ):
-        """Pre / post / Sinkhorn comb of token ``tt`` from its mixes, in
-        ``mhc_fused_hc``'s order.
+        """Pre / post / Sinkhorn comb of token `tt` from its mixes, in
+        `mhc_fused_hc`'s order.
 
-        Lane ``r`` of the token's 16: 0-3 pre, 4-7 post, 8-11 the softmax of comb row
-        ``r - 8``; lane 12 then runs the Sinkhorn iterations on the four rows. With
-        ``sinkhorn_iters == 0`` lanes 8-11 store the softmax rows to ``comb_out`` for
-        ``MhcSinkhornKernel``.
+        Lane `r` of the token's 16: 0-3 pre, 4-7 post, 8-11 the softmax of comb row
+        `r - 8`; lane 12 then runs the Sinkhorn iterations on the four rows.
         """
         rstd = cute.math.rsqrt(
             lds_f32(tot + MIXES * 4) / Float32(MULT * self.hidden) + rms_eps
@@ -1026,31 +876,23 @@ class MhcBoundaryKernel:
             row = [cute.math.exp(v - row_max) for v in row]
             inv = rcp(row[0] + row[1] + row[2] + row[3])
             row = [cute.math.fma(v, inv, eps) for v in row]
-            if cutlass.const_expr(self.sinkhorn_iters == 0):
-                if tt < valid:
+            for k in cutlass.range_constexpr(MULT):
+                sts_f32(s_rows + (4 * i + k) * 4, row[k])
+        cute.arch.sync_warp()
+        if r == 3 * MULT:
+            out = self.sinkhorn(
+                [lds_f32(s_rows + k * 4) for k in range(MULT * MULT)], eps
+            )
+            if tt < valid:
+                for i in cutlass.range_constexpr(MULT):
                     stg_v4_u32(
                         comb_out.iterator.toint() + (gt * 16 + i * 4) * 4,
-                        [f32_bits(v) for v in row],
+                        [f32_bits(v) for v in out[4 * i : 4 * i + 4]],
                     )
-            else:
-                for k in cutlass.range_constexpr(MULT):
-                    sts_f32(s_rows + (4 * i + k) * 4, row[k])
-        if cutlass.const_expr(self.sinkhorn_iters > 0):
-            cute.arch.sync_warp()
-            if r == 3 * MULT:
-                out = self.sinkhorn(
-                    [lds_f32(s_rows + k * 4) for k in range(MULT * MULT)], eps
-                )
-                if tt < valid:
-                    for i in cutlass.range_constexpr(MULT):
-                        stg_v4_u32(
-                            comb_out.iterator.toint() + (gt * 16 + i * 4) * 4,
-                            [f32_bits(v) for v in out[4 * i : 4 * i + 4]],
-                        )
 
     @cute.jit
     def sinkhorn(self, c, eps: Float32):
-        """A column normalization, then ``sinkhorn_iters - 1`` row and column
+        """A column normalization, then `sinkhorn_iters - 1` row and column
         normalizations."""
         c0, c1, c2, c3, c4, c5, c6, c7, c8, c9, c10, c11, c12, c13, c14, c15 = (
             self.col_normalize(c, eps)
@@ -1070,7 +912,7 @@ class MhcBoundaryKernel:
 
     @staticmethod
     def col_normalize(c, eps):
-        """Column sums (r0 + r1) + (r2 + r3), ``mhc_fused_hc``'s shuffle order."""
+        """Column sums (r0 + r1) + (r2 + r3), `mhc_fused_hc`'s shuffle order."""
         out = list(c)
         for k in range(MULT):
             inv = rcp((c[k] + c[4 + k]) + (c[8 + k] + c[12 + k]) + eps)
@@ -1079,40 +921,16 @@ class MhcBoundaryKernel:
         return out
 
 
-class MhcSinkhornKernel(MhcBoundaryKernel):
-    """The Sinkhorn iterations of the comb rows that a boundary run with
-    ``sinkhorn_iters = 0`` wrote, in place, one token per thread."""
-
-    def __init__(self, sinkhorn_iters: int):
-        self.sinkhorn_iters = sinkhorn_iters
-
-    @cute.jit
-    def __call__(self, comb, sinkhorn_eps: Float32, stream):
-        self.kernel(comb, sinkhorn_eps).launch(
-            grid=[(comb.shape[0] + 127) // 128, 1, 1], block=[128, 1, 1], stream=stream
-        )
-
-    @cute.kernel
-    def kernel(self, comb, sinkhorn_eps: Float32):
-        t = cute.arch.block_idx()[0] * 128 + cute.arch.thread_idx()[0]
-        if t < comb.shape[0]:
-            row = comb.iterator.toint() + Int64(t) * 64
-            c = [v for i in range(MULT) for v in ldg_v4_f32(row + i * 16)]
-            out = self.sinkhorn(c, sinkhorn_eps)
-            for i in cutlass.range_constexpr(MULT):
-                stg_v4_u32(row + i * 16, [f32_bits(v) for v in out[4 * i : 4 * i + 4]])
-
-
 def prepare_boundary_weight(fn: torch.Tensor) -> torch.Tensor:
-    """``fn [24, 4 * hidden]`` -> int32 mma A fragments ``[16 slices, k16 steps, 32
-    lanes, 12]``.
+    """`fn [24, 4 * hidden]` -> int32 mma A fragments `[16 slices, k16 steps, 32
+    lanes, 12]`.
 
     The weight is rounded to TF32 (nearest, ties away, as the TF32 tensor-core path) and
     split into BF16 high and low parts whose sum is exact; the 12 words of a lane are
-    its A fragments of the three m16 tiles of the stacked ``[high; low]`` rows. k16 step
-    ``8 c + kb`` of a slice is chunk ``c`` (hidden ``[32 c, 32 c + 32)``), stream ``kb
-    // 2``; fragment columns ``2q, 2q + 1`` and ``2q + 8, 2q + 9`` hold hidden ``8 q + 4
-    (kb % 2) + {0, 1}`` and ``+ {2, 3}`` of the chunk.
+    its A fragments of the three m16 tiles of the stacked `[high; low]` rows. k16 step
+    `8 c + kb` of a slice is chunk `c` (hidden `[32 c, 32 c + 32)`), stream `kb
+    // 2`; fragment columns `2q, 2q + 1` and `2q + 8, 2q + 9` hold hidden `8 q + 4
+    (kb % 2) + {0, 1}` and `+ {2, 3}` of the chunk.
     """
     hidden = fn.shape[1] // MULT
     S = hidden // CLUSTER
@@ -1137,17 +955,10 @@ def prepare_boundary_weight(fn: torch.Tensor) -> torch.Tensor:
     return pairs[rows + g, (base + upper) // 2].contiguous()
 
 
-_COMPILED = set()
-
-
-def compiled(hidden: int, num_sinkhorn_iters: int, tokens: int) -> bool:
-    """Whether ``mhc_boundary`` for this batch is compiled (compiling inside graph
-    capture is not allowed)."""
-    return (
-        0 < tokens <= MAX_TOKENS
-        and (hidden, True, num_sinkhorn_iters, False, boundary_tile(tokens))
-        in _COMPILED
-    )
+def boundary_tile(tokens: int) -> int:
+    """Tokens per cluster: the smallest of `TILES` that runs `tokens` in one wave,
+    so small batches spread over every co-resident cluster."""
+    return next(tile for tile in TILES if tile * CLUSTERS >= tokens)
 
 
 def _mat(dtype, *shape):
@@ -1156,37 +967,25 @@ def _mat(dtype, *shape):
     )
 
 
-def boundary_tile(tokens: int) -> int:
-    """Tokens per cluster of the single-pass kernel: the smallest of ``TILES`` that runs
-    ``tokens`` in one wave, so small batches spread over every co-resident cluster."""
-    return next(tile for tile in TILES if tile * CLUSTERS >= tokens)
-
-
-@functools.cache
-def _compile_tile(
-    hidden: int, with_post: bool, sinkhorn_iters: int, mxfp8: bool, tile: int
-):
+def _compile(hidden: int, sinkhorn_iters: int, tile: int) -> Callable:
     tokens = cute.sym_int()
     bf16 = cutlass.BFloat16
-    vec = (tokens, MULT)
-    fn = cute.compile(
-        MhcBoundaryKernel(hidden, with_post, sinkhorn_iters, mxfp8, tile),
+    return cute.compile(
+        MhcBoundaryKernel(hidden, sinkhorn_iters, tile),
         _mat(bf16, tokens, hidden),
         _mat(bf16, tokens, MULT, hidden),
-        _mat(Float32, *vec),
+        _mat(Float32, tokens, MULT),
         _mat(Float32, tokens, MULT * MULT),
-        _mat(Float32, *vec),
+        _mat(Float32, tokens, MULT),
         _mat(Int32, CLUSTER, MULT * (hidden // CLUSTER) // 16, 32, 12),
         _mat(Float32, 3),
         _mat(Float32, MIXES),
         _mat(bf16, hidden),
         _mat(bf16, tokens, MULT, hidden),
         _mat(bf16, tokens, hidden),
-        _mat(Float32, *vec),
-        _mat(Float32, *vec),
+        _mat(Float32, tokens, MULT),
+        _mat(Float32, tokens, MULT),
         _mat(Float32, tokens, MULT * MULT),
-        Int64(0),
-        Int64(0),
         Float32(0.0),
         Float32(0.0),
         Float32(0.0),
@@ -1195,83 +994,9 @@ def _compile_tile(
         cute.runtime.make_fake_stream(use_tvm_ffi_env_stream=True),
         options="--opt-level 2 --enable-tvm-ffi",
     )
-    _COMPILED.add((hidden, with_post, sinkhorn_iters, mxfp8, tile))
-    return fn
 
 
-@functools.cache
-def _compile_sinkhorn(sinkhorn_iters: int):
-    fn = cute.compile(
-        MhcSinkhornKernel(sinkhorn_iters),
-        _mat(Float32, cute.sym_int(), MULT * MULT),
-        Float32(0.0),
-        cute.runtime.make_fake_stream(use_tvm_ffi_env_stream=True),
-        options="--opt-level 2 --enable-tvm-ffi",
-    )
-    _COMPILED.add(("sinkhorn", sinkhorn_iters))
-    return fn
-
-
-def mhc_boundary(
-    x: torch.Tensor,
-    residual: torch.Tensor,
-    pre_mix: torch.Tensor,
-    post_mix: torch.Tensor,
-    comb_res_mix: torch.Tensor,
-    weight: torch.Tensor,
-    scale: torch.Tensor,
-    base: torch.Tensor,
-    hc_norm_eps: float,
-    hc_pre_eps: float,
-    hc_post_scale: float,
-    sinkhorn_eps: float,
-    num_sinkhorn_iters: int,
-    norm_weight: torch.Tensor,
-    norm_eps: float,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """``mhc_shifted_post_pre_deep_gemm`` for up to ``MAX_TOKENS`` tokens, with the same
-    inputs except ``weight = prepare_boundary_weight(fn)``. With ``num_sinkhorn_iters
-    = 0`` the returned comb holds the row softmax for ``mhc_sinkhorn``."""
-    tokens, mult, hidden = residual.shape
-    assert 0 < tokens <= MAX_TOKENS and mult == MULT, residual.shape
-    new_residual = torch.empty_like(residual)
-    layer_input = torch.empty(tokens, hidden, dtype=torch.bfloat16, device=x.device)
-    new_pre, new_post = torch.empty(
-        2, tokens, mult, dtype=torch.float32, device=x.device
-    )
-    new_comb = torch.empty(tokens, mult, mult, dtype=torch.float32, device=x.device)
-    _compile_tile(hidden, True, num_sinkhorn_iters, False, boundary_tile(tokens))(
-        x,
-        residual,
-        post_mix.view(tokens, mult),
-        comb_res_mix.view(tokens, mult * mult),
-        pre_mix,
-        weight,
-        scale,
-        base,
-        norm_weight,
-        new_residual,
-        layer_input,
-        new_pre,
-        new_post,
-        new_comb.view(tokens, mult * mult),
-        0,
-        0,
-        hc_norm_eps,
-        hc_pre_eps,
-        sinkhorn_eps,
-        hc_post_scale,
-        norm_eps,
-    )
-    return new_residual, new_post.unsqueeze(-1), new_comb, layer_input, new_pre
-
-
-def mhc_sinkhorn(
-    comb: torch.Tensor, sinkhorn_eps: float, num_sinkhorn_iters: int
-) -> None:
-    """Run the Sinkhorn iterations of a comb ``mhc_boundary(..., num_sinkhorn_iters=0)``
-    returned, in place."""
-    _compile_sinkhorn(num_sinkhorn_iters)(comb.view(-1, MULT * MULT), sinkhorn_eps)
+_KERNELS: dict[tuple[int, int, int], Callable] = {}
 
 
 def mhc_shifted_post_pre_boundary(
@@ -1291,43 +1016,46 @@ def mhc_shifted_post_pre_boundary(
     norm_weight: torch.Tensor,
     norm_eps: float,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor] | None:
-    """``mhc_shifted_post_pre_deep_gemm`` on the CuTe DSL boundary kernel, or None when
-    the batch is not decode-sized or the kernel is not ready (it compiles on eager
-    runs before capture)."""
+    """`mhc_shifted_post_pre_deep_gemm` on `fn.mhc_boundary_weight` (see
+    `prepare_boundary_weight`), or None for more than `MAX_TOKENS` tokens. Each
+    token tile compiles on its first call, which vLLM's eager run before each graph
+    capture makes; a capture that would have to compile returns None too."""
     tokens, mult, hidden = residual.shape
-    capturing = torch.cuda.is_current_stream_capturing()
-    if (
-        mult != MULT
-        or not MhcBoundaryKernel.supports(hidden)
-        or not 0 < tokens <= MAX_TOKENS
-        or (capturing and not compiled(hidden, num_sinkhorn_iters, tokens))
-    ):
+    if not 0 < tokens <= MAX_TOKENS:
         return None
-    # The prepared weight follows in-place updates of `fn` (weight reloads) by its
-    # version.
-    cached = getattr(fn, "_mhc_boundary_weight", None)
-    if cached is None or cached[0] != fn._version:
-        if capturing:
+    key = (hidden, num_sinkhorn_iters, boundary_tile(tokens))
+    kernel = _KERNELS.get(key)
+    if kernel is None:
+        if torch.cuda.is_current_stream_capturing():
             return None
-        cached = (fn._version, prepare_boundary_weight(fn))
-        fn._mhc_boundary_weight = cached
-    inputs = (x, residual, pre_mix, post_mix, comb_res_mix)
-    if any(not t.is_contiguous() or t.data_ptr() % 16 for t in inputs):
-        return None
-    return mhc_boundary(
+        kernel = _KERNELS[key] = _compile(*key)
+    for t in (x, residual, pre_mix, post_mix, comb_res_mix):
+        if not t.is_contiguous() or t.data_ptr() % 16:
+            return None
+    new_residual = torch.empty_like(residual)
+    layer_input = torch.empty(tokens, hidden, dtype=torch.bfloat16, device=x.device)
+    new_pre = torch.empty(tokens, mult, dtype=torch.float32, device=x.device)
+    new_post = torch.empty(tokens, mult, 1, dtype=torch.float32, device=x.device)
+    new_comb = torch.empty(tokens, mult, mult, dtype=torch.float32, device=x.device)
+    kernel(
         x,
         residual,
+        post_mix.view(tokens, mult),
+        comb_res_mix.view(tokens, mult * mult),
         pre_mix,
-        post_mix,
-        comb_res_mix,
-        cached[1],
+        fn.mhc_boundary_weight,
         scale,
         base,
+        norm_weight,
+        new_residual,
+        layer_input,
+        new_pre,
+        new_post.view(tokens, mult),
+        new_comb.view(tokens, mult * mult),
         hc_norm_eps,
         hc_pre_eps,
-        hc_post_scale,
         sinkhorn_eps,
-        num_sinkhorn_iters,
-        norm_weight,
+        hc_post_scale,
         norm_eps,
     )
+    return new_residual, new_post, new_comb, layer_input, new_pre

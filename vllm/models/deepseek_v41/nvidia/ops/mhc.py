@@ -190,17 +190,20 @@ def mhc_pre_delayed_overlap(
     return outputs
 
 
+def mhc_boundary_supported(hidden_size: int, hc_mult: int) -> bool:
+    """Whether the CuTe DSL mHC boundary (`mhc_boundary.py`) runs here."""
+    if not (current_platform.is_device_capability_family(100) and has_cutedsl()):
+        return False
+    from .mhc_boundary import MhcBoundaryKernel
+
+    return MhcBoundaryKernel.supports(hidden_size, hc_mult)
+
+
 @cache
-def _mhc_boundary_supported() -> bool:
-    return current_platform.is_device_capability_family(100) and has_cutedsl()
-
-
-def _mhc_boundary(*args):
-    if not _mhc_boundary_supported():
-        return None
+def _mhc_shifted_post_pre_boundary():
     from .mhc_boundary import mhc_shifted_post_pre_boundary
 
-    return mhc_shifted_post_pre_boundary(*args)
+    return mhc_shifted_post_pre_boundary
 
 
 def mhc_shifted_post_pre(
@@ -315,9 +318,12 @@ def mhc_shifted_post_pre(
             norm_weight,
             norm_eps,
         )
-        # Decode-size batches run one CuTe DSL kernel: the same TF32 products,
-        # one cluster-wide pass instead of Mega mHC's.
-        outputs = _mhc_boundary(*args) or mhc_shifted_post_pre_deep_gemm(*args)
+        outputs = None
+        if hasattr(fn, "mhc_boundary_weight"):
+            # Decode-size batches: one CuTe DSL kernel, the same TF32 products.
+            outputs = _mhc_shifted_post_pre_boundary()(*args)
+        if outputs is None:
+            outputs = mhc_shifted_post_pre_deep_gemm(*args)
         return *outputs, x.new_empty(0, x.shape[1])
 
     return mhc_fused_post_pre_delayed_tilelang(

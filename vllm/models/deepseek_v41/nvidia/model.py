@@ -113,6 +113,7 @@ from .ops.mhc import (
     MHC_OVERLAP_MAX_TOKENS,
     hc_expand,
     init_mhc_all_reduce,
+    mhc_boundary_supported,
     mhc_pre_delayed_overlap,
     mhc_shifted_post_pre,
     supports_mhc_all_reduce,
@@ -1534,6 +1535,23 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             else:
                 layer.hc_attn_fn_broadcast.copy_(broadcast)
 
+    def finalize_mhc_boundary_weights(self) -> None:
+        """Lay out the mHC mixer weights for the CuTe DSL boundary kernel (see
+        ops/mhc_boundary.py). Reloads write in place, so captured graphs see them."""
+        if not mhc_boundary_supported(self.config.hidden_size, self.hc_mult):
+            return
+        from .ops.mhc_boundary import prepare_boundary_weight
+
+        for layer in self.layers[self.start_layer : self.end_layer]:
+            if not isinstance(layer, DeepseekV4DecoderLayer):
+                continue
+            for fn in (layer.hc_attn_fn, layer.hc_ffn_fn):
+                weight = prepare_boundary_weight(fn.detach())
+                if hasattr(fn, "mhc_boundary_weight"):
+                    fn.mhc_boundary_weight.copy_(weight)
+                else:
+                    fn.mhc_boundary_weight = weight
+
 
 def _linear_scale_param_name(vllm_config: VllmConfig, expert_dtype: str) -> str:
     """Parameter name the linear quant method registers for weight scales.
@@ -1762,6 +1780,7 @@ class DeepseekV41LLMForCausalLM(
 
     def process_weights_after_loading(self) -> None:
         self.model.finalize_mhc_broadcast_weights()
+        self.model.finalize_mhc_boundary_weights()
         config = self.model.vllm_config
         if config.engram_config and config.engram_config.use_thp:
             # Loading weights refills the file cache; release it before MADV_COLLAPSE.
