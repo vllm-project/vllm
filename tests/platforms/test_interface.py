@@ -73,9 +73,11 @@ def hybrid_config(tmp_path, dist_init, monkeypatch, request):
 
 
 @pytest.mark.parametrize("skip_layers", [[], ["0"]])
-def test_layerwise_hybrid_keeps_backend_block_size(hybrid_config, skip_layers):
+@pytest.mark.parametrize("layout", [None, "BLHNC"])
+def test_layerwise_hybrid_keeps_backend_block_size(hybrid_config, skip_layers, layout):
     config = hybrid_config
     config.cache_config.kv_cache_dtype_skip_layers = skip_layers
+    config.cache_config.kv_cache_layout = layout
 
     Platform.update_block_size_for_backend(config)
 
@@ -84,19 +86,19 @@ def test_layerwise_hybrid_keeps_backend_block_size(hybrid_config, skip_layers):
     assert config.cache_config.mamba_page_size_padded is None
 
 
-@pytest.mark.parametrize("layout", ["LBHNC", "BLHNC"])
-def test_layerwise_hybrid_honors_explicit_layout(hybrid_config, layout):
+@pytest.mark.parametrize("layerwise,layout", [(True, "LBHNC"), (False, None)])
+def test_layerwise_hybrid_fallback_keeps_legacy_alignment(
+    hybrid_config, layerwise, layout
+):
     config = hybrid_config
     config.cache_config.kv_cache_layout = layout
+    if not layerwise:
+        config.quant_config = Fp8Config()
 
     Platform.update_block_size_for_backend(config)
 
-    if layout == "BLHNC":
-        assert config.cache_config.block_size == 64
-        assert config.cache_config.mamba_page_size_padded is None
-    else:
-        assert config.cache_config.block_size > 64
-        assert config.cache_config.mamba_page_size_padded is not None
+    assert config.cache_config.block_size > 64
+    assert config.cache_config.mamba_page_size_padded is not None
 
 
 @pytest.mark.parametrize("hybrid_config", [1, 2], indirect=True)
@@ -186,16 +188,6 @@ def test_packed_hybrid_checkpoint_is_exportable_and_reusable(hybrid_config, bloc
     replay = make_request("replay", tokens, 64, sha256)
     _, hit_tokens, _ = manager.get_computed_blocks(replay)
     assert hit_tokens == 64
-
-
-def test_layerwise_hybrid_without_recipe_keeps_legacy_alignment(hybrid_config):
-    config = hybrid_config
-    config.quant_config = Fp8Config()
-
-    Platform.update_block_size_for_backend(config)
-
-    assert config.cache_config.block_size > 64
-    assert config.cache_config.mamba_page_size_padded is not None
 
 
 @pytest.mark.parametrize("hybrid_config", [2], indirect=True)
