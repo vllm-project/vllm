@@ -126,7 +126,7 @@ class DummyConfig:
 def _make_qwen25vl_model(config=None):
     if config is None:
         config = DummyConfig()
-    model = object.__new__(Qwen2_5_VLForConditionalGeneration)
+    model = object.__new__(Qwen2_5_VLForConditionalGeneration)  # type: ignore[type-abstract]
     model.config = config
     return model
 
@@ -134,7 +134,7 @@ def _make_qwen25vl_model(config=None):
 def _make_qwen2vl_model(config=None):
     if config is None:
         config = DummyConfig()
-    model = object.__new__(Qwen2VLForConditionalGeneration)
+    model = object.__new__(Qwen2VLForConditionalGeneration)  # type: ignore[type-abstract]
     model.config = config
     return model
 
