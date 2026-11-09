@@ -10,12 +10,15 @@ from vllm.distributed import cleanup_dist_env_and_memory
 
 MODEL = "meta-llama/Llama-3.2-1B-Instruct"
 DRAFT = "nm-testing/Llama3_2_1B_speculator.eagle3"
-PROMPTS = [
-    "The capital of France is",
-    "2 + 2 equals",
-    "In one word, the color of the sky is",
-    "Q: If a train travels 60 miles in 1.5 hours, what is its average speed?\nA:",
+# Enough tokens that one greedy path changing under compilation can't move the mean
+TOPICS = ["the ocean", "a robot", "Rome", "volcanoes", "chess", "bread", "jazz", "bees"]
+TEMPLATES = [
+    "Write a short story about {}.",
+    "Explain {} to a child.",
+    "List five facts about {}:",
+    "Q: What is the history of {}?\nA:",
 ]
+PROMPTS = [template.format(topic) for topic in TOPICS for template in TEMPLATES]
 
 ACCEPTANCE_TOLERANCE = 0.95
 
@@ -39,7 +42,7 @@ def _run(pp_size: int, model_impl: str) -> float:
     try:
         llm.generate(
             PROMPTS,
-            SamplingParams(temperature=0.0, max_tokens=32, ignore_eos=True),
+            SamplingParams(temperature=0.0, max_tokens=64, ignore_eos=True),
         )
         acceptance = compute_acceptance_len(llm.get_metrics())
         assert acceptance > 1
