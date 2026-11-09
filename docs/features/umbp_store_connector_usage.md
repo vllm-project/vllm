@@ -101,7 +101,9 @@ options. Use the [shared options](#shared-options) for transfer settings.
 
 Objects are keyed by the model, revision, effective model config (dtype,
 quantization, and `hf_config` with `hf_overrides` applied), KV layout, cache
-groups, TP/PCP/DCP topology, and block hash. In standalone mode, KV that is
+groups, TP/PCP/DCP topology, and block hash. Engines that combine UMBP with a
+connector that may load KV vLLM did not write (in `MultiConnector`) use separate
+keys, so that KV never reaches UMBP-only engines. In standalone mode, KV that is
 identical on every TP rank is keyed without the TP rank, so the pool holds one
 copy (see `dedup_tp_replicated_kv`). The data-parallel rank is
 excluded, so DP ranks and engines serving the same model with the same layout

@@ -226,6 +226,51 @@ def test_namespace_distinguishes_draft_models():
     assert namespace(draft("drafter-a")) != namespace(draft("drafter-a", "v2"))
 
 
+@pytest.mark.parametrize(
+    "engine_connectors, separate",
+    [
+        (None, False),
+        ([{"kv_connector": "UMBPStoreConnector", "kv_role": "kv_both"}], False),
+        (
+            [
+                {"kv_connector": "ExampleConnector", "kv_role": "kv_both"},
+                {"kv_connector": "UMBPStoreConnector", "kv_role": "kv_both"},
+            ],
+            True,
+        ),
+    ],
+)
+def test_namespace_separates_engines_whose_siblings_load_foreign_kv(
+    monkeypatch, engine_connectors, separate
+):
+    """A sibling's foreign bytes stored by UMBP must not reach engines that
+    restore the namespace as canonical KV (see only_restores_canonical_kv)."""
+    import vllm.config
+
+    config = _kv_cache_config()
+    # The child UMBP connector sees only its own kv_transfer_config.
+    child_config = _vllm_config({"mode": "standalone"})
+    plain = UMBPNamespace.from_vllm_config(child_config, config).value
+    engine_config = (
+        None
+        if engine_connectors is None
+        else SimpleNamespace(
+            kv_transfer_config=_kv_transfer_config(
+                "MultiConnector", connectors=engine_connectors
+            )
+        )
+    )
+    monkeypatch.setattr(
+        vllm.config, "get_current_vllm_config_or_none", lambda: engine_config
+    )
+
+    namespace = UMBPNamespace.from_vllm_config(child_config, config).value
+
+    assert (namespace != plain) is separate
+    explicit = _vllm_config({"mode": "standalone", "key_namespace": "v2"})
+    assert UMBPNamespace.from_vllm_config(explicit, config).value == "v2"
+
+
 def test_namespace_distinguishes_effective_model_configs():
     """Overridden RoPE, quantization or dtype must not reuse the defaults' KV."""
     config = _kv_cache_config()
@@ -1898,7 +1943,7 @@ def test_worker_submits_stores_once(grouped):
 
 
 def _replicated_kv_cache_config() -> KVCacheConfig:
-    """Group 0 is replicated across TP (``max_tp_shards=1``); group 1 is not."""
+    """Group 0 is replicated across TP (`max_tp_shards=1`); group 1 is not."""
     replicated = replace(_LAYER1_SPEC, max_tp_shards=1)
     return KVCacheConfig(
         num_blocks=8,

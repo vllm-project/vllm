@@ -102,9 +102,11 @@ class UMBPStoreConnector(KVConnectorBase_V1, SupportsHMA):
 
     @classmethod
     def only_restores_canonical_kv(cls, kv_transfer_config: KVTransferConfig) -> bool:
-        # Objects are whole blocks this cache layout stored, and the derived
-        # namespace fingerprints every per-layer spec. An explicit
-        # key_namespace skips that fingerprint, so it may hold foreign bytes.
+        # Objects are whole blocks this cache layout stored. The derived
+        # namespace fingerprints every per-layer spec, and engines whose other
+        # connectors may load foreign bytes derive a separate one (see
+        # UMBPNamespace). An explicit key_namespace skips both, so it may hold
+        # foreign bytes.
         extra = kv_transfer_config.kv_connector_extra_config
         return extra.get("key_namespace", "auto") == "auto"
 

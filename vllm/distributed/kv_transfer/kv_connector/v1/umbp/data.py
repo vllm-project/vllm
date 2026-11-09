@@ -88,7 +88,7 @@ def tp_replicated_group_ids(
 ) -> frozenset[int]:
     """Groups whose blocks are byte-identical on every TP rank.
 
-    Every layer must declare a single TP shard (``max_tp_shards=1``, e.g. MLA
+    Every layer must declare a single TP shard (`max_tp_shards=1`, e.g. MLA
     latents and sparse indexers); context parallelism shards them, so it opts
     out.
     """
@@ -211,6 +211,25 @@ class RankTopology:
         )
 
 
+def _engine_may_load_foreign_kv(vllm_config: Any) -> bool:
+    """Whether any connector of this engine may load KV that vLLM's own cache
+    writer did not produce, e.g. a MultiConnector sibling of UMBP.
+
+    MultiConnector hands each child a config copy holding only that child's
+    kv_transfer_config, so read the engine's current config, which workers set
+    while they create their connector.
+    """
+    from vllm.config import get_current_vllm_config_or_none
+    from vllm.distributed.kv_transfer.kv_connector.utils import (
+        kv_connector_may_load_foreign_kv,
+    )
+
+    engine_config = get_current_vllm_config_or_none()
+    if engine_config is None or engine_config.kv_transfer_config is None:
+        engine_config = vllm_config
+    return kv_connector_may_load_foreign_kv(engine_config)
+
+
 @dataclass(frozen=True)
 class UMBPNamespace:
     """Compatibility namespace for objects stored outside the engine."""
@@ -283,6 +302,11 @@ class UMBPNamespace:
         if speculative is not None:
             # Added only when set, so namespaces without a drafter are unchanged.
             fields["speculative"] = speculative
+        if _engine_may_load_foreign_kv(vllm_config):
+            # Bytes another connector loaded can be stored here too. Keep them
+            # out of the namespace that UMBP-only engines restore as canonical
+            # KV. Added only when set, so UMBP-only namespaces are unchanged.
+            fields["foreign_kv"] = True
         payload = json.dumps(
             fields, sort_keys=True, separators=(",", ":"), default=str
         ).encode()
@@ -301,7 +325,7 @@ class UMBPHandshakeMetadata(KVConnectorHandshakeMetadata):
 class BlockIdentityCodec:
     """Build stable rank-local keys from vLLM block hashes.
 
-    Groups in ``replicated_groups`` get one TP-agnostic key (``tp*``) that
+    Groups in `replicated_groups` get one TP-agnostic key (`tp*`) that
     every TP rank loads and only TP rank 0 stores.
     """
 
