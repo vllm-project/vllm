@@ -1154,6 +1154,7 @@ def _make_ple_from_checkpoint(
     disk_offload: bool,
     device: str = "cpu",
     load: bool = True,
+    reader: str = "auto",
 ) -> Qwen4ExpNGramEmbedding:
     """Build a two-head PLE embedding and load `path` through file-backed views."""
     _mock_etp_group(monkeypatch)
@@ -1164,7 +1165,12 @@ def _make_ple_from_checkpoint(
     vllm_config = SimpleNamespace(
         load_config=SimpleNamespace(load_format="auto"),
         engram_config=SimpleNamespace(
-            disk_offload=disk_offload, cpu_offload=False, dp_shared_memory=False
+            disk_offload=disk_offload,
+            cpu_offload=False,
+            dp_shared_memory=False,
+            disk_offload_reader=reader,
+            disk_offload_threads=4,
+            disk_offload_queue_depth=8,
         ),
     )
     for name, value in (
@@ -1206,15 +1212,21 @@ def _make_ple_from_checkpoint(
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="disk offload is CUDA-only")
 @pytest.mark.parametrize("fmt", ["bf16", "fp8", "nvfp4"])
+@pytest.mark.parametrize("reader", ["buffered", "auto"])
 def test_disk_offload_matches_resident_table_under_graph_replay(
-    monkeypatch, tmp_path, fmt
+    monkeypatch, tmp_path, fmt, reader
 ) -> None:
     """Staged rows equal the resident lookup of the same ids in a replayed graph."""
     path = tmp_path / "model.safetensors"
     _save_ple_checkpoint(path, fmt)
     gather, resident = (
         _make_ple_from_checkpoint(
-            monkeypatch, path, fmt, disk_offload=disk_offload, device="cuda"
+            monkeypatch,
+            path,
+            fmt,
+            disk_offload=disk_offload,
+            device="cuda",
+            reader=reader,
         )
         for disk_offload in (True, False)
     )
@@ -1288,12 +1300,15 @@ def test_disk_offload_rejects_shards_it_cannot_serve_from_files(
             embedding.quant_method.process_weights_after_loading(embedding)
 
 
+@pytest.mark.parametrize("reader", ["buffered", "auto"])
 def test_disk_offload_fails_closed_on_truncation_and_reload(
-    monkeypatch, tmp_path
+    monkeypatch, tmp_path, reader
 ) -> None:
     path = tmp_path / "model.safetensors"
     _save_ple_checkpoint(path, "bf16")
-    module = _make_ple_from_checkpoint(monkeypatch, path, "bf16", disk_offload=True)
+    module = _make_ple_from_checkpoint(
+        monkeypatch, path, "bf16", disk_offload=True, reader=reader
+    )
     embedding = module.ngram_embedding
     assert isinstance(embedding, Qwen4ExpPLEDiskOffloadEmbedding)
     embedding.copy_ids_to_host(torch.tensor([[0, 23], [5, 6], [12, 17], [23, 23]]))
