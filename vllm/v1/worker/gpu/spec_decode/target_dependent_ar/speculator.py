@@ -44,7 +44,9 @@ class TargetDependentARSpeculator(AutoRegressiveSpeculator):
             self.vllm_config,
             self.device,
             cudagraph_mode,
-            self.num_speculative_steps + 1,
+            self.vllm_config.get_decode_cudagraph_query_lens(
+                self.num_speculative_steps + 1
+            ),
             # Draft prefill shares the target's padded attention metadata.
             varlen_decode=self.enable_adaptive_verification,
         )
@@ -254,10 +256,7 @@ class TargetDependentARSpeculator(AutoRegressiveSpeculator):
                 input_batch.idx_mapping, num_reqs_padded=num_reqs
             )
 
-        if dummy_run and dp_sync_state is not None:
-            num_reqs = min(num_reqs, dp_sync_state.num_reqs)
-
-        self._decode(
+        self._run_multi_step_decode(
             input_batch,
             num_rejected,
             num_reqs,
@@ -389,7 +388,7 @@ class TargetDependentARSpeculator(AutoRegressiveSpeculator):
         self.input_buffers.positions[:num_reqs] = positions
         self.sample_src_positions[:num_reqs] = sample_src_positions
 
-    def _generate_draft(
+    def _decode(
         self,
         num_reqs: int,
         num_tokens_padded: int,
@@ -434,7 +433,7 @@ class TargetDependentARSpeculator(AutoRegressiveSpeculator):
             self.input_buffers,
             self.sample_src_positions,
             num_reqs,
-            self.max_model_len,
+            self.max_model_len_gpu,
             num_speculative_steps,
             advance_draft_positions=self.advance_draft_positions,
         )
@@ -632,7 +631,7 @@ def _update_draft_inputs_kernel(
     hidden_states_ptr,
     hidden_states_stride,
     hidden_size,
-    max_model_len,
+    max_model_len_ptr,  # scalar
     num_speculative_steps,
     BLOCK_SIZE: tl.constexpr,
     ADVANCE_DRAFT_POSITIONS: tl.constexpr,
@@ -680,6 +679,7 @@ def _update_draft_inputs_kernel(
         # Increment position and seq_lens.
         # NOTE(woosuk): To prevent out-of-range access, we clamp these values
         # if they reach the max model length.
+        max_model_len = tl.load(max_model_len_ptr)
         position = tl.load(positions_ptr + req_idx)
         position = tl.minimum(position + 1, max_model_len - 1)
         tl.store(positions_ptr + req_idx, position)
@@ -698,7 +698,7 @@ def update_draft_inputs(
     input_buffers: InputBuffers,
     sample_src_positions: torch.Tensor,
     num_reqs: int,
-    max_model_len: int,
+    max_model_len: torch.Tensor,  # scalar device tensor, loaded inside the kernel
     num_speculative_steps: int,
     advance_draft_positions: bool = True,
 ):

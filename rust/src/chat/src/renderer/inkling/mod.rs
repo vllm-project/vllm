@@ -8,7 +8,7 @@ use thiserror_ext::AsReport as _;
 use vllm_text::Prompt;
 use vllm_text::tokenizer::{DynTokenizer, Tokenizer};
 
-use super::{ChatRenderer, RenderedPrompt};
+use super::{ChatRenderer, RenderedPrompt, tool_call_arguments_or_empty};
 use crate::EffortValue;
 use crate::error::{Error, Result};
 use crate::reasoning::ReasoningControl;
@@ -226,6 +226,9 @@ impl InklingChatRenderer {
                         ChatContentPart::VideoUrl { .. } => {
                             return Err(Error::UnsupportedMultimodalContent("video_url"));
                         }
+                        ChatContentPart::ToolReference { .. } => {
+                            return Err(Error::UnsupportedContentPart("tool_reference"));
+                        }
                     }
                 }
             }
@@ -416,20 +419,7 @@ fn resolve_special_token(tokenizer: &dyn Tokenizer, token: &str) -> Result<u32> 
 fn tool_call_json(tool_call: &AssistantToolCall) -> Result<String> {
     let name_json = serde_json::to_string(&tool_call.name)
         .map_err(|error| Error::ChatTemplate(error.as_report().to_string()))?;
-    let arguments = if tool_call.arguments.trim().is_empty() {
-        Value::Object(Map::new())
-    } else {
-        serde_json::from_str(&tool_call.arguments).map_err(|error| {
-            Error::ChatTemplate(format!(
-                "Inkling tool call arguments must decode to a JSON object: {error}"
-            ))
-        })?
-    };
-    let Value::Object(_) = arguments else {
-        return Err(Error::ChatTemplate(
-            "Inkling tool call arguments must decode to a JSON object".to_string(),
-        ));
-    };
+    let arguments = Value::Object(tool_call_arguments_or_empty(&tool_call.arguments));
     let args_json = compact_json(&sort_json(&arguments))?;
     Ok(format!("{{\"name\":{name_json},\"args\":{args_json}}}"))
 }

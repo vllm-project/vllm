@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from vllm.config import set_current_vllm_config
+from vllm.config import CacheConfig, set_current_vllm_config
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.models.step5.common.csa_tail_ring import Step5CSATailRing
 from vllm.platforms.interface import Platform
@@ -69,8 +69,9 @@ class _MainLayer(AttentionLayerBase):
     ],
 )
 def test_block_size_fits_tail_ring(
-    num_kv_heads, dtype, speculative_tokens, page_size_padded, expected
+    num_kv_heads, dtype, speculative_tokens, page_size_padded, expected, monkeypatch
 ):
+    monkeypatch.setattr(CacheConfig, "DEFAULT_BLOCK_SIZE", _DEFAULT_BLOCK_SIZE)
     context: dict = {}
     ring = Step5CSATailRing(
         prefix="layers.0.csa_tail_ring",
