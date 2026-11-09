@@ -232,9 +232,9 @@ class _WorkerProbe:
         assert self._reports.empty()
 
 
-def _start_ft_async_eplb(monkeypatch, num_failures: int):
-    """Start single-rank async EPLB under fault tolerance whose first
-    ``num_failures`` layer transfers raise. On one rank the EP group stands in
+def _start_ft_async_eplb(monkeypatch):
+    """Start single-rank async EPLB under fault tolerance whose first layer
+    transfer raises. On one rank the EP group stands in
     for the EPLB group. Returns once the worker is waiting for a signal.
     """
     num_layers, num_experts, window = 2, 4, 2
@@ -251,8 +251,8 @@ def _start_ft_async_eplb(monkeypatch, num_failures: int):
     transferred: list[int] = []
 
     def transfer_layer(*, layer_idx: int, **kwargs) -> None:
-        if len(failures) < num_failures:
-            failures.append(RuntimeError(f"injected transfer failure {len(failures)}"))
+        if not failures:
+            failures.append(RuntimeError("injected transfer failure"))
             raise failures[-1]
         transferred.append(layer_idx)
 
@@ -320,7 +320,7 @@ def test_fault_tolerance_recovers_async_eplb_after_worker_failure(
     silently with every rank waiting for the failed layer. The worker thread
     survives, so after the FT reset the next rearrangement runs to completion.
     """
-    run = _start_ft_async_eplb(monkeypatch, num_failures=1)
+    run = _start_ft_async_eplb(monkeypatch)
     _signal_rearrangement(run.state)
     run.probe.expect("idle")
     with pytest.raises(RuntimeError) as exc_info:

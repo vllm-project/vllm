@@ -13,6 +13,7 @@ steps:
   - vllm/v1/worker/sentinel/
   - vllm/entrypoints/serve/fault_tolerance/
   - vllm/distributed/elastic_ep/
+  - vllm/distributed/eplb/
   - vllm/distributed/device_communicators/
   - vllm/distributed/kv_transfer/
   - vllm/v1/engine/
