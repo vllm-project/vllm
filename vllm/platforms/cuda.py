@@ -816,15 +816,15 @@ class NvmlCudaPlatform(CudaPlatformBase):
     @with_nvml_context
     def get_process_memory_usage(cls, device_id: int = 0) -> int | None:
         """Device memory used by this process on the visible device
-        ``device_id`` as reported by NVML.
+        `device_id` as reported by NVML.
 
-        Returns ``None`` whenever NVML cannot attribute memory to this
+        Returns `None` whenever NVML cannot attribute memory to this
         process (no entry for our PID, e.g. a container whose PID namespace
         NVML does not see, WDDM, MIG, or an NVML error) so that callers fall
         back to device-level accounting.
 
-        Keep this on the per-process query: ``nvmlDeviceGetMemoryInfo`` is
-        ``NVMLError_NotSupported`` on integrated parts such as GB10 (DGX Spark),
+        Keep this on the per-process query: `nvmlDeviceGetMemoryInfo` is
+        `NVMLError_NotSupported` on integrated parts such as GB10 (DGX Spark),
         where this per-process path is exactly what still works.
         """
         try:
