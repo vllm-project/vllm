@@ -79,6 +79,7 @@ def test_prometheus_request_labels_valid():
     [
         ({"x-a-b": "1bad"}, "not a valid Prometheus label name"),
         ({"x-a-b": "has-dash"}, "not a valid Prometheus label name"),
+        ({"x-a-b": "__tenant"}, "reserves for internal labels"),
         ({"x-a-b": "model_name"}, "collides with a label"),
         ({"x-a-b": "engine"}, "collides with a label"),
         ({"x-a-b": "finished_reason"}, "collides with a label"),

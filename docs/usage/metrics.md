@@ -162,9 +162,9 @@ Only the allowlisted headers are ever read. A request missing a header
 records an empty value for the corresponding label, so the label set of each
 family stays fixed. Header values are truncated to 128 characters. Label
 names are validated at startup: they must be valid Prometheus label names,
-must not collide with labels vLLM already sets, and at most 5 labels are
-allowed. The option has no effect when log stats are disabled
-(`--disable-log-stats`).
+must not start with `__` (reserved by prometheus_client), must not collide
+with labels vLLM already sets, and at most 5 labels are allowed. The option
+has no effect when log stats are disabled (`--disable-log-stats`).
 
 !!! warning "Label cardinality"
     Every distinct label *value* multiplies the series of every labeled

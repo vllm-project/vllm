@@ -255,6 +255,11 @@ class ObservabilityConfig:
                     f"prometheus_request_labels: {label!r} is not a valid "
                     "Prometheus label name"
                 )
+            if label.startswith("__"):
+                raise ValueError(
+                    f"prometheus_request_labels: {label!r} starts with '__', "
+                    "which prometheus_client reserves for internal labels"
+                )
             if label in _PROMETHEUS_REQUEST_LABEL_RESERVED:
                 raise ValueError(
                     f"prometheus_request_labels: {label!r} collides with a "
