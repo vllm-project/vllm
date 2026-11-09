@@ -2282,10 +2282,6 @@ class MooncakeConnectorWorker:
                         local_ids, remote_ids
                     )
                 else:
-                    assert local_region.group_index == remote_region.group_index, (
-                        "Aligned Mooncake transfer regions must belong to the same "
-                        "KV group."
-                    )
                     local_ids = _block_ids_for_region(
                         local_block_ids_by_group,
                         local_region.group_index,
@@ -2294,7 +2290,7 @@ class MooncakeConnectorWorker:
                     remote_ids = _block_ids_for_region(
                         remote_block_ids_by_group,
                         remote_region.group_index,
-                        remote_region.shared_group_ids,
+                        local_region.shared_group_ids,
                     )
                 local_array = np.asarray(local_ids, dtype=np.int64)
                 remote_array = np.asarray(remote_ids, dtype=np.int64)
@@ -2422,6 +2418,7 @@ class MooncakeConnectorWorker:
         num_blocks = (
             self.kv_cache_config.num_blocks * self._physical_blocks_per_logical_kv_block
         )
+        skip_host = self.kv_cache_config.hisparse_shared_host_pool and self.tp_rank != 0
 
         for layer_name, cache in kv_caches.items():
             layer_index = extract_layer_index(layer_name)
@@ -2439,12 +2436,7 @@ class MooncakeConnectorWorker:
             storage = cache.untyped_storage()
             storage_addr = storage.data_ptr()
             host_group = self.kv_cache_config.transfer_groups[group_index].host_resident
-            owner_registers = not (
-                host_group
-                and self.kv_cache_config.hisparse_shared_host_pool
-                and self.tp_rank != 0
-            )
-            if owner_registers and storage_addr not in seen_storage_ptrs:
+            if not (skip_host and host_group) and storage_addr not in seen_storage_ptrs:
                 seen_storage_ptrs.add(storage_addr)
                 kv_data_ptrs.append(storage_addr)
                 kv_data_lens.append(storage.nbytes())
@@ -3311,9 +3303,7 @@ class MooncakeConnectorWorker:
         # gating on use_mla alone would promote and then fail the length check
         # for a non-replicated MLA rank with tp_ratio != 1.
         tp_ratio = _get_tp_ratio(self.tp_size, meta.remote_tp_size)
-        if groups_match and (
-            tp_ratio == 1 or self._producer_cache_is_replicated()
-        ):
+        if groups_match and (tp_ratio == 1 or self._producer_cache_is_replicated()):
             covered_both_sides = len(local_regions) == len(pre_align_local) and len(
                 remote_regions
             ) == len(pre_align_remote)
@@ -3374,21 +3364,18 @@ class MooncakeConnectorWorker:
     ) -> MooncakeXferMetadata:
         skip_host = self.kv_cache_config.hisparse_shared_host_pool and self.tp_rank != 0
         # Filter the wire request only; all ranks retain their completion state.
-        req_blocks = {
-            req_id: (
-                pull_meta.transfer_id,
-                [
+        req_blocks = {}
+        for req_id, pull_meta in pull_metas.items():
+            block_ids = pull_meta.local_block_ids
+            if skip_host:
+                block_ids = [
                     [] if group.host_resident else ids
                     for group, ids in zip(
                         self.kv_cache_config.transfer_groups,
-                        pull_meta.local_block_ids,
+                        block_ids,
                     )
                 ]
-                if skip_host
-                else pull_meta.local_block_ids,
-            )
-            for req_id, pull_meta in pull_metas.items()
-        }
+            req_blocks[req_id] = (pull_meta.transfer_id, block_ids)
         if not include_layout:
             return MooncakeXferMetadata(
                 remote_hostname=self.hostname,
