@@ -61,6 +61,7 @@ from vllm.models.common.ops.sequence_parallel import (
     sp_reduce_scatter,
     sp_shard,
 )
+from vllm.models.deepseek_v4.amd.mega_moe import finalize_mega_moe_weights
 from vllm.models.deepseek_v4.amd.model import (
     DeepseekV4MoE as DeepseekV4MoEBase,
 )
@@ -150,9 +151,9 @@ class DeepseekV4MoE(DeepseekV4MoEBase):
                 requires_grad=False,
             )
             self.image_sentinel_lo = IMAGE_SENTINEL_BASE_ID
-            self.experts.router.bias_vl = self.gate.bias_vl
-            self.experts.router.image_sentinel_lo = self.image_sentinel_lo
-        self.use_mega_moe = False
+            if not self.use_mega_moe:
+                self.experts.router.bias_vl = self.gate.bias_vl
+                self.experts.router.image_sentinel_lo = self.image_sentinel_lo
         # Expose the MixtureOfExperts protocol fields expected by the V4.1
         # outer model.  The current ROCm runner has no redundant EPLB copies,
         # so logical and physical expert counts are identical.
@@ -541,7 +542,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         self.config = config
         self.quant_config = quant_config
         self.parallel_config = vllm_config.parallel_config
-        self.use_mega_moe = False
+        self.use_mega_moe = vllm_config.kernel_config.moe_backend == "aiter_mega_moe"
         self.use_sequence_parallel = _use_sequence_parallel(vllm_config)
         if self.use_mega_moe and not vllm_config.parallel_config.enable_expert_parallel:
             raise NotImplementedError(
@@ -743,9 +744,6 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         else:
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
-
-        if self.use_mega_moe:
-            input_ids = input_ids.to(torch.int64)
 
         # Engram n-gram hashes for the whole (flattened) batch, computed once
         # on the full token stream — before any sequence-parallel sharding —
@@ -1205,10 +1203,12 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             ckpt_down_proj_name="w2",
             ckpt_up_proj_name="w3",
             num_experts=self.config.n_routed_experts,
+            routed_experts_prefix="" if self.use_mega_moe else "routed_experts",
         )
 
     def finalize_mega_moe_weights(self) -> None:
-        return
+        if self.use_mega_moe:
+            finalize_mega_moe_weights(self)
 
     def finalize_mhc_broadcast_weights(self) -> None:
         if not get_pp_group().is_first_rank or self.start_layer >= self.end_layer:
