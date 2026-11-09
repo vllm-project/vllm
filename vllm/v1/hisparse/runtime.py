@@ -452,11 +452,11 @@ class HiSparsePrefillStagingPlan:
     ) -> None:
         """Resolve which staged rows can be served from the resident cache.
 
-        ``resident_state_rows`` is a resident group's persistent table by
-        request state row and ``state_indices`` holds each staged request's
+        `resident_state_rows` is a resident group's persistent table by
+        request state row and `state_indices` holds each staged request's
         state row. Computed once per plan and resident group (every layer in
         the group shares the table); non-null resident pages become
-        miss_mask=0 rows gathered device-to-device by ``gather_prefill_cache``.
+        miss_mask=0 rows gathered device-to-device by `gather_prefill_cache`.
         """
         source_key = (resident_state_rows.data_ptr(), resident_block_size)
         if self.gpu_source_key == source_key:
@@ -1082,7 +1082,7 @@ def update_hisparse_residency(
 ) -> None:
     """Apply scheduled requests' residency changes.
 
-    ``residency`` is ``[resident groups, state rows, pages]``: the GPU block of
+    `residency` is `[resident groups, state rows, pages]`: the GPU block of
     each page, or block 0 when the page is read from the host.
     """
     if not updates:

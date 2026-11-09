@@ -3,12 +3,12 @@
 """Tests for DeepSeek-V4 in-image bidirectional SWA visibility (vision variant).
 
 The reference semantics are a torch port of the official
-``get_image_visible`` / ``get_window_topk_idxs_visible``: inside an image span
-[span_start, span_end] (inclusive), a token at ``pos`` sees
-``min(pos - span_start, max_image_tokens - 1)`` extra tokens to the left and
-``min(span_end - pos, max_image_tokens)`` to the right; the window then starts
-at ``max(pos - (window - 1) - max(left - (window - 1), 0), 0)`` and ends at
-``pos + right`` (inclusive).
+`get_image_visible` / `get_window_topk_idxs_visible`: inside an image span
+[span_start, span_end] (inclusive), a token at `pos` sees
+`min(pos - span_start, max_image_tokens - 1)` extra tokens to the left and
+`min(span_end - pos, max_image_tokens)` to the right; the window then starts
+at `max(pos - (window - 1) - max(left - (window - 1), 0), 0)` and ends at
+`pos + right` (inclusive).
 """
 
 import inspect
@@ -64,7 +64,7 @@ def ref_swa_bounds(
     pos: int, window: int, left: int, right: int, replay_start: int = 0
 ) -> tuple[int, int]:
     """Reference [start, end) window bounds for one query token. Under SWA
-    bounded replay no window KV exists below ``replay_start``."""
+    bounded replay no window KV exists below `replay_start`."""
     left_add = max(left - (window - 1), 0)
     start = max(pos - (window - 1) - left_add, 0, replay_start)
     return start, pos + right + 1
@@ -307,7 +307,7 @@ def combine_case(
 ):
     """Run combine_topk_swa_indices and return (indices, lens, expected).
 
-    ``in_range_topk`` draws top-k indices below N, for combiners that drop
+    `in_range_topk` draws top-k indices below N, for combiners that drop
     out-of-range ones.
     """
     device = torch.device("cuda")
@@ -460,7 +460,7 @@ def _require_bi_kernels():
 
 
 def _swa_first_chunk(prefix_query_replay, compress_ratio, ragged, base, gen):
-    """One combine chunk: query_start_loc offset by ``base``, per-request
+    """One combine chunk: query_start_loc offset by `base`, per-request
     gather lengths stopping at the replay start, and top-k rows that are
     ascending (compact) or random with -1 holes, negatives and ids >= N
     past and inside each row's length (ragged)."""
@@ -635,7 +635,7 @@ def test_v41_bi_topk_lens_by_position(seq_len, compress_ratio):
 
 def _paged_indices_batch(requests, compress_ratio, topk_rows, gen):
     """Metadata for (request, prefix, query_len, replay_start) rows, with
-    per-request shuffled pages; top-k rows come from ``topk_rows[request]``
+    per-request shuffled pages; top-k rows come from `topk_rows[request]`
     at absolute positions."""
     window, swa_block, top_k = 128, 32, 512
     compressed_block = 64
@@ -730,7 +730,7 @@ def test_v41_bi_sparse_paged_indices(compress_ratio):
         (3, 2, 3, 0),
     ]
     results: dict[tuple[int, int], list[list]] = {}
-    for name, requests in (("prefill", prefill), ("mixed", mixed)):
+    for _name, requests in (("prefill", prefill), ("mixed", mixed)):
         batch = _paged_indices_batch(requests, compress_ratio, topk_rows, gen)
         out, lens = _run_paged_indices(batch)
         tokens = batch["token_to_req"].numel()
@@ -1787,7 +1787,7 @@ def _assert_ds41_bi_decode_graph(fixture, lengths, compress_ratio, expected, que
 
     A FULL decode graph is captured once; later steps rewrite the persistent
     metadata, queries and indexer inputs in place and replay. Each request
-    contributes ``query_len`` rows (6 is a spec-decode verify step with 5
+    contributes `query_len` rows (6 is a spec-decode verify step with 5
     draft tokens). Every real row must match the eager prefill result for the
     same (request, position) bit for bit; padding rows stay inert.
     """
@@ -2356,8 +2356,8 @@ def test_ds41_bi_exact_replay_matches_full_forward(monkeypatch, length):
             cache.kv_cache.random_(0, 256)
 
     def forward(cache, layer, hidden, rows, run_from, kv_start):
-        """The rows from ``run_from`` attend, reading no window KV below
-        ``kv_start``; returns their per-row output map."""
+        """The rows from `run_from` attend, reading no window KV below
+        `kv_start`; returns their per-row output map."""
         num = rows.numel() - run_from
         q = (hidden[run_from:, None].float() * q_weights[layer]).bfloat16()
         starts = torch.tensor([0, num], dtype=torch.int32)
@@ -2386,9 +2386,9 @@ def test_ds41_bi_exact_replay_matches_full_forward(monkeypatch, length):
         return torch.tanh(mixed + hidden[run_from:].float()).bfloat16()
 
     def run(start, decoder_starts):
-        """Rows [start, length) of one request, replaying from ``start``. Layers
+        """Rows [start, length) of one request, replaying from `start`. Layers
         below the cut run every row; the cut writes every row's KV and, like the
-        layers past it, runs the rows from its ``decoder_starts`` entry; those
+        layers past it, runs the rows from its `decoder_starts` entry; those
         layers write only those rows' KV and read no window KV below them."""
         hidden = embeddings[start:]
         rows = torch.arange(start, length, device=device)
@@ -2428,7 +2428,7 @@ def test_ds41_bi_exact_replay_matches_full_forward(monkeypatch, length):
         replayed = exact_replay_rows(window, num_layers)
 
         def matches(start, decoder_rows):
-            """``decoder_rows``: rows each layer from the cut on keeps (an int
+            """`decoder_rows`: rows each layer from the cut on keeps (an int
             for all of them)."""
             scramble()
             if isinstance(decoder_rows, int):

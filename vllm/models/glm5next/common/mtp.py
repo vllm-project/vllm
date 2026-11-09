@@ -147,7 +147,7 @@ class Glm5NextMultiTokenPredictor(nn.Module):
             mla_attn.skip_topk = skip
 
     def compact_topk_indices(self, slot_ids: torch.Tensor):
-        """Gather the top-k index rows at ``slot_ids`` to the front of the buffer."""
+        """Gather the top-k index rows at `slot_ids` to the front of the buffer."""
         num_slots = slot_ids.numel()
         for mla_attn in self._mtp_mla_attns:
             topk_indices_buffer = mla_attn.topk_indices_buffer
