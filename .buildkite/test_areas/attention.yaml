@@ -61,8 +61,13 @@ steps:
     - vllm/v1/hisparse/
     - csrc/hisparse_kernels.cu
     - tests/v1/attention
+    - vllm/utils/cute_dsl_aot_cache.py
+    - tests/utils_/test_cute_dsl_aot_cache.py
   commands:
-    - pytest -v -s v1/attention
+    - >-
+      pytest -v -s
+      v1/attention
+      utils_/test_cute_dsl_aot_cache.py
   mirror:
     amd:
       label: ":amd: (MI355 DPX) V1 Attention"

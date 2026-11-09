@@ -18,10 +18,13 @@ temporary directory and a rename and checks a CRC32 on load.
 `CUTE_DSL_DISABLE_FILE_CACHING` keep their meaning.
 """
 
+import contextlib
 import functools
 import importlib
 import inspect
 import os
+import threading
+from collections.abc import Iterator
 from typing import Any
 
 import vllm.envs as envs
@@ -30,6 +33,17 @@ from vllm.logger import init_logger
 logger = init_logger(__name__)
 
 _installed: bool = False
+_compile_state = threading.local()
+
+
+@contextlib.contextmanager
+def _bypass_compile_cache() -> Iterator[None]:
+    previous = getattr(_compile_state, "bypass", False)
+    _compile_state.bypass = True
+    try:
+        yield
+    finally:
+        _compile_state.bypass = previous
 
 
 def _cache_opted_out(envar: object) -> bool:
@@ -142,6 +156,7 @@ def maybe_enable_cute_dsl_compile_cache() -> bool:
         if (
             setup.compile_only
             and setup.no_cache
+            and not getattr(_compile_state, "bypass", False)
             and not _cache_opted_out(getattr(self, "envar", None))
             and not any(
                 self.compile_options.options[option].value
