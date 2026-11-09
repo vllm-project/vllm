@@ -41,39 +41,27 @@ Now you can send requests to the proxy server through port 8000.
 For multimodal Encode-Prefill-Decode (encoder embeddings rather than KV
 cache), see [ECMooncakeConnector Usage Guide](mooncake_ec_connector_usage.md).
 
-## Experimental HiSparse imports
+## HiSparse decoding (experimental)
 
-MooncakeConnector can import sparse MLA KV into a HiSparse decoder's host pool.
-Configure the decoder with `MultiConnector` (`kv_consumer`) combining
-`HiSparseConnector` (`kv_both`) and `MooncakeConnector` (`kv_consumer`); keep
-`MooncakeConnector` (`kv_producer`) on the prefiller.
-See the [HiSparse architecture](../design/hisparse.md) for host
-pool ownership and residency. Matching group layouts retain the ordinary
-Mooncake transfer path. Different group layouts use per-region pairing.
+Keep the prefiller's `MooncakeConnector` configuration above. On the decoder,
+set `--kv-transfer-config` to:
 
-This experimental path requires matching tensor-parallel sizes, pipeline
-parallelism of one, and sparse MLA with unsplit physical pages. Layer names
-and per-layer payload sizes must agree even when group numbers differ between
-nodes. Configure the same token block sizes on both endpoints, as required by
-the ordinary Mooncake path. Each decoder group must request a contiguous
-uncached suffix; holes within that suffix are unsupported. The producer pairs
-the requested pages with the suffix of its corresponding source group.
-Incompatible region layouts fail before any data transfer.
+```json
+{
+  "kv_connector": "MultiConnector",
+  "kv_role": "kv_consumer",
+  "kv_connector_extra_config": {
+    "connectors": [
+      {"kv_connector": "HiSparseConnector", "kv_role": "kv_both",
+       "kv_connector_extra_config": {"host_pool_gib": 64}},
+      {"kv_connector": "MooncakeConnector", "kv_role": "kv_consumer"}
+    ]
+  }
+}
+```
 
-Run the same code revision on both endpoints. This experimental path does not
-negotiate connector versions or guarantee interoperability across revisions.
-
-For a shared host pool, decoder TP rank 0 registers and requests the host memory;
-other ranks omit host pages from their wire requests. Every decoder rank still
-receives its GPU indexer data and participates in completion before imported
-pages become usable. Private host backing retains per-rank host writes.
-
-An earlier prototype was exercised with GLM-5.2-FP8 on two TP8 H200 nodes with
-RDMA, eager execution and `FLASHMLA_SPARSE`. The simplified metadata and suffix
-pairing described here have not been revalidated. A synthetic 4097-token output
-discrepancy between ordinary prefill and HiSparse remains unresolved and also
-occurs with decoder-local prefill; this is not a claim of general output parity
-or production readiness.
+Set `host_pool_gib` to the host-cache capacity in GiB per data-parallel replica.
+The prefiller and decoder can use different TP sizes, such as TP2 and TP4.
 
 ## Environment Variables
 

@@ -2232,7 +2232,7 @@ class MooncakeConnectorWorker:
                         raise ValueError(
                             "Region-mapped imports cannot transfer null pages"
                         )
-                    local_ids = local_ids[-len(remote_ids):] if remote_ids else []
+                    local_ids = local_ids[-len(remote_ids) :] if remote_ids else []
                     local_ids, remote_ids = _normalize_paired_block_order(
                         local_ids, remote_ids
                     )
@@ -2264,13 +2264,12 @@ class MooncakeConnectorWorker:
         remote: list[TransferRegion],
     ) -> str | None:
         if (
-            self.tp_size != meta.remote_tp_size
-            or self.pp_size != 1
+            self.pp_size != 1
             or meta.remote_pp_size != 1
             or self._physical_blocks_per_logical_kv_block != 1
             or not self.use_mla
         ):
-            return "Region-mapped imports require equal TP, PP1 and unsplit MLA pages"
+            return "Region-mapped imports require PP1 and unsplit MLA pages"
         if len(local) != len(remote):
             return "Region-mapped imports require the same layers on both endpoints"
         for region in local + remote:

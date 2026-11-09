@@ -600,14 +600,22 @@ def test_failed_receive_waits_for_every_peer(swa_enabled, outcomes):
         worker.shutdown()
 
 
-@pytest.fixture(params=[False, True], ids=["separate", "packed"])
+@pytest.fixture(
+    params=[
+        (packed, tp, rank)
+        for packed in (False, True)
+        for tp in (1, 2, 4)
+        for rank in range(tp)
+    ]
+)
 def hisparse_producer(request):
+    packed, tp, rank = request.param
     cache_config = _make_packed_mla_kv_cache_config(8)
     names = cache_config.kv_cache_groups[0].layer_names
     page = cache_config.kv_cache_groups[0].kv_cache_spec.page_size_bytes
     backing = torch.arange(16, dtype=torch.uint8).repeat_interleave(page).view(8, -1)
     caches = dict(zip(names, backing.split(page, dim=1)))
-    if not request.param:
+    if not packed:
         caches = {name: cache.contiguous() for name, cache in caches.items()}
     config = create_vllm_config(
         kv_connector="MooncakeConnector",
@@ -615,47 +623,59 @@ def hisparse_producer(request):
         hf_overrides={"model_type": "deepseek_v2", "kv_lora_rank": 16},
     )
     with mooncake_register_worker(
-        cache_config, vllm_config=config, tp_size=2
+        cache_config, vllm_config=config, tp_size=tp, tp_rank=rank
     ) as (worker, _):
         worker.register_kv_caches(caches)
         yield worker, caches, page
 
 
 @pytest.mark.cpu_test
-@pytest.mark.parametrize("rank,shared", [(0, True), (1, True), (1, False)])
-def test_hisparse_import_copies_uncached_pages(hisparse_producer, rank, shared):
-    """Copy group suffixes while preserving padding and shared-host ownership."""
+@pytest.mark.parametrize("decoder_tp", [1, 2, 4, 8])
+@pytest.mark.parametrize("shared", [False, True])
+def test_hisparse_import_copies_uncached_pages(hisparse_producer, decoder_tp, shared):
+    """Only the elected P rank copies each D rank's GPU and owned host suffixes."""
     producer, caches, page = hisparse_producer
     config = _make_packed_mla_kv_cache_config(8, num_groups=2)
     config.kv_cache_groups[0].host_resident = True
     config.hisparse_host_num_blocks = 8
     config.hisparse_shared_host_pool = shared
-    host = torch.full((8, page), 0xCC, dtype=torch.uint8)
-    gpu = torch.full((8, page + 64), 0xCC, dtype=torch.uint8)
     source, indexer = caches.values()
-    host_owner = rank == 0 or not shared
-    expected_host, expected_gpu = host.clone(), gpu.clone()
-    if host_owner:
-        expected_host[[6, 5]] = source[[2, 1]]
-    expected_gpu[[7, 2, 6], 32 : 32 + page] = indexer[[3, 2, 1]]
-    pull = _make_pull_meta("d", [[6, 5], [7, 2, 6]])
-    send = SendBlockMeta("p", pull.transfer_id, [[4, 3, 2, 1]], asyncio.Event())
-    with mooncake_register_worker(config, tp_size=2, tp_rank=rank) as (decoder, reg):
-        decoder.register_kv_caches(dict(zip(caches, (host, gpu[:, 32 : 32 + page]))))
-        meta = decoder._build_pull_metadata({"d": pull}, include_layout=True)
-        assert (host.data_ptr() in reg.call_args.args[0]) == host_owner
-    assert pull.local_block_ids == [[6, 5], [7, 2, 6]]
-    local, remote, error = producer._prepare_transfer_regions(meta)
-    assert error is None
-    sources, destinations, lengths, errors, message = asyncio.run(
-        producer._build_transfer_params([("d", send)], meta, local, remote)
-    )
-    assert errors == [] and message is None
-    for src, dst, length in zip(sources, destinations, lengths):
-        ctypes.memmove(dst, src, length)
-    assert torch.equal(host, expected_host)
-    assert torch.equal(gpu, expected_gpu)
-    assert sum(lengths) == (5 if host_owner else 3) * page
+    for rank in producer.transfer_topo.handshake_target_ranks(decoder_tp):
+        host = torch.full((8, page), 0xCC, dtype=torch.uint8)
+        gpu = torch.full((8, page + 64), 0xCC, dtype=torch.uint8)
+        host_owner = rank == 0 or not shared
+        sends_bytes = producer.tp_rank == rank * producer.tp_size // decoder_tp
+        expected_host, expected_gpu = host.clone(), gpu.clone()
+        if sends_bytes:
+            if host_owner:
+                expected_host[[6, 5]] = source[[2, 1]]
+            expected_gpu[[7, 2, 6], 32 : 32 + page] = indexer[[3, 2, 1]]
+        pull = _make_pull_meta("d", [[6, 5], [7, 2, 6]])
+        send = SendBlockMeta("p", pull.transfer_id, [[4, 3, 2, 1]], asyncio.Event())
+        with mooncake_register_worker(config, tp_size=decoder_tp, tp_rank=rank) as (
+            decoder,
+            reg,
+        ):
+            assert producer.tp_rank in decoder.transfer_topo.handshake_target_ranks(
+                producer.tp_size
+            )
+            decoder.register_kv_caches(
+                dict(zip(caches, (host, gpu[:, 32 : 32 + page])))
+            )
+            meta = decoder._build_pull_metadata({"d": pull}, include_layout=True)
+            assert (host.data_ptr() in reg.call_args.args[0]) == host_owner
+        assert pull.local_block_ids == [[6, 5], [7, 2, 6]]
+        local, remote, error = producer._prepare_transfer_regions(meta)
+        assert error is None
+        sources, destinations, lengths, errors, message = asyncio.run(
+            producer._build_transfer_params([("d", send)], meta, local, remote)
+        )
+        assert errors == [] and message is None
+        for src, dst, length in zip(sources, destinations, lengths):
+            ctypes.memmove(dst, src, length)
+        assert torch.equal(host, expected_host)
+        assert torch.equal(gpu, expected_gpu)
+        assert sum(lengths) == (5 if host_owner else 3) * page * sends_bytes
 
 
 @pytest.mark.cpu_test
