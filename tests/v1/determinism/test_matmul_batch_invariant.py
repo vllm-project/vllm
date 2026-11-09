@@ -141,15 +141,24 @@ def test_matmul_batch_invariance_across_tuned_m_buckets(m, transpose_b):
 @pytest.mark.parametrize(
     "n,k,has_bias",
     [
-        (4608, 3584, True),
-        (3584, 3584, False),
-        (37888, 3584, False),
-        (3584, 18944, False),
-        (152064, 3584, False),
+        (256, 6144, False),
+        (160, 6144, False),
+        (19360, 6144, False),
+        (38720, 6144, False),
+        (384, 5120, False),
+        (32, 5120, False),
+        (128, 512, False),
+        (1024, 5120, False),
+        (16160, 5120, False),
+        (32320, 5120, False),
+        (5120, 2880, True),
+        (2880, 4096, True),
+        (201088, 2880, False),
+        (32, 2880, True),
     ],
 )
-def test_qwen25_7b_hopper_tuned_linear_batch_invariance(n, k, has_bias):
-    """The Hopper entries for Qwen2.5-7B are selected per bucket, and a row's
+def test_hopper_tuned_linear_batch_invariance(n, k, has_bias):
+    """Hopper entries for popular models' bf16 Linear shapes are selected per bucket, and a row's
     output is bitwise the same alone and inside batches that cross every
     bucket boundary."""
     capability = (
@@ -157,7 +166,7 @@ def test_qwen25_7b_hopper_tuned_linear_batch_invariance(n, k, has_bias):
     )
     family = _get_tuned_matmul_arch_family(capability)
     if family != "hopper":
-        pytest.skip("Qwen2.5-7B projection shapes are tuned for H100")
+        pytest.skip("These shapes are tuned for H100")
 
     shape_config = _BATCH_INVARIANT_MATMUL_TUNED_CONFIGS[family].get((n, k))
     assert shape_config is not None
