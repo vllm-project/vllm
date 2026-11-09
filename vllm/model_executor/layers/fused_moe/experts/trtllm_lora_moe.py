@@ -614,14 +614,6 @@ class TrtLlmMxfp4LoRAExperts(_TrtLlmLoRAExpertsBase, TrtLlmMxfp4ExpertsBase):
     def _supports_routing_method(routing_method, weight_key, activation_key) -> bool:
         return True  # routing is done outside the kernel
 
-    @staticmethod
-    def _supports_parallel_config(
-        moe_parallel_config: FusedMoEParallelConfig,
-    ) -> bool:
-        # DP gathers tokens, but the no-LoRA fast path reads the local batch.
-        p = moe_parallel_config
-        return p.dp_size == 1 and not p.use_all2all_kernels and not p.enable_eplb
-
     def workspace_shapes(
         self,
         M,
