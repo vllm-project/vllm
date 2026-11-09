@@ -558,6 +558,85 @@ def test_query_overlap_kernels(batch, fp8):
     assert torch.equal(q_c.view(torch.int16), serial[1].view(torch.int16))
 
 
+@pytest.mark.parametrize("batch", [6, 8])
+def test_query_without_pdl(batch):
+    """DCP "front" query order (overlap.QUERY_AFTER_FRONT): MlaQuery compiled to
+    launch without PDL writes the same query rows and KV row as the PDL launch, and
+    no q_c rows (the "front" mode leaves them to IndexFront), eager and in CUDA graph
+    replays after another kernel."""
+    import cutlass
+
+    from vllm.models.kimi_k3.nvidia.specialized_decode.cutedsl.common.host import (
+        fake,
+        layout,
+        stream,
+        to_cute,
+    )
+    from vllm.models.kimi_k3.nvidia.specialized_decode.cutedsl.dsa.query_stage import (  # noqa: E501
+        compile_query,
+        runs_split,
+    )
+
+    assert not runs_split(HEADS, batch, 0, True)
+    torch.manual_seed(batch)
+    bf, dev = torch.bfloat16, "cuda"
+    projected = torch.randn(batch, PITCH, device=dev, dtype=bf) * 3
+    q_norm = torch.rand(1536, device=dev, dtype=bf) + 0.5
+    kv_norm = torch.rand(512, device=dev, dtype=bf) + 0.5
+    q_b = torch.randn(HEADS * 192, 1536, device=dev, dtype=bf) / 40
+    w_uk = torch.randn(HEADS, 128, 512, device=dev, dtype=bf) / 12
+    blocks = 2
+    slots = torch.randperm(blocks * UNIT, device=dev)[:batch]
+    slots[1] = -1
+    weights = q_norm, kv_norm, q_b, w_uk
+    unit = torch.full((1,), 0.5, device=dev)
+    dev_index = torch.accelerator.current_device_index()
+
+    def query_rows(pdl, graph):
+        mla = packed_cache(blocks, UNIT, FP8_ROW)
+        specs = tuple(layout(t) for t in (*weights, mla))
+        fakes = tuple(
+            fake(shape, stride, dtype, 4 if dtype == torch.float32 else 16)
+            for shape, stride, dtype in specs
+        )
+        kernel = compile_query(
+            batch, HEADS, PITCH, fakes, dev_index, fp8=True, overlap="front", pdl=pdl
+        )
+        query = torch.zeros(batch, HEADS, 576, device=dev, dtype=torch.uint8)
+        q_c = torch.full((batch, 1536), -7.0, device=dev, dtype=bf)
+        args = (to_cute(projected), *(to_cute(w) for w in weights), to_cute(mla))
+        args += (to_cute(slots, 8), to_cute(unit, 4), to_cute(unit, 4))
+        args += (cutlass.Float32(EPS), to_cute(query), to_cute(q_c))
+        before = torch.zeros(1 << 20, device=dev)
+
+        def step():
+            before.add_(1.0)  # the kernel MlaQuery follows
+            kernel(*args, stream(dev))  # the current (capturing) stream
+
+        if not graph:
+            step()
+            torch.accelerator.synchronize()
+            return query, q_c, mla
+        step()  # compile and warm up outside the capture
+        torch.accelerator.synchronize()
+        g = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(g):
+            step()
+        for _ in range(2):
+            query.zero_()
+            g.replay()
+        torch.accelerator.synchronize()
+        return query, q_c, mla
+
+    want = query_rows(True, False)
+    assert (want[1] == -7.0).all()  # no q_c rows
+    for graph in (False, True):
+        got = query_rows(False, graph)
+        assert torch.equal(got[0], want[0]), graph  # the query rows
+        assert torch.equal(got[2], want[2]), graph  # the KV row inserted
+        assert (got[1] == -7.0).all(), graph
+
+
 @pytest.mark.parametrize("fp8", [False, True], ids=["ds", "fp8"])
 @pytest.mark.parametrize("batch", [1, 60])
 def test_query_wait_polls_mailbox(batch, fp8):
@@ -744,6 +823,11 @@ FUSED_INDEXER_CASES = {
     "q1_64": ([3000 + 977 * r for r in range(64)], 1),
     "ties": ([50000, 30000, 4000], 5),
     "far": ([600000], 1),
+    # Rows past SPLIT_FROM vectors: the select splits over a cluster of CTAs per row
+    # (up to 8 by the row count), at DSpark's q8 too (the one-accumulator scorer).
+    "split_q8": ([524288], 8),
+    "split_mixed": ([300000, 250000, 170000, 20000], 8),
+    "split_1m": ([1040000], 5),
     # The step's last request is CUDA-graph padding: no metadata rows.
     "padded": ([40000, 3000, 0], 5),
     # Past 64 rows (the attention cores serve up to 320): R48 / R64 at q5.
@@ -1795,9 +1879,14 @@ def layer_config(core, q, world=1, index_dtype="mxfp4"):
         config.kernel_config.flashinfer_sparse_mla_kernel = kernel
     if q > 1:  # DSpark verify: the indexer's decode rows take q tokens
         config.speculative_config = SimpleNamespace(
+            method="dspark",
             num_speculative_tokens=q - 1,
             enable_adaptive_verification=False,
             parallel_drafting=False,
+            # Read by the V2 model runner: VllmConfig's check (any speculator
+            # class) and the decode query length (DSpark appends no slots).
+            speculator_config=SimpleNamespace(speculator_class=object),
+            max_num_new_slots_for_drafting=0,
         )
     return config
 
@@ -2377,18 +2466,37 @@ def test_prepared_dsa_run_fp8_index_matches_stock(
 
 @pytest.mark.parametrize("batch,q", [(8, 8), (40, 8), (80, 8)])
 @pytest.mark.parametrize("core", ["fi-auto"])
-def test_prepared_dsa_q8_runs_stock_indexer(workspace_init, dist_init, core, batch, q):
-    """DSpark k = 7 (q = 8) at TP on the MXFP4 indexer cache: the layer runs the
-    stock decode indexer (DeepGEMM MXFP4 logits + top-k, faster there:
-    prepared.FUSED_TP_MAX_Q) instead of the fused one, and matches stock."""
+def test_prepared_dsa_q8_runs_stock_indexer(
+    workspace_init, dist_init, monkeypatch, core, batch, q
+):
+    """Verify steps past prepared.FUSED_TP_MAX_Q tokens per request at TP on the
+    MXFP4 indexer cache: the layer runs the stock decode indexer (DeepGEMM MXFP4
+    logits + top-k) instead of the fused one, and matches stock. The bound is
+    lowered below q = 8 here, as the default serves DSpark's q = 8 with the fused
+    indexer (test_prepared_dsa_q8_runs_fused_indexer)."""
+    from vllm.models.kimi_k3.nvidia.specialized_decode.cutedsl.dsa import prepared
+
+    monkeypatch.setattr(prepared, "FUSED_TP_MAX_Q", q - 1)
+    step = run_layer_step(core, batch, q)
+    assert step.caches[1].shape[2] == FP4_INDEX_ROW
+    assert step.width is None  # no fused indexer ran
+    check_layer_step(step, q)
+
+
+@pytest.mark.parametrize("batch,q", [(8, 8), (40, 8), (80, 8)])
+@pytest.mark.parametrize("core", ["fi-auto"])
+def test_prepared_dsa_q8_runs_fused_indexer(workspace_init, dist_init, core, batch, q):
+    """DSpark k = 7 (q = 8) at TP on the MXFP4 indexer cache, at the default
+    prepared.FUSED_TP_MAX_Q: the layer runs the fused indexer (its q = 8
+    split-epilogue scorer) and matches stock."""
     from vllm.models.kimi_k3.nvidia.specialized_decode.cutedsl.dsa.prepared import (
         FUSED_TP_MAX_Q,
     )
 
-    assert q > FUSED_TP_MAX_Q
+    assert q <= FUSED_TP_MAX_Q
     step = run_layer_step(core, batch, q)
     assert step.caches[1].shape[2] == FP4_INDEX_ROW
-    assert step.width is None  # no fused indexer ran
+    assert step.width is not None  # the fused indexer ran
     check_layer_step(step, q)
 
 

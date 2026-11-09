@@ -65,6 +65,7 @@ from .overlap import (
     NORM,
     QUERY_OVERLAP_UNFUSED,
     overlap_for,
+    query_after_front,
     side_stream,
 )
 from .query_stage import (
@@ -114,7 +115,9 @@ FUSED_INDEX = 64
 # fused one wins everywhere (32K R4 / R16 / R64 22.5 / 27.1, 33.0 / 56.0, 102 /
 # 180; 128K 37.7 / 55.5, 80.0 / 180, 284 / 582). Under DCP the fused scorer and
 # local select stay at q = 8 (R4 / R16 within 5%, 32K R64 23.9 / 34.2).
-FUSED_TP_MAX_Q = 7
+# The q = 8 scorer with the split epilogue (score_epilogue: one accumulator, two
+# epilogue warpgroups) lets the fused indexer serve q = 8 at TP too.
+FUSED_TP_MAX_Q = 8
 
 
 @cache
@@ -136,6 +139,7 @@ def compile_core(
     cap=64,
     release=True,
     pushed=False,
+    query_pdl=True,
 ):
     """CuTe kernels (query, index, value) of one batch of rows (`q` per request).
     `specs`: the layouts of the weights, the MLA cache and the indexer cache.
@@ -148,7 +152,7 @@ def compile_core(
     cache (FlashInfer prims_ts). `overlap`: the query overlap mode (overlap.py).
     `partials`: the DcpBox's partial rows. `release`: the query launches the
     next kernel early (PDL). `pushed`: DcpValue only merges (the sparse decode
-    pushes the rows, attn_sparse)."""
+    pushes the rows, attn_sparse). `query_pdl`: the query launches with PDL."""
     qnorm, kvnorm, qb, uk, uv, kv, index_kv = (
         fake(shape, stride, dtype, 4 if dtype == torch.float32 else 16)
         for shape, stride, dtype in specs
@@ -169,6 +173,7 @@ def compile_core(
             overlap=overlap,
             cap=cap,
             release=release,
+            pdl=query_pdl,
         )
         index_kernel = compile_index(batch, heads, pitch, index_kv)
         if dcp:
@@ -307,6 +312,14 @@ class PreparedDsa:
             mode = self.overlaps[shape]
             if split and (mode in LATE or (mode == "serial" and self.dcp > 1)):
                 self.overlaps[shape] = "front" if mode in FRONT else "fork"
+        # DCP "front": the shapes whose MlaQuery forks after IndexFront.
+        self.after_front = {
+            (b, q)
+            for (b, q), mode in self.overlaps.items()
+            if mode == "front"
+            and not self.split[b, q]
+            and query_after_front(b, self.dcp)
+        }
         if self.fp8:
             if kernels is None:
                 kernels = fi_kernels(layer.kv_cache_dtype)
@@ -429,6 +442,7 @@ class PreparedDsa:
                 cap=cap,
                 release=(batch, q) not in self.held(LATE),
                 pushed=pushed,
+                query_pdl=(batch, q) not in self.after_front,
             )
             if overlap != "serial" or batch <= FUSED_INDEX:
                 self.overlap_kernels[batch, q] = self.compile_overlap(
@@ -676,8 +690,12 @@ class PreparedDsa:
         _, index, value = self.kernels[batch, q]
         stage = self.query_stage
         publish = publish_args(box, p)
-        join = self.run_query(projected, cache, slots, q, publish)
-        self.run_index(index, projected, index_slots, q)
+        if (batch, q) in self.after_front:  # IndexFront, then the fork
+            self.run_index(index, projected, index_slots, q)
+            join = self.run_query(projected, cache, slots, q, publish)
+        else:
+            join = self.run_query(projected, cache, slots, q, publish)
+            self.run_index(index, projected, index_slots, q)
         core = self.dcp_core(cache, None, metadata, batch, projected, join, q)
         uv, w_uv = stage.views[4], None
         if box.mailbox(batch).format == PROJECTED:
