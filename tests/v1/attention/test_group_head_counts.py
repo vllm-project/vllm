@@ -295,6 +295,30 @@ def test_triton_geometry_comes_from_the_group():
     assert builder.seq_threshold_3D == MIN_LAUNCH_GRID_SIZE_2D // 2
 
 
+def test_triton_splitk_request_bound_follows_the_gate():
+    """The varlen capture bound must count Q blocks against the snapped
+    threshold and stop at the 3D query width."""
+    builder = _triton_builder(
+        spec_num_kv_heads=2, spec_head_size=512, spec_head_size_v=512
+    )
+
+    # 128 // 2 KV heads = 64 Q blocks, 8 queries / BLOCK_Q 2 = 4 per request.
+    assert builder.splitk_max_num_reqs(8) == 16
+    assert builder.splitk_max_num_reqs(4) == 32
+    # The 3D kernel takes multi-query batches only up to width 8.
+    assert builder.splitk_max_num_reqs(9) is None
+
+    snapped = _triton_builder(
+        spec_num_kv_heads=4,
+        spec_head_size=512,
+        spec_head_size_v=512,
+        capture_sizes=[1, 2, 4, 8, 16, 24],
+    )
+    # 128 // 4 = 32 snaps to 24, and 8 queries / BLOCK_Q 4 = 2 per request.
+    assert snapped.seq_threshold_3D == 24
+    assert snapped.splitk_max_num_reqs(8) == 12
+
+
 def test_triton_threshold_snaps_before_the_max_num_seqs_cap():
     """An off-grid max_num_seqs caps the scratch rows, not the snapped threshold."""
     from vllm.v1.attention.backends.triton_attn import MIN_LAUNCH_GRID_SIZE_2D

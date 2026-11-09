@@ -171,6 +171,7 @@ class CudaGraphManager:
         decode_query_lens: Mapping[int, int],
         lora_capture_cases: list[int] | None = None,
         varlen_decode: bool = False,
+        varlen_splitk_max_reqs: int | None = None,
         ubatch_runner: "UBatchRunner | None" = None,
         decode_request_sizes: Sequence[int] | None = None,
     ):
@@ -189,6 +190,8 @@ class CudaGraphManager:
         # Widest decode query; varlen decode graphs take 1..this many per request.
         self.decode_query_len = max(self.decode_max_reqs)
         self.varlen_decode = varlen_decode
+        # Largest request count the attention builders still admit to split-KV.
+        self.varlen_splitk_max_reqs = varlen_splitk_max_reqs
         # DBO supports FULL CUDA graphs only.
         self.ubatch_runner = ubatch_runner
 
@@ -319,14 +322,8 @@ class CudaGraphManager:
             for num_tokens, num_active_loras in product(
                 varlen_sizes, self.lora_capture_cases
             ):
-                token_keyed_descs.append(
-                    BatchExecutionDescriptor(
-                        cg_mode=decode_mode,
-                        num_tokens=num_tokens,
-                        num_reqs=min(num_tokens, self.max_num_reqs),
-                        max_query_len=self.decode_query_len,
-                        num_active_loras=num_active_loras,
-                    )
+                token_keyed_descs.extend(
+                    self._varlen_decode_descs(num_tokens, num_active_loras, decode_mode)
                 )
         elif capture_decode:
             # Attention backends size CUDA graph buffers and pick graph-compatible
@@ -424,6 +421,41 @@ class CudaGraphManager:
                         key = (i, num_active_loras)
                         self._candidates.setdefault(key, []).extend(matching)
                     current_range_start = num_tokens + 1
+
+    def _varlen_decode_descs(
+        self,
+        num_tokens: int,
+        num_active_loras: int,
+        cg_mode: CUDAGraphMode,
+    ) -> list[BatchExecutionDescriptor]:
+        """Token-keyed decode descriptors for adaptive verification.
+
+        The first descriptor is captured at the split-K request bound, so a
+        batch whose real request count fits it replays the 3D kernel. The
+        second keeps the token-keyed worst case, one request per token, which
+        forces the 2D kernel.
+        """
+        num_reqs = min(num_tokens, self.max_num_reqs)
+        splitk_reqs = self.varlen_splitk_max_reqs
+        request_counts = [num_reqs]
+        if (
+            splitk_reqs is not None
+            and 0 < splitk_reqs < num_reqs
+            # The capture splits num_tokens evenly over its requests, so it can
+            # only promise the query-length bound up to splitk_reqs * bound.
+            and num_tokens <= splitk_reqs * self.decode_query_len
+        ):
+            request_counts.insert(0, min(num_tokens, splitk_reqs))
+        return [
+            BatchExecutionDescriptor(
+                cg_mode=cg_mode,
+                num_tokens=num_tokens,
+                num_reqs=count,
+                max_query_len=self.decode_query_len,
+                num_active_loras=num_active_loras,
+            )
+            for count in request_counts
+        ]
 
     @property
     def dp_size(self) -> int:
@@ -643,6 +675,7 @@ class ModelCudaGraphManager(CudaGraphManager):
         decode_query_lens: Mapping[int, int],
         lora_capture_cases: list[int] | None = None,
         varlen_decode: bool = False,
+        varlen_splitk_max_reqs: int | None = None,
         ubatch_runner: "UBatchRunner | None" = None,
     ):
         super().__init__(
@@ -652,6 +685,7 @@ class ModelCudaGraphManager(CudaGraphManager):
             decode_query_lens,
             lora_capture_cases=lora_capture_cases,
             varlen_decode=varlen_decode,
+            varlen_splitk_max_reqs=varlen_splitk_max_reqs,
             ubatch_runner=ubatch_runner,
         )
         self.hidden_states: torch.Tensor | None = None

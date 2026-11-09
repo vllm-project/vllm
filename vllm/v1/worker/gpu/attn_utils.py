@@ -421,6 +421,31 @@ def get_varlen_cudagraph_unsupported_backend(
     return None
 
 
+def get_varlen_splitk_max_reqs(
+    attn_groups: list[list[AttentionGroup]],
+    max_query_len: int,
+    checked_layer_names: set[str] | None = None,
+) -> int | None:
+    """Fewest requests any split-KV builder admits for a varlen decode batch at
+    max_query_len, or None if none of them admits one.
+
+    Capturing a varlen decode graph at that request count keeps every group that
+    can take split-KV on the 3D kernel. See
+    AttentionMetadataBuilder.splitk_max_num_reqs().
+    """
+    bounds = []
+    for groups in attn_groups:
+        for group in groups:
+            if checked_layer_names is not None and checked_layer_names.isdisjoint(
+                group.layer_names
+            ):
+                continue
+            bound = group.get_metadata_builder(0).splitk_max_num_reqs(max_query_len)
+            if bound is not None:
+                bounds.append(bound)
+    return min(bounds) if bounds else None
+
+
 def init_kv_cache(
     forward_context: dict[str, Any],
     kv_cache_config: KVCacheConfig,

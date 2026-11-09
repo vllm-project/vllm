@@ -104,6 +104,7 @@ from vllm.v1.worker.gpu.attn_utils import (
     FastPrefillHelper,
     build_slot_mappings_by_layer,
     get_kv_cache_spec,
+    get_varlen_splitk_max_reqs,
     init_attn_backend,
     init_kv_cache,
 )
@@ -795,6 +796,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             is_profiling=is_profiling,
             piecewise_capture_available=piecewise_capture_available,
         )
+        # Small verification batches take a varlen graph captured at the
+        # split-K request bound, so the 3D gate sees their real request count.
+        varlen_splitk_reqs = (
+            get_varlen_splitk_max_reqs(
+                self.attn_groups,
+                self.decode_query_len,
+                checked_layer_names=target_attn_layer_names,
+            )
+            if self.adaptive_verification is not None
+            else None
+        )
         self.cudagraph_manager = ModelCudaGraphManager(
             self.vllm_config,
             self.device,
@@ -804,6 +816,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             ),
             lora_capture_cases=self.lora_capture_cases,
             varlen_decode=self.adaptive_verification is not None,
+            varlen_splitk_max_reqs=varlen_splitk_reqs,
             ubatch_runner=self.ubatch_runner,
         )
         if self.cache_config.kv_sharing_fast_prefill and self.pcp_manager is None:

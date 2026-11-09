@@ -390,6 +390,7 @@ def _make_spec_decode_manager(
     max_num_seqs: int = 8,
     use_kda_recoverssm: bool = False,
     varlen_decode: bool = False,
+    varlen_splitk_max_reqs: int | None = None,
 ) -> gpu_cudagraph_utils.CudaGraphManager:
     if num_speculative_tokens is None:
         num_speculative_tokens = decode_query_len - 1
@@ -418,6 +419,7 @@ def _make_spec_decode_manager(
             vllm_config, decode_query_len
         ),
         varlen_decode=varlen_decode,
+        varlen_splitk_max_reqs=varlen_splitk_max_reqs,
     )
     manager._graphs_captured = True
     return manager
@@ -670,6 +672,43 @@ def test_varlen_decode_graph_takes_bounded_decode_batches_only(monkeypatch):
     assert desc.max_query_len == _DECODE_QUERY_LEN
     assert dispatch(None).cg_mode == CUDAGraphMode.PIECEWISE
     assert dispatch(_DECODE_QUERY_LEN + 1).cg_mode == CUDAGraphMode.PIECEWISE
+
+
+def test_varlen_decode_graph_is_captured_at_the_splitk_bound(monkeypatch):
+    """A varlen decode graph captured at the split-K request bound replays a
+    batch whose real request count fits it, so the 3D gate sees that count.
+    Above the bound, and without a bound, the token-keyed worst case backs it."""
+    manager = _make_spec_decode_manager(
+        monkeypatch, varlen_decode=True, varlen_splitk_max_reqs=4
+    )
+    plain = _make_spec_decode_manager(monkeypatch, varlen_decode=True)
+
+    def dispatch(m, num_reqs):
+        return m.dispatch(
+            num_reqs=num_reqs,
+            num_tokens=12,
+            uniform_token_count=None,
+            num_active_loras=0,
+            max_query_len=_DECODE_QUERY_LEN,
+        )
+
+    fits = dispatch(manager, 4)
+    assert fits.cg_mode == CUDAGraphMode.FULL
+    assert (fits.num_tokens, fits.num_reqs) == (12, 4)
+    assert dispatch(manager, 5).num_reqs == 8
+    assert dispatch(plain, 4).num_reqs == 8
+
+    # The small variant is only captured where the even split of the dummy
+    # batch stays within the query-length bound.
+    small: list[BatchExecutionDescriptor] = []
+    for desc in manager._capture_descs[CUDAGraphMode.FULL]:
+        num_reqs = desc.num_reqs
+        if desc.max_query_len is None or num_reqs is None:
+            continue
+        if num_reqs < 8:
+            small.append(desc)
+    assert small
+    assert all(d.num_tokens <= 4 * _DECODE_QUERY_LEN for d in small)
 
 
 @pytest.mark.parametrize(

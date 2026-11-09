@@ -657,6 +657,17 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
         """
         return None
 
+    def splitk_max_num_reqs(self, max_query_len: int) -> int | None:
+        """Largest request count this builder admits to split-KV for a decode
+        batch whose queries are at most `max_query_len` tokens, or None if it
+        never admits one.
+
+        Varlen decode graphs are captured with one request count, so the caller
+        can pick a count that keeps small batches on the split-K path. Backends
+        without a split-K gate report None.
+        """
+        return None
+
     def _init_reorder_batch_threshold(
         self,
         reorder_batch_threshold: int | None = 1,
