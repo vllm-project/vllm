@@ -141,8 +141,8 @@ def _read_producer_scheduler(deferred: dict[str, float]) -> Any:
         unmap_request_id=lambda *args, **kwargs: None,
         xfer_stats=MoRIIOKVConnectorStats(),
     )
-    scheduler.get_kv_connector_stats = (
-        lambda: MoRIIOConnectorScheduler.get_kv_connector_stats(scheduler)
+    scheduler.get_kv_connector_stats = lambda: (
+        MoRIIOConnectorScheduler.get_kv_connector_stats(scheduler)
     )
     return scheduler
 
