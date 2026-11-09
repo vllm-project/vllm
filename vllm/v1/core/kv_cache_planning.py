@@ -1631,8 +1631,9 @@ def get_kv_cache_configs(
 def _use_dflash_sliding_window_specs(
     vllm_config: VllmConfig, kv_cache_spec: dict[str, KVCacheSpec]
 ) -> None:
-    """Give a DFlash/DSpark drafter's sliding-window layers
-    ``DFlashSlidingWindowSpec``, in place.
+    """Give a DFlash/DSpark drafter's regular-attention sliding-window layers
+    ``DFlashSlidingWindowSpec``, in place. Sliding-window MLA draft layers
+    (``SlidingWindowMLASpec``) keep their spec.
 
     Their KV is read only past the last target token, so only its tail is
     backed. Model Runner V2 only: its DFlash speculator writes no context KV

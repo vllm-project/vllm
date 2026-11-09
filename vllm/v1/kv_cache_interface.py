@@ -955,7 +955,7 @@ class SlidingWindowSpec(AttentionSpec):
 
 @dataclass(frozen=True, kw_only=True)
 class DFlashSlidingWindowSpec(SlidingWindowSpec):
-    """Sliding-window drafter KV that is only read near the sequence end.
+    """Regular-attention sliding-window drafter KV read only near the end.
 
     DFlash/DSpark context KV is a per-position projection of the target's
     hidden states, and draft attention runs only past the last target token.
