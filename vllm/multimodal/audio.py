@@ -195,7 +195,7 @@ def _bounded_resample_rates(
     *,
     max_kernel_elems: int = _MAX_TORCHAUDIO_KERNEL_ELEMS,
 ) -> tuple[int, int]:
-    """Return rates whose reduced product fits ``max_kernel_elems``."""
+    """Return rates whose reduced product fits `max_kernel_elems`."""
     if orig_sr < 1 or target_sr < 1:
         raise ValueError(
             f"Sample rates must be positive integers, got orig_sr={orig_sr}, "

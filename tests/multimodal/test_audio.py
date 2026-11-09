@@ -213,6 +213,7 @@ def test_parser_coprime_header_rate_does_not_build_unbounded_kernel():
     with patch("vllm.multimodal.audio._get_torchaudio_resampler") as mock_get:
         result = parser._parse_audio_data((audio, 16001))
         mock_get.assert_not_called()
+        assert result is not None
         np.testing.assert_array_equal(result.get(0), audio)
 
 
