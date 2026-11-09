@@ -5,7 +5,7 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from enum import Enum
 from fnmatch import fnmatch
-from typing import TYPE_CHECKING, Any, cast
+from typing import Any, cast
 
 import torch
 
@@ -17,6 +17,12 @@ from vllm.model_executor.kernels.linear import (
     init_fp8_linear_kernel,
     init_mxfp8_linear_kernel,
     init_nvfp4_linear_kernel,
+)
+from vllm.model_executor.kernels.linear.scaled_mm import (
+    CutlassFP8ScaledMMLinearKernel,
+)
+from vllm.model_executor.kernels.linear.scaled_mm.cutlass import (
+    CutlassFp8BlockScaledMMKernel,
 )
 from vllm.model_executor.layers.attention import Attention, MLAAttention
 from vllm.model_executor.layers.fused_moe import (
@@ -71,9 +77,6 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     process_fp8_weight_channel_strategy,
     process_fp8_weight_tensor_strategy_moe,
 )
-from vllm.model_executor.layers.quantization.utils.marlin_utils import (
-    get_marlin_input_dtype,
-)
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     MXFP8_BLOCK_SIZE,
     MXFP8_SCALE_DTYPE,
@@ -82,6 +85,10 @@ from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
 )
 from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (
     dequantize_nvfp4_moe_weights,
+)
+from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
+    CSF_SCALE_ENCODINGS,
+    csf_weights_transform,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     FP4_DTYPE,
@@ -106,6 +113,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
+from vllm.model_executor.models.utils import WeightsMapper
 from vllm.model_executor.parameter import (
     BlockQuantScaleParameter,
     ChannelQuantScaleParameter,
@@ -114,6 +122,7 @@ from vllm.model_executor.parameter import (
 )
 from vllm.model_executor.utils import (
     is_weights_pre_processed,
+    refill_derived,
     replace_parameter,
     retire_parameter,
     set_weight_attrs,
@@ -121,9 +130,6 @@ from vllm.model_executor.utils import (
 from vllm.platforms import current_platform
 from vllm.utils.b12x import B12X_BLOCK_CODECS
 from vllm.utils.math_utils import cdiv
-
-if TYPE_CHECKING:
-    from vllm.model_executor.models.utils import WeightsMapper
 
 logger = init_logger(__name__)
 
@@ -255,16 +261,13 @@ class ModelOptQuantConfigBase(QuantizationConfig):
         if isinstance(layer, (LinearBase, ParallelLMHead)):
             return build_linear_method(self, self.quant_method, prefix)
         elif isinstance(layer, RoutedExperts):
-            quant_method = self.FusedMoEMethodCls(
+            return self.FusedMoEMethodCls(
                 quant_config=self, moe_config=layer.moe_config
             )
-            if getattr(quant_method, "backend", "") == "marlin":
-                quant_method.marlin_input_dtype = get_marlin_input_dtype(prefix)
-            return quant_method
 
         return None
 
-    def apply_vllm_mapper(self, hf_to_vllm_mapper: "WeightsMapper"):
+    def apply_vllm_mapper(self, hf_to_vllm_mapper: WeightsMapper):
         if len(self.exclude_modules) > 0:
             # This is a workaround for the weights remapping issue:
             # https://github.com/vllm-project/vllm/issues/28072
@@ -622,6 +625,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             experts_cls=self.experts_cls,
             routing_tables=layer._expert_routing_tables(),
         )
+        self.moe_kernel.fused_experts.keep_constants(layer)
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
         w13 = layer.w13_weight
@@ -739,6 +743,7 @@ class ModelOptNvFp4Config(ModelOptQuantConfigBase):
         group_size: int = 16,
         *,
         quantization_args: QuantizationConfigArgs | None = None,
+        weight_scale_encoding: str | None = None,
     ) -> None:
         if exclude_modules is None:
             exclude_modules = []
@@ -749,6 +754,14 @@ class ModelOptNvFp4Config(ModelOptQuantConfigBase):
         self.moe_activation_override: QuantKey | None = (
             moe_spec.activation if moe_spec is not None else None
         )
+        if weight_scale_encoding is not None and (
+            weight_scale_encoding not in CSF_SCALE_ENCODINGS
+        ):
+            raise ValueError(
+                f"unsupported weight_scale_encoding: {weight_scale_encoding}"
+            )
+        # CSF weight_scale_encoding of the checkpoint's block scales, if any.
+        self.weight_scale_encoding = weight_scale_encoding
         if is_checkpoint_nvfp4_serialized:
             self.group_size = group_size
             self.kv_cache_quant_algo = kv_cache_quant_algo
@@ -765,6 +778,15 @@ class ModelOptNvFp4Config(ModelOptQuantConfigBase):
 
     def get_name(self) -> QuantizationMethods:
         return "modelopt_fp4"
+
+    def get_checkpoint_weight_mapper(self) -> WeightsMapper:  # type: ignore[override]
+        """Pair CSF scale streams, on top of the usual name mappings."""
+        mapper = super().get_checkpoint_weight_mapper()
+        encoding = self.weight_scale_encoding
+        if encoding is None:
+            return mapper
+        transform = csf_weights_transform((encoding,))
+        return mapper | WeightsMapper(weights_transforms=[transform])
 
     def get_supported_act_dtypes(self) -> list[torch.dtype]:
         return [torch.bfloat16, torch.half, torch.float8_e4m3fn]
@@ -814,6 +836,11 @@ class ModelOptNvFp4Config(ModelOptQuantConfigBase):
         if group_size is None:
             group_size = 16  # Default value
 
+        weight_scale_encoding = original_config.get("weight_scale_encoding")
+        quantization = original_config.get("quantization")
+        if weight_scale_encoding is None and isinstance(quantization, dict):
+            weight_scale_encoding = quantization.get("weight_scale_encoding")
+
         # For FP4, these fields are required
         if is_checkpoint_nvfp4_serialized and "quantization" in original_config:
             # Check if required fields are present in the quantization config
@@ -835,6 +862,7 @@ class ModelOptNvFp4Config(ModelOptQuantConfigBase):
             exclude_modules,
             group_size,
             quantization_args=original_config.get("_online_quantization_args"),
+            weight_scale_encoding=weight_scale_encoding,
         )
 
 
@@ -899,7 +927,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
     def dequantize_weight(
         self, layer: torch.nn.Module
     ) -> Iterator[tuple[slice, torch.Tensor, torch.Tensor]]:
-        """Yield ``(experts, w13, w2)`` dequantized ModelOpt NVFP4 experts."""
+        """Yield `(experts, w13, w2)` dequantized ModelOpt NVFP4 experts."""
         return dequantize_nvfp4_moe_weights(
             layer.w13_weight,
             layer.w13_weight_scale,
@@ -1042,10 +1070,13 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
         """Convert NVFP4 MoE weights into kernel format and setup the kernel."""
         if is_weights_pre_processed():
-            if self.nvfp4_backend != NvFp4MoeBackend.FLASHINFER_TRTLLM:
+            if self.nvfp4_backend not in (
+                NvFp4MoeBackend.FLASHINFER_TRTLLM,
+                NvFp4MoeBackend.VLLM_CUTLASS,
+            ):
                 raise RuntimeError(
-                    "pre-processed weights require FLASHINFER_TRTLLM backend, "
-                    f"moe backend, got {self.nvfp4_backend}"
+                    "pre-processed weights require FLASHINFER_TRTLLM or "
+                    f"VLLM_CUTLASS MoE backend, got {self.nvfp4_backend}"
                 )
             self._restore_padded_moe_dims(layer)
             self._build_moe_kernel(layer)
@@ -1123,10 +1154,11 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             routing_tables=layer._expert_routing_tables(),
             per_token_activation=self.per_token_activation,
         )
+        self.moe_kernel.fused_experts.keep_constants(layer)
         self.moe_kernel.fused_experts.process_weights_after_loading(layer)
 
     def _restore_padded_moe_dims(self, layer: RoutedExperts) -> None:
-        """Recover the padded ``moe_config`` dims from the exported weights."""
+        """Recover the padded `moe_config` dims from the exported weights."""
         mc = layer.moe_config
         padded_hidden = layer.w2_weight.shape[1]
         if padded_hidden != mc.hidden_dim:
@@ -1321,7 +1353,7 @@ class ModelOptMxFp8Config(ModelOptQuantConfigBase):
     def routed_expert_weight_key(self) -> QuantKey:
         """The weight format the routed experts are stored in.
 
-        MXFP8, or NVFP4 (``moe_quant_algo: NVFP4``).
+        MXFP8, or NVFP4 (`moe_quant_algo: NVFP4`).
         """
         if self.moe_quant_algo != "NVFP4":
             return kMxfp8Static
@@ -1477,13 +1509,13 @@ class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
         """One-time MXFP8->BF16 weight dequant for the emulation path.
 
         On devices without a native MXFP8 MoE kernel (e.g. gfx942 / MI300),
-        ``Mxfp8EmulationTritonExperts`` otherwise dequantizes every expert
+        `Mxfp8EmulationTritonExperts` otherwise dequantizes every expert
         weight to BF16 on *every* forward step -- the dominant cost (conc1
         ~1.3 tok/s). Doing the dequant once here and replacing the MXFP8
         parameters with BF16 makes the MoE run exactly like a plain BF16
         checkpoint (full precision, no per-step dequant); SwiGLU-OAI is still
-        applied by the experts' ``activation()`` override. The MXFP8 weights
-        are freed by ``replace_parameter`` (BF16 is 2x their size; the small
+        applied by the experts' `activation()` override. The MXFP8 weights
+        are freed by `replace_parameter` (BF16 is 2x their size; the small
         E8M0 scale tensors are left in place, unused).
         """
         from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
@@ -1547,6 +1579,7 @@ class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
             experts_cls=self.experts_cls,
             routing_tables=layer._expert_routing_tables(),
         )
+        self.moe_kernel.fused_experts.keep_constants(layer)
 
         # No native MXFP8 MoE kernel on this device (e.g. gfx942): the emulation
         # experts would dequant MXFP8->BF16 every forward step. Convert the
@@ -1636,9 +1669,9 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
 
     Supports checkpoints where different layers use different quantization
     algorithms (e.g., FP8 for dense layers and NVFP4 for MoE experts).
-    The per-layer algorithm is specified in the ``quantized_layers`` dict
-    inside ``config.json``'s ``quantization_config`` (preferred) or the
-    legacy ``hf_quant_config.json``.
+    The per-layer algorithm is specified in the `quantized_layers` dict
+    inside `config.json`'s `quantization_config` (preferred) or the
+    legacy `hf_quant_config.json`.
     """
 
     def __init__(
@@ -1666,6 +1699,14 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
             ):
                 raise ValueError(
                     f"unsupported {codec.upper()} block contract for {prefix}: {recipe}"
+                )
+            encoding = recipe.get("weight_scale_encoding")
+            if encoding is not None and (
+                encoding not in CSF_SCALE_ENCODINGS
+                or codec not in ("nvfp4", "w4a16_nvfp4")
+            ):
+                raise ValueError(
+                    f"unsupported weight_scale_encoding for {prefix}: {recipe}"
                 )
         self.fp8_config = fp8_config
         self.nvfp4_config = nvfp4_config
@@ -1699,6 +1740,19 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
 
     def get_name(self) -> QuantizationMethods:
         return "modelopt_mixed"
+
+    def get_checkpoint_weight_mapper(self) -> WeightsMapper:  # type: ignore[override]
+        """Pair CSF scale streams, on top of the usual name mappings."""
+        mapper = super().get_checkpoint_weight_mapper()
+        encodings = {
+            encoding
+            for info in self.quantized_layers.values()
+            if (encoding := info.get("weight_scale_encoding")) is not None
+        }
+        if not encodings:
+            return mapper
+        transform = csf_weights_transform(encodings)
+        return mapper | WeightsMapper(weights_transforms=[transform])
 
     def get_supported_act_dtypes(self) -> list[torch.dtype]:
         return [torch.bfloat16, torch.half]
@@ -1809,10 +1863,10 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
         """Look up the quant_algo for a vLLM-side layer prefix.
 
         Tries three strategies in order:
-        1. Direct lookup in ``quantized_layers``.
-        2. Packed/fused-layer lookup (unfuse via ``packed_modules_mapping``).
+        1. Direct lookup in `quantized_layers`.
+        2. Packed/fused-layer lookup (unfuse via `packed_modules_mapping`).
         3. Prefix-based lookup for RoutedExperts (any child key starts with
-           ``prefix + "."``).
+           `prefix + "."`).
 
         Returns the upper-cased quant_algo string, or *None* if the prefix
         is not found.
@@ -1973,7 +2027,7 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
 
         return None
 
-    def apply_vllm_mapper(self, hf_to_vllm_mapper: "WeightsMapper"):
+    def apply_vllm_mapper(self, hf_to_vllm_mapper: WeightsMapper):
         super().apply_vllm_mapper(hf_to_vllm_mapper)
         if self.quantized_layers:
             self.quantized_layers = hf_to_vllm_mapper.apply_dict(self.quantized_layers)
@@ -2024,7 +2078,6 @@ class RuntimeDtypes:
 
     input_dtype: torch.dtype
     out_dtype: torch.dtype
-    marlin_input_dtype: torch.dtype | None = None
 
 
 @dataclass(frozen=True)
@@ -2046,9 +2099,9 @@ class Shapes:
 
 class QuantKeyScheme:
     """One scheme per QuantKey. Selected by key *content*; the base supplies the
-    ``role`` from the slot it fills the key into (wkey->WEIGHT, akey->ACT).
+    `role` from the slot it fills the key into (wkey->WEIGHT, akey->ACT).
 
-    Every scheme branches on ``role`` explicitly and ``reject``s any role it has
+    Every scheme branches on `role` explicitly and `reject`s any role it has
     not validated — never falling through to the wrong role's registration,
     which would allocate the wrong parameters and produce garbage silently.
     """
@@ -2519,11 +2572,11 @@ class FormatScheme:
 
     Extension seam for residue that belongs to a format as a whole rather than a
     single QuantKey — an extra parameter the weight/activation schemes don't
-    cover, or a tweak before/after their ``process``. All hooks default to
-    no-ops; most formats need none (they are a pure ``(weight, activation)`` key
+    cover, or a tweak before/after their `process`. All hooks default to
+    no-ops; most formats need none (they are a pure `(weight, activation)` key
     pair). To add one: subclass, override the hooks you need, and return an
-    instance from the format's ``resolve()`` branch — no change to
-    ``ModelOptLinearMethod`` itself.
+    instance from the format's `resolve()` branch — no change to
+    `ModelOptLinearMethod` itself.
     """
 
     def extra_weights(self, layer, shapes: "Shapes", ctx: CkptCtx, wl) -> None:
@@ -2534,31 +2587,31 @@ class FormatScheme:
         return tuple(layer.weight.shape)
 
     def pre_process(self, layer) -> None:
-        """Run before the key schemes' ``process``."""
+        """Run before the key schemes' `process`."""
 
     def post_process(self, layer) -> None:
-        """Run after the key schemes' ``process``, before the kernel's."""
+        """Run after the key schemes' `process`, before the kernel's."""
 
     def apply(self, layer, x, bias, kernel_apply):
-        """Wrap the kernel's forward. ``kernel_apply(layer, x, bias) -> Tensor``.
+        """Wrap the kernel's forward. `kernel_apply(layer, x, bias) -> Tensor`.
 
         Default: delegate unchanged. A format whose residue lives at compute
         time (e.g. run the GEMM on a padded weight then slice the output back
         to its logical width, #53132-style) overrides this and calls
-        ``kernel_apply`` in the middle.
+        `kernel_apply` in the middle.
         """
         return kernel_apply(layer, x, bias)
 
 
 class _Fp8PbWoPartialBlock(FormatScheme):
     """FP8_PB_WO output width that is not a multiple of 128 (a partial trailing
-    block; e.g. GLM's replicated ``fused_qkv_a_proj`` = 2048 + 576 = 2624).
+    block; e.g. GLM's replicated `fused_qkv_a_proj` = 2048 + 576 = 2624).
 
     The block kernel needs full 128-blocks, so pad the weight up to the block
     boundary with zeros before the kernel's post-load, then slice the GEMM
     output back to the logical width. This is #53132's approach, expressed as
     the format's compute-time residue on the generic method. The cdiv-sized
-    scale from ``KFp8Block128`` already matches the padded block count, so only
+    scale from `KFp8Block128` already matches the padded block count, so only
     the weight rows and the output need adjusting.
     """
 
@@ -2623,11 +2676,11 @@ _DROP_INPUT_SCALE = _DropInputScale()
 class ModelOptLinearMethod(LinearMethodBase):
     """Generic, format-agnostic ModelOpt linear method. Holds a weight scheme +
     an activation scheme (from the QuantSpec pair) and an optional
-    ``FormatScheme``, runs a fixed lifecycle, selects the kernel from the pair,
+    `FormatScheme`, runs a fixed lifecycle, selects the kernel from the pair,
     and applies.
 
     Registered for weight_loader_v2 (like every ModelOpt linear method) so the
-    ``BasevLLMParameter`` params route through the v2 fused loader, not the
+    `BasevLLMParameter` params route through the v2 fused loader, not the
     legacy shape-assert path.
     """
 
@@ -2653,18 +2706,23 @@ class ModelOptLinearMethod(LinearMethodBase):
         )
         self.out_dtype = dtype
         self.input_dtype = dtype
-        self.marlin_input_dtype = None
-        # Kernel/backend are chosen in create_weights (after get_quant_method),
-        # so the front-end marlin poke stays dormant here — same as the old
-        # NVFP4 methods.
         self.kernel: Any = None
 
     @property
     def supports_pre_processed_weights(self) -> bool:  # type: ignore[override]
-        # TODO(Isotr0py): support fp8 ModelOpt kernels transpose/repack.
         w = self.spec.weight
         return isinstance(w, QuantKey) and (
             w.dtype == FP4_DTYPE
+            or (
+                w in (kFp8StaticTensorSym, kFp8StaticTokenSym)
+                and isinstance(self.kernel, CutlassFP8ScaledMMLinearKernel)
+                and type(self.fmt) is FormatScheme
+            )
+            or (
+                w == kFp8Static128BlockSym
+                and isinstance(self.kernel, CutlassFp8BlockScaledMMKernel)
+                and type(self.fmt) is _Fp8PbWoPartialBlock
+            )
             or (
                 w == kMxfp8Static
                 and self.kernel is not None
@@ -2694,7 +2752,7 @@ class ModelOptLinearMethod(LinearMethodBase):
             self.akey.create_weights(layer, ACT, self.ctx, shapes, weight_loader)
         self.fmt.extra_weights(layer, shapes, self.ctx, weight_loader)
 
-        rt = RuntimeDtypes(self.input_dtype, self.out_dtype, self.marlin_input_dtype)
+        rt = RuntimeDtypes(self.input_dtype, self.out_dtype)
         self.kernel = select_linear_kernel(
             self.spec,
             layer,
@@ -2714,6 +2772,12 @@ class ModelOptLinearMethod(LinearMethodBase):
                 raise RuntimeError(
                     f"{type(self.kernel).__name__} cannot use pre-processed weights"
                 )
+            if self.spec.weight in (kFp8StaticTensorSym, kFp8StaticTokenSym):
+                layer.processed_weight_dims = (0, 1)
+            elif self.spec.weight == kFp8Static128BlockSym:
+                logical_out = layer.output_size_per_partition
+                if logical_out % 128:
+                    layer._pbwo_logical_out = logical_out
             return
         self.fmt.pre_process(layer)
         self.wkey.process(layer, WEIGHT)
@@ -2732,21 +2796,12 @@ class ModelOptLinearMethod(LinearMethodBase):
                 )
             assert self.ctx.group_size is not None
             # Copies: the kernel may write its layout into the params in place.
-            layer.register_buffer(
-                "_nvfp4_weight_for_gather",
-                layer.weight.detach().clone(),
-                persistent=False,
-            )
-            layer.register_buffer(
-                "_nvfp4_weight_scale_for_gather",
-                layer.weight_scale.detach().clone(),
-                persistent=False,
-            )
-            layer.register_buffer(
-                "_nvfp4_weight_global_scale_for_gather",
-                layer.weight_global_scale.detach().clone(),
-                persistent=False,
-            )
+            for name, src in (
+                ("_nvfp4_weight_for_gather", layer.weight),
+                ("_nvfp4_weight_scale_for_gather", layer.weight_scale),
+                ("_nvfp4_weight_global_scale_for_gather", layer.weight_global_scale),
+            ):
+                refill_derived(layer, name, src.detach().clone())
             layer._nvfp4_group_size_for_gather = self.ctx.group_size
         self.kernel.process_weights_after_loading(layer)
 
@@ -2773,7 +2828,7 @@ class ModelOptLinearMethod(LinearMethodBase):
 def resolve(algo: str, subcfg, prefix: str):
     """Turn a sub-config into (QuantSpec, CkptCtx, format_scheme).
 
-    Strictly read-only over ``subcfg``: in mixed precision the same sub-config
+    Strictly read-only over `subcfg`: in mixed precision the same sub-config
     is shared with the MoE method, so writing back would leak a linear-only
     change into MoE.
     """
@@ -2838,13 +2893,13 @@ LINEAR_METHOD_BUILDERS: dict[str, Callable[..., LinearMethodBase]] = {}
 
 
 def build_linear_method(config, algo: str, prefix: str) -> LinearMethodBase:
-    """Construct the linear method for ``algo``.
+    """Construct the linear method for `algo`.
 
-    Returns a bespoke method if one is registered in ``LINEAR_METHOD_BUILDERS``,
-    else the generic ``ModelOptLinearMethod`` built from ``resolve(algo, config,
-    prefix)``. Single indirection point shared by the homogeneous and
+    Returns a bespoke method if one is registered in `LINEAR_METHOD_BUILDERS`,
+    else the generic `ModelOptLinearMethod` built from `resolve(algo, config,
+    prefix)`. Single indirection point shared by the homogeneous and
     mixed-precision dispatch, so a new format plugs in without editing either
-    ``get_quant_method``.
+    `get_quant_method`.
     """
     builder = LINEAR_METHOD_BUILDERS.get(algo)
     if builder is not None:

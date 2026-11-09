@@ -11,6 +11,9 @@ from vllm.distributed.device_communicators.all2all import (
 )
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
+from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
+    TopKWeightAndReduceNoOP,
+)
 from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
 from vllm.utils.flashinfer import nvfp4_block_scale_interleave
 
@@ -77,6 +80,25 @@ class FlashInferNVLinkOneSidedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeMo
     def topk_indices_dtype(self) -> torch.dtype | None:
         return torch.int32
 
+    def allocate_fused_expert_output(
+        self,
+        shape: tuple[int, ...],
+        dtype: torch.dtype,
+        device: torch.device,
+        weight_and_reduce_impl: mk.TopKWeightAndReduce,
+    ) -> torch.Tensor | None:
+        # Combine reads one reduced row per received token straight from the
+        # workspace, which is sized for 16-bit rows.
+        if not isinstance(weight_and_reduce_impl, TopKWeightAndReduceNoOP):
+            return None
+        if dtype not in (torch.bfloat16, torch.float16):
+            return None
+        communication = self.all2all_manager.get_communication()
+        buffer = communication.get_combine_input_buffer(dtype)
+        if tuple(buffer.shape) != tuple(shape) or buffer.device != device:
+            return None
+        return buffer
+
     def prepare(
         self,
         a1: torch.Tensor,
@@ -121,7 +143,7 @@ class FlashInferNVLinkOneSidedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeMo
             topk_ids,
             topk_weights,
             hidden_states_scale=dispatch_x_sf,
-            max_tokens_per_rank=self.runtime_max_tokens_per_rank,
+            runtime_max_tokens_per_rank=self.runtime_max_tokens_per_rank,
         )
         recv_x_sf = received.hidden_states_scale
         if recv_x_sf is not None:

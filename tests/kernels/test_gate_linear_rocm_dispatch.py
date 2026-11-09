@@ -3,11 +3,11 @@
 """Platform-agnostic eligibility tests for GateLinear's ROCm router GEMMs.
 
 These assert the dispatch flags directly, so they run device-free by mocking
-the platform predicates. ``allow_cublas_router_gemm`` selects the
-bf16xbf16->fp32 ``torch.mm`` epilogue, while ``allow_fp32_router_gemm`` selects
+the platform predicates. `allow_cublas_router_gemm` selects the
+bf16xbf16->fp32 `torch.mm` epilogue, while `allow_fp32_router_gemm` selects
 the gfx950 low-M kernel with fp32 weights and output.
 
-The ROCm branch is guarded on ``not bias`` because ``torch.mm`` has no bias
+The ROCm branch is guarded on `not bias` because `torch.mm` has no bias
 term; a biased gate must fall back so the bias is not silently dropped.
 """
 

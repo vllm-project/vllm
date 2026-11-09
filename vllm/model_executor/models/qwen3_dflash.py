@@ -35,7 +35,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.model_executor.model_loader.weight_utils import make_attention_sink
 from vllm.model_executor.utils import (
-    weights_already_processed,
+    refill_derived,
 )
 from vllm.multimodal.inputs import NestedTensors
 from vllm.platforms import current_platform
@@ -99,7 +99,7 @@ def _dflash_layer_causal(config: Qwen3Config, layer_idx: int) -> bool:
 
 def dflash_has_any_non_causal(config: Qwen3Config) -> bool:
     """Whether the draft needs a non-causal-capable backend, resolved from config
-    (config mirror of the model's ``get_draft_attn_causal``, usable pre-build)."""
+    (config mirror of the model's `get_draft_attn_causal`, usable pre-build)."""
     return not all(
         _dflash_layer_causal(config, i) for i in range(config.num_hidden_layers)
     )
@@ -127,21 +127,21 @@ def _get_dflash_fc_input_size(vllm_config: VllmConfig) -> int:
 def _resolve_layer_attention(
     config: Qwen3Config, layer_idx: int
 ) -> tuple[int | None, bool]:
-    """Resolve ``(sliding_window, causal)`` for one DFlash draft layer.
+    """Resolve `(sliding_window, causal)` for one DFlash draft layer.
 
     +----------------------+-------------------------+--------------------------------+
-    | Config               | ``layer_type``          | *``causal``                    |
+    | Config               | `layer_type`          | *`causal`                    |
     +======================+=========================+================================+
-    | ``layer_types``      | SWA if ``use_swa``      | True if ``layer_types[i]=SWA`` |
-    |                      | else ``layer_types[i]`` | else False                     |
+    | `layer_types`      | SWA if `use_swa`      | True if `layer_types[i]=SWA` |
+    |                      | else `layer_types[i]` | else False                     |
     +----------------------+-------------------------+--------------------------------+
-    | ``layer_types=None`` | SWA                     | False                          |
-    | + ``use_swa=True``   |                         |                                |
+    | `layer_types=None` | SWA                     | False                          |
+    | + `use_swa=True`   |                         |                                |
     +----------------------+-------------------------+--------------------------------+
-    | ``layer_types=None`` | Full                    | False                          |
-    | + ``use_swa=False``  |                         |                                |
+    | `layer_types=None` | Full                    | False                          |
+    | + `use_swa=False`  |                         |                                |
     +----------------------+-------------------------+--------------------------------+
-    * If ``dflash_config.causal`` is set, its value overrides ``causal`` for all layers.
+    * If `dflash_config.causal` is set, its value overrides `causal` for all layers.
 
     This is to support a varied ecosystem of checkpoints, including:
     - XiaomiMiMo/MiMo-V2.5-Pro-FP4-DFlash (sets "use_swa", assumes non-causal)
@@ -156,16 +156,6 @@ def _resolve_layer_attention(
     if layer_types is not None:
         num_sliding = sum(lt == _SLIDING_ATTENTION for lt in layer_types)
         any_sliding = num_sliding > 0
-        # Mixed sliding/full attention needs multiple KV groups (V2 runner only).
-        if (
-            0 < num_sliding < len(layer_types)
-            and not get_current_vllm_config().use_v2_model_runner
-        ):
-            raise NotImplementedError(
-                "DFlash drafters with mixed sliding/full attention require "
-                "the V2 model runner; relaunch with "
-                "VLLM_USE_V2_MODEL_RUNNER=1."
-            )
 
     # ``use_swa`` forces SWA on every layer, even an all-full ``layer_types``.
     if layer_types is None or (use_swa and not any_sliding):
@@ -453,6 +443,10 @@ class DFlashQwen3Model(nn.Module):
         prefix: str = "",
     ) -> None:
         super().__init__()
+        # derived from the weights after loading, refilled in place on reloads
+        self._fused_kv_weight: torch.Tensor | None = None
+        self._fused_kv_bias: torch.Tensor | None = None
+        self._k_norm_weights: torch.Tensor
         speculative_config = vllm_config.speculative_config
         assert speculative_config is not None
         self.config = speculative_config.draft_model_config.hf_config
@@ -553,27 +547,25 @@ class DFlashQwen3Model(nn.Module):
         self._context_qkv_projs = [a.qkv_proj for a in layers_attn]
         self._context_q_sizes = [a.q_size for a in layers_attn]
 
+        # Quantized linear weights may use packed storage that cannot be
+        # consumed by F.linear; then each projection runs through its quant
+        # method (or the MXFP8 context projection, when there is one) and the
+        # fused buffers stay None.
+        kv_weight = kv_bias = None
         if _reads_raw_weights(self._context_qkv_projs):
             # KV projection weights: [num_layers * 2 * kv_size, hidden_size]
             kv_weights = [a.qkv_proj.weight[a.q_size :] for a in layers_attn]
-            self._fused_kv_weight: torch.Tensor | None = torch.cat(kv_weights, dim=0)
+            kv_weight = torch.cat(kv_weights, dim=0)
             if has_bias:
                 kv_biases = [a.qkv_proj.bias[a.q_size :] for a in layers_attn]
-                self._fused_kv_bias: torch.Tensor | None = torch.cat(kv_biases, dim=0)
-            else:
-                self._fused_kv_bias = None
-        else:
-            # Quantized linear weights may use packed storage that cannot be
-            # consumed by F.linear. Run each projection through its quant method
-            # (or the MXFP8 context projection, when there is one).
-            self._fused_kv_weight = None
-            self._fused_kv_bias = None
+                kv_bias = torch.cat(kv_biases, dim=0)
+        refill_derived(self, "_fused_kv_weight", kv_weight)
+        refill_derived(self, "_fused_kv_bias", kv_bias)
 
         # K-norm weights stacked into one contiguous [num_layers, head_dim]
         # tensor so the per-layer K-norm runs as a single grouped kernel.
-        self._k_norm_weights = torch.stack(
-            [a.k_norm.weight.data for a in layers_attn], dim=0
-        ).contiguous()
+        k_norm = torch.stack([a.k_norm.weight.data for a in layers_attn], dim=0)
+        refill_derived(self, "_k_norm_weights", k_norm.contiguous())
 
     def _make_mxfp8_context_kv_proj(
         self, layers_attn: list[nn.Module]
@@ -681,7 +673,7 @@ class DFlashQwen3Model(nn.Module):
         num_kv_heads: int,
         head_dim: int,
     ) -> torch.Tensor:
-        """Context K/V of every layer, ``[num_ctx, L, 2, nkv, hd]``."""
+        """Context K/V of every layer, `[num_ctx, L, 2, nkv, hd]`."""
         # --- Fused KV projection (one GEMM for all layers) ---
         normed_context_states = self._normalize_context_states(context_states)
         if self._fused_kv_weight is not None:
@@ -724,6 +716,26 @@ class DFlashQwen3Model(nn.Module):
         all_v = all_kv[1]  # [L, num_ctx, nkv, hd], contiguous
         return all_k, all_v
 
+    def _apply_context_rope(
+        self, all_k: torch.Tensor, context_positions: torch.Tensor
+    ) -> None:
+        """Apply RoPE in place to the context K of every layer, one fused call."""
+        num_layers, num_ctx = all_k.shape[:2]
+        # View as [L * num_ctx, kv] so RoPE sees one big batch (no copy).
+        # In-place RoPE: pass K as the "query" arg with key=None.
+        all_k_flat = all_k.view(num_layers * num_ctx, -1)
+        cos_sin_cache = self._rope_cos_sin_cache
+        if cos_sin_cache.dtype != all_k_flat.dtype:
+            cos_sin_cache = cos_sin_cache.to(dtype=all_k_flat.dtype)
+        ops.rotary_embedding(
+            context_positions.repeat(num_layers),
+            all_k_flat,
+            None,
+            self._rope_head_size,
+            cos_sin_cache,
+            self._rope_is_neox,
+        )
+
     def _normalize_context_k(self, all_k: torch.Tensor) -> torch.Tensor:
         # --- Grouped RMSNorm K across all layers ([L, num_ctx, nkv, hd]) ---
         # The weight is selected per layer by the outermost (layer) index.
@@ -754,39 +766,15 @@ class DFlashQwen3Model(nn.Module):
         When context_slot_mapping is None (e.g. during dummy_run) only
         the computation runs, and no K/V is written to cache.
         """
-        if not hasattr(self, "_num_attn_layers"):
-            logger.warning_once(
-                "DFlash buffer initialization was skipped. If dummy weights are not "
-                "in use, this may indicate an error in weight loading."
-            )
-            with weights_already_processed():
-                self._build_fused_kv_buffers()
-
         num_ctx = context_states.shape[0]
         L = self._num_attn_layers
-        kv = self._kv_size
         hd = self._head_dim
         nkv = self._num_kv_heads
 
         all_k, all_v = self._project_context_kv(context_states, num_ctx, L, nkv, hd)
         all_k_normed = self._normalize_context_k(all_k)
 
-        # --- Fused RoPE across all layers ---
-        # View as [L * num_ctx, kv] so RoPE sees one big batch (no copy).
-        # In-place RoPE: pass K as the "query" arg with key=None.
-        all_k_flat = all_k_normed.view(L * num_ctx, kv)
-        positions_repeated = context_positions.repeat(L)
-        cos_sin_cache = self._rope_cos_sin_cache
-        if cos_sin_cache.dtype != all_k_flat.dtype:
-            cos_sin_cache = cos_sin_cache.to(dtype=all_k_flat.dtype)
-        ops.rotary_embedding(
-            positions_repeated,
-            all_k_flat,
-            None,
-            self._rope_head_size,
-            cos_sin_cache,
-            self._rope_is_neox,
-        )
+        self._apply_context_rope(all_k_normed, context_positions)
 
         if context_slot_mapping is None:
             return
@@ -796,7 +784,7 @@ class DFlashQwen3Model(nn.Module):
             all_v.mul_(v_scale)
 
         # --- Per-layer cache insert ---
-        all_k_final = all_k_flat.view(L, num_ctx, nkv, hd)
+        all_k_final = all_k_normed.view(L, num_ctx, nkv, hd)
         per_layer = isinstance(context_slot_mapping, (list, tuple))
         for i in range(L):
             slot_mapping = (

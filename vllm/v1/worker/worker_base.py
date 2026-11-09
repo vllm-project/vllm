@@ -150,7 +150,7 @@ class WorkerBase:
 
     def synchronize_device(self) -> None:
         """Block until in-flight device work completes; backends outside
-        ``torch.accelerator`` must override with their own wait."""
+        `torch.accelerator` must override with their own wait."""
         if torch.accelerator.is_available():
             torch.accelerator.synchronize()
 
@@ -213,12 +213,6 @@ class WorkerBase:
         self, grammar_output: GrammarOutput
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput:
         """Should be called immediately after execute_model iff it returned None."""
-        raise NotImplementedError
-
-    def get_cache_block_size_bytes(self) -> int:
-        """Return the size of a single cache block, in bytes. Used in
-        speculative decoding.
-        """
         raise NotImplementedError
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
@@ -310,8 +304,8 @@ class WorkerWrapperBase:
 
         load_general_plugins()
 
-        # Let the platform replace core Triton kernels (e.g. CPU fallback
-        # implementations) before any worker or model code can launch them.
+        # Let the platform replace core Triton kernels before any worker or
+        # model code can launch them.
         from vllm.platforms import current_platform
 
         current_platform.register_triton_kernel_overrides()
