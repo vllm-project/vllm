@@ -455,6 +455,8 @@ async def test_state_is_prefilled_once_before_the_reads(
     warm, reads = calls[0], calls[1:]
     assert warm.args[2].endswith("-prefix")
     assert warm.args[1].max_tokens == 1
+    # The warm's output is discarded; detokenizing would decode the prefix.
+    assert warm.args[1].detokenize is False
     assert warm.args[0]["cache_salt"] == "tenant"
     warm_ids = warm.args[0]["prompt_token_ids"]
     assert len(warm_ids) >= state_words
@@ -1978,6 +1980,8 @@ async def test_knowline_read_scores_the_labels():
     ((prompt, params, request_id),) = engine.generated
     assert request_id == "decision-r-0"
     assert params.max_tokens == 1 and params.temperature == 0.0
+    # The reply's text is never read, so the read skips detokenizing.
+    assert params.detokenize is False
     # Up to 128 options the read asks for the labels' logprobs directly.
     assert params.logprob_token_ids == [
         strategy.label_token[label] for label in q.labels
