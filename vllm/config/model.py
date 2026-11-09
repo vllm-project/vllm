@@ -1540,6 +1540,8 @@ class ModelConfig:
         )
 
         cls = MODELS_CONFIG_MAP.get(architecture, None)
+        if cls is None and self.using_transformers_backend():
+            cls = MODELS_CONFIG_MAP.get(self._model_info.architecture, None)
         if cls is not None:
             cls.verify_and_update_model_config(self)
 

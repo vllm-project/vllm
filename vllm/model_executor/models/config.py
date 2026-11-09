@@ -1590,7 +1590,6 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "MiniMaxM3SparseForConditionalGeneration": (
         MiniMaxM3SparseForConditionalGenerationConfig
     ),
-    "ModernBertForSequenceClassification": TransformersForSequenceClassificationConfig,  # noqa: E501
     "MuseGlimmerForCausalLM": MuseGlimmerAttentionConfig,
     "MuseGlimmerForConditionalGeneration": MuseGlimmerAttentionConfig,
     "NemotronHForCausalLM": NemotronHForCausalLMConfig,
