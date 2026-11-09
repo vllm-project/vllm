@@ -12,7 +12,7 @@ from torch import nn
 
 from vllm import envs
 from vllm.compilation.decorators import ignore_torch_compile
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import CacheConfig, EPLBConfig, VllmConfig
 from vllm.distributed import (
     get_ep_group,
     get_pp_group,
@@ -159,6 +159,15 @@ class TokenShard:
         return tensor_model_parallel_reduce_scatter(x.contiguous(), 0)
 
 
+def warn_on_async_eplb(eplb_config: EPLBConfig) -> None:
+    if eplb_config.use_async or eplb_config.communicator == "nixl":
+        logger.warning_once(
+            "Async EPLB or the NIXL communicator stalled Muse Spark on MI300X; "
+            "use --eplb-config "
+            '\'{"communicator":"pynccl","use_async":false}\' on ROCm.'
+        )
+
+
 def norm_residual_then_norm(
     x: MuseSparkResidualStream,
     pre_norm: MuseSparkRMSNorm,
@@ -241,6 +250,8 @@ class MuseSparkMoE(nn.Module):
         self.n_logical_experts = config.num_local_experts
         parallel_config = vllm_config.parallel_config
         self.enable_eplb = parallel_config.enable_eplb
+        if self.enable_eplb:
+            warn_on_async_eplb(parallel_config.eplb_config)
         self.n_redundant_experts = parallel_config.eplb_config.num_redundant_experts
         self.n_physical_experts = self.n_logical_experts + self.n_redundant_experts
         self.n_local_physical_experts = self.n_physical_experts // self.ep_size
