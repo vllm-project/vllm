@@ -66,6 +66,7 @@ cache), see [ECMooncakeConnector Usage Guide](mooncake_ec_connector_usage.md).
 - `VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT`: Timeout (in seconds) for automatically releasing the prefiller’s KV cache for a particular request. (Optional)
     - Default: 480
     - If a request is aborted and the decoder has not yet notified the prefiller, the prefill instance will release its KV-cache blocks after this timeout to avoid holding them indefinitely.
+    - When `kv_lease_duration` is set, the lease decides when those blocks are released instead. This timeout still bounds how long a pull waits for a prefill that has not finished.
 
 ## KV Transfer Config
 
@@ -80,6 +81,10 @@ cache), see [ECMooncakeConnector Usage Guide](mooncake_ec_connector_usage.md).
 - **num_workers**: Size of thread pool for one prefiller worker to transfer KV caches by mooncake. (default 10)
 - **mooncake_protocol**: Mooncake connector protocol. (default "rdma")
 - **device_name**: Comma-separated whitelist of RDMA devices (e.g. `"mlx5_0,mlx5_1"`) to restrict topology discovery to. Empty discovers every device. Useful on hosts exposing a mix of InfiniBand and RoCE ports, where both peers must settle on the same link layer.
+- **kv_lease_duration**: Seconds the prefiller holds a finished request's KV blocks before the decoder must renew them. (default unset)
+    - Unset keeps the fixed `VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT`.
+    - When set, the decoder renews the lease every `kv_lease_duration / 6` seconds from the time the request arrives until its pull settles, and each renewal extends it to at least `kv_lease_duration * 2 / 3` seconds from then, as in [NixlConnector](../design/nixl_kv_cache_lease.md). Blocks of a decoder that crashed are freed within about `kv_lease_duration` seconds, while requests queued on a busy decoder keep their blocks.
+    - Set the same value on prefill and decode instances. A decoder without it does not renew, so its requests that wait longer than the lease lose their prefilled KV; a prefiller without it rejects renewals, and the decoder logs a warning. Prefill instances from releases without this option log an error for each renewal they receive, so upgrade them before enabling it on decode instances.
 - **bootstrap_server_address**: Optional `"host:port"` of an already running Mooncake bootstrap server. All prefiller ranks register with this endpoint instead of launching an embedded server. The caller owns the server lifetime and must configure the proxy to use the same endpoint. The example proxy assumes the bootstrap server is on the prefiller API host; a different host requires a proxy that supplies that address in `remote_bootstrap_addr`. Omit this option to use the embedded server and `VLLM_MOONCAKE_BOOTSTRAP_PORT`.
 
 ## Prometheus metrics
@@ -102,8 +107,9 @@ The following Prometheus metrics are exported when MooncakeConnector is active, 
 
 !!! tip
     High `vllm:mooncake_num_kv_expired_reqs` indicates that the prefiller's
-    lease duration is too short for your network or workload. Increase it via
-    `VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT`.
+    lease duration is too short for your network or workload. Increase
+    `VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT`, or set `kv_lease_duration` on both
+    instances so that queued requests keep their blocks.
 
 ## Example Scripts/Code
 

@@ -3,7 +3,6 @@
 
 import torch
 
-import vllm.envs as envs
 from tests.v1.kv_connector.unit.utils import MockKVConfig
 from vllm.config import (
     CacheConfig,
@@ -28,6 +27,7 @@ from vllm.multimodal.inputs import (
 )
 from vllm.sampling_params import SamplingParams
 from vllm.utils.hashing import sha256
+from vllm.v1.core import kv_cache_planning
 from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.scheduler import Scheduler
@@ -74,7 +74,6 @@ def create_scheduler(
     max_model_len: int | None = None,
     num_speculative_tokens: int | None = None,
     speculative_method: str | None = None,
-    parallel_drafting: bool = False,
     skip_tokenizer_init: bool = False,
     async_scheduling: bool = False,
     pipeline_parallel_size: int = 1,
@@ -82,15 +81,17 @@ def create_scheduler(
     num_speculative_tokens_per_batch_size: list[tuple[int, int, int]] | None = None,
     use_ec_connector: bool = False,
     ec_role: str | None = None,
-    use_v2_model_runner: bool | None = None,
     kv_cache_spec: KVCacheSpec | None = None,
     runner: RunnerOption = "auto",
     per_request_spec_decode_metrics: str = "none",
+    cache_aware_admission_window: int = 0,
+    cache_aware_admission_threshold: float = 0.5,
     prefill_schedule_interval: int = 1,
     scheduling_policy: SchedulerPolicy = "fcfs",
     diffusion_canvas_length: int | None = None,
     scheduler_cls: type[Scheduler] | None = None,
     lora_config: LoRAConfig | None = None,
+    speculative_config: SpeculativeConfig | None = None,
 ) -> Scheduler | AsyncScheduler:
     """Create scheduler under test.
 
@@ -137,6 +138,8 @@ def create_scheduler(
         enable_chunked_prefill=enable_chunked_prefill,
         async_scheduling=async_scheduling,
         is_encoder_decoder=model_config.is_encoder_decoder,
+        cache_aware_admission_window=cache_aware_admission_window,
+        cache_aware_admission_threshold=cache_aware_admission_threshold,
         prefill_schedule_interval=prefill_schedule_interval,
         # Ensure admission/preemption mechanics are deterministic
         watermark=0.0,
@@ -174,8 +177,8 @@ def create_scheduler(
             kv_connector_extra_config={"shared_storage_path": "local_storage"},
         )
 
-    speculative_config: SpeculativeConfig | None = None
     if num_speculative_tokens is not None:
+        assert speculative_config is None
         spec_kwargs: dict = dict(
             model="ngram", num_speculative_tokens=num_speculative_tokens
         )
@@ -188,7 +191,6 @@ def create_scheduler(
             spec_kwargs["prompt_lookup_max"] = num_speculative_tokens
             spec_kwargs["prompt_lookup_min"] = 1
         speculative_config = SpeculativeConfig(**spec_kwargs)
-        speculative_config.parallel_drafting = parallel_drafting
 
     ec_transfer_config = (
         ECTransferConfig(
@@ -246,9 +248,6 @@ def create_scheduler(
         log_stats=True,
         structured_output_manager=StructuredOutputManager(vllm_config),
     )
-    if use_v2_model_runner is None:
-        use_v2_model_runner = envs.VLLM_USE_V2_MODEL_RUNNER is not False
-    scheduler.use_v2_model_runner = use_v2_model_runner
     return scheduler
 
 
@@ -267,6 +266,7 @@ def create_requests(
     same_prompt: bool = False,
     block_size: int = 16,
     req_ids: list[str] | None = None,
+    sampling_params: SamplingParams | None = None,
 ) -> list[Request]:
     global _none_hash_initialized
     if not _none_hash_initialized:
@@ -274,12 +274,13 @@ def create_requests(
         _none_hash_initialized = True
 
     block_hasher = get_request_block_hasher(block_size, sha256)
-    sampling_params = SamplingParams(
-        ignore_eos=ignore_eos,
-        max_tokens=max_tokens,
-        stop_token_ids=stop_token_ids,
-        prompt_logprobs=prompt_logprobs,
-    )
+    if sampling_params is None:
+        sampling_params = SamplingParams(
+            ignore_eos=ignore_eos,
+            max_tokens=max_tokens,
+            stop_token_ids=stop_token_ids,
+            prompt_logprobs=prompt_logprobs,
+        )
     sampling_params.update_from_generation_config({}, EOS_TOKEN_ID)
     requests = []
 
@@ -411,4 +412,17 @@ def new_mla_spec(cache_dtype_str=None, block_size: int = 16):
         head_size=576,
         dtype=torch.float32,
         cache_dtype_str=cache_dtype_str,
+    )
+
+
+def get_kv_cache_configs(
+    vllm_config: VllmConfig,
+    kv_cache_specs: list[dict[str, KVCacheSpec]],
+    available_memory: list[int],
+) -> list[KVCacheConfig]:
+    return kv_cache_planning.get_kv_cache_configs(
+        vllm_config,
+        kv_cache_specs,
+        available_memory,
+        kv_cache_planning.get_global_kv_cache_groups(vllm_config, kv_cache_specs),
     )

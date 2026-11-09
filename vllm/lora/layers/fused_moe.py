@@ -22,7 +22,9 @@ from vllm.model_executor.layers.fused_moe.fused_moe_modular_method import (
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEKernelModularImpl,
 )
+from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import OCP_MX_BLOCK_SIZE
 from vllm.platforms import current_platform
+from vllm.utils.math_utils import round_up
 
 from .utils import _get_lora_aux_cuda_stream, _get_lora_device
 
@@ -113,11 +115,13 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
 
     @property
     def _tp_shard_size(self) -> int:
-        """Per-rank stride of an adapter along the expert intermediate dim: the
-        base weights are sharded by the unpadded size even when a backend pads."""
+        """Match the base loader's shard stride before backend padding."""
         unpadded = self.moe_config.intermediate_size_per_partition_unpadded
         if unpadded is None:
             return self.intermediate_size_per_partition
+        quant_config = self.base_layer.routed_experts.quant_config
+        if quant_config is not None and quant_config.get_name() == "gpt_oss_mxfp4":
+            return round_up(unpadded, OCP_MX_BLOCK_SIZE)
         return unpadded
 
     def _init_lora_stream_context(self) -> None:
@@ -233,6 +237,15 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
 
     def _ep_check(self):
         if self.use_ep:
+            placement = self.base_layer.expert_placement_strategy
+            if placement != "linear":
+                raise ValueError(
+                    "Fused MoE LoRA with EP requires linear expert placement: "
+                    "adapter loading assumes a contiguous range of experts "
+                    f"on each rank, got '{placement}'. "
+                    "Set expert_placement_strategy='linear' to use MoE LoRA "
+                    "with expert parallelism."
+                )
             moe_config = self.moe_config
             all2all_backend = moe_config.moe_parallel_config.all2all_backend
             assert all2all_backend == "allgather_reducescatter", (

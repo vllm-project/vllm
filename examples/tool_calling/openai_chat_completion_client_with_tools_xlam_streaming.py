@@ -160,7 +160,7 @@ def process_stream(response, tool_functions, original_query):
     # Execute each function call and build messages for follow-up
     follow_up_messages = [{"role": "user", "content": original_query}]
 
-    for tool_id, tool_data in tool_calls.items():
+    for tool_data in tool_calls.values():
         function_name = tool_data["function_name"]
         function_args = tool_data["function_args"]
         function_id = tool_data["function_id"]

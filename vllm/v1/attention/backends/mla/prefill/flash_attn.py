@@ -184,7 +184,9 @@ class FA4MLAPrefillKernel(VllmJitKernel["FA4MLAPrefillKernel.CompileKey"]):
 
         mla_dims = get_mla_dims(vllm_config.model_config)
         qk_head_dim = mla_dims.qk_nope_head_dim + mla_dims.qk_rope_head_dim
-        fa_version = get_flash_attn_version(head_size=qk_head_dim)
+        fa_version = get_flash_attn_version(
+            head_size=qk_head_dim, head_size_v=mla_dims.v_head_dim
+        )
         if fa_version != 4:
             return []
 
@@ -212,29 +214,21 @@ class FA4MLAPrefillKernel(VllmJitKernel["FA4MLAPrefillKernel.CompileKey"]):
         effective_v_head_dim = (
             qk_head_dim if requires_v_padding else mla_dims.v_head_dim
         )
+        # max_seqlen_q covers FA4's q_stage (q > Q_TILE) and its single-m-block
+        # static persistent scheduler (q <= 2 * Q_TILE), so 1, Q_TILE + 1 and
+        # 2 * Q_TILE + 1 hit every compile-static combination.
+        q_probes = (1, FA4_MLA_PREFILL_Q_TILE + 1, 2 * FA4_MLA_PREFILL_Q_TILE + 1)
+        k_probes = (
+            4 * FA4_MLA_PREFILL_K_TILE,
+            FA4_MLA_PREFILL_LONG_K_BLOCKS * FA4_MLA_PREFILL_K_TILE,
+            FA4_MLA_PREFILL_VERY_LONG_K_BLOCKS * FA4_MLA_PREFILL_K_TILE,
+        )
         shape_probes = (
             dict(max_seqlen_q=1, max_seqlen_k=FA4_MLA_PREFILL_K_TILE),
-            dict(
-                max_seqlen_q=FA4_MLA_PREFILL_Q_TILE + 1,
-                max_seqlen_k=4 * FA4_MLA_PREFILL_K_TILE,
-            ),
-            dict(
-                max_seqlen_q=1,
-                max_seqlen_k=FA4_MLA_PREFILL_LONG_K_BLOCKS * FA4_MLA_PREFILL_K_TILE,
-            ),
-            dict(
-                max_seqlen_q=FA4_MLA_PREFILL_Q_TILE + 1,
-                max_seqlen_k=FA4_MLA_PREFILL_LONG_K_BLOCKS * FA4_MLA_PREFILL_K_TILE,
-            ),
-            dict(
-                max_seqlen_q=1,
-                max_seqlen_k=FA4_MLA_PREFILL_VERY_LONG_K_BLOCKS
-                * FA4_MLA_PREFILL_K_TILE,
-            ),
-            dict(
-                max_seqlen_q=FA4_MLA_PREFILL_Q_TILE + 1,
-                max_seqlen_k=FA4_MLA_PREFILL_VERY_LONG_K_BLOCKS
-                * FA4_MLA_PREFILL_K_TILE,
+            *(
+                dict(max_seqlen_q=max_seqlen_q, max_seqlen_k=max_seqlen_k)
+                for max_seqlen_k in k_probes
+                for max_seqlen_q in q_probes
             ),
         )
 
@@ -448,6 +442,11 @@ class FlashAttnPrefillBackend(MLAPrefillBackend):
         lse = None
         if isinstance(attn_out, tuple):
             attn_out, lse = attn_out[0], attn_out[1]
+
+        # Upstream flash_attn on ROCm may return a head-major output.
+        # merge_attn_states needs token-major partials, so normalize it here.
+        if attn_out.stride(0) != attn_out.shape[1] * attn_out.stride(1):
+            attn_out = attn_out.contiguous()
 
         # Remain consistent with old `flash_attn_varlen_func` where there
         # is only one output tensor if `return_softmax_lse` is False.

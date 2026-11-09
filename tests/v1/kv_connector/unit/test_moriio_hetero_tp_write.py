@@ -148,7 +148,7 @@ def _global_state(layers: list[Layer], heads: int) -> dict[str, torch.Tensor]:
 
 
 def _mamba_shard(slot: torch.Tensor, tp_rank: int, tp_size: int) -> tuple:
-    """(conv, ssm) bytes of ``tp_rank`` for one unsharded GDN state slot."""
+    """(conv, ssm) bytes of `tp_rank` for one unsharded GDN state slot."""
     parts, offset = [], 0
     for channels in (KEY_DIM, KEY_DIM, V_HEADS * V_DIM):
         size = channels * CONV_ROWS
@@ -220,11 +220,12 @@ def _build_rank(model, tp_rank, tp_size, layout, hma, state, is_producer) -> Ran
     worker._has_mamba = any(layer.kind == "mamba" for layer in layers)
     worker.model_config = SimpleNamespace(get_total_num_kv_heads=lambda: heads)
     worker.kv_caches = caches
+    worker.num_blocks = NUM_BLOCKS
     worker.layer_to_spec = specs
     worker.layer_to_group = {
         layer.name: groups.index(layer.group if hma else "full") for layer in layers
     }
-    worker._mamba_payload_index_by_layer = {
+    worker._hybrid_payload_index_by_layer = {
         layer.name: groups.index("mamba") for layer in layers if layer.kind == "mamba"
     }
     worker._conv_decomp = next(

@@ -2,14 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """LoRA-aware FlashInfer TRT-LLM MoE experts (BF16, MXFP4 x BF16).
 
-Reuses the routed API + ``gemm1_lora_delta`` path from FlashInfer PR #3153
+Reuses the routed API + `gemm1_lora_delta` path from FlashInfer PR #3153
 (BF16) and PR #3987 (FP4 block-scale):
 
-  * The W13 (gate_up) LoRA delta is passed directly as ``gemm1_lora_delta`` to
+  * The W13 (gate_up) LoRA delta is passed directly as `gemm1_lora_delta` to
     the routed kernel, which fuses it into FC1 before SwiGLU (BiasType::Mn).
   * The W2 (down) LoRA cannot be fused -- we take the FC1 activation output
-    returned by the kernel (``gemm1_activation_output``, permuted) together with
-    ``expanded_idx_to_permuted_idx``, unpermute it, compute the W2 delta out of
+    returned by the kernel (`gemm1_activation_output`, permuted) together with
+    `expanded_idx_to_permuted_idx`, unpermute it, compute the W2 delta out of
     kernel via punica, and add it to the already-finalized output.
 
 Constraints (matching the PR support matrix; final gating lives in the oracle):
@@ -19,7 +19,6 @@ Constraints (matching the PR support matrix; final gating lives in the oracle):
 
 """
 
-import functools
 from abc import abstractmethod
 
 import torch
@@ -169,7 +168,7 @@ class _TrtLlmLoRAExpertsBase(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         """Override the base 3D-weight assumption.
 
         FusedMoEKernel._fused_experts calls moe_problem_size before apply(),
-        but the base impl asserts ``len(w1.shape) == 3``. The flashinfer
+        but the base impl asserts `len(w1.shape) == 3`. The flashinfer
         trtllm path stores shuffled weights in 4D BlockMajorK layout, so we
         derive the (E, M, N, K, topk) tuple from config + inputs instead.
         The N/K here only feed workspace sizing, which we zero out in
@@ -426,11 +425,11 @@ class _TrtLlmLoRAExpertsBase(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         """True when no token in the batch selects a LoRA adapter.
 
         Mirrors the no-lora fast path in
-        ``PunicaWrapperGPU.add_lora_fused_moe``: the punica kernel metadata
-        carries a CPU ``no_lora_flag`` computed once per forward from the
+        `PunicaWrapperGPU.add_lora_fused_moe`: the punica kernel metadata
+        carries a CPU `no_lora_flag` computed once per forward from the
         token->LoRA mapping. Reading it is a host-only check (no device sync),
         and under CUDA graphs the branch is frozen at capture time against the
-        graph's ``has_lora`` dispatch key, so it stays correct on replay.
+        graph's `num_active_loras` dispatch key, so it stays correct on replay.
         """
         meta = getattr(lora_context.punica_wrapper, "token_mapping_meta", None)
         if meta is None:
@@ -482,11 +481,11 @@ class _TrtLlmLoRAExpertsBase(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         top_k: int,
         scale: float = 1.0,
     ) -> None:
-        """Fused base finalize + W2 LoRA reduction, written into ``output``.
+        """Fused base finalize + W2 LoRA reduction, written into `output`.
 
         For each token: sum the routing-weighted permuted base rows over top_k
-        (``expert_weights`` in expanded order, ``idx_map < 0`` dropped), scale by
-        ``scale``, and add the already-weighted ``w2_delta`` reduced over top_k.
+        (`expert_weights` in expanded order, `idx_map < 0` dropped), scale by
+        `scale`, and add the already-weighted `w2_delta` reduced over top_k.
         """
         # Inputs may carry hidden padding that `output` does not.
         K = output.size(1)
@@ -581,6 +580,13 @@ class TrtLlmMxfp4LoRAExperts(_TrtLlmLoRAExpertsBase, TrtLlmMxfp4ExpertsBase):
     """MXFP4-weight, BF16-activation trtllm MoE + LoRA. Not MXFP8 activations:
     the kernel then returns the FC1 activation quantized, without its scales."""
 
+    # FusedMoEExpertsModular's empty tuple precedes TrtLlmMxfp4ExpertsBase's
+    # in the MRO.
+    kept_constants: tuple[str, ...] = (
+        *TrtLlmMxfp4ExpertsBase.kept_constants,
+        "_w13_bias_up_gate_index",
+    )
+
     def __init__(
         self,
         moe_config: FusedMoEConfig,
@@ -589,6 +595,9 @@ class TrtLlmMxfp4LoRAExperts(_TrtLlmLoRAExpertsBase, TrtLlmMxfp4ExpertsBase):
         _TrtLlmLoRAExpertsBase.__init__(self, moe_config, quant_config)
         # gemm1_alpha / gemm1_beta / gemm1_clamp_limit, hidden_dim_unpadded.
         TrtLlmMxfp4ExpertsBase.__init__(self, moe_config, quant_config)
+        self._w13_bias_up_gate_index = (
+            None if self.w1_bias is None else self._bias_up_gate_index(self.w1_bias)
+        )
 
     @staticmethod
     def _supports_quant_scheme(
@@ -631,14 +640,12 @@ class TrtLlmMxfp4LoRAExperts(_TrtLlmLoRAExpertsBase, TrtLlmMxfp4ExpertsBase):
         # FusedMoEExpertsModular precedes TrtLlmMxfp4ExpertsBase in the MRO.
         return self.hidden_dim_unpadded
 
-    @functools.cached_property
-    def _w13_bias_up_gate_index(self) -> torch.Tensor:
+    def _bias_up_gate_index(self, w1_bias: torch.Tensor) -> torch.Tensor:
         """Columns of the kernel-format FC1 bias in [up | gate] order."""
         from flashinfer.fused_moe.core import get_w2_permute_indices_with_cache
 
         # Kernel format is the (up_i, gate_i) bias permuted for the tile.
-        assert self.w1_bias is not None
-        bias = self.w1_bias.reshape(self.local_num_experts, -1)[0]
+        bias = w1_bias.reshape(self.local_num_experts, -1)[0]
         permute = get_w2_permute_indices_with_cache({}, bias.reshape(-1, 1), 128)
         interleaved = torch.argsort(permute.to(bias.device))
         return torch.cat([interleaved[0::2], interleaved[1::2]])
