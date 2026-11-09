@@ -697,6 +697,7 @@ def test_eonly_vit_cudagraph_outputs(
     import numpy as np
     from PIL import Image
     from transformers import AutoProcessor
+
     # collective_rpc below sends a `partial` function, which needs pickle
     # fallback since msgpack can't serialize it.
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")

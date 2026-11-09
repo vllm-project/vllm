@@ -3,8 +3,8 @@
 """Encoder CUDA graph support for the Kimi-K3 vision tower.
 
 Mixin implementing the SupportsEncoderCudaGraph protocol for any host class
-that holds the vision tower as ``self.vision_tower`` (a
-``MoonViT3dPretrainedModel``) and projector as ``self.mm_projector``.
+that holds the vision tower as `self.vision_tower` (a
+`MoonViT3dPretrainedModel`) and projector as `self.mm_projector`.
 """
 
 import math
@@ -30,7 +30,7 @@ if TYPE_CHECKING:
 
 
 class KimiK3EncoderCudaGraphMixin(SupportsEncoderCudaGraph):
-    """SupportsEncoderCudaGraph for hosts with ``self.vision_tower``."""
+    """SupportsEncoderCudaGraph for hosts with `self.vision_tower`."""
 
     supports_encoder_cudagraph: ClassVar[Literal[True]] = True
     # Replay removes launch overhead, which only pays off up to ~512 output
