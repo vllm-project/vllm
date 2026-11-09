@@ -23,6 +23,9 @@ from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.fused_moe.router.gate_linear import GateLinear
+from vllm.model_executor.layers.fused_moe.utils import (
+    resolve_layer_fused_shared_expert,
+)
 from vllm.model_executor.layers.fusion.quant_activation import (
     QuantizedActivation,
     get_input_quant_key,
@@ -69,6 +72,8 @@ from vllm.model_executor.models.interfaces import (
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     PPMissingLayer,
+    extract_layer_index,
+    get_fused_shared_expert_layers,
     get_spec_layer_idx_from_weight_name,
     is_pp_missing_parameter,
     make_layers,
@@ -88,6 +93,8 @@ from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 from vllm.utils.math_utils import cdiv
 
 logger = init_logger(__name__)
+
+_SHARED_TO_ROUTED_PROJ = {"gate_proj": "w1", "up_proj": "w3", "down_proj": "w2"}
 
 
 # DSA indexer weight rename mapping. Specific rules must come before the
@@ -343,7 +350,19 @@ class KimiMoE(nn.Module):
             torch.empty(num_experts, dtype=torch.float32)
         )
 
-        if self.num_shared_experts is not None:
+        # Latent MoE runs at another hidden size; the MTP loader keeps shared_experts.
+        self.is_fused_shared_expert_enabled = (
+            bool(self.num_shared_experts)
+            and not self.use_latent_moe
+            and layer_idx < config.num_hidden_layers
+            and resolve_layer_fused_shared_expert(quant_config, prefix)
+        )
+
+        self.shared_experts: KimiMLP | None
+        if (
+            self.num_shared_experts is not None
+            and not self.is_fused_shared_expert_enabled
+        ):
             shared_intermediate_size = moe_intermediate_size * self.num_shared_experts
             self.shared_experts = KimiMLP(
                 hidden_size=config.hidden_size,
@@ -443,6 +462,9 @@ class KimiMoE(nn.Module):
             routed_input_transform=self.routed_expert_down_proj,
             routed_output_transform=self.routed_output_transform,
             runner_cls=ROCmLatentMoERunner if self.use_latent_moe else None,
+            n_shared_experts=self.num_shared_experts,
+            fuse_shared_experts=self.is_fused_shared_expert_enabled,
+            shared_expert_prefix=f"{prefix}.shared_experts",
         )
         moe_parallel = self.experts.moe_config.moe_parallel_config
         if (
@@ -918,6 +940,9 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
             get_layer,
             prefix=f"{prefix}.layers",
         )
+        self.fused_shared_expert_layers = get_fused_shared_expert_layers(
+            self, KimiMoE, enable_eplb=vllm_config.parallel_config.enable_eplb
+        )
 
         if config.dsa_config is not None:
             # A DSA layer silently built as dense MLA would be invisible in
@@ -1093,6 +1118,40 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
             return hidden_states, aux_hidden_states
         return hidden_states
 
+    def _route_fused_shared_experts(self, weights: Iterable[tuple]) -> Iterable[tuple]:
+        """Rename fused layers' shared-expert weights to the appended routed slots.
+
+        `shared_experts.{gate,up,down}_proj` holds `num_shared_experts` experts
+        side by side; each slice becomes `experts.{num_experts + j}.{w1,w3,w2}`.
+        """
+        n_routed = self.config.num_experts
+        n_shared = self.config.num_shared_experts
+        for args in weights:
+            name, loaded_weight = args[0], args[1]
+            if (
+                ".shared_experts." not in name
+                or extract_layer_index(name) not in self.fused_shared_expert_layers
+            ):
+                yield args
+                continue
+            proj = name.split(".shared_experts.", 1)[1].split(".", 1)[0]
+            shard = _SHARED_TO_ROUTED_PROJ[proj]
+            split_dim = 1 if shard == "w2" and loaded_weight.ndim > 1 else 0
+            if loaded_weight.shape[split_dim] % n_shared != 0:
+                raise ValueError(
+                    f"{name!r} has size {loaded_weight.shape[split_dim]} along "
+                    f"dim {split_dim}, not divisible by {n_shared} shared experts."
+                )
+            for j, chunk in enumerate(loaded_weight.chunk(n_shared, dim=split_dim)):
+                yield (
+                    name.replace(
+                        f".shared_experts.{proj}.",
+                        f".experts.{n_routed + j}.{shard}.",
+                    ),
+                    chunk,
+                    *args[2:],
+                )
+
     def load_weights(
         self,
         weights: Iterable[
@@ -1134,10 +1193,17 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
                 ckpt_gate_proj_name="w1",
                 ckpt_down_proj_name="w2",
                 ckpt_up_proj_name="w3",
-                num_experts=self.config.num_experts,
+                num_experts=self.config.num_experts
+                + (
+                    self.config.num_shared_experts
+                    if self.fused_shared_expert_layers
+                    else 0
+                ),
             )
         else:
             expert_params_mapping = []
+        if self.fused_shared_expert_layers:
+            weights = self._route_fused_shared_experts(weights)
         params_dict = dict(self.named_parameters())
         # Under the MXFP4 quant interface the routed experts register unpacked
         # params (``w13_weight``), while the compressed-tensors checkpoint names

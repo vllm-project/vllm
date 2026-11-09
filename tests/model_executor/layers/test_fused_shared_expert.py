@@ -428,6 +428,30 @@ def get_fse_test_model_config(
         config.mla_use_nope = False
         config.num_nextn_predict_layers = 1
         return config, Glm5NextModel
+    if model_type == "kimi_linear":
+        from vllm.models.kimi_k3.amd.linear import KimiLinearModel
+        from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
+
+        config = KimiLinearConfig(
+            vocab_size=256,
+            hidden_size=128,
+            intermediate_size=32,
+            moe_intermediate_size=32,
+            num_hidden_layers=2,
+            num_attention_heads=1,
+            num_experts=2,
+            num_experts_per_token=1,
+            num_shared_experts=1,
+            routed_scaling_factor=2.5,
+            kv_lora_rank=16,
+            qk_nope_head_dim=16,
+            qk_rope_head_dim=16,
+            v_head_dim=16,
+            mla_use_nope=True,
+            linear_attn_config={"kda_layers": [1], "full_attn_layers": [2]},
+            quantization_config=quantization_config,
+        )
+        return config, KimiLinearModel
     raise ValueError(f"Unsupported FSE test model: {model_type}")
 
 
@@ -1417,6 +1441,7 @@ def single_rank_parallel_state(monkeypatch: pytest.MonkeyPatch):
         "deepseek_v32",
         "glm5_next",
         "qwen4_exp",
+        "kimi_linear",
     ],
 )
 @pytest.mark.parametrize("shared_expert_precision", ["all_mxfp4", "mixed"])
@@ -1442,6 +1467,7 @@ def test_models_fse_init(
     moe_attr = {
         "minimax_m3": "block_sparse_moe",
         "deepseek_v4": "ffn",
+        "kimi_linear": "block_sparse_moe",
     }.get(model_type, "mlp")
     shared_name = (
         "shared_experts"
@@ -1455,6 +1481,7 @@ def test_models_fse_init(
             "glm4_moe_lite",
             "deepseek_v32",
             "glm5_next",
+            "kimi_linear",
         }
         else "shared_expert"
     )
@@ -1574,6 +1601,12 @@ def test_models_fse_init(
         monkeypatch.setattr(
             deepseek_v32_model, "DeepseekV32MLAAttention", _StubGlm5NextAttention
         )
+    if model_type == "kimi_linear":
+        from vllm.models.kimi_k3.amd import linear as kimi_linear_model
+
+        # Only the MoE/shared-expert wiring is under test here.
+        for attention in ("KimiLinearGatedDeltaNetAttention", "KimiMLAAttention"):
+            monkeypatch.setattr(kimi_linear_model, attention, _StubGlm5NextAttention)
     if model_type == "qwen4_exp":
         from vllm.models.qwen4_exp.amd import model as qwen4_exp_model
 
@@ -1620,6 +1653,19 @@ def test_models_fse_init(
                 )
             }
             mtp = mtps.get("deepseek_v4")
+            if model_type == "kimi_linear":
+                from vllm.models.kimi_k3.amd.linear import KimiMoE
+
+                # Layer index `num_hidden_layers` is the MTP layer.
+                n = config.num_hidden_layers
+                mtp_moe = KimiMoE(
+                    config,
+                    vllm_config.quant_config,
+                    prefix=f"model.layers.{n}.block_sparse_moe",
+                    layer_idx=n,
+                )
+                assert not mtp_moe.is_fused_shared_expert_enabled
+                assert mtp_moe.shared_experts is not None
         if per_layer_fse:
             expected_policy = {
                 f"layers.0.{moe_attr}": bool(fse_enabled and not exclude),
@@ -1847,6 +1893,36 @@ def test_models_fse_init(
     rocm_aiter_moe.init_aiter_topK_meta_data.cache_clear()
     importlib.reload(envs)
     rocm_aiter_ops.refresh_env_variables()
+
+
+def test_kimi_linear_fused_shared_experts_split_into_routed_slots() -> None:
+    """A widened Kimi shared expert loads as one routed slot per shared expert."""
+    from vllm.models.kimi_k3.amd.linear import KimiLinearModel
+
+    model = SimpleNamespace(
+        config=SimpleNamespace(num_experts=4, num_shared_experts=2),
+        fused_shared_expert_layers=frozenset({1}),
+    )
+    gate = torch.arange(24).reshape(8, 3)
+    down = torch.arange(24).reshape(3, 8)
+    unfused = ("layers.0.block_sparse_moe.shared_experts.up_proj.weight", gate)
+    weights = [
+        ("layers.1.block_sparse_moe.shared_experts.gate_proj.weight", gate),
+        ("layers.1.block_sparse_moe.shared_experts.down_proj.weight", down, {"k": 1}),
+        unfused,
+    ]
+    routed = list(KimiLinearModel._route_fused_shared_experts(model, weights))
+    assert [w[0] for w in routed] == [
+        "layers.1.block_sparse_moe.experts.4.w1.weight",
+        "layers.1.block_sparse_moe.experts.5.w1.weight",
+        "layers.1.block_sparse_moe.experts.4.w2.weight",
+        "layers.1.block_sparse_moe.experts.5.w2.weight",
+        unfused[0],
+    ]
+    torch.testing.assert_close(routed[1][1], gate[4:])
+    torch.testing.assert_close(routed[3][1], down[:, 4:])
+    assert routed[3][2] == {"k": 1}
+    assert routed[4] is unfused
 
 
 def _modelopt_mxfp8_config(exclude_modules=(), moe_quant_algo="NVFP4"):
