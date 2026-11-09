@@ -265,7 +265,7 @@ def test_dcp_region_pull(region_pull_worker, num_pages, region_groups):
 
 @pytest.mark.cpu_test
 def test_dcp_replicated_groups_follow_the_spec_not_its_type():
-    """Replicated MLA draft caches are found by ``dcp_sharded``, whether or not
+    """Replicated MLA draft caches are found by `dcp_sharded`, whether or not
     the draft layers are windowed."""
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.utils import (
         get_dcp_replicated_group_ids,
