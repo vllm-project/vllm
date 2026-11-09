@@ -37,8 +37,6 @@ from datetime import datetime
 from pathlib import Path
 from urllib.request import urlopen
 
-import regex as re
-
 MODEL = "openai/gpt-oss-120b"
 TP_SIZE = 2
 PORT = 8000
@@ -242,24 +240,40 @@ class GuideLLM:
         ]
         with log_path.open("w") as log:
             subprocess.run(cmd, stdout=log, stderr=subprocess.STDOUT, check=True)
-        return self._parse_report(log_path.read_text())
+        return self._parse_report(log_path.with_name("guidellm.json"))
 
-    def _parse_report(self, text: str) -> dict:
-        """Extract `Metric: value` pairs from the guidellm stdout report."""
-        metrics = {}
-        for line in text.splitlines():
-            m = re.match(r"\s*([A-Za-z0-9 ()/]+?):\s+([0-9.]+)\s", line + " ")
-            if m:
-                key = (
-                    m.group(1)
-                    .strip()
-                    .lower()
-                    .replace(" ", "_")
-                    .replace("(", "")
-                    .replace(")", "")
-                )
-                metrics[key] = m.group(2)
-        return {k: v for k, v in metrics.items() if k in METRICS}
+    def _parse_report(self, json_path: Path) -> dict:
+        """Extract aggregate metrics from the guidellm JSON report.
+
+        guidellm also records per-request stats under `requests`; those are
+        dropped after extraction to keep the report file small.
+        """
+        report = json.loads(json_path.read_text())
+        benchmark = report["benchmarks"][0]
+        metrics = benchmark["metrics"]
+
+        def successful(field: str) -> dict:
+            return metrics.get(field, {}).get("successful") or {}
+
+        def percentile(field: str, p: str) -> float | None:
+            return successful(field).get("percentiles", {}).get(p)
+
+        result = {
+            "request_throughput": successful("requests_per_second").get("mean"),
+            "request_latency_mean": successful("request_latency").get("mean"),
+            "request_latency_p99": percentile("request_latency", "p99"),
+            "output_token_throughput": successful("output_tokens_per_second").get(
+                "mean"
+            ),
+            "total_token_throughput": successful("tokens_per_second").get("mean"),
+            "ttft_mean": successful("time_to_first_token_ms").get("mean"),
+            "ttft_p50": percentile("time_to_first_token_ms", "p50"),
+            "ttft_p95": percentile("time_to_first_token_ms", "p95"),
+            "ttft_p99": percentile("time_to_first_token_ms", "p99"),
+        }
+        benchmark.pop("requests", None)
+        json_path.write_text(json.dumps(report, indent=2))
+        return {k: v for k, v in result.items() if v is not None}
 
 
 class BenchmarkRun:
