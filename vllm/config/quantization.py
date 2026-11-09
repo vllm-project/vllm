@@ -30,6 +30,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kInt4Static32,
     kInt8Dynamic32Sym,
     kInt8StaticChannelSym,
+    kLutBStatic,
     kMxfp4Dynamic,
     kMxfp4Static,
     kMxfp8Dynamic,
@@ -50,6 +51,7 @@ QUANT_KEY_NAMES: dict[str, QuantKey] = {
     "mxfp4": kMxfp4Dynamic,
     "nvfp4_per_token": kNvfp4DynamicToken,
     "int8_per_channel_static": kInt8StaticChannelSym,
+    "lut_b": kLutBStatic,
     # Dynamic per-32-element int8 activations (RDNA3 MXFP4 W4A8 GEMV).
     "int8_per_group_32": kInt8Dynamic32Sym,
     # Load-time MXFP4-to-int4 for Kimi-K3 on gfx942.
@@ -106,7 +108,7 @@ class QuantSpec:
     """Quantization spec for one layer kind (linear or MoE).
 
     An omitted activation key lets the quantization implementation choose its
-    default. An explicitly configured ``activation: null`` requests no
+    default. An explicitly configured `activation: null` requests no
     activation quantization; methods that do not support that request raise an
     error.
     """
@@ -179,10 +181,10 @@ class QuantizationConfigArgs:
     """
 
     linear: QuantSpec | None = None
-    """Spec applied to ``LinearBase`` layers."""
+    """Spec applied to `LinearBase` layers."""
 
     moe: QuantSpec | None = None
-    """Spec applied to ``FusedMoEFactory`` layers."""
+    """Spec applied to `FusedMoEFactory` layers."""
 
     ignore: list[str] = Field(default_factory=list)
     """Layers to skip quantization for. Online quantization also supports
@@ -305,6 +307,11 @@ _ONLINE_SHORTHANDS: dict[str, QuantizationConfigArgs] = {
     # FlashInfer TRTLLM only); linear stays unquantized (no `linear` field).
     "nvfp4_per_token": QuantizationConfigArgs(
         moe=QuantSpec(weight=kNvfp4Static),
+    ),
+    # LUT-B routed experts with MXFP8 activations; native on Rubin (SM107),
+    # emulated elsewhere. Dense layers stay unquantized.
+    "lut_b_moe": QuantizationConfigArgs(
+        moe=QuantSpec(weight=kLutBStatic),
     ),
 }
 

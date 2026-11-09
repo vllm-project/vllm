@@ -123,7 +123,7 @@ class AsyncLLM(EngineClient):
             client_addresses: ZMQ addresses of an externally launched engine,
                 when not launching one in-process.
             client_count: Number of API-server clients sharing the engine.
-            client_index: Index of this client within ``client_count``.
+            client_index: Index of this client within `client_count`.
             aggregate_engine_logging: Whether to aggregate per-engine logs
                 into a single stat logger.
             stat_loggers: customized stat loggers for the engine.
@@ -329,15 +329,15 @@ class AsyncLLM(EngineClient):
         Both limits return HTTP 503 (Service Unavailable) so that load
         balancers and client SDKs retry on a different instance.
 
-        - ``max_num_queued_reqs``: approximate global cap on the number of
-          unfinished requests (waiting + running). A request with ``n > 1``
-          counts as ``n`` slots.
-        - ``max_num_queued_tokens``: TTFT QoS — cap on the total prompt
+        - `max_num_queued_reqs`: approximate global cap on the number of
+          unfinished requests (waiting + running). A request with `n > 1`
+          counts as `n` slots.
+        - `max_num_queued_tokens`: TTFT QoS — cap on the total prompt
           tokens of requests still in prefill.
 
-        Note: ``get_num_queued_tokens`` uses ``prompt_len`` for all prefilling requests.
+        Note: `get_num_queued_tokens` uses `prompt_len` for all prefilling requests.
         Chunked prefill progress and prefix-cache hits are not subtracted because the
-        scheduler's ``num_computed_tokens`` and ``num_cached_tokens`` are only
+        scheduler's `num_computed_tokens` and `num_cached_tokens` are only
         propagated to the API server after prefill completes. The overestimation is
         conservative — earlier rejection, preserving TTFT targets.
 
@@ -348,8 +348,8 @@ class AsyncLLM(EngineClient):
         Raises:
             EngineFaultedError: If the engine has faulted and is awaiting
                 FT recovery.
-            QueueOverflowError: If ``max_num_queued_reqs`` would be exceeded.
-            MaxQueuedTokensError: If ``max_num_queued_tokens`` would be exceeded.
+            QueueOverflowError: If `max_num_queued_reqs` would be exceeded.
+            MaxQueuedTokensError: If `max_num_queued_tokens` would be exceeded.
 
         """
         if (
@@ -1011,19 +1011,19 @@ class AsyncLLM(EngineClient):
         """Pause generation to allow model weight updates.
 
         All mode handling (abort / wait / keep) and cache clearing is done
-        in the engine. In ``abort`` and ``wait`` mode, new requests are rejected
-        with ``RetryableRequestError`` from when the pause starts until
-        :meth:`resume_generation`; ``keep`` accepts and queues them.
+        in the engine. In `abort` and `wait` mode, new requests are rejected
+        with `RetryableRequestError` from when the pause starts until
+        `resume_generation`; `keep` accepts and queues them.
 
         Args:
             mode: How to handle in-flight requests:
-                - ``"abort"``: Abort all in-flight requests immediately
+                - `"abort"`: Abort all in-flight requests immediately
                   (default).
-                - ``"wait"``: Wait for in-flight requests to complete.
-                - ``"keep"``: Freeze requests in queue; they resume on
-                  :meth:`resume_generation`.
+                - `"wait"`: Wait for in-flight requests to complete.
+                - `"keep"`: Freeze requests in queue; they resume on
+                  `resume_generation`.
             clear_cache: Whether to clear KV cache and prefix cache after
-                draining. Set to ``False`` to preserve cache for faster resume.
+                draining. Set to `False` to preserve cache for faster resume.
 
         """
         if clear_cache:
@@ -1040,7 +1040,7 @@ class AsyncLLM(EngineClient):
         await asyncio.sleep(0.02)
 
     async def resume_generation(self) -> None:
-        """Resume generation after :meth:`pause_generation`."""
+        """Resume generation after `pause_generation`."""
         await self.engine_core.resume_scheduler_async()
 
     async def is_paused(self) -> bool:
@@ -1211,17 +1211,19 @@ class AsyncLLM(EngineClient):
     async def reset_encoder_cache(self) -> None:
         await self.engine_core.reset_encoder_cache_async()
 
-    async def sleep(self, level: int = 1, mode: PauseMode = "abort") -> None:
+    async def sleep(
+        self, level: int = 1, mode: PauseMode = "abort", reset_connector: bool = True
+    ) -> None:
         if level >= 1:
             await self.renderer.clear_mm_cache_async()
-        await self.engine_core.sleep_async(level, mode)
+        await self.engine_core.sleep_async(level, mode, reset_connector)
 
         if self.logger_manager is not None:
             self.logger_manager.record_sleep_state(1, level)
 
-    async def release_kv_cache_memory(self) -> None:
+    async def release_kv_cache_memory(self, reset_connector: bool = True) -> None:
         await self.renderer.clear_mm_cache_async()
-        await self.engine_core.release_kv_cache_memory_async()
+        await self.engine_core.release_kv_cache_memory_async(reset_connector)
 
         if self.logger_manager is not None:
             self.logger_manager.record_sleep_state(1, 0)
