@@ -381,12 +381,11 @@ def registers_kv_cache_memory(vllm_config: "VllmConfig") -> bool:
 
 
 def exports_kv_cache_memory(vllm_config: "VllmConfig") -> bool:
-    """Whether a KV connector shares the KV cache with another process through
-    exported VMM handles, as LMCache MP does with lmcache.mp.use_vmm_api."""
+    """Whether another process imports the KV cache through POSIX file
+    descriptors, which needs it created exportable."""
     kv_transfer_config = vllm_config.kv_transfer_config
-    return kv_transfer_config is not None and any(
-        config.get("lmcache.mp.use_vmm_api", False)
-        for config in kv_transfer_config.connector_extra_configs("LMCacheMPConnector")
+    return (
+        kv_transfer_config is not None and kv_transfer_config.exports_kv_cache_memory()
     )
 
 

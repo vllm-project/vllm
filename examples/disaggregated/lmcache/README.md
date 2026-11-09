@@ -21,15 +21,18 @@ LMCache integrates with vLLM v1 in two ways:
 
 vLLM's extensible KV cache (`--enable-extensible-kv-cache`, on by default
 where supported) allocates the KV cache through the CUDA
-VMM API, which legacy CUDA IPC cannot share. With `LMCacheMPConnector` it
-therefore stays off unless the connector's `kv_connector_extra_config` sets
-`"lmcache.mp.use_vmm_api": true`, also when the connector is nested in
+VMM API, which legacy CUDA IPC cannot share. `LMCacheMPConnector` declares
+how it reaches the KV cache (`KVConnectorBase_V1.kv_cache_access`): through
+legacy CUDA IPC by default, which keeps the extensible cache off, or through
+POSIX file descriptors (`EXPORTS_FD`) when its `kv_connector_extra_config`
+sets `"lmcache.mp.use_vmm_api": true`, also when the connector is nested in
 `MultiConnector`. vLLM then allocates the KV cache as exportable memory, and
 the LMCache server imports each layer through a POSIX file descriptor. This
 requires:
 
 - an LMCache release that includes
-  [LMCache/LMCache#6266](https://github.com/LMCache/LMCache/pull/6266),
+  [LMCache/LMCache#6266](https://github.com/LMCache/LMCache/pull/6266) and
+  declares `kv_cache_access`,
 - a CUDA GPU, with vLLM and the LMCache server on the same host, running as the
   same user and sharing `/dev/shm` (`--ipc host` for containers),
 - a server URL with a TCP port (`"lmcache.mp.host": "tcp://..."` and
