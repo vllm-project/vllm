@@ -41,7 +41,7 @@ FlashInfer ReplaySSM caches recent inputs to reduce full-state writes during Mam
 This example enables ReplaySSM and prefix caching with three MTP draft tokens:
 
 ```bash
-VLLM_USE_V2_MODEL_RUNNER=1 vllm serve nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 \
+vllm serve nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 \
     --tensor-parallel-size 2 \
     --max-model-len 12288 \
     --dtype bfloat16 \
