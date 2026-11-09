@@ -1191,12 +1191,15 @@ def test_trtllm_mxfp8_minimax2_routing_applies_routed_scale(m: int, workspace_in
     ],
 )
 @pytest.mark.parametrize("m", [1, 32])
+@pytest.mark.parametrize(
+    "experts_cls", [TrtLlmFp8ExpertsMonolithic, TrtLlmFp8ExpertsModular]
+)
 @pytest.mark.skipif(
     not current_platform.is_device_capability_family(100),
     reason="Requires TRTLLM-Gen FP8 MoE (SM100)",
 )
 def test_trtllm_mxfp8_moe_pads_intermediate(
-    m: int, activation: MoEActivation, n: int, k: int, workspace_init
+    experts_cls, m: int, activation: MoEActivation, n: int, k: int, workspace_init
 ):
     """TRTLLM-Gen MXFP8 experts need the intermediate size to be a multiple
     of 128 and the hidden size a multiple of 256. Misaligned experts, gated or
@@ -1256,37 +1259,42 @@ def test_trtllm_mxfp8_moe_pads_intermediate(
             routing_method=RoutingMethodType.Renormalize,
             max_num_tokens=next_power_of_2(m),
         )
-        # The monolithic experts pass the activation type to the kernel; the
-        # modular ones always run it gated.
+        use_monolithic = experts_cls is TrtLlmFp8ExpertsMonolithic
         kernel = mk.FusedMoEKernel(
             maybe_make_prepare_finalize(
                 moe=moe_config,
                 quant_config=quant_config,
                 allow_new_interface=True,
-                use_monolithic=True,
+                use_monolithic=use_monolithic,
             ),
-            TrtLlmFp8ExpertsMonolithic(
-                moe_config=moe_config, quant_config=quant_config
-            ),
+            experts_cls(moe_config=moe_config, quant_config=quant_config),
         )
 
         a = torch.randn((m, k), device="cuda", dtype=torch.bfloat16) / 10
         logits = torch.randn((m, e), device="cuda", dtype=torch.float32)
-        output = kernel.apply_monolithic(
+        topk_weights, topk_ids, _ = fused_topk(a, logits, topk, renormalize=True)
+        common = dict(
             hidden_states=torch.nn.functional.pad(a, (0, padded_k - k)),
             w1=w1,
             w2=w2,
-            router_logits=logits,
             activation=activation,
             global_num_experts=e,
             expert_map=None,
             apply_router_weight_on_input=False,
-            routed_scaling_factor=1.0,
-            routing_sink=None,
         )
+        if use_monolithic:
+            output = kernel.apply_monolithic(
+                router_logits=logits,
+                routed_scaling_factor=1.0,
+                routing_sink=None,
+                **common,
+            )
+        else:
+            output = kernel.apply(
+                topk_weights=topk_weights, topk_ids=topk_ids, **common
+            )
         assert isinstance(output, torch.Tensor)
         output = output[:, :k]
-        topk_weights, topk_ids, _ = fused_topk(a, logits, topk, renormalize=True)
         reference = fused_experts(
             a,
             w1_ref,

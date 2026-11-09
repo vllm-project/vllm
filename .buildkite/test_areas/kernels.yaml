@@ -786,6 +786,7 @@ steps:
   - vllm/model_executor/layers/fusion/
   - vllm/model_executor/layers/fused_moe/experts/cutlass_moe.py
   - vllm/model_executor/layers/fused_moe/experts/flashinfer_cutlass_moe.py
+  - vllm/model_executor/layers/fused_moe/experts/trtllm_fp8_moe.py
   - vllm/model_executor/layers/fused_moe/experts/trtllm_nvfp4_moe.py
   - vllm/model_executor/layers/fused_moe/oracle/nvfp4.py
   - vllm/model_executor/layers/fused_moe/prepare_finalize/flashinfer_nvlink_one_sided.py
@@ -811,6 +812,7 @@ steps:
   - tests/kernels/attention/test_flashinfer_mla_decode.py
   - tests/kernels/attention/test_minimax_m3_msa_cutlass_sparse_decode.py
   - tests/kernels/attention/test_cache.py
+  - tests/kernels/moe/test_flashinfer.py
   - tests/kernels/quantization/nvfp4_utils.py
   - tests/kernels/test_fused_minimax_m3_qknorm_rope_kv_insert.py
   - tests/kernels/mamba/test_gdn_prefill_cutedsl.py
