@@ -43,6 +43,7 @@ def flashinfer_autotune_cache_hash(runner: "GPUModelRunner") -> str:
     if (
         vllm_config.parallel_config.data_parallel_size > 1
         and envs.VLLM_MOE_SKIP_PADDING
+        and not envs.VLLM_MOE_ROUTING_SIMULATION_STRATEGY
         and any(
             isinstance(m, RoutedExperts) and m.supports_precomputed_routing
             for m in runner.get_model().modules()

@@ -331,3 +331,49 @@ def test_runner_prepares_monolithic_logits(monkeypatch, device, dp_size):
     assert passed.device == logits.device
     assert torch.all((passed >= -1) & (passed <= 0))
     assert torch.all(logits == 7)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="fused top-k needs CUDA")
+@pytest.mark.parametrize("router_masks", [True, False])
+def test_runner_routes_dp_padding_rows_to_no_expert(monkeypatch, router_masks):
+    """Under DP, a monolithic kernel that takes precomputed routing gets vLLM's
+    top-k with padding rows at -1: from the router itself (fused top-k) or from
+    the runner when the router does not mask."""
+    from vllm.forward_context import set_forward_context
+    from vllm.model_executor.layers.fused_moe.router.fused_topk_router import (
+        FusedTopKRouter,
+    )
+    from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner
+
+    monkeypatch.setenv("VLLM_MOE_SKIP_PADDING", "1")
+    router = FusedTopKRouter(top_k=2, global_num_experts=32)
+    if not router_masks:
+        monkeypatch.setattr(FusedTopKRouter, "masks_padding", False)
+        monkeypatch.setattr(
+            "vllm.model_executor.layers.fused_moe.router.fused_topk_router."
+            "get_moe_padding_mask",
+            lambda n: None,
+        )
+    assert router.masks_padding is router_masks
+    experts = SimpleNamespace(
+        quant_method=SimpleNamespace(is_monolithic=True),
+        supports_precomputed_routing=True,
+        forward_monolithic_routed=Mock(),
+    )
+    runner = SimpleNamespace(
+        router=router,
+        routed_experts=experts,
+        _maybe_apply_shared_experts=Mock(),
+        _shared_experts=None,
+        moe_config=SimpleNamespace(dp_size=4),
+    )
+    logits = torch.randn(6, 32, device="cuda")
+    hidden = torch.zeros(6, 8, device="cuda")
+    _, expected_ids = router.select_experts(hidden, logits, torch.int32)
+    is_padding = torch.tensor([0, 0, 1, 0, 1, 1], dtype=torch.bool, device="cuda")
+    with set_forward_context(None, VllmConfig(), is_padding=is_padding):
+        MoERunner._apply_quant_method(runner, hidden, logits, None)
+    _, _, passed_ids = experts.forward_monolithic_routed.call_args.args
+    assert passed_ids.dtype == torch.int32
+    assert torch.all(passed_ids[is_padding] == -1)
+    torch.testing.assert_close(passed_ids[~is_padding], expected_ids[~is_padding])
