@@ -1509,11 +1509,27 @@ def test_mla_draft_prefers_standard_layout_when_pages_can_be_unified():
     )
 
 
-def test_mla_with_incompatible_swa_uses_one_full_allocation_group(caplog_vllm):
+@pytest.mark.parametrize(
+    ("draft", "promoted_cls"),
+    [
+        (new_sliding_window_spec(block_size=16), FullAttentionSpec),
+        (
+            replace(
+                new_swa_mla_spec(),
+                bounded_replay=True,
+                non_causal_multi_token_decode=True,
+            ),
+            MLAAttentionSpec,
+        ),
+    ],
+    ids=["swa", "swa_mla"],
+)
+def test_mla_with_incompatible_swa_uses_one_full_allocation_group(
+    caplog_vllm, draft, promoted_cls
+):
     # Sparse MLA pages cannot be padded safely. Keeping the draft's attention
     # compute sliding-window while promoting only its allocation semantics lets
     # every layer share the target's block table and remain contiguous.
-    draft = new_sliding_window_spec(block_size=16)
     specs = {
         "target.0.attn": new_mla_spec(block_size=64),
         "target.0.indexer": new_indexer_mla_spec(block_size=64),
@@ -1527,10 +1543,12 @@ def test_mla_with_incompatible_swa_uses_one_full_allocation_group(caplog_vllm):
     assert isinstance(group_spec, UniformTypeKVCacheSpecs)
     assert group_spec.block_size == 64
     promoted_draft = group_spec.kv_cache_specs["draft.0"]
-    assert isinstance(promoted_draft, FullAttentionSpec)
-    assert not isinstance(promoted_draft, SlidingWindowSpec)
+    assert type(promoted_draft) is promoted_cls
     assert promoted_draft.block_size == 64
     assert promoted_draft.sliding_window == draft.sliding_window
+    assert getattr(promoted_draft, "non_causal_multi_token_decode", False) == (
+        getattr(draft, "non_causal_multi_token_decode", False)
+    )
     assert specs["draft.0"] is draft
     assert "attention compute is unchanged" in caplog_vllm.text
 
@@ -1994,7 +2012,6 @@ def _spec_decode_kv_cache_groups(worker_specs, use_eagle_block_drop=True):
         use_eagle=lambda: True,
         use_eagle_block_drop=lambda: use_eagle_block_drop,
         use_multi_module_mtp=lambda: False,
-        parallel_drafting=False,
         draft_model_config=SimpleNamespace(architectures=[]),
     )
     configs = get_kv_cache_configs(config, worker_specs, [2**30] * len(worker_specs))

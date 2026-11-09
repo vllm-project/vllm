@@ -810,8 +810,8 @@ async def test_chat_completion_render_with_sampling_params(client):
     "max_tokens", [{"max_tokens": 16}, {}], ids=["sixteen", "omitted"]
 )
 async def test_completion_render_keeps_default_max_tokens(client, max_tokens):
-    """``max_tokens=16`` (also the completions default) equals the
-    ``SamplingParams`` default; /render must still return it, or generate
+    """`max_tokens=16` (also the completions default) equals the
+    `SamplingParams` default; /render must still return it, or generate
     treats it as unset."""
     response = await client.post(
         "/v1/completions/render",

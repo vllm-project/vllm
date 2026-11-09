@@ -21,8 +21,8 @@ from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec
 def _make_vllm_config(supports_grouping: bool = False) -> MagicMock:
     """Create a minimal mock VllmConfig for builder resolution tests.
 
-    ``supports_grouping`` selects whether the resolved model class declares
-    ``SupportsKVCacheGrouping`` (exposing a ``get_kv_cache_groups`` classmethod).
+    `supports_grouping` selects whether the resolved model class declares
+    `SupportsKVCacheGrouping` (exposing a `get_kv_cache_groups` classmethod).
     """
     cfg = MagicMock()
     cfg.model_config.supports_kv_cache_grouping = supports_grouping
@@ -46,7 +46,7 @@ class CustomBuilder(DefaultKVCacheConfigBuilder):
 
 
 class _GroupedModel:
-    """A test model class with a ``get_kv_cache_groups`` classmethod."""
+    """A test model class with a `get_kv_cache_groups` classmethod."""
 
     @classmethod
     def get_kv_cache_groups(cls, vllm_config, kv_cache_spec):
