@@ -7,11 +7,22 @@ from PIL import Image, ImageDraw, ImageFont
 from vllm import SamplingParams
 from vllm.exceptions import VLLMValidationError
 from vllm.platforms import current_platform
+from vllm.utils.flashinfer import has_flashinfer
 
 # Should be fixed by https://github.com/vllm-project/vllm/pull/66031
 pytestmark = pytest.mark.skipif(
     current_platform.is_rocm(), reason="Unlimited-OCR-2 DASH attention is CUDA-only"
 )
+
+
+# FlashInfer is CUDA-only; run its cases only where present.
+DASH_BACKENDS = [
+    "FLASH_ATTN",
+    pytest.param(
+        "FLASHINFER",
+        marks=pytest.mark.skipif(not has_flashinfer(), reason="requires FlashInfer"),
+    ),
+]
 
 
 def _attention_class_names(model):
@@ -56,7 +67,7 @@ def _prefill_graph_segments(worker):
 
 @pytest.mark.core_model
 @pytest.mark.parametrize("crop_mode", [False, True])
-@pytest.mark.parametrize("backend", ["FLASH_ATTN", "FLASHINFER"])
+@pytest.mark.parametrize("backend", DASH_BACKENDS)
 @pytest.mark.parametrize("graph_mode", ["eager", "decode", "prefill"])
 def test_unlimited_ocr2_batched_pages(
     vllm_runner, graph_mode, backend, crop_mode, monkeypatch
@@ -207,7 +218,7 @@ def test_unlimited_ocr2_batched_pages(
 
 
 @pytest.mark.core_model
-@pytest.mark.parametrize("backend", ["FLASH_ATTN", "FLASHINFER"])
+@pytest.mark.parametrize("backend", DASH_BACKENDS)
 def test_unlimited_ocr2_chunked_prefill_under_encoder_pressure(
     vllm_runner, monkeypatch, backend
 ):
@@ -258,7 +269,7 @@ def test_unlimited_ocr2_chunked_prefill_under_encoder_pressure(
 
 
 @pytest.mark.core_model
-@pytest.mark.parametrize("backend", ["FLASH_ATTN", "FLASHINFER"])
+@pytest.mark.parametrize("backend", DASH_BACKENDS)
 def test_unlimited_ocr2_excess_markers_survive_preemption(
     vllm_runner, monkeypatch, backend
 ):
