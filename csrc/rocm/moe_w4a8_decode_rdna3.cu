@@ -207,13 +207,15 @@ __global__ void moe_w4a8_quant_act_kernel(const T* __restrict__ x,
 // up rows of 4 intermediate columns; lanes stride over the K groups.
 template <typename T, bool kHasZp>
 __global__ void __launch_bounds__(kWave* kWavesPerBlock)
-    moe_w4a8_gate_up_kernel(
-        const int8_t* __restrict__ xq, const float* __restrict__ xs,
-        const int* __restrict__ xsum, const Routing routing,
-        const uint8_t* __restrict__ w13, const T* __restrict__ w13_scale,
-        const uint8_t* __restrict__ w13_zp, int8_t* __restrict__ hq,
-        float* __restrict__ hs, int* __restrict__ hsum, int top_k, int K,
-        int N, int group_size) {
+    moe_w4a8_gate_up_kernel(const int8_t* __restrict__ xq,
+                            const float* __restrict__ xs,
+                            const int* __restrict__ xsum, const Routing routing,
+                            const uint8_t* __restrict__ w13,
+                            const T* __restrict__ w13_scale,
+                            const uint8_t* __restrict__ w13_zp,
+                            int8_t* __restrict__ hq, float* __restrict__ hs,
+                            int* __restrict__ hsum, int top_k, int K, int N,
+                            int group_size) {
 #if defined(__HIP__MOE_W4A8_GFX11__) || !defined(__HIP_DEVICE_COMPILE__)
   const int ms = blockIdx.x;
   const int e = routing.expert(ms);
@@ -293,12 +295,14 @@ __global__ void __launch_bounds__(kWave* kWavesPerBlock)
 // grid (M, K / 32), block (32, 8). Each wave computes 4 output columns;
 // lanes stride over (slot, N group) pairs of the token.
 template <typename T, bool kHasZp>
-__global__ void __launch_bounds__(kWave* kWavesPerBlock) moe_w4a8_down_kernel(
-    const int8_t* __restrict__ hq, const float* __restrict__ hs,
-    const int* __restrict__ hsum, const Routing routing,
-    const uint8_t* __restrict__ w2, const T* __restrict__ w2_scale,
-    const uint8_t* __restrict__ w2_zp, T* __restrict__ out, int top_k, int K,
-    int N, int group_size) {
+__global__ void __launch_bounds__(kWave* kWavesPerBlock)
+    moe_w4a8_down_kernel(const int8_t* __restrict__ hq,
+                         const float* __restrict__ hs,
+                         const int* __restrict__ hsum, const Routing routing,
+                         const uint8_t* __restrict__ w2,
+                         const T* __restrict__ w2_scale,
+                         const uint8_t* __restrict__ w2_zp, T* __restrict__ out,
+                         int top_k, int K, int N, int group_size) {
 #if defined(__HIP__MOE_W4A8_GFX11__) || !defined(__HIP_DEVICE_COMPILE__)
   const int m = blockIdx.x;
   const int lane = threadIdx.x;
@@ -439,15 +443,12 @@ void check_zp(const std::optional<at::Tensor>& zp, int64_t E, int64_t rows,
 
 }  // namespace
 
-void moe_w4a8_decode_rdna3(at::Tensor& out, const at::Tensor& x,
-                           const at::Tensor& topk_ids,
-                           const at::Tensor& topk_weights,
-                           const std::optional<at::Tensor>& expert_map,
-                           at::Tensor& workspace, const at::Tensor& w13,
-                           const at::Tensor& w13_scale,
-                           const std::optional<at::Tensor>& w13_zp,
-                           const at::Tensor& w2, const at::Tensor& w2_scale,
-                           const std::optional<at::Tensor>& w2_zp) {
+void moe_w4a8_decode_rdna3(
+    at::Tensor& out, const at::Tensor& x, const at::Tensor& topk_ids,
+    const at::Tensor& topk_weights, const std::optional<at::Tensor>& expert_map,
+    at::Tensor& workspace, const at::Tensor& w13, const at::Tensor& w13_scale,
+    const std::optional<at::Tensor>& w13_zp, const at::Tensor& w2,
+    const at::Tensor& w2_scale, const std::optional<at::Tensor>& w2_zp) {
   for (const at::Tensor* t : std::initializer_list<const at::Tensor*>{
            &out, &x, &topk_ids, &topk_weights, &workspace, &w13, &w13_scale,
            &w2, &w2_scale}) {
@@ -464,14 +465,14 @@ void moe_w4a8_decode_rdna3(at::Tensor& out, const at::Tensor& x,
   TORCH_CHECK(
       w13.scalar_type() == at::kByte && w2.scalar_type() == at::kByte,
       "moe_w4a8_decode_rdna3: w13 and w2 must be uint8 (two codes per byte)");
-  TORCH_CHECK(topk_ids.scalar_type() == at::kInt ||
-                  topk_ids.scalar_type() == at::kLong,
-              "moe_w4a8_decode_rdna3: topk_ids must be int32 or int64");
+  TORCH_CHECK(
+      topk_ids.scalar_type() == at::kInt || topk_ids.scalar_type() == at::kLong,
+      "moe_w4a8_decode_rdna3: topk_ids must be int32 or int64");
   const auto w_dtype = topk_weights.scalar_type();
-  TORCH_CHECK(w_dtype == at::kFloat || w_dtype == at::kHalf ||
-                  w_dtype == at::kBFloat16,
-              "moe_w4a8_decode_rdna3: topk_weights must be float32, float16 "
-              "or bfloat16");
+  TORCH_CHECK(
+      w_dtype == at::kFloat || w_dtype == at::kHalf || w_dtype == at::kBFloat16,
+      "moe_w4a8_decode_rdna3: topk_weights must be float32, float16 "
+      "or bfloat16");
   TORCH_CHECK(x.dim() == 2 && out.dim() == 2 && topk_ids.dim() == 2 &&
                   w13.dim() == 3 && w13_scale.dim() == 3 && w2.dim() == 3 &&
                   w2_scale.dim() == 3,
