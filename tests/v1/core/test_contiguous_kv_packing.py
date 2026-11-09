@@ -640,9 +640,10 @@ def layerwise_config(tmp_path, request):
             return True
 
     config = VllmConfig(
-        cache_config=CacheConfig(block_size=64, kv_cache_layout="BLHNC"),
+        cache_config=CacheConfig(block_size=64, mamba_cache_mode="align"),
         quant_config=LayerwiseKVConfig(),
     )
+    config.cache_config.kv_cache_layout = "BLHNC"
     config.model_config = ModelConfig(
         model=str(tmp_path), max_model_len=64, skip_tokenizer_init=True
     )
