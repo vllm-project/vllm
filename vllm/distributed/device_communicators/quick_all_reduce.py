@@ -278,8 +278,14 @@ class QuickAllReduce:
             rank=self.rank,
             world_size=self.world_size,
         )
+        # Build the kernels and run one real all-reduce on every rank, so the
+        # JIT stays out of the first prefill and out of CUDA graph capture.
         warmup = torch.empty(MB, dtype=torch.bfloat16, device=self.device)
-        self._warm_up_flydsl(flydsl_int4, warmup)
+        if hasattr(flydsl_int4, "compile"):
+            flydsl_int4.compile(warmup, torch.empty_like(warmup))
+        else:
+            flydsl_int4.preload()
+            flydsl_int4.allreduce(warmup, torch.empty_like(warmup))
         self._flydsl_sp = self._init_flydsl_sp(flydsl_int4, warmup, vllm_config)
         torch.accelerator.synchronize(self.device)
         logger.info(
@@ -296,17 +302,6 @@ class QuickAllReduce:
                 "separate RMSNorm, so the fusion does nothing for them."
             )
         return flydsl_int4
-
-    @staticmethod
-    def _warm_up_flydsl(flydsl_int4: Any, warmup: torch.Tensor) -> None:
-        """Move the JIT out of the first prefill and out of CUDA graph capture.
-        AITER builds with `preload()` load the engines without launching anything;
-        earlier ones only have `compile()`, which runs a real all-reduce on every
-        rank."""
-        if hasattr(flydsl_int4, "preload"):
-            flydsl_int4.preload()
-        else:
-            flydsl_int4.compile(warmup, torch.empty_like(warmup))
 
     def _init_flydsl_sp(
         self, flydsl_int4: Any, warmup: torch.Tensor, vllm_config
