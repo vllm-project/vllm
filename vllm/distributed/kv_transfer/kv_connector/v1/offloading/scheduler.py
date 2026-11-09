@@ -952,6 +952,8 @@ class OffloadingConnectorScheduler:
         full_attention_hit_boundary: int | None = None
         while lookup_groups:
             looked_up_sliding_window: bool = False
+            full_attention_deferred = False
+            looked_up_full_attention = False
             groups_iter = iter(lookup_groups)
             lookup_groups = ()
             for group_idx in groups_iter:
@@ -991,13 +993,13 @@ class OffloadingConnectorScheduler:
                 )
                 if (
                     sliding_window_size_in_chunks is not None
-                    and full_attention_hit_boundary is None
+                    and not full_attention_hit_boundary
+                    and not full_attention_deferred
+                    and (looked_up_full_attention or not self._full_attention_groups)
                 ):
                     # Groups before the first sparse group are full attention.
                     full_attention_hit_boundary = (
-                        max_hit_size_tokens
-                        if self._full_attention_groups and not defer_lookup
-                        else 0
+                        max_hit_size_tokens if self._full_attention_groups else 0
                     )
 
                 # For legacy EAGLE groups, query one extra chunk that will be
@@ -1021,6 +1023,7 @@ class OffloadingConnectorScheduler:
                 # have backend-confirmed hits
                 num_hit_chunks: int | None
                 if sliding_window_size_in_chunks is None:
+                    looked_up_full_attention = True
                     num_hit_chunks = self._maximal_prefix_lookup(
                         offload_keys,
                         req_status.req_context,
@@ -1028,6 +1031,7 @@ class OffloadingConnectorScheduler:
                         group_config,
                         start_chunk_idx,
                     )
+                    full_attention_deferred |= num_hit_chunks is None
                     group_state.lookup_hit_end_chunk_idx = start_chunk_idx + (
                         num_hit_chunks or 0
                     )
