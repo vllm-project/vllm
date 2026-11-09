@@ -1571,8 +1571,6 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             if residual is not None:
                 residual = sp_shard(residual)
 
-        remote_aux = self.collect_remote_aux_hidden_states(intermediate_tensors)
-
         # Aux hidden state k is the residual stream entering layer k. Under TP
         # it is only complete after layer k's input norm (or the final norm)
         # finishes the previous FFN's deferred all-reduce, so it is read there.
@@ -1632,7 +1630,6 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
         elif self.use_sequence_parallel:
             hidden_states = sp_all_gather(hidden_states)[:num_tokens]
 
-        aux_hidden_states = remote_aux + aux_hidden_states
         if len(aux_hidden_states) > 0:
             return hidden_states, aux_hidden_states
         return hidden_states
