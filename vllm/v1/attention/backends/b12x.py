@@ -214,7 +214,8 @@ class B12xPagedAttentionBackend(AttentionBackend):
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
-        return [64, 128, 192, 256]
+        # head_dim 64 is excluded until flashinfer-ai/flashinfer#6977 is fixed.
+        return [128, 192, 256]
 
     @classmethod
     def supports_sink(cls) -> bool:
@@ -409,15 +410,11 @@ class B12xPagedAttentionImpl(AttentionImpl[B12xPagedMetadata]):
         vllm_config = get_current_vllm_config()
         scheduler_config = vllm_config.scheduler_config
         model_config = vllm_config.model_config
-        cache_config = vllm_config.cache_config
         spec_config = vllm_config.speculative_config
-        default_block_size = int(cache_config.block_size)
-        if default_block_size not in _B12X_SUPPORTED_PAGE_SIZES:
-            raise ValueError(
-                "b12x requires --block-size in "
-                f"{_B12X_SUPPORTED_PAGE_SIZES}, got "
-                f"{cache_config.block_size}."
-            )
+        # cache_config.block_size is not final here: the platform applies
+        # get_preferred_block_size() after the model is constructed. Unsupported
+        # user-specified sizes are rejected at backend selection, and the runtime
+        # page size comes from the cache tensors (_kv_page_size).
 
         self.device = torch.device("cuda", torch.accelerator.current_device_index())
         self.dtype = model_config.dtype

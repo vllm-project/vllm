@@ -90,10 +90,18 @@ class PPTestSettings:
 
     def iter_params(self, model_id: str):
         opts = self.test_options
+        # Skip at collection: each case runs in a fresh process, which costs
+        # seconds to start even when the case only skips.
+        marks = pytest.mark.skipif(
+            opts.multi_node_only and not VLLM_MULTI_NODE,
+            reason="Not in multi-node setting",
+        )
 
         for parallel_setup in self.parallel_setups:
             for backend in self.distributed_backends:
-                yield (model_id, parallel_setup, backend, self.runner, opts)
+                yield pytest.param(
+                    model_id, parallel_setup, backend, self.runner, opts, marks=marks
+                )
 
 
 # NOTE: You can adjust tp_base and/or pp_base locally to fit the model in GPU
@@ -122,7 +130,7 @@ TEXT_GENERATION_MODELS = {
     "pfnet/plamo-3-nict-2b-base": PPTestSettings.fast(),
     "meta-llama/Llama-3.2-1B-Instruct": PPTestSettings.detailed(),
     # Tests TransformersForCausalLM
-    "hmellor/Ilama-3.2-1B": PPTestSettings.fast(),
+    "vllm-project/Ilama-3.2-1B": PPTestSettings.fast(),
     "openbmb/MiniCPM-2B-sft-bf16": PPTestSettings.fast(),
     "openbmb/MiniCPM3-4B": PPTestSettings.fast(),
     # Uses Llama
@@ -152,7 +160,7 @@ TEXT_GENERATION_MODELS = {
 
 EMBEDDING_MODELS = {  # type: ignore[var-annotated]
     # [Text-only]
-    "intfloat/e5-mistral-7b-instruct": PPTestSettings.fast(runner="pooling"),
+    "vllm-project/e5-mistral-7b-instruct": PPTestSettings.fast(runner="pooling"),
     "BAAI/bge-multilingual-gemma2": PPTestSettings.fast(runner="pooling"),
     "Qwen/Qwen2.5-Math-RM-72B": PPTestSettings.fast(
         load_format="dummy", runner="pooling"
@@ -184,11 +192,11 @@ TEST_MODELS = [
     # [LANGUAGE GENERATION]
     "microsoft/Phi-3.5-MoE-instruct",
     "meta-llama/Llama-3.2-1B-Instruct",
-    "hmellor/Ilama-3.2-1B",
+    "vllm-project/Ilama-3.2-1B",
     "ibm/PowerLM-3b",
     "deepseek-ai/DeepSeek-V2-Lite-Chat",
     # [LANGUAGE EMBEDDING]
-    "intfloat/e5-mistral-7b-instruct",
+    "vllm-project/e5-mistral-7b-instruct",
     "BAAI/bge-multilingual-gemma2",
     # [MULTIMODAL GENERATION]
     "OpenGVLab/InternVL3-1B",
@@ -442,12 +450,9 @@ def test_pp_mixed_precision_kv_cache():
         "--distributed-executor-backend",
         "mp",
     ]
-    env = {"VLLM_USE_V2_MODEL_RUNNER": "1"}
     compare_two_settings(
         "Qwen/Qwen3-0.6B",
         [*common_args, "--pipeline-parallel-size", "2"],
         common_args,
-        env,
-        env,
         method="generate_close",
     )

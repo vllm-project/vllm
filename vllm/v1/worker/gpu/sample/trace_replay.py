@@ -11,11 +11,11 @@ from vllm.v1.worker.gpu.states import RequestState
 class TraceReplayState:
     """Per-request state for inference trace-replay.
 
-    When a request carries ``SamplingParams.trace_decode_token_ids``, the
+    When a request carries `SamplingParams.trace_decode_token_ids`, the
     sampler overwrites the sampled token at each decode step with the
     predetermined trace token, while real logprobs and ranks are still computed
     from the unmodified logit distribution. The replay step for a request is
-    derived entirely from GPU state (``total_len - prompt_len``), so no CPU
+    derived entirely from GPU state (`total_len - prompt_len`), so no CPU
     synchronization or async placeholder handling is needed.
     """
 
@@ -120,7 +120,7 @@ def apply_trace_tokens(
     total_len: torch.Tensor,
     prompt_len: torch.Tensor,
 ) -> None:
-    """Overwrite ``sampled`` in place with trace tokens for the current step."""
+    """Overwrite `sampled` in place with trace tokens for the current step."""
     num_reqs = idx_mapping.shape[0]
     _trace_replay_kernel[(num_reqs,)](
         sampled,
