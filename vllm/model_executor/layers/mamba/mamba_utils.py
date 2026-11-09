@@ -57,7 +57,7 @@ def gdn_replayssm_executed_width(num_speculative_tokens: int) -> int:
 def configure_flashinfer_gdn_env() -> None:
     """Select FP16 state in FlashInfer's GDN prefix materializer.
 
-    FlashInfer reads ``GDN_UCACHE_STATE_DTYPE`` once, when ``flashinfer`` is
+    FlashInfer reads `GDN_UCACHE_STATE_DTYPE` once, when `flashinfer` is
     first imported, so it must be set before vLLM starts its workers.
 
     Raises:
@@ -186,7 +186,7 @@ class MambaStateDtypeCalculator:
         cls,
         model_dtype: ModelDType | torch.dtype,
     ) -> tuple[torch.dtype, torch.dtype, torch.dtype]:
-        """Return FlashInfer GDN ``(u, k, G)`` ring dtypes."""
+        """Return FlashInfer GDN `(u, k, G)` ring dtypes."""
         activation_dtype = get_kv_cache_torch_dtype("auto", model_dtype)
         return (activation_dtype, activation_dtype, torch.float32)
 
@@ -362,7 +362,7 @@ class MambaStateShapeCalculator:
         head_k_dim: int,
         head_v_dim: int,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
-        """Return FlashInfer GDN ``(u, k, G)`` ring shapes."""
+        """Return FlashInfer GDN `(u, k, G)` ring shapes."""
         local_k_heads = divide(num_k_heads, tp_world_size)
         local_v_heads = divide(num_v_heads, tp_world_size)
         slots = GDN_REPLAYSSM_RING_SLOTS

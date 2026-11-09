@@ -60,13 +60,13 @@ def pack_replayssm_rows(
     uniform: bool = False,
     allow_strided_rows: bool = False,
 ) -> torch.Tensor:
-    """Pack variable-length token rows into ``[num_rows, executed_width, ...]``.
+    """Pack variable-length token rows into `[num_rows, executed_width, ...]`.
 
-    Row ``i`` holds the tokens in ``query_start_loc[i]:query_start_loc[i + 1]``
-    followed by ``padding_value``. With ``uniform``, every row has exactly
-    ``executed_width`` tokens, so the result is a view of ``values`` when it
+    Row `i` holds the tokens in `query_start_loc[i]:query_start_loc[i + 1]`
+    followed by `padding_value`. With `uniform`, every row has exactly
+    `executed_width` tokens, so the result is a view of `values` when it
     is contiguous and aligned for CuTe, and a contiguous copy otherwise.
-    ``allow_strided_rows`` also preserves aligned, non-overlapping 2D rows.
+    `allow_strided_rows` also preserves aligned, non-overlapping 2D rows.
     """
     num_rows = query_start_loc.numel() - 1
     if uniform and values.shape[0] == num_rows * executed_width:
@@ -129,7 +129,7 @@ def run_gdn_replayssm(
 ) -> torch.Tensor:
     """Run one FlashInfer decode step over the replay rows.
 
-    Returns the outputs of real tokens in ``output_indices`` order. The kernel
+    Returns the outputs of real tokens in `output_indices` order. The kernel
     reads the committed cursors but does not publish them; vLLM commits the
     accepted tokens once per model step, after every layer runs.
     """

@@ -71,7 +71,7 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
 
     @property
     def replayssm_rings(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Bound ``(u, k, G)`` rings, stored after the conv and SSM states."""
+        """Bound `(u, k, G)` rings, stored after the conv and SSM states."""
         u_cache, k_cache, g_cache = self.kv_cache[2:5]
         return u_cache, k_cache, g_cache
 

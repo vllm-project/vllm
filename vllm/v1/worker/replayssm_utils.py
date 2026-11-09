@@ -27,7 +27,7 @@ def may_cross_mamba_block_boundary(
 ) -> bool:
     """Whether any request could cross a Mamba block boundary this step.
 
-    A request accepts at most its scheduled tokens, so ``False`` means no prefix
+    A request accepts at most its scheduled tokens, so `False` means no prefix
     snapshot can be due and postprocess may skip materialization.
     """
     return bool(((computed + scheduled) // block_size > computed // block_size).any())
