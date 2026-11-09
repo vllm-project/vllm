@@ -1313,8 +1313,10 @@ def test_qwen3_vl_unknown_source_fps_matches_hf(
     the metadata carries the fps HF assumes, which the frame timestamps use."""
     get_video_metadata = OpenCVVideoBackendMixin.get_video_metadata
 
-    def unknown_fps(data) -> VideoSourceMetadata:
-        return get_video_metadata(data)._replace(original_fps=0.0, duration=0.0)
+    def unknown_fps(data, **kwargs) -> VideoSourceMetadata:
+        return get_video_metadata(data, **kwargs)._replace(
+            original_fps=0.0, duration=0.0
+        )
 
     monkeypatch.setattr(
         OpenCVVideoBackendMixin, "get_video_metadata", staticmethod(unknown_fps)
@@ -1502,6 +1504,38 @@ def test_video_backend_handles_broken_frames(monkeypatch: pytest.MonkeyPatch):
             f"Expected fewer than {metadata['total_num_frames']} frames, "
             f"but loaded {frames.shape[0]} frames"
         )
+
+
+@pytest.mark.parametrize(
+    "make_video",
+    [create_long_gop_video, create_live_webm_video, create_raw_h264_video],
+)
+@pytest.mark.parametrize("loader", [VideoBackend, Qwen2VLVideoBackend])
+def test_opencv_reuses_capture_for_metadata(make_video, loader, monkeypatch):
+    """Reading metadata must not open another decoder for the same video."""
+    import cv2
+
+    data = make_video(num_frames=20, fps=10)
+    expected_frames, expected_metadata = loader.load_bytes(
+        data, num_frames=4, backend="opencv"
+    )
+    native_capture = cv2.VideoCapture
+    decoder_opens = 0
+
+    def track_capture(stream, backend, params):
+        nonlocal decoder_opens
+        if params != [cv2.CAP_PROP_FORMAT, -1]:
+            decoder_opens += 1
+        return native_capture(stream, backend, params)
+
+    monkeypatch.setattr(cv2, "VideoCapture", track_capture)
+    frames, metadata = loader.load_bytes(data, num_frames=4, backend="opencv")
+
+    np.testing.assert_array_equal(frames, expected_frames)
+    assert metadata == expected_metadata
+    assert metadata["total_num_frames"] == 20
+    assert len(metadata["frames_indices"]) == frames.shape[0] == 4
+    assert decoder_opens == 1
 
 
 def test_video_backend_handles_edit_list_trimmed_video(
