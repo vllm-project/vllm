@@ -24,4 +24,4 @@ steps:
   - tests/v1/worker/test_worker_memory_snapshot.py
   commands:
     - cd tests
-    - pytest -v -s v1/shutdown -k "not (test_llm_model_error and 2-True) and not (test_async_llm_startup_error and -2)"
+    - pytest -v -s v1/shutdown -k "not (test_llm_model_error and 2-True) and not (test_async_llm_startup_error and forward-2)"
