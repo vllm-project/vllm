@@ -32,20 +32,14 @@ KNOWN_DEFECTS: dict[str, Defect] = {}
 
 
 KNOWN_DEFECTS["prefill-features"] = Defect(
-    "AITER varlen prefill/extend drops the logits soft cap, the head-128 "
-    "asm kernel ignores sinks (and extend double counts them across "
-    "context chunks), and ALiBi positions restart in each context chunk.",
+    "AITER varlen prefill/extend drops the logits soft cap, and ALiBi "
+    "positions restart in each context chunk.",
     (
         _FEATURE + "[*softcap-prefill]",
         _FEATURE + "[*softcap-extend]",
         _FEATURE + "[*softcap-mixed]",
         _FEATURE + "[*-alibi-extend]",
         _FEATURE + "[*-alibi-mixed]",
-        _FEATURE + "[d128-*-sinks-prefill]",
-        _FEATURE + "[d128-*-sinks-extend]",
-        _FEATURE + "[d128-*-sinks-mixed]",
-        _FEATURE + "[d256-auto-sinks-extend]",
-        _FEATURE + "[d64-auto-sinks-extend]",
         _DISPATCH + "test_logits_soft_cap_every_phase[prefill]",
         _DISPATCH + "test_logits_soft_cap_every_phase[extend]",
         _DISPATCH + "test_logits_soft_cap_every_phase[extend-swa]",
@@ -99,6 +93,19 @@ KNOWN_DEFECTS["kv-update-bypass-frozen"] = Defect(
     "supports_kv_cache_update_bypass is computed once at import and goes "
     "stale when the shuffle toggle changes.",
     (_CAP + "test_kv_update_bypass_follows_the_shuffle_toggle",),
+)
+
+KNOWN_DEFECTS["zero-query-rows"] = Defect(
+    "Rows with no query tokens (FULL CUDA graph padding, or requests an async "
+    "KV connector is loading) are run as real rows: decode kernels compute "
+    "them at the query/output row their query_start_loc points at, and the "
+    "extend chunk planner and sliding-window gather give them context, "
+    "adding chunks no real row needs.",
+    (
+        _DISPATCH + "test_zero_query_rows_after_real_rows[*-decode-*]",
+        _BUILDER + "test_chunk_planner_skips_rows_without_queries[*-kv-load]",
+        _BUILDER + "test_sliding_window_extend_skips_rows_without_queries[kv-load]",
+    ),
 )
 
 _MARKED = pytest.StashKey[bool]()

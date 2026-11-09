@@ -66,6 +66,15 @@ class TrtLlmFp8ExpertsBase:
     interfaces.
     """
 
+    kept_constants: tuple[str, ...] = (
+        "_g1_alphas",
+        "_g2_alphas",
+        "_g1_scale_c",
+        "gemm1_alpha",
+        "gemm1_beta",
+        "gemm1_clamp_limit",
+    )
+
     @staticmethod
     def is_supported_config(
         cls: type[mk.FusedMoEExperts],
@@ -197,7 +206,15 @@ class TrtLlmFp8ExpertsBase:
 
 
 class TrtLlmFp8ExpertsModular(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsModular):
-    """Fp8 TRTLLM-Gen MoE kernels. Supports modular interface."""
+    """Fp8 TRTLLM-Gen MoE kernels. Supports modular interface.
+
+    The TRTLLM-Gen kernel skips padding rows at tile granularity, so it can
+    consume the padded contiguous layout produced by DeepEP v2.
+    """
+
+    @staticmethod
+    def activation_format() -> mk.FusedMoEActivationFormat:
+        return mk.FusedMoEActivationFormat.PaddedStandard
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
