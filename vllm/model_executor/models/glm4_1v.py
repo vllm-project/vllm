@@ -1313,10 +1313,7 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
         seq_len: int,
         mm_counts: Mapping[str, int],
     ) -> int:
-        max_images = mm_counts.get("image", 0)
-
-        max_image_tokens = self.get_max_image_tokens() * max_images
-        return self._get_max_video_frames(seq_len - max_image_tokens)
+        return self._get_max_video_frames(seq_len)
 
     def _get_video_second_idx_glm4v(
         self, metadata: dict[str, Any], total_frames: int

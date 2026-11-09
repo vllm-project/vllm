@@ -272,13 +272,11 @@ class InternS1ProcessingInfo(BaseProcessingInfo):
         seq_len: int,
         mm_counts: Mapping[str, int],
     ) -> int:
-        max_images = mm_counts.get("image", 0)
         max_videos = mm_counts.get("video", 0)
 
         processor = self.get_hf_processor()
 
-        max_image_tokens = self.get_max_image_tokens() * max_images
-        max_total_frames = (seq_len - max_image_tokens) // processor.image_seq_length
+        max_total_frames = seq_len // processor.image_seq_length
         max_frames_per_video = max_total_frames // max(max_videos, 1)
 
         return max(max_frames_per_video, 1)

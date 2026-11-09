@@ -260,10 +260,8 @@ class Ovis2_5ProcessingInfo(BaseProcessingInfo):
         seq_len: int,
         mm_counts: Mapping[str, int],
     ) -> int:
-        max_images = mm_counts.get("image", 0)
         max_videos = mm_counts.get("video", 0)
-        max_image_tokens = self.get_max_image_tokens() * max_images
-        max_total_frames = self._get_max_video_frames(seq_len - max_image_tokens)
+        max_total_frames = self._get_max_video_frames(seq_len)
         max_frames_per_video = max_total_frames // max(max_videos, 1)
         return max(max_frames_per_video, 1)
 
