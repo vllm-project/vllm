@@ -107,7 +107,6 @@ steps:
       --ignore models/multimodal/generation/test_whisper.py
       --ignore models/multimodal/generation/test_gemma_ragged_audio.py
       --ignore models/multimodal/generation/test_memory_leak.py
-      --ignore models/multimodal/generation/test_unlimited_ocr.py
       --ignore models/multimodal/processing'
 
 - label: ":intel: (BMG) Multi-Modal Processor" # 44min
