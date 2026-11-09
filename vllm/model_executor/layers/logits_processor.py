@@ -223,10 +223,10 @@ class LogitsProcessor(PluggableLayer):
     def _mask_outside_vocab(
         self, logits: torch.Tensor, lm_head: VocabParallelEmbedding
     ) -> None:
-        """Mask this shard's padding and any head rows past ``org_vocab_size``.
+        """Mask this shard's padding and any head rows past `org_vocab_size`.
 
         A head shared with another model can have rows past this processor's
-        vocabulary, as ``_get_logits`` drops them.
+        vocabulary, as `_get_logits` drops them.
         """
         shard_indices = lm_head.shard_indices
         if shard_indices.num_org_vocab_padding > 0:
