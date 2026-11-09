@@ -2,9 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Dual batch overlap (DBO) in the model runner.
 
-The runner slices the batch *before* building attention metadata. These tests
-cover that slicing, the decision to microbatch and the threaded execution of
-the microbatches.
+The runner slices the batch *before* building attention metadata. The main
+test here pins each microbatch's sliced inputs to known layouts. The rest covers
+the decision to microbatch and the threaded execution of the microbatches.
 """
 
 import threading
@@ -46,10 +46,7 @@ from vllm.v1.worker.gpu.ubatch_utils import (
     merge_ubatch_outputs,
     slice_model_inputs,
 )
-from vllm.v1.worker.ubatch_utils import (
-    UBatchSlice,
-    maybe_create_ubatch_slices,
-)
+from vllm.v1.worker.ubatch_utils import UBatchSlice
 from vllm.v1.worker.ubatching import (
     dbo_current_ubatch_id,
     dbo_register_recv_hook,
@@ -146,21 +143,82 @@ BATCHES = {
     "trailing_prefill_spans_boundary": ([2, 20], [64, 300]),
 }
 
+# Per microbatch: (request_slice, token_slice, query_start_loc, seq_lens). A
+# request split across microbatches keeps only the tokens each one owns, and
+# the first part's seq_len stops at its last owned token.
+EXPECTED_UBATCHES = {
+    "uniform_decode": [
+        ((0, 4), (0, 4), [0, 1, 2, 3, 4], [128, 132, 136, 140]),
+        ((4, 8), (4, 8), [0, 1, 2, 3, 4], [144, 148, 152, 156]),
+    ],
+    "split_request": [
+        ((0, 3), (0, 7), [0, 1, 2, 7], [64, 96, 507]),
+        ((2, 5), (7, 14), [0, 5, 6, 7], [512, 32, 48]),
+    ],
+    "aligned_prefills": [
+        ((0, 2), (0, 8), [0, 6, 8], [6, 130]),
+        ((2, 4), (8, 16), [0, 4, 8], [260, 4]),
+    ],
+    "split_first_and_last": [
+        ((0, 2), (0, 7), [0, 3, 7], [70, 295]),
+        ((1, 3), (7, 15), [0, 5, 8], [300, 41]),
+    ],
+    "trailing_prefill_spans_boundary": [
+        ((0, 2), (0, 11), [0, 2, 11], [64, 289]),
+        ((1, 2), (11, 22), [0, 11], [300]),
+    ],
+}
+
+
+@pytest.mark.parametrize("batch_name", list(BATCHES))
+def test_slicing_truncates_requests_at_microbatch_boundaries(batch_name: str):
+    """Each microbatch sees only its own tokens of the requests it holds."""
+    query_lens, seq_lens = BATCHES[batch_name]
+    buffers = _make_buffers()
+    ubatch_buffers = _make_ubatch_buffers()
+    input_batch = _make_input_batch(query_lens, seq_lens, buffers)
+
+    ubatch_slices = create_ubatch_slices(input_batch, num_ubatches=2)
+
+    expected_ubatches = EXPECTED_UBATCHES[batch_name]
+    assert len(ubatch_slices) == len(expected_ubatches)
+    for i, (ubatch_slice, expected) in enumerate(zip(ubatch_slices, expected_ubatches)):
+        request_bounds, token_bounds, query_start_loc, ubatch_seq_lens = expected
+        assert ubatch_slice == UBatchSlice(slice(*request_bounds), slice(*token_bounds))
+        # numpy scalars leaking into the bounds break Triton specialization.
+        for bound in (
+            ubatch_slice.request_slice.start,
+            ubatch_slice.request_slice.stop,
+            ubatch_slice.token_slice.start,
+            ubatch_slice.token_slice.stop,
+        ):
+            assert type(bound) is int
+
+        ubatch = _slice_input_batch(input_batch, ubatch_slice, *ubatch_buffers[i])
+        expected_query_start_loc = torch.tensor(query_start_loc, dtype=torch.int32)
+        expected_seq_lens = torch.tensor(ubatch_seq_lens, dtype=torch.int32)
+
+        assert ubatch.num_reqs == len(ubatch_seq_lens)
+        assert ubatch.num_tokens == query_start_loc[-1]
+        assert int(ubatch.num_scheduled_tokens.max()) == max(
+            b - a for a, b in zip(query_start_loc, query_start_loc[1:])
+        )
+        torch.testing.assert_close(ubatch.query_start_loc, expected_query_start_loc)
+        torch.testing.assert_close(
+            torch.from_numpy(ubatch.query_start_loc_np), expected_query_start_loc
+        )
+        torch.testing.assert_close(ubatch.seq_lens, expected_seq_lens)
+        # `prepare_attn` derives max_seq_len from this bound.
+        torch.testing.assert_close(ubatch.seq_lens_cpu_upper_bound, expected_seq_lens)
+
 
 def test_microbatches_do_not_share_buffers():
     """Both microbatches are live at once, so their buffers must be distinct."""
     query_lens, seq_lens = BATCHES["split_request"]
-    num_scheduled_tokens = np.array(query_lens, dtype=np.int32)
-    num_tokens = int(num_scheduled_tokens.sum())
-
-    ubatch_slices, _ = maybe_create_ubatch_slices(
-        True, num_scheduled_tokens, num_tokens, len(query_lens), num_ubatches=2
-    )
-    assert ubatch_slices is not None
-
     buffers = _make_buffers()
     ubatch_buffers = _make_ubatch_buffers()
     input_batch = _make_input_batch(query_lens, seq_lens, buffers)
+    ubatch_slices = create_ubatch_slices(input_batch, num_ubatches=2)
 
     first = _slice_input_batch(input_batch, ubatch_slices[0], *ubatch_buffers[0])
     first_query_start_loc = first.query_start_loc.clone()
