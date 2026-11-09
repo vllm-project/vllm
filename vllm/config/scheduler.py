@@ -176,6 +176,35 @@ class SchedulerConfig:
     - "priority" means requests are handled based on given priority (lower
       value means earlier handling) and time of arrival deciding any ties)."""
 
+    max_priority_preemptions_per_step: int = Field(default=0, ge=0)
+    """With the priority policy, the most running requests that the
+    highest-priority waiting request may preempt in a step when the KV cache
+    lacks room for its whole sequence. Only requests of a strictly lower
+    priority are preempted, in the scheduler's preemption order (the lowest
+    priority, then the latest arrival), as few as needed and none if this many
+    would not make room. In a step that schedules a higher-priority prefill, a
+    lower-priority request that holds no KV blocks is admitted only if its whole
+    sequence fits beside the blocks in-flight prefills still need. 0 (the
+    default) disables it."""
+
+    priority_prefill_budget_cap: bool = False
+    """With the priority policy, hold back lower-priority prefills, running or
+    waiting, while a higher-priority request awaits its first
+    `priority_prefill_budget_cap_tokens` output tokens: from the step in which
+    it fits (a free running slot and KV cache room for its whole sequence) or,
+    with a running slot free, its KV connector load is done. A request that is
+    not admitted or is scheduled nothing, or a load still in flight, holds them
+    back for at most that many steps. Decodes are never held, nor is a request
+    with one token left to compute, nor a prefill midway through an encoder
+    input while a request it is held for needs encoder cache space, since only
+    its progress frees the space."""
+
+    priority_prefill_budget_cap_tokens: int = Field(default=16, ge=1)
+    """With `priority_prefill_budget_cap`, the number of a request's first
+    output tokens during which lower-priority prefills are held back, and the
+    most steps for which a request not yet admitted or scheduled nothing, or a
+    KV load in flight, holds them back."""
+
     disable_chunked_mm_input: bool = False
     """If set to true and chunked prefill is enabled, we do not want to
     partially schedule a multimodal item. Only used in V1
@@ -319,6 +348,9 @@ class SchedulerConfig:
             "max_num_encoder_input_tokens",
             "encoder_cache_size",
             "policy",
+            "max_priority_preemptions_per_step",
+            "priority_prefill_budget_cap",
+            "priority_prefill_budget_cap_tokens",
             "disable_chunked_mm_input",
             "scheduler_cls",
             "disable_hybrid_kv_cache_manager",
@@ -386,6 +418,14 @@ class SchedulerConfig:
             raise ValueError(
                 f"max_num_active_seqs ({self.max_num_active_seqs}) cannot be "
                 f"greater than max_num_seqs ({self.max_num_seqs})."
+            )
+
+        if self.policy != "priority" and (
+            self.max_priority_preemptions_per_step or self.priority_prefill_budget_cap
+        ):
+            raise ValueError(
+                "max_priority_preemptions_per_step and priority_prefill_budget_cap "
+                f"require the priority scheduling policy, not {self.policy!r}."
             )
 
         if self.max_num_batched_tokens > self.max_num_seqs * max_model_len:

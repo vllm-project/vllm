@@ -722,6 +722,13 @@ class EngineArgs:
     )
 
     watermark: float = SchedulerConfig.watermark
+    max_priority_preemptions_per_step: int = (
+        SchedulerConfig.max_priority_preemptions_per_step
+    )
+    priority_prefill_budget_cap: bool = SchedulerConfig.priority_prefill_budget_cap
+    priority_prefill_budget_cap_tokens: int = (
+        SchedulerConfig.priority_prefill_budget_cap_tokens
+    )
 
     disable_hybrid_kv_cache_manager: bool | None = (
         SchedulerConfig.disable_hybrid_kv_cache_manager
@@ -1823,6 +1830,18 @@ class EngineArgs:
         )
         scheduler_group.add_argument("--watermark", **scheduler_kwargs["watermark"])
         scheduler_group.add_argument(
+            "--max-priority-preemptions-per-step",
+            **scheduler_kwargs["max_priority_preemptions_per_step"],
+        )
+        scheduler_group.add_argument(
+            "--priority-prefill-budget-cap",
+            **scheduler_kwargs["priority_prefill_budget_cap"],
+        )
+        scheduler_group.add_argument(
+            "--priority-prefill-budget-cap-tokens",
+            **scheduler_kwargs["priority_prefill_budget_cap_tokens"],
+        )
+        scheduler_group.add_argument(
             "--prefill-schedule-interval",
             **scheduler_kwargs["prefill_schedule_interval"],
         )
@@ -2711,6 +2730,9 @@ class EngineArgs:
             ),
             scheduler_reserve_full_isl=self.scheduler_reserve_full_isl,
             watermark=self.watermark,
+            max_priority_preemptions_per_step=self.max_priority_preemptions_per_step,
+            priority_prefill_budget_cap=self.priority_prefill_budget_cap,
+            priority_prefill_budget_cap_tokens=self.priority_prefill_budget_cap_tokens,
             prefill_schedule_interval=self.prefill_schedule_interval,
             cache_aware_admission_window=self.cache_aware_admission_window,
             cache_aware_admission_threshold=self.cache_aware_admission_threshold,

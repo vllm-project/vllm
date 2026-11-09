@@ -231,6 +231,14 @@ class SchedulerStats:
 
     num_kv_fetch_reqs_by_stage: dict[str, int] = field(default_factory=dict)
 
+    # Running requests preempted for a waiting request of a higher priority
+    # (max_priority_preemptions_per_step), since the last stats.
+    num_priority_preemptions: int = 0
+    # Steps in which priority_prefill_budget_cap held lower-priority prefill
+    # back, and the prefill tokens it held back in them, since the last stats.
+    num_prefill_held_steps: int = 0
+    num_prefill_held_tokens: int = 0
+
     # These are used for internal DP load-balancing.
     step_counter: int = 0
     current_wave: int = 0
