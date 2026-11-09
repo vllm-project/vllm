@@ -389,22 +389,23 @@ gauges keep updating while the engine is idle. Each is a fraction of
 | Metric | Source | Meaning |
 | --- | --- | --- |
 | `vllm:mooncake_store_cache_usage_perc` | write + read + `master_put_start_discarded_staging_size` | Memory eviction cannot reclaim now |
-| `vllm:mooncake_store_cache_write_usage_perc` | `master_mem_processing_bytes` | Puts in flight |
+| `vllm:mooncake_store_cache_write_usage_perc` | counted by vLLM | Puts this vLLM instance has in flight |
 | `vllm:mooncake_store_cache_read_usage_perc` | estimated by vLLM | Data under a read lease this vLLM instance took |
 | `vllm:mooncake_store_cache_occupancy_perc` | `master_allocated_bytes` | All allocated memory, including data eviction can reclaim |
 
-`master_mem_processing_bytes` requires a Mooncake master that publishes it
-([kvcache-ai/Mooncake#5174](https://github.com/kvcache-ai/Mooncake/pull/5174)).
-With an older master, `write_usage_perc` and `usage_perc` are not exported and
-vLLM logs a warning.
+The master gauges used here are published by every Mooncake master. The master
+does not export memory pinned by puts in flight or by read leases, so vLLM
+estimates both from its own traffic:
 
-The master does not export read-lease memory, so vLLM estimates it. The master
-grants a lease of `mooncake_kv_lease_ttl_ms` on every key it returns and on
-every key an existence check finds; vLLM counts the bytes of the keys it read
-or found already stored while saving, until their leases expire. The estimate
-only covers this vLLM instance, so leases taken by other clients of the same
-Store are missing, and adding the gauges of several instances counts keys they
-share more than once.
+- Write usage counts the bytes of each put from the moment it is issued until
+  it returns.
+- Read usage counts the bytes of the keys vLLM read, or found already stored
+  while saving, for `mooncake_kv_lease_ttl_ms`: the master grants a lease of
+  that length on every key it returns and on every key an existence check finds.
+
+Both estimates cover only this vLLM instance, so traffic from other clients of
+the same Store is missing, and adding the gauges of several instances counts
+keys they share more than once.
 
 These gauges follow `vllm:kv_offload_cpu_cache_{usage,write_usage,read_usage}_perc`
 of the CPU offloading connector, with one difference: the Store holds a read

@@ -879,6 +879,24 @@ def test_store_sending_thread_records_existing_keys():
     assert stats.data["save_put"][0]["num_keys"] == 1
 
 
+@pytest.mark.parametrize("put_raises", [False, True])
+def test_store_sending_thread_records_in_flight_writes(put_raises):
+    store = MagicMock()
+    store.batch_is_exist.return_value = [0, 0]
+    if put_raises:
+        store.batch_put_from_multi_buffers.side_effect = RuntimeError("down")
+    else:
+        store.batch_put_from_multi_buffers.return_value = [256, 256]
+    thread = _make_store_sending_thread(store)
+    writes: list[int] = []
+    thread._record_writes_cb = writes.append
+
+    _run_store_req(thread, _make_store_req("req-a", [b"a0", b"a1"]))
+
+    # The bytes are in flight only while the put call runs, even if it raises.
+    assert writes == [512, -512]
+
+
 def test_store_sending_thread_records_leases_for_existing_keys():
     store = MagicMock()
     store.batch_is_exist.return_value = [1, 0]

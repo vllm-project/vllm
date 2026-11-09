@@ -117,10 +117,10 @@ def _wait_for_value(series: str, value: float) -> None:
 
 
 def test_parse_master_metrics_picks_memory_gauges():
+    # master_mem_processing_bytes is not used: vLLM counts its own puts.
     assert parse_master_metrics(MASTER_METRICS_TEXT) == {
         "capacity_bytes": 4 * GiB,
         "allocated_bytes": 2 * GiB,
-        "processing_bytes": GiB // 2,
         "discarded_bytes": GiB // 4,
     }
 
@@ -128,7 +128,9 @@ def test_parse_master_metrics_picks_memory_gauges():
 def test_usage_fractions_from_full_snapshot():
     snapshot = parse_master_metrics(MASTER_METRICS_TEXT)
 
-    assert master_usage_fractions(snapshot, leased_bytes=GiB // 4) == {
+    assert master_usage_fractions(
+        snapshot, leased_bytes=GiB // 4, writing_bytes=GiB // 2
+    ) == {
         "occupancy": 0.5,
         "write_usage": 0.125,
         "read_usage": 0.0625,
@@ -137,19 +139,25 @@ def test_usage_fractions_from_full_snapshot():
 
 
 def test_usage_without_discarded_staging_gauge():
-    snapshot = {"capacity_bytes": 4 * GiB, "processing_bytes": GiB}
+    snapshot = {"capacity_bytes": 4 * GiB}
 
-    assert master_usage_fractions(snapshot, leased_bytes=GiB)["usage"] == 0.5
+    fractions = master_usage_fractions(snapshot, leased_bytes=GiB, writing_bytes=GiB)
+    assert fractions["usage"] == 0.5
 
 
-def test_unpatched_master_reports_no_write_usage():
+def test_stock_master_reports_every_gauge():
     snapshot = {"capacity_bytes": 4 * GiB, "allocated_bytes": GiB}
 
-    assert master_usage_fractions(snapshot, leased_bytes=0) == {
+    assert master_usage_fractions(snapshot, leased_bytes=0, writing_bytes=0) == {
         "occupancy": 0.25,
+        "write_usage": 0.0,
         "read_usage": 0.0,
+        "usage": 0.0,
     }
-    assert master_usage_fractions({"capacity_bytes": 0}, leased_bytes=0) == {}
+    assert (
+        master_usage_fractions({"capacity_bytes": 0}, leased_bytes=0, writing_bytes=0)
+        == {}
+    )
 
 
 def test_lease_tracker_moves_extended_leases():
@@ -162,9 +170,10 @@ def test_lease_tracker_moves_extended_leases():
     assert tracker.grant([("a", 256)], now=120.0) == {130: 256}
 
 
-def test_reduce_skips_leases():
+def test_reduce_skips_leases_and_writes():
     stats = MooncakeStoreConnectorStats()
     stats.record_leases({110: 256})
+    stats.record_writes(256)
 
     assert stats.reduce() == {}
 
@@ -209,8 +218,8 @@ def test_prom_usage_gauges_track_master_without_engine_steps(master_url):
 
     for engine in ("0", "1"):
         labels = {"engine": engine}
-        assert _sample("vllm:mooncake_store_cache_usage_perc", labels) == 0.1875
-        assert _sample("vllm:mooncake_store_cache_write_usage_perc", labels) == 0.125
+        assert _sample("vllm:mooncake_store_cache_usage_perc", labels) == 0.0625
+        assert _sample("vllm:mooncake_store_cache_write_usage_perc", labels) == 0.0
         assert _sample("vllm:mooncake_store_cache_read_usage_perc", labels) == 0.0
         assert _sample("vllm:mooncake_store_cache_occupancy_perc", labels) == 0.5
 
@@ -226,14 +235,14 @@ def test_prom_read_usage_expires_without_engine_steps(master_url):
     _wait_for_value("vllm:mooncake_store_cache_read_usage_perc", 0.0)
 
 
-def test_prom_skips_usage_gauges_without_master_inputs(serve_master):
-    # A master without the unevictable-memory gauges.
-    url = serve_master(
-        "master_total_capacity_bytes 4294967296\nmaster_allocated_bytes 1073741824\n"
-    )
-    _build_prom({"mooncake_master_metrics_url": url})
-    _wait_for_sample("vllm:mooncake_store_cache_occupancy_perc")
+def test_prom_write_usage_tracks_in_flight_puts(master_url):
+    prom = _build_prom({"mooncake_master_metrics_url": master_url})
+    started = MooncakeStoreConnectorStats()
+    started.record_writes(GiB)
+    prom.observe(started.data, engine_idx=0)
+    _wait_for_value("vllm:mooncake_store_cache_write_usage_perc", 0.25)
 
-    assert _sample("vllm:mooncake_store_cache_occupancy_perc") == 0.25
-    assert _sample("vllm:mooncake_store_cache_write_usage_perc") is None
-    assert _sample("vllm:mooncake_store_cache_usage_perc") is None
+    finished = MooncakeStoreConnectorStats()
+    finished.record_writes(-GiB)
+    prom.observe(finished.data, engine_idx=0)
+    _wait_for_value("vllm:mooncake_store_cache_write_usage_perc", 0.0)

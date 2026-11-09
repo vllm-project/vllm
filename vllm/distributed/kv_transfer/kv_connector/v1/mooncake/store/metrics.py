@@ -13,9 +13,11 @@ fractions. It polls from the frontend process because connector stats only
 arrive on engine steps: an idle engine would freeze the gauges while leases
 expire and puts land in the store.
 
-The master does not export read-lease memory, so workers report the leases
-it grants them (reads and existence hits) as bytes per expiry second, and the
-frontend sums the seconds that have not passed.
+The master does not export memory pinned by puts in flight or by read leases,
+so workers report their own: bytes entering and leaving a put, and the leases
+the master grants them (reads and existence hits) as bytes per expiry second.
+The frontend keeps the running write total and sums the lease seconds that
+have not passed.
 """
 
 import math
@@ -39,27 +41,27 @@ from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
-# Reserved ``data`` key for lease deltas. It is not an operation.
+# Reserved ``data`` keys for lease and in-flight write deltas. Not operations.
 LEASES_KEY = "leases"
+WRITES_KEY = "writes"
 
 # Same buckets as vllm:kv_offload_cpu_allocation_size.
 _ALLOCATION_SIZE_BUCKETS = [1, 4, 16, 64, 256, 1024, 4096, 16384, 65536, 262144]
 
 
-# Master gauge name -> snapshot field. processing bytes exist only on masters
-# that publish them; without them ``write_usage`` and ``usage`` are not derived.
+# Master gauge name -> snapshot field. Every Mooncake master publishes these.
 _MASTER_GAUGES = {
     "master_total_capacity_bytes": "capacity_bytes",
     "master_allocated_bytes": "allocated_bytes",
-    "master_mem_processing_bytes": "processing_bytes",
     "master_put_start_discarded_staging_size": "discarded_bytes",
 }
 
 
 def master_usage_fractions(
-    snapshot: dict[str, Any], leased_bytes: int
+    snapshot: dict[str, Any], leased_bytes: int, writing_bytes: int
 ) -> dict[str, float]:
-    """Store usage fractions from one master snapshot and the leased bytes.
+    """Store usage fractions from one master snapshot and this instance's
+    leased and in-flight write bytes.
 
     ``usage`` counts memory eviction cannot reclaim now: puts in flight, data
     under a read lease, and displaced replicas awaiting deferred release.
@@ -68,14 +70,14 @@ def master_usage_fractions(
     capacity = float(snapshot.get("capacity_bytes", 0))
     if capacity <= 0:
         return {}
-    fractions = {"read_usage": leased_bytes / capacity}
+    discarded = snapshot.get("discarded_bytes", 0)
+    fractions = {
+        "read_usage": leased_bytes / capacity,
+        "write_usage": writing_bytes / capacity,
+        "usage": (writing_bytes + leased_bytes + discarded) / capacity,
+    }
     if "allocated_bytes" in snapshot:
         fractions["occupancy"] = snapshot["allocated_bytes"] / capacity
-    processing = snapshot.get("processing_bytes")
-    if processing is not None:
-        fractions["write_usage"] = processing / capacity
-        discarded = snapshot.get("discarded_bytes", 0)
-        fractions["usage"] = (processing + leased_bytes + discarded) / capacity
     return fractions
 
 
@@ -164,7 +166,7 @@ class MooncakeStoreConnectorStats(KVConnectorStats):
     def reduce(self) -> dict[str, int | float]:
         reduced: dict[str, int | float] = {}
         for operation, records in sorted(self.data.items()):
-            if not records or operation == LEASES_KEY:
+            if not records or operation in (LEASES_KEY, WRITES_KEY):
                 continue
             durations = [float(record["duration_seconds"]) for record in records]
             reduced[f"{operation}_count"] = len(records)
@@ -211,6 +213,10 @@ class MooncakeStoreConnectorStats(KVConnectorStats):
                 "num_existing_keys": num_existing_keys,
             }
         )
+
+    def record_writes(self, nbytes: int) -> None:
+        """Record bytes entering (+) or leaving (-) a put in flight."""
+        self.data.setdefault(WRITES_KEY, []).append({"bytes": nbytes})
 
     def record_leases(self, deltas: dict[int, int]) -> None:
         """Record leased bytes gained (or moved away) per expiry second."""
@@ -318,6 +324,7 @@ class MooncakeStorePromMetrics(KVConnectorPromMetrics):
         # Leased bytes per expiry second, from the workers' lease deltas.
         self._lease_lock = threading.Lock()
         self._leased_bytes_by_expiry: dict[int, int] | None = None
+        self._writing_bytes = 0
         if master_metrics_url:
             self._leased_bytes_by_expiry = {}
             threading.Thread(
@@ -337,19 +344,12 @@ class MooncakeStorePromMetrics(KVConnectorPromMetrics):
             return sum(buckets.values())
 
     def _poll_master(self, url: str) -> None:
-        warned = False
         while True:
             snapshot = poll_master_metrics(url)
             if snapshot is not None:
-                if "processing_bytes" not in snapshot and not warned:
-                    logger.warning(
-                        "Mooncake master at %s publishes no "
-                        "master_mem_processing_bytes; write_usage and usage "
-                        "are not reported.",
-                        url,
-                    )
-                    warned = True
-                fractions = master_usage_fractions(snapshot, self._leased_bytes())
+                fractions = master_usage_fractions(
+                    snapshot, self._leased_bytes(), self._writing_bytes
+                )
                 # One store backs every engine, so every engine label gets it.
                 for name, value in fractions.items():
                     for labelvalues in self.per_engine_labelvalues.values():
@@ -389,6 +389,11 @@ class MooncakeStorePromMetrics(KVConnectorPromMetrics):
                             buckets[expires_at] = (
                                 buckets.get(expires_at, 0) + record["bytes"]
                             )
+                continue
+            if operation == WRITES_KEY:
+                if self._leased_bytes_by_expiry is not None:
+                    with self._lease_lock:
+                        self._writing_bytes += sum(r["bytes"] for r in records)
                 continue
             for record in records:
                 assert isinstance(record, dict)
