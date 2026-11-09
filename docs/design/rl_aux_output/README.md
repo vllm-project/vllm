@@ -9,13 +9,15 @@ An RL trainer recomputes the logprobs of tokens an inference engine sampled. Som
 
 This folder specifies how vLLM delivers these "aux outputs" to the trainer at frontier scale, and records the evidence behind it.
 
+Read in this order:
+
 | Document | Contents |
 |---|---|
-| [Consumer contract](consumer.md) | What a trainer gets from `read_sample`, what every mask and sentinel means, and what to do with missing or no-replay cells |
-| [Protocol](protocol.md) | What a row is, the invariants, and what the engine, the store, the driver and the trainer each do, event by event |
-| [Design space](design_space.md) | The alternatives for each mechanism and why the protocol picks what it picks |
-| [Scenarios](scenarios.md) | Sizing: bytes per token, pools, bandwidth and object counts, from a single node to frontier scale |
-| [Experiments](experiments.md) | Measurements on DeepSeek-V4.1-Flash: capacity, correctness per design, scale, and the correctness hardening |
+| [Scenarios](scenarios.md) | Sizing: bytes per token, pools, bandwidth and object counts, from a single node to frontier scale. §1 (the two scenarios) and §8 (constraints on the design) are enough for a first read |
+| [Protocol](protocol.md) | What a row is, the invariants, and what the engine, the store, the driver and the trainer each do, event by event; inline mode for small scale |
+| [Consumer contract](consumer.md) | What a trainer gets from `read_sample`, what each field and failure means, and what the trainer must do |
+| [Experiments](experiments.md) | Measurements on DeepSeek-V4.1-Flash: capacity, correctness per design, overhead, scale, the store, and the correctness hardening |
+| [Design space](design_space.md) | The alternatives for each mechanism, why the protocol picks what it picks, and what was not adopted |
 
 ## The requirement, from first principles
 
@@ -30,7 +32,8 @@ The trainer replays a row to reproduce the computation that produced a sampled t
 ## Conclusions
 
 - **Delivery is block-wise and session-scoped.** Each full KV block is written when it fills, to `<job>/<session>/<block_hash>`; at request end a tail and a manifest are written, and only then is the response sent. Release deletes the session prefix in one call (0.2–1 ms).
-- **The delivery pool doubles as the session's prefix cache (P-S).** A prefix hit is allowed only up to what the session already published, so rows for hits are always in the pool. Cross-session hits (shared system prompts) are truncated, at <1% of prefill. No engine-side row cache is needed.
+- **The delivery pool doubles as the session's prefix cache (P-S).** A prefix hit is allowed only up to what the session already published, so rows for hits are always in the pool and store mode needs no engine-side row cache. Cross-session hits (shared system prompts) are truncated: each session computes a shared prefix once itself.
+- **Inline mode for small scale.** Rows come back in the response, `[aux_start, rows)` per turn, with no store, session or trajectory. Rows for prefix hits come from an engine-local block-row cache allocated and evicted with the KV (c1), per replica and lost on restart (protocol §12).
 - **Objects live on the store's local SSD; memory is a cache.** Each Mooncake holder offloads evicted objects to its own NVMe directory, so a listed row is never lost and the store's memory no longer has to hold every session in flight. The driver admits sessions by free disk, releases with force removal, and aborts the step when a holder dies or puts stop landing. At 512 sessions × 14.6K context, an 8 GB memory segment over SSD ran 1–2% slower than a 96 GB pinned pool, with nothing missing. Offload at put time loses objects silently and is not used. Without SSD, objects are pinned and admission follows the pool, as before; every run either way had 0 missing rows.
 - **Engine events need explicit handling, and each was found and fixed by test.** Preemption, in-flight weight updates (`pause` + `reset_prefix_cache`), write failures, prefix hits that end mid-block, forks, and speculative decoding each break a naive implementation; the protocol lists what the engine does in each case.
 - **Verify against an independent reference.** For prefix-hit positions the engine's own inline rows are read back from the same store, so "delivered = inline" cannot see delivery errors there. Correctness is checked against each trajectory's own first computation, dumped by the engine.

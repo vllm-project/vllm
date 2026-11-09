@@ -30,6 +30,14 @@ The sampled token's logprob is returned inline with the response; that number is
 - *Trajectory*: the sequence of requests whose prompts extend each other (the turns of one agent rollout, one GRPO sample, one fork branch).
 - *Session*: the consumption unit, released together: a GRPO group, a trajectory tree, one agent rollout. A session contains one or more trajectories.
 - *Weight version*: incremented by every weight update the engine applies.
+- *Generation*: the engine's store namespace. A weight update that resets the prefix cache starts a new one (§6.6).
+
+**Two delivery modes.**
+
+- *Store mode*, the subject of §3–§11: rows go to a store keyed per session, and the store doubles as the session's prefix cache, so rows for prefix-hit positions are always there (§6.2). The design space calls this design P-S ("pool as session cache").
+- *Inline mode* (§12), for small scale: rows come back in the response. Rows for prefix-hit positions come from an engine-local block-row cache, allocated and evicted with the KV; the design space calls that cache c1.
+
+The store is Mooncake: a master places objects on holders, each a process that contributes a memory segment and, by default, a local SSD directory (§8, §9).
 
 **The right row.** For every position of a trajectory, the delivered row is the one from the first computation of that position in the trajectory, i.e. the computation whose KV or logits the trajectory went on to use. Later computations of the same position (next-turn re-prefill of an unfinished block, recomputation after preemption, a prefill overlapping a speculative verification) never replace it. For a fork, positions before the fork point belong to the parent trajectory.
 
@@ -68,14 +76,14 @@ Sampling-parameter constraints (when requesting `topk_logprobs`, `sampling_mask`
 
 - `status` is always present when `aux_outputs` was requested; `unavailable` only if the store is unreachable. A response without `aux` to a request that asked for it is an error.
 - `<req>` is the caller-visible request id (engine-internal ids carry a random suffix).
-- **Inline mode** (small scale): data in the response, nothing in a store. Delivery needs no session or trajectory. The request sets the start of the rows it wants to `aux_start`, the end of what the framework already holds, and the response returns `[aux_start, rows)`; the framework keeps earlier turns' rows and concatenates them, so a next turn's re-prefill of the previous turn's unfinished block is not returned again. Rows for prefix-hit positions inside that range come from the engine-local block-row cache (c1), allocated and evicted with the KV and scoped to the engine's generation. That cache is per-replica engine state, lost on a restart; when a hit's block is no longer cached, the position is recomputed and the row returned is the computation this request actually used.
+- **Inline mode** (small scale) returns the rows in the response instead of the store; it is specified in §12.
 
 **Manifest** (one per request, covering the whole sequence `[0, rows)`):
 
 | Field | Meaning |
 |---|---|
 | `key_prefix`, `tail_key` | `<job>/<session>` and the R3 tail key; readers build every object key from these |
-| `blocks` | ordered object names of the full blocks; usually the block hash, `hash~<tag>` for a trajectory's own copy (§5), `hash~r` never appears |
+| `blocks` | ordered object names of the full blocks: usually the block hash; `hash~<tag>` when the trajectory keeps its own copy of a block another trajectory stored at a different weight version (§5); `hash~r` never appears |
 | `tail_start`, `tail_nbytes` | the tail object covering `[tail_start, rows)`; it can span several blocks |
 | `rows` | rows covered; can exceed `L−1` (see §7) |
 | `weight_versions` | `[[start, version], ...]` covering `[0, rows)`, describing the stored objects |
@@ -173,7 +181,7 @@ A normal abort writes a manifest for the computed positions. Request-private obj
 
 ### 6.11 Full-depth capture on models with sliding-window layers
 
-**Bounded replay.** On DeepSeek-V4.1 only layers up to 20 keep KV for every row; the rest of layer 20 and layers 21–39 attend through a 128-row sliding window. By default vLLM does not cache that window per row. On a prefix hit, and for every new prompt row, it runs those layers in eager prefill steps on each request's trailing rows only, in stages that shrink by 127 rows per layer. Cells of those layers on other rows are never computed exactly. Asking for exact KV-following rows at every position under bounded replay forces every new row through the stages, which cost about 41% of throughput at the top scenario (experiments: engine overhead).
+**Bounded replay.** On DeepSeek-V4.1 only layers up to 20 keep KV for every row; the rest of layer 20 and layers 21–39 attend through a 128-row sliding window. By default vLLM does not cache that window per row. On a prefix hit, and for every new prompt row, it runs those layers in eager prefill steps on each request's trailing rows only, in stages that shrink by 127 rows per layer. Cells of those layers on other rows are never computed exactly. Asking for exact KV-following rows at every position under bounded replay forces every new row through the stages, which cost about 41% of throughput in the top scenario of the experiments (512K context, 51 sessions in flight per replica; experiments: engine overhead).
 
 **Full depth.** Aux capture runs with bounded replay off: `CacheConfig.swa_bounded_replay=False` (`--swa-bounded-replay=False`). Every new row runs all 40 layers. The sliding-window KV is prefix-cached only as snapshots of the last 128 rows of every window layer:
 
@@ -290,11 +298,22 @@ Training framework:
 | Multiple policies / LoRAs | a session per policy; separate in-flight caps |
 | Job end | delete by job prefix, report the count |
 
-## 12. Known limits
+## 12. Inline mode
+
+At small scale (one node, short multi-turn agents) rows are returned in the response and nothing goes to a store. Delivery needs no session or trajectory.
+
+- **Range.** The request sets `aux_start` to the end of the rows the framework already holds, and the response returns `[aux_start, rows)`. The framework keeps earlier turns' rows and concatenates them, so a next turn's re-prefill of the previous turn's unfinished block is not returned again.
+- **Prefix hits.** Rows for hit positions inside that range come from the engine-local block-row cache (c1), allocated and evicted with the KV and scoped to the engine's generation (§6.6). For R3 it costs about 1% of the KV on DeepSeek-V4.1-Flash; for the indexer about 54 GB raw per engine (scenarios §10).
+- **Cache loss.** The cache is per-replica engine state, lost on a restart. When a hit's block is no longer cached, the position is recomputed, and the row returned is the computation this request actually used.
+- **Top-k logprobs** are returned inline today in either mode (§1).
+- **Limits.** The cache reads hit rows from a generation-scoped base store. Its version records describe spliced rows rather than the base payload, and a request parked across a generation change reads the new generation. Store mode does not use this path.
+
+Design c1 in experiment X1 delivered every row of all 112 requests, equal to the inline rows (experiments: designs compared).
+
+## 13. Known limits
 
 - **Per-trajectory state lives in the engine worker.** The previous tail, the version record and the names a trajectory holds are kept in the writing worker's memory, so a trajectory's next turn must return to the same replica, and a replica restart loses its trajectories. A follow-up can move that state into the store: each request carries the previous request's manifest reference (the manifest already holds the tail, versions and blocks), and the engine reads it when the request starts. A next turn could then go to any replica and survive restarts, for one manifest read per request (about a millisecond), with deduplication shared by replicas writing one session (or occasional extra copies accepted). Inferring the trajectory from token prefixes, or a global lifetime keyed by block hash and version, were considered and are not worth their cost.
 - **Release is per session.** A long agentic session (hundreds of trajectories, up to about a day) keeps every object until it is released, including the copies of blocks recomputed at a new version after each weight update resets the GPU prefix cache. GRPO groups are trained within one step, so session release fits them; long sessions are the costly case. Two follow-ups are possible: release a trajectory's private objects (its tails, manifests and `hash~<tag>` copies) when that trajectory is consumed, by ownership alone; or release single blocks by reference counts kept per session, which needs the writer to know who lists each name, the trainer to report each request it consumed, and the engine to stop hitting deleted blocks.
 - **Teacher scoring at prompt positions.** On-policy distillation runs a teacher over the student's sequence as a prompt and needs the teacher's top-k logprobs (or hidden states) at those prompt positions. Top-k and hidden states are captured at generated positions only; prompt positions need a capture over `[aux_start, P)` stored like blocks.
 - **Contexts that are not append-only** (history reasoning dropped, rewritten or truncated context) re-prefill from the rewrite point every turn: rows are correct, but prefix reuse and the decode-end snapshot (§6.11) do not apply, and the full-depth recompute grows with every rewritten turn.
 - **A prefix hit does not say which computation produced the KV it hits.** The session's first copy of a block is listed for every hit on that hash. This is wrong only if all three of the following happen: the KV of the first computation is evicted from every cache tier; another trajectory recomputes the block at a different weight version (it keeps its own copy, and its KV is now the cached one); and a third trajectory hits that KV. Two fixes are possible. One is to follow vLLM's KV cache events (stored / removed, per block hash) so the worker knows which object the cached KV belongs to. The other is to carry R3 in the KV cache itself (#64383), which makes rows follow the KV by construction. The indexer would still need the first.
-- **The engine-local row cache (c1)** reads hit rows from a generation-scoped base store. Its version records describe spliced rows rather than the base payload, and a request parked across a generation change reads the new generation. The P-S design (§6.2) does not use this path.
