@@ -10,9 +10,13 @@ updated residual with its slice of the mixer weight on BF16 tensor cores. The we
 rounded to TF32 and split into BF16 high and low parts that sum to it exactly
 (`prepare_boundary_weight`), so every product equals the TF32 product of DeepGEMM's
 Mega mHC. A 16-CTA cluster owns a tile of tokens and its CTAs push their partial mixes
-and sums of squares to the CTA that owns the token through distributed shared memory, so
-up to `MAX_TOKENS` tokens run in one wave of one kernel. Every reduction runs in a
-fixed order, so results are deterministic.
+and sums of squares to the CTA that owns the token through distributed shared memory.
+
+The weight fragments stream from global memory (L2) straight into the mma operands
+instead of being staged in shared memory, so a CTA needs at most ~110 KB of shared
+memory and two CTAs share an SM: 14 clusters are co-resident on GB300 and up to
+`MAX_TOKENS` tokens run in one wave of one kernel. Every reduction runs in a fixed
+order, so results are deterministic.
 """
 
 from collections.abc import Callable
@@ -28,20 +32,29 @@ from cutlass.utils import SmemAllocator
 from vllm.cute_utils.cvt import fp32x2_to_bf16x2
 
 CLUSTER = 16
-THREADS = 640
+# Two CTAs of 320 threads (96 registers each) and at most ~110 KB of shared memory share
+# an SM; 14 such 16-CTA clusters are co-resident on GB300.
+THREADS = 320
+CTAS_PER_SM = 2
 MMA_WARPS = 10
+CLUSTERS = 14
 MULT = 4
 MIXES = 24
 # floats per pushed token partial: 24 mixes, sum of squares of residual_cur, padding
 RECV = 28
-TILE = 28
-# Seven 16-CTA clusters with this kernel's shared memory are co-resident on GB300: one
-# wave of tiles.
-CLUSTERS = 7
+TILE = 24
 MAX_TOKENS = CLUSTERS * TILE
-# Tile sizes the single-pass kernel is compiled for; a batch takes the smallest that
-# fills one wave.
-TILES = (14, 18, 21, 24, TILE)
+# Tokens per cluster: a batch takes ceil(tokens / CLUSTERS).
+TILES = tuple(range(1, TILE + 1))
+# k16 steps of weight fragments each MMA warp keeps in flight.
+PREFETCH = 4
+# Per tile, measured on GB300: (one 8-wide chunk per thread in every elementwise pass,
+# the first cluster prefetches the weight into L2 at the start).
+_TILE_CONFIG = {
+    **{tile: (True, False) for tile in (9, 10, 11, 12, 13, 14, 17, 18, 19, 21, 23)},
+    16: (False, True),
+    22: (False, True),
+}
 
 _ATT = llvm.AsmDialect.AD_ATT
 
@@ -77,6 +90,19 @@ def lds_v4_u32(addr, *, loc=None, ip=None):
         ip=ip,
     )
     return _fields(out, 4, T.i32(), Uint32, loc, ip)
+
+
+@dsl_user_op
+def lds_v4_f32(addr, *, loc=None, ip=None):
+    out = _asm(
+        llvm.StructType.get_literal([T.f32()] * 4),
+        [Int32(addr)],
+        "ld.shared.v4.f32 {$0, $1, $2, $3}, [$4];",
+        "=f,=f,=f,=f,r",
+        loc=loc,
+        ip=ip,
+    )
+    return _fields(out, 4, T.f32(), Float32, loc, ip)
 
 
 @dsl_user_op
@@ -143,13 +169,15 @@ def sts_u32(addr, w, *, loc=None, ip=None):
 
 
 @dsl_user_op
-def ldg_v4_u32(addr, *, loc=None, ip=None):
+def ldg_v4_u32(addr, ordered=False, *, loc=None, ip=None):
+    """`ordered` keeps the load where it is issued (a prefetch), instead of letting
+    the compiler sink it to its first use."""
     out = _asm(
         llvm.StructType.get_literal([T.i32()] * 4),
         [Int64(addr)],
         "ld.global.nc.v4.u32 {$0, $1, $2, $3}, [$4];",
         "=r,=r,=r,=r,l",
-        side_effects=False,
+        side_effects=ordered,
         loc=loc,
         ip=ip,
     )
@@ -210,6 +238,18 @@ def bulk_g2s(dst, src, size, bar, *, loc=None, ip=None):
         [Int32(dst), Int64(src), Int32(size), Int32(bar)],
         "cp.async.bulk.shared::cta.global.mbarrier::complete_tx::bytes [$0], [$1], $2, [$3];",  # noqa: E501
         "r,l,r,r",
+        loc=loc,
+        ip=ip,
+    )
+
+
+@dsl_user_op
+def bulk_prefetch_l2(src, size, *, loc=None, ip=None):
+    _asm(
+        None,
+        [Int64(src), Int32(size)],
+        "cp.async.bulk.prefetch.L2.global [$0], $1;",
+        "l,r",
         loc=loc,
         ip=ip,
     )
@@ -379,35 +419,49 @@ def lagged_collapse(cur, pre, ssq_rc, ssq_li):
 
 class MhcBoundaryKernel:
     """`tile` (at most `TILE`) tokens per 16-CTA cluster; CTA `r` owns hidden `[r
-    * slice, (r + 1) * slice)`. Each token's arithmetic is the same at every tile
-    size.
+    * slice, (r + 1) * slice)`.
 
     Mixer GEMM per CTA: `[48, K slice] x [K slice, tokens]` with rows 0-23 the high
     and rows 24-47 the low BF16 part of the weight. Warp `w < MMA_WARPS` takes the k16
-    steps `[w * steps_per_warp, (w + 1) * steps_per_warp)`.
+    steps `[w * steps_per_warp, (w + 1) * steps_per_warp)`; its A fragments stream from
+    global memory `PREFETCH` steps ahead.
     """
 
     def __init__(self, hidden: int, sinkhorn_iters: int, tile: int):
         self.tile = tile
         self.hidden = hidden
         self.sinkhorn_iters = sinkhorn_iters
+        one_chunk, self.l2_prefetch = _TILE_CONFIG.get(tile, (False, False))
         self.slice = hidden // CLUSTER
         self.chunks = self.slice // 8
-        self.parts = (
-            self.chunks // 2
-        )  # elementwise threads per token, two 8-wide chunks each
+        self.parts = self.chunks // 2  # threads per token at two 8-wide chunks each
         self.k_steps = MULT * self.slice // 16
         self.steps_per_warp = self.k_steps // MMA_WARPS
         self.n_tiles = (self.tile + 7) // 8
-        self.cols = 40  # padded token columns of the per-warp partials
+        # padded token columns of the per-warp partials
+        self.cols = 40 if tile > 16 else 24
         self.owned = (
             self.tile + CLUSTER - 1
         ) // CLUSTER  # at most 2: warp 0 runs 16 lanes per owned token
         self.li_words = (self.tile + 3) // 4 * 4
-        self.w_bytes = self.k_steps * 32 * 48
+        # Elementwise passes (first token, tokens, 8-wide chunks per thread). A pass
+        # gives each thread one chunk when its tokens fit (2 * parts threads each),
+        # else two; tokens after the first pass are staged in shared memory by bulk
+        # copies while it runs.
+        one = THREADS // (2 * self.parts)
+        self.passes: list[tuple[int, int, int]] = []
+        first = 0
+        while first < tile:
+            if one_chunk or tile - first <= one:
+                self.passes.append((first, min(tile - first, one), 1))
+            else:
+                self.passes.append((first, min(tile - first, 2 * one), 2))
+            first += self.passes[-1][1]
+        self.staged = tile - self.passes[0][1]
         # residual_cur rows in k16 block order; 16 bytes of padding per 32-wide chunk
         # and per row keep the elementwise stores and the ldmatrix rows on distinct
-        # banks.
+        # banks. A staged token's raw residual and x slices land in its residual_cur
+        # and li rows, which the elementwise pass overwrites in place.
         self.r_chunk = 8 * 32 + 16
         self.r_row = self.slice // 32 * self.r_chunk + 16
         self.x_row = self.slice * 2
@@ -420,13 +474,14 @@ class MhcBoundaryKernel:
             off += size
             return start
 
-        # The weight fragments are dead after the mixer GEMM; its per-warp partials
-        # reuse the space.
-        self.o_w = take(max(self.w_bytes, MMA_WARPS * MIXES * self.cols * 4), 128)
-        self.o_r = take(self.tile * self.r_row)
+        # residual_cur is dead after the mixer GEMM; the per-warp partials reuse it.
+        self.o_r = take(
+            max(self.tile * self.r_row, MMA_WARPS * MIXES * self.cols * 4), 128
+        )
         self.o_x = take(self.tile * self.x_row)
-        self.o_prc = take(self.tile * self.parts * 4)
-        self.o_pli = take(self.tile * self.parts * 4)
+        # per-thread sums of squares of residual_cur and li, [2 parts][tile] each
+        self.o_prc = take(self.tile * 2 * self.parts * 4)
+        self.o_pli = take(self.tile * 2 * self.parts * 4)
         self.o_cta = take(self.tile * RECV * 4)
         self.o_cli = take(self.li_words * 4)
         self.o_rmix = take(self.owned * CLUSTER * RECV * 4)
@@ -435,6 +490,8 @@ class MhcBoundaryKernel:
         self.o_rows = take(2 * MULT * MULT * 4)
         self.o_rstd = take(self.li_words * 4)
         self.o_hcw = take(32 * 4)
+        # pre / post / comb of the staged tokens: [pre | post | comb] blocks
+        self.o_coef = take(max(self.staged, 1) * 24 * 4)
         self.o_bar = take(16, 8)
         self.smem_bytes = off
 
@@ -445,7 +502,6 @@ class MhcBoundaryKernel:
             hc_mult == MULT
             and hidden % 512 == 0
             and (MULT * slice_ // 16) % MMA_WARPS == 0
-            and TILE * (slice_ // 16) <= THREADS
         )
 
     @cute.jit
@@ -499,6 +555,10 @@ class MhcBoundaryKernel:
             cluster=[CLUSTER, 1, 1],
             stream=stream,
             use_pdl=True,
+            min_blocks_per_mp=CTAS_PER_SM,
+            # All of the unified L1 as shared memory: the carveout the compiler derives
+            # from the block's size can be too small for two CTAs at some tiles.
+            preferred_smem_carveout=100,
         )
 
     @cute.kernel
@@ -532,24 +592,29 @@ class MhcBoundaryKernel:
         rank = bid % CLUSTER
         t0 = (bid // CLUSTER) * self.tile
         valid = cutlass.min(self.tile, residual.shape[0] - t0)
+        p0 = self.passes[0][1]
+        staged = self.staged
 
         smem = SmemAllocator()
         sbase = smem.allocate(self.smem_bytes, 128).toint()
-        s_w = sbase + self.o_w
         s_r = sbase + self.o_r
         s_x = sbase + self.o_x
         s_hcw = sbase + self.o_hcw
-        bar_w = sbase + self.o_bar
-        bar_x = bar_w + 8
+        s_coef = sbase + self.o_coef
+        bar_in = sbase + self.o_bar
+        bar_x = bar_in + 8
         hslice = Int64(rank * S)
         owned_here = (self.tile - rank + CLUSTER - 1) // CLUSTER
+        # this CTA's fragments of the stacked mixer: [k16 step][3 m tiles][32 lanes][4]
+        g_frag = weight.iterator.toint() + Int64(rank) * self.k_steps * 1536
 
-        w_chunks = 10
         if tid == 0:
-            mbar_init(bar_w, 1)
+            mbar_init(bar_in, 1)
             mbar_init(bar_x, 1)
             mbar_fence_init()
-            mbar_expect_tx(bar_w, self.w_bytes)
+            mbar_expect_tx(
+                bar_in, cutlass.max(valid - p0, 0) * ((MULT + 1) * S * 2 + 24 * 4)
+            )
             mbar_expect_tx(
                 bar_x, owned_here * CLUSTER * RECV * 4 + CLUSTER * self.li_words * 4
             )
@@ -558,83 +623,138 @@ class MhcBoundaryKernel:
         # first push.
         cute.arch.cluster_arrive_relaxed()
 
-        # ---- the weight slice in a few bulk copies; hc scale and base to shared memory
-        jw = tid - (THREADS - w_chunks)
-        if jw >= 0:
-            size = self.w_bytes // w_chunks
-            bulk_g2s(
-                s_w + jw * size,
-                weight.iterator.toint() + Int64(rank) * self.w_bytes + jw * size,
-                size,
-                bar_w,
-            )
-        elif (tid >= 256) & (tid < 256 + 3 + MIXES):
+        # ---- hc scale and base to shared memory
+        if (tid >= 256) & (tid < 256 + 3 + MIXES):
             i = tid - 256
             if i < 3:
                 sts_f32(s_hcw + i * 4, ldg_f32(scale.iterator.toint() + i * 4))
             else:
                 sts_f32(s_hcw + i * 4, ldg_f32(base.iterator.toint() + (i - 3) * 4))
+        # At some tiles the first cluster warms L2 with every slice's fragments.
+        prefetchers = CLUSTER if self.l2_prefetch else 0
+        if (tid < MMA_WARPS) & (bid < prefetchers):
+            bulk_prefetch_l2(
+                g_frag + tid * self.steps_per_warp * 1536,
+                self.steps_per_warp * 1536,
+            )
 
         # Everything above reads only weights; the activations come from the previous
         # kernel.
         cute.arch.griddepcontrol_wait()
 
-        # ---- elementwise pass: residual update, lagged collapse li, sums of squares.
-        # Thread (t, part)
-        # handles the 8-wide chunks part and part + PARTS of token t, loaded straight to
-        # registers.
-        t = tid // PARTS
-        part = tid % PARTS
-        if t < valid:
-            gt = Int64(t0 + t)
-            pre = ldg_v4_f32(pre_lag.iterator.toint() + gt * 16)
-            pw = ldg_v4_f32(post.iterator.toint() + gt * 16)
-            cm = [
-                ldg_v4_f32(comb.iterator.toint() + gt * 64 + j * 16)
-                for j in range(MULT)
-            ]
-            g_row = residual.iterator.toint() + (gt * MULT * H + hslice) * 2
-            g_xrow = x.iterator.toint() + (gt * H + hslice) * 2
+        # ---- stage the tokens after the first elementwise pass: their pre / post /
+        # comb rows and this CTA's slices of their residual and x rows
+        if (tid == THREADS - 1) & (valid > p0):
+            n = valid - p0
+            g0 = Int64(t0 + p0)
+            bulk_g2s(s_coef, pre_lag.iterator.toint() + g0 * 16, n * 16, bar_in)
+            bulk_g2s(
+                s_coef + staged * 16, post.iterator.toint() + g0 * 16, n * 16, bar_in
+            )
+            bulk_g2s(
+                s_coef + staged * 32, comb.iterator.toint() + g0 * 64, n * 64, bar_in
+            )
+        if tid < cutlass.max(valid - p0, 0) * (MULT + 1):
+            bt = tid // (MULT + 1) + p0
+            bj = tid % (MULT + 1)
+            gtb = Int64(t0 + bt)
+            if bj < MULT:
+                bulk_g2s(
+                    s_r + bt * self.r_row + bj * S * 2,
+                    residual.iterator.toint() + ((gtb * MULT + bj) * H + hslice) * 2,
+                    S * 2,
+                    bar_in,
+                )
+            else:
+                bulk_g2s(
+                    s_x + bt * self.x_row,
+                    x.iterator.toint() + (gtb * H + hslice) * 2,
+                    S * 2,
+                    bar_in,
+                )
+
+        # ---- elementwise passes: residual update, lagged collapse li, sums of squares.
+        # Thread (t, part) of a pass handles chunk part (and part + PARTS) of token t;
+        # the first pass loads straight to registers, later ones read the staged rows.
+        # Thread sums go to slot `part` of [2 PARTS][tile]; a two-chunk thread zeroes
+        # slot part + PARTS.
+        for pi in cutlass.range_constexpr(len(self.passes)):
+            first, count, per_thread = self.passes[pi]
+            NP = 2 * PARTS // per_thread
+            t = first + tid // NP
+            part = tid % NP
+            tc = cutlass.min(t, valid - 1)
+            gt = Int64(t0 + tc)
+            chunks = [part] if per_thread == 1 else [part, part + PARTS]
             rws = []
             xws = []
-            for half in cutlass.range_constexpr(2):
-                c = part + half * PARTS
-                rws.append(
-                    [ldg_v4_u32(g_row + j * H * 2 + c * 16) for j in range(MULT)]
-                )
-                xws.append(ldg_v4_u32(g_xrow + c * 16))
-            ssq_rc = (Float32(0.0), Float32(0.0))
-            ssq_li = (Float32(0.0), Float32(0.0))
-            for half in cutlass.range_constexpr(2):
-                c = part + half * PARTS
-                r_addr = s_r + t * self.r_row + (c // 4) * self.r_chunk + (c % 4) * 4
-                cur = residual_update(pw, cm, xws[half], rws[half])
-                for s in cutlass.range_constexpr(MULT):
-                    stg_v4_u32(
-                        residual_out.iterator.toint()
-                        + ((gt * MULT + s) * H + hslice + c * 8) * 2,
-                        cur[s],
+            if cutlass.const_expr(pi == 0):
+                pre = ldg_v4_f32(pre_lag.iterator.toint() + gt * 16)
+                pw = ldg_v4_f32(post.iterator.toint() + gt * 16)
+                cm = [
+                    ldg_v4_f32(comb.iterator.toint() + gt * 64 + j * 16)
+                    for j in range(MULT)
+                ]
+                g_row = residual.iterator.toint() + (gt * MULT * H + hslice) * 2
+                g_xrow = x.iterator.toint() + (gt * H + hslice) * 2
+                for c in chunks:
+                    rws.append(
+                        [ldg_v4_u32(g_row + j * H * 2 + c * 16) for j in range(MULT)]
                     )
-                # Word w of stream s lands in k16 block 2 * s + w // 2, fragment column
-                # half w % 2.
-                for s in cutlass.range_constexpr(MULT):
-                    for w in cutlass.range_constexpr(4):
-                        sts_u32(
-                            r_addr + (2 * s + w // 2) * 32 + (w % 2) * 16, cur[s][w]
+                    xws.append(ldg_v4_u32(g_xrow + c * 16))
+            else:
+                if cutlass.const_expr(pi == 1):
+                    mbar_wait(bar_in, 0)
+                ci = cutlass.max(tc - p0, 0)
+                pre = lds_v4_f32(s_coef + ci * 16)
+                pw = lds_v4_f32(s_coef + staged * 16 + ci * 16)
+                cm = [
+                    lds_v4_f32(s_coef + staged * 32 + ci * 64 + j * 16)
+                    for j in range(MULT)
+                ]
+                row = s_r + tc * self.r_row
+                for c in chunks:
+                    rws.append(
+                        [lds_v4_u32(row + j * S * 2 + c * 16) for j in range(MULT)]
+                    )
+                    xws.append(lds_v4_u32(s_x + tc * self.x_row + c * 16))
+                # every raw read of this pass's rows precedes the in-place writes
+                cute.arch.sync_threads()
+            if (t < valid) & (tid < count * NP):
+                ssq_rc = (Float32(0.0), Float32(0.0))
+                ssq_li = (Float32(0.0), Float32(0.0))
+                for ci_ in cutlass.range_constexpr(len(chunks)):
+                    c = chunks[ci_]
+                    r_addr = (
+                        s_r + t * self.r_row + (c // 4) * self.r_chunk + (c % 4) * 4
+                    )
+                    cur = residual_update(pw, cm, xws[ci_], rws[ci_])
+                    for s in cutlass.range_constexpr(MULT):
+                        stg_v4_u32(
+                            residual_out.iterator.toint()
+                            + ((gt * MULT + s) * H + hslice + c * 8) * 2,
+                            cur[s],
                         )
-                li, ssq_rc, ssq_li = lagged_collapse(cur, pre, ssq_rc, ssq_li)
-                sts_v4_u32(s_x + t * self.x_row + c * 16, li)
-            sts_f32(
-                sbase + self.o_prc + (part * self.tile + t) * 4, ssq_rc[0] + ssq_rc[1]
-            )
-            sts_f32(
-                sbase + self.o_pli + (part * self.tile + t) * 4, ssq_li[0] + ssq_li[1]
-            )
+                    # Word w of stream s lands in k16 block 2 * s + w // 2, fragment
+                    # column half w % 2.
+                    for s in cutlass.range_constexpr(MULT):
+                        for w in cutlass.range_constexpr(4):
+                            sts_u32(
+                                r_addr + (2 * s + w // 2) * 32 + (w % 2) * 16, cur[s][w]
+                            )
+                    li, ssq_rc, ssq_li = lagged_collapse(cur, pre, ssq_rc, ssq_li)
+                    sts_v4_u32(s_x + t * self.x_row + c * 16, li)
+                slot = (part * self.tile + t) * 4
+                sts_f32(sbase + self.o_prc + slot, ssq_rc[0] + ssq_rc[1])
+                sts_f32(sbase + self.o_pli + slot, ssq_li[0] + ssq_li[1])
+                if cutlass.const_expr(per_thread == 2):
+                    slot = ((part + PARTS) * self.tile + t) * 4
+                    sts_f32(sbase + self.o_prc + slot, Float32(0.0))
+                    sts_f32(sbase + self.o_pli + slot, Float32(0.0))
         cute.arch.sync_threads()
 
         # ---- mixer GEMM on m16n8k16 BF16: A = weight fragments, B = residual_cur
         # tokens
-        mbar_wait(bar_w, 0)
         warp = tid // 32
         lane = tid % 32
         g = lane // 4
@@ -645,10 +765,21 @@ class MhcBoundaryKernel:
         mk = ((lane // 8) % 2) * 8
         if warp < MMA_WARPS:
             acc = [[[Float32(0.0)] * 4 for _ in range(self.n_tiles)] for _ in range(3)]
-            for step in cutlass.range_constexpr(self.steps_per_warp):
-                kk = warp * self.steps_per_warp + step
-                frag = s_w + (kk * 32 + lane) * 48
-                a = [lds_v4_u32(frag + 16 * mt) for mt in range(3)]
+            spw = self.steps_per_warp
+            g_w = g_frag + warp * spw * 1536 + lane * 16
+            # A fragments of the stacked [high; low] mixer rows, coalesced 512-byte
+            # loads per m tile, issued PREFETCH steps ahead of their mma
+            pending = [
+                [ldg_v4_u32(g_w + st * 1536 + m * 512, True) for m in range(3)]
+                for st in range(min(PREFETCH, spw))
+            ]
+            for step in cutlass.range_constexpr(spw):
+                kk = warp * spw + step
+                a = [tuple(words) for words in pending[0]]
+                pending = pending[1:]
+                if cutlass.const_expr(step + PREFETCH < spw):
+                    nxt = g_w + (step + PREFETCH) * 1536
+                    pending.append([ldg_v4_u32(nxt + m * 512, True) for m in range(3)])
                 b = []
                 for pair in cutlass.range_constexpr((self.n_tiles + 1) // 2):
                     tok = cutlass.min(pair * 16 + mrow, self.tile - 1)
@@ -666,7 +797,8 @@ class MhcBoundaryKernel:
                         acc[mt][nt] = list(mma_bf16(a[mt], b[nt], acc[mt][nt]))
             # Rows g / g + 8 of the three m tiles are high g, high g + 8 | high g + 16,
             # low g | low g + 8, low g + 16, so each thread holds both parts of mixes g,
-            # g + 8 and g + 16.
+            # g + 8 and g + 16. The partials overwrite residual_cur once every warp is
+            # done reading it.
             cute.arch.barrier(barrier_id=1, number_of_threads=MMA_WARPS * 32)
             for nt in cutlass.range_constexpr(self.n_tiles):
                 col = nt * 8 + 2 * q
@@ -674,7 +806,7 @@ class MhcBoundaryKernel:
                     hi_t, hi_r = ((0, 0), (0, 2), (1, 0))[mi]
                     lo_t, lo_r = ((1, 2), (2, 0), (2, 2))[mi]
                     sts_v2_f32(
-                        s_w + ((warp * MIXES + mi * 8 + g) * self.cols + col) * 4,
+                        s_r + ((warp * MIXES + mi * 8 + g) * self.cols + col) * 4,
                         acc[hi_t][nt][hi_r] + acc[lo_t][nt][lo_r],
                         acc[hi_t][nt][hi_r + 1] + acc[lo_t][nt][lo_r + 1],
                     )
@@ -690,7 +822,7 @@ class MhcBoundaryKernel:
                 n = i // self.tile
                 tt = i % self.tile
                 parts = [
-                    lds_f32(s_w + ((w * MIXES + n) * self.cols + tt) * 4)
+                    lds_f32(s_r + ((w * MIXES + n) * self.cols + tt) * 4)
                     for w in range(MMA_WARPS)
                 ]
                 v = Float32(0.0)
@@ -702,9 +834,9 @@ class MhcBoundaryKernel:
                 kind = ii // self.tile
                 tt = ii % self.tile
                 src = sbase + self.o_prc + kind * (self.o_pli - self.o_prc) + tt * 4
-                parts = [lds_f32(src + j * self.tile * 4) for j in range(PARTS)]
+                parts = [lds_f32(src + j * self.tile * 4) for j in range(2 * PARTS)]
                 v = Float32(0.0)
-                for j in cutlass.range_constexpr(PARTS):
+                for j in cutlass.range_constexpr(2 * PARTS):
                     v = v + parts[j]
                 if kind == 0:
                     sts_f32(s_cta + (tt * RECV + MIXES) * 4, v)
@@ -921,18 +1053,19 @@ class MhcBoundaryKernel:
         return out
 
 
-def boundary_weight_shape(hidden: int) -> tuple[int, int, int, int]:
+def boundary_weight_shape(hidden: int) -> tuple[int, int, int, int, int]:
     """Shape of `prepare_boundary_weight`'s int32 fragments for `hidden`."""
-    return (CLUSTER, MULT * (hidden // CLUSTER) // 16, 32, 12)
+    return (CLUSTER, MULT * (hidden // CLUSTER) // 16, 3, 32, 4)
 
 
 def prepare_boundary_weight(fn: torch.Tensor) -> torch.Tensor:
-    """`fn [24, 4 * hidden]` -> int32 mma A fragments `[16 slices, k16 steps, 32
-    lanes, 12]`.
+    """`fn [24, 4 * hidden]` -> int32 mma A fragments `[16 slices, k16 steps, 3 m16
+    tiles, 32 lanes, 4]`.
 
     The weight is rounded to TF32 (nearest, ties away, as the TF32 tensor-core path) and
-    split into BF16 high and low parts whose sum is exact; the 12 words of a lane are
-    its A fragments of the three m16 tiles of the stacked `[high; low]` rows. k16 step
+    split into BF16 high and low parts whose sum is exact; the 4 words of (m tile, lane)
+    are the lane's A fragment of that m16 tile of the stacked `[high; low]` rows, so a
+    warp loads one m tile of one k16 step as 512 contiguous bytes. k16 step
     `8 c + kb` of a slice is chunk `c` (hidden `[32 c, 32 c + 32)`), stream `kb
     // 2`; fragment columns `2q, 2q + 1` and `2q + 8, 2q + 9` hold hidden `8 q + 4
     (kb % 2) + {0, 1}` and `+ {2, 3}` of the chunk.
@@ -957,12 +1090,13 @@ def prepare_boundary_weight(fn: torch.Tensor) -> torch.Tensor:
     upper = torch.tensor([0, 0, 2, 2, 0, 0, 2, 2, 0, 0, 2, 2], device=dev).view(
         1, 1, 1, -1
     )
-    return pairs[rows + g, (base + upper) // 2].contiguous()
+    frags = pairs[rows + g, (base + upper) // 2]
+    return frags.view(CLUSTER, MULT * S // 16, 32, 3, 4).transpose(2, 3).contiguous()
 
 
 def boundary_tile(tokens: int) -> int:
-    """Tokens per cluster: the smallest of `TILES` that runs `tokens` in one wave,
-    so small batches spread over every co-resident cluster."""
+    """Tokens per cluster: the smallest of `TILES` that runs `tokens` in one wave of
+    `CLUSTERS` clusters, so small batches spread over every co-resident cluster."""
     return next(tile for tile in TILES if tile * CLUSTERS >= tokens)
 
 

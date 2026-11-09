@@ -878,7 +878,7 @@ def test_deep_gemm_mega_mhc_correctness(num_tokens, hidden_size):
 
 
 @pytest.mark.skipif(not HAS_TILELANG_MHC, reason="TileLang MHC support required")
-@pytest.mark.parametrize("num_tokens", [1, 17, 128, 196])
+@pytest.mark.parametrize("num_tokens", [1, 17, 98, 128, 196, 197, 252, 336])
 def test_mhc_boundary_correctness(num_tokens):
     if mhc_boundary_weight(5120, 4, torch.device(DEVICE)) is None:
         pytest.skip("The CuTe DSL mHC boundary needs SM100 and CuTe DSL")
