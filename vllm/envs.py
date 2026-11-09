@@ -1275,8 +1275,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_SKIP_P2P_CHECK": lambda: os.getenv("VLLM_SKIP_P2P_CHECK", "1") == "1",
     # How a PP stage sends its intermediate tensors to the next stage.
     # "copy_engine" uses CUDA copy engines instead of NCCL kernels; it needs
-    # TP=1 and NVLink-connected PP GPUs on one node, and fails startup without.
-    # "auto" uses copy engines when every PP rank can, and NCCL otherwise.
+    # PCP=1 and each PP chain's GPUs on one node, all NVLink-connected, and
+    # fails startup without. "auto" uses copy engines when every rank can, and
+    # NCCL otherwise.
     "VLLM_PP_TRANSPORT": env_with_choices(
         "VLLM_PP_TRANSPORT", "auto", ["auto", "nccl", "copy_engine"]
     ),
