@@ -74,6 +74,13 @@ class CuMemAllocator:
     will be loaded back to GPU memory, and the rest of the tensors will
     have empty memory (zeroed on ROCm).
 
+    The `_create_and_map`, `_unmap_and_release`, `_create_cpu_backup`,
+    `_release_cpu_backup`, `_get_pluggable_allocator`, and
+    `_use_memory_pool_with_allocator` methods are subclass hooks for
+    out-of-tree device allocators. Their names and signatures form the
+    subclassing contract; renaming them or changing their signatures is
+    a breaking change.
+
     Why it needs to be a singleton?
     When allocated tensors are garbage collected, PyTorch will call
     the free callback, which will call the `python_free_callback` method.
@@ -151,10 +158,9 @@ class CuMemAllocator:
 
     def _get_pluggable_allocator(self) -> torch.cuda.memory.CUDAPluggableAllocator:
         init_module(self.python_malloc_callback, self.python_free_callback)
-        new_alloc = torch.cuda.memory.CUDAPluggableAllocator(
+        return torch.cuda.memory.CUDAPluggableAllocator(
             lib_name, "my_malloc", "my_free"
         )
-        return new_alloc
 
     @contextmanager
     def _use_memory_pool_with_allocator(
