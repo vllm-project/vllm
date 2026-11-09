@@ -64,7 +64,8 @@ void expandInputRowsKernelLauncher(
     int* expanded_source_row_to_expanded_dest_row, int* permuted_idx,
     int64_t const* expert_first_token_offset, int64_t const num_rows,
     int64_t const* num_valid_tokens_ptr, int64_t const cols, int const k,
-    int num_local_experts, cudaStream_t stream);
+    int num_local_experts, float const* unpermuted_scale, float* permuted_scale,
+    int64_t const scale_cols, cudaStream_t stream);
 
 template <class T, class OutputType>
 void finalizeMoeRoutingKernelLauncher(
@@ -73,7 +74,7 @@ void finalizeMoeRoutingKernelLauncher(
     int64_t const num_rows, int64_t const cols, int64_t const k,
     int64_t const* num_valid_ptr, cudaStream_t stream);
 
-void preprocessTopkIdLauncher(int* topk_id_ptr, int size,
+void preprocessTopkIdLauncher(const int* topk_id_ptr, int* out_ptr, int size,
                               const int* expert_map_ptr, int num_experts,
                               cudaStream_t stream);
 
