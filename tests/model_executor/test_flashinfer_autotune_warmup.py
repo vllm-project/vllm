@@ -17,13 +17,12 @@ import torch
 import vllm.model_executor.warmup.kernel_warmup as warmup
 import vllm.utils.flashinfer as fi_utils
 from vllm.config.utils import hash_config
-from vllm.distributed.utils import stateless_init_torch_distributed_process_group
+from vllm.distributed.utils import init_gloo_process_group
 from vllm.model_executor.warmup.kernel_warmup import (
     _flashinfer_autotune_token_counts,
     _run_flashinfer_autotune_dummy_runs,
     flashinfer_autotune,
 )
-from vllm.utils.network_utils import get_open_port
 
 pytestmark = pytest.mark.cpu_test
 
@@ -194,10 +193,21 @@ def test_flashinfer_autotune_lifecycle(
         broadcast_object=events.broadcast,
         barrier=events.barrier,
     )
+    stateless = elastic_ep and world_size > 1
+    if stateless:
+        world.cpu_group = init_gloo_process_group(
+            torch.distributed.PrefixStore("autotune", torch.distributed.HashStore()),
+            group_rank=0,
+            group_size=1,
+            timeout=torch.distributed.default_pg_timeout,
+        )
 
     @contextmanager
     def autotune_context(**kwargs):
         assert torch.is_inference_mode_enabled()
+        if stateless:
+            (group,) = events.set_group.call_args.args
+            assert torch.distributed.get_backend(group) == "gloo"
         events.enter()
         try:
             yield
@@ -254,6 +264,10 @@ def test_flashinfer_autotune_lifecycle(
     else:
         with pytest.raises(RuntimeError, match="warmup failed"):
             warmup.flashinfer_autotune(runner)
+
+    if stateless:
+        with pytest.raises(ValueError, match="world group map"):
+            torch.distributed.get_backend(world.cpu_group)
 
     kwargs = {"skip_ops": set(skip_ops)} if skip_ops else {}
     expected = []
@@ -681,57 +695,3 @@ def test_autotune_cache_key_normalizes_kv_init_fields():
     # block_size stays significant (the daemon keys on the resolved value).
     resolved = CacheConfig(block_size=32)
     assert hash_config(_normalize_cache_config_for_hash(resolved)) != hash_config(fresh)
-
-
-def test_flashinfer_autotune_on_stateless_group(monkeypatch, tmp_path):
-    """FlashInfer calls dist.get_backend on the tuning group while tuning. That must
-    work for the stateless groups of Elastic EP, which torch's world map omits."""
-    group = stateless_init_torch_distributed_process_group(
-        host="127.0.0.1", port=get_open_port(), rank=0, world_size=1, backend="gloo"
-    )
-    runner = _make_runner([])
-    runner.vllm_config.parallel_config.enable_elastic_ep = True
-    world = SimpleNamespace(
-        rank_in_group=0,
-        world_size=2,
-        cpu_group=group,
-        broadcast_object=Mock(),
-        barrier=Mock(),
-    )
-    backends = []
-
-    def dummy_runs(*args, **kwargs):
-        backends.append(torch.distributed.get_backend(group))
-
-    monkeypatch.setitem(
-        sys.modules,
-        "flashinfer.autotuner",
-        SimpleNamespace(
-            AutoTuner=SimpleNamespace(get=Mock),
-            set_autotune_process_group=Mock(),
-        ),
-    )
-    monkeypatch.setattr(
-        "vllm.distributed.parallel_state.get_world_group", lambda: world
-    )
-    monkeypatch.setattr(
-        "vllm.distributed.parallel_state.get_pp_group",
-        lambda: SimpleNamespace(world_size=1),
-    )
-    monkeypatch.setattr(
-        warmup,
-        "resolve_rank_flashinfer_autotune_file",
-        Mock(return_value=tmp_path / "autotune.json"),
-    )
-    monkeypatch.setattr(warmup, "_load_shared_autotune_cache", Mock(return_value=False))
-    monkeypatch.setattr(warmup.envs, "VLLM_FLASHINFER_AUTOTUNE_SKIP_OPS", ())
-    monkeypatch.setattr(fi_utils, "autotune", lambda **kwargs: nullcontext())
-    monkeypatch.setattr(warmup, "_run_flashinfer_autotune_dummy_runs", dummy_runs)
-    monkeypatch.setattr(warmup, "replayssm_autotune_warmup", Mock())
-    monkeypatch.setattr(warmup, "_autotune_kimi_k3_kda_qkvg", Mock())
-
-    warmup.flashinfer_autotune(runner)
-
-    assert backends == ["gloo"]
-    with pytest.raises(ValueError, match="world group map"):
-        torch.distributed.get_backend(group)

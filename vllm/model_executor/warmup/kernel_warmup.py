@@ -516,12 +516,12 @@ def _known_to_torch_distributed(group: "ProcessGroup | None") -> Iterator[None]:
     Outside warmup, vLLM uses the group's absence to identify stateless groups.
     """
     from torch.distributed import ProcessGroup
-    from torch.distributed.distributed_c10d import Backend, _world
+    from torch.distributed.distributed_c10d import _world
 
     if not isinstance(group, ProcessGroup) or group in _world.pg_map:
         yield
         return
-    _world.pg_map[group] = (Backend(group.name()), None)
+    _world.pg_map[group] = (group.name(), group.get_group_store())
     try:
         yield
     finally:
