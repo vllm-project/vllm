@@ -40,14 +40,14 @@ print_packages() {
 
 # Keep test_onednn.py whole (~19 min). Its tests are unseeded, so running a
 # subset changes later inputs and test_onednn_gemm can miss its bf16 tolerance.
-kernel_tests_0() {
+shard_0_kernel_tests_0() {
   set -e
   docker exec "$CONTAINER_NAME" bash -c "
     set -e
     pytest -x -v -s tests/kernels/test_onednn.py"
 }
 
-kernel_tests_1() {
+shard_1_kernel_tests_1() {
   set -e
   docker exec "$CONTAINER_NAME" bash -c "
     set -e
@@ -58,7 +58,7 @@ kernel_tests_1() {
     pytest -x -v -s tests/kernels/mamba/cpu/test_cpu_gdn_ops.py"
 }
 
-kernel_tests_2() {
+shard_2_kernel_tests_2_and_model_tests_and_serving_tests() {
   set -e
   docker exec "$CONTAINER_NAME" bash -c "
     set -e
@@ -67,6 +67,8 @@ kernel_tests_2() {
     pytest -x -v -s tests/kernels/mamba/test_causal_conv1d.py
     pytest -x -v -s tests/kernels/mamba/test_mamba_ssm.py
     pytest -x -v -s tests/v1/worker/cpu"
+  model_tests
+  serving_tests
 }
 
 model_tests() {
@@ -125,18 +127,12 @@ serving_tests() {
     kill -s SIGTERM $server_pid &'
 }
 
-shard_2() {
-  set -e
-  kernel_tests_2
-  model_tests
-  serving_tests
-}
-
 print_packages
 export CONTAINER_NAME
-export -f kernel_tests_0 kernel_tests_1 kernel_tests_2 model_tests serving_tests shard_2
+export -f shard_0_kernel_tests_0 shard_1_kernel_tests_1 \
+  shard_2_kernel_tests_2_and_model_tests_and_serving_tests model_tests serving_tests
 case "$SHARD_ID" in
-  0) timeout 40m bash -c kernel_tests_0 ;;
-  1) timeout 40m bash -c kernel_tests_1 ;;
-  2) timeout 40m bash -c shard_2 ;;
+  0) timeout 40m bash -c shard_0_kernel_tests_0 ;;
+  1) timeout 40m bash -c shard_1_kernel_tests_1 ;;
+  2) timeout 40m bash -c shard_2_kernel_tests_2_and_model_tests_and_serving_tests ;;
 esac
