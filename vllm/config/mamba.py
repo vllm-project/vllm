@@ -106,7 +106,7 @@ class MambaConfig:
     def compile_factors(self) -> CompileFactors:
         """Return settings that affect Mamba kernel selection and graph structure.
 
-        ``backend`` selects between distinct selective-state-update custom ops
+        `backend` selects between distinct selective-state-update custom ops
         (FlashInfer vs Triton) in the mixer forward, and the remaining fields
         specialize the compiled kernel. All of them change the compiled
         artifact, so they must participate in the AOT/compile cache identity.
