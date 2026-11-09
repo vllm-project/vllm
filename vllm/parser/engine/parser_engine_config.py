@@ -138,6 +138,18 @@ class ParserEngineConfig:
     # Reject tool calls whose names are absent from the request tools.
     validate_tool_names: bool = False
 
+    # Buffer tool-preamble text (between the tool block opener and the first
+    # invoke) and fall it back to content when the block closes or the stream
+    # ends without any invoke, instead of dropping it silently. The buffer
+    # reproduces the model output verbatim, starting with the opener spelling.
+    preamble_fallback_to_content: bool = False
+
+    # Drop a tool call the model truncated before the tool name's closing
+    # marker instead of finalizing it with empty arguments at stream end.
+    # Without this, a call cut inside its name by max_tokens reaches the
+    # client as a ghost call to a non-existent tool.
+    drop_name_truncated_calls: bool = False
+
     def __post_init__(self) -> None:
         if self.arg_value_extender is not None and (
             self.arg_converter is None or not self.stream_arg_deltas

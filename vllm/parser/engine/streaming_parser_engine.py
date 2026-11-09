@@ -190,6 +190,10 @@ class StreamingParserEngine:
         self._args_brace_depth: int = 0
         self._args_in_string: bool = False
         self._args_escape_next: bool = False
+        # Preamble text buffered for configs that fall an invoke-less tool
+        # block back to content; starts with the opener spelling.
+        self._preamble_buffer: str = ""
+        self._preamble_token_count: int = 0
 
     def _reset_json_collection_state(self) -> None:
         # State shared by JSON-array and semicolon-separated tool bodies.
@@ -219,6 +223,8 @@ class StreamingParserEngine:
         self._lexer.reset()
         self._message_header_buffer = ""
         self._message_header_token_count = 0
+        self._preamble_buffer = ""
+        self._preamble_token_count = 0
         self._in_skipped_tool_span = False
         self._reset_args_state()
         self._reset_json_collection_state()
@@ -296,6 +302,22 @@ class StreamingParserEngine:
     def finish(self) -> list[SemanticEvent]:
         events = self._process_scanner_items(self._scanner.flush_pending())
 
+        if self.state == ParserState.TOOL_PREAMBLE and self._preamble_buffer:
+            # An invoke-less block never left the preamble: fall the buffered
+            # text (including the opener spelling) back to content instead of
+            # dropping it silently. Runs before the lexer flush so an invoke
+            # truncated mid-name and still held by the lexer stays dropped
+            # rather than surfacing as partial content.
+            events.append(
+                SemanticEvent(
+                    EventType.TEXT_CHUNK,
+                    value=self._preamble_buffer,
+                    token_count=self._preamble_token_count,
+                )
+            )
+            self._preamble_buffer = ""
+            self._preamble_token_count = 0
+
         events.extend(self._process_lex_tokens(self._lexer.flush()))
 
         if self._args_buffer:
@@ -322,7 +344,19 @@ class StreamingParserEngine:
                 if self.config.tool_call_body_collection is not None
                 else True
             )
-            if end_open_call and self.tool_index >= 0:
+            # A tool name cut off before its closing marker never became a
+            # real call: finalizing it here hands the client a ghost call
+            # with empty arguments. Configs that opt in leave the slot
+            # uncompleted so it is dropped instead; others keep finalizing
+            # partial calls (plamo3 extracts them by contract).
+            if (
+                end_open_call
+                and self.tool_index >= 0
+                and not (
+                    self.config.drop_name_truncated_calls
+                    and self.state == ParserState.TOOL_NAME
+                )
+            ):
                 events.append(
                     SemanticEvent(
                         EventType.TOOL_CALL_END,
@@ -489,6 +523,16 @@ class StreamingParserEngine:
             self._message_header_buffer += text
             self._message_header_token_count += token_count
             return []
+        if (
+            self.state == ParserState.TOOL_PREAMBLE
+            and self.config.preamble_fallback_to_content
+            and text
+        ):
+            # Hold preamble text so an invoke-less block can fall back to
+            # content later; dropped once an invoke starts.
+            self._preamble_buffer += text
+            self._preamble_token_count += token_count
+            return []
         if self.state == ParserState.TOOL_ARGS:
             if self.config.tool_call_body_collection is not None:
                 return self._feed_json_collection_text(text)
@@ -550,7 +594,35 @@ class StreamingParserEngine:
             self._message_header_buffer = ""
             self._message_header_token_count = 0
 
+        if previous_state == ParserState.TOOL_PREAMBLE:
+            if transition.next_state == ParserState.TOOL_NAME:
+                # An invoke started: the preamble was format framing.
+                self._preamble_buffer = ""
+                self._preamble_token_count = 0
+            elif self._preamble_buffer:
+                # Leaving the preamble without an invoke (e.g. on the block's
+                # closer): fall the buffered text back to content ahead of
+                # the transition's own events.
+                events.append(
+                    SemanticEvent(
+                        EventType.TEXT_CHUNK,
+                        value=self._preamble_buffer,
+                        token_count=self._preamble_token_count,
+                    )
+                )
+                self._preamble_buffer = ""
+                self._preamble_token_count = 0
+
         self.state = transition.next_state
+
+        if (
+            self.state == ParserState.TOOL_PREAMBLE
+            and self.config.preamble_fallback_to_content
+        ):
+            # Start the fallback buffer with the opener spelling so an
+            # invoke-less block falls back to the model output verbatim.
+            self._preamble_buffer = value
+            self._preamble_token_count = token_count
 
         for event_type in transition.events:
             if event_type == EventType.TOOL_CALL_START:

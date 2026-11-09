@@ -15,8 +15,12 @@ from vllm.parser.deepseek_v4 import (
 from vllm.parser.engine.parser_engine_config import ParserEngineConfig
 
 DSML_TOOL_START = "<｜DSML｜ calls>"
-# V4's ``tool_calls`` wrapper name with V4.1's spacing (#62051).
-DSML_TOOL_START_VARIANTS: tuple[str, ...] = ("<｜DSML｜ tool_calls>",)
+# V4's ``tool_calls`` wrapper name, spaced and unspaced (#62051): V4.1 spacing
+# adds a space, and some V4.1 deployments emit V4's unspaced spelling.
+DSML_TOOL_START_VARIANTS: tuple[str, ...] = (
+    "<｜DSML｜ tool_calls>",
+    "<｜DSML｜tool_calls>",
+)
 DSML_TOOL_END = "</｜DSML｜ calls>"
 DSML_INVOKE_PREFIX = '<｜DSML｜ invoke name="'
 DSML_INVOKE_END = "</｜DSML｜ invoke>"
