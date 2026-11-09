@@ -6,15 +6,17 @@ from collections.abc import Callable
 import torch
 
 from vllm.distributed.eplb.eplb_state import EplbLayerState
+from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
 
 
-class FusedMoERouter(ABC):
+class FusedMoERouter(PluggableLayer, ABC):
     """FusedMoERouter is an abstract class that provides a 'select_experts'
     method that is used for routing hidden states based on router logits.
     """
 
     def __init__(self, eplb_state: EplbLayerState | None = None):
+        super().__init__()
         self._routing_replay_out: torch.Tensor | None = None
         self.eplb_state = eplb_state
         # Deepseek V4.1 vision checkpoints carry a second per-expert routing
