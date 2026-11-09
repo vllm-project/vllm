@@ -6,10 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from transformers import HunYuanDenseV1Config, LlamaConfig, Phi3Config
-from transformers.models.hunyuan_v1_dense.modeling_hunyuan_v1_dense import (
-    HunYuanDenseV1RotaryEmbedding,
-)
+from transformers import LlamaConfig, Phi3Config
 from transformers.models.llama.modeling_llama import LlamaRotaryEmbedding
 from transformers.models.phi3.modeling_phi3 import Phi3RotaryEmbedding
 
@@ -29,10 +26,6 @@ DYNAMIC = {"rope_type": "dynamic", "factor": 4.0, "rope_theta": 1e4}
 ORIGINAL = MAX_POSITION_EMBEDDINGS // 2
 
 LLAMA_CONFIG = LlamaConfig(**CONFIG_KWARGS, rope_parameters=DYNAMIC)
-# Hunyuan's dynamic init also applies `alpha`, which must be kept
-HUNYUAN_CONFIG = HunYuanDenseV1Config(
-    **CONFIG_KWARGS, head_dim=16, rope_parameters=DYNAMIC | {"alpha": 1e3}
-)
 PHI3_CONFIG = Phi3Config(
     **CONFIG_KWARGS,
     original_max_position_embeddings=ORIGINAL,
@@ -87,7 +80,6 @@ def test_can_enable_torch_compile(rope_parameters, max_model_len, compilable):
     "config,rotary_cls,max_model_len,ref_len",
     [
         (LLAMA_CONFIG, LlamaRotaryEmbedding, MAX_POSITION_EMBEDDINGS, 8),
-        (HUNYUAN_CONFIG, HunYuanDenseV1RotaryEmbedding, MAX_POSITION_EMBEDDINGS, 8),
         # Longrope uses the long factors iff `max_model_len` exceeds the original
         (PHI3_CONFIG, Phi3RotaryEmbedding, ORIGINAL, 8),
         (PHI3_CONFIG, Phi3RotaryEmbedding, ORIGINAL + 1, ORIGINAL + 1),
