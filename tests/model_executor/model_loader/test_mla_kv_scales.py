@@ -26,7 +26,7 @@ pytestmark = pytest.mark.skipif(
 
 @pytest.fixture(scope="module")
 def kv_scale_checkpoint(tmp_path_factory) -> str:
-    """`MODEL` with a `kv_cache_scheme` and per-layer `self_attn.{k,v}_scale`
+    """`MODEL` with a `kv_cache_scheme` and per-layer `self_attn.{q,k,v}_scale`
     tensors, the names llm-compressor writes for an attention module."""
     src = Path(hf_api().snapshot_download(MODEL))
     dst = tmp_path_factory.mktemp("mla-fp8-kv")
@@ -44,9 +44,13 @@ def kv_scale_checkpoint(tmp_path_factory) -> str:
     (dst / "config.json").write_text(json.dumps(config))
     assert not (dst / "model.safetensors.index.json").exists()
     scales = {
-        f"model.layers.{i}.self_attn.{name}": torch.tensor(KV_SCALE)
+        f"model.layers.{i}.self_attn.{name}": torch.tensor(value)
         for i in range(config["num_hidden_layers"])
-        for name in ("k_scale", "v_scale")
+        for name, value in (
+            ("q_scale", 1.0),
+            ("k_scale", KV_SCALE),
+            ("v_scale", KV_SCALE),
+        )
     }
     save_file(scales, dst / "kv-scales.safetensors")
     return str(dst)
