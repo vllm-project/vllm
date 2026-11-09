@@ -6,19 +6,23 @@ meta:
   provider: "AutoTrust"
   description: "Dense 27B vision-language decision model on a Qwen3.8-27B backbone, with a rank-32 LoRA (jev-decision) for calibrated choices over text and images."
   date_added: 2026-10-28
-  date_updated: 2026-10-28
+  date_updated: 2026-11-09
   tasks:
     - multimodal
     - text
   performance_headline: "Qwen3.8-27B VL backbone; System 1 decisions through the jev-decision LoRA"
   related_recipes:
     - "Qwen/Qwen3.8-27B"
+  hardware:
+    mi355x: verified
 
 model:
   model_id: "autotrust/JEV-27B-VL"
   # Model author: this checkpoint only works on vLLM >= 0.32.0.
   # Qwen3_5ForConditionalGeneration is registered in that release.
   min_vllm_version: "0.32.0"
+  docker_image:
+    amd: "vllm/vllm-openai-rocm:latest"
   architecture: dense
   # safetensors parameter total is 27,781,427,952 BF16 (vision tower included).
   parameter_count: "27B"
@@ -78,7 +82,8 @@ variants:
     # 55,562,855,904 bytes on disk; ceil(55.563 GB × 1.2) = 67.
     # Uniform BF16, so params × 2 × 1.2 lands on the same budget.
     vram_minimum_gb: 67
-    description: "BF16 weights (about 52–56 GB). The model card's quick start targets one GPU with 80 GB or more; this recipe does not mark any GPU verified."
+    description: "BF16 weights (about 52–56 GB). The model card's quick start targets one GPU with 80 GB or more."
+    supported_hardware: [mi355x]
 
 compatible_strategies:
   - single_node_tp
@@ -92,6 +97,14 @@ strategy_overrides:
   single_node_tp:
     tp: 1
 
+hardware_overrides:
+  amd:
+    extra_args:
+      - "--attention-backend"
+      - "ROCM_AITER_FA"
+    extra_env:
+      VLLM_ROCM_USE_AITER: "1"
+
 guide: |
   ## Overview
 
@@ -104,10 +117,7 @@ guide: |
   rank-32 LoRA `jev-decision` (`adapter_vllm/`, `r` 32, `lora_alpha` 64),
   used for calibrated choice probabilities over text or images.
 
-  This recipe has no `verified` hardware entry. The model card's quick start
-  asks for one GPU with 80 GB or more, and the card's published latency
-  figures are from a B200. Those runs are the author's, not a badge on this
-  page.
+  MI355X is verified; see the AMD section below. 
 
   ## Prerequisites
 
@@ -160,6 +170,49 @@ guide: |
   `serve_decide.py`, which starts the OpenAI server with these same flags
   and adds that route. Stock `vllm serve` still exposes System 2 as
   `autotrust/JEV-27B-VL` and System 1 as the LoRA model `jev-decision`.
+
+  ## AMD (1x MI355X, BF16)
+
+  One MI355X at TP1. `VLLM_ROCM_USE_AITER=1` and `--attention-backend
+  ROCM_AITER_FA` select AITER FlyDSL for the 48 gated-delta-net layers and
+  `ROCM_AITER_FA` for the 16 full-attention layers. 
+
+  ```bash
+  docker run --device=/dev/kfd --device=/dev/dri --group-add video \
+    --ipc=host --shm-size 16g \
+    -e VLLM_ROCM_USE_AITER=1 \
+    -v ~/.cache/huggingface:/root/.cache/huggingface \
+    -v /path/to/JEV-27B-VL:/workspace/JEV-27B-VL \
+    -p 8000:8000 \
+    vllm/vllm-openai-rocm:latest \
+    autotrust/JEV-27B-VL \
+    --served-model-name autotrust/JEV-27B-VL \
+    --tensor-parallel-size 1 \
+    --attention-backend ROCM_AITER_FA \
+    --enable-lora --max-lora-rank 32 \
+    --lora-modules jev-decision=/workspace/JEV-27B-VL/adapter_vllm \
+    --logprobs-mode processed_logprobs \
+    --max-model-len 32768 \
+    --enable-prefix-caching \
+    --mamba-cache-mode align \
+    --limit-mm-per-prompt '{"image": 8}' \
+    --max-num-seqs 8 \
+    --trust-request-chat-template
+  ```
+
+  Verified on 1x MI355X with `:latest` (vLLM 0.33.0); `:nightly` gives the
+  same results:
+
+  - System 1 on the card's example (`billing` / `shipping` /
+    `tech support`) returns 0.9970 / 0.0000 / 0.0030 with 49 prompt
+    tokens; the card reports 0.9969 / 0.0000 / 0.0031 and 49.
+  - Images work on System 2 and System 1. `text_only` rejects image
+    requests; `encoder_parallel` serves them.
+  - At `--max-model-len 262144`, a needle was retrieved from a
+    250,391-token prompt.
+  - `vllm bench serve`, 1000 in / 256 out, concurrency 32: about 550 output
+    tok/s and 2,700 total tok/s. Median TTFT is about 11.4 s because
+    `--max-num-seqs 8` keeps only 8 requests running.
 
   ## Client usage
 
