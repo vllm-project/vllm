@@ -510,7 +510,7 @@ class FusedMoEPrepareAndFinalizeMonolithic(FusedMoEPrepareAndFinalize):
         raise NotImplementedError
 
     def supports_precomputed_routing(self) -> bool:
-        """Whether ``prepare_routed`` is implemented."""
+        """Whether `prepare_routed` is implemented."""
         return False
 
     def prepare_routed(
@@ -521,7 +521,7 @@ class FusedMoEPrepareAndFinalizeMonolithic(FusedMoEPrepareAndFinalize):
         quant_config: FusedMoEQuantConfig,
         defer_input_quant: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor, torch.Tensor]:
-        """Like ``prepare``, but dispatch vLLM's routing instead of logits.
+        """Like `prepare`, but dispatch vLLM's routing instead of logits.
 
         Returns the quantized and dispatched (a1q, a1q_scale, topk_weights,
         topk_ids).
@@ -1136,7 +1136,7 @@ class FusedMoEExpertsMonolithic(FusedMoEExperts):
         return False
 
     def supports_precomputed_routing(self) -> bool:
-        """Whether ``apply_precomputed_routing`` is implemented."""
+        """Whether `apply_precomputed_routing` is implemented."""
         return False
 
     def apply_precomputed_routing(
@@ -1150,9 +1150,9 @@ class FusedMoEExpertsMonolithic(FusedMoEExperts):
         global_num_experts: int,
         a1q_scale: torch.Tensor | None,
     ) -> torch.Tensor | UnfinalizedMoEOutput:
-        """Same as ``apply``, but with routing computed by vLLM's router.
+        """Same as `apply`, but with routing computed by vLLM's router.
 
-        Tokens whose ``topk_ids`` are -1 (padding) must not reach any expert.
+        Tokens whose `topk_ids` are -1 (padding) must not reach any expert.
         """
         raise NotImplementedError
 
@@ -1798,7 +1798,7 @@ class FusedMoEKernelMonolithicImpl:
         *,
         routing_sink: RoutedExpertsSink | None,
     ) -> torch.Tensor | UnfinalizedMoEOutput:
-        """Like ``apply``, but with routing from vLLM's top-k."""
+        """Like `apply`, but with routing from vLLM's top-k."""
         a1q, a1q_scale, topk_weights, topk_ids = self.prepare_finalize.prepare_routed(
             hidden_states,
             topk_weights,
@@ -1953,7 +1953,7 @@ class FusedMoEKernel:
         )
 
     def supports_precomputed_routing(self) -> bool:
-        """Whether ``apply_monolithic_routed`` can replace ``apply_monolithic``."""
+        """Whether `apply_monolithic_routed` can replace `apply_monolithic`."""
         return (
             isinstance(self.impl, FusedMoEKernelMonolithicImpl)
             and self.impl.supports_precomputed_routing()

@@ -47,7 +47,7 @@ class FusedMoERouter(PluggableLayer, ABC):
 
     @property
     def masks_padding(self) -> bool:
-        """Whether ``select_experts`` already gives padding rows expert id -1."""
+        """Whether `select_experts` already gives padding rows expert id -1."""
         return False
 
     def prepare_monolithic_logits(self, router_logits: torch.Tensor) -> torch.Tensor:
