@@ -67,11 +67,13 @@ jobs:
         run: |
           uv venv --python 3.12 .venv
           uv pip install --python .venv/bin/python \
-            pytest==8.4.2 pytest-timeout==2.4.0 msgspec==0.19.0 ruff==0.14.0 \
+            pytest==8.4.2 pytest-timeout==2.4.0 msgspec==0.19.0 ruff==0.17.2 \
             numpy==2.3.5 regex==2026.9.29
           uv pip install --python .venv/bin/python \
             torch==2.14.0+cpu torchvision==0.29.1+cpu \
             --index-url https://download.pytorch.org/whl/cpu
+          uv pip install --python .venv/bin/python \
+            'triton @ https://github.com/triton-lang/triton-cpu/releases/download/v3.8.0/triton-3.8.0+cpu-cp312-abi3-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl'
       - name: Lint changed Python files
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
