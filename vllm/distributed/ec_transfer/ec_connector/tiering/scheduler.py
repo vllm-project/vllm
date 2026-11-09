@@ -105,7 +105,7 @@ class ECTieringScheduler(ECCPUScheduler):
             return super().request_finished(request)
         finally:
             if self._tiering_manager is not None:
-                self._tiering_manager.release_prefetch(request.request_id)
+                self._tiering_manager.request_finished(request.request_id)
 
     @staticmethod
     def _build_namespace(vllm_config: VllmConfig) -> ECCacheNamespace:
@@ -204,6 +204,7 @@ class ECTieringScheduler(ECCPUScheduler):
                 num_tokens,
                 shape,
                 self._dtype.itemsize,
+                request_id=request.request_id,
             ):
                 all_ready = False
         return all_ready

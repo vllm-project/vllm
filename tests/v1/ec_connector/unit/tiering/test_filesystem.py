@@ -195,7 +195,7 @@ def test_manager_read_failure_invalidates_indexed_entry(
     assert not manager.contains(_CACHE_KEY)
 
 
-def test_stale_read_failure_does_not_remove_new_generation(tmp_path: Path) -> None:
+def test_existing_or_pending_key_is_not_rewritten(tmp_path: Path) -> None:
     executor = _FakeExecutor()
     manager = ECFileSystemTierManager(
         root_dir=tmp_path,
@@ -205,55 +205,18 @@ def test_stale_read_failure_does_not_remove_new_generation(tmp_path: Path) -> No
         n_write_threads=1,
         executor=executor,
     )
-    assert manager.submit_write(_CACHE_KEY, [memoryview(b"old!")], 4)
+    assert manager.submit_write(_CACHE_KEY, [memoryview(b"data")], 4)
+    assert not manager.submit_write(_CACHE_KEY, [memoryview(b"new!")], 4)
     executor.finish(0, success=True)
     manager.poll_completed_writes()
-
+    assert not manager.submit_write(_CACHE_KEY, [memoryview(b"new!")], 4)
     assert manager.submit_read(_CACHE_KEY, [memoryview(bytearray(4))])
-    assert manager.submit_write(_CACHE_KEY, [memoryview(b"new!")], 4)
-    executor.finish(2, success=True)
-    executor.finish(1, success=False, error="stale read")
-
-    assert manager.poll_completed_reads() == [
-        ECReadResult(
-            cache_key=_CACHE_KEY,
-            success=False,
-            file_size_bytes=4,
-            error="stale read",
-        )
-    ]
+    assert not manager.submit_write(_CACHE_KEY, [memoryview(b"new!")], 4)
+    assert len(executor.submissions) == 2
+    executor.finish(1, success=True)
+    assert manager.poll_completed_reads()[0].success
     assert manager.contains(_CACHE_KEY)
-    assert manager.poll_completed_writes() == [
-        ECWriteResult(cache_key=_CACHE_KEY, success=True, file_size_bytes=4)
-    ]
-
-
-def test_failed_rewrite_keeps_existing_index_entry(tmp_path: Path) -> None:
-    executor = _FakeExecutor()
-    manager = ECFileSystemTierManager(
-        root_dir=tmp_path,
-        namespace_digest=_NAMESPACE_DIGEST,
-        capacity_bytes=_CAPACITY_BYTES,
-        n_read_threads=1,
-        n_write_threads=1,
-        executor=executor,
-    )
-    assert manager.submit_write(_CACHE_KEY, [memoryview(b"old!")], 4)
-    executor.finish(0, success=True)
-    manager.poll_completed_writes()
-
-    assert manager.submit_write(_CACHE_KEY, [memoryview(b"new!")], 4)
-    executor.finish(1, success=False, error="disk full")
-
-    assert manager.poll_completed_writes() == [
-        ECWriteResult(
-            cache_key=_CACHE_KEY,
-            success=False,
-            file_size_bytes=4,
-            error="disk full",
-        )
-    ]
-    assert manager.contains(_CACHE_KEY)
+    assert manager.poll_completed_writes() == []
 
 
 def test_manager_skips_new_writes_under_store_pressure(tmp_path: Path) -> None:
@@ -478,3 +441,60 @@ def test_manager_shutdown_drains_completions_and_rejects_submission(
     assert not manager.submit_write(_CACHE_KEY, [memoryview(b"data")], 4)
     assert not manager.submit_read(_CACHE_KEY, [memoryview(bytearray(4))])
     manager.shutdown()
+
+
+def test_async_lookup_discovers_late_file_and_releases_request(tmp_path: Path) -> None:
+    from threading import Event
+    from time import monotonic
+
+    from vllm.distributed.ec_transfer.ec_connector.tiering.io import store_entry
+
+    manager = ECFileSystemTierManager(
+        root_dir=tmp_path,
+        namespace_digest=_NAMESPACE_DIGEST,
+        capacity_bytes=_CAPACITY_BYTES,
+        n_read_threads=1,
+        n_write_threads=1,
+    )
+
+    def resolved(key, request_id):
+        deadline = monotonic() + 5
+        pause = Event()
+        while (result := manager.lookup(key, 4, request_id)) is None:
+            assert monotonic() < deadline
+            pause.wait(0.001)
+        return result
+
+    path = get_ec_entry_path(tmp_path, _NAMESPACE_DIGEST, _CACHE_KEY)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    store_entry(path, get_ec_temporary_path(path, "late"), [memoryview(b"data")], 4)
+    try:
+        assert not manager.contains(_CACHE_KEY)
+        assert manager.lookup(_CACHE_KEY, 4, "request") is None
+        assert resolved(_CACHE_KEY, "request")
+        assert manager.contains(_CACHE_KEY)
+        destination = bytearray(4)
+        assert manager.submit_read(_CACHE_KEY, [memoryview(destination)])
+        manager.drain()
+        assert manager.poll_completed_reads()[0].success
+        assert destination == b"data"
+        manager.release_request("request")
+
+        missing = "c" * 64
+        assert manager.lookup(missing, 4, "request2") is None
+        assert resolved(missing, "request2") is False
+        missing_path = get_ec_entry_path(tmp_path, _NAMESPACE_DIGEST, missing)
+        missing_path.parent.mkdir(parents=True, exist_ok=True)
+        store_entry(
+            missing_path,
+            get_ec_temporary_path(missing_path, "new"),
+            [memoryview(b"next")],
+            4,
+        )
+        assert manager.lookup(missing, 4, "request2") is False
+        manager.release_request("request2")
+        assert manager.lookup(missing, 4, "request3") is None
+        assert resolved(missing, "request3")
+        manager.release_request("request3")
+    finally:
+        manager.shutdown()

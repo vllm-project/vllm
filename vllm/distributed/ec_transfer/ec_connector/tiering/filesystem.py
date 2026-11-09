@@ -22,7 +22,9 @@ from vllm.distributed.ec_transfer.ec_connector.tiering.layout import (
     get_ec_namespace_path,
     get_ec_temporary_path,
 )
+from vllm.distributed.ec_transfer.ec_connector.tiering.lookup import ECFileLookup
 from vllm.logger import init_logger
+from vllm.v1.kv_offload.base import ReqContext
 from vllm.v1.kv_offload.tiering.backpressure import (
     BackpressureDetector,
     EMABackpressureDetector,
@@ -106,12 +108,6 @@ class _ECFileIOExecutor(Protocol):
     def shutdown(self) -> None: ...
 
 
-@dataclass(frozen=True)
-class _IndexedEntry:
-    entry: ECFileEntry
-    generation: int
-
-
 class ECFileSystemTierManager:
     """Capacity-bounded LRU index and lifecycle around entry I/O."""
 
@@ -150,17 +146,17 @@ class ECFileSystemTierManager:
             )
         self._accepting = True
         self._shutdown = False
-        self._next_generation = 0
-        self._entries: OrderedDict[str, _IndexedEntry] = OrderedDict()
-        self._pending_reads: dict[int, _IndexedEntry] = {}
+        self._entries: OrderedDict[str, ECFileEntry] = OrderedDict()
+        self._pending_reads: dict[int, ECFileEntry] = {}
         self._pending_writes: dict[int, ECFileEntry] = {}
         self._pending_write_keys: set[str] = set()
-        self._pending_deletes: dict[int, _IndexedEntry] = {}
+        self._pending_deletes: dict[int, ECFileEntry] = {}
         self._deleting_keys: set[str] = set()
         self._read_pins: Counter[str] = Counter()
         self._completed_reads: deque[ECReadResult] = deque()
         self._completed_writes: deque[ECWriteResult] = deque()
         self._recover_index()
+        self._lookup = ECFileLookup(root_dir, namespace_digest)
         self._evict_to_capacity()
 
     @property
@@ -184,6 +180,38 @@ class ECFileSystemTierManager:
         self._entries.move_to_end(cache_key)
         return True
 
+    def lookup(
+        self, cache_key: str, file_size_bytes: int, request_id: str
+    ) -> bool | None:
+        """Resolve unknown files in the background; None means retry later."""
+        if file_size_bytes <= 0:
+            raise ValueError("file_size_bytes must be positive")
+        if not self._accepting or file_size_bytes > self._capacity_bytes:
+            return False
+        if cache_key in self._deleting_keys:
+            return False
+        if self.contains(cache_key):
+            return self._entries[cache_key].file_size_bytes == file_size_bytes
+        if cache_key in self._pending_write_keys:
+            return None
+        key = self._lookup.key(cache_key, file_size_bytes)
+        result = self._lookup.lookup(key, ReqContext(req_id=request_id))
+        # EC has no schedule-end callback; flush this non-blocking probe here.
+        self._lookup.flush()
+        if result:
+            self._entries[cache_key] = ECFileEntry(
+                cache_key,
+                get_ec_entry_path(self._root_dir, self._namespace_digest, cache_key),
+                file_size_bytes,
+            )
+            self._used_bytes += file_size_bytes
+            self._evict_to_capacity()
+            return cache_key in self._entries
+        return result
+
+    def release_request(self, request_id: str) -> None:
+        self._lookup.cleanup(request_id)
+
     def submit_read(
         self,
         cache_key: str,
@@ -193,11 +221,10 @@ class ECFileSystemTierManager:
         if not self._accepting:
             return False
 
-        indexed_entry = self._entries.get(cache_key)
-        if indexed_entry is None:
+        entry = self._entries.get(cache_key)
+        if entry is None:
             raise KeyError(f"encoder-cache entry is not indexed: {cache_key}")
 
-        entry = indexed_entry.entry
         job_id = self._executor.submit_read(
             cache_key,
             entry.path,
@@ -206,7 +233,7 @@ class ECFileSystemTierManager:
         )
         if job_id is None:
             return False
-        self._pending_reads[job_id] = indexed_entry
+        self._pending_reads[job_id] = entry
         self._read_pins[cache_key] += 1
         self._entries.move_to_end(cache_key)
         return True
@@ -224,7 +251,11 @@ class ECFileSystemTierManager:
             raise ValueError("file_size_bytes must be positive")
         if file_size_bytes > self._capacity_bytes:
             return False
-        if cache_key in self._pending_write_keys or cache_key in self._deleting_keys:
+        if (
+            cache_key in self._entries
+            or cache_key in self._pending_write_keys
+            or cache_key in self._deleting_keys
+        ):
             return False
         if self._backpressure_detector is not None and not (
             self._backpressure_detector.should_store(len(sources))
@@ -279,6 +310,7 @@ class ECFileSystemTierManager:
         if self._shutdown:
             return
         self._accepting = False
+        self._lookup.shutdown()
         self.drain()
         self._executor.shutdown()
         self._collect_executor_completions()
@@ -304,9 +336,12 @@ class ECFileSystemTierManager:
             del self._read_pins[completion.cache_key]
         if not completion.success:
             current_entry = self._entries.get(completion.cache_key)
-            if current_entry == indexed_entry:
+            if current_entry is indexed_entry:
                 del self._entries[completion.cache_key]
-                self._used_bytes -= indexed_entry.entry.file_size_bytes
+                self._used_bytes -= indexed_entry.file_size_bytes
+            self._lookup.mark_miss(
+                [self._lookup.key(completion.cache_key, indexed_entry.file_size_bytes)]
+            )
         self._completed_reads.append(
             ECReadResult(
                 cache_key=completion.cache_key,
@@ -328,15 +363,11 @@ class ECFileSystemTierManager:
                     completion.queue_time + completion.transfer_time,
                     completion.file_size_bytes,
                 )
-            previous = self._entries.pop(completion.cache_key, None)
-            if previous is not None:
-                self._used_bytes -= previous.entry.file_size_bytes
-            self._entries[completion.cache_key] = _IndexedEntry(
-                entry=entry,
-                generation=self._next_generation,
-            )
+            self._entries[completion.cache_key] = entry
             self._used_bytes += entry.file_size_bytes
-            self._next_generation += 1
+            self._lookup.mark_present(
+                [self._lookup.key(completion.cache_key, entry.file_size_bytes)]
+            )
         self._completed_writes.append(
             ECWriteResult(
                 cache_key=completion.cache_key,
@@ -351,11 +382,11 @@ class ECFileSystemTierManager:
 
     def _complete_delete(self, completion: ECFileIOCompletion) -> None:
         indexed_entry = self._pending_deletes.pop(completion.job_id)
-        self._deleting_keys.remove(indexed_entry.entry.cache_key)
+        self._deleting_keys.remove(indexed_entry.cache_key)
         if not completion.success:
             logger.warning(
                 "Failed to delete evicted encoder-cache entry %s: %s",
-                indexed_entry.entry.path,
+                indexed_entry.path,
                 completion.error,
             )
 
@@ -391,16 +422,12 @@ class ECFileSystemTierManager:
             )
 
         for _, cache_key, entry in sorted(recovered):
-            self._entries[cache_key] = _IndexedEntry(
-                entry=entry,
-                generation=self._next_generation,
-            )
+            self._entries[cache_key] = entry
             self._used_bytes += entry.file_size_bytes
-            self._next_generation += 1
 
     def _evict_to_capacity(self) -> None:
         while self._used_bytes > self._capacity_bytes:
-            victim: tuple[str, _IndexedEntry] | None = None
+            victim: tuple[str, ECFileEntry] | None = None
             for cache_key, indexed_entry in self._entries.items():
                 if (
                     self._read_pins[cache_key] == 0
@@ -413,19 +440,22 @@ class ECFileSystemTierManager:
 
             cache_key, indexed_entry = victim
             del self._entries[cache_key]
-            self._used_bytes -= indexed_entry.entry.file_size_bytes
+            self._used_bytes -= indexed_entry.file_size_bytes
             job_id = self._executor.submit_delete(
                 cache_key,
-                indexed_entry.entry.path,
-                indexed_entry.entry.file_size_bytes,
+                indexed_entry.path,
+                indexed_entry.file_size_bytes,
             )
             if job_id is None:
                 self._entries[cache_key] = indexed_entry
                 self._entries.move_to_end(cache_key, last=False)
-                self._used_bytes += indexed_entry.entry.file_size_bytes
+                self._used_bytes += indexed_entry.file_size_bytes
                 return
             self._pending_deletes[job_id] = indexed_entry
             self._deleting_keys.add(cache_key)
+            self._lookup.mark_miss(
+                [self._lookup.key(cache_key, indexed_entry.file_size_bytes)]
+            )
 
 
 @runtime_checkable
@@ -441,6 +471,12 @@ class ECFileSystemTier(Protocol):
     def contains(self, cache_key: str) -> bool:
         """Return an in-memory membership decision without filesystem I/O."""
         ...
+
+    def lookup(
+        self, cache_key: str, file_size_bytes: int, request_id: str
+    ) -> bool | None: ...
+
+    def release_request(self, request_id: str) -> None: ...
 
     def submit_read(
         self,

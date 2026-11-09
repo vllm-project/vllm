@@ -32,9 +32,18 @@ class _FakeSecondary:
         self.write_completions: list[ECWriteResult] = []
         self.read_completions: list[ECReadResult] = []
         self.shutdown_called = False
+        self.lookup_pending = False
 
     def contains(self, cache_key: str) -> bool:
         return cache_key in self.entries
+
+    def lookup(self, cache_key, file_size_bytes, request_id):
+        if self.lookup_pending:
+            return None
+        return self.contains(cache_key)
+
+    def release_request(self, request_id):
+        pass
 
     def submit_write(self, cache_key, sources, file_size_bytes):
         self.write_submissions.append((cache_key, file_size_bytes))
@@ -219,6 +228,23 @@ def test_prefetch_deduplicates_waiters_and_holds_until_last_release():
     assert primary.alloc("other", 2) is not None
 
 
+def test_cpu_save_during_lookup_keeps_shared_prefetch_protection():
+    primary, secondary, manager = _bounded_promotion_manager()
+    secondary.lookup_pending = True
+    for request_id in ("first", "second"):
+        manager.prefetch_entry(request_id, "loaded", "image", 2, (2, 1), 4)
+    primary.alloc("loaded", 2, (2, 1))
+    manager.poll()
+    primary.mark_ready("loaded")
+    manager.poll()
+    assert secondary.read_submissions == []
+    assert primary.alloc("other", 2) is None
+    manager.request_finished("first")
+    assert primary.alloc("other", 2) is None
+    manager.request_finished("second")
+    assert primary.alloc("other", 2) is not None
+
+
 def test_cancelled_prefetch_keeps_blocks_until_io_completes():
     primary, secondary, manager = _bounded_promotion_manager()
     manager.prefetch_entry("r1", "loaded", "image", 2, (2, 1), 4)
@@ -322,13 +348,13 @@ def indexed_scheduler(tmp_path, request):
         scheduler.shutdown()
 
 
-def image_request(*identifiers):
+def image_request(*identifiers, request_id="gpu-hint"):
     from vllm.multimodal.inputs import MultiModalFeatureSpec, PlaceholderRange
     from vllm.sampling_params import SamplingParams
     from vllm.v1.request import Request
 
     return Request(
-        request_id="gpu-hint",
+        request_id=request_id,
         prompt_token_ids=[0] * (2 * len(identifiers)),
         sampling_params=SamplingParams(max_tokens=1),
         pooling_params=None,
@@ -475,3 +501,41 @@ def test_cpu_full_is_feature_miss_but_submitted_read_stays_pending(
         assert len(scheduler._tiering_manager._pending_reads) == 1
     finally:
         release.set()
+
+
+def test_async_arrival_prefetch_survives_one_of_two_request_cancellations(
+    indexed_scheduler,
+):
+    from threading import Event
+    from time import monotonic
+
+    from vllm.distributed.ec_transfer.ec_connector.tiering.io import store_entry
+    from vllm.distributed.ec_transfer.ec_connector.tiering.layout import (
+        get_ec_entry_path,
+        get_ec_temporary_path,
+    )
+
+    scheduler = indexed_scheduler
+    manager = scheduler._tiering_manager
+    filesystem = scheduler._filesystem
+    key = build_ec_cache_key(manager._namespace_digest, "late", "image", 2, 128)
+    path = get_ec_entry_path(filesystem._root_dir, manager._namespace_digest, key)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    store_entry(
+        path, get_ec_temporary_path(path, "late"), [memoryview(bytes(128))], 128
+    )
+    first = image_request("late", request_id="first")
+    second = image_request("late", request_id="second")
+    scheduler.on_new_request(first, {"late"})
+    scheduler.on_new_request(second, {"late"})
+    manager.request_finished(first.request_id)
+    deadline = monotonic() + 5
+    while not ((entry := scheduler._primary.get("late")) is not None and entry.ready):
+        assert monotonic() < deadline
+        manager.poll()
+        Event().wait(0.001)
+    assert not entry.evictable
+    assert scheduler.ensure_cache_available(second, 0, set())
+    scheduler.update_state_after_alloc(second, 0)
+    assert "late" in scheduler._pending_loads
+    manager.request_finished(second.request_id)

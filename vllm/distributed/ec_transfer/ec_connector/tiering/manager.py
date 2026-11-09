@@ -52,6 +52,12 @@ class _PrimaryTier(Protocol):
 class _SecondaryTier(Protocol):
     def contains(self, cache_key: str) -> bool: ...
 
+    def lookup(
+        self, cache_key: str, file_size_bytes: int, request_id: str
+    ) -> bool | None: ...
+
+    def release_request(self, request_id: str) -> None: ...
+
     def submit_write(
         self,
         cache_key: str,
@@ -97,6 +103,7 @@ class ECTieringManager:
         self._prefetch_requests: dict[str, set[str]] = {}
         self._prefetch_waiters: dict[str, set[str]] = {}
         self._prefetch_holds: set[str] = set()
+        self._prefetch_probes: dict[str, tuple[str, int, tuple[int, int], int]] = {}
 
     def prefetch_entry(
         self,
@@ -113,13 +120,21 @@ class ECTieringManager:
             identifier not in self._pending_read_identifiers
             and identifier not in self._prefetch_holds
         ):
-            self._ensure_primary_entry(
+            available = self._ensure_primary_entry(
                 identifier,
                 modality,
                 num_tokens,
                 shape,
                 element_size,
+                request_id=request_id,
             )
+            if not available and identifier not in self._pending_read_identifiers:
+                self._prefetch_probes[identifier] = (
+                    modality,
+                    num_tokens,
+                    shape,
+                    element_size,
+                )
         entry = self._primary.get(identifier)
         if entry is not None and entry.ready and identifier not in self._prefetch_holds:
             self._primary.pin(identifier)
@@ -127,6 +142,7 @@ class ECTieringManager:
         if (
             identifier in self._pending_read_identifiers
             or identifier in self._prefetch_holds
+            or identifier in self._prefetch_probes
         ):
             self._prefetch_requests.setdefault(request_id, set()).add(identifier)
             self._prefetch_waiters.setdefault(identifier, set()).add(request_id)
@@ -145,11 +161,16 @@ class ECTieringManager:
             waiters.remove(request_id)
             if not waiters:
                 del self._prefetch_waiters[key]
+                self._prefetch_probes.pop(key, None)
                 if key in self._prefetch_holds:
                     self._prefetch_holds.remove(key)
                     self._primary.unpin(key)
         if not identifiers:
             del self._prefetch_requests[request_id]
+
+    def request_finished(self, request_id: str) -> None:
+        self.release_prefetch(request_id)
+        self._secondary.release_request(request_id)
 
     def _forget_prefetch(self, identifier: str) -> None:
         for request_id in tuple(self._prefetch_waiters.get(identifier, ())):
@@ -219,6 +240,7 @@ class ECTieringManager:
         num_tokens: int,
         shape: tuple[int, int],
         element_size: int,
+        request_id: str = "",
     ) -> bool:
         """Wait for submitted reads; allow recomputation when promotion cannot start."""
         entry = self._primary.get(identifier)
@@ -231,6 +253,7 @@ class ECTieringManager:
             num_tokens,
             shape,
             element_size,
+            request_id=request_id,
         )
 
     def _ensure_primary_entry(
@@ -240,6 +263,7 @@ class ECTieringManager:
         num_tokens: int,
         shape: tuple[int, int],
         element_size: int,
+        request_id: str,
     ) -> bool:
         entry = self._primary.get(identifier)
         if entry is not None:
@@ -258,7 +282,11 @@ class ECTieringManager:
             num_tokens,
             file_size_bytes,
         )
-        if not self._secondary.contains(cache_key):
+        found = self._secondary.lookup(cache_key, file_size_bytes, request_id)
+        if found is None:
+            return False
+        self._prefetch_probes.pop(identifier, None)
+        if not found:
             return True
 
         entry = self._primary.alloc(identifier, num_blocks, shape)
@@ -313,18 +341,37 @@ class ECTieringManager:
                     identifier,
                     completion.error,
                 )
+        for identifier, descriptor in tuple(self._prefetch_probes.items()):
+            waiters = self._prefetch_waiters.get(identifier)
+            if not waiters:
+                self._prefetch_probes.pop(identifier, None)
+                continue
+            entry = self._primary.get(identifier)
+            if entry is not None:
+                if entry.ready:
+                    if identifier not in self._prefetch_holds:
+                        self._primary.pin(identifier)
+                        self._prefetch_holds.add(identifier)
+                    self._prefetch_probes.pop(identifier, None)
+                continue
+            if self._ensure_primary_entry(
+                identifier, *descriptor, request_id=next(iter(waiters))
+            ):
+                self._forget_prefetch(identifier)
         return read_completions, write_completions
 
     def has_pending(self) -> bool:
         """Poll once and report whether any tier transfer is still pending."""
         self.poll()
-        return bool(self._pending_reads or self._pending_writes)
+        return bool(
+            self._pending_reads or self._pending_writes or self._prefetch_probes
+        )
 
     def shutdown(self) -> None:
         """Drain transfers, finalize their state, and verify quiescence."""
         self._secondary.shutdown()
         self.poll()
         for request_id in tuple(self._prefetch_requests):
-            self.release_prefetch(request_id)
+            self.request_finished(request_id)
         if self._pending_reads or self._pending_writes:
             raise RuntimeError("filesystem shutdown left encoder-cache jobs pending")
