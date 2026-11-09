@@ -174,3 +174,66 @@ def test_model_advertises_encoder_tp_data():
     from vllm.model_executor.models.mimo_v2_omni import MiMoV2OmniForCausalLM
 
     assert supports_multimodal_encoder_tp_data(MiMoV2OmniForCausalLM)
+
+
+@pytest.mark.parametrize(
+    ("fps", "frames_indices", "expected"),
+    [
+        # Uniform sampling: consecutive frames one frame apart.
+        (25.0, [0, 25, 50], [0.0, 1.0, 2.0]),
+        # Non-uniform sampling: the real positions come from frames_indices.
+        (10.0, [0, 3, 9], [0.0, 0.3, 0.9]),
+    ],
+)
+def test_video_timestamps_use_sampling_metadata(fps, frames_indices, expected):
+    timestamps = mimo_v2_omni._video_timestamps(
+        {"fps": fps, "frames_indices": frames_indices},
+        len(frames_indices),
+        default_fps=1.0,
+    )
+
+    torch.testing.assert_close(timestamps, torch.tensor(expected))
+
+
+def test_video_timestamps_fall_back_to_default_fps():
+    timestamps = mimo_v2_omni._video_timestamps(None, 3, default_fps=1.0)
+
+    torch.testing.assert_close(timestamps, torch.tensor([0.0, 1.0, 2.0]))
+
+
+def test_video_timestamps_ignore_stale_frame_indices():
+    # A frames_indices list that no longer matches the frame count must not be
+    # trusted, otherwise the timestamps silently desynchronise from the frames.
+    timestamps = mimo_v2_omni._video_timestamps(
+        {"fps": 4.0, "frames_indices": [0, 4]}, 3, default_fps=1.0
+    )
+
+    torch.testing.assert_close(timestamps, torch.tensor([0.0, 0.25, 0.5]))
+
+
+def test_split_frames_metadata_passes_mimo_tuples_through():
+    frames = torch.zeros(2, 3, 4, 4)
+    metadata = {"fps": 24.0}
+    timestamps = torch.zeros(2)
+
+    assert mimo_v2_omni._split_frames_metadata((frames, metadata)) == (
+        frames,
+        metadata,
+    )
+    # MiMo's own (frames, timestamps) tuple must be handed back untouched, so
+    # that it is still recognised as already-converted input.
+    mimo_tuple = (frames, timestamps)
+    item, item_metadata = mimo_v2_omni._split_frames_metadata(mimo_tuple)
+    assert item is mimo_tuple
+    assert item_metadata is None
+
+
+def test_video_item_metadata_reads_parsed_items():
+    class _Items:
+        metadata = [{"fps": 30.0}, None]
+
+    assert mimo_v2_omni._video_item_metadata({"video": _Items()}) == [
+        {"fps": 30.0},
+        None,
+    ]
+    assert mimo_v2_omni._video_item_metadata({}) == []

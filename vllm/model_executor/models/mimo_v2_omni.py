@@ -906,6 +906,69 @@ class MiMoV2OmniProcessingInfo(BaseProcessingInfo):
         )
 
 
+def _video_item_metadata(
+    mm_items: MultiModalDataItems,
+) -> list[Mapping[str, object] | None]:
+    """Per-video sampling metadata kept next to the decoded frames.
+
+    ``VideoProcessorItems`` stores the loader metadata (``fps``,
+    ``frames_indices``, ...) separately from the frames themselves, so it never
+    shows up in ``hf_data`` and has to be fetched from the parsed items.
+    """
+    items = mm_items.get("video")
+    metadata = getattr(items, "metadata", None)
+    if metadata is None:
+        return []
+    if isinstance(metadata, Mapping):
+        return [metadata]
+    return list(metadata)
+
+
+def _split_frames_metadata(
+    item: object,
+) -> tuple[object, Mapping[str, object] | None]:
+    """Split a ``(frames, metadata)`` video item into its two parts."""
+    if isinstance(item, tuple) and len(item) == 2 and isinstance(item[1], Mapping):
+        return item[0], item[1]
+    return item, None
+
+
+def _video_timestamps(
+    metadata: Mapping[str, object] | None,
+    num_frames: int,
+    default_fps: float,
+) -> torch.Tensor:
+    """Build per-frame timestamps from the sampling metadata of a decoded video.
+
+    Follows the ``qwen_vl_utils`` policy of ``frame_index / fps`` so that frames
+    sampled at a non-uniform rate keep their real positions. Falls back to a
+    uniform ``1 / default_fps`` grid when no metadata was supplied, which keeps
+    the previous behaviour for raw frame arrays.
+    """
+    if not isinstance(metadata, Mapping):
+        return torch.arange(num_frames, dtype=torch.float32) / default_fps
+
+    timestamps = metadata.get("timestamps")
+    if isinstance(timestamps, torch.Tensor) and timestamps.numel() == num_frames:
+        return timestamps.float()
+
+    fps = metadata.get("fps") or default_fps
+    try:
+        fps = float(fps)
+    except (TypeError, ValueError):
+        fps = default_fps
+    if fps <= 0:
+        fps = default_fps
+
+    indices = metadata.get("frames_indices")
+    if indices is not None:
+        frame_indices = torch.as_tensor(list(indices), dtype=torch.float32)
+        if frame_indices.numel() == num_frames:
+            return frame_indices / fps
+
+    return torch.arange(num_frames, dtype=torch.float32) / fps
+
+
 class MiMoV2OmniMultiModalProcessor(BaseMultiModalProcessor[MiMoV2OmniProcessingInfo]):
     """vLLM multimodal processor for MiMo-Omni (image + video).
 
@@ -917,9 +980,10 @@ class MiMoV2OmniMultiModalProcessor(BaseMultiModalProcessor[MiMoV2OmniProcessing
       regenerate the exact same timestamp token IDs.
     """
 
-    # fps assumed for vllm-decoded video (numpy T,H,W,C arrays).
-    # The video loader samples ~32 frames; treat each frame as 1 s apart so
-    # MiMoVLProcessor sees 1 fps input and resamples internally.
+    # Fallback fps for vllm-decoded video (numpy T,H,W,C arrays) that arrives
+    # without sampling metadata. Real ``fps``/``frames_indices`` from the video
+    # loader take precedence; only metadata-less frames use this value, so that
+    # MiMoVLProcessor still sees 1 fps input and resamples internally.
     _INPUT_FPS: float = 1.0
 
     def _get_mm_fields_config(
@@ -957,6 +1021,8 @@ class MiMoV2OmniMultiModalProcessor(BaseMultiModalProcessor[MiMoV2OmniProcessing
         """Convert numpy video arrays to (TCHW, timestamps) tuples for MiMo."""
         hf_inputs = super()._get_hf_mm_inputs(mm_items, hf_kwargs)
         mm_data = hf_inputs.hf_data
+        # Only used when a video arrives without sampling metadata.
+        default_fps = float(hf_kwargs.get("fps") or self._INPUT_FPS)
 
         # Handle video_audio items: convert video part to (TCHW, timestamps) tuple
         if "video_audio" in mm_data:
@@ -964,6 +1030,7 @@ class MiMoV2OmniMultiModalProcessor(BaseMultiModalProcessor[MiMoV2OmniProcessing
             video_audio_items = mm_data["video_audio"]
             assert isinstance(video_audio_items, Sequence)
             for va_item in video_audio_items:
+                metadata: Mapping[str, object] | None = None
                 if isinstance(va_item, VideoAudioInput):
                     vid = va_item.video
                 else:
@@ -971,6 +1038,7 @@ class MiMoV2OmniMultiModalProcessor(BaseMultiModalProcessor[MiMoV2OmniProcessing
                     assert isinstance(va_item, (list, tuple)) and len(va_item) == 2
                     vid, audio_src = va_item
                     va_item = VideoAudioInput(video=vid, audio=audio_src)
+                vid, metadata = _split_frames_metadata(vid)
                 # Convert video frames to (TCHW, timestamps) if needed
                 if (
                     isinstance(vid, tuple)
@@ -991,13 +1059,7 @@ class MiMoV2OmniMultiModalProcessor(BaseMultiModalProcessor[MiMoV2OmniProcessing
                     else:
                         frames = frames.float()
                     T = frames.shape[0]
-                    input_fps = float(hf_kwargs.get("fps") or getattr(vid, "fps", None) or self._INPUT_FPS)
-                    if hasattr(vid, "timestamps") and isinstance(vid.timestamps, torch.Tensor):
-                        timestamps = vid.timestamps.float()
-                    elif hasattr(vid, "frames_indices") and vid.frames_indices is not None:
-                        timestamps = torch.tensor(vid.frames_indices, dtype=torch.float32) / input_fps
-                    else:
-                        timestamps = torch.arange(T, dtype=torch.float32) / input_fps
+                    timestamps = _video_timestamps(metadata, T, default_fps)
                     va_converted.append(
                         VideoAudioInput(
                             video=(frames, timestamps),
@@ -1010,7 +1072,16 @@ class MiMoV2OmniMultiModalProcessor(BaseMultiModalProcessor[MiMoV2OmniProcessing
             converted: list[tuple[torch.Tensor, torch.Tensor]] = []
             videos = mm_data["videos"]
             assert isinstance(videos, Sequence)
-            for video in videos:
+            video_metadata = _video_item_metadata(mm_items)
+            for video_idx, video in enumerate(videos):
+                metadata = (
+                    video_metadata[video_idx]
+                    if video_idx < len(video_metadata)
+                    else None
+                )
+                video, tuple_metadata = _split_frames_metadata(video)
+                if tuple_metadata is not None:
+                    metadata = tuple_metadata
                 if (
                     isinstance(video, tuple)
                     and len(video) == 2
@@ -1035,13 +1106,7 @@ class MiMoV2OmniMultiModalProcessor(BaseMultiModalProcessor[MiMoV2OmniProcessing
                         frames = frames.float()
 
                     T = frames.shape[0]
-                    input_fps = float(hf_kwargs.get("fps") or getattr(video, "fps", None) or self._INPUT_FPS)
-                    if hasattr(video, "timestamps") and isinstance(video.timestamps, torch.Tensor):
-                        timestamps = video.timestamps.float()
-                    elif hasattr(video, "frames_indices") and video.frames_indices is not None:
-                        timestamps = torch.tensor(video.frames_indices, dtype=torch.float32) / input_fps
-                    else:
-                        timestamps = torch.arange(T, dtype=torch.float32) / input_fps
+                    timestamps = _video_timestamps(metadata, T, default_fps)
                     converted.append((frames, timestamps))
 
             mm_data["videos"] = converted
