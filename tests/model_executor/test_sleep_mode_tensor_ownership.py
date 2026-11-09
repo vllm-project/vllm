@@ -250,13 +250,13 @@ def _assert_tensor_snapshots_equal(
         torch.testing.assert_close(
             after_value,
             before_value,
-            msg=lambda msg, name=name: (f"{model_name}: {name} was corrupted: {msg}"),
+            msg=lambda msg, name=name: f"{model_name}: {name} was corrupted: {msg}",
         )
 
 
 @create_new_process_for_each_test("spawn")
 @pytest.mark.slow_test
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA sleep mode test")
+@pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="GPU sleep mode test")
 @pytest.mark.parametrize("case", SLEEP_MODEL_CASES, ids=lambda case: case.name)
 def test_static_model_tensors_survive_level2_restore(
     monkeypatch: pytest.MonkeyPatch,

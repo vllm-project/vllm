@@ -266,7 +266,7 @@ class TestCMakeGuards:
     )
     def test_cu_files_inside_arch_conditional(self, arch_marker, cu_files):
         """RDNA .cu files must be listed inside their
-        ``if(VLLM_GPU_ARCHES MATCHES ...)`` block, not unconditionally, so CDNA
+        `if(VLLM_GPU_ARCHES MATCHES ...)` block, not unconditionally, so CDNA
         builds do not compile them (and, for gfx11, a gfx1151-only build does).
         """
         cmake = self._read_cmake()
@@ -294,7 +294,7 @@ class TestCMakeGuards:
     )
     def test_compile_definition_inside_conditional(self, has_flag, define):
         """The compile definition must only be set inside
-        ``if(<has_flag>)``, or CDNA builds would define it."""
+        `if(<has_flag>)`, or CDNA builds would define it."""
         cmake = self._read_cmake()
         in_block = False
         for line in cmake.splitlines():
@@ -422,7 +422,7 @@ class TestCustomOpsGuards:
             )
 
     def test_no_toplevel_rocm_c_import(self):
-        """No top-level ``from vllm._rocm_C import`` — would crash on CDNA."""
+        """No top-level `from vllm._rocm_C import` — would crash on CDNA."""
         src = self._read_custom_ops()
         for line in src.splitlines():
             stripped = line.strip()

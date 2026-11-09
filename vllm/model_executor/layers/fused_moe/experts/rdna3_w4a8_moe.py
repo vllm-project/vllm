@@ -2,18 +2,18 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Int4 x int8 (W4A8) MoE decode experts for RDNA3/RDNA3.5 (gfx11).
 
-For small batches, ``moe_w4a8_decode_rdna3`` replaces the two Triton WNA16
+For small batches, `moe_w4a8_decode_rdna3` replaces the two Triton WNA16
 GEMMs, the activation and the top-k reduction with three HIP launches.
 Activations and the SiLU-and-mul output are quantized to int8 per 32 values
-and reduced with ``v_dot4_i32_iu8``, so the numerics differ slightly from
+and reduced with `v_dot4_i32_iu8`, so the numerics differ slightly from
 the W4A16 Triton path; this backend is therefore only used when requested
-with ``--moe-backend rdna3_w4a8``.
+with `--moe-backend rdna3_w4a8`.
 
-Weights stay in the ``TritonWNA16Experts`` format (uint8, two codes per byte,
+Weights stay in the `TritonWNA16Experts` format (uint8, two codes per byte,
 optional nibble-packed zero points), so larger batches and unsupported
 configurations fall back to the Triton kernels on the same tensors. A request
 therefore decodes with int8 activations while the batch has at most
-``RDNA3_W4A8_MAX_TOKENS`` tokens and with fp16/bf16 activations above that.
+`RDNA3_W4A8_MAX_TOKENS` tokens and with fp16/bf16 activations above that.
 """
 
 from math import prod

@@ -12,7 +12,9 @@ use crate::ChatRenderer;
 use crate::EffortValue;
 use crate::event::{AssistantContentBlock, AssistantToolCall};
 use crate::renderer::deepseek_v41::DeepSeekV41ChatRenderer;
-use crate::renderer::test_utils::{FixtureRequestOptions, fixture_chat_request};
+use crate::renderer::test_utils::{
+    FixtureRequestOptions, fixture_chat_request, tool_search_request,
+};
 use crate::request::{ChatContentPart, ChatMessage, ChatRequest, ChatTool, GenerationPromptMode};
 
 fn render_request(request: &ChatRequest) -> String {
@@ -841,4 +843,15 @@ fn custom_roles_are_rejected_as_request_errors() {
     assert!(error.is_request_validation_error());
     expect!["chat role `root` is not supported by this chat renderer"]
         .assert_eq(&error.to_report_string());
+}
+
+/// Like deepseek-recipe's Messages conversion: a tool reference is written as
+/// the tool's name, and V4 lists every tool, deferred ones included, up front.
+/// The expected prompt is deepseek-recipe's (`935817c`) for the same Messages
+/// request.
+#[test]
+fn tool_references_render_as_tool_names_like_deepseek_recipe() {
+    expect_file!["fixtures/tool_search_references.txt"].assert_eq(&render_request(
+        &tool_search_request(&["get_weather", "get_time"]),
+    ));
 }

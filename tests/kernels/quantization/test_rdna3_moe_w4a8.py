@@ -2,12 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Correctness tests for the RDNA3/RDNA3.5 (gfx11) W4A8 MoE decode kernel.
 
-``moe_w4a8_decode_rdna3`` consumes the TritonWNA16Experts weight tensors
+`moe_w4a8_decode_rdna3` consumes the TritonWNA16Experts weight tensors
 (uint8 codes, optional nibble-packed zero points) and quantizes activations
 to int8 per 32 values. It is checked against:
   - a torch reference that applies the same activation quantization
     (tight tolerance), and
-  - the Triton WNA16 ``fused_experts`` path on the same tensors (loose
+  - the Triton WNA16 `fused_experts` path on the same tensors (loose
     tolerance, int8 activation error only), which also pins the layout.
 
 Run `pytest tests/kernels/quantization/test_rdna3_moe_w4a8.py`.
