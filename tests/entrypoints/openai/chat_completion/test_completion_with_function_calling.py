@@ -374,7 +374,7 @@ async def test_named_tool_use(
         tool_choice=tool_choice,
     )
     message = chat_completion.choices[0].message
-    assert len(message.content) == 0
+    assert not message.content
     json_string = message.tool_calls[0].function.arguments
     json1 = json.loads(json_string)
     jsonschema.validate(instance=json1, schema=sample_json_schema)

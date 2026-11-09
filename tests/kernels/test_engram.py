@@ -7,16 +7,22 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.distributed import parallel_state
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     dequant_mxfp8_to_bf16,
 )
+from vllm.models.deepseek_v41.amd import engram as rocm_engram_ops
+from vllm.models.deepseek_v41.amd.engram import RocmEngram
 from vllm.models.deepseek_v41.common import engram as engram_ops
 from vllm.models.deepseek_v41.common.engram import (
     Engram,
     NgramHashState,
     ParallelEngramEmbedding,
 )
+from vllm.models.deepseek_v41.quant_config import DeepseekV4FP8Config
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_default_torch_dtype
 
 
 def _reference_engram_post_wkv(
@@ -51,7 +57,9 @@ def _reference_engram_post_wkv(
     return (h + gate.unsqueeze(-1) * value.unsqueeze(-2)).to(hidden_states.dtype)
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="CUDA or ROCm required"
+)
 @pytest.mark.parametrize(
     "num_tokens,num_kv_tokens,hc_mult,dim,tp_size,tp_rank,use_mask",
     [
@@ -144,26 +152,207 @@ def test_fused_engram_post_wkv_matches_reference(
     torch.testing.assert_close(actual, expected, rtol=1e-2, atol=1e-2)
 
 
-def _hash_state(use_slot_cache: bool) -> NgramHashState:
+@pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="GPU required")
+@pytest.mark.parametrize(
+    "num_tokens,hc_mult,dim,tp_size,use_mask",
+    [
+        (5, 4, 5120, 4, True),
+        (3, 4, 5120, 2, False),
+        (1, 4, 96, 4, False),
+        (7, 2, 96, 2, True),
+        (0, 4, 96, 4, False),
+    ],
+)
+def test_sharded_engram_post_wkv_matches_reference(
+    num_tokens, hc_mult, dim, tp_size, use_mask, monkeypatch
+):
+    """Each rank's dim slice of the keys and value, exchanged as value slices
+    plus gate partial sums, gives the full-projection update on every rank."""
+    torch.manual_seed(0)
+    device = "cuda"
+    hidden_states = torch.randn(
+        num_tokens, hc_mult, dim, dtype=torch.bfloat16, device=device
+    )
+    kv = torch.randn(
+        num_tokens, (hc_mult + 1) * dim, dtype=torch.bfloat16, device=device
+    )
+    q_weight = torch.randn(hc_mult, dim, dtype=torch.bfloat16, device=device)
+    k_weight = torch.randn(hc_mult, dim, dtype=torch.bfloat16, device=device)
+    token_mask = None
+    if use_mask:
+        token_mask = torch.arange(num_tokens, device=device) % 2 == 0
+    eps = 1e-20
+    clamp_value = 1e-6
+    expected = _reference_engram_post_wkv(
+        hidden_states, kv, q_weight, k_weight, token_mask, eps, clamp_value, 0
+    )
+
+    module = RocmEngram.__new__(RocmEngram)
+    torch.nn.Module.__init__(module)
+    module.dim = dim
+    module.hc_mult = hc_mult
+    module.eps = eps
+    module.clamp_value = clamp_value
+    module.kv_shards = tp_size
+    module.q_weight = torch.nn.Parameter(q_weight, requires_grad=False)
+    module.k_weight = torch.nn.Parameter(k_weight, requires_grad=False)
+
+    # MergedColumnParallelLinear's layout: rank r holds columns
+    # [r * width, (r + 1) * width) of every key and of the value.
+    width = dim // tp_size
+    parts = kv.view(num_tokens, hc_mult + 1, tp_size, width)
+    local_kv = [
+        parts[:, :, rank].reshape(num_tokens, (hc_mult + 1) * width)
+        for rank in range(tp_size)
+    ]
+
+    sent: list[torch.Tensor] = []
+
+    def record(x, dim):
+        assert dim == 0
+        sent.append(x.clone())
+        return torch.cat([x] * tp_size)
+
+    def exchange(x, dim):
+        assert dim == 0 and len(sent) == tp_size
+        return torch.cat(sent)
+
+    for gather in (record, exchange):
+        monkeypatch.setattr(rocm_engram_ops, "tensor_model_parallel_all_gather", gather)
+        for rank in range(tp_size):
+            monkeypatch.setattr(
+                rocm_engram_ops,
+                "get_tensor_model_parallel_rank",
+                lambda rank=rank: rank,
+            )
+            actual = module._post_wkv(
+                hidden_states, local_kv[rank], token_mask, num_tokens
+            )
+            if gather is exchange:
+                assert actual.shape == hidden_states.shape
+                torch.testing.assert_close(actual, expected, rtol=1e-2, atol=1e-2)
+
+
+def _checkpoint_tensor(param: torch.Tensor) -> torch.Tensor:
+    if param.dtype == torch.float8_e4m3fn:
+        return (torch.randn(param.shape) * 4).to(param.dtype)
+    if param.dtype in (torch.uint8, torch.float8_e8m0fnu):
+        return torch.randint(118, 124, param.shape, dtype=torch.uint8).view(param.dtype)
+    return (torch.randn(param.shape) * 0.05).to(param.dtype)
+
+
+@pytest.mark.skipif(
+    not rocm_engram_ops._shards_engram_gate(),
+    reason="sharded Engram gate platforms only",
+)
+@pytest.mark.parametrize("tp_size", [2, 4])
+@pytest.mark.parametrize("quantized", [False, True])
+def test_sharded_engram_loads_and_matches_tp1(tp_size, quantized, monkeypatch):
+    """The model's `wkv`, loaded from one fused checkpoint weight on each rank,
+    lays out the columns the gate kernels read and matches TP1."""
+    num_tokens, hc_mult, dim = 6, 4, 256
+    config = SimpleNamespace(hidden_size=dim, hc_mult=hc_mult, rms_norm_eps=1e-6)
+    layout = SimpleNamespace(max_ngram_size=3, n_heads=2, head_dim=64)
+    n_hash_cols = (layout.max_ngram_size - 1) * layout.n_heads
+    quant_config = None
+    if quantized:
+        quant_config = DeepseekV4FP8Config.from_config(
+            {
+                "quant_method": "fp8",
+                "activation_scheme": "dynamic",
+                "weight_block_size": [32, 32],
+                "scale_fmt": "ue8m0",
+            }
+        )
+
+    torch.manual_seed(0)
+    hidden_states = torch.randn(
+        num_tokens, hc_mult, dim, dtype=torch.bfloat16, device="cuda"
+    )
+    rows = torch.randn(
+        num_tokens, n_hash_cols, layout.head_dim, dtype=torch.bfloat16, device="cuda"
+    )
+    q_weight = torch.randn(hc_mult, dim, dtype=torch.bfloat16, device="cuda")
+    k_weight = torch.randn(hc_mult, dim, dtype=torch.bfloat16, device="cuda")
+    hash_ids = torch.zeros(num_tokens, n_hash_cols, dtype=torch.int32, device="cuda")
+    token_mask = torch.arange(num_tokens, device="cuda") % 3 != 1
+
+    monkeypatch.setattr(RocmEngram, "_create_embedding", lambda *args: None)
+    monkeypatch.setattr(RocmEngram, "_init_staging", lambda *args: None)
+    monkeypatch.setattr(RocmEngram, "embed", lambda self, hash_ids: rows)
+
+    def set_rank(size, rank):
+        tp = SimpleNamespace(world_size=size, rank_in_group=rank)
+        monkeypatch.setattr(parallel_state, "_TP", tp)
+
+    def build(size, rank, checkpoint=None):
+        set_rank(size, rank)
+        with (
+            set_current_vllm_config(VllmConfig()),
+            set_default_torch_dtype(torch.bfloat16),
+            torch.device("cuda"),
+        ):
+            engram = RocmEngram(config, quant_config, layout, 0, False, "engram")
+        params = dict(engram.wkv.named_parameters())
+        if checkpoint is None:
+            checkpoint = {name: _checkpoint_tensor(p) for name, p in params.items()}
+        for name, param in params.items():
+            param.weight_loader(param, checkpoint[name].cuda())
+        engram.wkv.quant_method.process_weights_after_loading(engram.wkv)
+        engram.q_weight.data.copy_(q_weight)
+        engram.k_weight.data.copy_(k_weight)
+        return engram, checkpoint
+
+    reference, checkpoint = build(1, 0)
+    assert reference.kv_shards == 1
+    expected_kv = reference.wkv(rows.flatten(-2))
+    expected = reference(hidden_states, hash_ids, token_mask)
+
+    width = dim // tp_size
+    parts = expected_kv.view(num_tokens, hc_mult + 1, tp_size, width)
+    ranks = [build(tp_size, rank, checkpoint)[0] for rank in range(tp_size)]
+    for rank, engram in enumerate(ranks):
+        assert engram.kv_shards == tp_size
+        set_rank(tp_size, rank)
+        torch.testing.assert_close(
+            engram.wkv(rows.flatten(-2)),
+            parts[:, :, rank].flatten(1),
+            rtol=1e-2,
+            atol=1e-2,
+        )
+
+    sent: list[torch.Tensor] = []
+
+    def record(x, dim):
+        sent.append(x.clone())
+        return torch.cat([x] * tp_size)
+
+    def exchange(x, dim):
+        return torch.cat(sent)
+
+    for gather in (record, exchange):
+        monkeypatch.setattr(rocm_engram_ops, "tensor_model_parallel_all_gather", gather)
+        for rank, engram in enumerate(ranks):
+            set_rank(tp_size, rank)
+            actual = engram(hidden_states, hash_ids, token_mask)
+            if gather is exchange:
+                torch.testing.assert_close(actual, expected, rtol=1e-2, atol=1e-2)
+
+
+def _hash_state() -> NgramHashState:
     state = NgramHashState.__new__(NgramHashState)
     torch.nn.Module.__init__(state)
-    state.block_size = 64
-    state.use_slot_cache = use_slot_cache
-    state._cache = None
-    state._kv_cache_ref = None
     state.swa_cache_module = torch.nn.Module()
     state.swa_cache_module.kv_cache = torch.empty(0)
     return state
 
 
 @pytest.mark.parametrize("num_tokens", [0, 7])
-def test_engram_dummy_hashes_leave_history_untouched(num_tokens):
-    """Dummy forwards have no valid table IDs and do not alter cached history."""
-    state = _hash_state(use_slot_cache=True)
+def test_engram_dummy_hashes_have_no_valid_rows(num_tokens):
+    """Dummy forwards take part in DP lookups without any valid table IDs."""
+    state = _hash_state()
     state.multipliers = torch.empty(2, 4, dtype=torch.int64)
     state.primes = torch.empty(2, 3, 8, dtype=torch.int64)
-    state._cache = torch.arange(16, dtype=torch.int32)
-    history = state._cache.clone()
 
     hashes, keep = state.dummy_hashes(torch.arange(num_tokens))
 
@@ -172,70 +361,47 @@ def test_engram_dummy_hashes_leave_history_untouched(num_tokens):
     assert torch.all(hashes == engram_ops.DEAD_ID)
     assert keep.shape == (num_tokens,) and keep.dtype == torch.bool
     assert not keep.any()
-    torch.testing.assert_close(state._cache, history)
 
 
-@pytest.mark.parametrize("num_blocks", [4, 100])
-def test_engram_cache_follows_kv_cache_binding(num_blocks):
-    """Discard profiling history when the real KV cache replaces its storage."""
-    state = _hash_state(use_slot_cache=True)
+def test_engram_ensure_cache_gates_on_kv_binding():
+    """Hashing is skipped while the KV cache is unbound (the profile run)."""
+    state = _hash_state()
     assert not state.ensure_cache()
-
     state.swa_cache_module.kv_cache = torch.empty(4, 64, 1)
     assert state.ensure_cache()
-    profiling_cache = state._cache
-    assert profiling_cache is not None
-    profiling_cache.fill_(7)
-    assert state.ensure_cache()
-    assert state._cache is profiling_cache
-    assert torch.all(state._cache == 7)
-
-    state.swa_cache_module.kv_cache = torch.empty(num_blocks, 64, 1)
-    assert state.ensure_cache()
-    assert state._cache is not profiling_cache
-    assert state._cache is not None
-    assert state._cache.shape == (num_blocks * 64,)
-    assert torch.count_nonzero(state._cache) == 0
-
     state.swa_cache_module.kv_cache = torch.empty(0)
     assert not state.ensure_cache()
-    assert state._cache is None
-
-
-def test_engram_without_slot_cache_only_gates_on_kv_binding():
-    """The V2 runner supplies every lookback, so no slot cache is allocated."""
-    state = _hash_state(use_slot_cache=False)
-    assert not state.ensure_cache()
-    state.swa_cache_module.kv_cache = torch.empty(4, 64, 1)
-    assert state.ensure_cache()
-    assert state._cache is None
 
 
 def _reference_hashes(
     ids,
     positions,
-    slots,
     starts,
-    tables,
     dead,
-    cache,
+    window,
+    window_dead,
     token_map,
     multipliers,
     primes,
     offsets,
 ):
-    """Scalar n-gram oracle with persistent, physically addressed token history."""
-    for token, slot, is_dead in zip(ids, slots, dead):
-        if slot >= 0:
-            cache[slot] = -1 if is_dead else token_map[token]
+    """Scalar n-gram oracle reading history from the chunk, then the window."""
     result = []
     for i, position in enumerate(positions):
-        req = min(bisect.bisect_right(starts[1:], i), len(tables) - 1)
+        req = min(bisect.bisect_right(starts[1:], i), len(window) - 1)
+        chunk_start = positions[starts[req]]
         history, blocked = [], False
         for shift in range(4):
             lookback = position - shift
-            p = max(0, min(lookback, len(tables[req]) * 16 - 1))
-            source = cache[tables[req][p // 16] * 16 + p % 16]
+            if lookback >= chunk_start:
+                source = -1 if dead[i - shift] else token_map[ids[i - shift]]
+            else:
+                col = chunk_start - 1 - lookback
+                token = window[req][col]
+                if token < 0:
+                    source = 0
+                else:
+                    source = -1 if window_dead[req][col] else token_map[token]
             blocked |= lookback < 0 or source == -1
             history.append(0 if blocked else source)
         layers = []
@@ -251,28 +417,26 @@ def _reference_hashes(
     return torch.tensor(result, dtype=torch.int32)
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="CUDA or ROCm required"
+)
 @pytest.mark.parametrize("query_len", [1, 17, 257])
 @pytest.mark.parametrize("capture", [False, True])
-@pytest.mark.parametrize("strided_slots", [False, True])
+@pytest.mark.parametrize("strided_positions", [False, True])
 @pytest.mark.parametrize("large_hashes", [False, True])
-def test_engram_hash_cache_replay(query_len, capture, strided_slots, large_hashes):
-    """Preserve history, dead tokens and padding as inputs change across replay."""
+def test_engram_hash_replay(query_len, capture, strided_positions, large_hashes):
+    """Follow tokens, positions, dead masks and windows as they change across replay."""
     num_tokens = 2 * query_len + 3
-    blocks = (3 * query_len + 15) // 16
-    tables = [list(range(blocks, 2 * blocks)), list(range(blocks))]
     starts = [0, query_len, 2 * query_len]
 
     def tensor(data, dtype=torch.int64):
         return torch.tensor(data, dtype=dtype, device="cuda")
 
     input_ids = tensor([0] * num_tokens)
-    positions = torch.zeros_like(input_ids)
-    slots = tensor([-1] * (num_tokens * (2 if strided_slots else 1)))
-    if strided_slots:
-        slots = slots[::2]
+    positions = tensor([0] * (num_tokens * (2 if strided_positions else 1)))
+    if strided_positions:
+        positions = positions[::2]
     dead_mask = tensor([False] * num_tokens, torch.bool)
-    cache = tensor([-1] * (2 * blocks * 16), torch.int32)
     token_map = [i * 3091 if large_hashes else i % 7 for i in range(32)]
     multipliers = (
         engram_ops.compute_hash_multipliers((1, 14), 4, 99092).tolist()
@@ -304,20 +468,16 @@ def test_engram_hash_cache_replay(query_len, capture, strided_slots, large_hashe
     state.multipliers = tensor(multipliers)
     state.primes = tensor(primes)
     state.offsets = tensor(offsets)
-    state._cache = cache
-    state.use_slot_cache = True
     state.pad_id = 0
-    state.block_size = 16
     lookback = tensor([[-1] * 3] * 2, torch.int32)
+    lookback_dead = torch.zeros_like(lookback, dtype=torch.bool)
     args = (
         input_ids,
         positions,
         tensor(starts, torch.int32),
         dead_mask,
         lookback,
-        torch.zeros_like(lookback, dtype=torch.bool),
-        slots,
-        tensor(tables, torch.int32),
+        lookback_dead,
     )
     op = state
     graph = None
@@ -332,87 +492,76 @@ def test_engram_hash_cache_replay(query_len, capture, strided_slots, large_hashe
         with torch.cuda.graph(graph, stream=stream):
             output = op(*args)
         torch.cuda.current_stream().wait_stream(stream)
-    cache.fill_(-1)
-    expected_cache = [-1] * cache.numel()
 
     for step in range(3):
         ids = [(i + 3 * step) % 32 for i in range(num_tokens)]
-        pos = list(range(step * query_len, (step + 1) * query_len)) * 2
-        physical_slots = [
-            tables[i // query_len][p // 16] * 16 + p % 16 for i, p in enumerate(pos)
-        ]
-        pos += [0] * 3
-        physical_slots += [-1] * 3
-        # A fully padded replay must leave every cache slot untouched.
-        if step == 2:
-            physical_slots = [-1] * num_tokens
+        pos = list(range(step * query_len, (step + 1) * query_len)) * 2 + [0] * 3
         dead = [(i + step) % 5 == 0 for i in range(num_tokens)]
+        # The second request's oldest window token is unknown on the middle step.
+        window = [
+            [
+                -1 if (step, req, col) == (1, 1, 2) else (7 * step + req + col) % 32
+                for col in range(3)
+            ]
+            for req in range(2)
+        ]
+        window_dead = [
+            [(step + req + col) % 4 == 0 for col in range(3)] for req in range(2)
+        ]
         input_ids.copy_(tensor(ids))
         positions.copy_(tensor(pos))
-        slots.copy_(tensor(physical_slots))
         dead_mask.copy_(tensor(dead, torch.bool))
+        lookback.copy_(tensor(window, torch.int32))
+        lookback_dead.copy_(tensor(window_dead, torch.bool))
         if graph is None:
             output = op(*args)
         else:
             graph.replay()
+        real = 2 * query_len
         expected = _reference_hashes(
-            ids,
-            pos,
-            physical_slots,
+            ids[:real],
+            pos[:real],
             starts,
-            tables,
             dead,
-            expected_cache,
+            window,
+            window_dead,
             token_map,
             multipliers,
             primes,
             offsets,
         )
-        if step != 2:
-            real = 2 * query_len
-            torch.testing.assert_close(
-                output[:real].cpu(), expected[:real], rtol=0, atol=0
-            )
-        assert cache.cpu().tolist() == expected_cache
+        torch.testing.assert_close(output[:real].cpu(), expected, rtol=0, atol=0)
 
     empty_output = state(
         input_ids[:0], positions[:0], args[2], dead_mask[:0], *args[4:]
     )
     assert empty_output.shape == (0, 2, len(offsets[0]))
-    assert cache.cpu().tolist() == expected_cache
 
 
-def _hash_ids(requests, tables_meta, block_table, cache=None, capture=False):
+def _hash_ids(requests, tables_meta, capture=False):
     """Run the op on a batch of (token_ids, start, window) requests; `window`
     is the runner's [depth] lookback for that request (None = all unknown).
     Token IDs 14 and 22 stand in for image tokens that break n-grams.
     Returns one [len(token_ids), ...] hash tensor per request."""
-    token_map, multipliers, primes, offsets, block_size = tables_meta
+    token_map, multipliers, primes, offsets = tables_meta
     depth = multipliers.shape[1] - 1
 
     def tensor(data, dtype=torch.int64):
         return torch.tensor(data, dtype=dtype, device="cuda")
 
-    input_ids, positions, slots, windows, starts = [], [], [], [], [0]
-    for req, (token_ids, start, window) in enumerate(requests):
-        pos = list(range(start, start + len(token_ids)))
+    input_ids, positions, windows, starts = [], [], [], [0]
+    for token_ids, start, window in requests:
         input_ids += token_ids
-        positions += pos
-        slots += [
-            int(block_table[req, p // block_size]) * block_size + p % block_size
-            for p in pos
-        ]
+        positions += list(range(start, start + len(token_ids)))
         windows.append(window or [-1] * depth)
         starts.append(starts[-1] + len(token_ids))
     window = tensor(windows, torch.int32)
-    state = _hash_state(use_slot_cache=cache is not None)
+    state = _hash_state()
     state.token_map = token_map
     state.multipliers = multipliers
     state.primes = primes
     state.offsets = offsets
     state.pad_id = 0
-    state.block_size = block_size
-    state._cache = cache
     input_tensor = tensor(input_ids, torch.int32)
     args = (
         input_tensor,
@@ -421,8 +570,6 @@ def _hash_ids(requests, tables_meta, block_table, cache=None, capture=False):
         (input_tensor == 14) | (input_tensor == 22),
         window,
         (window == 14) | (window == 22),
-        tensor(slots) if cache is not None else None,
-        block_table if cache is not None else None,
     )
     out = state(*args)
     if capture:
@@ -433,77 +580,55 @@ def _hash_ids(requests, tables_meta, block_table, cache=None, capture=False):
     return [out[a:b] for a, b in zip(starts, starts[1:])]
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
-@pytest.mark.parametrize("runner", ["v2_window_only", "v1_prompt_window_plus_cache"])
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="CUDA or ROCm required"
+)
 @pytest.mark.parametrize("capture", [False, True])
-def test_lookback_window_reproduces_single_instance(runner, capture):
+def test_lookback_window_reproduces_single_instance(capture):
     """Decoding on a fresh instance whose prompt KV came from elsewhere (P/D,
     offload) must hash like the instance that processed the whole sequence,
-    with two requests batched and chunks of 1-2 tokens so in-batch, window
-    and (V1) cache lookbacks mix within one step.
-
-    V2 supplies every lookback from its device token history and needs no
-    slot cache. V1 supplies prompt positions only and reads generated
-    positions from the slot cache it fills itself. Without any window the
-    first decode token hashes stale slots (negative control)."""
-    block_size = 4
-    block_table = torch.tensor(
-        [[3, 1, 5, 0], [2, 4, 6, 7]], dtype=torch.int32, device="cuda"
-    )
+    with two requests batched and chunks of 1-2 tokens so in-batch and window
+    lookbacks mix within one step. Without a window the first decode token
+    hashes padding instead (negative control)."""
     tables_meta = (
         torch.arange(50, dtype=torch.int32, device="cuda"),
         torch.tensor([[3, 5, 7, 9]], device="cuda"),
         torch.tensor([[[97, 89], [83, 79], [73, 71]]], device="cuda"),
         torch.tensor([[0, 97, 186, 269, 348, 421]], device="cuda"),
-        block_size,
     )
     depth = 3
     prompts = [[11, 12, 13, 14, 15, 16], [31, 32, 33, 34, 35]]
     decodes = [[21, 22, 23, 24], [41, 42, 43, 44]]
     chunk_sizes = [1, 2, 1]
-    v2 = runner.startswith("v2")
-
-    def fresh_cache():
-        return torch.zeros(8 * block_size, dtype=torch.int32, device="cuda")
 
     reference = _hash_ids(
-        [(p + d, 0, None) for p, d in zip(prompts, decodes)],
-        tables_meta,
-        block_table,
-        cache=fresh_cache(),
+        [(p + d, 0, None) for p, d in zip(prompts, decodes)], tables_meta
     )
 
     histories = [list(p) for p in prompts]
-    cache = None if v2 else fresh_cache()
     consumed = 0
     for chunk in chunk_sizes:
         batch = []
-        for history, prompt, decode in zip(histories, prompts, decodes):
+        for history, decode in zip(histories, decodes):
             start = len(history)
             tokens = decode[consumed : consumed + chunk]
-            window = [
-                history[start - 1 - j] if v2 or start - 1 - j < len(prompt) else -1
-                for j in range(depth)
-            ]
+            window = [history[start - 1 - j] for j in range(depth)]
             batch.append((tokens, start, window))
-        got = _hash_ids(batch, tables_meta, block_table, cache=cache, capture=capture)
+        got = _hash_ids(batch, tables_meta, capture=capture)
         for req, (tokens, start, _) in enumerate(batch):
             assert torch.equal(got[req], reference[req][start : start + chunk]), (
-                f"{runner} request {req} chunk at {start}"
+                f"request {req} chunk at {start}"
             )
             histories[req] += tokens
         consumed += chunk
 
-    unseeded = _hash_ids(
-        [(decodes[0][:1], len(prompts[0]), None)],
-        tables_meta,
-        block_table,
-        cache=fresh_cache(),
-    )
+    unseeded = _hash_ids([(decodes[0][:1], len(prompts[0]), None)], tables_meta)
     assert not torch.equal(unseeded[0][0], reference[0][len(prompts[0])])
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="CUDA or ROCm required"
+)
 @pytest.mark.parametrize("pcp", [False, True])
 def test_v2_model_state_gathers_lookback_window(pcp):
     """The window is gathered on device from the runner's token history."""
@@ -574,6 +699,7 @@ def _make_embedding(cpu_offload, rows=4096, dim=256, block=32):
     layer.head_start = 0
     layer.cpu_offload = cpu_offload
     layer.dp_shared_memory = False
+    layer.peer_rows = 0
     layer.part_num_embeddings = rows
     # A window strictly inside the table, so unowned rows are exercised too.
     layer.vocab_start_idx, layer.vocab_end_idx = rows // 4, rows // 4 + rows // 2
@@ -598,6 +724,25 @@ def _make_embedding(cpu_offload, rows=4096, dim=256, block=32):
 
 
 @pytest.mark.parametrize(
+    "cpu_offload,use_thp", [(False, False), (True, False), (True, True)]
+)
+def test_engram_meta_initialization_does_not_allocate_host_tables(
+    dist_init, cpu_offload, use_thp
+):
+    """Encoder-only language-model placeholders must not allocate host storage."""
+    with torch.device("meta"):
+        layer = ParallelEngramEmbedding(
+            36, 64, (17, 19), cpu_offload=cpu_offload, use_thp=use_thp
+        )
+
+    assert layer.weight.is_meta and layer.weight_scale_inv.is_meta
+    assert layer.weight.shape == (36, 64)
+    assert layer.weight_scale_inv.shape == (36, 2)
+    assert layer.weight.dtype == torch.float8_e4m3fn
+    assert layer.weight_scale_inv.dtype == torch.uint8
+
+
+@pytest.mark.parametrize(
     "tp_size,dp_size,n_heads", [(1, 4, 5), (2, 2, 5), (4, 1, 6), (8, 1, 6)]
 )
 def test_engram_rejects_empty_head_shards(tp_size, dp_size, n_heads, monkeypatch):
@@ -608,7 +753,8 @@ def test_engram_rejects_empty_head_shards(tp_size, dp_size, n_heads, monkeypatch
     monkeypatch.setattr(engram_ops, "get_engram_dp_size", lambda: dp_size)
     monkeypatch.setattr(engram_ops, "get_tensor_model_parallel_rank", lambda: 0)
     with pytest.raises(AssertionError, match="ranks without hash heads"):
-        ParallelEngramEmbedding(n_heads * 17, 64, (17,) * n_heads)
+        # GPU tables at TP1 shard rows across DP instead of heads.
+        ParallelEngramEmbedding(n_heads * 17, 64, (17,) * n_heads, cpu_offload=True)
 
 
 @pytest.mark.skipif(
@@ -699,7 +845,9 @@ def test_engram_head_shards_reconstruct_checkpoint(
         )
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="CUDA or ROCm required"
+)
 def test_engram_lookup_reuses_jit_across_token_shapes():
     """Runtime token counts and launch grids must share one JIT variant."""
     layer = _make_embedding(cpu_offload=False)
@@ -755,9 +903,12 @@ def test_engram_lookup_matches_torch(cpu_offload, background, packed, num_tokens
     assert torch.equal(out, expected)
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="CUDA or ROCm required"
+)
+@pytest.mark.parametrize("use_thp", [False, True])
 @pytest.mark.parametrize("register_fails", [False, True])
-def test_engram_use_thp_lookup_and_fallback(monkeypatch, register_fails):
+def test_engram_use_thp_lookup_and_fallback(monkeypatch, register_fails, use_thp):
     """Huge-page tables and their pinned fallback both give exact lookup rows."""
     monkeypatch.setattr(engram_ops, "get_tensor_model_parallel_world_size", lambda: 1)
     monkeypatch.setattr(engram_ops, "get_tensor_model_parallel_rank", lambda: 0)
@@ -768,13 +919,14 @@ def test_engram_use_thp_lookup_and_fallback(monkeypatch, register_fails):
     rows, dim = 32769, 64
     with torch.device("cuda"):
         layer = ParallelEngramEmbedding(
-            rows, dim, (rows,), cpu_offload=True, use_thp=True
+            rows, dim, (rows,), cpu_offload=True, use_thp=use_thp
         )
     assert layer.weight.is_pinned() and layer.weight_scale_inv.is_pinned()
     same_storage = layer.weight.untyped_storage().data_ptr() == (
         layer.weight_scale_inv.untyped_storage().data_ptr()
     )
-    assert same_storage != register_fails
+    registered = (use_thp or current_platform.is_rocm()) and not register_fails
+    assert same_storage == registered
     layer.weight.data.fill_(2)
     layer.weight_scale_inv.data.fill_(127)
     ids = torch.tensor(
@@ -788,7 +940,7 @@ def test_engram_use_thp_lookup_and_fallback(monkeypatch, register_fails):
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
-def test_engram_shared_prefetch_stream_waits_per_layer():
+def test_engram_shared_prefetch_stream_waits_per_layer(monkeypatch):
     """Consuming a layer must not wait for later layers on the shared stream."""
     stream = torch.cuda.Stream()
     modules = []
@@ -804,13 +956,24 @@ def test_engram_shared_prefetch_stream_waits_per_layer():
         modules.append(module)
     hashes = torch.randint(1024, 3072, (8, 2, 24), device="cuda", dtype=torch.int32)
     modules[0].prepare_embeddings(hashes[:, 0])
-    with torch.cuda.stream(stream):
-        torch.cuda._sleep(100_000_000)  # ~50 ms ahead of the second lookup
     modules[1].prepare_embeddings(hashes[:, 1])
-    rows = modules[0].embed(hashes[:, 0])
+
+    # Independent CUDA streams can serialize; check the requested dependency
+    # instead of assuming the second lookup is still running at a given time.
+    waits = []
+    wait_event = torch.cuda.Stream.wait_event
+
+    def record_wait_event(consumer, event):
+        waits.append((consumer, event))
+        return wait_event(consumer, event)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(torch.cuda.Stream, "wait_event", record_wait_event)
+        rows = modules[0].embed(hashes[:, 0])
+
+    assert modules[0]._prefetch_done is not None
+    assert waits == [(torch.cuda.current_stream(), modules[0]._prefetch_done)]
     torch.cuda.current_stream().synchronize()
-    assert modules[1]._prefetch_done is not None
-    assert not modules[1]._prefetch_done.query(), "waited for the second lookup"
     layer = modules[0].embed_tokens
     expected = _reference_lookup(
         layer.weight.cuda(),
@@ -823,7 +986,9 @@ def test_engram_shared_prefetch_stream_waits_per_layer():
     torch.accelerator.synchronize()
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="CUDA or ROCm required"
+)
 @pytest.mark.parametrize("cpu_offload", [None, False])
 def test_engram_constructor_honors_offload(monkeypatch, cpu_offload):
     """Default offload uses pinned storage and the given stream; False uses HBM."""
@@ -893,7 +1058,9 @@ def test_engram_constructor_honors_offload(monkeypatch, cpu_offload):
         assert streams == [main]
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="CUDA or ROCm required"
+)
 @pytest.mark.parametrize(
     "cpu_offload,delay",
     [(False, None), (True, None), (True, "producer"), (True, "lookup")],
@@ -1076,7 +1243,9 @@ def _engram_tp_worker(rank, tp_size, port):
 
 
 @pytest.mark.distributed(num_gpus=2)
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="CUDA or ROCm required"
+)
 def test_engram_head_collectives_survive_graph_breaks():
     """All-gather preserves head order and local SP tokens across graph replay."""
     from vllm.utils.network_utils import get_open_port

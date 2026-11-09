@@ -39,7 +39,7 @@ def use_merged_qkv_gate(config: BeamConfig, tp_size: int) -> bool:
 class BeamAttention(nn.Module):
     """GQA with per-head Q/K RMSNorm, then RoPE (sliding-window layers) or
     SSMax (NoPE full-attention layers). The attention output is scaled by
-    ``sigmoid(gate + bias)`` before ``o_proj``.
+    `sigmoid(gate + bias)` before `o_proj`.
     """
 
     def __init__(
@@ -48,6 +48,7 @@ class BeamAttention(nn.Module):
         cache_config: CacheConfig | None,
         quant_config: QuantizationConfig | None,
         prefix: str = "",
+        reduce_results: bool = True,
     ) -> None:
         super().__init__()
         self.layer_id = extract_layer_index(prefix)
@@ -104,6 +105,7 @@ class BeamAttention(nn.Module):
             bias=False,
             quant_config=quant_config,
             prefix=f"{prefix}.o_proj",
+            reduce_results=reduce_results,
         )
 
         self.rms_norm_eps = config.rms_norm_eps

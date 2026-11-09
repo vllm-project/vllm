@@ -22,7 +22,7 @@ from vllm.entrypoints.launchers.render.app_state import init_render_app_state
 from vllm.entrypoints.launchers.render.entry import build_and_serve_renderer
 
 warnings.warn(
-    "`vllm.entrypoints.openai.api_server` is deprecated and will likely be"
+    "`vllm.entrypoints.openai.api_server` is deprecated and will likely be "
     "unsupported in a future version. Use the corresponding function from "
     "`vllm.entrypoints.launchers` instead.",
     DeprecationWarning,
@@ -50,7 +50,7 @@ __all__ = [
 if __name__ == "__main__":
     warnings.warn(
         "The `python -m vllm.entrypoints.openai.api_server` command is deprecated "
-        "and may be removed in a future release. Please use `vllm server` instead.",
+        "and may be removed in a future release. Please use `vllm serve` instead.",
         DeprecationWarning,
         stacklevel=1,
     )

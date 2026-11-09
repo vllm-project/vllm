@@ -54,9 +54,11 @@ class AiterInt8ScaledMMLinearKernel(CutlassInt8ScaledMMLinearKernel):
         if not rocm_aiter_ops.is_linear_enabled():
             return (
                 False,
-                "requires setting `VLLM_ROCM_USE_AITER=1` "
-                "and `VLLM_ROCM_USE_AITER_LINEAR=1`. "
-                "`VLLM_ROCM_USE_AITER_LINEAR` default is True.",
+                (
+                    "requires setting `VLLM_ROCM_USE_AITER=1` "
+                    "and `VLLM_ROCM_USE_AITER_LINEAR=1`. "
+                    "`VLLM_ROCM_USE_AITER_LINEAR` default is True."
+                ),
             )
         return True, None
 
@@ -64,6 +66,15 @@ class AiterInt8ScaledMMLinearKernel(CutlassInt8ScaledMMLinearKernel):
     def can_implement(cls, c: Int8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
         if not c.input_symmetric:
             return False, "supports symmetric quantization only."
+        # AITER actually supports only per-token-per-channel GEMM.
+        # Fused per-tensor weight scales become per-channel after loading
+        # (see CutlassInt8ScaledMMLinearKernel).
+        weight_per_channel = c.is_channelwise or c.is_fused_module
+        if c.is_static_input_scheme or not weight_per_channel:
+            return (
+                False,
+                "supports only per-token activations with per-channel weights.",
+            )
         return True, None
 
     def apply_weights(
@@ -76,10 +87,9 @@ class AiterInt8ScaledMMLinearKernel(CutlassInt8ScaledMMLinearKernel):
             `output = torch.mm((scale_a * a), (scale_b * b)).to(out_dtype)`
         where scale_a * a and scale_b * b are implemented using numpy-style
         broadcasting.
-        Currently only support per-tensor-per-tensor GEMM
-        and per-token-per-channel GEMM through AITER
+        Currently only supports per-token-per-channel GEMM through AITER
         w8a8 scaled gemm. `AiterInt8ScaledMMLinearKernel` also does not support
-        ATIER block scaled GEMM and mix-precision GEMM.
+        AITER block scaled GEMM and mix-precision GEMM.
         """
         w_q, w_s, i_s, i_zp, azp_adj = self._get_layer_params(layer)
 
@@ -104,24 +114,11 @@ class AiterInt8ScaledMMLinearKernel(CutlassInt8ScaledMMLinearKernel):
         m = x_q.shape[0]  # a
         n = w_q.shape[1]  # b
 
-        per_tensor_scale_a = x_s.numel() == 1
-        per_tensor_scale_b = w_s.numel() == 1
         per_token_scale_a = x_s.numel() == m
         per_channel_scale_b = w_s.numel() == n
-
-        # @TODO:
-        # Maybe broadcast the per-tensor-scale into per-channel-scale
-        # if one of the scale is a per-channel-scale.
-        # For now, it only supports:
-        # - per-tensor-per-tensor a8w8 scaled GEMM, and
-        # - per-token-per-channel a8w8 scaled GEMM
-        assert (per_tensor_scale_a and per_tensor_scale_b) or (
-            per_token_scale_a and per_channel_scale_b
-        ), (
-            "Currently only support per-tensor-per-tensor GEMM "
-            " and per-token-per-channel GEMM through AITER"
-            " w8a8 scaled gemm. `AiterInt8ScaledMMLinearKernel` "
-            "does not support AITER block scaled GEMM."
+        assert per_token_scale_a and per_channel_scale_b, (
+            "Currently only support per-token-per-channel GEMM through AITER"
+            " w8a8 scaled gemm."
         )
 
         # gemm_a8w8_CK(a, b, scale_a, scale_b, bias) expects
@@ -141,9 +138,11 @@ class AiterPreshuffledPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         if not rocm_aiter_ops.is_linear_fp8_enabled():
             return (
                 False,
-                "requires setting `VLLM_ROCM_USE_AITER=1` "
-                "and `VLLM_ROCM_USE_AITER_LINEAR=1`. "
-                "`VLLM_ROCM_USE_AITER_LINEAR` default is True.",
+                (
+                    "requires setting `VLLM_ROCM_USE_AITER=1` "
+                    "and `VLLM_ROCM_USE_AITER_LINEAR=1`. "
+                    "`VLLM_ROCM_USE_AITER_LINEAR` default is True."
+                ),
             )
         try:
             import aiter  # noqa: F401
@@ -180,8 +179,10 @@ class AiterPreshuffledPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         if not (N % 16 == 0 and K % 16 == 0):
             return (
                 False,
-                f"requires N and K dimensions divisible by 16, received "
-                f"N={N} and K={K}.",
+                (
+                    f"requires N and K dimensions divisible by 16, received "
+                    f"N={N} and K={K}."
+                ),
             )
 
         # Aiter's shuffled per-token Gemm performs better than torch only when its
@@ -189,8 +190,10 @@ class AiterPreshuffledPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         if not rocm_aiter_ops.is_shuffled_per_token_w8a8_gemm_tuned(N, K, fp8_dtype):
             return (
                 False,
-                f"requires a tuned configuration for N: {N} and K: {K} "
-                f"and fp8 dtype {fp8_dtype}.",
+                (
+                    f"requires a tuned configuration for N: {N} and K: {K} "
+                    f"and fp8 dtype {fp8_dtype}."
+                ),
             )
 
         return True, None
@@ -235,9 +238,11 @@ class AiterHipbMMPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         if not rocm_aiter_ops.is_linear_hipbmm_enabled():
             return (
                 False,
-                "requires setting `VLLM_ROCM_USE_AITER=1`, "
-                "`VLLM_ROCM_USE_AITER_LINEAR=1`, "
-                "and `VLLM_ROCM_USE_AITER_LINEAR_HIPBMM=1`.",
+                (
+                    "requires setting `VLLM_ROCM_USE_AITER=1`, "
+                    "`VLLM_ROCM_USE_AITER_LINEAR=1`, "
+                    "and `VLLM_ROCM_USE_AITER_LINEAR_HIPBMM=1`."
+                ),
             )
         try:
             import aiter  # noqa: F401
@@ -276,8 +281,10 @@ class AiterHipbMMPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         if not (N >= 16 and N % 16 == 0 and K % 16 == 0):
             return (
                 False,
-                "requires N >= 16 and both N and K divisible by 16, "
-                f"received N={N} and K={K}.",
+                (
+                    "requires N >= 16 and both N and K divisible by 16, "
+                    f"received N={N} and K={K}."
+                ),
             )
 
         return True, None
@@ -356,8 +363,10 @@ class AiterPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         if not rocm_aiter_ops.is_per_token_w8a8_gemm_tuned(N, K, fp8_dtype):
             return (
                 False,
-                f"requires a tuned configuration for N: {N} and K: {K} "
-                f"and fp8 dtype {fp8_dtype}.",
+                (
+                    f"requires a tuned configuration for N: {N} and K: {K} "
+                    f"and fp8 dtype {fp8_dtype}."
+                ),
             )
         return True, None
 
@@ -465,13 +474,15 @@ class AiterFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         if act_quant_desc.group_shape != GroupShape(1, 128):
             return (
                 False,
-                "Supports only dynamic per token group activation "
-                "quantization with group_shape=(1,128).",
+                (
+                    "Supports only dynamic per token group activation "
+                    "quantization with group_shape=(1,128)."
+                ),
             )
 
-        # RDNA4 (gfx12) only has the aiter Triton blockscale backend, which
-        # needs a per-(N,K) tune. Reject untuned shapes so the dispatcher falls
-        # through to the generic backend.
+        # RDNA only has the aiter Triton blockscale backend, which needs a
+        # per-(N,K) tune. Reject untuned shapes so the dispatcher falls through
+        # to the generic backend.
         if rocm_aiter_ops.is_rdna_linear_enabled():
             n, k = config.weight_shape
             if not rocm_aiter_ops.is_triton_gemm_w8a8_tuned(n, k):

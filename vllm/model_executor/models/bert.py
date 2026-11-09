@@ -787,7 +787,9 @@ class BertSpladeSparseEmbeddingModel(BertEmbeddingModel):
 
 
 @default_pooling_type(seq_pooling_type="CLS")
-class BertForSequenceClassification(nn.Module, SupportsCrossEncoding, SupportsQuant):
+class BertForSequenceClassification(
+    nn.Module, SupportsCrossEncoding, SupportsQuant, SupportsLoRA
+):
     """A model that uses Bert to provide embedding functionalities.
 
     This class encapsulates the BertModel and provides an interface for
@@ -801,10 +803,12 @@ class BertForSequenceClassification(nn.Module, SupportsCrossEncoding, SupportsQu
 
     is_pooling_model = True
     embedding_class: type[nn.Module] = BertEmbedding
+    packed_modules_mapping = {"qkv_proj": ["query", "key", "value"]}
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
+        self.config = config
 
         self.num_labels = config.num_labels
         self.bert = BertPoolingModel(
@@ -812,10 +816,12 @@ class BertForSequenceClassification(nn.Module, SupportsCrossEncoding, SupportsQu
             prefix=maybe_prefix(prefix, "bert"),
             embedding_class=self.embedding_class,
         )
-        self.classifier = nn.Linear(
+        self.classifier = ReplicatedLinear(
             config.hidden_size,
             config.num_labels,
-            dtype=vllm_config.model_config.head_dtype,
+            params_dtype=vllm_config.model_config.head_dtype,
+            return_bias=False,
+            prefix=maybe_prefix(prefix, "classifier"),
         )
 
         pooler_config = vllm_config.model_config.pooler_config
@@ -922,11 +928,11 @@ class BertForTokenClassification(nn.Module, SupportsLoRA):
 @attn_type("encoder_only")
 @default_pooling_type(tok_pooling_type="ALL")
 class BertForMaskedLM(nn.Module):
-    """Bert with a masked-language-modeling head on top of ``BertModel``.
+    """Bert with a masked-language-modeling head on top of `BertModel`.
 
     Produces per-token logits over the vocabulary. In vLLM terms this is a
-    token-level pooling model (``tok_pooling_type="ALL"``): the encoder output
-    is projected by the MLM head to ``vocab_size`` logits for every position,
+    token-level pooling model (`tok_pooling_type="ALL"`): the encoder output
+    is projected by the MLM head to `vocab_size` logits for every position,
     and the token pooler returns one vector per token.
     """
 

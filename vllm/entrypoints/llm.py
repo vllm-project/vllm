@@ -51,7 +51,7 @@ from vllm.usage.usage_lib import UsageContext
 from vllm.utils.counter import Counter
 from vllm.v1.engine import PauseMode
 from vllm.v1.engine.llm_engine import LLMEngine
-from vllm.v1.sample.logits_processor import LogitsProcessor
+from vllm.v1.worker.gpu.sample.logits_processor.interface import LogitsProcessor
 
 if TYPE_CHECKING:
     from vllm.v1.metrics.reader import Metric
@@ -108,7 +108,8 @@ class LLM(
             reserve for the model weights, activations, and KV cache. Higher
             values will increase the KV cache size and thus improve the model's
             throughput. However, if the value is too high, it may cause out-of-
-            memory (OOM) errors.
+            memory (OOM) errors. Defaults to 1.0 with the extensible KV cache
+            (which sizes the cache from measured memory) and to 0.92 otherwise.
         kv_cache_memory_bytes: Size of KV Cache per GPU in bytes. By default,
             this is set to None and vllm can automatically infer the kv cache
             size based on gpu_memory_utilization. However, users may want to
@@ -117,6 +118,10 @@ class LLM(
             compared with using gpu_memory_utilization. Note that
             kv_cache_memory_bytes (when not-None) ignores
             gpu_memory_utilization
+        enable_extensible_kv_cache: Reserve the KV cache address range with
+            device virtual memory and commit physical pages after warmup, so
+            the cache is sized from the memory actually free after CUDA graph
+            capture. Defaults to on for CUDA and ROCm.
         cpu_offload_gb: The size (GiB) of CPU memory to use for offloading
             the model weights. This virtually increases the GPU memory space
             you can use to hold the model weights, at the cost of CPU-GPU data
@@ -193,7 +198,7 @@ class LLM(
         tokenizer_revision: str | None = None,
         chat_template: Path | str | None = None,
         seed: int = 0,
-        gpu_memory_utilization: float = 0.92,
+        gpu_memory_utilization: float | None = None,
         cpu_offload_gb: float = 0,
         offload_group_size: int = 0,
         offload_num_in_group: int = 1,
@@ -213,6 +218,7 @@ class LLM(
         profiler_config: dict[str, Any] | ProfilerConfig | None = None,
         attention_config: dict[str, Any] | AttentionConfig | None = None,
         kv_cache_memory_bytes: int | None = None,
+        enable_extensible_kv_cache: bool | None = None,
         compilation_config: int | dict[str, Any] | CompilationConfig | None = None,
         quantization_config: dict[str, Any] | QuantizationConfigArgs | None = None,
         logits_processors: list[str | type[LogitsProcessor]] | None = None,
@@ -310,6 +316,7 @@ class LLM(
             seed=seed,
             gpu_memory_utilization=gpu_memory_utilization,
             kv_cache_memory_bytes=kv_cache_memory_bytes,
+            enable_extensible_kv_cache=enable_extensible_kv_cache,
             cpu_offload_gb=cpu_offload_gb,
             offload_group_size=offload_group_size,
             offload_num_in_group=offload_num_in_group,
@@ -374,8 +381,7 @@ class LLM(
 
         PoolingOfflineMixin.__init__(self)
 
-        # Cache for __repr__ to avoid repeated collective_rpc calls
-        self._cached_repr: str | None = None
+        self._cached_model_inspection: str | None = None
 
     @classmethod
     def from_engine_args(cls, engine_args: EngineArgs) -> "LLM":
@@ -803,6 +809,7 @@ class LLM(
         *,
         delay_iterations: int | None = None,
         max_iterations: int | None = None,
+        profiler_kwargs: dict[str, Any] | None = None,
     ) -> None:
         """Start profiling with optional per-session overrides.
 
@@ -814,12 +821,15 @@ class LLM(
                 profiling starts.
             max_iterations: Optional maximum number of worker iterations to profile.
                 Zero means no limit.
+            profiler_kwargs: Optional dictionary of keyword arguments to pass to
+                the underlying profiler.
 
         """
         self.llm_engine.start_profile(
             profile_prefix,
             delay_iterations=delay_iterations,
             max_iterations=max_iterations,
+            profiler_kwargs=profiler_kwargs,
         )
 
     def stop_profile(self) -> None:
@@ -832,7 +842,9 @@ class LLM(
             reset_running_requests, reset_connector
         )
 
-    def sleep(self, level: int = 1, mode: PauseMode = "abort"):
+    def sleep(
+        self, level: int = 1, mode: PauseMode = "abort", reset_connector: bool = True
+    ):
         """Put the engine to sleep. The engine should not process any requests.
         The caller should guarantee that no requests are being processed
         during the sleep period, before `wake_up` is called.
@@ -846,24 +858,33 @@ class LLM(
                            sleeping and waking up the engine to run the same
                            model again. Please make sure there's enough CPU
                            memory to store the model weights.
-                - Level 2: Discard all GPU memory (weights + KV cache).
-                           Good for sleeping and waking up the engine to run
-                           a different model or update the model, where
-                           previous model weights are not needed. It reduces
+                - Level 2: Discard model parameters and KV cache, and offload
+                           the rest of the model's GPU state to CPU.
+                           Good for sleeping and waking up the engine to update
+                           the model's weights, where the previous weights are
+                           not needed. It reduces
                            CPU memory pressure.
             mode: How to handle any existing requests, can be "abort", "wait",
                 or "keep".
+            reset_connector: Also reset the KV connector's cache, such as
+                blocks offloaded to CPU. Set `False` only if the weights do
+                not change before `wake_up`. Ignored at level 0.
 
         """
-        self.llm_engine.sleep(level=level, mode=mode)
+        self.llm_engine.sleep(level=level, mode=mode, reset_connector=reset_connector)
 
-    def release_kv_cache_memory(self) -> None:
+    def release_kv_cache_memory(self, reset_connector: bool = True) -> None:
         """Release the GPU physical memory backing the KV cache.
 
-        Requires a completed ``sleep(level=0)`` and resident executor memory.
-        Restore with ``wake_up(tags=["kv_cache"])``; kept requests are recomputed.
+        Requires a completed `sleep(level=0)` and resident executor memory.
+        Restore with `wake_up(tags=["kv_cache"])`; kept requests are recomputed.
+
+        Args:
+            reset_connector: Also reset the KV connector's cache; see
+                [sleep][vllm.LLM.sleep].
+
         """
-        self.llm_engine.release_kv_cache_memory()
+        self.llm_engine.release_kv_cache_memory(reset_connector)
 
     def wake_up(self, tags: list[str] | None = None) -> bool:
         """Wake up the engine from sleep mode. See the [sleep][vllm.LLM.sleep]
@@ -887,7 +908,7 @@ class LLM(
         """Return a snapshot of aggregated metrics from Prometheus.
 
         Returns:
-            A `MetricSnapshot` instance capturing the current state
+            A `list[Metric]` capturing the current state
             of all aggregated metrics from Prometheus.
 
         Note:
@@ -896,15 +917,13 @@ class LLM(
         """
         return self.llm_engine.get_metrics()
 
-    def __repr__(self) -> str:
-        """Return a transformers-style hierarchical view of the model."""
-        # Cache the result to avoid repeated collective_rpc calls
-        if self._cached_repr is None:
+    def get_model_inspection(self) -> str:
+        """Return a cached transformers-style hierarchical view of the model."""
+        if self._cached_model_inspection is None:
             results = self.llm_engine.collective_rpc("get_model_inspection")
-            # In distributed settings, we get results from all workers
-            # Just return the first one (they should all be the same)
-            if results:
-                self._cached_repr = results[0]
-            else:
-                self._cached_repr = f"LLM(model={self.model_config.model!r})"
-        return self._cached_repr
+            self._cached_model_inspection = results[0] if results else repr(self)
+        return self._cached_model_inspection
+
+    def __repr__(self) -> str:
+        """Return a local model summary without querying workers."""
+        return f"LLM(model={self.model_config.model!r})"

@@ -192,12 +192,12 @@ class TestParserSelection:
         )
         assert cls is not None
         request = ChatCompletionRequest(messages=[], model="m")
-        assert request.skip_special_tokens
+        assert request.to_sampling_params(1, {}).skip_special_tokens is True
         cls(tokenizer).adjust_request(request)
         assert request.skip_special_tokens is False
 
     def test_non_cohere_selection_does_not_import_melody_parser(self, monkeypatch):
-        """``cohere_melody`` is optional; other parsers must not depend on it."""
+        """`cohere_melody` is optional; other parsers must not depend on it."""
         import sys
 
         monkeypatch.setitem(sys.modules, "vllm.parser.cohere_command", None)

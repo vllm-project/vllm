@@ -260,7 +260,7 @@ def main(args: argparse.Namespace):
     # Collect cold startup iterations
     print("Measuring cold startup time...\n")
     cold_iterations = []
-    for i in tqdm(range(args.num_iters_cold), desc="Cold startup iterations"):
+    for _ in tqdm(range(args.num_iters_cold), desc="Cold startup iterations"):
         with cold_startup():
             cold_iterations.append(create_llm_and_measure_startup())
 
@@ -272,7 +272,7 @@ def main(args: argparse.Namespace):
     # Collect warm startup iterations
     print("\nMeasuring warm startup time...\n")
     warm_iterations = []
-    for i in tqdm(range(args.num_iters_warm), desc="Warm startup iterations"):
+    for _ in tqdm(range(args.num_iters_warm), desc="Warm startup iterations"):
         warm_iterations.append(create_llm_and_measure_startup())
 
     # Determine if encoder compilation occurred in any iteration
