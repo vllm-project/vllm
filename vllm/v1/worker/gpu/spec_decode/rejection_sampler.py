@@ -421,10 +421,12 @@ class RejectionSampler:
         sampled_chunks: list[torch.Tensor] = []
         num_sampled_chunks: list[torch.Tensor] = []
         path_chunks: list[torch.Tensor] = []
+        plan = input_batch.verify_plan
+        is_tree = plan is not None and not plan.single_branch
         # The positions the rows ran at: a plan that is not a chain gives siblings
         # one position, while ``pos`` holds the chain positions.
         plan_pos = pos
-        if input_batch.tree_pos_delta is not None:
+        if is_tree and input_batch.tree_pos_delta is not None:
             plan_pos = pos + input_batch.tree_pos_delta[input_batch.logits_indices]
         logprobs_chunks: list[LogprobsTensors] = []
         sampling_mask_chunks: list[SamplingMaskTensors] = []
@@ -442,16 +444,15 @@ class RejectionSampler:
             chunk_cu_num_logits_np = cu_num_logits_np[start : end + 1] - lo
             chunk_cu_num_logits = input_batch.cu_num_logits[start : end + 1] - lo
             result = None
-            plan = input_batch.verify_plan
-            if plan is not None and not plan.single_branch:
-                assert self.tree_accept is not None
-                plan = slice_plan(plan, start, end)
+            if is_tree:
+                assert plan is not None and self.tree_accept is not None
+                chunk_plan = slice_plan(plan, start, end)
                 tree_logits, target = self._target_tokens(
                     input_batch, logits, plan_pos, draft_sampled, start, end
                 )
                 width = self.num_speculative_steps + 1
-                result = self.tree_accept(plan, target, width)
-                check_accept_result(plan, target, result, width)
+                result = self.tree_accept(chunk_plan, target, width)
+                check_accept_result(chunk_plan, target, result, width)
             chunk_logits = logits[lo:hi]
             if result is None:
                 # draft_logits uses persistent request-state indices, not batch
