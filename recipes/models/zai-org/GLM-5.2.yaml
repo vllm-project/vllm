@@ -4,7 +4,7 @@ meta:
   provider: "GLM (Z-AI)"
   description: "GLM-5.2 — frontier-scale MoE language model (~743B total parameters, 39B active) with up to 5-token MTP speculative decoding and thinking mode"
   date_added: 2026-06-16
-  date_updated: 2026-10-03
+  date_updated: 2026-10-30
   tasks:
     - text
   performance_headline: "Latest GLM-5 series MoE with extended MTP (5 draft tokens), improved reasoning and agentic performance"
@@ -466,6 +466,7 @@ guide: |
   ## References
 
   - [Model card](https://huggingface.co/zai-org/GLM-5.2)
+  - [RedHatAI NVFP4-FP8 MTP supplement](https://huggingface.co/RedHatAI/GLM-5.2-NVFP4-FP8-mtp-FP8) — contains supplemental MTP shards only; merge them into the matching base checkpoint as described on the card before serving.
   - [FP8 checkpoint](https://huggingface.co/zai-org/GLM-5.2-FP8)
   - [MXFP4 checkpoint](https://huggingface.co/amd/GLM-5.2-MXFP4)
   - [NVFP4 checkpoint (NVIDIA)](https://huggingface.co/nvidia/GLM-5.2-NVFP4)
