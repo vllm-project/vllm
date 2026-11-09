@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import ctypes
 import functools
+import threading
 import time
 from collections import deque
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from typing import NamedTuple
 
@@ -213,16 +215,27 @@ MIN_HOST_REGISTER_SAVED_BYTES = 3 * 1024**2
 
 
 def pin_mmap_region(
-    region: SharedOffloadRegion, worker_slot_only: bool = False
+    region: SharedOffloadRegion,
+    worker_slot_only: bool = False,
+    should_stop: Callable[[], bool] | None = None,
+    max_chunk_bytes: int | None = None,
+    pace: float = 0.0,
 ) -> None:
-    """Register row-aligned chunks or this worker's slots, rolling back on failure."""
+    """Register row-aligned chunks or this worker's slots, rolling back on failure
+    or when should_stop() turns true.
+
+    pace > 0 sleeps that multiple of each registration's duration after it:
+    back-to-back registrations hold a CUDA driver lock that starves other
+    threads' CUDA calls, which stalls serving while this runs in the background.
+    """
     rank = region.rank
     base_ptr = region._base.data_ptr()
     total_size = region.total_size_bytes
     # Chunks end on block-row boundaries, which are page aligned, so neither the
     # driver's page rounding nor any single block transfer straddles two
     # registrations.
-    rows_per_chunk = max(MAX_HOST_REGISTER_CHUNK_BYTES // region._row_stride, 1)
+    max_chunk_bytes = max_chunk_bytes or MAX_HOST_REGISTER_CHUNK_BYTES
+    rows_per_chunk = max(max_chunk_bytes // region._row_stride, 1)
     chunk_size = rows_per_chunk * region._row_stride
     ranges: Iterator[tuple[int, int]] = (
         (offset, min(chunk_size, total_size - offset))
@@ -254,10 +267,17 @@ def pin_mmap_region(
     addresses: list[int] = []
     registered_bytes = 0
     for offset, size in ranges:
+        if should_stop is not None and should_stop():
+            for registered in reversed(addresses):
+                host_unregister(registered)
+            return
         address = base_ptr + offset
+        t0 = time.monotonic()
         if host_register(address, size):
             addresses.append(address)
             registered_bytes += size
+            if pace > 0:
+                time.sleep((time.monotonic() - t0) * pace)
             continue
         logger.warning(
             "host_register failed for rank=%d at %.2f of %.2f GB; "
@@ -770,6 +790,27 @@ class SingleDirectionOffloadingHandler:
             raise sync_error
 
 
+# Pre-fault step, so shutdown can stop a deferred setup between steps.
+_PREFAULT_STEP_BYTES = 1 << 30
+# Deferred pinning registers small chunks so no single call holds the CUDA
+# driver lock long enough to stall serving.
+_DEFERRED_PIN_CHUNK_BYTES = 8 << 20
+
+
+def _relax_stream_capture() -> None:
+    """Let this thread call cudaHostRegister while another captures a graph.
+
+    A global-mode capture otherwise fails on such a call from any thread.
+    """
+    if not current_platform.is_cuda():
+        return
+    mode = ctypes.c_int(2)  # cudaStreamCaptureModeRelaxed
+    lib = CudaRTLibrary().lib
+    if lib.cudaThreadExchangeStreamCaptureMode(ctypes.byref(mode)) != 0:
+        lib.cudaGetLastError()
+        logger.warning("Could not relax stream capture mode for offload setup")
+
+
 class CPUOffloadingWorker(OffloadingWorker):
     """OffloadingWorker for CPU offloading.
 
@@ -785,18 +826,37 @@ class CPUOffloadingWorker(OffloadingWorker):
         num_cpu_chunks: int,
         mmap_region: SharedOffloadRegion | None = None,
         canonical_layout: bool = False,
+        defer_host_setup: bool = False,
+        prefault_shard: tuple[int, int] | None = None,
+        pin_pace: float = 2.0,
     ):
+        """defer_host_setup leaves pre-faulting and pinning mmap_region to
+        start_background_setup(); prefault_shard is then the share this worker
+        pre-faults, and pin_pace paces its pinning (see pin_mmap_region)."""
         assert not canonical_layout or mmap_region is not None
         # The caller owns mmap_region until this constructor returns. After a
         # successful construction, the worker is the sole owner and releases
         # it after both transfer directions have stopped.
         self._mmap_region = mmap_region
         pin_memory = PIN_MEMORY
+        self._pin_memory = pin_memory
+        self._worker_slot_only = not canonical_layout
+        self._defer_host_setup = defer_host_setup and mmap_region is not None
+        self._prefault_shard = prefault_shard
+        self._pin_pace = pin_pace
+        self._setup_thread: threading.Thread | None = None
+        self._setup_stop = threading.Event()
+        self._ready = threading.Event()
+        if self._defer_host_setup:
+            self._device = torch.accelerator.current_device_index()
+        else:
+            self._ready.set()
         logger.info("Allocating %d CPU tensors...", len(kv_caches.tensors))
-        if mmap_region is not None and pin_memory:
+        if mmap_region is not None and pin_memory and not self._defer_host_setup:
             pin_mmap_region(mmap_region, worker_slot_only=not canonical_layout)
+        # A deferred region is pinned before is_ready(), or never used.
         host_memory_is_pinned = pin_memory and (
-            mmap_region is None or mmap_region.is_pinned
+            mmap_region is None or mmap_region.is_pinned or self._defer_host_setup
         )
 
         canonical_bytes_per_block = (
@@ -848,6 +908,55 @@ class CPUOffloadingWorker(OffloadingWorker):
         # Own stream, so expedited loads do not queue behind regular loads.
         self._expedited_load_handler = make_handler(gpu_to_cpu=False)
 
+    def start_background_setup(self) -> None:
+        if self._defer_host_setup and self._setup_thread is None:
+            self._setup_thread = threading.Thread(
+                target=self._host_setup, name="vllm_offload_host_setup", daemon=True
+            )
+            self._setup_thread.start()
+
+    def is_ready(self) -> bool:
+        return self._ready.is_set()
+
+    def _host_setup(self) -> None:
+        region = self._mmap_region
+        assert region is not None
+        t0 = time.monotonic()
+        try:
+            torch.accelerator.set_device_index(self._device)
+            _relax_stream_capture()
+            for offset, length in region.prefault_ranges(self._prefault_shard):
+                for start in range(offset, offset + length, _PREFAULT_STEP_BYTES):
+                    if self._setup_stop.is_set():
+                        return
+                    end = min(start + _PREFAULT_STEP_BYTES, offset + length)
+                    region.prefault(start, end - start)
+            t1 = time.monotonic()
+            if self._pin_memory:
+                pin_mmap_region(
+                    region,
+                    worker_slot_only=self._worker_slot_only,
+                    should_stop=self._setup_stop.is_set,
+                    max_chunk_bytes=_DEFERRED_PIN_CHUNK_BYTES,
+                    pace=self._pin_pace,
+                )
+                if not region.is_pinned:
+                    if not self._setup_stop.is_set():
+                        logger.error(
+                            "Pinning the CPU offload region failed; "
+                            "offloading stays off"
+                        )
+                    return
+        except Exception:
+            logger.exception("CPU offload setup failed; offloading stays off")
+            return
+        logger.info(
+            "CPU offload region set up in the background: pre-fault %.1f s, pin %.1f s",
+            t1 - t0,
+            time.monotonic() - t1,
+        )
+        self._ready.set()
+
     def submit_store(
         self, job_id: int, device_ptrs: DevicePointers, dst_spec: LoadStoreSpec
     ) -> bool:
@@ -880,6 +989,11 @@ class CPUOffloadingWorker(OffloadingWorker):
         self._expedited_load_handler.wait(job_ids)
 
     def shutdown(self) -> None:
+        # The region must outlive the setup thread that touches it.
+        setup_thread = getattr(self, "_setup_thread", None)
+        if setup_thread is not None:
+            self._setup_stop.set()
+            setup_thread.join()
         handler_failed = False
         try:
             self._store_handler.shutdown()

@@ -605,6 +605,8 @@ def _create_req_context(
 class OffloadingConnectorScheduler:
     """Implementation of Scheduler side methods"""
 
+    _tier_ready = True
+
     def __init__(
         self,
         spec: OffloadingSpec,
@@ -615,6 +617,10 @@ class OffloadingConnectorScheduler:
             spec, vllm_config, kv_cache_config
         )
         self.manager: OffloadingManager = spec.get_manager()
+        # Under async_init the engine serves without offloading until every
+        # worker reports its tier ready.
+        self._tier_ready = getattr(spec, "async_init", False) is not True
+        self._tier_init_start = time.monotonic()
         self._connector_stats = OffloadingConnectorStats()
         self.use_lookahead_block_hashes = vllm_config.num_hash_lookahead_tokens > 0
 
@@ -1392,6 +1398,8 @@ class OffloadingConnectorScheduler:
             group_state.block_ids.clear()
             # Restarting at token 0: offer every chunk again.
             group_state.next_stored_chunk_idx = 0
+        if not self._tier_ready:
+            return 0, False
 
         if req_status.transfer_jobs:
             logger.debug(
@@ -2338,12 +2346,17 @@ class OffloadingConnectorScheduler:
                 for jid in self._block_id_to_pending_jobs[bid]
             )
 
-        partial_store_jobs = self._build_partial_tail_store_jobs(scheduler_output)
-        normal_store_jobs = self._build_store_jobs(scheduler_output)
+        store_jobs: dict[int, TransferJob] = {}
+        if self._tier_ready:
+            # Chunks skipped before the tier was ready are still offered:
+            # stored indices have not moved.
+            store_jobs = self._build_partial_tail_store_jobs(scheduler_output)
+            store_jobs |= self._build_store_jobs(scheduler_output)
         meta = OffloadingConnectorMetadata(
             load_jobs=self._current_batch_load_jobs,
-            store_jobs=partial_store_jobs | normal_store_jobs,
+            store_jobs=store_jobs,
             jobs_to_flush=self._current_batch_jobs_to_flush,
+            tier_ready=self._tier_ready,
         )
 
         # All prepare_store calls for finished requests have been issued.
@@ -2405,6 +2418,14 @@ class OffloadingConnectorScheduler:
         if not isinstance(meta, OffloadingWorkerMetadata):
             assert meta is None
             meta = OffloadingWorkerMetadata()
+        if not self._tier_ready and len(meta.ready_ranks) >= self.config.num_workers:
+            self._tier_ready = True
+            logger.info(
+                "KV offloading enabled: all %d workers ready %.1f s after the "
+                "scheduler started",
+                self.config.num_workers,
+                time.monotonic() - self._tier_init_start,
+            )
         if not meta.transfer_stats.is_empty():
             transfer_stats = OffloadingConnectorStats()
             if not meta.transfer_stats.load.is_empty():

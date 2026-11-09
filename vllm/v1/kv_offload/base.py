@@ -26,6 +26,8 @@ if TYPE_CHECKING:
         OffloadingConnectorStats,
     )
 
+from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.v1.kv_hints import KvHintsEnvelope
 from vllm.v1.kv_offload.config import OffloadingConfig
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
@@ -52,6 +54,16 @@ def get_offload_group_idx(key: OffloadKey) -> int:
 
 
 _T = TypeVar("_T")
+
+logger = init_logger(__name__)
+
+
+def _parse_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str) and value.lower() in ("true", "false"):
+        return value.lower() == "true"
+    raise ValueError(f"async_init must be a boolean, got {value!r}")
 
 
 class Medium(Enum):
@@ -746,6 +758,14 @@ class OffloadingWorker(ABC):
     @abstractmethod
     def wait(self, job_ids: set[int]) -> None: ...
 
+    def start_background_setup(self) -> None:
+        """Start setup deferred by async_init. Transfers wait for is_ready()."""
+        return
+
+    def is_ready(self) -> bool:
+        """Whether this worker can take transfers."""
+        return True
+
     def shutdown(self) -> None:
         return
 
@@ -775,6 +795,17 @@ class OffloadingSpec(ABC):
     def __init__(self, config: OffloadingConfig):
         self.config = config
         self.extra_config = config.extra_config
+        # Set the offload tier up in the background; the engine serves without
+        # it until every worker is ready.
+        self.async_init = _parse_bool(self.extra_config.get("async_init", False))
+        if self.async_init and not current_platform.is_cuda():
+            # Pinning would race graph capture without a capture-mode guard.
+            logger.warning("async_init needs CUDA; setting the offload tier up now")
+            self.async_init = False
+        # Pause between background pin calls, as a multiple of each call's time.
+        self.async_init_pin_pace = float(
+            self.extra_config.get("async_init_pin_pace", 2.0)
+        )
         self.replicated_layout: bool = False
         self.kv_events_config = OffloadingKVEventsConfig(
             enable_kv_cache_events=config.enable_kv_cache_events,

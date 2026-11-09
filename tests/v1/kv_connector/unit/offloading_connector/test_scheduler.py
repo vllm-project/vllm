@@ -2206,6 +2206,50 @@ def test_store_jobs_wait_for_missing_offload_key(request_runner):
     assert group_state.next_stored_chunk_idx == 2
 
 
+def test_async_init_offloads_only_after_workers_are_ready(request_runner):
+    block_size = 4
+    runner = request_runner(
+        block_size=block_size,
+        num_gpu_blocks=100,
+        async_scheduling=False,
+        extra_config_overrides={"async_init": True},
+    )
+    ready = False
+    runner.offloading_spec.handler.is_ready = lambda: ready
+    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output(keys)
+    )
+
+    runner.new_request(token_ids=[0] * block_size * 2)
+    runner.run(decoded_tokens=[0, 0])
+    assert not runner.connector_scheduler._tier_ready
+    runner.manager.lookup.assert_not_called()
+    runner.manager.prepare_store.assert_not_called()
+
+    # Readiness reported in one step enables stores in the next, which complete
+    # a step later. Chunks skipped while not ready are still stored.
+    ready = True
+    runner.run(decoded_tokens=[0, 0, 0], expected_stored=(0, 1))
+    assert runner.connector_scheduler._tier_ready
+
+
+def test_async_init_is_parsed_strictly():
+    from vllm.v1.kv_offload.base import _parse_bool
+
+    assert _parse_bool(True) and _parse_bool("TRUE")
+    assert not _parse_bool(False) and not _parse_bool("false")
+    with pytest.raises(ValueError):
+        _parse_bool("yes")
+
+
+def test_worker_metadata_merges_ready_ranks():
+    a = OffloadingWorkerMetadata(ready_ranks={0})
+    b = OffloadingWorkerMetadata(ready_ranks={1})
+    assert a.aggregate(b).ready_ranks == {0, 1}
+    # A replayed output must not count the same rank twice.
+    assert a.aggregate(a).ready_ranks == {0}
+
+
 def test_scheduler_reports_lookup_sync_delay(request_runner):
     runner = request_runner(
         block_size=4,

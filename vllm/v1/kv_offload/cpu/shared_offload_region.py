@@ -87,6 +87,15 @@ def _get_populate_write_fn(
     return _madvise_populate_write
 
 
+@functools.cache
+def _libc_madvise() -> Callable[[int, int, int], int]:
+    # Called through ctypes, so the GIL is released while pages fault in.
+    madvise_fn = ctypes.CDLL(None, use_errno=True).madvise
+    madvise_fn.argtypes = [c_void_p, c_size_t, c_int]
+    madvise_fn.restype = c_int
+    return madvise_fn
+
+
 class SharedOffloadRegion:
     """Single mmap-backed memory region shared across all workers for a
     vLLM instance.  Workers coordinate via the filesystem: the first worker
@@ -305,6 +314,32 @@ class SharedOffloadRegion:
         for path, _, _ in self._segments:
             with contextlib.suppress(FileNotFoundError):
                 os.unlink(path)
+
+    def prefault_ranges(
+        self, shard: tuple[int, int] | None = None
+    ) -> list[tuple[int, int]]:
+        """Ranges a deferred pre-fault covers: a shard, this rank's slots, or all."""
+        if shard is not None:
+            index, count = shard
+            share = round_up(cdiv(self.total_size_bytes, count), self.page_size)
+            start = min(index * share, self.total_size_bytes)
+            return [(start, min(share, self.total_size_bytes - start))]
+        if self.rank is not None:
+            return list(self.iter_worker_slot_ranges())
+        return [(0, self.total_size_bytes)]
+
+    def prefault(self, offset: int, length: int) -> None:
+        """Pre-fault a range without holding the GIL."""
+        if length <= 0:
+            return
+        addr = self._base.data_ptr() + offset
+        if _libc_madvise()(addr, length, _MADV_POPULATE_WRITE) == 0:
+            return
+        err = ctypes.get_errno()
+        if err != errno.EINVAL:
+            raise OSError(err, os.strerror(err))
+        assert self.mmap_obj is not None
+        _fallback_populate_write(self.mmap_obj, offset, length)
 
     def iter_worker_slot_ranges(self) -> Iterator[tuple[int, int]]:
         """Yield this worker's slots as page-aligned (offset, length) ranges."""

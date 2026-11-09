@@ -181,6 +181,7 @@ class CPUOffloadingSpec(OffloadingSpec):
 
     def create_worker(self, kv_caches: CanonicalKVCaches) -> CPUOffloadingWorker:
         mmap_region: SharedOffloadRegion | None = None
+        prefault_shard: tuple[int, int] | None = None
         # num_chunks == 0 would size the region to zero bytes, which cannot be
         # mmap'd; fall back to the tensor path (empty tensors) as before.
         if self._uses_shared_region() and self.num_chunks > 0:
@@ -188,6 +189,8 @@ class CPUOffloadingSpec(OffloadingSpec):
             # replicated region's pre-faulting work across the worker group.
             world_size = self.config.parallel.world_size
             worker_index = self.config.parallel.rank
+            if self.replicated_layout:
+                prefault_shard = (worker_index, world_size)
 
             mmap_region = SharedOffloadRegion(
                 engine_id=self.config.engine_id,
@@ -197,9 +200,8 @@ class CPUOffloadingSpec(OffloadingSpec):
                 cpu_page_size=self.cpu_page_size_per_worker,
                 barrier=_all_workers_barrier,
                 num_segments=REGION_SEGMENTS,
-                populate_shard=(
-                    (worker_index, world_size) if self.replicated_layout else None
-                ),
+                populate_shard=None if self.async_init else prefault_shard,
+                populate=not self.async_init,
             )
         try:
             return CPUOffloadingWorker(
@@ -207,6 +209,9 @@ class CPUOffloadingSpec(OffloadingSpec):
                 blocks_per_chunk=self.blocks_per_chunk,
                 num_cpu_chunks=self.num_chunks,
                 mmap_region=mmap_region,
+                defer_host_setup=self.async_init,
+                prefault_shard=prefault_shard,
+                pin_pace=self.async_init_pin_pace,
             )
         except Exception:
             if mmap_region is not None:
