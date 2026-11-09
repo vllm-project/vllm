@@ -106,7 +106,7 @@ Each family key overrides a group of related histograms:
 
 | Family key | Histograms |
 | --- | --- |
-| `request_latency` | `vllm:e2e_request_latency_seconds`, `vllm:request_queue_time_seconds`, `vllm:request_inference_time_seconds`, `vllm:request_prefill_time_seconds`, `vllm:request_decode_time_seconds` |
+| `request_latency` | `vllm:e2e_request_latency_seconds`, `vllm:request_queue_time_seconds`, `vllm:request_inference_time_seconds`, `vllm:request_prefill_time_seconds`, `vllm:request_decode_time_seconds`, `vllm:request_kv_wait_time_seconds`, `vllm:request_pure_queue_time_seconds` |
 | `time_to_first_token` | `vllm:time_to_first_token_seconds` |
 | `inter_token_latency` | `vllm:inter_token_latency_seconds`, `vllm:request_time_per_output_token_seconds` |
 | `iteration_tokens` | `vllm:iteration_tokens_total` |
