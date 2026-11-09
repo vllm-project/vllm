@@ -147,6 +147,7 @@ def test_streaming_parses_once_per_completed_invoke(monkeypatch):
     delta that completes an ``</atem:invoke>``, so only those deltas parse.
     Counted rather than timed, so the bound holds on any runner (cf. #62027).
     """
+    request = ChatCompletionRequest(model="muse", messages=[])
     tail = (
         "<|start|>assistant to=read.read<|message|><atem:function_calls>\n"
         '<atem:invoke name="read.read">\n'
@@ -154,13 +155,15 @@ def test_streaming_parses_once_per_completed_invoke(monkeypatch):
         "</atem:invoke>\n</atem:function_calls>"
     )
 
-    real = MuseToolParser._parse_tool_calls.__func__
+    # Bound before patching, so `real` keeps the original implementation and
+    # already carries `cls`; the wrapper drops the one it is handed.
+    real = MuseToolParser._parse_tool_calls
     parses = 0
 
     def counting(cls, *args, **kwargs):
         nonlocal parses
         parses += 1
-        return real(cls, *args, **kwargs)
+        return real(*args, **kwargs)
 
     monkeypatch.setattr(MuseToolParser, "_parse_tool_calls", classmethod(counting))
 
@@ -175,7 +178,7 @@ def test_streaming_parses_once_per_completed_invoke(monkeypatch):
             while i < len(raw):
                 cur = raw[: i + chunk]
                 delta = MuseToolParser.extract_tool_calls_streaming(
-                    parser, prev, cur, cur[len(prev) :], [], [], [], _fake_req()
+                    parser, prev, cur, cur[len(prev) :], [], [], [], request
                 )
                 if delta is not None and delta.tool_calls:
                     names += [_fn_of(tc)[0] for tc in delta.tool_calls]
