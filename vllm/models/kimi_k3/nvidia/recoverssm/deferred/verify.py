@@ -26,8 +26,6 @@ import cutlass.cute as cute
 import torch
 from cutlass.cute.runtime import make_fake_stream
 
-from vllm.triton_utils import tl, triton
-
 from . import fused_tc, fused_ws
 from .fused import KdaFused
 from .fused_tc import KdaFusedTC
@@ -185,37 +183,3 @@ class KdaDeferredVerify:
         # TVM-FFI launch on the current stream, straight from the torch tensors.
         compiled(*operands[:13], lower_bound, K**-0.5, norm_eps, *operands[13:])
         return out
-
-
-@triton.jit
-def _record_pending_kernel(
-    state_indices_ptr,
-    commit_lens_ptr,
-    record_rows_ptr,
-    pending_ptr,
-    null_block_id,
-    stride_state_indices,
-):
-    """After sampling: request b's commit length becomes the pending replay of
-    its record slot, and no commit runs for it."""
-    b = tl.program_id(0)
-    record_row = tl.load(record_rows_ptr + b)
-    slot = tl.load(state_indices_ptr + b * stride_state_indices)
-    if (record_row < 0) | (slot <= null_block_id):
-        return
-    tl.store(pending_ptr + record_row, tl.load(commit_lens_ptr + b))
-    tl.store(commit_lens_ptr + b, 0)
-
-
-def record_pending(
-    state_indices: torch.Tensor,
-    commit_lens: torch.Tensor,
-    record_rows: torch.Tensor,
-    pending: torch.Tensor,
-    null_block_id: int,
-) -> None:
-    """The deferred commit of a prepared commit plan (`commit_lens`)."""
-    _record_pending_kernel[(state_indices.shape[0],)](
-        state_indices, commit_lens, record_rows, pending, null_block_id,
-        state_indices.stride(0), num_warps=1,
-    )  # fmt: skip

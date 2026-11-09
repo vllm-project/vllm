@@ -33,17 +33,14 @@ from vllm.model_executor.layers.mamba.ops.causal_conv1d import causal_conv1d_upd
 from vllm.models.kimi_k3.nvidia.ops.recoverssm import (
     KDARecoverSSMCommitContext,
     KDARecoverSSMRecords,
-    _prepare_commit_plan_kernel,
     kda_recoverssm_verify,
 )
 from vllm.models.kimi_k3.nvidia.recoverssm.deferred import verify as deferred_verify
 from vllm.models.kimi_k3.nvidia.recoverssm.deferred.verify import (
     KdaDeferredVerify,
     decode_conv_weight,
-    record_pending,
 )
 from vllm.third_party.flash_linear_attention.ops.kda import rms_norm_gated
-from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
 K = 128
 LOWER_BOUND = -5.0
@@ -182,19 +179,6 @@ def deferred_layer(layer, verify, x, beta, f_a, gate, slots, ones, rows, pending
     )  # fmt: skip
 
 
-def deferred_commit(ctx, accepted, slots, starts, rows, pending, window):
-    """The commit plan, then each request's commit length becomes its pending
-    replay."""
-    _prepare_commit_plan_kernel[(slots.shape[0],)](
-        accepted, None, slots, starts, None, None, ctx.commit_lens,
-        ctx.final_state_indices, ctx.boundary_state_indices,
-        ctx.boundary_recovery_lens, NULL_BLOCK_ID, 1, 1, accepted.stride(0), 0,
-        slots.stride(0), starts.stride(0), 0, 0, 0, SPEC_QUERY_LEN=window,
-        num_warps=1,
-    )  # fmt: skip
-    record_pending(slots, ctx.commit_lens, rows, pending, NULL_BLOCK_ID)
-
-
 def check(layer, verify, inputs, slots, starts, ones, accepted, window):
     """One deferred step of a layer against the commit then the verify of the
     model's path, from the same checkpoint and records (the conv weight in FP32
@@ -306,8 +290,8 @@ def benchmark_batch(args, heads, num_layers, window, batch) -> dict:
             deferred_layer(layer, verify, *inputs, slots, ones, rows, pending, out)
             for layer in layers
         ],
-        "deferred_commit": lambda: deferred_commit(
-            ctx, accepted, slots, starts, rows, pending, window
+        "deferred_commit": lambda: ctx.commit(
+            accepted, slots, starts, record_rows=rows, pending=pending
         ),
     }
     graphs = {name: capture_graph(op) for name, op in candidates.items()}
