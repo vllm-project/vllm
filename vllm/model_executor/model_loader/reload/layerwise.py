@@ -419,8 +419,8 @@ def _quantize_on_arrival(
     method = layer.quant_method
     if not isinstance(method, OnlineArrivalMixin):
         return False
-    group = method.arrival_row_group(layer, name)
-    if group is None or method.reduces_across_ranks(layer, name):
+    group = method.arrival_group(layer, name)
+    if group is None:
         return False
     if any(buffered == name for buffered, _ in info.loaded_weights):
         return False  # earlier loads of it were buffered

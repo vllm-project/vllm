@@ -31,6 +31,14 @@ class OnlineArrivalMixin:
         `reduce_amax`, which decides with this."""
         return False
 
+    def arrival_group(self, layer: torch.nn.Module, name: str) -> int | None:
+        """`arrival_row_group`, or None if the scale of `name` is reduced
+        across ranks. Not overridden: the gate a reload checks."""
+        group = self.arrival_row_group(layer, name)
+        if group is None or self.reduces_across_ranks(layer, name):
+            return None
+        return group
+
     def reduce_amax(
         self, layer: torch.nn.Module, name: str, amax: torch.Tensor
     ) -> torch.Tensor:

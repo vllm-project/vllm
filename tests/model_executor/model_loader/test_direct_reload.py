@@ -691,7 +691,7 @@ def _arrival_layer(method, moe, tp_size=1):
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="quantization kernels")
-@pytest.mark.parametrize("scheme", list(_SCHEMES))
+@pytest.mark.parametrize("scheme", _SCHEMES)
 def test_scale_reduced_across_ranks_is_buffered(monkeypatch, scheme):
     # at TP 2 (row parallel, expert TP) each real scheme's `quantize_param`
     # reduces a scale across ranks exactly when its `reduces_across_ranks`
@@ -721,8 +721,8 @@ def test_scale_reduced_across_ranks_is_buffered(monkeypatch, scheme):
         method.quantize_param(layer, name, weight)
         reduces = method.reduces_across_ranks(layer, name)
         assert bool(reduced) is reduces, name
-        info = LayerReloadingInfo(({}, {}), torch.device("cuda"))
         if reduces:
+            info = LayerReloadingInfo(({}, {}), torch.device("cuda"))
             assert not _quantize_on_arrival(layer, info, name, RecordedCopies())
 
 
