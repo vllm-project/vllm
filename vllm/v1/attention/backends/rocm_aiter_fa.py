@@ -836,45 +836,6 @@ class AiterFlashAttentionMetadataBuilder(
         )
         return attn_metadata
 
-    def build_for_drafting(
-        self,
-        common_attn_metadata: CommonAttentionMetadata,
-        draft_index: int,
-    ) -> AiterFlashAttentionMetadata:
-        """Build attention metadata for draft model without CPU-GPU sync.
-
-        During EAGLE drafting all requests are uniform decodes, so we can
-        skip split_decodes_prefills_and_extends() and avoid all .cpu() /
-        .item() calls that would otherwise break CUDA graph capture.
-        """
-        self._build_asm_kv_scale_tables()
-        num_reqs = common_attn_metadata.num_reqs
-        num_tokens = common_attn_metadata.num_actual_tokens
-
-        decode_metadata = AiterFlashAttentionDecodeMetadata(
-            max_query_len=common_attn_metadata.max_query_len,
-        )
-
-        return AiterFlashAttentionMetadata(
-            num_actual_tokens=num_tokens,
-            query_start_loc=common_attn_metadata.query_start_loc,
-            max_seq_len=common_attn_metadata.max_seq_len,
-            seq_lens=common_attn_metadata.seq_lens,
-            block_table=common_attn_metadata.block_table_tensor,
-            causal=common_attn_metadata.causal,
-            slot_mapping=common_attn_metadata.slot_mapping,
-            num_decodes=num_reqs,
-            num_decode_tokens=num_tokens,
-            num_prefills=0,
-            num_extends=0,
-            num_extend_tokens=0,
-            decode_metadata=decode_metadata,
-            prefill_metadata=None,
-            extend_metadata=None,
-            k_scale=self.k_scale,
-            v_scale=self.v_scale,
-        )
-
 
 class AiterFlashAttentionBackend(AttentionBackend):
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
@@ -936,8 +897,8 @@ class AiterFlashAttentionBackend(AttentionBackend):
         """Validate the block size the ROCm gather kernels require, and under
         the shuffle layout publish K and V as two head slots.
 
-        The shuffle read/write kernels rearrange a whole ``head_size x
-        block_size`` tile per side, so each side needs its own contiguous run
+        The shuffle read/write kernels rearrange a whole `head_size x
+        block_size` tile per side, so each side needs its own contiguous run
         in the page. Packed into the content dim they interleave per token
         instead, which no layout can undo.
         """
@@ -1101,7 +1062,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
             cu_seqlens_k=swa_cu_seqlens,
             max_seqlen_q=max_seqlen_q,
             max_seqlen_k=swa_max_seqlens,
-            min_seqlen_q=1,
+            min_seqlen_q=0,
             dropout_p=0.0,
             softmax_scale=self.scale,
             causal=True,
@@ -1207,7 +1168,9 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 window_size=self.sliding_window,
                 alibi_slopes=self.alibi_slopes,
                 return_lse=True,
-                sink_ptr=self.sinks,
+                # The causal call above already adds the sink to each query's
+                # LSE; adding it per context chunk would overcount it on merge.
+                sink_ptr=None,
             )
             if chunked_output is None:
                 chunked_output = suf_out
@@ -1352,7 +1315,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 cu_seqlens_k=attn_metadata.prefill_metadata.query_start_loc,
                 max_seqlen_q=attn_metadata.prefill_metadata.max_query_len,
                 max_seqlen_k=attn_metadata.prefill_metadata.max_seq_len,
-                min_seqlen_q=1,
+                min_seqlen_q=0,
                 dropout_p=0.0,
                 softmax_scale=self.scale,
                 causal=attn_metadata.causal,
@@ -1385,7 +1348,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 output=extend_outputs,
                 cu_seqlens_q=attn_metadata.extend_metadata.query_start_loc,
                 max_seqlen_q=attn_metadata.extend_metadata.max_query_len,
-                min_seqlen_q=1,
+                min_seqlen_q=0,
                 max_seqlen_k=attn_metadata.extend_metadata.max_seq_len,
                 block_table=attn_metadata.block_table[
                     num_decodes : num_decodes + num_extends

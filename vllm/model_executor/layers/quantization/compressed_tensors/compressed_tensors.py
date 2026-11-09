@@ -1252,7 +1252,8 @@ class CompressedTensorsKVCacheMethod(BaseKVCacheMethod):
         """Override the default vLLM placeholder scales with the llm-compressor loaded
         scales. Zero points are not used as only symmetric quantization is supported.
         """
-        # Buffers (not Parameters) so sleep snapshots them; ATTN_HEAD changes shape.
+        # Buffers, not Parameters: updates don't rewrite them, so level-2 sleep
+        # must keep them. ATTN_HEAD changes shape.
         layer.register_buffer("_k_scale", layer.k_scale.detach())
         layer.register_buffer("_v_scale", layer.v_scale.detach())
         layer.register_buffer("_q_scale", layer.q_scale.detach())
@@ -1271,11 +1272,3 @@ class CompressedTensorsKVCacheMethod(BaseKVCacheMethod):
         # Sync host (cpu) scale copies read by AITER fused kernels.
         layer._k_scale_cpu.fill_(layer._k_scale_float)
         layer._v_scale_cpu.fill_(layer._v_scale_float)
-
-        # Discard all placeholders.
-        del layer.k_scale
-        del layer.v_scale
-        del layer.q_scale
-        del layer.k_zero_point
-        del layer.v_zero_point
-        del layer.q_zero_point

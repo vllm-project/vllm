@@ -5,9 +5,11 @@ import json
 from pathlib import Path
 
 import pytest
-from transformers import AutoTokenizer, PreTrainedTokenizerBase
+from tokenizers import Tokenizer
+from tokenizers.models import WordLevel
+from transformers import AutoTokenizer, PreTrainedTokenizerBase, TokenizersBackend
 
-from vllm.benchmarks.datasets import get_samples
+from vllm.benchmarks.datasets import CustomDataset, get_samples
 
 
 @pytest.fixture(scope="session")
@@ -75,3 +77,22 @@ def test_custom_dataset_same_seed_is_deterministic(
     prompts_b = [s.prompt for s in samples_b]
 
     assert prompts_a == prompts_b
+
+
+@pytest.mark.benchmark
+def test_custom_dataset_keeps_numeric_string_prompts(tmp_path: Path) -> None:
+    """All-numeric string prompts must not be inferred as numbers by pandas."""
+    prompts = ["00123", "00456"]
+    jsonl = tmp_path / "data.jsonl"
+    jsonl.write_text(
+        "".join(json.dumps({"prompt": p, "output_tokens": 4}) + "\n" for p in prompts)
+    )
+    tokenizer = TokenizersBackend(
+        tokenizer_object=Tokenizer(WordLevel({"[UNK]": 0}, unk_token="[UNK]")),
+        unk_token="[UNK]",
+    )
+
+    dataset = CustomDataset(dataset_path=str(jsonl), disable_shuffle=True)
+    requests = dataset.sample(tokenizer, num_requests=2, skip_chat_template=True)
+
+    assert [r.prompt for r in requests] == prompts
