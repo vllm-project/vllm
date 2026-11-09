@@ -40,7 +40,7 @@ A full client is in [examples/scale_out/token_generation_client.py](../../../exa
 | `logprobs` | `{"content": [{"token_id", "logprob", "rank", "top_logprobs": [...]}]}`, one entry per token, sampled token first. `token_id` is an integer, not the older `"token_id:<id>"` string. Needs `sampling_params.logprobs`. |
 | `weight_versions`, `routed_experts`, `sampling_mask` | Optional, see [Weight versions](#weight-versions); the last two need `--enable-return-routed-experts` / `--return-sampling-mask`. |
 
-The top level adds `request_id`, `usage`, `prompt_token_ids` and `prompt_logprobs`. Stream chunks carry the same per-choice fields for the new tokens.
+The top level adds `request_id`, `usage`, `prompt_token_ids` and `prompt_logprobs`. Stream chunks carry the same per-choice fields for the new tokens. With `--enable-prompt-tokens-details`, `usage.prompt_tokens_details` reports prefix-cache hits as `cached_tokens` and the prompt tokens written to the local prefix cache as `created_cache_tokens`, as on `/v1/chat/completions`.
 
 ## Targeting a data-parallel rank (`X-data-parallel-rank`)
 

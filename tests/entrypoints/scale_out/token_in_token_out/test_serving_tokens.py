@@ -116,6 +116,33 @@ async def test_generate_endpoint(client):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "server",
+    [["--enable-prefix-caching", "--enable-prompt-tokens-details"]],
+    indirect=True,
+)
+async def test_generate_reports_prompt_cache_split(client):
+    """usage.prompt_tokens_details reports prefix-cache writes on a cold prompt
+    and hits on a warm one, as /v1/chat/completions does."""
+    payload = {
+        "model": MODEL_NAME,
+        "token_ids": list(range(1000, 1100)),
+        "sampling_params": {"max_tokens": 1},
+    }
+    details = []
+    for _ in range(2):
+        resp = await client.post(GEN_ENDPOINT, json=payload)
+        resp.raise_for_status()
+        details.append(resp.json()["usage"]["prompt_tokens_details"])
+
+    cold, warm = details
+    assert cold["cached_tokens"] == 0
+    assert cold["created_cache_tokens"] > 0
+    assert warm["cached_tokens"] > 0
+    assert warm["created_cache_tokens"] == 0
+
+
+@pytest.mark.asyncio
 async def test_generate_rejects_min_tokens_above_filled_max_tokens(client):
     """Explicit null max_tokens must not skip the min_tokens bound."""
     payload = {

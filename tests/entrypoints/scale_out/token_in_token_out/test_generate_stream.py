@@ -151,6 +151,7 @@ def _make_request_output(
     prompt_token_ids: list[int] | None = None,
     logprobs: list[dict[int, Any] | None] | None = None,
     num_cached_tokens: int | None = None,
+    num_cache_creation_tokens: int | None = None,
     index: int = 0,
     spec_decode_metrics: RequestSpecDecodeMetrics | None = None,
     text: str = "",
@@ -178,6 +179,7 @@ def _make_request_output(
         encoder_prompt=None,
         encoder_prompt_token_ids=None,
         num_cached_tokens=num_cached_tokens,
+        num_cache_creation_tokens=num_cache_creation_tokens,
     )
 
 
@@ -1202,8 +1204,10 @@ async def test_stream_with_logprobs():
 
 
 @pytest.mark.asyncio
-async def test_stream_prompt_tokens_details():
-    """enable_prompt_tokens_details includes cached_tokens in final usage."""
+@pytest.mark.parametrize("stream", [False, True])
+async def test_prompt_tokens_details(stream: bool):
+    """enable_prompt_tokens_details reports the prompt cache hits and writes,
+    as /v1/chat/completions does."""
     engine = _mock_engine()
 
     async def mock_generate(*args, **kwargs):
@@ -1213,6 +1217,7 @@ async def test_stream_prompt_tokens_details():
             finish_reason="stop",
             finished=True,
             num_cached_tokens=2,
+            num_cache_creation_tokens=1,
         )
 
     engine.generate = MagicMock(side_effect=mock_generate)
@@ -1222,20 +1227,23 @@ async def test_stream_prompt_tokens_details():
         token_ids=[1, 2, 3],
         sampling_params=SamplingParams(max_tokens=10),
         model=MODEL_NAME,
-        stream=True,
-        stream_options=StreamOptions(include_usage=True),
+        stream=stream,
+        stream_options=StreamOptions(include_usage=True) if stream else None,
     )
 
     response = await serving.serve_tokens(request)
-    chunks = []
-    async for chunk in response:
-        chunks.append(chunk)
+    if stream:
+        parsed = _parse_sse_chunks([chunk async for chunk in response])
+        # Usage-only chunk (before [DONE])
+        usage_chunk = parsed[-2]
+        assert usage_chunk["choices"] == []
+        details = usage_chunk["usage"]["prompt_tokens_details"]
+    else:
+        assert isinstance(response, GenerateTokensResponse)
+        details = response.usage.prompt_tokens_details.model_dump()
 
-    parsed = _parse_sse_chunks(chunks)
-    # Usage-only chunk (before [DONE])
-    usage_chunk = parsed[-2]
-    assert usage_chunk["choices"] == []
-    assert usage_chunk["usage"]["prompt_tokens_details"]["cached_tokens"] == 2
+    assert details["cached_tokens"] == 2
+    assert details["created_cache_tokens"] == 1
 
 
 @pytest.mark.asyncio

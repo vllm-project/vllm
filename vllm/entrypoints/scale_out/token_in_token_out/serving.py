@@ -643,7 +643,8 @@ class ServingTokens(GenerateBaseServing):
         ):
             # This info is not available at the /coordinator level
             usage.prompt_tokens_details = PromptTokenUsageInfo(
-                cached_tokens=final_res.num_cached_tokens
+                cached_tokens=final_res.num_cached_tokens,
+                created_cache_tokens=final_res.num_cache_creation_tokens,
             )
 
         request_metadata.final_usage_info = usage
@@ -686,6 +687,7 @@ class ServingTokens(GenerateBaseServing):
         first_iteration = True
         prompt_token_ids: list[int] | None = None
         num_cached_tokens = None
+        num_cache_creation_tokens = None
         sampling_params: SamplingParams = request.sampling_params
         # With n > 1, the first output may not include every choice yet.
         num_generated_tokens = [0] * sampling_params.n
@@ -714,6 +716,7 @@ class ServingTokens(GenerateBaseServing):
                     if res.encoder_prompt_token_ids is not None:
                         num_prompt_tokens += len(res.encoder_prompt_token_ids)
                     num_cached_tokens = res.num_cached_tokens
+                    num_cache_creation_tokens = res.num_cache_creation_tokens
                     first_iteration = False
 
                 for output in res.outputs:
@@ -849,7 +852,8 @@ class ServingTokens(GenerateBaseServing):
 
             if self.enable_prompt_tokens_details and num_cached_tokens is not None:
                 final_usage_info.prompt_tokens_details = PromptTokenUsageInfo(
-                    cached_tokens=num_cached_tokens
+                    cached_tokens=num_cached_tokens,
+                    created_cache_tokens=num_cache_creation_tokens,
                 )
 
             if include_usage:
