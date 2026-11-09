@@ -385,6 +385,9 @@ class UMBPStoreConnectorScheduler:
         # Keys a lookup or a completed store showed resident, with the block
         # and hash they were seen on.
         self._lazy_confirmed: dict[str, tuple[int, bytes]] = {}
+        # Free-queue blocks whose keys and prefix chain are all confirmed, by
+        # the block hash they had then. A scan skips them until the recheck.
+        self._lazy_settled: dict[int, BlockHashWithGroupId] = {}
         self._lazy_prefix_chains_by_block: dict[
             int,
             tuple[tuple[tuple[int, str, int, bytes], ...], int],
@@ -945,11 +948,15 @@ class UMBPStoreConnectorScheduler:
         expanded_chains: dict[int, int] = {}
         visited_by_group: dict[int, int] = {}
         unhashed = 0
+        walked: list[KVCacheBlock] = []
         in_flight_keys = {
             key for event in self._store_events.values() for key in event.iter_keys()
         }
         aliases = getattr(pool, "cached_block_hashes_by_block", {})
         prefix_groups = self.kv_cache_config.prefix_cacheable_group_ids
+        settled = self._lazy_settled
+        if recheck:
+            settled.clear()
 
         def add_candidate(
             block: KVCacheBlock,
@@ -974,6 +981,11 @@ class UMBPStoreConnectorScheduler:
             if block.is_null or block.block_hash is None:
                 unhashed += 1
                 continue
+            # Allocation moves this window nearly every step under load, so
+            # most blocks were already resolved by an earlier scan.
+            if settled.get(block.block_id) == block.block_hash:
+                continue
+            walked.append(block)
             block_hashes = (
                 block.block_hash,
                 *aliases.get(block.block_id, ()),
@@ -1026,23 +1038,26 @@ class UMBPStoreConnectorScheduler:
                 add_candidate(prefix_block, key, group_id, block_hash)
 
         logger.debug(
-            "UMBP lazy scan target=%d free=%d unhashed=%d keys_by_group=%s "
-            "candidates=%d",
+            "UMBP lazy scan target=%d free=%d unhashed=%d walked=%d "
+            "keys_by_group=%s candidates=%d",
             self._lazy_target_blocks,
             getattr(pool.free_block_queue, "num_free_blocks", -1),
             unhashed,
+            len(walked),
             tuple(sorted(visited_by_group.items())),
             len(candidates),
         )
-        # Keep only keys still in the window, so the cache stays bounded.
-        self._lazy_confirmed = {
-            key: identity
-            for key, identity in self._lazy_confirmed.items()
-            if key in observed_keys or key in in_flight_keys
-        }
         if recheck:
+            # Settled blocks skip the walk above, so only a full scan sees
+            # every key still in the window and can bound the cache.
+            self._lazy_confirmed = {
+                key: identity
+                for key, identity in self._lazy_confirmed.items()
+                if key in observed_keys or key in in_flight_keys
+            }
             self._lazy_recheck_at = now + _LAZY_RECHECK_S
         if not candidates:
+            self._settle_lazy_blocks(walked)
             return [], True
         keys = [
             rank_key
@@ -1059,7 +1074,55 @@ class UMBPStoreConnectorScheduler:
         except Exception as exc:
             logger.warning("UMBP lazy residency lookup failed: %s", exc)
             return [], False
-        return self._lazy_plans_for_hits(candidates, hits)
+        plans, ok = self._lazy_plans_for_hits(candidates, hits)
+        if ok:
+            self._settle_lazy_blocks(walked)
+        return plans, ok
+
+    def _settle_lazy_blocks(self, walked: Sequence[KVCacheBlock]) -> None:
+        """Mark walked blocks whose keys and prefix chain are all confirmed."""
+        assert self.codec is not None and self._gpu_block_pool is not None
+        pool = self._gpu_block_pool
+        aliases = getattr(pool, "cached_block_hashes_by_block", {})
+        prefix_groups = self.kv_cache_config.prefix_cacheable_group_ids
+        confirmed = self._lazy_confirmed
+        closed: dict[int, int] = {}
+        for block in walked:
+            block_hash = block.block_hash
+            # Aliases can gain keys while the block is reused, which its
+            # primary hash would not show.
+            if block_hash is None or block.block_id in aliases:
+                continue
+            group_id, raw_hash, key = _decode_lazy_block_hash(self.codec, block_hash)
+            if group_id in prefix_groups and confirmed.get(key) != (
+                block.block_id,
+                raw_hash,
+            ):
+                continue
+            chain_entry = self._lazy_prefix_chains_by_block.get(block.block_id)
+            if chain_entry is not None:
+                chain, chain_index = chain_entry
+                done = closed.get(id(chain))
+                if done is None:
+                    done = 0
+                    for block_id, chain_key, chain_group, chain_hash in chain:
+                        if confirmed.get(chain_key) != (block_id, chain_hash):
+                            # The walk skips a recycled prefix block, so
+                            # nothing is left to store for it.
+                            prefix_block = pool.blocks[block_id]
+                            expected = make_block_hash_with_group_id(
+                                BlockHash(chain_hash), chain_group
+                            )
+                            if not prefix_block.is_null and (
+                                expected == prefix_block.block_hash
+                                or expected in aliases.get(block_id, ())
+                            ):
+                                break
+                        done += 1
+                    closed[id(chain)] = done
+                if done <= chain_index:
+                    continue
+            self._lazy_settled[block.block_id] = block_hash
 
     def _lazy_plans_for_hits(
         self,
@@ -1077,19 +1140,8 @@ class UMBPStoreConnectorScheduler:
                 expected,
             )
             return [], False
-        pool = self._gpu_block_pool
-        aliases = getattr(pool, "cached_block_hashes_by_block", {})
         plans: list[BlockTransferPlan] = []
         for index, (block, key, group_id, block_hash) in enumerate(candidates):
-            expected_hash = make_block_hash_with_group_id(
-                BlockHash(block_hash), group_id
-            )
-            if block.is_null or (
-                expected_hash != block.block_hash
-                and expected_hash not in aliases.get(block.block_id, ())
-            ):
-                # Recycled while a background lookup was running.
-                continue
             if all(hits[index * rank_count : (index + 1) * rank_count]):
                 self._lazy_confirmed[key] = (block.block_id, block_hash)
                 continue
@@ -1850,6 +1902,7 @@ class UMBPStoreConnectorScheduler:
         self._lazy_store_retry_at = 0.0
         self._lazy_recheck_at = 0.0
         self._lazy_confirmed.clear()
+        self._lazy_settled.clear()
         self._lazy_prefix_chains_by_block.clear()
         cleared = True if self.runtime is None else self.runtime.clear()
         if cleared:
