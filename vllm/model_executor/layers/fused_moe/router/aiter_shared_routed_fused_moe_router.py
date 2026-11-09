@@ -88,7 +88,9 @@ class AiterSharedRoutedFusedMoERouter(BaseRouter):
             M, topk, dtype=torch.int32, device=hidden_states.device
         )
 
-        if not self.has_shared_expert_gate:
+        if not self.has_shared_expert_gate or rocm_aiter_ops.fuse_sigmoid_in_kernel(
+            aiter_topK_meta_data
+        ):
             assert aiter_topK_meta_data is not None, (
                 "AITER topK meta data is not initialized. Ensure "
                 "init_aiter_topK_meta_data is called before routing."
@@ -100,16 +102,24 @@ class AiterSharedRoutedFusedMoERouter(BaseRouter):
             )
             total_topk_weights = total_topk_weights[:M]
             total_topk_ids = total_topk_ids[:M]
-
-            # Both kernels honor the row strides, so they fill the routed slots
-            # in place and leave the pre-filled shared-expert slots untouched.
-            topk_weights = total_topk_weights[:, :topk]
             topk_ids = total_topk_ids[:, :topk]
+
+            # The kernel writes the routed slots in place. With a gate it also
+            # writes sigmoid(gate logit) into the shared slots; without one the
+            # pre-filled shared slots are left untouched.
+            if self.has_shared_expert_gate:
+                topk_weights = total_topk_weights
+                shared_args = (num_fse, "sigmoid")
+            else:
+                topk_weights = total_topk_weights[:, :topk]
+                shared_args = (0, "")
             topk_func = dispatch_topk_softmax_func(
                 use_rocm_aiter=True,
                 topk_weights=topk_weights,
                 topk_indices=topk_ids,
                 gating_output=router_logits,
+                num_shared_experts=shared_args[0],
+                shared_expert_scoring_func=shared_args[1],
             )
             topk_func(
                 topk_weights,
@@ -117,32 +127,9 @@ class AiterSharedRoutedFusedMoERouter(BaseRouter):
                 token_expert_indices,
                 router_logits,
                 self.renormalize,
+                *shared_args,
             )
             return total_topk_weights, total_topk_ids
-
-        if rocm_aiter_ops.fuse_sigmoid_in_kernel(aiter_topK_meta_data):
-            total_topk_weights, total_topk_ids = aiter_topK_meta_data  # type: ignore[misc]
-            total_topk_weights_slice = total_topk_weights[:M]
-            topk_ids_slice = total_topk_ids[:M, :topk]
-
-            topk_func = dispatch_topk_softmax_func(
-                use_rocm_aiter=True,
-                topk_weights=total_topk_weights_slice,
-                topk_indices=topk_ids_slice,
-                gating_output=router_logits,
-                num_shared_experts=num_fse,
-                shared_expert_scoring_func="sigmoid",
-            )
-            topk_func(
-                total_topk_weights_slice,
-                topk_ids_slice,
-                token_expert_indices,
-                router_logits,
-                self.renormalize,
-                num_fse,
-                "sigmoid",
-            )
-            return total_topk_weights_slice, total_topk_ids[:M]
 
         routing_logits = router_logits[:, :-num_fse]
         shared_logits = router_logits[:, -num_fse:]
