@@ -19,7 +19,7 @@ Correctness is checked against an independent reference, not only against what t
 - **Reference:** each trajectory's own first computation, dumped by the engine per step after the rejected speculative suffix is dropped. For a fork, positions before the fork point come from the parent. Rows of drafts the scheduler later truncated are skipped.
 - **Version segments:** the manifest's segments must match the weight versions the trajectory saw.
 
-The inline check is blind at prefix-hit positions: the engine reads those inline rows back from the same store, so "delivered = inline" holds even if both are another trajectory's rows. Errors in the hardening section below were only visible against the reference. The reference comparison has not yet been run at full depth (engine overhead: full depth against bounded replay).
+The inline check is blind at prefix-hit positions: the engine reads those inline rows back from the same store, so "delivered = inline" holds even if both are another trajectory's rows. Errors in the hardening section below were only visible against the reference. At full depth the reference comparison has been run on the whole regression suite, with 0 wrong rows (correctness hardening: full-depth regressions).
 
 Engine events that do not occur on their own in a short test are triggered through the engine's real code paths:
 
@@ -49,7 +49,7 @@ Engine events that do not occur on their own in a short test are triggered throu
 | X9 | Trainer logprob recompute with R3 and indexer replay | aligned rows; gap vs a self-perturbation floor | delivered = exact; remaining gap is trainer-engine numerics |
 | E0 | KV offload to an NVMe tier | recompute, time, aux complete | −23% time and 9× less recompute with a 4 GB CPU tier; 0 missing |
 | Scale | 512K, 108 turns, shared pool | 0 missing, 0 wrong | pass |
-| Hardening | Preemption, GRPO, forks, delayed forks, in-flight weight updates, write failures, indexer gaps, writer memory, speculative decoding | 0 missing, 0 wrong vs the reference | pass (P-S) |
+| Hardening | Preemption, GRPO, forks, delayed forks, in-flight weight updates, write failures, indexer gaps, writer memory, speculative decoding | 0 missing, 0 wrong vs the reference | pass (P-S), on the bounded-replay build and again at full depth (without speculative decoding) |
 
 ## Designs compared (X1)
 
@@ -121,7 +121,7 @@ Workload: the one-node 14.6K workload (512 closed-loop agents, 16 turns growing 
 
 **Decode-end snapshot.** The same workload at full depth with all outputs, on another node: 440.7 s with decode-end snapshots against 492.4 s with prompt-end snapshots only (−10.5%). Per-turn time grew from 25 s to 31 s over the 16 turns, against 25 s to 35 s. 0 missing, 0 wrong. Against bounded replay with all outputs (1,209 s, on the first node; nodes differ by about 4%), that is 63% less time. No prefix-hit counter was recorded, so the gain is not yet attributed to more prefix hits.
 
-**Not yet run at full depth:** the comparison against each trajectory's dumped first computation (How correctness is checked), and the 512K top scenario.
+**Correctness at full depth.** The regression suite with reference dumps passed at full depth with 0 wrong rows (correctness hardening: full-depth regressions). The 512K top scenario has not yet been run at full depth.
 
 
 #### Bounded replay: R3 through the replay layers
@@ -421,7 +421,24 @@ These are the rules of protocol §9: offload on eviction only, a long `client_tt
 
 ## Correctness hardening
 
-Each row is a defect found by test or review, the test that exposes it, and the result before and after the fix, on the same workload. "Wrong" is against the reference unless noted.
+### Full-depth regressions
+
+The regression suite was rerun at full depth: bounded replay off, decode-end snapshots, every layer captured, no speculative decoding. Every row was checked against its trajectory's own first computation, dumped by the engine.
+
+| Regression | Rows checked | Wrong | Notes |
+|---|---|---|---|
+| GRPO group | 4.33M | 0 | |
+| Fork | 3.96M | 0 | |
+| Interior fork (cut inside a block) | 4.63M | 0 | |
+| Forced preemption | 2.71M | 0 | 323 preemptions |
+| Context compaction | 551K | 0 | no reuse of rows at shifted positions |
+| Write-failure injection | — | — | 128 injected failed requests; 0 other failed requests, 0 missing rows |
+
+Speculative decoding was not part of this run, since the decode-end snapshot patch does not yet support it (protocol §6.11).
+
+### Defects fixed
+
+Each row of the table below is a defect found by test or review, the test that exposes it, and the result before and after the fix, on the same workload. "Wrong" is against the reference unless noted. These fixes were made on the bounded-replay build.
 
 | Defect | Test | Before | After |
 |---|---|---|---|
@@ -445,9 +462,11 @@ Each row is a defect found by test or review, the test that exposes it, and the 
 
 KV-load rewind (block-level failure recovery) cannot occur on this model: vLLM refuses block-level recovery with 9 KV cache groups. For single-group models the protocol reports rows from the rewind point as invalid.
 
-## Finding: same-version rows differ without the consistent build
+## Finding: same-version rows differed under bounded replay
 
-On this build (batch invariance, not #62365), GRPO siblings prefilling the same prompt in different chunks route differently: in one run 2,253 of 5,842 positions differed, and ~4,800 blocks per GRPO run had same-hash, different-content copies. Against the reference, sharing the first copy leaves ~224K rows of a GRPO run (and ~243K of a fork run) delivered from a sibling's computation. Under the train-inference consistent build these computations are bitwise identical and the protocol shares them; keeping a copy per trajectory instead (`OC_ALT=1` in the overlay) delivers every trajectory its own computation.
+On the bounded-replay build (batch invariance, not #62365), GRPO siblings prefilling the same prompt in different chunks routed differently: in one run 2,253 of 5,842 positions differed, and ~4,800 blocks per GRPO run had same-hash, different-content copies. Against the reference, sharing the first copy left ~224K rows of a GRPO run (and ~243K of a fork run) delivered from a sibling's computation, and the control arms of the group and fork regressions had about 109K and 107K wrong rows. These were read as same-version computations that differ by chunking.
+
+At full depth, the same group and fork regressions have 0 wrong rows (correctness hardening: full-depth regressions). Same-version recomputes match, on this batch-invariant build without the rest of #62365. The differing rows came from bounded replay's replayed rows: cells of the window layers that a step recomputed on a different set of trailing rows. Keeping a copy per trajectory (`OC_ALT=1` in the overlay) still delivers every trajectory its own computation, and the protocol still states invariant 3 for the train-inference consistent build.
 
 ## Finding: `deep_gemm_mega_moe` broke batch invariance
 

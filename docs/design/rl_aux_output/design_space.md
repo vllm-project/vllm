@@ -54,7 +54,7 @@ K2 is chosen. Sharing across sessions is worth ~0.24 GB per node for R3, not wor
 
 **Sharing inside a session.** A block hash names tokens, not a computation. Two trajectories of one session can compute the same tokens differently in two ways:
 
-- **Same weight version.** Under batch invariance without the consistency guarantees of #62365, a different chunk split routes differently: on DeepSeek-V4.1-Flash, a GRPO group's siblings prefilling the same prompt in different chunks differed in ~40% of the rows of the affected blocks. Under the train-inference consistent build these computations are bitwise identical, so one copy serves all trajectories. The protocol relies on that build.
+- **Same weight version.** Under the train-inference consistent build these computations are bitwise identical, so one copy serves all trajectories; the protocol relies on that build. On DeepSeek-V4.1-Flash with bounded replay, a GRPO group's siblings prefilling the same prompt in different chunks differed in ~40% of the rows of the affected blocks. At full depth the same regressions match the reference with 0 wrong rows: the difference came from bounded replay's replayed rows, not from same-version computations (experiments: finding on same-version rows).
 - **Different weight version.** A trajectory computing the same tokens after a weight update has different rows, and its sampling used them. Sharing the earlier copy would deliver another version's routing. The trajectory keeps its own copy.
 
 | Option | What a trajectory reads for a shared hash | Assessment |
