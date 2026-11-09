@@ -227,6 +227,7 @@ if TYPE_CHECKING:
     VLLM_KIMI_SD_DSA_FOLD: bool = True
     VLLM_KIMI_SD_DSA_PART_FP32: bool = False
     VLLM_KIMI_SD_DSA_VERIFY: bool = False
+    VLLM_KIMI_SD_DSA_PROLOGUE: bool = False
     VLLM_ENABLE_GEMM_RS: bool = False
     VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER: bool = True
     VLLM_USE_FLASHINFER_MOE_INT4: bool = False
@@ -1763,6 +1764,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # log how the query, KV write, top-k and o_proj input differ.
     "VLLM_KIMI_SD_DSA_VERIFY": lambda: bool(
         int(os.getenv("VLLM_KIMI_SD_DSA_VERIFY", "0"))
+    ),
+    # The DSA layers' query, KV and indexer projections as one persistent
+    # launch (D1a: AttnRes, qkv_a, wk / wv, g_proj, the norms, the fp8_ds_mla
+    # write, q_b, wq, W_UK) before the indexer's scoring and K2.
+    "VLLM_KIMI_SD_DSA_PROLOGUE": lambda: bool(
+        int(os.getenv("VLLM_KIMI_SD_DSA_PROLOGUE", "0"))
     ),
     # Fuse eligible sequence-parallel row-parallel projections with their TP
     # reduce-scatter using the SM100 BF16/MXFP8 GEMM-RS kernel (Kimi-K3
