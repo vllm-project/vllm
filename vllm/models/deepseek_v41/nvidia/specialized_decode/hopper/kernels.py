@@ -10,26 +10,28 @@ executor and every prefill keeps running the stock forward on a single copy of
 the weights; the small-batch MLA chain's `wo_a`, which the stock SM90 layer
 keeps only as BF16, is the one exception (`dense.fp8_wo_a`).
 
-Each layer's low-batch kernels are providers (`DenseProvider`), one per layer
-and seam, built with the executor: today `dense.DenseFp8Linear` up to
-`dense.MAX_ROWS` rows; a weight-preloading or fused kernel replaces one by
-implementing the same interface. Every launch here is captured into a FULL CUDA
-graph of the executor only, and the Hopper kernels chain with programmatic
-dependent launch. The sparse-MLA decode is `sparse_mla.FlashMlaDecode.run`.
+Each layer's low-batch dense kernels are `dense.DenseFp8Linear` calls, one
+per layer and seam, built with the executor, up to `dense.MAX_ROWS` rows.
+Every launch here is captured into a FULL CUDA graph of the executor only, and
+the Hopper kernels chain with programmatic dependent launch. The sparse-MLA
+decode is `sparse_mla.FlashMlaDecode.run`.
+
+Outside the executor's own kernels, this module relies on these stock MoE
+internals (`hopper/AGENTS.md`): `SharedMlp.installed` replaces the shared
+expert MLP's `forward` on the instance; `partial_output` sets the runner's
+`moe_config.skip_final_all_reduce` for the call; `moe` calls the runner's
+`gate`.
 """
 
 from collections.abc import Iterator
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING
 
 import torch
 from torch import nn
 
 from vllm.model_executor.layers.fused_moe.moe_output import MoEOutput
-from vllm.model_executor.layers.fused_moe.runner.shared_experts import (
-    SharedExpertsOrder,
-)
 from vllm.models.deepseek_v41.attention import DeepseekV4Attention, DeepseekV4Indexer
 
 from ...ops.o_proj import dsv41_o_proj
@@ -40,35 +42,15 @@ if TYPE_CHECKING:
     from ...model import DeepseekV4MoE
 
 
-class DenseProvider(Protocol):
-    """One layer's low-batch kernel of one dense seam."""
-
-    seam: str
-    n: int
-    k: int
-
-    def serves(self, rows: int) -> bool:
-        """Whether a call of `rows` rows runs here (host state only)."""
-        ...
-
-    def __call__(self, x: torch.Tensor) -> torch.Tensor:
-        """The product."""
-        ...
-
-    def warm_up(self, rows: int) -> None:
-        """Compile what a `rows`-row call launches, before graph capture."""
-        ...
-
-
 @dataclass
 class AttentionLinears:
     """The low-batch providers of one attention layer's dense linears."""
 
-    wqa_wkv: DenseProvider | None
-    wq_b: DenseProvider | None
-    index_wq_b: DenseProvider | None
-    wo_a: DenseProvider | None
-    wo_b: DenseProvider | None
+    wqa_wkv: DenseFp8Linear | None
+    wq_b: DenseFp8Linear | None
+    index_wq_b: DenseFp8Linear | None
+    wo_a: DenseFp8Linear | None
+    wo_b: DenseFp8Linear | None
 
     @classmethod
     def of(cls, attn: DeepseekV4Attention) -> "AttentionLinears":
@@ -85,12 +67,12 @@ class AttentionLinears:
             wo_b=DenseFp8Linear.of("wo_b", attn.wo_b),
         )
 
-    def all(self) -> list[DenseProvider]:
+    def all(self) -> list[DenseFp8Linear]:
         linears = (self.wqa_wkv, self.wq_b, self.index_wq_b, self.wo_a, self.wo_b)
         return [linear for linear in linears if linear is not None]
 
 
-def _serves(linear: DenseProvider | None, rows: int) -> bool:
+def _serves(linear: DenseFp8Linear | None, rows: int) -> bool:
     return linear is not None and linear.serves(rows)
 
 
@@ -166,8 +148,8 @@ class SharedMlp:
     """The low-batch providers of a MoE layer's shared expert MLP."""
 
     mlp: nn.Module
-    gate_up: DenseProvider
-    down: DenseProvider
+    gate_up: DenseFp8Linear
+    down: DenseFp8Linear
 
     @classmethod
     def of(cls, ffn: "DeepseekV4MoE") -> "SharedMlp | None":
@@ -231,47 +213,18 @@ def moe(
     """The MoE layer's TP-partial output, or its routed output left
     unfinalized with the shared output.
 
-    Up to `moe.MAX_ROWS` rows the routed experts run the low-batch kernel
-    (`routed`), from the stock router's logits (on hash-routed layers, its
-    top-k), and stop before the top-k reduction: the next boundary's fused
-    all-reduce + mHC folds the reduction and the shared-expert add into its
-    publish (`AllReduceMHC.finalize`). The kernel also runs the shared expert
-    up to `moe.SHARED_MAX_ROWS` rows; above that the stock shared expert runs
-    on its side stream, on the low-batch dense calls where they serve. Larger
-    calls run the stock MoE, without its final all-reduce.
+    Up to `moe.MAX_ROWS` rows the routed and shared experts run the low-batch
+    kernel (`routed`), from the stock router's logits, and stop before the
+    top-k reduction: the next boundary's fused all-reduce + mHC folds the
+    reduction and the shared-expert add into its publish
+    (`AllReduceMHC.finalize`). Larger calls run the stock MoE, without its
+    final all-reduce, with the shared expert on the low-batch dense calls where
+    they serve.
     """
     rows = x.shape[0]
     if routed is None or not routed.serves(rows):
         with shared_installed(shared, rows), partial_output(ffn):
             return ffn(x, input_ids, None)
-    runner = ffn.experts
-    runner.routed_experts._ensure_moe_quant_config_init()
-    side = runner._shared_experts
-    fused = routed.fuses_shared(rows)
-    overlapping = False
-    with shared_installed(shared, rows):
-        if not fused:
-            assert side is not None
-            overlapping = side.maybe_forward_async(x)
-        router_logits, _ = runner.gate(x)
-        if not fused:
-            runner._maybe_apply_shared_experts(x, SharedExpertsOrder.NO_OVERLAP)
-    if routed.hash_routed:
-        topk_weights, topk_ids = runner.router.select_experts(
-            hidden_states=x,
-            router_logits=router_logits,
-            topk_indices_dtype=runner._quant_method.topk_indices_dtype,
-            input_ids=input_ids,
-        )
-        output, shared_output = routed(x, topk_ids=topk_ids, topk_weights=topk_weights)
-    else:
-        output, shared_output = routed(
-            x, router_logits=router_logits, input_ids=input_ids
-        )
-    if not fused:
-        if overlapping:
-            side.wait()
-        # Read once: the property hands the output over and clears it.
-        shared_output = side.output
-    assert shared_output is not None
+    router_logits, _ = ffn.experts.gate(x)
+    output, shared_output = routed(x, router_logits, input_ids)
     return MoEOutput(routed=output, shared_output=shared_output)

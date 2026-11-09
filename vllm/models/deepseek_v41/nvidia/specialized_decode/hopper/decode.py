@@ -45,8 +45,9 @@ from ..runtime.decode import (
     SpecializedDecode,
     captures_pure_decode,
 )
-from . import attn_chain, kernels
+from . import attn_chain
 from .dense import MAX_ROWS as DENSE_MAX_ROWS
+from .dense import DenseFp8Linear
 from .mhc import SeamPre
 from .sparse_mla import FlashMlaDecode, FlashMlaTables
 from .steps import HopperAttentionStep, HopperBoundaries, HopperMoEStep
@@ -227,9 +228,9 @@ class HopperSpecializedDecode(SpecializedDecode):
         query_len = vllm_config.num_speculative_tokens + 1
         cap = min(self.max_rows, DENSE_MAX_ROWS)
         rows = sorted({round_up(n, query_len) for n in sizes} & set(range(1, cap + 1)))
-        by_shape: dict[tuple, tuple[kernels.DenseProvider, set[int]]] = {}
+        by_shape: dict[tuple, tuple[DenseFp8Linear, set[int]]] = {}
 
-        def add(linear: kernels.DenseProvider) -> None:
+        def add(linear: DenseFp8Linear) -> None:
             key = (linear.seam, linear.n, linear.k)
             by_shape.setdefault(key, (linear, set()))[1].update(rows)
 

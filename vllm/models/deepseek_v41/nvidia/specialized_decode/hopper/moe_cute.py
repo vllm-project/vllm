@@ -9,10 +9,9 @@ warpgroups), a TMA producer warp, a signal warp.
 
 * Front: row CTA `t < M` routes token `t` (from the router's logits:
   sqrt-softplus plus the correction bias, top-6, renormalized, times the routed
-  scaling factor; image sentinel tokens with `bias_vl`; or from given top-k
-  ids and weights), block-FP8 (group 128) quantizes it and publishes it with
-  one counter. Every CTA builds the expert-major row-chunk table in shared
-  memory.
+  scaling factor; image sentinel tokens with `bias_vl`), block-FP8 (group
+  128) quantizes it and publishes it with one counter. Every CTA builds the
+  expert-major row-chunk table in shared memory.
 
   - Dense mode (`M <= DENSE_MAX_ROWS`): one row chunk per active expert
     covering all `M` tokens (a token mask marks the routed ones), on the
@@ -27,7 +26,7 @@ warpgroups), a TMA producer warp, a signal warp.
   after its 9 pairs.
 * GEMM2 (`w2`): the producer streams `w2` tiles into a second ring once its
   GEMM1 ring is drained; each item waits only for its own row chunk.
-* Shared expert (`shared`): the W8A16 FP8 weights read in place, as f16
+* Shared expert: the W8A16 FP8 weights read in place, as f16
   wgmma A fragments (exact e4m3 to f16 conversion) with the per-32 UE8M0
   scale applied on each k32 partial, on f16 activations converted from x; an
   extra row chunk of weight 1 covering every token, written to its own output
@@ -377,8 +376,8 @@ def _tile_ch(tile: Int32, h: Int32, NCH: Int32, tshc: Int32) -> Int32:
 
 
 @cute.jit
-def _route_row2(
-    plog: Int64,
+def _route_row_image(
+    logits: Int64,
     bias: Int64,
     bias_vl: Int64,
     in_ids: Int64,
@@ -389,33 +388,25 @@ def _route_row2(
     lane: Int32,
     experts: cutlass.Constexpr,
     top_k: cutlass.Constexpr,
-    image: cutlass.Constexpr,
-    halves: cutlass.Constexpr = True,
 ):
-    """_route_row on the two published partial-logit halves; image sentinel
-    tokens (lo <= id < lo + 5) use `bias_vl`."""
+    """_route_row where image sentinel tokens (lo <= id < lo + 5) use
+    `bias_vl`."""
     use_vl = Int32(0)
-    if cutlass.const_expr(image):
-        tok = ldg_cg_i32(in_ids + Int64(r) * 4)
-        if tok >= lo:  # noqa: SIM102
-            if tok < lo + 5:
-                use_vl = Int32(1)
+    tok = ldg_cg_i32(in_ids + Int64(r) * 4)
+    if tok >= lo:  # noqa: SIM102
+        if tok < lo + 5:
+            use_vl = Int32(1)
     per_lane = experts // 32
     sc = cute.make_rmem_tensor((per_lane,), Float32)
     ky = cute.make_rmem_tensor((per_lane,), Float32)
-    bb = cute.make_rmem_tensor((per_lane,), Float32)
     for j in cutlass.range_constexpr(per_lane):
         e = lane + 32 * j
         bj0 = ldg_f32(bias + Int64(e) * 4)
-        if cutlass.const_expr(image):  # noqa: SIM102
-            if use_vl == 1:
-                bj0 = ldg_f32(bias_vl + Int64(e) * 4)
-        lg = ldg_cg_f32(plog + (Int64(r) * experts + e) * 4)
-        if cutlass.const_expr(halves):
-            lg = lg + ldg_cg_f32(plog + (Int64(MAXM + r) * experts + e) * 4)
+        if use_vl == 1:
+            bj0 = ldg_f32(bias_vl + Int64(e) * 4)
+        lg = ldg_cg_f32(logits + (Int64(r) * experts + e) * 4)
         sc[j] = score_of(lg)
         ky[j] = sc[j] + bj0
-        bb[j] = bj0
     tot = Float32(0.0)
     my_id = Int32(0)
     my_s = Float32(0.0)
@@ -521,9 +512,7 @@ class LowBatchMoEKernel:
         ns1: int = 3,
         ns2: int = 5,
         chunk_target: int = 1,
-        ids_mode: bool = False,
         dense: bool = True,
-        shared: bool = False,
         image: bool = False,
         cluster: bool = False,
         nchs: int = 20,
@@ -538,13 +527,11 @@ class LowBatchMoEKernel:
         self.cluster = cluster and dense
         self.nchs_d = nchs
         assert not self.cluster or nchs % 2 == 0  # chunk parity == cluster rank
-        self.shared = shared
-        self.image = image and not ids_mode
         self.ns1 = ns1
         self.ns2 = ns2
         self.chunk_target = chunk_target
-        self.ids_mode = ids_mode
         self.dense = dense
+        self.image = image
         self.smem = smem_bytes(ns1, ns2, self.cluster)
 
     @cute.jit
@@ -699,6 +686,39 @@ class LowBatchMoEKernel:
             stg_f32(xsg + ((Int64(b128 // 2) * ENTP + ent) * 2 + b128 % 2) * 4, qs[0])
 
     @cute.jit
+    def _route(
+        self,
+        logits: Int64,
+        bias: Int64,
+        maps: Int64,
+        xgs: Int64,
+        ids: Int64,
+        wts: Int64,
+        r: Int32,
+        lane: Int32,
+    ):
+        """Warp 0 of row CTA r: route token r. Image routing reads the token
+        ids where the FP8 shared activations would go (`xgs`; the W8A16 shared
+        expert converts its own) and `bias_vl` and the sentinel from the
+        blob."""
+        if cutlass.const_expr(self.image):
+            _route_row_image(
+                logits,
+                bias,
+                ldg_i64(maps + 1024 + 9 * 8),
+                xgs,
+                Int32(ldg_i64(maps + 1024 + 10 * 8)),
+                ids,
+                wts,
+                r,
+                lane,
+                self.experts,
+                self.top_k,
+            )
+        else:
+            _route_row(logits, bias, ids, wts, r, lane, self.experts, self.top_k)
+
+    @cute.jit
     def _publish_row(self, cnt: Int64, tid: Int32):
         """Consumer warps: make this CTA's row writes visible, count it."""
         fence_proxy_async_global()
@@ -732,9 +752,8 @@ class LowBatchMoEKernel:
         npad = (M + 7) // 8 * 8
         for i in cutlass.range(tid, self.experts, NTHR, unroll=1):
             sts32(s_tmask + i * 4, Uint32(0))
-        if cutlass.const_expr(not self.ids_mode):  # noqa: SIM102
-            if tid == 0:
-                self._wait_rows(cnt, M)
+        if tid == 0:
+            self._wait_rows(cnt, M)
         cute.arch.sync_threads()
         if tid < M * self.top_k:
             ex = ldg_cg_i32(ids + Int64(tid) * 4)
@@ -800,9 +819,8 @@ class LowBatchMoEKernel:
             sts32(s_mask + i * 4, Uint32(0))
         for i in cutlass.range(tid, self.experts, NTHR, unroll=1):
             sts32(s_cnt + i * 4, Uint32(0))
-        if cutlass.const_expr(not self.ids_mode):  # noqa: SIM102
-            if tid == 0:
-                self._wait_rows(cnt, M)
+        if tid == 0:
+            self._wait_rows(cnt, M)
         cute.arch.sync_threads()
         for i in cutlass.range(tid, M * self.top_k, NTHR, unroll=1):
             ex = ldg_cg_i32(ids + Int64(i) * 4)
@@ -1151,9 +1169,8 @@ class LowBatchMoEKernel:
     ):
         G = (Int32(lds32(tab + (2 * RC_CAP + rc) * 4)) + 7) // 8
         is_sh = Int32(0)
-        if cutlass.const_expr(self.shared):  # noqa: SIM102
-            if Int32(lds32(tab + rc * 4)) == E_SH:
-                is_sh = Int32(1)
+        if Int32(lds32(tab + rc * 4)) == E_SH:
+            is_sh = Int32(1)
         if is_sh == 0:
             off = Int32(0)
             if cutlass.const_expr(not self.dense):
@@ -2018,30 +2035,28 @@ class LowBatchMoEKernel:
                 prefetch_tmap(ts13)
                 prefetch_tmap(tw2)
                 prefetch_tmap(ts2)
-                if cutlass.const_expr(self.shared):
-                    prefetch_tmap(sw13)
-                    prefetch_tmap(ss13)
-                    prefetch_tmap(sw2)
-                    prefetch_tmap(ss2)
-        if cutlass.const_expr(self.shared):  # noqa: SIM102
-            # PDL: the shared expert's weights do not depend on the previous
-            # kernel -- pull this CTA's slice of them into L2 before the wait
-            if warp == SIG:  # noqa: SIM102
-                if lane < 4:
-                    base = ldg_i64(maps + 1024 + lane * 16)
-                    nb = Int32(ldg_i64(maps + 1024 + lane * 16 + 8))
-                    chunk = ((nb + nblk - 1) // nblk + 15) // 16 * 16
-                    start = bid * chunk
-                    if start < nb:
-                        n = nb - start
-                        if n > chunk:
-                            n = chunk
-                        prefetch_l2_bulk(base + Int64(start), n)
+                prefetch_tmap(sw13)
+                prefetch_tmap(ss13)
+                prefetch_tmap(sw2)
+                prefetch_tmap(ss2)
+        # PDL: the shared expert's weights do not depend on the previous
+        # kernel -- pull this CTA's slice of them into L2 before the wait
+        if warp == SIG:  # noqa: SIM102
+            if lane < 4:
+                base = ldg_i64(maps + 1024 + lane * 16)
+                nb = Int32(ldg_i64(maps + 1024 + lane * 16 + 8))
+                chunk = ((nb + nblk - 1) // nblk + 15) // 16 * 16
+                start = bid * chunk
+                if start < nb:
+                    n = nb - start
+                    if n > chunk:
+                        n = chunk
+                    prefetch_l2_bulk(base + Int64(start), n)
         cute.arch.sync_threads()
         if cutlass.const_expr(self.cluster):
             cluster_sync_all()  # the peer's barriers are initialized
         pre = Int32(0)
-        if cutlass.const_expr(self.shared and self.dense):  # noqa: SIM102
+        if cutlass.const_expr(self.dense):  # noqa: SIM102
             # chunks 0 .. 9 * NCHS - 1 are the shared expert's (rc 0), statically
             # chunk = blockIdx: their weights do not depend on the previous kernel
             if warp == PROD:  # noqa: SIM102
@@ -2086,33 +2101,12 @@ class LowBatchMoEKernel:
         qw = cute.make_rmem_tensor((8,), Uint32)
         qs = cute.make_rmem_tensor((1,), Float32)
         n_rc = Int32(0)
-        nsh_rc = Int32(0)  # shared-expert row chunks (rc 0 .. nsh_rc - 1)
-        if cutlass.const_expr(self.shared):
-            nsh_rc = Int32(1) if self.dense else (M + 31) // 32
+        # shared-expert row chunks (rc 0 .. nsh_rc - 1)
+        nsh_rc = Int32(1) if self.dense else (M + 31) // 32
         if cutlass.const_expr(self.dense):
             if bid < M:
-                if cutlass.const_expr(self.image):
-                    if warp == 0:
-                        _route_row2(
-                            logits,
-                            bias,
-                            ldg_i64(maps + 1024 + 9 * 8),
-                            xgs,
-                            Int32(ldg_i64(maps + 1024 + 10 * 8)),
-                            ids,
-                            wts,
-                            bid,
-                            lane,
-                            self.experts,
-                            self.top_k,
-                            True,
-                            False,
-                        )
-                elif cutlass.const_expr(not self.ids_mode):  # noqa: SIM102
-                    if warp == 0:
-                        _route_row(
-                            logits, bias, ids, wts, bid, lane, self.experts, self.top_k
-                        )
+                if warp == 0:
+                    self._route(logits, bias, maps, xgs, ids, wts, bid, lane)
                 if tid < 160:
                     self._quant_row(x, bid, tid, qw, qs)
                     self._store_xrow(xg, xsg, bid, tid, qw, qs)
@@ -2121,16 +2115,14 @@ class LowBatchMoEKernel:
             n_rc = self._front_dense(
                 ids, cnt, M, tid, warp, lane, tab, s_mask, s_off, s_tot, nsh_rc
             )
-            if cutlass.const_expr(self.shared):
-                npad = (M + 7) // 8 * 8
-                if tid == 0:
-                    sts32(tab, Uint32(E_SH))
-                    sts32(tab + RC_CAP * 4, Uint32(0))
-                    sts32(tab + 2 * RC_CAP * 4, Uint32(npad))
-                    sts32(tab + 3 * RC_CAP * 4, (Uint32(1) << Uint32(M)) - Uint32(1))
-                cute.arch.sync_threads()
+            npad = (M + 7) // 8 * 8
+            if tid == 0:
+                sts32(tab, Uint32(E_SH))
+                sts32(tab + RC_CAP * 4, Uint32(0))
+                sts32(tab + 2 * RC_CAP * 4, Uint32(npad))
+                sts32(tab + 3 * RC_CAP * 4, (Uint32(1) << Uint32(M)) - Uint32(1))
+            cute.arch.sync_threads()
             if bid < M:  # noqa: SIM102
-                # the boundary's finalize reads the map before its griddepcontrol.wait
                 if warp == SIG:  # noqa: SIM102
                     if lane < self.top_k:
                         ex = ldg_cg_i32(ids + Int64(bid * self.top_k + lane) * 4)
@@ -2140,41 +2132,14 @@ class LowBatchMoEKernel:
                         )
                         fence_gpu()
         else:
-            if cutlass.const_expr(not self.ids_mode):  # noqa: SIM102
-                if bid < M:
-                    if warp == 0:
-                        if cutlass.const_expr(self.image):
-                            _route_row2(
-                                logits,
-                                bias,
-                                ldg_i64(maps + 1024 + 9 * 8),
-                                xgs,
-                                Int32(ldg_i64(maps + 1024 + 10 * 8)),
-                                ids,
-                                wts,
-                                bid,
-                                lane,
-                                self.experts,
-                                self.top_k,
-                                True,
-                                False,
-                            )
-                        else:
-                            _route_row(
-                                logits,
-                                bias,
-                                ids,
-                                wts,
-                                bid,
-                                lane,
-                                self.experts,
-                                self.top_k,
-                            )
-                    if warp < NCW:
-                        named_barrier(1, NCT)
-                        if tid == 0:
-                            fence_gpu()
-                            atom_add_relaxed(cnt + C_BAR * 4, 1)
+            if bid < M:
+                if warp == 0:
+                    self._route(logits, bias, maps, xgs, ids, wts, bid, lane)
+                if warp < NCW:
+                    named_barrier(1, NCT)
+                    if tid == 0:
+                        fence_gpu()
+                        atom_add_relaxed(cnt + C_BAR * 4, 1)
             if bid < M:  # noqa: SIM102
                 if tid < 160:
                     self._quant_row(x, bid, tid, qw, qs)
@@ -2194,16 +2159,15 @@ class LowBatchMoEKernel:
                 s_tot,
                 nsh_rc,
             )
-            if cutlass.const_expr(self.shared):
-                if tid < nsh_rc:
-                    rem = M - 32 * tid
-                    if rem > 32:
-                        rem = Int32(32)
-                    sts32(tab + tid * 4, Uint32(E_SH))
-                    sts32(tab + (RC_CAP + tid) * 4, Uint32(32 * tid))
-                    sts32(tab + (2 * RC_CAP + tid) * 4, Uint32(rem))
-                    sts32(tab + (3 * RC_CAP + tid) * 4, Uint32(0xFFFFFFFF))
-                cute.arch.sync_threads()
+            if tid < nsh_rc:
+                rem = M - 32 * tid
+                if rem > 32:
+                    rem = Int32(32)
+                sts32(tab + tid * 4, Uint32(E_SH))
+                sts32(tab + (RC_CAP + tid) * 4, Uint32(32 * tid))
+                sts32(tab + (2 * RC_CAP + tid) * 4, Uint32(rem))
+                sts32(tab + (3 * RC_CAP + tid) * 4, Uint32(0xFFFFFFFF))
+            cute.arch.sync_threads()
             if bid < M:
                 if tid < 160:
                     for k in cutlass.range_constexpr(self.top_k):
@@ -2236,12 +2200,12 @@ class LowBatchMoEKernel:
             NCH = Int32(2)
         UPC = SPT // NCH
         n_chunks = nsh_rc * NPAIR * nchs + n_tiles * NCH
-        # entry mode: the GEMM1 bar counts row CTAs; dense too (logits mode
-        # already waited in the front)
+        # The GEMM1 bar counts row CTAs (twice each in entry mode: routed, then
+        # quantized); dense mode already waited for them in the front.
         if warp == PROD:  # noqa: SIM102
             if lane == 0:
                 btgt = M
-                if cutlass.const_expr(not self.dense and not self.ids_mode):
+                if cutlass.const_expr(not self.dense):
                     btgt = 2 * M
                 self._produce1(
                     tw13,
@@ -2290,7 +2254,7 @@ class LowBatchMoEKernel:
                 )
         if warp == SIG:
             btgt = M
-            if cutlass.const_expr(not self.dense and not self.ids_mode):
+            if cutlass.const_expr(not self.dense):
                 btgt = 2 * M
             self._b_loop(
                 x, M, xg, xsg, xgs, xsgs, cnt, btgt, NCH, tsh, sbase, full, hb, tab, bid

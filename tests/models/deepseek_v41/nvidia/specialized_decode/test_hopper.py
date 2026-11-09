@@ -753,9 +753,10 @@ def test_low_batch_moe_matches_the_stock_moe(
     """The low-batch MoE kernel's unfinalized output, reduced as the
     boundary's finalize reduces it, against the stock Humming W4A8 MoE on the
     same routing at the row counts the executor serves, dense and entry mode,
-    routed from logits and from given top-k; its in-kernel routing against
-    the DeepSeek-V4 routing; and its fused shared expert against the stock
-    W8A16 shared expert MLP; for the backbone's shape and a smaller one."""
+    and its in-kernel routing against the DeepSeek-V4 routing (on the rows
+    whose top-k is not a near tie, which an innocuous rounding change could
+    flip); and its fused shared expert against the stock W8A16 shared expert
+    MLP; for the backbone's shape and a smaller one."""
     from vllm.config import KernelConfig, VllmConfig, set_current_vllm_config
     from vllm.forward_context import set_forward_context
     from vllm.model_executor.layers.activation import SiluAndMulWithClamp
@@ -771,10 +772,11 @@ def test_low_batch_moe_matches_the_stock_moe(
         ffn, (w13, w2), (gate_up, down) = _moe_ffn(num_experts, top_k, bias)
         layer = ffn.experts
         by_logits = moe.HopperLowBatchMoE.of(ffn)
-        # Hash-routed: the kernel takes given top-k ids.
+        assert by_logits is not None
+        # Hash-routed layers run the stock MoE.
         ffn.gate.tid2eid = torch.zeros(1)
-        by_ids = moe.HopperLowBatchMoE.of(ffn)
-        assert by_logits is not None and by_ids is not None
+        assert moe.HopperLowBatchMoE.of(ffn) is None
+        ffn.gate.tid2eid = None
         act = SiluAndMulWithClamp(10.0)
         assert not by_logits.serves(moe.MAX_ROWS + 1)
         for m in (1, 2, 6, 8, 9, 12, 16, 17, 24, 48, 96, 120, 144):
@@ -782,6 +784,11 @@ def test_low_batch_moe_matches_the_stock_moe(
             x = torch.randn(m, MOE_HIDDEN, generator=g, device=DEVICE).bfloat16()
             logits = torch.randn(m, num_experts, generator=g, device=DEVICE)
             ids, weights = _routing(logits, bias, top_k)
+            keys = (torch.nn.functional.softplus(logits).sqrt() + bias).sort(
+                -1, descending=True
+            )[0]
+            clear = keys[:, top_k - 1] - keys[:, top_k] > 1e-5
+            assert clear.float().mean() > 0.9, m
             with set_forward_context(None, config, num_tokens=m):
                 stock = layer._quant_method.apply(
                     layer.routed_experts, x, weights, ids, None, None
@@ -790,44 +797,86 @@ def test_low_batch_moe_matches_the_stock_moe(
             stock_error = _rel(stock, want)
             assert stock_error < 6e-2, m
 
-            routed, shared = by_logits(x, router_logits=logits)
+            routed, shared = by_logits(x, logits)
             got = _finalize(routed)
             kernel_ids = by_logits.workspace.ids[: m * top_k].view(m, top_k)
-            assert torch.equal(kernel_ids.sort(-1).values, ids.sort(-1).values), m
+            assert torch.equal(
+                kernel_ids[clear].sort(-1).values, ids[clear].sort(-1).values
+            ), m
             assert torch.allclose(
-                routed.expert_weights.sort(-1).values,
-                weights.sort(-1).values,
+                routed.expert_weights[clear].sort(-1).values,
+                weights[clear].sort(-1).values,
                 atol=1e-5,
             ), m
-            assert _rel(got, want) < 1.25 * stock_error, m
+            assert _rel(got[clear], want[clear]) < 1.25 * stock_error, m
 
-            routed, _ = by_ids(x, topk_ids=ids, topk_weights=weights)
-            assert _rel(_finalize(routed), want) < 1.25 * stock_error, m
-
-            if m <= moe.SHARED_MAX_ROWS:
-                assert shared is not None
-                stock_shared = x
-                for (linear, humming), f in ((gate_up, act), (down, None)):
-                    stock_shared = apply_humming_linear(
-                        linear,
-                        stock_shared,
-                        skip_bias_add=True,
-                        layer_config=humming.layer_config,
-                        compute_config=humming.compute_config,
-                        locks=humming.locks,
-                    )
-                    stock_shared = f(stock_shared) if f else stock_shared
-                assert _rel(shared, stock_shared) < 1e-2, (
-                    m,
-                    _rel(shared, stock_shared),
+            stock_shared = x
+            for (linear, humming), f in ((gate_up, act), (down, None)):
+                stock_shared = apply_humming_linear(
+                    linear,
+                    stock_shared,
+                    skip_bias_add=True,
+                    layer_config=humming.layer_config,
+                    compute_config=humming.compute_config,
+                    locks=humming.locks,
                 )
-            else:
-                assert shared is None
+                stock_shared = f(stock_shared) if f else stock_shared
+            assert _rel(shared, stock_shared) < 1e-2, (m, _rel(shared, stock_shared))
+
+
+def test_low_batch_moe_routes_image_tokens_with_bias_vl(dist_init, workspace_init):
+    """On a vision checkpoint (every V4.1 checkpoint with a vision tower,
+    V4.1-Flash included) the router uses `bias_vl` for image sentinel tokens
+    (5 ids from `image_sentinel_lo`) and the correction bias for the others:
+    the kernel's routing against that, dense and entry mode, on steps mixing
+    both kinds of token."""
+    from vllm.config import KernelConfig, VllmConfig, set_current_vllm_config
+    from vllm.models.deepseek_v41.nvidia.specialized_decode.hopper import moe
+
+    num_experts, top_k = MOE_SHAPES[0]
+    lo = 1000
+    g = torch.Generator(device=DEVICE).manual_seed(19)
+    config = VllmConfig(kernel_config=KernelConfig(moe_backend="humming"))
+    with set_current_vllm_config(config):
+        bias = torch.randn(num_experts, generator=g, device=DEVICE) * 0.05
+        ffn, (w13, w2), _ = _moe_ffn(num_experts, top_k, bias)
+        ffn.gate.bias_vl = torch.randn(num_experts, generator=g, device=DEVICE)
+        ffn.image_sentinel_lo = lo
+        mod = moe.HopperLowBatchMoE.of(ffn)
+    assert mod is not None and mod.image
+    for m in (1, 6, 16, 17, 48, 144):
+        x = torch.randn(m, MOE_HIDDEN, generator=g, device=DEVICE).bfloat16()
+        logits = torch.randn(m, num_experts, generator=g, device=DEVICE)
+        # Text ids around the sentinel range, and sentinels.
+        input_ids = torch.randint(lo - 3, lo + 8, (m,), generator=g, device=DEVICE)
+        image = (input_ids >= lo) & (input_ids < lo + 5)
+        row_bias = torch.where(image[:, None], ffn.gate.bias_vl, bias)
+        keys = (torch.nn.functional.softplus(logits).sqrt() + row_bias).sort(
+            -1, descending=True
+        )[0]
+        clear = keys[:, top_k - 1] - keys[:, top_k] > 1e-5
+        scores = torch.nn.functional.softplus(logits).sqrt()
+        ids = (scores + row_bias).topk(top_k, dim=-1).indices
+        weights = scores.gather(1, ids)
+        weights = weights / weights.sum(-1, keepdim=True) * 1.5
+        routed, _ = mod(x, logits, input_ids)
+        kernel_ids = mod.workspace.ids[: m * top_k].view(m, top_k)
+        assert torch.equal(
+            kernel_ids[clear].sort(-1).values, ids[clear].int().sort(-1).values
+        ), m
+        assert torch.allclose(
+            routed.expert_weights[clear].sort(-1).values,
+            weights[clear].sort(-1).values,
+            atol=1e-5,
+        ), m
+        want = _moe_reference(x, ids.int(), weights.float(), w13, w2)
+        got = _finalize(routed)
+        assert _rel(got[clear], want[clear]) < 6e-2, (m, _rel(got, want))
 
 
 def test_low_batch_moe_every_row_count_skewed_and_spread(dist_init, workspace_init):
-    """The low-batch MoE (dense, cluster and entry paths, routed
-    in-kernel and by given ids) at every row count it serves, on the two
+    """The low-batch MoE (dense, cluster and entry paths) at every row count
+    it serves, on the two
     extremes of routing: skewed (one expert takes every row, so its row chunks
     fill up, the others get a row or two) and spread (every route its own
     expert while there are experts left: the most tiles, so the most split-K
@@ -857,22 +906,18 @@ def test_low_batch_moe_every_row_count_skewed_and_spread(dist_init, workspace_in
                 logits.scatter_(1, pool, 4.0)
             ids, weights = _routing(logits, bias, top_k)
             want = _moe_reference(x, ids, weights, w13, w2)
-            for kw in (
-                dict(router_logits=logits),
-                dict(topk_ids=ids, topk_weights=weights),
-            ):
-                routed, _ = mod(x, **kw)
-                got = _finalize(routed)
-                torch.accelerator.synchronize()
-                assert _rel(got, want) < 6e-2, (m, spread, list(kw), _rel(got, want))
+            routed, _ = mod(x, logits)
+            got = _finalize(routed)
+            torch.accelerator.synchronize()
+            assert _rel(got, want) < 6e-2, (m, spread, _rel(got, want))
 
 
 def test_low_batch_moe_is_repeatable_on_a_dirty_workspace(dist_init, workspace_init):
     """Serving calls run on a workspace a different call left behind (another
     layer, row count, routing or kernel): layers of both shapes share
-    it, and each target call at a serving shape (ids and logits routing, so
-    the dense / cluster / entry paths) gives
-    bitwise the same per-route rows, routing weights and shared-expert output
+    it, and each target call at a serving shape (the dense / cluster / entry
+    paths) gives bitwise the same per-route rows, routing weights and
+    shared-expert output
     after random sequences of other calls, eagerly and replayed from a CUDA
     graph, as on its first run."""
     from vllm.config import KernelConfig, VllmConfig, set_current_vllm_config
@@ -889,7 +934,7 @@ def test_low_batch_moe_is_repeatable_on_a_dirty_workspace(dist_init, workspace_i
         layers[top_k] = (mod, num_experts, bias)
     assert layers[6][0].workspace is layers[3][0].workspace
 
-    def make(top_k, m, spread, ids_mode):
+    def make(top_k, m, spread):
         _, num_experts, bias = layers[top_k]
         x = torch.randn(m, MOE_HIDDEN, generator=g, device=DEVICE).bfloat16()
         logits = torch.randn(m, num_experts, generator=g, device=DEVICE)
@@ -899,31 +944,22 @@ def test_low_batch_moe_is_repeatable_on_a_dirty_workspace(dist_init, workspace_i
         else:  # requests of 6 rows routed alike
             req = torch.randn((m + 5) // 6, num_experts, generator=g, device=DEVICE)
             logits = req.repeat_interleave(6, 0)[:m] + 0.5 * logits
-        ids, weights = _routing(logits, bias, top_k)
-        kw = (
-            dict(topk_ids=ids, topk_weights=weights)
-            if ids_mode
-            else dict(router_logits=logits)
-        )
-        return top_k, x, kw
+        return top_k, x, logits
 
-    def run(top_k, x, kw):
-        routed, shared = layers[top_k][0](x, **kw)
-        assert shared is not None
+    def run(top_k, x, logits):
+        routed, shared = layers[top_k][0](x, logits)
         rows = routed.gemm2_permuted[routed.expanded_idx_to_permuted_idx.long()]
         return rows.clone(), routed.expert_weights.clone(), shared.clone()
 
     shapes = [(6, m) for m in (6, 12, 24, 48, 144)] + [(3, m) for m in (5, 10, 40)]
     targets = [
-        make(top_k, m, spread, ids_mode)
-        for (top_k, m), spread, ids_mode in itertools.product(
-            shapes, (False, True), (False, True)
-        )
+        make(top_k, m, spread)
+        for (top_k, m), spread in itertools.product(shapes, (False, True))
     ]
     others = [
-        make(top_k, m, spread, ids_mode)
-        for top_k, m, spread, ids_mode in itertools.product(
-            (6, 3), (1, 4, 9, 16, 17, 30, 96, 140), (False, True), (False, True)
+        make(top_k, m, spread)
+        for top_k, m, spread in itertools.product(
+            (6, 3), (1, 4, 9, 16, 17, 30, 96, 140), (False, True)
         )
     ]
     want = [run(*t) for t in targets]

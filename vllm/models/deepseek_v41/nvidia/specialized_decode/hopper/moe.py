@@ -2,20 +2,20 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Low-batch MoE of the Hopper executor.
 
-`HopperLowBatchMoE` runs one DeepSeek-V4.1 MoE layer's routed experts, and up
-to `SHARED_MAX_ROWS` rows its shared expert, as one persistent CuTe DSL launch
-(`moe_cute.LowBatchMoEKernel`) for up to `MAX_ROWS` rows. It reads the
-layer's stock Humming tensors in place: the routed experts' SM90 W4A8 weights
-(MXFP4 x block-FP8 group-128 activations) and the shared expert's W8A16 linears.
+`HopperLowBatchMoE` runs one DeepSeek-V4.1 MoE layer's routed and shared
+experts as one persistent CuTe DSL launch (`moe_cute.LowBatchMoEKernel`) for
+up to `MAX_ROWS` rows. It reads the layer's stock Humming tensors in place:
+the routed experts' SM90 W4A8 weights (MXFP4 x block-FP8 group-128
+activations) and the shared expert's W8A16 linears.
 
 The kernel routes the step itself from the stock router's FP32 logits
 (sqrt-softplus plus the correction bias, top-k, renormalized, times the routed
-scaling factor; image sentinel tokens with `bias_vl`), or takes the stock
-router's top-k ids and weights on hash-routed layers. It stops before the top-k
-reduction: its output is an `UnfinalizedMoEOutput` (unweighted BF16 rows per
-(token, expert), FP32 routing weights, int32 route-to-row map) that the next
-boundary's fused all-reduce + mHC finalizes (`AllReduceMHC.finalize`), with
-the shared expert's BF16 output (fused, or from the stock shared expert).
+scaling factor; on vision checkpoints, image sentinel tokens with `bias_vl`,
+as the stock router). It stops before the top-k reduction: its output is an
+`UnfinalizedMoEOutput` (unweighted BF16 rows per (token, expert), FP32
+routing weights, int32 route-to-row map) that the next boundary's fused
+all-reduce + mHC finalizes (`AllReduceMHC.finalize`), with the shared
+expert's BF16 output.
 
 The expert count and top-k are the layer's (up to 384 and 6). Every layer
 shares one `MoEWorkspace`: calls are ordered on the forward stream, and each
@@ -33,7 +33,7 @@ from torch import nn
 from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
 
 # Rows of the largest call: at 144 rows the kernel with its fused shared
-# expert ties the stock MoE with the shared expert on the side stream (the
+# expert ties the stock MoE with the shared expert on its side stream (the
 # kernel holds 256).
 MAX_ROWS = 144
 # Calls of up to this many rows give each active expert one chunk of all rows,
@@ -41,9 +41,6 @@ MAX_ROWS = 144
 # memory (CLUSTER_MAX_ROWS).
 DENSE_MAX_ROWS = 16
 CLUSTER_MAX_ROWS = 16
-# The fused shared expert beats or ties the stock one on its side stream up to
-# here.
-SHARED_MAX_ROWS = 144
 _HIDDEN = 5120
 
 
@@ -80,14 +77,14 @@ def _tensor_map(dtype, address: int, dims, strides, box) -> list[int]:
 
 def _layer_maps(
     routed: dict[str, torch.Tensor],
-    shared: tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor] | None,
+    shared: tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
     bias_vl: torch.Tensor | None,
     sentinel_lo: int,
 ) -> torch.Tensor:
     """The kernel's [9, 16] int64 layer blob: TMA tensor maps of the routed
     w13 / s13 / w2 / s2 and shared gate-up / its scales / down / its scales;
-    row 8: (address, bytes) of the four shared tensors, then the gate weight
-    (unused), `bias_vl` addresses and the image sentinel."""
+    row 8: (address, bytes) of the four shared tensors, then (columns 9 and
+    10) the `bias_vl` address and the first image sentinel id."""
     import cuda.bindings.driver as cuda
 
     u64 = cuda.CUtensorMapDataType.CU_TENSOR_MAP_DATA_TYPE_UINT64
@@ -106,18 +103,17 @@ def _layer_maps(
         # s2 [e * 20 + k32][block pair][128 B]
         (u8, s2, [128, 40, e * 20], [128, 5120], [128, 1, 6]),
     ]
-    if shared is not None:
-        gate_up, gate_up_scale, down, down_scale = shared
-        maps += [
-            (u64, gate_up, [128, 9, 2, 320], [1024, 9216, 20480], [128, 1, 2, 8]),
-            (u8, gate_up_scale, [64, 9, 2, 160], [64, 576, 1280], [64, 1, 2, 4]),
-            (u64, down, [128, 80, 40], [1024, 81920], [128, 2, 6]),
-            (u8, down_scale, [5120, 20], [5120], [128, 3]),
-        ]
-        # The shared tensors' (address, bytes) for the kernel's L2 prefetch.
-        for i, t in enumerate(shared):
-            blob[8, 2 * i] = t.data_ptr()
-            blob[8, 2 * i + 1] = t.numel() * t.element_size()
+    gate_up, gate_up_scale, down, down_scale = shared
+    maps += [
+        (u64, gate_up, [128, 9, 2, 320], [1024, 9216, 20480], [128, 1, 2, 8]),
+        (u8, gate_up_scale, [64, 9, 2, 160], [64, 576, 1280], [64, 1, 2, 4]),
+        (u64, down, [128, 80, 40], [1024, 81920], [128, 2, 6]),
+        (u8, down_scale, [5120, 20], [5120], [128, 3]),
+    ]
+    # The shared tensors' (address, bytes) for the kernel's L2 prefetch.
+    for i, t in enumerate(shared):
+        blob[8, 2 * i] = t.data_ptr()
+        blob[8, 2 * i + 1] = t.numel() * t.element_size()
     for i, (dtype, t, dims, strides, box) in enumerate(maps):
         blob[i] = torch.tensor(_tensor_map(dtype, t.data_ptr(), dims, strides, box))
     blob[8, 9] = 0 if bias_vl is None else bias_vl.data_ptr()
@@ -186,9 +182,8 @@ class LaunchConfig(NamedTuple):
 
     experts: int
     top_k: int
-    ids_mode: bool
     dense: bool
-    shared: bool
+    # Image sentinel tokens route with `bias_vl`.
     image: bool
     # Split GEMM1's K over CTA pairs (dense calls only).
     cluster: bool
@@ -198,17 +193,13 @@ class LaunchConfig(NamedTuple):
     gemm2_stages: int
 
 
-def launch_config(
-    experts: int, top_k: int, rows: int, ids_mode: bool, shared: bool, image: bool
-) -> LaunchConfig:
+def launch_config(experts: int, top_k: int, rows: int, image: bool) -> LaunchConfig:
     dense = rows <= DENSE_MAX_ROWS
     cluster = dense and rows <= CLUSTER_MAX_ROWS
     return LaunchConfig(
         experts=experts,
         top_k=top_k,
-        ids_mode=ids_mode,
         dense=dense,
-        shared=shared,
         image=image,
         cluster=cluster,
         shared_chunks=10 if cluster else 20,
@@ -227,9 +218,7 @@ def _compiled(config: LaunchConfig):
 
     kernel = LowBatchMoEKernel(
         ns2=config.gemm2_stages,
-        ids_mode=config.ids_mode,
         dense=config.dense,
-        shared=config.shared,
         image=config.image,
         cluster=config.cluster,
         nchs=config.shared_chunks,
@@ -246,11 +235,10 @@ class HopperLowBatchMoE:
     def __init__(
         self,
         routed: dict[str, torch.Tensor],
-        shared: tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor] | None,
+        shared: tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
         bias: torch.Tensor | None,
         bias_vl: torch.Tensor | None,
         sentinel_lo: int,
-        hash_routed: bool,
         top_k: int,
     ) -> None:
         self.device = routed["w13_weight"].device
@@ -260,7 +248,6 @@ class HopperLowBatchMoE:
         self.blob = _layer_maps(routed, shared, bias_vl, sentinel_lo)
         self.scale13 = routed["w13_weight_scale_2"]
         self.scale2 = routed["w2_weight_scale_2"]
-        self.has_shared = shared is not None
         # Keep the tensors the blob addresses alive with the layer's.
         self._tensors = (routed, shared, bias_vl)
         self.bias = (
@@ -269,7 +256,6 @@ class HopperLowBatchMoE:
             else torch.zeros(self.experts, dtype=torch.float32, device=self.device)
         )
         self.image = bias_vl is not None and sentinel_lo > 0
-        self.hash_routed = hash_routed
         self._grid = (
             2 * torch.cuda.get_device_properties(self.device).multi_processor_count
         )
@@ -278,8 +264,8 @@ class HopperLowBatchMoE:
     def of(cls, ffn: nn.Module) -> "HopperLowBatchMoE | None":
         """The call of a stock `DeepseekV4MoE` on Humming W4A8 experts at TP4
         (a multiple of 32 experts up to 384, top-k up to 6, sqrt-softplus,
-        renormalized, routed scaling 1.5, SwiGLU limit 10), or None for any
-        other layer."""
+        renormalized, routed scaling 1.5, SwiGLU limit 10) with a W8A16 shared
+        expert, routed by score (not by hash), or None for any other layer."""
         from .moe_cute import MAX_EXPERTS, MAX_TOPK, ROUTED_SCALING, SWIGLU_LIMIT
 
         runner = getattr(ffn, "experts", None)
@@ -310,102 +296,70 @@ class HopperLowBatchMoE:
             or ffn.swiglu_limit != SWIGLU_LIMIT
         ):
             return None
-        shared = None
-        mlp = getattr(ffn, "shared_experts", None)
-        if mlp is not None:
-            tensors = (
-                mlp.gate_up_proj.weight.view(torch.int32),
-                mlp.gate_up_proj.weight_scale.view(torch.uint8),
-                mlp.down_proj.weight.view(torch.int32),
-                mlp.down_proj.weight_scale.view(torch.uint8),
-            )
-            shared_shapes = ((320, 5120), (160, 1280), (40, 20480), (20, 5120))
-            if all(tuple(t.shape) == s for t, s in zip(tensors, shared_shapes)):
-                shared = tensors
         gate = ffn.gate
+        if getattr(gate, "tid2eid", None) is not None:
+            return None
+        mlp = getattr(ffn, "shared_experts", None)
+        if mlp is None:
+            return None
+        shared = (
+            mlp.gate_up_proj.weight.view(torch.int32),
+            mlp.gate_up_proj.weight_scale.view(torch.uint8),
+            mlp.down_proj.weight.view(torch.int32),
+            mlp.down_proj.weight_scale.view(torch.uint8),
+        )
+        shared_shapes = ((320, 5120), (160, 1280), (40, 20480), (20, 5120))
+        if any(tuple(t.shape) != s for t, s in zip(shared, shared_shapes)):
+            return None
         return cls(
             {name: params[name].data for name in shapes},
             shared,
             getattr(gate, "e_score_correction_bias", None),
             getattr(gate, "bias_vl", None),
             int(getattr(ffn, "image_sentinel_lo", 0)),
-            getattr(gate, "tid2eid", None) is not None,
             top_k,
         )
 
     def serves(self, rows: int) -> bool:
         return 0 < rows <= MAX_ROWS
 
-    def fuses_shared(self, rows: int) -> bool:
-        return self.has_shared and rows <= SHARED_MAX_ROWS
-
     def warm_up(self, rows: list[int]) -> None:
         """Compile the variants calls of `rows` rows launch."""
         for m in rows:
             if self.serves(m):
-                _compiled(self._config(m, self.hash_routed, self.image))
-
-    def _config(self, rows: int, ids_mode: bool, image: bool) -> LaunchConfig:
-        return launch_config(
-            self.experts,
-            self.top_k,
-            rows,
-            ids_mode,
-            self.fuses_shared(rows),
-            image,
-        )
+                _compiled(launch_config(self.experts, self.top_k, m, self.image))
 
     def __call__(
         self,
         x: torch.Tensor,
-        router_logits: torch.Tensor | None = None,
-        topk_ids: torch.Tensor | None = None,
-        topk_weights: torch.Tensor | None = None,
+        router_logits: torch.Tensor,
         input_ids: torch.Tensor | None = None,
-    ) -> tuple[UnfinalizedMoEOutput, torch.Tensor | None]:
+    ) -> tuple[UnfinalizedMoEOutput, torch.Tensor]:
         """The unfinalized routed output of the BF16 MoE input `x` [rows,
-        5120], routed from FP32 `router_logits` [rows, experts] or by given
-        `topk_ids` (int32 [rows, top_k]) and `topk_weights` (FP32 [rows,
-        top_k], renormalized and times the routed scaling factor), as on a
-        hash-routed layer; and the fused shared expert's
-        output, or None above `SHARED_MAX_ROWS` rows. Both are views of the
-        workspace."""
+        5120], routed from FP32 `router_logits` [rows, experts] (and, on an
+        image-routed layer, the step's `input_ids`), and the shared expert's
+        output. Both are views of the workspace."""
         from cutlass import Int32, Int64
 
         from vllm.models.common.ops.moe_tail_fusion.primitives import current_cu_stream
 
         rows = x.shape[0]
         assert self.serves(rows) and x.is_contiguous() and x.dtype == torch.bfloat16
+        assert router_logits.shape == (rows, self.experts)
         ws = self.workspace
-        shared = self.fuses_shared(rows)
 
         def address(t: torch.Tensor) -> Int64:
             return Int64(t.data_ptr())
 
-        ids_mode = topk_ids is not None
-        assert ids_mode or not self.hash_routed
-        image = self.image and not ids_mode and input_ids is not None
-        if ids_mode:
-            assert topk_ids is not None and topk_weights is not None
-            ids = topk_ids.to(torch.int32).contiguous()
-            weights = topk_weights.to(torch.float32).contiguous()
-            logits = bias = x
-        else:
-            assert router_logits is not None and router_logits.shape == (
-                rows,
-                self.experts,
-            )
-            size = rows * self.top_k
-            ids = ws.ids[:size].view(rows, self.top_k)
-            weights = ws.wts[:size].view(rows, self.top_k)
-            logits, bias = router_logits.float().contiguous(), self.bias
+        weights = ws.wts[: rows * self.top_k].view(rows, self.top_k)
+        logits = router_logits.float().contiguous()
         # Image routing reads the token ids where the FP8 shared activations
         # would go (the W8A16 shared expert converts its own).
         xgs = ws.xgs
-        if image:
-            assert input_ids is not None
+        if self.image:
+            assert input_ids is not None and input_ids.shape == (rows,)
             xgs = input_ids.to(torch.int32).contiguous()
-        _compiled(self._config(rows, ids_mode, image))(
+        _compiled(launch_config(self.experts, self.top_k, rows, self.image))(
             address(self.blob),
             address(self.scale13),
             address(self.scale2),
@@ -418,10 +372,10 @@ class HopperLowBatchMoE:
             address(ws.cnt),
             address(ws.sync),
             address(x),
-            address(ids),
+            address(ws.ids),
             address(weights),
             address(logits),
-            address(bias),
+            address(self.bias),
             address(ws.rows),
             address(ws.out),
             address(xgs),
@@ -435,7 +389,7 @@ class HopperLowBatchMoE:
         )
         routed = UnfinalizedMoEOutput(
             gemm2_permuted=ws.rows,
-            expert_weights=weights[:rows],
+            expert_weights=weights,
             expanded_idx_to_permuted_idx=ws.route_to_row(rows, self.top_k),
         )
-        return routed, ws.shared[:rows] if shared else None
+        return routed, ws.shared[:rows]
