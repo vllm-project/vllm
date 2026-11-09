@@ -35,6 +35,12 @@ from typing import Any
 import torch
 from packaging import version
 
+from vllm.model_executor.warmup.jit_warmup import WarmupChoices
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    DispatchSpec,
+    TritonWarmupTensor,
+    triton_kernel_dispatcher_with_warmup,
+)
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
@@ -98,6 +104,7 @@ def _fwd_kernel_stage1(
     logit_cap: tl.constexpr,
     Lk: tl.constexpr,
     Lv: tl.constexpr,
+    SLIDING_WINDOW: tl.constexpr = 0,
 ):
     cur_batch = tl.program_id(0)
     cur_head = tl.program_id(1)
@@ -115,8 +122,12 @@ def _fwd_kernel_stage1(
     off_q = cur_batch * stride_qbs + cur_head * stride_qh + offs_d
     q = tl.load(Q + off_q, mask=mask_d, other=0.0)
 
-    kv_len_per_split = tl.cdiv(cur_batch_seq_len, NUM_KV_SPLITS)
-    split_kv_start = kv_len_per_split * split_kv_id
+    # A window of SLIDING_WINDOW keys ends at the sequence end.
+    window_start = 0
+    if SLIDING_WINDOW > 0:
+        window_start = tl.maximum(cur_batch_seq_len - SLIDING_WINDOW, 0)
+    kv_len_per_split = tl.cdiv(cur_batch_seq_len - window_start, NUM_KV_SPLITS)
+    split_kv_start = window_start + kv_len_per_split * split_kv_id
     split_kv_end = tl.minimum(split_kv_start + kv_len_per_split, cur_batch_seq_len)
 
     e_max = -float("inf")
@@ -221,6 +232,7 @@ def _decode_att_m_fwd(
     logit_cap,
     k_scale,
     v_scale,
+    sliding_window=0,
 ):
     BLOCK = 64 if not is_hip_ else 8
 
@@ -273,6 +285,7 @@ def _decode_att_m_fwd(
         num_stages=2,
         Lk=Lk,
         Lv=Lv,
+        SLIDING_WINDOW=sliding_window,
     )
 
 
@@ -312,6 +325,7 @@ def _fwd_grouped_kernel_stage1(
     Lk: tl.constexpr,
     Lv: tl.constexpr,
     IS_MLA: tl.constexpr = False,
+    SLIDING_WINDOW: tl.constexpr = 0,
 ):
     cur_batch = tl.program_id(0)
     cur_head_id = tl.program_id(1)
@@ -351,8 +365,12 @@ def _fwd_grouped_kernel_stage1(
             cache_modifier=".ca",
         )
 
-    kv_len_per_split = tl.cdiv(cur_batch_seq_len, NUM_KV_SPLITS)
-    split_kv_start = kv_len_per_split * split_kv_id
+    # A window of SLIDING_WINDOW keys ends at the sequence end.
+    window_start = 0
+    if SLIDING_WINDOW > 0:
+        window_start = tl.maximum(cur_batch_seq_len - SLIDING_WINDOW, 0)
+    kv_len_per_split = tl.cdiv(cur_batch_seq_len - window_start, NUM_KV_SPLITS)
+    split_kv_start = window_start + kv_len_per_split * split_kv_id
     split_kv_end = tl.minimum(split_kv_start + kv_len_per_split, cur_batch_seq_len)
 
     e_max = tl.zeros([BLOCK_H], dtype=tl.float32) - float("inf")
@@ -468,6 +486,55 @@ def _fwd_grouped_kernel_stage1(
         )
 
 
+def _decode_grouped_att_m_fwd_warmup_inputs(
+    *,
+    q_dtype: torch.dtype,
+    kv_dtype: torch.dtype,
+    num_heads: int,
+    head_size: int,
+    kv_lora_rank: int,
+    page_size: int,
+    kv_block_stride: int,
+    kv_token_stride: int,
+    num_kv_splits: tuple[int, ...],
+    sliding_window: int = 0,
+) -> dict[str, Any]:
+    # TritonMLAImpl.forward_mqa: one latent KV head whose cache row holds the
+    # latent (Lv = kv_lora_rank) then the RoPE part (Lk = head_size). K and V
+    # view the same [num_blocks, page_size, 1, Lk] cache. The block-table row
+    # width depends on the runner's kernel block size split, which the layer
+    # cannot see, so warm both of its integer classes (generic, multiple of 16).
+    splits: Any = WarmupChoices(*num_kv_splits)
+    block_table_width: Any = WarmupChoices(2, 16)
+    kv_strides = (kv_block_stride, kv_token_stride, head_size, 1)
+    return dict(
+        q=TritonWarmupTensor(q_dtype, shape=(1, num_heads, head_size)),
+        k_buffer=TritonWarmupTensor(
+            kv_dtype, shape=(1, page_size, 1, head_size), strides=kv_strides
+        ),
+        v_buffer=TritonWarmupTensor(
+            kv_dtype, shape=(1, page_size, 1, kv_lora_rank), strides=kv_strides
+        ),
+        att_out=TritonWarmupTensor(
+            torch.float32, shape=(1, num_heads, splits, kv_lora_rank + 1)
+        ),
+        Req_to_tokens=TritonWarmupTensor(torch.int32, shape=(1, block_table_width)),
+        B_Seqlen=TritonWarmupTensor(torch.int32),
+        num_kv_splits=splits,
+        sm_scale=1.0,
+        page_size=page_size,
+        logit_cap=0.0,
+        k_scale=TritonWarmupTensor(torch.float32),
+        v_scale=TritonWarmupTensor(torch.float32),
+        is_mla=True,
+        sliding_window=sliding_window,
+    )
+
+
+@triton_kernel_dispatcher_with_warmup(
+    kernel=_fwd_grouped_kernel_stage1,
+    warmup_inputs=_decode_grouped_att_m_fwd_warmup_inputs,
+)
 def _decode_grouped_att_m_fwd(
     q,
     k_buffer,
@@ -482,7 +549,8 @@ def _decode_grouped_att_m_fwd(
     k_scale,
     v_scale,
     is_mla=False,
-):
+    sliding_window=0,
+) -> DispatchSpec:
     # with is_mla there is only a single c_kv in smem.
     # could increase BLOCK or num_stages.
     Lk = k_buffer.shape[-1]
@@ -532,28 +600,29 @@ def _decode_grouped_att_m_fwd(
         # exceeds 101376 bytes limit
         num_stages = 1
 
-    _fwd_grouped_kernel_stage1[grid](
-        q,
-        k_buffer,
-        v_buffer,
-        sm_scale,
-        Req_to_tokens,
-        B_Seqlen,
-        att_out,
-        Req_to_tokens.stride(0),
-        q.stride(0),
-        q.stride(1),
-        _page_stride(k_buffer, page_size),
-        k_buffer.stride(-3),  # Assume (..., PAGE_SIZE, NUM_HEADS, HEAD_DIM)
-        k_buffer.stride(-2),  # Assume (..., PAGE_SIZE, NUM_HEADS, HEAD_DIM)
-        _page_stride(v_buffer, page_size),
-        v_buffer.stride(-3),  # Assume (..., PAGE_SIZE, NUM_HEADS, HEAD_DIM)
-        v_buffer.stride(-2),  # Assume (..., PAGE_SIZE, NUM_HEADS, HEAD_DIM)
-        att_out.stride(0),
-        att_out.stride(1),
-        att_out.stride(2),
-        k_scale,
-        v_scale,
+    return grid, dict(
+        Q=q,
+        K_Buffer=k_buffer,
+        V_Buffer=v_buffer,
+        sm_scale=sm_scale,
+        Req_to_tokens=Req_to_tokens,
+        B_Seqlen=B_Seqlen,
+        Att_Out=att_out,
+        stride_req_to_tokens_b=Req_to_tokens.stride(0),
+        stride_qbs=q.stride(0),
+        stride_qh=q.stride(1),
+        stride_buf_kpbs=_page_stride(k_buffer, page_size),
+        # Assume (..., PAGE_SIZE, NUM_HEADS, HEAD_DIM)
+        stride_buf_kbs=k_buffer.stride(-3),
+        stride_buf_kh=k_buffer.stride(-2),
+        stride_buf_vpbs=_page_stride(v_buffer, page_size),
+        stride_buf_vbs=v_buffer.stride(-3),
+        stride_buf_vh=v_buffer.stride(-2),
+        stride_mid_ob=att_out.stride(0),
+        stride_mid_oh=att_out.stride(1),
+        stride_mid_os=att_out.stride(2),
+        k_scale=k_scale,
+        v_scale=v_scale,
         kv_group_num=kv_group_num,
         q_head_num=head_num,
         BLOCK_DMODEL=BLOCK_DMODEL,
@@ -569,6 +638,7 @@ def _decode_grouped_att_m_fwd(
         Lk=Lk,
         Lv=Lv,
         IS_MLA=is_mla,
+        SLIDING_WINDOW=sliding_window,
         **extra_kargs,
     )
 
@@ -589,6 +659,7 @@ def _fwd_kernel_stage2(
     BLOCK_DV: tl.constexpr,
     Lv: tl.constexpr,
     OUTPUT_FP16: tl.constexpr = 0,
+    SLIDING_WINDOW: tl.constexpr = 0,
 ):
     cur_batch = tl.program_id(0)
     cur_head = tl.program_id(1)
@@ -605,9 +676,12 @@ def _fwd_kernel_stage2(
     offs_v = cur_batch.to(tl.int64) * stride_mid_ob + cur_head * stride_mid_oh + offs_d
     offs_logic = cur_batch.to(tl.int64) * stride_mid_ob + cur_head * stride_mid_oh + Lv
 
+    window_start = 0
+    if SLIDING_WINDOW > 0:
+        window_start = tl.maximum(cur_batch_seq_len - SLIDING_WINDOW, 0)
     for split_kv_id in range(0, NUM_KV_SPLITS):
-        kv_len_per_split = tl.cdiv(cur_batch_seq_len, NUM_KV_SPLITS)
-        split_kv_start = kv_len_per_split * split_kv_id
+        kv_len_per_split = tl.cdiv(cur_batch_seq_len - window_start, NUM_KV_SPLITS)
+        split_kv_start = window_start + kv_len_per_split * split_kv_id
         split_kv_end = tl.minimum(split_kv_start + kv_len_per_split, cur_batch_seq_len)
 
         if split_kv_end > split_kv_start:
@@ -640,6 +714,35 @@ def _fwd_kernel_stage2(
     )
 
 
+def _decode_softmax_reducev_fwd_warmup_inputs(
+    *,
+    dtype: torch.dtype,
+    num_heads: int,
+    kv_lora_rank: int,
+    num_kv_splits: tuple[int, ...],
+    sliding_window: int = 0,
+) -> dict[str, Any]:
+    # TritonMLAImpl.forward_mqa: [B, H, num_kv_splits, Lv + 1] scratch, and a
+    # [B, H, Lv] output and [B, H] LSE in the query dtype.
+    splits: Any = WarmupChoices(*num_kv_splits)
+    return dict(
+        logits=TritonWarmupTensor(
+            torch.float32, shape=(1, num_heads, splits, kv_lora_rank + 1)
+        ),
+        q=TritonWarmupTensor(dtype, shape=(1, num_heads, 1)),
+        o=TritonWarmupTensor(dtype, shape=(1, num_heads, kv_lora_rank)),
+        lse=TritonWarmupTensor(dtype, shape=(1, num_heads)),
+        v_buffer=TritonWarmupTensor(dtype, shape=(1, 1, 1, kv_lora_rank)),
+        b_seq_len=TritonWarmupTensor(torch.int32),
+        num_kv_splits=splits,
+        sliding_window=sliding_window,
+    )
+
+
+@triton_kernel_dispatcher_with_warmup(
+    kernel=_fwd_kernel_stage2,
+    warmup_inputs=_decode_softmax_reducev_fwd_warmup_inputs,
+)
 def _decode_softmax_reducev_fwd(
     logits,
     q,
@@ -648,7 +751,8 @@ def _decode_softmax_reducev_fwd(
     v_buffer,
     b_seq_len,
     num_kv_splits,
-):
+    sliding_window=0,
+) -> DispatchSpec:
     batch, head_num = q.shape[0], q.shape[1]
     Lv = v_buffer.shape[-1]
     BLOCK_DV = triton.next_power_of_2(Lv)
@@ -662,20 +766,21 @@ def _decode_softmax_reducev_fwd(
         extra_kargs = {"waves_per_eu": 4, "matrix_instr_nonkdim": 16, "kpack": 2}
 
     grid = (batch, head_num)
-    _fwd_kernel_stage2[grid](
-        logits,
-        o,
-        lse,
-        b_seq_len,
-        logits.stride(0),
-        logits.stride(1),
-        logits.stride(2),
-        o.stride(0),
-        o.stride(1),
-        lse.stride(0),
+    return grid, dict(
+        Mid_O=logits,
+        o=o,
+        lse=lse,
+        B_Seqlen=b_seq_len,
+        stride_mid_ob=logits.stride(0),
+        stride_mid_oh=logits.stride(1),
+        stride_mid_os=logits.stride(2),
+        stride_obs=o.stride(0),
+        stride_oh=o.stride(1),
+        stride_lse_bs=lse.stride(0),
         NUM_KV_SPLITS=NUM_KV_SPLITS,
         BLOCK_DV=BLOCK_DV,
         Lv=Lv,
+        SLIDING_WINDOW=sliding_window,
         num_warps=4,
         num_stages=2,
         **extra_kargs,
@@ -697,6 +802,7 @@ def decode_attention_fwd_normal(
     logit_cap=0.0,
     k_scale=None,
     v_scale=None,
+    sliding_window=0,
 ):
     _decode_att_m_fwd(
         q,
@@ -711,9 +817,10 @@ def decode_attention_fwd_normal(
         logit_cap,
         k_scale,
         v_scale,
+        sliding_window=sliding_window,
     )
     _decode_softmax_reducev_fwd(
-        attn_logits, q, o, lse, v_buffer, b_seq_len, num_kv_splits
+        attn_logits, q, o, lse, v_buffer, b_seq_len, num_kv_splits, sliding_window
     )
 
 
@@ -733,6 +840,7 @@ def decode_attention_fwd_grouped(
     k_scale=None,
     v_scale=None,
     is_mla=False,
+    sliding_window=0,
 ):
     _decode_grouped_att_m_fwd(
         q,
@@ -748,9 +856,10 @@ def decode_attention_fwd_grouped(
         k_scale,
         v_scale,
         is_mla=is_mla,
+        sliding_window=sliding_window,
     )
     _decode_softmax_reducev_fwd(
-        attn_logits, q, o, lse, v_buffer, b_seq_len, num_kv_splits
+        attn_logits, q, o, lse, v_buffer, b_seq_len, num_kv_splits, sliding_window
     )
 
 
@@ -770,8 +879,11 @@ def decode_attention_fwd(
     k_scale=None,
     v_scale=None,
     is_mla=False,
+    sliding_window: int | None = None,
 ):
+    """`sliding_window` limits each row to its last `sliding_window` keys."""
     assert num_kv_splits == attn_logits.shape[2]
+    sliding_window = sliding_window or 0
 
     if k_scale is None:
         k_scale = torch.tensor(1.0, dtype=torch.float32, device=q.device)
@@ -797,6 +909,7 @@ def decode_attention_fwd(
             logit_cap,
             k_scale,
             v_scale,
+            sliding_window=sliding_window,
         )
     else:
         # GQA/MQA/MLA
@@ -816,6 +929,7 @@ def decode_attention_fwd(
             k_scale,
             v_scale,
             is_mla=is_mla,
+            sliding_window=sliding_window,
         )
 
 
@@ -1251,16 +1365,15 @@ def _fwd_verify_kernel_stage2(
     )
 
 
-VERIFY_DEFAULT_CONFIG: dict[str, Any] = dict(
-    BLOCK_H=32,
-    BLOCK_N=16,
+_VERIFY_BASE_CONFIG: dict[str, Any] = dict(
+    BLOCK_N=32,
     num_warps=4,
     num_stages=1,
     waves_per_eu=1,
     matrix_instr_nonkdim=16,
     kpack=2,
     SPLIT_ALIGN=16,
-    MIN_SPLIT_LEN=256,
+    MIN_SPLIT_LEN=128,
     QSPLIT=False,
     S2_BLOCK_S=16,
     s2_num_warps=4,
@@ -1277,24 +1390,24 @@ def verify_num_kv_splits(
     qlen: int,
     num_heads: int,
     sm_count: int,
-    block_h: int = VERIFY_DEFAULT_CONFIG["BLOCK_H"],
-    occupancy: float = 1.0,
-    min_work_per_split: int = 64,
     max_splits: int = 8,
 ) -> int:
     """Static upper bound on KV splits (safe to bake into a cudagraph).
 
     The kernel splits each request's own length into
     max(cdiv(L, splits), MIN_SPLIT_LEN) chunks, so this only caps the split
-    count. ``occupancy`` is the number of resident stage-1 programs per CU.
-    If one split of every request fits in a single dispatch round, use as many
-    splits as fit in that round; otherwise pick n <= max_splits minimising
-    rounds(n) / n (the idle tail of the last round), preferring fewer splits
-    within 5% of the best.
+    count. The config's `occupancy` is the number of resident stage-1
+    programs per CU. If one split of every request fits in a single dispatch
+    round, use as many splits as fit in that round; otherwise pick
+    n <= max_splits minimising rounds(n) / n (the idle tail of the last round),
+    preferring fewer splits within 5% of the best.
     """
-    programs_per_split = max(1, batch) * verify_row_blocks(qlen, num_heads, block_h)
-    ideal = triton.cdiv(max(1, max_seq_len), max(1, min_work_per_split))
-    slots = max(1, int(occupancy * sm_count))
+    cfg = select_verify_config(batch, qlen, num_heads)
+    programs_per_split = max(1, batch) * verify_row_blocks(
+        qlen, num_heads, cfg["BLOCK_H"]
+    )
+    ideal = triton.cdiv(max(1, max_seq_len), cfg["MIN_SPLIT_LEN"])
+    slots = max(1, int(cfg["occupancy"] * sm_count))
     if programs_per_split <= slots:
         n = slots // programs_per_split
     else:
@@ -1450,20 +1563,11 @@ def decode_attention_fwd_verify(
     )
 
 
-_VERIFY_SMALL_CONFIG: dict[str, Any] = dict(
-    BLOCK_H=32, BLOCK_N=32, num_warps=4, kpack=1, MIN_SPLIT_LEN=128, occupancy=2.0
-)
+_VERIFY_SMALL_CONFIG: dict[str, Any] = dict(BLOCK_H=32, kpack=1, occupancy=2.0)
 # 64-row tiles, Q and the QK operand split in two 256-wide halves (QSPLIT,
 # which also enables the K/V prefetch), 32 keys per step on 4 warps. 8 warps
 # cap VGPRs at 256 and spill or idle MFMA rows here.
-_VERIFY_LARGE_CONFIG: dict[str, Any] = dict(
-    BLOCK_H=64,
-    BLOCK_N=32,
-    num_warps=4,
-    QSPLIT=True,
-    MIN_SPLIT_LEN=128,
-    occupancy=1.0,
-)
+_VERIFY_LARGE_CONFIG: dict[str, Any] = dict(BLOCK_H=64, QSPLIT=True, occupancy=1.0)
 
 
 _VERIFY_SMALL_MAX_ROWS = 640
@@ -1476,7 +1580,7 @@ def select_verify_config(batch: int, qlen: int, num_heads: int) -> dict[str, Any
     GPU. Otherwise 64-row tiles (Q split in two 256-wide halves, next K/V
     tile prefetched) halve the KV re-reads per request.
     """
-    cfg = dict(VERIFY_DEFAULT_CONFIG)
+    cfg = dict(_VERIFY_BASE_CONFIG)
     if batch * qlen * num_heads <= _VERIFY_SMALL_MAX_ROWS:
         cfg.update(_VERIFY_SMALL_CONFIG)
     else:
@@ -1485,7 +1589,7 @@ def select_verify_config(batch: int, qlen: int, num_heads: int) -> dict[str, Any
 
 
 def _storage_view(t, shape):
-    """Contiguous ``shape`` over ``t``'s storage, or a new tensor if too small."""
+    """Contiguous `shape` over `t`'s storage, or a new tensor if too small."""
     if math.prod(shape) > t.untyped_storage().nbytes() // t.element_size():
         return t.new_empty(shape)
     strides = [1]

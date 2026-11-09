@@ -2,6 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import logging
+import os
+import subprocess
+import sys
 from argparse import Namespace
 
 import pytest
@@ -75,6 +78,26 @@ def test_disabled_scale_out_routes_are_logged_at_info(caplog):
         for record in caplog.records
         if "--enable-scale-out" in record.message
     ] == [logging.INFO]
+
+
+@pytest.mark.parametrize("dev_mode", ["0", "1"])
+def test_enable_scale_out_defaults_to_server_dev_mode(dev_mode):
+    code = (
+        "from vllm.entrypoints.common.cli_args import make_arg_parser\n"
+        "from vllm.utils.argparse_utils import FlexibleArgumentParser\n"
+        "parser = make_arg_parser(FlexibleArgumentParser())\n"
+        "print(parser.parse_args(['model']).enable_scale_out,"
+        " parser.parse_args(['model', '--disable-scale-out']).enable_scale_out)\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        env=os.environ | {"VLLM_SERVER_DEV_MODE": dev_mode},
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    assert result.stdout.split()[-2:] == [str(dev_mode == "1"), "False"]
 
 
 @pytest.mark.parametrize("tokens_only", [False, True])

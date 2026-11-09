@@ -13,7 +13,6 @@ from utils import (
     _extract_step_logprobs,
     _prompt_with_tokens,
     _random_prompt,
-    skip_if_not_cuda,
     skip_if_not_cuda_alike,
     skip_unsupported,
 )
@@ -22,6 +21,7 @@ import vllm.envs as envs
 from vllm import LLM, SamplingParams
 from vllm.inputs import TokensPrompt
 from vllm.platforms import current_platform
+from vllm.transformers_utils.config import get_config
 
 
 @skip_unsupported
@@ -118,7 +118,7 @@ def test_v1_generation_is_deterministic_across_batch_sizes_with_needle(
 
         mismatches = 0
 
-        for trial in range(num_trials):
+        for _ in range(num_trials):
             # Create a batch of size `max_batch_size` and insert the needle at
             # a random index
             prompts: list[str] = []
@@ -716,8 +716,10 @@ def test_logprobs_without_batch_invariance_should_fail(
         pytest.fail(fail_msg)
 
 
-@skip_if_not_cuda
-@pytest.mark.parametrize("backend", ["FLASH_ATTN"])
+@skip_if_not_cuda_alike
+@pytest.mark.parametrize(
+    "backend", ["TRITON_ATTN"] if current_platform.is_rocm() else ["FLASH_ATTN"]
+)
 def test_decode_logprobs_match_prefill_logprobs(
     backend,
 ):
@@ -1009,6 +1011,63 @@ def test_online_fp8_moe_logprobs_bitwise_bs1_vs_bsN():
         assert torch.equal(lp1, lpN), (
             f"Prompt {i}: logprobs are not bitwise equal between BS=1 and "
             f"BS={len(prompts)}; max abs diff {(lp1 - lpN).abs().max():.3e}"
+        )
+
+
+@pytest.mark.skipif(
+    not (current_platform.is_cuda() and current_platform.is_device_capability(90)),
+    reason="FA3 drops covered sliding windows only on CUDA Hopper",
+)
+@pytest.mark.timeout(600)
+def test_sliding_window_logprobs_bitwise_alone_vs_mixed_batch():
+    """A sliding-window request must decode the same bits alone (FULL CUDA
+    graphs) and next to other requests' prefill chunks (eager), see #65587."""
+    model = "google/gemma-2-2b-it"
+    window = get_config(model, trust_remote_code=False).sliding_window
+    max_model_len = 2 * window
+    max_tokens = 16
+    rng = random.Random(int(os.getenv("VLLM_TEST_SEED", "12345")))
+
+    def prompt(num_tokens: int) -> TokensPrompt:
+        ids = [rng.randint(1000, 30000) for _ in range(num_tokens)]
+        return TokensPrompt(prompt_token_ids=ids)
+
+    # Every sequence spans several KV tiles but stays inside the window, so
+    # mixed steps see max_seqlen_k < window while FULL graphs see max_model_len.
+    targets = [prompt(rng.randint(256, 512)) for _ in range(4)]
+    fillers = [prompt(rng.randint(window // 2, window - max_tokens)) for _ in range(4)]
+
+    # Random token ids make Gemma emit <end_of_turn> within a few steps.
+    sp = SamplingParams(
+        temperature=0.0, max_tokens=max_tokens, logprobs=1, ignore_eos=True
+    )
+    llm = LLM(
+        model=model,
+        attention_config={"backend": "FLASH_ATTN"},
+        compilation_config={"cudagraph_mode": "FULL_AND_PIECEWISE"},
+        max_model_len=max_model_len,
+        max_num_batched_tokens=256,
+        max_num_seqs=len(targets) + len(fillers),
+        gpu_memory_utilization=0.4,
+        enable_prefix_caching=False,
+    )
+    try:
+        alone = [
+            _extract_step_logprobs(llm.generate([p], sp, use_tqdm=False)[0])
+            for p in targets
+        ]
+        outputs = llm.generate(targets + fillers, sp, use_tqdm=False)
+        batched = [_extract_step_logprobs(o) for o in outputs[: len(targets)]]
+    finally:
+        with contextlib.suppress(Exception):
+            llm.llm_engine.engine_core.shutdown()
+
+    for i, ((lp1, tok1), (lpN, tokN)) in enumerate(zip(alone, batched)):
+        assert len(tok1) == max_tokens and len(tokN) == max_tokens
+        assert tok1 == tokN, f"Prompt {i}: tokens differ: {tok1} vs {tokN}"
+        assert torch.equal(lp1, lpN), (
+            f"Prompt {i}: logprobs differ alone vs batched; "
+            f"max abs diff {(lp1 - lpN).abs().max():.3e}"
         )
 
 

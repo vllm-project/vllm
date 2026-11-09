@@ -14,7 +14,7 @@ from vllm.v1.outputs import ModelRunnerOutput
 
 
 def _model_output(kv_connector_output: KVConnectorOutput | None) -> ModelRunnerOutput:
-    output = ModelRunnerOutput(req_ids=[], req_id_to_index={})
+    output = ModelRunnerOutput(req_ids=[])
     output.kv_connector_output = kv_connector_output
     return output
 
