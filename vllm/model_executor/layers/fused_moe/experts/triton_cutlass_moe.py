@@ -17,14 +17,22 @@ from vllm.platforms import current_platform
 
 
 class TritonOrCutlassExperts(FallbackExperts):
-    """Cutlass with fallback to Triton for low latency shapes on SM100."""
+    """Cutlass with fallback to Triton for low latency shapes on SM100/SM120."""
 
     def __init__(
         self,
         moe_config: FusedMoEConfig,
         quant_config: FusedMoEQuantConfig,
     ):
-        self.is_sm100 = current_platform.has_device_capability(100)
+        # Batches of up to this many tokens run on Triton. On SM120 the MoE
+        # GEMMs are bandwidth-bound well past decode sizes and Triton is
+        # faster there; CUTLASS wins from ~1.5k tokens.
+        if current_platform.is_device_capability_family(120):
+            self.triton_max_tokens = 1024
+        elif current_platform.has_device_capability(100):
+            self.triton_max_tokens = 8
+        else:
+            self.triton_max_tokens = 0
         super().__init__(
             experts=CutlassExpertsFp8(moe_config, quant_config),
             fallback_experts=TritonExperts(moe_config, quant_config),
@@ -48,8 +56,7 @@ class TritonOrCutlassExperts(FallbackExperts):
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         activation: MoEActivation,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
-        # Small batch fallback for sm100.
-        if self.is_sm100 and M <= 8:
+        if self.triton_max_tokens >= M:
             return self.fallback_experts.workspace_shapes(
                 M,
                 N,
@@ -78,8 +85,7 @@ class TritonOrCutlassExperts(FallbackExperts):
         w1: torch.Tensor,
         w2: torch.Tensor,
     ) -> mk.FusedMoEExpertsModular:
-        # Small batch fallback for sm100.
-        if self.is_sm100 and hidden_states.shape[0] <= 8:
+        if hidden_states.shape[0] <= self.triton_max_tokens:
             return self.fallback_experts
         else:
             return self.experts
