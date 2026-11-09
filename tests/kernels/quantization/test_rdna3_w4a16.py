@@ -3,12 +3,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Correctness tests for the ROCm RDNA3 W4A16 GPTQ kernel (gfx1100).
 
-Exercises ``RDNA3W4A16LinearKernel`` end-to-end: it builds a layer with
-GPTQ-format checkpoint parameters, runs ``process_weights_after_loading``
-(weight shuffle + zero-point synthesis), then ``apply_weights``, and compares
+Exercises `RDNA3W4A16LinearKernel` end-to-end: it builds a layer with
+GPTQ-format checkpoint parameters, runs `process_weights_after_loading`
+(weight shuffle + zero-point synthesis), then `apply_weights`, and compares
 the result against an fp32 reference dequant-and-matmul.
 
-The kernel is exposed via ``torch.ops._rocm_C.gptq_gemm_rdna3`` and is only
+The kernel is exposed via `torch.ops._rocm_C.gptq_gemm_rdna3` and is only
 built for gfx11; tests are skipped elsewhere.
 
 Run `pytest tests/kernels/quantization/test_rdna3_w4a16.py`.
@@ -79,7 +79,7 @@ def _reference(
     group_size: G.
 
     The kernel applies the GPTQv1 "+1" zero-point quirk, so the effective
-    zero is ``stored_zero + 1`` (symmetric path: 7 + 1 == bias == 8).
+    zero is `stored_zero + 1` (symmetric path: 7 + 1 == bias == 8).
     """
     K, N = q_int4_kn.shape
     s_full = scales_gn.repeat_interleave(group_size, dim=0).to(torch.float32)  # [K,N]

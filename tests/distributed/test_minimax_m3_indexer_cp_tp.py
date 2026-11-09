@@ -27,7 +27,7 @@ from ..utils import (
     multi_process_parallel,
 )
 
-# MiniMax-M3's sparse_attention_config.
+# MiniMax-M3's index_* config fields.
 TOTAL_HEADS = 4
 HEAD_DIM = 128
 BLOCK = 128

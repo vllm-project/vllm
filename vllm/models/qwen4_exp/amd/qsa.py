@@ -117,7 +117,7 @@ _QSA_CACHE_DTYPES: tuple[CacheDType, ...] = (
 class Qwen4ExpQSABackend(AttentionBackend):
     """FullAttentionSpec backend used by the merged QSA owner.
 
-    With an Octave ``kv_cache_dtype`` the main K/V cache holds one packed
+    With an Octave `kv_cache_dtype` the main K/V cache holds one packed
     Octave slot per (token, KV head) and sparse attention runs the Octave
     sparse decode kernel over the selected positions.
     """
