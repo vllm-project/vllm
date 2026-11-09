@@ -770,6 +770,54 @@ def test_default_local_buffer_size_matches_pr40900():
     assert mooncake_store.DEFAULT_LOCAL_BUFFER_SIZE == 4 * 1024**3
 
 
+@pytest.mark.parametrize(
+    ("store_config", "physical_gpu", "expected"),
+    [
+        ({"device_name": "mlx5_0,mlx5_1"}, None, "mlx5_0,mlx5_1"),
+        ({"device_name_per_gpu": ["rdma0", "rdma1,rdma2"]}, 1, "rdma1,rdma2"),
+        ({"device_name_per_gpu": ["rdma0", "rdma1"]}, 2, ValueError),
+    ],
+)
+def test_setup_passes_the_current_gpus_device_names(
+    monkeypatch, tmp_path, store_config, physical_gpu, expected
+):
+    import vllm.platforms
+
+    path = tmp_path / "mooncake_config.json"
+    path.write_text(json.dumps(store_config))
+    config = mooncake_store.MooncakeStoreConfig.from_file(str(path))
+    platform = MagicMock()
+    platform.visible_device_id_to_physical_device_id.return_value = physical_gpu
+    monkeypatch.setattr(vllm.platforms, "current_platform", platform)
+    monkeypatch.setattr(torch.accelerator, "current_device_index", lambda: 0)
+    store = MagicMock()
+    store.setup.return_value = 0
+    if expected is ValueError:
+        with pytest.raises(ValueError, match="no entry for physical GPU 2"):
+            mooncake_store.setup_mooncake_store(store, config, "host")
+        return
+    mooncake_store.setup_mooncake_store(store, config, "host")
+    assert store.setup.call_args.args[5] == expected
+    if physical_gpu is None:
+        platform.visible_device_id_to_physical_device_id.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "store_config",
+    [
+        {"device_name": "rdma0", "device_name_per_gpu": ["rdma0"]},
+        {"device_name_per_gpu": []},
+        {"device_name_per_gpu": ["rdma0", " "]},
+        {"device_name_per_gpu": "rdma0"},
+    ],
+)
+def test_device_name_per_gpu_rejects_invalid_config(tmp_path, store_config):
+    path = tmp_path / "mooncake_config.json"
+    path.write_text(json.dumps(store_config))
+    with pytest.raises(ValueError, match="device_name"):
+        mooncake_store.MooncakeStoreConfig.from_file(str(path))
+
+
 def test_get_requester_local_hostname_prefers_override(monkeypatch):
     monkeypatch.setenv("MOONCAKE_REQUESTER_LOCAL_HOSTNAME", "worker-a:50053")
 
@@ -1651,7 +1699,7 @@ def test_partial_tail_with_smaller_mamba_blocks_writes_one_mamba_key(tp_rank):
 
 
 def test_shared_prefix_junction_handoff_writes_only_its_mamba_key():
-    """A junction hand-off (``--enable-mamba-shared-prefix-checkpoint``) below
+    """A junction hand-off (`--enable-mamba-shared-prefix-checkpoint`) below
     the prompt checkpoint stores its Mamba state under the junction hash and
     no attention tail."""
     store = MagicMock()
@@ -3237,6 +3285,48 @@ def test_store_tp_opt_in_isolates_different_pp_sizes(tmp_path, monkeypatch):
     assert keys[0] != keys[1]
 
 
+@pytest.mark.cpu_test
+def test_pp_stages_write_distinct_keys_with_pcp(tmp_path, monkeypatch):
+    """Workers are laid out as PP x PCP x TP, so with PCP the first rank of
+    each PP stage is 0 and tp_size * pcp_size, and the stages' keys differ."""
+    store = MagicMock()
+    store.setup.return_value = 0
+    _install_fake_mooncake(monkeypatch, store)
+    _patch_worker_runtime(monkeypatch, tp_size=2, pcp_size=2)
+    monkeypatch.setattr(worker, "get_pp_group", MagicMock())
+
+    def gather_prefixes(output, local, **kwargs):
+        output[:] = [local] * len(output)
+
+    monkeypatch.setattr(torch.distributed, "all_gather_object", gather_prefixes)
+    monkeypatch.setattr(_FakeModelConfig, "get_total_num_kv_heads", lambda _self: 8)
+    monkeypatch.setenv(
+        "MOONCAKE_CONFIG_PATH",
+        _write_mooncake_config(
+            tmp_path,
+            {
+                "metadata_server": "http://metadata/endpoint",
+                "protocol": "tcp",
+                "master_server_address": "10.0.0.7:50051",
+            },
+        ),
+    )
+
+    keys = []
+    for rank in (0, 4):
+        w = worker.MooncakeStoreWorker(
+            _make_vllm_config(
+                rank=rank, pipeline_parallel_size=2, tensor_parallel_size=2
+            ),
+            _make_kv_cache_config(num_kv_heads=4),
+        )
+        layout = w.token_dbs[0].store_layout
+        keys.append(layout.key_for(layout.local_shard_ids[0], BlockHash(b"h")))
+
+    assert "@pp_rank:0@" in keys[0]
+    assert "@pp_rank:1@" in keys[1]
+
+
 @pytest.mark.parametrize("tp_size", [2, 4])
 @pytest.mark.parametrize("missing_group", [None, 0, 1])
 def test_hybrid_lookup_uses_each_pp_stage_schema(
@@ -3466,7 +3556,7 @@ def test_worker_put_striding_covers_every_rank_get_namespace(
     When num_kv_head < tp_size, ranks holding the same KV heads stripe
     their PUTs across one shared key namespace. That dedup is only valid
     when those ranks really share a namespace: with DCP > 1 each rank GETs
-    every key from its own ``@dcpN`` namespace, so striding must be
+    every key from its own `@dcpN` namespace, so striding must be
     disabled.
     """
     tp_size = 4
@@ -3934,7 +4024,7 @@ def test_store_sending_thread_skips_when_token_len_below_lcm():
 
 
 def test_store_sending_thread_only_stores_swa_blocks_in_window():
-    """For SWA groups, only blocks within ``sliding_window`` of an
+    """For SWA groups, only blocks within `sliding_window` of an
     lcm-aligned boundary are stored — a block outside every such window
     can never participate in any future hit (mirrors recv-side masking).
 
@@ -6154,9 +6244,9 @@ def test_store_worker_close_swallows_store_errors():
 
 
 def test_blob_block_hashes_wire_roundtrip():
-    """The lookup wire format sends a ``hash_len`` frame plus the raw hashes
+    """The lookup wire format sends a `hash_len` frame plus the raw hashes
     concatenated back-to-back; the server rebuilds them through a zero-copy
-    ``BlobBlockHashes`` view over the frame buffer."""
+    `BlobBlockHashes` view over the frame buffer."""
     hashes = [BlockHash(bytes([i]) * 16) for i in range(5)]
     hash_len = len(hashes[0])
 

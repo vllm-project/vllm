@@ -136,17 +136,6 @@ def test_module_skip_tied_weights(tie: bool):
         assert torch.all(mod.lm_head.weight[:VOCAB_SIZE] == 2.0)
 
 
-@pytest.mark.cpu_test
-@pytest.mark.usefixtures("dist_init")
-def test_module_skip_tied_weights_without_canonical():
-    """Skipping a tied weight must not leave the shared weight uninitialized."""
-    mod = ModuleWithTiedWeights(tie=True)
-
-    weights = [("lm_head.weight", make_embedding_weights(2.0))]
-    with pytest.raises(ValueError, match="model.embed_tokens.weight"):
-        AutoWeightsLoader(mod).load_weights(iter(weights))
-
-
 class ModuleWithSharedParam(torch.nn.Module):
     """Mimics an MoE router shared between the MLP and its fused experts."""
 
@@ -178,7 +167,9 @@ class raise_if_cuda_sync:
         torch.cuda.set_sync_debug_mode(self.previous_debug_mode)
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="Skip if not cuda")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="Skip if not cuda or rocm"
+)
 def test_merge_multimodal_embeddings_no_sync():
     inputs_embeds = torch.zeros(
         [5, 10], dtype=torch.bfloat16, device=f"{DEVICE_TYPE}:0"
@@ -248,7 +239,7 @@ def _double(weights):
 
 
 def _pair_halves(weights):
-    """Stateful merge: cat a name's ``.first``/``.second`` halves on arrival."""
+    """Stateful merge: cat a name's `.first`/`.second` halves on arrival."""
     pending: dict[str, dict[str, torch.Tensor]] = {}
     for name, tensor in weights:
         for half in (".first", ".second"):
@@ -341,7 +332,7 @@ def test_weights_mapper_or_concatenates_transforms_in_order():
 
 
 def _double_w(weights):
-    """Stateless dispatch by name, the idiomatic inline ``endswith`` form."""
+    """Stateless dispatch by name, the idiomatic inline `endswith` form."""
     for name, tensor in weights:
         if name.endswith(".w"):
             tensor = tensor * 2

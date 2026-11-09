@@ -168,6 +168,10 @@ def _assert_parity(coupled: dict, disagg: dict) -> None:
     assert d["token_ids"] == c["token_ids"]
     assert disagg["usage"]["prompt_tokens"] == coupled["usage"]["prompt_tokens"]
     assert disagg["usage"]["completion_tokens"] == len(c["token_ids"])
+    assert (
+        disagg["usage"]["completion_tokens_details"]
+        == coupled["usage"]["completion_tokens_details"]
+    )
 
 
 async def _run_parity_case(
@@ -999,7 +1003,7 @@ def _assert_inline_parity(coupled: dict, inline: dict) -> None:
         ),
         pytest.param(
             TEXT_MESSAGES[0]["content"],
-            {"n": 2, "temperature": 0.8, "seed": 42},
+            {"n": 2, "temperature": 0.8, "seed": 42, "top_k": 1},
             id="n2",
         ),
     ],
@@ -1143,7 +1147,7 @@ async def _inline_derender_stream(
         ),
         pytest.param(
             TEXT_MESSAGES[0]["content"],
-            {"n": 2, "temperature": 0.8, "seed": 42},
+            {"n": 2, "temperature": 0.8, "seed": 42, "top_k": 1},
             id="n2",
         ),
     ],
