@@ -2,11 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Selective read leases for Mooncake store prefix lookups.
 
-``batch_is_exist`` leases every key it finds, so a lookup renews every stored
+`batch_is_exist` leases every key it finds, so a lookup renews every stored
 key of the prompt, including keys a load of the hit skips, such as blocks
 outside a sliding window or states at earlier block boundaries. With
-``VLLM_MOONCAKE_STORE_SELECTIVE_LEASE`` the lookup probes lease-free
-(``batch_probe_key``) and leases only the keys the hit will load.
+`VLLM_MOONCAKE_STORE_SELECTIVE_LEASE` the lookup probes lease-free
+(`batch_probe_key`) and leases only the keys the hit will load.
 """
 
 import time
@@ -51,8 +51,8 @@ class _RecordOperation(Protocol):
 class SelectiveLookupLease:
     """Leases only the keys a prefix-lookup hit will load.
 
-    The lookup probes its candidates with :meth:`probe`, computes the hit as
-    usual, and passes it through :meth:`lease_hit`.
+    The lookup probes its candidates with `probe`, computes the hit as
+    usual, and passes it through `lease_hit`.
     """
 
     def __init__(
@@ -80,7 +80,7 @@ class SelectiveLookupLease:
             )
 
     def probe(self, keys: list[str]) -> list[int]:
-        """Existence of ``keys``, without granting a lease."""
+        """Existence of `keys`, without granting a lease."""
         return self.store.batch_probe_key(keys)
 
     def lease_hit(
@@ -94,10 +94,10 @@ class SelectiveLookupLease:
             tuple[MooncakeLookupResult, tuple[list[bool], ...]],
         ],
     ) -> MooncakeLookupResult:
-        """Lease the keys a load of ``hit`` reads and return the hit to load.
+        """Lease the keys a load of `hit` reads and return the hit to load.
 
-        ``exists_set`` holds the probed ``(group, hash)`` pairs and
-        ``longest_hit`` recomputes the hit from them. The lease covers only the
+        `exists_set` holds the probed `(group, hash)` pairs and
+        `longest_hit` recomputes the hit from them. The lease covers only the
         keys this hit loads, e.g. the state at its tail boundary but not states
         at earlier boundaries. If a key was evicted since the probe, the shorter
         hit can end at one of those unleased keys, so it is leased in another
@@ -127,10 +127,10 @@ class SelectiveLookupLease:
         hit: MooncakeLookupResult,
         load_masks: tuple[list[bool], ...],
     ) -> tuple[list[str], list[tuple[int, bytes]]]:
-        """Keys a load of ``hit`` reads, in every rank namespace, and their
-        ``(group, hash)`` pairs.
+        """Keys a load of `hit` reads, in every rank namespace, and their
+        `(group, hash)` pairs.
 
-        Mirrors ``KVCacheStoreRecvingThread._handle_request``: each group's
+        Mirrors `KVCacheStoreRecvingThread._handle_request`: each group's
         load mask (one entry per Store block), with the tail chunk keyed by the
         hit's tail boundary.
         """
@@ -166,10 +166,10 @@ class SelectiveLookupLease:
         hit: MooncakeLookupResult,
         load_masks: tuple[list[bool], ...],
     ) -> set[tuple[int, bytes]]:
-        """Lease the keys a load of ``hit`` reads.
+        """Lease the keys a load of `hit` reads.
 
-        Returns the ``(group, hash)`` pairs no longer in the store. Raises
-        ``_LeaseFailedError`` when the lease RPC fails, including per-key error
+        Returns the `(group, hash)` pairs no longer in the store. Raises
+        `_LeaseFailedError` when the lease RPC fails, including per-key error
         results.
         """
         keys, key_meta = self.loaded_keys(block_hashes, hit, load_masks)

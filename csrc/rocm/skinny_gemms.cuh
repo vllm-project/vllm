@@ -1,0 +1,2903 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+//
+// Kernels and shared helpers of the "skinny" (wave-split-K) GEMMs. The host
+// launchers live in one translation unit per kernel family, see
+// skinny_gemms_{llmm1,wvsplitk,wvsplitkrc,wvsplitkq}.cu.
+
+#pragma once
+
+// <torch/all.h> is not needed here: it also pulls in autograd, nn and jit,
+// which is several seconds of frontend for every skinny GEMM translation unit.
+#include <torch/types.h>            // torch::Tensor, torch::empty, AT_DISPATCH
+#include <ATen/cuda/CUDAContext.h>  // at::cuda::getCurrentCUDAStream
+#include <c10/cuda/CUDAGuard.h>     // at::cuda::OptionalCUDAGuard
+
+#include <cuda_runtime.h>
+#include <cuda_fp16.h>
+#include <cuda_bf16.h>
+
+#include <algorithm>
+#include <string>
+#include <utility>
+
+#include "core/cuda_compat.h"
+#include "core/utils.hpp"
+
+// TODO(rasmith): The kernels in this file are susceptible to integer overflow
+// issues, do not take strides, and are unable to handle PyTorch tensors that
+// return is_contiguous() as False (the tensors may actually be contiguous
+// in memory).
+//
+// However, it may be possible to fix these kernels to handle both issues.
+
+#if defined(__HIPCC__) && \
+    (defined(__gfx90a__) || defined(__gfx942__) || defined(__gfx950__))
+  #define __HIP__GFX9__
+#endif
+
+// Combined RDNA macro (gfx11 + gfx12) - both use 32-wide wavefronts
+#if defined(__GFX11__) || defined(__GFX12__)
+  #define __HIP__GFX1X__
+#endif
+
+#if defined(__HIPCC__) && (defined(__gfx942__) || defined(__gfx950__))
+  #define __HIP__MI3XX__
+#endif
+
+// Defined unconditionally: a TU that already has a different LDS_SIZE (e.g.
+// skinny_gemms_int4.cuh, which uses 64 KiB and no gfx950 case) must not
+// silently size these kernels' LDS window from it.
+#ifdef LDS_SIZE
+  #error "LDS_SIZE already defined"
+#endif
+#if defined(__gfx950__)
+  #define LDS_SIZE 160 * 1024
+#else
+  #define LDS_SIZE 64 * 1024
+#endif
+
+// Traps unconditionally, so it does not depend on NDEBUG or on <assert.h> being
+// included with a particular state (this used to #undef/#define NDEBUG around
+// the include, which is order-dependent now that the file is a header). Note
+// this trades the device-assert message (file/line) for a bare trap: these
+// stubs are never launched, they only exist so the arch-specific #if in the
+// launchers has something to call.
+#define UNREACHABLE_CODE __builtin_trap()
+
+// The helpers below keep function-local statics (device properties); because
+// they are inline, the C++ rules make that one object for the whole program
+// instead of one per translation unit, which is what the callers want.
+inline int get_lds_size() {
+  static const int result = [] {
+    const auto* dprops = at::cuda::getCurrentDeviceProperties();
+    const std::string device_arch = dprops->gcnArchName;
+    return device_arch.find("gfx95") == std::string::npos ? 64 * 1024
+                                                          : 160 * 1024;
+  }();
+  return result;
+}
+
+inline bool on_gfx1x() {
+  static const bool result = [] {
+    const auto* dprops = at::cuda::getCurrentDeviceProperties();
+    const std::string device_arch = dprops->gcnArchName;
+    return device_arch.find("gfx11") != std::string::npos ||
+           device_arch.find("gfx12") != std::string::npos;
+  }();
+  return result;
+}
+
+inline bool on_gfx12() {
+  static const bool result = [] {
+    const auto* dprops = at::cuda::getCurrentDeviceProperties();
+    const std::string device_arch = dprops->gcnArchName;
+    return device_arch.find("gfx12") != std::string::npos;
+  }();
+  return result;
+}
+
+inline bool on_gfx120x() {
+  static const bool result = [] {
+    const auto* dprops = at::cuda::getCurrentDeviceProperties();
+    const std::string device_arch = dprops->gcnArchName;
+    return device_arch.find("gfx120") != std::string::npos;
+  }();
+  return result;
+}
+
+inline bool on_gfx1151() {
+  static const bool result = [] {
+    const auto* dprops = at::cuda::getCurrentDeviceProperties();
+    const std::string device_arch = dprops->gcnArchName;
+    return device_arch.find("gfx1151") != std::string::npos;
+  }();
+  return result;
+}
+
+// gfx1150, gfx1152 and gfx1153: 1024 VGPRs a lane and a 128-bit memory bus.
+inline bool on_gfx1150_class() {
+  static const bool result = [] {
+    const auto* dprops = at::cuda::getCurrentDeviceProperties();
+    const std::string device_arch = dprops->gcnArchName;
+    return device_arch.find("gfx1150") != std::string::npos ||
+           device_arch.find("gfx1152") != std::string::npos ||
+           device_arch.find("gfx1153") != std::string::npos;
+  }();
+  return result;
+}
+template <typename T>
+struct scalar {};
+
+template <typename T>
+struct scalar2 {};
+
+template <typename T>
+__device__ __forceinline__ float2 __s22float2(T v);
+
+template <typename T>
+__device__ __forceinline__ T __float2s(float v);
+
+template <typename T>
+__device__ __forceinline__ T __float22s2_rn(float2 v);
+
+// Definitions and cvt functions for fp16
+template <>
+struct scalar<c10::Half> {
+  using type = half;
+};
+
+template <>
+struct scalar2<c10::Half> {
+  using type = __half2;
+};
+
+template <>
+__device__ __forceinline__ half __float2s(float v) {
+  return __float2half(v);
+}
+
+template <>
+__device__ __forceinline__ float2 __s22float2(__half2 v) {
+  return __half22float2(v);
+}
+
+template <>
+__device__ __forceinline__ __half2 __float22s2_rn(float2 v) {
+  return __float22half2_rn(v);
+}
+
+// Definitions and cvt functions for bf16
+template <>
+struct scalar<c10::BFloat16> {
+  using type = __hip_bfloat16;
+};
+
+template <>
+struct scalar2<c10::BFloat16> {
+  using type = __hip_bfloat162;
+};
+
+template <>
+__device__ __forceinline__ __hip_bfloat16 __float2s(float v) {
+  return __float2bfloat16(v);
+}
+
+template <>
+__device__ __forceinline__ float2 __s22float2(__hip_bfloat162 v) {
+  return __bfloat1622float2(v);
+}
+
+template <>
+__device__ __forceinline__ __hip_bfloat162 __float22s2_rn(float2 v) {
+  return __float22bfloat162_rn(v);
+}
+
+template <typename T>
+__device__ __forceinline__ T loadnt(T* addr) {
+  return __builtin_nontemporal_load(addr);
+}
+
+__device__ __forceinline__ float4 load_ntmprl(const float4* addr) {
+  auto addr_alias = reinterpret_cast<const float*>(addr);
+  auto dat0 = loadnt(addr_alias);
+  auto dat1 = loadnt(addr_alias + 1);
+  auto dat2 = loadnt(addr_alias + 2);
+  auto dat3 = loadnt(addr_alias + 3);
+  return make_float4(dat0, dat1, dat2, dat3);
+}
+
+using swmmac_i16x8 = short __attribute__((ext_vector_type(8)));
+using swmmac_i16x16 = short __attribute__((ext_vector_type(16)));
+using swmmac_f16x8 = __fp16 __attribute__((ext_vector_type(8)));
+using swmmac_f16x16 = __fp16 __attribute__((ext_vector_type(16)));
+using swmmac_f32x8 = float __attribute__((ext_vector_type(8)));
+using swmmac_i32x4 = int32_t __attribute__((__vector_size__(16)));
+
+// TBlock fetches entire rows of A, and entire col of B (K dimension); assume
+// N=1 for time being grid is M/A_NUM_ROWS blocks
+template <typename scalar_t, int NUM_A_ROWS_PER_BLOCK>
+__global__ void LLGemm1_kernel(const scalar_t* in_a, const scalar_t* in_b,
+                               scalar_t* out_c, const int K) {
+  using scalar2_t = typename scalar2<scalar_t>::type;
+  auto af4 = reinterpret_cast<const float4*>(in_a);
+  auto bf4 = reinterpret_cast<const scalar2_t*>(in_b);
+  auto c = reinterpret_cast<scalar2_t*>(out_c);
+  __shared__ float red_smem[NUM_A_ROWS_PER_BLOCK][WARP_SIZE];
+  const int row_addr = blockIdx.x * NUM_A_ROWS_PER_BLOCK * K / 8;
+  const int threadid = threadIdx.x;
+  const int warp = threadIdx.x / WARP_SIZE;
+  const int lane = threadIdx.x % WARP_SIZE;
+  const int num_warps = blockDim.x / WARP_SIZE;
+  const int qwarpid = threadid / 16;
+  const int qthreadid = threadid % 16;
+  float4 rowA_elem4[NUM_A_ROWS_PER_BLOCK];
+  scalar2_t colB_elem4x, colB_elem4y, colB_elem4z, colB_elem4w;
+  float acc[NUM_A_ROWS_PER_BLOCK];
+  scalar2_t acch2;
+  scalar2_t oval;
+
+  // As we later use warp shuffle operations, we may have more threads in the
+  // block than the actual available data, hence the if guard here.
+  if (threadid * 8 < K) {
+#pragma unroll
+    for (int i = 0; i < NUM_A_ROWS_PER_BLOCK; i++) {
+      // rowA_elem4[i] holds 8 * half numbers seen as a single float4.
+      rowA_elem4[i] = load_ntmprl(&af4[row_addr + threadid + K / 8 * i]);
+    }
+    colB_elem4x = bf4[threadid * 4 + 0];
+    colB_elem4y = bf4[threadid * 4 + 1];
+    colB_elem4z = bf4[threadid * 4 + 2];
+    colB_elem4w = bf4[threadid * 4 + 3];
+  }
+
+  scalar2_t Af2;
+  float2 S;
+
+  auto Ah2ptr = reinterpret_cast<scalar2_t*>(&rowA_elem4);
+  scalar2_t* ah2lptr;
+
+#pragma unroll
+  for (int i = 0; i < NUM_A_ROWS_PER_BLOCK; i++) {
+    // Multiply-add on 8 scalar_t.
+    ah2lptr = Ah2ptr + i * 4;
+    Af2 = *(ah2lptr);
+    acch2 = __hmul2(Af2, colB_elem4x);
+    Af2 = *(ah2lptr + 1);
+    acch2 = __hfma2(Af2, colB_elem4y, acch2);
+    Af2 = *(ah2lptr + 2);
+    acch2 = __hfma2(Af2, colB_elem4z, acch2);
+    Af2 = *(ah2lptr + 3);
+    acch2 = __hfma2(Af2, colB_elem4w, acch2);
+    S = __s22float2(acch2);
+
+    // See comment above concerning the if guard.
+    acc[i] = (threadid * 8 < K ? S.x + S.y : 0.f);
+  }
+
+// all reduce across warp.
+#pragma unroll
+  for (int mask = WARP_SIZE / 2; mask >= 1; mask /= 2) {
+#pragma unroll
+    for (int i = 0; i < NUM_A_ROWS_PER_BLOCK; i++) {
+      acc[i] += __shfl_xor(acc[i], mask);
+    }
+  }
+
+  // Warp leaders store the data to shared memory.
+  if (lane < NUM_A_ROWS_PER_BLOCK) {
+    red_smem[lane][warp] = acc[lane];
+  }
+
+  // Make sure the data is in shared memory.
+  __syncthreads();
+
+  if (qwarpid < NUM_A_ROWS_PER_BLOCK) {
+    acc[qwarpid] = qthreadid < num_warps ? red_smem[qwarpid][qthreadid] : 0.f;
+#pragma unroll
+    for (int mask = 16 / 2; mask >= 1; mask /= 2) {
+      acc[qwarpid] += __shfl_xor(acc[qwarpid], mask);
+    }
+    float oval2 = __shfl_xor(acc[qwarpid], 16);
+
+    if (lane % 32 == 0) {
+      oval = __float22s2_rn<scalar2_t>(make_float2(acc[qwarpid], oval2));
+      c[blockIdx.x * NUM_A_ROWS_PER_BLOCK / 2 + qwarpid / 2] = oval;
+    }
+  }
+}
+
+#if defined(__HIP__GFX9__) && !defined(__HIP__GFX1X__)
+  #define DOT2C(V0, V2, V3)                                          \
+    if constexpr (std::is_same_v<scalar_t, half>) {                  \
+      asm("v_dot2c_f32_f16 %0, %2, %3"                               \
+          : "=v"(V0)                                                 \
+          : "0"(V0), "v"(V2), "v"(V3));                              \
+    } else if constexpr (std::is_same_v<scalar_t, __hip_bfloat16>) { \
+      float2 s = __bfloat1622float2(*((__hip_bfloat162*)(&(V2)))) *  \
+                 __bfloat1622float2(*((__hip_bfloat162*)(&(V3))));   \
+      V0 += (s.x + s.y);                                             \
+    }
+#elif defined(__HIP__GFX1X__)
+  // gfx1x: v_dot2_f32_f16 and v_dot2_f32_bf16 (VOP3-P, gfx11 and gfx12). The
+  // bf16 dot keeps the weights packed instead of widening them to f32.
+  #define DOT2C(V0, V2, V3)                                                \
+    if constexpr (std::is_same_v<scalar_t, half>) {                        \
+      asm("v_dot2_f32_f16 %0, %1, %2, %0" : "+v"(V0) : "v"(V2), "v"(V3));  \
+    } else if constexpr (std::is_same_v<scalar_t, __hip_bfloat16>) {       \
+      asm("v_dot2_f32_bf16 %0, %1, %2, %0" : "+v"(V0) : "v"(V2), "v"(V3)); \
+    }
+#endif
+
+// To avoid LLVM silently upcasting to double
+__device__ inline unsigned int min__(uint32_t a, uint32_t b) {
+  return min(a, b);
+}
+
+#if defined(__gfx1200__) || defined(__gfx1201__)
+
+// Selectors used by the SWMMAC sparse A operand. Even/odd lanes choose
+// different 16-bit pairs from the A fragment.
+static constexpr int32_t kSwmmacSelect01 = static_cast<int32_t>(0x44444444u);
+static constexpr int32_t kSwmmacSelect23 = static_cast<int32_t>(0xEEEEEEEEu);
+
+template <typename scalar_t>
+struct swmmac_traits;
+
+template <>
+struct swmmac_traits<__hip_bfloat16> {
+  using a_frag_t = swmmac_i16x8;
+  using b_frag_t = swmmac_i16x16;
+
+  __device__ __forceinline__ static swmmac_f32x8 mma(const a_frag_t a,
+                                                     const b_frag_t b,
+                                                     const swmmac_f32x8 acc,
+                                                     const int sparse_idx) {
+    return __builtin_amdgcn_swmmac_f32_16x16x32_bf16_w32(a, b, acc, sparse_idx);
+  }
+
+  __device__ __forceinline__ static float to_float(const __hip_bfloat16 value) {
+    return __bfloat162float(value);
+  }
+
+  __device__ __forceinline__ static __hip_bfloat16 from_float(
+      const float value) {
+    return __float2bfloat16(value);
+  }
+};
+
+template <>
+struct swmmac_traits<half> {
+  using a_frag_t = swmmac_f16x8;
+  using b_frag_t = swmmac_f16x16;
+
+  __device__ __forceinline__ static swmmac_f32x8 mma(const a_frag_t a,
+                                                     const b_frag_t b,
+                                                     const swmmac_f32x8 acc,
+                                                     const int sparse_idx) {
+    return __builtin_amdgcn_swmmac_f32_16x16x32_f16_w32(a, b, acc, sparse_idx);
+  }
+
+  __device__ __forceinline__ static float to_float(const half value) {
+    return __half2float(value);
+  }
+
+  __device__ __forceinline__ static half from_float(const float value) {
+    return __float2half(value);
+  }
+};
+
+// Build the A fragment for SWMMAC.
+//
+// B stays row-major. Each lane reads one contiguous 16-value half row from LDS:
+//   lane_half 0 -> B[k +  0 : k + 16]
+//   lane_half 1 -> B[k + 16 : k + 32]
+template <typename scalar_t, int N, int K_PER_INSTRUCTION>
+__device__ __forceinline__ typename swmmac_traits<scalar_t>::a_frag_t
+load_swmmac_a_direct(const scalar_t* __restrict__ A, const int A_stride,
+                     const int global_kblock, const int lane) {
+  using a_frag_t = typename swmmac_traits<scalar_t>::a_frag_t;
+  a_frag_t frag{};
+
+  const int sparse_row = lane & 15;
+  const int original_n = sparse_row >> 1;
+  if (original_n >= N) {
+    return frag;
+  }
+
+  const int lane_half = lane >> 4;
+  const bool select_high_pair = (sparse_row & 1) != 0;
+
+  const auto* src_aligned =
+      reinterpret_cast<const int32_t*>(A) +
+      (original_n * A_stride + global_kblock * K_PER_INSTRUCTION +
+       lane_half * 16) /
+          2;
+
+  const auto* src_vec = reinterpret_cast<const swmmac_i32x4*>(src_aligned);
+
+  const auto load0 = src_vec[0];
+  const auto load1 = src_vec[1];
+
+  auto* frag_i32 = reinterpret_cast<int32_t*>(&frag);
+
+  if (select_high_pair) {
+    frag_i32[0] = load0[1];
+    frag_i32[1] = load0[3];
+    frag_i32[2] = load1[1];
+    frag_i32[3] = load1[3];
+  } else {
+    frag_i32[0] = load0[0];
+    frag_i32[1] = load0[2];
+    frag_i32[2] = load1[0];
+    frag_i32[3] = load1[2];
+  }
+
+  return frag;
+}
+
+// B panels are streamed through the kernel, so use nontemporal vector loads.
+template <typename frag_t>
+__device__ __forceinline__ frag_t
+load_swmmac_b(const frag_t* __restrict__ ptr) {
+  return __builtin_nontemporal_load(ptr);
+}
+
+__device__ __forceinline__ int swmmac_bias_index(const int row, const int col,
+                                                 const int N, const int M,
+                                                 const int Bx, const int By) {
+  if (Bx == 1 && By == 1) return 0;
+  if (Bx == M && By == 1) return col;
+  if (Bx == 1 && By == N) return row;
+  if (Bx == M && By == N) return row * M + col;
+  return (row % By) * Bx + (col % Bx);
+}
+
+__device__ __forceinline__ void swmmac_lds_wave_fence() {
+  // Wait for wave-local LDS operations before reading from, or reusing, the
+  // LDS panel.
+  asm volatile("s_waitcnt lgkmcnt(0)" ::: "memory");
+  __syncwarp();
+}
+
+// Prefetch one row-major B panel from global memory into VGPRs.
+//
+// For one wave, the panel is:
+//
+//   B[m + 0 ][k_start : k_start + K_LOAD]
+//   B[m + 1 ][k_start : k_start + K_LOAD]
+//   ...
+//   B[m + COLUMNS_PER_WAVE - 1][k_start : k_start + K_LOAD]
+template <typename scalar_t, int K_LOAD, int COLUMNS_PER_WAVE,
+          int THREADS_PER_WAVE>
+__device__ __forceinline__ void prefetch_swmmac_b_panel(
+    swmmac_i32x4* __restrict__ prefetched, const scalar_t* __restrict__ B,
+    const int K, const int M, const int m, const int k_start,
+    const int valid_kblocks) {
+  constexpr int scalars_per_vec = 8;
+  constexpr int vecs_per_row = K_LOAD / scalars_per_vec;
+  constexpr int panel_vecs = COLUMNS_PER_WAVE * vecs_per_row;
+  static_assert(panel_vecs % THREADS_PER_WAVE == 0);
+  constexpr int vecs_per_lane = panel_vecs / THREADS_PER_WAVE;
+
+  const int lane = static_cast<int>(threadIdx.x);
+  const int valid_k = valid_kblocks * 32;
+
+  #pragma unroll
+  for (int v = 0; v < vecs_per_lane; ++v) {
+    const int flat_vec = v * THREADS_PER_WAVE + lane;
+    const int row = flat_vec / vecs_per_row;
+    const int scalar_col = (flat_vec % vecs_per_row) * scalars_per_vec;
+
+    swmmac_i32x4 value{};
+
+    if (m + row < M && scalar_col + scalars_per_vec <= valid_k) {
+      const auto* src = reinterpret_cast<const swmmac_i32x4*>(
+          B + static_cast<size_t>(m + row) * K + k_start + scalar_col);
+      value = load_swmmac_b(src);
+    }
+
+    prefetched[v] = value;
+  }
+}
+
+// Commit the prefetched VGPR panel into LDS.
+template <typename scalar_t, int K_LOAD, int K_LOAD_PAD, int COLUMNS_PER_WAVE,
+          int THREADS_PER_WAVE>
+__device__ __forceinline__ void commit_swmmac_b_panel(
+    scalar_t* __restrict__ lds_panel,
+    const swmmac_i32x4* __restrict__ prefetched) {
+  constexpr int scalars_per_vec = 8;
+  constexpr int vecs_per_row = K_LOAD / scalars_per_vec;
+  constexpr int panel_vecs = COLUMNS_PER_WAVE * vecs_per_row;
+  static_assert(panel_vecs % THREADS_PER_WAVE == 0);
+  constexpr int vecs_per_lane = panel_vecs / THREADS_PER_WAVE;
+
+  const int lane = static_cast<int>(threadIdx.x);
+
+  #pragma unroll
+  for (int v = 0; v < vecs_per_lane; ++v) {
+    const int flat_vec = v * THREADS_PER_WAVE + lane;
+    const int row = flat_vec / vecs_per_row;
+    const int scalar_col = (flat_vec % vecs_per_row) * scalars_per_vec;
+
+    auto* dst = reinterpret_cast<swmmac_i32x4*>(
+        lds_panel + static_cast<size_t>(row) * K_LOAD_PAD + scalar_col);
+    *dst = prefetched[v];
+  }
+}
+
+// Read one SWMMAC B fragment from the row-major LDS panel. Each lane owns
+// one output column and one 16-value half of the current K block.
+template <typename scalar_t, int K_LOAD_PAD, int TILE_COLUMNS,
+          int K_PER_INSTRUCTION>
+__device__ __forceinline__ typename swmmac_traits<scalar_t>::b_frag_t
+load_swmmac_b_lds_row_major(const scalar_t* __restrict__ lds_panel,
+                            const int tile, const int u, const int lane) {
+  using b_frag_t = typename swmmac_traits<scalar_t>::b_frag_t;
+
+  const int row = tile * TILE_COLUMNS + (lane & 15);
+  const int lane_half = lane >> 4;
+  const int scalar_col = u * K_PER_INSTRUCTION + lane_half * 16;
+
+  const auto* src = reinterpret_cast<const b_frag_t*>(
+      lds_panel + static_cast<size_t>(row) * K_LOAD_PAD + scalar_col);
+  return *src;
+}
+
+// Regular SWMMAC path. Each active wave computes one 16-column output tile.
+//
+// Two LDS panels are used as ping-pong buffers for B:
+//   prefetch next B panel into VGPRs
+//   compute current B panel from LDS
+//   commit next B panel into the alternate LDS panel
+template <typename scalar_t, int N, bool HAS_BIAS, int LOAD_GROUP,
+          bool ALIGNED_K, int TILE_COLUMNS, int M_TILES_PER_WAVE,
+          int K_PER_INSTRUCTION, int WV_PER_GROUP, int THREADS_PER_WAVE>
+__global__ void __launch_bounds__(WV_PER_GROUP* THREADS_PER_WAVE)
+    swmmacGemmRegular(const int K, const int A_stride, const int M,
+                      const int Bx, const int By,
+                      const scalar_t* __restrict__ A,
+                      const scalar_t* __restrict__ B,
+                      const scalar_t* __restrict__ BIAS,
+                      scalar_t* __restrict__ C) {
+  static_assert(N >= 5 && N <= 8);
+
+  using traits_t = swmmac_traits<scalar_t>;
+  using a_frag_t = typename traits_t::a_frag_t;
+  using b_frag_t = typename traits_t::b_frag_t;
+
+  constexpr int columns_per_wave = TILE_COLUMNS * M_TILES_PER_WAVE;
+  constexpr int k_load = LOAD_GROUP * K_PER_INSTRUCTION;
+  constexpr int k_load_pad = k_load + 8;
+  constexpr int vecs_per_lane =
+      (columns_per_wave * k_load) / (8 * THREADS_PER_WAVE);
+
+  // Two B panels per wave. They are used as ping-pong buffers.
+  __shared__ __align__(16)
+      scalar_t b_lds[WV_PER_GROUP][2][columns_per_wave][k_load_pad];
+
+  const int total_num_kblocks = K / K_PER_INSTRUCTION;
+  const int lane = static_cast<int>(threadIdx.x);
+  const int wave_id = static_cast<int>(threadIdx.y);
+  const int j = lane & 15;
+  const int row_base = (lane >> 4) * 4;
+  const int32_t sparse_idx = (lane & 1) ? kSwmmacSelect23 : kSwmmacSelect01;
+
+  // Some blocks need fewer than four waves when M is small.
+  const int columns_per_grid_round =
+      static_cast<int>(gridDim.x) * columns_per_wave;
+  const int required_waves =
+      (M + columns_per_grid_round - 1) / columns_per_grid_round;
+  const int active_waves =
+      required_waves < WV_PER_GROUP ? required_waves : WV_PER_GROUP;
+
+  if (wave_id >= active_waves) return;
+
+  uint32_t m =
+      (static_cast<uint32_t>(blockIdx.x) * static_cast<uint32_t>(active_waves) +
+       static_cast<uint32_t>(wave_id)) *
+      columns_per_wave;
+
+  while (m < static_cast<uint32_t>(M)) {
+    // Accumulate even and odd K blocks separately, then merge before store.
+    swmmac_f32x8 acc0[M_TILES_PER_WAVE]{};
+    swmmac_f32x8 acc1[M_TILES_PER_WAVE]{};
+
+    // Load the first B panel and place it in LDS buffer 0.
+    swmmac_i32x4 initial_panel[vecs_per_lane];
+    const int first_valid_kblocks =
+        total_num_kblocks < LOAD_GROUP ? total_num_kblocks : LOAD_GROUP;
+
+    prefetch_swmmac_b_panel<scalar_t, k_load, columns_per_wave,
+                            THREADS_PER_WAVE>(
+        initial_panel, B, K, M, static_cast<int>(m), 0, first_valid_kblocks);
+
+    commit_swmmac_b_panel<scalar_t, k_load, k_load_pad, columns_per_wave,
+                          THREADS_PER_WAVE>(&b_lds[wave_id][0][0][0],
+                                            initial_panel);
+
+    swmmac_lds_wave_fence();
+
+    for (int group_base = 0; group_base < total_num_kblocks;
+         group_base += LOAD_GROUP) {
+      // Current buffer is consumed by SWMMAC; next buffer receives the next
+      // prefetched panel.
+      const int current_buffer = (group_base / LOAD_GROUP) & 1;
+      const int next_buffer = current_buffer ^ 1;
+      const int next_group_base = group_base + LOAD_GROUP;
+      const bool has_next = next_group_base < total_num_kblocks;
+
+      const int current_valid_kblocks =
+          ALIGNED_K ? LOAD_GROUP
+                    : ((total_num_kblocks - group_base) < LOAD_GROUP
+                           ? (total_num_kblocks - group_base)
+                           : LOAD_GROUP);
+
+      // A is small, so keep the current group of A fragments in registers.
+      a_frag_t frag_a[LOAD_GROUP]{};
+
+      // Compute this group from the current LDS panel.
+  #pragma unroll
+      for (int u = 0; u < LOAD_GROUP; ++u) {
+        if constexpr (!ALIGNED_K) {
+          if (u >= current_valid_kblocks) continue;
+        }
+
+        frag_a[u] = load_swmmac_a_direct<scalar_t, N, K_PER_INSTRUCTION>(
+            A, A_stride, group_base + u, lane);
+      }
+
+      // Prefetch the next B panel into VGPRs before computing this group.
+      swmmac_i32x4 next_panel[vecs_per_lane];
+
+      if (has_next) {
+        const int next_valid_kblocks =
+            ALIGNED_K ? LOAD_GROUP
+                      : ((total_num_kblocks - next_group_base) < LOAD_GROUP
+                             ? (total_num_kblocks - next_group_base)
+                             : LOAD_GROUP);
+
+        prefetch_swmmac_b_panel<scalar_t, k_load, columns_per_wave,
+                                THREADS_PER_WAVE>(
+            next_panel, B, K, M, static_cast<int>(m),
+            next_group_base * K_PER_INSTRUCTION, next_valid_kblocks);
+      }
+
+  #pragma unroll
+      for (int u = 0; u < LOAD_GROUP; ++u) {
+        if constexpr (!ALIGNED_K) {
+          if (u >= current_valid_kblocks) continue;
+        }
+
+        const int global_kblock = group_base + u;
+
+  #pragma unroll
+        for (int tile = 0; tile < M_TILES_PER_WAVE; ++tile) {
+          const uint32_t tile_m =
+              m + static_cast<uint32_t>(tile * TILE_COLUMNS);
+          if (tile_m >= static_cast<uint32_t>(M)) continue;
+
+          const b_frag_t frag_b =
+              load_swmmac_b_lds_row_major<scalar_t, k_load_pad, TILE_COLUMNS,
+                                          K_PER_INSTRUCTION>(
+                  &b_lds[wave_id][current_buffer][0][0], tile, u, lane);
+
+          if (global_kblock & 1) {
+            acc1[tile] =
+                traits_t::mma(frag_a[u], frag_b, acc1[tile], sparse_idx);
+          } else {
+            acc0[tile] =
+                traits_t::mma(frag_a[u], frag_b, acc0[tile], sparse_idx);
+          }
+        }
+      }
+
+      // Commit the prefetched next panel into the alternate LDS buffer.
+      if (has_next) {
+        commit_swmmac_b_panel<scalar_t, k_load, k_load_pad, columns_per_wave,
+                              THREADS_PER_WAVE>(
+            &b_lds[wave_id][next_buffer][0][0], next_panel);
+
+        swmmac_lds_wave_fence();
+      }
+    }
+
+    // Merge even/odd K-block accumulators.
+  #pragma unroll
+    for (int tile = 0; tile < M_TILES_PER_WAVE; ++tile) {
+  #pragma unroll
+      for (int r = 0; r < 8; ++r) {
+        acc0[tile][r] += acc1[tile][r];
+      }
+    }
+
+    // Store the final C tile. Each lane owns one output column.
+  #pragma unroll
+    for (int tile = 0; tile < M_TILES_PER_WAVE; ++tile) {
+      const int col = static_cast<int>(m) + tile * TILE_COLUMNS + j;
+      if (col >= M) continue;
+
+  #pragma unroll
+      for (int r = 0; r < 4; ++r) {
+        const int row = row_base + r;
+        if (row >= N) continue;
+
+        float value = acc0[tile][2 * r] + acc0[tile][2 * r + 1];
+
+        if constexpr (HAS_BIAS) {
+          value += traits_t::to_float(
+              BIAS[swmmac_bias_index(row, col, N, M, Bx, By)]);
+        }
+
+        C[row * M + col] = traits_t::from_float(value);
+      }
+    }
+
+    m += static_cast<uint32_t>(gridDim.x) *
+         static_cast<uint32_t>(active_waves) * columns_per_wave;
+  }
+}
+
+// Split-K SWMMAC path. Compute different K shards for the same output
+// tile, then reduce the partial sums through LDS.
+template <typename scalar_t, int N, bool HAS_BIAS, int SPLIT_K, int LOAD_GROUP,
+          bool ALIGNED_SHARDS, int TILE_COLUMNS, int M_TILES_PER_WAVE,
+          int K_PER_INSTRUCTION, int WV_PER_GROUP, int THREADS_PER_WAVE>
+__global__ void __launch_bounds__(WV_PER_GROUP* THREADS_PER_WAVE)
+    swmmacGemmSplitK(const int K, const int A_stride, const int M, const int Bx,
+                     const int By, const scalar_t* __restrict__ A,
+                     const scalar_t* __restrict__ B,
+                     const scalar_t* __restrict__ BIAS,
+                     scalar_t* __restrict__ C) {
+  static_assert(N >= 5 && N <= 8);
+
+  using traits_t = swmmac_traits<scalar_t>;
+  using a_frag_t = typename traits_t::a_frag_t;
+  using b_frag_t = typename traits_t::b_frag_t;
+
+  constexpr int columns_per_wave = TILE_COLUMNS * M_TILES_PER_WAVE;
+  constexpr int k_load = LOAD_GROUP * K_PER_INSTRUCTION;
+  constexpr int k_load_pad = k_load + 8;
+  constexpr int vecs_per_lane =
+      (columns_per_wave * k_load) / (8 * THREADS_PER_WAVE);
+
+  // One partial C tile per K shard. The +1 column padding helps avoid LDS
+  // bank conflicts during the reduction.
+  __shared__ float partials_lds[SPLIT_K][N][columns_per_wave + 1];
+
+  // Each K shard owns its own pair of B ping-pong panels.
+  __shared__ __align__(16)
+      scalar_t b_lds[SPLIT_K][2][columns_per_wave][k_load_pad];
+
+  const int total_num_kblocks = K / K_PER_INSTRUCTION;
+
+  // threadIdx.y selects which K shard this wave computes.
+  const int shard_id = static_cast<int>(threadIdx.y);
+  const int shard_begin_kblock = (total_num_kblocks * shard_id) / SPLIT_K;
+  const int shard_end_kblock = (total_num_kblocks * (shard_id + 1)) / SPLIT_K;
+  const int shard_num_kblocks = shard_end_kblock - shard_begin_kblock;
+
+  const int lane = static_cast<int>(threadIdx.x);
+  const int j = lane & 15;
+  const int row_base = (lane >> 4) * 4;
+  const int32_t sparse_idx = (lane & 1) ? kSwmmacSelect23 : kSwmmacSelect01;
+
+  uint32_t m = static_cast<uint32_t>(blockIdx.x) * columns_per_wave;
+
+  while (m < static_cast<uint32_t>(M)) {
+    swmmac_f32x8 acc0[M_TILES_PER_WAVE]{};
+    swmmac_f32x8 acc1[M_TILES_PER_WAVE]{};
+
+    // Load this shard's first B panel into LDS buffer 0.
+    swmmac_i32x4 initial_panel[vecs_per_lane];
+    const int first_valid_kblocks =
+        shard_num_kblocks < LOAD_GROUP ? shard_num_kblocks : LOAD_GROUP;
+
+    prefetch_swmmac_b_panel<scalar_t, k_load, columns_per_wave,
+                            THREADS_PER_WAVE>(
+        initial_panel, B, K, M, static_cast<int>(m),
+        shard_begin_kblock * K_PER_INSTRUCTION, first_valid_kblocks);
+
+    commit_swmmac_b_panel<scalar_t, k_load, k_load_pad, columns_per_wave,
+                          THREADS_PER_WAVE>(&b_lds[shard_id][0][0][0],
+                                            initial_panel);
+
+    swmmac_lds_wave_fence();
+
+    for (int local_group_base = 0; local_group_base < shard_num_kblocks;
+         local_group_base += LOAD_GROUP) {
+      // Ping-pong between this shard's two B LDS buffers.
+      const int current_buffer = (local_group_base / LOAD_GROUP) & 1;
+      const int next_buffer = current_buffer ^ 1;
+      const int next_local_group_base = local_group_base + LOAD_GROUP;
+      const bool has_next = next_local_group_base < shard_num_kblocks;
+
+      const int current_valid_kblocks =
+          ALIGNED_SHARDS ? LOAD_GROUP
+                         : ((shard_num_kblocks - local_group_base) < LOAD_GROUP
+                                ? (shard_num_kblocks - local_group_base)
+                                : LOAD_GROUP);
+
+      // Keep this shard-local group of A fragments in registers.
+      a_frag_t frag_a[LOAD_GROUP]{};
+
+      // Compute this shard's partial sums from the current LDS panel.
+  #pragma unroll
+      for (int u = 0; u < LOAD_GROUP; ++u) {
+        if constexpr (!ALIGNED_SHARDS) {
+          if (u >= current_valid_kblocks) continue;
+        }
+
+        frag_a[u] = load_swmmac_a_direct<scalar_t, N, K_PER_INSTRUCTION>(
+            A, A_stride, shard_begin_kblock + local_group_base + u, lane);
+      }
+
+      // Prefetch this shard's next B panel into VGPRs.
+      swmmac_i32x4 next_panel[vecs_per_lane];
+
+      if (has_next) {
+        const int next_valid_kblocks =
+            ALIGNED_SHARDS
+                ? LOAD_GROUP
+                : ((shard_num_kblocks - next_local_group_base) < LOAD_GROUP
+                       ? (shard_num_kblocks - next_local_group_base)
+                       : LOAD_GROUP);
+
+        prefetch_swmmac_b_panel<scalar_t, k_load, columns_per_wave,
+                                THREADS_PER_WAVE>(
+            next_panel, B, K, M, static_cast<int>(m),
+            (shard_begin_kblock + next_local_group_base) * K_PER_INSTRUCTION,
+            next_valid_kblocks);
+      }
+
+  #pragma unroll
+      for (int u = 0; u < LOAD_GROUP; ++u) {
+        if constexpr (!ALIGNED_SHARDS) {
+          if (u >= current_valid_kblocks) continue;
+        }
+
+        const int global_kblock = shard_begin_kblock + local_group_base + u;
+
+  #pragma unroll
+        for (int tile = 0; tile < M_TILES_PER_WAVE; ++tile) {
+          const uint32_t tile_m =
+              m + static_cast<uint32_t>(tile * TILE_COLUMNS);
+          if (tile_m >= static_cast<uint32_t>(M)) continue;
+
+          const b_frag_t frag_b =
+              load_swmmac_b_lds_row_major<scalar_t, k_load_pad, TILE_COLUMNS,
+                                          K_PER_INSTRUCTION>(
+                  &b_lds[shard_id][current_buffer][0][0], tile, u, lane);
+
+          if (global_kblock & 1) {
+            acc1[tile] =
+                traits_t::mma(frag_a[u], frag_b, acc1[tile], sparse_idx);
+          } else {
+            acc0[tile] =
+                traits_t::mma(frag_a[u], frag_b, acc0[tile], sparse_idx);
+          }
+        }
+      }
+
+      // Commit the prefetched next panel into the alternate LDS buffer.
+      if (has_next) {
+        commit_swmmac_b_panel<scalar_t, k_load, k_load_pad, columns_per_wave,
+                              THREADS_PER_WAVE>(
+            &b_lds[shard_id][next_buffer][0][0], next_panel);
+
+        swmmac_lds_wave_fence();
+      }
+    }
+
+    // Merge even/odd K-block accumulators for this shard.
+  #pragma unroll
+    for (int tile = 0; tile < M_TILES_PER_WAVE; ++tile) {
+  #pragma unroll
+      for (int r = 0; r < 8; ++r) {
+        acc0[tile][r] += acc1[tile][r];
+      }
+    }
+
+    // Store this shard's partial C tile into LDS.
+  #pragma unroll
+    for (int tile = 0; tile < M_TILES_PER_WAVE; ++tile) {
+      const int local_col = tile * TILE_COLUMNS + j;
+      const int col = static_cast<int>(m) + local_col;
+      if (col >= M) continue;
+
+  #pragma unroll
+      for (int r = 0; r < 4; ++r) {
+        const int row = row_base + r;
+        if (row < N) {
+          partials_lds[shard_id][row][local_col] =
+              acc0[tile][2 * r] + acc0[tile][2 * r + 1];
+        }
+      }
+    }
+
+    // Wait for all K shards, then reduce partials and write final C.
+    __syncthreads();
+
+    const int epilogue_local_col = lane;
+    const int epilogue_col = static_cast<int>(m) + epilogue_local_col;
+
+    if (lane < columns_per_wave && epilogue_col < M) {
+  #pragma unroll
+      for (int r_step = 0; r_step < 2; ++r_step) {
+        const int row = shard_id + r_step * SPLIT_K;
+        if (row >= N) continue;
+
+        float value = 0.0f;
+
+  #pragma unroll
+        for (int shard = 0; shard < SPLIT_K; ++shard) {
+          value += partials_lds[shard][row][epilogue_local_col];
+        }
+
+        if constexpr (HAS_BIAS) {
+          value += traits_t::to_float(
+              BIAS[swmmac_bias_index(row, epilogue_col, N, M, Bx, By)]);
+        }
+
+        C[row * M + epilogue_col] = traits_t::from_float(value);
+      }
+    }
+
+    __syncthreads();
+
+    m += static_cast<uint32_t>(gridDim.x) * columns_per_wave;
+  }
+}
+
+#else
+
+// Matching host-compilation stubs. HIP-Clang parses kernel launches in the
+// host pass as well, so the signatures must exactly match the device branch.
+
+template <typename scalar_t, int N, bool HAS_BIAS, int LOAD_GROUP,
+          bool ALIGNED_K, int TILE_COLUMNS, int M_TILES_PER_WAVE,
+          int K_PER_INSTRUCTION, int WV_PER_GROUP, int THREADS_PER_WAVE>
+__global__ void __launch_bounds__(WV_PER_GROUP* THREADS_PER_WAVE)
+    swmmacGemmRegular(const int, const int, const int, const int, const int,
+                      const scalar_t*, const scalar_t*, const scalar_t*,
+                      scalar_t*) {
+  UNREACHABLE_CODE
+}
+
+template <typename scalar_t, int N, bool HAS_BIAS, int SPLIT_K, int LOAD_GROUP,
+          bool ALIGNED_SHARDS, int TILE_COLUMNS, int M_TILES_PER_WAVE,
+          int K_PER_INSTRUCTION, int WV_PER_GROUP, int THREADS_PER_WAVE>
+__global__ void __launch_bounds__(WV_PER_GROUP* THREADS_PER_WAVE)
+    swmmacGemmSplitK(const int, const int, const int, const int, const int,
+                     const scalar_t*, const scalar_t*, const scalar_t*,
+                     scalar_t*){UNREACHABLE_CODE}
+
+#endif
+
+torch::Tensor swmmacGEMM(const at::Tensor& in_a, const at::Tensor& in_b,
+                         const std::optional<at::Tensor>& in_bias,
+                         const int64_t logical_M, const int64_t CuCount) {
+  TORCH_CHECK(on_gfx120x(), "swmmacGEMM is only supported on GFX120x");
+  TORCH_CHECK(in_b.scalar_type() == torch::kFloat16 ||
+                  in_b.scalar_type() == torch::kBFloat16,
+              "B must be FP16 or BF16");
+  TORCH_CHECK(in_a.scalar_type() == in_b.scalar_type(),
+              "A and B must use the same dtype");
+  TORCH_CHECK(in_b.dim() == 2, "B must be a 2D tensor");
+  TORCH_CHECK(in_a.dim() == 2, "A must be a 2D tensor");
+
+  constexpr int tile_columns = 16;
+  constexpr int m_tiles_per_wave = 1;
+  constexpr int load_group = 4;
+  constexpr int columns_per_wave = tile_columns * m_tiles_per_wave;
+  constexpr int k_per_instruction = 32;
+  constexpr int split_k = 4;
+  constexpr int regular_waves_per_block = 4;
+  constexpr int threads_per_wave = 32;
+
+  const int M = static_cast<int>(in_b.size(0));
+  const int K = static_cast<int>(in_b.size(1));
+  const int N = static_cast<int>(in_a.size(0));
+  const int A_stride = static_cast<int>(in_a.stride(0));
+
+  TORCH_CHECK(logical_M == M, "logical_M must match the row count of raw B");
+  TORCH_CHECK(N >= 5 && N <= 8, "swmmacGEMM supports N in [5, 8]");
+  TORCH_CHECK(in_a.size(1) == K, "A and B inner dimensions (K) must match");
+  TORCH_CHECK(K % k_per_instruction == 0, "K must be divisible by ",
+              k_per_instruction);
+
+  const bool has_bias = in_bias.has_value() && in_bias->numel() > 0;
+
+  if (has_bias) {
+    TORCH_CHECK(in_bias->scalar_type() == in_a.scalar_type(),
+                "bias and A must use the same dtype");
+    TORCH_CHECK(in_bias->dim() == 1 || in_bias->dim() == 2,
+                "bias must be a 1D or 2D tensor");
+  }
+
+  // Bias may be scalar, per-column, per-row, or full [N, M]. Bx is the
+  // logical bias width used by swmmac_bias_index().
+  const int Bx = !has_bias
+                     ? 1
+                     : static_cast<int>(in_bias->dim() == 2 ? in_bias->size(1)
+                                                            : in_bias->size(0));
+
+  // By is the logical bias height. A 1D bias is treated as [1, M].
+  const int By =
+      !has_bias || in_bias->dim() == 1 ? 1 : static_cast<int>(in_bias->size(0));
+
+  auto out_c = torch::empty(
+      {N, M}, torch::TensorOptions().dtype(in_a.dtype()).device(in_a.device()));
+
+  const auto ceil_div = [](const int value, const int divisor) {
+    return (value + divisor - 1) / divisor;
+  };
+
+  const int cu_count = static_cast<int>(CuCount);
+  const int total_num_kblocks = K / k_per_instruction;
+
+  const int regular_columns_per_block =
+      regular_waves_per_block * columns_per_wave;
+
+  const int regular_workgroups = ceil_div(M, regular_columns_per_block);
+  const int regular_useful_waves = ceil_div(M, columns_per_wave);
+
+  // Use split-K when regular M tiling does not create enough waves to fill
+  // the GPU and K is long enough to make splitting worthwhile.
+  const bool regular_is_underfilled = regular_useful_waves < cu_count * 4;
+  const bool splitk_is_profitable = total_num_kblocks >= 64;
+  const bool use_splitk = regular_is_underfilled && splitk_is_profitable;
+
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(in_a));
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+
+#define VLLM_LAUNCH_SWMMAC_REGULAR(_N, _HAS_BIAS, _ALIGNED)                    \
+  swmmacGemmRegular<fptype, _N, _HAS_BIAS, load_group, _ALIGNED, tile_columns, \
+                    m_tiles_per_wave, k_per_instruction,                       \
+                    regular_waves_per_block, threads_per_wave>                 \
+      <<<grid, block, 0, stream>>>(K, A_stride, M, Bx, By, A, B, BIAS, C)
+
+#define VLLM_DISPATCH_SWMMAC_REGULAR(_N, _HAS_BIAS)     \
+  do {                                                  \
+    if (aligned_regular) {                              \
+      VLLM_LAUNCH_SWMMAC_REGULAR(_N, _HAS_BIAS, true);  \
+    } else {                                            \
+      VLLM_LAUNCH_SWMMAC_REGULAR(_N, _HAS_BIAS, false); \
+    }                                                   \
+  } while (0)
+
+#define VLLM_DISPATCH_SWMMAC_REGULAR_BY_N(_HAS_BIAS) \
+  do {                                               \
+    switch (N) {                                     \
+      case 5:                                        \
+        VLLM_DISPATCH_SWMMAC_REGULAR(5, _HAS_BIAS);  \
+        break;                                       \
+      case 6:                                        \
+        VLLM_DISPATCH_SWMMAC_REGULAR(6, _HAS_BIAS);  \
+        break;                                       \
+      case 7:                                        \
+        VLLM_DISPATCH_SWMMAC_REGULAR(7, _HAS_BIAS);  \
+        break;                                       \
+      case 8:                                        \
+        VLLM_DISPATCH_SWMMAC_REGULAR(8, _HAS_BIAS);  \
+        break;                                       \
+      default:                                       \
+        TORCH_CHECK(false, "unsupported N: ", N);    \
+    }                                                \
+  } while (0)
+
+#define VLLM_LAUNCH_SWMMAC_SPLITK(_N, _HAS_BIAS, _ALIGNED)                     \
+  swmmacGemmSplitK<fptype, _N, _HAS_BIAS, split_k, load_group, _ALIGNED,       \
+                   tile_columns, m_tiles_per_wave, k_per_instruction, split_k, \
+                   threads_per_wave>                                           \
+      <<<fused_splitk_grid, fused_splitk_block, 0, stream>>>(                  \
+          K, A_stride, M, Bx, By, A, B, BIAS, C)
+
+#define VLLM_DISPATCH_SWMMAC_SPLITK(_N, _HAS_BIAS)     \
+  do {                                                 \
+    if (aligned_splitk) {                              \
+      VLLM_LAUNCH_SWMMAC_SPLITK(_N, _HAS_BIAS, true);  \
+    } else {                                           \
+      VLLM_LAUNCH_SWMMAC_SPLITK(_N, _HAS_BIAS, false); \
+    }                                                  \
+  } while (0)
+
+#define VLLM_DISPATCH_SWMMAC_SPLITK_BY_N(_HAS_BIAS) \
+  do {                                              \
+    switch (N) {                                    \
+      case 5:                                       \
+        VLLM_DISPATCH_SWMMAC_SPLITK(5, _HAS_BIAS);  \
+        break;                                      \
+      case 6:                                       \
+        VLLM_DISPATCH_SWMMAC_SPLITK(6, _HAS_BIAS);  \
+        break;                                      \
+      case 7:                                       \
+        VLLM_DISPATCH_SWMMAC_SPLITK(7, _HAS_BIAS);  \
+        break;                                      \
+      case 8:                                       \
+        VLLM_DISPATCH_SWMMAC_SPLITK(8, _HAS_BIAS);  \
+        break;                                      \
+      default:                                      \
+        TORCH_CHECK(false, "unsupported N: ", N);   \
+    }                                               \
+  } while (0)
+
+  AT_DISPATCH_REDUCED_FLOATING_TYPES(in_a.scalar_type(), "swmmacGEMM", [&] {
+    using fptype = typename scalar<scalar_t>::type;
+
+    const auto* B = reinterpret_cast<const fptype*>(in_b.data_ptr());
+    const auto* A = reinterpret_cast<const fptype*>(in_a.data_ptr());
+
+    const auto* BIAS =
+        has_bias ? reinterpret_cast<const fptype*>(in_bias->data_ptr())
+                 : nullptr;
+
+    auto* C = reinterpret_cast<fptype*>(out_c.data_ptr());
+
+    if (!use_splitk) {
+      const int grid_x =
+          std::max(1, std::min(regular_workgroups, cu_count * 2));
+
+      const dim3 grid(grid_x);
+      const dim3 block(threads_per_wave, regular_waves_per_block);
+
+      const bool aligned_regular = total_num_kblocks % load_group == 0;
+
+      if (has_bias) {
+        VLLM_DISPATCH_SWMMAC_REGULAR_BY_N(true);
+      } else {
+        VLLM_DISPATCH_SWMMAC_REGULAR_BY_N(false);
+      }
+
+      return;
+    }
+
+    const int fused_splitk_workgroups = ceil_div(M, columns_per_wave);
+
+    const int fused_splitk_grid_x =
+        std::max(1, std::min(fused_splitk_workgroups, cu_count * split_k * 2));
+
+    const dim3 fused_splitk_grid(fused_splitk_grid_x);
+    const dim3 fused_splitk_block(threads_per_wave, split_k);
+
+    const bool aligned_splitk = total_num_kblocks % split_k == 0 &&
+                                (total_num_kblocks / split_k) % load_group == 0;
+
+    if (has_bias) {
+      VLLM_DISPATCH_SWMMAC_SPLITK_BY_N(true);
+    } else {
+      VLLM_DISPATCH_SWMMAC_SPLITK_BY_N(false);
+    }
+  });
+
+#undef VLLM_LAUNCH_SWMMAC_REGULAR
+#undef VLLM_DISPATCH_SWMMAC_REGULAR
+#undef VLLM_DISPATCH_SWMMAC_REGULAR_BY_N
+#undef VLLM_LAUNCH_SWMMAC_SPLITK
+#undef VLLM_DISPATCH_SWMMAC_SPLITK
+#undef VLLM_DISPATCH_SWMMAC_SPLITK_BY_N
+
+  return out_c;
+}
+
+#if defined(__HIP__GFX9__) || defined(__HIP__GFX1X__)
+// This version targets cases where A[] fits LDS capacity
+template <typename scalar_t, int THRDS, int YTILE, int WvPrGrp, int A_CHUNK,
+          int UNRL, int N>
+__global__ void __launch_bounds__(WvPrGrp* THRDS)
+    wvSplitK_hf_sml_(const int K, const int Kbp, const int Kap, const int M,
+                     const int Bx, const int By, const scalar_t* B,
+                     const scalar_t* __restrict__ A,
+                     const scalar_t* __restrict__ BIAS, scalar_t* C,
+                     const int _WvPrGrp, const int CuCount) {
+  constexpr int max_lds_len = LDS_SIZE / 2;
+  #if defined(__HIP__MI3XX__)
+  constexpr bool use_mfma = (std::is_same_v<scalar_t, __hip_bfloat16>);
+  #else
+  constexpr bool use_mfma = false;
+  #endif
+  using scalar8 =
+      __attribute__((__vector_size__((A_CHUNK / 2) * sizeof(float)))) float;
+  using half4 = __attribute__((__vector_size__(4 * sizeof(__bf16)))) __bf16;
+  using floatx4 = __attribute__((__vector_size__(4 * sizeof(float)))) float;
+  union bigType {
+    scalar_t h[A_CHUNK];
+    float f[A_CHUNK / 2];
+    float2 f2[A_CHUNK / 4];
+    double d[A_CHUNK / 4];
+    half4 h4[A_CHUNK / 4];
+    scalar8 h8;
+  };
+
+  //----------------------------------------------------
+  // Reserving 64/160 KB of LDS to have 1 WG / CU
+  // Goal is to bring the activation matrix A to the LDS
+  // and use it across the lifetime of the work group
+  // TODO: When activation matrix is larger than 64 KB
+  //     then this is not going to work!
+  //----------------------------------------------------
+  __shared__ scalar_t s[max_lds_len];
+
+  //----------------------------------------------------
+  // Fetch the activation matrix to LDS
+  // Loop iteration:
+  // - Each thread (lane) is fetching 8 elements (A_Chunk)
+  // - Each wave will fetch 64*8=> 512 elements
+  // - Each WG will fetch 512 * 16 => 8K elements
+  // - Then the WG will move to another 8 K elements
+  // TODO: Logic below will only work when K is multiple of 8
+  //----------------------------------------------------
+  for (uint32_t k = (threadIdx.y * THRDS + threadIdx.x) * A_CHUNK;
+       k < min__(Kap * N, max_lds_len); k += THRDS * WvPrGrp * A_CHUNK) {
+  #if defined(__gfx950__)
+    __builtin_amdgcn_global_load_lds((int*)(&A[k]), (int*)(&s[k]), 16, 0, 0);
+  #else
+    *((bigType*)(&s[k])) = *((bigType*)(&A[k]));
+  #endif
+  }
+  __syncthreads();
+
+  if (threadIdx.y >= _WvPrGrp) return;
+
+  uint32_t m = (blockIdx.x * _WvPrGrp + (threadIdx.y % _WvPrGrp)) * YTILE;
+
+  //----------------------------------------------------
+  // Each wave works on a single column of weight matrix.
+  // There are 16 waves per WG, and hence, each WG is
+  // working on 16 columns of weight matrix. Moreover,
+  // we tile in column direction by YTILE, so when YTILE=1
+  // the above math is right, however, when YTILE=2 then
+  // each wave  will be working on 2 columns and WG will
+  // be working on 32 columns.
+  //
+  // Top level loop that makes WGs persistent!
+  // - WGs iterates across columns of weight matrix
+  // - Each wave within WG works on a given column(s)
+  // - After completing first set of columns, WGs start
+  //   working on the next set of available columns
+  //----------------------------------------------------
+  while (m < M) {
+    //----------------------------------------------------
+    // 'sum' accumulates the matrix A x B computation
+    // split across 64 lanes.
+    //
+    // YTILE represents how many column of weight matrix
+    // are being worked on by each wave.
+    //----------------------------------------------------
+    float sum[N][YTILE] = {};
+    floatx4 sum4[N][YTILE] = {};
+
+    for (uint32_t k1 = 0; k1 < K; k1 += THRDS * A_CHUNK * UNRL) {
+      bigType bigA[N][UNRL] = {};
+      bigType bigB[YTILE][UNRL];
+      // Fetch the weight matrix from memory!
+  #pragma unroll
+      for (uint32_t k2 = 0; k2 < UNRL; k2++) {
+        uint32_t k = k1 + k2 * THRDS * A_CHUNK;
+        uint32_t k_ = k + threadIdx.x * A_CHUNK;
+        const scalar_t* B_ = &B[min__(k_, K - A_CHUNK)];
+        for (int y = 0; y < YTILE; y++)
+          bigB[y][k2].h8 = (loadnt((scalar8*)(&B_[min__(y + m, M - 1) * Kbp])));
+      }
+
+      // Fetch activation matrix from either just LDS or from both LDS / memory
+  #pragma unroll
+      for (uint32_t k2 = 0; k2 < UNRL; k2++) {
+        uint32_t k = k1 + k2 * THRDS * A_CHUNK;
+        uint32_t k_ = k + threadIdx.x * A_CHUNK;
+        if (k_ >= K) break;
+        for (int n = 0; n < N; n++) {
+          bigA[n][k2] = *((const bigType*)(&(s[k_ + Kap * n])));
+        }
+      }
+
+      // Do the matrix multiplication in interleaved manner
+      for (uint32_t k2 = 0; k2 < UNRL; k2++) {
+        for (uint32_t n = 0; n < N; n++) {
+          for (int y = 0; y < YTILE; y++) {
+            if constexpr (!use_mfma)
+              for (uint32_t b = 0; b < A_CHUNK / 2; b++) {
+                DOT2C(sum[n][y], bigA[n][k2].f[b], bigB[y][k2].f[b])
+              }
+            else
+              for (uint32_t b = 0; b < A_CHUNK / 4; b++)
+                sum4[n][y] = __builtin_amdgcn_mfma_f32_4x4x4bf16_1k(
+                    bigA[n][k2].h4[b], bigB[y][k2].h4[b], sum4[n][y], 0, 0, 0);
+          }
+        }
+      }
+    }
+    __builtin_amdgcn_sched_barrier(0);
+    //----------------------------------------------------
+    // Final reduction step using shuffle
+    //----------------------------------------------------
+    if constexpr (!use_mfma) {
+      for (int n = 0; n < N; n++) {
+        for (int y = 0; y < YTILE; y++) {
+          sum[n][y] += __builtin_amdgcn_mov_dpp(sum[n][y], 0x118, 0xf, 0xf,
+                                                1);  // row_shr8
+          sum[n][y] += __builtin_amdgcn_mov_dpp(sum[n][y], 0x114, 0xf, 0xf,
+                                                1);  // row_shr4
+          sum[n][y] += __builtin_amdgcn_mov_dpp(sum[n][y], 0x112, 0xf, 0xf,
+                                                1);  // row_shr2
+          sum[n][y] += __builtin_amdgcn_mov_dpp(sum[n][y], 0x111, 0xf, 0xf,
+                                                1);  // row_shr1
+  #if defined(__HIP__GFX9__)
+          sum[n][y] += __builtin_amdgcn_mov_dpp(sum[n][y], 0x142, 0xf, 0xf,
+                                                1);  // ROW_BCAST15
+          sum[n][y] += __builtin_amdgcn_mov_dpp(sum[n][y], 0x143, 0xf, 0xf,
+                                                1);  // ROW_BCAST31
+  #else
+          sum[n][y] += __shfl_xor(sum[n][y], 16);
+  #endif
+        }
+      }
+
+      if (threadIdx.x == (THRDS - 1)) {
+        scalar_t biases[N][YTILE] = {};
+        if (BIAS)
+          for (int n = 0; n < N; n++) {
+            for (int y = 0; y < YTILE; y++) {
+              biases[n][y] = BIAS[(m + y) % Bx + (n % By) * Bx];
+            }
+          }
+        for (int n = 0; n < N; n++) {
+          for (int y = 0; y < YTILE; y++) {
+            if constexpr (std::is_same_v<scalar_t, half>) {
+              sum[n][y] += __half2float(biases[n][y]);
+            } else if constexpr (std::is_same_v<scalar_t, __hip_bfloat16>) {
+              sum[n][y] += __bfloat162float(biases[n][y]);
+            }
+            C[m + y + n * M] = __float2s<scalar_t>(sum[n][y]);
+          }
+        }
+      }
+    } else {
+  #ifdef __HIP__GFX9__
+    #pragma unroll
+      for (int n = 0; n < N; n++) {
+    #pragma unroll
+        for (int y = 0; y < YTILE; y++) {
+          /*float accm1 = 0;
+           for (int i=0; i<64; i++)
+              accm1 += __shfl(sum4[n][y][i%4], i);
+          sum4[n][y][0] = accm1;*/
+          float accm = sum4[n][y][0];
+          accm += __builtin_amdgcn_mov_dpp(sum4[n][y][1], 0x101, 0xf, 0xf,
+                                           1);  // row_shl1
+          accm += __builtin_amdgcn_mov_dpp(sum4[n][y][2], 0x102, 0xf, 0xf,
+                                           1);  // row_shl2
+          accm += __builtin_amdgcn_mov_dpp(sum4[n][y][3], 0x103, 0xf, 0xf,
+                                           1);  // row_shl3
+          accm += __builtin_amdgcn_mov_dpp(accm, 0x104, 0xf, 0xf,
+                                           1);  // row_shl4
+          accm += __builtin_amdgcn_mov_dpp(accm, 0x108, 0xf, 0xf,
+                                           1);  // row_shl8
+          accm = __builtin_amdgcn_mov_dpp(accm, 0x11f, 0xf, 0xf,
+                                          1);  // row_shr15
+          accm += __builtin_amdgcn_mov_dpp(accm, 0x142, 0xf, 0xf,
+                                           1);  // ROW_BCAST15
+          accm += __builtin_amdgcn_mov_dpp(accm, 0x143, 0xf, 0xf,
+                                           1);  // ROW_BCAST31
+
+          sum4[n][y][0] = accm;
+        }
+      }
+      if (threadIdx.x == (THRDS - 1)) {
+        scalar_t biases[N][YTILE] = {};
+        if (BIAS)
+          for (int n = 0; n < N; n++) {
+            for (int y = 0; y < YTILE; y++) {
+              biases[n][y] = BIAS[(m + y) % Bx + (n % By) * Bx];
+            }
+          }
+        for (int n = 0; n < N; n++) {
+          for (int y = 0; y < YTILE; y++) {
+            sum4[n][y][0] += __bfloat162float(biases[n][y]);
+            C[m + y + n * M] = __float2bfloat16(sum4[n][y][0]);
+          }
+        }
+      }
+  #endif  // __HIP__GFX9__ (MFMA path)
+    }
+    m += CuCount * _WvPrGrp * YTILE;
+  }
+}
+#else
+template <typename scalar_t, int THRDS, int YTILE, int WvPrGrp, int A_CHUNK,
+          int UNRL, int N>
+__global__ void wvSplitK_hf_sml_(const int K, const int Kbp, const int Kap,
+                                 const int M, const int Bx, const int By,
+                                 const scalar_t* B,
+                                 const scalar_t* __restrict__ A,
+                                 const scalar_t* __restrict__ BIAS, scalar_t* C,
+                                 const int _WvPrGrp, const int CuCount) {
+  UNREACHABLE_CODE;
+}
+#endif
+
+#if defined(__HIP__GFX9__) || defined(__HIP__GFX1X__)
+// This version targets cases where A[] marginally exceeds LDS capacity
+template <typename scalar_t, int THRDS, int YTILE, int WvPrGrp, int A_CHUNK,
+          int UNRL, int N>
+__global__ void __launch_bounds__(WvPrGrp* THRDS)
+    wvSplitK_hf_(const int K, const int Kbp, const int Kap, const int M,
+                 const int Bx, const int By, const scalar_t* B,
+                 const scalar_t* __restrict__ A,
+                 const scalar_t* __restrict__ BIAS, scalar_t* C,
+                 const int _WvPrGrp, const int CuCount) {
+  constexpr int max_lds_len = LDS_SIZE / 2;
+  #if defined(__HIP__MI3XX__)
+  constexpr bool use_mfma = (std::is_same_v<scalar_t, __hip_bfloat16>);
+  #else
+  constexpr bool use_mfma = false;
+  #endif
+
+  using scalar8 =
+      __attribute__((__vector_size__((A_CHUNK / 2) * sizeof(float)))) float;
+  using half4 = __attribute__((__vector_size__(4 * sizeof(__bf16)))) __bf16;
+  using floatx4 = __attribute__((__vector_size__(4 * sizeof(float)))) float;
+  union bigType {
+    scalar_t h[A_CHUNK];
+    float f[A_CHUNK / 2];
+    float2 f2[A_CHUNK / 4];
+    double d[A_CHUNK / 4];
+    half4 h4[A_CHUNK / 4];
+    scalar8 h8;
+  };
+
+  __shared__ scalar_t s[max_lds_len];
+
+  //----------------------------------------------------
+  // Computation of columns that need to be committed to memory!
+  //----------------------------------------------------
+  uint32_t commitColumn[YTILE];
+  for (uint32_t i = 0; i < YTILE; i++) {
+    commitColumn[i] = 1;
+  }
+
+  uint32_t m = (blockIdx.x * _WvPrGrp + threadIdx.y) * YTILE;
+
+  // Check whether there will be fragmentation!
+  // This will happen only for the last wave!
+  if (m < M && (m + YTILE) >= M) {
+    uint32_t startColumn = M - YTILE;
+    for (uint32_t i = 0; i < (m - startColumn); i++) {
+      commitColumn[i] = 0;
+    }
+    m = startColumn;
+  }
+
+  for (uint32_t k = (threadIdx.y * THRDS + threadIdx.x) * A_CHUNK;
+       k < min__(Kap * N, max_lds_len); k += THRDS * WvPrGrp * A_CHUNK) {
+  #if defined(__gfx950__)
+    __builtin_amdgcn_global_load_lds((int*)(&A[k]), (int*)(&s[k]), 16, 0, 0);
+  #else
+    *((bigType*)(&s[k])) = *((bigType*)(&A[k]));
+  #endif
+  }
+
+  __syncthreads();
+
+  if (threadIdx.y >= _WvPrGrp) return;
+
+  while (m < M) {
+    float sum[N][YTILE] = {};
+    floatx4 sum4[N][YTILE] = {};
+
+    for (uint32_t k1 = 0; k1 < K; k1 += THRDS * A_CHUNK * UNRL) {
+      bigType bigA[N][UNRL] = {};
+      bigType bigB[YTILE][UNRL];
+      // Fetch the weight matrix from memory!
+  #pragma unroll
+      for (uint32_t k2 = 0; k2 < UNRL; k2++) {
+        uint32_t k = k1 + k2 * THRDS * A_CHUNK;
+        uint32_t k_ = k + threadIdx.x * A_CHUNK;
+        const scalar_t* B_ = &B[min__(k_, K - A_CHUNK)];
+        for (int y = 0; y < YTILE; y++)
+          bigB[y][k2].h8 = (loadnt((scalar8*)(&B_[min__(y + m, M - 1) * Kbp])));
+      }
+
+      // Fetch activation matrix from either just LDS or from both LDS / memory
+  #pragma unroll
+      for (uint32_t k2 = 0; k2 < UNRL; k2++) {
+        uint32_t k = k1 + k2 * THRDS * A_CHUNK;
+        uint32_t k_ = k + threadIdx.x * A_CHUNK;
+        if (k_ >= K) break;
+        for (int n = 0; n < N; n++) {
+          if (k_ + Kap * n < max_lds_len)
+            bigA[n][k2] = *((const bigType*)(&(s[k_ + Kap * n])));
+          else
+            bigA[n][k2] = *((const bigType*)(&(A[k_ + Kap * n])));
+        }
+      }
+
+      // Do the matrix multiplication in interleaved manner
+      for (uint32_t n = 0; n < N; n++) {
+        for (uint32_t k2 = 0; k2 < UNRL; k2++) {
+          for (int y = 0; y < YTILE; y++) {
+            if constexpr (!use_mfma)
+              for (uint32_t b = 0; b < A_CHUNK / 2; b++) {
+                DOT2C(sum[n][y], bigA[n][k2].f[b], bigB[y][k2].f[b])
+              }
+            else
+              for (uint32_t b = 0; b < A_CHUNK / 4; b++)
+                sum4[n][y] = __builtin_amdgcn_mfma_f32_4x4x4bf16_1k(
+                    bigA[n][k2].h4[b], bigB[y][k2].h4[b], sum4[n][y], 0, 0, 0);
+          }
+        }
+      }
+    }
+
+    //----------------------------------------------------
+    // Final reduction step using shuffle
+    //----------------------------------------------------
+    if constexpr (!use_mfma) {
+      for (int n = 0; n < N; n++) {
+        for (int y = 0; y < YTILE; y++) {
+          sum[n][y] += __builtin_amdgcn_mov_dpp(sum[n][y], 0x118, 0xf, 0xf,
+                                                1);  // row_shr8
+          sum[n][y] += __builtin_amdgcn_mov_dpp(sum[n][y], 0x114, 0xf, 0xf,
+                                                1);  // row_shr4
+          sum[n][y] += __builtin_amdgcn_mov_dpp(sum[n][y], 0x112, 0xf, 0xf,
+                                                1);  // row_shr2
+          sum[n][y] += __builtin_amdgcn_mov_dpp(sum[n][y], 0x111, 0xf, 0xf,
+                                                1);  // row_shr1
+  #if defined(__HIP__GFX9__)
+          sum[n][y] += __builtin_amdgcn_mov_dpp(sum[n][y], 0x142, 0xf, 0xf,
+                                                1);  // ROW_BCAST15
+          sum[n][y] += __builtin_amdgcn_mov_dpp(sum[n][y], 0x143, 0xf, 0xf,
+                                                1);  // ROW_BCAST31
+  #else
+          sum[n][y] += __shfl_xor(sum[n][y], 16);
+  #endif
+        }
+      }
+
+      if (threadIdx.x == (THRDS - 1)) {
+        scalar_t biases[N][YTILE] = {};
+        if (BIAS)
+          for (int n = 0; n < N; n++) {
+            for (int y = 0; y < YTILE; y++) {
+              biases[n][y] = BIAS[(m + y) % Bx + (n % By) * Bx];
+            }
+          }
+        for (int n = 0; n < N; n++) {
+          for (int y = 0; y < YTILE; y++) {
+            if (commitColumn[y]) {
+              if constexpr (std::is_same_v<scalar_t, half>) {
+                sum[n][y] += __half2float(biases[n][y]);
+              } else if constexpr (std::is_same_v<scalar_t, __hip_bfloat16>) {
+                sum[n][y] += __bfloat162float(biases[n][y]);
+              }
+              C[m + y + n * M] = __float2s<scalar_t>(sum[n][y]);
+            }
+          }
+        }
+      }
+    } else {
+  #ifdef __HIP__GFX9__
+    #pragma unroll
+      for (int n = 0; n < N; n++) {
+    #pragma unroll
+        for (int y = 0; y < YTILE; y++) {
+          // float accm1 = 0;
+          // for (int i=0; i<64; i++)
+          //    accm1 += __shfl(sum4[n][y][i%4], i);
+          float accm = sum4[n][y][0];
+          accm += __builtin_amdgcn_mov_dpp(sum4[n][y][1], 0x101, 0xf, 0xf,
+                                           1);  // row_shl1
+          accm += __builtin_amdgcn_mov_dpp(sum4[n][y][2], 0x102, 0xf, 0xf,
+                                           1);  // row_shl2
+          accm += __builtin_amdgcn_mov_dpp(sum4[n][y][3], 0x103, 0xf, 0xf,
+                                           1);  // row_shl3
+          accm += __builtin_amdgcn_mov_dpp(accm, 0x104, 0xf, 0xf,
+                                           1);  // row_shl4
+          accm += __builtin_amdgcn_mov_dpp(accm, 0x108, 0xf, 0xf,
+                                           1);  // row_shl8
+          accm = __builtin_amdgcn_mov_dpp(accm, 0x11f, 0xf, 0xf,
+                                          1);  // row_shr15
+          accm += __builtin_amdgcn_mov_dpp(accm, 0x142, 0xf, 0xf,
+                                           1);  // ROW_BCAST15
+          accm += __builtin_amdgcn_mov_dpp(accm, 0x143, 0xf, 0xf,
+                                           1);  // ROW_BCAST31
+          sum4[n][y][0] = accm;
+        }
+      }
+      if (threadIdx.x == (THRDS - 1)) {
+        scalar_t biases[N][YTILE] = {};
+        if (BIAS)
+          for (int n = 0; n < N; n++) {
+            for (int y = 0; y < YTILE; y++) {
+              biases[n][y] = BIAS[(m + y) % Bx + (n % By) * Bx];
+            }
+          }
+        for (int n = 0; n < N; n++) {
+          for (int y = 0; y < YTILE; y++) {
+            if (commitColumn[y]) {
+              sum4[n][y][0] += __bfloat162float(biases[n][y]);
+              C[m + y + n * M] = __float2bfloat16(sum4[n][y][0]);
+            }
+          }
+        }
+      }
+  #endif  // __HIP__GFX9__ (MFMA path)
+    }
+
+    m += CuCount * _WvPrGrp * YTILE;
+
+    // Check whether there will be fragmentation!
+    // This will happen only for the last wave!
+    if (m < M && (m + YTILE) >= M) {
+      uint32_t startColumn = M - YTILE;
+      for (uint32_t i = 0; i < (m - startColumn); i++) {
+        commitColumn[i] = 0;
+      }
+      m = startColumn;
+    }
+  }
+}
+
+#else
+template <typename scalar_t, int THRDS, int YTILE, int WvPrGrp, int A_CHUNK,
+          int UNRL, int N>
+__global__ void wvSplitK_hf_(const int K, const int Kbp, const int Kap,
+                             const int M, const int Bx, const int By,
+                             const scalar_t* B, const scalar_t* __restrict__ A,
+                             const scalar_t* __restrict__ BIAS, scalar_t* C,
+                             const int _WvPrGrp, const int CuCount) {
+  UNREACHABLE_CODE;
+}
+#endif
+
+#if defined(__HIP__GFX9__) || defined(__HIP__GFX1X__)
+// This version targets big A[] cases, where it is much larger than LDS capacity
+template <typename scalar_t, int THRDS, int YTILE, int WvPrGrp, int A_CHUNK,
+          int UNRL, int N>
+__global__ void __launch_bounds__(WvPrGrp* THRDS)
+    wvSplitK_hf_big_(const int K, const int Kbp, const int Kap, const int M,
+                     const int Bx, const int By, const scalar_t* B,
+                     const scalar_t* __restrict__ A,
+                     const scalar_t* __restrict__ BIAS, scalar_t* C,
+                     const int _WvPrGrp, const int CuCount) {
+  constexpr int max_lds_len = LDS_SIZE / 2;
+  #if defined(__HIP__MI3XX__)
+  constexpr bool use_mfma = (std::is_same_v<scalar_t, __hip_bfloat16>);
+  #else
+  constexpr bool use_mfma = false;
+  #endif
+
+  using scalar8 =
+      __attribute__((__vector_size__((A_CHUNK / 2) * sizeof(float)))) float;
+  using half4 = __attribute__((__vector_size__(4 * sizeof(__bf16)))) __bf16;
+  using floatx4 = __attribute__((__vector_size__(4 * sizeof(float)))) float;
+  union bigType {
+    scalar_t h[A_CHUNK];
+    float f[A_CHUNK / 2];
+    float2 f2[A_CHUNK / 4];
+    double d[A_CHUNK / 4];
+    half4 h4[A_CHUNK / 4];
+    scalar8 h8;
+  };
+
+  //----------------------------------------------------
+  // Reserving 64/160 KB of LDS to have 1 WG / CU
+  // Goal is to bring the activation matrix A to the LDS
+  // and use it across the lifetime of the work group
+  // TODO: When activation matrix is larger than 64 KB
+  //     then this is not going to work!
+  //----------------------------------------------------
+  __shared__ scalar_t s[max_lds_len];
+
+  //----------------------------------------------------
+  // Computation of columns that need to be committed to memory!
+  //----------------------------------------------------
+  uint32_t commitColumn[YTILE];
+  for (uint32_t i = 0; i < YTILE; i++) {
+    commitColumn[i] = 1;
+  }
+
+  // int _WvPrGrp = mindiv(N, CuCount * YTILE, WvPrGrp);
+  if (threadIdx.y >= _WvPrGrp) return;
+
+  //----------------------------------------------------
+  // Indexing function into the column of weight matrix B
+  // Algorithm does 64 lane k-splitting / wave and uses
+  // WG ID and Thread ID to find the index.
+  //----------------------------------------------------
+  uint32_t m = (blockIdx.x * _WvPrGrp + threadIdx.y) * YTILE;
+
+  // Check whether there will be fragmentation!
+  // This will happen only for the last wave!
+  if (m < M && (m + YTILE) >= M) {
+    uint32_t startColumn = M - YTILE;
+    for (uint32_t i = 0; i < (m - startColumn); i++) {
+      commitColumn[i] = 0;
+    }
+    m = startColumn;
+  }
+
+  //----------------------------------------------------
+  // Fetch the activation matrix to LDS
+  // Loop iteration:
+  // - Each thread (lane) is fetching 8 elements (A_Chunk)
+  // - Each wave will fetch 64*8=> 512 elements
+  // - Each WG will fetch 512 * 16 => 8K elements
+  // - Then the WG will move to another 8 K elements
+  // TODO: Logic below will only work when K is multiple of 8
+  //----------------------------------------------------
+  #define PCML
+  #ifndef PCML
+  for (uint32_t k = (threadIdx.y * THRDS + threadIdx.x) * A_CHUNK;
+       k < min__(Kap * N, max_lds_len); k += THRDS * WvPrGrp * A_CHUNK) {
+    #if defined(__gfx950__)
+    __builtin_amdgcn_global_load_lds((int*)(&A[k]), (int*)(&s[k]), 16, 0, 0);
+    #else
+    *((bigType*)(&s[k])) = *((bigType*)(&A[k]));
+    #endif
+  }
+  __syncthreads();
+  #endif
+
+  #define TUC (THRDS * UNRL * A_CHUNK)
+  uint32_t kBase = 0;
+  // find biggest k size that fits in LDS
+  uint32_t kFit = (max_lds_len) / N;
+  // kFit = (kFit%TWC==0) ? kFit : (kFit-kFit%TWC+TWC); //round up to multiple
+  // of TUC
+  kFit = (kFit % TUC == 0)
+             ? kFit
+             : (kFit - kFit % TUC);  // round up to multiple of TUC
+  // if (kFit == 0) kFit = TUC;
+  kFit = min__(kFit, Kap);
+
+  //----------------------------------------------------
+  // Each wave works on a single column of weight matrix.
+  // There are 16 waves per WG, and hence, each WG is
+  // working on 16 columns of weight matrix. Moreover,
+  // we tile in column direction by YTILE, so when YTILE=1
+  // the above math is right, however, when YTILE=2 then
+  // each wave  will be working on 2 columns and WG will
+  // be working on 32 columns.
+  //
+  // Top level loop that makes WGs persistent!
+  // - WGs iterates across columns of weight matrix
+  // - Each wave within WG works on a given column(s)
+  // - After completing first set of columns, WGs start
+  //   working on the next set of available columns
+  //----------------------------------------------------
+  #ifdef PCML
+  int YW = (YTILE * _WvPrGrp);
+  uint32_t Mrndp = (M % YW == 0) ? M : (M - M % YW + YW);
+  while (m < Mrndp) {
+  #else
+  while (m < M) {
+  #endif
+    //----------------------------------------------------
+    // 'sum' accumulates the matrix A x B computation
+    // split across 64 lanes.
+    //
+    // YTILE represents how many column of weight matrix
+    // are being worked on by each wave.
+    //----------------------------------------------------
+    float sum[N][YTILE] = {};
+    floatx4 sum4[N][YTILE] = {};
+
+    //----------------------------------------------------
+    // Fetch weight matrix B in interleaved K-split!
+    // - Each thread (lane) is fetching 8 elements (A_Chunk)
+    // - Each wave will fetch 64*8=> 512 elements (1024B)
+    // - YTILE represents the number of column being serviced
+    //   by wave
+    // - Loop for fetching weight matrix (B) are unrolled
+    //
+    // Fetch activation matrix A from LDS
+    // - Loop for fetching activation matrix (A) are unrolled
+    //
+    // Finally, do the matrix multiplication in an unrolled
+    // fashion. This provides lot of food for compiler
+    // scheduling.
+    //
+    // TODO: Logic below will only work when K is multiple of 8
+    //----------------------------------------------------
+    for (uint32_t k1 = 0; k1 < K; k1 += THRDS * A_CHUNK * UNRL) {
+      bigType bigA[N][UNRL] = {};
+      bigType bigB[YTILE][UNRL];
+
+  #ifdef PCML
+      if ((k1 == 0) || (k1 == kBase + kFit)) {  // load next chunk of A[] to LDS
+        if (k1 != 0) kBase += kFit;
+        __syncthreads();
+        for (uint32_t k = 0; k < kFit; k += THRDS * _WvPrGrp * A_CHUNK) {
+          uint32_t kOff = k + ((threadIdx.y * THRDS + threadIdx.x) * A_CHUNK);
+          if (kBase + kOff >= Kap) break;
+          if (kOff >= kFit) break;
+          for (uint32_t n = 0; n < N; n++) {
+            uint32_t k_in = kBase + n * Kap + kOff;
+            uint32_t k_ot = n * kFit + kOff;
+    #if defined(__gfx950__)
+            __builtin_amdgcn_global_load_lds((int*)(&A[k_in]), (int*)(&s[k_ot]),
+                                             16, 0, 0);
+    #else
+            *((bigType*)(&s[k_ot])) = *((bigType*)(&A[k_in]));
+    #endif
+          }
+        }
+        __syncthreads();
+      }
+      if (m >= M) continue;
+  #endif
+
+      // Fetch the weight matrix from memory!
+  #pragma unroll
+      for (uint32_t k2 = 0; k2 < UNRL; k2++) {
+        uint32_t k = k1 + k2 * THRDS * A_CHUNK;
+        uint32_t k_ = k + threadIdx.x * A_CHUNK;
+        const scalar_t* B_ = &B[min__(k_, K - A_CHUNK)];
+        for (int y = 0; y < YTILE; y++)
+          bigB[y][k2].h8 = (loadnt((scalar8*)(&B_[min__(y + m, M - 1) * Kbp])));
+      }
+
+      // Fetch activation matrix from either just LDS or from both LDS / memory
+  #pragma unroll
+      for (uint32_t k2 = 0; k2 < UNRL; k2++) {
+        uint32_t k = k1 + k2 * THRDS * A_CHUNK;
+        uint32_t k_ = k + threadIdx.x * A_CHUNK;
+        if (k_ >= K) break;
+        for (int n = 0; n < N; n++) {
+  #ifdef PCML
+          bigA[n][k2] = *((const bigType*)(&(s[k_ - kBase + kFit * n])));
+  #else
+          if (k_ + Kap * n < max_lds_len)
+            bigA[n][k2] = *((const bigType*)(&(s[k_ + Kap * n])));
+          else
+            bigA[n][k2] = *((const bigType*)(&(A[k_ + Kap * n])));
+  #endif
+        }
+      }
+
+      // Do the matrix multiplication in interleaved manner
+  #pragma unroll
+      for (uint32_t k2 = 0; k2 < UNRL; k2++) {
+        for (uint32_t n = 0; n < N; n++) {
+          for (int y = 0; y < YTILE; y++) {
+            if constexpr (!use_mfma)
+              for (uint32_t b = 0; b < A_CHUNK / 2; b++) {
+                DOT2C(sum[n][y], bigA[n][k2].f[b], bigB[y][k2].f[b])
+              }
+            else
+              for (uint32_t b = 0; b < A_CHUNK / 4; b++)
+                sum4[n][y] = __builtin_amdgcn_mfma_f32_4x4x4bf16_1k(
+                    bigA[n][k2].h4[b], bigB[y][k2].h4[b], sum4[n][y], 0, 0, 0);
+          }
+        }
+      }
+    }
+
+  #ifdef PCML
+    if (m >= M) {
+      m += CuCount * _WvPrGrp * YTILE;
+      kBase = 0;
+      continue;
+    }
+  #endif
+
+    //----------------------------------------------------
+    // Final reduction step using shuffle
+    //----------------------------------------------------
+    if constexpr (!use_mfma) {
+      for (int n = 0; n < N; n++) {
+        for (int y = 0; y < YTILE; y++) {
+          sum[n][y] += __builtin_amdgcn_mov_dpp(sum[n][y], 0x118, 0xf, 0xf,
+                                                1);  // row_shr8
+          sum[n][y] += __builtin_amdgcn_mov_dpp(sum[n][y], 0x114, 0xf, 0xf,
+                                                1);  // row_shr4
+          sum[n][y] += __builtin_amdgcn_mov_dpp(sum[n][y], 0x112, 0xf, 0xf,
+                                                1);  // row_shr2
+          sum[n][y] += __builtin_amdgcn_mov_dpp(sum[n][y], 0x111, 0xf, 0xf,
+                                                1);  // row_shr1
+  #if defined(__HIP__GFX9__)
+          sum[n][y] += __builtin_amdgcn_mov_dpp(sum[n][y], 0x142, 0xf, 0xf,
+                                                1);  // ROW_BCAST15
+          sum[n][y] += __builtin_amdgcn_mov_dpp(sum[n][y], 0x143, 0xf, 0xf,
+                                                1);  // ROW_BCAST31
+  #else
+          sum[n][y] += __shfl_xor(sum[n][y], 16);
+  #endif
+        }
+      }
+
+      if (threadIdx.x == (THRDS - 1)) {
+        scalar_t biases[N][YTILE] = {};
+        if (BIAS)
+          for (int n = 0; n < N; n++) {
+            for (int y = 0; y < YTILE; y++) {
+              biases[n][y] = BIAS[(m + y) % Bx + (n % By) * Bx];
+            }
+          }
+        for (int n = 0; n < N; n++) {
+          for (int y = 0; y < YTILE; y++) {
+            if (commitColumn[y]) {
+              if constexpr (std::is_same_v<scalar_t, half>) {
+                sum[n][y] += __half2float(biases[n][y]);
+              } else if constexpr (std::is_same_v<scalar_t, __hip_bfloat16>) {
+                sum[n][y] += __bfloat162float(biases[n][y]);
+              }
+              C[m + y + n * M] = __float2s<scalar_t>(sum[n][y]);
+            }
+          }
+        }
+      }
+    } else {
+  #ifdef __HIP__GFX9__
+    #pragma unroll
+      for (int n = 0; n < N; n++) {
+    #pragma unroll
+        for (int y = 0; y < YTILE; y++) {
+          float accm = sum4[n][y][0];
+          accm += __builtin_amdgcn_mov_dpp(sum4[n][y][1], 0x101, 0xf, 0xf,
+                                           1);  // row_shl1
+          accm += __builtin_amdgcn_mov_dpp(sum4[n][y][2], 0x102, 0xf, 0xf,
+                                           1);  // row_shl2
+          accm += __builtin_amdgcn_mov_dpp(sum4[n][y][3], 0x103, 0xf, 0xf,
+                                           1);  // row_shl3
+          accm += __builtin_amdgcn_mov_dpp(accm, 0x104, 0xf, 0xf,
+                                           1);  // row_shl4
+          accm += __builtin_amdgcn_mov_dpp(accm, 0x108, 0xf, 0xf,
+                                           1);  // row_shl8
+          accm = __builtin_amdgcn_mov_dpp(accm, 0x11f, 0xf, 0xf,
+                                          1);  // row_shr15
+          accm += __builtin_amdgcn_mov_dpp(accm, 0x142, 0xf, 0xf,
+                                           1);  // ROW_BCAST15
+          accm += __builtin_amdgcn_mov_dpp(accm, 0x143, 0xf, 0xf,
+                                           1);  // ROW_BCAST31
+          sum4[n][y][0] = accm;
+        }
+      }
+      if (threadIdx.x == (THRDS - 1)) {
+        scalar_t biases[N][YTILE] = {};
+        if (BIAS)
+          for (int n = 0; n < N; n++) {
+            for (int y = 0; y < YTILE; y++) {
+              biases[n][y] = BIAS[(m + y) % Bx + (n % By) * Bx];
+            }
+          }
+        for (int n = 0; n < N; n++) {
+          for (int y = 0; y < YTILE; y++) {
+            if (commitColumn[y]) {
+              sum4[n][y][0] += __bfloat162float(biases[n][y]);
+              C[m + y + n * M] = __float2bfloat16(sum4[n][y][0]);
+            }
+          }
+        }
+      }
+  #endif  // __HIP__GFX9__ (MFMA path)
+    }
+
+    m += CuCount * _WvPrGrp * YTILE;
+    kBase = 0;
+
+    // Check whether there will be fragmentation!
+    // This will happen only for the last wave!
+    if (m < M && (m + YTILE) >= M) {
+      uint32_t startColumn = M - YTILE;
+      for (uint32_t i = 0; i < (m - startColumn); i++) {
+        commitColumn[i] = 0;
+      }
+      m = startColumn;
+    }
+  }
+}
+#else
+template <typename scalar_t, int THRDS, int YTILE, int WvPrGrp, int A_CHUNK,
+          int UNRL, int N>
+__global__ void wvSplitK_hf_big_(const int K, const int Kbp, const int Kap,
+                                 const int M, const int Bx, const int By,
+                                 const scalar_t* B,
+                                 const scalar_t* __restrict__ A,
+                                 const scalar_t* __restrict__ BIAS, scalar_t* C,
+                                 const int _WvPrGrp, const int CuCount) {
+  UNREACHABLE_CODE;
+}
+#endif
+
+// Find the min val of div2 that doesn't increase N/(div1*div2)
+inline int mindiv(int N, int div1, int div2) {
+  int nPrRnd = div1 * div2;
+  int rnds[13];
+  for (int i = 0; i < 13; i++) {
+    rnds[i] = (N + nPrRnd - 1) / nPrRnd;
+    nPrRnd -= div1;
+  }
+  for (int i = 12; i >= 0; i--)
+    if (rnds[0] == rnds[i]) return (div2 - i);
+  return 0;
+}
+
+// This version targets cases skinny where CUs are not filled
+// Wave-SplitK is used with reduction done via atomics.
+#if defined(__gfx950__)
+  #define WVSPLITKRC_1KPASS
+template <typename scalar_t, int THRDS, int YTILE, int WvPrGrp, int A_CHUNK,
+          int UNRL, int N, int GrpsShrB, int CHUNKK, int DTRMNSTC>
+__global__ void __launch_bounds__(WvPrGrp* THRDS)
+    __attribute__((amdgpu_waves_per_eu(1, 1)))
+    wvSplitKrc_(const int actlN, const int K, const int Kap, const int M,
+                const int Bx, const int By, const scalar_t* __restrict__ A,
+                const scalar_t* __restrict__ B,
+                const scalar_t* __restrict__ BIAS, float* glbl, int* cntr,
+                scalar_t* C, const int CuCount) {
+  constexpr int NTILE = 16;
+  constexpr int APAD = 1;
+  constexpr int ASTRD = 64;
+  constexpr int BPAD = 1;
+  constexpr int WVLDS_ = THRDS * A_CHUNK / CHUNKK;
+  constexpr int WVLDS = ((WVLDS_ + A_CHUNK * BPAD)) * YTILE;
+
+  constexpr int max_lds_len = LDS_SIZE / 2;
+
+  using scalar16 =
+      __attribute__((__vector_size__((A_CHUNK * 2) * sizeof(float)))) float;
+  using scalar8 =
+      __attribute__((__vector_size__((A_CHUNK / 2) * sizeof(float)))) float;
+  using half4 = __attribute__((__vector_size__(4 * sizeof(__bf16)))) __bf16;
+  union bigType {
+    scalar_t h[A_CHUNK];
+    float f[A_CHUNK / 2];
+    unsigned int i[A_CHUNK / 2];
+    float2 f2[A_CHUNK / 4];
+    unsigned long l[A_CHUNK / 4];
+    double d[A_CHUNK / 4];
+    half4 h4[A_CHUNK / 4];
+    scalar8 h8;
+  };
+  using big4 = __attribute__((__vector_size__(4 * sizeof(bigType)))) __bf16;
+
+  // The main-loop staging areas are separated from the split-K readback by a
+  // __syncthreads(), so the readback may reuse all of LDS.
+  __shared__ union {
+    struct {
+      scalar_t stg[WvPrGrp * WVLDS / GrpsShrB];
+      scalar_t s[max_lds_len - WvPrGrp * WVLDS / GrpsShrB];
+    } mainloop;
+    scalar_t all[max_lds_len];
+  } lds;
+  auto& stg = lds.mainloop.stg;
+  auto& s = lds.mainloop.s;
+  unsigned int* myStg = (unsigned int*)(&stg[WVLDS * (threadIdx.y / GrpsShrB)]);
+
+  #ifndef WVSPLITKRC_1KPASS
+  constexpr int TUC_ = (THRDS * UNRL * A_CHUNK);
+  // find biggest k size that fits padded into LDS
+  constexpr uint32_t kFit__ = (max_lds_len - WvPrGrp * WVLDS / GrpsShrB) / N;
+  constexpr uint32_t kFit_ = (kFit__ * ASTRD) / (APAD + ASTRD);
+  uint32_t kFit = kFit_ - (kFit_ % TUC_);
+  uint32_t kfitsPerRdc = (K + kFit - 1) / kFit;
+
+  // find best k split to fill the CUs
+  if (((K + kfitsPerRdc * kFit - 1) / (kfitsPerRdc * kFit)) * numCuWithFullK <=
+      CuCount)
+    while (true) {
+      while (kFit > TUC_) {
+        uint32_t kFit_ = kFit - TUC_;
+        if (((K + (kfitsPerRdc * kFit_ - 1)) / (kfitsPerRdc * kFit_)) *
+                numCuWithFullK >
+            CuCount)
+          break;
+        kFit = kFit_;
+      }
+      if (((K + ((kfitsPerRdc - 1) * kFit - 1)) / ((kfitsPerRdc - 1) * kFit)) *
+              numCuWithFullK <=
+          CuCount)
+        kfitsPerRdc--;
+      else
+        break;
+    }
+  #else
+  int constexpr kFit = 512 / CHUNKK;
+  int constexpr kfitsPerRdc = 1;
+  #endif
+
+  bool doRdc = true;  // Assuming (kfitsPerRdc * kFit < K) is always true
+  uint32_t numCuWithFullK =
+      ((M + (WvPrGrp * YTILE / GrpsShrB) - 1) / (WvPrGrp * YTILE / GrpsShrB));
+  uint32_t Mmod = numCuWithFullK * (WvPrGrp * YTILE / GrpsShrB);
+
+  // given above k-split, find this wave's position
+  uint32_t kFitPdd = kFit * CHUNKK + ((kFit * CHUNKK) / ASTRD) * APAD;
+  uint32_t m0 = (blockIdx.x * WvPrGrp / GrpsShrB) * YTILE;
+  uint32_t m1 = ((threadIdx.y % WvPrGrp) / GrpsShrB) * YTILE;
+  uint32_t m = (m0 + m1) % Mmod;
+  const uint32_t k_str = (m0 / Mmod) * kFit * kfitsPerRdc;
+  uint32_t k_end = (m0 / Mmod + 1) * kFit * kfitsPerRdc;
+  const uint32_t k_rnd = (K + kFit * kfitsPerRdc - 1) / (kFit * kfitsPerRdc);
+
+  scalar8 sum4[N / NTILE / GrpsShrB][1] = {0};
+  bigType bigB_[YTILE / GrpsShrB / CHUNKK][UNRL];
+  const uint32_t bLoader = (threadIdx.y % GrpsShrB);
+  uint32_t kBase = 0;
+  if (k_str >= K) return;
+  if (m >= Mmod) return;
+
+  bool noreloada = false;
+  constexpr bool FAST_UNSAFE_RDC_INIT = false;
+
+  #ifdef WVSPLITKRC_1KPASS
+  // Early glbl init, B[] loading, if 1KPASS
+  if constexpr (FAST_UNSAFE_RDC_INIT) {
+    if (m + (threadIdx.x % 16) < M)
+      if (doRdc)
+        if (k_str == 0) {
+          int mindx = m + (threadIdx.x % 16);
+          int nindx_ = (0 + (threadIdx.x / 16) * 4) + 0 * NTILE +
+                       (N / GrpsShrB) * (threadIdx.y % GrpsShrB);
+          int adr_ = mindx + M * nindx_ / 4;
+          __hip_atomic_store(&cntr[adr_], 0, __ATOMIC_RELAXED,
+                             __HIP_MEMORY_SCOPE_AGENT);
+          for (uint32_t nt = 0; nt < N / NTILE / GrpsShrB; nt++) {
+            for (uint32_t j = 0; j < 4; j++) {
+              int nindx = (j + (threadIdx.x / 16) * 4) + nt * NTILE +
+                          (N / GrpsShrB) * (threadIdx.y % GrpsShrB);
+              int adr = mindx + M * nindx;
+              __hip_atomic_store(&glbl[adr], 0, __ATOMIC_RELAXED,
+                                 __HIP_MEMORY_SCOPE_AGENT);
+            }
+          }
+        }
+  }
+
+    // Load first B[] chunk
+    #pragma unroll
+  for (uint32_t k2 = 0; k2 < UNRL; k2++) {
+    uint32_t k = k_str + k2 * THRDS * A_CHUNK;
+    uint32_t k_ = k + (threadIdx.x % (THRDS / CHUNKK)) * A_CHUNK;
+    const scalar_t* B_ = &B[min__(k_, K - A_CHUNK)];
+    #pragma unroll
+    for (uint32_t y = 0; y < YTILE / GrpsShrB; y += CHUNKK)
+      bigB_[y / CHUNKK][k2].h8 = (loadnt(
+          (scalar8*)(&B_[min__((y + threadIdx.x / (THRDS / CHUNKK)) * GrpsShrB +
+                                   bLoader + m,
+                               M - 1) *
+                         K])));
+  }
+  {
+  #else
+  while (m < Mmod) {
+  #endif
+
+  #ifndef WVSPLITKRC_1KPASS
+    if constexpr (FAST_UNSAFE_RDC_INIT) {
+      if (m + (threadIdx.x % 16) < M)
+        if (doRdc)
+          if (k_str == 0) {
+            int mindx = m + (threadIdx.x % 16);
+            int nindx_ = (0 + (threadIdx.x / 16) * 4) + 0 * NTILE +
+                         (N / GrpsShrB) * (threadIdx.y % GrpsShrB);
+            int adr_ = mindx + M * nindx_ / 4;
+            __hip_atomic_store(&cntr[adr_], 0, __ATOMIC_RELAXED,
+                               __HIP_MEMORY_SCOPE_AGENT);
+            for (uint32_t nt = 0; nt < N / NTILE / GrpsShrB; nt++) {
+              for (uint32_t j = 0; j < 4; j++) {
+                int nindx = (j + (threadIdx.x / 16) * 4) + nt * NTILE +
+                            (N / GrpsShrB) * (threadIdx.y % GrpsShrB);
+                int adr = mindx + M * nindx;
+                __hip_atomic_store(&glbl[adr], 0, __ATOMIC_RELAXED,
+                                   __HIP_MEMORY_SCOPE_AGENT);
+              }
+            }
+          }
+    }
+
+  #endif
+
+  #ifndef WVSPLITKRC_1KPASS
+    for (uint32_t k1 = k_str; k1 < k_end; k1 += THRDS * A_CHUNK * UNRL) {
+  #else
+    const uint32_t k1 = k_str;
+    {
+  #endif
+  #ifndef WVSPLITKRC_1KPASS
+      const bool reloada = (!noreloada) &&
+                           ((k1 == k_str) || (k1 == k_str + kBase + kFit)) &&
+                           (k1 < k_end);
+      // load next chunk of A[] to LDS
+      if (reloada) {
+        if (k1 != k_str) kBase += kFit;
+        __syncthreads();
+  #else
+      const bool reloada = (!noreloada) &&
+                           ((k1 == k_str) || (k1 == k_str + kBase + kFit)) &&
+                           (k1 < k_end);
+      if (reloada) {
+  #endif
+        constexpr int sprdN = 4;
+        const uint32_t thrd = threadIdx.x % (THRDS / CHUNKK);
+
+  #ifndef WVSPLITKRC_1KPASS
+    #pragma unroll
+        for (int k = 0; k < kFit;
+             k += (THRDS * (WvPrGrp / sprdN) * A_CHUNK) / CHUNKK) {
+  #else
+        const unsigned int k = 0;
+        {
+  #endif
+          unsigned int kOff = k + (thrd * A_CHUNK);
+          unsigned int kOffcp = min__(K - A_CHUNK, k_str + kOff);
+          for (unsigned int n = 0; n < N; n += CHUNKK * sprdN) {
+            __builtin_amdgcn_global_load_lds(
+                (int*)(&A[min__(Kap * actlN - A_CHUNK,
+                                kOffcp + Kap * (n / CHUNKK +
+                                                (N / CHUNKK) * (threadIdx.x /
+                                                                (64 / CHUNKK)) +
+                                                (threadIdx.y % sprdN)))]),
+                (int*)(&s[(k +
+                           kFitPdd * ((n / CHUNKK) + (threadIdx.y % sprdN)))]),
+                16, 0, 0);
+          }
+
+          // Stage loaded B[] to LDS for MFMA swizzling...
+          for (uint32_t k2 = 0; k2 < UNRL; k2++) {
+            uint32_t k = k1 + k2 * THRDS * A_CHUNK;
+            uint32_t k_ = k + (threadIdx.x % (THRDS / CHUNKK)) * A_CHUNK;
+            const bool oob_k = (k_ >= K);
+            for (uint32_t y = 0; y < YTILE / GrpsShrB; y += CHUNKK) {
+              uint32_t idx =
+                  (threadIdx.x % (THRDS / CHUNKK)) * 4 +
+                  ((y + threadIdx.x / (THRDS / CHUNKK)) * GrpsShrB + bLoader) *
+                      ((THRDS / CHUNKK + BPAD) * 4);
+              // zero out if oob
+              *((scalar8*)&myStg[idx]) =
+                  (oob_k)  // TODO: ever necessary (y*GrpsShrB+bLoader+m>=M) ?
+                      ? 0
+                      : bigB_[y / CHUNKK][k2].h8;
+            }
+          }
+        }
+      }
+    }
+  #ifndef WVSPLITKRC_1KPASS
+    // Fire load of next B[] chunk...
+    if ((k1 + THRDS * A_CHUNK * UNRL < k_end) &&
+        (k1 + THRDS * A_CHUNK * UNRL < K))
+    #pragma unroll
+      for (uint32_t k2 = 0; k2 < UNRL; k2++) {
+        uint32_t k = k1 + THRDS * A_CHUNK * UNRL + k2 * THRDS * A_CHUNK;
+        uint32_t k_ = k + threadIdx.x * A_CHUNK;
+        const scalar_t* B_ = &B[min__(k_, K - A_CHUNK)];
+    #pragma unroll
+        for (uint32_t y = 0; y < YTILE / GrpsShrB; y += CHUNKK)
+          bigB_[y / CHUNKK][k2].h8 = (loadnt(
+              (scalar8*)(&B_[min__((y + threadIdx.x / (THRDS / CHUNKK)) *
+                                           GrpsShrB +
+                                       bLoader + m,
+                                   M - 1) *
+                             K])));
+      }
+  #endif
+
+    // B[] staging is cooperative across GrpsShrB, so sync here before reading
+    // back. This wait is currently inserted by compiler, but not guaranteed.
+    asm volatile("s_waitcnt 0");
+    __syncthreads();
+
+    // read back B[] swizzled for MFMA...
+    bigType bigB[YTILE / CHUNKK][UNRL];
+    for (uint32_t k2 = 0; k2 < UNRL; k2++) {
+      for (uint32_t y = 0; y < YTILE / CHUNKK; y++) {
+        unsigned int idx =
+            (threadIdx.x % YTILE) * ((THRDS / CHUNKK + BPAD) * 4) +
+            (threadIdx.x / YTILE) * 4 + y * 16;
+        bigB[y][k2].h8 = *((scalar8*)&myStg[idx]);
+      }
+    }
+
+    // rReadback A[] swizzled for MFMA...
+    bigType bigA[N / GrpsShrB / CHUNKK][UNRL];
+  #pragma unroll
+    for (uint32_t k2 = 0; k2 < UNRL; k2++) {
+      uint32_t k = k1 + k2 * THRDS * A_CHUNK - kBase - k_str;
+  #pragma unroll
+      for (uint32_t nt = 0; nt < N / GrpsShrB; nt += NTILE)
+  #pragma unroll
+        for (uint32_t n = 0; n < NTILE / CHUNKK; n++) {
+          uint32_t idxa =
+              ((nt + (N / GrpsShrB) * (threadIdx.y % GrpsShrB)) % (N / CHUNKK) +
+               (threadIdx.x % NTILE)) *
+                  kFitPdd +
+              ((nt + (N / GrpsShrB) * (threadIdx.y % GrpsShrB)) /
+               (N / CHUNKK)) *
+                  A_CHUNK * (64 / CHUNKK) +
+              A_CHUNK * ((threadIdx.x / NTILE) + n * 4) + k;
+          bigA[nt / CHUNKK + n][k2] = *((const bigType*)(&(s[idxa])));
+        }
+    }
+
+    // Do the MFMAs
+  #pragma unroll
+    for (uint32_t k2 = 0; k2 < UNRL; k2++) {
+  #pragma unroll
+      for (uint32_t nt = 0; nt < N / NTILE / GrpsShrB; nt++) {
+  #pragma unroll
+        for (uint32_t j = 0; j < YTILE / CHUNKK; j++) {
+          if constexpr (std::is_same_v<scalar_t, half>) {
+            sum4[nt][0] = __builtin_amdgcn_mfma_f32_16x16x32_f16(
+                bigA[nt * (YTILE / CHUNKK) + j][k2].h8, bigB[j][k2].h8,
+                sum4[nt][0], 0, 0, 0);
+          } else {  // bf16
+            sum4[nt][0] = __builtin_amdgcn_mfma_f32_16x16x32_bf16(
+                bigA[nt * (YTILE / CHUNKK) + j][k2].h8, bigB[j][k2].h8,
+                sum4[nt][0], 0, 0, 0);
+          }
+        }
+      }
+    }
+  }
+
+  union flt4 {
+    scalar8 s8;
+    float2 f2[2];
+    float4 f4;
+  };
+  if (m + (threadIdx.x % 16) < M) {
+    int my_cntr;
+    int mindx = m + (threadIdx.x % 16);
+    int g_mindx = m * 4 + (threadIdx.x % 64);  // coalesced atomic reduction
+    scalar_t biases[N / NTILE / GrpsShrB][4] = {};
+    // Atomic add the output, read biases
+    for (uint32_t nt = 0; nt < N / NTILE / GrpsShrB; nt++) {
+      int g_nindx =
+          (nt * NTILE + (N / GrpsShrB) * (threadIdx.y % GrpsShrB)) / 4;
+      int g_adr = g_mindx * 4 + 0 + M * g_nindx * 4;
+      if (DTRMNSTC) {
+        flt4 flt4_ = {.s8 = sum4[nt][0]};
+        __hip_atomic_store((float2*)&glbl[g_adr + M * N * (m0 / Mmod)],
+                           flt4_.f2[0], __ATOMIC_RELAXED,
+                           __HIP_MEMORY_SCOPE_AGENT);
+        __hip_atomic_store((float2*)&glbl[g_adr + 2 + M * N * (m0 / Mmod)],
+                           flt4_.f2[1], __ATOMIC_RELAXED,
+                           __HIP_MEMORY_SCOPE_AGENT);
+      } else {
+        for (uint32_t j = 0; j < 4; j++)
+          atomicAdd((&glbl[g_adr + j]), sum4[nt][0][j]);
+      }
+    }
+
+    __atomic_signal_fence(__ATOMIC_SEQ_CST);
+    asm volatile("s_waitcnt vmcnt(0)" ::: "memory");
+    __atomic_signal_fence(__ATOMIC_SEQ_CST);
+
+    int nindx_ = (0 + (threadIdx.x / 16) * 4) + 0 * NTILE +
+                 (N / GrpsShrB) * (threadIdx.y % GrpsShrB);
+    int adr_ = mindx + M * nindx_ / 4;
+    my_cntr = atomicAdd(&cntr[adr_], 1);
+
+    // make sure LDS is free for write out staging
+    if (DTRMNSTC) __syncthreads();
+
+    // Update the complete counter
+    flt4 vals[N / NTILE / GrpsShrB] = {};
+    // If we're the last k-shard, read back the value and convert...
+    if (my_cntr + 1 == k_rnd) {
+      cntr[adr_] = 0;  // clear for next round
+      if constexpr (DTRMNSTC) {
+        constexpr uint32_t NT = N / NTILE / GrpsShrB;
+        // The readback stages k-shard partials through LDS, which bounds how
+        // many shards may be in flight at once.
+        constexpr uint32_t LDS_F4 =
+            max_lds_len * sizeof(scalar_t) / sizeof(float4);
+        constexpr uint32_t KSBMAX = LDS_F4 / (THRDS * 4 * NT);
+        static_assert(KSBMAX >= 1, "LDS cannot stage even one k-shard");
+        const uint32_t KSB = (k_rnd < KSBMAX) ? k_rnd : KSBMAX;
+
+        // First batch is peeled; it is the only batch for most shapes.
+  #pragma unroll
+        for (uint32_t kb = 0; kb < KSB; kb++) {
+          for (uint32_t nt = 0; nt < NT; nt++) {
+            int g_nindx =
+                (nt * NTILE + (N / GrpsShrB) * (threadIdx.y % GrpsShrB)) / 4;
+            int g_adr = g_mindx * 4 + 0 + M * g_nindx * 4;
+            __builtin_amdgcn_global_load_lds(
+                (float4*)(&glbl[g_adr + M * N * kb]),
+                &(((float4*)lds.all)[(threadIdx.y * THRDS) + kb * THRDS * 4 +
+                                     nt * THRDS * 4 * KSB]),
+                16, 0, 0);
+          }
+        }
+        if (BIAS)  // overlaps the DMAs above
+          for (uint32_t nt = 0; nt < NT; nt++) {
+            for (uint32_t j = 0; j < 4; j++) {
+              int nindx = (j + (threadIdx.x / 16) * 4) + nt * NTILE +
+                          (N / GrpsShrB) * (threadIdx.y % GrpsShrB);
+              biases[nt][j] = BIAS[(mindx % Bx) + (nindx % By) * Bx];
+            }
+          }
+        asm volatile("s_waitcnt vmcnt(0)" ::: "memory");
+        for (uint32_t kb = 0; kb < KSB; kb++) {
+          for (uint32_t nt = 0; nt < NT; nt++) {
+            vals[nt].f4 +=
+                ((float4*)lds.all)[(threadIdx.x + threadIdx.y * THRDS) +
+                                   kb * THRDS * 4 + nt * THRDS * 4 * KSB];
+          }
+        }
+
+        for (uint32_t ks0 = KSB; ks0 < k_rnd; ks0 += KSB) {
+          const uint32_t ksn = (k_rnd - ks0 < KSB) ? (k_rnd - ks0) : KSB;
+          // prior reads must retire before the staging is overwritten
+          asm volatile("s_waitcnt lgkmcnt(0)" ::: "memory");
+          for (uint32_t kb = 0; kb < ksn; kb++) {
+            for (uint32_t nt = 0; nt < NT; nt++) {
+              int g_nindx =
+                  (nt * NTILE + (N / GrpsShrB) * (threadIdx.y % GrpsShrB)) / 4;
+              int g_adr = g_mindx * 4 + 0 + M * g_nindx * 4;
+              __builtin_amdgcn_global_load_lds(
+                  (float4*)(&glbl[g_adr + M * N * (ks0 + kb)]),
+                  &(((float4*)lds.all)[(threadIdx.y * THRDS) + kb * THRDS * 4 +
+                                       nt * THRDS * 4 * KSB]),
+                  16, 0, 0);
+            }
+          }
+          asm volatile("s_waitcnt vmcnt(0)" ::: "memory");
+          for (uint32_t kb = 0; kb < ksn; kb++) {
+            for (uint32_t nt = 0; nt < NT; nt++) {
+              vals[nt].f4 +=
+                  ((float4*)lds.all)[(threadIdx.x + threadIdx.y * THRDS) +
+                                     kb * THRDS * 4 + nt * THRDS * 4 * KSB];
+            }
+          }
+        }
+      } else {
+        for (uint32_t nt = 0; nt < N / NTILE / GrpsShrB; nt++) {
+          int g_nindx =
+              (nt * NTILE + (N / GrpsShrB) * (threadIdx.y % GrpsShrB)) / 4;
+          int g_adr = g_mindx * 4 + 0 + M * g_nindx * 4;
+          vals[nt].f4 = *(float4*)(&glbl[g_adr]);
+          *(float4*)(&glbl[g_adr]) = {};  // clear out for next round
+        }
+        if (BIAS)
+          for (uint32_t nt = 0; nt < N / NTILE / GrpsShrB; nt++) {
+            for (uint32_t j = 0; j < 4; j++) {
+              int nindx = (j + (threadIdx.x / 16) * 4) + nt * NTILE +
+                          (N / GrpsShrB) * (threadIdx.y % GrpsShrB);
+              biases[nt][j] = BIAS[(mindx % Bx) + (nindx % By) * Bx];
+            }
+          }
+      }
+      __builtin_amdgcn_sched_barrier(0);
+      for (uint32_t nt = 0; nt < N / NTILE / GrpsShrB; nt++) {
+        for (uint32_t j = 0; j < 4; j++) {
+          int nindx = (j + (threadIdx.x / 16) * 4) + nt * NTILE +
+                      (N / GrpsShrB) * (threadIdx.y % GrpsShrB);
+          if (nindx < actlN) {
+            int adr = mindx + M * nindx;
+            if constexpr (std::is_same_v<scalar_t, __hip_bfloat16>) {
+              vals[nt].s8[j] += __bfloat162float(biases[nt][j]);
+              C[adr] = __float2bfloat16(vals[nt].s8[j]);
+            } else {
+              vals[nt].s8[j] += __half2float(biases[nt][j]);
+              C[adr] = __float2half(vals[nt].s8[j]);
+            }
+          }
+        }
+      }
+    }
+
+  #ifndef WVSPLITKRC_1KPASS
+    m0 += CuCount * WvPrGrp * YTILE / GrpsShrB;
+    m = (m0 + m1) % Mmod;
+    k_str = (m0 / Mmod) * kFit * kfitsPerRdc;
+    k_end = (m0 / Mmod + 1) * kFit * kfitsPerRdc;
+    if (k_str >= K) break;
+    kBase = 0;
+  #endif
+  }
+}
+#else
+template <typename scalar_t, int THRDS, int YTILE, int WvPrGrp, int A_CHUNK,
+          int UNRL, int N, int GrpsShrB, int CHUNKK, int DTRMNSTC>
+__global__ void wvSplitKrc_(const int actlN, const int K, const int Kap,
+                            const int M, const int Bx, const int By,
+                            const scalar_t* B, const scalar_t* __restrict__ A,
+                            const scalar_t* __restrict__ BIAS, float* glbl,
+                            int* cntr, scalar_t* C, const int CuCount) {
+  UNREACHABLE_CODE;
+}
+#endif  // defined(__HIP__GFX9__) TODO: Add NAVI support
+
+#if defined(__HIP__MI3XX__) || defined(__GFX12__)
+template <typename scalar_t, typename fp8_t, int THRDS, int YTILE, int WvPrGrp,
+          int A_CHUNK, int UNRL, int N>
+__global__ void __launch_bounds__(WvPrGrp* THRDS)
+    wvSplitKQ_hf_sml_(const int K, const int Kap, const int Kbp, const int M,
+                      const int Bx, const int By, const fp8_t* B,
+                      const fp8_t* __restrict__ A,
+                      const scalar_t* __restrict__ BIAS, scalar_t* C,
+                      const float* __restrict__ s_A,
+                      const float* __restrict__ s_B, const int _WvPrGrp,
+                      const int CuCount) {
+  constexpr int max_lds_len = LDS_SIZE;
+  using scalar8 =
+      __attribute__((__vector_size__((A_CHUNK / 4) * sizeof(float)))) float;
+  using intx2 = __attribute__((__vector_size__(2 * sizeof(int)))) int;
+  using intx4 = __attribute__((__vector_size__(4 * sizeof(int)))) int;
+  union bigType {
+    char f8[A_CHUNK];
+    char2 c2[A_CHUNK / 2];
+    scalar_t h[A_CHUNK / 2];
+    float f[A_CHUNK / 4];
+    int i[A_CHUNK / 4];
+    long l[A_CHUNK / 8];
+    intx4 l2[A_CHUNK / 16];
+    scalar8 h8;
+  };
+
+  __shared__ fp8_t s[max_lds_len];
+
+  for (uint32_t k = (threadIdx.y * THRDS + threadIdx.x) * A_CHUNK;
+       k < min__(Kap * N, max_lds_len); k += THRDS * WvPrGrp * A_CHUNK) {
+  #if defined(__gfx950__)
+    __builtin_amdgcn_global_load_lds((int*)(&A[k]), (int*)(&s[k]), 16, 0, 0);
+  #else
+    *((bigType*)(&s[k])) = *((bigType*)(&A[k]));
+  #endif
+  }
+  asm volatile("s_waitcnt vmcnt(0)");
+  __syncthreads();
+
+  if (threadIdx.y >= _WvPrGrp) return;
+
+  uint32_t m = (blockIdx.x * _WvPrGrp + (threadIdx.y % _WvPrGrp)) * YTILE;
+
+  float sA = *s_A;
+  float sB = *s_B;
+
+  while (m < M) {
+  #ifdef __GFX12__
+    // gfx12: per-lane scalar accumulation via v_dot4_f32_fp8_fp8
+    float sum[N][YTILE] = {};
+  #else
+    // gfx9: MFMA accumulation
+    scalar8 sum[N][YTILE] = {};
+  #endif
+    for (uint32_t k1 = 0; k1 < K; k1 += THRDS * A_CHUNK * UNRL) {
+      bigType bigA[N][UNRL] = {};
+      bigType bigB[YTILE][UNRL];
+
+      // Fetch the weight matrix from memory!
+  #pragma unroll
+      for (uint32_t k2 = 0; k2 < UNRL; k2++) {
+        uint32_t k = k1 + k2 * THRDS * A_CHUNK;
+        uint32_t k_ = k + threadIdx.x * A_CHUNK;
+        const fp8_t* B_ = &B[min__(k_, K - A_CHUNK)];
+  #pragma unroll
+        for (uint32_t y = 0; y < YTILE; ++y) {
+          bigB[y][k2].h8 = (loadnt((scalar8*)(&B_[min__(y + m, M - 1) * Kbp])));
+        }
+      }
+
+  // Fetch activation matrix from either just LDS or from both LDS / memory
+  #pragma unroll
+      for (uint32_t k2 = 0; k2 < UNRL; k2++) {
+        uint32_t k = k1 + k2 * THRDS * A_CHUNK;
+        uint32_t k_ = k + threadIdx.x * A_CHUNK;
+        if (k_ >= K) break;
+        for (int n = 0; n < N; n++) {
+          bigA[n][k2] = *((const bigType*)(&(s[k_ + Kap * n])));
+        }
+      }
+
+  // Do the matrix multiplication in interleaved manner
+  #pragma unroll
+      for (uint32_t k2 = 0; k2 < UNRL; k2++) {
+        for (uint32_t n = 0; n < N; n++) {
+  #ifdef __GFX12__
+          // gfx12: 4 x dot4 per A_CHUNK=16 bytes (4 FP8 per dot4)
+          for (int y = 0; y < YTILE; ++y) {
+    #pragma unroll
+            for (int i = 0; i < A_CHUNK / 4; i++) {
+              sum[n][y] = __builtin_amdgcn_dot4_f32_fp8_fp8(
+                  bigA[n][k2].i[i], bigB[y][k2].i[i], sum[n][y]);
+            }
+          }
+  #else
+          // gfx9: MFMA path
+          for (int i = 0; i < A_CHUNK; i += 8) {
+            for (int y = 0; y < YTILE; ++y) {
+              sum[n][y] = __builtin_amdgcn_mfma_f32_16x16x32_fp8_fp8(
+                  bigA[n][k2].l[i / 8], bigB[y][k2].l[i / 8], sum[n][y], 0, 0,
+                  0);
+            }
+          }
+  #endif
+        }
+      }
+    }
+
+    // Final reduction
+  #ifdef __GFX12__
+    // gfx12 wave32: DPP row_shr within 16-lane rows + cross-row shuffle
+    for (int n = 0; n < N; n++) {
+      for (int y = 0; y < YTILE; y++) {
+        asm("s_nop 0\n\tv_add_f32 %0, %2, %3 row_shr:8 bound_ctrl:0 "
+            : "=v"(sum[n][y])
+            : "0"(sum[n][y]), "v"(sum[n][y]), "v"(sum[n][y]));
+        asm("s_nop 0\n\tv_add_f32 %0, %2, %3 row_shr:4 bound_ctrl:0 "
+            : "=v"(sum[n][y])
+            : "0"(sum[n][y]), "v"(sum[n][y]), "v"(sum[n][y]));
+        asm("s_nop 0\n\tv_add_f32 %0, %2, %3 row_shr:2 bound_ctrl:0 "
+            : "=v"(sum[n][y])
+            : "0"(sum[n][y]), "v"(sum[n][y]), "v"(sum[n][y]));
+        asm("s_nop 0\n\tv_add_f32 %0, %2, %3 row_shr:1 bound_ctrl:0 "
+            : "=v"(sum[n][y])
+            : "0"(sum[n][y]), "v"(sum[n][y]), "v"(sum[n][y]));
+        sum[n][y] += __shfl_xor(sum[n][y], 16);
+      }
+    }
+  #else
+    // gfx9 MFMA reduction
+    for (int n = 0; n < N; n++) {
+      for (int y = 0; y < YTILE; y++) {
+        float accm0 = sum[n][y][0];
+        accm0 += __builtin_amdgcn_mov_dpp(sum[n][y][1], 0x101, 0xf, 0xf,
+                                          1);  // row_shl1
+        accm0 += __builtin_amdgcn_mov_dpp(sum[n][y][2], 0x102, 0xf, 0xf,
+                                          1);  // row_shl2
+        accm0 += __builtin_amdgcn_mov_dpp(sum[n][y][3], 0x103, 0xf, 0xf,
+                                          1);  // row_shl3
+        accm0 += __shfl_down(accm0, 20);
+        accm0 += __shfl_down(accm0, 40);
+        sum[n][y][0] = accm0;
+      }
+    }
+  #endif
+
+    const bool writeback_lane =
+  #ifdef __GFX12__
+        threadIdx.x == (THRDS - 1);
+  #else
+        threadIdx.x == 0;
+  #endif
+    if (writeback_lane) {
+      scalar_t biases[N][YTILE] = {};
+      if (BIAS)
+        for (int n = 0; n < N; n++) {
+          for (int y = 0; y < YTILE; y++) {
+            biases[n][y] = BIAS[(m + y) % Bx + (n % By) * Bx];
+          }
+        }
+      for (int n = 0; n < N; n++) {
+        for (int y = 0; y < YTILE; y++) {
+          if (y + m >= M) break;  // To avoid mem access fault.
+  #ifdef __GFX12__
+          float result = sum[n][y] * sA * sB;
+  #else
+          float result = sum[n][y][0] * sA * sB;
+  #endif
+          if constexpr (std::is_same_v<scalar_t, half>) {
+            result += __half2float(biases[n][y]);
+          } else if constexpr (std::is_same_v<scalar_t, __hip_bfloat16>) {
+            result += __bfloat162float(biases[n][y]);
+          }
+          C[m + y + n * M] = __float2s<scalar_t>(result);
+        }
+      }
+    }
+
+    m += CuCount * _WvPrGrp * YTILE;
+  }
+}
+#else   // !defined(__HIP__MI3XX__) && !defined(__GFX12__)
+template <typename scalar_t, typename fp8_t, int THRDS, int YTILE, int WvPrGrp,
+          int A_CHUNK, int UNRL, int N>
+__global__ void wvSplitKQ_hf_sml_(const int K, const int Kap, const int Kbp,
+                                  const int M, const int Bx, const int By,
+                                  const fp8_t* B, const fp8_t* __restrict__ A,
+                                  const scalar_t* __restrict__ BIAS,
+                                  scalar_t* C, const float* __restrict__ s_A,
+                                  const float* __restrict__ s_B,
+                                  const int _WvPrGrp, const int CuCount) {
+  UNREACHABLE_CODE;
+}
+#endif  // defined(__HIP__MI3XX__) || defined(__GFX12__)
+
+#if defined(__HIP__MI3XX__) || defined(__GFX12__)
+template <typename scalar_t, typename fp8_t, int THRDS, int YTILE, int WvPrGrp,
+          int A_CHUNK, int UNRL, int N>
+__global__ void __launch_bounds__(WvPrGrp* THRDS)
+    wvSplitKQ_hf_(const int K, const int Kap, const int Kbp, const int M,
+                  const int Bx, const int By, const fp8_t* B,
+                  const fp8_t* __restrict__ A,
+                  const scalar_t* __restrict__ BIAS, scalar_t* C,
+                  const float* __restrict__ s_A, const float* __restrict__ s_B,
+                  const int _WvPrGrp, const int CuCount) {
+  constexpr int max_lds_len = LDS_SIZE;
+  using scalar8 =
+      __attribute__((__vector_size__((A_CHUNK / 4) * sizeof(float)))) float;
+  using intx2 = __attribute__((__vector_size__(2 * sizeof(int)))) int;
+  using intx4 = __attribute__((__vector_size__(4 * sizeof(int)))) int;
+  union bigType {
+    char f8[A_CHUNK];
+    char2 c2[A_CHUNK / 2];
+    scalar_t h[A_CHUNK / 2];
+    float f[A_CHUNK / 4];
+    int i[A_CHUNK / 4];
+    long l[A_CHUNK / 8];
+    intx4 l2[A_CHUNK / 16];
+    scalar8 h8;
+  };
+
+  __shared__ fp8_t s[max_lds_len];
+
+  for (uint32_t k = (threadIdx.y * THRDS + threadIdx.x) * A_CHUNK;
+       k < min__(Kap * N, max_lds_len); k += THRDS * WvPrGrp * A_CHUNK) {
+  #if defined(__gfx950__)
+    __builtin_amdgcn_global_load_lds((int*)(&A[k]), (int*)(&s[k]), 16, 0, 0);
+  #else
+    *((bigType*)(&s[k])) = *((bigType*)(&A[k]));
+  #endif
+  }
+  asm volatile("s_waitcnt vmcnt(0)");
+  __syncthreads();
+
+  if (threadIdx.y >= _WvPrGrp) return;
+
+  uint32_t m = (blockIdx.x * _WvPrGrp + (threadIdx.y % _WvPrGrp)) * YTILE;
+
+  float sA = *s_A;
+  float sB = *s_B;
+
+  while (m < M) {
+  #ifdef __GFX12__
+    // gfx12: per-lane scalar accumulation via v_dot4_f32_fp8_fp8
+    float sum[N][YTILE] = {};
+  #else
+    // gfx9: MFMA accumulation
+    scalar8 sum[N][YTILE] = {};
+  #endif
+    for (uint32_t k1 = 0; k1 < K; k1 += THRDS * A_CHUNK * UNRL) {
+      bigType bigA[N][UNRL] = {};
+      bigType bigB[YTILE][UNRL];
+
+      // Fetch the weight matrix from memory!
+  #pragma unroll
+      for (uint32_t k2 = 0; k2 < UNRL; k2++) {
+        uint32_t k = k1 + k2 * THRDS * A_CHUNK;
+        uint32_t k_ = k + threadIdx.x * A_CHUNK;
+        const fp8_t* B_ = &B[min__(k_, K - A_CHUNK)];
+        for (int y = 0; y < YTILE; ++y) {
+          bigB[y][k2].h8 = (loadnt((scalar8*)(&B_[min__(y + m, M - 1) * Kbp])));
+        }
+      }
+
+  // Fetch activation matrix from either just LDS or from both LDS / memory
+  #pragma unroll
+      for (uint32_t k2 = 0; k2 < UNRL; k2++) {
+        uint32_t k = k1 + k2 * THRDS * A_CHUNK;
+        uint32_t k_ = k + threadIdx.x * A_CHUNK;
+        if (k_ >= K) break;
+        for (int n = 0; n < N; n++) {
+          if (k_ + Kap * n < max_lds_len)
+            bigA[n][k2] = *((const bigType*)(&(s[k_ + Kap * n])));
+          else
+            bigA[n][k2] = *((const bigType*)(&(A[k_ + Kap * n])));
+        }
+      }
+
+  // Do the matrix multiplication in interleaved manner
+  #pragma unroll
+      for (uint32_t k2 = 0; k2 < UNRL; k2++) {
+        for (uint32_t n = 0; n < N; n++) {
+  #ifdef __GFX12__
+          // gfx12: 4 x dot4 per A_CHUNK=16 bytes (4 FP8 per dot4)
+          for (int y = 0; y < YTILE; ++y) {
+    #pragma unroll
+            for (int i = 0; i < A_CHUNK / 4; i++) {
+              sum[n][y] = __builtin_amdgcn_dot4_f32_fp8_fp8(
+                  bigA[n][k2].i[i], bigB[y][k2].i[i], sum[n][y]);
+            }
+          }
+  #else
+          // gfx9: MFMA path
+          for (int i = 0; i < A_CHUNK; i += 8) {
+            for (int y = 0; y < YTILE; ++y) {
+              sum[n][y] = __builtin_amdgcn_mfma_f32_16x16x32_fp8_fp8(
+                  bigA[n][k2].l[i / 8], bigB[y][k2].l[i / 8], sum[n][y], 0, 0,
+                  0);
+            }
+          }
+  #endif
+        }
+      }
+    }
+
+    // Final reduction
+  #ifdef __GFX12__
+    // gfx12 wave32: DPP row_shr within 16-lane rows + cross-row shuffle
+    for (int n = 0; n < N; n++) {
+      for (int y = 0; y < YTILE; y++) {
+        asm("s_nop 0\n\tv_add_f32 %0, %2, %3 row_shr:8 bound_ctrl:0 "
+            : "=v"(sum[n][y])
+            : "0"(sum[n][y]), "v"(sum[n][y]), "v"(sum[n][y]));
+        asm("s_nop 0\n\tv_add_f32 %0, %2, %3 row_shr:4 bound_ctrl:0 "
+            : "=v"(sum[n][y])
+            : "0"(sum[n][y]), "v"(sum[n][y]), "v"(sum[n][y]));
+        asm("s_nop 0\n\tv_add_f32 %0, %2, %3 row_shr:2 bound_ctrl:0 "
+            : "=v"(sum[n][y])
+            : "0"(sum[n][y]), "v"(sum[n][y]), "v"(sum[n][y]));
+        asm("s_nop 0\n\tv_add_f32 %0, %2, %3 row_shr:1 bound_ctrl:0 "
+            : "=v"(sum[n][y])
+            : "0"(sum[n][y]), "v"(sum[n][y]), "v"(sum[n][y]));
+        sum[n][y] += __shfl_xor(sum[n][y], 16);
+      }
+    }
+  #else
+    // gfx9 MFMA reduction
+    for (int n = 0; n < N; n++) {
+      for (int y = 0; y < YTILE; y++) {
+        float accm0 = sum[n][y][0];
+        accm0 += __builtin_amdgcn_mov_dpp(sum[n][y][1], 0x101, 0xf, 0xf,
+                                          1);  // row_shl1
+        accm0 += __builtin_amdgcn_mov_dpp(sum[n][y][2], 0x102, 0xf, 0xf,
+                                          1);  // row_shl2
+        accm0 += __builtin_amdgcn_mov_dpp(sum[n][y][3], 0x103, 0xf, 0xf,
+                                          1);  // row_shl3
+        accm0 += __shfl_down(accm0, 20);
+        accm0 += __shfl_down(accm0, 40);
+        sum[n][y][0] = accm0;
+      }
+    }
+  #endif
+
+    const bool writeback_lane =
+  #ifdef __GFX12__
+        threadIdx.x == (THRDS - 1);
+  #else
+        threadIdx.x == 0;
+  #endif
+    if (writeback_lane) {
+      scalar_t biases[N][YTILE] = {};
+      if (BIAS)
+        for (int n = 0; n < N; n++) {
+          for (int y = 0; y < YTILE; y++) {
+            biases[n][y] = BIAS[(m + y) % Bx + (n % By) * Bx];
+          }
+        }
+      for (int n = 0; n < N; n++) {
+        for (int y = 0; y < YTILE; y++) {
+          if (y + m >= M) break;  // To avoid mem access fault.
+  #ifdef __GFX12__
+          float result = sum[n][y] * sA * sB;
+  #else
+          float result = sum[n][y][0] * sA * sB;
+  #endif
+          if constexpr (std::is_same_v<scalar_t, half>) {
+            result += __half2float(biases[n][y]);
+          } else if constexpr (std::is_same_v<scalar_t, __hip_bfloat16>) {
+            result += __bfloat162float(biases[n][y]);
+          }
+          C[m + y + n * M] = __float2s<scalar_t>(result);
+        }
+      }
+    }
+
+    m += CuCount * _WvPrGrp * YTILE;
+  }
+}
+#else   // !defined(__HIP__MI3XX__) && !defined(__GFX12__)
+template <typename scalar_t, typename fp8_t, int THRDS, int YTILE, int WvPrGrp,
+          int A_CHUNK, int UNRL, int N>
+__global__ void wvSplitKQ_hf_(const int K, const int Kap, const int Kbp,
+                              const int M, const int Bx, const int By,
+                              const fp8_t* B, const fp8_t* __restrict__ A,
+                              const scalar_t* __restrict__ BIAS, scalar_t* C,
+                              const float* __restrict__ s_A,
+                              const float* __restrict__ s_B, const int _WvPrGrp,
+                              const int CuCount) {
+  UNREACHABLE_CODE;
+}
+#endif  // defined(__HIP__MI3XX__) || defined(__GFX12__)
+
+// Do not leak this into the including translation units: skinny_gemms_int4.cuh
+// defines its own LDS_SIZE (64 KiB, no gfx950 case), so a shared TU must
+// never pick up one definition from the other by accident.
+#undef LDS_SIZE

@@ -154,8 +154,8 @@ def test_rocm_unquantized_gemm_rejects_unsupported_skinny_layouts(
 
 
 def _row_stride_padded(weight: torch.Tensor, pad: int) -> torch.Tensor:
-    """A weight whose row stride is offset by ``pad`` elements, as produced by
-    ``maybe_pad_weight_avoid_cache_aliasing``."""
+    """A weight whose row stride is offset by `pad` elements, as produced by
+    `maybe_pad_weight_avoid_cache_aliasing`."""
     padded = torch.nn.functional.pad(weight, (0, pad))[..., :-pad]
     assert padded.shape == weight.shape
     assert padded.stride() == (weight.shape[1] + pad, 1)
