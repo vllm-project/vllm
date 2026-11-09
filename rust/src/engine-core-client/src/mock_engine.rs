@@ -79,6 +79,8 @@ pub fn default_ready_response() -> EngineCoreReadyResponse {
         vllm_config: None,
         prefix_hash_config: None,
         cache_config_info: None,
+        kv_identity: None,
+        kv_identity_components: None,
         config_hash: None,
         enable_expert_parallel: false,
     }

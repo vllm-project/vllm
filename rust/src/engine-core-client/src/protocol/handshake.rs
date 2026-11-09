@@ -138,6 +138,13 @@ pub struct EngineCoreReadyResponse {
     /// `vllm:cache_config_info`.
     #[serde(default)]
     pub cache_config_info: Option<BTreeMap<String, String>>,
+    /// KV compatibility identity: engines exchange KV cache only when theirs
+    /// are equal.
+    #[serde(default)]
+    pub kv_identity: Option<String>,
+    /// What `kv_identity` digests: weights, config, code and libraries.
+    #[serde(default)]
+    pub kv_identity_components: Option<BTreeMap<String, String>>,
     /// `hash_config()` of the engine's initialized `VllmConfig`, the last part
     /// of `system_fingerprint`; `None` if hashing failed.
     #[serde(default)]

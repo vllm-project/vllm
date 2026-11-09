@@ -4175,6 +4175,14 @@ fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
     assert_eq!(ready_response.effective_attention_block_size, Some(64));
     assert_eq!(ready_response.config_hash.as_deref(), Some("0123456789"));
     assert!(ready_response.enable_expert_parallel);
+    assert_eq!(ready_response.kv_identity.as_deref(), Some("abc"));
+    assert_eq!(
+        ready_response.kv_identity_components,
+        Some(BTreeMap::from([
+            ("weights".to_string(), "w".to_string()),
+            ("weights_source".to_string(), "hf_cache".to_string()),
+        ]))
+    );
     assert_eq!(
         ready_response.cache_config_info,
         Some(BTreeMap::from([

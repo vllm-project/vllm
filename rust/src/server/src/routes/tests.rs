@@ -6,7 +6,7 @@
 // response body is fully drained, which closes the mock engine connection too
 // early and causes flaky `closed unexpectedly` failures.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -2842,6 +2842,43 @@ async fn kv_event_sources_reports_each_ready_engine() {
                 "hwm": 100000,
                 "max_queue_size": 100000,
                 "topic": "kv",
+            }
+        })
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn kv_identity_reports_each_ready_engine() {
+    let ready = vllm_engine_core_client::protocol::handshake::EngineCoreReadyResponse {
+        data_parallel_rank: 1,
+        kv_identity: Some("abc".to_string()),
+        kv_identity_components: Some(BTreeMap::from([
+            ("weights".to_string(), "w".to_string()),
+            ("weights_source".to_string(), "hf_cache".to_string()),
+        ])),
+        ..default_ready_response()
+    };
+    let (mut app, _engine_task) = test_dev_mode_app_with_ready(ready).await;
+    let response = app
+        .call(
+            Request::builder()
+                .uri("/kv_identity")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+    assert_eq!(
+        json,
+        json!({
+            "1": {
+                "kv_identity": "abc",
+                "components": {"weights": "w", "weights_source": "hf_cache"},
             }
         })
     );
