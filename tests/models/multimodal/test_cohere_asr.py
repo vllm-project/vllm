@@ -75,7 +75,7 @@ def test_relative_attention_fuses_score_accumulation(monkeypatch, query_len, key
     [(1.0, 13), (10.0, 125), (30.0, 375)],
 )
 def test_get_num_audio_tokens_streaming_estimate(audio_duration_s, expected_tokens):
-    """The duration-based estimate must convert ``window_stride`` (seconds) to a
+    """The duration-based estimate must convert `window_stride` (seconds) to a
     sample hop and divide by the encoder subsampling factor. Values are pinned to
     concrete numbers so a rounding regression is actually caught."""
     model_config = SimpleNamespace(
