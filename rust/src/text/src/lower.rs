@@ -73,7 +73,7 @@ pub fn lower_text_request(
 ) -> Result<PreparedTextRequest> {
     let prompt_len = prompt_token_ids.len() as u32;
     validate_prompt_token_ids(&prompt_token_ids, &sampling_limits)?;
-    validate_cache_salt(request.cache_salt.as_deref())?;
+    request.validate_cache_salt()?;
 
     let generate_request = GenerateRequest {
         request_id: request.request_id.clone(),
@@ -412,31 +412,6 @@ pub fn resolve_max_tokens(
 
     let request_max_tokens = user_max_tokens.or(default_max_tokens);
     Ok(request_max_tokens.map_or(model_max_tokens, |n| n.min(model_max_tokens)))
-}
-
-const MAX_CACHE_SALT_CHARS: usize = 128;
-const CACHE_SALT_EMPTY_MESSAGE: &str =
-    "Parameter 'cache_salt' must be a non-empty string if provided.";
-const CACHE_SALT_INVALID_MESSAGE: &str = "Parameter 'cache_salt' must be at most 128 characters and must \
-     not contain '@', '/', '\\\\', or NUL.";
-
-/// Mirror Python `validate_cache_salt`: at most 128 characters, and no
-/// `@`, `/`, `\`, or NUL. `None` (omitted salt) is allowed.
-fn validate_cache_salt(cache_salt: Option<&str>) -> Result<()> {
-    let Some(salt) = cache_salt else {
-        return Ok(());
-    };
-    if salt.is_empty() {
-        return Err(Error::InvalidCacheSalt {
-            message: CACHE_SALT_EMPTY_MESSAGE,
-        });
-    }
-    if salt.chars().count() > MAX_CACHE_SALT_CHARS || salt.contains(['@', '/', '\\', '\0']) {
-        return Err(Error::InvalidCacheSalt {
-            message: CACHE_SALT_INVALID_MESSAGE,
-        });
-    }
-    Ok(())
 }
 
 fn merge_unique_token_ids(
@@ -1873,6 +1848,7 @@ mod tests {
             vec![1, 2, 3],
             sample_sampling_hints(),
             sample_sampling_limits(),
+            StructuredOutputBackend::Xgrammar,
             &stub_tokenizer(),
         )
     }

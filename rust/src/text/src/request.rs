@@ -314,11 +314,16 @@ impl TextRequest {
                 request_id: self.request_id.clone(),
             });
         }
-        if self.cache_salt.as_deref().is_some_and(|salt| !is_valid_cache_salt(salt)) {
-            return Err(Error::InvalidCacheSalt);
-        }
+        self.validate_cache_salt()?;
         if self.mm_features.is_some() && self.prompt_truncation.is_some() {
             return Err(Error::TruncateUnsupportedWithMultimodal);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn validate_cache_salt(&self) -> Result<()> {
+        if self.cache_salt.as_deref().is_some_and(|salt| !is_valid_cache_salt(salt)) {
+            return Err(Error::InvalidCacheSalt);
         }
         Ok(())
     }
