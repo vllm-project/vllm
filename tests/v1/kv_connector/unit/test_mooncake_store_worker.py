@@ -418,7 +418,7 @@ def _make_kv_cache_config(
     block_size: int = 16,
     num_kv_heads: int = 8,
     prefix_cache_retention_interval: int | None = 0,
-) -> object:
+) -> KVCacheConfig:
     """Minimal single-group KVCacheConfig for topology tests."""
     from vllm.v1.kv_cache_interface import KVCacheConfig
 
@@ -2852,6 +2852,37 @@ def test_requester_worker_init_uses_positional_setup(tmp_path, monkeypatch):
         "10.0.0.7:50051",
     )
     assert w.coord.retention_interval == 0
+
+
+def test_worker_uses_engine_core_hash_block_size(tmp_path, monkeypatch):
+    """Request.block_hashes follow the core's hash unit, not a re-resolution
+    from the worker's (possibly hook-modified) cache_config."""
+    store = MagicMock()
+    store.setup.return_value = 0
+    _install_fake_mooncake(monkeypatch, store)
+    _patch_worker_runtime(monkeypatch)
+    monkeypatch.setenv(
+        "MOONCAKE_CONFIG_PATH",
+        _write_mooncake_config(
+            tmp_path,
+            {
+                "metadata_server": "P2PHANDSHAKE",
+                "local_buffer_size": "64mb",
+                "protocol": "tcp",
+                "device_name": "",
+                "master_server_address": "10.0.0.7:50051",
+            },
+        ),
+    )
+    kv_cache_config = _make_kv_cache_config()
+    kv_cache_config.hash_block_size = 8
+
+    w = worker.MooncakeStoreWorker(_make_vllm_config(), kv_cache_config)
+
+    assert w.block_size == 16
+    assert w.hash_block_size == 8
+    assert w.coord.hash_block_size == 8
+    assert all(db.hash_block_size == 8 for db in w.token_dbs)
 
 
 def test_requester_worker_init_prefers_local_hostname_override(

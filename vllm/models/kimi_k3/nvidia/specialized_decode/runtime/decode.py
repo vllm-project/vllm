@@ -12,11 +12,16 @@ from vllm.config import CUDAGraphMode, get_current_vllm_config
 from vllm.distributed import get_tp_group
 from vllm.distributed import tensor_model_parallel_all_reduce as all_reduce
 from vllm.forward_context import get_forward_context, is_forward_context_available
+from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import round_up
 
 from ...ops import attn_res
-from ..cutedsl.attn_res.prepared import PreparedAttnRes
+from ..cutedsl.attn_res.prepared import (
+    PreparedAttnRes,
+    statistics_blocks,
+    statistics_rows,
+)
 from ..cutedsl.common.embedding import PreparedEmbedding
 from ..cutedsl.common.twoshot import TwoShot
 from ..cutedsl.kda.prepared import PreparedKda
@@ -30,6 +35,7 @@ from ..cutedsl.moe.wide import WideMoE, WideScratch, wide_batches
 from ..cutedsl.oproj.prepared import OprojMailbox
 from ..recoverssm.state import install_layers as install_recoverssm_layers
 from ..recoverssm.state import install_model_state as install_recoverssm_model_state
+from .logits_gather import install_logits_gather
 from .prefetch import PrefetchController
 from .providers import (
     ATTENTION_MAX,
@@ -43,6 +49,8 @@ from .providers import (
     step_cap,
     wide_caps,
 )
+
+logger = init_logger(__name__)
 
 # The attention layer kinds of the wide-step caps.
 WIDE = sorted({*(kind for kind, _ in WIDE_ROWS), "kda"})
@@ -190,10 +198,47 @@ class SpecializedDecode:
         end = layers[-1].layer_idx + 1
         for index in self.aux_layers:
             (self.final if index == end else self.before[index]).bind_aux()
+        self.bind_statistics_ahead(layers)
         empty = partial(torch.empty, device=self.device, dtype=torch.bfloat16)
         self.hidden = (empty((64, 7168)), empty((64, 7168)))
         self.prefix = empty((64, 7168))
         self.blocks = empty((64, backbone.num_attn_res_blocks, 7168))
+
+    def bind_statistics_ahead(self, layers):
+        """For the `statistics_rows` of this (TP, DCP), each KDA layer that follows
+        a KDA layer and reads one of the `statistics_blocks` saved-block counts
+        takes its AttnRes saved-block statistics precomputed by the previous layer's
+        fused o-projection, whose own AttnRes reads the same saved blocks; FP32 rows
+        in two parities by the computing layer. Other layers and rows: unchanged."""
+        rows = statistics_rows(self.tp, self.dcp) & set(self.batches)
+        counts = statistics_blocks(self.tp, self.dcp)
+        if not rows:
+            return
+        cap = round_up(max(rows), 8)  # 16-byte aligned parity rows
+        dtype = dict(device=self.device, dtype=torch.float32)
+        mixture = torch.zeros((2, cap, 7168), **dtype)
+        scal = torch.zeros((2, cap, 2), **dtype)
+        self.buffers["attn_res.statistics"] = mixture, scal
+        bound = []
+        for host, target in zip(layers, layers[1:]):
+            kinds = {attention_kind(d.self_attn) for d in (host, target)}
+            nb = target.prev_valid_blocks
+            same = nb == host.prev_valid_blocks + host.is_block_write_layer
+            if kinds != {"kda"} or nb not in counts or not same:
+                continue
+            parity = host.layer_idx % 2
+            views = mixture[parity], scal[parity]
+            output = self.attention[host.layer_idx].output
+            batches = output.bind_ahead(target, *views, rows)
+            if batches:
+                self.before[target.layer_idx].bind_statistics(*views, batches)
+                bound.append(target.layer_idx)
+        logger.info_once(
+            "Specialized decode AttnRes statistics ahead: rows %s, %d layers %s",
+            tuple(sorted(rows)),
+            len(bound),
+            tuple(bound),
+        )
 
     def build_dep(self, rounded):
         """DEP: no full specialized step (its MoE, o-projection and AttnRes
@@ -290,7 +335,7 @@ class SpecializedDecode:
             up = module.routed_expert_up_proj.weight
             op = module.experts._k3_latent_moe_tail_op
             placement = tail_box, moe_layers.index(index), len(moe_layers)
-            tail = PreparedTail(op, norm, up, batches, placement)
+            tail = PreparedTail(op, norm, up, batches, placement, dcp=self.dcp)
             moe = PreparedMoE(
                 front, experts, tail, state, prefetch=prefetch, layer_idx=index
             )
@@ -310,8 +355,14 @@ class SpecializedDecode:
 
     def bind_model_state(self, state):
         """Install the runner-state side of the deferred RecoverSSM on the model
-        runner state (`recoverssm.state.install_model_state`)."""
+        runner state (`recoverssm.state.install_model_state`), and the TP
+        specialized decode's target logits gather (`logits_gather`)."""
         install_recoverssm_model_state(state)
+        model = getattr(state, "language_model", None)
+        if model is not None and not self.dep and self.hybrid is None:
+            install_logits_gather(
+                model, self.group, self.tp, self.rank, self.device, self.dcp
+            )
 
     @torch.no_grad()
     def process_weights_after_loading(self):

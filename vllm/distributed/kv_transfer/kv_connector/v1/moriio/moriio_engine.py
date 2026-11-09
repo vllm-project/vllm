@@ -396,7 +396,7 @@ class MoRIIOWriter:
             )
             if is_mamba:
                 plans = self._prepare_mamba_transfer_plans(
-                    task, request_info, target, remote_moriio_meta
+                    task, request_info, target, remote_moriio_meta, target_engine_id
                 )
             else:
                 plans = [
@@ -504,6 +504,7 @@ class MoRIIOWriter:
         request_info: RemoteAllocInfo,
         target: "WriteTarget | None" = None,
         remote_moriio_meta: MoRIIOAgentMetadata | None = None,
+        remote_engine_id: str | None = None,
     ) -> list[LayerTransferPlan]:
         """Plan both registered regions as one scheduled layer write."""
         assert request_info.block_ids is not None
@@ -537,21 +538,33 @@ class MoRIIOWriter:
                 target,
             )
         conv_session, ssm_session = self.worker._region_session_indices(task.layer_name)
-        return [
-            LayerTransferPlan(
-                request_id=task.request_id,
-                transfer_id=task.transfer_id,
-                layer_name=task.layer_name,
-                sess_idx=session,
-                transfer_local_offsets=local[region],
-                transfer_remote_offsets=remote[region],
-                transfer_sizes=sizes[region],
-            )
-            for session, region in (
+        plans = []
+        for region_index, (session, region) in enumerate(
+            (
                 (conv_session, slice(0, n_conv)),
                 (ssm_session, slice(n_conv, None)),
             )
-        ]
+        ):
+            local_offsets, remote_offsets = self.worker._mamba_region_mr_offsets(
+                task.layer_name,
+                region_index,
+                local[region],
+                remote[region],
+                remote_moriio_meta,
+                remote_engine_id,
+            )
+            plans.append(
+                LayerTransferPlan(
+                    request_id=task.request_id,
+                    transfer_id=task.transfer_id,
+                    layer_name=task.layer_name,
+                    sess_idx=session,
+                    transfer_local_offsets=local_offsets,
+                    transfer_remote_offsets=remote_offsets,
+                    transfer_sizes=sizes[region],
+                )
+            )
+        return plans
 
     def _do_layer_write(self, plan: LayerTransferPlan, sessions: list) -> list[Any]:
         """Perform the actual layer write.

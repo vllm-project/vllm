@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import dataclasses
 import random
+import subprocess
+import sys
 from concurrent.futures import Future
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -11,7 +13,9 @@ import pytest
 import torch
 
 from vllm.config import (
+    AttentionConfig,
     CacheConfig,
+    DeviceConfig,
     ECTransferConfig,
     KVTransferConfig,
     LoRAConfig,
@@ -42,6 +46,7 @@ from vllm.multimodal.inputs import (
     PlaceholderRange,
 )
 from vllm.outputs import RequestError
+from vllm.platforms import current_platform
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.utils.hashing import sha256
@@ -9172,3 +9177,82 @@ def test_cpu_encoder_input_updates_preserve_shm_handles():
     )
     assert scheduler.schedule().encoder_input_updates == {request.request_id: {1: None}}
     assert request.mm_features[0].data is handle
+
+
+def test_dcp_shardq_prefill_context_cap():
+    """Prefill rows whose context would overflow the DCP ShardQ workspace are
+    not co-scheduled; the first row of a step is always admitted."""
+    scheduler = create_scheduler(max_num_batched_tokens=8192)
+    # Workspace of 40 pages of 64 tokens; each 1600-token prompt needs 25.
+    scheduler.max_prefill_context_pages = 40
+    scheduler.prefill_context_page_tokens = 64
+    scheduler.max_decode_row_tokens = 1
+    for request in create_requests(num_requests=2, num_tokens=1600):
+        scheduler.add_request(request)
+
+    output = scheduler.schedule()
+    assert len(output.scheduled_new_reqs) == 1
+    assert len(scheduler.waiting) == 1
+
+    # Once the first finishes its prefill (now a decode row), the second fits.
+    model_runner_output = make_output(scheduler)
+    scheduler.update_from_output(output, model_runner_output)
+    output = scheduler.schedule()
+    assert len(output.scheduled_new_reqs) == 1
+    assert len(output.scheduled_cached_reqs.req_ids) == 1
+
+
+def test_dcp_shardq_scheduler_context_pages_follows_the_platform():
+    """The cap belongs to the DCP ShardQ path, which only runs on SM100.
+
+    Returning a cap elsewhere, ROCm included, would hold prefill rows back
+    for a workspace no step there ever gathers into.
+    """
+    from vllm.v1.attention.ops.dcp_shardq.context import (
+        capacity_pages,
+        scheduler_context_pages,
+    )
+
+    max_model_len = 2048
+    max_num_seqs = 16
+    # DCP ShardQ serves sparse MLA, so the config needs an MLA model.
+    model_config = ModelConfig(
+        model="deepseek-ai/DeepSeek-V2-Lite",
+        dtype="float16",
+        max_model_len=max_model_len,
+    )
+    vllm_config = VllmConfig(
+        model_config=model_config,
+        scheduler_config=SchedulerConfig(
+            max_num_seqs=max_num_seqs,
+            max_num_batched_tokens=8192,
+            max_model_len=max_model_len,
+            is_encoder_decoder=model_config.is_encoder_decoder,
+        ),
+        device_config=DeviceConfig(device="cpu"),
+        parallel_config=ParallelConfig(
+            tensor_parallel_size=2,
+            decode_context_parallel_size=2,
+            distributed_executor_backend="mp",
+        ),
+        attention_config=AttentionConfig(sparse_mla_shard_q=True),
+    )
+
+    pages = scheduler_context_pages(vllm_config)
+    if current_platform.is_device_capability_family(100):
+        assert pages == capacity_pages(max_model_len, max_num_seqs)
+    else:
+        assert pages is None
+
+    # DCP itself is a precondition on every platform.
+    vllm_config.parallel_config.decode_context_parallel_size = 1
+    assert scheduler_context_pages(vllm_config) is None
+
+
+def test_dcp_shardq_context_imports_without_cutedsl():
+    """The scheduler imports this module, so it must not need CuTeDSL."""
+    code = (
+        "import sys, vllm.v1.attention.ops.dcp_shardq.context; "
+        "assert 'cutlass' not in sys.modules"
+    )
+    subprocess.check_call([sys.executable, "-c", code])

@@ -36,6 +36,7 @@ from vllm.model_executor.layers.mla import (
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
+from vllm.model_executor.layers.sparse_attn_indexer import dcp_shardq_context
 from vllm.model_executor.utils import is_weights_pre_processed
 from vllm.models.kimi_k3.common.dsa_cache import (
     KimiK3IndexerCache,
@@ -51,7 +52,6 @@ from vllm.models.kimi_k3.nvidia.mla import (
     _GATE_MULTI_STREAM_TOKEN_THRESHOLD,
     _gate_sigmoid_mul,
 )
-from vllm.models.kimi_k3.nvidia.ops.dcp_topk_merge import init_dcp_topk_merge
 from vllm.models.kimi_k3.nvidia.ops.dsa_indexer import (
     dsa_fused_prologue,
     indexer_k_norm_quant_insert,
@@ -71,6 +71,7 @@ from vllm.v1.attention.backends.mla.index_group import (
     SparseMLAIndexGroupBuilder,
     get_sparse_mla_index_group_max_rows,
 )
+from vllm.v1.attention.ops.dcp_topk_merge import init_dcp_topk_merge
 
 logger = init_logger(__name__)
 
@@ -232,8 +233,8 @@ class KimiK3DSAIndexer(nn.Module):
         self.dcp_world_size = self._parallel_config.decode_context_parallel_size
         self.dcp_rank = get_dcp_group().rank_in_group if self.dcp_world_size > 1 else 0
         self._cp_kv_cache_interleave_size: int | None = None
-        # The specialized decode merges each rank's packed local top-N in one
-        # exchange (0 keeps the generic merge).
+        # Same as the upstream SparseAttnIndexer: decode merges each rank's
+        # packed local top-N in one exchange (0 keeps the generic merge).
         self.dcp_local_topk = init_dcp_topk_merge(vllm_config, index_topk)
 
     @property
@@ -294,7 +295,11 @@ class KimiK3DSAIndexer(nn.Module):
         prefill = getattr(attn_metadata.get(self.k_cache.prefix), "prefill", None)
         if prefill is None:
             return None
-        return prefill.shardq_gather_indices
+        if prefill.shardq_gather_indices is not None:
+            return prefill.shardq_gather_indices
+        # Under DCP the MLA layer's gathered context plans the rows.
+        dcp_shardq = dcp_shardq_context(forward_context, self.k_cache.prefix)
+        return None if dcp_shardq is None else dcp_shardq[1].gather_indices
 
     def _fused_k_insert(self, index_k: torch.Tensor, num_tokens: int) -> None:
         attn_metadata = get_forward_context().attn_metadata
@@ -410,6 +415,7 @@ class KimiK3DSAIndexer(nn.Module):
             self.cp_kv_cache_interleave_size,
             skip_topk_buffer_clear=self.use_fused_k_insert,
             topk_backend=self.topk_backend,
+            dcp_local_topk=self.dcp_local_topk,
         )
 
 
@@ -683,6 +689,7 @@ class KimiK3DSAAttention(nn.Module):
         # its cache follows the MLA layer's split here.
         if self.mla_attn.mla_attn.use_shardq:
             indexer.k_cache.use_shardq = True
+            indexer.k_cache.shardq_layer_name = self.mla_attn.mla_attn.layer_name
 
         offload = vllm_config.offload_config
         self.weights_offloaded = (

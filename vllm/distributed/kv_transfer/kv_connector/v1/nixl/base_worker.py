@@ -14,7 +14,7 @@ import uuid
 from collections import defaultdict
 from collections.abc import Iterator, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, cast
 
 import msgspec
@@ -288,6 +288,7 @@ class NixlBaseConnectorWorker:
         src_blocks_data: np.ndarray,
         num_fa_descs: int,
         block_size_ratio: int = 1,
+        draft_plan: TPMapping | None = None,
     ) -> Iterator[np.ndarray]:
         """Build split handle data for P_TP > D_TP scenario.
 
@@ -296,11 +297,15 @@ class NixlBaseConnectorWorker:
         FA uses rank_to_attention_slot for the slot offset;
         SSM uses the rank's positional index.
         Each Nx5 strided desc covers one region, so slicing it slices every block.
+        Under an MLA target the only split FA regions are a head-sharded draft's,
+        which `draft_plan` maps. With heterogeneous block sizes they arrive as
+        [sub-block, head, token] and are permuted on receive.
         """
         fa_idx = next(
             i for i, t in enumerate(self._group_spec_types) if _is_attention_spec(t)
         )
-        fa_num_splits = len(plan.source_ranks_per_group[fa_idx])
+        split_plan = draft_plan or plan
+        fa_num_splits = len(split_plan.source_ranks_per_group[fa_idx])
 
         starts = self._strided_desc_starts(src_blocks_data)
         num_descs = int(src_blocks_data[:, 4].sum())
@@ -326,7 +331,12 @@ class NixlBaseConnectorWorker:
         fa_replicated = self._fa_desc_replicated(
             starts[is_fa], num_fa_descs, block_size_ratio
         )
-        assert block_size_ratio == 1 or fa_num_splits == 1 or fa_replicated.all(), (
+        assert (
+            block_size_ratio == 1
+            or fa_num_splits == 1
+            or fa_replicated.all()
+            or draft_plan is not None
+        ), (
             "Head-sharded attention reads with P_TP > D_TP and heterogeneous "
             "block sizes are not supported"
         )
@@ -335,7 +345,7 @@ class NixlBaseConnectorWorker:
         ssm_split = ~is_fa & (starts < sharded_desc_end)
 
         for p_idx, p_rank in enumerate(plan.all_source_ranks):
-            fa_slot = plan.rank_to_attention_slot.get(p_rank, 0)
+            fa_slot = split_plan.rank_to_attention_slot.get(p_rank, 0)
             handle = src_blocks_data.copy()
             handle[fa_split, 1] //= fa_num_splits
             handle[fa_split, 0] += fa_slot * handle[fa_split, 1]
@@ -395,7 +405,7 @@ class NixlBaseConnectorWorker:
         """Total KV heads of a non-MLA draft under an MLA target, else None.
 
         Such a draft's KV is head-sharded while the target's is replicated."""
-        if not self.use_mla or self._has_mamba or self._is_csa_linear:
+        if not self.use_mla or self._is_csa_linear:
             return None
         spec_config = self.vllm_config.speculative_config
         draft_config = spec_config.draft_model_config if spec_config else None
@@ -1071,6 +1081,8 @@ class NixlBaseConnectorWorker:
         # combining both (e.g. GQA main + MLA Eagle-3 draft).
         self._region_is_mla = list[bool]()
         self._head_sharded_draft_regions = set[int]()
+        # Transfer groups holding only head-sharded draft regions.
+        self._head_sharded_draft_groups = set[int]()
         self._ssm_region_indices = list[int]()
         # Per transfer group, the regions holding its layers (None: all). Tracked
         # explicitly because aliased layers share a region keyed by address, so
@@ -1799,7 +1811,16 @@ class NixlBaseConnectorWorker:
                     ]
                 else:
                     segment_bytes = num_blocks * block_stride
-                    if cache.nbytes % segment_bytes != 0:
+                    # Measure the view by its block stride, not cache.nbytes: a
+                    # block can be padded past its payload (e.g. DSA latent +
+                    # indexer rows inside a hybrid page), and nbytes drops that
+                    # padding, so it is never a multiple of the segment size.
+                    view_bytes = (
+                        cache.shape[0] * block_stride
+                        if cache.ndim > 1
+                        else cache.nbytes
+                    )
+                    if view_bytes % segment_bytes != 0:
                         raise AssertionError(
                             "KV cache view cannot be partitioned into NIXL regions: "
                             f"layer={layer_name}, cache_nbytes={cache.nbytes}, "
@@ -1808,7 +1829,7 @@ class NixlBaseConnectorWorker:
                             f"cache_shape={tuple(cache.shape)}, "
                             f"cache_stride={tuple(cache.stride())}"
                         )
-                    num_segments = cache.nbytes // segment_bytes
+                    num_segments = view_bytes // segment_bytes
                     region_block_len = (
                         block_stride if num_segments > 1 else physical_page_size
                     )
@@ -1902,6 +1923,11 @@ class NixlBaseConnectorWorker:
             for group_id in range(len(self.kv_cache_config.transfer_groups))
         ]
         self._head_sharded_draft_regions = self._get_head_sharded_draft_regions()
+        self._head_sharded_draft_groups = {
+            g
+            for g, regions in enumerate(self._group_region_indices)
+            if regions and set(regions) <= self._head_sharded_draft_regions
+        }
 
         self.kv_caches_base_addr[self.engine_id][self.tp_rank] = seen_base_addresses
         self.num_regions = len(seen_base_addresses)
@@ -2571,12 +2597,25 @@ class NixlBaseConnectorWorker:
             remote_dcp_size=remote_dcp_size,
         )
         if self._head_sharded_draft_regions:
-            self.draft_tp_mappings[engine_id] = compute_tp_mapping(
+            draft_plan = self.draft_tp_mappings[engine_id] = compute_tp_mapping(
                 transfer_topology=transfer_topo,
                 remote_tp_size=remote_tp_size,
                 group_spec_types=self._group_spec_types,
                 remote_dcp_size=remote_dcp_size,
                 head_sharded_kv_heads=self._head_sharded_draft_kv_heads,
+            )
+            # Draft groups read their head slices from the draft's source ranks.
+            plan = self.tp_mappings[engine_id]
+            source_ranks_per_group = tuple(
+                draft_plan.source_ranks_per_group[g]
+                if g in self._head_sharded_draft_groups
+                else ranks
+                for g, ranks in enumerate(plan.source_ranks_per_group)
+            )
+            self.tp_mappings[engine_id] = replace(
+                plan,
+                source_ranks_per_group=source_ranks_per_group,
+                all_source_ranks=tuple(sorted(set().union(*source_ranks_per_group))),
             )
 
         remote_agent_name = self.nixl_wrapper.add_remote_agent(
@@ -2662,6 +2701,7 @@ class NixlBaseConnectorWorker:
                 src_blocks_data,
                 self.num_descs * block_size_ratio,
                 block_size_ratio,
+                self.draft_tp_mappings.get(engine_id),
             ):
                 if self._mixed_mem_types:
                     desc_is_dram = self._desc_is_dram_by_block_size[remote_block_size]
@@ -2781,10 +2821,16 @@ class NixlBaseConnectorWorker:
             draft_remote_heads = max(
                 1, self._head_sharded_draft_kv_heads // remote_tp_size
             )
-            if tp_ratio < 0 or self.dcp_size > 1 or remote_dcp_size > 1:
+            # A hybrid target already reads its SSM state from every source
+            # rank, so the draft's heads can be gathered from them too. Under
+            # DCP only equal TP and DCP pair ranks 1:1 (rank i reads rank i).
+            if (tp_ratio < 0 and not self._has_mamba) or (
+                (self.dcp_size > 1 or remote_dcp_size > 1)
+                and (tp_ratio != 1 or self.dcp_size != remote_dcp_size)
+            ):
                 raise NotImplementedError(
                     "NIXL head-sharded draft KV under an MLA target requires "
-                    "local TP >= remote TP and no DCP: "
+                    "local TP >= remote TP (unless the target is hybrid) and no DCP: "
                     f"local TP={self.transfer_topo.tp_size}, "
                     f"remote TP={remote_tp_size}, "
                     f"local DCP={self.dcp_size}, remote DCP={remote_dcp_size}, "
@@ -2942,9 +2988,15 @@ class NixlBaseConnectorWorker:
             # match up to the kernel block size ratio even under
             # heterogeneous TP (remote kernel blocks may be smaller).
             # SSM geometry is validated via ssm_sizes/conv offsets instead.
+            # A head-sharded draft's blocks also scale with its heads per rank.
             local_lens = [self.block_len_per_layer[r] for r in local_regions]
             assert local_lens == [
-                block_len * block_size_ratio for block_len in nixl_agent_meta.block_lens
+                block_len * block_size_ratio * draft_local_heads // draft_remote_heads
+                if r in self._head_sharded_draft_regions
+                else block_len * block_size_ratio
+                for r, block_len in zip(
+                    local_regions, nixl_agent_meta.block_lens, strict=True
+                )
             ], (
                 "Hybrid MLA kernel-granularity block lengths must match "
                 f"between P and D (block_size_ratio={block_size_ratio}): "
@@ -3364,6 +3416,22 @@ class NixlBaseConnectorWorker:
             convert = not self.use_mla and (
                 block_size_ratio > 1 or self.enable_permute_local_kv
             )
+            drafts = [
+                entry
+                for entry in block_ids_list
+                if entry[0] in self._head_sharded_draft_groups
+            ]
+            if drafts:
+                # A head-sharded draft's sub-blocks arrive as [sub-block, head,
+                # token], under an MLA target too.
+                self.post_process_device_kv_on_receive(
+                    block_size_ratio, drafts, convert=block_size_ratio > 1
+                )
+                block_ids_list = [
+                    entry
+                    for entry in block_ids_list
+                    if entry[0] not in self._head_sharded_draft_groups
+                ]
             self.post_process_device_kv_on_receive(
                 block_size_ratio, block_ids_list, convert
             )

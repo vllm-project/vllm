@@ -1673,6 +1673,13 @@ class SpeculativeConfig:
         for src, config_name, dst in _DRAFT_VLLM_CONFIG_OVERRIDES:
             if (value := getattr(self, src)) is not None:
                 sub_config = replace(getattr(vllm_config, config_name), **{dst: value})
+                if config_name == "cache_config":
+                    # replace() marks the copied block_size as user-specified, so the
+                    # draft's attention backend would have to support that size, which
+                    # is only a placeholder until model load. Keep the target's flag.
+                    sub_config.user_specified_block_size = (
+                        vllm_config.cache_config.user_specified_block_size
+                    )
                 vllm_config = replace(vllm_config, **{config_name: sub_config})
         return vllm_config
 

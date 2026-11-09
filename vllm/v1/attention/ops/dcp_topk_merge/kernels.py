@@ -65,7 +65,7 @@ from vllm.model_executor.warmup.jit_warmup_cutedsl_helper import (
     CuTeDSLLaunchSpec,
     VllmCuTeDSLJitKernel,
 )
-from vllm.models.kimi_k3.nvidia.ops.dcp_topk_merge import (
+from vllm.v1.attention.ops.dcp_topk_merge import (
     LOCAL_INDEX_BITS,
     packed_row_words,
     rescue_slots,

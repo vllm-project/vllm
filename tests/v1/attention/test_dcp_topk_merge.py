@@ -58,7 +58,7 @@ def _local_case(lengths: list[int], seed: int) -> tuple[torch.Tensor, torch.Tens
 
 
 def test_local_topk_sizing():
-    from vllm.models.kimi_k3.nvidia.ops.dcp_topk_merge import (
+    from vllm.v1.attention.ops.dcp_topk_merge import (
         dcp_merge_local_topk,
         packed_row_words,
     )
@@ -87,7 +87,7 @@ def test_local_topk_sizing():
 def test_local_topk_config_gating(dcp, pcp, backend, max_model_len, expected):
     from types import SimpleNamespace
 
-    from vllm.models.kimi_k3.nvidia.ops.dcp_topk_merge import (
+    from vllm.v1.attention.ops.dcp_topk_merge import (
         dcp_topk_merge_local_topk,
     )
 
@@ -101,6 +101,41 @@ def test_local_topk_config_gating(dcp, pcp, backend, max_model_len, expected):
     assert dcp_topk_merge_local_topk(config, TOPK) == expected
 
 
+@pytest.mark.parametrize(
+    ("local_topk", "global_seq_lens", "interleave", "candidates", "expected"),
+    [
+        (384, True, 1, False, True),
+        (0, True, 1, False, False),  # merge disabled for the layer
+        (384, False, 1, False, False),  # no DCP decode metadata
+        (384, True, 64, False, False),  # interleave > 1: ids decode differently
+        (384, True, 1, True, False),  # candidate blocks keep the generic merge
+    ],
+)
+@pytest.mark.parametrize("num_rows", [1, 64, 65])
+def test_decode_step_gating(
+    local_topk,
+    global_seq_lens,
+    interleave,
+    candidates,
+    expected,
+    num_rows,
+    monkeypatch,
+):
+    """A step takes the one-round merge only with interleave 1 and DCP decode
+    metadata, and only when its rows fit the rescue workspace (64 rows here):
+    larger steps take the generic merge instead of raising."""
+    from vllm.model_executor.layers.sparse_attn_indexer import (
+        _use_dcp_decode_topk_merge,
+    )
+    from vllm.v1.attention.ops import dcp_topk_merge as gate
+
+    monkeypatch.setattr(gate, "_MERGE_MAX_ROWS", {(TOPK, 384): 64})
+    got = _use_dcp_decode_topk_merge(
+        local_topk, global_seq_lens, interleave, candidates, num_rows, TOPK
+    )
+    assert got is (expected and num_rows <= 64)
+
+
 def test_init_fails_closed(monkeypatch):
     """Without symmetric memory over the DCP group (on any rank), under
     ubatching or past 16 DCP ranks the construction gate keeps the generic
@@ -112,8 +147,8 @@ def test_init_fails_closed(monkeypatch):
     import vllm.distributed as distributed
     import vllm.v1.attention.ops.cp_common as cp_common
     import vllm.v1.attention.ops.dcp as dcp
-    from vllm.models.kimi_k3.nvidia.ops import dcp_topk_merge as gate
-    from vllm.models.kimi_k3.nvidia.ops.dcp_topk_merge import kernels
+    from vllm.v1.attention.ops import dcp_topk_merge as gate
+    from vllm.v1.attention.ops.dcp_topk_merge import kernels
 
     def config(ubatching: bool = False, dcp_size: int = 8) -> SimpleNamespace:
         return SimpleNamespace(
@@ -167,7 +202,7 @@ def test_init_fails_closed(monkeypatch):
 
 def test_pack_layout_bit_exact():
     """The B' word layout, bit for bit, from a hand-computed reference."""
-    from vllm.models.kimi_k3.nvidia.ops.dcp_topk_merge.kernels import (
+    from vllm.v1.attention.ops.dcp_topk_merge.kernels import (
         dcp_topk_pack_indices,
     )
 
@@ -207,7 +242,7 @@ def test_pack_layout_bit_exact():
 def test_pack_drops_invalid_ids_and_nan(with_row_ends):
     """Ids outside `[0, min(row_end, S, 2**17))` and NaN scores pack as
     empty slots; +-inf scores pack as ordinary candidates."""
-    from vllm.models.kimi_k3.nvidia.ops.dcp_topk_merge.kernels import (
+    from vllm.v1.attention.ops.dcp_topk_merge.kernels import (
         dcp_topk_pack_indices,
     )
 
@@ -254,7 +289,7 @@ def test_pack_max_local_len_matches_narrow_logits():
     them by max_local_len (which moves DeepSelect off its <= 6-row cluster
     variant at >= 512K columns) packs the same candidates as logits of the
     local width."""
-    from vllm.models.kimi_k3.nvidia.ops.dcp_topk_merge.kernels import (
+    from vllm.v1.attention.ops.dcp_topk_merge.kernels import (
         dcp_topk_pack,
     )
 
@@ -283,12 +318,119 @@ def test_pack_max_local_len_matches_narrow_logits():
 # --- Memory profile, host checks and the packed-mode contract -------------
 
 
+@pytest.mark.parametrize("merge", [False, True])
+def test_profile_reservation_matches_decode_peak(merge):
+    """The memory-profile run reserves what one decode step's top-k inputs
+    peak at: the DeepGEMM bf16 logits plus their FP32 copy for the generic
+    path, or plus the packed merge's small buffers (no FP32 copy: its packed
+    rows and their all-gather) for the one-round merge. Production decode
+    shape: 128 seqs x (1 + 4) tokens, max_model_len 1M, DCP8."""
+    import math
+
+    from vllm.model_executor.layers.indexer_topk import SparseIndexerTopk
+    from vllm.model_executor.layers.sparse_attn_indexer import (
+        _decode_logits_profile_bytes,
+        as_fp32_logits,
+    )
+    from vllm.utils.deep_gemm import (
+        fp8_fp4_paged_mqa_logits,
+        get_num_sms,
+        get_paged_mqa_logits_metadata,
+        has_deep_gemm,
+        mqa_logits_mx_inputs,
+    )
+    from vllm.utils.math_utils import round_up
+    from vllm.v1.attention.ops.dcp_topk_merge import (
+        dcp_merge_local_topk,
+    )
+    from vllm.v1.attention.ops.dcp_topk_merge.kernels import dcp_topk_pack
+
+    if not has_deep_gemm():
+        pytest.skip("DeepGEMM not available")
+    torch.manual_seed(0)
+    world, num_rows, max_model_len = 8, 128 * 5, 1 << 20
+    heads, head_dim, block_size = 32, 128, 64
+    # Same row alignment as the profile run on SM100 (bf16 logits).
+    row_align = math.lcm(384, 1024 // torch.bfloat16.itemsize)
+    local_topk = dcp_merge_local_topk(TOPK, world)
+
+    ctx = torch.randint(1, 8192, (num_rows, 1), dtype=torch.int32, device="cuda")
+    max_blocks = -(-8192 // block_size)
+    block_table = torch.randperm(num_rows * max_blocks, device="cuda").view(
+        num_rows, max_blocks
+    )
+    block_table = block_table.to(torch.int32)
+    # Bytes in [0x30, 0x70) are finite as both fp8 values and UE8M0 scales,
+    # wherever the cache layout keeps the scales.
+    kv_cache = torch.randint(
+        0x30,
+        0x70,
+        (num_rows * max_blocks, block_size, 1, head_dim + 4),
+        dtype=torch.uint8,
+        device="cuda",
+    )
+    q = torch.randn(num_rows, 1, heads, head_dim, device="cuda").to(torch.float8_e4m3fn)
+    q_scale, weights = mqa_logits_mx_inputs(
+        q, None, torch.randn(num_rows, heads, device="cuda"), torch.bfloat16
+    )
+    indices = torch.arange(num_rows, dtype=torch.int32, device="cuda")
+    schedule = get_paged_mqa_logits_metadata(
+        ctx, block_size, get_num_sms(), indices=indices
+    )
+    row_ends = SparseIndexerTopk._row_ends(ctx, 1, num_rows)
+    torch.accelerator.synchronize()
+    torch.accelerator.empty_cache()
+    base = torch.accelerator.memory_allocated()
+    torch.accelerator.reset_peak_memory_stats()
+    logits = fp8_fp4_paged_mqa_logits(
+        (q, q_scale),
+        kv_cache,
+        weights,
+        ctx,
+        block_table,
+        schedule,
+        max_model_len,
+        indices=indices,
+        logits_dtype=torch.bfloat16,
+    )
+    assert logits.dtype == torch.bfloat16
+    assert logits.shape == (num_rows, max_model_len)
+    assert logits.stride(0) == round_up(max_model_len, row_align)
+    assert all(logits[r, : ctx[r, 0]].isfinite().all() for r in (0, num_rows - 1))
+    if merge:
+        # The merge's step buffers: this rank's packed rows and the
+        # all-gather's output (every rank's packed rows). The select and the
+        # rescue write into caller buffers and the workspace (allocated at
+        # model construction); the multi-GPU test runs them.
+        packed = dcp_topk_pack(logits, row_ends, local_topk)
+        gathered = packed.repeat(world, 1)
+        assert gathered.shape[0] == world * num_rows
+    else:
+        as_fp32_logits(logits, row_ends)
+    torch.accelerator.synchronize()
+    peak = torch.accelerator.max_memory_allocated() - base
+
+    reserved = _decode_logits_profile_bytes(
+        num_rows,
+        max_model_len,
+        torch.bfloat16,
+        row_align,
+        True,  # DCP decode reads an FP32 copy unless the merge runs
+        local_topk if merge else 0,
+        world,
+    )
+    print(f"merge={merge}: decode peak {peak} B, profile reservation {reserved} B")
+    # Within 1 MiB: allocator rounding and launch-time scratch (the FP32
+    # upcast's launch peaks 768 KiB above its two tensors).
+    assert abs(reserved - peak) <= 1 << 20, (peak, reserved)
+
+
 def test_merge_requires_rescue_workspace(monkeypatch):
     """No lossy path: without the rescue workspace the entry points raise,
     and packed mode needs the logits (a saturated rank re-reads its row)."""
     import vllm.distributed as distributed
-    from vllm.models.kimi_k3.nvidia.ops.dcp_topk_merge import kernels
-    from vllm.models.kimi_k3.nvidia.ops.dcp_topk_merge.kernels import (
+    from vllm.v1.attention.ops.dcp_topk_merge import kernels
+    from vllm.v1.attention.ops.dcp_topk_merge.kernels import (
         dcp_topk_merge,
         dcp_topk_merge_rows,
         dcp_topk_pack,
@@ -322,7 +464,7 @@ def test_merge_requires_rescue_workspace(monkeypatch):
 def _host_only_workspace(world: int, max_rows: int, n: int):
     """A rescue workspace for the host-side checks only: local buffers, no
     peers. Every call below is refused before a kernel launches."""
-    from vllm.models.kimi_k3.nvidia.ops.dcp_topk_merge import (
+    from vllm.v1.attention.ops.dcp_topk_merge import (
         kernels,
         packed_row_words,
         rescue_slots,
@@ -349,8 +491,8 @@ def test_exact_call_checks(monkeypatch):
     tensors silently: the host refuses every call the workspace or the
     compiled layouts do not cover."""
     import vllm.distributed as distributed
-    from vllm.models.kimi_k3.nvidia.ops.dcp_topk_merge import kernels, packed_row_words
-    from vllm.models.kimi_k3.nvidia.ops.dcp_topk_merge.kernels import (
+    from vllm.v1.attention.ops.dcp_topk_merge import kernels, packed_row_words
+    from vllm.v1.attention.ops.dcp_topk_merge.kernels import (
         dcp_topk_merge_rows,
         dcp_topk_select,
     )
@@ -407,7 +549,7 @@ def test_packed_contract_validator():
     """`assert_packed_merge_contract` accepts the stock producer (DeepSelect
     + pack, including short and empty rows) and catches a dropped word, a
     non-top word and a word whose score is not its logit."""
-    from vllm.models.kimi_k3.nvidia.ops.dcp_topk_merge.kernels import (
+    from vllm.v1.attention.ops.dcp_topk_merge.kernels import (
         assert_packed_merge_contract,
         dcp_topk_pack,
     )

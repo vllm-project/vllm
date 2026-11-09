@@ -142,6 +142,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_CUSTOM_AR: bool = True
     VLLM_ROCM_MUSE_MOE_REDUCE_DTYPE: str = "fp32"
     VLLM_ROCM_MUSE_MOE_ONLINE_QUANT: str = ""
+    VLLM_ROCM_DCP_AITER_ALLGATHER: bool = False
     VLLM_ROCM_USE_AITER_LINEAR: bool = True
     VLLM_ROCM_USE_AITER_LINEAR_HIPBMM: bool = False
     VLLM_ROCM_USE_AITER_MOE: bool = True
@@ -153,6 +154,8 @@ if TYPE_CHECKING:
     VLLM_ROCM_AITER_MLA_ASM_PADDING: Literal["auto", "gluon", "asm"] = "auto"
     VLLM_ROCM_USE_AITER_MHA: bool = True
     VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA: bool = False
+    VLLM_ROCM_USE_AITER_FLYDSL_SPARSE_MLA: bool = False
+    VLLM_ROCM_AITER_FLYDSL_SPARSE_MLA_MIN_TOKENS: int = 160
     VLLM_ROCM_USE_AITER_TRITON_ROPE: bool = False
     VLLM_ROCM_USE_AITER_FP8BMM: bool = False
     VLLM_ROCM_USE_AITER_FP4BMM: bool = False
@@ -163,6 +166,9 @@ if TYPE_CHECKING:
     VLLM_ROCM_FP8_PADDING: bool = True
     VLLM_ROCM_MOE_PADDING: bool = True
     VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT: bool = False
+    VLLM_ROCM_DSA_DCP_GLOBAL_KEY_PREFILL: bool = True
+    VLLM_ROCM_DSA_DCP_ROWSHARD_PREFILL: bool = True
+    VLLM_ROCM_DSA_DCP_PAD_KEY_GATHER: bool = False
     VLLM_ROCM_PARALLEL_INDEX_TOPK: bool = False
     VLLM_ENABLE_V1_MULTIPROCESSING: bool = True
     VLLM_LOG_BATCHSIZE_INTERVAL: float = -1
@@ -1340,6 +1346,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ROCM_MUSE_MOE_ONLINE_QUANT": lambda: os.getenv(
         "VLLM_ROCM_MUSE_MOE_ONLINE_QUANT", ""
     ).lower(),
+    # Route DCP-group all_gathers through the TP group's AITER IPC all-gather
+    # when the DCP and TP groups span the same ranks. Falls back to RCCL for
+    # inputs AITER cannot take (e.g. large prefill gathers).
+    "VLLM_ROCM_DCP_AITER_ALLGATHER": lambda: (
+        os.getenv("VLLM_ROCM_DCP_AITER_ALLGATHER", "0").lower() in ("true", "1")
+    ),
     # use aiter linear op if aiter ops are enabled
     # The following list of related ops
     # - scaled_mm (per-tensor / rowwise)
@@ -1417,6 +1429,22 @@ environment_variables: dict[str, Callable[[], Any]] = {
         os.getenv("VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA", "False").lower()
         in ("true", "1")
     ),
+    # Whether rocm_aiter_ops.triton_sparse_mla_fwd hands the calls the FlyDSL
+    # sparse MLA kernel accepts (bf16 q, fp8_ds_mla cache, no scales, sinks or
+    # extra segment: Kimi-K3.1 DSA) to that kernel instead of the Triton one.
+    # The kernel is vLLM's own (vllm/models/kimi_k3/amd/ops), with aiter's copy
+    # as a fallback. Falls back to the Triton kernel when neither imports or
+    # when the kernel rejects the call. gfx950 only. By default is disabled.
+    "VLLM_ROCM_USE_AITER_FLYDSL_SPARSE_MLA": lambda: (
+        os.getenv("VLLM_ROCM_USE_AITER_FLYDSL_SPARSE_MLA", "False").lower()
+        in ("true", "1")
+    ),
+    # Smallest query batch VLLM_ROCM_USE_AITER_FLYDSL_SPARSE_MLA sends to the
+    # FlyDSL kernel; smaller ones (decode) stay on Triton, which is faster
+    # there. 160 is the measured gfx950 crossover for 2048-key rows, H 8..16.
+    "VLLM_ROCM_AITER_FLYDSL_SPARSE_MLA_MIN_TOKENS": lambda: int(
+        os.getenv("VLLM_ROCM_AITER_FLYDSL_SPARSE_MLA_MIN_TOKENS", "160")
+    ),
     # Whether to use aiter rope.
     # By default is disabled.
     "VLLM_ROCM_USE_AITER_TRITON_ROPE": lambda: (
@@ -1460,6 +1488,27 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Whether to use the shuffled kv cache layout
     "VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT": lambda: (
         os.getenv("VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT", "False").lower() in ("true", "1")
+    ),
+    # DSA indexer prefill with DCP > 1 on ROCm. 1 gathers every rank's index
+    # keys once per chunk and takes the top-k over the global key set, so no
+    # candidate merge is needed. 0 scores this rank's keys only and merges the
+    # per-rank candidates, which is the behaviour of the decode path.
+    "VLLM_ROCM_DSA_DCP_GLOBAL_KEY_PREFILL": lambda: bool(
+        int(os.getenv("VLLM_ROCM_DSA_DCP_GLOBAL_KEY_PREFILL", "1"))
+    ),
+    # Global-key DSA prefill only: 1 scores 1/dcp of a chunk's query rows per
+    # rank and all-gathers the selections once per layer. 0 scores every row
+    # on every rank.
+    "VLLM_ROCM_DSA_DCP_ROWSHARD_PREFILL": lambda: bool(
+        int(os.getenv("VLLM_ROCM_DSA_DCP_ROWSHARD_PREFILL", "1"))
+    ),
+    # Global-key DSA prefill only: pad the per-rank row count of the index-key
+    # all-gather so the payload is a multiple of 16 bytes, which is what the
+    # AITER IPC all-gather requires. The key row is 132 bytes, so an unpadded
+    # buffer takes AITER only when the row count happens to be a multiple of 4.
+    # The padding rows are never read back.
+    "VLLM_ROCM_DSA_DCP_PAD_KEY_GATHER": lambda: (
+        os.getenv("VLLM_ROCM_DSA_DCP_PAD_KEY_GATHER", "0").lower() in ("true", "1")
     ),
     # Custom quick allreduce kernel for MI3* cards
     # Choice of quantization level: FP, INT8, INT6, INT4, INT3 or NONE

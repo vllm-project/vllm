@@ -245,7 +245,8 @@ def run_headless(args: argparse.Namespace):
 
     # A colocated frontend that serves only these engines (the Rust frontend in
     # hybrid or external DP LB) also handshakes with them for their I/O.
-    client_handshake_address = args.headless_client_handshake_address
+    # Launchers that build `args` themselves (e.g. Dynamo) may not set it.
+    client_handshake_address = getattr(args, "headless_client_handshake_address", None)
 
     # Create the engines.
     engine_manager = CoreEngineProcManager(

@@ -385,22 +385,37 @@ def get_current_attn_backends_and_specs(
 ) -> tuple[list[type[AttentionBackend]], list[AttentionSpec | None]]:
     """Distinct (backend, spec) pairs of the transfer layers, else `fallback`.
 
-    Compressed caches are skipped: their kernel pages never split transferred
-    blocks.
+    Attention caches in a block-outermost layout are skipped: blocks there are
+    never split group-wide (`prepare_kernel_block_sizes`), and a cache that
+    needs smaller kernel blocks views them inside each block, so its kernel
+    pages never split transferred blocks. Compressed caches are skipped too
+    (`check_compressed_kernel_split` guards them); caches whose backend writes
+    them from their block table must be packed.
     """
+    layout = vllm_config.cache_config.get_resolved_kv_cache_layout()
     pairs: dict[tuple[type[AttentionBackend], AttentionSpec | None], None] = {}
+    has_layers = False
     layer_type = cast(type[Any], AttentionLayerBase)
     for group in kv_cache_config.transfer_groups:
         specs = getattr(group.kv_cache_spec, "kv_cache_specs", {})
         layers = get_layers_from_vllm_config(vllm_config, layer_type, group.layer_names)
         for name, layer in layers.items():
+            has_layers = True
             spec = specs.get(name, group.kv_cache_spec)
-            if isinstance(spec, AttentionSpec) and spec.tokens_per_state > 1:
-                continue
-            if not isinstance(spec, AttentionSpec):
+            backend = layer.get_attn_backend()
+            if isinstance(spec, AttentionSpec):
+                if spec.tokens_per_state > 1:
+                    continue
+                if backend.writes_kv_cache_from_block_table():
+                    assert layout.is_block_outermost, (
+                        "Kernel-paged caches must be packed"
+                    )
+                if layout.is_block_outermost:
+                    continue
+            else:
                 spec = None
-            pairs[layer.get_attn_backend(), spec] = None
-    if not pairs:
+            pairs[backend, spec] = None
+    if not has_layers:
         return fallback, [None] * len(fallback)
     return [backend for backend, _ in pairs], [spec for _, spec in pairs]
 

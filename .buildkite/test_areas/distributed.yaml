@@ -658,6 +658,19 @@ steps:
       commands:
       - pytest -v -s tests/distributed/test_mnnvl_alltoall.py::test_args_dispatch_combine
 
+- label: ":nvidia: (B200) DCP Top-k Merge"
+  key: dcp-topk-merge-2xb200
+  timeout_in_minutes: 20
+  device: b200-k8s
+  working_dir: "/vllm-workspace/"
+  num_devices: 2
+  source_file_dependencies:
+    - vllm/v1/attention/ops/dcp_topk_merge/
+    - vllm/model_executor/layers/sparse_attn_indexer.py
+    - tests/distributed/test_dcp_topk_merge.py
+  commands:
+    - pytest -v -s tests/distributed/test_dcp_topk_merge.py
+
 - label: ":nvidia: (B200) GEMM-RS/AR"
   key: gemm-rs-ar-2xb200
   automatic_shard: true

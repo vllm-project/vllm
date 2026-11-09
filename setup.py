@@ -1622,6 +1622,8 @@ package_data = {
     "vllm": [
         "py.typed",
         "libs/*.so*",
+        # Launched by NUMA binding (utils/numa_utils.py); not a Python module.
+        "utils/numa_wrapper.sh",
         "model_executor/layers/fused_moe/configs/*.json",
         # Tuned kernel configs must be explicit: the setuptools-scm git
         # file-finder is inactive when building from a .git-less tree
