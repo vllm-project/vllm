@@ -2218,7 +2218,8 @@ def initialize_model_parallel(
         and config.model_config is not None
         and (
             config.model_config.architecture == "DeepseekV41ForCausalLM"
-            # The Qwen4Exp PLE table is ETP-sharded; this group only shares it.
+            # Qwen4Exp only shares its PLE table over this group. embedding_across_dp
+            # spreads the table's vocab over the DP ranks, so they hold different rows.
             or (
                 config.model_config.architecture
                 in ("Qwen4ExpForCausalLM", "Qwen4ExpForConditionalGeneration")
