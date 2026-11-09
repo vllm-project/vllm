@@ -11,6 +11,7 @@ from vllm.entrypoints.pooling.scoring.utils import (
     validate_score_input,
 )
 from vllm.exceptions import VLLMValidationError
+from vllm.tokenizers.mistral import MistralTokenizer
 
 
 @pytest.mark.parametrize(
@@ -82,3 +83,16 @@ def test_truncate_text_to_tokens_handles_shared_character_offsets():
 
     assert truncated == "a"
     assert len(tokenizer(truncated, add_special_tokens=False)["input_ids"]) == 1
+
+
+@pytest.mark.parametrize(
+    "model_name",
+    ["mistralai/Mistral-7B-Instruct-v0.3", "mistralai/Magistral-Small-2509"],
+)
+def test_truncate_text_to_tokens_with_mistral_tokenizer(model_name: str):
+    """MistralTokenizer cannot return offset_mapping, but limits still apply."""
+    tokenizer = MistralTokenizer.from_pretrained(model_name)
+    text = "The quick brown fox jumps over the lazy dog"
+
+    assert truncate_text_to_tokens(text, tokenizer, max_tokens=3) == "The quick brown"
+    assert truncate_text_to_tokens(text, tokenizer, max_tokens=100) == text

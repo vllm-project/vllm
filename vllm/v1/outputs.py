@@ -267,8 +267,6 @@ class ECConnectorOutput:
 class ModelRunnerOutput:
     # [num_reqs]
     req_ids: list[str]
-    # req_id -> index
-    req_id_to_index: dict[str, int]
 
     # num_reqs x num_generated_tokens
     # num_generated_tokens is the number of tokens
@@ -396,9 +394,6 @@ def make_empty_encoder_model_runner_output(
     # Convert to list so we get a deterministic, indexable sequence
     req_ids: list[str] = list(scheduler_output.num_scheduled_tokens.keys())
 
-    # Give every request its own contiguous index
-    req_id_to_index: dict[str, int] = {rid: idx for idx, rid in enumerate(req_ids)}
-
     # An encoder instance never samples, so it emits no tokens at all. The
     # scheduler finishes these requests once their prompt is fully encoded
     # (see `Scheduler.update_from_output`).
@@ -409,10 +404,9 @@ def make_empty_encoder_model_runner_output(
 
     return ModelRunnerOutput(
         req_ids=req_ids,
-        req_id_to_index=req_id_to_index,
         sampled_token_ids=sampled_token_ids,
         pooler_output=pooler_output,
     )
 
 
-EMPTY_MODEL_RUNNER_OUTPUT = ModelRunnerOutput(req_ids=[], req_id_to_index={})
+EMPTY_MODEL_RUNNER_OUTPUT = ModelRunnerOutput(req_ids=[])

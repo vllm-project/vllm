@@ -40,7 +40,7 @@ IterationTimingPoll = Callable[[], tuple[tuple[int, float], ...] | None]
 
 
 def _check_worker_profile_kwargs(worker_cls: str, kwargs: dict[str, int]) -> None:
-    """Raise if the worker's ``profile`` cannot accept the given overrides."""
+    """Raise if the worker's `profile` cannot accept the given overrides."""
     params = inspect.signature(resolve_obj_by_qualname(worker_cls).profile).parameters
     if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
         return

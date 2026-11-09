@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Nonblocking GPU iteration timing shared by both model runners.
+"""Nonblocking GPU iteration timing.
 
 Intervals span model execution, sampling and speculative drafting on the
 recorded stream, including host-submission gaps. Independent work on other

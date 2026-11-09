@@ -69,9 +69,7 @@ def test_iteration_timing_keeps_original_batch_when_results_arrive_late(timing_f
     output.total_num_scheduled_tokens = 9
     output.scheduled_cached_reqs = CachedRequestData(
         req_ids=["prefill", "decode"],
-        resumed_req_ids=set(),
         new_token_ids=[],
-        all_token_ids={},
         new_block_ids=[None, None],
         num_computed_tokens=[4, 8],
         num_output_tokens=[0, 1],
@@ -86,7 +84,7 @@ def test_iteration_timing_keeps_original_batch_when_results_arrive_late(timing_f
     output.num_scheduled_tokens.update(prefill=99, decode=7)
     output.scheduled_encoder_input_stats.num_inputs = 9
     output.scheduled_encoder_input_stats.output_tokens = 999
-    model_output = ModelRunnerOutput([], {})
+    model_output = ModelRunnerOutput([])
     samples = ((index, 12.0),)
     if timing_first:
         collector.complete_timing_samples(samples)
@@ -119,7 +117,7 @@ def test_dummy_tail_timings_survive_more_than_batch_queue_depth():
     collector.complete_iteration(
         output,
         ModelRunnerOutput(
-            [], {}, iteration_timing_samples=tuple((index, 10.0) for index in indices)
+            [], iteration_timing_samples=tuple((index, 10.0) for index in indices)
         ),
     )
     records = collector.take_ready()
@@ -151,9 +149,7 @@ def test_completed_idle_timing_poll_is_consumed_when_inference_resumes(dummy):
         output.total_num_scheduled_tokens = 1
         output.scheduled_cached_reqs = CachedRequestData(
             req_ids=["request"],
-            resumed_req_ids=set(),
             new_token_ids=[],
-            all_token_ids={},
             new_block_ids=[None],
             num_computed_tokens=[8],
             num_output_tokens=[1],
@@ -162,7 +158,7 @@ def test_completed_idle_timing_poll_is_consumed_when_inference_resumes(dummy):
         iteration_id = output.iteration_metrics_id
         collector.complete_iteration(
             output,
-            ModelRunnerOutput([], {}, iteration_timing_samples=((iteration_id, 20.0),)),
+            ModelRunnerOutput([], iteration_timing_samples=((iteration_id, 20.0),)),
         )
     records = collector.take_ready()
     assert [record.iteration_index for record in records] == [

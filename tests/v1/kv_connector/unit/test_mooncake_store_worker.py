@@ -315,6 +315,8 @@ def test_request_tracker_keeps_event_tokens_from_hybrid_checkpoint():
     first = ReqMeta.from_request_tracker(
         tracker,
         block_size=8,
+        hash_block_size=8,
+        block_hashes=[b"h0", b"h1"],
     )
     assert first is None
     assert tracker.num_saved_tokens == 8
@@ -323,6 +325,8 @@ def test_request_tracker_keeps_event_tokens_from_hybrid_checkpoint():
     second = ReqMeta.from_request_tracker(
         tracker,
         block_size=8,
+        hash_block_size=8,
+        block_hashes=[b"h0", b"h1"],
     )
     assert second is not None
     assert second.token_ids_start == 8
@@ -405,6 +409,7 @@ def _make_vllm_config(
         ),
         kv_events_config=SimpleNamespace(enable_kv_cache_events=False),
         speculative_config=None,
+        num_hash_lookahead_tokens=0,
     )
 
 
@@ -765,6 +770,54 @@ def test_default_local_buffer_size_matches_pr40900():
     assert mooncake_store.DEFAULT_LOCAL_BUFFER_SIZE == 4 * 1024**3
 
 
+@pytest.mark.parametrize(
+    ("store_config", "physical_gpu", "expected"),
+    [
+        ({"device_name": "mlx5_0,mlx5_1"}, None, "mlx5_0,mlx5_1"),
+        ({"device_name_per_gpu": ["rdma0", "rdma1,rdma2"]}, 1, "rdma1,rdma2"),
+        ({"device_name_per_gpu": ["rdma0", "rdma1"]}, 2, ValueError),
+    ],
+)
+def test_setup_passes_the_current_gpus_device_names(
+    monkeypatch, tmp_path, store_config, physical_gpu, expected
+):
+    import vllm.platforms
+
+    path = tmp_path / "mooncake_config.json"
+    path.write_text(json.dumps(store_config))
+    config = mooncake_store.MooncakeStoreConfig.from_file(str(path))
+    platform = MagicMock()
+    platform.visible_device_id_to_physical_device_id.return_value = physical_gpu
+    monkeypatch.setattr(vllm.platforms, "current_platform", platform)
+    monkeypatch.setattr(torch.accelerator, "current_device_index", lambda: 0)
+    store = MagicMock()
+    store.setup.return_value = 0
+    if expected is ValueError:
+        with pytest.raises(ValueError, match="no entry for physical GPU 2"):
+            mooncake_store.setup_mooncake_store(store, config, "host")
+        return
+    mooncake_store.setup_mooncake_store(store, config, "host")
+    assert store.setup.call_args.args[5] == expected
+    if physical_gpu is None:
+        platform.visible_device_id_to_physical_device_id.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "store_config",
+    [
+        {"device_name": "rdma0", "device_name_per_gpu": ["rdma0"]},
+        {"device_name_per_gpu": []},
+        {"device_name_per_gpu": ["rdma0", " "]},
+        {"device_name_per_gpu": "rdma0"},
+    ],
+)
+def test_device_name_per_gpu_rejects_invalid_config(tmp_path, store_config):
+    path = tmp_path / "mooncake_config.json"
+    path.write_text(json.dumps(store_config))
+    with pytest.raises(ValueError, match="device_name"):
+        mooncake_store.MooncakeStoreConfig.from_file(str(path))
+
+
 def test_get_requester_local_hostname_prefers_override(monkeypatch):
     monkeypatch.setenv("MOONCAKE_REQUESTER_LOCAL_HOSTNAME", "worker-a:50053")
 
@@ -1071,6 +1124,7 @@ def _make_partial_tail_send_thread(
         hash_block_size=4,
         lcm_block_size=16,
         mamba_group_ids={1},
+        num_hash_lookahead_tokens=0,
         use_eagle=False,
         eagle_proof_margin_by_group={},
     )
@@ -1597,6 +1651,7 @@ def test_partial_tail_with_smaller_mamba_blocks_writes_one_mamba_key(tp_rank):
         hash_block_size=4,
         lcm_block_size=16,
         mamba_group_ids={1},
+        num_hash_lookahead_tokens=0,
         use_eagle=False,
         eagle_proof_margin_by_group={},
     )
@@ -1644,7 +1699,7 @@ def test_partial_tail_with_smaller_mamba_blocks_writes_one_mamba_key(tp_rank):
 
 
 def test_shared_prefix_junction_handoff_writes_only_its_mamba_key():
-    """A junction hand-off (``--enable-mamba-shared-prefix-checkpoint``) below
+    """A junction hand-off (`--enable-mamba-shared-prefix-checkpoint`) below
     the prompt checkpoint stores its Mamba state under the junction hash and
     no attention tail."""
     store = MagicMock()
@@ -1655,6 +1710,7 @@ def test_shared_prefix_junction_handoff_writes_only_its_mamba_key():
         hash_block_size=4,
         lcm_block_size=16,
         mamba_group_ids={1},
+        num_hash_lookahead_tokens=0,
         use_eagle=True,
         eagle_proof_margin_by_group={0: 4},
     )
@@ -3229,6 +3285,48 @@ def test_store_tp_opt_in_isolates_different_pp_sizes(tmp_path, monkeypatch):
     assert keys[0] != keys[1]
 
 
+@pytest.mark.cpu_test
+def test_pp_stages_write_distinct_keys_with_pcp(tmp_path, monkeypatch):
+    """Workers are laid out as PP x PCP x TP, so with PCP the first rank of
+    each PP stage is 0 and tp_size * pcp_size, and the stages' keys differ."""
+    store = MagicMock()
+    store.setup.return_value = 0
+    _install_fake_mooncake(monkeypatch, store)
+    _patch_worker_runtime(monkeypatch, tp_size=2, pcp_size=2)
+    monkeypatch.setattr(worker, "get_pp_group", MagicMock())
+
+    def gather_prefixes(output, local, **kwargs):
+        output[:] = [local] * len(output)
+
+    monkeypatch.setattr(torch.distributed, "all_gather_object", gather_prefixes)
+    monkeypatch.setattr(_FakeModelConfig, "get_total_num_kv_heads", lambda _self: 8)
+    monkeypatch.setenv(
+        "MOONCAKE_CONFIG_PATH",
+        _write_mooncake_config(
+            tmp_path,
+            {
+                "metadata_server": "http://metadata/endpoint",
+                "protocol": "tcp",
+                "master_server_address": "10.0.0.7:50051",
+            },
+        ),
+    )
+
+    keys = []
+    for rank in (0, 4):
+        w = worker.MooncakeStoreWorker(
+            _make_vllm_config(
+                rank=rank, pipeline_parallel_size=2, tensor_parallel_size=2
+            ),
+            _make_kv_cache_config(num_kv_heads=4),
+        )
+        layout = w.token_dbs[0].store_layout
+        keys.append(layout.key_for(layout.local_shard_ids[0], BlockHash(b"h")))
+
+    assert "@pp_rank:0@" in keys[0]
+    assert "@pp_rank:1@" in keys[1]
+
+
 @pytest.mark.parametrize("tp_size", [2, 4])
 @pytest.mark.parametrize("missing_group", [None, 0, 1])
 def test_hybrid_lookup_uses_each_pp_stage_schema(
@@ -3458,7 +3556,7 @@ def test_worker_put_striding_covers_every_rank_get_namespace(
     When num_kv_head < tp_size, ranks holding the same KV heads stripe
     their PUTs across one shared key namespace. That dedup is only valid
     when those ranks really share a namespace: with DCP > 1 each rank GETs
-    every key from its own ``@dcpN`` namespace, so striding must be
+    every key from its own `@dcpN` namespace, so striding must be
     disabled.
     """
     tp_size = 4
@@ -3926,7 +4024,7 @@ def test_store_sending_thread_skips_when_token_len_below_lcm():
 
 
 def test_store_sending_thread_only_stores_swa_blocks_in_window():
-    """For SWA groups, only blocks within ``sliding_window`` of an
+    """For SWA groups, only blocks within `sliding_window` of an
     lcm-aligned boundary are stored — a block outside every such window
     can never participate in any future hit (mirrors recv-side masking).
 
@@ -4218,23 +4316,37 @@ def test_store_sending_thread_kv_events_retry_without_covered_tokens():
     assert suffix_event.token_ids == list(range(16, 32))
 
 
-def test_store_sending_thread_kv_events_recover_suffix_after_put_failure():
+@pytest.mark.parametrize("lookahead", [0, 5])
+@pytest.mark.cpu_test
+def test_store_sending_thread_kv_events_recover_suffix_after_put_failure(lookahead):
     store = MagicMock()
     store.batch_is_exist.side_effect = ([0], [0, 0])
     store.batch_put_from_multi_buffers.side_effect = ([-1], [256, 256])
     thread = _make_store_sending_thread(store)
     thread.enable_kv_event = True
 
-    _run_store_req(thread, _make_event_store_req(16))
+    first = _make_event_store_req(16)
+    first.num_hash_lookahead_tokens = lookahead
+    first.token_ids = list(range(16 + lookahead))
+    _run_store_req(thread, first)
 
     assert thread.get_kv_events() == []
-    assert thread._retry_token_ids["r0"] == (0, list(range(16)))
+    assert thread._retry_token_ids["r0"] == (0, list(range(16 + lookahead)))
 
-    _run_store_req(thread, _make_event_store_req(32, 16))
+    second = _make_event_store_req(32, 16)
+    second.num_hash_lookahead_tokens = lookahead
+    second.token_ids = list(range(16, 32 + lookahead))
+    _run_store_req(thread, second)
 
     retry_event, suffix_event = thread.get_kv_events()
     assert retry_event.token_ids == list(range(16))
     assert suffix_event.token_ids == list(range(16, 32))
+    assert retry_event.lookahead_token_ids == (
+        [list(range(16, 16 + lookahead))] if lookahead else None
+    )
+    assert suffix_event.lookahead_token_ids == (
+        [list(range(32, 32 + lookahead))] if lookahead else None
+    )
     assert thread._retry_token_ids == {}
     assert thread._saved_offset["r0"] == 32
 
@@ -4399,6 +4511,7 @@ def test_mooncake_lookup_reuses_resolved_hash_checkpoint(
         ),
     ]
     config = SimpleNamespace(
+        num_hash_lookahead_tokens=0,
         speculative_config=None,
         kv_transfer_config=SimpleNamespace(
             kv_role="kv_both", kv_connector_extra_config={}
@@ -4472,6 +4585,7 @@ def test_scheduler_follows_core_hit_alignment(alignment, expected):
         ),
     ]
     config = SimpleNamespace(
+        num_hash_lookahead_tokens=0,
         speculative_config=None,
         kv_transfer_config=SimpleNamespace(
             kv_role="kv_both", kv_connector_extra_config={}
@@ -5570,6 +5684,28 @@ def test_register_kv_caches_excludes_nonprefix_cacheable_layers():
     )
 
 
+def test_register_kv_caches_uses_committed_block_count():
+    """An extensible KV cache creates the connector with its committed block
+    count while cache_config.num_gpu_blocks still holds the warmup size."""
+    num_blocks = 6
+    worker = _make_bare_worker(num_gpu_blocks=num_blocks)
+    worker.cache_config.num_gpu_blocks = 16
+    store_layout = MagicMock()
+    worker.token_dbs[0].store_layout = store_layout
+    cache = torch.zeros(num_blocks, 4, dtype=torch.float16)
+
+    _register_with_mocked_threads(worker, {"layer0": cache})
+
+    registered_caches, registered_num_blocks = (
+        store_layout.register_kv_caches.call_args.args
+    )
+    assert registered_num_blocks == num_blocks
+    assert registered_caches[0] is cache
+    worker.store.register_buffer.assert_called_once_with(
+        cache.data_ptr(), cache.untyped_storage().nbytes()
+    )
+
+
 def test_register_kv_caches_separate_head_groups():
     # LHBNC gives each head group its own region; the K/V split doubles heads.
     layout = KVCacheLayout.LHBNC
@@ -6108,9 +6244,9 @@ def test_store_worker_close_swallows_store_errors():
 
 
 def test_blob_block_hashes_wire_roundtrip():
-    """The lookup wire format sends a ``hash_len`` frame plus the raw hashes
+    """The lookup wire format sends a `hash_len` frame plus the raw hashes
     concatenated back-to-back; the server rebuilds them through a zero-copy
-    ``BlobBlockHashes`` view over the frame buffer."""
+    `BlobBlockHashes` view over the frame buffer."""
     hashes = [BlockHash(bytes([i]) * 16) for i in range(5)]
     hash_len = len(hashes[0])
 
