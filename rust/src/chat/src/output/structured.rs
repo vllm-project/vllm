@@ -10,17 +10,14 @@
 
 use asynk_strim_attr::{TryYielder, try_stream};
 use futures::{StreamExt as _, pin_mut};
-use vllm_engine_core_client::protocol::output::RequestSpecDecodeMetrics;
-use vllm_llm::{RequestTimestamps, WeightVersionSpan};
 use vllm_text::DecodedLogprobs;
 
 use super::{AssistantEvent, AssistantEventStream};
+use crate::Result;
 use crate::error::Error;
 use crate::event::{
     AssistantBlockKind, AssistantContentBlock, AssistantMessage, AssistantToolCall, ChatEvent,
-    ChatTokenUsage,
 };
-use crate::{FinishReason, Result};
 
 /// One currently open assistant text-like block being assembled from streamed
 /// deltas.
@@ -148,31 +145,12 @@ impl StructuredEventState {
         Ok(events)
     }
 
-    /// Close any open block and emit the terminal `Done` event.
-    fn finish(
-        &mut self,
-        usage: ChatTokenUsage,
-        timestamps: RequestTimestamps,
-        spec_decode_metrics: Option<RequestSpecDecodeMetrics>,
-        finish_reason: FinishReason,
-        kv_transfer_params: Option<Box<serde_json::Value>>,
-        ec_transfer_params: Option<Box<serde_json::Value>>,
-        weight_versions: Option<Vec<WeightVersionSpan>>,
-    ) -> Result<Vec<ChatEvent>> {
+    /// Close any open block before the terminal `Done` event.
+    fn close_open_blocks(&mut self) -> Vec<ChatEvent> {
         let mut events = Vec::new();
         self.close_open_text_block(&mut events);
         self.close_open_tool_call(&mut events);
-        events.push(ChatEvent::Done {
-            message: self.message.clone(),
-            usage,
-            timestamps,
-            spec_decode_metrics,
-            finish_reason,
-            kv_transfer_params,
-            ec_transfer_params,
-            weight_versions,
-        });
-        Ok(events)
+        events
     }
 
     /// Append one semantic text delta to the current block, or open a new block
@@ -327,8 +305,13 @@ pub(crate) async fn structured_chat_event_stream(
                 kv_transfer_params,
                 ec_transfer_params,
                 weight_versions,
+                routed_experts,
             } => {
-                for next in state.finish(
+                for next in state.close_open_blocks() {
+                    y.yield_ok(next).await;
+                }
+                y.yield_ok(ChatEvent::Done {
+                    message: state.message.clone(),
                     usage,
                     timestamps,
                     spec_decode_metrics,
@@ -336,9 +319,9 @@ pub(crate) async fn structured_chat_event_stream(
                     kv_transfer_params,
                     ec_transfer_params,
                     weight_versions,
-                )? {
-                    y.yield_ok(next).await;
-                }
+                    routed_experts,
+                })
+                .await;
             }
         }
     }
@@ -377,6 +360,7 @@ mod tests {
                 kv_transfer_params: None,
                 ec_transfer_params: None,
                 weight_versions: None,
+                routed_experts: None,
             }),
         ]);
 
@@ -435,6 +419,7 @@ mod tests {
                 kv_transfer_params: None,
                 ec_transfer_params: None,
                 weight_versions: None,
+                routed_experts: None,
             }),
         ]);
 
@@ -491,6 +476,7 @@ mod tests {
                 kv_transfer_params: None,
                 ec_transfer_params: None,
                 weight_versions: None,
+                routed_experts: None,
             }),
         ]);
 
@@ -547,6 +533,7 @@ mod tests {
                 kv_transfer_params: None,
                 ec_transfer_params: None,
                 weight_versions: None,
+                routed_experts: None,
             }),
         ]);
 
@@ -618,6 +605,7 @@ mod tests {
                 kv_transfer_params: None,
                 ec_transfer_params: None,
                 weight_versions: None,
+                routed_experts: None,
             }),
         ]);
 
@@ -672,6 +660,7 @@ mod tests {
                 kv_transfer_params: None,
                 ec_transfer_params: None,
                 weight_versions: None,
+                routed_experts: None,
             }),
         ]);
 

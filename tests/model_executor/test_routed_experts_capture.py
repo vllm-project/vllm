@@ -856,7 +856,7 @@ def test_aux_output_worker_connector_default_capacity(monkeypatch):
     assert background_store_constructor.call_args.kwargs["max_pending_batches"] == 16
 
 
-def test_v2_model_runner_accepts_routed_experts(monkeypatch):
+def test_model_runner_accepts_routed_experts(monkeypatch):
     monkeypatch.setattr("importlib.metadata.entry_points", lambda **_: ())
     config = SimpleNamespace(
         model_config=SimpleNamespace(
@@ -883,6 +883,6 @@ def test_v2_model_runner_accepts_routed_experts(monkeypatch):
         ec_transfer_config=None,
     )
 
-    unsupported = VllmConfig._get_v2_model_runner_unsupported_features(config)
+    unsupported = VllmConfig._get_model_runner_unsupported_features(config)
 
     assert "routed experts capture" not in unsupported

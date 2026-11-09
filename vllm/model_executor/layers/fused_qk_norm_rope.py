@@ -2,10 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Fused QK-RMSNorm + (partial) RoPE + gate copy Triton kernel.
 
-Currently used by the Qwen3.5 attention path (``attn_output_gate`` with
+Currently used by the Qwen3.5 attention path (`attn_output_gate` with
 NeoX-style partial RoPE). The unfused reference sequence is
-``split -> GemmaRMSNorm -> RoPE -> gate chunk``; this collapses it into a
-single Triton launch. See :func:`fused_qk_rmsnorm_rope_gate`.
+`split -> GemmaRMSNorm -> RoPE -> gate chunk`; this collapses it into a
+single Triton launch. See `fused_qk_rmsnorm_rope_gate`.
 """
 
 import torch
@@ -177,7 +177,7 @@ def fused_qk_rmsnorm_rope_gate(
 
     Returns:
         (q_out, k_out, gate_out) -- all contiguous (n_tokens, heads * head_dim).
-        ``gate_out`` is the raw (pre-sigmoid) gate.
+        `gate_out` is the raw (pre-sigmoid) gate.
 
     """
     if rotary_dim <= 0 or rotary_dim > head_dim or rotary_dim % 2 != 0:
