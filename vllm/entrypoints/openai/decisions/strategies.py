@@ -236,7 +236,9 @@ class ReadStrategy(ABC):
             return
         generator = engine_client.generate(
             tokens_input(list(prompts[0][:shared]), cache_salt=cache_salt),
-            SamplingParams(max_tokens=1, temperature=0.0),
+            # The warm's one-token output is discarded; detokenizing it
+            # would decode the shared prefix on the event loop.
+            SamplingParams(max_tokens=1, temperature=0.0, detokenize=False),
             f"{request_id}-prefix",
             lora_request=lora_request,
             trace_headers=trace_headers,
@@ -427,44 +429,6 @@ class NextTokenStrategy(ReadStrategy):
         ).token_ids
         return engine_input, list(prompt_ids or [])
 
-    async def _warm_shared_prefix(
-        self,
-        prompts: Sequence[Sequence[int]],
-        request_id: str,
-        *,
-        lora_request: LoRARequest | None,
-        priority: int,
-        cache_salt: str | None,
-        trace_headers: Mapping[str, str] | None,
-        extra_args: dict[str, Any] | None = None,
-    ) -> None:
-        """Prefill the tokens every question starts with, before the reads.
-
-        The reads share the state only through the prefix cache. Reads that
-        start together cannot reuse each other's recurrent state, so on hybrid
-        models each of them would prefill the state again. Attention-only
-        models share the blocks within a step and skip this.
-        """
-        engine_client = self.context.engine_client
-        if (
-            len(prompts) < 2
-            or not engine_client.model_config.is_hybrid
-            or not engine_client.vllm_config.cache_config.enable_prefix_caching
-        ):
-            return
-        shared = common_prefix_len(prompts)
-        if shared < MIN_WARM_PREFIX_TOKENS:
-            return
-        generator = engine_client.generate(
-            tokens_input(list(prompts[0][:shared]), cache_salt=cache_salt),
-            SamplingParams(max_tokens=1, temperature=0.0, extra_args=extra_args),
-            f"{request_id}-prefix",
-            lora_request=lora_request,
-            trace_headers=trace_headers,
-            priority=priority,
-        )
-        async for _ in generator:
-            pass
 
     async def _prompts(
         self,
@@ -1831,6 +1795,9 @@ class KnowLineStrategy(ReadStrategy):
                     f"{self.max_model_len - 1} tokens, got {len(prompt_ids)}"
                 )
             engine_inputs.append(tokens_input(prompt_ids, cache_salt=cache_salt))
+            # The read scores the reply's logprobs, never its text;
+            # detokenizing would prime a decoder with the whole prompt
+            # on every read.
             if n_options > MAX_LOGPROB_TOKEN_IDS:
                 # Too many labels for logprob_token_ids: mask the rest out.
                 params.append(
@@ -1839,6 +1806,7 @@ class KnowLineStrategy(ReadStrategy):
                         temperature=0.0,
                         allowed_token_ids=ids,
                         logprobs=n_options,
+                        detokenize=False,
                     )
                 )
             else:
@@ -1847,6 +1815,7 @@ class KnowLineStrategy(ReadStrategy):
                         max_tokens=1,
                         temperature=0.0,
                         logprob_token_ids=ids,
+                        detokenize=False,
                     )
                 )
             label_groups.append(ids)
