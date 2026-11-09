@@ -2032,12 +2032,8 @@ class MooncakeConnectorWorker:
         err_reqs: list[ReqId] = []
         err_msg: str | None = None
         remote_session = f"{agent_meta.remote_hostname}:{agent_meta.remote_port}"
-        groups_match = _groups_match(local_regions, remote_regions)
 
         for d_req_id, send_meta in ready_reqs:
-            request_sources: list[int] = []
-            request_destinations: list[int] = []
-            request_lengths: list[int] = []
             try:
                 remote_block_ids = agent_meta.req_blocks[d_req_id][1]
                 # Full D hits still acknowledge every rank to release P's pages.
@@ -2046,84 +2042,76 @@ class MooncakeConnectorWorker:
                 region_runs = self._get_request_block_runs(
                     d_req_id, send_meta, agent_meta, local_regions, remote_regions
                 )
-                for local_region, remote_region, runs in zip(
-                    local_regions, remote_regions, region_runs
-                ):
-                    local_ids, remote_ids, run_starts, run_lens = runs
-                    if not groups_match and (
-                        local_region.kv_block_len != remote_region.kv_block_len
-                    ):
-                        raise ValueError(
-                            "Region-mapped source and destination payloads differ"
-                        )
-                    if len(local_ids) == 0:
-                        continue
-                    (
-                        should_transfer,
-                        src_region_offset,
-                        dst_region_offset,
-                        transfer_len,
-                    ) = self._get_sender_transfer_plan(
-                        local_kv_block_len=local_region.kv_block_len,
-                        remote_kv_block_len=remote_region.kv_block_len,
-                        remote_tp_rank=agent_meta.remote_tp_rank,
-                        remote_tp_size=agent_meta.remote_tp_size,
-                    )
-                    if not should_transfer:
-                        # Replicated KV cache: only one producer rank in the TP group
-                        # needs to send the actual bytes for this paired decoder rank.
-                        # TODO: Account for replicated producer KV in
-                        # get_target_remote_ranks() so we can avoid sending
-                        # unnecessary ZMQ requests and remove this branch.
-                        continue
-
-                    assert (
-                        src_region_offset + transfer_len <= local_region.kv_block_len
-                    ), "Computed source transfer region exceeds local KV block size."
-                    assert (
-                        dst_region_offset + transfer_len <= remote_region.kv_block_len
-                    ), "Destination transfer region exceeds remote KV block size."
-                    # Collapse one contiguous block group into a single larger
-                    # transfer descriptor when the per-block copy is identical.
-                    can_coalesce = _can_coalesce_block_transfers(
-                        local_region_block_len=local_region.block_len,
-                        remote_region_block_len=remote_region.block_len,
-                        src_region_offset=src_region_offset,
-                        dst_region_offset=dst_region_offset,
-                        transfer_len=transfer_len,
-                    )
-
-                    if can_coalesce:
-                        local_ids = local_ids[run_starts]
-                        remote_ids = remote_ids[run_starts]
-                        request_lengths.extend((run_lens * transfer_len).tolist())
-                    else:
-                        request_lengths.extend([transfer_len] * len(local_ids))
-                    request_sources.extend(
-                        (
-                            local_ids * local_region.block_len
-                            + (local_region.base_addr + src_region_offset)
-                        ).tolist()
-                    )
-                    request_destinations.extend(
-                        (
-                            remote_ids * remote_region.block_len
-                            + (remote_region.base_addr + dst_region_offset)
-                        ).tolist()
-                    )
             except (ValueError, IndexError, KeyError) as error:
                 logger.error("req %s: %s", d_req_id, error)
                 err_reqs.append(d_req_id)
                 if err_msg is None:
                     err_msg = str(error)
                 continue
-            src_ptrs.extend(request_sources)
-            dst_ptrs.extend(request_destinations)
-            lengths.extend(request_lengths)
+            descriptor_start = len(src_ptrs)
+            for local_region, remote_region, runs in zip(
+                local_regions, remote_regions, region_runs
+            ):
+                local_ids, remote_ids, run_starts, run_lens = runs
+                if len(local_ids) == 0:
+                    continue
+                (
+                    should_transfer,
+                    src_region_offset,
+                    dst_region_offset,
+                    transfer_len,
+                ) = self._get_sender_transfer_plan(
+                    local_kv_block_len=local_region.kv_block_len,
+                    remote_kv_block_len=remote_region.kv_block_len,
+                    remote_tp_rank=agent_meta.remote_tp_rank,
+                    remote_tp_size=agent_meta.remote_tp_size,
+                )
+                if not should_transfer:
+                    # Replicated KV cache: only one producer rank in the TP group
+                    # needs to send the actual bytes for this paired decoder rank.
+                    # TODO: Account for replicated producer KV in
+                    # get_target_remote_ranks() so we can avoid sending
+                    # unnecessary ZMQ requests and remove this branch.
+                    continue
+
+                assert src_region_offset + transfer_len <= local_region.kv_block_len, (
+                    "Computed source transfer region exceeds local KV block size."
+                )
+                assert dst_region_offset + transfer_len <= remote_region.kv_block_len, (
+                    "Destination transfer region exceeds remote KV block size."
+                )
+                # Collapse one contiguous block group into a single larger
+                # transfer descriptor when the per-block copy is identical.
+                can_coalesce = _can_coalesce_block_transfers(
+                    local_region_block_len=local_region.block_len,
+                    remote_region_block_len=remote_region.block_len,
+                    src_region_offset=src_region_offset,
+                    dst_region_offset=dst_region_offset,
+                    transfer_len=transfer_len,
+                )
+
+                if can_coalesce:
+                    local_ids = local_ids[run_starts]
+                    remote_ids = remote_ids[run_starts]
+                    lengths.extend((run_lens * transfer_len).tolist())
+                else:
+                    lengths.extend([transfer_len] * len(local_ids))
+                src_ptrs.extend(
+                    (
+                        local_ids * local_region.block_len
+                        + (local_region.base_addr + src_region_offset)
+                    ).tolist()
+                )
+                dst_ptrs.extend(
+                    (
+                        remote_ids * remote_region.block_len
+                        + (remote_region.base_addr + dst_region_offset)
+                    ).tolist()
+                )
             logger.debug(
                 "Sending kv_caches for request %s (%d descriptors) to %s",
                 d_req_id,
-                len(request_lengths),
+                len(src_ptrs) - descriptor_start,
                 remote_session,
             )
 
@@ -2139,11 +2127,10 @@ class MooncakeConnectorWorker:
     ) -> list[tuple[np.ndarray, ...]]:
         """Pair pages once per endpoint group pair, retaining region order."""
         remote_block_ids_per_group = agent_meta.req_blocks[d_req_id][1]
+        local_block_ids_by_group = send_meta.local_block_ids
+        remote_block_ids_by_group = remote_block_ids_per_group
         groups_match = _groups_match(local_regions, remote_regions)
-        if not groups_match:
-            local_block_ids_by_group = send_meta.local_block_ids
-            remote_block_ids_by_group = remote_block_ids_per_group
-        else:
+        if groups_match:
             if len(send_meta.local_block_ids) != len(remote_block_ids_per_group):
                 raise ValueError("KV group count mismatch")
             # Keep KV-cache group identity. Hybrid/HMA groups can carry
@@ -2217,6 +2204,10 @@ class MooncakeConnectorWorker:
         ] = {}
         region_runs: list[tuple[np.ndarray, ...]] = []
         for local_region, remote_region in zip(local_regions, remote_regions):
+            if not groups_match and (
+                local_region.kv_block_len != remote_region.kv_block_len
+            ):
+                raise ValueError("Region-mapped source and destination payloads differ")
             group_key = (
                 local_region.group_index,
                 local_region.shared_group_ids,
