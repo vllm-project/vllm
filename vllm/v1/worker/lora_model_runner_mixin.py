@@ -25,18 +25,6 @@ class LoRAModelRunnerMixin:
     lora_config: LoRAConfig | None
     get_model: Callable[[], nn.Module]
 
-    def reset_lora_state(self) -> None:
-        """Invalidate LoRA state after base weights are replaced."""
-        if not self.lora_config:
-            return
-
-        from vllm.lora.layers.logits_processor import LogitsProcessorWithLoRA
-
-        self.lora_manager.remove_all_adapters()
-        for module in self.get_model().modules():
-            if isinstance(module, LogitsProcessorWithLoRA):
-                module.reset_sharded_to_full_mapping()
-
     def load_lora_model(
         self,
         model: nn.Module,
@@ -241,12 +229,15 @@ class LoRAModelRunnerMixin:
             num_sampled_tokens: Array of sampled token counts per request.
             remove_lora: Whether to remove LoRAs after the context exits.
             num_active_loras: Number of distinct active LoRAs to use.
-                LoRA is activated when num_active_loras > 0.
+                LoRA is activated when num_active_loras > 0. When it is 0, no
+                dummy LoRAs are added or removed, so loaded adapters are kept.
             mapping_type: Which LoRA mapping to build (language or encoder).
 
         """
         with (
-            self.maybe_setup_dummy_loras(lora_config, remove_lora),
+            self.maybe_setup_dummy_loras(
+                lora_config if num_active_loras > 0 else None, remove_lora
+            ),
             self.maybe_select_dummy_loras(
                 lora_config,
                 num_scheduled_tokens,

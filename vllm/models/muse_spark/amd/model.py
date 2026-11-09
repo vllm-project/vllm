@@ -105,7 +105,7 @@ def norm_residual_then_norm(
     *,
     out_dtype: torch.dtype,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Post-norm, blend and pre-norm in one kernel; returns ``(out, new_stream)``."""
+    """Post-norm, blend and pre-norm in one kernel; returns `(out, new_stream)`."""
     post_norm, connection = x.post_norm, x.connection
     branch, stream = x.branch, x.stream
     if (
@@ -581,7 +581,7 @@ class MuseSparkAttention(nn.Module):
         floor_scale: float,
         q_scale: float,
     ) -> torch.Tensor:
-        """Query scale: 1.0 up to ``floor_scale``, logarithmic above it."""
+        """Query scale: 1.0 up to `floor_scale`, logarithmic above it."""
         scaling = torch.log((positions.float() + 1.0) / floor_scale) * q_scale + 1.0
         return scaling.clamp_min(1.0).unsqueeze(-1)
 
@@ -597,7 +597,7 @@ class MuseSparkAttention(nn.Module):
     def _qk_norm_rope_kv_insert(
         self, qkv: torch.Tensor, positions: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
-        """QK-norm, temperature scale and RoPE; returns ``(q, k, v, o_gate)``."""
+        """QK-norm, temperature scale and RoPE; returns `(q, k, v, o_gate)`."""
         cos_sin_cache = None
         rotary_dim = 0
         if self.use_rope:
@@ -872,7 +872,7 @@ class MuseSparkDecoderLayer(nn.Module):
 
 
 def _drop_gate_up_stacking(base: WeightsMapper) -> WeightsMapper:
-    """Keep Quark's per-expert gate/up names unstacked for ``RoutedExperts``."""
+    """Keep Quark's per-expert gate/up names unstacked for `RoutedExperts`."""
     return WeightsMapper(
         orig_to_new_renaming=base.orig_to_new_renaming,
         orig_to_new_regex=base.orig_to_new_regex,
@@ -963,7 +963,6 @@ class MuseSparkModel(LlamaModel):
         x: MuseSparkResidualStream | torch.Tensor = hidden_states.to(
             self.residual_dtype
         )
-        remote_aux = self.collect_remote_aux_hidden_states(intermediate_tensors)
         aux_hidden_states: list[torch.Tensor] = []
         if get_pp_group().is_first_rank:
             self._maybe_add_hidden_state(aux_hidden_states, self.start_layer, x, None)
@@ -1002,7 +1001,6 @@ class MuseSparkModel(LlamaModel):
             output, _ = norm_residual_then_norm(
                 x, self.norm, out_dtype=self.default_dtype
             )
-        aux_hidden_states = remote_aux + aux_hidden_states
         if aux_hidden_states:
             return output, aux_hidden_states
         return output

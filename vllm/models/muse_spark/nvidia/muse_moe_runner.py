@@ -241,7 +241,7 @@ class MusePostExpertFinalize:
         return workspace
 
     def __call__(self, unfinalized: UnfinalizedMoEOutput, out: torch.Tensor) -> None:
-        """Finalize permuted GEMM2 rows into ``out``."""
+        """Finalize permuted GEMM2 rows into `out`."""
         permuted_idx = unfinalized.expanded_idx_to_permuted_idx
         num_tokens, top_k = permuted_idx.shape
         rows_all = unfinalized.gemm2_permuted
@@ -467,13 +467,13 @@ def _attach_post_expert_finalize(
 
 @dataclass
 class MuseSparkNvFp4MoEQuantConfig(FusedMoEQuantConfig):
-    """``FusedMoEQuantConfig`` that also carries the w3-side GEMM1 scale."""
+    """`FusedMoEQuantConfig` that also carries the w3-side GEMM1 scale."""
 
     g1_scale_c: torch.Tensor | None = None
 
 
 class _MuseSparkNvFp4Scales:
-    """Split w1/w3 GEMM1 global scales (``w13_weight_scale_2`` is [E, 2])."""
+    """Split w1/w3 GEMM1 global scales (`w13_weight_scale_2` is [E, 2])."""
 
     quant_config: FusedMoEQuantConfig
     gemm1_clamp_limit: torch.Tensor | None
@@ -574,7 +574,7 @@ class MuseSparkTrtLlmNvFp4ExpertsModular(
 class MuseSparkModelOptNvFp4FusedMoE(ModelOptNvFp4FusedMoE):
     """ModelOpt NVFP4 MoE preserving separate w1/w3 global weight scales.
 
-    The name must contain "ModelOpt": ``RoutedExperts.weight_loader`` matches it.
+    The name must contain "ModelOpt": `RoutedExperts.weight_loader` matches it.
     """
 
     muse_post_expert_finalize: MusePostExpertFinalize
@@ -866,10 +866,10 @@ class MuseMoERunner(MoERunner):
         a1q_scale: torch.Tensor,
         routing: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
     ) -> torch.Tensor:
-        """MoE output from NVFP4 input quantized with ``nvfp4_input_global_scale``.
+        """MoE output from NVFP4 input quantized with `nvfp4_input_global_scale`.
 
-        ``routing`` is either router logits (the kernel routes) or prepared
-        ``(topk_ids, topk_weights)``.
+        `routing` is either router logits (the kernel routes) or prepared
+        `(topk_ids, topk_weights)`.
         """
         layer = self.routed_experts
         experts = self._prepared_nvfp4_experts
