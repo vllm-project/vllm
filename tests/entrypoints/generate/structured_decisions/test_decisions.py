@@ -62,6 +62,19 @@ def test_choice_preserves_boolean_and_string_values():
     assert answer["confidence"] == pytest.approx(0.35)
 
 
+def test_unlabeled_read_question_can_exceed_alphabetic_labels():
+    question = request(
+        questions=[
+            {
+                "type": "choice",
+                "choices": [{"value": str(i)} for i in range(27)],
+            }
+        ]
+    ).questions[0]
+    read = make_read_question(0, question, max_options=None, labeled=False)
+    assert len(read.options) == 27
+
+
 def test_score_is_weighted_average_of_zero_based_level_indices():
     question = request(
         questions=[

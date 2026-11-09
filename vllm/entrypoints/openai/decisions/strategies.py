@@ -83,7 +83,8 @@ class ReadContext:
 @dataclass(frozen=True)
 class DecisionLimits:
     max_questions: int
-    max_options: int
+    #: None means that option count is bounded by the rendered prompt length.
+    max_options: int | None
     #: Whether a read scores each option by its label's token, so a question
     #: has at most as many options as its type has labels.
     labeled: bool = True
@@ -336,7 +337,7 @@ class NextTokenStrategy(ReadStrategy):
         return [{"type": "image_pil", "image_pil": image} for image in images]
 
     def limits(self) -> DecisionLimits:
-        return DecisionLimits(max_questions=64, max_options=len(LABELS))
+        return DecisionLimits(max_questions=64, max_options=None, labeled=False)
 
     def _read_request(
         self, chat_template_kwargs: dict[str, Any] | None, cache_salt: str | None = None

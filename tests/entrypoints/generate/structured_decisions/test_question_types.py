@@ -119,6 +119,18 @@ def test_option_limit():
         choice(criteria={str(i): None for i in range(27)})
 
 
+def test_unlabeled_question_can_exceed_label_count():
+    q = build_question(
+        "q",
+        "choice",
+        "Pick one",
+        {str(i): None for i in range(27)},
+        None,
+        labeled=False,
+    )
+    assert len(q.options) == 27
+
+
 def test_noul_labels_and_prompt():
     q = noul()
     assert q.labels == ("yes", "no")
