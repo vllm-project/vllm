@@ -179,7 +179,7 @@ def test_b12x_attention_runtime_page_size_comes_from_cache() -> None:
 
 def test_b12x_attention_impl_accepts_default_block_size(workspace_init) -> None:
     """The impl is constructed with the model, before the platform applies
-    get_preferred_block_size(); it must not reject the default block size.
+    get_preferred_block_size(); it must not reject the block size it sees then.
 
     Regression test: `--attention-backend b12x` without `--block-size`
     used to fail with "b12x requires --block-size in (64, 128), got 16".
@@ -188,10 +188,14 @@ def test_b12x_attention_impl_accepts_default_block_size(workspace_init) -> None:
     from tests.v1.attention.utils import create_vllm_config
     from vllm.config import set_current_vllm_config
 
-    vllm_config = create_vllm_config(model_name="Qwen/Qwen3-0.6B", dtype=torch.bfloat16)
-    cache_config = vllm_config.cache_config
-    assert cache_config.block_size == cache_config.DEFAULT_BLOCK_SIZE
-    assert not B12xPagedAttentionBackend.supports_block_size(cache_config.block_size)
+    # A block size b12x does not support stands in for the unresolved default
+    # (the default itself is 64 since #63231, which b12x happens to support).
+    vllm_config = create_vllm_config(
+        model_name="Qwen/Qwen3-0.6B", dtype=torch.bfloat16, block_size=16
+    )
+    assert not B12xPagedAttentionBackend.supports_block_size(
+        vllm_config.cache_config.block_size
+    )
 
     with set_current_vllm_config(vllm_config):
         impl = B12xPagedAttentionImpl(
