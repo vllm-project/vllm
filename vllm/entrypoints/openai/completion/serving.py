@@ -66,10 +66,10 @@ def _delta_frame_template(
     constant for a stream, so only index and text are rendered per chunk.
 
     Taking them from the serializer keeps frames byte-identical to
-    ``model_dump_json(exclude_unset=True)`` if the models gain fields.
+    `model_dump_json(exclude_unset=True)` if the models gain fields.
 
     Returns:
-        ``(prefix, infix, suffix)``, or None if the sentinels are ambiguous.
+        `(prefix, infix, suffix)`, or None if the sentinels are ambiguous.
 
     """
     probe = CompletionStreamResponse(
