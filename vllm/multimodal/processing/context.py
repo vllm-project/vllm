@@ -82,12 +82,12 @@ def _resolve_mm_processor_kwargs(
 ) -> dict[str, object]:
     """Resolve flat processor kwargs into HuggingFace processor kwarg scopes.
 
-    With ``supported_mm_processor_kwargs``, each scope lists the flat keys it
+    With `supported_mm_processor_kwargs`, each scope lists the flat keys it
     supports. Matching flat keys are routed to every scope that supports them,
     existing scoped values take precedence, and keys not supported by any scope
     remain flat.
 
-    Without ``supported_mm_processor_kwargs``, flat keys already represented in
+    Without `supported_mm_processor_kwargs`, flat keys already represented in
     at least one existing mapping-valued scope are removed from the shared flat
     namespace; all other flat keys are left unchanged because there is no
     information to determine which scopes should receive them.
@@ -379,15 +379,15 @@ class InputProcessingContext:
         *,
         supported_mm_processor_kwargs: Mapping[str, set[str]] | None = None,
     ) -> dict[str, Any]:
-        """Merge configured and request ``mm_processor_kwargs``.
+        """Merge configured and request `mm_processor_kwargs`.
 
-        When ``supported_mm_processor_kwargs`` is provided, flat keys are matched
+        When `supported_mm_processor_kwargs` is provided, flat keys are matched
         against the keys supported by each HuggingFace processor kwarg scope.
         Matching flat keys are routed to every scope that supports them and
         removed from the shared flat namespace; keys not supported by any scope
         remain flat.
 
-        Without ``supported_mm_processor_kwargs``, flat keys already represented
+        Without `supported_mm_processor_kwargs`, flat keys already represented
         in at least one existing mapping-valued scope are removed from the shared
         flat namespace; all other flat keys are left unchanged because there is
         no information to determine which scopes should receive them.
@@ -503,7 +503,7 @@ class BaseProcessingInfo:
         self,
         mm_kwargs: Mapping[str, object],
     ) -> dict[str, Any]:
-        """Merge configured and request ``mm_processor_kwargs``.
+        """Merge configured and request `mm_processor_kwargs`.
 
         Flat kwargs are routed into the HuggingFace processor kwarg scopes that
         support them after the configured/request merge. When a routed flat value

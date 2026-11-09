@@ -746,7 +746,7 @@ class FusedAddMulticastGemm:
                 ab_producer.reset()
                 peek_ab_empty_status = ab_producer.try_acquire()
 
-                for k_tile in cutlass.range(0, self.b_prime_stages, 1, unroll=1):
+                for _ in cutlass.range(0, self.b_prime_stages, 1, unroll=1):
                     handle = ab_producer.acquire_and_advance(peek_ab_empty_status)
                     cute.copy(
                         tma_atom_b,
@@ -779,9 +779,7 @@ class FusedAddMulticastGemm:
 
                 peek_ab_empty_status = ab_producer.try_acquire()
 
-                for k_tile in cutlass.range(
-                    self.b_prime_stages, k_tile_cnt, 1, unroll=1
-                ):
+                for _ in cutlass.range(self.b_prime_stages, k_tile_cnt, 1, unroll=1):
                     handle = ab_producer.acquire_and_advance(peek_ab_empty_status)
 
                     cute.copy(
@@ -837,7 +835,7 @@ class FusedAddMulticastGemm:
 
                 tiled_mma.set(tcgen05.Field.ACCUMULATE, False)
 
-                for k_tile in range(k_tile_cnt):
+                for _ in range(k_tile_cnt):
                     if is_leader_cta:
                         handle = ab_consumer.wait_and_advance(peek_ab_full_status)
 
