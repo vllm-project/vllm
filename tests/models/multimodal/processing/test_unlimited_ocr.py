@@ -158,6 +158,32 @@ def test_image_cache_identity_without_cropping(kwargs_on_init: bool):
     assert results[0]["prompt_token_ids"] == results[2]["prompt_token_ids"]
 
 
+def test_v2_multi_page_request_uses_processor_cache():
+    config = ModelConfig(
+        model="baidu/Unlimited-OCR-2",
+        limit_mm_per_prompt={"image": 2},
+        max_model_len=8192,
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(config)
+    prompt = processor.info.get_tokenizer().encode(
+        "<PAGE><image><PAGE><image>Multi page parsing."
+    )
+    images = [Image.new("RGB", (1920, 1080), color) for color in ("red", "blue")]
+    cache = MultiModalProcessorOnlyCache(config)
+    results = []
+    for data in (images, [None, None]):
+        inputs = ProcessorInputs(
+            prompt=prompt,
+            mm_data_items=processor.info.parse_mm_data({"image": data}),
+            mm_uuid_items={"image": ["page-0", "page-1"]},
+            cache=cache,
+        )
+        results.append(processor.apply(inputs, TimingContext(enabled=False)))
+
+    assert results[0]["prompt_token_ids"] == results[1]["prompt_token_ids"]
+    assert results[0]["mm_hashes"] == results[1]["mm_hashes"]
+
+
 def test_v2_gundam_matches_official_wide_page_grid():
     """The checkpoint's 16-crop preset selects 5x3, rather than the v1 7x4 grid."""
     config = ModelConfig(model="baidu/Unlimited-OCR-2", max_model_len=8192)

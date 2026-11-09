@@ -286,7 +286,9 @@ class UnlimitedOCRMultiModalProcessor(DeepseekOCRMultiModalProcessor):
         # (no crop) requests. The processing cache assumes per-item output is
         # invariant of how many images are passed per prompt, so we only cache
         # the single-image case and recompute multi-image requests fresh.
-        if inputs.mm_data_items.get_count("image", strict=False) > 1:
+        if inputs.mm_data_items.get_count("image", strict=False) > 1 and not getattr(
+            self.info.get_hf_config().text_config, "unlimited_ocr2", False
+        ):
             return self._apply_hf_processor(inputs, timing_ctx)
 
         return super()._cached_apply_hf_processor(inputs, timing_ctx)
