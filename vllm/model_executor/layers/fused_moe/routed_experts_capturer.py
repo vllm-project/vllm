@@ -17,6 +17,7 @@ from vllm.distributed.parallel_state import get_tp_group
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.platforms import current_platform
+from vllm.v1.worker.ubatching import dbo_current_ubatch_token_offset
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +26,21 @@ logger = logging.getLogger(__name__)
 class RoutedExpertsCaptureSource(Protocol):
     layer_id: int
     capture_fn: Callable[[torch.Tensor], None] | None
+
+
+@runtime_checkable
+class RoutedExpertsRowRestorer(Protocol):
+    def restore_routed_experts_rows(
+        self, topk_ids: torch.Tensor, ctx: ForwardContext
+    ) -> torch.Tensor:
+        """Restore local token-ordered logical IDs for all captured MoE layers.
+
+        Binding selects the first provider. Read current metadata from `ctx`;
+        do not depend on the provider's layer-specific state or modify input.
+        Return a 2-D tensor with the input device, dtype and top-k width.
+        Collectives must be rank-consistent and graph-replay safe.
+        """
+        ...
 
 
 def _get_routed_experts_shape(vllm_config: VllmConfig) -> tuple[int, int, int]:
@@ -44,15 +60,15 @@ def _get_routed_experts_shape(vllm_config: VllmConfig) -> tuple[int, int, int]:
 class RoutedExpertsCapturer:
     """Worker-side capturer for routed experts, lives on GPU.
 
-    Layer-level hooks call :meth:`capture` inside the forward pass. Routing
+    Layer-level hooks call `capture` inside the forward pass. Routing
     rows owned by this DP rank are written into a preallocated device buffer.
 
-    The device buffer uses ``int32``. Stable snapshots use the narrowest dtype
+    The device buffer uses `int32`. Stable snapshots use the narrowest dtype
     that can represent every logical expert ID.
 
     Invariants:
         - One instance per worker; shape is fixed at init and covers the
-          worst-case step (``max_num_batched_tokens`` tokens).
+          worst-case step (`max_num_batched_tokens` tokens).
         - Every routed layer overwrites the current step's token rows.
     """
 
@@ -83,6 +99,9 @@ class RoutedExpertsCapturer:
         )
         self.dp_rank = vllm_config.parallel_config.data_parallel_rank
         self.tp_size = vllm_config.parallel_config.tensor_parallel_size
+        self.restore_rows: Callable[[torch.Tensor, ForwardContext], torch.Tensor] = (
+            self._restore_local_topk_ids
+        )
 
     def capture(self, layer_id: int, topk_ids: torch.Tensor) -> None:
         if not 0 <= layer_id < self.device_buffer.shape[1]:
@@ -91,8 +110,12 @@ class RoutedExpertsCapturer:
                 f"layer count {self.device_buffer.shape[1]}"
             )
 
-        local_topk_ids = self._restore_local_topk_ids(topk_ids, get_forward_context())
-        self.device_buffer[: len(local_topk_ids), layer_id] = local_topk_ids
+        ctx = get_forward_context()
+        local_topk_ids = self.restore_rows(topk_ids, ctx)
+        offset = dbo_current_ubatch_token_offset()
+        self.device_buffer[offset : offset + len(local_topk_ids), layer_id] = (
+            local_topk_ids
+        )
 
     def _restore_local_topk_ids(
         self, topk_ids: torch.Tensor, ctx: ForwardContext
@@ -187,12 +210,16 @@ def bind_routed_experts_capturer(
     from vllm.model_executor.layers.fused_moe.router.base_router import BaseRouter
 
     num_bound = 0
+    restorer_bound = False
     for module in model.modules():
+        if not isinstance(module, (MoERunner, RoutedExpertsCaptureSource)):
+            continue
+        if not restorer_bound and isinstance(module, RoutedExpertsRowRestorer):
+            capturer.restore_rows = module.restore_routed_experts_rows
+            restorer_bound = True
         if isinstance(module, RoutedExpertsCaptureSource):
             module.capture_fn = partial(capturer.capture, module.layer_id)
             num_bound += 1
-            continue
-        if not isinstance(module, MoERunner):
             continue
         capture_fn = partial(capturer.capture, module.layer_id)
         quant_method = module._quant_method

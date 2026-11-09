@@ -317,15 +317,24 @@ class MiMoV2Attention(nn.Module):
 
         sliding_window = sliding_window_size if sliding_window_size > -1 else None
 
-        # Use DiffKV backend when V has a different head dim than K.
-        # Auto-pick FA-DiffKV when FA3/4 is usable on this device, else fall
-        # back to TRITON_ATTN_DIFFKV.  Users can force a choice via
-        # `--attention-backend <FLASH_ATTN_DIFFKV|TRITON_ATTN_DIFFKV>`.
+        # V has a different head dim than K. Honor an explicit backend that
+        # declares it can serve that geometry; anything else keeps the auto-pick
+        # below, with a warning.
         if self.v_head_dim != self.head_dim:
             requested = get_current_vllm_config().attention_config.backend
-            if requested is not None and requested.name.endswith("_DIFFKV"):
+            if requested is not None and requested.get_class().supports_head_size_v(
+                self.head_dim, self.v_head_dim
+            ):
                 backend_enum = requested
             else:
+                if requested is not None:
+                    logger.warning_once(
+                        "%s cannot serve head_size_v=%d != head_size=%d; "
+                        "using the DiffKV auto-pick instead.",
+                        requested.name,
+                        self.v_head_dim,
+                        self.head_dim,
+                    )
                 fa_backend = AttentionBackendEnum.FLASH_ATTN_DIFFKV.get_class()
                 assert hasattr(fa_backend, "is_supported_on_current_device")
                 if fa_backend.is_supported_on_current_device(
@@ -337,8 +346,11 @@ class MiMoV2Attention(nn.Module):
                 else:
                     backend_enum = AttentionBackendEnum.TRITON_ATTN_DIFFKV
             attn_backend = backend_enum.get_class()
-            assert hasattr(attn_backend, "set_head_size_v")
-            attn_backend.set_head_size_v(self.v_head_dim)
+            if backend_enum.name.endswith("_DIFFKV"):
+                # DiffKV takes V's head size as a backend class attribute;
+                # unified attention reads it from the layer's KV spec.
+                assert hasattr(attn_backend, "set_head_size_v")
+                attn_backend.set_head_size_v(self.v_head_dim)
             logger.info_once("Using %s for attention.", attn_backend.get_name())
         else:
             attn_backend = None
@@ -503,10 +515,10 @@ class MiMoV2FlashDecoderLayer(nn.Module):
 def _requantize_fp8(
     grouped: torch.Tensor, rows_rank: int, block: int, dtype: torch.dtype
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Block-quantize a rank's ``[Q | K | V]`` rows back to fp8.
+    """Block-quantize a rank's `[Q | K | V]` rows back to fp8.
 
     A rank's rows need not end on a block boundary (a single 1856-row slice is
-    14.5 blocks) while ``scaled_quantize`` requires both dims to be multiples of
+    14.5 blocks) while `scaled_quantize` requires both dims to be multiples of
     the block size, so pad the tail with zeros: zero rows cannot raise a block's
     amax, so every scale -- and the number of scale rows -- is unchanged. The
     padding is dropped again here.
@@ -531,9 +543,9 @@ def _fused_qkv_kv_chunk_rows(
     ckpt_tp: int,
     block: int = 128,
 ) -> int:
-    """Padded ``K | V`` rows per checkpoint chunk, or 0 for ``[Q | K | V]``.
+    """Padded `K | V` rows per checkpoint chunk, or 0 for `[Q | K | V]`.
 
-    0 when the de-interleaved ``[Q | K | V]`` layout is already exact: a rank
+    0 when the de-interleaved `[Q | K | V]` layout is already exact: a rank
     owns at most one checkpoint chunk, the chunk counts do not divide, or
     every chunk's Q, K and V rows span whole scale blocks (a block
     permutation; MiMo SWA layers). When a rank owns several chunks whose K
@@ -585,20 +597,20 @@ def _shard_fp8_qkv_proj(
     block: int = 128,
     kv_chunk_rows: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Shard the fp8 qkv_proj weights for ``tp_rank``.
+    """Shard the fp8 qkv_proj weights for `tp_rank`.
 
-    The checkpoint stores the fused QKV pre-sharded for ``ckpt_tp`` ranks (the
-    model config's ``num_key_value_heads``), each chunk holding that slice's
+    The checkpoint stores the fused QKV pre-sharded for `ckpt_tp` ranks (the
+    model config's `num_key_value_heads`), each chunk holding that slice's
     Q, K and V rows:
 
         [Q_0 | K_0 | V_0 | Q_1 | K_1 | V_1 | ... | Q_n | K_n | V_n]   (n = ckpt_tp)
 
-    Per chunk, Q has ``(num_heads / ckpt_tp) * head_dim`` rows, K has
-    ``(num_kv_heads / ckpt_tp) * head_dim`` rows, and V has
-    ``(num_kv_heads / ckpt_tp) * v_head_dim`` rows, and the fp8 block scales
-    are tiled per chunk too (``ceil(rows_per_chunk / block)`` rows each).
+    Per chunk, Q has `(num_heads / ckpt_tp) * head_dim` rows, K has
+    `(num_kv_heads / ckpt_tp) * head_dim` rows, and V has
+    `(num_kv_heads / ckpt_tp) * v_head_dim` rows, and the fp8 block scales
+    are tiled per chunk too (`ceil(rows_per_chunk / block)` rows each).
 
-    ``ckpt_tp`` is not the layer's KV-head count: a MiMo-V2.5 SWA layer has 8
+    `ckpt_tp` is not the layer's KV-head count: a MiMo-V2.5 SWA layer has 8
     KV heads over 4 chunks, so each chunk carries two KV heads (3712 rows = 29
     blocks) while a GA layer has 4 KV heads over 4 chunks (3392 rows each).
 
@@ -606,13 +618,13 @@ def _shard_fp8_qkv_proj(
 
         [Q_1 | Q_2 | ... | Q_g | K_1 | K_2 | ... | K_g | V_1 | V_2 | ... | V_g]
 
-    When ``tp_size == ckpt_tp`` the checkpoint chunk *is* that layout, so a
-    plain chunk of both weight and scale suffices. When ``tp_size`` is a
-    proper divisor of ``ckpt_tp`` and, under per-chunk scales, each chunk's
+    When `tp_size == ckpt_tp` the checkpoint chunk *is* that layout, so a
+    plain chunk of both weight and scale suffices. When `tp_size` is a
+    proper divisor of `ckpt_tp` and, under per-chunk scales, each chunk's
     Q, K and V segments span whole scale blocks, the rank gathers its rows
     as an exact block permutation with no dequantize-requantize round trip;
-    with ``kv_chunk_rows`` a K segment that straddles a scale block gathers
-    into the zero-padded ``[Q_1..Q_g | K_1 V_1 pad | ..]`` layout instead.
+    with `kv_chunk_rows` a K segment that straddles a scale block gathers
+    into the zero-padded `[Q_1..Q_g | K_1 V_1 pad | ..]` layout instead.
     Otherwise each rank's Q, K and V rows are gathered from the chunks that
     hold them, dequantized with the chunk's own scales, reordered, and
     re-quantized to fp8.
@@ -1002,7 +1014,7 @@ class MiMoV2Model(nn.Module, EagleModelMixin):
         See _shard_fp8_qkv_proj for more details.
 
         Returns:
-            True if ``tensor`` was an fp8 qkv_proj weight/scale and was consumed
+            True if `tensor` was an fp8 qkv_proj weight/scale and was consumed
             (caller should skip it); False otherwise, so the caller falls
             through to its normal loading path.
 
@@ -1020,6 +1032,9 @@ class MiMoV2Model(nn.Module, EagleModelMixin):
             return True
 
         prefix, qkv_kind = name.rsplit(".", 1)
+        if f"{prefix}.weight" not in params_dict:
+            # Layer absent from this instance, e.g. truncated num_hidden_layers.
+            return True
         entry = fp8_qkv_proj_dict.setdefault(prefix, {})
         entry[qkv_kind] = tensor
         if "weight" not in entry or "weight_scale_inv" not in entry:

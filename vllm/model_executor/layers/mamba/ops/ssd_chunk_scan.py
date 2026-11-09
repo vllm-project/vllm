@@ -8,7 +8,10 @@
 
 from packaging import version
 
-from vllm.model_executor.layers.mamba.ops.triton_helpers import fast_exp
+from vllm.model_executor.layers.mamba.ops.triton_helpers import (
+    fast_exp,
+    launch_autotuned,
+)
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
@@ -488,7 +491,9 @@ def _chunk_scan_fwd(
         else (0, 0, 0, 0)
     )
 
-    _chunk_scan_fwd_kernel[grid](
+    launch_autotuned(
+        _chunk_scan_fwd_kernel,
+        grid,
         cb_ptr=cb,
         x_ptr=x,
         z_ptr=z,

@@ -142,7 +142,7 @@ def flashinfer_moe_ep_unsupported_reasons(
 ) -> tuple[str, ...]:
     """Deployment constraints of the megakernel beyond the framework's checks.
 
-    ``activation_key`` is ``None`` for MXFP4 checkpoints (the kernel quantizes
+    `activation_key` is `None` for MXFP4 checkpoints (the kernel quantizes
     bf16 activations itself) but marks a W4A16 recipe for NVFP4 weights.
     """
     spec = flashinfer_moe_ep_backend_spec(moe.moe_backend)
@@ -272,7 +272,7 @@ def sm90_fp8_block_moe_ep_weights(
     w13: torch.Tensor,
     w13_scale: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Reorder block-FP8 ``w13`` (gate rows, then up rows) for the SM90 kernel.
+    """Reorder block-FP8 `w13` (gate rows, then up rows) for the SM90 kernel.
 
     After the gate/up interleave a 128-row scale block holds 64 gate and 64 up
     rows from two checkpoint blocks. Both take the larger of the two scales and
@@ -280,12 +280,12 @@ def sm90_fp8_block_moe_ep_weights(
     shift, so only values that drop out of the E4M3 normal range round.
 
     Args:
-        w13: ``(E, 2 * I, H)`` E4M3 weights.
-        w13_scale: ``(E, 2 * I / 128, H / 128)`` float32 dequantization scales.
+        w13: `(E, 2 * I, H)` E4M3 weights.
+        w13_scale: `(E, 2 * I / 128, H / 128)` float32 dequantization scales.
 
     Returns:
-        The ``(E, 2 * I, H)`` weights in kernel row order and their
-        ``(E, 2 * I / 128, H / 128)`` scales.
+        The `(E, 2 * I, H)` weights in kernel row order and their
+        `(E, 2 * I / 128, H / 128)` scales.
 
     """
     num_experts, two_i, hidden = w13.shape
@@ -607,7 +607,7 @@ class FlashInferMoeEp:
 
 def _expert_major_bytes(tensor: torch.Tensor, as_bytes: bool = True) -> torch.Tensor:
     """Contiguous storage of a per-expert kernel tensor, 1-byte dtypes as uint8
-    unless ``as_bytes`` is False.
+    unless `as_bytes` is False.
 
     The CuTeDSL kernel keeps (E, K, N) transpose views over (E, N, K) storage.
     """

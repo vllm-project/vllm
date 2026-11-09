@@ -52,11 +52,12 @@ mod tests {
     };
 
     use super::*;
+    use crate::tool::test_utils::test_tokenizer;
     use crate::tool::{Step5ToolParser, ToolParser};
 
     #[test]
     fn structural_tag_keeps_qwen_tools_with_bare_reasoning_boundaries() {
-        let parser = Step5ToolParser::create(&[]).unwrap();
+        let parser = Step5ToolParser::create(&[], test_tokenizer()).unwrap();
         let builder = parser.structural_tag_builder().unwrap();
         for strict in [false, true] {
             let tools = [ToolParam::Function(FunctionToolParam::new(

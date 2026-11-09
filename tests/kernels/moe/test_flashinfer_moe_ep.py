@@ -3,7 +3,7 @@
 """End-to-end tests for the FlashInfer MoE-EP adapter on Hopper and Blackwell GPUs.
 
 Each test spawns one process per GPU, bootstraps vLLM's expert-parallel
-groups, builds a ``FlashInferMoeEp`` adapter from bf16 expert weights at the
+groups, builds a `FlashInferMoeEp` adapter from bf16 expert weights at the
 MoE geometry of a real model, warms it up and runs a forward whose inputs are
 chosen so that every quantization step in the megakernel is exact, for the
 CuTeDSL kernel (NVFP4 activations and weights, E4M3 scales per 16) as well as
@@ -272,7 +272,7 @@ def _check_expert_views_alias_kernel_memory(
     device: torch.device,
     sentinel: float = X_SENTINEL,
 ) -> None:
-    """EPLB moves experts through ``expert_weight_views``; the kernel must see it.
+    """EPLB moves experts through `expert_weight_views`; the kernel must see it.
 
     Swap local experts 0 and 1 in place on every rank, then route through the
     swapped physical slots: the output must be the one the unswapped logical
@@ -303,7 +303,7 @@ def _check_block_fp8_modular_kernel(
     rank: int,
     device: torch.device,
 ) -> None:
-    """Block FP8 through the loading hook and ``FusedMoEKernel``.
+    """Block FP8 through the loading hook and `FusedMoEKernel`.
 
     Rank 1 has no tokens, but the other ranks route to its experts and it owns
     part of the collective, so it must still enter the megakernel. A full batch
@@ -328,6 +328,7 @@ def _check_block_fp8_modular_kernel(
     )
     experts = FlashInferMoeEpExperts(moe, quant_config)
     experts.process_weights_after_loading(layer)
+    experts.keep_constants(layer)
     assert layer.w13_weight.dtype == torch.float8_e4m3fn
     kernel = mk.FusedMoEKernel(PassThroughPrepareAndFinalize(), experts)
 
@@ -570,6 +571,7 @@ def test_block_fp8_adapter_hands_kernel_ready_weights_to_flashinfer(
     # (E, K, N) views over the layer's storage, K contiguous.
     assert fc1.shape == (2, hidden, 2 * intermediate) and fc1.stride(1) == 1
     assert fc2.shape == (2, intermediate, hidden) and fc2.stride(1) == 1
+    assert weights.w13_scale is not None and weights.w2_scale is not None
     assert _kernel_storage(mega_config) == [
         t.data_ptr()
         for t in (weights.w13, weights.w13_scale, weights.w2, weights.w2_scale)

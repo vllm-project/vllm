@@ -53,9 +53,6 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     validate_fp8_block_shape,
     validate_fp8_block_shape_moe,
 )
-from vllm.model_executor.layers.quantization.utils.marlin_utils import (
-    get_marlin_input_dtype,
-)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     create_fp8_quant_key,
@@ -185,9 +182,7 @@ class Fp8Config(QuantizationConfig):
                 match_mode=self.ignored_layers_match_mode,
             ):
                 return UnquantizedLinearMethod()
-            offline_method = Fp8LinearMethod(self)
-            offline_method.marlin_input_dtype = get_marlin_input_dtype(prefix)
-            return offline_method
+            return Fp8LinearMethod(self)
         elif isinstance(layer, RoutedExperts):
             if is_layer_skipped(
                 prefix=prefix,
@@ -246,7 +241,6 @@ class Fp8LinearMethod(LinearMethodBase):
 
         # For GPUs that lack FP8 hardware support, we can leverage the Marlin
         # kernel for fast weight-only FP8 quantization
-        self.marlin_input_dtype = None
         self.use_marlin = False
 
         if self.quant_config.use_deep_gemm is not None:
@@ -274,7 +268,7 @@ class Fp8LinearMethod(LinearMethodBase):
             # Use per-token quantization for better perf if dynamic and cutlass
             if self.act_q_static:
                 self.activation_quant_key = kFp8StaticTensorSym
-            elif cutlass_fp8_supported():
+            elif cutlass_fp8_supported() or current_platform.is_xpu():
                 self.activation_quant_key = kFp8DynamicTokenSym
             else:
                 self.activation_quant_key = kFp8DynamicTensorSym
@@ -363,20 +357,12 @@ class Fp8LinearMethod(LinearMethodBase):
             # registered that parameter.
             if not self.act_q_static and not hasattr(layer, "input_scale"):
                 layer.input_scale = None
-            # Marlin reads marlin_input_dtype in apply_weights; it lives on the
-            # method (not exported with the weights), so restore it here too.
-            if self.use_marlin and hasattr(self.fp8_linear, "marlin_input_dtype"):
-                self.fp8_linear.marlin_input_dtype = self.marlin_input_dtype
             return
 
         if self.use_marlin:
             if not self.block_quant:
                 # Canonicalize to (K, N) for the kernel.
                 replace_parameter(layer, "weight", layer.weight.t())
-            # Only Marlin kernels support `marlin_input_dtype`; guard to avoid
-            # AttributeError if backend selection changes.
-            if hasattr(self.fp8_linear, "marlin_input_dtype"):
-                self.fp8_linear.marlin_input_dtype = self.marlin_input_dtype
             self.fp8_linear.process_weights_after_loading(layer)
             return
 
@@ -406,6 +392,8 @@ class Fp8LinearMethod(LinearMethodBase):
 
             # Update layer with new values.
             replace_parameter(layer, "weight", weight.data)
+            # The helper returns (K, N); the param keeps its checkpoint dims.
+            layer.processed_weight_dims = (0, 1)
             replace_parameter(layer, "weight_scale", weight_scale.data)
 
         if input_scale is not None:
@@ -508,11 +496,16 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             activation_key = kFp8Dynamic128Sym
         else:
             weight_key = kFp8StaticTensorSym
-            activation_key = (
-                kFp8StaticTensorSym
-                if self.quant_config.activation_scheme == "static"
-                else kFp8DynamicTensorSym
-            )
+            if self.quant_config.activation_scheme == "static":
+                activation_key = kFp8StaticTensorSym
+            elif envs.VLLM_BATCH_INVARIANT:
+                # A per-tensor dynamic scale is the max over every token in
+                # the batch, so a request's quantized activations would depend
+                # on the requests it is batched with.
+                activation_key = kFp8DynamicTokenSym
+            else:
+                activation_key = kFp8DynamicTensorSym
+        self.per_act_token_quant = activation_key == kFp8DynamicTokenSym
 
         # Select Fp8 MoE backend
         self.fp8_backend, self.experts_cls = select_fp8_moe_backend(
@@ -705,6 +698,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             routing_tables=layer._expert_routing_tables(),
         )
         self.moe_kernel.fused_experts.process_weights_after_loading(layer)
+        self.moe_kernel.fused_experts.keep_constants(layer)
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
         if is_weights_pre_processed():
@@ -775,6 +769,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             a1_scale=a1_scale,
             a2_scale=a2_scale,
             block_shape=self.moe_block_shape,
+            per_act_token_quant=self.per_act_token_quant,
             swiglu_limit=getattr(layer, "swiglu_limit", None),
             gemm1_alpha=getattr(layer, "swiglu_alpha", None),
             gemm1_beta=getattr(layer, "swiglu_beta", None),
