@@ -52,6 +52,7 @@ def test_sp_split_matches_padded_contiguous_input(num_tokens, world):
         )
 
 
+@pytest.mark.parametrize("sequence_parallel", [False, True])
 @pytest.mark.parametrize(
     "num_tokens,input_tokens,mode,prefill_limit,capture_limit,expected",
     [
@@ -67,7 +68,13 @@ def test_sp_split_matches_padded_contiguous_input(num_tokens, world):
     ],
 )
 def test_sp_shardq_requires_matching_projection_layout(
-    num_tokens, input_tokens, mode, prefill_limit, capture_limit, expected
+    sequence_parallel,
+    num_tokens,
+    input_tokens,
+    mode,
+    prefill_limit,
+    capture_limit,
+    expected,
 ):
     """Graph capture and DP padding must preserve the local query layout."""
     metadata = create_common_attn_metadata(
@@ -83,7 +90,9 @@ def test_sp_shardq_requires_matching_projection_layout(
         max_prefill_cudagraph_capture_tokens=prefill_limit,
         max_cudagraph_capture_size=capture_limit,
     )
-    assert can_use_sequence_parallel_shardq(metadata, compilation, 2) == expected
+    assert can_use_sequence_parallel_shardq(
+        sequence_parallel, metadata, compilation, 2
+    ) == (sequence_parallel and expected)
 
 
 def _sp_projection_round_trip(rank, world, port, model_path):
@@ -286,6 +295,7 @@ def test_build_shardq_split_after_indexer_decodes(monkeypatch, num_spec):
     attention_config = SimpleNamespace(sparse_mla_shard_q_min_tokens=9100)
     hf_config = SimpleNamespace(index_topk=5299)
     vllm_config = SimpleNamespace(
+        compilation_config=CompilationConfig(),
         speculative_config=(
             SimpleNamespace(num_speculative_tokens=num_spec) if num_spec else None
         ),

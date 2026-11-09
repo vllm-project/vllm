@@ -115,11 +115,14 @@ def sequence_parallel_split(num_tokens: int, world: int) -> ShardQSplit:
 
 
 def can_use_sequence_parallel_shardq(
+    sequence_parallel: bool,
     common_attn_metadata: "CommonAttentionMetadata",
     compilation_config: "CompilationConfig",
     tp_size: int,
 ) -> bool:
     """Whether local SP projections match this step's attention layout."""
+    if not sequence_parallel:
+        return False
     num_tokens = common_attn_metadata.num_actual_tokens
     capture_limit = (
         compilation_config.max_prefill_cudagraph_capture_tokens
@@ -167,12 +170,12 @@ def build_shardq_split(
     prefill_lens = query_lens[num_decodes:num_reqs].numpy()
     if prefill_lens.sum() != num_prefill_tokens:
         return None
-    if sequence_parallel:
-        sequence_parallel = can_use_sequence_parallel_shardq(
-            common_attn_metadata,
-            vllm_config.compilation_config,
-            get_tp_group().world_size,
-        )
+    sequence_parallel = can_use_sequence_parallel_shardq(
+        sequence_parallel,
+        common_attn_metadata,
+        vllm_config.compilation_config,
+        get_tp_group().world_size,
+    )
     if sequence_parallel:
         # Match sp_shard's contiguous, equally padded input shards. Include
         # decode rows so the local projections never need remote hidden states.
