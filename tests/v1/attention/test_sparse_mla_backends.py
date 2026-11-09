@@ -111,11 +111,16 @@ from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerMetadataBuilder,
 )
 from vllm.v1.attention.backends.mla.prefill import get_mla_prefill_backend
+from vllm.v1.attention.backends.mla.sparse_utils import (
+    build_query_group_row_union,
+    build_query_group_union,
+)
 from vllm.v1.attention.backends.utils import (
     split_decodes_and_prefills,
     split_prefill_chunks,
 )
 from vllm.v1.attention.ops import flashmla
+from vllm.v1.attention.ops.shardq import zigzag_split
 from vllm.v1.hisparse import runtime as hisparse_runtime
 from vllm.v1.hisparse.backend import get_hisparse_backend
 from vllm.v1.hisparse.runtime import (
@@ -4729,11 +4734,13 @@ def _fa4_impl(topk_indices_buffer, **fields):
         kv_cache_dtype="auto",
         dcp_world_size=1,
         dcp_rank=0,
+        pcp_world_size=1,
         need_to_return_lse_for_decode=False,
         is_nope_mla=False,
         _workspace_buffer=None,
         bmm1_scale=None,
         bmm2_scale=None,
+        use_shardq=False,
         # A non-index-producing layer does not wait on the indexer's ready event.
         index_group=SparseMLAIndexGroupBuilder(topk_indices_buffer).register_layer(
             False
@@ -4915,6 +4922,382 @@ def test_fa4_sparse_hook_routes_lanes(monkeypatch, is_decode):
         # trtllm-gen's LSE is base 2; the DCP merge expects natural log.
         expected = calls.lse(num_tokens) * math.log(2.0)
         torch.testing.assert_close(lse, expected, rtol=0, atol=1e-5)
+
+
+def test_build_query_group_union_matches_reference():
+    if not current_platform.is_cuda():
+        pytest.skip("Triton union builder test runs on CUDA")
+    group, topk, block_size, stride_rows, seq_len = 8, 128, 64, 80, 1000
+    num_groups = 13
+    gen = torch.Generator().manual_seed(0)
+    logical = torch.full((num_groups * group, topk), -1, dtype=torch.int32)
+    for t in range(group, num_groups * group):  # group 0 selects nothing
+        n = int(torch.randint(0, topk + 1, (1,), generator=gen))
+        logical[t, :n] = torch.randperm(seq_len, generator=gen)[:n].to(torch.int32)
+    block_table = torch.randperm(64, generator=gen)[: cdiv(seq_len, block_size)]
+    block_table = block_table.to(torch.int32)
+
+    enc = torch.empty(num_groups, group * topk, dtype=torch.int32, device="cuda")
+    lens = torch.empty(num_groups, dtype=torch.int32, device="cuda")
+    build_query_group_union(
+        logical.cuda(),
+        block_table.cuda(),
+        group_size=group,
+        max_seq_len=seq_len,
+        block_size=block_size,
+        block_stride_rows=stride_rows,
+        enc=enc,
+        lens=lens,
+        # 5 groups per chunk
+        bits=torch.empty(5 * cdiv(seq_len, 4), dtype=torch.int32, device="cuda"),
+    )
+
+    enc = enc.cpu().to(torch.int64) & 0xFFFFFFFF
+    for g in range(num_groups):
+        member: dict[int, int] = {}
+        for t in range(group):
+            for pos in logical[g * group + t].tolist():
+                if pos >= 0:
+                    member[pos] = member.get(pos, 0) | (1 << t)
+        expected = [
+            (int(block_table[p // block_size]) * stride_rows + p % block_size)
+            | (member[p] << 24)
+            for p in sorted(member)
+        ]
+        n = len(expected)
+        assert int(lens[g]) == n
+        assert enc[g, :n].tolist() == expected
+        padded_end = max(cdiv(n, 128) * 128, 128)
+        assert (enc[g, n:padded_end] == 0xFFFFFFFF).all()
+
+
+@pytest.mark.parametrize("group", [2, 4])
+def test_build_query_group_row_union_matches_reference(group):
+    if not current_platform.is_cuda():
+        pytest.skip("Triton union builder test runs on CUDA")
+    topk, num_groups = 128, 13
+    num_tokens = num_groups * group + 1  # the last token makes no group
+    gen = torch.Generator().manual_seed(group)
+    # Neighbouring queries draw from a shared pool, up to the 24-bit row limit.
+    pool = torch.randint(0, (1 << 24) - 1, (3 * topk,), generator=gen)
+    rows = torch.full((num_tokens, topk), 7, dtype=torch.int32)  # 7 past counts
+    counts = torch.zeros(num_tokens, dtype=torch.int32)
+    for t in range(group, num_tokens):  # group 0 selects nothing
+        n = int(torch.randint(0, topk + 1, (1,), generator=gen))
+        rows[t, :n] = pool[torch.randperm(pool.numel(), generator=gen)[:n]]
+        rows[t, : n // 5] = -1
+        counts[t] = n
+
+    enc = torch.empty(num_groups, group * topk, dtype=torch.int32, device="cuda")
+    lens = torch.empty(num_groups, dtype=torch.int32, device="cuda")
+    build_query_group_row_union(
+        rows.cuda(), counts.cuda(), group_size=group, enc=enc, lens=lens
+    )
+
+    enc = enc.cpu().to(torch.int64) & 0xFFFFFFFF
+    for g in range(num_groups):
+        member: dict[int, int] = {}
+        for t in range(group):
+            token = g * group + t
+            for row in rows[token, : counts[token]].tolist():
+                if row >= 0:
+                    member[row] = member.get(row, 0) | (1 << t)
+        expected = sorted(row | (m << 24) for row, m in member.items())
+        n = len(expected)
+        assert int(lens[g]) == n
+        assert sorted(enc[g, :n].tolist()) == expected
+        padded_end = max(cdiv(n, 128) * 128, 128)
+        assert (enc[g, n:padded_end] == 0xFFFFFFFF).all()
+
+
+def _fa4_prefill_inputs(num_heads, query_lens, seq_lens, *, topk=256, device):
+    """One decode request then prefills; neighbouring queries share most rows."""
+    block_size, kv_lora_rank, rope_dim = 64, 512, 64
+    num_blocks = sum(cdiv(s, block_size) for s in seq_lens) + 3
+    gen = torch.Generator().manual_seed(0)
+    kv_cache = (
+        torch.rand(num_blocks, block_size, kv_lora_rank + rope_dim, generator=gen).to(
+            torch.bfloat16
+        )
+        - 0.5
+    )
+    blocks = torch.randperm(num_blocks, generator=gen).to(torch.int32)
+    block_table = torch.zeros(len(seq_lens), 16, dtype=torch.int32)
+    used = 0
+    for r, s in enumerate(seq_lens):
+        block_table[r, : cdiv(s, block_size)] = blocks[
+            used : used + cdiv(s, block_size)
+        ]
+        used += cdiv(s, block_size)
+    logical, req_ids = [], []
+    for r, (q_len, s) in enumerate(zip(query_lens, seq_lens)):
+        pool = torch.randperm(s - q_len + 1, generator=gen)
+        for i in range(q_len):
+            visible = s - q_len + i + 1
+            row = torch.full((topk,), -1, dtype=torch.int32)
+            own = torch.randperm(visible, generator=gen)[: topk // 4]
+            picks = torch.unique(torch.cat([pool[: topk * 3 // 4], own]))[:topk]
+            row[: picks.numel()] = picks.to(torch.int32)
+            logical.append(row)
+            req_ids.append(r)
+    num_tokens = sum(query_lens)
+    # Head-major like the DSA model's absorbed query: bmm(...).transpose(0, 1).
+    ql_nope = (
+        torch.rand(num_heads, num_tokens, kv_lora_rank, generator=gen) - 0.5
+    ).transpose(0, 1)
+    q_pe = torch.rand(num_tokens, num_heads, rope_dim, generator=gen) - 0.5
+    return SimpleNamespace(
+        kv_cache=kv_cache.to(device),
+        logical=torch.stack(logical).to(device),
+        q=(ql_nope.to(torch.bfloat16).to(device), q_pe.to(torch.bfloat16).to(device)),
+        scale=(kv_lora_rank + rope_dim) ** -0.5,
+        metadata=SimpleNamespace(
+            req_id_per_token=torch.tensor(req_ids, dtype=torch.int32, device=device),
+            block_table=block_table.to(device),
+            block_size=block_size,
+            num_decode_tokens=query_lens[0],
+            num_decodes=1,
+            cp_kv_cache_interleave_size=1,
+            prefill=SimpleNamespace(query_lens_cpu=torch.tensor(query_lens[1:])),
+            prefill_max_seq_len=max(seq_lens[1:]),
+            topk_start=0,
+        ),
+    )
+
+
+@pytest.mark.parametrize("num_heads", [16, 32, 64])
+def test_fa4_sparse_grouped_prefill_correctness(workspace_init, monkeypatch, num_heads):
+    if not current_platform.is_device_capability_family(100):
+        pytest.skip("FA4 sparse MLA requires SM 10.x")
+    if (reason := _fa4_cute_mla_available()) is not None:
+        pytest.skip(reason)
+    group = 128 // num_heads
+    # Prefill lengths that are not multiples of the group size leave tails.
+    inputs = _fa4_prefill_inputs(
+        num_heads, [1, 3 * group + 5, 2 * group + 1], [300, 700, 650], device="cuda"
+    )
+    assert not inputs.q[0].is_contiguous()
+    builder = SparseMLAIndexGroupBuilder(inputs.logical)
+    layers = [
+        _fa4_impl(
+            inputs.logical,
+            scale=inputs.scale,
+            index_group=group_and_index[0],
+            index_group_index=group_and_index[1],
+        )
+        for group_and_index in (
+            builder.register_layer(True),
+            builder.register_layer(False),
+        )
+    ]
+    group_sizes, builds = [], []
+    real_fa4 = flashattn_sparse_module.flash_attn_varlen_func
+    real_build = flashattn_sparse_module.build_query_group_union
+
+    def fa4(**kwargs):
+        group_sizes.append(kwargs["gather_kv_query_group_size"])
+        return real_fa4(**kwargs)
+
+    def build(*args, **kwargs):
+        builds.append(1)
+        return real_build(*args, **kwargs)
+
+    monkeypatch.setattr(flashattn_sparse_module, "flash_attn_varlen_func", fa4)
+    monkeypatch.setattr(flashattn_sparse_module, "build_query_group_union", build)
+
+    with torch.inference_mode():
+        outs = [
+            impl.forward_mqa(inputs.q, inputs.kv_cache, inputs.metadata, None)
+            for impl in layers
+        ]
+
+    assert all(lse is None for _, lse in outs)
+    assert torch.equal(outs[0][0], outs[1][0])
+    # Each layer groups both prefills, one call per request at these lengths.
+    assert group_sizes.count(group) == 4 and len(builds) == 4
+
+    md = inputs.metadata
+    logical = inputs.logical.long()
+    block = md.block_table[
+        md.req_id_per_token.long()[:, None], logical.clamp(min=0) // 64
+    ]
+    physical = (block.long() * 64 + logical.clamp(min=0) % 64).masked_fill(
+        logical < 0, 0
+    )
+    kv_flat = inputs.kv_cache.view(-1, inputs.kv_cache.shape[-1])
+    keys = kv_flat[physical].float()
+    scores = torch.einsum("thd,tkd->thk", torch.cat(inputs.q, dim=-1).float(), keys)
+    scores = (scores * inputs.scale).masked_fill((logical < 0)[:, None, :], -math.inf)
+    reference = torch.einsum("thk,tkd->thd", torch.softmax(scores, -1), keys[..., :512])
+    torch.testing.assert_close(outs[0][0].float(), reference, rtol=0.01, atol=0.01)
+
+
+@pytest.mark.parametrize("num_heads", [16, 64])
+def test_fa4_sparse_grouped_prefill_sub_chunks(workspace_init, monkeypatch, num_heads):
+    """Splitting a request's grouped rows over several calls leaves every union,
+    and so the output, unchanged."""
+    if not current_platform.is_device_capability_family(100):
+        pytest.skip("FA4 sparse MLA requires SM 10.x")
+    if (reason := _fa4_cute_mla_available()) is not None:
+        pytest.skip(reason)
+    group = 128 // num_heads
+    inputs = _fa4_prefill_inputs(
+        num_heads, [1, 7 * group + 5, 2 * group + 1], [300, 700, 650], device="cuda"
+    )
+    impl = _fa4_impl(inputs.logical, scale=inputs.scale)
+    group_sizes = []
+    real_fa4 = flashattn_sparse_module.flash_attn_varlen_func
+
+    def fa4(**kwargs):
+        group_sizes.append(kwargs["gather_kv_query_group_size"])
+        return real_fa4(**kwargs)
+
+    monkeypatch.setattr(flashattn_sparse_module, "flash_attn_varlen_func", fa4)
+    outs, grouped_calls = [], []
+    for rows in (1024, 3):
+        monkeypatch.setattr(flashattn_sparse_module, "_GROUPED_PREFILL_ROWS", rows)
+        group_sizes.clear()
+        with torch.inference_mode():
+            out, _ = impl.forward_mqa(inputs.q, inputs.kv_cache, inputs.metadata, None)
+        outs.append(out)
+        grouped_calls.append(group_sizes.count(group))
+
+    # 7 and 2 grouped rows: one call per request, then calls of 3, 3, 1 and 2 rows.
+    assert grouped_calls == [2, 4]
+    assert torch.equal(outs[0], outs[1])
+
+
+def _shardq_step(inputs, token_ids):
+    """The query (every head, token-major) and narrowed metadata ShardQ hands a
+    rank owning these prefill tokens; the indexer wrote their top-k compactly
+    after the decode tokens."""
+    md = inputs.metadata
+    rows = token_ids + md.num_decode_tokens
+    q = torch.cat(inputs.q, dim=-1)[rows]
+    metadata = SimpleNamespace(
+        **{
+            **vars(md),
+            "num_decodes": 0,
+            "num_decode_tokens": 0,
+            "req_id_per_token": md.req_id_per_token[rows],
+            "topk_start": md.num_decode_tokens,
+        }
+    )
+    topk = torch.cat([inputs.logical[: md.num_decode_tokens], inputs.logical[rows]])
+    return q, metadata, topk
+
+
+@pytest.mark.parametrize("num_heads", [32, 64])
+def test_fa4_shardq_prefill_groups_rank_tokens(workspace_init, monkeypatch, num_heads):
+    """Each rank of a ShardQ step groups its tokens, with every head, across its
+    requests; together the ranks reproduce the step's attention."""
+    if not current_platform.is_device_capability_family(100):
+        pytest.skip("FA4 sparse MLA requires SM 10.x")
+    if (reason := _fa4_cute_mla_available()) is not None:
+        pytest.skip(reason)
+    group, world = 128 // num_heads, 4
+    inputs = _fa4_prefill_inputs(num_heads, [1, 29, 18], [300, 700, 650], device="cuda")
+    md = inputs.metadata
+    token_ids, per_rank = zigzag_split(md.prefill.query_lens_cpu.numpy(), world)
+    group_sizes = []
+    real_fa4 = flashattn_sparse_module.flash_attn_varlen_func
+
+    def fa4(**kwargs):
+        group_sizes.append(kwargs["gather_kv_query_group_size"])
+        return real_fa4(**kwargs)
+
+    monkeypatch.setattr(flashattn_sparse_module, "flash_attn_varlen_func", fa4)
+    num_prefill = int(per_rank.sum())
+    out = torch.empty(num_prefill, num_heads, 512, device="cuda")
+    expected_calls, start = 0, 0
+    for count in per_rank.tolist():
+        local = torch.from_numpy(token_ids[start : start + count]).cuda()
+        start += count
+        q, metadata, topk = _shardq_step(inputs, local)
+        # Calls of 2 rows, so ranks take several calls and some end in a tail.
+        impl = _fa4_impl(
+            topk,
+            scale=inputs.scale,
+            num_heads=num_heads // world,
+            use_shardq=True,
+            _shardq_rows=2,
+        )
+        with torch.inference_mode():
+            rank_out, lse = impl.forward_mqa(q, inputs.kv_cache, metadata, None)
+        assert lse is None
+        out[local] = rank_out.float()
+        expected_calls += cdiv(count // group, 2) + (count % group > 0)
+    # Every rank count here leaves a tail for some group size.
+    assert any(count % group for count in per_rank.tolist())
+    assert group_sizes == [group] * expected_calls
+
+    logical = inputs.logical.long()[md.num_decode_tokens :]
+    req = md.req_id_per_token.long()[md.num_decode_tokens :]
+    block = md.block_table[req[:, None], logical.clamp(min=0) // 64]
+    physical = (block.long() * 64 + logical.clamp(min=0) % 64).masked_fill(
+        logical < 0, 0
+    )
+    keys = inputs.kv_cache.view(-1, inputs.kv_cache.shape[-1])[physical].float()
+    q = torch.cat(inputs.q, dim=-1)[md.num_decode_tokens :].float()
+    scores = torch.einsum("thd,tkd->thk", q, keys) * inputs.scale
+    scores = scores.masked_fill((logical < 0)[:, None, :], -math.inf)
+    reference = torch.einsum("thk,tkd->thd", torch.softmax(scores, -1), keys[..., :512])
+    torch.testing.assert_close(out, reference, rtol=0.01, atol=0.01)
+
+
+def test_fa4_grouped_prefill_warmup_covers_runtime_keys(workspace_init, monkeypatch):
+    """After the compile-only warmup, grouped prefill calls compile nothing."""
+    if not current_platform.is_device_capability_family(100):
+        pytest.skip("FA4 sparse MLA requires SM 10.x")
+    if (reason := _fa4_cute_mla_available()) is not None:
+        pytest.skip(reason)
+    import cutlass.cute as cute
+
+    from vllm.vllm_flash_attn.cute.interface import BIN_BATCH_SEARCH_THRESH
+
+    num_heads, group, topk, rows = 64, 2, 256, 300
+    # The warmup's 1-row and full calls must fall on both sides of FA4's
+    # varlen-scheduler threshold, which splits the grouped kernel's keys.
+    assert 1 <= BIN_BATCH_SEARCH_THRESH < flashattn_sparse_module._GROUPED_PREFILL_ROWS
+    monkeypatch.setattr(flashattn_sparse_module, "_GROUPED_PREFILL_ROWS", rows)
+    kernel = flashattn_sparse_module.FA4GroupedPrefillKernel()
+    kernel.compile_many(kernel.get_warmup_keys(group, topk, 512, 64, torch.bfloat16))
+
+    # 300 and 3 groups: calls of 300 rows (above the threshold) and of 3 (below).
+    inputs = _fa4_prefill_inputs(
+        num_heads, [1, 2 * rows + 1, 2 * 3], [300, 700, 650], topk=topk, device="cuda"
+    )
+    impl = _fa4_impl(inputs.logical, scale=inputs.scale)
+    real_fa4 = flashattn_sparse_module.flash_attn_varlen_func
+    grouped_calls = []
+
+    def no_compile(*args, **kwargs):
+        raise AssertionError("grouped prefill compiled a kernel after warmup")
+
+    def fa4(**kwargs):
+        if kwargs["gather_kv_query_group_size"] == 1:
+            return real_fa4(**kwargs)
+        grouped_calls.append(kwargs["gather_kv_indices"].shape[0])
+        with monkeypatch.context() as m:
+            m.setattr(cute, "compile", no_compile)
+            return real_fa4(**kwargs)
+
+    monkeypatch.setattr(flashattn_sparse_module, "flash_attn_varlen_func", fa4)
+    with torch.inference_mode():
+        impl.forward_mqa(inputs.q, inputs.kv_cache, inputs.metadata, None)
+    assert grouped_calls == [rows, 3]
+
+    # A ShardQ step's rows are views of the token-major query: one rank owning
+    # all 607 tokens with every head takes calls of 300 and 3 rows, then the tail.
+    grouped_calls.clear()
+    num_prefill = int(inputs.metadata.prefill.query_lens_cpu.sum())
+    q, metadata, topk = _shardq_step(inputs, torch.arange(num_prefill, device="cuda"))
+    impl = _fa4_impl(
+        topk, scale=inputs.scale, num_heads=16, use_shardq=True, _shardq_rows=rows
+    )
+    with torch.inference_mode():
+        impl.forward_mqa(q, inputs.kv_cache, metadata, None)
+    assert grouped_calls == [rows, 3, 1]
 
 
 @pytest.mark.parametrize(

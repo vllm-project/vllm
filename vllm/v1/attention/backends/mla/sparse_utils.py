@@ -789,3 +789,270 @@ def prepare_sparse_mla_safe_lengths(
             BLOCK=256,
         )
     return safe_lengths
+
+
+@triton.jit(do_not_specialize=["words_per_group"])
+def _query_group_membership_kernel(
+    topk_ptr,
+    topk_stride,
+    bits_ptr,
+    words_per_group,
+    TOPK: tl.constexpr,
+    GROUP: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    # One byte per position: bit t is set iff query t of the group selected it.
+    token = tl.program_id(0)
+    group = token // GROUP
+    bit = 1 << (token % GROUP)
+    offs = tl.arange(0, BLOCK)
+    for k0 in range(0, TOPK, BLOCK):
+        pos = tl.load(
+            topk_ptr + token * topk_stride + k0 + offs, k0 + offs < TOPK, other=-1
+        )
+        word = group.to(tl.int64) * words_per_group + (pos >> 2)
+        tl.atomic_or(bits_ptr + word, bit << (8 * (pos & 3)), pos >= 0, sem="relaxed")
+
+
+@triton.jit(do_not_specialize=["words_per_group", "width"])
+def _query_group_emit_kernel(
+    bits_ptr,
+    words_per_group,
+    block_table_ptr,
+    enc_ptr,
+    lens_ptr,
+    width,
+    BLOCK_SIZE: tl.constexpr,
+    BLOCK_STRIDE_ROWS: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    group = tl.program_id(0)
+    bits = bits_ptr + group.to(tl.int64) * words_per_group
+    enc = enc_ptr + group.to(tl.int64) * width
+    offs = tl.arange(0, BLOCK)
+    count = tl.zeros([1], tl.int32)
+    for w0 in range(0, words_per_group, BLOCK // 4):
+        word = tl.load(
+            bits + w0 + (offs >> 2), w0 + (offs >> 2) < words_per_group, other=0
+        )
+        member = (word >> (8 * (offs & 3))) & 0xFF
+        keep = member != 0
+        pos = w0 * 4 + offs
+        block = tl.load(block_table_ptr + pos // BLOCK_SIZE, keep, other=0)
+        row = block * BLOCK_STRIDE_ROWS + pos % BLOCK_SIZE
+        dst = count + tl.cumsum(keep.to(tl.int32), 0) - 1
+        tl.store(enc + dst, row | (member << 24), keep)
+        count += tl.sum(keep.to(tl.int32), 0)
+    # The kernel walks whole 128-entry tiles (at least one), so -1 pad up to there.
+    pad = count + offs
+    padded_end = tl.maximum((count + 127) // 128 * 128, 128)
+    tl.store(enc + pad, -1, (offs < 128) & (pad < padded_end))
+    tl.store(lens_ptr + group + tl.arange(0, 1), count)
+
+
+def build_query_group_union(
+    logical_topk: torch.Tensor,
+    block_table_row: torch.Tensor,
+    *,
+    group_size: int,
+    max_seq_len: int,
+    block_size: int,
+    block_stride_rows: int,
+    enc: torch.Tensor,
+    lens: torch.Tensor,
+    bits: torch.Tensor,
+) -> None:
+    """Union of the top-k of every `group_size` consecutive queries of ONE request.
+
+    `logical_topk` holds request-local positions (-1 padded) for a multiple of
+    `group_size` queries. Writes `enc` [num_groups, width] int32, the position-
+    sorted union mapped to KV rows through `block_table_row` and encoded as
+    `row | (membership << 24)` (bit t = query t selected the row), -1 padded to a
+    whole 128-entry tile, and `lens` [num_groups], the union sizes. `bits` is
+    int32 scratch for the per-group position bitmap; groups are processed in
+    chunks that fit in it.
+    """
+    num_tokens, topk = logical_topk.shape
+    assert num_tokens % group_size == 0 and logical_topk.stride(1) == 1
+    num_groups = num_tokens // group_size
+    assert enc.shape[0] == lens.shape[0] == num_groups and enc.is_contiguous()
+    width = enc.shape[1]
+    words_per_group = cdiv(max_seq_len, 4)
+    chunk = min(num_groups, bits.numel() // words_per_group)
+    assert chunk > 0, "bits must hold one group's position bitmap"
+    for g0 in range(0, num_groups, chunk):
+        n = min(chunk, num_groups - g0)
+        bits[: n * words_per_group].zero_()
+        _query_group_membership_kernel[(n * group_size,)](
+            logical_topk[g0 * group_size :],
+            logical_topk.stride(0),
+            bits,
+            words_per_group,
+            TOPK=topk,
+            GROUP=group_size,
+            BLOCK=1024,
+        )
+        _query_group_emit_kernel[(n,)](
+            bits,
+            words_per_group,
+            block_table_row,
+            enc[g0:],
+            lens[g0:],
+            width,
+            BLOCK_SIZE=block_size,
+            BLOCK_STRIDE_ROWS=block_stride_rows,
+            BLOCK=1024,
+        )
+
+
+# Sorts after every (row << 3 | query) key; rows are below 2^24.
+_NO_ROW = tl.constexpr(0x7FFFFFFF)
+
+
+@triton.jit(do_not_specialize=["width"])
+def _query_group_row_union_kernel(
+    rows_ptr,
+    rows_stride,
+    counts_ptr,
+    enc_ptr,
+    lens_ptr,
+    width,
+    TOPK: tl.constexpr,
+    GROUP: tl.constexpr,
+    N: tl.constexpr,
+):
+    group = tl.program_id(0)
+    offs = tl.arange(0, N)
+    query = offs // TOPK
+    token = group * GROUP + query
+    in_group = query < GROUP
+    count = tl.load(counts_ptr + token, in_group, other=0)
+    row = tl.load(
+        rows_ptr + token.to(tl.int64) * rows_stride + offs % TOPK,
+        in_group & (offs % TOPK < count),
+        other=-1,
+    )
+    key = tl.sort(tl.where(row >= 0, (row << 3) | query, _NO_ROW))
+    # A row's entries are adjacent once sorted, at most one per query. The
+    # group's enc row holds the sorted keys while neighbours read them.
+    enc = enc_ptr + group.to(tl.int64) * width
+    tl.store(enc + offs, key)
+    tl.debug_barrier()
+    prev = tl.load(enc + offs - 1, offs > 0, other=-1)
+    member = 1 << (key & 7)
+    for d in tl.static_range(1, GROUP):
+        nxt = tl.load(enc + offs + d, offs + d < N, other=_NO_ROW)
+        member |= tl.where(nxt >> 3 == key >> 3, 1 << (nxt & 7), 0)
+    tl.debug_barrier()
+    first = (key != _NO_ROW) & (prev >> 3 != key >> 3)
+    dst = tl.cumsum(first.to(tl.int32), 0) - 1
+    tl.store(enc + dst, (key >> 3) | (member << 24), first)
+    total = tl.sum(first.to(tl.int32), 0)
+    # The kernel walks whole 128-entry tiles (at least one), so -1 pad up to there.
+    pad = total + offs
+    padded_end = tl.maximum((total + 127) // 128 * 128, 128)
+    tl.store(enc + pad, -1, (offs < 128) & (pad < padded_end))
+    tl.store(lens_ptr + group, total)
+
+
+@triton.jit(do_not_specialize=["width"])
+def _query_pair_row_union_kernel(
+    rows_ptr,
+    rows_stride,
+    counts_ptr,
+    enc_ptr,
+    lens_ptr,
+    width,
+    TOPK: tl.constexpr,
+    SEARCH_STEPS: tl.constexpr,
+):
+    # Sorts query 0's rows only and looks query 1's up in them: half the sort.
+    group = tl.program_id(0)
+    offs = tl.arange(0, TOPK)
+    rows = rows_ptr + (2 * group).to(tl.int64) * rows_stride + offs
+    a = tl.load(rows, offs < tl.load(counts_ptr + 2 * group), other=-1)
+    b = tl.load(
+        rows + rows_stride, offs < tl.load(counts_ptr + 2 * group + 1), other=-1
+    )
+    a = tl.sort(tl.where(a >= 0, a, _NO_ROW))
+    num_a = tl.sum((a != _NO_ROW).to(tl.int32), 0)
+    # The group's enc row holds a while b's rows search it, then a's shared flags.
+    enc = enc_ptr + group.to(tl.int64) * width
+    tl.store(enc + offs, a)
+    tl.store(enc + TOPK + offs, 0)
+    tl.debug_barrier()
+    lo = tl.zeros([TOPK], tl.int32)
+    hi = tl.full([TOPK], TOPK, tl.int32)
+    for _ in tl.static_range(SEARCH_STEPS):
+        mid = (lo + hi) >> 1
+        below = tl.load(enc + mid, mid < TOPK, other=_NO_ROW) < b
+        lo = tl.where(below, mid + 1, lo)
+        hi = tl.where(below, hi, mid)
+    found = (b >= 0) & (lo < num_a)
+    found &= tl.load(enc + lo, found, other=-1) == b
+    tl.store(enc + TOPK + lo, 1, found)
+    tl.debug_barrier()
+    shared = tl.load(enc + TOPK + offs)
+    tl.debug_barrier()
+    # a's rows, then the rows only b selected.
+    tl.store(enc + offs, a | ((1 | (shared << 1)) << 24), offs < num_a)
+    b_only = (b >= 0) & ~found
+    dst = num_a + tl.cumsum(b_only.to(tl.int32), 0) - 1
+    tl.store(enc + dst, b | (2 << 24), b_only)
+    total = num_a + tl.sum(b_only.to(tl.int32), 0)
+    pad = total + tl.arange(0, 128)
+    padded_end = tl.maximum((total + 127) // 128 * 128, 128)
+    tl.store(enc + pad, -1, pad < padded_end)
+    tl.store(lens_ptr + group, total)
+
+
+def build_query_group_row_union(
+    rows: torch.Tensor,
+    counts: torch.Tensor,
+    *,
+    group_size: int,
+    enc: torch.Tensor,
+    lens: torch.Tensor,
+) -> None:
+    """Union of the top-k of every `group_size` consecutive queries, from KV rows.
+
+    `rows` [num_tokens, topk] holds each query's KV rows (below 2^24), of which
+    the first `counts` are valid and negative ones are padding. Groups may span
+    requests, and the cost does not grow with the sequence length as
+    `build_query_group_union`'s does: each group sorts its rows. Writes `enc`
+    [num_groups, width] int32, the union (in no particular order) encoded as
+    `row | (membership << 24)` (bit t = query t selected the row), -1 padded to
+    a whole 128-entry tile, and `lens` [num_groups], the union sizes. `width`
+    must hold `group_size * topk` entries; `topk` must be a power of two.
+    """
+    num_tokens, topk = rows.shape
+    entries = group_size * topk
+    assert entries & (entries - 1) == 0 and rows.stride(1) == 1
+    num_groups = num_tokens // group_size
+    assert enc.shape[0] == lens.shape[0] == num_groups and enc.is_contiguous()
+    assert enc.shape[1] >= entries
+    if num_groups and group_size == 2:
+        _query_pair_row_union_kernel[(num_groups,)](
+            rows,
+            rows.stride(0),
+            counts,
+            enc,
+            lens,
+            enc.shape[1],
+            TOPK=topk,
+            SEARCH_STEPS=topk.bit_length(),
+            num_warps=8,
+        )
+    elif num_groups:
+        _query_group_row_union_kernel[(num_groups,)](
+            rows,
+            rows.stride(0),
+            counts,
+            enc,
+            lens,
+            enc.shape[1],
+            TOPK=topk,
+            GROUP=group_size,
+            N=entries,
+            num_warps=8,
+        )
