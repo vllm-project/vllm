@@ -178,7 +178,11 @@ def beam_norm_residual_norm(
     *,
     launch_pdl: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
-    """Fuse post-norm, scaled residual add and next pre-norm, keeping each cast."""
+    """Fuse post-norm, scaled residual add and next pre-norm, keeping each cast.
+
+    Returns the new residual and, when `next_eps` is given, its
+    normalization for the next sublayer.
+    """
     assert x.ndim == residual.ndim == 2 and x.shape == residual.shape
     assert x.stride(-1) == residual.stride(-1) == 1
     hidden = torch.empty(x.shape, device=x.device, dtype=x.dtype)
