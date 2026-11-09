@@ -19,7 +19,7 @@ _FP4X2 = torch.float4_e2m1fn_x2
 
 
 class TorchMxFp4LinearKernel(MxFp4LinearKernel):
-    """MXFP4 W4A4 GEMM on XPU using the native ``torch._scaled_mm`` dispatch."""
+    """MXFP4 W4A4 GEMM on XPU using the native `torch._scaled_mm` dispatch."""
 
     @classmethod
     def is_supported(

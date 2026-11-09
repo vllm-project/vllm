@@ -169,22 +169,22 @@ class ReplayAttnMetadata(ModelSpecificAttnMetadata):
 class DeepseekV41ModelState(DefaultModelState):
     """DefaultModelState plus the engram lookback window and SWA bounded replay.
 
-    The engram n-gram hash needs the ids of the ``depth`` tokens preceding
-    each request's chunk start (see ``common/engram.py``). The runner keeps
+    The engram n-gram hash needs the ids of the `depth` tokens preceding
+    each request's chunk start (see `common/engram.py`). The runner keeps
     the full token history on device, so the window is gathered there every
     step: exact for prompt and generated tokens alike, whatever instance
     produced their KV.
 
-    SWA bounded replay (``CacheConfig.swa_bounded_replay``) keeps the
+    SWA bounded replay (`CacheConfig.swa_bounded_replay`) keeps the
     sliding-window KV out of prefix caching and rebuilds it after a prefix hit
     by recomputing the hit's last window; the scheduler tells each request the
-    position from which it holds window KV (``NewRequestData.replay_start``).
-    ``prepare_attn`` gathers those per batch, pads the replayed tokens' slots
+    position from which it holds window KV (`NewRequestData.replay_start`).
+    `prepare_attn` gathers those per batch, pads the replayed tokens' slots
     in the prefix-cacheable groups so the cached KV stays as is, and hands the
     starts to the sliding-window metadata builders, whose kernels read no
     window KV below them. With the decoder side on
-    (``model.decoder_replay_layers``) it also prepares the replay layers'
-    batch in eager steps: each prefill's last ``window`` rows (one row for a
+    (`model.decoder_replay_layers`) it also prepares the replay layers'
+    batch in eager steps: each prefill's last `window` rows (one row for a
     chunk far from its prompt's end) as a sub-batch with metadata and a forward
     context of its own, like a microbatch.
     """
@@ -234,9 +234,9 @@ class DeepseekV41ModelState(DefaultModelState):
             # window can still reach the rows it skipped; 0 otherwise.
             self._skipped_tail_np = np.zeros(self.max_num_reqs, dtype=np.int32)
             # The replay batch's inputs: its rows of the batch, query offsets,
-            # positions, slot mappings (sized with the KV cache groups on first
-            # use) and the position from which each request holds replay-layer
-            # window KV.
+            # positions, MoE padding mask, slot mappings (sized with the KV cache
+            # groups on first use) and the position from which each request holds
+            # replay-layer window KV.
             self._kept_rows = torch.zeros(
                 self.max_num_tokens, dtype=torch.int64, device=device
             )
@@ -245,6 +245,9 @@ class DeepseekV41ModelState(DefaultModelState):
             )
             self._kept_positions = torch.zeros(
                 self.max_num_tokens, dtype=torch.int64, device=device
+            )
+            self._kept_is_padding = torch.ones(
+                self.max_num_tokens, dtype=torch.bool, device=device
             )
             self._kept_slot_mappings: torch.Tensor | None = None
             self._kept_kv_start = torch.zeros(
@@ -261,7 +264,7 @@ class DeepseekV41ModelState(DefaultModelState):
             layers is not None
             and compilation_config.cudagraph_decoder_replay
             and compilation_config.cudagraph_mode.has_piecewise_cudagraphs()
-            and is_breakable_cudagraph_enabled()
+            and is_breakable_cudagraph_enabled(compilation_config)
             and get_pp_group().is_first_rank
             # The graphs' fixed inputs hold no LoRA mapping and no None input ids.
             and vllm_config.lora_config is None
@@ -305,9 +308,16 @@ class DeepseekV41ModelState(DefaultModelState):
         self, input_batch: InputBatch, req_states: RequestState
     ) -> dict[str, torch.Tensor | None]:
         model_inputs = super().prepare_inputs(input_batch, req_states)
-        window = self.lookback_token_ids
-        if window is None:
+        if self.lookback_token_ids is None:
             return model_inputs
+        self._fill_lookback(input_batch, req_states)
+        model_inputs["lookback_token_ids"] = self.lookback_token_ids
+        return model_inputs
+
+    def _fill_lookback(self, input_batch: InputBatch, req_states: RequestState) -> None:
+        """Gather the batch's lookback windows into `lookback_token_ids`."""
+        window = self.lookback_token_ids
+        assert window is not None
         all_token_ids = req_states.all_token_ids.gpu
         depth = window.shape[1]
         _gather_lookback_kernel[(window.shape[0],)](
@@ -321,8 +331,6 @@ class DeepseekV41ModelState(DefaultModelState):
             DEPTH=depth,
             BLOCK_DEPTH=triton.next_power_of_2(depth),
         )
-        model_inputs["lookback_token_ids"] = window
-        return model_inputs
 
     def prepare_dummy_inputs(self, num_reqs: int, num_tokens: int) -> dict[str, Any]:
         model_inputs = super().prepare_dummy_inputs(num_reqs, num_tokens)
@@ -444,7 +452,7 @@ class DeepseekV41ModelState(DefaultModelState):
         )
 
     def _build_attn_metadata(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
-        """The step's attention-metadata build (``DefaultModelState.prepare_attn``)."""
+        """The step's attention-metadata build (`DefaultModelState.prepare_attn`)."""
         return super().prepare_attn(*args, **kwargs)
 
     def _warm_up_replay_kernels(
@@ -534,7 +542,7 @@ class DeepseekV41ModelState(DefaultModelState):
     ) -> tuple[np.ndarray, np.ndarray]:
         """Prefill chunks that replay one row instead of their last window, and
         chunks whose window reaches back past a one-row chunk. A chunk replays
-        one row when it ends at least ``_tail_reach`` tokens before its prompt's
+        one row when it ends at least `_tail_reach` tokens before its prompt's
         end; the chunks within reach keep their window, so the prompt's last
         window is computed as before."""
         assert self.decoder_replay_layers is not None
@@ -702,18 +710,27 @@ class DeepseekV41ModelState(DefaultModelState):
             kv_cache_config,
             model_specific_attn_metadata=ReplayAttnMetadata(replay_start),
         )[first_swa]
+        if self.pcp_size > 1:
+            is_padding = kept_batch.is_padding
+        else:
+            # Dummy batches and graph-padding rows are padding, as in the outer
+            # batch. Filled in place: replay graphs read the captured buffer.
+            num_real = 0 if is_dummy else num_tokens
+            is_padding = self._kept_is_padding[:num_padded]
+            is_padding[:num_real].fill_(False)
+            is_padding[num_real:].fill_(True)
         layers.replay_batch = ReplayBatch(
             self._kept_rows[:num_tokens],
             create_forward_context(
                 attn_metadata,
                 self.vllm_config,
                 dp_metadata=dp_metadata,
+                is_padding=is_padding,
                 cudagraph_runtime_mode=cg_mode,
                 batch_descriptor=BatchDescriptor(num_tokens=num_padded),
                 slot_mapping=build_slot_mappings_by_layer(
                     kept_slot_mappings, kv_cache_config
                 ),
-                is_padding=kept_batch.is_padding if self.pcp_size > 1 else None,
             ),
             run_graph,
             num_padded if self.pcp_size > 1 else None,
@@ -756,7 +773,7 @@ class DeepseekV41ModelState(DefaultModelState):
         kv_floor: np.ndarray,
         num_padded: int,
     ) -> tuple[InputBatch, torch.Tensor]:
-        """Build the sub-``InputBatch`` of each request's last ``kept_lens``
+        """Build the sub-`InputBatch` of each request's last `kept_lens`
         rows, and its slot mappings.
 
         The kept rows follow the device boundaries minus the rows trimmed before
@@ -840,7 +857,7 @@ class DeepseekV41ModelState(DefaultModelState):
     def _copy_attn_groups(
         self, attn_groups: list[list[AttentionGroup]], prefixes: set[str]
     ) -> list[list[AttentionGroup]]:
-        """Copies of the groups holding any of ``prefixes``, with builders of their
+        """Copies of the groups holding any of `prefixes`, with builders of their
         own like a microbatch's: a builder keeps the metadata it built."""
         own_groups = []
         for groups in attn_groups:

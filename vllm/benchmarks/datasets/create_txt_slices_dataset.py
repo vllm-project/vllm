@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Convert a plain-text file (local path or URL) into a JSONL dataset
-compatible with ``CustomDataset`` (``--dataset-name custom``), by 
+compatible with `CustomDataset` (`--dataset-name custom`), by 
 randomly slicing the tokenized text into prompts.
 
-Each line of the output JSONL contains a ``prompt`` (decoded from a random
-slice of the tokenized source text) and an ``output_tokens`` count.
+Each line of the output JSONL contains a `prompt` (decoded from a random
+slice of the tokenized source text) and an `output_tokens` count.
 
 Usage
 -----
