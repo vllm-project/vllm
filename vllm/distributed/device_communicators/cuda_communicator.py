@@ -119,6 +119,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
         self.fi_pcie_ipc_ar_comm: FlashInferPcieIpcAllReduce | None = None
         self.aiter_ar_comm: AiterCustomAllreduce | None = None
         self.use_aiter_ag_rs: bool = False
+        self.use_aiter_tp_all_gather: bool = False
 
         # cuMem graph buffers cannot be IPC-registered; capture copies them instead.
         config = get_current_vllm_config_or_none()
@@ -165,9 +166,15 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 register_graph_buffers=register,
             )
 
-        # AITER custom all-gather/reduce-scatter DP-attention dispatch/combine
+        # AITER custom all-gather/reduce-scatter DP-attention dispatch/combine.
+        # AITER requires a torch.distributed-registered group and exchanges IPC
+        # handles via the default store; stateless groups satisfy neither.
+        # Only StatelessGroupCoordinator passes tcp_store_group, so this checks
+        # the property AITER depends on rather than the feature that currently
+        # creates stateless groups (elastic EP).
         if (
             "dp" in unique_name
+            and tcp_store_group is None
             and self.world_size in (2, 4, 8)
             and current_platform.is_rocm()
             and rocm_aiter_ops.is_custom_all_reduce_enabled()
@@ -181,6 +188,10 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 self.aiter_ar_comm = None
             else:
                 self.use_aiter_ag_rs = True
+        elif self.aiter_ar_comm is not None and self.world_size in (2, 4, 8):
+            from vllm.platforms.rocm import get_cdna_version
+
+            self.use_aiter_tp_all_gather = get_cdna_version() in (3, 4)
 
         if (
             use_custom_allreduce
@@ -218,10 +229,21 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 self.all2all_manager = DeepEPLLAll2AllManager(
                     self.cpu_group, tcp_store_group
                 )
+            elif self.all2all_backend == "mori" and self._mori_ep_v2():
+                from .all2all import MoriEPv2All2AllManager
+
+                self.all2all_manager = MoriEPv2All2AllManager(self.cpu_group)
             elif self.all2all_backend in (
                 "mori_high_throughput",
                 "mori_low_latency",
+                "mori",
             ):
+                if self.all2all_backend != "mori":
+                    logger.warning_once(
+                        "'%s' is deprecated and will be removed in a future release. "
+                        "Use 'mori', which picks the MoRI kernels automatically.",
+                        self.all2all_backend,
+                    )
                 from .all2all import MoriAll2AllManager
 
                 self.all2all_manager = MoriAll2AllManager(
@@ -283,10 +305,15 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 scope="global",
             )
 
+    @staticmethod
+    def _mori_ep_v2() -> bool:
+        config = get_current_vllm_config_or_none()
+        return config is not None and bool(config.parallel_config.mori_ep_v2)
+
     def _log_all_reduce_backend_selection(self) -> None:
         """Log the all-reduce backends that are active for this group.
 
-        The dispatch chain in ``all_reduce`` tries backends in this order and
+        The dispatch chain in `all_reduce` tries backends in this order and
         falls through to the next one if the current backend rejects the
         input (size/dtype gates) or is disabled. The list of "enabled"
         backends below is the subset of potential backends that may be
@@ -413,6 +440,17 @@ class CudaCommunicator(DeviceCommunicatorBase):
             out = ca_comm.custom_all_reduce(input_)
             assert out is not None
             return out
+        if (
+            envs.VLLM_BATCH_INVARIANT
+            and current_platform.is_rocm()
+            and input_.is_floating_point()
+        ):
+            # Integer sums are exact in any order and stay on RCCL.
+            from vllm.model_executor.determinism.batch_invariant import (
+                all_reduce_batch_invariant,
+            )
+
+            return all_reduce_batch_invariant(input_, self.device_group)
         symm_mem_comm = self.symm_mem_comm
         if symm_mem_comm is not None and symm_mem_comm.should_use_symm_mem(input_):
             out = symm_mem_comm.all_reduce(input_)
@@ -466,6 +504,9 @@ class CudaCommunicator(DeviceCommunicatorBase):
         # copy on every step. This is on the hot path for TP forward passes, so
         # keep ROCm on the base-class collective to avoid a decode regression.
         if current_platform.is_rocm():
+            out = self._maybe_aiter_all_gather(input_, dim)
+            if out is not None:
+                return out
             return super().all_gather(input_, dim)
 
         input_size = input_.size()
@@ -477,6 +518,32 @@ class CudaCommunicator(DeviceCommunicatorBase):
         output_tensor = output_tensor.reshape((self.world_size,) + input_size)
         output_tensor = output_tensor.movedim(0, dim)
         return output_tensor.reshape(
+            input_size[:dim]
+            + (self.world_size * input_size[dim],)
+            + input_size[dim + 1 :]
+        )
+
+    def _maybe_aiter_all_gather(
+        self, input_: torch.Tensor, dim: int
+    ) -> torch.Tensor | None:
+        aiter_comm = self.aiter_ar_comm
+        if (
+            not self.use_aiter_tp_all_gather
+            or aiter_comm is None
+            or input_.dtype not in (torch.bfloat16, torch.float16, torch.float32)
+            or input_.numel() == 0
+            or not input_.is_contiguous()
+            or not aiter_comm.should_custom_ag(input_)
+        ):
+            return None
+        input_size = input_.size()
+        if dim > 0:
+            row = input_size[dim:].numel()
+            if row * input_.element_size() % 16 != 0:
+                return None
+            input_ = input_.view(-1, row)
+        output = aiter_comm.all_gather_unreg(input_, dim=0 if dim == 0 else -1)
+        return output.view(
             input_size[:dim]
             + (self.world_size * input_size[dim],)
             + input_size[dim + 1 :]
@@ -498,7 +565,17 @@ class CudaCommunicator(DeviceCommunicatorBase):
         chunk_size = input_tensor.shape[0] // world_size
         output_shape = (chunk_size,) + input_tensor.shape[1:]
 
-        if should_nccl_symm_mem_ag_rs():
+        if (
+            envs.VLLM_BATCH_INVARIANT
+            and current_platform.is_rocm()
+            and input_.is_floating_point()
+        ):
+            from vllm.model_executor.determinism.batch_invariant import (
+                reduce_scatter_batch_invariant,
+            )
+
+            output = reduce_scatter_batch_invariant(input_tensor, self.device_group)
+        elif should_nccl_symm_mem_ag_rs():
             output = self._reduce_scatter_symm_mem(input_tensor)
         else:
             output = torch.empty(
@@ -562,6 +639,22 @@ class CudaCommunicator(DeviceCommunicatorBase):
             assert output.dtype == input_tensor.dtype
             assert output.device == input_tensor.device
             assert output.is_contiguous()
+
+        if (
+            envs.VLLM_BATCH_INVARIANT
+            and current_platform.is_rocm()
+            and input_.is_floating_point()
+        ):
+            from vllm.model_executor.determinism.batch_invariant import (
+                reduce_scatter_batch_invariant,
+            )
+
+            result = reduce_scatter_batch_invariant(
+                input_tensor, self.device_group, sizes=sizes
+            )
+            if output is not None:
+                return output.copy_(result)
+            return result.movedim(0, dim).contiguous()
 
         if self._can_use_aiter_ag_rs(sizes):
             aiter_comm = self.aiter_ar_comm
@@ -630,19 +723,18 @@ class CudaCommunicator(DeviceCommunicatorBase):
         """Persistent, pre-registered NCCL symmetric-memory scratch buffer.
 
         Allocating a fresh symm tensor per collective pays the
-        ``nccl_symm_mem_context`` snapshot + window-registration scan on every
+        `nccl_symm_mem_context` snapshot + window-registration scan on every
         call (~0.5 ms/RS+AG pair, dwarfing the NVLS transfer itself). Instead,
-        each ``(role, shape[1:], dtype, device)`` keeps a geometric high-water
+        each `(role, shape[1:], dtype, device)` keeps a geometric high-water
         allocation and returns a leading slice. Superseded allocations remain
         referenced because a captured CUDA graph may still use their pointers;
         geometric growth bounds their total capacity to less than twice the
         current allocation.
 
-        Safe across serial MoE layers and eager sequence parallelism: the
-        producer and collective are ordered on the same stream before the next
-        same-role operation reuses the buffer. DBO microbatches use distinct
-        cache entries. Any future cross-layer communication overlap must also
-        use distinct roles.
+        These buffers are internal scratch. Returning one would let a later
+        collective with the same cache key overwrite an earlier live result.
+        MoE combines may reuse scratch when the producer and collective are
+        ordered on the same stream. DBO microbatches use distinct cache entries.
         """
         from vllm.distributed.device_communicators.pynccl_allocator import (
             nccl_symm_mem_context,
@@ -700,12 +792,13 @@ class CudaCommunicator(DeviceCommunicatorBase):
             )
             symm_input.copy_(input_tensor)
 
+        scratch_output = output is None
         if output is None:
             output = self._get_symm_scratch(
                 "rs_out", output_shape, input_tensor.dtype, input_tensor.device
             )
         pynccl_comm.reduce_scatter(output, symm_input)
-        return output
+        return output.clone() if scratch_output else output
 
     def get_symmetric_memory_buffer(
         self,
@@ -930,7 +1023,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
             "ag_out", out_size, input_.dtype, input_.device
         )
         pynccl_comm.all_gather(symm_output, input_)
-        return symm_output
+        return symm_output.clone()
 
     def _all_gather_batched_symm_mem(
         self, inputs: list[torch.Tensor]

@@ -10,7 +10,6 @@ Both variants share a SigLIP vision encoder with a bidirectional LLaMA backbone.
 
 from collections.abc import Sequence
 from io import BytesIO
-from pathlib import Path
 
 import pybase64 as base64
 import pytest
@@ -56,6 +55,51 @@ HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts(
 )
 
 MODELS = ["nvidia/llama-nemotron-embed-vl-1b-v2"]
+
+
+@pytest.mark.parametrize("model", MODELS)
+@pytest.mark.parametrize(
+    ("async_scheduling", "long_prefill_token_threshold"),
+    [(True, 0), (False, 128)],
+    ids=["async-encoder-cache-pressure", "sync-prefill-threshold"],
+)
+def test_image_embeddings_without_chunked_prefill(
+    vllm_runner, model, monkeypatch, async_scheduling, long_prefill_token_threshold
+):
+    """Encoder pressure and prefill caps must preserve whole bidirectional prompts."""
+    # Queue both requests before scheduling, independent of arrival timing.
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    images = [Image.new("RGB", (512, 512), color=color) for color in ("red", "blue")]
+    prompts = [f"{PASSAGE_PREFIX}<image>"] * len(images)
+    # ROCM_ENGINE_KWARGS also sets max_num_seqs, which this test needs at 2.
+    engine_kwargs = {**ROCM_ENGINE_KWARGS, "max_num_seqs": 2}
+    # The 384-token encoder cache fits one 256-token image, but not both.
+    with vllm_runner(
+        model,
+        runner="pooling",
+        dtype="half",
+        max_model_len=384,
+        max_num_batched_tokens=384,
+        async_scheduling=async_scheduling,
+        long_prefill_token_threshold=long_prefill_token_threshold,
+        enable_chunked_prefill=False,
+        enforce_eager=True,
+        trust_remote_code=True,
+        limit_mm_per_prompt={"image": 1},
+        mm_processor_kwargs={"max_dynamic_patch": 1, "use_thumbnail": False},
+        **engine_kwargs,
+    ) as vllm_model:
+        batched = vllm_model.embed(prompts, images=images)
+        individual = [
+            vllm_model.embed([prompt], images=[image])[0]
+            for prompt, image in zip(prompts, images)
+        ]
+    check_embeddings_close(
+        embeddings_0_lst=individual,
+        embeddings_1_lst=batched,
+        name_0="individual",
+        name_1="batch",
+    )
 
 
 @pytest.mark.usefixtures("default_vllm_config")
@@ -202,13 +246,6 @@ def test_models(
 
 RERANKER_MODELS = ["nvidia/llama-nemotron-rerank-vl-1b-v2"]
 
-# The tokenizer's built-in chat template is not suitable for the Score/Rerank
-# APIs (it's inherited from the base LLM).  We must use the provided override.
-_RERANKER_SCORE_TEMPLATE = (
-    Path(__file__).parents[4]
-    / "examples/pooling/score/template/nemotron-vl-rerank.jinja"
-).read_text()
-
 RERANKER_TEXT_QUERY = "How is AI improving the intelligence and capabilities of robots?"
 RERANKER_TEXT_DOCS = [
     "AI enables robots to perceive, plan, and act autonomously.",
@@ -281,7 +318,11 @@ def _run_vllm_reranker(
     dtype: str,
     input_cases: Sequence[RerankerCase],
 ) -> list[list[float]]:
-    """Run all vLLM reranker cases in one model lifecycle."""
+    """Run all vLLM reranker cases in one model lifecycle.
+
+    The checkpoint declares its score template in its Sentence Transformers
+    config, so no chat template is passed.
+    """
     with vllm_runner(
         model,
         runner="pooling",
@@ -298,11 +339,7 @@ def _run_vllm_reranker(
             if not has_images:
                 queries = [query] * len(docs)
                 doc_texts = [doc_text for doc_text, _ in docs]
-                outputs = vllm_model.score(
-                    queries,
-                    doc_texts,
-                    chat_template=_RERANKER_SCORE_TEMPLATE,
-                )
+                outputs = vllm_model.score(queries, doc_texts)
             else:
                 query_params = [
                     ScoreMultiModalParam(
@@ -334,11 +371,7 @@ def _run_vllm_reranker(
                         )
                     doc_params.append(ScoreMultiModalParam(content=content))
 
-                raw_outputs = vllm_model.llm.score(
-                    query_params,
-                    doc_params,
-                    chat_template=_RERANKER_SCORE_TEMPLATE,
-                )
+                raw_outputs = vllm_model.llm.score(query_params, doc_params)
                 outputs = [output.outputs.score for output in raw_outputs]
 
             scores_per_case.append(outputs)

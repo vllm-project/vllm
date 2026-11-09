@@ -35,6 +35,17 @@ def mock_if_no_torch(mock_module: str, mock: MagicMock):
         sys.modules[mock_module] = mock
 
 
+class MockBase:
+    """Real base for classes that inherit from a mock."""
+
+    def __class_getitem__(cls, item):
+        return cls
+
+    @classmethod
+    def __get_pydantic_core_schema__(cls, source_type, handler):
+        return core_schema.any_schema()
+
+
 class PydanticMagicMock(MagicMock):
     """`MagicMock` that's able to generate pydantic-core schemas."""
 
@@ -45,6 +56,10 @@ class PydanticMagicMock(MagicMock):
 
     def __get_pydantic_core_schema__(self, source_type, handler):
         return core_schema.any_schema()
+
+    # A fresh type each time so two mocks can be bases of one class
+    def __mro_entries__(self, bases):
+        return (type("MockBase", (MockBase,), {}),)
 
 
 # Mock custom op code
@@ -79,7 +94,7 @@ mock_if_no_torch(
 
 # Mock any version checks by reading from compiled CI requirements
 with open(ROOT_DIR / "requirements/test/cuda.txt") as f:
-    VERSIONS = dict(line.strip().split("==") for line in f if "==" in line)
+    VERSIONS = dict(line.split()[0].split("==") for line in f if "==" in line)
 importlib.metadata.version = lambda name: VERSIONS.get(name) or "0.0.0"
 
 
@@ -90,7 +105,7 @@ class MockModule:
 
 # Make torch.nn.Parameter and torch.nn.Module safe to inherit from.
 # `import torch.nn` resolves the attribute on `torch`, so mock both.
-mock_nn = MagicMock(Parameter=object, Module=MockModule)
+mock_nn = PydanticMagicMock(name="torch.nn", Parameter=object, Module=MockModule)
 mock_if_no_torch("torch.nn", mock_nn)
 mock_if_no_torch("torch", PydanticMagicMock(name="torch", nn=mock_nn))
 
@@ -145,6 +160,7 @@ def auto_mock(module_name: str, attr: str, max_mocks: int = 100):
     )
 
 
+bench_forward = auto_mock("vllm.benchmarks.forward", "main")
 bench_latency = auto_mock("vllm.benchmarks", "latency")
 bench_serve = auto_mock("vllm.benchmarks", "serve")
 bench_startup = auto_mock("vllm.benchmarks", "startup")
@@ -182,7 +198,7 @@ DownloadKernelsSubcommand = auto_mock(
     "vllm.entrypoints.cli.download_kernels", "DownloadKernelsSubcommand"
 )
 sweep_subcommands = auto_mock("vllm.benchmarks.sweep.cli", "SUBCOMMANDS")
-openai_cli_args = auto_mock("vllm.entrypoints.launchers", "cli_args")
+openai_cli_args = auto_mock("vllm.entrypoints.common", "cli_args")
 run_batch = auto_mock("vllm.entrypoints.launchers", "run_batch")
 
 if TYPE_CHECKING:
@@ -340,6 +356,7 @@ pages = {
         False,
     ),
     "cli/launch/render.md": (create_parser(RenderSubcommand.add_cli_args), True),
+    "cli/bench/forward.md": (create_parser(bench_forward.add_cli_args), True),
     "cli/bench/latency.md": (create_parser(bench_latency.add_cli_args), True),
     # URL kept as `mm_processor` for back-compat; command name is `mm-processor`
     "cli/bench/mm_processor.md": (

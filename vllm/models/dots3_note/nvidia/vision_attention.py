@@ -68,7 +68,7 @@ def apply_rotary_pos_emb_vision(
 class VisionRotaryEmbedding(nn.Module):
     """2D vision RoPE frequency table.
 
-    When ``cache_seq_len`` is set, precomputes and reuses frequencies up to that
+    When `cache_seq_len` is set, precomputes and reuses frequencies up to that
     length (MoE default). Otherwise frequencies are computed on each forward
     (dense default).
     """
@@ -226,7 +226,7 @@ class VisionAttention(_VisionAttentionBase):
 
 
 class VisionAttentionV2(_VisionAttentionBase):
-    """Eager attention per varlen segment (lower peak memory than :class:`VisionAttention`)."""
+    """Eager attention per varlen segment (lower peak memory than `VisionAttention`)."""
 
     def forward(
         self,
@@ -386,9 +386,9 @@ def resolve_attn_implementation(
 ) -> str:
     """Apply FA3 → FA2 → eager fallback when backends are missing.
 
-    ``eager_fallback`` selects which eager backend is used when flash-attn is
-    unavailable. MoE historically used per-segment eager (``eager_v2``); dense
-    uses full-mask ``eager``.
+    `eager_fallback` selects which eager backend is used when flash-attn is
+    unavailable. MoE historically used per-segment eager (`eager_v2`); dense
+    uses full-mask `eager`.
     """
     if attn_implementation == "flash_attention_3" and not _flash_attn3_available:
         logger.warning_once(
@@ -413,7 +413,7 @@ def build_vision_attention(
     bias: bool | None = None,
     eager_fallback: str = "eager",
 ) -> nn.Module:
-    """Instantiate a vision attention module from ``attn_implementation`` and config."""
+    """Instantiate a vision attention module from `attn_implementation` and config."""
     attn_implementation = resolve_attn_implementation(
         attn_implementation, eager_fallback=eager_fallback
     )
@@ -440,21 +440,6 @@ def build_vision_attention(
 
 def attn_uses_seqlens(attn_implementation: str) -> bool:
     return attn_implementation == "eager_v2"
-
-
-def prepare_seqlens_for_attention(
-    attn_implementation: str,
-    cu_seqlens: torch.Tensor,
-    *,
-    eager_fallback: str = "eager",
-) -> list[int] | None:
-    """Return per-segment lengths when the resolved backend needs ``seqlens``."""
-    resolved = resolve_attn_implementation(
-        attn_implementation, eager_fallback=eager_fallback
-    )
-    if attn_uses_seqlens(resolved):
-        return torch.diff(cu_seqlens).tolist()
-    return None
 
 
 def apply_vision_attention_residual(
@@ -497,7 +482,6 @@ __all__ = [
     "attn_uses_seqlens",
     "build_vision_attention",
     "prepare_rotary_pos_emb_vision",
-    "prepare_seqlens_for_attention",
     "resolve_attn_implementation",
     "rotate_half",
     "vision_attention_params_from_config",

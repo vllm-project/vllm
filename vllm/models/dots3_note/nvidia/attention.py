@@ -6,7 +6,7 @@ Prefill and mixed batches expand the latent cache and use FlashAttention-3
 varlen MHA. Decode-only batches use the Triton absorbed-MQA kernel.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import ClassVar
 
 import torch
@@ -22,7 +22,6 @@ from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import (
     PIN_MEMORY,
     async_tensor_h2d,
-    is_quantized_kv_cache,
 )
 from vllm.v1.attention.backend import (
     AttentionCGSupport,
@@ -36,6 +35,7 @@ from vllm.v1.attention.backends.mla.flashattn_mla_sparse import (
 )
 from vllm.v1.attention.backends.mla.prefill.base import MLADimensions
 from vllm.v1.attention.backends.mla.prefill.flash_attn import (
+    FA4MLALayerConfig,
     FlashAttnPrefillBackend,
 )
 from vllm.v1.attention.backends.mla.sparse_utils import (
@@ -46,7 +46,7 @@ from vllm.v1.attention.backends.mla.triton_mla import (
     TritonMLAImpl,
     TritonMLAMetadataBuilder,
 )
-from vllm.v1.kv_cache_interface import KVCacheLayout
+from vllm.v1.kv_cache_interface import KVCacheLayout, is_quantized_kv_cache
 from vllm.v1.worker.workspace import (
     current_workspace_manager,
     is_workspace_manager_initialized,
@@ -286,6 +286,14 @@ class Dots3NoteFlashAttnPrefillBackend(FlashAttnPrefillBackend):
         # equal-dimension varlen kernel.
         self.requires_v_padding = True
 
+    def fa4_warmup_layer_configs(self) -> tuple[FA4MLALayerConfig, ...]:
+        # The base constructor registers before V padding is forced on above.
+        # Sliding-window layers also run run_sliding_window's windowed prefill.
+        (config,) = super().fa4_warmup_layer_configs()
+        config = replace(config, requires_v_padding=True)
+        window = self.vllm_config.model_config.hf_text_config.sliding_window_size
+        return (config, replace(config, window_size=(window - 1, 0)))
+
     def supports_quant_output(self, quant_key) -> bool:
         return False
 
@@ -481,6 +489,13 @@ class Dots3NoteTritonMLAImpl(TritonMLAImpl):
             **mla_args,
         )
         self.sliding_window = sliding_window
+
+    def register_decode_warmup(
+        self, kv_cache: torch.Tensor, kv_cache_dtype: str
+    ) -> None:
+        # forward_mqa runs _forward_swa_mqa, which never reaches the split-KV
+        # Triton decode kernels.
+        return
 
     def _forward_swa_mqa(
         self,
@@ -724,6 +739,7 @@ class Dots3NotePaddedSparseImpl(FlashAttnMLASparseImpl):
         slot_mapping: torch.Tensor,
         kv_cache_dtype: str,
         k_scale: torch.Tensor,
+        skip_scale: bool = False,
     ) -> None:
         super().do_kv_cache_update(
             kv_c_normed,
@@ -732,6 +748,7 @@ class Dots3NotePaddedSparseImpl(FlashAttnMLASparseImpl):
             slot_mapping,
             kv_cache_dtype,
             k_scale,
+            skip_scale=skip_scale,
         )
 
     def forward_mha(  # type: ignore[override]

@@ -22,6 +22,8 @@ ALLOWED_FILES = {
     "vllm/distributed/weight_transfer/ipc_engine.py",
     "vllm/distributed/weight_transfer/sharded_rdt_engine.py",
     "tests/distributed/test_packed_tensor.py",
+    # Wraps (rather than calls) the torch.cuda sync APIs.
+    "vllm/v1/conf_compute_utils.py",
 }
 
 

@@ -6,15 +6,22 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from vllm.config.quantization import QuantizationConfigArgs
 from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
+)
+from vllm.model_executor.layers.quantization.online.base import OnlineQuantizationConfig
+from vllm.model_executor.layers.quantization.utils.config_utils import (
+    is_shared_expert_quant_fse_compatible,
 )
 from vllm.models.deepseek_v4.amd import mega_moe as mega_moe_module
 from vllm.models.deepseek_v4.amd.mega_moe import (
     DeepseekV4AiterMegaMoEExperts,
 )
 from vllm.models.deepseek_v4.amd.model import DeepseekV4MoE
+from vllm.models.deepseek_v41.quant_config import DeepseekV4FP8Config
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import aux_stream
 
 HIDDEN = 64
 INTER = 64
@@ -29,6 +36,7 @@ def _make_experts(
     intermediate_size=INTER,
     max_num_batched_tokens=3000,
     swiglu_limit=None,
+    fuse_shared_expert=False,
 ):
     monkeypatch.setattr(
         mega_moe_module,
@@ -47,6 +55,7 @@ def _make_experts(
         hidden_size=HIDDEN,
         intermediate_size=intermediate_size,
         swiglu_limit=swiglu_limit,
+        fuse_shared_expert=fuse_shared_expert,
     )
 
 
@@ -108,10 +117,87 @@ def test_experts_load_into_local_slots(monkeypatch):
             assert torch.all(w2 == 10 * expert + 3)
 
 
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    "tokens_across_dp, expected",
+    [([4, 128], "decode"), ([4, 129], "prefill")],
+)
+def test_runtime_selected_by_max_tokens_across_dp(
+    monkeypatch, tokens_across_dp, expected
+):
+    experts = _make_experts(monkeypatch)
+    experts._runtimes = [(128, "decode"), (4096, "prefill")]
+    monkeypatch.setattr(mega_moe_module, "is_forward_context_available", lambda: True)
+    monkeypatch.setattr(
+        mega_moe_module,
+        "get_forward_context",
+        lambda: SimpleNamespace(
+            dp_metadata=SimpleNamespace(
+                num_tokens_across_dp_cpu=torch.tensor(tokens_across_dp)
+            )
+        ),
+    )
+    # Every rank must take the same runtime, so a small local batch still gets
+    # the prefill runtime when another DP rank is over the decode capacity.
+    assert experts.select_runtime(4) == expected
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    "moe_backend, targets, fused",
+    [
+        ("aiter_mega_moe", None, False),
+        ("aiter_mega_moe", {"*shared_experts*": "mxfp8"}, False),
+        ("aiter_mega_moe", {"*shared_experts*": "mxfp4"}, True),
+        ("aiter", {"*shared_experts*": "mxfp4"}, False),
+    ],
+)
+def test_mega_moe_shared_expert_fusion_requires_mxfp4_target(
+    moe_backend, targets, fused
+):
+    quant_config = DeepseekV4FP8Config(
+        is_checkpoint_fp8_serialized=True, weight_block_size=[128, 128]
+    )
+    quant_config._resolved_expert_dtype = "fp4"
+    quant_config.packed_modules_mapping = {"gate_up_proj": ["w1", "w3"]}
+    if targets is not None:
+        quant_config.online_quantization_config = OnlineQuantizationConfig(
+            QuantizationConfigArgs(targets=targets)
+        )
+    compatible, _ = is_shared_expert_quant_fse_compatible(
+        quant_config,
+        "model.layers.3.ffn.experts",
+        "model.layers.3.ffn.shared_experts",
+        moe_backend=moe_backend,
+    )
+    assert compatible is fused
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="Requires ROCm")
+def test_shared_expert_route_appended(monkeypatch):
+    experts = _make_experts(
+        monkeypatch, ep_rank=3, ep_size=8, num_experts=384, fuse_shared_expert=True
+    )
+    ids = torch.randint(0, 384, (37, 2), device="cuda", dtype=torch.int32)
+    ids[::5, 1] = -1
+    weights = torch.rand(37, 2, device="cuda")
+    out_weights, out_ids = experts.append_shared_expert(weights, ids)
+
+    shared = torch.full((37, 1), 3 * 49 + 48, device="cuda", dtype=torch.int32)
+    expected_ids = torch.cat([torch.where(ids >= 0, ids + ids // 48, ids), shared], 1)
+    torch.testing.assert_close(out_ids, expected_ids)
+    torch.testing.assert_close(
+        out_weights, torch.cat([weights, torch.ones(37, 1, device="cuda")], 1)
+    )
+
+
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="Requires ROCm")
 @pytest.mark.parametrize("hash_routing", [False, True])
 @pytest.mark.parametrize("num_tokens", [1, 37])
-def test_mega_moe_routing_matches_reference(monkeypatch, hash_routing, num_tokens):
+@pytest.mark.parametrize("shared_stream", [False, True])
+def test_mega_moe_routing_matches_reference(
+    monkeypatch, hash_routing, num_tokens, shared_stream
+):
     num_experts, top_k, vocab = 16, 4, 64
     scaling = 2.5
     device = "cuda"
@@ -150,6 +236,10 @@ def test_mega_moe_routing_matches_reference(monkeypatch, hash_routing, num_token
     moe.gate = Gate()
     moe.experts = experts
     moe.shared_experts = lambda x: 3 * x
+    moe.shared_experts_stream = aux_stream() if shared_stream else None
+    moe.shared_experts_events = (
+        (torch.cuda.Event(), torch.cuda.Event()) if shared_stream else None
+    )
     moe.scoring_func = "sqrtsoftplus"
     moe.n_activated_experts = top_k
     moe.renormalize = True

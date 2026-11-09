@@ -26,11 +26,11 @@ from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
     UnquantizedFusedMoEMethod,
 )
-from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     resolve_quant_method,
 )
+from vllm.model_executor.utils import copy_weight_, kernel_parameters
 from vllm.utils.math_utils import cdiv
 
 if TYPE_CHECKING:
@@ -79,6 +79,9 @@ class RoutedExperts(PluggableLayer):
     - Executing routed experts via quant_method.apply()
     """
 
+    # Hash-routing table, owned by the gate.
+    hash_indices_table: torch.Tensor | None = None
+
     def __init__(
         self,
         layer_name: str,
@@ -107,6 +110,7 @@ class RoutedExperts(PluggableLayer):
         swiglu_beta: float | None = None,
         e_score_correction_bias: torch.Tensor | None = None,
         apply_router_weight_on_input: bool = False,
+        hash_indices_table: torch.Tensor | None = None,
     ):
         super().__init__()
         self.layer_name = layer_name
@@ -152,15 +156,36 @@ class RoutedExperts(PluggableLayer):
         # Set by bind_routed_experts_capturer for monolithic kernels.
         self.routing_sink: RoutedExpertsSink | None = None
         self.apply_router_weight_on_input = apply_router_weight_on_input
+        # The gate owns this Parameter: keep it out of this module's parameters.
+        object.__setattr__(self, "hash_indices_table", hash_indices_table)
         # End random parameters
         self._loaded_expert_biases: set[str] = set()
-        self._fused_shared_expert_quantizer = self._get_fused_shared_expert_quantizer()
 
         self.quant_method = self._get_quant_method(
             self.layer_name,
             self.quant_config,
             self.moe_config,
         )
+
+        # Only set when FSE go through online quantization, with pre-quantized routed.
+        self.shared_expert_online_loader = None
+        online_config = getattr(self.quant_config, "online_quantization_config", None)
+        if (
+            online_config is not None
+            and self.expert_map_manager.num_fused_shared_experts > 0
+        ):
+            from vllm.model_executor.layers.quantization.online.shared_expert import (
+                OnlineSharedExpertLoader,
+            )
+
+            self.shared_expert_online_loader = OnlineSharedExpertLoader(
+                self.quant_config,
+                online_config,
+                self.quant_method,
+                self.moe_config.shared_expert_prefix,
+                self.moe_config.num_logical_experts,
+                self.expert_map_manager.num_fused_shared_experts,
+            )
 
         # Round up hidden size and update moe_config.
         # TODO: move roundup to _get_quant_method?
@@ -206,7 +231,29 @@ class RoutedExperts(PluggableLayer):
 
         self.quant_method.create_weights(layer=self, **moe_quant_params)
 
+        loader = self.shared_expert_online_loader
+        if loader is not None and loader.stages_shared_experts:
+            loader.create_staging(self, params_dtype, weight_loader=self.weight_loader)
+
         self.lora_base_layer_prefix = ""
+
+    def padding_fill_params(self) -> list[str]:
+        """Params a direct reload zero-fills; read at cold start, before PWAL."""
+        c = self.moe_config
+        inter = c.intermediate_size_per_partition
+        if not (
+            c.hidden_dim > (c.hidden_dim_unpadded or c.hidden_dim)
+            or inter > (c.intermediate_size_per_partition_unpadded or inter)
+            # The loader refills this padding too, but a load plan skips loader fills.
+            or c.tp_shard_with_padding
+        ):
+            return []
+        # Per-expert scalars ((E,), (E, <=2)) aren't padded.
+        return [
+            n
+            for n, p in self._parameters.items()
+            if p is not None and p.ndim > 1 and p.numel() > 2 * p.shape[0]
+        ]
 
     # TODO(bnell): Temporary hack. Get rid of this.
     def _replace_quant_method(self, quant_method: FusedMoEMethodBase):
@@ -360,7 +407,7 @@ class RoutedExperts(PluggableLayer):
         loaded_weight = loaded_weight.narrow(
             shard_dim, shard_size * tp_rank, shard_size
         )
-        param.copy_(loaded_weight)
+        copy_weight_(param, loaded_weight)
 
     def _load_model_weight_or_group_weight_scale(
         self,
@@ -442,7 +489,7 @@ class RoutedExperts(PluggableLayer):
                 hidden_dim=hidden_dim,
                 shard_dim=shard_dim,
             )
-            expert_data.copy_(loaded_weight)
+            copy_weight_(expert_data, loaded_weight)
         elif shard_id in ("w1", "w3"):
             self._load_w13(
                 shard_id=shard_id,
@@ -458,7 +505,7 @@ class RoutedExperts(PluggableLayer):
         dimension and tensor rank.
 
         For 2D weight tensors the two data dims are (0, 1). For 3D tensors
-        with an expert dimension at dim 0, they are (1, 2). ``shard_dim``
+        with an expert dimension at dim 0, they are (1, 2). `shard_dim`
         occupies one of these; the hidden dimension is the other.
         For 1D tensors (e.g. per-channel scales) returns 0.
         """
@@ -569,7 +616,7 @@ class RoutedExperts(PluggableLayer):
             hidden_dim=hidden_dim,
             shard_dim=shard_dim,
         )
-        expert_data.copy_(loaded_weight)
+        copy_weight_(expert_data, loaded_weight)
 
     def _load_w2(
         self,
@@ -618,9 +665,9 @@ class RoutedExperts(PluggableLayer):
                 expert_data.chunk(num_chunks, dim=0),
                 loaded_weight.chunk(num_chunks, dim=0),
             ):
-                dst.copy_(src)
+                copy_weight_(dst, src)
             return
-        expert_data.copy_(loaded_weight)
+        copy_weight_(expert_data, loaded_weight)
 
     def _load_single_value(
         self, param: torch.nn.Parameter, loaded_weight: torch.Tensor, expert_id: int
@@ -631,31 +678,6 @@ class RoutedExperts(PluggableLayer):
         # param (compressed-tensors). Assign directly so both shapes load;
         # _to_scalar's reshape(()) would reject the size-2 weight_shape.
         param_data[expert_id] = loaded_weight
-
-    def _get_fused_shared_expert_quantizer(
-        self,
-    ) -> Callable[[torch.Tensor], tuple[torch.Tensor, torch.Tensor]] | None:
-        """Return the quantizer for an online-quantized fused shared expert."""
-        online_config = getattr(self.quant_config, "online_quantization_config", None)
-        prefix = self.moe_config.shared_expert_prefix
-        if (
-            online_config is None
-            or prefix is None
-            or self.expert_map_manager.num_fused_shared_experts == 0
-        ):
-            return None
-        # FSE compatibility checks require every shared-expert projection to
-        # use the routed experts' weight key.
-        resolved = online_config.resolve_quant_method_cls(
-            LinearBase, f"{prefix}.down_proj"
-        )
-        if resolved is None:
-            return None
-        from vllm.model_executor.layers.quantization.online.base import (
-            ONLINE_SHARED_EXPERT_QUANTIZERS,
-        )
-
-        return ONLINE_SHARED_EXPERT_QUANTIZERS[resolved[3].weight]
 
     @overload
     def weight_loader(
@@ -693,19 +715,54 @@ class RoutedExperts(PluggableLayer):
             # (FIXME) for gpt-oss all experts are combined
             if "bias" in weight_name:
                 dim1 = loaded_weight.shape[1]
-                param.data[:, :dim1].copy_(loaded_weight)
+                copy_weight_(param.data[:, :dim1], loaded_weight)
             else:
                 dim1 = loaded_weight.shape[1]
                 dim2 = loaded_weight.shape[2]
-                param.data[:, :dim1, :dim2].copy_(loaded_weight)
+                copy_weight_(param.data[:, :dim1, :dim2], loaded_weight)
             return True if return_success else None
 
-        quant_method_name = self.quant_method.__class__.__name__
+        from vllm.model_executor.layers.quantization.online.moe_base import (
+            OnlineMoEMethodBase,
+        )
+
+        base_quant_method = self.quant_method
+
+        # In case online MOE re-quantization is used, loading is handled
+        # by the original quant method.
+        if (
+            isinstance(base_quant_method, OnlineMoEMethodBase)
+            and base_quant_method.requantization_source is not None
+        ):
+            assert isinstance(
+                base_quant_method.requantization_source, FusedMoEMethodBase
+            )
+            base_quant_method = base_quant_method.requantization_source
+
+        quant_method_name = base_quant_method.__class__.__name__
         global_expert_id = expert_id
+        num_global_experts = (
+            self.moe_config.num_experts
+            + self.expert_map_manager.num_fused_shared_experts
+        )
+        # `num_experts` counts logical and redundant experts; fused shared
+        # slots are appended after them.
+        # Expert substitution checkpoints name retained experts by their
+        # logical ID, which is not bounded by the number of allocated slots.
+        expert_substitution = getattr(self, "expert_substitution", None)
+        if expert_substitution is not None:
+            num_global_experts = (
+                expert_substitution.num_logical_experts
+                + self.expert_map_manager.num_fused_shared_experts
+            )
+        assert global_expert_id < num_global_experts, (
+            f"Expert id {global_expert_id} is out of range for "
+            f"{self.layer_name}; expected < {num_global_experts}"
+        )
         expert_id = self._map_global_expert_id_to_local_expert_id(global_expert_id)
 
         use_global_sf = (
-            getattr(self.quant_method, "use_global_sf", False)
+            getattr(base_quant_method, "use_global_sf", False)
             and "input_scale" in weight_name
         )
 
@@ -714,34 +771,18 @@ class RoutedExperts(PluggableLayer):
             return False if return_success else None
         # Hereafter, `expert_id` is local physical id
 
-        # A full-precision fused shared expert is quantized into the checkpoint
-        # layout, then loaded like a pre-quantized expert weight and scale.
-        if (
-            self._fused_shared_expert_quantizer is not None
-            and self.moe_config.num_logical_experts
-            <= global_expert_id
-            < self.moe_config.num_logical_experts
-            + self.expert_map_manager.num_fused_shared_experts
-            and weight_name.endswith("_weight")
-            and loaded_weight.is_floating_point()
-            and loaded_weight.dtype != param.dtype
-        ):
-            weight, weight_scale = self._fused_shared_expert_quantizer(
-                loaded_weight.to(self.moe_config.device)
-            )
-            stem = "w2" if shard_id == "w2" else "w13"
-            self.weight_loader(
-                getattr(self, f"{stem}_weight_scale"),
-                weight_scale,
-                f"{weight_name}_scale",
+        if self.shared_expert_online_loader is not None:
+            param, expert_id, loaded = self.shared_expert_online_loader.load(
+                self,
+                param,
+                loaded_weight,
+                weight_name,
                 shard_id,
                 global_expert_id,
-                return_success=True,
+                expert_id,
             )
-            loaded = self.weight_loader(
-                param, weight, weight_name, shard_id, global_expert_id, True
-            )
-            return loaded if return_success else None
+            if loaded is not None:
+                return loaded if return_success else None
 
         # is_transposed: if the dim to shard the weight
         # should be flipped. Required by GPTQ/AWQ (K-first format).
@@ -789,7 +830,11 @@ class RoutedExperts(PluggableLayer):
                     loaded_weight,
                     hidden_dim=0,
                 )
-                expert_data.copy_(loaded_weight)
+                # w2 is row-parallel: its bias is added before the TP
+                # all-reduce, so only one rank may hold it.
+                if self.moe_config.tp_rank != 0:
+                    loaded_weight = torch.zeros_like(loaded_weight)
+                copy_weight_(expert_data, loaded_weight)
             else:
                 self._load_w13(
                     shard_id=shard_id,
@@ -842,7 +887,7 @@ class RoutedExperts(PluggableLayer):
         if "ModelOpt" in quant_method_name:
             # Determine per-tensor weight scale patterns based on variant
             # Use the dedicated method instead of brittle string matching
-            uses_weight_scale_2 = self.quant_method.uses_weight_scale_2_pattern()
+            uses_weight_scale_2 = base_quant_method.uses_weight_scale_2_pattern()
             quant_method = getattr(param, "quant_method", None)
 
             # Call _load_per_tensor_weight_scale() to load per-tensor (scalar)
@@ -921,7 +966,7 @@ class RoutedExperts(PluggableLayer):
                 FusedMoeWeightScaleSupported.GROUP.value,
                 FusedMoeWeightScaleSupported.BLOCK.value,
             ]:
-                scale_refine = getattr(self.quant_method, "weight_scale_refine", None)
+                scale_refine = getattr(base_quant_method, "weight_scale_refine", None)
                 if (
                     quant_method == FusedMoeWeightScaleSupported.BLOCK.value
                     and scale_refine is not None
@@ -986,12 +1031,20 @@ class RoutedExperts(PluggableLayer):
 
         for expert_name, loaded_weight in weights:
             qual_name = f"{self.layer_name}.{expert_name}"
-            is_fused = loaded_weight.dim() == 3
+            expert_key = qual_name.partition("experts.")[2].partition(".")[0]
+            named_expert = (
+                mapping_by_expert.get(expert_key)
+                if qual_name.count("experts.") == 1
+                else None
+            )
+            # Encoded per-expert [N, K / block_size, bytes_per_block] weights
+            # have the same rank as fused [E, N, K] weights. An explicit expert
+            # name identifies the per-expert layout without treating N as E.
+            is_fused = loaded_weight.dim() == 3 and named_expert is None
             # Fused tensors and ambiguous names keep the full mapping.
             candidates = expert_mapping
             if not is_fused and qual_name.count("experts.") == 1:
-                expert_key = qual_name.partition("experts.")[2].partition(".")[0]
-                candidates = mapping_by_expert.get(expert_key, expert_mapping)
+                candidates = named_expert or expert_mapping
 
             matched = False
             for param_name, weight_name, expert_id, shard_id in candidates:
@@ -1011,6 +1064,10 @@ class RoutedExperts(PluggableLayer):
                 )
                 weight_name = qual_name.replace(weight_name, param_name)
                 param_name = weight_name.removeprefix(f"{self.layer_name}.")
+                if self.shared_expert_online_loader is not None:
+                    param_name = self.shared_expert_online_loader.redirect_param_name(
+                        param_name, shard_id, expert_id
+                    )
                 param = getattr(self, param_name, None)
                 if param is None:
                     if param_name.endswith(("w13_bias", "w2_bias")):
@@ -1116,7 +1173,7 @@ class RoutedExperts(PluggableLayer):
         has_base_layer = any(".base_layer." in n for n, _ in model.named_parameters())
         prefix = "base_layer." if has_base_layer else ""
         # These loaders index ``params_dict[full_name]``, so both sides get it.
-        return RoutedExperts.build_expert_params_mapping(
+        mapping = RoutedExperts.build_expert_params_mapping(
             ckpt_gate_proj_name,
             ckpt_down_proj_name,
             ckpt_up_proj_name,
@@ -1126,6 +1183,14 @@ class RoutedExperts(PluggableLayer):
             lora_base_layer_prefix=prefix,
             lora_base_layer_prefix_on_param_name=prefix,
         )
+
+        # All MoE layers of a model share the same FSE and quantization setup.
+        routed_experts = next(
+            (m for m in model.modules() if isinstance(m, RoutedExperts)), None
+        )
+        if routed_experts is None or routed_experts.shared_expert_online_loader is None:
+            return mapping
+        return routed_experts.shared_expert_online_loader.redirect_mapping(mapping)
 
     @staticmethod
     def build_expert_params_mapping(
@@ -1151,14 +1216,14 @@ class RoutedExperts(PluggableLayer):
             ckpt_up_proj_name: Name of up projection in checkpoint
             num_experts: Number of logical (non-redundant) experts
             num_redundant_experts: Number of redundant experts
-            lora_base_layer_prefix: LoRA ``base_layer.`` prefix for the
-                ``weight_name`` (checkpoint) side
-            lora_base_layer_prefix_on_param_name: same, for the ``param_name``
-                side. Independent because ``get_expert_mapping`` resolves
-                ``param_name`` via ``getattr`` against this layer's bare
-                ``w13_weight``/``w2_weight`` (no prefix), while
-                ``make_expert_params_mapping`` indexes the model-wide
-                ``params_dict`` (prefix included).
+            lora_base_layer_prefix: LoRA `base_layer.` prefix for the
+                `weight_name` (checkpoint) side
+            lora_base_layer_prefix_on_param_name: same, for the `param_name`
+                side. Independent because `get_expert_mapping` resolves
+                `param_name` via `getattr` against this layer's bare
+                `w13_weight`/`w2_weight` (no prefix), while
+                `make_expert_params_mapping` indexes the model-wide
+                `params_dict` (prefix included).
             include_fused: Prepend the fused pre-fused-checkpoint entries
             is_gated: Whether w13 holds gate and up (gated activation) or a
                 single up projection. Selects the fused checkpoint layout.
@@ -1298,7 +1363,21 @@ class RoutedExperts(PluggableLayer):
                 torch.transpose(p.data, 1, 2), requires_grad=False
             )
 
-        weights = list(self.named_parameters())
+        # Kernel views of the params: live ones only, under their runtime names
+        # (an aliased checkpoint name such as `w13_weight_packed` is reported as
+        # `w13_weight`, which the name filters below expect).
+        weights = [
+            (f"{prefix}.{name}" if prefix else name, p)
+            for prefix, module in self.named_modules()
+            for name, p in kernel_parameters(module).items()
+        ]
+
+        # EPLB must use shards when original weight storage has been released.
+        # Use explicit metadata: some tensor subclasses lack untyped_storage().
+        localized_freed = getattr(self, "localized_freed_full_weight_names", ())
+        if localized_freed:
+            weights = [(name, p) for name, p in weights if name not in localized_freed]
+
         weights = [(name, _maybe_make_contiguous(name, p)) for name, p in weights]
 
         # `w13_input_scale` and `w2_input_scale` are global per-tensor

@@ -7,6 +7,7 @@ from __future__ import annotations
 from collections.abc import Callable, Collection, Sequence
 from typing import cast
 
+from vllm.entrypoints.generate.base.protocol import MMPayload
 from vllm.entrypoints.scale_out.token_in_token_out.mm_serde import (
     decode_mm_kwargs_item,
     encode_mm_kwargs_item,
@@ -44,7 +45,7 @@ def _encode_metadata_items(
     *,
     declared: Collection[str],
 ) -> list[str | None]:
-    """Serialize placeholder-metadata and ``keep_on_cpu`` fields per item."""
+    """Serialize placeholder-metadata and `keep_on_cpu` fields per item."""
     metadata_items: list[str | None] = []
     for item in items:
         if item is None:
@@ -94,7 +95,7 @@ def _encode_mm_kwargs_with_metadata(
 def mm_kwargs_from_features(
     features: MultiModalFeatures,
 ) -> dict[str, list[MultiModalKwargsItem | None]]:
-    """Deserialize ``features`` into per-modality kwargs for ``mm_input``."""
+    """Deserialize `features` into per-modality kwargs for `mm_input`."""
     mm_kwargs: dict[str, list[MultiModalKwargsItem | None]] = {}
     kwargs_data = features.kwargs_data or {}
     mm_metadata = features.mm_metadata or {}
@@ -120,7 +121,7 @@ def mm_kwargs_from_features(
 def placeholder_ranges_from_engine_input(
     engine_input: EngineInput,
 ) -> dict[str, list[PlaceholderRangeInfo]] | None:
-    """Return per-modality placeholder ranges, or ``None`` for text-only prompts."""
+    """Return per-modality placeholder ranges, or `None` for text-only prompts."""
     if engine_input.get("type") != "multimodal":
         return None
 
@@ -139,15 +140,15 @@ def extract_mm_features(
     engine_input: EngineInput,
     *,
     metadata_fields_for: Callable[[str], Collection[str]] | None = None,
-    include_mm_kwargs: bool = True,
+    mm_payload: MMPayload = "tensors",
 ) -> MultiModalFeatures | None:
     """Extract multimodal features from a rendered engine prompt.
 
-    Returns ``None`` for text-only prompts. ``mm_metadata`` keeps the
+    Returns `None` for text-only prompts. `mm_metadata` keeps the
     intersection of processed kwargs that prefill needs after EC transfer:
     fields declared as embedding metadata, plus fields marked
-    ``keep_on_cpu`` (for example M-RoPE grid dims). With
-    ``include_mm_kwargs=False`` neither is serialized.
+    `keep_on_cpu` (for example M-RoPE grid dims). With
+    `mm_payload="none"` neither is serialized.
     """
     if engine_input.get("type") != "multimodal":
         return None
@@ -159,7 +160,7 @@ def extract_mm_features(
 
     kwargs_data: dict[str, list[str | None]] | None = None
     mm_metadata: dict[str, list[str | None]] | None = None
-    if include_mm_kwargs:
+    if mm_payload == "tensors":
         raw_mm_kwargs = mm_engine_input.get("mm_kwargs")
         if raw_mm_kwargs:
             kwargs_data, mm_metadata = _encode_mm_kwargs_with_metadata(
