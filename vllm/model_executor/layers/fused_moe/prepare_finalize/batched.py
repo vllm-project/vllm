@@ -61,11 +61,6 @@ class BatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         quant_config: FusedMoEQuantConfig,
         defer_input_quant: bool = False,
     ) -> mk.PrepareResultType:
-        if defer_input_quant:
-            raise NotImplementedError(
-                f"{self.__class__.__name__} does not support defer_input_quant=True. "
-                "Please select an MoE kernel that accepts quantized inputs."
-            )
         assert a1.dim() == 2
         assert topk_ids.dim() == 2
         assert topk_ids.size(0) == a1.size(0)
@@ -85,10 +80,9 @@ class BatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
 
         num_local_experts = self.num_local_experts
 
-        if quant_config.quant_dtype is None:
-            b_type = a1.dtype
-        else:
-            b_type = quant_config.quant_dtype
+        # With defer_input_quant the experts quantize the batched activations.
+        quantize_input = quant_config.quant_dtype is not None and not defer_input_quant
+        b_type = quant_config.quant_dtype if quantize_input else a1.dtype
 
         # One expert receives at most num_tokens rows, so max_num_tokens
         # (scheduler-wide) over-allocates by orders of magnitude at decode.
@@ -100,14 +94,14 @@ class BatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             device=a1.device,
         )
 
-        if quant_config.is_quantized:
+        if quantize_input and quant_config.is_quantized:
             scale_shape = quant_config.batched_scale_shape(
                 num_local_experts, capacity, hidden_dim
             )
 
             b_a1_scale = torch.zeros(scale_shape, dtype=torch.float32, device=a1.device)
         else:
-            assert quant_config.a1_scale is None
+            assert defer_input_quant or quant_config.a1_scale is None
             b_a1_scale = None
 
         first_expert = num_local_experts * self.rank
@@ -115,7 +109,7 @@ class BatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
 
         a1_scale = normalize_scales_shape(quant_config.a1_scale)
 
-        if quant_config.quant_dtype is None:
+        if not quantize_input:
             # Vectorized dispatch: compute the [E_local, T] hit mask and
             # per-expert slot offsets in one shot (single nonzero sync instead
             # of a launch-bound per-expert Python loop).

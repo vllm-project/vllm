@@ -17,6 +17,8 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
+    kMxfp8Dynamic,
+    kMxfp8Static,
     kNvfp4Dynamic,
     kNvfp4Static,
 )
@@ -24,9 +26,14 @@ from vllm.platforms import current_platform
 from vllm.utils.flashinfer import (
     flashinfer_cutedsl_grouped_gemm_nt_masked,
     has_flashinfer_cutedsl_grouped_gemm_nt_masked,
+    has_flashinfer_cutedsl_mxfp8_grouped_gemm_nt_masked,
+    mxfp8_grouped_quantize,
+    nvfp4_block_scale_interleave,
     scaled_fp4_grouped_quantize,
+    silu_and_mul_mxfp8_experts_quantize,
     silu_and_mul_scaled_nvfp4_experts_quantize,
 )
+from vllm.utils.math_utils import round_up
 
 logger = init_logger(__name__)
 
@@ -349,3 +356,229 @@ def flashinfer_cutedsl_moe_masked(
         alpha_dtype=get_cute_dtype(w2_alpha),
     )  # in logical [m, k, l]
     out = out.permute(2, 0, 1)
+
+
+class FlashInferCuteDSLMxfp8BatchedExperts(mk.FusedMoEExpertsModular):
+    """MXFP8 (W8A8) experts on the batched activation format.
+
+    The experts consume the dispatched activations unquantized
+    ([num_local_experts, max_tokens, hidden], e.g. from DeepEP low-latency) and
+    quantize only the valid rows of each expert before both masked grouped
+    GEMMs. The weight scales must be swizzled at load time with
+    `swizzle_mxfp8_moe_weight_scales`.
+    """
+
+    def __init__(
+        self,
+        moe_config: FusedMoEConfig,
+        quant_config: FusedMoEQuantConfig,
+        max_num_tokens: int,
+        num_dispatchers: int,
+    ):
+        super().__init__(
+            moe_config=moe_config,
+            quant_config=quant_config,
+            max_num_tokens=max_num_tokens,
+            num_dispatchers=num_dispatchers,
+        )
+        assert quant_config.quant_dtype == "mxfp8", (
+            "Only mxfp8 quantization is supported."
+        )
+        assert (
+            quant_config.gemm1_alpha is None
+            and quant_config.gemm1_beta is None
+            and quant_config.gemm1_clamp_limit is None
+        ), "Clamped or scaled SiLU is not supported."
+
+    @property
+    def expects_unquantized_inputs(self) -> bool:
+        return True
+
+    @staticmethod
+    def activation_format() -> mk.FusedMoEActivationFormat:
+        return mk.FusedMoEActivationFormat.BatchedExperts
+
+    @staticmethod
+    def _supports_current_device() -> bool:
+        p = current_platform
+        return (
+            p.is_cuda()
+            and p.is_device_capability_family(100)
+            and has_flashinfer_cutedsl_mxfp8_grouped_gemm_nt_masked()
+        )
+
+    @staticmethod
+    def _supports_no_act_and_mul() -> bool:
+        return False
+
+    @staticmethod
+    def _supports_quant_scheme(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        return (weight_key, activation_key) == (kMxfp8Static, kMxfp8Dynamic)
+
+    @staticmethod
+    def _supports_activation(activation: MoEActivation) -> bool:
+        return activation == MoEActivation.SILU
+
+    @staticmethod
+    def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
+        return True
+
+    @staticmethod
+    def _supports_shape(hidden_dim: int) -> bool:
+        # Both GEMM K dims (hidden and intermediate) must be whole 128-column
+        # MXFP8 tiles; the quantizers pad activations to that width.
+        return hidden_dim % 128 == 0
+
+    @staticmethod
+    def is_supported_config(
+        cls: type[mk.FusedMoEExperts],
+        moe_config: FusedMoEConfig,
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+        activation_format: mk.FusedMoEActivationFormat,
+    ) -> tuple[bool, str | None]:
+        if moe_config.intermediate_size_per_partition % 128 != 0:
+            return False, (
+                f"kernel does not support intermediate size "
+                f"{moe_config.intermediate_size_per_partition} (not a multiple of 128)"
+            )
+        return mk.FusedMoEExperts.is_supported_config(
+            cls, moe_config, weight_key, activation_key, activation_format
+        )
+
+    def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
+        # Let PrepareAndFinalize::finalize() decide the impl.
+        return TopKWeightAndReduceDelegate()
+
+    def workspace_shapes(
+        self,
+        M: int,
+        N: int,
+        K: int,
+        topk: int,
+        global_num_experts: int,
+        local_num_experts: int,
+        expert_tokens_meta: mk.ExpertTokensMetadata | None,
+        activation: MoEActivation,
+    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
+        # workspace2 holds the gate/up GEMM output; the output holds the down
+        # GEMM output.
+        output_shape = (local_num_experts, M, K)
+        workspace2 = (local_num_experts, M, N)
+        workspace1 = output_shape
+        return (workspace1, workspace2, output_shape)
+
+    def apply(
+        self,
+        output: torch.Tensor,
+        hidden_states: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        activation: MoEActivation,
+        global_num_experts: int,
+        expert_map: torch.Tensor | None,
+        a1q_scale: torch.Tensor | None,
+        a2_scale: torch.Tensor | None,
+        workspace13: torch.Tensor | None,
+        workspace2: torch.Tensor | None,
+        expert_tokens_meta: mk.ExpertTokensMetadata | None,
+        apply_router_weight_on_input: bool | None,
+    ):
+        assert a1q_scale is None, "Expected unquantized activations."
+        assert self.w1_scale is not None and self.w2_scale is not None
+        assert expert_tokens_meta is not None
+        assert hidden_states.ndim == 3
+        flashinfer_cutedsl_mxfp8_moe_masked(
+            hidden_states=hidden_states,
+            w1=w1,
+            w1_blockscale=self.w1_scale,
+            w2=w2,
+            w2_blockscale=self.w2_scale,
+            masked_m=expert_tokens_meta.expert_num_tokens,
+            workspace=workspace2,
+            out=output,
+        )
+
+
+def swizzle_mxfp8_moe_weight_scales(scale: torch.Tensor) -> torch.Tensor:
+    """Swizzle per-expert UE8M0 weight scales for the masked grouped GEMM.
+
+    Args:
+        scale: [num_experts, n, k // 32] uint8 (or float8_e8m0fnu) row-major
+            block scales of [num_experts, n, k] MXFP8 weights.
+
+    Returns:
+        [num_experts, round_up(n, 128), round_up(k // 32, 4)] uint8 scales in
+        the 128x4 swizzled layout.
+
+    """
+    num_experts, n, k_blocks = scale.shape
+    swizzled = nvfp4_block_scale_interleave(scale.view(torch.uint8).contiguous())
+    return swizzled.view(num_experts, round_up(n, 128), round_up(k_blocks, 4))
+
+
+def flashinfer_cutedsl_mxfp8_moe_masked(
+    hidden_states: torch.Tensor,
+    w1: torch.Tensor,
+    w1_blockscale: torch.Tensor,
+    w2: torch.Tensor,
+    w2_blockscale: torch.Tensor,
+    masked_m: torch.Tensor,
+    workspace: torch.Tensor,
+    out: torch.Tensor,
+):
+    """Masked MXFP8 Mixture-of-Experts with FlashInfer's CuteDSL kernels.
+
+    Args:
+        hidden_states (torch.Tensor): [num_experts, m, k], bf16/fp16
+        w1 (torch.Tensor): [num_experts, 2 * n, k], float8_e4m3fn
+        w1_blockscale (torch.Tensor): swizzled UE8M0 scales of w1, see
+            `swizzle_mxfp8_moe_weight_scales`
+        w2 (torch.Tensor): [num_experts, k, n], float8_e4m3fn
+        w2_blockscale (torch.Tensor): swizzled UE8M0 scales of w2
+        masked_m (torch.Tensor): [num_experts], int32, valid rows per expert
+        workspace (torch.Tensor): [num_experts, m, 2 * n], gate/up output
+        out (torch.Tensor): [num_experts, m, k], output; rows past
+            masked_m[i] are not written
+
+    """
+    num_experts, m, k = hidden_states.shape
+    n = w2.shape[-1]
+    assert w1.dtype == torch.float8_e4m3fn and w2.dtype == torch.float8_e4m3fn
+    assert w1.shape == (num_experts, 2 * n, k), f"w1 shape mismatch: {w1.shape}"
+    assert w2.shape == (num_experts, k, n), f"w2 shape mismatch: {w2.shape}"
+    assert workspace.shape == (num_experts, m, 2 * n)
+    assert out.shape == (num_experts, m, k)
+
+    gemm_kwargs = dict(
+        ab_dtype="float8_e4m3fn",
+        sf_dtype="float8_e8m0fnu",
+        c_dtype=get_cute_dtype(hidden_states),
+        sf_vec_size=32,
+    )
+    e8m0 = torch.float8_e8m0fnu
+
+    # The CUDA backend spreads the valid rows of all experts over the whole
+    # grid, so a skewed masked_m still keeps every SM busy.
+    aq, aq_sf = mxfp8_grouped_quantize(hidden_states, masked_m, backend="cuda")
+    flashinfer_cutedsl_grouped_gemm_nt_masked(
+        (aq, aq_sf.view(e8m0)),
+        (w1.permute(1, 2, 0), w1_blockscale.view(e8m0)),
+        workspace.permute(1, 2, 0),
+        masked_m,
+        **gemm_kwargs,
+    )  # in logical [m, 2 * n, l]
+
+    diq, diq_sf = silu_and_mul_mxfp8_experts_quantize(workspace, masked_m)
+    flashinfer_cutedsl_grouped_gemm_nt_masked(
+        (diq, diq_sf.view(e8m0)),
+        (w2.permute(1, 2, 0), w2_blockscale.view(e8m0)),
+        out.permute(1, 2, 0),
+        masked_m,
+        **gemm_kwargs,
+    )  # in logical [m, k, l]
