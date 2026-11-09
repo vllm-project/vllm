@@ -419,6 +419,9 @@ fn extract_mm_placeholders(features: Option<&[MmFeatureSpec]>) -> Option<MultiMo
             PlaceholderRangeInfo {
                 offset: feature.mm_position.offset,
                 length: feature.mm_position.length,
+                is_embed: (feature.mm_position.is_embed.as_ref())
+                    .and_then(|mask| mask.data.as_raw_view())
+                    .map(|bytes| bytes.iter().map(|&b| b != 0).collect()),
             },
         );
     }
@@ -604,6 +607,7 @@ mod tests {
     use vllm_engine_core_client::protocol::multimodal::{MmModality, PlaceholderRange};
     use vllm_engine_core_client::protocol::output::{RequestSpecDecodeMetrics, StopReason};
     use vllm_engine_core_client::protocol::sampling_mask::SamplingMask;
+    use vllm_engine_core_client::protocol::tensor::WireTensor;
     use vllm_llm::{GeneratePromptInfo, PromptCacheUsage, WeightVersionSpan};
 
     use super::*;
@@ -736,6 +740,7 @@ mod tests {
             vec![PlaceholderRangeInfo {
                 offset: 1,
                 length: 4,
+                is_embed: None,
             }],
         )]);
         let chunks: Vec<_> = generate_chunk_stream(
@@ -884,6 +889,7 @@ mod tests {
                 vec![PlaceholderRangeInfo {
                     offset: 1,
                     length: 4,
+                    is_embed: None,
                 }],
             )])),
         )
@@ -1026,6 +1032,7 @@ mod tests {
                 vec![PlaceholderRangeInfo {
                     offset: 0,
                     length: 1,
+                    is_embed: None,
                 }],
             )])),
         )
@@ -1179,10 +1186,12 @@ mod tests {
                 PlaceholderRangeInfo {
                     offset: 1,
                     length: 5,
+                    is_embed: None,
                 },
                 PlaceholderRangeInfo {
                     offset: 8,
                     length: 2,
+                    is_embed: None,
                 },
             ]
         );
@@ -1191,8 +1200,29 @@ mod tests {
             vec![PlaceholderRangeInfo {
                 offset: 4,
                 length: 3,
+                is_embed: None,
             }]
         );
+    }
+
+    #[test]
+    fn extract_mm_placeholders_keeps_is_embed() {
+        let mask = vec![false, true, true, false];
+        let features = vec![MmFeatureSpec {
+            data: None,
+            modality: MmModality::Image,
+            identifier: "image-0".to_string(),
+            mm_position: PlaceholderRange {
+                offset: 1,
+                length: 4,
+                is_embed: Some(WireTensor::from_bool(vec![4], mask.clone()).unwrap()),
+            },
+            mm_hash: None,
+        }];
+
+        let placeholders = extract_mm_placeholders(Some(&features)).expect("metadata");
+
+        assert_eq!(placeholders["image"][0].is_embed, Some(mask));
     }
 
     #[test]

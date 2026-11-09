@@ -175,6 +175,7 @@ pub(super) type MultiModalPlaceholders = HashMap<String, Vec<PlaceholderRangeInf
 pub(super) struct PlaceholderRangeInfo {
     pub offset: usize,
     pub length: usize,
+    pub is_embed: Option<Vec<bool>>,
 }
 
 /// Mirrors the Python vLLM `GenerateLogProbs` class: output logprobs for one
