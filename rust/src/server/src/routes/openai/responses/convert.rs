@@ -16,18 +16,20 @@ use thiserror_ext::AsReport as _;
 use tracing::warn;
 use vllm_chat::{
     AssistantContentBlock, AssistantToolCall, ChatContent, ChatContentPart, ChatMessage,
-    ChatOptions, ChatRequest, ChatTool, ChatToolChoice, Error as ChatError, GenerationPromptMode,
+    ChatOptions, ChatRequest, ChatToolChoice, Error as ChatError, GenerationPromptMode,
     ResolvedToolContext,
 };
 use vllm_text::output::TextDecodeOptions;
 use vllm_text::{EffectiveSampling, SamplingParams};
 
+use super::tools::{ResponsesToolNames, ToolIdentity};
 use super::types::{
-    InputTokensDetails, OutputTokensDetails, ResponseInputContentPart, ResponseInputItem,
-    ResponseInputReasoning, ResponseInputRole, ResponseItemStatus, ResponseMessageContent,
-    ResponseObject, ResponseTextConfig, ResponseTextFormat, ResponseToolChoice,
-    ResponseToolChoiceObject, ResponseTruncation, ResponseUsage, ResponsesInput,
-    ResponsesReasoning, ResponsesRequest, ResponsesResponse, ResponsesTool, ServiceTier,
+    InputTokensDetails, OutputTokensDetails, ResponseEchoFields, ResponseInputContentPart,
+    ResponseInputItem, ResponseInputReasoning, ResponseInputRole, ResponseItemStatus,
+    ResponseMessageContent, ResponseObject, ResponseTextConfig, ResponseTextFormat,
+    ResponseToolChoice, ResponseToolChoiceObject, ResponseTruncation, ResponseUsage,
+    ResponsesInput, ResponsesReasoning, ResponsesRequest, ResponsesResponse, ResponsesTool,
+    ServiceTier,
 };
 use super::validate;
 use crate::error::{ApiError, bail_invalid_request};
@@ -48,18 +50,17 @@ use crate::utils::{
 pub(crate) struct ResponseMeta {
     pub model: String,
     pub instructions: Option<String>,
-    pub metadata: Option<std::collections::HashMap<String, String>>,
+    /// Request fields echoed back unchanged.
+    pub echo: ResponseEchoFields,
     pub tools: Vec<ResponsesTool>,
     pub tool_choice: ResponseToolChoice,
     pub parallel_tool_calls: bool,
-    pub max_tool_calls: Option<u32>,
     pub previous_response_id: Option<String>,
     pub reasoning: Option<ResponsesReasoning>,
     pub service_tier: ServiceTier,
     pub top_logprobs: Option<i32>,
     pub text: Option<ResponseTextConfig>,
     pub truncation: ResponseTruncation,
-    pub user: Option<String>,
 }
 
 /// Lowered responses request plus the response metadata carried by every SSE
@@ -70,6 +71,8 @@ pub(crate) struct PreparedResponsesRequest {
     pub meta: ResponseMeta,
     /// Whether reasoning items appear in the output.
     pub include_reasoning: bool,
+    /// Maps called tool names back to namespaced functions in the output.
+    pub tool_names: ResponsesToolNames,
     pub chat_request: ChatRequest,
 }
 
@@ -93,8 +96,7 @@ pub(crate) fn prepare_responses_request(
         tool_choice,
         parallel_tool_calls,
         max_output_tokens,
-        max_tool_calls,
-        metadata,
+        echo,
         previous_response_id,
         previous_input_messages: _,
         prompt: _,
@@ -111,7 +113,6 @@ pub(crate) fn prepare_responses_request(
         top_logprobs,
         text,
         truncation,
-        user,
         include: _,
         presence_penalty,
         frequency_penalty,
@@ -148,11 +149,9 @@ pub(crate) fn prepare_responses_request(
         GenerationPromptMode::StartNewAssistant
     };
 
-    let converted_tools = tools
-        .iter()
-        .map(|ResponsesTool::Function(function)| ChatTool::from(function.clone()))
-        .collect::<Vec<_>>();
-    let requested_tool_choice = normalize_tool_choice(tool_choice, converted_tools.is_empty())?;
+    let (converted_tools, tool_names) = ResponsesToolNames::convert(&tools);
+    let requested_tool_choice =
+        normalize_tool_choice(tool_choice, &tools, &tool_names, converted_tools.is_empty())?;
     let tool_context = ResolvedToolContext::new(
         &messages,
         converted_tools,
@@ -284,24 +283,23 @@ pub(crate) fn prepare_responses_request(
     let meta = ResponseMeta {
         model: response_model,
         instructions,
-        metadata,
+        echo,
         tools,
         tool_choice: tool_choice_echo,
         parallel_tool_calls: parallel_tool_calls.unwrap_or(true),
-        max_tool_calls,
         previous_response_id,
         reasoning,
         service_tier: service_tier.unwrap_or_default(),
         top_logprobs,
         text,
         truncation,
-        user,
     };
 
     Ok(PreparedResponsesRequest {
         request_id,
         meta,
         include_reasoning,
+        tool_names,
         chat_request,
     })
 }
@@ -329,10 +327,12 @@ fn response_prompt_truncation(
 /// Resolve the requested tool choice, mirroring the Python
 /// `check_tool_usage` validator: without tools, `auto` is normalized to
 /// `none` and named function choices are errors; with tools, named choices
-/// must exist (enforced by
-/// [`ResolvedToolContext`]).
+/// must exist and resolve to the name the model sees (see
+/// [`ResponsesToolNames::resolve_choice`]).
 fn normalize_tool_choice(
     tool_choice: Option<ResponseToolChoice>,
+    tools: &[ResponsesTool],
+    tool_names: &ResponsesToolNames,
     tools_empty: bool,
 ) -> Result<Option<ChatToolChoice>, ApiError> {
     let Some(tool_choice) = tool_choice else {
@@ -350,7 +350,9 @@ fn normalize_tool_choice(
                     "Tool choice 'function' not found in 'tools' parameter."
                 );
             }
-            ChatToolChoice::Function { name }
+            ChatToolChoice::Function {
+                name: tool_names.resolve_choice(name, tools)?,
+            }
         }
         ResponseToolChoice::Object(ResponseToolChoiceObject::AllowedTools { tools, .. }) => {
             bail_invalid_request!(
@@ -411,7 +413,7 @@ fn convert_input(
                 | ResponseInputRole::Developer
                 | ResponseInputRole::User) => {
                     assistant.flush(&mut messages);
-                    let content = convert_content_parts(message.content, true)?;
+                    let content = convert_content_parts(message.content)?;
                     messages.push(match role {
                         ResponseInputRole::System => ChatMessage::system(content),
                         ResponseInputRole::Developer => ChatMessage::developer(content, None),
@@ -419,27 +421,29 @@ fn convert_input(
                     });
                 }
                 ResponseInputRole::Assistant => {
-                    let content = convert_content_parts(message.content, false)?;
-                    let text = content.try_flatten_to_text().map_err(|_| {
-                        ApiError::invalid_request(
-                            "assistant input items only support text content".to_string(),
-                            Some("input"),
-                        )
-                    })?;
-                    assistant.push_text(&mut messages, text);
+                    assistant.push_text(&mut messages, assistant_text_blocks(message.content)?);
                 }
             },
             ResponseInputItem::FunctionCall(call) => {
+                let name = match &call.namespace {
+                    Some(namespace) => ToolIdentity {
+                        namespace: Some(namespace),
+                        name: &call.name,
+                    }
+                    .flat_name()
+                    .into_owned(),
+                    None => call.name,
+                };
                 assistant.push_block(AssistantContentBlock::ToolCall(AssistantToolCall {
                     id: call.call_id,
-                    name: call.name,
+                    name,
                     arguments: call.arguments,
                 }));
             }
             ResponseInputItem::FunctionCallOutput(output) => {
                 assistant.flush(&mut messages);
                 messages.push(ChatMessage::tool_response(
-                    output.output.flatten_text()?,
+                    output.output.into_text_content()?,
                     output.call_id,
                 ));
             }
@@ -479,10 +483,7 @@ fn convert_input(
 }
 
 /// Convert message content into internal chat content.
-fn convert_content_parts(
-    content: ResponseMessageContent,
-    allow_multimodal: bool,
-) -> Result<ChatContent, ApiError> {
+fn convert_content_parts(content: ResponseMessageContent) -> Result<ChatContent, ApiError> {
     match content {
         ResponseMessageContent::Text(text) => Ok(ChatContent::Text(text)),
         ResponseMessageContent::Parts(parts) => {
@@ -503,12 +504,6 @@ fn convert_content_parts(
                         detail,
                         file_id,
                     } => {
-                        if !allow_multimodal {
-                            bail_invalid_request!(
-                                param = "input",
-                                "input_image parts are not supported in assistant messages."
-                            );
-                        }
                         if file_id.is_some() {
                             bail_invalid_request!(
                                 param = "input",
@@ -529,12 +524,6 @@ fn convert_content_parts(
                         });
                     }
                     ResponseInputContentPart::InputAudio { input_audio } => {
-                        if !allow_multimodal {
-                            bail_invalid_request!(
-                                param = "input",
-                                "input_audio parts are not supported in assistant messages."
-                            );
-                        }
                         let Some(format) = input_audio.format else {
                             bail_invalid_request!(
                                 param = "input",
@@ -573,7 +562,8 @@ struct AssistantTurn {
 }
 
 impl AssistantTurn {
-    fn push_text(&mut self, messages: &mut Vec<ChatMessage>, text: String) {
+    /// Push the text blocks of one assistant message item.
+    fn push_text(&mut self, messages: &mut Vec<ChatMessage>, blocks: Vec<AssistantContentBlock>) {
         if self
             .blocks
             .iter()
@@ -581,7 +571,7 @@ impl AssistantTurn {
         {
             self.flush(messages);
         }
-        self.push_block(AssistantContentBlock::Text { text });
+        self.blocks.extend(blocks);
     }
 
     fn push_reasoning(&mut self, messages: &mut Vec<ChatMessage>, text: String) {
@@ -631,32 +621,65 @@ fn reasoning_content_string(reasoning: &ResponseInputReasoning) -> String {
     String::new()
 }
 
+/// Lower the content of an assistant message item into one text block per
+/// part, as chat completions does, so the renderer joins them. Python's
+/// converter keeps only the first part.
+fn assistant_text_blocks(
+    content: ResponseMessageContent,
+) -> Result<Vec<AssistantContentBlock>, ApiError> {
+    let texts = match content {
+        ResponseMessageContent::Text(text) => vec![text],
+        ResponseMessageContent::Parts(parts) => parts
+            .into_iter()
+            .map(|part| -> Result<String, ApiError> {
+                match part {
+                    ResponseInputContentPart::InputText { text }
+                    | ResponseInputContentPart::OutputText { text, .. }
+                    // Refusals are answer text; keep them so templates still see the turn.
+                    | ResponseInputContentPart::Refusal { refusal: text } => Ok(text),
+                    other => bail_invalid_request!(
+                        param = "input",
+                        "assistant input items only support text content; got part type '{}'",
+                        part_type_name(&other)
+                    ),
+                }
+            })
+            .try_collect()?,
+    };
+    // An item with no parts still makes an assistant turn, as before.
+    if texts.is_empty() {
+        return Ok(vec![AssistantContentBlock::Text {
+            text: String::new(),
+        }]);
+    }
+    Ok(texts.into_iter().map(|text| AssistantContentBlock::Text { text }).collect())
+}
+
 impl ResponseMessageContent {
-    /// Flatten content into one plain string without separators, rejecting
-    /// non-text parts (tool outputs support text only in this frontend).
-    fn flatten_text(&self) -> Result<String, ApiError> {
+    /// Lower `function_call_output` content, keeping its text parts so the
+    /// renderer joins them as for a chat tool message; non-text parts are
+    /// rejected (tool outputs support text only in this frontend).
+    fn into_text_content(self) -> Result<ChatContent, ApiError> {
         match self {
-            Self::Text(text) => Ok(text.clone()),
-            Self::Parts(parts) => {
-                let mut flattened = String::new();
-                for part in parts {
+            Self::Text(text) => Ok(ChatContent::Text(text)),
+            Self::Parts(parts) => parts
+                .into_iter()
+                .map(|part| -> Result<ChatContentPart, ApiError> {
                     match part {
                         ResponseInputContentPart::InputText { text }
                         | ResponseInputContentPart::OutputText { text, .. } => {
-                            flattened.push_str(text)
+                            Ok(ChatContentPart::text(text))
                         }
-                        other => {
-                            bail_invalid_request!(
-                                param = "input",
-                                "function_call_output only supports text content parts; got \
-                                 part type '{}'",
-                                part_type_name(other)
-                            );
-                        }
+                        other => bail_invalid_request!(
+                            param = "input",
+                            "function_call_output only supports text content parts; got part type \
+                         '{}'",
+                            part_type_name(&other)
+                        ),
                     }
-                }
-                Ok(flattened)
-            }
+                })
+                .try_collect()
+                .map(ChatContent::Parts),
         }
     }
 }
@@ -688,18 +711,16 @@ pub(crate) fn build_response(
     ResponseMeta {
         model,
         instructions,
-        metadata,
+        echo,
         tools,
         tool_choice,
         parallel_tool_calls,
-        max_tool_calls,
         previous_response_id,
         reasoning,
         service_tier,
         top_logprobs,
         text,
         truncation,
-        user,
     }: ResponseMeta,
     sampling: EffectiveSampling,
     request_id: String,
@@ -715,8 +736,7 @@ pub(crate) fn build_response(
         incomplete_details: None,
         instructions,
         max_output_tokens: sampling.max_tokens,
-        max_tool_calls,
-        metadata,
+        echo,
         model,
         output: vec![],
         parallel_tool_calls,
@@ -732,7 +752,6 @@ pub(crate) fn build_response(
         top_logprobs,
         truncation,
         usage: None,
-        user,
         metrics: None,
         presence_penalty: sampling.presence_penalty,
         frequency_penalty: sampling.frequency_penalty,
@@ -776,30 +795,89 @@ fn should_continue_final_message(items: &[ResponseInputItem]) -> bool {
 #[cfg(test)]
 mod tests {
     use serde_json::{Value, json};
-    use vllm_chat::ChatTokenUsage;
+    use vllm_chat::{ChatTokenUsage, ChatTool};
     use vllm_llm::TokenUsage;
 
     use super::*;
+    use crate::model_names::ServedModelNames;
 
     #[test]
     fn auto_tool_choice_without_tools_normalizes_to_none() {
         let tool_choice = serde_json::from_value(json!("auto")).unwrap();
 
         assert_eq!(
-            normalize_tool_choice(Some(tool_choice), true).unwrap(),
+            normalize_tool_choice(Some(tool_choice), &[], &ResponsesToolNames::default(), true)
+                .unwrap(),
             Some(ChatToolChoice::None)
         );
     }
 
     #[test]
     fn responses_function_tool_defaults_parameters_to_null() {
-        let ResponsesTool::Function(function) = serde_json::from_value(json!({
+        let Ok(ResponsesTool::Function(function)) = serde_json::from_value(json!({
             "type": "function",
             "name": "lookup",
-        }))
-        .expect("deserialize function tool");
+        })) else {
+            panic!("deserialize function tool");
+        };
 
         assert_eq!(ChatTool::from(function).parameters, Value::Null);
+    }
+
+    #[test]
+    fn namespace_tools_reach_the_model_by_their_flat_names() {
+        let request: ResponsesRequest = serde_json::from_value(json!({
+            "input": [
+                {"role": "user", "content": "Who is Ada?"},
+                {
+                    "type": "function_call",
+                    "call_id": "call_1",
+                    "name": "get_contact",
+                    "namespace": "crm",
+                    "arguments": "{\"name\":\"Ada\"}"
+                },
+                {"type": "function_call_output", "call_id": "call_1", "output": "found"}
+            ],
+            "tools": [{
+                "type": "namespace",
+                "name": "crm",
+                "description": "CRM tools.",
+                "tools": [{"type": "function", "name": "get_contact"}]
+            }],
+            "tool_choice": {"type": "function", "name": "get_contact"}
+        }))
+        .expect("deserialize request");
+        let served = LoraModelResolution {
+            model_names: ServedModelNames::new(vec!["test-model".to_string()]),
+            lora_request: None,
+        };
+
+        let prepared = prepare_responses_request(request, &served, Default::default())
+            .expect("prepare request");
+
+        let tool_context = &prepared.chat_request.tool_context;
+        let names = tool_context.initial_tools.iter().map(|tool| tool.name.as_str());
+        assert_eq!(names.collect::<Vec<_>>(), ["crm__get_contact"]);
+        let flat_choice = ChatToolChoice::Function {
+            name: "crm__get_contact".to_string(),
+        };
+        assert_eq!(tool_context.tool_choice, flat_choice);
+        assert_eq!(
+            prepared.meta.tool_choice,
+            ResponseToolChoice::Object(ResponseToolChoiceObject::Function(FunctionChoice {
+                name: "crm__get_contact".to_string(),
+            }))
+        );
+        let ChatMessage::Assistant { content } = &prepared.chat_request.messages[1] else {
+            panic!("assistant turn: {:?}", prepared.chat_request.messages);
+        };
+        assert!(
+            matches!(
+                content.as_slice(),
+                [AssistantContentBlock::ToolCall(call)] if call.name == "crm__get_contact"
+            ),
+            "{content:?}"
+        );
     }
 
     #[test]
@@ -835,6 +913,63 @@ mod tests {
     }
 
     #[test]
+    fn text_parts_reach_the_renderer_as_parts() {
+        let input = serde_json::from_value(json!([
+            {"role": "user", "content": "What is the weather?"},
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [
+                    {"type": "output_text", "text": "Let me check."},
+                    {"type": "output_text", "text": "One moment."}
+                ]
+            },
+            {
+                "type": "function_call",
+                "call_id": "call_1",
+                "name": "get_weather",
+                "arguments": "{}"
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "call_1",
+                "output": [
+                    {"type": "input_text", "text": "Sunny"},
+                    {"type": "input_text", "text": "25C"}
+                ]
+            }
+        ]))
+        .expect("deserialize Responses input");
+
+        let (messages, _) = convert_input(&None, input).expect("convert Responses input");
+        assert_eq!(
+            messages[1..],
+            [
+                ChatMessage::assistant_blocks(vec![
+                    AssistantContentBlock::Text {
+                        text: "Let me check.".to_string()
+                    },
+                    AssistantContentBlock::Text {
+                        text: "One moment.".to_string()
+                    },
+                    AssistantContentBlock::ToolCall(AssistantToolCall {
+                        id: "call_1".to_string(),
+                        name: "get_weather".to_string(),
+                        arguments: "{}".to_string(),
+                    }),
+                ]),
+                ChatMessage::tool_response(
+                    ChatContent::Parts(vec![
+                        ChatContentPart::text("Sunny"),
+                        ChatContentPart::text("25C"),
+                    ]),
+                    "call_1",
+                ),
+            ]
+        );
+    }
+
+    #[test]
     fn input_audio_uses_the_nested_responses_wire_shape() {
         let content = serde_json::from_value(json!([
             {
@@ -847,8 +982,7 @@ mod tests {
         ]))
         .expect("deserialize Responses audio content");
 
-        let converted =
-            convert_content_parts(content, true).expect("convert Responses audio content");
+        let converted = convert_content_parts(content).expect("convert Responses audio content");
         assert_eq!(
             converted,
             ChatContent::Parts(vec![ChatContentPart::InputAudio {
