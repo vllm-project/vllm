@@ -918,7 +918,7 @@ class AiterMLADecodeMetadata(MLACommonDecodeMetadata):
 
 @dataclass
 class AiterMLAFusedPrefillMetadata:
-    """Every prefill's [context ‖ new] KV rows, for one causal MLA.
+    """Every prefill's [context | new] KV rows, for one causal MLA.
 
     Built only for batches that take that launch, so its presence on the
     metadata is the routing decision.
@@ -968,9 +968,6 @@ class AiterMLAMetadata(MLACommonMetadata[AiterMLADecodeMetadata]):
 
 # Tile size used by the mla_prefill_ps_asm_fwd assembly kernel.
 _FP8_PREFILL_TILE_Q = 256
-
-_FUSED_PREFILL_LONG_CONTEXT = 8192
-_FUSED_PREFILL_SHORT_QUERY = 256
 
 
 class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
@@ -1757,12 +1754,10 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         self, query_lens: torch.Tensor, context_lens: torch.Tensor
     ) -> bool:
         """Shape rule for prefills with context."""
-        if self.num_heads > 32:
+        if int(query_lens.min()) >= 8192:
             return True
-        if int(context_lens.min()) >= _FUSED_PREFILL_LONG_CONTEXT:
-            return True
-        long_query = query_lens > _FUSED_PREFILL_SHORT_QUERY
-        long_context = context_lens >= _FUSED_PREFILL_LONG_CONTEXT
+        long_query = query_lens > 256
+        long_context = context_lens >= 8192
         return not bool((long_query & long_context).any())
 
     def _build_fused_prefill_metadata(
@@ -1770,7 +1765,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         metadata: AiterMLAMetadata,
         common_attn_metadata: CommonAttentionMetadata,
     ) -> AiterMLAFusedPrefillMetadata | None:
-        """Lay out every prefill's [context ‖ new] rows for one causal launch.
+        """Lay out every prefill's [context | new] rows for one causal launch.
 
         Returns None to keep the two-pass path when the rows do not fit the
         chunked-prefill workspace or _use_fused_prefill returns False.
@@ -3264,7 +3259,7 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         output: torch.Tensor,
         output_scale: torch.Tensor | None = None,
     ) -> None:
-        """Run prefill with context as one causal launch over [context ‖ new]."""
+        """Run prefill with context as one causal launch over [context | new]."""
         assert output_scale is None, (
             "Fused FP8 output is only wired for the non-chunked-context path"
         )
@@ -3275,7 +3270,7 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         assert fused_prefill_metadata is not None
 
         # The new tokens reached the cache before attention, so this gathers
-        # each prefill's whole sequence as contiguous [context ‖ new] rows.
+        # each prefill's whole sequence as contiguous [context | new] rows.
         workspace = prefill_metadata.chunked_context.workspace
         ops.gather_and_maybe_dequant_cache(
             src_cache=kv_c_and_k_pe_cache,
