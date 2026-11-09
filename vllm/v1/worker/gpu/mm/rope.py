@@ -130,10 +130,9 @@ class RopeState:
                 source = input_batch.positions[offset : offset + length].to(
                     device=positions.device, dtype=positions.dtype
                 )
-                positions[:, offset : offset + length] = (
-                    source.unsqueeze(0).repeat(self.num_dims, 1) + delta
-                )
+                positions[:, offset : offset + length] = source.unsqueeze(0) + delta
             offset += length
+
         return positions
 
     
