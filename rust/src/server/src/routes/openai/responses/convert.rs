@@ -248,9 +248,9 @@ pub(crate) fn prepare_responses_request(
             structured_outputs,
             skip_reading_prefix_cache: None,
             vllm_xargs: merge_kv_transfer_params(
-                merge_ec_transfer_params(vllm_xargs, ec_transfer_params.as_ref()),
+                merge_ec_transfer_params(vllm_xargs, ec_transfer_params.as_ref())?,
                 kv_transfer_params.as_ref(),
-            ),
+            )?,
             ..SamplingParams::default()
         },
         chat_options: ChatOptions {
