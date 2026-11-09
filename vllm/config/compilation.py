@@ -613,19 +613,27 @@ class CompilationConfig:
 
     encoder_cudagraph_token_budgets: list[int] = field(default_factory=list)
     """Token budget levels for encoder CUDA graph capture.
-    Each budget defines a fixed token capacity. At runtime, images are greedy-packed
-    into the smallest fitting budget and the corresponding CUDA graph is replayed.
-    If empty (default), auto-inferred from model architecture as power-of-2
-    levels from the model's estimated min budget to max budget.
+    Each budget defines a fixed token capacity. At runtime, a batch replays the
+    smallest budget that holds it, or runs eagerly if none does.
+    If empty (default), generated over the model's budget range: quarter-octave
+    steps up to 1024 tokens, steps of 128 up to 2560, then 1/8-octave steps,
+    up to `encoder_cudagraph_max_token_budget`.
     User-provided values override auto-inference.
     Example: [2048, 4096, 8192, 13824]"""
+
+    encoder_cudagraph_max_token_budget: int | None = 5120
+    """Largest auto-generated encoder CUDA graph token budget; must be positive
+    or None. A batch with more tokens runs eagerly. The default balances graph
+    memory against replay coverage; performance depends on the model, batch
+    shape, and hardware. None captures up to the model's largest budget.
+    Ignored when encoder_cudagraph_token_budgets is set."""
 
     encoder_cudagraph_max_vision_items_per_batch: int = 0
     """Maximum number of images/videos per batch for encoder CUDA graph capture.
     Determines the fixed batch size used during graph capture.
     If 0 (default), auto-inferred as max_budget // min_budget from the
     model's budget range. User-provided positive value overrides
-    auto-inference."""
+    auto-inference. A batch with more items runs eagerly in one forward."""
 
     encoder_cudagraph_max_frames_per_batch: int | None = None
     """Maximum total video frames per batch for encoder CUDA graph capture.
@@ -645,7 +653,8 @@ class CompilationConfig:
 
     decoder_replay_cudagraph_capture_sizes: list[int] = field(default_factory=list)
     """Decoder replay CUDA graph sizes for YOCO models (e.g. DeepSeek-V4.1), at
-    most max_num_batched_tokens. If empty: multiples of sliding_window up to
+    most max_num_batched_tokens. If empty: the powers of two below
+    sliding_window, then multiples of sliding_window up to
     min(max_cudagraph_capture_size, max_num_seqs * sliding_window), coarser past
     16 * sliding_window. Larger replay batches run eagerly."""
 
@@ -1209,6 +1218,15 @@ class CompilationConfig:
             raise ValueError(
                 "encoder_cudagraph_max_frames_per_batch must be "
                 "non-negative (None = auto-infer)"
+            )
+
+        if (
+            self.encoder_cudagraph_max_token_budget is not None
+            and self.encoder_cudagraph_max_token_budget <= 0
+        ):
+            raise ValueError(
+                "encoder_cudagraph_max_token_budget must be positive "
+                f"(None = no limit), got {self.encoder_cudagraph_max_token_budget}"
             )
 
         if self.encoder_cudagraph_token_budgets and any(

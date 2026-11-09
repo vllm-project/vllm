@@ -12,6 +12,7 @@ import pytest
 import torch
 
 from vllm.platforms import current_platform
+from vllm.utils.flashinfer import has_flashinfer_prims_ts_sparse_mla
 
 pytestmark = pytest.mark.skipif(
     not current_platform.is_device_capability_family(100),
@@ -40,7 +41,7 @@ def _inputs(counts, rows_total=40_000, seed=0):
 
 
 def _reference(query, kv, rows, valid, quantize_p):
-    """FP32 attention of the first HEADS heads; ``quantize_p``: the kernel's
+    """FP32 attention of the first HEADS heads; `quantize_p`: the kernel's
     schedule (each of SPLIT CTAs takes a contiguous 1 / SPLIT of the keys in
     chunks of CHUNK, E4M3 P at 448 of its running max, FP32 sums; the CTAs'
     partials merge in FP32)."""
@@ -115,6 +116,57 @@ def _run_sparse(query, kv, rows, valid):
 _PLANS: dict = {}
 
 
+def _run_prims_ts(query, kv, rows, valid):
+    latent, lse = _run_prims_ts_nosync(query, kv, rows, valid)
+    torch.accelerator.synchronize()
+    return latent, lse
+
+
+def _run_prims_ts_nosync(query, kv, rows, valid):
+    """FlashInfer prims_ts on the plan of the batch's rows (planned once)."""
+    from flashinfer.attention.prims_ts import (
+        BatchSparseMLADecodePagedTSWrapper,
+        get_prims_ts_sparse_mla_decode_workspace_size,
+    )
+
+    batch, device = rows.shape[0], torch.device("cuda")
+    if batch in _PLANS:
+        plan, latent, lse, indptr = _PLANS[batch]
+        plan.run(
+            query[:batch],
+            kv,
+            rows,
+            valid,
+            qo_indptr=indptr,
+            softmax_scale=SOFTMAX * Q_SCALE * K_SCALE,
+            output_scale=K_SCALE,
+            out=latent,
+            lse=lse,
+            validate=False,
+        )
+        return latent, lse
+    kwargs = dict(
+        max_q_len=1,
+        q_dtype=torch.float8_e4m3fn,
+        max_topk=WIDTH,
+        packed_query=True,
+        qk_rope_head_dim=64,
+        kv_cache_format="native",
+    )
+    size = get_prims_ts_sparse_mla_decode_workspace_size(
+        device, batch, PADDED, return_lse=True, **kwargs
+    )
+    plan = BatchSparseMLADecodePagedTSWrapper(
+        torch.empty(size, dtype=torch.uint8, device=device)
+    )
+    plan.plan(device, batch, PADDED, return_lse=True, **kwargs)
+    latent = torch.empty(batch, PADDED, LATENT, dtype=torch.bfloat16, device=device)
+    lse = torch.empty(batch, PADDED, dtype=torch.float32, device=device)
+    indptr = torch.arange(batch + 1, dtype=torch.int32, device=device)
+    _PLANS[batch] = plan, latent, lse, indptr
+    return _run_prims_ts_nosync(query, kv, rows, valid)
+
+
 @pytest.mark.parametrize(
     "counts",
     [
@@ -141,8 +193,26 @@ def test_sparse_matches_emulation(counts):
         torch.testing.assert_close(lse[b, :HEADS], ref_lse[b], atol=1e-3, rtol=1e-4)
 
 
+@pytest.mark.parametrize("counts", [[256, 255, 1, 31, 200], [300, 2048, 257, 513, 7]])
+def test_sparse_error_within_flashinfer(counts):
+    if not has_flashinfer_prims_ts_sparse_mla():
+        pytest.skip("FlashInfer has no prims_ts sparse MLA")
+    query, kv, rows, valid = _inputs(counts, seed=1)
+    exact, exact_lse = _reference(query, kv, rows, valid, quantize_p=False)
+    ours, ours_lse = _run_sparse(query, kv, rows, valid)
+    theirs, theirs_lse = _run_prims_ts(query, kv, rows, valid)
+    for b in range(len(counts)):
+        scale = exact[b].abs().max()
+        e_ours = ((ours[b, :HEADS].float() - exact[b]) / scale).pow(2).mean().sqrt()
+        e_fi = ((theirs[b, :HEADS].float() - exact[b]) / scale).pow(2).mean().sqrt()
+        assert e_ours <= 1.25 * e_fi + 1e-4, (b, float(e_ours), float(e_fi))
+        torch.testing.assert_close(
+            ours_lse[b, :HEADS], theirs_lse[b, :HEADS], atol=2e-3, rtol=1e-4
+        )
+
+
 def test_sparse_push_into_value_mailbox():
-    """``push``: the merged rows and base-2 LSEs land in DcpValue's "bf16" mailbox
+    """`push`: the merged rows and base-2 LSEs land in DcpValue's "bf16" mailbox
     slot [parity, rank, row, head % H] of owner head // H (as DcpValue's own push
     of the unpushed rows: no negative zeros; a row with nothing to merge sends
     only EMPTY_LSE), and the q mailbox rows read are re-armed."""

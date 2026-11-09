@@ -140,8 +140,8 @@ class MambaStateDtypeCalculator:
         base_dtypes: tuple[torch.dtype, ...],
         model_dtype: ModelDType | torch.dtype,
     ) -> tuple[torch.dtype, ...]:
-        """Append the ReplaySSM ring dtypes to a base ``(conv, ssm)`` tuple:
-        ``(x_cache, dt_cache, B_cache)`` = ``(activation, fp32, activation)``.
+        """Append the ReplaySSM ring dtypes to a base `(conv, ssm)` tuple:
+        `(x_cache, dt_cache, B_cache)` = `(activation, fp32, activation)`.
         """
         activation_dtype = get_kv_cache_torch_dtype("auto", model_dtype)
         return (*base_dtypes, activation_dtype, torch.float32, activation_dtype)
@@ -289,8 +289,8 @@ class MambaStateShapeCalculator:
     ]:
         """Append the physical ReplaySSM ring shapes.
 
-        ``base_shapes[1]`` is ``(nheads // tp, head_dim, state_size)``;
-        B_cache extends ``n_groups`` for head shards as in ``mamba2_state_shape``.
+        `base_shapes[1]` is `(nheads // tp, head_dim, state_size)`;
+        B_cache extends `n_groups` for head shards as in `mamba2_state_shape`.
         """
         ring_buffer_len = logical_window
         if backend == MambaBackendEnum.FLASHINFER:
@@ -440,8 +440,8 @@ def get_conv_copy_spec(
 ) -> MambaCopySpec:
     """Return a MambaCopySpec for copying a convolutional state slice.
 
-    Works for both SD layout ``(num_blocks, state_len, dim)`` and
-    DS layout ``(num_blocks, dim, state_len)``.
+    Works for both SD layout `(num_blocks, state_len, dim)` and
+    DS layout `(num_blocks, dim, state_len)`.
     """
     src_block_id = block_ids[cur_block_idx]
     offset = num_accepted_tokens - 1
