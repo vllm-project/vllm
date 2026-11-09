@@ -262,13 +262,7 @@ def _qsa_sparse_paged_decode_kernel(
     )
 
 
-# At or below this many (row, KV-head) programs the split-K kernel's splits
-# fill the GPU better than one program per (row, KV head). Measured on GB200
-# (CUDA graphs, 2048-token selections, 3-24 query heads per KV head): the
-# kernel loses at 64 programs (0.7-0.9x) and wins at 80-128 (1.2-1.5x) and
-# from 184 (1.15x+). Around one full wave (152 SMs) it pays for a second
-# wave: 136-176 programs range from 0.96x (6 query heads per KV head) to
-# 1.4x (12).
+# At or below this many (row, KV-head) programs, split-K is faster (GB200).
 _DECODE_MIN_PROGRAMS = 64
 
 

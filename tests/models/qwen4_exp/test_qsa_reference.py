@@ -1141,7 +1141,7 @@ def test_qsa_sparse_paged_attention_correctness(
     not current_platform.is_device_capability_family(100),
     reason="the fp8 kernel runs on sm_100/sm_103",
 )
-# Per-rank (query heads, KV heads) of the 24/2-head model at TP1/2/4/8.
+# Per-rank heads at TP1/2/4/8.
 @pytest.mark.parametrize(
     "num_query_heads,num_kv_heads", [(24, 2), (12, 1), (6, 1), (3, 1)]
 )
@@ -1151,11 +1151,10 @@ def test_qsa_fp8_kernel_correctness(
 ) -> None:
     """The Blackwell fp8 kernel matches the dense reference.
 
-    An MTP-verify-shaped batch (num_requests x 4 rows; 20 requests sits just
-    above the dispatch gate) over the engine's fp8 cache layout (each token's
-    per-head K|V side by side, page 1920), at every tensor-parallel head
-    layout. Covers short contexts (masked tails) and a CUDA-graph padding
-    row, which must stay zero.
+    An MTP-verify-shaped batch (num_requests x 4 rows) over the engine's fp8
+    cache layout (each token's per-head K|V side by side, page 1920). Covers
+    short contexts (masked tails) and a CUDA-graph padding row, which must
+    stay zero.
     """
     cpu_generator = torch.Generator().manual_seed(0)
     generator = torch.Generator(device="cuda").manual_seed(0)
