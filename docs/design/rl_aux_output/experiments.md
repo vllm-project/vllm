@@ -344,7 +344,7 @@ A 20 GB CPU tier already holds nearly all of it; the NVMe tier then removes the 
 
 ## Aux objects on SSD (E-aux)
 
-The pinned design sizes the store's memory for every session in flight and admits sessions by that memory. E-aux asks whether the store can instead keep aux objects on the holder's local NVMe, with memory only a cache, at the same speed and with nothing lost.
+Before E-aux, the store's memory had to hold every session in flight, pinned, and sessions were admitted by that memory. E-aux asks whether the store can keep aux objects on each holder's local NVMe instead, with memory only a cache, at the same speed and with nothing lost. It is the basis of the SSD-first default in protocol §9.
 
 **Setup.** 14.6K context × 512 sessions × 16 turns, all outputs with partial capture, one TP4 replica per node. The memory arm: a 96 GB hard-pinned segment. The SSD arm: an 8 GB segment, no pinning, Mooncake offload to a fresh directory on local NVMe (`--enable_offload --offload_on_evict --offload_force_evict=false --enable_disk_eviction=false --client_ttl=600`), sessions admitted by free disk. Each pair ran on one node, in both orders.
 
