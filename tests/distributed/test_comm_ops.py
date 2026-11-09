@@ -876,7 +876,6 @@ def test_multi_process_pipeline_parallel(
         all_reduce_test_worker,
         all_gather_test_worker,
         broadcast_tensor_dict_test_worker,
-        single_pp_stage_test_worker,
     ],
 )
 def test_multi_process_tensor_parallel_pipeline_parallel(

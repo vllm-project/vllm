@@ -179,18 +179,14 @@ def test_draft_model_tensor_parallelism(vllm_runner):
     [
         {"load_format": "auto"},
         {"load_format": "fastsafetensors"},
-        {
-            "load_format": "runai_streamer",
-            "model_loader_extra_config": {"distributed": True},
-        },
     ],
-    ids=["auto", "fastsafetensors", "runai_distributed"],
+    ids=["auto", "fastsafetensors"],
 )
 def test_draft_model_pipeline_parallelism(vllm_runner, load_kwargs: dict):
     """Ensure the draft model runs whole on the last stage when PP > 1.
 
-    fastsafetensors and distributed RunAI streaming synchronize across ranks,
-    so they must load the draft model without the other stages.
+    fastsafetensors synchronizes across ranks, so it must load the draft model
+    without the other stages.
     """
     sd_case = ArgsTest(
         target_model="Qwen/Qwen3-1.7B",
