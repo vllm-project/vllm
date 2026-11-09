@@ -878,7 +878,8 @@ def test_engram_lookup_reuses_jit_across_token_shapes():
 @pytest.mark.parametrize("cpu_offload", [False, True])
 @pytest.mark.parametrize("background", [False, True])
 @pytest.mark.parametrize("packed", [False, True])
-@pytest.mark.parametrize("num_tokens", [1, 7, 256])
+# 1024 tokens fill the grid with 128-row tiles.
+@pytest.mark.parametrize("num_tokens", [1, 7, 256, 1024])
 def test_engram_lookup_matches_torch(cpu_offload, background, packed, num_tokens):
     """The fused gather must be bit-exact with the torch dequant path it
     replaces, from HBM and from pinned host memory alike, and must contribute
