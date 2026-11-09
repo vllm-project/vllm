@@ -422,6 +422,100 @@ def test_rocm_mxfp8_block32_split_k_first_use_in_capture(packed):
     assert _rel_err(out, expected) < 5e-3
 
 
+# (N, K, M, in-launch splits) for shapes `_TUNED` has no entry for: DSpark's
+# replicated main_proj (7 rows a request at k=5) and the V4.1 linears at
+# TP=1, on a 256-CU part.
+UNTUNED_SPLIT_CASES = [
+    (5120, 15360, 7, 3),  # 320 packed tiles of 1024 slots, 30 K steps
+    (5120, 15360, 28, 6),  # 160 packed 32x32 tiles
+    (5120, 8192, 8, 3),
+    (5120, 8192, 128, 3),  # 160 tiled 64x64 tiles of 512 slots
+    (4608, 5120, 5, 3),  # 288 tiles, 10 K steps
+    (5120, 8192, 256, 1),  # 320 tiles: over half the slots
+    (5120, 2304, 8, 1),  # 5 K steps: too shallow to pay for a split
+    (5120, 2304, 300, 1),  # 18 K steps of 128, but K itself is too shallow
+    (6144, 4096, 8, 1),  # deep enough, but only 8 K steps of 512
+    (4608, 5120, 300, 4),  # 108 tiled 128x128 tiles
+    (32768, 1280, 16, 1),
+]
+
+
+@pytest.mark.parametrize("n,k,m,splits", UNTUNED_SPLIT_CASES, ids=lambda v: str(v))
+def test_rocm_mxfp8_block32_untuned_split_k(monkeypatch, n, k, m, splits):
+    """An untuned shape keeps its default tile and splits K only when the
+    tiles leave the GPU idle and K is deep enough."""
+    from vllm.model_executor.kernels.linear.mxfp8 import rocm_block32_gemm as g
+
+    assert (n, k) not in g._TUNED
+    monkeypatch.setattr(g, "num_compute_units", lambda: 256)
+    g._untuned_config.cache_clear()
+    try:
+        cfg = g._config(m, n, k)
+    finally:
+        g._untuned_config.cache_clear()
+    assert cfg._replace(fused_splits=1) == g._default_config(m, n, k)
+    assert cfg.fused_splits == splits
+
+
+def test_rocm_mxfp8_block32_tuned_tiers_are_not_split(monkeypatch):
+    """A tuned tier is used as is, even one the occupancy rule would split."""
+    from vllm.model_executor.kernels.linear.mxfp8 import rocm_block32_gemm as g
+
+    n, k, m = 5120, 15360, 7
+    tier = g._default_config(m, n, k)
+    monkeypatch.setattr(g, "_TUNED", {**g._TUNED, (n, k): [(8192, tier)]})
+    monkeypatch.setattr(g, "num_compute_units", lambda: 256)
+    g._untuned_config.cache_clear()
+    try:
+        assert g._config(m, n, k) == tier
+        for (n, k), tiers in g._TUNED.items():
+            for m in (1, 3, 8, 13, 40, 200, 5000, 9000):
+                want = next((cfg for max_m, cfg in tiers if max_m >= m), tiers[-1][1])
+                assert g._config(m, n, k) == want, (n, k, m)
+    finally:
+        g._untuned_config.cache_clear()
+
+
+@pytest.mark.parametrize("m", [1, 7, 28, 128])
+@torch.inference_mode()
+def test_rocm_mxfp8_block32_untuned_split_k_matches_unsplit(monkeypatch, m):
+    """Both entry points agree with the unsplit default tile and the
+    dequantized reference when an untuned shape splits K."""
+    from vllm.model_executor.kernels.linear.mxfp8 import rocm_block32_gemm as g
+
+    monkeypatch.setattr(g, "num_compute_units", lambda: 256)
+    g._untuned_config.cache_clear()
+    try:
+        torch.manual_seed(m)
+        n, k = 5120, 15360
+        cfg = g._config(m, n, k)
+        assert cfg.fused_splits > 1
+        layer = _make_block32_layer(n, k, "cuda")
+        weight_scale = layer.weight_scale.data[::32].contiguous()
+        x = torch.randn(m, k, device="cuda", dtype=torch.bfloat16)
+        x_q, x_scale = mxfp8_e4m3_quantize(x)
+        expected = (
+            dequant_mxfp8_to_bf16(x_q, x_scale).float()
+            @ dequant_mxfp8_to_bf16(layer.weight, layer.weight_scale).float().T
+        )
+        unsplit = torch.empty_like(expected, dtype=torch.bfloat16)
+        default = g._default_config(m, n, k)
+        g._launch(x_q, x_scale, layer.weight, weight_scale, unsplit, default)
+        for out in (
+            rocm_mxfp8_block32_gemm(
+                x_q, x_scale, layer.weight, weight_scale, torch.bfloat16
+            ),
+            rocm_mxfp8_block32_gemm_quant(
+                x, layer.weight, weight_scale, torch.bfloat16
+            ),
+        ):
+            assert torch.isfinite(out).all()
+            assert _rel_err(out, expected) < 5e-3
+            assert _rel_err(out, unsplit.float()) < 1e-3
+    finally:
+        g._untuned_config.cache_clear()
+
+
 FUSED_QUANT_SHAPES = [(6144, 1024), (6144, 768), (6144, 384), (8192, 512), (4096, 640)]
 FUSED_QUANT_TOKENS = [1, 2, 3, 5, 8, 16]
 FUSED_QUANT_CASES = [

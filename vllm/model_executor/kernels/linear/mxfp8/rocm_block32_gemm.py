@@ -39,13 +39,16 @@ Two kernels, picked per shape from a table tuned on MI355X:
 
 Either can split K. The partials are normally summed in the same launch by
 the last program of each output tile to finish, in split order, so the result
-does not depend on scheduling. Otherwise a second launch reduces them.
+does not depend on scheduling. Otherwise a second launch reduces them. Tuned
+shapes take their split count from the table; a shape without an entry gets
+one from the occupancy of its default tile (`_untuned_config`).
 
 The packed kernel and the in-launch split-K reduction on one XCD
 (`_split_tile`, `_sum_splits`, `_split_counters`, `_k_partition`) are
 adapted from the group32 GEMM in ROCm/aiter#5750.
 """
 
+import functools
 from typing import NamedTuple
 
 import torch
@@ -55,6 +58,7 @@ from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     mxfp8_e4m3_quantize,
 )
 from vllm.triton_utils import tl, triton
+from vllm.utils.platform_utils import num_compute_units
 from vllm.utils.torch_utils import direct_register_custom_op
 
 logger = init_logger(__name__)
@@ -677,10 +681,44 @@ def _default_config(M: int, N: int, K: int) -> _Config:
     return _tiled(128, 128, 128, 1, True, 4, 2, 16, 0)
 
 
+# Workgroup slots per CU, counted in warps: a num_warps=2 program shares its
+# CU with three others, a num_warps=8 one has it to itself.
+_WARPS_PER_CU = 8
+# Below either bound the split prologue and reduction cost more than the
+# shorter K loop saves (MI355X: K=2304 is 17-32% slower split at M=257-700).
+_MIN_K_TO_SPLIT = 4096
+_MIN_STEPS_TO_SPLIT = 10
+# Fewest BLOCK_K steps left to each split, and most splits.
+_MIN_STEPS_PER_SPLIT = 2
+_MAX_OCCUPANCY_SPLITS = 8
+
+
+@functools.lru_cache(maxsize=4096)
+def _untuned_config(M: int, N: int, K: int) -> _Config:
+    """`_default_config`, plus in-launch K splits when its tiles fill at most
+    half the workgroup slots.
+
+    `_default_config` sizes the tile from M and N alone, so a narrow, deep
+    weight launches far fewer programs than the GPU holds (N = 5120 at M <= 8:
+    320 programs against 1024 slots on MI355X), each walking the whole K loop.
+    """
+    cfg = _default_config(M, N, K)
+    step = cfg.block_k * cfg.k_split if cfg.packed else cfg.block_k
+    steps = triton.cdiv(K, step)
+    if K < _MIN_K_TO_SPLIT or steps < _MIN_STEPS_TO_SPLIT:
+        return cfg
+    tiles = triton.cdiv(M, cfg.block_m) * triton.cdiv(N, cfg.block_n)
+    slots = num_compute_units() * max(1, _WARPS_PER_CU // cfg.num_warps)
+    splits = min(_MAX_OCCUPANCY_SPLITS, slots // tiles, steps // _MIN_STEPS_PER_SPLIT)
+    if splits < 2:
+        return cfg
+    return cfg._replace(fused_splits=splits)
+
+
 def _config(M: int, N: int, K: int) -> _Config:
     tiers = _TUNED.get((N, K))
     if tiers is None:
-        return _default_config(M, N, K)
+        return _untuned_config(M, N, K)
     for max_m, cfg in tiers:
         if max_m >= M:
             return cfg
