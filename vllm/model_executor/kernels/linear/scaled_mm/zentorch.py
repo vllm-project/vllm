@@ -41,11 +41,11 @@ class ZentorchInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
 
     @classmethod
     def can_implement(cls, c: Int8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
-        if c.is_static_input_scheme:
+        if c.activation_quant_key.scale.static:
             return False, "requires dynamic activation quantization."
-        if not c.input_symmetric:
+        if not c.activation_quant_key.symmetric:
             return False, "requires symmetric activation quantization."
-        if not c.is_channelwise:
+        if not c.weight_quant_key.scale.group_shape.is_per_channel():
             return False, "requires per-channel weight quantization."
         return True, None
 

@@ -23,10 +23,8 @@ from ..base import MMLinearLayerConfig
 
 @dataclass
 class Int8ScaledMMLinearLayerConfig(MMLinearLayerConfig):
-    # TODO: Change to QuantKey like FP8ScaledMMLinearLayerConfig
-    is_static_input_scheme: bool
-    is_channelwise: bool
-    input_symmetric: bool
+    weight_quant_key: QuantKey
+    activation_quant_key: QuantKey
     # More than one logical output partition (e.g. QKV). Per-tensor weight
     # scales of such layers hold one scale per partition and are expanded to
     # per-channel scales after loading.
@@ -196,11 +194,12 @@ class Int8ScaledMMLinearKernel(
 ):
     def _get_layer_params(self, layer) -> _Int8ParamsT:
         w_q, w_s, i_s, i_zp, azp_adj = self.layer_param_names
+        act_symmetric = self.config.activation_quant_key.symmetric
         return (
             getattr(layer, w_q),
             getattr(layer, w_s),
             getattr(layer, i_s, None),
             # A loaded zero point of a symmetric scheme stays registered, unused.
-            None if self.config.input_symmetric else getattr(layer, i_zp, None),
+            None if act_symmetric else getattr(layer, i_zp, None),
             getattr(layer, azp_adj, None),
         )

@@ -247,6 +247,11 @@ from vllm.model_executor.layers.quantization.utils.humming import (
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
+    kInt8DynamicTokenAsym,
+    kInt8DynamicTokenSym,
+    kInt8StaticChannelSym,
+    kInt8StaticTensorAsym,
+    kInt8StaticTensorSym,
     kMxfp4Static,
 )
 from vllm.platforms import PlatformEnum, current_platform
@@ -856,10 +861,20 @@ def init_int8_linear_kernel(
     module_name: str,
     is_fused_module: bool = False,
 ) -> Int8ScaledMMLinearKernel:
+    # Int8 weight scales are computed offline, so only their granularity varies.
+    weight_quant_key = kInt8StaticChannelSym if is_channelwise else kInt8StaticTensorSym
+    # Static activation scales are per-tensor, dynamic ones are per-token.
+    if is_static_input_scheme:
+        activation_quant_key = (
+            kInt8StaticTensorSym if input_symmetric else kInt8StaticTensorAsym
+        )
+    else:
+        activation_quant_key = (
+            kInt8DynamicTokenSym if input_symmetric else kInt8DynamicTokenAsym
+        )
     config = Int8ScaledMMLinearLayerConfig(
-        is_channelwise=is_channelwise,
-        is_static_input_scheme=is_static_input_scheme,
-        input_symmetric=input_symmetric,
+        weight_quant_key=weight_quant_key,
+        activation_quant_key=activation_quant_key,
         is_fused_module=is_fused_module,
     )
 
