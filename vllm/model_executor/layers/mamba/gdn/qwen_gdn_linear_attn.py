@@ -53,10 +53,16 @@ from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_fn,
     causal_conv1d_update,
 )
+from vllm.model_executor.layers.mamba.ops.gather_initial_states import (
+    gather_initial_states,
+)
 from vllm.model_executor.layers.mamba.ops.hip_gdn_chunk import (
     chunk_gdn_hip_fwd,
     is_hip_gdn_available,
     is_hip_gdn_supported,
+)
+from vllm.model_executor.layers.mamba.ops.scatter_states import (
+    scatter_states,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
@@ -116,7 +122,7 @@ if GDN_AITER_TRITON_AVAILABLE:
 
 logger = init_logger(__name__)
 
-MAX_FUSED_GDN_MTP_TOKENS = 8
+MAX_FUSED_GDN_MTP_TOKENS = 9  # kMaxMtpTokens in fused_gdn_decode_kernel.cu
 # Below this conservative threshold, overlap in_proj_ba with in_proj_qkvz on the aux
 # stream. On GB300, across Qwen3.5/3.8 shapes, quant formats and TP 1-8, the first
 # regression was at 272 tokens (27B BF16 TP8).
@@ -185,34 +191,34 @@ def _resolve_gdn_prefill_backend(
 ]:
     """Resolve GDN prefill backend.
 
-    The SYCL kernel is chosen when ``requested in ["sycl", "auto"]``, the
-    platform is XPU and ``_xpu_C::gdn_attention`` is built. Unlike the other
+    The SYCL kernel is chosen when `requested in ["sycl", "auto"]`, the
+    platform is XPU and `_xpu_C::gdn_attention` is built. Unlike the other
     backends it is a fused whole-layer op, so selecting it also replaces the
     conv1d and decode kernels, not just prefill.
 
     FlashInfer's GDN prefill kernel is chosen when:
-    * ``requested in ["flashinfer", "auto"]``;
-    * ``platform == cuda``;
+    * `requested in ["flashinfer", "auto"]`;
+    * `platform == cuda`;
     * one of the following:
       - Hopper (SM90) - no further constraints;
-      - Blackwell (SM10.x) with ``head_k_dim == 128``, ``cuda_runtime >= 13``;
-      - Blackwell (SM12.x) with ``head_k_dim == 128``, ``cuda_runtime >= 13``.
+      - Blackwell (SM10.x) with `head_k_dim == 128`, `cuda_runtime >= 13`;
+      - Blackwell (SM12.x) with `head_k_dim == 128`, `cuda_runtime >= 13`.
 
     In-tree CuteDSL GDN prefill kernel is chosen when:
     * "cutedsl" is requested; (opt-in only)
-    * Blackwell (SM10.x or SM11.x) with ``head_k_dim == 128``,
-      ``cuda_runtime >= 13``;
+    * Blackwell (SM10.x or SM11.x) with `head_k_dim == 128`,
+      `cuda_runtime >= 13`;
 
     AITER FlyDSL GDN prefill kernels are chosen when:
     * "aiter_flydsl" is requested, or "auto" is requested on gfx942/gfx950;
     * ROCm AITER exposes the optimized VK prefill API and FlyDSL kernels;
-    * the model uses BF16 activations with ``head_k_dim == head_v_dim == 128``.
+    * the model uses BF16 activations with `head_k_dim == head_v_dim == 128`.
 
     The HIP GDN prefill kernel is chosen when:
     * "hip" is requested on RDNA3.5 (gfx1150-gfx1153), or "auto" on gfx1151;
-    * the build includes ``_rocm_C.rdna35_gdn_chunked``;
+    * the build includes `_rocm_C.rdna35_gdn_chunked`;
     * the model uses BF16 or FP16 activations with
-      ``head_k_dim == head_v_dim == 128``.
+      `head_k_dim == head_v_dim == 128`.
     """
     additional_config = vllm_config.additional_config
     backend_cfg = (
@@ -1198,9 +1204,9 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
     def rearrange_mixed_qkv(self, mixed_qkv):
         """Split packed qkv into contiguous (1, seq, heads, dim) tensors.
 
-        The original code used ``rearrange(x, "l (h d) -> 1 l h d", d=...)``
-        followed by ``.contiguous()`` on each tensor.  This version flattens
-        all three splits into a single buffer via ``torch.cat`` so that
+        The original code used `rearrange(x, "l (h d) -> 1 l h d", d=...)`
+        followed by `.contiguous()` on each tensor.  This version flattens
+        all three splits into a single buffer via `torch.cat` so that
         torch.compile emits one Triton copy kernel instead of three separate
         contiguous() calls.
         """
@@ -1297,8 +1303,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         2. Core attention (custom op)
         3. Output projection
 
-        ``qkvz_input``, if given, is ``hidden_states`` pre-quantized for
-        in_proj_qkvz; in_proj_ba still reads ``hidden_states``.
+        `qkvz_input`, if given, is `hidden_states` pre-quantized for
+        in_proj_qkvz; in_proj_ba still reads `hidden_states`.
         """
         num_tokens = hidden_states.size(0)
         # ============================================================
@@ -1511,25 +1517,25 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
     def _warmup_prefill_kernels(self, qkv_or_qkvz: torch.Tensor, v_dim: int) -> None:
         """Warm up GDN prefill kernels during V1 profiling.
 
-        During V1 profile runs, ``_forward_core`` returns early because
-        ``attn_metadata`` is ``None``, so the autotuned kernels used by
-        ``chunk_gated_delta_rule`` (e.g. ``solve_tril``,
-        ``chunk_scaled_dot_kkt``) are never invoked.  After profiling,
+        During V1 profile runs, `_forward_core` returns early because
+        `attn_metadata` is `None`, so the autotuned kernels used by
+        `chunk_gated_delta_rule` (e.g. `solve_tril`,
+        `chunk_scaled_dot_kkt`) are never invoked.  After profiling,
         vLLM allocates KV cache using most of the remaining GPU memory.
         When the first real inference triggers the autotuner it OOMs
         because there is not enough memory left for benchmarking.
 
         This method runs minimal forward passes through
-        ``chunk_gated_delta_rule`` with small dummy tensors to force
+        `chunk_gated_delta_rule` with small dummy tensors to force
         autotuning while GPU memory is still plentiful.  The autotuner
         results are cached globally, so only the first layer incurs
         actual benchmarking cost.
 
-        All kernels including ``chunk_fwd_kernel_o`` now use a fixed
-        ``BT = chunk_size`` (64).  A single warmup pass with T = 64
+        All kernels including `chunk_fwd_kernel_o` now use a fixed
+        `BT = chunk_size` (64).  A single warmup pass with T = 64
         is sufficient to populate the autotuner cache.
 
-        The decode path uses ``gdn_aiter_fused_rearrange_sigmoid_gated_delta_rule``
+        The decode path uses `gdn_aiter_fused_rearrange_sigmoid_gated_delta_rule`
         which has fixed kernel parameters (no autotuning), so only the
         prefill (chunked) path needs warming up.
         """
@@ -1663,8 +1669,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
 
         FlashInfer builds separate kernels for its context-parallel route (few
         sequences) and its regular route, each with and without checkpoint
-        output. A single sequence under ``use_cp="auto"`` takes the CP route
-        wherever the heuristic can pick it; ``use_cp=False`` forces the other.
+        output. A single sequence under `use_cp="auto"` takes the CP route
+        wherever the heuristic can pick it; `use_cp=False` forces the other.
         """
         # g arrives in log space (from _warmup_prefill_kernels); FlashInfer
         # takes exp(g).
@@ -1708,8 +1714,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         qkvz/ba layout.
 
         For decode-only (no spec, no prefill) batches, dispatches directly to
-        ``_forward_core_decode_aiter``. Otherwise unpacks the packed layout and
-        falls through to ``_forward_core``.
+        `_forward_core_decode_aiter`. Otherwise unpacks the packed layout and
+        falls through to `_forward_core`.
 
         Args:
             qkvz: packed [q, k, v, z] projection (num_tokens, qkvz_dim)
@@ -2043,8 +2049,9 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 )
                 prefill_in_place = prefill_out is not None
             else:
-                initial_state = ssm_state[prefill_state_indices]
-                initial_state[~prefill_has_initial_state, ...] = 0
+                initial_state = gather_initial_states(
+                    ssm_state, prefill_state_indices, prefill_has_initial_state
+                )
                 (
                     core_attn_out_non_spec,
                     last_recurrent_state,
@@ -2063,7 +2070,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                     aiter_prefill_metadata=attn_metadata.aiter_prefill_metadata,
                 )
             # Init cache
-            ssm_state[prefill_state_indices] = last_recurrent_state.to(ssm_state.dtype)
+            scatter_states(ssm_state, last_recurrent_state, prefill_state_indices)
 
             if split_non_spec and prefill_in_place:
                 core_attn_out[:num_decode_tokens] = core_attn_out_decode.squeeze(0)
@@ -2123,14 +2130,17 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """FlashInfer chunked prefill of the batch's prefill rows.
 
-        Writes the output into ``output`` when given and exports the
+        Writes the output into `output` when given and exports the
         batch's internal prefill checkpoints. Returns the output and the
         rows' final states.
         """
         has_initial_state = attn_metadata.prefill_has_initial_state
+        state_indices = attn_metadata.prefill_state_indices
         assert has_initial_state is not None
-        initial_state = ssm_state[attn_metadata.prefill_state_indices]
-        initial_state[~has_initial_state, ...] = 0
+        assert state_indices is not None
+        initial_state = gather_initial_states(
+            ssm_state, state_indices, has_initial_state
+        )
         plan = attn_metadata.flashinfer_checkpoint_plan
         if plan is None:
             return fi_chunk_gated_delta_rule(
@@ -2522,13 +2532,13 @@ def qwen_gdn_attention_core(
     Handles conv1d + recurrent attention only; input/output projections
     are performed by the caller.
 
-    When ``use_aiter=False`` (standard path):
+    When `use_aiter=False` (standard path):
         qkv_or_qkvz is [q, k, v], b_or_ba is b, a_or_z_out is a (read-only).
-    When ``use_aiter=True`` (AITER Triton path, ROCm only):
+    When `use_aiter=True` (AITER Triton path, ROCm only):
         qkv_or_qkvz is [q, k, v, z], b_or_ba is [b, a], a_or_z_out is the
         z output buffer (mutated in-place).
 
-    ``core_attn_out`` is always mutated in-place.
+    `core_attn_out` is always mutated in-place.
     """
     layer_name = _resolve_layer_name(layer_name)
     forward_context: ForwardContext = get_forward_context()

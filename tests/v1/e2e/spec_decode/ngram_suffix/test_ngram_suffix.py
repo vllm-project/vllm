@@ -90,99 +90,13 @@ def test_ngram_gpu_default_with_async_scheduling(
 
 
 @single_gpu_only
-def test_suffix_decoding_acceptance(
-    sampling_config: SamplingParams,
-    model_name: str,
-    vllm_runner,
-    monkeypatch: pytest.MonkeyPatch,
-):
-    """Check that suffix decoding caching takes effect and improves acceptance
-    lengths and acceptance rates over multiple runs of the same prompts on the
-    V1 model runner (Arctic Inference). The V2 speculator is covered by
-    test_suffix_cross_request_acceptance_v2.
-    """
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
-    test_prompts = get_test_prompts(mm_enabled=False)
-
-    with vllm_runner(
-        model_name,
-        block_size=None,
-        trust_remote_code=False,
-        speculative_config={
-            "method": "suffix",
-            "suffix_decoding_max_spec_factor": 2.0,
-            "suffix_decoding_max_cached_requests": 1000,
-        },
-        max_model_len=1024,
-        disable_log_stats=False,
-        enable_chunked_prefill=None,
-        compilation_config=CompilationConfig(),
-    ) as spec_runner:
-        # Run several times and check that the accepted tokens increase.
-        num_draft = []
-        num_accept = []
-        for _ in range(10):  # Run multiple times to warm up the cache.
-            spec_runner.llm.chat(test_prompts, sampling_config)
-            # Collect draft and acceptance stats.
-            metrics = spec_runner.llm.get_metrics()
-            num_draft.append(
-                get_spec_decode_metric_value(
-                    metrics, "vllm:spec_decode_num_draft_tokens"
-                )
-            )
-            num_accept.append(
-                get_spec_decode_metric_value(
-                    metrics, "vllm:spec_decode_num_accepted_tokens"
-                )
-            )
-
-    # Calculate the acceptance rates for the first and last runs.
-    first_accept_tokens = num_accept[0]
-    first_draft_tokens = num_draft[0]
-    assert first_draft_tokens > 0, (
-        "Suffix decoder produced no draft tokens on the first run: "
-        f"accepted={first_accept_tokens}, drafted={first_draft_tokens}"
-    )
-    first_accept_rate = first_accept_tokens / first_draft_tokens
-
-    # Take the diff since the stats are cumulative.
-    last_accept_tokens = num_accept[-1] - num_accept[-2]
-    last_draft_tokens = num_draft[-1] - num_draft[-2]
-    assert last_draft_tokens > 0, (
-        "Suffix decoder produced no draft tokens on the last run: "
-        f"accepted_delta={last_accept_tokens}, drafted_delta={last_draft_tokens}; "
-        f"cumulative_drafted={num_draft[-2:]}"
-    )
-    last_accept_rate = last_accept_tokens / last_draft_tokens
-    summary = (
-        f"first accepted/drafted={first_accept_tokens}/{first_draft_tokens} "
-        f"(rate={first_accept_rate:.3f}); last delta accepted/drafted="
-        f"{last_accept_tokens}/{last_draft_tokens} (rate={last_accept_rate:.3f})"
-    )
-
-    # Expect the acceptance length to improve.
-    assert first_accept_tokens < last_accept_tokens, (
-        f"Expected accepted tokens to increase after cache warmup; {summary}"
-    )
-
-    # Expect the acceptance rate to improve.
-    assert first_accept_rate < last_accept_rate, (
-        f"Expected acceptance rate to increase after cache warmup; {summary}"
-    )
-
-    # Heuristic: expect at least 80.0% acceptance rate at the end.
-    assert last_accept_rate > 0.80, f"Expected final acceptance rate > 0.80; {summary}"
-
-
-@single_gpu_only
-def test_suffix_cross_request_acceptance_v2(
+def test_suffix_cross_request_acceptance(
     sampling_config: SamplingParams,
     model_name: str,
     vllm_runner,
 ):
-    """On Model Runner V2, repeating the same prompts should let suffix
-    decoding draft the earlier responses from its corpus of finished
-    requests."""
+    """Repeating the same prompts should let suffix decoding draft the earlier
+    responses from its corpus of finished requests."""
     test_prompts = get_test_prompts(mm_enabled=False)
     k = 8
 
@@ -196,7 +110,6 @@ def test_suffix_cross_request_acceptance_v2(
         enable_chunked_prefill=None,
         compilation_config=CompilationConfig(),
     ) as spec_runner:
-        assert spec_runner.llm.llm_engine.vllm_config.use_v2_model_runner
         num_drafts = []
         num_accept = []
         for _ in range(2):

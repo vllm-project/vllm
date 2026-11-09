@@ -7,7 +7,7 @@ modelling code with explicit fused kernels.
 XPU uses a separate eager + breakable XPU-graph implementation with explicit
 routed/shared expert fusion for eligible MoE calls.
 ROCm and all other platforms keep
-the previous torch.compile implementation in ``vllm/model_executor/models/``
+the previous torch.compile implementation in `vllm/model_executor/models/`
 so their behavior is unchanged.
 """
 

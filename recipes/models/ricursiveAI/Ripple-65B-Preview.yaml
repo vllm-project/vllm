@@ -1,0 +1,97 @@
+# yaml-language-server: $schema=https://recipes.vllm.ai/recipe.schema.json
+meta:
+  title: "Ripple-65B-Preview"
+  slug: "ripple-65b-preview"
+  provider: "Ricursive Intelligence"
+  description: "Ricursive's Ripple-65B Preview, a dense 65B model for reasoning and agentic coding with hybrid sliding-window and NoPE full attention, tool calling, and a DFlash2 speculative drafter."
+  date_added: 2026-11-04
+  date_updated: 2026-11-04
+  tasks:
+    - text
+  related_recipes: []
+  hardware:
+    b300: verified
+  default_hardware: b300
+
+model:
+  model_id: "ricursiveAI/Ripple-65B-Preview"
+  min_vllm_version: "0.33.0"
+  nightly_required: true
+  docker_image: "vllm/vllm-openai:nightly"
+  architecture: dense
+  parameter_count: "65B"
+  active_parameters: "65B"
+  context_length: 2097152
+  base_args: []
+  base_env: {}
+
+features:
+  reasoning:
+    description: "Ripple reasoning parser: splits an optional leading `<think>` block into `reasoning_content`."
+    args:
+      - "--reasoning-parser"
+      - "ripple"
+  tool_calling:
+    description: "Ripple tool-call parser with automatic tool choice."
+    args:
+      - "--enable-auto-tool-choice"
+      - "--tool-call-parser"
+      - "ripple"
+  spec_decoding:
+    label: "DFlash2"
+    description: "DFlash2 speculative decoding with Ricursive's drafter."
+    args:
+      - "--speculative-config"
+      - '{"method":"dflash","model":"ricursiveAI/Ripple-65B-Preview-DFlash2","num_speculative_tokens":7}'
+
+opt_in_features:
+  - spec_decoding
+
+variants:
+  default:
+    model_id: "ricursiveAI/Ripple-65B-Preview-NVFP4"
+    precision: nvfp4
+    # Mixed precision, sized from the checkpoint: 57.2 GB × 1.2.
+    vram_minimum_gb: 69
+    description: "ModelOpt NVFP4 MLPs; attention, embeddings and LM head in BF16."
+  bf16:
+    precision: bf16
+    # 129.6 GB × 1.2
+    vram_minimum_gb: 156
+    description: "Native BF16 checkpoint."
+
+compatible_strategies:
+  - single_node_tp
+
+hardware_overrides: {}
+
+strategy_overrides: {}
+
+guide: |
+  ## Overview
+
+  [Ripple-65B Preview](https://huggingface.co/ricursiveAI/Ripple-65B-Preview)
+  is a dense 65B model from Ricursive Intelligence. Its 80 layers alternate four
+  1024-token sliding-window layers with one NoPE full-attention layer, and it
+  supports a 2M-token context. The NVFP4 checkpoint fits on one B200/B300.
+
+  Ripple decides per turn whether to reason, so `reasoning_content` is empty
+  when it answers directly.
+
+  ## Client usage
+
+  ```bash
+  curl http://localhost:8000/v1/chat/completions \
+    -H "Content-Type: application/json" \
+    -d '{
+      "model": "ricursiveAI/Ripple-65B-Preview-NVFP4",
+      "messages": [{"role": "user", "content": "Write a Python function that reverses a linked list."}]
+    }'
+  ```
+
+  ## References
+
+  - [Ripple-65B Preview](https://huggingface.co/ricursiveAI/Ripple-65B-Preview)
+  - [Ripple-65B Preview NVFP4](https://huggingface.co/ricursiveAI/Ripple-65B-Preview-NVFP4)
+  - [DFlash2 drafter](https://huggingface.co/ricursiveAI/Ripple-65B-Preview-DFlash2)
+  - [vLLM PR #65745](https://github.com/vllm-project/vllm/pull/65745)
