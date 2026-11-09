@@ -552,6 +552,24 @@ steps:
       - VLLM_LOGGING_LEVEL=DEBUG python3 examples/features/data_parallel/data_parallel_offline.py --model=Qwen/Qwen1.5-MoE-A2.7B -tp=1 -dp=2 --max-model-len=2048 --all2all-backend=deepep_high_throughput
       - VLLM_LOGGING_LEVEL=DEBUG python3 examples/features/data_parallel/data_parallel_offline.py --model=Qwen/Qwen1.5-MoE-A2.7B -tp=1 -dp=2 --max-model-len=2048 --all2all-backend=allgather_reducescatter --disable-nccl-for-dp-synchronization
 
+- label: ":nvidia: (H100) DeepSeek ShardQ Sequence Parallel"
+  key: deepseek-shardq-sequence-parallel
+  timeout_in_minutes: 20
+  device: h100
+  working_dir: "/vllm-workspace/"
+  num_devices: 2
+  source_file_dependencies:
+  - vllm/models/deepseek_v32/
+  - vllm/models/common/ops/sequence_parallel.py
+  - vllm/model_executor/layers/attention/
+  - vllm/model_executor/models/deepseek_v2.py
+  - vllm/v1/attention/ops/shardq.py
+  - vllm/v1/attention/backends/mla/
+  - vllm/config/attention.py
+  - tests/models/deepseek_v32/test_shardq_sequence_parallel.py
+  commands:
+  - pytest -v -s tests/models/deepseek_v32/test_shardq_sequence_parallel.py
+
 - label: ":nvidia: (H100) [Nightly] Distributed Features"
   key: distributed-tests-2xh100-2xmi300
   automatic_shard: true
