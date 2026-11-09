@@ -221,7 +221,7 @@ aux.release_session(job, session)  # after the session is consumed and the step 
 Terms: a **holder** is a process that contributes a Mooncake segment (memory, and with SSD-first a local offload directory); the **master** places objects on holders. A **group** is the sessions admitted together; a session's **branching factor** is its number of trajectories.
 
 1. **Admission by disk.** With SSD-first (§9) memory is a cache and the limit is disk. Admit a new group only if `free disk − segment − reserve − reserved ≥ group bytes`, where:
-   - `group bytes = longest context × bytes/token × branching factor × sessions in the group`, with bytes/token of the configured codecs at the target context (§9);
+   - `group bytes = rows a session writes × bytes/token × sessions in the group`, with bytes/token of the configured codecs at the target context (§9). A session writes, summed over its trajectories, every row no other trajectory of the session already holds at the same version: about `longest context × branching factor` when trajectories only grow, but `segments × compaction threshold` when the context is compacted (each continuation re-prefills a summary and recent turns at new positions, so its rows are new);
    - `segment` is the holder's memory segment size: objects in memory still need a place on disk when evicted;
    - `reserve` is headroom kept free for other users of the disk and for bucket files not yet reclaimed (default 16 GiB);
    - `reserved` is the sum of `group bytes` over groups admitted and not yet released. It is conservative: bytes a group has already written count both here and in the drop of free disk.
@@ -257,7 +257,7 @@ Every acked object stays readable until its session is released. A listed object
 ## 10. Checklist
 
 Inference framework:
-1. Send `aux_outputs`, `aux_session`, `aux_trajectory`, and `aux_parent` on a fork's first request.
+1. Send `aux_outputs`, `aux_session`, `aux_trajectory`, and `aux_parent` on a fork's first request. After a context compaction, continue under a new `aux_trajectory` in the same session (the summarizing request itself is the next turn of the segment it summarizes).
 2. Store `prompt_token_ids`, the manifest reference, the generated tokens and the inline sampled logprobs.
 3. Treat a missing `aux` as an error.
 
@@ -283,7 +283,8 @@ Training framework:
 | Holder or disk failure | holder death: keys listed but unreadable, step aborts; disk write failure: puts stall, deadline aborts |
 | Write failure | reported as missing or as an error marker; never substituted |
 | Cross-session prefix hit | truncated |
-| Context rewriting / compaction | rewritten prefixes hash differently and are rewritten |
+| Context rewriting | rewritten prefixes hash differently and are rewritten |
+| Context compaction (summarize, continue from system prompt + summary + recent turns) | the summary request extends its segment's trajectory; each continuation is a new trajectory of the session, sharing only blocks that hash the same (the system prompt) at the same version; the session lives and holds its objects until the whole rollout is trained, and is admitted by the rows of all its segments |
 | Multiple policies / LoRAs | a session per policy; separate in-flight caps |
 | Job end | delete by job prefix, report the count |
 
