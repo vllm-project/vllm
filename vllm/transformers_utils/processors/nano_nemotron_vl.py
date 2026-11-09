@@ -150,9 +150,9 @@ def cvcuda_bicubic_resize(
     max_chunk_bytes: int = 256 * 1024 * 1024,
 ) -> torch.Tensor:
     """GPU counterpart of `_bicubic_resize_and_normalize` with
-    ``do_cpu_normalize=False``.
+    `do_cpu_normalize=False`.
 
-    Resizes uint8 NHWC RGB *frames* to *size* ``(H, W)`` on *device* with
+    Resizes uint8 NHWC RGB *frames* to *size* `(H, W)` on *device* with
     CV-CUDA and returns uint8 NCHW pixels; the cast to float, rescaling and
     normalization stay with the model's input norm. Frames are uploaded in
     chunks of at most *max_chunk_bytes*, from host memory on a separate stream,

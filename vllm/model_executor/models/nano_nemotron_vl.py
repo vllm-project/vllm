@@ -1143,7 +1143,7 @@ class NemotronH_Nano_VL_V2(
     def _resize_raw_pixels(
         self, frames: torch.Tensor, size: Sequence[int]
     ) -> torch.Tensor:
-        """Resize decoded uint8 NHWC frames sent with ``device_resize``."""
+        """Resize decoded uint8 NHWC frames sent with `device_resize`."""
         assert self.input_norm is not None, "device_resize requires input_norm"
         h, w = (int(x) for x in size)
         return cvcuda_bicubic_resize(frames, (h, w), self.input_norm.weight.device)
