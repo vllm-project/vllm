@@ -614,7 +614,7 @@ class HiSparseCoordinator:
         self._publish_host_blocks_if_ready(request_id)
 
     def _promote_imported_pages(self, request_id: str, num_pages: int) -> list[int]:
-        """Back an import's first ``num_pages`` host pages with new GPU pages.
+        """Back an import's first `num_pages` host pages with new GPU pages.
 
         Imports land in the host tier. While the GPU pool has room above the
         transition watermark, the imported pages are restored into resident
