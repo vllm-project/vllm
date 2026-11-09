@@ -823,6 +823,7 @@ def test_legacy_layerwise_engine_does_not_reuse_storers_on_empty_steps():
 def test_engine_shutdown_stops_lmcache_threads(monkeypatch):
     """LMCache starts non-daemon threads. If engine shutdown does not stop
     them, the EngineCore process cannot exit and is force-killed."""
+    pytest.importorskip("lmcache")
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
     monkeypatch.setenv("LMCACHE_MAX_LOCAL_CPU_SIZE", "1")
     threads_before = set(threading.enumerate())
