@@ -41,6 +41,34 @@ Now you can send requests to the proxy server through port 8000.
 For multimodal Encode-Prefill-Decode (encoder embeddings rather than KV
 cache), see [ECMooncakeConnector Usage Guide](mooncake_ec_connector_usage.md).
 
+## Experimental HiSparse imports
+
+MooncakeConnector can import sparse MLA KV into a HiSparse decoder's host pool.
+Configure the decoder with `MultiConnector` (`kv_consumer`) combining
+`HiSparseConnector` (`kv_both`) and `MooncakeConnector` (`kv_consumer`); keep
+`MooncakeConnector` (`kv_producer`) on the prefiller.
+See the [HiSparse architecture](../design/hisparse.md) for host
+pool ownership and residency. Ordinary Mooncake deployments retain their
+existing transfer path; the import path is selected when the decoder has a
+HiSparse host pool.
+
+This experimental path requires both endpoints to run a compatible version,
+matching tensor-parallel sizes, pipeline parallelism of one, sparse MLA with
+unsplit physical pages, and a single host cache group. Layer names, cache roles
+and token block sizes must agree even when group numbers differ between nodes.
+Unsupported layouts fail the handshake.
+
+For a shared host pool, decoder TP rank 0 registers the host memory and its
+paired producer writes the host payload. Every decoder rank still receives its
+GPU indexer data and participates in completion before imported pages become
+usable. Private host backing retains per-rank host writes.
+
+Validation so far covers GLM-5.2-FP8 on two TP8 H200 nodes with RDMA, eager
+execution and `FLASHMLA_SPARSE`. Private host backing has only descriptor-level
+coverage. A synthetic 4097-token output discrepancy between ordinary prefill
+and HiSparse remains unresolved and also occurs with decoder-local prefill;
+this is not a claim of general output parity or production readiness.
+
 ## Environment Variables
 
 - `VLLM_MOONCAKE_BOOTSTRAP_PORT`: Port for Mooncake bootstrap server

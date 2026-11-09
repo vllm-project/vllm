@@ -1141,6 +1141,14 @@ def test_scheduler_request_finished():
 def patch_worker_dependencies():
     """Helper to mock all distributed and network dependencies for Worker tests."""
     with (
+        patch("torch.accelerator.current_device_index", return_value=0),
+        patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector.get_current_attn_backends",
+            return_value=[],
+        ),
+        patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector.current_platform.set_device"
+        ),
         patch(
             "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector.TransferEngine",
             FakeMooncakeWrapper,
@@ -1245,9 +1253,12 @@ def _xfer_meta(
 
 
 @contextlib.contextmanager
-def mooncake_register_worker(kv_cache_config, *, kv_role: str = "kv_consumer"):
+def mooncake_register_worker(
+    kv_cache_config, *, kv_role: str = "kv_consumer", vllm_config=None
+):
     """Build a worker whose engine registration and sender thread are patched."""
-    vllm_config = _make_worker_vllm_config(kv_role)
+    if vllm_config is None:
+        vllm_config = _make_worker_vllm_config(kv_role)
     connector_mod = (
         "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector"
     )

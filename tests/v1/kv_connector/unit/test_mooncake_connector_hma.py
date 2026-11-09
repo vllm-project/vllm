@@ -29,9 +29,15 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
+    MLAAttentionSpec,
+    SparseCacheRole,
 )
 
-from .test_mooncake_connector import FakeMooncakeWrapper, patch_worker_dependencies
+from .test_mooncake_connector import (
+    FakeMooncakeWrapper,
+    mooncake_register_worker,
+    patch_worker_dependencies,
+)
 from .utils import (
     create_request,
     create_vllm_config,
@@ -591,3 +597,156 @@ def test_failed_receive_waits_for_every_peer(swa_enabled, outcomes):
         assert worker.get_transfer_results().finished_recving == set()
     finally:
         worker.shutdown()
+
+
+def _hisparse_producer_cache_config():
+    return KVCacheConfig(
+        num_blocks=10,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                [name],
+                MLAAttentionSpec(
+                    block_size=16,
+                    num_kv_heads=1,
+                    head_size=16,
+                    dtype=torch.float16,
+                    cache_role=role,
+                ),
+            )
+            for name, role in [
+                ("source", SparseCacheRole.SPARSE),
+                ("indexer", SparseCacheRole.INDEXER),
+            ]
+        ],
+    )
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    "rank,shared,expected_sources",
+    [
+        (0, True, [1200, 1300, 2400]),
+        (1, True, [2400]),
+        (1, False, [1200, 1300, 2400]),
+    ],
+)
+def test_hisparse_import_keeps_rank_private_indexer(rank, shared, expected_sources):
+    """D's host/indexer prefixes differ; only shared host bytes have an owner."""
+    send = SendBlockMeta(
+        "p", "x", [[1, 2, 3, 4]], asyncio.Event(), local_block_positions=[[0, 1, 2, 3]]
+    )
+    meta = MooncakeXferMetadata(
+        remote_hostname="d",
+        remote_port=1,
+        remote_tp_size=2,
+        remote_tp_rank=rank,
+        req_blocks={"d": ("x", [[5, 6], [7]])},
+        kv_caches_base_addr=[],
+        block_lens=[],
+        kv_block_lens=[],
+        hisparse_protocol=1,
+        host_group_indices=[0],
+        shared_host_owner=0 if shared else -1,
+        req_block_positions={"d": [[1, 2], [3]]},
+    )
+    local = [
+        TransferRegion("source", 0, 1000, 100, 10, 0),
+        TransferRegion("indexer", 0, 2000, 100, 10, 0),
+    ]
+    remote = [
+        TransferRegion("source", 0, 3000, 100, 10, 0),
+        TransferRegion("indexer", 0, 4000, 100, 10, 1),
+    ]
+    with mooncake_register_worker(_hisparse_producer_cache_config()) as (worker, _):
+        sources, destinations, lengths, errors, message = asyncio.run(
+            worker._build_transfer_params([("d", send)], meta, local, remote)
+        )
+    assert sources == expected_sources
+    assert destinations == ([3500, 3600, 4700] if rank == 0 or not shared else [4700])
+    assert lengths == [10] * len(expected_sources)
+    assert errors == [] and message is None
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("positions", [[[1, 2], [4]], [[1, 2], [2, 1]], [[1, 2]]])
+def test_hisparse_import_rejects_incomplete_page_plan_atomically(positions):
+    """A bad indexer plan must discard even previously planned host descriptors."""
+    send = SendBlockMeta(
+        "p", "x", [[1, 2, 3]], asyncio.Event(), local_block_positions=[[0, 1, 2]]
+    )
+    meta = MooncakeXferMetadata(
+        remote_hostname="d",
+        remote_port=1,
+        remote_tp_size=1,
+        remote_tp_rank=0,
+        req_blocks={"d": ("x", [[5, 6], [7]])},
+        kv_caches_base_addr=[],
+        block_lens=[],
+        kv_block_lens=[],
+        hisparse_protocol=1,
+        host_group_indices=[0],
+        req_block_positions={"d": positions},
+    )
+    local = [
+        TransferRegion("source", 0, 1000, 100, 10, 0),
+        TransferRegion("indexer", 0, 2000, 100, 10, 0),
+    ]
+    remote = [
+        TransferRegion("source", 0, 3000, 100, 10, 0),
+        TransferRegion("indexer", 0, 4000, 100, 10, 1),
+    ]
+    with mooncake_register_worker(_hisparse_producer_cache_config()) as (worker, _):
+        sources, destinations, lengths, errors, message = asyncio.run(
+            worker._build_transfer_params([("d", send)], meta, local, remote)
+        )
+    assert sources == destinations == lengths == []
+    assert errors == ["d"] and message
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("incompatible", [None, "role", "block_size", "tp", "opaque"])
+def test_hisparse_semantic_layout_requires_compatible_roles(incompatible):
+    """Independent group numbers are valid only under the sparse-MLA contract."""
+    local = [
+        TransferRegion("source", 0, 1000, 100, 10, 0),
+        TransferRegion("indexer", 0, 2000, 100, 10, 0),
+    ]
+    remote = [
+        TransferRegion("source", 0, 3000, 100, 10, 0),
+        TransferRegion("indexer", 0, 4000, 100, 10, 1),
+    ]
+    meta = MooncakeXferMetadata(
+        remote_hostname="d",
+        remote_port=1,
+        remote_tp_size=2,
+        remote_tp_rank=0,
+        req_blocks={},
+        kv_caches_base_addr=[],
+        block_lens=[],
+        kv_block_lens=[],
+        hisparse_protocol=1,
+        host_group_indices=[0],
+        shared_host_owner=0,
+        group_block_sizes=[16, 16],
+        registered_cache_roles=["sparse", "indexer"],
+    )
+    if incompatible == "role":
+        meta.registered_cache_roles[1] = "sparse"
+    elif incompatible == "block_size":
+        meta.group_block_sizes[1] = 32
+    elif incompatible == "tp":
+        meta.remote_tp_size = 4
+    elif incompatible == "opaque":
+        remote[1] = TransferRegion("indexer", 0, 4000, 100, 10, -1, (0, 1))
+    config = create_vllm_config(
+        kv_connector="MooncakeConnector",
+        hf_overrides={"model_type": "deepseek_v2", "kv_lora_rank": 16},
+    )
+    # Single-rank construction is sufficient to validate the layout contract.
+    meta.remote_tp_size = 2 if incompatible == "tp" else 1
+    with mooncake_register_worker(
+        _hisparse_producer_cache_config(), vllm_config=config
+    ) as (worker, _):
+        error = worker._validate_hisparse_layout(meta, local, remote)
+    assert (error is None) == (incompatible is None)
