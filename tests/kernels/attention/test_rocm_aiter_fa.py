@@ -42,9 +42,11 @@ DIRECT_NUM_HEADS = (8, 2)
 DIRECT_HEAD_SIZE = 128
 DIRECT_DTYPE = torch.bfloat16
 HEAD_SIZE_TEST_NUM_HEADS_PAIRS = [(16, 16), (16, 4)]
-# Prefill seq lens: (query_len, kv_len). q=1 is a single-token prompt landing in
-# the prefill path; it only matches the reference while min_seqlen_q is 0, since
-# the CK kernel returns early for seqlen_q <= min_seqlen_q.
+# Prefill seq lens: (query_len, kv_len). q=1 is a first-chunk prompt: the batch
+# reorder classifies it as a prefill because it has no computed context, not by
+# comparing its query length against the decode threshold, so it does reach this
+# kernel. CK returns early for seqlen_q <= min_seqlen_q and leaves `out`
+# unwritten, so this entry fails if min_seqlen_q ever goes back to 1.
 SEQ_LENS = [(1, 512), (8, 512), (32, 1024)]
 DIRECT_SEQ_LENS = [(10, 1328), (5, 18), (129, 463)]
 
