@@ -7,6 +7,7 @@ mod types;
 mod validate;
 
 use std::collections::HashMap;
+use std::num::NonZeroU32;
 use std::result::Result;
 use std::sync::Arc;
 
@@ -127,14 +128,17 @@ pub async fn generate(
     let api_server_options = state.api_server_options;
     let stream = prepared.stream;
     let created = unix_timestamp();
-    let text_stream = match state
-        .chat
-        .text()
-        .generate(prepared.text_request)
-        .instrument(request_span.clone())
-        .await
+    // Like Python's token-in-token-out route, record no render duration: lower
+    // and submit directly rather than through `TextLlm::generate`.
+    let text = state.chat.text();
+    let text_stream = match async {
+        let text_request = text.request_processor().prepare(prepared.text_request)?;
+        text.generate_prepared_n(text_request, NonZeroU32::MIN).await
+    }
+    .instrument(request_span.clone())
+    .await
     {
-        Ok(stream) => stream,
+        Ok(mut streams) => streams.pop().expect("one output stream per sample"),
         Err(error) => {
             return text_submit_error("failed to submit raw generate request", error)
                 .into_response();

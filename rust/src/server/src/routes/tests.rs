@@ -7139,6 +7139,7 @@ async fn non_stream_raw_generate_returns_token_output_envelope() {
             ..RouteGates::default()
         },
     );
+    let metrics_before = METRICS.render().unwrap();
 
     let response = app
         .call(
@@ -7198,6 +7199,17 @@ async fn non_stream_raw_generate_returns_token_output_envelope() {
         "token_id:22"
     );
     assert_eq!(json["kv_transfer_params"], json!({"connector": "x"}));
+
+    // Like Python's token-in-token-out route, generate records no render.
+    assert_eq!(
+        metric_delta(
+            &metrics_before,
+            &METRICS.render().unwrap(),
+            "vllm:request_render_duration_seconds_count",
+            Some("model_name=\"test-model\",request_type=\"completion\""),
+        ),
+        0.0
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
