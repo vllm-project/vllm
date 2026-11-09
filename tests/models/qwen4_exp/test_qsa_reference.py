@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from vllm.model_executor.layers.layernorm import GemmaRMSNorm
 from vllm.models.qwen4_exp.common import qsa_indexer as qsa_common
 from vllm.models.qwen4_exp.common.qsa_indexer import (
     QSAIndexerMetadataBuilder,
@@ -461,7 +462,7 @@ def test_qsa_ring_capacity_covers_one_speculative_step(
 
 
 def test_qsa_kv_cache_dtype_honors_skip_layers() -> None:
-    """``--kv-cache-dtype-skip-layers`` keeps the listed QSA layers unquantized.
+    """`--kv-cache-dtype-skip-layers` keeps the listed QSA layers unquantized.
 
     The MTP layer's own attention is the one that matters on Flash-Next: FP8
     there cuts draft acceptance at depth while the target layers stay FP8.
@@ -540,10 +541,7 @@ def test_qsa_unfused_cache_update_ignores_padded_qk() -> None:
         )
     raw_cache = torch.zeros((1, 4, 1, 64), dtype=torch.bfloat16, device=device)
     compressed_cache = torch.zeros((1, 2, 1, 64), dtype=torch.bfloat16, device=device)
-    norm = SimpleNamespace(
-        weight=torch.zeros(64, dtype=torch.bfloat16, device=device),
-        variance_epsilon=1e-6,
-    )
+    norm = GemmaRMSNorm(64).to(device=device, dtype=torch.bfloat16)
     indexer = SimpleNamespace(
         _metadata=lambda: (raw_metadata, compressed_metadata),
         skip_topk=True,

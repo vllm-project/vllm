@@ -46,7 +46,7 @@ def index_policies(batches):
 
 
 def q_b_policies(batches, heads=96):
-    """Split-K tactics of the split query's Q_B projection (``q_b_wide_policies``
+    """Split-K tactics of the split query's Q_B projection (`q_b_wide_policies`
     from WIDE_HEADS heads; below, the TP8 shard: N = 12 * 192 = 2304, 64-row weight
     tiles split K four ways up to 32 rows, then two ways). GB300, 12 heads, L2
     flushed, us (SOL 0.94): 5 rows 5.3 (64,8,4,4; 6.8 with 128-row tiles), 40 rows
@@ -75,7 +75,7 @@ def q_b_wide_policies(batches):
 
 
 def runs_split(heads, batch, dcp, fp8):
-    """Whether the MLA query of ``batch`` rows runs split (mla.query_wide): at many
+    """Whether the MLA query of `batch` rows runs split (mla.query_wide): at many
     heads always (FlashInfer only), at few heads (TP8 / DCP8) on FlashInfer's
     per-tensor FP8 query from SPLIT_FROM rows."""
     return split_query(heads, batch, dcp) and (fp8 or heads >= 64)
@@ -84,7 +84,7 @@ def runs_split(heads, batch, dcp, fp8):
 class WideQuery:
     """compile_query's result at query_wide heads: the q_a RMSNorm (QueryNorm, None
     when the overlap mode's main-stream QueryNorm writes the q_c rows), then the
-    layer's Q_B projection (QueryStage.q_projection) and MlaAbsorb, or (``bmm``,
+    layer's Q_B projection (QueryStage.q_projection) and MlaAbsorb, or (`bmm`,
     query_wide.absorb_bmm) the W_UK bmm and MlaQuant."""
 
     def __init__(self, norm, absorb, bmm=False):
@@ -105,14 +105,14 @@ def compile_query(
     cap=64,
     release=True,
 ):
-    """MlaQuery (dsa) of one batch of rows. ``fakes``: the fake weight and cache
+    """MlaQuery (dsa) of one batch of rows. `fakes`: the fake weight and cache
     tensors (q_a norm, kv_a norm, Q_B, W_UK, the MLA cache). Under DCP the query
-    also publishes into the q mailbox (``q_heads``: its padded heads). ``nvfp4``:
-    the FP8 query over an nvfp4_ds_mla cache (FlashInfer prims_ts). ``cap``: the
-    q mailbox rows (DcpBox.cap). ``overlap`` (overlap.MODES): "fork" and "front"
+    also publishes into the q mailbox (`q_heads`: its padded heads). `nvfp4`:
+    the FP8 query over an nvfp4_ds_mla cache (FlashInfer prims_ts). `cap`: the
+    q mailbox rows (DcpBox.cap). `overlap` (overlap.MODES): "fork" and "front"
     leave the q_c rows to QueryNorm or IndexFront, and every mode but "serial" the
     mailbox poll to QueryWait.
-    ``release``: launch the next kernel early (PDL)."""
+    `release`: launch the next kernel early (PDL)."""
     qnorm, kvnorm, qb, uk, kv = fakes
     scalar = fake((1,), (1,), torch.float32, 4)
     if runs_split(heads, batch, dcp, fp8):
@@ -161,7 +161,7 @@ def compile_query(
 
 
 def compile_absorb(batch, heads, pitch, fakes, fp8, nvfp4, release, box=None):
-    """MlaAbsorb of one batch of rows (query_wide); ``box``: (DCP size, the q
+    """MlaAbsorb of one batch of rows (query_wide); `box`: (DCP size, the q
     mailbox's padded heads, its rows) to publish into under DCP."""
     qnorm, kvnorm, _, uk, kv = fakes
     scalar = fake((1,), (1,), torch.float32, 4)
@@ -224,7 +224,7 @@ def compile_norm(batch, heads, pitch):
 
 @cache
 def compile_wait(batch, heads, dcp, q_heads, fp8, cap=64):
-    """QueryWait of one batch of rows under DCP (else None; ``cap``: the q mailbox
+    """QueryWait of one batch of rows under DCP (else None; `cap`: the q mailbox
     rows). Shared by every DSA layer: the mailbox is a launch argument."""
     if not dcp:
         return None
@@ -244,7 +244,7 @@ FRONT_KERNEL: str | None = None
 
 
 def front_kernel(batch):
-    """The "front" mode's kernel of ``batch`` rows ("cluster" or "mma")."""
+    """The "front" mode's kernel of `batch` rows ("cluster" or "mma")."""
     kind = FRONT_KERNEL or ("cluster" if batch < FRONT_MMA_FROM else "mma")
     if kind == "cluster" and batch > CLUSTER_FRONT_MAX:
         raise ValueError(f"IndexFront serves at most {CLUSTER_FRONT_MAX} rows")
@@ -260,9 +260,9 @@ def compile_front(
     device,
     normalized=False,
 ):
-    """The fused index front of one batch of rows (``wq``, ``index_kv``: the
+    """The fused index front of one batch of rows (`wq`, `index_kv`: the
     layouts of the wq_b weight and the indexer cache): from the packed rows (q_a
-    RMSNorm, wq_b, DsaIndex), or (``normalized``: IndexFrontMma only) from the q_c
+    RMSNorm, wq_b, DsaIndex), or (`normalized`: IndexFrontMma only) from the q_c
     rows. Shared by every DSA layer of those layouts: the weight, cache and outputs
     are launch arguments."""
     kind, mx = front_kernel(batch), mqa_logits_use_mx_scales()
@@ -300,7 +300,7 @@ def _compile_front(batch, heads, pitch, wq, index_kv, device, normalized, kind, 
 
 
 def compile_index(batch, heads, pitch, index_kv):
-    """DsaIndex of one batch of rows into the indexer cache ``index_kv`` (fake)."""
+    """DsaIndex of one batch of rows into the indexer cache `index_kv` (fake)."""
     _, key = gate_columns(heads)
     index = DsaIndex(key, key + DIM, mx=mqa_logits_use_mx_scales())
     projected = fake((batch, pitch), (pitch, 1))
@@ -315,10 +315,10 @@ def compile_index(batch, heads, pitch, index_kv):
 
 
 class QueryStage:
-    """One layer's query stage. ``scratch``: the shared rows (BF16 query, q_c,
-    indexer projection, FP8 indexer query, head weights); ``fp8``: a per-tensor FP8
+    """One layer's query stage. `scratch`: the shared rows (BF16 query, q_c,
+    indexer projection, FP8 indexer query, head weights); `fp8`: a per-tensor FP8
     query (FlashInfer), whose query rows are this layer's own, over a per-tensor FP8
-    cache or (``nvfp4``) an nvfp4_ds_mla one, whose rows carry their own scales."""
+    cache or (`nvfp4`) an nvfp4_ds_mla one, whose rows carry their own scales."""
 
     def __init__(self, attention, pitches, scratch, fp8, nvfp4=False, dcp=0):
         wrapper = attention.mla_attn
@@ -367,7 +367,7 @@ class QueryStage:
                 absorb_rows(device, max(pitches), self.heads)
 
     def run_query(self, kernel, projected, cache, slots, publish=()):
-        """MlaQuery: query rows, the KV insert at ``slots`` and q_c (``publish``:
+        """MlaQuery: query rows, the KV insert at `slots` and q_c (`publish`:
         the q mailbox, its multicast address and this rank, under DCP)."""
         batch, s = projected.shape[0], stream(self.device)
         qnorm, kvnorm, qb, uk, _ = self.views
@@ -396,14 +396,14 @@ class QueryStage:
         kernel(*q_args, query, qc, *publish, s)
 
     def run_norm(self, kernel, projected):
-        """QueryNorm: the q_c rows of ``projected`` (query overlap)."""
+        """QueryNorm: the q_c rows of `projected` (query overlap)."""
         batch, s = projected.shape[0], stream(self.device)
         qnorm = self.views[0]
         kernel(to_cute(projected), qnorm, to_cute(self.qc[:batch]), self.eps, s)
 
     def run_front(self, kernel, projected, index_slots, normalized=False):
         """The fused index front: the FP8 indexer query and head weights straight
-        from the packed rows (``normalized``: from the q_c rows), and the key into
+        from the packed rows (`normalized`: from the q_c rows), and the key into
         the indexer cache."""
         batch, s = projected.shape[0], stream(self.device)
         rows = to_cute(self.q_fp8[:batch]), to_cute(self.head_w[:batch], 4)

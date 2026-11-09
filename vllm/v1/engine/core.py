@@ -129,12 +129,6 @@ _R = TypeVar("_R")  # Return type for collective_rpc
 class EngineCore:
     """Inner loop of vLLM's Engine."""
 
-    # Class-level defaults so tests can build an EngineCore with
-    # object.__new__.
-    _checkpoint_state = CheckpointState.RUNNING
-    _checkpoint_error: str | None = None
-    _kv_cache_reclaimable = False
-
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -143,6 +137,12 @@ class EngineCore:
         executor_fail_callback: Callable | None = None,
         include_finished_set: bool = False,
     ):
+        # Process checkpoint lifecycle (prepare/restore).
+        self._checkpoint_state = CheckpointState.RUNNING
+        self._checkpoint_error: str | None = None
+        # Whether the workers' extensible KV cache holds nothing to keep.
+        self._kv_cache_reclaimable = False
+
         # plugins need to be loaded at the engine/scheduler level too
         from vllm.plugins import load_general_plugins
 
@@ -254,7 +254,11 @@ class EngineCore:
         self.step_fn = (
             self.step if self.batch_queue is None else self.step_with_batch_queue
         )
-        self.async_scheduling = vllm_config.scheduler_config.async_scheduling
+        scheduler_config = vllm_config.scheduler_config
+        self.async_scheduling = scheduler_config.async_scheduling
+        self.prefill_schedule_interval = scheduler_config.prefill_schedule_interval
+        # Steps that scheduled tokens; empty schedule() calls don't count.
+        self.num_executed_steps = 0
 
         self.aborts_queue = queue.Queue[list[str]]()
 
@@ -706,9 +710,10 @@ class EngineCore:
             eco.weight_version = self._weight_version
 
     def _should_throttle_prefills(self) -> bool:
-        """Whether to defer new prefills this step (DP prefill balancing).
-        Overridden by the DP engine core; never throttles otherwise."""
-        return False
+        """Whether to defer prefills this step, to run them every Nth step.
+        Overridden by the DP engine core to align across ranks."""
+        interval = self.prefill_schedule_interval
+        return interval > 1 and self.num_executed_steps % interval != 0
 
     def step(self) -> tuple[dict[int, EngineCoreOutputs], bool]:
         """Schedule, execute, and make output.
@@ -721,6 +726,8 @@ class EngineCore:
         if not self.scheduler.has_requests():
             return {}, False
         scheduler_output = self.scheduler.schedule(self._should_throttle_prefills())
+        if scheduler_output.total_num_scheduled_tokens > 0:
+            self.num_executed_steps += 1
         future = self.model_executor.execute_model(scheduler_output, non_block=True)
         grammar_output = self.scheduler.get_grammar_bitmask(scheduler_output)
         with (
@@ -789,6 +796,8 @@ class EngineCore:
                 )
             if not self.is_mm_encoder_only:
                 model_executed = scheduler_output.total_num_scheduled_tokens > 0
+            if model_executed:
+                self.num_executed_steps += 1
 
             if self.is_pooling_model or not model_executed:
                 # No sampling required (no requests scheduled).
@@ -1032,15 +1041,15 @@ class EngineCore:
         All pause modes queue new adds -- "abort" and "keep" skip step();
         "wait" allows step() so in-flight requests can drain.
 
-        - ``abort``: Set PAUSED_NEW, abort all requests, wait for abort
+        - `abort`: Set PAUSED_NEW, abort all requests, wait for abort
           outputs to be sent (when running with output_queue), optionally
           clear caches, then complete the returned Future.
-        - ``wait``: Set PAUSED_NEW (queue adds, keep stepping); when drained,
+        - `wait`: Set PAUSED_NEW (queue adds, keep stepping); when drained,
           optionally clear caches, then complete the returned Future.
-        - ``keep``: Set PAUSED_ALL; return a Future that completes when the
+        - `keep`: Set PAUSED_ALL; return a Future that completes when the
           output queue is empty.
 
-        ``reset_connector`` decides whether clearing caches also resets the
+        `reset_connector` decides whether clearing caches also resets the
         KV connector's cache.
         """
         if mode not in get_args(PauseMode):
@@ -1110,7 +1119,7 @@ class EngineCore:
             mode: Pause mode - how to deal with any existing requests, see
                 documentation of pause_scheduler method.
             reset_connector: Also reset the KV connector's cache; see
-                ``LLM.sleep``.
+                `LLM.sleep`.
 
         """
         if self._checkpoint_state != CheckpointState.RUNNING:
@@ -1180,7 +1189,7 @@ class EngineCore:
     def release_kv_cache_memory(self, reset_connector: bool = True) -> None:
         """Discard KV cache physical memory. Requires a completed pause
         and all executor memory to be resident. Kept requests are recomputed
-        after wake-up. ``reset_connector`` is as for ``sleep``.
+        after wake-up. `reset_connector` is as for `sleep`.
         """
         if not (
             self.is_scheduler_paused()
@@ -2346,9 +2355,9 @@ class EngineCoreProc(EngineCore):
     ) -> None:
         """Return a retryable response for a P0/P1 cache-drift miss.
 
-        Surfaces every drifted hash via ``EngineCoreOutput.mm_cache_miss_hashes`` so
+        Surfaces every drifted hash via `EngineCoreOutput.mm_cache_miss_hashes` so
         the frontend drops them from its sender cache and the client resends with
-        data (see ``MultiModalCacheMissError``). Logged at warning, not exception,
+        data (see `MultiModalCacheMissError`). Logged at warning, not exception,
         because it is expected and self-healing.
         """
         logger.warning(
@@ -2423,12 +2432,12 @@ class EngineCoreProc(EngineCore):
         All pause modes queue new adds -- "abort" and "keep" skip step();
         "wait" allows step() so in-flight requests can drain.
 
-        - ``abort``: Set PAUSED_NEW, abort all requests, wait for abort
+        - `abort`: Set PAUSED_NEW, abort all requests, wait for abort
           outputs to be sent (when running with output_queue), optionally
           clear caches, then complete the returned Future.
-        - ``wait``: Set PAUSED_NEW (queue adds, keep stepping); when drained,
+        - `wait`: Set PAUSED_NEW (queue adds, keep stepping); when drained,
           optionally clear caches, then complete the returned Future.
-        - ``keep``: Set PAUSED_ALL; return a Future that completes when the
+        - `keep`: Set PAUSED_ALL; return a Future that completes when the
           output queue is empty.
         """
         if mode not in get_args(PauseMode):
@@ -2462,7 +2471,7 @@ class EngineCoreProc(EngineCore):
     def pause_generation(
         self, mode: PauseMode = "abort", clear_cache: bool = True
     ) -> Future | None:
-        """``pause_scheduler`` for a user pause: "abort" and "wait" also reject
+        """`pause_scheduler` for a user pause: "abort" and "wait" also reject
         new requests with a retryable error until resume, rather than queue
         them. Other pauses (e.g. sleep) leave this policy unchanged."""
         future = self.pause_scheduler(mode, clear_cache)
@@ -2520,7 +2529,7 @@ class EngineCoreProc(EngineCore):
 
     def _pause_complete(self) -> bool:
         """Returns True if the pause has fully completed and the caller can
-        return ``None`` synchronously; False if the pause is still pending
+        return `None` synchronously; False if the pause is still pending
         and the caller should register an idle-state callback to finish it.
         """
         return not self.has_work()
@@ -2578,8 +2587,6 @@ class DPEngineCoreProc(EngineCoreProc):
             "DPEngineCoreProc should only be used for MoE models"
         )
 
-        scheduler_config = vllm_config.scheduler_config
-        self.prefill_schedule_interval = scheduler_config.prefill_schedule_interval
         self.dp_sync_interval = vllm_config.parallel_config.dp_sync_interval
 
         # Counts forward-passes of the model so that we can synchronize
@@ -2636,15 +2643,15 @@ class DPEngineCoreProc(EngineCoreProc):
     def _pause_complete(self) -> bool:
         """Two-phase DP-aware pause.
 
-        Phase 1: Set local pause state and ``pending_pause`` flag. If the
-        engines are idle, kick-start them by setting ``engines_running`` to
+        Phase 1: Set local pause state and `pending_pause` flag. If the
+        engines are idle, kick-start them by setting `engines_running` to
         True so ranks enter the stepping loop and reach the all-reduce
-        consensus checkpoint in ``_has_global_unfinished_reqs``.
+        consensus checkpoint in `_has_global_unfinished_reqs`.
 
-        Phase 2 (in ``_has_global_unfinished_reqs``): Once the all-reduce
-        confirms that **all** ranks have ``pending_pause`` set, collectively
-        stop stepping and set ``ignore_start_dp_wave`` so that stale
-        ``START_DP_WAVE`` messages cannot re-wake any engine.
+        Phase 2 (in `_has_global_unfinished_reqs`): Once the all-reduce
+        confirms that **all** ranks have `pending_pause` set, collectively
+        stop stepping and set `ignore_start_dp_wave` so that stale
+        `START_DP_WAVE` messages cannot re-wake any engine.
         """
         self.pending_pause = True
         self.engines_running = True

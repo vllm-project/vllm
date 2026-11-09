@@ -155,10 +155,10 @@ def get_engine_client_zmq_addr(
     host: str,
     port: int = 0,
 ) -> str:
-    """Return an IPC path (``local_only=True``) or ``tcp://host:port``.
+    """Return an IPC path (`local_only=True`) or `tcp://host:port`.
 
-    ``port=0`` lets the kernel assign the port at ``bind()`` time; the
-    caller must recover it via ``getsockopt(zmq.LAST_ENDPOINT)``."""
+    `port=0` lets the kernel assign the port at `bind()` time; the
+    caller must recover it via `getsockopt(zmq.LAST_ENDPOINT)`."""
     if local_only:
         return get_open_zmq_ipc_path()
     return get_tcp_uri(host, port)
@@ -361,6 +361,24 @@ class RustFrontendProcessManager:
         # frontends.
         args_dict["engine_ready_timeout_secs"] = envs.VLLM_ENGINE_READY_TIMEOUT_S
         args_dict["http_timeout_keep_alive"] = envs.VLLM_HTTP_TIMEOUT_KEEP_ALIVE
+
+        # `--log-level`, `--logging-config` and `--log-config-file` default to
+        # argparse.SUPPRESS, so get_non_default_args() never sees them;
+        # cli/main.py has already merged them into `args.logging_config`.
+        if logging_config := getattr(args, "logging_config", None):
+            args_dict["logging_config"] = {
+                "log_level": logging_config.log_level,
+                "formatter": logging_config.formatter,
+            }
+            if (
+                not logging_config.configure_logging
+                or logging_config.pylogging_config_file
+            ):
+                logger.warning(
+                    "configure_logging and pylogging_config_file apply to "
+                    "Python logging only, not to the Rust frontend's logs."
+                )
+
         args_json = json.dumps(args_dict, sort_keys=True)
         cmd.extend(["--args-json", args_json])
 
@@ -380,6 +398,11 @@ class RustFrontendProcessManager:
         else:
             input_listener.close()
             output_listener.close()
+            # Rust owns these now; an open copy here keeps the ports listening
+            # after Rust closes them.
+            sock.close()
+            if grpc_sock is not None:
+                grpc_sock.close()
 
         # Create a process wrapper with a sentinel fd for monitoring
         self.processes: list[_SubprocessWrapper] = [

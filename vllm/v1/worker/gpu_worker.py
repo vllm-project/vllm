@@ -546,6 +546,9 @@ class Worker(WorkerBase):
 
             # take current memory snapshot after external weights are ready
             self.init_snapshot = init_snapshot = MemorySnapshot(device=self.device)
+            if self.cache_config.enable_extensible_kv_cache:
+                # Read as the final sizing reads the free memory it compares.
+                self.init_free_memory = current_platform.free_device_memory(self.device)
             self.requested_memory = request_memory(
                 init_snapshot, self.cache_config, external_weight_memory
             )
@@ -1165,11 +1168,9 @@ class Worker(WorkerBase):
 
             maybe_save_startup_plan(self, kv_cache_memory_bytes_to_requested_limit)
 
-        if get_pp_group().is_last_rank and not self.model_runner.is_pooling_model:
-            # Warm up the sampler and keep its max-batch buffers (e.g. the
-            # fp32 logits copy) cached after the empty_cache() in
-            # capture_model(), so later steps reuse them instead of reserving
-            # a new, larger block at each new batch size.
+        if not self.model_runner.is_pooling_model:
+            # Every PP rank runs an attention-bearing forward here, so lazily
+            # built attention state is ready before the sync check below.
             max_num_reqs = min(
                 self.scheduler_config.max_num_seqs,
                 self.scheduler_config.max_num_batched_tokens,
@@ -1179,7 +1180,13 @@ class Worker(WorkerBase):
             _, sample_hidden_states = self.model_runner._dummy_run(
                 num_tokens=max_num_reqs, skip_eplb=True
             )
-            self.model_runner._dummy_sampler_run(hidden_states=sample_hidden_states)
+            if get_pp_group().is_last_rank:
+                # Warm up the sampler and keep its max-batch buffers (e.g. the
+                # fp32 logits copy) cached after the empty_cache() in
+                # capture_model(), so later steps reuse them instead of
+                # reserving a new, larger block at each new batch size.
+                assert sample_hidden_states is not None
+                self.model_runner._dummy_sampler_run(hidden_states=sample_hidden_states)
             del sample_hidden_states
 
         # Reset the seed to ensure that the random state is not affected by
@@ -1221,7 +1228,7 @@ class Worker(WorkerBase):
                     kv_cache,
                     self.vllm_config,
                     self.device,
-                    init_free_memory=self.init_snapshot.free_memory,
+                    init_free_memory=self.init_free_memory,
                     requested_memory=int(self.requested_memory),
                 )
             )
@@ -1568,6 +1575,7 @@ class Worker(WorkerBase):
             self.model_runner.decode_query_len,
             uniform_decode=True,
             randomize_inputs=self.randomize_dummy_inputs,
+            num_active_loras=0,
         )
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
@@ -1776,7 +1784,7 @@ class Worker(WorkerBase):
 
         # Weight transfer bypasses GPUModelRunner.reload_weights().
         if not self._weight_update_is_draft:
-            self.model_runner.reset_lora_state()
+            self.model_runner.on_target_weights_replaced()
 
     def shutdown(self) -> None:
         gc.unfreeze()
