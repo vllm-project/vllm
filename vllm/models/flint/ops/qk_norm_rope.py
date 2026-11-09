@@ -3,8 +3,8 @@
 """Fused per-head q/k RMSNorm + NeoX RoPE + paged KV-cache write.
 
 Numerics follow the unfused vLLM ops it replaces: RMSNorm computes
-``bf16(x * rsqrt(mean(x^2) + eps) * w)`` in fp32, RoPE computes
-``x * cos - y * sin`` in fp32 from the fp32 cos/sin cache (as the reference
+`bf16(x * rsqrt(mean(x^2) + eps) * w)` in fp32, RoPE computes
+`x * cos - y * sin` in fp32 from the fp32 cos/sin cache (as the reference
 implementation does; vLLM's rotary op would round the cache to bf16 first) and
 rounds to bf16, and K/V are stored unchanged in the bf16 cache.
 """
@@ -118,7 +118,7 @@ def qk_norm_rope_cache(
     head_dim: int,
     launch_dependents: bool = False,
 ) -> torch.Tensor:
-    """Normalize and rotate q/k from ``qkv`` and write k/v into the cache.
+    """Normalize and rotate q/k from `qkv` and write k/v into the cache.
 
     Args:
         qkv: [T, (Hq + 2 * Hkv) * D] bf16; k is normalized in place.
@@ -129,7 +129,7 @@ def qk_norm_rope_cache(
         cos_sin_cache: [max_pos, D] fp32 (cos | sin), or None for no RoPE.
         k_cache: [num_blocks, block_size, Hkv, D] view (any strides with a
             contiguous last dim), or None to skip the cache write.
-        v_cache: Same shape and strides as ``k_cache``.
+        v_cache: Same shape and strides as `k_cache`.
         slot_mapping: [<= T] int64; negative slots are skipped.
         num_q_heads: Hq.
         num_kv_heads: Hkv.

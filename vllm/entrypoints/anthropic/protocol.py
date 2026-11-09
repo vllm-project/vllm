@@ -44,7 +44,7 @@ _ANTHROPIC_ERROR_TYPE_BY_STATUS: dict[int, str] = {
 
 
 def translate_error_type(status_code: int) -> str:
-    """Translate an HTTP status code to Anthropic's ``error.type`` vocabulary."""
+    """Translate an HTTP status code to Anthropic's `error.type` vocabulary."""
     error_type = _ANTHROPIC_ERROR_TYPE_BY_STATUS.get(status_code)
     if error_type is not None:
         return error_type
@@ -208,7 +208,7 @@ class AnthropicJsonOutputFormat(BaseModel):
 
 
 AnthropicEffort = Literal["low", "medium", "high", "xhigh", "max"]
-# reasoning_effort sent to the chat template for thinking.type=disabled.
+# reasoning_effort sent to the chat template when upfront thinking is disabled.
 AnthropicDisabledThinkingEffort = Literal["none", AnthropicEffort]
 AnthropicDisabledThinkingEffortOption = Literal["auto", AnthropicDisabledThinkingEffort]
 AnthropicThinkingDisplay = Literal["summarized", "omitted", "updates"]
@@ -224,7 +224,7 @@ class AnthropicOutputConfig(BaseModel):
 class AnthropicThinkingConfigEnabled(BaseModel):
     """Extended thinking with a fixed token budget.
 
-    ``display`` is accepted but ignored: reasoning is always returned.
+    `display` is accepted but ignored: reasoning is always returned.
     """
 
     type: Literal["enabled"]
@@ -239,17 +239,29 @@ class AnthropicThinkingConfigDisabled(BaseModel):
 class AnthropicThinkingConfigAdaptive(BaseModel):
     """Extended thinking whose depth the model chooses.
 
-    ``display`` is accepted but ignored: reasoning is always returned.
+    `display` is accepted but ignored: reasoning is always returned.
     """
 
     type: Literal["adaptive"]
     display: AnthropicThinkingDisplay | None = None
 
 
+class AnthropicThinkingConfigBetweenTools(BaseModel):
+    """Thinking that is off up front but may resume between tool calls.
+
+    vLLM maps this to disabled thinking. It cannot force a model to emit
+    progress notes between tool calls; any reasoning the model emits is still
+    returned as thinking blocks.
+    """
+
+    type: Literal["between_tools"]
+
+
 AnthropicThinkingConfig = Annotated[
     AnthropicThinkingConfigEnabled
     | AnthropicThinkingConfigDisabled
-    | AnthropicThinkingConfigAdaptive,
+    | AnthropicThinkingConfigAdaptive
+    | AnthropicThinkingConfigBetweenTools,
     Field(discriminator="type"),
 ]
 

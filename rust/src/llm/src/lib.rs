@@ -298,6 +298,8 @@ impl EngineCoreLlm {
         let arrival_time = engine_request.arrival_time;
         let max_tokens_param = (engine_request.sampling_params.as_ref()).map(|p| p.max_tokens);
         let prompt_len = prompt_token_ids.len() as u32;
+        let watermark_requested =
+            (engine_request.sampling_params.as_ref()).is_some_and(|p| p.watermarking);
 
         let stream = self.client.call(engine_request).await?;
 
@@ -310,6 +312,7 @@ impl EngineCoreLlm {
             prompt_len,
             max_tokens_param,
             parallel_sampling,
+            watermark_requested,
         );
         let guard = self.inflight.track(external_request_id, internal_request_id);
 

@@ -1215,6 +1215,106 @@ async fn generate_records_request_metrics_in_prometheus_output() {
     llm.shutdown().await.unwrap();
 }
 
+/// The engine reports `watermarking` on a request's first output only with a
+/// `watermark_config`; the frontend counts each request at finish by what the
+/// engine applied and whether the request asked for it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn generate_records_watermark_status_reported_by_engine() {
+    let ipc = IpcNamespace::new().unwrap();
+    let handshake_address = ipc.handshake_endpoint();
+    let engine_id = EngineId::from_engine_index(5);
+    let model_name = request_metrics_model_name("watermark-model");
+    // (request id, requested, applied by the engine): a greedy request the
+    // sampler cannot watermark, an opt-out the engine enforces, and a plain
+    // opt-out.
+    let cases = [
+        ("req-greedy", true, false),
+        ("req-enforced", false, true),
+        ("req-opt-out", false, false),
+    ];
+
+    let (shutdown_tx, engine_task) = spawn_mock_engine_task(
+        handshake_address.clone(),
+        engine_id.clone(),
+        move |dealer, push| {
+            Box::pin(async move {
+                for (_, requested, applied) in cases {
+                    let add = recv_engine_message(dealer).await;
+                    let request: EngineCoreRequest = rmp_serde::from_slice(&add[1]).unwrap();
+                    assert_eq!(request.sampling_params.unwrap().watermarking, requested);
+                    send_outputs(
+                        push,
+                        RequestBatchOutputs {
+                            engine_index: 5,
+                            outputs: vec![EngineCoreOutput {
+                                watermarking: Some(applied),
+                                ..request_output(&request.request_id, vec![1], None)
+                            }],
+                            ..Default::default()
+                        }
+                        .into(),
+                    )
+                    .await;
+                    send_outputs(
+                        push,
+                        RequestBatchOutputs {
+                            engine_index: 5,
+                            outputs: vec![request_output(
+                                &request.request_id,
+                                vec![2],
+                                Some(EngineCoreFinishReason::Length),
+                            )],
+                            finished_requests: Some(BTreeSet::from([request.request_id])),
+                            ..Default::default()
+                        }
+                        .into(),
+                    )
+                    .await;
+                }
+            })
+        },
+    );
+
+    let llm = connect_async_llm_with_ipc(handshake_address, 0, &model_name, &ipc).await;
+    let watermark_series = || {
+        let rendered = METRICS.render().unwrap();
+        let mut series: Vec<_> = rendered
+            .lines()
+            .filter(|line| line.starts_with("vllm:watermark_requests_total"))
+            .filter(|line| line.contains(&model_name))
+            .filter_map(|line| line.split_once("status=")?.1.split_once('}'))
+            .map(|(status, count)| format!("{}={}", status.trim_matches('"'), count.trim()))
+            .collect();
+        series.sort();
+        if series.is_empty() {
+            "no series".to_string()
+        } else {
+            series.join(" ")
+        }
+    };
+    // Nothing reveals a watermark config before the engine reports one.
+    let mut progression = vec![format!("start: {}", watermark_series())];
+
+    for (request_id, requested, _) in cases {
+        let mut request = sample_generate_request(request_id, 8);
+        request.sampling_params.watermarking = requested;
+        let output = llm.generate(request).await.unwrap().collect_output().await.unwrap();
+        assert_eq!(output.finish_reason, FinishReason::Length);
+        progression.push(format!("{request_id}: {}", watermark_series()));
+    }
+
+    expect_test::expect![[r#"
+        start: no series
+        req-greedy: not_watermarked=0 skipped=1 watermarked=0
+        req-enforced: not_watermarked=0 skipped=1 watermarked=1
+        req-opt-out: not_watermarked=1 skipped=1 watermarked=1"#]]
+    .assert_eq(&progression.join("\n"));
+
+    let _ = shutdown_tx.send(());
+    engine_task.await.unwrap();
+    llm.shutdown().await.unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn generate_without_engine_stats_exports_only_frontend_observed_metrics() {
     let ipc = IpcNamespace::new().unwrap();

@@ -68,7 +68,7 @@ def _sconv_add_norm(
     norm: InklingRMSNorm | None,
     positions: torch.Tensor,
 ) -> tuple[torch.Tensor | None, torch.Tensor]:
-    """``h = hidden + sconv(TP-sum(delta)); y = rmsnorm(h)``.
+    """`h = hidden + sconv(TP-sum(delta)); y = rmsnorm(h)`.
 
     ROCm uses the portable collective path. The Lamport P2P implementation in
     the NVIDIA model relies on CUDA GDC and CUDA-specific symmetric-memory
@@ -208,8 +208,8 @@ class InklingReplicatedEmbedding(nn.Module):
     Trades the full table per rank (~2.3 GiB at V=201k / H=6144 bf16, vs a
     1/tp shard) for no masked lookup and no per-lookup TP all-reduce — one
     all-reduce per MTP draft step plus one per verify pass — and keeps the
-    full table on-rank for the fused gather+norm kernels (``embed_rmsnorm``,
-    ``embed_dual_rmsnorm_cat``). Bit-exact vs vocab-parallel: the all-reduce
+    full table on-rank for the fused gather+norm kernels (`embed_rmsnorm`,
+    `embed_dual_rmsnorm_cat`). Bit-exact vs vocab-parallel: the all-reduce
     there only ever summed one real row against exact zeros. The LM head
     stays vocab-sharded.
     """
@@ -434,7 +434,7 @@ class _TmlForCausalLMBase(nn.Module, SupportsPP, SupportsLoRA):
 
 
 class InklingForCausalLM(_TmlForCausalLMBase):
-    """Text-only entry point (``inkling_model`` checkpoints)."""
+    """Text-only entry point (`inkling_model` checkpoints)."""
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
@@ -452,7 +452,7 @@ class InklingForConditionalGeneration(_TmlForCausalLMBase, SupportsMultiModal):
     Builds the vision + audio towers on top of the shared text backbone. Inkling has
     NO cross-modal fusion (the vision tower emits one token per patch, the audio
     tower one token per frame), so generation reuses the inherited backbone
-    ``forward`` / ``compute_logits`` (the latter already applies muP) and this
+    `forward` / `compute_logits` (the latter already applies muP) and this
     class only adds multimodal embedding + merge.
     """
 

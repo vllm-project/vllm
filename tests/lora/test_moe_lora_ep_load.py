@@ -75,8 +75,8 @@ def test_moe_lora_ep_requires_contiguous_expert_placement(
 
 
 def _expected_lora_modules() -> set[str]:
-    """Replicate the set ``WorkerLoRAManager._load_adapter`` would build
-    from this model's ``packed_modules_mapping``."""
+    """Replicate the set `WorkerLoRAManager._load_adapter` would build
+    from this model's `packed_modules_mapping`."""
     expected: set[str] = set(NON_EXPERT_MODULES)
     for expert in range(GLOBAL_NUM_EXPERTS):
         for proj in EXPERT_PROJECTIONS:

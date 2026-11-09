@@ -293,6 +293,8 @@ pub(super) struct CompletionStreamResponse {
     pub choices: Vec<CompletionStreamChoice>,
     pub usage: Option<Usage>,
     pub metrics: Option<StreamPerRequestMetrics>,
+    /// Set only on the last chunk.
+    pub system_fingerprint: Option<String>,
     /// Set only on the chunk carrying the finish reason.
     pub kv_transfer_params: Option<Value>,
 }
@@ -305,6 +307,7 @@ impl CompletionStreamResponse {
             choices: Vec::new(),
             usage: None,
             metrics: None,
+            system_fingerprint: None,
             kv_transfer_params: None,
         }
     }
