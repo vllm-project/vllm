@@ -589,6 +589,62 @@ def test_execute_model_waits_previous_pp_send_before_forward(
     assert worker._pp_send_work == [tensor_handle]
 
 
+@pytest.mark.parametrize("is_last_rank", [False, True])
+def test_every_pp_rank_runs_a_forward_before_the_sync_check(
+    monkeypatch: pytest.MonkeyPatch, is_last_rank: bool
+):
+    """Eager, no JIT or extensible-cache warmup: every PP rank still runs an
+    attention-bearing dummy forward before `enable_gpu_sync_check()`, so state
+    built on the first forward is not built in a checked step. Only the last
+    rank warms up the sampler."""
+    log: list[str] = []
+    monkeypatch.setattr(
+        gpu_worker, "get_pp_group", lambda: SimpleNamespace(is_last_rank=is_last_rank)
+    )
+    monkeypatch.setattr(gpu_worker, "kernel_warmup", lambda worker: None)
+    monkeypatch.setattr(gpu_worker, "freeze_gc_heap", lambda: None)
+    monkeypatch.setattr(gpu_worker, "set_random_seed", lambda *args: None)
+    monkeypatch.setattr(
+        gpu_worker, "enable_gpu_sync_check", lambda: log.append("sync_check")
+    )
+
+    def dummy_run(num_tokens, skip_eplb):
+        log.append("forward")
+        return (None, torch.zeros(num_tokens)) if is_last_rank else (None, None)
+
+    compilation_config = SimpleNamespace(
+        mode=gpu_worker.CompilationMode.NONE,
+        compilation_time=0.0,
+        encoder_compilation_time=0.0,
+    )
+    worker = SimpleNamespace(
+        vllm_config=SimpleNamespace(
+            compilation_config=compilation_config,
+            kernel_config=SimpleNamespace(enable_jit_warmup=False),
+        ),
+        cache_config=SimpleNamespace(
+            enable_extensible_kv_cache=False, kv_cache_memory_bytes=None
+        ),
+        model_config=SimpleNamespace(enforce_eager=True, seed=0),
+        parallel_config=SimpleNamespace(data_parallel_index=0),
+        scheduler_config=SimpleNamespace(max_num_seqs=4, max_num_batched_tokens=64),
+        compilation_config=compilation_config,
+        model_runner=SimpleNamespace(
+            is_pooling_model=False,
+            maybe_remove_all_loras=lambda lora_config: None,
+            lora_config=None,
+            _dummy_run=dummy_run,
+            _dummy_sampler_run=lambda hidden_states: log.append("sampler"),
+        ),
+        _maybe_activate_jit_monitor=lambda: None,
+    )
+
+    gpu_worker.Worker._compile_or_warm_up_model(worker)
+
+    sampler = ["sampler"] if is_last_rank else []
+    assert log == ["forward", *sampler, "sync_check"]
+
+
 def test_jit_monitor_activation_follows_enable_jit_warmup(
     monkeypatch: pytest.MonkeyPatch,
 ):
