@@ -65,9 +65,9 @@ FlashInfer ReplaySSM has these limits:
 
 Prefix reuse still requires a shared prefix with a saved Mamba checkpoint. The matching rules for hybrid Mamba models above also apply.
 
-#### Qwen3.5 Gated DeltaNet
+#### Qwen3.5 and Qwen4Exp Gated DeltaNet
 
-On Qwen3.5 models, `--use-replayssm` applies ReplaySSM to the Gated DeltaNet layers. It runs FlashInfer's UMMA kernel, which requires FlashInfer 0.7.3 or later, an SM100-class GPU, and FP16 recurrent state:
+On Qwen3.5 and Qwen4Exp models, `--use-replayssm` applies ReplaySSM to the Gated DeltaNet layers. It runs FlashInfer's UMMA kernel, which requires FlashInfer 0.7.3 or later, an SM100-class GPU, and FP16 recurrent state:
 
 ```bash
 vllm serve nvidia/Qwen3.5-122B-A10B-NVFP4 \
@@ -78,12 +78,16 @@ vllm serve nvidia/Qwen3.5-122B-A10B-NVFP4 \
     --speculative-config '{"method":"mtp","num_speculative_tokens":7}'
 ```
 
-Remove `--speculative-config` for standard decoding. Qwen3.5 Gated DeltaNet ReplaySSM has these limits:
+Remove `--speculative-config` for standard decoding. The Gated DeltaNet ReplaySSM path has these limits:
 
 - Model activations and the convolution state must be BF16, with 128-element key and value heads and at most four value heads per key head.
 - Speculative decoding supports up to seven draft tokens. Adaptive verification is not supported; set `enable_adaptive_verification` to `false`.
 - `--replayssm-buffer-len` must be 16, the default.
 - Mamba cache stochastic rounding, pipeline parallelism, microbatching, and KV connectors are not supported.
+
+Qwen3.8-Flash-Next uses the Qwen4Exp architecture. Its PLE convolution cache keeps its canonical state and speculative input window. Only the GDN layers use replay rings. The Qwen4Exp MTP draft uses attention layers and keeps ReplaySSM disabled.
+
+`--gdn-prefill-backend` selects the prefill kernel independently. Triton prefill can run with FlashInfer ReplaySSM decode.
 
 With prefix caching, vLLM sets `GDN_UCACHE_STATE_DTYPE=fp16` before starting its workers, because FlashInfer reads it when first imported. If your own code imports FlashInfer before creating the engine, set this variable before that import.
 

@@ -141,6 +141,8 @@ _GDN_REPLAYSSM_ARCHITECTURES = frozenset(
         "Qwen3_5MoeForCausalLM",
         "Qwen3_5ForConditionalGeneration",
         "Qwen3_5MoeForConditionalGeneration",
+        "Qwen4ExpForCausalLM",
+        "Qwen4ExpForConditionalGeneration",
     }
 )
 
@@ -3609,6 +3611,13 @@ class VllmConfig:
     def validate_gdn_replayssm(self) -> "VllmConfig":
         if not _uses_gdn_replayssm(self.cache_config, self.model_config):
             return self
+        if (
+            self.model_config.architecture.startswith("Qwen4Exp")
+            and current_platform.is_rocm()
+        ):
+            raise ValueError(
+                "FlashInfer GDN ReplaySSM does not support Qwen4Exp on ROCm"
+            )
         cache_config = self.cache_config
         if not 0 <= self.num_speculative_tokens <= 7:
             raise ValueError(

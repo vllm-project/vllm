@@ -321,13 +321,14 @@ class CacheConfig:
     replayssm_buffer_len: int = Field(default=16, gt=0)
     """ReplaySSM logical history length B. Mamba2 Triton uses B physical rows
     and Mamba2 FlashInfer uses B+T, where T is the verification length. Qwen3.5
-    Gated DeltaNet requires B=16 and uses 32 physical rows. Kimi-K3 speculative
-    decode does not use B. Default 16."""
+    and Qwen4Exp Gated DeltaNet require B=16 and use 32 physical rows.
+    Kimi-K3 speculative decode does not use B. Default 16."""
     use_replayssm: bool = False
     """Use a supported ReplaySSM decode kernel: cache recent recurrent inputs
     and skip the per-step full-state store, writing the checkpoint only on flush.
     Mamba2 supports Triton and FlashInfer in 'none' and 'align' cache modes.
-    Mamba2 speculative decoding and Qwen3.5 Gated DeltaNet require FlashInfer.
+    Mamba2 speculative decoding, Qwen3.5 Gated DeltaNet, and Qwen4Exp Gated
+    DeltaNet require FlashInfer. Qwen4Exp ReplaySSM does not support ROCm.
     Pipeline parallelism is not supported. Flushes are most efficient when
     mamba_block_size is a multiple of replayssm_buffer_len, but this is not
     required."""

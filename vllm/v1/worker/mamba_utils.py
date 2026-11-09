@@ -937,7 +937,7 @@ class MambaSpecDecodeGPUContext:
             f"expected {self.num_groups} block tables, got {len(block_tables)}"
         )
         replayssm_groups: list[tuple[list[Any], MambaSpec, torch.Tensor]] = []
-        has_baseline_layer = False
+        has_baseline_temporal_state = False
         for group_local_idx, mamba_group_id in enumerate(self.mamba_group_ids):
             kv_cache_group = kv_cache_config.kv_cache_groups[mamba_group_id]
             mixers: list[Any] = []
@@ -953,7 +953,10 @@ class MambaSpecDecodeGPUContext:
                     isinstance(attention, MambaBase)
                     and attention.use_flashinfer_replayssm
                 )
-                has_baseline_layer |= not is_flashinfer_replayssm
+                has_baseline_temporal_state |= (
+                    not is_flashinfer_replayssm
+                    and get_temporal_copy_spec in state_copy_funcs
+                )
                 if is_flashinfer_replayssm:
                     if len(kv_caches) != len(state_copy_funcs):
                         raise ValueError(
@@ -1056,9 +1059,10 @@ class MambaSpecDecodeGPUContext:
                 )
 
         assert idx == self.num_states
-        if replayssm_groups and has_baseline_layer:
+        if replayssm_groups and has_baseline_temporal_state:
             raise ValueError(
-                "mixed FlashInfer ReplaySSM and baseline Mamba layers are unsupported"
+                "mixed FlashInfer ReplaySSM and baseline Mamba temporal states "
+                "are unsupported"
             )
 
         # Cache per-group block-table base addresses and per-request stride.
