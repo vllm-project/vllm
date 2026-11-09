@@ -5,16 +5,19 @@ ops vLLM runs for the same decode step: random weights in the checkpoint's
 formats, the step's KV caches as vLLM's insert writes them.
 
 - The whole layer (K1 + K2) against the mHC seams, the ROCm attention op chain,
-  the TP all-reduce and ``DeepseekV4MoE``.
+  the TP all-reduce and `DeepseekV4MoE`.
 - The FFN launch against the same FFN half, from wo_b's unreduced output.
 
 Each stage is compared on its own input, so a failure names the stage; the MoE
 is checked on the kernels' own FFN input, where routing cannot differ.
 
-On gfx942 at TP4, ``test_mono_decode_942_replays`` runs the composed runner on
+On gfx942 at TP4, `test_mono_decode_942_replays` runs the composed runner on
 the copies of the weights that the model makes at load, at steps of 6, 8 and 42
 rows, and replays the steps in one CUDA graph. The real model's numerics on
-gfx942 are checked by ``test_dsv41_mono_layers.py``."""
+gfx942 are checked by `test_dsv41_mono_layers.py`."""
+
+import shutil
+import subprocess
 
 import pytest
 import ray
@@ -59,7 +62,7 @@ def _cos(a: torch.Tensor, b: torch.Tensor) -> float:
 
 
 def _rel(a: torch.Tensor, b: torch.Tensor) -> float:
-    """Relative L2 error of ``a`` against ``b``: unlike the cosine, it sees a
+    """Relative L2 error of `a` against `b`: unlike the cosine, it sees a
     wrong scale."""
     a, b = a.float().reshape(-1), b.float().reshape(-1)
     return ((a - b).norm() / b.norm()).item()
@@ -88,9 +91,9 @@ def _rope(kv: torch.Tensor, positions: torch.Tensor, cos_sin: torch.Tensor):
 
 
 def _write_records(cache, block: int, slots, kv, fnuz: bool = False):
-    """fp8_ds_mla records of roped bf16 kv rows at ``slots``: the 448 nope dims
+    """fp8_ds_mla records of roped bf16 kv rows at `slots`: the 448 nope dims
     in e4m3 with a UE8M0 per 64, the rope dims in bf16, as vLLM's insert.
-    ``fnuz``: the e4m3 bytes in FNUZ with a maximum of 224, as vLLM's gfx942
+    `fnuz`: the e4m3 bytes in FNUZ with a maximum of 224, as vLLM's gfx942
     window cache holds them. In FNUZ the OCP -0 byte would be NaN."""
     fp8, fp8_max = torch.float8_e4m3fn, 448.0
     if fnuz:
@@ -131,7 +134,7 @@ def _decode_step(
 ):
     """R requests x T tokens past random contexts: the step's metadata as
     vLLM's builders lay it out, its window rows and (ratio > 0) the compressed
-    cache filled, a random top-512 a token. ``fnuz``: the window records in
+    cache filled, a random top-512 a token. `fnuz`: the window records in
     FNUZ, as on gfx942. The compressed records stay OCP, as vLLM's Triton
     compressor writes them on gfx942 too."""
     g = torch.Generator().manual_seed(seed)
@@ -216,9 +219,9 @@ def _decode_step(
 
 
 def _rows(s: dict, a: int, b: int) -> dict:
-    """The decode step ``s`` cut to its rows a .. b - 1, as a step of its own
+    """The decode step `s` cut to its rows a .. b - 1, as a step of its own
     on the same caches. The rows keep their request numbers, so the block
-    tables of ``s`` stay valid."""
+    tables of `s` stay valid."""
     cut = dict(s, M=b - a)
     for k in ("positions", "slot_mapping", "token_to_req", "swa_indices", "swa_lens"):
         cut[k] = s[k][a:b]
@@ -239,10 +242,10 @@ def _mxfp8(n: int, k: int, g, device):
 
 def _random_moe(moe, gd, gr, inter: int) -> None:
     """Random parameters in the loaded layout, before post-load processing: this
-    rank's shards (``gd``, a device generator) of the MXFP4 routed experts
-    (random nibbles, E8M0 scales; the intermediate past ``inter`` zero, as the
+    rank's shards (`gd`, a device generator) of the MXFP4 routed experts
+    (random nibbles, E8M0 scales; the intermediate past `inter` zero, as the
     loader pads it) and the MXFP8 shared expert (one E8M0 a 32 x 32 block); the
-    replicated router from ``gr``, seeded alike on every rank."""
+    replicated router from `gr`, seeded alike on every rank."""
     u8 = torch.uint8
     for lin in (moe.shared_experts.gate_up_proj, moe.shared_experts.down_proj):
         n = lin.weight.shape[0]
@@ -391,6 +394,15 @@ def _check_layers(rank: int, tp: int, device) -> None:
     e, sh = moe.experts.routed_experts, moe.shared_experts
     u8 = lambda t: t.view(torch.uint8)  # noqa: E731
     runner = DSV41MonoLayer(tp, rank, get_tp_group().cpu_group, device)
+    # the tuned builds' reference (``MonoBuild.generic``): at TP2 the ratio-2
+    # steps take the tuned paths, 12 rows the small-width ones, 36 a partial
+    # last token tile; their outputs must match the generic builds' bit for bit.
+    # Only TP2 has tuned builds, so only TP2 makes the reference.
+    generic = (
+        DSV41MonoLayer(tp, rank, get_tp_group().cpu_group, device, generic=True)
+        if tp == 2
+        else None
+    )
     gw, bias = moe.gate.weight.float(), moe.gate.e_score_correction_bias.float()
 
     def top6(x):
@@ -399,7 +411,21 @@ def _check_layers(rank: int, tp: int, device) -> None:
         return sc.topk(6, dim=1).indices.sort(1).values
 
     steps = []  # each case's launches, on fixed buffers, for the replay stress
-    for ratio, R, T in ((1, 1, 6), (2, 8, 6)):
+    gate_bias = moe.gate.e_score_correction_bias
+    # ``hot``: the router's bias on six experts, so every row picks the same six:
+    # a down round's rows then overflow its LDS block (``fits`` false in
+    # ``moe.down_round_pipe``, which the random routing never reaches)
+    for ratio, R, T, hot in (
+        (1, 1, 6, False),
+        (2, 2, 6, False),
+        (2, 6, 6, False),
+        (2, 8, 6, False),
+        (2, 6, 6, True),
+    ):
+        saved_bias = gate_bias.detach().clone()
+        if hot:
+            gate_bias.data[:6] += 100.0
+        bias = gate_bias.float()
         with set_current_vllm_config(VllmConfig()):
             rope = build_deepseek_v4_rope(
                 cfg, head_dim=HEAD_DIM, rope_head_dim=ROPE,
@@ -462,10 +488,14 @@ def _check_layers(rank: int, tp: int, device) -> None:
         q8, qs = mxfp8_e4m3_quantize(qr)
         q = rocm_mxfp8_block32_gemm(q8, qs, wq_b, wq_b_s, bf).view(M, H, HEAD_DIM)
         swa2d = s["swa_cache"].view(s["swa_cache"].shape[0], -1)
+        swa_pre = s["swa_cache"].clone()
         q_roped = torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
             q, kv, swa2d, s["slot_mapping"], s["positions"], cos_sin, H,
             cfg.rms_norm_eps, SWA_BLOCK, False, False, True, False,
         )  # fmt: skip
+        swa_ref = s["swa_cache"].clone()
+        # the step's rows are new: the reference's insert changed the cache
+        assert not torch.equal(swa_pre.view(torch.uint8), swa_ref.view(torch.uint8))
         attn = torch.empty(M, H, HEAD_DIM, dtype=bf, device=device)
         rocm_aiter_ops.triton_sparse_mla_fwd(
             q_roped, s["swa_cache"], attn, HEAD_DIM**-0.5, swa_ptr, swa_ind,
@@ -483,15 +513,37 @@ def _check_layers(rank: int, tp: int, device) -> None:
         out = moe_out(xf)
 
         # ---- the whole layer: K1 + K2
-        o = runner.forward(
-            mw, x0, res0, post0, comb0, pre0, s["positions"], s["slot_mapping"],
-            s["swa_cache"], s["swa_indices"], s["swa_lens"], s["token_to_req"],
-            topk_indices=s["topk"], comp_cache=s["comp_cache"],
-            comp_block_table=s["comp_block_table"],
-        )  # fmt: skip
-        off = scratch_layout(M, tp)["normed"][0]
-        normed = runner.scratch(M)[off : off + M * HIDDEN * 2].view(bf).view(M, HIDDEN)
         tag = f"ratio {ratio}, {R} x {T}"
+        res_of = {}
+        swa_of = {}
+        runs = (
+            (generic, runner)
+            if generic is not None and runner.tuned(M, ratio)
+            else (runner,)
+        )
+        for r in runs:
+            # each runner inserts the step's rows itself, into the cache as it
+            # was before the reference's insert
+            s["swa_cache"].copy_(swa_pre)
+            o = r.forward(
+                mw, x0, res0, post0, comb0, pre0, s["positions"], s["slot_mapping"],
+                s["swa_cache"], s["swa_indices"], s["swa_lens"], s["token_to_req"],
+                topk_indices=s["topk"], comp_cache=s["comp_cache"],
+                comp_block_table=s["comp_block_table"],
+            )  # fmt: skip
+            off = scratch_layout(M, tp, tuned=r.tuned(M, ratio))["normed"][0]
+            normed = r.scratch(M, r.tuned(M, ratio))[off : off + M * HIDDEN * 2]
+            mid = (r.res_mid, r.post_a, r.comb_a, r.pre_a)
+            res_of[r] = [t.clone() for t in (*o, normed, *(t[:M] for t in mid))]
+            swa_of[r] = s["swa_cache"].clone()
+        if generic is not None and generic in res_of:
+            assert all(map(torch.equal, res_of[runner], res_of[generic])), tag
+        # the SWA records K1 writes: every runner's cache, byte for byte,
+        # equals the one the reference's insert leaves (a K1 that skipped or
+        # misplaced an insert fails here, whatever its attention then reads)
+        for got in swa_of.values():
+            assert torch.equal(got.view(torch.uint8), swa_ref.view(torch.uint8)), tag
+        normed = normed.view(bf).view(M, HIDDEN)
         assert _cos(runner.res_mid[:M], res) > 0.99999, tag
         for got, want in (
             (runner.post_a, post),
@@ -518,6 +570,9 @@ def _check_layers(rank: int, tp: int, device) -> None:
         # ---- the FFN launch, from the same unreduced wo_b output
         f = runner.ffn(mw, part, res, post, comb, attn_pre)
         torch.testing.assert_close(f[1], res2, rtol=2**-8, atol=1e-6)
+        # the FFN launch is a generic build: it writes the generic scratch
+        off = scratch_layout(M, tp)["normed"][0]
+        normed = runner.scratch(M)[off : off + M * HIDDEN * 2].view(bf).view(M, HIDDEN)
         torch.testing.assert_close(normed, xf, rtol=2**-7, atol=1e-6)
         # TODO: back to 0.9999 / 0.015 with the one above (ROCm/aiter#6548)
         assert _cos(f[0], out) > 0.9998 and _rel(f[0], out) < 0.02, tag
@@ -541,6 +596,7 @@ def _check_layers(rank: int, tp: int, device) -> None:
             return [*whole, *ffn]
 
         steps.append(step)
+        gate_bias.data.copy_(saved_bias)
 
     # ---- the hand-off protocol under back-to-back launches: both step widths
     # alternating in one graph, every replay bit for bit the first's
@@ -568,6 +624,23 @@ def test_mono_decode_layer_matches_vllm(monkeypatch: pytest.MonkeyPatch, tp: int
         pytest.skip(f"needs {tp} GPUs")
     pytest.importorskip("flydsl")
     multi_process_parallel(monkeypatch, tp, 1, _mono_numerics)
+
+
+@pytest.mark.skipif(not _on_cdna4(), reason="the mono kernels target CDNA4")
+@pytest.mark.skipif(not shutil.which("llvm-objdump"), reason="needs llvm-objdump")
+def test_mono_decode_k2_tp4_no_scratch(monkeypatch: pytest.MonkeyPatch):
+    """TP4 K2 at 14 rows, where the MoE push's peer bases spilled: no scratch."""
+    flyc = pytest.importorskip("flydsl.compiler")
+    from vllm.models.deepseek_v41.amd.mono.layer import MonoBuild, build_mono_k2
+    from vllm.models.minimax_m3.amd.specialized_decode.mono.residency import code_object
+
+    monkeypatch.setenv("COMPILE_ONLY", "1")
+    monkeypatch.setenv("FLYDSL_RUNTIME_ENABLE_CACHE", "0")
+    k2 = build_mono_k2(MonoBuild(14, 4, 2))
+    flyc.compile(k2, *[0] * (k2.func.__code__.co_argcount - 1))
+    elf = code_object(k2._last_compiled[1]._ir_text)
+    isa = subprocess.check_output(["llvm-objdump", "-d", "-"], input=elf)
+    assert b"scratch_" not in isa
 
 
 # ---------------------------------------------------------------- gfx942

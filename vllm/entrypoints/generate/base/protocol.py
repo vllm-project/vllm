@@ -182,7 +182,7 @@ def structured_outputs_from_response_format(
     structured_outputs: StructuredOutputsParams | None,
     response_format: AnyResponseFormat | None,
 ) -> StructuredOutputsParams | None:
-    """Apply ``response_format`` overrides to ``structured_outputs``."""
+    """Apply `response_format` overrides to `structured_outputs`."""
     if response_format is None or response_format.type == "text":
         return structured_outputs
 

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-//! MuseSpark1x Omni audio preprocessing.
+//! Muse Spark Omni audio preprocessing.
 //!
 //! The model consumes *raw waveforms* resampled to 24 kHz — there is no mel
 //! spectrogram frontend. Each clip is emitted as-is into one flat
@@ -55,7 +55,7 @@ impl MuseSparkAudioParams {
     }
 }
 
-/// MuseSpark1x audio preprocessor: resample to 24 kHz, pass the waveform
+/// Muse Spark audio preprocessor: resample to 24 kHz, pass the waveform
 /// through unchanged.
 #[derive(Debug, Clone, Default)]
 pub struct MuseSparkAudioProcessor {

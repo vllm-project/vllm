@@ -46,9 +46,12 @@ class DecoderReplayCudaGraphManager(CudaGraphManager):
             )
         compilation.cudagraph_capture_sizes = sizes
         compilation.max_cudagraph_capture_size = max(sizes)
+        compilation.prefill_cudagraph_capture_token_sizes = sizes
         replay_config = copy(vllm_config)
         replay_config.compilation_config = compilation
-        super().__init__(replay_config, device, CUDAGraphMode.PIECEWISE, 1)
+        super().__init__(
+            replay_config, device, CUDAGraphMode.PIECEWISE, {1: scheduler.max_num_seqs}
+        )
         self.layers = layers
         self.breakable_cg_runner: BreakableCUDAGraphWrapper = BreakableCUDAGraphWrapper(
             layers.run_layers, replay_config
@@ -72,11 +75,11 @@ class DecoderReplayCudaGraphManager(CudaGraphManager):
         prepare: Callable[[BatchExecutionDescriptor], None],
         stream: torch.cuda.Stream | None = None,
     ) -> None:
-        """Capture each size on the replay batch ``prepare`` sets on the layers.
+        """Capture each size on the replay batch `prepare` sets on the layers.
 
-        On the model graphs' ``stream`` they share its free blocks of the graph
+        On the model graphs' `stream` they share its free blocks of the graph
         pool: a replay graph runs in a model graph's eager break, after it has
-        gathered its inputs into ``input_buffers`` and before the model graph
+        gathered its inputs into `input_buffers` and before the model graph
         reads its outputs from the break's own buffers, so no model graph
         tensor in the pool is live while it runs. Aux hidden states captured
         before the replay layers would be, so with those it keeps its own.
@@ -102,7 +105,7 @@ class DecoderReplayCudaGraphManager(CudaGraphManager):
         self.layers.replay_batch = None
 
     def run(self, rows: torch.Tensor, inputs: tuple) -> tuple[torch.Tensor, ...]:
-        """Replay the forward context's graph on ``rows`` of ``inputs``."""
+        """Replay the forward context's graph on `rows` of `inputs`."""
         num_rows = rows.shape[0]
         for buf, t in zip(self.input_buffers, inputs):
             torch.index_select(t, 0, rows, out=buf[:num_rows])

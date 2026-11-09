@@ -20,7 +20,7 @@ from datetime import timedelta
 from typing import Any
 
 import torch
-from torch.distributed import ProcessGroup, Store, TCPStore
+from torch.distributed import ProcessGroup, ReduceOp, Store, TCPStore
 from torch.distributed.distributed_c10d import (
     Backend,
     PrefixStore,
@@ -58,6 +58,18 @@ def ensure_divisibility(numerator, denominator):
 
 # P2P tags [base, base + log2(group size) + 1] are reserved for cpu_all_reduce_.
 _CPU_ALL_REDUCE_TAG_BASE = 27100
+
+
+def all_reduce_int(
+    group: ProcessGroup | None, value: int, op: ReduceOp = ReduceOp.MIN
+) -> int:
+    """All-reduce one integer over a CPU process group, e.g. for ranks to agree
+    on a size or a decision; `value` itself without a group or with one rank."""
+    if group is None or group.size() == 1:
+        return value
+    tensor = torch.tensor([value], dtype=torch.int64, device="cpu")
+    torch.distributed.all_reduce(tensor, op=op, group=group)
+    return int(tensor.item())
 
 
 def cpu_all_reduce_(
@@ -156,10 +168,10 @@ def verify_group_size_divides_partition(
 def is_weak_contiguous(inp: torch.Tensor) -> bool:
     """Check that *inp* occupies a single contiguous block of memory.
 
-    Unlike ``torch.Tensor.is_contiguous()``, this also accepts tensors
+    Unlike `torch.Tensor.is_contiguous()`, this also accepts tensors
     whose strides are not strictly C-contiguous (e.g. column-major) as
     long as the underlying storage from the tensor's offset onward is
-    exactly ``numel * element_size`` bytes.
+    exactly `numel * element_size` bytes.
     """
     return inp.is_contiguous() or (
         inp.storage().nbytes() - inp.storage_offset() * inp.element_size()
@@ -222,6 +234,8 @@ def get_pp_indices(
             raise ValueError(f"{len(partitions)=} does not match {pp_size=}.")
         if sum(partitions) != num_hidden_layers:
             raise ValueError(f"{sum(partitions)=} does not match {num_hidden_layers=}.")
+        if any(p < 0 for p in partitions):
+            raise ValueError(f"Negative layer count in {partition_list_str=}.")
     else:
         layers_per_partition = num_hidden_layers // pp_size
         partitions = [layers_per_partition for _ in range(pp_size)]
@@ -248,7 +262,7 @@ def create_tcp_store(
     listen_socket: socket.socket | None = None,
     **kwargs: Any,
 ) -> TCPStore:
-    """Create a TCPStore, optionally taking ownership of ``listen_socket``."""
+    """Create a TCPStore, optionally taking ownership of `listen_socket`."""
     if listen_socket is None:
         return TCPStore(host_name=host, port=port, **kwargs)
 
@@ -587,8 +601,8 @@ class StatelessProcessGroup:
 def get_cached_tcp_store_client(host: str, port: int) -> TCPStore:
     """Return a cached TCPStore client.
 
-    Cached so that every call with the same ``(host, port)`` reuses the
-    same connection.  A new ``(host, port)`` evicts the old entry.
+    Cached so that every call with the same `(host, port)` reuses the
+    same connection.  A new `(host, port)` evicts the old entry.
     """
     return TCPStore(host, port, is_master=False, wait_for_workers=False)
 
@@ -598,7 +612,7 @@ def allocate_group_ports(
 ) -> tuple[list[int], list[socket.socket]]:
     """Bind sockets and publish the ports to *store*.
 
-    Returns ``(ports, sockets)`` with the sockets still open.
+    Returns `(ports, sockets)` with the sockets still open.
     """
     socks: list[socket.socket] = []
     ports: list[int] = []
@@ -729,7 +743,7 @@ def stateless_init_torch_distributed_process_group(
     channel is formed with process 9 and 10.
 
     When *listen_socket* is provided, the rendezvous step
-    is skipped and a ``TCPStore`` server is created directly using the
+    is skipped and a `TCPStore` server is created directly using the
     pre-bound socket.  This is useful for eliminating TOCTOU races
     between port allocation and binding.
 

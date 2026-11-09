@@ -4,7 +4,7 @@
 
 Trace-replay forces the sampler to emit a predetermined sequence of decode
 token IDs. The replay step for a request is derived from GPU state as
-``total_len - prompt_len`` (output tokens produced so far), and the trace token
+`total_len - prompt_len` (output tokens produced so far), and the trace token
 overwrites the sampled token in place before logprobs are computed.
 """
 
