@@ -30,6 +30,7 @@ mooncake_master --port 50051
 Default ports:
 
 - RPC: 50051
+- Metrics (HTTP, `--metrics_port`): 9003, serving `/metrics` (see [Metrics](#metrics))
 
 Multiple vLLM instances can share the same master server.
 
@@ -351,6 +352,13 @@ reset waits at most 60 seconds.
 - `save_decode_cache` (bool): Enable offloading decode tokens' KV cache. A `kv_consumer` does not save during prefill; when decode starts, it fills any missing block-aligned prompt prefix before appending completed decode blocks. Default: `false`.
 - `store_tp_size` (int): Common Store TP for divisible heterogeneous-TP
   sharing. See [Sharing one Store across multiple Prefill TP sizes](#sharing-one-store-across-multiple-prefill-tp-sizes).
+- `mooncake_master_metrics_url` (str): URL of the Mooncake master's Prometheus
+  endpoint, for example `"http://127.0.0.1:9003/metrics"`. When set, vLLM polls
+  it once a second and exports the [store usage gauges](#metrics). Default:
+  unset, so no usage gauges are exported.
+- `mooncake_kv_lease_ttl_ms` (int): The master's read-lease TTL, which must
+  match its `--default_kv_lease_ttl`. Used to estimate `read_usage_perc`.
+  Default: `10000`, the Mooncake master's default.
 
 #### Automatic cache prefix
 
@@ -379,6 +387,64 @@ their local KV replica.
 Tensor-parallel collectives and low-precision arithmetic are not bitwise
 invariant across TP sizes, so heterogeneous-TP reuse does not guarantee the
 same greedy output as recomputing the prefix at the decode TP size.
+
+## Metrics
+
+`MooncakeStoreConnector` exports these Prometheus metrics on vLLM's `/metrics`
+endpoint.
+
+**Per-operation metrics** are always exported. They are labelled by
+`operation` (`save_exists`, `save_put`, `load_get`, `lookup_exists`) and
+`status`:
+
+| Metric | Type | Meaning |
+| --- | --- | --- |
+| `vllm:mooncake_store_operation_time_seconds` | histogram | Duration of each Store call |
+| `vllm:mooncake_store_operation_total` | counter | Store calls |
+| `vllm:mooncake_store_operation_keys_total` | counter | Keys touched |
+| `vllm:mooncake_store_operation_bytes_total` | counter | Bytes transferred |
+| `vllm:mooncake_store_operation_failed_keys_total` | counter | Keys that failed |
+| `vllm:mooncake_store_allocation_size` | histogram | Keys per `save_put` call, after dropping keys the Store already holds |
+| `vllm:mooncake_store_save_existing_keys_total` | counter | Save candidates skipped because the Store already holds them |
+
+**Store usage gauges** are exported only when `mooncake_master_metrics_url` is
+set in `kv_connector_extra_config`:
+
+```bash
+vllm serve meta-llama/Llama-3.1-8B-Instruct \
+    --kv-transfer-config '{"kv_connector":"MooncakeStoreConnector","kv_role":"kv_both","kv_connector_extra_config":{"mooncake_master_metrics_url":"http://127.0.0.1:9003/metrics"}}'
+```
+
+vLLM polls the master once a second from the API server process, so the
+gauges keep updating while the engine is idle. Each is a fraction of
+`master_total_capacity_bytes`, from 0 to 1:
+
+| Metric | Source | Meaning |
+| --- | --- | --- |
+| `vllm:mooncake_store_cache_usage_perc` | write + read + `master_put_start_discarded_staging_size` | Memory eviction cannot reclaim now |
+| `vllm:mooncake_store_cache_write_usage_perc` | counted by vLLM | Puts this vLLM instance has in flight |
+| `vllm:mooncake_store_cache_read_usage_perc` | estimated by vLLM | Data under a read lease this vLLM instance took |
+| `vllm:mooncake_store_cache_occupancy_perc` | `master_allocated_bytes` | All allocated memory, including data eviction can reclaim |
+
+The master gauges used here are published by every Mooncake master. The master
+does not export memory pinned by puts in flight or by read leases, so vLLM
+estimates both from its own traffic:
+
+- Write usage counts the bytes of each put from the moment it is issued until
+  it returns.
+- Read usage counts the bytes of the keys vLLM read, or found already stored
+  while saving, for `mooncake_kv_lease_ttl_ms`: the master grants a lease of
+  that length on every key it returns and on every key an existence check finds.
+
+Both estimates cover only this vLLM instance, so traffic from other clients of
+the same Store is missing, and adding the gauges of several instances counts
+keys they share more than once.
+
+These gauges follow `vllm:kv_offload_cpu_cache_{usage,write_usage,read_usage}_perc`
+of the CPU offloading connector, with one difference: the Store holds a read
+lease for its whole TTL after each read, so `read_usage_perc` includes that
+TTL, not only the transfer time. The CPU offloading connector has no occupancy
+gauge.
 
 ## Standalone EGM over NVLink
 
