@@ -62,7 +62,7 @@ TOOL_CHOICE_CASES = [
 EXPECTED: dict[str, dict[str, tuple[bool, str | None] | None]] = {
     "omitted": {
         "omitted": (False, "none"),
-        "null": (False, None),
+        "null": (False, "none"),
         "none": (False, "none"),
         "auto": (False, "none"),
         "required": None,
@@ -71,7 +71,7 @@ EXPECTED: dict[str, dict[str, tuple[bool, str | None] | None]] = {
     },
     "null": {
         "omitted": (False, "none"),
-        "null": (False, None),
+        "null": (False, "none"),
         "none": (False, "none"),
         "auto": (False, "none"),
         "required": None,
@@ -80,7 +80,7 @@ EXPECTED: dict[str, dict[str, tuple[bool, str | None] | None]] = {
     },
     "empty": {
         "omitted": (False, "none"),
-        "null": (False, None),
+        "null": (False, "none"),
         "none": (False, "none"),
         "auto": (False, "none"),
         "required": None,
