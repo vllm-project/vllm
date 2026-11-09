@@ -290,6 +290,13 @@ def _try_get_processor_chat_template(
             and hasattr(processor, "chat_template")
             and (chat_template := processor.chat_template) is not None
         ):
+            if isinstance(chat_template, dict) and "default" in chat_template:
+                chat_template = chat_template["default"]
+            if not isinstance(chat_template, str):
+                raise TypeError(
+                    "Expected a str or a dict with a 'default' entry, "
+                    f"got {type(chat_template).__name__}"
+                )
             _PROCESSOR_CHAT_TEMPLATES[cache_key] = chat_template
             return chat_template
     except Exception:
@@ -408,7 +415,7 @@ def _is_var_or_elems_access(
 
 
 def _attr_dotted_name(node: jinja2.nodes.Node) -> str | None:
-    """Render an attribute-assignment target like ``ns.rest`` as a dotted name."""
+    """Render an attribute-assignment target like `ns.rest` as a dotted name."""
     if isinstance(node, jinja2.nodes.NSRef):
         return f"{node.name}.{node.attr}"
     parts = []
@@ -1064,7 +1071,7 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
 
         Called after a render timeout so that the stuck thread (which CPython
         cannot interrupt) does not permanently block all subsequent renders.
-        The executor *object* is kept so ``make_async`` wrappers bound at
+        The executor *object* is kept so `make_async` wrappers bound at
         init (tokenize, decode, pooling, derender) keep submitting work.
         The old inner pool is abandoned with wait=False — its thread will
         eventually finish or be reaped on process exit.
@@ -1479,6 +1486,7 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
         for tensor, (start, length) in zip(
             prompt_embeds_tensors, positions, strict=True
         ):
+            token_ids[start : start + length] = [0] * length
             pe_kwargs_items.append(
                 MultiModalKwargsItem(
                     {
@@ -1500,6 +1508,7 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
                 PlaceholderRange(offset=start, length=length, is_embed=None)
             )
 
+        engine_input["prompt_token_ids"] = token_ids
         cast(
             MultiModalKwargsItems[MultiModalKwargsItem | None],
             engine_input["mm_kwargs"],

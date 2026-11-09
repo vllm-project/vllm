@@ -1,6 +1,6 @@
 ---
 name: attention-backend-testing
-description: "Standard for testing a vLLM attention backend (vllm/v1/attention/backends/*): what a complete suite must cover (capability contract, metadata builder, every forward dispatch path, KV-cache write/read and dtypes, CUDA graph modes, workspace/memory, scheduler, model runner v1/v2, async scheduling, spec decode, PCP/DCP, logits), where the tests live, how accuracy and performance artifacts are produced and compared in Buildkite. Use when writing or restructuring tests for an attention backend, when reviewing a PR that touches an attention backend, its kernels, its selector rules or its CI steps, or when judging whether a backend's coverage is sufficient."
+description: "Standard for testing a vLLM attention backend (vllm/v1/attention/backends/*): what a complete suite must cover (capability contract, metadata builder, every forward dispatch path, KV-cache write/read and dtypes, CUDA graph modes, workspace/memory, scheduler, model runner v2 batch order, async scheduling, spec decode, PCP/DCP, logits), where the tests live, how accuracy and performance artifacts are produced and compared in Buildkite. Use when writing or restructuring tests for an attention backend, when reviewing a PR that touches an attention backend, its kernels, its selector rules or its CI steps, or when judging whether a backend's coverage is sufficient."
 ---
 
 # Attention backend testing standard
@@ -22,7 +22,7 @@ Buildkite wiring and perf/accuracy comparison. When reviewing a PR, use
 
 1. **Enumerate dispatch paths first.** Before writing tests, list every branch
    in `Impl.forward`, `Builder.build`, `build_for_cudagraph_capture`,
-   `build_for_drafting`, `do_kv_cache_update` and any fused-update hooks, as a
+   `do_kv_cache_update` and any fused-update hooks, as a
    table of *condition -> kernel*. Each row gets at least one test that
    (a) checks the numerical output against an independent reference and
    (b) asserts the intended kernel ran, by spying on the op (monkeypatch a
@@ -82,7 +82,7 @@ Buildkite wiring and perf/accuracy comparison. When reviewing a PR, use
 10. **Runtime integration through a dummy-weight model.** Build a small model
     from a real architecture (`load_format="dummy"`, `hf_overrides`) and run it
     through `LLM` with the scheduler, prefix caching, chunked prefill, async
-    scheduling on/off, model runner v1 and v2, and each CUDA graph mode. For a
+    scheduling on/off, and each CUDA graph mode. For a
     hybrid model, keep exactly its smallest repeating layer block (Qwen3.8: 3
     GDN + 1 full; Gemma 4: 5 sliding + 1 global; GPT-OSS: sliding + full), so
     every layer kind and its neighbors run. Stock dummy weights give flat
@@ -150,6 +150,11 @@ them before trusting a green run.
   and do not refresh cached env in the test process.
 - **Output-only checks.** A correct output from a fallback kernel passes; spy
   on the kernel (rule 1).
+- **Exact-size output buffers.** A kernel that also writes rows with no query
+  tokens (padding, or a request whose KV is still loading) lands past the real
+  tokens: in allocator slack it passes, and it aborts only when another test's
+  memory happens to sit there. Allocate Q and the output with extra rows,
+  filled with NaN, as the runner pads them, and assert the extra rows stay NaN.
 
 ## Tiers and where they live
 
@@ -162,7 +167,7 @@ them before trusting a green run.
 | L2 KV cache | write path per layout and dtype, read-back round trip, sharing/bypass | 1 | `.../<backend>/test_kv_cache.py` |
 | L2 correctness | model-shape matrix x phases x KV dtype x block size | 1 | `.../<backend>/test_correctness.py` |
 | L2 graphs | capture/replay per mode, padded batches | 1 | `.../<backend>/test_cudagraph.py` |
-| L3 runtime | dummy-weight model via `LLM`: scheduler, MRv1/v2, async, spec decode, CUDA graph modes, logprobs vs reference | 1-2 | `tests/v1/e2e/attention/test_<backend>_runtime.py` |
+| L3 runtime | dummy-weight model via `LLM`: scheduler, async, spec decode, CUDA graph modes, logprobs vs reference | 1-2 | `tests/v1/e2e/attention/test_<backend>_runtime.py` |
 | L4 task | real-weight GSM8K for one model per head size | 1-8 | `tests/evals/gsm8k/configs/` |
 | Perf | kernel and backend timing | 1 | `benchmarks/attention_benchmarks/configs/<backend>.yaml` |
 

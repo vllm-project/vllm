@@ -87,7 +87,8 @@ def test_flashinfer_mla_forward_uses_gathered_head_count(monkeypatch):
 
 @requires_flashinfer_mla
 @pytest.mark.parametrize("causal", [True, False], ids=["causal", "noncausal"])
-def test_flashinfer_mla_forward_uses_native_dcp_api(monkeypatch, causal):
+@pytest.mark.parametrize("query_lens", [(3, 3), (3, 1)], ids=["uniform", "ragged"])
+def test_flashinfer_mla_forward_uses_native_dcp_api(monkeypatch, causal, query_lens):
     import vllm.v1.attention.backends.mla.flashinfer_mla as flashinfer_mla
 
     impl = MagicMock()
@@ -106,8 +107,11 @@ def test_flashinfer_mla_forward_uses_native_dcp_api(monkeypatch, causal):
         flashinfer_mla.FlashInferMLAImpl._flattened_decode_metadata, impl
     )
 
-    num_reqs, query_len = 2, 3
-    num_tokens = num_reqs * query_len
+    num_reqs = len(query_lens)
+    num_tokens = sum(query_lens)
+    query_len = max(query_lens)
+    split_rows = not causal or len(set(query_lens)) > 1
+    lens = torch.tensor(query_lens)
     block_table = torch.tensor([[10], [20]], dtype=torch.int32)
     seq_lens = torch.tensor([4, 5], dtype=torch.int32)
     global_causal_seq_lens = torch.tensor([31, 35], dtype=torch.int32)
@@ -120,15 +124,15 @@ def test_flashinfer_mla_forward_uses_native_dcp_api(monkeypatch, causal):
     attn_metadata.decode.seq_lens = seq_lens
     attn_metadata.decode.dcp_tot_seq_lens = global_causal_seq_lens
     attn_metadata.decode.max_query_len = query_len
-    attn_metadata.decode.query_start_loc = torch.arange(
-        0, num_tokens + 1, query_len, dtype=torch.int32
+    attn_metadata.decode.query_start_loc = torch.tensor(
+        [0, *lens.cumsum(0).tolist()], dtype=torch.int32
     )
     attn_metadata.decode.query_len = 0
 
     query = torch.ones(num_tokens, 24, 576, dtype=torch.bfloat16)
     kv_cache = torch.ones(2, 128, 576, dtype=torch.bfloat16)
-    kernel_batch = num_reqs if causal else num_tokens
-    kernel_query_len = query_len if causal else 1
+    kernel_batch = num_tokens if split_rows else num_reqs
+    kernel_query_len = 1 if split_rows else query_len
     kernel = MagicMock(
         return_value=(
             torch.ones(
@@ -155,15 +159,17 @@ def test_flashinfer_mla_forward_uses_native_dcp_api(monkeypatch, causal):
 
     call = kernel.call_args.kwargs
     assert call["query"].shape == (kernel_batch, kernel_query_len, 24, 576)
-    expected_block_table = (
-        block_table if causal else block_table.repeat_interleave(query_len, dim=0)
-    )
-    expected_seq_lens = seq_lens if causal else seq_lens.repeat_interleave(query_len)
-    expected_global_seq_lens = (
-        global_causal_seq_lens
-        if causal
-        else global_causal_seq_lens.repeat_interleave(query_len)
-    )
+    expected_block_table = block_table
+    expected_seq_lens = seq_lens
+    expected_global_seq_lens = global_causal_seq_lens
+    if split_rows:
+        expected_block_table = block_table.repeat_interleave(lens, dim=0)
+        expected_seq_lens = seq_lens.repeat_interleave(lens)
+        expected_global_seq_lens = global_causal_seq_lens.repeat_interleave(lens)
+    if causal and split_rows:
+        # Each split row sees KV only up to its own position in its request.
+        rows_after = torch.cat([torch.arange(n - 1, -1, -1) for n in query_lens])
+        expected_global_seq_lens = expected_global_seq_lens - rows_after.int()
     torch.testing.assert_close(call["block_tables"], expected_block_table)
     torch.testing.assert_close(call["seq_lens"], expected_seq_lens)
     assert call["backend"] == "cute-dsl"

@@ -24,7 +24,7 @@ touching vLLM code.
 Run the unit step with
 `pytest --cov=vllm/v1/attention/backends/<backend>.py --cov-branch --cov-report=json:cov.json`
 and upload `cov.json`. A small script fails the step when a branch inside
-`forward`, `build`, `build_for_drafting`, `do_kv_cache_update` is uncovered and
+`forward`, `build`, `build_for_cudagraph_capture`, `do_kv_cache_update` is uncovered and
 not marked `# pragma: no cover` with a reason. This turns "every dispatch path
 is tested" into a mechanical check that reviewers can read off the artifact.
 

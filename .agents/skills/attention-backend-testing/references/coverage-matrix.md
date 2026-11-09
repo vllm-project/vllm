@@ -26,7 +26,7 @@ mark each row *covered (test id)*, *N/A (reason)* or *gap (issue)*.
 | B2 | Each metadata field equals an independently computed value (query start locs per phase, max lens, seq lens, block tables). |
 | B3 | Context chunking: no context, context < one chunk, exactly one chunk, many chunks, uneven contexts across requests. |
 | B4 | Sliding-window tables: trimmed block table and rebased seq lens at window edges and block edges. |
-| B5 | `build_for_cudagraph_capture` and `build_for_drafting` produce metadata the forward path accepts, without GPU syncs. |
+| B5 | `build_for_cudagraph_capture` produces metadata the forward path accepts, without GPU syncs. |
 | B6 | No GPU sync in decode-only builds; CPU copies only when the phase needs them. |
 | B7 | Persistent buffers: allocated once, sized from scheduler limits, reused across builds (same `data_ptr`). |
 | B8 | Padded batches: `num_actual_tokens` < padded tokens, and requests with query length 0 placed after the real prefills/extends, in two forms: seq_len 0 (FULL CUDA graph request padding) and seq_len > 0 (a KV connector loading asynchronously; vllm-project/vllm#51486). Run each form through every prefill/context chunking path the builder has (B3). Real rows must match the reference, and no kernel may get an empty tensor (vllm-project/vllm#55695). |
@@ -88,7 +88,7 @@ mark each row *covered (test id)*, *N/A (reason)* or *gap (issue)*.
 | # | Case |
 | --- | --- |
 | H1 | Scheduler: chunked prefill, prefix caching, preemption and recompute. |
-| H2 | Model runner v1 and v2 (`VLLM_USE_V2_MODEL_RUNNER`). |
+| H2 | Model runner v2 batch order: non-decodes sorted by token count, so a prefill can precede an extend. |
 | H3 | Async scheduling on and off. |
 | H4 | Speculative decoding (EAGLE/MTP/ngram) with the backend as target and draft. |
 | H5 | PCP / DCP: tested, or rejected by the selector. |

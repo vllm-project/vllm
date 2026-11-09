@@ -3,7 +3,7 @@
 """AiterFlashAttentionMetadataBuilder: every field against an independent value.
 
 Covers the decode/extend/prefill split, context chunking for extends, the
-sliding-window decode tables, the capture and drafting builders, persistent
+sliding-window decode tables, the capture builder, persistent
 buffers and the no-GPU-sync guarantee of decode-only builds.
 """
 
@@ -258,9 +258,7 @@ def test_decode_only_build_does_not_sync(sliding_window):
     with no_gpu_sync():
         md = case.build(batch)
         md_capture = case.builder.build_for_cudagraph_capture(batch.common)
-        md_draft = case.builder.build_for_drafting(batch.common, draft_index=0)
     assert md_capture.num_decodes == md.num_decodes == 16
-    assert md_draft.num_decodes == 16 and md_draft.extend_metadata is None
 
 
 def test_capture_build_matches_regular_build():
@@ -278,16 +276,6 @@ def test_capture_build_matches_regular_build():
     ):
         assert getattr(a, field) == getattr(b, field), field
     assert a.decode_metadata.max_query_len == b.decode_metadata.max_query_len
-
-
-def test_drafting_build_treats_every_row_as_decode():
-    case = _case()
-    batch = case.batch([3, 3, 3], [40, 90, 500])
-    md = case.builder.build_for_drafting(batch.common, draft_index=1)
-    assert (md.num_decodes, md.num_decode_tokens) == (3, 9)
-    assert md.prefill_metadata is None and md.extend_metadata is None
-    assert md.decode_metadata.max_query_len == 3
-    assert md.block_table is batch.common.block_table_tensor
 
 
 def test_builder_rejects_two_sliding_windows():

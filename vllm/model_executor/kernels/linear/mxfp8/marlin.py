@@ -33,8 +33,10 @@ class MarlinMxfp8LinearKernel(Mxfp8LinearKernel):
         if K % MXFP8_BLOCK_SIZE != 0:
             return (
                 False,
-                f"Marlin MXFP8 requires K to be divisible by {MXFP8_BLOCK_SIZE}, "
-                f"got K={K}.",
+                (
+                    f"Marlin MXFP8 requires K to be divisible by {MXFP8_BLOCK_SIZE}, "
+                    f"got K={K}."
+                ),
             )
         # Tile misalignment is fixed by zero-padding at weight prep.
         return True, None
