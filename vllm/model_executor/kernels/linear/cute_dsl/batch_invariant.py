@@ -61,7 +61,7 @@ def _compile_tensor_core_configs(
 
 
 def compile_tensor_core_rows(weight: torch.Tensor, rows: int) -> None:
-    """Compile ``weight``'s DeepGEMM configs for up to ``rows`` rows now, for a
+    """Compile `weight`'s DeepGEMM configs for up to `rows` rows now, for a
     weight whose largest batches (such as speculative verification at the
     lm_head) arrive only while serving."""
     if (
