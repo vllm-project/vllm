@@ -11,15 +11,15 @@
 
 """Lamport mailboxes in symmetric memory.
 
-A mailbox is ``[LAMPORT_GENERATIONS, tp, capacity, width]`` BF16 on every rank
+A mailbox is `[LAMPORT_GENERATIONS, tp, capacity, width]` BF16 on every rank
 of a TP group, mapped for NVLink multicast. A publisher multicasts its
-``[m, width]`` rows into slot ``[stage, rank]`` of every rank's copy; readers
+`[m, width]` rows into slot `[stage, rank]` of every rank's copy; readers
 poll their own copy in 16-byte fragments until no fragment holds BF16 negative
 zero (the sentinel; publishers store -0.0 as +0.0), then re-arm what they read.
-A publisher can also store rows into one rank's copy alone through ``peers``
-(the TP tail's route rows); ``poll_at`` reads slots at any fixed offsets.
+A publisher can also store rows into one rank's copy alone through `peers`
+(the TP tail's route rows); `poll_at` reads slots at any fixed offsets.
 
-Every spin is bounded: a poll that sees no data for ``SPIN_TIMEOUT_NS`` traps,
+Every spin is bounded: a poll that sees no data for `SPIN_TIMEOUT_NS` traps,
 so a rank that diverges fails the launch instead of hanging the group.
 """
 
@@ -70,11 +70,11 @@ SPIN_TIMEOUT_NS = 60_000_000_000
 
 
 class LamportMailbox:
-    """One TP group's ``[3, tp, capacity, width]`` BF16 mailbox and stage state.
+    """One TP group's `[3, tp, capacity, width]` BF16 mailbox and stage state.
 
-    Construction is collective over ``group`` and raises on every rank when the
-    buffer has no multicast mapping. ``peers`` are the ranks' buffer addresses
-    in rank order and ``multicast`` the multicast address of the whole buffer.
+    Construction is collective over `group` and raises on every rank when the
+    buffer has no multicast mapping. `peers` are the ranks' buffer addresses
+    in rank order and `multicast` the multicast address of the whole buffer.
     """
 
     def __init__(
@@ -133,7 +133,7 @@ class LamportMailbox:
         )
 
     def publish(self, publisher, rows: torch.Tensor) -> None:
-        """Multicast ``rows`` [m, width] BF16 into slot [NEXT_STAGE, rank]."""
+        """Multicast `rows` [m, width] BF16 into slot [NEXT_STAGE, rank]."""
         publisher(
             to_cute_dynamic(rows.flatten(), 16, divisibility=self.width),
             self.stage_view,
@@ -163,7 +163,7 @@ def rearm(pointer: cute.Pointer) -> None:
 
 @cute.jit
 def fetch(values: cute.Tensor, i: cutlass.Constexpr[int], pointer: cute.Pointer):
-    """Load fragment ``i`` into ``values[i]``; returns its dirty flag at bit ``i``."""
+    """Load fragment `i` into `values[i]`; returns its dirty flag at bit `i`."""
     got = load_global_u32x4(pointer, volatile=True)
     for k in cutlass.range_constexpr(4):
         values[i, k] = got[k]
@@ -183,7 +183,7 @@ def _poll(
     """Lamport-poll the 16-byte fragments at base + offsets[i] * stride
     (elements) into a [len(offsets), 4] u32 register tensor. All loads issue
     before any check and only dirty fragments re-poll; traps after
-    ``timeout_ns`` without data."""
+    `timeout_ns` without data."""
     count = len(offsets)
     values = cute.make_rmem_tensor(cute.make_layout((count, 4)), Uint32)
     pending = Uint32(0)
@@ -206,8 +206,8 @@ def poll(
     count: int,
     timeout_ns: int = SPIN_TIMEOUT_NS,
 ):
-    """``count`` fragments at base + i * stride (elements, ``stride`` at run
-    time), polled as ``_poll`` does: a [count, 4] u32 register tensor."""
+    """`count` fragments at base + i * stride (elements, `stride` at run
+    time), polled as `_poll` does: a [count, 4] u32 register tensor."""
     return _poll(base, stride, tuple(range(count)), timeout_ns)
 
 
@@ -217,7 +217,7 @@ def poll_at(
     timeout_ns: int = SPIN_TIMEOUT_NS,
 ):
     """The fragments at base + offsets[i] (elements, compile-time), polled as
-    ``_poll`` does: a [len(offsets), 4] u32 register tensor."""
+    `_poll` does: a [len(offsets), 4] u32 register tensor."""
     return _poll(base, Int64(1), offsets, timeout_ns)
 
 
@@ -235,9 +235,9 @@ def poll_owned_fragment(
     timeout_ns: cutlass.Constexpr[int] = SPIN_TIMEOUT_NS,
 ) -> None:
     """Column all-gather read: wait for this token's 8 global columns
-    ``fragment`` from the one rank that owns them, store the BF16x8 fragment
-    into ``packed`` and re-arm the slot; one thread per launch advances the
-    stage. Releases PDL dependents after the poll when ``release_dependents``
+    `fragment` from the one rank that owns them, store the BF16x8 fragment
+    into `packed` and re-arm the slot; one thread per launch advances the
+    stage. Releases PDL dependents after the poll when `release_dependents`
     (a kernel that triggers earlier passes False)."""
     local_fragments = hidden_local // VEC_BF16
     active_stage = load_volatile_u32(stage_state.iterator + ACTIVE_STAGE)
@@ -447,7 +447,7 @@ def compile_shared_only_publish(
     release_before_store: bool,
     enable_pdl: bool,
 ):
-    """Compile the publisher that multicasts a local ``[m, hidden]`` BF16 tensor
+    """Compile the publisher that multicasts a local `[m, hidden]` BF16 tensor
     into slot [NEXT_STAGE, rank] and then sets ACTIVE_STAGE."""
     device_kernel = _SharedOnlyPublishDeviceKernel(
         hidden=hidden,

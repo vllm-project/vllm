@@ -69,7 +69,7 @@ STEAL = "9-64:1"
 
 def static(batch):
     """Streamed B<=8 with TP8 FC2 pairs: the MMA warp walks the producer's static
-    schedule (``ExpertsKernel.consume_static``). The grouped engines keep the slot
+    schedule (`ExpertsKernel.consume_static`). The grouped engines keep the slot
     metadata: walking their FC1 stages gained 1-1.5% alone but lost 0.25% of the
     TP8 R4 step."""
     return bool(batch_table(STATIC).get(batch, 0))
@@ -80,7 +80,7 @@ STATIC = "4-8:1"
 
 def dynamic(batch):
     """Static B<=8: FC2 tile-pair jobs claimed from a grid-wide counter
-    (``ExpertsKernel.dynamic``): CTA stream rates vary by a few us per call, so a
+    (`ExpertsKernel.dynamic`): CTA stream rates vary by a few us per call, so a
     static FC2 slice leaves the slowest CTA as the kernel's tail."""
     return static(batch) and bool(batch_table(DYNAMIC).get(batch, 0))
 
@@ -90,7 +90,7 @@ DYNAMIC = "4-8:1"
 
 @functools.cache
 def compile_experts(tp, experts, batch, grid, device, publish=False, *knobs):
-    """Only code and geometry are cached; no owner tensors or descriptors. ``knobs``:
+    """Only code and geometry are cached; no owner tensors or descriptors. `knobs`:
     (B<=8 stream, pregrouped, steal, listed, ahead, static, dynamic)."""
     defaults: tuple = (streamed(batch), False, False, False, False, static(batch))
     defaults += (dynamic(batch),)
@@ -120,7 +120,7 @@ def compile_experts(tp, experts, batch, grid, device, publish=False, *knobs):
 
 @functools.cache
 def compile_group(tp, experts, batch, grid, device, early=False):
-    """The pregrouped experts' unit-table kernel: (ids, workspace, batch); ``early``:
+    """The pregrouped experts' unit-table kernel: (ids, workspace, batch); `early`:
     it releases the experts at entry."""
     capacity = 1 << (batch - 1).bit_length()
     kernel = ExpertsGroupKernel(tp, capacity, experts, grid, early=early)
@@ -141,7 +141,7 @@ def compile_plan(batch, device):
 
 def scratch(tp, device, wide=False):
     """Model-owned expert buffers: the workspace and the grouped plan (MXFP8 x, written
-    by the routing kernel or ``compile_plan``). ``wide``: the wide engines' own
+    by the routing kernel or `compile_plan`). `wide`: the wide engines' own
     workspace and plan (B > 64), never shared with the B <= 64 engines."""
     geometry = ExpertsGeometry(tp, WIDE_ROWS if wide else 8)
     size, u8 = (geometry.workspace_bytes, torch.uint8)
@@ -153,6 +153,11 @@ def scratch(tp, device, wide=False):
     return buffers
 
 
+# The wide engines fit one CTA per SM and every CTA must be resident: their grid is
+# the SM count, capped at the tuned 152 (the FC2 partial slots hold 160 CTAs).
+WIDE_GRID = 152
+
+
 class PersistentExperts:
     def __init__(self, w13, s13, w2, s2, *, beta=4.0, linear_beta=25.0):
         experts, rows, _ = w13.shape
@@ -162,7 +167,8 @@ class PersistentExperts:
         # TP8: B3-4 on 148 CTAs; B5-8 publish on 128-136 CTAs, leaving SMs for the
         # one-wave tail; grouped B9-64 on 152.
         grids = "3-4:148,5-6:128,7:132,9-64:152" if self.tp == 8 else ""
-        grids += f",65-{WIDE_ROWS}:152"  # wide: every SM
+        sms = torch.cuda.get_device_properties(self.device).multi_processor_count
+        grids += f",65-{WIDE_ROWS}:{min(WIDE_GRID, sms)}"  # wide: one CTA per SM
         self.grids = batch_table(grids)
         scalars = (beta, linear_beta, 1 / beta, 1 / linear_beta)
         self.scalars = tuple(map(c.Float32, scalars))
@@ -195,12 +201,12 @@ class PersistentExperts:
         self, batch, buffers, out, publish=(), planned=False, twoshot=False,
         early=False, ahead=False, listed=False,
     ):  # fmt: skip
-        """``publish``: (multicast, parity, rank) of the WaveMoeTail latent slot to
-        publish (``twoshot``: the ``common.twoshot`` push box); ``planned``: B>8 calls
+        """`publish`: (multicast, parity, rank) of the WaveMoeTail latent slot to
+        publish (`twoshot`: the `common.twoshot` push box); `planned`: B>8 calls
         find the plan written (by the routing kernel), else run writes it from x first;
-        ``early``: the caller runs ``group`` (pregrouped batches) before ``run``;
-        ``listed`` (wide): the routing kernel appended the routing lists
-        (``buffers["lists"]``, passed to ``run`` as ``ids``) and wrote the plan; no
+        `early`: the caller runs `group` (pregrouped batches) before `run`;
+        `listed` (wide): the routing kernel appended the routing lists
+        (`buffers["lists"]`, passed to `run` as `ids`) and wrote the plan; no
         unit-table kernel runs."""
         mode = "twoshot" if twoshot else bool(publish)
         grouped = pregrouped(self.tp, batch)
@@ -232,8 +238,8 @@ class PersistentExperts:
         self.ahead[batch] = ahead
 
     def group(self, ids):
-        """Pregrouped batches prepared ``early``: the unit-table kernel (run it on the
-        stream after routing; ``run`` then skips it)."""
+        """Pregrouped batches prepared `early`: the unit-table kernel (run it on the
+        stream after routing; `run` then skips it)."""
         group = self.prepared[ids.shape[0]][7]
         if group is not None and group[2]:
             self.launch_group(ids, group)
@@ -246,8 +252,8 @@ class PersistentExperts:
         return self.grids.get(batch, self.grid)
 
     def run(self, x, ids, weights=None, ahead=None):
-        """``ahead``: the next weights' [PREFETCH_ROWS, 2] (address, bytes) table, for
-        batches prepared ``ahead``."""
+        """`ahead`: the next weights' [PREFETCH_ROWS, 2] (address, bytes) table, for
+        batches prepared `ahead`."""
         batch = x.shape[0]
         out, output, workspace, code, box, plan, maps, group = self.prepared[batch]
         output = tensor(weights) if box else output
