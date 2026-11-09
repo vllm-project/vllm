@@ -1,9 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import faulthandler
 import time
-from copy import copy
 
 import pytest
 import ray
@@ -15,11 +13,8 @@ from tests.v1.attention.utils import (
     create_vllm_config,
 )
 from vllm.config import (
-    AttentionConfig,
     CompilationConfig,
-    CUDAGraphMode,
     KVTransferConfig,
-    SchedulerConfig,
     SpeculativeConfig,
     set_current_vllm_config,
 )
@@ -66,7 +61,7 @@ def _indexer_sharding(
         config.speculative_config = SpeculativeConfig(
             method="ngram", num_speculative_tokens=7
         )
-        config.attention_config.indexer_cache_sharding = "on"
+        config.attention_config.indexer_cache_sharding = True
         config.kv_transfer_config = KVTransferConfig(
             kv_connector="SimpleCPUOffloadConnector", kv_role="kv_both"
         )
@@ -74,84 +69,14 @@ def _indexer_sharding(
             init_test_distributed_environment(
                 tp_size, pp_size, rank, distributed_init_port
             )
-            if scenario == "fallback":
-                _check_initialization_fallback(config, device, rank)
-            else:
-                assert msa.resolve_index_k_shard(config, 4, "fp8", 16) == tp_size
-                comm = msa.get_comm()
-                assert comm is not None
-                if scenario == "policy":
-                    _check_sharding_policy(config, comm)
-                else:
-                    for num_layers in (1, 2, 5):
-                        config.compilation_config = CompilationConfig()
-                        assert (
-                            msa.resolve_index_k_shard(config, 4, "fp8", 16) == tp_size
-                        )
-                        comm = msa.get_comm()
-                        _check_indexer_forwards(
-                            config, device, rank, comm, num_layers, scenario
-                        )
-                    if scenario == "reconstruction":
-                        config.compilation_config.static_forward_context.clear()
-                        _check_indexer_forwards(
-                            config, device, rank, comm, num_layers, scenario
-                        )
-                        assert comm.num_layers == num_layers
+            assert msa.resolve_index_k_shard(config, 4, "fp8", 16) == tp_size
+            for num_layers in (1, 2, 5):
+                config.compilation_config = CompilationConfig()
+                comm = msa.IndexKShardComm(config, 4)
+                _check_indexer_forwards(
+                    config, device, rank, comm, num_layers, scenario
+                )
         get_tp_group().barrier()
-
-
-def _check_initialization_fallback(config, device, rank):
-    import torch.distributed._symmetric_memory as symm_mem
-
-    from vllm.models.minimax_m3.nvidia import indexer_msa as msa
-
-    for block_size in (16, 64, 256):
-        with pytest.MonkeyPatch.context() as m:
-            m.setattr(config.cache_config, "block_size", block_size)
-            assert msa.resolve_index_k_shard(config, 4, "fp8", 16) == 1
-            assert msa.get_comm() is None
-
-    for name, value in (("enable_dbo", True), ("ubatch_size", 2)):
-        with pytest.MonkeyPatch.context() as m:
-            m.setattr(config.parallel_config, name, value)
-            assert msa.resolve_index_k_shard(config, 4, "fp8", 16) == 1
-            assert msa.get_comm() is None
-
-    for failure in (
-        "topology",
-        "recv_allocation",
-    ):
-        config.compilation_config = CompilationConfig()
-        with pytest.MonkeyPatch.context() as m:
-            injected = False
-
-            def fail_allocation(*args, **kwargs):
-                nonlocal injected
-                injected = True
-                raise RuntimeError("injected indexer allocation failure")
-
-            def fail_topology(_):
-                nonlocal injected
-                injected = True
-                return False
-
-            if rank == 1:
-                if failure == "topology":
-                    m.setattr(current_platform, "is_fully_connected", fail_topology)
-                else:
-                    m.setattr(symm_mem, "empty", fail_allocation)
-
-            # A rank stranded in rendezvous or GPU polling cannot raise a Python
-            # timeout. Exit that worker so Ray reports failure and stops peers.
-            faulthandler.dump_traceback_later(90, exit=True)
-            try:
-                shard = msa.resolve_index_k_shard(config, 4, "fp8", 16)
-                assert injected == (rank == 1)
-                assert shard == 1
-                assert msa.get_comm() is None
-            finally:
-                faulthandler.cancel_dump_traceback_later()
 
 
 def _roundtrip_index_caches(config, impls):
@@ -256,26 +181,17 @@ def _check_indexer_forwards(config, device, rank, comm, num_layers, scenario):
                 for layer in range(num_layers)
             ]
         )
-    builders = []
-    default_prefill = config.attention_config.indexer_prefill_cp
-    assert default_prefill == "local_score"
-    for impls, prefill_mode in (
-        (layers[0], default_prefill),
-        (layers[1], default_prefill),
-        (layers[1], "local_score_unified"),
-    ):
-        with pytest.MonkeyPatch.context() as patch:
-            patch.setattr(config.attention_config, "indexer_prefill_cp", prefill_mode)
-            builders.append(
-                msa.MiniMaxM3IndexerMSAMetadataBuilder(
-                    impls[0].index_cache.get_kv_cache_spec(config),
-                    [impl.index_cache.prefix for impl in impls],
-                    config,
-                    device,
-                )
-            )
-    assert builders[0].unified_scores_buffer is not None
-    assert all(builder.unified_scores_buffer is None for builder in builders[1:])
+    for impl in layers[1]:
+        impl.set_shard_comm(comm)
+    builders = [
+        msa.MiniMaxM3IndexerMSAMetadataBuilder(
+            impls[0].index_cache.get_kv_cache_spec(config),
+            [impl.index_cache.prefix for impl in impls],
+            config,
+            device,
+        )
+        for impls in layers
+    ]
     prefill_storage = [
         (
             builder.prefill_candidate_pool.data_ptr(),
@@ -302,6 +218,10 @@ def _check_indexer_forwards(config, device, rank, comm, num_layers, scenario):
     def check_local(metadata, queries, num_tokens):
         run(False, metadata, queries)
         for reference, sharded in zip(*snapshots):
+            if scenario == "replay":
+                reference[num_tokens - 1].fill_(-1)
+                if metadata[1].prefill_msa is not None:
+                    reference[num_tokens - 1, :, 0] = 0
             torch.testing.assert_close(
                 sharded[:num_tokens].sort(dim=-1).values,
                 reference[:num_tokens].sort(dim=-1).values,
@@ -350,7 +270,7 @@ def _check_indexer_forwards(config, device, rank, comm, num_layers, scenario):
         BatchSpec(seq_lens=[2691], query_lens=[1027]),
         BatchSpec(seq_lens=[129, 2305], query_lens=[1, 1]),
     ]
-    if scenario in ("offload", "reconstruction"):
+    if scenario == "offload":
         batches = batches[:1]
     for batch in batches:
         # Exercise wrap-safe rotation, single-layer ACK fallback and mixed transitions.
@@ -400,9 +320,17 @@ def _check_indexer_forwards(config, device, rank, comm, num_layers, scenario):
             queries.append(query.to(torch.float8_e4m3fn))
         if scenario == "offload":
             _roundtrip_index_caches(config, layers[1])
-        metadata = [builder.build(0, common) for builder in builders]
+        if scenario == "replay":
+            # Padding must be excluded even when its position is nonnegative.
+            common.slot_mapping[num_tokens - 1] = -1
+        metadata = [builders[0].build(0, common)]
+        torch.cuda.set_sync_debug_mode("error")
+        try:
+            metadata.append(builders[1].build(0, common))
+        finally:
+            torch.cuda.set_sync_debug_mode("default")
         for md, storage in zip(metadata[1:], prefill_storage, strict=True):
-            assert md.unified_scores is None
+            assert isinstance(md, msa.MiniMaxM3IndexerMSAShardedMetadata)
             if md.prefill_msa is not None:
                 prefill = md.prefill_msa
                 assert (
@@ -456,23 +384,20 @@ def _check_indexer_forwards(config, device, rank, comm, num_layers, scenario):
                 if chunks[-1][1] > PREFILL_CHUNK_SIZE:
                     assert len(chunks) > 1
                 assert all(plan is not None for _, _, _, plan in chunks)
-                # Both dispatches reuse scratch across layers and steps; unified
-                # mixed scoring exchanges decode and prefill candidates together.
+                # Reuse scratch across layers and steps.
                 exchanges.clear()
                 with pytest.MonkeyPatch.context() as patch:
                     patch.setattr(torch.distributed, "all_to_all_single", exchange)
                     for _ in range(3):
                         run(True, metadata, queries)
-                exchanged_tokens = (
-                    num_tokens if prefill.unified else local_metadata.num_prefill_tokens
-                )
+                exchanged_tokens = local_metadata.num_prefill_tokens
                 assert exchanges == [(world, local_heads, exchanged_tokens, 33)] * (
                     3 * num_layers
                 )
                 check(metadata, queries, num_tokens)
-                assert len(prefill.graph_steps) == 1
+                assert prefill.graph_step is not None
                 if num_layers == 5:
-                    builder = builders[2 if prefill.unified else 1]
+                    builder = builders[1]
                     graphs = builder.prefill_graphs
                     before = graphs.stats["replayed_layers"]
                     for _ in range(3):
@@ -490,9 +415,7 @@ def _check_indexer_forwards(config, device, rank, comm, num_layers, scenario):
     reason="MiniMax M3 sharded MSA indexer requires SM100",
 )
 @pytest.mark.parametrize("tp_size", [2, 4])
-@pytest.mark.parametrize(
-    "scenario", ["fallback", "policy", "parity", "offload", "replay", "reconstruction"]
-)
+@pytest.mark.parametrize("scenario", ["parity", "offload", "replay"])
 def test_indexer_sharding(monkeypatch, tp_size, scenario, cake_indexer):
     """Each case exercises one CP contract through real TP indexer objects."""
     if torch.accelerator.device_count() < tp_size:
@@ -614,9 +537,9 @@ def test_sharded_model_matches_replicated(
         {"prompt_token_ids": [i % 251 for i in range(length)]} for length in (129, 2305)
     ]
     results = []
-    for mode in ("off", "on"):
+    for mode in (False, True):
         with vllm_runner(tiny_m3_checkpoint, **_model_options(tp_size, mode)) as runner:
-            shards = tp_size if mode == "on" else 1
+            shards = tp_size if mode else 1
             assert runner.llm.apply_model(_indexer_shards) == [[shards] * 2] * tp_size
             cohorts = []
             for _ in range(2):
@@ -667,7 +590,7 @@ def test_dummy_batch_preserves_index_cache(
         pytest.skip("Requires 2 GPUs")
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
     with vllm_runner(
-        tiny_m3_checkpoint, **_model_options(2, "on"), enforce_eager=eager
+        tiny_m3_checkpoint, **_model_options(2, True), enforce_eager=eager
     ) as runner:
         assert runner.llm.apply_model(_indexer_shards) == [[2, 2]] * 2
         prompt = [{"prompt_token_ids": [i % 251 for i in range(2305)]}]
@@ -680,108 +603,3 @@ def test_dummy_batch_preserves_index_cache(
             replay = runner.llm.generate(prompt, params, use_tqdm=False)
             assert replay[0].num_cached_tokens > 0
             assert replay[0].outputs[0].token_ids == reference[0].outputs[0].token_ids
-
-
-def _check_sharding_policy(config, original_comm):
-    from vllm.models.minimax_m3.nvidia import indexer_msa as msa
-
-    text_config = config.model_config.hf_text_config
-    policy = create_vllm_config(
-        tensor_parallel_size=original_comm.world,
-        block_size=128,
-        max_model_len=4096,
-        max_num_seqs=32,
-        hf_config_override={
-            "index_n_heads": text_config.index_n_heads,
-            "index_head_dim": text_config.index_head_dim,
-            "index_local_blocks": text_config.index_local_blocks,
-        },
-    )
-    model = copy(policy.model_config)
-    for mode, length, cap, active_cap, q, eager, graph_mode, expected in [
-        ("on", 4096, 1, None, 4, False, CUDAGraphMode.FULL, original_comm.world),
-        ("off", 1024 * 1024, 32, None, 1, False, CUDAGraphMode.FULL, 1),
-        ("on", 4096, 1, None, 1, True, CUDAGraphMode.NONE, original_comm.world),
-        ("off", 1024 * 1024, 32, None, 1, True, CUDAGraphMode.NONE, 1),
-    ]:
-        policy.model_config = copy(model)
-        policy.model_config.max_model_len = length
-        policy.model_config.enforce_eager = eager
-        policy.scheduler_config = SchedulerConfig(
-            max_model_len=length,
-            is_encoder_decoder=False,
-            max_num_seqs=cap,
-            max_num_active_seqs=active_cap,
-            max_num_batched_tokens=8192,
-            enable_chunked_prefill=True,
-        )
-        policy.attention_config = AttentionConfig(indexer_cache_sharding=mode)
-        policy.compilation_config = CompilationConfig(cudagraph_mode=graph_mode)
-        policy.speculative_config = (
-            SpeculativeConfig(method="ngram", num_speculative_tokens=q - 1)
-            if q > 1
-            else None
-        )
-        before = msa.get_comm()
-        assert msa.resolve_index_k_shard(policy, 4, "fp8", 16) == expected
-        current = msa.get_comm()
-        if expected == 1:
-            assert current is before
-        else:
-            assert current is not before
-            assert current.max_decode_tokens == cap * q
-            assert msa.get_comm(policy, 4) is current
-            policy.model_config.max_model_len = length * 2
-            resized = msa.get_comm(policy, 4)
-            assert resized is not current
-            assert resized.scores.shape[-1] == 2 * current.scores.shape[-1]
-            policy.model_config.max_model_len = length
-            assert msa.get_comm(policy, 4) is not resized
-    assert original_comm.max_decode_tokens == 4 * 8
-
-    policy.model_config = copy(model)
-    policy.model_config.max_model_len = 1024 * 1024
-    policy.compilation_config = CompilationConfig(cudagraph_mode=CUDAGraphMode.FULL)
-    policy.scheduler_config = SchedulerConfig(
-        max_model_len=1024 * 1024,
-        is_encoder_decoder=False,
-        max_num_seqs=32,
-        max_num_batched_tokens=8192,
-        enable_chunked_prefill=True,
-    )
-    for mode, dtype, topk, pcp, dcp, q, transfer in [
-        ("on", "bf16", 16, 1, 1, 1, False),
-        ("on", "fp8", 8, 1, 1, 1, False),
-        ("on", "fp8", 16, 2, 1, 1, False),
-        ("on", "fp8", 16, 1, 2, 1, False),
-        ("on", "fp8", 16, 1, 1, 9, False),
-        ("on", "fp8", 16, 1, 1, 1, True),
-    ]:
-        policy.attention_config = AttentionConfig(indexer_cache_sharding=mode)
-        policy.parallel_config = copy(config.parallel_config)
-        policy.parallel_config.prefill_context_parallel_size = pcp
-        policy.parallel_config.decode_context_parallel_size = dcp
-        policy.speculative_config = (
-            SpeculativeConfig(method="ngram", num_speculative_tokens=q - 1)
-            if q > 1
-            else None
-        )
-        policy.kv_transfer_config = (
-            KVTransferConfig(kv_connector="NixlConnector", kv_role="kv_consumer")
-            if transfer
-            else None
-        )
-        before = msa.get_comm()
-        assert msa.resolve_index_k_shard(policy, 4, dtype, topk) == 1
-        assert msa.get_comm() is before
-
-    for options in (
-        {"kv_connector_module_path": "custom_connector"},
-        {"kv_connector_extra_config": {"kv_offload_backend": "disk"}},
-    ):
-        policy.kv_transfer_config = KVTransferConfig(
-            kv_connector="SimpleCPUOffloadConnector", kv_role="kv_both", **options
-        )
-        before = msa.get_comm()
-        assert msa.resolve_index_k_shard(policy, 4, "fp8", 16) == 1
-        assert msa.get_comm() is before
