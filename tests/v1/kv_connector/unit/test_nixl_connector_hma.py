@@ -264,9 +264,33 @@ def test_dcp_region_pull(region_pull_worker, num_pages, region_groups):
 
 
 @pytest.mark.cpu_test
+def test_dcp_replicated_groups_follow_the_spec_not_its_type():
+    """Replicated MLA draft caches are found by ``dcp_sharded``, whether or not
+    the draft layers are windowed."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.utils import (
+        get_dcp_replicated_group_ids,
+    )
+    from vllm.v1.kv_cache_interface import CircularBufferSpec
+
+    common = dict(block_size=64, num_kv_heads=1, head_size=8, dtype=torch.bfloat16)
+    specs = [
+        MLAAttentionSpec(**common),
+        SlidingWindowMLASpec(**common, sliding_window=128),
+        MLAAttentionSpec(**common, dcp_sharded=False),
+        SlidingWindowMLASpec(**common, sliding_window=128, dcp_sharded=False),
+        # Non-MLA replicated caches keep their existing transfer path.
+        FullAttentionSpec(**common, dcp_sharded=False),
+        CircularBufferSpec(**common, dcp_sharded=False),
+    ]
+    groups = [KVCacheGroupSpec([f"layer.{i}"], spec) for i, spec in enumerate(specs)]
+    assert get_dcp_replicated_group_ids(groups) == {2, 3}
+
+
+@pytest.mark.cpu_test
 @pytest.mark.parametrize("tp_rank", [0, 3])
+@pytest.mark.parametrize("short_remote_draft", [False, True])
 def test_dcp_pull_reads_replicated_draft_group_from_one_rank(
-    region_pull_worker, tp_rank
+    region_pull_worker, tp_rank, short_remote_draft
 ):
     """A DCP prefill keeps its sliding-window MLA draft whole on every rank:
     read each target page from its DCP rank and the draft group from one rank."""
@@ -292,13 +316,19 @@ def test_dcp_pull_reads_replicated_draft_group_from_one_rank(
     # 8 pages: target pages are interleaved over the 4 remote DCP ranks (2 remote
     # blocks each), the draft window keeps the last 3 pages on every rank.
     local = [list(range(30, 38)), [45, 46, 47]]
+    remote_draft = [22, 23] if short_remote_draft else [20, 21, 22, 23]
     meta = ReqMeta(
         local,
         local,
         tp_size=4,
         local_num_computed_blocks=(0, 0),
-        remote=RemoteMeta([[10, 11], [20, 21, 22, 23]], "localhost", 1, "P", "P-req"),
+        remote=RemoteMeta([[10, 11], remote_draft], "localhost", 1, "P", "P-req"),
     )
+    if short_remote_draft:
+        # D cannot be missing draft pages that P never sent.
+        with pytest.raises(AssertionError, match="decode needs 3 blocks"):
+            worker._read_blocks_for_req("request", meta)
+        return
     worker._read_blocks_for_req("request", meta)
     reads = {
         call.kwargs["remote_xfer_side_handle"] - 1000: list(

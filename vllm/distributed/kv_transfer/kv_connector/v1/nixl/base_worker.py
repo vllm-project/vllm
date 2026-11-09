@@ -60,6 +60,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.utils import (
     _NIXL_SUPPORTED_DEVICE,
+    get_dcp_replicated_group_ids,
     get_representative_spec_type,
     zmq_ctx,
 )
@@ -1066,13 +1067,11 @@ class NixlBaseConnectorWorker:
             get_representative_spec_type(g.kv_cache_spec)
             for g in self.kv_cache_config.transfer_groups
         )
-        # Sliding-window MLA drafts run at DCP=1, so a DCP peer holds them
-        # in full on every rank.
-        self._dcp_replicated_groups = {
-            g
-            for g, spec_type in enumerate(self._group_spec_types)
-            if issubclass(spec_type, SlidingWindowMLASpec)
-        }
+        # MLA drafts running at DCP=1 under a DCP target: a DCP peer holds
+        # them in full on every rank.
+        self._dcp_replicated_groups = get_dcp_replicated_group_ids(
+            self.kv_cache_config.transfer_groups
+        )
         # Per-region MLA flag, 1:1 with block_len_per_layer. True -> REPLICATE
         # (MLA), False -> SPLIT (head-sharded full-attn). Mixed only for models
         # combining both (e.g. GQA main + MLA Eagle-3 draft).
@@ -2770,7 +2769,7 @@ class NixlBaseConnectorWorker:
             self.dcp_size > 1 or (remote_dcp_size > 1 and self._TRANSFER_MODE != "pull")
         ):
             raise NotImplementedError(
-                "NIXL with a sliding-window MLA draft and DCP only supports "
+                "NIXL with a DCP-replicated MLA draft cache only supports "
                 "pulling from a DCP prefill into a non-DCP decode: "
                 f"local DCP={self.dcp_size}, remote DCP={remote_dcp_size}, "
                 f"transfer_mode={self._TRANSFER_MODE}."

@@ -246,7 +246,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
             if dcp_active and self._dcp_replicated_groups:
                 raise NotImplementedError(
                     "Region-mapped NIXL pulls with DCP do not support "
-                    "sliding-window MLA draft groups"
+                    "DCP-replicated MLA draft groups"
                 )
             if self.block_size != remote_info.remote_block_size:
                 raise NotImplementedError(
@@ -350,12 +350,18 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                             continue
                         if g in self._dcp_replicated_groups:
                             # Every remote rank holds the whole group: read it
-                            # from one rank, paired as a non-DCP read.
+                            # from one rank, paired as a non-DCP read (end-trim
+                            # the remote to the blocks D still needs).
                             ranks = plan.source_ranks_per_group[g]
                             if rank != ranks[self.tp_rank % len(ranks)]:
                                 local_ids[g] = remote_ids[g] = []
-                            else:
-                                remote_ids[g] = remote_ids[g][-len(local_ids[g]) :]
+                                continue
+                            num_local = len(local_ids[g])
+                            assert num_local <= len(remote_ids[g]), (
+                                f"Group {g}: decode needs {num_local} blocks, "
+                                f"prefill sent {len(remote_ids[g])}"
+                            )
+                            remote_ids[g] = remote_ids[g][-num_local:]
                             continue
                         local_ids[g], remote_ids[g] = self._apply_dcp_prefix_caching(
                             local_ids[g],

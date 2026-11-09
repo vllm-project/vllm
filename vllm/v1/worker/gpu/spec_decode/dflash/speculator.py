@@ -6,10 +6,11 @@ from typing import Any
 import torch
 import torch.nn as nn
 
-from vllm.config import VllmConfig, replace
+from vllm.config import VllmConfig, get_layers_from_vllm_config, replace
 from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
+from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
@@ -43,15 +44,21 @@ class DFlashSpeculator(DraftModelSpeculator):
         parallel_config = vllm_config.parallel_config
         speculative_config = vllm_config.speculative_config
         assert speculative_config is not None
+        from vllm.model_executor.models.qwen3_dflash import dflash_has_any_sliding
+
         draft_model_config = speculative_config.draft_model_config
+        # Windowed draft layers cannot shard over DCP, so any of them keeps the
+        # whole draft at DCP=1 (replicated cache).
+        draft_has_window = draft_model_config.get_sliding_window() is not None or (
+            dflash_has_any_sliding(draft_model_config.hf_config)
+        )
         vllm_config = copy.copy(vllm_config)
         vllm_config.parallel_config = replace(
             parallel_config,
             prefill_context_parallel_size=1,
             decode_context_parallel_size=(
                 parallel_config.decode_context_parallel_size
-                if draft_model_config.use_mla
-                and draft_model_config.get_sliding_window() is None
+                if draft_model_config.use_mla and not draft_has_window
                 else 1
             ),
         )
@@ -277,6 +284,30 @@ class DFlashSpeculator(DraftModelSpeculator):
             self._speculator_name,
             freed_bytes / (1 << 30),
         )
+
+    def load_model(self, target_model: nn.Module) -> None:
+        super().load_model(target_model)
+        if self.dcp_size == 1:
+            return
+        # The DCP choice in __init__ is resolved from config; catch drafts whose
+        # built layers disagree instead of failing inside the attention kernel.
+        draft_layers = get_layers_from_vllm_config(
+            self.vllm_config,
+            AttentionLayerBase,  # type: ignore[type-abstract]
+            self.draft_attn_layer_names,
+        )
+        windowed = sorted(
+            name
+            for name, layer in draft_layers.items()
+            if getattr(layer, "sliding_window", None) is not None
+        )
+        if windowed:
+            raise ValueError(
+                f"{self._speculator_name} draft layers {windowed} use sliding-window "
+                f"attention, which cannot run at decode_context_parallel_size="
+                f"{self.dcp_size}. Set sliding_window, dflash_config.use_swa or "
+                "layer_types in the draft config so the draft runs at DCP=1."
+            )
 
     def set_attn(
         self,
