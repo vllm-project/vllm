@@ -4,10 +4,6 @@ min_acceptance_length: 4.8
 num_questions: 1319
 num_fewshot: 5
 startup_max_wait_seconds: 1800
-# One 1M-token request needs 15.5 GiB of KV cache per rank. On SM100, model
-# runner V2 captures prefill CUDA graphs up to 8192 tokens by default, which
-# costs ~3 GiB more per GPU here and leaves too little KV cache at 0.90
-# utilization. Cap prefill graphs at the previous 1024-token default.
 server_args: >-
   --trust-remote-code
   --gpu-memory-utilization 0.90
@@ -19,7 +15,6 @@ server_args: >-
   --max-num-seqs 128
   --kv-cache-dtype fp8
   --attention-config '{"use_prefill_query_quantization":true,"mla_prefill_backend":"flashinfer"}'
-  --compilation-config '{"max_prefill_cudagraph_capture_tokens":1024}'
   --enable-prefix-caching
   --enable-auto-tool-choice
   --tool-call-parser kimi_k3
