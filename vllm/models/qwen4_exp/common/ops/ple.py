@@ -3,10 +3,10 @@
 """Fused Qwen4Exp PLE kernels.
 
 N-gram IDs hash each suffix with
-``offset[h] + (xor_i(token[t-i] * multiplier[i]) % size[h])``. The gate computes
-``d = dot(RMSNorm(key), RMSNorm(query)) / sqrt(H)`` and
-``g = sigmoid(sign(d) * sqrt(max(abs(d), 1e-6)))``. Short convolution adds
-``silu(sum_k weight[k] * history[t + k * dilation])`` to the gated output and
+`offset[h] + (xor_i(token[t-i] * multiplier[i]) % size[h])`. The gate computes
+`d = dot(RMSNorm(key), RMSNorm(query)) / sqrt(H)` and
+`g = sigmoid(sign(d) * sqrt(max(abs(d), 1e-6)))`. Short convolution adds
+`silu(sum_k weight[k] * history[t + k * dilation])` to the gated output and
 updates its persistent history.
 """
 
@@ -199,7 +199,7 @@ def _ple_gate_kernel(
     BLOCK_H: tl.constexpr,
     launch_pdl: tl.constexpr,
 ):
-    t = tl.program_id(0)
+    t = tl.program_id(0).to(tl.int64)
     s = tl.program_id(1)
     lanes = tl.arange(0, BLOCK_H)
     mask = lanes < H
