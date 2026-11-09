@@ -38,9 +38,9 @@ def check_frame_pixel_limit(width: int, height: int) -> None:
 
 
 def check_video_decode_frame_limit(frames_to_walk: int) -> None:
-    """Reject videos that would walk more than ``VLLM_MAX_VIDEO_DECODE_FRAMES``.
+    """Reject videos that would walk more than `VLLM_MAX_VIDEO_DECODE_FRAMES`.
 
-    Set the env var to ``0`` to disable.
+    Set the env var to `0` to disable.
     """
     max_frames = envs.VLLM_MAX_VIDEO_DECODE_FRAMES
     if max_frames > 0 and frames_to_walk > max_frames:
