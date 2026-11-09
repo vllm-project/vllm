@@ -2567,9 +2567,11 @@ def test_pull_from_hma_pp_stages_reads_each_group_from_its_stage(shared, pp_size
 
 
 @pytest.mark.cpu_test
-def test_pull_from_hma_pp_stages_only_notifies_a_stage_without_blocks_to_read():
+@pytest.mark.parametrize("full_hit", [False, True])
+def test_pull_from_hma_pp_stages_only_notifies_a_stage_without_blocks_to_read(full_hit):
     """A stage holding no layer of the groups a request has blocks in is not
-    read, but is notified so it can free the request's blocks."""
+    read, but is notified so it can free the request's blocks. A full prefix
+    hit notifies both stages without reading either."""
     decode = _make_pp_attn_worker("decode", [*_PP_TARGET_LAYERS, _PP_DRAFT_LAYER])
     stages = [
         _make_pp_attn_worker("prefill", _PP_TARGET_LAYERS[:2], pp_stage=(0, 2)),
@@ -2581,10 +2583,14 @@ def test_pull_from_hma_pp_stages_only_notifies_a_stage_without_blocks_to_read():
     decode.nixl_wrapper.send_notif = lambda agent, notif_msg=None: notified.append(
         agent
     )
-    local_block_ids: tuple[list[int], ...] = ([], [3, 4])
+    local_block_ids: tuple[list[int], ...] = ([], []) if full_hit else ([], [3, 4])
     remote_block_ids: tuple[list[int], ...] = ([], [7, 6])
     pairs = _pull_page_pairs(decode, stages, local_block_ids, remote_block_ids)
-    assert notified == ["prefill-pp0"]
+    assert notified == (["prefill-pp0", "prefill-pp1"] if full_hit else ["prefill-pp0"])
+    if full_hit:
+        assert not decode.nixl_wrapper.xfers
+        assert not pairs
+        return
     assert pairs == {
         (
             1,
