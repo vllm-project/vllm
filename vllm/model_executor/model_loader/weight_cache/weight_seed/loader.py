@@ -72,7 +72,7 @@ class PeerModelLoader(BaseModelLoader):
             current_platform.device_type, torch.accelerator.current_device_index()
         )
         tensors = mover.fill(manifest, payload["seed"], device)
-        acknowledge_lease(transport, payload)
+        acknowledge_lease(transport)
         kinds: dict[str, TensorKind] = {
             name: "param" if view["is_param"] else "buffer"
             for name, view in manifest["tensors"].items()

@@ -4,7 +4,6 @@
 
 import threading
 import time
-import uuid
 from typing import TYPE_CHECKING, Any
 
 from vllm.logger import init_logger
@@ -38,9 +37,9 @@ logger = init_logger(__name__)
 WEIGHT_COPY_LEASE_TIMEOUT_S = 300.0
 
 
-def _reject_lease(transport: Any, payload: Any) -> None:
+def _reject_lease(transport: Any) -> None:
     try:
-        acknowledge_lease(transport, payload)
+        acknowledge_lease(transport)
     except Exception as e:
         logger.warning("Could not reject weight-cache lease: %s", e)
 
@@ -55,7 +54,7 @@ def validate_weights_payload_or_reject(
     try:
         return validate_weights_payload(payload, expected_key, model)
     except Exception:
-        _reject_lease(transport, payload)
+        _reject_lease(transport)
         raise
 
 
@@ -69,7 +68,7 @@ class WeightShardSeed(Seedable):
         # seeds and fingerprint are all read from it.
         self._daemon = daemon
         self._movers: dict[SeedBackend, WeightMover] = {}
-        self._outstanding: set[str] = set()
+        self._active_copies = 0
         self._lease_condition = threading.Condition(daemon._state_lock)
         self._release_pending = False
 
@@ -85,19 +84,19 @@ class WeightShardSeed(Seedable):
         deadline = time.monotonic() + WEIGHT_COPY_LEASE_TIMEOUT_S
         with self._lease_condition:
             self._release_pending = True
-            if self._outstanding:
+            if self._active_copies:
                 logger.info(
                     "Weight cache %s daemon rank %d waiting for %d "
                     "weight-cache copy acknowledgement(s)",
                     self._daemon.role,
                     self._daemon.global_rank,
-                    len(self._outstanding),
+                    self._active_copies,
                 )
-            while self._outstanding:
+            while self._active_copies:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise TimeoutError(
-                        f"Timed out waiting for {len(self._outstanding)} "
+                        f"Timed out waiting for {self._active_copies} "
                         "weight-cache copy acknowledgement(s); cached "
                         "weights and NIC registrations were retained"
                     )
@@ -107,19 +106,18 @@ class WeightShardSeed(Seedable):
             for mover in self._movers.values():
                 mover.release()
 
-    def _acknowledge(self, request: dict[str, Any]) -> dict[str, str]:
-        lease_id = request.get("lease_id")
-        if not isinstance(lease_id, str) or not lease_id:
-            raise ValueError("A weight-cache acknowledgement needs a lease_id")
+    def _acknowledge(self) -> dict[str, bool]:
         with self._lease_condition:
-            if lease_id not in self._outstanding:
-                raise ValueError(f"Unknown weight-cache lease {lease_id}")
-            self._outstanding.remove(lease_id)
+            if not self._active_copies:
+                raise ValueError("Unexpected weight-cache acknowledgement")
+            self._active_copies -= 1
             self._lease_condition.notify_all()
-        return {"lease_id": lease_id}
+        return {"acknowledged": True}
 
     def validate_remote(self, request: dict[str, Any]) -> None:
         """Refuse node-local movers on the remote control plane."""
+        if request.get("acknowledge"):
+            return
         backend = parse_seed_backend(request.get("seed_backend", PEER_IPC_BACKEND))
         if backend == PEER_IPC_BACKEND:
             raise ValueError(
@@ -127,10 +125,10 @@ class WeightShardSeed(Seedable):
                 "cannot cross hosts; mirror it over this daemon's Unix socket"
             )
 
-    def resolve(self, request: dict[str, Any]) -> WeightsSeedPayload | dict[str, str]:
+    def resolve(self, request: dict[str, Any]) -> WeightsSeedPayload | dict[str, bool]:
         """Describe this rank so a peer daemon can mirror it."""
-        if "lease_id" in request:
-            return self._acknowledge(request)
+        if request.get("acknowledge"):
+            return self._acknowledge()
         daemon = self._daemon
         backend = parse_seed_backend(request.get("seed_backend", PEER_IPC_BACKEND))
         with daemon._state_lock:
@@ -140,10 +138,8 @@ class WeightShardSeed(Seedable):
             tensors, kinds, aliases, attrs = daemon._seed_state()
             manifest, storages = build_manifest(tensors, kinds)
             seed = mover.prepare_seed(storages)
-            lease_id = uuid.uuid4().hex
             with self._lease_condition:
-                self._outstanding.add(lease_id)
-            seed["lease_id"] = lease_id
+                self._active_copies += 1
             return {
                 "cache_config": dataclass_to_json(daemon.cache_key),
                 # Matched instead of the checkpoint fingerprint by a mirror

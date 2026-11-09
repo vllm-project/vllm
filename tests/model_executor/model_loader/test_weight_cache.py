@@ -1765,7 +1765,7 @@ def _exercise_lease_release(
     )
     tensors = mover.fill(manifest, payload["seed"], device)
     assert len(tensors) == len(manifest["tensors"])
-    acknowledge_lease(transport, payload)
+    acknowledge_lease(transport)
     if shutdown:
         assert source.wait_for_exit(timeout_s=30) == 128 + signal.SIGTERM
     else:
