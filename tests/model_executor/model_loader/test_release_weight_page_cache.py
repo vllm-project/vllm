@@ -54,3 +54,22 @@ def test_release_skips_missing_files(tmp_path, released):
 
     release_checkpoint_page_cache()
     assert released == [os.stat(present).st_ino]
+
+
+def test_release_covers_every_file_under_directory(tmp_path, released):
+    own = tmp_path / "org-a" / "model" / "model-0.safetensors"
+    other = tmp_path / "org-b" / "model" / "nested" / "model-0.safetensors"
+    for path in (own, other):
+        path.parent.mkdir(parents=True)
+        path.write_bytes(b"weights")
+    pipe = tmp_path / "pipe"
+    os.mkfifo(pipe)
+    # An open writer turns a regression into a failed assert instead of a hang.
+    writer = os.open(pipe, os.O_RDWR)
+    try:
+        record_checkpoint_files([str(own)])
+        release_checkpoint_page_cache(str(tmp_path))
+    finally:
+        os.close(writer)
+
+    assert sorted(released) == sorted(os.stat(p).st_ino for p in (own, other))

@@ -105,6 +105,48 @@ def test_sleep_preservation_allows_empty_draft_but_rejects_target_typo(
         worker._save_sleep_parameters(target)
 
 
+@pytest.mark.parametrize(
+    ("own_files", "directory", "expected"),
+    [
+        (False, None, []),
+        (True, None, [None]),
+        (False, "/model-cache", ["/model-cache"]),
+        (True, "/model-cache", ["/model-cache"]),
+    ],
+)
+def test_load_model_releases_weight_page_cache(
+    monkeypatch, own_files, directory, expected
+):
+    from vllm.model_executor.model_loader.weight_cache.utils import (
+        ExternalWeightCharges,
+    )
+
+    monkeypatch.setattr(gpu_worker, "has_ec_transfer", lambda: False)
+    monkeypatch.setattr(
+        gpu_worker, "set_current_vllm_config", lambda config: nullcontext()
+    )
+    released: list[str | None] = []
+    monkeypatch.setattr(gpu_worker, "release_checkpoint_page_cache", released.append)
+    monkeypatch.setattr(gpu_worker, "set_torch_threads_for_runtime", lambda: None)
+    worker = SimpleNamespace(
+        vllm_config=SimpleNamespace(
+            load_config=SimpleNamespace(
+                release_weight_page_cache=own_files,
+                release_weight_page_cache_dir=directory,
+            ),
+            weight_transfer_config=None,
+        ),
+        model_runner=SimpleNamespace(load_model=lambda **kwargs: None),
+        _maybe_get_memory_pool_context=lambda **kwargs: nullcontext(),
+        _scoped_allocator_max_split=lambda **kwargs: nullcontext(),
+        _external_weight_charges=ExternalWeightCharges(),
+    )
+
+    gpu_worker.Worker.load_model(worker)
+
+    assert released == expected
+
+
 def test_load_model_preserves_compiled_graphs_at_runtime(monkeypatch):
     """Profiling must use serving's thread count to keep Dynamo guards valid."""
     from torch._dynamo.testing import CompileCounter
@@ -121,7 +163,10 @@ def test_load_model_preserves_compiled_graphs_at_runtime(monkeypatch):
     loading_threads = []
     worker = SimpleNamespace(
         vllm_config=SimpleNamespace(
-            load_config=SimpleNamespace(release_weight_page_cache=False),
+            load_config=SimpleNamespace(
+                release_weight_page_cache=False,
+                release_weight_page_cache_dir=None,
+            ),
             weight_transfer_config=None,
         ),
         model_runner=SimpleNamespace(

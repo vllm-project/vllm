@@ -841,6 +841,7 @@ class EngineArgs:
 
     use_tqdm_on_load: bool = LoadConfig.use_tqdm_on_load
     release_weight_page_cache: bool = LoadConfig.release_weight_page_cache
+    release_weight_page_cache_dir: str | None = LoadConfig.release_weight_page_cache_dir
     pt_load_map_location: str | dict[str, str] = LoadConfig.pt_load_map_location
     shuffle_safetensors_files: bool = LoadConfig.shuffle_safetensors_files
 
@@ -1115,6 +1116,10 @@ class EngineArgs:
         load_group.add_argument(
             "--release-weight-page-cache",
             **load_kwargs["release_weight_page_cache"],
+        )
+        load_group.add_argument(
+            "--release-weight-page-cache-dir",
+            **load_kwargs["release_weight_page_cache_dir"],
         )
         load_group.add_argument(
             "--pt-load-map-location", **load_kwargs["pt_load_map_location"]
@@ -2132,6 +2137,7 @@ class EngineArgs:
             ignore_patterns=self.ignore_patterns,
             use_tqdm_on_load=self.use_tqdm_on_load,
             release_weight_page_cache=self.release_weight_page_cache,
+            release_weight_page_cache_dir=self.release_weight_page_cache_dir,
             pt_load_map_location=self.pt_load_map_location,
             shuffle_safetensors_files=self.shuffle_safetensors_files,
         )
