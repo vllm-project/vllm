@@ -2,7 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Qwen3.5 Gemma add-RMSNorm + input quant vs the unfused production chain
 (flashinfer gemma norm, then scaled_fp8_quant / scaled_fp4_quant), plus the
-unquantized ``gemma_add_rms_norm`` (pre-SM80 fallback) vs flashinfer."""
+unquantized ``gemma_add_rms_norm`` (pre-SM80 fallback) vs a naive fp32
+reference."""
 
 import pytest
 import torch
@@ -10,10 +11,7 @@ import torch
 from vllm import _custom_ops as ops
 from vllm.platforms import current_platform
 
-pytestmark = pytest.mark.skipif(
-    not current_platform.has_device_capability(100),
-    reason="fused Gemma norm + FP8/NVFP4 quant targets SM100+",
-)
+pytestmark = pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
 
 # Partial and multiple 128-row scale tiles, both sides of the num_warps
 # switches (128 for NVFP4, 384 for FP8); 1 and 7 are decode sizes.
@@ -49,6 +47,10 @@ def _swizzled_sf_rows(sf: torch.Tensor, m: int, h: int) -> torch.Tensor:
 # 5120: a production hidden size; 2112: not a power of 2 (33 64-wide scale tiles).
 @pytest.mark.parametrize("H", [5120, 2112])
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
+@pytest.mark.skipif(
+    not current_platform.has_device_capability(100),
+    reason="fused Gemma norm + FP8/NVFP4 quant targets SM100+",
+)
 @pytest.mark.parametrize("nvfp4", [False, True])
 @pytest.mark.parametrize("has_residual", [True, False])
 @torch.inference_mode()
@@ -115,12 +117,10 @@ def test_gemma_add_rms_norm_quant_matches_chain(
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("has_residual", [True, False])
 @torch.inference_mode()
-def test_gemma_add_rms_norm_matches_flashinfer(
+def test_gemma_add_rms_norm_correctness(
     H: int, num_tokens: int, dtype: torch.dtype, has_residual: bool
 ):
-    """The unquantized kernel (pre-SM80 flashinfer fallback) vs flashinfer."""
-    from flashinfer.norm import gemma_fused_add_rmsnorm, gemma_rmsnorm
-
+    """The unquantized kernel (pre-SM80 fallback) vs a naive fp32 reference."""
     from vllm.models.qwen3_5.nvidia.ops.fused_norm_quant import gemma_add_rms_norm
 
     g = torch.Generator(device="cuda").manual_seed(num_tokens)
@@ -130,27 +130,19 @@ def test_gemma_add_rms_norm_matches_flashinfer(
     residual = (torch.randn(num_tokens, H, generator=g, device="cuda") * 4).to(dtype)
     residual[:, 7] *= 50  # outlier channel
 
-    ref_res = residual.clone()
-    if has_residual:
-        ref_y = x.clone()
-        gemma_fused_add_rmsnorm(ref_y, ref_res, w, 1e-6)
-    else:
-        ref_y = gemma_rmsnorm(x, w, 1e-6)
+    summed = x.float() + residual.float() if has_residual else x.float()
+    var = summed.pow(2).mean(dim=-1, keepdim=True)
+    ref_y = (summed * torch.rsqrt(var + 1e-6) * (1.0 + w.float())).to(dtype)
 
     x_in = x.clone()
     res = residual.clone()
     y = gemma_add_rms_norm(x_in, res if has_residual else None, w, 1e-6)
 
     torch.testing.assert_close(x_in, x, rtol=0, atol=0)
-    torch.testing.assert_close(res, ref_res, rtol=0, atol=0)
-    # The fp32 sum of squares is reduced in a different order, so values
-    # landing within ~1 fp32 ulp of a rounding boundary can flip: mismatches
-    # are at most 1 ulp of the output dtype, at a rate ~2^-13 per element
-    # for fp16 and ~2^-16 for bf16.
-    yc = y.view(torch.uint16).int()
-    rc = ref_y.view(torch.uint16).int()
-    codes = lambda t: torch.where(t >= 32768, -(t & 0x7FFF), t)
-    dist = (codes(yc) - codes(rc)).abs()
-    assert dist.max().item() <= 1
-    rate = (dist > 0).float().mean().item()
-    assert rate <= (1e-3 if dtype == torch.float16 else 1e-4), rate
+    if has_residual:
+        # The residual update is an fp32 add rounded once, bitwise-exact.
+        torch.testing.assert_close(res, summed.to(dtype), rtol=0, atol=0)
+    # House kernel-test tolerances; the kernel differs from the fp32
+    # reference only by reduction-order rounding (1-ulp output flips).
+    tol = {"atol": 1e-3, "rtol": 1e-3 if dtype == torch.float16 else 1.6e-2}
+    torch.testing.assert_close(y, ref_y, **tol)

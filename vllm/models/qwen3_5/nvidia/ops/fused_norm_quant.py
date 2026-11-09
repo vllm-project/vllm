@@ -108,38 +108,36 @@ def _gemma_add_rms_norm_quant_kernel(
     y = (h * rstd * (1.0 + w.to(tl.float32))).to(x_ptr.dtype.element_ty)
     if QUANT == "none" or WRITE_Y:
         tl.store(y_ptr + row * H + cols, y, mask=mask)
+    if QUANT == "nvfp4":
+        # scaled_fp4_quant numerics; `scale` is the global scale
+        # (448 * 6 / amax).
+        y32 = y.to(tl.float32)
+        vmax = tl.max(tl.max(tl.abs(y32), axis=2), axis=1)
+        sf = scale * (vmax * _rcp_approx_ftz(tl.full((G,), 6.0, tl.float32)))
+        sf_fp8 = tl.minimum(sf, FP8_MAX).to(tl.float8e4nv)
+        sf32 = sf_fp8.to(tl.float32)
+        out_scale = tl.where(
+            sf32 != 0.0, _rcp_approx_ftz(sf32 * _rcp_approx_ftz(scale)), 0.0
+        )
+        lo, hi = tl.split(y32 * out_scale[:, None, None])
+        pcols = g[:, None] * 8 + pair[None, :]
+        tl.store(
+            q_ptr + row * (H // 2) + pcols, _cvt_e2m1x2(lo, hi), mask=pcols < H // 2
+        )
 
-    if QUANT != "none":
-        y = y.to(tl.float32)
-        if QUANT == "nvfp4":
-            # scaled_fp4_quant numerics; `scale` is the global scale
-            # (448 * 6 / amax).
-            vmax = tl.max(tl.max(tl.abs(y), axis=2), axis=1)
-            sf = scale * (vmax * _rcp_approx_ftz(tl.full((G,), 6.0, tl.float32)))
-            sf_fp8 = tl.minimum(sf, FP8_MAX).to(tl.float8e4nv)
-            sf32 = sf_fp8.to(tl.float32)
-            out_scale = tl.where(
-                sf32 != 0.0, _rcp_approx_ftz(sf32 * _rcp_approx_ftz(scale)), 0.0
-            )
-            lo, hi = tl.split(y * out_scale[:, None, None])
-            pcols = g[:, None] * 8 + pair[None, :]
-            tl.store(
-                q_ptr + row * (H // 2) + pcols, _cvt_e2m1x2(lo, hi), mask=pcols < H // 2
-            )
-
-            # Swizzled 128x4 scale layout [m_tile, k_tile, 32, 4, 4].
-            num_k_tiles: tl.constexpr = (H // 16 + 3) // 4
-            sf_off = (
-                ((row >> 7) * num_k_tiles + (g >> 2)) * 512
-                + (row & 31) * 16
-                + ((row >> 5) & 3) * 4
-                + (g & 3)
-            )
-            tl.store(sf_ptr + sf_off, sf_fp8, mask=g < H // 16)
-        else:
-            inv_scale = tl.math.div_rn(1.0, scale)
-            q = tl.clamp(y * inv_scale, -FP8_MAX, FP8_MAX)
-            tl.store(q_ptr + row * H + cols, q, mask=mask)
+        # Swizzled 128x4 scale layout [m_tile, k_tile, 32, 4, 4].
+        num_k_tiles: tl.constexpr = (H // 16 + 3) // 4
+        sf_off = (
+            ((row >> 7) * num_k_tiles + (g >> 2)) * 512
+            + (row & 31) * 16
+            + ((row >> 5) & 3) * 4
+            + (g & 3)
+        )
+        tl.store(sf_ptr + sf_off, sf_fp8, mask=g < H // 16)
+    elif QUANT == "fp8":
+        inv_scale = tl.math.div_rn(1.0, scale)
+        q = tl.clamp(y.to(tl.float32) * inv_scale, -FP8_MAX, FP8_MAX)
+        tl.store(q_ptr + row * H + cols, q, mask=mask)
 
     if launch_pdl and not TRIGGER_EARLY:
         tl.extra.cuda.gdc_launch_dependents()
