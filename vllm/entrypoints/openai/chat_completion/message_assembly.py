@@ -3,6 +3,8 @@
 from collections.abc import Mapping, Sequence
 from typing import Any, NamedTuple
 
+from openai_harmony import Message as HarmonyMessage
+
 from vllm.entrypoints.generate.base.protocol import FunctionCall, ToolCall
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionNamedToolChoiceParam,
@@ -121,11 +123,14 @@ def get_chat_response_role(request: ChatCompletionRequest, response_role: str) -
     return request.messages[-1]["role"]
 
 
-def get_echo_content(messages: Sequence[Mapping[str, Any]], role: str) -> str:
+def get_echo_content(
+    messages: Sequence[Mapping[str, Any] | HarmonyMessage], role: str
+) -> str:
     """Text that `echo` prepends to the response content.
 
     Args:
-        messages: The conversation, parsed or as sent in the request.
+        messages: The conversation, parsed (Harmony messages for gpt-oss) or
+            as sent in the request.
         role: The response role from `get_chat_response_role`.
 
     Returns:
@@ -134,9 +139,14 @@ def get_echo_content(messages: Sequence[Mapping[str, Any]], role: str) -> str:
         parsing does. Multimodal parts are left out.
 
     """
-    if not messages or messages[-1].get("role") != role:
+    if not messages:
         return ""
-    content = messages[-1].get("content") or ""
+    last = messages[-1]
+    if isinstance(last, HarmonyMessage):
+        last = last.to_dict()
+    if last.get("role") != role:
+        return ""
+    content = last.get("content") or ""
     if isinstance(content, str):
         return content
     texts = (_part_text(part) for part in content)
