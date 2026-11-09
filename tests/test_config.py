@@ -7,6 +7,7 @@ import os
 import subprocess
 import sys
 import textwrap
+from contextlib import nullcontext
 from dataclasses import MISSING, Field, asdict, dataclass, field
 from datetime import timedelta
 from pathlib import Path
@@ -1570,6 +1571,49 @@ def test_engram_thp_rejects_explicit_shared_memory():
         ValueError, match="use_thp requires cpu_offload=True and dp_shared_memory=False"
     ):
         EngramConfig(use_thp=True, dp_shared_memory=True)
+
+
+_PEER_GROUP = {
+    "cpu_offload": False,
+    "peer_group_size": 4,
+    "peer_group_store": "/shared/peers",
+}
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize(
+    "options,tp_size,dp_size,error",
+    [
+        ({"cpu_offload": False, "peer_group_size": 4}, 1, 2, "set together"),
+        ({"cpu_offload": False, "peer_group_store": "/p"}, 1, 2, "set together"),
+        (_PEER_GROUP | {"cpu_offload": True}, 1, 2, "requires cpu_offload=False"),
+        (_PEER_GROUP, 2, 2, "TP=1"),
+        (_PEER_GROUP, 1, 8, "cannot hold an engine of 8"),
+        (_PEER_GROUP, 1, 4, None),
+    ],
+)
+def test_engram_peer_group_validation(options, tp_size, dp_size, error, monkeypatch):
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    parallel = ParallelConfig(
+        tensor_parallel_size=tp_size,
+        data_parallel_size=dp_size,
+        distributed_executor_backend="mp",
+    )
+    with pytest.raises(ValueError, match=error) if error else nullcontext():
+        EngramConfig(**options).verify_parallel_config(parallel)
+
+
+@pytest.mark.skip_global_cleanup
+def test_engram_peer_group_store_path_does_not_change_compile_hash():
+    """Launches pick fresh store paths; their compiled graphs stay reusable."""
+
+    def factors(size, path):
+        return EngramConfig(
+            cpu_offload=False, peer_group_size=size, peer_group_store=path
+        ).compile_factors()
+
+    assert factors(4, "/job1/peers") == factors(4, "/job2/peers")
+    assert factors(4, "/job1/peers") != factors(8, "/job1/peers")
 
 
 @pytest.mark.parametrize(

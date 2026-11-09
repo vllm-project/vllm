@@ -61,6 +61,21 @@ class EngramConfig:
     startup takes longer. Requires cpu_offload without dp_shared_memory.
     Always on for private tables on ROCm."""
 
+    peer_group_size: int = 0
+    """Split each GPU table's rows over this many GPUs of several engines in one
+    NVLink domain, such as every prefill engine of a deployment, instead of over
+    one engine's DP ranks. Lookups read rows from the owning GPU's HBM, so no
+    engine's step waits on another's. The GPU counts of the engines in the group
+    must add up to this value, and every engine passes the same value and
+    `peer_group_store`. The engines wait at startup until all of them have
+    loaded their rows, and restarting one means restarting all of them. Requires
+    CUDA FABRIC memory handles (an IMEX channel), tables in HBM and TP=1."""
+
+    peer_group_store: str | None = None
+    """Path of the file through which the engines of a peer group meet at
+    startup. Every engine must be able to open it, e.g. on the job's shared
+    filesystem, and it must not exist before the group starts."""
+
     @model_validator(mode="after")
     def _validate_shared_memory(self) -> Self:
         if self.dp_shared_memory and not self.cpu_offload:
@@ -68,6 +83,14 @@ class EngramConfig:
         if self.use_thp and (not self.cpu_offload or self.dp_shared_memory):
             raise ValueError(
                 "use_thp requires cpu_offload=True and dp_shared_memory=False"
+            )
+        if (self.peer_group_size > 0) != (self.peer_group_store is not None):
+            raise ValueError(
+                "peer_group_size and peer_group_store must be set together"
+            )
+        if self.peer_group_size and (self.cpu_offload or self.disk_offload):
+            raise ValueError(
+                "peer_group_size requires cpu_offload=False and disk_offload=False"
             )
         return self
 
@@ -120,6 +143,22 @@ class EngramConfig:
             )
         if self.disk_offload and parallel_config.enable_elastic_ep:
             raise ValueError("disk_offload is not supported with elastic EP.")
+        if self.peer_group_size:
+            from vllm.platforms import current_platform
+
+            if (
+                not current_platform.is_cuda()
+                or parallel_config.tensor_parallel_size > 1
+                or parallel_config.enable_elastic_ep
+            ):
+                raise ValueError(
+                    "peer_group_size requires CUDA, TP=1 and no elastic EP"
+                )
+            if self.peer_group_size < parallel_config.data_parallel_size:
+                raise ValueError(
+                    f"An Engram peer group of {self.peer_group_size} GPUs cannot "
+                    f"hold an engine of {parallel_config.data_parallel_size}"
+                )
 
     def get_parallel_size(self, parallel_config: "ParallelConfig") -> int:
         """Derive the embedding group size from the parallel configuration."""
@@ -130,4 +169,6 @@ class EngramConfig:
 
     def compile_factors(self) -> CompileFactors:
         """Hash settings that affect embedding execution and graph structure."""
-        return get_compile_factors(self, set())
+        # The store only matters at startup; a per-launch path must not
+        # invalidate the compile cache.
+        return get_compile_factors(self, {"peer_group_store"})

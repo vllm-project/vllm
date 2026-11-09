@@ -25,6 +25,8 @@ import sys
 import tempfile
 import weakref
 from contextlib import ExitStack
+from datetime import timedelta
+from functools import cache
 
 import numpy as np
 import torch
@@ -664,6 +666,59 @@ def gather_errors(group: GroupCoordinator, error: str | None) -> str:
     )
 
 
+class EngramPeerGroup:
+    """GPUs of several engines that split each Engram table over their HBM.
+
+    They meet once, at startup, through a file store; lookups then read peers'
+    rows directly, so no engine's step ever waits on another's.
+    """
+
+    # Engines load their weights at their own pace before the group can serve.
+    TIMEOUT = timedelta(minutes=30)
+
+    def __init__(self, size: int, path: str) -> None:
+        self.world_size = size
+        self.store = torch.distributed.FileStore(path, size)
+        self.store.set_timeout(self.TIMEOUT)
+        # Any assignment works: a rank only decides which rows a GPU holds.
+        self.rank_in_group = self.store.add("next_rank", 1) - 1
+        if self.rank_in_group >= size:
+            raise RuntimeError(
+                f"More than {size} GPUs joined the Engram peer group at {path}; "
+                "check peer_group_size and use a fresh store path per launch"
+            )
+        self._num_tables = 0
+
+    def next_table_key(self) -> str:
+        """Engines allocate their tables in the same order, so counting names a
+        table alike on every GPU."""
+        self._num_tables += 1
+        return f"table{self._num_tables}"
+
+    def all_gather(self, key: str, value: bytes) -> list[bytes]:
+        """Every GPU's value for `key` in rank order, once all have set theirs."""
+        self.store.set(f"{key}/{self.rank_in_group}", value)
+        keys = [f"{key}/{rank}" for rank in range(self.world_size)]
+        try:
+            self.store.wait(keys)
+        except RuntimeError as exc:
+            missing = [
+                rank for rank, name in enumerate(keys) if not self.store.check([name])
+            ]
+            raise TimeoutError(
+                f"Engram peer GPUs {missing} did not reach {key!r} within "
+                f"{self.TIMEOUT}; every engine of the group must start, and none "
+                "may restart alone"
+            ) from exc
+        return [self.store.get(name) for name in keys]
+
+
+@cache
+def join_engram_peer_group(size: int, path: str) -> EngramPeerGroup:
+    """This GPU's membership, shared by all of its process's tables."""
+    return EngramPeerGroup(size, path)
+
+
 def _shm_shortfall(num_bytes: int) -> str | None:
     """Why /dev/shm cannot hold a table of this size, or None if it can."""
     if not os.path.isdir(SHM_PATH):
@@ -893,12 +948,15 @@ class ParallelEngramEmbedding(nn.Module):
     """Hash heads with FP8 rows and per-block E8M0 scales.
 
     Heads are TP-sharded, and additionally DP-sharded across a node-local
-    group unless the table lives in (DP-shared) pinned host memory.
+    group unless the table lives in (DP-shared) pinned host memory or its rows
+    are split over a peer group's HBM.
     """
 
     _weight_loader = staticmethod(_engram_head_shard_weight_loader)
     _shared_memory: DPSharedEngramStorage | None = None
     _packed: torch.Tensor | None = None
+    # Where this table's slice is published, if its rows span several engines.
+    _peer_key: str | None = None
 
     def __init__(
         self,
@@ -909,6 +967,7 @@ class ParallelEngramEmbedding(nn.Module):
         cpu_offload: bool = False,
         dp_shared_memory: bool = False,
         use_thp: bool = False,
+        peer_group: EngramPeerGroup | None = None,
     ) -> None:
         super().__init__()
         assert head_sizes and all(size > 0 for size in head_sizes)
@@ -928,10 +987,13 @@ class ParallelEngramEmbedding(nn.Module):
                     "DP replicas to be co-located."
                 )
             self.dp_size = 1
-        # GPU tables split rows over the DP group and every rank reads its own
-        # tokens' rows from the owning peer's HBM, so lookups need no collective.
-        peer_group = None
-        if (
+        # GPU tables split rows over a peer group (the given GPUs of several
+        # engines, else the DP group) and every rank reads its own tokens' rows
+        # from the owning peer's HBM, so lookups need no collective.
+        self._peer_group: EngramPeerGroup | GroupCoordinator | None = peer_group
+        if peer_group is not None:
+            self.dp_size = 1
+        elif (
             not cpu_offload
             and self.dp_size > 1
             and get_tensor_model_parallel_world_size() == 1
@@ -951,7 +1013,7 @@ class ParallelEngramEmbedding(nn.Module):
                 )
                 peer = current_platform.is_fully_connected(physical_ids)
             if peer:
-                peer_group, self.dp_size = group, 1
+                self._peer_group, self.dp_size = group, 1
         if cpu_offload and not is_uva_available():
             raise RuntimeError("Engram CPU offload requires UVA support")
         self._views: tuple[torch.Tensor, torch.Tensor] | None = None
@@ -975,11 +1037,9 @@ class ParallelEngramEmbedding(nn.Module):
         self.part_num_embeddings = self.vocab_end_idx - self.vocab_start_idx
         # Peer tables keep the full lookup range but store one row slice.
         self.peer_rows, row_start = 0, self.vocab_start_idx
-        if peer_group is not None:
-            self.peer_rows = triton.cdiv(self.vocab_end_idx, peer_group.world_size)
-            row_start = min(
-                peer_group.rank_in_group * self.peer_rows, self.vocab_end_idx
-            )
+        if (peers := self._peer_group) is not None:
+            self.peer_rows = triton.cdiv(self.vocab_end_idx, peers.world_size)
+            row_start = min(peers.rank_in_group * self.peer_rows, self.vocab_end_idx)
             self.part_num_embeddings = min(
                 self.peer_rows, self.vocab_end_idx - row_start
             )
@@ -1031,22 +1091,31 @@ class ParallelEngramEmbedding(nn.Module):
                 torch.empty(self.part_num_embeddings, scale_dim, dtype=torch.uint8),
             )
         if self.peer_rows:
-            import torch.distributed._symmetric_memory as symm_mem
-
-            group = get_engram_dp_group()
-            assert group is not None
+            peers = self._peer_group
             values = self.peer_rows * self.dim
+            num_bytes = values + self.peer_rows * scale_dim
             device = torch.device("cuda", torch.accelerator.current_device_index())
-            buffer = symm_mem.empty(
-                values + self.peer_rows * scale_dim, dtype=torch.uint8, device=device
-            )
-            handle = symm_mem.rendezvous(buffer, group.device_group)
+            if isinstance(peers, EngramPeerGroup):
+                # Symmetric memory cannot span engines: its rendezvous rejects
+                # equal device ordinals on one node, and each engine's start at 0.
+                from vllm.models.deepseek_v41.nvidia.ops.engram_host_table import (
+                    share_peer_table,
+                )
+
+                self._peer_key = peers.next_table_key()
+                buffer, pointers = share_peer_table(num_bytes, peers, self._peer_key)
+            else:
+                import torch.distributed._symmetric_memory as symm_mem
+
+                assert peers is not None
+                buffer = symm_mem.empty(num_bytes, dtype=torch.uint8, device=device)
+                self._symm_handle = symm_mem.rendezvous(buffer, peers.device_group)
+                pointers = self._symm_handle.buffer_ptrs
             self.register_buffer(
                 "peer_ptrs",
-                torch.tensor(handle.buffer_ptrs, dtype=torch.int64, device=device),
+                torch.tensor(pointers, dtype=torch.int64, device=device),
                 persistent=False,
             )
-            self._symm_handle = handle
             rows = self.part_num_embeddings
             return (
                 buffer[: rows * self.dim].view(torch.float8_e4m3fn).view(rows, -1),
@@ -1090,6 +1159,18 @@ class ParallelEngramEmbedding(nn.Module):
                 pin_memory=True,
             ),
         )
+
+    def process_weights_after_loading(self) -> None:
+        """Peers read this table's rows directly, so serve only once every GPU
+        of the group has finished loading its own."""
+        if not self.peer_rows:
+            return
+        torch.accelerator.synchronize()
+        if isinstance(self._peer_group, EngramPeerGroup):
+            self._peer_group.all_gather(f"{self._peer_key}/loaded", b"")
+        else:
+            assert self._peer_group is not None
+            self._peer_group.barrier()
 
     def collapse_huge_pages(self) -> None:
         """Best-effort MADV_COLLAPSE (Linux >= 6.1) of pages that faulted small."""
@@ -1607,6 +1688,11 @@ class Engram(nn.Module):
     ) -> ParallelEngramEmbedding:
         engram_config = get_current_vllm_config().engram_config
         assert engram_config is not None
+        peer_group = None
+        if engram_config.peer_group_store is not None:
+            peer_group = join_engram_peer_group(
+                engram_config.peer_group_size, engram_config.peer_group_store
+            )
         return ParallelEngramEmbedding(
             layout.num_embeddings[layer_hash_index],
             layout.head_dim,
@@ -1614,6 +1700,7 @@ class Engram(nn.Module):
             cpu_offload=engram_config.cpu_offload,
             dp_shared_memory=bool(engram_config.dp_shared_memory),
             use_thp=engram_config.use_thp,
+            peer_group=peer_group,
         )
 
     def _init_staging(self, max_tokens: int, head_dim: int) -> None:

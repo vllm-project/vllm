@@ -12,6 +12,8 @@ With shared host storage, DP replicas instead map the same TP slice and
 prefetch only their own tokens without DP gathers.
 """
 
+from concurrent.futures import ThreadPoolExecutor
+from datetime import timedelta
 from itertools import product
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -50,6 +52,7 @@ from vllm.models.deepseek_v41.common.engram import (
     Engram,
     EngramBatch,
     EngramLayout,
+    EngramPeerGroup,
     ParallelEngramEmbedding,
     engram_head_shard_rank,
     gather_engram_hashes,
@@ -57,6 +60,7 @@ from vllm.models.deepseek_v41.common.engram import (
 from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_open_port
 from vllm.utils.system_utils import update_environment_variables
+from vllm.utils.vmm_driver import imex_channel_available
 
 WORLD_SIZE = 4
 DIM, BLOCK = 64, 32
@@ -169,7 +173,7 @@ def test_engram_group_creation_honors_model_and_options(
     assert (group is parallel_state._DP) == full_dp
 
 
-def _worker(rank: int, tp_size: int, port: int) -> None:
+def _worker(rank: int, tp_size: int, port: int, store_dir: str) -> None:
     torch.accelerator.set_device_index(rank)
     update_environment_variables(
         {
@@ -216,6 +220,8 @@ def _worker(rank: int, tp_size: int, port: int) -> None:
             _check_shared_storage_lifetime_and_failures(failure)
         for failure in (None, "create", "import"):
             _check_cumem_host_table(failure)
+        if tp_size == 1:
+            _check_peer_group_table(str(Path(store_dir) / "peers"))
 
         # GPU peer reads need NVLink P2P, which CI's L4s lack.
         p2p = current_platform.is_fully_connected(
@@ -245,6 +251,53 @@ def _worker(rank: int, tp_size: int, port: int) -> None:
             _check_fp8_batch(vllm_config)
     finally:
         cleanup_dist_env_and_memory()
+
+
+def _check_peer_group_table(store_path: str):
+    """GPUs of independent engines split one GPU table, publish their slices
+    through a file store and read each other's rows without collectives."""
+    if not imex_channel_available():
+        return
+    weight, scale = _full_table(sum(HEAD_SIZES))
+    group = EngramPeerGroup(WORLD_SIZE, store_path)
+    with torch.device("cuda"):
+        table = ParallelEngramEmbedding(
+            sum(HEAD_SIZES), DIM, HEAD_SIZES, peer_group=group
+        )
+    assert table.dp_size == 1
+    assert table.peer_rows == -(-sum(HEAD_SIZES) // WORLD_SIZE)
+    table.weight.weight_loader(table.weight, weight)
+    table.weight_scale_inv.weight_loader(table.weight_scale_inv, scale)
+    table.process_weights_after_loading()
+    ids = _make_ids(HEAD_SIZES, 9, seed=500 + group.rank_in_group)
+    expected = _reference(weight.cuda(), scale.cuda(), ids)
+    torch.testing.assert_close(table(ids), expected, atol=0, rtol=0)
+
+
+def test_engram_peer_group_assigns_ranks_and_gathers(tmp_path):
+    """Engines share one config, so ranks must not collide however they race,
+    and a reused store is rejected rather than joined."""
+    path = str(tmp_path / "peers")
+    with ThreadPoolExecutor(4) as pool:
+        groups = list(pool.map(lambda _: EngramPeerGroup(4, path), range(4)))
+        gathered = list(
+            pool.map(
+                lambda group: group.all_gather("key", b"%d" % group.rank_in_group),
+                groups,
+            )
+        )
+    assert sorted(group.rank_in_group for group in groups) == [0, 1, 2, 3]
+    assert gathered == [[b"0", b"1", b"2", b"3"]] * 4
+    with pytest.raises(RuntimeError, match="fresh store path"):
+        EngramPeerGroup(4, path)
+
+
+def test_engram_peer_group_names_missing_gpus(tmp_path, monkeypatch):
+    """A peer that never arrives fails startup with its rank, not a bare timeout."""
+    monkeypatch.setattr(EngramPeerGroup, "TIMEOUT", timedelta(milliseconds=200))
+    group = EngramPeerGroup(2, str(tmp_path / "peers"))
+    with pytest.raises(TimeoutError, match=r"GPUs \[1\] did not reach 'loaded'"):
+        group.all_gather("loaded", b"")
 
 
 def _check_fp8_batch(vllm_config):
@@ -527,6 +580,8 @@ def _check_table(
                 layer.weight_scale_inv.weight_loader(
                     layer.weight_scale_inv, loader_scale
                 )
+            # As the model loader does: peers must not read rows still loading.
+            layer.process_weights_after_loading()
             # Shared host tables and GPU peer reads look up only local tokens.
             local = layer.dp_size == 1
             assert (layer.peer_rows > 0) == (not cpu_offload and tp_size == 1 and p2p)
@@ -812,12 +867,12 @@ def _check_prefetch_replay(
     not current_platform.is_cuda_alike(), reason="CUDA or ROCm required"
 )
 @pytest.mark.parametrize("tp_size", [1, 2])
-def test_engram_table_shared_across_dp_replicas(tp_size, monkeypatch):
+def test_engram_table_shared_across_dp_replicas(tp_size, monkeypatch, tmp_path):
     """Check all storage modes with one process launch per TP/DP topology."""
     if torch.accelerator.device_count() < WORLD_SIZE:
         pytest.skip(f"Need {WORLD_SIZE} GPUs to run the test.")
     monkeypatch.setenv("VLLM_USE_BREAKABLE_CUDAGRAPH", "1")
-    mp.spawn(_worker, args=(tp_size, get_open_port()), nprocs=WORLD_SIZE)
+    mp.spawn(_worker, args=(tp_size, get_open_port(), str(tmp_path)), nprocs=WORLD_SIZE)
     cleanup_dist_env_and_memory()
 
 

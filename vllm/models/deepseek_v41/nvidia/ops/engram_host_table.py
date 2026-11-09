@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Engram host tables in host-NUMA cuMem, shared across DP ranks by FABRIC handle.
+"""Engram tables in cuMem shared by FABRIC handle.
 
-GPUs map cuMem host memory with 2M pages instead of the 64K pages of a registered
-/dev/shm mapping, so random row lookups miss the TLB far less.
+Host tables live in host-NUMA memory shared across DP ranks: GPUs map cuMem host
+memory with 2M pages instead of the 64K pages of a registered /dev/shm mapping, so
+random row lookups miss the TLB far less. Peer tables split their rows over the
+HBM of several engines' GPUs.
 """
 
 import ctypes
@@ -17,7 +19,11 @@ from cuda.bindings import driver as cu
 
 from vllm.distributed.parallel_state import GroupCoordinator
 from vllm.logger import init_logger
-from vllm.models.deepseek_v41.common.engram import describe_error, gather_errors
+from vllm.models.deepseek_v41.common.engram import (
+    EngramPeerGroup,
+    describe_error,
+    gather_errors,
+)
 from vllm.utils.cpu_resource_utils import get_memory_node_info
 from vllm.utils.math_utils import round_up
 
@@ -191,9 +197,14 @@ def _map_table(
         host_buffer, _unmap, address, table.padded_bytes, mapped
     )
     finalizer.atexit = False  # type: ignore[misc]
-    # Torch retains this object, so the GPU view keeps the buffer alive too.
-    # Name the device: an index-less "cuda" makes torch copy the table.
-    gpu_view = torch.as_tensor(
+    gpu_view = _gpu_view(address, num_bytes, owner=host_buffer)
+    return torch.frombuffer(host_buffer, dtype=torch.uint8), gpu_view
+
+
+def _gpu_view(address: int, num_bytes: int, owner: object = None) -> torch.Tensor:
+    """A uint8 tensor over mapped memory; torch retains `owner` with it."""
+    # Name the device: an index-less "cuda" makes torch copy the memory.
+    return torch.as_tensor(
         SimpleNamespace(
             __cuda_array_interface__={
                 "shape": (num_bytes,),
@@ -201,11 +212,46 @@ def _map_table(
                 "data": (address, False),
                 "version": 3,
             },
-            owner=host_buffer,
+            owner=owner,
         ),
-        device=torch.device("cuda", device),
+        device=torch.device("cuda", torch.accelerator.current_device_index()),
     )
-    return torch.frombuffer(host_buffer, dtype=torch.uint8), gpu_view
+
+
+def share_peer_table(
+    num_bytes: int, group: EngramPeerGroup, key: str
+) -> tuple[torch.Tensor, list[int]]:
+    """Allocate this GPU's slice of a table in its HBM and map every GPU's slice.
+
+    Every slice holds `num_bytes`. Returns this GPU's slice and the address of
+    each rank's slice. The mappings last as long as the process, since peers read
+    the slices; each mapping keeps its slice alive.
+    """
+    device = torch.accelerator.current_device_index()
+    prop = cu.CUmemAllocationProp()
+    prop.type = cu.CUmemAllocationType.CU_MEM_ALLOCATION_TYPE_PINNED
+    prop.location.type = cu.CUmemLocationType.CU_MEM_LOCATION_TYPE_DEVICE
+    prop.location.id = device
+    prop.requestedHandleTypes = FABRIC_HANDLE
+    size = round_up(num_bytes, _allocation_granularity(prop))
+    own = _call_driver(cu.cuMemCreate, size, prop, 0)
+    exported = group.all_gather(key, _export_fabric_handle(own))
+    access = _read_write_access(
+        cu.CUmemLocationType.CU_MEM_LOCATION_TYPE_DEVICE, device
+    )
+    addresses = []
+    for rank, peer in enumerate(exported):
+        handle = (
+            own
+            if rank == group.rank_in_group
+            else _call_driver(cu.cuMemImportFromShareableHandle, peer, FABRIC_HANDLE)
+        )
+        address = int(_call_driver(cu.cuMemAddressReserve, size, 0, 0, 0))
+        _call_driver(cu.cuMemMap, address, size, 0, handle, 0)
+        _call_driver(cu.cuMemSetAccess, address, size, [access], 1)
+        _release([handle])
+        addresses.append(address)
+    return _gpu_view(addresses[group.rank_in_group], num_bytes), addresses
 
 
 def share_host_table(

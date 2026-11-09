@@ -172,6 +172,34 @@ and falls back to per-replica (or DP-sharded) tables with a warning when:
 Requirements: `cpu_offload` enabled, `--data-parallel-size > 1`, and a shared
 IPC namespace across the co-located replicas.
 
+## Splitting GPU tables across engines (DeepSeek V4.1)
+
+Deployments that run several engines in one NVLink domain, such as the prefill
+engines of a disaggregated deployment, can keep the tables in HBM and split
+their rows over the GPUs of all those engines. Each GPU then holds
+1/`peer_group_size` of every table, and lookups read the other rows straight
+from the owning GPU's HBM, so no engine's step waits on another's. This frees
+the host memory that a CPU-offloaded copy per engine or node takes, e.g. for
+a host KV cache tier:
+
+```bash
+# On every engine of the group, e.g. 9 DEP2 prefill engines (18 GPUs):
+vllm serve deepseek-ai/DeepSeek-V4.1-Flash \
+  --data-parallel-size 2 --enable-expert-parallel \
+  --engram-config '{"cpu_offload": false, "peer_group_size": 18,
+                    "peer_group_store": "/shared/job-logs/engram-peers"}'
+```
+
+`peer_group_size` counts GPUs: the GPU counts of the engines in the group must
+add up to it. The engines meet once at startup through `peer_group_store`, a
+file every engine can open (e.g. in the job's shared log directory), which
+must not exist before the group starts. Each engine waits until all of them
+have loaded their rows, for at most 30 minutes.
+
+Requirements: CUDA with FABRIC memory handles (an IMEX channel, as on NVL72
+systems), TP=1, and `cpu_offload` disabled. Restarting one engine means
+restarting the whole group, because its peers keep reading its rows.
+
 ## Limitations
 
 - CUDA-alike platforms only.
