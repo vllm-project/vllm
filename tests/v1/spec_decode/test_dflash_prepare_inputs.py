@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 import torch
 
+from vllm.config import VllmConfig
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import (
@@ -87,6 +88,7 @@ def _run_prepare(
         pass
 
     draft = SimpleNamespace(
+        vllm_config=VllmConfig(),
         input_buffers=input_buffers,
         context_positions=context_positions,
         _context_slot_mappings=context_slot_mapping.unsqueeze(0),

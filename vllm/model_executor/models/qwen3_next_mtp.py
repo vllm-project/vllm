@@ -41,7 +41,17 @@ logger = init_logger(__name__)
 KVCache = tuple[torch.Tensor, torch.Tensor]
 
 
-@support_torch_compile
+def should_torch_compile_mtp_drafter(vllm_config: VllmConfig) -> bool:
+    """`enable_if` for MTP drafters that pick their module by `spec_step_idx`.
+
+    The drafter is compiled once with guards dropped, so a compiled
+    multi-module drafter would reuse the first-traced module for every step.
+    """
+    spec_config = vllm_config.speculative_config
+    return spec_config is None or not spec_config.use_multi_module_mtp()
+
+
+@support_torch_compile(enable_if=should_torch_compile_mtp_drafter)
 class Qwen3NextMultiTokenPredictor(nn.Module):
     hf_to_vllm_mapper = Qwen3NextModel.hf_to_vllm_mapper
 
@@ -171,7 +181,7 @@ class Qwen3NextMultiTokenPredictor(nn.Module):
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
-@support_torch_compile
+@support_torch_compile(enable_if=should_torch_compile_mtp_drafter)
 class Qwen3NextMTP(nn.Module, QwenNextMixtureOfExperts):
     packed_modules_mapping = {
         "qkv_proj": [
@@ -211,10 +221,15 @@ class Qwen3NextMTP(nn.Module, QwenNextMixtureOfExperts):
         hidden_states: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
-        **kwargs: object,
+        spec_step_idx: int = 0,
     ):
         hidden_states = self.model(
-            input_ids, positions, hidden_states, intermediate_tensors, inputs_embeds
+            input_ids,
+            positions,
+            hidden_states,
+            intermediate_tensors,
+            inputs_embeds,
+            spec_step_idx,
         )
         return hidden_states
 
