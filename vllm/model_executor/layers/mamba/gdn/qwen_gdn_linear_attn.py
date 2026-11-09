@@ -1992,7 +1992,26 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             core_attn_out_spec, last_recurrent_state = None, None
 
         # 2.2: Process non-spec-decode part
-        if split_non_spec:
+        decode_in_place = split_non_spec and GDN_AITER_TRITON_AVAILABLE
+        if decode_in_place:
+            gdn_aiter_fused_rearrange_sigmoid_gated_delta_rule(
+                A_log=self.A_log,
+                a=a[:num_decode_tokens],
+                b=b[:num_decode_tokens],
+                dt_bias=self.dt_bias,
+                qkv=mixed_qkv_non_spec[:num_decode_tokens],  # type: ignore[index]
+                key_dim=self.key_dim // self.tp_size,
+                value_dim=self.value_dim // self.tp_size,
+                head_k_dim=self.head_k_dim,
+                head_v_dim=self.head_v_dim,
+                initial_state=ssm_state,
+                inplace_final_state=True,
+                cu_seqlens=non_spec_query_start_loc[: attn_metadata.num_decodes + 1],  # type: ignore[index]
+                ssm_state_indices=non_spec_state_indices_tensor,
+                use_qk_l2norm_in_kernel=True,
+                core_attn_out=core_attn_out.reshape(-1),
+            )
+        elif split_non_spec:
             query_decode, key_decode, value_decode = self.rearrange_mixed_qkv(
                 mixed_qkv_non_spec[:num_decode_tokens]  # type: ignore[index]
             )
@@ -2072,7 +2091,13 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             # Init cache
             scatter_states(ssm_state, last_recurrent_state, prefill_state_indices)
 
-            if split_non_spec and prefill_in_place:
+            if decode_in_place:
+                if not prefill_in_place:
+                    core_attn_out[num_decode_tokens:num_actual_tokens] = (
+                        core_attn_out_non_spec.squeeze(0)
+                    )
+                core_attn_out_non_spec = None
+            elif split_non_spec and prefill_in_place:
                 core_attn_out[:num_decode_tokens] = core_attn_out_decode.squeeze(0)
             elif split_non_spec:
                 # Stitch the peeled decode outputs in front of the prefill
@@ -2111,7 +2136,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             )
         elif spec_sequence_masks is not None:
             core_attn_out[:num_actual_tokens] = core_attn_out_spec.squeeze(0)
-        elif not prefill_in_place:
+        elif not prefill_in_place and core_attn_out_non_spec is not None:
             core_attn_out[:num_actual_tokens] = core_attn_out_non_spec.squeeze(0)
 
     def _forward_flashinfer_prefill(
