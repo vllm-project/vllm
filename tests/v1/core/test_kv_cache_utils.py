@@ -1565,6 +1565,7 @@ def test_uniform_type_spec_block_table_width_matches_layer_spec(
     # report the same width as the layers it wraps.
     vllm_config = VllmConfig(model_config=ModelConfig(max_model_len=1024))
     vllm_config.parallel_config.decode_context_parallel_size = dcp_size
+    vllm_config.cache_config.enable_prefix_caching = False
     layer_spec = new_mla_spec() if layer_type == "mla" else new_mamba_spec()
     uniform_spec = UniformTypeKVCacheSpecs(
         block_size=layer_spec.block_size,

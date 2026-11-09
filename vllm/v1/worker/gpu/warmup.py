@@ -98,7 +98,7 @@ def _warmup_block_counter(
     num_lookahead_tokens = vllm_config.num_lookahead_tokens
     max_model_len = model_runner.max_model_len
     max_encoder_len = getattr(model_runner.model_state, "max_encoder_len", 0)
-    enable_prefix_caching = model_runner.vllm_config.cache_config.enable_prefix_caching
+    enable_prefix_caching = vllm_config.cache_config.enable_prefix_caching
     dcp_world_size = vllm_config.parallel_config.decode_context_parallel_size
 
     def block_count(num_tokens: int, kvcache_spec: KVCacheSpec) -> int:
