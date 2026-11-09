@@ -26,7 +26,10 @@ class TestMaybePromoteTorchSymbolsHsaToolsLibSkip:
         prevents an external HSA tool's OnLoad callback from firing.
         """
         monkeypatch.setenv("HSA_TOOLS_LIB", "/path/to/external_tool.so")
-        fake_lib = tmp_path / "libtorch_cpu.so"
+        # The function looks for <torch_root>/lib/libtorch_cpu.so
+        lib_dir = tmp_path / "lib"
+        lib_dir.mkdir()
+        fake_lib = lib_dir / "libtorch_cpu.so"
         fake_lib.touch()
         with (
             patch.object(
