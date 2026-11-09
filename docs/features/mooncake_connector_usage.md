@@ -52,22 +52,29 @@ pool ownership and residency. Ordinary Mooncake deployments retain their
 existing transfer path; the import path is selected when the decoder has a
 HiSparse host pool.
 
-This experimental path requires both endpoints to run a compatible version,
-matching tensor-parallel sizes, pipeline parallelism of one, sparse MLA with
-unsplit physical pages, and a single host cache group. Layer names, cache roles
-and token block sizes must agree even when group numbers differ between nodes.
-Unsupported layouts fail the handshake.
+This experimental path requires matching tensor-parallel sizes, pipeline
+parallelism of one, and sparse MLA with unsplit physical pages. Layer names,
+token block sizes, and per-layer payload sizes must agree even when group
+numbers differ between nodes. Each decoder group must request a contiguous
+uncached suffix; holes within that suffix are unsupported. The producer pairs
+the requested pages with the suffix of its corresponding source group.
+Unsupported layouts fail before any data transfer.
 
-For a shared host pool, decoder TP rank 0 registers the host memory and its
-paired producer writes the host payload. Every decoder rank still receives its
-GPU indexer data and participates in completion before imported pages become
-usable. Private host backing retains per-rank host writes.
+The producer advertises its connector version through bootstrap registration.
+The decoder rejects this import path if the producer or bootstrap server does
+not advertise a compatible version.
 
-Validation so far covers GLM-5.2-FP8 on two TP8 H200 nodes with RDMA, eager
-execution and `FLASHMLA_SPARSE`. Private host backing has only descriptor-level
-coverage. A synthetic 4097-token output discrepancy between ordinary prefill
-and HiSparse remains unresolved and also occurs with decoder-local prefill;
-this is not a claim of general output parity or production readiness.
+For a shared host pool, decoder TP rank 0 registers and requests the host memory;
+other ranks omit host pages from their wire requests. Every decoder rank still
+receives its GPU indexer data and participates in completion before imported
+pages become usable. Private host backing retains per-rank host writes.
+
+An earlier prototype was exercised with GLM-5.2-FP8 on two TP8 H200 nodes with
+RDMA, eager execution and `FLASHMLA_SPARSE`. The simplified metadata and suffix
+pairing described here have not been revalidated. A synthetic 4097-token output
+discrepancy between ordinary prefill and HiSparse remains unresolved and also
+occurs with decoder-local prefill; this is not a claim of general output parity
+or production readiness.
 
 ## Environment Variables
 
