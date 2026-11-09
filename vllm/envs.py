@@ -466,8 +466,7 @@ def env_with_choices(
                     return choice
 
         raise ValueError(
-            f"Invalid value '{value}' for {env_name}. "
-            f"Valid options: {actual_choices}."
+            f"Invalid value '{value}' for {env_name}. Valid options: {actual_choices}."
         )
 
     return _get_validated_env
