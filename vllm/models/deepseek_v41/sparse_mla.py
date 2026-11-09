@@ -29,6 +29,7 @@ from vllm.v1.attention.backends.mla.sparse_swa import (
     DeepseekSparseSWAMetadata,
     DeepseekSparseSWAMetadataBuilder,
 )
+from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec
 
 # v4.1 per-layer compress ratios: 0 = pure sliding window, 1 = full-length
@@ -159,6 +160,7 @@ class DeepseekV4FlashMLAMetadata(AttentionMetadata):
     max_seq_len: int
 
     num_actual_tokens: int  # Number of tokens excluding padding.
+    num_decode_tokens: int
     query_start_loc: torch.Tensor
     slot_mapping: torch.Tensor
 
@@ -219,6 +221,9 @@ class DeepseekV4SparseMLAMetadataBuilder(
     ) -> DeepseekV4FlashMLAMetadata:
         cm = common_attn_metadata
         req_id_per_token = cm.token_to_req_indices(self.req_id_per_token_buffer)
+        _, _, num_decode_tokens, _ = split_decodes_and_prefills(
+            cm, decode_threshold=self.reorder_batch_threshold or 1
+        )
 
         slot_mapping = cm.slot_mapping
         if self.compress_ratio > 1:
@@ -245,6 +250,7 @@ class DeepseekV4SparseMLAMetadataBuilder(
             max_query_len=cm.max_query_len,
             max_seq_len=cm.max_seq_len,
             num_actual_tokens=cm.num_actual_tokens,
+            num_decode_tokens=num_decode_tokens,
             query_start_loc=cm.query_start_loc,
             slot_mapping=slot_mapping,
             block_table=cm.block_table_tensor,

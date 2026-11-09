@@ -6,7 +6,11 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from tests.v1.attention.utils import create_vllm_config
+from tests.v1.attention.utils import (
+    BatchSpec,
+    create_common_attn_metadata,
+    create_vllm_config,
+)
 from vllm.config import SpeculativeConfig
 from vllm.model_executor.layers.attention.sparse_mla_attention import (
     SparseMLACommonMetadataBuilder,
@@ -14,6 +18,9 @@ from vllm.model_executor.layers.attention.sparse_mla_attention import (
 from vllm.models.deepseek_v4.sparse_mla import DeepseekV4SparseMLABackend
 from vllm.models.deepseek_v41.sparse_mla import (
     DeepseekV4SparseMLABackend as DeepseekV41SparseMLABackend,
+)
+from vllm.models.deepseek_v41.sparse_mla import (
+    DeepseekV4SparseMLAMetadataBuilder as DeepseekV41SparseMLAMetadataBuilder,
 )
 from vllm.utils.deep_gemm import mqa_logits_use_mx_scales
 from vllm.v1.attention.backend import CommonAttentionMetadata
@@ -533,6 +540,52 @@ def test_index_conversion_warmup_uses_physical_block_stride():
         block_stride_rows=4096,
     )
     assert {key.block_stride_rows for key in keys} == {4096}
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="requires CUDA metadata kernels"
+)
+@pytest.mark.parametrize(
+    "query_lens,expected_decode_tokens",
+    [
+        ([1, 1], 2),
+        ([2, 5], 2),
+        ([0], 0),
+    ],
+)
+def test_deepseek_v41_metadata_reports_decode_tokens(
+    query_lens, expected_decode_tokens
+):
+    vllm_config = create_vllm_config(
+        model_name="vllm-project/tiny-random-LlamaForCausalLM",
+        max_model_len=128,
+    )
+    vllm_config.model_config.hf_config.index_topk = 8
+    vllm_config.speculative_config = SpeculativeConfig(
+        method="ngram", num_speculative_tokens=3
+    )
+    kv_cache_spec = MLAAttentionSpec(
+        block_size=64,
+        num_kv_heads=1,
+        head_size=512,
+        dtype=torch.uint8,
+        tokens_per_state=1,
+    )
+    builder = DeepseekV41SparseMLAMetadataBuilder(
+        kv_cache_spec=kv_cache_spec,
+        layer_names=["dummy"],
+        vllm_config=vllm_config,
+        device=torch.device("cpu"),
+    )
+    common = create_common_attn_metadata(
+        BatchSpec(seq_lens=[16] * len(query_lens), query_lens=query_lens),
+        block_size=64,
+        device=torch.device("cpu"),
+    )
+
+    metadata = builder.build(common_prefix_len=0, common_attn_metadata=common)
+
+    assert metadata.num_decode_tokens == expected_decode_tokens
 
 
 def test_zero_token_pcp_rank_participates_in_compressed_mapping_gather(monkeypatch):

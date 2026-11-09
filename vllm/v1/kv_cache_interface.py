@@ -496,6 +496,8 @@ class HiSparseHotSpec(KVCacheSpec):
 
     page_size: int
     blocks_per_request: int
+    storage_block_size: int | None = None
+    """Compressed rows per page; defaults to the bound group block size."""
 
     @property
     def prefix_cacheable(self) -> bool:
@@ -532,6 +534,8 @@ class HiSparseResidentSpec(KVCacheSpec):
     """Reclaimable GPU-resident pages for host-backed HiSparse KV."""
 
     page_size: int
+    storage_block_size: int | None = None
+    """Compressed rows per page; defaults to the bound group block size."""
 
     @property
     def prefix_cacheable(self) -> bool:

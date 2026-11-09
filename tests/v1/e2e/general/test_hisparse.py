@@ -237,9 +237,9 @@ def test_hisparse_spill_and_prefix_restore(
             finally:
                 full_replay_pending = False
 
-        def finish_previous_step():
+        def finish_previous_step(previous_host_write_event):
             nonlocal draft_check_pending
-            original_finish_previous_step()
+            original_finish_previous_step(previous_host_write_event)
             if draft_check_pending:
                 draft_check_pending = False
                 check_host_rows(draft_layers, "draft")

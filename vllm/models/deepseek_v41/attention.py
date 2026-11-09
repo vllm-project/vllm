@@ -86,9 +86,14 @@ from vllm.v1.attention.backends.mla.sparse_indexer import (
     DeepseekV41SparseIndexerBackend,
 )
 from vllm.v1.attention.backends.mla.sparse_swa import DeepseekV4SWACache
+from vllm.v1.hisparse.runtime import (
+    HiSparseCacheHandle,
+    create_hisparse_cache_handle,
+)
 from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     MLAAttentionSpec,
+    SparseCacheRole,
     get_kv_quant_mode,
 )
 
@@ -255,6 +260,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
     deepseek_v41 model module. The base is never instantiated directly.
     """
 
+    supports_hisparse: ClassVar[bool] = False
     # Provided by the platform subclass.
     backend_cls: ClassVar[type[AttentionBackend]]
     # Backend for the SWA cache layer; None uses the default SWA backend.
@@ -589,6 +595,42 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
                 "nvfp4_ds_mla needs the V4.1 KV records, which FlashMLA "
                 "decodes only on SM100."
             )
+
+        self.hisparse_cache: HiSparseCacheHandle | None = None
+        # Per-step top-k results shared by the layers of one index group.
+        self._hisparse_decode_results: dict[int, Any] = {}
+        if (
+            vllm_config.attention_config.hisparse_config is not None
+            and self.is_kv_source
+            and self.compress_ratio in (1, 2)
+        ):
+            if not self.supports_hisparse:
+                raise NotImplementedError(
+                    "DeepSeek V4.1 HiSparse currently requires the FlashMLA "
+                    f"backend; got {type(self).__name__}."
+                )
+            if self.kv_mxfp8:
+                raise NotImplementedError(
+                    "DeepSeek V4.1 HiSparse does not support the SM100 MXFP8 "
+                    "528-byte KV record. HiSparse is currently limited to SM90."
+                )
+            if not current_platform.is_device_capability(90):
+                raise NotImplementedError(
+                    "DeepSeek V4.1 HiSparse is currently supported only on SM90."
+                )
+            if self.kv_cache_dtype != "fp8_ds_mla":
+                raise ValueError(
+                    "DeepSeek V4.1 HiSparse requires the fp8_ds_mla cache layout."
+                )
+            self.hisparse_cache = create_hisparse_cache_handle(
+                vllm_config,
+                vllm_config.model_config.hf_text_config.index_topk,
+                is_index_group_leader=True,
+                row_width=584,
+                kv_dtype=torch.uint8,
+                row_value_bytes=576,
+            )
+            assert self.hisparse_cache is not None
 
         swa_bounded_replay = cache_config.swa_bounded_replay
         if (
@@ -1272,12 +1314,13 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             tokens_per_state=self.compress_ratio,
             cache_dtype_str=self.kv_cache_dtype,
             alignment=self.kv_page_alignment if uses_fp8_ds_mla_layout else 512,
-            model_version="deepseek_v4",
+            model_version="deepseek_v41",
             kv_quant_mode=get_kv_quant_mode(self.kv_cache_dtype),
             # Packed record width; head_size stays semantic (512).
             state_content_bytes=(
                 self.compressed_bytes_per_token if uses_fp8_ds_mla_layout else None
             ),
+            is_index_group_leader=self.indexer is not None,
         )
 
     def _compressed_kv_cache(self) -> torch.Tensor:
@@ -1288,6 +1331,13 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         assert self.compressed_cache_prefix is not None
         source = self._static_forward_context[self.compressed_cache_prefix]
         return source.kv_cache
+
+    def _hisparse_cache(self) -> HiSparseCacheHandle | None:
+        """The handle owned by this layer's kv source, if HiSparse is active."""
+        if self.compressed_cache_prefix is None:
+            return None
+        source = self._static_forward_context[self.compressed_cache_prefix]
+        return source.hisparse_cache
 
 
 class DeepseekV4IndexerCache(torch.nn.Module, AttentionLayerBase):
@@ -1357,6 +1407,7 @@ class DeepseekV4IndexerCache(torch.nn.Module, AttentionLayerBase):
                 if self.sparse_logits and not self.rocm_mxfp4
                 else None
             ),
+            cache_role=SparseCacheRole.INDEXER,
         )
 
     def forward(self): ...

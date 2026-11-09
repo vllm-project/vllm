@@ -1138,7 +1138,8 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             and (
                 (
                     isinstance(self.kv_cache_spec, MLAAttentionSpec)
-                    and self.kv_cache_spec.model_version == "deepseek_v4"
+                    and self.kv_cache_spec.model_version
+                    in ("deepseek_v4", "deepseek_v41")
                 )
                 or self.cp_kv_cache_interleave_size % self.compress_ratio != 0
             )
