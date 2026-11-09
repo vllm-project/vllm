@@ -282,7 +282,7 @@ def new_d2h_stream(device: torch.device | int | None = None) -> torch.cuda.Strea
     """Create a stream for non_blocking D2H copies.
 
     It must only carry copies: compute anything it copies on the producer stream
-    first (see ``conf_compute_utils.new_external_d2h_stream()``).
+    first (see `conf_compute_utils.new_external_d2h_stream()`).
     """
     if not current_platform.is_confidential_compute():
         return torch.cuda.Stream(device)

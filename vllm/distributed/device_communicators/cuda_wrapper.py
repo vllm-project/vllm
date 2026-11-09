@@ -165,7 +165,7 @@ class CudaRTLibrary:
         """Create a stream on the current device; returns its raw handle.
 
         Only used under NVIDIA Confidential Computing, so unlike
-        ``exported_functions`` it is resolved on use: ROCm and non-CC processes
+        `exported_functions` it is resolved on use: ROCm and non-CC processes
         never look it up.
         """
         create = self.lib.cudaStreamCreateWithFlags

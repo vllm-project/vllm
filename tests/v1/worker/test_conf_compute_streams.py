@@ -2,12 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Stream identity under the Confidential Computing copy patches.
 
-``torch.cuda.Stream()`` hands out streams round-robin from a fixed pool of 32
+`torch.cuda.Stream()` hands out streams round-robin from a fixed pool of 32
 per device and priority. The CC patches key the event redirect on the raw
 handle of the D2H copy streams, so a pool stream taken later (e.g. by
-``graph_capture()`` or an aux stream) must never share that handle: a capture
+`graph_capture()` or an aux stream) must never share that handle: a capture
 would fail and a cross-stream join outside capture would be silently dropped.
-``new_d2h_stream()`` therefore creates the copy streams outside the pool.
+`new_d2h_stream()` therefore creates the copy streams outside the pool.
 """
 
 import pytest
@@ -112,7 +112,7 @@ def test_capture_on_pool_stream_after_d2h_stream(d2h_stream):
 
 
 def test_join_on_pool_stream_after_d2h_stream(d2h_stream):
-    """``cur.wait_stream(aux)`` must order ``cur`` after work on ``aux`` for any
+    """`cur.wait_stream(aux)` must order `cur` after work on `aux` for any
     pool stream taken after the D2H stream was created."""
     device = d2h_stream.device
     aux = _pool_streams(device)[-1]
@@ -129,7 +129,7 @@ def test_join_on_pool_stream_after_d2h_stream(d2h_stream):
 
 
 def test_exported_functions_resolve_on_rocm():
-    """``CudaRTLibrary()`` resolves all of these on every platform, so one without
+    """`CudaRTLibrary()` resolves all of these on every platform, so one without
     a HIP name would break the library on ROCm."""
     exported = {f.name for f in CudaRTLibrary.exported_functions}
     assert exported <= CudaRTLibrary.cuda_to_hip_mapping.keys()

@@ -216,7 +216,7 @@ def _nvml_confidential_compute_enabled() -> bool:
 def _detect_confidential_compute() -> bool:
     """Whether the GPU runs in NVIDIA Confidential Computing mode.
 
-    Overridable via ``VLLM_CONFIDENTIAL_COMPUTE=1/0``; detected once via NVML
+    Overridable via `VLLM_CONFIDENTIAL_COMPUTE=1/0`; detected once via NVML
     and cached. Returns False if CUDA is unavailable or NVML fails.
     """
     forced = envs.VLLM_CONFIDENTIAL_COMPUTE

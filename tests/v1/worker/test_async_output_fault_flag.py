@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""``AsyncOutput`` must keep the EP fault flag alive until it has been copied.
+"""`AsyncOutput` must keep the EP fault flag alive until it has been copied.
 
 The flag is computed on the main stream and copied on the copy stream after
-``__init__`` returns. If the GPU tensor were dropped at that point, the caching
+`__init__` returns. If the GPU tensor were dropped at that point, the caching
 allocator would hand its block back to the main stream, where the next kernel
 could overwrite it before the copy ran: a spurious "fault detected" with an
 all-zero rank mask.

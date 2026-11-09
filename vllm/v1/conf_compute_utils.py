@@ -4,7 +4,7 @@
 
 Under bounce-buffer Confidential Computing, cudaMemcpyAsync is
 host-synchronous: it returns only after the copy *and all prior work on its
-stream* complete. ``install()`` patches torch's non_blocking copy entry points
+stream* complete. `install()` patches torch's non_blocking copy entry points
 so that:
 
 - H2D runs on an idle per-device staging stream, so the host waits only for
@@ -12,7 +12,7 @@ so that:
   into an existing tensor lands in a staging tensor and is moved by a D2D on
   the current stream, so it is ordered exactly like the original copy. This
   applies to every caller.
-- D2H issued on a stream created with ``new_external_d2h_stream()`` is issued
+- D2H issued on a stream created with `new_external_d2h_stream()` is issued
   by a worker thread once the source is ready. Event / stream / device
   synchronize additionally wait for the D2H copies submitted before the event
   was recorded (or before the call). Using such a stream asserts that its D2H
@@ -20,9 +20,9 @@ so that:
   work is never ordered after a side stream anyway), and that their completion
   is only awaited through the patched torch.cuda / torch.Event methods. D2H on
   any other stream keeps the original, host-blocking copy, since e.g. a
-  ``torch.accelerator.current_stream().synchronize()`` can't be patched.
+  `torch.accelerator.current_stream().synchronize()` can't be patched.
   A registered stream is only ever ordered after a producer stream by
-  ``wait_stream()`` and then carries D2H copies, so the events that mark its
+  `wait_stream()` and then carries D2H copies, so the events that mark its
   position (the copies' readiness, and events recorded on it such as the
   caller's copy event) are recorded on that producer stream instead. Under CC
   an event recorded on an otherwise idle stream behind a cross-stream wait was
@@ -32,7 +32,7 @@ so that:
 
 Copies made while torch.compile is tracing or a CUDA graph is being captured
 are left alone, as are H2D copies into an existing tensor that would need a
-staging buffer larger than ``_MAX_STAGED_BYTES`` (e.g. KV cache swaps).
+staging buffer larger than `_MAX_STAGED_BYTES` (e.g. KV cache swaps).
 """
 
 import threading
@@ -81,7 +81,7 @@ _CUDA_STREAM_NON_BLOCKING = 0x01
 
 
 def _new_external_stream(device: torch.device) -> torch.cuda.Stream:
-    """A stream created outside torch's per-device pool, so ``torch.cuda.Stream()``
+    """A stream created outside torch's per-device pool, so `torch.cuda.Stream()`
     can never hand out its handle again (the pool is 32 streams, round-robin)."""
     from vllm.distributed.device_communicators.cuda_wrapper import CudaRTLibrary
 
@@ -94,16 +94,16 @@ def new_external_d2h_stream(
     device: torch.device | int | None = None,
 ) -> torch.cuda.Stream:
     """Create a stream whose non_blocking D2H copies go through the worker
-    thread once ``install()`` has run (see the module docstring). Callers use
-    this through ``async_utils.new_d2h_stream()``.
+    thread once `install()` has run (see the module docstring). Callers use
+    this through `async_utils.new_d2h_stream()`.
 
     The stream is created outside torch's stream pool: the patches key on the
-    raw handle, and a pool stream handed out later (e.g. by ``graph_capture()``
-    or ``aux_stream()``) must never share it, or its events would be redirected
+    raw handle, and a pool stream handed out later (e.g. by `graph_capture()`
+    or `aux_stream()`) must never share it, or its events would be redirected
     to the producer stream. The stream lives for the life of the process.
 
     Such a stream must only carry copies: readiness is tracked on the stream
-    it last waited on via ``wait_stream()``, so a kernel launched on the copy
+    it last waited on via `wait_stream()`, so a kernel launched on the copy
     stream itself is not ordered before the copies of its output. Compute such
     values on the producer stream first.
     """
@@ -117,14 +117,14 @@ def new_external_d2h_stream(
 
 
 def register_inplace_h2d_target(tensor: torch.Tensor) -> None:
-    """Let non_blocking H2D copies into ``tensor`` (or a view of it) land in
-    place on the staging stream once ``install()`` has run: no staging tensor
-    and no D2D. The caller guarantees that no GPU reader of ``tensor`` is still
+    """Let non_blocking H2D copies into `tensor` (or a view of it) land in
+    place on the staging stream once `install()` has run: no staging tensor
+    and no D2D. The caller guarantees that no GPU reader of `tensor` is still
     in flight whenever it is rewritten (e.g. a round-robin pool slot whose
     readers retired). The staging stream is ordered once after the current
-    stream, so work that initialized ``tensor`` (e.g. the zero fill of a fresh
+    stream, so work that initialized `tensor` (e.g. the zero fill of a fresh
     allocation) completes before the first in-place upload. The registration
-    lapses with ``tensor``, so a later tensor reusing its memory is not matched.
+    lapses with `tensor`, so a later tensor reusing its memory is not matched.
     """
     from vllm.platforms import current_platform
 
@@ -283,7 +283,7 @@ def _cuda(
 
 
 def _patch_event_methods(cls: Any) -> dict[str, Any]:
-    """Wrap ``cls``'s record/synchronize/query so a recorded event also covers
+    """Wrap `cls`'s record/synchronize/query so a recorded event also covers
     the D2H copies submitted before it was recorded."""
     orig_record, orig_synchronize, orig_query = (
         cls.record,
@@ -317,8 +317,8 @@ def _stream_wait_stream(self, stream):
 
 
 def _record_target(stream):
-    """Where an event recorded on ``stream`` (None: the current stream) goes:
-    the producer stream of a registered D2H stream, otherwise ``stream``."""
+    """Where an event recorded on `stream` (None: the current stream) goes:
+    the producer stream of a registered D2H stream, otherwise `stream`."""
     s = stream if stream is not None else torch.cuda.current_stream()
     target = _producer_of.get(s.native_handle, stream)
     if target is not stream and torch.cuda.is_current_stream_capturing():
@@ -369,10 +369,10 @@ def install() -> None:
     """Install the patches. Call once per worker process, only under CC.
 
     torch.Event is an immutable C type, so it is replaced with a subclass:
-    events created through ``torch.Event(...)`` afterwards are covered, but
-    events created in C (e.g. ``torch.Stream.record_event()``) are not, and
-    ``isinstance(e, torch.Event)`` becomes False for those and for
-    ``torch.cuda.Event`` instances (which subclass the original). Only D2H
+    events created through `torch.Event(...)` afterwards are covered, but
+    events created in C (e.g. `torch.Stream.record_event()`) are not, and
+    `isinstance(e, torch.Event)` becomes False for those and for
+    `torch.cuda.Event` instances (which subclass the original). Only D2H
     copies on registered streams depend on these patches.
     """
     global _d2h_executor
