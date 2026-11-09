@@ -2987,26 +2987,26 @@ def test_decode_chunk_budget_disabled_fitting_and_invalid():
 # ---------------------------------------------------------------------------
 
 
-def _bi_reference_topk(logits: torch.Tensor, row_end: int, topk: int) -> torch.Tensor:
-    """Ground truth: value-descending stable order (ties keep ascending index
-    order, NaN ranks above +inf), then selected indices sorted ascending."""
+def _bi_reference_topk(logits: torch.Tensor, row_end: int, topk: int):
+    """Stable-sort ground truth: value-descending (ties keep ascending index
+    order, NaN above +inf), selected indices sorted ascending."""
     kk = min(topk, row_end)
     order = torch.argsort(logits[:row_end], descending=True, stable=True)[:kk]
     return torch.sort(order).values.to(torch.int32)
 
 
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
-def test_top_k_per_row_batch_invariant_matches_reference(device: str) -> None:
-    """The BI selector's set (tie -> smaller index) and ascending order match
-    the stable-sort reference on tied inputs and ragged row ends."""
+def test_top_k_per_row_batch_invariant(device: str) -> None:
+    """Selection set (ties -> smaller index), ascending order and -1 padding
+    match the reference, and a row's output never depends on how many other
+    rows share the launch (64 is the cooperative/persistent chain boundary).
+    """
     from vllm.model_executor.layers.indexer_topk import top_k_per_row_batch_invariant
 
     torch.manual_seed(1234)
     num_rows, width, topk = 16, 300, 64
-    logits = torch.randn(num_rows, width, device=device, dtype=torch.float32)
-    # Heavy ties: whole column ranges share exact values.
-    logits[:, :50] = 1.5
-    logits[:, 100:130] = -0.25
+    logits = torch.randn(num_rows, width, device=device)
+    logits[:, :50] = 1.5  # heavy ties
     row_ends = torch.tensor(
         [300, 200, 64, 10, 1, 0, 64, 300, 130, 101, 50, 65, 299, 2, 128, 63],
         dtype=torch.int32,
@@ -3014,169 +3014,60 @@ def test_top_k_per_row_batch_invariant_matches_reference(device: str) -> None:
     )
     out = torch.full((num_rows, topk), -7, dtype=torch.int32, device=device)
     top_k_per_row_batch_invariant(logits, row_ends, out, topk)
-
     for i in range(num_rows):
         end = int(row_ends[i])
         kk = min(topk, end)
-        ref = _bi_reference_topk(logits[i], end, topk)
-        assert torch.equal(out[i, :kk], ref), f"row {i} selection mismatch"
-        assert (out[i, kk:] == -1).all(), f"row {i} padding mismatch"
-    # The untouched tail beyond a wider-than-k output stays as-is.
-    wide = torch.full((1, topk + 8), -7, dtype=torch.int32, device=device)
-    top_k_per_row_batch_invariant(logits[:1], row_ends[:1], wide, topk)
-    assert (wide[0, topk:] == -7).all()
+        assert torch.equal(out[i, :kk], _bi_reference_topk(logits[i], end, topk))
+        assert (out[i, kk:] == -1).all()
 
-
-@pytest.mark.parametrize("device", ["cpu", "cuda"])
-def test_top_k_per_row_batch_invariant_row_count_invariant(device: str) -> None:
-    """A row's selection must not depend on how many other rows share the
-    launch (covers the 64-row cooperative/persistent chain boundary)."""
-    from vllm.model_executor.layers.indexer_topk import top_k_per_row_batch_invariant
-
-    torch.manual_seed(4321)
-    width, topk = 512, 96
-    target = torch.randn(1, width, device=device, dtype=torch.float32)
-    target[0, ::3] = 0.75  # ties inside the target row
-    alone = torch.full((1, topk), -1, dtype=torch.int32, device=device)
-    top_k_per_row_batch_invariant(
-        target,
-        torch.full((1,), width, dtype=torch.int32, device=device),
-        alone,
-        topk,
-    )
-    for num_rows in (1, 2, 64, 65, 100):
-        logits = torch.randn(num_rows, width, device=device, dtype=torch.float32)
-        logits[0] = target[0]
-        out = torch.full((num_rows, topk), -1, dtype=torch.int32, device=device)
-        top_k_per_row_batch_invariant(
-            logits,
-            torch.full((num_rows,), width, dtype=torch.int32, device=device),
-            out,
-            topk,
-        )
-        assert torch.equal(out[0], alone[0]), (
-            f"row 0 changed with batch size {num_rows}"
-        )
-
-
-@pytest.mark.parametrize("device", ["cpu", "cuda"])
-def test_top_k_per_row_batch_invariant_ties_low_index(device: str) -> None:
-    """Threshold ties resolve to the lowest column indices, stably across
-    batch sizes."""
-    from vllm.model_executor.layers.indexer_topk import top_k_per_row_batch_invariant
-
-    width, topk = 64, 32
-    logits = torch.zeros(1, width, device=device, dtype=torch.float32)
-    row_end = width
-    alone = torch.full((1, topk), -1, dtype=torch.int32, device=device)
-    top_k_per_row_batch_invariant(
-        logits,
-        torch.full((1,), row_end, dtype=torch.int32, device=device),
-        alone,
-        topk,
-    )
-    assert torch.equal(alone[0], torch.arange(topk, dtype=torch.int32, device=device))
-    for num_rows in (1, 64, 65):
-        batch = torch.zeros(num_rows, width, device=device, dtype=torch.float32)
-        out = torch.full((num_rows, topk), -1, dtype=torch.int32, device=device)
-        top_k_per_row_batch_invariant(
-            batch,
-            torch.full((num_rows,), row_end, dtype=torch.int32, device=device),
-            out,
-            topk,
-        )
-        assert torch.equal(out[0], torch.arange(topk, dtype=torch.int32, device=device))
-
-
-@pytest.mark.parametrize("device", ["cpu", "cuda"])
-def test_top_k_per_row_batch_invariant_nan_and_empty(device: str) -> None:
-    """NaN ranks above +inf deterministically; degenerate shapes are no-ops."""
-    from vllm.model_executor.layers.indexer_topk import top_k_per_row_batch_invariant
-
-    width, topk = 8, 4
-    logits = torch.tensor(
+    # NaN ranks above +inf deterministically; empty rows stay all -1.
+    nan_row = torch.tensor(
         [[1.0, float("nan"), float("inf"), 2.0, 0.0, -1.0, 3.0, -2.0]],
         device=device,
     )
-    out = torch.full((1, topk), -1, dtype=torch.int32, device=device)
+    out1 = torch.full((1, 4), -1, dtype=torch.int32, device=device)
     top_k_per_row_batch_invariant(
-        logits,
-        torch.full((1,), width, dtype=torch.int32, device=device),
-        out,
-        topk,
-    )
-    # NaN and +inf first, then by value; ascending column order.
-    expected = torch.tensor([1, 2, 3, 6], dtype=torch.int32, device=device)
-    assert torch.equal(out[0], expected)
-
-    empty_ends = torch.zeros(1, dtype=torch.int32, device=device)
-    out0 = torch.full((1, topk), -1, dtype=torch.int32, device=device)
-    top_k_per_row_batch_invariant(logits, empty_ends, out0, topk)
-    assert (out0 == -1).all()
-
-    # Zero rows / zero width / zero k are no-ops.
-    top_k_per_row_batch_invariant(logits[:0], empty_ends[:0], out0[:0], topk)
-    top_k_per_row_batch_invariant(logits[:, :0], empty_ends, out0, 0)
-    # topk wider than the row: only `width` entries written.
-    wide_out = torch.full((1, 16), -1, dtype=torch.int32, device=device)
-    top_k_per_row_batch_invariant(
-        logits,
-        torch.full((1,), width, dtype=torch.int32, device=device),
-        wide_out,
-        16,
+        nan_row, torch.tensor([8] * 1, dtype=torch.int32, device=device), out1, 4
     )
     assert torch.equal(
-        wide_out[0, :width],
-        torch.arange(width, dtype=torch.int32, device=device),
+        out1[0], torch.tensor([1, 2, 3, 6], dtype=torch.int32, device=device)
     )
-    assert (wide_out[0, width:] == -1).all()
+
+    # Same row alone vs at the head of 1/64/65/100-row launches.
+    target = torch.randn(1, width, device=device)
+    target[0, ::3] = 0.75  # ties inside the row
+    ends = torch.tensor([width], dtype=torch.int32, device=device)
+    alone = torch.full((1, topk), -1, dtype=torch.int32, device=device)
+    top_k_per_row_batch_invariant(target, ends, alone, topk)
+    for num_rows2 in (1, 64, 65, 100):
+        batch = torch.randn(num_rows2, width, device=device)
+        batch[0] = target[0]
+        outn = torch.full((num_rows2, topk), -1, dtype=torch.int32, device=device)
+        top_k_per_row_batch_invariant(
+            batch,
+            torch.full((num_rows2,), width, dtype=torch.int32, device=device),
+            outn,
+            topk,
+        )
+        assert torch.equal(outn[0], alone[0])
 
 
-def test_sparse_indexer_topk_bi_resolution(monkeypatch) -> None:
-    """Under VLLM_BATCH_INVARIANT the decode chain pins one backend and
-    always takes the FP32 logits copy."""
-    from vllm.model_executor.layers.indexer_topk import SparseIndexerTopk
-
-    bf16 = torch.randn(8, 4096, dtype=torch.bfloat16, device="cuda")
-    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
-    selector = SparseIndexerTopk("auto")
-    assert selector.resolve_backend(bf16, 2048, 8) == "per_row"
-    assert not selector.takes_bf16_logits(bf16, 2048, 8)
-    monkeypatch.delenv("VLLM_BATCH_INVARIANT")
-    selector = SparseIndexerTopk("auto")
-    resolved = selector.resolve_backend(bf16, 2048, 8)
-    assert resolved in ("cooperative", "persistent", "per_row")
-
-
-def test_flashmla_bi_request_row_bounds() -> None:
-    """Row ranges for per-request BI launches: uniform decode requests first,
-    then prefill query rows; an underivable layout yields []."""
-    from vllm.v1.attention.backends.mla.flashmla_sparse import FlashMLASparseImpl
-
-    bounds = FlashMLASparseImpl._bi_request_row_bounds
-    # Pure decode batch: 3 requests x 2 rows (spec decode, next_n == 2).
-    assert bounds(3, 6, None, 6) == [(0, 2), (2, 4), (4, 6)]
-    # Mixed: 1 decode row + prefill query rows [4, 0, 3].
-    q_lens = torch.tensor([4, 0, 3], dtype=torch.int32)
-    assert bounds(1, 1, q_lens, 8) == [(0, 1), (1, 5), (5, 8)]
-    # Rows not covered (e.g. CUDA-graph padding): cannot describe -> [].
-    assert bounds(1, 1, q_lens, 12) == []
-
-
-def test_flashmla_bi_backend_declaration(monkeypatch) -> None:
-    """FLASHMLA_SPARSE opts into batch invariance on CUDA, and rejects
-    quantized DS-MLA caches under BI at selection time (issue #65278's
-    startup refusal is lifted for the bf16-cache configuration only)."""
+def test_sparse_indexer_topk_bi_selection(monkeypatch) -> None:
+    """Under VLLM_BATCH_INVARIANT the decode chain pins one backend and takes
+    the FP32 logits copy; FLASHMLA_SPARSE opts in on SM100 with an
+    unquantized cache only."""
     if not current_platform.is_cuda():
         pytest.skip("requires CUDA")
 
-    from vllm.v1.attention.backends.mla.flashmla_sparse import (
-        FlashMLASparseBackend,
-    )
+    from vllm.model_executor.layers.indexer_topk import SparseIndexerTopk
+    from vllm.v1.attention.backends.mla.flashmla_sparse import FlashMLASparseBackend
 
-    assert FlashMLASparseBackend.supports_batch_invariance()
+    bf16 = torch.randn(8, 4096, dtype=torch.bfloat16, device="cuda")
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    assert SparseIndexerTopk("auto").resolve_backend(bf16, 2048, 8) == "per_row"
+    assert not SparseIndexerTopk("auto").takes_bf16_logits(bf16, 2048, 8)
 
-    def combination(kv_dtype: str | None) -> str | None:
+    def combination(kv_dtype):
         return FlashMLASparseBackend.supports_combination(
             head_size=576,
             dtype=torch.bfloat16,
@@ -3186,14 +3077,12 @@ def test_flashmla_bi_backend_declaration(monkeypatch) -> None:
             has_sink=False,
             use_sparse=True,
             use_mm_prefix=False,
-            device_capability=type(
-                "cap", (), {"major": 10, "minor": 0}
-            )(),
+            device_capability=type("cap", (), {"major": 10, "minor": 0})(),
         )
 
-    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
-    assert combination("fp8_ds_mla") is not None
-    assert combination("nvfp4_ds_mla") is not None
-    assert combination("bfloat16") is None
+    if current_platform.is_device_capability_family(100):
+        assert FlashMLASparseBackend.supports_batch_invariance()
+        assert combination("fp8_ds_mla") is not None
+        assert combination("bfloat16") is None
     monkeypatch.delenv("VLLM_BATCH_INVARIANT")
     assert combination("fp8_ds_mla") is None

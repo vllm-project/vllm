@@ -38,6 +38,7 @@ from vllm.model_executor.kernels.attention.dsa.fused_mqa_topk import (
     use_fused_mqa_topk,
 )
 from vllm.model_executor.layers.indexer_topk import (
+    _BI_TOPK_MAX_KEY_ELEMS,
     RADIX_TOPK_WORKSPACE_SIZE,
     SparseIndexerTopk,
     deep_select_topk,
@@ -539,7 +540,7 @@ def sparse_attn_indexer(
         assert candidate_block_size > 0
 
     # The fused top-k writes indices in its own launch-dependent order; the
-    # batch-invariant top-k replaces it below.
+    # BI top-k replaces it below.
     fused_mqa_topk = (
         use_fused_mqa_topk(
             query_shape=q_quant.shape[1:],
@@ -628,6 +629,12 @@ def sparse_attn_indexer(
             * round_up(max_model_len, row_align)
             * (logits_dtype.itemsize + decode_copy_bytes),
         )
+        if bi:
+            # One bounded int64 key chunk plus per-row topk/sort temporaries.
+            max_logits_bytes += (
+                _BI_TOPK_MAX_KEY_ELEMS * torch.int64.itemsize
+                + 3 * topk_tokens * torch.int64.itemsize * max_decode_tokens
+            )
         _ = torch.empty(
             max_logits_bytes, dtype=torch.uint8, device=hidden_states.device
         )
@@ -1160,12 +1167,7 @@ def sparse_attn_indexer(
         topk_indices = topk_indices_buffer[:num_padded_tokens, :topk_tokens]
 
         if bi:
-            # Same deterministic per-row top-k as prefill: identical row
-            # content selects an identical set in an identical order whatever
-            # the surrounding batch looks like.
-            assert dcp_world_size == 1, (
-                "batch-invariant indexer decode is not supported with DCP"
-            )
+            # Same deterministic per-row top-k as prefill.
             row_ends = SparseIndexerTopk._row_ends(
                 seq_lens, next_n, logits.shape[0]
             ).contiguous()
@@ -1309,6 +1311,16 @@ class SparseAttnIndexer(CustomOp):
         ]
         self._parallel_config = parallel_config
         self.dcp_world_size = parallel_config.decode_context_parallel_size
+        if (
+            envs.VLLM_BATCH_INVARIANT
+            and current_platform.is_cuda()
+            and self.dcp_world_size > 1
+        ):
+            # Fail at model construction, not on the first decode batch.
+            raise NotImplementedError(
+                "VLLM_BATCH_INVARIANT does not support the DSA indexer with "
+                "decode context parallelism."
+            )
         self.dcp_rank = get_dcp_group().rank_in_group if self.dcp_world_size > 1 else 0
         self.use_pcp = parallel_config.prefill_context_parallel_size > 1
         self.pcp_shard_decode_requests = parallel_config.pcp_shard_decode_requests

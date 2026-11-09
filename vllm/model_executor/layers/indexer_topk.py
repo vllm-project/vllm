@@ -134,6 +134,11 @@ def deep_select_topk(
 # ---------------------------------------------------------------------------
 
 
+# Bounded int64 key chunk for the BI selector, so its temporaries stay
+# capped whatever the logits width or row count is.
+_BI_TOPK_MAX_KEY_ELEMS = 64 * 1024 * 1024  # 512 MiB
+
+
 def top_k_per_row_batch_invariant(
     logits: torch.Tensor,
     row_ends: torch.Tensor,
@@ -143,61 +148,73 @@ def top_k_per_row_batch_invariant(
     """Batch-invariant per-row top-k for the indexer (VLLM_BATCH_INVARIANT=1).
 
     Selects each row's ``min(topk_tokens, width)`` largest logits in
-    ``[0, row_ends[i])`` — ties broken by the smaller column index — and
-    writes the selected indices in ascending order, with -1 padding at the
-    row tail, into ``topk_indices``.
+    ``[0, row_ends[i])``, ties broken by the smaller column index, and writes
+    the selected indices in ascending order with -1 padding at the row tail.
 
-    Batch invariance follows from a unique selection key: the float's
-    order-preserving int32 mapping in the high 32 bits and
-    ``(width - 1) - column`` in the low 32 bits. Every key is distinct, so
-    the top-k *set* is mathematically unique regardless of how many rows are
-    launched; the ascending output order fixes the reduction order of the
-    sparse attention kernels that consume these indices.
+    The selection key — the logit's order-preserving int32 in the high 32
+    bits, ``(width - 1) - column`` in the low 32 — is unique per entry, so
+    the selected set and its ascending order are functions of the row alone;
+    the sparse kernels that consume these indices then reduce in a fixed
+    order. Rows are processed in chunks bounded by
+    ``_BI_TOPK_MAX_KEY_ELEMS`` with in-place key construction.
 
     Args:
         logits: (num_rows, width) float32; columns past a row's end hold
             garbage and are excluded via ``row_ends``.
-        row_ends: (num_rows,) int32 exclusive per-row selection bound.
-        topk_indices: (num_rows, topk_tokens) int32 output slice; columns
-            past a row's selection keep their prior -1 fill when the row is
-            shorter than the padded width.
+        row_ends: (num_rows,) exclusive per-row selection bound.
+        topk_indices: (num_rows, topk_tokens) int32 output slice.
         topk_tokens: Number of indices to select per row.
 
     """
     assert logits.dtype == torch.float32 and logits.dim() == 2
     assert logits.stride(1) == 1
     num_rows, width = logits.shape
-    k = min(topk_tokens, width)
-    if num_rows == 0 or width == 0 or k == 0:
+    if num_rows == 0 or width == 0 or topk_tokens == 0:
         return
 
+    max_rows = max(1, _BI_TOPK_MAX_KEY_ELEMS // width)
+    for start in range(0, num_rows, max_rows):
+        _bi_topk_chunk(
+            logits[start : start + max_rows],
+            row_ends[start : start + max_rows],
+            topk_indices[start : start + max_rows],
+            topk_tokens,
+        )
+
+
+def _bi_topk_chunk(logits, row_ends, topk_indices, topk_tokens) -> None:
+    num_rows, width = logits.shape
+    k = min(topk_tokens, width)
+    if num_rows == 0 or k == 0:
+        return
     device = logits.device
-    # Order-preserving map of float32 onto int32: negative floats flip to
-    # ~bits, positive floats set the sign bit, so unsigned key order matches
-    # float order (a positive-sign NaN ranks above +inf, a negative-sign NaN
-    # below -inf; both deterministically).
+    # Negative floats flip to ~bits, positive floats set the sign bit, so
+    # unsigned key order matches float order (positive NaN above +inf,
+    # negative NaN below -inf; both deterministically).
     bits = logits.view(torch.int32)
     key32 = torch.where(bits < 0, ~bits, bits | -(2**31))
-    # Zero-extend to unsigned, then bias into [-2**31, 2**31) so the int64
-    # shift never overflows and signed order matches unsigned key32 order.
-    key = (((key32.to(torch.int64) & 0xFFFFFFFF) - (2**31)) << 32) | (
-        (width - 1) - torch.arange(width, device=device)
-    )
-    # Columns at or past row_ends hold garbage and get a sentinel below every
-    # real key, so they never win a selection slot. The only real key equal
-    # to the sentinel would be bits == 0xFFFFFFFF (a NaN) in the very last
-    # column; that column is valid only when row_end == width, in which case
-    # no sentinel was written at all — a collision is impossible.
-    key = key.masked_fill(
+    # One int64 allocation, built in place: zero-extend, bias into
+    # [-2**31, 2**31) so the shift never overflows, and fold the column into
+    # the low bits so smaller columns win ties.
+    key = key32.to(torch.int64)
+    del key32
+    key.bitwise_and_(0xFFFFFFFF).sub_(2**31).bitwise_left_shift_(32)
+    key.bitwise_or_((width - 1) - torch.arange(width, device=device))
+    # Garbage columns get a sentinel below every real key. The only real key
+    # equal to it would be a bits==0xFFFFFFFF NaN in the very last column,
+    # which is valid only when row_end == width — when no sentinel exists —
+    # so a collision is impossible.
+    key.masked_fill_(
         torch.arange(width, device=device).unsqueeze(0)
         >= row_ends.to(torch.int64).unsqueeze(1),
         torch.iinfo(torch.int64).min,
     )
     cols = torch.topk(key, k, dim=-1).indices
-    valid = cols < row_ends.to(torch.int64).unsqueeze(1)
-    # Sort valid indices ascending and push invalid slots to the tail.
-    keyed = torch.where(valid, cols, width)
-    keyed = torch.sort(keyed, dim=-1).values
+    del key
+    # Ascending valid indices; invalid slots (and rows shorter than k) to -1.
+    keyed = torch.sort(
+        torch.where(cols < row_ends.to(torch.int64).unsqueeze(1), cols, width), dim=-1
+    ).values
     out = torch.where(keyed < width, keyed.to(torch.int32), -1)
     topk_indices[:, :k].copy_(out)
 

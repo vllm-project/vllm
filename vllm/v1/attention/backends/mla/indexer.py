@@ -218,10 +218,10 @@ class PrepareUniformDecodeKernel(
 class DeepseekV32IndexerBackend(AttentionBackend):
     @classmethod
     def supports_batch_invariance(cls) -> bool:
-        # The indexer's batch-invariant per-row top-k
-        # (indexer_topk.top_k_per_row_batch_invariant) is deterministic per
-        # row. Lanes without BI-gated indexer calls must override to False.
-        return current_platform.is_cuda()
+        # The BI per-row top-k (indexer_topk) is deterministic per row;
+        # validated on SM100. Lanes without BI-gated indexer calls override
+        # this to False.
+        return current_platform.is_device_capability_family(100)
 
     @classmethod
     def supports_pcp(cls) -> bool:
@@ -254,9 +254,7 @@ class DeepseekV32IndexerBackend(AttentionBackend):
 
 
 class Glm5NextIndexerBackend(DeepseekV32IndexerBackend):
-    # The kpool indexer path (fused/per-row top-k without BI gating) is not
-    # batch invariant; today the KpoolTail storage backend already blocks BI
-    # at startup, but do not rely on that coupling here.
+    # The kpool indexer path has no BI gating.
     @classmethod
     def supports_batch_invariance(cls) -> bool:
         return False
