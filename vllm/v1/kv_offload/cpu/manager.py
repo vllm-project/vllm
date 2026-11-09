@@ -135,7 +135,7 @@ class CPUOffloadingManager(OffloadingManager):
     ) -> None:
         """Record an offer without evicting its tracked candidates.
 
-        Keys in ``counted`` were counted by an earlier offer of the same request:
+        Keys in `counted` were counted by an earlier offer of the same request:
         they stay tracked but don't count again.
         """
         assert self.counts is not None

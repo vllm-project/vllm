@@ -603,7 +603,7 @@ class FusedWoAKernel(VllmCuTeDSLJitKernel["FusedWoAKernel.CompileKey"]):
         early_trigger: bool = False,
     ) -> CuTeDSLLaunchSpec["FusedWoAKernel.CompileKey"]:
         """Return FP8 WO-A output and FlashInfer F8_128x4 scale bytes.
-        ``early_trigger`` launches the PDL dependent right after the TMEM
+        `early_trigger` launches the PDL dependent right after the TMEM
         allocation, for a dependent that loads its weights before its wait."""
         tokens = x.shape[0]
         groups, rank = weight_scale.shape[:2]

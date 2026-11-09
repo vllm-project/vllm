@@ -4,7 +4,7 @@
 CuTe DSL kernels of cutedsl/attention/ and cutedsl/moe/routing.py), with the
 checks that decide where each one runs.
 
-``attn2`` (``cutedsl/attention/attn2.py``)
+`attn2` (`cutedsl/attention/attn2.py`)
     Paged decode attention of the 8-token verify step (one request, 1 + 7 draft
     tokens) fused with the attention output's weightless RMS norm and sigmoid
     gate: the o_proj input of a decoder layer. Contract: head_dim 64, 8 query
@@ -12,32 +12,32 @@ checks that decide where each one runs.
     slot), 8 query rows per request, any context length L >= 8, and the
     layer's sliding window if it has one. One launch covers the KV heads of
     the rank. With max_model_len past 2048 (or a window) a split kernel
-    spreads a request's pages over ``attn2_splits`` z slices, merged through a
+    spreads a request's pages over `attn2_splits` z slices, merged through a
     workspace. The launch shape depends on max_model_len only, not on the
-    step, so it is graph-capturable once ``prepare_attn2`` has compiled it.
+    step, so it is graph-capturable once `prepare_attn2` has compiled it.
 
     attn2 has no fallback of its own: the executor's plan() leaves every step
     it does not cover (prefill, other query lengths) to the stock forward.
 
-``MuseRouting`` (``cutedsl/moe/routing.py``)
+`MuseRouting` (`cutedsl/moe/routing.py`)
     Muse Spark routing for decode batches of at most 8 tokens. It writes, bit
-    for bit, the expert ids and weights ``fused_muse_spark_routing`` writes
+    for bit, the expert ids and weights `fused_muse_spark_routing` writes
     for Muse Spark's router: sigmoid scores, the correction bias for the
     selection only, top-8 of 256 experts, weights
-    ``score * route_scale / (sum + 1e-15)``. The router's output multiplier
-    must already be folded into its weight, as ``fold_router_output_multiplier``
+    `score * route_scale / (sum + 1e-15)`. The router's output multiplier
+    must already be folded into its weight, as `fold_router_output_multiplier`
     does after loading. Optionally the same launch writes the TRT-LLM-gen
     routing metadata of this rank's experts for one GEMM tile
-    (``RoutingMetadata``): the CTA map, the permutation and the padded size the
+    (`RoutingMetadata`): the CTA map, the permutation and the padded size the
     routed experts' GEMMs read, as the routed MoE op's own routing kernel
     would write them for these ids.
 
-``qkv_front`` (``cutedsl/attention/qkv_front.py``)
+`qkv_front` (`cutedsl/attention/qkv_front.py`)
     For 1 to 16 tokens on the SM100 family the QKV front CuTe kernel replaces
     the QKV + o-gate projection GEMM and
-    ``fused_muse_spark_qknorm_rope_kv_insert``. A served call is checked once
-    (``supports_call``) and then launched (``launch_qkv_front``). Called
-    eagerly (Muse Spark runs uncompiled), so the ``data_ptr()`` checks are not
+    `fused_muse_spark_qknorm_rope_kv_insert`. A served call is checked once
+    (`supports_call`) and then launched (`launch_qkv_front`). Called
+    eagerly (Muse Spark runs uncompiled), so the `data_ptr()` checks are not
     traced.
 """
 
@@ -126,7 +126,7 @@ attn2_available = qkv_front_available = routing_available = sm100_family
 
 
 def unavailable(kernel: str) -> str:
-    """The reason a deployment whose GPUs cannot run ``kernel`` is refused."""
+    """The reason a deployment whose GPUs cannot run `kernel` is refused."""
     return f"GPUs outside the SM100 family ({kernel})"
 
 
@@ -171,7 +171,7 @@ def attn2_splits(max_model_len: int, window: int, num_kv_heads: int) -> int:
 
 
 def attn2_workspace_bytes(num_reqs: int, num_kv_heads: int, num_splits: int) -> int:
-    """Bytes of the workspace the split kernel needs for ``num_reqs``
+    """Bytes of the workspace the split kernel needs for `num_reqs`
     requests: the counters (16-byte padded) and a partial per row and
     cluster."""
     rows = num_reqs * QUERY_LEN * HEADS_PER_KV_HEAD * num_kv_heads
@@ -182,7 +182,7 @@ def split_qkv(
     qkv: torch.Tensor, num_kv_heads: int
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """The q and gate column views of the attention front's output rows
-    ``[q | k | v | gate]`` (q and gate: 8 heads of 64 per KV head)."""
+    `[q | k | v | gate]` (q and gate: 8 heads of 64 per KV head)."""
     q_width = HEADS_PER_KV_HEAD * num_kv_heads * HEAD_DIM
     kv_width = num_kv_heads * HEAD_DIM
     if qkv.dim() != 2 or qkv.shape[1] != 2 * q_width + 2 * kv_width:
@@ -194,7 +194,7 @@ def split_qkv(
 
 
 def unsupported_router(router: MuseSparkRouter) -> str | None:
-    """Why the kernel cannot reproduce ``router``'s routing, or None if it
+    """Why the kernel cannot reproduce `router`'s routing, or None if it
     can."""
     if router.router_score_normalization != "sigmoid":
         return f"{router.router_score_normalization} router scores"
@@ -217,8 +217,8 @@ def unsupported_router(router: MuseSparkRouter) -> str | None:
 
 class RoutingMetadata(NamedTuple):
     """Where the routing writes the routing metadata of the local experts
-    ``[local_expert_offset, local_expert_offset + num_local_experts)`` for GEMM
-    tile ``tile_n``: ``buffer``, int32 of at least ``metadata_size(tile_n)``
+    `[local_expert_offset, local_expert_offset + num_local_experts)` for GEMM
+    tile `tile_n`: `buffer`, int32 of at least `metadata_size(tile_n)`
     elements, not aliasing the ids or weights."""
 
     buffer: torch.Tensor
@@ -227,8 +227,8 @@ class RoutingMetadata(NamedTuple):
     tile_n: int
 
     def fields(self, num_tokens: int) -> dict[str, torch.Tensor]:
-        """The fields of ``num_tokens`` tokens, as 1-D int32 views of
-        ``buffer`` at the extents the routed MoE op allocates for them (with
+        """The fields of `num_tokens` tokens, as 1-D int32 views of
+        `buffer` at the extents the routed MoE op allocates for them (with
         8 num_tokens <= 256 routes, at most one CTA per route):
         total_num_padded_tokens [1], num_non_exiting_ctas [1],
         expanded_idx_to_permuted_idx [8 num_tokens] (-1 for another rank's
@@ -277,10 +277,10 @@ class MuseRouting:
         metadata: RoutingMetadata | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Route fp32 router logits [b, 256] (1 <= b <= 8, 16-byte aligned
-        rows) into ``ids`` (int32 [b, 8], global expert ids) and ``weights``
-        (fp32 [b, 8]), and with ``metadata`` the routing metadata of its local
+        rows) into `ids` (int32 [b, 8], global expert ids) and `weights`
+        (fp32 [b, 8]), and with `metadata` the routing metadata of its local
         experts; returns (ids, weights). Raises ValueError on arguments outside
-        ``routing.route``'s contract."""
+        `routing.route`'s contract."""
         if metadata is None:
             routing.route(logits, self.bias, ids, weights, self.route_scale)
         else:
@@ -342,8 +342,8 @@ def supports_call(
     num_kv_heads: int,
     out: torch.Tensor | None = None,
 ) -> bool:
-    """Whether the QKV front takes this call of a layer with ``num_kv_heads``
-    (with ``out``, the full check before ``launch_qkv_front``); otherwise the
+    """Whether the QKV front takes this call of a layer with `num_kv_heads`
+    (with `out`, the full check before `launch_qkv_front`); otherwise the
     caller keeps the unfused path."""
     return (
         _front.unsupported(
