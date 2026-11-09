@@ -656,10 +656,9 @@ def _aiter_mla_small_head_mode() -> str:
 
     Controlled by `VLLM_ROCM_AITER_MLA_ASM_PADDING`:
 
-    - `"auto"` (default): let the arch decide -- divisor head counts keep the
-      Gluon decode where a build exists (gfx950), everything else (non-divisor
-      counts and all counts on gfx942) uses the padded persistent-scheduling
-      ASM decode.
+    - `"auto"` (default): let the arch decide -- every head count below 16
+      keeps the Gluon decode where a build exists (gfx950); gfx942 uses the
+      padded persistent-scheduling ASM decode.
     - `"gluon"`: prefer the Gluon path wherever a build exists.
     - `"asm"`: force the padded persistent-scheduling ASM decode.
 
@@ -2570,12 +2569,9 @@ class AiterMLAHelper:
         # request under fp8 would assert immediately.
         if is_quantized_kv_cache(kv_cache_dtype):
             return False
-        mode = _aiter_mla_small_head_mode()
-        if mode == "asm":
+        if _aiter_mla_small_head_mode() == "asm":
             return False
         if not _gluon_mla_decode_supported():
-            return False
-        if mode != "gluon" and m % num_heads != 0:
             return False
         # Last, so the size warning only fires where Gluon would have run.
         return _gluon_kv_cache_in_bounds(kv_cache_bytes)

@@ -1402,7 +1402,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Small-head (<16) AITER MLA decode kernel selection. Small head counts
     # (e.g. Kimi-K3: 12 heads/rank at TP8, 6 at TP16) can decode either through
     # the Gluon small-head kernel or through the padded persistent-scheduling
-    # (PS) ASM kernel. "auto" (default) keeps Gluon for head counts that divide
+    # (PS) ASM kernel. "auto" (default) keeps Gluon for every head count below
     # 16 where a Gluon build exists (gfx950/CDNA4) and otherwise uses the padded
     # PS ASM decode; "gluon" forces the Gluon path wherever a build exists;
     # "asm" forces the padded PS ASM decode. On gfx942/CDNA3 there is no Gluon

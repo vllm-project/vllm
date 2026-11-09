@@ -1387,13 +1387,9 @@ def test_decode_expands_kernel_block_page_indices(monkeypatch):
         (4, 4, 16, "auto", True),  # MTP deployment, full-qlen verification step
         (1, 1, 24, "auto", True),  # unaligned H24 pads to H32 persistent decode
         (2, 4, 16, "auto", False),  # step demand exceeds provisioned K -> fallback
-        (1, 1, 8, "auto", False),  # divisor head count -> Gluon decode owns qlen==1
+        (1, 1, 8, "auto", False),  # small head count -> Gluon decode owns qlen==1
         (4, 4, 8, "auto", False),  # small head count -> Gluon flatten owns qlen>1
-        # A non-divisor head count is padded to 16 and runs the asm decode, so it
-        # needs the schedule even though num_heads < 16. Its verify still
-        # flattens onto Gluon though -- divisibility only steers the qlen==1
-        # decode, and bf16 has no small-head multi-token asm kernel either way.
-        (1, 1, 12, "auto", True),
+        (1, 1, 12, "auto", False),
         (8, 8, 12, "auto", False),
         # An fp8 cache never reaches Gluon, at any head count or qlen, so it
         # always needs the schedule. (1, 1, 8) is the case the head-count gate
