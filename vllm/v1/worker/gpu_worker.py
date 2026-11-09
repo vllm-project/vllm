@@ -1779,7 +1779,7 @@ class Worker(WorkerBase):
 
         # Weight transfer bypasses GPUModelRunner.reload_weights().
         if not self._weight_update_is_draft:
-            self.model_runner.reset_lora_state()
+            self.model_runner.on_target_weights_replaced()
 
     def shutdown(self) -> None:
         gc.unfreeze()
