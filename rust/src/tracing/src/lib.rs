@@ -3,11 +3,13 @@
 
 //! Shared tracing subscriber and log formatting for vLLM Rust binaries.
 
+mod json;
 pub mod timing;
 
 use std::str::FromStr;
 use std::{env, fmt, process};
 
+use serde::{Deserialize, Serialize};
 use serde_with::{DeserializeFromStr, SerializeDisplay};
 use time::UtcOffset;
 use time::macros::format_description;
@@ -22,6 +24,8 @@ use tracing_subscriber::layer::SubscriberExt as _;
 use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::util::SubscriberInitExt as _;
 use tracing_subscriber::{Layer, Registry};
+
+use crate::json::{JsonFields, VllmJsonEventFormatter};
 
 const CYAN: &str = "\x1b[0;36m";
 const GREY: &str = "\x1b[90m";
@@ -108,19 +112,29 @@ impl From<LogLevel> for LevelFilter {
     }
 }
 
+/// Python's `LoggingConfig.formatter`: vLLM's text lines, or one JSON object
+/// per line with the keys of Python's `pythonjsonlogger` formatter.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LogFormatter {
+    #[default]
+    Text,
+    Json,
+}
+
 /// Install the process-wide vLLM-style tracing subscriber at `log_level`.
-pub fn init_tracing(process_label: &str, log_level: LogLevel) {
+pub fn init_tracing(process_label: &str, log_level: LogLevel, formatter: LogFormatter) {
     let _ = tracing_subscriber::registry()
-        .with(vllm_fmt_layer(process_label, log_level))
+        .with(vllm_fmt_layer(process_label, log_level, formatter))
         .try_init();
 }
 
 /// Install the vLLM-style tracing subscriber at `log_level` on the current
 /// thread until the guard drops, for events emitted before the process-wide
-/// level is known.
+/// level and formatter are known.
 pub fn set_default_tracing(process_label: &str, log_level: LogLevel) -> DefaultGuard {
     tracing_subscriber::registry()
-        .with(vllm_fmt_layer(process_label, log_level))
+        .with(vllm_fmt_layer(process_label, log_level, LogFormatter::Text))
         .set_default()
 }
 
@@ -132,7 +146,7 @@ where
 {
     let _ = tracing_subscriber::registry()
         .with(layer)
-        .with(vllm_fmt_layer(process_label, log_level))
+        .with(vllm_fmt_layer(process_label, log_level, LogFormatter::Text))
         .try_init();
 }
 
@@ -140,17 +154,26 @@ where
 fn vllm_fmt_layer<S>(
     process_label: &str,
     log_level: LogLevel,
-) -> impl Layer<S> + Send + Sync + 'static + use<S>
+    formatter: LogFormatter,
+) -> Box<dyn Layer<S> + Send + Sync + 'static>
 where
     S: Subscriber + for<'lookup> LookupSpan<'lookup>,
 {
     let filter = build_targets_filter(log_level, env::var("RUST_LOG").ok().as_deref());
-    let formatter = VllmEventFormatter::new(process_label);
+    let layer = tracing_subscriber::fmt::layer().with_writer(std::io::stderr);
 
-    tracing_subscriber::fmt::layer()
-        .event_format(formatter)
-        .with_writer(std::io::stderr)
-        .with_filter(filter)
+    match formatter {
+        LogFormatter::Text => layer
+            .event_format(VllmEventFormatter::new(process_label))
+            .with_filter(filter)
+            .boxed(),
+        LogFormatter::Json => layer
+            .with_ansi(false)
+            .fmt_fields(JsonFields)
+            .event_format(VllmJsonEventFormatter::new(process_label))
+            .with_filter(filter)
+            .boxed(),
+    }
 }
 
 /// Build the CLI log filter by merging the vLLM-style default level with
@@ -179,7 +202,7 @@ fn build_targets_filter(log_level: LogLevel, rust_log: Option<&str>) -> Targets 
 }
 
 #[derive(Debug, Clone, Copy)]
-struct VllmLocalTimer {
+pub(crate) struct VllmLocalTimer {
     local_offset: UtcOffset,
 }
 
@@ -190,9 +213,16 @@ impl Default for VllmLocalTimer {
     }
 }
 
+impl VllmLocalTimer {
+    /// The current local time, as Python's `logging` timestamps use.
+    pub(crate) fn now(&self) -> time::OffsetDateTime {
+        time::OffsetDateTime::now_utc().to_offset(self.local_offset)
+    }
+}
+
 impl FormatTime for VllmLocalTimer {
     fn format_time(&self, w: &mut Writer<'_>) -> fmt::Result {
-        let now = time::OffsetDateTime::now_utc().to_offset(self.local_offset);
+        let now = self.now();
         let formatted = now.format(VLLM_TIME_FORMAT).map_err(|_| fmt::Error)?;
         w.write_str(&formatted)
     }

@@ -6,10 +6,15 @@ description = "Shared tracing subscriber and log formatting for vLLM Rust binari
 license.workspace = true
 
 [dependencies]
+serde.workspace = true
+serde_json.workspace = true
 serde_with.workspace = true
 time.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+
+[dev-dependencies]
+expect-test.workspace = true
 
 [lints]
 workspace = true
