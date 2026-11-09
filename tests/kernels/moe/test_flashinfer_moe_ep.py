@@ -303,7 +303,7 @@ def _check_block_fp8_modular_kernel(
     rank: int,
     device: torch.device,
 ) -> None:
-    """Block FP8 through the loading hook and ``FusedMoEKernel``.
+    """Block FP8 through the loading hook and `FusedMoEKernel`.
 
     Rank 1 has no tokens, but the other ranks route to its experts and it owns
     part of the collective, so it must still enter the megakernel. A full batch
@@ -570,6 +570,7 @@ def test_block_fp8_adapter_hands_kernel_ready_weights_to_flashinfer(
     # (E, K, N) views over the layer's storage, K contiguous.
     assert fc1.shape == (2, hidden, 2 * intermediate) and fc1.stride(1) == 1
     assert fc2.shape == (2, intermediate, hidden) and fc2.stride(1) == 1
+    assert weights.w13_scale is not None and weights.w2_scale is not None
     assert _kernel_storage(mega_config) == [
         t.data_ptr()
         for t in (weights.w13, weights.w13_scale, weights.w2, weights.w2_scale)
