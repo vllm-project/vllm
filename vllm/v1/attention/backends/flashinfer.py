@@ -2522,6 +2522,7 @@ class FlashInferImpl(AttentionImpl):
                     out = self._nvfp4_fp8_out[:num_prefill_tokens]
 
                 prefill_kv_block_scales = None
+                prefill_bmm1_scale, prefill_bmm2_scale = bmm1_scale, bmm2_scale
                 if self.is_kvcache_nvfp4:
                     # NVFP4 trtllm-gen kernel requires FP8 query.
                     assert attn_metadata.q_data_type_prefill == FP8_DTYPE, (
@@ -2564,6 +2565,9 @@ class FlashInferImpl(AttentionImpl):
                         layer._v_scale,
                         attn_metadata.q_data_type_prefill,
                     )
+                    # The dequant already applied k_scale / v_scale, and the
+                    # query is not FP8 (so no q_scale and no output quant).
+                    prefill_bmm1_scale, prefill_bmm2_scale = self.scale, 1.0
                 else:
                     mock_kv_cache = kv_cache_tuple
                     mock_block_table = block_tables_prefill
@@ -2576,8 +2580,8 @@ class FlashInferImpl(AttentionImpl):
                     seq_lens=seq_lens_prefill,
                     max_q_len=attn_metadata.prefill.max_q_len,
                     max_kv_len=attn_metadata.prefill.max_seq_len,
-                    bmm1_scale=bmm1_scale,
-                    bmm2_scale=bmm2_scale,
+                    bmm1_scale=prefill_bmm1_scale,
+                    bmm2_scale=prefill_bmm2_scale,
                     batch_size=attn_metadata.num_prefills,
                     cum_seq_lens_q=attn_metadata.prefill.cum_seq_lens_q,
                     cum_seq_lens_kv=attn_metadata.prefill.cum_seq_lens_kv,
