@@ -2,33 +2,33 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Push-specific (WRITE) worker-side logic for the NIXL connector.
 
-A dedicated ``nixl-push-writer`` thread owns all push-related NIXL ops:
-calls ``get_new_notifs`` (routing PUSH_REG internally; HB / completion
+A dedicated `nixl-push-writer` thread owns all push-related NIXL ops:
+calls `get_new_notifs` (routing PUSH_REG internally; HB / completion
 notifs are forwarded to the engine main thread), sends PUSH_REG via
-``send_notif``, matches D registrations with P finished blocks, and
-issues WRITE transfers via ``make_prepped_xfer`` / ``transfer``.
+`send_notif`, matches D registrations with P finished blocks, and
+issues WRITE transfers via `make_prepped_xfer` / `transfer`.
 
 The engine main thread feeds the writer through queues:
-``_reg_send_inbox`` (D-side regs to send), ``_finished_blocks_inbox``
-(P-side blocks from metadata) and ``_pending_completion_notifs``
+`_reg_send_inbox` (D-side regs to send), `_finished_blocks_inbox`
+(P-side blocks from metadata) and `_pending_completion_notifs`
 (non-PUSH_REG notifs forwarded back for HB / completion accounting).
-The handshake-completion callback feeds ``_deferred_push_inbox`` with
+The handshake-completion callback feeds `_deferred_push_inbox` with
 matched pushes whose P→D handshake has finished so the writer can
 (re-)issue the WRITE without ever blocking on the network.
 
 Wake model: the writer self-polls every
-``_PUSH_WRITER_POLL_INTERVAL_MS`` only while it has unmatched
-``_push_finished_blocks`` (i.e. P-side blocks waiting for a D PUSH_REG
+`_PUSH_WRITER_POLL_INTERVAL_MS` only while it has unmatched
+`_push_finished_blocks` (i.e. P-side blocks waiting for a D PUSH_REG
 notif that has no other wake source). All other progress is
-event-driven: the engine main thread sets ``_push_writer_wake`` from
-``start_load_kv`` (when handing it new work) and from ``get_finished``
+event-driven: the engine main thread sets `_push_writer_wake` from
+`start_load_kv` (when handing it new work) and from `get_finished`
 (so each engine step gives the writer a chance to drain NIXL notifs);
 the handshake-completion callback sets the same event after a deferred
 PUSH_REG send or a deferred push WRITE has been queued. When a request's
-lease expires (the base worker reports it via ``done_sending``) or the WRITE completes,
-``get_finished`` enqueues an eviction onto ``_evict_finished_inbox`` so
-the writer drops any leftover ``_push_finished_blocks`` /
-``_pending_d_registrations`` and stops self-polling.
+lease expires (the base worker reports it via `done_sending`) or the WRITE completes,
+`get_finished` enqueues an eviction onto `_evict_finished_inbox` so
+the writer drops any leftover `_push_finished_blocks` /
+`_pending_d_registrations` and stops self-polling.
 """
 
 import queue
@@ -357,10 +357,10 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         req_id: str,
         reg_data: dict[str, Any],
     ) -> None:
-        """Handshake (if needed) then send PUSH_REG. ``send_notif`` always
+        """Handshake (if needed) then send PUSH_REG. `send_notif` always
         executes on the writer; the handshake runs on the background executor
-        and the request is re-queued onto ``_reg_send_inbox`` once it
-        completes (at which point ``_ensure_handshake`` returns ``None`` and we
+        and the request is re-queued onto `_reg_send_inbox` once it
+        completes (at which point `_ensure_handshake` returns `None` and we
         send directly)."""
         remote_pp_size = reg_data.get("remote_pp_size", 1)
         fut = self._ensure_handshake(
@@ -453,7 +453,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
     ) -> tuple[str, BlockIds] | None:
         """Pop the P-side finished blocks matching *request_id*.
 
-        Same lookup as ``_pop_matching_registration``: exact key, then a
+        Same lookup as `_pop_matching_registration`: exact key, then a
         match after stripping the random suffix from both sides.
         """
         blocks = self._push_finished_blocks.pop(request_id, None)
@@ -477,9 +477,9 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
 
         The P→D handshake runs on the base worker's background executor.
         If it isn't ready yet we register a completion callback, defer the
-        WRITE, and re-drive this request via ``_deferred_push_inbox`` once
+        WRITE, and re-drive this request via `_deferred_push_inbox` once
         the handshake resolves -- so the writer thread never blocks on the
-        network (mirrors ``_send_registration_to_p``).
+        network (mirrors `_send_registration_to_p`).
         """
         if not local_block_ids:
             logger.warning("No local blocks to push for request %s", request_id)
@@ -554,7 +554,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
     def _as_grouped_block_ids(block_ids: BlockIds) -> BlockIds:
         """Normalise a sequence of block IDs to a tuple-of-groups shape.
 
-        ``BlockIds`` is canonically a tuple of per-group lists, but some
+        `BlockIds` is canonically a tuple of per-group lists, but some
         registration payloads collapse a single-group case to a flat
         list. Re-wrap that case so downstream group-aware helpers see a
         consistent shape."""
@@ -675,7 +675,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         """Post a WRITE point-to-point xfer request.
 
         Returns the in-flight transfer handle (so the caller can track all of
-        a request's handles atomically), or ``None`` if nothing was submitted.
+        a request's handles atomically), or `None` if nothing was submitted.
         """
         assert self.transfer_topo is not None
         remote_rank = read_spec.remote_rank
@@ -774,7 +774,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
     def _get_new_notifs(self) -> set[str]:
         """Drain HB / completion notifs forwarded by the writer thread.
 
-        The writer owns ``nixl_wrapper.get_new_notifs`` for push; PUSH_REG
+        The writer owns `nixl_wrapper.get_new_notifs` for push; PUSH_REG
         notifs are handled there. P learns of finished pushes from its WRITE
         handles, so this never reports finished sends.
         """

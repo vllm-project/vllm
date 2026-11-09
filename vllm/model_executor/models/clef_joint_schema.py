@@ -3,20 +3,20 @@
 """Shared joint schema head for Clef decision models.
 
 The head reads the final hidden states of the whole prompt, so it runs as a
-``token_classify`` pooler.
+`token_classify` pooler.
 
-Each request carries its schema in ``PoolingParams.extra_kwargs`` under
-``"joint_schema"``:
+Each request carries its schema in `PoolingParams.extra_kwargs` under
+`"joint_schema"`:
 
-- ``question_types``: 0 (noul), 1 (choice) or 2 (score) per question.
-- ``question_spans``: the ``[start, end)`` of each question's instructions.
-- ``option_spans``: the ``[start, end)`` of each option, question by question.
-- ``option_counts``: the number of options of each question.
+- `question_types`: 0 (noul), 1 (choice) or 2 (score) per question.
+- `question_spans`: the `[start, end)` of each question's instructions.
+- `option_spans`: the `[start, end)` of each option, question by question.
+- `option_counts`: the number of options of each question.
 
-Spans count from the end of the prompt (``-len(prompt) <= start < end <= 0``),
+Spans count from the end of the prompt (`-len(prompt) <= start < end <= 0`),
 so they hold after multimodal placeholders are expanded. The output has one
-value per option, in ``option_spans`` order: its probability within its
-question, or its logit with ``use_activation=False``.
+value per option, in `option_spans` order: its probability within its
+question, or its logit with `use_activation=False`.
 """
 
 import math
@@ -56,17 +56,17 @@ class SchemaIndices:
     positions: torch.Tensor
     """Every token of every span, questions first."""
     span_ids: torch.Tensor
-    """The span of each of ``positions``."""
+    """The span of each of `positions`."""
     span_lengths: torch.Tensor
-    """``[Q + O]``."""
+    """`[Q + O]`."""
     question_types: torch.Tensor
-    """``[Q]``."""
+    """`[Q]`."""
     option_question: torch.Tensor
-    """The question of each option, ``[O]``."""
+    """The question of each option, `[O]`."""
     option_slots: torch.Tensor
-    """Each option's flat index in a ``[Q, max_options]`` grid, ``[O]``."""
+    """Each option's flat index in a `[Q, max_options]` grid, `[O]`."""
     option_mask: torch.Tensor
-    """``[Q, max_options]``, true at the slots of options."""
+    """`[Q, max_options]`, true at the slots of options."""
 
 
 class EvidenceRoutingLayer(nn.Module):
@@ -151,8 +151,8 @@ class JointSchemaHead(nn.Module):
         lexical: torch.Tensor,
         schema: SchemaIndices,
     ) -> torch.Tensor:
-        """The ``[O]`` option logits of one prompt, from its ``[L, hidden]``
-        final hidden states and each option's ``[O, hidden]`` mean output
+        """The `[O]` option logits of one prompt, from its `[L, hidden]`
+        final hidden states and each option's `[O, hidden]` mean output
         embedding."""
         num_questions = schema.question_types.shape[0]
         option_question = schema.option_question
