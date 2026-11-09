@@ -70,12 +70,12 @@ def mhc_pre_delayed_overlap(
     *,
     overlap: MHCOverlapStream,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """``pre_delayed`` with the gate projection moved onto ``overlap.stream``.
+    """`pre_delayed` with the gate projection moved onto `overlap.stream`.
 
     Returns residual, post_mix, comb_mix, layer_input, next_pre_mix. Only the
     residual and layer input are ready on the caller stream; call
-    ``overlap.join()`` before using the gates. Seams without a post block, a
-    carried pre-mix or a fused norm run ``pre_delayed`` on the caller stream.
+    `overlap.join()` before using the gates. Seams without a post block, a
+    carried pre-mix or a fused norm run `pre_delayed` on the caller stream.
     """
     main = torch.cuda.current_stream()
     if (

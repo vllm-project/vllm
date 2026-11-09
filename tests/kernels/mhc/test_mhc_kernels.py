@@ -87,7 +87,9 @@ def test_deepseek_v41_all_reduce_fusion_requires_kernel_support(
     assert mhc.supports_mhc_all_reduce(config) is expected
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="CUDA or ROCm required"
+)
 @pytest.mark.parametrize(
     "num_tokens,hc_mult,hidden_size",
     [
@@ -139,7 +141,9 @@ def test_hc_collapse_preserves_weighted_residual_sum(
         )
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="CUDA or ROCm required"
+)
 def test_hc_collapse_custom_op_supports_compile():
     x = torch.randn(2, 4, 5120, dtype=torch.bfloat16, device=DEVICE)
     pre = torch.rand(2, 4, device=DEVICE)
@@ -190,7 +194,9 @@ def test_v41_dspark_head_collapses_with_last_ffn_mix(num_tokens, monkeypatch):
     )
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="CUDA or ROCm required"
+)
 @pytest.mark.parametrize("num_tokens", [1, 7, 32])
 @pytest.mark.parametrize("tp_size", [4, 8])
 def test_hc_collapse_before_gather_is_bitwise_equal(num_tokens, tp_size):
@@ -695,7 +701,7 @@ def test_deepseek_v41_capture_previous_aux(entry, monkeypatch, default_vllm_conf
 
     The draft model's input is the mean over hc streams of the previous
     layer's post. That post now runs inside this layer's fused pre, so the
-    captured value must equal a standalone ``mhc_post_tilelang`` on the same
+    captured value must equal a standalone `mhc_post_tilelang` on the same
     inputs -- and Engram must not be folded into it, since the injection
     happens after the aux consumers read the stream.
     """
@@ -1345,7 +1351,7 @@ def test_mhc_fused_rocm_fallback_applies_norm(monkeypatch):
 def test_mhc_pre_delayed_rocm_aiter(num_tokens, carried):
     """AITER must reproduce the delayed reference on both seam variants.
 
-    ``num_tokens`` spans the split-k choices AITER makes for the projection,
+    `num_tokens` spans the split-k choices AITER makes for the projection,
     since the pre-mix is recovered from that unreduced output.
     """
     set_random_seed(0)
@@ -1392,15 +1398,15 @@ def test_mhc_pre_delayed_rocm_aiter(num_tokens, carried):
 @pytest.mark.parametrize("seam", ["post", "no_post", "identity_pre"])
 def test_mhc_pre_delayed_rocm_aiter_fused_rms_norm(num_tokens, seam):
     """One fused kernel must match the whole reference seam: the post block
-    (the previous seam's post/comb gates fold ``sublayer_out`` into the
+    (the previous seam's post/comb gates fold `sublayer_out` into the
     streams), the delayed pre block (projection + Sinkhorn producing the next
     seam's post/comb/pre gates, plus the collapse with the carried pre-mix),
     and the RMSNorm folded onto the collapse.
 
-    ``num_tokens`` spans the kernel's split-K config buckets. ``seam`` covers
+    `num_tokens` spans the kernel's split-K config buckets. `seam` covers
     the three call shapes the model makes: a regular seam (post folded in), an
     Engram seam (post already applied), and the draft entry seam
-    (``pre_mix=None`` = identity pre-mix).
+    (`pre_mix=None` = identity pre-mix).
     """
     set_random_seed(0)
     hc_mult, hidden_size = 4, 5120
@@ -1597,8 +1603,8 @@ def test_deepseek_v41_rocm_decoder_overlap_matches_serial(
     entry, num_splits, over_limit, monkeypatch, default_vllm_config
 ):
     """The decoder layer splits its seams only inside a FULL graph capture of at
-    most ``MHC_OVERLAP_MAX_TOKENS`` tokens, and the replayed layer matches the
-    serial one. ``num_splits`` counts the seams that carry a post block: layer
+    most `MHC_OVERLAP_MAX_TOKENS` tokens, and the replayed layer matches the
+    serial one. `num_splits` counts the seams that carry a post block: layer
     0, a pipeline entry and Engram fold none into the attention seam, and the
     FFN seam always has one."""
     from vllm.config import CUDAGraphMode
@@ -1709,13 +1715,13 @@ def test_mhc_pre_delayed_rocm_aiter_declines_unsupported(monkeypatch):
     """The broadcast seam must not take the AITER path; a fused norm must not
     take the unfused AITER op.
 
-    The broadcast projects a narrower ``x``, which no AITER pre kernel takes;
-    ``mhc_pre_gemm_sqrsum`` folds no RMSNorm, so a fused norm routes to the
+    The broadcast projects a narrower `x`, which no AITER pre kernel takes;
+    `mhc_pre_gemm_sqrsum` folds no RMSNorm, so a fused norm routes to the
     fused seam kernel where it exists (gfx950) and away from AITER otherwise.
     What is asserted here is the routing decision, which is what this gate
     owns; the numerics of the paths are covered by
-    ``test_deepseek_v41_mhc_pre_delayed`` and
-    ``test_mhc_pre_delayed_rocm_aiter_fused_rms_norm``.
+    `test_deepseek_v41_mhc_pre_delayed` and
+    `test_mhc_pre_delayed_rocm_aiter_fused_rms_norm`.
     """
     set_random_seed(0)
     hc_mult, hidden_size = 4, 5120
@@ -1975,7 +1981,7 @@ def _patch_first_rank_pp_group(monkeypatch):
 @pytest.mark.parametrize("carried", [False, True])
 def test_deepseek_v4_layer_reuse_residual_keeps_caller_input(carried):
     """reuse_residual changes no output and never writes the caller's x, even
-    when a first layer starts from ``residual = x``."""
+    when a first layer starts from `residual = x`."""
     torch.set_default_device(DEVICE)
     set_random_seed(0)
     hc_mult, hidden_size, num_tokens = 4, 4096, 64

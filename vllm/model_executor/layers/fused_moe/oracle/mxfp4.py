@@ -381,7 +381,7 @@ def map_mxfp4_backend(runner_backend: MoEBackend) -> list[Mxfp4MoeBackend]:
     """Map a moe_backend string to its candidate Mxfp4MoeBackends.
 
     Vendor families return all activation variants; the caller picks one
-    via ``activation_key`` and ``is_supported_config``.
+    via `activation_key` and `is_supported_config`.
     """
     mapping: dict[str, list[Mxfp4MoeBackend]] = {
         "b12x": list(B12X_BACKENDS),
@@ -471,7 +471,7 @@ def _get_priority_backends_for_gpt_oss() -> list[Mxfp4MoeBackend]:
 def _get_priority_backends() -> list[Mxfp4MoeBackend]:
     """Get available backends in priority order. SM100+ prefers DeepGEMM FP4 /
     TRTLLM MXFP8; SM90 falls through to Humming or Marlin (the
-    backend-level ``is_supported_config`` check filters by device capability).
+    backend-level `is_supported_config` check filters by device capability).
     """
     if current_platform.is_rocm():
         return [
@@ -530,8 +530,8 @@ def _user_moe_activation_override_is_set() -> bool:
 def _resolve_activation_key(
     model_activation_key: QuantKey | None,
 ) -> QuantKey | None:
-    """Apply ``--quantization-config.moe.activation`` to the checkpoint's
-    activation key. An explicit override wins, ``null`` included (BF16)."""
+    """Apply `--quantization-config.moe.activation` to the checkpoint's
+    activation key. An explicit override wins, `null` included (BF16)."""
     user_override = _user_moe_activation_override()
     if user_override is None and not _user_moe_activation_override_is_set():
         return model_activation_key
@@ -631,10 +631,10 @@ def _filter_by_activation(
     backends: list[Mxfp4MoeBackend],
     requested_activation_key: QuantKey | None,
 ) -> list[Mxfp4MoeBackend]:
-    """Pick variants matching ``requested_activation_key``, followed by BF16
+    """Pick variants matching `requested_activation_key`, followed by BF16
     variants as a higher-precision fallback; without one, prefer BF16 if the
     list has any, else keep the list as-is so explicit non-BF16 picks (e.g.
-    the ``_afp8`` aliases) still land."""
+    the `_afp8` aliases) still land."""
     bf16 = [b for b in backends if _backend_activation_key(b) is None]
     if requested_activation_key is not None:
         matching = [
