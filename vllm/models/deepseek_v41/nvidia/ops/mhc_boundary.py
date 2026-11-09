@@ -921,6 +921,11 @@ class MhcBoundaryKernel:
         return out
 
 
+def boundary_weight_shape(hidden: int) -> tuple[int, int, int, int]:
+    """Shape of `prepare_boundary_weight`'s int32 fragments for `hidden`."""
+    return (CLUSTER, MULT * (hidden // CLUSTER) // 16, 32, 12)
+
+
 def prepare_boundary_weight(fn: torch.Tensor) -> torch.Tensor:
     """`fn [24, 4 * hidden]` -> int32 mma A fragments `[16 slices, k16 steps, 32
     lanes, 12]`.
@@ -977,7 +982,7 @@ def _compile(hidden: int, sinkhorn_iters: int, tile: int) -> Callable:
         _mat(Float32, tokens, MULT),
         _mat(Float32, tokens, MULT * MULT),
         _mat(Float32, tokens, MULT),
-        _mat(Int32, CLUSTER, MULT * (hidden // CLUSTER) // 16, 32, 12),
+        _mat(Int32, *boundary_weight_shape(hidden)),
         _mat(Float32, 3),
         _mat(Float32, MIXES),
         _mat(bf16, hidden),
@@ -1005,7 +1010,7 @@ def mhc_shifted_post_pre_boundary(
     pre_mix: torch.Tensor,
     post_mix: torch.Tensor,
     comb_res_mix: torch.Tensor,
-    fn: torch.Tensor,
+    weight: torch.Tensor,
     scale: torch.Tensor,
     base: torch.Tensor,
     hc_norm_eps: float,
@@ -1016,10 +1021,10 @@ def mhc_shifted_post_pre_boundary(
     norm_weight: torch.Tensor,
     norm_eps: float,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor] | None:
-    """`mhc_shifted_post_pre_deep_gemm` on `fn.mhc_boundary_weight` (see
-    `prepare_boundary_weight`), or None for more than `MAX_TOKENS` tokens. Each
-    token tile compiles on its first call, which vLLM's eager run before each graph
-    capture makes; a capture that would have to compile returns None too."""
+    """`mhc_shifted_post_pre_deep_gemm` with `weight = prepare_boundary_weight(fn)` in
+    place of `fn`, or None for more than `MAX_TOKENS` tokens. Each token tile compiles
+    on its first call, which vLLM's eager run before each graph capture makes; a
+    capture that would have to compile returns None too."""
     tokens, mult, hidden = residual.shape
     if not 0 < tokens <= MAX_TOKENS:
         return None
@@ -1043,7 +1048,7 @@ def mhc_shifted_post_pre_boundary(
         post_mix.view(tokens, mult),
         comb_res_mix.view(tokens, mult * mult),
         pre_mix,
-        fn.mhc_boundary_weight,
+        weight,
         scale,
         base,
         norm_weight,

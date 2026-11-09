@@ -113,7 +113,7 @@ from .ops.mhc import (
     MHC_OVERLAP_MAX_TOKENS,
     hc_expand,
     init_mhc_all_reduce,
-    mhc_boundary_supported,
+    mhc_boundary_weight,
     mhc_pre_delayed_overlap,
     mhc_shifted_post_pre,
     supports_mhc_all_reduce,
@@ -498,20 +498,23 @@ class DeepseekV4DecoderLayer(nn.Module):
             ),
             requires_grad=False,
         )
+        # The mixer weights laid out for the CuTe DSL mHC boundary, filled after
+        # loading; None where that kernel cannot run.
+        for name in ("hc_attn_boundary_weight", "hc_ffn_boundary_weight"):
+            weight = mhc_boundary_weight(
+                self.hidden_size, self.hc_mult, self.hc_attn_fn.device
+            )
+            self.register_buffer(name, weight, persistent=False)
 
     def process_weights_after_loading(self) -> None:
         """Lay out the mHC mixer weights for the CuTe DSL boundary kernel (see
-        ops/mhc_boundary.py). Reloads write in place, so captured graphs see them."""
-        if not mhc_boundary_supported(self.hidden_size, self.hc_mult):
+        ops/mhc_boundary.py), in place so captured graphs see reloads."""
+        if self.hc_attn_boundary_weight is None:
             return
         from .ops.mhc_boundary import prepare_boundary_weight
 
-        for fn in (self.hc_attn_fn, self.hc_ffn_fn):
-            weight = prepare_boundary_weight(fn.detach())
-            if hasattr(fn, "mhc_boundary_weight"):
-                fn.mhc_boundary_weight.copy_(weight)
-            else:
-                fn.mhc_boundary_weight = weight
+        self.hc_attn_boundary_weight.copy_(prepare_boundary_weight(self.hc_attn_fn))
+        self.hc_ffn_boundary_weight.copy_(prepare_boundary_weight(self.hc_ffn_fn))
 
     def forward(
         self,
@@ -649,6 +652,7 @@ class DeepseekV4DecoderLayer(nn.Module):
                 capture_aux=capture_previous_aux,
                 stream=mhc_stream,
                 reduce_results=self.fuse_mhc_all_reduce,
+                boundary_weight=self.hc_attn_boundary_weight,
             )
             if capture_previous_aux:
                 previous_aux = aux
@@ -682,6 +686,7 @@ class DeepseekV4DecoderLayer(nn.Module):
             norm_eps=self.ffn_norm.variance_epsilon,
             stream=mhc_stream,
             reduce_results=self.fuse_mhc_all_reduce,
+            boundary_weight=self.hc_ffn_boundary_weight,
         )
         if self.fuse_mhc_all_reduce and self.ffn.defers_finalize(x.shape[0]):
             # The next layer's first boundary finalizes it with the all-reduce.
@@ -723,6 +728,7 @@ class DeepseekV4DecoderLayer(nn.Module):
             norm_weight=self.attn_norm.weight,
             norm_eps=self.attn_norm.variance_epsilon,
             reduce_results=self.fuse_mhc_all_reduce,
+            boundary_weight=self.hc_attn_boundary_weight,
         )
         self.attn.forward_kv(positions, x)
 

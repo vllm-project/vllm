@@ -190,13 +190,20 @@ def mhc_pre_delayed_overlap(
     return outputs
 
 
-def mhc_boundary_supported(hidden_size: int, hc_mult: int) -> bool:
-    """Whether the CuTe DSL mHC boundary (`mhc_boundary.py`) runs here."""
+def mhc_boundary_weight(
+    hidden_size: int, hc_mult: int, device: torch.device
+) -> torch.Tensor | None:
+    """An empty `prepare_boundary_weight` buffer, or None where the CuTe DSL mHC
+    boundary (`mhc_boundary.py`) cannot run."""
     if not (current_platform.is_device_capability_family(100) and has_cutedsl()):
-        return False
-    from .mhc_boundary import MhcBoundaryKernel
+        return None
+    from .mhc_boundary import MhcBoundaryKernel, boundary_weight_shape
 
-    return MhcBoundaryKernel.supports(hidden_size, hc_mult)
+    if not MhcBoundaryKernel.supports(hidden_size, hc_mult):
+        return None
+    return torch.empty(
+        boundary_weight_shape(hidden_size), dtype=torch.int32, device=device
+    )
 
 
 @cache
@@ -226,10 +233,14 @@ def mhc_shifted_post_pre(
     *,
     stream: torch.cuda.Stream | None = None,
     reduce_results: bool = False,
+    boundary_weight: torch.Tensor | None = None,
 ) -> tuple[
     torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor
 ]:
     """Dispatch shifted post/pre to overlap, Mega-mHC, or fused TileLang.
+
+    `boundary_weight` (`fn` laid out by `prepare_boundary_weight`, see
+    `mhc_boundary_weight`) runs decode-size Mega-mHC batches on the CuTe DSL kernel.
 
     A MoE output left unfinalized is finalized inside the fused all-reduce.
     When stream is supplied, join it before consuming the returned coefficients.
@@ -319,9 +330,11 @@ def mhc_shifted_post_pre(
             norm_eps,
         )
         outputs = None
-        if hasattr(fn, "mhc_boundary_weight"):
+        if boundary_weight is not None:
             # Decode-size batches: one CuTe DSL kernel, the same TF32 products.
-            outputs = _mhc_shifted_post_pre_boundary()(*args)
+            outputs = _mhc_shifted_post_pre_boundary()(
+                *args[:5], boundary_weight, *args[6:]
+            )
         if outputs is None:
             outputs = mhc_shifted_post_pre_deep_gemm(*args)
         return *outputs, x.new_empty(0, x.shape[1])
