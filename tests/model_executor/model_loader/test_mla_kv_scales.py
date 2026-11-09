@@ -10,6 +10,7 @@ import pytest
 import torch
 from safetensors.torch import save_file
 
+from tests.models.utils import check_logprobs_close
 from vllm.platforms import current_platform
 from vllm.transformers_utils.repo_utils import hf_api
 
@@ -90,19 +91,21 @@ def test_mla_loads_checkpoint_kv_scales(vllm_runner, monkeypatch, kv_scale_check
 def test_flashinfer_mla_decode_follows_kv_scale_reload(
     vllm_runner, monkeypatch, kv_scale_checkpoint, reload_mode
 ):
-    """A dummy start captures the decode CUDA graphs with dummy KV scales; after
-    reloading the checkpoint, greedy decode must match a cold start on it."""
+    """A dummy start captures the decode CUDA graphs with dummy KV scales (1.0);
+    after reloading the checkpoint, decode must match a cold start on it. Both
+    the bmm scales and the cache write's scale must follow the reload."""
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
     monkeypatch.setenv("VLLM_RELOAD_MODE", reload_mode)
     kwargs = dict(
         kv_cache_dtype="fp8",
         attention_config={"backend": "FLASHINFER_MLA"},
+        block_size=64,
         enable_prefix_caching=False,
         max_model_len=64,
         max_num_seqs=len(PROMPTS),
     )
     with vllm_runner(kv_scale_checkpoint, **kwargs) as llm:
-        cold = llm.generate_greedy(PROMPTS, max_tokens=16)
+        cold = llm.generate_greedy_logprobs(PROMPTS, 16, num_logprobs=5)
 
     with vllm_runner(kv_scale_checkpoint, load_format="dummy", **kwargs) as llm:
         llm.collective_rpc(
@@ -113,6 +116,8 @@ def test_flashinfer_mla_decode_follows_kv_scale_reload(
             "reload_weights", kwargs={"weights_path": kv_scale_checkpoint}
         )
         assert all(s == (KV_SCALE,) * 3 for s in llm.collective_rpc(_mla_kv_scales)[0])
-        reloaded = llm.generate_greedy(PROMPTS, max_tokens=16)
+        reloaded = llm.generate_greedy_logprobs(PROMPTS, 16, num_logprobs=5)
 
-    assert reloaded == cold
+    check_logprobs_close(
+        outputs_0_lst=cold, outputs_1_lst=reloaded, name_0="cold", name_1="reloaded"
+    )
