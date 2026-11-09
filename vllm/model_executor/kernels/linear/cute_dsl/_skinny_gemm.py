@@ -14,7 +14,7 @@ _PREFETCH_TILES = 2
 class CuteSkinnyGemm:
     """Shape-dynamic low-latency GEMM for small token counts.
 
-    Computes ``C[M, N] = A[M, K] @ B[N, K].T + residual`` with BF16 or FP16
+    Computes `C[M, N] = A[M, K] @ B[N, K].T + residual` with BF16 or FP16
     inputs, FP32 accumulators, and an output matching the input dtype. The
     residual term is optional and is added before the output conversion. N and
     K are runtime values unless the configuration specializes K at compile
