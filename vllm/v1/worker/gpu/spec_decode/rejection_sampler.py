@@ -449,8 +449,9 @@ class RejectionSampler:
                 tree_logits, target = self._target_tokens(
                     input_batch, logits, plan_pos, draft_sampled, start, end
                 )
-                result = self.tree_accept(plan, target, self.num_speculative_steps + 1)
-                check_accept_result(plan, target, result)
+                width = self.num_speculative_steps + 1
+                result = self.tree_accept(plan, target, width)
+                check_accept_result(plan, target, result, width)
             chunk_logits = logits[lo:hi]
             if result is None:
                 # draft_logits uses persistent request-state indices, not batch

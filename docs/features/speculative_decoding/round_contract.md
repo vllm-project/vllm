@@ -184,9 +184,10 @@ matches. The result, `AcceptResult`:
 - `sampled`: `[R, width]`; `sampled[r, :path_len[r]]` holds the committed tokens;
   the last is the bonus token.
 
-vLLM checks the result on device, without a host sync: `path[r, 0] == 0`, each
-accepted row's parent is the row before it on the path, and `1 <= path_len[r] <=
-rows[r]`. A failed check is a device assert.
+vLLM checks the shapes on host (`path` at least as wide as the plan) and the
+result on device, without a host sync: `path[r, 0] == 0`, each accepted row's
+parent is the row before it on the path, and `1 <= path_len[r] <= rows[r]`. A
+failed device check is a device assert.
 
 ### 5. Commit
 

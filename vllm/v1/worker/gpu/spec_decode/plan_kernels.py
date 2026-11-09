@@ -195,17 +195,33 @@ def _check_path_kernel(
 
 
 def check_accept_result(
-    plan: VerifyPlan, target: TargetTokens, result: AcceptResult
+    plan: VerifyPlan, target: TargetTokens, result: AcceptResult, width: int
 ) -> None:
     """Assert on device, without a host sync, that ``result`` is a path of
     ``plan``: it starts at the root, each row's parent is the row before it,
     and ``path_len`` is in ``[1, rows]``. One kernel and one async assert, after
-    host checks of the tensors' layout."""
+    host checks of the tensors' layout and shapes (``width``: the columns of
+    ``sampled``)."""
     check_rows("AcceptResult.path", result.path, 2)
     check_rows("AcceptResult.path_len", result.path_len, 1)
     check_rows("AcceptResult.sampled", result.sampled, 2, dtype=None)
     num_reqs = target.row_start.shape[0] - 1
-    width = plan.parent.shape[1]
+    plan_width = plan.parent.shape[1]
+    # The kernels index these by request and path step on device: a smaller
+    # tensor would be read out of bounds.
+    path_rows, path_cols = result.path.shape
+    if (
+        path_rows != num_reqs
+        or path_cols < plan_width
+        or tuple(result.path_len.shape) != (num_reqs,)
+        or tuple(result.sampled.shape) != (num_reqs, width)
+    ):
+        raise ValueError(
+            f"AcceptResult must have path [{num_reqs}, >= {plan_width}], path_len "
+            f"[{num_reqs}] and sampled [{num_reqs}, {width}]; got "
+            f"{list(result.path.shape)}, {list(result.path_len.shape)} and "
+            f"{list(result.sampled.shape)}"
+        )
     ok = torch.empty(1, dtype=torch.int32, device=result.path.device)
     _check_path_kernel[(1,)](
         plan.parent,
@@ -216,8 +232,8 @@ def check_accept_result(
         result.path_len,
         ok,
         num_reqs,
-        C=width,
-        CP=triton.next_power_of_2(width),
+        C=plan_width,
+        CP=triton.next_power_of_2(plan_width),
         BLOCK_R=32,
         num_warps=1,
     )

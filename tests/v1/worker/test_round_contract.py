@@ -403,6 +403,7 @@ def _check(parent, counts, path, path_len):
             torch.tensor(path_len, dtype=torch.int32),
             torch.zeros(len(counts), 4, dtype=torch.int64),
         ),
+        4,
     )
 
 
@@ -446,7 +447,30 @@ def test_round_tensors_need_unit_row_stride():
             for field, values in fields.items()
         }
         with pytest.raises(ValueError, match=f"AcceptResult.{name} "):
-            check_accept_result(plan, target, AcceptResult(**result))
+            check_accept_result(plan, target, AcceptResult(**result), 4)
+
+
+@pytest.mark.parametrize(
+    "field, shape",
+    [("path", (2, 3)), ("path", (1, 4)), ("path_len", (3,)), ("sampled", (2, 3))],
+)
+def test_accept_result_shapes_are_checked(field, shape):
+    """A narrower or shorter tensor than the plan and batch would be read out
+    of bounds on device, so it is rejected on host before the check kernel."""
+    counts = [4, 3]
+    row_start = torch.tensor(np.concatenate([[0], np.cumsum(counts)])).int()
+    tokens = torch.zeros(int(row_start[-1]), dtype=torch.int64)
+    target = TargetTokens(tokens=tokens, drafted=tokens, row_start=row_start)
+    tree = torch.tensor(_TREE, dtype=torch.int32)
+    plan = VerifyPlan(parent=tree, tokens=torch.zeros_like(tree))
+    result = dict(
+        path=torch.zeros(2, 4, dtype=torch.int32),
+        path_len=torch.ones(2, dtype=torch.int32),
+        sampled=torch.zeros(2, 4, dtype=torch.int64),
+    )
+    result[field] = torch.zeros(shape, dtype=result[field].dtype)
+    with pytest.raises(ValueError, match="AcceptResult must have"):
+        check_accept_result(plan, target, AcceptResult(**result), 4)
 
 
 @pytest.mark.skipif(
