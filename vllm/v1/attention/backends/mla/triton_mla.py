@@ -26,8 +26,15 @@ from vllm.v1.attention.backend import (
     MultipleOf,
     max_decode_query_len,
 )
-from vllm.v1.attention.ops.triton_decode_attention import decode_attention_fwd
-from vllm.v1.kv_cache_interface import is_quantized_kv_cache
+from vllm.v1.attention.ops.triton_decode_attention import (
+    _decode_grouped_att_m_fwd,
+    _decode_softmax_reducev_fwd,
+    decode_attention_fwd,
+)
+from vllm.v1.kv_cache_interface import (
+    get_kv_cache_spec_sliding_window,
+    is_quantized_kv_cache,
+)
 from vllm.v1.worker.workspace import (
     current_workspace_manager,
     is_workspace_manager_initialized,
@@ -51,19 +58,27 @@ def _compute_num_kv_splits(max_seq_len: int, sm_count: int) -> int:
 
 
 def _reserve_attn_logits_workspace(
-    vllm_config: VllmConfig, max_decode_rows: int, q_num_heads: int, kv_lora_rank: int
+    vllm_config: VllmConfig,
+    max_decode_rows: int,
+    q_num_heads: int,
+    kv_lora_rank: int,
+    sliding_window: int | None = None,
 ) -> None:
     """Pre-size the shared workspace for the decode split-KV attn logits.
 
-    Reserving at the worst case (max_model_len -> max num_kv_splits,
+    Reserving at the worst case (max KV length -> max num_kv_splits,
     max_decode_rows) before warmup/cudagraph capture means the per-call
-    ``get_simultaneous`` in ``forward_mqa`` never has to grow the buffer at
-    runtime (which would raise once the workspace is locked).
+    `get_simultaneous` in `forward_mqa` never has to grow the buffer at
+    runtime (which would raise once the workspace is locked). Like
+    `forward_mqa`, the KV length is clamped to the layer's sliding window.
     """
     if not is_workspace_manager_initialized():
         return
+    max_kv_len = vllm_config.model_config.max_model_len
+    if sliding_window is not None:
+        max_kv_len = min(max_kv_len, sliding_window)
     max_splits = _compute_num_kv_splits(
-        vllm_config.model_config.max_model_len,
+        max_kv_len,
         current_platform.num_compute_units(),
     )
     current_workspace_manager().get_simultaneous(
@@ -90,6 +105,7 @@ class TritonMLAMetadataBuilder(MLACommonMetadataBuilder[MLACommonMetadata]):
             vllm_config.scheduler_config.max_num_seqs * self.reorder_batch_threshold,
             self.num_heads * self.dcp_world_size,
             self.mla_dims.kv_lora_rank,
+            get_kv_cache_spec_sliding_window(kv_cache_spec),
         )
 
     def update_draft_decode_metadata(self, _metadata: MLACommonMetadata) -> None:
@@ -141,6 +157,11 @@ class TritonMLABackend(MLACommonBackend):
         return True
 
     @classmethod
+    def supports_sliding_window(cls) -> bool:
+        # Decode only (windowed DSpark drafts); prefill raises.
+        return True
+
+    @classmethod
     def supports_non_causal(cls) -> bool:
         # DSpark non-causal blocks are flattened to single-token decode rows in
         # TritonMLAImpl.forward_mqa (decode_attention_fwd has no causal flag /
@@ -181,12 +202,17 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
             **mla_args,
         )
 
-        unsupported_features = [alibi_slopes, sliding_window, logits_soft_cap]
+        unsupported_features = [alibi_slopes, logits_soft_cap]
         if any(unsupported_features):
             raise NotImplementedError(
                 "TritonMLAImpl does not support one of the following: "
-                "alibi_slopes, sliding_window, logits_soft_cap"
+                "alibi_slopes, logits_soft_cap"
             )
+        # Each decode row attends to the last `decode_sliding_window` keys.
+        self.decode_sliding_window = sliding_window
+        assert sliding_window is None or self.dcp_world_size == 1, (
+            "Sliding-window Triton MLA does not support decode context parallelism"
+        )
 
         if attn_type != AttentionType.DECODER:
             raise NotImplementedError(
@@ -241,6 +267,61 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
             * max_decode_query_len(vllm_config),
             self.num_heads * self.dcp_world_size,
             self.kv_lora_rank,
+            self.decode_sliding_window,
+        )
+
+    def forward_mha(self, *args, **kwargs) -> None:
+        if self.decode_sliding_window is not None:
+            # Windowed DSpark drafts only run non-causal decode blocks.
+            raise NotImplementedError("Sliding-window Triton MLA prefill")
+        return super().forward_mha(*args, **kwargs)
+
+    def register_decode_warmup(
+        self, kv_cache: torch.Tensor, kv_cache_dtype: str
+    ) -> None:
+        """Register the split-KV decode kernels for a bound KV cache.
+
+        Mirrors forward_mqa's launch: MLAAttention views a uint8 fp8 cache as
+        fp8, num_kv_splits is any value `_compute_num_kv_splits` can select
+        up to max_model_len (clamped to the sliding window), and the query
+        keeps the model dtype.
+        """
+        if is_quantized_kv_cache(kv_cache_dtype) and kv_cache_dtype not in (
+            "fp8_ds_mla",
+            "nvfp4_ds_mla",
+        ):
+            kv_cache = kv_cache.view(current_platform.fp8_dtype())
+        if envs.VLLM_BATCH_INVARIANT:
+            num_kv_splits: tuple[int, ...] = (1,)
+        else:
+            max_kv_len = self._vllm_config.model_config.max_model_len
+            if self.decode_sliding_window is not None:
+                max_kv_len = min(max_kv_len, self.decode_sliding_window)
+            max_splits = _compute_num_kv_splits(max_kv_len, self._sm_count)
+            num_kv_splits = tuple(
+                sorted({1 << i for i in range(max_splits.bit_length())} | {max_splits})
+            )
+        num_heads = self.num_heads * self.dcp_world_size
+        dtype = self._vllm_config.model_config.dtype
+        sliding_window = self.decode_sliding_window or 0
+        _decode_grouped_att_m_fwd.register_warmup(
+            q_dtype=dtype,
+            kv_dtype=kv_cache.dtype,
+            num_heads=num_heads,
+            head_size=kv_cache.shape[-1],
+            kv_lora_rank=self.kv_lora_rank,
+            page_size=kv_cache.shape[1],
+            kv_block_stride=kv_cache.stride(0),
+            kv_token_stride=kv_cache.stride(1),
+            num_kv_splits=num_kv_splits,
+            sliding_window=sliding_window,
+        )
+        _decode_softmax_reducev_fwd.register_warmup(
+            dtype=dtype,
+            num_heads=num_heads,
+            kv_lora_rank=self.kv_lora_rank,
+            num_kv_splits=num_kv_splits,
+            sliding_window=sliding_window,
         )
 
     def forward_mqa(
@@ -268,9 +349,10 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
         if envs.VLLM_BATCH_INVARIANT:
             num_kv_splits = 1
         else:
-            num_kv_splits = _compute_num_kv_splits(
-                attn_metadata.max_seq_len, self._sm_count
-            )
+            max_kv_len = attn_metadata.max_seq_len
+            if self.decode_sliding_window is not None:
+                max_kv_len = min(max_kv_len, self.decode_sliding_window)
+            num_kv_splits = _compute_num_kv_splits(max_kv_len, self._sm_count)
 
         # NOTE: the +1 stores the LogSumExp (LSE) that the stage2 kernel uses to
         # merge partial attention outputs across splits. The scratch is served
@@ -340,6 +422,7 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
             k_scale=layer._k_scale,
             v_scale=layer._k_scale,
             is_mla=True,
+            sliding_window=self.decode_sliding_window,
         )
 
         return o, lse

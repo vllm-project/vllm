@@ -2,13 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Per-operation telemetry for MooncakeStoreConnector.
 
-Records one row per Mooncake RPC (``save_exists``, ``save_put``, ``load_get``,
-``lookup_exists``) with duration, key/byte counts, status, and failed-key
-count. Exposed to the logger via ``KVConnectorLogging`` and to Prometheus
-via ``MooncakeStorePromMetrics``.
+Records one row per Mooncake RPC (`save_exists`, `save_put`, `load_get`,
+`lookup_exists`) with duration, key/byte counts, status, and failed-key
+count. Exposed to the logger via `KVConnectorLogging` and to Prometheus
+via `MooncakeStorePromMetrics`.
 
-``MooncakeStorePromMetrics`` can also poll the Mooncake master's memory
-gauges (see ``poll_master_metrics``) and export the store usage
+`MooncakeStorePromMetrics` can also poll the Mooncake master's memory
+gauges (see `poll_master_metrics`) and export the store usage
 fractions. It polls from the frontend process because connector stats only
 arrive on engine steps: an idle engine would freeze the gauges while leases
 expire and puts land in the store.
@@ -41,7 +41,7 @@ from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
-# Reserved ``data`` keys for lease and in-flight write deltas. Not operations.
+# Reserved `data` keys for lease and in-flight write deltas. Not operations.
 LEASES_KEY = "leases"
 WRITES_KEY = "writes"
 
@@ -63,9 +63,9 @@ def master_usage_fractions(
     """Store usage fractions from one master snapshot and this instance's
     leased and in-flight write bytes.
 
-    ``usage`` counts memory eviction cannot reclaim now: puts in flight, data
+    `usage` counts memory eviction cannot reclaim now: puts in flight, data
     under a read lease, and displaced replicas awaiting deferred release.
-    ``occupancy`` also counts evictable data.
+    `occupancy` also counts evictable data.
     """
     capacity = float(snapshot.get("capacity_bytes", 0))
     if capacity <= 0:
@@ -105,7 +105,7 @@ def poll_master_metrics(url: str) -> dict[str, int] | None:
 class LeaseTracker:
     """Read leases the master granted one worker: key -> (expiry second, bytes).
 
-    ``grant`` returns the change in leased bytes per expiry second. A key
+    `grant` returns the change in leased bytes per expiry second. A key
     leased again before its lease expires moves its bytes to the new expiry.
     """
 

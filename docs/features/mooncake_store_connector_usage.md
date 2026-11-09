@@ -57,6 +57,10 @@ Create a JSON configuration file (e.g., `mooncake_config.json`):
   Store provider owns the memory pool and (optionally) the SSD tier.
 - `protocol`: Use `"rdma"` for best performance. `"tcp"` works as a fallback.
   `"nvlink"` is used by the opt-in [EGM deployment](#standalone-egm-over-nvlink).
+- `device_name_per_gpu`: Optional list of RDMA device names indexed by
+  physical GPU ID, such as `["rdma0", "rdma1", ...]`. Each rank's store client
+  uses only its own GPU's entry, which may list several devices separated by
+  commas. Set it instead of `device_name` to give each GPU its local NIC.
 - `global_segment_size`: CPU memory contributed to the distributed pool (per
   GPU). Must be `> 0` in `embedded` mode and `0` in `standalone-store` mode.
 - `local_buffer_size`: Private buffer for this node's own operations (per GPU).
@@ -318,16 +322,33 @@ Strict isolation requires a Mooncake master started with `--enable_multi_tenants
 - **kv_consumer**: For instances that load KV caches from the pool.
 - **kv_both**: The instance both stores and loads KV caches. Use this for single-node CPU offloading or prefiller instances.
 
+### Lookup timeout and circuit breaker
+
+Prefix lookups (blocking, async, and arrival-time prefetch) wait at most
+`lookup_timeout_s` (see below), including time queued on the lookup executor.
+A timeout or lookup error returns a cache miss so the request computes locally.
+Only lookups that reached the store count as failures; lookups that expire
+while queued behind others do not. After 3 consecutive failures, lookups are
+skipped for 30 seconds. After the cooldown, a single probe lookup either closes
+the breaker or reopens it.
+
+This bounds the scheduler's wait for prefix lookup. It does not cancel a master
+RPC already running inside the worker or apply to KV loads and saves. Store
+reset waits at most 60 seconds.
+
 ### kv_connector_extra_config
 
 - `load_async` (bool): Enable asynchronous loading for better compute-I/O overlap. Default: `true`.
-- `lookup_async` (bool): Run the external prefix-cache lookup on a background thread so it never blocks the scheduler step. The request is held until the in-flight lookup completes, then resumed on a later step. Default: `false`.
+- `lookup_async` (bool): Run the external prefix-cache lookup on a background thread without waiting for its result. With a positive `lookup_prefetch_limit`, lookup starts as soon as the request is added to the scheduler, so it overlaps the time the request waits in the queue. GPU KV allocation and loading still happen through the scheduler. Default: `false`.
+- `lookup_prefetch_limit` (int): Maximum number of arrival-time lookups in flight. Beyond it, a request is looked up when the scheduler first reaches it; scheduler lookups are not capped. Set to a positive value to enable arrival-time lookup. Default: `0` (disabled).
+- `lookup_prefetch_ttl_s` (float): Maximum age of a completed async lookup result, measured from when its RPC returned. Older results are looked up again, as are lookups whose token/hash range changed. Pending lookups use the separate lookup timeout above. Default: `2.0` seconds.
+- `lookup_timeout_s` (float): Maximum wait for a prefix lookup, including executor queue time. Default: `1.0` seconds.
 - `lookup_rpc_port` (int): Custom port for the ZMQ lookup RPC socket. Default: `0`.
 - `custom_mem_pool` (str): Optional Mooncake allocator for the GPU KV cache.
   `"NVLINK"` is used in the [EGM deployment example](#standalone-egm-over-nvlink);
   `"BAREX"` selects the BAR-exposed allocator. Unset by default. Both are
   incompatible with sleep mode and the CuMem allocator.
-- `cache_prefix` (str): Namespace prepended to every store key. Lets separate deployments share one Mooncake master without polluting each other — instances configured with different prefixes never see each other's cached blocks, even for identical prompts. All instances that should share a prefix cache must use the same value. Default: `""` (no prefix; keys are byte-identical to the unprefixed format).
+- `cache_prefix` (str): Namespace prepended to every store key. Different prefixes isolate cached blocks, even for identical prompts. Set to `"auto"` to derive a deployment fingerprint automatically (see below). Other strings remain literal custom prefixes. Default: `""` (no prefix; existing key format).
 - `save_decode_cache` (bool): Enable offloading decode tokens' KV cache. A `kv_consumer` does not save during prefill; when decode starts, it fills any missing block-aligned prompt prefix before appending completed decode blocks. Default: `false`.
 - `store_tp_size` (int): Common Store TP for divisible heterogeneous-TP
   sharing. See [Sharing one Store across multiple Prefill TP sizes](#sharing-one-store-across-multiple-prefill-tp-sizes).
@@ -338,6 +359,18 @@ Strict isolation requires a Mooncake master started with `--enable_multi_tenants
 - `mooncake_kv_lease_ttl_ms` (int): The master's read-lease TTL, which must
   match its `--default_kv_lease_ttl`. Used to estimate `read_usage_perc`.
   Default: `10000`, the Mooncake master's default.
+
+#### Automatic cache prefix
+
+Set `"cache_prefix": "auto"` in `kv_connector_extra_config` to derive the prefix
+from the deployment identity: `VLLM_IMAGE_TAG` (or `VLLM_BUILD_COMMIT`), the
+model configuration (path, revision, dtype, quantization) and the KV cache
+configuration (e.g. KV dtype, block size). Changing any of these isolates new
+blocks from previously cached ones; identically configured replicas share the
+prefix. Official release images set both build identity variables; custom builds
+must pass `--build-arg VLLM_IMAGE_TAG=<immutable-tag>`, otherwise startup fails.
+Environment flags and weight files are not hashed: use a custom prefix if they
+change while the image and model configuration stay the same.
 
 LBHNC/HND is strongly recommended for TP-sharded Store when supported. LBNHC/NHD
 creates many transfer segments and may significantly reduce PUT/GET performance.

@@ -105,7 +105,7 @@ def test_kv_balanced_impl_runs_the_kernel():
 
 
 def _paged(rows_per_request, device):
-    """A paged FP8 cache holding ``rows_per_request`` [n, 576] FP32 rows per request
+    """A paged FP8 cache holding `rows_per_request` [n, 576] FP32 rows per request
     at shuffled pages, and its block table."""
     pages = [-(-len(rows) // PAGE) for rows in rows_per_request]
     cache = torch.zeros(sum(pages) + 2, PAGE, LATENT + ROPE, device=device)
@@ -124,7 +124,7 @@ def _paged(rows_per_request, device):
 
 
 def _shard_len(n, cp):
-    """Tokens of a length-``n`` request on rank ``rank`` of ``cp`` = (world, rank,
+    """Tokens of a length-`n` request on rank `rank` of `cp` = (world, rank,
     interleave): rank r holds the interleave-sized chunks r, r + world, ..."""
     world, rank, interleave = cp
     chunks, tail = divmod(n, interleave * world)
@@ -314,8 +314,8 @@ def test_kv_balanced_plan_replays_in_cuda_graph():
 
 
 def _layer(monkeypatch, lengths, cp, lse):
-    """The KV-balanced decode of an MLA layer over random shards of ``lengths`` on
-    rank ``cp[1]``."""
+    """The KV-balanced decode of an MLA layer over random shards of `lengths` on
+    rank `cp[1]`."""
     from vllm.models.kimi_k3.nvidia.kv_balanced_mla import decode
 
     device = torch.device("cuda")
@@ -444,3 +444,232 @@ def test_kv_balanced_mqa_dcp_shard(monkeypatch, workspace_init):
     out, lse = mqa(query, metadata)
     ref_out, ref_lse = reference()
     _check(out.view_as(ref_out).float(), lse.view_as(ref_lse), ref_out, ref_lse)
+
+
+def test_specialized_mla_core_policy():
+    """The specialized decode's MLA core per (rows, q): balanced for spec verify
+    (q > 1) and from BALANCED_Q1_BATCH rows at q = 1 where the kernel runs,
+    tokenspeed otherwise (both tokenspeed's kernel, the stock backend's; there is no
+    trtllm-gen core); a named balanced core falls back where it can't run."""
+    pytest.importorskip("cutlass")
+    from vllm.models.kimi_k3.nvidia.specialized_decode.cutedsl.mla.prepared import (
+        BALANCED_Q1_BATCH,
+        core_for,
+    )
+
+    for dcp in (False, True):
+        for rows in (5, 60):
+            assert core_for(rows, q=5, dcp=dcp, balanced=True) == "balanced"
+        assert core_for(60, q=5, dcp=dcp, balanced=False) == "tokenspeed"
+        for rows in (BALANCED_Q1_BATCH, 64):
+            assert core_for(rows, q=1, dcp=dcp, balanced=True) == "balanced"
+        below = BALANCED_Q1_BATCH - 1
+        assert core_for(below, q=1, dcp=dcp, balanced=True) == "tokenspeed"
+        assert core_for(60, "tokenspeed", 5, dcp, True) == "tokenspeed"
+        assert core_for(5, "balanced", 5, dcp, True) == "balanced"
+        assert core_for(5, "balanced", 5, dcp, False) == "tokenspeed"
+    # SM100 TP8 (12 heads: M64 tiles, no balanced core): tokenspeed at every batch.
+    for rows in (1, 16, 64):
+        for dcp in (False, True):
+            assert core_for(rows, q=1, dcp=dcp, balanced=False) == "tokenspeed"
+    for core in ("trtllm", "flash"):
+        with pytest.raises(ValueError, match="expected auto"):
+            core_for(8, core)
+
+
+@requires_sm100
+@pytest.mark.parametrize(
+    ("lengths", "heads", "q", "cp"),
+    [
+        # TP8 (12 heads, whole KV): one long request needs more than 8 splits.
+        ([130000], 12, 5, (1, 0, 1)),
+        # TP8, AgentX-like mixed lengths with an empty padded request.
+        ([300, 150000, 7000, 64000, 0, 2500, 90000, 41], 12, 5, (1, 0, 1)),
+        ([1, 6000, 33000, 100000], 12, 1, (1, 0, 1)),
+        # q = 1 past 12 requests: the 8-split core.
+        ([i * 7919 % 60000 + 1 for i in range(16)], 12, 1, (1, 0, 1)),
+        # DCP8 (96 gathered heads, a shard): rank 5 of 8, interleave 64 and 1.
+        ([5443, 51580, 330, 2000, 160000], 96, 5, (8, 5, 64)),
+        # The 7-token request leaves rank 3 one key, past the first rows' bounds.
+        ([2000, 64000, 12345, 7], 96, 5, (8, 3, 1)),
+        ([700, 300000], 96, 1, (8, 0, 1)),
+    ],
+)
+def test_specialized_balanced_core_matches_reference(lengths, heads, q, cp):
+    """The specialized decode's balanced MLA core (`BalancedMla`: TP8 / DCP8
+    capacity, PDL launch, caller-owned output) against the FP32 reference, captured
+    in a CUDA graph with the plan, as the decode step runs it."""
+    from vllm.models.kimi_k3.nvidia.kv_balanced_mla.core import supports
+    from vllm.models.kimi_k3.nvidia.specialized_decode.cutedsl.mla.balanced import (
+        CAPACITY,
+        BalancedMla,
+    )
+
+    torch.manual_seed(0)
+    device = torch.device("cuda")
+    if not supports(heads, q, device):
+        pytest.skip("this GPU runs the shape on M64 tiles, without the balanced core")
+    dcp = cp[0] > 1
+    local = [_shard_len(n, cp) for n in lengths]
+    cache, block_table = _paged(
+        [torch.randn(n, LATENT + ROPE, device=device) / 2 for n in local], device
+    )
+    query = (torch.randn(len(lengths), q, heads, LATENT + ROPE, device=device) / 2).to(
+        torch.float8_e4m3fn
+    )
+    as_tensor = lambda x: torch.tensor(x, dtype=torch.int32, device=device)  # noqa: E731
+    local_t, totals = as_tensor(local), as_tensor(lengths)
+    balanced = BalancedMla(heads, device, dcp)
+    balanced.require(q, len(lengths))
+    out = torch.full((len(lengths), q, heads, LATENT), float("nan"), device=device)
+    out = out.to(torch.bfloat16)
+    lse = torch.empty(len(lengths), q, heads, dtype=torch.float32, device=device)
+    extra = dict(cp=cp, totals=totals) if dcp else {}
+
+    def step():
+        balanced.plan(q, local_t)
+        balanced.decode(
+            query, cache, block_table, local_t, (SCALE, 1.0), out, lse=lse, **extra
+        )
+
+    step()  # compile outside the capture
+    out.fill_(float("nan"))
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        step()
+    graph.replay()
+    key = balanced.key(q, len(lengths))
+    counts = balanced.plans[key][0][: len(lengths)]
+    capacity = key[1]
+    assert capacity in [c for _, c in CAPACITY[dcp]]
+    assert bool((counts <= capacity).all()) and int(counts.max()) >= 1
+    if not dcp and max(lengths) >= 100000:  # beyond the kernel's default of 8 splits
+        assert int(counts.max()) > 8
+    ref_out, ref_lse = _reference(query, cache, block_table, local_t, totals, True, cp)
+    # A row with no visible local key (DCP: a short request's shard) carries no
+    # weight in DcpValue's merge: a finite output under an LSE far below any real one
+    # (as tokenspeed returns it).
+    masked = ref_out.isnan().any(-1)
+    assert bool(out[masked].float().isfinite().all())
+    assert bool((lse[masked] < -1e4).all())
+    live = ~masked
+    _check(out.float()[live], lse[live], ref_out[live], ref_lse[live])
+
+
+def _stock_split(heads, q, requests, max_seq, device):
+    """tokenspeed_mla_decode's split count (shared by every request of the batch) for
+    `requests` x `q` query rows of `heads` heads and `max_seq`."""
+    from tokenspeed_mla import mla_decode as md
+
+    fp8 = torch.float8_e4m3fn
+    arch = torch.cuda.get_device_capability(device)
+    tiler, _ = md.select_mla_decode_tilers(
+        heads, q, is_fp8=True, compute_capability=arch
+    )
+    fold = md.get_mla_decode_fold_sq_factor(heads, q, tiler[0])
+    rows = (q // fold, heads * fold)
+    if tiler[0] == 128 and -(-heads * q // 128) < rows[0]:  # packed M128 tiles
+        rows = (md.compute_q_tile_layout(heads, q, 128)[1], 128)
+    sms = md.get_num_sm(device)
+    split, _ = md._get_split_kv_and_workspace_size(
+        requests, *rows, LATENT, sms, max_seq, fp8, tiler, 1
+    )
+    return split
+
+
+@requires_sm100
+@pytest.mark.parametrize(
+    ("lengths", "heads", "q", "cp"),
+    [
+        # TP8: 12 heads, one query tile per request (R1: 2 D bands per reduced row).
+        ([30000], 12, 5, (1, 0, 1)),
+        ([9000, 9000], 12, 5, (1, 0, 1)),
+        ([3000, 20000, 777, 12345], 12, 5, (1, 0, 1)),
+        ([40000] * 3 + [5000] * 9, 12, 1, (1, 0, 1)),
+        # DCP8: 96 gathered heads over rank 3's shard (4 packed tiles at q = 5).
+        ([30000, 6000, 61000], 96, 5, (8, 3, 1)),
+        ([16000, 70000, 40000], 96, 5, (8, 6, 64)),
+        ([90000, 50000] * 5, 96, 1, (8, 0, 1)),
+    ],
+)
+def test_specialized_balanced_core_bitwise_matches_tokenspeed(lengths, heads, q, cp):
+    """At tokenspeed_mla_decode's split points, the specialized decode's balanced core
+    (BalancedMla, as served) returns stock's BF16 latent and log2 LSE bit for bit:
+    the same FP32 split-KV partials, P scaling and reduction. Each request is given
+    stock's split count in the plan (the balanced core only moves the split points,
+    a summation order); stock's own call is the TOKENSPEED_MLA backend's."""
+    from tokenspeed_mla import tokenspeed_mla_decode
+
+    from vllm.models.kimi_k3.nvidia.kv_balanced_mla.core import KV_TILE, supports
+    from vllm.models.kimi_k3.nvidia.specialized_decode.cutedsl.mla.balanced import (
+        BalancedMla,
+    )
+
+    torch.manual_seed(0)
+    device = torch.device("cuda")
+    if not supports(heads, q, device):
+        pytest.skip("this GPU runs the shape on M64 tiles, without the balanced core")
+    world, rank, interleave = cp
+    dcp = world > 1
+    local = [_shard_len(n, cp) for n in lengths]
+    cache, block_table = _paged(
+        [torch.randn(n, LATENT + ROPE, device=device) / 2 for n in local], device
+    )
+    requests = len(lengths)
+    query = (torch.randn(requests, q, heads, LATENT + ROPE, device=device) / 2).to(
+        torch.float8_e4m3fn
+    )
+    as_tensor = lambda x: torch.tensor(x, dtype=torch.int32, device=device)  # noqa: E731
+    local_t, totals = as_tensor(local), as_tensor(lengths)
+    softmax, output_scale = SCALE * 0.75, 1.25
+
+    # Stock: the TOKENSPEED_MLA backend's call (one split count for the batch).
+    max_seq = max(local)
+    split = _stock_split(heads, q, requests, max_seq, device)
+    workspace = torch.zeros(1 << 30, dtype=torch.int8, device=device)
+    stock_out, stock_lse = tokenspeed_mla_decode(
+        query=query,
+        kv_cache=cache,
+        workspace_buffer=workspace,
+        kv_lora_rank=LATENT,
+        qk_rope_head_dim=ROPE,
+        block_tables=block_table,
+        seq_lens=local_t,
+        max_seq_len=max_seq,
+        softmax_scale=softmax,
+        output_scale=output_scale,
+        return_lse=True,
+        causal_mask=True,
+        causal_seqs=totals if dcp else None,
+        cp_world=world,
+        cp_rank=rank,
+        cp_interleave_size=interleave,
+    )
+
+    balanced = BalancedMla(heads, device, dcp)
+    balanced.require(q, requests)
+    key = balanced.key(q, requests)
+    core, (counts, work) = balanced.cores[key], balanced.plans[key]
+    # Each request's nonempty splits at stock's chunk, ceil(tiles / split) tiles.
+    tiles = [-(-n // KV_TILE) for n in local]
+    planned = [-(-t // -(-t // split)) for t in tiles]
+    assert min(planned) > 1, "a single-split request stores its output directly"
+    assert max(planned) <= core.capacity, (planned, core.capacity)
+    entries = [
+        ((tile * requests + b) << 8) | s
+        for b, n in enumerate(planned)
+        for s in range(n)
+        for tile in range(core.q_tiles)
+    ]
+    counts[:requests] = as_tensor(planned)
+    work.fill_(-1)
+    work[: len(entries)] = as_tensor(entries)
+    out = torch.empty(requests, q, heads, LATENT, dtype=torch.bfloat16, device=device)
+    lse = torch.empty(requests, q, heads, dtype=torch.float32, device=device)
+    extra = dict(cp=cp, totals=totals) if dcp else {}
+    balanced.decode(
+        query, cache, block_table, local_t, (softmax, output_scale), out, lse, **extra
+    )
+    torch.accelerator.synchronize()
+    assert torch.equal(out.view(torch.int16), stock_out.view(torch.int16))
+    assert torch.equal(lse.view(torch.int32), stock_lse.view(torch.int32))
