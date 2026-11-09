@@ -109,7 +109,6 @@ _TEXT_GENERATION_MODELS = {
     "FalconMambaForCausalLM": ("mamba", "MambaForCausalLM"),
     "FalconH1ForCausalLM": ("falcon_h1", "FalconH1ForCausalLM"),
     "FlintForCausalLM": ("vllm.models.flint", "FlintForCausalLM"),
-    "GemmaForCausalLM": ("gemma", "GemmaForCausalLM"),
     "Gemma2ForCausalLM": ("gemma2", "Gemma2ForCausalLM"),
     "Gemma3ForCausalLM": ("gemma3", "Gemma3ForCausalLM"),
     "Rnj1ForCausalLM": ("rnj1", "Rnj1ForCausalLM"),
@@ -210,7 +209,6 @@ _TEXT_GENERATION_MODELS = {
     "Step3TextForCausalLM": ("step3_text", "Step3TextForCausalLM"),
     "Step3p5ForCausalLM": ("step3p5", "Step3p5ForCausalLM"),
     "Step5ForCausalLM": ("vllm.models.step5", "Step5ForCausalLM"),
-    "StableLmForCausalLM": ("stablelm", "StablelmForCausalLM"),
     "SolarForCausalLM": ("solar", "SolarForCausalLM"),
     "TeleChat2ForCausalLM": ("telechat2", "TeleChat2ForCausalLM"),
     "TeleChat3ForCausalLM": ("llama", "LlamaForCausalLM"),
@@ -723,15 +721,12 @@ _SPECULATIVE_DECODING_MODELS = {
     ),
     "DFlashLagunaForCausalLM": ("laguna_dflash", "DFlashLagunaForCausalLM"),
     "Gemma4DSparkModel": ("gemma4_dspark", "Gemma4DSparkForCausalLM"),
-    "PEagleDraftModel": ("llama_eagle3", "Eagle3LlamaForCausalLM"),
-    "PeagleLlamaForCausalLM": ("llama_eagle3", "Eagle3LlamaForCausalLM"),
     "Eagle3LlamaForCausalLM": ("llama_eagle3", "Eagle3LlamaForCausalLM"),
     "Eagle3MiniMaxM2ForCausalLM": ("llama_eagle3", "Eagle3LlamaForCausalLM"),
     "LlamaForCausalLMEagle3": ("llama_eagle3", "Eagle3LlamaForCausalLM"),
     "Eagle3Qwen2_5vlForCausalLM": ("llama_eagle3", "Eagle3LlamaForCausalLM"),
     "Eagle3Qwen3vlForCausalLM": ("llama_eagle3", "Eagle3LlamaForCausalLM"),
     "Eagle3Qwen3ForCausalLM": ("qwen3_eagle3", "Eagle3Qwen3ForCausalLM"),
-    "PeagleQwen3ForCausalLM": ("qwen3_eagle3", "Eagle3Qwen3ForCausalLM"),
     "EagleMistralForCausalLM": ("mistral_eagle", "EagleMistralForCausalLM"),
     "EagleMistralLarge3ForCausalLM": (
         "mistral_large_3_eagle",
@@ -781,6 +776,7 @@ _TRANSFORMERS_SUPPORTED_MODELS = {
     "ArceeForCausalLM": ("transformers", "TransformersForCausalLM"),
     "CwmForCausalLM": ("transformers", "TransformersForCausalLM"),
     "FlexOlmoForCausalLM": ("transformers", "TransformersMoEForCausalLM"),
+    "GemmaForCausalLM": ("transformers", "TransformersForCausalLM"),
     "GlmForCausalLM": ("transformers", "TransformersForCausalLM"),
     "GPTBigCodeForCausalLM": ("transformers", "TransformersForCausalLM"),
     "GPTNeoXForCausalLM": ("transformers", "TransformersForCausalLM"),
@@ -797,6 +793,7 @@ _TRANSFORMERS_SUPPORTED_MODELS = {
     "PhiForCausalLM": ("transformers", "TransformersForCausalLM"),
     "SeedOssForCausalLM": ("transformers", "TransformersForCausalLM"),
     "SmolLM3ForCausalLM": ("transformers", "TransformersForCausalLM"),
+    "StableLmForCausalLM": ("transformers", "TransformersForCausalLM"),
     "Starcoder2ForCausalLM": ("transformers", "TransformersForCausalLM"),
     "VaultGemmaForCausalLM": ("transformers", "TransformersForCausalLM"),
     # Multimodal models
@@ -814,7 +811,7 @@ _TRANSFORMERS_SUPPORTED_MODELS = {
     ),
     "VibeVoiceAsrForConditionalGeneration": (
         "transformers",
-        "TransformersMultiModalForCausalLM",
+        "TransformersMultiModalForTranscription",
     ),
 }
 
@@ -829,6 +826,10 @@ _TRANSFORMERS_BACKEND_MODELS = {
     "TransformersMultiModalForCausalLM": (
         "transformers",
         "TransformersMultiModalForCausalLM",
+    ),
+    "TransformersMultiModalForTranscription": (
+        "transformers",
+        "TransformersMultiModalForTranscription",
     ),
     "TransformersMultiModalMoEForCausalLM": (
         "transformers",

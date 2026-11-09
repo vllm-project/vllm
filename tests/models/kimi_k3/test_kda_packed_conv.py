@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The packed Q|K|V KDA prefill conv against three stock ``causal_conv1d_fn``
+"""The packed Q|K|V KDA prefill conv against three stock `causal_conv1d_fn`
 calls: outputs and updated conv state bit for bit."""
 
 import pytest

@@ -3,9 +3,9 @@
 """CuTe DSL device primitives for Flint's small-M BF16 x NVFP4/BF16 GEMV.
 
 Shared with other Flint kernels; keep signatures stable. A-fragment layout
-(``mma.sync`` m16n8k16, swap-AB: weight rows are the MMA M dimension): lane
-``(g, t) = (lane // 4, lane % 4)`` of k-tile ``j`` within a 64-wide K chunk
-covers ``k = 64c + 16t + 4j + {0..3}`` of rows ``g`` and ``g + 8``.
+(`mma.sync` m16n8k16, swap-AB: weight rows are the MMA M dimension): lane
+`(g, t) = (lane // 4, lane % 4)` of k-tile `j` within a 64-wide K chunk
+covers `k = 64c + 16t + 4j + {0..3}` of rows `g` and `g + 8`.
 """
 
 import cutlass
@@ -338,7 +338,7 @@ def load_rows(
     PREFETCH: cutlass.Constexpr = False,
 ):
     """NVFP4 weight words / scale bytes of rows (row, row + 8) for CPW chunks
-    from ``c_begin`` (ModelOpt weight, 128x4-swizzled scales)."""
+    from `c_begin` (ModelOpt weight, 128x4-swizzled scales)."""
     kb = KC * 32
     wbase = w_base + Int64(row) * kb + c_begin * 32 + t * 8
     row8 = row + 8
@@ -402,7 +402,7 @@ def cta_reduce(
 ):
     """Sum each lane's NA accumulators over the CTA's warps and the cluster's
     CTAs (fixed order) into warp 0 of cluster rank 0. With SPLIT > 1 the
-    caller must have issued ``cluster_arrive_relaxed``."""
+    caller must have issued `cluster_arrive_relaxed`."""
     for i in cutlass.range_constexpr(NA):
         red[warp, i, lane] = acc[i]
     cute.arch.sync_threads()
