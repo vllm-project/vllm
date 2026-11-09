@@ -617,7 +617,6 @@ steps:
   - tests/kernels/moe
   - vllm/model_executor/layers/fused_moe/
   - vllm/model_executor/model_loader/reload/
-  - vllm/models/muse_spark/amd/
   - vllm/models/muse_spark/common/
   - vllm/models/muse_spark/nvidia/
   - vllm/distributed/device_communicators/
@@ -638,7 +637,6 @@ steps:
       - csrc/moe/
       - tests/kernels/moe
       - vllm/model_executor/layers/fused_moe/
-      - vllm/models/muse_spark/amd/
       - vllm/models/muse_spark/common/
       - vllm/models/muse_spark/nvidia/
       - vllm/distributed/device_communicators/
