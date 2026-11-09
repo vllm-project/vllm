@@ -75,14 +75,14 @@ def fused_mm_input_norm_triton(
     """Fused per-channel affine transform for normalisation.
 
     Args:
-        inputs: Input tensor, shape ``(P, C, L)``. A contiguous copy is
+        inputs: Input tensor, shape `(P, C, L)`. A contiguous copy is
             materialized internally if needed.
-        outputs: Output tensor, contiguous and shaped exactly ``(P, C, L)``.
-        weight: Per-channel scale, shape ``(C,)``.
-        bias: Per-channel shift, shape ``(C,)``.
+        outputs: Output tensor, contiguous and shaped exactly `(P, C, L)`.
+        weight: Per-channel scale, shape `(C,)`.
+        bias: Per-channel shift, shape `(C,)`.
 
     Returns:
-        ``outputs``, for chaining.
+        `outputs`, for chaining.
 
     """
     P, C, L = inputs.shape
@@ -132,8 +132,8 @@ class NormParams(NamedTuple):
 
     @property
     def is_identity(self) -> bool:
-        """Whether ``weight = rescale/std`` and ``bias = -mean/std`` are
-        numerically the identity transform (mirrors ``torch.allclose``'s
+        """Whether `weight = rescale/std` and `bias = -mean/std` are
+        numerically the identity transform (mirrors `torch.allclose`'s
         default fp32 tolerances)."""
         return all(
             math.isclose(self.rescale_factor / s, 1.0, rel_tol=1e-5, abs_tol=1e-8)
@@ -143,8 +143,8 @@ class NormParams(NamedTuple):
 
 
 def _load_norm_params(model_config: ModelConfig) -> NormParams:
-    """Resolve the per-channel affine parameters ``(image_mean, image_std,
-    rescale_factor)`` from the processor config."""
+    """Resolve the per-channel affine parameters `(image_mean, image_std,
+    rescale_factor)` from the processor config."""
     config = get_processor_config(model_config.model, revision=model_config.revision)
     config = config.get("image_processor", config)
     if not any(
@@ -190,9 +190,9 @@ _INPUT_LAYOUTS: tuple[str, ...] = get_args(InputLayout)
 def _validate_layout(layout: str) -> InputLayout:
     """Runtime validation for layouts supplied via config/plumbing.
 
-    A ``Literal`` is only checked statically; validating here preserves the
-    fail-fast behaviour of the previous ``InputLayout(layout)`` call so that
-    typos do not silently fall through to the ``PCL`` branch.
+    A `Literal` is only checked statically; validating here preserves the
+    fail-fast behaviour of the previous `InputLayout(layout)` call so that
+    typos do not silently fall through to the `PCL` branch.
     """
     if layout not in _INPUT_LAYOUTS:
         raise ValueError(f"invalid layout {layout!r}; expected one of {_INPUT_LAYOUTS}")
@@ -202,9 +202,9 @@ def _validate_layout(layout: str) -> InputLayout:
 class IdentityInputNorm(nn.Module):
     """Stand-in used when the processor requires no rescale/normalise.
 
-    Not a no-op: with ``mm_device_do_normalize`` enabled, raw ``uint8``
+    Not a no-op: with `mm_device_do_normalize` enabled, raw `uint8`
     pixels travel to the device unprocessed and must be cast to
-    ``visual_dtype`` here.
+    `visual_dtype` here.
     """
 
     @property
@@ -224,29 +224,29 @@ class FusedMMInputNorm(CustomOp):
 
     Dtype semantics:
 
-    * Input dtype — the dtype of the ``pixel_values`` argument to ``forward_*``.
-      It is ``uint8`` when ``mm_device_do_normalize`` is enabled (raw bytes
-      travel to the device unprocessed) and equals ``visual_dtype``
+    * Input dtype — the dtype of the `pixel_values` argument to `forward_*`.
+      It is `uint8` when `mm_device_do_normalize` is enabled (raw bytes
+      travel to the device unprocessed) and equals `visual_dtype`
       otherwise.
-    * Output dtype — the ``visual_dtype`` argument of ``forward_*``. The
+    * Output dtype — the `visual_dtype` argument of `forward_*`. The
       computation itself is always fp32, independent of the output dtype
       (e.g. compute fp32, emit bf16).
 
     Input Layout semantics:
 
-    * ``layout="pcl"``  (default) — ``pixel_values`` is ``(patches, C*L)``,
+    * `layout="pcl"`  (default) — `pixel_values` is `(patches, C*L)`,
       output has the same shape.
-    * ``layout="bchw"`` — ``pixel_values`` is ``(B, C, H, W)``, output has
+    * `layout="bchw"` — `pixel_values` is `(B, C, H, W)`, output has
       the same shape.
 
     Platform dispatch:
 
-    * ``forward_native`` — pure PyTorch eager path, used as the semantic
+    * `forward_native` — pure PyTorch eager path, used as the semantic
       reference and default fallback on all platforms.
-    * ``forward_cuda`` — Triton kernel path for CUDA devices.
-    * ``forward_xpu`` — custom XPU kernel path.
-    * ``forward_oot`` — out-of-tree platform override entry point; falls back
-      to ``forward_native`` unless a plugin overrides it.
+    * `forward_cuda` — Triton kernel path for CUDA devices.
+    * `forward_xpu` — custom XPU kernel path.
+    * `forward_oot` — out-of-tree platform override entry point; falls back
+      to `forward_native` unless a plugin overrides it.
     """
 
     def __init__(
@@ -309,14 +309,14 @@ class FusedMMInputNorm(CustomOp):
     def _unpack(
         self, pixel_values: torch.Tensor
     ) -> tuple[torch.Tensor, tuple[int, ...]]:
-        """Normalise either layout to ``(P, C, L)`` plus the output shape.
+        """Normalise either layout to `(P, C, L)` plus the output shape.
 
-        Returns a ``(x3, out_shape)`` pair where ``x3`` is a
-        ``(P, C, L)`` view of the input and ``out_shape`` is the shape
-        the final output must have. The ``reshape`` below is a pure view
+        Returns a `(x3, out_shape)` pair where `x3` is a
+        `(P, C, L)` view of the input and `out_shape` is the shape
+        the final output must have. The `reshape` below is a pure view
         as long as the caller's tensor is contiguous; the platform
-        forward_* methods call ``.contiguous()`` inside
-        ``fused_mm_input_norm_triton`` when needed.
+        forward_* methods call `.contiguous()` inside
+        `fused_mm_input_norm_triton` when needed.
         """
         if self.layout == "bchw":
             assert pixel_values.ndim == 4, (
@@ -397,9 +397,9 @@ def build_mm_input_norm(
 ) -> nn.Module:
     """Build the input normalisation module for a model.
 
-    Returns an ``IdentityInputNorm`` when device-side normalisation is
+    Returns an `IdentityInputNorm` when device-side normalisation is
     disabled or the processor's rescale/normalise is numerically the identity
-    transform; otherwise a ``FusedMMInputNorm`` built from the processor's
+    transform; otherwise a `FusedMMInputNorm` built from the processor's
     parameters."""
     mm_config = getattr(model_config, "multimodal_config", None)
     if not getattr(mm_config, "mm_device_do_normalize", False):

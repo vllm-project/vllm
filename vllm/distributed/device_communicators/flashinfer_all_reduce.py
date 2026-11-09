@@ -144,7 +144,7 @@ def _resolve_fi_ar_backend(group: ProcessGroup) -> tuple[str | None, bool]:
     """Resolve the flashinfer allreduce backend for the current setup.
 
     Returns:
-        A ``(backend, allow_trtllm_fallback)`` tuple. ``backend`` is ``None``
+        A `(backend, allow_trtllm_fallback)` tuple. `backend` is `None`
         when automatic selection has no supported backend for the process
         group.
 
@@ -201,18 +201,23 @@ def get_fi_ar_workspace(
     hidden_dim: int,
     dtype: torch.dtype,
     group: ProcessGroup,
+    resolved_backend: tuple[str | None, bool] | None = None,
 ):
     """Return the allreduce workspace for non-quant patterns, initializing if needed.
 
     Used by AllReduceFusionPass (non-quant patterns) and FlashInferAllReduce
     for standalone allreduce. Backend is controlled by
-    VLLM_FLASHINFER_ALLREDUCE_BACKEND env var.
+    VLLM_FLASHINFER_ALLREDUCE_BACKEND env var. `resolved_backend` is a
+    `_resolve_fi_ar_backend` result taken while the vLLM config was current;
+    lazy creation can run outside it.
     """
     global _fi_ar_workspace, _fi_ar_workspace_failed
     if _fi_ar_workspace is not None or _fi_ar_workspace_failed:
         return _fi_ar_workspace
 
-    backend, allow_trtllm_fallback = _resolve_fi_ar_backend(group)
+    backend, allow_trtllm_fallback = (
+        _resolve_fi_ar_backend(group) if resolved_backend is None else resolved_backend
+    )
 
     if backend is None:
         return None
@@ -274,7 +279,7 @@ def get_fi_ar_quant_workspace(
     """Return the allreduce workspace for quant patterns, initializing if needed.
 
     Backend is controlled by VLLM_FLASHINFER_ALLREDUCE_BACKEND env var, matching
-    non-quant fusion. With ``auto`` this prefers mnnvl and falls back to trtllm
+    non-quant fusion. With `auto` this prefers mnnvl and falls back to trtllm
     only on single-node topologies where mnnvl multicast is unavailable.
     """
     global _fi_ar_quant_workspace, _fi_ar_quant_workspace_failed
@@ -444,7 +449,8 @@ class FlashInferAllReduce:
                 self.world_size,
             )
             return
-        backend, _ = _resolve_fi_ar_backend(self.group)
+        self.resolved_backend = _resolve_fi_ar_backend(self.group)
+        backend = self.resolved_backend[0]
         if backend is None:
             logger.info(
                 "FlashInfer All Reduce is disabled because no supported backend "
@@ -476,6 +482,7 @@ class FlashInferAllReduce:
             hidden_dim=hidden_dim,
             dtype=dtype,
             group=self.group,
+            resolved_backend=self.resolved_backend,
         )
         if workspace is None:
             self.disabled = True

@@ -3,8 +3,8 @@
 """Unit tests for MoRIIOConnectorScheduler.{map,unmap}_request_id.
 
 vLLM's input_processor mutates a request_id after the connector has stored it
-(e.g. ``cmpl-abc-0`` -> ``cmpl-abc-0-956053a4``), so an exact-match unmap can
-miss. These tests cover the stable-``transfer_id`` fallback that handles that
+(e.g. `cmpl-abc-0` -> `cmpl-abc-0-956053a4`), so an exact-match unmap can
+miss. These tests cover the stable-`transfer_id` fallback that handles that
 case (and the clean exact-match and miss paths).
 
 The map/unmap methods touch only the two id<->id dicts, so we bind them to a

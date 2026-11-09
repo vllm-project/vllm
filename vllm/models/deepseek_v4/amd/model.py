@@ -29,7 +29,7 @@ from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
-    derive_aiter_quant_method,
+    derive_aiter_quant_type,
     mxfp4_w4a16_extra_kwargs,
     rocm_aiter_fused_experts,
 )
@@ -75,7 +75,11 @@ from vllm.model_executor.models.utils import (
     make_layers,
     maybe_prefix,
 )
-from vllm.model_executor.utils import refill_derived
+from vllm.model_executor.utils import (
+    is_weights_pre_processed,
+    refill_derived,
+    replace_parameter,
+)
 from vllm.models.deepseek_v4.amd.mega_moe import (
     DeepseekV4AiterMegaMoEExperts,
     finalize_mega_moe_weights,
@@ -157,7 +161,6 @@ class DeepseekV4MLP(nn.Module):
             _upcast_e8m0_to_fp32,
             get_fp8_block_weight_scale,
         )
-        from vllm.model_executor.utils import replace_parameter
 
         w = getattr(self.gate_up_proj, "weight", None)
         ws = get_fp8_block_weight_scale(self.gate_up_proj)
@@ -169,13 +172,18 @@ class DeepseekV4MLP(nn.Module):
         if ws.dtype == torch.float8_e8m0fnu:
             ws = _upcast_e8m0_to_fp32(ws).contiguous()
         # Skip when the linear kernel already B-preshuffled this weight.
-        if not getattr(self.gate_up_proj, "aiter_bpreshuffled", False):
+        if not (
+            getattr(self.gate_up_proj, "aiter_bpreshuffled", False)
+            or is_weights_pre_processed()
+        ):
             replace_parameter(
                 self.gate_up_proj,
                 "weight",
                 rocm_aiter_ops.shuffle_weight(w.data, layout=(16, 16)),
             )
-        self._gateup_scale = ws
+        # A plain tensor (the scale Parameter would register a second time on
+        # this module), refilled in place on reloads for captured CUDA graphs.
+        refill_derived(self, "_gateup_scale", ws.detach())
 
     def forward(self, x):
         if self._gateup_scale is not None and x.dim() == 2:
@@ -504,7 +512,7 @@ class DeepseekV4HeterogeneousSharedRoutedExperts(RoutedExperts):
                 activation=self.activation,
                 expert_mask=self.expert_map,
                 quant_config=quant_config,
-                quant_method=derive_aiter_quant_method(quant_config),
+                quant_type=derive_aiter_quant_type(quant_config),
                 output_dtype=x.dtype,
                 moe_sorting_dispatch_policy=(rocm_aiter_ops.get_moe_dispatch_policy()),
                 shared_w1=self.shared_w1,
@@ -533,7 +541,7 @@ class DeepseekV4HeterogeneousSharedRoutedExperts(RoutedExperts):
             activation=self.activation,
             expert_mask=self.expert_map,
             quant_config=self._routed_quant_config,
-            quant_method=derive_aiter_quant_method(self._routed_quant_config),
+            quant_type=derive_aiter_quant_type(self._routed_quant_config),
             output_dtype=x.dtype,
             moe_sorting_dispatch_policy=rocm_aiter_ops.get_moe_dispatch_policy(),
             **mxfp4_w4a16_extra_kwargs(self._routed_quant_config, self.moe_config),
@@ -957,7 +965,7 @@ class DeepseekV4DecoderLayer(nn.Module):
     ):
         """Reduce HC residual streams to the next sub-layer input.
 
-        When ``norm_weight`` is set, RMSNorm is fused into the pre kernel.
+        When `norm_weight` is set, RMSNorm is fused into the pre kernel.
         """
         post_mix, res_mix, layer_input = self.mhc_pre(
             residual=x,
@@ -1451,8 +1459,8 @@ def _redirect_shared_expert_name(
     """Route a DSV4 shared-expert checkpoint name to its final parameter name.
 
     Fused layers go to the appended routed-expert slot. When any layer is fused
-    the weight mapper leaves the checkpoint ``.w2`` names untouched, so
-    non-fused layers still need the native ``down_proj`` parameter name.
+    the weight mapper leaves the checkpoint `.w2` names untouched, so
+    non-fused layers still need the native `down_proj` parameter name.
     """
     if ".ffn.shared_experts.w" not in name:
         return name
