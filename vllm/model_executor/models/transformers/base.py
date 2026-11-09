@@ -178,12 +178,12 @@ class Base(
 
         # LoRA matches embeddings by the last part of their name, which varies by model
         input_embeddings = set(self.model.get_input_embeddings().modules())
-        input_embedding_modules = {
+        embedding_modules = {
             name.rpartition(".")[2]: "input_embeddings"
             for name, module in self.model.named_modules()
             if module in input_embeddings and isinstance(module, nn.Embedding)
         }
-        self.embedding_modules = self.embedding_modules | input_embedding_modules
+        self.embedding_modules = self.embedding_modules | embedding_modules
 
         # Create weight name to module qualname mapper
         self._create_hf_to_vllm_mapper()
