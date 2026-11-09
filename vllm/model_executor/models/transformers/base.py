@@ -164,6 +164,8 @@ class Base(
         """Mapping from layer index to layer name for Eagle3."""
         self._output_aux_hidden_states_kwargs: dict[str, bool] = {}
         """Kwargs to pass to model forward for Eagle3 aux hidden states."""
+        self._aux_embeddings = False
+        """Whether layer 0 (the input embeddings) is an Eagle3 aux hidden state."""
 
         if self.quant_config:
             quant_method_name = self.quant_config.get_name()
@@ -809,6 +811,13 @@ class Base(
         if input_ids is not None and inputs_embeds is not None:
             input_ids = None
 
+        aux_embeddings = None
+        if self._aux_embeddings and self.pp_group.is_first_rank:
+            if inputs_embeds is None:
+                inputs_embeds = self.embed_input_ids(input_ids)
+                input_ids = None
+            aux_embeddings = inputs_embeds[0, ...]
+
         outputs = self.model(
             input_ids=input_ids,
             inputs_embeds=inputs_embeds,
@@ -825,6 +834,8 @@ class Base(
         if self._output_aux_hidden_states_kwargs:
             # Layers on other PP ranks capture nothing
             aux_hidden_states = [x[0][0, ...] for x in outputs[1:] if x]
+        if aux_embeddings is not None:
+            aux_hidden_states.insert(0, aux_embeddings)
 
         if not self.pp_group.is_last_rank:
             return IntermediateTensors(
@@ -869,7 +880,11 @@ class Base(
 
         self._set_aux_hidden_state_layers(layers)
         target_class = self._target_class
+        # The input to layer 0 is captured in `forward`
+        self._aux_embeddings = 0 in self.aux_hidden_state_layers
         for layer in self.aux_hidden_state_layers:
+            if layer == 0:
+                continue
             # layer - 1 because we want the input to the layer
             layer_name = self._layer_names[layer - 1]
             layer_key = f"aux_hidden_state_{layer}"
