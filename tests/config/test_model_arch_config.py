@@ -305,6 +305,29 @@ def test_modelopt_mixed_precision_config_is_normalized(legacy, quant_algo):
     }
 
 
+@pytest.mark.parametrize("weight_algo", [None, "MIXED_PRECISION"])
+@pytest.mark.parametrize("kv_algo", ["MIXED_PRECISION", "FP8", "NVFP4"])
+def test_modelopt_layerwise_kv_config_is_normalized(weight_algo, kv_algo):
+    quantization_config = {
+        "producer": {"name": "modelopt"},
+        "quantization": {
+            "quant_algo": weight_algo,
+            "kv_cache_quant_algo": kv_algo,
+            "kv_cache_schema_version": 1,
+            "kv_cache_quantized_layers": {
+                "model.layers.0.self_attn": {"quant_algo": "FP8"},
+                "model.layers.1.self_attn": {"quant_algo": "NVFP4"},
+            },
+        },
+    }
+    hf_config = PreTrainedConfig(quantization_config=quantization_config)
+
+    convertor = ModelArchConfigConvertorBase(hf_config, hf_config)
+
+    assert convertor.get_quantization_config()["quant_method"] == "modelopt_mixed"
+    assert quantization_config["quantization"]["quant_algo"] == weight_algo
+
+
 def _layer(**overrides) -> ModelArchitectureConfig:
     fields = dict(
         architectures=["X"],
