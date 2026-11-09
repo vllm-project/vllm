@@ -754,22 +754,23 @@ class BaseNanoNemotronVLProcessor(ABC):
         max_model_len: int,
         max_num_tiles: int | None = None,
         do_cpu_normalize: bool = True,
-        device_resize: bool | None = None,
+        device_resize: bool = False,
         **kwargs,
     ) -> None:
         super().__init__()
 
-        if device_resize and do_cpu_normalize:
-            raise ValueError("device_resize requires mm_device_do_normalize=True")
-        if device_resize is None:
-            # On wherever it can run; device_resize=False opts out.
-            device_resize = not do_cpu_normalize and _cvcuda_available()
-            if device_resize:
-                logger.info_once(
-                    "Resizing Nemotron VL images and video frames on the GPU with "
-                    "CV-CUDA. To resize on the CPU, set "
-                    "--mm-processor-kwargs '{\"device_resize\": false}'."
+        if device_resize:
+            if do_cpu_normalize:
+                raise ValueError("device_resize requires mm_device_do_normalize=True")
+            if not _cvcuda_available():
+                raise ValueError(
+                    "device_resize requires CUDA and CV-CUDA: install "
+                    "cvcuda-cu13 (CUDA 13) or cvcuda-cu12 (CUDA 12)"
                 )
+            logger.info_once(
+                "Resizing Nemotron VL images and video frames on the GPU with "
+                "CV-CUDA (device_resize)."
+            )
         # With device_resize, dynamic-resolution images and video frames are
         # sent to the model as decoded uint8 RGB at their source resolution and
         # resized on its device with CV-CUDA (`cvcuda_bicubic_resize`).
@@ -979,7 +980,7 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
         use_audio_in_video: bool = False,
         do_rescale: bool = True,
         do_normalize: bool = True,
-        device_resize: bool | None = None,
+        device_resize: bool = False,
     ) -> None:
         if do_rescale != do_normalize:
             raise ValueError(

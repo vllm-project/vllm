@@ -113,13 +113,12 @@ GPU-side fusion is controlled by `multimodal_config.mm_device_do_normalize`:
 
 #### Resizing on the Device (Nemotron VL)
 
-With `mm_device_do_normalize`, most models still resize images and video frames on the CPU, in `uint8`. Nemotron VL models (`NemotronH_Nano_VL_V2` and the Nemotron Omni architectures above) resize them on the GPU with [CV-CUDA](https://github.com/CVCUDA/CV-CUDA) by default, on CUDA when CV-CUDA is installed (`cvcuda-cu13` or `cvcuda-cu12`, installed with CUDA builds).
-
-The API server then sends the decoded `uint8` pixels at their source resolution. On the GPU, CV-CUDA resizes them (bicubic, antialiased, `uint8` in and out) and reformats them to NCHW; `FusedMMInputNorm` then casts, rescales and normalizes them exactly as it does for the CPU path. This covers dynamic-resolution images and video frames. The pixels are uploaded on a stream of their own, so the upload does not wait for the steps already queued on the model's stream; the resize kernels are queued on the model's stream after it. CV-CUDA's scratch buffer is capped at 512 MiB and reserved during the startup memory profile.
-
-To resize on the CPU instead:
+With `mm_device_do_normalize`, most models still resize images and video frames on the CPU, in `uint8`. Nemotron VL models (`NemotronH_Nano_VL_V2` and the Nemotron Omni architectures above) can resize them on the GPU instead, with [CV-CUDA](https://github.com/CVCUDA/CV-CUDA). This is opt-in and needs CV-CUDA, which vLLM does not install:
 
 ```bash
+pip install cvcuda-cu13==0.19.0  # or cvcuda-cu12==0.19.0 for CUDA 12
 vllm serve nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-NVFP4 \
-    --trust-remote-code --mm-processor-kwargs '{"device_resize": false}'
+    --trust-remote-code --mm-processor-kwargs '{"device_resize": true}'
 ```
+
+The API server then sends the decoded `uint8` pixels at their source resolution. On the GPU, CV-CUDA resizes them (bicubic, antialiased, `uint8` in and out) and reformats them to NCHW; `FusedMMInputNorm` then casts, rescales and normalizes them exactly as it does for the CPU path. This covers dynamic-resolution images and video frames. The pixels are uploaded on a stream of their own, so the upload does not wait for the steps already queued on the model's stream; the resize kernels are queued on the model's stream after it. CV-CUDA's scratch buffer is capped at 512 MiB and reserved during the startup memory profile.

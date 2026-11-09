@@ -262,17 +262,17 @@ def _make_processor(**kwargs) -> NanoNemotronVLProcessor:
 @pytest.mark.parametrize(
     ("device_normalize", "cvcuda_available", "device_resize", "expected"),
     [
-        (True, True, None, True),  # on by default
-        (True, True, False, False),  # opted out
-        (True, False, None, False),  # not CUDA, or no CV-CUDA
-        (False, True, None, False),  # normalizing on the CPU
+        (True, True, None, False),  # off by default
+        (True, True, True, True),  # opted in
+        (True, False, True, "requires CUDA and CV-CUDA"),  # not CUDA, or no CV-CUDA
+        (False, True, True, "requires mm_device_do_normalize"),
     ],
 )
-def test_nemotron_device_resize_is_on_by_default_where_it_can_run(
+def test_nemotron_device_resize_is_opt_in(
     device_normalize: bool,
     cvcuda_available: bool,
     device_resize: bool | None,
-    expected: bool,
+    expected: bool | str,
     monkeypatch: pytest.MonkeyPatch,
 ):
     monkeypatch.setattr(
@@ -283,7 +283,11 @@ def test_nemotron_device_resize_is_on_by_default_where_it_can_run(
     ).merge_mm_processor_kwargs({})
     if device_resize is not None:
         kwargs["device_resize"] = device_resize
-    assert _make_processor(**kwargs).device_resize is expected
+    if isinstance(expected, str):
+        with pytest.raises(ValueError, match=expected):
+            _make_processor(**kwargs)
+    else:
+        assert _make_processor(**kwargs).device_resize is expected
 
 
 def _preprocess(processor: NanoNemotronVLProcessor, modality: str, sources: list):
