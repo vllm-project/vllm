@@ -256,6 +256,36 @@ class TestMaybeRemapKvScaleName:
         )
         assert result is None
 
+    @pytest.mark.parametrize(
+        "name,expected",
+        [
+            # llm-compressor, on the HF attention module
+            ("self_attn.k_scale", "k_scale"),
+            ("self_attn.v_scale", "v_scale"),
+            ("self_attn.q_scale", "q_scale"),
+            # ModelOpt (e.g. nvidia/Kimi-K2.5-NVFP4)
+            ("self_attn.k_proj.k_scale", "k_scale"),
+            ("self_attn.v_proj.v_scale", "v_scale"),
+            # deprecated fused kv_scale
+            ("self_attn.kv_scale", "k_scale"),
+        ],
+    )
+    def test_mla_after_cache_scale_mapper(self, name, expected):
+        """DeepSeek-style MLA keeps its scales on `self_attn.mla_attn.mla_attn`.
+        `AutoWeightsLoader` applies the quant config's cache-scale mapper
+        first, which rewrites every format above to `self_attn.attn.*`; the
+        model's remap must still reach the MLA layer."""
+        from vllm.model_executor.layers.quantization.base_config import (
+            QuantizationConfig,
+        )
+
+        prefix = "model.layers.0."
+        mla = prefix + "self_attn.mla_attn.mla_attn."
+        params = {mla + s: None for s in ("k_scale", "v_scale", "q_scale")}
+        mapped = QuantizationConfig.get_cache_scale_mapper()._map_name(prefix + name)
+        assert mapped is not None
+        assert maybe_remap_kv_scale_name(mapped, params) == mla + expected
+
 
 def test_checkpoint_weight_mapper_discards_serialized_g_idx():
     from vllm.model_executor.layers.quantization.base_config import (

@@ -1851,9 +1851,15 @@ def maybe_remap_kv_scale_name(name: str, params_dict: dict) -> str | None:
         # .self_attn.attn.{k,v}_scale
         (r"\.self_attn\.([kv])_cache\.scale$", r".self_attn.attn.\1_scale"),
         # Default format: .{k,v}_scale -> .attn.{k,v}_scale
-        (r"\.([qkv])_scale$", r".attn.\1_scale"),
-        (r"\.([qkv])_zero_point$", r".attn.\1_zero_point"),
+        (r"\.([qkv])_scale$", rf".{attn_str}.\1_scale"),
+        (r"\.([qkv])_zero_point$", rf".{attn_str}.\1_zero_point"),
     ]
+    if attn_str != "attn":
+        # The quant config's cache-scale mapper has already rewritten MLA
+        # scale names to `.attn.{q,k,v}_scale`; move them to the MLA layer.
+        scale_mapping_patterns.insert(
+            0, (r"\.attn\.([qkv])_(scale|zero_point)$", rf".{attn_str}.\1_\2")
+        )
 
     # Check if name ends with k_scale or v_scale
     if name.endswith(
