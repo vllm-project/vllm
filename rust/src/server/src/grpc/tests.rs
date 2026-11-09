@@ -53,6 +53,7 @@ use vllm_engine_core_client::test_utils::{
 };
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig, EngineId, TransportMode};
 use vllm_llm::EngineCoreLlm;
+use vllm_metrics::METRICS;
 use vllm_text::tokenizer::DynTokenizer;
 use vllm_text::{Prompt, TextBackend};
 use vllm_tokenizer::test_utils::{PanickingTokenizer, TestTokenizer};
@@ -442,7 +443,7 @@ where
     let llm = EngineCoreLlm::new(client);
     let engine_health = EngineHealth::subscribe(&llm);
 
-    let chat = ChatLlm::from_shared_backend(llm, backend);
+    let chat = ChatLlm::from_shared_backend(llm, backend).with_served_model_name("test-model");
     let state = Arc::new(AppState::new(vec!["test-model".to_string()], chat));
     (
         InferenceServer::new(InferenceServiceImpl::new(state.clone()))
@@ -682,6 +683,7 @@ async fn h2_unresponsive_peer_closed_within(addr: &str, wait: Duration) -> bool 
 async fn unary_generate_returns_collected_text() {
     let (mut client, server_task, engine_task) =
         grpc_test_server(b"engine-grpc-unary", default_stream_output_specs()).await;
+    let before = render_duration_count();
 
     let response = client
         .generate(pb::GenerateRequest {
@@ -717,8 +719,23 @@ async fn unary_generate_returns_collected_text() {
     let prompt = response.prompt_info.expect("prompt_info present");
     assert_eq!(prompt.num_prompt_tokens, 5); // "hello" = 5 bytes
 
+    // The text facade records the render, as for `/v1/completions`.
+    assert_eq!(render_duration_count() - before, 1.0);
+
     engine_task.await.expect("mock engine task");
     server_task.abort();
+}
+
+/// `vllm:request_render_duration_seconds` observations of `completion`
+/// renders for the test model.
+fn render_duration_count() -> f64 {
+    let rendered = METRICS.render().expect("render metrics");
+    let prefix = "vllm:request_render_duration_seconds_count{model_name=\"test-model\",\
+                  request_type=\"completion\"} ";
+    rendered
+        .lines()
+        .find_map(|line| line.strip_prefix(prefix))
+        .map_or(0.0, |value| value.parse().expect("numeric sample"))
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2425,6 +2442,7 @@ async fn control_sleep_rejects_unknown_level() {
         .sleep(pb::SleepRequest {
             level: Some(3),
             mode: pb::PauseMode::Unspecified.into(),
+            reset_connector: None,
         })
         .await
         .expect_err("level 3 should be rejected");

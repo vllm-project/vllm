@@ -332,6 +332,9 @@ class StandaloneCPUModelRunner(LoRAModelRunnerMixin):
     def get_draft_model(self) -> torch.nn.Module | None:
         return None
 
+    def on_target_weights_replaced(self) -> None:
+        """Called by the worker after a weight transfer; nothing derives from them."""
+
     def reload_weights(
         self,
         weights_iterator: Iterable[tuple[str, torch.Tensor]] | None = None,
@@ -344,7 +347,6 @@ class StandaloneCPUModelRunner(LoRAModelRunnerMixin):
         reload_weights(
             vllm_config, model, weights_iterator, weights_path, is_checkpoint_format
         )
-        self.reset_lora_state()
         self.reset_encoder_cache()
         self.reset_mm_cache()
 
@@ -459,6 +461,7 @@ class StandaloneCPUModelRunner(LoRAModelRunnerMixin):
         uniform_decode: bool = False,
         is_profile: bool = False,
         randomize_inputs: bool = False,
+        num_active_loras: int | None = None,
     ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
         if skip_attn and not is_profile:
             raise ValueError(
@@ -500,13 +503,16 @@ class StandaloneCPUModelRunner(LoRAModelRunnerMixin):
             assert self.intermediate_tensors is not None
             intermediate_tensors = self.intermediate_tensors[:num_tokens]
 
-        max_loras = self.lora_config.max_loras if self.lora_config is not None else 0
+        if num_active_loras is None:
+            num_active_loras = (
+                self.lora_config.max_loras if self.lora_config is not None else 0
+            )
         with self.maybe_dummy_run_with_lora(
             self.lora_config,
             num_scheduled_tokens=np.array(num_tokens_per_request, dtype=np.int32),
             num_sampled_tokens=None,
             remove_lora=True,
-            num_active_loras=max_loras,
+            num_active_loras=num_active_loras,
         ):
             # Execute the model.
             self.execute_model(

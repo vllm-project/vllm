@@ -379,6 +379,13 @@ class AttentionBackend(ABC):
         return None
 
     @classmethod
+    def writes_kv_cache_from_block_table(cls) -> bool:
+        """Whether the layers write even a token (uncompressed) KV cache at
+        slots derived from their metadata's block table, as compressed caches
+        are written. A packed group can then split it into kernel blocks."""
+        return False
+
+    @classmethod
     def is_ssm(cls) -> bool:
         return False
 
@@ -470,7 +477,7 @@ class CommonAttentionMetadata:
     Reference Sliding Window Attention (R-SWA). Tokens with logical index below
     this stay globally visible; later (generated) tokens additionally see a
     fixed sliding window. None disables R-SWA. The attention backend copies this
-    into its own persistent buffer and reads ``rswa_window`` from model config."""
+    into its own persistent buffer and reads `rswa_window` from model config."""
 
     _num_computed_tokens_cache: torch.Tensor | None = None
     _token_to_req_indices_cache: torch.Tensor | None = None
@@ -729,7 +736,7 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
         Speculators can record this call inside their draft decode CUDA graphs,
         so it runs once at capture and never again in Python. Implementations
         must emit only capture-safe operations and write results into persistent
-        tensors that ``metadata`` already references.
+        tensors that `metadata` already references.
         """
         raise NotImplementedError
 
