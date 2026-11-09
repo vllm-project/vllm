@@ -1286,8 +1286,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # How a PP stage sends its intermediate tensors to the next stage.
     # "copy_engine" uses copy engines instead of NCCL kernels: CUDA copy engines
     # over NVLink, or SDMA engines over xGMI on ROCm gfx950. It needs PCP=1 and
-    # each PP chain's GPUs on one node, fully connected, and fails startup
-    # without. "auto" uses copy engines when every rank can, and NCCL
+    # each PP chain's GPUs directly connected: on one node, or with CUDA across
+    # nodes in one multi-node NVLink domain with an IMEX channel. It fails
+    # startup without. "auto" uses copy engines when every rank can, and NCCL
     # otherwise; on ROCm it keeps NCCL.
     "VLLM_PP_TRANSPORT": env_with_choices(
         "VLLM_PP_TRANSPORT", "auto", ["auto", "nccl", "copy_engine"]
