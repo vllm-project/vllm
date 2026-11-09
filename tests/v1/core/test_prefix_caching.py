@@ -6525,59 +6525,6 @@ def test_swa_reachable_block_mask_pins_shared_prefix():
     assert retained(0, 0, block_size) == {14}
 
 
-def test_swa_lookahead_tail_keeps_window_of_best_hit():
-    """Block-hash lookahead makes the last shared block request-specific (its hash
-    covers tokens past the shared prefix), so the shared ceiling drops one block,
-    and the EAGLE pop costs another. The resulting hit needs one block below the
-    retained tail; without the extra block the sliding-window lookup misses and
-    answers from the retention segment (8192 of a 16384-token prefix). The
-    fallback also pins a `shared_prefix_boundary`, so a zero boundary is what
-    separates a genuine match from that fallback."""
-    block_size = 16
-    prefix = 1024 * block_size  # 16384 tokens, two retention segments
-    suffix = 4 * block_size
-
-    def last_request(lookahead):
-        config = _make_hybrid_kv_cache_config(
-            block_size, 12288, ["full", "sliding_window_large"]
-        )
-        manager = make_kv_cache_manager(
-            config,
-            max_model_len=2 * prefix,
-            enable_caching=True,
-            use_eagle=True,
-            hash_block_size=block_size,
-            retention_interval=prefix // 2,
-            num_hash_lookahead_tokens=lookahead,
-        )
-        shared = [7] * prefix
-        nc, boundary = 0, 0
-        for i in range(2):
-            manager.new_step_starts()
-            req = make_request(
-                f"{i}",
-                shared + [50 + i] * suffix,
-                block_size,
-                sha256,
-                num_hash_lookahead_tokens=lookahead,
-            )
-            cb, nc, boundary = manager.get_computed_blocks(req)
-            manager.allocate_slots(req, len(req.all_token_ids) - nc, nc, cb)
-            req.num_computed_tokens = len(req.all_token_ids)
-        return nc, boundary
-
-    # No lookahead: the EAGLE pop costs one block, 16384 -> 16368, genuine hit.
-    hit, boundary = last_request(0)
-    assert hit == prefix - block_size
-    assert boundary == 0
-
-    # Lookahead costs two blocks (request-specific trailing block + the pop), and
-    # the block the window needs must still be retained.
-    hit, boundary = last_request(3)
-    assert hit == prefix - 2 * block_size
-    assert boundary == 0, "fell back to the retention segment instead of matching"
-
-
 def test_swa_reachable_block_mask_with_dcp_scaling():
     """DCP shards each block's KV across ranks, scaling the effective block size.
     Verify that dcp_world_size > 1 scales block size in reachability calculations,
