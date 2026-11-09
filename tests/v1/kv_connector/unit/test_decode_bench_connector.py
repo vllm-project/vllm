@@ -195,7 +195,7 @@ def test_decode_bench_connector_basic():
     assert len(block_ids) == expected_num_blocks
 
     # Verify KV caches were filled with constant value
-    for layer_name, kv_cache in runner.kv_caches.items():
+    for kv_cache in runner.kv_caches.values():
         for block_id in block_ids:
             # Check that the block was filled
             block_data = kv_cache[block_id]
@@ -714,7 +714,7 @@ def test_decode_bench_connector_large_context():
     assert len(block_ids) == expected_num_blocks
 
     # Verify blocks were filled
-    for layer_name, kv_cache in runner.kv_caches.items():
+    for kv_cache in runner.kv_caches.values():
         for block_id in block_ids:
             block_data = kv_cache[block_id]
             assert torch.allclose(block_data, torch.tensor(0.015))
@@ -834,9 +834,9 @@ def test_decode_bench_connector_concurrent_requests():
     assert len(block_ids_per_group3[0]) == 1  # 1 block
 
     # Verify all blocks are filled in KV cache
-    for req_id, (block_ids_per_group, _) in metadata.reqs_to_fill.items():
+    for block_ids_per_group, _ in metadata.reqs_to_fill.values():
         block_ids = block_ids_per_group[0]
-        for layer_name, kv_cache in runner.kv_caches.items():
+        for kv_cache in runner.kv_caches.values():
             for block_id in block_ids:
                 block_data = kv_cache[block_id]
                 assert torch.allclose(block_data, torch.tensor(0.015))

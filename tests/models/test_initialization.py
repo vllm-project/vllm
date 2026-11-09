@@ -77,11 +77,11 @@ def cleanup_gpu_memory_between_tests() -> Generator[None, None, None]:
     """Reclaim GPU memory left over by each test's forked subprocess.
 
     These tests are known to leave behind GPU memory (see the comment at
-    ``gpu_memory_utilization=0.80`` below). Each parametrized case builds an
+    `gpu_memory_utilization=0.80` below). Each parametrized case builds an
     LLM in a forked subprocess whose VRAM is only reclaimed asynchronously
     when the subprocess exits, so the leftovers can OOM a later test in this
     module (observed with the heavier multimodal archs, e.g.
-    InternVLChatModel). Mirrors ``clean_gpu_memory_between_tests`` in the
+    InternVLChatModel). Mirrors `clean_gpu_memory_between_tests` in the
     top-level conftest, but unconditionally for this module.
     """
     yield
@@ -283,12 +283,6 @@ def test_can_initialize_large_subset(model_arch: str, monkeypatch: pytest.Monkey
     This test covers the complement of the tests covered in the "small subset"
     test.
     """
-    if model_arch in ("HYV4ForCausalLM", "HYV4MTPModel"):
-        from vllm.platforms import current_platform
-
-        if current_platform.is_rocm():
-            pytest.skip("HY V4 ROCm initialization requires #54405")
-
     can_initialize(model_arch, monkeypatch, HF_EXAMPLE_MODELS)
 
 
