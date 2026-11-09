@@ -16,6 +16,8 @@ _HF_MODALITY_PROCESSOR_KWARGS = {
     "audio": "audio_kwargs",
 }
 
+_MM_UUID_PREFIX = "uuid:"
+
 
 @dataclass
 class ProcessorInputs:
@@ -92,17 +94,20 @@ class ProcessorInputs:
                     # NOTE: use provided hash string to hash with kwargs
                     # if available for better performance.
                     item = uuid_item if uuid_item is not None else item
+                    mm_hash = hasher.hash_kwargs(
+                        hash_algorithm,
+                        model_id=model_id,
+                        **{modality: item},
+                        **hash_factors,
+                    )
                     hashes.append(
-                        hasher.hash_kwargs(
-                            hash_algorithm,
-                            model_id=model_id,
-                            **{modality: item},
-                            **hash_factors,
-                        )
+                        f"{_MM_UUID_PREFIX}{mm_hash}"
+                        if uuid_item is not None
+                        else mm_hash
                     )
                 else:
                     # If there are no extra kwargs, use the client-provided UUID.
-                    hashes.append(uuid_item)
+                    hashes.append(f"{_MM_UUID_PREFIX}{uuid_item}")
 
             mm_hashes[modality] = hashes
 

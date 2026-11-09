@@ -1527,7 +1527,7 @@ def test_processor_inputs_hashes_partial_uuids():
 
     assert inputs.get_mm_hashes("test-model", "blake3") == {
         "image": [
-            "image-uuid",
+            "uuid:image-uuid",
             MultiModalHasher.hash_kwargs(
                 "blake3", model_id="test-model", image=images[1]
             ),
@@ -1582,7 +1582,27 @@ def test_processor_inputs_hashes_ignore_unrelated_kwargs():
         hf_processor_mm_kwargs={"videos_kwargs": {"size": {"longest_edge": 448}}},
     )
 
-    assert inputs.get_mm_hashes("test-model", "blake3") == {"image": ["image-uuid"]}
+    assert inputs.get_mm_hashes("test-model", "blake3") == {
+        "image": ["uuid:image-uuid"]
+    }
+
+
+def test_processor_inputs_hashes_separate_uuid_and_content_domains():
+    """Caller UUIDs must not alias content-addressed cache keys."""
+    image = random_image(np.random.RandomState(0), min_wh=8, max_wh=9)
+    mm_data_items = MultiModalDataParser().parse_mm_data({"image": [image]})
+
+    content_hash = ProcessorInputs(
+        prompt=[], mm_data_items=mm_data_items
+    ).get_mm_hashes("test-model", "blake3")["image"][0]
+    uuid_hash = ProcessorInputs(
+        prompt=[],
+        mm_data_items=mm_data_items,
+        mm_uuid_items={"image": [content_hash]},
+    ).get_mm_hashes("test-model", "blake3")["image"][0]
+
+    assert uuid_hash == f"uuid:{content_hash}"
+    assert uuid_hash != content_hash
 
 
 @pytest.mark.parametrize(
