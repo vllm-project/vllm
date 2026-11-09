@@ -4,7 +4,7 @@
 
 This test suite validates vLLM's automatic chunking functionality for handling
 text inputs that exceed the model's maximum token length, specifically targeting
-the intfloat/multilingual-e5-small model (max token length: 512).
+the vllm-project/multilingual-e5-small model (max token length: 512).
 """
 
 import random
@@ -193,7 +193,7 @@ def _generate_random_text(word_count: int) -> str:
     return " ".join(result)
 
 
-MODEL_NAME = "intfloat/multilingual-e5-small"
+MODEL_NAME = "vllm-project/multilingual-e5-small"
 DTYPE = "bfloat16"
 
 # Test text: Generate text with approximately 1500 words to exceed 1024 tokens

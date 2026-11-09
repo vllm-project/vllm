@@ -129,7 +129,8 @@ impl Error {
             | Self::ToolChoiceFunctionNotFound { .. }
             | Self::UnsupportedChatRole { .. }
             | Self::UntrustedRequestChatTemplate
-            | Self::UnsupportedRequestChatTemplate => true,
+            | Self::UnsupportedRequestChatTemplate
+            | Self::Tokenizer(vllm_tokenizer::TokenizerError::Unavailable) => true,
             Self::Text(error) => error.is_request_validation_error(),
             Self::UnsupportedMultimodalRenderer
             | Self::UnsupportedMultimodalContent(_)
@@ -149,6 +150,12 @@ impl Error {
             Self::UnsupportedRequestChatTemplate => Some("chat_template"),
             _ => None,
         }
+    }
+
+    /// Whether the request could not be taken now, so retrying later may
+    /// succeed.
+    pub fn is_unavailable(&self) -> bool {
+        matches!(self, Self::Text(error) if error.is_unavailable())
     }
 }
 

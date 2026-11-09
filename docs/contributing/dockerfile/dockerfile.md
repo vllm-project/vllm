@@ -29,11 +29,6 @@ The `extensions-build` stage can also produce an optional source-built Triton
 wheel. `vllm-openai-base` installs that wheel after its other Python
 dependencies so dependency resolution cannot restore an older Triton version.
 
-With `BUILD_NIXL=true`, `extensions-build` also builds NIXL, including its NIXL
-EP extension for the installed PyTorch, with `tools/build_nixl_with_torch215_for_rubin.py`.
-`vllm-openai-base` then replaces the NIXL packages installed from the KV-connector
-requirements with these wheels.
-
 The AWS EFA images are built separately by `docker/Dockerfile.efa` on top of a
 `vllm-openai` image built with `INSTALL_KV_CONNECTORS=true`. It adds a minimal
 AWS EFA userspace install (libfabric, aws-ofi-nccl and hwloc), the EFA Mooncake
@@ -44,6 +39,11 @@ host limits remain host-managed.
 docker build -f docker/Dockerfile.efa \
     --build-arg BASE_IMAGE=vllm/vllm-openai:latest -t vllm:openai-efa docker/
 ```
+
+The release pipeline publishes the CUDA 13.0 EFA image to DockerHub as
+`vllm/vllm-openai:latest-efa` and `vllm/vllm-openai:v<version>-efa` for releases,
+and as `vllm/vllm-openai:efa-nightly` and `vllm/vllm-openai:efa-nightly-<commit>`
+for nightly builds.
 
 The image does not change vLLM's Mooncake protocol default (`rdma`). To use
 EFA, set it per connector:

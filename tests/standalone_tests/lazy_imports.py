@@ -11,7 +11,16 @@ import sys
 # too many processes before we set the number of compiler threads.
 # Lazy import `cv2` to avoid bothering users who only use text models.
 # `cv2` can easily mess up the environment.
-module_names = ["torch._inductor.async_compile", "cv2"]
+# `openai`, `fastapi` and `starlette` belong to the frontend layer; `vllm.config`
+# (imported by every process) and the engine core's `vllm.v1.structured_output`
+# must not pull them in.
+module_names = [
+    "torch._inductor.async_compile",
+    "cv2",
+    "openai",
+    "fastapi",
+    "starlette",
+]
 
 # set all modules in `module_names` to be None.
 # if we import any modules during `import vllm`, there would be a
@@ -44,3 +53,8 @@ if Version(torch.__version__) >= Version("2.12.0.dev"):
         f"`import vllm` must not import {eagerly_loaded}; only processes that "
         "actually compile a model should pay for the Inductor stack."
     )
+
+# Keep the check above before these imports: `vllm.config` still imports
+# Inductor through vllm/compilation/passes/inductor_pass.py.
+import vllm.config  # noqa
+import vllm.v1.structured_output  # noqa
