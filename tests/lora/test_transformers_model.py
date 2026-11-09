@@ -124,7 +124,8 @@ def test_lora_on_input_embeddings_not_named_embed_tokens(tmp_path):
 
     model_path = "EleutherAI/pythia-70m"
     lora_config = LoraConfig(r=8, target_modules=["embed_in"], init_lora_weights=False)
-    hf_model = AutoModelForCausalLM.from_pretrained(model_path, device_map="cuda")
+    hf_model = AutoModelForCausalLM.from_pretrained(model_path, device_map=current_platform.device_type
+    )
     get_peft_model(hf_model, lora_config).save_pretrained(tmp_path)
 
     llm = vllm.LLM(model_path, enable_lora=True, max_lora_rank=8, max_model_len=256)
