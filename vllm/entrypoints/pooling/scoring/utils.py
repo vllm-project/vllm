@@ -17,6 +17,7 @@ from vllm.renderers.chat_utils import (
     MultiModalItemTracker,
     parse_chat_message_content_parts,
 )
+from vllm.utils.mistral import is_mistral_tokenizer
 
 from .typing import (
     ScoreContentPartParam,
@@ -48,22 +49,35 @@ def truncate_text_to_tokens(
 
     Uses offset_mapping to slice the original text at the exact character
     boundary, avoiding lossy encode→decode round-trips that can shift
-    the token count due to BPE merge boundary changes.
+    the token count due to BPE merge boundary changes. MistralTokenizer has
+    no offset_mapping, so its boundary comes from the decoded token prefix;
+    the token count of the sliced text is re-checked either way.
     """
     if max_tokens <= 0:
         return ""
 
     while text:
-        encoding = tokenizer(
-            text,
-            add_special_tokens=False,
-            return_offsets_mapping=True,
-        )
-        offsets = encoding["offset_mapping"]
-        if len(encoding["input_ids"]) <= max_tokens:
-            break
+        if is_mistral_tokenizer(tokenizer):
+            token_ids = tokenizer.encode(text, add_special_tokens=False)
+            if len(token_ids) <= max_tokens:
+                break
 
-        char_end = min(offsets[max_tokens - 1][1], offsets[max_tokens][0])
+            # Unless special tokens are skipped, SentencePiece pieces such as
+            # "▁" and "<0x0A>" are decoded verbatim.
+            prefix = tokenizer.decode(token_ids[:max_tokens], skip_special_tokens=True)
+            char_end = len(prefix)
+        else:
+            encoding = tokenizer(
+                text,
+                add_special_tokens=False,
+                return_offsets_mapping=True,
+            )
+            offsets = encoding["offset_mapping"]
+            if len(encoding["input_ids"]) <= max_tokens:
+                break
+
+            char_end = min(offsets[max_tokens - 1][1], offsets[max_tokens][0])
+
         if char_end >= len(text):
             char_end = len(text) - 1
         text = text[:char_end]
@@ -150,8 +164,8 @@ def score_data_to_prompts(
 
     For plain text inputs, returns the string directly.
     For multimodal inputs (list of content parts), parses them into
-    a :class:`TextPrompt` with attached ``multi_modal_data`` /
-    ``multi_modal_uuids``.
+    a `TextPrompt` with attached `multi_modal_data` /
+    `multi_modal_uuids`.
 
     This is used by late-interaction scoring where each query/document
     is encoded independently.
@@ -191,9 +205,7 @@ def _parse_score_content(
     else:
         parts = cast(Iterable[ChatCompletionContentPartParam], data)
 
-    mm_parser = mm_tracker.create_parser()
-
-    parse_res = parse_chat_message_content_parts(
+    return parse_chat_message_content_parts(
         role=role,
         parts=parts,
         mm_tracker=mm_tracker,
@@ -201,19 +213,6 @@ def _parse_score_content(
         interleave_strings=False,
         multimodal_content_part_separator="",
     )
-
-    if parse_res:
-        return parse_res
-
-    mm_placeholder_storage = mm_parser.mm_placeholder_storage()
-
-    if (
-        len(mm_placeholder_storage) != 1
-        or len(next(iter(mm_placeholder_storage.values()))) != 1
-    ):
-        raise ValueError("Only one multi-modal item is supported")
-
-    return next(iter(mm_placeholder_storage.values()))[0]
 
 
 def parse_score_data_single(
@@ -224,8 +223,8 @@ def parse_score_data_single(
     """Parse **one** ScoreData into a text prompt and its own multi-modal
     data.
 
-    Unlike :func:`parse_score_data`, each call creates an **independent**
-    :class:`MultiModalItemTracker` so multi-modal items are kept separate.
+    Unlike `parse_score_data`, each call creates an **independent**
+    `MultiModalItemTracker` so multi-modal items are kept separate.
     This is the correct behaviour for late-interaction scoring, where
     query and document are encoded independently.
     """
@@ -245,8 +244,8 @@ def parse_score_data(
     """Parse a query-document pair into text prompts and shared multi-modal
     data.
 
-    Uses a **single** :class:`MultiModalItemTracker` so that multi-modal
-    items from both inputs are merged into one ``mm_data`` dict.  This is
+    Uses a **single** `MultiModalItemTracker` so that multi-modal
+    items from both inputs are merged into one `mm_data` dict.  This is
     the correct behaviour for cross-encoder scoring, where query and
     document are concatenated into a single model prompt.
     """

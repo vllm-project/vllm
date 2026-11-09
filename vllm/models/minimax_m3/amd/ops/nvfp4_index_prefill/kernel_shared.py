@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """NVFP4 prefill index scorer for small work (FlyDSL, gfx950).
 
-The scores of ``kernel.py`` with one dequantized block per workgroup: a
+The scores of `kernel.py` with one dequantized block per workgroup: a
 workgroup is 4 waves x 32 MQ query rows x a segment of the causal window. Per
 block, wave w dequantizes token tile w into e4m3 A fragments in LDS (double
 buffered, one barrier per block) while the MFMAs of the previous block run;
@@ -79,7 +79,7 @@ def _fp8_pair(w, sv):
 
 def _mfma_fp8_32x32x64(a8, b8, acc16):
     """v_mfma_f32_32x32x64_f8f6f4 on e4m3; lane (r, h) gets
-    D[8 (i // 4) + 4 h + i % 4][r]."""
+    `D[8 (i // 4) + 4 h + i % 4][r]`."""
     return Vec(
         fx.rocdl.mfma_scale_f32_32x32x64_f8f6f4(
             Vec.make_type(16, fx.Float32), [a8, b8, acc16, 0, 0, 0, 0, 0, 0]
@@ -99,7 +99,7 @@ def tile_q(mq: int) -> int:
 
 
 def compile_score_prefill_shared(heads: int = 1, mq: int = 2):
-    """Build the scorer for 1, 2 or 4 index heads and ``mq`` 32-row query tiles
+    """Build the scorer for 1, 2 or 4 index heads and `mq` 32-row query tiles
     per wave."""
     assert heads in (1, 2, 4) and mq in MQ_CHOICES, (heads, mq)
     H, MQ = heads, mq
