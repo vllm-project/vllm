@@ -26,6 +26,7 @@ import regex as re
 
 import vllm.v1.core.kv_cache_utils as kv_cache_utils
 from vllm.lora.request import LoRARequest
+from vllm.multimodal.inputs import MultiModalFeatureSpec, PlaceholderRange
 from vllm.sampling_params import SamplingParams
 from vllm.utils.hashing import sha256, sha256_cbor
 from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
@@ -99,6 +100,58 @@ def _case_inputs() -> list[dict[str, Any]]:
                         "prompt_token_ids": EDGE_TOKENS * 3 + [7, 8],
                     }
                 )
+    for name, spans in [
+        ("spanning_image", [("image", "image-a", 3, 18)]),
+        ("changed_image", [("image", "image-b", 3, 18)]),
+        ("shifted_image", [("image", "image-a", 4, 18)]),
+        ("adjacent_images", [("image", "image-a", 2, 2), ("image", "image-b", 4, 3)]),
+        ("repeated_image", [("image", "image-a", 2, 2), ("image", "image-a", 12, 5)]),
+        ("lookahead_image", [("image", "image-é", 9, 1)]),
+        ("mixed_modalities", [("audio", "audio-a", 0, 8), ("video", "video-a", 8, 16)]),
+    ]:
+        lookaheads = (
+            (0, 1, 3) if name in ("spanning_image", "lookahead_image") else (0,)
+        )
+        for lookahead in lookaheads:
+            cases.append(
+                {
+                    "name": f"{name}_lookahead_{lookahead}",
+                    "hash_algo": "sha256_cbor",
+                    "block_size": 8,
+                    "num_lookahead_tokens": lookahead,
+                    "lora": {"name": "adapter-é", "path": "/m/é"},
+                    "cache_salt": "tenant-1",
+                    "prompt_token_ids": EDGE_TOKENS * 3 + [7, 8],
+                    "mm_features": [
+                        {
+                            "data": None,
+                            "modality": modality,
+                            "identifier": identifier,
+                            "mm_position": {"offset": offset, "length": length},
+                        }
+                        for modality, identifier, offset, length in spans
+                    ],
+                }
+            )
+    cases.append(
+        {
+            "name": "image_negative_offset_widths",
+            "hash_algo": "sha256_cbor",
+            "block_size": 32,
+            "num_lookahead_tokens": 0,
+            "lora": None,
+            "cache_salt": None,
+            "prompt_token_ids": [7] * 320,
+            "mm_features": [
+                {
+                    "data": None,
+                    "modality": "image",
+                    "identifier": "image-a",
+                    "mm_position": {"offset": 7, "length": 300},
+                }
+            ],
+        }
+    )
     return cases
 
 
@@ -120,6 +173,15 @@ def _engine_block_hashes(case: dict[str, Any]) -> list[str]:
             )
         ),
         cache_salt=case["cache_salt"],
+        mm_features=[
+            MultiModalFeatureSpec(
+                data=None,
+                modality=feature["modality"],
+                identifier=feature["identifier"],
+                mm_position=PlaceholderRange(**feature["mm_position"]),
+            )
+            for feature in case.get("mm_features", [])
+        ],
         block_hasher=get_request_block_hasher(
             case["block_size"],
             HASH_FNS[case["hash_algo"]],

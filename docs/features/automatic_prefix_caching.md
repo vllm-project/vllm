@@ -13,6 +13,23 @@ Set `enable_prefix_caching=True` in vLLM engine to enable APC. Here is an exampl
 
 [examples/features/automatic_prefix_caching/automatic_prefix_caching_offline.py](../../examples/features/automatic_prefix_caching/automatic_prefix_caching_offline.py)
 
+### Rust frontend
+
+With `VLLM_USE_RUST_FRONTEND=1`, the frontend can compute prompt block hashes
+before submitting a request to the engine. For multimodal prompts, this is
+supported with `--prefix-caching-hash-algo sha256_cbor` when the media placeholder
+ranges are sorted and do not overlap. This moves prompt hashing off the engine's
+input thread while preserving the same prefix-cache keys.
+
+```bash
+VLLM_USE_RUST_FRONTEND=1 vllm serve <model> \
+    --enable-prefix-caching --prefix-caching-hash-algo sha256_cbor
+```
+
+Other multimodal hash configurations, overlapping placeholder ranges, and prompt
+embeddings continue to use engine-side hashing. No additional flag is needed to
+select the frontend optimization for supported requests.
+
 ## Hybrid Mamba models
 
 With prefix caching enabled, Mamba state is stored only on the Mamba block grid, so a prefix-cache hit can resume only at a block boundary. `--enable-mamba-shared-prefix-checkpoint` also stores a checkpoint at the shared-prefix junction, the point where an earlier request with the same prefix stopped. Requests whose shared prefix ends inside a block can then reuse it.
