@@ -74,6 +74,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.platforms import current_platform
+from vllm.v1.kv_cache_interface import is_quantized_kv_cache
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.utils import WeightsMapper
@@ -1252,6 +1253,16 @@ class CompressedTensorsKVCacheMethod(BaseKVCacheMethod):
         """Override the default vLLM placeholder scales with the llm-compressor loaded
         scales. Zero points are not used as only symmetric quantization is supported.
         """
+        # Checkpoint scales only apply when the runtime KV cache is quantized. A
+        # compressed-tensors checkpoint may contain static scales for every
+        # attention layer, even when vLLM keeps some layers in BF16 (for example
+        # layers excluded by ``kv_cache_dtype_skip_layers``). Passing those scales
+        # to the attention backend would incorrectly rescale an unquantized cache.
+        if not is_quantized_kv_cache(layer.kv_cache_dtype):
+            layer.k_scale.fill_(1.0)
+            layer.v_scale.fill_(1.0)
+            layer.q_scale.fill_(1.0)
+
         # Buffers, not Parameters: updates don't rewrite them, so level-2 sleep
         # must keep them. ATTN_HEAD changes shape.
         layer.register_buffer("_k_scale", layer.k_scale.detach())

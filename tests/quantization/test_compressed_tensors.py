@@ -32,6 +32,7 @@ from vllm.model_executor.layers.fused_moe import UnquantizedFusedMoEMethod
 from vllm.model_executor.layers.fused_moe.oracle.fp8 import Fp8MoeBackend
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
     CompressedTensorsConfig,
+    CompressedTensorsKVCacheMethod,
     CompressedTensorsLinearMethod,
     CompressedTensorsW4A4Fp4,
     CompressedTensorsW4A4Mxfp4,
@@ -386,6 +387,23 @@ def test_compressed_tensors_kv_cache_fp8_per_tensor(vllm_runner):
     with vllm_runner(model_path) as llm:
         output = llm.generate_greedy("Hello world!", max_tokens=4)
         assert output
+
+
+def test_compressed_tensors_kv_scales_are_unit_for_unquantized_cache():
+    method = object.__new__(CompressedTensorsKVCacheMethod)
+    layer = torch.nn.Module()
+    layer.kv_cache_dtype = "auto"
+    layer.k_scale = torch.nn.Parameter(torch.tensor([2.0]), requires_grad=False)
+    layer.v_scale = torch.nn.Parameter(torch.tensor([3.0]), requires_grad=False)
+    layer.q_scale = torch.nn.Parameter(torch.tensor([4.0]), requires_grad=False)
+    layer._k_scale_cpu = torch.empty(1)
+    layer._v_scale_cpu = torch.empty(1)
+
+    method.process_weights_after_loading(layer)
+
+    assert layer._k_scale_float == 1.0
+    assert layer._v_scale_float == 1.0
+    assert layer._q_scale_float == 1.0
 
 
 @pytest.mark.skipif(
