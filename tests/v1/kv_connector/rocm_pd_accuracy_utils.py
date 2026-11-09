@@ -36,10 +36,10 @@ _REVISIONS = {
 
 
 def _side_channel_ports(count: int) -> list[int]:
-    """Free ports below the ephemeral range, which ``bind(0)`` never returns.
+    """Free ports below the ephemeral range, which `bind(0)` never returns.
 
     NIXL binds its side channel only after the model loads, and until then an
-    ephemeral port could be given to another ``bind(0)`` listener.
+    ephemeral port could be given to another `bind(0)` listener.
     """
     with open("/proc/sys/net/ipv4/ip_local_port_range") as f:
         ephemeral_start = int(f.read().split()[0])

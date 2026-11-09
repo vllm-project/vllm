@@ -333,7 +333,7 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
         sparse decode kernel on the quantized caches.
 
         Each row gets one CTA that reads only that row's query, slot lists and
-        lengths, and ``sparse_paged_indices`` derives those from the row's
+        lengths, and `sparse_paged_indices` derives those from the row's
         (request, position) alone. So a token's output bits do not depend on
         the batch, on chunking, or on whether it is decoded or refed as a
         prompt token.

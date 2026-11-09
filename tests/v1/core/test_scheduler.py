@@ -1871,7 +1871,7 @@ def test_no_mm_input_chunking_at_item_boundary():
     """A chunk starting exactly at a multimodal item must not split it.
 
     Regression test for issue #52306: the rollback guard only fired while
-    ``num_computed_tokens < start_pos``, so a chunk beginning exactly at the
+    `num_computed_tokens < start_pos`, so a chunk beginning exactly at the
     item skipped the check and could cover only part of it - silently breaking
     models with bidirectional attention over the item.
     """
@@ -2979,11 +2979,11 @@ def test_kv_cache_release_rejects_nonresident_memory(sleeping_tags):
 
 
 def test_reset_connector_cache_no_connector_is_no_op_success():
-    """``reset_connector_cache`` must return True when no connector is
+    """`reset_connector_cache` must return True when no connector is
     configured.
 
-    Without this, ``reset_prefix_cache(reset_connector=True)`` returns
-    ``False`` on every engine that doesn't have a KV connector configured —
+    Without this, `reset_prefix_cache(reset_connector=True)` returns
+    `False` on every engine that doesn't have a KV connector configured —
     even when the local prefix cache reset succeeded — and any caller that
     interprets the return value as "did the reset I asked for succeed?"
     sees a spurious failure.
@@ -3171,8 +3171,8 @@ def test_schedule_spec_decoding_stats(
 def _run_spec_verify_steps(scheduler, rounds, num_invalid_per_round=None):
     """Drive prefill + one draft/verify step per round for a single request.
 
-    ``rounds`` is a list of ``(spec_token_ids, output_token_ids)`` -- one verify
-    step each. ``num_invalid_per_round`` optionally injects the grammar-invalid
+    `rounds` is a list of `(spec_token_ids, output_token_ids)` -- one verify
+    step each. `num_invalid_per_round` optionally injects the grammar-invalid
     draft count structured-output decoding would set on the verify output.
     Returns the request.
     """
