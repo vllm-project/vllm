@@ -4,7 +4,7 @@
 
 This file owns the ROCm-specific fused-MoE custom-op path:
 - custom-op registration and fake-tensor support
-- enablement gating for ``VLLM_ROCM_USE_AITER_MOE`` and shared experts
+- enablement gating for `VLLM_ROCM_USE_AITER_MOE` and shared experts
 - BF16 accuracy for the fused MoE kernel on representative shapes
 - CDNA4+ 128x128 block FP8 accuracy (``AiterFp8BlockExperts``)
 - AITER MXFP4 MoE support per arch (incl. the MXFP4 experts check), and the
@@ -13,10 +13,10 @@ This file owns the ROCm-specific fused-MoE custom-op path:
 - deterministic routing and representative gfx942 / gfx950 coverage
 
 Generic fused-MoE backend selection and non-ROCm kernel coverage live in the
-generic MoE test files under ``tests/kernels/moe``.
+generic MoE test files under `tests/kernels/moe`.
 
-Raw ROCm AITER helper-op coverage such as ``group_fp8_quant`` and
-``per_tensor_quant`` lives in ``tests/kernels/core/test_rocm_aiter_ops.py``.
+Raw ROCm AITER helper-op coverage such as `group_fp8_quant` and
+`per_tensor_quant` lives in `tests/kernels/core/test_rocm_aiter_ops.py`.
 This file only keeps the MoE-shaped integration angle for those helpers.
 """
 
@@ -855,6 +855,69 @@ def test_aiter_moe_dispatch_policy_forwarded_to_fused_moe(
         )
 
 
+@pytest.mark.parametrize(
+    ("activation", "biased", "expected_pad"),
+    [
+        # Bias-less (DeepSeek-V4.1): AITER leaves the padded columns unwritten.
+        ("SILU", False, 0),
+        # Biased (gpt-oss): the pad stays declared, undoubled at TP1.
+        ("SWIGLUOAI", True, 64),
+        # SITU zeroes its own scratch on a non-zero pad.
+        ("SITU", False, 64),
+    ],
+)
+def test_aiter_mxfp4_w4a16_intermediate_pad_reaching_aiter(
+    activation: str, biased: bool, expected_pad: int
+):
+    """The intermediate pad rocm_aiter_fused_experts hands to AITER for MXFP4
+    W4A16. Until ROCm/aiter#6598 is pinned, a bias-less pad can produce NaN."""
+    from tests.kernels.moe.utils import make_dummy_moe_config
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+    from vllm.model_executor.layers.fused_moe.config import (
+        mxfp4_w4a16_moe_quant_config,
+    )
+    from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
+        derive_aiter_quant_type,
+        rocm_aiter_fused_experts,
+    )
+
+    _assert_aiter_supported()
+    num_experts, hidden_dim, padded, unpadded = 4, 256, 640, 576
+    moe_config = make_dummy_moe_config(
+        num_experts=num_experts,
+        experts_per_token=2,
+        hidden_dim=hidden_dim,
+        intermediate_size=padded,
+    )
+    moe_config.intermediate_size_per_partition_unpadded = unpadded
+    bias1 = torch.zeros(num_experts, 2 * padded, device="cuda") if biased else None
+    quant_config = mxfp4_w4a16_moe_quant_config(
+        w1_scale=torch.empty(0, device="cuda"),
+        w2_scale=torch.empty(0, device="cuda"),
+        w1_bias=bias1,
+    )
+    hidden_states = torch.zeros(8, hidden_dim, dtype=torch.bfloat16, device="cuda")
+
+    with mock.patch.object(
+        rocm_aiter_ops, "fused_moe", return_value=hidden_states
+    ) as fused_moe_mock:
+        rocm_aiter_fused_experts(
+            hidden_states=hidden_states,
+            w1=torch.empty(0, device="cuda"),
+            w2=torch.empty(0, device="cuda"),
+            topk_weights=torch.ones(8, 2, device="cuda"),
+            topk_ids=torch.zeros(8, 2, dtype=torch.int32, device="cuda"),
+            moe_config=moe_config,
+            quant_type=derive_aiter_quant_type(quant_config),
+            activation=MoEActivation[activation],
+            quant_config=quant_config,
+            bias1=bias1,
+        )
+
+    assert fused_moe_mock.call_args.kwargs["intermediate_pad"] == expected_pad
+
+
 @pytest.mark.skipif(
     # AITER only ships an asm tkw1 build for CDNA 3/4 today; not an
     # architectural limit, so widen this if gfx1250 gets one too.
@@ -1179,7 +1242,7 @@ def test_aiter_moe_group_fp8_quant_reconstructs_hidden_states(
     within the expected FP8 error budget.
 
     The raw op's shape and standalone roundtrip contracts are covered in
-    ``tests/kernels/core/test_rocm_aiter_ops.py``. This test keeps the
+    `tests/kernels/core/test_rocm_aiter_ops.py`. This test keeps the
     representative hidden-state sizes that the fused-MoE path actually cares
     about.
     """
@@ -1607,7 +1670,7 @@ def _make_alignment_moe_config(intermediate: int):
 def _make_aiter_method(moe_config):
     """Build the unquantized method with the backend pinned to AITER.
 
-    ``select_unquantized_moe_backend`` needs a real ROCm + AITER runtime, so
+    `select_unquantized_moe_backend` needs a real ROCm + AITER runtime, so
     stub it out and set the backend directly.
     """
     from unittest.mock import patch
@@ -1807,10 +1870,10 @@ def _aiter_accepts_intermediate(intermediate: int, num_tokens: int) -> bool:
 # respectively (AITER's get_block_size_M, on both 256- and 304-CU parts).
 @pytest.mark.parametrize("num_tokens", [1024, 2560, 5120])
 def test_aiter_moe_alignment_rule_holds_across_block_m(intermediate, num_tokens):
-    """The alignment rule must hold at every reachable ``block_m``.
+    """The alignment rule must hold at every reachable `block_m`.
 
-    Stage 1 checks ``NPerBlock`` and stage 2 ``KPerBlock``; both vary with
-    ``block_m``, so a size validated at one tile size says nothing about the
+    Stage 1 checks `NPerBlock` and stage 2 `KPerBlock`; both vary with
+    `block_m`, so a size validated at one tile size says nothing about the
     others.
     """
     from vllm.model_executor.layers.fused_moe.oracle.unquantized import (

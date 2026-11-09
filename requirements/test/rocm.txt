@@ -273,9 +273,6 @@ apache-tvm-ffi==0.1.11 \
     #   -c requirements/rocm.txt
     #   tilelang
     #   xgrammar
-arctic-inference==0.1.1 \
-    --hash=sha256:36857e2fbe3ead34821a04be98dfab95086050c1e38199c8fdfe308234fdcf63
-    # via -r requirements/test/rocm.in
 argcomplete==3.6.3 \
     --hash=sha256:62e8ed4fd6a45864acc8235409461b72c9a28ee785a2011cc5eb78318786c89c \
     --hash=sha256:f5007b3a600ccac5d25bbce33089211dfd49eab4a7718da3f10e3082525a92ce
@@ -7272,9 +7269,9 @@ tenacity==9.1.4 \
     #   gpt-oss
     #   lm-eval
     #   schemathesis
-tensorizer==2.10.1 \
-    --hash=sha256:079a4aa1db03fb6fe4e6949a78cd5f6b0070e074421da4b34216db58973dce65 \
-    --hash=sha256:fe39940548a287c84891ee9dd966d6e87575312625ba46c9eda11b0b79d05028
+tensorizer==2.12.1 \
+    --hash=sha256:20c765c5c71d2db3eaa7f9af53620d00d79659b3a98100e93ed508fa69b0d441 \
+    --hash=sha256:8af9b3be54f31d08d1928e3f25bfaaa963cdc8d716d09559c68ec014f8beb440
     # via
     #   -c requirements/rocm.txt
     #   -r requirements/test/rocm.in
@@ -7492,9 +7489,9 @@ tritonclient==2.66.0 \
     --hash=sha256:d2c2865239017a0d15a5f34e23f093feac222e608d6182a1444354204a0833ad \
     --hash=sha256:ec759cd8186130be9726be2fa31bc14b1dd46daa19add770610df889aa57d0a4
     # via -r requirements/test/rocm.in
-truststore==0.10.4 \
-    --hash=sha256:9d91bd436463ad5e4ee4aba766628dd6cd7010cf3e2461756b3303710eebc301 \
-    --hash=sha256:adaeaecf1cbb5f4de3b1959b42d41f6fab57b2b1666adb59e89cb0b53361d981
+truststore==0.10.5 \
+    --hash=sha256:30d36967ccaded5cbb38d602c433f53600036c79d502f4533a49b60a03bbefcd \
+    --hash=sha256:9aaaedaefaf06d8b206278cf8b5012bc897f485a874503501e12d776df78951c
     # via
     #   httpcore2
     #   httpx2

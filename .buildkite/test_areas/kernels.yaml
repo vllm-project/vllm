@@ -66,6 +66,8 @@ steps:
       - tests/kernels/core
       - vllm/kernels/triton/
       - tests/kernels/test_top_k_per_row.py
+      - vllm/model_executor/layers/indexer_topk.py
+      - vllm/v1/attention/ops/rocm_aiter_mla_sparse.py
       - tests/kernels/test_concat_mla_q.py
       - tests/kernels/test_rocm_fp32_router_gemm.py
       - vllm/model_executor/layers/fused_moe/router/gate_linear.py
@@ -152,9 +154,18 @@ steps:
       - csrc/fused_deepseek_v4_qnorm_rope_kv_insert_kernel.cu
       - vllm/models/deepseek_v4/common/ops/
       - tests/kernels/test_fused_deepseek_v4_qnorm_rope_kv_insert.py
+      - csrc/topk.cu
+      - csrc/persistent_topk.cuh
+      - csrc/sampled_topk.cuh
+      - csrc/topk_histogram_4096.cuh
+      - csrc/topk_histogram_4096_overflow.cuh
+      - vllm/model_executor/layers/indexer_topk.py
+      - vllm/v1/attention/ops/rocm_aiter_mla_sparse.py
+      - tests/kernels/test_top_k_per_row.py
       - vllm/platforms/rocm.py
       commands:
       - pytest -v -s kernels/test_fused_deepseek_v4_qnorm_rope_kv_insert.py
+      - pytest -v -s kernels/test_top_k_per_row.py -k "persistent or sparse_indexer"
 
 - label: ":nvidia: (H100) BF16x3 Router GEMM Kernels"
   key: kernels-bf16x3-router-gemm-h100
@@ -167,6 +178,22 @@ steps:
   - tests/kernels/test_bf16x3_router_gemm_cutedsl.py
   commands:
     - pytest -v -s kernels/test_bf16x3_router_gemm_cutedsl.py
+  mirror:
+    amd:
+      automatic_shard: true
+      label: ":amd: (MI355) BF16x3 Router GEMM Kernels"
+      dind: false
+      device: mi355_1
+      timeout_in_minutes: 20
+      working_dir: "/vllm-workspace/tests"
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/model_executor/layers/fused_moe/router/bf16x3_router_gemm_rocm.py
+      - vllm/platforms/rocm.py
+      - tests/kernels/test_bf16x3_router_gemm_rocm.py
+      commands:
+      - pytest -v -s kernels/test_bf16x3_router_gemm_rocm.py
 
 - label: ":nvidia: (B200) DeepSeek V4 Kernels"
   key: deepseek-v4-kernel-test-b200
@@ -306,6 +333,22 @@ steps:
   - tests/models/minimax_m3/
   commands:
     - pytest -v -s models/minimax_m3 --ignore=models/minimax_m3/amd_specialized_decode
+  mirror:
+    amd:
+      label: ":amd: (MI355) MiniMax-M3 Model Tests"
+      automatic_shard: true
+      dind: false
+      device: mi355_1
+      timeout_in_minutes: 20
+      working_dir: "/vllm-workspace/tests"
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/models/minimax_m3/
+      - vllm/transformers_utils/configs/minimax_m3.py
+      - vllm/model_executor/models/config.py
+      - tests/models/minimax_m3/
+      - vllm/platforms/rocm.py
 
 # Catch-all for test files at the tests/kernels root. This job collects
 # the whole root so new files are wired by default.
@@ -913,13 +956,11 @@ steps:
       - vllm/platforms/rocm.py
       - tests/kernels/test_rocm_fp32_router_gemm.py
       - tests/kernels/test_gate_linear_rocm_dispatch.py
-      - tests/kernels/test_bf16x3_router_gemm_rocm.py
       commands:
       - >-
         pytest -v -s
         tests/kernels/test_rocm_fp32_router_gemm.py
         tests/kernels/test_gate_linear_rocm_dispatch.py
-        tests/kernels/test_bf16x3_router_gemm_rocm.py
 
 # Disabled until b12x transitive dependencies are locked.
 # - label: ":nvidia: (DGX Spark) [Nightly] b12x Linear Kernels"
