@@ -854,6 +854,69 @@ def test_aiter_moe_dispatch_policy_forwarded_to_fused_moe(
         )
 
 
+@pytest.mark.parametrize(
+    ("activation", "biased", "expected_pad"),
+    [
+        # Bias-less (DeepSeek-V4.1): AITER leaves the padded columns unwritten.
+        ("SILU", False, 0),
+        # Biased (gpt-oss): the pad stays declared, undoubled at TP1.
+        ("SWIGLUOAI", True, 64),
+        # SITU zeroes its own scratch on a non-zero pad.
+        ("SITU", False, 64),
+    ],
+)
+def test_aiter_mxfp4_w4a16_intermediate_pad_reaching_aiter(
+    activation: str, biased: bool, expected_pad: int
+):
+    """The intermediate pad rocm_aiter_fused_experts hands to AITER for MXFP4
+    W4A16. Until ROCm/aiter#6598 is pinned, a bias-less pad can produce NaN."""
+    from tests.kernels.moe.utils import make_dummy_moe_config
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+    from vllm.model_executor.layers.fused_moe.config import (
+        mxfp4_w4a16_moe_quant_config,
+    )
+    from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
+        derive_aiter_quant_type,
+        rocm_aiter_fused_experts,
+    )
+
+    _assert_aiter_supported()
+    num_experts, hidden_dim, padded, unpadded = 4, 256, 640, 576
+    moe_config = make_dummy_moe_config(
+        num_experts=num_experts,
+        experts_per_token=2,
+        hidden_dim=hidden_dim,
+        intermediate_size=padded,
+    )
+    moe_config.intermediate_size_per_partition_unpadded = unpadded
+    bias1 = torch.zeros(num_experts, 2 * padded, device="cuda") if biased else None
+    quant_config = mxfp4_w4a16_moe_quant_config(
+        w1_scale=torch.empty(0, device="cuda"),
+        w2_scale=torch.empty(0, device="cuda"),
+        w1_bias=bias1,
+    )
+    hidden_states = torch.zeros(8, hidden_dim, dtype=torch.bfloat16, device="cuda")
+
+    with mock.patch.object(
+        rocm_aiter_ops, "fused_moe", return_value=hidden_states
+    ) as fused_moe_mock:
+        rocm_aiter_fused_experts(
+            hidden_states=hidden_states,
+            w1=torch.empty(0, device="cuda"),
+            w2=torch.empty(0, device="cuda"),
+            topk_weights=torch.ones(8, 2, device="cuda"),
+            topk_ids=torch.zeros(8, 2, dtype=torch.int32, device="cuda"),
+            moe_config=moe_config,
+            quant_type=derive_aiter_quant_type(quant_config),
+            activation=MoEActivation[activation],
+            quant_config=quant_config,
+            bias1=bias1,
+        )
+
+    assert fused_moe_mock.call_args.kwargs["intermediate_pad"] == expected_pad
+
+
 @pytest.mark.skipif(
     # AITER only ships an asm tkw1 build for CDNA 3/4 today; not an
     # architectural limit, so widen this if gfx1250 gets one too.
