@@ -20,7 +20,7 @@ from vllm.v1.kv_cache_interface import (
     HiddenStateCacheSpec,
     KVCacheConfig,
 )
-from vllm.v1.spec_decode.resources import BudgetView, SpecResources
+from vllm.v1.spec_decode.resources import BudgetView, SpecLayerKind, SpecResources
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.mm.rope import RopeState
@@ -28,7 +28,6 @@ from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
 from vllm.v1.worker.gpu.sample.trace_replay import TraceReplayState
-from vllm.v1.worker.gpu.spec_decode.capabilities import SpecLayerKind
 from vllm.v1.worker.gpu.spec_decode.commit import accepted_rows
 from vllm.v1.worker.gpu.spec_decode.kernels import (
     CommitStep,

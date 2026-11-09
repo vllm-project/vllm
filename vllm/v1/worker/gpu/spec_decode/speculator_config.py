@@ -22,8 +22,11 @@ from vllm.utils.import_utils import resolve_obj_by_qualname
 # vllm.config imports this module, so it imports vllm.config lazily.
 if TYPE_CHECKING:
     from vllm.config import ParallelConfig, SpeculativeConfig
-    from vllm.v1.spec_decode.resources import BudgetView, SpecResources
-    from vllm.v1.worker.gpu.spec_decode.capabilities import SpecCapabilities
+    from vllm.v1.spec_decode.resources import (
+        BudgetView,
+        SpecCapabilities,
+        SpecResources,
+    )
 
 _PKG = "vllm.v1.worker.gpu.spec_decode"
 

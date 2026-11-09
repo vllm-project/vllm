@@ -10,11 +10,13 @@ import torch
 
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.kv_cache_interface import AttentionSpec
-from vllm.v1.spec_decode.resources import SpecResources
-from vllm.v1.worker.gpu.spec_decode.capabilities import (
+from vllm.v1.spec_decode.resources import (
     SpecCapabilities,
     SpecLayerKind,
     SpecLimit,
+    SpecResources,
+)
+from vllm.v1.worker.gpu.spec_decode.capabilities import (
     attn_layer_kind,
     attn_layout,
     layer_spec_limits,

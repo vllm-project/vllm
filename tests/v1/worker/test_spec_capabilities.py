@@ -28,15 +28,18 @@ from vllm.v1.kv_cache_interface import (
     RSWASpec,
     SlidingWindowSpec,
 )
-from vllm.v1.spec_decode.resources import SpecResources, adapt_spec_resources
-from vllm.v1.worker.gpu.model_runner import GPUModelRunner
-from vllm.v1.worker.gpu.spec_decode.capabilities import (
+from vllm.v1.spec_decode.resources import (
     SpecCapabilities,
     SpecLayerKind,
     SpecLimit,
+    SpecResources,
+    adapt_spec_resources,
+    resolve_spec_resources,
+)
+from vllm.v1.worker.gpu.model_runner import GPUModelRunner
+from vllm.v1.worker.gpu.spec_decode.capabilities import (
     causal_full_attention,
     layer_spec_limits,
-    resolve_spec_resources,
 )
 from vllm.v1.worker.gpu.spec_decode.kernels import (
     CommitStep,

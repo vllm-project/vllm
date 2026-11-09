@@ -13,8 +13,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import torch
 
-from vllm.v1.spec_decode.resources import PlanKind
-from vllm.v1.worker.gpu.spec_decode.capabilities import SpecLayerKind
+from vllm.v1.spec_decode.resources import PlanKind, SpecLayerKind
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig

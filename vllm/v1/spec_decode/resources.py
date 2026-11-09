@@ -3,12 +3,17 @@
 """What speculative decoding holds, shared by the scheduler, the engine core and
 the workers."""
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
+from vllm.logger import init_logger
+
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+    from vllm.v1.worker.gpu.spec_decode.speculator_config import SpeculatorConfig
+
+logger = init_logger(__name__)
 
 PlanKind = Literal["chain", "tree"]
 """The plans a model verifies: ``"chain"`` (each row follows the one before
@@ -65,6 +70,43 @@ class BudgetView:
     """Tokens per block of the unified pool (the scheduler's block size)."""
 
 
+@dataclass(frozen=True)
+class SpecLayerKind:
+    """What a layer is to speculative decoding, derived from the KV cache spec
+    or the layer class (a plugin cannot invent one)."""
+
+    family: Literal["attn", "recurrent", "layout"]
+    variant: str
+    """attn: the ``KVCacheSpecKind`` value; recurrent: the layer class name;
+    layout: ``"paged_token"``, ``"paged_split_scale"`` or ``"recurrent_state"``."""
+
+    def key(self) -> str:
+        return f"{self.family}:{self.variant}"
+
+
+@dataclass(frozen=True)
+class SpecLimit:
+    """A layer kind or a setting that caps the plan kind, and why."""
+
+    plan_kind: PlanKind
+    reason: str
+
+
+@dataclass(frozen=True)
+class SpecCapabilities:
+    """What a worker's layers verify; reduced over ranks by the engine core."""
+
+    plan_kind: PlanKind
+    """``"chain"`` when any layer or setting caps it, else ``"tree"``."""
+    limits: tuple[SpecLimit, ...] = ()
+    """Every cap to chains, for the startup log."""
+
+    @classmethod
+    def from_limits(cls, limits: Iterable[SpecLimit]) -> "SpecCapabilities":
+        limits = tuple(dict.fromkeys(limits))
+        return cls(plan_kind="chain" if limits else "tree", limits=limits)
+
+
 def adapt_spec_resources(
     vllm_config: "VllmConfig", collective_rpc: Callable[..., list[Any]]
 ) -> SpecResources | None:
@@ -82,8 +124,64 @@ def adapt_spec_resources(
     capabilities = [c for c in collective_rpc("get_spec_capabilities") if c is not None]
     if not capabilities:
         return None
-    from vllm.v1.worker.gpu.spec_decode.capabilities import resolve_spec_resources
-
     effective = resolve_spec_resources(speculator_config, declared, capabilities)
     collective_rpc("set_spec_resources", args=(effective,))
     return effective
+
+
+def resolve_spec_resources(
+    speculator_config: "SpeculatorConfig",
+    declared: SpecResources,
+    capabilities: Sequence[SpecCapabilities],
+) -> SpecResources:
+    """The speculator's declared resources adapted to what every rank verifies
+    (``capabilities``, one per worker); logs each lowering."""
+    # Pipeline ranks hold different layers: the model verifies the lowest.
+    caps = SpecCapabilities.from_limits(
+        limit for rank in capabilities for limit in rank.limits
+    )
+    lowering = caps.limits if declared.plan_kind == "tree" else ()
+    for limit in lowering:
+        logger.info(
+            "spec decode: %s -> %s (%s)",
+            declared.plan_kind,
+            limit.plan_kind,
+            limit.reason,
+        )
+    effective = speculator_config.adapt_resources(declared, caps)
+    validate_effective_resources(declared, effective, caps)
+    if effective.max_rows < declared.max_rows:
+        logger.info(
+            "spec decode: max_rows %d -> %d (adapt_resources)",
+            declared.max_rows,
+            effective.max_rows,
+        )
+    return effective
+
+
+def validate_effective_resources(
+    declared: SpecResources, effective: SpecResources, caps: SpecCapabilities
+) -> None:
+    """Check that ``effective`` takes no more than ``declared`` and ``caps``."""
+    problems = []
+    if effective.plan_kind == "tree" and "chain" in (
+        declared.plan_kind,
+        caps.plan_kind,
+    ):
+        problems.append(
+            f"plan_kind {effective.plan_kind!r} is above the declared "
+            f"{declared.plan_kind!r} or the model's {caps.plan_kind!r}"
+        )
+    if effective.max_branching > declared.max_branching:
+        problems.append(
+            f"max_branching {effective.max_branching} is above the declared "
+            f"{declared.max_branching}"
+        )
+    extra_rows = set(effective.capture_rows) - set(declared.capture_rows)
+    if extra_rows:
+        problems.append(f"capture_rows {sorted(extra_rows)} not declared")
+    if problems:
+        raise ValueError(
+            "SpeculatorConfig.adapt_resources returned resources the model cannot "
+            "run: " + "; ".join(problems)
+        )
