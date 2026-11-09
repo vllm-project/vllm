@@ -27,6 +27,7 @@ from vllm.model_executor.models.utils import maybe_prefix
 from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
 from vllm.v1.attention.backend import (
     AttentionBackend,
+    AttentionCGSupport,
     AttentionImpl,
     AttentionMetadataBuilder,
     AttentionType,
@@ -140,6 +141,10 @@ class CacheOnlyAttentionMetadata:
 class CacheOnlyAttentionMetadataBuilder(
     AttentionMetadataBuilder[CacheOnlyAttentionMetadata]
 ):
+    # The cache write is a branch-free, sync-free scatter, so it doesn't
+    # limit the CUDA graph mode of the target model.
+    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.ALWAYS
+
     def __init__(
         self,
         kv_cache_spec: AttentionSpec,
