@@ -398,6 +398,11 @@ class RustFrontendProcessManager:
         else:
             input_listener.close()
             output_listener.close()
+            # Rust owns these now; an open copy here keeps the ports listening
+            # after Rust closes them.
+            sock.close()
+            if grpc_sock is not None:
+                grpc_sock.close()
 
         # Create a process wrapper with a sentinel fd for monitoring
         self.processes: list[_SubprocessWrapper] = [
