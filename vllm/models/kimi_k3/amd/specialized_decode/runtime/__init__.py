@@ -209,11 +209,13 @@ def unsupported(vllm_config) -> list[str]:
         # K1 keeps a BF16 conv state and an FP32 recurrent state in place; it
         # maintains no ReplaySSM / RecoverSSM records
         (
-            MambaStateDtypeCalculator.kda_state_dtype(mc.dtype, cc.mamba_cache_dtype)
+            MambaStateDtypeCalculator.kda_state_dtype(
+                mc.dtype, cc.mamba_cache_dtype, cc.mamba_ssm_cache_dtype
+            )
             != (torch.bfloat16, torch.float32),
             (
                 "KDA cache dtypes other than a BF16 conv state and an FP32 recurrent "
-                "state (mamba cache dtype)"
+                "state (mamba cache dtype, mamba SSM cache dtype)"
             ),
         ),
         (cc.use_replayssm or cc.use_kda_recoverssm, "ReplaySSM / RecoverSSM"),

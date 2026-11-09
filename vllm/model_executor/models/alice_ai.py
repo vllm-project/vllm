@@ -682,6 +682,7 @@ class AliceAIForCausalLM(
         return MambaStateDtypeCalculator.kda_state_dtype(
             model_dtype=vllm_config.model_config.dtype,
             mamba_cache_dtype=vllm_config.cache_config.mamba_cache_dtype,
+            mamba_ssm_cache_dtype=vllm_config.cache_config.mamba_ssm_cache_dtype,
         )
 
     @classmethod

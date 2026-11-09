@@ -645,7 +645,9 @@ class BailingMoeV3KimiDeltaAttention(PluggableLayer, MambaBase):
         if self.model_config is None or self.cache_config is None:
             raise ValueError("model_config and cache_config must be set")
         return MambaStateDtypeCalculator.kda_state_dtype(
-            self.model_config.dtype, self.cache_config.mamba_cache_dtype
+            self.model_config.dtype,
+            self.cache_config.mamba_cache_dtype,
+            self.cache_config.mamba_ssm_cache_dtype,
         )
 
     def get_state_shape(
@@ -1115,7 +1117,9 @@ class BailingMoeV3KimiDeltaAttention(PluggableLayer, MambaBase):
                 lower_bound=self.lower_bound,
                 cu_seqlens=query_start_loc,
             )
-            recurrent_state_active[state_indices] = last_state
+            recurrent_state_active[state_indices] = last_state.to(
+                recurrent_state_active.dtype
+            )
         elif attn_metadata.num_decodes > 0:
             assert q is not None and k is not None and v is not None
             assert g1_non_spec is not None and beta_non_spec is not None
@@ -1487,6 +1491,7 @@ class BailingMoeV3ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsPP):
         return MambaStateDtypeCalculator.kda_state_dtype(
             vllm_config.model_config.dtype,
             vllm_config.cache_config.mamba_cache_dtype,
+            vllm_config.cache_config.mamba_ssm_cache_dtype,
         )
 
     @classmethod
