@@ -445,10 +445,14 @@ def test_falls_back_when_the_config_breaks_the_shard(
     assert runner._up_proj_shard_size == 0
 
 
-def _merged_front_moe(down_quant_method=None) -> SimpleNamespace:
+def _merged_front_moe(down_quant_method=None, num_experts=896) -> SimpleNamespace:
     moe = SimpleNamespace(
         gate=GateLinear(
-            HIDDEN_SIZE, 896, bias=False, out_dtype=torch.float32, prefix="gate"
+            HIDDEN_SIZE,
+            num_experts,
+            bias=False,
+            out_dtype=torch.float32,
+            prefix="gate",
         ),
         routed_expert_down_proj=ReplicatedLinear(
             HIDDEN_SIZE, LATENT_SIZE, bias=False, prefix="routed_expert_down_proj"
@@ -581,6 +585,9 @@ def test_shared_experts_take_the_activation(merged_front) -> None:
     )
 
 
-def test_merged_front_skips_a_quantized_down_proj(merged_front_env) -> None:
-    moe = _merged_front_moe(down_quant_method=object())
+@pytest.mark.parametrize(
+    "kwargs", [{"down_quant_method": object()}, {"num_experts": 384}]
+)
+def test_merged_front_skips_unsupported_layers(merged_front_env, kwargs) -> None:
+    moe = _merged_front_moe(**kwargs)
     assert moe.merged_front_weight is None

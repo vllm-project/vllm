@@ -504,7 +504,11 @@ class KimiMoE(nn.Module):
             return
         assert self.routed_expert_down_proj is not None
         layers = (shared.gate_up_proj, self.gate, self.routed_expert_down_proj)
-        if not all(
+        if [tuple(layer.weight.shape) for layer in layers] != [
+            (1536, 7168),
+            (896, 7168),
+            (3584, 7168),
+        ] or not all(
             isinstance(layer.quant_method, UnquantizedLinearMethod)
             and layer.weight.dtype == torch.bfloat16
             for layer in layers
