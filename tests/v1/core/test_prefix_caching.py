@@ -6440,8 +6440,44 @@ def test_swa_reachable_block_mask_final_partial_segment():
 
     assert reachable_blocks(300) == {248, 249}
     assert reachable_blocks(250) == {246, 247, 248, 249}
-    assert reachable_blocks(300, use_eagle=True) == {243, 247, 248, 249}
-    assert reachable_blocks(250, use_eagle=True) == {243, 247, 248, 249}
+    assert reachable_blocks(300, use_eagle=True) == {243, 248, 249}
+    assert reachable_blocks(250, use_eagle=True) == {243, 248, 249}
+
+
+def test_swa_reachable_block_mask_eagle_sibling_divergence():
+    """A sibling that diverges right after a segment boundary hits one alignment
+    unit lower, because the EAGLE peek block past the boundary is dropped when
+    the hit is taken. When a segment spans several alignment units, that run ends
+    a full unit below the boundary, so it must be retained as well; keeping only
+    the peek block would still lose the sibling's hit.
+    """
+    from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
+
+    block_size = 16
+    spec = SlidingWindowSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+        sliding_window=3 * block_size,  # need = 3, 4 with the EAGLE peek
+    )
+
+    def retained(use_eagle: bool) -> set[int]:
+        mask = SlidingWindowManager.reachable_block_mask(
+            start_block=0,
+            end_block=24,
+            alignment_tokens=2 * block_size,  # two blocks per alignment unit
+            kv_cache_spec=spec,
+            use_eagle=use_eagle,
+            retention_interval=8 * block_size,  # four alignment units per segment
+        )
+        assert mask is not None
+        return {i for i, v in enumerate(mask) if v}
+
+    # Per segment the tail is ``need`` blocks ending on the boundary; under
+    # EAGLE it also reaches one alignment unit (two blocks) below it.
+    assert retained(True) == {*range(3, 9), *range(11, 17), *range(19, 24)}
+    assert retained(False) == {5, 6, 7, 13, 14, 15, 21, 22, 23}
 
 
 def test_swa_reachable_block_mask_pins_shared_prefix():
