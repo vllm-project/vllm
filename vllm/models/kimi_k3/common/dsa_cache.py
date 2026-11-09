@@ -7,7 +7,7 @@ from dataclasses import replace
 
 import torch
 
-from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.config import VllmConfig
 from vllm.model_executor.layers.sparse_attn_indexer import MXFP4_BLOCK_SIZE
 from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 from vllm.platforms import current_platform
@@ -128,22 +128,9 @@ class KimiK3IndexerMetadataBuilder(DeepseekV32IndexerMetadataBuilder):
 class KimiK3IndexerBackend(DeepseekV32IndexerBackend):
     @staticmethod
     def get_supported_kernel_block_sizes(kv_cache_spec=None):
-        if kv_cache_spec is not None:
-            fp4 = kv_cache_spec.head_size == 68
-        else:
-            fp4 = (
-                get_current_vllm_config().attention_config.resolve_indexer_kv_dtype(
-                    "fp8"
-                )
-                == "mxfp4"
-            )
-        return (
-            [64]
-            if fp4
-            else DeepseekV32IndexerBackend.get_supported_kernel_block_sizes(
-                kv_cache_spec
-            )
-        )
+        # The packed indexer cache is block-flat; the FP4 and ROCm FP8 kernels
+        # tile it by 64 tokens.
+        return [64]
 
     @classmethod
     def supported_kv_cache_layouts(cls) -> tuple[KVCacheLayout, ...]:
