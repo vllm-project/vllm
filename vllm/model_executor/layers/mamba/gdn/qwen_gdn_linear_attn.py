@@ -1752,7 +1752,10 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 attn_metadata=attn_metadata,
             )
 
-        core_attn_out.zero_()
+        if self.gdn_prefill_backend != "aiter_flydsl" or not isinstance(
+            self.out_proj.quant_method, UnquantizedLinearMethod
+        ):
+            core_attn_out.zero_()
         num_tokens_all = qkvz.shape[0]
         mixed_qkv, z, b, a = self.prepare_gdn_attention_core_inputs(
             qkvz, ba, num_tokens_all
