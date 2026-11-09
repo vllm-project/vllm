@@ -381,13 +381,14 @@ build_ep_cmd() {
 }
 EOF
 )
-    if [[ "${KV_CONNECTOR:-}" == Nixl* ]]; then kv_cfg="$(nixl_kv_cfg)"; fi
     if [[ "${IS_MASTER}" == "1" ]]; then
         CMD+=(--api-server-count="${GPUS_PER_NODE}")
+        if [[ "${KV_CONNECTOR:-}" == Nixl* ]]; then kv_cfg="$(nixl_kv_cfg)"; fi
         CMD+=(--kv-transfer-config "${kv_cfg}")
         log "role=${ROLE} mode=ep MASTER node_rank=${NODE_RANK} dp_size=${DP_GROUP_SIZE} dp_addr=${DP_MASTER_ADDR} kv_role=${KV_ROLE} all2all=${backend} read_mode=${MORIIO_READ_MODE}"
     else
         CMD+=(--data-parallel-start-rank "${DP_START_RANK}" --headless)
+        if [[ "${KV_CONNECTOR:-}" == Nixl* ]]; then kv_cfg="$(nixl_kv_cfg)"; fi
         CMD+=(--kv-transfer-config "${kv_cfg}")
         log "role=${ROLE} mode=ep CHILD  node_rank=${NODE_RANK} dp_size=${DP_GROUP_SIZE} dp_start_rank=${DP_START_RANK} dp_addr=${DP_MASTER_ADDR} all2all=${backend}"
     fi
