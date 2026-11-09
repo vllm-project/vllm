@@ -1,12 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import json
-
 import pytest
 
 from vllm.config.cache import CacheConfig
 from vllm.platforms import current_platform
 
+from ..models.utils import check_logprobs_close
 from ..utils import (
     compare_two_settings,
     create_new_process_for_each_test,
@@ -57,41 +56,42 @@ def test_pp_cudagraph(
 
 @pytest.mark.skipif(
     not (current_platform.is_cuda() and current_platform.has_device_capability(90)),
-    reason="Below SM90, FlashInfer captures spec-decode batches without TRT-LLM",
+    reason="Below SM90, FlashInfer supports full CUDA graphs for spec-decode batches",
 )
 @create_new_process_for_each_test()
-def test_pp_cudagraph_mode_differs_across_stages():
-    """Each stage resolves its CUDA graph mode from its own attention layers.
+def test_pp_cudagraph_mode_differs_across_stages(vllm_runner, example_prompts):
+    """Pipeline stages with different CUDA graph modes match eager outputs.
 
-    Only the last stage holds the draft. Its FlashInfer attention cannot capture
-    spec-decode batches without TRT-LLM, so that stage falls back to PIECEWISE
-    while the first stage keeps FULL decode graphs. The last stage then pads
-    decode batches beyond the rows the first stage sends.
+    The draft model's attention layers are on the last stage only. FlashInfer
+    without TRT-LLM does not support full CUDA graphs for spec-decode batches, so
+    the last stage uses PIECEWISE and the first stage uses FULL decode graphs,
+    which pad decode batches to different sizes.
     """
-    speculative_config = {
-        "method": "eagle3",
-        "model": "RedHatAI/Qwen3-8B-speculator.eagle3",
-        "num_speculative_tokens": 2,
-        "attention_backend": "FLASHINFER",
-    }
-    common_args = [
-        "--pipeline-parallel-size",
-        "2",
-        "--distributed-executor-backend",
-        "mp",
-        "--max-model-len",
-        "2048",
-        "--attention-backend",
-        "TRITON_ATTN",
-        "--attention-config",
-        json.dumps({"use_trtllm_attention": False}),
-        "--speculative-config",
-        json.dumps(speculative_config),
-        "--load-format",
-        "auto",
-    ]
-    eager_args = common_args + ["--enforce-eager"]
+    outputs = {}
+    for enforce_eager in (True, False):
+        with vllm_runner(
+            "Qwen/Qwen3-8B",
+            trust_remote_code=False,
+            max_model_len=2048,
+            enforce_eager=enforce_eager,
+            pipeline_parallel_size=2,
+            distributed_executor_backend="mp",
+            compilation_config={"cudagraph_mode": "FULL_AND_PIECEWISE"},
+            attention_config={"backend": "TRITON_ATTN", "use_trtllm_attention": False},
+            speculative_config={
+                "method": "eagle3",
+                "model": "RedHatAI/Qwen3-8B-speculator.eagle3",
+                "num_speculative_tokens": 2,
+                "attention_backend": "FLASHINFER",
+            },
+        ) as llm:
+            outputs[enforce_eager] = llm.generate_greedy_logprobs(
+                example_prompts[:4], max_tokens=32, num_logprobs=5
+            )
 
-    compare_two_settings(
-        "Qwen/Qwen3-8B", eager_args, common_args, include_seeded_sampling=False
+    check_logprobs_close(
+        outputs_0_lst=outputs[True],
+        outputs_1_lst=outputs[False],
+        name_0="eager",
+        name_1="cudagraph",
     )

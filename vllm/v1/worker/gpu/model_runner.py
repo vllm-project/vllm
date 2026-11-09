@@ -2075,9 +2075,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 model_inputs["input_ids"] = None
             model_inputs["inputs_embeds"] = None
 
-            # Prepare the intermediate tensors. Each stage pads to its own CUDA
-            # graph sizes, so the previous stage may send fewer rows than this
-            # stage runs. Copy only the real tokens; the rest is padding.
+            # Prepare the intermediate tensors. CUDA graph padding can differ
+            # between pipeline stages, so copy only the unpadded tokens.
             assert intermediate_tensors is not None
             assert self.intermediate_tensors is not None
             if not dummy_run:
