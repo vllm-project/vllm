@@ -588,8 +588,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             return None
         return speculator.model
 
-    def reset_lora_state(self) -> None:
-        super().reset_lora_state()
+    def on_target_weights_replaced(self) -> None:
         # Called whenever the target's weights are replaced (reload, weight
         # transfer), so draft weights derived from them must follow.
         draft_model = self.get_draft_model()
@@ -609,7 +608,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         reload_weights(
             vllm_config, model, weights_iterator, weights_path, is_checkpoint_format
         )
-        self.reset_lora_state()
+        self.on_target_weights_replaced()
         self.reset_encoder_cache()
         self.reset_mm_cache()
 
@@ -709,8 +708,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 for layer_name in group.layer_names
             } - self.speculator.draft_attn_layer_names
         draft_attn_layer_names = None
+        slot_mapped_layers: set[str] = set()
         if isinstance(self.speculator, DraftModelSpeculator):
             draft_attn_layer_names = self.speculator.draft_attn_layer_names
+            if self.speculator.maps_slot_mapping:
+                # The speculator writes its layers through mapped slots, so their
+                # packed caches, bound here, may split into kernel blocks.
+                slot_mapped_layers = draft_attn_layer_names
         # Metadata builders select attention kernels that need JIT warmup.
         with self.jit_warmup_registry.activate():
             (
@@ -722,6 +726,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.vllm_config,
                 self.device,
                 draft_layer_names=draft_attn_layer_names,
+                slot_mapped_layers=slot_mapped_layers,
             )
         additional_attn_cg_support = self.model_state.get_additional_cg_support()
         attn_cg_support = attn_cg_support.narrow(*additional_attn_cg_support)
