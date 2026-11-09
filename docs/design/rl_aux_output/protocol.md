@@ -213,6 +213,8 @@ aux.release_session(job, session)  # after the session is consumed and the step 
   - a failed read fails the step collectively: all ranks all-reduce a success flag and retry or skip together;
   - decode on the GPU: copy the encoded indexer bytes and decode them where replay runs, in engine order (§1, indexer rows). A single CPU thread decoding numpy is the bottleneck of the whole path: about 180 MB/s, against more than 10 GB/s for the store's get. Decoded, one 512K request's indexer is about 8 GiB of int32, so decode it in position ranges, or on the CPU, when the GPU has no room for it.
 - **release** deletes everything under `<job>/<session>/` once the session will not grow, all reads are done and the step has committed: a release marker first, then force removal, a wait for the writers, and a second force removal (§8). The marker also makes writers drop the session's bookkeeping, so writer memory is bounded by live sessions.
+- **Every request's manifest stays readable until release**, not only the last one of a trajectory. A training sequence can be any request's prefix: a segment of a compacted rollout, a summary segment, or one sample per turn (state, action) as some recipes train. Read each with its own manifest reference, truncated to that sequence's length.
+- **Samples the trainer drops still release.** Timeouts, staleness filters, incomplete or zero-advantage groups and partial rollouts carried into a later step all end in `release_session` once the session will not be trained on, or the store keeps them until job end.
 - Retrying a failed step re-reads; rolling back to an earlier checkpoint requires regeneration; saving rollouts offline requires reading them inline first.
 
 ## 8. Driver
@@ -272,7 +274,11 @@ Training framework:
 | Scenario | What happens |
 |---|---|
 | Single-turn GRPO | n trajectories, one session; prompt blocks stored once per version |
-| Multi-turn agent | one trajectory; each turn writes only new blocks; the last manifest covers the sequence |
+| Multi-turn agent | one trajectory; each turn writes only new blocks; the last manifest covers the sequence, every earlier manifest its own prefix |
+| One sample per turn (state, action) | each request's manifest is read for its own turn; blocks of the shared prefix are stored once |
+| Sub-agents trained as their own sequences | each sub-agent is a trajectory of the rollout's session; its rows never mix with the caller's |
+| Prefix tree of continuation and summary branches | each branch is a trajectory with a parent at the compaction point; leaves are read with their own manifests |
+| Partial rollouts across training steps | the session stays admitted until its last trajectory is consumed; every row carries its version |
 | Forks / tree search | each branch is a trajectory with a parent; parent blocks shared |
 | Weights updated between turns | each turn's rows labelled with their version; a block recomputed at another version by another trajectory gets its own copy |
 | In-flight weight update | pause, reset, stash running requests, bump the version, resume |
@@ -288,6 +294,9 @@ Training framework:
 | Job end | delete by job prefix, report the count |
 
 ## 12. Known limits
+
+- **Teacher scoring at prompt positions.** On-policy distillation runs a teacher over the student's sequence as a prompt and needs the teacher's top-k logprobs (or hidden states) at those prompt positions. Top-k and hidden states are captured at generated positions only; prompt positions need a capture over `[aux_start, P)` stored like blocks.
+- **Contexts that are not append-only** (history reasoning dropped, rewritten or truncated context) re-prefill from the rewrite point every turn: rows are correct, but prefix reuse and the decode-end snapshot do not apply, and the full-deep cost grows with every rewritten turn.
 
 - **A prefix hit does not say which computation produced the KV it hits.** The session's first copy of a block is listed for every hit on that hash. This is wrong only if all three of the following happen: the KV of the first computation is evicted from every cache tier; another trajectory recomputes the block at a different weight version (it keeps its own copy, and its KV is now the cached one); and a third trajectory hits that KV. Two fixes are possible. One is to follow vLLM's KV cache events (stored / removed, per block hash) so the worker knows which object the cached KV belongs to. The other is to carry R3 in the KV cache itself (#64383), which makes rows follow the KV by construction. The indexer would still need the first.
 - **Partial capture, window-carrying KV loads.** The worker takes a request's first captured position as its replay start. A KV load that restores the sliding window computes from the hit without replaying, so its exact cells are masked and reported in `uncovered`, not delivered. The scheduler's replay start has to reach the worker to fix this. Such loads are not used with the P-S design.
