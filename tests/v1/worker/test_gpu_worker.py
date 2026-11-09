@@ -185,6 +185,31 @@ def test_scoped_max_split_keeps_freed_large_blocks_releasable():
     or torch.cuda.memory.get_allocator_backend() != "native",
     reason="needs the native CUDA or ROCm allocator",
 )
+@create_new_process_for_each_test("spawn")
+def test_scoped_max_split_reuses_freed_small_tensor_segments():
+    """Freed 1-10 MiB tensors (20 MiB segments) must be reused under load_model's
+    limit, not stranded: a loader that yields many of them filled the device."""
+    torch.accelerator.empty_cache()
+    with gpu_worker.Worker._scoped_allocator_max_split(
+        SimpleNamespace(), gpu_worker._MAX_SPLIT_SIZE_MB
+    ):
+        before = torch.accelerator.memory_reserved()
+        for i in range(100):
+            tensor = torch.empty(
+                (1 + i % 9) * 1024 * 1024 + 4096, dtype=torch.uint8, device="cuda"
+            )
+            del tensor
+        grown = torch.accelerator.memory_reserved() - before
+    # One segment is enough; at max_split_size_mb:20 this grows by 2000 MiB.
+    assert grown <= 20 * 1024 * 1024
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike()
+    or not torch.accelerator.is_available()
+    or torch.cuda.memory.get_allocator_backend() != "native",
+    reason="needs the native CUDA or ROCm allocator",
+)
 @pytest.mark.parametrize("fail", [False, True])
 @pytest.mark.parametrize("snapshot_fallback", [False, True])
 @pytest.mark.parametrize("suffix", ["", ", "])

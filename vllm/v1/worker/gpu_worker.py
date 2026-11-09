@@ -212,6 +212,11 @@ class AsyncIntermediateTensors(IntermediateTensors):
         return object.__getattribute__(self, name)
 
 
+# Above PyTorch's 20 MiB segment for 1-10 MiB requests: at 20 a freed segment
+# is oversize, is never reused, and fills the device.
+_MAX_SPLIT_SIZE_MB = 21
+
+
 class Worker(WorkerBase):
     def __init__(
         self,
@@ -598,8 +603,7 @@ class Worker(WorkerBase):
         with (
             self._maybe_get_memory_pool_context(tag="weights"),
             set_current_vllm_config(self.vllm_config),
-            # 20 MiB is the minimum PyTorch allows for max_split_size_mb.
-            self._scoped_allocator_max_split(max_split_size_mb=20),
+            self._scoped_allocator_max_split(max_split_size_mb=_MAX_SPLIT_SIZE_MB),
             self._external_weight_charges.track(),
         ):
             self.model_runner.load_model(load_dummy_weights=load_dummy_weights)
@@ -728,7 +732,7 @@ class Worker(WorkerBase):
             # counted as consumed and taken from the KV cache. Blocks above the
             # limit are never split, so they stay releasable. Exits before
             # memory_profiling measures, restoring the original limit.
-            self._scoped_allocator_max_split(max_split_size_mb=20),
+            self._scoped_allocator_max_split(max_split_size_mb=_MAX_SPLIT_SIZE_MB),
             set_current_vllm_config(self.vllm_config),
         ):
             self.model_runner.profile_run(randomize_inputs=self.randomize_dummy_inputs)
