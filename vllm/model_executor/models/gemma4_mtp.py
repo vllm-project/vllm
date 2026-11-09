@@ -7,7 +7,7 @@ with the target (backbone) model.  All assistant decoder layers are
 KV-shared: they only have Q projections (no K/V projections or norms),
 and read K/V from the target model's cache at runtime.
 
-Checkpoint layout (``gemma4_assistant``)::
+Checkpoint layout (`gemma4_assistant`)::
 
     model.embed_tokens.*          -- token embeddings
     model.layers.{i}.*            -- decoder layers (Q-only attention + MLP)
@@ -152,7 +152,7 @@ class Gemma4MTPAttention(nn.Module):
     """Q-only attention for Gemma4 MTP layers.
 
     K/V come from the target model's KV cache via
-    ``kv_sharing_target_layer_name`` (set by the proposer after
+    `kv_sharing_target_layer_name` (set by the proposer after
     model construction).
     """
 
@@ -220,7 +220,7 @@ class Gemma4MTPAttention(nn.Module):
         )
 
         # kv_sharing_target_layer_name is set after model construction
-        # by Gemma4Proposer._setup_gemma4_kv_sharing().
+        # by Gemma4Speculator._setup_gemma4_kv_sharing().
         self.is_kv_shared_layer = True
         self.attn = Attention(
             self.num_heads,

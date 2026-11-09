@@ -10,6 +10,7 @@ from compressed_tensors.quantization import (
     QuantizationStrategy,
 )
 
+import vllm._cpu_ops as cpu_ops
 import vllm._custom_ops as ops
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import envs
@@ -30,6 +31,10 @@ from vllm.model_executor.layers.fused_moe.experts.triton_moe import (
 )
 from vllm.model_executor.layers.fused_moe.experts.trtllm_mxint4_moe import (
     TrtLlmMxint4ExpertsMonolithic,
+)
+from vllm.model_executor.layers.fused_moe.oracle.base import (
+    MoEKernelOracle,
+    make_moe_kernel,
 )
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.layers.quantization.utils.humming import prioritize_humming
@@ -277,6 +282,17 @@ def map_wna16_backend(runner_backend: MoEBackend) -> WNA16MoEBackend:
     )
 
 
+class WNA16MoEKernelOracle(MoEKernelOracle[WNA16MoEBackend]):
+    """WNA16 MoE backend selection for one deployment configuration."""
+
+    name = "WNA16"
+
+    def backend_to_kernel_cls(
+        self, backend: WNA16MoEBackend
+    ) -> list[type[mk.FusedMoEExperts]]:
+        return backend_to_kernel_cls(backend)
+
+
 def select_wna16_moe_backend(
     config: FusedMoEConfig,
     weight_key: QuantKey,
@@ -288,7 +304,7 @@ def select_wna16_moe_backend(
     """Select the WNA16 MoE backend.
 
     Args:
-        config: the shared ``FusedMoEConfig`` for this layer.
+        config: the shared `FusedMoEConfig` for this layer.
         weight_key: The QuantKey describing the weight quantization.
                     Must have int4 or int8 type.
         quant_config: Quantization structure and checkpoint format description.
@@ -298,41 +314,11 @@ def select_wna16_moe_backend(
             up to a tile boundary may be selected.
 
     Returns:
-        A tuple of (``WNA16MoEBackend``, experts class or ``None``).
+        A tuple of (`WNA16MoEBackend`, experts class or `None`).
 
     """
-    activation_format = config.activation_format
-
-    def _make_log_backend(backend: WNA16MoEBackend):
-        return f"Using '{backend.value}' WNA16 MoE backend."
-
-    def _make_log_unsupported(backend: WNA16MoEBackend, reason: str | None) -> str:
-        if reason:
-            return (
-                f"WNA16 MoE backend '{backend.value}' does not support the "
-                f"deployment configuration since {reason}."
-            )
-        return (
-            f"WNA16 MoE backend '{backend.value}' does not support the "
-            "deployment configuration."
-        )
-
-    def _return_or_raise(
-        backend: WNA16MoEBackend,
-        config: FusedMoEConfig,
-        weight_key: QuantKey | None,
-        activation_key: QuantKey | None,
-        activation_format: mk.FusedMoEActivationFormat,
-    ) -> tuple[WNA16MoEBackend, type[mk.FusedMoEExperts]]:
-        reason: str | None = None
-        for k_cls in backend_to_kernel_cls(backend):
-            supported, reason = k_cls.is_supported_config(
-                k_cls, config, weight_key, activation_key, activation_format
-            )
-            if supported:
-                logger.info_once(_make_log_backend(backend), scope="local")
-                return backend, k_cls
-        raise ValueError(_make_log_unsupported(backend, reason))
+    # WNA16 MoE always runs BF16 activations.
+    oracle = WNA16MoEKernelOracle(config, weight_key, None)
 
     # Handle explicit moe_backend from user.
     runner_backend = config.moe_backend
@@ -347,10 +333,8 @@ def select_wna16_moe_backend(
             allow_tile_padding,
         )
         if reason is not None:
-            raise ValueError(_make_log_unsupported(requested_backend, reason))
-        return _return_or_raise(
-            requested_backend, config, weight_key, None, activation_format
-        )
+            raise ValueError(oracle.make_log_unsupported(requested_backend, reason))
+        return oracle.return_or_raise(requested_backend)
 
     # Select kernels in order of backend.
     AVAILABLE_BACKENDS = _get_priority_backends()
@@ -365,18 +349,12 @@ def select_wna16_moe_backend(
             allow_tile_padding,
         )
         if reason is not None:
-            logger.debug_once(_make_log_unsupported(backend, reason), scope="local")
+            logger.debug_once(oracle.make_log_unsupported(backend, reason))
             continue
-        activation_key = None  # always BF16 activation for WNA16 MoE
-        for k_cls in backend_to_kernel_cls(backend):
-            supported, reason = k_cls.is_supported_config(
-                k_cls, config, weight_key, activation_key, activation_format
-            )
-            if supported:
-                logger.info_once(_make_log_backend(backend), scope="local")
-                return backend, k_cls
-            else:
-                logger.debug_once(_make_log_unsupported(backend, reason), scope="local")
+        kernel_cls, _ = oracle.try_backend(backend)
+        if kernel_cls is not None:
+            logger.info_once(oracle.make_log_backend(backend))
+            return backend, kernel_cls
 
     raise NotImplementedError(
         "No WNA16 MoE backend supports the deployment configuration."
@@ -433,9 +411,6 @@ def make_wna16_moe_kernel(
     backend: WNA16MoEBackend = WNA16MoEBackend.MARLIN,
     routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
 ) -> mk.FusedMoEKernel:
-    from vllm.model_executor.layers.fused_moe.all2all_utils import (
-        maybe_make_prepare_finalize,
-    )
     from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
         CPUExpertsInt4,
     )
@@ -471,36 +446,12 @@ def make_wna16_moe_kernel(
         allowed_experts += tuple(backend_to_kernel_cls(WNA16MoEBackend.HUMMING))
     assert experts_cls in allowed_experts
 
-    is_monolithic = experts_cls.is_monolithic()
-
-    prepare_finalize = maybe_make_prepare_finalize(
-        moe=moe_config,
-        quant_config=moe_quant_config,
-        routing_tables=routing_tables,
-        allow_new_interface=True,
-        use_monolithic=is_monolithic,
-    )
-    assert prepare_finalize is not None
-
-    logger.info_once("Using %s", prepare_finalize.__class__.__name__, scope="local")
-    logger.info_once("Using %s", experts_cls.__name__, scope="local")
-
-    extra_args: dict[str, Any] = {}
-    if prepare_finalize.activation_format.is_batched:
-        max_num_tokens = prepare_finalize.max_num_tokens_per_rank()
-        assert max_num_tokens is not None
-        extra_args["max_num_tokens"] = max_num_tokens
-        extra_args["num_dispatchers"] = prepare_finalize.num_dispatchers()
-
-    experts = experts_cls(
-        moe_config=moe_config,
-        quant_config=moe_quant_config,
-        **extra_args,
-    )
-
-    return mk.FusedMoEKernel(
-        prepare_finalize,
-        experts,
+    return make_moe_kernel(
+        moe_quant_config,
+        moe_config,
+        experts_cls,
+        routing_tables,
+        experts_log="Using %s",
     )
 
 
@@ -530,7 +481,7 @@ def _process_weights_flashinfer(
 
     Steps
     -----
-    1. Transform weights/scales via ``prepare_static_weights_for_trtllm_mxint4_moe``.
+    1. Transform weights/scales via `prepare_static_weights_for_trtllm_mxint4_moe`.
     2. Return transformed tensors and biases.
     """
     from vllm.model_executor.layers.quantization.utils.flashinfer_mxint4_moe import (
@@ -557,8 +508,8 @@ def _process_weights_flashinfer(
 
 
 def _pad_w13_shard_cols(x: torch.Tensor, unit: int, padded_unit: int) -> torch.Tensor:
-    """Zero-pad each of the two gate/up shards of a ``(E, rows, 2 * unit)``
-    tensor along its last dim, from ``unit`` to ``padded_unit`` columns."""
+    """Zero-pad each of the two gate/up shards of a `(E, rows, 2 * unit)`
+    tensor along its last dim, from `unit` to `padded_unit` columns."""
     if padded_unit == unit:
         return x
     e, rows, _ = x.shape
@@ -568,14 +519,14 @@ def _pad_w13_shard_cols(x: torch.Tensor, unit: int, padded_unit: int) -> torch.T
 
 
 def _pad_rows(x: torch.Tensor, padded_rows: int) -> torch.Tensor:
-    """Zero-pad a ``(E, rows, cols)`` tensor to ``padded_rows`` rows."""
+    """Zero-pad a `(E, rows, cols)` tensor to `padded_rows` rows."""
     if padded_rows == x.size(1):
         return x
     return torch.nn.functional.pad(x, (0, 0, 0, padded_rows - x.size(1)))
 
 
 def _pad_w13_bias(bias: torch.Tensor, n: int, padded_n: int) -> torch.Tensor:
-    """Zero-pad each gate/up shard of a ``(E, 2 * n)`` bias to ``padded_n``."""
+    """Zero-pad each gate/up shard of a `(E, 2 * n)` bias to `padded_n`."""
     if padded_n == n:
         return bias
     e = bias.size(0)
@@ -610,12 +561,12 @@ def _process_weights_marlin(
     """Standard Marlin weight post-processing shared by MARLIN and
     BATCHED_MARLIN backends.
 
-    Inputs arrive in canonical N-first layout ``[E, N, K_packed]``.
+    Inputs arrive in canonical N-first layout `[E, N, K_packed]`.
 
     Steps
     -----
     1. Transpose canonical N-first to K-first for Marlin.
-    2. Repack weights via ``gptq_marlin_moe_repack``.
+    2. Repack weights via `gptq_marlin_moe_repack`.
     3. Permute scales.
     4. Permute bias tensors.
     """
@@ -860,8 +811,8 @@ def _process_weights_rdna3(
     """RDNA3 (gfx1100) W4A16 weight post-processing.
 
     Transposes the canonical N-first inputs to the K-first layout of
-    ``moe_gptq_gemm_rdna3`` (weights ``[E, K // 8, N]``, scales
-    ``[E, groups, N]``), interleaves the packed nibbles per expert (the exllama
+    `moe_gptq_gemm_rdna3` (weights `[E, K // 8, N]`, scales
+    `[E, groups, N]`), interleaves the packed nibbles per expert (the exllama
     shuffle the dense RDNA3 kernel also uses) and synthesizes the symmetric
     zero points the kernel dequantizes with.
     """
@@ -932,7 +883,7 @@ def _process_weights_cpu(
     )
 
     if isinstance(quant_config, AutoAWQConfig):
-        cpu_quant_algo = ops.CPUQuantAlgo.AWQ
+        cpu_quant_algo = cpu_ops.CPUQuantAlgo.AWQ
     elif isinstance(quant_config, (AutoGPTQConfig, QuantizationArgs)):
         if isinstance(quant_config, AutoGPTQConfig) and quant_config.desc_act:
             raise NotImplementedError(
@@ -940,7 +891,7 @@ def _process_weights_cpu(
                 "desc_act=True. The fused MoE kernel has no activation "
                 "reordering support."
             )
-        cpu_quant_algo = ops.CPUQuantAlgo.GPTQ
+        cpu_quant_algo = cpu_ops.CPUQuantAlgo.GPTQ
         # Canonical N-first → K-first for CPU kernel.
         w13 = w13.transpose(1, 2).contiguous()
         w2 = w2.transpose(1, 2).contiguous()
@@ -1003,8 +954,8 @@ def _process_weights_cpu(
 def _zen_decode_weight(
     packed: torch.Tensor, in_features: int, num_bits: int
 ) -> torch.Tensor:
-    """Decode a CT ``[E, N, K//pack_factor]`` weight into the layout the op
-    reads: packed s4 ``[E, N, K//8]`` for int4, plain s8 ``[E, N, K]`` for
+    """Decode a CT `[E, N, K//pack_factor]` weight into the layout the op
+    reads: packed s4 `[E, N, K//8]` for int4, plain s8 `[E, N, K]` for
     int8. The trailing dim is what makes the op pick DA8W4 over DA8W8."""
     from vllm.model_executor.kernels.linear.mixed_precision.zentorch import (
         _import_unpack_from_int32,
@@ -1081,7 +1032,7 @@ def _process_weights_xpu(
     """Repack INT4 MoE weights into the layout
     `vllm_xpu_kernels.fused_moe_interface.xpu_fused_moe(is_int4=True)` expects.
 
-    Inputs arrive in canonical N-first layout ``[E, N, K_packed]`` int32.
+    Inputs arrive in canonical N-first layout `[E, N, K_packed]` int32.
     The int32 → uint8 view recovers sequential int4-packed bytes along
     the input dim.  Each packed int32 holds 8 nibbles in ascending K order;
     on a little-endian host the view exposes them as two nibbles per byte
@@ -1471,25 +1422,25 @@ def convert_to_wna16_moe_kernel_format(
     """Dispatch weight post-processing to the appropriate per-backend handler.
 
     All non-AWQ frontends must supply weights and scales in N-first
-    canonical layout ``[E, N_out, K_packed]``.  AWQ uses a different
+    canonical layout `[E, N_out, K_packed]`.  AWQ uses a different
     packing axis and is handled by dedicated per-backend helpers.
 
-    To add a new backend, implement a ``_process_weights_<name>`` helper and
+    To add a new backend, implement a `_process_weights_<name>` helper and
     add a branch here. Backends that rewrite the layer's parameters in place
-    (e.g. Humming) return ``None``; the caller then skips the param scatter.
+    (e.g. Humming) return `None`; the caller then skips the param scatter.
 
     Args:
-        backend: the selected ``WNA16MoEBackend``.
-        layer: the ``MoERunner`` layer whose parameters are being prepared.
-        quant_config: the ``QuantizationConfig`` for this layer.
+        backend: the selected `WNA16MoEBackend`.
+        layer: the `MoERunner` layer whose parameters are being prepared.
+        quant_config: the `QuantizationConfig` for this layer.
         w13: fused gate/up expert weights.
         w2: down-projection expert weights.
-        w13_scale: quantization scales for ``w13``.
-        w2_scale: quantization scales for ``w2``.
-        w13_qzeros: optional zero points for ``w13``.
-        w2_qzeros: optional zero points for ``w2``.
-        w13_bias: optional bias for ``w13``.
-        w2_bias: optional bias for ``w2``.
+        w13_scale: quantization scales for `w13`.
+        w2_scale: quantization scales for `w2`.
+        w13_qzeros: optional zero points for `w13`.
+        w2_qzeros: optional zero points for `w2`.
+        w13_bias: optional bias for `w13`.
+        w2_bias: optional bias for `w2`.
 
     """
     if backend == WNA16MoEBackend.HUMMING:
