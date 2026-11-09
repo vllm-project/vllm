@@ -395,8 +395,8 @@ def _pixel_shuffle(x, scale_factor=0.5):
 class PixelShuffleAdapter(nn.Module):
     """Legacy adapter: NHWC pixel-shuffle spatial merge + LayerNorm + 2-layer MLP.
 
-    Mirrors ``cybertron`` ``FCAdapter(pool_kind='pixel_shuffle', proj_kind='mlp2x_ln_gelu')``.
-    State-dict keys: ``proj.0`` (LayerNorm of in_dim*merge**2), ``proj.1`` / ``proj.3`` (Linear).
+    Mirrors `cybertron` `FCAdapter(pool_kind='pixel_shuffle', proj_kind='mlp2x_ln_gelu')`.
+    State-dict keys: `proj.0` (LayerNorm of in_dim*merge**2), `proj.1` / `proj.3` (Linear).
     """
 
     def __init__(self, config: DotsMoEVitConfig):
@@ -438,12 +438,12 @@ class PixelShuffleAdapter(nn.Module):
 
 
 class PatchMergerAdapter(nn.Module):
-    """Cybertron ``PatchMerger`` (``pool_kind='patch_merger', proj_kind='identity'``).
+    """Cybertron `PatchMerger` (`pool_kind='patch_merger', proj_kind='identity'`).
 
-    Assumes the encoder output is already laid out in ``merge_size``x``merge_size`` groups
-    (qwen ``pre_pixel_shuffle`` preprocessor + RoPE grouped accordingly), so merging is a
-    simple ``view(-1, merge**2 * in_dim)`` of consecutive tokens. State-dict layout matches
-    cybertron's ``PatchMerger`` (``ln_q`` over the per-token dim, ``mlp.0`` / ``mlp.2`` Linear).
+    Assumes the encoder output is already laid out in `merge_size`x`merge_size` groups
+    (qwen `pre_pixel_shuffle` preprocessor + RoPE grouped accordingly), so merging is a
+    simple `view(-1, merge**2 * in_dim)` of consecutive tokens. State-dict layout matches
+    cybertron's `PatchMerger` (`ln_q` over the per-token dim, `mlp.0` / `mlp.2` Linear).
     """
 
     def __init__(self, config: DotsMoEVitConfig):
