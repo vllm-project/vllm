@@ -53,6 +53,7 @@ from vllm.transformers_utils.model_arch_config_convertor import (
     MODEL_ARCH_CONFIG_CONVERTORS,
     ModelArchConfigConvertorBase,
 )
+from vllm.transformers_utils.processor import processor_has_attr
 from vllm.transformers_utils.repo_utils import resolve_revision
 from vllm.transformers_utils.runai_utils import ObjectStorageModel, is_runai_obj_uri
 from vllm.transformers_utils.utils import maybe_model_redirect
@@ -1174,6 +1175,14 @@ class ModelConfig:
                 cls += "EmbeddingModel"
             elif task == "classify":
                 cls += "ForSequenceClassification"
+        elif cls == "TransformersMultiModal" and processor_has_attr(
+            self.model,
+            self.hf_config.model_type,
+            "apply_transcription_request",
+            revision=self.revision,
+            trust_remote_code=self.trust_remote_code,
+        ):
+            cls += "ForTranscription"
         else:
             cls += "ForCausalLM"
         return cls
