@@ -82,7 +82,10 @@ def unsupported(vllm_config: VllmConfig) -> list[str]:
     compilation = vllm_config.compilation_config
     cudagraph_mode = compilation.cudagraph_mode
     requirements = {
-        "a GB300 (SM103) GPU": current_platform.is_device_capability(103),
+        "an SM103 or SM107 GPU": (
+            current_platform.is_device_capability(103)
+            or current_platform.is_device_capability(107)
+        ),
         "tensor parallel size 4 without pipeline, data, expert or context "
         "parallelism or micro-batching": (
             parallel.tensor_parallel_size == 4

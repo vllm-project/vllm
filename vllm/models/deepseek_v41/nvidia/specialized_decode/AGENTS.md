@@ -12,7 +12,9 @@ model keeps its stock paths.
 target model is built. Any deployment other than the one below raises at
 startup on every TP rank with the missing requirements:
 
-- GPU: GB300 (SM103).
+- GPU: SM103 (GB300) or SM107. The MXFP8 GEMM tactics were chosen on SM103
+  and are pinned there only: on SM107 those GEMMs tune over every tactic and
+  the wide low-latency MXFP8 GEMM above 8 rows stays off.
 - Parallelism: TP=4; no pipeline, data, expert or context parallelism, no
   micro-batching.
 - Speculative decoding: DSpark, without adaptive verification.

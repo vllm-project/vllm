@@ -24,7 +24,7 @@ they arrive, and two stock runs already differ. Prefill
 positions are compared before the decoder's bounded replay only, which runs
 the later layers of a prefill step on each request's last tokens.
 
-Needs four GB300 (SM103) GPUs; about 10 minutes, mostly two engine starts.
+Needs four SM103 (GB300) or SM107 GPUs; about 10 minutes, mostly two engine starts.
 """
 
 import zlib
@@ -476,8 +476,11 @@ def _check_close(got: dict, want: dict, keys: list, layers, output: bool) -> Non
 
 @pytest.mark.distributed(num_gpus=4)
 @pytest.mark.skipif(
-    not current_platform.is_device_capability(103),
-    reason="decode_backend=latency_specialized runs on GB300 (SM103)",
+    not (
+        current_platform.is_device_capability(103)
+        or current_platform.is_device_capability(107)
+    ),
+    reason="decode_backend=latency_specialized runs on SM103 or SM107",
 )
 def test_specialized_decode_matches_the_model(vllm_runner, tmp_path):
     if torch.accelerator.device_count() < 4:
