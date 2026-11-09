@@ -19,6 +19,12 @@ from torch.nn import functional as F
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutedsl_batched_moe import (  # noqa: E501
     flashinfer_cutedsl_moe_masked,
+    flashinfer_cutedsl_mxfp8_moe_masked,
+    swizzle_mxfp8_moe_weight_scales,
+)
+from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+    dequant_mxfp8_to_bf16,
+    mxfp8_e4m3_quantize,
 )
 from vllm.utils.flashinfer import (
     flashinfer_cutedsl_grouped_gemm_nt_masked as cutedsl_gmm_masked,
@@ -521,6 +527,70 @@ def test_flashinfer_cutedsl_moe_masked(
     )
 
 
+def quant_dequant_mxfp8(x: torch.Tensor) -> torch.Tensor:
+    x_q, x_s = mxfp8_e4m3_quantize(x)
+    return dequant_mxfp8_to_bf16(x_q, x_s.view(*x.shape[:-1], -1))
+
+
+@pytest.mark.parametrize(
+    "num_experts, max_m, hidden_dim, inter_dim",
+    [(8, 64, 256, 128), (16, 128, 512, 384)],
+)
+@torch.inference_mode()
+def test_flashinfer_cutedsl_mxfp8_moe_masked(
+    num_experts: int, max_m: int, hidden_dim: int, inter_dim: int
+):
+    torch.manual_seed(42)
+    device = "cuda"
+    hidden_states = torch.randn(
+        num_experts, max_m, hidden_dim, dtype=torch.bfloat16, device=device
+    )
+    # Empty, partially filled and full experts.
+    masked_m = torch.randint(
+        0, max_m + 1, (num_experts,), dtype=torch.int32, device=device
+    )
+    masked_m[0], masked_m[-1] = 0, max_m
+    w1 = torch.randn(
+        num_experts, 2 * inter_dim, hidden_dim, dtype=torch.bfloat16, device=device
+    ) / (hidden_dim**0.5)
+    w2 = torch.randn(
+        num_experts, hidden_dim, inter_dim, dtype=torch.bfloat16, device=device
+    ) / (inter_dim**0.5)
+    w1_fp8, w1_scale = mxfp8_e4m3_quantize(w1)
+    w2_fp8, w2_scale = mxfp8_e4m3_quantize(w2)
+    w1_fp8 = w1_fp8.view(num_experts, 2 * inter_dim, hidden_dim)
+    w1_scale = w1_scale.view(num_experts, 2 * inter_dim, hidden_dim // 32)
+    w2_fp8 = w2_fp8.view(num_experts, hidden_dim, inter_dim)
+    w2_scale = w2_scale.view(num_experts, hidden_dim, inter_dim // 32)
+
+    out = torch.empty_like(hidden_states)
+    flashinfer_cutedsl_mxfp8_moe_masked(
+        hidden_states,
+        w1_fp8,
+        swizzle_mxfp8_moe_weight_scales(w1_scale),
+        w2_fp8,
+        swizzle_mxfp8_moe_weight_scales(w2_scale),
+        masked_m,
+        torch.empty(
+            num_experts, max_m, 2 * inter_dim, dtype=torch.bfloat16, device=device
+        ),
+        out,
+    )
+
+    # reference: both GEMM inputs are MXFP8 quantize-dequantized and the gate/up
+    # output is rounded to bf16, as in the kernel.
+    w1_ref = dequant_mxfp8_to_bf16(w1_fp8, w1_scale).float()
+    w2_ref = dequant_mxfp8_to_bf16(w2_fp8, w2_scale).float()
+    for i, m in enumerate(masked_m.tolist()):
+        if m == 0:
+            continue
+        gate_up = quant_dequant_mxfp8(hidden_states[i, :m]).float() @ w1_ref[i].T
+        gate_up = gate_up.to(torch.bfloat16)
+        act = F.silu(gate_up[:, :inter_dim].float()) * gate_up[:, inter_dim:]
+        ref = quant_dequant_mxfp8(act.to(torch.bfloat16)).float() @ w2_ref[i].T
+        torch.testing.assert_close(out[i, :m], ref.to(out.dtype), atol=3e-2, rtol=5e-2)
+
+
 @pytest.mark.parametrize(
     "bs, hidden_dim, inter_dim, topk", [(2, 128, 256, 2), (16, 128, 512, 5)]
 )
@@ -583,4 +653,5 @@ def test_grouped_gemm_nt_masked(
 
 if __name__ == "__main__":
     test_flashinfer_cutedsl_moe_masked(16, 128, 512, 4)
+    test_flashinfer_cutedsl_mxfp8_moe_masked(16, 128, 512, 384)
     test_grouped_gemm_nt_masked(16, 128, 512, 4)
