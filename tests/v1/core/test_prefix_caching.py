@@ -144,7 +144,7 @@ def make_kv_cache_manager(
     config (LCM of group block sizes) unless explicitly provided. This mirrors
     `resolve_kv_cache_block_sizes` for the non-context-parallel case used by
     these tests, so callers don't have to pass it at every site. With
-    ``vllm_config``, a HiSparseConnector builds the HiSparse coordinator."""
+    `vllm_config`, a HiSparseConnector builds the HiSparse coordinator."""
     if (
         kwargs.get("use_eagle", False)
         and mark_eagle_group
