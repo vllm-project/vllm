@@ -233,13 +233,19 @@ def _run_sparse_mla_decode_autotune_v2(
     FlashInfer owns persistence; some sparse kernels use a separate calibration
     cache instead of managed winner entries.
     """
-    from flashinfer import autotune_v2, autotune_v2_reload
+    from flashinfer import autotune_v2
+    from flashinfer.autotuner import set_autotune_process_group
 
-    from vllm.distributed.parallel_state import get_world_group
+    from vllm.distributed.parallel_state import (
+        get_pp_group,
+        get_tp_group,
+        get_world_group,
+    )
 
     runner = worker.model_runner
     world = get_world_group()
-    cache_root = resolve_flashinfer_autotune_v2_root()
+    tune_group = get_tp_group() if get_pp_group().world_size > 1 else world
+    cache_root = resolve_flashinfer_autotune_v2_root(runner)
     if world.rank_in_group == 0:
         logger.info(
             "Autotuning FlashInfer SM120 sparse MLA %s decode with the managed "
@@ -248,27 +254,30 @@ def _run_sparse_mla_decode_autotune_v2(
             cache_root if cache_root is not None else "flashinfer default",
         )
 
-    with torch.inference_mode():
-        if runner.max_num_reqs >= 2:
-            warmup_executed = run_mixed_prefill_decode_warmup(
-                runner,
-                worker.execute_model,
-                worker.sample_tokens,
-                num_tokens,
-                mixed_step_context=autotune_v2(mode="tune", cache_root=cache_root),
-                req_id_prefix="_sparse_mla_v2_warmup",
-            )
-        else:
-            warmup_executed = True
-            with autotune_v2(mode="tune", cache_root=cache_root):
-                runner._dummy_run(**dummy_run_kwargs)
+    group = tune_group.cpu_group if tune_group.world_size > 1 else None
+    set_autotune_process_group(group)
+    try:
+        with torch.inference_mode():
+            if runner.max_num_reqs >= 2:
+                warmup_executed = run_mixed_prefill_decode_warmup(
+                    runner,
+                    worker.execute_model,
+                    worker.sample_tokens,
+                    num_tokens,
+                    mixed_step_context=autotune_v2(mode="tune", cache_root=cache_root),
+                    req_id_prefix="_sparse_mla_v2_warmup",
+                )
+            else:
+                warmup_executed = True
+                with autotune_v2(mode="tune", cache_root=cache_root):
+                    runner._dummy_run(**dummy_run_kwargs)
+    finally:
+        set_autotune_process_group(None)
 
     if not warmup_executed:
         return False
 
     if world.world_size > 1:
-        world.barrier()
-        autotune_v2_reload()
         world.barrier()
     return True
 
