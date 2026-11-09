@@ -148,7 +148,7 @@ def register_omni_processor(cls: type) -> type:
 class MuseSparkOmniMixin:
     """The Omni towers, their embedding merge and their weight mapping.
 
-    Not a ``Protocol``: it precedes the text stack in the bases so ``__init__``
+    Not a `Protocol`: it precedes the text stack in the bases so `__init__`
     runs after the stack is built, and a Protocol would swallow that chain.
     """
 

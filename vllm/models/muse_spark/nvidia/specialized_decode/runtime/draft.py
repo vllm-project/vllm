@@ -2,22 +2,22 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The specialized decode of the Muse Spark DSpark draft.
 
-With ``decode_backend=latency_specialized`` the draft model's forward runs
-``DraftDecode.run`` over its stock layers: the first layer's input norm is a
-CuTe kernel (``cutedsl/draft/input_norm.py``) and each residual boundary
+With `decode_backend=latency_specialized` the draft model's forward runs
+`DraftDecode.run` over its stock layers: the first layer's input norm is a
+CuTe kernel (`cutedsl/draft/input_norm.py`) and each residual boundary
 (post-norm, gated fp32 residual, next pre-norm) is one CuTe kernel
-(``cutedsl/common/draft_boundary.py``), at TP4 and TP8 one with the branch's
-all-reduce in it (``cutedsl/oproj/draft_all_reduce_boundary.py``). These are
+(`cutedsl/common/draft_boundary.py`), at TP4 and TP8 one with the branch's
+all-reduce in it (`cutedsl/oproj/draft_all_reduce_boundary.py`). These are
 bitwise equal to the stock eager layers; a boundary (or the first norm) the
-kernels do not cover keeps its stock modules (``plan_fused_boundaries``). On 1
+kernels do not cover keeps its stock modules (`plan_fused_boundaries`). On 1
 to 16 tokens each layer's QKV projection, QK-norm, RoPE and KV insert are the
-QKV front CuTe kernel (``cutedsl/attention/qkv_front.py``), equal to the stock
+QKV front CuTe kernel (`cutedsl/attention/qkv_front.py`), equal to the stock
 layers up to the projection GEMM's summation order. At TP8 the o_proj and
-down_proj partials run on the package GEMM (``cutedsl/gemm/unpooler.py``), which
+down_proj partials run on the package GEMM (`cutedsl/gemm/unpooler.py`), which
 publishes them into the boundary's mailbox: not bitwise to cuBLAS (summation
 order).
 
-The draft model builds it once its weights are loaded (``build_draft_decode``).
+The draft model builds it once its weights are loaded (`build_draft_decode`).
 """
 
 import copy
@@ -93,8 +93,8 @@ _T = TypeVar("_T")
 
 def _norm_unsupported(norm: nn.Module, hidden_size: int) -> str | None:
     """Why the fused kernels do not take this norm as the stock one, or None:
-    the stock MuseSparkRMSNorm forward over all ``hidden_size`` columns,
-    its weight (if any) a contiguous ``[hidden_size]``."""
+    the stock MuseSparkRMSNorm forward over all `hidden_size` columns,
+    its weight (if any) a contiguous `[hidden_size]`."""
     if (
         not isinstance(norm, MuseSparkRMSNorm)
         or type(norm).forward is not MuseSparkRMSNorm.forward
@@ -113,7 +113,7 @@ def _norm_unsupported(norm: nn.Module, hidden_size: int) -> str | None:
 def _connection_unsupported(conn: nn.Module, hidden_size: int) -> str | None:
     """Why the fused boundary does not take this residual connection, or
     None: the stock norm-preserving connection with materialized contiguous
-    FP32 ``[hidden_size]`` coefficients."""
+    FP32 `[hidden_size]` coefficients."""
     if (
         not isinstance(conn, MuseSparkNormPreservingResidualConnection)
         or type(conn).forward is not MuseSparkNormPreservingResidualConnection.forward
@@ -139,7 +139,7 @@ def _connection_unsupported(conn: nn.Module, hidden_size: int) -> str | None:
 def _constants(
     build: Callable[..., _T], *args, **kwargs
 ) -> tuple[_T | None, str | None]:
-    """``(build(*args, **kwargs), None)``, or ``(None, why)`` where it raises
+    """`(build(*args, **kwargs), None)`, or `(None, why)` where it raises
     ValueError: a kernel's constants function refusing what the kernel does
     not reproduce."""
     try:
@@ -152,7 +152,7 @@ def _boundary_constants(
     boundary: _Boundary, hidden_size: int
 ) -> tuple["DraftBoundaryConstants | None", str | None]:
     """The constants of the CuTe boundary kernel of this boundary, or
-    ``(None, why)`` where it does not reproduce it (the boundary keeps its
+    `(None, why)` where it does not reproduce it (the boundary keeps its
     stock modules)."""
     from ..cutedsl.common.draft_boundary import draft_boundary_constants
 
@@ -192,10 +192,10 @@ def _layer_boundaries(
 
 
 class DraftPlan(NamedTuple):
-    """The draft's fused forward as planned at build (``plan_fused_boundaries``):
+    """The draft's fused forward as planned at build (`plan_fused_boundaries`):
     every residual boundary with the constants of its CuTe kernel, and the
     first layer's input norm's. A None keeps that part's stock modules;
-    ``refused`` says why, per part."""
+    `refused` says why, per part."""
 
     boundaries: list[_Boundary]
     constants: list["DraftBoundaryConstants | None"]
@@ -231,13 +231,13 @@ def _draft_unsupported(model: "MuseSparkDSparkModel") -> str | None:
 def plan_fused_boundaries(
     model: "MuseSparkDSparkModel",
 ) -> tuple[DraftPlan | None, str | None]:
-    """``(plan, None)`` with every residual boundary that the CuTe boundary
+    """`(plan, None)` with every residual boundary that the CuTe boundary
     kernel reproduces as one kernel and the first norm on the CuTe input
-    norm where it reproduces it; ``(None, why)`` where no part runs fused.
+    norm where it reproduces it; `(None, why)` where no part runs fused.
 
     A boundary runs fused with the stock norms and norm-preserving connection
-    (materialized coefficients) and norms ``draft_boundary_constants``
-    takes; the first norm where ``input_norm_constants`` takes it (its
+    (materialized coefficients) and norms `draft_boundary_constants`
+    takes; the first norm where `input_norm_constants` takes it (its
     weight aligned). Any other part keeps its stock modules.
     """
     reason = _draft_unsupported(model)
@@ -302,7 +302,7 @@ def _slot_groups(
     slot_mapping: torch.Tensor | list[torch.Tensor | None] | tuple,
     num_layers: int,
 ) -> list[tuple[int, list[torch.Tensor]]]:
-    """The context store's calls: ``(first layer, slots of each layer)`` for
+    """The context store's calls: `(first layer, slots of each layer)` for
     every run of consecutive layers whose slot mappings have one shape. A
     layer without slots (None in a per-layer list) stores nothing."""
     if isinstance(slot_mapping, torch.Tensor):
@@ -321,11 +321,11 @@ def _slot_groups(
 
 
 class ContextKV:
-    """``MuseSparkDSparkModel.precompute_and_store_context_kv`` as two CuTe
-    kernels around its K/V projection (``cutedsl/draft/context.py``), bitwise
+    """`MuseSparkDSparkModel.precompute_and_store_context_kv` as two CuTe
+    kernels around its K/V projection (`cutedsl/draft/context.py`), bitwise
     equal to it: the hidden norm, the layers' input norms and the stack before
-    the stock ``torch.bmm``; the K-norm, RoPE and every layer's cache insert
-    after it. ``prepare`` binds and compiles them (at build, before CUDA graph
+    the stock `torch.bmm`; the K-norm, RoPE and every layer's cache insert
+    after it. `prepare` binds and compiles them (at build, before CUDA graph
     capture)."""
 
     def __init__(
@@ -356,7 +356,7 @@ class ContextKV:
     def prepare(self) -> None:
         """Bind and compile the kernels every covered call launches; raise
         ValueError for a model whose rows or KV heads are not the kernels'
-        (``context_kv_unsupported`` refuses them)."""
+        (`context_kv_unsupported` refuses them)."""
         from ..cutedsl.draft import context as cute_context
 
         if (self.hidden_size, self.head_dim) != (
@@ -388,7 +388,7 @@ class ContextKV:
         )
 
     def _project(self, context_states: torch.Tensor) -> torch.Tensor:
-        """The stock K/V projection of the fused norms: ``[L, T, 2 * kv]``."""
+        """The stock K/V projection of the fused norms: `[L, T, 2 * kv]`."""
         assert self.norms is not None, "ContextKV.prepare has not run"
         per_layer = self.norms(context_states)
         return torch.bmm(per_layer, self.model._stacked_kv_weight.transpose(1, 2))
@@ -400,7 +400,7 @@ class ContextKV:
         context_slot_mapping: torch.Tensor | list[torch.Tensor | None] | None,
     ) -> bool:
         """The stock method's work, or False (nothing done) where the kernels
-        do not cover the call. A strided ``context_states`` is not covered:
+        do not cover the call. A strided `context_states` is not covered:
         the stock hidden norm takes its torch path for it, not the
         single-tile kernel the fused norms reproduce."""
         if not (
@@ -488,7 +488,7 @@ def _context_norm_constants(
     model: "MuseSparkDSparkModel",
 ) -> tuple["ContextNormConstants | None", str | None]:
     """The constants of the fused context chain's norms kernel where the
-    chain is bitwise the stock one for this draft, else ``(None, why)`` (the
+    chain is bitwise the stock one for this draft, else `(None, why)` (the
     draft keeps the stock method)."""
     if not hasattr(model, "_num_attn_layers"):
         return None, "no fused K/V buffers"
@@ -541,9 +541,9 @@ def context_kv_unsupported(model: "MuseSparkDSparkModel") -> str | None:
 def plan_context_kv(
     model: "MuseSparkDSparkModel",
 ) -> tuple[ContextKV | None, str | None]:
-    """``(chain, None)``: the fused context K/V chain, bound to its norms
-    kernel's constants, where it is bitwise the stock one; else ``(None,
-    why)``."""
+    """`(chain, None)`: the fused context K/V chain, bound to its norms
+    kernel's constants, where it is bitwise the stock one; else `(None,
+    why)`."""
     constants, reason = _context_norm_constants(model)
     if constants is None:
         return None, reason
@@ -555,7 +555,7 @@ def may_fuse_qkv_front(attn: nn.Module) -> bool:
     may run as one kernel (the QKV front) on 1 to 16 tokens.
 
     The deployment checks (SM100, no LoRA, no batch-invariant mode) are the
-    specialized decode's own (``unsupported``); its draft adds the kernel's.
+    specialized decode's own (`unsupported`); its draft adds the kernel's.
     """
     return (
         attn.fused_qk_norm_rope_kv_insert
@@ -611,13 +611,13 @@ def _fused_qkv_projection(
 
 def _partial(linear: nn.Module, x: torch.Tensor) -> torch.Tensor:
     """A plain RowParallelLinear's output before its all-reduce: the GEMM its
-    forward runs (``_plain_row_parallel``)."""
+    forward runs (`_plain_row_parallel`)."""
     return linear.quant_method.apply(linear, x, None)
 
 
 def _plain_row_parallel(linear: nn.Module | None, tp: int, width: int) -> bool:
-    """Whether ``linear`` is the stock RowParallelLinear forward over a bf16
-    GEMM without bias into ``width`` features, whose output is all-reduced
+    """Whether `linear` is the stock RowParallelLinear forward over a bf16
+    GEMM without bias into `width` features, whose output is all-reduced
     over the TP group."""
     return (
         isinstance(linear, RowParallelLinear)
@@ -633,8 +633,8 @@ def _plain_row_parallel(linear: nn.Module | None, tp: int, width: int) -> bool:
 
 
 def _ffn_partial(mlp: nn.Module, x: torch.Tensor, project: _Projection) -> _Partial:
-    """``LlamaMLP.forward`` without the down projection's all-reduce, the down
-    projection run by ``project``."""
+    """`LlamaMLP.forward` without the down projection's all-reduce, the down
+    projection run by `project`."""
     x, _ = mlp.gate_up_proj(x)
     x = maybe_fused_act_quant(mlp.act_fn, x, mlp.down_proj)
     return project(mlp.down_proj, x)
@@ -644,8 +644,8 @@ def _package_gemm_weight(
     linear: nn.Module, shape: "UnpoolerShape"
 ) -> torch.Tensor | None:
     """The weight of a plain row-parallel draft projection where the package
-    GEMM runs it at launch shape ``shape`` (on the GPU, every feature of the
-    rows the boundary's mailbox holds, and nothing ``Unpooler.unsupported``
+    GEMM runs it at launch shape `shape` (on the GPU, every feature of the
+    rows the boundary's mailbox holds, and nothing `Unpooler.unsupported`
     refuses), else None: cuBLAS."""
     weight = linear.weight
     if not weight.is_cuda:
@@ -663,7 +663,7 @@ def _package_gemm_weight(
 
 def all_reduce_unsupported(model: "MuseSparkDSparkModel") -> str | None:
     """Why the draft's residual boundaries keep the stock all-reduce of their
-    branch, or None when every one takes it fused (``DraftAllReduce``).
+    branch, or None when every one takes it fused (`DraftAllReduce`).
 
     Reads the configuration only, the same on every rank: the fused form
     builds a mailbox collectively.
@@ -716,13 +716,13 @@ class DraftAllReduce:
     """The draft's residual boundaries with their branch's all-reduce fused in
     (TP4 and TP8, as the target's attention boundary).
 
-    Each boundary is one CuTe kernel (``DraftAllReduceBoundary``): every rank
+    Each boundary is one CuTe kernel (`DraftAllReduceBoundary`): every rank
     multicasts its branch partial into a Lamport mailbox over the TP group, sums
     the ranks' rows in the order of the stock all-reduce (the backend it
-    resolved to, ``flashinfer_ops.stock_sum_order``, as the target's attention
+    resolved to, `flashinfer_ops.stock_sum_order`, as the target's attention
     boundary) and runs the boundary on the sum, bit for bit the stock
     all-reduce followed by the boundary. Construction is collective over the TP
-    group; ``bind_gemms`` and then ``prepare`` set up every boundary before CUDA
+    group; `bind_gemms` and then `prepare` set up every boundary before CUDA
     graph capture.
     """
 
@@ -753,11 +753,11 @@ class DraftAllReduce:
         self.bound: list[BoundDraftBoundary] = []
 
     def bind_gemms(self, layers: list[nn.Module]) -> int:
-        """At ``policy.PACKAGE_GEMM_TPS``, run each boundary's branch GEMM (a
+        """At `policy.PACKAGE_GEMM_TPS`, run each boundary's branch GEMM (a
         layer's o_proj, then its down_proj) on the package GEMM at its role's
-        launch shape (``DRAFT_GEMMS``), whose epilogue multicasts the partial
+        launch shape (`DRAFT_GEMMS`), whose epilogue multicasts the partial
         into the mailbox; its boundary then only consumes it. Returns how many
-        boundaries do. Call before ``prepare``."""
+        boundaries do. Call before `prepare`."""
         from ..cutedsl.gemm.unpooler import Unpooler
 
         package = self.tp in policy.PACKAGE_GEMM_TPS
@@ -783,9 +783,9 @@ class DraftAllReduce:
         boundaries: list[_Boundary],
         constants: list["DraftBoundaryConstants"],
     ) -> None:
-        """Bind the draft's boundaries (one per ``bind_gemms`` GEMM) to their
-        constants (``all_reduce_boundaries_unsupported`` takes them) and
-        compile the kernel variants ``DraftDecode.run`` launches (the first
+        """Bind the draft's boundaries (one per `bind_gemms` GEMM) to their
+        constants (`all_reduce_boundaries_unsupported` takes them) and
+        compile the kernel variants `DraftDecode.run` launches (the first
         boundary also on a BF16 stream, for a BF16 embedding)."""
         assert len(boundaries) == len(constants) == len(self.gemms)
         self.bound = []
@@ -812,7 +812,7 @@ class DraftAllReduce:
         return partial.dim() == 2 and 1 <= partial.shape[0] <= self.mailbox.capacity
 
     def project(self, index: int, linear: nn.Module, x: torch.Tensor) -> _Partial:
-        """Boundary ``index``'s branch partial ``x @ linear.weight^T``: on its
+        """Boundary `index`'s branch partial `x @ linear.weight^T`: on its
         package GEMM, which also publishes it, where it has one and the call
         fuses the all-reduce, else the stock GEMM."""
         gemm = self.gemms[index]
@@ -828,8 +828,8 @@ class DraftAllReduce:
         stream: torch.Tensor,
         store_stream: bool,
     ) -> tuple[torch.Tensor | None, torch.Tensor]:
-        """``DraftBoundary.run`` of boundary ``index`` (``prepare``) on
-        the all-reduced ``partial``; where its GEMM published it, the kernel
+        """`DraftBoundary.run` of boundary `index` (`prepare`) on
+        the all-reduced `partial`; where its GEMM published it, the kernel
         only consumes."""
         return self.bound[index].run(
             partial.tensor, stream.contiguous(), store_stream, partial.published
@@ -845,8 +845,8 @@ def _attention(
 ) -> torch.Tensor | _Partial:
     """Attention over the normalized input: the fused QKV front where it
     covers the call, else the stock attention module. Returns the all-reduced
-    output; with ``project`` the fused front's output is this rank's o_proj
-    partial instead, from ``project(o_proj, x)``."""
+    output; with `project` the fused front's output is this rank's o_proj
+    partial instead, from `project(o_proj, x)`."""
     qkv = None
     if fused_qkv:
         qkv = _fused_qkv_projection(layer, positions, hidden_states)
@@ -881,9 +881,9 @@ def _attention(
 
 class DraftDecode:
     """The forward of the DSpark draft's layers with the fused boundaries and,
-    per layer, the fused QKV front, as planned (``DraftPlan``: a part the
-    kernels do not reproduce runs its stock modules); with ``all_reduce``,
-    each boundary also takes its branch's all-reduce. ``prepare`` binds the
+    per layer, the fused QKV front, as planned (`DraftPlan`: a part the
+    kernels do not reproduce runs its stock modules); with `all_reduce`,
+    each boundary also takes its branch's all-reduce. `prepare` binds the
     first layer's input norm and the boundaries' kernels before CUDA graph
     capture."""
 
@@ -910,10 +910,10 @@ class DraftDecode:
 
     def prepare(self) -> None:
         """Bind the first layer's input norm and every planned boundary's
-        kernel to their constants and compile the variants ``run`` launches:
+        kernel to their constants and compile the variants `run` launches:
         the QKV front of every layer on it, the first boundary also on a BF16
         stream (a BF16 embedding), every boundary for both row regimes of
-        ``DraftBoundary.late_rows``."""
+        `DraftBoundary.late_rows`."""
         from ..cutedsl.common.draft_boundary import DraftBoundary
         from ..cutedsl.draft.input_norm import InputNorm
 
@@ -954,7 +954,7 @@ class DraftDecode:
         context_positions: torch.Tensor,
         context_slot_mapping: torch.Tensor | list[torch.Tensor | None] | None,
     ) -> bool:
-        """``MuseSparkDSparkModel.precompute_and_store_context_kv`` with the
+        """`MuseSparkDSparkModel.precompute_and_store_context_kv` with the
         fused context K/V chain; False where it does not cover the call (the
         stock method runs)."""
         return self.context is not None and self.context.store(
@@ -968,7 +968,7 @@ class DraftDecode:
         index: int,
         store_stream: bool,
     ) -> tuple[torch.Tensor | None, torch.Tensor]:
-        """Boundary ``index`` of ``branch``, or of its all-reduce where it is
+        """Boundary `index` of `branch`, or of its all-reduce where it is
         this rank's partial."""
         post, conn, pre = self.boundaries[index]
         if isinstance(branch, _Partial):
@@ -985,14 +985,14 @@ class DraftDecode:
         return fused.launch(branch, stream, store_stream)
 
     def _projection(self, index: int) -> _Projection | None:
-        """Boundary ``index``'s branch GEMM before the all-reduce, or None
+        """Boundary `index`'s branch GEMM before the all-reduce, or None
         (the branch is all-reduced unfused)."""
         if self.all_reduce is None:
             return None
         return functools.partial(self.all_reduce.project, index)
 
     def run(self, positions: torch.Tensor, hidden_states: torch.Tensor) -> torch.Tensor:
-        """``MuseSparkDSparkModel.forward`` after the embedding: the layers
+        """`MuseSparkDSparkModel.forward` after the embedding: the layers
         and the final norm."""
         # A bf16 embedding round-trips through the fp32 stream unchanged, so the
         # first norm and the first boundary read it directly.

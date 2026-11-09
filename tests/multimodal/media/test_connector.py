@@ -425,8 +425,8 @@ async def test_ssrf_bypass_backslash_in_url(local_asset_server):
     allowed_media_domains check (GHSA-v359-jj2v-j536).
 
     urllib3.parse_url() and aiohttp/yarl disagree on how to parse a
-    backslash before ``@``.  urllib3 treats ``\\`` as part of the path
-    (encoding it as ``%5C``), while yarl treats it as a userinfo
+    backslash before `@`.  urllib3 treats `\\` as part of the path
+    (encoding it as `%5C`), while yarl treats it as a userinfo
     separator, changing the effective host.  The fix normalises the URL
     through urllib3 *before* handing it to aiohttp so both layers agree.
     """

@@ -398,7 +398,7 @@ def moe_finalize_with_rmsnorm(
     start_expert: int = 0,
     num_local_experts: int = 0,
 ) -> None:
-    """Unpermute, norm each expert's row, and reduce into ``output``."""
+    """Unpermute, norm each expert's row, and reduce into `output`."""
     assert HAS_CUTEDSL, "the fused MoE finalize requires nvidia-cutlass-dsl"
     num_tokens, hidden_dim = output.shape
     if num_tokens == 0:

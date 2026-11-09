@@ -1163,6 +1163,8 @@ steps:
   - csrc/
   - tests/kernels/core
   - tests/kernels/test_top_k_per_row.py
+  - vllm/model_executor/layers/indexer_topk.py
+  - vllm/v1/attention/ops/rocm_aiter_mla_sparse.py
   - tests/kernels/test_concat_mla_q.py
   - tests/kernels/test_rocm_fp32_router_gemm.py
   - vllm/model_executor/layers/fused_moe/router/gate_linear.py
@@ -4544,9 +4546,18 @@ steps:
   - csrc/fused_deepseek_v4_qnorm_rope_kv_insert_kernel.cu
   - vllm/models/deepseek_v4/common/ops/
   - tests/kernels/test_fused_deepseek_v4_qnorm_rope_kv_insert.py
+  - csrc/topk.cu
+  - csrc/persistent_topk.cuh
+  - csrc/sampled_topk.cuh
+  - csrc/topk_histogram_4096.cuh
+  - csrc/topk_histogram_4096_overflow.cuh
+  - vllm/model_executor/layers/indexer_topk.py
+  - vllm/v1/attention/ops/rocm_aiter_mla_sparse.py
+  - tests/kernels/test_top_k_per_row.py
   - vllm/platforms/rocm.py
   commands:
   - pytest -v -s kernels/test_fused_deepseek_v4_qnorm_rope_kv_insert.py
+  - pytest -v -s kernels/test_top_k_per_row.py -k "persistent or sparse_indexer"
 
 - label: ":amd: (MI355 DPX) Attention Kernels Shard %N" # TBD
   timeout_in_minutes: 90
@@ -4575,6 +4586,7 @@ steps:
     --ignore=kernels/attention/test_rocm_aiter_mla_decode_metadata.py
     --ignore=kernels/attention/test_rocm_aiter_mla_fp8_support.py
     --ignore=kernels/attention/test_rocm_aiter_mla_op_registration.py
+    -k "not (test_rocm_triton_attn_dsv4 and mqa_logits)"
     --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
 - label: ":amd: (MI355) MoE Kernels Shard %N" # TBD
@@ -4610,6 +4622,7 @@ steps:
       --ignore=kernels/moe/test_deepep_moe.py
       --ignore=kernels/moe/test_moe_layer.py
       --ignore=kernels/moe/test_modular_kernel_combinations.py
+      --ignore=kernels/moe/test_rocm_aiter_moe.py
       --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
   - pytest -v -s kernels/moe/test_modular_oai_triton_moe.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
   - VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_MOE=1 pytest -v -s kernels/moe/test_modular_kernel_combinations.py -k "not multigpu" --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
@@ -4715,7 +4728,16 @@ steps:
   - tests/kernels/quantization/test_rocm_skinny_gemms.py
   optional: true
   commands:
-  - pytest -v -s kernels/quantization -k "not test_nvfp4_dense_emulation" --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+  - >-
+    pytest -v -s
+    kernels/quantization
+    -k "not test_nvfp4_dense_emulation"
+    --ignore=kernels/quantization/test_rocm_aiter_grouped_quant.py
+    --ignore=kernels/quantization/test_block_fp8.py
+    --ignore=kernels/quantization/test_w4a16_kernel_selection.py
+    --ignore=kernels/quantization/test_triton_w4a16.py
+    --ignore=kernels/quantization/test_rocm_compressed_tensors_w4a16.py
+    --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
 - label: ":amd: (MI355) NVFP4 Dense Emulation Shard %N"
   timeout_in_minutes: 10
@@ -4782,15 +4804,48 @@ steps:
   - vllm/platforms/rocm.py
   - vllm/envs.py
   - vllm/config/
-  - tests/kernels/moe/test_rocm_aiter_moe.py
   - tests/kernels/moe/test_ocp_mx_moe.py
   - tests/kernels/moe/test_flydsl_moe.py
   - tests/kernels/moe/utils.py
   - tests/kernels/utils.py
   commands:
-  - pytest -v -s kernels/moe/test_rocm_aiter_moe.py -k 'mi350_mxfp4 or quant_scheme_support_matches_gfx950'
   - pytest -v -s kernels/moe/test_ocp_mx_moe.py::test_rocm_mxfp4_moe_oracle -k AITER_MXFP4
   - pytest -v -s kernels/moe/test_flydsl_moe.py
+
+- label: ":amd: (MI355) AITER FP8 GEMM and MoE, MQA Logits and W4A16 Kernels"
+  timeout_in_minutes: 35
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  dind: false
+  agent_pool: mi355_1
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/_aiter_ops.py
+  - vllm/platforms/rocm.py
+  - vllm/envs.py
+  - vllm/model_executor/layers/fused_moe/
+  - vllm/model_executor/layers/quantization/
+  - vllm/model_executor/kernels/linear/
+  - vllm/v1/attention/ops/rocm_aiter_mla_sparse.py
+  - tests/kernels/moe/test_rocm_aiter_moe.py
+  - tests/kernels/moe/test_block_fp8.py
+  - tests/kernels/quant_utils.py
+  - tests/kernels/quantization/test_rocm_aiter_grouped_quant.py
+  - tests/kernels/quantization/test_block_fp8.py
+  - tests/kernels/attention/test_rocm_triton_attn_dsv4.py
+  - tests/kernels/quantization/test_w4a16_kernel_selection.py
+  - tests/kernels/quantization/test_triton_w4a16.py
+  - tests/kernels/quantization/test_rocm_compressed_tensors_w4a16.py
+  commands:
+  - pytest -v -s kernels/moe/test_rocm_aiter_moe.py
+  - pytest -v -s kernels/quantization/test_block_fp8.py
+  - pytest -v -s kernels/quantization/test_rocm_aiter_grouped_quant.py
+  - pytest -v -s kernels/attention/test_rocm_triton_attn_dsv4.py -k mqa_logits
+  - >-
+    pytest -v -s
+    kernels/quantization/test_w4a16_kernel_selection.py
+    kernels/quantization/test_triton_w4a16.py
+    kernels/quantization/test_rocm_compressed_tensors_w4a16.py
 
 - label: ":amd: (MI355) DeepEP FP8 MoE Kernels" # TBD
   timeout_in_minutes: 55

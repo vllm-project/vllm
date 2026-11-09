@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Seven-CTA cluster AttnRes: one cluster per token, 1024 hidden columns per CTA.
 
-The delta is a tensor (read after the PDL wait) or ``slots`` Lamport mailbox slots
+The delta is a tensor (read after the PDL wait) or `slots` Lamport mailbox slots
 summed in slot order, rounded to BF16 and re-armed. The final boundary rounds the
 mixture to BF16 before its RMSNorm. Prefix and saved blocks must be complete at launch.
 
@@ -51,7 +51,7 @@ def unpack(words, out, row: cutlass.Constexpr):
 
 
 def block_ptr(blocks, token, block, col):
-    """``&blocks[token, block, col]`` from the tensor's strides."""
+    """`&blocks[token, block, col]` from the tensor's strides."""
     return blocks.iterator + token * blocks.stride[0] + block * blocks.stride[1] + col
 
 
@@ -62,7 +62,7 @@ def dot8(a, ar: cutlass.Constexpr, b, br: cutlass.Constexpr):
 
 @cute.jit
 def arm_exchanges(bars, counts):
-    """Thread 0 arms barrier ``r`` for ``counts[r]`` FP32 pushes from each of 7 CTAs."""
+    """Thread 0 arms barrier `r` for `counts[r]` FP32 pushes from each of 7 CTAs."""
     if cute.arch.thread_idx()[0] == 0:
         for r, count in enumerate(counts):
             if cutlass.const_expr(count > 0):
@@ -72,7 +72,7 @@ def arm_exchanges(bars, counts):
 
 
 class ClusterAttnRes:
-    """``final``: the last AttnRes, normalized by the backbone norm."""
+    """`final`: the last AttnRes, normalized by the backbone norm."""
 
     def __init__(self, nb, *, slots=1, has_delta=True, write=-1, final=False):
         self.nb, self.slots, self.has_delta = nb, slots, has_delta
@@ -90,7 +90,7 @@ class ClusterAttnRes:
     def exchange(
         self, values, count: cutlass.Constexpr, kpad: cutlass.Constexpr, bufs, r, ids
     ):
-        """Cluster-sum ``count`` per-thread partials into round ``r``'s total row."""
+        """Cluster-sum `count` per-thread partials into round `r`'s total row."""
         wb, peer_buf, total, bars = bufs
         peer_buf, total, bar = peer_buf[r, None], total[r, None], bars.iterator + r
         rank, _, tid = ids
@@ -189,7 +189,7 @@ class ClusterAttnRes:
     def post(
         self, state, bufs, delta, rows, output, eps: Float32, out_eps: Float32, ids, aux
     ):
-        """Add the delta, update prefix (and its ``aux`` copy) and saved block, write
+        """Add the delta, update prefix (and its `aux` copy) and saved block, write
         the normalized output."""
         prefix, blocks, norm, query, out_norm = rows
         rank, token, tid = ids
