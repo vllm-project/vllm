@@ -3321,14 +3321,12 @@ class MooncakeConnectorWorker:
             )
             for req_id, pull_meta in pull_metas.items()
         }
-        layout_fields: dict[str, Any] = {}
+        group_block_sizes: list[int] = []
         if self.kv_cache_config.hisparse_host_num_blocks is not None:
-            layout_fields = dict(
-                group_block_sizes=[
-                    group.kv_cache_spec.block_size
-                    for group in self.kv_cache_config.transfer_groups
-                ],
-            )
+            group_block_sizes = [
+                group.kv_cache_spec.block_size
+                for group in self.kv_cache_config.transfer_groups
+            ]
         if not include_layout:
             return MooncakeXferMetadata(
                 remote_hostname=self.hostname,
@@ -3341,7 +3339,7 @@ class MooncakeConnectorWorker:
                 kv_caches_base_addr=[],
                 block_lens=[],
                 kv_block_lens=[],
-                **layout_fields,
+                group_block_sizes=group_block_sizes,
             )
         return MooncakeXferMetadata(
             remote_hostname=self.hostname,
@@ -3361,7 +3359,7 @@ class MooncakeConnectorWorker:
                 list(groups) for groups in self.region_shared_groups
             ],
             registered_row_offsets=self.region_row_offsets,
-            **layout_fields,
+            group_block_sizes=group_block_sizes,
         )
 
     def _validate_head_resharding_layout(
