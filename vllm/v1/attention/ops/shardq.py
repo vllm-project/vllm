@@ -34,7 +34,7 @@ from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 logger = init_logger(__name__)
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
+    from vllm.config import CompilationConfig, VllmConfig
     from vllm.model_executor.layers.attention.sparse_mla_attention import (
         SparseMLACommonMetadata,
     )
@@ -114,6 +114,31 @@ def sequence_parallel_split(num_tokens: int, world: int) -> ShardQSplit:
     return ShardQSplit(0, np.arange(num_tokens), counts, True)
 
 
+def can_use_sequence_parallel_shardq(
+    common_attn_metadata: "CommonAttentionMetadata",
+    compilation_config: "CompilationConfig",
+    tp_size: int,
+) -> bool:
+    """Whether local SP projections match this step's attention layout."""
+    num_tokens = common_attn_metadata.num_actual_tokens
+    capture_limit = (
+        compilation_config.max_prefill_cudagraph_capture_tokens
+        or compilation_config.max_cudagraph_capture_size
+        or 0
+    )
+    if (
+        compilation_config.cudagraph_mode
+        and compilation_config.cudagraph_mode.mixed_mode()
+        and num_tokens <= capture_limit
+    ):
+        # Captured projections use the full-token layout selected during warmup.
+        return False
+    # Slot mappings retain model-input padding, including eager DBO's DP
+    # padding. sp_shard and attention must agree on the per-rank chunk size.
+    input_tokens = common_attn_metadata.slot_mapping.numel()
+    return -(-input_tokens // tp_size) == -(-num_tokens // tp_size)
+
+
 def build_shardq_split(
     common_attn_metadata: "CommonAttentionMetadata",
     vllm_config: "VllmConfig",
@@ -143,20 +168,11 @@ def build_shardq_split(
     if prefill_lens.sum() != num_prefill_tokens:
         return None
     if sequence_parallel:
-        compilation = vllm_config.compilation_config
-        capture_limit = (
-            compilation.max_prefill_cudagraph_capture_tokens
-            or compilation.max_cudagraph_capture_size
-            or 0
+        sequence_parallel = can_use_sequence_parallel_shardq(
+            common_attn_metadata,
+            vllm_config.compilation_config,
+            get_tp_group().world_size,
         )
-        if (
-            compilation.cudagraph_mode
-            and compilation.cudagraph_mode.mixed_mode()
-            and common_attn_metadata.num_actual_tokens <= capture_limit
-        ):
-            # Captured projections use the full-token layout selected during
-            # warmup. Retain the original query exchange for those batch sizes.
-            sequence_parallel = False
     if sequence_parallel:
         # Match sp_shard's contiguous, equally padded input shards. Include
         # decode rows so the local projections never need remote hidden states.

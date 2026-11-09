@@ -10,7 +10,13 @@ import torch
 import torch.multiprocessing as mp
 
 from tests.v1.attention.utils import BatchSpec, create_common_attn_metadata
-from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.config import (
+    CompilationConfig,
+    CUDAGraphMode,
+    ModelConfig,
+    VllmConfig,
+    set_current_vllm_config,
+)
 from vllm.distributed.parallel_state import (
     destroy_distributed_environment,
     destroy_model_parallel,
@@ -23,6 +29,7 @@ from vllm.v1.attention.ops.shardq import (
     ShardQMetadata,
     allocate_shardq_buffers,
     build_shardq_split,
+    can_use_sequence_parallel_shardq,
     sequence_parallel_split,
     shard_q,
     unshard_out,
@@ -45,13 +52,49 @@ def test_sp_split_matches_padded_contiguous_input(num_tokens, world):
         )
 
 
-def _sp_projection_round_trip(rank, world, port):
+@pytest.mark.parametrize(
+    "num_tokens,input_tokens,mode,prefill_limit,capture_limit,expected",
+    [
+        (2000, 3000, CUDAGraphMode.NONE, None, None, False),
+        (3000, 3000, CUDAGraphMode.NONE, None, None, True),
+        (2001, 2002, CUDAGraphMode.NONE, None, None, True),
+        (2001, 2003, CUDAGraphMode.NONE, None, None, False),
+        (2048, 2048, CUDAGraphMode.PIECEWISE, 2048, 1024, False),
+        (2049, 2049, CUDAGraphMode.PIECEWISE, 2048, 4096, True),
+        (2048, 2048, CUDAGraphMode.PIECEWISE, None, 2048, False),
+        (2049, 2049, CUDAGraphMode.PIECEWISE, None, 2048, True),
+        (2048, 2048, CUDAGraphMode.NONE, 2048, 2048, True),
+    ],
+)
+def test_sp_shardq_requires_matching_projection_layout(
+    num_tokens, input_tokens, mode, prefill_limit, capture_limit, expected
+):
+    """Graph capture and DP padding must preserve the local query layout."""
+    metadata = create_common_attn_metadata(
+        BatchSpec(seq_lens=[num_tokens], query_lens=[num_tokens]),
+        block_size=16,
+        device=torch.device("cpu"),
+    )
+    metadata.slot_mapping = torch.nn.functional.pad(
+        metadata.slot_mapping, (0, input_tokens - num_tokens), value=-1
+    )
+    compilation = CompilationConfig(
+        cudagraph_mode=mode,
+        max_prefill_cudagraph_capture_tokens=prefill_limit,
+        max_cudagraph_capture_size=capture_limit,
+    )
+    assert can_use_sequence_parallel_shardq(metadata, compilation, 2) == expected
+
+
+def _sp_projection_round_trip(rank, world, port, model_path):
     from vllm import _custom_ops as ops
     from vllm.model_executor.layers.linear import ColumnParallelLinear
     from vllm.models.common.ops.sequence_parallel import sp_all_gather, sp_shard
 
     torch.accelerator.set_device_index(rank)
-    with set_current_vllm_config(VllmConfig()):
+    config = VllmConfig(model_config=ModelConfig(model=model_path))
+    config.attention_config.sparse_mla_shard_q_min_tokens = 1
+    with set_current_vllm_config(config):
         init_distributed_environment(
             world_size=world,
             rank=rank,
@@ -140,14 +183,69 @@ def _sp_projection_round_trip(rank, world, port):
                 torch.testing.assert_close(
                     actual_index_cache, expected_index_cache, rtol=0, atol=0
                 )
+
+            # DP ranks with 5000/6000 tokens split into 3000-row microbatches.
+            # The last microbatch has 2000/3000 real tokens, respectively.
+            # Also retain SP when extra padding leaves TP boundaries unchanged.
+            for tokens, padded_tokens in ((2000, 3000), (3000, 3000), (2001, 2002)):
+                common = create_common_attn_metadata(
+                    BatchSpec(seq_lens=[tokens + 128], query_lens=[tokens]),
+                    block_size=16,
+                    device=torch.device("cpu"),
+                )
+                common.slot_mapping = torch.nn.functional.pad(
+                    common.slot_mapping, (0, padded_tokens - tokens), value=-1
+                )
+                split = build_shardq_split(common, config, sequence_parallel=True)
+                assert split is not None
+                metadata = ShardQMetadata(
+                    num_decode_tokens=split.num_decode_tokens,
+                    num_tokens_per_rank=split.num_tokens_per_rank.tolist(),
+                    token_ids=torch.from_numpy(split.token_ids).cuda(),
+                    rank_offsets=torch.from_numpy(
+                        np.r_[0, np.cumsum(split.num_tokens_per_rank)]
+                    ).cuda(),
+                    sequence_parallel=split.sequence_parallel,
+                )
+                # Unique, exactly representable rows expose lost or mislabeled Q.
+                hidden = torch.arange(padded_tokens, device="cuda").float()
+                hidden[tokens:] = -1
+                hidden = hidden[:, None].expand(-1, 8).contiguous()
+                local = sp_shard(hidden)
+                if split.sequence_parallel:
+                    q = full_proj(local)[0].view(-1, 8, 4)
+                    q = q[: split.num_tokens_per_rank[rank]]
+                else:
+                    gathered = sp_all_gather(local)[:tokens]
+                    q = head_proj(gathered)[0].view(tokens, 8 // world, 4)
+                    _, q = shard_q(q, metadata)
+                restored = unshard_out(q, metadata, None)
+                expected = full_proj(hidden[:tokens])[0].view(tokens, 8, 4)
+                torch.testing.assert_close(
+                    q, expected[metadata.local_token_ids], rtol=0, atol=0
+                )
+                torch.testing.assert_close(
+                    restored,
+                    head_proj(hidden[:tokens])[0].view(tokens, 8 // world, 4),
+                    rtol=0,
+                    atol=0,
+                )
+                assert split.sequence_parallel == (tokens != 2000)
         finally:
             destroy_model_parallel()
             destroy_distributed_environment()
 
 
-def test_sp_replicated_query_projection_returns_original_head_shards():
-    """Load full Q weights and restore uneven SP rows with only output A2A."""
-    mp.spawn(_sp_projection_round_trip, args=(2, get_open_port()), nprocs=2)
+def test_sp_replicated_query_projection_returns_original_head_shards(tmp_path):
+    """Restore Q head shards through SP and the DP-padding fallback."""
+    from transformers import DeepseekV2Config
+
+    DeepseekV2Config(
+        architectures=["DeepseekV2ForCausalLM"], index_topk=128
+    ).save_pretrained(tmp_path)
+    mp.spawn(
+        _sp_projection_round_trip, args=(2, get_open_port(), str(tmp_path)), nprocs=2
+    )
 
 
 @pytest.mark.parametrize("world", [2, 4, 8])
