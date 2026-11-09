@@ -46,7 +46,11 @@ from vllm.v1.worker.gpu.spec_decode.round import (
     TargetTokens,
     VerifyPlan,
 )
-from vllm.v1.worker.gpu.spec_decode.round_runner import SpecRound, spec_kernel_layers
+from vllm.v1.worker.gpu.spec_decode.round_runner import (
+    SpecRound,
+    spec_kernel_layers,
+    trim_draft_tokens,
+)
 from vllm.v1.worker.utils import AttentionGroup
 
 HAS_GPU = current_platform.is_cuda_alike() or current_platform.is_xpu()
@@ -147,8 +151,19 @@ def test_spec_round_checks_a_plans_shape(max_rows, rows, match):
     spec_round = object.__new__(SpecRound)
     spec_round.max_rows = max_rows
     plan = _plan(_PARENT, [4])
-    with pytest.raises(AssertionError, match=match):
+    with pytest.raises(ValueError, match=match):
         spec_round._check_plan(plan, np.array(rows))
+
+
+@pytest.mark.parametrize("verified", [[3, 1], [-1, 1], [1]])
+def test_trim_draft_tokens_checks_the_plans_rows(verified):
+    """A plan's ``rows`` must keep, per request, between none and all of its
+    scheduled drafts."""
+    num_tokens, num_drafts = np.array([3, 2]), np.array([2, 1])
+    trimmed = trim_draft_tokens(num_tokens, num_drafts, np.array([1, 0]))
+    assert [a.tolist() for a in trimmed] == [[2, 1], [1, 0]]
+    with pytest.raises(ValueError, match="between 1 and its scheduled rows"):
+        trim_draft_tokens(num_tokens, num_drafts, np.array(verified))
 
 
 def test_trace_replay_requests_verify_chains():
