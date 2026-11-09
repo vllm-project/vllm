@@ -20,6 +20,7 @@ in NCCL's zero-SM copy-engine path, this relies on NVLink delivering the peer
 copy before the flag write that follows it, so all PP GPUs must be NVLink peers.
 """
 
+import contextlib
 from collections import deque
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, NamedTuple
@@ -116,6 +117,16 @@ def _write_flag(stream: torch.cuda.Stream, addr: int, value: int) -> None:
     )
 
 
+class CopyEngineUnavailable(RuntimeError):
+    """Copy engines are not usable. Raised on every rank alike."""
+
+
+def _close_peer(ptr: int) -> None:
+    from cuda.bindings import runtime as cudart
+
+    _check(cudart.cudaIpcCloseMemHandle(ptr))
+
+
 class CopyEngineTransport(PPTransport):
     def __init__(
         self,
@@ -123,8 +134,9 @@ class CopyEngineTransport(PPTransport):
         pp_group: "GroupCoordinator",
         persistent: dict[str, torch.Tensor] | None,
     ) -> None:
-        """Collective over the PP group. Raises on every rank alike if copy
-        engines are not usable."""
+        """Collective over the PP group. Raises `CopyEngineUnavailable` on every
+        rank alike, with nothing left allocated, if copy engines are not usable
+        on some rank."""
         from vllm import _custom_ops as ops
         from vllm.distributed.parallel_state import in_the_same_node_as
         from vllm.platforms import current_platform
@@ -132,22 +144,49 @@ class CopyEngineTransport(PPTransport):
         # The same on every rank, so these raise before any collective.
         parallel_config = vllm_config.parallel_config
         if not current_platform.is_cuda():
-            raise RuntimeError("PP copy engines need CUDA")
+            raise CopyEngineUnavailable("PP copy engines need CUDA")
         if (
             parallel_config.tensor_parallel_size != 1
             or parallel_config.prefill_context_parallel_size != 1
         ):
-            raise RuntimeError("PP copy engines need TP=1 and PCP=1")
-        import cuda.bindings.driver as cu
-
+            raise CopyEngineUnavailable("PP copy engines need TP=1 and PCP=1")
         if not all(in_the_same_node_as(pp_group.cpu_group, source_rank=0)):
-            raise RuntimeError("PP copy engines need all PP stages on one node")
+            raise CopyEngineUnavailable("PP copy engines need one node")
 
+        # Anything that can differ between ranks runs inside `step`, and the
+        # ranks share its outcome before going on, so they all agree.
         rank, world = pp_group.rank_in_group, pp_group.world_size
-        layout = _layout(persistent) if persistent is not None else {}
-        device = torch.accelerator.current_device_index()
-        ptr = handle = error = None
-        try:
+        owned: list[int] = []  # Buffers this rank allocated.
+        opened: list[int] = []  # Peer buffers this rank mapped.
+
+        def step(fn) -> list[Any]:
+            out = error = None
+            try:
+                out = fn()
+            except Exception as e:
+                error = repr(e)
+            gathered: list[Any] = [None] * world
+            torch.distributed.all_gather_object(
+                gathered, (out, error), group=pp_group.cpu_group
+            )
+            errors = [e for _, e in gathered if e]
+            if errors:
+                # Best effort: every rank must still raise the same error.
+                with contextlib.suppress(Exception):
+                    for p in opened:
+                        _close_peer(p)
+                    for p in owned:
+                        ops.free_shared_buffer(p)
+                raise CopyEngineUnavailable(
+                    f"PP copy engines are not usable: {errors[0]}"
+                )
+            return [o for o, _ in gathered]
+
+        def allocate_recv() -> tuple[Any, ...]:
+            import cuda.bindings.driver as cu
+
+            layout = _layout(persistent) if persistent is not None else {}
+            device = torch.accelerator.current_device_index()
             attr = cu.CUdevice_attribute
             memops = attr.CU_DEVICE_ATTRIBUTE_CAN_USE_64_BIT_STREAM_MEM_OPS
             dev = _check(cu.cuDeviceGet(device))
@@ -157,23 +196,34 @@ class CopyEngineTransport(PPTransport):
             ptr, handle = ops.allocate_shared_buffer_and_handle(
                 _DATA_OFFSET + _nbytes(layout)
             )
-        except Exception as e:
-            error = repr(e)
-        phys = current_platform.visible_device_id_to_physical_device_id(device)
-        ranks: list[Any] = [None] * world
-        torch.distributed.all_gather_object(
-            ranks, (handle, layout, error, phys), group=pp_group.cpu_group
-        )
-        errors = [r[2] for r in ranks if r[2]]
-        if not current_platform.is_fully_connected([r[3] for r in ranks]):
-            errors.append("PP GPUs are not all NVLink-connected")
-        if errors:
-            raise RuntimeError(f"PP copy engines are not usable: {errors[0]}")
-        assert ptr is not None
+            owned.append(ptr)
+            phys = current_platform.visible_device_id_to_physical_device_id(device)
+            return ptr, handle, layout, phys
+
+        ranks = step(allocate_recv)
+        ptr, _, layout, _ = ranks[rank]
+
+        def connect() -> tuple[int | None, int | None, int | None]:
+            if not current_platform.is_fully_connected([r[3] for r in ranks]):
+                raise RuntimeError("PP GPUs are not all NVLink-connected")
+            prev_ptr = next_ptr = send_ptr = None
+            if not pp_group.is_first_rank:
+                prev_ptr = ops.open_mem_handle(ranks[rank - 1][1])
+                opened.append(prev_ptr)
+            if not pp_group.is_last_rank:
+                next_ptr = ops.open_mem_handle(ranks[rank + 1][1])
+                opened.append(next_ptr)
+                # Outside the torch allocator, so memory profiling counts it.
+                send_ptr, _ = ops.allocate_shared_buffer_and_handle(
+                    _nbytes(ranks[rank + 1][2])
+                )
+                owned.append(send_ptr)
+            return prev_ptr, next_ptr, send_ptr
+
+        prev_ptr, next_ptr, send_ptr = step(connect)[rank]
 
         if not pp_group.is_first_rank:
-            assert persistent is not None
-            prev_ptr = ops.open_mem_handle(ranks[rank - 1][0])
+            assert persistent is not None and prev_ptr is not None
             self.src = rank - 1
             self.persistent = persistent
             self.recv_layout = layout
@@ -181,13 +231,10 @@ class CopyEngineTransport(PPTransport):
             self.full = ptr
             self.peer_empty = prev_ptr + 8
         if not pp_group.is_last_rank:
-            next_ptr = ops.open_mem_handle(ranks[rank + 1][0])
+            assert next_ptr is not None and send_ptr is not None
             self.dst = rank + 1
-            self.send_layout = ranks[rank + 1][1]
-            nbytes = _nbytes(self.send_layout)
-            # Outside the torch allocator, so memory profiling counts it as is.
-            send_ptr, _ = ops.allocate_shared_buffer_and_handle(nbytes)
-            self.send_buf = _device_bytes(send_ptr, nbytes)
+            self.send_layout = ranks[rank + 1][2]
+            self.send_buf = _device_bytes(send_ptr, _nbytes(self.send_layout))
             self.empty = ptr + 8
             self.peer_recv_buf = next_ptr + _DATA_OFFSET
             self.peer_full = next_ptr

@@ -266,7 +266,7 @@ class Worker(WorkerBase):
 
         # Device handles of the previous step's PP intermediate-tensor send.
         self._pp_send_work: list[Handle] = []
-        # Set by VLLM_PP_TRANSPORT; None sends over NCCL.
+        # Chosen by VLLM_PP_TRANSPORT in load_model; None sends over NCCL.
         self._pp_transport: PPTransport | None = None
 
         # Resolved lazily on first sleep/wake; persists worker-process state.

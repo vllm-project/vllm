@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Opt-in alternatives to NCCL for sending a PP stage's intermediate tensors to
-the next stage, selected by `VLLM_PP_TRANSPORT`."""
+"""Alternatives to NCCL for sending a PP stage's intermediate tensors to the next
+stage, selected by `VLLM_PP_TRANSPORT`."""
 
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING
@@ -33,7 +33,9 @@ class PPTransport(ABC):
 def create_pp_transport(
     vllm_config: "VllmConfig", persistent: "IntermediateTensors | None"
 ) -> PPTransport | None:
-    """Collective over the PP group. Returns None without PP.
+    """Collective over the PP group. Returns None (send over NCCL) without PP,
+    or under "auto" when copy engines are not usable on some rank; every rank
+    makes the same choice.
 
     Args:
         vllm_config: The engine config.
@@ -46,11 +48,21 @@ def create_pp_transport(
     pp_group = get_pp_group()
     if pp_group.world_size == 1:
         return None
-    assert envs.VLLM_PP_TRANSPORT == "copy_engine"
-    from vllm.distributed.pp_transport.copy_engine import CopyEngineTransport
-
-    transport = CopyEngineTransport(
-        vllm_config, pp_group, None if persistent is None else persistent.tensors
+    mode = envs.VLLM_PP_TRANSPORT
+    assert mode in ("auto", "copy_engine")
+    from vllm.distributed.pp_transport.copy_engine import (
+        CopyEngineTransport,
+        CopyEngineUnavailable,
     )
+
+    try:
+        transport = CopyEngineTransport(
+            vllm_config, pp_group, None if persistent is None else persistent.tensors
+        )
+    except CopyEngineUnavailable as e:
+        if mode == "copy_engine":
+            raise
+        logger.info_once("PP transport: NCCL (%s)", e)
+        return None
     logger.info_once("PP transport: copy engines")
     return transport

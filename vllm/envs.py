@@ -130,7 +130,7 @@ if TYPE_CHECKING:
     VLLM_TRITON_JIT_WARMUP_NUM_THREADS: int = 4
     VLLM_ALLOW_RUNTIME_LORA_UPDATING: bool = False
     VLLM_SKIP_P2P_CHECK: bool = True
-    VLLM_PP_TRANSPORT: Literal["nccl", "copy_engine"] = "nccl"
+    VLLM_PP_TRANSPORT: Literal["auto", "nccl", "copy_engine"] = "auto"
     VLLM_DISABLED_KERNELS: list[str] = []
     VLLM_USE_HW_AGNOSTIC: bool = False
     VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE: bool = True
@@ -1274,9 +1274,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_SKIP_P2P_CHECK": lambda: os.getenv("VLLM_SKIP_P2P_CHECK", "1") == "1",
     # How a PP stage sends its intermediate tensors to the next stage.
     # "copy_engine" uses CUDA copy engines instead of NCCL kernels; it needs
-    # TP=1 and NVLink-connected PP GPUs on one node.
+    # TP=1 and NVLink-connected PP GPUs on one node, and fails startup without.
+    # "auto" uses copy engines when every PP rank can, and NCCL otherwise.
     "VLLM_PP_TRANSPORT": env_with_choices(
-        "VLLM_PP_TRANSPORT", "nccl", ["nccl", "copy_engine"]
+        "VLLM_PP_TRANSPORT", "auto", ["auto", "nccl", "copy_engine"]
     ),
     # List of quantization kernels that should be disabled, used for testing
     # and performance comparisons. Currently only affects MPLinearKernel
