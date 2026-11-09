@@ -883,9 +883,9 @@ def test_modelopt_int8_pb_wo_checkpoint(tmp_path, vllm_runner, quant_algo, dtype
                 for name in weights
                 if name.endswith("_proj.weight")
             ),
-            16,
+            32,
         )
-        quantization: dict[str, Any] = {"quant_algo": "INT8_PB_WO", "group_size": 16}
+        quantization: dict[str, Any] = {"quant_algo": "INT8_PB_WO", "group_size": 32}
         reference_quantization: dict[str, Any] | None = None
     else:
         # q/k/v and lm_head stay unquantized.

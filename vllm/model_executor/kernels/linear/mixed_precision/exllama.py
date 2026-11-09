@@ -65,16 +65,6 @@ class ExllamaLinearKernel(MPLinearKernel):
                 ),
             )
 
-        # The kernels walk K in 128-wide blocks of 32-wide steps, start each
-        # block on group offset_k // group_size and switch groups only at those
-        # steps; any other group size reads the wrong scales.
-        if not (c.group_size in (32, 64) or c.group_size % 128 == 0):
-            return (
-                False,
-                f"Group size ({c.group_size}) not supported by Exllama, "
-                "supported group sizes are 32, 64 and multiples of 128",
-            )
-
         if c.full_weight_shape[0] % c.group_size != 0:
             return (
                 False,
