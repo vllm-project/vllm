@@ -1550,6 +1550,7 @@ strategy_overrides:
           SAFETENSORS_FAST_GPU: "1"
           VLLM_USE_BREAKABLE_CUDAGRAPH: "1"
           VLLM_ENGINE_READY_TIMEOUT_S: "7200"
+          VLLM_ROCM_QUICK_REDUCE_QUANTIZATION: "INT6"
   # TEP on one B300 node: experts on MegaMoE, which dispatches tokens over
   # NVLink one-sided all-to-all.
   single_node_tep:
@@ -1779,6 +1780,23 @@ guide: |
   grew from 1.49M tokens to 8.29M. On `vllm bench serve` with 512 output tokens, `a2a` was a
   little faster than `ag_rs` (241.8 vs 234.0 output tok/s at 2k input, concurrency 8) and both
   were a few percent below DCP off (263.6 tok/s) at `--max-num-seqs 8`.
+
+  **INT6 QuickReduce.** `VLLM_ROCM_QUICK_REDUCE_QUANTIZATION=INT6` sends tensor-parallel
+  all-reduces of 4 MiB and more through QuickReduce, which casts BF16 to FP16 and quantizes to
+  6 bits. That covers the prefill all-reduces. Decode all-reduces are smaller and stay on AITER's
+  BF16 custom all-reduce. INT6 is lossy; set the variable to `NONE` for BF16 all-reduce. Against
+  `NONE`, with the command above (DCP8, `--max-num-seqs 64`) and only this variable changed:
+  - GSM8K, 5-shot, all 1,319 questions (lm-eval 0.4.13, completions API): 0.9773 ± 0.0041
+    flexible-extract and 0.9757 strict-match, vs 0.9765 and 0.9750.
+  - Passkey retrieval in wikitext-103 text at 32k and 120k tokens, at 7 depths each: 14/14 for
+    both. The mean log-probability of the answer did not drop (−0.25 and −0.066, vs −0.26 and
+    −0.073).
+  - Time to first token fell 4.6% at both 32k and 128k input (concurrency 1).
+  - At 32k input and 1k output, concurrency 16, output throughput rose 2.8%.
+  - Decode at concurrency 1 was unchanged.
+
+  INT4 roughly doubled the speedup (time to first token −9.6%), but it lowered answer
+  confidence at 120k on 6 of the 7 passkey depths, so the recipe does not use it.
 
   Expert parallelism, speculative decoding, multi-node TP and prefill/decode disaggregation has
   not been tested yet on MI325X.
