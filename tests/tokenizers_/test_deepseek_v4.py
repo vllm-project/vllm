@@ -165,13 +165,17 @@ def test_deepseek_v4_does_not_transition_after_mid_conversation_system():
     [
         (
             False,
-            "<｜begin▁of▁sentence｜>rules<｜Assistant｜></think>answer"
-            "<｜end▁of▁sentence｜>",
+            (
+                "<｜begin▁of▁sentence｜>rules<｜Assistant｜></think>answer"
+                "<｜end▁of▁sentence｜>"
+            ),
         ),
         (
             True,
-            "<｜begin▁of▁sentence｜>rules<｜Assistant｜><think>reason</think>answer"
-            "<｜end▁of▁sentence｜>",
+            (
+                "<｜begin▁of▁sentence｜>rules<｜Assistant｜><think>reason</think>answer"
+                "<｜end▁of▁sentence｜>"
+            ),
         ),
     ],
 )
@@ -478,7 +482,7 @@ def test_deepseek_v4_image_blocks_become_placeholders():
 
 def test_deepseek_v4_image_sentinel_ids_match_tokenizer():
     """The borrowed sentinel ids must line up with the reserved
-    ``<|place_holder_mm_span_XXXX|>`` tokens in the tokenizer."""
+    `<|place_holder_mm_span_XXXX|>` tokens in the tokenizer."""
     from vllm.models.deepseek_v4.common.mm_preprocess import (
         IMAGE_SENTINEL_BASE_ID,
         IMAGE_SENTINEL_TOKEN_NAMES,
@@ -714,8 +718,10 @@ def test_leading_policy_developer_only_converts_when_dropped(
         (get_deepseek_v4_tokenizer, "<｜begin▁of▁sentence｜>", "\n\n"),
         (
             get_deepseek_v41_tokenizer,
-            "<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 50 "
-            "(range 1-100, the higher the value, the more thorough the reasoning)\n\n",
+            (
+                "<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 50 (range 1-100, "
+                "the higher the value, the more thorough the reasoning)\n\n"
+            ),
             "<｜System｜>",
         ),
     ],

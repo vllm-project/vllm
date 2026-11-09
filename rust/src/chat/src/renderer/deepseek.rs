@@ -159,6 +159,12 @@ pub(super) fn render_request_with_media_order(
     let synthetic_tool_system = needs_synthetic_tool_system(request, request_tools);
     if dialect == DsDialect::V41 {
         reject_image_placeholder_text(&request.messages)?;
+        // As deepseek-recipe: V4.1 lists deferred tools only once a tool
+        // search result references them, so at least one tool, request-level
+        // or message-scoped, must be listed.
+        if !request.tools().is_empty() && request.tools().iter().all(is_deferred) {
+            return Err(Error::AllToolsDeferred);
+        }
     }
     let last_user_render_index = find_last_user_render_index(
         request.messages.as_slice(),
@@ -241,6 +247,9 @@ pub(super) fn render_request_with_media_order(
                     dialect,
                     &mut media_order,
                 )?;
+                if dialect == DsDialect::V41 {
+                    write_updated_tool_schemas(&mut out, request, message_index)?;
+                }
             }
             ChatMessage::Assistant { content } => {
                 // Mirror Python: thinking block (reasoning + </think>) is
@@ -475,9 +484,14 @@ fn reject_image_placeholder_text(messages: &[ChatMessage]) -> Result<()> {
         | ChatMessage::ToolResponse { content, .. }
         | ChatMessage::Custom { content, .. } => match content {
             ChatContent::Text(text) => has_placeholder(text),
-            ChatContent::Parts(parts) => parts.iter().any(
-                |part| matches!(part, ChatContentPart::Text { text } if has_placeholder(text)),
-            ),
+            ChatContent::Parts(parts) => parts.iter().any(|part| {
+                matches!(
+                    part,
+                    ChatContentPart::Text { text: text_or_name }
+                        | ChatContentPart::ToolReference { name: text_or_name }
+                        if has_placeholder(text_or_name)
+                )
+            }),
         },
         ChatMessage::Assistant { content } => content.iter().any(|block| {
             matches!(
@@ -565,7 +579,11 @@ Otherwise, output directly after </think> with tool calls or final response.
     )
     .expect("writing to String cannot fail");
 
-    for (index, tool) in tools.iter().enumerate() {
+    // V4.1 leaves deferred tools out until a tool search result references
+    // them (`write_updated_tool_schemas`); V4 lists every tool, as
+    // deepseek-recipe ignores `defer_loading` there.
+    let listed = tools.iter().filter(|tool| dialect == DsDialect::V4 || !is_deferred(tool));
+    for (index, tool) in listed.enumerate() {
         if index > 0 {
             out.push('\n');
         }
@@ -586,6 +604,46 @@ fn render_tool_schema(out: &mut String, tool: &ChatTool) -> Result<()> {
         parameters: &tool.parameters,
         strict: tool.strict,
     })?);
+    Ok(())
+}
+
+/// Return whether the tool's schema is loaded on demand by tool search.
+fn is_deferred(tool: &ChatTool) -> bool {
+    tool.defer_loading == Some(true)
+}
+
+/// V4.1: after a user turn whose tool results reference tools, write a system
+/// turn with the referenced tools' schemas, as deepseek-recipe does for tools
+/// found by tool search. References keep their order, duplicates included.
+fn write_updated_tool_schemas(
+    out: &mut String,
+    request: &ChatRequest,
+    message_index: usize,
+) -> Result<()> {
+    let messages = request.messages.as_slice();
+    let (block_start, block_end) = user_content_block_bounds(messages, message_index);
+    // A referenced tool is missing only when `tool_choice: none` excluded the
+    // request-level tools from the prompt; it stays unlisted then.
+    let tools = messages[block_start..block_end]
+        .iter()
+        .filter_map(|message| match message {
+            ChatMessage::ToolResponse { content, .. } => Some(content),
+            _ => None,
+        })
+        .flat_map(ChatContent::tool_references)
+        .filter_map(|name| request.tool(name))
+        .collect::<Vec<_>>();
+    if tools.is_empty() {
+        return Ok(());
+    }
+    out.push_str(SYSTEM_SP_TOKEN);
+    out.push_str("\n\n### Updated Tool Schemas\n\n");
+    for (index, tool) in tools.into_iter().enumerate() {
+        if index > 0 {
+            out.push('\n');
+        }
+        render_tool_schema(out, tool)?;
+    }
     Ok(())
 }
 
@@ -841,10 +899,11 @@ fn encode_arguments_to_dsml(
 /// it into an intermediate `String`.
 ///
 /// Content parts are joined by a blank line for every role, as the reference
-/// Chat Completions conversion joins content blocks. The V4.1 dialect inlines
-/// the image placeholder at each image part's position unconditionally
-/// (matching the Python encoding's `IMAGE_PLACEHOLDER`); other dialects reject
-/// multimodal parts.
+/// Chat Completions conversion joins content blocks, and a tool reference is
+/// written as the tool's name, as deepseek-recipe's Messages conversion does.
+/// The V4.1 dialect inlines the image placeholder at each image part's
+/// position unconditionally (matching the Python encoding's
+/// `IMAGE_PLACEHOLDER`); other dialects reject multimodal parts.
 fn write_chat_content(
     out: &mut String,
     content: &ChatContent,
@@ -867,6 +926,7 @@ fn write_chat_content(
                             content_part_index: index,
                         });
                     }
+                    ChatContentPart::ToolReference { name } => out.push_str(name),
                     _ => out.push_str(part.as_text()?),
                 }
             }
