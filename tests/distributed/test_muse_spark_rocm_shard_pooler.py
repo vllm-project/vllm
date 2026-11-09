@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Column-sharded MuseSpark1x pooler/unpooler on ROCm: every TP rank projects
+"""Column-sharded MuseSpark pooler/unpooler on ROCm: every TP rank projects
 its block of output columns and the blocks are all-gathered, which must give
 the replicated projection's output."""
 
@@ -25,7 +25,7 @@ from ..utils import (
 
 pytestmark = [
     pytest.mark.skipif(
-        not current_platform.is_rocm(), reason="ROCm-only MuseSpark1x model path"
+        not current_platform.is_rocm(), reason="ROCm-only MuseSpark model path"
     ),
     pytest.mark.skipif(not is_aiter_found(), reason="AITER is not installed"),
 ]
@@ -128,3 +128,4 @@ def test_column_sharded_projection_tp2(monkeypatch: pytest.MonkeyPatch, test_tar
 @pytest.mark.parametrize("test_target", [gather_with_aiter, gather_with_rccl])
 def test_column_sharded_projection_tp8(monkeypatch: pytest.MonkeyPatch, test_target):
     multi_process_parallel(monkeypatch, 8, 1, test_target)
+

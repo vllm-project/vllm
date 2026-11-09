@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-//! MuseSpark1x Omni model spec: NaViT vision (image + video) and raw-waveform
-//! audio on the MuseSpark1x stack.
+//! Muse Spark Omni model spec: NaViT vision (image + video) and raw-waveform
+//! audio on the Muse Spark stack.
 //!
 //! Mirrors vLLM `models/muse_spark/common/processor.py`
-//! (`MuseSpark1xOmniMultiModalProcessor`):
+//! (`MuseSparkOmniMultiModalProcessor`):
 //!
 //! - Placeholders are the vocabulary tokens `<|patch|>`, `<|video|>`, `<|audio|>`;
 //!   structural/embedding token ids are resolved from the tokenizer vocabulary
@@ -290,16 +290,16 @@ impl ModelProcessorSpec for MuseSparkSpec {
 
     /// The reference video processor's `fps`: clips arrive pre-sampled by the
     /// media connector at this rate.
-    fn default_video_sample_fps(&self) -> Option<f32> {
-        Some(processor::DEFAULT_SAMPLING_FPS as f32)
+    fn default_video_sample_fps(&self) -> Option<f64> {
+        Some(processor::DEFAULT_SAMPLING_FPS)
     }
 
-    fn default_video_sample_fps_with(&self, config: Option<&PreProcessorConfig>) -> Option<f32> {
+    fn default_video_sample_fps_with(&self, config: Option<&PreProcessorConfig>) -> Option<f64> {
         Some(
             config
-                .and_then(|config| config.get_extra::<f32>("fps"))
+                .and_then(|config| config.get_extra::<f64>("fps"))
                 .filter(|fps| fps.is_finite() && *fps > 0.0)
-                .unwrap_or(processor::DEFAULT_SAMPLING_FPS as f32),
+                .unwrap_or(processor::DEFAULT_SAMPLING_FPS),
         )
     }
 
@@ -430,7 +430,7 @@ mod tests {
     use super::*;
     use llm_multimodal::{ImageSize, ModelSpecificValue};
 
-    // Token IDs from the Muse-Spark-1.2 checkpoint's `tokenizer_config.json`.
+    // Token IDs from the Muse Spark Open checkpoint's `tokenizer_config.json`.
     fn muse_spark_tokenizer() -> TestTokenizer {
         TestTokenizer::new(&[
             (AUDIO_TOKEN, 200038),
@@ -471,7 +471,7 @@ mod tests {
 
         let config = json!({"model_type": "unknown"});
         let id_metadata = ModelMetadata {
-            model_id: "example/Muse-Spark-1x-Omni",
+            model_id: "example/Muse-Spark-Omni",
             ..metadata(&tokenizer, &config)
         };
         let spec = lookup_spec(&id_metadata).unwrap();

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""fp32-accumulating split-K GEMM for the TP-sharded MuseSpark1x projections."""
+"""fp32-accumulating split-K GEMM for the TP-sharded MuseSpark projections."""
 
 import pytest
 import torch
@@ -22,7 +22,7 @@ SHAPES = [(512, 8192), (1024, 4096)]
 
 
 def _bf16_ulp(t: torch.Tensor) -> torch.Tensor:
-    """One BF16 unit in the last place at each element of ``t``."""
+    """One BF16 unit in the last place at each element of `t`."""
     exponent = torch.frexp(t.float())[1]
     return torch.ldexp(torch.ones_like(t, dtype=torch.float32), exponent - 8)
 
@@ -32,7 +32,7 @@ def test_config_lookup():
         for max_tokens, *_ in rows:
             assert skinny_gemm_config(n, k, max_tokens) is not None
         assert skinny_gemm_config(n, k, rows[-1][0] + 1) is None
-        for max_tokens, _, block_n, block_k, splits, _ in rows:
+        for _, _, block_n, block_k, splits, _ in rows:
             assert n % block_n == 0 and k % (splits * block_k) == 0
     assert skinny_gemm_config(4096, 8192, 1) is None
 
@@ -41,7 +41,7 @@ def test_config_lookup():
 @pytest.mark.parametrize("num_tokens", [1, 2, 7, 8, 16, 33, 64, 100, 128])
 def test_skinny_gemm_rounds_the_fp32_sum_once(n, k, num_tokens):
     """Each output is the fp32 sum rounded to BF16 once, like an fp32-accumulating
-    ``F.linear``: within one BF16 ulp (plus the fp32 summation error) of an fp64
+    `F.linear`: within one BF16 ulp (plus the fp32 summation error) of an fp64
     reference, and almost always equal to that reference rounded to BF16."""
     torch.manual_seed(num_tokens * n)
     x = torch.randn(num_tokens, k, device="cuda", dtype=torch.bfloat16)

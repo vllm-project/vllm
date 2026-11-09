@@ -2,10 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Split-K BF16 GEMM for few-token activations against a narrow weight.
 
-``y = x @ w.T`` with ``x`` ``[M, K]`` (M small) and ``w`` ``[N, K]``. Each split
+`y = x @ w.T` with `x` `[M, K]` (M small) and `w` `[N, K]`. Each split
 accumulates its K range in fp32; a second kernel adds the splits in fixed order,
 in fp32, and rounds to BF16 once. No partial sum is ever rounded to BF16, so the
-error matches an fp32-accumulating GEMM such as ``F.linear`` (the results differ
+error matches an fp32-accumulating GEMM such as `F.linear` (the results differ
 from it only through the summation order), and the output is deterministic for
 a given M.
 
@@ -42,7 +42,7 @@ _CONFIGS: dict[tuple[int, int], tuple[tuple[int, int, int, int, int, int], ...]]
 
 
 def skinny_gemm_config(n: int, k: int, num_tokens: int) -> _Config | None:
-    """The tuned config for ``[num_tokens, k] @ [n, k].T``, or None."""
+    """The tuned config for `[num_tokens, k] @ [n, k].T`, or None."""
     for max_tokens, *cfg in _CONFIGS.get((n, k), ()):
         if num_tokens <= max_tokens:
             return tuple(cfg)  # type: ignore[return-value]
@@ -121,9 +121,9 @@ def _reduce_splits_kernel(
 def skinny_gemm(
     x: torch.Tensor, weight: torch.Tensor, config: _Config | None = None
 ) -> torch.Tensor:
-    """``x @ weight.T`` for 2-D bf16 ``x`` and a contiguous ``[N, K]`` weight.
+    """`x @ weight.T` for 2-D bf16 `x` and a contiguous `[N, K]` weight.
 
-    ``config`` defaults to the tuned entry, which must exist for this shape.
+    `config` defaults to the tuned entry, which must exist for this shape.
     """
     assert x.dim() == 2 and x.stride(1) == 1 and weight.is_contiguous()
     m, k = x.shape
