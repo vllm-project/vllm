@@ -4,7 +4,7 @@ import tempfile
 from collections import defaultdict
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from itertools import chain, count
+from itertools import count
 from typing import TYPE_CHECKING, Any, Literal
 from unittest.mock import Mock
 
@@ -82,6 +82,7 @@ def assert_scheduler_empty(scheduler: Scheduler):
     assert len(scheduler.finished_req_ids) == 0
     assert len(scheduler.finished_recving_kv_req_ids) == 0
     assert len(scheduler._inflight_prefills) == 0
+    assert not scheduler._parked_reservations
     assert not scheduler._kv_fetch_stages
     assert not any(scheduler._kv_fetch_counts.values())
     assert not scheduler._aborted_kv_loads
@@ -321,7 +322,6 @@ def create_model_runner_output(
     """Make dummy model runner output for testing."""
     # Make request data.
     req_ids = [req.request_id for req in reqs]
-    req_id_to_index = {req_id: idx for idx, req_id in enumerate(req_ids)}
 
     # Make sampled tokens.
     sampled_token = EOS_TOKEN_ID if use_eos else token_id
@@ -348,7 +348,6 @@ def create_model_runner_output(
     # Make output data structure.
     return ModelRunnerOutput(
         req_ids=req_ids,
-        req_id_to_index=req_id_to_index,
         sampled_token_ids=sampled_token_ids,
         logprobs=None,
         prompt_logprobs_dict={},
@@ -486,16 +485,8 @@ class MockKVConnector(KVConnectorBase_V1):
         self, scheduler_output: SchedulerOutput
     ) -> KVConnectorMetadata:
         metadata = MockKVConnectorMetadata()
-        cached_reqs = scheduler_output.scheduled_cached_reqs
-        for req_id in chain(
-            (req.req_id for req in scheduler_output.scheduled_new_reqs),
-            (
-                req_id
-                for req_id in cached_reqs.req_ids
-                if req_id in cached_reqs.resumed_req_ids
-            ),
-        ):
-            metadata.requests.append({"req_id": req_id})
+        for req in scheduler_output.scheduled_new_reqs:
+            metadata.requests.append({"req_id": req.req_id})
         return metadata
 
     def start_load_kv(self, kv_caches, finished_req_ids):
@@ -636,9 +627,9 @@ def make_nixl_push_scheduler(
 ):
     """Create a NixlPushConnectorScheduler via __new__ (skipping __init__).
 
-    The push scheduler can't reuse :func:`make_nixl_scheduler` because it
-    is a different class (``NixlPushConnectorScheduler`` vs
-    ``NixlConnectorScheduler``) and carries push-specific state. Only the
+    The push scheduler can't reuse `make_nixl_scheduler` because it
+    is a different class (`NixlPushConnectorScheduler` vs
+    `NixlConnectorScheduler`) and carries push-specific state. Only the
     fields touched by the unit tests are populated.
     """
     from unittest.mock import MagicMock
@@ -705,7 +696,7 @@ def make_nixl_push_scheduler(
 def make_moriio_writer(fake_worker: Any) -> Any:
     """Build a MoRIIOWriter with internals stubbed for unit tests.
 
-    Bypasses ``__init__`` and wires only the write/finalize state the tests
+    Bypasses `__init__` and wires only the write/finalize state the tests
     touch, including the deferred-task fields used by the routing suite.
     """
     import threading
@@ -748,7 +739,7 @@ def region_pairs_by_index(
     groups: Sequence[int] | None = None,
     groups_match: bool = True,
 ) -> "_RegionPairs":
-    """NIXL region pairs where peer region ``i`` pairs with local region ``i``."""
+    """NIXL region pairs where peer region `i` pairs with local region `i`."""
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
         _RegionPairs,
     )

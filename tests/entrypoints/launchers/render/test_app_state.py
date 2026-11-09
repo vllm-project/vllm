@@ -28,8 +28,8 @@ class _CaptureKwargs:
 
 
 def _render_cli_args(*argv: str) -> Namespace:
-    """Parse ``argv`` the way ``vllm launch render`` does, so new serve flags
-    carry their defaults instead of needing a hand-maintained ``Namespace``."""
+    """Parse `argv` the way `vllm launch render` does, so new serve flags
+    carry their defaults instead of needing a hand-maintained `Namespace`."""
     args = make_arg_parser(FlexibleArgumentParser()).parse_args(list(argv))
     if args.model_tag is not None:
         args.model = args.model_tag

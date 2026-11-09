@@ -157,10 +157,12 @@ async fn responses_rejects_invalid_controls_before_inference() {
         ("top_logprobs", json!(1)),
         ("reasoning", json!({"summary": "unknown"})),
         ("text", json!({"verbosity": "unknown"})),
-        ("spaces_between_special_tokens", json!(false)),
         ("media_io_kwargs", json!({"image": {}})),
         ("mm_processor_kwargs", json!({})),
         ("enable_response_messages", json!(true)),
+        ("prompt_cache_retention", json!("1w")),
+        ("prompt_cache_options", json!({"ttl": "1h"})),
+        ("prompt_cache_options", json!({"mode": "bogus"})),
     ] {
         let response = responses_call(&app, json!({"input": "hello", field: value})).await;
         assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{field}");
@@ -187,6 +189,93 @@ async fn responses_accepts_codex_controls_and_metadata_boundaries() {
     engine_task.await.expect("mock engine task");
     assert_eq!(response["metadata"], json!(metadata));
     assert_eq!(response["service_tier"], "default");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn responses_echoes_prompt_cache_and_safety_fields() {
+    /// Collect the four echoed keys, failing if any is missing.
+    fn echoed(response: &serde_json::Value) -> serde_json::Value {
+        let keys = [
+            "prompt_cache_key",
+            "prompt_cache_options",
+            "prompt_cache_retention",
+            "safety_identifier",
+        ];
+        keys.into_iter()
+            .map(|key| {
+                let value = response.get(key).unwrap_or_else(|| panic!("missing `{key}`"));
+                (key.to_string(), value.clone())
+            })
+            .collect::<serde_json::Map<_, _>>()
+            .into()
+    }
+
+    // Absent fields are echoed as `null`.
+    let (app, engine_task) = test_app_with_engine_handle().await;
+    let response = responses_call(&app, json!({"input": "hello"})).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    engine_task.await.expect("mock engine task");
+    let response: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        echoed(&response),
+        json!({
+            "prompt_cache_key": null,
+            "prompt_cache_options": null,
+            "prompt_cache_retention": null,
+            "safety_identifier": null,
+        })
+    );
+
+    // Defaults are applied to the echoed options, the request-only
+    // `prewarm` is dropped, and the legacy `in-memory` spelling is echoed in
+    // its current form, on every lifecycle event of the stream.
+    let (app, engine_task) = test_app_with_engine_handle().await;
+    let response = responses_call(
+        &app,
+        json!({
+            "input": "hello",
+            "stream": true,
+            "prompt_cache_key": "tenant-a",
+            "prompt_cache_options": {"mode": "explicit", "prewarm": true},
+            "prompt_cache_retention": "in-memory",
+            "safety_identifier": "user-1234",
+        }),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    engine_task.await.expect("mock engine task");
+    let events = sse_json_payloads(std::str::from_utf8(&body).expect("utf8 body"))
+        .into_iter()
+        .filter(|event| event.get("response").is_some())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        events.iter().map(|event| event["type"].as_str().unwrap()).collect::<Vec<_>>(),
+        [
+            "response.created",
+            "response.in_progress",
+            "response.completed"
+        ]
+    );
+    for event in &events {
+        assert_eq!(
+            echoed(&event["response"]),
+            json!({
+                "prompt_cache_key": "tenant-a",
+                "prompt_cache_options": {
+                    "mode": "explicit",
+                    "ttl": "30m",
+                    "comparison_response_id": null,
+                },
+                "prompt_cache_retention": "in_memory",
+                "safety_identifier": "user-1234",
+            }),
+            "{}",
+            event["type"]
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1115,6 +1204,96 @@ async fn responses_streaming_emits_function_call_events() {
         .map(|payload| payload["delta"].as_str().unwrap())
         .collect();
     assert_eq!(arguments, "{\"city\":\"Paris\"}");
+}
+
+fn computer_use_namespace_tool() -> serde_json::Value {
+    json!({
+        "type": "namespace",
+        "name": "mcp__computer_use",
+        "description": "Computer control tools.",
+        "tools": [{
+            "type": "function",
+            "name": "get_app_state",
+            "description": "Get the current state of a desktop application.",
+            "parameters": {
+                "type": "object",
+                "properties": {"app": {"type": "string"}},
+                "required": ["app"]
+            }
+        }]
+    })
+}
+
+/// The model calls a namespaced function by its flat `<namespace>__<name>`.
+fn namespaced_tool_call_output_specs() -> Vec<(Vec<u32>, Option<EngineCoreFinishReason>)> {
+    vec![
+        (
+            bytes_to_token_ids(b"<tool_call>\n{\"name\":\"mcp__computer_use__get_app_state\", "),
+            None,
+        ),
+        (
+            bytes_to_token_ids(b"\"arguments\":{\"app\":\"Chrome\"}}\n</tool_call>"),
+            Some(EngineCoreFinishReason::Stop),
+        ),
+    ]
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn responses_namespace_tool_call_reports_function_name_and_namespace() {
+    for stream in [false, true] {
+        let (app, engine_task) = test_app_with_backend_and_stream_output_specs(
+            Arc::new(FakeChatBackend::with_model_id("Qwen/Qwen3-0.6B")),
+            namespaced_tool_call_output_specs(),
+        )
+        .await;
+        let request = json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "input": "Inspect Google Chrome.",
+            "tools": [computer_use_namespace_tool()],
+            "stream": stream,
+        });
+        let response = responses_call(&app, request).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+        engine_task.await.expect("mock engine task");
+        let text = String::from_utf8(body.to_vec()).expect("utf8 body");
+
+        let json = if stream {
+            let payloads = sse_json_payloads(&text);
+            let event = |event_type: &str| {
+                payloads
+                    .iter()
+                    .find(|payload| payload["type"] == event_type)
+                    .unwrap_or_else(|| panic!("{event_type} event: {text}"))
+            };
+            let added = &event("response.output_item.added")["item"];
+            assert_eq!(added["name"], "get_app_state", "{text}");
+            assert_eq!(added["namespace"], "mcp__computer_use", "{text}");
+            assert_eq!(
+                event("response.function_call_arguments.done")["name"],
+                "get_app_state",
+                "{text}"
+            );
+            let done = &event("response.output_item.done")["item"];
+            assert_eq!(done["name"], "get_app_state", "{text}");
+            assert_eq!(done["namespace"], "mcp__computer_use", "{text}");
+            payloads.last().expect("terminal event")["response"].clone()
+        } else {
+            serde_json::from_str(&text).expect("decode json")
+        };
+
+        let call = json["output"]
+            .as_array()
+            .expect("output items")
+            .iter()
+            .find(|item| item["type"] == "function_call")
+            .unwrap_or_else(|| panic!("function call item: {json}"));
+        assert_eq!(call["name"], "get_app_state", "{json}");
+        assert_eq!(call["namespace"], "mcp__computer_use", "{json}");
+        assert_eq!(call["arguments"], "{\"app\":\"Chrome\"}", "{json}");
+        assert_eq!(json["tools"], json!([computer_use_namespace_tool()]));
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

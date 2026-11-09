@@ -22,9 +22,5 @@ class StandaloneARSpeculatorConfig(DraftModelSpeculatorConfig):
 
     @property
     def max_num_new_slots_for_drafting(self) -> int:
-        if self.spec_config.parallel_drafting:
-            # PARD does not shift the existing input, so all K query positions
-            # require additional slots.
-            return self.num_speculative_tokens
         # The autoregressive draft-model input retains one unsliced token.
         return 1

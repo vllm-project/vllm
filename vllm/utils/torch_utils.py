@@ -6,7 +6,7 @@ import os
 import random
 import sys
 import threading
-from collections.abc import Callable, Collection
+from collections.abc import Callable, Collection, Sequence
 from typing import TYPE_CHECKING, Any, TypeVar
 
 import numpy as np
@@ -95,6 +95,14 @@ MODELOPT_TO_VLLM_KV_CACHE_DTYPE_MAP = {
 T = TypeVar("T")
 
 
+def token_ids_to_tensor(
+    token_ids: Sequence[int], dtype: torch.dtype = torch.int64
+) -> torch.Tensor:
+    """CPU tensor of token ids. A TokenBuffer is copied as one block rather than
+    read token by token; the copy keeps the buffer resizable."""
+    return torch.tensor(np.asarray(token_ids), dtype=dtype)
+
+
 def is_meta_module(module: torch.nn.Module) -> bool:
     """Return True if module contains any meta parameters or buffers."""
     return any(p.is_meta for p in module.parameters()) or any(
@@ -134,7 +142,7 @@ def is_strictly_contiguous(t: torch.Tensor) -> bool:
 def is_non_overlapping_and_dense(t: torch.Tensor) -> bool:
     """Check if the tensor's elements cover one gapless, non-overlapping byte
     range, in any dimension order (i.e. a permuted view of a contiguous
-    tensor); ``is_contiguous()`` additionally requires row-major order.
+    tensor); `is_contiguous()` additionally requires row-major order.
     """
     expected_stride = 1
     for size, stride in sorted(zip(t.shape, t.stride()), key=lambda p: p[1]):
@@ -562,17 +570,17 @@ def nvfp4_split_data_scale(
     """Split one side (K or V) of an NVFP4 KV cache into data and scale.
 
     The input is a 4D uint8 tensor whose last dimension is
-    ``full_dim = data_dim + scale_dim``.  The physical layout within each
-    side is ``[data | scale]``, both packed contiguously.
+    `full_dim = data_dim + scale_dim`.  The physical layout within each
+    side is `[data | scale]`, both packed contiguously.
 
     The caller is responsible for slicing K and V from the combined cache
-    first (e.g. ``kv_cache.split(num_kv_heads, dim=1)``).
+    first (e.g. `kv_cache.split(num_kv_heads, dim=1)`).
 
     Args:
-        kv_side: 4D uint8 tensor ``(B, H, N, full_dim)``.
+        kv_side: 4D uint8 tensor `(B, H, N, full_dim)`.
 
     Returns:
-        ``(data, scale)`` where *data* is uint8 and *scale* is
+        `(data, scale)` where *data* is uint8 and *scale* is
         float8_e4m3fn, both views of the same storage.
 
     """
@@ -769,30 +777,6 @@ def make_ndarray_with_pad(
     return padded_x
 
 
-def make_tensor_with_pad(
-    x: list[list[T]],
-    pad: T,
-    dtype: torch.dtype,
-    *,
-    max_len: int | None = None,
-    device: str | torch.device | None = None,
-    pin_memory: bool = False,
-) -> torch.Tensor:
-    """Make a padded tensor from 2D inputs.
-
-    The padding is applied to the end of each inner list until it reaches
-    `max_len`.
-    """
-    np_dtype = TORCH_DTYPE_TO_NUMPY_DTYPE[dtype]
-    padded_x = make_ndarray_with_pad(x, pad, np_dtype, max_len=max_len)
-
-    tensor = torch.from_numpy(padded_x).to(device)
-    if pin_memory:
-        tensor = tensor.pin_memory()
-
-    return tensor
-
-
 prev_set_stream = torch.cuda.set_stream
 
 _current_stream_tls = threading.local()
@@ -859,7 +843,6 @@ def current_stream() -> torch.cuda.Stream:
 #
 # aux_stream() is currently used for:
 #   - MoE shared_expert overlap with router
-#   - DeepSeek-V4.1 mHC gate projection overlap on ROCm
 _aux_stream: torch.cuda.Stream | None = None
 
 
