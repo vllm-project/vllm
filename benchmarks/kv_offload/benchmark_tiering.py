@@ -187,6 +187,11 @@ class VLLMServer:
 
     def __enter__(self) -> "VLLMServer":
         self.start()
+        try:
+            self.wait_ready()
+        except BaseException:
+            self.stop()
+            raise
         return self
 
     def __exit__(self, *exc) -> None:
@@ -271,19 +276,14 @@ class BenchmarkRun:
         config_path = self.run_dir / "kv_transfer_config.json"
         self._write_config(config_path)
         print("  [3/5] Starting vLLM server...")
-        server = VLLMServer(config_path, self.run_dir / "vllm.log")
-        try:
-            server.start()
-            server.wait_ready()
+        with VLLMServer(config_path, self.run_dir / "vllm.log"):
             print("  [4/5] Running guidellm benchmark...")
             result = {
                 "spec": asdict(self.spec),
                 "status": "ok",
                 **self.guidellm.run(self.spec, self.run_dir / "guidellm.log"),
             }
-        finally:
-            print("  [5/5] Teardown: stopping vLLM...")
-            server.stop()
+        print("  [5/5] Teardown: vLLM stopped.")
         time.sleep(5)
         return result
 
