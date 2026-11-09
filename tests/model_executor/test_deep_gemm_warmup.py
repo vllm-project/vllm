@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -8,6 +9,10 @@ import torch
 
 from vllm.model_executor.kernels.linear.scaled_mm.deep_gemm import (
     DeepGemmFp8BlockScaledMMKernel,
+)
+from vllm.model_executor.layers.fused_moe.deep_gemm_mega_moe import (
+    MEGA_MOE_MXFP4,
+    MEGA_MOE_NVFP4,
 )
 from vllm.model_executor.warmup import deep_gemm_warmup
 
@@ -88,3 +93,84 @@ def test_kernel_registers_itself_as_warmup_provider(is_bmm) -> None:
 
     provider = getattr(layer, "deep_gemm_warmup_provider", None)
     assert provider is (None if is_bmm else kernel)
+
+
+def test_mega_moe_predicate_matches_only_native_mega_moe_layers(monkeypatch) -> None:
+    """Without the MegaMoE model modules loaded, nothing matches and nothing is
+    imported; with them loaded, only DeepSeek-V4, Kimi K3 and MiniMax M3 MegaMoE
+    layers match."""
+    name = "vllm.models.deepseek_v4.nvidia.model"
+    kimi_name = "vllm.models.kimi_k3.nvidia.model"
+    minimax_name = "vllm.models.minimax_m3.nvidia.model"
+    for model_module in (name, kimi_name, minimax_name):
+        monkeypatch.delitem(sys.modules, model_module, raising=False)
+    other = SimpleNamespace(use_native_mega_moe=True, use_mega_moe=True)
+    assert not deep_gemm_warmup._mega_moe_may_use_deep_gemm(other)
+    assert not {name, kimi_name, minimax_name} & set(sys.modules)
+
+    moe_cls = type("DeepseekV4MoE", (), {})
+    monkeypatch.setitem(sys.modules, name, SimpleNamespace(DeepseekV4MoE=moe_cls))
+    native, fused = moe_cls(), moe_cls()
+    native.use_native_mega_moe, fused.use_native_mega_moe = True, False
+    assert deep_gemm_warmup._mega_moe_may_use_deep_gemm(native)
+    assert not deep_gemm_warmup._mega_moe_may_use_deep_gemm(fused)
+    assert not deep_gemm_warmup._mega_moe_may_use_deep_gemm(other)
+
+    kimi_cls = type("KimiMoE", (), {})
+    monkeypatch.setitem(sys.modules, kimi_name, SimpleNamespace(KimiMoE=kimi_cls))
+    kimi_mega, kimi_fused = kimi_cls(), kimi_cls()
+    kimi_mega.use_mega_moe, kimi_fused.use_mega_moe = True, False
+    assert deep_gemm_warmup._mega_moe_may_use_deep_gemm(kimi_mega)
+    assert not deep_gemm_warmup._mega_moe_may_use_deep_gemm(kimi_fused)
+
+    minimax_cls = type("MiniMaxM3MoE", (), {})
+    monkeypatch.setitem(
+        sys.modules, minimax_name, SimpleNamespace(MiniMaxM3MoE=minimax_cls)
+    )
+    minimax_mega, minimax_fused = minimax_cls(), minimax_cls()
+    minimax_mega.use_mega_moe, minimax_fused.use_mega_moe = True, False
+    assert deep_gemm_warmup._mega_moe_may_use_deep_gemm(minimax_mega)
+    assert not deep_gemm_warmup._mega_moe_may_use_deep_gemm(minimax_fused)
+
+
+@pytest.mark.parametrize(
+    ("weight_format", "expected"),
+    [(MEGA_MOE_MXFP4, [2, 5]), (MEGA_MOE_NVFP4, [1, 2, 3, 5])],
+)
+def test_mega_moe_m_values_cover_nvfp4_launch_variants(
+    monkeypatch, weight_format, expected
+) -> None:
+    """NVFP4 switches from the decode-shaped to the bulk kernel inside one BLOCK_M,
+    so both ends are warmed; MX kernels depend on BLOCK_M alone."""
+    monkeypatch.setattr(
+        deep_gemm_warmup, "_import_deep_gemm", lambda: SimpleNamespace()
+    )
+    module = SimpleNamespace(
+        gate=SimpleNamespace(),
+        experts=SimpleNamespace(
+            get_block_m=lambda num_tokens: 64 if num_tokens <= 2 else 128,
+            weight_format=weight_format,
+        ),
+        use_sequence_parallel=False,
+    )
+    assert deep_gemm_warmup._get_fp8_fp4_mega_moe_m_values(module, 5) == expected
+
+
+def test_mega_moe_m_values_reach_mega_gate(monkeypatch) -> None:
+    """Each bf16_mega_gate config is warmed with an M above the GateLinear
+    threshold (1 for 128 experts), so the forward actually reaches the kernel."""
+    dg = SimpleNamespace(
+        get_bf16_mega_gate_config=lambda m, *_: {"num_sms": -(-m // 16)},
+    )
+    monkeypatch.setattr(deep_gemm_warmup, "_import_deep_gemm", lambda: dg)
+    monkeypatch.setattr(deep_gemm_warmup, "_mega_moe_uses_mega_gate", lambda _: True)
+    module = SimpleNamespace(
+        gate=SimpleNamespace(input_size=4096, output_size=128),
+        experts=SimpleNamespace(
+            top_k=6,
+            get_block_m=lambda num_tokens: 16,
+            weight_format=MEGA_MOE_MXFP4,
+        ),
+        use_sequence_parallel=False,
+    )
+    assert deep_gemm_warmup._get_fp8_fp4_mega_moe_m_values(module, 40) == [16, 32, 40]

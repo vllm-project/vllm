@@ -3,7 +3,6 @@
 
 import time
 from collections.abc import Callable, Mapping
-from functools import partial
 from typing import Any, Literal
 
 import vllm.envs as envs
@@ -25,7 +24,7 @@ from vllm.platforms import current_platform
 from vllm.pooling_params import PoolingParams
 from vllm.renderers import BaseRenderer, renderer_from_config
 from vllm.renderers.inputs.preprocess import parse_model_prompt
-from vllm.sampling_params import SamplingParams
+from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tasks import GENERATION_TASKS, POOLING_TASKS, SupportedTask
 from vllm.tokenizers import TokenizerLike
 from vllm.utils import length_from_prompt_token_ids_or_embeds, random_uuid
@@ -94,30 +93,52 @@ class InputProcessor:
         self,
     ) -> Callable[[SamplingParams], None]:
         """Load the custom logits processor classes and return the per-request
-        params validator for the active model runner."""
+        params validator."""
         custom_logitsprocs = self.model_config.logits_processors
-        if self.vllm_config.use_v2_model_runner:
-            if self.model_config.runner_type == "pooling" and not custom_logitsprocs:
-                return lambda _: None
+        if self.model_config.runner_type == "pooling" and not custom_logitsprocs:
+            return lambda _: None
 
-            from vllm.v1.worker.gpu.sample.logits_processor import (
-                build_custom_logits_processors_params_validator,
-            )
-
-            return build_custom_logits_processors_params_validator(custom_logitsprocs)
-
-        from vllm.v1.sample.logits_processor import (
-            validate_logits_processors_parameters,
+        from vllm.v1.worker.gpu.sample.logits_processor import (
+            build_custom_logits_processors_params_validator,
         )
 
-        return partial(validate_logits_processors_parameters, custom_logitsprocs)
+        return build_custom_logits_processors_params_validator(custom_logitsprocs)
+
+    def resolve_watermarking(self, params: SamplingParams | BeamSearchParams) -> bool:
+        """Return whether watermarking will be applied to this request.
+
+        `None` and `True` request watermarking, while `False` opts out.
+        If watermarking is unavailable or incompatible with the request, emit
+        a warning and return `False`.
+        """
+        return self.vllm_config._check_supports_watermarking(params)
+
+    def apply_watermarking(self, params: SamplingParams, watermarking: bool) -> None:
+        """Store the resolved `watermarking` on request-local params.
+
+        Also records whether watermarking was requested on a watermarking
+        engine but could not be applied, as opposed to an explicit opt-out.
+        """
+        # Sticky, so resolving an already resolved request keeps the flag.
+        params._watermarking_skipped = params._watermarking_skipped or (
+            self.vllm_config.watermark_config is not None
+            and params.watermarking is not False
+            and not watermarking
+        )
+        params.watermarking = watermarking
 
     def _validate_params(
         self,
         params: SamplingParams | PoolingParams,
         supported_tasks: tuple[SupportedTask, ...],
-    ) -> None:
-        """Raise `ValueError` if SamplingParams or PoolingParams is not valid."""
+    ) -> bool | None:
+        """Raise `ValueError` if SamplingParams or PoolingParams is not valid.
+
+        Returns the resolved `watermarking` value for `SamplingParams` (`None`
+        for `PoolingParams`). The caller applies it to its private copy of the
+        params so that a caller-owned params object is never mutated.
+        """
+        watermarking: bool | None = None
         if isinstance(params, SamplingParams):
             supported_generation_tasks = [
                 task for task in supported_tasks if task in GENERATION_TASKS
@@ -131,19 +152,15 @@ class InputProcessor:
                 self.structured_outputs_config,
                 self.tokenizer,
             )
-            if params.prompt_logprob_token_ids is not None:
-                if not self.vllm_config.use_v2_model_runner:
-                    raise VLLMValidationError(
-                        "prompt_logprob_token_ids requires the V2 model runner "
-                        "(VLLM_USE_V2_MODEL_RUNNER=1).",
-                        parameter="prompt_logprob_token_ids",
-                    )
-                if self.vllm_config.cache_config.kv_sharing_fast_prefill:
-                    raise VLLMValidationError(
-                        "prompt_logprob_token_ids is incorrect with "
-                        "--kv-sharing-fast-prefill; disable it for scoring.",
-                        parameter="prompt_logprob_token_ids",
-                    )
+            if (
+                params.prompt_logprob_token_ids is not None
+                and self.vllm_config.cache_config.kv_sharing_fast_prefill
+            ):
+                raise VLLMValidationError(
+                    "prompt_logprob_token_ids is incorrect with "
+                    "--kv-sharing-fast-prefill; disable it for scoring.",
+                    parameter="prompt_logprob_token_ids",
+                )
 
             self.validate_logits_processors_params(params)
 
@@ -189,6 +206,9 @@ class InputProcessor:
                     "enabled. Start the engine with --enable-trace-replay "
                     "to use it."
                 )
+            # Resolved last so that feature gates above report the missing
+            # feature rather than its incompatibility with watermarking.
+            watermarking = self.resolve_watermarking(params)
         elif isinstance(params, PoolingParams):
             supported_pooling_tasks = [
                 task for task in supported_tasks if task in POOLING_TASKS
@@ -216,6 +236,8 @@ class InputProcessor:
                 f"params must be either SamplingParams or PoolingParams, "
                 f"but got {type(params).__name__}"
             )
+
+        return watermarking
 
     def _normalize_trace_replay_params(
         self, sampling_params: SamplingParams, prompt_len: int
@@ -290,7 +312,7 @@ class InputProcessor:
         accurately and avoids redundant processing on subsequent requests
         with the same images.
 
-        Uses ``get_and_update_item()`` with an empty prompt_updates list,
+        Uses `get_and_update_item()` with an empty prompt_updates list,
         since token expansion has already been handled externally.
         """
         cache = self.renderer.mm_processor_cache
@@ -352,7 +374,7 @@ class InputProcessor:
         session_id: str | None = None,
         kv_hints: KvHintsEnvelope | None = None,
     ) -> EngineCoreRequest:
-        self._validate_params(params, supported_tasks)
+        watermarking = self._validate_params(params, supported_tasks)
         self._validate_lora(lora_request)
 
         parallel_config = self.vllm_config.parallel_config
@@ -413,6 +435,10 @@ class InputProcessor:
         if isinstance(params, SamplingParams):
             # TODO: can we avoid cloning here in multiproc case?
             sampling_params = params.clone()
+            # Resolve on the request-local copy: `params` may be shared across
+            # prompts, requests and even engines by the caller.
+            assert watermarking is not None
+            self.apply_watermarking(sampling_params, watermarking)
             prompt_len = length_from_prompt_token_ids_or_embeds(
                 prompt_token_ids, prompt_embeds
             )
@@ -423,6 +449,25 @@ class InputProcessor:
                     parameter="routed_experts_prompt_start",
                     value=sampling_params.routed_experts_prompt_start,
                 )
+            start = sampling_params.prompt_logprob_start or 0
+            if start and start >= prompt_len - 1:
+                raise VLLMValidationError(
+                    f"prompt_logprob_start must be less than prompt_len - 1 "
+                    f"({prompt_len - 1}) so at least one prompt row is scored.",
+                    parameter="prompt_logprob_start",
+                    value=start,
+                )
+            rows = sampling_params.prompt_logprob_token_ids
+            if rows is not None:
+                num_rows = max(prompt_len - 1 - start, 0)
+                if len(rows) != num_rows:
+                    raise VLLMValidationError(
+                        f"prompt_logprob_token_ids has {len(rows)} rows, but the "
+                        f"prompt has {num_rows} scored rows "
+                        f"(prompt_len - 1 - prompt_logprob_start).",
+                        parameter="prompt_logprob_token_ids",
+                        value=len(rows),
+                    )
             # If unset max tokens, then generate up to the max_model_len.
             if sampling_params.max_tokens is None:
                 sampling_params.max_tokens = (

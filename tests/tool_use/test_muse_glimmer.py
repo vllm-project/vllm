@@ -11,15 +11,15 @@ parser reads ATEM markup out of those channels.
 Four areas, in order:
 
   1. non-streaming tool-call extraction, including channel scoping (an
-     ``<atem:invoke>`` echoed inside reasoning must never become a call);
+     `<atem:invoke>` echoed inside reasoning must never become a call);
   2. the reasoning -> tool-parser handoff, which regressed once by returning
-     ``content=None`` and starving the tool parser;
+     `content=None` and starving the tool parser;
   3. streaming, where markers routinely straddle chunk boundaries, plus
-     truncation isolation for an unterminated ``to=self`` block;
+     truncation isolation for an unterminated `to=self` block;
   4. tool-name normalization against the tools registered on the request.
 
 These drive the parsers directly and need no checkpoint. The tests that require
-a real tokenizer live in ``test_muse_glimmer_parse_delta.py``.
+a real tokenizer live in `test_muse_glimmer_parse_delta.py`.
 """
 
 import json
@@ -29,6 +29,7 @@ from typing import cast
 import pytest
 
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.reasoning.muse_glimmer_reasoning_parser import MuseGlimmerReasoningParser
 from vllm.tool_parsers.muse_glimmer_tool_parser import MuseGlimmerToolParser
 
@@ -72,7 +73,7 @@ _NO_REQ = cast(ChatCompletionRequest, None)
 
 
 def _req(*names: str) -> ChatCompletionRequest:
-    """A request with ``names`` registered as tools."""
+    """A request with `names` registered as tools."""
     return cast(
         ChatCompletionRequest,
         SimpleNamespace(
@@ -82,7 +83,7 @@ def _req(*names: str) -> ChatCompletionRequest:
 
 
 def _call(name):
-    """One tool-call turn invoking ``name``."""
+    """One tool-call turn invoking `name`."""
     return (
         f"<|start|>assistant to={name}<|message|>"
         f'<atem:function_calls>\n<atem:invoke name="{name}">\n'
@@ -235,7 +236,7 @@ def test_reasoning_then_parallel_calls():
 
 
 def _stream(raw: str, chunk: int):
-    """Feed ``raw`` incrementally in ``chunk``-char steps through BOTH streaming
+    """Feed `raw` incrementally in `chunk`-char steps through BOTH streaming
     parsers; return (reasoning, content, tool_calls)."""
     reasoning, content, toolcalls = [], [], []
     prev = ""
@@ -400,3 +401,34 @@ def test_exact_match_kept():
         T, _call("get_weather"), _req("get_weather")
     )
     assert out.tool_calls[0].function.name == "get_weather"
+
+
+def test_named_custom_tool_choice_skips_structured_outputs():
+    # Custom tools ride the function shim; a named custom choice must skip
+    # the base adjust_request like a named function choice does.
+    request = ResponsesRequest(
+        input="hi",
+        tools=[{"type": "custom", "name": "emit_command"}],
+        tool_choice={"type": "custom", "name": "emit_command"},
+    )
+    T.adjust_request(request)
+    assert request.structured_outputs is None
+
+
+@pytest.mark.parametrize("chunk", [1, 3, 100])
+def test_recipient_less_content_keeps_glimmer_behavior(chunk):
+    """The shared Muse implementation must not reclassify Glimmer content."""
+    raw = "<|message|>Hello.<|eot|>"
+    assert T.extract_tool_calls(raw, _NO_REQ).content == "Hello."
+    assert R.extract_reasoning(raw, _NO_REQ) == (None, raw)
+    content, reasoning = [], []
+    for end in range(chunk, len(raw) + chunk, chunk):
+        previous, current = raw[: max(0, end - chunk)], raw[:end]
+        delta = T.extract_tool_calls_streaming(
+            previous, current, current[len(previous) :], [], [], [], _fake_req()
+        )
+        if delta:
+            content.append(delta.content or "")
+            reasoning.append(delta.reasoning or "")
+    assert "".join(content) == "Hello."
+    assert "".join(reasoning) == ""

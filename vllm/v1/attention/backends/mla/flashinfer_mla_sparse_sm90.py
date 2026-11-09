@@ -2,33 +2,33 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """FlashInfer sparse MLA backend for SM90 (Hopper) NoPE models.
 
-Wraps FlashInfer's ``BatchMLAPagedAttentionWrapper`` (FA2/FA3 paths), which
-as of FlashInfer 0.6.18 supports ``head_dim_kpe=0`` (GLM-5.3-Flash NoPE MLA)
+Wraps FlashInfer's `BatchMLAPagedAttentionWrapper` (FA2/FA3 paths), which
+as of FlashInfer 0.6.18 supports `head_dim_kpe=0` (GLM-5.3-Flash NoPE MLA)
 and FP8 E4M3 KV caches on SM90 with in-kernel dequantization: the FP8 cache
 is read directly (half the bf16 HBM traffic) and converted to BF16 in shared
 memory, while queries stay BF16 (no query quantization).
 
 Sparsity rides the same trick the FA-based sparse backend uses: with
-``page_size=1`` the per-token top-k slot indices ARE the page table, so each
-query token becomes one varlen batch row whose ``kv_indices`` slice is its
-top-k row and whose ``kv_len`` is its valid count. Causality is already
-encoded by the indexer's selection, so ``causal=False``.
+`page_size=1` the per-token top-k slot indices ARE the page table, so each
+query token becomes one varlen batch row whose `kv_indices` slice is its
+top-k row and whose `kv_len` is its valid count. Causality is already
+encoded by the indexer's selection, so `causal=False`.
 
-CUDA-graph handling: ``plan()`` copies its inputs to host unconditionally,
+CUDA-graph handling: `plan()` copies its inputs to host unconditionally,
 so it must stay outside graph capture. Each metadata builder owns a wrapper,
 reserved capture-stable device buffers, and the plan parameters. The wrapper
-bakes the per-row ``kv_len`` into its int schedule at plan() time — ``run()``
+bakes the per-row `kv_len` into its int schedule at plan() time — `run()`
 never reads the device-side buffer. The builder plans (outside capture) from
-sync-free host upper bounds and clamps each scheduled work item's ``kv_end``
+sync-free host upper bounds and clamps each scheduled work item's `kv_end`
 on device to the exact valid count, so the kernel never reads past a row's
 valid prefix (the -1 tail of the converted index buffer) and async scheduling
 needs no D2H sync. Per-step content (top-k slots) is written into the
 reserved buffers by kernels inside the captured forward, and captured runs
 read the refreshed plan buffers on replay.
 
-KV cache format: plain contiguous E4M3 ``[num_blocks, block_size, 512]``
-(uint8 storage) with a per-tensor ``k_scale``; BF16 caches also work. The
-per-token x 128-channel-group ``ckv_scale_arr`` layout is supported by the
+KV cache format: E4M3 `[num_blocks, block_size, 512]` (any block stride)
+(uint8 storage) with a per-tensor `k_scale`; BF16 caches also work. The
+per-token x 128-channel-group `ckv_scale_arr` layout is supported by the
 kernel but not wired yet (it needs a group-quantizing cache-write op).
 """
 
@@ -57,9 +57,11 @@ from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import (
     FlashInferMLASparseMetadataBuilder,
 )
 from vllm.v1.attention.backends.mla.sparse_utils import (
+    align_blocks_to_rows,
+    flat_kv_row_view,
     triton_convert_req_index_to_global_index,
 )
-from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheLayout
+from vllm.v1.kv_cache_interface import AttentionSpec
 
 _FP8_KV_DTYPES = ("fp8", "fp8_e4m3")
 _WORKSPACE_BYTES = 128 * 1024 * 1024
@@ -99,7 +101,12 @@ def _pack_topk_indices(
     end = tl.load(indptr + row + 1)
     mask = (cols < end - start) & (cols < WIDTH)
     values = tl.load(slots + row * WIDTH + cols, mask=mask, other=0)
-    tl.store(indices + start + cols, tl.maximum(values, 0), mask=mask)
+    first_slot = tl.load(slots + row * WIDTH)
+    tl.store(
+        indices + start + cols,
+        tl.where(values >= 0, values, tl.maximum(first_slot, 0)),
+        mask=mask,
+    )
 
 
 @triton.jit
@@ -148,6 +155,10 @@ class FlashInferMLASparseSM90Backend(AttentionBackend):
     @staticmethod
     def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
         return [MultipleOf(64)]
+
+    @classmethod
+    def customize_spec(cls, spec: AttentionSpec) -> AttentionSpec:
+        return align_blocks_to_rows(spec)
 
     @staticmethod
     def get_name() -> str:
@@ -221,10 +232,6 @@ class FlashInferMLASparseSM90Backend(AttentionBackend):
         cache_dtype_str: str = "auto",
     ) -> tuple[int, ...]:
         return (num_blocks, block_size, head_size)
-
-    @classmethod
-    def supported_kv_cache_layouts(cls) -> tuple[KVCacheLayout, ...]:
-        return (KVCacheLayout.LBHNC,)
 
 
 class _SM90State:
@@ -300,13 +307,13 @@ class _SM90State:
         cam: CommonAttentionMetadata | None,
         req_id_per_token: torch.Tensor | None,
     ) -> None:
-        """Plan per-row KV lengths (CPU int32, ``[num_tokens]``).
+        """Plan per-row KV lengths (CPU int32, `[num_tokens]`).
 
         The wrapper bakes kv_len into its int schedule from host values, so
         rows past their valid count would send the kernel into the -1 tail of
-        the converted index buffer. With ``cam`` and ``req_id_per_token``
-        (device batch layout), ``kv_lens`` only needs to upper-bound the
-        valid counts: the plan is padded by ``_PLAN_SLACK`` and reused while
+        the converted index buffer. With `cam` and `req_id_per_token`
+        (device batch layout), `kv_lens` only needs to upper-bound the
+        valid counts: the plan is padded by `_PLAN_SLACK` and reused while
         the bound still fits, and every call clamps each work item's kv_end
         on device to the exact count, so no D2H sync is needed. Without them
         the lengths must be exact. Must run outside CUDA graph capture: the
@@ -472,14 +479,14 @@ class FlashInferMLASparseSM90Builder(FlashInferMLASparseMetadataBuilder):
         """Host per-row KV lengths for the plan and whether they are exact.
 
         A row for the j-th query token of request i attends
-        ``seq_lens[i] - q_len[i] + j + 1`` tokens. The indexer's selection
-        then bounds the valid count: contexts up to ``index_topk`` select
+        `seq_lens[i] - q_len[i] + j + 1` tokens. The indexer's selection
+        then bounds the valid count: contexts up to `index_topk` select
         everything (valid == context); longer contexts keep the top
-        ``index_topk`` pool-expanded tokens plus the trailing incomplete
-        pool (valid == ``index_topk + context % index_kpool``). Both match
+        `index_topk` pool-expanded tokens plus the trailing incomplete
+        pool (valid == `index_topk + context % index_kpool`). Both match
         the count of non -1 entries the convert kernel produces.
 
-        With ``seq_lens_cpu_upper_bound`` (optimistic under async spec
+        With `seq_lens_cpu_upper_bound` (optimistic under async spec
         decode) returns sync-free upper bounds, which the plan clamps on
         device. Otherwise returns exact lengths via a D2H copy.
         """
@@ -602,6 +609,9 @@ class FlashInferMLASparseSM90Impl(SparseMLACommonImpl[FlashInferMLASparseSM90Met
 
         assert self.topk_indices_buffer is not None
         topk_indices = self.topk_indices_buffer[:num_tokens]
+        kv_c_and_k_pe_cache, block_stride_rows = flat_kv_row_view(
+            kv_c_and_k_pe_cache, attn_metadata.block_size
+        )
         # return_valid_counts=True keeps the compacted-prefix layout: valid
         # entries at [0, valid_count), -1 past it — exactly the prefix the
         # planned per-row lengths address.
@@ -610,6 +620,7 @@ class FlashInferMLASparseSM90Impl(SparseMLACommonImpl[FlashInferMLASparseSM90Met
             attn_metadata.block_table,
             topk_indices,
             BLOCK_SIZE=attn_metadata.block_size,
+            BLOCK_STRIDE_ROWS=block_stride_rows,
             NUM_TOPK_TOKENS=topk_indices.shape[1],
             return_valid_counts=True,
         )

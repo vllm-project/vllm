@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Accessors for the optional ``b12x`` package."""
+"""Accessors for the optional `b12x` package."""
 
 import importlib
 import importlib.util
@@ -10,6 +10,9 @@ from types import ModuleType
 from typing import Any
 
 import torch
+
+# Logical elements and encoded bytes per block.
+B12X_BLOCK_CODECS = {"iq2_xs": (256, 74), "iq2_xxs": (256, 66), "q8_0": (32, 34)}
 
 
 @dataclass(frozen=True)

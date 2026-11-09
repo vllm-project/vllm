@@ -27,7 +27,7 @@ def monitor_torch_compile(
     On normal exit: logs the compile time and exits depyf.
     On exception: cleans up depyf without logging (compilation failed).
 
-    ``announce_start=False`` suppresses the "Starting torch.compile" line;
+    `announce_start=False` suppresses the "Starting torch.compile" line;
     used by the AOT-load probe so a failed load attempt doesn't announce a
     compile it didn't perform.
     """
@@ -41,11 +41,11 @@ def monitor_torch_compile(
     depyf_cm = None
     path = vllm_config.compile_debug_dump_path()
     if compilation_config.mode == CompilationMode.VLLM_COMPILE and path:
-        import depyf
+        from vllm.compilation import depyf_compat
 
         path.mkdir(parents=True, exist_ok=True)
         logger.debug("Dumping depyf output to %s", path)
-        depyf_cm = depyf.prepare_debug(path.as_posix())
+        depyf_cm = depyf_compat.prepare_debug(path.as_posix())
         depyf_cm.__enter__()
 
     try:
@@ -93,23 +93,3 @@ def monitor_profiling_run(tag: str = "") -> Generator[None, None, None]:
         log_prefix,
         elapsed,
     )
-
-
-cudagraph_capturing_enabled: bool = True
-
-
-def validate_cudagraph_capturing_enabled() -> None:
-    # used to monitor whether a cudagraph capturing is legal at runtime.
-    # should be called before any cudagraph capturing.
-    # if an illegal cudagraph capturing happens, raise an error.
-    global cudagraph_capturing_enabled
-    if not cudagraph_capturing_enabled:
-        raise RuntimeError(
-            "CUDA graph capturing detected at an inappropriate "
-            "time. This operation is currently disabled."
-        )
-
-
-def set_cudagraph_capturing_enabled(enabled: bool) -> None:
-    global cudagraph_capturing_enabled
-    cudagraph_capturing_enabled = enabled

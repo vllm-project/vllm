@@ -6,14 +6,17 @@ import json
 import keyword as _python_keyword
 import math
 import warnings
+from collections.abc import Sequence
 from dataclasses import dataclass
 from json import JSONDecodeError, JSONDecoder
 from typing import Any, TypeAlias
 
 import partial_json_parser
 from openai.types.responses import (
+    CustomTool,
     FunctionTool,
     NamespaceTool,
+    ToolChoiceCustom,
     ToolChoiceFunction,
 )
 from openai.types.responses.tool import Tool as ResponsesTool
@@ -29,11 +32,38 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionNamedToolChoiceParam,
     ChatCompletionToolsParam,
 )
+from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 
 Tool: TypeAlias = ChatCompletionToolsParam | ResponsesTool
 
 logger = init_logger(__name__)
+
+CUSTOM_TOOL_INPUT_KEY = "input"
+
+
+def custom_tool_parameters() -> dict[str, Any]:
+    """Schema of the single-string function shim a `custom` tool is shown as."""
+    return {
+        "type": "object",
+        "properties": {
+            CUSTOM_TOOL_INPUT_KEY: {
+                "type": "string",
+                "description": "The freeform text payload for this tool.",
+            }
+        },
+        "required": [CUSTOM_TOOL_INPUT_KEY],
+        "additionalProperties": False,
+    }
+
+
+def custom_tool_as_function_dict(tool: CustomTool) -> dict[str, Any]:
+    return {
+        "type": "function",
+        "name": tool.name,
+        "description": tool.description,
+        "parameters": custom_tool_parameters(),
+    }
 
 
 def safe_literal_eval(text: str):
@@ -45,7 +75,7 @@ def safe_literal_eval(text: str):
 def partial_tag_overlap(text: str, tag: str) -> int:
     """Length of the longest prefix of *tag* that matches a suffix of *text*.
 
-    E.g. text ending in ``"<tool_"`` returns 6 when tag is ``"<tool_call>"``.
+    E.g. text ending in `"<tool_"` returns 6 when tag is `"<tool_call>"`.
     Returns 0 when there is no overlap.
     """
     max_check = min(len(tag) - 1, len(text))
@@ -149,8 +179,8 @@ def is_complete_json(input_str: str) -> bool:
 def _is_json_finite(obj: Any) -> bool:
     """Whether *obj* can be serialized to valid JSON.
 
-    ``json.dumps(..., allow_nan=False)`` raises ``ValueError`` on any
-    non-finite float (``inf``/``-inf``/``nan``) anywhere in the value, so this
+    `json.dumps(..., allow_nan=False)` raises `ValueError` on any
+    non-finite float (`inf`/`-inf`/`nan`) anywhere in the value, so this
     detects non-finite floats nested inside parsed lists/dicts too.
     """
     try:
@@ -179,43 +209,79 @@ def flat_namespace_tool_name(namespace: str, name: str) -> str:
     return f"{namespace}{_NAMESPACE_TOOL_SEPARATOR}{name}"
 
 
+def get_function_tools(
+    tools: Sequence[Tool],
+) -> list[ChatCompletionToolsParam | FunctionTool]:
+    """Return the function tools the model is shown, in request order.
+
+    This is the single source for both the chat template's tool list and the
+    tools a tool-call grammar constrains, so the two cannot drift apart.
+    Namespace functions are flattened to `<namespace>__<name>`; custom tools
+    become a single-string function shim. Other Responses tool types are never
+    rendered for the model and are dropped.
+    """
+    function_tools: list[ChatCompletionToolsParam | FunctionTool] = []
+    for tool in tools:
+        if isinstance(tool, NamespaceTool):
+            function_tools.extend(
+                FunctionTool.model_validate(
+                    {
+                        **namespaced_tool.model_dump(by_alias=True),
+                        "name": flat_namespace_tool_name(
+                            tool.name, namespaced_tool.name
+                        ),
+                    }
+                )
+                for namespaced_tool in tool.tools
+                if namespaced_tool.type == "function"
+            )
+        elif isinstance(tool, CustomTool):
+            function_tools.append(
+                FunctionTool.model_validate(custom_tool_as_function_dict(tool))
+            )
+        elif isinstance(tool, (FunctionTool, ChatCompletionToolsParam)):
+            function_tools.append(tool)
+    return function_tools
+
+
+def require_function_tools(
+    tools: Sequence[Tool],
+) -> list[ChatCompletionToolsParam | FunctionTool]:
+    """Return `get_function_tools(tools)`, rejecting a request that has none.
+
+    Raises:
+        VLLMValidationError: `tools` has no tool the model can call, so a
+            tool choice that requires a call can never be satisfied.
+
+    """
+    function_tools = get_function_tools(tools)
+    if not function_tools:
+        raise VLLMValidationError(
+            "tool_choice requires a function call, but tools contains no "
+            "function tool the model can call.",
+            parameter="tool_choice",
+        )
+    return function_tools
+
+
 def iter_response_function_tool_info(
     tool: ResponsesTool,
 ) -> list[tuple[str, dict[str, Any] | None]]:
-    if isinstance(tool, FunctionTool):
-        return [(tool.name, tool.parameters)]
-    if not isinstance(tool, NamespaceTool):
-        return []
-
-    namespace = tool.name
     return [
-        (
-            flat_namespace_tool_name(namespace, namespaced_tool.name),
-            namespaced_tool.parameters,
-        )
-        for namespaced_tool in tool.tools
-        if namespaced_tool.type == "function"
+        (function_tool.name, function_tool.parameters)
+        for function_tool in get_function_tools([tool])
+        if isinstance(function_tool, FunctionTool)
     ]
 
 
 def iter_response_function_tool_dicts(
     tools: list[ResponsesTool],
 ) -> list[dict[str, Any]]:
-    function_tools: list[dict[str, Any]] = []
-    for tool in tools:
-        if isinstance(tool, NamespaceTool):
-            namespace = tool.name
-            for namespaced_tool in tool.tools:
-                if namespaced_tool.type != "function":
-                    continue
-                tool_dict = namespaced_tool.model_dump()
-                tool_dict["name"] = flat_namespace_tool_name(
-                    namespace, namespaced_tool.name
-                )
-                function_tools.append(tool_dict)
-        elif isinstance(tool, FunctionTool):
-            function_tools.append(tool.model_dump())
-    return function_tools
+    return [
+        tool.model_dump()
+        for tool in get_function_tools(tools)
+        if isinstance(tool, FunctionTool)
+    ]
 
 
 def build_responses_tool_call_name_map(
@@ -274,7 +340,7 @@ def find_tool_properties(
     if not tools:
         return {}
     for tool in tools:
-        if isinstance(tool, (FunctionTool, NamespaceTool)):
+        if isinstance(tool, (FunctionTool, NamespaceTool, CustomTool)):
             for name, params in iter_response_function_tool_info(tool):
                 if name == tool_name:
                     return (params or {}).get("properties", {})
@@ -295,7 +361,7 @@ def find_tool_name(
     if not tools:
         return False
     for tool in tools:
-        if isinstance(tool, (FunctionTool, NamespaceTool)):
+        if isinstance(tool, (FunctionTool, NamespaceTool, CustomTool)):
             for name, _ in iter_response_function_tool_info(tool):
                 if name == tool_name:
                     return True
@@ -335,15 +401,22 @@ def _get_tool_schema_defs(
 ) -> dict:
     all_defs: dict[str, dict[str, Any]] = {}
     for tool in tools:
-        _, params = _extract_tool_info(tool)
+        name, params = _extract_tool_info(tool)
         if params is None:
             continue
         defs = params.pop("$defs", {})
+        if not isinstance(defs, dict):
+            raise VLLMValidationError(
+                f"`$defs` in the parameters of tool '{name}' must be an "
+                f"object, got {type(defs).__name__}.",
+                parameter="tools",
+            )
         for def_name, def_schema in defs.items():
             if def_name in all_defs and all_defs[def_name] != def_schema:
-                raise ValueError(
+                raise VLLMValidationError(
                     f"Tool definition '{def_name}' has multiple schemas, "
-                    "which is not supported."
+                    "which is not supported.",
+                    parameter="tools",
                 )
             all_defs[def_name] = def_schema
     return all_defs
@@ -353,19 +426,8 @@ def _get_json_schema_from_tools(
     tools: list[Tool],
     parallel_tool_calls: bool | None = None,
 ) -> dict:
-    fn_tool_schemas: list[dict[str, Any]] = []
-    fn_tools: list[Tool] = []
-    for tool in tools:
-        if isinstance(tool, (FunctionTool, NamespaceTool)):
-            fn_tool_schemas.extend(
-                _get_tool_schema_from_name_and_params(name, params)
-                for name, params in iter_response_function_tool_info(tool)
-            )
-            if isinstance(tool, FunctionTool):
-                fn_tools.append(tool)
-        elif _is_function_tool(tool):
-            fn_tool_schemas.append(_get_tool_schema_from_tool(tool))
-            fn_tools.append(tool)
+    fn_tools: list[Tool] = list(require_function_tools(tools))
+    fn_tool_schemas = [_get_tool_schema_from_tool(tool) for tool in fn_tools]
     json_schema: dict[str, Any] = {
         "type": "array",
         "minItems": 1,
@@ -385,7 +447,9 @@ def _get_json_schema_from_tools(
 
 
 def get_json_schema_from_tools(
-    tool_choice: str | ToolChoiceFunction | ChatCompletionNamedToolChoiceParam,
+    tool_choice: (
+        str | ToolChoiceFunction | ToolChoiceCustom | ChatCompletionNamedToolChoiceParam
+    ),
     tools: list[Tool] | None,
     parallel_tool_calls: bool | None = None,
 ) -> str | dict | None:
@@ -394,17 +458,15 @@ def get_json_schema_from_tools(
         return None
     # tool_choice: Forced Function (Responses)
     if (not isinstance(tool_choice, str)) and isinstance(
-        tool_choice, ToolChoiceFunction
+        tool_choice, (ToolChoiceFunction, ToolChoiceCustom)
     ):
         tool_name = tool_choice.name
         responses_tool_map: dict[str, dict[str, Any] | None] = {}
         for tool in tools:
-            if not isinstance(tool, (FunctionTool, NamespaceTool)):
+            if not isinstance(tool, (FunctionTool, NamespaceTool, CustomTool)):
                 continue
             for name, params in iter_response_function_tool_info(tool):
                 responses_tool_map[name] = params
-                if "__" in name:
-                    responses_tool_map.setdefault(name.rsplit("__", 1)[1], params)
         if tool_name not in responses_tool_map:
             raise ValueError(f"Tool '{tool_name}' has not been passed in `tools`.")
         return _params_or_empty_object(responses_tool_map[tool_name])
@@ -530,12 +592,12 @@ def get_parameter_value(val: ast.expr) -> Any:
 
 
 def _ast_callable_dotted_name(node: ast.expr) -> str:
-    """Return the dotted name for a call target, walking ``ast.Attribute``
-    chains so ``a.b.c(...)`` becomes ``"a.b.c"``.
+    """Return the dotted name for a call target, walking `ast.Attribute`
+    chains so `a.b.c(...)` becomes `"a.b.c"`.
 
     Raises:
         UnexpectedAstError: If the chain does not bottom out in an
-            ``ast.Name`` (e.g. subscript or call expression as receiver).
+            `ast.Name` (e.g. subscript or call expression as receiver).
 
     """
     parts: list[str] = []
@@ -552,8 +614,8 @@ def _ast_callable_dotted_name(node: ast.expr) -> str:
 def handle_single_tool(call: ast.Call) -> ToolCall:
     """Convert a single AST function call node into a ToolCall object.
 
-    Accepts both bare names (``foo(...)``) and dotted attribute chains
-    (``a.b.c(...)``); the resulting tool call ``name`` field preserves the
+    Accepts both bare names (`foo(...)`) and dotted attribute chains
+    (`a.b.c(...)`); the resulting tool call `name` field preserves the
     dotted form.
 
     Raises:
@@ -584,11 +646,11 @@ def escape_ctrl_chars_in_strings(text: str) -> str:
     """Escape literal control chars inside string literals of pythonic text.
 
     Models emitting pythonic tool calls frequently place raw newlines inside a
-    string argument (e.g. ``exec(command='line1\\nline2')`` written with a real
-    line break). That is invalid Python — ``ast.parse`` fails with "unterminated
+    string argument (e.g. `exec(command='line1\\nline2')` written with a real
+    line break). That is invalid Python — `ast.parse` fails with "unterminated
     string literal" — so the call would be dropped even though the intent is
-    unambiguous. A NUL byte is worse: ``ast.parse`` rejects it anywhere in the
-    source with ``ValueError``. Escaping ``\\n``/``\\r``/``\\t``/``\\x00`` only
+    unambiguous. A NUL byte is worse: `ast.parse` rejects it anywhere in the
+    source with `ValueError`. Escaping `\\n`/`\\r`/`\\t`/`\\x00` only
     *inside* string literals makes the text parseable while preserving the
     argument value exactly (the escape sequences evaluate back to the original
     control chars).
@@ -632,14 +694,14 @@ _RESERVED_KW_SUFFIX = "_pyreservedkw_"
 def rename_reserved_kwargs(text: str) -> tuple[str, bool]:
     """Rename Python-keyword parameter names so pythonic tool text parses.
 
-    Tools legitimately name parameters ``from``, ``in``, ``class`` — but
-    ``memory_get(from=1)`` is a Python ``SyntaxError``, so the whole call
-    would be dropped. Rename ``from=`` to ``from_pyreservedkw_=`` (outside
+    Tools legitimately name parameters `from`, `in`, `class` — but
+    `memory_get(from=1)` is a Python `SyntaxError`, so the whole call
+    would be dropped. Rename `from=` to `from_pyreservedkw_=` (outside
     string literals only, and only in keyword-argument position: preceded by
-    ``(`` or ``,`` and followed by a single ``=``), parse, then restore the
-    original name with :func:`restore_reserved_kwarg_names`.
+    `(` or `,` and followed by a single `=`), parse, then restore the
+    original name with `restore_reserved_kwarg_names`.
 
-    Returns (rewritten_text, changed). Keyword *values* (``x=True``) and
+    Returns (rewritten_text, changed). Keyword *values* (`x=True`) and
     keywords inside string arguments are never touched.
     """
     out: list[str] = []
@@ -695,7 +757,7 @@ def rename_reserved_kwargs(text: str) -> tuple[str, bool]:
 
 
 def restore_reserved_kwarg_names(arguments: dict) -> dict:
-    """Undo :func:`rename_reserved_kwargs` on a decoded arguments dict.
+    """Undo `rename_reserved_kwargs` on a decoded arguments dict.
 
     Only keys that carry the rename suffix *and* whose stem is a Python
     keyword are restored, making this an exact inverse of the rename.
@@ -716,13 +778,13 @@ def restore_reserved_kwarg_names(arguments: dict) -> dict:
 def normalize_leading_zero_ints(text: str) -> str:
     """Strip leading zeros from decimal integer literals so the text parses.
 
-    Models emit zero-padded integers (``month=07``), which Python rejects
+    Models emit zero-padded integers (`month=07`), which Python rejects
     ("leading zeros in decimal integer literals are not permitted"), so the
-    whole call would be dropped. Rewrite ``07`` to ``7`` outside string
+    whole call would be dropped. Rewrite `07` to `7` outside string
     literals only. Tokens that are already valid Python are left alone:
-    all-zero literals (``00``), floats and fractional parts (``07.5``,
-    ``1.07``), exponents (``1e07``, consumed as a name run), and ``0x``/
-    ``0o``/``0b`` prefixes (the digit run stops at the prefix letter).
+    all-zero literals (`00`), floats and fractional parts (`07.5`,
+    `1.07`), exponents (`1e07`, consumed as a name run), and `0x`/
+    `0o`/`0b` prefixes (the digit run stops at the prefix letter).
     """
     out: list[str] = []
     quote: str | None = None
@@ -782,15 +844,15 @@ def escape_nested_quotes_in_strings(text: str) -> tuple[str, bool]:
     """Close a broken string literal at the only closing quote that works.
 
     Models emitting shell commands frequently nest unescaped same-style
-    quotes inside a string argument — ``command='sed -n '360,450p' f.py'``,
-    or a quoted ``python3 -c`` payload that itself contains quoted strings —
+    quotes inside a string argument — `command='sed -n '360,450p' f.py'`,
+    or a quoted `python3 -c` payload that itself contains quoted strings —
     which Python reads as juxtaposed garbage, so the call is dropped even
     though the intent is unambiguous. A string is treated as broken when
     its first unescaped quote cannot syntactically close it (what follows
-    is none of ``,``, ``)``, ``]``, ``}``, ``:``). For a broken string,
+    is none of `,`, `)`, `]`, `}`, `:`). For a broken string,
     every syntactically plausible closing quote is tried: interior quotes
     escaped, the rest of the text kept verbatim, and the result (with
-    control chars escaped) validated with ``ast.parse``. Exactly one
+    control chars escaped) validated with `ast.parse`. Exactly one
     candidate parsing means recovery — the decoded value is exactly the
     text the model wrote. Zero or several parsing candidates means the
     nesting is genuinely ambiguous and the text is returned unchanged
@@ -901,13 +963,13 @@ def contains_broken_string_literal(text: str) -> bool:
 
 
 def _is_escaped(text: str, index: int) -> bool:
-    """Whether the character at ``index`` is backslash-escaped.
+    """Whether the character at `index` is backslash-escaped.
 
     A character is escaped iff it is preceded by an *odd* number of consecutive
     backslashes. Checking only the single preceding character is wrong for even
-    runs: in ``'ab\\'`` the closing quote follows an escaped backslash (``\\\\``)
+    runs: in `'ab\\'` the closing quote follows an escaped backslash (`\\\\`)
     and is therefore NOT escaped — it closes the string. Common in regex/code
-    arguments such as ``r'\\\\b'``.
+    arguments such as `r'\\\\b'`.
     """
     backslashes = 0
     j = index - 1
@@ -1018,8 +1080,8 @@ def make_valid_python(text: str) -> tuple[str, str] | None:
 def extract_types_from_schema(schema: Any) -> list[str]:
     """Extract all possible type strings from a JSON Schema definition.
 
-    Handles ``type`` (string or list), ``enum`` value inference, and
-    recursive ``anyOf``/``oneOf``/``allOf``.  Returns ``["string"]``
+    Handles `type` (string or list), `enum` value inference, and
+    recursive `anyOf`/`oneOf`/`allOf`.  Returns `["string"]`
     when no type information can be determined.
     """
     if schema is None or not isinstance(schema, dict):
@@ -1098,7 +1160,7 @@ def coerce_to_schema_type(value: str, schema_type: str | list[str]) -> Any:
     Args:
         value: The raw string value from the model output.
         schema_type: One or more JSON Schema type strings
-            (e.g. ``"string"`` or ``["string", "null"]``).
+            (e.g. `"string"` or `["string", "null"]`).
 
     """
     if isinstance(schema_type, str):
@@ -1135,6 +1197,10 @@ def coerce_to_schema_type(value: str, schema_type: str | list[str]) -> Any:
             except (ValueError, TypeError):
                 continue
         if candidate_type == "number":
+            try:
+                return int(value)
+            except (ValueError, TypeError):
+                pass
             try:
                 val = float(value)
             except (ValueError, TypeError):

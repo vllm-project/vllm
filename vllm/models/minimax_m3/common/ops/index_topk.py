@@ -7,11 +7,11 @@ then the top-k blocks (plus forced init/local blocks) are selected per query
 token. Adapted to vLLM's paged KV cache: the KV page size is forced to equal the
 sparse block size (128), so one sparse block maps to exactly one page.
 
-Index-K cache layout (vLLM): ``(num_blocks, 128, idx_head_dim)`` (single head).
+Index-K cache layout (vLLM): `(num_blocks, 128, idx_head_dim)` (single head).
 
 Only the paths MiniMax M3 uses are implemented: score_type="max", index value
 disabled (score-only indexer), single shared index head. The selected block ids
-feed the block-sparse attention kernels in ``sparse_attn``.
+feed the block-sparse attention kernels in `sparse_attn`.
 """
 
 import torch
@@ -115,15 +115,17 @@ def _index_block_score_kernel(
     if BLOCK_SIZE_Q * pid_q >= q_len:
         return
 
-    q_ptrs = tl.make_block_ptr(
-        base=q_ptr + seq_start * stride_q_n + pid_h * stride_q_h,
-        shape=(q_len, head_dim),
-        strides=(stride_q_n, stride_q_d),
-        offsets=(pid_q * BLOCK_SIZE_Q, 0),
-        block_shape=(BLOCK_SIZE_Q, head_dim),
-        order=(1, 0),
+    o_q = pid_q * BLOCK_SIZE_Q + tl.arange(0, BLOCK_SIZE_Q)
+    o_d = tl.arange(0, head_dim)
+    m_q = o_q < q_len
+    q_ptrs = (
+        q_ptr
+        + seq_start.to(tl.int64) * stride_q_n
+        + pid_h.to(tl.int64) * stride_q_h
+        + o_q[:, None].to(tl.int64) * stride_q_n
+        + o_d[None, :].to(tl.int64) * stride_q_d
     )
-    q = tl.load(q_ptrs, boundary_check=(0,), padding_option="zero")
+    q = tl.load(q_ptrs, mask=m_q[:, None], other=0.0)
     # A matched fp8 pair (e.g. e4m3 x e4m3) lowers to a native FP8 MMA, so
     # upcast only when the operands differ: there is no mixed-dtype fp8 MMA,
     # including across fp8 flavours (fp8e4nv vs fp8e4b8). bf16 and fp32 loads
@@ -701,15 +703,19 @@ def minimax_m3_index_score(
     )
     BLOCK_SIZE_Q = 64
     n_q_tiles = triton.cdiv(max_query_len, BLOCK_SIZE_Q)
-    SCORE_TARGET_GRID = 48
+    # Splits write disjoint score columns, preserving the unsplit result.
+    if current_platform.is_cuda() and current_platform.is_device_capability((12, 0)):
+        score_target_grid = 48
+    elif current_platform.is_cuda() and current_platform.is_device_capability_family(
+        90
+    ):
+        score_target_grid = 1056
+    else:
+        score_target_grid = 1
     split_k = max(
         1,
-        min(max_block, SCORE_TARGET_GRID // max(1, n_q_tiles * batch * num_idx_heads)),
+        min(max_block, score_target_grid // max(1, n_q_tiles * batch * num_idx_heads)),
     )
-    if not (
-        current_platform.is_cuda() and current_platform.is_device_capability((12, 0))
-    ):
-        split_k = 1
     grid_score = (n_q_tiles, batch * num_idx_heads, split_k)
     _index_block_score_kernel[grid_score](
         idx_q,
@@ -751,8 +757,8 @@ def minimax_m3_index_topk(
 ) -> torch.Tensor:
     """Select index top-k from a precomputed score tensor.
 
-    When ``out`` is provided (a ``[num_idx_heads, >=total_q, topk]`` buffer), the
-    result is written into ``out[:, :total_q, :]`` instead of a fresh tensor --
+    When `out` is provided (a `[num_idx_heads, >=total_q, topk]` buffer), the
+    result is written into `out[:, :total_q, :]` instead of a fresh tensor --
     used to keep the top-k output at a stable address for cudagraph capture.
     """
     num_idx_heads = score.shape[0]
@@ -808,7 +814,7 @@ def minimax_m3_index_decode_score(
     """Decode index block-score (split-K, cudagraph-safe); no top-k.
 
     Returns score [num_kv_heads, total_q, >=max_block] (fp32; init/local blocks
-    forced to 1e30/1e29). When ``score_out`` is given the scores are written into
+    forced to 1e30/1e29). When `score_out` is given the scores are written into
     it (read/written by strides, so a transposed view of a unified buffer is
     accepted) instead of a fresh tensor -- used to share a unified score buffer
     with the prefill side and run a single top-k over both.
@@ -908,9 +914,9 @@ def minimax_m3_index_decode(
     """Decode index block-score + top-k, both split-K (cudagraph-safe).
 
     Returns topk_idx [num_kv_heads, total_q, topk] (0-indexed block ids, -1 pad).
-    When ``out`` ([num_kv_heads, >=total_q, topk]) is given, writes into
-    ``out[:, :total_q, :]`` (stable address for cudagraph) instead of allocating.
-    When ``score_out`` ([num_kv_heads, total_q, >=max_block]) is given, the block
+    When `out` ([num_kv_heads, >=total_q, topk]) is given, writes into
+    `out[:, :total_q, :]` (stable address for cudagraph) instead of allocating.
+    When `score_out` ([num_kv_heads, total_q, >=max_block]) is given, the block
     scores are written into it (read back by the top-k) instead of a fresh
     tensor -- used to share a unified score buffer with the prefill side. Reads
     via strides, so a transposed view of a block-major buffer is accepted.

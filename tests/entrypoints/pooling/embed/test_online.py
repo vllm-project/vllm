@@ -18,7 +18,6 @@ from tests.models.language.pooling.embed_utils import (
 )
 from tests.models.utils import check_embeddings_close
 from tests.utils import RemoteOpenAIServer
-from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
 from vllm.entrypoints.pooling.embed.protocol import EmbeddingResponse
 from vllm.entrypoints.pooling.pooling.protocol import PoolingResponse
 from vllm.entrypoints.pooling.utils import (
@@ -27,10 +26,11 @@ from vllm.entrypoints.pooling.utils import (
     decode_pooling_output,
 )
 from vllm.platforms import current_platform
+from vllm.renderers.chat_utils import ChatCompletionMessageParam
 from vllm.tokenizers import get_tokenizer
 from vllm.utils.serial_utils import EMBED_DTYPES, ENDIANNESS, binary2tensor
 
-MODEL_NAME = "intfloat/multilingual-e5-small"
+MODEL_NAME = "vllm-project/multilingual-e5-small"
 DUMMY_CHAT_TEMPLATE = """{% for message in messages %}{{message['role'] + ': ' + message['content'] + '\\n'}}{% endfor %}"""  # noqa: E501
 DTYPE = "bfloat16"
 input_text = "The best thing about vLLM is that it supports many different models"

@@ -17,6 +17,7 @@ import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
+from . import rocm_device_memory
 from .interface import DeviceCapability, Platform, PlatformEnum, in_wsl
 
 if TYPE_CHECKING:
@@ -24,12 +25,17 @@ if TYPE_CHECKING:
     from vllm.config.kernel import IrOpPriorityConfig
     from vllm.utils.argparse_utils import FlexibleArgumentParser
     from vllm.v1.attention.backend import AttentionBackend
+    from vllm.v1.attention.backends.mla.prefill.base import MLAPrefillBackend
+    from vllm.v1.attention.backends.mla.prefill.selector import (
+        MLAPrefillSelectorConfig,
+    )
     from vllm.v1.attention.selector import AttentionSelectorConfig
 
 logger = init_logger(__name__)
 
 _KV_CACHE_DTYPE_REASON = "kv_cache_dtype not supported"
 _TURBOQUANT_LAYOUT_REASON = "no KV cache layout in common with TURBOQUANT"
+_ULTRAQUANT_LAYOUT_REASON = "no KV cache layout in common with ULTRAQUANT"
 
 try:
     from amdsmi import (
@@ -213,6 +219,8 @@ _ON_GFX1X = any(arch in _GCN_ARCH for arch in ["gfx11", "gfx12"])
 _ON_GFX11 = "gfx11" in _GCN_ARCH
 _ON_GFX1100 = "gfx1100" in _GCN_ARCH
 _ON_GFX1151 = "gfx1151" in _GCN_ARCH
+_ON_GFX115X = "gfx115" in _GCN_ARCH
+_ON_GFX1201 = "gfx1201" in _GCN_ARCH
 _ON_GFX12X = any(arch in _GCN_ARCH for arch in ["gfx12"])
 _ON_MI3XX = any(arch in _GCN_ARCH for arch in ["gfx942", "gfx950"])
 _ON_GFX9 = any(arch in _GCN_ARCH for arch in ["gfx90a", "gfx942", "gfx950"])
@@ -314,6 +322,14 @@ def on_gfx1151() -> bool:
     return _ON_GFX1151
 
 
+def on_gfx115x() -> bool:
+    return _ON_GFX115X
+
+
+def on_gfx1201() -> bool:
+    return _ON_GFX1201
+
+
 def on_gfx12x() -> bool:
     return _ON_GFX12X and not _ON_CDNA
 
@@ -366,6 +382,48 @@ def get_cdna_version() -> int:
     return 0
 
 
+def get_rdna_version() -> int:
+    if on_rdna4():
+        return 4
+    if on_gfx11():
+        return 3
+    return 0
+
+
+def _maybe_default_dsv4_mxfp4_indexer(vllm_config: "VllmConfig") -> None:
+    """Default DeepSeek-V4's sparse indexer K cache to MXFP4 on CDNA4.
+
+    aiter's paged MXFP4 indexer is faster than FP8 on MI350/MI355 (lower
+    TTFT/TPOT, ~9% more KV cache) with near-lossless accuracy. Only rewrite
+    "auto" and fall back to FP8 silently when the MXFP4 path can't run, so
+    configs that worked before never start failing.
+    """
+    hf_config = getattr(vllm_config.model_config, "hf_config", None)
+    if getattr(hf_config, "model_type", None) != "deepseek_v4":
+        return
+    attention_config = vllm_config.attention_config
+    parallel_config = vllm_config.parallel_config
+    if (
+        attention_config.indexer_kv_dtype != "auto"
+        or attention_config.indexer_sparse_logits
+        or get_cdna_version() != 4
+        # The MXFP4 indexer metadata builder rejects DCP/PCP.
+        or parallel_config.decode_context_parallel_size > 1
+        or parallel_config.prefill_context_parallel_size > 1
+    ):
+        return
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    if not rocm_aiter_ops.is_enabled():
+        return
+    attention_config.indexer_kv_dtype = "mxfp4"
+    logger.info_once(
+        "DeepSeek-V4 on ROCm CDNA4: using aiter's paged MXFP4 sparse indexer "
+        "K cache by default. Pass --attention-config "
+        '\'{"indexer_kv_dtype": "fp8"}\' to use the FP8 indexer cache.'
+    )
+
+
 @cache
 def get_rocm_version() -> tuple[int, ...] | None:
     """Return the installed ROCm release as (major, minor, patch), or None."""
@@ -394,6 +452,12 @@ if (
     and get_cdna_version() > 2
 ):
     os.environ["HIP_ONLINE_TUNING"] = "1"
+
+# RCCL 2.30's RAS thread can abort the process at exit ("terminate called
+# without an active exception") when its shutdown notification fails.
+# https://github.com/ROCm/rocm-systems/issues/13572
+if torch.version.hip:
+    os.environ.setdefault("NCCL_RAS_ENABLE", "0")
 
 
 @cache
@@ -501,10 +565,15 @@ def _get_backend_priorities(
         backends.append(AttentionBackendEnum.ROCM_AITER_FA)
     if is_aiter_found_and_supported():
         backends.append(AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN)
-    elif rocm_aiter_ops.is_rdna_aiter_enabled():
-        backends.insert(0, AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN)
+    if rocm_aiter_ops.is_rdna_aiter_enabled():
+        if on_rdna4():
+            backends.insert(0, AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN)
+        else:
+            backends.append(AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN)
     backends.append(AttentionBackendEnum.TRITON_ATTN)
     backends.append(AttentionBackendEnum.TURBOQUANT)
+    backends.append(AttentionBackendEnum.ROCM_OCTAVE)
+    backends.append(AttentionBackendEnum.ULTRAQUANT)
 
     return backends
 
@@ -514,6 +583,14 @@ def _uses_turboquant(vllm_config: "VllmConfig | None") -> bool:
     cache_config = getattr(vllm_config, "cache_config", None)
     return cache_config is not None and str(cache_config.cache_dtype).startswith(
         "turboquant_"
+    )
+
+
+def _uses_ultraquant(vllm_config: "VllmConfig | None") -> bool:
+    """Whether the run's KV cache dtype is the UltraQuant 4-bit format."""
+    cache_config = getattr(vllm_config, "cache_config", None)
+    return (
+        cache_config is not None and str(cache_config.cache_dtype) == "ultraquant_4bit"
     )
 
 
@@ -535,12 +612,29 @@ def _shares_layout_with_turboquant(backend_class: type["AttentionBackend"]) -> b
     return not set(layouts).isdisjoint(turboquant_layouts)
 
 
+def _shares_layout_with_ultraquant(backend_class: type["AttentionBackend"]) -> bool:
+    """Whether this backend reads a KV cache layout ULTRAQUANT reads too.
+
+    Same constraint as _shares_layout_with_turboquant: an ultraquant_4bit run
+    keeps its boundary layers at the native dtype, and one layout has to serve
+    the whole worker.
+    """
+    layouts = backend_class.supported_kv_cache_layouts()
+    ultraquant_layouts = (
+        AttentionBackendEnum.ULTRAQUANT.get_class().supported_kv_cache_layouts()
+    )
+    if layouts is None or ultraquant_layouts is None:
+        return True
+    return not set(layouts).isdisjoint(ultraquant_layouts)
+
+
 def _get_invalid_reasons(
     backend_class: type["AttentionBackend"],
     device_capability: DeviceCapability,
     attn_selector_config: "AttentionSelectorConfig",
     *,
     is_turboquant_run: bool,
+    is_ultraquant_run: bool = False,
 ) -> list[str]:
     """Why this backend cannot serve the layer, empty when it can."""
     invalid_reasons = backend_class.validate_configuration(
@@ -553,6 +647,12 @@ def _get_invalid_reasons(
         and not _shares_layout_with_turboquant(backend_class)
     ):
         invalid_reasons = [_TURBOQUANT_LAYOUT_REASON]
+    if (
+        not invalid_reasons
+        and is_ultraquant_run
+        and not _shares_layout_with_ultraquant(backend_class)
+    ):
+        invalid_reasons = [_ULTRAQUANT_LAYOUT_REASON]
     return invalid_reasons
 
 
@@ -596,6 +696,7 @@ class RocmPlatform(Platform):
         "fp8_per_tensor",
         "fp8_per_block",
         "fp8_per_channel",
+        "mxfp4_hadamard32",
         "online",
         "gpt_oss_mxfp4",
     ]
@@ -662,6 +763,22 @@ class RocmPlatform(Platform):
         # TODO: Make this explicit in the selector in a future PR.
         if is_encoder_decoder and AttentionBackendEnum.ROCM_ATTN in backend_priorities:
             backend_priorities.remove(AttentionBackendEnum.ROCM_ATTN)
+        # On gfx1201 and gfx1100, prefer TRITON_ATTN over ROCM_ATTN. An
+        # fp8_e5m2 KV cache keeps ROCM_ATTN: Attention rejects fp8_e5m2 for
+        # backends that take an fp8 query, as TRITON_ATTN does on gfx1201.
+        if (
+            (on_gfx1201() or on_gfx1100())
+            and AttentionBackendEnum.ROCM_ATTN in backend_priorities
+            and AttentionBackendEnum.TRITON_ATTN in backend_priorities
+            and attn_selector_config.kv_cache_dtype != "fp8_e5m2"
+        ):
+            # Swap the two so every other backend keeps its position.
+            rocm_idx = backend_priorities.index(AttentionBackendEnum.ROCM_ATTN)
+            triton_idx = backend_priorities.index(AttentionBackendEnum.TRITON_ATTN)
+            backend_priorities[rocm_idx], backend_priorities[triton_idx] = (
+                AttentionBackendEnum.TRITON_ATTN,
+                AttentionBackendEnum.ROCM_ATTN,
+            )
         is_turboquant_run = _uses_turboquant(vllm_config)
         for priority, backend in enumerate(backend_priorities):
             try:
@@ -683,7 +800,7 @@ class RocmPlatform(Platform):
     @classmethod
     def get_attn_backend_cls(
         cls,
-        selected_backend: "AttentionBackendEnum",
+        selected_backend: "AttentionBackendEnum | None",
         attn_selector_config: "AttentionSelectorConfig",
         num_heads: int | None = None,
     ) -> str:
@@ -695,13 +812,16 @@ class RocmPlatform(Platform):
             # Keep lazy: vllm.config imports current_platform during initialization.
             from vllm.config import get_current_vllm_config_or_none
 
-            is_turboquant_run = _uses_turboquant(get_current_vllm_config_or_none())
+            vllm_config = get_current_vllm_config_or_none()
+            is_turboquant_run = _uses_turboquant(vllm_config)
+            is_ultraquant_run = _uses_ultraquant(vllm_config)
             try:
                 sel_invalid_reasons = _get_invalid_reasons(
                     selected_backend.get_class(),
                     device_capability,
                     attn_selector_config,
                     is_turboquant_run=is_turboquant_run,
+                    is_ultraquant_run=is_ultraquant_run,
                 )
             except ImportError:
                 sel_invalid_reasons = ["ImportError"]
@@ -711,21 +831,23 @@ class RocmPlatform(Platform):
                     selected_backend.name,
                 )
                 return selected_backend.get_path()
-            # Only tolerate the mismatch when turboquant is in play: boundary
-            # layers keep the native dtype while every other layer needs
-            # TURBOQUANT, so no single --attention-backend can serve every layer.
-            # For any other dtype the selection is genuinely invalid -> fail loud.
+            # Only tolerate the mismatch when turboquant or ultraquant is in play:
+            # boundary layers keep the native dtype while every other layer needs
+            # the packed backend, so no single --attention-backend can serve every
+            # layer. For any other dtype the selection is genuinely invalid -> fail
+            # loud.
             kv_dtype = attn_selector_config.kv_cache_dtype
             layer_is_turboquant = kv_dtype is not None and str(kv_dtype).startswith(
                 "turboquant"
             )
-            is_turboquant_fallback = (
-                is_turboquant_run or layer_is_turboquant
+            is_packed_kv_fallback = (
+                is_turboquant_run or layer_is_turboquant or is_ultraquant_run
             ) and sel_invalid_reasons in (
                 [_KV_CACHE_DTYPE_REASON],
                 [_TURBOQUANT_LAYOUT_REASON],
+                [_ULTRAQUANT_LAYOUT_REASON],
             )
-            if not is_turboquant_fallback:
+            if not is_packed_kv_fallback:
                 raise ValueError(
                     f"Selected backend {selected_backend} is not valid for "
                     f"this configuration. Reason: {sel_invalid_reasons}"
@@ -733,10 +855,11 @@ class RocmPlatform(Platform):
             # NOTE: pass a str (not the list) -- info_once hashes its args.
             logger.info_once(
                 "Selected backend %s is incompatible with this layer (%s) of "
-                "the turboquant run; using the auto-selected per-layer backend. "
+                "the %s run; using the auto-selected per-layer backend. "
                 "Reason: %s",
                 selected_backend.name,
                 attn_selector_config.attn_type,
+                "ultraquant" if is_ultraquant_run else "turboquant",
                 str(sel_invalid_reasons),
             )
 
@@ -839,7 +962,11 @@ class RocmPlatform(Platform):
 
         from vllm._aiter_ops import rocm_aiter_ops
 
-        if rocm_aiter_ops.is_mha_enabled() and on_cdna():
+        if (
+            rocm_aiter_ops.is_mha_enabled()
+            and on_cdna()
+            and (dtype == torch.float16 or dtype == torch.bfloat16)
+        ):
             logger.info_once("Using AITER Flash Attention backend for ViT model.")
             return AttentionBackendEnum.ROCM_AITER_FA
 
@@ -864,6 +991,57 @@ class RocmPlatform(Platform):
 
         logger.info_once("Using Torch SDPA backend for ViT model.")
         return AttentionBackendEnum.TORCH_SDPA
+
+    @classmethod
+    def get_mla_prefill_backend_cls(
+        cls,
+        mla_selector_config: "MLAPrefillSelectorConfig",
+    ) -> "type[MLAPrefillBackend]":
+        """On ROCm, prefer the AITER FlashAttention backend, falling back to
+        FlashAttention.
+
+        Raises:
+            ValueError: If neither backend is valid for the configuration.
+
+        """
+        from vllm.v1.attention.backends.mla.prefill.registry import (
+            MLAPrefillBackendEnum,
+        )
+
+        device_capability = cls.get_device_capability()
+        all_invalid_reasons: dict[str, list[str]] = {}
+        for backend_enum in (
+            MLAPrefillBackendEnum.ROCM_AITER_FA,
+            MLAPrefillBackendEnum.FLASH_ATTN,
+        ):
+            try:
+                backend_cls = backend_enum.get_class()
+                invalid_reasons = backend_cls.validate_configuration(
+                    device_capability, mla_selector_config
+                )
+            except ImportError:
+                invalid_reasons = ["ImportError"]
+            if not invalid_reasons:
+                return backend_cls
+            all_invalid_reasons[backend_enum.name] = invalid_reasons
+
+        reasons_str = (
+            "{"
+            + ", ".join(
+                f"{name}: [{', '.join(reasons)}]"
+                for name, reasons in all_invalid_reasons.items()
+            )
+            + "}"
+        )
+        logger.debug_once(
+            "Some MLA prefill backends are not valid with %s. Reasons: %s.",
+            repr(mla_selector_config),
+            reasons_str,
+        )
+        raise ValueError(
+            f"No valid MLA prefill backend found with {mla_selector_config!r}. "
+            f"Reasons: {reasons_str}."
+        )
 
     @classmethod
     def set_device(cls, device: torch.device) -> None:
@@ -974,6 +1152,15 @@ class RocmPlatform(Platform):
         if use_aiter_fp8_linear and "-quant_fp8" not in compilation_config.custom_ops:
             compilation_config.custom_ops.append("+quant_fp8")
 
+        # Only RMSNorm's custom op reaches rms_norm_batch_invariant. Inductor
+        # lowers the native one to a reduction whose block size it picks by
+        # benchmarking, so the summation order varies with the batch and run.
+        if (
+            envs.VLLM_BATCH_INVARIANT
+            and "-rms_norm" not in compilation_config.custom_ops
+        ):
+            compilation_config.custom_ops.append("+rms_norm")
+
         if use_aiter_fused_se and "-grouped_topk" in compilation_config.custom_ops:
             logger.warning_once(
                 "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS is enabled, which "
@@ -992,6 +1179,17 @@ class RocmPlatform(Platform):
 
         # Default dispatch to rocm's sparse_attn_indexer implementation
         compilation_config.custom_ops.append("+sparse_attn_indexer")
+
+        # Default the gated RMSNorm custom op on for unquantized models. Quantized
+        # is untested in serving.
+        model_config = vllm_config.model_config
+        if (
+            model_config is not None
+            and model_config.quantization is None
+            and "+rms_norm_gated" not in compilation_config.custom_ops
+            and "-rms_norm_gated" not in compilation_config.custom_ops
+        ):
+            compilation_config.custom_ops.append("+rms_norm_gated")
 
     @classmethod
     def check_and_update_config(cls, vllm_config: "VllmConfig") -> None:
@@ -1029,6 +1227,20 @@ class RocmPlatform(Platform):
                 "with multimodal-bidirectional attention."
             )
             scheduler_config.disable_chunked_mm_input = True
+
+        _maybe_default_dsv4_mxfp4_indexer(vllm_config)
+
+        if parallel_config.all2all_backend == "mori":
+            from vllm.config.parallel import resolve_mori_all2all
+
+            resolve_mori_all2all(
+                parallel_config,
+                model_config,
+                vllm_config.kernel_config.moe_backend,
+                lsa_spans_hosts=on_gfx1250(),
+                sdma_picks_epv1=not on_gfx1250(),
+                validated_arch=on_gfx950() or on_gfx1250(),
+            )
 
     @classmethod
     def verify_model_arch(cls, model_arch: str) -> None:
@@ -1068,6 +1280,11 @@ class RocmPlatform(Platform):
         return torch.cuda.max_memory_allocated(device)
 
     @classmethod
+    def free_device_memory(cls, device: torch.device | None = None) -> int:
+        free = rocm_device_memory.exact_free_memory(device)
+        return super().free_device_memory(device) if free is None else free
+
+    @classmethod
     def get_device_communicator_cls(cls) -> str:
         return (
             "vllm.distributed.device_communicators.cuda_communicator.CudaCommunicator"  # noqa
@@ -1079,7 +1296,7 @@ class RocmPlatform(Platform):
 
     @classmethod
     def supports_fp8(cls) -> bool:
-        return on_cdna() or on_rdna4()
+        return on_cdna() or on_rdna()
 
     @classmethod
     def is_fp8_fnuz(cls) -> bool:
@@ -1242,12 +1459,13 @@ class RocmPlatform(Platform):
         default = ["native"] if using_inductor else ["vllm_c", "native"]
 
         #  Aiter rms norm perform best when CUDA Graph capture is enabled.
-        # TODO(luka/TJ) remove env vars completely
+        # TODO(Rohan138/dllehr-amd/rasmith) Change this to be an inclusive
+        # check instead of exclusive check in the future.
         if (
             cc.cudagraph_mode != CUDAGraphMode.NONE
             and envs.VLLM_ROCM_USE_AITER
             and envs.VLLM_ROCM_USE_AITER_RMSNORM
-            and not on_rdna4()
+            and not on_gfx90a()  # AITER not built for gfx90a, rmsnorm -> SEGV.
         ):
             rms_norm = ["aiter"] + default
         else:
