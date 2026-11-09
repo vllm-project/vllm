@@ -56,7 +56,8 @@ class XPUExperts(mk.FusedMoEExpertsModular):
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
-        return mk.FusedMoEActivationFormat.Standard
+        # Rows without a route (topk_ids == -1) are skipped below.
+        return mk.FusedMoEActivationFormat.PaddedStandard
 
     @staticmethod
     def _supports_current_device() -> bool:
@@ -155,6 +156,19 @@ class XPUExperts(mk.FusedMoEExpertsModular):
                 gemm1_clamp_limit=self.gemm1_clamp_limit,
             )
         assert self.fused_moe_impl is not None
+        meta = expert_tokens_meta
+        if (
+            meta is not None
+            and meta.psum_recv_per_rank is not None
+            and a1q_scale is None
+            and self.quant_config.act_scale_is_tensor_wide(self.quant_config.a1_scale)
+        ):
+            # PaddedStandard rows past the received tokens are uninitialized;
+            # zero them so the kernel's tensor-wide activation scale skips
+            # them.
+            rows = torch.arange(hidden_states.size(0), device=hidden_states.device)
+            pad = rows >= meta.psum_recv_per_rank[-1:]
+            hidden_states = hidden_states.masked_fill(pad.unsqueeze(1), 0)
         if self.moe_config.ep_size > 1:
             # Avoid topk_ids = -1, remap them to an
             # expert not owned by this rank so they are skipped.
