@@ -302,9 +302,9 @@ def compile_regex_with_timeout(fn: Callable[..., _T], *args: Any, pattern: str) 
 
     Args:
         fn: Picklable callable that performs the compilation.
-        *args: Picklable arguments passed to ``fn``.
+        *args: Picklable arguments passed to `fn`.
         pattern: Regex text included in timeout error messages. Not passed
-            to ``fn`` unless it is also one of ``args``.
+            to `fn` unless it is also one of `args`.
 
     Raises:
         ValueError: If compilation exceeds the configured timeout or a
