@@ -61,6 +61,7 @@ from vllm.v1.core.kv_cache_utils import (
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.core.single_type_kv_cache_manager import (
+    FullAttentionManager,
     HiSparseHotManager,
     HiSparseResidentManager,
     HiSparseSourceManager,
@@ -2609,11 +2610,9 @@ def _make_hybrid_kv_cache_config(
         block_sizes: Optional per-group physical block sizes (same length as
             spec_types). Sliding-window sizes scale with each group's own
             block size. Defaults to ``block_size`` for every group.
-        eagle_groups: Mark every group as an eagle (draft) group. Equivalent to
-            the fallback the coordinator applies when ``use_eagle`` is set but
-            no group is flagged, which it stops doing once a drafter that owns
-            no KV is distinguished from one that does. Tests that assert the
-            drop should flag their groups explicitly.
+        eagle_groups: Mark every group as an eagle (draft) group, which is what
+            the coordinator's all-groups fallback used to do. Set it in tests
+            that assert the drop rather than relying on that fallback.
 
     """
     if block_sizes is None:
@@ -2804,24 +2803,21 @@ _EAGLE_HYBRID_MODEL_TEST_CASES = [
     pytest.param(
         ["full", "sliding_window", "sliding_window_large"], 3, id="3g-full+sw+sw_large"
     ),
-    pytest.param(["full", "sliding_window", "mamba"], 3, id="3g-full+sw+mamba"),
     # 4 groups: interleaved fulls
     pytest.param(
         ["full", "sliding_window", "full", "sliding_window_large"],
         3,
         id="4g-interleaved-full+sw+sw_large",
     ),
-    # Merges into 2 coordinated groups (full first): pins that
-    # is_simple_hybrid counts coordinated groups, not physical ones.
+    # Shapes below carry a mamba group. Their expectation is the reconciled
+    # 48 tokens on current main; #57128 and #45614 would move them to 32, so
+    # keep the mamba rows adjacent and update them together.
     pytest.param(["full", "mamba", "full", "mamba"], 3, id="4g-interleaved-full+mamba"),
-    # 4 groups: 0 full (all other types)
     pytest.param(
         ["sliding_window", "mamba", "sliding_window_large", "mamba"],
         3,
         id="4g-sw+mamba+sw_large+mamba",
     ),
-    # 4 groups: 1 full + 3 others (the attention-group cardinality of
-    # DeepSeek-V4-Flash with DSpark speculative decoding)
     pytest.param(
         ["full", "sliding_window", "sliding_window_large", "mamba"],
         3,
@@ -2854,6 +2850,15 @@ def test_prefill_hybrid_model_combinations_eagle(
         hash_block_size=block_size,
         use_eagle=True,
     )
+
+    if len(set(spec_types)) < len(spec_types):
+        # Repeated spec kinds merge into one coordinated group each, so this
+        # shape exercises group merging rather than one group per physical
+        # entry. Full attention is ordered first.
+        coordinated = manager.coordinator.attention_groups
+        assert len(coordinated) == len(set(spec_types))
+        if "full" in spec_types:
+            assert issubclass(coordinated[0].manager_cls, FullAttentionManager)
 
     hash_fn = sha256
 
