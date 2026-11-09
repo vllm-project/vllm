@@ -359,10 +359,17 @@ enum TemplateContent {
 #[derive(Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum TemplateContentPart {
-    Text { text: String },
+    Text {
+        text: String,
+    },
     Image,
     Video,
     Audio,
+    /// Kept structured, like Python, for templates that expand the referenced
+    /// tool.
+    ToolReference {
+        name: String,
+    },
 }
 
 #[derive(Debug, Serialize)]
@@ -442,11 +449,20 @@ fn to_template_message<'a>(
             tool_call_id: None,
         },
         ChatMessage::Assistant { content } => {
-            let text = content.text();
             let reasoning = content.reasoning();
             let tool_calls = to_template_tool_calls(content);
+            // Each text block is one part of the request's `content`, so the
+            // parts reach the template like any other role's.
+            let text_parts = content
+                .iter()
+                .filter_map(|block| match block {
+                    AssistantContentBlock::Text { text } => Some(ChatContentPart::text(text)),
+                    AssistantContentBlock::Reasoning { .. }
+                    | AssistantContentBlock::ToolCall(_) => None,
+                })
+                .collect();
             let content =
-                to_template_content(&ChatContent::Text(text), content_format, multimodal)?;
+                to_template_content(&ChatContent::Parts(text_parts), content_format, multimodal)?;
             TemplateMessage {
                 role: "assistant",
                 content,
@@ -462,7 +478,7 @@ fn to_template_message<'a>(
             tool_call_id,
         } => TemplateMessage {
             role: "tool",
-            content: to_template_content(content, content_format, multimodal)?,
+            content: to_template_tool_content(content, content_format, multimodal)?,
             tools: None,
             reasoning: None,
             reasoning_content: None,
@@ -513,6 +529,29 @@ fn to_template_content(
     })
 }
 
+/// Text-only tool results reach the template as one string in both formats,
+/// like Python: most templates only handle string tool content, while clients
+/// such as Claude Code send tool results as text parts.
+fn to_template_tool_content(
+    content: &ChatContent,
+    content_format: ChatTemplateContentFormat,
+    multimodal: Option<&MultimodalRenderInfo>,
+) -> Result<TemplateContent> {
+    let text_only = match content {
+        ChatContent::Text(_) => true,
+        ChatContent::Parts(parts) => {
+            parts.iter().all(|part| matches!(part, ChatContentPart::Text { .. }))
+        }
+    };
+    if text_only {
+        Ok(TemplateContent::String(to_template_string_content(
+            content, multimodal,
+        )?))
+    } else {
+        to_template_content(content, content_format, multimodal)
+    }
+}
+
 fn to_template_openai_content(
     content: &ChatContent,
     multimodal: Option<&MultimodalRenderInfo>,
@@ -544,6 +583,9 @@ fn to_template_openai_content(
                         .ok_or(Error::UnsupportedMultimodalContent("audio"))?;
                     Ok(TemplateContentPart::Audio)
                 }
+                ChatContentPart::ToolReference { name } => {
+                    Ok(TemplateContentPart::ToolReference { name: name.clone() })
+                }
             })
             .collect(),
     }
@@ -557,9 +599,9 @@ fn to_template_string_content(
         ChatContent::Text(text) => Ok(text.clone()),
         ChatContent::Parts(parts) => {
             // Same as Python with `--interleave-mm-strings`: each part becomes one segment,
-            // media as its modality's placeholder in place, empty text parts are dropped, and
-            // the segments are joined with "\n". Python's default moves placeholders to the
-            // front instead.
+            // media as its modality's placeholder in place, a tool reference as the tool's
+            // name, empty text parts are dropped, and the segments are joined with "\n".
+            // Python's default moves placeholders to the front instead.
             let segments: Vec<&str> = parts
                 .iter()
                 .filter(|part| !part.is_empty_text())
@@ -576,6 +618,7 @@ fn to_template_string_content(
                             .and_then(|multimodal| multimodal.audio_token.as_deref())
                             .ok_or(Error::UnsupportedMultimodalContent("audio"))
                     }
+                    ChatContentPart::ToolReference { name } => Ok(name.as_str()),
                 })
                 .collect::<Result<_>>()?;
             Ok(segments.join("\n"))
@@ -605,7 +648,8 @@ fn append_continue_final_message_tag(message: &mut TemplateMessage<'_>) -> Resul
             TemplateContentPart::Text { text } => Some(text),
             TemplateContentPart::Image
             | TemplateContentPart::Video
-            | TemplateContentPart::Audio => None,
+            | TemplateContentPart::Audio
+            | TemplateContentPart::ToolReference { .. } => None,
         }),
     };
     let text = text.ok_or_else(|| {
@@ -1206,6 +1250,91 @@ mod tests {
             let rendered = render(Some("{{ messages[0].content }}"), &request).unwrap();
             assert_eq!(rendered, expected);
         }
+    }
+
+    #[test]
+    fn assistant_and_tool_content_parts_reach_templates() {
+        let tool_call = AssistantContentBlock::ToolCall(crate::AssistantToolCall {
+            id: "call_1".to_string(),
+            name: "lookup".to_string(),
+            arguments: "{}".to_string(),
+        });
+        let messages = vec![
+            ChatMessage::assistant_blocks(
+                ["a", "", "b"]
+                    .map(|text| AssistantContentBlock::Text {
+                        text: text.to_string(),
+                    })
+                    .to_vec(),
+            ),
+            ChatMessage::assistant_blocks(vec![tool_call]),
+            ChatMessage::tool_response(
+                ["x", "", "y"].map(ChatContentPart::text).to_vec(),
+                "call_1",
+            ),
+            ChatMessage::tool_response("x", "call_1"),
+            ChatMessage::tool_response(
+                vec![
+                    ChatContentPart::text("x"),
+                    ChatContentPart::image_url("data:image/png;base64,test"),
+                ],
+                "call_1",
+            ),
+            ChatMessage::tool_response(
+                vec![
+                    ChatContentPart::text("x"),
+                    ChatContentPart::tool_reference("get_weather"),
+                ],
+                "call_1",
+            ),
+        ];
+        let weather = ChatTool {
+            name: "get_weather".to_string(),
+            description: None,
+            parameters: serde_json::json!({"type": "object"}),
+            strict: None,
+            defer_loading: Some(true),
+        };
+        let tool_context = ResolvedToolContext::new(&messages, vec![weather], None, true).unwrap();
+        let request = ChatRequest {
+            messages,
+            tool_context,
+            ..sample_request(Vec::new())
+        };
+        let template = "{% for m in messages %}{{ m.content | tojson }}\n{% endfor %}";
+        let rendered: String = [
+            ChatTemplateContentFormatOption::String,
+            ChatTemplateContentFormatOption::OpenAi,
+        ]
+        .into_iter()
+        .map(|content_format| {
+            let prompt = render_mm(template, &request, content_format)
+                .unwrap()
+                .prompt
+                .into_text()
+                .unwrap();
+            format!("{content_format:?}:\n{prompt}")
+        })
+        .collect();
+
+        // The `openai` tool row drops the empty part as `string` does; Python's
+        // `openai` collapse keeps it (`"x\n\ny"`).
+        expect![[r#"
+            String:
+            "a\nb"
+            ""
+            "x\ny"
+            "x"
+            "x\n<image>"
+            "x\nget_weather"
+            OpenAi:
+            [{"type": "text", "text": "a"}, {"type": "text", "text": ""}, {"type": "text", "text": "b"}]
+            []
+            "x\ny"
+            "x"
+            [{"type": "text", "text": "x"}, {"type": "image"}]
+            [{"type": "text", "text": "x"}, {"type": "tool_reference", "name": "get_weather"}]
+        "#]].assert_eq(&rendered);
     }
 
     #[test]

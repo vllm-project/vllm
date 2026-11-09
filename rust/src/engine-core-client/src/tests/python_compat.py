@@ -139,6 +139,7 @@ class EngineCoreOutput(
     spec_decode_metrics: object | None = None
     prompt_token_id_logprobs: object | None = None
     error: RequestError | None = None
+    watermarking: bool | None = None
 
 
 class ExtendedEngineCoreOutput(EngineCoreOutput):
@@ -296,6 +297,7 @@ outputs = EngineCoreOutputs(
             new_token_ids=[7, 8],
             finish_reason=FinishReason.ERROR,
             error=RequestError("engine_paused", "Generation is paused.", True),
+            watermarking=True,
             routed_experts=[
                 np.arange(4, dtype=np.uint8).reshape(2, 1, 2).dtype.str,
                 [2, 1, 2],
@@ -546,6 +548,9 @@ class EngineCoreReadyResponse:
     effective_attention_block_size: int | None = None
     vllm_config: dict | None = None
     prefix_hash_config: PrefixHashConfig | None = None
+    cache_config_info: dict[str, str] | None = None
+    config_hash: str | None = None
+    enable_expert_parallel: bool = False
 
 
 ready_response = EngineCoreReadyResponse(
@@ -592,6 +597,9 @@ ready_response = EngineCoreReadyResponse(
         "parallel_config": {"_api_process_count": 1, "_api_process_rank": -1},
         "speculative_config": None,
     },
+    cache_config_info={"block_size": "16", "mamba_block_size": "None"},
+    config_hash="0123456789",
+    enable_expert_parallel=True,
 )
 
 nixl_stats = {
@@ -629,11 +637,41 @@ umbp_stats = {
     "load": {"submitted": 3, "completed": 2, "failed": 1, "num_bytes": 8192},
     "store": {"submitted": 1, "completed": 1, "failed": 0, "num_bytes": 4096},
 }
+# `SimpleCPUOffloadStats.data` as `SimpleCPUOffloadScheduler.get_stats` fills
+# it: metric types, and samples keyed by metric name and label-value tuple. The
+# last metric stands for one Python adds later, which Rust must ignore.
+simple_cpu_offload_stats = {
+    "types": {
+        "vllm:simple_kv_offload_save_outcomes_total": "counter",
+        "vllm:simple_kv_offload_load_blocks_total": "counter",
+        "vllm:simple_kv_offload_used_blocks": "gauge",
+        "vllm:simple_kv_offload_pending_store_blocks": "gauge",
+        "vllm:simple_kv_offload_info": "gauge",
+        "vllm:simple_kv_offload_future_blocks": "gauge",
+    },
+    "data": {
+        "vllm:simple_kv_offload_save_outcomes_total": {
+            ("stored",): 3,
+            ("skipped_in_flight",): 1,
+        },
+        "vllm:simple_kv_offload_load_blocks_total": {(): 4},
+        "vllm:simple_kv_offload_used_blocks": {(): 9},
+        "vllm:simple_kv_offload_pending_store_blocks": {(): 2},
+        "vllm:simple_kv_offload_info": {("cpu", "false", "true", "64"): 1},
+        "vllm:simple_kv_offload_future_blocks": {(): 7},
+    },
+}
+# `OffloadingConnector` stats share the `types`/`data` envelope.
+kv_offload_stats = {
+    "types": {"vllm:kv_offload_load_bytes": "counter"},
+    "data": {"vllm:kv_offload_load_bytes": {(): 4096}},
+}
 multi_connector_stats = {
     "NixlConnector": nixl_stats,
     "MooncakeConnector": mooncake_transfer_stats,
     "MooncakeStoreConnector": mooncake_stats,
     "UMBPStoreConnector": umbp_stats,
+    "SimpleCPUOffloadConnector": simple_cpu_offload_stats,
     "UnsupportedConnector": {"sample_count": 1},
 }
 
@@ -665,3 +703,5 @@ print(msgspec.msgpack.encode(ready_response).hex())
 print(extended_outputs_bytes.hex())
 print(msgspec.msgpack.encode(lora_request).hex())
 print(msgspec.msgpack.encode(inplace_lora_request).hex())
+print(msgspec.msgpack.encode(simple_cpu_offload_stats).hex())
+print(msgspec.msgpack.encode(kv_offload_stats).hex())
