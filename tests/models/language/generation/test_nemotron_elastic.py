@@ -189,6 +189,7 @@ def test_elastic_llm_rejects_routed_expert_outputs(
             enforce_eager=True,
             async_scheduling=False,
             enable_prefix_caching=True,
+            enable_chunked_prefill=True,
             enable_return_routed_experts=True,
             kernel_config={"moe_backend": "triton"},
             compilation_config={"mode": 0},
