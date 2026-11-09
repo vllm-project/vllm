@@ -43,6 +43,9 @@ from vllm.model_executor.layers.quantization.online.base import (
 from vllm.model_executor.layers.quantization.utils.config_utils import (
     get_checkpoint_quant_keys,
 )
+from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (
+    break_fp4_bytes,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     is_layer_skipped,
     kMxfp4Static,
@@ -66,7 +69,6 @@ _SHARD_TENSORS = {
     "mxfp4": ("weight", "weight_scale"),
 }
 _ONLINE_FORMATS = {kMxfp8Static: MEGA_MOE_MXFP8, kMxfp4Static: MEGA_MOE_MXFP4}
-_E2M1_VALUES = torch.tensor([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0])
 
 
 def dequantize_experts(
@@ -77,11 +79,7 @@ def dequantize_experts(
         return weight.float()
     assert scale is not None
     if checkpoint_format == "mxfp4":
-        # E2M1 pairs, element 2i in the low nibble (OCP MX).
-        codes = weight.view(torch.uint8)
-        codes = torch.stack([codes & 0xF, codes >> 4], dim=-1).flatten(-2).long()
-        values = _E2M1_VALUES.to(weight.device)
-        values = torch.cat([values, -values])[codes]
+        values = break_fp4_bytes(weight.view(torch.uint8), torch.float32)
     else:
         values = weight.float()
     if checkpoint_format != "fp8_block":
