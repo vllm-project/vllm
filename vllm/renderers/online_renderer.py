@@ -123,10 +123,12 @@ def _reused_prompt_token_ids(
     `kv_transfer_params` so the decode stage can skip re-tokenizing. Removing
     the key keeps the id list out of the engine's sampling metadata.
 
-    Returns None without checking the ids when `echo` is set, `messages`
-    has non-text content, or the server has no KV transfer connector and direct
-    token-id reuse was not explicitly enabled. Otherwise raises
-    VLLMValidationError if the ids are malformed or out of vocabulary.
+    Returns None when token ids alone are not enough. For example, the
+    user may want the rendered prompt back, may have sent media for the
+    model to see, or may have no KV transfer connector without explicitly
+    enabling direct token-id reuse. In those cases, messages are rendered
+    instead. Otherwise raises VLLMValidationError if the ids are malformed
+    or out of vocabulary.
     """
     kv = getattr(request, "kv_transfer_params", None)
     if not isinstance(kv, dict):
@@ -141,6 +143,12 @@ def _reused_prompt_token_ids(
         logger.debug(
             "Ignoring kv_transfer_params['prompt_token_ids']: "
             "echo is set, so messages are rendered instead."
+        )
+        return None
+    if getattr(request, "return_prompt_text", False):
+        logger.debug(
+            "Ignoring kv_transfer_params['prompt_token_ids']: "
+            "return_prompt_text is set, so messages are rendered instead."
         )
         return None
     if has_non_text_content(messages):
