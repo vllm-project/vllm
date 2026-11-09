@@ -264,6 +264,9 @@ def test_scheduler_passes_max_num_seqs_as_dsd_runtime_batch_limit():
 
     assert not scheduler.pads_new_decode_rows
     assert scheduler.speculator_config is not None
+    # The step's budget came from the lookup built for max_num_seqs.
+    lookup = scheduler.speculator_config._dynamic_sd_lookup
+    assert lookup is not None and lookup[0] == 16 and len(lookup[1]) == 17
     assert scheduler.speculator_config.resources(16).capture_rows == (4,)
     assert len(output.num_scheduled_tokens) == 16
     assert output.num_spec_tokens_to_schedule == 3
