@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""K2 ``back``: one attention layer from the rotated query to the rank's wo_b
+"""K2 `back`: one attention layer from the rotated query to the rank's wo_b
 partial.
 
-One launch a layer and rank, ``BLOCKS`` x ``THREADS``, S rows:
+One launch a layer and rank, `BLOCKS` x `THREADS`, S rows:
 
     split   (S x chunks of CK keys): flash-decoding over one chunk of a token's
             keys (K1's key table: top-k compressed rows, then window rows) for
@@ -25,7 +25,7 @@ One launch a layer and rank, ``BLOCKS`` x ``THREADS``, S rows:
     wo_b    (448, 16 rows): X8B times wo_b -> bf16 -> ``out``
 
 Hand-offs are plain device-scope data behind tagged flags (half the bytes of a
-tagged pair per value). Adapted from ATOM's V4.1 ``attn_post`` (K2a), which
+tagged pair per value). Adapted from ATOM's V4.1 `attn_post` (K2a), which
 reads a bf16 pool and ends in a peer all-reduce.
 """
 
@@ -142,7 +142,7 @@ def publish(c, region, i):
 
 @traced
 def await_flags(c, region, n, index):
-    """Thread u < n polls flag ``index(u)``; then the CTA proceeds."""
+    """Thread u < n polls flag `index(u)`; then the CTA proceeds."""
     tid = c["tid"]
     if tid < n:
         c["mb"].poll([(region, index(fx.min(tid, n - 1)), 1)])
@@ -198,9 +198,9 @@ def _fp8_pair_f32(word, scale, hi):
 
 @traced
 def stage_split(c, unit):
-    """Flash-decoding over chunk ``unit % nchunk`` of token ``unit // nchunk``
-    (``split_chunk``). A build whose key table is wider than a token's top-k
-    (``bounded``: every compressed row of a long context) skips a chunk past
+    """Flash-decoding over chunk `unit % nchunk` of token `unit // nchunk`
+    (`split_chunk`). A build whose key table is wider than a token's top-k
+    (`bounded`: every compressed row of a long context) skips a chunk past
     the token's keys at most, known from its position alone: no load of its q
     or keys."""
     nchunk = c["nchunk"]
@@ -219,7 +219,7 @@ def stage_split(c, unit):
 @traced
 def q_head_rstd(c):
     """Each head's weightless RMSNorm of the token's q in LDS:
-    rsq(mean(q^2) + eps) -> ``qn`` [head]. vLLM norms q before its RoPE, which
+    rsq(mean(q^2) + eps) -> `qn` [head]. vLLM norms q before its RoPE, which
     keeps every pair's norm: the scores scale by it after the dot product."""
     tid, d, sl = c["tid"], c["d"], c["sl"]
     tph = THREADS // d.heads  # threads a head
@@ -241,7 +241,7 @@ def q_head_rstd(c):
 
 @traced
 def split_chunk(c, t, ch):
-    """Flash-decoding over chunk ``ch`` of token ``t``, every head of the rank
+    """Flash-decoding over chunk `ch` of token `t`, every head of the rank
     -> the chunk's partial and (max, sum) per head. Wave (head group hg, key
     tile kt): keys 16 kt .. of the chunk (loaded and dequantized once) against
     the group's head tiles; then dims 64 w .. of the PV over every key and
@@ -520,7 +520,7 @@ def _chunk_loads(c, t, h, d0, cc):
 def merge_all(c, t, h, d0, nlive, sink):
     """The chunks' (sum, 8 dims) of (t, h) weighted by exp2(max - the max),
     the sink's term first, in chunk order: every chunk loaded at once (a
-    past-``nlive`` chunk weighs nothing)."""
+    past-`nlive` chunk weighs nothing)."""
     m = fx.Float32(NEG)
     ms, ls, vs = [], [], []
     for cc in range_constexpr(c["nchunk"]):
@@ -546,7 +546,7 @@ MERGE_BATCH = 4  # a wide table's chunks loaded together (``merge_live``)
 
 @traced
 def merge_live(c, t, h, d0, nlive, sink):
-    """``merge_all`` over the live chunks only, ``MERGE_BATCH`` at a time (a
+    """`merge_all` over the live chunks only, `MERGE_BATCH` at a time (a
     wide key table: most of its chunks past a token's keys)."""
     m = fx.Float32(NEG)
     for c0 in range(0, nlive, MERGE_BATCH):
@@ -588,7 +588,7 @@ COMB_HEADS = WAVES  # heads a combine unit: a wave each
 
 @traced
 def stage_combine(c, unit):
-    """(token, 8 heads) ``unit``, a wave a head, 8 dims a lane: the chunks
+    """(token, 8 heads) `unit`, a wave a head, 8 dims a lane: the chunks
     merged with the sink folded in, bf16, inverse RoPE, MXFP8 of each 32 -> XO,
     published (a flag a (token, head group))."""
     lane, wave, d, s = c["lane"], c["wave"], c["d"], c["S"]
@@ -698,20 +698,6 @@ def stage_woa(c, task, ops, t0, n):
     gpu.barrier()
 
 
-def woa_loads(c, task):
-    a = c["args"]
-    return gemv_loads(
-        c,
-        a["woa"],
-        a["woa_s"],
-        c["d"].group_k,
-        task * WOA_ROWS,
-        WOA_SPLIT_K,
-        tiled=True,
-        ld=ld(c["d"].group_k),
-    )
-
-
 def wob_loads(c, task, pred=None):
     a, d = c["args"], c["d"]
     return gemv_loads(
@@ -736,8 +722,8 @@ def _wob_store(a, t, col, v0, v1):
 
 @traced
 def stage_wob(c, task, ops, task2, ops2, has2, t0, n, mark=False):
-    """Rows 16 task .. (and 16 task2 .., ``has2``) of wo_b -> bf16 -> out, or
-    (``c["wob_out"]``, the mono layer) the caller's hook with each bf16 pair."""
+    """Rows 16 task .. (and 16 task2 .., `has2`) of wo_b -> bf16 -> out, or
+    (`c["wob_out"]`, the mono layer) the caller's hook with each bf16 pair."""
     tid, red = c["tid"], c["red"]
     o_rows = c["d"].o_rows
     a = c["args"]
@@ -811,7 +797,7 @@ def back_lds_members(s: int, d: Dims) -> dict:
 
 
 def back_lds(s: int, d: Dims):
-    """K2's attention LDS: the union of ``back_lds_members``."""
+    """K2's attention LDS: the union of `back_lds_members`."""
     m = back_lds_members(s, d)
     SplitLds, GemvLds = m["split"], m["gemv"]
 
@@ -824,8 +810,8 @@ def back_lds(s: int, d: Dims):
 
 
 def back_context(key, lds, args: dict, scratch, tag, layout=None) -> dict:
-    """The attention back's context: LDS views (``lds``: an allocated
-    ``back_lds``, or a dict of the members' views), mailbox (tag ``tag``),
+    """The attention back's context: LDS views (`lds`: an allocated
+    `back_lds`, or a dict of the members' views), mailbox (tag `tag`),
     scratch regions, arguments by name."""
     s, d = key.tokens, Dims(key.tp, key.topk)
     tid = fx.thread_idx.x
@@ -868,7 +854,7 @@ EPOCH_MARKS = 4  # word offset of the per-CTA marks in the epoch buffer
 @traced
 def epoch_begin(c, epoch, ep):
     """This CTA has read the launch pair's epoch: its own mark word (no
-    contended atomic) := ep + 1, which ``epoch_end`` checks."""
+    contended atomic) := ep + 1, which `epoch_end` checks."""
     if c["tid"] == 0:
         bo.buffer_store(
             ep + 1, rsrc(epoch), EPOCH_MARKS + c["bid"], cache_modifier=CM_DEV
@@ -878,7 +864,7 @@ def epoch_begin(c, epoch, ep):
 @traced
 def epoch_end(c, epoch, ep, reset=None):
     """CTA 0, once every CTA marked this epoch (thread u checks CTA u's mark):
-    ``reset()`` (state later pairs must find cleared), then the epoch moved on.
+    `reset()` (state later pairs must find cleared), then the epoch moved on.
     The next pair's hand-offs carry a tag no earlier pair wrote; later launches'
     kernels start after this one ends."""
     if c["bid"] == 0:

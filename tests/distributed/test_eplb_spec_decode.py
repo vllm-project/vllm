@@ -61,12 +61,6 @@ def get_model_args(
     return model_args
 
 
-pytestmark = pytest.mark.skipif(
-    current_platform.is_rocm(),
-    reason="EPLB with Spec Decode is a work in progress on ROCm.",
-)
-
-
 class FakeEplbState:
     instances: list[FakeEplbState] = []
 
@@ -257,7 +251,7 @@ def test_eplb_dspark_draft_registration(
             (
                 "eagle",
                 "meta-llama/Llama-4-Scout-17B-16E-Instruct",
-                "morgendave/EAGLE-Llama-4-Scout-17B-16E-Instruct",
+                "vllm-project/EAGLE-Llama-4-Scout-17B-16E-Instruct",
                 4,
                 0.92,
                 1,

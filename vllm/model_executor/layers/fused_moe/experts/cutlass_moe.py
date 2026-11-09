@@ -48,6 +48,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     cutlass_group_gemm_supported,
 )
+from vllm.model_executor.utils import is_weights_pre_processed
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 
@@ -280,6 +281,13 @@ def run_cutlass_moe_fp8(
 
 
 class CutlassExpertsFp8Base(mk.FusedMoEExpertsModular):
+    kept_constants: tuple[str, ...] = (
+        "ab_strides1",
+        "ab_strides2",
+        "c_strides1",
+        "c_strides2",
+    )
+
     def __init__(
         self,
         moe_config: FusedMoEConfig,
@@ -371,9 +379,7 @@ class CutlassExpertsFp8Base(mk.FusedMoEExpertsModular):
         if expert_tokens_meta is not None:
             expert_num_tokens = expert_tokens_meta.expert_num_tokens
 
-        use_batched_format = (
-            self.activation_format() == mk.FusedMoEActivationFormat.BatchedExperts
-        )
+        use_batched_format = self.activation_format().is_batched
 
         in_dtype = hidden_states.dtype
         run_cutlass_moe_fp8(
@@ -702,6 +708,8 @@ class CutlassExpertsFp4(mk.FusedMoEExpertsModular):
     """CUTLASS FP4 fused MoE expert implementation."""
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        if is_weights_pre_processed():
+            return
         # Fuse activation scales into w_scale_2 in-place so that
         # g1/g2_alphas (which reference the same tensor) stay in sync
         # when EPLB rearranges the parameter.
@@ -717,7 +725,7 @@ class CutlassExpertsFp4(mk.FusedMoEExpertsModular):
         p = current_platform
         return p.is_cuda() and (
             p.is_device_capability_family(100)
-            or p.is_device_capability_family(110)
+            # SM110 excluded: grouped NVFP4 kernel is sm100-only
             or p.is_device_capability_family(120)
         )
 
@@ -890,6 +898,11 @@ def run_cutlass_moe_mxfp4(
 
     a_map = torch.empty((topk_ids.numel()), dtype=torch.int32, device=device)
     c_map = torch.empty((topk_ids.numel()), dtype=torch.int32, device=device)
+    # Below 17 experts the quant kernel uses a cheap linear offset scan; skip
+    # sorted_expert_ids to avoid extra routing writes and ID lookups.
+    sorted_expert_ids: torch.Tensor | None = None
+    if e > 16:
+        sorted_expert_ids = torch.empty_like(a_map)
 
     if apply_router_weight_on_input:
         assert num_topk == 1, (
@@ -909,6 +922,7 @@ def run_cutlass_moe_mxfp4(
         k,
         blockscale_offsets,
         is_gated=is_gated,
+        sorted_expert_ids=sorted_expert_ids,
     )
 
     a = ops.shuffle_rows(a, a_map)
@@ -918,6 +932,7 @@ def run_cutlass_moe_mxfp4(
         blockscale_offsets,
         e,
         num_topk,
+        sorted_expert_ids,
     )
     c1 = _resize_cache(workspace13, (m * topk, w1_n))
     c2 = _resize_cache(workspace2, (m * topk, n))
@@ -938,7 +953,12 @@ def run_cutlass_moe_mxfp4(
         activation_config is None or activation_config.clamp_limit is None
     ):
         int_fp4, int_blockscale = ops.silu_and_mul_mxfp4_experts_quant(
-            c1, expert_offsets, blockscale_offsets, e, num_topk
+            c1,
+            expert_offsets,
+            blockscale_offsets,
+            e,
+            num_topk,
+            sorted_expert_ids,
         )
     else:
         apply_moe_activation(
@@ -948,7 +968,12 @@ def run_cutlass_moe_mxfp4(
             activation_config=activation_config,
         )
         int_fp4, int_blockscale = ops.mxfp4_experts_quant(
-            c2, expert_offsets, blockscale_offsets, e, num_topk
+            c2,
+            expert_offsets,
+            blockscale_offsets,
+            e,
+            num_topk,
+            sorted_expert_ids,
         )
 
     ops.cutlass_mxfp4_moe_mm(
@@ -1292,6 +1317,17 @@ def run_cutlass_moe_w4a8_fp8(
 
 
 class CutlassExpertsW4A8Fp8(mk.FusedMoEExpertsModular):
+    kept_constants: tuple[str, ...] = (
+        "a_strides1",
+        "a_strides2",
+        "b_strides1",
+        "b_strides2",
+        "c_strides1",
+        "c_strides2",
+        "s_strides1",
+        "s_strides2",
+    )
+
     def __init__(
         self,
         moe_config: FusedMoEConfig,
@@ -1433,9 +1469,7 @@ class CutlassExpertsW4A8Fp8(mk.FusedMoEExpertsModular):
 
         expert_num_tokens = None
 
-        use_batched_format = (
-            self.activation_format() == mk.FusedMoEActivationFormat.BatchedExperts
-        )
+        use_batched_format = self.activation_format().is_batched
         assert not use_batched_format, "batched format not supported"
 
         in_dtype = hidden_states.dtype
