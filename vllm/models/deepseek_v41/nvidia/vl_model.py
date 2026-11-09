@@ -2,18 +2,18 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """DeepSeek-V4.1 vision variant.
 
-Thin multimodal wrapper around the text-only ``DeepseekV41LLMForCausalLM``:
+Thin multimodal wrapper around the text-only `DeepseekV41LLMForCausalLM`:
 
-- ``vision`` ViT + ``aligner`` produce per-image embeddings for the IMAGE
-  positions; three learned vectors (``image_start`` / ``image_newline`` /
-  ``image_end``) fill the delimiter positions. Every image-span position
-  carries ``image_token_id`` (129264) in ``input_ids``; the per-position
-  roles come from the processor's ``types`` tensor (see
-  ``common/mm_preprocess.py``, and ``common/vision.py`` for the tower).
-- Merged embeddings enter the text model via ``inputs_embeds``, i.e. before
-  its hyper-connection stream expansion. Raw ``input_ids`` still flow into
-  the model so the MoE router can apply ``bias_vl`` to image tokens
-  (``requires_raw_input_tokens``).
+- `vision` ViT + `aligner` produce per-image embeddings for the IMAGE
+  positions; three learned vectors (`image_start` / `image_newline` /
+  `image_end`) fill the delimiter positions. Every image-span position
+  carries `image_token_id` (129264) in `input_ids`; the per-position
+  roles come from the processor's `types` tensor (see
+  `common/mm_preprocess.py`, and `common/vision.py` for the tower).
+- Merged embeddings enter the text model via `inputs_embeds`, i.e. before
+  its hyper-connection stream expansion. Raw `input_ids` still flow into
+  the model so the MoE router can apply `bias_vl` to image tokens
+  (`requires_raw_input_tokens`).
 """
 
 from collections.abc import Iterable
@@ -27,9 +27,11 @@ from vllm.model_executor.models.interfaces import (
     MultiModalEmbeddings,
     SupportsEagle3,
     SupportsEncoderCudaGraph,
+    SupportsLoRA,
     SupportsMultiModal,
     SupportsPP,
 )
+from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     WeightsMapper,
@@ -39,6 +41,7 @@ from vllm.model_executor.models.vision import is_vit_use_data_parallel
 from vllm.models.deepseek_v4.common.vision import (
     DeepseekV4Aligner,
     DeepseekV4ViT,
+    encode_images,
     run_dp_sharded_vision_tower,
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -49,6 +52,7 @@ from ..common.mm_preprocess import (
     DeepseekV4VLDummyInputsBuilder,
     DeepseekV4VLMultiModalProcessor,
     DeepseekV4VLProcessingInfo,
+    num_image_tokens,
 )
 from ..common.vl_cudagraph import DeepseekV4VLEncoderCudaGraphMixin
 from ..decoder_replay_layers import DecoderReplayLayers
@@ -83,7 +87,7 @@ class DeepseekV4VLImagePixelInputs(TensorSchema):
 def _make_deepseek_v4_vl_weights_mapper(
     expert_dtype: str, linear_scale_name: str
 ) -> WeightsMapper:
-    """Text-checkpoint mapping rules re-rooted under ``language_model.``."""
+    """Text-checkpoint mapping rules re-rooted under `language_model.`."""
     base = _make_deepseek_v4_weights_mapper(expert_dtype, linear_scale_name)
     orig_to_new_prefix: dict[str, str | None] = {
         "layers.": "language_model.model.layers.",
@@ -121,16 +125,26 @@ class DeepseekV41ForCausalLM(
     SupportsEncoderCudaGraph,
     SupportsPP,
     SupportsEagle3,
+    SupportsLoRA,
 ):
     """Multimodal entry point for DeepSeek-V4.1 checkpoints with a vision tower.
 
-    ``SupportsEagle3`` (aux hidden-state plumbing for MTP/DSpark drafters)
-    delegates through ``language_model`` via the protocol defaults.
-    ``SupportsEncoderCudaGraph`` (ViT CUDA graph capture/replay) is
-    implemented by ``DeepseekV4VLEncoderCudaGraphMixin``.
+    `SupportsEagle3` (aux hidden-state plumbing for MTP/DSpark drafters)
+    delegates through `language_model` via the protocol defaults.
+    `SupportsEncoderCudaGraph` (ViT CUDA graph capture/replay) is
+    implemented by `DeepseekV4VLEncoderCudaGraphMixin`.
     """
 
     supports_encoder_tp_data = True
+
+    packed_modules_mapping = {
+        "gate_up_proj": ["w1", "w3"],
+        "fused_wqa_wkv": ["wq_a", "wkv"],
+        "fused_wkv_wgate": ["wkv", "wgate"],
+    }
+
+    # The MTP draft head is not LoRA-adapted.
+    lora_skip_prefixes = ["mtp."]
 
     # The MoE router needs raw token ids to detect image-span tokens
     # (all carrying image_token_id, see common/mm_preprocess.py) and apply
@@ -139,7 +153,7 @@ class DeepseekV41ForCausalLM(
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
-        if modality == "image":
+        if modality.startswith("image"):
             return IMAGE_PLACEHOLDER
         raise ValueError(f"Unsupported modality: {modality!r}")
 
@@ -219,16 +233,9 @@ class DeepseekV41ForCausalLM(
                 self.vision, self.aligner, patches, vit_grid
             )
         else:
-            image_embeds_list = []
-            vit_offset = 0
-            for n_vit_h, n_vit_w in vit_grid:
-                n_vit = n_vit_h * n_vit_w
-                image_embeds_list.append(
-                    self._encode_image(
-                        patches[vit_offset : vit_offset + n_vit], n_vit_h, n_vit_w
-                    )
-                )
-                vit_offset += n_vit
+            image_embeds_list = encode_images(
+                self.vision, self.aligner, patches, vit_grid
+            )
 
         embeds: list[torch.Tensor] = []
         span_offset = 0
@@ -246,6 +253,13 @@ class DeepseekV41ForCausalLM(
         return tuple(embeds)
 
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
+        image_embeds = kwargs.get("image_embeds")
+        if image_embeds is not None:
+            llm_grid = kwargs["llm_grid"]
+            assert isinstance(image_embeds, torch.Tensor)
+            assert isinstance(llm_grid, torch.Tensor)
+            sizes = [num_image_tokens(h, w) for h, w in llm_grid.tolist()]
+            return image_embeds.split(sizes)
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return []
@@ -316,3 +330,11 @@ class DeepseekV41ForCausalLM(
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(self.hf_to_vllm_mapper.apply(weights))
+
+    def get_mm_mapping(self) -> MultiModelKeys:
+        """Get the module prefixes in the multimodal model."""
+        return MultiModelKeys.from_string_field(
+            language_model="language_model",
+            connector="aligner",
+            tower_model="vision.",
+        )

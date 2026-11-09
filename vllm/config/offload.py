@@ -7,7 +7,7 @@ from typing import Any, Literal
 
 from pydantic import Field, field_validator, model_validator
 
-from vllm.config.utils import config
+from vllm.config.utils import CompileFactors, config, get_compile_factors
 
 OffloadBackend = Literal["auto", "uva", "prefetch"]
 
@@ -72,6 +72,13 @@ class UVAOffloadConfig:
         if self.cpu_offload_stage_min_tokens >= 0:
             return self.cpu_offload_stage_min_tokens
         return max((max_cudagraph_capture_size or 0) + 1, 512)
+
+    def compile_factors(self) -> CompileFactors:
+        """Provide the factors used for hashing UVAOffloadConfig. The staging
+        threshold is left out: it only acts inside the opaque moe_forward op."""
+        return get_compile_factors(
+            self, ignored_factors={"cpu_offload_stage_min_tokens"}
+        )
 
 
 @config
@@ -166,7 +173,7 @@ class OffloadConfig:
             )
         return self
 
-    def compute_hash(self) -> str:
+    def compile_factors(self) -> CompileFactors:
         """Provide a hash that uniquely identifies all the offload configs.
 
         All fields but the UVA staging threshold are included because
@@ -175,12 +182,4 @@ class OffloadConfig:
         any offload setting can alter which layers are hooked and how prefetch
         indices are computed, so the compilation cache must distinguish them.
         """
-        from vllm.config.utils import get_hash_factors, hash_factors
-
-        factors = get_hash_factors(self, ignored_factors={"uva"})
-        # The staging threshold only acts inside the opaque moe_forward op.
-        factors["uva"] = get_hash_factors(
-            self.uva, ignored_factors={"cpu_offload_stage_min_tokens"}
-        )
-        hash_str = hash_factors(factors)
-        return hash_str
+        return get_compile_factors(self, ignored_factors=set())

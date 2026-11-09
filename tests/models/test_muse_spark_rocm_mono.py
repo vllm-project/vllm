@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Host side of the Muse Spark monokernel (``--monokernel``).
+"""Host side of the Muse Spark monokernel (`--monokernel`).
 
-The guards run on real vLLM configs and on a tiny real MuseSpark1x model
+The guards run on real vLLM configs and on a tiny real Muse Spark model
 (Quark MXFP4 experts, ROCm AITER FA, a bf16 LBHNC KV cache). The FlyDSL
 launches build only for the TEP8 checkpoint shapes, so the step tests run
 them as the stock layer pieces they replace: from layer i's attention output
@@ -352,7 +352,7 @@ def _on_gfx950() -> bool:
 
 
 requires_gfx950 = pytest.mark.skipif(
-    not _on_gfx950(), reason="MuseSpark1x on ROCm needs AITER's gfx950 kernels"
+    not _on_gfx950(), reason="Muse Spark on ROCm needs AITER's gfx950 kernels"
 )
 
 
@@ -410,6 +410,8 @@ def tiny_model(checkpoints):
             init_workspace_manager(device)
             with set_default_torch_dtype(torch.bfloat16), device:
                 lm = MuseSparkForConditionalGeneration(vllm_config=vllm_config)
+            # A preceding CPU test may have populated the shared RoPE cache.
+            lm.to(device)
             model_config = vllm_config.model_config
             text_config = model_config.hf_text_config
             dims = MonoDims.from_config(text_config, 1)
@@ -526,7 +528,7 @@ def _params(head: str, world_size: int, tail: str) -> list[str]:
 
 
 def _device_view(ptr: int, shape, dtype: torch.dtype, strides=None) -> torch.Tensor:
-    """The device memory at ``ptr`` as a tensor, as a launch reads it."""
+    """The device memory at `ptr` as a tensor, as a launch reads it."""
     strides = strides or torch.empty(shape, device="meta").stride()
     extent = 1 + sum((n - 1) * s for n, s in zip(shape, strides))
     nbytes = extent * torch.empty((), dtype=dtype).element_size()
@@ -571,8 +573,8 @@ class StockLaunches:
     def _attention(
         self, i: int, attn_o: int, rows: int, nreq: int, fused: bool
     ) -> torch.Tensor:
-        """Layer i's attention output: at ``attn_o``, or, for a fused build,
-        run here from the descriptor row at ``attn_o``."""
+        """Layer i's attention output: at `attn_o`, or, for a fused build,
+        run here from the descriptor row at `attn_o`."""
         layer = self.model.layers[i]
         d = self.dims
         if not fused:
@@ -592,8 +594,8 @@ class StockLaunches:
         return out
 
     def run_layer(self, rows: int, a: dict, b: dict) -> None:
-        """Layer i from its attention output (launch ``a``) to layer i+1's q,
-        o-gate and stream (launch ``b``)."""
+        """Layer i from its attention output (launch `a`) to layer i+1's q,
+        o-gate and stream (launch `b`)."""
         i, nreq = a["layer"], rows // ROWS_PER_REQUEST
         d, layer, nxt = self.dims, self.model.layers[i], self.model.layers[i + 1]
         o = self._attention(i, a["attn_o"], rows, nreq, a["fused"])
@@ -764,7 +766,7 @@ class Step:
         ).to(device)
 
     def run(self, tiny: TinyModel, mode=CUDAGraphMode.NONE):
-        """MuseSpark1xModel.forward on zeroed KV caches; returns the hidden
+        """MuseSparkModel.forward on zeroed KV caches; returns the hidden
         states, the aux hidden states and the KV caches after the step."""
         from vllm.forward_context import set_forward_context
         from vllm.v1.worker.utils import bind_kv_cache

@@ -11,7 +11,11 @@ import vllm.models.deepseek_v32.attention as deepseek_attention
 from vllm.config import CUDAGraphMode
 from vllm.models.deepseek_v32 import attention as deepseek_v32_attention
 from vllm.models.deepseek_v32.attention import DeepseekV32Attention
-from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerMetadata
+from vllm.v1.attention.backends.mla.indexer import (
+    DeepseekV32IndexerMetadata,
+    DeepseekV32IndexerPrefillChunkMetadata,
+    DeepseekV32IndexerPrefillMetadata,
+)
 
 INDEXER_LAYER = "model.layers.0.self_attn.indexer.k_cache"
 MLA_LAYER = "model.layers.0.self_attn.attn"
@@ -72,6 +76,25 @@ def make_indexer_metadata(
 ) -> DeepseekV32IndexerMetadata:
     if slot_mapping is None:
         slot_mapping = torch.zeros(num_prefill_tokens, dtype=torch.long)
+    prefill = None
+    if num_prefills:
+        # Dispatch tests need scoring work; empty chunks would skip workspace
+        # setup before reaching the scoring sentinel.
+        chunk = DeepseekV32IndexerPrefillChunkMetadata(
+            block_table=torch.zeros(num_prefills, 1, dtype=torch.int32),
+            cu_seqlen_ks=torch.zeros(num_prefill_tokens, dtype=torch.int32),
+            cu_seqlen_ke=torch.ones(num_prefill_tokens, dtype=torch.int32),
+            cu_seq_lens=torch.arange(num_prefills + 1, dtype=torch.int32),
+            token_to_seq=torch.arange(num_prefill_tokens, dtype=torch.int32)
+            * num_prefills
+            // num_prefill_tokens,
+            total_seq_lens=num_prefills,
+            max_seqlen_k=1,
+            token_start=num_decode_tokens,
+            token_end=num_decode_tokens + num_prefill_tokens,
+            num_reqs=num_prefills,
+        )
+        prefill = DeepseekV32IndexerPrefillMetadata(chunks=[chunk])
     return DeepseekV32IndexerMetadata(
         seq_lens=torch.empty(0, dtype=torch.int32),
         max_seq_len=2048,
@@ -80,7 +103,7 @@ def make_indexer_metadata(
         num_decode_tokens=num_decode_tokens,
         num_prefills=num_prefills,
         num_prefill_tokens=num_prefill_tokens,
-        prefill=SimpleNamespace(chunks=[]) if num_prefills else None,
+        prefill=prefill,
     )
 
 
@@ -500,7 +523,7 @@ def _candidate_token_mask(
 ):
     """[rows, total] bool mask of the candidate-covered token positions.
 
-    ``ks`` converts request-local candidate blocks to absolute positions
+    `ks` converts request-local candidate blocks to absolute positions
     (prefill's packed workspace); pass None when already request-local.
     """
     rows = candidates.shape[0]
@@ -520,7 +543,7 @@ def _candidate_token_mask(
 
 
 def _reference_topk(masked: torch.Tensor, topk: int) -> torch.Tensor:
-    """Plain ``torch.topk`` over -inf-masked logits; slots past a row's valid
+    """Plain `torch.topk` over -inf-masked logits; slots past a row's valid
     count are -1 (the indexer's "no token" sentinel)."""
     values, indices = masked.topk(topk, dim=1)
     return torch.where(values > float("-inf"), indices.int(), -1)
@@ -559,8 +582,8 @@ def _expand_candidates_reference(
     candidates: torch.Tensor, ks: torch.Tensor, ke: torch.Tensor, cbk: int, sbk: int
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """PyTorch reference for `candidate_blocks_to_sparse_indices`: expand
-    each candidate block into ``cbk // sbk`` sparse blocks, keep those inside
-    ``[0, ke - ks)``, sort ascending, anchor at ``ks // sbk``, pad by
+    each candidate block into `cbk // sbk` sparse blocks, keep those inside
+    `[0, ke - ks)`, sort ascending, anchor at `ks // sbk`, pad by
     repeating the last valid block, and count the valid sparse columns."""
     ratio = cbk // sbk
     rows, num_candidates = candidates.shape
@@ -587,7 +610,7 @@ def _expand_candidates_reference(
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="Triton kernel")
 def test_candidate_blocks_to_sparse_indices_math():
     """Candidate->sparse-block expansion: ks anchoring, range filtering,
-    repeat-last padding, and the per-row valid column count (``end``)."""
+    repeat-last padding, and the per-row valid column count (`end`)."""
     from vllm.model_executor.kernels.attention.dsa.sparse_mqa_logits import (
         candidate_blocks_to_sparse_indices,
     )
@@ -764,7 +787,7 @@ def _quant_k(x: torch.Tensor, kv_dtype: str):
 def _quant_q(x: torch.Tensor, kv_dtype: str):
     """Quantize [N, D] Q rows as the indexer passes them: MXFP4 like K, or
     FP8 e4m3 with unit UE8M0 scales (FP8 Q folds its scale into the weights,
-    see ``mqa_logits_mx_inputs``)."""
+    see `mqa_logits_mx_inputs`)."""
     if kv_dtype == "mxfp4":
         return _quant_k(x, kv_dtype)
     values = x.to(torch.float8_e4m3fn)
@@ -776,7 +799,7 @@ def _quant_q(x: torch.Tensor, kv_dtype: str):
 @pytest.mark.parametrize("capture", [False, True])
 def test_sparse_mqa_logits_prefill_matches_dense_masked(capture: bool, kv_dtype: str):
     """The sparse-MQA candidate path selects exactly the same logit values as
-    ``torch.topk`` over dense bf16 logits masked to the candidates (the two
+    `torch.topk` over dense bf16 logits masked to the candidates (the two
     DeepGEMM kernels agree bitwise on candidate columns), incl. under CUDA
     graph capture, and a later layer reusing the step's expansion/schedule
     selects the same values."""
@@ -815,6 +838,7 @@ def test_sparse_mqa_logits_prefill_matches_dense_masked(capture: bool, kv_dtype:
         ks,
         ke,
         max_len,
+        logits_dtype=torch.bfloat16,
     )
     in_range = torch.arange(max_len, device="cuda") < lens.unsqueeze(1)
     # A row's last candidate block may extend past max_len.
@@ -870,7 +894,7 @@ def _build_paged_cache(
     page_pad: int = 0,
 ):
     """MXFP4 or FP8 paged cache in DeepGEMM's fused layout: per page, all
-    tokens' values first, then their packed UE8M0 scales; ``page_pad`` bytes
+    tokens' values first, then their packed UE8M0 scales; `page_pad` bytes
     pad each page like the other layers' pages in a packed block."""
     device = req_lens.device
     pages_per = (req_lens + page_kv - 1) // page_kv
@@ -917,7 +941,7 @@ def _build_paged_cache(
 def test_sparse_mqa_logits_paged_matches_dense_masked(
     next_n: int, capture: bool, page_pad: int, kv_dtype: str
 ):
-    """Paged sparse-MQA decode selects exactly the values ``torch.topk`` picks
+    """Paged sparse-MQA decode selects exactly the values `torch.topk` picks
     from the dense bf16 masked logits, incl. MTP rows (next_n > 1 flattened to
     one query row each), CUDA graph capture/replay and schedule reuse by a
     later layer."""
@@ -968,7 +992,8 @@ def test_sparse_mqa_logits_paged_matches_dense_masked(
             block_table.repeat_interleave(next_n, dim=0),
             sched,
             int(req_lens.max()),
-            indices,
+            logits_dtype=torch.bfloat16,
+            indices=indices,
         )
         lens_flat = row_lens.flatten()
         cols = torch.arange(logits.shape[1], device="cuda")

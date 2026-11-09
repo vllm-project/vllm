@@ -80,8 +80,8 @@ def chunk_hashes_for_block_size(
     hash_block_size: int,
     block_size: int,
 ) -> Sequence[BlockHash]:
-    """Map ``hash_block_size``-granular block hashes to one compact hash per
-    ``block_size`` chunk (the chunk's last sub-hash). Returns ``block_hashes``
+    """Map `hash_block_size`-granular block hashes to one compact hash per
+    `block_size` chunk (the chunk's last sub-hash). Returns `block_hashes`
     unchanged when the two sizes are equal.
     """
     if block_size == hash_block_size:
@@ -142,20 +142,20 @@ class ChunkedTokenDatabase:
 
         When there are fewer KV heads than TP ranks, chunks are distributed
         across TP ranks to avoid duplicate load/store. The assignment keys off
-        the absolute ``chunk_id`` so a given chunk always lands on the same
+        the absolute `chunk_id` so a given chunk always lands on the same
         rank regardless of where the processed suffix begins.
 
         Args:
             token_len: Total number of tokens. Must be hash-block aligned and
-                covered by ``block_hashes`` when hashes are present.
-            block_hashes: Block hashes computed at ``hash_block_size`` granularity.
+                covered by `block_hashes` when hashes are present.
+            block_hashes: Block hashes computed at `hash_block_size` granularity.
                 A chunk spanning multiple hashes is keyed by its last hash.
             mask_num: Number of tokens to skip from the beginning.
-            chunk_mask: Optional mask over chunks after ``mask_num``.
+            chunk_mask: Optional mask over chunks after `mask_num`.
             tail_key_boundary: Token boundary whose prefix hash keys the final
                 chunk (the stored tail key). Defaults to the chunk's own end.
             put_step: Stride for distributing chunks across ranks.
-            put_step_rank: ``chunk_id % put_step`` value this rank stores.
+            put_step_rank: `chunk_id % put_step` value this rank stores.
 
         """
         assert put_step > 0
@@ -191,8 +191,8 @@ class TailKeyBoundary:
         group_id: KV-cache group containing the tail block.
         num_tokens: Token boundary whose prefix hash identifies the matched
             stored block. The loader uses
-            ``block_hashes[num_tokens // hash_block_size - 1]`` instead of the
-            hash implied by ``MooncakeLookupResult.hit_length``. This changes
+            `block_hashes[num_tokens // hash_block_size - 1]` instead of the
+            hash implied by `MooncakeLookupResult.hit_length`. This changes
             only the load key, not the reusable prefix.
 
     """
@@ -209,7 +209,7 @@ class MooncakeLookupResult:
         hit_length: Longest prefix that every KV-cache group can reuse after
             their individual cache hits converge.
         tail_key_boundaries: Hash boundary used to store each cache group's
-            tail block when ``hit_length`` does not identify its store key.
+            tail block when `hit_length` does not identify its store key.
             There is one entry per group for every nonzero hit.
 
     """
@@ -245,15 +245,6 @@ class RequestTracker:
     prefill_end_tokens: int = 0
     partial_tail_sent: bool = False
 
-    def reset(self) -> None:
-        self.token_len = 0
-        self.allocated_block_ids = ()
-        self.num_saved_tokens = 0
-        self.token_ids = None
-        self.has_pending_offload = False
-        self.prefill_end_tokens = 0
-        self.partial_tail_sent = False
-
     def update(
         self,
         new_block_ids: tuple[list[int], ...] | list[int],
@@ -273,7 +264,7 @@ class RequestTracker:
 
 
 class BoundaryPut(NamedTuple):
-    """A block stored under the hash of the prefix ending at ``num_tokens``."""
+    """A block stored under the hash of the prefix ending at `num_tokens`."""
 
     group_id: int
     block_id: int
@@ -296,6 +287,7 @@ class ReqMeta:
     token_ids: list[int] | None = None
     # Absolute request offset represented by token_ids[0].
     token_ids_start: int = 0
+    num_hash_lookahead_tokens: int = 0
     num_prompt_tokens: int | None = None
     # Total prefill tokens, including generated tokens replayed after preemption.
     prefill_end_tokens: int | None = None
@@ -320,6 +312,7 @@ class ReqMeta:
     def from_request_tracker(
         tracker: RequestTracker,
         block_size: int,
+        hash_block_size: int,
         load_spec: LoadSpec | None = None,
         skip_save: bool | None = False,
         block_hashes: list[BlockHash] | None = None,
@@ -336,6 +329,10 @@ class ReqMeta:
         token_ids_start = tracker.num_saved_tokens
         chunk_boundary = cdiv(token_ids_start + 1, block_size) * block_size
         num_tokens_to_save = input_token_len // block_size * block_size
+        num_tokens_to_save = min(
+            num_tokens_to_save,
+            len(block_hashes) * hash_block_size // block_size * block_size,
+        )
 
         publish_tail = (
             save_partial_tail
@@ -398,7 +395,7 @@ class ReqMeta:
 
 @dataclass
 class MooncakeStoreWorkerMetadata(KVConnectorWorkerMetadata):
-    """Maps ``ReqMeta.store_job_id`` to the number of ranks done with that job."""
+    """Maps `ReqMeta.store_job_id` to the number of ranks done with that job."""
 
     completed_saves: dict[int, int] = field(default_factory=dict)
 

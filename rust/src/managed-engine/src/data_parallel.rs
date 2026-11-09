@@ -55,7 +55,7 @@ impl DataParallelTopology {
 pub struct DataParallelLbArgs {
     /// Rank of the data parallel group served by this process. Implies
     /// `--data-parallel-external-lb`.
-    #[arg(long, env = "VLLM_DP_RANK")]
+    #[arg(long)]
     pub data_parallel_rank: Option<u32>,
     /// First data parallel rank on this node. Implies
     /// `--data-parallel-hybrid-lb` unless `--headless` is set.
@@ -156,7 +156,7 @@ impl DataParallelLbArgs {
 
 #[cfg(test)]
 mod tests {
-    use clap::Parser;
+    use clap::{CommandFactory, Parser};
 
     use super::DataParallelLbArgs;
     use crate::cli::ManagedEngineArgs;
@@ -170,6 +170,18 @@ mod tests {
         data_parallel_lb: DataParallelLbArgs,
         #[arg(long)]
         headless: bool,
+    }
+
+    /// `vllm serve` turns on external DP LB from the flag alone; Python reads the
+    /// env var only in `ParallelConfig`'s fallback, used for example by offline SPMD.
+    #[test]
+    fn data_parallel_rank_is_not_bound_to_vllm_dp_rank() {
+        let command = ServeFlags::command();
+        let rank = command
+            .get_arguments()
+            .find(|arg| arg.get_id() == "data_parallel_rank")
+            .expect("`--data-parallel-rank` is declared");
+        assert_eq!(rank.get_env(), None);
     }
 
     #[test]

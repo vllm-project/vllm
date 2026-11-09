@@ -154,9 +154,9 @@ def set_offloader(instance: BaseOffloader | None) -> None:
 def create_offloader(offload_config: "OffloadConfig") -> BaseOffloader:
     """Create an offloader based on the offload configuration.
 
-    Uses the explicit ``offload_backend`` selector.  When set to ``"auto"``,
-    selects prefetch if ``offload_group_size > 0``, UVA if
-    ``cpu_offload_gb > 0``, otherwise noop.
+    Uses the explicit `offload_backend` selector.  When set to `"auto"`,
+    selects prefetch if `offload_group_size > 0`, UVA if
+    `cpu_offload_gb > 0`, otherwise noop.
     """
     from vllm.model_executor.offloader.prefetch import PrefetchOffloader
     from vllm.model_executor.offloader.uva import UVAOffloader
