@@ -647,6 +647,9 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             )
         self.q_pad_num_heads = getattr(self.impl, "q_pad_num_heads", None)
         self.is_amx_bmm_enabled = getattr(self.impl, "uses_amx_bmm", False)
+        # Set by a model wrapper that opts in (Kimi-K3 on gfx1250): the bf16
+        # W_UK / W_UV bmms run on aiter's batched_gemm_bf16 instead of torch.
+        self.use_aiter_bf16_bmm = False
         # AMX reads kv_b_proj's weight directly and never calls it live; the
         # reference CPU MLA backend calls it but isn't perf-critical. Skip
         # the packed-kernel dispatch either way.
@@ -1160,7 +1163,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     mqa_ql_nope = mqa_q_nope.new_empty((self.q_pad_num_heads, B, L))
                     mqa_ql_nope.resize_((N, B, L))
                     # Multiply (N, B, P) x (N, P, L) -> (N, B, L)
-                    torch.bmm(mqa_q_nope, W_UK_T, out=mqa_ql_nope)
+                    self._bf16_bmm(mqa_q_nope, W_UK_T, mqa_ql_nope)
                     # Convert from (N, B, L) to (B, N, L)
                     mqa_ql_nope = mqa_ql_nope.transpose(0, 1)
                 elif (
@@ -1186,7 +1189,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     # contiguous; a NoPE model (qk_rope_head_dim == 0) then
                     # needs no concat at all.
                     mqa_ql_nope = mqa_q_nope.new_empty((B, N, L))
-                    torch.bmm(mqa_q_nope, W_UK_T, out=mqa_ql_nope.transpose(0, 1))
+                    self._bf16_bmm(mqa_q_nope, W_UK_T, mqa_ql_nope.transpose(0, 1))
 
             if fp8_attention and self.impl.supports_quant_query_input:
                 assert mqa_ql_nope.shape[0] == mqa_q_pe.shape[0]
@@ -1566,7 +1569,14 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             )
         else:
             # Multiply + Transpose (N, B, L) x (N, L, V)->(N, B, V)->(B, N, V)
-            torch.bmm(x, self.W_UV, out=out.transpose(0, 1))
+            self._bf16_bmm(x, self.W_UV, out.transpose(0, 1))
+
+    def _bf16_bmm(self, x: torch.Tensor, weight: torch.Tensor, out: torch.Tensor):
+        """Computes out = x @ weight per batch for the unquantized W_UK / W_UV."""
+        if self.use_aiter_bf16_bmm:
+            rocm_aiter_ops.batched_gemm_bf16(x, weight, out)
+        else:
+            torch.bmm(x, weight, out=out)
 
 
 def unified_mla_kv_cache_update(

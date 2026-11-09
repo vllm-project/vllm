@@ -36,6 +36,12 @@ class KimiK3MultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self._use_eager_qk_rmsnorm_fusion = bool(rocm_aiter_ops.is_enabled())
+        if rocm_aiter_ops.is_enabled():
+            from vllm.platforms.rocm import on_gfx1250
+
+            # aiter's Gluon batched_gemm_bf16 beats hipBLASLt on K3's W_UK /
+            # W_UV decode bmms on gfx1250.
+            self.mla_attn.use_aiter_bf16_bmm = on_gfx1250()
         self._fused_qk_prep = self._fused_qk_prep_supported()
         self._identity_rope: tuple[torch.Tensor, torch.Tensor] | None = None
         self._qkv_gate_fused = isinstance(
@@ -242,7 +248,7 @@ class KimiK3MultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
                 B, N = q_nope.shape[0], q_nope.shape[1]
                 L = attn.W_UK_T.shape[-1]
                 ql_nope = q_nope_t.new_empty((B, N, L))
-                torch.bmm(q_nope_t, attn.W_UK_T, out=ql_nope.transpose(0, 1))
+                attn._bf16_bmm(q_nope_t, attn.W_UK_T, ql_nope.transpose(0, 1))
 
         if self._identity_rope is None:
             # cos = 1, sin = 0 makes the kernel's RoPE the identity, which is

@@ -1740,6 +1740,36 @@ def _fused_mla_dual_rms_norm_fake(
     return (torch.empty_like(x1), torch.empty_like(x2))
 
 
+def _rocm_aiter_gemm_a16w16_accumulate_impl(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    out: torch.Tensor,
+    out_col_start: int,
+    max_aiter_rows: int,
+) -> None:
+    # The op mutates the whole ``out`` so torch.compile tracks the write; the
+    # GEMM adds into its column slice in place.
+    y = out.narrow(-1, out_col_start, weight.shape[0])
+    # The row count is only concrete here: above max_aiter_rows the caller's
+    # measurements favour torch's addmm_ (hipBLASLt).
+    if x.shape[0] > max_aiter_rows:
+        y.addmm_(x, weight.t())
+        return
+    from aiter.ops.triton.gemm.basic.gemm_a16w16 import gemm_a16w16
+
+    gemm_a16w16(x, weight, dtype=out.dtype, y=y, accumulate=True)
+
+
+def _rocm_aiter_gemm_a16w16_accumulate_fake(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    out: torch.Tensor,
+    out_col_start: int,
+    max_aiter_rows: int,
+) -> None:
+    return None
+
+
 def _fused_mla_dual_rms_norm_per_token_quant_impl(
     q: torch.Tensor,
     q_weight: torch.Tensor,
@@ -3331,6 +3361,14 @@ class rocm_aiter_ops:
                 fake_impl=_fused_mla_dual_rms_norm_group_quant_fake,
             )
 
+            direct_register_custom_op(
+                op_name="rocm_aiter_gemm_a16w16_accumulate",
+                op_func=_rocm_aiter_gemm_a16w16_accumulate_impl,
+                mutates_args=["out"],
+                fake_impl=_rocm_aiter_gemm_a16w16_accumulate_fake,
+                dispatch_key=current_platform.dispatch_key,
+            )
+
             _OPS_REGISTERED = True
 
     @staticmethod
@@ -4382,6 +4420,48 @@ class rocm_aiter_ops:
             prequant=prequant,
             y_scale=y_scale,
         )
+
+    @staticmethod
+    @functools.cache
+    def is_gemm_a16w16_accumulate_supported() -> bool:
+        """Whether the installed aiter gemm_a16w16 takes ``accumulate``
+        (y += x @ w.T in the GEMM epilogue)."""
+        import inspect
+
+        try:
+            from aiter.ops.triton.gemm.basic.gemm_a16w16 import gemm_a16w16
+        except ImportError:
+            return False
+        return "accumulate" in inspect.signature(gemm_a16w16).parameters
+
+    @staticmethod
+    def gemm_a16w16_accumulate(
+        x: torch.Tensor,
+        weight: torch.Tensor,
+        out: torch.Tensor,
+        out_col_start: int,
+        max_aiter_rows: int,
+    ) -> None:
+        """out[..., out_col_start:out_col_start + N] += x @ weight.T for weight
+        [N, K], in one aiter gemm_a16w16 launch for at most max_aiter_rows rows
+        of x and in torch's addmm_ above that."""
+        torch.ops.vllm.rocm_aiter_gemm_a16w16_accumulate(
+            x, weight, out, out_col_start, max_aiter_rows
+        )
+
+    @staticmethod
+    def batched_gemm_bf16(
+        x: torch.Tensor,
+        weight: torch.Tensor,
+        out: torch.Tensor,
+    ) -> None:
+        """Computes torch.bmm(x, weight, out=out) on aiter's batched_gemm_bf16,
+        for weight [B, K, N]. ``out`` is written in place through its strides."""
+        from aiter.ops.triton.gemm.batched.batched_gemm_bf16 import (
+            batched_gemm_bf16,
+        )
+
+        batched_gemm_bf16(x, weight.transpose(1, 2), dtype=out.dtype, YQ=out)
 
     @staticmethod
     def triton_fp8_bmm(
