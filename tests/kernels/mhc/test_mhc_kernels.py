@@ -84,6 +84,15 @@ def test_deepseek_v41_all_reduce_fusion_requires_kernel_support(
         )
     )
     monkeypatch.setattr(mhc, "get_tp_group", lambda: group)
+    # The TP4 fusion is SM100's; SM90 at TP8 is in the model's own tests.
+    monkeypatch.setattr(
+        mhc,
+        "current_platform",
+        SimpleNamespace(
+            is_device_capability=lambda capability: False,
+            is_device_capability_family=lambda family: family == 100,
+        ),
+    )
     assert mhc.supports_mhc_all_reduce(config) is expected
 
 

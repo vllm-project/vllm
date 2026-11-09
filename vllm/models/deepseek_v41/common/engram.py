@@ -24,6 +24,7 @@ import platform
 import sys
 import tempfile
 import weakref
+from collections.abc import Callable
 from contextlib import ExitStack
 from datetime import timedelta
 from functools import cache
@@ -552,6 +553,7 @@ def _engram_lookup_kernel(
     PEER_ROWS: tl.constexpr = 0,
     WORD: tl.constexpr = tl.uint8,
     PACKED_FP4: tl.constexpr = False,
+    SOFTWARE_FP8: tl.constexpr = False,
 ):
     """Gather FP8 or MXFP4 rows as dequantized BF16, or FP8 rows as packed
     values/scales (copied WORD at a time).
@@ -559,7 +561,9 @@ def _engram_lookup_kernel(
     Only this rank's heads are read; padded heads write zeros for all-gather.
     `weight`/`scales` may address pinned host memory through UVA. If SORTED,
     `ids` holds rows relative to vocab_start in table order and `sorted_dst`
-    their output rows.
+    their output rows. SOFTWARE_FP8 (GPUs below SM89, which Triton gives no
+    FP8 type): `weight` holds the E4M3 bytes as uint8 and they are decoded
+    with integer operations, which is exact.
     """
     cols = tl.arange(0, DIM)
     scale_cols = cols // QUANT_BLOCK
@@ -589,7 +593,7 @@ def _engram_lookup_kernel(
             owner = local // PEER_ROWS
             peer = tl.load(weight + owner, mask=owned, other=0)
             local -= owner * PEER_ROWS
-            if PACKED_FP4:
+            if PACKED_FP4 or SOFTWARE_FP8:
                 row_weight = peer.to(tl.pointer_type(tl.uint8))
             else:
                 row_weight = peer.to(tl.pointer_type(tl.float8e4nv))
@@ -649,9 +653,20 @@ def _engram_lookup_kernel(
             )
             # ue8m0 is a power of two, so its byte *is* the fp32 exponent field.
             scale = (scale.to(tl.int32) << 23).to(tl.float32, bitcast=True)
+            if SOFTWARE_FP8:
+                # E4M3: a normal code's exponent and mantissa shift into the
+                # fp32 fields (bias 7 -> 127); a subnormal code is m * 2^-9.
+                code = values.to(tl.int32)
+                magnitude = code & 0x7F
+                normal = ((magnitude << 20) + (120 << 23)).to(tl.float32, bitcast=True)
+                subnormal = (magnitude & 7).to(tl.float32) * 0.001953125
+                decoded = tl.where(magnitude < 8, subnormal, normal)
+                decoded = tl.where((code & 0x80) != 0, -decoded, decoded)
+            else:
+                decoded = values.to(tl.float32)
             tl.store(
                 out + dst[:, None] * DIM + cols[None, :],
-                (values.to(tl.float32) * scale).to(tl.bfloat16),
+                (decoded * scale).to(tl.bfloat16),
                 mask=valid[:, None],
             )
 
@@ -1338,6 +1353,11 @@ class ParallelEngramEmbedding(nn.Module):
             and (out.stride(0) | out.data_ptr()) % 8 == 0
         )
         grid = min(triton.cdiv(rows, block_r), max_grid)
+        software_fp8 = (
+            not self.packed_fp4 and not current_platform.has_device_capability(89)
+        )
+        if software_fp8 and not self.peer_rows:
+            weight = weight.view(torch.uint8)
         _engram_lookup_kernel[(grid,)](
             self.peer_ptrs if self.peer_rows else weight,
             scales,
@@ -1361,6 +1381,7 @@ class ParallelEngramEmbedding(nn.Module):
             OUT_STRIDE=out.stride(0),
             PEER_ROWS=self.peer_rows,
             PACKED_FP4=self.packed_fp4,
+            SOFTWARE_FP8=software_fp8,
             WORD=tl.uint64 if wide else tl.uint8,
             num_warps=8 if block_r == 128 else 4,
         )
@@ -1724,6 +1745,10 @@ class Engram(nn.Module):
     _prefetch_stream: torch.cuda.Stream | None = None
     _prefetch_done: torch.cuda.Event | None = None
     _batch: EngramBatch | None = None
+    # A model's own TP all-gather of a 2-D tensor's last dimension for the
+    # TP-sharded heads and wkv output (set_column_gather); None uses the TP
+    # group's.
+    _gather_columns: Callable[[torch.Tensor], torch.Tensor] | None = None
 
     def __init__(
         self,
@@ -1866,10 +1891,24 @@ class Engram(nn.Module):
             return _gather_engram_rows(staged, num_tokens)
         return self.staged_rows[:num_tokens]
 
+    def set_column_gather(self, gather: Callable[[torch.Tensor], torch.Tensor]) -> None:
+        """All-gather the TP-sharded heads and wkv output with `gather` (a
+        2-D tensor's last dimension, every rank's columns side by side)
+        instead of the TP group's all-gather. For TP-sharded tables without
+        sequence parallelism or a DP-shared table."""
+        assert self.embed_tokens.tp_size > 1 and self.embed_tokens.dp_size == 1
+        assert not self.use_sequence_parallel and self._batch is None
+        self._gather_columns = gather
+        self.wkv.gather_output = False
+
     def embed(self, hash_ids: torch.Tensor) -> torch.Tensor:
         """Gather heads, returning only local tokens when SP is enabled."""
         rows = self._ready_rows(hash_ids.shape[0])
         if self.embed_tokens.tp_size == 1:
+            return rows[:, : self.embed_tokens.n_hash_cols]
+        if self._gather_columns is not None:
+            dim = rows.shape[-1]
+            rows = self._gather_columns(rows.flatten(1)).unflatten(1, (-1, dim))
             return rows[:, : self.embed_tokens.n_hash_cols]
         if self.use_sequence_parallel:
             tp_size = self.embed_tokens.tp_size
@@ -1901,6 +1940,8 @@ class Engram(nn.Module):
             kv = self.wkv(self._batch.wkv_input(self, hash_ids.shape[0]))
         else:
             kv = self.wkv(self.embed(hash_ids).flatten(-2))
+        if self._gather_columns is not None:
+            kv = self._gather_columns(kv)
         num_kv_tokens = hash_ids.shape[0]
         assert token_mask is None or token_mask.shape == (num_kv_tokens,)
         if self.use_sequence_parallel:

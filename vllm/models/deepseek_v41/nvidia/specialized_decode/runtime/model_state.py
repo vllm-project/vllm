@@ -1,18 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The model state of the specialized decode.
+"""The model states of the specialized decode and of SM80 and SM90.
 
-`DeepseekV41SpecializedDecodeModelState` is `DeepseekV41ModelState` plus:
+`DeepseekV41MetadataGraphModelState` is `DeepseekV41ModelState` plus:
 
-- the decode executor, built and warmed up once the weights are loaded (the
-  model runner creates the model state after loading the target and draft
-  models, and before memory profiling);
 - CUDA graphs of the attention metadata builds of FULL decode steps
   (`metadata_graphs`), recorded with the inner CUDA graphs and replayed in
   place of the eager build. A step that replays one gathers its engram
   lookback windows on a side stream beside it, so the metadata graph hands
   off to the forward's graph with no eager kernel between them;
 - no replay-start upload for decode steps whose starts are known to be zero.
+
+SM80 and SM90 use it as is. `DeepseekV41SpecializedDecodeModelState` adds
+the decode executor, built and warmed up once the weights are loaded (the
+model runner creates the model state after loading the target and draft
+models, and before memory profiling).
 """
 
 from dataclasses import replace
@@ -63,7 +65,10 @@ def padded_decode_batch(
     )
 
 
-class DeepseekV41SpecializedDecodeModelState(DeepseekV41ModelState):
+class DeepseekV41MetadataGraphModelState(DeepseekV41ModelState):
+    """`DeepseekV41ModelState` with recorded metadata builds of FULL decode
+    steps. Its users run without micro-batching."""
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -72,13 +77,6 @@ class DeepseekV41SpecializedDecodeModelState(DeepseekV41ModelState):
         device: torch.device,
     ):
         super().__init__(vllm_config, model, encoder_cache, device)
-        language_model = (
-            model.get_language_model()
-            if hasattr(model, "get_language_model")
-            else model
-        )
-        self.decode = language_model.build_specialized_decode()
-        warm_up(self.decode, vllm_config)
         self.graphs = AttnMetadataCudaGraphs(
             vllm_config,
             vllm_config.num_speculative_tokens + self.num_new_sampled_tokens_per_step,
@@ -180,7 +178,6 @@ class DeepseekV41SpecializedDecodeModelState(DeepseekV41ModelState):
         if not for_capture and self.graphs.can_record(attn_groups):
             key = self.graphs.key(input_batch, cudagraph_mode)
             if key is not None:
-                # decode_backend=latency_specialized refuses micro-batching.
                 assert ubatch_idx == 0
                 self._stage_lookback(input_batch)
                 attn_metadata = self.graphs.replay(key)
@@ -226,3 +223,21 @@ class DeepseekV41SpecializedDecodeModelState(DeepseekV41ModelState):
         super().capture_inner_cudagraphs(
             input_buffers, block_tables, attn_groups, kv_cache_config, stream
         )
+
+
+class DeepseekV41SpecializedDecodeModelState(DeepseekV41MetadataGraphModelState):
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        model: nn.Module,
+        encoder_cache: EncoderCache | None,
+        device: torch.device,
+    ):
+        super().__init__(vllm_config, model, encoder_cache, device)
+        language_model = (
+            model.get_language_model()
+            if hasattr(model, "get_language_model")
+            else model
+        )
+        self.decode = language_model.build_specialized_decode()
+        warm_up(self.decode, vllm_config)

@@ -62,6 +62,14 @@ from .model import (
     prepare_mega_gate_routing_metadata,
 )
 from .ops.fused_markov import FusedMarkovSampler
+from .ops.mhc import (
+    ampere_all_reduce_ready,
+    boundary_all_reduce,
+    mhc_all_reduce_ready,
+    supports_ampere_mhc_overlap,
+)
+from .specialized_decode.ampere import is_ampere
+from .specialized_decode.hopper import is_hopper
 
 logger = init_logger(__name__)
 
@@ -122,6 +130,22 @@ class DSparkDeepseekV4Model(nn.Module):
         run_gemm_rs = maybe_init_gemm_rs(
             current_vllm_config, self.use_sequence_parallel
         )
+        # SM80 and SM90 compute the draft layers' mHC coefficients on a side
+        # stream too, as the target's.
+        mhc_stream = (
+            torch.cuda.Stream()
+            if supports_ampere_mhc_overlap(current_vllm_config)
+            else None
+        )
+        # The draft layers' boundaries take the TP all-reduce with the
+        # target's kernel: SM80's two-shot one, and SM90's fused one up to its
+        # rows. Their MoE (top-3) finalizes itself: the kernels' fused top-k
+        # finalize is built for the target's top-6.
+        self.fuse_mhc_all_reduce = (
+            mhc_stream is not None
+            and not self.use_sequence_parallel
+            and (ampere_all_reduce_ready() or mhc_all_reduce_ready())
+        )
         self.layers = nn.ModuleList(
             [
                 DeepseekV4DecoderLayer(
@@ -129,6 +153,8 @@ class DSparkDeepseekV4Model(nn.Module):
                     prefix=maybe_prefix(prefix, f"layers.{self.num_hidden_layers + i}"),
                     topk_indices_buffer=self.topk_indices_buffer,
                     run_gemm_rs=run_gemm_rs,
+                    mhc_stream=mhc_stream,
+                    fuse_mhc_all_reduce=self.fuse_mhc_all_reduce,
                 )
                 for i in range(self.num_dspark_layers)
             ]
@@ -166,7 +192,11 @@ class DSparkDeepseekV4Model(nn.Module):
             )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.embed_tokens(input_ids)
+        x = self.embed_tokens(input_ids)
+        # The target's embedding leaves the shards' sum to its caller on SM80.
+        if not self.embed_tokens.reduce_results:
+            x = boundary_all_reduce(x)
+        return x
 
     def combine_hidden_states(self, aux_hidden_states: torch.Tensor) -> torch.Tensor:
         """main_x = main_norm(main_proj(concat of target aux hidden states)).
@@ -250,6 +280,8 @@ class DSparkDeepseekV4Model(nn.Module):
                 residual,
                 mega_gate_metadata=mega_gate_metadata,
             )
+        if self.fuse_mhc_all_reduce:
+            hidden_states = boundary_all_reduce(hidden_states)
         hidden_states = mhc_post_tilelang(hidden_states, residual, post_mix, res_mix)
         # Collapse the hc copies with the pre-mix from the last layer's FFN
         # mixes — the mix the reference forward_head applies (hc_pre with the
@@ -317,14 +349,27 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
             self.config.hidden_size,
             prefix=maybe_prefix(prefix, "lm_head"),
         )
-        self.logits_processor = LogitsProcessor(self.config.vocab_size)
+        logits_processor_cls = LogitsProcessor
+        if is_ampere() or is_hopper():
+            from .specialized_decode.ampere.columns import (
+                AmpereLogitsProcessor,
+                column_gathers_ready,
+            )
+
+            if column_gathers_ready():
+                # The target's Lamport gather of the vocabulary shards (same
+                # head).
+                logits_processor_cls = AmpereLogitsProcessor
+        self.logits_processor = logits_processor_cls(self.config.vocab_size)
         # additional_config={"dspark_fused_markov": true} replaces the speculator's loop
-        # when it would sample a full draft-logits cache with plain Gumbel noise.
+        # when it would sample a full draft-logits cache with plain Gumbel noise. SM80
+        # and SM90 replace it unless the option is false.
         spec_config = vllm_config.speculative_config
         extra = vllm_config.additional_config
+        if not isinstance(extra, dict):
+            extra = {}
         if (
-            isinstance(extra, dict)
-            and extra.get("dspark_fused_markov", False)
+            extra.get("dspark_fused_markov", is_ampere() or is_hopper())
             and spec_config.draft_sample_method == "probabilistic"
             and not spec_config.enable_adaptive_verification
             and not vllm_config.model_config.use_fp64_gumbel

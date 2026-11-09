@@ -712,6 +712,25 @@ steps:
   # B200 runs the kernels and the TP4 boundary, draft norm and logits gather tests.
   - pytest -v -s models/glm5next -k specialized_decode
 
+- label: ":nvidia: (8xH100) DeepSeek-V4.1 SM80 and SM90 Decode"
+  key: dsv41-nvidia-sm80-sm90-decode-8xh100
+  # Nightly only, like the 4xB200 step above.
+  optional: true
+  timeout_in_minutes: 40
+  device: h100
+  num_devices: 8
+  source_file_dependencies:
+  - vllm/models/deepseek_v41/nvidia/
+  - vllm/models/deepseek_v41/attention.py
+  - vllm/models/deepseek_v41/common/
+  - vllm/models/deepseek_v41/quant_config.py
+  - tests/models/deepseek_v41/
+  commands:
+  # The SM80 kernels need SM80 or newer and run here; the eight-GPU all-reduce
+  # and rank-major all-gather tests are SM80-only and skip.
+  - pytest -v -s models/deepseek_v41/nvidia/specialized_decode/ampere models/deepseek_v41/nvidia/specialized_decode/hopper models/deepseek_v41/nvidia/specialized_decode/test_metadata_graph_state.py
+  - pytest -v -s models/deepseek_v41/nvidia/test_mhc_dispatch.py models/deepseek_v41/nvidia/test_mxfp4_marlin_padding.py models/deepseek_v41/nvidia/test_quantization.py models/deepseek_v41/test_quant_config.py
+
 - label: ':amd: (MI355) Kimi-K3 Specialized Decode'
   key: kimi-k3-specialized-decode-amd
   automatic_shard: true

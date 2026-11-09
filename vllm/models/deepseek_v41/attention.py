@@ -194,9 +194,30 @@ def _indexer_k_cache_head_dim(index_head_dim: int, use_fp4_kv: bool) -> int:
 # UE8M0 scale per 32 dims, each token's 512 data bytes followed by its 16 scale
 # bytes -- only in its SM100 sparse-decode kernels. Every other arch keeps the
 # V4 record: 448 fp8 NoPE + 64 bf16 RoPE plus 7 UE8M0 scales of 64 dims and a
-# pad byte (584 B, 576 B pages).
+# pad byte (584 B, 576 B pages). The Ampere kernels decode the V4.1 records
+# too (nvidia/specialized_decode/ampere).
 def _use_v41_mxfp8_kv_record() -> bool:
-    return current_platform.is_device_capability_family(100)
+    if current_platform.is_device_capability_family(100):
+        return True
+    if not current_platform.is_cuda():
+        return False
+    from vllm.models.deepseek_v41.nvidia.specialized_decode.ampere import is_ampere
+
+    return is_ampere()
+
+
+def _indexer_uses_fp4(vllm_config: VllmConfig) -> bool:
+    """Whether the index K cache is MXFP4. The Ampere kernels decide it
+    themselves (nvidia/specialized_decode/ampere)."""
+    if current_platform.is_cuda():
+        from vllm.models.deepseek_v41.nvidia.specialized_decode.ampere import (
+            indexer_uses_fp4,
+            is_ampere,
+        )
+
+        if is_ampere():
+            return indexer_uses_fp4(vllm_config)
+    return dsa_indexer_uses_fp4(vllm_config)
 
 
 def _resolve_dsv4_kv_cache_dtype(
@@ -264,6 +285,9 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
     # bf16 / per-tensor fp8 KV row. Backends can override the instance hook when
     # a single attention class dispatches across arch-specific layouts.
     use_fp8_ds_mla_layout: ClassVar[bool] = True
+    # The compressor of kv-source layers; a platform subclass swaps in one
+    # that writes its compressed KV record with its own kernel.
+    compressor_cls: ClassVar[type[DeepseekCompressor]] = DeepseekCompressor
     # Prefill is processed in fixed-size chunks; this bounds the bf16 kv-gather
     # workspace allocated in _forward_prefill and is also read by the dummy-run
     # path to pre-reserve that workspace.
@@ -340,6 +364,11 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         """The indexer for this layer's index K cache. A platform subclass
         returns one that writes and scores its own cache layout."""
         return DeepseekV4Indexer
+
+    def _indexer_cache_cls(self) -> type["DeepseekV4IndexerCache"]:
+        """The index K cache layer, which names the indexer metadata
+        backend. A platform subclass returns one with its own builder."""
+        return DeepseekV4IndexerCache
 
     def __init__(
         self,
@@ -506,9 +535,9 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             # wk/k_norm); non-owning index sources share the K cache of the
             # latest kv source below them (its indexer produces the keys).
             if self.is_kv_source:
-                index_k_cache = DeepseekV4IndexerCache(
+                index_k_cache = self._indexer_cache_cls()(
                     head_dim=_indexer_k_cache_head_dim(
-                        config.index_head_dim, dsa_indexer_uses_fp4(vllm_config)
+                        config.index_head_dim, _indexer_uses_fp4(vllm_config)
                     ),
                     dtype=torch.uint8,
                     prefix=f"{prefix}.indexer.k_cache",
@@ -639,7 +668,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         # source's compressed cache through the forward context.
         self.compressor = None
         if self.is_kv_source:
-            self.compressor = DeepseekCompressor(
+            self.compressor = self.compressor_cls(
                 vllm_config=vllm_config,
                 compress_ratio=self.compress_ratio,
                 hidden_size=self.hidden_size,
@@ -1427,7 +1456,7 @@ class DeepseekV4Indexer(nn.Module):
         self.q_lora_rank = q_lora_rank  # 1280
         self.compress_ratio = compress_ratio
         self.owns_k = owns_k
-        self.use_fp4_kv = dsa_indexer_uses_fp4(vllm_config)
+        self.use_fp4_kv = _indexer_uses_fp4(vllm_config)
         logger.info_once(
             "Using %s indexer cache for Lightning Indexer.",
             "MXFP4" if self.use_fp4_kv else "FP8",

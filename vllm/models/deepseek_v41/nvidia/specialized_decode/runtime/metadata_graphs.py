@@ -10,6 +10,10 @@ capture, the build of every uniform decode batch shape that a FULL decode graph
 serves, and replays it on the steps of that shape, returning the metadata
 objects captured with it. A step of a shape without a recording builds its
 metadata eagerly.
+
+The specialized decode records the builds of its FlashInfer backends; SM80 and
+SM90 record those of their own SWA and indexer backends and of the stock
+FlashMLA and indexer builders they keep (`DeepseekV41MetadataGraphModelState`).
 """
 
 from collections.abc import Callable, Sequence
@@ -29,13 +33,20 @@ from vllm.models.deepseek_v41.nvidia.flashinfer_sparse import (
     DeepseekSparseSWAFlashInferMetadataBuilder,
     DeepseekV4FlashInferSparseMLAMetadataBuilder,
 )
+from vllm.models.deepseek_v41.sparse_mla import DeepseekV4FlashMLAMetadataBuilder
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import current_stream
+from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerMetadataBuilder
 from vllm.v1.attention.backends.mla.sparse_indexer import (
     DeepseekV41SparseIndexerMetadataBuilder,
 )
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.utils import AttentionGroup
+
+from ..ampere.attention import AmpereSWAMetadataBuilder
+from ..ampere.indexer_metadata import AmpereIndexerMetadataBuilder
+from ..hopper.attention import HopperSWAMetadataBuilder
+from ..hopper.indexer_metadata import HopperIndexerMetadataBuilder
 
 logger = init_logger(__name__)
 
@@ -44,10 +55,16 @@ logger = init_logger(__name__)
 # persistent buffers, with host arguments set by the batch shape.
 _RECORDABLE_BUILDERS = frozenset(
     {
+        AmpereIndexerMetadataBuilder,
+        AmpereSWAMetadataBuilder,
         CompressorMetadataBuilder,
         DeepseekSparseSWAFlashInferMetadataBuilder,
+        DeepseekV32IndexerMetadataBuilder,
         DeepseekV41SparseIndexerMetadataBuilder,
         DeepseekV4FlashInferSparseMLAMetadataBuilder,
+        DeepseekV4FlashMLAMetadataBuilder,
+        HopperIndexerMetadataBuilder,
+        HopperSWAMetadataBuilder,
     }
 )
 
@@ -173,8 +190,8 @@ class AttnMetadataCudaGraphs:
         entry = self._graphs.get(key)
         if entry is None:
             logger.warning_once(
-                "DeepSeek-V4.1 specialized decode: a FULL decode step has no "
-                "recorded attention-metadata build; building it eagerly."
+                "DeepSeek-V4.1: a FULL decode step has no recorded "
+                "attention-metadata build; building it eagerly."
             )
             return None
         graph, attn_metadata = entry
