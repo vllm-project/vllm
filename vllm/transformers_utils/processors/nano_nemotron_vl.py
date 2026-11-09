@@ -112,6 +112,18 @@ def _cvcuda_available() -> bool:
 _CVCUDA_SCRATCH_BYTES = 512 * 1024 * 1024
 _cvcuda_scratch_reserved: set[int] = set()  # device indices
 
+# Frames in host memory are uploaded on a stream of their own. A copy from
+# pageable memory first waits for its stream, so on the model's stream it would
+# hold the engine thread until the GPU finishes every step already queued.
+# Not aux_stream(): model layers queue their own work on that one.
+_upload_streams: dict[int, torch.cuda.Stream] = {}  # device index -> stream
+
+
+def _upload_stream(device_index: int) -> torch.cuda.Stream:
+    if device_index not in _upload_streams:
+        _upload_streams[device_index] = torch.cuda.Stream(device_index)
+    return _upload_streams[device_index]
+
 
 class _CudaArrayOnStream:
     """CUDA Array Interface v3 view of a torch tensor written on *stream*.
@@ -143,8 +155,9 @@ def cvcuda_bicubic_resize(
     Resizes uint8 NHWC RGB *frames* to *size* ``(H, W)`` on *device* with
     CV-CUDA and returns uint8 NCHW pixels; the cast to float, rescaling and
     normalization stay with the model's input norm. Frames are uploaded in
-    chunks of at most *max_chunk_bytes*. Only the upload from pageable host
-    memory waits for the current stream; the resize itself is queued on it.
+    chunks of at most *max_chunk_bytes*, from host memory on a separate stream,
+    so the caller waits for the copy but not for work queued on the current
+    stream. The resize is queued on the current stream, after the upload.
     """
     import cvcuda
 
@@ -174,6 +187,11 @@ def cvcuda_bicubic_resize(
 
     num_frames, height, width, _ = frames.shape
     out = torch.empty((num_frames, 3, *size), dtype=torch.uint8, device=device)
+    upload = (
+        _upload_stream(torch_stream.device_index)
+        if frames.device.type == "cpu"
+        else None
+    )
     resize = (height, width) != tuple(size)
     step = max(1, max_chunk_bytes // (height * width * 3))
     if resize:
@@ -186,10 +204,18 @@ def cvcuda_bicubic_resize(
             1, min(step, (_CVCUDA_SCRATCH_BYTES - filter_scratch) // frame_scratch)
         )
     for start in range(0, num_frames, step):
-        # A copy from pageable memory waits for the current stream. Pinning
-        # the frames first would avoid that, but its host copy costs more on
-        # the engine's single torch thread.
-        src = frames[start : start + step].to(device, non_blocking=True)
+        chunk = frames[start : start + step]
+        if upload is None:
+            src = chunk.to(device, non_blocking=True)
+        else:
+            # Pinning the frames first would let the copy run asynchronously,
+            # but its host copy costs more on the engine's single torch thread.
+            with torch.cuda.stream(upload):
+                src = chunk.to(device, non_blocking=True)
+            torch_stream.wait_stream(upload)
+            # src was allocated on the upload stream: keep its memory until the
+            # work queued on the current stream has read it.
+            src.record_stream(torch_stream)
         if resize:
             resized = src.new_empty((src.shape[0], *size, 3))
             tvresize(resized, src)

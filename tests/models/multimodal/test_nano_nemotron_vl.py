@@ -485,22 +485,30 @@ def test_nemotron_device_resize_scratch_memory_stays_flat():
 def test_nemotron_device_resize_does_not_wait_for_the_gpu():
     # CV-CUDA calls cudaDeviceSynchronize for a tensor whose stream it does not
     # know, which waits for every stream, and cvcuda.clear_cache() waits for
-    # the current one. Only the upload from pageable memory may wait, and only
-    # for the current stream: frames already on the device must not wait at all.
+    # the current one. A copy from pageable memory waits for its own stream,
+    # so frames in host memory are uploaded on a separate one: a busy current
+    # stream (the model's, mid-step) must not hold the caller either.
     pytest.importorskip("cvcuda")
-    frames = torch.randint(0, 256, (8, 360, 640, 3), dtype=torch.uint8)
+    frames, next_frames = torch.randint(
+        0, 256, (2, 8, 360, 640, 3), dtype=torch.uint8
+    ).unbind()
     stream, other = torch.cuda.Stream(_DEVICE), torch.cuda.Stream(_DEVICE)
     with torch.cuda.stream(stream):
         expected = cvcuda_bicubic_resize(frames, (224, 384), _DEVICE)
+        next_expected = cvcuda_bicubic_resize(next_frames, (224, 384), _DEVICE)
         on_device = frames.to(_DEVICE)
-        for busy, video in ((other, frames), (stream, on_device)):
+        for busy, video in ((other, frames), (stream, frames), (stream, on_device)):
             torch.accelerator.synchronize()
             with torch.cuda.stream(busy):
                 torch.cuda._sleep(1_000_000_000)
             actual = cvcuda_bicubic_resize(video, (224, 384), _DEVICE)
+            # The next upload must not reuse the first one's memory while the
+            # first resize, queued behind the busy stream, has yet to read it.
+            next_actual = cvcuda_bicubic_resize(next_frames, (224, 384), _DEVICE)
             assert not busy.query()
             torch.accelerator.synchronize()
             torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+            torch.testing.assert_close(next_actual, next_expected, rtol=0, atol=0)
 
 
 def _uninitialized_model() -> NemotronH_Nano_VL_V2:
