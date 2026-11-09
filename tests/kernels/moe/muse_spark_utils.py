@@ -49,7 +49,7 @@ def make_runner(
     intermediate_size: int,
     top_k: int,
 ):
-    """Build a MuseSpark runner, load ``ckpt`` and finalize its weights."""
+    """Build a MuseSpark runner, load `ckpt` and finalize its weights."""
     num_experts = expert_bias.numel()
     vllm_config = VllmConfig(
         parallel_config=ParallelConfig(),
@@ -133,7 +133,7 @@ def swiglu_moe_ref(
     norm_fn: Callable[[torch.Tensor], torch.Tensor],
     act_quant: Callable[[torch.Tensor], torch.Tensor] | None = None,
 ) -> torch.Tensor:
-    """fp32 SwiGLU MoE with ``norm_fn`` applied to each BF16 expert output."""
+    """fp32 SwiGLU MoE with `norm_fn` applied to each BF16 expert output."""
     out = torch.zeros(x.shape, dtype=torch.float32, device=x.device)
     for e in range(w13.shape[0]):
         token_idx, slot = (topk_ids == e).nonzero(as_tuple=True)

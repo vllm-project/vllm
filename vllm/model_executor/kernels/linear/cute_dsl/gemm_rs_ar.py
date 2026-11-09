@@ -4,8 +4,8 @@
 """SM100 BF16/MXFP8 GEMM with fused tensor-parallel reduce-scatter/all-reduce.
 
 Model-neutral: any row-parallel projection whose output is reduced across TP
-(Kimi-K3 ``o_proj``/``down_proj``, DeepSeek-V4.1 ``wo_b``) can bind to the
-process-wide workspace through ``maybe_init_gemm_rs_ar`` + ``GemmRsAr.apply``.
+(Kimi-K3 `o_proj`/`down_proj`, DeepSeek-V4.1 `wo_b`) can bind to the
+process-wide workspace through `maybe_init_gemm_rs_ar` + `GemmRsAr.apply`.
 """
 
 # Based on CUTLASS's Blackwell distributed GEMM-RS example at dcf215a.
@@ -1125,7 +1125,7 @@ def maybe_init_gemm_rs_ar(
     Callers gate on their own feature flag first; this checks the worker
     topology (SM100-family CUDA, BF16 model dtype, no ubatching, a TP size in
     2-16 that divides 128) and the NVLink multicast rendezvous. Returns whether
-    projections may bind to the kernel through ``get_gemm_rs_ar().can_run``.
+    projections may bind to the kernel through `get_gemm_rs_ar().can_run`.
     """
     mode = "GEMM-AR" if all_reduce else "GEMM-RS"
     parallel_config = vllm_config.parallel_config

@@ -599,8 +599,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         with use_workspace_lane(self._draft_workspace_lane), single_pp_stage():
             yield
 
-    def reset_lora_state(self) -> None:
-        super().reset_lora_state()
+    def on_target_weights_replaced(self) -> None:
         # Called whenever the target's weights are replaced (reload, weight
         # transfer), so draft weights derived from them must follow.
         draft_model = self.get_draft_model()
@@ -620,7 +619,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         reload_weights(
             vllm_config, model, weights_iterator, weights_path, is_checkpoint_format
         )
-        self.reset_lora_state()
+        self.on_target_weights_replaced()
         self.reset_encoder_cache()
         self.reset_mm_cache()
 

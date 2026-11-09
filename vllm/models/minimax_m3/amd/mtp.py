@@ -2,18 +2,18 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """MiniMax M3 MTP (multi-token prediction) draft model -- ROCm/AMD variant.
 
-Byte-identical to ``nvidia/mtp.py`` except this file lives under ``amd/`` so its
-``from .model import ...`` resolves to the self-contained AMD model (native Gemma
+Byte-identical to `nvidia/mtp.py` except this file lives under `amd/` so its
+`from .model import ...` resolves to the self-contained AMD model (native Gemma
 RMSNorm, native MXFP8 MoE, Triton sparse attention). The MTP logic is
-platform-agnostic. (Mirrors ``vllm.models.deepseek_v4.amd.mtp``.)
+platform-agnostic. (Mirrors `vllm.models.deepseek_v4.amd.mtp`.)
 
-TODO(future, separate diff): since this is byte-identical to ``nvidia/mtp.py``,
-both copies could be consolidated into a single ``common/mtp.py`` that dispatches
-its model import (``..amd.model`` vs ``..nvidia.model``) via
-``current_platform.is_rocm()`` -- the same dispatch ``minimax_m3/__init__.py``
-uses. This was prototyped and VERIFIED working (``MiniMaxM3MTP`` resolves through
-``common.mtp`` to the AMD decoder layer / RMSNorm on ROCm), but it deletes the
-upstream ``nvidia/mtp.py`` and touches the NVIDIA load path, so it is deferred to
+TODO(future, separate diff): since this is byte-identical to `nvidia/mtp.py`,
+both copies could be consolidated into a single `common/mtp.py` that dispatches
+its model import (`..amd.model` vs `..nvidia.model`) via
+`current_platform.is_rocm()` -- the same dispatch `minimax_m3/__init__.py`
+uses. This was prototyped and VERIFIED working (`MiniMaxM3MTP` resolves through
+`common.mtp` to the AMD decoder layer / RMSNorm on ROCm), but it deletes the
+upstream `nvidia/mtp.py` and touches the NVIDIA load path, so it is deferred to
 a dedicated refactor diff to keep this AMD-enablement change NVIDIA-untouched.
 """
 

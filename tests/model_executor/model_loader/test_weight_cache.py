@@ -353,7 +353,7 @@ def test_ipc_cache_cold_start_and_warm_restart(
     really came from the daemon — for the MTP case, both the target's and the
     draft's daemon groups.
 
-    Cases with ``check_flashinfer_cache`` additionally cover in-daemon
+    Cases with `check_flashinfer_cache` additionally cover in-daemon
     autotune (default-on with `--enable-flashinfer-autotune`): each daemon
     tunes before binding its socket and must write the on-disk FlashInfer
     autotune cache, and the restart engine must load tactics from it instead
@@ -1160,8 +1160,8 @@ def test_ipc_loader_copy_mode_reports_no_external_weight_memory():
 
 
 def _serve_one(handler):
-    """Fake ``IpcModelLoader._connect``: serve each request on a thread and
-    close the accepted connection afterwards, like ``serve_forever``.
+    """Fake `IpcModelLoader._connect`: serve each request on a thread and
+    close the accepted connection afterwards, like `serve_forever`.
 
     Returns the fake and the list of server threads it started.
     """

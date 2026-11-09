@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """GQA drafts (e.g. a Qwen3 sliding-window DSpark) on Kimi-K3: their KV cache grouping.
 
-Dense MLA drafts keep their own MLA cache (``dense_draft.py``)."""
+Dense MLA drafts keep their own MLA cache (`dense_draft.py`)."""
 
 from dataclasses import replace
 
@@ -21,7 +21,7 @@ _DRAFT_BLOCK_ALIGN = 64
 
 
 def _fit_draft_page(spec: AttentionSpec, page_size: int) -> AttentionSpec:
-    """Shrink a draft's block until its page fits under ``page_size``."""
+    """Shrink a draft's block until its page fits under `page_size`."""
     for block_size in range(spec.block_size, 0, -_DRAFT_BLOCK_ALIGN):
         fitted = replace(spec, block_size=block_size)
         if spec.block_size % block_size == 0 and fitted.page_size_bytes <= page_size:
