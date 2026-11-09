@@ -386,7 +386,7 @@ class HTTPConnection:
     """Helper class to send HTTP requests.
 
     Reused clients do not persist cookies, so caller-supplied media fetches
-    cannot replay another request's ``Set-Cookie`` state.
+    cannot replay another request's `Set-Cookie` state.
     """
 
     def __init__(self, *, reuse_client: bool = True) -> None:
