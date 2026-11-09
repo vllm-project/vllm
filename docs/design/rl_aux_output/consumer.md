@@ -27,7 +27,7 @@ for token `p + 1`).
 | Field | Type | Meaning |
 |---|---|---|
 | `ok` | bool | No error and every `missing.counts` entry is 0. |
-| `error` | str or None | Error marker found, or manifest absent. All arrays are `None`, every row is missing. |
+| `error` | str or None | The request failed: its error marker was found, its manifest is absent, or an object the manifest lists cannot be read (`listed object absent: <key>`). A failed store write fails the whole request; the sample is not delivered in part. All arrays are `None`, every row is missing. |
 | `missing.counts` | dict | Per cause: `r3_blocks`, `r3_tail`, `r3_cone_patches`, `r3_invalid_rows`, `r3_needed_missing`, `r3_field`, `indexer_blocks`, `indexer_tail`, `indexer_cone_patches`, `indexer_reported_missing`, `indexer_reported_holes`, `indexer_needed_missing`, `hidden_chunks`, `hidden_rows_short`, `rows_short`, `invalid_rows`, `*_field`, ... |
 | `missing.rows` | bool `[n]` | Rows whose data was not delivered by some wanted output. |
 | `r3` | `[n, layers, k]` uint | Expert ids to replay. Where not replayed the cell holds `r3_no_replay` (dtype max, 65535 for uint16). With one-byte ids 255 is a valid id: always go by the mask, never by the value. |
@@ -49,6 +49,7 @@ for token `p + 1`).
 
 - A cell whose replay mask is True holds the value of the first computation of that position in
   the trajectory, with its weight version. Nothing is substituted, padded or guessed.
+- A request whose store writes failed is reported through `error`, never as a partial sample. Rows can otherwise be absent only for malformed data or by design (deep cells outside every patch).
 - Every row that was not delivered is in `missing.rows`, with a cause in `missing.counts`. On those
   rows every replay mask is False and the data holds the sentinel.
 - Deep cells (partial capture) come only from the cone patches, overlaid in list order, each up to
