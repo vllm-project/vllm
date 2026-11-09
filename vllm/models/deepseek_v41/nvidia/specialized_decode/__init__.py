@@ -142,9 +142,10 @@ def unsupported(vllm_config: VllmConfig) -> list[str]:
             and vllm_config.kv_transfer_config is None
             and not envs.VLLM_BATCH_INVARIANT
         ),
-        "NVLink multicast for the fused all-reduce + mHC (and off Hopper, "
-        "DeepGEMM)": supports_mhc_all_reduce(vllm_config)
-        and (hopper or supports_mhc_overlap(vllm_config)),
+        "DeepGEMM and NVLink multicast for the fused all-reduce + mHC": hopper
+        or (supports_mhc_overlap(vllm_config) and supports_mhc_all_reduce(vllm_config)),
+        "on Hopper, NVLink multicast for the fused all-reduce + mHC": not hopper
+        or supports_mhc_all_reduce(vllm_config),
     }
     return [need for need, ok in requirements.items() if not ok]
 

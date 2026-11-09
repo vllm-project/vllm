@@ -78,9 +78,10 @@ def _compiled(kind: str, compressed: bool):
     return cute.compile(kernel, *args, make_fake_stream())
 
 
-def _launch(kind: str, compressed: bool, *args: Any) -> None:
-    """`kind`'s kernel on the current stream; tensors pass their address,
-    floats and `("i64", n)` pass as 64-bit, other ints as Int32."""
+def launch(kernel: Any, *args: Any) -> None:
+    """The compiled CuTe DSL `kernel` on the current stream; tensors pass
+    their address, `("i64", n)` a 64-bit value, floats Float32 and other ints
+    Int32."""
     from cutlass import Float32, Int32, Int64
 
     from vllm.models.common.ops.moe_tail_fusion.primitives import current_cu_stream
@@ -95,7 +96,11 @@ def _launch(kind: str, compressed: bool, *args: Any) -> None:
             values.append(Float32(arg))
         else:
             values.append(Int32(arg))
-    _compiled(kind, compressed)(*values, current_cu_stream())
+    kernel(*values, current_cu_stream())
+
+
+def _launch(kind: str, compressed: bool, *args: Any) -> None:
+    launch(_compiled(kind, compressed), *args)
 
 
 class SmallMlaDecode:

@@ -109,7 +109,7 @@ class FlashMlaDecode:
     def __init__(self, tables: FlashMlaTables) -> None:
         self.tables = tables
 
-    def chain_step(self, rows: int) -> bool:
+    def chain_step(self) -> bool:
         """Whether this step's MLA can run the small-batch chain, which takes
         the query before its RoPE and applies the inverse RoPE (`chain_norm`,
         `run_rotated`)."""

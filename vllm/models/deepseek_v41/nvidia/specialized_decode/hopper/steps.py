@@ -19,14 +19,14 @@ from ..attention.indexer import rope_quant_q
 from ..boundary.boundary import Boundaries, BoundaryState
 from ..moe.step import MoEStep
 from . import attn_chain, kernels
-from .all_reduce import HopperBoundaryAllReduce
 from .mhc import SeamPre
 from .moe import HopperLowBatchMoE
-from .sparse_mla import FlashMlaDecode, FlashMlaTables
+from .sparse_mla import FlashMlaDecode
 
 if TYPE_CHECKING:
     from ...flashmla import DeepseekV4FlashMLAAttention
     from ...model import DeepseekV4DecoderLayer, DeepseekV4MoE
+    from ..boundary.all_reduce import BoundaryAllReduce
     from ..runtime.decode import DecodeStep
 
 
@@ -46,11 +46,9 @@ class HopperAttentionStep:
     def __init__(
         self,
         attn: "DeepseekV4FlashMLAAttention",
-        tables: FlashMlaTables,
         mla: FlashMlaDecode,
     ) -> None:
         self.attn = attn
-        self.tables = tables
         self.mla = mla
         self.linears = kernels.AttentionLinears.of(attn)
         self.chain = attn_chain.applies(attn)
@@ -65,10 +63,7 @@ class HopperAttentionStep:
         rows = x.shape[0]
         wo_a = self.linears.wo_a
         chain = (
-            self.chain
-            and mla.chain_step(rows)
-            and wo_a is not None
-            and wo_a.serves(rows)
+            self.chain and mla.chain_step() and wo_a is not None and wo_a.serves(rows)
         )
         qr_kv, kv_score, indexer_weights = self._input_projections(x, step)
         if chain:
@@ -192,8 +187,6 @@ class HopperAttentionStep:
     ) -> None:
         """The layer's top-k indices (and on the candidate source, its
         candidate blocks), on the stock indexer."""
-        # The side-stream table builds read the top-k indices this overwrites.
-        self.tables.join()
         q_quant = (index_q, index_q_scale) if index_q_scale is not None else index_q
         indexer.indexer_op(x, q_quant, None, index_weights)
 
@@ -221,10 +214,9 @@ class HopperBoundaries(Boundaries):
     pre also computes the layer input. No DeepGEMM kernel runs."""
 
     def __init__(
-        self, all_reduce: HopperBoundaryAllReduce, stream: torch.cuda.Stream
+        self, all_reduce: "BoundaryAllReduce", stream: torch.cuda.Stream
     ) -> None:
         super().__init__(all_reduce)
-        self.all_reduce: HopperBoundaryAllReduce = all_reduce
         self.stream = stream
         self.seams: dict[tuple[DeepseekV4DecoderLayer, bool], SeamPre] = {}
 

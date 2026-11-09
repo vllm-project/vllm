@@ -59,6 +59,7 @@ class DenseFp8Gemm:
         sk: K split over the CTAs of a cluster.
         xr: X rows (16 k each) staged per CTA, even.
         prec: 0 f16 operands, 1 bf16 operands.
+        cn: CTAs of one K slice per cluster, which multicast X to each other.
 
     """
 

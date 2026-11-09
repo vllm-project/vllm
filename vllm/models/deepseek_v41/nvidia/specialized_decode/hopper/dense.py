@@ -39,7 +39,8 @@ MAX_ROWS = 192
 
 
 class Cute(NamedTuple):
-    """A CuTe DSL launch geometry (`DenseFp8Gemm`)."""
+    """A CuTe DSL launch geometry: the `DenseFp8Gemm` arguments of the same
+    names (see its `Args:`)."""
 
     tw: int
     S: int
@@ -48,7 +49,6 @@ class Cute(NamedTuple):
     kg: int
     sk: int
     prec: int
-    # The CTAs of a K slice per cluster, which multicast X to each other.
     cn: int = 1
 
 
@@ -109,16 +109,23 @@ _WG48 = _wgmma(48, 128, 4, True)
 
 # Up to 8 rows the ring holds a CTA's whole weight slice, all loaded during
 # the previous kernel (``DenseFp8Gemm`` issues weights before its grid wait).
+# From 6 to 16 rows the wq_b, wo_a and wo_b CTAs of a K slice share X by
+# cluster multicast (``cn``): 4 per cluster where the K split allows (measured
+# -0.7 to -1.2 us per layer at 6-16 rows in the decode-layer chain; no gain at
+# 1 row).
 _WQA_F16 = Cute(2, 8, 5, 2, 2, 8, 0)
 _WQA_BF16 = Cute(1, 16, 3, 2, 4, 4, 1)
 _WQB = Cute(1, 16, 5, 2, 4, 1, 0)
+_WQB_MC = Cute(1, 16, 5, 2, 4, 1, 0, cn=4)
 _IWQB = Cute(1, 16, 4, 2, 4, 2, 0)
 _WOA_F16 = Cute(1, 16, 4, 2, 4, 4, 0)
-_WOA_BF16 = Cute(1, 16, 3, 2, 4, 3, 1)
+_WOA_F16_MC = Cute(1, 16, 4, 2, 4, 4, 0, cn=2)
+_WOA_BF16_MC = Cute(1, 16, 3, 2, 4, 3, 1, cn=2)
 _WOB_F16 = Cute(1, 16, 4, 2, 4, 2, 0)
-_WOB_F16N = Cute(1, 16, 4, 1, 2, 2, 0)
-_WOB_BF16 = Cute(1, 16, 4, 1, 2, 1, 1)
-_WOB_BF16N = Cute(1, 16, 3, 2, 4, 2, 1)
+_WOB_F16_MC = Cute(1, 16, 4, 2, 4, 2, 0, cn=4)
+_WOB_F16N_MC = Cute(1, 16, 4, 1, 2, 2, 0, cn=4)
+_WOB_BF16_MC = Cute(1, 16, 4, 1, 2, 1, 1, cn=4)
+_WOB_BF16N_MC = Cute(1, 16, 3, 2, 4, 2, 1, cn=4)
 _GU_F16 = Cute(1, 8, 4, 1, 2, 8, 0)
 _GU_F16S6 = Cute(1, 8, 6, 1, 2, 8, 0)
 _GU_BF16 = Cute(1, 8, 4, 1, 2, 8, 1)
@@ -136,7 +143,8 @@ DISPATCH: dict[str, dict[int, Cute | dict]] = {
         192: _wgmma(96, 64, 3, True, 2),
     },
     "wq_b": {
-        **dict.fromkeys(range(1, 9), _WQB),
+        **dict.fromkeys(range(1, 6), _WQB),
+        **dict.fromkeys(range(6, 9), _WQB_MC),
         **dict.fromkeys((9, 11, 12, 13, 14, 16), _M16S6),
         **dict.fromkeys((10, 15), _M16),
         24: Cute(1, 16, 3, 2, 4, 1, 1),
@@ -155,19 +163,23 @@ DISPATCH: dict[str, dict[int, Cute | dict]] = {
         144: _wgmma(144, 64, 3, True, 2),
     },
     "wo_a": {
-        **dict.fromkeys((1, 2, 3, 4, 6, 8), _WOA_F16),
+        **dict.fromkeys((1, 2, 3, 4), _WOA_F16),
+        **dict.fromkeys((6, 8), _WOA_F16_MC),
         5: Cute(1, 16, 4, 1, 2, 4, 0),
         7: Cute(2, 8, 4, 2, 2, 8, 0),
-        **dict.fromkeys((9, 10), Cute(1, 16, 3, 2, 4, 4, 1)),
-        **dict.fromkeys((11, 12, 14, 15, 16), _WOA_BF16),
-        **dict.fromkeys((13, 24), Cute(1, 16, 4, 1, 2, 3, 1)),
+        **dict.fromkeys((9, 10), Cute(1, 16, 3, 2, 4, 4, 1, cn=2)),
+        **dict.fromkeys((11, 12, 14, 15, 16), _WOA_BF16_MC),
+        13: Cute(1, 16, 4, 1, 2, 3, 1, cn=2),
+        24: Cute(1, 16, 4, 1, 2, 3, 1),
         48: Cute(1, 8, 4, 1, 2, 3, 1),
     },
     "wo_b": {
-        **dict.fromkeys((1, 2, 3, 4, 7, 8), _WOB_F16),
-        **dict.fromkeys((5, 6), _WOB_F16N),
-        **dict.fromkeys((9, 10, 11, 14), _WOB_BF16),
-        **dict.fromkeys((12, 13, 15, 16), _WOB_BF16N),
+        **dict.fromkeys((1, 2, 3, 4), _WOB_F16),
+        **dict.fromkeys((7, 8), _WOB_F16_MC),
+        5: Cute(1, 16, 4, 1, 2, 2, 0),
+        6: _WOB_F16N_MC,
+        **dict.fromkeys((9, 10, 11, 14), _WOB_BF16_MC),
+        **dict.fromkeys((12, 13, 15, 16), _WOB_BF16N_MC),
         24: Cute(1, 16, 3, 2, 4, 1, 1),
         48: _WG48,
         96: _wgmma(96, 64, 3, True, 2),
@@ -195,14 +207,6 @@ DISPATCH: dict[str, dict[int, Cute | dict]] = {
         192: _wgmma(96, 128, 4, False),
     },
 }
-
-# From 6 rows, the CTAs of a K slice share X by cluster multicast: 4 per
-# cluster where the K split allows (measured -0.7 to -1.2 us per layer at 6-16
-# rows in the decode-layer chain; no gain at 1 row).
-for _seam in ("wq_b", "wo_b", "wo_a"):
-    for _rows, _c in DISPATCH[_seam].items():
-        if isinstance(_c, Cute) and 6 <= _rows <= 16:
-            DISPATCH[_seam][_rows] = _c._replace(cn=min(4, 8 // _c.sk))
 
 
 def choice(seam: str, rows: int) -> Cute | dict | None:

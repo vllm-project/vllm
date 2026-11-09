@@ -661,11 +661,20 @@ steps:
   key: dsv41-hopper-specialized-decode-h200
   timeout_in_minutes: 30
   device: h200
-  num_devices: 1
+  num_devices: 2
   source_file_dependencies:
-  - vllm/models/deepseek_v41/nvidia/specialized_decode/hopper/
-  - vllm/models/deepseek_v41/nvidia/ops/cute_dsl/all_reduce_mhc.py
+  - vllm/models/deepseek_v41/
+  - vllm/models/deepseek_v4/common/ops/
+  - vllm/models/common/ops/
   - vllm/model_executor/kernels/mhc/
+  - vllm/model_executor/kernels/linear/mxfp8/humming.py
+  - vllm/model_executor/layers/quantization/utils/humming/
+  - vllm/model_executor/layers/fused_moe/
+  - vllm/utils/humming.py
+  - vllm/v1/attention/ops/flashmla.py
+  - cmake/external_projects/flashmla.cmake
+  - requirements/cuda.txt
+  - vllm/v1/attention/backends/mla/sparse_swa.py
   - tests/models/deepseek_v41/nvidia/specialized_decode/test_hopper.py
   commands:
   - pytest -v -s models/deepseek_v41/nvidia/specialized_decode/test_hopper.py

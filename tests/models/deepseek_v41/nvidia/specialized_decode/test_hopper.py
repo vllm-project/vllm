@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The Hopper executor's sparse-MLA decode
-(`specialized_decode/hopper/sparse_mla.py`) against the stock FlashMLA decode
-it replaces, on the FlashMLA SM90 kernel, eagerly and replayed from a CUDA
-graph. Needs one SM90 GPU; under a minute.
+"""The Hopper executor's kernels against the stock ops they replace, eagerly
+and replayed from a CUDA graph: the FlashMLA plans and top-k tables, the
+small-batch MLA chain, the dense FP8 linears, the low-batch MoE (and its
+handoff to the fused all-reduce's finalize) and the mHC pre. Needs one SM90
+GPU; about two minutes.
 
 Run: pytest -v tests/models/deepseek_v41/nvidia/specialized_decode/test_hopper.py
 """
@@ -282,17 +283,22 @@ def _rope_cache(positions: int = 4096) -> torch.Tensor:
 class ChainStep:
     """One uniform verify step of `requests` 6-row requests at `context`
     tokens on one compressed (ratio 2) layer, with SWA windows and slots as
-    the stock metadata derives them (a per-request ring of 256 slots)."""
+    the stock metadata derives them (a per-request ring of 256 slots). The
+    last `padded` requests are a FULL graph's padding: invalid rows at
+    position 0 with no slot, SWA window or top-k."""
 
-    def __init__(self, requests: int, context: int, seed: int = 0):
+    def __init__(self, requests: int, context: int, seed: int = 0, padded: int = 0):
         g = torch.Generator(device=DEVICE).manual_seed(seed)
         self.rows = rows = requests * ROWS
+        self.real_rows = real = (requests - padded) * ROWS
         lens = [context - 37 * b for b in range(requests)]
         positions = torch.cat([torch.arange(n - ROWS, n, device=DEVICE) for n in lens])
+        positions[real:] = 0
         request = torch.arange(rows, device=DEVICE) // ROWS
         ring = 4 * PAGE
         self.positions = positions
         self.slots = (request * ring + positions % ring).long()
+        self.slots[real:] = -1
         swa = torch.full((rows, WINDOW), -1, dtype=torch.int32, device=DEVICE)
         columns = torch.arange(WINDOW, device=DEVICE)
         first = (positions - WINDOW + 1).clamp(min=0)
@@ -302,6 +308,10 @@ class ChainStep:
             (request[:, None] * ring + window % ring).int(),
             swa,
         )
+        swa[real:] = -1
+        swa_lens = (positions + 1).clamp(max=WINDOW).int()
+        swa_lens[real:] = 0
+        valid = torch.arange(rows, device=DEVICE) < real
         self.swa_cache = _v4_cache(requests * 4, PAGE, g)
         pages = -(-context // 2 // PAGE)
         self.compressed_cache = _v4_cache(requests * pages, PAGE, g)
@@ -315,10 +325,10 @@ class ChainStep:
             num_prefills=0,
             num_decode_tokens=rows,
             max_decode_query_len=ROWS,
-            is_valid_token=torch.ones(rows, dtype=torch.bool, device=DEVICE),
+            is_valid_token=valid,
             token_to_req_indices=request.int(),
             decode_swa_indices=swa.unsqueeze(1),
-            decode_swa_lens=(positions + 1).clamp(max=WINDOW).int(),
+            decode_swa_lens=swa_lens,
             slot_mapping=self.slots,
             block_size=PAGE,
         )
@@ -332,6 +342,7 @@ class ChainStep:
                 picks = torch.unique(picks, sorted=False)[:TOP_K]
                 order = torch.randperm(TOP_K, generator=g, device=DEVICE)
                 topk[b * ROWS + r] = picks[order]
+        topk[real:] = -1
         cos_sin = _rope_cache(context + 1)
         layer = object.__new__(DeepseekV4FlashMLAAttention)
         layer.compress_ratio = 2
@@ -372,16 +383,21 @@ class ChainStep:
 
 
 @pytest.mark.parametrize("context", [8192, 32768])
-@pytest.mark.parametrize("requests", [1, 2, 4, 8])
-def test_chain_decode_matches_flashmla(requests, context):
+@pytest.mark.parametrize(
+    "requests,padded",
+    [(1, 0), (2, 0), (4, 0), (8, 0), (4, 1)],
+    ids=["r1", "r2", "r4", "r8", "r4_padded1"],
+)
+def test_chain_decode_matches_flashmla(requests, padded, context):
     """The `attn_chain` steps' MLA (6 to 48 rows): the q/kv norm writing the
     step's keys into the SWA tile images and the cluster decode on the tile
     images (query RoPE as it stages the `wq_b` output, splits merged in the
     cluster, inverse RoPE) against `fused_q_kv_rmsnorm`, the stock q RoPE
     and KV insert, FlashMLA and `fused_inv_rope_fp8_quant`: the normalized
-    query and the whole SWA cache bit for bit, the `wo_a` input within one
-    BF16 ulp of FlashMLA's; a CUDA graph replay equals the eager step bit for
-    bit."""
+    query and the whole SWA cache bit for bit, the real rows' `wo_a` input
+    within one BF16 ulp of FlashMLA's; a CUDA graph replay equals the eager
+    step bit for bit. A padded request (as a FULL graph replays with) leaves
+    the cache untouched and the real rows unchanged."""
     import vllm._custom_ops  # noqa: F401
     from vllm.models.common.ops.fused_qk_rmsnorm import fused_q_kv_rmsnorm
     from vllm.models.deepseek_v4.common.ops.fused_inv_rope_fp8_quant import (
@@ -389,8 +405,8 @@ def test_chain_decode_matches_flashmla(requests, context):
     )
     from vllm.models.deepseek_v41.nvidia.specialized_decode.hopper import mla_small
 
-    step = ChainStep(requests, context)
-    layer, rows = step.layer, step.rows
+    step = ChainStep(requests, context, padded=padded)
+    layer, rows, real = step.layer, step.rows, step.real_rows
     cache0 = step.swa_cache.clone()
     small = mla_small.SmallMlaDecode([layer], DEVICE)
     small.warm_up()
@@ -461,7 +477,10 @@ def test_chain_decode_matches_flashmla(requests, context):
         assert torch.equal(step.swa_cache, stock_cache)
         assert torch.equal(rotated_graph, rotated)
     torch.accelerator.synchronize()
-    _assert_within_one_ulp(rotated[None], want[None])
+    _assert_within_one_ulp(rotated[None, :real], want[None, :real])
+    # The padded requests' pages (4 per request) keep their keys.
+    first_padded = (requests - padded) * 4
+    assert torch.equal(step.swa_cache[first_padded:], cache0[first_padded:])
 
 
 # ------------------------------------------------------------- dense FP8 GEMMs

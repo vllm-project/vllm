@@ -19,12 +19,13 @@ startup on every TP rank with the missing requirements:
   micro-batching.
 - Speculative decoding: DSpark, without adaptive verification.
 - Attention: `FLASHINFER_MLA_SPARSE_DSV41`, fp8 KV cache, MXFP4 indexer with
-  sparse logits.
+  sparse logits (GB300; Hopper: see `hopper/AGENTS.md`).
 - CUDA graphs: FULL graphs for decode batches only (`FULL_AND_PIECEWISE` or
   `FULL_DECODE_ONLY`).
 - No `torch.compile` of the model, no sleep mode, no runtime weight updates.
 - No LoRA, KV transfer or batch invariance.
-- DeepGEMM and NVLink multicast for the fused all-reduce + mHC.
+- DeepGEMM and NVLink multicast for the fused all-reduce + mHC (GB300; Hopper:
+  see `hopper/AGENTS.md`).
 
 This check runs once, at startup. The configuration is the same on every
 rank, but the last requirement is probed per rank: the custom all-reduce sets

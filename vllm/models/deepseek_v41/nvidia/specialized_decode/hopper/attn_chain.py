@@ -17,11 +17,12 @@ its own wait) becomes resident and loads during it.
 """
 
 from functools import cache
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import torch
 
 from ...flashmla import DeepseekV4FlashMLAAttention
+from .mla_small import launch
 
 if TYPE_CHECKING:
     from vllm.v1.attention.backends.mla.sparse_swa import DeepseekSparseSWAMetadata
@@ -48,7 +49,7 @@ def applies(attn: DeepseekV4FlashMLAAttention) -> bool:
 
 
 @cache
-def compiled(kind: str, flag: Any):
+def _compiled(eps: float):
     import cutlass.cute as cute
     from cutlass import Int32, Int64
     from cutlass.cute.runtime import make_fake_stream
@@ -56,29 +57,8 @@ def compiled(kind: str, flag: Any):
     from . import attn_cute
 
     i, p = Int32(1), Int64(0)
-    if kind != "norm":
-        raise ValueError(kind)
-    kernel = attn_cute.QkvNorm(flag)
     args = [p, i, p, i, p, p, p, p, p, i, p, p, p, p, p, p, i, i, i, i]
-    return cute.compile(kernel, *args, make_fake_stream())
-
-
-def launch(kind: str, flag: Any, *args: Any) -> None:
-    """`kind`'s kernel on the current stream; tensors pass their address,
-    `("i64", n)` a 64-bit value, other ints Int32."""
-    from cutlass import Int32, Int64
-
-    from vllm.models.common.ops.moe_tail_fusion.primitives import current_cu_stream
-
-    values: list = []
-    for arg in args:
-        if isinstance(arg, torch.Tensor):
-            values.append(Int64(arg.data_ptr()))
-        elif isinstance(arg, tuple):
-            values.append(Int64(arg[1]))
-        else:
-            values.append(Int32(arg))
-    compiled(kind, flag)(*values, current_cu_stream())
+    return cute.compile(attn_cute.QkvNorm(eps), *args, make_fake_stream())
 
 
 def norm_kv_insert(
@@ -101,8 +81,7 @@ def norm_kv_insert(
     cache_2d = cache.view(cache.shape[0], -1)
     qr = torch.empty(rows, _Q_LORA, dtype=qr_kv.dtype, device=qr_kv.device)
     launch(
-        "norm",
-        float(attn.eps),
+        _compiled(float(attn.eps)),
         qr_kv,
         qr_kv.stride(0),
         qr,
@@ -124,4 +103,4 @@ def norm_kv_insert(
 
 def warm_up(eps: float) -> None:
     """Compile the kernels before CUDA graph capture."""
-    compiled("norm", eps)
+    _compiled(eps)

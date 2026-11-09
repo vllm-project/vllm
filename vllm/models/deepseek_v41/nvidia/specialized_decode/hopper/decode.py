@@ -79,6 +79,7 @@ class HopperSpecializedDecode(SpecializedDecode):
     """The decode executor over one backbone's local layers on Hopper."""
 
     boundaries: HopperBoundaries
+    mhc_stream: torch.cuda.Stream
 
     def __init__(
         self, backbone: "DeepseekV4Model", config: DecodeConfig, lm_head: nn.Module
@@ -108,10 +109,17 @@ class HopperSpecializedDecode(SpecializedDecode):
         # DeepGEMM prenorm GEMM.
         self.mhc_stream = torch.cuda.Stream()
 
-        from .all_reduce import HopperBoundaryAllReduce
+        from ..boundary.all_reduce import BoundaryAllReduce
 
-        # Collective: every TP rank builds the executor in lockstep.
-        self.all_reduce = HopperBoundaryAllReduce(backbone.config, FUSED_MAX_ROWS)
+        # Collective: every TP rank builds the executor in lockstep. The
+        # low-batch MoE kernel, the grid right before each finalize, writes
+        # the route map and weights the finalize reads.
+        self.all_reduce = BoundaryAllReduce(
+            backbone.config,
+            quantize_layer_input=False,
+            max_num_tokens=FUSED_MAX_ROWS,
+            finalize_metadata_before_pdl=False,
+        )
         self.boundaries = HopperBoundaries(self.all_reduce, self.mhc_stream)
         for layer in layers:
             self.boundaries.add(layer)
@@ -126,7 +134,7 @@ class HopperSpecializedDecode(SpecializedDecode):
             LayerPlan(
                 layer_id=layer_id,
                 layer=layer,
-                attention=HopperAttentionStep(attn, tables, mla),
+                attention=HopperAttentionStep(attn, mla),
                 moe=HopperMoEStep(layer.ffn, self.max_rows),
                 engram=layer.engram,
             )
@@ -181,7 +189,7 @@ class HopperSpecializedDecode(SpecializedDecode):
             for plan in self.layer_plans:
                 layer = plan.layer
                 if state is None:
-                    state, layer_input = bound.first(layer, x)
+                    state, layer_input = bound.first(layer, x, streams)
                 elif plan.engram is not None and engram_hashes is not None:
                     residual = bound.post_only(state)
                     if plan.layer_id in aux_layers:
@@ -217,7 +225,6 @@ class HopperSpecializedDecode(SpecializedDecode):
     def _join_side_work(self, error: bool = False) -> None:
         self.mla_tables.join()
         if error:
-            assert self.mhc_stream is not None
             torch.cuda.current_stream().wait_stream(self.mhc_stream)
 
     def warm_up(self, vllm_config: VllmConfig) -> None:
