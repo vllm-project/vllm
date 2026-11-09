@@ -1434,8 +1434,8 @@ class MooncakeConnectorWorker:
             tuple,
             tuple[list[TransferRegion], list[TransferRegion], str | None],
         ] = {}
-        # Peer identity and geometry -> regions, in LRU order.
-        # Filled only after a pull that actually carried the layout.
+        # (host, port, tp_rank, pp_size, tp_size, layout_id) -> regions, in LRU
+        # order. Filled only after a pull that actually carried the layout.
         self._layout_by_peer: OrderedDict[
             tuple, tuple[list[TransferRegion], list[TransferRegion]]
         ] = OrderedDict()
