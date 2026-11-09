@@ -109,11 +109,11 @@ def _call(name):
 def test_attribute_scan_stops_at_the_tag_boundary():
     """A repeated open tag must not restart the attribute search per tag.
 
-    The attribute runs in ``_NAME_RE`` and ``_PARAM_RE`` were ``[^>]*?``, so
-    output that opens tags without ever closing one retried the ``name="..."``
-    search from every ``<atem:invoke`` position, each retry scanning to the end
+    The attribute runs in `_NAME_RE` and `_PARAM_RE` were `[^>]*?`, so
+    output that opens tags without ever closing one retried the `name="..."`
+    search from every `<atem:invoke` position, each retry scanning to the end
     of the block: 13 KB cost 0.48 s and 52 KB cost 7.9 s, on the event loop.
-    ``[^<>]`` stops every attempt at the next ``<``, which makes the match
+    `[^<>]` stops every attempt at the next `<`, which makes the match
     independent of what follows the opening tag -- asserted directly, since a
     wall-clock bound would depend on the runner.
     """
@@ -139,12 +139,12 @@ def test_attribute_scan_stops_at_the_tag_boundary():
 def test_streaming_parses_once_per_completed_invoke(monkeypatch):
     """Streaming must not re-parse the whole text on every delta.
 
-    ``extract_tool_calls_streaming`` ran ``_parse_tool_calls(current_text)`` for
+    `extract_tool_calls_streaming` ran `_parse_tool_calls(current_text)` for
     each delta, so _INVOKE_RE -- which the attribute fix above leaves alone --
     rescanned the whole output every time: O(n) per delta and O(n^2) over the
     message: 26 KB in 4-char deltas took 5-19 s, depending on the runner.
     A call can only appear on the
-    delta that completes an ``</atem:invoke>``, so only those deltas parse.
+    delta that completes an `</atem:invoke>`, so only those deltas parse.
     Counted rather than timed, so the bound holds on any runner (cf. #62027).
     """
     request = ChatCompletionRequest(model="muse", messages=[])
