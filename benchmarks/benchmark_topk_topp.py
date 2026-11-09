@@ -29,6 +29,7 @@ from vllm.v1.sample.ops.topk_topp_cuda import (
     apply_top_k_top_p_cuda,
     topk_topp_cuda_available,
 )
+from vllm.v1.sample.ops.topk_topp_cute import apply_top_k_top_p_cute
 from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p_pytorch
 from vllm.v1.sample.ops.topk_topp_triton import (
     apply_top_k_top_p_triton,
@@ -153,6 +154,7 @@ def apply_top_k_top_p_flashinfer_mask(logits, k, p):
 IMPLEMENTATIONS = {
     "triton": apply_top_k_top_p_triton,
     "cuda": apply_top_k_top_p_cuda,
+    "cute": apply_top_k_top_p_cute,
     "flashinfer-mask": apply_top_k_top_p_flashinfer_mask,
     "pytorch": apply_top_k_top_p_pytorch,
 }

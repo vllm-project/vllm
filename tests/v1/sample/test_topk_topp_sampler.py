@@ -12,6 +12,7 @@ from vllm.v1.sample.ops.topk_topp_cuda import (
     apply_top_k_top_p_cuda,
     topk_topp_cuda_available,
 )
+from vllm.v1.sample.ops.topk_topp_cute import topk_topp_cute_available
 from vllm.v1.sample.ops.topk_topp_sampler import (
     apply_top_k_top_p,
     apply_top_k_top_p_pytorch,
@@ -960,6 +961,14 @@ class TestTritonTopkTopp:
 # =============================================================================
 
 
+@pytest.fixture(params=["cuda", "cute"])
+def filter_impl(request, monkeypatch: pytest.MonkeyPatch):
+    """Runs a test against the CUDA kernel and its CuTe DSL port."""
+    if request.param == "cute" and not topk_topp_cute_available():
+        pytest.skip("CuTe DSL is not available")
+    monkeypatch.setenv("VLLM_TOPK_TOPP_FILTER_IMPL", request.param)
+
+
 @pytest.mark.skipif(
     not topk_topp_cuda_available(),
     reason="CUDA top-k/top-p filter requires SM90 or SM100",
@@ -968,7 +977,7 @@ class TestCudaTopkTopp(TestTritonTopkTopp):
     """Runs the Triton kernel's regression suite against the CUDA filter."""
 
     @pytest.fixture(autouse=True)
-    def use_cuda_filter(self, monkeypatch: pytest.MonkeyPatch):
+    def use_cuda_filter(self, monkeypatch: pytest.MonkeyPatch, filter_impl):
         import vllm.v1.sample.ops.topk_topp_triton as tt
 
         monkeypatch.setattr(
@@ -1051,7 +1060,7 @@ class TestCudaTopkToppExact:
     full-row radix fallback (large k, heavy ties)."""
 
     @pytest.fixture(autouse=True)
-    def setup(self):
+    def setup(self, filter_impl):
         torch.set_default_device(DEVICE_TYPE)
         self.generator = Generator(device=DEVICE_TYPE).manual_seed(7)
 

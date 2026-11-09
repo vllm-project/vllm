@@ -13,6 +13,11 @@ import torch
 
 import vllm.envs as envs
 from vllm.platforms import current_platform
+from vllm.v1.sample.ops.topk_topp_cute import (
+    apply_top_k_top_p_cute,
+    reserve_topk_topp_cute_workspace,
+    topk_topp_cute_available,
+)
 
 # Indices and fixed-point masses are sized for vocabularies below 2^20.
 _MAX_VOCAB_SIZE = 1 << 20
@@ -43,12 +48,20 @@ def can_use_topk_topp_cuda(logits: torch.Tensor) -> bool:
 
 
 def _supports(device: torch.device, vocab_size: int) -> bool:
-    return (
+    if not (
         envs.VLLM_USE_CUDA_TOPK_TOPP_FILTER
         and device.type == "cuda"
         and vocab_size < _MAX_VOCAB_SIZE
-        and topk_topp_cuda_available(_index(device))
-    )
+    ):
+        return False
+    if _use_cute():
+        return topk_topp_cute_available(_index(device))
+    return topk_topp_cuda_available(_index(device))
+
+
+def _use_cute() -> bool:
+    """The CuTe DSL port (VLLM_TOPK_TOPP_FILTER_IMPL=cute) of the kernel."""
+    return envs.VLLM_TOPK_TOPP_FILTER_IMPL == "cute"
 
 
 def apply_top_k_top_p_cuda(
@@ -70,6 +83,8 @@ def apply_top_k_top_p_cuda(
     """
     if k is None and p is None:
         return logits
+    if _use_cute():
+        return apply_top_k_top_p_cute(logits, k, p)
     if logits.stride(1) != 1:
         logits = logits.contiguous()
     if k is not None:
@@ -85,6 +100,8 @@ def reserve_topk_topp_cuda_workspace(device: torch.device, vocab_size: int) -> N
     when the sampler can use the kernel, since profiling may not call it (e.g.
     with a fused FlashInfer sampler) and the KV cache must leave room for it."""
     if _supports(device, vocab_size):
+        if _use_cute():
+            return reserve_topk_topp_cute_workspace(device)
         _workspace(device)
 
 

@@ -50,6 +50,7 @@ if TYPE_CHECKING:
     VLLM_TRACE_FUNCTION: int = 0
     VLLM_USE_FLASHINFER_SAMPLER: bool = True
     VLLM_USE_CUDA_TOPK_TOPP_FILTER: bool = True
+    VLLM_TOPK_TOPP_FILTER_IMPL: Literal["cuda", "cute"] = "cuda"
     VLLM_PP_LAYER_PARTITION: str | None = None
     VLLM_CPU_KVCACHE_SPACE: int | None = 0
     VLLM_CPU_OMP_THREADS_BIND: str = "auto"
@@ -936,6 +937,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # SM103, FP32 logits). Set to 0 to use the Triton kernel instead.
     "VLLM_USE_CUDA_TOPK_TOPP_FILTER": lambda: bool(
         int(os.getenv("VLLM_USE_CUDA_TOPK_TOPP_FILTER", "1"))
+    ),
+    # Implementation of that filter: the AOT CUDA kernel, or its CuTe DSL (JIT)
+    # port.
+    "VLLM_TOPK_TOPP_FILTER_IMPL": env_with_choices(
+        "VLLM_TOPK_TOPP_FILTER_IMPL", "cuda", ["cuda", "cute"]
     ),
     # Pipeline stage partition strategy
     "VLLM_PP_LAYER_PARTITION": lambda: os.getenv("VLLM_PP_LAYER_PARTITION", None),
