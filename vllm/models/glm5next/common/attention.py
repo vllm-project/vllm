@@ -580,6 +580,8 @@ class Glm5NextMLAAttention(nn.Module):
             # ShardQ splits heads across TP ranks; replicated heads stay whole.
             shardq_eligible=shardq_eligible and not replicate,
         )
+        # Replicated layers have no all-reduce to resync ranks: fix the top-k order.
+        self.mla_attn.canonical_topk_order = replicate and self.indexer is not None
 
     def forward(
         self, hidden_states: torch.Tensor, positions: torch.Tensor
