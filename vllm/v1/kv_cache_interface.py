@@ -946,8 +946,11 @@ class SlidingWindowSpec(AttentionSpec):
     def is_uniform_with_collection(
         self, kv_cache_specs: dict[str, KVCacheSpec]
     ) -> bool:
+        # DFlash drafter layers run their own manager, so they never share a
+        # group with ordinary sliding-window layers.
         return all(
             isinstance(spec, SlidingWindowSpec)
+            and not isinstance(spec, DFlashSlidingWindowSpec)
             and spec.sliding_window == self.sliding_window
             for spec in kv_cache_specs.values()
         )
