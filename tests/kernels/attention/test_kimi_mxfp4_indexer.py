@@ -7,9 +7,17 @@ import torch
 
 from vllm.platforms import current_platform
 
-pytestmark = pytest.mark.skipif(
-    not current_platform.is_rocm(), reason="ROCm MXFP4 indexer"
-)
+
+def _on_gfx950() -> bool:
+    if not current_platform.is_rocm():
+        return False
+    from vllm.platforms.rocm import on_gfx950
+
+    return on_gfx950()
+
+
+# The MXFP4 indexer kernels use gfx950-only scaled MFMA instructions.
+pytestmark = pytest.mark.skipif(not _on_gfx950(), reason="needs gfx950 (MI350/MI355)")
 
 # TODO: drop once AITER's row-group FP4 MQA logits kernel accepts physical page
 # strides. score_paged reads the index cache in place, whose pages pitch 4352
