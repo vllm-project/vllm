@@ -9,7 +9,7 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Protocol
 
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake import rdma_utils
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store import rdma_utils
 from vllm.distributed.mooncake_store import MooncakeStoreConfig, setup_mooncake_store
 from vllm.logger import init_logger
 from vllm.utils.import_utils import PlaceholderModule
