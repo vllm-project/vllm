@@ -3,7 +3,7 @@
 """ROCm-specific tests for the AITER Flash Attention backend.
 
 This file owns the ROCm backend contract and the ROCm-specific execution paths
-wired through ``vllm.v1.attention.backends.rocm_aiter_fa``:
+wired through `vllm.v1.attention.backends.rocm_aiter_fa`:
 - backend contract and env gating
 - representative prefill, multi-batch, decode, and FP8-KV execution
 - direct kernel stress for large block tables and sliding-window masking
@@ -42,11 +42,14 @@ DIRECT_NUM_HEADS = (8, 2)
 DIRECT_HEAD_SIZE = 128
 DIRECT_DTYPE = torch.bfloat16
 HEAD_SIZE_TEST_NUM_HEADS_PAIRS = [(16, 16), (16, 4)]
-# Prefill seq lens: (query_len, kv_len). Exclude single-token decode (q=1)
-# because flash_attn_varlen_func is a prefill kernel; q_len=1 with short kv
-# triggers kernel limitations (MAE > 0.1 for head != 128 in BF16, all heads in FP16).
-# Single-token decode is covered separately in test_aiter_mha_decode_single_token.
-SEQ_LENS = [(8, 512), (32, 1024)]
+# Prefill seq lens: (query_len, kv_len). q=1 is not a production shape for this
+# kernel: sort_batch_req_ids orders requests by scheduled token count, so a
+# 1-token request leads the batch and is split off as a decode, and the decode
+# path takes no min_seqlen_q. It is kept as a regression guard -- CK returns
+# early for seqlen_q <= min_seqlen_q and leaves `out` unwritten, so this entry
+# fails loudly if min_seqlen_q ever goes back to 1. See
+# test_aiter_mha_decode_single_token for the decode path itself.
+SEQ_LENS = [(1, 512), (8, 512), (32, 1024)]
 DIRECT_SEQ_LENS = [(10, 1328), (5, 18), (129, 463)]
 
 
@@ -261,7 +264,7 @@ def _run_direct_flash_attn_case(
         cu_seqlens_k=cu_seq_lens,
         max_seqlen_q=max_query_len,
         max_seqlen_k=max_kv_len,
-        min_seqlen_q=1,
+        min_seqlen_q=0,
         dropout_p=0.0,
         softmax_scale=scale,
         causal=True,
@@ -449,7 +452,7 @@ def _run_single_seq_flash_attn_case(
         cu_seqlens_k=cu_seq_lens,
         max_seqlen_q=query_len,
         max_seqlen_k=kv_len,
-        min_seqlen_q=1,
+        min_seqlen_q=0,
         dropout_p=0.0,
         softmax_scale=scale,
         causal=True,
@@ -613,7 +616,7 @@ def test_aiter_mha_multi_batch(num_heads, head_size, dtype):
         cu_seqlens_k=cu_seq_lens,
         max_seqlen_q=max(query_lens),
         max_seqlen_k=max_kv_len,
-        min_seqlen_q=1,
+        min_seqlen_q=0,
         dropout_p=0.0,
         softmax_scale=scale,
         causal=True,
@@ -719,7 +722,7 @@ def test_aiter_fa_shared_kv_matches_reference(
     monkeypatch.setattr(rocm_aiter_ops, "_SHUFFLE_KV_CACHE_ENABLED", shuffle)
     set_random_seed(42)
     batch_spec = {
-        "prefill": BatchSpec(seq_lens=[32, 24], query_lens=[32, 24]),
+        "prefill": BatchSpec(seq_lens=[32, 24, 1], query_lens=[32, 24, 1]),
         "extend": BatchSpec(seq_lens=[80, 56], query_lens=[32, 24]),
         "mixed": BatchSpec(seq_lens=[48, 80, 24], query_lens=[1, 32, 24]),
     }[batch]
@@ -949,30 +952,9 @@ def test_aiter_fa_chunked_extend_with_sinks_matches_reference(monkeypatch, use_s
 
 # Decode path test --------------------------------------------------------
 @pytest.mark.skipif(not on_mi3xx(), reason="MI300/MI350 ROCm only")
-@pytest.mark.parametrize(
-    "dtype",
-    [
-        torch.bfloat16,
-        pytest.param(
-            torch.float16,
-            marks=pytest.mark.xfail(
-                reason=(
-                    "aiter bug #2229: flash_attn_varlen_func currently "
-                    "miscomputes FP16 single-token decode on MI3xx "
-                    "(validated on gfx950; max abs diff 1.95 vs atol 1.5e-2). "
-                    "Remove xfail when the AITER decode kernel is fixed. "
-                    "https://github.com/ROCm/aiter/issues/2229"
-                ),
-            ),
-        ),
-    ],
-)
+@pytest.mark.parametrize("dtype", DTYPES)
 def test_aiter_mha_decode_single_token(dtype):
-    """Test AITER MHA for decode (single query token per sequence).
-
-    BF16 is the working reference configuration here. FP16 remains xfail until
-    the upstream AITER single-token decode bug is fixed.
-    """
+    """Test AITER MHA for decode (single query token per sequence)."""
     atol = 1.5e-2
     rtol = 1e-2
     _assert_aiter_supported()
@@ -1029,7 +1011,7 @@ def test_aiter_mha_decode_single_token(dtype):
         cu_seqlens_k=cu_seq_lens,
         max_seqlen_q=1,
         max_seqlen_k=kv_len,
-        min_seqlen_q=1,
+        min_seqlen_q=0,
         dropout_p=0.0,
         softmax_scale=scale,
         causal=True,
@@ -1137,7 +1119,7 @@ def test_aiter_mha_varlen_fp8_kv(dtype):
         cu_seqlens_k=cu_seq_lens,
         max_seqlen_q=query_len,
         max_seqlen_k=kv_len,
-        min_seqlen_q=1,
+        min_seqlen_q=0,
         dropout_p=0.0,
         softmax_scale=scale,
         causal=True,
