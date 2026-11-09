@@ -455,20 +455,20 @@ def env_with_choices(
         # Resolve choices if it's a callable (for lazy loading)
         actual_choices = choices() if callable(choices) else choices
 
-        if not case_sensitive:
-            check_value = value.lower()
-            check_choices = [choice.lower() for choice in actual_choices]
+        if case_sensitive:
+            if value in actual_choices:
+                return value
         else:
-            check_value = value
-            check_choices = actual_choices
+            # Accept mixed-case input, but return the canonical choice. Some
+            # consumers (e.g. torch.set_float32_matmul_precision) require it.
+            for choice in actual_choices:
+                if value.casefold() == choice.casefold():
+                    return choice
 
-        if check_value not in check_choices:
-            raise ValueError(
-                f"Invalid value '{value}' for {env_name}. "
-                f"Valid options: {actual_choices}."
-            )
-
-        return value
+        raise ValueError(
+            f"Invalid value '{value}' for {env_name}. "
+            f"Valid options: {actual_choices}."
+        )
 
     return _get_validated_env
 
