@@ -6,8 +6,8 @@ INT4 packs two 4-bit values per cache byte, pre-rotates with a single RHT,
 and hides a 4-bit zero-point in the scale's low mantissa bits — too
 different from the core kernel to share it. Owns the whole mode: nibble
 pack/unpack, the reshape (write) kernel, the split-dot attention (read)
-kernel, the RHT transform, and the public ``reshape_and_cache_int4`` /
-``unified_attention_int4`` entry points.
+kernel, the RHT transform, and the public `reshape_and_cache_int4` /
+`unified_attention_int4` entry points.
 """
 
 from __future__ import annotations
@@ -694,11 +694,11 @@ def _launch_packed_attn(
     softmax_segm_expsum,
     packing_factor: int,
 ):
-    """Launch ``_attn_packed`` for one of the sub-byte modes.
+    """Launch `_attn_packed` for one of the sub-byte modes.
 
     Handles 2D-vs-3D dispatch, placeholder pointers for the unused side
-    of that split, and the trailing ``reduce_segments`` pass.  Writes
-    into ``out`` (directly for 2D; via the segm buffers for 3D).
+    of that split, and the trailing `reduce_segments` pass.  Writes
+    into `out` (directly for 2D; via the segm buffers for 3D).
     """
     import vllm.envs as envs
     from vllm.v1.attention.ops.triton_unified_attention import _get_tile_size
@@ -909,10 +909,10 @@ def unified_attention_int4(
 ) -> None:
     """Paged attention over the INT4 packed cache, writing into *out*.
 
-    The forward RHT has norm ``sqrt(b)`` for ``b`` the largest power-of-two
-    divisor of ``head_size`` (``b == head_size`` for power-of-two sizes), so
-    ``softmax_scale`` is divided by ``b`` and the inverse RHT divides the output
-    by ``b`` as well.
+    The forward RHT has norm `sqrt(b)` for `b` the largest power-of-two
+    divisor of `head_size` (`b == head_size` for power-of-two sizes), so
+    `softmax_scale` is divided by `b` and the inverse RHT divides the output
+    by `b` as well.
     """
     q_orig_dtype = q.dtype
     q = single_rht(q.float()).to(q_orig_dtype)

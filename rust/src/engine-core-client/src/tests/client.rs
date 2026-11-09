@@ -3335,16 +3335,19 @@ async fn sleep_and_wake_calls_record_engine_sleep_state() {
     .await;
 
     let mut series = vec![("connected", engine_sleep_state_series(MODEL))];
-    client.sleep(SleepLevel::OffloadWeights, PauseMode::default()).await.unwrap();
+    client
+        .sleep(SleepLevel::OffloadWeights, PauseMode::default(), true)
+        .await
+        .unwrap();
     series.push(("sleep level 1", engine_sleep_state_series(MODEL)));
     assert!(!client.wake_up(Some(vec!["weights".to_owned()])).await.unwrap());
     series.push(("partial wake", engine_sleep_state_series(MODEL)));
     assert!(client.wake_up(None).await.unwrap());
     series.push(("full wake", engine_sleep_state_series(MODEL)));
-    client.release_kv_cache_memory().await.unwrap();
+    client.release_kv_cache_memory(true).await.unwrap();
     series.push(("release kv cache", engine_sleep_state_series(MODEL)));
     assert!(client.wake_up(None).await.unwrap());
-    client.sleep(SleepLevel::DiscardAll, PauseMode::default()).await.unwrap();
+    client.sleep(SleepLevel::DiscardAll, PauseMode::default(), true).await.unwrap();
     series.push(("sleep level 2", engine_sleep_state_series(MODEL)));
 
     expect_test::expect![[r#"
@@ -3394,6 +3397,69 @@ async fn sleep_and_wake_calls_record_engine_sleep_state() {
         ]
     "#]]
     .assert_debug_eq(&series);
+
+    for (shutdown_tx, engine_task) in engines {
+        let _ = shutdown_tx.send(());
+        engine_task.await.unwrap();
+    }
+    client.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cache_config_info_exports_each_engine_cache_config() {
+    init_tracing();
+    let ipc = IpcNamespace::new().unwrap();
+    let handshake_address = ipc.handshake_endpoint();
+    let mut engines = Vec::new();
+    for engine_index in 0..2_u16 {
+        let ready_response = EngineCoreReadyResponse {
+            cache_config_info: Some(BTreeMap::from([
+                ("block_size".to_string(), "16".to_string()),
+                (
+                    "num_gpu_blocks".to_string(),
+                    (1000 + engine_index).to_string(),
+                ),
+                // Keeps other tests' engines off these series.
+                ("test".to_string(), "cache-config-info".to_string()),
+            ])),
+            ..crate::mock_engine::default_ready_response()
+        };
+        engines.push(spawn_mock_engine_task_with_ready(
+            handshake_address.clone(),
+            EngineId::from_engine_index(engine_index).into_frame().to_vec(),
+            ready_response,
+            |_dealer, _push| Box::pin(async {}),
+        ));
+    }
+    let client = connect_client_with_ipc(
+        handshake_test_config(
+            handshake_address,
+            2,
+            "cache-config-info-model",
+            Duration::from_secs(2),
+            0,
+            None,
+        ),
+        &ipc,
+    )
+    .await;
+
+    let rendered = vllm_metrics::METRICS.render().unwrap();
+    let mut series = rendered
+        .lines()
+        .filter(|line| {
+            line.starts_with("vllm:cache_config_info{")
+                && line.contains("test=\"cache-config-info\"")
+        })
+        .collect::<Vec<_>>();
+    // Family series render in hash order.
+    series.sort();
+    expect_test::expect![[r#"
+        [
+            "vllm:cache_config_info{block_size=\"16\",engine=\"0\",num_gpu_blocks=\"1000\",test=\"cache-config-info\"} 1.0",
+            "vllm:cache_config_info{block_size=\"16\",engine=\"1\",num_gpu_blocks=\"1001\",test=\"cache-config-info\"} 1.0",
+        ]
+    "#]].assert_debug_eq(&series);
 
     for (shutdown_tx, engine_task) in engines {
         let _ = shutdown_tx.send(());
@@ -3927,6 +3993,9 @@ fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
                                 retryable: true,
                             },
                         ),
+                        watermarking: Some(
+                            true,
+                        ),
                     },
                 ],
                 scheduler_stats: None,
@@ -4104,6 +4173,15 @@ fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
     assert!(ready_response.enable_sleep_mode);
     assert!(ready_response.supports_draft_weight_updates);
     assert_eq!(ready_response.effective_attention_block_size, Some(64));
+    assert_eq!(ready_response.config_hash.as_deref(), Some("0123456789"));
+    assert!(ready_response.enable_expert_parallel);
+    assert_eq!(
+        ready_response.cache_config_info,
+        Some(BTreeMap::from([
+            ("block_size".to_string(), "16".to_string()),
+            ("mamba_block_size".to_string(), "None".to_string()),
+        ]))
+    );
     assert_eq!(
         ready_response.vllm_config,
         Some(serde_json::json!({

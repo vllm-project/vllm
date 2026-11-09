@@ -3,7 +3,7 @@
 """Receive-pool, scheduler, settings and CUDA-path tests for sharded RDT.
 
 Most tests drive the engine on CPU with a fake CUDA runtime and stubbed NIXL
-registration; the cases under ``requires_cuda`` need one GPU (they page-lock
+registration; the cases under `requires_cuda` need one GPU (they page-lock
 through libcudart and time stream holds), so they skip on CPU and on ROCm.
 """
 
@@ -125,7 +125,7 @@ def _engine(
 
 @pytest.fixture
 def cuda_runtime(monkeypatch):
-    """A fake ``CudaRTLibrary``: records host (un)registrations, returns codes."""
+    """A fake `CudaRTLibrary`: records host (un)registrations, returns codes."""
     state = SimpleNamespace(
         registered=[],
         unregistered=[],
@@ -166,7 +166,7 @@ def cuda_runtime(monkeypatch):
 
 @pytest.fixture
 def nixl(monkeypatch, cuda_runtime):
-    """Stub NIXL (de)registration; ``events`` interleaves with the CUDA fake."""
+    """Stub NIXL (de)registration; `events` interleaves with the CUDA fake."""
     state = SimpleNamespace(
         registered=[],
         deregistered=[],
@@ -200,7 +200,7 @@ def nixl(monkeypatch, cuda_runtime):
 
 @pytest.fixture
 def engine_log(caplog):
-    """``caplog`` wired to the engine's logger, which does not propagate to the
+    """`caplog` wired to the engine's logger, which does not propagate to the
     root logger vLLM configures."""
     caplog.set_level(logging.ERROR, logger=engine_module.logger.name)
     engine_module.logger.addHandler(caplog.handler)
@@ -230,7 +230,7 @@ def _ids(tensors) -> list[int]:
 
 
 def _released(buffers) -> list[tuple[str, int]]:
-    """The event sequence a release of ``buffers`` in order must record."""
+    """The event sequence a release of `buffers` in order must record."""
     return [
         event
         for buffer in buffers
@@ -250,7 +250,7 @@ def _host_pool_engine(staging_device: str = "host") -> ShardedRDTWeightTransferE
 
 
 def _stub_init(engine, monkeypatch, plan: _CallPlan, *, fail: Exception | None):
-    """Stub bake and routing so ``init_transfer_engine`` exercises the pool,
+    """Stub bake and routing so `init_transfer_engine` exercises the pool,
     pre-registration and (optionally) a failure right after it. The stubs
     write the init candidate the engine hands them, as the real helpers do."""
     engine.parallel_config = SimpleNamespace(enable_eplb=False)
@@ -929,7 +929,7 @@ def _hold(
     stream: torch.cuda.Stream,
     seconds: float,
 ) -> tuple[torch.cuda.Event, torch.cuda.Event]:
-    """Keep ``stream`` busy for approximately ``seconds``."""
+    """Keep `stream` busy for approximately `seconds`."""
     start = torch.cuda.Event(enable_timing=True)
     end = torch.cuda.Event(enable_timing=True)
     probe = 10_000_000

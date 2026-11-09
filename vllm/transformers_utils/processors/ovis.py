@@ -197,7 +197,7 @@ class OvisProcessor(ProcessorMixin):
                         new_ids = []
 
                         # replace placeholders
-                        for i, token_id in enumerate(ids_list):
+                        for token_id in ids_list:
                             if token_id == image_token_id:
                                 placeholder_ids = image_features["image_placeholders"][
                                     idx

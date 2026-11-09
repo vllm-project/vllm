@@ -3,8 +3,8 @@
 """W4A16 GPTQ kernel for AMD RDNA3 (gfx1100) — fp16 + bf16.
 
 Drop-in replacement for ExllamaLinearKernel on RDNA3 that adds native bf16
-support. The HIP kernel lives in ``csrc/rocm/q_gemm_rdna3.cu``
-and is exposed via ``torch.ops._rocm_C.gptq_gemm_rdna3``.
+support. The HIP kernel lives in `csrc/rocm/q_gemm_rdna3.cu`
+and is exposed via `torch.ops._rocm_C.gptq_gemm_rdna3`.
 
 Registered ahead of TritonW4A16LinearKernel for the ROCm-RDNA3 path; falls
 through to the Triton kernel on non-RDNA3 ROCm devices (e.g. CDNA/MI300).
@@ -60,8 +60,10 @@ class RDNA3W4A16LinearKernel(MPLinearKernel):
         if c.weight_type not in cls.SUPPORTED_QUANT_TYPES:
             return (
                 False,
-                f"Quant type ({c.weight_type}) not supported by "
-                f"RDNA3 W4A16 kernel; supported: {cls.SUPPORTED_QUANT_TYPES}",
+                (
+                    f"Quant type ({c.weight_type}) not supported by "
+                    f"RDNA3 W4A16 kernel; supported: {cls.SUPPORTED_QUANT_TYPES}"
+                ),
             )
 
         if c.group_size <= 0:
@@ -73,8 +75,10 @@ class RDNA3W4A16LinearKernel(MPLinearKernel):
         if c.full_weight_shape[0] % c.group_size != 0:
             return (
                 False,
-                f"Group size ({c.group_size}) does not evenly divide K "
-                f"({c.full_weight_shape[0]})",
+                (
+                    f"Group size ({c.group_size}) does not evenly divide K "
+                    f"({c.full_weight_shape[0]})"
+                ),
             )
 
         # Output features must be a multiple of the pack factor (8 nibbles per
@@ -83,8 +87,10 @@ class RDNA3W4A16LinearKernel(MPLinearKernel):
         if c.partition_weight_shape[1] % 8 != 0:
             return (
                 False,
-                "Output features must be a multiple of 8 for the RDNA3 "
-                "W4A16 kernel (qzeros packing)",
+                (
+                    "Output features must be a multiple of 8 for the RDNA3 "
+                    "W4A16 kernel (qzeros packing)"
+                ),
             )
 
         return True, None

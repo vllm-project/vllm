@@ -323,7 +323,7 @@ def _finalize_attention_layer(
         _reload_attention_scales(layer, info)
     else:
         _place_kernel_tensors(layer, info)
-    layer.process_weights_after_loading()
+    # its post-load hook runs from finalize_model_weights
 
 
 def _reload_attention_scales(layer: torch.nn.Module, info: LayerReloadingInfo) -> None:
@@ -395,7 +395,7 @@ def _process_loaded_layer(layer: torch.nn.Module, info: LayerReloadingInfo) -> N
     processing, copy the result into the persistent kernel storage and reset
     its reload info.
 
-    Shared by ``_layerwise_process`` and the sharded-RDT engine's quant stream,
+    Shared by `_layerwise_process` and the sharded-RDT engine's quant stream,
     which loads a layer's weights by scattering into it instead of through the
     buffered loaders but finishes it exactly the same way.
     """
