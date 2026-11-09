@@ -17,6 +17,7 @@ from vllm.model_executor.models.qwen3_dflash2 import (
 from vllm.platforms import current_platform
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
 from vllm.v1.worker.gpu.spec_decode.dflash2.speculator import DFlash2Speculator
+from vllm.v1.worker.gpu.spec_decode.lilicorr.speculator import LiLiCorrSpeculator
 
 
 @pytest.mark.parametrize("block_size", [5, 8])
@@ -915,3 +916,46 @@ def test_top_k_tokens_stay_in_the_processor_vocabulary(default_vllm_config):
     _, ids = processor.get_top_k_tokens(head, hidden_states, 4)
     assert (ids < vocab_size).all()
     assert (processor.get_top_tokens(head, hidden_states) < vocab_size).all()
+
+
+def _block_steps_config(narrow: bool, schedule):
+    return SimpleNamespace(
+        narrow_dflash_draft_block=narrow,
+        num_speculative_tokens_per_batch_size=schedule,
+        uses_dynamic_speculative_decoding=lambda: schedule is not None,
+    )
+
+
+@pytest.mark.parametrize(
+    "narrow,schedule,expected",
+    [
+        (False, [(1, 8, 7), (9, 64, 3), (65, 128, 1)], [7]),
+        (True, None, [7]),
+        (True, [(1, 8, 7), (9, 64, 3), (65, 128, 1)], [1, 3, 7]),
+        (True, [(1, 128, 0)], [7]),
+    ],
+)
+def test_draft_block_steps_follow_the_schedule(narrow, schedule, expected):
+    spec = SimpleNamespace(
+        num_speculative_steps=7,
+        max_num_reqs=128,
+        _supports_narrow_draft_block=True,
+        _speculator_name="DFlash",
+    )
+    config = _block_steps_config(narrow, schedule)
+    assert DFlashSpeculator._get_draft_block_steps(spec, config) == expected
+
+
+def test_narrow_draft_block_rejects_unsupported_speculators():
+    assert not DFlash2Speculator._supports_narrow_draft_block
+    assert not LiLiCorrSpeculator._supports_narrow_draft_block
+    spec = SimpleNamespace(
+        num_speculative_steps=7,
+        max_num_reqs=8,
+        _supports_narrow_draft_block=False,
+        _speculator_name="LiLiCorr",
+    )
+    with pytest.raises(ValueError, match="not supported for LiLiCorr"):
+        DFlashSpeculator._get_draft_block_steps(
+            spec, _block_steps_config(True, [(1, 8, 3)])
+        )

@@ -32,6 +32,29 @@ implies that:
 * K=1 will be used when the concurrency is in range [65, 128]
 * K=0 will be used when the concurrency is in range [129, 512], i.e., no draft tokens will be produced.
 
+### Narrowing the DFlash draft block
+
+DFlash drafts every token in one forward pass over `1 + num_speculative_tokens` query positions per request, and by default it keeps that width when the schedule picks a smaller K, so drafting costs the same at K=1 as at the maximum. Set `narrow_dflash_draft_block` to `true` to run the pass over `1 + K` positions instead. It is off by default.
+
+```bash
+--speculative-config '{
+    "model": "z-lab/Qwen3-8B-DFlash-b16",
+    "num_speculative_tokens": 7,
+    "num_speculative_tokens_per_batch_size": [
+      [1, 24, 7],
+      [25, 48, 5],
+      [49, 96, 3],
+      [97, 128, 1]
+    ],
+    "narrow_dflash_draft_block": true
+  }'
+```
+
+* Supported for DFlash drafters. DSpark, XPress, LiLiCorr and DFlash2 drafters reject it.
+* It has no effect without `num_speculative_tokens_per_batch_size`.
+* The drafter captures FULL CUDA graphs for each K in the schedule, each up to the largest batch size that uses it.
+* The mask positions of a block attend to each other, so a shorter block can change the drafts. The target still verifies every draft token.
+
 ## Online Examples
 
 ### Dynamic SD Eagle Drafter

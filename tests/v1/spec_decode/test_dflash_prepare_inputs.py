@@ -118,6 +118,8 @@ def _run_prepare(
         parallel_drafting_token_id=123,
         num_query_per_req=num_speculative_steps,
         num_speculative_steps=num_speculative_steps,
+        draft_block_steps=[num_speculative_steps],
+        _set_num_draft_steps=lambda num_steps: None,
         max_num_reqs=max_num_reqs,
         max_num_tokens=max_num_tokens,
         max_model_len=128,
@@ -239,3 +241,86 @@ def test_prepare_dflash_inputs_compiles_once_for_all_query_lengths():
     warmed = compiled_variants()
     _run_prepare(**kwargs, num_scheduled_tokens=300)
     assert compiled_variants() == warmed
+
+
+def test_narrowed_draft_block_leaves_no_stale_sample_rows():
+    """A K < N pass after a full-width pass lays sample rows out as
+    req * K + offset and marks every row up to max_num_reqs * K inert, so no
+    row a K-wide graph reads keeps the previous step's request."""
+    from vllm.v1.worker.gpu.spec_decode.dflash.speculator import (
+        prepare_dflash_inputs,
+    )
+
+    device = torch.device(current_platform.device_type)
+    max_num_reqs, max_num_tokens, num_steps = 4, 32, 4
+    buffers = SimpleNamespace(
+        input_ids=torch.zeros(max_num_tokens, dtype=torch.int32, device=device),
+        positions=torch.zeros(max_num_tokens, dtype=torch.int64, device=device),
+        is_padding=torch.zeros(max_num_tokens, dtype=torch.bool, device=device),
+        query_start_loc=torch.zeros(max_num_reqs + 1, dtype=torch.int32, device=device),
+        seq_lens=torch.zeros(max_num_reqs, dtype=torch.int32, device=device),
+    )
+    sample_indices = torch.zeros(
+        max_num_reqs * num_steps, dtype=torch.int64, device=device
+    )
+    sample_pos = torch.zeros_like(sample_indices)
+    sample_idx_mapping = torch.full_like(sample_indices, -1)
+    block_table = torch.tensor(
+        [[1, 2, 3, 4]] * max_num_reqs, dtype=torch.int32, device=device
+    )
+
+    def prepare(num_reqs: int, width: int) -> None:
+        positions = [p for r in range(num_reqs) for p in (8 * r + 4, 8 * r + 5)]
+        batch = SimpleNamespace(
+            num_reqs=num_reqs,
+            num_scheduled_tokens=np.full(num_reqs, 2, dtype=np.int32),
+            positions=torch.tensor(positions, dtype=torch.int64, device=device),
+            query_start_loc=torch.arange(
+                0, 2 * num_reqs + 1, 2, dtype=torch.int32, device=device
+            ),
+            idx_mapping=torch.arange(
+                10, 10 + num_reqs, dtype=torch.int32, device=device
+            ),
+        )
+        ones = torch.ones(max_num_reqs, dtype=torch.int32, device=device)
+        state = torch.zeros(16, dtype=torch.int64, device=device)
+        prepare_dflash_inputs(
+            buffers,
+            torch.zeros(max_num_tokens, dtype=torch.int64, device=device),
+            torch.zeros(max_num_tokens, dtype=torch.int64, device=device),
+            torch.zeros(max_num_tokens, dtype=torch.int64, device=device),
+            sample_indices,
+            sample_pos,
+            sample_idx_mapping,
+            torch.zeros(16, dtype=torch.float32, device=device),
+            torch.zeros(16, dtype=torch.int64, device=device),
+            batch,
+            ones,
+            ones * 0,
+            state,
+            state,
+            torch.zeros(16, dtype=torch.float32, device=device),
+            state,
+            block_table,
+            block_size=16,
+            cp_rank=0,
+            cp_size=1,
+            cp_interleave=1,
+            parallel_drafting_token_id=123,
+            num_query_per_req=1 + width,
+            num_speculative_steps=width,
+            max_num_reqs=max_num_reqs,
+            max_num_tokens=max_num_tokens,
+            max_model_len=128,
+        )
+
+    prepare(num_reqs=3, width=num_steps)
+    prepare(num_reqs=2, width=2)
+    torch.accelerator.synchronize()
+
+    mapping = sample_idx_mapping.cpu().tolist()
+    # Two requests of two rows each, then inert rows up to max_num_reqs * K.
+    assert mapping[:4] == [10, 10, 11, 11]
+    assert mapping[4 : max_num_reqs * 2] == [-1] * (max_num_reqs * 2 - 4)
+    # Each row samples the mask query of its own request (query base req * 3).
+    assert sample_indices[:4].cpu().tolist() == [1, 2, 4, 5]

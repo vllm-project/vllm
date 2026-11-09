@@ -52,6 +52,7 @@ logger = init_logger(__name__)
 
 class DSparkSpeculator(DFlashSpeculator):
     _speculator_name = "DSpark"
+    _supports_narrow_draft_block = False
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         super().__init__(vllm_config, device)

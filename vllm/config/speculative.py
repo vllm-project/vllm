@@ -592,6 +592,13 @@ class SpeculativeConfig:
     inclusive batch-size range.
     """
 
+    narrow_dflash_draft_block: bool = False
+    """With a dynamic schedule, run the DFlash/DFlash2 draft pass on 1 + K
+    query positions per request, where K is the step's scheduled number of
+    speculative tokens, instead of 1 + num_speculative_tokens. Off by default:
+    the mask positions of a block attend to each other, so a shorter block can
+    change the drafts."""
+
     # params generated in the post-init stage
     draft_model_config: SkipValidation[ModelConfig] = None  # type: ignore
     """The configuration of the draft model initialized internal."""
@@ -1774,6 +1781,9 @@ class SpeculativeConfig:
                 "FLy verification is a lossy speculative decoding method and "
                 "may degrade model outputs."
             )
+
+        if self.narrow_dflash_draft_block and not self.use_dflash():
+            raise ValueError("narrow_dflash_draft_block requires method='dflash'.")
 
         self.verify_equal_vocab_size_if_draft_model()
         return self

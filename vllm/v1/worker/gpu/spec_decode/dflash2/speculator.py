@@ -195,6 +195,7 @@ class CandidateSampler:
 
 class DFlash2Speculator(DFlashSpeculator):
     _speculator_name = "DFlash2"
+    _supports_narrow_draft_block = False
     _candidate_top_k_key = "selector_top_k"
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):

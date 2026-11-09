@@ -17,6 +17,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     get_kv_cache_spec_sliding_window,
 )
+from vllm.v1.spec_decode.dynamic.utils import build_dynamic_sd_schedule_lookup
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.cp_utils import cp_local_slot
@@ -38,6 +39,9 @@ logger = init_logger(__name__)
 class DFlashSpeculator(DraftModelSpeculator):
     _speculator_name = "DFlash"  # For logging, so we can share methods with subclasses
     maps_slot_mapping = True
+    # Whether the draft pass may run on fewer mask positions than
+    # num_speculative_tokens (SpeculativeConfig.narrow_dflash_draft_block).
+    _supports_narrow_draft_block = True
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         parallel_config = vllm_config.parallel_config
@@ -128,8 +132,61 @@ class DFlashSpeculator(DraftModelSpeculator):
             self.num_speculative_steps, dtype=torch.int32, device=device
         ).repeat(self.max_num_reqs)
 
+        # Mask positions per request in the current draft pass. It is below
+        # num_speculative_steps only with narrow_dflash_draft_block.
+        self.num_draft_steps = self.num_speculative_steps
+        self.draft_block_steps = self._get_draft_block_steps(speculative_config)
+        self._sample_cols = {
+            k: torch.arange(k, dtype=torch.int32, device=device).repeat(
+                self.max_num_reqs
+            )
+            for k in self.draft_block_steps
+        }
+        self._sample_cols[self.num_speculative_steps] = self.sample_col
+
         self.query_cudagraph_manager: DFlashCudaGraphManager | None = None
         self.draft_kv_cache_group_id: int = -1
+
+    def _get_draft_block_steps(self, speculative_config) -> list[int]:
+        """The mask-position counts the draft pass can run with."""
+        num_steps = self.num_speculative_steps
+        if not speculative_config.narrow_dflash_draft_block:
+            return [num_steps]
+        if not self._supports_narrow_draft_block:
+            raise ValueError(
+                f"narrow_dflash_draft_block is not supported for "
+                f"{self._speculator_name}."
+            )
+        if not speculative_config.uses_dynamic_speculative_decoding():
+            logger.warning(
+                "narrow_dflash_draft_block has no effect without "
+                "num_speculative_tokens_per_batch_size."
+            )
+            return [num_steps]
+        dense_schedule = build_dynamic_sd_schedule_lookup(
+            speculative_config.num_speculative_tokens_per_batch_size,
+            vllm_max_batch_size=self.max_num_reqs,
+            vllm_num_speculative_tokens=num_steps,
+        )
+        return sorted({num_steps} | {k for k in dense_schedule if k > 0})
+
+    def _draft_decode_query_lens(self) -> dict[int, int]:
+        """Query length -> most requests, per draft width. Like the target's,
+        each width is only captured up to the largest batch that drafts it."""
+        if len(self.draft_block_steps) == 1:
+            return {self.num_query_per_req: self.max_num_reqs}
+        offset = self.num_query_per_req - self.num_speculative_steps
+        return {
+            q: max_reqs
+            for q, max_reqs in self.vllm_config.get_decode_cudagraph_query_lens(
+                self.num_query_per_req
+            ).items()
+            if q - offset in self.draft_block_steps
+        }
+
+    def _set_num_draft_steps(self, num_steps: int) -> None:
+        self.num_draft_steps = num_steps
+        self.sample_col = self._sample_cols[num_steps]
 
     @property
     def attn_vllm_config(self) -> VllmConfig:
@@ -164,7 +221,7 @@ class DFlashSpeculator(DraftModelSpeculator):
             self.vllm_config,
             self.device,
             cudagraph_mode,
-            decode_query_lens={self.num_query_per_req: self.max_num_reqs},
+            decode_query_lens=self._draft_decode_query_lens(),
         )
 
     def capture(self) -> None:
@@ -185,6 +242,9 @@ class DFlashSpeculator(DraftModelSpeculator):
             self.max_model_len,
             causal=self._group_causal,
             prepare_forward=self._prepare_graph_forward,
+            set_query_len=lambda q: self._set_num_draft_steps(
+                q - self.num_query_per_req + self.num_speculative_steps
+            ),
             progress_bar_desc=f"Capturing {self._speculator_name.lower()} CUDA graphs",
         )
 
@@ -358,7 +418,8 @@ class DFlashSpeculator(DraftModelSpeculator):
             num_tokens_across_dp,
             cudagraph_runtime_mode,
         )
-        num_sample = num_reqs * self.num_speculative_steps
+        num_steps = self.num_draft_steps
+        num_sample = num_reqs * num_steps
         sample_hidden_states = last_hidden_states[self.sample_indices[:num_sample]]
         # sample_pos is the predicted token's position P. Sampling keys a draw
         # by the position before the sampled token, P-1.
@@ -370,10 +431,10 @@ class DFlashSpeculator(DraftModelSpeculator):
             self.seeds,
             self.sample_col[:num_sample],
             self.draft_logits,
-            num_steps=self.num_speculative_steps,
+            num_steps=num_steps,
         )
-        self.draft_tokens[:num_reqs] = draft_tokens.view(
-            num_reqs, self.num_speculative_steps
+        self.draft_tokens[:num_reqs, :num_steps] = draft_tokens.view(
+            num_reqs, num_steps
         )
 
     def _num_graph_context_tokens(self, num_reqs: int) -> int:
@@ -482,10 +543,21 @@ class DFlashSpeculator(DraftModelSpeculator):
         if dummy_run and dp_sync_state is not None:
             num_reqs = min(num_reqs, dp_sync_state.num_reqs)
         num_target_tokens = input_batch.num_tokens
-        num_query_tokens = num_reqs * self.num_query_per_req
+        # With narrow_dflash_draft_block, draft only the scheduled K positions.
+        num_steps = (
+            num_speculative_tokens
+            if num_speculative_tokens in self.draft_block_steps
+            else self.num_speculative_steps
+        )
+        assert num_steps is not None
+        self._set_num_draft_steps(num_steps)
+        num_query_per_req = self.num_query_per_req - (
+            self.num_speculative_steps - num_steps
+        )
+        num_query_tokens = num_reqs * num_query_per_req
         max_seq_len = input_batch.seq_lens_cpu_upper_bound[:num_reqs].max().item()
         self.draft_max_seq_len = min(
-            max_seq_len + self.num_query_per_req, self.max_model_len
+            max_seq_len + num_query_per_req, self.max_model_len
         )
 
         # NOTE: To avoid CPU-GPU synchronization without CPU knowing the
@@ -552,8 +624,8 @@ class DFlashSpeculator(DraftModelSpeculator):
                 self.dcp_size,
                 self.block_tables.cp_interleave,
                 self.parallel_drafting_token_id,
-                self.num_query_per_req,
-                self.num_speculative_steps,
+                num_query_per_req,
+                num_steps,
                 self.max_num_reqs,
                 self.max_num_tokens,
                 self.max_model_len,
@@ -574,7 +646,7 @@ class DFlashSpeculator(DraftModelSpeculator):
             self._build_uniform_batch_dp_sync(
                 dp_sync_state,
                 num_reqs,
-                self.num_query_per_req,
+                num_query_per_req,
             )
             if dp_sync_state is not None
             else (None, num_query_tokens)
@@ -584,7 +656,7 @@ class DFlashSpeculator(DraftModelSpeculator):
             self.query_cudagraph_manager,
             num_reqs,
             num_batch_tokens,
-            uniform_token_count=self.num_query_per_req,
+            uniform_token_count=num_query_per_req,
             dp_size=self.dp_size,
             dp_rank=self.dp_rank,
             need_eager=is_profile,
@@ -630,9 +702,9 @@ class DFlashSpeculator(DraftModelSpeculator):
             draft_attn_metadata = self._build_uniform_attn_metadata(
                 num_reqs=num_reqs,
                 batch_desc=batch_desc,
-                num_query_per_req=self.num_query_per_req,
+                num_query_per_req=num_query_per_req,
                 seq_lens_cpu_upper_bound=input_batch.seq_lens_cpu_upper_bound,
-                step=self.num_query_per_req,
+                step=num_query_per_req,
                 causal=self._group_causal,
             )
         else:
