@@ -84,7 +84,6 @@ import multiprocessing
 import os
 import select
 import socket
-import time
 from collections.abc import Callable, Iterable
 
 import torch
@@ -131,12 +130,11 @@ from vllm.model_executor.model_loader.weight_cache.utils import (
     is_draft_model_cacheable,
 )
 from vllm.model_executor.model_loader.weight_cache.warmup_cache import (
-    CompileArtifactWarmupCache,
-    FlashInferWarmupCache,
-    WarmupCache,
+    flashinfer_autotune,
 )
-from vllm.model_executor.model_loader.weight_cache.warmup_cache.common import (
-    _cache_roots,
+from vllm.model_executor.model_loader.weight_cache.warmup_cache.base import WarmupCache
+from vllm.model_executor.model_loader.weight_cache.warmup_cache.compiled import (
+    CompileArtifactWarmupCache,
 )
 from vllm.platforms import current_platform
 from vllm.utils.mem_utils import format_gib
@@ -231,12 +229,9 @@ class WeightCacheDaemon:
             raise ValueError("The weight cache daemon does not support EPLB.")
         self.seed_config = seed_config or SeedConfig()
         warmup_cache_stores = tuple(warmup_cache_stores)
-        self.compile_cache = CompileArtifactWarmupCache(
-            _cache_roots(), warmup_cache_stores
-        )
         self.warmup_caches: list[WarmupCache] = [
-            FlashInferWarmupCache(warmup_cache_stores),
-            self.compile_cache,
+            flashinfer_autotune.FlashInferWarmupCache(warmup_cache_stores),
+            CompileArtifactWarmupCache(warmup_cache_stores),
         ]
         self.d2d = SeedTransport(self.warmup_caches, self.seed_config)
         self.tp_size = parallel_config.tensor_parallel_size
@@ -319,7 +314,8 @@ class WeightCacheDaemon:
             local_rank=self.local_rank,
             backend=current_platform.dist_backend,
         )
-        self._adopt_compile_cache()
+        for cache in self.warmup_caches:
+            cache.adopt_before_load(self, self.d2d)
         with set_current_vllm_config(self.vllm_config):
             ensure_model_parallel_initialized(self.tp_size, self.pp_size)
             self.model = self.get_model()
@@ -336,43 +332,6 @@ class WeightCacheDaemon:
             self.global_rank,
             format_gib(torch.accelerator.memory_allocated()),
             format_gib(torch.accelerator.memory_reserved()),
-        )
-
-    def _adopt_compile_cache(self) -> None:
-        if self.seed_config.source is None or not self.compile_cache.store_sources:
-            return
-        deadline = time.monotonic() + 300.0
-        while time.monotonic() < deadline:
-            response = self.d2d.request(
-                {
-                    "kind": self.compile_cache.kind,
-                    **self.compile_cache.request_params(self),
-                }
-            )
-            if response is not None and response.get("status") == "ok":
-                try:
-                    payload = self.compile_cache.validate_payload(
-                        response.get("payload")
-                    )
-                    self.compile_cache.install(self, payload)
-                except Exception as error:
-                    logger.warning(
-                        "Cannot install remote compile cache; using local loading: %s",
-                        error,
-                    )
-                    return
-                logger.info("Adopted remote compile cache before model loading")
-                return
-            if response is not None and response.get("status") == "miss":
-                return
-            if response is not None and response.get("status") == "error":
-                logger.warning(
-                    "Source does not provide a compile cache; using local loading"
-                )
-                return
-            time.sleep(1.0)
-        logger.warning(
-            "Timed out waiting for the source compile cache; using local loading"
         )
 
     def release_distributed(self) -> None:

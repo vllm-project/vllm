@@ -6,17 +6,10 @@ import hashlib
 import io
 import os
 import tarfile
-from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 
 BUNDLE_LIMIT = 8 << 30
-
-
-@dataclass(frozen=True)
-class CacheRoot:
-    name: str
-    path: Path
 
 
 def _safe_path(value: str) -> PurePosixPath:
@@ -26,57 +19,48 @@ def _safe_path(value: str) -> PurePosixPath:
     return path
 
 
-def _cache_roots() -> tuple[CacheRoot, ...]:
-    roots = []
-    for name, variable in (
-        ("flashinfer-cubins", "FLASHINFER_CUBIN_DIR"),
-        ("flashinfer-workspace", "FLASHINFER_WORKSPACE_BASE"),
-    ):
-        value = os.environ.get(variable)
-        if value:
-            roots.append(CacheRoot(name, Path(value).expanduser()))
-    return tuple(roots)
+def _cache_roots() -> dict[str, Path]:
+    return {
+        name: Path(value).expanduser()
+        for name, variable in (
+            ("flashinfer-cubins", "FLASHINFER_CUBIN_DIR"),
+            ("flashinfer-workspace", "FLASHINFER_WORKSPACE_BASE"),
+        )
+        if (value := os.environ.get(variable))
+    }
 
 
 def _digest(path: Path) -> str:
-    digest = hashlib.sha256()
     with path.open("rb") as stream:
-        while chunk := stream.read(1 << 20):
-            digest.update(chunk)
-    return digest.hexdigest()
+        return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
-def _manifest(roots: tuple[CacheRoot, ...]) -> dict[str, Any]:
+def _manifest(roots: dict[str, Path]) -> dict[str, Any]:
     entries: list[dict[str, Any]] = []
     total = 0
-    nested_roots = {
-        root.path: tuple(
-            other.path
-            for other in roots
-            if other.path != root.path and root.path in other.path.parents
-        )
-        for root in roots
-    }
-    for root in roots:
-        if not root.path.is_dir():
+    for root_name, root in roots.items():
+        if not root.is_dir():
             continue
-        for path in sorted(root.path.rglob("*")):
+        for path in sorted(root.rglob("*")):
             if (
                 not path.is_file()
                 or path.is_symlink()
                 or path.name.endswith((".lock", ".tmp"))
-                or any(other in path.parents for other in nested_roots[root.path])
+                or any(
+                    other != root and other in path.parents
+                    for other in roots.values()
+                    if root in other.parents
+                )
             ):
                 continue
-            relative = path.relative_to(root.path).as_posix()
-            _safe_path(relative)
+            relative = path.relative_to(root).as_posix()
             stat = path.stat()
             total += stat.st_size
             if total > BUNDLE_LIMIT:
                 raise ValueError("compiled cache is too large")
             entries.append(
                 {
-                    "root": root.name,
+                    "root": root_name,
                     "path": relative,
                     "size": stat.st_size,
                     "sha256": _digest(path),
@@ -86,13 +70,11 @@ def _manifest(roots: tuple[CacheRoot, ...]) -> dict[str, Any]:
     return {"version": 1, "total_size": total, "entries": entries}
 
 
-def _bundle(roots: tuple[CacheRoot, ...], manifest: dict[str, Any]) -> bytes:
-    by_name = {root.name: root for root in roots}
+def _bundle(roots: dict[str, Path], manifest: dict[str, Any]) -> bytes:
     output = io.BytesIO()
     with tarfile.open(fileobj=output, mode="w:") as archive:
         for entry in manifest["entries"]:
-            root = by_name[entry["root"]]
-            path = root.path / _safe_path(entry["path"])
+            path = roots[entry["root"]] / _safe_path(entry["path"])
             if not path.is_file() or path.stat().st_size != entry["size"]:
                 raise ValueError(f"compiled cache changed: {path}")
             info = tarfile.TarInfo(f"{entry['root']}/{entry['path']}")
@@ -103,10 +85,7 @@ def _bundle(roots: tuple[CacheRoot, ...], manifest: dict[str, Any]) -> bytes:
     return output.getvalue()
 
 
-def _install(
-    bundle: bytes, manifest: dict[str, Any], roots: tuple[CacheRoot, ...]
-) -> None:
-    by_name = {root.name: root for root in roots}
+def _install(bundle: bytes, manifest: dict[str, Any], roots: dict[str, Path]) -> None:
     expected = {
         f"{entry['root']}/{entry['path']}": entry for entry in manifest["entries"]
     }
@@ -120,7 +99,6 @@ def _install(
                 entry = expected.get(member.name)
                 if entry is None or not member.isfile():
                     raise ValueError(f"unexpected compiled cache member: {member.name}")
-                root_name, relative = member.name.split("/", 1)
                 extracted = archive.extractfile(member)
                 if extracted is None:
                     raise ValueError("cannot read compiled cache member")
@@ -130,7 +108,7 @@ def _install(
                     or hashlib.sha256(data).hexdigest() != entry["sha256"]
                 ):
                     raise ValueError(f"compiled cache checksum mismatch: {member.name}")
-                destination = by_name[root_name].path / _safe_path(relative)
+                destination = roots[entry["root"]] / _safe_path(entry["path"])
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 temporary = destination.with_name(destination.name + ".tmp")
                 temporary.write_bytes(data)

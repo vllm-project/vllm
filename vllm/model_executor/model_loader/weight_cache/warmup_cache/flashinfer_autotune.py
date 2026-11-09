@@ -18,11 +18,11 @@ from vllm.model_executor.model_loader.weight_cache.artifact_store import (
     DiskArtifactStore,
     artifact_key,
 )
-from vllm.model_executor.model_loader.weight_cache.seed import Seedable
 from vllm.model_executor.model_loader.weight_cache.utils import (
     build_warmup_runner,
     is_draft_model_cacheable,
 )
+from vllm.model_executor.model_loader.weight_cache.warmup_cache.base import WarmupCache
 from vllm.model_executor.warmup.flashinfer_autotune_cache import (
     flashinfer_autotune_cache_hash,
     flashinfer_autotune_filename,
@@ -45,7 +45,7 @@ logger = init_logger(__name__)
 _CONFIG_HASH_RE = re.compile(r"[0-9a-f]{64}")
 
 
-class FlashInferWarmupCache(Seedable):
+class FlashInferWarmupCache(WarmupCache):
     """FlashInfer's per-rank autotune table (a single JSON file)."""
 
     kind = "flashinfer_autotune"

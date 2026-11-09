@@ -3,34 +3,39 @@
 """Compiled runtime artifact warmup cache."""
 
 import hashlib
+import time
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any
 
+from vllm.logger import init_logger
 from vllm.model_executor.model_loader.weight_cache.artifact_store import (
     STORE_BACKENDS,
     ArtifactStore,
     artifact_key,
 )
-from vllm.model_executor.model_loader.weight_cache.seed import Seedable
-
-from .common import BUNDLE_LIMIT, CacheRoot, _bundle, _install, _manifest
+from vllm.model_executor.model_loader.weight_cache.warmup_cache.base import WarmupCache
+from vllm.model_executor.model_loader.weight_cache.warmup_cache.common import (
+    BUNDLE_LIMIT,
+    _bundle,
+    _cache_roots,
+    _install,
+    _manifest,
+)
 
 if TYPE_CHECKING:
     from vllm.model_executor.model_loader.weight_cache.daemon import WeightCacheDaemon
     from vllm.model_executor.model_loader.weight_cache.seed import SeedTransport
 
+logger = init_logger(__name__)
 
-class CompileArtifactWarmupCache(Seedable):
+
+class CompileArtifactWarmupCache(WarmupCache):
     """Compiled runtime cache seeded as part of daemon warmup."""
 
     kind = "compile_cache"
 
-    def __init__(
-        self,
-        roots: tuple[CacheRoot, ...],
-        store_names: Iterable[str] = (),
-    ) -> None:
-        self.roots = roots
+    def __init__(self, store_names: Iterable[str] = ()) -> None:
+        self.roots = _cache_roots()
         self._store_names = tuple(store_names)
         self._store_sources: list[ArtifactStore] | None = None
         self._payload: dict[str, Any] | None = None
@@ -40,6 +45,40 @@ class CompileArtifactWarmupCache(Seedable):
         if self._store_sources is None:
             self._store_sources = [STORE_BACKENDS[name]() for name in self._store_names]
         return self._store_sources
+
+    def adopt_before_load(
+        self, daemon: "WeightCacheDaemon", transport: "SeedTransport"
+    ) -> None:
+        if daemon.seed_config.source is None or not self.store_sources:
+            return
+        deadline = time.monotonic() + 300.0
+        while time.monotonic() < deadline:
+            response = transport.request(
+                {"kind": self.kind, **self.request_params(daemon)}
+            )
+            if response is not None and response.get("status") == "ok":
+                try:
+                    payload = self.validate_payload(response.get("payload"))
+                    self.install(daemon, payload)
+                except Exception as error:
+                    logger.warning(
+                        "Cannot install remote compile cache; using local loading: %s",
+                        error,
+                    )
+                    return
+                logger.info("Adopted remote compile cache before model loading")
+                return
+            if response is not None and response.get("status") == "miss":
+                return
+            if response is not None and response.get("status") == "error":
+                logger.warning(
+                    "Source does not provide a compile cache; using local loading"
+                )
+                return
+            time.sleep(1.0)
+        logger.warning(
+            "Timed out waiting for the source compile cache; using local loading"
+        )
 
     def warmup(self, daemon: "WeightCacheDaemon", transport: "SeedTransport") -> None:
         # Compiler outputs are created by the preceding FlashInfer warmup. A

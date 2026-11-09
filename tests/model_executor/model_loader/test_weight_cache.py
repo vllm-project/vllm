@@ -36,7 +36,7 @@ from vllm.model_executor.model_loader.weight_cache.artifact_store import (
     artifact_key,
 )
 from vllm.model_executor.model_loader.weight_cache.warmup_cache import (
-    FlashInferWarmupCache,
+    flashinfer_autotune,
 )
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer
@@ -1495,11 +1495,13 @@ def test_warmup_cache_request_validation_and_miss(tmp_path, monkeypatch):
     monkeypatch.setenv("VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR", str(tmp_path))
     from vllm.model_executor.model_loader.weight_cache.seed import SeedTransport
     from vllm.model_executor.model_loader.weight_cache.warmup_cache import (
-        FlashInferWarmupCache,
+        flashinfer_autotune,
     )
 
     def handle(request):
-        return SeedTransport([FlashInferWarmupCache()]).handle_request(request)
+        return SeedTransport(
+            [flashinfer_autotune.FlashInferWarmupCache()]
+        ).handle_request(request)
 
     assert handle("not a dict")["status"] == "error"
     assert handle(_warmup_cache_request(kind="bogus"))["status"] == "error"
@@ -1520,10 +1522,10 @@ def test_warmup_cache_metadata_gate():
     from flashinfer.autotuner.autotuner import _collect_metadata
 
     from vllm.model_executor.model_loader.weight_cache.warmup_cache import (
-        FlashInferWarmupCache,
+        flashinfer_autotune,
     )
 
-    kind = FlashInferWarmupCache()
+    kind = flashinfer_autotune.FlashInferWarmupCache()
     filename = "autotune_configs_dp0_rank0.json"
 
     matching = {filename: {"_metadata": _collect_metadata(), "records": {}}}
@@ -1557,7 +1559,7 @@ def test_remote_warmup_cache_listener(tmp_path, monkeypatch):
         SeedTransport,
     )
     from vllm.model_executor.model_loader.weight_cache.warmup_cache import (
-        FlashInferWarmupCache,
+        flashinfer_autotune,
     )
 
     config_hash = "b" * 64
@@ -1567,7 +1569,7 @@ def test_remote_warmup_cache_listener(tmp_path, monkeypatch):
     (cache_dir / "autotune_configs_dp0_rank0.json").write_text(json.dumps(table))
 
     transport = SeedTransport(
-        [FlashInferWarmupCache()],
+        [flashinfer_autotune.FlashInferWarmupCache()],
         SeedConfig(listen=("127.0.0.1", 0), token="test-secret"),
     )
     address = transport.start_listener()
@@ -1631,12 +1633,12 @@ def test_warmup_cache_install_writes_table(tmp_path, monkeypatch):
     import json
 
     from vllm.model_executor.model_loader.weight_cache.warmup_cache import (
-        FlashInferWarmupCache,
+        flashinfer_autotune,
     )
 
     monkeypatch.setenv("VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR", str(tmp_path))
     config_hash = "a" * 64
-    kind = FlashInferWarmupCache()
+    kind = flashinfer_autotune.FlashInferWarmupCache()
     params = {"config_hash": config_hash, "dp_rank": 0, "rank": 0}
     monkeypatch.setattr(kind, "request_params", lambda _: params)
 
@@ -1648,7 +1650,6 @@ def test_warmup_cache_install_writes_table(tmp_path, monkeypatch):
 
 def test_compile_cache_bundle_round_trip(tmp_path):
     from vllm.model_executor.model_loader.weight_cache.warmup_cache.common import (
-        CacheRoot,
         _bundle,
         _install,
         _manifest,
@@ -1658,18 +1659,16 @@ def test_compile_cache_bundle_round_trip(tmp_path):
     target = tmp_path / "target"
     (source / "nested").mkdir(parents=True)
     (source / "nested" / "kernel.cubin").write_bytes(b"compiled-kernel")
-    root = CacheRoot("flashinfer-cubins", source)
-    manifest = _manifest((root,))
-    bundle = _bundle((root,), manifest)
+    manifest = _manifest({"flashinfer-cubins": source})
+    bundle = _bundle({"flashinfer-cubins": source}, manifest)
 
-    _install(bundle, manifest, (CacheRoot("flashinfer-cubins", target),))
+    _install(bundle, manifest, {"flashinfer-cubins": target})
 
     assert (target / "nested" / "kernel.cubin").read_bytes() == b"compiled-kernel"
 
 
 def test_compile_cache_manifest_deduplicates_nested_roots(tmp_path):
     from vllm.model_executor.model_loader.weight_cache.warmup_cache.common import (
-        CacheRoot,
         _manifest,
     )
 
@@ -1680,10 +1679,10 @@ def test_compile_cache_manifest_deduplicates_nested_roots(tmp_path):
     (cubins / "kernel.cubin").write_bytes(b"compiled-kernel")
 
     manifest = _manifest(
-        (
-            CacheRoot("flashinfer-cubins", cubins),
-            CacheRoot("flashinfer-workspace", workspace),
-        )
+        {
+            "flashinfer-cubins": cubins,
+            "flashinfer-workspace": workspace,
+        }
     )
 
     assert [entry["path"] for entry in manifest["entries"]].count(
@@ -1701,10 +1700,9 @@ def test_compile_cache_manifest_rejects_path_traversal():
         _safe_path("../escape")
 
 
-def test_compile_cache_payload_rejects_oversized_bundle(tmp_path):
+def test_compile_cache_payload_rejects_oversized_bundle():
     from vllm.model_executor.model_loader.weight_cache.warmup_cache.common import (
         BUNDLE_LIMIT,
-        CacheRoot,
     )
     from vllm.model_executor.model_loader.weight_cache.warmup_cache.compiled import (
         CompileArtifactWarmupCache,
@@ -1728,7 +1726,7 @@ def test_compile_cache_payload_rejects_oversized_bundle(tmp_path):
         "bundle_size": BUNDLE_LIMIT + 1,
         "sha256": "0" * 64,
     }
-    cache = CompileArtifactWarmupCache((CacheRoot("flashinfer-cubins", tmp_path),))
+    cache = CompileArtifactWarmupCache()
     with pytest.raises(ValueError, match="bundle is too large"):
         cache.validate_payload(payload)
 
@@ -1751,9 +1749,6 @@ def test_compile_cache_shared_store_round_trip(tmp_path, monkeypatch):
     from vllm.model_executor.model_loader.weight_cache.artifact_store import (
         STORE_BACKENDS,
     )
-    from vllm.model_executor.model_loader.weight_cache.warmup_cache.common import (
-        CacheRoot,
-    )
     from vllm.model_executor.model_loader.weight_cache.warmup_cache.compiled import (
         CompileArtifactWarmupCache,
     )
@@ -1763,9 +1758,8 @@ def test_compile_cache_shared_store_round_trip(tmp_path, monkeypatch):
     source_dir = tmp_path / "source"
     source_dir.mkdir()
     (source_dir / "kernel.cubin").write_bytes(b"compiled-kernel")
-    source = CompileArtifactWarmupCache(
-        (CacheRoot("flashinfer-cubins", source_dir),), store_names=[store.name]
-    )
+    monkeypatch.setenv("FLASHINFER_CUBIN_DIR", str(source_dir))
+    source = CompileArtifactWarmupCache(store_names=[store.name])
     source.prepare()
     payload = source.resolve({"version": 1})
     assert payload is not None
@@ -1775,17 +1769,13 @@ def test_compile_cache_shared_store_round_trip(tmp_path, monkeypatch):
     assert payload["bundle_size"] == len(store.get(payload["key"]))
 
     target_dir = tmp_path / "target"
-    target = CompileArtifactWarmupCache(
-        (CacheRoot("flashinfer-cubins", target_dir),), store_names=[store.name]
-    )
+    monkeypatch.setenv("FLASHINFER_CUBIN_DIR", str(target_dir))
+    target = CompileArtifactWarmupCache(store_names=[store.name])
     target.install(None, target.validate_payload(payload))
     assert (target_dir / "kernel.cubin").read_bytes() == b"compiled-kernel"
 
 
-def test_compile_cache_resolve_without_stores_is_a_miss(tmp_path):
-    from vllm.model_executor.model_loader.weight_cache.warmup_cache.common import (
-        CacheRoot,
-    )
+def test_compile_cache_resolve_without_stores_is_a_miss(tmp_path, monkeypatch):
     from vllm.model_executor.model_loader.weight_cache.warmup_cache.compiled import (
         CompileArtifactWarmupCache,
     )
@@ -1793,7 +1783,8 @@ def test_compile_cache_resolve_without_stores_is_a_miss(tmp_path):
     source_dir = tmp_path / "source"
     source_dir.mkdir()
     (source_dir / "kernel.cubin").write_bytes(b"compiled-kernel")
-    source = CompileArtifactWarmupCache((CacheRoot("flashinfer-cubins", source_dir),))
+    monkeypatch.setenv("FLASHINFER_CUBIN_DIR", str(source_dir))
+    source = CompileArtifactWarmupCache()
     source.prepare()
     assert source.resolve({"version": 1}) is None
 
@@ -1804,9 +1795,6 @@ def test_compile_cache_store_failures_propagate(tmp_path, monkeypatch, failure):
     from vllm.model_executor.model_loader.weight_cache.artifact_store import (
         STORE_BACKENDS,
     )
-    from vllm.model_executor.model_loader.weight_cache.warmup_cache.common import (
-        CacheRoot,
-    )
     from vllm.model_executor.model_loader.weight_cache.warmup_cache.compiled import (
         CompileArtifactWarmupCache,
     )
@@ -1816,9 +1804,8 @@ def test_compile_cache_store_failures_propagate(tmp_path, monkeypatch, failure):
     source_dir = tmp_path / "source"
     source_dir.mkdir()
     (source_dir / "kernel.cubin").write_bytes(b"compiled-kernel")
-    source = CompileArtifactWarmupCache(
-        (CacheRoot("flashinfer-cubins", source_dir),), store_names=[store.name]
-    )
+    monkeypatch.setenv("FLASHINFER_CUBIN_DIR", str(source_dir))
+    source = CompileArtifactWarmupCache(store_names=[store.name])
     source.prepare()
     payload = source.resolve({"version": 1})
     assert payload is not None
@@ -1830,9 +1817,8 @@ def test_compile_cache_store_failures_propagate(tmp_path, monkeypatch, failure):
         store.put(payload["key"], bytes(bundle))
 
     target_dir = tmp_path / "target"
-    target = CompileArtifactWarmupCache(
-        (CacheRoot("flashinfer-cubins", target_dir),), store_names=[store.name]
-    )
+    monkeypatch.setenv("FLASHINFER_CUBIN_DIR", str(target_dir))
+    target = CompileArtifactWarmupCache(store_names=[store.name])
     with pytest.raises((RuntimeError, ValueError)):
         target.install(None, target.validate_payload(payload))
     assert not (target_dir / "kernel.cubin").exists()
@@ -1975,15 +1961,12 @@ class MooncakeCluster:
 
 def test_mooncake_store_cross_process_e2e(tmp_path, monkeypatch):
     """A real Mooncake cluster shares warmup artifacts across cache instances."""
-    from vllm.model_executor.model_loader.weight_cache.warmup_cache.common import (
-        CacheRoot,
-    )
     from vllm.model_executor.model_loader.weight_cache.warmup_cache.compiled import (
         CompileArtifactWarmupCache,
     )
 
     with MooncakeCluster(tmp_path, monkeypatch) as cluster:
-        kind = FlashInferWarmupCache(store_names=["mooncake"])
+        kind = flashinfer_autotune.FlashInferWarmupCache(store_names=["mooncake"])
         filename = "autotune_configs_dp0_rank0.json"
         params = {"config_hash": "9" * 64, "dp_rank": 0, "rank": 0}
         monkeypatch.setattr(kind, "request_params", lambda _: params)
@@ -2006,16 +1989,14 @@ def test_mooncake_store_cross_process_e2e(tmp_path, monkeypatch):
         source_dir = tmp_path / "compiled_source"
         source_dir.mkdir()
         (source_dir / "kernel.cubin").write_bytes(b"compiled-kernel")
-        source = CompileArtifactWarmupCache(
-            (CacheRoot("flashinfer-cubins", source_dir),), store_names=["mooncake"]
-        )
+        monkeypatch.setenv("FLASHINFER_CUBIN_DIR", str(source_dir))
+        source = CompileArtifactWarmupCache(store_names=["mooncake"])
         source.prepare()
         payload = source.resolve({"version": 1})
         assert payload is not None
 
         target_dir = tmp_path / "compiled_target"
-        target = CompileArtifactWarmupCache(
-            (CacheRoot("flashinfer-cubins", target_dir),), store_names=["mooncake"]
-        )
+        monkeypatch.setenv("FLASHINFER_CUBIN_DIR", str(target_dir))
+        target = CompileArtifactWarmupCache(store_names=["mooncake"])
         target.install(None, target.validate_payload(payload))
         assert (target_dir / "kernel.cubin").read_bytes() == b"compiled-kernel"
