@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """`LLMEngine`'s cleanup finalizer must not own the model.
 
-``weakref.finalize`` keeps its ``args`` strongly in a class-level registry
-until it fires, and it only fires once the ``LLMEngine`` itself is collected.
+`weakref.finalize` keeps its `args` strongly in a class-level registry
+until it fires, and it only fires once the `LLMEngine` itself is collected.
 Handing it the model directly therefore pins the weights -- and the KV cache
 aliased onto the model's layers -- for as long as the engine is reachable,
 which in-process is past engine shutdown.

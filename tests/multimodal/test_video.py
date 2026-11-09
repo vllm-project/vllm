@@ -40,8 +40,10 @@ from vllm.multimodal.video_decoders.opencv import OpenCVVideoBackendMixin
 from vllm.multimodal.video_decoders.pynvvideocodec import (
     PYNVVIDEOCODEC_DECODE_BATCH_SIZE,
     PYNVVIDEOCODEC_DECODER_CACHE_SIZE,
+    PYNVVIDEOCODEC_DECODER_CAPS_CACHE_SIZE,
     PyNvVideoCodecDecoderSlot,
     PyNvVideoCodecVideoBackendMixin,
+    _get_decoder_caps,
     _pynv_decoder_pool,
 )
 from vllm.platforms import current_platform
@@ -876,6 +878,54 @@ def test_pynvvideocodec_clamps_configured_bounds_per_codec():
     ) == (4096, 4096)
 
 
+def test_pynvvideocodec_caches_decoder_caps_per_stream_format():
+    calls = []
+
+    class FakeDemuxer:
+        def __init__(self, codec):
+            self.codec = codec
+
+        def Width(self):
+            return 1280
+
+        def Height(self):
+            return 720
+
+        def GetNvCodecId(self):
+            return self.codec
+
+        def ChromaFormat(self):
+            return "420"
+
+        def BitDepth(self):
+            return 8
+
+    class FakeNvc:
+        @staticmethod
+        def CreateDemuxer(file_path):
+            return FakeDemuxer("hevc" if "hevc" in file_path else "h264")
+
+        @staticmethod
+        def GetDecoderCaps(device_index, codec, chroma_format, bit_depth):
+            calls.append(codec)
+            return {
+                "supported": 1,
+                "width_min": 48,
+                "width_max": 8192,
+                "height_min": 16,
+                "height_max": 8192,
+                "mb_num_max": 262144,
+            }
+
+    for path in ("a.mp4", "b.mp4", "c-hevc.mp4", "d-hevc.mp4"):
+        assert PyNvVideoCodecVideoBackendMixin._validate_decoder_caps(
+            path, FakeNvc
+        ) == (1280, 1280)
+    assert calls == ["h264", "hevc"]
+    cache_size = _get_decoder_caps.cache_info().maxsize
+    assert cache_size == PYNVVIDEOCODEC_DECODER_CAPS_CACHE_SIZE
+
+
 @pytest.mark.parametrize(
     ("max_width", "max_height"),
     [(3840, None), (None, 2160), (0, 2160), (3840, -1), (True, 2160)],
@@ -1287,12 +1337,13 @@ def test_qwen3_vl_unknown_source_fps_matches_hf(
 
 
 @pytest.mark.parametrize(
-    "model_repo, expected_loader_cls, hf_sample_kwargs",
+    "model_repo, expected_loader_cls, hf_sample_kwargs, appends_last_frame",
     [
         pytest.param(
             "allenai/Molmo2-4B",
             Molmo2VideoBackend,
             None,
+            False,
             marks=pytest.mark.skip(
                 reason="Video processor not aligned, investigate later.",
             ),
@@ -1302,18 +1353,21 @@ def test_qwen3_vl_unknown_source_fps_matches_hf(
             "zai-org/GLM-4.1V-9B-Thinking",
             DynamicVideoBackend,
             None,
+            False,
             id="glm4v",
         ),
         pytest.param(
             "zai-org/GLM-4.6V-Flash",
             GLM46VVideoBackend,
             None,
+            False,
             id="glm46v",
         ),
         pytest.param(
             "Qwen/Qwen3-VL-4B-Instruct",
             Qwen3VLVideoBackend,
             None,
+            False,
             id="qwen3vl",
         ),
         # Qwen2-VL/Qwen2.5-VL ship no ``video_processor_type`` in their
@@ -1325,18 +1379,23 @@ def test_qwen3_vl_unknown_source_fps_matches_hf(
             "Qwen/Qwen2-VL-7B-Instruct",
             Qwen2VLVideoBackend,
             {"fps": 2},
+            False,
             id="qwen2vl",
         ),
         pytest.param(
             "Qwen/Qwen2.5-VL-7B-Instruct",
             Qwen2VLVideoBackend,
             {"fps": 2},
+            False,
             id="qwen2_5_vl",
         ),
         pytest.param(
             "MiniMaxAI/MiniMax-M3",
             MiniMaxM3VideoBackend,
             None,
+            # The MiniMax-M3 sampler also keeps the final frame, which the
+            # Hub ``sample_frames`` drops.
+            True,
             id="minimax_m3_vl",
         ),
     ],
@@ -1345,13 +1404,14 @@ def test_video_processor_from_model_repo(
     model_repo: str,
     expected_loader_cls: type,
     hf_sample_kwargs: dict[str, int | float] | None,
+    appends_last_frame: bool,
 ):
     """Test that a model repo resolves to the correct video loader backend.
 
     The test downloads the preprocessor config from HuggingFace Hub,
-    extracts the ``video_processor_type`` field, and verifies it maps
+    extracts the `video_processor_type` field, and verifies it maps
     to the expected backend and loader class.  When a corresponding HF
-    ``VideoProcessor.sample_frames`` implementation exists, the test
+    `VideoProcessor.sample_frames` implementation exists, the test
     also verifies that the vLLM backend produces identical frame indices.
     """
     video_processor = get_video_processor_cls_name_from_config(model_repo)
@@ -1390,6 +1450,9 @@ def test_video_processor_from_model_repo(
             duration=vllm_meta["duration"],
         )
         hf_indices = processor.sample_frames(hf_metadata, **(hf_sample_kwargs or {}))
+        last_frame = vllm_meta["total_num_frames"] - 1
+        if appends_last_frame and hf_indices[-1] != last_frame:
+            hf_indices = np.append(hf_indices, last_frame)
         vllm_indices = np.array(vllm_meta["frames_indices"])
         np.testing.assert_array_equal(
             hf_indices,
@@ -1444,7 +1507,7 @@ def test_video_backend_handles_broken_frames(monkeypatch: pytest.MonkeyPatch):
 def test_video_backend_handles_edit_list_trimmed_video(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """An mp4 edit list (e.g. from a lossless ``ffmpeg -ss ... -c copy`` cut)
+    """An mp4 edit list (e.g. from a lossless `ffmpeg -ss ... -c copy` cut)
     hides the decode lead-in: the header still counts every physical sample
     while sequential decode only yields the visible frames. Sampling over the
     header count used to collapse such videos to the few indices below the
@@ -1482,7 +1545,7 @@ def test_opencv_demux_counts_frames_when_video_header_lacks_metadata(
     monkeypatch: pytest.MonkeyPatch,
 ):
     """Streamed WebM and raw H.264 carry no frame count/duration in their
-    headers, so OpenCV reports a bogus negative ``CAP_PROP_FRAME_COUNT``.
+    headers, so OpenCV reports a bogus negative `CAP_PROP_FRAME_COUNT`.
     The loader must count the frames via a demux-only pass, without
     decoding.
     """
@@ -1833,7 +1896,7 @@ def test_torchcodec_backend_returns_target_frames_not_keyframes():
     GOP keyframe they seek back to.
 
     A long GOP (single keyframe at frame 0) with a per-frame green-channel
-    marker. With ``seek_mode="exact"`` torchcodec resolves each index to the
+    marker. With `seek_mode="exact"` torchcodec resolves each index to the
     exact frame, so the returned markers must be distinct, ordered, and match
     the requested indices.
     """

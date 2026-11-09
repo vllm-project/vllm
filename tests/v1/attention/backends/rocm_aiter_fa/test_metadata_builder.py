@@ -3,7 +3,7 @@
 """AiterFlashAttentionMetadataBuilder: every field against an independent value.
 
 Covers the decode/extend/prefill split, context chunking for extends, the
-sliding-window decode tables, the capture and drafting builders, persistent
+sliding-window decode tables, the capture builder, persistent
 buffers and the no-GPU-sync guarantee of decode-only builds.
 """
 
@@ -136,6 +136,65 @@ def test_extend_context_chunking(query_lens, seq_lens):
         assert sum(lens) <= _CP_TOKENS_PER_ITER_ROCM
 
 
+@pytest.mark.parametrize("tail_seq", [0, 700], ids=["pad-seq0", "kv-load"])
+@pytest.mark.parametrize(
+    "query_lens, seq_lens",
+    [
+        ([16], [16 + 40]),  # under one chunk
+        ([16], [16 + 96]),  # exactly one chunk
+        ([8, 24], [8 + 400, 24 + 250]),  # many, uneven
+    ],
+    ids=["under-one-chunk", "exactly-one-chunk", "many-uneven"],
+)
+def test_chunk_planner_skips_rows_without_queries(
+    monkeypatch, query_lens, seq_lens, tail_seq
+):
+    """A row with no query tokens (CUDA graph padding, or a request whose KV an
+    async connector is loading, vllm-project/vllm#51486) gets no context: no
+    chunk may carry only such rows (vllm-project/vllm#55695, #51489)."""
+    from vllm.v1.attention.backends import rocm_aiter_fa
+
+    monkeypatch.setattr(rocm_aiter_fa, "_CP_TOKENS_PER_ITER_ROCM", 96)
+    q_all = query_lens + [0, 0]
+    s_all = seq_lens + [tail_seq, tail_seq // 2]
+    case = _case(num_blocks=blocks_for(s_all, 16))
+    md = case.build(case.batch(q_all, s_all))
+    em = md.extend_metadata
+    assert em is not None
+    cm = em.chunk_context_metadata
+    rows = range(md.num_decodes, md.num_decodes + md.num_extends)
+    real = [i - md.num_decodes for i in rows if q_all[i] > 0]
+    empty = [i - md.num_decodes for i in rows if q_all[i] == 0]
+    per_chunk = 96 // md.num_extends
+    ctx = [s_all[md.num_decodes + i] - q_all[md.num_decodes + i] for i in real]
+    assert cm.num_chunks == -(-max(ctx) // per_chunk)
+    for c in range(cm.num_chunks):
+        lens = cm.cu_seq_lens_chunk[c].diff().tolist()
+        assert all(lens[i] == 0 for i in empty), (c, lens)
+        assert sum(lens[i] for i in real) > 0, (c, lens)
+
+
+@pytest.mark.parametrize("tail_seq", [0, 700], ids=["pad-seq0", "kv-load"])
+def test_sliding_window_extend_skips_rows_without_queries(tail_seq):
+    """The sliding-window extend gathers window + query tokens per row; a row
+    with no query tokens must gather none."""
+    window = 64
+    q_all, s_all = [8, 24, 0, 0], [8 + 400, 24 + 30, tail_seq, tail_seq // 2]
+    case = _case(
+        shape=MUSE_SPARK_SLIDING,
+        sliding_window=window,
+        num_blocks=blocks_for(s_all, 16),
+    )
+    md = case.build(case.batch(q_all, s_all))
+    swa = md.extend_metadata.chunk_context_metadata.swa_metadata
+    assert swa is not None
+    lens = swa.swa_cu_seqlens.diff().tolist()
+    rows = range(md.num_decodes, md.num_decodes + md.num_extends)
+    expected = [min(s_all[i], q_all[i] + window) if q_all[i] else 0 for i in rows]
+    assert lens == expected
+    assert swa.swa_total_tokens == sum(expected)
+
+
 @pytest.mark.parametrize("block_size", [16, 32])
 def test_sliding_window_decode_tables(block_size):
     window = MUSE_SPARK_SLIDING.sliding_window
@@ -199,9 +258,7 @@ def test_decode_only_build_does_not_sync(sliding_window):
     with no_gpu_sync():
         md = case.build(batch)
         md_capture = case.builder.build_for_cudagraph_capture(batch.common)
-        md_draft = case.builder.build_for_drafting(batch.common, draft_index=0)
     assert md_capture.num_decodes == md.num_decodes == 16
-    assert md_draft.num_decodes == 16 and md_draft.extend_metadata is None
 
 
 def test_capture_build_matches_regular_build():
@@ -219,16 +276,6 @@ def test_capture_build_matches_regular_build():
     ):
         assert getattr(a, field) == getattr(b, field), field
     assert a.decode_metadata.max_query_len == b.decode_metadata.max_query_len
-
-
-def test_drafting_build_treats_every_row_as_decode():
-    case = _case()
-    batch = case.batch([3, 3, 3], [40, 90, 500])
-    md = case.builder.build_for_drafting(batch.common, draft_index=1)
-    assert (md.num_decodes, md.num_decode_tokens) == (3, 9)
-    assert md.prefill_metadata is None and md.extend_metadata is None
-    assert md.decode_metadata.max_query_len == 3
-    assert md.block_table is batch.common.block_table_tensor
 
 
 def test_builder_rejects_two_sliding_windows():
