@@ -4,12 +4,14 @@ The reader library (`oc_reader.py`, to be added next to the connector) is the on
 numpy and zstandard; `ml_dtypes` is optional and only needed to get bf16 hidden states as numbers.
 
 ```python
-sample = read_sample(get, manifest_key, n_rows, want=("r3", "indexer", "hidden"), strict=False)
+sample = read_sample(get, manifest_key, n_rows, want=("r3", "indexer", "hidden"), strict=False,
+                     exists=None, store=None)
 ```
 
 | Argument | Meaning |
 |---|---|
-| `get(key) -> bytes or None` | Your store client's get. Return `None` (or empty bytes) for an absent key. It is the only store call. |
+| `get(key) -> bytes or None` | Your store client's get. Return `None` (or empty bytes) for an absent key. |
+| `exists`, `store` | The existence check for every object the manifest lists, in one batched call: `exists(keys) -> list` (1/True = present) if given, else `batch_is_exist` of the store `get` is bound to, else `store=` (its `batch_is_exist`, or `is_exist` per key). Objects are never downloaded to test existence; with none of these `read_sample` raises `ValueError`. |
 | `manifest_key` | The `aux.manifest.key` of the response. Object keys come from the manifest's `key_prefix` and `tail_key` (older manifests: derived from this key, which then must not have `/` in the request id). |
 | `n_rows` | `L - 1` for a sample of `L` tokens (prompt + generated). The manifest can cover more rows (async scheduling, truncated drafts); they are cut off. |
 | `want` | The outputs you requested. A wanted output the manifest lacks is reported missing. |
@@ -27,7 +29,7 @@ for token `p + 1`).
 | Field | Type | Meaning |
 |---|---|---|
 | `ok` | bool | No error and every `missing.counts` entry is 0. |
-| `error` | str or None | The request failed: its error marker was found, its manifest is absent, or an object the manifest lists cannot be read (`listed object absent: <key>`). A failed store write fails the whole request; the sample is not delivered in part. All arrays are `None`, every row is missing. |
+| `error` | str or None | The request failed: its manifest is absent (with an error marker: `error marker: ...`), or an object the manifest lists is absent (`listed object absent: <key>`). A failed store write fails the whole request; the sample is not delivered in part. A marker beside a manifest whose listed objects all exist is stale: ignored, and `stale_marker` is True. All arrays are `None` on error, every row is missing. |
 | `missing.counts` | dict | Per cause: `r3_blocks`, `r3_tail`, `r3_cone_patches`, `r3_invalid_rows`, `r3_needed_missing`, `r3_field`, `indexer_blocks`, `indexer_tail`, `indexer_cone_patches`, `indexer_reported_missing`, `indexer_reported_holes`, `indexer_needed_missing`, `hidden_chunks`, `hidden_rows_short`, `rows_short`, `invalid_rows`, `*_field`, ... |
 | `missing.rows` | bool `[n]` | Rows whose data was not delivered by some wanted output. |
 | `r3` | `[n, layers, k]` uint | Expert ids to replay. Where not replayed the cell holds `r3_no_replay` (dtype max, 65535 for uint16). With one-byte ids 255 is a valid id: always go by the mask, never by the value. |
