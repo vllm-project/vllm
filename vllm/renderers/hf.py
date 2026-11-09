@@ -1045,13 +1045,17 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
     ) -> None:
         # Add the placeholder token to a copy so the cached tokenizer is unchanged
         tokenizer = copy.copy(tokenizer)
-        if (
-            # Skip for mock configs and tokenizers
-            getattr(config.model_config, "enable_prompt_embeds", False)
-            and isinstance(tokenizer, HfTokenizer)
-        ):
+        # Skip for mock configs and tokenizers
+        enable_prompt_embeds = getattr(
+            config.model_config, "enable_prompt_embeds", False
+        )
+        if enable_prompt_embeds and isinstance(tokenizer, HfTokenizer):
             _ensure_prompt_embeds_placeholder_token(tokenizer)
         super().__init__(config, tokenizer)
+        # BaseRenderer may replace the tokenizer with a pooled copy. Register it
+        # too, so requests never add the token to the live tokenizer.
+        if enable_prompt_embeds and isinstance(self.tokenizer, HfTokenizer):
+            _ensure_prompt_embeds_placeholder_token(self.tokenizer)
 
         self.use_unified_vision_chunk = getattr(
             config.model_config.hf_config, "use_unified_vision_chunk", False

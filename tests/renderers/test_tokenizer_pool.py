@@ -12,10 +12,11 @@ from tokenizers import Tokenizer, models, pre_tokenizers
 from transformers import TokenizersBackend
 
 from vllm.renderers import TokenizeParams
+from vllm.renderers.chat_utils.content_parser import PROMPT_EMBEDS_PLACEHOLDER_TOKEN
 from vllm.renderers.cohere import CohereRenderer
 from vllm.renderers.deepseek_v4 import DeepseekV4Renderer, DeepseekV41Renderer
 from vllm.renderers.deepseek_v32 import DeepseekV32Renderer
-from vllm.renderers.hf import HfRenderer
+from vllm.renderers.hf import HfRenderer, _ensure_prompt_embeds_placeholder_token
 from vllm.renderers.inkling import InklingRenderer
 from vllm.renderers.inkling_encoding import SPECIAL_TOKEN_SPELLINGS
 from vllm.renderers.kimi_k3 import KimiK3Renderer
@@ -147,3 +148,20 @@ def test_pooled_tokenizer_leaves_cached_tokenizer_unchanged(renderer_cls):
     assert pooled.decode(tokenizer.encode(PROMPT)) == tokenizer.decode(
         tokenizer.encode(PROMPT)
     )
+
+
+def test_prompt_embeds_placeholder_is_registered_on_pooled_tokenizer(monkeypatch):
+    renderer = HfRenderer(
+        MockVllmConfig(MockModelConfig(enable_prompt_embeds=True)), _tokenizer()
+    )
+    pooled = renderer.get_tokenizer()
+
+    def add_at_request_time(*args, **kwargs):
+        raise AssertionError("placeholder token added to the live tokenizer")
+
+    monkeypatch.setattr(TokenizersBackend, "add_special_tokens", add_at_request_time)
+    token_id = _ensure_prompt_embeds_placeholder_token(pooled)
+
+    assert pooled.encode(PROMPT_EMBEDS_PLACEHOLDER_TOKEN, add_special_tokens=False) == [
+        token_id
+    ]
