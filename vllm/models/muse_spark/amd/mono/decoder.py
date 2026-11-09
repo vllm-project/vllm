@@ -229,6 +229,21 @@ def config_refusals(config: Any) -> list[str]:
     return reasons
 
 
+def _foreign_kv_writer(vllm_config: Any) -> bool:
+    """Whether a KV connector may put bytes into the KV cache that the model's
+    own writer did not produce. A connector that only restores whole blocks of
+    this cache layout (UMBP) keeps the kernels."""
+    kv_transfer_config = vllm_config.kv_transfer_config
+    if kv_transfer_config is None:
+        return False
+    from vllm.distributed.kv_transfer.kv_connector.factory import (
+        KVConnectorFactory,
+    )
+
+    connector_cls = KVConnectorFactory.get_connector_class(kv_transfer_config)
+    return not connector_cls.only_restores_canonical_kv(kv_transfer_config)
+
+
 def deployment_refusals(
     vllm_config: Any, tp_rank: int, tp_size: int, moe_parallel: Any
 ) -> list[str]:
@@ -269,7 +284,7 @@ def deployment_refusals(
         reasons.append("sleep mode on")
     if vllm_config.weight_transfer_config is not None:
         reasons.append("weight transfer on")
-    if vllm_config.kv_transfer_config is not None:
+    if _foreign_kv_writer(vllm_config):
         reasons.append("KV connector on")
     cache = vllm_config.cache_config
     if getattr(cache, "kv_offloading_size", None):
