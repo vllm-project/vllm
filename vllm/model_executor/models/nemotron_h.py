@@ -594,6 +594,11 @@ class NemotronHModel(nn.Module, EagleModelMixin):
                 "VLLM_NEMOTRON_H_REPLICATE_MIXER is not supported with "
                 "sequence-parallel MoE."
             )
+        if envs.VLLM_NEMOTRON_H_REPLICATE_MIXER:
+            # Nothing re-syncs ranks after a replicated block: autotune must agree.
+            from vllm.triton_utils.tp_synced_autotune import install
+
+            install()
 
         self.vocab_size = config.vocab_size
 
