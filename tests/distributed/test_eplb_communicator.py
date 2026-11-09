@@ -11,6 +11,7 @@ with the incoming one, so the incoming communicator does it after taking over.
 import logging
 from types import SimpleNamespace
 
+from vllm.config.utils import hash_config_cached
 from vllm.distributed.eplb.eplb_communicator import (
     NixlEplbCommunicator,
     TorchDistNcclEplbCommunicator,
@@ -88,13 +89,14 @@ def test_taking_over_releases_the_departed():
     wrapper = _FakeNixlWrapper()
     previous = _communicator(wrapper, {1: "eplb-1", 2: "eplb-2"})
     current = _communicator(wrapper, {1: "eplb-1"})
-    model_config = SimpleNamespace(compute_hash=lambda: "model")
+    model_config = SimpleNamespace(compile_factors=lambda: {"model": "test"})
+    key = hash_config_cached(model_config)
 
     state = object.__new__(EplbState)
-    state.model_states = {"model": SimpleNamespace(communicator=previous)}
+    state.model_states = {key: SimpleNamespace(communicator=previous)}
     state.update_communicator(model_config, current)
 
-    assert state.model_states["model"].communicator is current
+    assert state.model_states[key].communicator is current
     assert wrapper.removed == ["eplb-2"]
 
 
