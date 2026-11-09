@@ -5,6 +5,7 @@
 import mmap
 import os
 from collections.abc import Iterable
+from concurrent.futures import Future, ThreadPoolExecutor
 
 import torch
 from torch import nn
@@ -35,6 +36,17 @@ from ..common.ngram_embedding import (
 from ..common.ops.ple import ple_ngram_ids
 
 logger = init_logger(__name__)
+
+# One thread reads every module's predicted rows, in submission order.
+_overlap_pool: ThreadPoolExecutor | None = None
+
+
+def _overlap_executor() -> ThreadPoolExecutor:
+    global _overlap_pool
+    if _overlap_pool is None:
+        _overlap_pool = ThreadPoolExecutor(1, thread_name_prefix="ple-overlap")
+    return _overlap_pool
+
 
 __all__ = [
     "Qwen4ExpPLEDeviceEmbedding",
@@ -106,6 +118,7 @@ class Qwen4ExpPLEDiskOffloadEmbedding(Qwen4ExpPLEEmbedding):
         self._reader_queue_depth = (
             engram_config.disk_offload_queue_depth if engram_config else 1
         )
+        self._overlap = bool(engram_config and engram_config.disk_offload_overlap)
         # NVFP4 rows are packed E2M1 bytes plus a separate plane of block scales.
         self._nvfp4 = isinstance(embedding_method, Qwen4ExpPLENvFp4EmbeddingMethod)
         device, pin = self.weight.device, self.weight.is_cuda
@@ -130,6 +143,14 @@ class Qwen4ExpPLEDiskOffloadEmbedding(Qwen4ExpPLEEmbedding):
                 (*rows, embedding_dim), dtype=params_dtype, device=device
             )
             self._row_ids = torch.arange(rows[0] * rows[1], device=device)
+        if self._overlap:
+            # The next chunk's ids and distinct rows, read by the overlap thread.
+            self._next_ids = torch.empty_like(self._host_ids)
+            self._next_rows = {
+                name: torch.empty_like(rows)
+                for name, (_, _, rows) in self._planes.items()
+            }
+            self._next_read: tuple[Future, torch.Tensor] | None = None
         self._shards: dict[str, dict[int, torch.Tensor]] = {n: {} for n in self._planes}
         self._shard_size = 0
         self._bound = False
@@ -236,24 +257,81 @@ class Qwen4ExpPLEDiskOffloadEmbedding(Qwen4ExpPLEEmbedding):
     def copy_ids_to_host(self, ids: torch.Tensor) -> None:
         self._host_ids[: ids.shape[0]].copy_(ids, non_blocking=True)
 
+    def copy_next_ids_to_host(self, ids: torch.Tensor) -> None:
+        self._next_ids[: ids.shape[0]].copy_(ids, non_blocking=True)
+
+    def _distinct_ids(
+        self, ids: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Sorted distinct ids, the inverse map, and each id's shard and row."""
+        ids, inverse = ids.unique(return_inverse=True)
+        if ids.numel() and not 0 <= ids[0] <= ids[-1] < self.org_vocab_size:
+            raise IndexError(f"PLE id out of range for {self.org_vocab_size} rows")
+        shard = ids // self._shard_size
+        return ids, inverse, shard, ids - shard * self._shard_size
+
     def stage_rows(self, num_tokens: int) -> None:
         """Read the rows of `_host_ids[:num_tokens]` and copy them to staging."""
-        ids = self._host_ids[:num_tokens].flatten()
+        predicted = self._take_next_read() if self._overlap else None
         if not self._fds:
             for _, host, _ in self._planes.values():
                 host[:num_tokens].view(torch.uint8).zero_()
         else:
-            ids, inverse = ids.unique(return_inverse=True)
-            if ids.numel() and not 0 <= ids[0] <= ids[-1] < self.org_vocab_size:
-                raise IndexError(f"PLE id out of range for {self.org_vocab_size} rows")
-            shard = ids // self._shard_size
-            local = ids - shard * self._shard_size
+            ids, inverse, shard, local = self._distinct_ids(
+                self._host_ids[:num_tokens].flatten()
+            )
+            hit = None
+            if predicted is not None and predicted.numel():
+                pos = torch.searchsorted(predicted, ids).clamp_(
+                    max=predicted.numel() - 1
+                )
+                hit = predicted[pos] == ids
+                miss = (~hit).nonzero().flatten()
             for name, (_, host, rows) in self._planes.items():
+                rows = rows[: ids.numel()]
+                if hit is None:
+                    self._read_rows(name, shard, local, rows)
+                else:
+                    rows[hit] = self._next_rows[name][pos[hit]]
+                    if miss.numel():
+                        missed = rows.new_empty(miss.numel(), rows.shape[1])
+                        self._read_rows(name, shard[miss], local[miss], missed)
+                        rows[miss] = missed
                 out = host[:num_tokens].flatten(0, 1).view(torch.uint8)
-                self._read_rows(name, shard, local, rows[: ids.numel()])
-                torch.index_select(rows[: ids.numel()], 0, inverse, out=out)
+                torch.index_select(rows, 0, inverse, out=out)
         for staging, host, _ in self._planes.values():
             staging[:num_tokens].copy_(host[:num_tokens], non_blocking=True)
+
+    def start_next_read(self, num_tokens: int) -> None:
+        """Read the rows of `_next_ids[:num_tokens]` on the overlap thread.
+
+        Called after `stage_rows`, so the GPU runs this step while the rows of
+        the predicted next chunk are read.
+        """
+        self._take_next_read()
+        if not self._fds or not num_tokens:
+            return
+        ids, _, shard, local = self._distinct_ids(self._next_ids[:num_tokens].flatten())
+
+        def read() -> None:
+            for name, rows in self._next_rows.items():
+                self._read_rows(name, shard, local, rows[: ids.numel()])
+
+        self._next_read = (_overlap_executor().submit(read), ids)
+
+    def _take_next_read(self) -> torch.Tensor | None:
+        """Wait for the pending overlap read and return the ids it read."""
+        pending, self._next_read = self._next_read, None
+        if pending is None:
+            return None
+        future, ids = pending
+        try:
+            future.result()
+        except Exception as e:
+            # The step reads the rows itself and reports any real error.
+            logger.warning("PLE overlap read failed, reading the rows now: %s", e)
+            return None
+        return ids
 
     def _read_rows(
         self,
@@ -811,18 +889,27 @@ def stage_checkpoint_rows(
     input_ids: torch.Tensor,
     query_start_loc: torch.Tensor,
     ngram_context: torch.Tensor,
+    next_chunk: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
 ) -> None:
     """Stage disk-offload PLE rows for one step behind one stream sync.
 
     The ids hash this step's tokens, which the previous step samples on the
-    GPU, so the host read has to wait for them.
+    GPU, so the host read has to wait for them. `next_chunk` holds the
+    predicted next prefill chunk (input ids, query start locations, n-gram
+    context); its ids go to the host behind the same sync, and its rows are
+    read while the GPU runs this step.
     """
     num_tokens = input_ids.shape[0]
     for module, embedding in modules:
         ids = module.compute_ngram_ids(input_ids, query_start_loc, ngram_context)
         embedding.copy_ids_to_host(ids)
+        if next_chunk is not None:
+            embedding.copy_next_ids_to_host(module.compute_ngram_ids(*next_chunk))
     if input_ids.device.type != "cpu":
         with gpu_sync_allowed():
             torch.accelerator.current_stream().synchronize()
     for _, embedding in modules:
         embedding.stage_rows(num_tokens)
+    if next_chunk is not None:
+        for _, embedding in modules:
+            embedding.start_next_read(next_chunk[0].shape[0])

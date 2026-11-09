@@ -56,6 +56,11 @@ class EngramConfig:
     disk_offload_queue_depth: int = 16
     """Reads each io_uring reader thread keeps in flight."""
 
+    disk_offload_overlap: bool = True
+    """While the GPU runs a prefill chunk, read the rows of each prefilling
+    request's next chunk on a background thread. Prompt tokens are known ahead,
+    so the next step only reads the rows that were not predicted."""
+
     embedding_across_dp: bool = False
     """Shard embeddings across TP and all DP ranks when enabled.
     Otherwise, each DP rank has a separate TP-sharded embedding replica."""
@@ -153,5 +158,6 @@ class EngramConfig:
             "disk_offload_reader",
             "disk_offload_threads",
             "disk_offload_queue_depth",
+            "disk_offload_overlap",
         }
         return get_compile_factors(self, ignored)
