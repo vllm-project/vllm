@@ -48,7 +48,7 @@ from vllm.renderers.chat_utils import (
 from vllm.renderers.chat_utils.content_parser import (
     PROMPT_EMBEDS_PLACEHOLDER_ID_PREFIX,
 )
-from vllm.tokenizers.hf import HfTokenizer
+from vllm.tokenizers.hf import HfTokenizer, maybe_make_thread_pool
 from vllm.transformers_utils.chat_templates import get_chat_template_fallback_path
 from vllm.transformers_utils.processor import cached_get_processor
 from vllm.utils.async_utils import make_async
@@ -1045,17 +1045,18 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
     ) -> None:
         # Add the placeholder token to a copy so the cached tokenizer is unchanged
         tokenizer = copy.copy(tokenizer)
-        # Skip for mock configs and tokenizers
-        enable_prompt_embeds = getattr(
-            config.model_config, "enable_prompt_embeds", False
-        )
-        if enable_prompt_embeds and isinstance(tokenizer, HfTokenizer):
+        if (
+            # Skip for mock configs and tokenizers
+            getattr(config.model_config, "enable_prompt_embeds", False)
+            and isinstance(tokenizer, HfTokenizer)
+        ):
             _ensure_prompt_embeds_placeholder_token(tokenizer)
+        # Pool this copy in place. Another copy would rebuild the cached vocab
+        # with the placeholder in it and miss the placeholder id cache.
+        tokenizer = maybe_make_thread_pool(
+            tokenizer, config.model_config.renderer_num_workers + 1
+        )
         super().__init__(config, tokenizer)
-        # BaseRenderer may replace the tokenizer with a pooled copy. Register it
-        # too, so requests never add the token to the live tokenizer.
-        if enable_prompt_embeds and isinstance(self.tokenizer, HfTokenizer):
-            _ensure_prompt_embeds_placeholder_token(self.tokenizer)
 
         self.use_unified_vision_chunk = getattr(
             config.model_config.hf_config, "use_unified_vision_chunk", False

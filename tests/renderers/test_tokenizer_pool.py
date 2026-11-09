@@ -11,6 +11,7 @@ import pytest
 from tokenizers import Tokenizer, models, pre_tokenizers
 from transformers import TokenizersBackend
 
+from vllm.exceptions import VLLMValidationError
 from vllm.renderers import TokenizeParams
 from vllm.renderers.chat_utils.content_parser import PROMPT_EMBEDS_PLACEHOLDER_TOKEN
 from vllm.renderers.cohere import CohereRenderer
@@ -165,3 +166,19 @@ def test_prompt_embeds_placeholder_is_registered_on_pooled_tokenizer(monkeypatch
     assert pooled.encode(PROMPT_EMBEDS_PLACEHOLDER_TOKEN, add_special_tokens=False) == [
         token_id
     ]
+
+
+def test_prompt_embeds_placeholder_stays_out_of_vocabulary(monkeypatch):
+    tokenizer = _tokenizer()
+    renderer = HfRenderer(
+        MockVllmConfig(MockModelConfig(enable_prompt_embeds=True)), tokenizer
+    )
+    monkeypatch.setattr(
+        renderer.model_config, "get_vocab_size", lambda: 1, raising=False
+    )
+    pooled = renderer.get_tokenizer()
+    token_id = _ensure_prompt_embeds_placeholder_token(pooled)
+
+    assert pooled.max_token_id == tokenizer.max_token_id < token_id
+    with pytest.raises(VLLMValidationError):
+        renderer.validate_token_ids([token_id])
