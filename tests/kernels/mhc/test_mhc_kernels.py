@@ -48,7 +48,7 @@ from vllm.models.deepseek_v41.nvidia.ops.mega_mhc import (
 )
 from vllm.models.deepseek_v41.nvidia.ops.mhc import hc_expand, mhc_boundary_weight
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import set_random_seed
+from vllm.utils.torch_utils import set_default_torch_dtype, set_random_seed
 
 DEVICE = current_platform.device_type
 
@@ -1708,6 +1708,34 @@ def test_deepseek_v41_rocm_mega_mhc_refit_reaches_captured_graph():
     expected = _mhc_fused_seam_fp64(residual, new_fn, *args[2:], **kwargs)
     torch.testing.assert_close(captured[0], expected[0], atol=1e-5, rtol=2**-7)
     _check_mhc_seam_gates_and_input(captured, expected)
+
+
+@requires_rocm_mega_mhc
+def test_deepseek_v41_rocm_mega_mhc_loads_under_bf16_default_dtype():
+    """The loader post-processes weights with the model's dtype, bf16, as the
+    default dtype. Packing fn and preparing the side stream's Mega-MHC scratch
+    must still hand AITER fp32 weights."""
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.models.deepseek_v41.amd.mhc import MHCOverlapStream
+    from vllm.models.deepseek_v41.amd.model import DeepseekV4DecoderLayer
+
+    set_random_seed(0)
+    hidden_size = 5120
+    _, fn, *_ = _mega_mhc_inputs(1, hidden_size)
+    layer = DeepseekV4DecoderLayer.__new__(DeepseekV4DecoderLayer)
+    nn.Module.__init__(layer)
+    layer.use_mega_mhc = True
+    layer.hidden_size = hidden_size
+    layer.hc_attn_fn = nn.Parameter(fn.clone(), requires_grad=False)
+    layer.hc_ffn_fn = nn.Parameter(fn.clone(), requires_grad=False)
+    layer.hc_attn_fn_packed = layer.hc_ffn_fn_packed = None
+    layer.mhc_overlap = MHCOverlapStream()
+    with set_default_torch_dtype(torch.bfloat16):
+        layer.process_weights_after_loading()
+    assert layer.mhc_overlap._mega_mhc_ready
+    packed = rocm_aiter_ops.mega_mhc_pack_fn(fn)
+    for name in ("hc_attn_fn_packed", "hc_ffn_fn_packed"):
+        torch.testing.assert_close(getattr(layer, name), packed, atol=0, rtol=0)
 
 
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm required")

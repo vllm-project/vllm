@@ -5322,19 +5322,22 @@ class rocm_aiter_ops:
         num_tokens: int, hidden_size: int, device: torch.device
     ) -> None:
         """Allocate Mega-MHC's split-K scratch on the current stream for every
-        token count up to ``num_tokens``, with one eager call on zeros."""
+        token count up to ``num_tokens``, with one eager call on zeros. It runs
+        while the model loads, under the model's default dtype."""
         from aiter.ops.mega_mhc import mega_mhc, mega_mhc_shuffle_fn
 
         hc_mult = 4
         hc_mult3 = hc_mult * (2 + hc_mult)
-        fn = torch.zeros(hc_mult3, hc_mult * hidden_size, device=device)
+        fn = torch.zeros(
+            hc_mult3, hc_mult * hidden_size, dtype=torch.float32, device=device
+        )
         mega_mhc(
             torch.zeros(
                 num_tokens, hc_mult, hidden_size, dtype=torch.bfloat16, device=device
             ),
             mega_mhc_shuffle_fn(fn),
-            torch.zeros(3, device=device),
-            torch.zeros(hc_mult3, device=device),
+            torch.zeros(3, dtype=torch.float32, device=device),
+            torch.zeros(hc_mult3, dtype=torch.float32, device=device),
             1e-6,
             1e-6,
             1e-6,

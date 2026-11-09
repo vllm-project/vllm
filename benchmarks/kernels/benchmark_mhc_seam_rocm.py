@@ -14,7 +14,11 @@ One seam (hc_mult 4, 20 Sinkhorn iterations) on each backend:
   stays on the critical path when the gates run on the side stream (FULL
   graphs, at most 128 tokens). The side stream then runs a ``no_post`` seam.
 
-Every backend is checked against a float64 reference before it is timed.
+Every backend is checked against a float64 reference before it is timed, with
+the bounds of ``test_mhc_pre_delayed_rocm_aiter_mega``: per element, and
+relative to the Triton seam's error. Outputs outside them are printed and
+recorded in the JSON, not raised.
+
 Timing is HIP-graph replay over rotating inputs and weights larger than the
 256 MB MALL, warmed up and captured on one stream (both Mega-MHC kernels keep
 per-stream scratch), reported as the median over rounds.
@@ -219,12 +223,35 @@ def reference_fp64(w, x):
     return residual, post.unsqueeze(-1), comb, layer_input.to(torch.bfloat16), pre
 
 
+OUTPUTS = ("residual", "post_mix", "comb_mix", "layer_input", "next_pre_mix")
+# The bounds of test_mhc_pre_delayed_rocm_aiter_mega: (atol, rtol) per element
+# as the Triton seam's own test holds it, and relative errors at most twice
+# the Triton seam's plus these floors.
+ATOL_RTOL = dict(
+    post_mix=(5e-4, 1e-3),
+    comb_mix=(5e-4, 1e-3),
+    layer_input=(2e-2, 1e-2),
+    next_pre_mix=(5e-4, 1e-3),
+)
+REL_ERR_FLOORS = dict(
+    residual=2**-12,
+    post_mix=2**-16,
+    comb_mix=2**-16,
+    layer_input=2**-12,
+    next_pre_mix=2**-16,
+)
+
+
+def bf16_ulp(a, b):
+    """The bf16 ulp at the larger magnitude of ``a`` and ``b``."""
+    magnitude = torch.maximum(a.abs(), b.abs())
+    return torch.ldexp(torch.ones_like(magnitude), torch.frexp(magnitude)[1] - 8)
+
+
 def bf16_ulps(actual, expected) -> tuple[float, float]:
     """Largest difference in bf16 ulps, and the fraction of equal elements."""
     a, b = actual.float(), expected.float()
-    magnitude = torch.maximum(a.abs(), b.abs())
-    ulp = torch.ldexp(torch.ones_like(magnitude), torch.frexp(magnitude)[1] - 8)
-    return float(((a - b).abs() / ulp).max()), float((a == b).float().mean())
+    return float(((a - b).abs() / bf16_ulp(a, b)).max()), float((a == b).float().mean())
 
 
 def rel_err(actual, expected) -> float:
@@ -232,25 +259,61 @@ def rel_err(actual, expected) -> float:
     return float((a - b).norm() / b.norm())
 
 
-def check(name, out, ref) -> dict:
-    """Numerics against the float64 reference; raises if clearly wrong."""
-    report = {}
-    for i, label in ((0, "residual"), (3, "layer_input")):
-        ulps, equal = bf16_ulps(out[i], ref[i])
-        report[label] = dict(
-            max_ulps=ulps, frac_equal=equal, rel_err=rel_err(out[i], ref[i])
-        )
-    for i, label in ((1, "post_mix"), (2, "comb_mix"), (4, "next_pre_mix")):
-        if out[i] is not None:
-            report[label] = dict(rel_err=rel_err(out[i].view_as(ref[i]), ref[i]))
-    bad = [
-        label
-        for label, r in report.items()
-        if r.get("max_ulps", 0) > 4 or r["rel_err"] > 1e-3
-    ]
-    if bad:
-        raise AssertionError(f"{name}: {bad} disagree with the reference: {report}")
+def residual_in_bound(actual, expected, x) -> bool:
+    """One bf16 rounding of a five-term fp32 sum: within one bf16 ulp of the
+    rounded exact sum, plus the fp32 error of any summation order. Without the
+    post block the residual comes back unchanged."""
+    if "sublayer_out" not in x:
+        return torch.equal(actual, x["residual"])
+    terms = x["post_layer_mix"] * x["sublayer_out"].float().abs().unsqueeze(1)
+    terms += torch.einsum(
+        "tij,tih->tjh", x["comb_res_mix"], x["residual"].float().abs()
+    )
+    a, b = actual.float(), expected.float()
+    return bool(((a - b).abs() <= bf16_ulp(a, b) + 8 * 2**-24 * terms).all())
+
+
+def measure(out, ref, x) -> dict:
+    """Errors against the float64 reference, listing under ``outside_bounds``
+    the outputs that break the unit tests' elementwise bounds."""
+    report, outside = {}, []
+    for i, label in enumerate(OUTPUTS):
+        if out[i] is None:
+            continue
+        actual = out[i].reshape(ref[i].shape)
+        report[label] = dict(rel_err=rel_err(actual, ref[i]))
+        if label in ("residual", "layer_input"):
+            ulps, equal = bf16_ulps(actual, ref[i])
+            report[label].update(max_ulps=ulps, frac_equal=equal)
+        if label == "residual":
+            in_bound = residual_in_bound(actual, ref[i], x)
+        else:
+            atol, rtol = ATOL_RTOL[label]
+            close = torch.isclose(
+                actual.double(), ref[i].double(), rtol=rtol, atol=atol
+            )
+            in_bound = bool(close.all())
+        if not in_bound:
+            outside.append(label)
+    report["outside_bounds"] = outside
     return report
+
+
+def compare_to_triton(row, backends) -> None:
+    """Add the outputs whose relative error exceeds twice the Triton seam's
+    plus a floor to each backend's ``outside_bounds``."""
+    triton = row.get("triton_numerics")
+    if triton is None:
+        return
+    for name in backends:
+        if name == "triton":
+            continue
+        report = row[f"{name}_numerics"]
+        for label, floor in REL_ERR_FLOORS.items():
+            if label not in report:
+                continue
+            if report[label]["rel_err"] > 2 * triton[label]["rel_err"] + floor:
+                report["outside_bounds"].append(f"{label} vs triton")
 
 
 def time_graph(call, slots, stream) -> float:
@@ -350,14 +413,16 @@ def main() -> None:
                     first = call(*slots[0])
                     again = call(*slots[0])
                 torch.accelerator.synchronize()
-                row[f"{name}_numerics"] = check(name, first, ref)
-                # The post modes share residual_out, so only the other outputs
-                # are compared across the two calls.
+                # The post modes share residual_out: it is measured before the
+                # next backend overwrites it, and only the other outputs are
+                # compared across the two calls.
+                row[f"{name}_numerics"] = measure(first, ref, slots[0][1])
                 row[f"{name}_repeat_bitwise"] = all(
                     a is None or torch.equal(a, b) for a, b in zip(first[1:], again[1:])
                 )
                 if not args.check_only:
                     row[f"{name}_us"] = time_graph(call, slots, stream)
+            compare_to_triton(row, backends)
             rows.append(row)
             print(
                 f"T={tokens:5d} {mode:8s} "
@@ -368,6 +433,9 @@ def main() -> None:
                 ),
                 flush=True,
             )
+            for name in backends:
+                if outside := row[f"{name}_numerics"]["outside_bounds"]:
+                    print(f"  {name} outside the unit test bounds: {outside}")
             del slots
             torch.accelerator.empty_cache()
 
