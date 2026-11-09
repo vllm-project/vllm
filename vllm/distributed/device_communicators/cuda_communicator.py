@@ -257,6 +257,14 @@ class CudaCommunicator(DeviceCommunicatorBase):
                     tcp_store_group,
                     device_group=self.device_group,
                 )
+            elif self.all2all_backend == "mooncake":
+                from .all2all import MooncakeAll2AllManager
+
+                self.all2all_manager = MooncakeAll2AllManager(
+                    self.cpu_group,
+                    tcp_store_group,
+                    device_group=self.device_group,
+                )
             elif self.all2all_backend == "moonep":
                 from .all2all import MoonEPAll2AllManager
 

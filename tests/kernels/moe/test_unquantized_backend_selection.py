@@ -621,6 +621,7 @@ def test_select_lora_explicit_non_triton_backend():
         ("deepep_low_latency", "auto", "batched_experts"),
         ("nixl_ep", "auto", "batched_experts"),
         ("deepep_v2", "auto", "padded_standard"),
+        ("mooncake", "auto", "padded_standard"),
         ("allgather_reducescatter", "batched_triton", "batched_experts"),
     ],
 )

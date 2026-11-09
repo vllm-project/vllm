@@ -26,6 +26,7 @@ from vllm.utils.import_utils import (
     deep_ep_v2_unavailable_reason,
     has_deep_ep,
     has_deep_ep_v2,
+    has_mooncake_ep,
     has_mori,
 )
 from vllm.utils.math_utils import round_up
@@ -1264,6 +1265,55 @@ class DeepEPV2All2AllManager(All2AllManagerBase):
         logger.debug("DeepEP v2 all2all args %s", buffer_kwargs)
         handle: deep_ep.ElasticBuffer = self.handle_cache.get_or_create(
             buffer_kwargs, deep_ep.ElasticBuffer
+        )
+        if self._num_sms is None:
+            self._num_sms = handle.get_theoretical_num_sms(
+                num_experts=num_experts,
+                num_topk=kwargs["num_topk"],
+            )
+        return handle
+
+    def max_sms_used(self) -> int | None:
+        return self._num_sms
+
+    def destroy(self):
+        with self.handle_cache._lock:
+            for _, handle in self.handle_cache._cache.items():
+                handle.destroy()
+            self.handle_cache._cache.clear()
+
+
+class MooncakeAll2AllManager(All2AllManagerBase):
+    """All2All communication based on Mooncake EP's ElasticBuffer, which
+    follows the DeepEP v2 API. Runs on CUDA and XPU; needs no NCCL GIN.
+    """
+
+    def __init__(self, cpu_group, tcp_store_group=None, device_group=None):
+        assert has_mooncake_ep(), (
+            "Mooncake EP is not installed; install mooncake-transfer-engine "
+            "with EP support."
+        )
+        super().__init__(cpu_group, tcp_store_group)
+        self._device_group = device_group
+        self.handle_cache = Cache()
+        self._num_sms: int | None = None
+
+    def get_handle(self, kwargs):
+        from mooncake.mooncake_elastic_buffer import ElasticBuffer
+
+        num_experts = kwargs.pop("num_experts", 256)
+        buffer_kwargs = dict(
+            group=self._device_group
+            if self._device_group is not None
+            else self.cpu_group,
+            # Mooncake implements only the multiple-reduction combine.
+            allow_multiple_reduction=True,
+            explicitly_destroy=True,
+            **kwargs,
+        )
+        logger.debug("Mooncake EP all2all args %s", buffer_kwargs)
+        handle: ElasticBuffer = self.handle_cache.get_or_create(
+            buffer_kwargs, ElasticBuffer
         )
         if self._num_sms is None:
             self._num_sms = handle.get_theoretical_num_sms(

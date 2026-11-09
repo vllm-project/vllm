@@ -39,6 +39,7 @@ from vllm.platforms import current_platform
 from vllm.utils.import_utils import (
     has_deep_ep,
     has_deep_ep_v2,
+    has_mooncake_ep,
     has_moonep,
     has_mori,
     has_nixl_ep,
@@ -134,6 +135,10 @@ if current_platform.is_cuda_alike():
             MoonEPPrepareAndFinalize,
         )
 
+# Mooncake EP runs on CUDA and XPU.
+if has_mooncake_ep():
+    from .prepare_finalize.mooncake import MooncakePrepareAndFinalize
+
 
 def get_ep_all2all_manager(
     ep_group: GroupCoordinator | None = None,
@@ -178,6 +183,11 @@ def maybe_roundup_layer_hidden_size(
 
     if moe_parallel_config.use_deepep_v2_kernels:
         hidden_size = DeepEPV2PrepareAndFinalize.maybe_roundup_layer_hidden_size(
+            hidden_size, act_dtype
+        )
+
+    if moe_parallel_config.use_mooncake_kernels:
+        hidden_size = MooncakePrepareAndFinalize.maybe_roundup_layer_hidden_size(
             hidden_size, act_dtype
         )
 
@@ -283,7 +293,7 @@ def maybe_make_prepare_finalize(
             physical_to_global=physical_to_global,
             local_expert_global_ids=local_expert_global_ids,
         )
-    elif moe.use_deepep_v2_kernels:
+    elif moe.use_deepep_v2_kernels or moe.use_mooncake_kernels:
         assert moe.dp_size == all2all_manager.dp_world_size
 
         use_fp8_dispatch = (
@@ -302,7 +312,12 @@ def maybe_make_prepare_finalize(
         vllm_config = get_current_vllm_config()
         use_cudagraph = not vllm_config.model_config.enforce_eager
 
-        prepare_finalize = DeepEPV2PrepareAndFinalize(
+        pf_cls = (
+            MooncakePrepareAndFinalize
+            if moe.use_mooncake_kernels
+            else DeepEPV2PrepareAndFinalize
+        )
+        prepare_finalize = pf_cls(
             buffer=handle,
             num_dispatchers=all2all_manager.world_size,
             dp_size=all2all_manager.dp_world_size,

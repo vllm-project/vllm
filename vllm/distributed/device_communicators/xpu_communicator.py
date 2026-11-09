@@ -40,6 +40,14 @@ class XpuCommunicator(DeviceCommunicatorBase):
                 self.all2all_manager = AgRsAll2AllManager(self.cpu_group)
                 logger.info("Using AgRs manager on XPU device.")
 
+            elif self.all2all_backend == "mooncake":
+                from .all2all import MooncakeAll2AllManager
+
+                self.all2all_manager = MooncakeAll2AllManager(
+                    self.cpu_group, device_group=self.device_group
+                )
+                logger.info("Using Mooncake EP manager on XPU device.")
+
             else:  # type: ignore[has-type]
                 logger.warning(
                     "`%s` all2all manager is not supported on XPU. "
