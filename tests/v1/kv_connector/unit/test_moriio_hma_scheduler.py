@@ -4,8 +4,8 @@
 and the KDA offset-template cache.
 
 These exercise the highest-risk, otherwise-untested scheduler logic without a
-GPU or the ``mori`` runtime: per-group block-id splitting, the READ/WRITE
-``N-1`` token accounting, P-side prompt truncation, and offset-template cache
+GPU or the `mori` runtime: per-group block-id splitting, the READ/WRITE
+`N-1` token accounting, P-side prompt truncation, and offset-template cache
 wiring.
 """
 
@@ -61,7 +61,7 @@ def restore_moriio_role():
 
 
 class _FakeScheduler(moriio_connector.MoRIIOConnectorScheduler):  # type: ignore[name-defined]
-    """Constructs a scheduler without the heavy real ``__init__``; only the
+    """Constructs a scheduler without the heavy real `__init__`; only the
     attributes read by the method under test are set."""
 
     def __init__(self, **attrs):
@@ -516,8 +516,8 @@ def test_scheduler_rejects_non_dspark_speculative_hybrid_write():
 def _dspark_wrapped_attention_config(*, dcp_sharded: bool = True):
     """Mamba first, so a wrapped full-attention group at index 1 has to be found.
 
-    A bare ``isinstance(FullAttentionSpec)`` misses the wrapper and leaves
-    ``_full_attn_group_idx`` at its initial 0, which is the Mamba group.
+    A bare `isinstance(FullAttentionSpec)` misses the wrapper and leaves
+    `_full_attn_group_idx` at its initial 0, which is the Mamba group.
     """
     full = FullAttentionSpec(
         block_size=4,
@@ -1276,8 +1276,8 @@ def _make_register_worker(caches, geoms, *, disable_hma: bool = True):
     worker._is_mla_cache_layer = lambda _n: False
     worker._get_layer_transfer_geometry = lambda n, remote_num_blocks=None: geoms[n]
     worker._iter_layer_registration_regions = lambda n: [(caches[n], caches[n].nbytes)]
-    worker._moriio_handshake_listener = (
-        lambda _m, ready_event, *_a, **_k: ready_event.set()
+    worker._moriio_handshake_listener = lambda _m, ready_event, *_a, **_k: (
+        ready_event.set()
     )
     return worker
 

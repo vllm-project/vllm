@@ -13,24 +13,24 @@ Key design points:
 
 * We inherit the shared MLA scaffolding (`MLACommonBackend`,
   `MLACommonImpl`, `MLACommonMetadata`) so that the same
-  ``forward_impl`` in ``MLAAttention`` orchestrates weight-absorbed
+  `forward_impl` in `MLAAttention` orchestrates weight-absorbed
   decode (MQA) and non-absorbed prefill (MHA) for us.
-* The parent ``MLACommonImpl.__init__`` tries to pick a GPU prefill
+* The parent `MLACommonImpl.__init__` tries to pick a GPU prefill
   kernel (flash_attn / flashinfer / cudnn / trtllm) and raises when
   none of them are available. On CPU none of them apply, so we
   bypass that logic and set the attributes ourselves.
 * Chunked prefill and prefix caching are disabled by the CPU platform
-  when ``use_mla`` is set.
-* The CPU decode kernel only supports ``head_dim=576``,
-  ``v_head_dim=512`` and ``block_size=16`` today; the platform layer
-  forces ``block_size=16`` for MLA models.
+  when `use_mla` is set.
+* The CPU decode kernel only supports `head_dim=576`,
+  `v_head_dim=512` and `block_size=16` today; the platform layer
+  forces `block_size=16` for MLA models.
 """
 
 from typing import ClassVar
 
 import torch
 
-from vllm import _custom_ops as ops
+from vllm import _cpu_ops as ops
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.mla_attention import (
