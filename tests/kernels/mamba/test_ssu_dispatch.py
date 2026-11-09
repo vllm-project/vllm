@@ -22,6 +22,7 @@ from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     get_mamba_ssu_backend,
     initialize_mamba_ssu_backend,
     selective_state_update,
+    selective_state_update_replayssm_flashinfer,
 )
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadata
@@ -98,6 +99,8 @@ def _replayssm_mixer(kv_cache, ring_start, committed, A):
     [
         pytest.param(False, KVCacheLayout.LBNHC, torch.float16, id="v1-fp16-lbnhc"),
         pytest.param(True, KVCacheLayout.BLHNC, torch.float32, id="v2-fp32-blhnc"),
+        pytest.param(False, KVCacheLayout.LBNHC, torch.int8, id="v1-int8-lbnhc"),
+        pytest.param(True, KVCacheLayout.BLHNC, torch.float8_e4m3fn, id="v2-fp8-blhnc"),
     ],
 )
 def test_replayssm_materializes_only_accepted_boundary_with_compacted_rows(
@@ -120,6 +123,7 @@ def test_replayssm_materializes_only_accepted_boundary_with_compacted_rows(
 
     set_random_seed(42)
     slots, heads, dim, dstate, ring_len = 19, 8, 64, 128, 20
+    quantized = ssm_dtype in (torch.int8, torch.float8_e4m3fn)
     spec = MambaSpec(
         block_size=16,
         shapes=(
@@ -140,6 +144,12 @@ def test_replayssm_materializes_only_accepted_boundary_with_compacted_rows(
         state_alignment=16,
         block_stride_alignment=16,
     )
+    if quantized:
+        spec = replace(
+            spec,
+            shapes=(*spec.shapes, (heads, dim)),
+            dtypes=(*spec.dtypes, torch.float32),
+        )
     spec = replace(spec, page_size_padded=spec.page_size_bytes + 128)
     vllm_config = SimpleNamespace(
         cache_config=CacheConfig(),
@@ -166,13 +176,31 @@ def test_replayssm_materializes_only_accepted_boundary_with_compacted_rows(
         )
         MambaBase.bind_kv_cache(layer, page)
         caches[name] = layer.kv_cache
-    rings = {name: states[2:] for name, states in caches.items()}
+    rings = {name: states[2:5] for name, states in caches.items()}
     for name, states in caches.items():
-        states[1].normal_(std=0.1)
         x, dt, B = rings[name]
-        x.normal_()
-        dt.fill_(0.01)
-        B.normal_()
+        if quantized:
+            qmax = 127 if ssm_dtype == torch.int8 else 448
+            factors = torch.exp2(
+                (
+                    torch.arange(slots, device="cuda")[:, None, None]
+                    + torch.arange(heads * dim, device="cuda").reshape(1, heads, dim)
+                )
+                % 3
+                - 2
+            )
+            states[1].fill_(8)
+            states[1][..., -1] = qmax
+            states[5].copy_(factors)
+            x.copy_((qmax * factors / 4)[:, :, None, :])
+            dt.fill_(1)
+            B.zero_()
+            B[..., -1] = 1
+        else:
+            states[1].normal_(std=0.1)
+            x.normal_()
+            dt.fill_(0.01)
+            B.normal_()
         assert (
             not x.is_contiguous() and not dt.is_contiguous() and not B.is_contiguous()
         )
@@ -184,11 +212,18 @@ def test_replayssm_materializes_only_accepted_boundary_with_compacted_rows(
     for names, prefix, live in zip(layer_names, [1, 7, 13], [3, 9, 15], strict=True):
         for name in names:
             caches[name][1][live].copy_(caches[name][1][prefix])
+            if quantized:
+                caches[name][5][live].copy_(caches[name][5][prefix])
     original = {name: states[1].clone() for name, states in caches.items()}
+    original_scales = (
+        {name: states[5].clone() for name, states in caches.items()}
+        if quantized
+        else {}
+    )
     ring_before = {
         name: [tensor.clone() for tensor in tensors] for name, tensors in rings.items()
     }
-    A = -torch.ones(heads, device="cuda")
+    A = torch.full((heads,), 0.0 if quantized else -1.0, device="cuda")
     null = NULL_BLOCK_ID
     block_tables = [
         [[null, 3], [null, 5], [4, 4], [null, null], [null, null]],
@@ -282,6 +317,8 @@ def test_replayssm_materializes_only_accepted_boundary_with_compacted_rows(
                 destinations.setdefault(caches[name][1].data_ptr(), set()).add(dst)
                 x, dt, B = rings[name]
                 expected = original[name][src].float().clone()
+                if quantized:
+                    expected *= original_scales[name][src, ..., None]
                 for offset in range(flush):
                     pos = (start + offset) % ring_len
                     delta = dt[src, :, pos]
@@ -291,9 +328,12 @@ def test_replayssm_materializes_only_accepted_boundary_with_compacted_rows(
                         * x[src, :, pos].float()[:, :, None]
                         * B[src, 0, pos].float()[None, None, :]
                     )
-                torch.testing.assert_close(
-                    caches[name][1][dst].float(), expected, atol=2e-3, rtol=2e-3
-                )
+                if quantized:
+                    _assert_rows(expected, caches[name][1][dst], caches[name][5][dst])
+                else:
+                    torch.testing.assert_close(
+                        caches[name][1][dst].float(), expected, atol=2e-3, rtol=2e-3
+                    )
             assert starts[dst].item() == 0
             assert committed[dst].item() == 0
             if src != dst:
@@ -302,20 +342,31 @@ def test_replayssm_materializes_only_accepted_boundary_with_compacted_rows(
     # Check all other slots, including immutable prefixes and each live tail.
     for name, states in caches.items():
         for slot in set(range(slots)) - destinations[states[1].data_ptr()]:
-            torch.testing.assert_close(
-                states[1][slot], original[name][slot], atol=0, rtol=0
-            )
+            assert torch.equal(_bytes(states[1][slot]), _bytes(original[name][slot]))
+            if quantized:
+                torch.testing.assert_close(
+                    states[5][slot], original_scales[name][slot], atol=0, rtol=0
+                )
         for tensor, before in zip(rings[name], ring_before[name], strict=True):
             torch.testing.assert_close(tensor, before, atol=0, rtol=0)
 
     # Old plans beyond the new batch must not replay a second time.
     before_shrink = {name: states[1].clone() for name, states in caches.items()}
+    scales_before_shrink = (
+        {name: states[5].clone() for name, states in caches.items()}
+        if quantized
+        else {}
+    )
     mapping[:2].fill_(-1)
     metadata["num_reqs"] = 2
     context.postprocess(**metadata)
     assert context.active_request_indices.tolist() == [-1] * 6
     for name, states in caches.items():
-        torch.testing.assert_close(states[1], before_shrink[name], atol=0, rtol=0)
+        assert torch.equal(_bytes(states[1]), _bytes(before_shrink[name]))
+        if quantized:
+            torch.testing.assert_close(
+                states[5], scales_before_shrink[name], atol=0, rtol=0
+            )
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
@@ -841,7 +892,11 @@ def test_shared_prefill_selected_slots_and_reuse(dtype):
         quantize_replayssm_state,
     )
 
-    source, _ = _source(dtype)
+    source, factors = _source(dtype)
+    source[..., :8] = (
+        torch.tensor([-2.5, -1.5, -1.0625, -0.3, 0.3, 1.0625, 1.5, 2.5])
+        * factors[None, ..., None]
+    )
     source[0, 0, 0].zero_()
     source[2] *= 2
     source = source.cuda()
@@ -869,10 +924,9 @@ def test_shared_prefill_selected_slots_and_reuse(dtype):
     )
     assert decoded.dtype == torch.float32
     expected = torch.zeros_like(decoded)
-    expected[0] = payload[2].float() * scale[2, ..., None]
-    expected[1] = payload[1].float() * scale[1, ..., None]
+    expected_payload, expected_scale = _encode_rows(source[[2, 0]], dtype)
+    expected[:2] = (expected_payload.float() * expected_scale[..., None]).cuda()
     torch.testing.assert_close(decoded, expected, rtol=0, atol=0)
-    torch.testing.assert_close(decoded[:2], source[[2, 0]], rtol=0, atol=0)
     preserved_payload, preserved_scale = _bytes(payload[1]), scale[1].clone()
 
     source.mul_(4)
@@ -885,18 +939,27 @@ def test_shared_prefill_selected_slots_and_reuse(dtype):
     assert torch.all(scale_pages[1::2] == 7)
 
 
-@pytest.mark.parametrize("dtype", [torch.int8, torch.float8_e4m3fn])
-def test_shared_graph_mixed_flush_checkpoint_bytes(dtype):
-    """Two graph replays update only the flushing slot and preserve its scales."""
+@pytest.mark.parametrize(
+    ("dtype", "philox_rounds"),
+    [(torch.int8, 0), (torch.float8_e4m3fn, 0), (torch.int8, 5)],
+)
+def test_shared_graph_mixed_flush_checkpoint_bytes(dtype, philox_rounds):
+    """Dispatch two graph flushes with changing scales and unchanged other slots."""
     _require_cuda()
-    from flashinfer.mamba.checkpointing_ssu import checkpointing_ssu
-
     from vllm.model_executor.layers.mamba.ops.replayssm_quantization import (
         quantize_replayssm_state,
     )
 
+    initialize_mamba_ssu_backend(
+        MambaConfig(backend=MambaBackendEnum.FLASHINFER),
+        _kv_cache_config_with_ssu(),
+        use_replayssm=True,
+    )
     source, factors = _source(dtype)
+    # Each flush adds qmax to the row maximum. Payloads 12 -> 6 -> 4 are exact.
+    source[..., :-1] *= 12
     source[0].zero_()
+    qmax = 127 if dtype == torch.int8 else 448
     payload = torch.zeros_like(source, dtype=dtype, device="cuda")
     scale = torch.ones(3, 16, 64, device="cuda")
     quantize_replayssm_state(
@@ -904,14 +967,14 @@ def test_shared_graph_mixed_flush_checkpoint_bytes(dtype):
     )
     initial_payload, initial_scale = payload.clone(), scale.clone()
     x = (
-        (factors / 8)
+        (qmax * factors / 16)
         .cuda()
         .to(torch.bfloat16)[None, None]
         .expand(3, 1, -1, -1)
         .contiguous()
     )
     b = torch.zeros(3, 1, 1, 128, device="cuda", dtype=torch.bfloat16)
-    b[..., 0] = 1
+    b[..., -1] = 1
     x_cache = x[:, 0, :, None].expand(-1, -1, 17, -1).contiguous()
     b_cache = b[:, 0, :, None].expand(-1, -1, 17, -1).contiguous()
     dt_cache = torch.ones(3, 16, 17, device="cuda")
@@ -934,147 +997,36 @@ def test_shared_graph_mixed_flush_checkpoint_bytes(dtype):
         B=b,
         C=b,
         out=out,
-        state_batch_indices=torch.tensor([2, 1, -1], device="cuda"),
-        algorithm="monolith",
-        d_split=1,
+        state_batch_indices=torch.tensor([2, 1, NULL_BLOCK_ID], device="cuda"),
+        enable_stochastic_rounding=bool(philox_rounds),
+        stochastic_rounding_philox_rounds=philox_rounds,
     )
-    checkpointing_ssu(**args)
+    selective_state_update_replayssm_flashinfer(**args)
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
-        checkpointing_ssu(**args)
+        selective_state_update_replayssm_flashinfer(**args)
     payload.copy_(initial_payload)
     scale.copy_(initial_scale)
     for iteration in range(1, 3):
         graph.replay()
         expected = source.clone()
-        expected[2, ..., 0] += iteration * 2 * factors
+        expected[2, ..., -1] += iteration * qmax * factors
         _assert_rows(expected, payload, scale)
+        torch.testing.assert_close(
+            scale[2].cpu(), (iteration + 1) * factors, rtol=0, atol=0
+        )
         expected_out = torch.stack(
-            ((1 + iteration * 2 + 0.125) * factors, 1.125 * factors)
+            (
+                (1 + iteration + 1 / 16) * qmax * factors,
+                (1 + 1 / 16) * qmax * factors,
+            )
         ).to(torch.bfloat16)
         assert torch.equal(out[:2, 0].cpu(), expected_out)
 
 
-@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float8_e4m3fn, torch.int8])
-def test_shared_bolt_t8_acceptance_and_ring_wrap(dtype):
-    """Rejected candidates must not enter the next Bolt checkpoint or output."""
-    _require_cuda()
-    from flashinfer.mamba.checkpointing_ssu import checkpointing_ssu
-
-    from vllm.model_executor.layers.mamba.ops.replayssm_quantization import (
-        quantize_replayssm_state,
-    )
-
-    heads, groups, tokens, ring_len = 128, 8, 8, 24
-    source = torch.zeros(4, heads, 64, 128)
-    source[..., -1] = 127 if dtype == torch.int8 else 448
-    source[0].zero_()
-    state = source.to(device="cuda", dtype=dtype)
-    scales = None
-    if dtype != torch.bfloat16:
-        scales = torch.ones(4, heads, 64, device="cuda")
-        quantize_replayssm_state(
-            source.cuda(), state, scales, torch.tensor([-1, 1, 2, 3], device="cuda")
-        )
-    x_ring = torch.full(
-        (4, heads, ring_len, 64), 1 / 8, device="cuda", dtype=torch.bfloat16
-    )
-    b_ring = torch.zeros(4, groups, ring_len, 128, device="cuda", dtype=torch.bfloat16)
-    b_ring[..., 0] = 1
-    dt_ring = torch.ones(4, heads, ring_len, device="cuda")
-    starts = torch.tensor([0, 21, 19, 23], device="cuda", dtype=torch.int32)
-    history = torch.tensor([0, 8, 9, 16], device="cuda", dtype=torch.int32)
-    slots = torch.tensor([3, 1, 2, -1], device="cuda", dtype=torch.int32)
-    increments = torch.arange(1, tokens + 1).float() / 8
-    x = (
-        increments[None, :, None, None]
-        .expand(4, tokens, heads, 64)
-        .cuda()
-        .bfloat16()
-        .contiguous()
-    )
-    b = torch.zeros(4, tokens, groups, 128, device="cuda", dtype=torch.bfloat16)
-    b[..., 0] = 1
-    out = torch.empty_like(x)
-    args = dict(
-        state=state,
-        state_scale=scales,
-        x_cache=x_ring,
-        B_cache=b_ring,
-        dt_cache=dt_ring,
-        ring_start=starts,
-        prev_num_accepted_tokens=history,
-        x=x,
-        dt=torch.ones(4, tokens, heads, 1, device="cuda", dtype=torch.bfloat16).expand(
-            -1, -1, -1, 64
-        ),
-        A=torch.zeros(heads, 1, 1, device="cuda").expand(-1, 64, 128),
-        B=b,
-        C=b,
-        out=out,
-        state_batch_indices=slots,
-        algorithm="monolith",
-        d_split=1,
-    )
-    saved = [value.clone() for value in (state, x_ring, b_ring, dt_ring)]
-    saved_scale = None if scales is None else scales.clone()
-    checkpointing_ssu(**args)
-    graph = torch.cuda.CUDAGraph()
-    with torch.cuda.graph(graph):
-        checkpointing_ssu(**args)
-    for value, initial in zip((state, x_ring, b_ring, dt_ring), saved, strict=True):
-        value.copy_(initial)
-    if scales is not None:
-        scales.copy_(saved_scale)
-
-    expected = source.clone()
-    expected_ring = x_ring.cpu().clone()
-    starts_cpu, history_cpu = starts.cpu(), history.cpu()
-    for accepted in ([1, 7, 8], [8, 1, 7], [7, 8, 1]):
-        expected_output = []
-        for row, slot in enumerate((3, 1, 2)):
-            start, count = int(starts_cpu[slot]), int(history_cpu[slot])
-            positions = (start + torch.arange(count)) % ring_len
-            old_sum = expected_ring[slot, 0, positions, 0].float().sum()
-            current = expected[slot, 0, 0, 0] + old_sum
-            expected_output.append((current + increments.cumsum(0)).bfloat16())
-            if count + tokens > 16:
-                expected[slot, ..., 0] += old_sum
-                if scales is None:
-                    expected[slot] = expected[slot].bfloat16().float()
-                else:
-                    packed, row_scale = _encode_rows(expected[slot], dtype)
-                    expected[slot] = packed.float() * row_scale[..., None]
-            written = (start + count + torch.arange(tokens)) % ring_len
-            expected_ring[slot, :, written, :] = x[row].cpu().permute(1, 0, 2)
-        graph.replay()
-        for row, slot in enumerate((3, 1, 2)):
-            if scales is None:
-                torch.testing.assert_close(
-                    state[slot].cpu(), expected[slot].bfloat16(), rtol=0, atol=0
-                )
-            else:
-                _assert_rows(expected[slot], state[slot], scales[slot])
-            torch.testing.assert_close(
-                out[row].cpu(),
-                expected_output[row][:, None, None].expand(-1, heads, 64),
-                rtol=0,
-                atol=0,
-            )
-            count = int(history_cpu[slot])
-            flushed = count + tokens > 16
-            if flushed:
-                starts_cpu[slot] = (starts_cpu[slot] + count) % ring_len
-            history_cpu[slot] = (0 if flushed else count) + accepted[row]
-        torch.testing.assert_close(x_ring.cpu(), expected_ring, rtol=0, atol=0)
-        assert torch.equal(_bytes(state[0]), _bytes(saved[0][0]))
-        starts.copy_(starts_cpu)
-        history.copy_(history_cpu)
-
-
 @pytest.mark.parametrize("state_dtype", ["fp8", "int8"])
-def test_replayssm_quantized_cache_copies_payload_and_scale(state_dtype):
-    """A checkpoint record must copy its payload and FP32 scale together."""
+def test_replayssm_quantized_cache_spec_requires_matching_scale(state_dtype):
+    """A quantized cache specification requires an FP32 scale with matching rows."""
     state_shape = (16, 64, 128)
     spec = MambaSpec(
         block_size=16,

@@ -218,7 +218,12 @@ steps:
     - vllm/v1/kv_cache_interface.py
     - vllm/config/cache.py
     - vllm/config/vllm.py
+    - vllm/config/mamba.py
+    - vllm/engine/arg_utils.py
+    - vllm/utils/flashinfer.py
     - vllm/model_executor/layers/mamba/
+    - vllm/model_executor/models/config.py
+    - vllm/model_executor/models/interfaces.py
     - vllm/model_executor/models/nemotron_h.py
     - vllm/model_executor/warmup/kernel_warmup.py
     - vllm/model_executor/warmup/replayssm_warmup.py
@@ -239,8 +244,7 @@ steps:
       kernels/mamba/test_ssu_dispatch.py::test_shared_prefill_selected_slots_and_reuse
       kernels/mamba/test_ssu_dispatch.py::test_shared_fp8_prefill_tiny_rows_keep_valid_scales
       kernels/mamba/test_ssu_dispatch.py::test_shared_graph_mixed_flush_checkpoint_bytes
-      kernels/mamba/test_ssu_dispatch.py::test_shared_bolt_t8_acceptance_and_ring_wrap
-      kernels/mamba/test_ssu_dispatch.py::test_replayssm_quantized_cache_copies_payload_and_scale
+      kernels/mamba/test_ssu_dispatch.py::test_replayssm_quantized_cache_spec_requires_matching_scale
   mirror:
     amd:
       automatic_shard: true

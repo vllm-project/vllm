@@ -4858,18 +4858,32 @@ def test_quantized_replayssm_rejects_conflicting_checkpoint_dtype(state_dtype):
         )
 
 
-def test_quantized_replayssm_fp8_requires_bounded_flashinfer_scales():
+def test_quantized_replayssm_fp8_requires_bounded_flashinfer_scales(monkeypatch):
+    import importlib.metadata
+
     from vllm.config.mamba import MambaConfig
     from vllm.utils.flashinfer import has_flashinfer_replayssm_fp8_checkpoints
 
-    if has_flashinfer_replayssm_fp8_checkpoints():
-        pytest.skip("Installed FlashInfer bounds FP8 checkpoint scales")
-    with pytest.raises(ValueError, match="bounds FP8 checkpoint scales"):
-        VllmConfig(
-            cache_config=CacheConfig(use_replayssm=True, replayssm_state_dtype="fp8"),
-            mamba_config=MambaConfig(backend=MambaBackendEnum.FLASHINFER),
-            device_config=DeviceConfig(device="cpu"),
-        )
+    installed_version = importlib.metadata.version
+
+    def version(distribution):
+        if distribution == "flashinfer-python":
+            return "0.7.4"
+        return installed_version(distribution)
+
+    monkeypatch.setattr(importlib.metadata, "version", version)
+    has_flashinfer_replayssm_fp8_checkpoints.cache_clear()
+    try:
+        with pytest.raises(ValueError, match="bounds FP8 checkpoint scales"):
+            VllmConfig(
+                cache_config=CacheConfig(
+                    use_replayssm=True, replayssm_state_dtype="fp8"
+                ),
+                mamba_config=MambaConfig(backend=MambaBackendEnum.FLASHINFER),
+                device_config=DeviceConfig(device="cpu"),
+            )
+    finally:
+        has_flashinfer_replayssm_fp8_checkpoints.cache_clear()
 
 
 @pytest.mark.parametrize("state_dtype", ["fp8", "int8"])
