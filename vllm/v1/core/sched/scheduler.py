@@ -1828,6 +1828,8 @@ class Scheduler(SchedulerInterface):
             skip_drafts=not drafts_needed,
             spec_state_block_counts=(
                 self.kv_cache_manager.take_spec_state_block_counts() or None
+                if self.dynamic_spec_blocks
+                else None
             ),
             ec_manager_metadata=self.encoder_cache_manager.get_manager_metadata(),
         )
