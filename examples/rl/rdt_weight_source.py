@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The ``WeightSource`` for ``rlhf_sharded_rdt_small_ep.py``.
+"""The `WeightSource` for `rlhf_sharded_rdt_small_ep.py`.
 
 A trainer's producer job is to present its weights under the names the inference
 side expects, which for vLLM means HF CHECKPOINT names. Transformers does not
-store MoE experts that way -- it fuses each layer's into ``[E, ...]`` tensors --
+store MoE experts that way -- it fuses each layer's into `[E, ...]` tensors --
 so that is the one conversion this file does. Kept beside the example rather than
 inside it so the example stays about the sync itself, alongside
-``rdt_vllm_serve.py``.
+`rdt_vllm_serve.py`.
 """
 
 from functools import cached_property
@@ -26,16 +26,16 @@ _FUSED_EXPERT_RE = re.compile(r"^(.*\.experts)\.(gate_up_proj|down_proj)$")
 class CheckpointNameSource(WeightSource):
     """`WeightSource` over an FSDP2 model that publishes HF CHECKPOINT names.
 
-    Transformers keeps each layer's experts fused as ``[E, ...]`` tensors, but
+    Transformers keeps each layer's experts fused as `[E, ...]` tensors, but
     vLLM's MoE loaders are written against the per-expert checkpoint entries --
-    only ``qwen{2,3}_moe`` also accept the fused names, so publishing them
-    straight from ``named_parameters()`` limits the example to one family and
-    fails the consumer's bake on ``experts.gate_up_proj`` everywhere else.
+    only `qwen{2,3}_moe` also accept the fused names, so publishing them
+    straight from `named_parameters()` limits the example to one family and
+    fails the consumer's bake on `experts.gate_up_proj` everywhere else.
     Splitting them back is also what a real trainer does, since converting an
     internal layout to checkpoint names is the normal producer job.
 
     Every rank publishes the whole model: fused params are all-gathered and then
-    sliced per expert. Ownership stays uniform (no ``ParamMeta.owners``) --
+    sliced per expert. Ownership stays uniform (no `ParamMeta.owners`) --
     serving only the experts a rank holds is a real trainer's concern, not an
     example's.
     """
@@ -45,10 +45,10 @@ class CheckpointNameSource(WeightSource):
 
     @staticmethod
     def _expand(name: str, param: torch.Tensor) -> list[tuple[str, tuple]]:
-        """The checkpoint entries ``name`` contributes, as (name, shape).
+        """The checkpoint entries `name` contributes, as (name, shape).
 
-        ``gate_up_proj`` is ``[E, 2I, H]`` with gate in rows ``:I`` and up in
-        ``I:``; ``down_proj`` is ``[E, H, I]``. Anything else is already a
+        `gate_up_proj` is `[E, 2I, H]` with gate in rows `:I` and up in
+        `I:`; `down_proj` is `[E, H, I]`. Anything else is already a
         checkpoint name and passes through.
         """
         m = _FUSED_EXPERT_RE.match(name)

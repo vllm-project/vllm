@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """End-to-end tests for the elastic fault-tolerance framework.
 
-Requires nixl_ep FT hardware; gated behind ``has_nixl_ep()``.
+Requires nixl_ep FT hardware; gated behind `has_nixl_ep()`.
 """
 
 import contextlib
@@ -109,7 +109,7 @@ if _SPEC:
 
 
 def _install_fault_injection(monkeypatch, tmp_path, rank: int) -> None:
-    """Install a sitecustomize that raises on ``rank`` once armed.
+    """Install a sitecustomize that raises on `rank` once armed.
 
     Disarmed until the test calls /collective_rpc (needs VLLM_SERVER_DEV_MODE,
     set here).
@@ -214,7 +214,7 @@ def _run_gsm8k_eval(server, stage: str) -> float:
 
 
 def _in_parallel(fn, servers) -> list:
-    """Run ``fn(server)`` for all servers concurrently; return results in order."""
+    """Run `fn(server)` for all servers concurrently; return results in order."""
     with ThreadPoolExecutor(max_workers=len(servers)) as ex:
         return list(ex.map(fn, servers))
 
@@ -284,11 +284,11 @@ def _wait_for_engines(
     match_values: set[str],
     deadline_s: int = FAULT_DETECTION_DEADLINE_S,
 ) -> list[dict[str, Any] | None]:
-    """Poll ``/v1/fault_tolerance/status`` until each server's engine status matches.
+    """Poll `/v1/fault_tolerance/status` until each server's engine status matches.
 
-    A server matches when its engine-status dict has ``match_key`` equal to
-    one of ``match_values``. Returns one engine-status dict per server. Servers still
-    unmatched after ``deadline_s`` get None.
+    A server matches when its engine-status dict has `match_key` equal to
+    one of `match_values`. Returns one engine-status dict per server. Servers still
+    unmatched after `deadline_s` get None.
     """
     results: dict[int, dict[str, Any]] = {}
     pending = dict(enumerate(servers))
@@ -334,7 +334,7 @@ def _driving(*servers):
 
 
 def _wait_for_ft_failure(server, deadline_s: int) -> str | None:
-    """Wait until ``/v1/fault_tolerance/status`` records the FT failure outcome."""
+    """Wait until `/v1/fault_tolerance/status` records the FT failure outcome."""
     engine_status = _wait_for_engines(
         [server],
         match_key="ft_state",
@@ -355,7 +355,7 @@ def _drive_to_faulted(
 ) -> dict[int, dict[str, Any]]:
     """Drive every engine until each reports a matching fault status.
 
-    Returns a ``{rank: engine_status}`` map. Asserts no rank hung (all matched
+    Returns a `{rank: engine_status}` map. Asserts no rank hung (all matched
     within the deadline) so callers can assume every value is present.
     """
     ranks = sorted(servers_by_rank)
@@ -439,10 +439,10 @@ def test_pause_retry_recovers_healthy_engines(busy):
 def test_injected_fault_retry_recovers_all_ranks(monkeypatch, tmp_path):
     """An exception injected into the inference path drives full retry recovery.
 
-    The fault is patched into ``sync_cudagraph_and_dp_padding`` on rank 1 via
-    a generated ``sitecustomize``; it raises on the engine's first DP-sync
+    The fault is patched into `sync_cudagraph_and_dp_padding` on rank 1 via
+    a generated `sitecustomize`; it raises on the engine's first DP-sync
     step after arming, so rank 1 goes UNHEALTHY and rank 0 times out on the
-    DP allreduce. Both UNHEALTHY is the precondition for ``retry``.
+    DP allreduce. Both UNHEALTHY is the precondition for `retry`.
 
     The injection is armed (via /collective_rpc) only after the baseline
     accuracy eval; accuracy is compared before and after recovery, mirroring
@@ -506,11 +506,11 @@ def test_scale_down_removes_dead_rank_and_recovers(quantization, proactive):
 
     SIGKILLing rank 0's worker leaves its EngineCore DEAD while the other ranks
     detect the peer fault and go UNHEALTHY. The orchestrator then sends
-    ``scale_down`` with ``removed_dp_ranks=[0]`` to every survivor.
+    `scale_down` with `removed_dp_ranks=[0]` to every survivor.
 
 
-    Also verifies that a DEAD engine rejects ``retry``: recovery is gated on
-    UNHEALTHY, so trying ``retry`` on the victim records a rejection reason.
+    Also verifies that a DEAD engine rejects `retry`: recovery is gated on
+    UNHEALTHY, so trying `retry` on the victim records a rejection reason.
 
     Accuracy is measured before the fault and after scale_down; the survivor
     must stay within ACCURACY_TOL of the pre-fault baseline.

@@ -7,6 +7,7 @@ import sys
 import uuid
 import weakref
 from abc import ABC, abstractmethod
+from array import array
 from collections import Counter, defaultdict
 from collections.abc import Awaitable, Callable, Sequence
 from concurrent.futures import Future
@@ -17,6 +18,7 @@ from typing import Any, TypeAlias, TypeVar
 
 import msgspec
 import msgspec.msgpack
+import numpy as np
 import zmq
 import zmq.asyncio
 
@@ -79,6 +81,16 @@ AnyFuture: TypeAlias = asyncio.Future[Any] | Future[Any]
 _R = TypeVar("_R")  # Return type for collective_rpc
 
 EngineIdentity = bytes
+
+
+def _with_packed_prompt(request: EngineCoreRequest) -> EngineCoreRequest:
+    """Copy of request with its prompt token ids as an int32 ndarray, which is
+    sent out of band when long and decoded by the engine without a Python int
+    per token. The frontend keeps the original."""
+    if not isinstance(request.prompt_token_ids, list):
+        return request
+    packed = np.frombuffer(array("i", request.prompt_token_ids), dtype=np.int32)
+    return msgspec.structs.replace(request, prompt_token_ids=packed)
 
 
 class EngineCoreClient(ABC):
@@ -206,10 +218,12 @@ class EngineCoreClient(ABC):
     def reset_encoder_cache(self) -> None:
         raise NotImplementedError
 
-    def sleep(self, level: int = 1, mode: PauseMode = "abort") -> None:
+    def sleep(
+        self, level: int = 1, mode: PauseMode = "abort", reset_connector: bool = True
+    ) -> None:
         raise NotImplementedError
 
-    def release_kv_cache_memory(self) -> None:
+    def release_kv_cache_memory(self, reset_connector: bool = True) -> None:
         raise NotImplementedError
 
     def wake_up(self, tags: list[str] | None = None) -> bool:
@@ -314,10 +328,12 @@ class EngineCoreClient(ABC):
     async def reset_encoder_cache_async(self) -> None:
         raise NotImplementedError
 
-    async def sleep_async(self, level: int = 1, mode: PauseMode = "abort") -> None:
+    async def sleep_async(
+        self, level: int = 1, mode: PauseMode = "abort", reset_connector: bool = True
+    ) -> None:
         raise NotImplementedError
 
-    async def release_kv_cache_memory_async(self) -> None:
+    async def release_kv_cache_memory_async(self, reset_connector: bool = True) -> None:
         raise NotImplementedError
 
     async def wake_up_async(self, tags: list[str] | None = None) -> bool:
@@ -456,14 +472,16 @@ class InprocClient(EngineCoreClient):
     def reset_encoder_cache(self) -> None:
         self.engine_core.reset_encoder_cache()
 
-    def sleep(self, level: int = 1, mode: PauseMode = "abort") -> None:
+    def sleep(
+        self, level: int = 1, mode: PauseMode = "abort", reset_connector: bool = True
+    ) -> None:
         if mode == "wait":
             raise ValueError("'wait' pause mode is not supported in inproc-engine mode")
-        result = self.engine_core.sleep(level, mode)
+        result = self.engine_core.sleep(level, mode, reset_connector)
         assert result is None
 
-    def release_kv_cache_memory(self) -> None:
-        self.engine_core.release_kv_cache_memory()
+    def release_kv_cache_memory(self, reset_connector: bool = True) -> None:
+        self.engine_core.release_kv_cache_memory(reset_connector)
 
     def wake_up(self, tags: list[str] | None = None) -> bool:
         return self.engine_core.wake_up(tags)
@@ -1074,7 +1092,7 @@ class SyncMPClient(MPClient):
     def add_request(self, request: EngineCoreRequest) -> None:
         if self.is_dp:
             self.engines_running = True
-        self._send_input(EngineCoreRequestType.ADD, request)
+        self._send_input(EngineCoreRequestType.ADD, _with_packed_prompt(request))
 
     def abort_requests(self, request_ids: list[str]) -> None:
         if request_ids and not self.resources.engine_dead:
@@ -1122,11 +1140,13 @@ class SyncMPClient(MPClient):
     def pin_lora(self, lora_id: int) -> bool:
         return self.call_utility("pin_lora", lora_id)
 
-    def sleep(self, level: int = 1, mode: PauseMode = "abort") -> None:
-        self.call_utility("sleep", level, mode)
+    def sleep(
+        self, level: int = 1, mode: PauseMode = "abort", reset_connector: bool = True
+    ) -> None:
+        self.call_utility("sleep", level, mode, reset_connector)
 
-    def release_kv_cache_memory(self) -> None:
-        self.call_utility("release_kv_cache_memory")
+    def release_kv_cache_memory(self, reset_connector: bool = True) -> None:
+        self.call_utility("release_kv_cache_memory", reset_connector)
 
     def wake_up(self, tags: list[str] | None = None) -> bool:
         return self.call_utility("wake_up", tags)
@@ -1350,7 +1370,7 @@ class AsyncMPClient(MPClient):
 
     async def add_request_async(self, request: EngineCoreRequest) -> None:
         request.client_index = self.client_index
-        await self._send_input(EngineCoreRequestType.ADD, request)
+        await self._send_input(EngineCoreRequestType.ADD, _with_packed_prompt(request))
         self._ensure_output_queue_task()
 
     async def abort_requests_async(self, request_ids: list[str]) -> None:
@@ -1405,11 +1425,13 @@ class AsyncMPClient(MPClient):
     async def reset_encoder_cache_async(self) -> None:
         await self.call_utility_async("reset_encoder_cache")
 
-    async def sleep_async(self, level: int = 1, mode: PauseMode = "abort") -> None:
-        await self.call_utility_async("sleep", level, mode)
+    async def sleep_async(
+        self, level: int = 1, mode: PauseMode = "abort", reset_connector: bool = True
+    ) -> None:
+        await self.call_utility_async("sleep", level, mode, reset_connector)
 
-    async def release_kv_cache_memory_async(self) -> None:
-        await self.call_utility_async("release_kv_cache_memory")
+    async def release_kv_cache_memory_async(self, reset_connector: bool = True) -> None:
+        await self.call_utility_async("release_kv_cache_memory", reset_connector)
 
     async def wake_up_async(self, tags: list[str] | None = None) -> bool:
         return all(await self.call_utility_all_async("wake_up", tags))
@@ -1667,6 +1689,7 @@ class DPAsyncMPClient(AsyncMPClient):
 
         # The engine that receives it wakes the other ranks if they are idle.
         chosen_engine = self.get_core_engine_for_request(request)
+        request = _with_packed_prompt(request)
         await self._send_input(EngineCoreRequestType.ADD, request, chosen_engine)
 
         self._ensure_output_queue_task()
@@ -1679,12 +1702,9 @@ class DPAsyncMPClient(AsyncMPClient):
             can_reuse_fused_moe_kernel,
         )
 
-        # MRV2 re-warms through the request pool, so running requests must
+        # The runner re-warms through the request pool, so running requests must
         # finish first while new ones stay queued in the scheduler.
-        parallel_config = self.vllm_config.parallel_config
-        if self.vllm_config.use_v2_model_runner and not can_reuse_fused_moe_kernel(
-            parallel_config
-        ):
+        if not can_reuse_fused_moe_kernel(self.vllm_config.parallel_config):
             return "wait"
         return "keep"
 

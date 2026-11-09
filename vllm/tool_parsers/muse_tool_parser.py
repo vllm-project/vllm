@@ -2,9 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """ATEM tool-call parser for Muse (Muse Spark and Muse Glimmer).
 
-Port of the ``response_schema`` tool-call contract from the HuggingFace Muse
-Glimmer export (``convert_muse_glimmer_weights_to_hf.py``:
-``MUSE_GLIMMER_RESPONSE_SCHEMA``), which Muse Spark shares.
+Port of the `response_schema` tool-call contract from the HuggingFace Muse
+Glimmer export (`convert_muse_glimmer_weights_to_hf.py`:
+`MUSE_GLIMMER_RESPONSE_SCHEMA`), which Muse Spark shares.
 
 Muse emits tool calls in an XML-ish ATEM format inside channel-scoped messages:
 
@@ -17,21 +17,21 @@ Muse emits tool calls in an XML-ish ATEM format inside channel-scoped messages:
         </atem:function_calls><|eom|>            # non-final call
     <|start|>assistant to=user<|message|>...final answer...<|eot|>
 
-``to=commentary`` messages are user-visible updates between tool calls, and
-like ``to=user`` messages they are content; ``to=developer`` messages are
-dropped. Channel scoping is essential: an ``<atem:invoke>`` echoed inside a
-``to=self`` reasoning block or a ``to=user`` final answer must NOT be parsed as
+`to=commentary` messages are user-visible updates between tool calls, and
+like `to=user` messages they are content; `to=developer` messages are
+dropped. Channel scoping is essential: an `<atem:invoke>` echoed inside a
+`to=self` reasoning block or a `to=user` final answer must NOT be parsed as
 a real tool call.
 
 Rather than *subtracting* reasoning/answer spans with regex substitutions (the
-approach the HF ``response_schema`` uses, which is safe only on a complete,
+approach the HF `response_schema` uses, which is safe only on a complete,
 well-formed turn), this parser *segments* the output into messages and then
 *selects* the tool-channel bodies. On a complete turn the two are equivalent;
 on a truncated or damaged turn, subtraction can delete a valid tool call
-(an unterminated ``to=self`` block makes the non-greedy strip run to the next
-``<|eom|>``, which belongs to the tool-call message) whereas selection cannot.
+(an unterminated `to=self` block makes the non-greedy strip run to the next
+`<|eom|>`, which belongs to the tool-call message) whereas selection cannot.
 
-Usage: ``--enable-auto-tool-choice --tool-call-parser muse``
+Usage: `--enable-auto-tool-choice --tool-call-parser muse`
 """
 
 from __future__ import annotations
@@ -61,6 +61,11 @@ from vllm.renderers.chat_utils import make_tool_call_id
 from vllm.tool_parsers.abstract_tool_parser import (
     Tool,
     ToolParser,
+)
+from vllm.tool_parsers.schema_types import (
+    ParameterTypes,
+    ParameterTypesCache,
+    convert_value,
 )
 
 logger = init_logger(__name__)
@@ -102,7 +107,7 @@ _FUNCTION_CALLS_OPEN = "<atem:function_calls>"
 def _decode_value(raw: str):
     """JSON-decode a parameter value when possible, else keep the raw string.
 
-    Mirrors the schema's ``x-parser: json`` with ``allow_non_json: True``.
+    Mirrors the schema's `x-parser: json` with `allow_non_json: True`.
     """
     try:
         return json.loads(raw)
@@ -113,12 +118,12 @@ def _decode_value(raw: str):
 def _iter_messages(text: str) -> Iterator[tuple[str | None, str, bool]]:
     """Segment *text* into assistant messages.
 
-    Yields ``(recipient, body, closed)`` per message, where ``recipient`` is
-    ``None`` for a bare ``<|message|>`` header and ``closed`` is False for a
-    message that has not (yet) seen ``<|eom|>`` / ``<|eot|>``.
+    Yields `(recipient, body, closed)` per message, where `recipient` is
+    `None` for a bare `<|message|>` header and `closed` is False for a
+    message that has not (yet) seen `<|eom|>` / `<|eot|>`.
 
     A message is also terminated by the start of the NEXT header. Without that,
-    a reasoning block whose ``<|eom|>`` is missing (truncation, or a chunk
+    a reasoning block whose `<|eom|>` is missing (truncation, or a chunk
     dropped at the reasoning -> tool transition) would absorb the tool-call
     message that follows it and the call would be lost -- the same defect the
     subtractive regexes have.
@@ -198,6 +203,7 @@ class MuseToolParser(ToolParser):
         tools: list[Tool] | None = None,
     ) -> None:
         super().__init__(tokenizer, tools)
+        self._parameter_types_cache = ParameterTypesCache()
         # Streaming cursors. vLLM constructs one ToolParser per request, so
         # instance state is per-stream.
         self._streamed_content_len: int = 0
@@ -209,20 +215,20 @@ class MuseToolParser(ToolParser):
     ) -> ChatCompletionRequest | ResponsesRequest:
         """Force special tokens through, and keep JSON guided decoding off.
 
-        ``skip_special_tokens`` defaults to True on both ChatCompletionRequest
-        and ResponsesRequest. Every rule in this parser keys off ``<|message|>``
-        / ``<|eom|>`` / ``<|eot|>`` / ``<|start|>``, so with the default the
+        `skip_special_tokens` defaults to True on both ChatCompletionRequest
+        and ResponsesRequest. Every rule in this parser keys off `<|message|>`
+        / `<|eom|>` / `<|eot|>` / `<|start|>`, so with the default the
         channel framing is stripped before we see it: message segmentation
         finds nothing, reasoning-channel invokes are indistinguishable from real
         ones, and the raw ATEM markup falls through to the client as content.
         Set it unconditionally and FIRST -- not only for tools requests, and not
         relying on the reasoning parser to have set it.
 
-        For required/named ``tool_choice`` the base hook installs a JSON schema
+        For required/named `tool_choice` the base hook installs a JSON schema
         constraint (ToolParser.adjust_request -> get_json_schema_from_tools).
         Muse emits ATEM XML, so under that constraint it writes JSON *inside*
-        the tool channel -- ``<atem:function_calls>[{"name": ...``  -- with no
-        ``<atem:invoke>`` for this parser to find. Skip the base hook so those
+        the tool channel -- `<atem:function_calls>[{"name": ...`  -- with no
+        `<atem:invoke>` for this parser to find. Skip the base hook so those
         choices decode natively, the same as "auto".
         """
         request.skip_special_tokens = False
@@ -249,7 +255,7 @@ class MuseToolParser(ToolParser):
         """Concatenate the bodies of messages addressed to a tool.
 
         Falls back to the whole text when no message header is present at all --
-        that means the framing never reached us (``skip_special_tokens`` was on,
+        that means the framing never reached us (`skip_special_tokens` was on,
         or the chunk carrying the header was dropped upstream), and scanning
         everything is strictly better than returning nothing.
         """
@@ -272,12 +278,12 @@ class MuseToolParser(ToolParser):
 
     @classmethod
     def _visible_channels(cls, text: str) -> tuple[str, str, bool, bool]:
-        """Return ``(content, reasoning, content_open, reasoning_open)``.
+        """Return `(content, reasoning, content_open, reasoning_open)`.
 
-        The ``*_open`` flags say whether that channel's LAST message is still
+        The `*_open` flags say whether that channel's LAST message is still
         being generated; only then must the caller hold back a partial
         structural marker. Tracking them per channel matters: a closed
-        reasoning block whose text happens to end in ``<`` would otherwise stay
+        reasoning block whose text happens to end in `<` would otherwise stay
         permanently truncated while a later content message is open.
         """
         content_parts: list[str] = []
@@ -314,42 +320,26 @@ class MuseToolParser(ToolParser):
                 names.add(name)
         return names
 
-    @classmethod
-    def _string_parameters(
-        cls, request: ChatCompletionRequest | ResponsesRequest | None
-    ) -> dict[str, set[str]]:
-        if not cls._preserve_string_parameters:
-            return {}
-        strings: dict[str, set[str]] = {}
-        for tool in getattr(request, "tools", None) or []:
-            function = getattr(tool, "function", None) or tool
-            if isinstance(function, dict):
-                name = function.get("name")
-                parameters = function.get("parameters")
-            else:
-                name = getattr(function, "name", None)
-                parameters = getattr(function, "parameters", None)
-            if name and isinstance(parameters, dict):
-                strings[name] = {
-                    key
-                    for key, schema in parameters.get("properties", {}).items()
-                    if isinstance(schema, dict) and schema.get("type") == "string"
-                }
-        return strings
+    def _parameter_types(
+        self, request: ChatCompletionRequest | ResponsesRequest | None
+    ) -> dict[str, ParameterTypes]:
+        if not self._preserve_string_parameters:
+            return {}  # MuseGlimmer keeps legacy decoding, so it never walks.
+        return self._parameter_types_cache.for_tools(getattr(request, "tools", None))
 
     @staticmethod
     def _normalize_name(emitted: str, registered: set[str]) -> str:
         """Map an emitted ATEM invoke name back to a registered tool name.
 
-        When a client registers a BARE name (e.g. ``get_weather``) the shipped
-        chat template renders the valid recipient as ``"get_weather.*"``, and
-        the model duly emits ``get_weather.get_weather``. Collapsing that
+        When a client registers a BARE name (e.g. `get_weather`) the shipped
+        chat template renders the valid recipient as `"get_weather.*"`, and
+        the model duly emits `get_weather.get_weather`. Collapsing that
         doubled form is safe: head and tail are identical and the collapsed
         name is registered.
 
         Anything else is passed through unchanged. Matching on the trailing
-        segment alone is NOT safe -- an emitted ``weather.get`` against a
-        registered ``{calendar.get}`` has a unique leaf match and would silently
+        segment alone is NOT safe -- an emitted `weather.get` against a
+        registered `{calendar.get}` has a unique leaf match and would silently
         dispatch the wrong tool.
         """
         if not registered or emitted in registered:
@@ -369,7 +359,7 @@ class MuseToolParser(ToolParser):
         cls,
         text: str,
         registered: set[str] | None = None,
-        strings: dict[str, set[str]] | None = None,
+        types: dict[str, ParameterTypes] | None = None,
     ) -> list[ToolCall]:
         registered = registered or set()
         scoped = cls._tool_channel_text(text)
@@ -379,11 +369,11 @@ class MuseToolParser(ToolParser):
             if not name_m:
                 continue
             name = cls._normalize_name(name_m.group(1), registered)
-            string_parameters = (strings or {}).get(name, set())
+            props, extra = (types or {}).get(name, ({}, None))
             args: dict = {}
             for pm in _PARAM_RE.finditer(invoke):
                 key, raw = pm.group("key"), pm.group("value")
-                args[key] = raw if key in string_parameters else _decode_value(raw)
+                args[key] = convert_value(raw, props.get(key, extra), _decode_value)
             tool_calls.append(
                 ToolCall(
                     function=FunctionCall(
@@ -422,7 +412,7 @@ class MuseToolParser(ToolParser):
         try:
             registered = self._registered_names(request)
             tool_calls = self._parse_tool_calls(
-                model_output, registered, self._string_parameters(request)
+                model_output, registered, self._parameter_types(request)
             )
             if not tool_calls:
                 # A tool block was opened but no COMPLETE
@@ -467,14 +457,14 @@ class MuseToolParser(ToolParser):
 
         This parser owns every delta once reasoning has ended: in
         vllm/parser/abstract_parser.py::parse_delta the "pass through as
-        content" fallback is guarded by ``not self._in_tool_call_phase(state)``,
-        and ``_in_tool_call_phase`` is simply ``tool_parser is not None and
-        state.reasoning_ended``. So with a tool parser loaded that fallback is
+        content" fallback is guarded by `not self._in_tool_call_phase(state)`,
+        and `_in_tool_call_phase` is simply `tool_parser is not None and
+        state.reasoning_ended`. So with a tool parser loaded that fallback is
         dead code, and returning None here DISCARDS the delta. Anything we do
-        not emit -- including the ``to=user`` final answer -- never reaches the
+        not emit -- including the `to=user` final answer -- never reaches the
         client. Hence content is emitted here, not left to the reasoning parser.
 
-        Tool calls are surfaced only when an ``<atem:invoke>`` block becomes
+        Tool calls are surfaced only when an `<atem:invoke>` block becomes
         complete: the XML is opaque until closed and Muse parameters are not
         incremental JSON, so there is nothing meaningful to stream before then.
         """
@@ -488,7 +478,7 @@ class MuseToolParser(ToolParser):
         try:
             registered = self._registered_names(request)
             calls = self._parse_tool_calls(
-                current_text, registered, self._string_parameters(request)
+                current_text, registered, self._parameter_types(request)
             )
             content, reasoning, content_open, reasoning_open = self._visible_channels(
                 current_text
