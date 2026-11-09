@@ -104,12 +104,13 @@ def _prefers_one_sided_all2all(config: "ParallelConfig") -> bool:
     # may span nodes and any data-parallel size is served.
     if _is_gb200_gb300_or_vr200():
         return True
-    # HGX has no NVLink between hosts, so the EP group must be one host's
-    # 8 GPUs, placed by vLLM's own launcher. An API-server-only process has no
-    # local ranks and must agree with engines that do.
+    # HGX has no NVLink between hosts, so the whole deployment must sit on one
+    # physical node, placed by vLLM's own launcher. Parallelism layout (DP, TP,
+    # EP size) does not matter. An API-server-only process has no local ranks
+    # and must agree with engines that do.
     return (
-        config.data_parallel_size == 8
-        and config.data_parallel_size_local in (0, 8)
+        config.nnodes == 1
+        and config.data_parallel_size_local in (0, config.data_parallel_size)
         and config.distributed_executor_backend in ("mp", "uni")
         and _is_hgx_b200_or_b300()
     )
@@ -326,10 +327,10 @@ class ParallelConfig:
     """All2All backend for MoE expert parallel communication. Available options:
 
     - "auto": "flashinfer_nvlink_one_sided" for expert parallelism without
-      elastic EP, with any data-parallel size on GB200/GB300/VR200 or exactly 8
-      on a single HGX B200/B300 node launched by vLLM, for BF16/FP16, ModelOpt
-      NVFP4 or 128x128 block FP8 models without LoRA or a MoE-EP backend;
-      "allgather_reducescatter" otherwise
+      elastic EP, with any data-parallel size on GB200/GB300/VR200 or on a
+      single HGX B200/B300 node launched by vLLM (any parallel layout), for
+      BF16/FP16, ModelOpt NVFP4 or 128x128 block FP8 models without LoRA or a
+      MoE-EP backend; "allgather_reducescatter" otherwise
 
     - "allgather_reducescatter": All2all based on allgather and reducescatter
     - "alltoall_batched": All2all based on all_to_all_single, routing each

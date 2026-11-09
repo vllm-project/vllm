@@ -1596,21 +1596,45 @@ def test_all2all_backend_defaults_to_one_sided_only_on_measured_platforms(
         (8, 4, "allgather_reducescatter"),
         (8, 1, "allgather_reducescatter"),
         (16, 8, "allgather_reducescatter"),
-        # Fewer ranks than were measured.
-        (4, 4, "allgather_reducescatter"),
+        # Fewer than 8 ranks, all on one node.
+        (4, 4, "flashinfer_nvlink_one_sided"),
+        (4, 0, "flashinfer_nvlink_one_sided"),
+        (2, 2, "flashinfer_nvlink_one_sided"),
+        (1, 1, "flashinfer_nvlink_one_sided"),
+        # Part of the ranks on another node.
+        (4, 2, "allgather_reducescatter"),
     ],
 )
 def test_one_sided_all2all_default_on_hgx_needs_one_full_node(
     hgx_host, data_parallel_size, data_parallel_size_local, expected
 ):
     """One-sided maps peer memory over NVLink, which on HGX ends at the
-    node, so the default may only pick it when all 8 EP ranks share one."""
+    node, so the default may only pick it when the whole deployment is on one."""
     config = _parallel_config(
         enable_expert_parallel=True,
         data_parallel_size=data_parallel_size,
         data_parallel_size_local=data_parallel_size_local,
     )
     assert config.all2all_backend == expected
+
+
+def test_one_sided_all2all_default_on_hgx_needs_one_node_for_any_layout(hgx_host):
+    """The only HGX condition is one physical node: TP8 alone qualifies, while
+    a layout spanning nodes does not."""
+    one_node = _parallel_config(
+        enable_expert_parallel=True,
+        tensor_parallel_size=8,
+        data_parallel_size=1,
+        data_parallel_size_local=1,
+    )
+    assert one_node.all2all_backend == "flashinfer_nvlink_one_sided"
+    two_nodes = _parallel_config(
+        enable_expert_parallel=True,
+        tensor_parallel_size=16,
+        nnodes=2,
+        distributed_executor_backend="mp",
+    )
+    assert two_nodes.all2all_backend == "allgather_reducescatter"
 
 
 def test_one_sided_all2all_default_on_hgx_needs_ranks_placed_by_vllm(

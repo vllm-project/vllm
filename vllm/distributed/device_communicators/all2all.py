@@ -865,10 +865,6 @@ class FlashInferNVLinkOneSidedManager(All2AllManagerBase):
             extra_payload_bytes_per_token=extra_payload_bytes_per_token,
             use_low_precision_combine=envs.VLLM_FLASHINFER_MOE_A2A_LOW_PRECISION_COMBINE,
             comm_backend=CustomCommunicator(self.cpu_group),
-            # Keep the fence transport; FlashInfer otherwise picks CFT counted
-            # writes or the Lamport transport where the platform supports them.
-            cft=False,
-            lamport=False,
         )
         if communication is not None:
             # Growth happens during model initialization, before graph capture.
