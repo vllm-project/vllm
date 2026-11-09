@@ -99,7 +99,6 @@ def _make_request(
     req = MagicMock()
     req.request_id = request_id
     req.num_computed_tokens = 64
-    req.num_prompt_tokens = 64
 
     if is_d_side:
         # D-side request: do_remote_prefill=True -> prefill on a remote P.
@@ -338,7 +337,10 @@ class TestPushScheduler:
 
 
 class TestChunkedPushScheduler:
-    def test_complete_chunks_stay_pinned_until_request_finishes(self):
+    @staticmethod
+    def _scheduler_with_request():
+        """A chunked-push scheduler and a 40-token request on 3 blocks of 16,
+        with the scheduler output that resolves the request's blocks."""
         vllm_config = create_vllm_config(
             kv_connector="NixlPushConnector",
             kv_role="kv_producer",
@@ -369,13 +371,19 @@ class TestChunkedPushScheduler:
         )
 
         output = SchedulerOutput.make_empty()
-        output.num_scheduled_tokens = {request.request_id: 32}
         output.preempted_req_ids = set()
         output.kv_connector_block_state = KVConnectorBlockState(
             req_ids={request.request_id},
             resolve_block_ids=lambda _: (block_ids,),
             boundary_state_offloads={},
         )
+        return sched, request, blocks, output
+
+    def test_complete_chunks_stay_pinned_until_request_finishes(self):
+        sched, request, blocks, output = self._scheduler_with_request()
+        block_ids = [block.block_id for block in blocks]
+
+        output.num_scheduled_tokens = {request.request_id: 32}
         first_meta = sched.build_connector_meta(output)
 
         assert len(first_meta.push_chunk_jobs) == 1
@@ -418,33 +426,10 @@ class TestChunkedPushScheduler:
     def test_abort_after_final_job_sends_no_cancellation(self):
         # The final job's WRITE completes and reports the request finished;
         # a cancellation as well would report it a second time.
-        vllm_config = create_vllm_config(
-            kv_connector="NixlPushConnector",
-            kv_role="kv_producer",
-            kv_connector_extra_config={"enable_chunked_push": True},
-        )
-        sched = NixlPushConnectorScheduler(
-            vllm_config,
-            "test-prefill-engine",
-            make_kv_cache_config(block_size=16, num_blocks=8),
-        )
-        pool = BlockPool(num_gpu_blocks=8, enable_caching=False, hash_block_size=16)
-        blocks = pool.get_new_blocks(3)
+        sched, request, blocks, output = self._scheduler_with_request()
         block_ids = [block.block_id for block in blocks]
-        sched.bind_gpu_block_pool(pool)
 
-        request = create_request(num_tokens=40, block_size=16, do_remote_decode=True)
-        sched.update_state_after_alloc(
-            request, KVCacheBlocks((blocks,)), num_external_tokens=0
-        )
-        output = SchedulerOutput.make_empty()
         output.num_scheduled_tokens = {request.request_id: 40}
-        output.preempted_req_ids = set()
-        output.kv_connector_block_state = KVConnectorBlockState(
-            req_ids={request.request_id},
-            resolve_block_ids=lambda _: (block_ids,),
-            boundary_state_offloads={},
-        )
         (final_job,) = sched.build_connector_meta(output).push_chunk_jobs
         assert final_job.is_final
 
@@ -490,6 +475,18 @@ class _StubWriterWorker(NixlPushConnectorWorker):
         w._push_writer_stop = threading.Event()
         w._push_writer_thread = None
         w._chunked_push = False
+        w._chunk_defer_timeout = 60.0
+        w._chunk_job_inbox = queue.Queue()
+        w._pending_chunk_jobs = []
+        w._chunk_deferred = []
+        w._chunk_states = {}
+        w._chunk_registrations = {}
+        w._chunk_transfers = {}
+        w._chunk_transfer_tasks = {}
+        w._failed_chunk_transfers = set()
+        w._next_chunk_transfer_id = 0
+        w._completed_chunk_requests = set()
+        w._chunk_lock = threading.Lock()
 
         # Base worker fields touched by start_load_kv / _get_new_notifs.
         w._recving_metadata = {}
@@ -578,11 +575,6 @@ def test_chunked_push_final_job_queued_before_first_chunk_is_ready():
     # first chunk is computing. Both chunks still go out as chunk WRITEs.
     w = _StubWriterWorker.fresh()
     w._chunked_push = True
-    w._chunk_job_inbox = queue.Queue()
-    w._chunk_deferred, w._chunk_states = [], {}
-    w._chunk_transfers, w._chunk_transfer_tasks = {}, {}
-    w._next_chunk_transfer_id, w._completed_chunk_requests = 0, set()
-    w._chunk_lock = threading.Lock()
     w._chunk_registrations = {"req-p": _registration_data("req-d")}
     w._ensure_handshake = lambda *a, **k: None
     w._chunk_path_supported = lambda job, reg_data: True
@@ -642,13 +634,6 @@ def test_chunk_job_queued_at_cancellation_is_not_sent():
     # inbox, and D's registration arrives afterwards.
     w = _StubWriterWorker.fresh()
     w._chunked_push = True
-    w._chunk_job_inbox = queue.Queue()
-    w._pending_chunk_jobs = []
-    w._chunk_deferred, w._chunk_states = [], {}
-    w._chunk_transfers, w._chunk_transfer_tasks = {}, {}
-    w._next_chunk_transfer_id, w._completed_chunk_requests = 0, set()
-    w._chunk_lock = threading.Lock()
-    w._chunk_registrations = {}
     w._ensure_handshake = lambda *a, **k: None
     w._chunk_path_supported = lambda job, reg_data: True
     w._send_heartbeats = lambda metadata: None

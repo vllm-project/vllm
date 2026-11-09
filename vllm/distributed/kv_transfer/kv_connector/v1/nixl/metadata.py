@@ -276,7 +276,9 @@ class ReqMeta:
 class NixlPushChunkJob:
     """One producer-side chunk hand-off.
 
-    The scheduler pins ``local_block_ids`` until the request transfer finishes.
+    ``local_block_ids`` is the block table up to ``end_block``; this job and the
+    request's earlier jobs keep it pinned until the worker reports the request
+    finished.
     ``start_block`` and ``end_block`` address the single
     transferable full-attention block table supported by the initial chunked
     push implementation. The final job includes the complete table so the
@@ -318,6 +320,8 @@ class NixlConnectorMetadata(KVConnectorMetadata):
         # existing whole-request transfer after earlier writes have drained.
         self.push_chunk_jobs: list[NixlPushChunkJob] = []
         self.push_chunk_fallbacks: set[ReqId] = set()
+        # Requests that ended abnormally (e.g. aborted) with chunk jobs emitted
+        # but not the final one; their unsent jobs are dropped.
         self.push_chunk_cancellations: set[ReqId] = set()
 
     def _add_new_req(

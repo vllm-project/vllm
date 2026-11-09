@@ -1023,10 +1023,8 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         remote_block_ids, local_block_ids = self._apply_prefix_caching(
             decode_block_ids=remote_block_ids,
             prefill_block_ids=local_block_ids,
-            decode_physical_per_logical=(
-                remote_info.remote_physical_blocks_per_logical
-            ),
-            prefill_physical_per_logical=(self._physical_blocks_per_logical_kv_block),
+            decode_physical_per_logical=remote_info.remote_physical_blocks_per_logical,
+            prefill_physical_per_logical=self._physical_blocks_per_logical_kv_block,
         )
 
         local_block_ids = list(local_block_ids)
