@@ -83,7 +83,10 @@ async def test_requested_stop_is_not_reported_as_a_failure(caplog_vllm, monkeypa
     [outcome] = await asyncio.wait_for(
         asyncio.gather(request, return_exceptions=True), TIMEOUT_SEC
     )
-    assert isinstance(outcome, EngineDeadError) or outcome.finished
+    if isinstance(outcome, BaseException):
+        assert isinstance(outcome, EngineDeadError)
+    else:
+        assert outcome.finished
 
 
 @pytest.mark.asyncio
