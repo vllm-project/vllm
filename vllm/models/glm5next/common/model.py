@@ -878,10 +878,10 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
     ) -> torch.Tensor:
         """Completed residual stream entering a layer, as one hidden vector.
 
-        mHC layers defer their final ``hc_post`` into the next layer's fused
-        pre-op, so ``hidden_states`` holds the raw layer output while the
+        mHC layers defer their final `hc_post` into the next layer's fused
+        pre-op, so `hidden_states` holds the raw layer output while the
         widened stream is completed here and contracted back to
-        ``hidden_size``. Non-mHC layers already return the summed stream.
+        `hidden_size`. Non-mHC layers already return the summed stream.
         """
         if post is None:
             return hidden_states
@@ -1358,9 +1358,6 @@ class Glm5NextForConditionalGeneration(
         # so pipeline parallelism is gated off (consistent with the text-only
         # model) and we intentionally do not alias it here.
 
-    def process_weights_after_loading(self) -> None:
-        self.language_model.process_weights_after_loading()
-
     def set_moe_parameters(self) -> None:
         self.moe_mlp_layers = [
             layer.mlp
@@ -1458,7 +1455,7 @@ def _fused_shared_experts_tuned(parallel_config: ParallelConfig) -> bool:
 
 def _num_fused_shared_experts(n_shared_experts: int | None, enabled: bool) -> int:
     """Expert slots the fused MoE appends for the shared expert; must match the
-    ``num_fused_shared_experts`` that ``FusedMoE`` allocates."""
+    `num_fused_shared_experts` that `FusedMoE` allocates."""
     if not enabled or n_shared_experts is None:
         return 0
     if n_shared_experts > 1:
@@ -1472,7 +1469,7 @@ def _num_fused_shared_experts(n_shared_experts: int | None, enabled: bool) -> in
 
 
 def _fused_shared_expert_name(name: str, n_routed_experts: int) -> str:
-    """Point a checkpoint ``mlp.shared_experts.*`` tensor at the fused MoE's
+    """Point a checkpoint `mlp.shared_experts.*` tensor at the fused MoE's
     shared-expert slot, which follows the routed experts; other names are
     returned unchanged."""
     return name.replace("mlp.shared_experts.", f"mlp.experts.{n_routed_experts}.", 1)
@@ -1515,8 +1512,8 @@ def _dequant_fp8_block(
 ) -> torch.Tensor:
     """Dequantize a block-FP8 (e4m3) weight with per-block scale to BF16.
 
-    Unlike ``scaled_dequantize`` this tolerates a non-divisible (partial last
-    block) shape by zero-padding to a multiple of ``block_size`` before the
+    Unlike `scaled_dequantize` this tolerates a non-divisible (partial last
+    block) shape by zero-padding to a multiple of `block_size` before the
     scale broadcast and trimming back afterwards (e.g. kv_a_proj_with_mqa is
     576 rows = 4*128 + 64).
     """
@@ -1556,10 +1553,10 @@ def _try_load_fp8_attn_proj(
     """Dequantize FP8 q_a_proj / kv_a_proj_with_mqa / o_proj to BF16 on load.
 
     The FP8 checkpoint stores these as block-FP8 (weight + weight_scale_inv),
-    but the model holds them in BF16 (``fused_qkv_a_proj`` is always BF16 via
-    DeepSeekV2FusedQkvAProjLinear; ``o_proj`` is excluded by
+    but the model holds them in BF16 (`fused_qkv_a_proj` is always BF16 via
+    DeepSeekV2FusedQkvAProjLinear; `o_proj` is excluded by
     modules_to_not_convert). When the model target is BF16 (no
-    ``weight_scale_inv`` param) we dequantize; otherwise we return False so the
+    `weight_scale_inv` param) we dequantize; otherwise we return False so the
     normal stacked/direct path loads the FP8 tensor as-is.
     """
     matched = None
