@@ -470,6 +470,11 @@ pub struct SharedRuntimeArgs {
     #[serde(default)]
     pub enable_per_request_metrics: bool,
 
+    /// If set to True, including usage on every request.
+    #[arg(long, default_missing_value = "true", num_args = 0..=1)]
+    #[serde(default)]
+    pub enable_force_include_usage: bool,
+
     /// If specified, API server will add X-Request-Id header to responses.
     #[arg(
         long,
@@ -1009,6 +1014,7 @@ impl SharedRuntimeArgs {
             enable_prompt_tokens_details: self.enable_prompt_tokens_details,
             default_return_tokens_as_token_ids: self.return_tokens_as_token_ids,
             enable_per_request_metrics: self.enable_per_request_metrics,
+            force_include_usage: self.enable_force_include_usage,
             enable_request_id_headers: self.enable_request_id_headers,
             log_error_stack: self.log_error_stack.unwrap_or(self.server_dev_mode),
             enable_scale_out: self.enable_scale_out,
