@@ -44,6 +44,7 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
+from vllm.model_executor.tpsp import TPSPContext, tpsp_shard_residual
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.config import set_default_rope_theta
 from vllm.v1.attention.backend import AttentionType
@@ -55,8 +56,7 @@ from .interfaces import (
     SupportsLoRA,
     SupportsPP,
 )
-from .qwen2 import Qwen2MLP as Qwen3MLP
-from .qwen2 import Qwen2Model
+from .qwen2 import Qwen2MLP, Qwen2Model
 from .utils import AutoWeightsLoader, PPMissingLayer, extract_layer_index, maybe_prefix
 
 logger = init_logger(__name__)
@@ -157,6 +157,7 @@ class Qwen3Attention(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
+        tpsp_active: bool = False,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
@@ -169,11 +170,24 @@ class Qwen3Attention(nn.Module):
         k = k_by_head.view(k.shape)
         q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v)
+        if tpsp_active:
+            return attn_output
         output, _ = self.o_proj(attn_output)
         return output
 
 
+class Qwen3MLP(Qwen2MLP):
+    def forward(self, x: torch.Tensor, tpsp_active: bool = False) -> torch.Tensor:
+        gate_up, _ = self.gate_up_proj(x)
+        x = self.act_fn(gate_up)
+        if not tpsp_active:
+            x, _ = self.down_proj(x)
+        return x
+
+
 class Qwen3DecoderLayer(nn.Module):
+    tpsp_context: TPSPContext
+
     def __init__(
         self,
         config: Qwen3Config,
@@ -233,19 +247,42 @@ class Qwen3DecoderLayer(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None,
+        *,
+        next_norm: RMSNorm | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        # Self Attention
+        tpsp_active = next_norm is not None
+        residual_is_full = residual is None
         if residual is None:
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
-        else:
+        elif not tpsp_active:
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
+            tpsp_active=tpsp_active,
         )
 
-        # Fully Connected
+        if tpsp_active:
+            if residual_is_full:
+                residual = tpsp_shard_residual(residual)
+            backend = self.tpsp_context.backend
+            hidden_states, residual = backend.fused_gemm_rs_norm_ag(
+                self.tpsp_context.handles["o_proj"],
+                hidden_states,
+                self.self_attn.o_proj,
+                residual,
+                self.post_attention_layernorm,
+            )
+            hidden_states = self.mlp(hidden_states, tpsp_active=True)
+            return backend.fused_gemm_rs_norm_ag(
+                self.tpsp_context.handles["down_proj"],
+                hidden_states,
+                self.mlp.down_proj,
+                residual,
+                next_norm,
+            )
+
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
         hidden_states = self.mlp(hidden_states)
         return hidden_states, residual
@@ -280,6 +317,7 @@ class Qwen3Model(Qwen2Model):
 class Qwen3ForCausalLM(
     LocalArgmaxMixin, nn.Module, SupportsLoRA, SupportsPP, SupportsEagle, SupportsEagle3
 ):
+    tpsp_capable = True
     hf_to_vllm_mapper = Qwen3Model.hf_to_vllm_mapper
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
@@ -320,6 +358,16 @@ class Qwen3ForCausalLM(
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors
         )
+        if vllm_config.model_config.enable_tpsp:
+            if not type(self).__dict__.get("tpsp_capable", False):
+                raise ValueError(f"TPSP is not supported by {type(self).__name__}")
+            if (
+                vllm_config.quant_config is not None
+                or vllm_config.lora_config is not None
+            ):
+                raise ValueError("TPSP does not support quantization or LoRA")
+            self.model.tpsp_requested = True
+            self.model.do_not_compile = True
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
