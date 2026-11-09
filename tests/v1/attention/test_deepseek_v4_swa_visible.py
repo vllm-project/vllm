@@ -460,7 +460,7 @@ def _require_bi_kernels():
 
 
 def _swa_first_chunk(prefix_query_replay, compress_ratio, ragged, base, gen):
-    """One combine chunk: query_start_loc offset by ``base``, per-request
+    """One combine chunk: query_start_loc offset by `base`, per-request
     gather lengths stopping at the replay start, and top-k rows that are
     ascending (compact) or random with -1 holes, negatives and ids >= N
     past and inside each row's length (ragged)."""
@@ -635,7 +635,7 @@ def test_v41_bi_topk_lens_by_position(seq_len, compress_ratio):
 
 def _paged_indices_batch(requests, compress_ratio, topk_rows, gen):
     """Metadata for (request, prefix, query_len, replay_start) rows, with
-    per-request shuffled pages; top-k rows come from ``topk_rows[request]``
+    per-request shuffled pages; top-k rows come from `topk_rows[request]`
     at absolute positions."""
     window, swa_block, top_k = 128, 32, 512
     compressed_block = 64
@@ -1787,7 +1787,7 @@ def _assert_ds41_bi_decode_graph(fixture, lengths, compress_ratio, expected, que
 
     A FULL decode graph is captured once; later steps rewrite the persistent
     metadata, queries and indexer inputs in place and replay. Each request
-    contributes ``query_len`` rows (6 is a spec-decode verify step with 5
+    contributes `query_len` rows (6 is a spec-decode verify step with 5
     draft tokens). Every real row must match the eager prefill result for the
     same (request, position) bit for bit; padding rows stay inert.
     """
