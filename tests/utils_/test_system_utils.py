@@ -110,8 +110,7 @@ def test_kill_process_tree_skips_child_that_exits_mid_walk(monkeypatch):
 
 
 def test_forked_child_can_use_openmp_after_parent_did():
-    """A forked child deadlocks in libgomp if its parent already ran a parallel
-    region, unless get_mp_context() releases the parent's OpenMP workers."""
+    """A forked vLLM worker can use OpenMP after its parent ran a parallel region."""
     script = """
 import torch
 from vllm.utils.system_utils import get_mp_context
@@ -152,10 +151,13 @@ if pid == 0:
     use_openmp()
     proc = get_mp_context().Process(target=use_openmp)
     proc.start()
+    signal.alarm(0)
     proc.join(60)
-    hung = proc.is_alive()
-    proc.kill()
-    os._exit(1 if hung else proc.exitcode)
+    if proc.is_alive():
+        proc.kill()
+        proc.join()
+        os._exit(1)
+    os._exit(proc.exitcode)
 raise SystemExit(os.waitstatus_to_exitcode(os.waitpid(pid, 0)[1]))
 """
     env = os.environ | {"VLLM_WORKER_MULTIPROC_METHOD": "fork"}
