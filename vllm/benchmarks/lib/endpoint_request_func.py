@@ -43,8 +43,8 @@ class StreamedResponseHandler:
             if message:
                 messages.append(message)
 
-        # if self.buffer is not empty, check if it is a complete message
-        # by removing data: prefix and check if it is a valid JSON
+        # This can emit complete JSON before the event's blank-line delimiter;
+        # validation of multiline data therefore depends on HTTP chunk boundaries.
         if self.buffer.startswith("data: "):
             message_content = self.buffer.removeprefix("data: ").strip()
             if message_content == "[DONE]":
