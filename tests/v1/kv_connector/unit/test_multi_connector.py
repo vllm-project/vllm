@@ -415,6 +415,7 @@ def test_multi_example_connector_consistency():
         "get_mem_pool_context",
         "register_kv_caches",
         "set_host_xfer_buffer_ops",
+        "on_kv_cache_ready",
         "get_handshake_metadata",
         "handle_preemptions",
         "bind_connector_metadata",

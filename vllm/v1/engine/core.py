@@ -434,6 +434,12 @@ class EngineCore:
                 aligned_num_cpu_blocks
             )
 
+        if (
+            kv_transfer_config is not None
+            and kv_transfer_config.is_kv_transfer_instance
+        ):
+            self.collective_rpc("notify_kv_cache_ready")
+
         elapsed = time.time() - start
         compile_time = vllm_config.compilation_config.compilation_time
         encoder_compile_time = vllm_config.compilation_config.encoder_compilation_time

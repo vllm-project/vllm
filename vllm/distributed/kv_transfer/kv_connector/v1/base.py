@@ -306,6 +306,23 @@ class KVConnectorBase_V1(ABC):
         """
         return
 
+    def on_kv_cache_ready(self) -> None:
+        """Notify this worker that startup KV cache preparation is complete.
+
+        Called after startup warmup (when performed), graph capture, and final
+        KV cache sizing, before requests are admitted. Device work preceding
+        the notification has completed. Existing connectors need no action.
+
+        Connectors may finish deferred registration here. The engine waits for
+        this method on every worker; blocking implementations must bound their
+        own external waits. Returning after scheduling background work does
+        not make that work part of the engine's startup barrier.
+
+        This is an initialization notification, not a health check or a
+        sleep/wake callback. Registration and restore hooks remain unchanged.
+        """
+        return
+
     def unregister_kv_caches(self) -> None:
         """Drop KV cache registrations before sleep. Transfers are already
         drained. Idempotent."""

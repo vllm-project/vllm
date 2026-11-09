@@ -49,6 +49,36 @@ Now supports 9 types of connectors:
   --kv-transfer-config '{"kv_connector":"FlexKVConnectorV1","kv_role":"kv_both"}'
   ```
 
+## KV connector startup notification
+
+Custom KV connectors can override the worker-side
+`KVConnectorBase_V1.on_kv_cache_ready()` hook to finish deferred registration
+before the first request. The default implementation does nothing, so existing
+connectors retain their registration behavior. No new configuration is required.
+
+The engine calls this hook on every worker after startup warmup and CUDA Graph
+capture (when enabled), and after final KV cache sizing. Each worker completes
+preceding device work before invoking the hook. This ordering also applies in
+eager mode. `register_kv_caches()` still receives the cache tensors earlier;
+it is not a notification that warmup has finished. A connector that defers
+registration must retain the tensors and layout information it needs until
+`on_kv_cache_ready()` runs. `MultiConnector` forwards the notification to each
+child in configuration order, including nested connectors.
+
+Engine initialization waits for every worker's hook to return. A connector can
+use that boundary to complete resource activation before requests arrive;
+external waits must have connector-defined deadlines. Exceptions propagate as
+initialization failures. If the hook only starts a background task, the engine
+does not wait for that task, and the connector remains responsible for handling
+requests while its resources are unavailable. This notification does not add
+scheduler readiness tracking or automatically activate LMCache resources.
+
+This is a startup lifecycle notification, not proof of a successful transfer or
+ongoing health. It is not repeated on idle resource reclamation or sleep/wake;
+the existing unregister/restore lifecycle remains responsible for those paths.
+Elastic scale-up uses the same initialization boundary, but does not imply a
+warmup pass when that startup path deliberately skips warmup.
+
 ## Reusing prefill token ids on decode
 
 !!! note
