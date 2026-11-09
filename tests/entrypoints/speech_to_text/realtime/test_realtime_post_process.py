@@ -4,7 +4,7 @@
 
 The realtime WebSocket path must route model output through the same
 post-processing hooks as the REST transcription path, so that models with a
-structured output format (e.g. Qwen3-ASR's ``language Chinese<asr_text>``
+structured output format (e.g. Qwen3-ASR's `language Chinese<asr_text>`
 header, repeated on every 5 s segment) do not leak the header to clients.
 """
 
