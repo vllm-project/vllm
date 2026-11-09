@@ -3,7 +3,7 @@
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, replace
-from enum import Enum
+from enum import Enum, StrEnum
 from typing import TYPE_CHECKING, Any, ClassVar, Generic, Protocol, TypeVar
 
 import numpy as np
@@ -32,7 +32,7 @@ if TYPE_CHECKING:
 from vllm.v1.kv_cache_interface import KVCacheLayout, get_kv_quant_mode
 
 
-class AttentionType(str, Enum):
+class AttentionType(StrEnum):
     """Attention type.
     Use string to be compatible with `torch.compile`.
     """
@@ -470,7 +470,7 @@ class CommonAttentionMetadata:
     Reference Sliding Window Attention (R-SWA). Tokens with logical index below
     this stay globally visible; later (generated) tokens additionally see a
     fixed sliding window. None disables R-SWA. The attention backend copies this
-    into its own persistent buffer and reads ``rswa_window`` from model config."""
+    into its own persistent buffer and reads `rswa_window` from model config."""
 
     _num_computed_tokens_cache: torch.Tensor | None = None
     _token_to_req_indices_cache: torch.Tensor | None = None
@@ -478,20 +478,8 @@ class CommonAttentionMetadata:
     def batch_size(self) -> int:
         return self.seq_lens.shape[0]
 
-    def naive_query_lens(self) -> torch.Tensor:
-        """Naive because it assumes that query ends where the next query starts."""
-        return self.query_start_loc[1:] - self.query_start_loc[:-1]
-
     def replace(self, **kwargs) -> "CommonAttentionMetadata":
         return replace(self, **kwargs)
-
-    def invalidate_cached_layout(self) -> None:
-        """Drop values cached from query_start_loc and seq_lens.
-
-        Call after updating either in place.
-        """
-        self._num_computed_tokens_cache = None
-        self._token_to_req_indices_cache = None
 
     def compute_num_computed_tokens(self) -> torch.Tensor:
         """Compute num_computed_tokens on device (seq_lens - query_lens)."""
@@ -578,21 +566,22 @@ class AttentionCGSupport(Enum):
 def max_decode_query_len(vllm_config: "VllmConfig") -> int:
     """Widest request a spec-as-decode builder treats as a decode.
 
-    On model runner V2 this is a verification request, 1 +
-    num_speculative_tokens: no V2 speculator builds a wider query. The reorder
-    threshold and the code that mirrors the builders' decode/prefill split all
-    read this, so they cannot drift apart.
+    This is the widest per-request query any forward pass builds: a verification
+    request (1 + num_speculative_tokens) plus the drafter's extra slots, e.g. the
+    standalone draft model's correction token. The reorder threshold and the code
+    that mirrors the builders' decode/prefill split all read this, so they cannot
+    drift apart.
     """
     speculative_config = getattr(vllm_config, "speculative_config", None)
     if speculative_config is None or speculative_config.num_speculative_tokens is None:
         return 1
-    num_speculative_tokens = speculative_config.num_speculative_tokens
-    max_query_len = 1 + num_speculative_tokens
-    if speculative_config.parallel_drafting and not vllm_config.use_v2_model_runner:
-        # Model runner V1 only; remove with it. Its parallel drafter appends up
-        # to num_speculative_tokens mask slots to each verified request.
-        max_query_len += num_speculative_tokens
-    return max_query_len
+    # Account for additional drafting slots that some speculators append to the
+    # query.
+    return (
+        1
+        + speculative_config.num_speculative_tokens
+        + speculative_config.max_num_new_slots_for_drafting
+    )
 
 
 class AttentionMetadataBuilder(ABC, Generic[M]):
@@ -734,35 +723,13 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
             common_prefix_len=0, common_attn_metadata=common_attn_metadata
         )
 
-    def build_for_drafting(
-        self,
-        common_attn_metadata: CommonAttentionMetadata,
-        draft_index: int,
-    ) -> M:
-        """Build attention metadata for draft model. Uses build by default.
-
-        Args:
-            common_attn_metadata: The common attention metadata.
-            draft_index: The index of the current draft operation.
-                When speculating a chain of tokens, this index refers to the
-                draft attempt for the i-th token.
-                For tree-based attention, this index instead refers to the
-                draft attempt for the i-th level in the tree of tokens.
-
-        """
-        return self.build(
-            common_prefix_len=0,
-            common_attn_metadata=common_attn_metadata,
-            fast_build=True,
-        )
-
     def update_draft_decode_metadata(self, metadata: M) -> None:
         """Update draft decode metadata in place.
 
         Speculators can record this call inside their draft decode CUDA graphs,
         so it runs once at capture and never again in Python. Implementations
         must emit only capture-safe operations and write results into persistent
-        tensors that ``metadata`` already references.
+        tensors that `metadata` already references.
         """
         raise NotImplementedError
 

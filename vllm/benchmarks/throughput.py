@@ -535,7 +535,7 @@ _RANDOM_LEN_FALLBACKS = {
 def _to_serve_args(args: argparse.Namespace) -> argparse.Namespace:
     """Translate throughput args into a namespace the shared get_samples reads.
 
-    ``get_samples`` (used by ``bench serve``) expects ~45 attributes; the
+    `get_samples` (used by `bench serve`) expects ~45 attributes; the
     throughput CLI exposes most of them under the same names, and this adapter
     fills the rest while preserving throughput's existing flag names so no
     script breaks.
@@ -573,6 +573,7 @@ def _to_serve_args(args: argparse.Namespace) -> argparse.Namespace:
         getattr(args, "enable_multimodal_chat", False) or backend == "vllm-chat"
     )
     # serve-only attrs throughput never exposed; keep serve's defaults.
+    d.setdefault("hf_name", None)
     d.setdefault("disable_shuffle", False)
     d.setdefault("skip_chat_template", False)
     d.setdefault("no_stream", False)
@@ -613,9 +614,9 @@ def filter_requests_for_dp(requests, data_parallel_size):
 def assign_loras(requests, args):
     """Attach a LoRA request to each sample (throughput-only post-processing).
 
-    The shared ``datasets.get_samples`` path carries no LoRA information, so
+    The shared `datasets.get_samples` path carries no LoRA information, so
     LoRA assignment is applied here, uniformly across every dataset type. No-op
-    when ``--lora-path`` is unset.
+    when `--lora-path` is unset.
     """
     lora_path = getattr(args, "lora_path", None)
     if not lora_path:

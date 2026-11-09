@@ -15,6 +15,7 @@ pub mod types;
 
 mod convert;
 mod streaming;
+mod tools;
 mod validate;
 
 use std::convert::Infallible;
@@ -87,24 +88,20 @@ pub async fn create_responses(
         created_at,
     );
 
+    let items = OutputItemStreamer::new(prepared.include_reasoning, prepared.tool_names);
     if stream_requested {
         let event_stream = responses_event_stream(
             chat_stream,
             response,
-            prepared.include_reasoning,
+            items,
             api_server_options.enable_per_request_metrics,
         );
         let sse_stream = responses_sse_stream(event_stream).instrument(request_span);
         sse_response(sse_stream, api_server_options.sse_keep_alive_interval)
     } else {
-        match collect_responses(
-            chat_stream,
-            response,
-            prepared.include_reasoning,
-            &api_server_options,
-        )
-        .instrument(request_span)
-        .await
+        match collect_responses(chat_stream, response, items, &api_server_options)
+            .instrument(request_span)
+            .await
         {
             Ok(response) => Json(response).into_response(),
             Err(error) => error.into_response(),
@@ -141,14 +138,13 @@ fn response_not_found(response_id: &str) -> ApiError {
 async fn collect_responses(
     mut stream: ChatEventStream,
     response: ResponsesResponse,
-    include_reasoning: bool,
+    mut items: OutputItemStreamer,
     ApiServerOptions {
         enable_log_requests,
         enable_per_request_metrics,
         ..
     }: &ApiServerOptions,
 ) -> Result<ResponsesResponse, ApiError> {
-    let mut items = OutputItemStreamer::new(include_reasoning);
     let terminal = loop {
         let Some(event) = stream.next().await else {
             return Err(server_error!(
@@ -296,12 +292,10 @@ fn failed_response(
 async fn responses_event_stream(
     mut stream: impl ChatEventStreamTrait + Unpin,
     response: ResponsesResponse,
-    include_reasoning: bool,
+    mut items: OutputItemStreamer,
     enable_per_request_metrics: bool,
     mut y: TryYielder<ResponseStreamEvent, Infallible>,
 ) -> Result<(), Infallible> {
-    let mut items = OutputItemStreamer::new(include_reasoning);
-
     let initial = Arc::new(response);
     y.yield_ok(ResponseStreamEvent::Created {
         response: Arc::clone(&initial),
