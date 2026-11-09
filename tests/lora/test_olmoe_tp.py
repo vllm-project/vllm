@@ -253,3 +253,50 @@ def test_olmoe_lora_dp2_ep(olmoe_lora_files):
     running DP dummy batches; neither may leak into or drop the other's LoRA.
     """
     asyncio.run(_run_dp2_ep(olmoe_lora_files))
+
+
+async def _run_dp2_ep_slot_order(lora_path: str, opposite_path: str) -> None:
+    engine = AsyncLLM.from_engine_args(
+        AsyncEngineArgs(
+            MODEL_PATH,
+            max_model_len=1024,
+            enable_lora=True,
+            max_loras=4,
+            enforce_eager=True,
+            hf_overrides={"head_dtype": "float32"},
+            data_parallel_size=2,
+            enable_expert_parallel=True,
+        )
+    )
+    try:
+        sql = LoRARequest("sql", 1, lora_path)
+        opposite = LoRARequest("opposite", 2, opposite_path)
+        # Load in opposite orders: rank 0 slots are [sql, opposite], rank 1
+        # slots are [opposite, sql].
+        await _generate_on_rank(engine, "load0", 0, sql, 1)
+        await _generate_on_rank(engine, "load1", 1, opposite, 1)
+        await asyncio.gather(
+            _generate_on_rank(engine, "load2", 0, opposite, 1),
+            _generate_on_rank(engine, "load3", 1, sql, 1),
+        )
+        for rank in (0, 1):
+            _check(
+                await _generate_on_rank(engine, f"sql{rank}", rank, sql),
+                EXPECTED_LORA_OUTPUT,
+            )
+    finally:
+        engine.shutdown()
+
+
+@multi_gpu_test(num_gpus=2)
+def test_olmoe_lora_dp2_ep_slot_order(olmoe_lora_files, tmp_path):
+    """Tokens dispatched to a rank that holds the adapter in a different slot
+    must still use that adapter's expert weights."""
+    opposite = tmp_path / "opposite"
+    shutil.copytree(olmoe_lora_files, opposite)
+    weights = load_file(str(opposite / "adapter_model.safetensors"))
+    for name in weights:
+        if "experts" in name and "lora_B" in name:
+            weights[name] = -weights[name]
+    save_file(weights, str(opposite / "adapter_model.safetensors"))
+    asyncio.run(_run_dp2_ep_slot_order(olmoe_lora_files, str(opposite)))
