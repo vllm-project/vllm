@@ -17,6 +17,9 @@ use uuid::Uuid;
 
 use crate::error::{ApiError, bail_invalid_request};
 
+mod npy;
+pub(crate) use npy::npy_base64;
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ResolvedRequestContext {
     pub request_id: String,
