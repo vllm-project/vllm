@@ -184,12 +184,9 @@ steps:
   source_file_dependencies:
   - vllm/models/minimax_m3/amd/
   - tests/models/minimax_m3/amd_specialized_decode/
-  - tests/models/minimax_m3/test_index_cache_overrides.py
   - tests/models/minimax_m3/test_dspark_drafter.py
-  - vllm/model_executor/models/config.py
   commands:
   - pytest -v -s models/minimax_m3/amd_specialized_decode
-  - pytest -v -s models/minimax_m3/test_index_cache_overrides.py
   - pytest -v -s models/minimax_m3/test_dspark_drafter.py
 
 - label: ":nvidia: (B200) Inkling"
@@ -414,7 +411,7 @@ steps:
       - pytest -v -s models/qwen4_exp/test_ple.py
       - pytest -v -s models/qwen4_exp/test_qsa_reference.py
 
-- label: ":nvidia: (B200) Qwen4 Exp HC Kernels"
+- label: ":nvidia: (B200) Qwen4 Exp Kernels"
   key: qwen4-exp-hc-kernels-b200
   automatic_shard: true
   timeout_in_minutes: 20
@@ -422,10 +419,28 @@ steps:
   source_file_dependencies:
   - csrc/qwen4_exp/
   - vllm/models/qwen4_exp/nvidia/hyperconnection.py
+  - vllm/models/qwen4_exp/nvidia/mega_moe.py
   - vllm/models/qwen4_exp/nvidia/ops/hc.py
+  - vllm/model_executor/layers/fused_moe/deep_gemm_mega_moe.py
   - tests/models/qwen4_exp/test_hc_ops.py
+  - tests/models/qwen4_exp/test_mega_moe.py
   commands:
     - pytest -v -s models/qwen4_exp/test_hc_ops.py
+    - pytest -v -s models/qwen4_exp/test_mega_moe.py
+  mirror:
+    amd:
+      label: ":amd: (MI355) Qwen4 Exp HC Kernels"
+      dind: false
+      device: mi355_1
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/platforms/rocm.py
+      - vllm/models/qwen4_exp/amd/hyperconnection.py
+      - vllm/models/qwen4_exp/amd/ops/hc.py
+      - tests/models/qwen4_exp/test_hc_ops_amd.py
+      commands:
+      - pytest -v -s models/qwen4_exp/test_hc_ops_amd.py
 
 - label: ":amd: (MI300) Qwen4 Exp"
   key: qwen4-exp-unit-tests-mi300
