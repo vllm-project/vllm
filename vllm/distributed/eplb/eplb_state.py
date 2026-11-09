@@ -57,6 +57,7 @@ from .eplb_utils import CpuGpuEvent
 from .policy import EPLB_POLICIES, AbstractEplbPolicy, DefaultEplbPolicy
 from .rebalance_execute import (
     AsyncEplbLayerResult,
+    copy_rows,
     move_from_buffer,
     rearrange_expert_weights_inplace,
 )
@@ -519,6 +520,8 @@ class EplbState:
         )
         expert_buffer = communicator.owned_expert_buffer or expert_buffer
         assert expert_buffer is not None
+        # Compile the copy-back kernels now rather than mid-serving (no-op copy).
+        copy_rows(model.expert_weights[0], [0], model.expert_weights[0], [0])
 
         model_state = EplbModelState(
             physical_to_logical_map=physical_to_logical_map,
