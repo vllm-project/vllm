@@ -2177,7 +2177,7 @@ class rocm_aiter_ops:
         VLLM_ROCM_USE_AITER_TRITON_ROPE: Controls Triton rotary embeddings.
         VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA: Controls Triton sparse MLA (gfx950).
         VLLM_ROCM_USE_AITER_FLYDSL_SPARSE_MLA: Routes the fp8_ds_mla sparse MLA
-            calls the FlyDSL kernel supports to it (gfx950).
+            calls the FlyDSL kernel supports to it (gfx942, gfx950).
         VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: Controls shared expert fusion.
         VLLM_ROCM_USE_AITER_MOE_SITUV2: SiTUv2 FlyDSL MoE activation
             dtype (a16w4 | a8w4 | a4w4).
@@ -2251,7 +2251,10 @@ class rocm_aiter_ops:
     _TRITON_ROTARY_EMBED = envs.VLLM_ROCM_USE_AITER_TRITON_ROPE
     _TRITON_SPARSE_MLA = envs.VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA
     _FLYDSL_SPARSE_MLA = envs.VLLM_ROCM_USE_AITER_FLYDSL_SPARSE_MLA
-    _FLYDSL_SPARSE_MLA_MIN_TOKENS = envs.VLLM_ROCM_AITER_FLYDSL_SPARSE_MLA_MIN_TOKENS
+    # None until resolved; see _flydsl_sparse_mla_min_tokens.
+    _FLYDSL_SPARSE_MLA_MIN_TOKENS: int | None = (
+        envs.VLLM_ROCM_AITER_FLYDSL_SPARSE_MLA_MIN_TOKENS
+    )
     # FlyDSL sparse MLA configs (heads, has_invalid, return_lse) that already
     # ran eagerly, i.e. are compiled and loaded; see _flydsl_sparse_mla_fwd.
     _FLYDSL_SPARSE_MLA_COMPILED: set[tuple[int, bool, bool]] = set()
@@ -3902,6 +3905,16 @@ class rocm_aiter_ops:
         return None
 
     @classmethod
+    def _flydsl_sparse_mla_min_tokens(cls) -> int:
+        """VLLM_ROCM_AITER_FLYDSL_SPARSE_MLA_MIN_TOKENS, or when unset the arch's
+        measured FlyDSL / Triton crossover for 2048-key rows at H 8..16."""
+        if cls._FLYDSL_SPARSE_MLA_MIN_TOKENS is None:
+            from vllm.platforms.rocm import on_gfx942
+
+            cls._FLYDSL_SPARSE_MLA_MIN_TOKENS = 80 if on_gfx942() else 160
+        return cls._FLYDSL_SPARSE_MLA_MIN_TOKENS
+
+    @classmethod
     def _flydsl_sparse_mla_fwd(
         cls,
         q: torch.Tensor,
@@ -3931,7 +3944,7 @@ class rocm_aiter_ops:
         """
         if not cls._FLYDSL_SPARSE_MLA or not cls._AITER_ENABLED:
             return False, None
-        if q.shape[0] < cls._FLYDSL_SPARSE_MLA_MIN_TOKENS:
+        if q.shape[0] < cls._flydsl_sparse_mla_min_tokens():
             return False, None
         flydsl_ops = cls._flydsl_sparse_mla_ops()
         if flydsl_ops is None:
