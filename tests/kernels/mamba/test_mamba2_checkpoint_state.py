@@ -118,14 +118,13 @@ def test_store_selects_the_checkpoint_from_all_chunk_states(dim_first, spec_slot
     """The store reads the checkpoint row out of every chunk state.
 
     Row 0 checkpoints 32 tokens in, its state being chunk 3 rather than the
-    program's own row, so the store only passes if ``chunk_idx`` is used.
+    program's own row, so the store only passes if `chunk_idx` is used.
     Row 1 has an offset but a null destination (a non-final chunk under
     sparse retention) and must write nothing, not even into block 0. The conv
     input is a column slice of a wider projection, the SD conv layout is a
     transposed view, and SSM rows are padded pages, matching the strides the
-    mixer passes. Spec decoding
-    widens the conv state, and the store must still fill only the first
-    ``state_len`` slots with the newest inputs.
+    mixer passes. Spec decoding widens the conv state, and the store must
+    still fill only the first `state_len` slots with the newest inputs.
     """
     dim, state_len, heads, head_dim, d_state = 16, 4, 2, 4, 8
     projection = torch.randn(64, dim + 8, device=DEVICE)

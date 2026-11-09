@@ -3,7 +3,7 @@
 
 import torch
 
-import vllm._custom_ops as ops
+import vllm._cpu_ops as ops
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
 
@@ -189,7 +189,7 @@ def store_cache_checkpoints_cpu(
     recurrent_rows: torch.Tensor | None = None,
     token_indices: torch.Tensor | None = None,
 ) -> None:
-    """CPU version of ``store_cache_checkpoints_kernel``."""
+    """CPU version of `store_cache_checkpoints_kernel`."""
     offsets = checkpoint_offsets.long()
     rows = ((state_indices != NULL_BLOCK_ID) & (offsets > 0)).nonzero().flatten()
     if rows.numel() == 0:
