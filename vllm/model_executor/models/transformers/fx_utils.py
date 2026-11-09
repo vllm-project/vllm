@@ -246,6 +246,26 @@ def _leaf_attention_interfaces():
     return mock.patch.object(AttentionInterface, "get_interface", get_interface)
 
 
+@contextlib.contextmanager
+def _restored_state(module: nn.Module):
+    """Undo writes the traced forward makes to `module`, e.g. `@dynamic_rope_update`
+    re-registering `inv_freq`, which would otherwise leave proxies behind."""
+    attrs = dict(module.__dict__)
+    containers = {
+        name: value.copy()
+        for name, value in attrs.items()
+        if isinstance(value, (dict, set))
+    }
+    try:
+        yield
+    finally:
+        module.__dict__.clear()
+        module.__dict__.update(attrs)
+        for name, value in containers.items():
+            attrs[name].clear()
+            attrs[name].update(value)
+
+
 def trace(module: nn.Module) -> fx.Graph | None:
     """Trace `module.forward`, returning the partial graph on failure."""
     parameters = forward_parameters(type(module))
@@ -265,7 +285,7 @@ def trace(module: nn.Module) -> fx.Graph | None:
         None,
     )
     try:
-        with _leaf_attention_interfaces():
+        with _leaf_attention_interfaces(), _restored_state(module):
             return tracer.trace(module, concrete_args=concrete_args)
     except Exception as exc:
         logger.debug("Could not fully trace %s: %s", type(module), exc)
