@@ -123,13 +123,7 @@ def mm_kwargs_from_features(
 def rebuild_mm_placeholders(
     mm_placeholders: Mapping[str, list[PlaceholderRangeInfo]],
 ) -> dict[str, list[PlaceholderRange]]:
-    """Convert rendered `PlaceholderRangeInfo` back into `PlaceholderRange`.
-
-    `is_embed` has to survive the round trip: the model runner branches on it
-    to decide how much of the encoder output a span consumes and which
-    positions to overwrite, and it cannot be recomputed from offset and
-    length alone.
-    """
+    """Inverse of `placeholder_ranges_from_engine_input`."""
     return {
         modality: [
             PlaceholderRange(

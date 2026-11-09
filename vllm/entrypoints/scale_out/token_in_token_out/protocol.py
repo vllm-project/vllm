@@ -49,20 +49,12 @@ class PlaceholderRangeInfo(BaseModel):
     """Number of placeholder tokens."""
 
     is_embed: list[bool] | None = None
-    """Which positions in the span actually receive embeddings.
-
-    ``None`` means every position does. Models with sparse placeholder
-    masks (Gemma 3, Phi-3-V, the Qwen omni thinkers) mark only a subset,
-    and the mask cannot be recomputed from offset and length alone.
-    """
+    """Positions in the span that receive embeddings; `None` means all."""
 
     @model_validator(mode="after")
     def _check_is_embed_length(self) -> "PlaceholderRangeInfo":
         if self.is_embed is not None and len(self.is_embed) != self.length:
-            raise ValueError(
-                f"is_embed has {len(self.is_embed)} entries but the "
-                f"placeholder spans {self.length} tokens"
-            )
+            raise ValueError("is_embed must have `length` entries")
         return self
 
 
