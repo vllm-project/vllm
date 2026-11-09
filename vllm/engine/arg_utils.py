@@ -90,7 +90,7 @@ from vllm.config.kernel import (
 from vllm.config.load import SafetensorsLoadStrategy
 from vllm.config.logging import LogLevel
 from vllm.config.lora import MaxLoRARanks
-from vllm.config.mamba import MambaBackendEnum, MambaSSUAlgorithm
+from vllm.config.mamba import MambaBackendEnum, MambaSRRNG, MambaSSUAlgorithm
 from vllm.config.model import (
     ConvertOption,
     HfOverrides,
@@ -839,6 +839,7 @@ class EngineArgs:
         MambaConfig.enable_stochastic_rounding
     )
     mamba_cache_philox_rounds: int = MambaConfig.stochastic_rounding_philox_rounds
+    mamba_cache_sr_rng: MambaSRRNG | None = None
 
     additional_config: dict[str, Any] = get_field(VllmConfig, "additional_config")
 
@@ -1149,6 +1150,10 @@ class EngineArgs:
         mamba_group.add_argument(
             "--mamba-cache-philox-rounds",
             **mamba_kwargs["stochastic_rounding_philox_rounds"],
+        )
+        mamba_group.add_argument(
+            "--mamba-cache-sr-rng",
+            **{**mamba_kwargs["stochastic_rounding_rng"], "default": None},
         )
 
         # Structured outputs arguments
@@ -2827,6 +2832,8 @@ class EngineArgs:
             mamba_config.stochastic_rounding_philox_rounds = (
                 self.mamba_cache_philox_rounds
             )
+        if self.mamba_cache_sr_rng is not None:
+            mamba_config.stochastic_rounding_rng = self.mamba_cache_sr_rng
         mamba_config.__post_init__()
 
         # Kernel config overrides

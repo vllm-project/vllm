@@ -149,7 +149,7 @@ int get_kernel_cache_size(thread_config_t const& th_config, int thread_m_blocks,
 bool is_valid_config(thread_config_t const& th_config, int thread_m_blocks,
                      int prob_m, int prob_n, int prob_k, int num_bits,
                      int group_size, int has_zp, bool is_zp_float, int stages,
-                     int max_shared_mem) {
+                     int max_shared_mem, bool exact_m8_nvfp4 = false) {
   // Sanity
   if (th_config.thread_k == -1 || th_config.thread_n == -1 ||
       th_config.num_threads == -1) {
@@ -175,6 +175,22 @@ bool is_valid_config(thread_config_t const& th_config, int thread_m_blocks,
   int cache_size =
       get_kernel_cache_size(th_config, thread_m_blocks, prob_m, prob_n, prob_k,
                             num_bits, group_size, has_zp, is_zp_float, stages);
+  if (exact_m8_nvfp4) {
+    STD_TORCH_CHECK(prob_m == 8 && prob_n == 4096 && prob_k == 8192 &&
+                        thread_m_blocks == 1 && th_config.thread_n == 128 &&
+                        th_config.thread_k == 128 &&
+                        th_config.num_threads == 256 && num_bits == 4 &&
+                        group_size == 16 && !has_zp && !is_zp_float &&
+                        stages == 4,
+                    "Invalid exact M8 NVFP4 profile");
+    // This specialization uses 8 BF16 A rows and 1-byte E4M3 scales.
+    constexpr int sh_b = 4 * 128 * 128 / 2;
+    constexpr int sh_a = 4 * 8 * 128 * 2;
+    constexpr int sh_s = 4 * (128 / 16) * 128;
+    static_assert(sh_b >= 16 * (128 + 8) * 2 + 128 * 2);
+    static_assert(sh_b + sh_a + sh_s == 45056);
+    cache_size = sh_b + sh_a + sh_s;
+  }
   return cache_size <= max_shared_mem;
 }
 
@@ -290,6 +306,17 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
                     "Turing only support FP16 activation.");
   }
 
+  // Full-K output ownership for the exact 48-SM GB10 profile.
+  bool const gb10_m8_output =
+      major_capability == 12 && minor_capability == 1 && sms == 48 &&
+      prob_m == 8 && prob_n == 4096 && prob_k == 8192 && lda == prob_k &&
+      a_type == vllm::kBFloat16 && c_type == vllm::kBFloat16 &&
+      b_type == vllm::kFE2M1f && s_type == vllm::kFE4M3fn && group_size == 16 &&
+      num_groups == 512 && !has_bias && !has_zp && !is_zp_float &&
+      !use_atomic_add && use_fp32_reduce && g_s != nullptr && stages == 4 &&
+      thread_k_init == -1 && thread_n_init == -1 && max_shared_mem >= 45056 &&
+      get_device_prop()->multiProcessorCount == 48;
+
   int max_par = 16;
   if (prob_n <= 4096) max_par = 16 * 8;
   int max_shared_mem_new = max_shared_mem;
@@ -310,7 +337,10 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
     // Set thread config
     exec_config_t exec_cfg;
     thread_config_t thread_tfg;
-    if (thread_k != -1 && thread_n != -1) {
+    if (gb10_m8_output) {
+      thread_tfg = {128, 128, 256};
+      exec_cfg = {1, thread_tfg};
+    } else if (thread_k != -1 && thread_n != -1) {
       thread_tfg = thread_config_t{thread_k, thread_n, default_threads};
       exec_cfg = exec_config_t{1, thread_tfg};
       STD_TORCH_CHECK(prob_n % thread_n == 0, "prob_n = ", prob_n,
@@ -347,8 +377,12 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
     thread_k = thread_tfg.thread_k;
     thread_n = thread_tfg.thread_n;
     int blocks = sms * exec_cfg.blocks_per_sm;
-    if (exec_cfg.blocks_per_sm > 1)
+    if (gb10_m8_output) {
+      blocks = 32;
+      max_shared_mem_new = 45056;
+    } else if (exec_cfg.blocks_per_sm > 1) {
       max_shared_mem_new = max_shared_mem / exec_cfg.blocks_per_sm - 1024;
+    }
 
     int thread_k_blocks = thread_k / 16;
     int thread_n_blocks = thread_n / 16;
@@ -356,7 +390,7 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
     STD_TORCH_CHECK(
         is_valid_config(thread_tfg, thread_m_blocks, prob_m_split, prob_n,
                         prob_k, num_bits, group_size, has_zp, is_zp_float,
-                        stages, max_shared_mem_new),
+                        stages, max_shared_mem_new, gb10_m8_output),
         "Invalid thread config: thread_m_blocks = ", thread_m_blocks,
         ", thread_k = ", thread_tfg.thread_k,
         ", thread_n = ", thread_tfg.thread_n,
@@ -383,7 +417,7 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
     }
 
     cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
-                         max_shared_mem_new);
+                         gb10_m8_output ? max_shared_mem : max_shared_mem_new);
 
     bool part_use_atomic_add =
         use_atomic_add && div_ceil(prob_m_split, 64) * prob_n <= 2048;

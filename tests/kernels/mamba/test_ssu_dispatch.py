@@ -57,9 +57,11 @@ def restore_backend_state():
 
     old_backend = mod._mamba_ssu_backend
     old_replayssm_kernel = mod._flashinfer_replayssm_kernel
+    old_main_controls = mod._flashinfer_replayssm_main_controls_supported
     yield
     mod._mamba_ssu_backend = old_backend
     mod._flashinfer_replayssm_kernel = old_replayssm_kernel
+    mod._flashinfer_replayssm_main_controls_supported = old_main_controls
 
 
 def _kv_cache_config_with_ssu(
@@ -82,29 +84,55 @@ def _cuda_ints(values):
     return torch.tensor(values, dtype=torch.int32, device="cuda")
 
 
-def _replayssm_mixer(kv_cache, ring_start, committed, A):
+def _replayssm_mixer(kv_cache, ring_start, committed, A, sr_rng=None):
     return SimpleNamespace(
         kv_cache=kv_cache,
         _replayssm_ring_start=ring_start,
         _replayssm_prev_num_accepted=committed,
         replayssm_buffer_len=16,
         A=A,
-        mamba_config=MambaConfig(backend=MambaBackendEnum.FLASHINFER),
+        mamba_config=MambaConfig(
+            backend=MambaBackendEnum.FLASHINFER,
+            enable_stochastic_rounding=sr_rng is not None,
+            stochastic_rounding_philox_rounds=5 if sr_rng is not None else 0,
+            stochastic_rounding_rng=sr_rng or "philox",
+        ),
     )
 
 
 @pytest.mark.parametrize("checkpointed", [False, True], ids=["replay", "checkpoint"])
 @pytest.mark.parametrize(
-    ("post_step", "layout", "ssm_dtype"),
+    ("post_step", "layout", "ssm_dtype", "sr_rng"),
     [
-        pytest.param(False, KVCacheLayout.LBNHC, torch.float16, id="v1-fp16-lbnhc"),
-        pytest.param(True, KVCacheLayout.BLHNC, torch.float32, id="v2-fp32-blhnc"),
-        pytest.param(False, KVCacheLayout.LBNHC, torch.int8, id="v1-int8-lbnhc"),
-        pytest.param(True, KVCacheLayout.BLHNC, torch.float8_e4m3fn, id="v2-fp8-blhnc"),
+        pytest.param(
+            False, KVCacheLayout.LBNHC, torch.float16, None, id="v1-fp16-lbnhc"
+        ),
+        pytest.param(
+            True, KVCacheLayout.BLHNC, torch.float32, None, id="v2-fp32-blhnc"
+        ),
+        pytest.param(False, KVCacheLayout.LBNHC, torch.int8, None, id="v1-int8-lbnhc"),
+        pytest.param(
+            True, KVCacheLayout.BLHNC, torch.float8_e4m3fn, None, id="v2-fp8-blhnc"
+        ),
+        *[
+            pytest.param(
+                post_step, layout, dtype, policy, id=f"{version}-{name}-{policy}"
+            )
+            for post_step, layout, version in (
+                (False, KVCacheLayout.LBNHC, "v1"),
+                (True, KVCacheLayout.BLHNC, "v2"),
+            )
+            for dtype, name in (
+                (torch.float16, "fp16"),
+                (torch.int8, "int8"),
+                (torch.float8_e4m3fn, "fp8"),
+            )
+            for policy in ("philox", "shared_seed")
+        ],
     ],
 )
 def test_replayssm_materializes_only_accepted_boundary_with_compacted_rows(
-    post_step, layout, ssm_dtype, checkpointed
+    post_step, layout, ssm_dtype, sr_rng, checkpointed, monkeypatch
 ):
     """Publish a boundary without modifying its live or cached-prefix sources."""
     try:
@@ -246,10 +274,24 @@ def test_replayssm_materializes_only_accepted_boundary_with_compacted_rows(
             starts[slot], committed[slot] = start, count
         starts, committed = _cuda_ints(starts), _cuda_ints(committed)
         mixers = [
-            _replayssm_mixer(caches[name], starts, committed, A) for name in names
+            _replayssm_mixer(caches[name], starts, committed, A, sr_rng)
+            for name in names
         ]
         grouped.append((mixers, spec, _cuda_ints(table)))
     context = ReplaySSMModelContext.create(grouped, max_num_reqs=6)
+    from vllm.v1.worker import replayssm_utils
+
+    materializer_calls = []
+
+    def record_materializer(*args, sr_rng="philox", **kwargs):
+        materializer_calls.append(
+            (sr_rng, kwargs["philox_rounds"], kwargs["rand_seed"])
+        )
+        return replayssm_materialize(*args, sr_rng=sr_rng, **kwargs)
+
+    monkeypatch.setattr(
+        replayssm_utils, "_load_replayssm_materialize", lambda: record_materializer
+    )
     # Row 0 crosses token 16, but only later groups have a destination.
     # Row 1 rejects all drafts and stops at 15.
     # Row 2 uses in-place replay; row 3 has null slots in every group.
@@ -290,6 +332,17 @@ def test_replayssm_materializes_only_accepted_boundary_with_compacted_rows(
         num_reqs=5,
     )
     context.postprocess(**metadata)
+    assert materializer_calls
+    actual_rng, actual_rounds, actual_seed = materializer_calls[0]
+    assert actual_rng == (sr_rng or "philox")
+    assert actual_rounds == (5 if sr_rng is not None else 0)
+    if sr_rng is None:
+        assert actual_seed is None
+    else:
+        expected_seed_count = len(context.mixers) if sr_rng == "shared_seed" else 1
+        assert actual_seed.shape == (expected_seed_count,)
+        assert actual_seed.dtype == torch.int64 and actual_seed.is_cuda
+        assert torch.all((actual_seed >= 0) & (actual_seed < 2**32))
     # After a checkpoint, the source state is canonical at the old ring end.
     # Only the two accepted tokens through the boundary remain to replay.
     plans = {0: (1, 2) if checkpointed else (7, 4), 2: (6, 4)}
@@ -329,7 +382,14 @@ def test_replayssm_materializes_only_accepted_boundary_with_compacted_rows(
                         * B[src, 0, pos].float()[None, None, :]
                     )
                 if quantized:
-                    _assert_rows(expected, caches[name][1][dst], caches[name][5][dst])
+                    if sr_rng is None:
+                        _assert_rows(
+                            expected, caches[name][1][dst], caches[name][5][dst]
+                        )
+                    else:
+                        _assert_sr_rows(
+                            expected, caches[name][1][dst], caches[name][5][dst]
+                        )
                 else:
                     torch.testing.assert_close(
                         caches[name][1][dst].float(), expected, atol=2e-3, rtol=2e-3
@@ -843,12 +903,140 @@ def _assert_rows(value, payload, scale):
     torch.testing.assert_close(scale.cpu(), expected_scale, rtol=0, atol=0)
 
 
+def _assert_sr_rows(value, payload, scale):
+    """Require exact scales and the two legal stochastic neighbors, not RN bytes."""
+    value = value.float().cpu()
+    _, expected_scale = _encode_rows(value, payload.dtype)
+    torch.testing.assert_close(scale.cpu(), expected_scale, rtol=0, atol=0)
+    qmax = 127 if payload.dtype == torch.int8 else 448
+    amax = value.abs().amax(-1)
+    multiplier = torch.where(amax == 0, 1.0, qmax / amax)
+    scaled = value * multiplier[..., None]
+    if payload.dtype == torch.int8:
+        lower = scaled.floor().clamp(-qmax, qmax)
+        upper = scaled.ceil().clamp(-qmax, qmax)
+    else:
+        # Enumerate all finite E4M3FN values so neighbors remain exact at
+        # exponent/subnormal boundaries and at the finite saturation limits.
+        encodings = torch.arange(256, dtype=torch.int16).to(torch.uint8)
+        values = encodings.view(payload.dtype).float()
+        finite = values[torch.isfinite(values)].sort().values
+        lower_indices = torch.searchsorted(finite, scaled, right=True) - 1
+        upper_indices = torch.searchsorted(finite, scaled, right=False)
+        lower = finite[lower_indices.clamp(0, finite.numel() - 1)]
+        upper = finite[upper_indices.clamp(0, finite.numel() - 1)]
+    actual = payload.float().cpu()
+    assert torch.all((actual == lower) | (actual == upper))
+
+
 def _source(dtype):
     qmax = 127 if dtype == torch.int8 else 448
     value = torch.ones(3, 16, 64, 128)
     value[..., -1] = qmax
     factors = torch.exp2(torch.arange(16 * 64).reshape(16, 64) % 3 - 2)
     return value * factors[None, ..., None], factors
+
+
+def test_shared_int8_prefill_tiny_rows_keep_valid_scales():
+    """INT8 prefill retains normal decode scales for tiny nonzero rows."""
+    _require_cuda()
+    from vllm.model_executor.layers.mamba.ops.replayssm_quantization import (
+        quantize_replayssm_state,
+    )
+
+    floor = 2.0**-126
+    rows = torch.tensor([0.0, floor, 2 * floor, 64 * floor, 127.0], device="cuda")
+    source = rows[None, None, :, None].expand(1, 1, 5, 128).contiguous()
+    source[..., 1::2] = 0
+    state = torch.zeros(2, 1, 5, 128, dtype=torch.int8, device="cuda")
+    scales = torch.ones(2, 1, 5, device="cuda")
+    quantize_replayssm_state(
+        source, state, scales, torch.tensor([1], device="cuda", dtype=torch.int32)
+    )
+    expected = torch.tensor([0, 1, 2, 64, 127], device="cuda", dtype=torch.int8)
+    expected = expected[None, :, None].expand(1, 5, 128).clone()
+    expected[..., 1::2] = 0
+    torch.testing.assert_close(state[1], expected, rtol=0, atol=0)
+    torch.testing.assert_close(
+        scales[1, 0],
+        torch.tensor([1.0, floor, floor, floor, 1.0], device="cuda"),
+        rtol=0,
+        atol=0,
+    )
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.float8_e4m3fn, torch.int8])
+def test_shared_seed_dispatch_matches_flashinfer_api(dtype):
+    """The vLLM dispatcher forwards shared-seed SR rather than invoking Philox."""
+    _require_cuda()
+    from flashinfer.mamba.checkpointing_ssu import checkpointing_ssu
+
+    from vllm.model_executor.layers.mamba.ops.replayssm_quantization import (
+        quantize_replayssm_state,
+    )
+
+    initialize_mamba_ssu_backend(
+        MambaConfig(
+            backend=MambaBackendEnum.FLASHINFER,
+            enable_stochastic_rounding=True,
+            stochastic_rounding_rng="shared_seed",
+        ),
+        _kv_cache_config_with_ssu(),
+        use_replayssm=True,
+    )
+    torch.manual_seed(714)
+    device = torch.device("cuda")
+    inputs = dict(
+        state=torch.zeros(2, 128, 64, 128, device=device, dtype=dtype),
+        x_cache=torch.randn(2, 128, 24, 64, device=device, dtype=torch.bfloat16) * 0.1,
+        B_cache=torch.randn(2, 8, 24, 128, device=device, dtype=torch.bfloat16) * 0.1,
+        dt_cache=torch.full((2, 128, 24), 0.01, device=device),
+        ring_start=torch.zeros(2, device=device, dtype=torch.int32),
+        prev_num_accepted_tokens=torch.tensor(
+            [0, 15], device=device, dtype=torch.int32
+        ),
+        x=torch.randn(1, 8, 128, 64, device=device, dtype=torch.bfloat16) * 0.1,
+        dt=torch.full((1, 8, 128, 1), 0.01, device=device, dtype=torch.bfloat16).expand(
+            -1, -1, -1, 64
+        ),
+        A=torch.full((128, 1, 1), -1.0, device=device).expand(128, 64, 128),
+        B=torch.randn(1, 8, 8, 128, device=device, dtype=torch.bfloat16) * 0.1,
+        C=torch.randn(1, 8, 8, 128, device=device, dtype=torch.bfloat16) * 0.1,
+        out=torch.empty(1, 8, 128, 64, device=device, dtype=torch.bfloat16),
+        state_batch_indices=torch.tensor([1], device=device, dtype=torch.int32),
+    )
+    source = torch.randn(1, 128, 64, 128, device=device) * 0.1
+    if dtype == torch.float16:
+        inputs["state"][1].copy_(source[0])
+    else:
+        inputs["state_scale"] = torch.ones(2, 128, 64, device=device)
+        quantize_replayssm_state(
+            source,
+            inputs["state"],
+            inputs["state_scale"],
+            inputs["state_batch_indices"],
+        )
+    # Preserve the tied-head strides of read-only A and dt in both API calls.
+    actual = {k: v if k in ("A", "dt") else v.clone() for k, v in inputs.items()}
+    rng = torch.cuda.get_rng_state()
+    seed = torch.randint(0, 2**32, (1,), device=device, dtype=torch.int64)
+    checkpointing_ssu(
+        **inputs,
+        rand_seed=seed,
+        philox_rounds=5,
+        sr_rng="shared_seed",
+        enable_pdl=False,
+    )
+    torch.cuda.set_rng_state(rng)
+    selective_state_update_replayssm_flashinfer(
+        **actual,
+        enable_stochastic_rounding=True,
+        stochastic_rounding_philox_rounds=5,
+        stochastic_rounding_rng="shared_seed",
+    )
+    for key in ("state", "x_cache", "B_cache", "dt_cache", "out", "state_scale"):
+        if key in inputs:
+            assert torch.equal(_bytes(inputs[key]), _bytes(actual[key])), key
 
 
 def test_shared_fp8_prefill_tiny_rows_keep_valid_scales():
@@ -1060,3 +1248,37 @@ def test_replayssm_quantized_cache_spec_requires_matching_scale(state_dtype):
         _validate_replayssm_read_state_spec(
             replace(spec, dtypes=(*spec.dtypes[:5], torch.float16))
         )
+
+
+def test_shared_seed_prefix_requires_materializer_api(monkeypatch):
+    """Fail at context setup for an old FI API; default Philox stays compatible."""
+    from vllm.v1.worker import replayssm_utils
+
+    states = (
+        torch.empty(2, 1, device="cuda"),
+        torch.empty(2, 1, 64, 128, dtype=torch.float16, device="cuda"),
+        torch.empty(2, 1, 24, 64, dtype=torch.bfloat16, device="cuda"),
+        torch.empty(2, 1, 24, dtype=torch.float32, device="cuda"),
+        torch.empty(2, 1, 24, 128, dtype=torch.bfloat16, device="cuda"),
+    )
+    mixer = _replayssm_mixer(
+        states,
+        _cuda_ints([0, 0]),
+        _cuda_ints([0, 0]),
+        torch.empty(1, device="cuda"),
+        "shared_seed",
+    )
+    spec = MambaSpec(
+        block_size=16,
+        shapes=tuple(t.shape[1:] for t in states),
+        dtypes=tuple(t.dtype for t in states),
+        mamba_cache_mode="align",
+    )
+    grouped = [([mixer], spec, _cuda_ints([[0, 1]]))]
+    monkeypatch.setattr(
+        replayssm_utils, "_load_replayssm_materialize", lambda: lambda: None
+    )
+    with pytest.raises(ImportError, match="replayssm_materialize with sr_rng support"):
+        ReplaySSMModelContext.create(grouped, max_num_reqs=1)
+    mixer.mamba_config.stochastic_rounding_rng = "philox"
+    assert ReplaySSMModelContext.create(grouped, max_num_reqs=1).materialize_prefixes

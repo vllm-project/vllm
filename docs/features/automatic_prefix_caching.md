@@ -92,6 +92,19 @@ The path requires Mamba2 head dimension 64, state size 128, BF16 activations, an
 FP8 requires FlashInfer 0.7.4 or newer, which bounds FP8 checkpoint scales for tiny state rows.
 Explicit SSU algorithm selection is unsupported for quantized checkpoints.
 
+With a FlashInfer build that supports shared-seed stochastic rounding, add
+`--mamba-cache-sr-rng shared_seed` to replace per-element Philox with one uniform
+random seed per invocation. This opt-in applies to FP16, FP8 and INT8 ReplaySSM
+checkpoint writes. It requires `--enable-mamba-cache-stochastic-rounding` and
+the FlashInfer ReplaySSM backend. Prefix materialization uses the same caller-selected
+rounding policy; shared-seed materialization requires a FlashInfer build that
+exposes `replayssm_materialize(..., sr_rng=...)`. Its per-layer seeds are generated
+as one array in a single random-number draw. `philox` remains the default.
+Kernel tuning selects launch configurations without changing this policy or its
+round count. Shared-seed rounding correlates decisions across
+state elements. Model-quality equivalence
+has not been validated; kernel correctness and timing do not establish it.
+
 ## Example workloads
 
 We describe two example workloads, where APC can provide huge performance benefit:

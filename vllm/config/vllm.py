@@ -3585,6 +3585,14 @@ class VllmConfig:
 
     @model_validator(mode="after")
     def validate_replayssm_read_state(self) -> "VllmConfig":
+        if (
+            self.mamba_config.stochastic_rounding_rng == "shared_seed"
+            and not self.use_flashinfer_replayssm
+        ):
+            raise ValueError(
+                "--mamba-cache-sr-rng shared_seed requires --use-replayssm "
+                "and --mamba-backend flashinfer"
+            )
         if self.cache_config.replayssm_state_dtype == "auto":
             return self
         if not self.use_flashinfer_replayssm:

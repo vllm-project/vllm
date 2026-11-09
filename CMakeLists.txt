@@ -742,6 +742,28 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
         list(APPEND VLLM_STABLE_EXT_SRC ${MARLIN_TEMPLATE_SM75_KERNEL_SRC})
       endif()
 
+      # Compile a family-compatible image (12.0f may also cover SM120).
+      # CUDA13-only; runtime guards still require actual SM121/48SM.
+      # Do not imply that CUDA12.8 supports the SM12.1a target.
+      set(MARLIN_MAMBA_INPUT_CONV_ARCHS "")
+      if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
+        cuda_archs_loose_intersection(MARLIN_MAMBA_INPUT_CONV_ARCHS
+          "12.0f" "${CUDA_ARCHS}")
+      endif()
+      if(MARLIN_MAMBA_INPUT_CONV_ARCHS)
+        set(MARLIN_MAMBA_INPUT_CONV_SRC
+          "csrc/quantization/marlin/mamba_input_conv.cu"
+          "csrc/quantization/marlin/mamba_input_conv_short.cu"
+          "csrc/quantization/marlin/mamba_input_conv_batch.cu"
+          "csrc/quantization/marlin/mamba_input_conv_wide.cu")
+        set_gencode_flags_for_srcs(
+          SRCS "${MARLIN_MAMBA_INPUT_CONV_SRC}"
+          CUDA_ARCHS "${MARLIN_MAMBA_INPUT_CONV_ARCHS}")
+        set_source_files_properties(${MARLIN_MAMBA_INPUT_CONV_SRC}
+          PROPERTIES COMPILE_FLAGS "-static-global-template-stub=false")
+        list(APPEND VLLM_STABLE_EXT_SRC "${MARLIN_MAMBA_INPUT_CONV_SRC}")
+      endif()
+
       set(MARLIN_SRCS
          "csrc/quantization/marlin/marlin.cu"
          "csrc/quantization/marlin/gptq_marlin_repack.cu"
@@ -1297,6 +1319,10 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   # Needed to use cuda/hip APIs from C-shim
   if(VLLM_GPU_LANG STREQUAL "CUDA")
     target_compile_definitions(_C_stable_libtorch PRIVATE USE_CUDA)
+    if(MARLIN_MAMBA_INPUT_CONV_ARCHS)
+      target_compile_definitions(_C_stable_libtorch PRIVATE
+        VLLM_MARLIN_MAMBA_INPUT_CONV)
+    endif()
     if(COOPERATIVE_TOPK_ARCHS)
       target_compile_definitions(_C_stable_libtorch PRIVATE
         VLLM_ENABLE_COOPERATIVE_TOPK=1)

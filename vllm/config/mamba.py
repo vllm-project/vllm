@@ -31,6 +31,7 @@ class MambaBackendEnum(Enum, metaclass=_MambaBackendEnumMeta):
 
 
 MambaSSUAlgorithm = Literal["auto", "simple", "vertical", "horizontal"]
+MambaSRRNG = Literal["philox", "shared_seed"]
 
 
 @config
@@ -49,6 +50,13 @@ class MambaConfig:
     """Number of Philox PRNG rounds for stochastic rounding random number
     generation. 0 uses the Triton default. Higher values improve randomness
     quality at the cost of compute."""
+
+    stochastic_rounding_rng: MambaSRRNG = "philox"
+    """Stochastic-rounding random source (Philox by default).
+    ``shared_seed`` uses one uniform seed
+    per invocation instead of per-element Philox with FlashInfer ReplaySSM.
+    It correlates rounding decisions across elements; model-quality equivalence
+    has not been validated."""
 
     ssu_algorithm: MambaSSUAlgorithm | None = None
     """Selective state update algorithm to use with the FlashInfer backend.
@@ -83,6 +91,16 @@ class MambaConfig:
 
     def __post_init__(self):
         self.validate_ssu_algorithm()
+        if self.stochastic_rounding_rng not in get_args(MambaSRRNG):
+            raise ValueError("Unknown Mamba stochastic-rounding random source")
+        if self.stochastic_rounding_rng == "shared_seed" and (
+            not self.enable_stochastic_rounding
+            or self.backend != MambaBackendEnum.FLASHINFER
+        ):
+            raise ValueError(
+                "Shared-seed Mamba rounding requires stochastic rounding and "
+                "the FlashInfer ReplaySSM backend"
+            )
         if self.enable_stochastic_rounding:
             from vllm.platforms import current_platform
 

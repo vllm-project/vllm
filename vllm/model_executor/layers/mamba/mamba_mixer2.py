@@ -10,6 +10,7 @@ from torch import nn
 
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import CacheConfig, ModelConfig, VllmConfig, get_current_vllm_config
+from vllm.config.compilation import CompilationMode, CUDAGraphMode
 from vllm.config.mamba import MambaBackendEnum
 from vllm.distributed import (
     divide,
@@ -524,6 +525,53 @@ class MambaMixer2(MambaBase, PluggableLayer):
 
         vllm_config = get_current_vllm_config()
         compilation_config = vllm_config.compilation_config
+        splitting_ops = compilation_config.splitting_ops
+        # Existing capture choices remain authoritative. Explicit lists must
+        # include the new boundary; other routes keep the original mixer op.
+        fusion_capture_allowed = (
+            compilation_config.mode == CompilationMode.NONE
+            or splitting_ops is None
+            or "vllm::mamba_mixer2_with_input_projection" in splitting_ops
+        )
+        # Adaptive/token-keyed FULL graphs can replay shorter logical queries
+        # without rerunning this opaque Python dispatch. The legacy18arg kernel
+        # has no device query-length pointer: preserve original conv/SSU there.
+        speculative = vllm_config.speculative_config
+        uniform_capture_contract = (
+            not (speculative is not None and speculative.enable_adaptive_verification)
+            and compilation_config.cudagraph_mode.mixed_mode() != CUDAGraphMode.FULL
+        )
+        kernel_type = type(getattr(self.in_proj.quant_method, "kernel", None))
+        marlin_owner_selected = (
+            kernel_type.__module__ == "vllm.model_executor.kernels.linear.nvfp4.marlin"
+            and kernel_type.__name__ == "MarlinNvFp4LinearKernel"
+        )
+        self._marlin_input_conv_allowed = False
+        self._marlin_input_conv_short_supported = False
+        self._marlin_input_conv_batch_supported = False
+        if (
+            current_platform.is_cuda()
+            and fusion_capture_allowed
+            and uniform_capture_contract
+            and marlin_owner_selected
+            and hasattr(torch.ops._C, "marlin_mamba_input_conv")
+        ):
+            # The optional-acceptance schema also serves as the short-family
+            # feature check when Python is used with an older optional build.
+            self._marlin_input_conv_short_supported = "Tensor? accepted_tokens" in str(
+                torch.ops._C.marlin_mamba_input_conv.default._schema
+            )
+            self._marlin_input_conv_batch_supported = hasattr(
+                torch.ops._C.marlin_mamba_input_conv, "batched"
+            )
+            props = torch.cuda.get_device_properties(torch.cuda.current_device())
+            self._marlin_input_conv_allowed = (
+                props.major == 12
+                and props.minor == 1
+                and props.multi_processor_count == 48
+                and vllm_config.lora_config is None
+                and self.tp_size == 1
+            )
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
@@ -579,35 +627,53 @@ class MambaMixer2(MambaBase, PluggableLayer):
 
         # Check if running on Blackwell (SM100+) for kernel tuning
         self.is_blackwell = current_platform.is_device_capability_family(100)
+        self._gb10_replayssm_profile_allowed = (
+            self.use_flashinfer_replayssm and self._marlin_input_conv_allowed
+        )
 
     def forward(
         self,
         hidden_states: torch.Tensor,
         mup_vector: torch.Tensor | None = None,
     ):
-        # 1. Gated MLP's linear projection
-        projected_states, _ = self.in_proj(hidden_states)
-        if mup_vector is not None:
-            projected_states = projected_states * mup_vector
+        fused_input = False
+        if self._marlin_input_conv_allowed:
+            from vllm.model_executor.layers.mamba.ops.marlin_input_conv import (
+                can_use_marlin_input_conv,
+            )
 
-        # 2. Prepare inputs for conv + SSM
+            fused_input = can_use_marlin_input_conv(self, hidden_states, mup_vector)
+
+        # Caller-provided addresses remain stable across eager-break capture.
+        if fused_input:
+            projected_states = torch.empty(
+                (hidden_states.shape[0], 18560),
+                dtype=hidden_states.dtype,
+                device=hidden_states.device,
+            )
+        else:
+            projected_states, _ = self.in_proj(hidden_states)
+            if mup_vector is not None:
+                projected_states = projected_states * mup_vector
+
         ssm_output = torch.empty(
-            [
-                hidden_states.shape[0],
-                (self.num_heads // self.tp_size) * self.head_dim,
-            ],
+            [hidden_states.shape[0], (self.num_heads // self.tp_size) * self.head_dim],
             dtype=hidden_states.dtype,
             device=hidden_states.device,
         )
-
-        # 3. conv + SSM
-        # (split `projected_states` into hidden_states_B_C, dt in the custom op to
-        # ensure it is not treated as an intermediate tensor by torch compile)
-        torch.ops.vllm.mamba_mixer2(
-            projected_states,
-            ssm_output,
-            _encode_layer_name(self.prefix),
-        )
+        if fused_input:
+            torch.ops.vllm.mamba_mixer2_with_input_projection(
+                hidden_states,
+                projected_states,
+                ssm_output,
+                _encode_layer_name(self.prefix),
+            )
+        else:
+            torch.ops.vllm.mamba_mixer2(
+                projected_states,
+                ssm_output,
+                _encode_layer_name(self.prefix),
+            )
 
         # 4. gated MLP
         # GatedRMSNorm internally applying SiLU to the gate
@@ -738,6 +804,8 @@ class MambaMixer2(MambaBase, PluggableLayer):
         self,
         projected_states: torch.Tensor,
         output: torch.Tensor,
+        *,
+        _conv_precomputed: bool = False,
     ):
         hidden_states_B_C, dt = torch.split(
             projected_states[..., self.tped_intermediate_size :],
@@ -958,24 +1026,37 @@ class MambaMixer2(MambaBase, PluggableLayer):
         if has_decode:
             assert state_indices_tensor_d is not None
 
-            # 2. Convolution sequence transformation
-            hidden_states_B_C_d = causal_conv1d_update(
-                hidden_states_B_C_d,
-                conv_state,
-                self.conv_weights,
-                self.conv1d.bias,
-                self.activation,
-                conv_state_indices=state_indices_tensor_d,
-                num_accepted_tokens=num_accepted_tokens,
-                query_start_loc=query_start_loc_d,
-                # ReplaySSM keeps one physical state block while a speculative
-                # decode call still processes the full target + draft window.
-                max_query_len=(
-                    1 + self.num_spec
-                    if self.use_replayssm and use_spec_decode
-                    else state_indices_tensor_d.size(-1)
-                ),
-            )
+            if _conv_precomputed:
+                # Batched admission requires the full configured uniform window.
+                # B1 also admits runtime-short queries, as before.
+                assert (
+                    not has_prefill
+                    and 1 <= num_decodes <= 4
+                    and (
+                        1 <= num_decode_tokens <= 1 + self.num_spec
+                        if num_decodes == 1
+                        else num_decode_tokens == num_decodes * (1 + self.num_spec)
+                    )
+                )
+            else:
+                # 2. Convolution sequence transformation
+                hidden_states_B_C_d = causal_conv1d_update(
+                    hidden_states_B_C_d,
+                    conv_state,
+                    self.conv_weights,
+                    self.conv1d.bias,
+                    self.activation,
+                    conv_state_indices=state_indices_tensor_d,
+                    num_accepted_tokens=num_accepted_tokens,
+                    query_start_loc=query_start_loc_d,
+                    # ReplaySSM keeps one physical state block while a speculative
+                    # decode call still processes the full target + draft window.
+                    max_query_len=(
+                        1 + self.num_spec
+                        if self.use_replayssm and use_spec_decode
+                        else state_indices_tensor_d.size(-1)
+                    ),
+                )
 
             hidden_states_d, B_d, C_d = self.split_hidden_states_B_C_fn(
                 hidden_states_B_C_d
@@ -1066,6 +1147,14 @@ class MambaMixer2(MambaBase, PluggableLayer):
                         max_seqlen=fi_max_seqlen,
                         enable_pdl=False,
                         state_scale=self.kv_cache[5] if shared_quantized else None,
+                        stochastic_rounding_rng=(
+                            self.mamba_config.stochastic_rounding_rng
+                        ),
+                        use_gb10_profile=(
+                            self._gb10_replayssm_profile_allowed
+                            and _conv_precomputed
+                            and self.mamba_config.ssu_algorithm is None
+                        ),
                     )
                 else:
                     assert ring_start is not None
@@ -1217,6 +1306,29 @@ class MambaMixer2(MambaBase, PluggableLayer):
     @property
     def mamba_type(self) -> MambaAttentionBackendEnum:
         return MambaAttentionBackendEnum.MAMBA2
+
+
+@eager_break_during_capture
+def mamba_mixer2_with_input_projection(
+    hidden_states: torch.Tensor,
+    projected: torch.Tensor,
+    output: torch.Tensor,
+    layer_name: LayerNameType,
+) -> None:
+    from vllm.model_executor.layers.mamba.ops.marlin_input_conv import project_and_run
+
+    layer_name = _resolve_layer_name(layer_name)
+    context = get_forward_context()
+    layer = context.no_compile_layers[layer_name]
+    metadata = (context.attn_metadata or {}).get(layer_name)
+    project_and_run(layer, hidden_states, projected, output, metadata)
+
+
+direct_register_custom_op(
+    op_name="mamba_mixer2_with_input_projection",
+    op_func=mamba_mixer2_with_input_projection,
+    mutates_args=["projected", "output"],
+)
 
 
 @eager_break_during_capture

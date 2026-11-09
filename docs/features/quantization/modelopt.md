@@ -57,6 +57,20 @@ other dispatch paths retain their backend-specific behavior.
 Set `VLLM_MOE_SKIP_PADDING=0` before starting the engine to disable this
 optimization for comparisons.
 
+## Small-batch NVFP4 Marlin profile on GB10
+
+When Marlin W4A16 is already selected, a 48-SM GB10 (SM121) uses a specialized
+host launch for BF16 inputs with `M=8`, `K=8192` and `N=4096`, NVFP4 weights,
+and group size 16. The profile uses the existing stock Marlin device kernel with 32 full-K
+output tiles and 45,056 bytes of shared memory per CTA. Other shapes, dtypes
+and devices use the existing dispatcher. Weight packing and backend selection
+are unchanged.
+
+Use the existing `linear_backend_per_quant` setting for `nvfp4_w4a16`, or
+`--linear-backend marlin`, to select Marlin explicitly. These options affect
+all matching dense layers and prefill calls, not only Mamba output projections;
+model-wide performance should be validated separately.
+
 ## Benchmarking with dummy weights
 
 For performance experiments with random weights, use `--load-format dummy`.
@@ -162,3 +176,52 @@ export VLLM_TEST_MODELOPT_FP8_PC_PT_MODEL_PATH=<path_to_fp8_pc_pt_checkpoint>
 export VLLM_TEST_MODELOPT_FP8_PB_WO_MODEL_PATH=<path_to_fp8_pb_wo_checkpoint>
 pytest -q tests/quantization/test_modelopt.py
 ```
+
+## GB10 Mamba2 input projection and convolution
+
+A CUDA13 build can fuse input projection and convolution for an already
+selected Marlin NVFP4 W4A16 Mamba2 layer on GB10 SM121 hardware with 48 SMs.
+The specialization requires BF16, tensor parallel size 1, and the supported
+4096-hidden/128-head geometry using FlashInfer ReplaySSM. It supports batch
+sizes `B=1–4` and configured token lengths `T=1–8` when `B*T <= 16`.
+
+Batch size is a runtime value; the configured token length `T` is compiled
+for each graph. With `B=1`, runtime metadata may select fewer valid tokens
+than the configured length. With `B=2–4`, every request must have the same
+length, equal to the configured `T`. The fast path requires structural
+metadata and padded-layout checks to pass. Inactive cache slots remain
+protected. Unsupported or unproven geometry, metadata, wrappers and backends
+retain the original projection and convolution path.
+
+This does not select Marlin automatically or create a second weight pack.
+Existing explicit Marlin backend selection still applies to other dense
+linears and prefill as configured. The fusion preserves ReplaySSM state
+and stochastic-rounding seed handling.
+
+For compatible FP16 ReplaySSM calls, this GB10 path applies measured launch
+profiles to 29 combinations of uniform batch/token shape and caller-selected
+rounding policy among `B=1–4`, `T=1–8`, `B*T <= 16`. The policy must be Philox
+with five configured rounds or shared seed with five configured rounds.
+The selector never changes the caller's rounding mode or round count. It
+requires the actual fused Marlin-convolution producer, equal configured/runtime
+verification lengths, BF16 inputs, a 16-token checkpoint window
+(`16+T` physical ring entries; 24 at `T=8`), 128 value heads of width 64,
+128 state channels and eight shared Q/K groups, with PDL disabled and the
+supported state/ring layouts and scratch buffers. FP8, INT8, round-to-nearest
+and unmatched shapes retain normal FlashInfer selection/autotuning.
+
+For `B=1`, both policies use the two-kernel profile through `T=6`, then
+monolith with `d_split=1` at `T=7–8`. `B=2` uses the same rule for Philox5;
+shared seed retains normal selection at `T=1–4`, uses the two-kernel profile
+at `T=5–6`, and monolith with `d_split=1` at `T=7–8`. `B=3, T=5` with Philox5
+uses monolith with `d_split=2`; all other `B=3–4` points retain normal selection.
+
+Profiles use existing monolithic or two-kernel algorithms and launch controls.
+The installed FlashInfer API is inspected once at backend initialization;
+profiles requiring new MAIN controls retain normal selection when those
+controls are unavailable. Shared seed requires a compatible FlashInfer API.
+An explicit SSU algorithm setting retains precedence, including `auto`.
+Setting any of `FLASHINFER_SSU_HEADS_PER_CTA`,
+`FLASHINFER_SSU_PRECOMPUTE_NUM_WARPS`, `FLASHINFER_SSU_MAIN_CTA_PER_SM` or
+`FLASHINFER_SSU_MAIN_PIPELINE_STAGES` also preserves the configured FlashInfer
+path.

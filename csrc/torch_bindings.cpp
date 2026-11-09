@@ -99,6 +99,21 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "bool use_atomic_add, bool use_fp32_reduce, bool is_zp_float) -> Tensor");
   // conditionally compiled so impl registrations are in source file
 
+  #ifdef VLLM_MARLIN_MAMBA_INPUT_CONV
+  // Exact Marlin-owned SM121 M8 Mamba input projection + convolution.
+  ops.def(
+      "marlin_mamba_input_conv(Tensor input, Tensor(a!) projected, "
+      "Tensor weight, Tensor scales, Tensor global_scale, Tensor workspace, "
+      "Tensor taps, Tensor bias, Tensor(b!) history, Tensor cache_indices, "
+      "Tensor? accepted_tokens, int pad_slot_id, int null_block_id) -> ()");
+  // Separate overload is the capability check for uniform batched ownership.
+  ops.def(
+      "marlin_mamba_input_conv.batched(Tensor input, Tensor(a!) projected, "
+      "Tensor weight, Tensor scales, Tensor global_scale, Tensor workspace, "
+      "Tensor taps, Tensor bias, Tensor(b!) history, Tensor cache_indices, "
+      "Tensor? accepted_tokens, int pad_slot_id, int null_block_id) -> ()");
+  #endif
+
   // gptq_marlin repack from GPTQ.
   ops.def(
       "gptq_marlin_repack(Tensor b_q_weight, "

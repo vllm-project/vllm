@@ -4354,6 +4354,86 @@ def test_quantized_replayssm_requires_replay_backend(state_dtype):
         )
 
 
+@pytest.mark.parametrize(
+    ("backend", "enabled"),
+    [
+        (MambaBackendEnum.TRITON, False),
+        (MambaBackendEnum.TRITON, True),
+        (MambaBackendEnum.FLASHINFER, False),
+    ],
+)
+def test_shared_seed_mamba_requires_stochastic_rounding(backend, enabled):
+    from vllm.config.mamba import MambaConfig
+
+    with pytest.raises(ValueError, match="requires stochastic rounding"):
+        MambaConfig(
+            backend=backend,
+            enable_stochastic_rounding=enabled,
+            stochastic_rounding_rng="shared_seed",
+        )
+
+
+def test_shared_seed_mamba_requires_replayssm():
+    from vllm.config.mamba import MambaConfig
+
+    if not current_platform.is_cuda():
+        pytest.skip("stochastic rounding requires CUDA")
+    with pytest.raises(ValueError, match="requires --use-replayssm"):
+        VllmConfig(
+            cache_config=CacheConfig(mamba_ssm_cache_dtype="float16"),
+            mamba_config=MambaConfig(
+                backend=MambaBackendEnum.FLASHINFER,
+                enable_stochastic_rounding=True,
+                stochastic_rounding_rng="shared_seed",
+            ),
+            device_config=DeviceConfig(device="cpu"),
+        )
+
+
+def test_shared_seed_mamba_rejects_bfloat16_checkpoint():
+    from vllm.config.mamba import MambaConfig
+
+    if not current_platform.is_cuda():
+        pytest.skip("stochastic rounding requires CUDA")
+    with pytest.raises(ValueError, match="SSM cache to be float16"):
+        VllmConfig(
+            cache_config=CacheConfig(
+                use_replayssm=True, mamba_ssm_cache_dtype="bfloat16"
+            ),
+            mamba_config=MambaConfig(
+                backend=MambaBackendEnum.FLASHINFER,
+                enable_stochastic_rounding=True,
+                stochastic_rounding_rng="shared_seed",
+            ),
+            device_config=DeviceConfig(device="cpu"),
+        )
+
+
+@pytest.mark.parametrize(
+    ("prefix_caching", "cache_mode"), [(True, "none"), (False, "align")]
+)
+def test_shared_seed_mamba_allows_prefix_materialization(prefix_caching, cache_mode):
+    from vllm.config.mamba import MambaConfig
+
+    if not current_platform.is_cuda():
+        pytest.skip("stochastic rounding requires CUDA")
+    config = VllmConfig(
+        cache_config=CacheConfig(
+            use_replayssm=True,
+            mamba_ssm_cache_dtype="float16",
+            enable_prefix_caching=prefix_caching,
+            mamba_cache_mode=cache_mode,
+        ),
+        mamba_config=MambaConfig(
+            backend=MambaBackendEnum.FLASHINFER,
+            enable_stochastic_rounding=True,
+            stochastic_rounding_rng="shared_seed",
+        ),
+        device_config=DeviceConfig(device="cpu"),
+    )
+    assert config.mamba_config.stochastic_rounding_rng == "shared_seed"
+
+
 @pytest.mark.parametrize("state_dtype", ["fp8", "int8"])
 def test_quantized_replayssm_rejects_conflicting_checkpoint_dtype(state_dtype):
     from vllm.config.mamba import MambaConfig

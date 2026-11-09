@@ -927,6 +927,7 @@ class CompilationConfig:
         "vllm::unified_attention_with_output",
         "vllm::unified_mla_attention_with_output",
         "vllm::mamba_mixer2",
+        "vllm::mamba_mixer2_with_input_projection",
         "vllm::mamba_mixer",
         "vllm::short_conv",
         "vllm::zaya_cca",
