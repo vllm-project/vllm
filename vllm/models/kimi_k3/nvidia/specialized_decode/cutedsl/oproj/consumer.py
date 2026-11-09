@@ -1,22 +1,23 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""O-projection all-reduce consumer (``groups`` 128-thread groups poll disjoint
+"""O-projection all-reduce consumer (`groups` 128-thread groups poll disjoint
 rank slots, group 0 sums in rank order into the AttnRes) and TP16 fused producer +
-consumer. With ``twoshot`` the mailbox is the one-slot gather row of
-``common.twoshot``: the threads owning this rank's columns first reduce their
+consumer. With `twoshot` the mailbox is the one-slot gather row of
+`common.twoshot`: the threads owning this rank's columns first reduce their
 receive slots into it (args 11-13: receive view, gather multicast address, rank)."""
 
 import cutlass
 import cutlass.cute as cute
 from cutlass import Float32, Int32, Uint32
 
-from ..attn_res.kernel import arm_exchanges, rstd
+from ..attn_res.kernel import arm_exchanges
 from ..common.mailbox import rearm
 from ..common.primitives import (
     add_rn,
     alloc,
     asm,
     at,
+    attn_res_rstd,
     bits_float,
     copy_g2s,
     float_bits,
@@ -73,7 +74,7 @@ def dot8(a, b):
 
 @cute.jit
 def reduce_scatter(values, size: cutlass.Constexpr[int], lane):
-    """Warp-reduce ``size`` values; returns the index of the one this lane holds."""
+    """Warp-reduce `size` values; returns the index of the one this lane holds."""
     for shift in cutlass.range_constexpr(4, -1, -1):
         live: cutlass.Constexpr = max(1, size >> (4 - shift))
         half: cutlass.Constexpr = max(1, live // 2)
@@ -208,7 +209,8 @@ class OprojConsumer:
                 blk[tid] = add_rn(*sums)
             named_barrier()
             logits = [
-                mul_rn(blk[self.nb + b], rstd(blk[b], eps)) for b in range(self.nb)
+                mul_rn(blk[self.nb + b], attn_res_rstd(blk[b], eps))
+                for b in range(self.nb)
             ]
             maximum = tree_reduce(logits, max)
             exp = [cute.math.exp(x - maximum, fastmath=True) for x in logits]
@@ -346,7 +348,7 @@ class OprojConsumer:
             norm = self.fragment(pf, 2, tid)
             final = cute.make_rmem_tensor(8, Float32)
             if cutlass.const_expr(self.nb > 0):
-                lp = mul_rn(total[3], rstd(total[2], eps))
+                lp = mul_rn(total[3], attn_res_rstd(total[2], eps))
                 mx = max(maximum, lp)
                 alpha = cute.math.exp(maximum - mx, fastmath=True)
                 ep = cute.math.exp(lp - mx, fastmath=True)
@@ -354,10 +356,11 @@ class OprojConsumer:
                 a2, t1 = mul_rn(alpha, alpha), total[1]
                 ae2 = mul_rn(mul_rn(2.0, alpha), ep)
                 quad = fma(a2, t1, fma(ae2, total[0], mul_rn(mul_rn(ep, ep), total[2])))
-                scale = rstd(quad, mul_rn(mul_rn(out_eps, den), den))
+                # The stock fused output norm: rsqrt(acc^2 / 7168 + eps * s * s).
+                scale = attn_res_rstd(quad, out_eps, den)
                 ca, cp = mul_rn(alpha, scale), mul_rn(ep, scale)
             else:
-                cp = rstd(total[0], out_eps)
+                cp = attn_res_rstd(total[0], out_eps)
             for j in cutlass.range_constexpr(4):
                 value = pair_op((cp, cp), two(prefix_value, j), op="mul")
                 if cutlass.const_expr(self.nb > 0):

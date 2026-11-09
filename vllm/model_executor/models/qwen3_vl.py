@@ -266,7 +266,7 @@ if HAS_TRITON:
     ) -> torch.Tensor:
         """Launch the fused Triton kernel for one (t,h,w) grid.
 
-        Returns a tensor of shape ``(t * h * w, hidden_dim)`` with the
+        Returns a tensor of shape `(t * h * w, hidden_dim)` with the
         bilinearly-interpolated position embeddings in spatial-merge order.
         """
         assert h % m_size == 0 and w % m_size == 0, (
@@ -312,7 +312,7 @@ def pos_embed_interpolate_native(
 ) -> torch.Tensor:
     """Eager PyTorch bilinear position-embedding interpolation.
 
-    Returns a tensor of shape ``(t * h * w, hidden_dim)`` with the
+    Returns a tensor of shape `(t * h * w, hidden_dim)` with the
     bilinearly-interpolated position embeddings in spatial-merge order.
     """
     assert h % m_size == 0 and w % m_size == 0, (
@@ -1892,7 +1892,11 @@ class Qwen3LLMModel(Qwen3Model):
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
-                {"hidden_states": hidden_states, "residual": residual}
+                {
+                    "hidden_states": hidden_states,
+                    "residual": residual,
+                    **self.pack_local_aux_hidden_states(aux_hidden_states),
+                }
             )
         hidden_states, _ = self.norm(hidden_states, residual)
 
@@ -3195,7 +3199,7 @@ class Qwen3VLForConditionalGeneration(
                 batch.
                 **NOTE**: If mrope is enabled (default setting for Qwen3VL
                 opensource models), the shape will be `(3, seq_len)`,
-                otherwise it will be `(seq_len,).
+                otherwise it will be `(seq_len,)`.
             intermediate_tensors: Intermediate tensors from previous pipeline
                 stages.
             inputs_embeds: Pre-computed input embeddings.

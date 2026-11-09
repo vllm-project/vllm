@@ -11,14 +11,33 @@ Key benefits:
 - **Fine-grained control**: Optionally wake up only model weights or KV cache to avoid OOM during weight updates.
 
 !!! note
-    This feature is now supported on CUDA and ROCm platform.
+    This feature is now supported on CUDA, ROCm and XPU platforms.
 
 !!! note
     For more information, see this [Blog Post](https://blog.vllm.ai/2025/10/26/sleep-mode.html).
 
 ## Sleep levels
 
-Level 1 sleep will offload the model weights and discard the KV cache. The content of KV cache is forgotten. Level 1 sleep is good for sleeping and waking up the engine to run the same model again. The model weights are backed up in CPU memory. Please make sure there's enough CPU memory to store the model weights. Level 2 sleep will discard both the model weights and the KV cache (while the model's buffers are kept in CPU, like rope scaling tensors). The content of both the model weights and KV cache is forgotten. Level 2 sleep is good for sleeping and waking up the engine to run a different model or update the model, where previous model weights are not needed, e.g. RLHF weight update. Level 2 sleep is also useful when there is not enough CPU memory to back up the model weights, e.g. when a colocated trainer already uses CPU memory for offloading its own state; since nothing is backed up, restore the weights after waking up with `collective_rpc("reload_weights")`.
+Level 1 sleep will offload the model weights and discard the KV cache. The content of KV cache is forgotten. Level 1 sleep is good for sleeping and waking up the engine to run the same model again. The model weights are backed up in CPU memory. Please make sure there's enough CPU memory to store the model weights. Level 2 sleep will discard the model parameters and the KV cache, and back up the rest of what the model allocated on the GPU while loading, like rope scaling tensors, in CPU memory. The content of the parameters and KV cache is forgotten. Level 2 sleep is good for sleeping and waking up the engine to update the model's weights, where the previous weights are not needed, e.g. RLHF weight update. Level 2 sleep is also useful when there is not enough CPU memory to back up the model weights, e.g. when a colocated trainer already uses CPU memory for offloading its own state; since the parameters are not backed up, restore them after waking up with `collective_rpc("reload_weights")`.
+
+### What level 2 keeps
+
+Level 2 discards only what is rebuilt on wake, which is what the weight update writes.
+
+| State | After a level-2 wake, before the update |
+| --- | --- |
+| Parameters | Undefined, unless selected by `sleep_preserve_parameter_names` |
+| Anything else allocated while the model loads: buffers, plain attributes, tensors held in closures, pointer tables | Kept, at the same address |
+| Tensors derived from weights | Kept with their old values until post-load processing refreshes them |
+| KV cache and workspace scratch | Contents undefined |
+
+This is the same on CUDA, ROCm and XPU.
+
+**If you send weights to a sleeping engine,** send every parameter that isn't selected by `sleep_preserve_parameter_names`, including the ones that didn't change. `collective_rpc("reload_weights")` does this from the checkpoint. With DeepSeek V4.1, send `engram.wkv`: only the Engram embedding table weights and scales can be left out.
+
+**If you write a kernel,** state built during model loading needs nothing special, whether or not it is registered as a buffer. A tensor computed from weights must be recomputed in post-load processing (see `refill_derived`), or it goes stale after an update. Take per-step scratch from the workspace manager, so that it isn't backed up.
+
+**Host memory** is what non-parameter state takes, plus any preserved parameters. For example, DeepSeek-V4.1-Flash at TP 4 frees 80 GiB per GPU and backs up 2.35 GiB per rank. An allocation that mixes parameters with other tensors is backed up whole.
 
 ## Usage
 
@@ -44,7 +63,7 @@ llm.wake_up()
 
 ```python
 # Sleep level 2
-# Put the engine to sleep (level=2: discard both weights and KV cache)
+# Put the engine to sleep (level=2: discard parameters and KV cache)
 llm.sleep(level=2)
 
 # Reallocate weights memory only
@@ -88,9 +107,9 @@ training. It covers two use cases:
 Target patterns match
 `model.named_parameters()`; checkpoint names and `requires_grad` are not used.
 
-Level-2 sleep backs up selected GPU parameters to pageable CPU memory; weights
-wake-up restores them in place and releases the backups. CPU parameters need no
-copy. Allow enough host memory for backups. Level-1 behavior is unchanged.
+Level-2 sleep backs up selected GPU parameters to CPU memory; weights wake-up
+restores them in place. CPU parameters need no copy. Allow enough host memory
+for backups. Level-1 behavior is unchanged.
 
 The trainer must omit these parameters from updates, and reload/post-processing
 must preserve their values and storage (including avoiding replacement with meta
@@ -122,6 +141,9 @@ Parameters shared with the target are excluded from the draft selection, so
 target updates remain authoritative. An empty `draft.*` selection is valid.
 The Engram and draft patterns can be supplied together.
 
+Without a draft pattern, level-2 sleep discards draft weights, and speculative
+decoding accepts no tokens after `reload_weights`; vLLM logs a warning.
+
 #### Release only KV cache memory
 
 `LLM.release_kv_cache_memory()` discards KV cache physical memory while keeping model weights resident. It requires a completed pause and all executor memory to be resident: full sleep, partial wake-up, and repeated release without restoring memory are rejected. Requests retained with `mode="keep"` are recomputed after wake-up.
@@ -133,6 +155,17 @@ llm.sleep(level=0, mode="keep")  # Wait for the pause to complete.
 llm.release_kv_cache_memory()
 llm.wake_up(tags=["kv_cache"])  # Reallocate KV cache and resume scheduling.
 ```
+
+#### Keep the KV connector cache
+
+Discarding the KV cache, by a sleep at level 1 or 2 or by `release_kv_cache_memory()`, also resets a configured KV connector's cache, such as blocks offloaded to CPU or kept in an external store. Pass `reset_connector=False` to keep it, so that requests after the wake-up load those blocks instead of recomputing them:
+
+```python
+llm.sleep(level=1, reset_connector=False)
+llm.wake_up()
+```
+
+Block hashes do not cover the weights. If the weights may change before the wake-up, keep the default, or give requests a `cache_salt` per weight version so that blocks computed with older weights are never matched.
 
 #### Offloading CUDA graph memory
 
@@ -230,8 +263,8 @@ curl -X POST 'http://localhost:8000/wake_up?tags=kv_cache'
 
 #### HTTP endpoints
 
-- `POST /sleep?level=1` — Put the model to sleep (`level=1`).
-- `POST /release_kv_cache_memory` — Discard KV cache memory after a completed pause, while all executor memory is resident.
+- `POST /sleep?level=1` — Put the model to sleep (`level=1`). `reset_connector=false` keeps the KV connector's cache.
+- `POST /release_kv_cache_memory` — Discard KV cache memory after a completed pause, while all executor memory is resident. `reset_connector=false` keeps the KV connector's cache.
 - `POST /wake_up` — Wake up the model. Supports optional `tags` query parameters for partial wake-up (e.g., `?tags=weights`).
 - `POST /collective_rpc` — Perform a collective remote procedure call (RPC).
 - `GET /is_sleeping` — Check if the model is sleeping.
@@ -252,7 +285,7 @@ the remaining CUDA state, including captured graph executable objects, without
 recapturing graphs. Ordinary level-1 semantics still apply: KV cache contents are
 discarded. This is not a durable application checkpoint or model switching API.
 
-Set `VLLM_USE_V2_MODEL_RUNNER=1` before starting the engine:
+For example:
 
 ```python
 from vllm import LLM
@@ -283,9 +316,8 @@ for versioned test results and communication performance comparisons. Support
 for other GPU, driver, and communication-library combinations is not established.
 
 Only single-node tensor parallelism is accepted. Tensor parallel sizes 1, 2,
-and 4 have been GPU-tested; other sizes remain unvalidated. Use
-`VLLM_USE_V2_MODEL_RUNNER=1`, the standard GPU worker and the `cumem` sleep
-backend. Pipeline, data, context and expert parallelism, external cache or
+and 4 have been GPU-tested; other sizes remain unvalidated. Use the standard
+GPU worker and the `cumem` sleep backend. Pipeline, data, context and expert parallelism, external cache or
 weight transfer, custom worker classes, and sleep level 2 are rejected before
 worker startup (sleep level 2 is rejected when requested). Worker extensions
 that allocate additional CUDA IPC resources are outside the validated scope.

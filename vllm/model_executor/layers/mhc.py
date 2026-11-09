@@ -309,14 +309,14 @@ class MHCPreOp(CustomOp):
 class MHCPreDelayedOp(CustomOp):
     """MHC pre block using the pre-mix carried from the previous sublayer.
 
-    Same gates as :class:`MHCPreOp`, but the stream collapse applies the
-    caller's ``pre_mix`` and this sublayer's pre-mix is returned for the next
+    Same gates as `MHCPreOp`, but the stream collapse applies the
+    caller's `pre_mix` and this sublayer's pre-mix is returned for the next
     sublayer seam.
 
-    Passing ``sublayer_out`` / ``post_layer_mix`` / ``comb_res_mix`` also
+    Passing `sublayer_out` / `post_layer_mix` / `comb_res_mix` also
     applies the preceding post block, which lets AITER fold it into the pre
     projection and saves a launch. Returns residual, post_mix, comb_mix,
-    layer_input, next_pre_mix; ``residual`` is the caller's own tensor when
+    layer_input, next_pre_mix; `residual` is the caller's own tensor when
     no post is requested.
     """
 

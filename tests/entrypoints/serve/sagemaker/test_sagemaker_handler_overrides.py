@@ -13,8 +13,8 @@ Tests real customer usage scenarios:
   defaults
 
 The handler-override scenarios exercise the real vLLM SageMaker router and
-bootstrap path via an in-process FastAPI ``TestClient`` instead of launching a
-model server. These scenarios fully replace the ``/ping`` and ``/invocations``
+bootstrap path via an in-process FastAPI `TestClient` instead of launching a
+model server. These scenarios fully replace the `/ping` and `/invocations`
 endpoints with customer handlers, so no inference engine is required to
 validate override behavior. Avoiding the model server also keeps the tests
 fast and deterministic rather than depending on the FastAPI version resolved
@@ -38,7 +38,7 @@ from .conftest import (
 def _build_sagemaker_test_client() -> TestClient:
     """Build a TestClient over the real SageMaker router and bootstrap path.
 
-    ``attach_router`` is called with empty supported tasks because the override
+    `attach_router` is called with empty supported tasks because the override
     tests replace the endpoints with customer handlers, so no framework
     invocation handler (and therefore no engine) is exercised.
     """
@@ -366,7 +366,7 @@ async def custom_sagemaker_invocation_handler(request: Request):
         overrides exist.
 
         This scenario exercises the real inference path (default
-        ``/invocations``), so it keeps using a live model server rather than
+        `/invocations`), so it keeps using a live model server rather than
         the in-process TestClient.
         """
         args = [
