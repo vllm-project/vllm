@@ -74,8 +74,6 @@ tests/kernels/helion/test_rms_norm_per_block_quant.py  # CI jobs disabled pendin
 tests/kernels/helion/test_silu_and_mul_per_block_quant.py  # CI jobs disabled pending locked helion transitive dependencies
 tests/kernels/helion/test_silu_mul_fp8.py  # CI jobs disabled pending locked helion transitive dependencies
 tests/kernels/helion/test_utils.py  # CI jobs disabled pending locked helion transitive dependencies
-tests/rocm/test_moe_padding.py  # MI300 Quantization disabled until the ROCm image installs torchao
-tests/rocm/test_moe_weight_replay.py  # MI300 Quantization disabled until the ROCm image installs torchao
 
 # Temporary gaps from disabling jobs with unpinned install environments.
 tests/device_allocator/test_alloc_conf.py  # CI jobs disabled pending locked cmake installation

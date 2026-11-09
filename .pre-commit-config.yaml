@@ -95,6 +95,21 @@ repos:
       ]
       files: ^requirements/test/quantization_deps(\.in|_cuda\.txt)$
     - id: pip-compile
+      alias: pip-compile-quantization-deps-rocm
+      name: pip-compile-quantization-deps-rocm
+      args: [
+        requirements/test/quantization_deps.in,
+        -o, requirements/test/quantization_deps_rocm.txt,
+        --generate-hashes,
+        # The ROCm image installs these into /opt/quantization-deps; their deps are in requirements/test/rocm.txt.
+        --no-deps,
+        # ROCm already ships conch in site-packages (requirements/rocm.txt).
+        --no-emit-package, conch-triton-kernels,
+        --python-platform, x86_64-manylinux_2_28,
+        --python-version, "3.12",
+      ]
+      files: ^requirements/test/quantization_deps(\.in|_rocm\.txt)$
+    - id: pip-compile
       alias: pip-compile-rocm
       name: pip-compile-rocm
       args: [

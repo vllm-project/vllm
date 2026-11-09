@@ -2645,7 +2645,8 @@ def test_online_nvfp4_per_token_moe(vllm_runner, monkeypatch) -> None:
 
 
 @pytest.mark.skipif(
-    not current_platform.is_cuda_alike(), reason="LUT-B MoE needs a CUDA-like GPU."
+    not current_platform.is_cuda(),
+    reason="LUT-B MoE needs CUDA; ROCm does not support lut_b_moe.",
 )
 def test_online_lut_b_moe(vllm_runner, monkeypatch) -> None:
     """LUT-B quantizes only the routed experts; Rubin runs it natively."""

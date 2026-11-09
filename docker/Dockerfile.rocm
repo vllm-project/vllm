@@ -236,6 +236,14 @@ RUN MAMBA_FORCE_BUILD=TRUE CAUSAL_CONV1D_FORCE_BUILD=TRUE \
          llvm-objdump --offloading "$so" | grep -qw "$a" || { echo "$so lacks $a" >&2; exit 1; }; done; done \
     && rm -rf /tmp/whl
 
+# torchao for the Quantization steps, which put /opt/quantization-deps on PYTHONPATH. Kept out of
+# site-packages because transformers imports torchao when it is installed and torchao
+# queries the GPU at import, which breaks tests that fork. CI only.
+FROM dev AS build_torchao
+RUN --mount=type=bind,source=requirements/test/quantization_deps_rocm.txt,target=/r.txt \
+    --mount=type=cache,id=vllm-rocm-uv,target=/root/.cache/uv \
+    uv pip install --python python3 --require-hashes --no-deps --target /opt/quantization-deps -r /r.txt
+
 # rdma-core recent enough for DeepEP's rocshmem. CI only: it replaces the distro libibverbs, which
 # the vendor NIC providers in the runtime (AINIC, Broadcom bnxt_re) are built against.
 FROM dev AS build_rdma_core
@@ -390,6 +398,10 @@ RUN --mount=type=bind,source=requirements/test/rocm.txt,target=/t.txt --mount=ty
 RUN --mount=type=bind,from=build_mamba,src=/app/mamba_install,target=/mamba \
     --mount=type=cache,id=vllm-rocm-uv,target=/root/.cache/uv \
     uv pip install --system --no-deps /mamba/*.whl
+COPY --from=build_torchao /opt/quantization-deps /opt/quantization-deps
+RUN if ! python3 -c "import importlib.util, sys; sys.exit(importlib.util.find_spec('torchao') is not None)"; then \
+        echo "torchao is importable from the default path; keep it in /opt/quantization-deps only" >&2; exit 1; \
+    fi
 ENV HF_XET_HIGH_PERFORMANCE=1
 
 # ==== per-commit stages: nothing below is part of the runtime key ====
