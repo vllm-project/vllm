@@ -344,15 +344,6 @@ class Eagle3LlamaForCausalLM(_Eagle3LlamaForCausalLMBase):
         else:
             self.draft_id_to_target_id = None
 
-        self.use_parallel_drafting = speculative_config.parallel_drafting
-
-        if self.use_parallel_drafting:
-            self.register_buffer(
-                "mask_hidden",
-                torch.zeros(1, self.model.fc_input_size),
-                persistent=False,
-            )
-
     def embed_input_ids(
         self,
         input_ids: torch.Tensor,
@@ -428,15 +419,11 @@ class Eagle3LlamaForCausalLM(_Eagle3LlamaForCausalLMBase):
                 name = name.replace("d2t", "draft_id_to_target_id")
                 includes_draft_id_mapping = True
             elif "mask_hidden" in name:
-                # Load mask_hidden directly into buffer
-                if not self.use_parallel_drafting:
-                    logger.warning(
-                        "mask_hidden found in weights but "
-                        "model is not configured for parallel drafting. "
-                        "Skipping loading mask_hidden."
-                    )
-                    continue
-                self.mask_hidden.copy_(loaded_weight.view(1, -1))
+                # P-EAGLE (parallel drafting) weight; not supported.
+                logger.warning(
+                    "mask_hidden found in weights but parallel drafting is "
+                    "not supported for EAGLE-3. Skipping loading mask_hidden."
+                )
                 continue
             elif "lm_head" not in name:
                 name = "model." + name
