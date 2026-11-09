@@ -409,7 +409,6 @@ th {
 | `FalconMambaForCausalLM` | FalconMamba | `tiiuae/falcon-mamba-7b`, `tiiuae/falcon-mamba-7b-instruct`, etc. | | ✅︎ |
 | `FalconH1ForCausalLM` | Falcon-H1 | `tiiuae/Falcon-H1-34B-Base`, `tiiuae/Falcon-H1-34B-Instruct`, etc. | ✅︎ | ✅︎ |
 | `FlintForCausalLM` | Flint | `RecursiveSI/flint`, `RecursiveSI/flint-nvfp4-gguf` (GGUF) | | ✅︎ |
-| `GemmaForCausalLM` | Gemma | `google/gemma-2b`, `google/gemma-1.1-2b-it`, etc. | ✅︎ | ✅︎ |
 | `Gemma2ForCausalLM` | Gemma 2 | `google/gemma-2-9b`, `google/gemma-2-27b`, etc. | ✅︎ | ✅︎ |
 | `Gemma3ForCausalLM` | Gemma 3 | `google/gemma-3-1b-it`, etc. | ✅︎ | ✅︎ |
 | `Gemma3nForCausalLM` | Gemma 3n | `google/gemma-3n-E2B-it`, `google/gemma-3n-E4B-it`, etc. | | |
@@ -477,7 +476,6 @@ th {
 | `SarvamMoEForCausalLM` | Sarvam 2 | `sarvamai/sarvam2-30b-a3b`, etc. | ✅︎ | ✅︎ |
 | `SarvamMLAForCausalLM` | Sarvam 2 | `sarvamai/sarvam2-105b-a9b`, etc. | | ✅︎ |
 | `SolarForCausalLM` | Solar Pro | `upstage/solar-pro-preview-instruct`, etc. | ✅︎ | ✅︎ |
-| `StableLmForCausalLM` | StableLM | `stabilityai/stablelm-3b-4e1t`, `stabilityai/stablelm-base-alpha-7b-v2`, etc. | | |
 | `Step1ForCausalLM` | Step-Audio | `stepfun-ai/Step-Audio-EditX`, etc. | ✅︎ | ✅︎ |
 | `Step3p5ForCausalLM` | Step-3.5-flash | `stepfun-ai/Step-3.5-Flash`, etc. | | ✅︎ |
 | `TeleChat2ForCausalLM` | TeleChat2 | `Tele-AI/TeleChat2-3B`, `Tele-AI/TeleChat2-7B`, `Tele-AI/TeleChat2-35B`, etc. | ✅︎ | ✅︎ |
@@ -493,6 +491,7 @@ Some models are supported only via the [Transformers modeling backend](#transfor
 | `ArceeForCausalLM` | Arcee (AFM) | `arcee-ai/AFM-4.5B-Base`, etc. | ✅︎ | ✅︎ |
 | `CwmForCausalLM` | CWM | `facebook/cwm`, etc. | ✅︎ | ✅︎ |
 | `FlexOlmoForCausalLM` | FlexOlmo | `allenai/FlexOlmo-7x7B-1T`, `allenai/FlexOlmo-7x7B-1T-RT`, etc. | ✅︎ | ✅︎ |
+| `GemmaForCausalLM` | Gemma | `google/gemma-2b`, `google/gemma-1.1-2b-it`, etc. | ✅︎ | ✅︎ |
 | `GlmForCausalLM` | GLM-4 | `zai-org/glm-4-9b-chat-hf`, etc. | ✅︎ | ✅︎ |
 | `GPTBigCodeForCausalLM` | StarCoder, SantaCoder, WizardCoder | `bigcode/starcoder`, `bigcode/gpt_bigcode-santacoder`, `WizardLM/WizardCoder-15B-V1.0`, etc. | ✅︎ | |
 | `GPTNeoXForCausalLM` | GPT-NeoX, Pythia, OpenAssistant, Dolly V2, StableLM | `EleutherAI/gpt-neox-20b`, `EleutherAI/pythia-12b`, `OpenAssistant/oasst-sft-4-pythia-12b-epoch-3.5`, `databricks/dolly-v2-12b`, `stabilityai/stablelm-tuned-alpha-7b`, etc. | | ✅︎ |
@@ -509,6 +508,7 @@ Some models are supported only via the [Transformers modeling backend](#transfor
 | `PhiForCausalLM` | Phi | `microsoft/phi-1_5`, `microsoft/phi-2`, etc. | ✅︎ | ✅︎ |
 | `SeedOssForCausalLM` | SeedOss | `ByteDance-Seed/Seed-OSS-36B-Instruct`, etc. | ✅︎ | ✅︎ |
 | `SmolLM3ForCausalLM` | SmolLM3 | `HuggingFaceTB/SmolLM3-3B` | ✅︎ | ✅︎ |
+| `StableLmForCausalLM` | StableLM | `stabilityai/stablelm-3b-4e1t`, `stabilityai/stablelm-base-alpha-7b-v2`, etc. | ✅︎ | ✅︎ |
 | `Starcoder2ForCausalLM` | Starcoder2 | `bigcode/starcoder2-3b`, `bigcode/starcoder2-7b`, `bigcode/starcoder2-15b`, etc. | ✅︎ | ✅︎ |
 | `VaultGemmaForCausalLM` | VaultGemma | `google/vaultgemma-1b` | ✅︎ | ✅︎ |
 
@@ -551,7 +551,6 @@ These models primarily accept the [`LLM.generate`](./generative_models.md#llmgen
 | Architecture | Models | Inputs | Example HF Models | [LoRA](../features/lora.md) | [PP](../serving/parallelism_scaling.md) |
 | ------------ | ------ | ------ | ----------------- | -------------------- | ------------------------- |
 | `Alpamayo2Super` | Alpamayo 2 Super (reasoning model) | T + I<sup>E+</sup> | `nvidia/Alpamayo2-Super` | | ✅︎ |
-| `AriaForConditionalGeneration` | Aria | T + I<sup>+</sup> | `rhymes-ai/Aria` | | |
 | `AudioFlamingo3ForConditionalGeneration` | AudioFlamingo3 | T + A | `nvidia/audio-flamingo-3-hf`, `nvidia/music-flamingo-hf` | ✅︎ | ✅︎ |
 | `BagelForConditionalGeneration` | BAGEL | T + I<sup>+</sup> | `ByteDance-Seed/BAGEL-7B-MoT` | ✅︎ | ✅︎ |
 | `BailingMoeV3VLForConditionalGeneration` | Ling 3.0 Flash VL | T + I<sup>E+</sup> | `inclusionAI/Ling-3.0-flash-VL` | | ✅︎ |
@@ -593,6 +592,7 @@ These models primarily accept the [`LLM.generate`](./generative_models.md#llmgen
 | `KimiAudioForConditionalGeneration` | Kimi-Audio | T + A<sup>+</sup> | `moonshotai/Kimi-Audio-7B-Instruct` | | ✅︎ |
 | `KimiK25ForConditionalGeneration` | Kimi-K2.5 | T + I<sup>+</sup> | `moonshotai/Kimi-K2.5` | | ✅︎ |
 | `KimiK3ForConditionalGeneration` | Kimi-K3 | T + I<sup>+</sup> | `moonshotai/Kimi-K3` | | ✅︎ |
+| `KimiK31ForConditionalGeneration` | Kimi-K3.1 | T + I<sup>+</sup> | `moonshotai/Kimi-K3.1` | | ✅︎ |
 | `KimiVLForConditionalGeneration` | Kimi-VL-A3B-Instruct, Kimi-VL-A3B-Thinking | T + I<sup>+</sup> | `moonshotai/Kimi-VL-A3B-Instruct`, `moonshotai/Kimi-VL-A3B-Thinking` | | ✅︎ |
 | `LightOnOCRForConditionalGeneration` | LightOnOCR-1B | T + I<sup>E+</sup> | `lightonai/LightOnOCR-1B`, etc | ✅︎ | ✅︎ |
 | `Lfm2VlForConditionalGeneration` | LFM2-VL | T + I<sup>+</sup> | `LiquidAI/LFM2-VL-450M`, `LiquidAI/LFM2-VL-3B`, `LiquidAI/LFM2-VL-8B-A1B`, etc. | ✅︎ | ✅︎ |
@@ -659,14 +659,14 @@ These models primarily accept the [`LLM.generate`](./generative_models.md#llmgen
 | `UnlimitedOCRForCausalLM` | Unlimited-OCR | T + I<sup>+</sup> | `baidu/Unlimited-OCR`, etc. | ✅︎ | ✅︎ |
 | `UnlimitedOCRForCausalLM` | Unlimited-OCR-2 | T + I<sup>+</sup> | `baidu/Unlimited-OCR-2` | | |
 
-Unlimited-OCR-2 requires Model Runner V2 (`VLLM_USE_V2_MODEL_RUNNER=1`).
-Its optional page-count guard respects sampling constraints, preserving EOS
+Unlimited-OCR-2's optional page-count guard respects sampling constraints, preserving EOS
 when it is the only remaining permitted token.
 
 Some models are supported only via the [Transformers modeling backend](#transformers). The purpose of the table below is to acknowledge models which we officially support in this way. The logs will say that the Transformers modeling backend is being used, and you will see no warning that this is fallback behaviour. This means that, if you have issues with any of the models listed below, please [make an issue](https://github.com/vllm-project/vllm/issues/new/choose) and we'll do our best to fix it!
 
 | Architecture | Models | Inputs | Example HF Models | [LoRA](../features/lora.md) | [PP](../serving/parallelism_scaling.md) |
 | ------------ | ------ | ------ | ----------------- | --------------------------- | --------------------------------------- |
+| `AriaForConditionalGeneration` | Aria | T + I<sup>+</sup> | `rhymes-ai/Aria` | ✅︎ | ✅︎ |
 | `Emu3ForConditionalGeneration` | Emu3 | T + I<sup>+</sup> | `BAAI/Emu3-Chat-hf` | ✅︎ | ✅︎ |
 | `HunYuanVLForConditionalGeneration` | HunyuanOCR | T + I<sup>E+</sup> | `tencent/HunyuanOCR`, etc. | ✅︎ | ✅︎ |
 | `VibeVoiceAsrForConditionalGeneration` | VibeVoice-ASR | T + A<sup>+</sup> | `microsoft/VibeVoice-ASR-HF` | ✅︎ | ✅︎ |
