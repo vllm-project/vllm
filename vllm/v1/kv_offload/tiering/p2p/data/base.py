@@ -51,6 +51,36 @@ Transfer lifecycle
    - mode="wait" returns ids still in PROC/PEND so the caller can poll
      them to completion
 
+Failure model
+-------------
+
+The transport decides each failure's scope:
+
+- Transfer: write_blocks() returned None or poll() listed the id in
+  `failed`. The caller fails that round; the peer recomputes.
+- Peer: the registration for a peer is unusable (one decisive error, such
+  as any failed state check of an inflight transfer, or repeated transfer
+  failures with no success between). poll(peer_id) reports the cause in
+  `PollResult.peer_fault` until remove_remote_peer(). A transfer whose
+  state check failed stays inflight unless the failure proves it can no
+  longer write, so the peer's teardown is what bounds it.
+
+remove_remote_peer() does not stop a transfer that is still running: the
+transport retires it instead. A retired transfer leaves every poll(), so
+a reconnected peer under the same id never sees it; poll_retired()
+reports it once it has stopped, and only then are its handle and the
+removed peer's registration released. The caller keeps the transfer's
+source pins until then, or until it gives up and calls
+force_release_retired().
+
+The transport never recovers a peer itself. The session turns a peer
+fault into the same connection death as a missed heartbeat, so the
+manager's reap is the only teardown: DisconnectMsg makes the peer tear
+down too, and the next connection re-registers both sides.
+
+write_blocks() and poll() report failures through their return values
+and must not raise for them.
+
 Implementor contracts
 ---------------------
 
@@ -92,11 +122,15 @@ class PollResult(NamedTuple):
     Attributes:
         done: Transfer IDs that completed successfully.
         failed: Transfer IDs that failed (error, timeout, etc.).
+        peer_fault: Set only on a peer-scoped poll() once the transport
+            has judged the peer unusable (see "Failure model"); a short
+            human-readable cause. None while the peer is healthy.
 
     """
 
     done: Sequence[int]
     failed: Sequence[int]
+    peer_fault: str | None = None
 
 
 class DataTransport(ABC):
@@ -196,11 +230,11 @@ class DataTransport(ABC):
 
         Registration is O(num_blocks) and can take seconds for a large
         secondary tier, so the session starts it here and sends
-        ``ConnectAckMsg`` only once the returned future resolves. The
+        `ConnectAckMsg` only once the returned future resolves. The
         acknowledgement is therefore the peer's guarantee that this side
-        is ready to serve, and no ``write_blocks`` can arrive before it.
+        is ready to serve, and no `write_blocks` can arrive before it.
 
-        The default implementation runs ``add_remote_peer`` inline and
+        The default implementation runs `add_remote_peer` inline and
         returns an already-resolved future; transports whose registration
         is cheap need not override it.
 
@@ -235,9 +269,26 @@ class DataTransport(ABC):
     def remove_remote_peer(self, peer_id: str) -> None:
         """Unregister a remote peer and release associated resources.
 
-        Inflight transfers to this peer should be cancelled first.
+        Transfers to this peer still inflight are retired, not released
+        (see "Failure model"); the peer's registration is released once
+        they have stopped.
         """
         ...
+
+    def poll_retired(self) -> list[int]:
+        """Release retired transfers that have stopped; return their ids.
+
+        Must be called periodically while any transfer is retired. The
+        default transport retires nothing.
+        """
+        return []
+
+    def force_release_retired(self, transfer_ids: Iterable[int]) -> None:
+        """Release retired transfers that have not stopped.
+
+        Unsafe while one may still be writing; for a bounded hold only.
+        """
+        self.cancel(transfer_ids, mode="immediate")
 
     @abstractmethod
     def write_blocks(
@@ -267,11 +318,11 @@ class DataTransport(ABC):
 
         Args:
             peer_id: If given, only poll (and drain) transfers submitted for
-                this peer_id — the value passed to ``write_blocks``. This is
+                this peer_id — the value passed to `write_blocks`. This is
                 required when a single transport is shared across multiple
-                peer sessions: ``poll()`` pops completed handles, so an
+                peer sessions: `poll()` pops completed handles, so an
                 unscoped poll by one session would consume and discard the
-                completions of its siblings, starving them. ``None`` polls
+                completions of its siblings, starving them. `None` polls
                 every peer's transfers (used only for the shutdown drain).
 
         Returns:

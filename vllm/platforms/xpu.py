@@ -106,7 +106,7 @@ class XPUPlatform(Platform):
     device_type: str = "xpu"
     dispatch_key: str = "XPU"
     # Intel XPU's device key is "GPU" for Ray.
-    # see https://github.com/ray-project/ray/blob/6a5eb5865eeb9ccf058a79b44f107e327e360673/python/ray/_private/accelerators/intel_gpu.py#L20 # noqa: E501
+    # see https://github.com/ray-project/ray/blob/6a5eb5865eeb9ccf058a79b44f107e327e360673/python/ray/_private/accelerators/intel_gpu.py#L20
     ray_device_key: str = "GPU"
     dist_backend: str = "xccl"  # xccl only
     device_control_env_var: str = "ZE_AFFINITY_MASK"
@@ -213,8 +213,8 @@ class XPUPlatform(Platform):
         elif attn_selector_config.use_mm_prefix:
             # Flash Attention on XPU has no FA4 kernel, so it cannot apply the
             # multimodal prefix-LM bidirectional mask. Honor an explicit Flash
-            # Attention request (for text-only workloads); otherwise fall back
-            # to Triton Attention, which supports mm_prefix.
+            # Attention request (for text-only workloads); otherwise use the
+            # Triton/FlashAttention composite, falling back to Triton Attention.
             if selected_backend == AttentionBackendEnum.FLASH_ATTN:
                 logger.warning_once(
                     "Using Flash Attention on XPU for a multimodal prefix-LM "
@@ -224,6 +224,29 @@ class XPUPlatform(Platform):
                     "text-only workloads."
                 )
                 return AttentionBackendEnum.FLASH_ATTN.get_path()
+            if (
+                selected_backend in (None, AttentionBackendEnum.TRITON_FLASH_ATTN)
+                and dtype != torch.float32
+            ):
+                from vllm.v1.attention.backends.triton_flash_attn import (
+                    TritonFlashAttentionBackend,
+                )
+
+                if TritonFlashAttentionBackend.supports_head_size(
+                    attn_selector_config.head_size
+                ):
+                    logger.info_once(
+                        "Using the Triton/FlashAttention composite backend on "
+                        "XPU: batches with multimodal prefix masks run Triton "
+                        "Attention, causal batches run Flash Attention."
+                    )
+                    return AttentionBackendEnum.TRITON_FLASH_ATTN.get_path()
+                if selected_backend == AttentionBackendEnum.TRITON_FLASH_ATTN:
+                    raise ValueError(
+                        "TRITON_FLASH_ATTN on XPU supports head sizes "
+                        f"{TritonFlashAttentionBackend.get_supported_head_sizes()}"
+                        f", got {attn_selector_config.head_size}."
+                    )
             logger.warning_once(
                 "Flash Attention on XPU does not support multimodal prefix-LM "
                 "attention. Falling back to Triton Attention backend."
@@ -426,6 +449,25 @@ class XPUPlatform(Platform):
         # This allows custom workers (like vllm-omni workers) to be used on XPU
         if parallel_config.worker_cls == "auto":
             parallel_config.worker_cls = "vllm.v1.worker.xpu_worker.XPUWorker"
+
+        # Batched experts can only be fed by a batched dispatch.
+        if (
+            parallel_config.enable_expert_parallel
+            and vllm_config.kernel_config.moe_backend == "batched_triton"
+            and parallel_config.all2all_backend == "allgather_reducescatter"
+        ):
+            parallel_config.all2all_backend = "alltoall_batched"
+            # The token budget was already sized for a non-batched dispatch.
+            sched = vllm_config.scheduler_config
+            sched.max_num_batched_tokens = min(
+                sched.max_num_batched_tokens,
+                sched.DEFAULT_MAX_NUM_BATCHED_TOKENS_FOR_BATCHED_DP,
+            )
+            logger.info_once(
+                "XPU MoE: using alltoall_batched dispatch, max_num_batched_tokens=%d",
+                sched.max_num_batched_tokens,
+            )
+
         if vllm_config.kv_transfer_config is not None:
             vllm_config.kv_transfer_config.enable_permute_local_kv = True
 

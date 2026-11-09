@@ -1,14 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import json
-import time
 from collections.abc import Awaitable
-from dataclasses import dataclass, field
 from http import HTTPStatus
-from typing import ClassVar, Generic, TypeVar
+from typing import TypeVar
 
 from fastapi import Request
-from pydantic import ConfigDict
 
 from vllm import RequestOutput
 from vllm.engine.protocol import EngineClient
@@ -23,20 +20,16 @@ from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.entrypoints.serve.engine.serving import BaseServing
-from vllm.entrypoints.serve.engine.typing import AnyRequest
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.exceptions import GenerationError
-from vllm.inputs import EngineInput
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob, PromptLogprobs
-from vllm.lora.request import LoRARequest
 from vllm.tokenizers import TokenizerLike
 from vllm.tokenizers.detokenizer_utils import convert_ids_list_to_tokens
 from vllm.v1.metrics.stats import RequestStateStats
 
 logger = init_logger(__name__)
 
-RequestT = TypeVar("RequestT", bound=AnyRequest)
 _T = TypeVar("_T")
 SESSION_ID_HEADER = "X-Session-ID"
 PRIORITY_HEADER = "X-Vllm-Priority"
@@ -46,14 +39,14 @@ def build_per_request_timing_metrics(
     metrics: RequestStateStats | None,
     num_generation_tokens: int,
 ) -> PerRequestMetrics:
-    """Build per-request timing metrics from ``RequestStateStats``.
+    """Build per-request timing metrics from `RequestStateStats`.
 
-    ``generation_time_ms`` is the decode interval only (first output token to
+    `generation_time_ms` is the decode interval only (first output token to
     last output token); it excludes both queue wait and prefill/TTFT.
-    ``tokens_per_second`` is overall output throughput: all generated tokens
+    `tokens_per_second` is overall output throughput: all generated tokens
     over the inference interval (scheduling to last output token), so it counts
-    the prefill/TTFT phase and is not simply the reciprocal of ``mean_itl_ms``.
-    Each field is left ``None`` when the timestamps it depends on are
+    the prefill/TTFT phase and is not simply the reciprocal of `mean_itl_ms`.
+    Each field is left `None` when the timestamps it depends on are
     unavailable.
     """
     if metrics is None:
@@ -101,7 +94,7 @@ def build_spec_decoding_metrics(
     final_res: "RequestOutput | None",
 ) -> SpeculativeDecodingMetrics | None:
     """Build per-request spec-decode acceptance metrics from the single output
-    sequence, or ``None`` when unavailable (metrics disabled, or no sequence
+    sequence, or `None` when unavailable (metrics disabled, or no sequence
     yet).
 
     Only meaningful for single-sequence requests; callers suppress it for n>1.
@@ -114,23 +107,7 @@ def build_spec_decoding_metrics(
     return SpeculativeDecodingMetrics(**metrics.to_dict())
 
 
-@dataclass(kw_only=True)
-class ServeContext(Generic[RequestT]):
-    request: RequestT
-    raw_request: Request | None = None
-    model_name: str
-    request_id: str
-    created_time: int = field(default_factory=lambda: int(time.time()))
-    lora_request: LoRARequest | None = None
-    engine_inputs: list[EngineInput] | None = None
-    model_config = ConfigDict(arbitrary_types_allowed=True)
-
-
 class GenerateBaseServing(BaseServing, BeamSearchOnlineMixin):
-    request_id_prefix: ClassVar[str] = """
-    A short string prepended to every request’s ID.
-    """
-
     def __init__(
         self,
         engine_client: EngineClient,
@@ -210,11 +187,7 @@ class GenerateBaseServing(BaseServing, BeamSearchOnlineMixin):
         self, e: GenerationError
     ) -> str:
         """Convert GenerationError to streaming error response."""
-        return self.create_streaming_error_response(
-            str(e),
-            err_type="InternalServerError",
-            status_code=e.status_code,
-        )
+        return self.create_streaming_error_response(e)
 
     @staticmethod
     def _get_data_parallel_rank(raw_request: Request | None) -> int | None:
@@ -361,8 +334,8 @@ def chat_top_logprobs_limit(
 ) -> int | None:
     """How many of a position's logprob candidates `/v1/chat/completions`
     returns, in the engine's order (sampled token first): the first
-    ``top_logprobs``, none when it is unset, and all of them (``None``) for
-    ``top_logprobs=-1`` or ``logprob_token_ids`` (``return_all``). Shared with
+    `top_logprobs`, none when it is unset, and all of them (`None`) for
+    `top_logprobs=-1` or `logprob_token_ids` (`return_all`). Shared with
     chat derender so the two cannot drift."""
     if return_all or top_logprobs == -1:
         return None
@@ -373,9 +346,9 @@ def completion_top_logprobs_limit(
     logprobs: int | None, return_all: bool = False
 ) -> int | None:
     """How many of a position's logprob candidates `/v1/completions` returns:
-    the first ``logprobs + 1`` (the OpenAI completions convention), and all of
-    them (``None``) for ``logprobs=-1``, ``logprob_token_ids`` (``return_all``)
-    or when ``logprobs`` is unset. Shared with completions derender so the two
+    the first `logprobs + 1` (the OpenAI completions convention), and all of
+    them (`None`) for `logprobs=-1`, `logprob_token_ids` (`return_all`)
+    or when `logprobs` is unset. Shared with completions derender so the two
     cannot drift."""
     if return_all or logprobs is None or logprobs == -1:
         return None

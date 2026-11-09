@@ -6,7 +6,9 @@ use std::ffi::OsString;
 
 use clap::error::ErrorKind;
 use clap::{Args, CommandFactory};
+use serde_json::{Map, Value};
 
+use crate::data_parallel::DataParallelTopology;
 use crate::{ManagedEngineConfig, allocate_handshake_port};
 
 /// Managed Python headless-engine CLI arguments.
@@ -84,7 +86,6 @@ impl ManagedEngineArgs {
     pub fn into_config(
         self,
         model: String,
-        revision: Option<String>,
         max_logprobs: Option<i32>,
         profiler_config: Option<String>,
         reasoning_parser: Option<&str>,
@@ -94,13 +95,12 @@ impl ManagedEngineArgs {
         handshake_port: u16,
         limit_mm_per_prompt: Option<String>,
         hf_overrides: Option<String>,
+        structured_outputs_config: Option<String>,
+        topology: &DataParallelTopology,
+        client_handshake_address: Option<String>,
     ) -> ManagedEngineConfig {
         let mut python_args = self.python_args;
         // Manually forward some args to the Python engine.
-        if let Some(revision) = revision {
-            python_args.push("--revision".to_string());
-            python_args.push(revision);
-        }
         if let Some(max_model_len) = self.max_model_len {
             python_args.push("--max-model-len".to_string());
             python_args.push(max_model_len);
@@ -129,9 +129,16 @@ impl ManagedEngineArgs {
             python_args.push("--shutdown-timeout".to_string());
             python_args.push(shutdown_timeout.to_string());
         }
-        if let Some(data_parallel_size_local) = self.data_parallel_size_local {
+        // This node's engines launch as a headless internal-LB node; hybrid
+        // and external LB differ only in which frontend they handshake with,
+        // which `client_handshake_address` carries.
+        if self.data_parallel_size_local.is_some() || topology.local_engines_only {
             python_args.push("--data-parallel-size-local".to_string());
-            python_args.push(data_parallel_size_local.to_string());
+            python_args.push(topology.local_size.to_string());
+        }
+        if topology.start_rank != 0 {
+            python_args.push("--data-parallel-start-rank".to_string());
+            python_args.push(topology.start_rank.to_string());
         }
         if let Some(limit_mm_per_prompt) = limit_mm_per_prompt {
             python_args.push("--limit-mm-per-prompt".to_string());
@@ -141,6 +148,10 @@ impl ManagedEngineArgs {
             python_args.push("--hf-overrides".to_string());
             python_args.push(hf_overrides);
         }
+        if let Some(structured_outputs_config) = structured_outputs_config {
+            python_args.push("--structured-outputs-config".to_string());
+            python_args.push(structured_outputs_config);
+        }
 
         ManagedEngineConfig {
             python: self.python,
@@ -148,21 +159,9 @@ impl ManagedEngineArgs {
             handshake_host: self.handshake_host,
             handshake_port,
             data_parallel_size: self.data_parallel_size,
+            client_handshake_address,
             python_args,
         }
-    }
-
-    /// Return the number of engines that the Rust frontend should expect to
-    /// coordinate with.
-    fn local_engine_count(&self) -> usize {
-        self.data_parallel_size_local.unwrap_or(self.data_parallel_size)
-    }
-
-    /// Return whether the managed Rust frontend only needs to communicate with
-    /// colocated engines.
-    pub fn frontend_local_only(&self) -> bool {
-        self.data_parallel_size_local != Some(0)
-            && self.local_engine_count() == self.data_parallel_size
     }
 }
 
@@ -242,7 +241,11 @@ fn repartition_real_managed_engine_args(
 
     let (long_flags, short_flags) = collect_option_names(command);
     let (front_args, explicit_passthrough, had_separator) = split_managed_engine_args(&args[1..]);
-    let normalized_front_args = normalize_python_arg_aliases(front_args);
+    let normalized_front_args = merge_dotted_frontend_args(
+        normalize_python_arg_aliases(front_args),
+        &long_flags,
+        command,
+    )?;
 
     let mut frontend_chunks = Vec::new();
     let mut python_chunks = Vec::new();
@@ -301,10 +304,20 @@ fn normalize_python_arg_aliases(args: &[OsString]) -> Vec<OsString> {
         .map(|arg| {
             let text = arg.to_string_lossy();
             normalize_python_multi_char_alias(&text)
+                .or_else(|| normalize_python_long_flag_name(&text))
                 .map(Into::into)
                 .unwrap_or_else(|| arg.clone())
         })
         .collect()
+}
+
+/// Python's `FlexibleArgumentParser` accepts underscores in long flag names
+/// (`--served_model_name`), replacing them with dashes up to the first `.` or
+/// `=`, so keys of dotted config forms keep their underscores.
+fn normalize_python_long_flag_name(arg: &str) -> Option<String> {
+    let rest = arg.strip_prefix("--")?;
+    let (name, tail) = rest.split_at(rest.find(['.', '=']).unwrap_or(rest.len()));
+    name.contains('_').then(|| format!("--{}{tail}", name.replace('_', "-")))
 }
 
 fn normalize_python_multi_char_alias(arg: &str) -> Option<String> {
@@ -318,6 +331,129 @@ fn find_python_multi_char_alias(arg: &str) -> Option<&'static str> {
     PYTHON_MULTI_CHAR_ALIASES.iter().find_map(|&(alias, canonical)| {
         (arg == alias || arg.starts_with(&format!("{alias}="))).then_some(canonical)
     })
+}
+
+/// Python's `FlexibleArgumentParser` turns `--<flag>.<key>[.<key>...] <value>`
+/// into one `--<flag> <JSON object>` per flag, appended after the other
+/// arguments. Do the same for flags `vllm-rs serve` declares, so their dotted
+/// forms reach clap instead of only the managed engine; the dotted forms of
+/// every other flag go to Python unchanged, which expands them itself.
+fn merge_dotted_frontend_args(
+    args: Vec<OsString>,
+    long_flags: &HashSet<String>,
+    command: &clap::Command,
+) -> Result<Vec<OsString>, clap::Error> {
+    let mut merged = Map::new();
+    let mut kept = Vec::with_capacity(args.len());
+    let mut args = args.into_iter();
+    while let Some(arg) = args.next() {
+        let text = arg.to_string_lossy().into_owned();
+        let Some((flag, path, inline_value)) =
+            split_dotted_flag(&text).filter(|(flag, ..)| long_flags.contains(*flag))
+        else {
+            kept.push(arg);
+            continue;
+        };
+        let value = match inline_value {
+            Some(value) => value.to_owned(),
+            None => {
+                args.next().map(|value| value.to_string_lossy().into_owned()).ok_or_else(|| {
+                    command.clone().error(
+                        ErrorKind::InvalidValue,
+                        format!("a value is required for '{text}'"),
+                    )
+                })?
+            }
+        };
+        // `--<flag>.<key>+ a,b` appends list elements.
+        let (path, value) = match path.strip_suffix('+') {
+            Some(path) => (path, Value::from(value.split(',').collect::<Vec<_>>())),
+            None => (path, parse_dotted_value(&value)),
+        };
+        let nested = path.rsplit('.').fold(value, |value, key| {
+            Value::Object(Map::from_iter([(key.to_owned(), value)]))
+        });
+        let existing = merged.entry(flag).or_insert_with(|| Value::Object(Map::new()));
+        merge_json(existing, nested);
+    }
+    for (flag, value) in merged {
+        kept.push(format!("--{flag}").into());
+        kept.push(value.to_string().into());
+    }
+    Ok(kept)
+}
+
+/// Split `--<flag>.<path>[=<value>]` into the flag name, the dotted key path,
+/// and the inline value.
+fn split_dotted_flag(arg: &str) -> Option<(&str, &str, Option<&str>)> {
+    let rest = arg.strip_prefix("--")?;
+    let (key, value) = match rest.split_once('=') {
+        Some((key, value)) => (key, Some(value)),
+        None => (rest, None),
+    };
+    let (flag, path) = key.split_once('.')?;
+    Some((flag, path, value))
+}
+
+/// Python reads a dotted value as JSON, then as a human-readable integer, and
+/// otherwise keeps it as a string.
+fn parse_dotted_value(value: &str) -> Value {
+    serde_json::from_str(value)
+        .ok()
+        .or_else(|| parse_human_readable_int(value).map(Value::from))
+        .unwrap_or_else(|| Value::from(value))
+}
+
+/// Python's `human_readable_int`: `1k` is 1,000, `1K` is 1,024 and `25.6k` is
+/// 25,600; a binary suffix takes no decimals.
+fn parse_human_readable_int(value: &str) -> Option<i64> {
+    let value = value.trim();
+    let suffixed = value.char_indices().last().and_then(|(index, suffix)| {
+        let multiplier = match suffix {
+            'k' => 1_000,
+            'm' => 1_000_000,
+            'g' => 1_000_000_000,
+            't' => 1_000_000_000_000,
+            'K' => 1 << 10,
+            'M' => 1 << 20,
+            'G' => 1 << 30,
+            'T' => 1 << 40,
+            _ => return None,
+        };
+        let number = &value[..index];
+        let is_digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+        let well_formed = match number.split_once('.') {
+            Some((int, frac)) => is_digits(int) && is_digits(frac),
+            None => is_digits(number),
+        };
+        well_formed.then_some((number, multiplier, suffix.is_ascii_uppercase()))
+    });
+    match suffixed {
+        Some((number, multiplier, true)) => number.parse::<i64>().ok()?.checked_mul(multiplier),
+        Some((number, multiplier, false)) => {
+            Some((number.parse::<f64>().ok()? * multiplier as f64) as i64)
+        }
+        None => value.parse().ok(),
+    }
+}
+
+/// Python's `recursive_dict_update`: objects merge key by key, lists
+/// concatenate, and any other value is replaced.
+fn merge_json(original: &mut Value, update: Value) {
+    match (original, update) {
+        (Value::Object(original), Value::Object(update)) => {
+            for (key, value) in update {
+                match original.get_mut(&key) {
+                    Some(existing) => merge_json(existing, value),
+                    None => {
+                        original.insert(key, value);
+                    }
+                }
+            }
+        }
+        (Value::Array(original), Value::Array(update)) => original.extend(update),
+        (original, update) => *original = update,
+    }
 }
 
 fn push_chunk(

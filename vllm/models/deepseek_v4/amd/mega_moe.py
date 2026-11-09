@@ -11,13 +11,12 @@ from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig
 from vllm.distributed import get_ep_group
 from vllm.forward_context import get_forward_context, is_forward_context_available
-from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    get_fp8_block_weight_scale,
+from vllm.model_executor.layers.quantization.online.base import (
+    ONLINE_SHARED_EXPERT_QUANTIZERS,
 )
-from vllm.model_executor.layers.quantization.utils.mxfp4_utils import mxfp4_quantize
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    GroupShape,
-    scaled_dequantize,
+    get_and_maybe_dequant_weights,
+    kMxfp4Static,
 )
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.triton_utils import tl, triton
@@ -134,19 +133,14 @@ class DeepseekV4AiterMegaMoEExperts(nn.Module):
         return True if return_success else None
 
     def load_shared_expert(self, shared_experts: nn.Module) -> None:
+        quantize = ONLINE_SHARED_EXPERT_QUANTIZERS[kMxfp4Static]
         slot = self.num_routed_local_experts
         for linear, weight, weight_scale in (
             (shared_experts.gate_up_proj, self.w13_weight, self.w13_weight_scale),
             (shared_experts.down_proj, self.w2_weight, self.w2_weight_scale),
         ):
-            block_scale = get_fp8_block_weight_scale(linear)
-            assert block_scale is not None, "shared expert must be block-FP8"
-            group = GroupShape(
-                linear.weight.shape[0] // block_scale.shape[0],
-                linear.weight.shape[1] // block_scale.shape[1],
-            )
-            packed, scale = mxfp4_quantize(
-                scaled_dequantize(linear.weight, block_scale, group, torch.bfloat16)
+            packed, scale = quantize(
+                get_and_maybe_dequant_weights(linear, torch.bfloat16)
             )
             weight.data[slot].copy_(packed.view(torch.uint8))
             weight_scale.data[slot].copy_(scale.view(torch.uint8))

@@ -30,6 +30,7 @@ from vllm.tracing import (
     instrument_manual,
 )
 from vllm.utils import length_from_prompt_token_ids_or_embeds
+from vllm.utils.gc_utils import gc_untrack
 from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest, FinishReason
 from vllm.v1.engine.detokenizer import IncrementalDetokenizer
 from vllm.v1.engine.logprobs import LogprobsProcessor
@@ -213,7 +214,9 @@ class RequestState:
         self.lora_name = lora_request.lora_name if lora_request is not None else None
         self.output_kind = output_kind
         self.prompt = prompt
-        self.prompt_token_ids = prompt_token_ids
+        # The same list as every other holder of this prompt, and only extended
+        # in place, so hiding it from the cyclic GC here covers them all.
+        self.prompt_token_ids = gc_untrack(prompt_token_ids)
         self.prompt_embeds = prompt_embeds
         self.prompt_len = length_from_prompt_token_ids_or_embeds(
             self.prompt_token_ids, self.prompt_embeds
@@ -263,7 +266,7 @@ class RequestState:
         if self.prompt_token_ids:
             self.prompt_token_ids.extend(update.prompt_token_ids or ())
         else:
-            self.prompt_token_ids = update.prompt_token_ids or []
+            self.prompt_token_ids = gc_untrack(update.prompt_token_ids or [])
         assert self.prompt_token_ids is not None
         self.prompt_len = len(self.prompt_token_ids)
         if self.stats is not None:
@@ -368,6 +371,14 @@ class RequestState:
             # Only the final output is required in FINAL_ONLY mode.
             return None
 
+        if pooling_output is not None:
+            return self._new_request_output(
+                self.external_req_id,
+                [self._new_pooling_output(pooling_output)],
+                finished,
+                error=error,
+            )
+
         if self.stream_interval > 1:
             assert self.detokenizer is not None
 
@@ -392,14 +403,6 @@ class RequestState:
                 self.sent_tokens_offset = self.detokenizer.num_output_tokens()
 
         external_req_id = self.external_req_id
-
-        if pooling_output is not None:
-            return self._new_request_output(
-                external_req_id,
-                [self._new_pooling_output(pooling_output)],
-                finished,
-                error=error,
-            )
 
         output = self._new_completion_output(new_token_ids, finish_reason, stop_reason)
 
@@ -579,9 +582,9 @@ class OutputProcessor:
     def get_num_queued_tokens(self) -> int:
         """Total prompt tokens of requests currently in the prefill phase.
 
-        Uses ``prompt_len`` rather than remaining prefill work because the
-        scheduler's ``num_computed_tokens`` is not propagated to the API
-        server until prefill completes.  See ``SchedulerConfig`` docs.
+        Uses `prompt_len` rather than remaining prefill work because the
+        scheduler's `num_computed_tokens` is not propagated to the API
+        server until prefill completes.  See `SchedulerConfig` docs.
         """
         return sum(
             req.prompt_len for req in self.request_states.values() if req.is_prefilling
@@ -761,6 +764,16 @@ class OutputProcessor:
                 # Ignore output for already-aborted request.
                 continue
 
+            error = engine_core_output.error
+            if error is not None and req_state.queue is not None:
+                # Rejected on arrival, e.g. by a paused engine; nothing was run.
+                req_state.queue.put(error.to_exception())
+                self._finish_request(req_state)
+                if req_state.streaming_input:
+                    # Input chunks sent since may re-create the session.
+                    reqs_to_abort.append(req_id)
+                continue
+
             # 1) Compute stats for this iteration.
             self._update_stats_from_output(
                 req_state, engine_core_output, engine_core_timestamp, iteration_stats
@@ -915,8 +928,10 @@ class OutputProcessor:
 
         # Remove parent request if applicable.
         parent_req = req_state.parent_req
-        if parent_req and not parent_req.child_requests:
-            self.parent_requests.pop(parent_req.request_id, None)
+        if parent_req:
+            parent_req.child_requests.discard(req_id)
+            if not parent_req.child_requests:
+                self.parent_requests.pop(parent_req.request_id, None)
         self._update_admission_stats()
 
     def _update_admission_stats(self) -> None:

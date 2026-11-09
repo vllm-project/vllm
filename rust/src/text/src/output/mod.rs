@@ -17,7 +17,10 @@ mod logprobs;
 use std::sync::Arc;
 
 use futures::{StreamExt as _, pin_mut};
+use vllm_engine_core_client::protocol::output::RequestSpecDecodeMetrics;
 use vllm_engine_core_client::protocol::sampling_mask::SamplingMask;
+use vllm_engine_core_client::protocol::tensor::WireNdArray;
+use vllm_llm::WeightVersionSpan;
 
 use crate::{Error, FinishReason, Result, TextOutputStream};
 
@@ -39,6 +42,12 @@ pub struct CollectedTextOutput {
     pub ec_transfer_params: Option<serde_json::Value>,
     /// Sampling support sets aligned with generated token positions.
     pub sampling_mask: Option<SamplingMask>,
+    /// Per-request speculative-decoding statistics emitted by the engine.
+    pub spec_decode_metrics: Option<RequestSpecDecodeMetrics>,
+    /// Weight-version spans over generated token positions.
+    pub weight_versions: Option<Vec<WeightVersionSpan>>,
+    /// Routed-expert rows for the whole request, when the engine returned any.
+    pub routed_experts: Option<WireNdArray>,
 }
 
 #[allow(clippy::manual_async_fn, reason = "specify `Send` bound")]
@@ -90,12 +99,15 @@ impl<T: TextOutputStream> T {
                                 prompt_logprobs: prompt_logprobs.take(),
                                 logprobs: delta_logprobs,
                                 token_ids: delta_token_ids,
-                                finish_reason: FinishReason::Error,
+                                finish_reason: FinishReason::Error(None),
                                 usage: vllm_llm::TokenUsage::default(),
                                 timestamps: vllm_llm::RequestTimestamps::default(),
                                 kv_transfer_params: None,
                                 ec_transfer_params: None,
                                 sampling_mask: None,
+                                spec_decode_metrics: None,
+                                weight_versions: None,
+                                routed_experts: None,
                             })
                         };
 
@@ -109,6 +121,9 @@ impl<T: TextOutputStream> T {
                             collected.ec_transfer_params =
                                 finished.ec_transfer_params.map(|value| *value);
                             collected.sampling_mask = finished.sampling_mask;
+                            collected.spec_decode_metrics = finished.spec_decode_metrics;
+                            collected.weight_versions = finished.weight_versions;
+                            collected.routed_experts = finished.routed_experts.map(|rows| *rows);
                             return Ok(collected);
                         }
                     }
@@ -178,12 +193,15 @@ mod tests {
                     usage: vllm_llm::TokenUsage {
                         prompt_token_count: 2,
                         output_token_count: 2,
-                        cached_token_count: 0,
+                        prompt_cache_usage: Default::default(),
                     },
                     finish_reason: FinishReason::stop_eos(),
                     kv_transfer_params: None,
                     ec_transfer_params: None,
                     sampling_mask: None,
+                    spec_decode_metrics: None,
+                    weight_versions: None,
+                    routed_experts: None,
                     timestamps: Default::default(),
                 })),
             }),
@@ -302,12 +320,15 @@ mod tests {
                     usage: vllm_llm::TokenUsage {
                         prompt_token_count: 2,
                         output_token_count: 5,
-                        cached_token_count: 0,
+                        prompt_cache_usage: Default::default(),
                     },
                     finish_reason: FinishReason::stop_eos(),
                     kv_transfer_params: None,
                     ec_transfer_params: None,
                     sampling_mask: None,
+                    spec_decode_metrics: None,
+                    weight_versions: None,
+                    routed_experts: None,
                     timestamps: Default::default(),
                 })),
             }),

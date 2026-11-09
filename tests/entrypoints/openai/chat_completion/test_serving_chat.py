@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Coroutine
 from contextlib import suppress
 from dataclasses import dataclass, field
 from typing import Any
@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 import pytest_asyncio
 from openai import OpenAI
+from starlette.requests import Request
 
 from tests.entrypoints.openai.utils import (
     accumulate_streaming_response,
@@ -141,8 +142,10 @@ def gptoss_speculative_server(default_server_args: list[str]):
     )
     server_args = default_server_args + [
         "--speculative-config",
-        f'{{"model": "{GPT_OSS_SPECULATOR_NAME}", '
-        f'"method": "eagle3", "num_speculative_tokens": 3}}',
+        (
+            f'{{"model": "{GPT_OSS_SPECULATOR_NAME}", '
+            f'"method": "eagle3", "num_speculative_tokens": 3}}'
+        ),
         f"--attention-backend={attention_backend}",
     ]
     # gpt-oss requires AITER unified attention on ROCm
@@ -538,6 +541,7 @@ class MockModelConfig:
     task = "generate"
     runner_type = "generate"
     model = MODEL_NAME
+    served_model_name = MODEL_NAME
     tokenizer = MODEL_NAME
     trust_remote_code = False
     tokenizer_mode = "auto"
@@ -746,39 +750,48 @@ async def test_streaming_chunks_keep_usage_and_metadata(raw):
         )
     ]
     if raw:
-        assert all(isinstance(chunk, ChatCompletionStreamResponse) for chunk in chunks)
+        responses = [
+            chunk for chunk in chunks if isinstance(chunk, ChatCompletionStreamResponse)
+        ]
+        assert len(responses) == len(chunks)
     else:
-        assert chunks[-1] == "data: [DONE]\n\n"
-        first = json.loads(chunks[0].removeprefix("data: "))
+        frames = [chunk for chunk in chunks if isinstance(chunk, str)]
+        assert len(frames) == len(chunks)
+        assert frames[-1] == "data: [DONE]\n\n"
+        first = json.loads(frames[0].removeprefix("data: "))
         assert first["choices"][0]["logprobs"] is None
-        usage = json.loads(chunks[-2].removeprefix("data: "))
+        usage = json.loads(frames[-2].removeprefix("data: "))
         assert "system_fingerprint" not in usage
         assert "prompt_tokens_details" not in usage["usage"]
-        chunks = [
+        responses = [
             ChatCompletionStreamResponse.model_validate_json(
-                chunk.removeprefix("data: ")
+                frame.removeprefix("data: ")
             )
-            for chunk in chunks[:-1]
+            for frame in frames[:-1]
         ]
-    assert len(chunks) == 3
-    assert chunks[0].choices[0].delta.role == "assistant"
-    assert chunks[1].choices[0].delta.content == "Hello"
-    assert chunks[1].choices[0].finish_reason == "stop"
-    assert chunks[2].choices == []
-    assert chunks[2].usage.prompt_tokens == 3
-    assert chunks[2].usage.completion_tokens == 2
+    assert len(responses) == 3
+    assert responses[0].choices[0].delta.role == "assistant"
+    assert responses[1].choices[0].delta.content == "Hello"
+    assert responses[1].choices[0].finish_reason == "stop"
+    assert responses[2].choices == []
+    assert responses[2].usage is not None
+    assert responses[2].usage.prompt_tokens == 3
+    assert responses[2].usage.completion_tokens == 2
+    assert metadata.final_usage_info is not None
     assert metadata.final_usage_info.total_tokens == 5
 
 
 @pytest.mark.asyncio
-async def test_streaming_serialization_failure_emits_error_and_done():
+async def test_streaming_serialization_failure_emits_error_and_done(
+    monkeypatch: pytest.MonkeyPatch,
+):
     serving = _build_minimal_metrics_serving_chat(False)
     serving.parser_cls = HarmonyParser
     parser = MagicMock()
     parser.parse_delta.return_value = DeltaMessage(
         content="Hello", extra_object=object()
     )
-    serving._make_parser = MagicMock(return_value=parser)
+    monkeypatch.setattr(serving, "_make_parser", MagicMock(return_value=parser))
     request = ChatCompletionRequest(
         model="test-model", messages=[{"role": "user", "content": "Test"}], stream=True
     )
@@ -804,7 +817,9 @@ async def test_streaming_serialization_failure_emits_error_and_done():
 @pytest.mark.parametrize(
     "failure", ["parser", "before_first", "after_content", "generation"]
 )
-async def test_streaming_errors_preserve_envelope(raw, failure):
+async def test_streaming_errors_preserve_envelope(
+    raw, failure, monkeypatch: pytest.MonkeyPatch
+):
     serving = _build_minimal_metrics_serving_chat(False)
     error = (
         GenerationError("backend failed")
@@ -813,7 +828,7 @@ async def test_streaming_errors_preserve_envelope(raw, failure):
     )
     if failure == "parser":
         serving.parser_cls = HarmonyParser
-        serving._make_parser = MagicMock(side_effect=error)
+        monkeypatch.setattr(serving, "_make_parser", MagicMock(side_effect=error))
 
     async def results():
         if failure == "after_content":
@@ -853,8 +868,10 @@ async def test_streaming_errors_preserve_envelope(raw, failure):
     else:
         assert chunks[-1] == "data: [DONE]\n\n"
         assert chunks.count("data: [DONE]\n\n") == 1
+        error_frame = chunks[-2]
+        assert isinstance(error_frame, str)
         error_response = ErrorResponse.model_validate_json(
-            chunks[-2].removeprefix("data: ")
+            error_frame.removeprefix("data: ")
         )
     assert error_response.error.message == "backend failed"
     assert error_response.error.code == (500 if failure == "generation" else 400)
@@ -894,6 +911,7 @@ async def test_chat_per_request_metrics_follow_server_flag():
         tokenizer=MagicMock(),
         request_metadata=RequestResponseMetadata(request_id="chatcmpl-test-id"),
     )
+    assert not isinstance(disabled_response, ErrorResponse)
     assert disabled_response.metrics is None
     details = disabled_response.usage.completion_tokens_details
     assert details is None or details.reasoning_tokens == 0
@@ -910,6 +928,7 @@ async def test_chat_per_request_metrics_follow_server_flag():
         tokenizer=MagicMock(),
         request_metadata=RequestResponseMetadata(request_id="chatcmpl-test-id"),
     )
+    assert not isinstance(enabled_response, ErrorResponse)
     assert enabled_response.metrics is not None
     assert enabled_response.metrics.time_to_first_token_ms == pytest.approx(500.0)
 
@@ -932,6 +951,7 @@ async def test_chat_per_request_metrics_suppressed_for_n_greater_than_one():
         tokenizer=MagicMock(),
         request_metadata=RequestResponseMetadata(request_id="chatcmpl-test-id"),
     )
+    assert not isinstance(response, ErrorResponse)
     assert response.metrics is None
 
 
@@ -959,8 +979,9 @@ async def test_chat_full_generator_gives_each_choice_parser_the_prompt():
     serving.parser_cls = RecordingParser
     serving.model_config = None
     serving.chat_template = None
-    serving.chat_template_content_format = "auto"
+    serving.chat_template_content_format = "auto"  # type: ignore[misc]  # Final attr
     serving.default_chat_template_kwargs = {}
+    serving.online_renderer = MagicMock(reasoning_effort_map={})
     request_output = _make_metrics_request_output()
     request_output.prompt_token_ids = [7, 8]
     request_output.outputs.append(
@@ -1346,6 +1367,7 @@ async def test_streaming_reasoning_usage_lifecycle_edges(
         assert outcome == "exhausted" and chunks[-1] == "[DONE]" and not error_chunks
         assert metadata.final_usage_info is not None
         assert metadata.final_usage_info.completion_tokens == expected_tokens
+        assert metadata.final_usage_info.completion_tokens_details is not None
         assert (
             metadata.final_usage_info.completion_tokens_details.reasoning_tokens
             == expected_reasoning
@@ -1497,17 +1519,61 @@ def test_mm_prompt_tokens_details():
     # Zero cached_tokens is still reported (not None), matching the cached-only
     # behavior; multimodal counts ride alongside even when cached_tokens is None.
     details = _make_prompt_tokens_details(True, 0, 0, None)
+    assert details is not None
     assert details.cached_tokens == 0
     assert details.created_cache_tokens == 0
     assert details.multimodal_tokens is None
     details = _make_prompt_tokens_details(True, None, None, counts)
+    assert details is not None
     assert details.cached_tokens is None
     assert details.created_cache_tokens is None
     assert details.multimodal_tokens == {"image": 600, "video": 1200}
     details = _make_prompt_tokens_details(True, 3, 0, counts)
+    assert details is not None
     assert details.cached_tokens == 3
     assert details.created_cache_tokens == 0
     assert details.multimodal_tokens == {"image": 600, "video": 1200}
+
+
+@pytest.mark.asyncio
+async def test_streaming_first_chunk_reports_prompt_tokens_details():
+    """The first chunk's prompt split matches the final usage chunk.
+
+    The Anthropic Messages stream builds `message_start` usage from the first
+    chunk, so a missing split there reads as the whole prompt being uncached.
+    """
+    serving = _build_minimal_metrics_serving_chat(enable_per_request_metrics=False)
+    serving.model_config = None
+    serving.enable_prompt_tokens_details = True
+    output = _make_metrics_request_output(None)
+    output.num_cached_tokens = 2
+    output.num_cache_creation_tokens = 1
+    request = ChatCompletionRequest(
+        model="test-model",
+        messages=[{"role": "user", "content": "Test prompt"}],
+        stream=True,
+        stream_options={"include_usage": True, "continuous_usage_stats": True},
+    )
+    usages = []
+    async for line in serving.chat_completion_stream_generator(
+        request,
+        _single_request_output(output),
+        "chatcmpl-details",
+        "test-model",
+        conversation=[{"role": "user", "content": "Test"}],
+        tokenizer=MagicMock(),
+        request_metadata=RequestResponseMetadata(request_id="chatcmpl-details"),
+    ):
+        raw = line.removeprefix("data: ").strip()
+        if raw != "[DONE]" and json.loads(raw).get("usage"):
+            usages.append(json.loads(raw)["usage"])
+
+    first, last = (
+        usages[0]["prompt_tokens_details"],
+        usages[-1]["prompt_tokens_details"],
+    )
+    assert (first["cached_tokens"], first["created_cache_tokens"]) == (2, 1)
+    assert (last["cached_tokens"], last["created_cache_tokens"]) == (2, 1)
 
 
 def test_completion_tokens_details():
@@ -1515,7 +1581,9 @@ def test_completion_tokens_details():
 
 
 @pytest.mark.asyncio
-async def test_serving_chat_returns_correct_model_name():
+async def test_serving_chat_returns_correct_model_name(
+    monkeypatch: pytest.MonkeyPatch,
+):
     mock_engine = MagicMock(spec=AsyncLLM)
     mock_engine.errored = False
     mock_engine.model_config = MockModelConfig()
@@ -1528,7 +1596,9 @@ async def test_serving_chat_returns_correct_model_name():
     async def return_model_name(*args, **kwargs):
         return args[3]
 
-    serving_chat.chat_completion_full_generator = return_model_name
+    monkeypatch.setattr(
+        serving_chat, "chat_completion_full_generator", return_model_name
+    )
 
     # Test that full name is returned when short name is requested
     req = ChatCompletionRequest(model=MODEL_NAME_SHORT, messages=messages)
@@ -1836,16 +1906,21 @@ def test_serving_chat_starts_without_tokenizer():
 
 
 @pytest.mark.asyncio
-async def test_serving_chat_mistral_token_ids_prompt_is_validated():
-    """Regression test: when the Mistral tokenizer path returns token IDs
-    directly, we must still apply input length validation and clamp the
-    generation budget to the context the prompt leaves over.
+@pytest.mark.parametrize(
+    "prompt_length,max_tokens,truncate_prompt_tokens,expected_max_tokens",
+    [(95, 10, None, 5), (200, None, -1, 1)],
+)
+async def test_serving_chat_mistral_token_ids_prompt_is_validated(
+    prompt_length,
+    max_tokens,
+    truncate_prompt_tokens,
+    expected_max_tokens,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Token-ID prompts must leave a generation budget after truncation.
 
-    `max_tokens` is an upper bound on generation rather than a reservation off
-    the context window, so a 95-token prompt against `max_model_len=100` is
-    accepted even though the client asked for 10 output tokens. Genuine
-    overflow is covered by
-    test_serving_chat_mistral_token_ids_prompt_too_long_is_rejected.
+    A large requested output limit is capped to the remaining context. An
+    omitted limit must still reserve one output token for automatic truncation.
     """
     mock_engine = MagicMock(spec=AsyncLLM)
     mock_engine.errored = False
@@ -1857,13 +1932,16 @@ async def test_serving_chat_mistral_token_ids_prompt_is_validated():
         MockVllmConfig(mock_engine.model_config, parallel_config=MockParallelConfig()),
         tokenizer=mock_tokenizer,
     )
-    # Force the Mistral chat template renderer to return token IDs. The prompt
-    # fits the context on its own; only the naive prompt+output sum overflows.
-    mock_renderer.render_messages_async = AsyncMock(
-        return_value=(
-            [],
-            TokensPrompt(prompt_token_ids=list(range(95))),
-        )
+    # Exercise the renderer path that returns token IDs directly.
+    monkeypatch.setattr(
+        mock_renderer,
+        "render_messages_async",
+        AsyncMock(
+            return_value=(
+                [],
+                TokensPrompt(prompt_token_ids=list(range(prompt_length))),
+            )
+        ),
     )
     mock_engine.renderer = mock_renderer
 
@@ -1872,19 +1950,22 @@ async def test_serving_chat_mistral_token_ids_prompt_is_validated():
     req = ChatCompletionRequest(
         model=MODEL_NAME,
         messages=[{"role": "user", "content": "what is 1+1?"}],
-        max_tokens=10,
+        max_tokens=max_tokens,
+        truncate_prompt_tokens=truncate_prompt_tokens,
     )
 
-    # Must not raise: the prompt alone fits within max_model_len.
+    # Both an already fitting prompt and an auto-truncated one must succeed.
     await serving_chat.create_chat_completion(req)
 
-    # get_max_tokens() clamps the sampling budget to the 5 tokens left over.
+    # The generation budget fits the remaining context.
     sampling_params = mock_engine.generate.call_args.args[1]
-    assert 1 <= sampling_params.max_tokens <= 5
+    assert sampling_params.max_tokens == expected_max_tokens
 
 
 @pytest.mark.asyncio
-async def test_serving_chat_mistral_token_ids_prompt_too_long_is_rejected():
+async def test_serving_chat_mistral_token_ids_prompt_too_long_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+):
     """Regression test: MistralTokenizer token-id prompts must still enforce
     the max context length for the input itself (token_num >= max_model_len).
     """
@@ -1900,13 +1981,17 @@ async def test_serving_chat_mistral_token_ids_prompt_too_long_is_rejected():
     )
     # prompt_token_ids length == max_model_len should be rejected for
     # completion-like requests (ChatCompletionRequest).
-    mock_renderer.render_messages_async = AsyncMock(
-        return_value=(
-            [],
-            TokensPrompt(
-                prompt_token_ids=list(range(mock_engine.model_config.max_model_len))
-            ),
-        )
+    monkeypatch.setattr(
+        mock_renderer,
+        "render_messages_async",
+        AsyncMock(
+            return_value=(
+                [],
+                TokensPrompt(
+                    prompt_token_ids=list(range(mock_engine.model_config.max_model_len))
+                ),
+            )
+        ),
     )
     mock_engine.renderer = mock_renderer
 
@@ -1971,7 +2056,9 @@ async def test_serving_chat_could_load_correct_generation_config():
 
 @pytest.mark.parametrize("model_type", ["gpt_oss", "any"])
 @pytest.mark.asyncio
-async def test_serving_chat_did_set_correct_cache_salt(model_type):
+async def test_serving_chat_did_set_correct_cache_salt(
+    model_type, monkeypatch: pytest.MonkeyPatch
+):
     mock_model_config = MockModelConfig()
     mock_model_config.hf_config.model_type = model_type
 
@@ -1995,7 +2082,7 @@ async def test_serving_chat_did_set_correct_cache_salt(model_type):
 
         return result
 
-    serving_chat.render_chat_request = render_chat_request
+    monkeypatch.setattr(serving_chat, "render_chat_request", render_chat_request)
 
     # Test cache_salt
     req = ChatCompletionRequest(
@@ -2018,6 +2105,7 @@ async def test_serving_chat_did_set_correct_cache_salt(model_type):
         await serving_chat.create_chat_completion(req)
 
     assert len(captured_inputs) == 1
+    assert captured_inputs[0]["type"] == "token"
     assert captured_inputs[0]["cache_salt"] == "test_salt"
 
 
@@ -2094,6 +2182,41 @@ async def test_serving_chat_data_parallel_rank_extraction():
     # Verify that data_parallel_rank defaults to None
     assert "data_parallel_rank" in mock_engine.generate.call_args.kwargs
     assert mock_engine.generate.call_args.kwargs["data_parallel_rank"] is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("header", [None, "-5", "0"])
+async def test_beam_search_preserves_request_priority(header):
+    """Body and header priority survive every beam expansion."""
+    engine = _build_mock_engine()
+    priorities = []
+
+    async def generate(*args, priority=0, **kwargs):
+        priorities.append(priority)
+        output = _make_metrics_request_output()
+        output.outputs[0].logprobs = [{100: Logprob(-0.1), 101: Logprob(-0.2)}]
+        yield output
+
+    engine.generate = generate
+    serving = _build_serving_chat(engine)
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "Test"}],
+        use_beam_search=True,
+        n=2,
+        max_tokens=2,
+        ignore_eos=True,
+        watermarking=False,
+        priority=-9,
+    )
+    headers = [] if header is None else [(b"x-vllm-priority", header.encode())]
+    response = await serving.create_chat_completion(
+        request, Request({"type": "http", "headers": headers})
+    )
+
+    assert isinstance(response, ChatCompletionResponse)
+    assert len(response.choices) == 2
+    assert priorities == [-9 if header is None else int(header)] * 3
 
 
 async def _render_chat_prompt_token_ids(
@@ -2275,7 +2398,10 @@ class TestServingChatWithHarmony:
 
         if stream:
             return await accumulate_streaming_response(result)
-        return await result
+        assert isinstance(result, Coroutine)
+        response = await result
+        assert not isinstance(response, ErrorResponse)
+        return response
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -3087,7 +3213,7 @@ def test_make_request_with_harmony_rejects_invalid_kv_transfer_prompt_token_ids(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("ids", [[], [-1], [1.5], [1.0], ["1"], [True], "abc", 5])
 async def test_chat_kv_transfer_prompt_token_ids_rejects_invalid_ids(ids):
-    """``kv_transfer_params`` is untyped, so the ids are checked on reuse."""
+    """`kv_transfer_params` is untyped, so the ids are checked on reuse."""
     serving_chat = _build_serving_chat(_build_mock_engine())
 
     request = ChatCompletionRequest(
@@ -3133,7 +3259,7 @@ async def test_chat_kv_transfer_prompt_token_ids_rejection_notifies_kv_connector
 @pytest.mark.asyncio
 @pytest.mark.parametrize("ids", [[10, 20, 30], [1.5]])
 async def test_chat_kv_transfer_prompt_token_ids_ignored_with_echo(ids):
-    """``echo`` needs the rendered conversation, so the ids are not used."""
+    """`echo` needs the rendered conversation, so the ids are not used."""
     serving_chat = _build_serving_chat(_build_mock_engine())
 
     request = ChatCompletionRequest(
@@ -3147,6 +3273,30 @@ async def test_chat_kv_transfer_prompt_token_ids_ignored_with_echo(ids):
 
     conversation, engine_inputs = result
     assert [msg["role"] for msg in conversation] == ["user"]
+    assert engine_inputs[0]["type"] == "token"
+    assert engine_inputs[0]["prompt_token_ids"] != ids
+    assert request.kv_transfer_params == {"do_remote_prefill": True}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ids", [[10, 20, 30], [1.5]])
+async def test_chat_kv_transfer_prompt_token_ids_ignored_with_return_prompt_text(ids):
+    """`return_prompt_text` needs the rendered conversation, so the ids are
+    not used."""
+    serving_chat = _build_serving_chat(_build_mock_engine())
+
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "hi"}],
+        kv_transfer_params={"prompt_token_ids": ids, "do_remote_prefill": True},
+        return_prompt_text=True,
+    )
+    result = await serving_chat.render_chat_request(request)
+    assert not isinstance(result, ErrorResponse)
+
+    conversation, engine_inputs = result
+    assert [msg["role"] for msg in conversation] == ["user"]
+    assert engine_inputs[0]["type"] == "token"
     assert engine_inputs[0]["prompt_token_ids"] != ids
     assert request.kv_transfer_params == {"do_remote_prefill": True}
 
@@ -3175,10 +3325,27 @@ async def test_chat_kv_transfer_prompt_token_ids_ignored_with_echo(ids):
     ],
 )
 def test_chat_kv_transfer_prompt_token_ids_ignored_with_non_text_content(content):
-    """The ids are dropped so that ``messages`` is rendered with its media."""
+    """The ids are dropped so that `messages` is rendered with its media."""
     request = ChatCompletionRequest(
         model=MODEL_NAME,
         messages=[{"role": "user", "content": content}],
+        kv_transfer_params={
+            "prompt_token_ids": [10, 20, 30],
+            "do_remote_prefill": True,
+        },
+    )
+    assert request.kv_transfer_params == {"do_remote_prefill": True}
+
+
+def test_chat_kv_transfer_prompt_token_ids_ignored_with_reasoning_embeds():
+    request = ChatCompletionRequest(
+        messages=[
+            {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "some text"}],
+                "reasoning": {"type": "prompt_embeds", "data": "tensor"},
+            }
+        ],
         kv_transfer_params={
             "prompt_token_ids": [10, 20, 30],
             "do_remote_prefill": True,
@@ -3247,8 +3414,8 @@ _NAMED_WEATHER_TOOL_CHOICE = {"type": "function", "function": {"name": "get_weat
 def test_resolve_finish_reason(
     tool_choice, engine_finish_reason, tool_calls_made, expected
 ):
-    """``tool_calls`` needs a real call, a natural stop and no forced tool;
-    ``length`` is never hidden behind a parsed call."""
+    """`tool_calls` needs a real call, a natural stop and no forced tool;
+    `length` is never hidden behind a parsed call."""
     request = ChatCompletionRequest(
         model=MODEL_NAME,
         messages=[{"role": "user", "content": "test"}],
@@ -3278,11 +3445,12 @@ async def test_non_streaming_finish_reason_matches_tool_calls(
     engine_finish_reason: str,
     expected_finish_reason: str,
 ):
-    """Non-streaming ``finish_reason`` must agree with ``message.tool_calls``
-    and never hide a ``length`` truncation (#53255, #58228)."""
+    """Non-streaming `finish_reason` must agree with `message.tool_calls`
+    and never hide a `length` truncation (#53255, #58228)."""
     serving_chat = _build_serving_chat(
         _build_mock_engine(), tool_parser="hermes", enable_auto_tools=True
     )
+    assert serving_chat.parser_cls is not None
     # Parse required/named calls from the native <tool_call> format regardless
     # of VLLM_ENFORCE_STRICT_TOOL_CALLING, so one text serves every case.
     monkeypatch.setattr(

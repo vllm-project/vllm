@@ -20,7 +20,6 @@ from vllm.model_executor.layers.attention.mla_attention import (
 )
 from vllm.platforms.interface import DeviceCapability
 from vllm.utils.math_utils import round_up
-from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backend import (
     AttentionCGSupport,
     AttentionLayer,
@@ -33,7 +32,7 @@ from vllm.v1.attention.backends.fa_utils import (
     get_flash_attn_version,
     get_scheduler_metadata,
 )
-from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, is_quantized_kv_cache
 
 logger = init_logger(__name__)
 
@@ -158,7 +157,7 @@ class FlashAttnMLAMetadataBuilder(MLACommonMetadataBuilder[FlashAttnMLAMetadata]
             # The +1 is for the tile_count_semaphore (synchronization).
             # The 4 slots per batch element (num_prepare_batch_vectors) are:
             #   prepare_varlen + dynamic_split + sort_batches + head_swizzle
-            # See: https://github.com/vllm-project/flash-attention/blob/5824e6e/hopper/flash_api.cpp#L664-L671  # noqa: E501
+            # See: https://github.com/vllm-project/flash-attention/blob/5824e6e/hopper/flash_api.cpp#L664-L671
             max_batch_size = max(
                 vllm_config.scheduler_config.max_num_seqs,
                 self.max_cudagraph_size or 0,

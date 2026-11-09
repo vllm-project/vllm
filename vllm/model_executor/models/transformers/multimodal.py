@@ -23,9 +23,12 @@ from contextlib import ExitStack, contextmanager
 from functools import cached_property
 from typing import TYPE_CHECKING, Any
 
+import numpy as np
 import torch
 import transformers
+from torch.nn.utils.rnn import pad_sequence
 
+import vllm.envs as envs
 from vllm.compilation.decorators import should_torch_compile_mm_encoder
 from vllm.config.utils import getattr_iter
 from vllm.inputs import MultiModalDataBuiltins, MultiModalDataDict
@@ -51,7 +54,7 @@ from vllm.multimodal.processing import (
 from vllm.multimodal.processing.processor import HFMultiModalInputs
 from vllm.sequence import IntermediateTensors
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
-from vllm.utils.torch_utils import async_tensor_h2d
+from vllm.utils.torch_utils import async_tensor_h2d, token_ids_to_tensor
 
 from .base import Base
 
@@ -181,14 +184,82 @@ class MultiModalProcessingInfo(BaseProcessingInfo):
         modalities = self._get_supported_modalities()
         max_tokens = {}
         if "audio" in modalities:
-            max_tokens["audio"] = self.get_max_audio_tokens()
+            max_tokens["audio"] = self.get_max_audio_tokens(seq_len)
         if "image" in modalities:
             max_tokens["image"] = self.get_max_image_tokens()
         if "video" in modalities:
             max_tokens["video"] = self.get_max_video_tokens(seq_len, mm_counts)
         return max_tokens
 
-    def get_max_audio_tokens(self) -> int:
+    def _get_max_audio_length(self) -> int | None:
+        """Samples the audio processor truncates audios to, or None if it doesn't."""
+        sub = self._get_audio_processor()
+        # TODO: read only `truncation`/`max_length` once
+        # huggingface/transformers#44394 lands.
+        if hasattr(sub, "truncation"):
+            return sub.max_length if sub.truncation else None
+        max_length = getattr_iter(sub, ("n_samples", "nb_max_samples"))
+        return max_length if max_length and self._is_audio_capped else None
+
+    @cached_property
+    def _is_audio_capped(self) -> bool:
+        """Whether long audios stop adding tokens, as `n_samples` can be a window
+        that the processor splits them into (e.g. MOSS-Transcribe-Diarize)."""
+        num_samples = int(1800 * self._get_audio_sampling_rate())
+        tokens = self._count_audio_tokens(num_samples)
+        return tokens == self._count_audio_tokens(2 * num_samples)
+
+    @cached_property
+    def _audio_samples_per_token(self) -> float:
+        """Samples behind each audio token, measured on a 60 s audio."""
+        num_samples = int(60 * self._get_audio_sampling_rate())
+        return num_samples / self._count_audio_tokens(num_samples)
+
+    def _count_audio_tokens(self, num_samples: int) -> int:
+        processor = self.get_hf_processor()
+        outputs = self.ctx.call_hf_processor(
+            processor,
+            dict(
+                text=getattr(processor, "audio_token", ""),
+                audio=[np.zeros(num_samples, dtype=np.float32)],
+                return_text_replacement_offsets=True,
+            ),
+            {},
+        )
+        replacement = outputs["text_replacement_offsets"][0][0]["replacement"]
+        tokenizer = self.get_tokenizer()
+        seq = cached_encode(tokenizer, replacement, add_special_tokens=False)
+        return len(seq)
+
+    @cached_property
+    def _has_transcription_request(self) -> bool:
+        return hasattr(self.get_hf_processor(), "apply_transcription_request")
+
+    @cached_property
+    def _is_long_form_audio_model(self) -> bool:
+        """Whether a whole recording goes through in a single pass."""
+        return self._has_transcription_request and not self._get_max_audio_length()
+
+    def _get_max_long_form_audio_length(self, seq_len: int) -> int:
+        """Samples of the longest audio that fits in `seq_len`, set with
+        `--limit-mm-per-prompt`, or the longest the API decodes."""
+        limits = [int(seq_len * self._audio_samples_per_token)]
+        options = self.ctx.get_mm_config().limit_per_prompt.get("audio")
+        if length := getattr(options, "length", None):
+            return min(length, *limits)
+        # 0 disables a limit
+        if max_duration_s := envs.VLLM_MAX_AUDIO_DECODE_DURATION_S:
+            limits.append(int(max_duration_s * self._get_audio_sampling_rate()))
+        if max_bytes := envs.VLLM_MAX_AUDIO_DECODE_BYTES:
+            limits.append(max_bytes // np.dtype(np.float32).itemsize)
+        return min(limits)
+
+    def get_max_audio_tokens(self, seq_len: int) -> int:
+        # Measured, as config limits can be per encoder window (e.g. Qwen3-ASR)
+        if self._has_transcription_request:
+            if not (length := self._get_max_audio_length()):
+                length = self._get_max_long_form_audio_length(seq_len)
+            return math.ceil(length / self._audio_samples_per_token)
         config = self.get_hf_config()
         audio_config_names = ("audio_config", "encoder_config")
         names = ("max_source_positions", "max_position_embeddings", "max_pos_emb")
@@ -347,13 +418,19 @@ class MultiModalDummyInputsBuilder(BaseDummyInputsBuilder[MultiModalProcessingIn
     ) -> MultiModalDataDict:
         data = MultiModalDataBuiltins()
         if self.info._is_audio_model and (num_audios := mm_counts.get("audio", 0)):
-            sampling_rate = self.info._get_audio_sampling_rate()
-            sub = self.info._get_audio_processor()
-            chunk_length = getattr(sub, "chunk_length", None) if sub else None
-            if chunk_length is None:
-                chunk_length = 30
+            if self.info._is_long_form_audio_model:
+                length = self.info._get_max_long_form_audio_length(
+                    seq_len // num_audios
+                )
+            else:
+                sampling_rate = self.info._get_audio_sampling_rate()
+                sub = self.info._get_audio_processor()
+                chunk_length = getattr(sub, "chunk_length", None) if sub else None
+                if chunk_length is None:
+                    chunk_length = 30
+                length = int(chunk_length * sampling_rate)
             data["audio"] = self._get_dummy_audios(
-                length=int(chunk_length * sampling_rate),
+                length=length,
                 num_audios=num_audios,
                 overrides=mm_options.get("audio"),
             )
@@ -508,6 +585,7 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
     ) -> Mapping[str, MultiModalFieldConfig]:
         # HF Processors always return a mask but vLLM doesn't need it
         hf_inputs.pop("attention_mask", None)
+        num_audio_windows = hf_inputs.pop("num_audio_windows", None)
 
         # Absent if the modality had no items
         sizes = {
@@ -532,6 +610,13 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
             for modality in modalities
             for key in owned[modality]
         }
+
+        if num_audio_windows is not None:
+            for key in owned["audio"]:
+                if len(hf_inputs[key]) == num_audio_windows.sum():
+                    mm_fields[key] = MultiModalFieldConfig.flat_from_sizes(
+                        "audio", num_audio_windows
+                    )
 
         for modality in modalities:
             # One row per item, and only ever read on the CPU
@@ -571,7 +656,9 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
         data = hf_inputs[key]
         # Un-padded fields are already one entry per item, so index rather than slice
         if modality == "audio" or isinstance(data, list):
-            return MultiModalFieldConfig.batched(modality)
+            # Only read to drop padding, which would sync if this was on the GPU
+            keep_on_cpu = key == "padding_mask"
+            return MultiModalFieldConfig.batched(modality, keep_on_cpu=keep_on_cpu)
 
         total = int(sizes.sum())
         dim = self._get_slice_dim(data, total)
@@ -616,7 +703,15 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
         audios = mm_data.get("audio")
         if not isinstance(audios, Iterable) or not audios:
             return
-        if len({len(audio) for audio in audios}) == 1:
+        audios = list(audios)
+        tensors = {
+            key: value
+            for key in self._get_modality_field_names("audio")
+            if isinstance(value := hf_inputs.get(key), torch.Tensor)
+        }
+        # Processors can split long audios into windows, with a row for each one
+        is_windowed = any(len(value) != len(audios) for value in tensors.values())
+        if len({len(audio) for audio in audios}) == 1 and not is_windowed:
             return
 
         alone = [
@@ -630,9 +725,12 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
             for audio in audios
         ]
 
-        for key in self._get_modality_field_names("audio"):
-            if isinstance(hf_inputs.get(key), torch.Tensor):
+        for key, value in tensors.items():
+            if len(value) == len(audios):
                 hf_inputs[key] = [output[key][0] for output in alone]
+            else:
+                windows = [len(output[key]) for output in alone]
+                hf_inputs["num_audio_windows"] = torch.tensor(windows)
 
     def _unpad_images(self, hf_inputs: "BatchFeature") -> None:
         """Trim each image back to its own size when the processor padded them all
@@ -1067,6 +1165,13 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE, Base):
             # HuggingFace's `get_audio_features` implementations branch on
             # per-sample feature lengths internally.
             with gpu_sync_allowed():
+                # Padded again as windows, unlike audios, are all the same length
+                kwargs = {
+                    key: pad_sequence(value, batch_first=True)
+                    if isinstance(value, list)
+                    else value
+                    for key, value in kwargs.items()
+                }
                 audio_output = self.model.get_audio_features(
                     input_features, return_dict=True, **kwargs
                 )
@@ -1128,7 +1233,12 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE, Base):
             vision_embeddings = self._get_features(modality, pixel_values, **kwargs)
             if isinstance(vision_embeddings, torch.Tensor):
                 return self._split_embeddings(vision_embeddings, split_sizes)
-            return list(vision_embeddings)
+            if len(vision_embeddings) == len(split_sizes):
+                return list(vision_embeddings)
+            # Encoders which return one entry per batch row (Transformers >= 5.20.1)
+            return self._split_embeddings(
+                torch.cat(list(vision_embeddings)), split_sizes
+            )
 
         # Items the processor left un-padded arrive as a list once their
         # shapes differ. Encode them one at a time so that none of them is
@@ -1152,8 +1262,16 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE, Base):
         """Narrow the entries of `kwargs` that hold one row per item down to the item
         at `index`. Length is all there is to match on, so an unrelated entry of the
         same length is narrowed too."""
+
+        def select(value: torch.Tensor | list) -> torch.Tensor | list:
+            if isinstance(value, torch.Tensor):
+                return value[index : index + 1]
+            # Ragged fields arrive as a list of per-item tensors
+            item = value[index]
+            return item.unsqueeze(0) if isinstance(item, torch.Tensor) else [item]
+
         return {
-            key: value[index : index + 1]
+            key: select(value)
             if isinstance(value, (torch.Tensor, list)) and len(value) == num_items
             else value
             for key, value in kwargs.items()
@@ -1257,7 +1375,7 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE, Base):
             kwargs["mm_token_type_ids"] = mm_token_type_ids.unsqueeze(0)
 
         mrope_positions, mrope_position_delta = self.model.get_rope_index(
-            input_ids=torch.tensor(input_tokens).unsqueeze(0),
+            input_ids=token_ids_to_tensor(input_tokens).unsqueeze(0),
             **kwargs,
         )
 
