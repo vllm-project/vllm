@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Unit test for the Triton ``swap_blocks_batch`` fast-path kernel."""
+"""Unit test for the Triton `swap_blocks_batch` fast-path kernel."""
 
 import pytest
 import torch

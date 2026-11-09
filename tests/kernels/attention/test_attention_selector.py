@@ -465,7 +465,7 @@ def test_int4_per_token_head_head_size_selection(head_size: int):
 
     The Hadamard rotation the INT4 write path applies is now defined for
     non-power-of-two rows as well (it runs block-diagonally, see
-    ``fast_hadamard_transform``), so a model such as Phi-3 (head_size=96) must
+    `fast_hadamard_transform`), so a model such as Phi-3 (head_size=96) must
     keep selecting TRITON_ATTN instead of being rejected.
     """
     vllm_config = VllmConfig(cache_config=CacheConfig(block_size=64))
@@ -501,7 +501,7 @@ def test_non_causal_backend_selection(
 ):
     """Test that use_non_causal on AttentionConfig controls backend filtering.
 
-    DFlashProposer sets use_non_causal=True on the draft model's
+    DFlash draft model configs set use_non_causal=True on the
     AttentionConfig so only non-causal-capable backends are selected.
     The target model keeps use_non_causal=False (default) and can use
     any backend.

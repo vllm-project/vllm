@@ -77,7 +77,6 @@ steps:
   - vllm/_cpu_ops.py
   - vllm/v1/spec_decode/
   - vllm/v1/worker/cpu/
-  - vllm/v1/worker/cpu_model_runner.py
   - vllm/v1/worker/gpu/spec_decode/
   - vllm/v1/attention/backends/cpu_attn.py
   - vllm/config/speculative.py
@@ -106,9 +105,7 @@ steps:
       tests/v1/spec_decode/test_dflash_causality.py \
       tests/v1/spec_decode/test_eagle_draft_attn_metadata.py \
       tests/v1/spec_decode/test_draft_attention_backend_override.py \
-      tests/v1/spec_decode/test_draft_moe_backend_override.py \
-      tests/v1/spec_decode/test_ngram.py \
-      tests/v1/spec_decode/test_llm_base_proposer_sampling.py
+      tests/v1/spec_decode/test_draft_moe_backend_override.py
       unset VLLM_CPU_CI_ENV
       pytest -x -v -s tests/v1/e2e/test_cpu_spec_decode.py"
 
@@ -179,8 +176,6 @@ steps:
   - csrc/cpu/shm.cpp
   - vllm/v1/worker/cpu_worker.py
   - vllm/v1/worker/gpu_worker.py
-  - vllm/v1/worker/cpu_model_runner.py
-  - vllm/v1/worker/gpu_model_runner.py
   - vllm/platforms/cpu.py
   - vllm/distributed/parallel_state.py
   - vllm/distributed/device_communicators/cpu_communicator.py
