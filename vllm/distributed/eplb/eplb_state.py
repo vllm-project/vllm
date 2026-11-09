@@ -391,7 +391,8 @@ class EplbState:
 
     def create_policy(self) -> AbstractEplbPolicy:
         """Create the policy shared by every model in this EPLB state."""
-        return EPLB_POLICIES[self.parallel_config.eplb_config.policy]()
+        policy = self.parallel_config.eplb_config.policy
+        return EPLB_POLICIES["default" if policy is None else policy]()
 
     def rebalance_experts(
         self,

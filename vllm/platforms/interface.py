@@ -1283,6 +1283,8 @@ class Platform:
         eplb_config = parallel_config.eplb_config
         from vllm.distributed.eplb.policy import EPLB_POLICIES
 
+        if eplb_config.policy is None:
+            eplb_config.policy = "default"
         if eplb_config.policy not in EPLB_POLICIES:
             raise ValueError(f"Unknown EPLB policy: {eplb_config.policy}")
         if eplb_config.communicator is None:

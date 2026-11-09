@@ -100,8 +100,10 @@ class EPLBConfig:
     Whether to use non-blocking EPLB.
     """
 
-    policy: EPLBPolicyOption | str = "default"
-    """Built-in or platform-defined policy name, validated by the platform."""
+    policy: EPLBPolicyOption | str | None = None
+    """Built-in or platform-defined policy name. None selects the platform default
+    ("default" on built-in platforms). Validated by the platform.
+    """
 
     communicator: EPLBCommunicatorBackend | str | None = None
     """

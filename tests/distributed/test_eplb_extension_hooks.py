@@ -41,6 +41,8 @@ class _Platform(Platform):
     @classmethod
     def check_and_update_eplb_config(cls, parallel_config):
         config = parallel_config.eplb_config
+        if config.policy is None:
+            config.policy = "custom"
         if config.policy != "custom" or config.communicator not in (
             None,
             "custom_comm",
@@ -49,15 +51,17 @@ class _Platform(Platform):
         config.communicator = "custom_comm"
 
 
-@pytest.mark.parametrize("communicator", [None, "custom_comm"])
-def test_platform_can_validate_out_of_tree_names(monkeypatch, communicator):
+@pytest.mark.parametrize(
+    "policy, communicator", [(None, None), ("custom", None), ("custom", "custom_comm")]
+)
+def test_platform_can_validate_out_of_tree_names(monkeypatch, policy, communicator):
     monkeypatch.setattr(parallel_config_module, "current_platform", _Platform())
     config = ParallelConfig(
         enable_eplb=True,
         enable_expert_parallel=True,
         tensor_parallel_size=2,
         distributed_executor_backend="uni",
-        eplb_config=EPLBConfig(policy="custom", communicator=communicator),
+        eplb_config=EPLBConfig(policy=policy, communicator=communicator),
     )
     assert config.eplb_config.policy == "custom"
     assert config.eplb_config.communicator == "custom_comm"
@@ -105,6 +109,7 @@ def test_xpu_preserves_eplb_and_xccl_auto_selection():
     assert XpuPlatform.supports_eplb()
     XpuPlatform.check_and_update_eplb_config(config)
     assert config.eplb_config.communicator == "torch_xccl"
+    assert config.eplb_config.policy == "default"
 
 
 @pytest.mark.parametrize(
