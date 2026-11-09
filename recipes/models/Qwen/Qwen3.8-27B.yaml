@@ -96,6 +96,11 @@ features:
       - "qwen3"
   spec_decoding:
     description: "Speculative decoding — pick MTP (in-checkpoint), DFlash2, or DSpark (external drafts)."
+    # Never qualified on the 2x RTX 3090 build (AWQ INT4 at TP2, Ampere): neither
+    # the in-checkpoint MTP head nor the external DFlash2/DSpark drafters were
+    # run there, so the toggle renders disabled on rtx_3090_2x.
+    hardware:
+      rtx_3090_2x: unsupported
     default_mode: mtp
     modes:
       mtp:
@@ -107,7 +112,10 @@ features:
         # off the TOP-level config (config/speculative.py), but this checkpoint carries it only
         # under `text_config`, so the depth cannot be inferred here — omit it and startup fails.
         description: "Native MTP head, 3 draft tokens."
-        variants: [default, fp8, nvfp4, nvfp4_nvidia, int4, mxfp4]
+        # int4_awq is listed only because the recipe build requires every variant
+        # to resolve to at least one mode; the feature-level hardware gate above
+        # keeps spec decoding off on rtx_3090_2x, which is int4_awq's only target.
+        variants: [default, fp8, nvfp4, nvfp4_nvidia, int4, int4_awq, mxfp4]
         args:
           - "--speculative-config"
           - '{"method":"mtp","num_speculative_tokens":3}'
