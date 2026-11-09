@@ -871,10 +871,10 @@ class Base(
             self.model._can_record_outputs = {}
 
         self._set_aux_hidden_state_layers(layers)
-        embeddings = self.model.get_input_embeddings()
         for layer in self.aux_hidden_state_layers:
             # The input to a layer is the output of the module before it
             if layer == 0:
+                embeddings = self.model.get_input_embeddings()
                 target_class = type(embeddings)
                 modules = self.model.named_modules()
                 layer_name = next(n for n, m in modules if m is embeddings)
