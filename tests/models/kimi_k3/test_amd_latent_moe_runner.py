@@ -6,7 +6,7 @@ A wrong shard offset or a dropped accumulation still runs and still produces
 plausible text, so these pin the arithmetic rather than the behaviour.
 """
 
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 
 import pytest
 import torch
@@ -20,12 +20,13 @@ from tests.utils import (
     multi_gpu_test,
 )
 from vllm.distributed import get_tp_group
+from vllm.model_executor.layers.fused_moe.router.gate_linear import GateLinear
 from vllm.model_executor.layers.fused_moe.runner import moe_runner
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ColumnParallelLinear, ReplicatedLinear
 from vllm.models.kimi_k3.amd import latent_moe_runner
 from vllm.models.kimi_k3.amd.latent_moe_runner import ROCmLatentMoERunner
-from vllm.models.kimi_k3.amd.linear import KimiRoutedOutputTransform
+from vllm.models.kimi_k3.amd.linear import KimiMLP, KimiMoE, KimiRoutedOutputTransform
 from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_open_port
 
@@ -442,3 +443,144 @@ def test_falls_back_when_the_config_breaks_the_shard(
 
     assert not runner._tail_shardable
     assert runner._up_proj_shard_size == 0
+
+
+def _merged_front_moe(down_quant_method=None) -> SimpleNamespace:
+    moe = SimpleNamespace(
+        gate=GateLinear(
+            HIDDEN_SIZE, 896, bias=False, out_dtype=torch.float32, prefix="gate"
+        ),
+        routed_expert_down_proj=ReplicatedLinear(
+            HIDDEN_SIZE, LATENT_SIZE, bias=False, prefix="routed_expert_down_proj"
+        ),
+        shared_experts=KimiMLP(
+            HIDDEN_SIZE,
+            768,
+            "situ",
+            reduce_results=False,
+            prefix="shared_experts",
+            activation_situ_beta=4.0,
+            activation_situ_linear_beta=25.0,
+        ),
+        experts=_runner(
+            _tail_shardable=True,
+            moe_config=SimpleNamespace(
+                is_lora_enabled=False,
+                is_sequence_parallel=False,
+                dp_size=1,
+                pcp_size=1,
+                ep_size=1,
+            ),
+        ),
+        moe_hidden_size=LATENT_SIZE,
+        merged_front_weight=None,
+    )
+    object.__setattr__(
+        moe.experts, "routed_input_transform", moe.routed_expert_down_proj
+    )
+    moe._merged_front_core = MethodType(KimiMoE._merged_front_core, moe)
+    torch.manual_seed(0)
+    for layer in (
+        moe.gate,
+        moe.routed_expert_down_proj,
+        moe.shared_experts.gate_up_proj,
+        moe.shared_experts.down_proj,
+    ):
+        layer.weight.data.normal_(0.0, layer.weight.shape[1] ** -0.5)
+    if down_quant_method is not None:
+        moe.routed_expert_down_proj.quant_method = down_quant_method
+    KimiMoE.process_weights_after_loading(moe)
+    return moe
+
+
+@pytest.fixture(scope="module")
+def merged_front_env():
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.distributed import cleanup_dist_env_and_memory
+    from vllm.platforms.rocm import on_gfx950
+
+    if not on_gfx950():
+        pytest.skip("The merged MoE front needs gfx950")
+    mp = pytest.MonkeyPatch()
+    mp.setenv("VLLM_ROCM_USE_AITER", "1")
+    mp.setattr(
+        ROCmLatentMoERunner, "_fused_output_is_reduced", property(lambda _: False)
+    )
+    mp.setattr(
+        ROCmLatentMoERunner,
+        "_quant_method",
+        property(lambda _: SimpleNamespace(has_unpadded_output=False)),
+    )
+    mp.setattr(
+        ROCmLatentMoERunner,
+        "_forward_impl",
+        lambda self, routed, logits, shared: (routed, logits, shared),
+    )
+    rocm_aiter_ops.refresh_env_variables()
+    torch.set_default_dtype(DTYPE)
+    try:
+        with ensure_current_vllm_config(), torch.device("cuda"):
+            init_test_distributed_environment(1, 1, 0, str(get_open_port()))
+            yield
+    finally:
+        torch.set_default_dtype(torch.float32)
+        cleanup_dist_env_and_memory()
+        mp.undo()
+        rocm_aiter_ops.refresh_env_variables()
+
+
+@pytest.fixture(scope="module")
+def merged_front(merged_front_env) -> SimpleNamespace:
+    return _merged_front_moe()
+
+
+def test_merged_front_weight_backs_the_projections(merged_front) -> None:
+    moe = merged_front
+    start = 0
+    for layer in (
+        moe.shared_experts.gate_up_proj,
+        moe.gate,
+        moe.routed_expert_down_proj,
+    ):
+        assert layer.weight.data_ptr() == moe.merged_front_weight[start].data_ptr()
+        start += layer.weight.shape[0]
+    assert start == moe.merged_front_weight.shape[0]
+    assert moe.experts.merged_front_core is not None
+
+
+@pytest.mark.parametrize("num_tokens", [64, 512, 4096, 8192])
+@torch.inference_mode()
+def test_merged_front_matches_separate_projections(
+    merged_front, num_tokens: int
+) -> None:
+    moe = merged_front
+    torch.manual_seed(num_tokens)
+    x = torch.randn(num_tokens, HIDDEN_SIZE, device="cuda", dtype=DTYPE)
+    routed, logits, shared = moe._merged_front_core(x)
+
+    torch.testing.assert_close(logits, moe.gate(x)[0], atol=2e-3, rtol=2e-3)
+    torch.testing.assert_close(
+        routed, moe.routed_expert_down_proj(x)[0], atol=2e-2, rtol=1.6e-2
+    )
+    if 256 < num_tokens <= 4096:
+        gate_up, _ = moe.shared_experts.gate_up_proj(x)
+        torch.testing.assert_close(
+            shared, moe.shared_experts.act_fn(gate_up), atol=2e-2, rtol=2e-2
+        )
+    else:
+        assert shared is x
+
+
+@torch.inference_mode()
+def test_shared_experts_take_the_activation(merged_front) -> None:
+    shared = merged_front.shared_experts
+    x = torch.randn(64, HIDDEN_SIZE, device="cuda", dtype=DTYPE)
+    gate_up, _ = shared.gate_up_proj(x)
+    torch.testing.assert_close(
+        shared(shared.act_fn(gate_up)), shared(x), atol=3e-2, rtol=2e-2
+    )
+
+
+def test_merged_front_skips_a_quantized_down_proj(merged_front_env) -> None:
+    moe = _merged_front_moe(down_quant_method=object())
+    assert moe.merged_front_weight is None

@@ -9,6 +9,7 @@ import torch.nn.functional as F
 from torch import nn
 
 from vllm import envs
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed import (
     get_dcp_group,
@@ -34,6 +35,7 @@ from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
     ReplicatedLinear,
     RowParallelLinear,
+    UnquantizedLinearMethod,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.gdn.kimi_gdn_linear_attn import (
@@ -74,6 +76,7 @@ from vllm.model_executor.models.utils import (
     make_layers,
     maybe_prefix,
 )
+from vllm.model_executor.utils import refill_derived
 from vllm.models.kimi_k3.amd.dsa import KimiK3DSAAttention
 from vllm.models.kimi_k3.amd.kda import KimiK3DeltaAttention
 from vllm.models.kimi_k3.amd.latent_moe_runner import ROCmLatentMoERunner
@@ -152,8 +155,12 @@ class KimiMLP(nn.Module):
         return get_input_quant_key(self.gate_up_proj)
 
     def forward(self, x):
-        gate_up, _ = self.gate_up_proj(x)
-        x = self.act_fn(gate_up)
+        if (
+            not isinstance(x, torch.Tensor)
+            or x.shape[-1] == self.gate_up_proj.input_size
+        ):
+            gate_up, _ = self.gate_up_proj(x)
+            x = self.act_fn(gate_up)
         x, _ = self.down_proj(x)
         return x
 
@@ -471,10 +478,89 @@ class KimiMoE(nn.Module):
             self.experts.moe_config.intermediate_size_per_partition_unpadded = (
                 moe_intermediate_size // self.tp_size
             )
+        self.merged_front_weight: torch.Tensor | None = None
+
+    def process_weights_after_loading(self) -> None:
+        from vllm.platforms.rocm import on_gfx950
+
+        runner, shared = self.experts, self.shared_experts
+        if (
+            not on_gfx950()
+            or not rocm_aiter_ops.is_enabled()
+            or envs.VLLM_BATCH_INVARIANT
+            or not isinstance(runner, ROCmLatentMoERunner)
+            or shared is None
+            or not isinstance(shared.act_fn, SituAndMul)
+            or shared.act_fn.linear_beta is None
+            or runner.moe_config.is_lora_enabled
+            or runner.moe_config.is_sequence_parallel
+            or runner.moe_config.dp_size > 1
+            or runner.moe_config.pcp_size > 1
+            or runner.moe_config.ep_size > 1
+            or not runner._tail_shardable
+            or runner._fused_output_is_reduced
+            or runner._quant_method.has_unpadded_output
+        ):
+            return
+        assert self.routed_expert_down_proj is not None
+        layers = (shared.gate_up_proj, self.gate, self.routed_expert_down_proj)
+        if not all(
+            isinstance(layer.quant_method, UnquantizedLinearMethod)
+            and layer.weight.dtype == torch.bfloat16
+            for layer in layers
+        ):
+            return
+        merged = refill_derived(
+            self, "merged_front_weight", torch.cat([layer.weight for layer in layers])
+        )
+        start = 0
+        for layer in layers:
+            end = start + layer.weight.shape[0]
+            layer.weight.data = merged[start:end]
+            start = end
+        runner.merged_front_core = self._merged_front_core
+
+    def _merged_front_core(
+        self, hidden_states: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        runner = cast(ROCmLatentMoERunner, self.experts)
+        num_tokens = hidden_states.shape[0]
+        if num_tokens > 4096 or (
+            not envs.VLLM_DISABLE_SHARED_EXPERTS_STREAM
+            and num_tokens <= envs.VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD
+        ):
+            router_logits, _ = self.gate(hidden_states)
+            routed_input, shared_input = runner.apply_routed_input_transform(
+                hidden_states
+            )
+        else:
+            from aiter.ops.triton.moe.moe_situ_epilogue import moe_situ_epilogue
+
+            shared = self.shared_experts
+            assert shared is not None and self.merged_front_weight is not None
+            act = cast(SituAndMul, shared.act_fn)
+            shared_input, router_logits, routed_input = moe_situ_epilogue(
+                torch.mm(
+                    hidden_states, self.merged_front_weight.t(), out_dtype=torch.float32
+                ),
+                shared_intermediate_size=shared.gate_up_proj.weight.shape[0] // 2,
+                num_experts=self.gate.weight.shape[0],
+                routed_latent_size=self.moe_hidden_size,
+                situ_beta=act.beta,
+                situ_linear_beta=act.linear_beta,
+            )
+        return cast(
+            tuple[torch.Tensor, torch.Tensor],
+            runner._forward_impl(routed_input, router_logits, shared_input),
+        )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_size = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_size)
+        if self.merged_front_weight is not None:
+            runner = cast(ROCmLatentMoERunner, self.experts)
+            final_hidden_states = runner.forward_merged_front(hidden_states)
+            return final_hidden_states.view(num_tokens, hidden_size)
         router_logits, _ = self.gate(hidden_states)
         final_hidden_states = self.experts(
             hidden_states=hidden_states, router_logits=router_logits
