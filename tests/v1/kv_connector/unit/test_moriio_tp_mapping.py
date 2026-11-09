@@ -367,12 +367,24 @@ def test_consumer_completes_after_every_writer_reported(monkeypatch):
     assert wrapper.pop_finished_write_req_ids() == {"u"}
 
 
-def test_consumer_write_failure_drops_partial_write_count(monkeypatch):
+@pytest.mark.parametrize("first", ["write_done", "write_failed"])
+def test_consumer_write_failure_waits_for_every_writer(monkeypatch, first):
     monkeypatch.setattr(moriio_engine, "get_role", lambda: ROLE.CONSUMER)
     wrapper = _consumer_wrapper()
+    second = "write_failed" if first == "write_done" else "write_done"
+
     wrapper._handle_structured_message(
-        {"type": "write_done", "transfer_id": "t", "num_writers": 2}
+        {"type": first, "transfer_id": "t", "num_writers": 2}
     )
-    wrapper._handle_structured_message({"type": "write_failed", "transfer_id": "t"})
-    assert wrapper._write_done_counts == {}
+    assert wrapper.pop_failed_write_req_ids() == set()
+    assert wrapper.pop_finished_write_req_ids() == set()
+
+    wrapper._handle_structured_message(
+        {"type": second, "transfer_id": "t", "num_writers": 2}
+    )
     assert wrapper.pop_failed_write_req_ids() == {"t"}
+    assert wrapper.pop_finished_write_req_ids() == set()
+    assert wrapper._write_done_counts == {}
+
+    wrapper._handle_structured_message({"type": "write_failed", "transfer_id": "u"})
+    assert wrapper.pop_failed_write_req_ids() == {"u"}

@@ -3131,9 +3131,7 @@ class MoRIIOConnectorWorker:
             )
             # A request whose handshake failed is not retried; its writes
             # reach the decode ranks that are connected or fail the request.
-            if not handshake_ready and not self._writer.is_unconnected(
-                meta.transfer_id
-            ):
+            if not handshake_ready and self._writer.may_handshake(meta.transfer_id):
                 # Initiate handshake with remote engine to exchange metadata.
                 with self._handshake_lock:
                     if remote_engine_id not in self._remote_agents:

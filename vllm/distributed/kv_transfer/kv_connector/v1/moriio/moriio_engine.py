@@ -173,11 +173,19 @@ class MoRIIOWriter:
         """Record that a transfer's handshake failed. Its writes still go to
         decode ranks that are connected; otherwise the transfer fails."""
         with self._write_state_lock:
-            self._unconnected.add(transfer_id)
+            # A handshake callback may run after the transfer has ended.
+            if not self._is_transfer_terminal(transfer_id):
+                self._unconnected.add(transfer_id)
 
     def is_unconnected(self, transfer_id: TransferId) -> bool:
         with self._write_state_lock:
             return transfer_id in self._unconnected
+
+    def may_handshake(self, transfer_id: TransferId) -> bool:
+        with self._write_state_lock:
+            return transfer_id not in self._unconnected and not (
+                self._is_transfer_terminal(transfer_id)
+            )
 
     def seal_pending_transfers(self) -> None:
         """Seal expected WRITE counts after the model forward has run.
@@ -281,25 +289,32 @@ class MoRIIOWriter:
         )
         self._send_write_failed(task)
 
-    def _send_write_failed(self, task: WriteTask) -> None:
-        # Only the remote allocation names the decode DP rank that owns the
-        # request, and it may not have arrived. Tell every rank; the others
-        # drop it.
-        for decode_dp_rank in range(max(task.remote_dp_size, 1)):
-            for remote_ip, remote_port in self._resolve_notify_endpoints(
-                task, decode_dp_rank
-            ):
+    def _send_write_failed(
+        self, task: WriteTask, decode_dp_rank: int | None = None
+    ) -> None:
+        # Decode ranks that do not own the request drop the message.
+        decode_dp_ranks = (
+            range(max(task.remote_dp_size, 1))
+            if decode_dp_rank is None
+            else (decode_dp_rank,)
+        )
+        for dp_rank in decode_dp_ranks:
+            endpoints = self._resolve_notify_endpoints(task, dp_rank)
+            for (remote_ip, remote_port), num_writers in endpoints.items():
                 try:
                     self.worker.moriio_wrapper.send_notify(
                         task.transfer_id,
                         remote_ip,
                         remote_port,
                         message_type="write_failed",
+                        message_fields=(
+                            {"num_writers": num_writers} if num_writers != 1 else None
+                        ),
                     )
                 except Exception:
                     logger.exception(
                         "Failed to notify decode DP rank %d that transfer %s failed",
-                        decode_dp_rank,
+                        dp_rank,
                         task.transfer_id,
                     )
 
@@ -415,7 +430,7 @@ class MoRIIOWriter:
                 task.request_id,
             )
             self._mark_request_done(task.transfer_id)
-            self._send_write_failed(task)
+            self._send_write_failed(task, request_info.decode_dp_rank)
             return
 
         # Wait for CUDA event
@@ -827,8 +842,8 @@ class MoRIIOWrapper:
         self.done_remote_allocate_req_dict: dict[TransferId, RemoteAllocInfo] = {}
         self.done_write_cache_req_ids: list[str] = []
         self.failed_write_cache_req_ids: list[str] = []
-        # write_done messages received per transfer whose writers are not all in.
-        self._write_done_counts: dict[TransferId, int] = {}
+        # (writers reported, any failed) per transfer still waiting for writers.
+        self._write_done_counts: dict[TransferId, tuple[int, bool]] = {}
         self._terminal_transfer_ids: OrderedDict[TransferId, None] = OrderedDict()
         self._transfer_timeout = transfer_timeout
         self.notify_thread: threading.Thread | None = None
@@ -1158,22 +1173,28 @@ class MoRIIOWrapper:
         assert get_role() != ROLE.PRODUCER, (
             "Only decode can get WRITE completion messages"
         )
-        transfer_id = data["transfer_id"]
-        num_writers = int(data.get("num_writers", 1))
-        with self.lock:
-            received = self._write_done_counts.get(transfer_id, 0) + 1
-            if received < num_writers:
-                self._write_done_counts[transfer_id] = received
-                return
-            self._write_done_counts.pop(transfer_id, None)
-            self.done_write_cache_req_ids.append(transfer_id)
+        self._record_writer_report(data, failed=False)
 
     def _handle_write_failed_message(self, data: dict):
         assert get_role() != ROLE.PRODUCER, "Only decode can get WRITE failure messages"
+        self._record_writer_report(data, failed=True)
+
+    def _record_writer_report(self, data: dict, failed: bool) -> None:
         transfer_id = data["transfer_id"]
+        num_writers = int(data.get("num_writers", 1))
         with self.lock:
+            received, any_failed = self._write_done_counts.get(transfer_id, (0, False))
+            received += 1
+            any_failed = any_failed or failed
+            # Another writer may still be writing into the blocks after a failure.
+            if received < num_writers:
+                self._write_done_counts[transfer_id] = (received, any_failed)
+                return
             self._write_done_counts.pop(transfer_id, None)
-            self.failed_write_cache_req_ids.append(transfer_id)
+            if any_failed:
+                self.failed_write_cache_req_ids.append(transfer_id)
+            else:
+                self.done_write_cache_req_ids.append(transfer_id)
 
     def _handle_release_message(self, data: dict):
         assert get_role() == ROLE.PRODUCER, (

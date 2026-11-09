@@ -545,9 +545,11 @@ def test_refused_write_handshake_fails_the_request_on_every_decode_rank(
     worker = _handshake_worker(True, refuse)
     wrapper = _wrapper()
     sent = []
-    wrapper.send_notify = lambda transfer_id, ip, port, message_type: sent.append(
-        (transfer_id, port, message_type)
-    )
+
+    def send_notify(transfer_id, ip, port, message_type, message_fields=None):
+        sent.append((transfer_id, port, message_type, message_fields))
+
+    wrapper.send_notify = send_notify
     worker.moriio_wrapper = wrapper
     writer = worker._writer = make_moriio_writer(worker)
     tasks = []
@@ -564,7 +566,8 @@ def test_refused_write_handshake_fails_the_request_on_every_decode_rank(
 
     for layer in ("mla0", "mla1", "mla2"):
         worker.save_kv_layer(metadata, layer, kv_layer=None, attn_metadata=None)
-    worker._handshake_initiation_executor.shutdown()
+    # One worker, so this returns after the handshake callbacks.
+    worker._handshake_initiation_executor.submit(lambda: None).result()
 
     # One handshake per decode rank of the MLA fan-out, for the first layer.
     assert sorted(handshakes) == [f"decode:0_dp0_tp{t}" for t in range(4)]
@@ -589,16 +592,52 @@ def test_refused_write_handshake_fails_the_request_on_every_decode_rank(
     writer._execute_write_task(tasks[0])
 
     if targets_connected:
+        worker._handshake_initiation_executor.shutdown()
         assert written == [[f"decode:0_dp0_tp{t}"] for t in range(4)]
         assert sent == [] and wrapper.done_req_ids == []
         return
     assert [ack.transfer_id for ack in wrapper.done_req_ids] == ["t"]
     assert sent == [
-        ("t", NOTIFY_PORT + get_port_offset(0, t), "write_failed") for t in range(4)
+        ("t", NOTIFY_PORT + get_port_offset(0, t), "write_failed", None)
+        for t in range(4)
     ]
     # The request's other write tasks are dropped.
     assert writer._is_transfer_terminal("t")
     assert not writer.is_unconnected("t")
+
+    worker.save_kv_layer(metadata, "mla3", kv_layer=None, attn_metadata=None)
+    worker._handshake_initiation_executor.shutdown()
+    assert len(handshakes) == 4
+    writer.mark_unconnected("t")
+    assert not writer.is_unconnected("t")
+
+
+def test_unconnected_fan_in_writer_tells_the_owning_rank_how_many_write():
+    worker = _handshake_worker(True, _refuse)
+    worker.tp_rank, worker.world_size, worker._has_mamba = 1, 2, True
+    worker._is_mamba_layer = lambda layer_name: True
+    wrapper = _wrapper()
+    sent = []
+
+    def send_notify(transfer_id, ip, port, message_type, message_fields=None):
+        sent.append((port, message_type, message_fields))
+
+    wrapper.send_notify = send_notify
+    worker.moriio_wrapper = wrapper
+    writer = make_moriio_writer(worker)
+    task = _write_task("kda0", [5, 6], worker._write_tp_mapping(1))
+    task.remote_dp_size = task.remote_dp_size_local = 2
+    wrapper.done_remote_allocate_req_dict["t"] = RemoteAllocInfo(
+        block_ids=[[7, 8]], decode_dp_rank=1
+    )
+    writer.mark_unconnected("t")
+
+    writer._execute_write_task(task)
+
+    assert sent == [
+        (NOTIFY_PORT + get_port_offset(1, 0), "write_failed", {"num_writers": 2})
+    ]
+    assert [ack.transfer_id for ack in wrapper.done_req_ids] == ["t"]
 
 
 VOTES = {"connected": 2, "refused": 1, "failed": 0}
