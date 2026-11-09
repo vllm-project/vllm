@@ -1560,31 +1560,6 @@ async fn test_app_with_stream_output_specs(
     )
 }
 
-async fn test_app_with_force_include_usage() -> (axum::Router, MockEngineTask) {
-    let (chat, engine_task) = test_models_with_engine_outputs_and_backend(
-        b"engine-openai-force-usage",
-        default_stream_output_specs(),
-        Arc::new(FakeChatBackend::new()),
-    )
-    .await;
-    (
-        build_router_with_gates(
-            Arc::new(
-                AppState::new(vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()], chat)
-                    .with_api_server_options(ApiServerOptions {
-                        enable_force_include_usage: true,
-                        ..Default::default()
-                    }),
-            ),
-            RouteGates {
-                scale_out: true,
-                ..RouteGates::default()
-            },
-        ),
-        engine_task,
-    )
-}
-
 async fn test_app_with_backend_and_stream_output_specs(
     backend: Arc<dyn ChatTextBackend>,
     output_specs: Vec<(Vec<u32>, Option<EngineCoreFinishReason>)>,
@@ -5384,6 +5359,80 @@ async fn stream_continuous_usage_stats_adds_usage_to_chat_chunks() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn force_include_usage_streams_continuous_usage_regardless_of_stream_options() {
+    let mut lines = Vec::new();
+    for uri in ["/v1/chat/completions", "/v1/completions"] {
+        for stream_options in [None, Some(json!({"include_usage": false}))] {
+            let (chat, engine_task) = test_models_with_engine_outputs_and_backend(
+                b"engine-openai-force-include-usage",
+                default_stream_output_specs(),
+                Arc::new(FakeChatBackend::new()),
+            )
+            .await;
+            let mut app = build_router(Arc::new(
+                AppState::new(vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()], chat)
+                    .with_api_server_options(ApiServerOptions {
+                        force_include_usage: true,
+                        ..Default::default()
+                    }),
+            ));
+            let mut body = json!({"stream": true});
+            if let Some(stream_options) = &stream_options {
+                body["stream_options"] = stream_options.clone();
+            }
+            if uri == "/v1/chat/completions" {
+                body["messages"] = json!([{"role": "user", "content": "hello"}]);
+            } else {
+                body["prompt"] = json!("hello");
+            }
+            let response = app
+                .call(
+                    Request::builder()
+                        .method("POST")
+                        .uri(uri)
+                        .header("content-type", "application/json")
+                        .body(Body::from(body.to_string()))
+                        .expect("build request"),
+                )
+                .await
+                .expect("call app");
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+            engine_task.await.expect("mock engine task");
+
+            // One entry per chunk: its kind and the completion tokens of its
+            // usage, if any.
+            let summary = sse_json_payloads(std::str::from_utf8(&body).expect("utf8 body"))
+                .iter()
+                .map(|chunk| {
+                    let kind = if chunk["choices"].as_array().is_some_and(Vec::is_empty) {
+                        "usage"
+                    } else if chunk["choices"][0]["finish_reason"].is_string() {
+                        "finish"
+                    } else {
+                        "delta"
+                    };
+                    match chunk.get("usage") {
+                        Some(usage) => format!("{kind}={}", usage["completion_tokens"]),
+                        None => kind.to_string(),
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+            let stream_options =
+                stream_options.map_or_else(|| "absent".to_string(), |options| options.to_string());
+            lines.push(format!("{uri} stream_options={stream_options}: {summary}"));
+        }
+    }
+    expect_test::expect![[r#"
+        /v1/chat/completions stream_options=absent: delta=0 delta=1 delta=2 finish=3 usage=3
+        /v1/chat/completions stream_options={"include_usage":false}: delta=0 delta=1 delta=2 finish=3 usage=3
+        /v1/completions stream_options=absent: delta=1 delta=2 delta=3 finish=3 usage=3
+        /v1/completions stream_options={"include_usage":false}: delta=1 delta=2 delta=3 finish=3 usage=3"#]].assert_eq(&lines.join("\n"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn stream_without_include_usage_keeps_existing_shape() {
     let (app, engine_task) = test_app_with_stream_output_specs(default_stream_output_specs()).await;
     let response = app
@@ -5414,51 +5463,6 @@ async fn stream_without_include_usage_keeps_existing_shape() {
 
     assert!(!text.contains("\"usage\":"), "{text}");
     assert!(text.contains("\"finish_reason\":\"stop\""), "{text}");
-    assert!(text.trim_end().ends_with("data: [DONE]"), "{text}");
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[serial]
-async fn force_include_usage_adds_usage_to_chat_stream_without_stream_options() {
-    let (app, engine_task) = test_app_with_force_include_usage().await;
-    let response = app
-        .clone()
-        .call(
-            Request::builder()
-                .method("POST")
-                .uri("/v1/chat/completions")
-                .header("content-type", "application/json")
-                .body(Body::from(
-                    json!({
-                        "model": "Qwen/Qwen1.5-0.5B-Chat",
-                        "stream": true,
-                        "messages": [{"role": "user", "content": "hello"}]
-                    })
-                    .to_string(),
-                ))
-                .expect("build request"),
-        )
-        .await
-        .expect("call app");
-
-    assert_eq!(response.status(), StatusCode::OK);
-
-    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
-    engine_task.await.expect("mock engine task");
-    let text = String::from_utf8(body.to_vec()).expect("utf8 body");
-    let payloads = sse_json_payloads(&text);
-
-    assert!(
-        payloads.iter().all(|payload| payload.get("usage").is_some()),
-        "{text}"
-    );
-    let usage_chunk = payloads
-        .iter()
-        .find(|payload| payload["choices"] == json!([]))
-        .expect("final usage chunk");
-    assert_eq!(usage_chunk["usage"]["prompt_tokens"], 22);
-    assert_eq!(usage_chunk["usage"]["completion_tokens"], 3);
-    assert_eq!(usage_chunk["usage"]["total_tokens"], 25);
     assert!(text.trim_end().ends_with("data: [DONE]"), "{text}");
 }
 
@@ -7202,49 +7206,6 @@ async fn completions_stream_continuous_usage_stats_adds_usage_to_chunks() {
         .find(|payload| payload["choices"] == json!([]))
         .expect("final usage chunk");
     assert_eq!(usage_chunk["usage"]["completion_tokens"], 3);
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[serial]
-async fn force_include_usage_adds_usage_to_completions_stream_without_stream_options() {
-    let (app, engine_task) = test_app_with_force_include_usage().await;
-    let response = app
-        .clone()
-        .call(
-            Request::builder()
-                .method("POST")
-                .uri("/v1/completions")
-                .header("content-type", "application/json")
-                .body(Body::from(
-                    json!({
-                        "model": "Qwen/Qwen1.5-0.5B-Chat",
-                        "prompt": "hello",
-                        "stream": true
-                    })
-                    .to_string(),
-                ))
-                .expect("build request"),
-        )
-        .await
-        .expect("call app");
-
-    assert_eq!(response.status(), StatusCode::OK);
-
-    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
-    engine_task.await.expect("mock engine task");
-    let text = String::from_utf8(body.to_vec()).expect("utf8 body");
-    let payloads = sse_json_payloads(&text);
-
-    assert!(
-        payloads.iter().all(|payload| payload.get("usage").is_some()),
-        "{text}"
-    );
-    let usage_chunk = payloads
-        .iter()
-        .find(|payload| payload["choices"] == json!([]))
-        .expect("final usage chunk");
-    assert_eq!(usage_chunk["usage"]["completion_tokens"], 3);
-    assert!(text.trim_end().ends_with("data: [DONE]"), "{text}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

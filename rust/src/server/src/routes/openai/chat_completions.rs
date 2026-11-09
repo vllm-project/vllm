@@ -73,7 +73,7 @@ pub async fn chat_completions(
     let requested_model = body.model.as_deref().filter(|model| !model.is_empty());
     let lora_resolution = state.resolve_model_with_loras(requested_model).await;
 
-    let mut prepared = match prepare_chat_request(body, &lora_resolution, request_context) {
+    let prepared = match prepare_chat_request(body, &lora_resolution, request_context) {
         Ok(prepared) => prepared,
         Err(error) => return error.into_response(),
     };
@@ -96,10 +96,6 @@ pub async fn chat_completions(
 
     let created = unix_timestamp();
     let api_server_options = state.api_server_options;
-    if api_server_options.enable_force_include_usage {
-        prepared.options.include_usage = true;
-        prepared.options.include_continuous_usage = true;
-    }
     // Like Python, report reasoning-token details only when a reasoning parser
     // is configured to count them.
     let count_reasoning_tokens = state.chat.reasoning_parser_name().is_some();
@@ -389,6 +385,7 @@ async fn chat_completion_chunk_stream(
         enable_prompt_tokens_details,
         default_return_tokens_as_token_ids,
         enable_per_request_metrics,
+        force_include_usage,
         ..
     }: ApiServerOptions,
     count_reasoning_tokens: bool,
@@ -410,6 +407,8 @@ async fn chat_completion_chunk_stream(
 ) -> Result<(), ApiError> {
     let return_tokens_as_token_ids =
         return_tokens_as_token_ids.unwrap_or(default_return_tokens_as_token_ids);
+    let include_usage = include_usage || force_include_usage;
+    let include_continuous_usage = include_continuous_usage || force_include_usage;
     let envelope = Arc::new(StreamResponseEnvelope::new(
         request_id,
         "chat.completion.chunk",

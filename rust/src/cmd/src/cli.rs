@@ -465,29 +465,15 @@ pub struct SharedRuntimeArgs {
     #[serde(default)]
     pub enable_prompt_tokens_details: bool,
 
-    /// If set to True, including usage on every request.
-    #[arg(
-        long,
-        default_missing_value = "true",
-        num_args = 0..=1,
-        overrides_with = "no_enable_force_include_usage"
-    )]
-    #[serde(default)]
-    pub enable_force_include_usage: bool,
-
-    /// Negation of `--enable-force-include-usage`, matching Python's
-    /// `--no-enable-force-include-usage`
-    #[arg(
-        long = "no-enable-force-include-usage",
-        default_missing_value = "false",
-        num_args = 0..=1
-    )]
-    #[serde(skip)]
-    no_enable_force_include_usage: bool,
     /// Include per-request timing metrics in API responses.
     #[arg(long, default_missing_value = "true", num_args = 0..=1)]
     #[serde(default)]
     pub enable_per_request_metrics: bool,
+
+    /// If set to True, including usage on every request.
+    #[arg(long, default_missing_value = "true", num_args = 0..=1)]
+    #[serde(default)]
+    pub enable_force_include_usage: bool,
 
     /// If specified, API server will add X-Request-Id header to responses.
     #[arg(
@@ -1026,9 +1012,9 @@ impl SharedRuntimeArgs {
                 max_log_len: self.max_log_len,
             },
             enable_prompt_tokens_details: self.enable_prompt_tokens_details,
-            enable_force_include_usage: self.enable_force_include_usage,
             default_return_tokens_as_token_ids: self.return_tokens_as_token_ids,
             enable_per_request_metrics: self.enable_per_request_metrics,
+            force_include_usage: self.enable_force_include_usage,
             enable_request_id_headers: self.enable_request_id_headers,
             log_error_stack: self.log_error_stack.unwrap_or(self.server_dev_mode),
             enable_scale_out: self.enable_scale_out,

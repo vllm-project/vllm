@@ -74,13 +74,15 @@ pub struct ApiServerOptions {
     pub log_outputs: OutputLogConfig,
     /// When `true`, include prompt token cache details in response usage.
     pub enable_prompt_tokens_details: bool,
-    /// When `true`, force usage reporting on every streaming request.
-    pub enable_force_include_usage: bool,
     /// Format logprob tokens as `token_id:{id}` unless the request sets
     /// `return_tokens_as_token_ids` itself.
     pub default_return_tokens_as_token_ids: bool,
     /// Include request timing metrics in OpenAI chat and completion responses.
     pub enable_per_request_metrics: bool,
+    /// Stream usage on every chat and completions request, as if it set
+    /// `stream_options` with `include_usage` and `continuous_usage_stats`
+    /// (`--enable-force-include-usage`).
+    pub force_include_usage: bool,
     /// When `true`, set `X-Request-Id` on every HTTP response.
     pub enable_request_id_headers: bool,
     /// When `true`, log every error response at ERROR (`--log-error-stack`).
