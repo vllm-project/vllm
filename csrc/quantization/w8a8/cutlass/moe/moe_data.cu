@@ -6,12 +6,21 @@
 #include <torch/headeronly/core/ScalarType.h>
 
 #include "dispatch_utils.h"
+#include "cutlass_extensions/common.hpp"
 
 #include <iostream>
 
 constexpr uint64_t THREADS_PER_EXPERT = 512;
-// threshold must match the dispatch logic in run_cutlass_moe_mm_sm90()
+// Swap-AB thresholds on the number of routed rows. They must match the
+// dispatch logic in run_cutlass_moe_mm_sm90() / run_cutlass_moe_mm_sm120()
+// and swap_ab in run_cutlass_moe_fp8().
 constexpr int SWAP_AB_THRESHOLD = 64;
+constexpr int SWAP_AB_THRESHOLD_SM120 = 16384;
+
+static int swap_ab_threshold() {
+  int32_t const sm = get_sm_version_num();
+  return sm >= 120 && sm < 130 ? SWAP_AB_THRESHOLD_SM120 : SWAP_AB_THRESHOLD;
+}
 
 template <bool SWAP_AB>
 __global__ void compute_problem_sizes(const int32_t* __restrict__ topk_ids,
@@ -258,7 +267,7 @@ void get_cutlass_moe_mm_data_caller(
 
   // Swap-AB should be disabled for FP4 path
   bool may_swap_ab = (!blockscale_offsets.has_value()) &&
-                     (topk_ids.numel() <= SWAP_AB_THRESHOLD);
+                     (topk_ids.numel() <= swap_ab_threshold());
 
   launch_compute_problem_sizes(topk_ids, problem_sizes1, problem_sizes2,
                                atomic_buffer, num_experts, n, k, stream,
@@ -326,7 +335,7 @@ void get_cutlass_batched_moe_mm_data_caller(
       expert_offsets.get_device_index());
   auto stream = get_current_cuda_stream(expert_offsets.get_device_index());
 
-  if (num_local_experts * padded_m > SWAP_AB_THRESHOLD) {
+  if (num_local_experts * padded_m > swap_ab_threshold()) {
     compute_batched_moe_data<false><<<1, num_local_experts, 0, stream>>>(
         static_cast<int32_t*>(expert_offsets.data_ptr()),
         static_cast<int32_t*>(problem_sizes1.data_ptr()),
