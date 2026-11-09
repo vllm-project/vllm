@@ -137,11 +137,11 @@ def make_request(
 def make_kv_cache_manager(
     kv_cache_config: KVCacheConfig, vllm_config: VllmConfig | None = None, **kwargs
 ) -> KVCacheManager:
-    """Build a ``KVCacheManager``, deriving ``scheduler_block_size`` from the
+    """Build a `KVCacheManager`, deriving `scheduler_block_size` from the
     config (LCM of group block sizes) unless explicitly provided. This mirrors
-    ``resolve_kv_cache_block_sizes`` for the non-context-parallel case used by
+    `resolve_kv_cache_block_sizes` for the non-context-parallel case used by
     these tests, so callers don't have to pass it at every site. With
-    ``vllm_config``, a HiSparseConnector builds the HiSparse coordinator."""
+    `vllm_config`, a HiSparseConnector builds the HiSparse coordinator."""
     kwargs.setdefault(
         "scheduler_block_size",
         lcm(*(g.kv_cache_spec.block_size for g in kv_cache_config.kv_cache_groups)),
@@ -278,7 +278,7 @@ def _allocate_scheduled(
     num_external_computed_tokens: int = 0,
     **kwargs,
 ) -> KVCacheBlocks | None:
-    """``allocate_slots`` plus the per-step residency work the connector runs."""
+    """`allocate_slots` plus the per-step residency work the connector runs."""
     blocks = manager.allocate_slots(
         request,
         num_new_tokens,
@@ -970,7 +970,7 @@ def _make_hisparse_scheduler(
     tmp_path, host_num_blocks: int, matched_tokens: int, **kwargs
 ) -> tuple[Scheduler, KVCacheManager]:
     """A scheduler over a HiSparse manager whose async mock connector matches
-    ``matched_tokens``."""
+    `matched_tokens`."""
     from .utils import create_scheduler, mock_kv
 
     (tmp_path / "config.json").write_text(
@@ -1374,7 +1374,7 @@ def test_hisparse_prefix_hit_under_pressure_adopts_surviving_copies(
 
     Admission counts free GPU copies as free, but adopting a copy pins it. When
     adoption ran before the hit's allocation, it took blocks the allocation was
-    promised and the pool ran dry (``Cannot get N free blocks``). The allocation
+    promised and the pool ran dry (`Cannot get N free blocks`). The allocation
     now goes first, evicting a prefix's copies tail first; the copies it leaves
     are adopted.
     """
@@ -4698,9 +4698,9 @@ def test_eagle_swa_alignment_caches_extra_block():
 
     When the cache-hit alignment (lcm of per-group block sizes) is larger than
     the SWA window, the SWA mask only kept the last block of each aligned
-    segment. EAGLE/MTP lookup needs ``tail + 1`` contiguous cached blocks and
+    segment. EAGLE/MTP lookup needs `tail + 1` contiguous cached blocks and
     that +1 block lives at the next segment's first position, which was left
-    uncached. The fix caches that extra block when ``use_eagle=True``.
+    uncached. The fix caches that extra block when `use_eagle=True`.
     """
     block_size = 8
     # Full group uses 4 * block_size, so lcm/alignment is 4 * block_size.
@@ -4964,11 +4964,11 @@ def test_different_block_size():
 
 
 def test_hybrid_cache_blocks_swa_tail_window_only():
-    """Within each lcm-aligned segment, SWA's ``find_longest_cache_hit`` only
-    returns the trailing ``ceil((sliding_window - 1) / block_size)`` blocks
+    """Within each lcm-aligned segment, SWA's `find_longest_cache_hit` only
+    returns the trailing `ceil((sliding_window - 1) / block_size)` blocks
     (its right-to-left scan stops once a contiguous match is found). Blocks
     earlier in the segment can never serve a hit, so
-    ``HybridKVCacheCoordinator.cache_blocks`` should skip them rather than
+    `HybridKVCacheCoordinator.cache_blocks` should skip them rather than
     polluting the prefix-cache hash map."""
     block_size = 8
     # Full attn block_size=32, SWA block_size=8, sw=8 -> lcm=32.
@@ -5882,10 +5882,10 @@ def test_cache_hit_local_and_external():
 
 
 def _take_free_blocks(manager: KVCacheManager, num_blocks: int) -> list[KVCacheBlock]:
-    """Grab the first ``num_blocks`` blocks at the head of the free queue
+    """Grab the first `num_blocks` blocks at the head of the free queue
     without removing them. These ref_cnt==0 blocks stand in for evictable
     cache-hit blocks left behind by a previous (e.g. preempted) request, and
-    sitting at the head guarantees a later group's external ``get_new_blocks``
+    sitting at the head guarantees a later group's external `get_new_blocks`
     would contend for them on unpatched code (issue #33775)."""
     blocks: list[KVCacheBlock] = []
     head = manager.block_pool.free_block_queue.fake_free_list_head
@@ -5922,7 +5922,7 @@ def _cross_group_cache_hit(
     num_external_blocks: int = 2,
     num_new_blocks: int = 1,
 ) -> Request:
-    """Allocate ``req_id`` with a per-group local prefix hit plus external
+    """Allocate `req_id` with a per-group local prefix hit plus external
     (connector) computed tokens, driving the coordinator's two-phase path.
     Returns the allocated request so callers can free it (e.g. to preempt)."""
     block_size = _two_phase_block_size(manager)
@@ -6201,7 +6201,7 @@ def test_pure_swa_retention_latest_only():
 
 
 def test_pure_swa_dense_retention_caches_all():
-    """With retention set to ``None``, a pure-SWA model keeps dense behavior:
+    """With retention set to `None`, a pure-SWA model keeps dense behavior:
     every block boundary is a potential hit, so all blocks are cached."""
     block_size = 16
     manager = _make_pure_swa_manager(block_size, sliding_window=block_size)
@@ -6266,8 +6266,8 @@ def test_mamba_reachable_block_mask_sparsifies_retention():
 
 
 def test_mamba_reachable_block_mask_pins_shared_prefix():
-    """A Marconi-detected shared prefix (``shared_prefix_boundary``) lands before
-    ``num_prompt`` so the replay-boundary rule alone would drop it. The mask must
+    """A Marconi-detected shared prefix (`shared_prefix_boundary`) lands before
+    `num_prompt` so the replay-boundary rule alone would drop it. The mask must
     pin the single state block ending on that boundary so sparse retention does
     not defeat cross-request shared-prefix reuse."""
     from vllm.v1.core.single_type_kv_cache_manager import MambaManager
@@ -6352,7 +6352,7 @@ def test_mamba_align_siblings_hit_committed_boundary_in_one_step():
 def test_mamba_shared_prefix_reuse_under_zero_retention():
     """Full cross-request Marconi flow: a partial shared prefix cached by the
     detecting request must stay reusable by a later request under
-    ``prefix_cache_retention_interval=0``. Without the pin the junction is
+    `prefix_cache_retention_interval=0`. Without the pin the junction is
     masked out and the later request misses; with it (and under dense) the reuse
     is preserved."""
     block_size = 16
@@ -6436,7 +6436,7 @@ def test_swa_reachable_block_mask_final_partial_segment():
 
 def test_swa_reachable_block_mask_pins_shared_prefix():
     """SWA analog of the Mamba pin: the shared-prefix junction must keep the
-    ``need``-block sliding-window tail ending on that boundary (not a single
+    `need`-block sliding-window tail ending on that boundary (not a single
     block), so a windowed hit can land there under sparse retention."""
     from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
 
@@ -6637,7 +6637,7 @@ def test_mamba_reachable_block_mask_large_dcp_stays_sparse():
 @pytest.mark.parametrize("use_eagle", [False, True])
 def test_swa_shared_prefix_reuse_under_zero_retention(use_eagle):
     """SWA cross-request analog: a partial shared prefix's sliding-window tail
-    must stay reusable under ``prefix_cache_retention_interval=0``. Without
+    must stay reusable under `prefix_cache_retention_interval=0`. Without
     the pin the junction window is masked out and a later request misses; with
     it (and under dense) reuse is preserved. With only the SWA group drafting
     under EAGLE, the full group reports the junction at the shared prefix, but
@@ -6738,3 +6738,34 @@ def test_get_unhashed_block_ids_all_groups():
     )
 
     assert blocks.get_unhashed_block_ids_all_groups() == [[1, 4], []]
+
+
+def test_estimate_cached_tokens_tracks_hashed_prefix_of_each_group():
+    block_size = 16
+    manager = make_kv_cache_manager(
+        make_kv_cache_config_hybrid_model(
+            block_size, num_blocks=50, sliding_window_blocks=2
+        ),
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+    )
+    token_ids = list(range(4 * block_size + 1))
+    request = make_request("0", token_ids, block_size, sha256)
+    assert (
+        manager.allocate_slots(request, len(token_ids), delay_cache_blocks=True)
+        is not None
+    )
+    assert manager.estimate_cached_tokens(request) == 0
+
+    # The block table has an unhashed tail.
+    manager.cache_blocks(request, 2 * block_size)
+    assert manager.estimate_cached_tokens(request) == 2 * block_size
+
+    manager.cache_blocks(request, 4 * block_size)
+    assert manager.estimate_cached_tokens(request) == 4 * block_size
+
+    # Evicting one group's last hashed block lowers the estimate to that group's.
+    full_attention_blocks = manager.get_blocks(request.request_id).blocks[0]
+    manager.block_pool.evict_blocks({full_attention_blocks[3].block_id})
+    assert manager.estimate_cached_tokens(request) == 3 * block_size

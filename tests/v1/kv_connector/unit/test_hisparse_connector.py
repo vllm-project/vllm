@@ -226,6 +226,11 @@ class _FakeEvent:
         pass
 
 
+@pytest.mark.xfail(
+    strict=True,
+    reason="The worker stub lacks max_swap_rows, and ROCm rejects the real "
+    "HiSparse backend (#64240); no fix for the stub yet",
+)
 @pytest.mark.parametrize("cg_mode", [CUDAGraphMode.FULL, CUDAGraphMode.NONE])
 def test_draft_layer_rows_mirrored_after_drafter(monkeypatch, cg_mode):
     """Draft-layer host rows must hold the drafter's writes before page release.

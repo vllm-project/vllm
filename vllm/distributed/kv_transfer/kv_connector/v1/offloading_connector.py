@@ -189,7 +189,7 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
     def _max_loadable_tokens(
         self, request: "Request", num_computed_tokens: int
     ) -> int | None:
-        """How far past ``num_computed_tokens`` a load may reach, if bounded.
+        """How far past `num_computed_tokens` a load may reach, if bounded.
 
         Bounded by the deepest prefix the groups this connector does not
         offload already hold, since nothing refills them beyond it.
