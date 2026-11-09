@@ -342,6 +342,48 @@ A 20 GB CPU tier already holds nearly all of it; the NVMe tier then removes the 
 - **There is no backpressure.** Under the default policy a store the tier cannot take is dropped, and its blocks are recomputed later. A full SSD degrades the same way, silently, so drops and tier fill need monitoring.
 - **Size the CPU tier for promotion,** not only as a cache: every NVMe hit passes through it.
 
+## Aux objects on SSD (E-aux)
+
+The pinned design sizes the store's memory for every session in flight and admits sessions by that memory. E-aux asks whether the store can instead keep aux objects on the holder's local NVMe, with memory only a cache, at the same speed and with nothing lost.
+
+**Setup.** 14.6K context × 512 sessions × 16 turns, all outputs with partial capture, one TP4 replica per node. The memory arm: a 96 GB hard-pinned segment. The SSD arm: an 8 GB segment, no pinning, Mooncake offload to a fresh directory on local NVMe (`--enable_offload --offload_on_evict --offload_force_evict=false --enable_disk_eviction=false --client_ttl=600`), sessions admitted by free disk. Each pair ran on one node, in both orders.
+
+**Speed.** Eight same-node pairs:
+
+| Node | First | Second | SSD vs memory |
+|---|---|---|---|
+| A | memory 1247 s | SSD 1225 s, 1250 s | −1.8%, +0.2% |
+| B | SSD 1220 s | memory 1226 s | −0.5% |
+| C | memory 1150 s | SSD 1237 s | +7.6% |
+| D | SSD 1130 s | memory 1143 s | −1.1% |
+| E | memory 1199 s | SSD 1238 s | +3.3% |
+| E | SSD 1224 s | memory 1177 s | +4.0% |
+| F | SSD 1214 s | memory 1187 s | +2.3% |
+
+Rollouts on SSD are 1–2% slower (median +1.3%, mean +1.8%); reading every session back is about 2% slower (median 1621 s against 1583 s). Every arm delivered every row: 7.44M R3 and indexer rows and 131K hidden rows, 0 missing, 0 wrong. The SSD arm held about 7 of its 8 GB and spilled 36 GB.
+
+**Which settings fail.** The same workload with the alternatives:
+
+- **Offload at put (`--offload_on_evict=false`)** is not usable. Turns took 1467–2056 s instead of about 90 s, and every session read back had missing rows. In isolation, 100K objects of 32 KB through a 256 MB segment lost 2,976 (3.0%) with no error and all eviction counters at zero; a 1M offload queue and 10-hour task timeouts lost the same 2,976. The store evicts objects whose disk write has not finished.
+- **No SSD, no pinning, 8 GB:** the writers backed up and the run did not finish in 4 hours.
+- **Admission by memory with an SSD:** 8 GB admitted 57 sessions at a time, 9 waves, 20% slower. Admission has to follow the disk.
+
+**Fault tests** (Mooncake alone, 256 MB segment, 4 MB objects unless noted):
+
+| Test | Result |
+|---|---|
+| 1 GB through 256 MB with a retrying writer | 0 failed, 0 corrupt; puts first fail with −200, then land as offload frees memory |
+| 100K × 32 KB, offload on eviction | 100,000 of 100,000 intact |
+| Remove right after a read | non-force removal removes nothing (read lease, −706); force removal removes all |
+| Disk after removal | not reclaimed after 300 s; reused by later writes (6 × 256 MB written and removed left 512–588 MB) |
+| Holder restarted on its old directory | every removed key is listed again; a fresh directory lists none |
+| Holder paused 30 s | `client_ttl` 10 s: all memory objects lost; 600 s: none |
+| Holder killed | the master still lists every key, every get returns empty; puts fail |
+| Disk writes failing (file size limit) | `FILE_WRITE_FAIL` per bucket, partial files left (15 GB for 2 GB of data), memory stays full, every later put fails; no acked object lost |
+| `--quota_bytes=1 GB` | no effect on the offload directory |
+
+These are the rules of protocol §9: offload on eviction only, a long `client_ttl`, force removal, one fresh directory per holder and job deleted at job end, an abort on a dead holder or on puts that stop landing, and disk headroom monitored outside the store.
+
 ## Correctness hardening
 
 Each row is a defect found by test or review, the test that exposes it, and the result before and after the fix, on the same workload. "Wrong" is against the reference unless noted.

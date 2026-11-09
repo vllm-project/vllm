@@ -235,7 +235,7 @@ Every acked object must stay readable until its session is released. A listed ob
 - **One fresh directory per holder and job.** Removal is logical: bucket files are not reclaimed, and a holder restarted on an old directory re-registers keys that were removed. The holder must start on an empty directory it owns, and the directory is deleted when the job ends. Space is reused across removals, so disk use follows the peak live bytes, not the total written.
 - **Disk failure stalls, it does not lose acked data.** A failed bucket write is logged (`FILE_WRITE_FAIL`), leaves the partial file behind, and memory stays full, so every later put fails. The put-stall deadline of §8 turns that into an abort; monitor free disk, since `--quota_bytes` does not bound the offload directory.
 - **Every holder eligible for placement is SSD-backed**, or objects placed on a memory-only holder can be evicted.
-- Cost: at 14.6K context × 512 sessions with all outputs, an 8 GB segment spilling 36 GB to disk ran rollouts as fast as a 96 GB pinned pool, with nothing missing (experiments: SSD tier).
+- Cost: at 14.6K context × 512 sessions with all outputs, an 8 GB segment spilling 36 GB to disk ran rollouts about 1–2% slower than a 96 GB pinned pool (eight same-node pairs, median +1.3%, range −1.8% to +7.6%) and read back about 2% slower, with nothing missing (experiments: SSD tier).
 
 **Pinned memory (no SSD).** Objects are written hard-pinned, or soft-pinned with eviction of soft-pinned objects disabled on the master. They leave the store only through session release or the abort fallback. Without pinning, an overfull pool evicted 1.81M keys and the readers hung. The pool must hold every in-flight session (§8).
 
