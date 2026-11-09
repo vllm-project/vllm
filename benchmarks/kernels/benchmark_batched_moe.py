@@ -3,30 +3,30 @@
 """Tune or benchmark BatchedTritonExperts, the Triton kernel behind the
 batched expert-parallel MoE activation format (E x capacity x K).
 
-``benchmark_moe.py`` only ever instantiates ``TritonOrDeepGemmExperts``, so
+`benchmark_moe.py` only ever instantiates `TritonOrDeepGemmExperts`, so
 this is the tuning entry point for the batched kernel. It reuses the same
-mechanisms: ``override_config()`` forces a candidate through the real code
-path, and results use the ``E=...,N=...,device_name=...json`` naming so they
-drop straight into ``vllm/model_executor/layers/fused_moe/configs/`` or
-``VLLM_TUNED_CONFIG_FOLDER``.
+mechanisms: `override_config()` forces a candidate through the real code
+path, and results use the `E=...,N=...,device_name=...json` naming so they
+drop straight into `vllm/model_executor/layers/fused_moe/configs/` or
+`VLLM_TUNED_CONFIG_FOLDER`.
 
-What differs from ``benchmark_moe.py``:
+What differs from `benchmark_moe.py`:
 
-* The lookup key is the per-expert *capacity*, ``hidden_states.size(1)`` of the
-  ``[E_local, capacity, K]`` tensor, not a token count. With the
-  ``alltoall_batched`` dispatch it is ``max_num_batched_tokens * ep_size``.
-* ``E`` is the number of *local* experts (``E_global / ep_size``) and ``N`` is
-  the full ``moe_intermediate_size``: with expert parallelism the MoE layers are
+* The lookup key is the per-expert *capacity*, `hidden_states.size(1)` of the
+  `[E_local, capacity, K]` tensor, not a token count. With the
+  `alltoall_batched` dispatch it is `max_num_batched_tokens * ep_size`.
+* `E` is the number of *local* experts (`E_global / ep_size`) and `N` is
+  the full `moe_intermediate_size`: with expert parallelism the MoE layers are
   not tensor-parallel.
-* Only some keys reach the kernel: ``BLOCK_SIZE_M/N/K`` everywhere, plus
-  ``num_warps``, ``num_stages`` and ``grf_mode`` on XPU.
-* The batch is routed over ``E_global = E_local * ep_size`` experts and only the
+* Only some keys reach the kernel: `BLOCK_SIZE_M/N/K` everywhere, plus
+  `num_warps`, `num_stages` and `grf_mode` on XPU.
+* The batch is routed over `E_global = E_local * ep_size` experts and only the
   rows landing on local experts are kept, so each local expert holds roughly
-  ``tokens * topk / E_global`` rows, as in a real EP run. Each candidate is
+  `tokens * topk / E_global` rows, as in a real EP run. Each candidate is
   timed at several fill levels (share of the capacity that is populated), and
   ranked by the geometric mean, so a config that wins on full prefill batches
   does not lose on decode-sized ones.
-* Every candidate is checked against ``torch_experts`` before it may win.
+* Every candidate is checked against `torch_experts` before it may win.
 
 Examples (run from the vllm repo root)::
 
@@ -170,10 +170,10 @@ def build_kernel(capacity: int, num_local_experts: int) -> FusedMoEKernel:
 class Problem:
     """Weights plus one routed batch per fill level for a given capacity.
 
-    ``BatchedPrepareAndFinalize`` sizes the expert tensor as
-    ``min(capacity, num_tokens)`` rows, and that size is the config lookup key.
-    To keep the key at ``capacity`` for every fill level, the batch always has
-    ``capacity`` tokens and the unused ones are routed to a non-existent expert
+    `BatchedPrepareAndFinalize` sizes the expert tensor as
+    `min(capacity, num_tokens)` rows, and that size is the config lookup key.
+    To keep the key at `capacity` for every fill level, the batch always has
+    `capacity` tokens and the unused ones are routed to a non-existent expert
     id, so they are dropped by the dispatch.
     """
 
