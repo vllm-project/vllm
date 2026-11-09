@@ -12,6 +12,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.logits_processor import LogitsProcessor, _topk
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.v1.worker.gpu.spec_decode.xpress import kernels
+from vllm.v1.worker.gpu.spec_decode.xpress.config import XPressSpeculatorConfig
 
 from .qwen3_dflash import DFlashQwen3ForCausalLM, DFlashQwen3Model
 from .utils import AutoWeightsLoader, maybe_prefix, process_eagle_weight
@@ -119,7 +120,12 @@ class XPressRefinerHead(nn.Module):
         anchor_ids: torch.Tensor,
         tok_am1_ids: torch.Tensor,
         num_passes: int,
-    ) -> torch.Tensor:
+        return_logits: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """The refined draft ids [N, B-1] and, if return_logits, the last pass's
+        refined logits per draft slot [N * (B-1), C or V]: over the top-C
+        candidates if topc is set, else over the vocabulary (a scratch buffer
+        that the next call overwrites)."""
         # Greedy, so a settled prefix stays settled and K passes converge monotonically.
         N, B, _ = base_logits_full.shape
         hcache = self.hidden_cache(h_full)
@@ -133,7 +139,7 @@ class XPressRefinerHead(nn.Module):
         buf = self._fused_buf
         assert buf is not None, (
             "the fused buffers are built from the loaded weights; call "
-            "build_fused_buffers() first"
+            "process_weights_after_loading() first"
         )
         rows = N * (B - 1)
         v = base_logits_full.shape[-1]
@@ -179,7 +185,8 @@ class XPressRefinerHead(nn.Module):
                 kernels.fused_topc_argmax_to_blk(
                     base_c.view(N, B - 1, c), bias_c, cand.view(N, B - 1, c), blk
                 )
-            return blk[:, 1:]
+            logits = base_c + bias_c.view(rows, c) if return_logits else None
+            return blk[:, 1:], logits
 
         sc = self._scratch_buffers(base_logits_full.dtype, base_logits_full.device)
         lat, bias = sc["lat"][:N], sc["bias"][:rows]
@@ -203,18 +210,21 @@ class XPressRefinerHead(nn.Module):
             )
             torch.mm(lat.view(rows, self.rank), buf["w2_t"], out=bias)
             kernels.fused_add_argmax_to_blk(base, bias, ov, oi, blk)
-        return blk[:, 1:]
+        # The next pass overwrites bias, so the sum can take its place.
+        logits = bias.add_(base) if return_logits else None
+        return blk[:, 1:], logits
 
     @torch.no_grad()
-    def build_fused_buffers(self) -> None:
-        """Transposed, contiguous weight views the fused kernels index directly.
+    def process_weights_after_loading(self) -> None:
+        """Transposed, contiguous weight copies the fused kernels index directly.
 
-        Called once weights are loaded, not in the constructor: mix_kjc is derived
-        from mix_L, which only takes its serving form in fold_from_raw_().
+        Built after loading, not in the constructor: mix_kjc is derived from
+        mix_L, which only takes its serving form in fold_from_raw_(). Reloads
+        refill them in place, so captured CUDA graphs keep their addresses.
         """
         r = self.rank
         w = self.in_proj.weight.detach()
-        self._fused_buf = {
+        fused = {
             "whc_t": w[:, : 2 * r].t().contiguous(),
             "wlat_t": w[:, 2 * r :].t().contiguous(),
             "mix_kjc": self.mix_L.detach().permute(1, 2, 0).contiguous(),
@@ -223,6 +233,11 @@ class XPressRefinerHead(nn.Module):
             "wd_t": self.mlp_down.weight.detach().t().contiguous(),
             "w2_t": self.w2.weight.detach().t().contiguous(),
         }
+        if self._fused_buf is None:
+            self._fused_buf = fused
+        else:
+            for key, tensor in fused.items():
+                self._fused_buf[key].copy_(tensor)
 
     HYBRID_KEY_MAP = {
         "w1.weight": "w1.weight",
@@ -271,6 +286,9 @@ class Qwen3XPressModel(DFlashQwen3Model):
 
 
 class Qwen3XPressForCausalLM(DFlashQwen3ForCausalLM):
+    # The speculator this is a draft model of (see SpeculativeDraftModel).
+    speculator_config_class = XPressSpeculatorConfig
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         nn.Module.__init__(self)
         assert vllm_config.speculative_config is not None
@@ -349,10 +367,8 @@ class Qwen3XPressForCausalLM(DFlashQwen3ForCausalLM):
         }
         loader = AutoWeightsLoader(self)
         loader.load_weights(model_weights.items())
-        if raw_mix_L is None:
-            raise ValueError("XPress checkpoint is missing xpress_head.mix.L")
-        self.model.xpress_head.fold_from_raw_(
-            raw_mix_L.to(self.model.xpress_head.mix_L.dtype)
-        )
-        self.model.xpress_head.build_fused_buffers()
-        self.model._build_fused_kv_buffers()
+        # A weight update may send the checkpoint over several calls; the fused
+        # buffers are rebuilt by the post-load hooks once all of it is in.
+        head = self.model.xpress_head
+        if raw_mix_L is not None:
+            head.fold_from_raw_(raw_mix_L.to(head.mix_L.dtype))

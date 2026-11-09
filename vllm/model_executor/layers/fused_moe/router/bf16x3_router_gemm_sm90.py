@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """CuteDSL BF16x3 router GEMM for Hopper (SM90).
 
-Computes fp32 ``x @ w.T`` for bf16 ``x`` [M, K] and fp32 router weights ``w``
+Computes fp32 `x @ w.T` for bf16 `x` [M, K] and fp32 router weights `w`
 [E, K]. The MMA warpgroup splits each fp32 weight fragment into three bf16
 terms in registers and issues register-A wgmma with experts as the MMA M
 dimension. The first term accumulates per K-tile and is promoted into an fp32
@@ -631,5 +631,5 @@ direct_register_custom_op(
 
 
 def bf16x3_router_gemm(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
-    """Return ``x @ weight.T`` in fp32 using the SM90 BF16x3 router GEMM."""
+    """Return `x @ weight.T` in fp32 using the SM90 BF16x3 router GEMM."""
     return torch.ops.vllm.sm90_bf16x3_router_gemm(x, weight)

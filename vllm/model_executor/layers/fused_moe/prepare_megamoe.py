@@ -4,17 +4,21 @@
 
 Quantize hidden states to fp8 with E8M0 group scales, to NVFP4 with per-token
 global scales, or copy them as BF16, and repack the routing top-k tensors into
-the int64/float32 layout that the DeepGEMM MegaMoE kernels consume.
+the int64/float32 layout that the DeepGEMM MegaMoE kernels consume. Given an
+EPLB layer state, routing ids are mapped to physical replicas on the way.
 """
 
 import torch
 
+from vllm.distributed.eplb.eplb_state import EplbLayerState
+from vllm.model_executor.layers.fused_moe.eplb_triton import eplb_map_and_record
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     FP8_DTYPE,
     QuantKey,
     kMxfp8Dynamic,
 )
 from vllm.triton_utils import tl, triton
+from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
 _E8M0_SCALE_DTYPES = (torch.uint8, torch.float8_e8m0fnu)
 # Inverse of the NVFP4 range: E2M1 max (6) times E4M3 max (448).
@@ -55,14 +59,14 @@ def _quantize_fp8_groups(
 
 @triton.jit
 def _pack_bytes(values, NUM_BYTES: tl.constexpr):
-    """Pack the last dim of ``[..., NUM_BYTES]`` byte values into int32 words."""
+    """Pack the last dim of `[..., NUM_BYTES]` byte values into int32 words."""
     offsets = tl.arange(0, NUM_BYTES)
     return tl.sum(values.to(tl.uint32) << (offsets * 8), axis=-1).to(tl.int32)
 
 
 @triton.jit
 def _shared_sf_row(token_id, SHARED_BLOCK_M: tl.constexpr):
-    """Row of ``token_id`` in the shared-expert MN-major UTCCP scale pages."""
+    """Row of `token_id` in the shared-expert MN-major UTCCP scale pages."""
     m_block_id = token_id // SHARED_BLOCK_M
     m_in_block = token_id % SHARED_BLOCK_M
     aligned_block_m: tl.constexpr = triton.cdiv(SHARED_BLOCK_M, 128) * 128
@@ -81,6 +85,14 @@ def _store_topk(
     is_padding,
     topk_idx_out,
     topk_weights_out,
+    logical_to_physical,
+    replica_count,
+    expert_load,
+    record_enabled,
+    num_unpadded_tokens,
+    num_logical,
+    map_stride,
+    num_physical,
     topk_ids_stride_m: tl.constexpr,
     topk_ids_stride_k: tl.constexpr,
     topk_weights_stride_m: tl.constexpr,
@@ -113,6 +125,20 @@ def _store_topk(
         other=0,
     ).to(tl.int64)
     ids = tl.where(token_is_padding[:, None], -1, ids)
+    if logical_to_physical is not None:
+        ids = eplb_map_and_record(
+            ids,
+            token_id[:, None],
+            topk_mask,
+            logical_to_physical,
+            replica_count,
+            num_logical,
+            map_stride,
+            expert_load,
+            num_physical,
+            record_enabled,
+            num_unpadded_tokens,
+        )
     tl.store(
         topk_idx_out
         + token_id[:, None] * topk_idx_stride_m
@@ -149,6 +175,14 @@ def _prepare_megamoe_inputs_kernel(
     is_padding,
     topk_idx_out,
     topk_weights_out,
+    logical_to_physical,
+    replica_count,
+    expert_load,
+    record_enabled,
+    num_unpadded_tokens,
+    num_logical,
+    map_stride,
+    num_physical,
     hidden_stride_m: tl.constexpr,
     hidden_stride_k: tl.constexpr,
     x_stride_m: tl.constexpr,
@@ -249,6 +283,14 @@ def _prepare_megamoe_inputs_kernel(
             is_padding,
             topk_idx_out,
             topk_weights_out,
+            logical_to_physical,
+            replica_count,
+            expert_load,
+            record_enabled,
+            num_unpadded_tokens,
+            num_logical,
+            map_stride,
+            num_physical,
             topk_ids_stride_m,
             topk_ids_stride_k,
             topk_weights_stride_m,
@@ -277,6 +319,14 @@ def _prepare_megamoe_nvfp4_inputs_kernel(
     is_padding,
     topk_idx_out,
     topk_weights_out,
+    logical_to_physical,
+    replica_count,
+    expert_load,
+    record_enabled,
+    num_unpadded_tokens,
+    num_logical,
+    map_stride,
+    num_physical,
     w2_global_scale,
     l2_alpha,
     hidden_stride_m: tl.constexpr,
@@ -330,6 +380,14 @@ def _prepare_megamoe_nvfp4_inputs_kernel(
             is_padding,
             topk_idx_out,
             topk_weights_out,
+            logical_to_physical,
+            replica_count,
+            expert_load,
+            record_enabled,
+            num_unpadded_tokens,
+            num_logical,
+            map_stride,
+            num_physical,
             topk_ids_stride_m,
             topk_ids_stride_k,
             topk_weights_stride_m,
@@ -423,7 +481,7 @@ def _prepare_megamoe_nvfp4_inputs_kernel(
 
 
 def _resolve_hidden_quant(hidden_quant: QuantKey, block_k: int) -> tuple[int, bool]:
-    """Map a hidden-state ``QuantKey`` to the kernel's ``(GROUP_K, USE_UE8M0)``."""
+    """Map a hidden-state `QuantKey` to the kernel's `(GROUP_K, USE_UE8M0)`."""
     scale = hidden_quant.scale
     group_shape = scale.group_shape
     if (
@@ -443,6 +501,29 @@ def _resolve_hidden_quant(hidden_quant: QuantKey, block_k: int) -> tuple[int, bo
     return group_shape.col, scale.dtype in _E8M0_SCALE_DTYPES
 
 
+def _eplb_kernel_args(eplb_state: EplbLayerState | None) -> tuple:
+    """Replica-map and load-recording kernel args; inert without EPLB."""
+    if eplb_state is None or eplb_state.logical_to_physical_map is None:
+        return (None,) * 5 + (0,) * 3
+    mapping = eplb_state.logical_to_physical_map
+    replicas = eplb_state.logical_replica_count
+    load = eplb_state.expert_load_view
+    record = eplb_state.should_record_tensor
+    unpadded = eplb_state.num_unpadded_tokens_tensors
+    assert replicas is not None and load is not None and record is not None
+    assert unpadded is not None
+    return (
+        mapping,
+        replicas,
+        load,
+        record,
+        unpadded[dbo_current_ubatch_id()],
+        mapping.shape[0],
+        mapping.stride(0),
+        load.numel(),
+    )
+
+
 def prepare_megamoe_inputs(
     hidden_states: torch.Tensor,
     topk_weights: torch.Tensor,
@@ -455,25 +536,27 @@ def prepare_megamoe_inputs(
     shared_x_sf: torch.Tensor | None = None,
     shared_block_m: int | None = None,
     hidden_quant: QuantKey | None = kMxfp8Dynamic,
+    eplb_state: EplbLayerState | None = None,
 ) -> None:
     """Quantize hidden states and repack top-k routing for DeepGEMM MegaMoE.
 
     Args:
-        hidden_states: Input activations of shape ``[num_tokens, hidden_dim]``.
-        topk_weights: Router top-k weights of shape ``[num_tokens, top_k]``.
-        topk_ids: Router top-k expert ids of shape ``[num_tokens, top_k]``.
+        hidden_states: Input activations of shape `[num_tokens, hidden_dim]`.
+        topk_weights: Router top-k weights of shape `[num_tokens, top_k]`.
+        topk_ids: Router top-k expert ids of shape `[num_tokens, top_k]`.
         x: Output buffer for the dispatched hidden states.
-        x_sf: Output buffer for the hidden-state scale factors; ``None`` when
-            ``hidden_quant`` is ``None``.
+        x_sf: Output buffer for the hidden-state scale factors; `None` when
+            `hidden_quant` is `None`.
         topk_idx_out: Output buffer for the repacked top-k expert ids.
         topk_weights_out: Output buffer for the repacked top-k weights.
         is_padding: Optional per-token mask; padded tokens are not routed.
         shared_x_sf: Optional output buffer for shared-expert scale factors.
-            Must be given together with ``shared_block_m``.
-        shared_block_m: Block M used to lay out ``shared_x_sf``.
+            Must be given together with `shared_block_m`.
+        shared_block_m: Block M used to lay out `shared_x_sf`.
         hidden_quant: Hidden-state quantization scheme. E8M0 scales are packed
-            four per int32 into ``x_sf``; fp32 scales are stored directly.
-            ``None`` copies the hidden states into ``x`` unquantized.
+            four per int32 into `x_sf`; fp32 scales are stored directly.
+            `None` copies the hidden states into `x` unquantized.
+        eplb_state: Optional EPLB layer state; maps ids to replicas and records load.
 
     """
     num_tokens, hidden_size = hidden_states.shape
@@ -525,8 +608,9 @@ def prepare_megamoe_inputs(
                 f"{required_rows}, got {shared_x_sf.shape[0]}."
             )
 
-    # On GB200, eight-row tiles win from 64 tokens; keep smaller batches untiled.
-    block_m = 8 if num_tokens >= 64 else 1
+    # On GB200, 8-row tiles win from 64 tokens and 32-row tiles from 1024 (1.3-1.6x
+    # over 8 rows); smaller batches stay untiled.
+    block_m = 32 if num_tokens >= 1024 else 8 if num_tokens >= 64 else 1
     grid = (triton.cdiv(num_tokens, block_m), triton.cdiv(hidden_size, block_k))
     block_topk = triton.next_power_of_2(top_k)
     padding_stride_m = is_padding.stride(0) if is_padding is not None else 0
@@ -540,6 +624,7 @@ def prepare_megamoe_inputs(
         is_padding,
         topk_idx_out,
         topk_weights_out,
+        *_eplb_kernel_args(eplb_state),
         hidden_states.stride(0),
         hidden_states.stride(1),
         x.stride(0),
@@ -587,32 +672,34 @@ def prepare_megamoe_nvfp4_inputs(
     w2_global_scale: torch.Tensor | None = None,
     l2_alpha: torch.Tensor | None = None,
     l2_activation_scale: float = 1.0,
+    eplb_state: EplbLayerState | None = None,
 ) -> None:
-    """Stage DeepGEMM NVFP4 MegaMoE inputs (``kNvfp4DynamicToken``).
+    """Stage DeepGEMM NVFP4 MegaMoE inputs (`kNvfp4DynamicToken`).
 
-    Each token is scaled by its own fp32 ``x_scales`` (row amax / 2688) and
+    Each token is scaled by its own fp32 `x_scales` (row amax / 2688) and
     quantized to E2M1 with one E4M3 scale per 16 values.
 
     Args:
-        hidden_states: BF16 activations of shape ``[num_tokens, hidden_dim]``.
-        topk_weights: Router top-k weights of shape ``[num_tokens, top_k]``.
-        topk_ids: Router top-k expert ids of shape ``[num_tokens, top_k]``.
-        x: Packed E2M1 output, ``[num_tokens, hidden_dim // 2]``.
-        x_sf: E4M3 scales packed four per int32, ``[num_tokens, hidden_dim // 64]``.
-        x_scales: Per-token fp32 dequantization scales, ``[num_tokens]``.
+        hidden_states: BF16 activations of shape `[num_tokens, hidden_dim]`.
+        topk_weights: Router top-k weights of shape `[num_tokens, top_k]`.
+        topk_ids: Router top-k expert ids of shape `[num_tokens, top_k]`.
+        x: Packed E2M1 output, `[num_tokens, hidden_dim // 2]`.
+        x_sf: E4M3 scales packed four per int32, `[num_tokens, hidden_dim // 64]`.
+        x_scales: Per-token fp32 dequantization scales, `[num_tokens]`.
         topk_idx_out: Output buffer for the repacked top-k expert ids.
         topk_weights_out: Output buffer for the repacked top-k weights.
         is_padding: Optional per-token mask; padded tokens are not routed.
-        shared_x: Optional shared-expert input, fp8 (MXFP8 with ``shared_x_sf``)
+        shared_x: Optional shared-expert input, fp8 (MXFP8 with `shared_x_sf`)
             or a BF16 copy of the hidden states.
-        shared_x_sf: UE8M0 scales of an fp8 ``shared_x`` in the shared-expert
-            TMA layout for ``shared_block_m``.
-        shared_block_m: Block M used to lay out ``shared_x_sf``.
+        shared_x_sf: UE8M0 scales of an fp8 `shared_x` in the shared-expert
+            TMA layout for `shared_block_m`.
+        shared_block_m: Block M used to lay out `shared_x_sf`.
         w2_global_scale: Per-local-expert L2 weight global scales.
-        l2_alpha: Output ``w2_global_scale * l2_activation_scale``, the L2
+        l2_alpha: Output `w2_global_scale * l2_activation_scale`, the L2
             dequantization scale of each local expert. Written even without
             local tokens, as other ranks' tokens still reach these experts.
         l2_activation_scale: Global scale the kernel quantizes L2 inputs with.
+        eplb_state: Optional EPLB layer state; maps ids to replicas and records load.
 
     """
     num_tokens, hidden_size = hidden_states.shape
@@ -664,6 +751,7 @@ def prepare_megamoe_nvfp4_inputs(
         is_padding,
         topk_idx_out,
         topk_weights_out,
+        *_eplb_kernel_args(eplb_state),
         w2_global_scale,
         l2_alpha,
         hidden_states.stride(0),

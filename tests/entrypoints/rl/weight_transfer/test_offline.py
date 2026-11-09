@@ -26,7 +26,7 @@ from vllm.distributed.weight_transfer.base import (
 )
 
 # Use a tiny model for fast testing
-MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
+MODEL_NAME = "vllm-project/tiny-random-LlamaForCausalLM"
 
 
 # --- Mock Weight Transfer Engine ---

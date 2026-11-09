@@ -2,10 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import warnings
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+import pytest
 import torch
 import torch.nn.functional as F
 from transformers import PreTrainedConfig
@@ -17,7 +18,7 @@ from vllm.multimodal.processing import InputProcessingContext
 from vllm.tokenizers import cached_tokenizer_from_config
 
 from .. import ci_envs
-from .registry import HF_EXAMPLE_MODELS
+from .registry import HF_EXAMPLE_MODELS, _HfExamplesInfo
 
 TokensText = tuple[list[int], str]
 
@@ -414,6 +415,9 @@ class RerankModelInfo(ModelInfo):
 class GenerateModelInfo(ModelInfo):
     hf_dtype: str = "auto"
     hf_ppl: float | None = None
+    pixel_factor: int = 0
+    extra_kwargs: dict | None = None
+    image_token_id: int | None = None
 
 
 def get_vllm_extra_kwargs(model_info: ModelInfo, vllm_extra_kwargs):
@@ -561,6 +565,13 @@ def dummy_hf_overrides(
     if indexer_types := getattr(text_config, "indexer_types", None):
         text_config.update({"indexer_types": indexer_types[:num_hidden_layers]})
 
+    if (
+        sparse := getattr(hf_config, "sparse_attention_config", None)
+    ) and "sparse_attention_freq" in sparse:
+        sparse["sparse_attention_freq"] = sparse["sparse_attention_freq"][
+            :num_hidden_layers
+        ]
+
     # Update n_layers and moe configs for Moondream3 model
     if model_arch in ("Moondream3ForCausalLM", "HfMoondream"):
         text_config.update(
@@ -612,3 +623,28 @@ def dummy_hf_overrides(
         )
 
     return hf_config
+
+
+def skip_unavailable_models(
+    ids: Iterable[str], get_info: Callable[[str], _HfExamplesInfo]
+) -> list[Any]:
+    """Parametrize values for `ids`, with a skip mark on each whose model is not
+    available online or needs another transformers version.
+
+    Skipping at collection matters for tests that run every case in a new
+    process: a skip from inside the test still pays for starting that process.
+    """
+    params: list[Any] = []
+    for id_ in ids:
+        info = get_info(id_)
+        reason = (
+            "Model is not available online"
+            if not info.is_available_online
+            else info.check_transformers_version(
+                on_fail="return", check_max_version=False, check_version_reason="vllm"
+            )
+        )
+        params.append(
+            pytest.param(id_, marks=pytest.mark.skip(reason=reason)) if reason else id_
+        )
+    return params

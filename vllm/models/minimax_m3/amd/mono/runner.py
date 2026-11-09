@@ -3,8 +3,8 @@
 """One decode step of 1..MAX_TOKENS tokens on the mono kernels.
 
 Every sparse MoE layer is one launch of the fused layer kernel; it takes
-``(ar, res)`` -- the pair vLLM's input norm would receive (reduced MoE output,
-residual) -- and leaves ``(ar, h_mid)`` for the next layer, alternating between
+`(ar, res)` -- the pair vLLM's input norm would receive (reduced MoE output,
+residual) -- and leaves `(ar, h_mid)` for the next layer, alternating between
 two buffers by layer parity. The embedding, the leading dense-FFN layers and the
 final norm run the original modules. The K/V cache is read in vLLM's interleaved
 page-16 layout under the fixed unit fp8 scale; the step's tables come from the
@@ -66,7 +66,7 @@ def token_rows(
     block_table: torch.Tensor, seq_lens: torch.Tensor, q: int, n: int
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """One (block table row, seq_len) per token of the step: a request of q query
-    tokens becomes q rows, token j seeing ``seq_len - (q - 1 - j)`` keys."""
+    tokens becomes q rows, token j seeing `seq_len - (q - 1 - j)` keys."""
     if q == 1:
         return block_table, seq_lens
     reqs = n // q
@@ -166,7 +166,7 @@ class MonoDecodeRunner:
         return self.cache_ptrs(self.model, self.n_dense) != self._cache_ptrs
 
     def step_tables(self, n: int) -> StepTables:
-        """The current step's tables for ``n`` tokens, from the forward context."""
+        """The current step's tables for `n` tokens, from the forward context."""
         fwd = get_forward_context()
         decode = cast(Any, fwd.attn_metadata[self.layer_name]).decode
         q = decode.decode_query_len
@@ -181,7 +181,7 @@ class MonoDecodeRunner:
         aux_hidden_states: list[torch.Tensor] | None = None,
     ) -> torch.Tensor:
         """Embedding and the dense layers on the original modules; leaves the first
-        MoE layer's (ar, res) in ``ars[0][:n]`` and the returned residual (zeros
+        MoE layer's (ar, res) in `ars[0][:n]` and the returned residual (zeros
         when layer 0 is already an MoE layer: (embeddings, 0))."""
         n = positions.numel()
         hidden = (
@@ -235,7 +235,7 @@ class MonoDecodeRunner:
         positions: torch.Tensor,
         res: torch.Tensor,
     ) -> torch.Tensor:
-        """Sparse layer ``i``: (ars[i % 2][:n], res) -> (ars[(i + 1) % 2][:n], the
+        """Sparse layer `i`: (`ars[i % 2][:n]`, res) -> (`ars[(i + 1) % 2][:n]`, the
         returned residual)."""
         n = res.shape[0]
         block_table, seq_lens, slots, q_len = tables
@@ -262,7 +262,7 @@ class MonoDecodeRunner:
         init_blocks, local_blocks,
     ) -> None:  # fmt: skip
         """Compile the layer kernels and allocate scratch, peer buffers and the
-        per-step activation buffers; ``self.sparse`` and ``self.sm_scale`` are set."""
+        per-step activation buffers; `self.sparse` and `self.sm_scale` are set."""
         device_index = torch.accelerator.current_device_index()
         dev = torch.device("cuda", device_index)
         cus = current_platform.get_device_properties(device_index).multi_processor_count

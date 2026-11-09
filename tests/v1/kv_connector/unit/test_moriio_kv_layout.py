@@ -98,7 +98,7 @@ def _wrapper_for_messages() -> Any:
     wrapper.done_remote_allocate_req_dict = {}
     wrapper.done_req_ids = []
     wrapper.done_write_cache_req_ids = []
-    wrapper._write_done_counts = {}
+    wrapper._write_done_senders = {}
     wrapper._terminal_transfer_ids = OrderedDict()
     return wrapper
 
@@ -458,7 +458,7 @@ def test_hybrid_write_posts_both_regions_before_layer_completion():
         get_engine_name_with_dp=lambda name, rank: name,
         _get_built_session=lambda name: (["conv-session", "ssm-session"], None),
         _is_mamba_layer=lambda name: True,
-        _mamba_payload_index_by_layer={"kda": 2},
+        _hybrid_payload_index_by_layer={"kda": 2},
         _region_session_indices=lambda name: [0, 1],
         _compute_mamba_transfer_offsets=Mock(
             return_value=([10, 20, 30, 40], [50, 60, 70, 80], [2, 4, 8, 16], 3)
@@ -537,7 +537,9 @@ def test_write_completion_notifies_once_after_all_sealed_writes_finish():
     request_info.completion_notify_port = 7002
     request_info.completion_remote_ip = "127.0.0.1"
     wrapper.done_remote_allocate_req_dict["xfer"] = request_info
-    writer = make_moriio_writer(SimpleNamespace(moriio_wrapper=wrapper, tp_rank=2))
+    writer = make_moriio_writer(
+        SimpleNamespace(moriio_wrapper=wrapper, tp_rank=2, pp_rank=0, pp_size=1)
+    )
     writer._scheduled_writes["xfer"] = 2
     writer._scheduled_layers["xfer"] = {"dense0", "indexer"}
     writer._sealed_writes["xfer"] = 2
