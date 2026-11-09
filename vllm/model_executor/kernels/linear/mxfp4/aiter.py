@@ -50,9 +50,9 @@ if is_aiter_found_and_supported():
         x_scales: torch.Tensor | None = None,
         hadamard_rotate: bool = False,
     ) -> torch.Tensor:
-        """With ``hadamard_rotate``, the HIP quant of the ASM path rotates each
-        32-element block of ``x`` by the orthonormal Sylvester Hadamard matrix
-        (`block_hadamard_rotate`); ``weight`` must be rotated the same way."""
+        """With `hadamard_rotate`, the HIP quant of the ASM path rotates each
+        32-element block of `x` by the orthonormal Sylvester Hadamard matrix
+        (`block_hadamard_rotate`); `weight` must be rotated the same way."""
         assert not (hadamard_rotate and x_scales is not None), (
             "hadamard_rotate needs an unquantized x"
         )
