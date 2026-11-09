@@ -362,6 +362,19 @@ def FusedMoEFactory(
         # since model_config is not set in the pytest test.
         moe_in_dtype = params_dtype
 
+    is_3d_moe_weight = False
+    if vllm_config.lora_config is not None and vllm_config.model_config is not None:
+        from vllm.lora.utils import has_dynamic_expert_target
+
+        if has_dynamic_expert_target(vllm_config.lora_config.target_modules):
+            from vllm.model_executor.model_loader.utils import get_model_cls
+
+            is_3d_moe_weight = getattr(
+                get_model_cls(vllm_config.model_config),
+                "is_3d_moe_weight",
+                False,
+            )
+
     moe_config = (moe_config_cls or FusedMoEConfig)(
         num_experts=global_num_experts,
         experts_per_token=top_k,
@@ -381,6 +394,7 @@ def FusedMoEFactory(
             vllm_config.lora_config,
             layer_name,
             quant_config.packed_modules_mapping if quant_config is not None else None,
+            is_3d_moe_weight=is_3d_moe_weight,
         ),
         shared_expert_prefix=shared_expert_prefix,
         activation=moe_activation,
@@ -483,22 +497,27 @@ def _is_moe_lora_target(
     lora_config: LoRAConfig | None,
     layer_name: str,
     packed_modules_mapping: dict[str, list[str]] | None,
+    is_3d_moe_weight: bool = False,
 ) -> bool:
     """Whether LoRA can target this MoE layer at model construction."""
     if lora_config is None:
         return False
 
-    from vllm.lora.utils import is_in_target_modules
+    from vllm.lora.utils import (
+        has_dynamic_expert_target,
+        is_in_target_modules,
+        uses_dynamic_expert_mapping,
+    )
 
     return is_in_target_modules(
         layer_name, lora_config.target_modules, packed_modules_mapping
     ) or (
         layer_name.rsplit(".", 1)[-1] == "experts"
-        and any(
-            # Dynamic expert mappings are expanded from the instantiated model
-            # later, so retain the opt-in for targets that may reach them.
-            target.startswith("experts.")
-            for target in lora_config.target_modules or ()
+        and has_dynamic_expert_target(lora_config.target_modules)
+        and uses_dynamic_expert_mapping(
+            is_3d_moe_weight,
+            lora_config.enable_mixed_moe_lora_format,
+            lora_config.enable_moe_shared_loras,
         )
     )
 

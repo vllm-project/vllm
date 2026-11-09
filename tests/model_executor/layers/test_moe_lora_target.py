@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import inspect
 from dataclasses import replace
 
 import pytest
@@ -106,6 +107,56 @@ def test_dynamic_expert_target_is_scoped_to_expert_module():
     }
     assert decisions["mlp.experts"] is True
     assert decisions["mlp.shared_experts"] is False
+
+
+def test_dynamic_expert_target_accepts_checkpoint_prefixed_names():
+    from vllm.model_executor.layers.fused_moe.layer import _is_moe_lora_target
+
+    lora_config = _lora_config(["block_sparse_moe.experts.0.gate_proj"])
+    assert _is_moe_lora_target(lora_config, _LAYER_NAME, {}) is True
+
+
+def test_dynamic_expert_target_respects_3d_mapping_contract():
+    from vllm.model_executor.layers.fused_moe.layer import _is_moe_lora_target
+
+    if "is_3d_moe_weight" not in inspect.signature(_is_moe_lora_target).parameters:
+        pytest.fail("MoE target selection cannot represent the default 3D contract")
+
+    assert (
+        _is_moe_lora_target(
+            _lora_config(["experts.0.gate_proj"]),
+            _LAYER_NAME,
+            {},
+            is_3d_moe_weight=True,
+        )
+        is False
+    )
+    assert (
+        _is_moe_lora_target(
+            LoRAConfig(
+                max_lora_rank=8,
+                target_modules=["experts.0.gate_proj"],
+                enable_mixed_moe_lora_format=True,
+            ),
+            _LAYER_NAME,
+            {},
+            is_3d_moe_weight=True,
+        )
+        is True
+    )
+    assert (
+        _is_moe_lora_target(
+            LoRAConfig(
+                max_lora_rank=8,
+                target_modules=["experts.w1"],
+                enable_moe_shared_loras=True,
+            ),
+            _LAYER_NAME,
+            {},
+            is_3d_moe_weight=True,
+        )
+        is True
+    )
 
 
 def test_attention_only_lora_keeps_native_moe_backend(dist_init):

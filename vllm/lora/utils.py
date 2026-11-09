@@ -399,6 +399,21 @@ def get_adapter_absolute_path(lora_path: str) -> str:
     return local_snapshot_path
 
 
+def has_dynamic_expert_target(target_modules: list[str] | None) -> bool:
+    return any(
+        target.startswith("experts.") or ".experts." in target
+        for target in target_modules or ()
+    )
+
+
+def uses_dynamic_expert_mapping(
+    is_3d_moe_weight: bool,
+    force_2d_moe: bool = False,
+    enable_moe_shared_loras: bool = False,
+) -> bool:
+    return enable_moe_shared_loras or force_2d_moe or not is_3d_moe_weight
+
+
 def process_packed_modules_mapping(
     model: nn.Module,
     force_2d_moe: bool = False,
@@ -425,7 +440,9 @@ def process_packed_modules_mapping(
                 "experts.w2",
                 "experts.w3",
             ]
-        elif (not model.is_3d_moe_weight) or force_2d_moe:
+        elif uses_dynamic_expert_mapping(
+            model.is_3d_moe_weight, force_2d_moe, enable_moe_shared_loras
+        ):
             # Non-gated MoE yields two entries per expert (no w3); the
             # manager pads them to triplets before packing.
             packed_modules_mapping["experts"] = [
