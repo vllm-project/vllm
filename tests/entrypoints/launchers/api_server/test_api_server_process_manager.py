@@ -1,19 +1,26 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import argparse
+import contextlib
 import multiprocessing
 import os
+import signal
 import socket
 import threading
 import time
+from http.client import HTTPConnection
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import psutil
 import pytest
 import zmq
 
+from vllm.config import ParallelConfig
 from vllm.utils.network_utils import make_zmq_listener, make_zmq_socket
 from vllm.v1.engine.admission_control import SharedAdmissionStats
+from vllm.v1.engine.coordinator import DPCoordinator
 from vllm.v1.utils import (
     APIServerProcessManager,
     wait_for_completion_or_failure,
@@ -149,6 +156,126 @@ def _assert_endpoint_reserved(address: str) -> None:
         bind_address = ("127.0.0.1", int(address.rsplit(":", 1)[1]))
     with competitor, pytest.raises(OSError, match="Address already in use"):
         competitor.bind(bind_address)
+
+
+def _serve_parent_lifecycle_socket(listen_address, sock, args, client_config):
+    if args.ignore_sigterm:
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    args.ready.set()
+    while True:
+        connection, _ = sock.accept()
+        with connection:
+            connection.recv(4096)
+            connection.sendall(
+                b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok"
+            )
+
+
+def _launch_api_only_parent(report, ready, coordinator_method, ignore_sigterm):
+    os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = coordinator_method
+    with contextlib.ExitStack() as cleanup:
+        coordinator = DPCoordinator(
+            ParallelConfig(data_parallel_size=2, data_parallel_size_local=0),
+            enable_wave_coordination=False,
+        )
+        cleanup.callback(coordinator.shutdown, timeout=1)
+        listener = cleanup.enter_context(socket.socket())
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listener.bind(("127.0.0.1", 0))
+        listener.listen()
+        port = listener.getsockname()[1]
+        manager = APIServerProcessManager(
+            target_server_fn=_serve_parent_lifecycle_socket,
+            listen_address=f"127.0.0.1:{port}",
+            sock=listener,
+            args=argparse.Namespace(ready=ready, ignore_sigterm=ignore_sigterm),
+            num_servers=1,
+            input_listeners=[make_zmq_listener("tcp://127.0.0.1:0", zmq.ROUTER)],
+            output_listeners=[make_zmq_listener("tcp://127.0.0.1:0", zmq.PULL)],
+        )
+        cleanup.callback(manager.shutdown, timeout=1)
+        report.send((port, manager.processes[0].pid, coordinator.proc.pid))
+        report.close()
+        signal.pause()
+
+
+def _wait_for_owned_processes_to_exit(processes, timeout):
+    deadline = time.monotonic() + timeout
+    remaining = list(processes)
+    while remaining:
+        live = []
+        for process in remaining:
+            with contextlib.suppress(psutil.NoSuchProcess):
+                # A zombie leader can still have threads holding the listener.
+                if process.is_running() and (
+                    process.status() != psutil.STATUS_ZOMBIE
+                    or process.num_threads() > 1
+                ):
+                    live.append(process)
+        remaining = live
+        if not remaining or time.monotonic() >= deadline:
+            break
+        time.sleep(0.05)
+    return remaining
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize("coordinator_method", ["fork", "spawn"])
+@pytest.mark.parametrize("ignore_sigterm", [False, True])
+def test_api_only_children_exit_when_parent_is_killed(
+    coordinator_method, ignore_sigterm
+):
+    """An API-only headnode must not leave serving children after SIGKILL."""
+    context = multiprocessing.get_context("spawn")
+    report_read, report_write = context.Pipe(duplex=False)
+    ready = context.Event()
+    launcher = context.Process(
+        target=_launch_api_only_parent,
+        args=(report_write, ready, coordinator_method, ignore_sigterm),
+    )
+    owned_processes = []
+    launcher.start()
+    report_write.close()
+    try:
+        assert report_read.poll(120), "API-only launcher did not report its children"
+        port, api_pid, coordinator_pid = report_read.recv()
+        owned_processes = [psutil.Process(api_pid), psutil.Process(coordinator_pid)]
+        assert ready.wait(timeout=60), "API worker did not start serving"
+        assert launcher.is_alive()
+        assert all(process.ppid() == launcher.pid for process in owned_processes)
+        client = HTTPConnection("127.0.0.1", port, timeout=5)
+        with contextlib.closing(client):
+            client.request("GET", "/")
+            response = client.getresponse()
+            assert response.status == 200
+            assert response.read() == b"ok"
+
+        # Kill only the launcher: process-group cleanup would hide the defect.
+        launcher.kill()
+        launcher.join(timeout=10)
+        assert launcher.exitcode == -signal.SIGKILL
+        remaining = _wait_for_owned_processes_to_exit(owned_processes, timeout=10)
+        assert not remaining, (
+            f"API worker/coordinator outlived their launcher: "
+            f"{[process.pid for process in remaining]}"
+        )
+        with socket.socket() as released_listener:
+            released_listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            released_listener.bind(("127.0.0.1", port))
+    finally:
+        if launcher.is_alive():
+            with contextlib.suppress(psutil.NoSuchProcess):
+                owned_processes.extend(
+                    psutil.Process(launcher.pid).children(recursive=True)
+                )
+            launcher.kill()
+        launcher.join(timeout=10)
+        for process in owned_processes:
+            with contextlib.suppress(psutil.NoSuchProcess):
+                process.kill()
+        _wait_for_owned_processes_to_exit(owned_processes, timeout=5)
+        report_read.close()
+        launcher.close()
 
 
 @pytest.mark.parametrize("scheme", ["tcp", "ipc"])

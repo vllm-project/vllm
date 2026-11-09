@@ -59,6 +59,11 @@ vllm serve $MODEL --headless --data-parallel-size 4 --data-parallel-size-local 4
                   --data-parallel-address 10.99.48.128 --data-parallel-rpc-port 13345
 ```
 
+API worker and DP coordinator processes terminate if their owning launcher
+exits unexpectedly, so an API-only head node does not leave its HTTP listener
+running after the launcher dies. Engines started by a separate headless
+launcher remain under that launcher's control.
+
 This DP mode can also be used with Ray by specifying `--data-parallel-backend=ray`:
 
 ```bash
