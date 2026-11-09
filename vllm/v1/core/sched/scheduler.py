@@ -3897,7 +3897,6 @@ class Scheduler(SchedulerInterface):
         # Preempt in reverse order so the requests resume in FIFO order.
         for request in reversed(preempted):
             self._preempt_request(request, timestamp, drop_stale_output=True)
-            self.prev_step_scheduled_req_ids.discard(request.request_id)
         if preempted or preempted_early or async_affected:
             logger.warning(
                 "Recovered from synchronous KV load failure: %d request(s) "
