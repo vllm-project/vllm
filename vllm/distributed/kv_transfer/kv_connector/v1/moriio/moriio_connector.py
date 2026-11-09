@@ -119,6 +119,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     MambaSpec,
     MLAAttentionSpec,
+    prefix_lookup_groups,
 )
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import KVConnectorOutput
@@ -628,7 +629,9 @@ class MoRIIOConnectorScheduler:
         # Per attention group: not prefix-cacheable, so read even on a full hit.
         self._attn_group_is_state: list[bool] = []
         # Per attention group: tokens per page if READ can select by token
-        # range, i.e. full attention with a complete table; else None.
+        # range, i.e. full attention sharing one prefix-cache lookup (groups
+        # looked up separately, e.g. an EAGLE drafter's, may hit shorter);
+        # else None.
         self._attn_read_block_sizes: list[int | None] = []
         if self._has_mamba:
             attn_groups = [
@@ -640,8 +643,17 @@ class MoRIIOConnectorScheduler:
             attn_block_sizes = [
                 resolve_dcp_kv_block_size(g, dcp_size) for g in attn_groups
             ]
+            shared_lookup = (
+                sum(
+                    issubclass(lookup.manager_cls, FullAttentionManager)
+                    for lookup in prefix_lookup_groups(attn_groups)
+                )
+                <= 1
+            )
             self._attn_read_block_sizes = [
-                block_size if issubclass(g.manager_cls, FullAttentionManager) else None
+                block_size
+                if shared_lookup and issubclass(g.manager_cls, FullAttentionManager)
+                else None
                 for g, block_size in zip(attn_groups, attn_block_sizes, strict=True)
             ]
             # The smallest attention block bounds every group's local tail.

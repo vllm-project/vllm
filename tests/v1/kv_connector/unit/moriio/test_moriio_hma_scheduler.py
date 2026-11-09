@@ -653,6 +653,30 @@ def test_scheduler_accepts_dspark_with_multi_layer_full_attention(
 
 
 @pytest.mark.usefixtures("restore_moriio_role")
+@pytest.mark.parametrize("draft_head_size,expected", [(1, [4, 4]), (2, [None, None])])
+def test_read_selects_pages_only_with_one_attention_lookup(draft_head_size, expected):
+    # A drafter group of its own spec (e.g. EAGLE) can hit a page shorter.
+    def full(name, head_size):
+        spec = AttentionSpec(
+            block_size=4, num_kv_heads=1, head_size=head_size, dtype=torch.float32
+        )
+        return _attn_group(specs={name: spec})
+
+    config = SimpleNamespace(
+        kv_cache_groups=[
+            _mamba_group(),
+            full("target", 1),
+            full("draft", draft_head_size),
+        ]
+    )
+    config.transfer_groups = tuple(config.kv_cache_groups)
+    scheduler = moriio_connector.MoRIIOConnectorScheduler(
+        _gate_vllm_config(block_size=4), "engine", config
+    )
+    assert scheduler._attn_read_block_sizes == expected
+
+
+@pytest.mark.usefixtures("restore_moriio_role")
 def test_hybrid_write_clamps_attention_and_excludes_scratch_slots():
     config = _dspark_multi_layer_attention_config()
     config.select_transfer_block_ids = lambda blocks: tuple(blocks)
