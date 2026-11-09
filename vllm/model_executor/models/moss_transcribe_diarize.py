@@ -654,11 +654,13 @@ class MossTranscribeDiarizeForConditionalGeneration(
         )
 
     @classmethod
-    def post_process_output(cls, text: str) -> str:
+    def post_process_output(cls, text: str, model_config: ModelConfig) -> str:
         return text.strip()
 
     @classmethod
-    def parse_diarized_transcript(cls, text: str) -> list[DiarizedTranscriptionSegment]:
+    def parse_diarized_transcript(
+        cls, text: str, model_config: ModelConfig
+    ) -> list[DiarizedTranscriptionSegment]:
         """Parse MOSS's canonical `[start][Sxx]text[end]` transcript."""
         headers: list[tuple[re.Match[str], float, str]] = []
         for match in _MOSS_DIARIZED_HEADER_RE.finditer(text):
