@@ -15,7 +15,7 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.worker.dp_utils import coordinate_batch_across_dp
-from vllm.v1.worker.ubatch_utils import UBatchSlices
+from vllm.v1.worker.gpu.ubatch_common import UBatchSlices
 
 logger = init_logger(__name__)
 

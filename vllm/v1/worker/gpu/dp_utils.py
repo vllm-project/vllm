@@ -16,7 +16,7 @@ from vllm.v1.worker.gpu.cudagraph_utils import (
     BatchExecutionDescriptor,
     CudaGraphManager,
 )
-from vllm.v1.worker.ubatch_utils import check_ubatch_thresholds, get_num_ubatches
+from vllm.v1.worker.gpu.ubatch_common import check_ubatch_thresholds, get_num_ubatches
 
 
 @dataclass(frozen=True)
