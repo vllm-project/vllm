@@ -41,7 +41,7 @@ from vllm.v1.attention.backends.registry import AttentionBackendEnum
 def _vllm_config(**over) -> SimpleNamespace:
     """A supported config: TP8, DCP8 (interleave 1), 7 speculative tokens,
     max_num_seqs 1, an fp8 KV cache, FULL graphs, MRV2.
-    ``over`` sets dotted paths, e.g. ``{"parallel_config.data_parallel_size": 2}``."""
+    `over` sets dotted paths, e.g. `{"parallel_config.data_parallel_size": 2}`."""
     spec = SimpleNamespace(
         num_speculative_tokens=7,
         enable_adaptive_verification=False,
@@ -92,7 +92,6 @@ def _vllm_config(**over) -> SimpleNamespace:
         speculative_config=spec,
         scheduler_config=SimpleNamespace(max_num_seqs=1),
         attention_config=SimpleNamespace(backend=None),
-        use_v2_model_runner=True,
         compilation_config=SimpleNamespace(
             mode=CompilationMode.VLLM_COMPILE,
             cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
@@ -189,7 +188,6 @@ def test_supported_config_is_accepted(supported_vllm_config):
 def supported_vllm_config(tmp_path, monkeypatch, on_mi355x):
     from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
     # CUDA must not auto-enable a process-wide setting in this ROCm fixture.
     monkeypatch.setenv("VLLM_USE_BREAKABLE_CUDAGRAPH", "0")
     KimiLinearConfig(
@@ -233,6 +231,15 @@ def test_moriio_consumer_is_supported(supported_vllm_config, read_mode, backend)
     assert specialized_decode_config(supported_vllm_config) == DecodeConfig(q=8)
 
 
+def test_mooncake_consumer_is_supported(supported_vllm_config):
+    supported_vllm_config.kv_transfer_config = KVTransferConfig(
+        kv_connector="MooncakeConnector",
+        kv_role="kv_consumer",
+        kv_connector_extra_config={"mooncake_protocol": "rdma"},
+    )
+    assert specialized_decode_config(supported_vllm_config) == DecodeConfig(q=8)
+
+
 @pytest.mark.parametrize(
     "overrides",
     [
@@ -241,6 +248,8 @@ def test_moriio_consumer_is_supported(supported_vllm_config, read_mode, backend)
         {"kv_connector_module_path": "custom.connector"},
         {"kv_role": "kv_producer"},
         {"kv_role": "kv_both"},
+        {"kv_connector": "MooncakeConnector", "kv_role": "kv_producer"},
+        {"kv_connector": "MooncakeConnector", "kv_role": "kv_both"},
     ],
 )
 def test_unsupported_kv_transfer_is_refused(supported_vllm_config, overrides):
@@ -324,7 +333,6 @@ def test_mla_without_m1_runs_vllm_ops(on_mi355x, monkeypatch, over, env, why):
         ({"speculative_config.dynamic": True}, "dynamic speculative"),
         ({"cache_config.mamba_cache_dtype": "float32"}, "KDA cache dtypes"),
         ({"cache_config.use_replayssm": True}, "ReplaySSM"),
-        ({"use_v2_model_runner": False}, "V1 model runner"),
         (
             {"compilation_config.mode": CompilationMode.STOCK_TORCH_COMPILE},
             "torch.compile",
@@ -429,12 +437,10 @@ def test_every_refusal_is_reported_at_once(monkeypatch):
     monkeypatch.setattr(
         runtime, "platform_reasons", lambda: ["this GPU (gfx950 / MI355X only)"]
     )
-    cfg = _vllm_config(
-        **{"parallel_config.tensor_parallel_size": 4, "use_v2_model_runner": False}
-    )
+    cfg = _vllm_config(**{"parallel_config.tensor_parallel_size": 4})
     with pytest.raises(ValueError) as e:
         specialized_decode_config(cfg)
-    for reason in ("TP 4", "V1 model runner", "this GPU", "decode_backend=auto"):
+    for reason in ("TP 4", "this GPU", "decode_backend=auto"):
         assert reason in str(e.value)
 
 
@@ -538,7 +544,7 @@ class _Kernel:
 
 def _decode(monkeypatch, mode=CUDAGraphMode.FULL, md=None):
     """An executor with kernels on layers 1 and 2 at widths 4 and 8, bound to a
-    KV cache, under a forward context of ``mode``."""
+    KV cache, under a forward context of `mode`."""
     decode = object.__new__(SpecializedDecode)
     decode.config = DecodeConfig(q=4)
     decode.runner = SimpleNamespace(kda_prefix="kda", mla_prefix="")
@@ -666,7 +672,7 @@ def test_qkv_gate_weights_split_the_merged_gate():
 def test_m1c_runs_where_its_splits_share_out():
     """M1c's KV splits share out evenly over a width's requests: qlen 4's 80
     splits over 12 rows (3 requests) don't (DCP1 refuses that step,
-    ``test_unserved_steps_are_refused``)."""
+    `test_unserved_steps_are_refused`)."""
     from vllm.models.kimi_k3.amd.specialized_decode.runtime.layers import (
         m1c_at,
         m1c_splits,

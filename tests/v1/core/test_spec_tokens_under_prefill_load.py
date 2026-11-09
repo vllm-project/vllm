@@ -203,9 +203,9 @@ def test_no_reduction_for_remote_prefill_arrival(monkeypatch):
     monkeypatch.setattr(
         sched.connector,
         "get_num_new_matched_tokens",
-        lambda request, _: (992, True)
-        if request.request_id == "remote"
-        else (0, False),
+        lambda request, _: (
+            (992, True) if request.request_id == "remote" else (0, False)
+        ),
     )
     _add(sched, "dec", 4)
     _step(sched)
@@ -319,20 +319,6 @@ def test_requires_chunked_prefill():
     not run at all instead of being chunked."""
     with pytest.raises(ValueError, match="requires chunked prefill"):
         _vllm_config(enable_chunked_prefill=False)
-
-
-@pytest.mark.parametrize(
-    ("method", "use_v2_model_runner", "expected"),
-    [("ngram_gpu", "0", None), ("ngram_gpu", "1", 2), ("ngram", "0", 2)],
-)
-def test_disabled_on_v1_for_fixed_length_proposers(
-    monkeypatch, method, use_v2_model_runner, expected
-):
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", use_v2_model_runner)
-    config = _vllm_config(method=method)
-    assert (
-        config.speculative_config.num_speculative_tokens_under_prefill_load == expected
-    )
 
 
 @pytest.mark.parametrize(("num_reduced", "query_lens"), [(None, {9}), (2, {9, 3})])

@@ -18,7 +18,6 @@ from vllm.models.deepseek_v4.common.ops import (
 )
 from vllm.models.deepseek_v4.nvidia.ops.o_proj import (
     compute_fp8_einsum_recipe,
-    deep_gemm_fp8_o_proj,
     rope_quant_attn_out,
     rope_quant_unsupported_reason,
 )
@@ -60,7 +59,7 @@ def get_flashinfer_dsv4_workspace(device: torch.device) -> torch.Tensor:
 
 
 def packed_block_span(pool: torch.Tensor) -> int:
-    """Per-block stride of ``pool`` in tokens (``stride(0)//stride(-2)``): ==
+    """Per-block stride of `pool` in tokens (`stride(0)//stride(-2)`): ==
     block_size for unpacked KV, larger when packed (#44577). Raises if not
     token-aligned."""
     block_stride = pool.stride(0)
@@ -104,7 +103,7 @@ def required_sm120_sparse_topk(vllm_config: VllmConfig, window_size: int) -> int
 class DeepseekV4FlashInferMLASparseBackend(DeepseekV4SparseMLABackend):
     """FlashInfer backend using the DSv4 sparse metadata/cache layout.
 
-    Inherits the base and backend reuses its``DeepseekV4SparseMLAMetadataBuilder``
+    Inherits the base and backend reuses its`DeepseekV4SparseMLAMetadataBuilder`
     """
 
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.bfloat16]
@@ -212,12 +211,10 @@ class DeepseekV4FlashInferMLAAttention(DeepseekV4Attention):
     def _o_proj(
         self, o: torch.Tensor | QuantizedActivation, positions: torch.Tensor
     ) -> torch.Tensor:
-        return deep_gemm_fp8_o_proj(
+        z = self.wo_a.grouped_forward(
             o,
             positions,
             self.rotary_emb.cos_sin_cache,
-            self.wo_a,
-            self.wo_b,
             n_groups=self.n_local_groups,
             heads_per_group=self.n_local_heads // self.n_local_groups,
             nope_dim=self.nope_head_dim,
@@ -226,6 +223,7 @@ class DeepseekV4FlashInferMLAAttention(DeepseekV4Attention):
             einsum_recipe=self._einsum_recipe,
             tma_aligned_scales=self._tma_aligned_scales,
         )
+        return self.wo_b(z.flatten(1))
 
     def _alloc_attn_out(
         self, num_tokens: int, hidden_states: torch.Tensor
@@ -242,7 +240,7 @@ class DeepseekV4FlashInferMLAAttention(DeepseekV4Attention):
         # since every call passes the real per-request seq_lens. The one
         # exception is a draft block running past max_model_len, whose clamped
         # positions it does not reproduce; that only costs those drafts.
-        reason = rope_quant_unsupported_reason(self)
+        reason = rope_quant_unsupported_reason(self, vllm_config)
         self._fuse_rope_quant = reason is None
         if reason is None:
             logger.info_once(
@@ -353,8 +351,8 @@ class DeepseekV4FlashInferMLAAttention(DeepseekV4Attention):
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Build the combined sparse-index tensors for the mixed batch.
 
-        Returns ``(compressed_kv_cache, seq_lens, sparse_indices,
-        sparse_topk_lens)``, sized ``num_rows`` (default: the real tokens).
+        Returns `(compressed_kv_cache, seq_lens, sparse_indices,
+        sparse_topk_lens)`, sized `num_rows` (default: the real tokens).
         """
         num_decodes = swa_metadata.num_decodes
         num_prefills = swa_metadata.num_prefills
@@ -640,12 +638,10 @@ class DeepseekV4FlashInferSM120Attention(DeepseekV4Attention):
         return pad_to_supported_q_heads(num_heads)
 
     def _o_proj(self, o: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
-        return deep_gemm_fp8_o_proj(
+        z = self.wo_a.grouped_forward(
             o,
             positions,
             self.rotary_emb.cos_sin_cache,
-            self.wo_a,
-            self.wo_b,
             n_groups=self.n_local_groups,
             heads_per_group=self.n_local_heads // self.n_local_groups,
             nope_dim=self.nope_head_dim,
@@ -654,6 +650,7 @@ class DeepseekV4FlashInferSM120Attention(DeepseekV4Attention):
             einsum_recipe=self._einsum_recipe,
             tma_aligned_scales=self._tma_aligned_scales,
         )
+        return self.wo_b(z.flatten(1))
 
     def __init__(self, vllm_config: VllmConfig, *args, **kwargs) -> None:
         super().__init__(vllm_config, *args, **kwargs)
