@@ -762,6 +762,7 @@ class Platform:
         For hybrid models, also aligns block_size with mamba page sizes.
         """
         from vllm.config.cache import CacheConfig
+        from vllm.config.vllm import set_current_vllm_config
 
         cache_config = vllm_config.cache_config
         model_config = vllm_config.model_config
@@ -793,13 +794,75 @@ class Platform:
         # Phase 2: Align block/mamba sizes for hybrid models
         # (may override user settings).
         pre_block_size = cache_config.block_size
-        if model_config.is_hybrid:
+        use_packed_hybrid_cache = all(
+            cls._use_packed_hybrid_kv_cache(vllm_config, backend)
+            for backend in backend_classes
+        )
+        if model_config.is_hybrid and not use_packed_hybrid_cache:
             cls._align_hybrid_block_size(vllm_config, backend_classes[0])
+
+        if use_packed_hybrid_cache:
+            from math import lcm
+
+            from vllm.config.vllm import get_layers_from_vllm_config
+            from vllm.model_executor.layers.attention_layer_base import (
+                AttentionLayerBase,
+            )
+            from vllm.model_executor.layers.mamba.abstract import (
+                get_mamba_prefill_checkpoint_alignment,
+            )
+            from vllm.v1.attention.backend import MultipleOf
+
+            # Packing removes page-size padding, not the recurrent kernel's
+            # checkpoint grid. The scheduler must only cache exportable states.
+            checkpoint_alignment = (
+                get_mamba_prefill_checkpoint_alignment(vllm_config) or 1
+            )
+            cache_config.block_size = lcm(cache_config.block_size, checkpoint_alignment)
+            with set_current_vllm_config(vllm_config):
+                unsupported_backends = []
+                for layer in get_layers_from_vllm_config(
+                    vllm_config,
+                    AttentionLayerBase,  # type: ignore[type-abstract]
+                ).values():
+                    backend = layer.get_attn_backend()
+                    if backend.is_ssm():
+                        continue
+                    spec = layer.get_kv_cache_spec(vllm_config)
+                    if spec is None:
+                        continue
+                    # Packed rows cannot generally be subdivided into kernel
+                    # pages (e.g. multi-head BLHNC), so require a native page.
+                    supported_sizes = backend.get_supported_kernel_block_sizes(spec)
+                    if not any(
+                        cache_config.block_size % size.base == 0
+                        if isinstance(size, MultipleOf)
+                        else cache_config.block_size == size
+                        for size in supported_sizes
+                    ):
+                        unsupported_backends.append(
+                            f"{backend.get_name()} ({supported_sizes})"
+                        )
+            if unsupported_backends:
+                raise ValueError(
+                    f"Packed KV cache block size {cache_config.block_size} requires "
+                    f"unsupported kernel-page subdivision for "
+                    f"{'/'.join(unsupported_backends)}. Omit --block-size to use "
+                    "the backend default, or select a native kernel block size "
+                    "compatible with recurrent checkpoint alignment."
+                )
+
+            cache_config.mamba_block_size = cache_config.block_size
+            logger.info(
+                "Keeping %d-token KV cache blocks for layer-wise mixed KV "
+                "cache; Mamba and attention pages will use block-outer packing.",
+                cache_config.block_size,
+            )
 
         # Phase 3: Align block/page sizes when multiple KV dtypes share the
         # block pool (e.g. nvfp4 primary + unquantized skip layers).
         # May override the user's --block-size.
-        if cache_config.kv_cache_dtype_skip_layers:
+        if cache_config.kv_cache_dtype_skip_layers and not use_packed_hybrid_cache:
             cls._align_heterogeneous_kv_block_size(vllm_config, backend_classes[0])
         cls._check_aligned_block_size(vllm_config, backend_classes, pre_block_size)
 
@@ -831,6 +894,48 @@ class Platform:
                 f"Aligned KV cache block size {block_size} is not supported by "
                 f"attention backend(s): {', '.join(rejecting)}."
             )
+
+    @classmethod
+    def _use_packed_hybrid_kv_cache(
+        cls,
+        vllm_config: "VllmConfig",
+        backend_cls: "type[AttentionBackend]",
+    ) -> bool:
+        """Keep exact per-layer pages when block-outer packing can express them."""
+        import vllm.envs as envs
+        from vllm.config.cache import _layout_from_name
+        from vllm.distributed.kv_transfer.kv_connector.utils import (
+            get_kv_connector_cache_layout,
+        )
+
+        cache_config = vllm_config.cache_config
+        model_config = vllm_config.model_config
+        quant_config = vllm_config.quant_config
+        if (
+            model_config is None
+            or not model_config.is_hybrid
+            or cache_config.mamba_cache_mode != "align"
+            or quant_config is None
+            or not quant_config.has_layerwise_kv_cache()
+        ):
+            return False
+
+        requested_layout = cache_config.kv_cache_layout or envs.VLLM_KV_CACHE_LAYOUT
+        if requested_layout is not None:
+            return _layout_from_name(requested_layout).is_block_outermost
+
+        supported_layouts = backend_cls.supported_kv_cache_layouts()
+        connector_layout_name = None
+        if vllm_config.kv_transfer_config is not None:
+            connector_layout_name = get_kv_connector_cache_layout(vllm_config)
+        if connector_layout_name is not None:
+            connector_layout = _layout_from_name(connector_layout_name)
+            if supported_layouts is None or connector_layout in supported_layouts:
+                return connector_layout.is_block_outermost
+
+        return supported_layouts is None or any(
+            layout.is_block_outermost for layout in supported_layouts
+        )
 
     @classmethod
     def _align_heterogeneous_kv_block_size(

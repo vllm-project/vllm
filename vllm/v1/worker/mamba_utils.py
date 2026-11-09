@@ -1041,12 +1041,7 @@ class MambaSpecDecodeGPUContext:
                     idx += 1
 
             if mixers:
-                spec = kv_cache_group.kv_cache_spec
-                if not isinstance(spec, MambaSpec):
-                    raise TypeError(
-                        "FlashInfer ReplaySSM layers require a Mamba cache spec; "
-                        f"got {type(spec).__name__}"
-                    )
+                spec = _get_mamba_spec_for_layer(kv_cache_group, layer_names[0])
                 replayssm_groups.append(
                     (mixers, spec, aligned_index_block_tables[group_local_idx])
                 )
