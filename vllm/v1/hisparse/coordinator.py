@@ -193,7 +193,9 @@ class HiSparseCoordinator:
         self.copies: dict[BlockHashWithGroupId, tuple[KVCacheBlock, ...]] = {}
         self._copy_by_block: dict[int, BlockHashWithGroupId] = {}
         # Unpinned GPU block id -> (request, page) pairs still reading it.
-        self._owners: dict[int, set[tuple[str, int]]] = {}
+        # Tuples rather than sets: a page's blocks share one owner tuple, and
+        # most blocks have a single owner.
+        self._owners: dict[int, tuple[tuple[str, int], ...]] = {}
 
     @property
     def gpu_pool(self) -> BlockPool:
@@ -291,16 +293,17 @@ class HiSparseCoordinator:
         if not copies:
             return
         host_indices = list(copies)
-        adopted: list[KVCacheBlock] = []
+        adopted_blocks: list[KVCacheBlock] = []
+        adopted_pages: set[int] = set()
         for manager, column in zip(self.resident_managers, zip(*copies.values())):
-            for host_idx, block in manager.adopt_resident_pages(
-                request_id, host_indices, column
-            ):
-                adopted.append(block)
-                state.pinned_clean.add(host_idx)
-                if host_idx < state.synced_pages:
-                    state.stale_pages.add(host_idx)
-        self.gpu_pool.touch(adopted)
+            pairs = manager.adopt_resident_pages(request_id, host_indices, column)
+            adopted_pages.update(host_idx for host_idx, _ in pairs)
+            adopted_blocks.extend(block for _, block in pairs)
+        state.pinned_clean |= adopted_pages
+        state.stale_pages.update(
+            host_idx for host_idx in adopted_pages if host_idx < state.synced_pages
+        )
+        self.gpu_pool.touch(adopted_blocks)
 
     def _record_copies(self, request_id: str, num_computed_tokens: int) -> None:
         """Index the GPU copies of just-published host blocks for later hits."""
@@ -408,19 +411,28 @@ class HiSparseCoordinator:
             manager.get_residency_pages(request_id, pages)
             for manager in self.resident_managers
         ]
+        null_slots = {
+            slot
+            for column in columns
+            for slot, block in enumerate(column)
+            if block.is_null
+        }
+        slots = [slot for slot in range(len(pages)) if slot not in null_slots]
+        if not slots:
+            return
+        unpinned = [pages[slot] for slot in slots]
+        single_owners = [((request_id, page_idx),) for page_idx in unpinned]
+        owners = self._owners
         released: list[KVCacheBlock] = []
-        for page_idx, blocks in zip(pages, zip(*columns)):
-            if any(block.is_null for block in blocks):
-                continue
-            for block in blocks:
-                self._owners.setdefault(block.block_id, set()).add(
-                    (request_id, page_idx)
-                )
-            released.extend(blocks)
-            state.pinned_clean.discard(page_idx)
-            state.unpinned_pages.add(page_idx)
-        if released:
-            self.gpu_pool.unpin_blocks(released, self._on_block_reused)
+        for slot, single in zip(slots, single_owners):
+            for column in columns:
+                block = column[slot]
+                current = owners.get(block.block_id)
+                owners[block.block_id] = single if current is None else current + single
+                released.append(block)
+        state.pinned_clean.difference_update(unpinned)
+        state.unpinned_pages.update(unpinned)
+        self.gpu_pool.unpin_blocks(released, self._on_block_reused)
 
     def _unpin_clean_pages(self, request_id: str, state: _HiSparseRequestState) -> None:
         # Tail first, so a prefix loses its tail pages before its head.
@@ -433,6 +445,16 @@ class HiSparseCoordinator:
         for request_id, page_idx in self._owners.pop(block.block_id, ()):
             self._lose_page(request_id, page_idx)
 
+    def _discard_owner(self, block_id: int, owner: tuple[str, int]) -> None:
+        owners = self._owners.get(block_id)
+        if owners is None or owner not in owners:
+            return
+        remaining = tuple(o for o in owners if o != owner)
+        if remaining:
+            self._owners[block_id] = remaining
+        else:
+            del self._owners[block_id]
+
     def _lose_page(self, request_id: str, page_idx: int) -> None:
         self._resident_requests.discard(request_id)
         state = self.request_states.get(request_id)
@@ -442,9 +464,7 @@ class HiSparseCoordinator:
             block = manager.drop_resident_page(request_id, page_idx)
             if block is None:
                 continue
-            owners = self._owners.get(block.block_id)
-            if owners is not None:
-                owners.discard((request_id, page_idx))
+            self._discard_owner(block.block_id, (request_id, page_idx))
         state.unpinned_pages.discard(page_idx)
         if page_idx < state.synced_pages:
             state.stale_pages.add(page_idx)
@@ -980,9 +1000,7 @@ class HiSparseCoordinator:
                 if block.is_null:
                     continue
                 if page_idx in state.unpinned_pages:
-                    owners = self._owners.get(block.block_id)
-                    if owners is not None:
-                        owners.discard((request_id, page_idx))
+                    self._discard_owner(block.block_id, (request_id, page_idx))
                 elif (
                     page_idx in state.valid_pages
                     and page_idx not in state.pending_pages
