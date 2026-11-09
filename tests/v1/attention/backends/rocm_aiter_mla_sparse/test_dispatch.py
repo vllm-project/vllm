@@ -243,6 +243,13 @@ def test_sinks_with_unsupported_head_bucket_fall_back_to_triton(env, spy):
 
 def test_gfx942_long_bf16_prefill_uses_triton(env, spy, monkeypatch):
     monkeypatch.setattr("vllm.platforms.rocm.on_gfx942", lambda: True)
+    # On a real gfx942 the sparse prefill op may hand long rows to AITER's
+    # pa_prefill_sparse (#60102), whose kernel choice follows the actual GPU;
+    # pin the op's own Triton route so this checks the backend's dispatch.
+    monkeypatch.setattr(
+        "vllm.v1.attention.ops.rocm_aiter_mla_sparse._can_use_aiter_pa_prefill_sparse",
+        lambda q, kv: False,
+    )
     case = make_case(DSV32, LONG_PREFILL[1])
     _run(case, spy, LONG_PREFILL)
     names = spy.names()
