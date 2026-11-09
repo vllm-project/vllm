@@ -327,7 +327,7 @@ class CacheConfig:
     floating-point state. FP8 E4M3FN and INT8 use FP32 scales per state row.
     Quantized checkpoints require BF16 activations, Mamba2 head dimension 64,
     state size 128, and mamba_ssm_cache_dtype='auto'. FP8 also requires
-    FlashInfer 0.7.5 or newer. Decode checkpoint writes
+    FlashInfer 0.7.4 or newer. Decode checkpoint writes
     honor the Mamba stochastic-rounding settings. Prefill uses nearest rounding.
     Quantization can change model output."""
     use_replayssm: bool = False

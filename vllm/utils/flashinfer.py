@@ -123,7 +123,7 @@ def _installed_version(distribution: str) -> str | None:
 
 # Earlier FP8 ReplaySSM flushes can store NaN for tiny nonzero rows; see
 # flashinfer-ai/flashinfer#8968. Its fix postdates 0.7.4rc1.
-_REPLAYSSM_FP8_MIN_FLASHINFER = "0.7.5"
+_REPLAYSSM_FP8_MIN_FLASHINFER = "0.7.4"
 
 
 @functools.cache
