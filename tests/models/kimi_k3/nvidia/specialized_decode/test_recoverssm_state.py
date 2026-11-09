@@ -11,7 +11,6 @@ import torch
 
 from vllm.models.kimi_k3.nvidia.kda_metadata import KimiK3KDAMetadataBuilder
 from vllm.models.kimi_k3.nvidia.model_state import KimiK3ModelState
-from vllm.models.kimi_k3.nvidia.ops.recoverssm import KDARecoverSSMRecords
 from vllm.models.kimi_k3.nvidia.specialized_decode.recoverssm.state import (
     DeferredRecoverSSMState,
     install_model_state,
@@ -122,32 +121,43 @@ def test_model_state_hands_itself_to_the_specialized_decode() -> None:
     assert type(_make_state(use_recoverssm=True).recoverssm) is RecoverSSMState
 
 
-def test_model_state_installs_it_for_deferred_stock_kda_layers() -> None:
+def test_model_state_owns_the_pending_replays_of_deferred_stock_kda_layers() -> None:
     """Without the specialized decode, KDA layers that verify with the deferred
-    kernel (`deferred_verify`) get the same install: records by request slot
-    after a scratch row and the deferred runner state."""
-    records = KDARecoverSSMRecords(
-        torch.zeros(2, 3, 4, 8), torch.zeros(2, 3, 4, 16, dtype=torch.bfloat16)
+    kernel (`deferred_verify`) give the stock state per-slot pending replays:
+    reset per new request, bound with the step's request slots to the RecoverSSM
+    KDA builders before every build (no slots under capture)."""
+    kda = SimpleNamespace(deferred_verify=object())
+    model = SimpleNamespace(
+        specialized_decode_config=None, model=_backbone(kda, SimpleNamespace())
     )
-    kda = SimpleNamespace(
-        deferred_verify=object(),
-        recoverssm_records=records,
-        recoverssm_backend="triton",
-    )
-    mla = SimpleNamespace()
-    model = SimpleNamespace(specialized_decode_config=None, model=_backbone(kda, mla))
-    state = _make_state(use_recoverssm=True, model=model)
-    assert type(state.recoverssm) is DeferredRecoverSSMState
-    assert kda.deferred_recoverssm
-    correction = kda.recoverssm_records.correction
-    assert correction.shape == (2, 3, 4, 8)
-    assert correction.storage_offset() == 3 * 4 * 8
-    assert vars(mla) == {}
-    # KDA layers without the deferred kernel keep the stock state.
+    with (
+        patch.object(MambaHybridModelState, "add_request", lambda *args: None),
+        patch.object(MambaHybridModelState, "prepare_attn", lambda *a, **k: {}),
+    ):
+        state = _make_state(use_recoverssm=True, model=model)
+        assert type(state.recoverssm) is RecoverSSMState
+        pending = state.recoverssm_pending
+        assert pending is not None and pending.tolist() == [0] * 8
+        pending.fill_(3)
+        state.add_request(5, SimpleNamespace())
+        assert pending.tolist() == [3] * 5 + [0] + [3] * 2
+
+        groups, deferring, others = _groups()
+        idx_mapping = torch.tensor([2, 0], dtype=torch.int32)
+        batch = SimpleNamespace(idx_mapping=idx_mapping)
+        state.prepare_attn(batch, None, None, None, groups, None)
+        for builder in deferring:
+            assert builder.deferred_pending is pending
+            assert builder.deferred_request_slots is idx_mapping
+            assert builder.deferred_record_rows.tolist() == [-1] * 8
+        assert others[1].deferred_pending is None
+        state.prepare_attn(batch, None, None, None, groups, None, for_capture=True)
+        assert all(b.deferred_request_slots is None for b in deferring)
+
+    # KDA layers without the deferred kernel get no pending replays.
     stock = SimpleNamespace(deferred_verify=None)
     model = SimpleNamespace(specialized_decode_config=None, model=_backbone(stock))
-    assert type(_make_state(True, model).recoverssm) is RecoverSSMState
-    assert vars(stock) == {"deferred_verify": None}
+    assert _make_state(True, model).recoverssm_pending is None
 
 
 def test_install_model_state_only_with_recoverssm() -> None:

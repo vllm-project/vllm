@@ -950,6 +950,116 @@ def test_kda_recoverssm_verify_and_group_commit(
                 torch.testing.assert_close(actual_boundary_conv, expected_boundary_conv)
 
 
+@pytest.mark.parametrize("eager", [False, True])
+@torch.inference_mode()
+def test_kda_recoverssm_deferred_commit_matches_commit(
+    eager: bool, monkeypatch: pytest.MonkeyPatch
+):
+    """Deferred RecoverSSM (records by request slot): the commit after sampling
+    only records each request's accepted count (the rows of `eager` commit at
+    once), and the flush before a verify that does not replay them leaves the
+    checkpoints and conv states of the plain commit, bit for bit."""
+    monkeypatch.setattr(recoverssm_ops, "is_conv_state_dim_first", lambda: False)
+    num_layers, num_seqs, query_len, num_heads, dim = 2, 3, 4, 2, 128
+    num_blocks, max_num_reqs, conv_dim = 5, 6, 12
+    torch.manual_seed(20261109)
+    tokens = num_seqs * query_len
+    q, k, v, raw_g = (
+        torch.randn(1, tokens, num_heads, dim, dtype=torch.bfloat16, device=DEVICE)
+        for _ in range(4)
+    )
+    raw_beta = torch.randn(1, tokens, num_heads, dtype=torch.bfloat16, device=DEVICE)
+    query_start_loc = torch.arange(
+        0, tokens + 1, query_len, dtype=torch.int32, device=DEVICE
+    )
+    state_indices = torch.tensor([1, 3, 4], dtype=torch.int32, device=DEVICE)
+    slots = torch.tensor([4, 0, 2], dtype=torch.int32, device=DEVICE)
+    accepted = torch.tensor([2, 4, 1], dtype=torch.int32, device=DEVICE)
+
+    def verified_layers(record_indices: torch.Tensor | None):
+        torch.manual_seed(7)
+        layers = []
+        for _ in range(num_layers):
+            records = KDARecoverSSMRecords.allocate(
+                max_num_reqs,
+                num_heads,
+                query_len,
+                dim,
+                torch.bfloat16,
+                DEVICE,
+                scratch_row=record_indices is not None,
+            )
+            conv_state = torch.randn(
+                num_blocks, query_len + 2, conv_dim, dtype=torch.bfloat16, device=DEVICE
+            )
+            checkpoint = 0.01 * torch.randn(
+                num_blocks, num_heads, dim, dim, device=DEVICE
+            )
+            layer = SimpleNamespace(
+                kv_cache=(conv_state, checkpoint),
+                recoverssm_records=records,
+                A_log=0.2 * torch.randn(num_heads, device=DEVICE),
+                dt_bias=0.1 * torch.randn(num_heads, dim, device=DEVICE),
+                local_num_heads=num_heads,
+                head_dim=dim,
+                gate_lower_bound=-5.0,
+            )
+            kda_recoverssm_verify(
+                q=q,
+                k=k,
+                v=v,
+                raw_g=raw_g,
+                raw_beta=raw_beta,
+                A_log=layer.A_log,
+                dt_bias=layer.dt_bias,
+                lower_bound=-5.0,
+                checkpoint_state=checkpoint,
+                records=records,
+                query_start_loc=query_start_loc,
+                state_indices=state_indices,
+                spec_query_len=query_len,
+                record_indices=record_indices,
+            )
+            layers.append(layer)
+        context = KDARecoverSSMCommitContext.create(
+            layers, spec_query_len=query_len, max_num_reqs=max_num_reqs
+        )
+        return layers, context
+
+    expected, context = verified_layers(None)
+    context.commit(accepted, state_indices, query_start_loc)
+
+    layers, context = verified_layers(slots)
+    initial = [tuple(t.clone() for t in layer.kv_cache) for layer in layers]
+    pending = torch.full((max_num_reqs,), 9, dtype=torch.int32, device=DEVICE)
+    eager_rows = torch.tensor([1, 0, 1], dtype=torch.int32, device=DEVICE)
+    context.commit(
+        accepted,
+        state_indices,
+        query_start_loc,
+        record_rows=slots,
+        pending=pending,
+        eager=eager_rows if eager else None,
+    )
+    deferred = [row for row in range(num_seqs) if not (eager and eager_rows[row])]
+    expected_pending = [9] * max_num_reqs
+    for row, (slot, count) in enumerate(zip(slots.tolist(), accepted.tolist())):
+        expected_pending[slot] = count if row in deferred else 0
+    assert pending.tolist() == expected_pending
+    for layer, before, after in zip(layers, initial, expected):
+        for row, block in enumerate(state_indices.tolist()):
+            source = before if row in deferred else after.kv_cache
+            for actual, reference in zip(layer.kv_cache, source):
+                torch.testing.assert_close(
+                    actual[block], reference[block], atol=0, rtol=0
+                )
+
+    context.flush(state_indices, slots, pending)
+    for layer, after in zip(layers, expected):
+        for actual, reference in zip(layer.kv_cache, after.kv_cache):
+            torch.testing.assert_close(actual, reference, atol=0, rtol=0)
+
+
 @pytest.mark.parametrize(
     ("num_heads", "num_seqs", "lower_bound", "fuse_output_norm", "conv_layout"),
     [

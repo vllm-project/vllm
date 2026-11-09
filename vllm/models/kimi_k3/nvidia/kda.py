@@ -743,29 +743,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         # (installed with the runner state, see model_state.py).
         self.deferred_verify: KdaDeferredVerify | None = None
         if self.use_recoverssm:
-            self.recoverssm_records = KDARecoverSSMRecords.allocate(
-                vllm_config.scheduler_config.max_num_seqs,
-                self.local_num_heads,
-                self.spec_query_len,
-                self.head_dim,
-                vllm_config.model_config.dtype,
-                self.conv1d.weight.device,
-            )
             max_num_seqs = vllm_config.scheduler_config.max_num_seqs
-            records_bytes = len(kda_config["kda_layers"]) * sum(
-                t.numel() * t.element_size()
-                for t in (
-                    self.recoverssm_records.correction,
-                    self.recoverssm_records.key_gate,
-                )
-            )
-            logger.info_once(
-                "Allocated the KDA RecoverSSM verify records: %.2f GiB in total "
-                "for %d requests (%.2f MiB per request).",
-                records_bytes / 2**30,
-                max_num_seqs,
-                records_bytes / max_num_seqs / 2**20,
-            )
             # By SSM state dtype where the kernels can run: FP32 takes the
             # deferred verify, BF16 the CuTe verify and commit. Otherwise, or
             # with kda_decode_backend "triton" (as set: auto resolves to triton
@@ -810,6 +788,31 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                 )
                 if supported:
                     self.recoverssm_backend = "cute"
+            # The deferred verify keeps each request's records in its request
+            # slot until the next verify replays them.
+            self.recoverssm_records = KDARecoverSSMRecords.allocate(
+                max_num_seqs,
+                self.local_num_heads,
+                self.spec_query_len,
+                self.head_dim,
+                vllm_config.model_config.dtype,
+                self.conv1d.weight.device,
+                scratch_row=self.deferred_verify is not None,
+            )
+            records_bytes = len(kda_config["kda_layers"]) * sum(
+                t.numel() * t.element_size()
+                for t in (
+                    self.recoverssm_records.correction,
+                    self.recoverssm_records.key_gate,
+                )
+            )
+            logger.info_once(
+                "Allocated the KDA RecoverSSM verify records: %.2f GiB in total "
+                "for %d requests (%.2f MiB per request).",
+                records_bytes / 2**30,
+                max_num_seqs,
+                records_bytes / max_num_seqs / 2**20,
+            )
             if self.deferred_verify is not None:
                 logger.info_once("Using the deferred KDA RecoverSSM verify.")
             elif self.recoverssm_backend == "triton":
@@ -1089,6 +1092,13 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             # overlap path under graph capture). The Triton verify runs instead,
             # leaving the same conv state, records and SSM state.
 
+        record_indices = None
+        deferred = m.recoverssm_deferred
+        if deferred is not None:
+            # This verify does not replay the last step's accepted tokens: fold
+            # them into the checkpoints first (every layer, once per step).
+            deferred.flush()
+            record_indices = deferred.record_rows[: m.num_spec_decodes]
         if not is_conv_state_dim_first():
             conv_state = conv_state.transpose(-1, -2)
         mixed_qkv = causal_conv1d_update(
@@ -1123,6 +1133,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             state_indices=state_indices,
             spec_query_len=self.spec_query_len,
             out=out,
+            record_indices=record_indices,
         )
 
     @eager_break_during_capture
@@ -1310,7 +1321,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             )
             if spec_token_start is not None:
                 spec_out = core_attn_out[:, spec_slice]
-            deferred = getattr(m, "recoverssm_deferred", None)
+            deferred = m.recoverssm_deferred
             if (
                 deferred is not None
                 and self.deferred_verify is not None
