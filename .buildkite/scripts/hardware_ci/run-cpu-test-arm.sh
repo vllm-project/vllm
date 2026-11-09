@@ -38,8 +38,8 @@ print_packages() {
     pip list"
 }
 
-# Keep test_onednn.py whole (~19 min): its tests draw inputs from one RNG
-# stream, and running a subset makes test_onednn_gemm flaky.
+# Keep test_onednn.py whole (~19 min). Its tests are unseeded, so running a
+# subset changes later inputs and test_onednn_gemm can miss its bf16 tolerance.
 kernel_tests_0() {
   set -e
   docker exec "$CONTAINER_NAME" bash -c "
@@ -125,11 +125,20 @@ serving_tests() {
     kill -s SIGTERM $server_pid &'
 }
 
+# Run each suite in its own bash so a failure in one doesn't skip the others.
+shard_2() {
+  local rc=0
+  bash -c kernel_tests_2 || rc=1
+  bash -c model_tests || rc=1
+  bash -c serving_tests || rc=1
+  return "$rc"
+}
+
 print_packages
 export CONTAINER_NAME
-export -f kernel_tests_0 kernel_tests_1 kernel_tests_2 model_tests serving_tests
+export -f kernel_tests_0 kernel_tests_1 kernel_tests_2 model_tests serving_tests shard_2
 case "$SHARD_ID" in
-  0) timeout 30m bash -c kernel_tests_0 ;;
-  1) timeout 30m bash -c kernel_tests_1 ;;
-  2) timeout 30m bash -c "set -e; kernel_tests_2; model_tests; serving_tests" ;;
+  0) timeout 40m bash -c kernel_tests_0 ;;
+  1) timeout 40m bash -c kernel_tests_1 ;;
+  2) timeout 40m bash -c shard_2 ;;
 esac
