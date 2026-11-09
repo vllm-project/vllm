@@ -804,6 +804,12 @@ class EngineCore:
                 future = cast(Future[ModelRunnerOutput], exec_future)
             else:
                 if not scheduler_output.pending_structured_output_tokens:
+                    if scheduler_output.has_structured_output_spec_decode:
+                        draft_token_ids = self.model_executor.take_draft_token_ids()
+                        if draft_token_ids is not None:
+                            self.scheduler.update_draft_token_ids_in_output(
+                                draft_token_ids, scheduler_output
+                            )
                     # We aren't waiting for any tokens, get any grammar output
                     # and sample immediately.
                     grammar_output = self.scheduler.get_grammar_bitmask(
@@ -861,7 +867,7 @@ class EngineCore:
         if deferred_scheduler_output:
             # Update the deferred scheduler output before computing its grammar
             # bitmask.
-            if self.check_for_draft_tokens:
+            if deferred_scheduler_output.has_structured_output_spec_decode:
                 draft_token_ids = self.model_executor.take_draft_token_ids()
                 if draft_token_ids is not None:
                     # Update the draft token ids in the scheduler output while
