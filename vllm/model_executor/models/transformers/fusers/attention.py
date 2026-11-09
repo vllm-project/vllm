@@ -4,11 +4,12 @@
 
 import ast
 import inspect
+import operator
 import textwrap
 from collections.abc import Callable
 from dataclasses import dataclass
 from functools import cache
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING, ClassVar, TypeGuard
 
 import torch
 from torch import fx, nn
@@ -65,8 +66,19 @@ def interface_call(forward: Callable) -> ast.Call | None:
     return calls[0] if len(calls) == 1 else None
 
 
+_BINARY_OPS = {
+    ast.Pow: operator.pow,
+    ast.Mult: operator.mul,
+    ast.Div: operator.truediv,
+}
+
+
+def _is_number(value: object) -> TypeGuard[int | float]:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
 def _resolve(node: ast.expr, module: nn.Module) -> object:
-    """The value of `node` on `module`, for literals and `self.<attr>`."""
+    """The value of `node` on `module`, for literals, `self.<attr>` and arithmetic."""
     if isinstance(node, ast.Constant):
         return node.value
     if (
@@ -75,6 +87,14 @@ def _resolve(node: ast.expr, module: nn.Module) -> object:
         and node.value.id == "self"
     ):
         return getattr(module, node.attr, None)
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
+        operand = _resolve(node.operand, module)
+        return -operand if _is_number(operand) else None
+    if isinstance(node, ast.BinOp) and (op := _BINARY_OPS.get(type(node.op))):
+        left = _resolve(node.left, module)
+        right = _resolve(node.right, module)
+        if _is_number(left) and _is_number(right):
+            return op(left, right)
     return None
 
 
@@ -130,10 +150,14 @@ class AttentionFuser(BaseFuser):
             setattr(module, self.s_aux_expr.attr, sinks_param)
         return module
 
-    def layer_index(self, module: nn.Module) -> int | None:
-        """The layer `module` computes attention for, if it declares one."""
+    def layer_index(self, module: nn.Module, prefix: str) -> int | None:
+        """The layer `module` computes attention for, from its `layer_idx` or,
+        failing that, the only index in its qualname."""
         layer_idx = getattr(module, "layer_idx", None)
-        return layer_idx if isinstance(layer_idx, int) else None
+        if isinstance(layer_idx, int):
+            return layer_idx
+        indices = [int(name) for name in prefix.split(".") if name.isdigit()]
+        return indices[0] if len(indices) == 1 else None
 
     def scale(self, module: nn.Module) -> float | None:
         """The softmax scale `module` passes to the interface, or `None`."""

@@ -69,6 +69,7 @@ from vllm.model_executor.models.transformers.utils import (
     can_enable_torch_compile,
     disable_noop_dynamic_rope,
     get_feature_request_tip,
+    has_bidirectional_attention,
     init_on_device_without_buffers,
     log_replacement,
     named_state,
@@ -475,8 +476,8 @@ class Base(
         )
         return embeddings
 
-    def recursive_replace(self):
-        """Recursively replace modules in the model as needed.
+    def recursive_replace(self, root: nn.Module | None = None, prefix: str = "model"):
+        """Recursively replace modules in `root` (default `self.model`) as needed.
 
         Currently, this replaces:
 
@@ -488,6 +489,7 @@ class Base(
         - RMSNorm (detected from their dataflow) with vLLM's `RMSNorm`or `GemmaRMSNorm`
         - `nn.LayerNorm` with vLLM's `LayerNorm`
         """
+        root = self.model if root is None else root
         tp_plan = self._tp_plan()
 
         if not tp_plan and self.tp_group.world_size > 1:
@@ -506,7 +508,7 @@ class Base(
         # Prefix the patterns because we always start from `self.model`
         tp_plan = {maybe_prefix("model", k): v for k, v in tp_plan.items()}
         # Detect fusable patterns once per module class (cached, so this is cheap)
-        fusers = Fusers(self.model, self.vllm_config)
+        fusers = Fusers(root, self.vllm_config)
 
         vocab_embeddings = self._vocab_embeddings()
 
@@ -518,7 +520,7 @@ class Base(
 
             if (
                 isinstance(fuser, AttentionFuser)
-                and (index := fuser.layer_index(module)) is not None
+                and (index := fuser.layer_index(module, prefix)) is not None
             ):
                 if index in self.attention_fusers:
                     other, _ = self.attention_fusers[index]
@@ -594,7 +596,7 @@ class Base(
                     setattr(module, child_name, new_module)
                     log_replacement(qual_name, child_module, new_module)
 
-        _recursive_replace(self.model, prefix="model")
+        _recursive_replace(root, prefix=prefix)
 
         self.hf_to_vllm_mapper |= WeightsMapper(orig_to_new_stacked=orig_to_new_stacked)
 
@@ -690,7 +692,11 @@ class Base(
 
                 # Handle interleaved sliding window attention
                 if layer_types and layer_types[i] == "sliding_attention":
-                    kwargs["per_layer_sliding_window"] = text_config.sliding_window
+                    sliding_window = text_config.sliding_window
+                    # Transformers' bidirectional window includes both boundaries
+                    if attn_cls is EncoderOnlyAttention:
+                        sliding_window += 1
+                    kwargs["per_layer_sliding_window"] = sliding_window
                 # Handle attention sinks
                 if (sinks := attn_fuser.sinks(attn_module)) is not None:
                     kwargs["sinks"] = sinks
@@ -709,11 +715,11 @@ class Base(
 
     def _get_attn_cls(self) -> type[AttentionLayerBase]:
         """Return the `Attention` class to use for this model's layers."""
-        # In encoder models, the attention layers will have `is_causal=False`
-        is_encoder = lambda module: not getattr(module, "is_causal", True)
-        has_encoder = lambda model: any(is_encoder(m) for m in model.modules())
+        # Like vLLM's own models, honour `is_causal=False` set on the config
+        is_causal = getattr(self.text_config, "is_causal", True)
+        is_encoder = not is_causal or has_bidirectional_attention(self.model)
         # A VLM's text model may be bidirectional over the multimodal prefix
-        if has_encoder(self.model) and not self.model_config.is_multimodal_model:
+        if is_encoder and not self.model_config.is_multimodal_model:
             return EncoderOnlyAttention
         if self.model_config.use_mla:
             if any(

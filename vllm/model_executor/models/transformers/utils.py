@@ -16,7 +16,7 @@
 # limitations under the License.
 """Transformers modeling backend utilities."""
 
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from itertools import chain
 from operator import attrgetter
@@ -25,6 +25,8 @@ from typing import TYPE_CHECKING, Literal, TypeAlias, TypeVar
 
 import torch
 from torch import nn
+from transformers import AutoModel, PreTrainedModel
+from transformers.modeling_outputs import BaseModelOutputWithPast
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.conv import Conv2dLayer, Conv3dLayer
@@ -35,11 +37,13 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
 )
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
+from vllm.model_executor.models.transformers.fx_utils import forward_parameters
 from vllm.model_executor.models.utils import maybe_prefix
 from vllm.transformers_utils.config import iter_rope_parameters
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
+    from vllm.config import ModelConfig, VllmConfig
+    from vllm.config.pooler import SequencePoolingType
     from vllm.model_executor.layers.quantization import QuantizationConfig
 
 
@@ -405,3 +409,75 @@ def disable_noop_dynamic_rope(model: nn.Module, vllm_config: "VllmConfig") -> No
             }
         elif rope_type == "dynamic":
             module.rope_type = "default"
+
+
+def has_bidirectional_attention(model: nn.Module) -> bool:
+    """Whether any of the attention layers in `model` has `is_causal=False`."""
+    return any(not getattr(module, "is_causal", True) for module in model.modules())
+
+
+def get_default_seq_pooling_type(model_config: "ModelConfig") -> "SequencePoolingType":
+    """`CLS` for encoders and `LAST` for decoders, like vLLM's own pooling models."""
+    with torch.device("meta"):
+        model = AutoModel.from_config(
+            model_config.hf_config, trust_remote_code=model_config.trust_remote_code
+        )
+    return "CLS" if has_bidirectional_attention(model) else "LAST"
+
+
+_HEAD_FORWARD_KWARGS = {
+    "return_dict": True,
+    "use_cache": False,
+    "output_router_logits": False,
+}
+"""Head `forward` arguments which must not ask the base model for more."""
+
+
+class _BaseModelOutput(BaseModelOutputWithPast):
+    """Has every other output a head may read (e.g. `cross_attentions`), as
+    `None`."""
+
+    def __getattr__(self, name: str):
+        if name.startswith("_"):
+            raise AttributeError(name)
+        return None
+
+
+class OpaqueBaseModel(nn.Module):
+    """Stands in for the base model, and its children (e.g. OPT's `model.decoder`),
+    returning `inputs_embeds` as its output."""
+
+    def __init__(self, children: Iterable[str]):
+        super().__init__()
+        self.children_names = frozenset(children)
+
+    def forward(self, *args, inputs_embeds: torch.Tensor, **kwargs):
+        return _BaseModelOutput(last_hidden_state=inputs_embeds)
+
+    def __getattr__(self, name: str):
+        if name in self.__dict__.get("children_names", ()):
+            return self
+        return super().__getattr__(name)
+
+
+def replace_base_model(model: nn.Module, base_model_cls: type[nn.Module]) -> bool:
+    """Replace the submodule of `model` of type `base_model_cls` with
+    `OpaqueBaseModel`, so that `model(inputs_embeds=h)` applies only what `model`
+    applies after its base model. Returns whether the base model was found."""
+    base_model_name = next(
+        (n for n, m in model.named_modules() if n and isinstance(m, base_model_cls)),
+        None,
+    )
+    if base_model_name is None:
+        return False
+    parent_name, _, child_name = base_model_name.rpartition(".")
+    parent = model.get_submodule(parent_name)
+    base_model = getattr(parent, child_name)
+    setattr(parent, child_name, OpaqueBaseModel(dict(base_model.named_children())))
+    return True
+
+
+def head_forward_kwargs(model: PreTrainedModel) -> dict[str, bool]:
+    """The `_HEAD_FORWARD_KWARGS` which `model.forward` takes."""
+    parameters = forward_parameters(type(model))
+    return {k: v for k, v in _HEAD_FORWARD_KWARGS.items() if k in parameters}

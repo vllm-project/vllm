@@ -13,11 +13,14 @@ from typing import Any
 import pytest
 import torch
 import torch.nn as nn
+import transformers
 from safetensors.torch import load_file, save_file
 from transformers import (
     AutoConfig,
     AutoModel,
     AutoModelForCausalLM,
+    AutoModelForSequenceClassification,
+    AutoModelForTokenClassification,
     PreTrainedConfig,
 )
 
@@ -31,10 +34,22 @@ from vllm.config import (
 from vllm.model_executor import model_loader
 from vllm.model_executor.models.interfaces import SupportsMultiModal
 from vllm.model_executor.models.transformers.base import Base
+from vllm.model_executor.models.transformers.causal import (
+    probe_output_head,
+    to_output_head,
+)
 from vllm.model_executor.models.transformers.fusers import AttentionFuser
 from vllm.model_executor.models.transformers.fusers.attention import VLLM_ATTN_IMPL
 from vllm.model_executor.models.transformers.multimodal import MultiModalMixin
+from vllm.model_executor.models.transformers.pooling import (
+    ClassificationHead,
+    probe_classification_head,
+)
+from vllm.model_executor.models.transformers.utils import replace_base_model
 from vllm.model_executor.models.utils import StageMissingLayer
+from vllm.transformers_utils import dynamic_module
+from vllm.transformers_utils.dynamic_module import get_transformers_model_class
+from vllm.utils.torch_utils import set_default_torch_dtype
 
 from ...conftest import HfRunner, VllmRunner
 from ...utils import multi_gpu_test, prep_prompts
@@ -144,6 +159,26 @@ def test_models(
         model,
         num_fused=num_fused,
         model_impl=model_impl,
+    )
+
+
+def test_output_head_transform(
+    hf_runner: type[HfRunner],
+    vllm_runner: type[VllmRunner],
+    example_prompts: list[str],
+) -> None:
+    """ModernBERT decoder transforms the hidden states (dense -> act -> norm) before
+    its biased output embeddings, `decoder`. In float32 because this tiny model has
+    near-tied logits in bfloat16."""
+    check_implementation(
+        hf_runner,
+        vllm_runner,
+        example_prompts,
+        "jhu-clsp/ettin-decoder-17m",
+        kwargs_ref={"dtype": "float32"},
+        kwargs_test={"dtype": "float32"},
+        num_fused=(0, 1),  # `Wi` already holds the input and gate projections
+        model_impl="transformers",
     )
 
 
@@ -378,6 +413,32 @@ def test_pooling(
         embeddings_1_lst=vllm_outputs,
         name_0="hf",
         name_1="vllm",
+    )
+
+
+@pytest.mark.parametrize("is_causal", [True, False])
+def test_embed_decoder_base_model(vllm_runner, example_prompts, is_causal):
+    """A decoder `*Model` checkpoint without a Sentence Transformers config embeds
+    like vLLM's own implementation: last token pooling, honouring `is_causal`."""
+    hf_overrides = {"architectures": ["LlamaModel"], "is_causal": is_causal}
+    outputs = {}
+    for model_impl in ("vllm", "transformers"):
+        with vllm_runner(
+            "meta-llama/Llama-3.2-1B-Instruct",
+            runner="pooling",
+            model_impl=model_impl,
+            hf_overrides=hf_overrides,
+            max_model_len=512,
+            enforce_eager=True,
+            gpu_memory_utilization=0.3,
+        ) as vllm_model:
+            outputs[model_impl] = vllm_model.embed(example_prompts)
+
+    check_embeddings_close(
+        embeddings_0_lst=outputs["vllm"],
+        embeddings_1_lst=outputs["transformers"],
+        name_0="vllm",
+        name_1="transformers",
     )
 
 
@@ -728,7 +789,9 @@ def test_attention_layer_index_is_the_modules_own():
         fuser = AttentionFuser.match(None, attn)
         assert fuser is not None
         fusers.append(fuser)
-    assert [f.layer_index(a) for f, a in zip(fusers, attentions)] == [0, 1, 2, 3]
+    names = [f"layers.{i}.self_attn.{j}" for i in (0, 1) for j in (0, 1)]
+    indices = [f.layer_index(a, n) for f, a, n in zip(fusers, attentions, names)]
+    assert indices == [0, 1, 2, 3]
 
     # Not dispatching to vLLM yet, as a vision tower never would be. The vLLM
     # config is not consulted, only the one the module was built with.
@@ -780,6 +843,14 @@ def test_attention_scale_is_the_argument_not_the_attribute():
     assert fuser.scale(attention) == 1.0 != attention.scaling
 
 
+def test_attention_scale_resolves_arithmetic():
+    """ModernBERT declares `self.head_dim**-0.5` rather than a stored attribute."""
+    attention = build_model("modernbert", pad_token_id=0).layers[0].attn
+    fuser = AttentionFuser.match(None, attention)
+    assert fuser is not None
+    assert fuser.scale(attention) == attention.head_dim**-0.5
+
+
 def test_attention_scale_rejects_unresolvable_expression():
     """Unresolvable declared scales must not silently use the Llama default."""
 
@@ -812,6 +883,238 @@ def test_get_mrope_input_positions_omits_unsupported_grid_kwargs():
 
     assert positions.shape == (4, 3)
     assert delta == 0
+
+
+def build_causal_lm(model_type: str, arch: str, device: str, **overrides):
+    """A tiny HF `ForCausalLM` of one layer, in float32."""
+    if not hasattr(transformers, arch):
+        pytest.skip(f"The installed transformers has no {arch!r}")
+    model_cls = getattr(transformers, arch)
+    config = AutoConfig.for_model(
+        model_type,
+        num_hidden_layers=1,
+        hidden_size=64,
+        intermediate_size=128,
+        num_attention_heads=4,
+        vocab_size=VOCAB_SIZE,
+        pad_token_id=0,
+        **overrides,
+    )
+    with torch.device(device):
+        return model_cls._from_config(config, dtype=torch.float32)
+
+
+OUTPUT_HEADS = [
+    # (model_type, arch, overrides, renames of the output embeddings)
+    ("llama", "LlamaForCausalLM", {}, {"lm_head.weight": "lm_head.weight"}),
+    # Soft caps the logits
+    ("gemma2", "Gemma2ForCausalLM", {}, {"lm_head.weight": "lm_head.weight"}),
+    # Multiplies the logits by `logit_scale`
+    ("cohere", "CohereForCausalLM", {}, {"lm_head.weight": "lm_head.weight"}),
+    # Divides the logits by `logits_scaling`
+    (
+        "granite",
+        "GraniteForCausalLM",
+        {"logits_scaling": 4.0},
+        {"lm_head.weight": "lm_head.weight"},
+    ),
+    # Multiplies the logits by `logits_scaling`
+    (
+        "hyperclovax",
+        "HyperCLOVAXForCausalLM",
+        {"logits_scaling": 0.125},
+        {"lm_head.weight": "lm_head.weight"},
+    ),
+    # dense -> act -> norm in `lm_head`, then the biased output embeddings `decoder`
+    (
+        "modernbert-decoder",
+        "ModernBertDecoderForCausalLM",
+        {},
+        {"decoder.weight": "lm_head.weight", "decoder.bias": "lm_head.bias"},
+    ),
+    # The output embeddings are nested inside the module which transforms first,
+    # whose `bias` aliases theirs
+    (
+        "roberta",
+        "RobertaForCausalLM",
+        {"is_decoder": True},
+        {
+            "lm_head.decoder.weight": "lm_head.weight",
+            "lm_head.decoder.bias": "lm_head.bias",
+            "lm_head.bias": "lm_head.bias",
+        },
+    ),
+]
+
+
+@pytest.mark.parametrize(("model_type", "arch", "overrides", "renames"), OUTPUT_HEADS)
+def test_output_head_reproduces_logits(model_type, arch, overrides, renames):
+    """Everything after the base model, with the output embeddings swapped for a
+    projection, gives the HF logits from the base model's hidden states."""
+    torch.manual_seed(0)
+    model = build_causal_lm(model_type, arch, "cpu", **overrides).eval()
+    hidden_states = torch.randn(1, 3, model.config.hidden_size)
+
+    def replace_hidden_states(module, args, output):
+        output.last_hidden_state = hidden_states
+        return output
+
+    model.base_model.register_forward_hook(replace_hidden_states)
+    with torch.no_grad():
+        expected = model(input_ids=torch.zeros(1, 3, dtype=torch.long)).logits
+
+        embeddings = model.get_output_embeddings()
+        output_head = to_output_head(model, type(model.base_model), embeddings)
+        assert output_head is not None
+        assert output_head[0] is embeddings
+        assert output_head[1] == renames
+        assert not any(p is embeddings.weight for p in model.parameters())
+        logits = model(inputs_embeds=hidden_states).logits
+
+    torch.testing.assert_close(logits, expected)
+
+
+@pytest.mark.parametrize(("model_type", "arch", "overrides", "renames"), OUTPUT_HEADS)
+def test_only_projection_is_detected(model_type, arch, overrides, renames):
+    """Only heads which apply nothing but their output embeddings are skipped."""
+    model = build_causal_lm(model_type, arch, "meta", **overrides)
+    embeddings = model.get_output_embeddings()
+    assert to_output_head(model, type(model.base_model), embeddings) is not None
+    only_projection = probe_output_head(model, model.config.hidden_size)
+    assert only_projection is (arch == "LlamaForCausalLM")
+
+
+def test_output_head_calling_base_model_submodule():
+    """OPT calls its base model's decoder directly, which the stub also serves."""
+    model = build_causal_lm("opt", "OPTForCausalLM", "meta", ffn_dim=128)
+    embeddings = model.get_output_embeddings()
+    assert to_output_head(model, type(model.base_model), embeddings) is not None
+    assert probe_output_head(model, model.config.hidden_size)
+
+
+def test_transformers_model_class_honours_remote_code_config(monkeypatch):
+    """Remote code is loaded with the model's revisions and `trust_remote_code`."""
+    calls = []
+
+    def fake_get_class(class_reference, model, **kwargs):
+        calls.append((class_reference, model, kwargs))
+        return nn.Module
+
+    monkeypatch.setattr(
+        dynamic_module, "try_get_class_from_dynamic_module", fake_get_class
+    )
+    model_config = SimpleNamespace(
+        model="org/repo",
+        revision="abc",
+        code_revision="def",
+        trust_remote_code=True,
+        hf_config=SimpleNamespace(
+            auto_map={
+                "AutoConfig": "configuration_x.XConfig",
+                "AutoModel": "modeling_x.XModel",
+                "AutoModelForCausalLM": "modeling_x.XForCausalLM",
+            }
+        ),
+    )
+
+    assert get_transformers_model_class("XForCausalLM", model_config) is nn.Module
+    assert calls == [
+        (
+            "modeling_x.XForCausalLM",
+            "org/repo",
+            {"trust_remote_code": True, "revision": "abc", "code_revision": "def"},
+        )
+    ]
+
+
+def build_classifier(auto_cls, model_type: str, **overrides):
+    """A tiny HF `For*Classification` model of one layer, in float32, on CPU."""
+    config = AutoConfig.for_model(
+        model_type,
+        num_hidden_layers=1,
+        hidden_size=64,
+        intermediate_size=128,
+        num_attention_heads=4,
+        vocab_size=VOCAB_SIZE,
+        num_labels=3,
+        pad_token_id=0,
+        **overrides,
+    )
+    return auto_cls.from_config(config, dtype=torch.float32).eval()
+
+
+def classification_head(model, pooled: bool) -> ClassificationHead:
+    base_model_cls = type(model.base_model)
+    assert replace_base_model(model, base_model_cls)
+    return ClassificationHead(model, pooled, torch.float32)
+
+
+CLASSIFIERS = [
+    # (model_type, vLLM pooling type, overrides)
+    ("modernbert", "CLS", {"classifier_pooling": "cls"}),
+    ("modernbert", "MEAN", {"classifier_pooling": "mean"}),
+    # Pools inside its `classifier`
+    ("roberta", "CLS", {}),
+    # Pools inside its `pooler`, then applies a dense layer
+    ("deberta-v2", "CLS", {}),
+    # Applies an inline `nn.ReLU()`
+    ("distilbert", "CLS", {"dim": 64, "n_layers": 1, "n_heads": 4}),
+    # Scores every token, then picks the last
+    ("qwen3", "LAST", {"num_key_value_heads": 2, "head_dim": 16}),
+]
+
+
+@pytest.mark.parametrize(("model_type", "pooling_type", "overrides"), CLASSIFIERS)
+@pytest.mark.parametrize("pooled", [True, False], ids=["seq_cls", "token_cls"])
+def test_classification_head_reproduces_logits(
+    model_type, pooling_type, overrides, pooled
+):
+    """The head applied to vLLM's pooled (or per token) hidden states gives HF's
+    logits, and the probe accepts it."""
+    torch.manual_seed(0)
+    auto_cls = (
+        AutoModelForSequenceClassification
+        if pooled
+        else AutoModelForTokenClassification
+    )
+    model = build_classifier(auto_cls, model_type, **overrides)
+    input_ids = torch.randint(1, VOCAB_SIZE, (1, 6))
+    with torch.no_grad():
+        expected = model(input_ids=input_ids).logits
+        hidden_states = model.base_model(input_ids=input_ids).last_hidden_state[0]
+        head = classification_head(model, pooled)
+        if pooled:
+            hidden_states = {
+                "CLS": hidden_states[:1],
+                "MEAN": hidden_states.mean(0, keepdim=True),
+                "LAST": hidden_states[-1:],
+            }[pooling_type]
+        actual = head(hidden_states)
+    torch.testing.assert_close(actual, expected.reshape(actual.shape))
+    hidden_size = model.config.get_text_config().hidden_size
+    assert probe_classification_head(head, hidden_size, pooling_type) is None
+
+
+def test_classification_head_probe_rejects_wrong_pooling():
+    """A mean pooling model can't follow CLS pooling, unless the user chose it."""
+    model = build_classifier(
+        AutoModelForSequenceClassification, "modernbert", classifier_pooling="mean"
+    )
+    head = classification_head(model.to("meta"), pooled=True)
+    reason = probe_classification_head(head, 64, "CLS")
+    assert reason is not None and "pool" in reason
+    # vLLM builds models with their dtype as the default
+    with set_default_torch_dtype(torch.float16):
+        assert probe_classification_head(head, 64, "MEAN") is None
+    assert probe_classification_head(head, 64, None) is None
+
+
+def test_classification_head_probe_rejects_base_model_pooler():
+    """BERT classifies `pooler_output`, which the base model computes."""
+    model = build_classifier(AutoModelForSequenceClassification, "bert")
+    head = classification_head(model, pooled=True)
+    reason = probe_classification_head(head, 64, "CLS")
+    assert reason is not None and "failed to run" in reason
 
 
 # The smallest sizes the fused MoE kernels accept

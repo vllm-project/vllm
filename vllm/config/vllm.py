@@ -2837,6 +2837,8 @@ class VllmConfig:
                 architecture, self.model_config
             )
             cls = MODELS_CONFIG_MAP.get(architecture, None)
+        if cls is None and self.model_config.using_transformers_backend():
+            cls = MODELS_CONFIG_MAP.get(self.model_config._model_info.architecture)
         if cls is not None:
             cls.verify_and_update_config(self)
 

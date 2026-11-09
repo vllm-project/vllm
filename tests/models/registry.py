@@ -752,6 +752,7 @@ _REWARD_EXAMPLE_MODELS = {
 
 _TOKEN_CLASSIFICATION_EXAMPLE_MODELS = {
     "BertForTokenClassification": _HfExamplesInfo("vllm-project/NeuroBERT-NER"),
+    "DistilBertForTokenClassification": _HfExamplesInfo("dslim/distilbert-NER"),
     "ModernBertForTokenClassification": _HfExamplesInfo(
         "vllm-project/electrical-ner-ModernBERT-base"
     ),
@@ -780,6 +781,9 @@ _SEQUENCE_CLASSIFICATION_EXAMPLE_MODELS = {
             "d3-lite": "vllm-sr/d3-lite",
         },
         max_model_len=4096,
+    ),
+    "DistilBertForSequenceClassification": _HfExamplesInfo(
+        "distilbert/distilbert-base-uncased-finetuned-sst-2-english"
     ),
     "GPT2ForSequenceClassification": _HfExamplesInfo(
         "vllm-project/sentiment-polish-gpt2-small"
@@ -1930,6 +1934,10 @@ _TRANSFORMERS_BACKEND_MODELS = {
     "TransformersEmbeddingModel": _HfExamplesInfo("BAAI/bge-base-en-v1.5"),
     "TransformersForSequenceClassification": _HfExamplesInfo(
         "vllm-project/xlm-roberta-base-language-detection",
+    ),
+    "TransformersForTokenClassification": _HfExamplesInfo(
+        "disham993/electrical-ner-ModernBERT-base",
+        min_transformers_version="5.0.0",
     ),
     "TransformersForCausalLM": _HfExamplesInfo(
         "vllm-project/Ilama-3.2-1B", trust_remote_code=True

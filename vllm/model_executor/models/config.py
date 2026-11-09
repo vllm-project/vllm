@@ -1507,6 +1507,22 @@ class SnowflakeGteNewModelConfig(VerifyAndUpdateConfig):
         }
 
 
+class TransformersForSequenceClassificationConfig(VerifyAndUpdateConfig):
+    @staticmethod
+    def verify_and_update_model_config(model_config: "ModelConfig") -> None:
+        pooler_config = model_config.pooler_config
+        assert pooler_config is not None
+
+        # Prefer the HF classifier's pooling over the model default
+        sources = model_config._pooler_config_sources
+        classifier_pooling = getattr(model_config.hf_config, "classifier_pooling", None)
+        if sources.get(
+            "seq_pooling_type"
+        ) == "model_default" and classifier_pooling in ("cls", "mean"):
+            pooler_config.seq_pooling_type = classifier_pooling.upper()
+            sources["seq_pooling_type"] = "hf_config"
+
+
 class VoyageQwen3BidirectionalEmbedModelConfig(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_model_config(model_config: "ModelConfig") -> None:
@@ -1597,6 +1613,15 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "Qwen4ExpForCausalLM": Qwen4ExpForCausalLMConfig,
     "Qwen4ExpForConditionalGeneration": (Qwen4ExpForConditionalGenerationConfig),
     "Qwen4ExpMTP": Qwen4ExpMTPConfig,
+    "TransformersForSequenceClassification": (
+        TransformersForSequenceClassificationConfig
+    ),
+    "TransformersMoEForSequenceClassification": (
+        TransformersForSequenceClassificationConfig
+    ),
+    "TransformersMultiModalForSequenceClassification": (
+        TransformersForSequenceClassificationConfig
+    ),
     "UnlimitedOCRForCausalLM": UnlimitedOCRForCausalLMConfig,
     "VoyageQwen3BidirectionalEmbedModel": VoyageQwen3BidirectionalEmbedModelConfig,
     "XLMRobertaModel": JinaRobertaModelConfig,

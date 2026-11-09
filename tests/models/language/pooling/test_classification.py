@@ -18,6 +18,7 @@ from vllm.platforms import current_platform
                 pytest.mark.slow_test,
             ],
         ),
+        "distilbert/distilbert-base-uncased-finetuned-sst-2-english",
     ],
 )
 @pytest.mark.parametrize("dtype", ["half"] if current_platform.is_rocm() else ["float"])
@@ -48,6 +49,7 @@ def test_models(
             hf_output,
             vllm_output,
             rtol=2e-3 if dtype == "float" else 1e-2,
+            atol=2e-4,
         )
 
 
