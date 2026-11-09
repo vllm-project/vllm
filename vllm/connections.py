@@ -83,7 +83,7 @@ class MediaRequestDownloadBudget:
                 raise MediaRequestDownloadSizeExceededError(
                     "Request media downloads exceed "
                     f"VLLM_MAX_MEDIA_REQUEST_DOWNLOAD_SIZE_MB={limit_mb:g} "
-                    f"({received} bytes received)."
+                    f"({received} bytes received, including retried attempts)."
                 )
             self.used = received
 
@@ -204,6 +204,7 @@ def _is_retryable(exc: Exception) -> bool:
     Retryable:
       - Timeouts (aiohttp, requests, stdlib)
       - Connection-level failures (refused, reset, DNS)
+      - Response-body transfer failures (incomplete or malformed payloads)
       - Server errors (5xx) -- includes S3 503 SlowDown
     Not retryable:
       - Client errors (4xx) -- bad URL, auth, not-found
@@ -228,6 +229,12 @@ def _is_retryable(exc: Exception) -> bool:
             aiohttp.ClientConnectionError,
             requests.exceptions.ConnectionError,
         ),
+    ):
+        return True
+    # A connection closed during a body read can raise a payload error.
+    if isinstance(
+        exc,
+        (aiohttp.ClientPayloadError, requests.exceptions.ChunkedEncodingError),
     ):
         return True
     # aiohttp server-side disconnects
@@ -281,9 +288,9 @@ def _sync_retry(
 ) -> Callable[_P, _T]:
     """Add retry logic with exponential backoff to a sync method.
 
-    The decorated method must accept ``timeout`` as a keyword argument.
+    The decorated method must accept `timeout` as a keyword argument.
     The decorator replaces it with a per-attempt timeout that grows by
-    ``_RETRY_BACKOFF_FACTOR`` on each retry so transient slowness on busy
+    `_RETRY_BACKOFF_FACTOR` on each retry so transient slowness on busy
     hosts is absorbed.
     """
 
@@ -327,9 +334,9 @@ def _async_retry(
 ) -> Callable[_P, Coroutine[Any, Any, _T]]:
     """Add retry logic with exponential backoff to an async method.
 
-    The decorated method must accept ``timeout`` as a keyword argument.
+    The decorated method must accept `timeout` as a keyword argument.
     The decorator replaces it with a per-attempt timeout that grows by
-    ``_RETRY_BACKOFF_FACTOR`` on each retry so transient slowness on busy
+    `_RETRY_BACKOFF_FACTOR` on each retry so transient slowness on busy
     hosts is absorbed.
     """
 

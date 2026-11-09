@@ -71,8 +71,8 @@ def compress_norm_rope_store_triton(
 ) -> None:
     """Shared triton launcher for the fused compress+norm+RoPE+insert path.
 
-    Picks one of the three kernels in this module based on ``head_dim`` and
-    ``use_fp4_cache``. Identical launch signature for all three.
+    Picks one of the three kernels in this module based on `head_dim` and
+    `use_fp4_cache`. Identical launch signature for all three.
     """
     if head_dim == 512:
         kernel = _fused_kv_compress_norm_rope_insert_sparse_attn
@@ -189,7 +189,7 @@ def _fused_kv_compress_norm_rope_insert_sparse_attn(
 
     One program per token; early-exits for non-boundary positions.
 
-    Cache block layout (``block_size`` tokens):
+    Cache block layout (`block_size` tokens):
       [0, bs*576):       token data (448 fp8 + 128 bf16 each)
       [bs*576, +bs*8):   uint8 UE8M0 scales (7 real + 1 pad each)
     """
@@ -756,7 +756,7 @@ def _fused_kv_compress_norm_rope_insert_indexer_attn(
 
     For head_dim=128 we have exactly one quant block, so we skip the
     [N_QUANT_BLOCKS, QUANT_BLOCK] reshape entirely and use a flat
-    ``tl.max`` reduction.
+    `tl.max` reduction.
     """
     token_idx = tl.program_id(0)
 
@@ -933,14 +933,14 @@ def _fused_kv_compress_norm_rope_insert_indexer_mxfp4_attn(
     TOKEN_STRIDE: tl.constexpr,  # HEAD_SIZE // 2 = 64 packed bytes/token
     SCALE_DIM: tl.constexpr,  # HEAD_SIZE // QUANT_BLOCK = 4 ue8m0 bytes/token
     KV_BLOCK_STRIDE: tl.constexpr,
-PRESHUFFLE: tl.constexpr = False,
     MX_SCALE: tl.constexpr,  # unused for MXFP4 (kept for signature parity)
+    PRESHUFFLE: tl.constexpr = False,
 ):
     """Fused compress → RMSNorm → RoPE → MXFP4 quant → store.
 
     One program per token; early-exits for non-boundary positions.
 
-    Cache block layout (``block_size`` tokens per cache block):
+    Cache block layout (`block_size` tokens per cache block):
       [0, bs*TOKEN_STRIDE):        packed MXFP4 nibbles (2 values/byte)
       [bs*TOKEN_STRIDE, +bs*SCALE_DIM): ue8m0 scale bytes (one per 32-elem block)
 
@@ -1219,6 +1219,10 @@ class FusedKVCompressNormRopeInsertIndexerTritonKernel(
         )
 
         use_fp4_cache = dsa_indexer_uses_fp4(vllm_config)
+        # The MXFP4 variant packs FP4 with CUDA PTX; ROCm writes the MXFP4
+        # indexer cache with aiter's op instead.
+        if use_fp4_cache and current_platform.is_rocm():
+            return []
         head_dim = int(getattr(hf_config, "index_head_dim", 0) or 0)
         rope_head_dim = int(getattr(hf_config, "qk_rope_head_dim", 0) or 0)
         if head_dim <= 0 or rope_head_dim <= 0 or cache_block_size <= 0:
@@ -1332,7 +1336,7 @@ class FusedKVCompressNormRopeInsertIndexerTritonKernel(
             TOKEN_STRIDE=token_stride,
             SCALE_DIM=scale_dim,
             KV_BLOCK_STRIDE=kv_cache.stride(0),
-PRESHUFFLE=bool(use_fp4_cache and current_platform.is_rocm()),
+            PRESHUFFLE=bool(use_fp4_cache and current_platform.is_rocm()),
             MX_SCALE=not use_fp4_cache and mqa_logits_use_mx_scales(),
             num_warps=1,
             **pdl_kwargs,

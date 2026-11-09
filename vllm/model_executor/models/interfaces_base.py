@@ -51,6 +51,15 @@ class VllmModel(Protocol):
         self, input_ids: torch.Tensor, positions: torch.Tensor
     ) -> torch.Tensor: ...
 
+    def is_unused_checkpoint_weight(self, name: str) -> bool:
+        """Return True for checkpoint weights this model does not load.
+
+        Defining this method is optional for satisfying this interface.
+        Override with the same rule used in `load_weights`. Models without
+        a selection rule keep every checkpoint weight by default.
+        """
+        return False
+
 
 def _check_vllm_model_init(model: type[object] | object) -> bool:
     model_init = getattr(model, "__init__")  # noqa: B009
@@ -134,10 +143,8 @@ def is_text_generation_model(
     if not is_vllm_model(model):
         return False
 
-    if isinstance(model, type):
-        return isinstance(model, VllmModelForTextGeneration)
-
-    return isinstance(model, VllmModelForTextGeneration)
+    # Optional protocol defaults are not inherited by structural models.
+    return callable(getattr(model, "compute_logits", None))
 
 
 @runtime_checkable
@@ -189,19 +196,20 @@ class VllmModelForPooling(VllmModel, Protocol):
     Indicates the
     [vllm.config.model.ModelConfig.score_type][]
     to use by default.
-    
-    Scoring API handles score/rerank for:\n
-    - "classify" task (score_type: cross-encoder models)\n
-    - "embed" task (score_type: bi-encoder models)\n
-    - "token_embed" task (score_type: late interaction models)\n
-    
-    score_type defaults to bi-encoder, then the Score API uses the "embed" task.\n
-    If you set score_type to cross-encoder via 
-    [vllm.model_executor.models.interfaces.SupportsCrossEncoding][], 
-    then the Score API uses the "score" task.\n
-    If you set score_type to late-interaction via 
-    [vllm.model_executor.models.interfaces.SupportsLateInteraction][], 
-    then the Score API uses the "token_embed" task.\n
+
+    Scoring API handles score/rerank for:
+
+    - "classify" task (score_type: cross-encoder models)
+    - "embed" task (score_type: bi-encoder models)
+    - "token_embed" task (score_type: late interaction models)
+
+    score_type defaults to bi-encoder, then the Score API uses the "embed" task.
+    If you set score_type to cross-encoder via
+    [vllm.model_executor.models.interfaces.SupportsCrossEncoding][],
+    then the Score API uses the "score" task.
+    If you set score_type to late-interaction via
+    [vllm.model_executor.models.interfaces.SupportsLateInteraction][],
+    then the Score API uses the "token_embed" task.
     """
 
     pooler: Pooler

@@ -1,0 +1,143 @@
+meta:
+  title: "InternVL3.5"
+  slug: "internvl3.5"
+  provider: "InternVL (OpenGVLab)"
+  description: "InternVL 3.5 vision-language models from Shanghai AI Lab with thinking-mode prompting"
+  date_added: 2025-09-20
+  date_updated: 2026-04-17
+  tasks:
+    - multimodal
+  related_recipes:
+    - internlm/Intern-S1
+  hardware:
+    h100: verified
+    mi300x: verified
+    mi325x: verified
+    mi355x: verified
+
+model:
+  model_id: "OpenGVLab/InternVL3_5-8B"
+  min_vllm_version: "0.10.0"
+  architecture: dense
+  parameter_count: "8B"
+  active_parameters: "8B"
+  context_length: 40960
+  base_args:
+    - "--trust-remote-code"
+  base_env: {}
+
+features:
+  text_only:
+    description: "Skip loading the vision encoder for text-only workloads — frees VRAM for KV cache. Mutually exclusive with encoder_parallel."
+    args:
+      - "--language-model-only"
+  encoder_parallel:
+    description: "Run the vision encoder in data-parallel mode — avoids TP comm overhead on the small encoder. Mutually exclusive with text_only."
+    args:
+      - "--mm-encoder-tp-mode"
+      - "data"
+
+opt_in_features:
+  - text_only
+  - encoder_parallel
+
+variants:
+  default:
+    precision: bf16
+    vram_minimum_gb: 19
+    description: "BF16 weights for the 8B variant"
+
+compatible_strategies:
+  - single_node_tp
+  - multi_node_tp
+
+kv_offload_support:
+  offloading_cpu: verified
+  offloading_fs: verified
+
+hardware_overrides: {}
+strategy_overrides: {}
+
+guide: |
+  ## Overview
+
+  [InternVL3.5](https://github.com/OpenGVLab/InternVL) is a vision-language model developed
+  by Shanghai AI Laboratory. It supports single-image and multi-image prompts, plus an
+  optional "thinking mode" via a custom system prompt.
+
+  ## Prerequisites
+
+  - Hardware: 1x GPU with >=20 GB VRAM (A100, L40S, H100, etc.)
+  - vLLM >= 0.10.0
+
+  ### Install vLLM (CUDA)
+
+  ```bash
+  uv venv
+  source .venv/bin/activate
+  uv pip install -U vllm --torch-backend auto
+  ```
+
+  ### Install vLLM (AMD ROCm MI300X/MI325X/MI355X)
+
+  ```bash
+  uv pip install vllm --extra-index-url https://wheels.vllm.ai/rocm/0.14.1/rocm700
+  ```
+
+  ## Launch command
+
+  ```bash
+  vllm serve OpenGVLab/InternVL3_5-8B --trust-remote-code
+  ```
+
+  On AMD:
+
+  ```bash
+  export VLLM_ROCM_USE_AITER=1
+  vllm serve OpenGVLab/InternVL3_5-8B --trust-remote-code
+  ```
+
+  ## Client Usage
+
+  Single image:
+
+  ```python
+  from openai import OpenAI
+  client = OpenAI(api_key="", base_url="http://0.0.0.0:8000/v1")
+  model_name = client.models.list().data[0].id
+
+  response = client.chat.completions.create(
+      model=model_name,
+      messages=[{
+          "role": "user",
+          "content": [
+              {"type": "text", "text": "Describe the image."},
+              {"type": "image_url", "image_url": {"url": "https://raw.githubusercontent.com/open-mmlab/mmdeploy/main/tests/data/tiger.jpeg"}},
+          ],
+      }],
+      temperature=0.0,
+  )
+  print(response.choices[0].message.content)
+  ```
+
+  ## Thinking Mode
+
+  Set a thinking system prompt and use `temperature=0.6` to mitigate repetition:
+
+  ```python
+  THINKING_SYSTEM_PROMPT = """
+  You are an AI assistant that rigorously follows this response protocol:
+
+  1. First, conduct a detailed analysis of the question. Consider different angles, potential
+  solutions, and reason through the problem step-by-step. Enclose this entire thinking process
+  within <think> and </think> tags.
+
+  2. After the thinking section, provide a clear, concise, and direct answer to the user's
+  question. Separate the answer from the think section with a newline.
+  """.strip()
+  ```
+
+  ## References
+
+  - [InternVL3.5-8B](https://huggingface.co/OpenGVLab/InternVL3_5-8B)
+  - [InternVL GitHub](https://github.com/OpenGVLab/InternVL)

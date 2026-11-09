@@ -16,7 +16,7 @@ pytestmark = pytest.mark.skip_global_cleanup
 class MiniMaxM3Tokenizer:
     """Small tokenizer with MiniMax M3 reasoning tags as special tokens."""
 
-    special_tokens = ("<mm:think>", "</mm:think>")
+    special_tokens = ("<mm:think>", "</mm:think>", "]~b]")
 
     def __init__(self):
         self._token_to_id: dict[str, int] = {}
@@ -458,4 +458,39 @@ def test_token_id_helpers_enabled_mode():
     assert parser.count_reasoning_tokens(output_ids) == len(tokenizer.encode("abc"))
     assert parser.count_reasoning_tokens(open_reasoning_ids) == len(
         tokenizer.encode("abc")
+    )
+
+
+# Rendered like the MiniMax-M3.1 chat template: the system message spells out
+# both markers, and a prior assistant turn without reasoning is prefixed with
+# the closer.
+PROMPT = (
+    "]~b]system\nWrap your reasoning in <mm:think></mm:think> tags, or begin "
+    "directly after the </mm:think> prefix.[e~[\n"
+    "]~b]user\nCapital of France?[e~[\n"
+    "]~b]ai\n</mm:think>Paris.[e~[\n"
+    "]~b]user\nAnd Germany?[e~[\n"
+    "]~b]ai\n"
+)
+
+
+def test_prompt_markers_do_not_end_reasoning():
+    parser, tokenizer = make_parser()
+    prompt_ids = tokenizer.encode(PROMPT)
+
+    assert not parser.is_reasoning_end(prompt_ids)
+    assert not parser.is_reasoning_end(tokenizer.encode(PROMPT + "<mm:think>ab"))
+    assert parser.is_reasoning_end(tokenizer.encode(PROMPT + "<mm:think>a</mm:think>"))
+    assert parser.is_reasoning_end(tokenizer.encode(PROMPT + "</mm:think>Berlin"))
+
+
+def test_streaming_end_check_ignores_prompt_markers():
+    parser, tokenizer = make_parser()
+    prompt_ids = tokenizer.encode(PROMPT)
+    open_ids = tokenizer.encode("<mm:think>ab")
+    closed_ids = tokenizer.encode("</mm:think>")
+
+    assert not parser.is_reasoning_end_streaming(prompt_ids + open_ids, open_ids[-1:])
+    assert parser.is_reasoning_end_streaming(
+        prompt_ids + open_ids + closed_ids, closed_ids
     )

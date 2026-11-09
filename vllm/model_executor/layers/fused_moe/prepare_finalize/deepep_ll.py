@@ -13,6 +13,7 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate,
 )
 from vllm.model_executor.layers.fused_moe.utils import (
+    masked_amax_scale,
     moe_kernel_quantize_input,
     normalize_batched_scales_shape,
 )
@@ -158,6 +159,7 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         x: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
         a1_dtype: torch.dtype,
         quant_config: FusedMoEQuantConfig,
+        expert_num_tokens: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         if self.use_fp8_dispatch:
             block_k = (
@@ -202,11 +204,22 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             assert isinstance(x, torch.Tensor)
             num_experts, max_tokens, hidden_dim = x.size()
 
-            # TODO (varun): Optimization - Use a batched version of quant
             x = x.view((-1, hidden_dim))
+            # The dispatch buffer is worst-case per expert, so rows past
+            # `expert_num_tokens[e]` hold stale tokens and must not contribute
+            # to a per-tensor scale.
+            a1_scale = quant_config.a1_scale
+            if quant_config.act_scale_is_tensor_wide(a1_scale):
+                a1_scale = masked_amax_scale(
+                    x,
+                    q_dtype,
+                    expert_num_tokens=expert_num_tokens,
+                    rows_per_expert=max_tokens,
+                )
+            # TODO (varun): Optimization - Use a batched version of quant
             x, x_scales = moe_kernel_quantize_input(
                 x,
-                quant_config.a1_scale,
+                a1_scale,
                 q_dtype,
                 quant_config.per_act_token_quant,
                 quant_config.block_shape,
@@ -329,7 +342,9 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         a1_dtype: torch.dtype,
         quant_config: FusedMoEQuantConfig,
     ) -> mk.PrepareResultType:
-        expert_x, expert_x_scale = self._do_quant(expert_x, a1_dtype, quant_config)
+        expert_x, expert_x_scale = self._do_quant(
+            expert_x, a1_dtype, quant_config, expert_num_tokens
+        )
 
         expert_tokens_meta = mk.ExpertTokensMetadata(
             expert_num_tokens=expert_num_tokens, expert_num_tokens_cpu=None

@@ -3,16 +3,16 @@
 """Accuracy test for the ROCm AITER FP8 MLA prefill path.
 
 The FP8 MLA prefill path
-(``AiterMLAImpl._mla_fp8_prefill_attn`` -> ``mla_prefill_ps_asm_fwd`` +
-``mla_reduce_v1``) is auto-enabled on gfx950 (MI355) when AITER ships those
+(`AiterMLAImpl._mla_fp8_prefill_attn` -> `mla_prefill_ps_asm_fwd` +
+`mla_reduce_v1`) is auto-enabled on gfx950 (MI355) when AITER ships those
 kernels, and it has no other test coverage. This test drives the *real*
-metadata builder and impl methods (via ``object.__new__``, mirroring
-``test_rocm_aiter_mla_head_padding.py::test_h12_aiter_mla_decode_matches_reference``)
+metadata builder and impl methods (via `object.__new__`, mirroring
+`test_rocm_aiter_mla_head_padding.py::test_h12_aiter_mla_decode_matches_reference`)
 so it exercises the actual persistent-scheduling metadata contract
-(``get_ps_metadata_v1``) plus both kernels -- rather than re-implementing them --
+(`get_ps_metadata_v1`) plus both kernels -- rather than re-implementing them --
 and compares the output against a causal SDPA reference.
 
-gfx950-only: ``mla_prefill_ps_asm_fwd`` has no gfx942 build, so this is skipped
+gfx950-only: `mla_prefill_ps_asm_fwd` has no gfx942 build, so this is skipped
 on every other platform.
 """
 
@@ -49,7 +49,8 @@ pytestmark = pytest.mark.skipif(
 # q/k/v up to get_fp8_prefill_num_heads(num_heads) and slices the output back.
 # Cover all four regimes:
 #    8 -> padded to 16 (divisor, repeat_interleave), so the real heads sit at
-#         stride 2 in the padded output. Live case: Kimi-K2.x at TP8.
+#         stride 2 in the padded output. is_valid_fp8_prefill_num_heads keeps
+#         Kimi-K2.x at TP8 off this path, but the unpad must stay correct.
 #   12 -> padded to 16 (non-divisor, tile+slice). Live case: a K3 rank at TP8.
 #   16 -> no padding, output aliases the caller's buffer.
 #   24 -> padded to 32. No current model and TP reaches this band (96 heads
@@ -78,7 +79,7 @@ ATTN_OUT_DTYPE = torch.bfloat16
 @pytest.fixture(autouse=True)
 def _workspace_manager():
     """The FP8 prefill path draws per-call scratch from the global workspace
-    manager, which ``GPUModelRunner.__init__`` normally initializes. Set it up
+    manager, which `GPUModelRunner.__init__` normally initializes. Set it up
     for the test and tear it down so no global state leaks to other tests.
     """
     from vllm.v1.worker.workspace import (
@@ -103,6 +104,7 @@ def _make_impl(num_heads: int):
     impl.scale = SCALE
     impl._mla_prefill_ps_asm_fwd = mla_prefill_ps_asm_fwd
     impl._mla_reduce_v1 = mla_reduce_v1
+    impl._fp8_prefill_one_scale = None
     return impl
 
 
@@ -201,8 +203,8 @@ def test_fp8_prefill_matches_reference(seq_len: int, num_heads: int) -> None:
 def test_fp8_prefill_metadata_width_matches_forward(num_heads: int) -> None:
     """The PS metadata must be built for the head count the kernel is handed.
 
-    ``_init_fp8_prefill_ps_buffers``/``build()`` size the work and reduce maps
-    from ``num_head_k``, while ``_mla_fp8_prefill_attn`` pads q/k/v to its own
+    `_init_fp8_prefill_ps_buffers`/`build()` size the work and reduce maps
+    from `num_head_k`, while `_mla_fp8_prefill_attn` pads q/k/v to its own
     target. Divergence is not a numerical bug in either direction -- maps built
     narrower than the kernel width still cover the real heads, since padding
     only ever appends duplicate heads above them. It is a sizing bug: narrower

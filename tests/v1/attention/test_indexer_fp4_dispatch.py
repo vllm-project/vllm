@@ -7,7 +7,9 @@ from types import ModuleType, SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
+from transformers import PretrainedConfig
 
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import AttentionConfig
 from vllm.v1.attention.backends.mla import indexer
 
@@ -72,6 +74,9 @@ def _config(dtype=None, *, dcp=1, pcp=1):
     )
     return SimpleNamespace(
         attention_config=attention,
+        model_config=SimpleNamespace(
+            hf_config=PretrainedConfig(model_type="deepseek_v41")
+        ),
         parallel_config=SimpleNamespace(
             decode_context_parallel_size=dcp,
             prefill_context_parallel_size=pcp,
@@ -89,10 +94,11 @@ def _platform(monkeypatch, *, rocm, capability=100, gfx950=True):
     monkeypatch.setattr(indexer, "current_platform", platform)
     # Avoid importing ROCm driver libraries on CUDA/CPU hosts.
     rocm_module = ModuleType("vllm.platforms.rocm")
-    on_gfx950 = Mock(return_value=gfx950)
-    rocm_module.on_gfx950 = on_gfx950  # type: ignore[attr-defined]
+    cdna_version = Mock(return_value=4 if gfx950 else 3)
+    rocm_module.get_cdna_version = cdna_version  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "vllm.platforms.rocm", rocm_module)
-    return platform, on_gfx950
+    monkeypatch.setattr(rocm_aiter_ops, "is_enabled", lambda: True)
+    return platform, cdna_version
 
 
 @pytest.mark.parametrize("rocm", [False, True])
@@ -125,7 +131,7 @@ def test_rocm_fp4_rejects_other_architectures_before_aiter(monkeypatch):
     aiter_probe = Mock(side_effect=AssertionError("unsupported GPU must fail first"))
     monkeypatch.setattr(indexer, "aiter_mxfp4_available", aiter_probe)
 
-    with pytest.raises(ValueError, match="requires gfx950"):
+    with pytest.raises(ValueError, match="requires CDNA4"):
         indexer.dsa_indexer_uses_fp4(_config("mxfp4"))
     aiter_probe.assert_not_called()
 

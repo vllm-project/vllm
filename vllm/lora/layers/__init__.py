@@ -1,7 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from vllm.lora.layers.base import BaseLayerWithLoRA
-from vllm.lora.layers.classifier import ClassificationHeadWithLoRA
+from vllm.lora.layers.classifier import (
+    BaseClassificationHeadWithLoRA,
+    ClassificationHeadWithLoRA,
+    TokenClassificationHeadWithLoRA,
+)
 from vllm.lora.layers.column_parallel_linear import (
     ColumnParallelLinearWithLoRA,
     ColumnParallelLinearWithShardedLoRA,
@@ -12,6 +16,12 @@ from vllm.lora.layers.column_parallel_linear import (
     MergedQKVParallelLinearWithShardedLoRA,
     QKVParallelLinearWithLoRA,
     QKVParallelLinearWithShardedLoRA,
+)
+from vllm.lora.layers.custom_layer import (
+    DeepseekV4CompressorKVScoreWithLoRA,
+    DeepseekV4GroupedWoAWithLoRA,
+    Step5FusedQKVIndexerWithLoRA,
+    Step5SparseIndexerWWithLoRA,
 )
 from vllm.lora.layers.fused_moe import FusedMoE3DWithLoRA, FusedMoEWithLoRA
 from vllm.lora.layers.logits_processor import LogitsProcessorWithLoRA
@@ -25,6 +35,10 @@ from vllm.lora.layers.vocab_parallel_embedding import VocabParallelEmbeddingWith
 
 __all__ = [
     "BaseLayerWithLoRA",
+    "DeepseekV4CompressorKVScoreWithLoRA",
+    "DeepseekV4GroupedWoAWithLoRA",
+    "Step5FusedQKVIndexerWithLoRA",
+    "Step5SparseIndexerWWithLoRA",
     "VocabParallelEmbeddingWithLoRA",
     "LogitsProcessorWithLoRA",
     "ColumnParallelLinearWithLoRA",
@@ -44,4 +58,6 @@ __all__ = [
     "FusedMoEWithLoRA",
     "FusedMoE3DWithLoRA",
     "ClassificationHeadWithLoRA",
+    "BaseClassificationHeadWithLoRA",
+    "TokenClassificationHeadWithLoRA",
 ]
