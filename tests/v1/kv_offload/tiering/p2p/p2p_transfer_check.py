@@ -32,9 +32,10 @@ DECODE_METRICS_URLS = os.environ.get(
 BLOCK_SIZE = int(os.environ.get("DECODE_BLOCK_SIZE", "128"))
 NUM_PROMPTS = int(os.environ.get("NUM_TRANSFER_PROMPTS", "8"))
 # Fraction of each prompt's full blocks that must come from the external tier.
-# Half the prompts missing, e.g. requests routed to the wrong source, stays
-# below it.
-MIN_HIT_FRACTION = 0.75
+# After the warm-up round a healthy run loads every block. This lets one of
+# the eight prompts be recomputed (e.g. a block evicted before the pull) and
+# fails anything worse, such as requests routed to the wrong source.
+MIN_HIT_FRACTION = 0.875
 # Counters are published from scheduler stats; give the last step a moment.
 COUNTER_TIMEOUT_S = 15
 EXPECT_TRANSFER = os.environ.get("EXPECT_TRANSFER", "1") == "1"
