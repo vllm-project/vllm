@@ -15,6 +15,7 @@ from .deepseek_scaling_rope import (
 from .dual_chunk_rope import DualChunkRotaryEmbedding
 from .dynamic_ntk_alpha_rope import DynamicNTKAlphaRotaryEmbedding
 from .dynamic_ntk_scaling_rope import DynamicNTKScalingRotaryEmbedding
+from .ernie45_vl_rope import Ernie4_5_VLRotaryEmbedding
 from .fope import FourierRotaryEmbedding
 from .gemma4_rope import Gemma4RotaryEmbedding
 from .linear_scaling_rope import LinearScalingRotaryEmbedding
@@ -108,6 +109,17 @@ def get_rope(
             is_neox_style,
             dtype,
             mrope_section=rope_parameters["mrope_section"],
+        )
+    elif scaling_type == "ernie45_vl":
+        rotary_emb = Ernie4_5_VLRotaryEmbedding(
+            head_size,
+            rotary_dim,
+            max_position,
+            base,
+            is_neox_style,
+            dtype,
+            mrope_section=rope_parameters["mrope_section"],
+            positions_factor=mrope_positions_factor,
         )
     elif scaling_type == "default":
         if "mrope_section" in rope_parameters:
