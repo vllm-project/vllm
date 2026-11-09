@@ -62,7 +62,6 @@ def _run(
     aiter: bool = False,
     cudagraph_mode: str = "NONE",
     async_scheduling: bool = False,
-    model_runner_v2: bool = True,
     speculative: bool = False,
     tp: int = 1,
     **overrides,
@@ -72,7 +71,6 @@ def _run(
 
     monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
     monkeypatch.setenv(AITER_ENV, "1" if aiter else "0")
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1" if model_runner_v2 else "0")
     eager = cudagraph_mode == "NONE"
     kwargs = engine_kwargs(
         **{
@@ -188,23 +186,19 @@ def _compare(vllm_runner, monkeypatch, tol=None, ref_kwargs=None, **kwargs):
 
 
 ENGINE_MODES = [
-    # (cudagraph_mode, async_scheduling, model_runner_v2)
-    ("NONE", True, True),
-    ("PIECEWISE", False, True),
-    ("FULL_DECODE_ONLY", True, True),
-    ("FULL_AND_PIECEWISE", True, True),
-    ("NONE", False, False),
-    ("FULL_AND_PIECEWISE", False, False),
+    # (cudagraph_mode, async_scheduling)
+    ("NONE", True),
+    ("PIECEWISE", False),
+    ("FULL_DECODE_ONLY", True),
+    ("FULL_AND_PIECEWISE", True),
+    ("NONE", False),
+    ("FULL_AND_PIECEWISE", False),
 ]
 
 
 @pytest.mark.parametrize("aiter", [False, True], ids=["triton", "aiter"])
-@pytest.mark.parametrize(
-    "cudagraph_mode, async_scheduling, model_runner_v2", ENGINE_MODES
-)
-def test_engine_modes(
-    vllm_runner, monkeypatch, aiter, cudagraph_mode, async_scheduling, model_runner_v2
-):
+@pytest.mark.parametrize("cudagraph_mode, async_scheduling", ENGINE_MODES)
+def test_engine_modes(vllm_runner, monkeypatch, aiter, cudagraph_mode, async_scheduling):
     from vllm.platforms.rocm import on_gfx950
 
     if aiter and not on_gfx950():
@@ -215,7 +209,6 @@ def test_engine_modes(
         aiter=aiter,
         cudagraph_mode=cudagraph_mode,
         async_scheduling=async_scheduling,
-        model_runner_v2=model_runner_v2,
     )
 
 
