@@ -74,10 +74,10 @@ def _kv_cache(layer) -> torch.Tensor:
 
 
 class DrafterRunner:
-    """The drafter kernels of one TP4 rank for one ``MiniMaxM3DSparkModel``.
+    """The drafter kernels of one TP4 rank for one `MiniMaxM3DSparkModel`.
 
     Built outside CUDA graph capture (the peer buffer's IPC exchange is collective);
-    a re-bound KV cache (``stale``) needs a new runner.
+    a re-bound KV cache (`stale`) needs a new runner.
     """
 
     def __init__(self, model) -> None:
