@@ -35,6 +35,7 @@ from vllm.models.kimi_k3.amd.specialized_decode.runtime.guards import (
     mla_weight_reasons,
     weight_reasons,
 )
+from vllm.platforms import current_platform
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 
@@ -317,6 +318,9 @@ def test_mla_without_m1_runs_vllm_ops(on_mi355x, monkeypatch, over, env, why):
     [
         ({"parallel_config.tensor_parallel_size": 4}, "TP 4"),
         ({"parallel_config.pipeline_parallel_size": 2}, "pipeline parallelism"),
+        ({"parallel_config.data_parallel_size": 2}, "data parallelism"),
+        ({"parallel_config.enable_expert_parallel": True}, "expert parallelism"),
+        ({"parallel_config.enable_eplb": True}, "EPLB"),
         ({"parallel_config.decode_context_parallel_size": 2}, "other than 1 or 8"),
         ({"parallel_config.decode_context_parallel_size": 4}, "other than 1 or 8"),
         (
@@ -327,22 +331,55 @@ def test_mla_without_m1_runs_vllm_ops(on_mi355x, monkeypatch, over, env, why):
             },
             "KV transfer connectors",
         ),
+        ({"parallel_config.prefill_context_parallel_size": 2}, "prefill context"),
+        ({"parallel_config.use_ubatching": True}, "DBO"),
+        ({"lora_config": object()}, "LoRA"),
+        ({"aux_output_config.enable_return_routed_experts": True}, "routed-expert"),
+        ({"model_config.enable_sleep_mode": True}, "sleep mode"),
+        ({"offload_config.uva.cpu_offload_gb": 4}, "CPU weight offload"),
+        ({"offload_config.prefetch.offload_group_size": 2}, "CPU weight offload"),
+        ({"weight_transfer_config": object()}, "weight updates"),
         ({"speculative_config": None}, "without speculative decoding"),
         ({"speculative_config.num_speculative_tokens": 16}, "more than 15"),
         ({"speculative_config.enable_adaptive_verification": True}, "adaptive"),
         ({"speculative_config.dynamic": True}, "dynamic speculative"),
         ({"cache_config.mamba_cache_dtype": "float32"}, "KDA cache dtypes"),
         ({"cache_config.use_replayssm": True}, "ReplaySSM"),
+        ({"cache_config.use_kda_recoverssm": True}, "RecoverSSM"),
         (
             {"compilation_config.mode": CompilationMode.STOCK_TORCH_COMPILE},
             "torch.compile",
         ),
         ({"model_config.hf_text_config.hidden_size": 4096}, "model shapes"),
+        ({"model_config.hf_text_config.attn_res_block_size": None}, "AttnRes"),
     ],
 )
 def test_refusals(on_mi355x, over, reason):
     reasons = runtime.unsupported(_vllm_config(**over))
     assert len(reasons) == 1 and reason in reasons[0], reasons
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm GPU checks")
+@pytest.mark.parametrize(
+    "rocm, gfx950, cus, want",
+    [
+        (False, True, 256, ["this platform (ROCm only)"]),
+        (True, False, 256, ["this GPU (gfx950 / MI355X only)"]),
+        (True, True, 80, ["80 CUs (a partitioned GPU; the kernels need 256)"]),
+        (True, True, 256, []),
+    ],
+)
+def test_platform_refusals(monkeypatch, rocm, gfx950, cus, want):
+    from vllm.platforms import rocm as rocm_platform
+
+    monkeypatch.setattr(current_platform, "is_rocm", lambda: rocm)
+    monkeypatch.setattr(rocm_platform, "on_gfx950", lambda: gfx950)
+    monkeypatch.setattr(
+        torch.cuda,
+        "get_device_properties",
+        lambda *args: SimpleNamespace(multi_processor_count=cus),
+    )
+    assert runtime.platform_reasons() == want
 
 
 @pytest.mark.parametrize("env", ["VLLM_ROCM_USE_AITER", "VLLM_ROCM_USE_AITER_MOE"])
@@ -457,6 +494,11 @@ def test_cache_refusal_names_the_cache():
     rstate = torch.zeros(2, 12, 128, 128, dtype=torch.bfloat16)
     reasons = cache_reasons({"layers.5.attn": (conv, rstate)})
     assert len(reasons) == 2 and all(r.startswith("layers.5.attn:") for r in reasons)
+    padded = torch.zeros(2, 12, 128, 256, dtype=torch.float32)[..., :128]
+    conv = conv.to(torch.bfloat16)
+    assert cache_reasons({"layers.5.attn": (conv, padded)}) == [
+        "layers.5.attn: a slot's recurrent state must be dense"
+    ]
 
 
 def test_cache_refusal_checks_the_mla_cache():
