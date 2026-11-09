@@ -167,6 +167,7 @@ For backward compatibility, passing an integer works as before and is interprete
     - The size hints affect memory profiling only. They shape the dummy inputs used to compute reserved activation sizes. They do not change how inputs are actually processed at inference time.
     - If a hint exceeds what the model can accept, vLLM clamps it to the model's effective maximum and may log a warning.
     - For Qwen2-VL-family models, increasing `max_model_len` can increase the profiled video size and reduce the memory available for the KV cache. Profiling remains subject to the processor's pixel limits and the frame cap. Set `video` hints to profile the videos you expect instead.
+    - For LLaVA-OneVision-2, the profiled video grows with `max_model_len` up to 14 full-size frames, which reduces the memory available for the KV cache. Size hints are not applied to its profiling; a smaller `max_model_len` profiles fewer frames.
 
 !!! warning
     These size hints currently only affect activation memory profiling. Encoder cache size is determined by the actual inputs at runtime and is not limited by these hints.

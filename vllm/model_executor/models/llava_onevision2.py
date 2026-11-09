@@ -1479,10 +1479,13 @@ class LlavaOnevision2DummyInputsBuilder(
         if n_img:
             out["image"] = self._get_dummy_images(width=w, height=h, num_images=n_img)
         if n_vid:
-            # 4 frames per dummy video keeps profiling cheap; the real frame
-            # count is decided by the HF VideoProcessor at apply time.
             out["video"] = self._get_dummy_videos(
-                width=w, height=h, num_frames=4, num_videos=n_vid
+                width=w,
+                height=h,
+                num_frames=self.info.get_num_frames_with_most_features(
+                    seq_len, mm_counts
+                ),
+                num_videos=n_vid,
             )
         return out
 
