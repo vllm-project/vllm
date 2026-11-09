@@ -402,6 +402,156 @@ def test_get_image_size_with_most_features(
         assert tokens < max_tokens
 
 
+@pytest.mark.parametrize(
+    ("model_id", "max_model_len", "mm_processor_kwargs"),
+    [
+        ("Qwen/Qwen2-VL-2B-Instruct", 20000, None),
+        ("Qwen/Qwen2.5-VL-3B-Instruct", 20000, None),
+        ("Qwen/Qwen2.5-VL-3B-Instruct", 20000, {"max_pixels": 4096 * 28 * 28}),
+        (
+            "Qwen/Qwen2.5-VL-3B-Instruct",
+            20000,
+            {
+                "videos_kwargs": {
+                    "size": {
+                        "shortest_edge": 4 * 28 * 28,
+                        "longest_edge": 4096 * 28 * 28,
+                    }
+                }
+            },
+        ),
+        ("Qwen/Qwen2.5-VL-3B-Instruct", 20000, {"videos_kwargs": {"do_resize": False}}),
+        ("LGAI-EXAONE/EXAONE-4.5-33B", 20000, None),
+    ],
+)
+def test_max_video_tokens_fills_context(
+    model_id: str,
+    max_model_len: int,
+    mm_processor_kwargs: dict[str, object] | None,
+) -> None:
+    ctx = build_model_context(
+        model_id,
+        mm_processor_kwargs=mm_processor_kwargs,
+        model_config_kwargs={"max_model_len": max_model_len},
+        limit_mm_per_prompt={"image": 0, "video": 1},
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    assert isinstance(processor.info, Qwen2VLProcessingInfo)
+
+    max_video_tokens = processor.info.get_mm_max_tokens_per_item(
+        max_model_len, {"video": 1}
+    )["video"]
+    dummy_inputs = processor.get_dummy_mm_inputs({"video": 1})
+    dummy_video_tokens = sum(
+        placeholder.get_num_embeds()
+        for placeholder in dummy_inputs["mm_placeholders"]["video"]
+    )
+
+    assert max_video_tokens == max_model_len
+    assert dummy_video_tokens == max_video_tokens
+
+
+def _count_video_tokens(processor_inputs) -> int:
+    return sum(
+        placeholder.get_num_embeds()
+        for placeholder in processor_inputs["mm_placeholders"]["video"]
+    )
+
+
+def test_dummy_video_follows_size_hint() -> None:
+    width, height, num_frames = 1400, 2800, 2
+    ctx = build_model_context(
+        "Qwen/Qwen2.5-VL-3B-Instruct",
+        model_config_kwargs={"max_model_len": 40000},
+        limit_mm_per_prompt={
+            "image": 0,
+            "video": {
+                "count": 1,
+                "width": width,
+                "height": height,
+                "num_frames": num_frames,
+            },
+        },
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+
+    video = np.zeros((num_frames, height, width, 3), dtype=np.uint8)
+    metadata = {
+        "fps": 2.0,
+        "duration": num_frames / 2.0,
+        "total_num_frames": num_frames,
+        "frames_indices": list(range(num_frames)),
+        "video_backend": "opencv",
+        "do_sample_frames": False,
+    }
+    processed = processor(
+        "<|vision_start|><|video_pad|><|vision_end|>",
+        mm_items=processor.info.parse_mm_data({"video": [(video, metadata)]}),
+        hf_processor_mm_kwargs={},
+    )
+
+    assert _count_video_tokens(
+        processor.get_dummy_mm_inputs({"video": 1})
+    ) == _count_video_tokens(processed)
+
+
+@pytest.mark.parametrize(
+    ("max_model_len", "mm_processor_kwargs", "video_options"),
+    [
+        (40000, None, {"count": 1, "width": 3584, "height": 3584}),
+        (40000, None, {"count": 1, "num_frames": 4}),
+        (5000, {"min_pixels": 4096 * 28 * 28, "max_pixels": 4096 * 28 * 28}, 1),
+    ],
+)
+def test_max_video_tokens_matches_dummy_video(
+    max_model_len: int,
+    mm_processor_kwargs: dict[str, object] | None,
+    video_options: dict[str, int] | int,
+) -> None:
+    ctx = build_model_context(
+        "Qwen/Qwen2.5-VL-3B-Instruct",
+        mm_processor_kwargs=mm_processor_kwargs,
+        model_config_kwargs={"max_model_len": max_model_len},
+        limit_mm_per_prompt={"image": 0, "video": video_options},
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    assert isinstance(processor.info, Qwen2VLProcessingInfo)
+
+    max_video_tokens = processor.info.get_mm_max_tokens_per_item(
+        max_model_len, {"video": 1}
+    )["video"]
+
+    assert max_video_tokens <= max_model_len
+    assert (
+        _count_video_tokens(processor.get_dummy_mm_inputs({"video": 1}))
+        == max_video_tokens
+    )
+
+
+def test_max_video_tokens_with_pruning_keeps_full_size_frames() -> None:
+    max_model_len = 40000
+    ctx = build_model_context(
+        "Qwen/Qwen2.5-VL-3B-Instruct",
+        model_config_kwargs={"max_model_len": max_model_len},
+        limit_mm_per_prompt={"image": 0, "video": 1},
+    )
+    ctx.model_config.multimodal_config.video_pruning_rate = 0.75
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    info = processor.info
+    assert isinstance(info, Qwen2VLProcessingInfo)
+
+    max_size = info.get_image_size_with_most_features()
+    assert info.get_max_video_tokens(
+        max_model_len, {"video": 1}
+    ) == info.get_num_video_tokens(
+        image_width=max_size.width,
+        image_height=max_size.height,
+        num_frames=info.get_num_frames_with_most_features(max_model_len, {"video": 1}),
+        image_processor=info.get_image_processor(),
+        mm_kwargs={},
+    )
+
+
 def _build_qwen2_5_vl_video_mm_data(num_frames: int, fps: float) -> dict[str, Any]:
     video = np.zeros((num_frames, 56, 56, 3), dtype=np.uint8)
     metadata = {
