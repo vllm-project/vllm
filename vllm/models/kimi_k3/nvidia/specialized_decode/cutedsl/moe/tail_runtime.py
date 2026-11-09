@@ -5,7 +5,7 @@ latent partial and peer-stores the shared shard (three rotating parities), all-r
 and RMS-normalizes per K-slice, runs the K-split up projection and multicasts the output
 row into the next AttnRes mailbox. At TP8 B5+ and TP16 B9+ the experts publish the
 latent partial, WaveMoeTail.push the shared shard and WaveMoeTail does the rest. At
-``twoshot_batches`` the latent all-reduce is ``common.twoshot``: the experts push each
+`twoshot_batches` the latent all-reduce is `common.twoshot`: the experts push each
 partial chunk to its column owner, whose WaveMoeTail CTAs sum and multicast it."""
 
 from functools import cache
@@ -31,8 +31,12 @@ CAP, POLL_CAP = 64, 8
 # B32 52.20/53.18, B64 79.27/81.50; TP16 B16 33.98/34.49, B32 42.19/42.52, B64
 # 65.05/60.51.
 TWOSHOT = {8: "", 16: "33-64:1"}
-# WaveMoeTail batches that release the next AttnRes at entry.
-EARLY = {8: "9-64:1", 16: "9-64:1"}
+# WaveMoeTail batches that release the next AttnRes at entry (every published batch:
+# TP8 B5+, TP16 B9+). The AttnRes then runs its saved-block statistics and exchange
+# beside the tail and only its Lamport poll waits for the output rows; the next input
+# projection's weight prologue starts with it. GB300 TP8 K3.1 DSpark k=4 step, R1 (B5),
+# ms, release after the output multicast -> at entry: DCP8 136.5K 10.26 -> 10.21.
+EARLY = {8: "1-64:1", 16: "9-64:1"}
 # WaveMoeTail batches whose up projection runs on tcgen05 (B9+; 1-GPU WaveMoeTail us
 # mma.sync vs tcgen05, B16/32/64: TP8 4.53/5.80/9.05 vs 4.45/5.26/7.80, TP16 two-shot
 # 4.50/5.39/7.75 vs 4.52/5.46/7.21).
@@ -81,12 +85,14 @@ class MoeTailBox:
     """Model-owned MoE tail mailboxes: latent [3, TP, CAP, 3584] (multicast), shared
     reduce-scatter [3, TP, CAP, 7168/TP] (peer stores), output [1, CAP, 7168], the
     local all-reduced latent rows [3, CAP, 3584] that WaveMoeTail clusters share and the
-    two-shot latent buffers (``twoshot_args``/``twoshot_tail`` replace args/tail)."""
+    two-shot latent buffers (`twoshot_args`/`twoshot_tail` replace args/tail)."""
 
     def __init__(self, group, device, tp, rank):
         self.rank = rank
         self.latent = OprojMailbox(group, device, tp, rank, (3, tp, CAP, 3584))
-        self.rs = OprojMailbox(group, device, tp, rank, (3, tp, CAP, 7168 // tp))
+        self.rs = OprojMailbox(  # peer stores only
+            group, device, tp, rank, (3, tp, CAP, 7168 // tp), multicast=False
+        )
         self.out = OprojMailbox(group, device, tp, rank, (1, CAP, 7168))
         ptrs = self.rs.handle.buffer_ptrs
         self.peers = torch.tensor(ptrs, dtype=torch.int64, device=device)
@@ -109,7 +115,7 @@ class MoeTailBox:
 @cache
 def compile_tail(tp, batch, device, mode="front", trigger=2, early=False, umma=False):
     """front: rows complete at the PDL wait; front_poll: three 0xffff-armed G/W/S parity
-    slots polled per row and re-armed after use; publish (``published``): WaveMoeTail
+    slots polled per row and re-armed after use; publish (`published`): WaveMoeTail
     over the published mailboxes, reading the weight shard directly, not by TMA;
     twoshot: publish over the two-shot receive slots and gather."""
     m8, twoshot = mode in ("publish", "twoshot"), mode == "twoshot"
@@ -209,9 +215,9 @@ class MoeTailWeights:
 
 class PreparedTail:
     """The layer's MoE tail; placement = (model MoeTailBox, MoE ordinal, MoE layer
-    count). At WaveMoeTail batches the experts publish into latent slot ``publish[b]``
-    (multicast, parity, rank; at ``twoshots`` the two-shot push box) and the side
-    stream pushes the shared-expert output (``push``)."""
+    count). At WaveMoeTail batches the experts publish into latent slot `publish[b]`
+    (multicast, parity, rank; at `twoshots` the two-shot push box) and the side
+    stream pushes the shared-expert output (`push`)."""
 
     def __init__(self, op, norm, up, batches, placement):
         tp, rank = op.contract.tp_size, op.rank

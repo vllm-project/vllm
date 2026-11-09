@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """GLM-5.3-Flash KDA q|k|v short convs are one fused parameter.
 
-The conv kernels read ``conv1d.weight`` directly, so an RL refit must reach it
+The conv kernels read `conv1d.weight` directly, so an RL refit must reach it
 through every write path (#55087), and FULL cudagraphs capture its address, so
 it must never move.
 """
@@ -53,7 +53,7 @@ def test_fused_conv_loads_checkpoint_shards_in_qkv_order(conv1d):
 
 def test_refit_updates_fused_conv_without_moving_it(conv1d):
     """Refits through load_weights (RL weight sync) and through the layerwise
-    reload (``reload_weights``) both land at the original address."""
+    reload (`reload_weights`) both land at the original address."""
     data_ptr = conv1d.weight.data_ptr()
     _load(conv1d, _checkpoint_weights(seed=0))
 

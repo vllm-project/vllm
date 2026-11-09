@@ -2,11 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """PyTorch reference for the UltraQuant KV cache format.
 
-Scale is UE8M0 (power of two): after ``s = c * absmax`` snap
-``s = 2^round(log2(s))`` and store one byte. Q is Hadamard-rotated then
+Scale is UE8M0 (power of two): after `s = c * absmax` snap
+`s = 2^round(log2(s))` and store one byte. Q is Hadamard-rotated then
 cast to FP8 E4M3 before the QK matmul, matching the kernel launcher.
 
-Same FP4 E2M1 grid. ``c = 0.156``. No per-token L2 norm. No V rotation.
+Same FP4 E2M1 grid. `c = 0.156`. No per-token L2 norm. No V rotation.
 K is rotated at encode; Q arrives pre-rotated at decode.
 
 This module is the bit-comparison ground truth for the kernels.
@@ -19,7 +19,6 @@ from dataclasses import dataclass
 import torch
 
 from vllm.v1.attention.ops.ultraquant.format import (
-    FP4_LEVELS_SORTED,
     GROUP_SIZE,
     MIDPOINTS_SORTED,
     SORTED_TO_BITS,
@@ -27,18 +26,8 @@ from vllm.v1.attention.ops.ultraquant.format import (
     get_constant_c,
 )
 
-_LEVELS_CACHE: dict[tuple[torch.device, torch.dtype], torch.Tensor] = {}
 _MIDPOINTS_CACHE: dict[tuple[torch.device, torch.dtype], torch.Tensor] = {}
 _SORTED_TO_BITS_CACHE: dict[torch.device, torch.Tensor] = {}
-
-
-def _get_levels(device: torch.device, dtype: torch.dtype) -> torch.Tensor:
-    key = (device, dtype)
-    t = _LEVELS_CACHE.get(key)
-    if t is None:
-        t = torch.tensor(FP4_LEVELS_SORTED, device=device, dtype=dtype)
-        _LEVELS_CACHE[key] = t
-    return t
 
 
 def _get_midpoints(device: torch.device, dtype: torch.dtype) -> torch.Tensor:
@@ -131,11 +120,11 @@ def _ue8m0_snap_tensor(
     s_raw: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Snap a positive-scale tensor `s_raw` to a power of two and return
-    ``(s_snapped_fp32, byte_uint8)``.
+    `(s_snapped_fp32, byte_uint8)`.
 
     Matches the kernel: zero / non-finite inputs map to byte=0 / value=0.0.
-    Round-half-up via ``floor(log2(s) + 0.5)``, matching Triton's
-    ``tl.floor(... + 0.5)`` idiom.
+    Round-half-up via `floor(log2(s) + 0.5)`, matching Triton's
+    `tl.floor(... + 0.5)` idiom.
     """
     is_zero = (s_raw <= 0) | ~torch.isfinite(s_raw)
     s_safe = torch.where(is_zero, torch.ones_like(s_raw), s_raw)
@@ -158,7 +147,7 @@ class UltraQuantEncoded:
     Shapes assume input shape `[..., D]`:
     - codes_packed: `[..., D // 2]` uint8 — 2 FP4 nibbles per byte
     - scale_bytes:  `[..., D // GROUP_SIZE]` uint8 — E8M0 byte per group
-    Dequant is ``code · 2^(byte - 127)`` (`c` is folded into the byte).
+    Dequant is `code · 2^(byte - 127)` (`c` is folded into the byte).
     """
 
     codes_packed: torch.Tensor  # uint8, [..., D//2]
@@ -244,7 +233,7 @@ def ultraquant_dequant(
     """Decode `encoded` to fp32 (no inverse rotation — result in the
     rotated basis if rotation was applied at encode).
 
-    Dequant is ``code · 2^(byte - 127)`` (`c` is already folded into the byte).
+    Dequant is `code · 2^(byte - 127)` (`c` is already folded into the byte).
     """
     G = head_dim // GROUP_SIZE
     codes = _unpack_nibbles_last_dim(encoded.codes_packed, head_dim)
