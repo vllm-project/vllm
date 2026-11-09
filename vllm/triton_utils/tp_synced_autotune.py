@@ -13,6 +13,10 @@ the argmin is the same everywhere. Sync happens only inside a model forward pass
 where all ranks of a TP group launch the same kernels with the same shapes; a kernel
 autotuned outside it (or by one rank only) keeps its local timings, so it cannot hang.
 One CPU broadcast per benchmarked config, and only when a kernel meets a new shape key.
+
+Layouts where ranks of a TP group run kernels on rank-dependent shapes (expert
+parallelism, sequence-parallel MoE, decode/prefill context parallelism) could make one
+rank autotune alone and wait forever, so `configure()` turns syncing off for them.
 """
 
 from typing import Any
@@ -23,6 +27,8 @@ from vllm.triton_utils.importing import HAS_TRITON
 logger = init_logger(__name__)
 
 _installed: bool = False
+# Set by configure() once the parallel layout is known; None until then (no syncing).
+_layout_ok: bool | None = None
 
 
 def is_installed() -> bool:
@@ -40,6 +46,8 @@ def _sync_group() -> Any | None:
     )
     from vllm.forward_context import is_forward_context_available
 
+    if not _layout_ok:
+        return None
     if not (dist.is_initialized() and model_parallel_is_initialized()):
         return None
     if not is_forward_context_available():
@@ -58,6 +66,31 @@ def sync_timing(timing: Any) -> Any:
     box = [timing]
     dist.broadcast_object_list(box, src=group.ranks[0], group=group.cpu_group)
     return box[0]
+
+
+def configure(parallel_config: Any) -> None:
+    """Enable syncing unless the layout gives TP ranks rank-dependent kernel shapes."""
+    global _layout_ok
+    reasons = [
+        name
+        for name, active in (
+            ("expert parallelism", parallel_config.enable_expert_parallel),
+            ("sequence-parallel MoE", parallel_config.use_sequence_parallel_moe),
+            (
+                "context parallelism",
+                parallel_config.decode_context_parallel_size > 1
+                or parallel_config.prefill_context_parallel_size > 1,
+            ),
+        )
+        if active
+    ]
+    _layout_ok = not reasons
+    if reasons and _installed:
+        logger.warning(
+            "VLLM_TRITON_SYNC_AUTOTUNE_TP is ignored with %s: ranks may autotune "
+            "different shapes there, and syncing could hang.",
+            ", ".join(reasons),
+        )
 
 
 def install() -> None:
