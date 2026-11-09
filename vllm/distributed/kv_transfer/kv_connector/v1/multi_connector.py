@@ -78,6 +78,13 @@ class RequestLoadPlan:
 
 
 @dataclass
+class PendingLookup:
+    num_computed_tokens: int
+    num_tokens: int
+    matches: dict[int, tuple[int, bool]]
+
+
+@dataclass
 class AsyncLoadProgress:
     unfinished_connector_indices: set[int]
     has_error: bool = False
@@ -253,6 +260,7 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         # load the request from (if any).
         self._requests_to_connector: dict[str, int] = {}
         self._load_plans: dict[str, RequestLoadPlan] = {}
+        self._pending_lookups: dict[str, PendingLookup] = {}
         self._async_load_connectors_to_send: dict[str, tuple[int, ...]] = {}
         self._async_load_progress: dict[str, AsyncLoadProgress] = {}
 
@@ -713,19 +721,27 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
 
         req_id = request.request_id
         self._load_plans.pop(req_id, None)
-        matches: list[tuple[int, bool]] = []
-        lookup_pending = False
-        for c in self._connectors:
+        lookup = self._pending_lookups.get(req_id)
+        if (
+            lookup is None
+            or lookup.num_computed_tokens != num_computed_tokens
+            or lookup.num_tokens != request.num_tokens
+        ):
+            lookup = PendingLookup(num_computed_tokens, request.num_tokens, {})
+            self._pending_lookups[req_id] = lookup
+        for i, c in enumerate(self._connectors):
+            if i in lookup.matches:
+                continue
             toks, load_async = c.get_num_new_matched_tokens(
                 request, num_computed_tokens
             )
-            if toks is None:
-                lookup_pending = True
-            else:
-                matches.append((toks, load_async))
+            if toks is not None:
+                lookup.matches[i] = (toks, load_async)
 
-        if lookup_pending:
+        if len(lookup.matches) != len(self._connectors):
             return (None, False)
+        matches = [lookup.matches[i] for i in range(len(self._connectors))]
+        del self._pending_lookups[req_id]
 
         covered = num_computed_tokens
         ranges: dict[int, KVLoadRange] = {}
@@ -894,6 +910,7 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
                 c.update_state_after_alloc(request, blocks, 0)
 
     def on_new_request(self, request: "Request") -> None:
+        self._pending_lookups.pop(request.request_id, None)
         for c in self._connectors:
             c.on_new_request(request)
 
@@ -988,6 +1005,7 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
 
         self._requests_to_connector.pop(request.request_id, None)
         self._load_plans.pop(request.request_id, None)
+        self._pending_lookups.pop(request.request_id, None)
         self._async_load_connectors_to_send.pop(request.request_id, None)
 
         return async_saves > 0, kv_txfer_params
@@ -1158,4 +1176,5 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
 
     def reset_cache(self) -> bool:
         results = [c.reset_cache() is not False for c in self._connectors]
+        self._pending_lookups.clear()
         return all(results)

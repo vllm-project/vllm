@@ -303,6 +303,12 @@ class RangeTransport(KVConnectorBase_V1, SupportsHMA):
     def get_num_new_matched_tokens(self, request, num_computed_tokens):
         self.lookups.append(num_computed_tokens)
         endpoint = self.options.get("endpoint", 0)
+        if responses := self.options.get("lookup_responses"):
+            endpoint = responses[(len(self.lookups) - 1) % len(responses)]
+        if path := self.options.get("lookup_poll_log"):
+            with Path(path).open("a") as log:
+                log.write(request.request_id + "\n")
+            assert len(self.lookups) <= 4, "Completed lookup was repeatedly restarted"
         return (
             None if endpoint is None else max(0, endpoint - num_computed_tokens),
             self.options.get("async", True),
@@ -596,6 +602,66 @@ def test_range_lookup_waits_for_all_sources():
     request = create_request(num_tokens=160)
     assert connector.get_num_new_matched_tokens(request, 0) == (None, False)
     assert [c.lookups for c in connector.sub_connectors] == [[0], [0]]
+
+
+@pytest.mark.parametrize("ready_first", [0, 1])
+@pytest.mark.parametrize("first_hit", [0, 64])
+@pytest.mark.cpu_test
+def test_range_lookup_retains_completed_sources(ready_first, first_hit):
+    """Consume each source's result once, even when polls complete out of phase."""
+    endpoints = [first_hit, 96]
+    connector = _range_connector(
+        [
+            {"lookup_responses": [end, None] if i == ready_first else [None, end]}
+            for i, end in enumerate(endpoints)
+        ]
+    )
+    request = create_request(num_tokens=160)
+    assert connector.get_num_new_matched_tokens(request, 0) == (None, False)
+    assert connector.get_num_new_matched_tokens(request, 0) == (96, True)
+    assert [c.lookups for c in connector.sub_connectors] == [
+        [0] if i == ready_first else [0, 0] for i in range(2)
+    ]
+    connector.update_state_after_alloc(request, KVCacheBlocks(([],)), 96)
+    assert [c.loads for c in connector.sub_connectors] == (
+        [[KVLoadRange(0, 64, False)], [KVLoadRange(64, 96)]]
+        if first_hit
+        else [[0], [96]]
+    )
+
+
+@pytest.mark.parametrize("change", ["computed", "tokens", "finish", "new", "reset"])
+@pytest.mark.cpu_test
+def test_range_lookup_invalidates_completed_results(change):
+    connector = _range_connector(
+        [
+            {"lookup_responses": [64, None]},
+            {"lookup_responses": [None, 96]},
+        ]
+    )
+    request = create_request(request_id=99124, num_tokens=160)
+    assert connector.get_num_new_matched_tokens(request, 0) == (None, False)
+    local = 0
+    if change == "computed":
+        local = 16
+    elif change == "tokens":
+        request.append_output_token_ids(42)
+    elif change == "finish":
+        connector.request_finished_all_groups(request, ([],))
+    elif change == "new":
+        request = create_request(request_id=99124, num_tokens=160, common_prefix_len=1)
+        connector.on_new_request(request)
+    else:
+        assert connector.reset_cache()
+    assert connector.get_num_new_matched_tokens(request, local) == (None, False)
+    assert connector.get_num_new_matched_tokens(request, local) == (96 - local, True)
+    assert [c.lookups for c in connector.sub_connectors] == [
+        [0, local, local],
+        [0, local],
+    ]
+    # A completed round is not a permanent cache, even for the same request.
+    assert connector.get_num_new_matched_tokens(request, local) == (None, False)
+    assert [len(c.lookups) for c in connector.sub_connectors] == [4, 3]
 
 
 @pytest.mark.cpu_test
@@ -1020,6 +1086,51 @@ def test_failed_load_model_recomputes(
     assert actual == expected
     for log in logs:
         assert len(log.read_text().splitlines()) == 1
+
+
+@pytest.mark.timeout(240)
+def test_async_lookup_model_makes_progress(vllm_runner, tmp_path, monkeypatch):
+    """Out-of-phase lookup misses must reach real model execution exactly once."""
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    outputs = []
+    for name, responses in (
+        ("ready", ([0], [0])),
+        ("alternating", ([0, None], [None, 0])),
+    ):
+        logs = [tmp_path / f"{name}-{i}.log" for i in range(2)]
+        transfer = KVTransferConfig(
+            kv_connector="MultiConnector",
+            kv_role="kv_consumer",
+            kv_connector_extra_config={
+                "load_policy": "range_aware",
+                "connectors": [
+                    {
+                        "kv_connector": "RangeTransport",
+                        "kv_connector_module_path": __name__,
+                        "kv_role": "kv_consumer",
+                        "kv_connector_extra_config": {
+                            "lookup_responses": sequence,
+                            "lookup_poll_log": str(log),
+                        },
+                    }
+                    for sequence, log in zip(responses, logs)
+                ],
+            },
+        )
+        with vllm_runner(
+            MODEL_NAME,
+            enforce_eager=True,
+            max_model_len=512,
+            max_num_seqs=1,
+            enable_prefix_caching=False,
+            async_scheduling=False,
+            kv_transfer_config=transfer,
+        ) as model:
+            outputs.append(model.generate_greedy(PROMPTS[:1], max_tokens=8))
+        assert [len(log.read_text().splitlines()) for log in logs] == (
+            [1, 1] if name == "ready" else [1, 2]
+        )
+    assert outputs[0] == outputs[1]
 
 
 @pytest.mark.parametrize("first_source", [0, 1])

@@ -343,7 +343,10 @@ steps:
     - tests/v1/kv_connector/unit/test_multi_connector.py
   commands:
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-    - pytest -v -s v1/kv_connector/unit/test_multi_connector.py::test_failed_load_model_recomputes
+    - >-
+      pytest -v -s
+      v1/kv_connector/unit/test_multi_connector.py::test_failed_load_model_recomputes
+      v1/kv_connector/unit/test_multi_connector.py::test_async_lookup_model_makes_progress
 
 - label: ":nvidia: (H200 MIG 18GB) Extract Hidden States Integration"
   key: extract-hidden-states-integration
