@@ -24,6 +24,27 @@ Beyond the optimization levels, three mechanisms reduce time-to-first-token on r
 - **Skip memory profiling with `--kv-cache-memory`.** On startup, vLLM logs the exact `--kv-cache-memory` value that reproduces the current allocation. Passing it back on the next boot skips the memory-profiling measurement and the CUDA-graph memory estimation pass. Note that this has performance implications: the KV cache is sized to exactly the given value instead of being measured, so a conservative value caps batch concurrency (and therefore throughput), while an optimistic one fails at allocation time. The value is only valid on the same GPU with the same initial free memory; if a boot OOMs after hardware or co-tenant changes, remove the flag to re-profile.
 - **Serve without CUDA graphs using `--enforce-eager`.** Skips both compilation and CUDA-graph capture for the fastest possible startup, at the cost of steady-state decode performance. Useful for development loops and for measuring how much of a boot is compile/capture.
 
+## Packed KV Group Tuning
+
+For block-outermost packed KV caches (`BLHNC` and `BLNHC`), vLLM automatically
+sizes balanced groups around replicated draft attention when DCP is enabled. No tuning
+parameter is required. Each replicated draft bucket stays whole while the planner
+compares repeat counts for the other buckets using the actual stride-aligned
+shared block and per-group block reservations for a max-length request.
+
+The existing plan remains a candidate. Lower reservation wins, with fewer groups
+preferred on ties; an exact tie keeps the original plan. DCP1 and configurations
+without a separate replicated draft attention bucket, or with unbalanced layer
+patterns, keep the existing heuristic.
+This is a startup capacity choice, not a throughput autotuner.
+
+Inspect startup logs for the chosen repeat count, group count and per-request
+reservation. Smaller shared blocks can require more groups, so validate
+end-to-end performance as well as capacity. P/D peers must use compatible cache
+geometry: different specs, DCP factors, length limits or state reservations can
+produce different plans. Independent automatic selection does not coordinate
+plans between peers.
+
 ## Preemption
 
 Due to the autoregressive nature of transformer architecture, there are times when KV cache space is insufficient to handle all batched requests.

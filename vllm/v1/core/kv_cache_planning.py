@@ -947,6 +947,8 @@ def _get_packed_kv_cache_groups(
     repeats (picked by `_approximate_gcd` to minimize padding), so all
     groups pack into the same per-block layout. Mamba buckets are additionally
     split to fit the block the attention buckets already need.
+    Under DCP, replicated draft attention buckets stay whole while alternative
+    repeat counts compete with the original plan on per-request pool bytes.
     Returns None when the layout is not block-outermost or all layers already
     share one page size.
     """
@@ -1002,9 +1004,22 @@ def _get_packed_kv_cache_groups(
         else None
     )
 
-    def num_groups_for(spec: UniformTypeKVCacheSpecs, balanced: bool) -> int:
-        if balanced and repeats_per_group is not None:
-            return cdiv(spec.get_max_layers_per_page_size(), repeats_per_group)
+    def is_replicated_draft(spec: UniformTypeKVCacheSpecs) -> bool:
+        return isinstance(spec.first_spec, AttentionSpec) and all(
+            layer.is_draft and not layer.dcp_sharded
+            for layer in spec.kv_cache_specs.values()
+        )
+
+    def num_groups_for(
+        spec: UniformTypeKVCacheSpecs,
+        balanced: bool,
+        repeats: int | None,
+        keep_draft: bool,
+    ) -> int:
+        if keep_draft and is_replicated_draft(spec):
+            return 1
+        if balanced and repeats is not None:
+            return cdiv(spec.get_max_layers_per_page_size(), repeats)
         return 1
 
     def widest_group_bytes(page_size_layers: dict[int, list[str]], n: int) -> int:
@@ -1016,53 +1031,102 @@ def _get_packed_kv_cache_groups(
     # Bytes a block must hold however the state buckets end up split: mamba,
     # circular-buffer and unsplit sliding-window buckets can go down to one
     # state per group, every other bucket's split is fixed by the repeat pattern.
-    def is_state_bucket(spec: UniformTypeKVCacheSpecs) -> bool:
+    def is_state_bucket(spec: UniformTypeKVCacheSpecs, repeats: int | None) -> bool:
         if isinstance(spec.first_spec, (MambaSpec, CircularBufferSpec)):
             return True
-        return repeats_per_group is None and isinstance(
-            spec.first_spec, SlidingWindowSpec
+        return repeats is None and isinstance(spec.first_spec, SlidingWindowSpec)
+
+    def build_groups(
+        repeats: int | None, keep_draft: bool = False
+    ) -> list[KVCacheGroupSpec]:
+        anchor_bytes = max(
+            (
+                widest_group_bytes(
+                    page_size_layers,
+                    len(spec.kv_cache_specs)
+                    if is_state_bucket(spec, repeats)
+                    else num_groups_for(spec, balanced, repeats, keep_draft),
+                )
+                for spec, page_size_layers, balanced in bucketed
+            ),
+            default=0,
+        )
+        groups = []
+        for spec, page_size_layers, balanced in bucketed:
+            num_groups = num_groups_for(spec, balanced, repeats, keep_draft)
+            # Cap a state group at the states a block already fits rather than
+            # let it widen the block.
+            if anchor_bytes and is_state_bucket(spec, repeats):
+                states_per_block = max(
+                    anchor_bytes // spec.first_spec.page_size_bytes, 1
+                )
+                num_groups = max(
+                    num_groups, cdiv(len(spec.kv_cache_specs), states_per_block)
+                )
+            if num_groups == 1:
+                groups.append(KVCacheGroupSpec(list(spec.kv_cache_specs), spec))
+                continue
+
+            pattern_repeats = list(zip(*page_size_layers.values()))
+            for i in range(num_groups):
+                group_layer_names = [
+                    name for repeat in pattern_repeats[i::num_groups] for name in repeat
+                ]
+                group_layer_specs = {
+                    name: spec.kv_cache_specs[name] for name in group_layer_names
+                }
+                group_spec = UniformTypeKVCacheSpecs.from_specs(group_layer_specs)
+                assert group_spec is not None
+                groups.append(KVCacheGroupSpec(group_layer_names, group_spec))
+        return groups
+
+    original = build_groups(repeats_per_group)
+    if (
+        vllm_config.parallel_config.decode_context_parallel_size == 1
+        or not any(is_replicated_draft(spec) for spec, _, _ in bucketed)
+        or not all(balanced for _, _, balanced in bucketed)
+    ):
+        return original
+
+    # Keep each replicated draft bucket whole: its page is the pool-width anchor,
+    # rather than splitting it further for a small capacity gain and more groups.
+    builder = DefaultKVCacheConfigBuilder()
+
+    def cost(groups: list[KVCacheGroupSpec]) -> tuple[int, int]:
+        return (
+            _max_memory_usage_bytes_from_groups(builder, vllm_config, groups),
+            len(groups),
         )
 
-    anchor_bytes = max(
-        (
-            widest_group_bytes(
-                page_size_layers,
-                len(spec.kv_cache_specs)
-                if is_state_bucket(spec)
-                else num_groups_for(spec, balanced),
-            )
-            for spec, page_size_layers, balanced in bucketed
-        ),
-        default=0,
-    )
-
-    groups = []
-    for spec, page_size_layers, balanced in bucketed:
-        num_groups = num_groups_for(spec, balanced)
-        # Cap a state group at the states a block already fits rather than let
-        # it widen the block.
-        if anchor_bytes and is_state_bucket(spec):
-            states_per_block = max(anchor_bytes // spec.first_spec.page_size_bytes, 1)
-            num_groups = max(
-                num_groups, cdiv(len(spec.kv_cache_specs), states_per_block)
-            )
-        if num_groups == 1:
-            groups.append(KVCacheGroupSpec(list(spec.kv_cache_specs), spec))
-            continue
-
-        pattern_repeats = list(zip(*page_size_layers.values()))
-        for i in range(num_groups):
-            group_layer_names = [
-                name for repeat in pattern_repeats[i::num_groups] for name in repeat
-            ]
-            group_layer_specs = {
-                name: spec.kv_cache_specs[name] for name in group_layer_names
-            }
-            group_spec = UniformTypeKVCacheSpecs.from_specs(group_layer_specs)
-            assert group_spec is not None
-            groups.append(KVCacheGroupSpec(group_layer_names, group_spec))
-
-    return groups
+    best, best_cost = original, cost(original)
+    best_repeats = repeats_per_group
+    for repeats in range(
+        1,
+        max(
+            (
+                spec.get_max_layers_per_page_size()
+                for spec, _, balanced in bucketed
+                if balanced
+            ),
+            default=0,
+        )
+        + 1,
+    ):
+        candidate = build_groups(repeats, keep_draft=True)
+        candidate_cost = cost(candidate)
+        if candidate_cost < best_cost:
+            best, best_cost, best_repeats = candidate, candidate_cost, repeats
+    if best is not original:
+        logger.info(
+            "Auto-sized packed KV for replicated draft: repeats=%d, groups=%d->%d, "
+            "reserved bytes per max-length request=%d->%d",
+            best_repeats,
+            len(original),
+            len(best),
+            cost(original)[0],
+            best_cost[0],
+        )
+    return best
 
 
 def _warn_if_unannotated_eagle_mamba(
