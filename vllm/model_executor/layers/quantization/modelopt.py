@@ -927,7 +927,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
     def dequantize_weight(
         self, layer: torch.nn.Module
     ) -> Iterator[tuple[slice, torch.Tensor, torch.Tensor]]:
-        """Yield ``(experts, w13, w2)`` dequantized ModelOpt NVFP4 experts."""
+        """Yield `(experts, w13, w2)` dequantized ModelOpt NVFP4 experts."""
         return dequantize_nvfp4_moe_weights(
             layer.w13_weight,
             layer.w13_weight_scale,
@@ -1158,7 +1158,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         self.moe_kernel.fused_experts.process_weights_after_loading(layer)
 
     def _restore_padded_moe_dims(self, layer: RoutedExperts) -> None:
-        """Recover the padded ``moe_config`` dims from the exported weights."""
+        """Recover the padded `moe_config` dims from the exported weights."""
         mc = layer.moe_config
         padded_hidden = layer.w2_weight.shape[1]
         if padded_hidden != mc.hidden_dim:
@@ -1353,7 +1353,7 @@ class ModelOptMxFp8Config(ModelOptQuantConfigBase):
     def routed_expert_weight_key(self) -> QuantKey:
         """The weight format the routed experts are stored in.
 
-        MXFP8, or NVFP4 (``moe_quant_algo: NVFP4``).
+        MXFP8, or NVFP4 (`moe_quant_algo: NVFP4`).
         """
         if self.moe_quant_algo != "NVFP4":
             return kMxfp8Static
@@ -1509,13 +1509,13 @@ class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
         """One-time MXFP8->BF16 weight dequant for the emulation path.
 
         On devices without a native MXFP8 MoE kernel (e.g. gfx942 / MI300),
-        ``Mxfp8EmulationTritonExperts`` otherwise dequantizes every expert
+        `Mxfp8EmulationTritonExperts` otherwise dequantizes every expert
         weight to BF16 on *every* forward step -- the dominant cost (conc1
         ~1.3 tok/s). Doing the dequant once here and replacing the MXFP8
         parameters with BF16 makes the MoE run exactly like a plain BF16
         checkpoint (full precision, no per-step dequant); SwiGLU-OAI is still
-        applied by the experts' ``activation()`` override. The MXFP8 weights
-        are freed by ``replace_parameter`` (BF16 is 2x their size; the small
+        applied by the experts' `activation()` override. The MXFP8 weights
+        are freed by `replace_parameter` (BF16 is 2x their size; the small
         E8M0 scale tensors are left in place, unused).
         """
         from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
@@ -1743,9 +1743,9 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
 
     Supports checkpoints where different layers use different quantization
     algorithms (e.g., FP8 for dense layers and NVFP4 for MoE experts).
-    The per-layer algorithm is specified in the ``quantized_layers`` dict
-    inside ``config.json``'s ``quantization_config`` (preferred) or the
-    legacy ``hf_quant_config.json``.
+    The per-layer algorithm is specified in the `quantized_layers` dict
+    inside `config.json`'s `quantization_config` (preferred) or the
+    legacy `hf_quant_config.json`.
     """
 
     def __init__(
@@ -1937,10 +1937,10 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
         """Look up the quant_algo for a vLLM-side layer prefix.
 
         Tries three strategies in order:
-        1. Direct lookup in ``quantized_layers``.
-        2. Packed/fused-layer lookup (unfuse via ``packed_modules_mapping``).
+        1. Direct lookup in `quantized_layers`.
+        2. Packed/fused-layer lookup (unfuse via `packed_modules_mapping`).
         3. Prefix-based lookup for RoutedExperts (any child key starts with
-           ``prefix + "."``).
+           `prefix + "."`).
 
         Returns the upper-cased quant_algo string, or *None* if the prefix
         is not found.
@@ -2188,9 +2188,9 @@ class Shapes:
 
 class QuantKeyScheme:
     """One scheme per QuantKey. Selected by key *content*; the base supplies the
-    ``role`` from the slot it fills the key into (wkey->WEIGHT, akey->ACT).
+    `role` from the slot it fills the key into (wkey->WEIGHT, akey->ACT).
 
-    Every scheme branches on ``role`` explicitly and ``reject``s any role it has
+    Every scheme branches on `role` explicitly and `reject`s any role it has
     not validated — never falling through to the wrong role's registration,
     which would allocate the wrong parameters and produce garbage silently.
     """
@@ -2661,11 +2661,11 @@ class FormatScheme:
 
     Extension seam for residue that belongs to a format as a whole rather than a
     single QuantKey — an extra parameter the weight/activation schemes don't
-    cover, or a tweak before/after their ``process``. All hooks default to
-    no-ops; most formats need none (they are a pure ``(weight, activation)`` key
+    cover, or a tweak before/after their `process`. All hooks default to
+    no-ops; most formats need none (they are a pure `(weight, activation)` key
     pair). To add one: subclass, override the hooks you need, and return an
-    instance from the format's ``resolve()`` branch — no change to
-    ``ModelOptLinearMethod`` itself.
+    instance from the format's `resolve()` branch — no change to
+    `ModelOptLinearMethod` itself.
     """
 
     def extra_weights(self, layer, shapes: "Shapes", ctx: CkptCtx, wl) -> None:
@@ -2676,31 +2676,31 @@ class FormatScheme:
         return tuple(layer.weight.shape)
 
     def pre_process(self, layer) -> None:
-        """Run before the key schemes' ``process``."""
+        """Run before the key schemes' `process`."""
 
     def post_process(self, layer) -> None:
-        """Run after the key schemes' ``process``, before the kernel's."""
+        """Run after the key schemes' `process`, before the kernel's."""
 
     def apply(self, layer, x, bias, kernel_apply):
-        """Wrap the kernel's forward. ``kernel_apply(layer, x, bias) -> Tensor``.
+        """Wrap the kernel's forward. `kernel_apply(layer, x, bias) -> Tensor`.
 
         Default: delegate unchanged. A format whose residue lives at compute
         time (e.g. run the GEMM on a padded weight then slice the output back
         to its logical width, #53132-style) overrides this and calls
-        ``kernel_apply`` in the middle.
+        `kernel_apply` in the middle.
         """
         return kernel_apply(layer, x, bias)
 
 
 class _Fp8PbWoPartialBlock(FormatScheme):
     """FP8_PB_WO output width that is not a multiple of 128 (a partial trailing
-    block; e.g. GLM's replicated ``fused_qkv_a_proj`` = 2048 + 576 = 2624).
+    block; e.g. GLM's replicated `fused_qkv_a_proj` = 2048 + 576 = 2624).
 
     The block kernel needs full 128-blocks, so pad the weight up to the block
     boundary with zeros before the kernel's post-load, then slice the GEMM
     output back to the logical width. This is #53132's approach, expressed as
     the format's compute-time residue on the generic method. The cdiv-sized
-    scale from ``KFp8Block128`` already matches the padded block count, so only
+    scale from `KFp8Block128` already matches the padded block count, so only
     the weight rows and the output need adjusting.
     """
 
@@ -2765,11 +2765,11 @@ _DROP_INPUT_SCALE = _DropInputScale()
 class ModelOptLinearMethod(LinearMethodBase):
     """Generic, format-agnostic ModelOpt linear method. Holds a weight scheme +
     an activation scheme (from the QuantSpec pair) and an optional
-    ``FormatScheme``, runs a fixed lifecycle, selects the kernel from the pair,
+    `FormatScheme`, runs a fixed lifecycle, selects the kernel from the pair,
     and applies.
 
     Registered for weight_loader_v2 (like every ModelOpt linear method) so the
-    ``BasevLLMParameter`` params route through the v2 fused loader, not the
+    `BasevLLMParameter` params route through the v2 fused loader, not the
     legacy shape-assert path.
     """
 
@@ -2917,7 +2917,7 @@ class ModelOptLinearMethod(LinearMethodBase):
 def resolve(algo: str, subcfg, prefix: str):
     """Turn a sub-config into (QuantSpec, CkptCtx, format_scheme).
 
-    Strictly read-only over ``subcfg``: in mixed precision the same sub-config
+    Strictly read-only over `subcfg`: in mixed precision the same sub-config
     is shared with the MoE method, so writing back would leak a linear-only
     change into MoE.
     """
@@ -2982,13 +2982,13 @@ LINEAR_METHOD_BUILDERS: dict[str, Callable[..., LinearMethodBase]] = {}
 
 
 def build_linear_method(config, algo: str, prefix: str) -> LinearMethodBase:
-    """Construct the linear method for ``algo``.
+    """Construct the linear method for `algo`.
 
-    Returns a bespoke method if one is registered in ``LINEAR_METHOD_BUILDERS``,
-    else the generic ``ModelOptLinearMethod`` built from ``resolve(algo, config,
-    prefix)``. Single indirection point shared by the homogeneous and
+    Returns a bespoke method if one is registered in `LINEAR_METHOD_BUILDERS`,
+    else the generic `ModelOptLinearMethod` built from `resolve(algo, config,
+    prefix)`. Single indirection point shared by the homogeneous and
     mixed-precision dispatch, so a new format plugs in without editing either
-    ``get_quant_method``.
+    `get_quant_method`.
     """
     builder = LINEAR_METHOD_BUILDERS.get(algo)
     if builder is not None:

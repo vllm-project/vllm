@@ -57,7 +57,7 @@ def test_fa4_descale_layout(
     q = torch.empty(batch_size, 4, 128, dtype=dtype, device="cpu")
     kv = torch.empty(batch_size, num_kv_heads, 128, dtype=dtype, device="cpu")
     out = torch.empty_like(q, dtype=torch.bfloat16)
-    fwd = Mock(return_value=(out, None, None, None))
+    fwd = Mock(return_value=(out, None, None, None, None))
     cute_interface = ModuleType("vllm.vllm_flash_attn.cute.interface")
     monkeypatch.setattr(cute_interface, "_flash_attn_fwd", fwd, raising=False)
     monkeypatch.setitem(sys.modules, cute_interface.__name__, cute_interface)
