@@ -147,19 +147,19 @@ def _build_and_run_align(
     disabled_slots=(),
     seed=1,
 ):
-    """Build inputs the way ``LoRAKernelMeta.prepare_tensors`` does, run
-    ``moe_lora_align_block_size``, and return a dict of result tensors plus
-    derived sizes. Output buffers are pre-filled with ``SENTINEL_*`` so
+    """Build inputs the way `LoRAKernelMeta.prepare_tensors` does, run
+    `moe_lora_align_block_size`, and return a dict of result tensors plus
+    derived sizes. Output buffers are pre-filled with `SENTINEL_*` so
     callers can assert which slots the kernel did / did not touch.
 
-    Tokens are assigned to LoRA slot 0 (first ``num_lora_tokens``) then -1
-    (remaining ``num_base_tokens``), matching the "mixed base + 1 LoRA"
+    Tokens are assigned to LoRA slot 0 (first `num_lora_tokens`) then -1
+    (remaining `num_base_tokens`), matching the "mixed base + 1 LoRA"
     shape used to repro vllm-project/vllm#32235.
 
-    ``lora_ids_override``: optional 1-D int tensor of length ``max_loras+1``
-    used verbatim. Default mirrors ``prepare_tensors`` (sorted-unique into
+    `lora_ids_override`: optional 1-D int tensor of length `max_loras+1`
+    used verbatim. Default mirrors `prepare_tensors` (sorted-unique into
     the head, -1 tail).
-    ``disabled_slots``: iterable of slot indices to clear in ``adapter_enabled``.
+    `disabled_slots`: iterable of slot indices to clear in `adapter_enabled`.
     """
     random.seed(seed)
     num_tokens = num_lora_tokens + num_base_tokens
@@ -249,7 +249,7 @@ def _build_and_run_align(
 )
 def test_moe_lora_align_block_size_mixed_base_and_lora(max_loras):
     """Regression test for issue #32235: real LoRA slot must not be skipped
-    when ``active_lora_ids`` has -1 at position 0."""
+    when `active_lora_ids` has -1 at position 0."""
     out = _build_and_run_align(
         num_lora_tokens=8, num_base_tokens=8, max_loras=max_loras
     )
@@ -285,10 +285,10 @@ def test_moe_lora_align_block_size_mixed_base_and_lora(max_loras):
 
 def test_moe_lora_align_block_size_disabled_adapter_untouched():
     """Disabled-adapter slot rows must remain untouched by all three align
-    kernels. Pins the invariant protected by the ``adapter_enabled`` guard
-    in ``lora_count_and_sort_expert_tokens_kernel``: without it the sort
-    kernel reads uninitialized ``token_mask`` values for disabled slots and
-    pollutes ``sorted_token_ids`` / ``cumsum_buffer``."""
+    kernels. Pins the invariant protected by the `adapter_enabled` guard
+    in `lora_count_and_sort_expert_tokens_kernel`: without it the sort
+    kernel reads uninitialized `token_mask` values for disabled slots and
+    pollutes `sorted_token_ids` / `cumsum_buffer`."""
     max_loras = 1
     out = _build_and_run_align(
         num_lora_tokens=16,
@@ -317,13 +317,13 @@ def test_moe_lora_align_block_size_disabled_adapter_untouched():
 
 
 def test_moe_lora_align_block_size_lora_id_oob_guard():
-    """Regression test for the ``lora_id >= max_loras`` guard.
+    """Regression test for the `lora_id >= max_loras` guard.
 
-    Production ``LoRAKernelMeta.prepare_tensors`` pre-fills the tail of
-    ``active_lora_ids`` with -1, so the existing ``lora_id == -1`` check
+    Production `LoRAKernelMeta.prepare_tensors` pre-fills the tail of
+    `active_lora_ids` with -1, so the existing `lora_id == -1` check
     covers the extra slot. This test bypasses that invariant and injects
     an out-of-range value (5 with max_loras=1) at the tail to verify the
-    explicit guard prevents OOB reads against ``adapter_enabled`` and
+    explicit guard prevents OOB reads against `adapter_enabled` and
     OOB writes against the max_loras-sized output buffers. Without the
     guard, an illegal-memory-access would surface on the next CUDA sync.
     """

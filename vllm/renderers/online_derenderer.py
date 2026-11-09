@@ -556,17 +556,17 @@ class OnlineDerenderer:
         skip_special_tokens: bool = True,
         spaces_between_special_tokens: bool = True,
     ) -> tuple[str, DerenderStreamState]:
-        """Incrementally detokenize ``delta_token_ids`` from prior stream state.
+        """Incrementally detokenize `delta_token_ids` from prior stream state.
 
-        Resumes decoding from the offsets carried in ``state`` rather than
-        replaying token history. ``state.prev_token_ids`` holds the trailing
-        decode window (from ``prefix_offset`` onward) that
-        ``detokenize_incrementally`` still needs to reproduce any partially read
-        multi-byte character (tracked by ``read_offset``). The delta tokens are
+        Resumes decoding from the offsets carried in `state` rather than
+        replaying token history. `state.prev_token_ids` holds the trailing
+        decode window (from `prefix_offset` onward) that
+        `detokenize_incrementally` still needs to reproduce any partially read
+        multi-byte character (tracked by `read_offset`). The delta tokens are
         fed straight onto it.
 
-        The window is bounded. ``detokenize_incrementally`` never reads before
-        ``prefix_offset``, so after each token we trim the window to that
+        The window is bounded. `detokenize_incrementally` never reads before
+        `prefix_offset`, so after each token we trim the window to that
         tail and rebase the offsets to it. State transport therefore stays
         O(window) per chunk instead of re-sending the full token history.
 
@@ -659,7 +659,7 @@ class OnlineDerenderer:
             prompt_tokens: Prompt token count for the usage chunk.
             prompt_token_ids: Prompt token IDs. Required on the parser path
                 (validated by the caller) and optional otherwise, falling
-                back to ``generate_chunk.prompt_token_ids``. See
+                back to `generate_chunk.prompt_token_ids`. See
                 `DerenderChatStreamRequest.prompt_token_ids`.
 
         Returns:
@@ -765,7 +765,7 @@ class OnlineDerenderer:
         usage: UsageInfo | None = None
         if generate_chunk.usage is not None:
             u = generate_chunk.usage
-            pt = prompt_tokens if prompt_tokens is not None else (u.prompt_tokens or 0)
+            pt = resolve_prompt_tokens(prompt_tokens, u)
             ct = u.completion_tokens or 0
             usage = UsageInfo(
                 prompt_tokens=pt,
@@ -806,14 +806,14 @@ class OnlineDerenderer:
         `state.output_chunk_lens`, so the rebuilt parser state matches
         standard serving, which calls `parse_delta` once per engine step.
         Text comes from a fresh incremental detokenizer with special tokens
-        preserved (see ``_decode_params``), seeded from the prompt tail on
+        preserved (see `_decode_params`), seeded from the prompt tail on
         every call since replay starts from scratch.
 
-        Logprobs need no replay: a generate chunk's ``logprobs`` cover exactly
+        Logprobs need no replay: a generate chunk's `logprobs` cover exactly
         that chunk's tokens, so they are resolved once and attached to
         whatever delta the parser emits for the chunk, as the coupled chat
         endpoint does. Only the byte-fallback context crosses chunks, via
-        ``state.logprob_context_token_ids``. With ``include_reasoning=False``
+        `state.logprob_context_token_ids`. With `include_reasoning=False`
         logprobs are dropped on every chunk, again like the coupled endpoint.
         """
         tokenizer = self.renderer.get_tokenizer()
@@ -972,7 +972,7 @@ class OnlineDerenderer:
         usage: UsageInfo | None = None
         if generate_chunk.usage is not None:
             u = generate_chunk.usage
-            pt = prompt_tokens if prompt_tokens is not None else (u.prompt_tokens or 0)
+            pt = resolve_prompt_tokens(prompt_tokens, u)
             ct = u.completion_tokens or 0
             usage = UsageInfo(
                 prompt_tokens=pt,
@@ -1009,7 +1009,9 @@ class OnlineDerenderer:
     ) -> tuple[list[CompletionResponseChoice], int, int]:
         n = len(generate_responses)
         prompt_tokens_list: list[int] = (
-            prompt_tokens if prompt_tokens is not None else [0] * n
+            prompt_tokens
+            if prompt_tokens is not None
+            else [resolve_prompt_tokens(None, gen.usage) for gen in generate_responses]
         )
         prompt_token_ids_list: list[list[int] | None] = (
             prompt_token_ids if prompt_token_ids is not None else [None] * n
@@ -1100,23 +1102,23 @@ class OnlineDerenderer:
     ) -> tuple[CompletionStreamResponse, DerenderStreamState]:
         """Process one GenerateStreamResponse chunk for streaming completions.
 
-        Each call takes one SSE chunk from ``/inference/v1/generate`` plus the
-        client carried ``stream_state`` and returns a ``CompletionStreamResponse``
+        Each call takes one SSE chunk from `/inference/v1/generate` plus the
+        client carried `stream_state` and returns a `CompletionStreamResponse`
         chunk and the updated state.
 
         The generate stream emits one choice per SSE event, so this method
-        processes one output sequence at a time.  For ``n > 1`` the client
-        maintains one ``DerenderStreamState`` per ``choice.index``.
+        processes one output sequence at a time.  For `n > 1` the client
+        maintains one `DerenderStreamState` per `choice.index`.
 
         Args:
             model: Model name for the response object.
-            generate_chunk: One SSE chunk from ``/inference/v1/generate``.
-            state: Client carried detok state (``None`` → first call).
+            generate_chunk: One SSE chunk from `/inference/v1/generate`.
+            state: Client carried detok state (`None` → first call).
             prompt_tokens: Prompt token count for usage (from the render step).
-            completion_request: Original CompletionRequest from ``/render``;
-                supplies ``skip_special_tokens``.
+            completion_request: Original CompletionRequest from `/render`;
+                supplies `skip_special_tokens`.
             prompt_token_ids: Seeds the first chunk's decode. Falls back to
-                ``generate_chunk.prompt_token_ids``.
+                `generate_chunk.prompt_token_ids`.
 
         Returns:
             (chunk, updated_state) — the derendered chunk and updated state.
@@ -1211,7 +1213,7 @@ class OnlineDerenderer:
         usage: UsageInfo | None = None
         if generate_chunk.usage is not None:
             u = generate_chunk.usage
-            pt = prompt_tokens if prompt_tokens is not None else (u.prompt_tokens or 0)
+            pt = resolve_prompt_tokens(prompt_tokens, u)
             ct = u.completion_tokens or 0
             usage = UsageInfo(
                 prompt_tokens=pt,
@@ -1383,13 +1385,21 @@ def _completion_top_logprobs_limit(
     )
 
 
+def resolve_prompt_tokens(prompt_tokens: int | None, usage: UsageInfo | None) -> int:
+    """The request's `prompt_tokens` if set (0 included), else the generate
+    `usage.prompt_tokens`, else 0 when the generate response has no usage."""
+    if prompt_tokens is not None:
+        return prompt_tokens
+    return usage.prompt_tokens if usage is not None else 0
+
+
 def _resolve_prompt_logprobs(
     prompt_logprobs: PromptLogprobs | None, tokenizer: TokenizerLike
 ) -> PromptLogprobs | None:
-    """Fill missing ``decoded_token`` values in prompt logprobs.
+    """Fill missing `decoded_token` values in prompt logprobs.
 
-    A ``--tokens-only`` generate server has no tokenizer, so it returns
-    ``decoded_token=None``. Mirrors LogprobsProcessor._update_prompt_logprobs
+    A `--tokens-only` generate server has no tokenizer, so it returns
+    `decoded_token=None`. Mirrors LogprobsProcessor._update_prompt_logprobs
     in v1/engine/logprobs.py: decode each token id, then fix U+FFFD using the
     preceding prompt tokens (the first entry of each earlier position).
     """
@@ -1445,12 +1455,12 @@ def _resolve_logprobs(
     The generate server has no tokenizer, so `token` and `bytes` are filled
     here, with the same U+FFFD byte-fallback correction the coupled path
     applies (`_correct_decoded_token`, which needs the preceding sampled token
-    ids as context). ``initial_context_token_ids`` seeds that context with
+    ids as context). `initial_context_token_ids` seeds that context with
     sampled IDs from preceding chunks (streaming), so multi-byte characters
     split across chunk boundaries still resolve.
 
     Generate returns every candidate the engine produced for a position (the
-    sampled token first, then the top k). ``top_limit`` applies the target
+    sampled token first, then the top k). `top_limit` applies the target
     endpoint's cut before decoding, so each derender endpoint returns what its
     coupled counterpart would; None keeps all of them.
     """
@@ -1516,12 +1526,12 @@ def _convert_chat_logprobs_to_completion_logprobs(
     """Convert ChatCompletionLogProbs (per-token objects) to CompletionLogProbs
     (parallel flat lists) as required by the /v1/completions response schema.
 
-    ``generate_logprobs`` is what ``logprobs`` was resolved from. A position
+    `generate_logprobs` is what `logprobs` was resolved from. A position
     with no candidates there had no logprobs in the engine output, which
-    /v1/completions reports as ``None``; every other position is a dict of
+    /v1/completions reports as `None`; every other position is a dict of
     the candidates the cut kept.
 
-    ``initial_text_offset`` keeps ``text_offset`` absolute across streaming
+    `initial_text_offset` keeps `text_offset` absolute across streaming
     chunks, mirroring the generate streaming path.
     """
     if logprobs.content is None:

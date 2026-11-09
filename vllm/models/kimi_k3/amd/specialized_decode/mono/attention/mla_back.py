@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""M1b ``mla_post``: one Kimi-K3 MLA layer from AITER's decode output to
+"""M1b `mla_post`: one Kimi-K3 MLA layer from AITER's decode output to
 o_proj's input, at TP8 + DCP8 (the DCP group the TP group) or TP8 + DCP1.
 
 AITER leaves every rank the partial attention of its KV shard for all the
-gathered heads (``o`` [S, ranks x 12, 512] bf16 and ``lse`` [S, ranks x 12]
-f32, strided views). As ``dcp_a2a_lse_reduce`` -> ``_v_up_proj`` -> the gate:
+gathered heads (`o` [S, ranks x 12, 512] bf16 and `lse` [S, ranks x 12]
+f32, strided views). As `dcp_a2a_lse_reduce` -> `_v_up_proj` -> the gate:
 
     push (a wave a (token, head), over every CTA)
                         o / lse of rank p's heads -> rank p's CMB: the o row
@@ -19,13 +19,13 @@ f32, strided views). As ``dcp_a2a_lse_reduce`` -> ``_v_up_proj`` -> the gate:
                         the latents -> MXFP4 (aiter's even scale), four FP4
                         MFMAs against W_V -> bf16, times the gate -> ``core``
 
-At DCP1 (``ranks`` 1) ``o`` [S, 12, 512] is already the attention's output, as
-vLLM hands it to ``_v_up_proj``: no push, no LSE; the combine stage loads it.
-With ``splits`` (M1c ``mla_attn``'s partials: ``o`` / ``lse`` split 0 of dense
+At DCP1 (`ranks` 1) `o` [S, 12, 512] is already the attention's output, as
+vLLM hands it to `_v_up_proj`: no push, no LSE; the combine stage loads it.
+With `splits` (M1c `mla_attn`'s partials: `o` / `lse` split 0 of dense
 [splits, S, 12, 512] bf16 / [splits, S, 12] f32) the combine stage merges a
 token's request's splits, LSE-weighted.
 
-K2 (``layer``, ``K2Build.m1b_qlen``) runs these stages in its own launch.
+K2 (`layer`, `K2Build.m1b_qlen`) runs these stages in its own launch.
 """
 
 from dataclasses import dataclass
@@ -209,7 +209,7 @@ def stage_push(c):
 
 # ---------------------------------------------------------------- combine
 def sane(lse):
-    """NaN / +inf -> -inf (``_dcp_a2a_unpack_combine_kernel``)."""
+    """NaN / +inf -> -inf (`_dcp_a2a_unpack_combine_kernel`)."""
     bad = (lse != lse) | (lse == fx.Float32(float("inf")))
     return bad.select(fx.Float32(float("-inf")), lse)
 
@@ -245,12 +245,12 @@ def stage_combine(c, h, t0):
 
 @traced
 def combine_splits(c, t0, h):
-    """``stage_combine`` at DCP1 over M1c's partials: token t's request's splits
-    (``splits / requests`` of them, request-major), LSE-weighted. Wave tt < tc
-    (the task's tokens) turns token t0 + tt's LSEs into weights (LDS ``cw``);
+    """`stage_combine` at DCP1 over M1c's partials: token t's request's splits
+    (`splits / requests` of them, request-major), LSE-weighted. Wave tt < tc
+    (the task's tokens) turns token t0 + tt's LSEs into weights (LDS `cw`);
     then a token's WAVES / tc waves (parts) sum the splits part, part + parts,
     .. a thread 8 latents of a token (16 B loads, CB in flight), the parts'
-    sums halved through ``cw`` (the upper half's handed over) to part 0."""
+    sums halved through `cw` (the upper half's handed over) to part 0."""
     s, q, n, a, tid, tc = c["S"], c["Q"], c["splits"], c["args"], c["tid"], c["TC"]
     per = n // (s // q)
     sp0 = t0 // q * per
@@ -372,7 +372,7 @@ def combine_splits(c, t0, h):
 
 @traced
 def combine_ranks(c, h, t0, tt, cc, t):
-    """``stage_combine`` at DCP8: the ranks' CMB partials, LSE-weighted."""
+    """`stage_combine` at DCP8: the ranks' CMB partials, LSE-weighted."""
     s, R = c["S"], c["R"]
     specs = [(c["cmb_own"], cmb_pair(c, src, t, h) + 2 * OU, 1) for src in range(R)]
     got = c["poll"](specs)
@@ -440,7 +440,7 @@ def wv_loads(c, h):
 @traced
 def stage_uv(c, h, t0, ops):
     """The LDS latents of tokens t0 .. t0 + 4 against W_V[h]'s 16 rows of this
-    wave -> bf16, times the gate -> ``core``."""
+    wave -> bf16, times the gate -> `core`."""
     s, lane, wave, a, tc = c["S"], c["lane"], c["wave"], c["args"], c["TC"]
     tl = lane % 16
     kb = lane // 16
@@ -492,7 +492,7 @@ def stage_uv(c, h, t0, ops):
 def ctok(s: int, q: int, splits: int, ctas: int = BLOCKS) -> int:
     """Tokens a combine task: TT, or with M1c's splits the fewest of 1, 2, 4
     whose parts (WAVES / it a token) divide a request's splits and whose tasks
-    fit ``ctas`` (a CTA's reads, a part's splits a thread, over more CTAs)."""
+    fit `ctas` (a CTA's reads, a part's splits a thread, over more CTAs)."""
     if not splits:
         return TT
     per = splits // (s // q)
@@ -501,14 +501,14 @@ def ctok(s: int, q: int, splits: int, ctas: int = BLOCKS) -> int:
 
 
 def tasks(s: int, tc: int = TT) -> int:
-    """Combine tasks: a (head, ``tc`` tokens), head-minor (task h + 12 tile)."""
+    """Combine tasks: a (head, `tc` tokens), head-minor (task h + 12 tile)."""
     return NH * ((s + tc - 1) // tc)
 
 
 @traced
 def combine_tasks(c, ctas=BLOCKS, done=None):
-    """The combine + W_UV tasks over CTAs 0 .. ``ctas``; ``done(task)`` after
-    each task's ``core`` rows are stored (K2's fused M1b: their flag)."""
+    """The combine + W_UV tasks over CTAs 0 .. `ctas`; `done(task)` after
+    each task's `core` rows are stored (K2's fused M1b: their flag)."""
     s, bid, tc = c["S"], c["bid"], c["TC"]
     for task in range(first_task(bid, 0), tasks(s, tc), ctas):
         h = task % NH
@@ -690,7 +690,7 @@ def build(key: MlaPostBuild):
 
 
 def host_args(ranks, o, lse, seq_lens, qsl, w_v, w_v_scale, gate) -> list:
-    """ABI's ``o`` .. ``gate`` (``mla_post``'s, or K2's fused M1b's)."""
+    """ABI's `o` .. `gate` (`mla_post`'s, or K2's fused M1b's)."""
     assert o.stride(-1) == 1 and w_v.stride(-1) == 1
     assert o.dtype == torch.bfloat16
     assert lse is not None or ranks == 1  # DCP1: M1c's partials carry one
@@ -737,12 +737,12 @@ def mla_post(
     tl=None,
     scratch=None,
 ):
-    """Host launcher. ``o`` [S, >= ranks x 12, 512] bf16 and ``lse`` [S, >=
-    ranks x 12] f32, rows and heads strided (ranks 1: no ``lse``, ``peers``
-    may be None); ``seq_lens`` [requests] and ``qsl``
-    [requests + 1] int32 (the local KV lengths, the query starts); ``w_v`` (12,
-    128, 256) u8 MXFP4 and ``w_v_scale`` (12, 128, 16) e8m0, any strides but
-    W_V's last; ``gate`` / ``core`` [S, 1536] bf16, dense."""
+    """Host launcher. `o` [S, >= ranks x 12, 512] bf16 and `lse` [S, >=
+    ranks x 12] f32, rows and heads strided (ranks 1: no `lse`, `peers`
+    may be None); `seq_lens` [requests] and `qsl`
+    [requests + 1] int32 (the local KV lengths, the query starts); `w_v` (12,
+    128, 256) u8 MXFP4 and `w_v_scale` (12, 128, 16) e8m0, any strides but
+    W_V's last; `gate` / `core` [S, 1536] bf16, dense."""
     del scratch
     assert core.is_contiguous()
     f = build(key)

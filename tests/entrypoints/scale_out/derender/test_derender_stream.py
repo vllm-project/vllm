@@ -1168,7 +1168,7 @@ class TestStreamLogprobs:
         last_chunk = None
         # One token per chunk: every entry after the first needs cross-chunk
         # context to resolve without U+FFFD.
-        for i, tid in enumerate(token_ids):
+        for tid in token_ids:
             last_chunk, state = await derenderer.derender_chat_stream(
                 model=MODEL_NAME,
                 generate_chunk=_make_stream_chunk(
@@ -1582,8 +1582,8 @@ class TestDerenderChatStreamParsed:
     async def test_finish_reason_rewritten_to_tool_calls(
         self, parsed_derenderer, engine_finish_reason, expected_finish_reason
     ):
-        """A streamed tool call is reported as ``tool_calls`` only at a
-        natural stop; a ``length`` cut must stay visible."""
+        """A streamed tool call is reported as `tool_calls` only at a
+        natural stop; a `length` cut must stay visible."""
         chat_request = _chat_request(
             tools=[{"type": "function", "function": {"name": "get_weather"}}],
             tool_choice="auto",

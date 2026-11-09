@@ -21,7 +21,7 @@ def _ctx(req_id: str = "r1") -> ReqContext:
 
 
 class _SignalingQueue(queue.SimpleQueue):
-    """Sets ``ready`` once a posted batch is visible to drain_results()."""
+    """Sets `ready` once a posted batch is visible to drain_results()."""
 
     ready: threading.Event
 

@@ -3,13 +3,18 @@
 
 import atexit
 import gc
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Collection, Iterator
 from contextlib import contextmanager
 from typing import Any
 
 import torch
 
-from vllm.device_allocator import DEFERRABLE_TAGS, AllocationData, HandleType
+from vllm.device_allocator import (
+    DEFERRABLE_TAGS,
+    AllocationData,
+    HandleType,
+    discardable_allocations,
+)
 from vllm.logger import init_logger
 from vllm.utils.torch_utils import PIN_MEMORY
 
@@ -166,7 +171,11 @@ class XpuMemAllocator:
         logger.debug("Freed %s bytes for %s at %s", data.handle[1], data.tag, ptr)
         return data.handle
 
-    def sleep(self, offload_tags: tuple[str, ...] | str | None = None) -> None:
+    def sleep(
+        self,
+        offload_tags: tuple[str, ...] | str | None = None,
+        discardable: Collection[int] = (),
+    ) -> None:
         if offload_tags is None:
             offload_tags = (XpuMemAllocator.default_tag,)
         elif isinstance(offload_tags, str):
@@ -177,15 +186,14 @@ class XpuMemAllocator:
         total_bytes = 0
         backup_bytes = 0
         has_policy_conflict = False
+        discarded = discardable_allocations(self.allocator_and_pools, discardable)
 
         for ptr, data in self.pointer_to_data.items():
+            offload = data.tag in offload_tags and ptr not in discarded
             if data.is_asleep:
-                requests_offload = data.tag in offload_tags
-                was_offloaded = data.cpu_backup_tensor is not None
-                if requests_offload != was_offloaded:
+                if offload != (data.cpu_backup_tensor is not None):
                     has_policy_conflict = True
                 continue
-            offload = data.tag in offload_tags
             total_bytes += data.handle[1]
             if offload:
                 backup_bytes += data.handle[1]
