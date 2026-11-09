@@ -26,6 +26,7 @@ _MEM_LOCATION_TYPE_DEVICE = 1
 _MEM_ALLOC_GRANULARITY_MINIMUM = 0
 _MEM_ACCESS_FLAGS_PROT_READWRITE = 3
 _MEM_ALLOCATION_COMP_NONE = 0
+_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR = 1
 _DEVICE_ATTRIBUTE_GPU_DIRECT_RDMA_WITH_CUDA_VMM_SUPPORTED = 110
 _DEVICE_ATTRIBUTE_HANDLE_TYPE_FABRIC_SUPPORTED = 128
 _MEM_HANDLE_TYPE_FABRIC = 0x8
@@ -189,12 +190,16 @@ class VmmDriver:
             return
         raise RuntimeError(f"GPU driver error {result}: {self.error_string(result)}")
 
-    def _make_alloc_prop(self, device_index: int) -> _MemAllocationProp:
+    def _make_alloc_prop(
+        self, device_index: int, exportable: bool = False
+    ) -> _MemAllocationProp:
         prop = _MemAllocationProp()
         prop.type = _MEM_ALLOCATION_TYPE_PINNED
         prop.location.type = _MEM_LOCATION_TYPE_DEVICE
         prop.location.id = device_index
         prop.allocFlags.compressionType = _MEM_ALLOCATION_COMP_NONE
+        if exportable:
+            prop.requestedHandleTypes = _MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR
         return prop
 
     def granularity(self, device_index: int) -> int:
@@ -218,9 +223,10 @@ class VmmDriver:
     def free_reserved(self, ptr: int, size: int) -> None:
         self._check(self._fns["address_free"](ptr, size))
 
-    def create(self, size: int, device_index: int) -> int:
-        """Create a physical memory handle of `size` bytes."""
-        prop = self._make_alloc_prop(device_index)
+    def create(self, size: int, device_index: int, exportable: bool = False) -> int:
+        """Create a physical memory handle of `size` bytes, exportable as a
+        POSIX file descriptor if `exportable`."""
+        prop = self._make_alloc_prop(device_index, exportable)
         handle = MemHandle()
         self._check(
             self._fns["create"](ctypes.byref(handle), size, ctypes.byref(prop), 0)
@@ -296,11 +302,13 @@ class CudaVmmDriver(VmmDriver):
         )
         return result == _SUCCESS and bool(flag.value)
 
-    def _make_alloc_prop(self, device_index: int) -> _MemAllocationProp:
+    def _make_alloc_prop(
+        self, device_index: int, exportable: bool = False
+    ) -> _MemAllocationProp:
         # Request GPUDirect RDMA support where available, as the sleep-mode
         # allocator does: without it, KV connectors cannot register the
         # memory with RDMA NICs (ibv_reg_mr fails with EFAULT).
-        prop = super()._make_alloc_prop(device_index)
+        prop = super()._make_alloc_prop(device_index, exportable)
         if (capable := self._rdma_capable.get(device_index)) is None:
             capable = self._device_attribute(
                 _DEVICE_ATTRIBUTE_GPU_DIRECT_RDMA_WITH_CUDA_VMM_SUPPORTED, device_index
@@ -317,15 +325,15 @@ class CudaVmmDriver(VmmDriver):
             )
             self._fabric_capable[device_index] = fabric
         if fabric:
-            prop.requestedHandleTypes = _MEM_HANDLE_TYPE_FABRIC
+            prop.requestedHandleTypes |= _MEM_HANDLE_TYPE_FABRIC
         return prop
 
-    def create(self, size: int, device_index: int) -> int:
-        prop = self._make_alloc_prop(device_index)
+    def create(self, size: int, device_index: int, exportable: bool = False) -> int:
+        prop = self._make_alloc_prop(device_index, exportable)
         handle = MemHandle()
         result = self._fns["create"](ctypes.byref(handle), size, ctypes.byref(prop), 0)
         # Device support and an open channel do not guarantee a FABRIC allocation.
-        if prop.requestedHandleTypes and result in (
+        if prop.requestedHandleTypes & _MEM_HANDLE_TYPE_FABRIC and result in (
             _ERROR_NOT_PERMITTED,
             _ERROR_NOT_SUPPORTED,
         ):
@@ -337,7 +345,7 @@ class CudaVmmDriver(VmmDriver):
                 self.error_string(result),
             )
             self._fabric_capable[device_index] = False
-            return super().create(size, device_index)
+            return super().create(size, device_index, exportable)
         self._check(result)
         return handle.value
 

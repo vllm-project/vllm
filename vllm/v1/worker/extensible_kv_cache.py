@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 
 import torch
 
+from vllm.config.kv_transfer import KVCacheAccess
 from vllm.distributed.kv_transfer import (
     ensure_kv_transfer_initialized,
     get_kv_transfer_group,
@@ -85,6 +86,7 @@ class ExtensibleKVCache:
         kv_cache_config: KVCacheConfig,
         device: torch.device,
         layout: KVCacheLayout,
+        exportable: bool = False,
     ):
         tensors = [
             tensor
@@ -118,6 +120,7 @@ class ExtensibleKVCache:
                 end - start
                 for start, end in pairwise([*self.segment_offsets, self.size])
             ],
+            exportable=exportable,
         )
 
     def _segments(
@@ -375,6 +378,16 @@ def registers_kv_cache_memory(vllm_config: "VllmConfig") -> bool:
     return (
         kv_transfer_config is not None
         and kv_transfer_config.registers_kv_cache_memory()
+    )
+
+
+def exports_kv_cache_memory(vllm_config: "VllmConfig") -> bool:
+    """Whether another process imports the KV cache through POSIX file
+    descriptors, which needs it created exportable."""
+    kv_transfer_config = vllm_config.kv_transfer_config
+    return (
+        kv_transfer_config is not None
+        and KVCacheAccess.EXPORTS_FD in kv_transfer_config.kv_cache_access()
     )
 
 

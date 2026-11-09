@@ -17,6 +17,26 @@ LMCache integrates with vLLM v1 in two ways:
   distributed KV storage and for sharing KV cache across instances. See the
   [LMCache docs](https://docs.lmcache.ai) for the full MP setup.
 
+### MP mode with the extensible KV cache
+
+vLLM's extensible KV cache (`--enable-extensible-kv-cache`) allocates the KV
+cache through the CUDA VMM API, which legacy CUDA IPC cannot share.
+`LMCacheMPConnector` declares legacy CUDA IPC by default, which keeps the
+extensible KV cache off. With `"lmcache.mp.use_vmm_api": true` in its
+`kv_connector_extra_config`, also as a `MultiConnector` child, it declares
+POSIX file descriptor export instead: vLLM allocates the KV cache exportable,
+and the LMCache server imports each layer through a file descriptor. This
+requires:
+
+- an LMCache release that includes the file descriptor channel
+  ([LMCache/LMCache#6266](https://github.com/LMCache/LMCache/pull/6266)) and
+  declares `kv_cache_access`
+  ([LMCache/LMCache#6487](https://github.com/LMCache/LMCache/pull/6487)),
+- a CUDA GPU, with vLLM and the LMCache server on the same host, running as the
+  same user and sharing `/dev/shm` (`--ipc host` for containers),
+- a TCP server URL (`"lmcache.mp.host": "tcp://..."` and `"lmcache.mp.port"`),
+  from whose port the file descriptor socket path is derived.
+
 ## 1. CPU offload (in-process)
 
 - `python cpu_offload_lmcache.py` - CPU offloading with `LMCacheConnectorV1`

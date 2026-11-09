@@ -59,7 +59,7 @@ class KVCacheAccess(enum.IntFlag):
 
     EXPORTS_FD = enum.auto()
     """Another process imports it through POSIX file descriptors: one physical
-    allocation per segment, exportable (not yet implemented)."""
+    allocation per segment, exportable."""
 
     EXPORTS_FABRIC = enum.auto()
     """Another process on the host imports it through FABRIC handles (UCX
