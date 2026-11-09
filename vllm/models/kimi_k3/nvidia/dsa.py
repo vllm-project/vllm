@@ -3,12 +3,12 @@
 """Kimi K3.1 DSA (DeepSeek Sparse Attention) for the kimi_k3 stack.
 
 The DSA indexer uses the native upstream facilities
-(``DeepseekV32IndexerCache`` + ``torch.ops.vllm.sparse_attn_indexer``); the
-sparse MLA layers go through ``MultiHeadLatentAttentionWrapper`` with
-``MLAModules(is_sparse=True)``. Checkpoints name indexer weights
-``self_attn.indexer.{wq_b,wk,weights_proj,k_norm}``; the module tree keeps
-``self_attn.dsa_indexer.*``; load_weights renames into it and stacks ``wk``
-and ``weights_proj`` into the merged ``wkv_index``.
+(`DeepseekV32IndexerCache` + `torch.ops.vllm.sparse_attn_indexer`); the
+sparse MLA layers go through `MultiHeadLatentAttentionWrapper` with
+`MLAModules(is_sparse=True)`. Checkpoints name indexer weights
+`self_attn.indexer.{wq_b,wk,weights_proj,k_norm}`; the module tree keeps
+`self_attn.dsa_indexer.*`; load_weights renames into it and stacks `wk`
+and `weights_proj` into the merged `wkv_index`.
 """
 
 import math
@@ -67,6 +67,10 @@ from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 from vllm.utils.multi_stream_utils import maybe_execute_in_parallel
 from vllm.utils.torch_utils import _encode_layer_name
 from vllm.v1.attention.backends.mla import indexer as v32_indexer
+from vllm.v1.attention.backends.mla.index_group import (
+    SparseMLAIndexGroupBuilder,
+    get_sparse_mla_index_group_max_rows,
+)
 
 logger = init_logger(__name__)
 
@@ -80,11 +84,11 @@ def yarn_get_mscale(scale: float = 1, mscale: float = 1) -> float:
 class KimiK3DSAIndexerKNorm(nn.Module):
     """Bias-full fp32 LayerNorm for the DSA indexer shared key.
 
-    ``F.layer_norm(x.float(), (dim,), weight.float(), bias.float(),
-    eps).type_as(x)`` -- fp32 compute with a cast back to the input dtype.
+    `F.layer_norm(x.float(), (dim,), weight.float(), bias.float(),
+    eps).type_as(x)` -- fp32 compute with a cast back to the input dtype.
     weight/bias are stored in fp32 directly (numerically equivalent to
     casting per forward), keeping only the input/output dtype casts.
-    Selected via ``dsa_config.index_k_norm_type == "layernorm"``; legacy
+    Selected via `dsa_config.index_k_norm_type == "layernorm"`; legacy
     checkpoints keep the RMSNorm path untouched.
     """
 
@@ -102,10 +106,10 @@ class KimiK3DSAIndexerKNorm(nn.Module):
 
 
 class KimiK3DSAIndexer(nn.Module):
-    """wq / wkv indexer projections + native ``DeepseekV32IndexerCache``.
+    """wq / wkv indexer projections + native `DeepseekV32IndexerCache`.
 
     Forward quantizes the indexer query, folds the scales into the per-head
-    weights and drives ``torch.ops.vllm.sparse_attn_indexer`` directly (the
+    weights and drives `torch.ops.vllm.sparse_attn_indexer` directly (the
     upstream deepseek_v2.Indexer pattern).
     """
 
@@ -364,8 +368,8 @@ class KimiK3DSAIndexer(nn.Module):
         index_weights: torch.Tensor,
         index_k: torch.Tensor | None,
     ) -> torch.Tensor:
-        """Top-k of the current rows into ``topk_indices_buffer``; ``index_k`` is
-        None when the key was already inserted (``use_fused_k_insert``)."""
+        """Top-k of the current rows into `topk_indices_buffer`; `index_k` is
+        None when the key was already inserted (`use_fused_k_insert`)."""
         weight_scale = self.index_softmax_scale * self.indexer_weight_scale
         q_scale: torch.Tensor | None = None
         if self.use_fp4_cache:
@@ -413,7 +417,7 @@ class KimiK3DSAAttention(nn.Module):
     """Kimi K3.1 DSA (DeepSeek Sparse Attention) inference path.
 
     Same MLA projections as the dense Kimi-K3 MLA path, plus the DSA indexer
-    wired through ``MLAModules(is_sparse=True)`` so the FlashMLA sparse
+    wired through `MLAModules(is_sparse=True)` so the FlashMLA sparse
     backend consumes the top-k indices.
     """
 
@@ -649,6 +653,10 @@ class KimiK3DSAAttention(nn.Module):
             indexer_rotary_emb=self.rotary_emb,
             is_sparse=True,
             topk_indices_buffer=self.topk_indices_buffer,
+            index_group_builder=SparseMLAIndexGroupBuilder(
+                self.topk_indices_buffer,
+                get_sparse_mla_index_group_max_rows(vllm_config),
+            ),
         )
         self.mla_attn = MultiHeadLatentAttentionWrapper(
             self.hidden_size,
@@ -687,7 +695,7 @@ class KimiK3DSAAttention(nn.Module):
 
     def pack_projections(self) -> None:
         """Enable the fused forward (as DeepseekV32Attention): pack
-        ``[q_a | kv_a | wk | weights_proj]`` and ``[q_b | wq_index]`` into one
+        `[q_a | kv_a | wk | weights_proj]` and `[q_b | wq_index]` into one
         weight each, the linears becoming views. Other configurations keep the
         wrapper forward."""
         if self._packed is not None:

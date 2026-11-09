@@ -9,6 +9,7 @@
 
 use std::mem::take;
 use std::num::NonZeroU32;
+use std::time::Instant;
 
 pub use backend::{
     DynTextBackend, GenerationConfigMode, SamplingHints, SamplingLimits, TextBackend,
@@ -29,6 +30,7 @@ use trait_set::trait_set;
 use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputBackend;
 pub use vllm_llm::FinishReason;
 use vllm_llm::{BoxGenerateOutputStream, GenerateRequest, Llm};
+use vllm_metrics::{METRICS, RenderRequestType};
 use vllm_tokenizer::DynTokenizer;
 
 pub mod backend;
@@ -201,6 +203,9 @@ pub struct TextLlm {
     llm: Box<dyn Llm>,
     /// Shared engine-free request preparation.
     processor: TextRequestProcessor,
+    /// The `model_name` label of the render metric: the frontend's primary
+    /// served name, as for every other frontend metric.
+    served_model_name: String,
 }
 
 impl TextLlm {
@@ -210,11 +215,25 @@ impl TextLlm {
         // The engine-reported value reflects the post-profiling, auto-fitted
         // KV cache limit used at runtime.
         let max_model_len = llm.info().max_model_len;
+        let served_model_name = backend.model_id().to_owned();
 
         Self {
             llm: Box::new(llm),
             processor: TextRequestProcessor::new(backend, max_model_len),
+            served_model_name,
         }
+    }
+
+    /// Set the served model name that labels frontend metrics, the backend
+    /// model ID by default.
+    pub fn with_served_model_name(mut self, served_model_name: impl Into<String>) -> Self {
+        self.served_model_name = served_model_name.into();
+        self
+    }
+
+    /// Return the served model name that labels frontend metrics.
+    pub fn served_model_name(&self) -> &str {
+        &self.served_model_name
     }
 
     /// Override the maximum accepted logprobs count.
@@ -268,7 +287,8 @@ impl TextLlm {
     }
 
     /// Tokenize if needed, lower to a generate request, and return the raw
-    /// token stream.
+    /// token stream. Like Python's token-in-token-out route, this records no
+    /// render duration.
     pub async fn generate_raw(&self, request: TextRequest) -> Result<BoxGenerateOutputStream> {
         let prepared = self.processor.prepare(request)?;
         let mut streams = self.submit(prepared.generate_request, NonZeroU32::MIN).await?;
@@ -278,16 +298,7 @@ impl TextLlm {
     /// Tokenize if needed, lower to a generate request, and stream
     /// incrementally decoded text.
     pub async fn generate(&self, request: TextRequest) -> Result<impl TextOutputStream> {
-        let prepared = self.processor.prepare(request)?;
-        self.generate_prepared(prepared).await
-    }
-
-    /// Stream incrementally decoded text for one already prepared request.
-    pub async fn generate_prepared(
-        &self,
-        prepared: PreparedTextRequest,
-    ) -> Result<impl TextOutputStream + use<>> {
-        let mut streams = self.generate_prepared_n(prepared, NonZeroU32::MIN).await?;
+        let mut streams = self.generate_n(request, NonZeroU32::MIN).await?;
         Ok(streams.pop().expect("one output stream per sample"))
     }
 
@@ -298,7 +309,15 @@ impl TextLlm {
         request: TextRequest,
         n: NonZeroU32,
     ) -> Result<Vec<impl TextOutputStream + use<>>> {
+        // Like Python's `render_completion`, record successful renders
+        // (tokenization).
+        let render_start = Instant::now();
         let prepared = self.processor.prepare(request)?;
+        METRICS.renderer.observe_request_render_duration(
+            &self.served_model_name,
+            RenderRequestType::Completion,
+            render_start.elapsed(),
+        );
         self.generate_prepared_n(prepared, n).await
     }
 

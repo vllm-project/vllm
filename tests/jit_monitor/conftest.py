@@ -10,7 +10,7 @@ from vllm.utils import jit_monitor
 def _reset_monitor():
     """Reset global monitor state between tests.
 
-    ``activate()`` installs process-global hooks and flips module globals, so
+    `activate()` installs process-global hooks and flips module globals, so
     without this every test would inherit the previous test's monitor state.
     """
 
