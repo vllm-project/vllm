@@ -935,7 +935,7 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
         if hasattr(language_model, "language_model"):
             language_model = language_model.language_model
 
-        hidden_states = language_model.model(
+        hidden_states = language_model(
             input_ids, positions, intermediate_tensors, inputs_embeds=inputs_embeds
         )
         return hidden_states

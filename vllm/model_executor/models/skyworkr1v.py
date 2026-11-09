@@ -400,7 +400,7 @@ class SkyworkR1VChatModel(nn.Module, SupportsMultiModal, SupportsPP):
             forward_kwargs.update({"visual_token_mask": self.visual_token_mask})
             self.visual_token_mask = None
 
-        hidden_states = self.language_model.model(**forward_kwargs)
+        hidden_states = self.language_model(**forward_kwargs)
         return hidden_states
 
     def compute_logits(
