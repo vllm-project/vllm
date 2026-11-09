@@ -241,12 +241,12 @@ def gemma4_routing_function_topk_softmax(
     topk: int,
     per_expert_scale: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Gemma4 routing with the ``topk_softmax`` MoE custom op.
+    """Gemma4 routing with the `topk_softmax` MoE custom op.
 
-    ``topk_softmax(renormalize=True)`` is the Gemma4 routing (softmax over all
+    `topk_softmax(renormalize=True)` is the Gemma4 routing (softmax over all
     experts, top-k, renormalize over the selected k); the per-expert scale is
     then folded into the weights. Returns float32 weights and int32 expert ids
-    of shape ``[num_tokens, topk]``, like the Triton and torch paths.
+    of shape `[num_tokens, topk]`, like the Triton and torch paths.
     """
     num_tokens = gating_output.shape[0]
     topk_weights = torch.empty(
