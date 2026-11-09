@@ -19,7 +19,7 @@ from ..utils import (
 )
 
 
-def _picked_block(rank: int, sync: bool) -> list[int]:
+def _picked_block(rank: int, sync: bool) -> list[tuple[int, int, dict]]:
     """Autotune a copy kernel with rank-dependent fake timings; gather the picks."""
     import torch.distributed as dist
 
@@ -27,12 +27,17 @@ def _picked_block(rank: int, sync: bool) -> list[int]:
     from vllm.forward_context import override_forward_context
     from vllm.triton_utils import tl, tp_synced_autotune, triton
 
+    # Ranks of this test share a node and a Triton cache dir: with the on-disk
+    # autotune cache on, a rank would read the other's result instead of tuning.
+    triton.knobs.autotuning.cache = False
     Autotuner = triton.runtime.autotuner.Autotuner
     configs = [triton.Config({"BLOCK": 64}), triton.Config({"BLOCK": 128})]
 
+    fastest_here = 64 if rank == 0 else 128
+
     def fake_bench(self, *args, config, **meta):
-        # Each rank believes "its own" config is the fastest.
-        return [1.0] if configs.index(config) == rank else [2.0]
+        # Each rank believes a different config is the fastest.
+        return [1.0] if config.kwargs["BLOCK"] == fastest_here else [2.0]
 
     Autotuner._bench = fake_bench
     if sync:
@@ -53,9 +58,7 @@ def _picked_block(rank: int, sync: bool) -> list[int]:
         mask = offs < n
         tl.store(dst + offs, tl.load(src + offs, mask=mask), mask=mask)
 
-    # A per-case size gives each case its own autotune key: Triton may reuse cached
-    # autotune results across processes, which would hide the per-rank choice.
-    n = 1000 if sync else 1001
+    n = 1000 if sync else 1001  # one autotune key per case
     src = torch.arange(n, dtype=torch.float32, device="cuda")
     dst = torch.empty_like(src)
     with override_forward_context(SimpleNamespace()):  # type: ignore[arg-type]
@@ -63,9 +66,12 @@ def _picked_block(rank: int, sync: bool) -> list[int]:
     torch.accelerator.synchronize()
     torch.testing.assert_close(dst, src)
 
-    picks: list[int] = [0] * get_tp_group().world_size
+    picks: list[tuple[int, int, dict]] = [(0, 0, {})] * get_tp_group().world_size
+    timings = {c.kwargs["BLOCK"]: t for c, t in copy_kernel.configs_timings.items()}
     dist.all_gather_object(
-        picks, copy_kernel.best_config.kwargs["BLOCK"], group=get_tp_group().cpu_group
+        picks,
+        (copy_kernel.best_config.kwargs["BLOCK"], rank, timings),
+        group=get_tp_group().cpu_group,
     )
     return picks
 
@@ -74,11 +80,12 @@ def _worker(monkeypatch, tp_size, pp_size, rank, distributed_init_port, sync):
     monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
     torch.accelerator.set_device_index(torch.device(f"cuda:{rank}"))
     init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
-    picks = _picked_block(rank, sync)
+    full = _picked_block(rank, sync)
+    picks = [p[0] for p in full]
     if sync:
-        assert picks == [64, 64], picks  # every rank follows rank 0's timings
+        assert picks == [64, 64], full  # every rank follows rank 0's timings
     else:
-        assert picks == [64, 128], picks  # the test can tell the difference
+        assert picks == [64, 128], full  # the test can tell the difference
 
 
 @ray.remote(num_gpus=1, max_calls=1)
