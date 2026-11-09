@@ -453,7 +453,7 @@ class DeepseekV41ROCMAiterSparseSWAMetadataBuilder(DeepseekV41SparseSWAMetadataB
 class DeepseekV41RocmMxfp4Indexer(DeepseekV4Indexer):
     """The indexer on aiter's paged MXFP4 cache: its K store and Q quant write
     in the order aiter's MQA-logits kernel reads, and its layers score with it.
-    ``_produce_k`` and ``forward_q`` mirror ``DeepseekV4Indexer``'s except for
+    `_produce_k` and `forward_q` mirror `DeepseekV4Indexer`'s except for
     those two calls."""
 
     mqa_cls = RocmSparseMQAIndexer
@@ -685,16 +685,11 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
         hidden_states: torch.Tensor,
         llama_4_scaling: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        if (
-            self.indexer is None
-            or self._prepare_and_attn_fn == self._prepare_and_attn_eager
-            or not current_platform.enable_multi_stream_overlap(
-                self.aux_stream_list, get_forward_context().attn_metadata
-            )
+        if self.indexer is None or not current_platform.enable_multi_stream_overlap(
+            self.aux_stream_list, get_forward_context().attn_metadata
         ):
             # Sequential fallback: no forks outside the capture region, where
-            # HIP event sync is unreliable; MRV1 keeps the input prep in its
-            # wide eager region (#51430).
+            # HIP event sync is unreliable.
             aux_streams = self.aux_stream_list
             self.aux_stream_list = None
             try:
@@ -738,7 +733,7 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
         base three-fork pipeline is expensive there; the compressor chain and
         the indexer weights projection run fully in parallel with the default
         chain. The indexer K write and q-side stay serial after the join:
-        ``wk`` consumes the aux-0 latent and the q-side's wq_b consumes the
+        `wk` consumes the aux-0 latent and the q-side's wq_b consumes the
         default-stream qr.
         """
         attn_metadata = get_forward_context().attn_metadata
@@ -1099,7 +1094,7 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
     ) -> _TopkRagged:
         """Ragged form of the topk indices this layer's index source published.
 
-        The packing depends only on the shared ``topk_indices_buffer`` and
+        The packing depends only on the shared `topk_indices_buffer` and
         per-step metadata, apart from the layer's own compress ratio, so the
         source memoizes one result per ratio for all the layers below it.
         """
@@ -1214,9 +1209,9 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
         swa_metadata: DeepseekV41ROCMAiterSparseSWAMetadata,
         mxfp8_out: tuple[torch.Tensor, torch.Tensor] | None = None,
     ) -> None:
-        """Sparse prefill into bf16 ``output``, or into ``mxfp8_out``.
+        """Sparse prefill into bf16 `output`, or into `mxfp8_out`.
 
-        With ``mxfp8_out`` the rows go to a bf16 workspace first and are then
+        With `mxfp8_out` the rows go to a bf16 workspace first and are then
         inverse-RoPE'd and quantized into it in one pass.
         """
         if self._use_aiter_sparse_mla:
@@ -1359,7 +1354,7 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
     ) -> list[tuple[tuple[int, ...], torch.dtype]]:
         """The prefill gather buffer, plus bf16 rows for the MXFP8 output.
 
-        One ``get_simultaneous`` call: separate calls alias the same memory.
+        One `get_simultaneous` call: separate calls alias the same memory.
         """
         shapes: list[tuple[tuple[int, ...], torch.dtype]] = [
             ((self.PREFILL_CHUNK_SIZE, M, q.shape[-1]), torch.bfloat16)
@@ -1379,7 +1374,7 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
         attn_metadata: DeepseekV4FlashMLAMetadata,
         compressed_k_cache: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Prefill counterpart of ``_decode_topk_ragged``: layers that share an
+        """Prefill counterpart of `_decode_topk_ragged`: layers that share an
         index source and a compressed cache reuse one build per step."""
         assert swa_metadata.token_to_req_indices is not None
         assert swa_metadata.query_start_loc is not None
@@ -1430,7 +1425,7 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
     ) -> None:
         """Prefill straight off the paged caches, with no bf16 gather.
 
-        The store applies the inverse RoPE, and quantizes into ``mxfp8_out``.
+        The store applies the inverse RoPE, and quantizes into `mxfp8_out`.
         """
         num_prefill_tokens = swa_metadata.num_prefill_tokens
         assert swa_metadata.prefill_swa_ragged_indices is not None

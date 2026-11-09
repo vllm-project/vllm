@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """KDA prefill backend selection for ROCm.
 
-The Kimi-K3 KDA layer calls :func:`chunk_kda_prefill`, which either runs the
-fused HIP kernels in ``kda_chunk`` or falls back to the vendored Triton chunk
+The Kimi-K3 KDA layer calls `chunk_kda_prefill`, which either runs the
+fused HIP kernels in `kda_chunk` or falls back to the vendored Triton chunk
 path.
 """
 
@@ -58,37 +58,37 @@ def chunk_kda_prefill(
     """Run chunk KDA from raw gate and beta projections.
 
     Args:
-        q: query tensor, ``[1, T, H, K]``.
-        k: key tensor, ``[1, T, H, K]``.
-        v: value tensor, ``[1, T, H, V]``.
+        q: query tensor, `[1, T, H, K]`.
+        k: key tensor, `[1, T, H, K]`.
+        v: value tensor, `[1, T, H, V]`.
         raw_g: raw gate projection, before the activation.
         raw_beta: raw beta projection, before the activation.
         A_log: log of the per-head gate decay.
         g_bias: optional per-head gate bias.
         scale: scale applied to the query-key products. Defaults to
-            ``k.shape[-1] ** -0.5``.
-        initial_state: fp32 per-sequence initial recurrent state, or ``None``.
+            `k.shape[-1] ** -0.5`.
+        initial_state: fp32 per-sequence initial recurrent state, or `None`.
         output_final_state: whether to return the final recurrent state.
         lower_bound: optional floor applied to the gate.
         use_qk_l2norm_in_kernel: fold the q/k L2 norm into the kernel.
         cu_seqlens: int32 cumulative sequence lengths.
-        chunk_indices: precomputed chunk indices for ``cu_seqlens``.
+        chunk_indices: precomputed chunk indices for `cu_seqlens`.
         chunk_offsets: int32 per-sequence first chunk index.
-        backend: ``"triton"`` (the vendored chunk path), ``"fused"`` (the
+        backend: `"triton"` (the vendored chunk path), `"fused"` (the
             two-kernel ROCm path; used only when every one of its
             preconditions holds, otherwise the Triton path runs unchanged) or
-            ``"gluon"`` (AITER's ``chunk_kda``).
+            `"gluon"` (AITER's `chunk_kda`).
         out: buffer the result must land in. Honoured by both backends, so the
             caller can hand in a slice of its own output and skip a copy.
         checkpoint_state: destination for mid-prefill recurrent state
             snapshots, letting a later prefix-cache hit resume from a mamba
-            block boundary. See :func:`fused_kda_chunk`.
-        checkpoint_offsets: per-sequence token offset to snapshot at, ``0``
+            block boundary. See `fused_kda_chunk`.
+        checkpoint_offsets: per-sequence token offset to snapshot at, `0`
             for none.
         checkpoint_state_indices: optional per-sequence destination row.
         state_cache: the paged recurrent state. The fused backend reads and
             writes FP32 or BF16 cache rows directly, accumulating in FP32.
-            The returned final state is ``None``.
+            The returned final state is `None`.
         state_indices: per-sequence cache row.
         has_initial_state: per-sequence flag; false starts from a zero state.
 

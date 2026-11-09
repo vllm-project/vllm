@@ -623,8 +623,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
         Performs two normalizations in a single pass:
         - Converts tool_calls generators/iterators to lists so one-shot
           generators are not consumed during union type matching.
-        - Renames the deprecated ``reasoning_content`` field to
-          ``reasoning`` so downstream code only needs to check one field.
+        - Renames the deprecated `reasoning_content` field to
+          `reasoning` so downstream code only needs to check one field.
         """
         if not isinstance(data, dict):
             return data
@@ -781,7 +781,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
         )
 
     def extract_structured_outputs(self) -> StructuredOutputsParams | None:
-        """Normalize request constraints into ``StructuredOutputsParams``."""
+        """Normalize request constraints into `StructuredOutputsParams`."""
         return structured_outputs_from_response_format(
             self.structured_outputs,
             self.response_format,
@@ -1192,17 +1192,17 @@ class ChatCompletionRequest(OpenAIBaseModel):
 class BatchChatCompletionRequest(OpenAIBaseModel):
     """Request model for the /v1/chat/completions/batch endpoint.
 
-    Accepts the same fields as ChatCompletionRequest except that ``messages``
+    Accepts the same fields as ChatCompletionRequest except that `messages`
     is a list of conversations (each conversation is a
-    ``list[ChatCompletionMessageParam]``).  Each conversation is processed
+    `list[ChatCompletionMessageParam]`).  Each conversation is processed
     independently and the response contains one choice per conversation,
     indexed 0, 1, ..., N-1.
 
     Current limitations compared to the single-conversation endpoint:
-    - Streaming is not supported (``stream`` must be False or omitted).
-    - Tool use is not supported (``tools`` must be omitted).
-    - Beam search is not supported (``use_beam_search`` must be False or omitted).
-    - The ``n`` parameter must be 1 (or omitted).
+    - Streaming is not supported (`stream` must be False or omitted).
+    - Tool use is not supported (`tools` must be omitted).
+    - Beam search is not supported (`use_beam_search` must be False or omitted).
+    - The `n` parameter must be 1 (or omitted).
     """
 
     messages: list[Annotated[list[ChatCompletionMessageParam], Field(min_length=1)]] = (
