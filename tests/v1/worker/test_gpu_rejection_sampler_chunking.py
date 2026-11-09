@@ -163,6 +163,71 @@ def test_chunked_scores_match_full_batch(
     assert sampling_mask_tensors is None
 
 
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
+@pytest.mark.parametrize("top_k", [20, 4000])
+def test_top_k_rows_mask_on_load(monkeypatch: pytest.MonkeyPatch, top_k: int):
+    """With only temperature and top-k (plus top-p) active, _verify hands the raw
+    logits and per-row cutoffs to rejection_sample instead of making the fp32
+    copy; a top_k too large to sort cheaply keeps apply_sampling_params."""
+    seen = {}
+
+    def fake_rejection_sample(
+        *args, target_logits_pre_scaled, target_topp_thresh, **kwargs
+    ):
+        seen["pre_scaled"] = target_logits_pre_scaled
+        seen["thresh"] = target_topp_thresh
+        return torch.zeros(1, 2, dtype=torch.int64), torch.ones(1, dtype=torch.int32)
+
+    monkeypatch.setattr(rs_module, "rejection_sample", fake_rejection_sample)
+    vocab_size = 8192
+    device = "cuda"
+    rejection_sampler = _make_rejection_sampler(
+        SimpleNamespace(
+            logprobs_mode="raw_logprobs",
+            return_sampling_mask=False,
+            needs_only_temperature_scaling=lambda _: False,
+            needs_only_temperature_and_top_p=lambda _: False,
+            needs_only_temperature_and_top_k=lambda _: True,
+            apply_sampling_params=lambda logits, *args: logits.float(),
+            sampling_states=SimpleNamespace(
+                vocab_size=vocab_size,
+                temperature=SimpleNamespace(gpu=torch.full((1,), 0.7, device=device)),
+                top_k=SimpleNamespace(
+                    np=np.full(1, top_k, dtype=np.int32),
+                    gpu=torch.full((1,), top_k, dtype=torch.int32, device=device),
+                ),
+                top_p=SimpleNamespace(gpu=torch.full((1,), 0.9, device=device)),
+                seeds=SimpleNamespace(gpu=torch.zeros(1, dtype=torch.int64)),
+            ),
+            use_fp64_gumbel=False,
+            trace_replay_state=None,
+            may_mask_logits=np.ones(1, dtype=bool),
+        ),
+        num_speculative_steps=1,
+    )
+    idx_mapping_np = np.zeros(1, dtype=np.int32)
+    batch = _make_input_batch(np.array([0, 2], dtype=np.int32), idx_mapping_np, device)
+    logits = torch.randn(2, vocab_size, device=device).to(torch.bfloat16)
+    rejection_sampler._verify(
+        logits,
+        None,
+        torch.zeros(2, dtype=torch.int64),
+        torch.arange(2),
+        batch.cu_num_logits,
+        batch.idx_mapping,
+        idx_mapping_np,
+        batch.expanded_idx_mapping,
+        batch.expanded_local_pos,
+        np.full(1, 64, dtype=np.int32),
+    )
+
+    on_load = top_k <= 1024
+    assert seen["pre_scaled"] == (not on_load)
+    assert (seen["thresh"] is not None) == on_load
+    if on_load:
+        assert seen["thresh"].shape == (2,) and seen["thresh"].isfinite().all()
+
+
 @pytest.mark.parametrize("fly_window_size", [0, 2])
 def test_fly_verifies_processed_logits(
     monkeypatch: pytest.MonkeyPatch, fly_window_size: int

@@ -26,6 +26,7 @@ from vllm.v1.worker.gpu.sample.sampler import Sampler
 from vllm.v1.worker.gpu.spec_decode.draft_logits import DraftLogitsCache
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
     rejection_sample,
+    top_k_top_p_cutoffs,
 )
 
 # Cap on the FP32 target-logits buffer materialized by apply_sampling_params.
@@ -145,6 +146,11 @@ def gather_draft_sampled(
         BLOCK_SIZE=BLOCK_SIZE,
     )
     return draft_sampled, pos
+
+
+# Above this, sorting each row's top_k largest logits stops being cheap next to
+# the fp32 copy and full top-k/top-p mask it replaces.
+_MAX_TOP_K_ON_LOAD = 1024
 
 
 @functools.cache
@@ -290,6 +296,7 @@ class RejectionSampler:
             and self.sampler.needs_only_temperature_scaling(idx_mapping_np)
         )
         target_topp_thresh = None
+        states = self.sampler.sampling_states
         if (
             not skip_scaling
             and not needs_processed_logits
@@ -300,11 +307,29 @@ class RejectionSampler:
             # Top-p cutoffs on the raw logits, with every tie at the cutoff
             # kept; the verify kernels mask and scale as they load, so no fp32
             # copy of the logits is made.
-            states = self.sampler.sampling_states
             target_topp_thresh, _ = ops.topp_cutoffs_lse(
                 logits, expanded_idx_mapping, states.temperature.gpu, states.top_p.gpu
             )
             skip_scaling = True
+        elif (
+            not skip_scaling
+            and not needs_processed_logits
+            and self.sampler.needs_only_temperature_and_top_k(idx_mapping_np)
+        ):
+            top_k_np = states.top_k.np[idx_mapping_np]
+            max_top_k = int(top_k_np[top_k_np < states.vocab_size].max(initial=0))
+            if 0 < max_top_k <= _MAX_TOP_K_ON_LOAD:
+                # Same on-load masking, with cutoffs taken from each row's
+                # top_k largest logits (and top_p over them); works on any GPU.
+                target_topp_thresh = top_k_top_p_cutoffs(
+                    logits,
+                    expanded_idx_mapping,
+                    states.temperature.gpu,
+                    states.top_k.gpu,
+                    states.top_p.gpu,
+                    max_top_k,
+                )
+                skip_scaling = True
         if skip_scaling:
             processed_logits = logits
         else:

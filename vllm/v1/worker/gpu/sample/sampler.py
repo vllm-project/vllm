@@ -254,6 +254,21 @@ class Sampler:
         )
         return not np.any(sampled & restricted)
 
+    def needs_only_temperature_and_top_k(self, idx_mapping_np: np.ndarray) -> bool:
+        """Like needs_only_temperature_and_top_p, but top_k may be active too, as
+        long as every row with an active top_p also has one: the cutoffs then
+        come from each row's top_k largest logits, without a full-vocab sort.
+        """
+        if np.any(self.needs_other_processing[idx_mapping_np]):
+            return False
+        states = self.sampling_states
+        sampled = states.temperature.np[idx_mapping_np] != 0.0
+        no_top_k = states.top_k.np[idx_mapping_np] == states.vocab_size
+        restricted = (states.min_p.np[idx_mapping_np] != 0.0) | (
+            (states.top_p.np[idx_mapping_np] != 1.0) & no_top_k
+        )
+        return not np.any(sampled & restricted)
+
     def apply_sampling_params(
         self,
         logits: torch.Tensor,

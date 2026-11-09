@@ -220,3 +220,51 @@ def test_needs_only_temperature_scaling_blocked_by_any_restricted_row():
 
     assert sampler.needs_only_temperature_scaling(np.array([0], dtype=np.int32))
     assert not sampler.needs_only_temperature_scaling(np.array([0, 1], dtype=np.int32))
+
+
+@pytest.mark.parametrize(
+    ("requests", "expected"),
+    [
+        pytest.param([SamplingParams(temperature=0.7)], True, id="temperature-only"),
+        pytest.param([SamplingParams(temperature=0.7, top_k=20)], True, id="top-k"),
+        pytest.param(
+            [SamplingParams(temperature=0.6, top_k=20, top_p=0.95)],
+            True,
+            id="top-k-and-top-p",
+        ),
+        pytest.param(
+            [SamplingParams(temperature=0.7, top_p=0.9)], False, id="top-p-only"
+        ),
+        pytest.param(
+            [
+                SamplingParams(temperature=0.7, top_k=20),
+                SamplingParams(temperature=0.7, top_p=0.9),
+            ],
+            False,
+            id="mixed-with-top-p-only-row",
+        ),
+        pytest.param(
+            [SamplingParams(temperature=0.0, top_p=0.9)], True, id="greedy-top-p"
+        ),
+        pytest.param(
+            [SamplingParams(temperature=0.7, top_k=20, min_p=0.1)], False, id="min-p"
+        ),
+        pytest.param(
+            [SamplingParams(temperature=0.7, top_k=20, logit_bias={1: 1.0})],
+            False,
+            id="logit-bias",
+        ),
+    ],
+)
+def test_needs_only_temperature_and_top_k_matches_request_features(
+    requests: list[SamplingParams], expected: bool
+):
+    """The top-k on-load cutoffs look only at each row's top_k largest logits,
+    so a sampled row with top_p but no top_k must take another path."""
+    sampler = _make_sampler()
+    for req_idx, sampling_params in enumerate(requests):
+        sampler.add_request(req_idx, sampling_params)
+    sampler.sampling_states.apply_staged_writes()
+
+    idx_np = np.arange(len(requests), dtype=np.int32)
+    assert sampler.needs_only_temperature_and_top_k(idx_np) == expected

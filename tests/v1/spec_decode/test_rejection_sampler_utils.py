@@ -9,6 +9,7 @@ import pytest
 import torch
 
 from vllm.triton_utils import tl, triton
+from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p_pytorch
 from vllm.v1.spec_decode.fly import compute_fly_entropy
 from vllm.v1.watermarking import GumbelWatermarker
 from vllm.v1.watermarking.spec_decode import watermarked_rejection_sample
@@ -22,6 +23,7 @@ from vllm.v1.worker.gpu.spec_decode.rejection_sampler import (
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
     _div_rn_by_scalar,
     rejection_sample,
+    top_k_top_p_cutoffs,
 )
 
 VOCAB_SIZE = 4096
@@ -1208,6 +1210,7 @@ def test_verify_rejects_unproposed_drafts():
         return_sampling_mask=False,
         needs_only_temperature_scaling=lambda _: False,
         needs_only_temperature_and_top_p=lambda _: False,
+        needs_only_temperature_and_top_k=lambda _: False,
         may_mask_logits=np.zeros(num_trials, dtype=bool),
     )
     rejection_sampler.num_speculative_steps = K
@@ -2015,3 +2018,93 @@ def test_div_rn_by_scalar_matches_ieee_division():
 
     expected = x.unsqueeze(0) / temps.unsqueeze(1)
     assert torch.equal(out.view(torch.int32), expected.view(torch.int32))
+
+
+def _top_k_top_p_cutoffs_reference(
+    logits: torch.Tensor, temp: torch.Tensor, k: torch.Tensor, p: torch.Tensor
+) -> torch.Tensor:
+    """fp64 over the full sorted row: keep every value tied with the k-th
+    largest, then every value at or above the first one whose cumulative
+    probability over the kept set (x / T in fp32) reaches top_p."""
+    x = logits.float()
+    vocab_size = x.shape[1]
+    sorted_x = x.sort(dim=-1, descending=True).values
+    kth = sorted_x.gather(1, (k.long().clamp(max=vocab_size) - 1)[:, None])
+    scaled = x / torch.where(temp == 0, 1.0, temp)[:, None]
+    kept = torch.where(x >= kth, scaled, float("-inf")).double()
+    order = kept.argsort(dim=-1, descending=True)
+    probs = kept.softmax(-1).gather(1, order)
+    reach = (probs.cumsum(-1) < p.double()[:, None]).sum(-1, keepdim=True)
+    cut = x.gather(1, order).gather(1, reach.clamp(max=vocab_size - 1))
+    cut = torch.maximum(cut, kth)[:, 0]
+    keep_all = (temp == 0) | (k >= vocab_size) | (sorted_x[:, 0] == float("-inf"))
+    return torch.where(keep_all, float("-inf"), cut)
+
+
+def _top_k_top_p_rows(num_rows: int, vocab_size: int, device: str):
+    """Per-row temperature, top_k and top_p, every active top_p paired with a
+    top_k, as the caller routes them; greedy rows and rows without top-k too."""
+    temp = torch.tensor([0.0, 0.6, 1.0, 1.3], device=device).repeat(num_rows // 4)
+    k = torch.tensor([1, 5, 20, 40, 100, vocab_size], device=device)
+    k = k.repeat(num_rows // 6 + 1)[:num_rows].int()
+    p = torch.tensor([0.5, 0.8, 0.95, 1.0, 0.9], device=device)
+    p = p.repeat(num_rows // 5 + 1)[:num_rows]
+    p = torch.where(k == vocab_size, 1.0, p)
+    return temp, k, p
+
+
+@pytest.mark.parametrize("vocab_size", [32000, 151936])
+def test_top_k_top_p_cutoffs_match_fp64_reference(vocab_size: int):
+    """bf16 rounding ties logits at every value, including the k-th largest and
+    the top-p cutoff; every tie must be kept, as the fp64 reference does. Also
+    rows with fewer finite logits than top_k, and a row with none."""
+    torch.manual_seed(0)
+    device = "cuda"
+    num_rows = 96
+    logits = torch.randn(num_rows, vocab_size, device=device) * 2
+    # Dominant tokens in half the rows; the flat half reaches the k-th value.
+    spikes = torch.randint(0, vocab_size, (num_rows // 2, 4), device=device)
+    logits[::2].scatter_(
+        1, spikes, 12 + torch.rand(num_rows // 2, 4, device=device) * 6
+    )
+    temp, k, p = _top_k_top_p_rows(num_rows, vocab_size, device)
+    # 10 tokens above a group of 30 tied at the k-th value, past k = 20: top-p
+    # must weigh the whole group, not just its slots inside the top 20.
+    tied_rows = torch.tensor([21, 22, 25, 26], device=device)
+    cols = torch.randperm(vocab_size, device=device)[:40]
+    logits[tied_rows[:, None], cols[:10]] = 8 + torch.arange(10, device=device) / 8
+    logits[tied_rows[:, None], cols[10:]] = 7.0
+    k[tied_rows] = 20
+    p[tied_rows] = 0.9
+    logits = logits.to(torch.bfloat16)
+    logits[7, 10:] = float("-inf")
+    logits[13] = float("-inf")
+    idx = torch.arange(num_rows, device=device)
+    max_top_k = int(k[k < vocab_size].max())
+
+    cutoffs = top_k_top_p_cutoffs(logits, idx, temp, k, p, max_top_k)
+
+    expected = _top_k_top_p_cutoffs_reference(logits, temp, k, p)
+    torch.testing.assert_close(cutoffs, expected, rtol=0, atol=0)
+
+
+def test_top_k_top_p_cutoffs_keep_what_the_sampler_keeps():
+    """Without ties, masking the raw logits at the cutoffs keeps exactly the
+    tokens apply_top_k_top_p_pytorch keeps of the logits divided by T."""
+    torch.manual_seed(1)
+    device = "cuda"
+    num_rows, vocab_size = 64, 32000
+    logits = torch.randn(num_rows, vocab_size, device=device) * 3
+    temp, k, p = _top_k_top_p_rows(num_rows, vocab_size, device)
+    temp = torch.where(temp == 0, 0.8, temp)
+    k = torch.where(k == vocab_size, 50, k)
+    # Requests 2 and 0 share rows, as speculative steps of one request do.
+    idx = torch.arange(num_rows, device=device) // 2
+    req_temp, req_k, req_p = temp[::2], k[::2], p[::2]
+
+    cutoffs = top_k_top_p_cutoffs(logits, idx, req_temp, req_k, req_p, 100)
+
+    expected = apply_top_k_top_p_pytorch(
+        logits / req_temp[idx][:, None], req_k[idx], req_p[idx]
+    ) > float("-inf")
+    assert torch.equal(logits >= cutoffs[:, None], expected)

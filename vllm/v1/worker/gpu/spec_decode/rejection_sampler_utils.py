@@ -1599,3 +1599,98 @@ def rejection_sample(
         PADDED_RESAMPLE_NUM_BLOCKS=padded_resample_num_blocks,
     )
     return sampled, num_sampled
+
+
+@triton.jit
+def _count_ties_kernel(
+    logits_ptr,
+    logits_stride,
+    value_ptr,
+    count_ptr,
+    vocab_size,
+    BLOCK_SIZE: tl.constexpr,
+):
+    row = tl.program_id(0).to(tl.int64)
+    block = tl.program_id(1) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = block < vocab_size
+    logits = tl.load(logits_ptr + row * logits_stride + block, mask=mask)
+    value = tl.load(value_ptr + row)
+    tl.atomic_add(count_ptr + row, tl.sum((logits == value) & mask, axis=0))
+
+
+def _count_ties(logits: torch.Tensor, value: torch.Tensor) -> torch.Tensor:
+    """Per-row count of logits equal to value[row], without materializing the
+    [num_rows, vocab_size] comparison."""
+    num_rows, vocab_size = logits.shape
+    count = torch.zeros(num_rows, dtype=torch.int32, device=logits.device)
+    BLOCK_SIZE = 8192
+    _count_ties_kernel[(num_rows, triton.cdiv(vocab_size, BLOCK_SIZE))](
+        logits, logits.stride(0), value, count, vocab_size, BLOCK_SIZE=BLOCK_SIZE
+    )
+    return count
+
+
+def top_k_top_p_cutoffs(
+    logits: torch.Tensor,
+    expanded_idx_mapping: torch.Tensor,
+    temperature: torch.Tensor,
+    top_k: torch.Tensor,
+    top_p: torch.Tensor,
+    max_top_k: int,
+) -> torch.Tensor:
+    """Per-row cutoffs on the raw logits for top-k, then top-p over the top-k set.
+
+    Keeping logits >= cutoff keeps every token tied with the k-th largest logit,
+    as apply_top_k_top_p_pytorch does. Top-p then keeps every value at or above
+    the first one, in descending order, whose cumulative probability over the
+    kept set reaches top_p, ties included, as topp_cutoffs_lse does. The
+    probabilities are taken in fp64 over x / T in fp32, which is how the verify
+    kernels scale the logits they load. Only the max_top_k largest logits of a
+    row are sorted, so the caller must route rows whose top_p is active without
+    a top_k elsewhere: such rows get no top-p here.
+
+    Args:
+        logits: [num_rows, vocab_size] raw target logits.
+        expanded_idx_mapping: [num_rows] request index of each row.
+        temperature: [max_num_reqs] fp32; 0 marks a greedy request.
+        top_k: [max_num_reqs] int32; vocab_size means no top-k.
+        top_p: [max_num_reqs] fp32.
+        max_top_k: the largest top_k below vocab_size among the rows.
+
+    Returns:
+        [num_rows] fp32 cutoffs; -inf keeps every token (greedy rows, rows
+        without top-k, rows with no finite logit).
+
+    """
+    vocab_size = logits.shape[-1]
+    idx = expanded_idx_mapping.long()
+    temp = temperature[idx]
+    k = top_k[idx].long()
+    active = (temp != 0.0) & (k < vocab_size)
+
+    vals = logits.topk(min(max_top_k, vocab_size), dim=-1).values
+    num_vals = vals.shape[-1]
+    kth = vals.gather(1, (k.clamp(1, num_vals) - 1)[:, None])
+    num_ties = _count_ties(logits, kth.squeeze(1).contiguous())
+    vals = vals.float()
+    kth = kth.float()
+
+    # Tokens above the k-th value each keep their own slot; the tokens tied
+    # with it, top-k ones or not, share the first tied slot as one group.
+    above = vals > kth
+    first_tie = above.sum(-1, keepdim=True)
+    safe_temp = torch.where(temp == 0.0, 1.0, temp)[:, None]
+    scaled = (vals / safe_temp).double()
+    row_max = scaled[:, :1]
+    weights = torch.where(above, torch.exp(scaled - row_max), 0.0)
+    tie_weight = num_ties[:, None].double() * torch.exp(
+        (kth / safe_temp).double() - row_max
+    )
+    weights.scatter_(1, first_tie.clamp(max=num_vals - 1), tie_weight)
+    cdf = weights.cumsum(-1) / weights.sum(-1, keepdim=True)
+    reach = (cdf < top_p[idx].double()[:, None]).sum(-1, keepdim=True)
+    cutoff = torch.where(
+        reach < first_tie, vals.gather(1, reach.clamp(max=num_vals - 1)), kth
+    )[:, 0]
+    keep_all = ~active | (vals[:, 0] == float("-inf"))
+    return torch.where(keep_all, float("-inf"), cutoff)
