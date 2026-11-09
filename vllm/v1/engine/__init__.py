@@ -225,6 +225,10 @@ class EngineCoreRequest(
     # PrefixHashConfig, including any extra keys (LoRA, multimodal, cache salt).
     block_hashes: list[bytes] | None = None
 
+    # Prometheus label values extracted from allowlisted request headers,
+    # keyed by label name. Only consumed by the frontend metrics path.
+    metrics_labels: dict[str, str] | None = None
+
     @property
     def params(self) -> SamplingParams | PoolingParams:
         """Return the processed params (sampling or pooling)."""

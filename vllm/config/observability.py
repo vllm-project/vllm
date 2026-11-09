@@ -6,6 +6,7 @@ from functools import cached_property
 from itertools import pairwise
 from typing import Literal
 
+import regex as re
 from packaging.version import parse
 from pydantic import Field, field_validator, model_validator
 
@@ -16,6 +17,15 @@ from vllm.logger import init_logger
 logger = init_logger(__name__)
 
 DetailedTraceModules = Literal["model", "worker", "all"]
+
+MAX_PROMETHEUS_REQUEST_LABELS = 5
+"""Maximum number of header-derived labels allowed on per-request metrics."""
+
+_PROMETHEUS_REQUEST_LABEL_RESERVED = frozenset(
+    {"model_name", "engine", "finished_reason", "le"}
+)
+_HEADER_NAME_PATTERN = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
+_LABEL_NAME_PATTERN = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
 
 
 @config
@@ -80,6 +90,20 @@ class ObservabilityConfig:
     `--custom-histogram-buckets '{"request_latency": [0.01, 0.05, 0.1, 0.5]}'`.
     Note that every extra bucket adds one time series per metric and label
     set."""
+
+    prometheus_request_labels: dict[str, str] | None = None
+    """Additional Prometheus labels on per-request metric families, as a JSON
+    mapping from an incoming HTTP header name to the label name to expose its
+    value under. Only the allowlisted headers are extracted; a request missing
+    a header records an empty label value, so label sets stay fixed per metric
+    family. Applies to per-request families (e.g.
+    `vllm:e2e_request_latency_seconds`, `vllm:time_to_first_token_seconds`,
+    `vllm:request_success`); engine-wide scheduler metrics are unchanged.
+    Example: `--prometheus-metrics-request-labels
+    '{"x-fairness-id": "fairness_id", "x-client-id": "client_id"}'`.
+    Keep label values low-cardinality (tenant classes, not user or request
+    IDs): every distinct value multiplies the series of each per-request
+    family. At most 5 labels are allowed."""
 
     cudagraph_metrics: bool = False
     """Enable CUDA graph metrics (number of padded/unpadded tokens, runtime cudagraph
@@ -205,6 +229,41 @@ class ObservabilityConfig:
                     f"custom_histogram_buckets[{family!r}]: bounds {buckets} "
                     "must be strictly increasing"
                 )
+        return value
+
+    @field_validator("prometheus_request_labels")
+    @classmethod
+    def _validate_prometheus_request_labels(
+        cls, value: dict[str, str] | None
+    ) -> dict[str, str] | None:
+        if value is None:
+            return value
+        if len(value) > MAX_PROMETHEUS_REQUEST_LABELS:
+            raise ValueError(
+                f"prometheus_request_labels: at most "
+                f"{MAX_PROMETHEUS_REQUEST_LABELS} labels are allowed, "
+                f"got {len(value)}"
+            )
+        for header, label in value.items():
+            if not _HEADER_NAME_PATTERN.match(header):
+                raise ValueError(
+                    f"prometheus_request_labels: {header!r} is not a valid "
+                    "HTTP header name"
+                )
+            if not _LABEL_NAME_PATTERN.match(label):
+                raise ValueError(
+                    f"prometheus_request_labels: {label!r} is not a valid "
+                    "Prometheus label name"
+                )
+            if label in _PROMETHEUS_REQUEST_LABEL_RESERVED:
+                raise ValueError(
+                    f"prometheus_request_labels: {label!r} collides with a "
+                    f"label vLLM already sets "
+                    f"({sorted(_PROMETHEUS_REQUEST_LABEL_RESERVED)})"
+                )
+        labels = list(value.values())
+        if len(set(labels)) != len(labels):
+            raise ValueError("prometheus_request_labels: label names must be distinct")
         return value
 
     @model_validator(mode="after")

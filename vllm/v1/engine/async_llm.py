@@ -427,6 +427,7 @@ class AsyncLLM(EngineClient):
         reasoning_ended: bool | None = None,
         reasoning_parser_kwargs: dict[str, Any] | None = None,
         kv_hints: KvHintsEnvelope | None = None,
+        metrics_labels: dict[str, str] | None = None,
     ) -> RequestOutputCollector:
         """Add new request to the AsyncLLM."""
         if self.errored:
@@ -466,6 +467,7 @@ class AsyncLLM(EngineClient):
                 data_parallel_rank,
                 session_id,
                 kv_hints,
+                metrics_labels,
             )
 
         # Convert Input --> Request.
@@ -531,6 +533,8 @@ class AsyncLLM(EngineClient):
             request.reasoning_ended = reasoning_ended
         if reasoning_parser_kwargs is not None:
             request.reasoning_parser_kwargs = reasoning_parser_kwargs
+        if metrics_labels is not None:
+            request.metrics_labels = metrics_labels
 
         self.input_processor.assign_request_id(request)
 
@@ -613,6 +617,7 @@ class AsyncLLM(EngineClient):
         data_parallel_rank: int | None = None,
         session_id: str | None = None,
         kv_hints: KvHintsEnvelope | None = None,
+        metrics_labels: dict[str, str] | None = None,
     ) -> RequestOutputCollector:
         self._validate_resumable_request()
         self._validate_streaming_input_sampling_params(sampling_params)
@@ -642,6 +647,7 @@ class AsyncLLM(EngineClient):
             **inputs,  # type: ignore[arg-type]
         )
         self.input_processor.assign_request_id(final_req)
+        final_req.metrics_labels = metrics_labels
         internal_req_id = final_req.request_id
 
         queue = StreamingInputOutputCollector(
@@ -675,6 +681,7 @@ class AsyncLLM(EngineClient):
                         **inputs,  # type: ignore[arg-type]
                     )
                     req.external_req_id = request_id
+                    req.metrics_labels = metrics_labels
                     if req.prompt_embeds is not None:
                         raise VLLMValidationError(
                             "prompt_embeds not supported for streaming inputs"
@@ -756,6 +763,7 @@ class AsyncLLM(EngineClient):
         kv_hints: KvHintsEnvelope | None = None,
         reasoning_ended: bool | None = None,
         reasoning_parser_kwargs: dict[str, Any] | None = None,
+        metrics_labels: dict[str, str] | None = None,
     ) -> AsyncGenerator[RequestOutput, None]:
         """Main function called by the API server to kick off a request
             * 1) Making an AsyncStream corresponding to the Request.
@@ -798,6 +806,7 @@ class AsyncLLM(EngineClient):
                 prompt_text=prompt_text,
                 reasoning_ended=reasoning_ended,
                 reasoning_parser_kwargs=reasoning_parser_kwargs,
+                metrics_labels=metrics_labels,
             )
 
             # The output_handler task pushes items into the queue.
@@ -1055,6 +1064,7 @@ class AsyncLLM(EngineClient):
         priority: int = 0,
         tokenization_kwargs: dict[str, Any] | None = None,
         reasoning_ended: bool | None = None,
+        metrics_labels: dict[str, str] | None = None,
     ) -> AsyncGenerator[PoolingRequestOutput, None]:
         """Main function called by the API server to kick off a request
             * 1) Making an AsyncStream corresponding to the Request.
@@ -1079,6 +1089,7 @@ class AsyncLLM(EngineClient):
                 trace_headers=trace_headers,
                 priority=priority,
                 reasoning_ended=reasoning_ended,
+                metrics_labels=metrics_labels,
             )
 
             # The output_handler task pushes items into the queue.
