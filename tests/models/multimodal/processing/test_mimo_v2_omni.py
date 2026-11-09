@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """MiMo-V2 omni video timestamps must follow the sampled frames' media time.
 
-Uses the public ``XiaomiMiMo/MiMo-V2.5`` config and tokenizer (no weights).
+Uses the public `XiaomiMiMo/MiMo-V2.5` config and tokenizer (no weights).
 """
 
 import numpy as np
@@ -105,6 +105,7 @@ def test_timestamps_from_metadata():
         {"frames_indices": [0, 50, 100, 150]},
         {"frames_indices": [0, 50, 100, 150], "fps": 0.0},
         {"frames_indices": [0, 50, 100], "fps": 25.0},
+        {"frames_indices": [0, 0, 0, 0], "fps": 25.0},
     ],
 )
 def test_timestamps_without_frame_timing(metadata):

@@ -685,12 +685,18 @@ class MiMoVisionTransformer(nn.Module):
 def _video_timestamps(num_frames: int, metadata: dict | None) -> torch.Tensor:
     """Media time of each sampled frame, or 1 s apart without frame timing.
 
-    The loader samples frames uniformly, so space them evenly between the first
-    and last sampled frame.
+    Assume uniform sampling and space them evenly between the first and last
+    sampled frame.
     """
     indices = (metadata or {}).get("frames_indices")
     fps = (metadata or {}).get("fps")
-    if indices is None or not fps or len(indices) != num_frames or num_frames == 0:
+    if (
+        indices is None
+        or not fps
+        or len(indices) != num_frames
+        or num_frames == 0
+        or (num_frames > 1 and indices[-1] <= indices[0])
+    ):
         return torch.arange(num_frames, dtype=torch.float32)
     return torch.linspace(indices[0] / fps, indices[-1] / fps, num_frames)
 
