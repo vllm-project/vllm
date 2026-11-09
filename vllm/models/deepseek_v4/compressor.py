@@ -198,13 +198,21 @@ class CompressorStateCache(torch.nn.Module, AttentionLayerBase):
         return CompressorBackend
 
 
+class DeepseekV4CompressorKVScoreLinear(MergedColumnParallelLinear):
+    """Fused `wkv`/`wgate` projection with the FP32 output the compressor
+    state accumulates in."""
+
+    def forward(self, input_: torch.Tensor) -> torch.Tensor:
+        return torch.mm(input_, self.weight.T, out_dtype=torch.float32)
+
+
 class DeepseekCompressor(nn.Module):
     """DeepSeek V4 KV/score compressor.
 
     Owns the linear / norm / state-cache / ape state and the shared forward
     prologue (kv/score split, save_partial_states launch). The
     compress → norm → RoPE → store step is dispatched to a triton kernel
-    (``compress_norm_rope_store_triton``) by default, except for the NVIDIA
+    (`compress_norm_rope_store_triton`) by default, except for the NVIDIA
     head_dim=512 path which uses the CuTeDSL compressor kernels for better
     performance.
     """
@@ -269,7 +277,14 @@ class DeepseekCompressor(nn.Module):
             requires_grad=False,
         )
 
-        self.fused_wkv_wgate = MergedColumnParallelLinear(
+        # CPU packs the weight for its GEMM and frees the raw copy, so it keeps
+        # the quant-method forward and upcasts the BF16 output itself.
+        kv_score_linear = (
+            MergedColumnParallelLinear
+            if current_platform.is_cpu()
+            else DeepseekV4CompressorKVScoreLinear
+        )
+        self.fused_wkv_wgate = kv_score_linear(
             self.hidden_size,
             [self.coff * self.head_dim, self.coff * self.head_dim],
             bias=False,

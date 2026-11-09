@@ -182,10 +182,10 @@ class QuarkConfig(QuantizationConfig):
     ):
         """Find the linear layers exported with an online input rotation.
 
-        Quark's ``RotationConfig`` with ``online_r1_rotation`` (or ``r4``)
+        Quark's `RotationConfig` with `online_r1_rotation` (or `r4`)
         keeps the activation rotation online: the weight is stored rotated
-        along its input dimension, and the layer carries an ``input_rotation``
-        tensor (a +-1 int8 Hadamard matrix of size ``rotation_size``) that the
+        along its input dimension, and the layer carries an `input_rotation`
+        tensor (a +-1 int8 Hadamard matrix of size `rotation_size`) that the
         activation must be multiplied by first.
         """
         algo_configs = self.quant_config.get("algo_config") or []
@@ -223,7 +223,7 @@ class QuarkConfig(QuantizationConfig):
     def _scale_block_rows(self, prefix: str, layer_type: type[torch.nn.Module]) -> int:
         """How many weight rows one checkpoint scale row covers.
 
-        1 for the canonical 1-D per-group MX spelling; ``block_size[0]`` for
+        1 for the canonical 1-D per-group MX spelling; `block_size[0]` for
         MXFP8 exports that spell the scale 2-D (DeepSeek-V4.1 uses 32). The
         scheme cannot work this out itself: it has no handle on the layer name,
         and tensor-parallel sharding narrows the loaded scale so the ratio is
@@ -301,15 +301,15 @@ class QuarkConfig(QuantizationConfig):
         | None,
     ]:
         """Return weight key, activation key, and quant method class for
-        the given ``prefix`` and ``layer_type``.
+        the given `prefix` and `layer_type`.
 
-        This is the counterpart of ``get_quant_method`` without quant method
+        This is the counterpart of `get_quant_method` without quant method
         instantiation.
 
         TODO: integrate as part of base QuantizationConfig.get_quant_method_target
         in the future.
 
-        ``None`` denotes an unquantized/BF16 activation.
+        `None` denotes an unquantized/BF16 activation.
         """
         is_routed_experts = issubclass(layer_type, RoutedExperts)
         if should_ignore_layer(
