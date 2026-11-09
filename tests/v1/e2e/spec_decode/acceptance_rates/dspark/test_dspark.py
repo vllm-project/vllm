@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import pytest
 
 from tests.evals.gsm8k.gsm8k_eval import evaluate_gsm8k_offline
+from tests.models.utils import check_logprobs_close
 from vllm.config import CompilationConfig
 from vllm.platforms import current_platform
 
@@ -154,3 +155,51 @@ def test_dspark_correctness_and_acceptance_rate(
         assert (
             acceptance_len >= config.reference_acceptance_len * REGRESSION_TOLERANCE
         ), f"{context}: {metrics_summary}"
+
+
+def test_dspark_topk_fp32_head_matches_target(vllm_runner):
+    """Top-k drafting with BF16 Markov weights must support FP32 head logits."""
+    prompts = ["The capital of France is", "One plus one equals"]
+    runner_config = {
+        "dtype": "bfloat16",
+        "hf_overrides": {"head_dtype": "float32"},
+        "max_model_len": 256,
+        "max_num_seqs": 2,
+        "max_num_batched_tokens": 256,
+        "gpu_memory_utilization": 0.8,
+        "block_size": None,
+        "enable_prefix_caching": False,
+        "enforce_eager": True,
+        "disable_log_stats": False,
+        "kernel_config": {
+            "enable_jit_warmup": False,
+            "enable_flashinfer_autotune": False,
+        },
+    }
+    with vllm_runner(
+        "Qwen/Qwen3-8B",
+        speculative_config={
+            "method": "dspark",
+            "model": "deepseek-ai/dspark_qwen3_8b_block7",
+            "num_speculative_tokens": 3,
+            "draft_sample_method": "probabilistic",
+            "dspark_draft_topk": 128,
+        },
+        **runner_config,
+    ) as spec_runner:
+        spec_outputs = spec_runner.generate_greedy_logprobs(
+            prompts, max_tokens=24, num_logprobs=5
+        )
+        assert compute_acceptance_rate(spec_runner.llm.get_metrics()) > 0
+
+    with vllm_runner("Qwen/Qwen3-8B", **runner_config) as target_runner:
+        target_outputs = target_runner.generate_greedy_logprobs(
+            prompts, max_tokens=24, num_logprobs=5
+        )
+
+    check_logprobs_close(
+        outputs_0_lst=target_outputs,
+        outputs_1_lst=spec_outputs,
+        name_0="target",
+        name_1="DSpark top-k with FP32 head",
+    )

@@ -152,6 +152,9 @@ class DSparkMarkovHead(nn.Module):
                     "Gathered Markov projection requires unquantized weights or "
                     "retained ModelOpt W4A16 NVFP4 weights."
                 )
+        # head_dtype can promote base logits without changing the Markov weights.
+        weight = weight.to(values.dtype)
+        markov_embed = markov_embed.to(values.dtype)
         corrected = values.unsqueeze(-1).clone()
         corrected.baddbmm_(
             weight,
