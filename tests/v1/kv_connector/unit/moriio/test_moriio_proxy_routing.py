@@ -123,7 +123,7 @@ def _proxy_import_stubs():
 
 
 def _load_proxy_module():
-    path = Path(__file__).parents[4] / PROXY_REL
+    path = Path(__file__).parents[5] / PROXY_REL
     spec = importlib.util.spec_from_file_location("moriio_proxy_under_test", path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)

@@ -5627,13 +5627,13 @@ steps:
   - vllm/distributed/kv_transfer/kv_connector/v1/base.py
   - vllm/distributed/kv_transfer/kv_connector/v1/ssm_conv_transfer_utils.py
   - examples/disaggregated/disaggregated_serving/moriio_toy_proxy_server.py
-  - tests/v1/kv_connector/unit/test_moriio_
+  - tests/v1/kv_connector/unit/moriio/
   - tests/v1/kv_connector/unit/utils.py
   - requirements/test/rocm.txt
   commands:
   - bash /vllm-workspace/.buildkite/scripts/check-kv-connectors.sh
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s -rs v1/kv_connector/unit/test_moriio_*.py
+  - pytest -v -s -rs v1/kv_connector/unit/moriio
 
 - label: ":amd: (MI355 DPX) UMBP Connector Unit Tests"
   timeout_in_minutes: 30
