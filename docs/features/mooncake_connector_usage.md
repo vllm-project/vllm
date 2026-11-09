@@ -49,13 +49,13 @@ Configure the decoder with `MultiConnector` (`kv_consumer`) combining
 `MooncakeConnector` (`kv_producer`) on the prefiller.
 See the [HiSparse architecture](../design/hisparse.md) for host
 pool ownership and residency. Matching group layouts retain the ordinary
-Mooncake transfer path. Different group layouts use per-region pairing,
-validated against the decoder's per-group token block sizes.
+Mooncake transfer path. Different group layouts use per-region pairing.
 
 This experimental path requires matching tensor-parallel sizes, pipeline
-parallelism of one, and sparse MLA with unsplit physical pages. Layer names,
-token block sizes, and per-layer payload sizes must agree even when group
-numbers differ between nodes. Each decoder group must request a contiguous
+parallelism of one, and sparse MLA with unsplit physical pages. Layer names
+and per-layer payload sizes must agree even when group numbers differ between
+nodes. Configure the same token block sizes on both endpoints, as required by
+the ordinary Mooncake path. Each decoder group must request a contiguous
 uncached suffix; holes within that suffix are unsupported. The producer pairs
 the requested pages with the suffix of its corresponding source group.
 Incompatible region layouts fail before any data transfer.
