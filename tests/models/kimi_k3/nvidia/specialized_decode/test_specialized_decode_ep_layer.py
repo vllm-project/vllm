@@ -36,7 +36,8 @@ def stand_in(latent, topk_w, topk_ids):
 )
 @pytest.mark.parametrize("impl", ["cuda", "native"])
 @pytest.mark.parametrize("tokens", [1, 5, 20, 40, 80, 96])
-def test_ep_moe_layer_matches_stock_sequence(tokens, impl):
+@pytest.mark.parametrize("front_gemm", [False, True])
+def test_ep_moe_layer_matches_stock_sequence(tokens, impl, front_gemm):
     from vllm import _custom_ops as ops
     from vllm.config import VllmConfig, set_current_vllm_config
     from vllm.model_executor.layers.activation import SituAndMul
@@ -67,7 +68,7 @@ def test_ep_moe_layer_matches_stock_sequence(tokens, impl):
         situ = SituAndMul(beta=4.0, linear_beta=25.0)
         act = situ.forward_cuda if impl == "cuda" else situ.forward_native
         # 96 > FRONT_MAX: the layer must fall back to the stock order.
-        layer = EpMoeLayer(w, act, stand_in, [tokens])
+        layer = EpMoeLayer(w, act, stand_in, [tokens], front_gemm=front_gemm)
         assert (tokens in layer.batches) == (tokens <= 80)
 
         logits = torch.mm(x, w["gate"].t(), out_dtype=torch.float32)
