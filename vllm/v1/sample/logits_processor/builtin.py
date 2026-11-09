@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from typing import TYPE_CHECKING, TypeVar
 
 import numpy as np
@@ -185,6 +185,43 @@ class MinTokensLogitsProcessor(LogitsProcessor):
         self.neg_inf_tensor = torch.tensor(
             -float("inf"), dtype=torch.float32, device=self.device
         )
+        # Logits fed to the sampler are either the full (possibly padded)
+        # vocabulary after the default LM-head all-gather, or this rank's
+        # shard when the LM head output is TP-sharded (vocab-parallel logits
+        # fed to the sampler, e.g. by ecosystem backends). The coordinate
+        # system is selected at mask time from the logits width, so both
+        # layouts are handled correctly. For the sharded layout, index
+        # tensors are built with global ids translated to local columns
+        # (out-of-shard ids dropped) in `update_state`.
+        model_config = vllm_config.model_config
+        self.vocab_size = (
+            model_config.get_vocab_size() if model_config is not None else None
+        )
+        parallel_config = vllm_config.parallel_config
+        tp_size = (
+            parallel_config.tensor_parallel_size if parallel_config is not None else 1
+        )
+        self._shard_start = 0
+        self._shard_end = self.vocab_size
+        self._local_logits_slice: tuple[torch.Tensor, torch.Tensor] | None = None
+        self._local_restore_logits_slice: tuple[torch.Tensor, torch.Tensor] | None = (
+            None
+        )
+        self._sharding_possible = self.vocab_size is not None and tp_size > 1
+        if self._sharding_possible:
+            from vllm.distributed import get_tensor_model_parallel_rank
+            from vllm.model_executor.layers.vocab_parallel_embedding import (
+                DEFAULT_VOCAB_PADDING_SIZE,
+                pad_vocab_size,
+                vocab_range_from_global_vocab_size,
+            )
+
+            vocab_size_padded = pad_vocab_size(
+                self.vocab_size, DEFAULT_VOCAB_PADDING_SIZE
+            )
+            self._shard_start, self._shard_end = vocab_range_from_global_vocab_size(
+                vocab_size_padded, get_tensor_model_parallel_rank(), tp_size
+            )
 
     def is_argmax_invariant(self) -> bool:
         """By censoring stop tokens, min-tokens can change the outcome
@@ -223,10 +260,17 @@ class MinTokensLogitsProcessor(LogitsProcessor):
 
         # Update tensors if needed.
         if needs_update:
+            # Global coordinates: used whenever the sampler receives
+            # full-vocabulary logits (the default LM-head all-gather path).
             reqs: list[int] = []
             tok_ids: list[int] = []
             restore_reqs: list[int] = []
             restore_tok_ids: list[int] = []
+            # Local coordinates: used when the logits are TP-sharded.
+            local_reqs: list[int] = []
+            local_tok_ids: list[int] = []
+            local_restore_reqs: list[int] = []
+            local_restore_tok_ids: list[int] = []
             for req, (
                 _,
                 _,
@@ -238,6 +282,14 @@ class MinTokensLogitsProcessor(LogitsProcessor):
                 if uses_structured_output:
                     restore_reqs.extend([req] * len(stop_tok_ids))
                     restore_tok_ids.extend(stop_tok_ids)
+                if self._sharding_possible:
+                    local_toks = self._local_stop_ids(stop_tok_ids)
+                    if local_toks:
+                        local_reqs.extend([req] * len(local_toks))
+                        local_tok_ids.extend(local_toks)
+                        if uses_structured_output:
+                            local_restore_reqs.extend([req] * len(local_toks))
+                            local_restore_tok_ids.extend(local_toks)
 
             self.logits_slice = (
                 self._device_tensor(reqs, torch.int32),
@@ -247,9 +299,42 @@ class MinTokensLogitsProcessor(LogitsProcessor):
                 self._device_tensor(restore_reqs, torch.int32),
                 self._device_tensor(restore_tok_ids, torch.int32),
             )
+            if self._sharding_possible:
+                self._local_logits_slice = (
+                    self._device_tensor(local_reqs, torch.int32),
+                    self._device_tensor(local_tok_ids, torch.int32),
+                )
+                self._local_restore_logits_slice = (
+                    self._device_tensor(local_restore_reqs, torch.int32),
+                    self._device_tensor(local_restore_tok_ids, torch.int32),
+                )
 
     def _device_tensor(self, data: list, dtype: torch.dtype) -> torch.Tensor:
         return async_tensor_h2d(data, device=self.device, dtype=dtype)
+
+    def _local_stop_ids(self, tok_ids: Iterable[int]) -> list[int]:
+        """Map global token ids onto this rank's logits columns.
+
+        Ids outside this rank's vocabulary shard belong to other ranks'
+        samplers and are dropped. Only called when sharding is possible.
+        """
+        start, end = self._shard_start, self._shard_end
+        return [tok - start for tok in tok_ids if start <= tok < end]
+
+    def _pick_slices(
+        self, logits: torch.Tensor
+    ) -> tuple[tuple[torch.Tensor, torch.Tensor], tuple[torch.Tensor, torch.Tensor]]:
+        """Select the (mask, restore) index tensors matching `logits` layout.
+
+        Sharded logits (width below the full vocab size) must be indexed in
+        rank-local coordinates; full-vocabulary logits (default LM-head
+        all-gather, possibly padded) keep global token ids.
+        """
+        if self._sharding_possible and logits.shape[1] < self.vocab_size:
+            assert self._local_logits_slice is not None
+            assert self._local_restore_logits_slice is not None
+            return self._local_logits_slice, self._local_restore_logits_slice
+        return self.logits_slice, self.restore_logits_slice
 
     def _mask_stop_token_logits(
         self,
@@ -279,12 +364,11 @@ class MinTokensLogitsProcessor(LogitsProcessor):
     def apply(self, logits: torch.Tensor) -> torch.Tensor:
         if self.min_toks:
             # Inhibit stop tokens for requests which have not reached min length.
-            if self.restore_logits_slice[0].numel() == 0:
-                logits.index_put_(self.logits_slice, self.neg_inf_tensor)
+            logits_slice, restore_logits_slice = self._pick_slices(logits)
+            if restore_logits_slice[0].numel() == 0:
+                logits.index_put_(logits_slice, self.neg_inf_tensor)
             else:
-                self._mask_stop_token_logits(
-                    logits, self.logits_slice, self.restore_logits_slice
-                )
+                self._mask_stop_token_logits(logits, logits_slice, restore_logits_slice)
         return logits
 
     def apply_with_spec_decode(
@@ -338,11 +422,20 @@ class MinTokensLogitsProcessor(LogitsProcessor):
             n_mask = int(min(max(remaining, 0), num_draft_arr[req_idx]))
 
             if n_mask > 0:
+                # Sharded logits are indexed in local coordinates; full
+                # logits keep global ids.
+                toks = (
+                    self._local_stop_ids(stop_toks)
+                    if self._sharding_possible and logits.shape[1] < self.vocab_size
+                    else stop_toks
+                )
+                if not toks:
+                    continue
                 offset = cumsum[req_idx]
                 row_indices = np.arange(offset, offset + n_mask, dtype=np.int64)
-                n_stop = len(stop_toks)
+                n_stop = len(toks)
                 rows = np.repeat(row_indices, n_stop)
-                toks = np.tile(stop_toks, n_mask)
+                toks = np.tile(toks, n_mask)
                 all_rows.append(rows)
                 all_toks.append(toks)
                 if uses_structured_output:
