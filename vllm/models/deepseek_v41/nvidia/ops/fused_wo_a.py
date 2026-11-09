@@ -428,8 +428,10 @@ class FusedWoAKernel(VllmCuTeDSLJitKernel["FusedWoAKernel.CompileKey"]):
                 if split < tokens:
                     # One warp waits for the peers' bytes; named barrier 1 (0 is
                     # sync_threads) releases the other tile_n epilogue threads.
+                    # The peers' st.async complete-tx release at cluster scope,
+                    # so the wait acquires at cluster scope.
                     if warp == 0:
-                        cute.arch.mbarrier_wait(mbar_reduced, 0)
+                        mbarrier.wait_parity_acquire_cluster(mbar_reduced, Int32(0))
                     cute.arch.barrier(barrier_id=1, number_of_threads=tile_n)
                     for i in cutlass.range_constexpr(
                         cute.ceil_div(tokens, heads_per_group)

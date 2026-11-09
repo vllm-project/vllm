@@ -4133,6 +4133,9 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
             tCor_for_copy[None, None, None, p_cor_consumer_state.index],
             rCor,
         )
+        # The tcgen05.ld above is asynchronous: wait for its registers before
+        # they are read and before the stage is handed back to the producer.
+        cute.arch.fence_view_async_tmem_load()
         row_sum = rCor[0]
         row_max = rCor[1]
         correction_factor = rCor[2]

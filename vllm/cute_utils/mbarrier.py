@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import cutlass.cute as cute
 from cutlass import Int32
 from cutlass._mlir.dialects import nvvm
 from cutlass.cutlass_dsl import dsl_user_op
+from cutlass.experimental import primitives as prims
 
 _SPACE_MAP = {
     "cta": nvvm.MBarrierSpaceKind.CTA,
@@ -45,3 +47,21 @@ def arrive_expect_tx(
         loc=loc,
         ip=ip,
     )
+
+
+@cute.jit
+def wait_parity_acquire_cluster(mbar, phase: Int32) -> None:
+    """``cute.arch.mbarrier_wait`` with ``.acquire.cluster`` semantics.
+
+    Use it when the barrier is completed by a peer CTA's ``st.async`` or
+    ``cp.async.bulk`` complete-tx, a release at cluster scope: the default
+    ``.acquire.cta`` wait does not synchronize with other CTAs' threads, so the
+    peer-written DSMEM could be read before the peer's bytes are visible.
+    ``cute.arch.mbarrier_wait`` has no scope argument, so this uses the
+    Primitives ``mbarrier_try_wait_parity`` with ``MBarrierScope.CLUSTER``, which
+    lowers to ``mbarrier.try_wait.parity.acquire.cluster``.
+    """
+    while not prims.mbarrier_try_wait_parity(
+        mbar, phase, scope=prims.MBarrierScope.CLUSTER
+    ):
+        pass
