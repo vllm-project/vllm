@@ -9,14 +9,16 @@ Status: draft (v5). Measurements behind each rule are in [experiments](experimen
 | Output | Follows | Positions | Bytes/token (DeepSeek-V4.1-Flash) | Use |
 |---|---|---|---|---|
 | `routed_experts` (R3) | KV | all | 40 layers × 6 × uint16 = 480 B | routing replay in the trainer |
-| `indexer_topk` | KV | all | 8 layers × 512 × 20 bit, zstd: ~2.5–3.6 KB (16 KB raw) | sparse-attention replay |
-| `topk_logprobs` | sampling | generated | k × 8 B | truncated distillation, KL |
+| `indexer_topk` | KV | all | 8 layers × 512 × 20 bit, zstd: 2.5–3.6 KB up to 128K context, ~5.6 KB at 512K (16 KB raw) | sparse-attention replay |
+| `topk_logprobs` | sampling | generated | 128 × (int32 id + fp32 logprob) = 1 KB | truncated distillation, KL |
 | `sampling_mask` | sampling | generated | CSR, ≤ 256 ids per row | reconstruct the truncated/masked support |
 | `hidden_states` | sampling | generated | `lm_head` input in the dtype that enters `lm_head` (codec `raw`): 16 KB as float32 | full-vocabulary student training |
 
 The sampled token's logprob is returned inline with the response; that number is the behavior probability. Logits recomputed from hidden states are not bitwise equal to vLLM's (max diff 2e-4 even in fp32), so trainers must not try to reproduce the behavior logprob from them.
 
 **Hidden states are exact.** They are stored as the very values that entered `lm_head`, so the trainer's full-vocabulary logits differ from the engine's only by its own matmul (logprob error max 7.8e-4).
+
+**Top-k logprobs.** k = 128, at generated positions only. Today they are returned inline in the response, by the frontend; on the one-node 14.6K workload this made rollouts 46.8% longer (experiments: top-k inline). A store path like that of hidden states is planned, not built: captured on the GPU at sampling, written in generated chunks per request (§4), and read back as `[generated length, 128]`.
 
 **Indexer rows.** A cell (one position, one indexer layer) holds the top-k selected positions in ascending order with the `-1` pads last. That is the order the engine's top-k produces and the trainer's top-k kernel expects, so replay compares cells as sequences, not sets. Every codec must restore exactly this order on decode; a decoder that reorders pads still passes any set-based check while replay silently loses its effect.
 

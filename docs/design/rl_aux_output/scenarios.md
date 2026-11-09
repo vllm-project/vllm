@@ -25,12 +25,12 @@ By Little's law, a frontier-scale trajectory lives ≈110,000 ÷ 41.3 ≈ 2,660 
 | Output | Positions recorded | Per position | 16K trajectory | 200K trajectory | 1M trajectory |
 |---|---|---|---|---|---|
 | R3 | all | 384 B / 392 B (MoE layers × top-k × 1 B) | 6.3 MB | 80 MB | 411 MB |
-| top-k 256 | generated only | 2 KB (256 × (int32 id + fp32 logprob)) | 17 MB | 42 MB | 215 MB |
+| top-k 128 | generated only | 1 KB (128 × (int32 id + fp32 logprob)) | 8.4 MB | 21 MB | 107 MB |
 | top-p mask (≤ 256 ids) | generated only | ≤ 1 KB | 8.4 MB | 21 MB | 107 MB |
 | indexer, 12 layers × 2048 | all | 96 KiB | 1.6 GB | 20 GB | 103 GB |
 | indexer, 61 layers × 2048 | all | 488 KiB | 8.2 GB | 102 GB | 524 GB |
 
-The two indexer rows assume a model of the same size with a DSA-style indexer. Bounding the top-p mask at 256 ids requires `top_k ≤ 256` at sampling time.
+Top-k is sized at k = 128, the value the protocol uses. The two indexer rows assume a model of the same size with a DSA-style indexer. Bounding the top-p mask at 256 ids requires `top_k ≤ 256` at sampling time.
 
 ## 3. Cache segment as a KV layer: host memory
 
@@ -51,7 +51,7 @@ The store holds every session in flight until release. With objects on each hold
 | Output | Single node: in flight | Single node: store | Frontier: per node in flight | Frontier: cluster in flight | Frontier: per-node store (512K start / 1M bound) |
 |---|---|---|---|---|---|
 | R3 | 1.6 GB | 4.3 GB | 4.1 GB | 8.8 TB | 14 / 28 GB |
-| top-k 256 | 4.3 GB | 11.5 GB | 2.1 GB | 4.6 TB | 7 / 15 GB |
+| top-k 128 | 2.1 GB | 5.6 GB | 1.1 GB | 2.3 TB | 3.6 / 7.3 GB |
 | top-p mask | 2.1 GB | 5.6 GB | 1.1 GB | 2.3 TB | 3.6 / 7.3 GB |
 | indexer, 12 layers | 206 GB | 1.1 TB | 1.0 TB | 2.2 PB | 3.5 / 7.0 TB |
 | indexer, 61 layers | 1.0 TB | 5.6 TB | 5.2 TB | 11.3 PB | 18 / 36 TB |
@@ -65,7 +65,7 @@ Deduplication across turns is mandatory at frontier scale. Rewriting the full co
 | Output | Cluster bandwidth | Per inference node | Object (16-position block) | Live objects (cluster) |
 |---|---|---|---|---|
 | R3 | 3.3 GB/s | 1.5 MB/s | 6.3 KB | 1.4B |
-| top-k 256 | 1.7 GB/s | 0.8 MB/s | 33 KB | 141M |
+| top-k 128 | 0.87 GB/s | 0.4 MB/s | 16 KB | 141M |
 | top-p mask | 0.87 GB/s | 0.4 MB/s | 16 KB | 141M |
 | indexer, 12 layers | 831 GB/s | 385 MB/s | 1.6 MB | 1.4B |
 | indexer, 61 layers | 4.2 TB/s | 1.96 GB/s | 8.0 MB | 1.4B |
@@ -81,7 +81,7 @@ A frontier-scale step consumes ≈33K trajectories (41/s × 807 s) across ≈465
 | Output | Single node: per step | Frontier: per training node per step |
 |---|---|---|
 | R3 | 3.2 GB | 5.8 GB |
-| top-k 256 | 8.6 GB | 3.0 GB |
+| top-k 128 | 4.3 GB | 1.5 GB |
 | top-p mask | 4.3 GB | 1.5 GB |
 | indexer, 12 layers | 825 GB | 1.4 TB |
 | indexer, 61 layers | 4.2 TB | 7.3 TB |
@@ -97,8 +97,8 @@ That is ≈7.4% of each 807 s interval (MLP only; attention adds more). Frontier
 
 ## 8. Constraints on the design
 
-- **R3 and top-k share one protocol.** Both are 2–4 GB in flight per node with 7–28 GB stores. Top-k needs no cache segment.
-- **The indexer needs compression or a tier.** Uncompressed it is 5–100× R3; compressed (20-bit + zstd) it is 5–7× R3 and fits the same store. A cache segment for it in host memory is unaffordable, which favors using the delivery pool as the session's cache.
+- **R3 and top-k share one protocol.** At frontier scale R3 is 4.1 GB and top-k 1.1 GB in flight per node, with stores of 14–28 GB and 3.6–7.3 GB. Top-k needs no cache segment.
+- **The indexer needs compression or a tier.** Uncompressed it is 5–100× R3; compressed (20-bit + zstd) it is 5–7× R3 up to 128K context and about 12× at 512K (section 10), and fits the same store. A cache segment for it in host memory is unaffordable, which favors using the delivery pool as the session's cache.
 - **Deduplication is mandatory and must be scoped to the session.** Rewriting the full context every turn would write ~25× more R3. Sharing across sessions would need reference counting for little gain.
 - **Release is per session, not per generation.** A trajectory lives ~2,660 s and spans ~3 weight updates (and up to ~107 versions of staleness), so prefix hits on blocks computed by an older version are normal. Rows must therefore carry their weight version, and a computation at another version is never interchangeable with the stored one.
 - **Weight updates happen with requests in flight.** Recomputing in-flight work at every update costs ~7% of each interval (section 7), so the engine pauses, resets its prefix cache and resumes. The delivery path must survive that reset without losing or replacing rows.
@@ -130,13 +130,15 @@ Setup: TP4 + EP4, BI on. The frontier column keeps the workload from section 1 a
 | Output | Positions | Per position | 200K trajectory | Frontier: per replica in flight (≈10.4M positions) | Frontier: per-replica pool (÷0.75) |
 |---|---|---|---|---|---|
 | R3 | all | 480 B (40 × 6 × uint16) | 96 MB | 5.0 GB | 6.7 GB |
-| top-k 256 | generated | 2 KB | 41 MB | 2.1 GB | 2.8 GB |
+| top-k 128 | generated | 1 KB | 20 MB | 1.1 GB | 1.4 GB |
 | hidden (`lm_head` input, float32) | generated | 16 KB | 328 MB | 16.6 GB | 22 GB |
 | indexer, raw (8 × 512 × int32) | all | 16 KB | 3.3 GB | 170 GB | 227 GB |
-| indexer, 20-bit + zstd (measured) | all | 2.5–3.6 KB | 0.5–0.7 GB | 26–37 GB | 35–50 GB |
+| indexer, 20-bit + zstd, contexts up to 128K (measured) | all | 2.5–3.6 KB | 0.5–0.7 GB | 26–37 GB | 35–50 GB |
+| indexer, 20-bit + zstd, 512K context (measured) | all | ~5.6 KB | 1.1 GB | 58 GB | 78 GB |
 
 - **KV capacity, measured.** A TP4 engine at 0.65 GPU memory utilization holds 3.39M tokens.
   - R3 as a block-row cache (or KV layer): ≈1.6 GB per engine, ~1% of the KV.
-  - Indexer: ≈54 GB raw, ≈10 GB compressed.
-- **Indexer compression.** Selections are bitwise reproducible under BI. Compressed, the indexer is 5–7× R3, and fits in the same delivery store.
+  - Indexer: ≈54 GB raw; compressed ≈10 GB at contexts up to 128K and ≈19 GB at 512K.
+- **Indexer compression.** Selections are bitwise reproducible under BI. zstd gains less as contexts grow, because the selected positions spread over the whole sequence: compressed, the indexer is 5–7× R3 up to 128K and about 12× at 512K. The frontier mean of 200K lies between the two rows; size stores with the 512K row. Either way it fits in the same delivery store.
 - **Hidden states.** Delivered exactly, the trainer's `lm_head` reproduces vLLM's distribution up to its own matmul (logprob error max 7.8e-4). The behavior logprob must still come from the inline per-token logprob, because recomputed logits are not bitwise equal.
+- **Top-k logprobs.** k = 128 at generated positions, 1 KB per generated token. Today they are returned inline, which on the one-node 14.6K workload made rollouts 46.8% longer (experiments: top-k inline). A store path like that of hidden states is planned (protocol §1).

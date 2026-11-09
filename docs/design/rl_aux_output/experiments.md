@@ -285,6 +285,10 @@ The hidden state is the input of `lm_head`; the trainer multiplies it by the LM 
 
 So rows are delivered exactly, in the dtype that enters the LM head, float32 on this build: 16 KB per generated token. Recomputing the sampled tokens' logprobs from the delivered rows gives an error of max 7.8e-4 and mean 3e-6; the residual is the checker's own matmul, which is not bitwise equal to vLLM's (first row of the table). In every later regression the max stays at or below 6.7e-4 with 0 bad rows, including across forced preemption. Cost on the 128K one-node workload: within run-to-run noise, with 1.0 GB of hidden states in the run.
 
+## Top-k logprobs inline
+
+Top-k logprobs at k = 128 (1 KB per generated token), returned in the response by the frontend. One-node 14.6K workload (512 sessions × 16 turns, 256 generated tokens per turn): 1,164.6 s without top-k, 1,709.7 s with it (+46.8%). The store path (protocol §1) is not built.
+
 ## Trainer-side replay and training-inference mismatch (X9)
 
 **R3 replay, first test.** R3 rows for 16 sessions were replayed in a BF16 trainer (TP1/EP16), forward only.

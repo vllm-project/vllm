@@ -12,8 +12,8 @@ A row has to exist for two different reasons:
 | Output | Positions | Cache segment? | Bytes/token (DeepSeek-V4.1-Flash) | Can the trainer recompute it? |
 |---|---|---|---|---|
 | R3 | all | yes | 480 B | no, it must match the rollout's routing |
-| top-k + mask | generated | no | 2 KB + ≤ 1 KB | no, it is the sampling-time distribution |
-| indexer | all | yes | 16 KB raw, 2.5–3.6 KB compressed | only under BI with the same weights |
+| top-k (k = 128) + mask | generated | no | 1 KB + ≤ 1 KB | no, it is the sampling-time distribution |
+| indexer | all | yes | 16 KB raw; compressed 2.5–3.6 KB up to 128K context, ~5.6 KB at 512K | only under BI with the same weights |
 | hidden | generated, or teacher prompt positions | in the teacher case | 16 KB float32 (exact) | no |
 
 ## Cache segment: where rows for prefix hits come from
@@ -88,8 +88,8 @@ Rows are labelled with the version of the forward that computed them, stamped wh
 ## Encodings
 
 - R3: uint16 ids (384 experts); 9-bit packing would save 44%.
-- Top-k: 17-bit ids plus bf16 logprobs; mask: CSR.
-- Indexer: 20-bit packing plus zstd (4.6–6.7×); packing on the GPU, zstd on the host. Delta encoding does not help.
+- Top-k: int32 ids plus fp32 logprobs, k = 128: 1 KB per generated token. Narrower fields (17-bit ids, bf16 logprobs) would about halve it and are not used. Mask: CSR.
+- Indexer: 20-bit packing plus zstd, 4.6–6.7× up to 128K context and ~2.9× at 512K; packing on the GPU, zstd on the host. The codec in use stores each cell's ascending positions as deltas split into byte planes before zstd (experiments X6).
 - Hidden: the exact `lm_head` input, uncompressed.
 - Every field carries a codec name.
 
