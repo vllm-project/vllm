@@ -214,6 +214,8 @@ def flash_attn_varlen_func(
     aux_tensors=None,
     aux_tensor_leading_dims=None,
     dynamic_causal: "torch.Tensor | None" = None,
+    gather_kv_indices=None,
+    gather_kv_valid_length=None,
 ):
     """dropout_p should be set to 0.0 during evaluation
     Supports multi-query and grouped-query attention (MQA/GQA) by passing in K, V with fewer heads
@@ -262,9 +264,10 @@ def flash_attn_varlen_func(
            testing only. The returned probabilities are not guaranteed to be correct
            (they might not have the right scaling).
         seqused_k: (batch_size,), dtype torch.int32. Actual number of key tokens per
-           sequence. Mutually exclusive with cu_seqlens_k, and required when
+           sequence. Mutually exclusive with cu_seqlens_k except on FA4, which reads
+           cu_seqlens_k as the KV offset and seqused_k as the length. Required when
            block_table is given.
-        q_v: optional value tensor fused with q. FA3 only.
+        q_v: optional value tensor fused with q. FA3 and FA4 only.
         block_table: (batch_size, max_blocks_per_seq), dtype torch.int32. Paged KV
            cache block table. Requires seqused_k.
         return_softmax_lse: bool. Whether to also return softmax_lse.
@@ -289,31 +292,27 @@ def flash_attn_varlen_func(
         aux_tensors: auxiliary tensors consumed by mask_mod. FA4 only.
         aux_tensor_leading_dims: leading dimensions of each entry in aux_tensors.
         dynamic_causal: optional per-sequence causal offsets. FA4 only.
+        gather_kv_indices: (total_q, k) int32 KV rows per query token, `-1` padded,
+            k a multiple of 128. Requires q_v, excludes block_table. FA4 only.
+        gather_kv_valid_length: (total_q,) int32, real entries per row. FA4 only.
 
     Return:
         out: (total, nheads, headdim).
-        softmax_lse [optional, if return_softmax_lse=True]: (nheads, total_q_seqlen). The
-            logsumexp of each row of the matrix QK^T * scaling (e.g., log of the softmax
-            normalization factor).
+        softmax_lse [optional, if return_softmax_lse=True]: (nheads, total_q_seqlen), or
+            (total_q, nheads) on FA4's q_v path. The logsumexp of each row of the matrix
+            QK^T * scaling (e.g., log of the softmax normalization factor).
 
     """
     assert cu_seqlens_k is not None or seqused_k is not None, (
         "cu_seqlens_k or seqused_k must be provided"
     )
-    assert cu_seqlens_k is None or seqused_k is None, (
+    assert fa_version == 4 or cu_seqlens_k is None or seqused_k is None, (
         "cu_seqlens_k and seqused_k cannot be provided at the same time"
     )
     assert block_table is None or seqused_k is not None, (
         "seqused_k must be provided if block_table is provided"
     )
 
-    assert output_scale is None or fa_version == 4, (
-        f"Fused FP8 output (output_scale) is only supported by FA4, "
-        f"got fa_version={fa_version}"
-    )
-
-    if softmax_scale is None:
-        softmax_scale = q.shape[-1] ** (-0.5)
     # custom op does not support non-tuple input
     real_window_size: tuple[int, int]
     if window_size is None:
@@ -321,6 +320,37 @@ def flash_attn_varlen_func(
     else:
         assert len(window_size) == 2
         real_window_size = (window_size[0], window_size[1])
+
+    fa4_fp8_kv_dequant = False
+    if (
+        fa_version == 4
+        and k.dtype == torch.float8_e4m3fn
+        and torch.cuda.get_device_capability()[0] == 9
+    ):
+        fa4_fp8_kv_dequant = q.shape[-1] == k.shape[-1] == v.shape[-1] == 512
+        if not fa4_fp8_kv_dequant:
+            # Unreachable in-tree: FA4 with an FP8 KV cache on SM90 is only
+            # selected for head_size=512 (see flash_attn_supports_kv_cache_dtype).
+            raise NotImplementedError(
+                "FA4 on SM90 supports FP8 K/V only with q/k/v head_size=512, got "
+                f"q={q.dtype}/{q.shape[-1]}, k={k.dtype}/{k.shape[-1]}, "
+                f"v={v.dtype}/{v.shape[-1]} (dtype/head_size); use fa_version=3."
+            )
+        if not causal and real_window_size[0] < 0 and real_window_size[1] < 0:
+            raise NotImplementedError(
+                "SM90 FP8 MMA noncausal full attention has known accuracy errors."
+            )
+
+    assert output_scale is None or fa_version == 4, (
+        f"Fused FP8 output (output_scale) is only supported by FA4, "
+        f"got fa_version={fa_version}"
+    )
+    assert fa_version == 4 or (
+        gather_kv_indices is None and gather_kv_valid_length is None
+    ), f"gather_kv_* is only supported by FA4, got fa_version={fa_version}"
+
+    if softmax_scale is None:
+        softmax_scale = q.shape[-1] ** (-0.5)
     q, k, v = [maybe_contiguous(x) for x in (q, k, v)]
 
     dummy_cu_seqlens_k = torch.empty_like(cu_seqlens_q)
@@ -432,26 +462,34 @@ def flash_attn_varlen_func(
         if v.dtype not in (torch.float8_e4m3fn, torch.float8_e5m2):
             q_descale = k_descale = v_descale = None
 
-        from vllm.vllm_flash_attn.cute.interface import _flash_attn_fwd
-
-        # SM90 FA4 fp8-KV path: fp8 e4m3 paged K/V dequantized and the K/V descale folded
-        # in-kernel; accepts bf16/fp16 Q and writes O in its native dtype (no Q cast, no
-        # output copy). Only the (batch, num_kv_heads) f32 K/V descales are forwarded.
-        fa4_fp8_kv_dequant = (
-            k.dtype == torch.float8_e4m3fn
-            and torch.cuda.get_device_capability()[0] == 9
+        # CuTe requires unit stride in the descales' head dimension.
+        # contiguous() can be a no-op for scalar.expand(1, 1), whose
+        # strides are (0, 0), so explicitly clone incompatible layouts.
+        q_descale, k_descale, v_descale = (
+            t.clone(memory_format=torch.contiguous_format)
+            if t is not None and t.ndim == 2 and t.stride(1) != 1
+            else t
+            for t in (q_descale, k_descale, v_descale)
         )
 
+        from vllm.vllm_flash_attn.cute.interface import _flash_attn_fwd
+
+        # SM90 d512 accepts native FP16/BF16 Q and paged E4M3 K/V.
+        # It uses compensated FP8 MMA with FP32 running accumulation.
+        # K/V descales are folded in-kernel; O is written in Q's native dtype.
         out, softmax_lse, _, _ = _flash_attn_fwd(
             q,
             k,
             v,
+            qv=q_v,
             cu_seqlens_q=cu_seqlens_q,
             cu_seqlens_k=cu_seqlens_k,
             seqused_k=seqused_k,
             max_seqlen_q=max_seqlen_q,
             max_seqlen_k=max_seqlen_k,
             page_table=block_table,
+            gather_kv_indices=gather_kv_indices,
+            gather_kv_valid_length=gather_kv_valid_length,
             softmax_scale=softmax_scale,
             causal=causal,
             dynamic_causal=dynamic_causal,

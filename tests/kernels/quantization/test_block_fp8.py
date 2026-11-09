@@ -37,7 +37,8 @@ from vllm.utils.flashinfer import (
 )
 from vllm.utils.import_utils import has_deep_gemm
 
-if current_platform.get_device_capability() < (9, 0):
+capability = current_platform.get_device_capability()
+if capability is None or capability < (9, 0):
     pytest.skip("FP8 Triton requires CUDA 9.0 or higher", allow_module_level=True)
 
 vllm_config = VllmConfig()
@@ -69,10 +70,6 @@ def setup_cuda():
     torch.set_default_device("cuda")
 
 
-@pytest.mark.skipif(
-    current_platform.is_fp8_fnuz(),
-    reason="This platform supports e4m3fnuz, not e4m3fn.",
-)
 @pytest.mark.parametrize(
     "num_tokens,d,dtype,group_size,column_major_scales,tma_aligned_scales,seed",
     itertools.product(

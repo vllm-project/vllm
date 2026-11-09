@@ -2,7 +2,7 @@ group: E2E Integration
 depends_on: 
   - image-build
 steps:
-- label: ":nvidia: (H100) DeepSeek V2-Lite Sync EPLB Accuracy"
+- label: ":nvidia: (H100) [Nightly] DeepSeek V2-Lite Sync EPLB Accuracy"
   key: deepseek-v2-lite-sync-eplb-accuracy-4xh100
   timeout_in_minutes: 25
   device: h100
@@ -34,7 +34,7 @@ steps:
       - vllm/_aiter_ops.py
       - vllm/platforms/rocm.py
 
-- label: ":nvidia: (H100) Qwen3-30B-A3B-FP8-block Sync EPLB Accuracy"
+- label: ":nvidia: (H100) [Nightly] Qwen3-30B-A3B-FP8-block Sync EPLB Accuracy"
   key: qwen3-30b-a3b-fp8-block-sync-eplb-accuracy-4xh100
   timeout_in_minutes: 25
   device: h100
@@ -63,7 +63,7 @@ steps:
       - vllm/_aiter_ops.py
       - vllm/platforms/rocm.py
 
-- label: ":nvidia: (B200) Qwen3-30B-A3B-FP8-block Sync EPLB Accuracy"
+- label: ":nvidia: (B200) [Nightly] Qwen3-30B-A3B-FP8-block Sync EPLB Accuracy"
   key: qwen3-30b-a3b-fp8-block-sync-eplb-accuracy-2xb200
   timeout_in_minutes: 20
   device: b200-k8s
@@ -92,7 +92,7 @@ steps:
       - vllm/_aiter_ops.py
       - vllm/platforms/rocm.py
 
-- label: ":nvidia: (H100) Qwen3-30B-A3B-FP8 DP4 Async EPLB Accuracy"
+- label: ":nvidia: (H100) [Nightly] Qwen3-30B-A3B-FP8 DP4 Async EPLB Accuracy"
   key: qwen3-30b-a3b-fp8-dp4-async-eplb-accuracy
   timeout_in_minutes: 25
   device: h100
@@ -121,7 +121,7 @@ steps:
       - vllm/_aiter_ops.py
       - vllm/platforms/rocm.py
 
-- label: ":nvidia: (H100) DeepSeek V2-Lite Prefetch Offload Accuracy"
+- label: ":nvidia: (H100) [Nightly] DeepSeek V2-Lite Prefetch Offload Accuracy"
   key: deepseek-v2-lite-prefetch-offload-accuracy-h100
   timeout_in_minutes: 20
   device: h100
@@ -150,3 +150,27 @@ steps:
       - .buildkite/scripts/scheduled_integration_test/
       - vllm/_aiter_ops.py
       - vllm/platforms/rocm.py
+
+- label: ":amd: (MI355) Qwen3-Next-80B-A3B-Instruct MTP Async EPLB Accuracy"
+  key: amd-qwen3-next-mtp-async-eplb-accuracy
+  dind: false
+  device: mi355_4
+  timeout_in_minutes: 45
+  depends_on:
+  - image-build-amd
+  working_dir: /vllm-workspace
+  source_file_dependencies:
+  - vllm/model_executor/models/
+  - vllm/model_executor/model_loader/
+  - vllm/v1/spec_decode/
+  - vllm/distributed/eplb
+  - vllm/model_executor/layers/fused_moe/
+  - vllm/model_executor/layers/quantization/
+  - vllm/v1/attention/backends/
+  - vllm/v1/attention/selector.py
+  - .buildkite/scripts/scheduled_integration_test/
+  - vllm/_aiter_ops.py
+  - vllm/platforms/rocm.py
+  num_devices: 4
+  commands:
+  - VLLM_ENGINE_READY_TIMEOUT_S=1800 bash .buildkite/scripts/scheduled_integration_test/qwen3_next_mtp_async_eplb.sh 0.8 1319 8040

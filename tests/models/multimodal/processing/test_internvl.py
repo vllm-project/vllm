@@ -5,6 +5,7 @@
 from collections.abc import Mapping
 
 import pytest
+import torch
 from PIL import Image
 from transformers import PreTrainedConfig
 
@@ -75,7 +76,9 @@ def _run_check(
     # Ensure we have the right number of placeholders per num_crops size
     image_token_id = tokenizer.convert_tokens_to_ids("<IMG_CONTEXT>")
     img_tok_count = processed_inputs["prompt_token_ids"].count(image_token_id)
-    pixel_shape = processed_inputs["mm_kwargs"].get_data()["pixel_values_flat"].shape
+    pixel_values = processed_inputs["mm_kwargs"].get_data()["pixel_values_flat"]
+    assert isinstance(pixel_values, torch.Tensor)
+    pixel_shape = pixel_values.shape
 
     assert img_tok_count == 256 * total_expected_num_patches
     assert pixel_shape[0] == total_expected_num_patches

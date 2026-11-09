@@ -10,10 +10,11 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.mem_utils import MemorySnapshot, format_gib
 from vllm.utils.torch_utils import set_random_seed
-from vllm.v1.utils import report_usage_stats
 from vllm.v1.worker.gpu_worker import Worker, init_worker_distributed_environment
-from vllm.v1.worker.workspace import init_workspace_manager
-from vllm.v1.worker.xpu_model_runner import XPUModelRunner, XPUModelRunnerV2
+from vllm.v1.worker.xpu_model_runner import (
+    XPUMMEncoderModelRunner,
+    XPUModelRunner,
+)
 
 from .utils import request_memory
 
@@ -192,9 +193,6 @@ class XPUWorker(Worker):
         ):
             torch.distributed.all_reduce(torch.zeros(1).xpu())
 
-        if self.use_v2_model_runner:
-            logger.info_once("Using V2 Model Runner")
-
         # Set random seed.
         set_random_seed(self.model_config.seed)
 
@@ -210,19 +208,12 @@ class XPUWorker(Worker):
             "worker requested memory: %sGiB", format_gib(self.requested_memory)
         )
 
-        # Initialize workspace manager
-        num_ubatches = 2 if self.vllm_config.parallel_config.enable_dbo else 1
-        init_workspace_manager(self.device, num_ubatches)
+        self._init_workspace_and_model_runner()
 
-        # Construct the model runner
-        model_runner = XPUModelRunnerV2 if self.use_v2_model_runner else XPUModelRunner
-        self.model_runner = model_runner(  # type: ignore
-            self.vllm_config, self.device
-        )
-
-        if self.rank == 0:
-            # If usage stat is enabled, collect relevant info.
-            report_usage_stats(self.vllm_config)
+    def _make_model_runner(self):
+        if self.vllm_config.is_mm_encoder_only:
+            return XPUMMEncoderModelRunner(self.vllm_config, self.device)
+        return XPUModelRunner(self.vllm_config, self.device)
 
     def shutdown(self) -> None:
         logger.info(

@@ -12,8 +12,10 @@ use crate::ChatRenderer;
 use crate::EffortValue;
 use crate::event::{AssistantContentBlock, AssistantToolCall};
 use crate::renderer::deepseek_v41::DeepSeekV41ChatRenderer;
-use crate::renderer::test_utils::{FixtureRequestOptions, fixture_chat_request};
-use crate::request::{ChatMessage, ChatRequest, ChatTool, GenerationPromptMode};
+use crate::renderer::test_utils::{
+    FixtureRequestOptions, fixture_chat_request, tool_search_request,
+};
+use crate::request::{ChatContentPart, ChatMessage, ChatRequest, ChatTool, GenerationPromptMode};
 
 fn render_request(request: &ChatRequest) -> String {
     DeepSeekV4ChatRenderer::default()
@@ -183,6 +185,7 @@ fn tools_keep_historical_developer() {
         description: None,
         parameters: Value::Object(Default::default()),
         strict: None,
+        defer_loading: None,
     };
     let request = thinking_request(vec![
         ChatMessage::developer("old instruction", Some(vec![tool])),
@@ -571,6 +574,65 @@ fn consecutive_users_share_one_turn() {
 }
 
 #[test]
+fn content_parts_are_joined_by_a_blank_line_for_every_role() {
+    let parts = |first: &str, second: &str| {
+        vec![ChatContentPart::text(first), ChatContentPart::text(second)]
+    };
+    let mut request = ChatRequest {
+        messages: vec![
+            ChatMessage::system(parts("sys one", "sys two")),
+            ChatMessage::user(parts("first:", "second:")),
+            ChatMessage::assistant_blocks(vec![
+                AssistantContentBlock::Text {
+                    text: "answer one".to_string(),
+                },
+                AssistantContentBlock::Text {
+                    text: "answer two".to_string(),
+                },
+                AssistantContentBlock::ToolCall(AssistantToolCall {
+                    id: "call_1".to_string(),
+                    name: "get_weather".to_string(),
+                    arguments: r#"{"city": "Paris"}"#.to_string(),
+                }),
+            ]),
+            ChatMessage::tool_response(parts("sunny", "22C"), "call_1"),
+            ChatMessage::user(parts("thanks", "bye")),
+        ],
+        ..ChatRequest::for_test()
+    };
+    request
+        .chat_options
+        .template_kwargs
+        .insert("thinking".to_string(), Value::Bool(false));
+
+    let rendered = render_request(&request);
+
+    // The reference Chat Completions conversion joins the content blocks of
+    // every role, tool results included, with "\n\n".
+    expect![[r#"
+        <｜begin▁of▁sentence｜>sys one
+
+        sys two<｜User｜>first:
+
+        second:<｜Assistant｜></think>answer one
+
+        answer two
+
+        <｜DSML｜tool_calls>
+        <｜DSML｜invoke name="get_weather">
+        <｜DSML｜parameter name="city" string="true">Paris</｜DSML｜parameter>
+        </｜DSML｜invoke>
+        </｜DSML｜tool_calls><｜end▁of▁sentence｜><｜User｜><tool_result>sunny
+
+        22C</tool_result>
+
+        thanks
+
+        bye<｜Assistant｜></think>"#]]
+    .assert_eq(&rendered);
+}
+
+#[test]
 fn mixed_user_content_keeps_text_position_when_sorting_tool_results() {
     let mut request = ChatRequest {
         messages: vec![
@@ -781,4 +843,15 @@ fn custom_roles_are_rejected_as_request_errors() {
     assert!(error.is_request_validation_error());
     expect!["chat role `root` is not supported by this chat renderer"]
         .assert_eq(&error.to_report_string());
+}
+
+/// Like deepseek-recipe's Messages conversion: a tool reference is written as
+/// the tool's name, and V4 lists every tool, deferred ones included, up front.
+/// The expected prompt is deepseek-recipe's (`935817c`) for the same Messages
+/// request.
+#[test]
+fn tool_references_render_as_tool_names_like_deepseek_recipe() {
+    expect_file!["fixtures/tool_search_references.txt"].assert_eq(&render_request(
+        &tool_search_request(&["get_weather", "get_time"]),
+    ));
 }

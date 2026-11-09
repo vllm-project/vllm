@@ -16,12 +16,12 @@ from vllm.triton_utils import tl, triton
 
 
 def token_stride(x: torch.Tensor) -> int:
-    """Token stride (elements) of a ``[B, T, H, D]`` or ``[B, T, H]`` tensor.
+    """Token stride (elements) of a `[B, T, H, D]` or `[B, T, H]` tensor.
 
     The recurrent kernel walks tokens with this stride and addresses heads
-    densely inside a token, so each token's ``[H, D]`` (or ``[H]``) block must
-    be contiguous, tokens must not overlap, and with ``B > 1`` sequence ``n``
-    must start at token ``n * T`` (dense batch). Column slices of a wider
+    densely inside a token, so each token's `[H, D]` (or `[H]`) block must
+    be contiguous, tokens must not overlap, and with `B > 1` sequence `n`
+    must start at token `n * T` (dense batch). Column slices of a wider
     per-token projection buffer satisfy this and are consumed in place.
     """
     st = x.stride()
@@ -87,7 +87,7 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
     SAFE_GATE: tl.constexpr,  # bounded gate variant (only branch implemented)
     LOWER_BOUND: tl.constexpr,
 ):
-    i_k, i_v, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    i_nh, i_v, i_k = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_n, i_hv = i_nh // HV, i_nh % HV
     i_h = i_hv // (HV // H)
     if IS_VARLEN:
@@ -260,7 +260,9 @@ def fused_recurrent_gated_delta_rule_fwd(
     else:
         stride_indices_seq, stride_indices_tok = ssm_state_indices.stride()
 
-    grid = (NK, NV, N * HV)
+    # N * HV goes in gridDim.x: gridDim.z is capped at 65535 and batch x heads exceeds it
+    # (e.g. GLM-5.3-Flash at TP=1: 1024 x 64 = 65536 -> "invalid argument" at CUDA-graph capture).
+    grid = (N * HV, NV, NK)
     fused_recurrent_gated_delta_rule_fwd_kernel[grid](
         q=q,
         k=k,

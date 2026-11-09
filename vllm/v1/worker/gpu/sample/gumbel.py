@@ -3,6 +3,7 @@
 import torch
 
 from vllm.triton_utils import tl, triton
+from vllm.v1.worker.gpu.spec_decode.draft_logits import draft_logits_row
 
 # Smallest positive value produced by Triton's fp32 `tl.rand`. Used by the
 # retained Philox helper for rejection sampling.
@@ -68,6 +69,12 @@ def tl_rand32(seed, offset, includes_zero: tl.constexpr):
     if not includes_zero:
         u = tl.maximum(u, _TL_RAND_MIN)
     return u
+
+
+@triton.jit
+def spec_step_seed(seed, step):
+    """Mix a speculative step into the high bits of a request seed."""
+    return seed ^ (tl.cast(step, tl.int64) << 32)
 
 
 @triton.jit
@@ -220,6 +227,9 @@ def gumbel_block_argmax(
     logits_cache_stride_0,
     logits_cache_stride_1,
     logits_cache_col_ptr,
+    logits_cache_source_ptr,
+    logits_cache_source_stride,
+    logits_cache_row_mapping_ptr,
     vocab_size,
     IS_DRAFTING: tl.constexpr,
     APPLY_TEMPERATURE: tl.constexpr,
@@ -240,17 +250,29 @@ def gumbel_block_argmax(
             col = tl.load(logits_cache_col_ptr + token_idx)
         else:
             col = tl.load(logits_cache_col_ptr)
+        if logits_cache_source_ptr is not None:
+            cached_logits = tl.load(
+                logits_cache_source_ptr
+                + token_idx * logits_cache_source_stride
+                + block,
+                mask=mask,
+            )
+        else:
+            cached_logits = logits
+        row = draft_logits_row(req_state_idx, logits_cache_row_mapping_ptr)
         tl.store(
             logits_cache_ptr
-            + req_state_idx * logits_cache_stride_0
+            + row * logits_cache_stride_0
             + col * logits_cache_stride_1
             + block,
-            logits,
-            mask=mask & is_valid_req,
+            cached_logits,
+            mask=mask & (row >= 0),
         )
 
     seed = tl.load(seeds_ptr + req_state_idx, mask=is_valid_req, other=0)
     pos = tl.load(pos_ptr + token_idx)
+    if logits_cache_ptr is not None:
+        seed = spec_step_seed(seed, col)
     return gumbel_noised_argmax(
         logits,
         block,
@@ -275,8 +297,14 @@ def _gumbel_sample_kernel(
     logits_cache_stride_0,
     logits_cache_stride_1,
     logits_cache_col_ptr,
+    logits_cache_source_ptr,
+    logits_cache_source_stride,
+    logits_cache_row_mapping_ptr,
     logits_ptr,
     logits_stride,
+    # [num_tokens, vocab_size], added to the logits
+    bias_ptr,
+    bias_stride,
     expanded_idx_mapping_ptr,
     seeds_ptr,
     pos_ptr,
@@ -287,6 +315,7 @@ def _gumbel_sample_kernel(
     APPLY_TEMPERATURE: tl.constexpr,
     USE_FP64: tl.constexpr,
     PER_TOKEN_COL: tl.constexpr,
+    HAS_BIAS: tl.constexpr,
 ):
     token_idx = tl.program_id(0).to(tl.int64)
     block_idx = tl.program_id(1)
@@ -297,6 +326,10 @@ def _gumbel_sample_kernel(
         mask=mask,
         other=float("-inf"),
     )
+    if HAS_BIAS:
+        # Rounded to the logits dtype, as `logits + bias` would be.
+        bias = tl.load(bias_ptr + token_idx * bias_stride + block, mask=mask, other=0.0)
+        logits = (logits.to(tl.float32) + bias.to(tl.float32)).to(logits.dtype)
     logits = logits.to(tl.float32)
 
     value, idx = gumbel_block_argmax(
@@ -312,6 +345,9 @@ def _gumbel_sample_kernel(
         logits_cache_stride_0,
         logits_cache_stride_1,
         logits_cache_col_ptr,
+        logits_cache_source_ptr,
+        logits_cache_source_stride,
+        logits_cache_row_mapping_ptr,
         vocab_size,
         IS_DRAFTING=IS_DRAFTING,
         APPLY_TEMPERATURE=APPLY_TEMPERATURE,
@@ -321,6 +357,37 @@ def _gumbel_sample_kernel(
     token_id = block_idx * BLOCK_SIZE + idx
     tl.store(local_argmax_ptr + token_idx * local_argmax_stride + block_idx, token_id)
     tl.store(local_max_ptr + token_idx * local_max_stride + block_idx, value)
+
+
+@triton.jit
+def _gumbel_combine_kernel(
+    local_argmax_ptr,
+    local_argmax_stride,
+    local_max_ptr,
+    local_max_stride,
+    sampled_ptr,
+    num_blocks,
+    PADDED_NUM_BLOCKS: tl.constexpr,
+):
+    row = tl.program_id(0).to(tl.int64)
+    block = tl.arange(0, PADDED_NUM_BLOCKS)
+    mask = block < num_blocks
+    values = tl.load(
+        local_max_ptr + row * local_max_stride + block,
+        mask=mask,
+        other=float("-inf"),
+    )
+    # Match torch.argmax: the first NaN wins, otherwise the first maximum.
+    nan_block = tl.min(tl.where(values != values, block, PADDED_NUM_BLOCKS), axis=0)
+    if nan_block < PADDED_NUM_BLOCKS:
+        winner = nan_block
+    else:
+        maximum = tl.max(values, axis=0)
+        winner = tl.min(
+            tl.where(mask & (values == maximum), block, PADDED_NUM_BLOCKS), axis=0
+        )
+    sampled = tl.load(local_argmax_ptr + row * local_argmax_stride + winner)
+    tl.store(sampled_ptr + row, sampled)
 
 
 def gumbel_sample(
@@ -334,6 +401,9 @@ def gumbel_sample(
     logits_cache: torch.Tensor | None = None,  # [max_num_reqs, num_cols, vocab_size]
     logits_cache_col: torch.Tensor | None = None,  # scalar or [num_tokens]
     use_fp64: bool = False,
+    logits_cache_source: torch.Tensor | None = None,
+    logits_cache_row_mapping: torch.Tensor | None = None,  # [max_num_reqs]
+    bias: torch.Tensor | None = None,  # [num_tokens, vocab_size]
 ) -> torch.Tensor:
     # Enforce contiguity on non-strided input tensors
     expanded_idx_mapping = expanded_idx_mapping.contiguous()
@@ -341,18 +411,43 @@ def gumbel_sample(
     if logits_cache_col is not None:
         logits_cache_col = logits_cache_col.contiguous()
     num_tokens, vocab_size = logits.shape
+    # With a bias, the kernel caches the biased logits it samples from.
+    assert bias is None or logits_cache_source is None
     if logits_cache is not None:
+        # Without a separate source, the kernel caches the logits it samples.
+        if logits_cache_source is None:
+            assert logits.dtype == logits_cache.dtype, (
+                "sampled logits and logits cache must have the same dtype"
+            )
+        else:
+            assert logits_cache_source.shape == logits.shape, (
+                "logits cache source must match sampled logits shape"
+            )
+            assert logits_cache_source.device == logits.device, (
+                "logits cache source must be on the sampled logits device"
+            )
+            assert logits_cache_source.dtype == logits_cache.dtype, (
+                "logits cache source and destination must have the same dtype"
+            )
         assert logits_cache.size(-1) >= vocab_size, (
             f"draft logits cache vocab dim ({logits_cache.size(-1)}) is narrower "
             f"than the sampled logits ({vocab_size}). Cached logits would be "
             "truncated."
         )
+    elif logits_cache_source is not None:
+        raise ValueError("logits_cache_source requires logits_cache")
+    if logits_cache_source is not None and logits_cache_source.stride(-1) != 1:
+        logits_cache_source = logits_cache_source.contiguous()
     BLOCK_SIZE = 1024
     num_blocks = triton.cdiv(vocab_size, BLOCK_SIZE)
     local_argmax = logits.new_empty(num_tokens, num_blocks, dtype=torch.int64)
     local_max_dtype = torch.float64 if use_fp64 else torch.float32
     local_max = logits.new_empty(num_tokens, num_blocks, dtype=local_max_dtype)
     per_token_col = logits_cache_col is not None and logits_cache_col.dim() > 0
+    if bias is not None:
+        # The sum is rounded to the logits dtype: same dtype only.
+        assert bias.dtype == logits.dtype and bias.stride(-1) == 1
+        assert bias.shape == logits.shape
     _gumbel_sample_kernel[(num_tokens, num_blocks)](
         local_argmax,
         local_argmax.stride(0),
@@ -362,8 +457,13 @@ def gumbel_sample(
         logits_cache.stride(0) if logits_cache is not None else 0,
         logits_cache.stride(1) if logits_cache is not None else 0,
         logits_cache_col,
+        logits_cache_source,
+        logits_cache_source.stride(0) if logits_cache_source is not None else 0,
+        logits_cache_row_mapping,
         logits,
         logits.stride(0),
+        bias,
+        bias.stride(0) if bias is not None else 0,
         expanded_idx_mapping,
         seed,
         pos,
@@ -374,8 +474,16 @@ def gumbel_sample(
         APPLY_TEMPERATURE=apply_temperature,
         USE_FP64=use_fp64,
         PER_TOKEN_COL=per_token_col,
+        HAS_BIAS=bias is not None,
     )
-    # NOTE(woosuk): Use int64 for later indexing.
-    max_block_idx = local_max.argmax(dim=-1, keepdim=True)
-    sampled = local_argmax.gather(dim=-1, index=max_block_idx).view(-1)
+    sampled = logits.new_empty(num_tokens, dtype=torch.int64)
+    _gumbel_combine_kernel[(num_tokens,)](
+        local_argmax,
+        local_argmax.stride(0),
+        local_max,
+        local_max.stride(0),
+        sampled,
+        num_blocks,
+        PADDED_NUM_BLOCKS=triton.next_power_of_2(num_blocks),
+    )
     return sampled

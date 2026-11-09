@@ -107,17 +107,23 @@ pub(super) fn render_request_with_media_order(
         ThinkingMode::Chat
     };
     let reasoning_effort_prompt = reasoning_prompt(reasoning, dialect);
-    let request_tools = request_tools(request);
+    let request_tools = request.initial_tools();
     let synthetic_tool_system = needs_synthetic_tool_system(request, request_tools);
     let drop_thinking = request.parse_template_bool("drop_thinking")?.unwrap_or(true)
         && !rendered_tools_present(request, request_tools);
     let drop_historical_developers = thinking_mode == ThinkingMode::Thinking && drop_thinking;
-    let last_user_like_message_index = request
-        .messages
-        .iter()
-        .enumerate()
-        .rfind(|(index, message)| is_user_like_entry(message, *index, dialect))
-        .map(|(index, _)| index);
+    if dialect == DsDialect::V41 {
+        reject_image_placeholder_text(&request.messages)?;
+        // As deepseek-recipe: V4.1 lists deferred tools only once a tool
+        // search result references them, so at least one tool, request-level
+        // or message-scoped, must be listed.
+        if !request.tools().is_empty() && request.tools().iter().all(is_deferred) {
+            return Err(Error::AllToolsDeferred);
+        }
+    }
+    let last_user_like_message_index = (0..request.messages.len())
+        .rev()
+        .find(|&index| starts_user_turn(&request.messages, index, index, dialect));
     let last_user_render_index = find_last_user_render_index(
         request.messages.as_slice(),
         synthetic_tool_system,
@@ -199,6 +205,9 @@ pub(super) fn render_request_with_media_order(
                     dialect,
                     &mut media_order,
                 )?;
+                if dialect == DsDialect::V41 {
+                    write_updated_tool_schemas(&mut out, request, message_index)?;
+                }
             }
             ChatMessage::Assistant { content } => {
                 // Mirror Python: thinking block (reasoning + </think>) is
@@ -289,8 +298,8 @@ pub(super) fn resolve_reasoning(
         DsDialect::V41 => {
             let budget = match effort {
                 EffortValue::String(effort) => match effort.as_str() {
-                    "low" => 25,
-                    "high" => 50,
+                    "low" => 50,
+                    "high" => 75,
                     "xhigh" => 75,
                     "max" => 100,
                     _ => return Err(invalid_v41_reasoning_effort()),
@@ -326,15 +335,6 @@ fn invalid_v41_reasoning_effort() -> Error {
     Error::InvalidReasoningEffort(
         "DeepSeek V4.1 reasoning_effort must be low, high, xhigh, max, or an integer within [1, 100] in chat_template_kwargs".to_string(),
     )
-}
-
-/// Return request-level tools only when native tool parsing is enabled.
-fn request_tools(request: &ChatRequest) -> &[ChatTool] {
-    if request.tool_parsing_enabled() {
-        request.initial_tools()
-    } else {
-        &[]
-    }
 }
 
 /// Return whether request tools need a synthetic leading system entry.
@@ -379,7 +379,7 @@ fn find_last_user_render_index(
             continue;
         }
 
-        if is_user_like_entry(message, render_index as usize, dialect) {
+        if starts_user_turn(messages, message_index, render_index as usize, dialect) {
             last_user_index = render_index;
         }
         render_index += 1;
@@ -412,6 +412,59 @@ fn is_user_like_entry(message: &ChatMessage, message_index: usize, dialect: DsDi
     ) || (dialect == DsDialect::V41
         && message_index > 0
         && matches!(message, ChatMessage::System { .. }))
+}
+
+/// Return whether an entry starts a new user turn. In V4.1, tool results
+/// alone do not.
+fn starts_user_turn(
+    messages: &[ChatMessage],
+    message_index: usize,
+    render_index: usize,
+    dialect: DsDialect,
+) -> bool {
+    let message = &messages[message_index];
+    if dialect == DsDialect::V41 && is_user_content_entry(message) {
+        let (block_start, block_end) = user_content_block_bounds(messages, message_index);
+        return messages[block_start..block_end]
+            .iter()
+            .any(|message| matches!(message, ChatMessage::User { .. }));
+    }
+    is_user_like_entry(message, render_index, dialect)
+}
+
+/// Reject literal V4.1 image placeholders in message text.
+fn reject_image_placeholder_text(messages: &[ChatMessage]) -> Result<()> {
+    let has_placeholder = |text: &str| text.contains(DEEPSEEK_V41_IMAGE_PLACEHOLDER);
+    let found = messages.iter().any(|message| match message {
+        ChatMessage::System { content }
+        | ChatMessage::Developer { content, .. }
+        | ChatMessage::User { content }
+        | ChatMessage::ToolResponse { content, .. }
+        | ChatMessage::Custom { content, .. } => match content {
+            ChatContent::Text(text) => has_placeholder(text),
+            ChatContent::Parts(parts) => parts.iter().any(|part| {
+                matches!(
+                    part,
+                    ChatContentPart::Text { text: text_or_name }
+                        | ChatContentPart::ToolReference { name: text_or_name }
+                        if has_placeholder(text_or_name)
+                )
+            }),
+        },
+        ChatMessage::Assistant { content } => content.iter().any(|block| {
+            matches!(
+                block,
+                AssistantContentBlock::Text { text } | AssistantContentBlock::Reasoning { text }
+                    if has_placeholder(text)
+            )
+        }),
+    });
+    if found {
+        return Err(Error::UnsupportedMultimodalContent(
+            "image placeholder token in message text",
+        ));
+    }
+    Ok(())
 }
 
 /// Return whether a developer entry precedes another user-like turn.
@@ -484,7 +537,11 @@ Otherwise, output directly after </think> with tool calls or final response.
     )
     .expect("writing to String cannot fail");
 
-    for (index, tool) in tools.iter().enumerate() {
+    // V4.1 leaves deferred tools out until a tool search result references
+    // them (`write_updated_tool_schemas`); V4 lists every tool, as
+    // deepseek-recipe ignores `defer_loading` there.
+    let listed = tools.iter().filter(|tool| dialect == DsDialect::V4 || !is_deferred(tool));
+    for (index, tool) in listed.enumerate() {
         if index > 0 {
             out.push('\n');
         }
@@ -505,6 +562,46 @@ fn render_tool_schema(out: &mut String, tool: &ChatTool) -> Result<()> {
         parameters: &tool.parameters,
         strict: tool.strict,
     })?);
+    Ok(())
+}
+
+/// Return whether the tool's schema is loaded on demand by tool search.
+fn is_deferred(tool: &ChatTool) -> bool {
+    tool.defer_loading == Some(true)
+}
+
+/// V4.1: after a user turn whose tool results reference tools, write a system
+/// turn with the referenced tools' schemas, as deepseek-recipe does for tools
+/// found by tool search. References keep their order, duplicates included.
+fn write_updated_tool_schemas(
+    out: &mut String,
+    request: &ChatRequest,
+    message_index: usize,
+) -> Result<()> {
+    let messages = request.messages.as_slice();
+    let (block_start, block_end) = user_content_block_bounds(messages, message_index);
+    // A referenced tool is missing only when `tool_choice: none` excluded the
+    // request-level tools from the prompt; it stays unlisted then.
+    let tools = messages[block_start..block_end]
+        .iter()
+        .filter_map(|message| match message {
+            ChatMessage::ToolResponse { content, .. } => Some(content),
+            _ => None,
+        })
+        .flat_map(ChatContent::tool_references)
+        .filter_map(|name| request.tool(name))
+        .collect::<Vec<_>>();
+    if tools.is_empty() {
+        return Ok(());
+    }
+    out.push_str(SYSTEM_SP_TOKEN);
+    out.push_str("\n\n### Updated Tool Schemas\n\n");
+    for (index, tool) in tools.into_iter().enumerate() {
+        if index > 0 {
+            out.push('\n');
+        }
+        render_tool_schema(out, tool)?;
+    }
     Ok(())
 }
 
@@ -759,6 +856,9 @@ fn encode_arguments_to_dsml(
 /// Write chat content directly into the destination buffer without flattening
 /// it into an intermediate `String`.
 ///
+/// Content parts are joined by a blank line for every role, as the reference
+/// Chat Completions conversion joins content blocks, and a tool reference is
+/// written as the tool's name, as deepseek-recipe's Messages conversion does.
 /// The V4.1 dialect inlines the image placeholder at each image part's
 /// position unconditionally (matching the Python encoding's
 /// `IMAGE_PLACEHOLDER`); other dialects reject multimodal parts.
@@ -773,7 +873,7 @@ fn write_chat_content(
         ChatContent::Text(text) => out.push_str(text),
         ChatContent::Parts(parts) => {
             for (index, part) in parts.iter().enumerate() {
-                if index > 0 && dialect == DsDialect::V41 {
+                if index > 0 {
                     out.push_str("\n\n");
                 }
                 match part {
@@ -784,6 +884,7 @@ fn write_chat_content(
                             content_part_index: index,
                         });
                     }
+                    ChatContentPart::ToolReference { name } => out.push_str(name),
                     _ => out.push_str(part.as_text()?),
                 }
             }
@@ -801,12 +902,18 @@ fn write_assistant_reasoning(out: &mut String, content: &[AssistantContentBlock]
     }
 }
 
-/// Write all visible assistant text blocks in encounter order.
+/// Write all visible assistant text blocks in encounter order, joined by a
+/// blank line like any other content parts.
 fn write_assistant_text(out: &mut String, content: &[AssistantContentBlock]) {
-    for block in content {
-        if let AssistantContentBlock::Text { text } = block {
-            out.push_str(text);
+    let texts = content.iter().filter_map(|block| match block {
+        AssistantContentBlock::Text { text } => Some(text.as_str()),
+        _ => None,
+    });
+    for (index, text) in texts.enumerate() {
+        if index > 0 {
+            out.push_str("\n\n");
         }
+        out.push_str(text);
     }
 }
 

@@ -34,6 +34,8 @@ def test_stats_match_reference(vocab: int, dtype: torch.dtype):
     )
     assert torch.equal(argmax, ref_argmax)
     torch.testing.assert_close(entropy, ref_entropy, atol=2e-3, rtol=1e-3)
+    assert probs is not None
+    assert ref_probs is not None
     torch.testing.assert_close(probs.float(), ref_probs.float(), atol=5e-3, rtol=2e-2)
     assert probs.dtype == torch.bfloat16
     assert probs.shape == logits.shape
@@ -100,6 +102,7 @@ def test_masked_logits_keep_a_finite_entropy():
     assert entropy[0].item() < 1e-6 and entropy[1].item() < 1e-6
     assert abs(entropy[2].item() - math.log(2.0)) < 1e-4
     assert torch.equal(argmax[[0, 1, 3]], torch.tensor([3, 3, 3], device="cuda"))
+    assert probs is not None
     assert probs[0, 3].item() == 1.0 and probs[0].sum().item() == 1.0
     _, _, ref_entropy, _ = sample_row_stats_reference(logits, temps, 1, None)
     assert torch.isfinite(ref_entropy).all()

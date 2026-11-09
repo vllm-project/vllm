@@ -135,7 +135,7 @@
         "is_multimodal_model": false,
         "dtype": "torch.bfloat16"
     },
-    "luccafong/deepseek_mtp_main_random": {
+    "vllm-project/deepseek_mtp_main_random": {
         "architectures": [
             "DeepseekV3ForCausalLM"
         ],
@@ -152,7 +152,7 @@
         "is_multimodal_model": false,
         "dtype": "torch.bfloat16"
     },
-    "luccafong/deepseek_mtp_draft_random": {
+    "vllm-project/deepseek_mtp_draft_random": {
         "architectures": [
             "DeepseekV3ForCausalLM"
         ],
@@ -347,7 +347,7 @@
         "text_model_type": "step3p5",
         "hidden_size": 4096,
         "total_num_hidden_layers": 45,
-        "total_num_attention_heads": 64,
+        "total_num_attention_heads": 96,
         "head_size": 128,
         "vocab_size": 128896,
         "total_num_kv_heads": 8,
