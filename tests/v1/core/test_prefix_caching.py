@@ -2794,6 +2794,21 @@ def test_prefill_hybrid_model_combinations(spec_types: list[str]):
     manager.free(req1)
 
 
+def _allocate_in_chunks(
+    manager: KVCacheManager,
+    req: Request,
+    chunks: tuple[int, ...],
+    num_groups: int,
+) -> None:
+    """Allocate ``req`` in the given chunk sizes, one scheduler step each."""
+    for num_new_tokens in chunks:
+        blocks = manager.allocate_slots(req, num_new_tokens, 0, None)
+        assert blocks is not None
+        assert len(blocks.get_block_ids()) == num_groups
+        req.num_computed_tokens += num_new_tokens
+        manager.new_step_starts()
+
+
 # Test cases with eagle enabled. Regression coverage for
 # https://github.com/vllm-project/vllm/issues/51771.
 _EAGLE_HYBRID_MODEL_TEST_CASES = [
@@ -2878,17 +2893,12 @@ def test_prefill_hybrid_model_combinations_eagle(
     # the newest one lands on the older boundary (32 tokens) instead of
     # falling back to the same no-hit value a drop of many would produce.
     chunk_sizes = (2 * block_size, block_size)
-    for num_new_tokens in (
-        *chunk_sizes,
-        len(all_token_ids) - sum(chunk_sizes),
-    ):
-        blocks = manager.allocate_slots(req0, num_new_tokens, 0, computed_blocks)
-        assert blocks is not None
-        # Should have blocks for all groups
-        assert len(blocks.get_block_ids()) == num_groups
-        req0.num_computed_tokens += num_new_tokens
-        computed_blocks = None
-        manager.new_step_starts()
+    _allocate_in_chunks(
+        manager,
+        req0,
+        (*chunk_sizes, len(all_token_ids) - sum(chunk_sizes)),
+        num_groups,
+    )
 
     # Second request: should hit cached blocks for common prefix
     all_token_ids = common_token_ids + [6] * 5
@@ -2968,13 +2978,7 @@ def test_prefill_hybrid_model_eagle_mixed_block_sizes():
     # Two chunks; the first ends at the 48-token EAGLE replay boundary (the
     # value ``replay_boundaries`` yields for this prompt). Written out rather
     # than derived, as in the table test above.
-    for num_new_tokens in (48, len(all_token_ids) - 48):
-        blocks = manager.allocate_slots(req0, num_new_tokens, 0, computed_blocks)
-        assert blocks is not None
-        assert len(blocks.get_block_ids()) == num_groups
-        req0.num_computed_tokens += num_new_tokens
-        computed_blocks = None
-        manager.new_step_starts()
+    _allocate_in_chunks(manager, req0, (48, len(all_token_ids) - 48), num_groups)
 
     # Second request: same 64-token prefix, different tail
     req1 = make_request("1", common_token_ids + [6] * 5, hash_block_size, hash_fn)
@@ -3058,13 +3062,7 @@ def test_prefill_hybrid_model_eagle_mamba_fine_grained():
     # Three chunks ending at 32, 48 and 71, as in the table test above: the
     # mamba group keeps a checkpoint at both 32 and 48 so that dropping the
     # newest one is distinguishable from hitting nothing.
-    for num_new_tokens in (32, 16, len(all_token_ids) - 48):
-        blocks = manager.allocate_slots(req0, num_new_tokens, 0, computed_blocks)
-        assert blocks is not None
-        assert len(blocks.get_block_ids()) == num_groups
-        req0.num_computed_tokens += num_new_tokens
-        computed_blocks = None
-        manager.new_step_starts()
+    _allocate_in_chunks(manager, req0, (32, 16, len(all_token_ids) - 48), num_groups)
 
     # Second request: same 64-token prefix, different tail
     req1 = make_request("1", common_token_ids + [6] * 5, hash_block_size, hash_fn)
@@ -3125,19 +3123,13 @@ def test_prefill_hybrid_model_eagle_mamba_checkpoint_below_aligned_end():
     all_token_ids = common_token_ids + [4] * 7
 
     req0 = make_request("0", all_token_ids, block_size, hash_fn)
-    computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(req0)
+    _, num_computed_tokens, _ = manager.get_computed_blocks(req0)
     assert num_computed_tokens == 0
 
     # 2 * block_size, then the rest: the mamba group ends up with a checkpoint
     # at 32 and none at 48 or 64.
     chunk_sizes = (2 * block_size, len(all_token_ids) - 2 * block_size)
-    for num_new_tokens in chunk_sizes:
-        blocks = manager.allocate_slots(req0, num_new_tokens, 0, computed_blocks)
-        assert blocks is not None
-        assert len(blocks.get_block_ids()) == num_groups
-        req0.num_computed_tokens += num_new_tokens
-        computed_blocks = None
-        manager.new_step_starts()
+    _allocate_in_chunks(manager, req0, chunk_sizes, num_groups)
 
     req1 = make_request("1", common_token_ids + [6] * 5, block_size, hash_fn)
     computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(req1)
