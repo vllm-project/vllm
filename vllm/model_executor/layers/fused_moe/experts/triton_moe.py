@@ -260,6 +260,8 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
             and activation_config.clamp_limit is not None
         ):
             swiglu_limit_func(output, input, activation_config.clamp_limit)
+            if self.post_activation_transform is not None:
+                output.copy_(self.post_activation_transform(output))
             return
 
         # SWIGLUOAI_UNINTERLEAVE routes to torch.ops._C.silu_and_mul_with_clamp
@@ -463,6 +465,7 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
             and self.activation_config.clamp_limit is None
             and self._lora_context is None
             and not hooked
+            and self.post_activation_transform is None
             and not self.quantization_emulation
             and is_deep_gemm_e8m0_used()
             and a2_scale is None
@@ -638,6 +641,7 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
             and self.quant_config.use_fp8_w8a8
             and self.block_shape == [128, 128]
             and lora_context is None
+            and self.post_activation_transform is None
             and not is_deep_gemm_e8m0_used()
         ):
             qintermediate_cache2, a2q_scale = ops.silu_and_mul_per_block_quant(
