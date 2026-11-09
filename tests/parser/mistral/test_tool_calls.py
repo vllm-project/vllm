@@ -173,9 +173,9 @@ def fix_tool_call_tokenization(
 def encode_mistral_output(tokenizer: MistralTokenizer, text: str) -> list[int]:
     """Encode generated output with control markers as their special-token ids.
 
-    Real generation emits ``[TOOL_CALLS]``/``[ARGS]`` as single control tokens.
+    Real generation emits `[TOOL_CALLS]`/`[ARGS]` as single control tokens.
     Encoding the marker *strings* can instead glue them to neighbours (e.g.
-    ``}[``) and yield literal text tokens, which the id-based engine never sees.
+    `}[`) and yield literal text tokens, which the id-based engine never sees.
     Split on the markers and insert their special ids so the token stream
     matches real generation.
     """

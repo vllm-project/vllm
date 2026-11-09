@@ -385,7 +385,7 @@ VLM_TEST_SETTINGS = {
         test_type=VLMTestType.IMAGE,
         prompt_formatter=lambda img_prompt: (
             f"<|user|>{img_prompt}<|endofuser|><|assistant|>"
-        ),  # noqa: E501
+        ),
         img_idx_to_prompt=lambda idx: "<|img|><|imgpad|><|endofimg|>",
         max_model_len=4096,
         max_num_seqs=2,

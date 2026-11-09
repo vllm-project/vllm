@@ -31,13 +31,13 @@ def compute_mamba_prefill_checkpoints(
     """Per-row internal prefill checkpoint offsets and cache block columns.
 
     Backends call this instead of re-deriving the rules, so they decline in
-    lockstep with the scheduler and ``MambaManager``: allocating a checkpoint
+    lockstep with the scheduler and `MambaManager`: allocating a checkpoint
     block without writing it leaves the prefix cache serving uninitialized
     state.
 
     Returns:
-        ``(offsets, cols)``: the checkpoint's offset into each row's query and
-        its block-table column. ``0`` and ``-1`` mean the row has none.
+        `(offsets, cols)`: the checkpoint's offset into each row's query and
+        its block-table column. `0` and `-1` mean the row has none.
 
     """
     offsets: list[int] = []
@@ -171,10 +171,10 @@ class MambaPrefillCheckpointExporter:
     """Store each checkpoint's pre-convolution window and recurrent state.
 
     The recurrent states are rows of a buffer the prefill kernel emitted;
-    ``recurrent_rows`` picks each checkpoint row's state out of it, and by
-    default row ``i`` holds checkpoint ``i``'s. Layers with only a conv state
-    pass no recurrent buffers. ``token_indices`` maps the rows' tokens, laid out
-    by ``cu_seqlens``, to their rows of ``raw_qkv``.
+    `recurrent_rows` picks each checkpoint row's state out of it, and by
+    default row `i` holds checkpoint `i`'s. Layers with only a conv state
+    pass no recurrent buffers. `token_indices` maps the rows' tokens, laid out
+    by `cu_seqlens`, to their rows of `raw_qkv`.
     """
 
     state_len: int | None = None

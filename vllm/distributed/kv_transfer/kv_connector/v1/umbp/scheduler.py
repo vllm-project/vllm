@@ -173,7 +173,7 @@ class UMBPStoreConnectorScheduler:
     """Own vLLM prefix matching while the runtime owns lookup transport.
 
     Without a runtime and codec the scheduler neither looks up nor stores
-    until ``bind_namespace`` supplies them.
+    until `bind_namespace` supplies them.
     """
 
     def __init__(

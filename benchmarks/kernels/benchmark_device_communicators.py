@@ -470,11 +470,11 @@ class CommunicatorBenchmark:
 
         Each collective is measured for both the AITER custom kernel and the
         PyNccl baseline so they compare like-for-like (print_results groups
-        columns by collective). All-gather maps ``(seq, hidden)`` ->
-        ``(world_size * seq, hidden)``; reduce-scatter maps ``(seq, hidden)`` ->
-        ``(seq // world_size, hidden)`` and so only runs when ``seq`` divides
-        evenly across ranks. Both reuse ``benchmark_allreduce_single`` timed on a
-        ``(seq, hidden)`` input; baselines write into a pre-allocated buffer.
+        columns by collective). All-gather maps `(seq, hidden)` ->
+        `(world_size * seq, hidden)`; reduce-scatter maps `(seq, hidden)` ->
+        `(seq // world_size, hidden)` and so only runs when `seq` divides
+        evenly across ranks. Both reuse `benchmark_allreduce_single` timed on a
+        `(seq, hidden)` input; baselines write into a pre-allocated buffer.
         """
         results: dict[str, float] = {}
         entries = []
@@ -649,7 +649,7 @@ class CommunicatorBenchmark:
 
 
 def _calculate_speedup_info(comm_results: dict[str, float], baseline: str) -> str:
-    """Fastest comm in a collective group and its speedup vs ``baseline``."""
+    """Fastest comm in a collective group and its speedup vs `baseline`."""
     if not comm_results:
         return "N/A"
 
