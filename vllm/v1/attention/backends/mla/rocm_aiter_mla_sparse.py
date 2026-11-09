@@ -90,6 +90,17 @@ def _use_triton_long_bf16_prefill(
     )
 
 
+def _aiter_uses_persistent_mla_decode(
+    num_tokens: int, num_heads: int, q_dtype: torch.dtype, kv_dtype: torch.dtype
+) -> bool:
+    """AITER ignores persistent metadata for some gfx950 BF16 16-head batches."""
+    try:
+        from aiter.mla import _use_persistent_mla_decode
+    except ImportError:
+        return True
+    return _use_persistent_mla_decode(num_tokens, num_heads, 1, q_dtype, kv_dtype)
+
+
 @triton.jit
 def _fit_kpool_indices_kernel(
     token_indices_ptr,  # int32 [num_tokens, NUM_TOPK_TOKENS + TAIL_WIDTH]
@@ -682,6 +693,12 @@ class ROCMAiterMLASparseMetadataBuilder(
             and not use_triton_sparse
             and not _use_triton_long_bf16_prefill(self._mla_kv_dtype, metadata)
             and num_tokens > 0
+            and _aiter_uses_persistent_mla_decode(
+                num_tokens,
+                self._num_attention_heads,
+                self._mla_q_dtype,
+                self._mla_kv_dtype,
+            )
         ):
             with gpu_sync_allowed():
                 seq_lens_cpu = common_attn_metadata.seq_lens[:num_reqs].cpu().numpy()
@@ -1034,7 +1051,7 @@ class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
 
         if need_lse:
             # gfx942 has no persistent MLA code object that writes final LSE.
-            # The split-KV path consumes the same ragged indices and is exact.
+            # The split-KV path consumes the same ragged-index layout.
             lse = rocm_aiter_ops.mla_decode_fwd_lse(
                 q,
                 kv_c_and_k_pe_cache,
