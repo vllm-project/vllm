@@ -54,7 +54,6 @@ from vllm.model_executor.layers.fusion.quant_activation import (
     QuantizedActivation,
     get_input_quant_key,
 )
-from vllm.model_executor.layers.layernorm import GemmaRMSNorm
 from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
@@ -120,6 +119,7 @@ from vllm.model_executor.models.utils import (
     maybe_prefix,
     sequence_parallel_chunk,
 )
+from vllm.model_executor.utils import set_weight_attrs
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.platforms import current_platform
@@ -181,13 +181,12 @@ def _fused_gdn_gated_rms_norm_quant(
     )
 
 
-class Qwen3_5RMSNorm(GemmaRMSNorm):
-    """Gemma-style RMS normalization backed by flashinfer kernels, or by the
-    Triton `gemma_add_rms_norm` below SM80 or without FlashInfer (its norm
+class Qwen3_5RMSNorm(nn.Module):
+    """Gemma-style RMSNorm: flashinfer kernels, or the Triton
+    `gemma_add_rms_norm` below SM80 / without FlashInfer (whose norm
     module cannot JIT-build there).
 
-    When `residual` is given, the fused add + norm is applied in place and
-    the updated `(normed, residual)` pair is returned; the flashinfer path
+    With `residual`, both paths update it in place; the flashinfer path
     also updates `x` in place. Use the returned tensors.
 
     `reduce_inputs`: in `forward_fused`, an `x` that comes with a
@@ -199,7 +198,10 @@ class Qwen3_5RMSNorm(GemmaRMSNorm):
     def __init__(
         self, hidden_size: int, eps: float = 1e-6, reduce_inputs: bool = False
     ) -> None:
-        super().__init__(hidden_size, eps)
+        super().__init__()
+        self.weight = nn.Parameter(torch.zeros(hidden_size))
+        set_weight_attrs(self.weight, {"dummy_weight_value": 0.0})
+        self.variance_epsilon = eps
         self.reduce_inputs = reduce_inputs
         self.use_flashinfer = (
             current_platform.has_device_capability(80) and has_flashinfer()

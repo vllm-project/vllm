@@ -68,8 +68,7 @@ def _gemma_add_rms_norm_quant_kernel(
     eps,
     H: tl.constexpr,
     HAS_RESIDUAL: tl.constexpr,
-    HAS_QUANT: tl.constexpr,
-    QUANT_NVFP4: tl.constexpr,
+    QUANT: tl.constexpr,  # "none" (plain norm) | "fp8" | "nvfp4"
     WRITE_Y: tl.constexpr,
     launch_pdl: tl.constexpr,
     TRIGGER_EARLY: tl.constexpr,
@@ -95,7 +94,7 @@ def _gemma_add_rms_norm_quant_kernel(
     if HAS_RESIDUAL:
         r = tl.load(res_ptr + row * H + cols, mask=mask, other=0.0)
     w = tl.load(w_ptr + cols, mask=mask, other=0.0)
-    if HAS_QUANT:
+    if QUANT != "none":
         scale = tl.load(scale_ptr)
 
     h = x.to(tl.float32)
@@ -107,12 +106,12 @@ def _gemma_add_rms_norm_quant_kernel(
     rstd = tl.rsqrt(var + eps)
     # Round to the activation dtype, like the unfused norm output.
     y = (h * rstd * (1.0 + w.to(tl.float32))).to(x_ptr.dtype.element_ty)
-    if not HAS_QUANT or WRITE_Y:
+    if QUANT == "none" or WRITE_Y:
         tl.store(y_ptr + row * H + cols, y, mask=mask)
 
-    if HAS_QUANT:
+    if QUANT != "none":
         y = y.to(tl.float32)
-        if QUANT_NVFP4:
+        if QUANT == "nvfp4":
             # scaled_fp4_quant numerics; `scale` is the global scale
             # (448 * 6 / amax).
             vmax = tl.max(tl.max(tl.abs(y), axis=2), axis=1)
@@ -211,8 +210,7 @@ def gemma_add_rms_norm_quant(
         eps,
         H=H,
         HAS_RESIDUAL=residual is not None,
-        HAS_QUANT=True,
-        QUANT_NVFP4=nvfp4,
+        QUANT="nvfp4" if nvfp4 else "fp8",
         WRITE_Y=write_y,
         num_warps=16 if max_m_16_warps >= M else 4,
         launch_pdl=current_platform.is_arch_support_pdl(),
@@ -232,18 +230,9 @@ def gemma_add_rms_norm(
 ) -> torch.Tensor:
     """Gemma RMSNorm of ``x (+ residual)`` without quantization.
 
-    The pre-SM80 fallback for flashinfer's ``gemma_rmsnorm`` /
-    ``gemma_fused_add_rmsnorm``, whose JIT build fails there.
-
-    Args:
-        x: (num_tokens, hidden) bf16/fp16 activation, contiguous. Read only.
-        residual: same shape as x, or None. Updated in place to x + residual.
-        weight: (hidden,) Gemma norm weight; the norm scales by (1 + weight).
-        eps: RMS norm epsilon.
-
-    Returns:
-        The normed activation in x's dtype.
-
+    The pre-SM80 fallback for flashinfer's norm kernels, whose JIT build
+    fails there. ``x`` is read only; ``residual`` is updated in place.
+    Returns the normed activation in x's dtype.
     """
     assert x.dim() == 2 and x.is_contiguous()
     assert x.dtype in (torch.bfloat16, torch.float16)
@@ -258,15 +247,14 @@ def gemma_add_rms_norm(
         x,
         residual if residual is not None else x,
         weight,
-        x,  # scale, q, sf: unread when HAS_QUANT=False
+        x,  # scale, q, sf: unread when QUANT == "none"
         x,
         x,
         y,
         eps,
         H=H,
         HAS_RESIDUAL=residual is not None,
-        HAS_QUANT=False,
-        QUANT_NVFP4=False,
+        QUANT="none",
         WRITE_Y=True,
         num_warps=16 if M <= 384 else 4,
         launch_pdl=current_platform.is_arch_support_pdl(),
