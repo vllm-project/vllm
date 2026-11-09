@@ -28,6 +28,7 @@ import json
 import os
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import time
@@ -110,9 +111,10 @@ def build_sweeps(mode: str) -> list[RunSpec]:
 class VLLMServer:
     """Lifecycle of a single `vllm serve` process."""
 
-    def __init__(self, config_path: Path, log_path: Path) -> None:
+    def __init__(self, config_path: Path, log_path: Path, port: int) -> None:
         self.config_path = config_path
         self.log_path = log_path
+        self.port = port
         self.proc: subprocess.Popen | None = None
 
     def start(self) -> None:
@@ -128,7 +130,7 @@ class VLLMServer:
             "--enable-prefix-caching",
             "--no-disable-hybrid-kv-cache-manager",
             "--port",
-            str(PORT),
+            str(self.port),
         ]
         with self.log_path.open("w") as log:
             self.proc = subprocess.Popen(
@@ -137,9 +139,9 @@ class VLLMServer:
 
     def wait_ready(self, timeout: int = 1800) -> None:
         assert self.proc is not None
-        print(f"      Waiting for vLLM on port {PORT}...")
+        print(f"      Waiting for vLLM on port {self.port}...")
         deadline = time.monotonic() + timeout
-        url = f"http://127.0.0.1:{PORT}/v1/models"
+        url = f"http://127.0.0.1:{self.port}/v1/models"
         while time.monotonic() < deadline:
             if self.proc.poll() is not None:
                 raise RuntimeError(self._crash_report("crashed during startup"))
@@ -201,6 +203,9 @@ class VLLMServer:
 class GuideLLM:
     """Drives the guidellm load against a running server and parses metrics."""
 
+    def __init__(self, port: int) -> None:
+        self.port = port
+
     def run(self, spec: RunSpec, log_path: Path) -> dict:
         prefix_count = max(4 * spec.concurrency, 256)
         data = {
@@ -221,7 +226,7 @@ class GuideLLM:
             "run",
             "--backend",
             "kind=openai_http,"
-            f"target=http://127.0.0.1:{PORT},"
+            f"target=http://127.0.0.1:{self.port},"
             "request_format=/v1/completions",
             "--profile",
             f"kind=concurrent,streams={spec.concurrency}",
@@ -257,12 +262,15 @@ class GuideLLM:
 class BenchmarkRun:
     """One benchmark run: cleanup, config, server, load, teardown."""
 
-    def __init__(self, spec: RunSpec, fs_dir: Path, session_dir: Path) -> None:
+    def __init__(
+        self, spec: RunSpec, fs_dir: Path, session_dir: Path, port: int
+    ) -> None:
         self.spec = spec
         self.fs_dir = fs_dir
+        self.port = port
         self.run_dir = session_dir / spec.name
         self.run_dir.mkdir(parents=True, exist_ok=True)
-        self.guidellm = GuideLLM()
+        self.guidellm = GuideLLM(port)
 
     def execute(self) -> dict:
         print("=" * 70)
@@ -276,7 +284,7 @@ class BenchmarkRun:
         config_path = self.run_dir / "kv_transfer_config.json"
         self._write_config(config_path)
         print("  [3/5] Starting vLLM server...")
-        with VLLMServer(config_path, self.run_dir / "vllm.log"):
+        with VLLMServer(config_path, self.run_dir / "vllm.log", self.port):
             print("  [4/5] Running guidellm benchmark...")
             result = {
                 "spec": asdict(self.spec),
@@ -317,9 +325,10 @@ class BenchmarkRun:
 class BenchmarkSession:
     """Runs a list of specs and checkpoints results into a session dir."""
 
-    def __init__(self, fs_dir: Path, specs: list[RunSpec]) -> None:
+    def __init__(self, fs_dir: Path, specs: list[RunSpec], port: int) -> None:
         self.fs_dir = fs_dir
         self.specs = specs
+        self.port = port
         self.session_dir = Path(f"benchmark_session_{datetime.now():%Y%m%d_%H%M%S}")
         self.session_dir.mkdir()
         self.results: list[dict] = []
@@ -335,7 +344,9 @@ class BenchmarkSession:
 
         for i, spec in enumerate(self.specs, 1):
             print(f"\n[{i}/{len(self.specs)}]")
-            result = BenchmarkRun(spec, self.fs_dir, self.session_dir).execute()
+            result = BenchmarkRun(
+                spec, self.fs_dir, self.session_dir, self.port
+            ).execute()
             self.results.append(result)
             self._checkpoint()
             print(f"{spec.name}: {result['status']}")
@@ -365,7 +376,7 @@ def compare(session_a: Path, session_b: Path) -> None:
                 print(f"{name:<60} {metric:<30} {va:>12} {vb:>12}  ({delta:+.1f}%)")
 
 
-def preflight(fs_dir: Path) -> None:
+def preflight(fs_dir: Path, port: int) -> None:
     if shutil.which("guidellm") is None:
         answer = (
             input(
@@ -385,6 +396,15 @@ def preflight(fs_dir: Path) -> None:
             )
     if shutil.which("vllm") is None:
         raise RuntimeError("vllm not found on PATH")
+    probe = socket.socket()
+    try:
+        probe.bind(("127.0.0.1", port))
+    except OSError:
+        raise RuntimeError(
+            f"Port {port} is already in use; stop the other server or pass --port."
+        ) from None
+    finally:
+        probe.close()
     fs_dir.mkdir(parents=True, exist_ok=True)
 
 
@@ -398,6 +418,12 @@ def main() -> None:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=PORT,
+        help="port for the vLLM server (default: %(default)s)",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -469,11 +495,11 @@ def _main() -> None:
         specs = build_sweeps("quick" if args.quick else "full")
 
     try:
-        preflight(args.fs_dir)
+        preflight(args.fs_dir, args.port)
     except (RuntimeError, subprocess.CalledProcessError) as e:
         sys.exit(f"Preflight failed: {e}")
 
-    BenchmarkSession(args.fs_dir, specs).run()
+    BenchmarkSession(args.fs_dir, specs, args.port).run()
 
 
 if __name__ == "__main__":
