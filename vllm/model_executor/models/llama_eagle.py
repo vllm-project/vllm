@@ -12,13 +12,13 @@ from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import ReplicatedLinear
+from vllm.model_executor.layers.llama import (
+    LlamaDecoderLayer as BaseLlamaDecoderLayer,
+)
+from vllm.model_executor.layers.llama import LlamaForCausalLM
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
-from vllm.model_executor.models.llama_layers import (
-    LlamaDecoderLayer as BaseLlamaDecoderLayer,
-)
-from vllm.model_executor.models.llama_layers import LlamaForCausalLM
 
 from .utils import (
     AutoWeightsLoader,

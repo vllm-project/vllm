@@ -654,7 +654,7 @@ steps:
       - vllm/model_executor/models/gemma4.py
       - vllm/model_executor/models/gemma4_mm.py
       - vllm/model_executor/models/gemma4_mtp.py
-      - vllm/model_executor/models/llama_layers.py
+      - vllm/model_executor/layers/llama.py
       - vllm/model_executor/models/llama_eagle3.py
       - vllm/model_executor/models/registry.py
       - tests/evals/gsm8k/

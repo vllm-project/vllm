@@ -11,6 +11,7 @@ from safetensors.torch import load as safetensors_load
 from torch import nn
 
 from vllm.config import VllmConfig
+from vllm.model_executor.layers.llama import LlamaForCausalLM
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.pooler import PoolingParamsUpdate
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
@@ -28,7 +29,6 @@ from ..layers.pooler.tokwise import (
 )
 from .interfaces import SupportsLateInteraction
 from .interfaces_base import VllmModelForPooling
-from .llama_layers import LlamaForCausalLM
 from .qwen3 import Qwen3ForCausalLM, Qwen3Model
 from .utils import (
     AutoWeightsLoader,

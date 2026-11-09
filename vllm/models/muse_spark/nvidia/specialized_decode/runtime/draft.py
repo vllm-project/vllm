@@ -43,8 +43,8 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
     UnquantizedLinearMethod,
 )
+from vllm.model_executor.layers.llama import LlamaMLP
 from vllm.model_executor.layers.rotary_embedding.base import RotaryEmbedding
-from vllm.model_executor.models.llama_layers import LlamaMLP
 from vllm.models.muse_spark.common.layers import (
     MuseSparkNormPreservingResidualConnection,
     MuseSparkRMSNorm,

@@ -16,13 +16,13 @@ from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
     RowParallelLinear,
 )
-from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.models.llama_layers import (
+from vllm.model_executor.layers.llama import (
     LlamaAttention,
     LlamaDecoderLayer,
     LlamaForCausalLM,
     LlamaModel,
 )
+from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.sequence import IntermediateTensors
 from vllm.v1.attention.backend import AttentionType
 

@@ -12,6 +12,7 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import RowParallelLinear
+from vllm.model_executor.layers.llama import LlamaConfig
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
@@ -19,7 +20,6 @@ from vllm.model_executor.models.interfaces import (
     MultiModalEmbeddings,
     SupportsMultiModalEmbeddings,
 )
-from vllm.model_executor.models.llama_layers import LlamaConfig
 from vllm.model_executor.models.mistral import (
     MistralDecoderLayer,
     MistralForCausalLM,

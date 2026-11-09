@@ -35,6 +35,8 @@ from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import QKVParallelLinear, RowParallelLinear
+from vllm.model_executor.layers.llama import LlamaMLP as Glm4MLP
+from vllm.model_executor.layers.llama import LlamaModel
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
@@ -43,8 +45,6 @@ from vllm.sequence import IntermediateTensors
 from vllm.v1.attention.backend import AttentionType
 
 from .interfaces import SupportsLoRA, SupportsPP
-from .llama_layers import LlamaMLP as Glm4MLP
-from .llama_layers import LlamaModel
 from .utils import AutoWeightsLoader, PPMissingLayer, WeightsMapper, maybe_prefix
 
 

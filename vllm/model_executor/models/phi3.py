@@ -4,7 +4,7 @@
 # Adapted from llama.py
 """Inference-only Phi3 model code inherit from Llama.py."""
 
-from vllm.model_executor.models.llama_layers import LlamaForCausalLM
+from vllm.model_executor.layers.llama import LlamaForCausalLM
 
 
 class Phi3ForCausalLM(LlamaForCausalLM):

@@ -25,10 +25,10 @@
 
 
 from vllm.config import VllmConfig
-from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.models.llama_layers import (
+from vllm.model_executor.layers.llama import (
     LlamaForCausalLM,
 )
+from vllm.model_executor.layers.logits_processor import LogitsProcessor
 
 
 class TeleFLMForCausalLM(LlamaForCausalLM):

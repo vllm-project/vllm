@@ -21,6 +21,7 @@ from vllm.config import VllmConfig
 from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.inputs import MultiModalDataDict
 from vllm.logger import init_logger
+from vllm.model_executor.layers.llama import LlamaForCausalLM
 from vllm.model_executor.model_loader.utils import initialize_model
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
@@ -42,7 +43,6 @@ from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from vllm.utils.torch_utils import async_tensor_h2d
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
-from .llama_layers import LlamaForCausalLM
 from .qwen2_vl import Qwen2VisionTransformer
 from .utils import AutoWeightsLoader, maybe_prefix
 

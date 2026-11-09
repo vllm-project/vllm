@@ -464,7 +464,7 @@ steps:
       - vllm/model_executor/layers/mamba/
       - vllm/model_executor/model_loader/
       - vllm/model_executor/models/extract_hidden_states.py
-      - vllm/model_executor/models/llama_layers.py
+      - vllm/model_executor/layers/llama.py
       - vllm/models/qwen3_5/
       - vllm/model_executor/models/qwen3_5.py
       - vllm/model_executor/models/qwen3_5_mtp.py

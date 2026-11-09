@@ -13,19 +13,19 @@ from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import QKVParallelLinear, ReplicatedLinear
+from vllm.model_executor.layers.llama import (
+    LlamaAttention,
+    LlamaForCausalLM,
+    LlamaMLP,
+)
+from vllm.model_executor.layers.llama import (
+    LlamaDecoderLayer as BaseLlamaDecoderLayer,
+)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
-)
-from vllm.model_executor.models.llama_layers import (
-    LlamaAttention,
-    LlamaForCausalLM,
-    LlamaMLP,
-)
-from vllm.model_executor.models.llama_layers import (
-    LlamaDecoderLayer as BaseLlamaDecoderLayer,
 )
 from vllm.multimodal.inputs import NestedTensors
 

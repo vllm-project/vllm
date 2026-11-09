@@ -46,6 +46,7 @@ from vllm.model_executor.layers.linear import (
     QKVParallelLinear,
     RowParallelLinear,
 )
+from vllm.model_executor.layers.llama import LlamaForCausalLM, LlamaMLP, LlamaModel
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.model_loader.weight_utils import (
@@ -58,7 +59,6 @@ from vllm.model_executor.models.utils import sequence_parallel_chunk
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import is_torch_equal_or_newer
 
-from .llama_layers import LlamaForCausalLM, LlamaMLP, LlamaModel
 from .utils import (
     AutoWeightsLoader,
     PPMissingLayer,

@@ -2162,7 +2162,7 @@ steps:
   - vllm/model_executor/layers/mamba/
   - vllm/model_executor/model_loader/
   - vllm/model_executor/models/extract_hidden_states.py
-  - vllm/model_executor/models/llama_layers.py
+  - vllm/model_executor/layers/llama.py
   - vllm/models/qwen3_5/
   - vllm/model_executor/models/qwen3_5.py
   - vllm/model_executor/models/qwen3_5_mtp.py
@@ -2722,7 +2722,7 @@ steps:
   - tests/compile/passes/
   - tests/compile/correctness_e2e/test_attn_quant.py
   - vllm/model_executor/kernels/linear/
-  - vllm/model_executor/models/llama_layers.py
+  - vllm/model_executor/layers/llama.py
   commands:
   - amd-smi
   - >-
@@ -5983,7 +5983,7 @@ steps:
   - vllm/model_executor/models/gemma4.py
   - vllm/model_executor/models/gemma4_mm.py
   - vllm/model_executor/models/gemma4_mtp.py
-  - vllm/model_executor/models/llama_layers.py
+  - vllm/model_executor/layers/llama.py
   - vllm/model_executor/models/llama_eagle3.py
   - vllm/model_executor/models/registry.py
   - tests/evals/gsm8k/

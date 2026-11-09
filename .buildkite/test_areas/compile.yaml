@@ -86,7 +86,7 @@ steps:
       - tests/compile/passes/
       - tests/compile/correctness_e2e/test_attn_quant.py
       - vllm/model_executor/kernels/linear/
-      - vllm/model_executor/models/llama_layers.py
+      - vllm/model_executor/layers/llama.py
       commands:
       - amd-smi
       # MLA static FP8 and distributed AR/RMS are owned by the existing ROCm jobs.

@@ -54,11 +54,8 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.sequence import IntermediateTensors
-from vllm.v1.attention.backend import AttentionType
-
-from .adapters import as_embedding_model, as_seq_cls_model
-from .interfaces import (
+from vllm.model_executor.models.adapters import as_embedding_model, as_seq_cls_model
+from vllm.model_executor.models.interfaces import (
     EagleModelMixin,
     LocalArgmaxMixin,
     SupportsEagle,
@@ -67,7 +64,7 @@ from .interfaces import (
     SupportsPP,
     SupportsQuant,
 )
-from .utils import (
+from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     PPMissingLayer,
     WeightsMapper,
@@ -77,6 +74,8 @@ from .utils import (
     maybe_prefix,
     spec_decode_needs_target_embed,
 )
+from vllm.sequence import IntermediateTensors
+from vllm.v1.attention.backend import AttentionType
 
 
 class LlamaMLP(nn.Module):

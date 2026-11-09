@@ -14,7 +14,7 @@ from tests.v1.shutdown.utils import (
 from vllm import LLM
 from vllm.distributed import get_tensor_model_parallel_rank
 from vllm.engine.arg_utils import AsyncEngineArgs
-from vllm.model_executor.models.llama_layers import LlamaForCausalLM
+from vllm.model_executor.layers.llama import LlamaForCausalLM
 from vllm.platforms import current_platform
 from vllm.v1.engine.async_llm import AsyncLLM
 
@@ -34,7 +34,7 @@ def evil_method_fixture(spawn_sitecustomize_factory, request):
     failing_method = request.getfixturevalue("failing_method")
     lines = [
         "from vllm.distributed import get_tensor_model_parallel_rank",
-        "from vllm.model_executor.models.llama_layers import LlamaForCausalLM",
+        "from vllm.model_executor.layers.llama import LlamaForCausalLM",
         inspect.getsource(evil_method),
         f"LlamaForCausalLM.{failing_method} = {evil_method.__name__}",
     ]

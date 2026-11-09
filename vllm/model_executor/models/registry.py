@@ -139,8 +139,8 @@ _TEXT_GENERATION_MODELS = {
     "HCXVisionV2ForCausalLM": ("hyperclovax_vision_v2", "HCXVisionV2ForCausalLM"),
     "HyperCLOVAXForCausalLM": ("hyperclovax", "HyperCLOVAXForCausalLM"),
     "InternLM2ForCausalLM": ("internlm2", "InternLM2ForCausalLM"),
-    "InternLM3ForCausalLM": ("llama_layers", "LlamaForCausalLM"),
-    "IQuestCoderForCausalLM": ("llama_layers", "LlamaForCausalLM"),
+    "InternLM3ForCausalLM": ("vllm.model_executor.layers.llama", "LlamaForCausalLM"),
+    "IQuestCoderForCausalLM": ("vllm.model_executor.layers.llama", "LlamaForCausalLM"),
     "IQuestLoopCoderForCausalLM": ("iquest_loopcoder", "IQuestLoopCoderForCausalLM"),
     "JambaForCausalLM": ("jamba", "JambaForCausalLM"),
     "K2HorizonForCausalLM": ("k2_horizon", "K2HorizonForCausalLM"),
@@ -208,7 +208,7 @@ _TEXT_GENERATION_MODELS = {
     "Step5ForCausalLM": ("vllm.models.step5", "Step5ForCausalLM"),
     "SolarForCausalLM": ("solar", "SolarForCausalLM"),
     "TeleChat2ForCausalLM": ("telechat2", "TeleChat2ForCausalLM"),
-    "TeleChat3ForCausalLM": ("llama_layers", "LlamaForCausalLM"),
+    "TeleChat3ForCausalLM": ("vllm.model_executor.layers.llama", "LlamaForCausalLM"),
     "TeleFLMForCausalLM": ("teleflm", "TeleFLMForCausalLM"),
     "UnlimitedOCR2TextForCausalLM": ("unlimited_ocr", "UnlimitedOCR2TextForCausalLM"),
     "Zamba2ForCausalLM": ("zamba2", "Zamba2ForCausalLM"),
@@ -229,7 +229,10 @@ _EMBEDDING_MODELS = {
     "GteNewModel": ("bert_with_rope", "GteNewModel"),
     "JinaEmbeddingsV5Model": ("jina", "JinaEmbeddingsV5Model"),
     "Lfm2BidirectionalModel": ("lfm2", "Lfm2BidirectionalModel"),
-    "LlamaBidirectionalModel": ("llama_layers", "LlamaBidirectionalModel"),
+    "LlamaBidirectionalModel": (
+        "vllm.model_executor.layers.llama",
+        "LlamaBidirectionalModel",
+    ),
     **{
         # Multiple models share the same architecture, so we include them all
         k: (mod, arch)
@@ -326,7 +329,7 @@ _SEQUENCE_CLASSIFICATION_MODELS = {
     ),
     "JambaForSequenceClassification": ("jamba", "JambaForSequenceClassification"),
     "LlamaBidirectionalForSequenceClassification": (
-        "llama_layers",
+        "vllm.model_executor.layers.llama",
         "LlamaBidirectionalForSequenceClassification",
     ),
     "ModernBertForSequenceClassification": (

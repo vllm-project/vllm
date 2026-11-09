@@ -32,6 +32,7 @@ from vllm.config import VllmConfig
 from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.linear import ReplicatedLinear
+from vllm.model_executor.layers.llama import LlamaModel
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
@@ -66,7 +67,6 @@ from .interfaces import (
     SupportsLoRA,
     SupportsMultiModal,
 )
-from .llama_layers import LlamaModel
 from .utils import AutoWeightsLoader, maybe_prefix
 
 
