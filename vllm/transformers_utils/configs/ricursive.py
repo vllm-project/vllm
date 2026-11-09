@@ -9,8 +9,8 @@ class RicursiveConfig(PreTrainedConfig):
     """Configuration for the Ricursive dense causal LM.
 
     Sliding-window layers use RoPE and full-attention layers are NoPE.
-    ``embed_scale`` multiplies the input embeddings at runtime; checkpoints
-    that fold it into ``embed_tokens.weight`` leave it unset.
+    `embed_scale` multiplies the input embeddings at runtime; checkpoints
+    that fold it into `embed_tokens.weight` leave it unset.
     """
 
     model_type = "ricursive"

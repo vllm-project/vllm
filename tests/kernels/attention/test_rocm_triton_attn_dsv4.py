@@ -327,7 +327,7 @@ def _launch_sparse_decode_reduce(
 ) -> torch.Tensor:
     """Run the reduce kernel, with the inverse-RoPE epilogue if given positions.
 
-    Passing ``out_scale`` selects the MXFP8 epilogue (``out_dtype`` e4m3).
+    Passing `out_scale` selects the MXFP8 epilogue (`out_dtype` e4m3).
     """
     from vllm.v1.attention.ops import rocm_aiter_mla_sparse as mod
 
@@ -1322,7 +1322,7 @@ def test_sparse_attn_decode_split_k_kernel(
 
     This path is the gfx942/gfx950 production path, so the test only runs on
     those architectures. The split count is pinned so the partial/reduce kernels are
-    exercised across split counts. ``num_splits=8`` drives splits past the
+    exercised across split counts. `num_splits=8` drives splits past the
     shortest segment length, covering the empty-split edge case handled by the
     reduce kernel.
     """
@@ -1438,7 +1438,7 @@ def test_sparse_attn_decode_reduce_inverse_rope_epilogue(adaptive_splits: bool) 
 
     The epilogue rotates a whole [H, nope + rope] row with one expression by
     feeding cos=1/sin=0 to the NoPE lanes, which only holds if the pair split
-    lands on ``nope_head_dim // 2``; the NoPE lanes therefore have to come
+    lands on `nope_head_dim // 2`; the NoPE lanes therefore have to come
     back untouched, not merely close.
     """
     from vllm.v1.attention.ops.rocm_aiter_mla_sparse import _fused_inverse_rope_gptj
@@ -1555,7 +1555,7 @@ def test_inverse_rope_mxfp8_rows() -> None:
 @requires_gfx950
 @torch.inference_mode()
 def test_sparse_attn_decode_mxfp8_output() -> None:
-    """``out_mxfp8`` routes the real decode through the MXFP8 epilogue."""
+    """`out_mxfp8` routes the real decode through the MXFP8 epilogue."""
     from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
         _rocm_sparse_attn_decode_ragged_triton,
     )
@@ -1877,9 +1877,11 @@ def test_dsv4_adaptive_mla_swa_metadata_graph_replay(monkeypatch) -> None:
     )
     vllm_config.speculative_config = SimpleNamespace(
         num_speculative_tokens=upper_query_len - 1,
-        parallel_drafting=False,
+        max_num_new_slots_for_drafting=0,
         enable_adaptive_verification=True,
         use_dspark=lambda: True,
+        method="dspark",
+        speculator_config=SimpleNamespace(speculator_class=None),
     )
     mla_spec = MLAAttentionSpec(
         block_size=block_size,
@@ -2126,9 +2128,11 @@ def test_dsv41_adaptive_mla_swa_metadata_graph_replay(monkeypatch) -> None:
     )
     vllm_config.speculative_config = SimpleNamespace(
         num_speculative_tokens=upper_query_len - 1,
-        parallel_drafting=False,
+        max_num_new_slots_for_drafting=0,
         enable_adaptive_verification=True,
         use_dspark=lambda: True,
+        method="dspark",
+        speculator_config=SimpleNamespace(speculator_class=None),
     )
     mla_spec = MLAAttentionSpec(
         block_size=block_size,
@@ -2397,7 +2401,7 @@ def _inv_rope_via_rotary_native(
     o: torch.Tensor,
     positions: torch.Tensor,
 ) -> torch.Tensor:
-    """Reference: the official ``forward_native(inverse=True)`` path."""
+    """Reference: the official `forward_native(inverse=True)` path."""
     expected, _ = rotary_emb.forward_native(positions, o.clone(), None, inverse=True)
     return expected.to(torch.bfloat16)
 
