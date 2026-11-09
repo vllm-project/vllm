@@ -920,9 +920,13 @@ def dense_logits_rows(max_seqlen_k: int, max_logits_bytes: int | None = None) ->
 
 
 def _supports_varlen_paged_mqa_logits() -> bool:
+    # Thor (SM110) runs DeepGEMM's SM100 paged kernel, which is varlen-only.
     return (
         current_platform.is_cuda()
-        and current_platform.is_device_capability_family(100)
+        and (
+            current_platform.is_device_capability_family(100)
+            or current_platform.is_device_capability_family(110)
+        )
         and has_deep_gemm()
     )
 
