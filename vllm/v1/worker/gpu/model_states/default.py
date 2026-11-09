@@ -18,7 +18,10 @@ from vllm.v1.worker.gpu.model_states.interface import (
     ModelSpecificAttnMetadata,
     ModelState,
 )
-from vllm.v1.worker.gpu.model_states.mm_pruning import maybe_create_mm_pruner
+from vllm.v1.worker.gpu.model_states.mm_pruning import (
+    maybe_create_mm_pruner,
+    uses_multimodal_pruning,
+)
 from vllm.v1.worker.gpu.model_states.prompt_embeds import PromptEmbedsState
 from vllm.v1.worker.gpu.states import RequestState
 from vllm.v1.worker.utils import AttentionGroup
@@ -60,6 +63,11 @@ class DefaultModelState(ModelState):
         # Pruner is used for multimodal embedding pruning (EVS).
         self.mm_pruner = maybe_create_mm_pruner(
             self.model_config, model, self.rope_state, encoder_cache
+        )
+        # EVS recomputes M-RoPE positions from the pruned encoder outputs.
+        self.positions_depend_on_encoder = (
+            self.rope_state is not None
+            and uses_multimodal_pruning(self.model_config, model)
         )
 
         # Per-request bidirectional MM ranges. Not kept in the encoder cache:

@@ -15,6 +15,8 @@ from vllm.sequence import IntermediateTensors
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.worker.gpu.input_batch import InputBatch
 
+PP_POSITIONS_KEY = "pp_positions"
+
 
 @dataclass
 class PendingRecv:
@@ -100,6 +102,9 @@ class PPHandler:
         self.upstream_aux_keys: tuple[str, ...] = ()
         self.local_aux_keys: tuple[str, ...] = ()
         self.num_aux_hidden_states = 0
+        # Whether positions depend on encoder outputs, which only the first
+        # stage has, so later stages use the first stage's positions.
+        self.relay_positions = False
 
     def on_req_idx_freed(self, req_idx: int) -> None:
         self.req_idx_gen_np[req_idx] += 1
@@ -142,6 +147,44 @@ class PPHandler:
             output_intermediate_tensors.tensors
             | {key: intermediate_tensors[key] for key in self.upstream_aux_keys}
         )
+
+    def add_positions_buffer(
+        self,
+        intermediate_tensors: IntermediateTensors,
+        max_num_tokens: int,
+        num_dims: int,
+    ) -> None:
+        """Add the relayed positions to the persistent intermediate tensors,
+        which some PP transports receive into."""
+        if not self.relay_positions:
+            return
+        intermediate_tensors[PP_POSITIONS_KEY] = torch.zeros(
+            (max_num_tokens, num_dims), dtype=torch.int64, device=self.device
+        )
+
+    def send_positions(
+        self, output_intermediate_tensors: IntermediateTensors, positions: torch.Tensor
+    ) -> IntermediateTensors:
+        """Add this step's positions to the tensors sent to the next stage."""
+        if not self.relay_positions:
+            return output_intermediate_tensors
+        # Token-major, since IntermediateTensors are sliced along dim 0.
+        token_major = positions.movedim(-1, 0).contiguous()
+        return IntermediateTensors(
+            output_intermediate_tensors.tensors | {PP_POSITIONS_KEY: token_major}
+        )
+
+    def receive_positions(
+        self,
+        intermediate_tensors: IntermediateTensors,
+        positions: torch.Tensor,
+        num_tokens: int,
+    ) -> None:
+        """Overwrite the locally prepared positions with the first stage's."""
+        if not self.relay_positions:
+            return
+        received = intermediate_tensors[PP_POSITIONS_KEY][:num_tokens]
+        positions[..., :num_tokens].copy_(received.movedim(0, -1))
 
     def add_upstream_aux_hidden_states(
         self,

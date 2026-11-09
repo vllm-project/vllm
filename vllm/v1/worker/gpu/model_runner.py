@@ -447,6 +447,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.model_state = init_model_state(
             self.vllm_config, self.model, self.encoder_cache, self.device
         )
+        if self.pp_handler is not None:
+            self.pp_handler.relay_positions = (
+                self.model_state.positions_depend_on_encoder
+            )
 
         self.decode_query_len = (
             self.num_speculative_steps
@@ -569,6 +573,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 batch_size=self.max_num_tokens,
                 dtype=self.model_config.dtype,
                 device=self.device,
+            )
+            assert self.pp_handler is not None
+            self.pp_handler.add_positions_buffer(
+                self.intermediate_tensors,
+                self.max_num_tokens,
+                self.model_config.mrope_num_dims,
             )
 
         get_offloader().post_init()
@@ -2104,6 +2114,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 for k, v in self.intermediate_tensors.tensors.items()
             }
             model_inputs["intermediate_tensors"] = IntermediateTensors(new_tensors)
+            if not dummy_run:
+                assert self.pp_handler is not None
+                self.pp_handler.receive_positions(
+                    intermediate_tensors,
+                    model_inputs["positions"],
+                    input_batch.num_tokens,
+                )
             del intermediate_tensors
 
         # Update the EPLB meta.
@@ -2212,8 +2229,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Non-last PP rank: return IntermediateTensors for sending.
             assert output_intermediate_tensors is not None
             assert self.pp_handler is not None
-            return self.pp_handler.relay_aux_hidden_states(
+            output_intermediate_tensors = self.pp_handler.relay_aux_hidden_states(
                 model_inputs["intermediate_tensors"], output_intermediate_tensors
+            )
+            return self.pp_handler.send_positions(
+                output_intermediate_tensors, model_inputs["positions"]
             )
         return None
 
