@@ -2260,8 +2260,8 @@ class VllmConfig:
 
     def _resolve_uva_stage_min_tokens(self) -> None:
         """Resolve "auto" for `cpu_offload_stage_min_tokens` once the CUDA graph
-        capture sizes are known. The worker may only lower them later (spec
-        decode rounding), so the threshold stays above every captured size."""
+        capture sizes are final, so the threshold stays above every captured
+        size."""
         uva = self.offload_config.uva
         max_capture = self.compilation_config.max_cudagraph_capture_size or 0
         explicit = uva.cpu_offload_stage_min_tokens

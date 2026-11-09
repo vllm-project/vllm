@@ -54,7 +54,9 @@ def test_vllm_config_resolves_auto_and_hash_ignores_it():
     # No model, so no CUDA graphs: "auto" resolves to the floor.
     config = VllmConfig(offload_config=offload("auto"))
     assert config.offload_config.uva.cpu_offload_stage_min_tokens == 512
-    assert offload(0).compute_hash() == offload(4096).compute_hash()
+    assert offload(0).compile_factors() == offload(4096).compile_factors()
+    other = OffloadConfig(uva=UVAOffloadConfig(cpu_offload_gb=2))
+    assert offload(0).compile_factors() != other.compile_factors()
 
 
 def test_passthrough():
