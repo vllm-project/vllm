@@ -1379,8 +1379,8 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         res_mix: torch.Tensor,
         residual: torch.Tensor,
     ) -> tuple[torch.Tensor, ...]:
-        """Replay stage ``stage`` on the given rows: the last stage returns what
-        ``_run_replay_layers`` does, the others their output and mixes and
+        """Replay stage `stage` on the given rows: the last stage returns what
+        `_run_replay_layers` does, the others their output and mixes and
         residual for the next stage; both then the aux hidden states they
         capture, in layer order."""
         aux_layers = list(self.aux_hidden_state_layers)
@@ -1417,7 +1417,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         )
 
     def _attn_metadata_prefixes(self, layer_ids: range) -> set[str]:
-        """The attention metadata keys layers ``layer_ids`` read."""
+        """The attention metadata keys layers `layer_ids` read."""
         prefixes = set()
         for layer in islice(self.layers, layer_ids.start, layer_ids.stop):
             attn = typing.cast(DeepseekV4DecoderLayer, layer).attn

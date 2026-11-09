@@ -2356,8 +2356,8 @@ def test_ds41_bi_exact_replay_matches_full_forward(monkeypatch, length):
             cache.kv_cache.random_(0, 256)
 
     def forward(cache, layer, hidden, rows, run_from, kv_start):
-        """The rows from ``run_from`` attend, reading no window KV below
-        ``kv_start``; returns their per-row output map."""
+        """The rows from `run_from` attend, reading no window KV below
+        `kv_start`; returns their per-row output map."""
         num = rows.numel() - run_from
         q = (hidden[run_from:, None].float() * q_weights[layer]).bfloat16()
         starts = torch.tensor([0, num], dtype=torch.int32)
@@ -2386,9 +2386,9 @@ def test_ds41_bi_exact_replay_matches_full_forward(monkeypatch, length):
         return torch.tanh(mixed + hidden[run_from:].float()).bfloat16()
 
     def run(start, decoder_starts):
-        """Rows [start, length) of one request, replaying from ``start``. Layers
+        """Rows [start, length) of one request, replaying from `start`. Layers
         below the cut run every row; the cut writes every row's KV and, like the
-        layers past it, runs the rows from its ``decoder_starts`` entry; those
+        layers past it, runs the rows from its `decoder_starts` entry; those
         layers write only those rows' KV and read no window KV below them."""
         hidden = embeddings[start:]
         rows = torch.arange(start, length, device=device)
@@ -2428,7 +2428,7 @@ def test_ds41_bi_exact_replay_matches_full_forward(monkeypatch, length):
         replayed = exact_replay_rows(window, num_layers)
 
         def matches(start, decoder_rows):
-            """``decoder_rows``: rows each layer from the cut on keeps (an int
+            """`decoder_rows`: rows each layer from the cut on keeps (an int
             for all of them)."""
             scramble()
             if isinstance(decoder_rows, int):

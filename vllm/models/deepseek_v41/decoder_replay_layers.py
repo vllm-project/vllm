@@ -29,9 +29,9 @@ from vllm.model_executor.layers.fused_moe.moe_output import MoEOutput
 
 
 def exact_replay_rows(window: int, num_layers: int) -> int:
-    """Trailing rows to recompute so that the last ``window`` rows' outputs come
-    out as in the full forward after ``num_layers`` sliding-window layers: a
-    row's window reaches ``window - 1`` rows back, so each layer the exact rows
+    """Trailing rows to recompute so that the last `window` rows' outputs come
+    out as in the full forward after `num_layers` sliding-window layers: a
+    row's window reaches `window - 1` rows back, so each layer the exact rows
     lose that many at their low end."""
     return window + num_layers * (window - 1)
 
@@ -39,9 +39,9 @@ def exact_replay_rows(window: int, num_layers: int) -> int:
 def exact_replay_stages(
     window: int, cut: int, end: int, layers_per_stage: int
 ) -> list[tuple[int, int, int]]:
-    """``(first layer, end layer, rows)`` of each replay stage of layers
-    ``cut``..``end``: a stage runs each request's last ``rows`` rows, as many as
-    the layers from its first one on need for the last ``window`` rows to come
+    """`(first layer, end layer, rows)` of each replay stage of layers
+    `cut`..`end`: a stage runs each request's last `rows` rows, as many as
+    the layers from its first one on need for the last `window` rows to come
     out exact. The cut writes every row's KV, so the first stage keeps the rows
     of the layer after it."""
     stages = []
@@ -57,8 +57,8 @@ def exact_replay_stages(
 
 @dataclass
 class ReplayStage:
-    """A later replay stage: ``select`` picks its rows out of the previous stage's
-    outputs, ``rows`` are their batch rows."""
+    """A later replay stage: `select` picks its rows out of the previous stage's
+    outputs, `rows` are their batch rows."""
 
     rows: torch.Tensor
     select: torch.Tensor
@@ -88,15 +88,15 @@ class DecoderReplayLayers:
     first replay layer's SWA metadata, built with the batch's window starts.
     `has_early_aux` tells whether layers before the replay layers capture aux
     hidden states, which the forward holds across the replay layers.
-    ``kept_rows`` is how many trailing rows of each prefill the layers run on:
-    ``window`` by default, more when their outputs must match the full forward.
+    `kept_rows` is how many trailing rows of each prefill the layers run on:
+    `window` by default, more when their outputs must match the full forward.
 
-    With ``stage_rows`` the layers run in stages instead, each on fewer trailing
-    rows (``exact_replay_stages``): ``run_stage(i, *inputs)`` runs stage ``i``
+    With `stage_rows` the layers run in stages instead, each on fewer trailing
+    rows (`exact_replay_stages`): `run_stage(i, *inputs)` runs stage `i`
     and returns its output, pre-mix, post-mix, res-mix and residual (the last
     stage: its collapsed output and pre-mix), then the aux hidden states it
-    captures. ``stage_metadata_prefixes`` are the metadata keys each stage reads.
-    ``select_shared_rows(select)`` keeps the given rows of the per-row buffers
+    captures. `stage_metadata_prefixes` are the metadata keys each stage reads.
+    `select_shared_rows(select)` keeps the given rows of the per-row buffers
     layers share across stages (indexer top-k, candidate blocks).
     """
 

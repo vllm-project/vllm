@@ -738,7 +738,7 @@ class SingleTypeKVCacheManager(ABC):
         return 0
 
     def get_num_hit_skipped_tokens(self, num_computed_tokens: int) -> int:
-        """``get_num_skipped_tokens`` for a request taking its first blocks,
+        """`get_num_skipped_tokens` for a request taking its first blocks,
         prefix hit included."""
         return self.get_num_skipped_tokens(num_computed_tokens)
 
@@ -1194,7 +1194,7 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
 
     def get_num_hit_skipped_tokens(self, num_computed_tokens: int) -> int:
         """A bounded replay longer than the window rewrites the hit's last
-        ``prefix_replay_tokens`` tokens, so their blocks are needed too."""
+        `prefix_replay_tokens` tokens, so their blocks are needed too."""
         num_skipped_tokens = self.get_num_skipped_tokens(num_computed_tokens)
         replay_tokens = self.kv_cache_spec.prefix_replay_tokens
         if replay_tokens > self.sliding_window:

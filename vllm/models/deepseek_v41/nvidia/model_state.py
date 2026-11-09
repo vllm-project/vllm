@@ -160,7 +160,7 @@ def _gather_replay_batch_kernel(
 
 
 class _ReplayStageBuffers:
-    """A later exact-replay stage's inputs, like the first stage's ``_kept_*``
+    """A later exact-replay stage's inputs, like the first stage's `_kept_*`
     buffers, plus each row's index among the previous stage's rows."""
 
     def __init__(self, max_num_reqs: int, max_num_tokens: int, device) -> None:
