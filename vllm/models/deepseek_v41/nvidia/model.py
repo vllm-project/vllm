@@ -350,6 +350,11 @@ class DeepseekV4DecoderLayer(nn.Module):
         self.use_sequence_parallel = _use_sequence_parallel(vllm_config)
         # Replicated mixer: attention runs whole on every TP rank, no reduce after it.
         self.replicate_mixer = envs.VLLM_DSV41_REPLICATE_MIXER
+        if self.replicate_mixer:
+            # Nothing re-syncs ranks after a replicated block: autotune must agree.
+            from vllm.triton_utils.tp_synced_autotune import install
+
+            install()
         if self.replicate_mixer and (
             self.use_sequence_parallel or vllm_config.lora_config is not None
         ):
