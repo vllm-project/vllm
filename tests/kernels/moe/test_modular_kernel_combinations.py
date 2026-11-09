@@ -1044,7 +1044,9 @@ _PADDING_INTERMEDIATE_PAD_EXPECTED = 256
 # physical intermediate (128 isn't enough), so MXFP4 needs its own N pair.
 _PADDING_N_UNPADDED_MXFP4 = 512  # 2 * 256
 _PADDING_N_PADDED_MXFP4 = 768  # +256
-_PADDING_INTERMEDIATE_PAD_EXPECTED_MXFP4_W4A16 = 512
+# Bias-less W4A16 forwards no intermediate pad (ROCm/aiter#6598); these
+# weights have no bias.
+_PADDING_INTERMEDIATE_PAD_EXPECTED_MXFP4_W4A16 = 0
 
 # Both MXFP4 schemes also need a 256-wide physical hidden dim: W4A4's stage1
 # GEMM silently produces NaN/Inf below it (confirmed: K=896/1152 -> NaN,
@@ -1056,8 +1058,7 @@ _PADDING_K_UNPADDED_MXFP4 = 1024  # 4 * 256
 _PADDING_K_PADDED_MXFP4 = 1280  # +256
 # hidden_pad = (K_padded_mxfp4 - hidden_dim_unpadded) // 128 * 128.
 _PADDING_HIDDEN_PAD_EXPECTED_MXFP4 = 256
-# W4A4's SiLU path doubles intermediate_pad inside AITER, so this constant
-# (undoubled) differs from the W4A16 one above despite the same N pair.
+# W4A4's SiLU path doubles intermediate_pad inside AITER, so it's forwarded undoubled.
 _PADDING_INTERMEDIATE_PAD_EXPECTED_MXFP4_W4A4 = 256
 
 # {no padding, hidden-only, intermediate-only, both} -> (pad_hidden, pad_intermediate)

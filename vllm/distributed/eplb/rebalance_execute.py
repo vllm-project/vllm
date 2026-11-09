@@ -172,7 +172,7 @@ def get_ep_ranks_with_experts_batch(
 
 
 def _first_rows(local_expert_ids: np.ndarray) -> dict[int, int]:
-    """Map each expert to its first local row in ``local_expert_ids``."""
+    """Map each expert to its first local row in `local_expert_ids`."""
     rows: dict[int, int] = {}
     for row, expert_id in enumerate(local_expert_ids.tolist()):
         if expert_id != -1:

@@ -33,6 +33,9 @@ ARG TRITON_INSTALL_FROM_SOURCE_REVISION=
 # runtime NCCL versions compatible.
 # DeepEPv2 GDA over EFA requires NCCL 2.31.x or later.
 ARG NCCL_VERSION=2.31.2
+# AWS EFA userspace (libfabric, aws-ofi-nccl), installed with the KV connectors.
+ARG EFA_INSTALLER_VERSION=1.51.0
+ARG EFA_INSTALLER_SHA256=83993044fa4df3dc2f8b5c2f7051d61b9689441be023a2c92ea51d3f53f2465c
 
 # By parameterizing the base images, we allow third-party to use their own
 # base images. One use case is hermetic builds with base images stored in
@@ -493,8 +496,9 @@ WORKDIR /workspace
 
 # Build DeepEP wheels
 COPY tools/ep_kernels/install_python_libraries.sh /tmp/install_python_libraries.sh
+COPY tools/ep_kernels/patches /tmp/patches
 # Defaults moved here from tools/ep_kernels/install_python_libraries.sh for centralized version management
-ARG DEEPEP_COMMIT_HASH=d4f41e4e93
+ARG DEEPEP_COMMIT_HASH=a56d6156febcd9976e55adc85b5155bfac9f28f8
 ARG NVSHMEM_VER
 ARG NCCL_VERSION
 RUN --mount=type=cache,target=/opt/uv/cache \
@@ -1100,11 +1104,35 @@ RUN --mount=type=cache,target=/opt/uv/cache \
         fi \
     fi
 
+# KV connectors for the P/D and connector suites, so CI jobs never install them
+# at runtime. Lock entries the image lacks are installed hash-verified, and the
+# install must not change any preinstalled package. The test stage checks the
+# finished environment against the lock. Targets the stable x86_64 CUDA 13 image.
+COPY requirements/test/kv_connectors_cuda.txt requirements/test/kv_connectors_cuda.txt
+COPY tools/kv_connector_lock.py tools/kv_connector_lock.py
+RUN --mount=type=cache,target=/opt/uv/cache \
+    if [ "${CUDA_VERSION%%.*}" = "13" ] && [ "${PYTORCH_NIGHTLY}" != "1" ] \
+        && [ "$TARGETPLATFORM" != "linux/arm64" ]; then \
+        uv pip freeze --system | sort > /tmp/kv-before.txt \
+        && python3 tools/kv_connector_lock.py plan \
+            requirements/test/kv_connectors_cuda.txt /tmp/kv-new.txt \
+        # The NCCL UV_OVERRIDE would enter --require-hashes as an unhashed requirement.
+        && env -u UV_OVERRIDE uv pip install --system --require-hashes --no-deps \
+            -r /tmp/kv-new.txt \
+        && uv pip freeze --system | sort > /tmp/kv-after.txt \
+        && if comm -23 /tmp/kv-before.txt /tmp/kv-after.txt | grep .; then \
+            echo "kv_connectors_cuda.txt changed the packages above; recompile it" >&2; \
+            exit 1; \
+        fi \
+        && rm -f /tmp/kv-before.txt /tmp/kv-after.txt /tmp/kv-new.txt; \
+    fi
+
 # image to run unit testing suite
 # note that this uses vllm installed by `pip`
 FROM test-deps AS test
 
 ARG PYTHON_VERSION
+ARG TARGETPLATFORM
 
 ARG PIP_INDEX_URL UV_INDEX_URL
 ARG PIP_EXTRA_INDEX_URL UV_EXTRA_INDEX_URL
@@ -1155,6 +1183,12 @@ ADD . /vllm-workspace/
 RUN --mount=type=cache,target=/opt/uv/cache \
     uv pip install --system -e tests/vllm_test_utils
 
+# The installs above may move packages the KV connector layer relied on.
+RUN if [ "${CUDA_VERSION%%.*}" = "13" ] && [ "${PYTORCH_NIGHTLY}" != "1" ] \
+        && [ "$TARGETPLATFORM" != "linux/arm64" ]; then \
+        python3 tools/kv_connector_lock.py verify requirements/test/kv_connectors_cuda.txt; \
+    fi
+
 # enable fast downloads from hf (for testing)
 ENV HF_XET_HIGH_PERFORMANCE 1
 
@@ -1179,6 +1213,8 @@ RUN mv vllm src/vllm
 FROM vllm-base AS vllm-openai-base
 ARG TARGETPLATFORM
 ARG INSTALL_KV_CONNECTORS=false
+ARG EFA_INSTALLER_VERSION
+ARG EFA_INSTALLER_SHA256
 ARG INSTALL_RUBIN_PRERELEASE
 ARG TRITON_INSTALL_FROM_SOURCE_REPO
 ARG CUDA_VERSION
@@ -1228,7 +1264,7 @@ RUN --mount=type=cache,target=/opt/uv/cache \
         ); \
         # The default mooncake wheel links libcudart.so.12, so on CUDA 13 swap in the
         # cuda13 variant. Uninstall first; both ship the `mooncake` package.
-        # Mirrors .buildkite/scripts/install-kv-connectors.sh.
+        # The CI image does the same via requirements/test/kv_connectors_cuda.in.
         MOONCAKE_VERSION=$(python3 -c "import importlib.metadata as m; print(m.version('mooncake-transfer-engine'))" 2>/dev/null || true) && \
         if [ "${CUDA_MAJOR}" = "13" ] && [ -n "${MOONCAKE_VERSION}" ]; then \
             uv pip uninstall --system mooncake-transfer-engine 2>/dev/null || true; \
@@ -1237,6 +1273,37 @@ RUN --mount=type=cache,target=/opt/uv/cache \
         rm -f /tmp/kv-installed.txt /tmp/kv-constraints.txt; \
     fi
 
+# Install the AWS EFA userspace with the KV connectors: NIXL's LIBFABRIC plugin
+# and Mooncake's EFA transport load libfabric at runtime.
+RUN if [ "$INSTALL_KV_CONNECTORS" = "true" ]; then \
+        set -eux; \
+        EFA_INSTALLER_ARCHIVE="/tmp/aws-efa-installer-${EFA_INSTALLER_VERSION}.tar.gz"; \
+        curl -fsSL --retry 3 --retry-all-errors \
+            "https://efa-installer.amazonaws.com/aws-efa-installer-${EFA_INSTALLER_VERSION}.tar.gz" \
+            -o "${EFA_INSTALLER_ARCHIVE}"; \
+        echo "${EFA_INSTALLER_SHA256}  ${EFA_INSTALLER_ARCHIVE}" | sha256sum -c -; \
+        tar -xzf "${EFA_INSTALLER_ARCHIVE}" -C /tmp; \
+        # The installer apt-installs dependencies; earlier layers purged the lists.
+        apt-get update -y; \
+        # Minimal install: libfabric, aws-ofi-nccl and hwloc only. --build-ngc
+        # implies --skip-kmod --skip-limit-conf --no-verify.
+        (cd /tmp/aws-efa-installer && \
+            ./efa_installer.sh --skip-mpi --skip-rdma-core --build-ngc); \
+        test -x /opt/amazon/efa/bin/fi_info; \
+        /opt/amazon/efa/bin/fi_info --version; \
+        # `-l` lists providers without EFA hardware, so this works in a build.
+        /opt/amazon/efa/bin/fi_info -l | grep -q '^efa:'; \
+        EFA_NIXL_PLUGIN=$(find /usr/local/lib -name libplugin_LIBFABRIC.so \
+            -print -quit); \
+        test -n "${EFA_NIXL_PLUGIN}"; \
+        ldd "${EFA_NIXL_PLUGIN}" | grep -q 'libfabric\.so\.1 => /opt/amazon/efa/lib/'; \
+        # Plugins that NCCL_NET_PLUGIN=ofi and NCCL_TUNER_PLUGIN=ofi resolve to.
+        ldconfig -p | grep -q '/opt/amazon/ofi-nccl/lib/libnccl-net-ofi\.so$'; \
+        ldconfig -p | grep -q '/opt/amazon/ofi-nccl/lib/libnccl-tuner-ofi\.so$'; \
+        apt-get clean; \
+        rm -rf "${EFA_INSTALLER_ARCHIVE}" /tmp/aws-efa-installer \
+            /var/lib/apt/lists/*; \
+    fi
 # Mooncake registers GPU memory for RDMA via nvidia-peermem by default. Hosts
 # without that module loaded (e.g. GB200) must pass WITH_NVIDIA_PEERMEM=0 at run
 # time; see docs/features/mooncake_connector_usage.md. Deliberately not an ENV
