@@ -13,6 +13,7 @@ from tests.kernels.moe.muse_spark_utils import (
 )
 from vllm.config.quantization import QuantizationConfigArgs
 from vllm.model_executor.layers.fused_moe.experts.triton_moe import TritonExperts
+from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
 from vllm.model_executor.layers.quantization.online.base import (
     OnlineQuantizationConfig,
 )
@@ -105,12 +106,21 @@ def _build(checkpoint: dict[str, torch.Tensor], quant_config):
 def _dequantized(routed) -> tuple[torch.Tensor, torch.Tensor]:
     w13 = routed.w13_weight.float() * routed.w13_weight_scale
     w2 = routed.w2_weight.float() * routed.w2_weight_scale
-    return w13.to(torch.bfloat16), w2.to(torch.bfloat16)
+    return w13, w2
+
+
+def _fp8_per_token(t: torch.Tensor) -> torch.Tensor:
+    """The experts' dynamic per-token FP8 activation quantization, dequantized."""
+    q, scale = moe_kernel_quantize_input(
+        t.to(torch.bfloat16), None, current_platform.fp8_dtype(), True
+    )
+    return q.float() * scale
 
 
 def _rel_to_reference(router, norm, runner, vllm_config, x, logits, norm_fn=None):
     """Relative distance of the layer output from an fp32 MoE on the layer's
-    own (dequantized) FP8 weights."""
+    own (dequantized) FP8 weights, with the same FP8 activation quantization on
+    the GEMM1 input and the GEMM2 input."""
     out = run_moe(runner, vllm_config, x, logits)
     topk_weights, topk_ids = router._compute_routing(x, logits, None)
     w13, w2 = _dequantized(runner.routed_experts)
@@ -119,7 +129,9 @@ def _rel_to_reference(router, norm, runner, vllm_config, x, logits, norm_fn=None
         def norm_fn(y):
             return norm.forward_native(y, out_dtype=torch.float32)
 
-    ref = swiglu_moe_ref(x, w13, w2, topk_weights, topk_ids, norm_fn)
+    ref = swiglu_moe_ref(
+        _fp8_per_token(x), w13, w2, topk_weights, topk_ids, norm_fn, _fp8_per_token
+    )
     return ((out.float() - ref).norm() / ref.norm()).item()
 
 
@@ -135,9 +147,12 @@ def test_fp8_experts_match_reference_with_post_expert_norm(dist_init, workspace_
     assert kernel is not None and type(kernel.fused_experts) is TritonExperts
     assert routed.w13_weight.dtype == current_platform.fp8_dtype()
 
+    torch.manual_seed(0)
     x = torch.randn(M, K, dtype=torch.bfloat16, device="cuda") / 10
     logits = torch.randn(M, E, dtype=torch.float32, device="cuda")
-    # Only the dynamic per-token activation quantization separates the two.
+    # The reference repeats the FP8 activation quantization, so only the bf16
+    # rounding of the GEMM1 output (which flips a few FP8 roundings of the
+    # GEMM2 input) and accumulation order remain: about 1% to 2%.
     assert _rel_to_reference(router, norm, runner, vllm_config, x, logits) < 5e-2
     # The norm runs on each expert's output, before the top-k reduction.
     unnormed = _rel_to_reference(
@@ -171,6 +186,7 @@ def test_layerwise_reload_requantizes_in_place(dist_init, workspace_init):
     assert kernel is not None
     assert kernel.fused_experts.post_gemm2_hook is runner.post_expert_finalize
     assert not torch.equal(_dequantized(routed)[0], before[0])
+    torch.manual_seed(0)
     x = torch.randn(M, K, dtype=torch.bfloat16, device="cuda") / 10
     logits = torch.randn(M, E, dtype=torch.float32, device="cuda")
     assert _rel_to_reference(router, norm, runner, vllm_config, x, logits) < 5e-2
