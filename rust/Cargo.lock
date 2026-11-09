@@ -5971,11 +5971,14 @@ name = "vllm-tracing"
 version = "0.1.0"
 dependencies = [
  "expect-test",
+ "indexmap 2.13.0",
  "serde",
+ "serde-json-fmt",
  "serde_json",
  "serde_with",
  "time",
  "tracing",
+ "tracing-log",
  "tracing-subscriber",
 ]
 

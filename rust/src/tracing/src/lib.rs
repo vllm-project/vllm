@@ -34,8 +34,12 @@ const YELLOW: &str = "\x1b[33m";
 const RED: &str = "\x1b[31m";
 const WHITE: &str = "\x1b[37m";
 const RESET: &str = "\x1b[0m";
-const VLLM_TIME_FORMAT: &[time::format_description::FormatItem<'static>] =
-    format_description!("[month]-[day] [hour]:[minute]:[second]");
+
+/// A compile-time `time` format description, as `format_description!` builds.
+pub(crate) type TimeFormat = &'static [time::format_description::FormatItem<'static>];
+
+/// Python vLLM's text `datefmt`, `%m-%d %H:%M:%S`.
+const VLLM_TIME_FORMAT: TimeFormat = format_description!("[month]-[day] [hour]:[minute]:[second]");
 
 /// Python's logging level names, as `--log-level`, `--logging-config` and
 /// `VLLM_LOGGING_LEVEL` spell them.
@@ -201,30 +205,39 @@ fn build_targets_filter(log_level: LogLevel, rust_log: Option<&str>) -> Targets 
     filter
 }
 
+/// Writes the current local time, as Python's `logging` does, in `format`.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct VllmLocalTimer {
     local_offset: UtcOffset,
-}
-
-impl Default for VllmLocalTimer {
-    fn default() -> Self {
-        let local_offset = UtcOffset::current_local_offset().unwrap_or(UtcOffset::UTC);
-        Self { local_offset }
-    }
+    format: TimeFormat,
 }
 
 impl VllmLocalTimer {
-    /// The current local time, as Python's `logging` timestamps use.
-    pub(crate) fn now(&self) -> time::OffsetDateTime {
-        time::OffsetDateTime::now_utc().to_offset(self.local_offset)
+    pub(crate) fn new(format: TimeFormat) -> Self {
+        let local_offset = UtcOffset::current_local_offset().unwrap_or(UtcOffset::UTC);
+        Self {
+            local_offset,
+            format,
+        }
     }
 }
 
 impl FormatTime for VllmLocalTimer {
     fn format_time(&self, w: &mut Writer<'_>) -> fmt::Result {
-        let now = self.now();
-        let formatted = now.format(VLLM_TIME_FORMAT).map_err(|_| fmt::Error)?;
+        let now = time::OffsetDateTime::now_utc().to_offset(self.local_offset);
+        let formatted = now.format(self.format).map_err(|_| fmt::Error)?;
         w.write_str(&formatted)
+    }
+}
+
+/// Python's name for `level`, as both formatters write it.
+pub(crate) fn level_name(level: &Level) -> &'static str {
+    match *level {
+        Level::TRACE => "TRACE",
+        Level::DEBUG => "DEBUG",
+        Level::INFO => "INFO",
+        Level::WARN => "WARNING",
+        Level::ERROR => "ERROR",
     }
 }
 
@@ -238,7 +251,7 @@ impl VllmEventFormatter {
     fn new(process_label: &str) -> Self {
         Self {
             prefix: format!("({process_label} pid={})", process::id()),
-            timer: VllmLocalTimer::default(),
+            timer: VllmLocalTimer::new(VLLM_TIME_FORMAT),
         }
     }
 
@@ -248,14 +261,13 @@ impl VllmEventFormatter {
     }
 
     fn write_level(&self, writer: &mut Writer<'_>, level: &Level, ansi: bool) -> fmt::Result {
-        let (text, color) = match *level {
-            Level::TRACE => ("TRACE", WHITE),
-            Level::DEBUG => ("DEBUG", WHITE),
-            Level::INFO => ("INFO", GREEN),
-            Level::WARN => ("WARNING", YELLOW),
-            Level::ERROR => ("ERROR", RED),
+        let color = match *level {
+            Level::TRACE | Level::DEBUG => WHITE,
+            Level::INFO => GREEN,
+            Level::WARN => YELLOW,
+            Level::ERROR => RED,
         };
-        write_colored(writer, ansi, Some(color), text)
+        write_colored(writer, ansi, Some(color), level_name(level))
     }
 
     fn write_timestamp(&self, writer: &mut Writer<'_>, ansi: bool) -> fmt::Result {
