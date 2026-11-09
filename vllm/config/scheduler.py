@@ -98,6 +98,8 @@ class SchedulerConfig:
     Requests identified by the connector as async loads wait separately, so
     this limit does not block ordinary waiting requests. Starting loads while
     the running batch is full still requires ``max_num_inflight_kv_loads``.
+
+    **Experimental**: this option may be changed or removed in a future release.
     """
 
     long_prefill_token_threshold: int = Field(default=0, ge=0)
