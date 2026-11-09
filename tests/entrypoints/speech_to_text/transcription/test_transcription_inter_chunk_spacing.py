@@ -149,7 +149,7 @@ class _StubTranscriptionModel:
         )
 
     @classmethod
-    def post_process_output(cls, text: str) -> str:
+    def post_process_output(cls, text: str, model_config) -> str:
         return text
 
     @classmethod
