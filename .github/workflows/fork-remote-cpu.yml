@@ -121,6 +121,20 @@ jobs:
             opencv-python-headless 'fastapi>=0.133.0,<0.137.0' pybase64 \
             uvloop prometheus-client xgrammar==0.2.8 'llguidance>=1.7,<1.8' \
             tiktoken 'mistral-common[image]>=1.11.6'
+      - name: Prepare CPU source package metadata
+        run: |
+          uv pip install --python .venv/bin/python \
+            'setuptools>=77.0.3,<81.0.0' 'setuptools-scm>=8.0' \
+            'setuptools-rust>=1.9.0' wheel
+          .venv/bin/python setup.py egg_info
+          .venv/bin/python - <<'PY'
+          from importlib.metadata import version
+
+          from vllm.triton_utils import HAS_TRITON
+
+          assert 'cpu' in version('vllm')
+          assert HAS_TRITON, 'The CPU test environment must have working Triton.'
+          PY
       - name: Test complete remote CPU suites
         run: >-
           .venv/bin/python .github/workflows/scripts/remote_cpu_regressions.py

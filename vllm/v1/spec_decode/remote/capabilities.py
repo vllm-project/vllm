@@ -25,7 +25,7 @@ StandaloneWeights = Literal["complete", "materializable", "missing"]
 REMOTE_DRAFT_SUPPORTED_METHODS = frozenset({"eagle", "eagle3", "mtp"})
 
 
-class TargetFeatureKind(str, enum.Enum):
+class TargetFeatureKind(enum.StrEnum):
     """Target-side features a speculator may require every round."""
 
     TOKEN_IDS = "token_ids"
@@ -82,7 +82,7 @@ def placement_incompatibilities(
 
     An empty list means the verifier may use the remote speculator. Each
     entry is a human-readable reason suitable for a startup error message.
-    ``provided_features`` accepts TargetFeatureKind members or their string
+    `provided_features` accepts TargetFeatureKind members or their string
     values.
     """
     reasons: list[str] = []
@@ -143,7 +143,7 @@ def remote_draft_config_incompatibilities(
     that can be decided before connecting to the standalone server. The
     remaining checks (checkpoint capabilities, feature schema, fingerprints)
     happen during the HELLO handshake via `placement_incompatibilities`.
-    ``uses_target_kv=None`` means the property could not be determined and
+    `uses_target_kv=None` means the property could not be determined and
     is rejected fail-closed.
     """
     reasons: list[str] = []

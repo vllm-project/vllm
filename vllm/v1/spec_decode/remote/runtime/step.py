@@ -25,10 +25,10 @@ from vllm.v1.spec_decode.remote.runtime.kv import DraftBlockPool, DraftKVExhaust
 class DraftStepRow:
     """One sequence's share of a draft step.
 
-    ``num_tokens`` target tokens starting at the sequence's committed length
-    are covered; the last ``num_rejected`` of them were rejected by the
-    target. ``num_sampled == 0`` marks a prompt chunk that is not the last:
-    its final position is completed by ``next_prefill_tokens`` instead of a
+    `num_tokens` target tokens starting at the sequence's committed length
+    are covered; the last `num_rejected` of them were rejected by the
+    target. `num_sampled == 0` marks a prompt chunk that is not the last:
+    its final position is completed by `next_prefill_tokens` instead of a
     sampled token.
     """
 
@@ -44,7 +44,7 @@ class DraftStepRow:
 class BlockTableUpdate:
     """New blocks for one request slot's block table.
 
-    ``start`` is the table index of the first new block; 0 means the slot
+    `start` is the table index of the first new block; 0 means the slot
     belongs to a new sequence and its previous table must be discarded.
     """
 
@@ -97,7 +97,7 @@ class _DraftSequence:
 class DraftStepPlanner:
     """Request slots, draft KV blocks, and committed lengths per sequence.
 
-    ``max_num_reqs`` bounds open sequences, matching the per-request buffers
+    `max_num_reqs` bounds open sequences, matching the per-request buffers
     a speculator allocates. Each sequence keeps KV blocks for its committed
     length, the next query, and the positions used by additional draft forwards.
     """
@@ -162,7 +162,7 @@ class DraftStepPlanner:
         """Admit rows into one step and reserve their KV.
 
         Returns the plan for the admitted rows and the failure of every row
-        that was left out, keyed by its index in ``rows``. Malformed rows
+        that was left out, keyed by its index in `rows`. Malformed rows
         raise ValueError: they indicate a bug in the caller, not a
         per-sequence condition.
         """
@@ -185,8 +185,10 @@ class DraftStepPlanner:
             if seq_len > self.max_model_len:
                 failures[i] = (
                     SpeculatorStatusCode.OUT_OF_MEMORY,
-                    f"sequence would reach {seq_len} positions, beyond "
-                    f"max_model_len={self.max_model_len}",
+                    (
+                        f"sequence would reach {seq_len} positions, beyond "
+                        f"max_model_len={self.max_model_len}"
+                    ),
                 )
                 continue
             start = len(self.block_pool.blocks(sequence.req_index))
