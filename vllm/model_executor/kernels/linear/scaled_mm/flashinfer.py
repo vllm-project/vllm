@@ -23,7 +23,7 @@ from vllm.utils.flashinfer import (
     is_flashinfer_fp8_blockscale_gemm_supported,
     should_use_flashinfer_for_blockscale_fp8_gemm,
 )
-from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.utils.torch_utils import direct_register_custom_op, eager_bypass_custom_op
 
 from .BlockScaledMMLinearKernel import (
     Fp8BlockScaledDynamicMMLinearKernel,
@@ -102,8 +102,10 @@ class FlashInferFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         if act_quant_desc.group_shape != GroupShape(1, 128):
             return (
                 False,
-                "Supports only dynamic per token group activation "
-                "quantization with group_shape=(1,128).",
+                (
+                    "Supports only dynamic per token group activation "
+                    "quantization with group_shape=(1,128)."
+                ),
             )
 
         if not should_use_flashinfer_for_blockscale_fp8_gemm(
@@ -139,7 +141,7 @@ class FlashInferFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
     ) -> torch.Tensor:
         # A is BF16 — FlashInfer handles FP8 conversion internally.
         # As is a placeholder (apply_input_quant=False) and is not used here.
-        return torch.ops.vllm.flashinfer_fp8_blockscale_gemm(
+        return _flashinfer_fp8_blockscale_gemm_op(
             A,  # BF16 input
             B,  # FP8 weight
             Bs,  # Weight scales
@@ -190,7 +192,7 @@ class FlashInferFp8DeepGEMMDynamicBlockScaledKernel(
         group_size = self.weight_group_shape.col
         use_deep_gemm_e8m0 = self.fallback.use_deep_gemm_e8m0
 
-        return torch.ops.vllm.dynamic_flashinfer_deepgemm_blockscale_gemm(
+        return _dynamic_flashinfer_deepgemm_blockscale_gemm_op(
             A, B, Bs, group_size, use_deep_gemm_e8m0
         )
 
@@ -223,6 +225,9 @@ direct_register_custom_op(
     "flashinfer_fp8_blockscale_gemm",
     _flashinfer_fp8_blockscale_gemm_impl,
     fake_impl=_flashinfer_fp8_blockscale_gemm_fake,
+)
+_flashinfer_fp8_blockscale_gemm_op = eager_bypass_custom_op(
+    "flashinfer_fp8_blockscale_gemm", _flashinfer_fp8_blockscale_gemm_impl
 )
 
 
@@ -330,4 +335,8 @@ direct_register_custom_op(
     "dynamic_flashinfer_deepgemm_blockscale_gemm",
     _dynamic_flashinfer_deepgemm_blockscale_gemm_impl,
     fake_impl=_dynamic_flashinfer_deepgemm_blockscale_gemm_fake,
+)
+_dynamic_flashinfer_deepgemm_blockscale_gemm_op = eager_bypass_custom_op(
+    "dynamic_flashinfer_deepgemm_blockscale_gemm",
+    _dynamic_flashinfer_deepgemm_blockscale_gemm_impl,
 )

@@ -4,24 +4,43 @@
 
 import gc
 import json
+from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any
 
 import regex as re
 import torch
-
+from vllm.distributed.parallel_state import get_world_group
 from vllm.logger import init_logger
+from vllm.model_executor.warmup.flashinfer_autotune_cache import (
+    flashinfer_autotune_cache_hash,
+    flashinfer_autotune_filename,
+    flashinfer_autotune_root,
+    use_flashinfer_autotune_v2,
+)
+from vllm.platforms import current_platform
+from vllm.utils.flashinfer import has_flashinfer
+
+from vllm.model_executor.model_loader.weight_cache.artifact_store import (
+    STORE_BACKENDS,
+    ArtifactStore,
+    DiskArtifactStore,
+    artifact_key,
+)
 from vllm.model_executor.model_loader.weight_cache.seed import Seedable
 from vllm.model_executor.model_loader.weight_cache.utils import (
     build_warmup_runner,
     is_draft_model_cacheable,
 )
-from vllm.platforms import current_platform
-from vllm.utils.flashinfer import has_flashinfer
 
 if TYPE_CHECKING:
-    from vllm.model_executor.model_loader.weight_cache.daemon import WeightCacheDaemon
-    from vllm.model_executor.model_loader.weight_cache.seed import SeedTransport
-    from vllm.v1.worker.gpu_model_runner import GPUModelRunner
+    from vllm.v1.worker.gpu.model_runner import GPUModelRunner
+
+    from vllm.model_executor.model_loader.weight_cache.daemon import (
+        WeightCacheDaemon,
+    )
+    from vllm.model_executor.model_loader.weight_cache.seed import (
+        SeedTransport,
+    )
 
 logger = init_logger(__name__)
 _CONFIG_HASH_RE = re.compile(r"[0-9a-f]{64}")
@@ -31,6 +50,23 @@ class FlashInferWarmupCache(Seedable):
     """FlashInfer's per-rank autotune table (a single JSON file)."""
 
     kind = "flashinfer_autotune"
+
+    def __init__(self, store_names: Iterable[str] = ()) -> None:
+        self._store_names = tuple(store_names)
+        self._store_sources: list[ArtifactStore] | None = None
+
+    @property
+    def store_sources(self) -> list[ArtifactStore]:
+        # Lazily built: resolving the disk root needs flashinfer, which ROCm
+        # daemons never have; construction must stay flashinfer-free.
+        if self._store_sources is None:
+            self._store_sources = [
+                DiskArtifactStore(self.kind, flashinfer_autotune_root())
+            ]
+            # A misspelled store name or a failed build is a startup error.
+            for name in self._store_names:
+                self._store_sources.append(STORE_BACKENDS[name]())
+        return self._store_sources
 
     def warmup(self, daemon: "WeightCacheDaemon", transport: "SeedTransport") -> None:
         vllm_config = daemon.vllm_config
@@ -54,52 +90,86 @@ class FlashInferWarmupCache(Seedable):
             )
             assert daemon.model is not None, "warmup ran before load_model"
             runner.load_model(model=daemon.model)
-            transport.adopt(self, runner)
-            # The V2 runner requires skip_attn when no KV cache exists
-            flashinfer_autotune(runner, skip_attn=vllm_config.use_v2_model_runner)
+            # Shared stores come before D2D: they are built for read fan-out.
+            if not self._adopt_from_stores(runner):
+                transport.adopt(self, runner)
+            # The runner requires skip_attn when no KV cache exists
+            flashinfer_autotune(runner, skip_attn=True)
             logger.info(
                 "Weight cache %s daemon rank %d tuned FlashInfer; the tuned "
                 "configs are in the on-disk autotune cache",
                 daemon.role,
                 daemon.global_rank,
             )
+            self._publish_autotune_table(runner)
         finally:
-            # Free the runner and the dummy-run activations; the daemon's
-            # weights are untouched.
+            # Free the runner and activations; the daemon's weights are untouched.
             gc.collect()
             torch.accelerator.empty_cache()
 
     def request_params(self, runner: "GPUModelRunner") -> dict[str, Any]:
-        from vllm.distributed.parallel_state import get_world_group
-        from vllm.model_executor.warmup.flashinfer_autotune_cache import (
-            flashinfer_autotune_cache_hash,
-        )
-
         return {
             "config_hash": flashinfer_autotune_cache_hash(runner),
             "dp_rank": runner.vllm_config.parallel_config.data_parallel_rank,
             "rank": get_world_group().rank_in_group,
         }
 
-    def resolve(self, request: dict[str, Any]) -> dict[str, Any] | None:
-        from vllm.model_executor.warmup.flashinfer_autotune_cache import (
-            flashinfer_autotune_filename,
-            flashinfer_autotune_root,
-        )
+    def _runner_key(self, runner: "GPUModelRunner") -> tuple[str, str]:
+        """The (key, filename) naming this rank's table in every store."""
+        params = self.request_params(runner)
+        filename = flashinfer_autotune_filename(params["dp_rank"], params["rank"])
+        key = artifact_key(self.kind, params["config_hash"], filename)
+        return key, filename
 
+    def resolve(self, request: dict[str, Any]) -> dict[str, Any] | None:
         config_hash = request.get("config_hash")
         if not isinstance(config_hash, str) or not _CONFIG_HASH_RE.fullmatch(
             config_hash
         ):
             raise ValueError("invalid config_hash")
 
-        # Garbage ranks simply name a file that does not exist (a miss); the
-        # hex check above is what keeps the request inside the cache root.
+        # Garbage ranks name a missing key; the hex check keeps us in the root.
         filename = flashinfer_autotune_filename(request["dp_rank"], request["rank"])
-        path = flashinfer_autotune_root() / config_hash / filename
-        if not path.is_file():
-            return None
-        return {filename: json.loads(path.read_bytes())}
+        key = artifact_key(self.kind, config_hash, filename)
+        for store in self.store_sources:
+            if (data := store.get(key)) is not None:
+                return {filename: json.loads(data)}
+        return None
+
+    def _adopt_from_stores(self, runner: "GPUModelRunner") -> bool:
+        """Pull this rank's table from the shared stores; True skips D2D."""
+        shared = self.store_sources[1:]
+        if not shared or use_flashinfer_autotune_v2(runner):
+            return False
+        key, filename = self._runner_key(runner)
+        if self.store_sources[0].get(key) is not None:
+            return False
+        for store in shared:
+            if (data := store.get(key)) is not None:
+                break
+        else:
+            return False
+        try:
+            payload = self.validate_payload({filename: json.loads(data)})
+        except ValueError as e:
+            logger.warning("Rejecting the shared autotune table %s: %s", key, e)
+            return False
+        self.install(runner, payload)
+        logger.info(
+            "Adopted the FlashInfer autotune table from a shared store: %s", key
+        )
+        return True
+
+    def _publish_autotune_table(self, runner: "GPUModelRunner") -> None:
+        """Publish this rank's tuned table from the disk store to every store."""
+        if len(self.store_sources) == 1:
+            return
+        key, _ = self._runner_key(runner)
+        if (data := self.store_sources[0].get(key)) is None:
+            return
+        for store in self.store_sources:
+            store.put(key, data)
+        logger.info("Published the FlashInfer autotune table: %s", key)
 
     def validate_payload(self, payload: Any) -> dict[str, Any]:
         if not isinstance(payload, dict) or len(payload) != 1:
@@ -109,9 +179,7 @@ class FlashInferWarmupCache(Seedable):
             raise ValueError("autotune table must be a JSON object")
         if not filename.startswith("autotune_configs_"):
             raise ValueError(f"unexpected file {filename!r}")
-        # Reject tables flashinfer would refuse to load: a hard _metadata
-        # conflict would also never be overwritten, poisoning this cache
-        # path into re-tuning on every start.
+        # Reject tables flashinfer would refuse to load; a mismatch never heals.
         saved_meta = table.get("_metadata")
         if saved_meta is None:
             # Pre-metadata flashinfer file; load_configs accepts these.
@@ -138,12 +206,7 @@ class FlashInferWarmupCache(Seedable):
         return payload
 
     def install(self, runner: "GPUModelRunner", payload: dict[str, Any]) -> None:
-        from vllm.model_executor.warmup.flashinfer_autotune_cache import (
-            resolve_rank_flashinfer_autotune_file,
-            write_flashinfer_autotune_cache,
-        )
-
         (data,) = payload.values()
-        cache_path = resolve_rank_flashinfer_autotune_file(runner)
-        write_flashinfer_autotune_cache(cache_path, json.dumps(data).encode())
-        logger.info("Installed remote FlashInfer autotune table: %s", cache_path)
+        key, _ = self._runner_key(runner)
+        self.store_sources[0].put(key, json.dumps(data).encode())
+        logger.info("Installed remote FlashInfer autotune table: %s", key)

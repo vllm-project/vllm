@@ -117,8 +117,8 @@ def _make_reader(
 ) -> list:
     """Route the decode rank's reads to the prefill ranks; return its releases.
 
-    With ``prewarmed`` (session key -> dialed prefill rank, filled by
-    ``_prewarm``), a read may only use a session the eager handshake opened.
+    With `prewarmed` (session key -> dialed prefill rank, filled by
+    `_prewarm`), a read may only use a session the eager handshake opened.
     """
     worker = consumer.worker
     released: list = []
@@ -154,6 +154,11 @@ def _make_reader(
     worker.is_producer = False
     worker.dp_rank = 0
     worker._num_mamba_transfer_groups = 1 if worker._has_mamba else 0
+    worker._num_attn_transfer_groups = (
+        len(set(worker.layer_to_group.values())) - worker._num_mamba_transfer_groups
+    )
+    # _groups() puts attention groups before mamba, as the READ payload does.
+    worker._hybrid_payload_index_by_layer = dict(worker.layer_to_group)
     worker.moriio_config = SimpleNamespace(
         backend=backend, transfer_timeout=30.0, recv_abort_timeout=600.0
     )
@@ -237,7 +242,7 @@ def _read_all(
 ):
     """Run every decode rank's READ; return the releases per prefill rank.
 
-    ``advertised_tp`` is the prefill TP size the request carries, which is 0
+    `advertised_tp` is the prefill TP size the request carries, which is 0
     when the proxy does not forward it.
     """
     if advertised_tp is None:

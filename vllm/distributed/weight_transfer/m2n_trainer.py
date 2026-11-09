@@ -41,16 +41,15 @@ from vllm.distributed.weight_transfer.m2n_common import (
     create_m2n_communicator,
     expected_local_shape,
     import_m2n,
+    m2n_param_meta,
     prepare_m2n_local_runtime,
     publish_destination_placements,
     resolve_layout,
     source_plan_digest,
     to_mesh,
     to_placements,
-    validate_local_buffer,
     validate_transfer_plan,
 )
-from vllm.distributed.weight_transfer.m2n_source import M2NWeightSource
 from vllm.distributed.weight_transfer.nccl_common import (
     decode_nccl_unique_id,
     stateless_init_metadata_group,
@@ -159,7 +158,9 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
     """Trainer-side engine: sends every rank's local shard, once per parameter.
 
     Called on every trainer rank. All ranks join the communicator and run every
-    reshard; only rank 0 touches the control plane.
+    reshard; only rank 0 touches the control plane. The source's `iter_local()`
+    supplies the shards and its metadata the layouts; every parameter must be
+    owned by all trainer ranks, in rank order.
     """
 
     init_info_cls = M2NTrainerInitInfo
@@ -168,11 +169,12 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
         self,
         *,
         client: VLLMWeightSyncClient,
-        source: M2NWeightSource,
+        source: WeightSource,
         is_sender: bool,
+        rank: int = 0,
     ) -> None:
         """Hold the client and source; `trainer_init` fills in the group."""
-        super().__init__(client=client, source=source, is_sender=is_sender)
+        super().__init__(client=client, source=source, is_sender=is_sender, rank=rank)
         self.group: Any = None
         self._m2n: Any = None
         self._handle: Any = None
@@ -203,10 +205,15 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
         waiting, join the metadata rendezvous, and require unanimous source,
         data-plane, and runtime readiness before constructing NCCL.
         """
+        if source is None:
+            raise ValueError(
+                "nccl_m2n trainer weight transfer requires a WeightSource."
+            )
         engine = cls(
             client=client,
-            source=cast(M2NWeightSource, source),
+            source=source,
             is_sender=init_info.is_sender,
+            rank=init_info.rank,
         )
         engine._initialize(init_info, source)
         return engine
@@ -214,16 +221,16 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
     def _initialize(
         self,
         init_info: M2NTrainerInitInfo,
-        source: WeightSource | None,
+        source: WeightSource,
     ) -> None:
         """Run source validation, metadata agreement, and NCCL rendezvous."""
         self._num_trainer_ranks = init_info.num_trainer_ranks
         local_source_error: str | None = None
         try:
-            if not isinstance(source, M2NWeightSource):
+            if not source.implements_iter_local():
                 raise TypeError(
-                    "nccl_m2n needs per-parameter layouts, so its source must "
-                    f"be an M2NWeightSource; got {type(source).__name__}"
+                    "nccl_m2n sends each rank's local shard, but "
+                    f"{type(source).__name__} does not implement iter_local()"
                 )
             self._m2n = import_m2n()
             self._prepare_source_plan(source, init_info.num_trainer_ranks)
@@ -391,17 +398,14 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
         return {key: value for key, value in payload.items() if value is not None}
 
     def _prepare_source_plan(
-        self, source: M2NWeightSource, num_trainer_ranks: int
+        self, source: WeightSource, num_trainer_ranks: int
     ) -> None:
         """Build and validate this rank's immutable source plan."""
-        self._metas = source.metadata()
+        self._metas = [
+            m2n_param_meta(meta, num_trainer_ranks) for meta in source.metadata
+        ]
         names: set[str] = set()
         for meta in self._metas:
-            if not isinstance(meta, M2NParamMeta):
-                raise TypeError(
-                    "nccl_m2n source metadata must contain M2NParamMeta "
-                    f"entries, got {type(meta).__name__}"
-                )
             if meta.name in names:
                 raise ValueError(
                     "nccl_m2n source metadata contains duplicate parameter "
@@ -409,18 +413,6 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
                 )
             names.add(meta.name)
             check_transferable(meta.name, meta.dtype, meta.shape)
-            layout = meta.source_layout
-            if layout.mesh.start_rank != 0:
-                raise ValueError(
-                    f"parameter '{meta.name}' source mesh must start at rank 0, "
-                    f"got {layout.mesh.start_rank}"
-                )
-            if layout.mesh.size != num_trainer_ranks:
-                raise ValueError(
-                    f"parameter '{meta.name}' source mesh covers "
-                    f"{layout.mesh.size} ranks, but there are "
-                    f"{num_trainer_ranks} trainer ranks"
-                )
             expected_local_shape(meta)
         self._wire_params = [
             M2NWireParam(
@@ -536,36 +528,35 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
         # Optimizer work may have used another CUDA stream. Make prior writes
         # visible before a provider materializes current-stream local shards.
         torch.accelerator.synchronize(device_index)
-        inflight_buffers: list[Any] = []
         sent = 0
-        for index, (name, buffer) in enumerate(self.source):
-            if index >= len(self._metas):
+        for name, shard in self.source.iter_local():
+            if sent >= len(self._metas):
                 raise RuntimeError(
-                    "weight source yielded more parameters than metadata() "
+                    "weight source yielded more parameters than metadata "
                     f"declared (first extra parameter: '{name}')"
                 )
-            meta = self._metas[index]
+            meta = self._metas[sent]
             if name != meta.name:
                 raise RuntimeError(
-                    f"weight source yielded '{name}' at position {index}, but "
+                    f"weight source yielded '{name}' at position {sent}, but "
                     f"its metadata declared '{meta.name}'; the source must "
                     "iterate in a stable order"
                 )
-            validate_local_buffer(m2n, meta, buffer)
+            local_shape = expected_local_shape(meta)
+            if shard.dtype != meta.dtype or tuple(shard.shape) != local_shape:
+                raise ValueError(
+                    f"parameter '{name}' source returned {shard.dtype} "
+                    f"{tuple(shard.shape)}, but its layout implies {meta.dtype} "
+                    f"{local_shape}"
+                )
             src_mesh, src_placements = resolve_layout(
                 meta.source_layout.mesh, meta.source_layout.placements
             )
             dst_mesh, dst_placements = resolve_layout(
-                self._dst_mesh, self._dst_placements[index]
+                self._dst_mesh, self._dst_placements[sent]
             )
-            raw_pointer_args = {}
-            if isinstance(buffer, int):
-                raw_pointer_args = {
-                    "src_local_shape": expected_local_shape(meta),
-                    "src_dtype": meta.dtype,
-                }
             m2n.reshard(
-                buffer,
+                shard,
                 None,
                 self.group,
                 stream,
@@ -574,22 +565,15 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
                 dst_mesh=to_mesh(m2n, dst_mesh),
                 dst_placements=to_placements(m2n, dst_placements),
                 handle=self._handle,
-                **raw_pointer_args,
             )
-            # Let allocator-aware buffers recycle storage in stream order.
-            # Other object owners must stay alive until the final synchronize;
-            # raw-pointer lifetime remains the source's responsibility.
-            record_stream = getattr(buffer, "record_stream", None)
-            if callable(record_stream):
-                record_stream(stream)
-            elif not isinstance(buffer, int):
-                inflight_buffers.append(buffer)
+            # Let the allocator recycle the shard's storage in stream order.
+            shard.record_stream(stream)
             sent += 1
 
         if sent != len(self._metas):
             missing = self._metas[sent].name
             raise RuntimeError(
-                f"weight source yielded {sent} parameters, but metadata() "
+                f"weight source yielded {sent} parameters, but metadata "
                 f"declared {len(self._metas)} (first missing: '{missing}')"
             )
 

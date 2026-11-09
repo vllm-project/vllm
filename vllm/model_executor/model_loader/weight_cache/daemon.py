@@ -22,8 +22,8 @@ Tensor, expert, data and pipeline parallelism are supported.
 For multi-node tensor parallelism, run one launcher per node with a shared
 rendezvous so the global TP group forms across nodes (CUDA IPC handles are
 node-local, so each node serves only its local GPUs' shards). Reuse the same
-``--nnodes``/``--node-rank``/``--master-addr`` flags you pass the engine, plus a
-``--weight-cache-master-port`` distinct from the engine's ``--master-port``:
+`--nnodes`/`--node-rank`/`--master-addr` flags you pass the engine, plus a
+`--weight-cache-master-port` distinct from the engine's `--master-port`:
 
     # node 0 (8 local GPUs)
     vllm preload \\
@@ -36,17 +36,17 @@ node-local, so each node serves only its local GPUs' shards). Reuse the same
         --nnodes 2 --node-rank 1 --master-addr 10.0.0.1 \\
         --weight-cache-master-port 29600
 
-The global TP rank of local GPU ``i`` on node ``r`` is
-``r * (tp_size // nnodes) + i``, matching vLLM's contiguous per-node rank
+The global TP rank of local GPU `i` on node `r` is
+`r * (tp_size // nnodes) + i`, matching vLLM's contiguous per-node rank
 assignment, so each engine worker maps its shard from the daemon on its own
 node. With pipeline parallelism each node additionally runs one daemon per PP
-stage; the global rank is ``pp_rank * tp_size + tp_rank``.
+stage; the global rank is `pp_rank * tp_size + tp_rank`.
 
 For data parallelism (e.g. a TP1 x DP16 x EP decode fleet) run one launcher per
-node with the engine's DP placement flags. Local GPU ``i`` serves DP rank
-``start_rank + i // tp_size`` and TP rank ``i % tp_size``, and all
-``dp_size * tp_size`` daemons form one world group on
-``--data-parallel-address``/``--weight-cache-master-port`` so the expert
+node with the engine's DP placement flags. Local GPU `i` serves DP rank
+`start_rank + i // tp_size` and TP rank `i % tp_size`, and all
+`dp_size * tp_size` daemons form one world group on
+`--data-parallel-address`/`--weight-cache-master-port` so the expert
 shards are laid out exactly as in the engine:
 
     # node r (4 local GPUs)
@@ -57,9 +57,9 @@ shards are laid out exactly as in the engine:
         --weight-cache-master-port 29600
 
 Data parallelism also combines with multi-node tensor parallelism: pass both
-flag sets (``--nnodes``/``--node-rank``/``--master-addr`` and the DP flags with
-a reachable ``--data-parallel-address``). Each node then serves a contiguous
-block of the ``dp_size * tp_size`` global ranks, e.g. TP8 x DP2 on 4 nodes:
+flag sets (`--nnodes`/`--node-rank`/`--master-addr` and the DP flags with
+a reachable `--data-parallel-address`). Each node then serves a contiguous
+block of the `dp_size * tp_size` global ranks, e.g. TP8 x DP2 on 4 nodes:
 
     # node r (4 local GPUs)
     vllm preload \\
@@ -70,9 +70,9 @@ block of the ``dp_size * tp_size`` global ranks, e.g. TP8 x DP2 on 4 nodes:
 
 With MTP, EAGLE or EAGLE3 speculative decoding the launcher additionally
 starts a draft daemon group that caches the draft model. It uses its own cache
-key, Unix sockets (``*_draft.sock``) and rendezvous port
-(``--weight-cache-draft-master-port``, default ``--weight-cache-master-port +
-1``), so each process serves exactly one model role. Other draft types are not
+key, Unix sockets (`*_draft.sock`) and rendezvous port
+(`--weight-cache-draft-master-port`, default `--weight-cache-master-port +
+1`), so each process serves exactly one model role. Other draft types are not
 cached and keep loading from disk in the engine.
 """
 
@@ -85,10 +85,9 @@ import os
 import select
 import socket
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 
 import torch
-
 from vllm.config import (
     ParallelConfig,
     VllmConfig,
@@ -106,8 +105,13 @@ from vllm.distributed.device_communicators.flashinfer_all_reduce import (
     destroy_fi_ar_workspace,
 )
 from vllm.logger import configure_logging, init_logger
-from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader.utils import process_weights_after_loading
+from vllm.platforms import current_platform
+from vllm.utils.mem_utils import format_gib
+from vllm.utils.torch_utils import set_default_torch_dtype
+from vllm.v1.worker.workspace import init_workspace_manager
+
+from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader.weight_cache.protocol import (
     TensorEntry,
     WeightCacheKey,
@@ -136,10 +140,6 @@ from vllm.model_executor.model_loader.weight_cache.warmup_cache import (
     WarmupCache,
     _cache_roots,
 )
-from vllm.platforms import current_platform
-from vllm.utils.mem_utils import format_gib
-from vllm.utils.torch_utils import set_default_torch_dtype
-from vllm.v1.worker.workspace import init_workspace_manager
 
 logger = init_logger("vllm.model_executor.model_loader.weight_cache.daemon")
 
@@ -149,9 +149,9 @@ def export_entries(
 ) -> tuple[dict[str, TensorEntry], dict[str, str]]:
     """Export a model's tensors, preserving tied-parameter aliases.
 
-    ``named_parameters``/``named_buffers`` are iterated with
-    ``remove_duplicate=False`` so tied weights (e.g. ``lm_head.weight`` sharing
-    storage with ``embed_tokens.weight``) are not silently dropped. Each unique
+    `named_parameters`/`named_buffers` are iterated with
+    `remove_duplicate=False` so tied weights (e.g. `lm_head.weight` sharing
+    storage with `embed_tokens.weight`) are not silently dropped. Each unique
     tensor is exported once per call; every additional name that refers to the same
     tensor object is recorded in the returned alias map so the client can
     re-establish the shared identity instead of allocating uninitialized
@@ -161,8 +161,8 @@ def export_entries(
     that PyTorch registers a reference for each IPC mapping's lifetime.
 
     Returns:
-        A ``(entries, aliases)`` pair where ``entries`` maps a canonical name to
-        its ``TensorEntry`` and ``aliases`` maps each duplicate name to its
+        A `(entries, aliases)` pair where `entries` maps a canonical name to
+        its `TensorEntry` and `aliases` maps each duplicate name to its
         canonical name.
 
     """
@@ -193,7 +193,7 @@ def exported_weight_bytes(model: torch.nn.Module | None) -> int:
     """Bytes of the distinct CUDA storages an engine maps from this model.
 
     This is the memory the engine would otherwise allocate for the weights
-    itself. ``memory_allocated()`` also counts daemon-only state the engine
+    itself. `memory_allocated()` also counts daemon-only state the engine
     never maps (communication buffers, warmup workspaces, tensors outside
     parameters/buffers that the engine rebuilds itself), so reporting it
     would shrink the engine's KV cache below that of a disk load.
@@ -222,22 +222,18 @@ class WeightCacheDaemon:
         dp_rank: int = 0,
         pp_rank: int = 0,
         seed_config: SeedConfig | None = None,
-        compile_cache_protocol: str = "rdma",
+        warmup_cache_stores: Iterable[str] = (),
     ):
         parallel_config = vllm_config.parallel_config
         if parallel_config.enable_eplb:
             raise ValueError("The weight cache daemon does not support EPLB.")
         self.seed_config = seed_config or SeedConfig()
+        warmup_cache_stores = tuple(warmup_cache_stores)
         self.compile_cache = CompileArtifactWarmupCache(
-            _cache_roots(),
-            compile_cache_protocol,
-            require_mooncake=(
-                self.seed_config.listen is not None
-                or self.seed_config.source is not None
-            ),
+            _cache_roots(), warmup_cache_stores
         )
         self.warmup_caches: list[WarmupCache] = [
-            FlashInferWarmupCache(),
+            FlashInferWarmupCache(warmup_cache_stores),
             self.compile_cache,
         ]
         self.d2d = SeedTransport(self.warmup_caches, self.seed_config)
@@ -341,9 +337,7 @@ class WeightCacheDaemon:
         )
 
     def _adopt_compile_cache(self) -> None:
-        if self.compile_cache is None:
-            return
-        if self.seed_config.source is None:
+        if self.seed_config.source is None or not self.compile_cache.store_sources:
             return
         deadline = time.monotonic() + 300.0
         while time.monotonic() < deadline:
@@ -375,7 +369,9 @@ class WeightCacheDaemon:
                 )
                 return
             time.sleep(1.0)
-        raise RuntimeError("timed out waiting for the source compile cache")
+        logger.warning(
+            "Timed out waiting for the source compile cache; using local loading"
+        )
 
     def release_distributed(self) -> None:
         """Release process groups and BLAS workspaces after loading and warmup.
@@ -627,7 +623,7 @@ def _run_daemon(
     dp_rank: int = 0,
     pp_rank: int = 0,
     seed_config: SeedConfig | None = None,
-    compile_cache_protocol: str = "rdma",
+    warmup_cache_stores: Iterable[str] = (),
 ) -> None:
     # Spawned daemons start with logging unconfigured, like engine workers.
     if logging_config := getattr(vllm_config, "logging_config", None):
@@ -642,7 +638,7 @@ def _run_daemon(
         dp_rank,
         pp_rank,
         seed_config=seed_config,
-        compile_cache_protocol=compile_cache_protocol,
+        warmup_cache_stores=warmup_cache_stores,
     )
     daemon.load_model()
     daemon.warmup()
@@ -658,13 +654,13 @@ def _run_daemon(
 def plan_local_ranks(
     parallel_config: ParallelConfig,
 ) -> list[tuple[int, int, int, int]]:
-    """``(local_rank, dp_rank, pp_rank, tp_rank)`` for every local daemon.
+    """`(local_rank, dp_rank, pp_rank, tp_rank)` for every local daemon.
 
-    Global ranks enumerate DP, PP, then TP: ``global = dp_rank * pp_size *
-    tp_size + pp_rank * tp_size + tp_rank``.
-    With ``--nnodes`` the engine hands each node a contiguous block of global
-    ranks, so node ``r`` serves ``node_rank * local + i``; without it a
-    launcher's block starts at ``--data-parallel-start-rank * tp_size``.
+    Global ranks enumerate DP, PP, then TP: `global = dp_rank * pp_size *
+    tp_size + pp_rank * tp_size + tp_rank`.
+    With `--nnodes` the engine hands each node a contiguous block of global
+    ranks, so node `r` serves `node_rank * local + i`; without it a
+    launcher's block starts at `--data-parallel-start-rank * tp_size`.
     """
     tp_size = parallel_config.tensor_parallel_size
     pp_size = parallel_config.pipeline_parallel_size
@@ -686,10 +682,10 @@ def plan_local_ranks(
 
 
 def get_engine_dp_placement(vllm_config: VllmConfig, dp_rank: int) -> tuple[int, int]:
-    """``(dp_size, dp_rank)`` as the engine fingerprints this DP rank.
+    """`(dp_size, dp_rank)` as the engine fingerprints this DP rank.
 
     The engine runs the DP ranks of a non-MoE target as independent DP=1
-    replicas, so their workers all report ``(1, 0)``.
+    replicas, so their workers all report `(1, 0)`.
     """
     if vllm_config.model_config.is_moe:
         return vllm_config.parallel_config.data_parallel_size, dp_rank
