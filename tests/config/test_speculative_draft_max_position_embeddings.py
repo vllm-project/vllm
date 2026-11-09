@@ -196,13 +196,13 @@ def test_mtp_draft_inherits_target_max_model_len(
     assert draft_text_config.max_position_embeddings == 524288
     assert _override_logged(vllm_caplog)
 
-    # The position-sharing check must also read the nested text config.
+    # The V2 model runner's draft limit must also read the nested text config.
     assert draft_config.hf_config is not draft_text_config
     monkeypatch.setattr(
         "vllm.config.speculative._rope_only_sizes_cache",
         lambda config: config is draft_text_config,
     )
-    assert speculative_config.draft_shares_target_positions()
+    assert speculative_config.speculator_config.max_model_len is None
 
 
 @pytest.mark.cpu_test

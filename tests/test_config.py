@@ -4008,6 +4008,7 @@ def test_mtp_draft_uses_model_weights_not_local_cache(mock_model_config_cls):
     mock_draft.hf_config.n_predict = None
     mock_draft.hf_config.num_nextn_predict_layers = 1
     mock_draft.hf_config.max_position_embeddings = 4096
+    mock_draft.hf_text_config = mock_draft.hf_config
     mock_draft.speculator_config_class = None
     mock_draft.max_model_len = 4096
     mock_model_config_cls.return_value = mock_draft
