@@ -150,10 +150,14 @@ class AttentionFuser(BaseFuser):
             setattr(module, self.s_aux_expr.attr, sinks_param)
         return module
 
-    def layer_index(self, module: nn.Module) -> int | None:
-        """The layer `module` computes attention for, if it declares one."""
+    def layer_index(self, module: nn.Module, prefix: str) -> int | None:
+        """The layer `module` computes attention for, from its `layer_idx` or,
+        failing that, the only index in its qualname."""
         layer_idx = getattr(module, "layer_idx", None)
-        return layer_idx if isinstance(layer_idx, int) else None
+        if isinstance(layer_idx, int):
+            return layer_idx
+        indices = [int(name) for name in prefix.split(".") if name.isdigit()]
+        return indices[0] if len(indices) == 1 else None
 
     def scale(self, module: nn.Module) -> float | None:
         """The softmax scale `module` passes to the interface, or `None`."""

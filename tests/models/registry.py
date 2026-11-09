@@ -752,6 +752,7 @@ _REWARD_EXAMPLE_MODELS = {
 
 _TOKEN_CLASSIFICATION_EXAMPLE_MODELS = {
     "BertForTokenClassification": _HfExamplesInfo("vllm-project/NeuroBERT-NER"),
+    "DistilBertForTokenClassification": _HfExamplesInfo("dslim/distilbert-NER"),
     "ModernBertForTokenClassification": _HfExamplesInfo(
         "vllm-project/electrical-ner-ModernBERT-base"
     ),
@@ -780,6 +781,9 @@ _SEQUENCE_CLASSIFICATION_EXAMPLE_MODELS = {
             "d3-lite": "vllm-sr/d3-lite",
         },
         max_model_len=4096,
+    ),
+    "DistilBertForSequenceClassification": _HfExamplesInfo(
+        "distilbert/distilbert-base-uncased-finetuned-sst-2-english"
     ),
     "GPT2ForSequenceClassification": _HfExamplesInfo(
         "vllm-project/sentiment-polish-gpt2-small"

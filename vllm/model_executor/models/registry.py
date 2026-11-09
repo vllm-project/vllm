@@ -790,11 +790,19 @@ _TRANSFORMERS_SUPPORTED_MODELS = {
     # Embedding models
     "ModernBertModel": ("transformers", "TransformersEmbeddingModel"),
     # Sequence classification models
+    "DistilBertForSequenceClassification": (
+        "transformers",
+        "TransformersForSequenceClassification",
+    ),
     "ModernBertForSequenceClassification": (
         "transformers",
         "TransformersForSequenceClassification",
     ),
     # Token classification models
+    "DistilBertForTokenClassification": (
+        "transformers",
+        "TransformersForTokenClassification",
+    ),
     "ModernBertForTokenClassification": (
         "transformers",
         "TransformersForTokenClassification",

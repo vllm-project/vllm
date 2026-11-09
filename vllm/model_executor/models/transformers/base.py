@@ -520,7 +520,7 @@ class Base(
 
             if (
                 isinstance(fuser, AttentionFuser)
-                and (index := fuser.layer_index(module)) is not None
+                and (index := fuser.layer_index(module, prefix)) is not None
             ):
                 if index in self.attention_fusers:
                     other, _ = self.attention_fusers[index]
