@@ -51,33 +51,24 @@ Now supports 9 types of connectors:
 
 ## KV connector startup notification
 
-Custom KV connectors can override the worker-side
-`KVConnectorBase_V1.on_kv_cache_ready()` hook to finish deferred registration
-before the first request. The default implementation does nothing, so existing
-connectors retain their registration behavior. No new configuration is required.
+Override `KVConnectorBase_V1.on_kv_cache_ready()` to finish deferred registration
+before the first request. It runs on each worker after startup warmup, CUDA Graph
+capture (when enabled), final KV cache sizing, and preceding device work. Eager
+mode uses the same hook. Startup paths that skip warmup, such as elastic scale-up,
+still receive the notification. The default is a no-op; `MultiConnector` forwards
+it to each child.
 
-The engine calls this hook on every worker after startup warmup and CUDA Graph
-capture (when enabled), and after final KV cache sizing. Each worker completes
-preceding device work before invoking the hook. This ordering also applies in
-eager mode. `register_kv_caches()` still receives the cache tensors earlier;
-it is not a notification that warmup has finished. A connector that defers
-registration must retain the tensors and layout information it needs until
-`on_kv_cache_ready()` runs. `MultiConnector` forwards the notification to each
-child in configuration order, including nested connectors.
+`register_kv_caches()` receives tensors earlier. To defer registration, retain
+those tensors and their layout until `on_kv_cache_ready()` runs.
 
-Engine initialization waits for every worker's hook to return. A connector can
-use that boundary to complete resource activation before requests arrive;
-external waits must have connector-defined deadlines. Exceptions propagate as
-initialization failures. If the hook only starts a background task, the engine
-does not wait for that task, and the connector remains responsible for handling
-requests while its resources are unavailable. This notification does not add
-scheduler readiness tracking or automatically activate LMCache resources.
+Startup waits for every worker's hook to return. **The hook must return in bounded
+time:** vLLM provides no hook timeout or cancellation, so an unbounded external
+wait blocks initialization indefinitely. Set deadlines on external operations;
+exceptions fail initialization. Background tasks started by the hook are not
+awaited.
 
-This is a startup lifecycle notification, not proof of a successful transfer or
-ongoing health. It is not repeated on idle resource reclamation or sleep/wake;
-the existing unregister/restore lifecycle remains responsible for those paths.
-Elastic scale-up uses the same initialization boundary, but does not imply a
-warmup pass when that startup path deliberately skips warmup.
+The hook runs only during startup. Idle recovery and sleep/wake continue to use
+the connector's existing lifecycle.
 
 ## Reusing prefill token ids on decode
 

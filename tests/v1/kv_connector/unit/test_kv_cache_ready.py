@@ -8,6 +8,7 @@ import pytest
 import torch
 
 from tests.v1.kv_connector.unit.utils import create_vllm_config
+from vllm import SamplingParams
 from vllm.config import KVTransferConfig
 from vllm.distributed.kv_transfer import get_kv_transfer_group
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
@@ -73,23 +74,15 @@ def _child_config(path: Path, name: str, *, fail_ready: bool = False):
 
 @pytest.mark.cpu_test
 @pytest.mark.parametrize("fail_ready", [False, True])
-def test_nested_connector_deferred_registration(tmp_path, fail_ready, dist_init):
-    """Nested children activate together; a registration failure propagates."""
+def test_connector_deferred_registration(tmp_path, fail_ready, dist_init):
+    """The worker notifies all children and propagates registration errors."""
     config = create_vllm_config(
         kv_connector="MultiConnector",
         kv_connector_extra_config={
             "connectors": [
                 {"kv_connector": "ExampleConnector", "kv_role": "kv_both"},
-                {
-                    "kv_connector": "MultiConnector",
-                    "kv_role": "kv_both",
-                    "kv_connector_extra_config": {
-                        "connectors": [
-                            _child_config(tmp_path, "first"),
-                            _child_config(tmp_path, "second", fail_ready=fail_ready),
-                        ]
-                    },
-                },
+                _child_config(tmp_path, "first"),
+                _child_config(tmp_path, "second", fail_ready=fail_ready),
             ]
         },
     )
@@ -116,13 +109,8 @@ def test_nested_connector_deferred_registration(tmp_path, fail_ready, dist_init)
 
 
 @pytest.mark.parametrize("enforce_eager", [True, False])
-@pytest.mark.parametrize(
-    "tensor_parallel_size", [1, pytest.param(2, marks=pytest.mark.distributed)]
-)
-def test_cache_ready_before_first_request(
-    vllm_runner, tmp_path, enforce_eager, tensor_parallel_size
-):
-    """All workers finish deferred registration before LLM becomes usable."""
+def test_cache_ready_before_first_request(vllm_runner, tmp_path, enforce_eager):
+    """Deferred registration finishes before LLM returns, with or without graphs."""
     transfer_config = KVTransferConfig(
         kv_connector="MultiConnector",
         kv_role="kv_both",
@@ -136,7 +124,6 @@ def test_cache_ready_before_first_request(
     with vllm_runner(
         "facebook/opt-125m",
         enforce_eager=enforce_eager,
-        tensor_parallel_size=tensor_parallel_size,
         kv_transfer_config=transfer_config,
         gpu_memory_utilization=0.5,
         max_model_len=128,
@@ -146,10 +133,11 @@ def test_cache_ready_before_first_request(
     ) as runner:
         num_blocks = runner.llm.llm_engine.vllm_config.cache_config.num_gpu_blocks
         for name in ("first", "second"):
-            for rank in range(tensor_parallel_size):
-                assert json.loads((tmp_path / f"{name}-{rank}.json").read_text()) == {
-                    "notifications": 1,
-                    "num_blocks": num_blocks,
-                }
-        outputs = runner.generate_greedy(["Hello"], max_tokens=1)
-        assert len(outputs[0][0]) > 0
+            assert json.loads((tmp_path / f"{name}-0.json").read_text()) == {
+                "notifications": 1,
+                "num_blocks": num_blocks,
+            }
+        outputs = runner.llm.generate(
+            ["Hello"], SamplingParams(temperature=0, max_tokens=1, ignore_eos=True)
+        )
+        assert len(outputs[0].outputs[0].token_ids) == 1

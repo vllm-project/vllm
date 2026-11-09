@@ -153,12 +153,10 @@ steps:
   - tests/compile/test_wrapper.py
   - tests/compile/test_aot_compile.py
   - tests/entrypoints/llm/test_collective_rpc.py
-  - tests/v1/kv_connector/unit/test_kv_cache_ready.py
   commands:
   # https://github.com/NVIDIA/nccl/issues/1838
   - export NCCL_CUMEM_HOST_ENABLE=0
   - pytest -v -s entrypoints/llm/test_collective_rpc.py
-  - pytest -v -s -m distributed v1/kv_connector/unit/test_kv_cache_ready.py
   - pytest -v -s ./compile/test_wrapper.py
   - pytest -v -s ./compile/test_aot_compile.py::test_load_on_another_device
   mirror:

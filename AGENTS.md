@@ -84,11 +84,6 @@ uv pip install -r requirements/test/cuda.in
 .venv/bin/python -m pytest tests/path/to/test_file.py -v
 ```
 
-Source-tree imports can still resolve `vllm._C` from an older editable install.
-Before serving validation, check both `vllm.__file__` and `vllm._C.__file__`,
-and use native artifacts built for the tested revision and PyTorch version.
-Passing source-only tests does not validate mismatched native artifacts.
-
 When adding tests:
 
 - **Design before you write.** Answer four questions first: what is the module
