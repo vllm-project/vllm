@@ -2184,7 +2184,6 @@ def test_deepep_v2_padded_scale_ignores_padding_tail():
 
     prepare_finalize = object.__new__(DeepEPV2PrepareAndFinalize)
     prepare_finalize.defer_globalize = False
-    prepare_finalize.use_cudagraph = True
     prepare_finalize.rank_expert_offset = 0
     prepare_finalize.num_experts = 8
 
@@ -2199,11 +2198,8 @@ def test_deepep_v2_padded_scale_ignores_padding_tail():
 
     x_q, scale, meta, topk_ids, _ = prepare_finalize._receiver(
         SimpleNamespace(event=None),
-        False,
         expert_x,
         recv_topk_idx,
-        8,
-        [],
         recv_topk_weights,
         psum_recv_per_rank,
         None,
