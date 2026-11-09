@@ -219,7 +219,7 @@ def test_context_kv_weights_are_loaded_as_merged_linear_shards():
 def test_v41_dspark_loads_linear_scales(
     monkeypatch, scale_dtype, checkpoint_name, runtime_module, shard_id
 ):
-    """Checkpoint ``.scale`` maps to the quant method's scale parameter and
+    """Checkpoint `.scale` maps to the quant method's scale parameter and
     loads untouched. MXFP8 block-scale expansion lives in the KMxfp8Static
     loader (see tests/quantization/test_modelopt.py), not in load_weights."""
     from vllm.models.deepseek_v41.nvidia import dspark

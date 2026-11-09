@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The refusals that need the loaded model (``weight_reasons``) or the bound KV
-caches (``cache_reasons``), and the fail-stop watch on the kernels' error words.
+"""The refusals that need the loaded model (`weight_reasons`) or the bound KV
+caches (`cache_reasons`), and the fail-stop watch on the kernels' error words.
 Each refusal reports every reason, not only the first."""
 
 from collections.abc import Mapping
@@ -21,8 +21,8 @@ MLA_HEADS, MLA_Q, MLA_KV, MLA_NOPE, MLA_ROPE, MLA_V = 12, 1536, 512, 128, 64, 12
 
 
 def _need(reasons: list[str]):
-    """``need(name, t, shape, dtype)``: appends to ``reasons`` unless ``t`` is
-    a contiguous ``shape`` ``dtype`` tensor."""
+    """`need(name, t, shape, dtype)`: appends to `reasons` unless `t` is
+    a contiguous `shape` `dtype` tensor."""
 
     def need(name, t, shape, dtype):
         if t is None:
@@ -38,9 +38,9 @@ def _need(reasons: list[str]):
 
 
 def weight_reasons(model) -> list[str]:
-    """``model``: the loaded ``KimiLinearModel``; every kernel layer's weights as
+    """`model`: the loaded `KimiLinearModel`; every kernel layer's weights as
     K1 and K2 read them, and the MoE backend that lays them out. The MLA layers'
-    attention is ``mla_weight_reasons``'."""
+    attention is `mla_weight_reasons`'."""
     from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import Mxfp4MoeBackend
     from vllm.models.kimi_k3.amd.specialized_decode.mono.attention import back, kda
     from vllm.models.kimi_k3.amd.specialized_decode.mono.stages import moe
@@ -122,7 +122,7 @@ def mla_weight_reasons(model) -> list[str]:
 
 
 def _mla_reasons(p: str, w, need) -> list[str]:
-    """An MLA layer as M1a / M1b (and ``runtime/mla.py``) run it: AITER MLA's
+    """An MLA layer as M1a / M1b (and `runtime/mla.py`) run it: AITER MLA's
     metadata, NoPE, gated, DCP1 or DCP8, an fp8 cache, W_UK / W_UV as MXFP4 bmms."""
     from vllm.models.kimi_k3.amd.specialized_decode.mono.attention.kda import (
         HIDDEN as H,
@@ -217,7 +217,7 @@ def cache_reasons(caches: Mapping[str, Any]) -> list[str]:
 
 class FailStop:
     """Stops every TP rank at the same step once any of them gave up an in-kernel
-    wait (``failed``: the mono kernels' health word FAILED, ``mono.abi``, or
+    wait (`failed`: the mono kernels' health word FAILED, `mono.abi`, or
     the sharded DSpark Markov sampler's C_ERR). Each step queues a D2H copy of
     this rank's word and keeps the newest copy that has landed, without blocking;
     every CHECK_EVERY steps the ranks agree on those over the TP CPU group and all
