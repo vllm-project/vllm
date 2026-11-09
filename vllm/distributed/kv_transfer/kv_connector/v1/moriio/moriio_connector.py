@@ -632,7 +632,9 @@ class MoRIIOConnectorScheduler:
         # Per attention group: not prefix-cacheable, so read even on a full hit.
         self._attn_group_is_state: list[bool] = []
         # Per attention group: tokens per page if READ can select by token
-        # range, i.e. full attention with a complete table; else None.
+        # range, i.e. full attention sharing one prefix-cache lookup (groups
+        # looked up separately, e.g. an EAGLE drafter's, may hit shorter);
+        # else None.
         self._attn_read_block_sizes: list[int | None] = []
         if self._has_mamba:
             attn_specs = [
@@ -647,8 +649,10 @@ class MoRIIOConnectorScheduler:
                 spec.block_size * (dcp_size if spec.dcp_sharded else 1)
                 for spec in attn_specs
             ]
+            full_attn_specs = [s for s in attn_specs if is_full_attention_spec(s)]
+            shared_lookup = all(s == full_attn_specs[0] for s in full_attn_specs)
             self._attn_read_block_sizes = [
-                block_size if is_full_attention_spec(spec) else None
+                block_size if shared_lookup and is_full_attention_spec(spec) else None
                 for spec, block_size in zip(attn_specs, attn_block_sizes, strict=True)
             ]
             # The smallest attention block bounds every group's local tail.
