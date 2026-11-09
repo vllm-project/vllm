@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 import torch
 import torch.nn as nn
@@ -10,6 +10,8 @@ from vllm.model_executor.models.interfaces import SupportsMRoPE
 from vllm.triton_utils import tl, triton
 from vllm.v1.worker.gpu.buffer_utils import StagedWriteTensor, UvaBackedTensor
 
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.input_batch import InputBatch
 
 class RopeState:
     """State for multi-dimensional (M-RoPE) positions.
@@ -95,6 +97,46 @@ class RopeState:
         )
         self.prefill_delta.np[req_idx] = delta
 
+    
+    def prepare_positions_pcp(self, input_batch: "InputBatch") -> torch.Tensor:
+        """Return M-RoPE positions for a PCP-local batch.
+
+        PCP splits one request into rank-local fragments. Prefill positions
+        must be sliced from the request's global M-RoPE table; decode positions
+        continue from the 1D token positions plus the request's M-RoPE delta.
+        """
+        num_tokens = input_batch.num_tokens_after_padding
+        positions = self.positions[:, :num_tokens]
+        positions.zero_()
+
+        offset = 0
+        for row_idx in range(input_batch.num_reqs):
+            length = int(input_batch.num_scheduled_tokens[row_idx])
+            if length == 0:
+                continue
+
+            req_idx = int(input_batch.idx_mapping_np[row_idx])
+            if bool(input_batch.is_prefilling_np[row_idx]):
+                start = int(input_batch.num_computed_prefill_tokens_np[row_idx])
+                base = req_idx * self.num_dims
+                source = self.prefill_positions.gpu[
+                    base : base + self.num_dims, start : start + length
+                ]
+                positions[:, offset : offset + length] = source.to(
+                    device=positions.device, dtype=positions.dtype
+                )
+            else:
+                delta = int(self.prefill_delta.np[req_idx])
+                source = input_batch.positions[offset : offset + length].to(
+                    device=positions.device, dtype=positions.dtype
+                )
+                positions[:, offset : offset + length] = (
+                    source.unsqueeze(0).repeat(self.num_dims, 1) + delta
+                )
+            offset += length
+        return positions
+
+    
     def prepare_positions(
         self,
         idx_mapping: torch.Tensor,
