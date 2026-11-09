@@ -70,7 +70,7 @@ def _encode_mm_metadata(
     *,
     metadata_fields_for: Callable[[str], Collection[str]] | None = None,
 ) -> dict[str, list[str | None]] | None:
-    """Serialize metadata-only subsets, or ``None`` if a modality has none."""
+    """Serialize metadata-only subsets, or `None` if a modality has none."""
     metadata_by_modality: dict[str, list[str | None]] = {}
 
     for modality, items in raw_mm_kwargs.items():

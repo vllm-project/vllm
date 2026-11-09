@@ -179,9 +179,19 @@ should split those fields:
 `"return_mm_kwargs": false` is a deprecated alias for `"mm_payload": "none"`
 and is ignored when `mm_payload` is set.
 
+Choose the mode by where the media goes after render: through the render
+response to the workers (`"tensors"`), straight from the client to the encode
+worker (`"metadata"`), or to whichever worker a router picks (`"none"`).
+
 In the diagrams, `features` also carries `mm_hashes` and `mm_placeholders`.
 
 #### `"tensors"`
+
+Use case: render once and let the workers run without reprocessing the media,
+for example a single worker at `/inference/v1/generate`, or an encode worker
+that should not load or process the media itself. The cost is response size:
+`kwargs_data` holds the processed tensors, about 12 MiB for one 1920x1080
+image and 86 MiB for a 32-frame 1280x720 video on Qwen2-VL.
 
 Render serializes the processed tensors, and the client forwards them to the
 encode worker:
@@ -211,6 +221,12 @@ A single worker can instead take the full response at
 
 #### `"metadata"`
 
+Use case: encode/prefill disaggregation where the client sends the original
+media to the encode worker and the embeddings reach prefill through the EC
+connector. Prefill still needs the token layout and the per-item metadata (for
+example `image_grid_thw` for M-RoPE positions), which is a few integers per
+item, so the processed tensors never pass through the client.
+
 Render does not serialize the tensors, so the encode worker needs the media from
 the client:
 
@@ -237,6 +253,11 @@ sequenceDiagram
 `/inference/v1/generate` rejects this response without `ec_transfer_params`.
 
 #### `"none"`
+
+Use case: routing. A cache-aware router reads `token_ids` and `mm_hashes` to
+send the request to the worker that already holds its prefix or encoder cache,
+then forwards the original request with its media. This is the smallest
+response.
 
 The response is for routing only:
 
