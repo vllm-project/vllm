@@ -26,6 +26,23 @@ CONFIG_KWARGS = dict(
     max_position_embeddings=MAX_POSITION_EMBEDDINGS,
 )
 DYNAMIC = {"rope_type": "dynamic", "factor": 4.0, "rope_theta": 1e4}
+ORIGINAL = MAX_POSITION_EMBEDDINGS // 2
+
+LLAMA_CONFIG = LlamaConfig(**CONFIG_KWARGS, rope_parameters=DYNAMIC)
+# Hunyuan's dynamic init also applies `alpha`, which must be kept
+HUNYUAN_CONFIG = HunYuanDenseV1Config(
+    **CONFIG_KWARGS, head_dim=16, rope_parameters=DYNAMIC | {"alpha": 1e3}
+)
+PHI3_CONFIG = Phi3Config(
+    **CONFIG_KWARGS,
+    original_max_position_embeddings=ORIGINAL,
+    rope_parameters={
+        "rope_type": "longrope",
+        "short_factor": [1.0] * 8,
+        "long_factor": [4.0] * 8,
+        "rope_theta": 1e4,
+    },
+)
 
 
 def make_vllm_config(hf_config, max_model_len: int) -> SimpleNamespace:
@@ -67,54 +84,26 @@ def test_can_enable_torch_compile(rope_parameters, max_model_len, compilable):
 
 
 @pytest.mark.parametrize(
-    "config,rotary_cls",
+    "config,rotary_cls,max_model_len,ref_len",
     [
-        (LlamaConfig(**CONFIG_KWARGS, rope_parameters=DYNAMIC), LlamaRotaryEmbedding),
-        # Hunyuan's dynamic init also applies `alpha`, which must be kept
-        (
-            HunYuanDenseV1Config(
-                **CONFIG_KWARGS, head_dim=16, rope_parameters=DYNAMIC | {"alpha": 1e3}
-            ),
-            HunYuanDenseV1RotaryEmbedding,
-        ),
+        (LLAMA_CONFIG, LlamaRotaryEmbedding, MAX_POSITION_EMBEDDINGS, 8),
+        (HUNYUAN_CONFIG, HunYuanDenseV1RotaryEmbedding, MAX_POSITION_EMBEDDINGS, 8),
+        # Longrope uses the long factors iff `max_model_len` exceeds the original
+        (PHI3_CONFIG, Phi3RotaryEmbedding, ORIGINAL, 8),
+        (PHI3_CONFIG, Phi3RotaryEmbedding, ORIGINAL + 1, ORIGINAL + 1),
     ],
 )
-def test_disable_noop_dynamic_rope(monkeypatch, config, rotary_cls):
-    """The update no longer syncs and the frequencies are unchanged."""
-    inputs = torch.zeros(1, 8, 64), torch.arange(8)[None, :]
+def test_disable_dynamic_rope_update(
+    monkeypatch, config, rotary_cls, max_model_len, ref_len
+):
+    """No sync, and short positions get HF's frequencies for `ref_len` positions."""
+    x, short = torch.zeros(1), torch.arange(8)[None]
+    expected = rotary_cls(config)(x, torch.arange(ref_len)[None])
+
     rotary_emb = rotary_cls(config)
-    expected = rotary_emb(*inputs)
-
-    vllm_config = make_vllm_config(config, MAX_POSITION_EMBEDDINGS)
-    maybe_disable_dynamic_rope_update(rotary_emb, vllm_config)
-    forbid_sync(monkeypatch)
-    actual = rotary_emb(*inputs)
-    assert all(torch.equal(e, a) for e, a in zip(expected, actual))
-
-
-@pytest.mark.parametrize("use_long", [False, True])
-def test_freeze_longrope(monkeypatch, use_long):
-    """Short positions get the long factors iff `max_model_len` needs them."""
-    original = MAX_POSITION_EMBEDDINGS // 2
-    config = Phi3Config(
-        **CONFIG_KWARGS,
-        original_max_position_embeddings=original,
-        rope_parameters={
-            "rope_type": "longrope",
-            "short_factor": [1.0] * 8,
-            "long_factor": [4.0] * 8,
-            "rope_theta": 1e4,
-        },
-    )
-    x = torch.zeros(1)
-    short, long = torch.arange(8)[None], torch.arange(original + 1)[None]
-    expected = Phi3RotaryEmbedding(config)(x, long if use_long else short)
-    expected = [t[:, :8] for t in expected]
-
-    rotary_emb = Phi3RotaryEmbedding(config)
-    vllm_config = make_vllm_config(config, original + int(use_long))
+    vllm_config = make_vllm_config(config, max_model_len)
     maybe_disable_dynamic_rope_update(rotary_emb, vllm_config)
 
     forbid_sync(monkeypatch)
     actual = rotary_emb(x, short)
-    assert all(torch.equal(e, a) for e, a in zip(expected, actual))
+    assert all(torch.equal(e[:, :8], a) for e, a in zip(expected, actual))
