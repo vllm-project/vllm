@@ -72,9 +72,12 @@ class EngramConfig:
     CUDA FABRIC memory handles (an IMEX channel), tables in HBM and TP=1."""
 
     peer_group_store: str | None = None
-    """Path of the file through which the engines of a peer group meet at
-    startup. Every engine must be able to open it, e.g. on the job's shared
-    filesystem, and it must not exist before the group starts."""
+    """Path of a file through which the engines of a peer group meet at startup
+    to take ranks and exchange memory handles; nothing reads it afterwards.
+    Required with `peer_group_size`. Pass every engine the same path, one that
+    all of them can open (on a shared filesystem when they span nodes, e.g.
+    `<job log dir>/engram-peers`) and that does not exist yet: use a fresh path
+    per launch. The first engine to start creates the file and its directory."""
 
     @model_validator(mode="after")
     def _validate_shared_memory(self) -> Self:

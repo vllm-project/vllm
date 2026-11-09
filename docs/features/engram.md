@@ -191,10 +191,28 @@ vllm serve deepseek-ai/DeepSeek-V4.1-Flash \
 ```
 
 `peer_group_size` counts GPUs: the GPU counts of the engines in the group must
-add up to it. The engines meet once at startup through `peer_group_store`, a
-file every engine can open (e.g. in the job's shared log directory), which
-must not exist before the group starts. Each engine waits until all of them
-have loaded their rows, for at most 30 minutes.
+add up to it. Each engine waits until all of them have loaded their rows, for
+at most 30 minutes.
+
+`peer_group_store` is required with `peer_group_size`. The engines meet once
+at startup through this file to take ranks and exchange memory handles;
+nothing reads it afterwards. To set it:
+
+- Pass every engine of the group the same path.
+- Every engine must be able to open it: when the engines span nodes, put it
+  on a shared filesystem, e.g. in the job's log directory.
+- It must not exist yet, so use a fresh path per launch, e.g. one under a
+  per-job directory. The first engine to start creates the file and its
+  directory.
+
+For example, under Slurm with a shared home directory, give every engine
+(field by field, so the shell expands the path):
+
+```bash
+--engram-config.cpu_offload false \
+--engram-config.peer_group_size 8 \
+--engram-config.peer_group_store "$HOME/engram-peers/$SLURM_JOB_ID/store"
+```
 
 Requirements: CUDA with FABRIC memory handles (an IMEX channel, as on NVL72
 systems), TP=1, and `cpu_offload` disabled. Restarting one engine means

@@ -276,8 +276,9 @@ def _check_peer_group_table(store_path: str):
 
 def test_engram_peer_group_assigns_ranks_and_gathers(tmp_path):
     """Engines share one config, so ranks must not collide however they race,
-    and a reused store is rejected rather than joined."""
-    path = str(tmp_path / "peers")
+    a per-job store directory need not exist, and a reused store is rejected
+    rather than joined."""
+    path = str(tmp_path / "job" / "peers")
     with ThreadPoolExecutor(4) as pool:
         groups = list(pool.map(lambda _: EngramPeerGroup(4, path), range(4)))
         gathered = list(

@@ -678,6 +678,7 @@ class EngramPeerGroup:
 
     def __init__(self, size: int, path: str) -> None:
         self.world_size = size
+        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
         self.store = torch.distributed.FileStore(path, size)
         self.store.set_timeout(self.TIMEOUT)
         # Any assignment works: a rank only decides which rows a GPU holds.
