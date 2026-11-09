@@ -167,7 +167,7 @@ def select_candidate_blocks(
     """Select local block IDs by maximum score, pinning each row's newest block.
 
     Row bounds are in packed column space; absent starts mean zero.
-    Decode rows share bounds in groups of ``row_repeat``. Output is -1 padded.
+    Decode rows share bounds in groups of `row_repeat`. Output is -1 padded.
     """
     assert logits.is_cuda
     rows, width = logits.shape

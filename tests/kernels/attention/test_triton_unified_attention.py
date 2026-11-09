@@ -1058,7 +1058,7 @@ def _run_use_td_case(
 ) -> None:
     """Shared driver for the USE_TD test cases.
 
-    Runs ``unified_attention(..., use_td=True)`` and compares against the
+    Runs `unified_attention(..., use_td=True)` and compares against the
     reference paged-attention implementation that the sibling non-TD
     tests use.
     """
@@ -1169,12 +1169,12 @@ def test_triton_unified_attn_use_td(
 ) -> None:
     """Exercise the USE_TD (tensor-descriptor) Q/K/V load/store path.
 
-    Covers both 2D and 3D kernels via ``seq_threshold_3D``. Two routes
+    Covers both 2D and 3D kernels via `seq_threshold_3D`. Two routes
     to the USE_TD_QO=False fallback (pointer path for Q/O with TD still
     active for KV tile loads):
 
-    - non-pow2 ``num_queries_per_kv`` via ``NUM_HEADS`` entry ``(5, 1)``,
-    - non-pow2 ``head_size`` via ``HEAD_SIZES_USE_TD`` entry ``96``.
+    - non-pow2 `num_queries_per_kv` via `NUM_HEADS` entry `(5, 1)`,
+    - non-pow2 `head_size` via `HEAD_SIZES_USE_TD` entry `96`.
     """
     _run_use_td_case(
         seq_lens=seq_lens,
@@ -1198,12 +1198,12 @@ def test_triton_unified_attn_use_td(
 def test_triton_unified_attn_use_td_tile_clamp(
     num_heads: tuple[int, int],
 ) -> None:
-    """Regression guard: ``USE_TD`` needs ``BLOCK_SIZE % TILE_SIZE == 0``.
+    """Regression guard: `USE_TD` needs `BLOCK_SIZE % TILE_SIZE == 0`.
 
-    With ``block_size=16`` and ``head_size=128`` (non-Gemma3),
-    ``_get_tile_size`` returns 32 for prefill, which violates the
-    ``USE_TD`` constraint unless clamped to ``block_size``.  Without
-    the clamp the triton kernel ``static_assert`` fires at compile time.
+    With `block_size=16` and `head_size=128` (non-Gemma3),
+    `_get_tile_size` returns 32 for prefill, which violates the
+    `USE_TD` constraint unless clamped to `block_size`.  Without
+    the clamp the triton kernel `static_assert` fires at compile time.
     """
     _run_use_td_case(
         seq_lens=[(256, 256), (128, 128)],
@@ -1234,10 +1234,10 @@ def _softcap_probe_kernel(
 def test_softcap_does_not_overflow_on_large_scores() -> None:
     """Scores above ~88 * soft_cap must not overflow to inf/NaN.
 
-    The exp-based softcap computes ``(exp(y) - exp(-y)) / (exp(y) + exp(-y))``
-    with ``y = S / soft_cap``. For ``|y| > ~88`` the exponentials overflow to
-    ``inf`` and the ratio becomes ``inf / inf = NaN``, poisoning the whole
-    attention row. Gemma-2 style models use ``attn_logit_softcapping = 50``,
+    The exp-based softcap computes `(exp(y) - exp(-y)) / (exp(y) + exp(-y))`
+    with `y = S / soft_cap`. For `|y| > ~88` the exponentials overflow to
+    `inf` and the ratio becomes `inf / inf = NaN`, poisoning the whole
+    attention row. Gemma-2 style models use `attn_logit_softcapping = 50`,
     so scores above 4400 are in range for their large attention logits.
     """
     soft_cap = 50.0
