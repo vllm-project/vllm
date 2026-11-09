@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for the ZAYA1 parser: Qwen3 grammar with ``<zyphra_tool_call>``."""
+"""Tests for the ZAYA1 parser: Qwen3 grammar with `<zyphra_tool_call>`."""
 
 import json
 

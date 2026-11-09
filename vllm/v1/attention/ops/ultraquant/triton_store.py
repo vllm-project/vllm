@@ -8,11 +8,11 @@ Per-token, per-head, per-group-of-32 the kernel computes:
     s     = 2^round(log2(s_raw))         # UE8M0 snap (power of 2)
     code  = quantize_to_fp4(group / s)   # OCP E2M1, 4 bits/elt
 
-and stores ``code`` as packed nibbles + ``s`` as a single UE8M0 byte per
-group. The output layout matches ``format.py`` (272 B/slot for D=256).
+and stores `code` as packed nibbles + `s` as a single UE8M0 byte per
+group. The output layout matches `format.py` (272 B/slot for D=256).
 
 K is Hadamard-rotated in-register; V is not. There is no per-token L2
-norm. The UE8M0 snap makes ``s`` a power of two so scaled F8F6F4 MFMA
+norm. The UE8M0 snap makes `s` a power of two so scaled F8F6F4 MFMA
 can consume it on the read side.
 """
 
