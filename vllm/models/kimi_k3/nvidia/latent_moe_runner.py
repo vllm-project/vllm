@@ -56,7 +56,7 @@ class LatentMoERunner(MoERunner):
     """MoE runner for latent MoE with a replicated routed up-projection.
 
     The fused path (tp>1, un-reduced combine output, shared expert, no SP)
-    dispatches over ``LatentTailTier`` by token count; see that enum for what
+    dispatches over `LatentTailTier` by token count; see that enum for what
     each tier does and when it applies.
 
     Native path: the replicated up-proj produces the full hidden dim on every
@@ -89,17 +89,6 @@ class LatentMoERunner(MoERunner):
                 "K3 latent-MoE tail fusion currently supports TP=8 and TP=16, "
                 "but TP=%d is configured. Falling back to the default path.",
                 self.moe_config.tp_size,
-            )
-            self.enable_k3_latent_moe_tail_fusion = False
-
-        if (
-            self.enable_k3_latent_moe_tail_fusion
-            and use_fused_path
-            and get_current_vllm_config().model_config.enable_sleep_mode
-        ):
-            logger.warning_once(
-                "K3 latent-MoE tail fusion does not support sleep mode. "
-                "Falling back to the default path."
             )
             self.enable_k3_latent_moe_tail_fusion = False
 
@@ -158,7 +147,7 @@ class LatentMoERunner(MoERunner):
         hidden_states: torch.Tensor,
         max_token_num: int,
     ) -> torch.Tensor:
-        """Read-only zero ``residual_in`` for the fused AR+RMSNorm kernel.
+        """Read-only zero `residual_in` for the fused AR+RMSNorm kernel.
 
         flashinfer requires a residual buffer even when there is no residual to
         add.

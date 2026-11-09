@@ -355,6 +355,7 @@ async fn completion_chunk_stream(
         enable_prompt_tokens_details,
         default_return_tokens_as_token_ids,
         enable_per_request_metrics,
+        force_include_usage,
         ..
     }: ApiServerOptions,
     ResponseOptions {
@@ -373,6 +374,8 @@ async fn completion_chunk_stream(
 ) -> Result<(), ApiError> {
     let return_tokens_as_token_ids =
         return_tokens_as_token_ids.unwrap_or(default_return_tokens_as_token_ids);
+    let include_usage = include_usage || force_include_usage;
+    let include_continuous_usage = include_continuous_usage || force_include_usage;
     pin_mut!(stream);
     let envelope = Arc::new(StreamResponseEnvelope::new(
         request_id,

@@ -15,7 +15,7 @@ from vllm.logger import init_logger
 
 if TYPE_CHECKING:
     from vllm.distributed.parallel_state import GroupCoordinator
-    from vllm.v1.worker.gpu_model_runner import GPUModelRunner
+    from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
 logger = init_logger(__name__)
 
@@ -53,7 +53,6 @@ def get_flashinfer_mm_encoder_autotune_config(
         model_config is None
         or not model_config.supports_multimodal_inputs
         or not vllm_config.kernel_config.enable_flashinfer_mm_encoder_autotune
-        or not vllm_config.use_v2_model_runner
     ):
         return None
     mm_config = model_config.multimodal_config
@@ -107,7 +106,7 @@ def resolve_flashinfer_autotune_file(runner: "GPUModelRunner") -> Path:
 
 
 def resolve_rank_flashinfer_autotune_file(runner: "GPUModelRunner") -> Path:
-    """The per-rank variant of :func:`resolve_flashinfer_autotune_file`."""
+    """The per-rank variant of `resolve_flashinfer_autotune_file`."""
     from vllm.distributed.parallel_state import get_world_group
 
     path = resolve_flashinfer_autotune_file(runner)
@@ -155,10 +154,10 @@ def use_flashinfer_autotune_v2(runner: "GPUModelRunner") -> bool:
 def resolve_flashinfer_autotune_v2_root() -> Path | None:
     """Placement root for FlashInfer's managed autotune store.
 
-    Unlike :func:`resolve_flashinfer_autotune_file`, no vLLM-side identity
+    Unlike `resolve_flashinfer_autotune_file`, no vLLM-side identity
     (config hash, flashinfer version, arch) is folded into the path: the
     managed store keys entries per op and hashes the software/hardware
-    environment itself. ``None`` selects FlashInfer's default root.
+    environment itself. `None` selects FlashInfer's default root.
     """
     override_dir = envs.VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR
     return Path(override_dir).expanduser() if override_dir else None

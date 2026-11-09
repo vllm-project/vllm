@@ -30,9 +30,9 @@ def maybe_make_thread_pool(tokenizer: _T, copies: int = 1):
     through a deep-copied tokenizer pool.
 
     Note that:
-    - Only ``TokenizerLike``'s public interface is thread-safe.
-      This doesn't include ``_tokenizer`` property nor any mutation
-      methods like ``add_special_tokens`` or ``add_tokens``.
+    - Only `TokenizerLike`'s public interface is thread-safe.
+      This doesn't include `_tokenizer` property nor any mutation
+      methods like `add_special_tokens` or `add_tokens`.
     - Adjacent method calls could happen on different deep copies.
     """
     if not isinstance(tokenizer, TokenizersBackend) or isinstance(
