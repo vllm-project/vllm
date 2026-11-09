@@ -227,6 +227,24 @@ def _gathered_column_proj(layer: nn.Module, x: torch.Tensor) -> torch.Tensor:
     return _all_gather_columns(out)
 
 
+def _can_shard_projections(
+    vllm_config: VllmConfig, tp_size: int, is_sequence_parallel: bool
+) -> bool:
+    """Whether the pooler/unpooler can be column-sharded over TP.
+
+    That needs the same tokens, in the same order, on every TP rank. The
+    split-K GEMM picks its config by token count, so it is not batch
+    invariant. The decode monokernel slices its rows out of the full weights.
+    """
+    return (
+        tp_size > 1
+        and not is_sequence_parallel
+        and vllm_config.parallel_config.data_parallel_size == 1
+        and not envs.VLLM_BATCH_INVARIANT
+        and not vllm_config.kernel_config.monokernel
+    )
+
+
 class MuseSparkMoE(nn.Module):
     post_norm_routed_experts_cls = MuseSparkRoutedExperts
     post_norm_runner_cls = MuseMoERunner
@@ -289,20 +307,13 @@ class MuseSparkMoE(nn.Module):
         )
 
         hidden_size = config.moe_hidden_size
-        parallel_config = vllm_config.parallel_config
-        # Splitting the pooler/unpooler output columns over TP needs the same
-        # tokens, in the same order, on every TP rank. The split-K GEMM picks
-        # its config by token count, so it is not batch invariant.
-        replicated_tokens = (
-            self.tp_size > 1
-            and not self.is_sequence_parallel
-            and parallel_config.data_parallel_size == 1
-            and not envs.VLLM_BATCH_INVARIANT
+        shard = _can_shard_projections(
+            vllm_config, self.tp_size, self.is_sequence_parallel
         )
-        self.shard_pooler = replicated_tokens and getattr(
+        self.shard_pooler = shard and getattr(
             config, "muse_spark_tep_shard_pooler", True
         )
-        self.shard_unpooler = replicated_tokens and getattr(
+        self.shard_unpooler = shard and getattr(
             config, "muse_spark_tep_shard_unpooler", True
         )
         if self.shard_pooler or self.shard_unpooler:

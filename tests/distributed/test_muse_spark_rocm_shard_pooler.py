@@ -129,3 +129,14 @@ def test_column_sharded_projection_tp2(monkeypatch: pytest.MonkeyPatch, test_tar
 def test_column_sharded_projection_tp8(monkeypatch: pytest.MonkeyPatch, test_target):
     multi_process_parallel(monkeypatch, 8, 1, test_target)
 
+
+@pytest.mark.parametrize("monokernel", [False, True])
+def test_projections_stay_replicated_under_monokernel(monokernel: bool):
+    from vllm.models.muse_spark.amd.model import _can_shard_projections
+
+    vllm_config = SimpleNamespace(
+        parallel_config=SimpleNamespace(data_parallel_size=1),
+        kernel_config=SimpleNamespace(monokernel=monokernel),
+    )
+    shard = _can_shard_projections(vllm_config, tp_size=8, is_sequence_parallel=False)
+    assert shard is not monokernel
