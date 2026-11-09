@@ -1152,6 +1152,11 @@ class BatchedTritonExperts(mk.FusedMoEExpertsModular):
             block_shape=self.block_shape,
         )
 
+        # The expert biases are not quantized, so they are added after the
+        # dequantizing GEMM above rather than inside its epilogue.
+        if self.w1_bias is not None:
+            intermediate_cache1 += self.w1_bias.unsqueeze(1)
+
         intermediate_cache2.fill_(0)
 
         # TODO (bnell): use triton utility from batched deep gemm.
@@ -1197,3 +1202,6 @@ class BatchedTritonExperts(mk.FusedMoEExpertsModular):
             per_act_token_quant=self.per_act_token_quant,
             block_shape=self.block_shape,
         )
+
+        if self.w2_bias is not None:
+            output += self.w2_bias.unsqueeze(1)

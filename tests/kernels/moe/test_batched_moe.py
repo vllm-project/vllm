@@ -789,6 +789,68 @@ def test_batched_experts_end_to_end(m, n, k, e, topk):
     torch.testing.assert_close(triton_output, baseline_output, atol=3e-2, rtol=2e-2)
 
 
+@pytest.mark.parametrize("bias_part", ["up", "down"])
+def test_batched_experts_apply_expert_bias(bias_part):
+    """Expert projection biases must not be dropped by BatchedTritonExperts.
+
+    Regression test for #66404: with zero weights the batched Triton path
+    returned 0 for every output, while TritonExperts returned the bias.
+    """
+    from vllm.model_executor.layers.fused_moe.config import biased_moe_quant_config
+    from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEKernel
+    from vllm.model_executor.layers.fused_moe.prepare_finalize.batched import (
+        BatchedPrepareAndFinalize,
+    )
+    from vllm.v1.worker.workspace import init_workspace_manager
+
+    device = current_platform.device_type
+    init_workspace_manager(torch.device(f"{device}:0"))
+
+    m, e, n, k = 3, 2, 128, 128
+    dtype = torch.bfloat16
+    x = torch.zeros((m, k), device=device, dtype=dtype)
+    w1 = torch.zeros((e, 2 * n, k), device=device, dtype=dtype)
+    w2 = torch.zeros((e, k, n), device=device, dtype=dtype)
+    b1 = (
+        torch.ones((e, 2 * n), device=device, dtype=dtype)
+        if bias_part == "up"
+        else None
+    )
+    b2 = torch.ones((e, k), device=device, dtype=dtype) if bias_part == "down" else None
+    if bias_part == "up":
+        # SiLU(0 + 1) has to survive an identity down projection.
+        w2.copy_(torch.eye(k, device=device, dtype=dtype).expand_as(w2))
+        expected = torch.full_like(
+            x,
+            torch.nn.functional.silu(torch.ones((), device=device, dtype=dtype)).item(),
+        )
+    else:
+        expected = torch.ones_like(x)
+
+    moe_config = make_dummy_moe_config(
+        num_experts=e, experts_per_token=1, hidden_dim=k, intermediate_size=n
+    )
+    moe_config.has_bias = True
+    kernel = FusedMoEKernel(
+        BatchedPrepareAndFinalize(64, num_dispatchers=1, num_local_experts=e, rank=0),
+        BatchedTritonExperts(moe_config, biased_moe_quant_config(b1, b2), 64, 1),
+    )
+    with set_current_vllm_config(vllm_config):
+        out = kernel.apply(
+            hidden_states=x,
+            w1=w1,
+            w2=w2,
+            topk_weights=torch.ones((m, 1), device=device, dtype=torch.float32),
+            topk_ids=torch.tensor([[0], [1], [0]], device=device, dtype=torch.int32),
+            activation=MoEActivation.SILU,
+            apply_router_weight_on_input=False,
+            global_num_experts=e,
+            expert_map=None,
+        )
+
+    torch.testing.assert_close(out, expected, atol=0, rtol=0)
+
+
 def test_batched_triton_backend_mapping():
     from vllm.model_executor.layers.fused_moe.oracle.unquantized import (
         UnquantizedMoeBackend,
