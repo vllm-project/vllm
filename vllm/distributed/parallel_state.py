@@ -26,6 +26,7 @@ If you only need to use the distributed environment without model/pipeline
 import contextlib
 import gc
 import pickle
+import socket
 import weakref
 from collections import deque, namedtuple
 from collections.abc import Callable
@@ -2130,16 +2131,44 @@ def _init_independent_dp_table_group(
     parallel_config: "ParallelConfig",
 ) -> StatelessObjectGroup | None:
     """Group this worker with the same worker of every co-located independent
-    DP rank, through a TCPStore on the now unused DP master port."""
+    DP rank, through a node-local TCPStore."""
     size = parallel_config._independent_dp_size_local
     dp_rank = parallel_config.data_parallel_rank_local
-    if size <= 1 or dp_rank is None or parallel_config.nnodes > 1:
+    # Ray may place a different number of ranks on each node than the local
+    # DP size, so only mp launches know their co-located ranks.
+    if (
+        size <= 1
+        or dp_rank is None
+        or parallel_config.nnodes > 1
+        or parallel_config.data_parallel_backend != "mp"
+    ):
         return None
     worker_rank = get_world_group().rank_in_group
+    is_master = dp_rank == 0 and worker_rank == 0
+    port, listen_socket = parallel_config.data_parallel_master_port, None
+    if parallel_config._coord_store_port:
+        # A port picked at config time can be taken before use, so the leader
+        # binds one now and publishes it, keyed by the node's first DP rank.
+        coord_store = get_cached_tcp_store_client(
+            parallel_config.data_parallel_master_ip,
+            parallel_config._coord_store_port,
+        )
+        key = (
+            f"independent_dp_table_port/{parallel_config.data_parallel_index - dp_rank}"
+        )
+        if is_master:
+            listen_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            listen_socket.bind(("127.0.0.1", 0))
+            listen_socket.listen()
+            port = listen_socket.getsockname()[1]
+            coord_store.set(key, str(port).encode())
+        else:
+            port = int(coord_store.get(key).decode())
     store = create_tcp_store(
         "127.0.0.1",
-        parallel_config.data_parallel_master_port,
-        is_master=dp_rank == 0 and worker_rank == 0,
+        port,
+        listen_socket=listen_socket,
+        is_master=is_master,
         wait_for_workers=False,
         timeout=timedelta(seconds=_INDEPENDENT_DP_TABLE_TIMEOUT_S),
     )

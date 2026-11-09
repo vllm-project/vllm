@@ -634,6 +634,8 @@ def get_engine_dp_placement(vllm_config: VllmConfig, dp_rank: int) -> tuple[int,
     The engine runs the DP ranks of a non-MoE target as independent DP=1
     replicas, so their workers all report `(1, 0)`.
     """
+    if vllm_config.parallel_config.independent_data_parallel:
+        raise ValueError("The weight cache does not support independent_data_parallel.")
     if vllm_config.model_config.is_moe:
         return vllm_config.parallel_config.data_parallel_size, dp_rank
     return 1, 0

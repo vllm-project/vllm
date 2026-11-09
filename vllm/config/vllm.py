@@ -1040,6 +1040,8 @@ class VllmConfig:
             speculative_config is None
             or not speculative_config.uses_dynamic_speculative_decoding()
             or self.parallel_config.data_parallel_size <= 1
+            # Independent ranks never synchronize, so counts may differ.
+            or self.parallel_config.independent_data_parallel
         ):
             return
 
@@ -1434,6 +1436,32 @@ class VllmConfig:
         self.engram_config.verify_parallel_config(self.parallel_config)
         logger.info_once("Resolved Engram configuration: %s", str(self.engram_config))
 
+    def _verify_independent_data_parallel(self) -> None:
+        """Reject features that still assume MoE DP ranks run in lockstep."""
+        parallel_config = self.parallel_config
+        if (
+            not parallel_config.independent_data_parallel
+            or parallel_config.num_dp_replicas <= 1
+        ):
+            return
+        if self.load_config.load_format == "ipc_cache":
+            raise ValueError(
+                "The IPC weight cache does not support independent_data_parallel "
+                "yet: its daemons build the lockstep MoE layout."
+            )
+        model_config = self.model_config
+        if (
+            model_config is not None
+            and model_config.architecture == "DeepseekV41ForCausalLM"
+            and self.engram_config is not None
+            and self.engram_config.cpu_offload
+        ):
+            logger.warning_once(
+                "DeepSeek V4.1 Engram tables are not shared between independent "
+                "DP ranks: each of the %d ranks pins its own host copy.",
+                parallel_config.num_dp_replicas,
+            )
+
     def _reject_mismatched_float_kv_cache(self) -> None:
         """Reject an explicit float16/bfloat16 KV dtype that differs from the model."""
         cache_dtype = self.cache_config.cache_dtype
@@ -1489,6 +1517,7 @@ class VllmConfig:
         self.try_verify_and_update_config()
         self._reject_mismatched_float_kv_cache()
         self._resolve_and_verify_engram_config()
+        self._verify_independent_data_parallel()
 
         self._check_supports_watermarking()
         # Models may have supplied their own DCP defaults above; anything still

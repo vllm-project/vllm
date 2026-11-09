@@ -1118,6 +1118,15 @@ class ParallelConfig:
 
         if self.data_parallel_size > 1 or self.data_parallel_size_local == 0:
             # Data parallel was specified in the engine args.
+            if (
+                self.distributed_executor_backend == "external_launcher"
+                and self.independent_data_parallel
+                and self.data_parallel_size > 1
+            ):
+                raise ValueError(
+                    "independent_data_parallel is not supported with the "
+                    "external_launcher backend; run separate processes instead."
+                )
             if self.distributed_executor_backend == "external_launcher":
                 # For external launcher,
                 # we need to set the data parallel rank automatically
