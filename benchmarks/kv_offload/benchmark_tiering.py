@@ -236,6 +236,8 @@ class GuideLLM:
             f"kind=static,value={BENCH_RANDOM_SEED}",
             "--data",
             json.dumps(data),
+            "--output",
+            f"kind=json,path={log_path.parent / 'guidellm.json'}",
         ]
         with log_path.open("w") as log:
             subprocess.run(cmd, stdout=log, stderr=subprocess.STDOUT, check=True)
