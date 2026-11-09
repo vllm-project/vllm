@@ -1224,6 +1224,7 @@ steps:
   - csrc/rocm/
   - tests/kernels/moe
   - tests/kernels/utils.py
+  - vllm/models/muse_spark/amd/
   - vllm/model_executor/layers/fused_moe/
   - vllm/model_executor/layers/quantization/mxfp4.py
   - vllm/model_executor/layers/quantization/utils/quant_utils.py
@@ -4590,6 +4591,7 @@ steps:
   - csrc/rocm/
   - tests/kernels/moe
   - tests/kernels/utils.py
+  - vllm/models/muse_spark/amd/
   - vllm/model_executor/layers/fused_moe/
   - vllm/model_executor/layers/quantization/mxfp4.py
   - vllm/model_executor/layers/quantization/utils/quant_utils.py

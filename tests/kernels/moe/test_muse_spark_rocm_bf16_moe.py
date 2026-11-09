@@ -34,6 +34,9 @@ from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     convert_gpt_oss_weight_to_mxfp4_moe_kernel_format,
     make_mxfp4_moe_quant_config,
 )
+from vllm.model_executor.layers.fused_moe.oracle.unquantized import (
+    UnquantizedMoeBackend,
+)
 from vllm.model_executor.layers.quantization.quark.quark_moe import (
     QuarkOCP_MX_MoEMethod,
     QuarkW8A8Fp8MoEMethod,
@@ -47,6 +50,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.models.muse_spark.amd.muse_moe_runner import (
     MuseMoERunner,
     MuseSparkAiterExperts,
+    MuseSparkAiterUnquantizedExperts,
     MuseSparkOnlineMXFP4FusedMoE,
     MuseSparkQuarkOCPMXFusedMoE,
     MuseSparkQuarkOCPMXMoEQuantConfig,
@@ -141,7 +145,11 @@ def _rms_norm(x: torch.Tensor, *, out_dtype: torch.dtype | None = None) -> torch
 
 
 def _route_launcher(
-    experts: MuseSparkTritonExperts | MuseSparkAiterExperts,
+    experts: (
+        MuseSparkTritonExperts
+        | MuseSparkAiterExperts
+        | MuseSparkAiterUnquantizedExperts
+    ),
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
     w2: torch.Tensor,
@@ -192,12 +200,19 @@ def _route_launcher(
     return routes, launch
 
 
-def test_muse_aiter_experts_expand_routes_with_unit_weights(monkeypatch) -> None:
+@pytest.mark.parametrize(
+    ("experts_cls", "quant_cls"),
+    [
+        (MuseSparkAiterExperts, MuseSparkQuarkOCPMXMoEQuantConfig),
+        (MuseSparkAiterUnquantizedExperts, MuseSparkUnquantizedMoEQuantConfig),
+    ],
+)
+def test_muse_aiter_experts_expand_routes_with_unit_weights(
+    monkeypatch, experts_cls, quant_cls
+) -> None:
     config = _moe_config(parallel_config=_parallel_config(tp_size=8))
-    experts = MuseSparkAiterExperts(
-        config, _quant_config(_rms_norm, MuseSparkQuarkOCPMXMoEQuantConfig)
-    )
-    calls: list[dict[str, torch.Tensor | bool]] = []
+    experts = experts_cls(config, _quant_config(_rms_norm, quant_cls))
+    calls: list[dict[str, object]] = []
 
     def _fake_aiter_fused_experts(**kwargs) -> torch.Tensor:
         hidden_states = kwargs["hidden_states"]
@@ -209,6 +224,7 @@ def test_muse_aiter_experts_expand_routes_with_unit_weights(monkeypatch) -> None
                 "topk_weights": topk_weights.clone(),
                 "topk_ids": topk_ids.clone(),
                 "apply_router_weight_on_input": kwargs["apply_router_weight_on_input"],
+                "quant_type": kwargs["quant_type"],
             }
         )
         return hidden_states + topk_ids.to(hidden_states.dtype)
@@ -245,6 +261,7 @@ def test_muse_aiter_experts_expand_routes_with_unit_weights(monkeypatch) -> None
         call["topk_weights"], torch.ones(4, 1, dtype=torch.float32)
     )
     assert call["apply_router_weight_on_input"] is False
+    assert call["quant_type"] is experts._AITER_QUANT_TYPE
     routed_ids = call["topk_ids"]
     assert isinstance(routed_ids, torch.Tensor)
     expected_output = (expected_states + routed_ids.to(expected_states.dtype)).view(
@@ -313,7 +330,7 @@ def test_muse_fp8_method_requires_route_preserving_triton(monkeypatch) -> None:
         MuseSparkQuarkW8A8Fp8FusedMoE(config, kFp8StaticChannelSym, kFp8DynamicTokenSym)
 
 
-def test_muse_unquantized_method_is_pinned_to_triton(
+def test_muse_unquantized_method_is_pinned_to_aiter(
     monkeypatch, default_vllm_config
 ) -> None:
     def _unexpected_backend_selection(*args, **kwargs):
@@ -325,7 +342,8 @@ def test_muse_unquantized_method_is_pinned_to_triton(
         _unexpected_backend_selection,
     )
     method = MuseSparkUnquantizedFusedMoE(_moe_config(moe_backend="auto"))
-    assert method.experts_cls is MuseSparkTritonExperts
+    assert method.unquantized_backend is UnquantizedMoeBackend.AITER
+    assert method.experts_cls is MuseSparkAiterUnquantizedExperts
 
 
 def test_muse_quant_config_ignores_cached_properties(default_vllm_config) -> None:
@@ -434,7 +452,7 @@ _FAIL_CLOSED_EVERYWHERE = [
     "validate,config,reason",
     [(validate_mxfp4_deployment, *case) for case in _FAIL_CLOSED_EVERYWHERE]
     + [
-        (validate_bf16_deployment, _moe_config(moe_backend="aiter"), "Triton"),
+        (validate_bf16_deployment, _moe_config(moe_backend="cutlass"), "AITER"),
         (validate_fp8_deployment, _moe_config(moe_backend="auto"), "Triton"),
         (validate_fp8_deployment, _moe_config(moe_backend="aiter"), "Triton"),
     ],
