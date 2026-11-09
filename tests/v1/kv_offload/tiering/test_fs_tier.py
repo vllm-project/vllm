@@ -10,6 +10,9 @@ data integrity throughout the process.
 import errno
 import mmap
 import os
+import subprocess
+import sys
+import textwrap
 import threading
 import time
 from unittest.mock import MagicMock
@@ -501,6 +504,52 @@ def test_store_load_roundtrip_without_o_direct(tmp_path, monkeypatch):
             assert torch.allclose(tensor[bid], expected[i])
     finally:
         tier.shutdown()
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="needs POSIX rlimits")
+@pytest.mark.parametrize("use_c_ext", [True, False])
+def test_store_short_write_reports_real_errno(tmp_path, use_c_ext):
+    """A store that runs out of space partway through a block raises the real
+    errno, not EIO or an OSError without one.
+
+    RLIMIT_FSIZE below the block size makes write(2) return a short count and
+    the next write fail with EFBIG, as a full disk does with ENOSPC. Runs in a
+    subprocess so the rlimit does not affect the test runner.
+    """
+    import vllm.v1.kv_offload.tiering.fs.io as io_mod
+
+    if use_c_ext and not io_mod._HAS_FSIO_C:
+        pytest.skip("fs_io_C extension not built")
+    block = 192 * 1024
+    script = textwrap.dedent(
+        f"""
+        import resource, signal, sys
+        import vllm.v1.kv_offload.tiering.fs.io as io_mod
+        io_mod._HAS_FSIO_C = {use_c_ext!r}
+        signal.signal(signal.SIGXFSZ, signal.SIG_IGN)
+        resource.setrlimit(resource.RLIMIT_FSIZE, (64 * 1024, 64 * 1024))
+        buf = memoryview(bytearray({block}))
+        try:
+            io_mod.batch_store_block(
+                [sys.argv[1]], buf, [0], {block}, use_o_direct=False
+            )
+        except OSError as exc:
+            print(exc.errno)
+        else:
+            print("stored")
+        """
+    )
+    out = subprocess.run(
+        [sys.executable, "-c", script, str(tmp_path / "block.bin")],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=120,
+    )
+
+    assert out.stdout.strip().splitlines()[-1] == str(errno.EFBIG), out.stderr
+    # Neither the block nor its temp file is left behind.
+    assert os.listdir(tmp_path) == []
 
 
 def test_wait_idle_blocks_until_tasks_complete():
