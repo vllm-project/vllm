@@ -95,7 +95,6 @@ async def run_launch_fastapi(args: argparse.Namespace) -> None:
         model_config=model_config,
         logging_config=engine_args.create_logging_config(),
         structured_outputs_config=engine_args.create_structured_outputs_config(),
-        shutdown_timeout=engine_args.shutdown_timeout,
     )
     shutdown_task = await build_and_serve_renderer(
         vllm_config, listen_address, sock, args

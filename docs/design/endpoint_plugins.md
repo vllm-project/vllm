@@ -1,6 +1,7 @@
 # Endpoint Plugins
 
-Endpoint plugins let out-of-tree packages add HTTP routes to the OpenAI compatible API server. They register routes and optionally per app state used by those routes, and may serve a listener of their own (see [Optional lifecycle methods](#optional-lifecycle-methods)). A plugin reaches the engine the same way an in-tree serving handler does, through the `EngineClient` it is handed at startup (e.g. `engine_client.collective_rpc(...)`). No new engine access path is introduced.
+Endpoint plugins let out-of-tree packages add HTTP routes to the OpenAI compatible API server. Their scope is
+the **HTTP surface only** registering routes and optionally per app state used by those routes. A plugin reaches the engine the same way an in-tree serving handler does, through the `EngineClient` it is handed at startup (e.g. `engine_client.collective_rpc(...)`). No new engine access path is introduced.
 
 !!! warning "Security"
     Endpoint plugins are **not loaded by default** and must be explicitly allowlisted. Read [Endpoint Plugins security posture](../usage/security.md#endpoint-plugins) before enabling one, especially the route shadowing warning.
@@ -75,79 +76,43 @@ class MyAdminEndpointPlugin:
 
 A complete and tested version of this example is in-repo as `tests/plugins/vllm_add_dummy_endpoint_plugin` and is exercised e2e (including a real HTTP request) in `tests/plugins_tests/test_endpoint_plugins.py`.
 
-## Optional lifecycle methods
+## Optional startup and cleanup
 
-A plugin that owns long-lived resources, such as streaming sessions or a listener of its own, can also implement any of these methods. They are optional and are not members of the `EndpointPlugin` protocol, so plugins without them keep working unchanged.
+An endpoint plugin can implement [`SupportsStart`][vllm.plugins.endpoint_plugins.interface.SupportsStart], [`SupportsStop`][vllm.plugins.endpoint_plugins.interface.SupportsStop], or both. These capabilities are independent of `EndpointPlugin`; existing plugins need no new methods.
 
-| Method | Called from | Contract |
-| --- | --- | --- |
-| `async start(state)` | Server lifespan startup, before connections are accepted | Called in load order. If it raises, the plugin cleans up its own partial resources; plugins that already started are stopped in reverse order and startup is aborted. |
-| `ready(state) -> bool` | `/health` | Cheap, synchronous and non-blocking. `False` or an exception makes `/health` return 503. Absent means ready. Also used by the render server. |
-| `async drain(state, timeout)` | Graceful shutdown, before the engine shuts down | Receives the remaining `--shutdown-timeout` budget in seconds. Close the plugin's listener and finish or abort open work. Errors are logged; a drain still running at the deadline, or when the server exits early (e.g. after engine death), is cancelled and awaited, so it must honor cancellation. |
-| `async stop(state)` | Server lifespan shutdown, after HTTP stops | Called exactly once per started plugin, in reverse order, including when the server exits without a graceful shutdown (e.g. after engine death). Must return promptly and must not wait for in-flight work, which is `drain`'s job. Like the rest of lifespan shutdown it is not time-bounded; the process manager's forced termination is the backstop. Errors are logged and do not stop other plugins. |
+The server awaits `start(state)` during lifespan startup, after `init_state` and before accepting HTTP requests. Hooks run in load order. If a hook raises or is cancelled, startup fails and the server calls `stop(state)` on preceding eligible plugins in reverse order. The failing plugin must release its own partially acquired resources before raising. A plugin with only `stop` becomes eligible when startup reaches its position in load order.
 
-On SIGINT or SIGTERM the API server shuts down in this order, against one deadline set by `--shutdown-timeout`:
+On shutdown, the server awaits each eligible `stop(state)` once in reverse order before deleting app state. An exception or cancellation from a stop hook does not skip other plugins or native serving cleanup. Cancellation of the lifespan task is re-raised after cleanup. Stop hooks must settle their owned background work; cleanup is cooperative and has no hard deadline.
 
-1. `app.state.draining` is set before anything is awaited, so `/health` returns 503. Every plugin admission path (e.g. a listener's connection handler) must check it and refuse new work; core does not close plugin listeners.
-2. All plugin `drain` methods run concurrently, bounded by the deadline. With `--shutdown-timeout 0`, no `drain` is called.
-3. The engine shuts down with the time left.
-4. HTTP stops, then plugins `stop`.
+The existing shutdown order stops the engine before HTTP shutdown and plugin cleanup. **A stop hook cannot rely on a running engine.** These hooks do not drain accepted plugin sessions before engine shutdown. The API server's `/health` behavior is unchanged.
 
-A plugin can start the same graceful shutdown on a fatal error (e.g. its listener died) by calling `app.state.request_shutdown()` from the event loop. It only affects the current API server process.
-
-A plugin that serves a non-HTTP listener (e.g. gRPC) must declare it with the class attribute `owns_non_http_listener = True`. The server then refuses to start with `--api-server-count` other than 1, because each API server process would run its own copy of the listener. That check does not cover data parallel external load balancing (including `--data-parallel-multi-port-external-lb`, whose supervisor runs one API server per rank): there the listener must use a distinct port per rank (e.g. a base port offset by the rank), as the supervisor already gives each rank its own HTTP port. The supervisor refuses `--grpc` for the same port collision. Such listeners are not protected by `--api-key`; see [Security](../usage/security.md#endpoint-plugins).
-
-This example serves a TCP echo listener next to the HTTP server:
+For example, this subclass acquires and closes an HTTP client used by its routes:
 
 ```python
-import asyncio
+import httpx
+from starlette.datastructures import State
 
-from fastapi import FastAPI
+from vllm.plugins.endpoint_plugins.interface import SupportsStart, SupportsStop
 
 
-class MyListenerEndpointPlugin:
-    name = "my_listener_endpoint_plugin"
-    required_tasks: tuple[str, ...] | None = None
-    owns_non_http_listener = True
+class ResourceEndpointPlugin(MyAdminEndpointPlugin):
+    async def start(self, state: State) -> None:
+        state.plugin_http_client = httpx.AsyncClient()
 
-    def attach_router(self, app: FastAPI) -> None:
-        pass
+    async def stop(self, state: State) -> None:
+        await state.plugin_http_client.aclose()
 
-    async def init_state(self, engine_client, state, args) -> None:
-        self.state = state
-        self.sessions: set[asyncio.Task] = set()
 
-    async def start(self, state) -> None:
-        self.server = await asyncio.start_server(self.handle, "127.0.0.1", 9000)
-
-    def ready(self, state) -> bool:
-        return self.server.is_serving()
-
-    async def drain(self, state, timeout: float) -> None:
-        self.server.close()  # stop accepting connections
-        await asyncio.gather(*self.sessions, return_exceptions=True)
-
-    async def stop(self, state) -> None:
-        for session in self.sessions:
-            session.cancel()
-        self.server.close()
-        await self.server.wait_closed()
-
-    async def handle(self, reader, writer) -> None:
-        if self.state.draining:  # refuse new sessions
-            writer.close()
-            return
-        self.sessions.add(session := asyncio.current_task())
-        try:
-            while data := await reader.read(1024):
-                writer.write(data)
-                await writer.drain()
-        finally:
-            self.sessions.discard(session)
-            writer.close()
+plugin = ResourceEndpointPlugin()
+startup: SupportsStart = plugin
+cleanup: SupportsStop = plugin
 ```
 
-`tests/plugins_tests/test_endpoint_plugins.py` exercises these methods through `serve_http`, including drain overruns, engine death during a drain and `--shutdown-timeout 0`, and startup failure through the server lifespan.
+The assignments let a static type checker validate the hook signatures. Runtime protocol checks detect capability members; they do not validate signatures or whether methods are asynchronous.
+
+### Requesting process shutdown
+
+`serve_http` exposes the synchronous callback `state.request_shutdown()` before startup hooks run. Call it on the server's event loop to request the same process-local shutdown as SIGINT or SIGTERM. Repeated calls are idempotent. It is available to hooks and route handlers, but not during `init_state`; it does not request deployment-wide shutdown. A startup hook that calls it must still finish or release its partial resources and raise.
 
 ## Registering the entry point
 
@@ -185,7 +150,7 @@ Only the front end API server process loads endpoint plugins. There is no need t
 
 ## Pairing with `vllm.general_plugins`
 
-Endpoint plugins run in the API server process only. If a plugin also needs new engine side behavior (a new worker-side RPC method, a custom stat) that half ships separately through the existing `vllm.general_plugins` group which loads in worker processes (see [Plugin System](plugin_system.md)). The two entry points are registered and loaded **independently**. Neither implies the other. The recommended distribution shape is a single package exposing both:
+Endpoint plugins cover the HTTP surface only. If a plugin also needs new engine side behavior (a new worker-side RPC method, a custom stat) that half ships separately through the existing `vllm.general_plugins` group which loads in worker processes (see [Plugin System](plugin_system.md)). The two entry points are registered and loaded **independently**. Neither implies the other. The recommended distribution shape is a single package exposing both:
 
 ```toml
 [project.entry-points."vllm.general_plugins"]

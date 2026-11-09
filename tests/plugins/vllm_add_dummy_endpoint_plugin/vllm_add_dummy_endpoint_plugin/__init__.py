@@ -12,8 +12,8 @@ render server which has no `EngineClient`. `init_state` is called with
 `engine_client=None` in that case and the route handler returns 503 rather
 than reaching for a client that doesn't exist.
 
-It also implements the optional lifecycle methods and records each call in
-`events`, so tests can check their order.
+It also implements the optional `start`/`stop` capabilities and records each
+call in `events`, so tests can check their order.
 """
 
 from fastapi import FastAPI, HTTPException, Request
@@ -25,7 +25,6 @@ class DummyAdminEndpointPlugin:
 
     def __init__(self, events: list[str] | None = None) -> None:
         self.events = [] if events is None else events
-        self.is_ready = True
 
     def attach_router(self, app: FastAPI) -> None:
         @app.get("/v1/admin/scheduler_config")
@@ -45,12 +44,6 @@ class DummyAdminEndpointPlugin:
 
     async def start(self, state) -> None:
         self.events.append(f"start:{self.name}")
-
-    def ready(self, state) -> bool:
-        return self.is_ready
-
-    async def drain(self, state, timeout: float) -> None:
-        self.events.append(f"drain:{self.name}")
 
     async def stop(self, state) -> None:
         self.events.append(f"stop:{self.name}")

@@ -5,15 +5,18 @@
 Uses the worked in repo example plugin (`vllm_add_dummy_endpoint_plugin`,
 installed via `tests/plugins/vllm_add_dummy_endpoint_plugin`) exercising both
 `EndpointPlugin` hooks against a fake `EngineClient`, unit tests for the
-`load_endpoint_plugins` gating matrix and an e2e test that drives a real HTTP
-request through the plugin's route.
+`load_endpoint_plugins` gating matrix, an e2e test that drives a real HTTP
+request through the plugin's route, and lifecycle tests that run the optional
+`start`/`stop` capabilities through `serve_http` and the server lifespan.
 """
 
 import asyncio
+import contextlib
 import os
 import signal
-import time
 from argparse import Namespace
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Any
 
 import httpx
@@ -33,12 +36,14 @@ from vllm.entrypoints.launchers.launcher import (
 from vllm.plugins import load_endpoint_plugins
 from vllm.plugins.endpoint_plugins.interface import (
     EndpointPlugin,
+    SupportsStart,
+    SupportsStop,
     attach_endpoint_plugins,
-    drain_endpoint_plugins,
     init_endpoint_plugins_state,
-    stop_endpoint_plugins,
 )
 from vllm.utils.argparse_utils import FlexibleArgumentParser
+
+_TIMEOUT_S = 10
 
 
 class _RaisingEndpointPlugin:
@@ -73,6 +78,7 @@ class _ShadowEndpointPlugin:
 
 class _RouterEndpointPlugin(DummyAdminEndpointPlugin):
     def __init__(self, router: APIRouter):
+        super().__init__()
         self.router = router
 
     def attach_router(self, app: FastAPI) -> None:
@@ -338,8 +344,6 @@ async def test_init_state_is_noop_without_phase_a(monkeypatch: pytest.MonkeyPatc
     """`init_app_state` callers that never ran `build_app` (e.g.
     `run_batch.py`, which builds a bare `State()`) must not crash just
     because `state.endpoint_plugins` was never set."""
-    from starlette.datastructures import State
-
     monkeypatch.setenv("VLLM_PLUGINS", "dummy_admin_endpoint_plugin")
 
     state = State()
@@ -408,10 +412,15 @@ async def test_endpoint_plugin_end_to_end(monkeypatch: pytest.MonkeyPatch):
 
 
 class _LegacyEndpointPlugin:
-    """A plugin written before the optional lifecycle methods existed."""
+    """A plugin written before the optional `start`/`stop` capabilities."""
 
     name = "legacy_endpoint_plugin"
     required_tasks = None
+
+    def __init__(self, events: list[str] | None = None, name: str | None = None):
+        self.events = [] if events is None else events
+        if name is not None:
+            self.name = name
 
     def attach_router(self, app: FastAPI) -> None:
         pass
@@ -420,409 +429,528 @@ class _LegacyEndpointPlugin:
         pass
 
 
-class _ServingEngineClient(_FakeEngineClient):
-    """Fake engine for `serve_http`; records `shutdown` into `events`."""
+class _StartOnlyPlugin(_LegacyEndpointPlugin):
+    async def start(self, state: State) -> None:
+        self.events.append(f"start:{self.name}")
 
-    def __init__(self, events: list[str], shutdown_timeout: int):
+
+class _StopOnlyPlugin(_LegacyEndpointPlugin):
+    async def stop(self, state: State) -> None:
+        self.events.append(f"stop:{self.name}")
+
+
+def _dummy(plugin_name: str, events: list[str]) -> DummyAdminEndpointPlugin:
+    plugin = DummyAdminEndpointPlugin(events)
+    plugin.name = plugin_name
+    return plugin
+
+
+class _ServingEngineClient(_FakeEngineClient):
+    """External engine service double for `serve_http`: healthy until core
+    calls `shutdown` (from its executor thread), which it records in `events`
+    and signals through `stopped`."""
+
+    def __init__(self, events: list[str], shutdown_timeout: int = 30):
         super().__init__()
         self.events = events
         self.vllm_config = VllmConfig(shutdown_timeout=shutdown_timeout)
         self.errored = False
         self.is_running = True
         self.should_keep_api_server_alive = False
-        self.shutdown_timeouts: list[float] = []
+        self.loop = asyncio.get_running_loop()
+        self.stopped = asyncio.Event()
 
     async def check_health(self) -> None:
         pass
 
     def shutdown(self, timeout: float | None = None) -> None:
         self.events.append("engine_shutdown")
-        self.shutdown_timeouts.append(timeout)
+        self.loop.call_soon_threadsafe(self.stopped.set)
+
+
+class _NativeServing:
+    """Stands in for `state.openai_serving_transcription`, which the lifespan
+    shuts down by duck typing on a synchronous `shutdown()`."""
+
+    def __init__(self, events: list[str]):
+        self.events = events
+
+    def shutdown(self) -> None:
+        self.events.append("native_shutdown")
 
 
 async def _build_plugin_app(
     monkeypatch: pytest.MonkeyPatch,
     plugins: list,
     engine_client: _ServingEngineClient | None,
-    supported_tasks: tuple = (),
+    native: _NativeServing | None = None,
 ) -> FastAPI:
     monkeypatch.setattr(
         "vllm.plugins.load_endpoint_plugins", lambda supported_tasks: plugins
     )
     args = _build_args()
-    app = build_app(args, supported_tasks)
+    app = build_app(args, supported_tasks=())
     app.state.engine_client = engine_client
     app.state.log_stats = False
+    if native is not None:
+        app.state.openai_serving_transcription = native
     await init_endpoint_plugins_state(engine_client, app.state, args)
     return app
 
 
-async def _serve(
+async def _wait_closed(serve_task: asyncio.Task) -> None:
+    """Bound the test's wait for serving and cleanup to finish."""
+    async with asyncio.timeout(_TIMEOUT_S):
+        await serve_task
+
+
+@asynccontextmanager
+async def _serving(
     monkeypatch: pytest.MonkeyPatch,
     plugins: list,
     engine_client: _ServingEngineClient | None,
-    supported_tasks: tuple = (),
-):
-    """Start `serve_http` on a free port and wait until it serves.
+    native: _NativeServing | None = None,
+) -> AsyncIterator[tuple[State, asyncio.Task, str]]:
+    """Serve a `build_app` app through `serve_http` on a free port.
 
-    Returns the app, the `serve_http` task and the base URL.
+    Yields the app state (which outlives the lifespan's `del app.state`), the
+    `serve_http` task and the base URL. The server is torn down on exit even
+    if the test fails.
     """
-    app = await _build_plugin_app(monkeypatch, plugins, engine_client, supported_tasks)
+    app = await _build_plugin_app(monkeypatch, plugins, engine_client, native)
+    state = app.state
     sock = create_server_socket(("127.0.0.1", 0), reuse_port=False)
     port = sock.getsockname()[1]
-    serve_task = asyncio.create_task(
-        serve_http(app, sock, host="127.0.0.1", port=port, log_level="warning")
-    )
-    async with asyncio.timeout(10):
-        while not getattr(getattr(app.state, "server", None), "started", False):
+
+    async def serve_and_shutdown() -> None:
+        await (
+            await serve_http(
+                app, sock, host="127.0.0.1", port=port, log_level="warning"
+            )
+        )
+
+    serve_task = asyncio.create_task(serve_and_shutdown())
+    try:
+        yield state, serve_task, f"http://127.0.0.1:{port}"
+    finally:
+        if not serve_task.done():
+            if (server := getattr(state, "server", None)) is not None:
+                server.should_exit = True
+            else:
+                serve_task.cancel()
+            with contextlib.suppress(Exception, asyncio.CancelledError):
+                await _wait_closed(serve_task)
+        sock.close()
+
+
+async def _wait_started(state: State, serve_task: asyncio.Task) -> None:
+    async with asyncio.timeout(_TIMEOUT_S):
+        while not getattr(getattr(state, "server", None), "started", False):
+            assert not serve_task.done(), serve_task.result()
             await asyncio.sleep(0.01)
-    return app, serve_task, f"http://127.0.0.1:{port}"
 
 
-async def _health(base_url: str) -> int:
+async def _health(base_url: str) -> httpx.Response:
     async with httpx.AsyncClient() as client:
-        return (await client.get(f"{base_url}/health")).status_code
+        return await client.get(f"{base_url}/health")
 
 
-def test_legacy_plugin_satisfies_protocol():
-    assert isinstance(_LegacyEndpointPlugin(), EndpointPlugin)
+def test_start_and_stop_capabilities_are_independently_optional():
+    """Legacy plugins satisfy `EndpointPlugin` alone; a plugin may implement
+    either capability without the other."""
+    legacy = _LegacyEndpointPlugin()
+    assert isinstance(legacy, EndpointPlugin)
+    assert not isinstance(legacy, SupportsStart)
+    assert not isinstance(legacy, SupportsStop)
 
+    assert isinstance(_StartOnlyPlugin(), SupportsStart)
+    assert not isinstance(_StartOnlyPlugin(), SupportsStop)
+    assert not isinstance(_StopOnlyPlugin(), SupportsStart)
+    assert isinstance(_StopOnlyPlugin(), SupportsStop)
 
-@pytest.mark.asyncio
-async def test_lifecycle_order_on_request_shutdown(monkeypatch: pytest.MonkeyPatch):
-    """`state.draining` is set before any drain runs, drains run concurrently
-    before the engine stops, and stops run in reverse start order after HTTP
-    stops."""
-    events: list[str] = []
-    entered = {"first": asyncio.Event(), "second": asyncio.Event()}
-    release_drain = asyncio.Event()
-
-    class _Draining(DummyAdminEndpointPlugin):
-        async def drain(self, state, timeout):
-            events.append(f"drain:{self.name}:draining={state.draining}")
-            entered[self.name].set()
-            await release_drain.wait()
-
-    class _First(_Draining):
-        name = "first"
-
-    class _Second(_Draining):
-        name = "second"
-
-    engine = _ServingEngineClient(events, shutdown_timeout=30)
-    app, serve_task, url = await _serve(
-        monkeypatch, [_First(events), _Second(events)], engine
-    )
-    assert await _health(url) == 200
-
-    app.state.request_shutdown()
-    async with asyncio.timeout(5):  # sequential drains never enter the second
-        await asyncio.gather(*(event.wait() for event in entered.values()))
-    assert await _health(url) == 503
-    release_drain.set()
-    shutdown = await serve_task
-    await shutdown
-
-    assert events == [
-        "start:first",
-        "start:second",
-        "drain:first:draining=True",
-        "drain:second:draining=True",
-        "engine_shutdown",
-        "stop:second",
-        "stop:first",
-    ]
-    assert 0 < engine.shutdown_timeouts[0] <= 30
+    dummy = DummyAdminEndpointPlugin()
+    assert isinstance(dummy, EndpointPlugin)
+    assert isinstance(dummy, SupportsStart)
+    assert isinstance(dummy, SupportsStop)
 
 
 @pytest.mark.asyncio
-async def test_sigterm_drains_and_stops(monkeypatch: pytest.MonkeyPatch):
-    events: list[str] = []
-    engine = _ServingEngineClient(events, shutdown_timeout=30)
-    app, serve_task, _ = await _serve(
-        monkeypatch, [DummyAdminEndpointPlugin(events)], engine
-    )
-
-    os.kill(os.getpid(), signal.SIGTERM)
-    await (await serve_task)
-
-    name = DummyAdminEndpointPlugin.name
-    assert events == [
-        f"start:{name}",
-        f"drain:{name}",
-        "engine_shutdown",
-        f"stop:{name}",
-    ]
-
-
-@pytest.mark.asyncio
-async def test_failed_start_stops_started_plugins_once(
+async def test_legacy_plugin_serves_and_shuts_down_unchanged(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """A failing `start` aborts lifespan startup (uvicorn then exits); only
-    plugins that started are stopped, in reverse order and exactly once;
-    later plugins never start."""
+    """A plugin without `start`/`stop` serves, keeps `/health` as is and sees
+    the engine-first shutdown it always had."""
     events: list[str] = []
+    engine = _ServingEngineClient(events)
+    async with _serving(monkeypatch, [_LegacyEndpointPlugin()], engine) as (
+        state,
+        serve_task,
+        url,
+    ):
+        await _wait_started(state, serve_task)
+        response = await _health(url)
+        assert (response.status_code, response.content) == (200, b"")
 
-    def plugin(plugin_name: str, fail: bool = False):
-        class _Plugin(DummyAdminEndpointPlugin):
-            name = plugin_name
+        state.request_shutdown()
+        await _wait_closed(serve_task)
 
-            async def start(self, state):
-                await super().start(state)
-                if fail:
-                    raise RuntimeError("bind failed")
-
-        return _Plugin(events)
-
-    plugins = [plugin("a"), plugin("b"), plugin("c", fail=True), plugin("d")]
-    app = await _build_plugin_app(monkeypatch, plugins, engine_client=None)
-    with pytest.raises(RuntimeError, match="bind failed"):
-        async with app.router.lifespan_context(app):
-            pass
-
-    assert events == ["start:a", "start:b", "start:c", "stop:b", "stop:a"]
+    assert events == ["engine_shutdown"]
 
 
 @pytest.mark.asyncio
-async def test_drain_overrun_and_error_are_isolated(monkeypatch: pytest.MonkeyPatch):
-    """A hanging drain is cancelled at the deadline and an erroring drain is
-    logged; neither stops the other drains, the engine shutdown or `stop`.
-    The engine gets only the time left."""
+async def test_start_and_stop_order_around_engine_shutdown(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """`start` runs in load order before HTTP accepts and can already reach
+    `state.request_shutdown`; after the engine stops, every plugin with
+    `stop` stops in reverse load order, including stop-only ones; repeated
+    `request_shutdown` calls are idempotent."""
     events: list[str] = []
 
-    class _Hanging(DummyAdminEndpointPlugin):
-        name = "hanging"
+    class _Probing(DummyAdminEndpointPlugin):
+        name = "first"
 
-        async def drain(self, state, timeout):
-            try:
-                await asyncio.Event().wait()
-            except asyncio.CancelledError:
-                events.append("drain:hanging:cancelled")
-                raise
+        async def start(self, state: State) -> None:
+            assert callable(state.request_shutdown)
+            self.events.append(f"start:{self.name}:accepting={state.server.started}")
+
+    plugins = [
+        _Probing(events),
+        _StartOnlyPlugin(events, "second"),
+        _StopOnlyPlugin(events, "third"),
+    ]
+    engine = _ServingEngineClient(events)
+    async with _serving(monkeypatch, plugins, engine) as (state, serve_task, url):
+        await _wait_started(state, serve_task)
+        assert (await _health(url)).status_code == 200
+
+        state.request_shutdown()
+        state.request_shutdown()
+        await _wait_closed(serve_task)
+
+    assert events == [
+        "start:first:accepting=False",
+        "start:second",
+        "engine_shutdown",
+        "stop:third",
+        "stop:first",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_sigterm_shares_the_request_shutdown_event(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    events: list[str] = []
+    engine = _ServingEngineClient(events)
+    async with _serving(monkeypatch, [_dummy("plugin", events)], engine) as (
+        state,
+        serve_task,
+        _,
+    ):
+        await _wait_started(state, serve_task)
+
+        os.kill(os.getpid(), signal.SIGTERM)
+        async with asyncio.timeout(_TIMEOUT_S):
+            await engine.stopped.wait()
+        state.request_shutdown()
+        await _wait_closed(serve_task)
+
+    assert events == ["start:plugin", "engine_shutdown", "stop:plugin"]
+
+
+@pytest.mark.asyncio
+async def test_request_shutdown_during_start_stops_exactly_once(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A `start` that requests shutdown (and keeps running until the engine
+    has stopped) still completes; the server never serves, and `stop` runs
+    once."""
+    events: list[str] = []
+    engine = _ServingEngineClient(events)
+
+    class _Aborting(DummyAdminEndpointPlugin):
+        name = "aborting"
+
+        async def start(self, state: State) -> None:
+            await super().start(state)
+            state.request_shutdown()
+            async with asyncio.timeout(_TIMEOUT_S):
+                await engine.stopped.wait()
+
+    async with _serving(monkeypatch, [_Aborting(events)], engine) as (
+        _,
+        serve_task,
+        url,
+    ):
+        await _wait_closed(serve_task)
+        with pytest.raises(httpx.ConnectError):
+            await _health(url)
+
+    assert events == ["start:aborting", "engine_shutdown", "stop:aborting"]
+
+
+@pytest.mark.asyncio
+async def test_shutdown_during_socket_binding_leaves_no_listener(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Pause real socket binding before Uvicorn records the listener, so a
+    shutdown request cannot cancel binding and orphan the open socket."""
+    events: list[str] = []
+    engine = _ServingEngineClient(events)
+    binding = asyncio.Event()
+    release = asyncio.Event()
+    shutdown_waiting = asyncio.Event()
+    listeners: list[asyncio.Server] = []
+    loop = asyncio.get_running_loop()
+    create_server = loop.create_server
+
+    async def paused_create_server(*args, **kwargs):
+        listener = await create_server(*args, **kwargs)
+        listeners.append(listener)
+        binding.set()
+        await release.wait()
+        return listener
+
+    monkeypatch.setattr(loop, "create_server", paused_create_server)
+    async with _serving(monkeypatch, [_dummy("plugin", events)], engine) as (
+        state,
+        serve_task,
+        url,
+    ):
+        try:
+            async with asyncio.timeout(_TIMEOUT_S):
+                await binding.wait()
+                wait_for_startup = state.server.startup_complete.wait
+
+                async def observed_wait() -> bool:
+                    shutdown_waiting.set()
+                    return await wait_for_startup()
+
+                monkeypatch.setattr(
+                    state.server.startup_complete, "wait", observed_wait
+                )
+                state.request_shutdown()
+                await shutdown_waiting.wait()
+            release.set()
+            await _wait_closed(serve_task)
+            with pytest.raises(httpx.ConnectError):
+                await _health(url)
+        finally:
+            release.set()
+            for listener in listeners:
+                listener.close()
+                await listener.wait_closed()
+    assert events == ["start:plugin", "engine_shutdown", "stop:plugin"]
+
+
+@pytest.mark.asyncio
+async def test_watchdog_exit_stops_plugins_without_engine_shutdown(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """When the watchdog exits the server after engine death, `stop` still
+    runs exactly once."""
+    events: list[str] = []
+    engine = _ServingEngineClient(events)
+    async with _serving(monkeypatch, [_dummy("plugin", events)], engine) as (
+        state,
+        serve_task,
+        _,
+    ):
+        await _wait_started(state, serve_task)
+
+        engine.errored = True
+        engine.is_running = False
+        terminate_if_errored(state.server, engine)
+        await _wait_closed(serve_task)
+
+    assert events == ["start:plugin", "stop:plugin"]
+
+
+@pytest.mark.asyncio
+async def test_watchdog_during_start_stops_plugins_and_closes_listener(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Engine death during startup still reaches HTTP and plugin cleanup."""
+    events: list[str] = []
+    engine = _ServingEngineClient(events)
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    class _Starting(DummyAdminEndpointPlugin):
+        name = "plugin"
+
+        async def start(self, state: State) -> None:
+            await super().start(state)
+            entered.set()
+            await release.wait()
+
+    async with _serving(monkeypatch, [_Starting(events)], engine) as (
+        state,
+        serve_task,
+        url,
+    ):
+        try:
+            async with asyncio.timeout(_TIMEOUT_S):
+                await entered.wait()
+            engine.errored = True
+            engine.is_running = False
+            # Repeated watchdog observations must remain one exit request.
+            terminate_if_errored(state.server, engine)
+            terminate_if_errored(state.server, engine)
+            release.set()
+            await _wait_closed(serve_task)
+            with pytest.raises(httpx.ConnectError):
+                await _health(url)
+            assert events == ["start:plugin", "stop:plugin"]
+        finally:
+            release.set()
+            if state.server.started and "stop:plugin" not in events:
+                await state.server.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_stop_failures_do_not_skip_peers_or_native_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A `stop` that raises, including `CancelledError`, is logged; the other
+    plugins still stop in reverse order and the native transcription
+    handler is still shut down afterwards."""
+    events: list[str] = []
 
     class _Erroring(DummyAdminEndpointPlugin):
         name = "erroring"
 
-        async def drain(self, state, timeout):
-            raise RuntimeError("drain failed")
+        async def stop(self, state: State) -> None:
+            await super().stop(state)
+            raise RuntimeError("stop failed")
 
-    engine = _ServingEngineClient(events, shutdown_timeout=1)
-    plugins = [_Hanging(events), _Erroring(events), DummyAdminEndpointPlugin(events)]
-    app, serve_task, _ = await _serve(monkeypatch, plugins, engine)
+    class _Cancelling(DummyAdminEndpointPlugin):
+        name = "cancelling"
 
-    app.state.request_shutdown()
-    await (await serve_task)
+        async def stop(self, state: State) -> None:
+            await super().stop(state)
+            raise asyncio.CancelledError
 
-    name = DummyAdminEndpointPlugin.name
-    assert f"drain:{name}" in events
-    assert events.index("drain:hanging:cancelled") < events.index("engine_shutdown")
-    assert [e for e in events if not e.startswith("drain:")][-4:] == [
+    plugins = [_dummy("first", events), _Erroring(events), _Cancelling(events)]
+    engine = _ServingEngineClient(events)
+    native = _NativeServing(events)
+    async with _serving(monkeypatch, plugins, engine, native) as (
+        state,
+        serve_task,
+        _,
+    ):
+        await _wait_started(state, serve_task)
+
+        state.request_shutdown()
+        await _wait_closed(serve_task)
+
+    assert events == [
+        "start:first",
+        "start:erroring",
+        "start:cancelling",
         "engine_shutdown",
-        f"stop:{name}",
+        "stop:cancelling",
         "stop:erroring",
-        "stop:hanging",
+        "stop:first",
+        "native_shutdown",
     ]
-    assert 0 <= engine.shutdown_timeouts[0] < 0.5
 
 
 @pytest.mark.asyncio
-async def test_shutdown_timeout_zero_skips_drain(monkeypatch: pytest.MonkeyPatch):
-    events: list[str] = []
-    engine = _ServingEngineClient(events, shutdown_timeout=0)
-    app, serve_task, _ = await _serve(
-        monkeypatch, [DummyAdminEndpointPlugin(events)], engine
-    )
-    state = app.state
-
-    state.request_shutdown()
-    shutdown = await serve_task
-    assert state.draining is True
-    await shutdown
-
-    name = DummyAdminEndpointPlugin.name
-    assert events == [f"start:{name}", "engine_shutdown", f"stop:{name}"]
-    assert engine.shutdown_timeouts == [0]
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("engine", [True, False], ids=["engine", "render"])
-async def test_health_reflects_plugin_readiness(
-    monkeypatch: pytest.MonkeyPatch, engine: bool
+@pytest.mark.parametrize("error", [RuntimeError, asyncio.CancelledError])
+async def test_failed_start_rolls_back_in_reverse_once(
+    monkeypatch: pytest.MonkeyPatch, error: type[BaseException]
 ):
-    """`/health` returns 503 while a plugin is not ready or its readiness
-    check raises, with an engine and on the engine-less render server."""
-    plugin = DummyAdminEndpointPlugin()
-    engine_client = _ServingEngineClient([], shutdown_timeout=0) if engine else None
-    tasks = ("generate",) if engine else ("render",)
-    app, serve_task, url = await _serve(monkeypatch, [plugin], engine_client, tasks)
-
-    assert await _health(url) == 200
-    plugin.is_ready = False
-    assert await _health(url) == 503
-
-    def raise_error(state):
-        raise RuntimeError("listener lost")
-
-    plugin.ready = raise_error
-    assert await _health(url) == 503
-
-    app.state.request_shutdown()
-    await (await serve_task)
-
-
-@pytest.mark.asyncio
-async def test_watchdog_exit_stops_without_drain(monkeypatch: pytest.MonkeyPatch):
-    """When the watchdog stops the server after engine death, `stop` still
-    runs exactly once; `drain` and the engine shutdown do not."""
+    """A failing `start` aborts lifespan startup: the plugins ahead of it,
+    including a stop-only one, stop in reverse order exactly once, later
+    plugins never start and native cleanup still runs."""
     events: list[str] = []
-    engine = _ServingEngineClient(events, shutdown_timeout=30)
-    app, serve_task, _ = await _serve(
-        monkeypatch, [DummyAdminEndpointPlugin(events)], engine
-    )
 
-    engine.errored = True
-    engine.is_running = False
-    terminate_if_errored(app.state.server, engine)
-    await (await serve_task)
+    class _Failing(DummyAdminEndpointPlugin):
+        name = "failing"
 
-    name = DummyAdminEndpointPlugin.name
-    assert events == [f"start:{name}", f"stop:{name}"]
+        async def start(self, state: State) -> None:
+            await super().start(state)
+            raise error("bind failed")
 
+    plugins = [
+        _dummy("first", events),
+        _StopOnlyPlugin(events, "second"),
+        _Failing(events),
+        _dummy("never", events),
+    ]
+    native = _NativeServing(events)
+    app = await _build_plugin_app(monkeypatch, plugins, None, native)
 
-class _HangingDrain(DummyAdminEndpointPlugin):
-    def __init__(self, events: list[str]):
-        super().__init__(events)
-        self.entered = asyncio.Event()
+    with pytest.raises(error):
+        async with app.router.lifespan_context(app):
+            pytest.fail("startup must not complete")
 
-    async def drain(self, state, timeout):
-        self.entered.set()
-        try:
-            await asyncio.Event().wait()
-        except asyncio.CancelledError:
-            self.events.append("drain:cancelled")
-            raise
-
-
-@pytest.mark.asyncio
-async def test_cancelled_shutdown_cancels_drains():
-    """Cancelling the shutdown cancels running drains rather than leaving them
-    behind to race `stop`."""
-    state = State()
-    state.started_endpoint_plugins = [plugin := _HangingDrain([])]
-    task = asyncio.create_task(drain_endpoint_plugins(state, time.monotonic() + 30))
-    await asyncio.wait_for(plugin.entered.wait(), 10)
-
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
-    assert plugin.events == ["drain:cancelled"]
+    assert events == [
+        "start:first",
+        "start:failing",
+        "stop:second",
+        "stop:first",
+        "native_shutdown",
+    ]
 
 
 @pytest.mark.asyncio
-async def test_watchdog_exit_during_drain_cancels_drain_before_stop(
+async def test_cancelled_lifespan_shutdown_still_stops_remaining_plugins(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """If the engine dies while plugins drain, the drain is cancelled and
-    finished before `stop` runs."""
+    """Cancelling the lifespan while a `stop` is pending is deferred until the
+    remaining plugins and native cleanup have run, then re-raised."""
     events: list[str] = []
-    engine = _ServingEngineClient(events, shutdown_timeout=30)
-    plugin = _HangingDrain(events)
-    app, serve_task, _ = await _serve(monkeypatch, [plugin], engine)
+    entered = asyncio.Event()
+    peer_entered = asyncio.Event()
+    release_peer = asyncio.Event()
 
-    app.state.request_shutdown()
-    await asyncio.wait_for(plugin.entered.wait(), 10)
-    engine.errored = True
-    engine.is_running = False
-    terminate_if_errored(app.state.server, engine)
-    await (await serve_task)
+    class _AwaitingPeer(DummyAdminEndpointPlugin):
+        name = "first"
 
-    name = DummyAdminEndpointPlugin.name
-    assert events == [f"start:{name}", "drain:cancelled", f"stop:{name}"]
+        async def stop(self, state: State) -> None:
+            peer_entered.set()
+            await release_peer.wait()
+            await super().stop(state)
 
+    class _Blocking(DummyAdminEndpointPlugin):
+        name = "blocking"
 
-@pytest.mark.asyncio
-async def test_stop_cancels_running_drain_first():
-    """`stop` never overlaps a drain, e.g. when a later plugin's `start`
-    fails while a shutdown requested during startup is draining."""
-    state = State()
-    state.started_endpoint_plugins = [plugin := _HangingDrain([])]
-    state.shutdown_task = asyncio.create_task(
-        drain_endpoint_plugins(state, time.monotonic() + 30)
-    )
-    await asyncio.wait_for(plugin.entered.wait(), 10)
-
-    await stop_endpoint_plugins(state)
-
-    assert state.shutdown_task.cancelled()
-    assert plugin.events == ["drain:cancelled", f"stop:{plugin.name}"]
-
-
-@pytest.mark.asyncio
-async def test_cancelled_stop_still_stops_plugins():
-    """Cancelling `stop` while it waits for a drain to unwind defers the
-    cancellation until every plugin has stopped."""
-
-    class _SlowUnwind(_HangingDrain):
-        unwinding = asyncio.Event()
-        release = asyncio.Event()
-
-        async def drain(self, state, timeout):
+        async def stop(self, state: State) -> None:
+            entered.set()
             try:
-                await super().drain(state, timeout)
-            finally:
-                self.unwinding.set()
-                await self.release.wait()
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                self.events.append(f"stop:{self.name}:cancelled")
+                raise
 
-    state = State()
-    state.started_endpoint_plugins = [plugin := _SlowUnwind([])]
-    state.shutdown_task = asyncio.create_task(
-        drain_endpoint_plugins(state, time.monotonic() + 30)
-    )
-    await asyncio.wait_for(plugin.entered.wait(), 10)
-    stop = asyncio.create_task(stop_endpoint_plugins(state))
-    await asyncio.wait_for(plugin.unwinding.wait(), 10)
+    plugins = [_AwaitingPeer(events), _Blocking(events), _dummy("last", events)]
+    native = _NativeServing(events)
+    app = await _build_plugin_app(monkeypatch, plugins, None, native)
 
-    stop.cancel()
-    await asyncio.sleep(0)
-    plugin.release.set()
+    async def run_lifespan() -> None:
+        async with app.router.lifespan_context(app):
+            pass
+
+    task = asyncio.create_task(run_lifespan())
+    async with asyncio.timeout(_TIMEOUT_S):
+        await entered.wait()
+    task.cancel()
+    async with asyncio.timeout(_TIMEOUT_S):
+        await peer_entered.wait()
+    release_peer.set()
     with pytest.raises(asyncio.CancelledError):
-        await stop
-    assert plugin.events == ["drain:cancelled", f"stop:{plugin.name}"]
+        async with asyncio.timeout(_TIMEOUT_S):
+            await task
 
-
-@pytest.mark.asyncio
-async def test_non_http_listener_requires_single_api_server(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    class _ListenerPlugin(DummyAdminEndpointPlugin):
-        owns_non_http_listener = True
-
-    monkeypatch.setattr(
-        "vllm.plugins.load_endpoint_plugins",
-        lambda supported_tasks: [_ListenerPlugin()],
-    )
-    args = _build_args()
-    app = build_app(args, supported_tasks=())
-
-    args.api_server_count = 2
-    with pytest.raises(ValueError, match="--api-server-count 1"):
-        await init_endpoint_plugins_state(None, app.state, args)
-
-    args.api_server_count = None
-    await init_endpoint_plugins_state(None, app.state, args)
-
-
-@pytest.mark.asyncio
-async def test_legacy_plugin_lifecycle_unchanged(monkeypatch: pytest.MonkeyPatch):
-    """A plugin without lifecycle methods serves, reports healthy and shuts
-    down as before."""
-    events: list[str] = []
-    engine = _ServingEngineClient(events, shutdown_timeout=30)
-    app, serve_task, url = await _serve(monkeypatch, [_LegacyEndpointPlugin()], engine)
-
-    assert await _health(url) == 200
-    app.state.request_shutdown()
-    await (await serve_task)
-
-    assert events == ["engine_shutdown"]
+    assert events == [
+        "start:first",
+        "start:blocking",
+        "start:last",
+        "stop:last",
+        "stop:blocking:cancelled",
+        "stop:first",
+        "native_shutdown",
+    ]
