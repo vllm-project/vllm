@@ -8479,7 +8479,11 @@ async fn sleep_route_uses_python_compatible_default_query_values() {
             assert_eq!(array[2], Value::from("sleep"));
             assert_eq!(
                 array[3],
-                Value::Array(vec![Value::from(1_u64), Value::from("abort")])
+                Value::Array(vec![
+                    Value::from(1_u64),
+                    Value::from("abort"),
+                    Value::from(true),
+                ])
             );
 
             send_outputs(push, utility_outputs(call_id, utility_none_result())).await;
@@ -8587,6 +8591,64 @@ async fn sleep_route_rejects_invalid_query_before_engine_dispatch() {
     }
 }
 
+async fn assert_route_sends_utility_args(
+    uri: &'static str,
+    method: &'static str,
+    args: Vec<Value>,
+) {
+    let (app, engine_task) = test_admin_app_with_engine_script(move |dealer, push| {
+        boxed_test_future(async move {
+            let utility = recv_engine_message(dealer).await;
+            let payload = decode_value(&utility[1]).expect("decode utility payload");
+            let array = payload.as_array().expect("utility payload array");
+            let call_id = array[1].as_u64().expect("call id");
+
+            assert_eq!(array[2], Value::from(method));
+            assert_eq!(array[3], Value::Array(args));
+
+            send_outputs(push, utility_outputs(call_id, utility_none_result())).await;
+        })
+    })
+    .await;
+
+    let response = app
+        .clone()
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri(uri)
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    engine_task.await.expect("mock engine task");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn sleep_route_forwards_reset_connector_opt_out() {
+    assert_route_sends_utility_args(
+        "/sleep?reset_connector=false",
+        "sleep",
+        vec![Value::from(1_u64), Value::from("abort"), Value::from(false)],
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn release_kv_cache_memory_route_forwards_reset_connector_opt_out() {
+    assert_route_sends_utility_args(
+        "/release_kv_cache_memory?reset_connector=false",
+        "release_kv_cache_memory",
+        vec![Value::from(false)],
+    )
+    .await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn release_kv_cache_memory_route_sends_expected_utility_call() {
@@ -8601,7 +8663,7 @@ async fn release_kv_cache_memory_route_sends_expected_utility_call() {
             let call_id = array[1].as_u64().expect("call id");
 
             assert_eq!(array[2], Value::from("release_kv_cache_memory"));
-            assert_eq!(array[3], Value::Array(Vec::new()));
+            assert_eq!(array[3], Value::Array(vec![Value::from(true)]));
 
             send_outputs(push, utility_outputs(call_id, utility_none_result())).await;
         })

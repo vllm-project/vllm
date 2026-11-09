@@ -17,7 +17,11 @@ from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.rocm_paged_mxfp4_indexer import RocmSparseAttnIndexer
 from vllm.model_executor.layers.sparse_attn_indexer import SparseAttnIndexer
-from vllm.model_executor.utils import refill_derived, replace_parameter
+from vllm.model_executor.utils import (
+    is_weights_pre_processed,
+    refill_derived,
+    replace_parameter,
+)
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     DispatchSpec,
     TritonWarmupTensor,
@@ -74,13 +78,13 @@ def _wo_a_block_scale_to_e8m0(scale: torch.Tensor) -> torch.Tensor | None:
     """Normalize checkpoint WO_A scales to raw OCP MX E8M0 bytes.
 
     E8M0 is an unsigned exponent-only scale format with bias 127. A finite
-    encoded byte ``b`` in ``[0, 254]`` represents ``2 ** (b - 127)``;
-    ``0xFF`` is reserved for NaN. This is the vendor-neutral OCP encoding used
+    encoded byte `b` in `[0, 254]` represents `2 ** (b - 127)`;
+    `0xFF` is reserved for NaN. This is the vendor-neutral OCP encoding used
     by AMD AITER/OPUS, not an NVIDIA-specific convention. Reference: OCP
     Microscaling Formats (MX) Specification, section 5.4.1:
     https://www.opencompute.org/documents/ocp-microscaling-formats-mx-v1-0-spec-final-pdf
 
-    Loaders may preserve the encoded byte as ``float8_e8m0fnu``/``uint8``,
+    Loaders may preserve the encoded byte as `float8_e8m0fnu`/`uint8`,
     or decode it to a floating-point power of two. Floating-point inputs are
     accepted only when the original E8M0 byte can be recovered losslessly.
     This function does not quantize or round arbitrary scales.
@@ -538,8 +542,8 @@ def compress_pool(
     overlap: bool,
 ) -> DispatchSpec:
     """Pool each boundary token's compressor states into a bf16 row of
-    ``pooled_k``, one program per token. Tensor inputs bind to the kernel's
-    ``<name>_ptr`` arguments; the same launch spec drives the JIT warmup."""
+    `pooled_k`, one program per token. Tensor inputs bind to the kernel's
+    `<name>_ptr` arguments; the same launch spec drives the JIT warmup."""
     return (pooled_k.shape[0],), dict(
         state_cache_stride0=state_cache.stride(0),
         state_cache_stride1=state_cache.stride(1),
@@ -897,7 +901,7 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
                 self._run_parallel_input_projections(hidden_states)
             )
             qr, qr_scale, kv = self._split_qkv_and_norm(qr_kv)
-            self._prepare_and_attn_fn(
+            self._prepare_and_attn(
                 hidden_states,
                 qr,
                 kv,
@@ -931,7 +935,7 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         ):
             # The ROCm override consumes these sentinels inside the capture
             # boundary, moving the stream fan-out ahead of the projections.
-            self._prepare_and_attn_fn(
+            self._prepare_and_attn(
                 hidden_states,
                 None,
                 None,
@@ -984,14 +988,6 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
                 )
             finally:
                 self.aux_stream_list = saved_streams
-            return
-
-        # Re-check: forward's gate ran inside a captured segment that
-        # _prepare_and_attn_eager (MRV1) then broke, making this region eager.
-        if not current_platform.enable_multi_stream_overlap(
-            self.aux_stream_list, get_forward_context().attn_metadata
-        ):
-            self._run_sequential_pipeline(hidden_states, positions, o_padded)
             return
 
         indexer = self.indexer
@@ -1116,7 +1112,10 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
                 ws = _upcast_e8m0_to_fp32(ws).contiguous()
             # Shuffle the weight in place (single weight, no unshuffled copy),
             # unless the linear kernel already B-preshuffled it at load time.
-            if not getattr(linear, "aiter_bpreshuffled", False):
+            if not (
+                getattr(linear, "aiter_bpreshuffled", False)
+                or is_weights_pre_processed()
+            ):
                 replace_parameter(
                     linear,
                     "weight",

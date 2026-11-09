@@ -76,7 +76,6 @@ SILENT_GROUPS = [
     "tests/reasoning",
     "tests/renderers",
     "tests/samplers",
-    "tests/spec_decode",
     "tests/tokenizers_",
     "tests/tool_parsers",
     "tests/tool_use",
