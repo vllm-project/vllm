@@ -66,6 +66,10 @@ single child with the longest hit. The scheduler may shorten that hit before
 allocation. Async requests wait for every selected source, including after
 cancellation or a transfer failure.
 
+Range-aware prefix lookup retains each child's completed result while other
+lookups are pending, including misses. Later polls query only unfinished
+children; a new lookup range or a finished request clears those saved results.
+
 In both default and range-aware loading, with
 `kv_load_failure_policy="recompute"`, a request-level receive failure or a
 block-level KV load failure
