@@ -41,7 +41,7 @@ class StoreSpecGroup(NamedTuple):
 
 
 class ExternalCachedBlockPool:
-    """Duck-typed BlockPool backed by a ``(group_id, hash)`` exists set."""
+    """Duck-typed BlockPool backed by a `(group_id, hash)` exists set."""
 
     def __init__(
         self,
@@ -78,8 +78,8 @@ class ExternalCachedBlockPool:
 
 
 class MooncakeStoreCoordinator:
-    """Mirror of ``HybridKVCacheCoordinator.find_longest_cache_hit`` over an
-    ``ExternalCachedBlockPool``."""
+    """Mirror of `HybridKVCacheCoordinator.find_longest_cache_hit` over an
+    `ExternalCachedBlockPool`."""
 
     def __init__(
         self,
@@ -89,6 +89,7 @@ class MooncakeStoreCoordinator:
         use_eagle: bool = False,
         retention_interval: int | None = None,
         enable_partial_hash_hits: bool = False,
+        num_hash_lookahead_tokens: int = 0,
     ) -> None:
         # Match core's alignment requirements for prefix-cacheable groups.
         assert all(
@@ -115,7 +116,10 @@ class MooncakeStoreCoordinator:
         self.lcm_block_size = scheduler_block_size
         # Core's decision: whether hits land on the hash unit, below the block.
         self.enable_partial_hash_hits = enable_partial_hash_hits
-        self.use_eagle = use_eagle
+        # Lookahead hashes key the drafter's KV past each block, so no group
+        # drops its trailing block.
+        self.use_eagle = use_eagle and not num_hash_lookahead_tokens
+        self.num_hash_lookahead_tokens = num_hash_lookahead_tokens
         # Mirror vLLM core's KVCacheCoordinator.retention_interval.
         self.retention_interval = retention_interval
         self._verify_and_split_kv_cache_groups()
@@ -152,6 +156,7 @@ class MooncakeStoreCoordinator:
             scheduler_block_size,
             hash_block_size,
             use_eagle=spec_config is not None and spec_config.use_eagle_block_drop(),
+            num_hash_lookahead_tokens=vllm_config.num_hash_lookahead_tokens,
             retention_interval=kv_cache_config.prefix_cache_retention_interval,
             enable_partial_hash_hits=(
                 alignment is not None and alignment < scheduler_block_size
@@ -177,16 +182,17 @@ class MooncakeStoreCoordinator:
             assert manager_cls is not None, (
                 f"No manager registered for KVCacheSpec {spec}"
             )
+            drops_eagle_block = g.is_eagle_group and not self.num_hash_lookahead_tokens
             for idx, group in enumerate(attention_groups):
                 if group.spec == spec:
                     assert manager_cls is group.manager_cls
                     group.group_ids.append(i)
-                    if g.is_eagle_group and not group.use_eagle:
+                    if drops_eagle_block and not group.use_eagle:
                         attention_groups[idx] = group._replace(use_eagle=True)
                     break
             else:
                 attention_groups.append(
-                    StoreSpecGroup(spec, [i], manager_cls, g.is_eagle_group)
+                    StoreSpecGroup(spec, [i], manager_cls, drops_eagle_block)
                 )
         # Full attention first (matches upstream convergence ordering).
         attention_groups.sort(key=lambda g: not isinstance(g.spec, FullAttentionSpec))
@@ -218,13 +224,13 @@ class MooncakeStoreCoordinator:
         *,
         apply_eagle: bool = True,
     ) -> tuple[tuple[list[bool], ...], int]:
-        """Returns ``(load_mask_per_group, hit_length)``. ``mask[g][i]`` is True iff
-        group ``g`` populates physical block ``i`` (e.g. SWA and Mamba tail-only);
+        """Returns `(load_mask_per_group, hit_length)`. `mask[g][i]` is True iff
+        group `g` populates physical block `i` (e.g. SWA and Mamba tail-only);
         recv-side callers skip False slots.
 
-        ``apply_eagle`` controls whether the per-spec ``use_eagle`` last-block
+        `apply_eagle` controls whether the per-spec `use_eagle` last-block
         pop is applied. Lookup callers want it (the drafter requires recomputing
-        the last block); load-mask callers must not, because ``token_len``
+        the last block); load-mask callers must not, because `token_len`
         already reflects the eagle-pruned hit length and a second pop would
         leave the trailing block unloaded.
         """
@@ -242,8 +248,8 @@ class MooncakeStoreCoordinator:
         block_hashes: Sequence[BlockHash],
         token_len: int,
     ) -> tuple[list[bool], ...]:
-        """Per-group load masks: ``mask[g][i]`` is True iff group ``g``'s
-        spec would populate physical block ``i`` at length ``token_len``
+        """Per-group load masks: `mask[g][i]` is True iff group `g`'s
+        spec would populate physical block `i` at length `token_len`
         (e.g. SWA / Mamba tail-only).
         """
         # Lookup has already applied Eagle's last-block drop.
@@ -261,17 +267,17 @@ class MooncakeStoreCoordinator:
         start_token: int = 0,
         num_prompt_tokens: int | None = None,
     ) -> tuple[list[bool] | None, ...]:
-        """Per-group store masks for the suffix starting at ``start_token``.
+        """Per-group store masks for the suffix starting at `start_token`.
 
-        ``mask[g][i]`` is True iff the i-th physical block of group ``g`` *after*
-        ``start_token`` should be written to the store so a future cache hit
-        can consume it. ``None`` is the all-True sentinel for the suffix.
+        `mask[g][i]` is True iff the i-th physical block of group `g` *after*
+        `start_token` should be written to the store so a future cache hit
+        can consume it. `None` is the all-True sentinel for the suffix.
 
-        Reuses the engine's ``SingleTypeKVCacheManager.reachable_block_mask``
+        Reuses the engine's `SingleTypeKVCacheManager.reachable_block_mask`
         so the store retains exactly the blocks the local prefix cache would.
 
         Mamba groups are all-False; checkpoint block IDs arrive through
-        ``SchedulerOutput.kv_connector_block_state.boundary_state_offloads``.
+        `SchedulerOutput.kv_connector_block_state.boundary_state_offloads`.
         """
         return self._reachable_masks(
             aligned_token_len,
@@ -287,8 +293,8 @@ class MooncakeStoreCoordinator:
     ) -> tuple[list[bool] | None, ...]:
         """Per-group lookup masks.
 
-        ``mask[g][i]`` is True iff physical block ``i`` of group ``g`` should be
-        looked up as an aligned hit boundary. ``None`` is the all-True
+        `mask[g][i]` is True iff physical block `i` of group `g` should be
+        looked up as an aligned hit boundary. `None` is the all-True
         sentinel.
         """
         return self._reachable_masks(
@@ -478,7 +484,7 @@ def _coverage_spec(spec: KVCacheSpec) -> KVCacheSpec:
     """The spec whose window covers every block an external hit restores.
 
     An external SWA hit allocates the MTP re-prefill tail
-    (``extra_retained_tokens``) below the window, so lookup, load and store
+    (`extra_retained_tokens`) below the window, so lookup, load and store
     must cover it too, as the offloading connector does.
     """
     spec = _unwrap_spec(spec)

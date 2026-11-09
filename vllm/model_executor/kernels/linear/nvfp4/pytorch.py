@@ -16,10 +16,10 @@ from .base import NvFp4LinearKernel, NvFp4LinearLayerConfig
 
 
 class TorchNvFp4LinearKernel(NvFp4LinearKernel):
-    """NVFP4 GEMM implemented with PyTorch's native ``torch._scaled_mm``.
+    """NVFP4 GEMM implemented with PyTorch's native `torch._scaled_mm`.
 
     Eager execution uses PyTorch's native scaled-matmul implementation. Under
-    ``torch.compile``, TorchInductor may select any enabled scaled-GEMM backend,
+    `torch.compile`, TorchInductor may select any enabled scaled-GEMM backend,
     including NVGEMM on supported Blackwell systems.
     """
 
