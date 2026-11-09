@@ -411,9 +411,6 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
             try:
                 # Create scheduler-side SharedOffloadRegion (rank=None) so the
                 # primary tier can eagerly create a memoryview over _base.
-                # Workers already pre-fault every page. No cudaHostRegister:
-                # the scheduler never copies to the GPU, and NIXL pins the
-                # pages itself when a secondary tier registers them.
                 scheduler_mmap = SharedOffloadRegion(
                     engine_id=self._engine_id,
                     num_chunks=self.num_chunks,
