@@ -466,9 +466,14 @@ def test_engine_rebinds_model_state_to_extended_views(
     ) as runner:
         ((bound, rebound, final),) = runner.llm.collective_rpc(_rebound_and_final_views)
     assert rebound == [final]
+    assert bound is not None, "initialize_kv_cache never ran on the model state"
     # The extension has to have moved the geometry, or the hook guards nothing:
-    # the reservation shrinks to the measured size at unchanged addresses.
+    # the reservation shrinks to the measured size at unchanged addresses. With
+    # memory to spare the measurement fills the reservation (`blocks_within`
+    # caps at the capacity), leaving nothing to move and nothing to check.
     (bound_blocks, bound_views), (final_blocks, final_views) = bound, final
+    if bound_blocks == final_blocks:
+        pytest.skip("the measured size filled the reservation; nothing was rebound")
     assert bound_blocks > final_blocks
     assert {n: ptr for n, (ptr, _) in bound_views.items()} == {
         n: ptr for n, (ptr, _) in final_views.items()
