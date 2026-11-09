@@ -24,7 +24,7 @@ The trainer replays a row to reproduce the computation that produced a sampled t
 1. **First computation wins, per trajectory.** A position is often computed more than once: the next turn re-prefills an unfinished block, a preempted request recomputes, speculative verification and a later prefill overlap. Only the first computation fed the trajectory, so it is the one delivered; recomputations never overwrite it.
 2. **Rows carry their weight version.** Trajectories span many weight updates. The manifest lists, per position range, the version of the weights that computed the delivered rows.
 3. **Same-version rows are interchangeable; different versions are not.** Under the train-inference consistent build (#62365), every computation of the same tokens at the same weight version is bitwise identical, so GRPO siblings and forks can share one stored copy of a block. A computation at another version is a different row and is never substituted.
-4. **Requested means delivered, or reported missing.** If a request asks for an aux output, the trainer can read every row, or the manifest says exactly which rows are missing. A row is never silently replaced by a different computation.
+4. **Requested means delivered, or the request fails.** If a request asks for an aux output, the trainer can read every row; if the store cannot keep them, the request fails with an error instead of delivering part of it. A row is never silently replaced by a different computation.
 5. **Freed once used.** Rows are stored per session and deleted as soon as the session is consumed.
 
 ## Conclusions

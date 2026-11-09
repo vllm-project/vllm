@@ -33,7 +33,7 @@ The sampled token's logprob is returned inline with the response; that number is
 
 ## 2. Invariants
 
-1. **Requested means delivered, or reported missing.** Every requested row can be read, or the manifest names the rows that are missing. A row is never replaced by a different computation.
+1. **Requested means delivered, or the request fails.** Every requested row can be read. If a store write the request depends on fails, the request fails: its reader gets an error, not a partial sample. Rows that are not computed by design (deep cells outside every patch under partial capture, §6.11) are listed in the manifest, not failed. A row is never replaced by a different computation.
 2. **First computation wins**, per trajectory, as defined above.
 3. **Same version, same tokens, same row.** Under the train-inference consistent build (#62365: batch invariance with bitwise identical results across batch composition, chunk size and prefix-cache hit vs miss), all computations of the same tokens at the same weight version are identical. Rows of one version may therefore be shared between trajectories of a session. Rows of different versions are never interchangeable.
 4. **Rows carry their version.** The manifest lists `weight_versions` segments covering `[0, rows)`; each segment's version is the version of the computation whose rows are stored there.
@@ -73,7 +73,7 @@ Sampling-parameter constraints (when requesting `topk_logprobs`, `sampling_mask`
 | Field | Meaning |
 |---|---|
 | `key_prefix`, `tail_key` | `<job>/<session>` and the R3 tail key; readers build every object key from these |
-| `blocks` | ordered object names of the full blocks; usually the block hash, `hash~<tag>` for a trajectory's own copy (§5), `hash~r` never appears (a lost block is reported missing) |
+| `blocks` | ordered object names of the full blocks; usually the block hash, `hash~<tag>` for a trajectory's own copy (§5), `hash~r` never appears |
 | `tail_start`, `tail_nbytes` | the tail object covering `[tail_start, rows)`; it can span several blocks |
 | `rows` | rows covered; can exceed `L−1` (see §7) |
 | `weight_versions` | `[[start, version], ...]` covering `[0, rows)`, describing the stored objects |
@@ -100,7 +100,7 @@ Within a session a block is stored once per distinct computation that some traje
 - **Another trajectory, a different version anywhere in the block:** stores its own copy as `hash~<tag>` and lists that name.
 - **Rows served by a prefix hit:** inside the requesting trajectory's version record they are marked "as recorded by the object" and match any version. A copy that keeps such rows takes their versions from the object it hit.
 - **Blocks entirely before the request's own rows:** a block whose last position precedes the request's first computed position, or that the trajectory (or its parent, for a fork) already holds, was computed first by an earlier request. It is shared as is.
-- **Failures are per object:** a write failure marks that exact object (`hash`, `hash~<tag>`, or an indexer object) as lost. The lost object is never rewritten. A failed indexer object does not affect the block's R3 object.
+- **A failed write fails every request that lists the object.** The writer records the exact name (`hash`, `hash~<tag>`, or an indexer object) as failed and never rewrites it; a request whose manifest would list a failed name gets an error marker instead of a manifest (§6.9).
 - **Writer bookkeeping:** per (session, trajectory) the writer keeps which name it holds for each hash, plus a digest, owner and version record per stored object. All of it is dropped when the session is released.
 
 ## 6. Engine behavior, event by event
@@ -163,8 +163,7 @@ Block-level KV-load failure recovery rewinds a request's computed tokens. vLLM r
 - **Host work off the critical path.** The writing rank also captures and assembles every request's rows each step. Done inline, under the lock the engine's output path holds, that work stalled the rank's GPU while the other ranks waited for it in collectives, and it, not the bytes, was most of the cost of the indexer and hidden states (experiments: engine overhead). Capture therefore runs on its own thread, fed by one ordered queue from inside the lock: the queue preserves the order in which the output path handled requests, so first computation wins exactly as if the work ran inline. The queue is bounded, and an error on the capture thread is raised at the engine's next step instead of being lost.
 - **Encoding off the writer thread:** indexer compression (zstd, which releases the GIL) runs on a small thread pool ahead of the writer. The writer takes the results in order. Manifests stay on the writer thread, because they read the sizes of the objects put before them. At 512K context, a single writer thread spent 46% of its time in zstd and the engine paused about 3% of the time on writer backlog. The pool removes most of that wait.
 - **Full memory:** objects must never be lost (§9). A put that does not fit is retried until it lands: with SSD-first, the store makes room by offloading to disk; with pinned memory, only releases make room. Each worker caps pending bytes, and beyond the cap the engine schedules no new tokens until writes catch up. Writers report a stall when no put has landed for a deadline, and the driver aborts (§8).
-- **A failed block write:** that object is lost for good, and its exact name is marked lost. Later recomputations are not substituted: they can be of another version, and the version record of those positions describes the lost computation. The block stays missing, and every manifest that lists it reports it.
-- **A failed manifest, tail or chunk write:** the writer writes the request's error marker (retrying ~1 s). A reader that finds the marker fails that request at once instead of waiting; siblings are unaffected.
+- **A failed write fails the request.** A block, tail, chunk, patch or manifest write that fails after its retries makes the writer write the request's error marker (retrying ~1 s) instead of its manifest, and every later request of the session that would list a failed block gets an error marker too. A reader that finds the marker fails that request at once; siblings that do not list the failed object are unaffected. Nothing is substituted: a recomputation can be of another version. Finer reporting (delivering the rest of the request and naming the missing rows) is left for later; the request fails as a whole.
 - Tail and manifest are written as soon as the request finishes, not at a later engine step (an idle engine never runs one).
 
 ### 6.10 Abort and undeliverable responses
@@ -206,7 +205,7 @@ aux.release_session(job, session)  # after the session is consumed and the step 
 
 - **read** reads the manifest, then the blocks, chunks and tail, and returns rows for `[0, L−1)`:
   - truncate to `L−1`: the manifest can cover more rows (async scheduling computes one more position; speculative decoding can capture truncated drafts);
-  - check the error marker; a missing block or a `missing`/`holes` count fails the sample;
+  - check the error marker: a failed request fails the sample; so does a block the manifest lists that cannot be read, or a nonzero `missing`/`holes` count;
   - verify each block's tokens against the sample;
   - R3 sanity: the 6 expert ids in a row are distinct; an all-zero row is an error;
   - replay compares expert sets; rows whose set is unchanged keep the trainer's own ids and weights;
@@ -281,7 +280,7 @@ Training framework:
 | Speculative decoding | accepted rows only; hash-lagging blocks delivered in the tail |
 | Full memory | SSD-first: objects offload to disk; pinned: writer blocks and the engine pauses scheduling; nothing dropped |
 | Holder or disk failure | holder death: keys listed but unreadable, step aborts; disk write failure: puts stall, deadline aborts |
-| Write failure | reported as missing or as an error marker; never substituted |
+| Write failure | the request fails with an error marker; never substituted |
 | Cross-session prefix hit | truncated |
 | Context rewriting | rewritten prefixes hash differently and are rewritten |
 | Context compaction (summarize, continue from system prompt + summary + recent turns) | the summary request extends its segment's trajectory; each continuation is a new trajectory of the session, sharing only blocks that hash the same (the system prompt) at the same version; the session lives and holds its objects until the whole rollout is trained, and is admitted by the rows of all its segments |

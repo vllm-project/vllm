@@ -75,8 +75,7 @@ Rows are labelled with the version of the forward that computed them, stamped wh
 |---|---|---|
 | Memory full | drop rows / fail the request / block / **offload to SSD** | **Offload** on eviction (never at put, which loses objects); without SSD, **block** with an in-flight cap |
 | Holder dies or disk fails | restart and continue / **abort the step** | A dead holder's objects are listed but unreadable, and a failing disk makes every put fail: **abort** on holder death or when puts stop landing |
-| A block write fails | **report missing** / substitute a later recompute | A recompute can be of another version and its label would be wrong: **report missing** |
-| A manifest or tail write fails | wait for a timeout / **error marker per request** | **Error marker**: the reader fails that request at once; a session-wide marker would fail every sibling |
+| Any write fails | report the missing rows / substitute a later recompute / **fail the request** | A recompute can be of another version and its label would be wrong. Reporting missing rows keeps the rest of the request but needs per-row bookkeeping on both sides; failures are rare, so for now the request fails as a whole, by an **error marker per request** (a session-wide marker would fail every sibling) |
 | Preemption | finish the request / **stash and resume** | Finishing loses rows computed before the preemption: **stash** |
 | KV-load rewind | crash / **mark invalid from the rewind point** | Rows computed on invalid KV are reported, never delivered |
 
