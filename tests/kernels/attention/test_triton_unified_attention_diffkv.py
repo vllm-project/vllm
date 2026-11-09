@@ -241,8 +241,8 @@ def test_triton_unified_attn_diffkv_vs_reference(
 
 
 @pytest.mark.skipif(
-    not current_platform.is_cuda() or not current_platform.has_device_capability(89),
-    reason="FP8 query requires CUDA SM89+",
+    not current_platform.is_cuda_alike() or not current_platform.supports_fp8(),
+    reason="FP8 query requires FP8 support",
 )
 @pytest.mark.parametrize(
     "seq_lens,seq_threshold_3D",

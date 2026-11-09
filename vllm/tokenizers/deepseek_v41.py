@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import copy
+from collections.abc import Iterator
 from typing import Any
 
 from transformers import TokenizersBackend
@@ -30,7 +31,12 @@ def _normalize_messages(
 ) -> list[dict[str, Any]]:
     # vLLM additions to the reference: Responses API part types, image_pil,
     # tool_reference, and ValueError (400) instead of the reference's asserts.
-    result = [dict(message) for message in copy.deepcopy(messages)]
+    result: list[dict[str, Any]] = []
+    for original_message in messages:
+        content = original_message.get("content")
+        if isinstance(content, Iterator):
+            original_message["content"] = list(content)
+        result.append(dict(copy.deepcopy(original_message)))
     image_idx = 0
     for message in result:
         image_indices = message["_image_indices"] = []
@@ -121,6 +127,8 @@ def get_deepseek_v41_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
                 drop_thinking=kwargs.get("drop_thinking", True),
                 reasoning_effort=effort,
                 image_order=image_order,
+                add_generation_prompt=kwargs.get("add_generation_prompt", True),
+                continue_final_message=kwargs.get("continue_final_message", False),
             )
             if kwargs.get("tokenize", True):
                 tokenizer_kwargs = {
