@@ -824,10 +824,10 @@ def test_hopper_sparse_mla_skips_backends_without_hisparse(
 ):
     """Head-512 sparse MLA prefers FlashInfer on Hopper, which has no HiSparse
     path; with HiSparse the selector must pass over it."""
-    attention_config = AttentionConfig(
-        hisparse_config=HiSparseConfig() if use_hisparse else None
-    )
-    with set_current_vllm_config(VllmConfig(attention_config=attention_config)):
+    vllm_config = VllmConfig()
+    if use_hisparse:
+        vllm_config.attention_config.hisparse_config = HiSparseConfig()
+    with set_current_vllm_config(vllm_config):
         backend = get_attn_backend(
             512, torch.bfloat16, None, use_mla=True, use_sparse=True
         )
@@ -857,9 +857,10 @@ def test_sm120_selects_flashinfer_sparse_mla(sm120):
 def test_sm120_sparse_mla_has_no_hisparse_backend(sm120):
     """SM120's only sparse MLA backend has no validated HiSparse path, so
     HiSparse must fail selection rather than run on it."""
-    attention_config = AttentionConfig(hisparse_config=HiSparseConfig())
+    vllm_config = VllmConfig()
+    vllm_config.attention_config.hisparse_config = HiSparseConfig()
     with (
-        set_current_vllm_config(VllmConfig(attention_config=attention_config)),
+        set_current_vllm_config(vllm_config),
         pytest.raises(ValueError, match="HiSparse not supported"),
     ):
         get_attn_backend(512, torch.bfloat16, None, use_mla=True, use_sparse=True)
