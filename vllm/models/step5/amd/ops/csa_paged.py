@@ -153,8 +153,8 @@ def sparse_attention_paged(
     v_scale: torch.Tensor | None = None,
 ) -> None:
     """Attention over each query's selected regions of the paged K/V, into
-    ``output``. ``key_cache``/``value_cache`` are ``[pages, page_tokens, kv_heads,
-    head_dim]`` views; ``token_req`` and ``positions`` locate every query row."""
+    `output`. `key_cache`/`value_cache` are `[pages, page_tokens, kv_heads,
+    head_dim]` views; `token_req` and `positions` locate every query row."""
     from vllm.platforms.rocm import get_cdna_version
 
     tokens, heads, head_dim = query.shape
