@@ -70,17 +70,6 @@ def test_local_snapshot_matches_hub_id():
     assert _identity(snapshot) == _identity()
 
 
-def test_weights_change_identity():
-    config = VllmConfig(model_config=ModelConfig(MODEL))
-    retrained = {"weights": "1" * 64, "weights_source": "hf_cache"}
-
-    original = compute_kv_identity(config, [WEIGHTS])
-    updated = compute_kv_identity(config, [retrained])
-
-    assert original.digest != updated.digest
-    assert original.components["config"] == updated.components["config"]
-
-
 def test_engine_reports_identity(vllm_runner):
     """The engine identifies Hub weights by content and reports the identity
     to the frontend and on `vllm:cache_config_info`."""

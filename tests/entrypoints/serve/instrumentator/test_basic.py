@@ -97,6 +97,23 @@ async def test_check_health(server: RemoteOpenAIServer):
     assert response.status_code == HTTPStatus.OK
 
 
+@pytest.mark.skipif(
+    envs.VLLM_USE_RUST_FRONTEND, reason="The Rust frontend does not serve it."
+)
+@pytest.mark.asyncio
+async def test_kv_identity(server: RemoteOpenAIServer):
+    """Routers read the identity per DP rank, and the metric labels it."""
+    response = requests.get(server.url_for("kv_identity"))
+    response.raise_for_status()
+
+    identities = response.json()
+    assert list(identities) == ["0"]
+    identity = identities["0"]
+    assert identity["components"]["weights_source"] == "hf_cache"
+    metrics = requests.get(server.url_for("metrics")).text
+    assert f'kv_identity="{identity["kv_identity"]}"' in metrics
+
+
 @pytest.mark.parametrize(
     "server_args",
     [
