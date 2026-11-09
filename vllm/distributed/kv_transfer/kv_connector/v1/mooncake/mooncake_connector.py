@@ -1981,14 +1981,20 @@ class MooncakeConnectorWorker:
                 if ret_value != 0:
                     transfer_err_msg = f"Mooncake transfer engine returned {ret_value}"
                 elif self._verify_transfers:
-                    transfer_err_msg = await self.sender_loop.run_in_executor(
-                        self._sender_executor,
-                        self._verify_sent_blocks,
-                        remote_session,
-                        src_ptrs,
-                        dst_ptrs,
-                        lengths,
-                    )
+                    try:
+                        transfer_err_msg = await self.sender_loop.run_in_executor(
+                            self._sender_executor,
+                            self._verify_sent_blocks,
+                            remote_session,
+                            src_ptrs,
+                            dst_ptrs,
+                            lengths,
+                        )
+                    except Exception as e:
+                        logger.exception(
+                            "Mooncake read-back from %s failed", remote_session
+                        )
+                        transfer_err_msg = f"Mooncake read-back failed: {e}"
                 if transfer_err_msg is not None:
                     err_msg = (
                         transfer_err_msg
@@ -2358,10 +2364,10 @@ class MooncakeConnectorWorker:
                     return f"Mooncake read-back returned {ret_value}"
                 for (i, start, n), offset in zip(batch, offsets):
                     expected = source_bytes(src_ptrs[i] + start, n)
-                    diff = torch.nonzero(buf[offset : offset + n] != expected)
-                    if diff.numel() == 0:
+                    differs = buf[offset : offset + n] != expected
+                    if not differs.any():
                         continue
-                    pos = start + int(diff[0])
+                    pos = start + int(differs.byte().argmax())
                     logger.error(
                         "Mooncake read-back from %s differs at byte %d of "
                         "descriptor %d (%d bytes, D address %#x): %s",
@@ -2379,12 +2385,13 @@ class MooncakeConnectorWorker:
         """Name the registered region and block that hold a local address."""
         candidates = [
             (addr - base, name, block_len)
-            for name, base, block_len in zip(
+            for name, base, block_len, kv_block_len in zip(
                 self.registered_layer_names,
                 self.kv_caches_base_addr,
                 self.block_len_per_layer,
+                self.kv_block_len_per_layer,
             )
-            if base <= addr
+            if base <= addr and (addr - base) % block_len < kv_block_len
         ]
         if not candidates:
             return f"address {addr:#x}"

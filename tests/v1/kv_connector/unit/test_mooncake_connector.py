@@ -1619,9 +1619,13 @@ async def test_kv_producer(monkeypatch):
 class _CopyingMooncake(FakeMooncakeWrapper):
     """Copies bytes between local addresses, so a write can be read back."""
 
-    def __init__(self, corrupt_addr: int | None = None):
+    def __init__(
+        self, corrupt_addr: int | None = None, read_error: Exception | None = None
+    ):
         self.corrupt_addr = corrupt_addr
+        self.read_error = read_error
         self.read_lengths: list[list[int]] = []
+        self.registered: list[int] = []
 
     def batch_transfer_sync_write(
         self, target_hostname, buffers, peer_buffer_addresses, lengths
@@ -1635,12 +1639,15 @@ class _CopyingMooncake(FakeMooncakeWrapper):
     def batch_transfer_sync_read(
         self, target_hostname, buffers, peer_buffer_addresses, lengths
     ) -> int:
+        if self.read_error is not None:
+            raise self.read_error
         self.read_lengths.append(list(lengths))
         for dst, src, length in zip(buffers, peer_buffer_addresses, lengths):
             ctypes.memmove(dst, src, length)
         return 0
 
     def register_memory(self, buffer_addr, capacity) -> int:
+        self.registered.append(capacity)
         return 0
 
 
@@ -1690,7 +1697,8 @@ async def _send_with_copying_engine(
         worker.shutdown()
     _, payload = sock.send_multipart.call_args.args[0]
     finished = "p-req" in worker.finished_sending_reqs
-    return src, worker._xfer_resp_decoder.decode(payload), finished, log_error
+    response = worker._xfer_resp_decoder.decode(payload)
+    return src, response, finished, log_error, send_meta
 
 
 @pytest.mark.asyncio
@@ -1704,7 +1712,7 @@ async def test_verify_transfers_reads_back_every_written_byte(
     monkeypatch.setattr(mooncake_connector, "_VERIFY_BUFFER_BYTES", buffer_bytes)
     engine = _CopyingMooncake()
     dst = torch.zeros((16, 1024), dtype=torch.uint8)
-    src, response, finished, _ = await _send_with_copying_engine(
+    src, response, finished, _, _ = await _send_with_copying_engine(
         {"verify_transfers": True}, engine, dst
     )
 
@@ -1729,7 +1737,7 @@ async def test_verify_transfers_fails_pull_on_mismatch(
     # D's block 5 holds P's block 3.
     engine = _CopyingMooncake(corrupt_addr=dst[5].data_ptr() + 100)
     extra_config = {"verify_transfers": True} if verify else None
-    _, response, finished, log_error = await _send_with_copying_engine(
+    _, response, finished, log_error, _ = await _send_with_copying_engine(
         extra_config, engine, dst
     )
 
@@ -1747,6 +1755,25 @@ async def test_verify_transfers_fails_pull_on_mismatch(
         assert response.ok_reqs == ["d-req"]
         assert finished
     assert engine.read_lengths == expected_reads
+    # The read-back buffer exists only with verify_transfers, once.
+    assert engine.registered == (
+        [mooncake_connector._VERIFY_BUFFER_BYTES] if verify else []
+    )
+
+
+@pytest.mark.asyncio
+async def test_verify_transfers_error_fails_pull():
+    dst = torch.zeros((16, 1024), dtype=torch.uint8)
+    engine = _CopyingMooncake(read_error=RuntimeError("CUDA out of memory"))
+    _, response, finished, _, send_meta = await _send_with_copying_engine(
+        {"verify_transfers": True}, engine, dst
+    )
+
+    assert response.ok_reqs is None
+    assert response.err_reqs == ["d-req"]
+    assert response.err_msg == "Mooncake read-back failed: CUDA out of memory"
+    assert not finished
+    assert send_meta.sending == 0
 
 
 @pytest.mark.parametrize(
@@ -3297,6 +3324,40 @@ def test_sliced_packed_mla_registers_each_layer_view():
     reg.assert_called_once()
     assert reg.call_args[0][0] == [backing.data_ptr()]
     assert worker.region_row_offsets == [0, page]
+
+
+def test_describe_kv_addr_names_packed_mla_column():
+    """Packed MLA layers share each row, so an address maps by its column."""
+    page = 1024
+    layers = [_layer_name(0), _layer_name(1)]
+    with mooncake_register_worker(
+        KVCacheConfig(
+            num_blocks=4,
+            kv_cache_tensors=[],
+            kv_cache_groups=[
+                KVCacheGroupSpec(
+                    layers,
+                    MLAAttentionSpec(
+                        block_size=maybe_update_block_size(16),
+                        num_kv_heads=1,
+                        head_size=64,
+                        dtype=torch.uint8,
+                    ),
+                )
+            ],
+        ),
+        kv_role="kv_producer",
+    ) as (worker, _):
+        backing = torch.zeros((4, page * len(layers)), dtype=torch.uint8)
+        worker.register_kv_caches(
+            {
+                layer: backing[:, i * page : (i + 1) * page]
+                for i, layer in enumerate(layers)
+            }
+        )
+    for i, layer in enumerate(layers):
+        addr = backing[2].data_ptr() + i * page + 100
+        assert worker._describe_kv_addr(addr) == f"{layer} block 2 offset 100"
 
 
 async def _copy_packed_slices(
