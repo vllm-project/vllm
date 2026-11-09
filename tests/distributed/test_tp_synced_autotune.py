@@ -53,10 +53,13 @@ def _picked_block(rank: int, sync: bool) -> list[int]:
         mask = offs < n
         tl.store(dst + offs, tl.load(src + offs, mask=mask), mask=mask)
 
-    src = torch.arange(1000, dtype=torch.float32, device="cuda")
+    # A per-case size gives each case its own autotune key: Triton may reuse cached
+    # autotune results across processes, which would hide the per-rank choice.
+    n = 1000 if sync else 1001
+    src = torch.arange(n, dtype=torch.float32, device="cuda")
     dst = torch.empty_like(src)
     with override_forward_context(SimpleNamespace()):  # type: ignore[arg-type]
-        copy_kernel[lambda m: (triton.cdiv(1000, m["BLOCK"]),)](src, dst, 1000)
+        copy_kernel[lambda m: (triton.cdiv(n, m["BLOCK"]),)](src, dst, n)
     torch.accelerator.synchronize()
     torch.testing.assert_close(dst, src)
 
