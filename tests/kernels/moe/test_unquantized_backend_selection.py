@@ -23,7 +23,9 @@ skipif_not_cuda_rocm = pytest.mark.skipif(
 )
 
 
-@pytest.fixture(params=["module", "oracle", "oracle_with_config"])
+@pytest.fixture(
+    params=["module", "oracle", "oracle_with_config", "oracle_with_keyword_config"]
+)
 def select_backend(request):
     if request.param == "module":
         return select_unquantized_moe_backend
@@ -32,6 +34,8 @@ def select_backend(request):
         oracle = UnquantizedMoEKernelOracle(moe_config)
         if request.param == "oracle_with_config":
             return oracle.select_backend(moe_config)
+        if request.param == "oracle_with_keyword_config":
+            return oracle.select_backend(moe_config=moe_config)
         return oracle.select_backend()
 
     return select
@@ -733,4 +737,5 @@ def test_oracle_priority_lists_are_independent():
 
     assert expected
     assert oracle.get_priority_backends() == expected
+    assert oracle.get_priority_backends(moe_config=config) == expected
     assert UnquantizedMoEKernelOracle(config).get_priority_backends() == expected
