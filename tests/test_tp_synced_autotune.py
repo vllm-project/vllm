@@ -19,6 +19,7 @@ def patched_bench(monkeypatch: pytest.MonkeyPatch):
     Autotuner = triton.runtime.autotuner.Autotuner
     original = Autotuner._bench
     monkeypatch.setattr(tp_synced_autotune, "_installed", False)
+    monkeypatch.setattr(tp_synced_autotune, "_layout_ok", True)
     monkeypatch.setattr(Autotuner, "_bench", lambda self, *a, **k: self.local_timing)
     tp_synced_autotune.install()
     yield Autotuner
@@ -52,3 +53,33 @@ def test_install_is_idempotent(patched_bench):
     first = patched_bench._bench
     tp_synced_autotune.install()
     assert patched_bench._bench is first
+
+
+def _layout(ep=False, sp_moe=False, dcp=1, pcp=1):
+    return SimpleNamespace(
+        enable_expert_parallel=ep,
+        use_sequence_parallel_moe=sp_moe,
+        decode_context_parallel_size=dcp,
+        prefill_context_parallel_size=pcp,
+    )
+
+
+@pytest.mark.parametrize(
+    "layout, ok",
+    [
+        (_layout(), True),
+        (_layout(ep=True), False),
+        (_layout(sp_moe=True), False),
+        (_layout(dcp=2), False),
+        (_layout(pcp=2), False),
+    ],
+)
+def test_configure_disables_rank_dependent_layouts(monkeypatch, layout, ok):
+    monkeypatch.setattr(tp_synced_autotune, "_layout_ok", None)
+    tp_synced_autotune.configure(layout)
+    assert tp_synced_autotune._layout_ok is ok
+
+
+def test_no_sync_before_configure(monkeypatch):
+    monkeypatch.setattr(tp_synced_autotune, "_layout_ok", None)
+    assert tp_synced_autotune._sync_group() is None

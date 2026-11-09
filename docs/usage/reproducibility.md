@@ -39,3 +39,9 @@ for workflows such as speculative decoding. For more information, see: <https://
 
     By default, `VLLM_ENABLE_V1_MULTIPROCESSING=1` so you can use vLLM without having to worry about
     accidentally making deterministic subsequent operations that rely on random state.
+
+## Identical results across tensor-parallel ranks
+
+Triton autotune benchmarks candidate kernel configs on each GPU, so tensor-parallel ranks can choose different configs for the same kernel and shape, and compute results that differ in the last bits. Plain tensor parallelism hides this: the all-reduce after each block gives every rank the same sum. Code where ranks compute the same tensors on their own, with no all-reduce after them (for example blocks replicated on every rank), lets the ranks drift apart.
+
+Set `VLLM_TRITON_SYNC_AUTOTUNE_TP=1` to make every rank use tensor-parallel rank 0's autotune timings, so all ranks choose the same configs. Syncing happens only inside model forward passes and costs one CPU broadcast per benchmarked config, the first time a kernel meets a new shape. It is turned off, with a warning, under expert parallelism, sequence-parallel MoE and context parallelism, where ranks may autotune different shapes. It does not make results reproducible across runs; for that, see the sections above.
