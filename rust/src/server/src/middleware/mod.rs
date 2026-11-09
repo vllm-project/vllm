@@ -4,6 +4,7 @@
 mod access_log;
 mod auth;
 mod cors;
+mod error_log;
 mod load;
 mod metrics;
 mod offload;
@@ -12,6 +13,7 @@ mod request_id;
 pub use access_log::log_access;
 pub use auth::authenticate_api_key;
 pub use cors::{cors_layer, strip_cors_on_no_origin};
+pub use error_log::log_error_response;
 pub use load::track_server_load;
 pub use metrics::track_http_metrics;
 pub(crate) use offload::request_runtime_layer;

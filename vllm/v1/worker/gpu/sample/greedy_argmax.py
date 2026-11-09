@@ -36,10 +36,10 @@ def _argmax_finish(PV, PI, OUT, SPLITS: tl.constexpr, BLOCK: tl.constexpr):
 
 
 def greedy_argmax(logits: torch.Tensor) -> torch.Tensor:
-    """``logits.argmax(dim=-1)`` over a large vocabulary, split across CTAs.
+    """`logits.argmax(dim=-1)` over a large vocabulary, split across CTAs.
 
     Ties resolve to the first index. NaN logits are treated as -inf, so a row
-    with NaN may differ from ``torch.argmax``, which returns the NaN's index.
+    with NaN may differ from `torch.argmax`, which returns the NaN's index.
     """
     if (
         not logits.is_cuda
