@@ -32,7 +32,11 @@ DECODE_METRICS_URLS = os.environ.get(
 BLOCK_SIZE = int(os.environ.get("DECODE_BLOCK_SIZE", "128"))
 NUM_PROMPTS = int(os.environ.get("NUM_TRANSFER_PROMPTS", "8"))
 # Fraction of each prompt's full blocks that must come from the external tier.
-MIN_HIT_FRACTION = 0.5
+# Half the prompts missing, e.g. requests routed to the wrong source, stays
+# below it.
+MIN_HIT_FRACTION = 0.75
+# Counters are published from scheduler stats; give the last step a moment.
+COUNTER_TIMEOUT_S = 15
 EXPECT_TRANSFER = os.environ.get("EXPECT_TRANSFER", "1") == "1"
 HITS_METRIC = "vllm:external_prefix_cache_hits"
 
@@ -82,10 +86,8 @@ def _external_hits() -> float:
     return total
 
 
-def test_decoder_pulls_kv_over_p2p():
-    client = openai.OpenAI(api_key="EMPTY", base_url=PROXY_URL)
-    before = _external_hits()
-
+def _send_round(client: openai.OpenAI) -> int:
+    """Send NUM_PROMPTS unique prompts; return their loadable token count."""
     expected_tokens = 0
     for _ in range(NUM_PROMPTS):
         completion = client.completions.create(
@@ -99,8 +101,41 @@ def test_decoder_pulls_kv_over_p2p():
         # The last prompt token is always recomputed, so only full blocks
         # before it can be loaded from the external tier.
         expected_tokens += (prompt_tokens - 1) // BLOCK_SIZE * BLOCK_SIZE
-
     assert expected_tokens > 0, "prompts too short to span a full block"
+    return expected_tokens
+
+
+def _settled_hits(timeout_s: float = COUNTER_TIMEOUT_S) -> float:
+    """Read the hit counter once it has stopped moving for a second."""
+    deadline = time.monotonic() + timeout_s
+    last = _external_hits()
+    while time.monotonic() < deadline:
+        time.sleep(1)
+        current = _external_hits()
+        if current == last:
+            return current
+        last = current
+    return last
+
+
+def _hits_since(before: float, target: float, timeout_s: float) -> float:
+    deadline = time.monotonic() + timeout_s
+    delta = _external_hits() - before
+    while delta < target and time.monotonic() < deadline:
+        time.sleep(1)
+        delta = _external_hits() - before
+    return delta
+
+
+def test_decoder_pulls_kv_over_p2p():
+    client = openai.OpenAI(api_key="EMPTY", base_url=PROXY_URL)
+    # In p2p mode a decoder dials a source on the first request that names
+    # it, and a lookup made while that handshake is pending prefills locally.
+    # An unmeasured round through the same proxy round-robin connects every
+    # prefiller/decoder pair first.
+    _send_round(client)
+    before = _settled_hits()
+    expected_tokens = _send_round(client)
 
     if not EXPECT_TRANSFER:
         # Let any late counter update land before asserting nothing moved.
@@ -114,14 +149,7 @@ def test_decoder_pulls_kv_over_p2p():
         return
 
     min_hits = MIN_HIT_FRACTION * expected_tokens
-
-    # Counters are published from scheduler stats; give the last step a moment.
-    deadline = time.monotonic() + 15
-    delta = _external_hits() - before
-    while delta < min_hits and time.monotonic() < deadline:
-        time.sleep(1)
-        delta = _external_hits() - before
-
+    delta = _hits_since(before, expected_tokens, COUNTER_TIMEOUT_S)
     print(
         f"external prefix cache hits: +{delta:.0f} tokens "
         f"(full-block prompt tokens: {expected_tokens}, need >= {min_hits:.0f})"
