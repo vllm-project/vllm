@@ -310,8 +310,6 @@ class EplbState:
         """
         Device index for the async EPLB worker thread.
         """
-        # NOTE: "npu" added so the async EPLB worker gets a valid device index
-        # on Ascend (otherwise every rank's async thread dies on assert).
         if self.device.type in ("cuda", "xpu", "npu"):
             self.device_index = self.device.index
             if self.device_index is None and torch.accelerator.is_available():
