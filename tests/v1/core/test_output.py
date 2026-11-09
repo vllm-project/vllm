@@ -295,8 +295,8 @@ def test_new_request_data_from_request_reuses_stripped_mm_features() -> None:
         _mm_stripped_prefix=[],
     )
 
-    first = NewRequestData.from_request(request, block_ids=([],))
-    second = NewRequestData.from_request(request, block_ids=([],))
+    first = NewRequestData.from_request(request, block_ids=([],), prefill_token_ids=[])
+    second = NewRequestData.from_request(request, block_ids=([],), prefill_token_ids=[])
 
     assert len(first.mm_features) == 40
     assert first.mm_features[0].data is None
