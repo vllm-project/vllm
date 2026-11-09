@@ -3,7 +3,7 @@
 This page is for authors of [custom speculators](README.md#custom-speculators-experimental)
 on the V2 model runner. A speculator may choose the rows the target verifies, how
 many candidates the next round takes, the accepted path through a tree, and the
-kernels that verify and commit trees. Every part has a default, and a speculator
+layers and kernels that verify and commit trees. Every part has a default, and a speculator
 overrides only the parts it needs. vLLM describes and checks what each part is
 given and returns; the tree kernels themselves come from the speculator.
 
@@ -206,12 +206,9 @@ next step plans over them.
 
 Every kernel that speculative decoding adds is in a `KernelRegistry`
 (`vllm/v1/worker/gpu/spec_decode/kernels.py`). A key is a layer kind and an op,
-written as `"<layer kind>/<op>"` in logs:
-
-| Op | Keys | What it does |
-| --- | --- | --- |
-| `commit` | `layout:paged_token`, `layout:recurrent_state` | Moves what the accepted path wrote to where the next step reads it: the attention KV, or a recurrent layer's state. |
-
+written as `"<layer kind>/<op>"` in logs. The one op is `commit`, keyed
+`layout:paged_token` (the attention KV) or `layout:recurrent_state` (a recurrent
+layer's state): it moves what the accepted path wrote to where the next step reads it.
 
 The registry holds no kernel in tree. A speculator names, in
 `SpeculatorConfig.spec_kernels`, the qualified name of a factory that takes
@@ -248,8 +245,8 @@ Token `t` of request `b` is kernel token
 `block_table[b, t // table_block_size] * table_block_size + t % table_block_size`,
 split by `block_size` into block and slot.
 
-**Capture rules.** `verify` runs inside captured graphs: no host syncs and no
-data-sized allocations. A `commit` kernel that needs a warm-up runs it in `bind`,
+**Capture rules.** `commit` and the tree attention backend run inside captured
+graphs: no host syncs and no data-sized allocations. A `commit` kernel that needs a warm-up runs it in `bind`,
 so failures surface at startup.
 
 ## Example: a tree speculator
@@ -306,14 +303,16 @@ class MyTreeSpeculator(EagleSpeculator):
 The config also names, in `spec_kernels`, a factory of a
 `layout:paged_token/commit` kernel, and the model runs a tree attention backend. The
 test plugin `tests/plugins/vllm_add_test_speculators` has PyTorch references of
-all three (`reference.py`, `tree_attn.py`).
+the tree walk and the KV commit (`reference.py`) and of a tree attention backend
+(`tree_attn.py`).
 
 ## Limits
 
 - Pipeline parallelism (the tree path is not broadcast between stages), prefill and
   decode context parallelism, batch-sharded sampling and micro-batching run trees
   as chains.
-- `plan` is not called under adaptive verification, which sets its own budget.
+- A speculator that overrides `plan` fails at startup under adaptive verification,
+  which sets each request's verified drafts itself.
 - Overlapping the drafter with the target forward is not part of the contract.
 - The KV and recurrent-state pools are sized for the declared resources, even when
   the model runs with less.
