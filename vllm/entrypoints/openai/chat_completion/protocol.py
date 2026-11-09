@@ -289,6 +289,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
     top_k: int | None = None
     min_p: float | None = None
     repetition_penalty: float | None = None
+    elastic_phase: Literal["full", "sliced", "auto"] | None = None
     watermarking: bool | None = None
     length_penalty: float = 1.0
     stop_token_ids: list[int] | None = []
@@ -717,6 +718,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
     def to_beam_search_params(
         self, max_tokens: int, default_sampling_params: dict
     ) -> BeamSearchParams:
+        if self.elastic_phase is not None:
+            raise ValueError("Beam search is not supported for Elastic models")
         n = self.n if self.n is not None else 1
         if (temperature := self.temperature) is None:
             temperature = default_sampling_params.get(
@@ -782,7 +785,9 @@ class ChatCompletionRequest(OpenAIBaseModel):
         if prompt_logprobs is None and self.echo:
             prompt_logprobs = self.top_logprobs
 
-        extra_args: dict[str, Any] = self.vllm_xargs if self.vllm_xargs else {}
+        extra_args: dict[str, Any] = dict(self.vllm_xargs or {})
+        if self.elastic_phase is not None:
+            extra_args["elastic_phase"] = self.elastic_phase
         if self.kv_transfer_params:
             # Pass in kv_transfer_params via extra_args
             extra_args["kv_transfer_params"] = self.kv_transfer_params

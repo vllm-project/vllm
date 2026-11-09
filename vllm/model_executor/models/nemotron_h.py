@@ -835,7 +835,13 @@ class NemotronHForCausalLM(
         super().__init__()
         self.config = config
         self.scheduler_config = scheduler_config
-        self.model = NemotronHModel(
+        model_cls: type[nn.Module] = NemotronHModel
+        if getattr(config, "elastic_use_lazy_slicing", False) is True:
+            # The Elastic subclass imports the base model from this module.
+            from .nemotron_h_elastic import NemotronHElasticModel
+
+            model_cls = NemotronHElasticModel
+        self.model = model_cls(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
 
@@ -907,6 +913,9 @@ class NemotronHForCausalLM(
         )
 
         return hidden_states
+
+    def set_elastic_phase(self, phase: str) -> None:
+        self.model.phase = phase
 
     def compute_logits(
         self,

@@ -7,6 +7,7 @@ from typing import Any, Literal
 
 import vllm.envs as envs
 from vllm.config import VllmConfig
+from vllm.config.elastic import elastic_phase
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs import (
     EngineInput,
@@ -140,6 +141,20 @@ class InputProcessor:
         """
         watermarking: bool | None = None
         if isinstance(params, SamplingParams):
+            if params.extra_args and "elastic_phase" in params.extra_args:
+                try:
+                    elastic_phase(params.extra_args)
+                except ValueError as exc:
+                    raise VLLMValidationError(
+                        str(exc), parameter="elastic_phase"
+                    ) from exc
+                if not getattr(
+                    self.model_config.hf_config, "elastic_use_lazy_slicing", False
+                ):
+                    raise VLLMValidationError(
+                        "elastic_phase requires an Elastic model",
+                        parameter="elastic_phase",
+                    )
             supported_generation_tasks = [
                 task for task in supported_tasks if task in GENERATION_TASKS
             ]
@@ -376,6 +391,13 @@ class InputProcessor:
     ) -> EngineCoreRequest:
         watermarking = self._validate_params(params, supported_tasks)
         self._validate_lora(lora_request)
+        if resumable and getattr(
+            self.model_config.hf_config, "elastic_use_lazy_slicing", False
+        ):
+            raise VLLMValidationError(
+                "Elastic models do not support resumable input sessions",
+                parameter="resumable",
+            )
 
         parallel_config = self.vllm_config.parallel_config
         dp_size = parallel_config.data_parallel_size
