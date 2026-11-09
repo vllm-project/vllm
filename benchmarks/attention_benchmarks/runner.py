@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""
-Standard attention benchmark runner - shared utilities for non-MLA benchmarks.
+"""Standard attention benchmark runner - shared utilities for non-MLA benchmarks.
 
 This module provides helpers for running standard attention backends
 (FlashAttention, Triton, FlashInfer) with real vLLM integration.
@@ -37,6 +36,7 @@ from vllm.config import (
     set_current_vllm_config,
 )
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.attention.backends.utils import (
     CommonAttentionMetadata,
     get_supported_kv_cache_layouts,
@@ -49,6 +49,7 @@ from vllm.v1.kv_cache_interface import (
     compute_layer_kv_cache_shape_bytes,
     compute_layout_strides,
     create_kv_cache_views,
+    get_kv_quant_mode,
 )
 
 # ============================================================================
@@ -57,8 +58,7 @@ from vllm.v1.kv_cache_interface import (
 
 
 def _get_backend_config(backend: str) -> dict:
-    """
-    Get backend configuration from AttentionBackendEnum.
+    """Get backend configuration from AttentionBackendEnum.
 
     Args:
         backend: Backend name matching AttentionBackendEnum exactly
@@ -66,6 +66,7 @@ def _get_backend_config(backend: str) -> dict:
 
     Returns:
         Dict with backend_class
+
     """
     from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
@@ -143,15 +144,16 @@ def _build_common_attn_metadata(
 def _create_vllm_config(
     config: BenchmarkConfig,
     max_num_blocks: int,
+    max_model_len: int = 0,
 ) -> VllmConfig:
     """Create a VllmConfig for benchmarking with mock model methods."""
     model_config = ModelConfig(
-        model="meta-llama/Meta-Llama-3-8B",
-        tokenizer="meta-llama/Meta-Llama-3-8B",
+        model=config.model,
+        tokenizer=config.model,
         trust_remote_code=False,
         dtype="auto",  # Use model's native dtype
         seed=0,
-        max_model_len=1024,
+        max_model_len=max(1024, max_model_len),
     )
 
     cache_config = CacheConfig(
@@ -165,7 +167,7 @@ def _create_vllm_config(
     scheduler_config = SchedulerConfig(
         max_num_seqs=256,
         max_num_batched_tokens=8192,
-        max_model_len=8192,
+        max_model_len=max(8192, max_model_len),
         is_encoder_decoder=False,
         enable_chunked_prefill=True,
     )
@@ -343,6 +345,22 @@ def _create_input_tensors(
     return q_list, k_list, v_list
 
 
+def _kv_cache_spec(config: BenchmarkConfig, dtype: torch.dtype) -> FullAttentionSpec:
+    if config.kv_cache_dtype == "auto":
+        cache_dtype = dtype
+    elif config.kv_cache_dtype.startswith("fp8"):
+        cache_dtype = current_platform.fp8_dtype()
+    else:
+        cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[config.kv_cache_dtype]
+    return FullAttentionSpec(
+        block_size=config.block_size,
+        num_kv_heads=config.num_kv_heads,
+        head_size=config.head_dim,
+        dtype=cache_dtype,
+        kv_quant_mode=get_kv_quant_mode(config.kv_cache_dtype),
+    )
+
+
 def _create_kv_cache(
     config: BenchmarkConfig,
     max_num_blocks: int,
@@ -352,16 +370,7 @@ def _create_kv_cache(
     layout: KVCacheLayout,
 ) -> list:
     """Create KV cache tensors for all layers using the standard allocator."""
-    if config.kv_cache_dtype.startswith("fp8"):
-        cache_dtype = current_platform.fp8_dtype()
-    else:
-        cache_dtype = dtype
-    spec = FullAttentionSpec(
-        block_size=config.block_size,
-        num_kv_heads=config.num_kv_heads,
-        head_size=config.head_dim,
-        dtype=cache_dtype,
-    )
+    spec = _kv_cache_spec(config, dtype)
     # Apply the backend's page customization, as the worker does for the real spec.
     spec = backend_class.customize_spec(spec)
     total_bytes = (
@@ -409,6 +418,7 @@ def _run_single_benchmark(
     Returns:
         (timing_stats, mem_stats) where timing_stats is a dict with
         mean/std/min/max in seconds per layer.
+
     """
     total_q = q_list[0].shape[0]
     v_dim = config.v_head_dim if config.v_head_dim is not None else config.head_dim
@@ -458,8 +468,7 @@ def _run_single_benchmark(
 
 
 def run_attention_benchmark(config: BenchmarkConfig) -> BenchmarkResult:
-    """
-    Run standard attention benchmark with real kernels.
+    """Run standard attention benchmark with real kernels.
 
     Supports: FLASH_ATTN, TRITON_ATTN, FLASHINFER
 
@@ -468,6 +477,7 @@ def run_attention_benchmark(config: BenchmarkConfig) -> BenchmarkResult:
 
     Returns:
         BenchmarkResult with timing and memory statistics
+
     """
     device = torch.device(config.device)
     torch.accelerator.set_device_index(device)
@@ -492,7 +502,7 @@ def run_attention_benchmark(config: BenchmarkConfig) -> BenchmarkResult:
     # Suppress vLLM logs during setup to reduce spam
     with log_warnings_and_errors_only():
         # Create vllm_config first - uses model's native dtype via "auto"
-        vllm_config = _create_vllm_config(config, max_num_blocks)
+        vllm_config = _create_vllm_config(config, max_num_blocks, max_kv)
         dtype = vllm_config.model_config.dtype
 
         # Wrap everything in set_current_vllm_config context
@@ -510,12 +520,7 @@ def run_attention_benchmark(config: BenchmarkConfig) -> BenchmarkResult:
                 q_lens, kv_lens, config.block_size, device
             )
 
-            kv_cache_spec = FullAttentionSpec(
-                block_size=config.block_size,
-                num_kv_heads=config.num_kv_heads,
-                head_size=config.head_dim,
-                dtype=dtype,
-            )
+            kv_cache_spec = backend_class.customize_spec(_kv_cache_spec(config, dtype))
 
             builder = _create_metadata_builder(
                 backend_class, kv_cache_spec, vllm_config, device, config.backend

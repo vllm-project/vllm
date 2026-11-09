@@ -11,9 +11,9 @@ pub use vllm_parser::tool::Tool as ChatTool;
 use vllm_text::TextDecodeOptions;
 pub use vllm_text::{PromptTruncation, SamplingParams};
 
-use crate::AssistantMessageExt;
 use crate::error::{Error, Result};
 use crate::event::{AssistantContentBlock, AssistantMessage};
+use crate::{AssistantMessageExt, EffortValue};
 
 /// Role label for one text-only chat message.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -24,6 +24,9 @@ pub enum ChatRole {
     User,
     Assistant,
     ToolResponse,
+    /// Role outside the standard set, passed to chat templates unchanged.
+    #[serde(untagged)]
+    Custom(String),
 }
 
 /// One text-only chat content part in OpenAI-style block format.
@@ -55,6 +58,10 @@ pub enum ChatContentPart {
         audio_url: String,
         uuid: Option<String>,
     },
+    /// A reference to a tool by name, as tool search returns it in a tool
+    /// result. Renderers that support it expand or name the referenced tool;
+    /// the others reject it.
+    ToolReference { name: String },
     // ImageData...
     // VideoData...
     // ImageEmbeds...
@@ -100,8 +107,13 @@ impl ChatContentPart {
         }
     }
 
+    /// Construct one tool reference content part naming the given tool.
+    pub fn tool_reference(name: impl Into<String>) -> Self {
+        Self::ToolReference { name: name.into() }
+    }
+
     /// Return the text content of this part when it's a text block, or an
-    /// "unsupported multimodal content" error otherwise.
+    /// "unsupported content" error otherwise.
     pub(crate) fn as_text(&self) -> Result<&str> {
         match self {
             Self::Text { text } => Ok(text),
@@ -109,6 +121,7 @@ impl ChatContentPart {
             Self::VideoUrl { .. } => Err(Error::UnsupportedMultimodalContent("video_url")),
             Self::InputAudio { .. } => Err(Error::UnsupportedMultimodalContent("input_audio")),
             Self::AudioUrl { .. } => Err(Error::UnsupportedMultimodalContent("audio_url")),
+            Self::ToolReference { .. } => Err(Error::UnsupportedContentPart("tool_reference")),
         }
     }
 
@@ -120,7 +133,7 @@ impl ChatContentPart {
     /// Return whether this part contains any multimodal content.
     pub(crate) fn is_multimodal(&self) -> bool {
         match self {
-            Self::Text { .. } => false,
+            Self::Text { .. } | Self::ToolReference { .. } => false,
             Self::ImageUrl { .. }
             | Self::VideoUrl { .. }
             | Self::InputAudio { .. }
@@ -154,6 +167,47 @@ impl ChatContent {
         })
     }
 
+    /// Append the content of a following message, as when two messages are
+    /// merged into one. Text on either side of the boundary is joined with a
+    /// blank line, as Python vLLM merges system messages; parts keep their
+    /// order. Empty content adds nothing.
+    pub(crate) fn append(&mut self, other: ChatContent) {
+        const SEPARATOR: &str = "\n\n";
+        if other.is_empty() && !other.has_multimodal() {
+            return;
+        }
+        if self.is_empty() && !self.has_multimodal() {
+            *self = other;
+            return;
+        }
+        match (&mut *self, other) {
+            (Self::Text(text), Self::Text(other)) => {
+                text.push_str(SEPARATOR);
+                text.push_str(&other);
+            }
+            (_, other) => {
+                let mut parts = std::mem::replace(self, Self::Text(String::new())).into_parts();
+                let mut other = other.into_parts().into_iter();
+                if let Some(ChatContentPart::Text { text }) = parts.last_mut()
+                    && let Some(ChatContentPart::Text { text: next }) = other.as_slice().first()
+                {
+                    text.push_str(SEPARATOR);
+                    text.push_str(next);
+                    other.next();
+                }
+                parts.extend(other);
+                *self = Self::Parts(parts);
+            }
+        }
+    }
+
+    fn into_parts(self) -> Vec<ChatContentPart> {
+        match self {
+            Self::Text(text) => vec![ChatContentPart::Text { text }],
+            Self::Parts(parts) => parts,
+        }
+    }
+
     /// Return whether there's no text content or only empty text blocks.
     pub fn is_empty(&self) -> bool {
         match self {
@@ -168,6 +222,18 @@ impl ChatContent {
             Self::Text(_) => false,
             Self::Parts(parts) => parts.iter().any(ChatContentPart::is_multimodal),
         }
+    }
+
+    /// Return the names of the tools this content references, in order.
+    pub fn tool_references(&self) -> impl Iterator<Item = &str> {
+        let parts = match self {
+            Self::Text(_) => &[][..],
+            Self::Parts(parts) => parts.as_slice(),
+        };
+        parts.iter().filter_map(|part| match part {
+            ChatContentPart::ToolReference { name } => Some(name.as_str()),
+            _ => None,
+        })
     }
 }
 
@@ -212,6 +278,10 @@ pub enum ChatMessage {
         content: ChatContent,
         tool_call_id: String,
     },
+    /// Message content under a role outside the standard set, passed to chat
+    /// templates unchanged.
+    #[serde(untagged)]
+    Custom { role: String, content: ChatContent },
 }
 
 impl ChatMessage {
@@ -230,6 +300,7 @@ impl ChatMessage {
                      use ChatMessage::tool_response() instead"
                 )
             }
+            ChatRole::Custom(role) => Self::custom(role, content),
         }
     }
 
@@ -286,6 +357,14 @@ impl ChatMessage {
         }
     }
 
+    /// Construct one chat message with a role outside the standard set.
+    pub fn custom(role: impl Into<String>, content: impl Into<ChatContent>) -> Self {
+        Self::Custom {
+            role: role.into(),
+            content: content.into(),
+        }
+    }
+
     /// Return the chat role of this message.
     pub fn role(&self) -> ChatRole {
         match self {
@@ -294,6 +373,7 @@ impl ChatMessage {
             Self::User { .. } => ChatRole::User,
             Self::Assistant { .. } => ChatRole::Assistant,
             Self::ToolResponse { .. } => ChatRole::ToolResponse,
+            Self::Custom { role, .. } => ChatRole::Custom(role.clone()),
         }
     }
 
@@ -303,7 +383,8 @@ impl ChatMessage {
             Self::System { content }
             | Self::Developer { content, .. }
             | Self::User { content }
-            | Self::ToolResponse { content, .. } => content.try_flatten_to_text(),
+            | Self::ToolResponse { content, .. }
+            | Self::Custom { content, .. } => content.try_flatten_to_text(),
             Self::Assistant { content } => Ok(content.text()),
         }
     }
@@ -315,7 +396,8 @@ impl ChatMessage {
             Self::System { .. }
             | Self::Developer { .. }
             | Self::User { .. }
-            | Self::ToolResponse { .. } => None,
+            | Self::ToolResponse { .. }
+            | Self::Custom { .. } => None,
         }
     }
 
@@ -325,9 +407,23 @@ impl ChatMessage {
             Self::System { content }
             | Self::Developer { content, .. }
             | Self::User { content }
-            | Self::ToolResponse { content, .. } => content.has_multimodal(),
+            | Self::ToolResponse { content, .. }
+            | Self::Custom { content, .. } => content.has_multimodal(),
             Self::Assistant { .. } => false,
         }
+    }
+
+    /// Return the names of the tools this message references, in order.
+    fn tool_references(&self) -> impl Iterator<Item = &str> {
+        let content = match self {
+            Self::System { content }
+            | Self::Developer { content, .. }
+            | Self::User { content }
+            | Self::ToolResponse { content, .. }
+            | Self::Custom { content, .. } => Some(content),
+            Self::Assistant { .. } => None,
+        };
+        content.into_iter().flat_map(ChatContent::tool_references)
     }
 }
 
@@ -362,33 +458,6 @@ pub enum GenerationPromptMode {
     NoGenerationPrompt,
 }
 
-/// Effort level for reasoning models.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ReasoningEffort {
-    None,
-    Minimal,
-    Low,
-    Medium,
-    High,
-    XHigh,
-    Max,
-}
-
-impl ReasoningEffort {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::None => "none",
-            Self::Minimal => "minimal",
-            Self::Low => "low",
-            Self::Medium => "medium",
-            Self::High => "high",
-            Self::XHigh => "xhigh",
-            Self::Max => "max",
-        }
-    }
-}
-
 /// Chat-template-related request options.
 ///
 /// These are the small subset of chat controls that currently affect prompt
@@ -401,11 +470,15 @@ pub struct ChatOptions {
     pub generation_prompt_mode: GenerationPromptMode,
 
     /// Per-request Jinja chat template override. When set, this template is
-    /// used instead of the model's default chat template.
+    /// used instead of the model's default chat template. Only the HF renderer
+    /// honors it, and only with `--trust-request-chat-template`; native
+    /// renderers ignore it.
     pub chat_template: Option<String>,
 
-    /// Effort level exposed to chat templates for reasoning models.
-    pub reasoning_effort: Option<ReasoningEffort>,
+    /// Model-specific reasoning effort, typically `none`, `minimal`, `low`,
+    /// `medium`, `high`, `xhigh`, or `max`. Supported names and numeric ranges
+    /// are validated by the selected renderer or HF template.
+    pub reasoning_effort: Option<EffortValue>,
 
     /// Standard response format available to model-specific renderers.
     #[serde(default)]
@@ -460,6 +533,17 @@ pub enum ChatToolChoice {
     },
 }
 
+impl From<&ChatToolChoice> for xgrammar_structural_tag::ToolChoice {
+    fn from(tool_choice: &ChatToolChoice) -> Self {
+        match tool_choice {
+            ChatToolChoice::None => Self::none(),
+            ChatToolChoice::Auto => Self::auto(),
+            ChatToolChoice::Required => Self::required(),
+            ChatToolChoice::Function { name } => Self::function(name.clone()),
+        }
+    }
+}
+
 /// Resolved tool state shared by rendering, output parsing, and constraints.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ResolvedToolContext {
@@ -501,6 +585,18 @@ impl ResolvedToolContext {
             effective_tools.push(tool.clone());
         }
 
+        // Renderers look referenced tools up by name, so every reference must
+        // name a request-level or message-scoped tool.
+        if let Some(name) = messages
+            .iter()
+            .flat_map(ChatMessage::tool_references)
+            .find(|name| !names.contains(*name))
+        {
+            return Err(Error::ToolReferenceNotFound {
+                name: name.to_owned(),
+            });
+        }
+
         let tool_choice = requested_tool_choice.unwrap_or({
             if effective_tools.is_empty() {
                 ChatToolChoice::None
@@ -533,6 +629,17 @@ impl ResolvedToolContext {
     /// Return whether tool output parsing is active for this request.
     pub fn parsing_enabled(&self) -> bool {
         !matches!(self.tool_choice, ChatToolChoice::None) && !self.effective_tools.is_empty()
+    }
+
+    /// Drop request-level tools when `tool_choice` is `none`, so they are not
+    /// rendered into the prompt. Message-scoped tools stay, as they are part of
+    /// the chat history.
+    pub(crate) fn exclude_initial_tools_if_none(&mut self) {
+        if matches!(self.tool_choice, ChatToolChoice::None) {
+            // `new` places request-level tools first in `effective_tools`.
+            self.effective_tools.drain(..self.initial_tools.len());
+            self.initial_tools.clear();
+        }
     }
 }
 
@@ -590,6 +697,11 @@ pub struct ChatRequest {
     /// LoRA adapter selected for this request.
     #[serde(default)]
     pub lora_request: Option<LoraRequest>,
+    /// Whether to report the rendered prompt text through
+    /// [`ChatEventStream::prompt_text`](crate::ChatEventStream::prompt_text)
+    /// and [`CollectedAssistantMessage::prompt_text`](crate::CollectedAssistantMessage::prompt_text).
+    #[serde(default)]
+    pub return_prompt_text: bool,
 }
 
 impl ChatRequest {
@@ -611,6 +723,7 @@ impl ChatRequest {
             data_parallel_rank: None,
             session_id: None,
             lora_request: None,
+            return_prompt_text: false,
         }
     }
 
@@ -649,6 +762,11 @@ impl ChatRequest {
         &self.tool_context.effective_tools
     }
 
+    /// Return the available tool with this name, as a tool reference names it.
+    pub fn tool(&self, name: &str) -> Option<&ChatTool> {
+        self.tools().iter().find(|tool| tool.name == name)
+    }
+
     /// Return request-level tools before message-scoped declarations.
     ///
     /// Renderers should use [`Self::tools`] unless their prompt format places
@@ -673,26 +791,19 @@ impl ChatRequest {
         self.tool_context.parsing_enabled()
     }
 
-    /// Return the request-level thinking toggle when explicitly requested.
+    /// Return how many parsed tool calls may be surfaced, or `None` for no
+    /// limit.
     ///
-    /// We currently accept the two request kwargs `thinking` and
-    /// `enable_thinking`. Both must be booleans when present. If both are
-    /// present, they must have the same value. If neither key is provided,
-    /// return `None`.
-    pub(crate) fn enable_thinking(&self) -> Result<Option<bool>> {
-        let thinking = self.parse_template_bool("thinking")?;
-        let enable_thinking = self.parse_template_bool("enable_thinking")?;
-
-        match (thinking, enable_thinking) {
-            (None, None) => Ok(None),
-            (Some(thinking), Some(enable_thinking)) if thinking != enable_thinking => {
-                Err(Error::ChatTemplate(
-                    "template kwargs `thinking` and `enable_thinking` must match when both are set"
-                        .to_string(),
-                ))
-            }
-            (Some(thinking), _) => Ok(Some(thinking)),
-            (None, Some(enable_thinking)) => Ok(Some(enable_thinking)),
+    /// With tool parsing off (e.g. `tool_choice=none`), calls a parser still
+    /// recognizes are dropped rather than surfaced, matching Python's parser
+    /// engine.
+    pub(crate) fn max_tool_calls(&self) -> Option<usize> {
+        if !self.tool_parsing_enabled() {
+            Some(0)
+        } else if !self.parallel_tool_calls() {
+            Some(1)
+        } else {
+            None
         }
     }
 
@@ -710,23 +821,25 @@ impl ChatRequest {
 impl ChatRole {
     /// Return the chat-template role string used by the current text-only chat
     /// backend.
-    pub fn as_str(&self) -> &'static str {
+    pub fn as_str(&self) -> &str {
         match self {
             Self::System => "system",
             Self::Developer => "developer",
             Self::User => "user",
             Self::Assistant => "assistant",
             Self::ToolResponse => "tool_response",
+            Self::Custom(role) => role,
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use expect_test::expect;
     use serde_json::{json, to_value};
 
     use super::{
-        ChatContent, ChatContentPart, ChatMessage, ChatRequest, ChatRole, ChatTool, ChatToolChoice,
+        ChatContent, ChatContentPart, ChatMessage, ChatRole, ChatTool, ChatToolChoice,
         ResolvedToolContext,
     };
     use crate::Error;
@@ -781,6 +894,38 @@ mod tests {
     }
 
     #[test]
+    fn chat_content_append_joins_text_at_the_boundary() {
+        let image = || ChatContentPart::image_url("data:image/png;base64,a");
+        let append = |mut content: ChatContent, other: ChatContent| {
+            content.append(other);
+            match content {
+                ChatContent::Text(text) => format!("{text:?}"),
+                ChatContent::Parts(parts) => {
+                    let parts = parts.iter().map(|part| match part {
+                        ChatContentPart::Text { text } => format!("{text:?}"),
+                        _ => "<image>".to_string(),
+                    });
+                    format!("[{}]", parts.collect::<Vec<_>>().join(", "))
+                }
+            }
+        };
+        let appended = [
+            append("a".into(), "b".into()),
+            append("a".into(), vec![ChatContentPart::text("b"), image()].into()),
+            append(vec![ChatContentPart::text("a"), image()].into(), "b".into()),
+            append("".into(), vec![image()].into()),
+            append("a".into(), "".into()),
+        ];
+        expect![[r#"
+            "a\n\nb"
+            ["a\n\nb", <image>]
+            ["a", <image>, "b"]
+            [<image>]
+            "a""#]]
+        .assert_eq(&appended.join("\n"));
+    }
+
+    #[test]
     fn chat_content_try_flattens_text_parts_without_separators() {
         let content = ChatContent::Parts(vec![
             ChatContentPart::text("hello"),
@@ -817,6 +962,7 @@ mod tests {
                     "properties": {"city": {"type": "string"}},
                 }),
                 strict: Some(true),
+                defer_loading: None,
             }]),
         );
 
@@ -831,6 +977,7 @@ mod tests {
             description: None,
             parameters: json!({"type": "object"}),
             strict: None,
+            defer_loading: None,
         }
     }
 
@@ -887,6 +1034,24 @@ mod tests {
     }
 
     #[test]
+    fn resolved_tool_context_rejects_unknown_tool_references() {
+        let messages = vec![
+            ChatMessage::developer("", Some(vec![chat_tool("scoped")])),
+            ChatMessage::tool_response(
+                vec![
+                    ChatContentPart::tool_reference("lookup"),
+                    ChatContentPart::tool_reference("scoped"),
+                ],
+                "call_0",
+            ),
+        ];
+        ResolvedToolContext::new(&messages, vec![chat_tool("lookup")], None, true).unwrap();
+
+        let error = ResolvedToolContext::new(&messages, Vec::new(), None, true).unwrap_err();
+        assert!(matches!(error, Error::ToolReferenceNotFound { name } if name == "lookup"));
+    }
+
+    #[test]
     fn resolved_tool_context_validates_named_choice_against_effective_tools() {
         let messages = vec![ChatMessage::developer("", Some(vec![chat_tool("lookup")]))];
         let context = ResolvedToolContext::new(
@@ -917,58 +1082,6 @@ mod tests {
         assert!(matches!(
             error,
             Error::ToolChoiceFunctionNotFound { name } if name == "missing"
-        ));
-    }
-
-    #[test]
-    fn enable_thinking_is_none_when_no_kwargs_are_present() {
-        let request = ChatRequest::for_test();
-        assert_eq!(request.enable_thinking().unwrap(), None);
-    }
-
-    #[test]
-    fn enable_thinking_accepts_matching_duplicate_kwargs() {
-        let mut request = ChatRequest::for_test();
-        request.chat_options.template_kwargs.insert("thinking".to_string(), json!(true));
-        request
-            .chat_options
-            .template_kwargs
-            .insert("enable_thinking".to_string(), json!(true));
-
-        assert_eq!(request.enable_thinking().unwrap(), Some(true));
-    }
-
-    #[test]
-    fn enable_thinking_rejects_non_boolean_kwargs() {
-        let mut request = ChatRequest::for_test();
-        request
-            .chat_options
-            .template_kwargs
-            .insert("thinking".to_string(), json!("yes"));
-
-        assert!(matches!(
-            request.enable_thinking(),
-            Err(Error::ChatTemplate(message))
-                if message.contains("`thinking` must be a boolean")
-        ));
-    }
-
-    #[test]
-    fn enable_thinking_rejects_conflicting_duplicate_kwargs() {
-        let mut request = ChatRequest::for_test();
-        request
-            .chat_options
-            .template_kwargs
-            .insert("thinking".to_string(), json!(false));
-        request
-            .chat_options
-            .template_kwargs
-            .insert("enable_thinking".to_string(), json!(true));
-
-        assert!(matches!(
-            request.enable_thinking(),
-            Err(Error::ChatTemplate(message))
-                if message.contains("`thinking` and `enable_thinking` must match")
         ));
     }
 }

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import torch
 
@@ -10,6 +11,11 @@ from vllm.model_executor.layers.attention import MLAAttention
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.models.common.ops import fused_q_kv_rmsnorm
 from vllm.platforms import current_platform
+
+if TYPE_CHECKING:
+    from vllm.v1.attention.backends.mla.index_group import (
+        SparseMLAIndexGroupBuilder,
+    )
 
 
 @dataclass
@@ -30,6 +36,7 @@ class MLAModules:
     topk_indices_buffer: torch.Tensor | None
     indexer_rotary_emb: torch.nn.Module | None = None
     g_proj: torch.nn.Module | None = None
+    index_group_builder: "SparseMLAIndexGroupBuilder | None" = None
 
 
 # --8<-- [start:multi_head_latent_attention]
@@ -71,6 +78,7 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
         non_causal_multi_token_decode: bool = False,
         allow_short_prefill_indexer_scoring_skip: bool = False,
         fuse_qkv_rmsnorm: bool = False,
+        shardq_eligible: bool = False,
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -128,7 +136,9 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
             use_sparse=self.is_sparse,
             indexer=self.indexer,
             topk_indices_buffer=mla_modules.topk_indices_buffer,
+            index_group_builder=mla_modules.index_group_builder,
             non_causal_multi_token_decode=non_causal_multi_token_decode,
+            shardq_eligible=shardq_eligible,
         )
         indexer_op = getattr(self.indexer, "indexer_op", None)
         if indexer_op is not None and hasattr(
@@ -223,6 +233,8 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
 
         if self.indexer and self.is_sparse and not self.skip_topk:
             self.indexer(hidden_states, q_c, positions, self.indexer_rope_emb)
+        if self.is_sparse:
+            self.mla_attn.impl.record_logical_topk_ready()  # type: ignore[attr-defined]
 
         if llama_4_scaling is not None:
             q *= llama_4_scaling

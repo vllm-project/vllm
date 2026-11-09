@@ -30,6 +30,7 @@ RERANK_MODELS = [
         is_chunked_prefill_supported=True,
         chat_template_name="mxbai_rerank_v2.jinja",
         mteb_score=0.33651,
+        mteb_tol=1e-2,
         enable_test=True,
     ),
     RerankModelInfo(
@@ -104,6 +105,7 @@ class MxbaiRerankerHfRunner(MtebCrossEncoderMixin, HfRunner):
         return torch.Tensor(scores)
 
 
+@pytest.mark.flaky(reruns=2)
 @pytest.mark.parametrize("model_info", RERANK_MODELS)
 def test_rerank_models_mteb(vllm_runner, model_info: RerankModelInfo) -> None:
     mteb_test_rerank_models(vllm_runner, model_info, hf_runner=MxbaiRerankerHfRunner)

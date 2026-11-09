@@ -1,15 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""
-test that invalid blocks are evicted from prefix cache to prevent pollution.
+"""test that invalid blocks are evicted from prefix cache to prevent pollution.
 
 verifies that when sync-loading fails, invalid blocks are removed from the
 prefix cache hash table so future requests cannot match and reuse corrupted data.
 """
 
 from collections.abc import Callable
-from unittest.mock import Mock
 
 import pytest
 
@@ -17,6 +15,7 @@ from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.request import Request, RequestStatus
 
 from .utils import (
+    create_mock_connector,
     create_model_runner_output,
     create_request,
     create_scheduler,
@@ -39,8 +38,9 @@ def _make_get_num_new_matched_tokens(
 
 @pytest.fixture
 def fail_scheduler():
-    """scheduler with kv_load_failure_policy='fail'"""
+    """Scheduler with kv_load_failure_policy='fail'."""
     vllm_config = create_vllm_config()
+    assert vllm_config.kv_transfer_config is not None
     vllm_config.kv_transfer_config.kv_load_failure_policy = "fail"
     return create_scheduler(vllm_config)
 
@@ -48,8 +48,7 @@ def fail_scheduler():
 def test_invalid_blocks_evicted_prevents_cache_pollution(
     fail_scheduler: Scheduler,
 ):
-    """
-    verify invalid blocks are evicted to prevent future cache hits.
+    """Verify invalid blocks are evicted to prevent future cache hits.
 
     scenario:
     1. request 1 loads externally-computed blocks (sync mode)
@@ -75,7 +74,7 @@ def test_invalid_blocks_evicted_prevents_cache_pollution(
     }
 
     # mock connector indicating sync load
-    fail_scheduler.connector = Mock()
+    fail_scheduler.connector = create_mock_connector()
     fail_scheduler.connector.get_num_new_matched_tokens.side_effect = (
         _make_get_num_new_matched_tokens(req_num_new_matched_tokens, False)
     )
@@ -148,13 +147,9 @@ def test_invalid_blocks_evicted_prevents_cache_pollution(
     cached_blocks = (
         fail_scheduler.kv_cache_manager.block_pool.cached_block_hash_to_block
     )
-    cached_block_ids = {
-        b.block_id
-        for blocks_val in cached_blocks._cache.values()
-        for b in (
-            [blocks_val] if not isinstance(blocks_val, dict) else blocks_val.values()
-        )
-    }
+    cached_block_ids = set(cached_blocks._cache.values()).union(
+        *cached_blocks._dup_ids.values()
+    )
 
     for idx in range(invalid_block_idx, len(req_block_ids)):
         block_id = req_block_ids[idx]

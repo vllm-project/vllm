@@ -26,6 +26,7 @@ from vllm.model_executor.layers.quantization.inc.schemes import (
     INCMxfp4Scheme,
     INCMxfp8Scheme,
     INCWna16Scheme,
+    inc_wna16_moe,
     resolve_scheme,
 )
 from vllm.model_executor.layers.quantization.inc.schemes.inc_fp8_linear import (
@@ -45,10 +46,6 @@ from vllm.model_executor.layers.quantization.inc.schemes.inc_wna16_linear import
     INCWNA16LinearScheme,
     INCXPULinearMethod,
 )
-from vllm.model_executor.layers.quantization.inc.schemes.inc_wna16_scheme import (
-    _resolve_awq_moe,
-    _resolve_gptq_moe,
-)
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.platforms import current_platform
 
@@ -60,8 +57,8 @@ MODELS = [
     pytest.param(
         "Intel/Qwen2-0.5B-Instruct-int4-sym-AutoRound",
         marks=pytest.mark.skipif(
-            not (current_platform.is_cuda() or current_platform.is_xpu()),
-            reason="AWQ AutoRound model only supports CUDA/XPU backend for now.",
+            not (current_platform.is_cuda_alike() or current_platform.is_xpu()),
+            reason="AWQ AutoRound model only supports CUDA/ROCm/XPU backend for now.",
         ),
         id="auto_round:auto_awq",
     ),
@@ -74,18 +71,18 @@ MODELS = [
         id="auto_round:auto_gptq_int2_tp2",
     ),
     pytest.param(
-        "INC4AI/Qwen3-8B-MXFP8-AR",
+        "vllm-project/Qwen3-8B-MXFP8-AR",
         marks=pytest.mark.skipif(
-            not (current_platform.is_cuda() or current_platform.is_xpu()),
-            reason="MXFP8 AutoRound model only supports CUDA/XPU backend for now.",
+            not (current_platform.is_cuda_alike() or current_platform.is_xpu()),
+            reason="MXFP8 AutoRound model only supports CUDA/ROCm/XPU backend for now.",
         ),
         id="auto_round:llm_compressor_mxfp8",
     ),
     pytest.param(
-        "INC4AI/Qwen3-8B-fp-w8g128x128-for-ut",
+        "vllm-project/Qwen3-8B-fp-w8g128x128-for-ut",
         marks=pytest.mark.skipif(
-            not (current_platform.is_cuda()),
-            reason="Block-wise AutoRound model only supports CUDA backend for now.",
+            not (current_platform.is_cuda_alike()),
+            reason="Block-wise AutoRound model only supports CUDA/ROCm for now.",
         ),
         id="auto_round:block_wise_fp8_on_cuda",
     ),
@@ -95,16 +92,16 @@ QWEN3_AUTOROUND_MODELS = [
     pytest.param(
         "INCModel/Qwen3-1.7B-AutoRound-MXFP4-W4A4",
         marks=pytest.mark.skipif(
-            not (current_platform.is_cuda() or current_platform.is_xpu()),
-            reason="Qwen3-1.7B MXFP4 AutoRound model requires CUDA/XPU.",
+            not (current_platform.is_cuda_alike() or current_platform.is_xpu()),
+            reason="Qwen3-1.7B MXFP4 AutoRound model requires CUDA/ROCm/XPU.",
         ),
         id="auto_round:mxfp4:qwen3-1p7b",
     ),
     pytest.param(
         "INCModel/Qwen3-30B-A3B-12L-W4A16-test",
         marks=pytest.mark.skipif(
-            not (current_platform.is_cuda() or current_platform.is_xpu()),
-            reason="Qwen3-30B-A3B W4A16 AutoRound model requires CUDA/XPU.",
+            not (current_platform.is_cuda_alike() or current_platform.is_xpu()),
+            reason="Qwen3-30B-A3B W4A16 AutoRound model requires CUDA/ROCm/XPU.",
         ),
         id="auto_round:w4a16:qwen3-30b-a3b",
     ),
@@ -119,8 +116,8 @@ QWEN3_AUTOROUND_MODELS = [
     pytest.param(
         "INCModel/Qwen3-30B-A3B-12L-MXFP8-test",
         marks=pytest.mark.skipif(
-            not (current_platform.is_cuda() or current_platform.is_xpu()),
-            reason="Qwen3-30B-A3B MXFP8 AutoRound model requires CUDA/XPU.",
+            not (current_platform.is_cuda_alike() or current_platform.is_xpu()),
+            reason="Qwen3-30B-A3B MXFP8 AutoRound model requires CUDA/ROCm/XPU.",
         ),
         id="auto_round:mxfp8:qwen3-30b-a3b",
     ),
@@ -135,12 +132,12 @@ MODEL_RUNNER_KWARGS: dict[str, dict[str, Any]] = {
         "gpu_memory_utilization": 0.8,
         "max_model_len": 512,
     },
-    "INC4AI/Qwen3-8B-MXFP8-AR": {
+    "vllm-project/Qwen3-8B-MXFP8-AR": {
         "block_size": 64,
         "gpu_memory_utilization": 0.8,
         "max_model_len": 512,
     },
-    "INC4AI/Qwen3-8B-fp-w8g128x128-for-ut": {
+    "vllm-project/Qwen3-8B-fp-w8g128x128-for-ut": {
         "gpu_memory_utilization": 0.8,
         "max_model_len": 512,
     },
@@ -151,9 +148,9 @@ MODEL_RUNNER_KWARGS: dict[str, dict[str, Any]] = {
     not (
         current_platform.is_cpu()
         or current_platform.is_xpu()
-        or current_platform.is_cuda()
+        or current_platform.is_cuda_alike()
     ),
-    reason="Only supports CPU/XPU/CUDA backend.",
+    reason="Only supports CPU/XPU/CUDA/ROCm backend.",
 )
 @pytest.mark.parametrize("model", MODELS + QWEN3_AUTOROUND_MODELS)
 def test_auto_round_model(vllm_runner, model):
@@ -178,7 +175,7 @@ class DummyFusedMoE:
 
 
 def make_config(**overrides) -> INCConfig:
-    kwargs = {
+    kwargs: dict[str, Any] = {
         "weight_bits": 4,
         "group_size": 128,
         "sym": True,
@@ -193,7 +190,7 @@ def make_config(**overrides) -> INCConfig:
 
 
 def make_layer_config(**overrides) -> INCLayerConfig:
-    kwargs = {
+    kwargs: dict[str, Any] = {
         "bits": 4,
         "group_size": 128,
         "sym": True,
@@ -381,7 +378,7 @@ def test_inc_get_quant_method_unquantized_unknown_layer_returns_none() -> None:
 def test_inc_get_quant_method_unquantized_layer_with_model_prefix(
     layer_factory,
 ) -> None:
-    """``model.``-prefixed extra_config entries trigger early exit for both
+    """`model.`-prefixed extra_config entries trigger early exit for both
     LinearBase and ParallelLMHead layers."""
     config = make_config(extra_config={"model.layer": {"bits": 16}})
     layer = layer_factory()
@@ -394,7 +391,7 @@ def test_inc_get_quant_method_unquantized_layer_with_model_prefix(
 def test_inc_get_quant_method_unquantized_routed_experts_with_model_prefix(
     monkeypatch,
 ) -> None:
-    """``model.``-prefixed extra_config entries trigger early exit for
+    """`model.`-prefixed extra_config entries trigger early exit for
     RoutedExperts layers, returning UnquantizedFusedMoEMethod."""
 
     class DummyUnquantizedFusedMoEMethod:
@@ -417,7 +414,7 @@ def test_inc_get_quant_method_unquantized_routed_experts_with_model_prefix(
 
 
 def test_inc_get_quant_method_unknown_layer_with_model_prefix_returns_none() -> None:
-    """``model.``-prefixed extra_config entries return None for unhandled
+    """`model.`-prefixed extra_config entries return None for unhandled
     layer types (non-Linear, non-MoE)."""
     config = make_config(extra_config={"model.unknown": {"bits": 16}})
 
@@ -682,8 +679,9 @@ def test_wna16_cuda_low_bit_linear_routes_to_humming(
     monkeypatch.setattr(
         "vllm.model_executor.layers.quantization.inc.schemes."
         "inc_wna16_scheme._build_humming_linear_method",
-        lambda layer_config: captured.update({"layer_config": layer_config})
-        or expected_method,
+        lambda layer_config: (
+            captured.update({"layer_config": layer_config}) or expected_method
+        ),
     )
 
     layer_config = make_layer_config(bits=bits, packing_format=packing_format)
@@ -708,10 +706,10 @@ def test_wna16_cuda_low_bit_moe_routes_to_humming(monkeypatch, bits) -> None:
     monkeypatch.setattr(
         "vllm.model_executor.layers.quantization.inc.schemes."
         "inc_wna16_scheme._build_humming_moe_method",
-        lambda layer, layer_config: captured.update(
-            {"layer": layer, "layer_config": layer_config}
-        )
-        or expected_method,
+        lambda layer, layer_config: (
+            captured.update({"layer": layer, "layer_config": layer_config})
+            or expected_method
+        ),
     )
 
     layer = object.__new__(RoutedExperts)
@@ -726,6 +724,10 @@ def test_wna16_cuda_low_bit_moe_routes_to_humming(monkeypatch, bits) -> None:
     assert captured["layer_config"] is layer_config
 
 
+@pytest.mark.skipif(
+    not current_platform.is_cuda(),
+    reason="This test only exercises the CUDA Marlin path.",
+)
 @pytest.mark.parametrize("bits", [4, 8])
 def test_wna16_cuda_high_bit_skips_humming(monkeypatch, bits) -> None:
     """4/8-bit int stays on the Marlin/GPTQ/AWQ path even on CUDA so a single
@@ -829,15 +831,19 @@ def test_qwen3_30b_a3b_w4a16_autoround_routes_to_gptq_moe(
     class DummyMoeConfig:
         pass
 
-    def fake_resolve_gptq_moe(layer, layer_config):
-        captured["layer"] = layer
-        captured["layer_config"] = layer_config
-        return expected_method
+    class DummyMoEScheme:
+        def __init__(self, layer_config) -> None:
+            captured["layer_config"] = layer_config
 
+        def get_method(self, layer):
+            captured["layer"] = layer
+            return expected_method
+
+    monkeypatch.setattr(current_platform, "is_xpu", lambda: False)
     monkeypatch.setattr(
-        "vllm.model_executor.layers.quantization.inc.schemes."
-        "inc_wna16_scheme._resolve_gptq_moe",
-        fake_resolve_gptq_moe,
+        inc_wna16_moe,
+        "INCWNA16MoEScheme",
+        DummyMoEScheme,
     )
 
     config = make_qwen3_autoround_config("qwen3_30b_a3b_w4a16")
@@ -1048,7 +1054,7 @@ def test_inc_mxfp4_linear_method_registers_and_processes_weights(
     method.process_weights_after_loading(layer)
 
     assert layer.weight.data.data_ptr() == packed_data.data_ptr()
-    assert not hasattr(layer, "weight_packed")
+    assert layer.weight_packed is layer.weight
     assert captured["processed_layer"] is layer
 
 
@@ -1071,7 +1077,8 @@ def test_inc_mxfp4_moe_method_preserves_checkpoint_packing(
         fused_experts=SimpleNamespace(
             process_weights_after_loading=lambda layer: captured.update(
                 {"processed_layer": layer}
-            )
+            ),
+            keep_constants=lambda layer: None,
         )
     )
     expected_experts_cls = object()
@@ -1095,8 +1102,9 @@ def test_inc_mxfp4_moe_method_preserves_checkpoint_packing(
     monkeypatch.setattr(
         "vllm.model_executor.layers.quantization.inc.schemes.inc_mxfp4_moe."
         "make_mxfp4_moe_quant_config",
-        lambda **kwargs: captured.update({"quant_config_kwargs": kwargs})
-        or expected_quant_config,
+        lambda **kwargs: (
+            captured.update({"quant_config_kwargs": kwargs}) or expected_quant_config
+        ),
     )
     monkeypatch.setattr(
         "vllm.model_executor.layers.quantization.inc.schemes.inc_mxfp4_moe."
@@ -1136,8 +1144,8 @@ def test_inc_mxfp4_moe_method_preserves_checkpoint_packing(
 
     assert layer.w13_weight.data.data_ptr() == w13_packed_data.data_ptr()
     assert layer.w2_weight.data.data_ptr() == w2_packed_data.data_ptr()
-    assert not hasattr(layer, "w13_weight_packed")
-    assert not hasattr(layer, "w2_weight_packed")
+    assert layer.w13_weight_packed is layer.w13_weight
+    assert layer.w2_weight_packed is layer.w2_weight
     assert captured["quant_config_kwargs"]["w1_scale"] is layer.w13_weight_scale
     assert captured["quant_config_kwargs"]["w2_scale"] is layer.w2_weight_scale
     assert captured["kernel_kwargs"]["moe_quant_config"] is expected_quant_config
@@ -1155,15 +1163,25 @@ def test_wna16_xpu_moe_routes_to_gptq_moe(monkeypatch) -> None:
     class DummyMoeConfig:
         pass
 
+    class DummyMoEScheme:
+        def __init__(self, layer_config) -> None:
+            captured["layer_config"] = layer_config
+
+        def get_method(self, layer):
+            captured["layer"] = layer
+            return expected_method
+
+    monkeypatch.delenv(_BACKEND_ENV, raising=False)
     monkeypatch.setattr(current_platform, "is_xpu", lambda: True)
     monkeypatch.setattr(current_platform, "is_cpu", lambda: False)
     monkeypatch.setattr(
-        "vllm.model_executor.layers.quantization.inc.schemes."
-        "inc_wna16_scheme._resolve_gptq_moe",
-        lambda layer, layer_config: captured.update(
-            {"layer": layer, "layer_config": layer_config}
-        )
-        or expected_method,
+        _ARK_STATE,
+        lambda: (False, "missing", None, None),
+    )
+    monkeypatch.setattr(
+        inc_wna16_moe,
+        "INCWNA16MoEScheme",
+        DummyMoEScheme,
     )
 
     layer = object.__new__(RoutedExperts)
@@ -1178,6 +1196,146 @@ def test_wna16_xpu_moe_routes_to_gptq_moe(monkeypatch) -> None:
     assert method is expected_method
     assert captured["layer"] is layer
     assert captured["layer_config"].is_gptq is True
+
+
+def test_wna16_xpu_moe_prefers_ark_when_moe_kernel_available(monkeypatch) -> None:
+    captured = {}
+
+    class DummyMoeConfig:
+        pass
+
+    class DummyArk:
+        xpu_lib = object()
+
+        class MoeSymmetricGemm:
+            pass
+
+    class DummyArkMethod:
+        def __init__(self, quant_config, moe_config) -> None:
+            captured["quant_config"] = quant_config
+            captured["moe_config"] = moe_config
+
+    monkeypatch.delenv(_BACKEND_ENV, raising=False)
+    monkeypatch.setattr(current_platform, "is_xpu", lambda: True)
+    monkeypatch.setattr(current_platform, "is_cpu", lambda: False)
+    monkeypatch.setattr(_ARK_STATE, lambda: (True, None, DummyArk(), object()))
+    monkeypatch.setattr(
+        inc_wna16_moe,
+        "INCARKWNA16MoEMethod",
+        DummyArkMethod,
+    )
+
+    layer = object.__new__(RoutedExperts)
+    layer.moe_config = DummyMoeConfig()
+
+    method = INCWna16Scheme().get_moe_method(
+        make_config(),
+        layer,
+        "model.layers.0.mlp",
+        make_layer_config(group_size=32),
+    )
+
+    assert isinstance(method, DummyArkMethod)
+    assert captured["quant_config"].weight_bits == 4
+    assert captured["quant_config"].group_size == 32
+    assert captured["moe_config"] is layer.moe_config
+
+
+def test_wna16_xpu_moe_falls_back_when_ark_lacks_moe_kernel(monkeypatch) -> None:
+    expected_method = object()
+
+    class DummyMoeConfig:
+        pass
+
+    class DummyArk:
+        xpu_lib = object()
+
+    class DummyMoEScheme:
+        def __init__(self, layer_config) -> None:
+            self.layer_config = layer_config
+
+        def get_method(self, layer):
+            return expected_method
+
+    monkeypatch.delenv(_BACKEND_ENV, raising=False)
+    monkeypatch.setattr(current_platform, "is_xpu", lambda: True)
+    monkeypatch.setattr(current_platform, "is_cpu", lambda: False)
+    monkeypatch.setattr(_ARK_STATE, lambda: (True, None, DummyArk(), object()))
+    monkeypatch.setattr(
+        inc_wna16_moe,
+        "INCWNA16MoEScheme",
+        DummyMoEScheme,
+    )
+
+    layer = object.__new__(RoutedExperts)
+    layer.moe_config = DummyMoeConfig()
+
+    method = INCWna16Scheme().get_moe_method(
+        make_config(),
+        layer,
+        "model.layers.0.mlp",
+        make_layer_config(group_size=32),
+    )
+
+    assert method is expected_method
+
+
+def test_wna16_xpu_moe_ark_backend_requested_but_unavailable_raises(
+    monkeypatch,
+) -> None:
+    class DummyMoeConfig:
+        pass
+
+    monkeypatch.setenv(_BACKEND_ENV, "ark")
+    monkeypatch.setattr(current_platform, "is_xpu", lambda: True)
+    monkeypatch.setattr(current_platform, "is_cpu", lambda: False)
+    monkeypatch.setattr(_ARK_STATE, lambda: (False, "missing", None, None))
+
+    layer = object.__new__(RoutedExperts)
+    layer.moe_config = DummyMoeConfig()
+
+    with pytest.raises(NotImplementedError, match="ARK MoE kernels are unavailable"):
+        INCWna16Scheme().get_moe_method(
+            make_config(),
+            layer,
+            "model.layers.0.mlp",
+            make_layer_config(group_size=32),
+        )
+
+
+def test_wna16_xpu_moe_w4a16_backend_overrides_available_ark(monkeypatch) -> None:
+    expected_method = object()
+
+    class DummyMoeConfig:
+        pass
+
+    class DummyMoEScheme:
+        def __init__(self, layer_config) -> None:
+            self.layer_config = layer_config
+
+        def get_method(self, layer):
+            return expected_method
+
+    monkeypatch.setenv(_BACKEND_ENV, "w4a16")
+    monkeypatch.setattr(current_platform, "is_xpu", lambda: True)
+    monkeypatch.setattr(current_platform, "is_cpu", lambda: False)
+    monkeypatch.setattr(
+        inc_wna16_moe,
+        "INCWNA16MoEScheme",
+        DummyMoEScheme,
+    )
+
+    layer = object.__new__(RoutedExperts)
+    layer.moe_config = DummyMoeConfig()
+
+    method = INCWna16Scheme().get_moe_method(
+        make_config(),
+        layer,
+        "model.layers.0.mlp",
+        make_layer_config(group_size=32),
+    )
+
+    assert method is expected_method
 
 
 def test_inc_resolve_scheme_selects_mxfp8() -> None:
@@ -1230,7 +1388,7 @@ def test_inc_mxfp8_linear_scheme_delegates_to_kernel(monkeypatch) -> None:
     kernel = DummyKernel()
     monkeypatch.setattr(
         "vllm.model_executor.layers.quantization.inc.schemes.inc_mxfp8_linear.init_mxfp8_linear_kernel",
-        lambda: kernel,
+        lambda weight_shape: kernel,
     )
     monkeypatch.setattr(
         "vllm.model_executor.layers.quantization.inc.schemes.inc_mxfp8_linear.ModelWeightParameter",
@@ -1269,7 +1427,7 @@ def test_inc_mxfp8_linear_scheme_delegates_to_kernel(monkeypatch) -> None:
 def test_inc_mxfp8_linear_scheme_requires_block_32_input(monkeypatch) -> None:
     monkeypatch.setattr(
         "vllm.model_executor.layers.quantization.inc.schemes.inc_mxfp8_linear.init_mxfp8_linear_kernel",
-        lambda: object(),
+        lambda weight_shape: object(),
     )
     scheme = INCMxfp8LinearScheme()
 
@@ -1319,7 +1477,6 @@ def test_inc_fp8_linear_scheme_delegates_to_fp8_linear_method(
             captured["quant_config"] = quant_config
             captured["method"] = self
             self.calls: list[tuple] = []
-            self.marlin_input_dtype = None
 
         def create_weights(
             self,
@@ -1356,11 +1513,6 @@ def test_inc_fp8_linear_scheme_delegates_to_fp8_linear_method(
         "Fp8LinearMethod",
         DummyMethod,
     )
-    monkeypatch.setattr(
-        "vllm.model_executor.layers.quantization.inc.schemes.inc_fp8_linear."
-        "get_marlin_input_dtype",
-        lambda _prefix: "fp8-marlin",
-    )
 
     scheme = INCFp8LinearScheme(
         prefix="layers.0.mlp.down_proj",
@@ -1383,7 +1535,6 @@ def test_inc_fp8_linear_scheme_delegates_to_fp8_linear_method(
     assert captured["quant_config"].is_checkpoint_fp8_serialized is True
     assert captured["quant_config"].activation_scheme == "dynamic"
     assert captured["quant_config"].weight_block_size == [128, 128]
-    assert captured["method"].marlin_input_dtype == "fp8-marlin"
     assert result == "applied"
     assert [call[0] for call in captured["method"].calls] == [
         "create_weights",
@@ -1533,8 +1684,7 @@ def test_inc_ark_linear_method_xpu_int2_create_weights(monkeypatch) -> None:
     assert layer.scales.dtype == torch.bfloat16
     assert layer.qzeros.shape == (1, 4)
     assert layer.qzeros.dtype == torch.int32
-    assert layer.g_idx.shape == (64,)
-    assert layer.g_idx.dtype == torch.int32
+    assert not hasattr(layer, "g_idx")
     assert layer.in_features == 64
     assert layer.out_features == 64
     assert layer.params_dtype == torch.bfloat16
@@ -1635,19 +1785,6 @@ def test_wna16_linear_gptq_unsupported_config_raises() -> None:
         INCWNA16LinearScheme(make_layer_config(sym=False))
 
 
-def test_wna16_xpu_unsupported_config_still_raises(monkeypatch) -> None:
-    monkeypatch.setattr(current_platform, "is_xpu", lambda: True)
-    monkeypatch.setattr(current_platform, "is_cpu", lambda: False)
-
-    with pytest.raises(NotImplementedError, match="unsupported config"):
-        INCWna16Scheme().get_linear_method(
-            make_config(weight_bits=2, sym=False),
-            object(),
-            "layer",
-            make_layer_config(bits=2, sym=False),
-        )
-
-
 def test_inc_get_quant_method_unquantized_linear_returns_unquantized() -> None:
     config = make_config(extra_config={"layer": {"bits": 16}})
     layer = object.__new__(LinearBase)
@@ -1664,7 +1801,7 @@ def test_inc_get_quant_method_unquantized_moe_returns_unquantized(
     when extra_config has bits >= 16."""
     config = make_config(extra_config={"layer": {"bits": 16}})
     layer = object.__new__(RoutedExperts)
-    layer.moe_config = None  # UnquantizedFusedMoEMethod accepts moe_config
+    layer.moe_config = None
 
     class DummyUnquantizedFusedMoEMethod:
         def __init__(self, moe_config) -> None:
@@ -1790,7 +1927,7 @@ def test_resolve_gptq_moe_falls_back_to_moe_wna16(monkeypatch) -> None:
         quantized=True,
     )
 
-    _resolve_gptq_moe(DummyLayer(), layer_config)
+    inc_wna16_moe.INCWNA16MoEScheme(layer_config)._build_gptq_method(DummyLayer())
 
     assert captured["from_config"] == {
         "quant_method": "gptq",
@@ -1827,7 +1964,9 @@ def test_resolve_gptq_moe_uses_auto_gptq_when_supported(monkeypatch) -> None:
         DummyMethod,
     )
 
-    _resolve_gptq_moe(DummyLayer(), make_layer_config())
+    inc_wna16_moe.INCWNA16MoEScheme(make_layer_config())._build_gptq_method(
+        DummyLayer()
+    )
 
     assert isinstance(captured["cfg"], AutoGPTQConfig)
     assert captured["cfg"].weight_bits == 4
@@ -1873,7 +2012,7 @@ def test_resolve_awq_moe_uses_marlin_when_supported(monkeypatch) -> None:
         quantized=True,
     )
 
-    _resolve_awq_moe(DummyLayer(), layer_config)
+    inc_wna16_moe.INCWNA16MoEScheme(layer_config)._build_awq_method(DummyLayer())
 
     assert captured["cfg"].weight_bits == 4
     assert captured["cfg"].zero_point is True
@@ -2027,9 +2166,9 @@ E2E_MODELS = [
 
 
 def _has_xpu_ops() -> bool:
-    """True when ``vllm._xpu_ops`` is importable.
+    """True when `vllm._xpu_ops` is importable.
 
-    ``apply_weights`` imports it for the activation quantizer, and the stubs
+    `apply_weights` imports it for the activation quantizer, and the stubs
     below patch through it, so tests that exercise that path cannot even be set
     up on a build without vllm-xpu-kernels installed.
     """
@@ -2045,8 +2184,8 @@ def _has_xpu_ops() -> bool:
 def _has_w4a8_kernel() -> bool:
     """True when this build can actually run the w4a8 GEMM.
 
-    The op is registered as a side effect of importing ``vllm._xpu_ops``, so it
-    is not visible on ``torch.ops._xpu_C`` until that import happens.
+    The op is registered as a side effect of importing `vllm._xpu_ops`, so it
+    is not visible on `torch.ops._xpu_C` until that import happens.
     """
     return _has_xpu_ops() and hasattr(torch.ops._xpu_C, "int4_gemm_w4a8")
 
@@ -2089,7 +2228,7 @@ def _with_w4a8_kernel(monkeypatch) -> None:
 
 def _dispatch(layer_config=None):
     return INCWna16Scheme().get_linear_method(
-        object(), object(), "layer", layer_config or make_layer_config()
+        make_config(), object(), "layer", layer_config or make_layer_config()
     )
 
 
@@ -2346,7 +2485,7 @@ def test_keeps_fp16_scales(w4a8_layer) -> None:
     """The kernel reads scales as fp16 regardless of activation dtype.
 
     Passing bf16 scales does not raise — it silently returns wrong results — so
-    an fp16 copy must exist, while the bf16 ``scales`` survive for the
+    an fp16 copy must exist, while the bf16 `scales` survive for the
     small-batch w4a16 fallback.
     """
     method, layer = w4a8_layer
@@ -2440,7 +2579,7 @@ def test_calls_kernel_at_threshold(monkeypatch, w4a8_layer) -> None:
         w_scale,
         w_zp,
         group_size,
-        g_idx,
+        group_idx,
         bias,
     ) = captured["gemm_args"]
     assert quant_x.dtype is torch.int8
@@ -2452,7 +2591,7 @@ def test_calls_kernel_at_threshold(monkeypatch, w4a8_layer) -> None:
     assert qweight is layer.qweight
     assert w_zp is layer.qzeros
     assert group_size == 128
-    assert g_idx is None
+    assert group_idx is None
     assert bias is None
 
     # The kernel emits fp16; the result is cast back to the activation dtype.

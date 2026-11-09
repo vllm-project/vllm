@@ -13,6 +13,8 @@ from torch.fx.experimental.proxy_tensor import make_fx
 import vllm.ir.op
 from vllm.ir.op import RESERVED_PROVIDERS, IrOp, IrOpImpl
 
+pytestmark = pytest.mark.skip_global_cleanup
+
 
 class CustomError(Exception):
     pass
@@ -20,7 +22,7 @@ class CustomError(Exception):
 
 @pytest.fixture
 def custom_add_op(fake_vllm_ir):
-    """Register ``_custom_add`` plus impl_a, impl_b, impl_even for this test."""
+    """Register `_custom_add` plus impl_a, impl_b, impl_even for this test."""
 
     @vllm.ir.register_op(allow_inplace=True)
     def _custom_add(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
@@ -32,7 +34,7 @@ def custom_add_op(fake_vllm_ir):
 
     @_custom_add.register_impl("impl_b", inplace=True)
     def impl_b(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
-        """Computes x+y+20"""
+        """Computes x+y+20."""
         x.add_(y)
         x.add_(20)
         return x
@@ -99,7 +101,7 @@ def test_no_kw_only_args(fake_vllm_ir):
 class TestIrOpCustomAdd:
     # Registration invariants
     def test_decorated_object(self, custom_add_op):
-        """Make sure that referring directly to an op is correct"""
+        """Make sure that referring directly to an op is correct."""
         _custom_add = custom_add_op
         assert isinstance(_custom_add, IrOp)
         assert "_custom_add" in IrOp.registry
@@ -428,7 +430,7 @@ def test_set_default_torch_wrap(default: bool):
 
 @pytest.fixture
 def custom_mm_op(fake_vllm_ir):
-    """Fixture that registers ``_custom_mm`` (isolated by ``fake_vllm_ir``)."""
+    """Fixture that registers `_custom_mm` (isolated by `fake_vllm_ir`)."""
 
     @vllm.ir.register_op
     def _custom_mm(
@@ -664,7 +666,7 @@ class TestTolerance:
 
 
 def test_naming_validation(fake_vllm_ir):
-    """Test that op and provider names are validated ([a-z_][a-z_0-9]*)."""
+    """Test that op and provider names are validated (`[a-z_][a-z_0-9]*`)."""
 
     # Valid op and provider names
     @vllm.ir.register_op

@@ -11,33 +11,45 @@ mod glm_xml;
 mod hy;
 pub(crate) mod json;
 mod kimi_k2;
+mod mimo;
 mod minimax_m2;
 mod minimax_m3;
 mod parameters;
 mod qwen_coder;
 mod seed_oss;
+mod step5;
 #[cfg(any(test, feature = "test-util"))]
 pub mod test_utils;
 use std::collections::{BTreeMap, btree_map};
+use std::sync::Once;
 
-pub use deepseek_dsml::{DeepSeekV4ToolParser, DeepSeekV32ToolParser};
+pub use deepseek_dsml::{DeepSeekV4ToolParser, DeepSeekV32ToolParser, DeepSeekV41ToolParser};
 pub use deepseek_json::{DeepSeekV3ToolParser, DeepSeekV31ToolParser};
 pub use error::{Result, ToolParserError};
 pub use glm_xml::{Glm45MoeToolParser, Glm47MoeToolParser};
 pub(crate) use hy::{HyDialect, HyToolMarkers, HyToolParser};
 pub use json::{
     Granite4ToolParser, HermesToolParser, Internlm2ToolParser, Llama3JsonToolParser,
-    MistralToolParser, Phi4MiniJsonToolParser, Qwen3XmlToolParser,
+    MistralToolParser, Phi4MiniJsonToolParser, Qwen3JsonToolParser,
 };
 pub use kimi_k2::KimiK2ToolParser;
+pub use mimo::MiMoToolParser;
 pub use minimax_m2::MinimaxM2ToolParser;
 pub use minimax_m3::MinimaxM3ToolParser;
+pub(crate) use parameters::{ToolSchemas, convert_integer_text, convert_number_text};
 pub use qwen_coder::Qwen3CoderToolParser;
 pub use seed_oss::SeedOssToolParser;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+pub use step5::Step5ToolParser;
+use tracing::warn;
+use vllm_tokenizer::{DecodedText, DynTokenizer};
+use xgrammar_structural_tag::ToolChoice;
 pub use xgrammar_structural_tag::builders::StructuralTagBuilder;
+use xgrammar_structural_tag::format::Format;
+use xgrammar_structural_tag::tool::{AllowedToolsMode, ToolChoiceValue};
 
+use crate::output_grammar::{self, OutputGrammarContext, ToolStrictLevel};
 use crate::utils;
 
 /// One function-style tool made available to the model.
@@ -47,6 +59,9 @@ pub struct Tool {
     pub description: Option<String>,
     pub parameters: Value,
     pub strict: Option<bool>,
+    /// Whether the tool's schema is loaded on demand (tool search). Only chat
+    /// templates consume it; the tool stays callable for parsing and grammars.
+    pub defer_loading: Option<bool>,
 }
 
 /// One tool-call update emitted while parsing assistant text.
@@ -175,7 +190,10 @@ impl ToolParserOutput {
 /// Incremental parser that extracts tool calls from assistant output.
 pub trait ToolParser: Send {
     /// Construct a boxed parser instance for one request stream.
-    fn create(tools: &[Tool]) -> Result<Box<dyn ToolParser>>
+    ///
+    /// `tokenizer` is the model's tokenizer, for parsers that resolve the IDs of
+    /// their marker tokens.
+    fn create(tools: &[Tool], tokenizer: DynTokenizer) -> Result<Box<dyn ToolParser>>
     where
         Self: Sized + 'static;
 
@@ -187,7 +205,62 @@ pub trait ToolParser: Send {
         false
     }
 
+    /// Return the tool strict level applied when the operator leaves
+    /// `--tool-strict-level` unset.
+    fn default_tool_strict_level(&self) -> ToolStrictLevel {
+        ToolStrictLevel::Auto
+    }
+
+    /// Build the language of everything the model may emit after reasoning
+    /// ends for the context's tool choice: visible text plus tool calls. `None`
+    /// means no tool grammar applies.
+    ///
+    /// The default forwards to [`Self::structural_tag_builder`] with reasoning
+    /// disabled, which is exactly today's strict-tool-calling grammar.
+    fn build_call_format(
+        &self,
+        ctx: &OutputGrammarContext<'_>,
+    ) -> output_grammar::Result<Option<Format>> {
+        output_grammar::visible_format_from_builder(self.structural_tag_builder(), ctx)
+    }
+
+    /// Build the visible language with the request's answer constraint
+    /// composed in, as the Python frontend does: an optional call becomes
+    /// `Or[calls built as required, answer]`, and a tool choice that obliges a
+    /// call ignores the answer. Parsers override [`Self::build_call_format`]
+    /// instead.
+    fn build_visible_format(
+        &self,
+        ctx: &OutputGrammarContext<'_>,
+    ) -> output_grammar::Result<Option<Format>> {
+        let Some(answer) = ctx.answer else {
+            return self.build_call_format(ctx);
+        };
+        match call_required(ctx.tool_choice) {
+            // Calls built from the optional choice would also admit free text
+            // in place of the answer.
+            Some(tool_choice) => {
+                let calls = self.build_call_format(&OutputGrammarContext {
+                    tool_choice: &tool_choice,
+                    ..*ctx
+                })?;
+                Ok(calls.map(|calls| Format::or(vec![calls, answer.clone()])))
+            }
+            None => {
+                let calls = self.build_call_format(ctx)?;
+                if calls.is_some() {
+                    warn_answer_ignored_once();
+                }
+                Ok(calls)
+            }
+        }
+    }
+
     /// Return the xgrammar structural-tag builder used for strict tool calling.
+    ///
+    /// To be deprecated: this only exists to back the default
+    /// [`Self::build_call_format`]. New parsers should override that method
+    /// directly instead of exposing a builder.
     fn structural_tag_builder(&self) -> Option<&dyn StructuralTagBuilder> {
         None
     }
@@ -201,10 +274,13 @@ pub trait ToolParser: Send {
     /// Feed one decoded text delta into the parser, appending committed output
     /// into `output`.
     ///
+    /// The delta carries the attributions of the generated tokens that produced
+    /// it. Parsers that match markers by spelling alone read only `chunk.text`.
+    ///
     /// If this returns an error, any output already appended to `output`
     /// remains committed parser output. The parser must keep its uncommitted
     /// buffer intact so callers may recover it with `reset()`.
-    fn parse_into(&mut self, chunk: &str, output: &mut ToolParserOutput) -> Result<()>;
+    fn parse_into(&mut self, chunk: DecodedText, output: &mut ToolParserOutput) -> Result<()>;
 
     /// Flush any buffered partial state at end of stream.
     ///
@@ -219,6 +295,32 @@ pub trait ToolParser: Send {
     fn reset(&mut self) -> String;
 }
 
+/// The tool choice with an optional call made obligatory, or `None` when the
+/// choice forbids or already obliges a call.
+fn call_required(tool_choice: &ToolChoice) -> Option<ToolChoice> {
+    let mut required = tool_choice.clone();
+    match &mut required {
+        ToolChoice::Value(value @ ToolChoiceValue::Auto) => *value = ToolChoiceValue::Required,
+        ToolChoice::AllowedTools(choice) if choice.allowed_tools.mode == AllowedToolsMode::Auto => {
+            choice.allowed_tools.mode = AllowedToolsMode::Required;
+        }
+        ToolChoice::FlatAllowedTools(choice) if choice.mode == AllowedToolsMode::Auto => {
+            choice.mode = AllowedToolsMode::Required;
+        }
+        _ => return None,
+    }
+    Some(required)
+}
+
+/// Warn that a request's answer constraint is ignored because its tool
+/// choice obliges a call, as the Python frontend does.
+fn warn_answer_ignored_once() {
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        warn!("structured outputs are ignored because tool_choice forces a tool call");
+    });
+}
+
 /// Extension methods for easily testing `ToolParser` implementations.
 ///
 /// These helpers do not handle partial parsing or error recovery, so they are
@@ -226,13 +328,14 @@ pub trait ToolParser: Send {
 #[cfg(any(test, feature = "test-util"))]
 #[easy_ext::ext(ToolParserTestExt)]
 impl<T: ToolParser + ?Sized> T {
-    /// Feed one decoded text delta and return only if the whole chunk parses.
+    /// Feed one unattributed text delta and return only if the whole chunk
+    /// parses.
     ///
     /// If parsing fails, partial committed output is discarded by this helper.
     /// Prefer `parse_into` for more fine-grained control in error recovery.
     pub fn parse_chunk(&mut self, chunk: &str) -> Result<ToolParserOutput> {
         let mut output = ToolParserOutput::default();
-        self.parse_into(chunk, &mut output)?;
+        self.parse_into(DecodedText::unattributed(chunk), &mut output)?;
         Ok(output)
     }
 

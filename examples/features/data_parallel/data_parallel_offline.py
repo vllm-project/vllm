@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Usage:
+"""Usage:
 Single node:
     python examples/features/data_parallel/data_parallel_offline.py \
             --model="ibm-research/PowerMoE-3b" \

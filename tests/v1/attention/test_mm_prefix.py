@@ -6,12 +6,12 @@ The metadata tests run anywhere. The FA4 tests need SM100 and run the real
 kernel against a dense float32 reference, which is the only way to check what
 cannot be reasoned about from the Python side:
 
-* ``q_ranges[token_idx, 0]`` indexing an aux tensor with a runtime ``Int32``.
-* ``cu_seqlens_q[b] + q_local`` matching FA4's own packing of a varlen batch.
+* `q_ranges[token_idx, 0]` indexing an aux tensor with a runtime `Int32`.
+* `cu_seqlens_q[b] + q_local` matching FA4's own packing of a varlen batch.
 
-The mask_mod is the *entire* mask (``(causal ∧ window) ∨ mm_prefix``), so
-callers must pass ``causal=False`` and no FA-layer window. FA #155 stopped
-auto-clearing those when ``mask_mod`` is set; leaving ``causal=True`` would
+The mask_mod is the *entire* mask (`(causal ∧ window) ∨ mm_prefix`), so
+callers must pass `causal=False` and no FA-layer window. FA #155 stopped
+auto-clearing those when `mask_mod` is set; leaving `causal=True` would
 short out the mask_mod on SM90 and clip bidirectional ranges on SM100.
 """
 
@@ -100,9 +100,9 @@ def _query_ranges(mm_ranges, query_lens, seq_lens):
 def test_matches_range_scan_semantics_with_context_offset():
     """Pin the equivalence the O(1) lookup rests on.
 
-    The kernel checks ``r_start <= kv_idx <= r_end`` for the range containing
+    The kernel checks `r_start <= kv_idx <= r_end` for the range containing
     the query token, which is only equal to the old scan's
-    ``any(q in r and kv in r)`` because ranges never overlap.  Request 1 carries
+    `any(q in r and kv in r)` because ranges never overlap.  Request 1 carries
     a context offset so the local-to-absolute query mapping is exercised too.
     """
     mm_ranges = {0: [(1, 3), (5, 7)], 1: [(2, 4), (9, 12)]}
@@ -131,7 +131,7 @@ def test_matches_range_scan_semantics_with_context_offset():
 def test_ranges_beyond_scheduled_chunk_are_clipped():
     """Chunked prefill must not error or produce a wrong mask.
 
-    ``disable_chunked_mm_input`` keeps a single mm item intact but still splits
+    `disable_chunked_mm_input` keeps a single mm item intact but still splits
     a prompt across steps, so a request's ranges routinely sit entirely past the
     tokens scheduled so far.  Sizing by query token makes the out-of-chunk part
     a no-op rather than an out-of-bounds condition.
@@ -151,7 +151,7 @@ def test_ranges_beyond_scheduled_chunk_are_clipped():
 
 def test_buffer_reuse_does_not_leak_previous_rows():
     """The staging buffer persists across steps, so every reported row must be
-    rewritten. Guards against dropping the ``-1`` fill as an optimization: a
+    rewritten. Guards against dropping the `-1` fill as an optimization: a
     step whose ranges shrink would otherwise expose the prior step's bounds and
     silently widen the bidirectional mask.
     """
@@ -178,7 +178,7 @@ def test_buffer_reuse_does_not_leak_previous_rows():
 def test_returns_none_when_no_range_covers_a_query_token():
     """No aux tensor means forward() skips the mask_mod entirely.
 
-    Returning None rather than an all-``-1`` tensor is what keeps text-only and
+    Returning None rather than an all-`-1` tensor is what keeps text-only and
     decode-only batches off the fill path.
     """
     # Text-only batch on an mm_prefix model: every request present, no ranges.
@@ -212,10 +212,10 @@ def _dense_reference(
     scale,
     mm_clamp_sw=0,
 ):
-    """Dense float32 ``(causal AND window) OR mm_prefix`` per request.
+    """Dense float32 `(causal AND window) OR mm_prefix` per request.
 
-    ``mm_clamp_sw`` confines the bidirectional block to the window, reproducing
-    Gemma4's ``mm_prefix_clamp_sliding_window``. Only the past bound applies, so
+    `mm_clamp_sw` confines the bidirectional block to the window, reproducing
+    Gemma4's `mm_prefix_clamp_sliding_window`. Only the past bound applies, so
     future keys inside a range still pass.
     """
     out = torch.empty_like(q, dtype=torch.float32)
@@ -445,8 +445,8 @@ PAGED_MM_RANGES = {
 def _enable_mm_prefix(vllm_config):
     """Flip stock Gemma4's null use_bidirectional_attention to "vision".
 
-    ``ModelConfig.__init__`` derives ``model_arch_config`` once from
-    ``hf_text_config``, and ``is_mm_prefix_lm`` is a ``cached_property`` that
+    `ModelConfig.__init__` derives `model_arch_config` once from
+    `hf_text_config`, and `is_mm_prefix_lm` is a `cached_property` that
     may already hold False from that first derivation, so re-derive and drop
     the cache.
     """
@@ -462,7 +462,7 @@ def test_decode_only_batch_reports_no_ranges():
     """Decode-only steps must carry no mm_prefix metadata at all.
 
     This is what makes FULL CUDA graph capture consistent for this feature.
-    Capture runs through ``_dummy_run`` with no multimodal requests, so no
+    Capture runs through `_dummy_run` with no multimodal requests, so no
     mask_mod is attached to the captured graph; a decode-only replay must
     therefore also want no mask_mod, or the captured graph would silently drop
     it. Indexing by query token gives that for free, because a generated token
@@ -513,12 +513,12 @@ def test_mm_prefix_kv_cache_path(head_size: int):
 
     Use head_size=128 on B200/H100 (FA4 + paged/`seqused_k` supported) and
     512 on H100 only (Blackwell FA4 rejects 512 via TMEM). Avoid 256: SM100's
-    dedicated hd256 2CTA kernel asserts away ``seqused_k``, which paged KV
+    dedicated hd256 2CTA kernel asserts away `seqused_k`, which paged KV
     requires.
 
     Tensors, kv_cache_spec, and FlashAttentionImpl must all use the same
-    ``head_size`` — ``run_attention_backend`` / ``create_standard_kv_cache_spec``
-    read ``get_head_size()`` (=512 for Gemma4), so this test builds them
+    `head_size` — `run_attention_backend` / `create_standard_kv_cache_spec`
+    read `get_head_size()` (=512 for Gemma4), so this test builds them
     explicitly. The sliding window is set on the impl; mm_prefix encodes it in
     mask_mod and clears FA's built-in window at forward time.
     """
@@ -638,3 +638,248 @@ def test_mm_prefix_kv_cache_path(head_size: int):
     assert not torch.allclose(expected, causal_only, atol=2e-2, rtol=2e-2), (
         "test batch does not actually exercise the mm_prefix branch"
     )
+
+
+@pytest.mark.parametrize(
+    "query_len,seq_len,spans,expected,unclamped_expected",
+    [
+        (16, 32, [(20, 28)], True, True),
+        (16, 32, [(0, 16)], False, True),
+        (16, 32, [(0, 17)], True, True),
+        (16, 32, [(32, 40)], False, False),
+        (16, 32, [(31, 40)], False, True),
+        (1, 24, [(20, 28)], False, True),
+        (0, 24, [(20, 28)], False, False),
+        (16, 32, [(20, 20)], False, False),
+        (16, 64, [(20, 28)], False, False),
+    ],
+)
+def test_composite_routes_queries_that_need_image_masking(
+    query_len, seq_len, spans, expected, unclamped_expected
+):
+    """Historical images and single-query steps must use the causal graph path."""
+    from types import SimpleNamespace
+
+    from vllm.v1.attention.backends.composite import requires_mm_prefix
+
+    common = SimpleNamespace(
+        max_query_len=query_len,
+        mm_req_doc_ranges={0: spans},
+        query_start_loc_cpu=torch.tensor([0, query_len]),
+        seq_lens_cpu_upper_bound=torch.tensor([seq_len]),
+    )
+    assert requires_mm_prefix(common) is expected
+    assert requires_mm_prefix(common, unclamped_window=True) is unclamped_expected
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA attention kernels")
+@pytest.mark.parametrize("head_size", [256, 512])
+@pytest.mark.parametrize(
+    "reverse_children,cache_dtype",
+    [(False, "auto"), (True, "auto"), (False, "fp8_e4m3")],
+)
+@pytest.mark.parametrize("causal_backend_name", ["FLASHINFER", "FLASH_ATTN"])
+def test_composite_shared_cache_across_image_and_causal_steps(
+    head_size, reverse_children, cache_dtype, causal_backend_name
+):
+    """Changing routes must preserve KV writes, image masking and graph replay."""
+    if causal_backend_name == "FLASHINFER":
+        if not current_platform.is_device_capability_family(100):
+            pytest.skip("The Triton/FlashInfer composite supports Blackwell")
+    else:
+        if not current_platform.is_device_capability(90):
+            pytest.skip("The Triton/FlashAttention composite supports Hopper")
+        if reverse_children or cache_dtype != "auto":
+            pytest.skip("Reverse-child and FP8 coverage is backend-independent")
+
+    from vllm.config import set_current_vllm_config
+    from vllm.engine.arg_utils import EngineArgs
+    from vllm.model_executor.layers.attention import Attention
+    from vllm.utils.torch_utils import set_default_torch_dtype
+    from vllm.v1.attention.backend import AttentionCGSupport, CommonAttentionMetadata
+    from vllm.v1.attention.backends.composite import (
+        MMPrefixAttentionRouting,
+        create_composite_attention_backend,
+    )
+    from vllm.v1.attention.backends.flash_attn import (
+        FlashAttentionMetadata,
+    )
+    from vllm.v1.attention.backends.flashinfer import (
+        FlashInferBackend,
+        FlashInferMetadata,
+        FlashInferTrtllmAPIDecode,
+        TRTLLMPrefill,
+    )
+    from vllm.v1.attention.backends.triton_attn import (
+        TritonAttentionBackend,
+        TritonAttentionMetadata,
+    )
+    from vllm.v1.attention.backends.triton_flash_attn import (
+        TritonFlashAttentionBackend,
+    )
+    from vllm.v1.attention.backends.triton_flashinfer import (
+        TritonFlashInferBackend,
+    )
+    from vllm.v1.kv_cache_interface import FullAttentionSpec, SlidingWindowSpec
+
+    if causal_backend_name == "FLASHINFER":
+        backend = TritonFlashInferBackend
+        causal_metadata_type = FlashInferMetadata
+        block_size = backend.get_supported_kernel_block_sizes()[0]
+        assert isinstance(block_size, int)
+    else:
+        backend = TritonFlashAttentionBackend
+        causal_metadata_type = FlashAttentionMetadata
+        block_size = backend.get_preferred_block_size(16)
+    num_blocks = (209 + block_size - 1) // block_size
+    torch.manual_seed(42)
+    attention_config = {"backend": backend.get_name()}
+    if causal_backend_name == "FLASH_ATTN":
+        attention_config["flash_attn_version"] = 4
+    cfg = EngineArgs(
+        model="google/gemma-4-31B-it",
+        dtype="bfloat16",
+        max_model_len=512,
+        max_num_seqs=4,
+        max_num_batched_tokens=512,
+        block_size=block_size,
+        kv_cache_dtype=cache_dtype,
+        enforce_eager=True,
+        attention_config=attention_config,
+    ).create_engine_config()
+    cfg.cache_config.kv_cache_layout = "LBHNC"
+    window = 128 if head_size == 256 else None
+    storage_dtype = torch.uint8 if cache_dtype == "fp8_e4m3" else DTYPE
+    spec_kwargs = dict(
+        block_size=block_size,
+        num_kv_heads=16,
+        head_size=head_size,
+        dtype=storage_dtype,
+        kv_quant_mode=get_kv_quant_mode(cache_dtype),
+    )
+    spec = (
+        SlidingWindowSpec(**spec_kwargs, sliding_window=window)
+        if window
+        else FullAttentionSpec(**spec_kwargs)
+    )
+    if reverse_children:
+        # Swapping the children and policy must preserve outputs and KV writes;
+        # dispatch cannot depend on a particular child's class or position.
+        class ReversedRouting(MMPrefixAttentionRouting):
+            capture_variant = 0
+
+            def select(self, metadata):
+                return 1 - super().select(metadata)
+
+            @staticmethod
+            def variant_uses_mm_prefix(variant):
+                return variant == 1
+
+        backend = create_composite_attention_backend(
+            FlashInferBackend,
+            TritonAttentionBackend,
+            name="ReversedCompositeBackend",
+            backend_name="CUSTOM",
+            module=__name__,
+            routing_policy=ReversedRouting,
+        )
+    with set_current_vllm_config(cfg), set_default_torch_dtype(DTYPE):
+        layer = Attention(
+            32,
+            head_size,
+            head_size**-0.5,
+            num_kv_heads=16,
+            cache_config=cfg.cache_config,
+            prefix="composite_test",
+            per_layer_sliding_window=window,
+            attn_backend=backend,
+        ).to(DEVICE)
+        layer.mm_prefix_clamp_sliding_window = window is not None
+        assert backend.get_builder_cls().get_cudagraph_support(cfg, spec) == (
+            AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
+        )
+        if window:
+            layer.mm_prefix_clamp_sliding_window = False
+            assert backend.get_builder_cls().get_cudagraph_support(cfg, spec) == (
+                AttentionCGSupport.NEVER
+            )
+            layer.mm_prefix_clamp_sliding_window = True
+        builder = backend.get_builder_cls()(spec, ["composite_test"], cfg, DEVICE)
+        # Match production, where unwritten page tails are zero-initialized.
+        cache = torch.zeros(
+            num_blocks,
+            16,
+            block_size,
+            2 * head_size,
+            dtype=storage_dtype,
+            device=DEVICE,
+        )
+        keys = torch.randn(209, 16, head_size, dtype=DTYPE, device=DEVICE)
+        values = torch.randn_like(keys)
+        if cache_dtype == "fp8_e4m3":
+            keys = keys.to(torch.float8_e4m3fn).to(DTYPE)
+            values = values.to(torch.float8_e4m3fn).to(DTYPE)
+        table = torch.arange(num_blocks, dtype=torch.int32, device=DEVICE).unsqueeze(0)
+        previous = 0
+        for end, spans, metadata_type in [
+            (128, [(32, 111)], TritonAttentionMetadata),
+            (129, [(32, 111)], causal_metadata_type),
+            (145, [(32, 111)], causal_metadata_type),
+            (209, [(32, 111), (160, 207)], TritonAttentionMetadata),
+        ]:
+            qlen = end - previous
+            starts = torch.tensor([0, qlen], dtype=torch.int32)
+            lengths = torch.tensor([end], dtype=torch.int32)
+            common = CommonAttentionMetadata(
+                query_start_loc=starts.to(DEVICE),
+                query_start_loc_cpu=starts,
+                seq_lens=lengths.to(DEVICE),
+                seq_lens_cpu_upper_bound=lengths,
+                num_reqs=1,
+                num_actual_tokens=qlen,
+                max_query_len=qlen,
+                max_seq_len=end,
+                block_table_tensor=table,
+                slot_mapping=torch.arange(previous, end, device=DEVICE),
+                mm_req_doc_ranges={0: spans},
+            )
+            metadata = builder.build(0, common)
+            assert isinstance(metadata, metadata_type)
+            if isinstance(metadata, FlashInferMetadata):
+                if qlen == 1:
+                    assert isinstance(metadata.decode, FlashInferTrtllmAPIDecode)
+                else:
+                    assert isinstance(metadata.prefill, TRTLLMPrefill)
+            query = torch.randn(qlen, 32, head_size, dtype=DTYPE, device=DEVICE)
+            if cache_dtype == "fp8_e4m3":
+                query = query.to(torch.float8_e4m3fn).to(DTYPE)
+            key, value = keys[previous:end], values[previous:end]
+            output = torch.empty_like(query)
+            layer.impl.do_kv_cache_update(layer, key, value, cache, common.slot_mapping)
+            layer.impl.forward(layer, query, key, value, cache, metadata, output)
+            expected = _dense_reference(
+                query,
+                [keys[:end]],
+                [values[:end]],
+                [qlen],
+                [end],
+                {0: spans},
+                window,
+                head_size**-0.5,
+                mm_clamp_sw=window or 0,
+            )
+            torch.testing.assert_close(output.float(), expected, atol=2e-2, rtol=2e-2)
+            if qlen == 1:
+                metadata = builder.build_for_cudagraph_capture(common)
+                assert isinstance(metadata, metadata_type)
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph):
+                    layer.impl.forward(
+                        layer, query, key, value, cache, metadata, output
+                    )
+                output.zero_()
+                graph.replay()
+                torch.testing.assert_close(
+                    output.float(), expected, atol=2e-2, rtol=2e-2
+                )
+            previous = end

@@ -10,16 +10,12 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from transformers import BatchFeature, PretrainedConfig
+from transformers import BatchFeature, PreTrainedConfig
 from transformers.models.qwen2_vl.image_processing_qwen2_vl import smart_resize
 from typing_extensions import TypedDict
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import (
-    BaseDummyOptions,
-    ImageDummyOptions,
-    VideoDummyOptions,
-)
+from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.distributed import parallel_state
 from vllm.distributed import utils as dist_utils
 from vllm.inputs import MultiModalDataDict
@@ -46,6 +42,7 @@ from vllm.multimodal.processing import (
     PromptUpdate,
     PromptUpdateDetails,
 )
+from vllm.multimodal.processing.processor import HFMultiModalInputs
 from vllm.transformers_utils.configs.mimo_v2_omni import Mimo_VLVisionConfig
 from vllm.transformers_utils.processors.mimo_v2_omni import (
     MiMoOmniProcessor,
@@ -55,6 +52,7 @@ from vllm.transformers_utils.processors.mimo_v2_omni import (
 
 from .interfaces import (
     MultiModalEmbeddings,
+    SupportsEagle3,
     SupportsMultiModal,
     SupportsPP,
     SupportsQuant,
@@ -71,7 +69,10 @@ from .qwen2_5_vl import (
     Qwen2_5_VLVideoInputs,
     Qwen2_5_VLVideoPixelInputs,
 )
-from .qwen2_vl import _create_qwen2vl_field_factory
+from .qwen2_vl import (
+    Qwen2VLMultiModalDataParser,
+    _create_qwen2vl_field_factory,
+)
 from .utils import AutoWeightsLoader, IntermediateTensors, WeightsMapper, maybe_prefix
 
 
@@ -161,7 +162,12 @@ class MiMoVisionAttention(nn.Module):
             if use_data_parallel
             else parallel_state.get_tensor_model_parallel_world_size()
         )
-        self.tp_rank = parallel_state.get_tensor_model_parallel_rank()
+        # Data parallel runs the whole encoder on every rank, so the rank has to
+        # collapse with the size: otherwise the per-head slices below start past
+        # the end of the head range on ranks > 0.
+        self.tp_rank = (
+            0 if use_data_parallel else parallel_state.get_tensor_model_parallel_rank()
+        )
 
         self.num_heads = num_heads
         self.num_kv_heads = num_kv_heads
@@ -233,7 +239,7 @@ class MiMoVisionAttention(nn.Module):
     ) -> torch.Tensor:
         """Window attention with the per-head sink applied to key 0.
 
-        The reference adds ``sinks[h]`` to the logit of each sequence's first
+        The reference adds `sinks[h]` to the logit of each sequence's first
         key, which the Triton prefill kernel supports directly, so the softmax
         normalizes over the biased scores in one pass.
         """
@@ -275,14 +281,14 @@ class MiMoVisionAttention(nn.Module):
         max_seqlen: torch.Tensor,
         full_attn: bool = True,
     ) -> torch.Tensor:
-        """
-        Args:
-            x: [seq_len, batch=1, embed_dim]  (seq-first convention)
-            cu_seqlens: cumulative sequence lengths [num_seqs+1], int32
-            rotary_pos_emb_cos: [seq_len, qk_channels // 2]
-            rotary_pos_emb_sin: [seq_len, qk_channels // 2]
-            max_seqlen: maximum sequence length
-            full_attn: if True, full attention; if False, window attention
+        """Args:
+        x: [seq_len, batch=1, embed_dim]  (seq-first convention)
+        cu_seqlens: cumulative sequence lengths [num_seqs+1], int32
+        rotary_pos_emb_cos: [seq_len, qk_channels // 2]
+        rotary_pos_emb_sin: [seq_len, qk_channels // 2]
+        max_seqlen: maximum sequence length
+        full_attn: if True, full attention; if False, window attention
+
         """
         # [seq_len, 1, embed_dim] -> QKV projection
         qkv, _ = self.qkv(x)  # [seq_len, 1, q_size + kv_size + kv_size]
@@ -420,7 +426,7 @@ class MiMoVisionTransformer(nn.Module):
 
     def __init__(
         self,
-        vision_cfg: PretrainedConfig,
+        vision_cfg: PreTrainedConfig,
         *,
         norm_eps: float = 1e-6,
         quant_config: QuantizationConfig | None = None,
@@ -531,6 +537,7 @@ class MiMoVisionTransformer(nn.Module):
         Returns:
             cos: [total_tokens, qk_channels // 2]
             sin: [total_tokens, qk_channels // 2]
+
         """
         cos_list, sin_list = [], []
         for i in range(grid_thw.size(0)):
@@ -576,12 +583,12 @@ class MiMoVisionTransformer(nn.Module):
         return torch.cat(cos_list, dim=0), torch.cat(sin_list, dim=0)
 
     def forward(self, x: torch.Tensor, grid_thw: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
+        """Args:
             x: [total_tokens, C] pre-flattened patches
             grid_thw: [num_images, 3] tensor of (t, h, w) for each image/video
         Returns:
             [merged_tokens, out_hidden_size]
+
         """
         # Ensure grid_thw is a tensor
         if not isinstance(grid_thw, torch.Tensor):
@@ -671,6 +678,14 @@ class MiMoVisionTransformer(nn.Module):
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
+class MiMoV2OmniMultiModalDataParser(Qwen2VLMultiModalDataParser):
+    # Video stays raw: get_video_replacement also reads second_per_grid_ts and
+    # video_start_times, which a metadata-only rewrite would not carry.
+    embedding_fields = {
+        "image": Qwen2VLMultiModalDataParser.embedding_fields["image"],
+    }
+
+
 class MiMoV2OmniProcessingInfo(BaseProcessingInfo):
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"audio": None, "image": None, "video": None}
@@ -690,9 +705,14 @@ class MiMoV2OmniProcessingInfo(BaseProcessingInfo):
         return self.get_hf_processor(**kwargs).image_processor
 
     def get_data_parser(self):
-        from vllm.multimodal.parse import MultiModalDataParser
-
-        return MultiModalDataParser(target_sr=24000.0)
+        # Without embedding_fields the EC producer publishes no metadata and
+        # the EPD proxy never rewrites the media item.
+        return MiMoV2OmniMultiModalDataParser(
+            self.get_hf_config().vision_config.spatial_merge_size,
+            target_sr=24000.0,
+            expected_hidden_size=self._get_expected_hidden_size(),
+            allow_missing_mm_embeddings=self.allow_missing_mm_embeddings,
+        )
 
     def get_mm_max_tokens_per_item(
         self,
@@ -891,9 +911,9 @@ class MiMoV2OmniMultiModalProcessor(BaseMultiModalProcessor[MiMoV2OmniProcessing
 
     Key differences from Qwen2.5-VL:
     - Videos use timestamp tokens between temporal grid positions.
-    - The HF processor expects ``(TCHW_tensor, timestamps_T_tensor)`` video
+    - The HF processor expects `(TCHW_tensor, timestamps_T_tensor)` video
       tuples rather than plain numpy arrays.
-    - ``video_start_times`` is tracked so prompt-update reconstruction can
+    - `video_start_times` is tracked so prompt-update reconstruction can
       regenerate the exact same timestamp token IDs.
     """
 
@@ -929,27 +949,14 @@ class MiMoV2OmniMultiModalProcessor(BaseMultiModalProcessor[MiMoV2OmniProcessing
             fields["va_audio_features"] = MultiModalFieldConfig.batched("va_audio")
         return fields
 
-    def _apply_hf_processor_main(
+    def _get_hf_mm_inputs(
         self,
         mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        """Convert numpy video arrays to (TCHW, timestamps) tuples for MiMo.
-        Also remap 'audios' → 'audio' since MiMoOmniProcessor.__call__ uses
-        the singular form.
-        """
-        valid_mm_items = mm_items.select(
-            {k for k, c in mm_items.get_all_counts().items() if c > 0}
-        )
-        mm_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
-
-        if not mm_data:
-            return BatchFeature(dict(passthrough_data))
-
-        # Remap audios → audio (MiMoOmniProcessor uses singular param name)
-        if "audios" in mm_data:
-            mm_data = {**mm_data, "audio": mm_data["audios"]}
-            mm_data = {k: v for k, v in mm_data.items() if k != "audios"}
+        hf_kwargs: Mapping[str, object],
+    ) -> HFMultiModalInputs:
+        """Convert numpy video arrays to (TCHW, timestamps) tuples for MiMo."""
+        hf_inputs = super()._get_hf_mm_inputs(mm_items, hf_kwargs)
+        mm_data = hf_inputs.hf_data
 
         # Handle video_audio items: convert video part to (TCHW, timestamps) tuple
         if "video_audio" in mm_data:
@@ -964,7 +971,6 @@ class MiMoV2OmniMultiModalProcessor(BaseMultiModalProcessor[MiMoV2OmniProcessing
                     assert isinstance(va_item, (list, tuple)) and len(va_item) == 2
                     vid, audio_src = va_item
                     va_item = VideoAudioInput(video=vid, audio=audio_src)
-                    vid = vid
                 # Convert video frames to (TCHW, timestamps) if needed
                 if (
                     isinstance(vid, tuple)
@@ -992,7 +998,7 @@ class MiMoV2OmniMultiModalProcessor(BaseMultiModalProcessor[MiMoV2OmniProcessing
                             audio=va_item.audio,
                         )
                     )
-            mm_data = {**mm_data, "video_audio": va_converted}
+            mm_data["video_audio"] = va_converted
 
         if "videos" in mm_data:
             converted: list[tuple[torch.Tensor, torch.Tensor]] = []
@@ -1026,15 +1032,9 @@ class MiMoV2OmniMultiModalProcessor(BaseMultiModalProcessor[MiMoV2OmniProcessing
                     timestamps = torch.arange(T, dtype=torch.float32) / self._INPUT_FPS
                     converted.append((frames, timestamps))
 
-            mm_data = {**mm_data, "videos": converted}
+            mm_data["videos"] = converted
 
-        processed_data = self.info.ctx.call_hf_processor(
-            self.info.get_hf_processor(**hf_processor_mm_kwargs),
-            mm_data,
-            hf_processor_mm_kwargs,
-        )
-        processed_data.update(passthrough_data)
-        return processed_data
+        return hf_inputs
 
     def _get_prompt_updates(
         self,
@@ -1129,7 +1129,7 @@ class MiMoV2OmniMultiModalProcessor(BaseMultiModalProcessor[MiMoV2OmniProcessing
                     full.extend(ts_ids)
                     is_embed_mask.extend([False] * len(ts_ids))
                     # Vision tokens for all frames in this group
-                    for f in range(frames_per_group):
+                    for _ in range(frames_per_group):
                         full.append(vision_start_id)
                         is_embed_mask.append(False)
                         full.extend([video_pad_id] * n_per_grid)
@@ -1202,33 +1202,26 @@ class MiMoV2OmniDummyInputsBuilder(BaseDummyInputsBuilder[MiMoV2OmniProcessingIn
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
-        num_images = mm_counts.get("image", 0)
-        num_videos = mm_counts.get("video", 0)
-
         target_width, target_height = self.info.get_image_size_with_most_features()
         target_num_frames = self.info.get_num_frames_with_most_features(
             seq_len, mm_counts
         )
-        image_overrides = mm_options.get("image")
-        video_overrides = mm_options.get("video")
-        assert image_overrides is None or isinstance(image_overrides, ImageDummyOptions)
-        assert video_overrides is None or isinstance(video_overrides, VideoDummyOptions)
 
         return {
             "image": self._get_dummy_images(
                 width=target_width,
                 height=target_height,
-                num_images=num_images,
-                overrides=image_overrides,
+                num_images=mm_counts.get("image", 0),
+                overrides=mm_options.get("image"),
             ),
             "video": self._get_dummy_videos(
                 width=target_width,
                 height=target_height,
                 num_frames=target_num_frames,
-                num_videos=num_videos,
-                overrides=video_overrides,
+                num_videos=mm_counts.get("video", 0),
+                overrides=mm_options.get("video"),
             ),
         }
 
@@ -1238,7 +1231,11 @@ class MiMoV2OmniDummyInputsBuilder(BaseDummyInputsBuilder[MiMoV2OmniProcessingIn
     info=MiMoV2OmniProcessingInfo,
     dummy_inputs=MiMoV2OmniDummyInputsBuilder,
 )
-class MiMoV2OmniForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsQuant):
+class MiMoV2OmniForCausalLM(
+    nn.Module, SupportsMultiModal, SupportsPP, SupportsQuant, SupportsEagle3
+):
+    supports_encoder_tp_data = True
+
     # To ensure correct weight loading and mapping.
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
@@ -1557,8 +1554,10 @@ class MiMoV2OmniForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsQ
                 batch. **NOTE**: If mrope is enabled (default setting for
                 Qwen2.5-VL opensource models), the shape will be `(3, seq_len)`,
                 otherwise it will be `(seq_len,).
-        """
+            intermediate_tensors: Intermediate tensors from prior forward pass.
+            inputs_embeds: Optional tensor of input embeddings.
 
+        """
         if intermediate_tensors is not None:
             inputs_embeds = None
 

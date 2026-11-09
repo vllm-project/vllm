@@ -1,13 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-This file demonstrates the example usage of structured outputs
+"""This file demonstrates the example usage of structured outputs
 in vLLM. It shows how to apply different constraints such as choice,
 regex, json schema, and grammar to produce structured and formatted
 results based on specific prompts.
 """
 
-from enum import Enum
+from enum import StrEnum
 
 from pydantic import BaseModel
 
@@ -40,7 +39,7 @@ prompt_regex = (
 
 
 # Structured outputs by JSON using Pydantic schema
-class CarType(str, Enum):
+class CarType(StrEnum):
     sedan = "sedan"
     suv = "SUV"
     truck = "Truck"

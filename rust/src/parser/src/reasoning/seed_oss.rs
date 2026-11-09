@@ -3,7 +3,10 @@
 
 use vllm_tokenizer::{DecodedText, DynTokenizer};
 
-use super::{DelimitedReasoningParser, ReasoningDelta, ReasoningParser, Result};
+use super::{
+    DelimitedReasoningParser, DelimitedReasoningParserBuilder, ReasoningDelta, ReasoningParser,
+    Result,
+};
 
 /// Reasoning parser for SeedOSS models using `<seed:think>`/`</seed:think>`
 /// delimiters.
@@ -15,12 +18,9 @@ impl SeedOssReasoningParser {
     /// Create a SeedOSS parser backed by the shared delimited state machine.
     pub fn new(tokenizer: DynTokenizer) -> Result<Self> {
         Ok(Self {
-            inner: DelimitedReasoningParser::new(
-                tokenizer,
-                "<seed:think>",
-                "</seed:think>",
-                false,
-            )?,
+            inner: DelimitedReasoningParserBuilder::new(tokenizer, "<seed:think>", "</seed:think>")
+                .with_after_end("\n")
+                .build()?,
         })
     }
 }
@@ -34,8 +34,7 @@ impl ReasoningParser for SeedOssReasoningParser {
     }
 
     fn initialize(&mut self, prompt_token_ids: &[u32]) -> Result<()> {
-        self.inner.initialize(prompt_token_ids);
-        Ok(())
+        self.inner.initialize(prompt_token_ids)
     }
 
     fn push(&mut self, delta: DecodedText) -> Result<ReasoningDelta> {
@@ -54,7 +53,7 @@ mod tests {
     use super::SeedOssReasoningParser;
     use crate::reasoning::ReasoningParser;
     use crate::reasoning::tests::{
-        SEED_THINK_END_ID, SEED_THINK_START_ID, content_str, fake_tokenizer, push_str,
+        SEED_THINK_END_ID, SEED_THINK_START_ID, content_str, decode, fake_tokenizer, push_str,
         reasoning_str,
     };
 
@@ -143,11 +142,12 @@ mod tests {
         parser.initialize(&[SEED_THINK_START_ID]).unwrap();
 
         // Closing delimiter `</seed:think>` arrives in two halves.
-        let first = push_str(&mut parser, "reason</seed:");
+        let [first, second] = decode(["reason</seed:", "think>answer"]);
+        let first = parser.push(first).unwrap();
         assert_eq!(reasoning_str(&first), Some("reason"));
         assert_eq!(first.content, None);
 
-        let second = push_str(&mut parser, "think>answer");
+        let second = parser.push(second).unwrap();
         assert_eq!(second.reasoning, None);
         assert_eq!(content_str(&second), Some("answer"));
     }

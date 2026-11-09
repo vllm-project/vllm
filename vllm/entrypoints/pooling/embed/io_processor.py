@@ -9,35 +9,44 @@ from openai.types.chat import (
     ChatCompletionContentPartImageParam,
     ChatCompletionContentPartTextParam,
 )
-from openai.types.chat.chat_completion_content_part_image_param import ImageURL
 
 from vllm import PoolingParams
-from vllm.entrypoints.chat_utils import (
-    ChatCompletionContentPartParam,
-    ChatCompletionMessageParam,
-    CustomChatCompletionMessageParam,
-)
+from vllm.exceptions import VLLMValidationError
 from vllm.inputs import tokens_input
 from vllm.logger import init_logger
 from vllm.outputs import PoolingOutput, PoolingRequestOutput
 from vllm.renderers import merge_kwargs
+from vllm.renderers.chat_utils import (
+    ChatCompletionContentPartParam,
+    ChatCompletionMessageParam,
+    CustomChatCompletionMessageParam,
+    ImageURL,
+)
 from vllm.renderers.hf import resolve_chat_template
 from vllm.utils.collection_utils import chunk_list
 from vllm.utils.mistral import is_mistral_tokenizer
 
 from ..base.io_processor import PoolingIOProcessor
 from ..scoring.io_processor import JinaRankingIOProcessorMixin
+from ..token_embed.late_chunking import (
+    attach_late_chunking_metadata,
+    build_late_chunking_metadata,
+    prepare_late_chunking_input,
+)
 from ..typing import (
     AnyOfflineInputsContext,
     AnyRenderParam,
     ChunkedEmbeddingMetadata,
     EncodeChatRenderParams,
+    LateChunkingSlot,
     OfflineEncodeInputsContext,
+    OfflineOutputsContext,
     PoolingChatLikeRequest,
     PoolingCompletionLikeRequest,
     PoolingEngineInput,
     PoolingServeContext,
     RequestFactory,
+    RequestGenerator,
 )
 from .protocol import (
     CohereEmbedContent,
@@ -57,6 +66,8 @@ logger = init_logger(__name__)
 class _ChunkedPromptAggregator:
     weighted_sum: torch.Tensor | None = None
     total_weight: int = 0
+    num_chunks: int = 0
+    all_chunks_l2_normalized: bool = True
 
 
 class EmbedIOProcessor(PoolingIOProcessor):
@@ -125,6 +136,15 @@ class EmbedIOProcessor(PoolingIOProcessor):
         if ctx.engine_inputs is None:
             raise ValueError("Engine prompts not available")
 
+        if any(
+            engine_input["prompts"]["type"] == "multimodal"
+            for engine_input in ctx.engine_inputs
+        ):
+            raise VLLMValidationError(
+                "Chunked embedding processing does not support multimodal inputs. "
+                "Disable enable_chunked_processing to use multimodal inputs."
+            )
+
         ctx.original_engine_inputs = ctx.engine_inputs
         request_id = ctx.request_id
         max_model_len = self.model_config.max_model_len
@@ -140,13 +160,16 @@ class EmbedIOProcessor(PoolingIOProcessor):
                 )
 
             prompt_token_ids = cast(list[int], token_ids)
+            cache_salt = cast(str | None, engine_input["prompts"].get("cache_salt"))
 
             for chunk_idx, chunk_tokens in enumerate(
                 chunk_list(prompt_token_ids, max_model_len)
             ):
                 chunked_engine_inputs.append(
                     PoolingEngineInput(
-                        prompts=tokens_input(prompt_token_ids=chunk_tokens),
+                        prompts=tokens_input(
+                            prompt_token_ids=chunk_tokens, cache_salt=cache_salt
+                        ),
                         params=engine_input["params"],
                         lora_requests=engine_input["lora_requests"],
                         priorities=engine_input["priorities"],
@@ -204,7 +227,17 @@ class EmbedIOProcessor(PoolingIOProcessor):
 
             weight = len(result.prompt_token_ids)
             embedding_data = result.outputs.data
-            weighted_embedding = embedding_data.to(dtype=torch.float32) * weight
+            float_embedding = embedding_data.to(dtype=torch.float32)
+            if ctx.pooling_params.use_activation:
+                # Custom activations need not L2-normalize; allow BF16 rounding.
+                embedding_norm = torch.linalg.vector_norm(float_embedding)
+                aggregator.all_chunks_l2_normalized &= torch.allclose(
+                    embedding_norm,
+                    torch.ones_like(embedding_norm),
+                    rtol=1e-2,
+                    atol=1e-5,
+                )
+            weighted_embedding = float_embedding * weight
 
             if aggregator.weighted_sum is None:
                 # First chunk
@@ -214,6 +247,7 @@ class EmbedIOProcessor(PoolingIOProcessor):
                 aggregator.weighted_sum += weighted_embedding
 
             aggregator.total_weight += weight
+            aggregator.num_chunks += 1
 
         if ctx.original_engine_inputs is None:
             raise ValueError("Original engine inputs not available")
@@ -239,6 +273,14 @@ class EmbedIOProcessor(PoolingIOProcessor):
                 ):
                     # Compute final mean embedding
                     final_embedding = weighted_sum / total_weight
+                    if (
+                        ctx.pooling_params.use_activation
+                        and aggregator.num_chunks > 1
+                        and aggregator.all_chunks_l2_normalized
+                    ):
+                        final_embedding = torch.nn.functional.normalize(
+                            final_embedding, dim=-1
+                        )
 
                     # Create a PoolingRequestOutput
                     # for the aggregated result
@@ -342,7 +384,7 @@ class EmbedIOProcessor(PoolingIOProcessor):
 
     @staticmethod
     def _load_task_instructions(hf_config: Any) -> dict[str, str] | None:
-        """Extract ``task_instructions`` from the HF model config."""
+        """Extract `task_instructions` from the HF model config."""
         ti = getattr(hf_config, "task_instructions", None)
         if not isinstance(ti, dict) or not ti:
             return None
@@ -353,7 +395,7 @@ class EmbedIOProcessor(PoolingIOProcessor):
         model: str | Any,
         revision: str | None,
     ) -> dict[str, str] | None:
-        """Load ``task_instructions`` from ``config_sentence_transformers.json``."""
+        """Load `task_instructions` from `config_sentence_transformers.json`."""
         from vllm.transformers_utils.repo_utils import get_hf_file_to_dict
 
         try:
@@ -416,7 +458,7 @@ class EmbedIOProcessor(PoolingIOProcessor):
     ) -> None:
         """Raise if any output exceeds *max_tokens_check* tokens.
 
-        Used to enforce ``truncate=NONE`` with an explicit ``max_tokens``:
+        Used to enforce `truncate=NONE` with an explicit `max_tokens`:
         the pipeline runs without truncation and we reject afterwards.
         """
         if max_tokens_check is None:
@@ -434,7 +476,7 @@ class EmbedIOProcessor(PoolingIOProcessor):
     def _resolve_cohere_truncation(
         request: CohereEmbedRequest,
     ) -> tuple[int | None, Literal["left", "right"] | None]:
-        """Return ``(truncate_prompt_tokens, truncation_side)``."""
+        """Return `(truncate_prompt_tokens, truncation_side)`."""
         if request.truncate == "NONE":
             return None, None
         if request.truncate == "START":
@@ -455,13 +497,13 @@ class EmbedIOProcessor(PoolingIOProcessor):
     def _get_request_factory_cohere_online(
         self, ctx: PoolingServeContext
     ) -> Sequence[AnyRenderParam]:
-        """Convert a ``CohereEmbedRequest`` into engine prompts.
+        """Convert a `CohereEmbedRequest` into engine prompts.
 
         If a model has a chat template the task instruction are rendered
         as a system prompt. Otherwise they are just prepended to the input text.
 
         Images and mixed inputs are always batch-rendered through the chat
-        template in one ``render_chat`` call.
+        template in one `render_chat` call.
         """
         request = ctx.request
         assert isinstance(request, CohereEmbedRequest)
@@ -618,7 +660,7 @@ class EmbedIOProcessor(PoolingIOProcessor):
         return [prefix + t for t in texts]
 
     def _get_task_instruction_prefix(self, input_type: str | None) -> str | None:
-        """Return the task-instruction prefix for *input_type*, or ``None``."""
+        """Return the task-instruction prefix for *input_type*, or `None`."""
         if not self.task_instructions or input_type is None:
             return None
         return self.task_instructions.get(input_type) or None
@@ -633,10 +675,94 @@ class EmbedIOProcessor(PoolingIOProcessor):
 class TokenEmbedIOProcessor(PoolingIOProcessor):
     name = "token_embed"
 
+    def get_request_factory_online(
+        self, ctx: PoolingServeContext
+    ) -> Sequence[AnyRenderParam]:
+        requests = super().get_request_factory_online(ctx)
+        if ctx.pooling_params.late_chunking_params is not None:
+            for request in requests:
+                slot = LateChunkingSlot()
+                ctx.late_chunking.append(slot)
+                request["late_chunking"] = slot
+        return requests
+
+    def post_process_online(self, ctx: PoolingServeContext):
+        if ctx.late_chunking:
+            for output, slot in zip(
+                ctx.final_res_batch, ctx.late_chunking, strict=True
+            ):
+                assert slot.metadata is not None
+                attach_late_chunking_metadata(output, slot.metadata)
+
+    def get_request_factory_offline(
+        self, ctx: AnyOfflineInputsContext
+    ) -> tuple[RequestFactory, int]:
+        factory, num_requests = super().get_request_factory_offline(ctx)
+        assert isinstance(ctx, OfflineEncodeInputsContext)
+        if ctx.pooling_params is None or not any(
+            p.late_chunking_params is not None
+            for p in self._params_to_seq(ctx.pooling_params, num_requests)
+        ):
+            return factory, num_requests
+
+        if (ctx.tokenization_kwargs or {}).get("padding") not in (
+            None,
+            False,
+            "do_not_pad",
+        ):
+            raise VLLMValidationError("Late chunking does not support input padding")
+
+        def request_factory() -> RequestGenerator:
+            for request in factory():
+                slot = None
+                if request["params"].late_chunking_params is not None:
+                    slot = LateChunkingSlot()
+                    request["late_chunking"] = slot
+                ctx.late_chunking.append(slot)
+                yield request
+
+        return request_factory, num_requests
+
+    def render(self, render_params: AnyRenderParam) -> PoolingEngineInput:
+        late_chunking = render_params["params"].late_chunking_params
+        if late_chunking is None:
+            return super().render(render_params)
+
+        text, tok_params = prepare_late_chunking_input(self.vllm_config, render_params)
+        render_params = render_params.copy()
+        render_params["tok_params"] = tok_params
+        result = super().render(render_params)
+        prompt = result["prompts"]
+        if prompt["type"] != "token":
+            raise VLLMValidationError("Late chunking requires tokenized text")
+        render_params["late_chunking"].metadata = build_late_chunking_metadata(
+            text,
+            len(prompt["prompt_token_ids"]),
+            prompt.pop("prompt_token_offsets", None),
+            late_chunking.chunk_size,
+        )
+        return result
+
+    def post_process_offline(self, ctx: OfflineOutputsContext):
+        if ctx.late_chunking:
+            for output, slot in zip(ctx.outputs, ctx.late_chunking, strict=True):
+                if slot is not None:
+                    assert slot.metadata is not None
+                    attach_late_chunking_metadata(output, slot.metadata)
+        return ctx.outputs
+
 
 class JinaRankingTokenEmbedIOProcessor(
     TokenEmbedIOProcessor, JinaRankingIOProcessorMixin
 ):
+    def render(self, render_params: AnyRenderParam) -> PoolingEngineInput:
+        if render_params["params"].late_chunking_params is not None:
+            raise VLLMValidationError(
+                "JinaForRanking returns document/query vectors and does not support "
+                "late chunking"
+            )
+        return super().render(render_params)
+
     def get_request_factory_online(
         self, ctx: PoolingServeContext
     ) -> Sequence[AnyRenderParam]:

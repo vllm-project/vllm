@@ -100,7 +100,7 @@ kv-cache and the quantization algorithm is AutoSmoothQuant.
 
 !!! note
     Note the quantization algorithm needs a JSON config file and the config file is located in
-    [Quark Pytorch examples](https://quark.docs.amd.com/latest/pytorch/pytorch_examples.html),
+    [Quark PyTorch examples](https://quark.docs.amd.com/latest/pytorch/pytorch_examples.html),
     under the directory `examples/torch/language_modeling/llm_ptq/models`. For example,
     AutoSmoothQuant config file for Llama is
     `examples/torch/language_modeling/llm_ptq/models/llama/autosmoothquant_config.json`.
