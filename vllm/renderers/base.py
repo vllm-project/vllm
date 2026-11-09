@@ -103,6 +103,11 @@ class _SwappableExecutor(Executor):
         self._inner = ThreadPoolExecutor(max_workers=self._max_workers)
 
 
+EMPTY_CONVERSATION_ERROR = (
+    "Cannot apply chat template to an empty conversation. Provide at least one message."
+)
+
+
 class BaseRenderer(ABC, Generic[_T]):
     def __init__(self, config: "VllmConfig", tokenizer: _T | None) -> None:
         super().__init__()
@@ -1347,10 +1352,7 @@ class BaseRenderer(ABC, Generic[_T]):
         # but renderers with their own chat encoding render it to a bare BOS
         # prompt. Refuse it here so every renderer answers the same way.
         if any(not conversation for conversation in conversations):
-            raise VLLMValidationError(
-                "Cannot apply chat template to an empty conversation. "
-                "Provide at least one message."
-            )
+            raise VLLMValidationError(EMPTY_CONVERSATION_ERROR)
 
     def render_chat(
         self,

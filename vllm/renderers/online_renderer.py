@@ -59,6 +59,7 @@ from vllm.renderers import (
     map_reasoning_effort,
     merge_kwargs,
 )
+from vllm.renderers.base import EMPTY_CONVERSATION_ERROR
 from vllm.renderers.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
@@ -410,6 +411,14 @@ class OnlineRenderer:
                 param="previous_response_id",
             )
 
+        if (
+            previous_messages is None
+            and request.instructions is None
+            and not request.previous_input_messages
+            and request.input == []
+        ):
+            return self.create_error_response(EMPTY_CONVERSATION_ERROR, param="input")
+
         messages: list[OpenAIMessage] = []
         request_input = request.input
         if previous_messages is None:
@@ -556,6 +565,9 @@ class OnlineRenderer:
             # engine. Harmony has no adjust_request hook to preserve.
             engine_input = tokens_input(reuse_ids, cache_salt=request.cache_salt)
             return [], [engine_input]
+
+        if not request.messages:
+            raise VLLMValidationError(EMPTY_CONVERSATION_ERROR, parameter="messages")
 
         messages: list[OpenAIMessage] = []
 
