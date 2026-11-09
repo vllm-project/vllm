@@ -506,6 +506,11 @@ class HiSparseCoordinator:
         manager = self.host_manager
         if manager is None:
             return
+        # A lookahead hash arrives only once the tokens after its page are known.
+        num_computed_tokens = min(
+            num_computed_tokens,
+            len(request.block_hashes) * manager.block_pool.hash_block_size,
+        )
         request_id = request.request_id
         self._get_request_state(request_id).publication = _PendingPublication(
             request=request,
@@ -876,19 +881,11 @@ class HiSparseCoordinator:
             state.ready_prefix_pages += 1
         # The host group uses full-attention retention. Only sealed pages with
         # completed copies can outlive the request, including on cancellation.
-        num_hashed_tokens = (
-            len(publication.request.block_hashes)
-            * self.host_manager.block_pool.hash_block_size
-        )
         self.host_manager.block_pool.cache_full_blocks(
             request=publication.request,
             blocks=blocks,
             num_cached_blocks=publication.num_cached_blocks,
-            num_full_blocks=min(
-                state.ready_prefix_pages,
-                publication.num_pages,
-                num_hashed_tokens // self.host_manager.block_size,
-            ),
+            num_full_blocks=min(state.ready_prefix_pages, publication.num_pages),
             block_size=self.host_manager.block_size,
             kv_cache_group_id=self.host_manager.kv_cache_group_id,
         )

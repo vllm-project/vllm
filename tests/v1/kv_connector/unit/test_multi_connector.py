@@ -24,6 +24,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     SupportsHMA,
     supports_hma,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.example_connector import (
+    ExampleConnector,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     KVConnectorLogging,
     KVConnectorStats,
@@ -142,6 +145,20 @@ class MockHMAConnector(KVConnectorBase_V1, SupportsHMA):
         return (False, None)
 
 
+class LookaheadHashingTestConnector(ExampleConnector):
+    """Minimal real connector for lookahead-hash protocol tests."""
+
+    @classmethod
+    def supports_lookahead_block_hashes(
+        cls, kv_transfer_config: KVTransferConfig
+    ) -> bool:
+        return bool(
+            kv_transfer_config.kv_connector_extra_config.get(
+                "supports_lookahead_block_hashes", False
+            )
+        )
+
+
 class MockDivergentHMAConnector(MockHMAConnector):
     _supports_divergent_local_hybrid_hits = True
 
@@ -156,6 +173,17 @@ KVConnectorFactory.register_connector(
     __name__,
     MockDivergentHMAConnector.__name__,
 )
+
+
+def _lookahead_connector_config(supported: bool) -> dict[str, Any]:
+    return {
+        "kv_connector": "LookaheadHashingTestConnector",
+        "kv_role": "kv_both",
+        "kv_connector_module_path": __name__,
+        "kv_connector_extra_config": {
+            "supports_lookahead_block_hashes": supported,
+        },
+    }
 
 
 def test_register_finished_partial_tail_notifies_every_connector():
@@ -1053,18 +1081,32 @@ Options:
 
 @pytest.mark.cpu_test
 @pytest.mark.parametrize(
-    ("num_lookahead", "prefix_caching", "disabled", "expected", "nested", "role"),
+    (
+        "child_support",
+        "num_lookahead",
+        "prefix_caching",
+        "disabled",
+        "expected",
+        "nested",
+        "role",
+    ),
     [
-        (1, True, False, 1, False, "SCHEDULER"),
-        (1, False, False, 1, False, "SCHEDULER"),
-        (2, True, False, 2, False, "SCHEDULER"),
-        (1, True, True, 0, False, "SCHEDULER"),
-        (1, True, False, 1, False, "WORKER"),
-        (1, True, False, 1, True, "SCHEDULER"),
-        (1, True, False, 1, True, "WORKER"),
+        ([], 1, True, False, 0, False, "SCHEDULER"),
+        ([True, True], 1, True, False, 1, False, "SCHEDULER"),
+        ([True, False], 1, True, False, 0, False, "SCHEDULER"),
+        ([True, True], 1, False, False, 1, False, "SCHEDULER"),
+        ([True, True], 2, True, False, 2, False, "SCHEDULER"),
+        ([True, True], 1, True, True, 0, False, "SCHEDULER"),
+        ([True, True], 1, True, False, 1, False, "WORKER"),
+        ([True, False], 1, True, False, 0, False, "WORKER"),
+        ([True, True], 1, True, False, 1, True, "SCHEDULER"),
+        ([True, False], 1, True, False, 0, True, "SCHEDULER"),
+        ([True, True], 1, True, False, 1, True, "WORKER"),
+        ([True, False], 1, True, False, 0, True, "WORKER"),
     ],
 )
 def test_multi_connector_children_use_configured_lookahead_hashes(
+    child_support: list[bool],
     num_lookahead: int,
     prefix_caching: bool,
     disabled: bool,
@@ -1072,9 +1114,7 @@ def test_multi_connector_children_use_configured_lookahead_hashes(
     nested: bool,
     role: str,
 ):
-    children: list[dict[str, Any]] = [
-        {"kv_connector": "ExampleConnector", "kv_role": "kv_both"} for _ in range(2)
-    ]
+    children = [_lookahead_connector_config(supported) for supported in child_support]
     if nested:
         children = [
             {

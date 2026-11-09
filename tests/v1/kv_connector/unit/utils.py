@@ -204,6 +204,7 @@ def set_mtp_config(
     spec.method = "mtp"
     spec.draft_model_config = config.model_config
     config.speculative_config = spec
+    config.num_hash_lookahead_tokens = config._resolve_num_hash_lookahead_tokens()
 
 
 def create_scheduler(

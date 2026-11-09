@@ -1037,15 +1037,10 @@ class UMBPStoreConnectorScheduler:
                     if self.enable_kv_cache_events and index > 0
                     else None
                 )
-                # Include the lookahead tokens the hash covers, as Mooncake
-                # Store does; the KV event splits them off.
+                # The hash also covers the next lookahead tokens.
+                hash_end = token_end + self.num_hash_lookahead_tokens
                 token_ids_by_block.append(
-                    tuple(
-                        request.all_token_ids[
-                            index * group_block_size : token_end
-                            + self.num_hash_lookahead_tokens
-                        ]
-                    )
+                    tuple(request.all_token_ids[index * group_block_size : hash_end])
                     if self.enable_kv_cache_events
                     else ()
                 )

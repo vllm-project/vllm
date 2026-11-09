@@ -66,7 +66,7 @@ def replay_boundaries(
     num_prompt_tokens: int,
     scheduler_block_size: int,
     use_eagle: bool,
-    num_hash_lookahead_tokens: int = 0,
+    num_hash_lookahead_tokens: int,
 ) -> tuple[int, ...]:
     """Positions a later request replaying a prompt can resume at.
 
@@ -807,12 +807,6 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                 num_finalized_computed_tokens,
                 self._align_cacheable(num_finalized_computed_tokens)
                 + manager.block_size,
-            )
-        if kv_cache_group_id in self.eagle_group_ids:
-            # Multi-module MTP re-prefills the drafter's KV of the last
-            # num_reprefillable_tokens tokens, so only finalized KV is cacheable.
-            return self._align_cacheable(
-                max(0, num_computed_tokens - self.num_reprefillable_tokens)
             )
         return cached_num_computed_tokens
 

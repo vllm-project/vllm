@@ -194,6 +194,17 @@ class KVConnectorBase_V1(ABC):
         """
         return False
 
+    @classmethod
+    def supports_lookahead_block_hashes(
+        cls, kv_transfer_config: "KVTransferConfig"
+    ) -> bool:
+        """Whether the connector supports core lookahead hashing.
+
+        If False, `num_hash_lookahead_tokens` is 0 and block hashes cover only
+        each block's own tokens.
+        """
+        return True
+
     @property
     def requires_kv_delivery(self) -> bool:
         """Whether this connector hands off KV that must be reliably delivered.

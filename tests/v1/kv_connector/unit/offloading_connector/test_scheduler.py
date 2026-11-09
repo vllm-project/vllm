@@ -5809,6 +5809,10 @@ class TestEagle:
             blocks_per_chunk=blocks_per_chunk,
             speculative_config=spec,
         )
+        connector = runner.scheduler_connector
+        assert connector.supports_lookahead_block_hashes(
+            runner.scheduler.vllm_config.kv_transfer_config
+        )
         assert runner.scheduler.num_hash_lookahead_tokens == num_lookahead
 
         runner.new_request(token_ids=[0] * block_size * 4)
