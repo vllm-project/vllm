@@ -10,7 +10,7 @@ from vllm.distributed import get_pp_group
 from vllm.logger import init_logger
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import DraftTokenIds
-from vllm.v1.worker.gpu.async_utils import async_copy_to_np
+from vllm.v1.worker.gpu.async_utils import async_copy_to_np, new_d2h_stream
 from vllm.v1.worker.gpu.input_batch import InputBatch
 
 logger = init_logger(__name__)
@@ -58,7 +58,7 @@ def get_pp_safe_draft_load_config(load_config: LoadConfig) -> LoadConfig:
 class DraftTokensHandler:
     def __init__(self, device: torch.device | None = None):
         self.device = device
-        self.copy_stream = torch.cuda.Stream(device)
+        self.copy_stream = new_d2h_stream(device)
         # Blocking (sleep) event to avoid busy-polling the CUDA driver lock.
         self.copy_event = torch.cuda.Event(blocking=True)
         self._copy_pending = False
