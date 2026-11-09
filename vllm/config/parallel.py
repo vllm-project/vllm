@@ -915,6 +915,18 @@ class ParallelConfig:
         """
         if self.nnodes == 1:
             return 1
+        if self.data_parallel_size_local < 1:
+            # `data_parallel_size_local` is 0 as a sentinel meaning "data
+            # parallel was specified in the engine args"; it does not encode a
+            # real per-node DP width, so the node layout cannot be derived from
+            # it yet.
+            raise ValueError(
+                "Cannot derive the data parallel node layout: "
+                "`data_parallel_size_local` must be at least 1, got "
+                f"{self.data_parallel_size_local}. Set "
+                "`--data-parallel-size-local` to the number of data parallel "
+                "ranks on this node."
+            )
         data_parallel_node_size = (
             self.data_parallel_size // self.data_parallel_size_local
         )

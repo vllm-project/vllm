@@ -1875,6 +1875,23 @@ def test_nnodes_within_dp_rejects_uneven_internal_lb(nnodes):
         _ = parallel_config.nnodes_within_dp
 
 
+def test_nnodes_within_dp_rejects_zero_local_size():
+    """`data_parallel_size_local=0` is the "DP specified via engine args"
+    sentinel and does not encode a real per-node DP width. Deriving the node
+    layout before it is resolved must raise a clear error instead of dividing
+    by zero.
+    """
+    parallel_config = ParallelConfig(
+        data_parallel_size=4,
+        data_parallel_size_local=0,
+        distributed_executor_backend="mp",
+        nnodes=2,
+    )
+
+    with pytest.raises(ValueError, match="data_parallel_size_local"):
+        _ = parallel_config.nnodes_within_dp
+
+
 def test_draft_model_enables_async_scheduling_by_default():
     parallel_config = ParallelConfig(distributed_executor_backend="uni")
     model_config = ModelConfig("Qwen/Qwen3-0.6B", max_model_len=2048)
