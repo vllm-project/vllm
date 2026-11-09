@@ -1104,7 +1104,12 @@ class ParallelEngramEmbedding(nn.Module):
                 )
 
                 self._peer_key = peers.next_table_key()
-                buffer, pointers = share_peer_table(num_bytes, peers, self._peer_key)
+                # Held here like the symmetric handle, so lookups keep every
+                # slice mapped even if a loader replaces the parameters' data.
+                buffer, self._peer_mappings = share_peer_table(
+                    num_bytes, peers, self._peer_key
+                )
+                pointers = self._peer_mappings.addresses
             else:
                 import torch.distributed._symmetric_memory as symm_mem
 

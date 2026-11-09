@@ -218,14 +218,29 @@ def _gpu_view(address: int, num_bytes: int, owner: object = None) -> torch.Tenso
     )
 
 
+def _unmap_slices(addresses: list[int], size: int) -> None:
+    for address in addresses:
+        _unmap(address, size, [(0, size)])
+
+
+class PeerTableMappings:
+    """This process's mappings of every slice of a peer table, unmapped once
+    neither the table nor any tensor over its slice holds them. A slice's
+    memory is freed when every GPU has unmapped it."""
+
+    def __init__(self, size: int) -> None:
+        self.addresses: list[int] = []
+        finalizer = weakref.finalize(self, _unmap_slices, self.addresses, size)
+        finalizer.atexit = False  # type: ignore[misc]
+
+
 def share_peer_table(
     num_bytes: int, group: EngramPeerGroup, key: str
-) -> tuple[torch.Tensor, list[int]]:
+) -> tuple[torch.Tensor, PeerTableMappings]:
     """Allocate this GPU's slice of a table in its HBM and map every GPU's slice.
 
-    Every slice holds `num_bytes`. Returns this GPU's slice and the address of
-    each rank's slice. The mappings last as long as the process, since peers read
-    the slices; each mapping keeps its slice alive.
+    Every slice holds `num_bytes`. Returns this GPU's slice and the mappings,
+    whose addresses are in rank order.
     """
     device = torch.accelerator.current_device_index()
     prop = cu.CUmemAllocationProp()
@@ -239,7 +254,7 @@ def share_peer_table(
     access = _read_write_access(
         cu.CUmemLocationType.CU_MEM_LOCATION_TYPE_DEVICE, device
     )
-    addresses = []
+    mappings = PeerTableMappings(size)
     for rank, peer in enumerate(exported):
         handle = (
             own
@@ -247,11 +262,13 @@ def share_peer_table(
             else _call_driver(cu.cuMemImportFromShareableHandle, peer, FABRIC_HANDLE)
         )
         address = int(_call_driver(cu.cuMemAddressReserve, size, 0, 0, 0))
+        mappings.addresses.append(address)
         _call_driver(cu.cuMemMap, address, size, 0, handle, 0)
         _call_driver(cu.cuMemSetAccess, address, size, [access], 1)
+        # The mapping keeps the slice alive.
         _release([handle])
-        addresses.append(address)
-    return _gpu_view(addresses[group.rank_in_group], num_bytes), addresses
+    address = mappings.addresses[group.rank_in_group]
+    return _gpu_view(address, num_bytes, owner=mappings), mappings
 
 
 def share_host_table(

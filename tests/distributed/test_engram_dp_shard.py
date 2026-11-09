@@ -272,6 +272,11 @@ def _check_peer_group_table(store_path: str):
     ids = _make_ids(HEAD_SIZES, 9, seed=500 + group.rank_in_group)
     expected = _reference(weight.cuda(), scale.cuda(), ids)
     torch.testing.assert_close(table(ids), expected, atol=0, rtol=0)
+    # A dropped table unmaps its slices; once every GPU has, its HBM is freed.
+    free, _ = torch.accelerator.get_memory_info()
+    del table
+    group.all_gather("released", b"")
+    assert torch.accelerator.get_memory_info()[0] > free
 
 
 def test_engram_peer_group_assigns_ranks_and_gathers(tmp_path):
