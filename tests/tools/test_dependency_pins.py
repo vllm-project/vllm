@@ -234,8 +234,10 @@ def test_hybrid_test_deps_pins_agree_and_build_tools_are_hashed():
         ),
         (
             {"mamba_ssm": "2.3.0", "causal_conv1d": "1.6.0"},
-            "mamba_ssm deadbeef\n"
-            "causal_conv1d da6dbaa9fd5a919967f14d3fd031da1288ad5025\n",
+            (
+                "mamba_ssm deadbeef\n"
+                "causal_conv1d da6dbaa9fd5a919967f14d3fd031da1288ad5025\n"
+            ),
             ["built from"],
         ),
     ],
