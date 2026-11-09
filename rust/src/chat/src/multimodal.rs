@@ -1703,6 +1703,25 @@ mod tests {
     }
 
     #[test]
+    fn kimi_k31_resolves_kimi_k3_image_support_by_model_type() {
+        const KIMI_MEDIA_PAD_ID: u32 = 163605;
+        let config = serde_json::json!({
+            "model_type": "kimi_k31",
+            "media_placeholder_token_id": KIMI_MEDIA_PAD_ID,
+        });
+        let tokenizer = TestTokenizer::new().with_regular_token("<|media_pad|>", KIMI_MEDIA_PAD_ID);
+        // The test model ID (`kimi_k31-test`) does not contain `kimi-k3`, so
+        // only the model type can select the K3 spec.
+        let info = test_info("kimi_k31", config, tokenizer);
+
+        assert_eq!(
+            info.placeholder_token(Modality::Image),
+            Some("<|media_pad|>")
+        );
+        assert_eq!(info.placeholder_token(Modality::Video), None);
+    }
+
+    #[test]
     fn deepseek_v41_resolves_image_support_only() {
         let info = deepseek_v41_info();
 

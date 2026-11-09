@@ -193,7 +193,7 @@ def okey(v):
 
 @traced
 def route_token(tkns, bias_v, lgss, tid, lane, rt):
-    """Tokens ``tkns`` (this wave's, all valid), interleaved for ILP: sigmoid +
+    """Tokens `tkns` (this wave's, all valid), interleaved for ILP: sigmoid +
     bias, radix top-8, rank, renorm -> rid / rw."""
     T_ = len(tkns)
     keys, sigs = [], []
@@ -282,7 +282,7 @@ def sel_peer(pl, d):
 def fp4_mma(ops, base, bl, brow, lane, acc, c, jpar, rows, row0=0):
     """Chunk c (256 K) of a 16-row MXFP4 group: 8 MFMA steps, B column n = LDS row row0 + n (at
     most rows - 1: columns past the expert's picks read some row, their outputs are never stored).
-    ``jpar``: the task's 16-row group parity (j & 1), for the shuffled scales."""
+    `jpar`: the task's 16-row group parity (j & 1), for the shuffled scales."""
     g = lane // 16
     t = fx.min(row0 + lane % 16, rows - 1)
     sw = ops[base + 2]
@@ -323,8 +323,8 @@ def o_gate(xv, gv):
         ss = ss + bf_lo(xv[d]) * bf_lo(xv[d]) + bf_hi(xv[d]) * bf_hi(xv[d])
     ss = butterfly(ss, (1, 2, 4))
     rstd = fx.Float32(1.0) / hw_sqrt(ss * fx.Float32(1.0 / HD) + fx.Float32(PRE_EPS))
-    sig = lambda x: fx.Float32(1.0) / (
-        fx.Float32(1.0) + hw_exp2(x * fx.Float32(-LOG2E))
+    sig = lambda x: (
+        fx.Float32(1.0) / (fx.Float32(1.0) + hw_exp2(x * fx.Float32(-LOG2E)))
     )
     ow = []
     for d in range_constexpr(4):
@@ -372,7 +372,7 @@ def dn_loads(w2, w2s, w_post, etab, task, lane, wave, ok, nv=None):
 @traced
 def task_ring(load, compute, q, task, it, end, unr, *args):
     """Tasks task .. end - 1: compute(q[0], task, it, *args) with the next len(q) tasks' loads
-    (load(task)) in flight. ``unr`` (len(q) = 2): three tasks an iteration in fixed slots (q[0],
+    (load(task)) in flight. `unr` (len(q) = 2): three tasks an iteration in fixed slots (q[0],
     q[1], qc): two tasks' loads stay in flight during each compute, no rotation copy waits for its
     data (the tail: the second loop)."""
     if const_expr(unr):
@@ -954,7 +954,7 @@ def build(key: Build):
 
     def gu_loads(w13, w13s, rt, task, lane, wave, ok):
         """Task (u, j)'s w13 operands for this wave: gate / up row groups x the
-        wave's 2 chunks of 256 K: 2 dwordx4 + 1 scale dword each. ``ok`` false:
+        wave's 2 chunks of 256 K: 2 dwordx4 + 1 scale dword each. `ok` false:
         zeros, no memory access (a lookahead past the CTA's last task)."""
         r = lane % 16
         g = lane // 16
@@ -1086,7 +1086,7 @@ def build(key: Build):
     @traced
     def load_ac(scratch, tag, health, rt, second, buf, tid):
         """Compact A: LDS row m = u0's pick m (m < n0), then u1's picks (when both fit
-        in S rows); ``second``: u1's picks from row 0 (the overflow reload)."""
+        in S rows); `second`: u1's picks from row 0 (the overflow reload)."""
         n0 = uniform(fx.ptr_load(rt["upn"] + 0))
         n1 = uniform(fx.ptr_load(rt["upn"] + 1))
         fit = (n0 + n1) <= S
