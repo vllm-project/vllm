@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """SwiGLU kernels for the Inkling MLP layers.
 
-``silu_and_mul_triton``: SiLU-and-mul over the checkpoint's interleaved
-fused gate/up layout (dense MLP). ``sink_silu_mul_epilogue``: the sink-expert
+`silu_and_mul_triton`: SiLU-and-mul over the checkpoint's interleaved
+fused gate/up layout (dense MLP). `sink_silu_mul_epilogue`: the sink-expert
 variant with the per-expert dequant scale and per-token gamma fused in.
 """
 
@@ -75,7 +75,7 @@ def _silu_and_mul_triton_kernel(
 def silu_and_mul_triton(gateup_output: torch.Tensor) -> torch.Tensor:
     """SiLU-and-mul for the interleaved fused gate/up layout.
 
-    Adapted from ``inkling_kernels.activation.silu_and_mul_fwd`` (without MXFP).
+    Adapted from `inkling_kernels.activation.silu_and_mul_fwd` (without MXFP).
     """
     assert gateup_output.is_contiguous(), (
         f"{gateup_output.shape=} {gateup_output.stride()=}"

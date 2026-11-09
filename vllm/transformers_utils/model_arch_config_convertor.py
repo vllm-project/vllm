@@ -344,10 +344,10 @@ class ModelArchConfigConvertorBase:
     def is_mm_prefix_lm(self, supports_multimodal: bool = True) -> bool:
         """Whether to use bidirectional attention for mm positions.
 
-        ``supports_multimodal`` is False when the deployment is configuration-
+        `supports_multimodal` is False when the deployment is configuration-
         disabled for multimodal inputs (text-only serving). In that case
         mm_prefix is unnecessary and must stay off so attention backends
-        without ``supports_mm_prefix()`` remain eligible.
+        without `supports_mm_prefix()` remain eligible.
         """
         if not supports_multimodal:
             return False
@@ -651,19 +651,6 @@ class Qwen3_5ModelArchConfigConvertor(ModelArchConfigConvertorBase):
         super().__init__(hf_config, hf_text_config, revision)
 
 
-class Qwen3ASRModelArchConfigConvertor(ModelArchConfigConvertorBase):
-    def __init__(
-        self,
-        hf_config: PreTrainedConfig,
-        hf_text_config: PreTrainedConfig,
-        revision: str | None = None,
-    ):
-        thinker_config = getattr(hf_config, "thinker_config", None)
-        if getattr(thinker_config, "model_type", None) == "qwen3_forced_aligner":
-            hf_config.architectures = ["Qwen3ASRForcedAlignerForTokenClassification"]
-        super().__init__(hf_config, hf_text_config, revision)
-
-
 class Qwen3OmniMoeModelArchConfigConvertor(ModelArchConfigConvertorBase):
     def __init__(
         self,
@@ -878,7 +865,6 @@ MODEL_ARCH_CONFIG_CONVERTORS = {
     "pangu_ultra_moe_mtp": PanguUltraMoeMTPModelArchConfigConvertor,
     "qwen3_5": Qwen3_5ModelArchConfigConvertor,
     "qwen3_5_mtp": Qwen3_5MTPModelArchConfigConvertor,
-    "qwen3_asr": Qwen3ASRModelArchConfigConvertor,
     "qwen3_omni_moe": Qwen3OmniMoeModelArchConfigConvertor,
     "qwen3_next_mtp": Qwen3NextMTPModelArchConfigConvertor,
     "qwen4_exp_mtp": Qwen4ExpMTPModelArchConfigConvertor,

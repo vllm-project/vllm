@@ -29,7 +29,7 @@ _TOLS = {
 @pytest.mark.parametrize("dtype", DTYPES)
 @torch.inference_mode()
 def test_fused_sigmoid_gate_mul_correctness(shape: tuple[int, int], dtype: torch.dtype):
-    """The fused kernel must match ``x * torch.sigmoid(gate)`` and must not
+    """The fused kernel must match `x * torch.sigmoid(gate)` and must not
     write in place."""
     set_random_seed(13)
     num_tokens, hidden = shape
