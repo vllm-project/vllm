@@ -191,7 +191,7 @@ def test_cpu_builder_selects_native_group_for_single_request(
 
 
 def test_flash_attention_geometry_comes_from_the_group():
-    """FA3 must use group geometry for layers without an ``impl`` wrapper."""
+    """FA3 must use group geometry for layers without an `impl` wrapper."""
     layers = {f"layer_{i}": SimpleNamespace(num_heads=16) for i in range(2)}
     vllm_config = MagicMock()
     vllm_config.model_config.get_num_attention_heads.return_value = MODEL_WIDE_NUM_HEADS

@@ -166,12 +166,12 @@ class CPUPrimaryTierOffloadingManager(CPUOffloadingManager):
         return self._prepare_load(keys, req_context, record_access=False)
 
     def defer_write_release(self, keys: Collection[OffloadKey]) -> list[int]:
-        """Fail pending writes like ``complete_write(False)``, deferring the release.
+        """Fail pending writes like `complete_write(False)`, deferring the release.
 
         The keys leave the cache (lookups miss and a later store allocates a
         fresh chunk), while the chunks stay counted as write-pending and out
         of the free pool. Returns the deferred chunk ids, to be passed to
-        ``release_deferred_write`` once the writer can no longer touch them.
+        `release_deferred_write` once the writer can no longer touch them.
         """
         chunk_ids: list[int] = []
         for key in keys:
@@ -218,7 +218,7 @@ class CPUPrimaryTierOffloadingManager(CPUOffloadingManager):
 
         The view has shape (num_chunks, row_stride_bytes) and is backed by the
         SharedOffloadRegion mmap.  Secondary tiers address chunk *c* as
-        ``view[c]``.
+        `view[c]`.
         """
         return self._kv_memoryview
 
