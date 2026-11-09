@@ -99,6 +99,16 @@ Rows are labelled with the version of the forward that computed them, stamped wh
 - With speculative decoding a request has one logits row per verified position; capture all logits rows of the batch with per-request offsets and keep the accepted ones.
 - Training side: multiply by the teacher's `lm_head` sharded by vocabulary across TP; never gather full logits on one rank.
 
+## Models with sliding-window layers
+
+On DeepSeek-V4.1 layers past 20 attend through a 128-row sliding window, and vLLM by default runs them on a request's trailing rows only ("bounded replay", protocol §6.11). Cells of those layers are then exact only near each step's end.
+
+| Option | Approach | Assessment |
+|---|---|---|
+| B0 | Bounded replay, every new row forced through the replay stages | Exact, but costs about 41% of throughput at the top scenario |
+| B1 | Bounded replay with partial capture: deliver only the deep cells sampled tokens depend on | Not adopted (below) |
+| B2 | **Full depth**: bounded replay off, sliding-window KV prefix-cached as snapshots at prompt end and decode end | **Chosen.** Every cell exact, no layer-specific delivery logic; 58–63% less time than bounded replay at 14.6K context |
+
 ## The five designs compared
 
 All five share the delivery segment (W1/W3, K2, backpressure, admission cap, session release) and differ in the cache segment.
@@ -123,4 +133,5 @@ All five share the delivery segment (W1/W3, K2, backpressure, admission cap, ses
 - **Distributed reference counting:** the driver already knows when a session is consumed.
 - **Engine-side admission:** the engine cannot tell a new trajectory from the next turn of an old one; blocking the latter deadlocks.
 - **Per-field keys:** 3–5× more master operations; range reads within one object do the same.
+- **Partial capture** (B1). It kept bounded replay and delivered, per request, only the cells of layers 20 and up that some sampled token depends on (the `1 + (39 − L) × 127` rows before it at layer `L`), as cone patches overlaid by the reader; every other deep cell was a no-replay sentinel the trainer routed itself. It was built, hardened and run at the top scenario, and replaced for three reasons. Its cost was the replay itself: bounded replay reruns the window layers in eager steps on every prefix hit and new prompt, and turning it off cut even the run without R3 from 1,030 to 394 s. It was complex: patch lists clipped per request and inherited by forks, per-cell versions, needed-cell accounting in the reader, and two review rounds of fixes, with open limits for forks after a regeneration and for KV loads that restore the window. And full depth, which delivers every cell exactly with none of that, took 58–63% less time than bounded replay with partial capture on the same workload (experiments: full depth).
 - **Recomputing to fill gaps:** recomputation is never a substitute for the first computation (different versions, different chunking, invalid KV).
