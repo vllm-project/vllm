@@ -5,7 +5,7 @@ meta:
   provider: "DeepSeek"
   description: "DeepSeek V4.1 Flash vision-language MoE (552B backbone; 8B active per prompt token, 16B per output token) combining sliding-window plus compressed sparse attention with a two-level indexer, engram n-gram memory, hyper-connections, and a DSpark multi-token draft head."
   date_added: 2026-09-09
-  date_updated: 2026-11-05
+  date_updated: 2026-11-09
   tasks:
     - text
     - multimodal
@@ -26,6 +26,7 @@ meta:
     mi350x: verified
     mi355x: verified
     dgx_station_gb300: verified
+    dgx_spark: verified
 
 model:
   model_id: "deepseek-ai/DeepSeek-V4.1-Flash"
@@ -1506,10 +1507,90 @@ presets:
       DSpark's synthetic golden acceptance length (3.51); the preset keeps real block
       rejection for ordinary serving and accuracy evaluation.
 
+  dgx_spark_tp3:
+    label: "3x Spark TP3 (capacity-first)"
+    hardware: dgx_spark
+    strategy: multi_node_tp
+    variants: [default]
+    workload: "Long-context RAG and assistant serving (1M context)"
+    description: "TP3 across three GB10 unified-memory nodes (one GPU each) on a 200G CX-7 RoCE triangle. Runs the pinned b12x fork image - mainline vLLM is load-blocked on GB10 for this model; the fork carries the loader, the kernels and runtime TP3 head padding. Capacity-first: 1M context from a 5 GB KV reservation (~5.1M-token pool with the boot-installed KV-accounting overlay), ~35 tok/s single-stream, spec decode measured and rejected on the deep-prefill memory transient."
+    source: { label: "DeepSeek-V4.1-Flash-TP3-3x-DGX-Spark", href: "https://github.com/PrblyElect/DeepSeek-V4.1-Flash-TP3-3x-DGX-Spark", key: "dsv41flash-gb10-spark-tp3-capacity", revision: 27aa465 }
+    image: "eugr/spark-vllm-b12x:nightly-20261015@sha256:03a956544e9f9b4b7ba91690469fbe7848bdbef29a7d2e0f5788368467bb3595"
+    select:
+      nodes: 3
+    args:
+      - "--max-model-len"
+      - "1048576"
+      - "--gpu-memory-utilization"
+      - "0.85"
+      - "--kv-cache-memory-bytes"
+      - "5g"
+      - "--max-num-seqs"
+      - "8"
+      - "--max-num-batched-tokens"
+      - "8192"
+      - "--block-size"
+      - "256"
+      - "--max-parallel-prefills"
+      - "2"
+      - "--prefill-policy"
+      - "decode-aware"
+      - "--prefill-compute-share"
+      - "0.2"
+      - "--max-num-prefill-tokens-per-step"
+      - "2048"
+      - "--engram-config"
+      - '{"cpu_offload":false,"table_memory":"disk"}'
+    env:
+      NCCL_BUFFSIZE: "1048576"
+      NCCL_LL128_BUFFSIZE: "262144"
+      NCCL_PROTO: "^LL128"
+      NCCL_MAX_NCHANNELS: "8"
+      PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:False"
+    points:
+      tp3_c1:
+        label: "1"
+        concurrency: 1
+        default: true
+        description: "~35 tok/s single-stream (prose); ~34 on counting-task prompts."
+      tp3_c2:
+        label: "2"
+        concurrency: 2
+        description: "~53 tok/s aggregate (counting-task prompts, idle cluster)."
+      tp3_c4:
+        label: "4"
+        concurrency: 4
+        description: "~70 tok/s aggregate."
+      tp3_c8:
+        label: "8"
+        concurrency: 8
+        description: "~103 tok/s aggregate (the max-num-seqs cap); per-stream ~12-19."
+    runbook: |
+      Three DGX Sparks (GB10, 128 GiB unified memory each) wired as a full
+      CX-7 RoCE triangle - three cables, one /24 per pair, MTU 9000 - plus a
+      management LAN. Set `NCCL_IB_HCA` (the RoCE pair, from `ibdev2netdev`)
+      and `NCCL_SOCKET_IFNAME` (the management interface) on every boot.
+
+      Measured at this posture (idle cluster, counting-task prompts): 1
+      stream ~34 tok/s; aggregate ~53 at 2, ~70 at 4, ~103 at 8 streams;
+      prose single-stream ~35. A short request decoding beside a ~350K-token
+      prefill runs ~25 tok/s with the decode share above (~1.4 without it),
+      at a first-token cost of 5-6 s versus ~4.6-4.8 s at higher shares.
+      The KV pool holds ~4.9 concurrent 1M requests (~9.7 at 512K).
+
+      The pinned fork image carries what the preset's flags assume (the
+      loader, the KV-accounting overlay installed at boot, the
+      decode-under-prefill share). Bring-up, ten acceptance gates and a
+      sixteen-entry failure ledger ship in the source repo.
+
 hardware_notes:
   dgx_station_gb300:
     title: "Weights in Grace memory (UVA offload)"
     body: "Single GB300 with both Engram tables and 60 GiB of routed experts in pinned Grace memory (UVA offload). Measured on a nightly image; vLLM 0.31.0 carries every flag this row uses. The first boot on a new flag set runs a 75-90 min FlashInfer autotune; keep /root/.cache/vllm on a persistent volume."
+
+  dgx_spark:
+    title: "GB10 unified memory (3x DGX Spark)"
+    body: "Three single-GPU GB10 nodes at TP3 need the pinned b12x fork image: mainline vLLM is load-blocked on GB10 for this model, and the fork carries the DeepseekV41 loader, the b12x kernels and runtime TP3 head padding. Unified memory makes host RAM part of the serving budget: the default NCCL buffer sizing pins ~4.7 GiB of unreclaimable host RAM per node (the caps in the preset cut it to ~139 MiB), the engram tables stay disk-resident, and ~2 GiB of headroom per box absorbs the deep-prefill transient. Speculative decode does not survive that transient at this pool size."
 
 guide: |
   ## Overview
