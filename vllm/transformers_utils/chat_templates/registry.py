@@ -41,6 +41,11 @@ _MODEL_TYPE_TO_CHAT_TEMPLATE_FALLBACK: dict[str, ChatTemplatePath] = {
     "siglip2": CHAT_TEMPLATES_DIR / "template_basic.jinja",
 }
 
+# Model types whose fallback also replaces a chat template shipped with the
+# tokenizer. SigLIP2 checkpoints (model_type "siglip") reuse the Gemma tokenizer,
+# whose chat template wraps embedding text in chat turns and drops EOS.
+_MODEL_TYPES_OVERRIDING_TOKENIZER_CHAT_TEMPLATE = {"siglip"}
+
 
 def register_chat_template_fallback_path(
     model_type: str,
@@ -69,3 +74,13 @@ def get_chat_template_fallback_path(
         return None
 
     return chat_template
+
+
+def get_chat_template_override_path(
+    model_type: str,
+    tokenizer_name_or_path: str,
+) -> Path | None:
+    if model_type not in _MODEL_TYPES_OVERRIDING_TOKENIZER_CHAT_TEMPLATE:
+        return None
+
+    return get_chat_template_fallback_path(model_type, tokenizer_name_or_path)
