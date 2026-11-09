@@ -15,6 +15,7 @@ import zlib
 import pytest
 import ray
 import torch
+from transformers import MiniMaxM3VLConfig
 
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_default_torch_dtype
@@ -36,11 +37,9 @@ _CKPT_ENV = "VLLM_TEST_M3_XLAYER_CKPT"
 
 @pytest.fixture(scope="module")
 def checkpoint(tmp_path_factory):
-    from vllm.transformers_utils.configs.minimax_m3 import MiniMaxM3Config
-
     path = tmp_path_factory.mktemp("minimax_m3_tiny")
     no_sparse = [0] * LAYERS
-    MiniMaxM3Config(
+    MiniMaxM3VLConfig(
         text_config=dict(
             vocab_size=256,
             hidden_size=256,
