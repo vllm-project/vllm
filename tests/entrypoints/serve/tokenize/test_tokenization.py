@@ -258,6 +258,37 @@ async def test_detokenize(
     [(MODEL_NAME, MODEL_NAME)],
     indirect=["tokenizer_name"],
 )
+@pytest.mark.parametrize("with_valid_prefix", [False, True])
+async def test_detokenize_out_of_vocab_token_id(
+    server: RemoteOpenAIServer,
+    model_name: str,
+    tokenizer_name: str,
+    with_valid_prefix: bool,
+):
+    """Out-of-vocabulary token ids are rejected, not silently dropped."""
+    oov_token_id = 999_999_999
+    tokens = []
+    if with_valid_prefix:
+        tokenizer = get_tokenizer(tokenizer_name=tokenizer_name)
+        tokens = tokenizer.encode("Hello", add_special_tokens=False)
+    tokens.append(oov_token_id)
+
+    response = requests.post(
+        server.url_for("detokenize"), json={"model": model_name, "tokens": tokens}
+    )
+
+    assert response.status_code == 400
+    error = response.json()["error"]
+    assert error["param"] == "tokens"
+    assert f"Token id {oov_token_id} is out of vocabulary" in error["message"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "model_name,tokenizer_name",
+    [(MODEL_NAME, MODEL_NAME)],
+    indirect=["tokenizer_name"],
+)
 async def test_tokenizer_info_basic(
     server: RemoteOpenAIServer,
     model_name: str,
