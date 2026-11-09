@@ -28,7 +28,7 @@ from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.model_states.interface import ModelState
-from vllm.v1.worker.gpu.ubatch_common import (
+from vllm.v1.worker.gpu.ubatch_utils import (
     UBatchSlice,
     UBatchSlices,
     compute_ubatch_slices,
