@@ -2594,6 +2594,7 @@ def _make_hybrid_kv_cache_config(
     num_blocks: int,
     spec_types: list[str],
     block_sizes: list[int] | None = None,
+    eagle_groups: bool = False,
 ) -> KVCacheConfig:
     """Create a KVCacheConfig with the specified spec types.
 
@@ -2608,6 +2609,11 @@ def _make_hybrid_kv_cache_config(
         block_sizes: Optional per-group physical block sizes (same length as
             spec_types). Sliding-window sizes scale with each group's own
             block size. Defaults to ``block_size`` for every group.
+        eagle_groups: Mark every group as an eagle (draft) group. Equivalent to
+            the fallback the coordinator applies when ``use_eagle`` is set but
+            no group is flagged, which it stops doing once a drafter that owns
+            no KV is distinguished from one that does. Tests that assert the
+            drop should flag their groups explicitly.
 
     """
     if block_sizes is None:
@@ -2650,7 +2656,9 @@ def _make_hybrid_kv_cache_config(
         raise ValueError(f"Unknown spec type: {spec_type}")
 
     kv_cache_groups = [
-        new_kv_cache_group([f"layer{i}"], make_layer(spec_type, bs))
+        new_kv_cache_group(
+            [f"layer{i}"], make_layer(spec_type, bs), is_eagle_group=eagle_groups
+        )
         for i, (spec_type, bs) in enumerate(zip(spec_types, block_sizes))
     ]
 
@@ -2836,7 +2844,9 @@ def test_prefill_hybrid_model_combinations_eagle(
     # Allocate enough blocks for all groups
     num_blocks = 10 * num_groups
 
-    kv_cache_config = _make_hybrid_kv_cache_config(block_size, num_blocks, spec_types)
+    kv_cache_config = _make_hybrid_kv_cache_config(
+        block_size, num_blocks, spec_types, eagle_groups=True
+    )
     manager = make_kv_cache_manager(
         kv_cache_config,
         max_model_len=8192,
@@ -2922,7 +2932,7 @@ def test_prefill_hybrid_model_eagle_mixed_block_sizes():
     num_groups = len(spec_types)
 
     kv_cache_config = _make_hybrid_kv_cache_config(
-        16, 128, spec_types, block_sizes=block_sizes
+        16, 128, spec_types, block_sizes=block_sizes, eagle_groups=True
     )
     manager = make_kv_cache_manager(
         kv_cache_config,
@@ -3008,7 +3018,7 @@ def test_prefill_hybrid_model_eagle_mamba_fine_grained():
     num_groups = len(spec_types)
 
     kv_cache_config = _make_hybrid_kv_cache_config(
-        16, 128, spec_types, block_sizes=block_sizes
+        16, 128, spec_types, block_sizes=block_sizes, eagle_groups=True
     )
     manager = make_kv_cache_manager(
         kv_cache_config,
