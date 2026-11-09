@@ -487,7 +487,7 @@ def select_fp8_moe_backend(
         if skip_aiter_moe:
             if Fp8MoeBackend.AITER in AVAILABLE_BACKENDS:
                 AVAILABLE_BACKENDS.remove(Fp8MoeBackend.AITER)
-        else:
+        elif envs.is_set("VLLM_ROCM_USE_AITER_MOE"):
             backend = Fp8MoeBackend.AITER
             return oracle.return_or_raise(backend, AVAILABLE_BACKENDS)
 
