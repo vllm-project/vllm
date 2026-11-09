@@ -2,14 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Encoder fan-out fairness in the disaggregated EPD proxy.
 
-Exercises the REAL ``encoder_rr_assignment`` helper loaded from its
-``examples/`` path -- no routing logic is re-implemented here, so a future
+Exercises the REAL `encoder_rr_assignment` helper loaded from its
+`examples/` path -- no routing logic is re-implemented here, so a future
 change to that function is what these tests exercise.
 
 Regression target: the fan-out cursor used to restart at e_urls[0] on every
-incoming request (``e_urls[i % len(e_urls)] for i in range(len(mm_items))``),
+incoming request (`e_urls[i % len(e_urls)] for i in range(len(mm_items))`),
 so single-item requests -- the common case -- always hit the first encoder
-instance and left the rest idle. ``encoder_rr_assignment`` threads a cursor
+instance and left the rest idle. `encoder_rr_assignment` threads a cursor
 across calls so consecutive requests keep advancing through every URL.
 """
 

@@ -39,7 +39,7 @@ def main(args: Namespace):
 
     # Print the outputs.
     print("\nGenerated Outputs:\n" + "-" * 60)
-    for prompt, output in zip(prompts, outputs):
+    for _, output in zip(prompts, outputs):
         multi_vector = output.outputs.data
         print(multi_vector.shape)
 

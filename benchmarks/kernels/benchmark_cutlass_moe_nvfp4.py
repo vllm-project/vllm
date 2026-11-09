@@ -67,9 +67,7 @@ def bench_run(
     label = "NVFP4 Blockscaled CUTLASS MOE vs FP8 Tensor Scaled Triton"
 
     sub_label = (
-        "{}, num_experts={}, topk={}, per_act_token={} per_out_ch={}, MKN=({})".format(
-            model, num_experts, topk, per_act_token, per_out_ch, mkn
-        )
+        f"{model}, {num_experts=}, {topk=}, {per_act_token=} {per_out_ch=}, MKN=({mkn})"
     )
 
     print(f"Testing: {sub_label}")
