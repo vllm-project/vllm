@@ -415,6 +415,46 @@ class TestChunkedPushScheduler:
         )
         assert [block.ref_cnt for block in blocks] == [1, 1, 1]
 
+    def test_abort_after_final_job_sends_no_cancellation(self):
+        # The final job's WRITE completes and reports the request finished;
+        # a cancellation as well would report it a second time.
+        vllm_config = create_vllm_config(
+            kv_connector="NixlPushConnector",
+            kv_role="kv_producer",
+            kv_connector_extra_config={"enable_chunked_push": True},
+        )
+        sched = NixlPushConnectorScheduler(
+            vllm_config,
+            "test-prefill-engine",
+            make_kv_cache_config(block_size=16, num_blocks=8),
+        )
+        pool = BlockPool(num_gpu_blocks=8, enable_caching=False, hash_block_size=16)
+        blocks = pool.get_new_blocks(3)
+        block_ids = [block.block_id for block in blocks]
+        sched.bind_gpu_block_pool(pool)
+
+        request = create_request(num_tokens=40, block_size=16, do_remote_decode=True)
+        sched.update_state_after_alloc(
+            request, KVCacheBlocks((blocks,)), num_external_tokens=0
+        )
+        output = SchedulerOutput.make_empty()
+        output.num_scheduled_tokens = {request.request_id: 40}
+        output.preempted_req_ids = set()
+        output.kv_connector_block_state = KVConnectorBlockState(
+            req_ids={request.request_id},
+            resolve_block_ids=lambda _: (block_ids,),
+            boundary_state_offloads={},
+        )
+        (final_job,) = sched.build_connector_meta(output).push_chunk_jobs
+        assert final_job.is_final
+
+        from vllm.v1.request import RequestStatus
+
+        request.status = RequestStatus.FINISHED_ABORTED
+        delay, _ = sched.request_finished(request, (block_ids,))
+        assert delay is True
+        output.num_scheduled_tokens = {}
+        assert sched.build_connector_meta(output).push_chunk_cancellations == set()
 
 
 # ----------------------------------------------------------------- #

@@ -307,8 +307,12 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
             RequestStatus.FINISHED_STOPPED,
         ):
             if self._chunked_push:
-                self._chunk_trackers.pop(request.request_id, None)
-                if request.request_id in self._pinned_chunk_blocks:
+                tracker = self._chunk_trackers.pop(request.request_id, None)
+                # After the final job no more jobs follow, and the worker reports
+                # the request finished once its WRITEs complete.
+                if request.request_id in self._pinned_chunk_blocks and not (
+                    tracker and tracker.final_job_enqueued
+                ):
                     self._chunk_cancellations.add(request.request_id)
             self._reqs_not_processed.add(request.request_id)
             self._reqs_need_save.pop(request.request_id, None)
