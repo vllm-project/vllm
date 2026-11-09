@@ -533,6 +533,10 @@ class SingleTypeKVCacheManager(ABC):
             retention_interval=retention_interval,
             reachable_boundaries=reachable_boundaries,
             dcp_world_size=self.dcp_world_size,
+            # Lookahead makes the trailing block unhashable, which costs the shared
+            # ceiling one block and the EAGLE pop another; the window of the best
+            # remaining hit then starts one block below the retained tail.
+            extra_tail_blocks=1 if self.block_pool.num_hash_lookahead_tokens else 0,
         )
         self.block_pool.cache_full_blocks(
             request=request,
@@ -558,6 +562,7 @@ class SingleTypeKVCacheManager(ABC):
         reachable_boundaries: Sequence[int] = (),
         dcp_world_size: int = 1,
         final_segment_end_block: int | None = None,
+        extra_tail_blocks: int = 0,
     ) -> list[bool] | None:
         """Per-block mask for `cache_full_blocks`. `None` means cache
         every (non-null) block — the default for full attention.
@@ -1080,6 +1085,7 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         reachable_boundaries: Sequence[int] = (),
         dcp_world_size: int = 1,
         final_segment_end_block: int | None = None,
+        extra_tail_blocks: int = 0,
     ) -> list[bool] | None:
         assert isinstance(kv_cache_spec, SlidingWindowSpec)
         if alignment_tokens is None:
@@ -1128,7 +1134,7 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
             # its hit lands one alignment unit lower; when a segment spans
             # several alignment units that run ends a whole unit below the
             # boundary and must be kept as well.
-            tail_margin = need
+            tail_margin = need + extra_tail_blocks
             if use_eagle and segment_tokens > alignment_tokens:
                 tail_margin += alignment_tokens // block_size
             for i in range(start_block, end_block):
@@ -1155,7 +1161,8 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
             for boundary_tokens in reachable_boundaries:
                 aligned = boundary_tokens // alignment_tokens * alignment_tokens
                 end = aligned // block_size + shift
-                for j in range(max(start_block, end - need), min(end_block, end)):
+                tail = need + extra_tail_blocks
+                for j in range(max(start_block, end - tail), min(end_block, end)):
                     mask[j - start_block] = True
 
         return mask
@@ -1572,6 +1579,7 @@ class MambaManager(SingleTypeKVCacheManager):
         reachable_boundaries: Sequence[int] = (),
         dcp_world_size: int = 1,
         final_segment_end_block: int | None = None,
+        extra_tail_blocks: int = 0,
     ) -> list[bool] | None:
         """Sparse Mamba state-snapshot retention.
 
