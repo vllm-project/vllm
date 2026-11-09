@@ -211,7 +211,6 @@ def _run(
     kv_cache_dtype="auto",
     cudagraph_mode="NONE",
     async_scheduling=False,
-    model_runner_v2=False,
     speculative=None,
 ):
     monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
@@ -219,7 +218,6 @@ def _run(
         "VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA", "1" if triton_reference else "0"
     )
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1" if model_runner_v2 else "0")
     kwargs = dict(model.engine_kwargs)
     if speculative == "ngram":
         kwargs["speculative_config"] = {
@@ -316,35 +314,29 @@ def _compare(vllm_runner, monkeypatch, model=DSV32, kv_cache_dtype="auto", **kwa
 
 
 CORE = [
-    # (cudagraph_mode, async_scheduling, model_runner_v2)
-    ("NONE", False, False),
-    ("PIECEWISE", False, False),
-    ("FULL_DECODE_ONLY", True, False),
-    ("FULL_AND_PIECEWISE", True, False),
-    ("PIECEWISE", False, True),
-    ("FULL_DECODE_ONLY", True, True),
+    # (cudagraph_mode, async_scheduling)
+    ("NONE", False),
+    ("PIECEWISE", False),
+    ("FULL_DECODE_ONLY", True),
+    ("FULL_AND_PIECEWISE", True),
 ]
 FULL = [
-    (mode, async_, v2)
+    (mode, async_)
     for mode in ("NONE", "PIECEWISE", "FULL_DECODE_ONLY", "FULL_AND_PIECEWISE")
     for async_ in (False, True)
-    for v2 in (False, True)
-    if (mode, async_, v2) not in CORE
+    if (mode, async_) not in CORE
 ]
 
 
 @pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("cudagraph_mode, async_scheduling, model_runner_v2", CORE)
-def test_engine_modes(
-    vllm_runner, monkeypatch, model, cudagraph_mode, async_scheduling, model_runner_v2
-):
+@pytest.mark.parametrize("cudagraph_mode, async_scheduling", CORE)
+def test_engine_modes(vllm_runner, monkeypatch, model, cudagraph_mode, async_scheduling):
     _compare(
         vllm_runner,
         monkeypatch,
         model=model,
         cudagraph_mode=cudagraph_mode,
         async_scheduling=async_scheduling,
-        model_runner_v2=model_runner_v2,
     )
 
 
@@ -363,19 +355,18 @@ def test_fp8_kv_cache(vllm_runner, monkeypatch, cudagraph_mode):
 
 @pytest.mark.parametrize("speculative", ["ngram", "mtp"])
 @pytest.mark.parametrize(
-    "cudagraph_mode, model_runner_v2",
-    [("NONE", False), ("FULL_AND_PIECEWISE", False), ("FULL_AND_PIECEWISE", True)],
+    "cudagraph_mode, async_scheduling",
+    [("NONE", False), ("FULL_AND_PIECEWISE", True)],
 )
 def test_spec_decode(
-    vllm_runner, monkeypatch, speculative, cudagraph_mode, model_runner_v2
+    vllm_runner, monkeypatch, speculative, cudagraph_mode, async_scheduling
 ):
     _compare(
         vllm_runner,
         monkeypatch,
         speculative=speculative,
         cudagraph_mode=cudagraph_mode,
-        model_runner_v2=model_runner_v2,
-        async_scheduling=model_runner_v2,
+        async_scheduling=async_scheduling,
     )
 
 
@@ -388,16 +379,13 @@ def test_check_catches_a_wrong_topk(vllm_runner, monkeypatch):
 
 
 @pytest.mark.slow_test
-@pytest.mark.parametrize("cudagraph_mode, async_scheduling, model_runner_v2", FULL)
-def test_engine_modes_full(
-    vllm_runner, monkeypatch, cudagraph_mode, async_scheduling, model_runner_v2
-):
+@pytest.mark.parametrize("cudagraph_mode, async_scheduling", FULL)
+def test_engine_modes_full(vllm_runner, monkeypatch, cudagraph_mode, async_scheduling):
     _compare(
         vllm_runner,
         monkeypatch,
         cudagraph_mode=cudagraph_mode,
         async_scheduling=async_scheduling,
-        model_runner_v2=model_runner_v2,
     )
 
 
