@@ -45,7 +45,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     PromMetricT,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_utils import (
-    MOONCAKE_CONNECTOR_VERSION,
     MooncakeBootstrapServer,
     RegisterWorkerPayload,
 )
@@ -1446,7 +1445,6 @@ class MooncakeConnectorWorker:
         )
 
         self._remote_agents: dict[EngineId, dict[int, dict[int, str]]] = {}
-        self._remote_connector_versions: dict[str, int] = {}
         self._pending_bootstrap_queries: dict[str, asyncio.Event] = {}
         self.side_channel_port: int = 0  # we will bind it in register_kv_caches()
         self.engine_id: EngineId = engine_id
@@ -1642,7 +1640,6 @@ class MooncakeConnectorWorker:
             tp_rank=self.tp_rank,
             pp_rank=self.pp_rank,
             addr=worker_addr,
-            connector_version=MOONCAKE_CONNECTOR_VERSION,
         )
         timeout = envs.VLLM_MOONCAKE_CONNECTOR_TIMEOUT
         max_attempts = _BOOTSTRAP_MAX_ATTEMPTS
@@ -2775,15 +2772,6 @@ class MooncakeConnectorWorker:
             metadata = self._build_pull_metadata(
                 pull_metas, include_layout=include_layout
             )
-            if metadata.group_block_sizes and self._remote_connector_versions.get(
-                worker_addr, 0
-            ) != MOONCAKE_CONNECTOR_VERSION:
-                self._handle_failed_recv(
-                    pull_metas,
-                    req_ids,
-                    "Producer did not advertise a compatible Mooncake connector version",
-                )
-                return
             encoded_data = self._encoder.encode(metadata)
             logger.debug(
                 "MooncakeXferMetadata to %s is %d bytes (%s).",
@@ -2962,13 +2950,6 @@ class MooncakeConnectorWorker:
                         for tp_rank, tp_entry in dp_entry["worker_addr"].items()
                     }
                     self._tp_size[remote_engine_id] = len(dp_entry["worker_addr"])
-                    self._remote_connector_versions.update(
-                        {
-                            addr: dp_entry.get("connector_version", 0)
-                            for tp_entry in dp_entry["worker_addr"].values()
-                            for addr in tp_entry.values()
-                        }
-                    )
         except Exception as e:
             logger.error(
                 "Failed to connect to bootstrap server %s (%s): %s",

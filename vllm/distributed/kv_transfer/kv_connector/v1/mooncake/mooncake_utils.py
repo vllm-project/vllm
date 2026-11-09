@@ -13,8 +13,6 @@ from vllm.distributed.kv_transfer.kv_connector.utils import EngineId
 from vllm.logger import init_logger
 
 WorkerAddr = str
-# Increment for changes that break P/D interoperability. Missing means legacy.
-MOONCAKE_CONNECTOR_VERSION = 1
 
 logger = init_logger(__name__)
 
@@ -25,7 +23,6 @@ class RegisterWorkerPayload(BaseModel):
     tp_rank: int
     pp_rank: int
     addr: WorkerAddr
-    connector_version: int = 0
 
 
 @dataclass
@@ -33,7 +30,6 @@ class EngineEntry:
     engine_id: EngineId
     # {tp_rank: {pp_rank: worker_addr}}
     worker_addr: dict[int, dict[int, WorkerAddr]]
-    connector_version: int = 0
 
 
 class MooncakeBootstrapServer:
@@ -134,15 +130,9 @@ class MooncakeBootstrapServer:
             self.workers[payload.dp_rank] = EngineEntry(
                 engine_id=payload.engine_id,
                 worker_addr={},
-                connector_version=payload.connector_version,
             )
 
         dp_entry = self.workers[payload.dp_rank]
-        if dp_entry.connector_version != payload.connector_version:
-            raise HTTPException(
-                status_code=400,
-                detail="Engine workers must use the same Mooncake connector version",
-            )
         if dp_entry.engine_id != payload.engine_id:
             raise HTTPException(
                 status_code=400,
