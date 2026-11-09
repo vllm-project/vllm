@@ -57,7 +57,7 @@ def flashinfer_bf16_mm(
 
 # This is the storage path for the cubins, it can be replaced
 # with a local path for testing.
-# Referenced from https://github.com/flashinfer-ai/flashinfer/blob/0c9a92c3d9a7e043ab6f3f7b2273269caf6ab044/flashinfer/jit/cubin_loader.py#L35  # noqa: E501
+# Referenced from https://github.com/flashinfer-ai/flashinfer/blob/0c9a92c3d9a7e043ab6f3f7b2273269caf6ab044/flashinfer/jit/cubin_loader.py#L35
 FLASHINFER_CUBINS_REPOSITORY = os.environ.get(
     "FLASHINFER_CUBINS_REPOSITORY",
     "https://edge.urm.nvidia.com/artifactory/sw-kernelinferencelibrary-public-generic-local/",  # noqa: E501
@@ -69,7 +69,7 @@ _DEFAULT_CUDA_HOME = "/usr/local/cuda"
 def _flashinfer_nvcc_path() -> str | None:
     """Return the nvcc FlashInfer's JIT would run, or None if it is missing.
 
-    Mirrors ``flashinfer.jit.cpp_ext.get_cuda_path()`` without importing
+    Mirrors `flashinfer.jit.cpp_ext.get_cuda_path()` without importing
     FlashInfer, whose import initializes CUDA.
     """
     cuda_home = os.environ.get("CUDA_HOME") or os.environ.get("CUDA_PATH")
@@ -377,8 +377,8 @@ autotune = _lazy_import_wrapper(
 
 @functools.cache
 def has_flashinfer_autotune_v2() -> bool:
-    """Return ``True`` if FlashInfer ships the managed-cache autotuner
-    (``flashinfer.autotune_v2``, flashinfer-ai/flashinfer#3861)."""
+    """Return `True` if FlashInfer ships the managed-cache autotuner
+    (`flashinfer.autotune_v2`, flashinfer-ai/flashinfer#3861)."""
     if not has_flashinfer():
         return False
     mod = _get_submodule("flashinfer")
@@ -405,23 +405,20 @@ def has_flashinfer_packed_fused_kda_decode() -> bool:
 
 @functools.cache
 def has_flashinfer_nvlink_two_sided() -> bool:
-    """Return `True` if FlashInfer mnnvl all2all is available."""
+    """Return whether FlashInfer exposes the NVLink two-sided MoE EP wrapper."""
     if not has_flashinfer_comm():
         return False
-
-    # Check if all required functions are available
-    required_functions = [
-        ("flashinfer.comm", "Mapping"),
-        ("flashinfer.comm.mnnvl", "MnnvlMemory"),
-        ("flashinfer.comm.trtllm_alltoall", "MnnvlMoe"),
-        ("flashinfer.comm.trtllm_alltoall", "MoEAlltoallInfo"),
-    ]
-
-    for module_name, attr_name in required_functions:
-        mod = _get_submodule(module_name)
-        if not mod or not hasattr(mod, attr_name):
-            return False
-    return True
+    mod = _get_submodule("flashinfer.moe_ep")
+    return mod is not None and all(
+        hasattr(mod, name)
+        for name in (
+            "BootstrapConfig",
+            "MoEEpCommParams",
+            "NVLinkTwoSidedAlltoAll",
+            "NVLinkTwoSidedConfig",
+            "create_communication",
+        )
+    )
 
 
 @functools.cache
@@ -459,7 +456,7 @@ def has_flashinfer_moe() -> bool:
 def has_flashinfer_sm90_nope_mla() -> bool:
     """FlashInfer SM90 NoPE MLA (FP8 KV with in-kernel dequant, kpe=0).
 
-    Feature-detected via the ``ckv_scale_arr`` run() kwarg introduced with
+    Feature-detected via the `ckv_scale_arr` run() kwarg introduced with
     the SM90 NoPE support (FlashInfer >= 0.6.18), so dev builds carry the
     gate without a version parse.
     """
@@ -483,7 +480,7 @@ def has_flashinfer_sm90_nope_mla() -> bool:
 
 @functools.cache
 def has_flashinfer_sparse_mla_sm120() -> bool:
-    """Return ``True`` if FlashInfer sparse MLA decode support is available."""
+    """Return `True` if FlashInfer sparse MLA decode support is available."""
     if not has_flashinfer():
         return False
     try:
@@ -519,7 +516,7 @@ def has_flashinfer_sparse_mla_sm120_config(num_q_heads: int, top_k: int) -> bool
 
 @functools.cache
 def has_flashinfer_cutedsl() -> bool:
-    """Return ``True`` if FlashInfer cutedsl module is available."""
+    """Return `True` if FlashInfer cutedsl module is available."""
     return (
         has_flashinfer() and importlib.util.find_spec("flashinfer.cute_dsl") is not None
     )
@@ -527,7 +524,7 @@ def has_flashinfer_cutedsl() -> bool:
 
 @functools.cache
 def has_flashinfer_bf16_fp4() -> bool:
-    """Return ``True`` if FlashInfer's CuTe-DSL W4A16 GEMM is available."""
+    """Return `True` if FlashInfer's CuTe-DSL W4A16 GEMM is available."""
     if not has_flashinfer_cutedsl():
         return False
     mod = _get_submodule("flashinfer.gemm")
@@ -600,7 +597,7 @@ def has_flashinfer_cutlass_fused_moe() -> bool:
 
 @functools.cache
 def has_flashinfer_cutedsl_grouped_gemm_nt_masked() -> bool:
-    """Return ``True`` if FlashInfer CUTLASS fused MoE is available."""
+    """Return `True` if FlashInfer CUTLASS fused MoE is available."""
     if not has_flashinfer_cutedsl():
         return False
 
@@ -620,7 +617,7 @@ def has_flashinfer_cutedsl_grouped_gemm_nt_masked() -> bool:
 
 @functools.cache
 def has_flashinfer_cutedsl_moe_nvfp4() -> bool:
-    """Return ``True`` if FlashInfer cute_dsl_fused_moe_nvfp4 is available."""
+    """Return `True` if FlashInfer cute_dsl_fused_moe_nvfp4 is available."""
     if not has_flashinfer_cutedsl():
         return False
     mod = _get_submodule("flashinfer")
@@ -629,10 +626,10 @@ def has_flashinfer_cutedsl_moe_nvfp4() -> bool:
 
 @functools.cache
 def has_flashinfer_localized_moe() -> bool:
-    """Return ``True`` if cute_dsl_fused_moe_nvfp4 accepts the ``localized_*`` args.
+    """Return `True` if cute_dsl_fused_moe_nvfp4 accepts the `localized_*` args.
 
     Locality-domain execution landed in flashinfer-ai/flashinfer#5276 and was
-    adapted to ``torch.cuda.execute_on_streams`` in #6488. Neither is in a
+    adapted to `torch.cuda.execute_on_streams` in #6488. Neither is in a
     FlashInfer 0.7.x release, so probe the signature rather than the version.
     """
     if not has_flashinfer_cutedsl_moe_nvfp4():
@@ -671,7 +668,7 @@ def has_flashinfer_b12x_gemm() -> bool:
 
 @functools.cache
 def has_flashinfer_b12x_moe() -> bool:
-    """Return ``True`` if FlashInfer CuteDSL SM12x fused MoE is available."""
+    """Return `True` if FlashInfer CuteDSL SM12x fused MoE is available."""
     if not has_flashinfer_moe():
         return False
 
@@ -1293,9 +1290,9 @@ def is_flashinfer_cudnn_fp8_prefill_attn_supported() -> bool:
     and cuDNN >= 9.17.1.
 
     cuDNN's FP8 SDPA forward path with bf16/fp16 output (used by
-    ``MMEncoderAttention._forward_flashinfer``) gates internally on
-    ``prop.major >= 10``; on Hopper it raises a misleading
-    ``cudnnGraphNotSupportedError: ... cuDNN version 9.13.0 and newer``
+    `MMEncoderAttention._forward_flashinfer`) gates internally on
+    `prop.major >= 10`; on Hopper it raises a misleading
+    `cudnnGraphNotSupportedError: ... cuDNN version 9.13.0 and newer`
     even when the installed cuDNN is new enough. See PR #38065 for the
     original Blackwell-only design intent.
     """

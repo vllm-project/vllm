@@ -2,30 +2,30 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The attention of a specialized decode step.
 
-``AttentionStep`` runs one ``DeepseekV4FlashInferMLAAttention`` layer through
+`AttentionStep` runs one `DeepseekV4FlashInferMLAAttention` layer through
 the layer's own modules and kernels, in a different schedule and with
 low-batch kernels where they apply:
 
-- ``fused_wqa_wkv`` reads the MXFP8 layer input the fused all-reduce + mHC
-  wrote instead of quantizing it again; up to ``WIDE_LOW_LATENCY_MAX_ROWS``
-  rows it, ``wq_b`` and ``wo_b`` run on the low-latency MXFP8 GEMM, and above
-  on the stock ``cute-dsl`` GEMM with pinned tactics (``mxfp8``).
-- The side projections (compressor ``kv_score``, indexer weights) join their
+- `fused_wqa_wkv` reads the MXFP8 layer input the fused all-reduce + mHC
+  wrote instead of quantizing it again; up to `WIDE_LOW_LATENCY_MAX_ROWS`
+  rows it, `wq_b` and `wo_b` run on the low-latency MXFP8 GEMM, and above
+  on the stock `cute-dsl` GEMM with pinned tactics (`mxfp8`).
+- The side projections (compressor `kv_score`, indexer weights) join their
   side streams at their first reader rather than before the query path, and
-  the indexer inputs are built on side streams: the indexer query once ``qr``
+  the indexer inputs are built on side streams: the indexer query once `qr`
   is ready and the index key right after the compressor.
-- Up to ``LOW_BATCH_MAX_ROWS`` rows, the side projections and the index key's
-  ``wk`` run on ``ll_bf16`` kernels (``aux_projections``), the key store reads
-  ``wk``'s FP32 output, and ``wo_b`` publishes its output into the mailbox of
-  the fused all-reduce that reduces it next (``boundary.publishing_gemm``).
-- Dense indexers row-shard their decode rows (``indexer.decode_rows``) and
+- Up to `LOW_BATCH_MAX_ROWS` rows, the side projections and the index key's
+  `wk` run on `ll_bf16` kernels (`aux_projections`), the key store reads
+  `wk`'s FP32 output, and `wo_b` publishes its output into the mailbox of
+  the fused all-reduce that reduces it next (`boundary.publishing_gemm`).
+- Dense indexers row-shard their decode rows (`indexer.decode_rows`) and
   plan them (top-k reset, slice schedule) while the current stream waits for
   the index key; the candidate source starts the candidate consumers'
   expansion on a side stream right after its indexer, and index sources first
   join the side-stream sparse-index builds, which read the top-k indices they
   overwrite.
 - The sparse MLA reuses the step's sparse-index tables and runs on persistent
-  KV counters (``sparse_mla``).
+  KV counters (`sparse_mla`).
 """
 
 from collections.abc import Callable
@@ -66,7 +66,7 @@ if TYPE_CHECKING:
 
 
 def side_weights(attn: DeepseekV4FlashInferMLAAttention) -> list[torch.Tensor]:
-    """The weights of ``attn``'s side projections."""
+    """The weights of `attn`'s side projections."""
     weights = []
     if attn.compressor is not None:
         weights.append(attn.compressor.fused_wkv_wgate.weight)
@@ -76,7 +76,7 @@ def side_weights(attn: DeepseekV4FlashInferMLAAttention) -> list[torch.Tensor]:
 
 
 def key_weight(attn: DeepseekV4FlashInferMLAAttention) -> torch.Tensor | None:
-    """``wk`` of ``attn``'s indexer when it produces MXFP4 index keys."""
+    """`wk` of `attn`'s indexer when it produces MXFP4 index keys."""
     indexer = attn.indexer
     if indexer is not None and indexer.owns_k and indexer.use_fp4_kv:
         return indexer.wk.weight
@@ -129,8 +129,8 @@ class AttentionStep:
         positions: torch.Tensor,
         step: "DecodeStep",
     ) -> torch.Tensor:
-        """The layer's TP-partial output for input ``x`` (``quant``: the same
-        input as MXFP8), published when ``wo_b`` publishes."""
+        """The layer's TP-partial output for input `x` (`quant`: the same
+        input as MXFP8), published when `wo_b` publishes."""
         attn = self.attn
         out = attn._alloc_attn_out(x.shape[0], x)
         assert isinstance(out, torch.Tensor)
@@ -171,8 +171,8 @@ class AttentionStep:
         quant: QuantizedActivation | None,
         step: "DecodeStep",
     ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
-        """``_run_parallel_input_projections``, with the side projections left
-        unjoined on aux streams 0 and 1; ``_prepare`` joins each at its first
+        """`_run_parallel_input_projections`, with the side projections left
+        unjoined on aux streams 0 and 1; `_prepare` joins each at its first
         reader."""
         attn = self.attn
         aux_gemm = self.aux_gemm and step.low_batch
@@ -221,9 +221,9 @@ class AttentionStep:
     def _split_qkv_and_norm(
         self, qr_kv: torch.Tensor
     ) -> tuple[torch.Tensor | QuantizedActivation, torch.Tensor | None, torch.Tensor]:
-        """``attn._split_qkv_and_norm``, with the fused norm triggering its
-        PDL dependents early up to ``WIDE_LOW_LATENCY_MAX_ROWS`` rows: there
-        this step's ``wq_b`` runs on the low-latency GEMM (above 8 rows, where
+        """`attn._split_qkv_and_norm`, with the fused norm triggering its
+        PDL dependents early up to `WIDE_LOW_LATENCY_MAX_ROWS` rows: there
+        this step's `wq_b` runs on the low-latency GEMM (above 8 rows, where
         its shape has a wide tactic), which loads its weights before its own
         wait, overlapping them with the norm."""
         attn = self.attn
@@ -257,14 +257,14 @@ class AttentionStep:
         torch.Tensor | None,
         DecodeRowsPlan | None,
     ]:
-        """``_prepare_and_attn`` up to the indexer, with the indexer inputs on
+        """`_prepare_and_attn` up to the indexer, with the indexer inputs on
         side streams.
 
-        From the moment ``qr`` is ready, aux stream 2 runs the indexer query
-        (``wq_b``, then RoPE/quantize once the weights GEMM is done) and aux
-        stream 0, after its ``kv_score`` GEMM, the compressor and the index
+        From the moment `qr` is ready, aux stream 2 runs the indexer query
+        (`wq_b`, then RoPE/quantize once the weights GEMM is done) and aux
+        stream 0, after its `kv_score` GEMM, the compressor and the index
         key; the current stream runs the main query and KV insertion, a dense
-        indexer's plan (``plan_decode_rows``), then the compressed-cache
+        indexer's plan (`plan_decode_rows`), then the compressed-cache
         insertion once the latent is ready. Returns the query, the indexer
         query, its scale and weights, and the dense indexer's plan.
         """
@@ -334,8 +334,8 @@ class AttentionStep:
         positions: torch.Tensor,
         step: "DecodeStep",
     ) -> None:
-        """``indexer._produce_k``; up to ``LOW_BATCH_MAX_ROWS`` rows, ``wk`` on
-        ``ll_bf16`` and the FP32 key store."""
+        """`indexer._produce_k`; up to `LOW_BATCH_MAX_ROWS` rows, `wk` on
+        `ll_bf16` and the FP32 key store."""
         rotary_emb = self.attn.indexer_rotary_emb
         attn_metadata = get_forward_context().attn_metadata
         if (
@@ -372,7 +372,7 @@ class AttentionStep:
     ) -> None:
         """The layer's indexer: the top-k indices (and in the candidate
         source, the candidate blocks) of the step; a dense indexer finishes
-        its ``plan``."""
+        its `plan`."""
         q_quant = (index_q, index_q_scale) if index_q_scale is not None else index_q
         op = indexer.indexer_op
         if isinstance(op, SparseAttnIndexer):
@@ -388,7 +388,7 @@ class AttentionStep:
             self.source.fork()
 
     def _wo_b_low_batch(self, z: torch.Tensor | QuantizedActivation) -> torch.Tensor:
-        """``wo_b`` up to ``LOW_BATCH_MAX_ROWS`` rows: published, or on the
+        """`wo_b` up to `LOW_BATCH_MAX_ROWS` rows: published, or on the
         low-latency MXFP8 GEMM."""
         wo_b = self.attn.wo_b
         if self.publisher is not None:
@@ -397,7 +397,7 @@ class AttentionStep:
         return out if out is not None else self.attn._wo_b_proj(z)
 
     def _wo_b_pinned(self, z: torch.Tensor | QuantizedActivation) -> torch.Tensor:
-        """``wo_b`` above ``LOW_BATCH_MAX_ROWS`` rows: on the wide low-latency
-        or the pinned ``cute-dsl`` GEMM where one runs."""
+        """`wo_b` above `LOW_BATCH_MAX_ROWS` rows: on the wide low-latency
+        or the pinned `cute-dsl` GEMM where one runs."""
         out = wide_or_pinned_mm(self.attn.wo_b, z)
         return out if out is not None else self.attn._wo_b_proj(z)

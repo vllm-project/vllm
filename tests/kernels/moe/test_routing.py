@@ -852,9 +852,9 @@ def test_eplb_map_no_redundancy(
 @pytest.mark.parametrize("top_k,R", [(2, 2), (4, 2), (8, 4), (8, 8)])
 def test_eplb_map_hot_expert_replica_balance(top_k, R):
     """Hot logical expert with R replicas must be balanced across replicas
-    even when ``top_k`` is a multiple of ``R``. In that regime every top-k
-    offset for the hot expert lands on a multiple of ``top_k`` in the flat
-    ``topk_ids`` view, so per-replica assignment must not collapse onto a
+    even when `top_k` is a multiple of `R`. In that regime every top-k
+    offset for the hot expert lands on a multiple of `top_k` in the flat
+    `topk_ids` view, so per-replica assignment must not collapse onto a
     single replica.
     """
     num_tokens = 8192

@@ -35,7 +35,7 @@ import torch
 from torch.distributed import ProcessGroup, all_reduce
 
 from vllm.config import ModelConfig, ParallelConfig
-from vllm.config.utils import compute_hash_cached
+from vllm.config.utils import hash_config_cached
 from vllm.distributed.parallel_state import (
     GroupCoordinator,
     get_ep_group,
@@ -120,7 +120,7 @@ class EplbModelState:
     ```
     """
     physical_to_logical_map_buffer: torch.Tensor
-    """Maximum-capacity buffer backing ``physical_to_logical_map``."""
+    """Maximum-capacity buffer backing `physical_to_logical_map`."""
     logical_to_physical_map: torch.Tensor
     """
     Mapping from logical experts to physical experts.
@@ -224,9 +224,9 @@ class EplbModelState:
     num_unpadded_tokens_tensors: list[torch.Tensor] | None = None
     """
     Per-ubatch scalar int32 tensors holding the number of real (non-padding)
-    tokens.  Allocated once in :meth:`EplbState.add_model` so that device
+    tokens.  Allocated once in `EplbState.add_model` so that device
     pointers remain stable across CUDA-graph replays.  The router kernel
-    indexes this list with ``dbo_current_ubatch_id()``.
+    indexes this list with `dbo_current_ubatch_id()`.
     """
     physical_load_pass: torch.Tensor | None = None
     """
@@ -284,12 +284,12 @@ class EplbState:
         self.should_record_tensor: torch.Tensor | None = None
         """
         Shared scalar bool tensor for all layers.  Every
-        :class:`EplbLayerState` holds a reference to the **same** object so
-        a single ``.fill_()`` updates all layers at once.  Allocated on the
-        first call to :meth:`_propagate_shared_tensors`.
+        `EplbLayerState` holds a reference to the **same** object so
+        a single `.fill_()` updates all layers at once.  Allocated on the
+        first call to `_propagate_shared_tensors`.
         """
         self._should_record_value: bool | None = None
-        """Last value written to ``should_record_tensor``."""
+        """Last value written to `should_record_tensor`."""
         self._pending_balancedness: deque[
             tuple[int, int, torch.Event, list[tuple[str, torch.Tensor]]]
         ] = deque()
@@ -367,25 +367,14 @@ class EplbState:
             or model.num_expert_groups != new_model.num_expert_groups
         ):
             raise RuntimeError(
-                "Model: {} "
-                "with config {} "
-                "{} {} {} {} "
-                "mismatch with new model {} "
-                "with config {} "
-                "{} {} {} {}".format(
-                    type(model),
-                    model.num_routed_experts,
-                    model.num_redundant_experts,
-                    model.num_physical_experts,
-                    model.num_logical_experts,
-                    model.num_expert_groups,
-                    type(new_model),
-                    new_model.num_routed_experts,
-                    new_model.num_redundant_experts,
-                    new_model.num_physical_experts,
-                    new_model.num_logical_experts,
-                    new_model.num_expert_groups,
-                )
+                f"Model: {type(model)} "
+                f"with config {model.num_routed_experts} "
+                f"{model.num_redundant_experts} {model.num_physical_experts} "
+                f"{model.num_logical_experts} {model.num_expert_groups} "
+                f"mismatch with new model {type(new_model)} "
+                f"with config {new_model.num_routed_experts} "
+                f"{new_model.num_redundant_experts} {new_model.num_physical_experts} "
+                f"{new_model.num_logical_experts} {new_model.num_expert_groups}"
             )
 
     def add_model(
@@ -568,7 +557,7 @@ class EplbState:
             num_unpadded_tokens_tensors=num_unpadded_tokens_tensors,
             physical_load_pass=physical_load_pass,
         )
-        self.model_states[model_config.compute_hash()] = model_state
+        self.model_states[hash_config_cached(model_config)] = model_state
 
     def prepare_forward(
         self,
@@ -576,19 +565,19 @@ class EplbState:
         num_unpadded_tokens: int,
         ubatch_slices: list | None = None,
     ) -> None:
-        """Fill the per-[u]batch ``num_unpadded_tokens`` tensors before a
+        """Fill the per-[u]batch `num_unpadded_tokens` tensors before a
         forward pass.
 
         Args:
-            model_config: Identifies which ``EplbModelState`` to update.
+            model_config: Identifies which `EplbModelState` to update.
             num_unpadded_tokens: Total number of real (non-padding) tokens
                 in the batch.
             ubatch_slices: When DBO is active, a list of
-                ``UBatchSlice`` objects describing each micro-batch's
-                token range.  When ``None``, only ``tensors[0]`` is filled.
+                `UBatchSlice` objects describing each micro-batch's
+                token range.  When `None`, only `tensors[0]` is filled.
 
         """
-        model_state = self.model_states.get(compute_hash_cached(model_config))
+        model_state = self.model_states.get(hash_config_cached(model_config))
         if model_state is None or model_state.num_unpadded_tokens_tensors is None:
             return
         tensors = model_state.num_unpadded_tokens_tensors
@@ -784,7 +773,7 @@ class EplbState:
         return should_record_for_rearrange or should_record_for_log
 
     def _update_layer_should_record(self, log_stats: bool = False) -> None:
-        """Update the shared ``should_record_tensor`` for all layers."""
+        """Update the shared `should_record_tensor` for all layers."""
         if self.should_record_tensor is None:
             return
         should_record = self._should_record_current_step(log_stats=log_stats)
@@ -799,15 +788,15 @@ class EplbState:
         num_unpadded_tokens_tensors: list[torch.Tensor],
         physical_load_pass: torch.Tensor | None = None,
     ) -> None:
-        """Propagate shared tensors to every :class:`EplbLayerState`.
+        """Propagate shared tensors to every `EplbLayerState`.
 
-        Allocates ``should_record_tensor`` on the first call and then
-        assigns both it and ``num_unpadded_tokens_tensors`` to every
-        MoE layer's :class:`EplbLayerState`.  All layers reference the
+        Allocates `should_record_tensor` on the first call and then
+        assigns both it and `num_unpadded_tokens_tensors` to every
+        MoE layer's `EplbLayerState`.  All layers reference the
         **same** objects so a single update is visible everywhere.
 
-        Must be called after :meth:`model.set_eplb_state` so that each
-        layer's ``eplb_state`` is already populated.
+        Must be called after `model.set_eplb_state` so that each
+        layer's `eplb_state` is already populated.
         """
         layer_states = [
             layer.eplb_state
@@ -1157,7 +1146,7 @@ class EplbState:
         model_config: ModelConfig,
         expanded_physical_to_logical: torch.Tensor,
     ) -> None:
-        eplb_model_state = self.model_states[model_config.compute_hash()]
+        eplb_model_state = self.model_states[hash_config_cached(model_config)]
         eplb_model_state.physical_to_logical_map_buffer.copy_(
             expanded_physical_to_logical
         )
@@ -1192,7 +1181,7 @@ class EplbState:
         """Replace physical_to_logical_map with a view covering the new active
         size.
         """
-        model_state = self.model_states[model_config.compute_hash()]
+        model_state = self.model_states[hash_config_cached(model_config)]
         old_num_physical_experts = model_state.model.num_physical_experts
         first_slot, last_slot = sorted((old_num_physical_experts, num_physical_experts))
         physical_to_logical_map_buffer = model_state.physical_to_logical_map_buffer
@@ -1206,7 +1195,7 @@ class EplbState:
     def create_communicator(
         self, model_config: ModelConfig, group_coordinator: GroupCoordinator
     ) -> EplbCommunicator:
-        model_state = self.model_states[model_config.compute_hash()]
+        model_state = self.model_states[hash_config_cached(model_config)]
         backend = self.parallel_config.eplb_config.communicator
         assert backend is not None
         return create_eplb_communicator(
@@ -1221,7 +1210,7 @@ class EplbState:
         model_config: ModelConfig,
         communicator: EplbCommunicator,
     ) -> None:
-        self.model_states[model_config.compute_hash()].communicator = communicator
+        self.model_states[hash_config_cached(model_config)].communicator = communicator
 
 
 @dataclass
@@ -1235,21 +1224,21 @@ class EplbLayerState:
     """
     Shared scalar bool tensor controlling whether to accumulate expert load
     metrics during this forward pass.  All layers reference the **same**
-    tensor object, which is owned and updated by :class:`EplbState`.
+    tensor object, which is owned and updated by `EplbState`.
 
-    Set to ``False`` for the first ``step_interval - window_size`` steps of
+    Set to `False` for the first `step_interval - window_size` steps of
     each rearrangement period: those steps would be overwritten in the
     sliding window before the next rearrangement, so recording them wastes
     GPU work.
     """
     num_unpadded_tokens_tensors: list[torch.Tensor] | None = None
     """
-    Reference to the parent :class:`EplbModelState`'s tensor list so the
+    Reference to the parent `EplbModelState`'s tensor list so the
     router can read the correct per-[u]batch unpadded token count.
     """
     physical_load_view: torch.Tensor | None = None
     """
-    This layer's row of :attr:`EplbModelState.physical_load_pass`. None unless
+    This layer's row of `EplbModelState.physical_load_pass`. None unless
     log_balancedness is on, which compiles physical recording out of the kernels.
     """
 
