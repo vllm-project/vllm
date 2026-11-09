@@ -227,6 +227,42 @@ class TestGemma4ChatTemplate:
         result = _render(gemma4_template, messages, add_generation_prompt=True)
         assert not result.strip().endswith("<|turn>model\n")
 
+    @pytest.mark.parametrize("enable_thinking", [False, True])
+    def test_generation_prompt_after_tool_response(
+        self, gemma4_template, enable_thinking
+    ):
+        """After a tool response, the generation prompt closes an empty thought
+        channel when thinking is off (as a new turn does) and opens one when
+        thinking is on."""
+        messages = [
+            {"role": "user", "content": "Weather?"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "function": {
+                            "name": "get_weather",
+                            "arguments": {"city": "London"},
+                        },
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": "call_1", "content": "sunny"},
+        ]
+        result = _render(
+            gemma4_template,
+            messages,
+            add_generation_prompt=True,
+            enable_thinking=enable_thinking,
+        )
+        if enable_thinking:
+            expected_tail = "<tool_response|><|channel>thought\n"
+        else:
+            expected_tail = "<tool_response|><|channel>thought\n<channel|>"
+        assert result.endswith(expected_tail)
+
     def test_reasoning_in_tool_chains(self, gemma4_template):
         """Reasoning field on assistant with tool_calls after last user
         message emits <|channel>thought\\n...<channel|>."""
