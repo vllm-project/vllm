@@ -28,7 +28,7 @@ steps:
 
 - label: ":intel: (BMG) Triton Unified Attention Tests"
   key: triton-unified-attention-tests
-  timeout_in_minutes: 20
+  timeout_in_minutes: 10
   device: intel_gpu
   agent_tags:
     label: production
