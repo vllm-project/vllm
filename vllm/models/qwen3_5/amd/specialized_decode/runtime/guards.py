@@ -106,7 +106,7 @@ def _moe_reasons(mlp) -> tuple[list[str], dict[str, torch.Tensor]]:
     return out, dense
 
 
-def _gdn_reasons(a) -> tuple[list[str], dict[str, torch.Tensor]]:
+def _gdn_reasons(a, fp6: bool) -> tuple[list[str], dict[str, torch.Tensor]]:
     if not (
         hasattr(a, "in_proj_qkvz")
         and not a.disable_tp_for_ba_proj
@@ -118,12 +118,20 @@ def _gdn_reasons(a) -> tuple[list[str], dict[str, torch.Tensor]]:
         and a.norm.norm_before_gate
     ):
         return ["GDN layer variant"], {}
-    if mxfp4_shuffled(a.in_proj_qkvz) is None:
+    if fp6:
+        # The MXFP6 copy is packed from the bf16 weight, which the dense
+        # check below requires.
+        out = []
+        if a.in_proj_qkvz.weight.shape != (L.QKVZ, L.HIDDEN):
+            out.append(f"in_proj_qkvz {tuple(a.in_proj_qkvz.weight.shape)}")
+    elif mxfp4_shuffled(a.in_proj_qkvz) is None:
         return ["in_proj_qkvz not online MXFP4 on AITER's FP4 GEMMs"], {}
-    out = _fp4_reasons("in_proj_qkvz", a.in_proj_qkvz, L.QKVZ, L.HIDDEN)
+    else:
+        out = _fp4_reasons("in_proj_qkvz", a.in_proj_qkvz, L.QKVZ, L.HIDDEN)
     if a.A_log.dtype != torch.float32:
         out.append("A_log not fp32")
     dense = {
+        **({"in_proj_qkvz": a.in_proj_qkvz.weight} if fp6 else {}),
         "in_proj_ba": a.in_proj_ba.weight,
         "conv1d": a.conv1d.weight,
         "dt_bias": a.dt_bias,
@@ -149,7 +157,7 @@ def _attention_reasons(a) -> list[str]:
     return []
 
 
-def _layer_reasons(layer) -> list[str]:
+def _layer_reasons(layer, fp6: bool) -> list[str]:
     if layer.layer_scale:
         return ["layer scale"]
     if layer.use_attn_reduce_scatter_for_moe:
@@ -160,26 +168,31 @@ def _layer_reasons(layer) -> list[str]:
         "post_attention_layernorm": layer.post_attention_layernorm.weight,
     }
     if layer.layer_type == "linear_attention":
-        why, more = _gdn_reasons(layer.linear_attn)
+        why, more = _gdn_reasons(layer.linear_attn, fp6)
         out += why
         dense |= more
     else:
         out += _attention_reasons(layer.self_attn)
     o = o_proj(layer)
-    if mxfp4_shuffled(o) is not None:
+    if fp6:
+        # The MXFP6 copy is packed from the bf16 weight.
+        dense["o_proj"] = o.weight
+    elif mxfp4_shuffled(o) is not None:
         out += _fp4_reasons("o_proj", o, L.HIDDEN, L.CORE)
     else:
         dense["o_proj"] = o.weight
     out += [
         f"{name} {w.dtype}, neither bf16 nor a quantized layout the kernels read"
+        + (" (MXFP6 projections need them bf16)" if fp6 else "")
         for name, w in dense.items()
         if w.dtype != torch.bfloat16
     ]
     return out
 
 
-def model_reasons(model) -> list[str]:
-    """Every reason the kernels cannot serve the loaded ``Qwen3_5Model``."""
+def model_reasons(model, fp6: bool = False) -> list[str]:
+    """Every reason the kernels cannot serve the loaded ``Qwen3_5Model``.
+    ``fp6``: the MXFP6 projections, which are packed from bf16 weights."""
     reasons = []
     if model.start_layer != 0 or model.end_layer != len(model.layers):
         reasons.append("partial layers")
@@ -189,7 +202,7 @@ def model_reasons(model) -> list[str]:
         reasons.append("no GDN layer")
     by_reason: dict[str, list[int]] = {}
     for layer in model.layers:
-        for why in _layer_reasons(layer):
+        for why in _layer_reasons(layer, fp6):
             by_reason.setdefault(why, []).append(layer.layer_idx)
     reasons += [f"{why} (layers {_compact(idx)})" for why, idx in by_reason.items()]
     return reasons

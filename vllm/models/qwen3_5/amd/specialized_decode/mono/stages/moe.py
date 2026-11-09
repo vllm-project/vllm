@@ -10,7 +10,8 @@ the thread ids, ``rank``, the mailbox (``put``, ``put_bf``, ``put_words``,
 ``poll``), LDS (``red``, ``xl``, ``il``, ``contrib``, ``rt``), the scratch
 regions ``sgate`` / ``route`` / ``inter``, the peer regions ``ar`` / ``final``,
 ``args`` and the variant flags ``oq`` / ``og`` / ``u1``, and, where the
-model sets it, ``up`` (a union slot for each pick). Where the
+model sets them, ``up`` (a union slot for each pick) and ``o6`` (o_proj in
+MXFP6, ``runtime.mxfp6.fp6_pack``'s layout). Where the
 router logits are is the model's: ``rlog_at(t, lane, i)`` is token t's logit
 of expert lane + 64 i as a poll spec, ``rlog_last`` (n, spec of i) the n
 logits that land last, and CTA ``route_cta`` also puts ROUTE (for the tests).
@@ -336,6 +337,88 @@ def fp4q_gemv(lane, wave, xl, k, s, rg, ops, shuffled=True):
     return acc
 
 
+# ---------------------------------------------------------------- fp6 GEMV
+# A 16-row group's 128-K step of an MXFP6 weight in fp6_pack's layout: 64
+# lanes of 24 bytes, so 384 dwords.
+FP6_TILE = 384
+
+
+def fp6_gemv_loads(lane, wave, w, ws, rg, k):
+    """An MXFP6 linear's rows 16 rg .. (K ``k``, fp6_pack's weight and scales)
+    for this wave, whose K steps are w n .. w n + n - 1. A lane's 32 E2M3
+    codes of a step are one 16-byte and one 8-byte load. A scale word of a
+    lane holds the e8m0 codes of 4 steps, byte (step % 4) for each step. With
+    fewer than 4 steps a wave (n = 2 for o_proj, K 2048), waves share a word
+    and each loads it."""
+    n = k // L.FP4_STEP // WAVES
+    assert n % 4 == 0 or 4 % n == 0, "fp6_gemv_loads: n divides 4 or 4 divides n"
+    r_w, r_s = rsrc(w), rsrc(ws)
+    ops = []
+    for i in range(n):
+        at = (rg * (k // L.FP4_STEP) + wave * n + i) * FP6_TILE
+        ops.append(
+            fx.Vector(
+                bo.buffer_load(
+                    r_w, at + lane * 4, vec_width=4, dtype=T.i32, cache_modifier=CM_NT
+                )
+            )
+        )
+        ops.append(
+            fx.Vector(
+                bo.buffer_load(
+                    r_w,
+                    at + 256 + lane * 2,
+                    vec_width=2,
+                    dtype=T.i32,
+                    cache_modifier=CM_NT,
+                )
+            )
+        )
+    for j in range(max(1, n // 4)):
+        at = (rg * (k // L.FP4_STEP // 4) + (wave * n) // 4 + j) * 64 + lane
+        ops.append(fx.Int32(bo.buffer_load(r_s, at, vec_width=1, dtype=T.i32)))
+    return ops
+
+
+def fp6_gemv(lane, wave, xl, xrow, k, s, ops):
+    """The ``fp6_gemv_loads`` operands against the bf16 rows at LDS ``xl`` (row
+    stride ``xrow``) -> this wave's fp32 partial MFMA tile. One
+    v_cvt_scalef32_pk32_bf16_fp6 turns a lane's 32 codes of a step, times
+    their scale, into 32 bf16 values exactly. Dwords 4 q .. 4 q + 3 of them
+    hold K 32 (lane / 16) + 8 q .. + 8, the A operand of MFMA q, the order in
+    which fp4_mfmas reads an MXFP4 tile."""
+    n = k // L.FP4_STEP // WAVES
+    t = fx.min(lane % 16, s - 1)
+    acc = fx.Vector.filled(4, 0.0, fx.Float32)
+    for i in range_constexpr(n):
+        # The byte of step w n + i in its scale word is (w n + i) % 4. When 4
+        # divides n that is i % 4, and otherwise it depends on the wave.
+        shift = (i % 4) * 8 if n % 4 == 0 else ((wave * n + i) % 4) * 8
+        code = (ops[2 * n + i // 4] >> shift) & 0xFF
+        lo, hi = ops[2 * i], ops[2 * i + 1]
+        codes = fx.Vector.from_elements(
+            [lo[0], lo[1], lo[2], lo[3], hi[0], hi[1]], fx.Int32
+        )
+        vals = fx.Vector(
+            rocdl.cvt_scalef32_pk32_bf16_fp6(
+                T.vec(32, T.bf16),
+                as_ir_value(codes),
+                as_ir_value(fx.Float32(pow2(code))),
+            )
+        ).bitcast(fx.Int32)
+        xoff = t * xrow + (wave * n + i) * L.FP4_STEP + 32 * (lane // 16)
+        for q in range_constexpr(4):
+            xb = fx.Vector(
+                fx.ptr_load(
+                    xl + (xoff + 8 * q) // 2,
+                    result_type=fx.Vector.make_type(4, fx.Int32),
+                )
+            )
+            a = fx.Vector.from_elements([vals[4 * q + d] for d in range(4)], fx.Int32)
+            acc = mfma_bf16(a.bitcast(fx.BFloat16), xb.bitcast(fx.BFloat16), acc)
+    return acc
+
+
 @traced
 def ksplit_rows(c, region, at, q, parts, out, t0=0, n=None):
     """A K-split GEMV task's 16 rows (``red``, tokens t0 .. t0 + n - 1; part
@@ -469,12 +552,15 @@ def quant_x_fp4(c, k):
 
 # ---------------------------------------------------------------- o_proj
 def o_loads(c, rg, k):
-    """o_proj rows 16 rg .. (K ``k``): this wave's weights."""
+    """o_proj rows 16 rg .. (K ``k``): this wave's weights (``o6``: the MXFP6
+    copy of fp6_pack, its scales in ``w_os``)."""
     lane, wave, a = c["lane"], c["wave"], c["args"]
     if const_expr(c["oq"]):
         return fp4_gemv_loads(
             lane, wave, a["w_o"], a["w_os"], rg, k, c["moe"].hidden, c["shuffled"]
         )
+    if const_expr(c.get("o6", False)):
+        return fp6_gemv_loads(lane, wave, a["w_o"], a["w_os"], rg, k)
     return gemv.loads(lane, wave, a["w_o"], rg * ROWS, k)
 
 
@@ -488,6 +574,8 @@ def stage_o(c, rg, ops, k):
         xl = rows_at(c["xl"], xrow, t0)
         if c["oq"]:
             return fp4_gemv(lane, wave, xl, xrow, k, n, rg, ops, c["shuffled"])
+        if c.get("o6", False):
+            return fp6_gemv(lane, wave, xl, xrow, k, n, ops)
         return gemv.mfmas(lane, wave, xl, xrow, k, n, ops)
 
     tiled(c, mfma, lambda t0, n: _o_out(c, rg, t0, n))

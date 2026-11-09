@@ -62,6 +62,7 @@ def _vllm_config(monokernel=True, **parallel):
             prefetch=SimpleNamespace(offload_group_size=0),
         ),
         use_v2_model_runner=True,
+        additional_config={},
         model_config=SimpleNamespace(
             architecture="Qwen3_5MoeForCausalLM",
             dtype=torch.bfloat16,
@@ -231,3 +232,21 @@ def _gdn_metadata(decodes=4, prefills=0, spec=0, indices=None):
 )
 def test_step_reason(md, width, why):
     assert step_reason(md, "gdn", width) == why
+
+
+def test_mxfp6_projections_config(supported_platform):
+    """``monokernel_projections`` selects the MXFP6 projections, which serve
+    up to ``Q6_MAX`` rows, and an unknown value is refused with the others."""
+    config = _vllm_config()
+    config.additional_config = {runtime.PROJECTIONS_KEY: "mxfp6"}
+    got = runtime.specialized_decode_config(config)
+    assert got == runtime.DecodeConfig(max_tokens=L.Q6_MAX, fp6=True)
+    assert got.widths == tuple(range(1, L.Q6_MAX + 1))
+    config.additional_config = {runtime.PROJECTIONS_KEY: "auto"}
+    assert runtime.specialized_decode_config(config) == runtime.DecodeConfig()
+    config = _vllm_config(tensor_parallel_size=4)
+    config.additional_config = {runtime.PROJECTIONS_KEY: "fp6"}
+    with pytest.raises(ValueError) as e:
+        runtime.specialized_decode_config(config)
+    for why in ("TP 4 (TP8 only)", "monokernel_projections 'fp6'"):
+        assert why in str(e.value), (why, str(e.value))

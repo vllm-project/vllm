@@ -30,6 +30,7 @@ from tests.models.qwen3_5.amd_specialized_decode.reference import (
     _block_input,
     _check_route,
     _cos,
+    _gdn_core_ref,
     _gdn_inputs,
     _gdn_reference,
     _gemma_norm,
@@ -148,6 +149,77 @@ def test_gdn_block_matches_vllm_ops(
     torch.testing.assert_close(conv_state[0], w["conv_state"][0], atol=0, rtol=0)
 
 
+@pytest.mark.parametrize(
+    "s,n_real,first", [(1, 1, False), (2, 2, False), (5, 4, False), (8, 7, True)]
+)
+@torch.inference_mode()
+def test_gdn_block_mxfp6_matches_vllm_ops(s: int, n_real: int, first: bool) -> None:
+    """The GDN block with the MXFP6 in_proj_qkvz (``q6``, fp6_pack's layout)
+    against the same ops on the weight rounded to MXFP6 (round_e2m3), which
+    the model's prefill GEMM multiplies with the bf16 x rows, as the kernel
+    does. Only the summation order of in_proj differs."""
+    from vllm.models.qwen3_5.amd.specialized_decode.mono import blocks
+    from vllm.models.qwen3_5.amd.specialized_decode.mono import layout as L
+    from vllm.models.qwen3_5.amd.specialized_decode.runtime.mxfp6 import (
+        fp6_pack,
+        round_e2m3,
+    )
+
+    w = _gdn_inputs(s, n_real, first=first)
+    w6 = round_e2m3(w["w_qkvz_ref"])
+    w6q, w6s = fp6_pack(w6)
+    x, res = _gemma_norm(w["hidden"], w["residual"], w["ln_w"])
+    qkvz = F.linear(x, w6)
+    ba = F.linear(x, w["w_ba"])
+    conv_ref, rstate_ref, core_ref = _gdn_core_ref(w, n_real, qkvz, ba)
+    key = blocks.GdnBuild(tokens=s, first=first, q6=True)
+    conv_state, rstate = w["conv_state"].clone(), w["rstate"].clone()
+    core = torch.full((s, L.CORE), float("nan"), dtype=bf, device="cuda")
+    res_out = torch.full_like(w["hidden"], float("nan"))
+    scratch = torch.zeros(
+        blocks.scratch_bytes(blocks.gdn_scratch_layout(key)),
+        dtype=torch.uint8,
+        device="cuda",
+    )
+    hl = _health()
+    blocks.gdn_block(
+        key,
+        hidden=w["hidden"],
+        residual=w["residual"],
+        res_out=res_out,
+        ln_w=w["ln_w"],
+        w_qkvz=w6q,
+        w_qkvzs=w6s,
+        w_ba=w["w_ba"],
+        conv_w=w["conv_w"],
+        conv_state=conv_state,
+        a_log=w["a_log"],
+        dt_bias=w["dt_bias"],
+        norm_w=w["norm_w"],
+        rstate=rstate,
+        st_idx=w["st_idx"],
+        core=core,
+        scratch=scratch,
+        epoch=torch.ones(1, dtype=torch.int32, device="cuda"),
+        **hl,
+        layer=0,
+    )
+    torch.accelerator.synchronize()
+    assert not hl["health"].any()
+    torch.testing.assert_close(res_out, res, atol=0, rtol=0)
+    live = w["st_idx"][:n_real].long()
+    errs = {
+        "conv_state": _rel_l2(conv_state[live], conv_ref[live]),
+        "rstate": _rel_l2(rstate[live], rstate_ref[live]),
+        "core": _rel_l2(core[:n_real], core_ref[:n_real]),
+    }
+    assert errs["conv_state"] < 5e-4 and errs["rstate"] < 5e-4, errs
+    assert _cos(core[:n_real], core_ref[:n_real]) > COS_MIN, errs
+    assert torch.equal(core[n_real:], torch.zeros_like(core[n_real:]))
+    torch.testing.assert_close(rstate[0], w["rstate"][0], atol=0, rtol=0)
+    torch.testing.assert_close(conv_state[0], w["conv_state"][0], atol=0, rtol=0)
+
+
 def _tp_state(rank: int, tp_size: int, device) -> dict:
     """A rank's launch state as ``Launcher`` builds it: the peer buffer (the
     output rank's flags in its head), the health words, the alarm word."""
@@ -205,6 +277,15 @@ def _layer_worker(
     flat = _mxfp4_linear(gr, h, ck, shuffled=False)
     w_of_ref = _mxfp4_dequant(flat[0], flat[1]).to(bf)
     w_o = _randn(gr, h, ck, scale=0.02)
+    # The MXFP6 o_proj (o6): the values, which bf16 holds exactly, and their
+    # packing.
+    from vllm.models.qwen3_5.amd.specialized_decode.runtime.mxfp6 import (
+        fp6_pack,
+        round_e2m3,
+    )
+
+    w_o6_ref = round_e2m3(_randn(gr, h, ck, scale=0.02))
+    w_o6, w_o6s = fp6_pack(w_o6_ref)
     ln_w = _randn(gc, h, scale=0.2)
 
     def agree(t, what):
@@ -215,14 +296,25 @@ def _layer_worker(
     # each width twice: both epoch parities
     for s in [w for w in (1, 3, 8, 9, 15, 16) for _ in range(2)]:
         epoch.add_(1)
-        # (oq, shuffled): out_proj on the ASM / Triton FP4 GEMM, o_proj bf16
-        for slot, (oq, shuffled) in enumerate(
-            ((True, True), (True, False), (False, True))
-        ):
-            what = ("layer", oq, shuffled, s)
-            key = blocks.LayerBuild(tokens=s, oq=oq, og=not oq, shuffled=shuffled)
+        # (oq, shuffled, og, o6, rm): out_proj on the ASM / Triton FP4 GEMM
+        # and the bf16 o_proj with its output gate; with the MXFP6
+        # projections, up to Q6_MAX rows, the MXFP6 o_proj with its gate and
+        # out_proj without one
+        variants = [
+            (True, True, False, False, False),
+            (True, False, False, False, False),
+            (False, True, True, False, False),
+        ]
+        if s <= L.Q6_MAX:
+            variants += [(False, True, True, True, False)]
+            variants += [(False, True, False, True, False)]
+        for slot, (oq, shuffled, og, o6, rm) in enumerate(variants):
+            what = ("layer", oq, shuffled, og, o6, rm, s)
+            key = blocks.LayerBuild(
+                tokens=s, oq=oq, og=og, shuffled=shuffled, o6=o6, rm=rm
+            )
             core = _randn(gr, s, ck)
-            gate = None if oq else _randn(gr, s, ck, scale=2.0)
+            gate = _randn(gr, s, ck, scale=2.0) if og else None
             residual = _block_input(gc, s, False)["residual"]
             w, ws, ref_w = (
                 (w_oq, w_os, w_oq_ref) if shuffled else (flat[2], flat[3], w_of_ref)
@@ -233,13 +325,19 @@ def _layer_worker(
             )
             out = torch.full_like(residual, float("nan"))
             res_out = torch.full_like(residual, float("nan"))
+            if key.o6:
+                w_l, ws_l = w_o6, w_o6s
+            elif oq:
+                w_l, ws_l = w, ws
+            else:
+                w_l, ws_l = w_o, None
             blocks.layer_block(
                 key,
                 core=core,
                 gate=gate,
                 residual=residual,
-                w_o=w if oq else w_o,
-                w_os=ws if oq else None,
+                w_o=w_l,
+                w_os=ws_l,
                 ln_w=ln_w,
                 out=out,
                 res_out=res_out,
@@ -255,9 +353,10 @@ def _layer_worker(
             if oq:
                 part = F.linear(_mxfp4_qdq(core, shuffled).to(bf), ref_w)
             else:
-                assert gate is not None
-                gated = (core.float() * torch.sigmoid(gate.float())).to(bf)
-                part = F.linear(gated, w_o)
+                gated = core
+                if gate is not None:
+                    gated = (core.float() * torch.sigmoid(gate.float())).to(bf)
+                part = F.linear(gated, w_o6_ref if key.o6 else w_o)
             o_sum = _all_reduce_fp32(part)
             x_ref, res_ref = _gemma_norm(o_sum, residual, ln_w)
             # the kernel's AR sum: the same partials in another fp32 order

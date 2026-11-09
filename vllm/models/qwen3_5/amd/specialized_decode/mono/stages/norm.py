@@ -4,9 +4,12 @@
 tile in LDS: at 8192 columns a 16-row bf16 x is 262 KB, more than a CU's LDS.
 
 The norm tasks (CTAs 0 .. NRED - 1, 128 columns each) add the block input
-and the residual -> ``res_out`` and put their columns' sums of squares (MSQ).
-Every consumer then builds what it reads of x = bf16(z rstd (1 + w)) from
-global memory: a bf16 K slice (``x_rows_to_lds``: the router, in_proj_ba),
+and the residual -> ``res_out`` and put their columns' sums of squares (MSQ,
+and MSQ2 in the layer block after the ``xbuf`` stores). Every consumer then
+builds what it reads of x = bf16(z rstd (1 + w)): the router from the
+tagged AR sums and sums of squares (XAR and MSQ, ``x_tagged_to_lds``), so
+the ``xbuf`` drain is not on its path, and the other consumers from global
+memory after MSQ2: a bf16 K slice (``x_rows_to_lds``: in_proj_ba),
 the rows' MXFP4 codes (``x_fp4_to_lds``: in_proj_qkvz and the routed
 experts, as their GEMMs quantize x), or a dot product (``stage_sgate``). At
 the wider widths the norm tasks quantize their columns once instead
@@ -100,8 +103,9 @@ def stage_front(c, j, src, msq=True):
 @traced
 def stage_norm(c, j):
     """Columns 128 j ..: the AR sum (rank order, fp32 -> bf16) + residual (fp32;
-    bf16 -> ``res_out``); the bf16 AR sums -> ``xbuf`` and the columns' sums of
-    squares -> MSQ, the store drained first."""
+    bf16 -> ``res_out``); the bf16 AR sums -> XAR and ``xbuf``, the columns'
+    sums of squares -> MSQ and, after the ``xbuf`` stores, MSQ2. The consumers
+    build x from them (``x_tagged_to_lds``, ``load_rstd``)."""
     s, tid, lane = c["S"], c["tid"], c["lane"]
     a = c["args"]
     for p in range_constexpr(token_passes(s)):
@@ -109,38 +113,55 @@ def stage_norm(c, j):
         mine = tt < s
         t = fx.min(tt, s - 1)
         col = j * COLS + 2 * (tid % 64)
+        at = (t * H + col) // 2
+        # The residual does not depend on the all-reduce, so its load goes
+        # out before the poll of the partials. The poll's first wait for its
+        # loads also waits for this one, so the residual is in when the
+        # partials are.
+        rw = ld_i32(a["residual"], at)
         lo, hi = sum_partials(
             c["poll"],
             c["peer"]["ar_own"],
             lambda src, t=t, col=col: ((src * s + t) * H + col) // 2,
             c["TP"],
         )
-        at = (t * H + col) // 2
-        rw = ld_i32(a["residual"], at)
         z0 = bf16_round(lo) + bf_lo(rw)
         z1 = bf16_round(hi) + bf_hi(rw)
         if mine:
             bo.buffer_store(_pair(z0, z1), rsrc(a["res_out"]), at)
-            bo.buffer_store(_pair(lo, hi), rsrc(c["xbuf"]), at, cache_modifier=CM_DEV)
+        # The router tasks read the bf16 AR sums from XAR and the sums of
+        # squares from MSQ. Both are tagged pairs, so these puts go out
+        # without a drain. The other consumers read the sums from xbuf, and
+        # MSQ2 follows only after the xbuf stores of this pass are drained.
         sq = wave_sum(z0 * z0 + z1 * z1)
-        rocdl.s_waitcnt(vmcnt=0)
+        aw = _pair(lo, hi)
+        if mine:
+            c["put_words"](c["xar"], at, [aw])
         if mine & (lane == 0):
             c["put"](c["msq"], j * s + t, sq)
+        if mine:
+            bo.buffer_store(aw, rsrc(c["xbuf"]), at, cache_modifier=CM_DEV)
+        rocdl.s_waitcnt(vmcnt=0)
+        if mine & (lane == 0):
+            c["put"](c["msq2"], j * s + t, sq)
 
 
 @traced
 def load_rstd(c):
     """Every norm task's sums of squares -> each token's rstd -> LDS ``rs``
     (fp32 sum in task order). A wave waits on the last token's first, so the
-    full polls don't spin."""
+    full polls don't spin. In the layer block it polls MSQ2, which a norm
+    task puts after its ``xbuf`` stores, so ``xbuf`` is complete when the rstd
+    is in."""
     s, tid, lane, red = c["S"], c["tid"], c["lane"], c["red"]
+    msq = c.get("msq2", c["msq"])
     if tid < NRED:
-        c["poll"]([(c["msq"], tid * s + s - 1, 1)])
+        c["poll"]([(msq, tid * s + s - 1, 1)])
     gpu.barrier()
     for p in range_constexpr(token_passes(s)):
         t = tid // 64 + WAVES * p
         if t < s:
-            v = c["poll"]([(c["msq"], lane * s + t, 1)])[0][0]
+            v = c["poll"]([(msq, lane * s + t, 1)])[0][0]
             fx.ptr_store(f32_of(v), red + (t * 64 + lane))
     gpu.barrier()
     if tid < s:
@@ -231,6 +252,73 @@ def x_rows_to_lds(c, src, klen, k0):
         t = e // (klen // 8)
         kk = e % (klen // 8) * 8
         ys = _x_norm(c, t, _x_words(c, src, t, k0 + kk))
+        if tid + THREADS * i < words:
+            fx.ptr_store(
+                fx.Vector.from_elements(ys, fx.Int32), c["xl"] + (t * xrow + kk) // 2
+            )
+    gpu.barrier()
+
+
+@traced
+def x_tagged_to_lds(c, klen, k0):
+    """The router tasks: x columns k0 .. k0 + klen -> LDS as ``x_rows_to_lds``
+    writes them. The norm tasks' AR sums (XAR) and sums of squares (MSQ)
+    come in one poll, so neither the norm tasks' drain nor a second round
+    trip after the poll is on the router's path. The rstd and the x
+    arithmetic are those of ``load_rstd`` and ``x_rows_to_lds``."""
+    s, tid, lane, red, a = c["S"], c["tid"], c["lane"], c["red"], c["args"]
+    xrow = klen + gemv.LDS_PAD
+    words = s * klen // 8
+    n = (words + THREADS - 1) // THREADS
+    es, gs, rvs, wvs = [], [], [], []
+    for i in range_constexpr(n):
+        e = fx.min(tid + THREADS * i, words - 1)
+        t = e // (klen // 8)
+        kk = e % (klen // 8) * 8
+        g = (t * H + k0 + kk) // 2
+        es.append(e)
+        gs.append(g)
+        # The residual and the norm weights do not depend on the norm
+        # tasks, so their loads go out before the poll.
+        rvs.append(
+            fx.Vector(bo.buffer_load(rsrc(a["residual"]), g, vec_width=4, dtype=T.i32))
+        )
+        wvs.append(
+            fx.Vector(
+                bo.buffer_load(
+                    rsrc(a["ln_w"]), (k0 + kk) // 2, vec_width=4, dtype=T.i32
+                )
+            )
+        )
+    passes = token_passes(s)
+    mts = [fx.min(tid // 64 + WAVES * p, s - 1) for p in range(passes)]
+    specs = [(c["msq"], lane * s + mt, 1) for mt in mts]
+    for g in gs:
+        specs += [(c["xar"], g, 2), (c["xar"], g + 2, 2)]
+    got = c["poll"](specs, batch=len(specs))
+    for p in range_constexpr(passes):
+        t = tid // 64 + WAVES * p
+        if t < s:
+            fx.ptr_store(f32_of(got[p][0]), red + (t * 64 + lane))
+    gpu.barrier()
+    if tid < s:
+        tot = fx.ptr_load(red + tid * 64)
+        for q in range_constexpr(1, NRED):
+            tot = tot + fx.ptr_load(red + (tid * 64 + q))
+        r = hw_rsq(tot * fx.Float32(1.0 / H) + fx.Float32(c["eps"]))
+        fx.ptr_store(r, c["rs"] + tid)
+    gpu.barrier()
+    for i in range_constexpr(n):
+        e = es[i]
+        t = e // (klen // 8)
+        kk = e % (klen // 8) * 8
+        av = [
+            got[passes + 2 * i][0],
+            got[passes + 2 * i][1],
+            got[passes + 1 + 2 * i][0],
+            got[passes + 1 + 2 * i][1],
+        ]
+        ys = _x_norm(c, t, (av, rvs[i], wvs[i]))
         if tid + THREADS * i < words:
             fx.ptr_store(
                 fx.Vector.from_elements(ys, fx.Int32), c["xl"] + (t * xrow + kk) // 2

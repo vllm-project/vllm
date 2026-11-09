@@ -18,6 +18,7 @@ from vllm.models.qwen3_5.amd.specialized_decode.runtime.guards import (
     o_proj,
     routed_experts,
 )
+from vllm.models.qwen3_5.amd.specialized_decode.runtime.mxfp6 import fp6_copy
 from vllm.platforms import current_platform
 
 
@@ -76,14 +77,19 @@ class Launcher:
         s = h.size(0)
         core = h.new_empty(s, L.CORE)
         res_out = torch.empty_like(h)
+        fp6 = fp6_copy(a.in_proj_qkvz)
+        if fp6 is not None:
+            w_qkvz, w_qkvzs = fp6
+        else:
+            w_qkvz, w_qkvzs = a.in_proj_qkvz.weight, a.in_proj_qkvz.weight_scale
         blocks.gdn_block(
             self.gdn_key(layer, s, residual is None),
             hidden=h,
             residual=residual,
             res_out=res_out,
             ln_w=layer.input_layernorm.weight,
-            w_qkvz=a.in_proj_qkvz.weight,
-            w_qkvzs=a.in_proj_qkvz.weight_scale,
+            w_qkvz=w_qkvz,
+            w_qkvzs=w_qkvzs,
             w_ba=a.in_proj_ba.weight,
             conv_w=a.conv1d.weight,
             conv_state=conv_state,
@@ -111,13 +117,18 @@ class Launcher:
         key = self.layer_key(layer, core.size(0))
         out = torch.empty_like(residual)
         res_out = torch.empty_like(residual)
+        fp6 = fp6_copy(o)
+        if fp6 is not None:
+            w_o, w_os = fp6
+        else:
+            w_o, w_os = o.weight, o.weight_scale if key.oq else None
         blocks.layer_block(
             key,
             core=core,
             gate=gate,
             residual=residual,
-            w_o=o.weight,
-            w_os=o.weight_scale if key.oq else None,
+            w_o=w_o,
+            w_os=w_os,
             ln_w=layer.post_attention_layernorm.weight,
             w_gate=mlp.gate.weight,
             w_sg=mlp.shared_expert_gate.weight,
@@ -140,12 +151,14 @@ class Launcher:
     # the build keys, also what ``SpecializedDecode`` compiles at build
     def gdn_key(self, layer, s: int, first: bool) -> blocks.GdnBuild:
         a = layer.linear_attn
+        q6 = fp6_copy(a.in_proj_qkvz) is not None
         return blocks.GdnBuild(
             tokens=s,
             first=first,
             eps=layer.input_layernorm.variance_epsilon,
             norm_eps=a.norm.eps,
-            shuffled=bool(mxfp4_shuffled(a.in_proj_qkvz)),
+            shuffled=q6 or bool(mxfp4_shuffled(a.in_proj_qkvz)),
+            q6=q6,
         )
 
     def layer_key(self, layer, s: int) -> blocks.LayerBuild:
@@ -156,6 +169,7 @@ class Launcher:
             oq=shuffled is not None,
             og=layer.layer_type != "linear_attention",
             shuffled=shuffled is not False,
+            o6=fp6_copy(o_proj(layer)) is not None,
         )
 
 

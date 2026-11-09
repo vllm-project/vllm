@@ -125,10 +125,13 @@ class GdnBuild:
     eps: float = 1e-6  # input_layernorm
     norm_eps: float = 1e-6  # the gated norm
     shuffled: bool = True  # in_proj_qkvz in the ASM FP4 GEMM layout, else Triton's
+    # in_proj_qkvz in MXFP6 E2M3, in the layout of runtime.mxfp6.fp6_pack,
+    # multiplied with the bf16 x rows (W6A16). x is not quantized.
+    q6: bool = False
 
     @property
     def xq(self) -> bool:
-        return self.tokens >= GDN_XQ_MIN
+        return not self.q6 and self.tokens >= GDN_XQ_MIN
 
     @property
     def local(self) -> bool:
@@ -142,6 +145,9 @@ class LayerBuild:
     oq: bool = True  # out_proj / o_proj MXFP4
     og: bool = False  # o_proj's input is core x sigmoid(gate) (full attention)
     shuffled: bool = True  # with oq: the ASM FP4 GEMM layout, else Triton's
+    # out_proj / o_proj in MXFP6 E2M3 (fp6_pack's layout and scales),
+    # multiplied with the bf16 core rows (W6A16). It takes the place of oq.
+    o6: bool = False
 
     @property
     def u1(self) -> bool:
@@ -259,7 +265,7 @@ def gdn_scratch_layout(key: GdnBuild) -> dict:
     return _xq_layout(lay, key)
 
 
-LAYER_REGIONS = ("msq", "xqf", "rpart", "sgate", "route", "inter")
+LAYER_REGIONS = ("msq", "msq2", "xar", "xqf", "rpart", "sgate", "route", "inter")
 
 
 def layer_scratch_layout(key: LayerBuild) -> dict:
@@ -269,6 +275,12 @@ def layer_scratch_layout(key: LayerBuild) -> dict:
     lay = pair_layout(
         {
             "msq": NRED * s,
+            # the norm tasks' sums of squares again, after their xbuf stores
+            # are drained, for the consumers that read xbuf
+            "msq2": NRED * s,
+            # the bf16 AR sums as tagged pairs, a pair a word of xbuf, for
+            # the router tasks
+            "xar": s * H // 2,
             "xqf": NRED,
             "rpart": R_TASKS * s * ROWS,
             "sgate": s,
@@ -334,7 +346,13 @@ _GDN: dict = {}
 
 
 def qkvz_loads(c, rg, live=None):
+    """An fp4 (``q6``: fp6) in_proj_qkvz task's (rg < 288) operands for this
+    wave."""
     a = c["args"]
+    if const_expr(c.get("q6", False)):
+        return moe.fp6_gemv_loads(
+            c["lane"], c["wave"], a["w_qkvz"], a["w_qkvzs"], rg, H
+        )
     return moe.fp4_gemv_loads(
         c["lane"],
         c["wave"],
@@ -350,14 +368,33 @@ def qkvz_loads(c, rg, live=None):
 
 @traced
 def stage_qkvz(c, rg, ops):
-    """in_proj_qkvz rows 16 rg .. on the x rows' MXFP4 codes -> bf16 PROJ."""
-    s, tid, lane, wave = c["S"], c["tid"], c["lane"], c["wave"]
-    moe.put_acc(c, moe.fp4q_gemv(lane, wave, c["xl"], H, s, rg, ops, c["shuffled"]))
-    if tid < ROWS * s:
+    """in_proj_qkvz rows 16 rg .. on the x rows' MXFP4 codes (with ``q6``: an
+    MXFP6 task on the bf16 x rows) -> bf16 PROJ."""
+    lane, wave = c["lane"], c["wave"]
+    if const_expr(c.get("q6", False)):
+        xrow = H + gemv.LDS_PAD
+        moe.tiled(
+            c,
+            lambda t0, n: moe.fp6_gemv(
+                lane, wave, moe.rows_at(c["xl"], xrow, t0), xrow, H, n, ops
+            ),
+            lambda t0, n: _qkvz_out(c, rg, t0, n),
+        )
+        return
+    moe.put_acc(
+        c, moe.fp4q_gemv(lane, wave, c["xl"], H, c["S"], rg, ops, c["shuffled"])
+    )
+    _qkvz_out(c, rg, 0, c["S"])
+
+
+@traced
+def _qkvz_out(c, rg, t0, n):
+    tid = c["tid"]
+    if tid < ROWS * n:
         r = tid % ROWS
         j = tid // ROWS
         v = bf16_round(row_sum(c["red"], r, j))
-        c["put"](c["proj"], j * L.QKVZ + rg * ROWS + r, v)
+        c["put"](c["proj"], moe.tok(t0, j) * L.QKVZ + rg * ROWS + r, v)
     gpu.barrier()
 
 
@@ -366,12 +403,18 @@ def build_gdn(key: GdnBuild):
         return _GDN[key]
     s = key.tokens
     need(1 <= s <= MAXT, f"{s} rows, the kernels take 1..{MAXT}")
+    need(
+        not key.q6 or s <= L.Q6_MAX,
+        f"q6 holds the bf16 x rows in LDS, {L.Q6_MAX} at most",
+    )
     scr = gdn_scratch_layout(key)
     nr = -(-s * GDN_TASKS // BLOCKS)
 
+    xw = s * (H + gemv.LDS_PAD) // 2 if key.q6 else _xwords(s)
+
     @fx.struct
     class XLds:
-        xl: fx.Array[fx.Int32, _xwords(s), 16]
+        xl: fx.Array[fx.Int32, xw, 16]
 
     @fx.struct
     class GdnLds:
@@ -391,7 +434,7 @@ def build_gdn(key: GdnBuild):
         rs: fx.Array[fx.Float32, 16, 16]
 
     keyed = key_tuple(key, source_digest())
-    name = f"qwen38_sd_gdn_s{s}_f{int(key.first)}_w{int(key.shuffled)}"
+    name = f"qwen38_sd_gdn_s{s}_f{int(key.first)}_w{int(key.shuffled)}_q{int(key.q6)}"
 
     @flyc.kernel(name=name, known_block_size=[THREADS, 1, 1])
     def kgdn(
@@ -432,6 +475,7 @@ def build_gdn(key: GdnBuild):
             "S": s,
             "gdn": L.GDN,
             "shuffled": key.shuffled,
+            "q6": key.q6,
             "ba_of": lambda c, t, h: G.ba_sums(c, t, h, BA_PARTS),
             "ba_parts": BA_PARTS,
             "z_gate": G.silu,
@@ -478,34 +522,61 @@ def build_gdn(key: GdnBuild):
         if key.xq:
             c["xq"] = scratch + fx.Int64(scr["xq"][0])
         src = (hidden, 0, None if key.first else residual)
-        rg = BLOCKS - 1 - bid
-        two = bid >= QQ0
-        qops = qkvz_loads(c, rg)
-        qops2 = qkvz_loads(c, fx.min(2 * BLOCKS - 1 - bid, QTASKS - 1), two)
-        is_ba = bid < BA_TASKS
-        bops = G.ba_loads(c, fx.min(bid, BA_TASKS - 1), BA_PARTS, BA_K)
         if bid < NRED:
             N.stage_front(c, bid, src, not key.local)
-        if const_expr(key.xq):
-            if bid < NRED:
-                N.load_rstd(c)
-                N.stage_xq(c, bid, src, key.shuffled)
-            if is_ba:
-                N.x_rows_to_lds(c, src, BA_K, bid % BA_PARTS * BA_K)
-                G.stage_ba(c, bid, bops, BA_PARTS, BA_K, sliced=True)
-            N.xq_to_lds(c)
+        if const_expr(key.q6):
+            # With q6, in_proj_qkvz multiplies the bf16 rows in LDS, so x is
+            # not quantized and stage_ba reads the same full rows.
+            def load_x():
+                if const_expr(key.local):
+                    N.local_rstd(c, src)
+                else:
+                    N.load_rstd(c)
+                N.x_rows_to_lds(c, src, H, 0)
+
+            rg = BLOCKS - 1 - bid
+            qops = qkvz_loads(c, rg)
+            if bid >= QQ0:
+                rg2 = 2 * BLOCKS - 1 - bid
+                qops2 = qkvz_loads(c, rg2)
+                load_x()
+                stage_qkvz(c, rg, qops)
+                stage_qkvz(c, rg2, qops2)
+            if bid < BA_TASKS:
+                bops = G.ba_loads(c, bid, BA_PARTS, BA_K)
+                load_x()
+                G.stage_ba(c, bid, bops, BA_PARTS, BA_K)
+                stage_qkvz(c, rg, qops)
+            if (bid >= BA_TASKS) & (bid < QQ0):
+                load_x()
+                stage_qkvz(c, rg, qops)
         else:
-            if const_expr(key.local):
-                N.local_rstd(c, src)
+            rg = BLOCKS - 1 - bid
+            two = bid >= QQ0
+            qops = qkvz_loads(c, rg)
+            qops2 = qkvz_loads(c, fx.min(2 * BLOCKS - 1 - bid, QTASKS - 1), two)
+            is_ba = bid < BA_TASKS
+            bops = G.ba_loads(c, fx.min(bid, BA_TASKS - 1), BA_PARTS, BA_K)
+            if const_expr(key.xq):
+                if bid < NRED:
+                    N.load_rstd(c)
+                    N.stage_xq(c, bid, src, key.shuffled)
+                if is_ba:
+                    N.x_rows_to_lds(c, src, BA_K, bid % BA_PARTS * BA_K)
+                    G.stage_ba(c, bid, bops, BA_PARTS, BA_K, sliced=True)
+                N.xq_to_lds(c)
             else:
-                N.load_rstd(c)
-            if is_ba:
-                N.x_rows_to_lds(c, src, BA_K, bid % BA_PARTS * BA_K)
-                G.stage_ba(c, bid, bops, BA_PARTS, BA_K, sliced=True)
-            N.x_fp4_to_lds(c, src, key.shuffled)
-        stage_qkvz(c, rg, qops)
-        if two:
-            stage_qkvz(c, 2 * BLOCKS - 1 - bid, qops2)
+                if const_expr(key.local):
+                    N.local_rstd(c, src)
+                else:
+                    N.load_rstd(c)
+                if is_ba:
+                    N.x_rows_to_lds(c, src, BA_K, bid % BA_PARTS * BA_K)
+                    G.stage_ba(c, bid, bops, BA_PARTS, BA_K, sliced=True)
+                N.x_fp4_to_lds(c, src, key.shuffled)
+            stage_qkvz(c, rg, qops)
+            if two:
+                stage_qkvz(c, 2 * BLOCKS - 1 - bid, qops2)
         gdn_tasks(c, nr)
 
     @flyc.jit
@@ -618,16 +689,26 @@ def gdn_block(
     need(res_out.shape == rows and res_out.dtype == bf, "res_out: bf16 [S, H]")
     need(ln_w.dtype == bf and ln_w.numel() == H, "input_layernorm weight")
     need(core.shape == (s, L.CORE) and core.dtype == bf, f"core: bf16 [S, {L.CORE}]")
-    need(
-        w_qkvz.shape == (L.QKVZ, H // 2)
-        and w_qkvz.dtype in (torch.uint8, torch.float4_e2m1fn_x2),
-        f"in_proj_qkvz: fp4x2 [{L.QKVZ}, {H // 2}]",
-    )
-    need(
-        w_qkvzs.shape == fp4_scale_shape(L.QKVZ, H, key.shuffled)
-        and w_qkvzs.element_size() == 1,
-        "in_proj_qkvz scales: e8m0, one a 32-block, in the weight's layout",
-    )
+    if key.q6:
+        need(
+            w_qkvz.dtype == torch.uint8 and w_qkvz.numel() == L.QKVZ * H * 3 // 4,
+            "in_proj_qkvz: fp6_pack's MXFP6 weight, 4608 x 8192 x 3/4 bytes",
+        )
+        need(
+            w_qkvzs.numel() == L.QKVZ * H // 32 and w_qkvzs.element_size() == 1,
+            "in_proj_qkvz scales: e8m0, one a 32-block",
+        )
+    else:
+        need(
+            w_qkvz.shape == (L.QKVZ, H // 2)
+            and w_qkvz.dtype in (torch.uint8, torch.float4_e2m1fn_x2),
+            f"in_proj_qkvz: fp4x2 [{L.QKVZ}, {H // 2}]",
+        )
+        need(
+            w_qkvzs.shape == fp4_scale_shape(L.QKVZ, H, key.shuffled)
+            and w_qkvzs.element_size() == 1,
+            "in_proj_qkvz scales: e8m0, one a 32-block, in the weight's layout",
+        )
     need(
         w_ba.shape == (L.BA, H) and w_ba.dtype == bf, f"in_proj_ba: bf16 [{L.BA}, {H}]"
     )
@@ -696,12 +777,12 @@ def router_loads(c, i, q):
 
 
 @traced
-def stage_router(c, i, q, ops, src):
-    """Router task (i, q) on x's K quarter q (``rs`` loaded). Parts q > 0
-    publish fp32 partials; part 0 adds them in part order, rounds to bf16
+def stage_router(c, i, q, ops):
+    """Router task (i, q) on x's K quarter q (``x_tagged_to_lds``). Parts q >
+    0 publish fp32 partials; part 0 adds them in part order, rounds to bf16
     (GateLinear's output) and puts the logits to every rank's RLOG."""
     s, lane, wave = c["S"], c["lane"], c["wave"]
-    N.x_rows_to_lds(c, src, R_K, q * R_K)
+    N.x_tagged_to_lds(c, R_K, q * R_K)
     moe.put_acc(c, gemv.mfmas(lane, wave, c["xl"], R_K + gemv.LDS_PAD, R_K, s, ops))
 
     def out(t, r, vs):
@@ -749,6 +830,7 @@ def build_layer(key: LayerBuild):
         return _LAYER[key]
     s = key.tokens
     need(1 <= s <= MAXT, f"{s} rows, the kernels take 1..{MAXT}")
+    need(not (key.oq and key.o6), "o6 takes the place of oq")
     scr = layer_scratch_layout(key)
     max_u = s * TOPK + 1  # distinct experts the step can touch + the fused shared
     d = L.MOE
@@ -781,7 +863,10 @@ def build_layer(key: LayerBuild):
         rs: fx.Array[fx.Float32, 16, 16]
 
     keyed = key_tuple(key, source_digest())
-    name = f"qwen38_sd_layer_s{s}_o{int(key.oq)}_a{int(key.og)}_w{int(key.shuffled)}"
+    name = (
+        f"qwen38_sd_layer_s{s}_o{int(key.oq)}{int(key.o6)}"
+        f"_a{int(key.og)}_w{int(key.shuffled)}"
+    )
 
     @flyc.kernel(name=name, known_block_size=[THREADS, 1, 1])
     def klayer(
@@ -840,6 +925,7 @@ def build_layer(key: LayerBuild):
             "rank": rank,
             "eps": key.eps,
             "oq": key.oq,
+            "o6": key.o6,
             "og": key.og,
             "shuffled": key.shuffled,
             "u1": key.u1,
@@ -902,8 +988,7 @@ def build_layer(key: LayerBuild):
             # task waits for the o_proj of every CTA. The weights still land
             # before x does.
             rops = router_loads(c, ri // R_PARTS, ri % R_PARTS)
-            N.load_rstd(c)
-            stage_router(c, ri // R_PARTS, ri % R_PARTS, rops, src)
+            stage_router(c, ri // R_PARTS, ri % R_PARTS, rops)
         if ~is_r:
             moe.run_oproj(
                 c, [moe.o_loads(c, bid + BLOCKS * j, ck) for j in range(2)], ck
@@ -917,7 +1002,10 @@ def build_layer(key: LayerBuild):
             N.load_rstd(c)
             N.stage_sgate(c, bid - RT0, src)
         # ---- the routed experts, then down: two row groups a CTA
-        missing = ~(is_r | is_g)
+        # The router CTAs built their x slice from the tagged XAR and MSQ
+        # pairs, which do not show that xbuf is complete. So they poll MSQ2
+        # here like every other CTA that has no rstd yet.
+        missing = ~is_g
         nu = moe.run_ug(c, key.ps, PS0, lambda: _x_ug(c, src, key.xq, missing))
         dops = moe.down_loads(c, bid, nu, fx.min(c["wave"], nu - 1))
         if const_expr(key.split):
@@ -1059,6 +1147,17 @@ def layer_block(
             and w_os.element_size() == 1,
             f"o_proj: fp4x2 [{H}, {k // 2}] + e8m0 scales in its layout",
         )
+    elif key.o6:
+        need(
+            w_o.dtype == torch.uint8 and w_o.numel() == H * k * 3 // 4,
+            "o_proj: fp6_pack's MXFP6 weight, 8192 x 2048 x 3/4 bytes",
+        )
+        need(
+            w_os is not None
+            and w_os.numel() == H * k // 32
+            and w_os.element_size() == 1,
+            "o_proj scales: e8m0, one a 32-block",
+        )
     else:
         need(w_o.shape == (H, k) and w_o.dtype == bf, f"o_proj: bf16 [{H}, {k}]")
     need(w_gate.shape == (E, H) and w_sg.numel() == H, "router shape")
@@ -1089,7 +1188,7 @@ def layer_block(
         "gate": 0 if gate is None else gate.data_ptr(),
         "residual": residual.data_ptr(),
         "w_o": w_o.data_ptr(),
-        "w_os": w_os.data_ptr() if key.oq else 0,
+        "w_os": w_os.data_ptr() if (key.oq or key.o6) and w_os is not None else 0,
         "ln_w": ln_w.data_ptr(),
         "w_gate": w_gate.data_ptr(),
         "w_sg": w_sg.data_ptr(),

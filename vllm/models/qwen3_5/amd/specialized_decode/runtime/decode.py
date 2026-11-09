@@ -105,8 +105,14 @@ class SpecializedDecode:
 
     def __init__(self, model, config: DecodeConfig):
         tp = get_tp_group()
-        agree(model_reasons(model), tp.cpu_group, "the loaded model")
+        agree(model_reasons(model, config.fp6), tp.cpu_group, "the loaded model")
         self.model, self.config = model, config
+        if config.fp6:
+            from vllm.models.qwen3_5.amd.specialized_decode.runtime import mxfp6
+
+            # Before any kernel compiles or a graph is captured: the prefill
+            # GEMMs then multiply the same MXFP6 values that the kernels read.
+            mxfp6.prepare(model)
         self.gdn_prefix = next(
             ly.linear_attn.prefix
             for ly in model.layers

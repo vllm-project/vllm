@@ -15,6 +15,9 @@ from vllm.models.qwen3_5.amd.specialized_decode.mono import mx_layout as QL
 BLOCKS = 256  # CTAs a launch, all resident at once: one a CU
 # the rows a launch serves: a step of more rows runs stock
 MAX_TOKENS = 16
+# the rows up to which the MXFP6 builds (q6, the attention front) hold the
+# bf16 x rows in LDS: 8 rows of 8192 are 131 KB of the CU's 160 KB
+Q6_MAX = 8
 ROWS = QL.ROWS  # a weight row group
 TP = 8
 

@@ -3,6 +3,12 @@
 """Qwen3.8 (2.4T-A95B) specialized decode on MI355X (TP8), enabled by
 ``--monokernel`` (``KernelConfig.monokernel``).
 
+``--additional-config '{"monokernel_projections": "mxfp6"}'`` selects the
+MXFP6 E2M3 projections (``runtime/mxfp6.py``): the GDN in_proj_qkvz and every
+out_proj and o_proj, rounded to MXFP6 and packed for the kernels after the
+weights load. They need those projections in bf16, and the kernels then run
+steps of at most ``layout.Q6_MAX`` rows.
+
 ``specialized_decode_config`` runs in the model's ``__init__``, before the
 weights load. It returns None for the stock decode, and raises with every
 reason from ``unsupported`` when ``--monokernel`` is set for a deployment the
@@ -19,12 +25,18 @@ logger = init_logger(__name__)
 
 NAME = "Qwen3.8 specialized decode (--monokernel)"
 ARCHITECTURE = "Qwen3_5MoeForCausalLM"
+# The additional_config key that selects the projections' format, and its
+# values: the formats vLLM loaded (online MXFP4 or bf16), or MXFP6 copies.
+PROJECTIONS_KEY = "monokernel_projections"
+PROJECTIONS = ("auto", "mxfp6")
 
 
 @dataclass(frozen=True)
 class DecodeConfig:
     # rows a launch serves; a wider step runs vLLM's decode
     max_tokens: int = L.MAX_TOKENS
+    # The projections run in MXFP6 E2M3 (``runtime/mxfp6.py``).
+    fp6: bool = False
 
     @property
     def widths(self) -> tuple[int, ...]:
@@ -51,7 +63,18 @@ def specialized_decode_config(vllm_config) -> DecodeConfig | None:
             "use FULL decode graphs",
             NAME,
         )
+    if projections(vllm_config) == "mxfp6":
+        return DecodeConfig(max_tokens=L.Q6_MAX, fp6=True)
     return DecodeConfig()
+
+
+def projections(vllm_config) -> str:
+    """The value of ``monokernel_projections`` in additional_config, "auto"
+    when it is not set."""
+    extra = getattr(vllm_config, "additional_config", None)
+    if not isinstance(extra, dict):
+        return "auto"
+    return extra.get(PROJECTIONS_KEY, "auto")
 
 
 def unsupported(vllm_config) -> list[str]:
@@ -144,6 +167,11 @@ def unsupported(vllm_config) -> list[str]:
         ),
     )
     reasons = [why for bad, why in checks if bad]
+    if projections(vllm_config) not in PROJECTIONS:
+        reasons.append(
+            f"{PROJECTIONS_KEY} {projections(vllm_config)!r} (one of "
+            f"{', '.join(PROJECTIONS)})"
+        )
     text = mc.hf_text_config
     shapes = text_shapes(text)
     if shapes != L.SHAPES:
