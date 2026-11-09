@@ -72,15 +72,6 @@ ROCM_AITER_SUPPORTED_INT8_MODEL = [
     "nm-testing/tinyllama-oneshot-w8a8-channel-dynamic-token-v2",
 ]
 
-# TritonInt8ScaledMMLinearKernel only supports symmetric quantization.
-ROCM_TRITON_SCALED_MM_SUPPORTED_INT8_MODEL = [
-    "nm-testing/tinyllama-oneshot-w8w8-test-static-shape-change",
-    "nm-testing/tinyllama-oneshot-w8-channel-a8-tensor",
-    "neuralmagic/Llama-3.2-1B-quantized.w8a8",
-    "nm-testing/tinyllama-oneshot-w8a8-dynamic-token-v2",
-    "nm-testing/tinyllama-oneshot-w8a8-channel-dynamic-token-v2",
-]
-
 
 @pytest.fixture(scope="function", autouse=True)
 def enable_pickle(monkeypatch):
@@ -152,12 +143,6 @@ def test_compressed_tensors_accepts_preordered_weights(actorder):
 def test_compressed_tensors_w8a8_static_setup(model_args, dist_init, workspace_init):
     model_path, strategy, quant_type, shape_0, is_symmetric = model_args
 
-    if (
-        current_platform.is_rocm()
-        and model_path not in ROCM_TRITON_SCALED_MM_SUPPORTED_INT8_MODEL
-    ):
-        pytest.skip(f"Skip model {model_path} as it is not supported on ROCm.")
-
     model, _ = load_model_without_vllm_runner(model_path)
     layer = model.model.layers[0]
 
@@ -220,12 +205,6 @@ def test_compressed_tensors_w8a8_logprobs(
     use_aiter,
     monkeypatch,
 ):
-    if (
-        current_platform.is_rocm()
-        and model_path not in ROCM_TRITON_SCALED_MM_SUPPORTED_INT8_MODEL
-    ):
-        pytest.skip(f"Skip model {model_path} as it is not supported on ROCm.")
-
     if use_aiter:
         if model_path not in ROCM_AITER_SUPPORTED_INT8_MODEL:
             pytest.skip(f"Skip model {model_path} as it is not support by aiter.")
@@ -287,12 +266,6 @@ def test_compressed_tensors_w8a8_dynamic_per_token(
 ):
     model_path, strategy = model_args
 
-    if (
-        current_platform.is_rocm()
-        and model_path not in ROCM_TRITON_SCALED_MM_SUPPORTED_INT8_MODEL
-    ):
-        pytest.skip(f"Skip model {model_path} as it is not supported on ROCm.")
-
     if use_aiter:
         if model_path not in ROCM_AITER_SUPPORTED_INT8_MODEL:
             pytest.skip(f"Skip model {model_path} as it is not support by aiter.")
@@ -321,7 +294,8 @@ def test_compressed_tensors_w8a8_dynamic_per_token(
     ],
 )
 @pytest.mark.skipif(
-    not current_platform.is_cuda(), reason="The tests are skipped on non-CUDA platform."
+    not current_platform.is_cuda_alike(),
+    reason="The tests are skipped on non-CUDA/ROCm platform.",
 )
 def test_compressed_tensors_wNa16(vllm_runner, wNa16_args):
     model, strategy, group, pack_factor, symmetric = wNa16_args
@@ -407,7 +381,8 @@ def test_compressed_tensors_w8a8_fp8_moe_forwards_swiglu_params():
 
 
 @pytest.mark.skipif(
-    not current_platform.is_cuda(), reason="This test is skipped on non-CUDA platform."
+    not current_platform.is_cuda_alike(),
+    reason="This test is skipped on non-CUDA/ROCm platform.",
 )
 def test_compressed_tensors_kv_cache_fp8_per_tensor(vllm_runner):
     model_path = "nm-testing/TinyLlama-1.1B-Chat-v1.0-kvcache-fp8-tensor"
@@ -502,7 +477,8 @@ def test_compressed_tensors_w4a8_fp8(vllm_runner, args):
 
 
 @pytest.mark.skipif(
-    not current_platform.is_cuda(), reason="This test is skipped on non-CUDA platform."
+    not current_platform.is_cuda_alike(),
+    reason="This test is skipped on non-CUDA/ROCm platform.",
 )
 @pytest.mark.parametrize(
     "model,prompt,exp_perplexity",
@@ -512,15 +488,21 @@ def test_compressed_tensors_w4a8_fp8(vllm_runner, args):
             "Flat is better than nested.\nSparse is better than dense.",
             150.0,
         ),
-        (
+        pytest.param(
             "nm-testing/Llama-3.2-1B-Instruct-quip-w4a16",
             "Flat is better than nested.\nSparse is better than dense.",
             150.0,
+            marks=pytest.mark.skipif(
+                not current_platform.is_cuda(), reason="hadacore is CUDA-only"
+            ),
         ),
-        (
+        pytest.param(
             "nm-testing/Llama-3.2-1B-Instruct-quipv16-nvfp4",
             "Flat is better than nested.\nSparse is better than dense.",
             150.0,
+            marks=pytest.mark.skipif(
+                not current_platform.is_cuda(), reason="hadacore is CUDA-only"
+            ),
         ),
     ],
 )
@@ -574,8 +556,8 @@ def test_compressed_tensors_fp8_block_enabled(
 
 
 @pytest.mark.skipif(
-    not current_platform.is_cuda(),
-    reason="This test is not for non-CUDA platforms",
+    not current_platform.is_cuda_alike(),
+    reason="This test is not for non-CUDA/ROCm platforms",
 )
 def test_compressed_tensors_moe_ignore_with_model(vllm_runner):
     """Integration test for MoE layer ignore functionality with a real model.
@@ -924,7 +906,8 @@ def test_scheme_selection(
 
 
 @pytest.mark.skipif(
-    not current_platform.is_cuda() or not current_platform.has_device_capability(75),
+    not current_platform.is_cuda_alike()
+    or not current_platform.has_device_capability(75),
     reason="MXFP8 requires Turing (sm_75+) or newer.",
 )
 def test_compressed_tensors_mxfp8_moe_setup(vllm_runner):
@@ -1015,7 +998,8 @@ def test_compressed_tensors_mxfp6(vllm_runner):
 
 
 @pytest.mark.skipif(
-    not current_platform.is_cuda() or not current_platform.has_device_capability(80),
+    not current_platform.is_cuda_alike()
+    or not current_platform.has_device_capability(80),
     reason="MXFP4 requires ampere or newer",
 )
 def test_compressed_tensors_mxfp4(vllm_runner):

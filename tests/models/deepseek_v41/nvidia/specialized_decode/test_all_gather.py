@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The specialized decode's TP all-gather (``LamportAllGather``) at TP4.
+"""The specialized decode's TP all-gather (`LamportAllGather`) at TP4.
 
-* ``accepts`` by size: 16-byte multiples up to the capacity.
+* `accepts` by size: 16-byte multiples up to the capacity.
 * Eager gathers of int32, BF16 and FP32 tensors whose sizes grow and shrink
   from call to call (1 pack to the full capacity), one rank late each call,
   bitwise against NCCL.
@@ -16,9 +16,9 @@
 
 Needs four SM100-family GPUs with NVLink multicast; about a minute. For a
 stress run, run this file as a module
-(``python -m tests.models.deepseek_v41.nvidia.specialized_decode.test_all_gather``)
-with ``--replays 2000000``. With ``--custom-all-gather`` it replays the same
-graphs on vLLM's custom all-gather (``CustomAllreduce.custom_all_gather``, the
+(`python -m tests.models.deepseek_v41.nvidia.specialized_decode.test_all_gather`)
+with `--replays 2000000`. With `--custom-all-gather` it replays the same
+graphs on vLLM's custom all-gather (`CustomAllreduce.custom_all_gather`, the
 MNNVL Lamport kernel) instead and only counts the mismatched words: that
 kernel never waits for a rank's own multicast copy, and words of an earlier
 call can reach a later one.
@@ -124,7 +124,7 @@ def _pattern(rank: int, kind: int, words: int) -> torch.Tensor:
 
 def _check_replays(all_gather, rank, replays, stop=True):
     """Gather graphs replayed in a random order; returns the mismatch count,
-    after the first 1000 replays with a mismatch if ``stop``."""
+    after the first 1000 replays with a mismatch if `stop`."""
     from vllm.distributed.parallel_state import graph_capture
 
     counter = torch.zeros(1, dtype=torch.int32, device="cuda")
@@ -225,7 +225,7 @@ def _worker(rank: int, port: int, replays: int, skip_path: str, custom: bool) ->
 
 def run(replays: int, custom: bool = False) -> str | None:
     """Run the checks on four GPUs (only the replays on the custom all-gather
-    if ``custom``); returns why they were skipped, if so."""
+    if `custom`); returns why they were skipped, if so."""
     from vllm.utils.network_utils import get_open_port
 
     with tempfile.TemporaryDirectory() as tmp:

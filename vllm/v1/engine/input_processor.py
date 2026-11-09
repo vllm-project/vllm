@@ -3,7 +3,6 @@
 
 import time
 from collections.abc import Callable, Mapping
-from functools import partial
 from typing import Any, Literal
 
 import vllm.envs as envs
@@ -94,30 +93,23 @@ class InputProcessor:
         self,
     ) -> Callable[[SamplingParams], None]:
         """Load the custom logits processor classes and return the per-request
-        params validator for the active model runner."""
+        params validator."""
         custom_logitsprocs = self.model_config.logits_processors
-        if self.vllm_config.use_v2_model_runner:
-            if self.model_config.runner_type == "pooling" and not custom_logitsprocs:
-                return lambda _: None
+        if self.model_config.runner_type == "pooling" and not custom_logitsprocs:
+            return lambda _: None
 
-            from vllm.v1.worker.gpu.sample.logits_processor import (
-                build_custom_logits_processors_params_validator,
-            )
-
-            return build_custom_logits_processors_params_validator(custom_logitsprocs)
-
-        from vllm.v1.sample.logits_processor import (
-            validate_logits_processors_parameters,
+        from vllm.v1.worker.gpu.sample.logits_processor import (
+            build_custom_logits_processors_params_validator,
         )
 
-        return partial(validate_logits_processors_parameters, custom_logitsprocs)
+        return build_custom_logits_processors_params_validator(custom_logitsprocs)
 
     def resolve_watermarking(self, params: SamplingParams | BeamSearchParams) -> bool:
         """Return whether watermarking will be applied to this request.
 
-        ``None`` and ``True`` request watermarking, while ``False`` opts out.
+        `None` and `True` request watermarking, while `False` opts out.
         If watermarking is unavailable or incompatible with the request, emit
-        a warning and return ``False``.
+        a warning and return `False`.
         """
         return self.vllm_config._check_supports_watermarking(params)
 
@@ -161,27 +153,14 @@ class InputProcessor:
                 self.tokenizer,
             )
             if (
-                params.prompt_logprob_start is not None
-                and not self.vllm_config.use_v2_model_runner
+                params.prompt_logprob_token_ids is not None
+                and self.vllm_config.cache_config.kv_sharing_fast_prefill
             ):
                 raise VLLMValidationError(
-                    "prompt_logprob_start requires the V2 model runner "
-                    "(VLLM_USE_V2_MODEL_RUNNER=1).",
-                    parameter="prompt_logprob_start",
+                    "prompt_logprob_token_ids is incorrect with "
+                    "--kv-sharing-fast-prefill; disable it for scoring.",
+                    parameter="prompt_logprob_token_ids",
                 )
-            if params.prompt_logprob_token_ids is not None:
-                if not self.vllm_config.use_v2_model_runner:
-                    raise VLLMValidationError(
-                        "prompt_logprob_token_ids requires the V2 model runner "
-                        "(VLLM_USE_V2_MODEL_RUNNER=1).",
-                        parameter="prompt_logprob_token_ids",
-                    )
-                if self.vllm_config.cache_config.kv_sharing_fast_prefill:
-                    raise VLLMValidationError(
-                        "prompt_logprob_token_ids is incorrect with "
-                        "--kv-sharing-fast-prefill; disable it for scoring.",
-                        parameter="prompt_logprob_token_ids",
-                    )
 
             self.validate_logits_processors_params(params)
 
@@ -333,7 +312,7 @@ class InputProcessor:
         accurately and avoids redundant processing on subsequent requests
         with the same images.
 
-        Uses ``get_and_update_item()`` with an empty prompt_updates list,
+        Uses `get_and_update_item()` with an empty prompt_updates list,
         since token expansion has already been handled externally.
         """
         cache = self.renderer.mm_processor_cache

@@ -34,7 +34,6 @@ from vllm.model_executor.warmup.flashinfer_sparse_mla_warmup import (
 from vllm.model_executor.warmup.kimi_k3_triton_warmup import (
     kimi_k3_triton_warmup,
 )
-from vllm.model_executor.warmup.mamba_triton_warmup import mamba_triton_warmup
 from vllm.model_executor.warmup.qwen4_exp_qsa_warmup import (
     qwen4_exp_qsa_triton_warmup,
 )
@@ -52,7 +51,7 @@ from vllm.utils.deep_gemm import is_deep_gemm_supported
 from vllm.utils.flashinfer import has_flashinfer
 
 if TYPE_CHECKING:
-    from vllm.v1.worker.gpu_model_runner import GPUModelRunner
+    from vllm.v1.worker.gpu.model_runner import GPUModelRunner
     from vllm.v1.worker.gpu_worker import Worker
 
 logger = init_logger(__name__)
@@ -71,11 +70,10 @@ def _warmup_flashinfer_attention(worker: "Worker") -> None:
         except NotImplementedError:
             return False
 
-    check = any if worker.use_v2_model_runner else all
     local_flashinfer_warmup = (
         not worker.model_runner.is_pooling_model
         and bool(worker.model_runner.attn_groups)
-        and check(
+        and any(
             _is_flashinfer_backend(group.backend)
             for groups in worker.model_runner.attn_groups
             for group in groups
@@ -90,12 +88,7 @@ def _warmup_flashinfer_attention(worker: "Worker") -> None:
         pp_group.cpu_all_reduce_(eligibility)
         eligible_pp_ranks = int(eligibility.item())
 
-    if worker.use_v2_model_runner:
-        should_warmup = eligible_pp_ranks > 0
-    else:
-        should_warmup = eligible_pp_ranks == pp_group.world_size
-
-    if should_warmup:
+    if eligible_pp_ranks > 0:
         logger.info_once("Warming up FlashInfer attention.")
         mixed_batch_attention_warmup(worker)
 
@@ -224,7 +217,7 @@ def _autotune_kimi_k3_kda_qkvg(model: torch.nn.Module) -> None:
 
 
 def _aiter_gemm_m_buckets(max_m: int) -> list[int]:
-    """One token count per AITER tuned-GEMM bucket up to ``max_m``.
+    """One token count per AITER tuned-GEMM bucket up to `max_m`.
 
     AITER pads M to 1, 2, 4 or 8 below 16, then to multiples of 16 / 32 / 64 /
     128 up to 256 / 1024 / 4096 / beyond, and builds each bucket's kernel on
@@ -269,22 +262,12 @@ def _rocm_aiter_gemm_warmup(worker: "Worker") -> None:
 def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
     from vllm.model_executor.warmup.step5_dsa_warmup import step5_dsa_warmup
 
-    if not worker.use_v2_model_runner:
-        # The KV-block zeroing kernel is driven by the scheduler's
-        # `new_block_ids_to_zero`, so no dummy run ever reaches it.
-        zeroer = getattr(worker.model_runner, "_kv_block_zeroer", None)
-        if zeroer is not None:
-            zeroer.warmup(worker.model_runner.kv_cache_config.num_blocks)
-
     enable_jit_warmup = worker.vllm_config.kernel_config.enable_jit_warmup
     if enable_jit_warmup:
         logger.info("JIT kernel warmup starting.")
         jit_warmup_start = time.perf_counter()
         try:
-            registry = (
-                worker.model_runner.jit_warmup_registry  # type: ignore[attr-defined]
-            )
-            registry.warmup()
+            worker.model_runner.jit_warmup_registry.warmup()
         except Exception:
             logger.exception(
                 "JIT kernel warmup failed after %.2fs.",
@@ -298,7 +281,6 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
 
     qwen_triton_warmup(worker.model_runner, worker.vllm_config.model_config)
     qwen_vl_triton_warmup(worker.model_runner)
-    mamba_triton_warmup(worker.model_runner)
     replayssm_lifecycle_warmup(worker.model_runner)
 
     compilation_config = worker.vllm_config.compilation_config
@@ -448,7 +430,7 @@ def _run_flashinfer_autotune_dummy_runs(
         # The drafter may use more tokens than this pass in the same dummy run.
         # Include its max M when building the autotune buckets.
         max_tuning_tokens = num_tokens
-        speculator = getattr(runner, "speculator", None)
+        speculator = runner.speculator
         if speculator is not None:
             num_query_per_req = speculator.num_query_per_req
             num_draft_reqs = min(
@@ -492,7 +474,7 @@ def _autotune_cache_fingerprint(path: Path) -> tuple[str, int] | None:
 
 
 def _all_ranks_have_matching_cache(path: Path, group) -> bool:
-    """True iff every rank in ``group`` has its own, mutually consistent file."""
+    """True iff every rank in `group` has its own, mutually consistent file."""
     fingerprint = _autotune_cache_fingerprint(path)
     if group.world_size == 1:
         return fingerprint is not None
@@ -541,7 +523,7 @@ def flashinfer_autotune(runner: "GPUModelRunner", *, skip_attn: bool = False) ->
     averaged over the tuning group so all its ranks select the same tactic.
 
     Legacy results are persisted per rank: FlashInfer keys MoE entries by tp/ep rank
-    (``MoERunner.get_cache_key_extras``), so one rank's file only hits on that
+    (`MoERunner.get_cache_key_extras`), so one rank's file only hits on that
     rank. A rank with a cache hit skips the per-tactic reduce the others block
     in, so ranks keep loaded configs only if every rank in the tuning group
     has a matching file and successfully loads it.

@@ -943,6 +943,7 @@ mod tests {
             sampling_mask: None,
             spec_decode_metrics: None,
             weight_versions: None,
+            routed_experts: None,
             timestamps: Default::default(),
         }
     }

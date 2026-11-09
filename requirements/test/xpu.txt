@@ -256,9 +256,6 @@ apache-tvm-ffi==0.1.13.post3 \
     --hash=sha256:f571b636af7ce906200dbd31402762eceff099013de17963a4a2d2ae9b05e400 \
     --hash=sha256:fbbab8aa62ba0afe996197267c3d7ff999c0747ba479b636589e52baf754f79e
     # via xgrammar
-arctic-inference==0.2.0 \
-    --hash=sha256:242755ae3662527dd842b4c3bd0c921e5a969e270daff0c9436b412505af4c4d
-    # via -r requirements/test/xpu.in
 astor==0.8.1 \
     --hash=sha256:070a54e890cefb5b3739d19f30f5a5ec840ffc9c50ffa7d23cc9fc1a38ebbfc5 \
     --hash=sha256:6a6effda93f4e1ce9f618779b2dd1d9d84f1e32812c23a29b3fff6fd7f63fa5e
@@ -1468,9 +1465,9 @@ fastavro==1.12.2 \
     --hash=sha256:f089f24225a28ddafa5cfad7c41cfa84db1a55f2d473370769a95c0e3bac60c9 \
     --hash=sha256:f604ba83498e209fff4c7ecc5063a39421dc538dace694bc592f9f338254f3dc
     # via cohere
-filelock==3.32.3 \
-    --hash=sha256:0ffa185a3540854c95caa7fa76b76cb219d907415e2c5dc9af25fd970563487f \
-    --hash=sha256:7f0ca4bcc0e181c60dbbd8aa9ab5b120ebb99e4e064e83636340056f833a1f09
+filelock==4.2.6 \
+    --hash=sha256:ee7af8ede36dcaf12e1016d9f7c3a63ecd5497d46f85dab21b8c779b8f944e97 \
+    --hash=sha256:fd7d4fca497bf3e3d0945a13261f8e684f2aef12ce7cf76aef26e13bf7388b88
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
@@ -1771,10 +1768,12 @@ gpt-oss==0.0.9 \
     --hash=sha256:4bbd174a6af2060179ab292505ec8e0f2505188628a6d102bd72690d06387f9c \
     --hash=sha256:f8cce0186e31752fb94ccbd61dcca5fd39603b6d22b9779656a7b20749a6330c
     # via -r requirements/test/xpu.in
-graphql-core==3.2.11 \
-    --hash=sha256:0b3e35ff41e9adba53021ab0cef475eb18f57c7f53f0f2ca55567fbf3c537ea0 \
-    --hash=sha256:e7e156d10beb127cab5c89ff0da71416fc73d27c484a4757d3b2d35633774802
-    # via hypothesis-graphql
+graphql-core==3.2.13 \
+    --hash=sha256:b0eb04f2c31556b2310a77c8fb53c74e8b56570f8fea594d89c6ef7827dbb497 \
+    --hash=sha256:bb81dd266d4ab7b591bd976f1b23639d97776cb9ac1a896b4a93c271e11ed618
+    # via
+    #   -r requirements/test/xpu.in
+    #   hypothesis-graphql
 grpcio==1.83.0 \
     --hash=sha256:009667eaf3dcd5224c713589cdc98e7ca4ed0ff0b61132c6b276e930eb83a2df \
     --hash=sha256:10b3fa0475eb572c9a81a6fe37fa16a9c500c0c91cfc148cac15692b7e3c2867 \
@@ -3421,9 +3420,9 @@ ninja==1.13.0 \
     --hash=sha256:fb46acf6b93b8dd0322adc3a4945452a4e774b75b91293bafcc7b7f8e6517dfa \
     --hash=sha256:fb8ee8719f8af47fed145cced4a85f0755dd55d45b2bddaf7431fa89803c5f3e
     # via -r requirements/test/../common.txt
-nltk==3.10.3 \
-    --hash=sha256:bb9327a461c3811c2fa4900e03840401f2126adfb30c0072827c433bd2444ea4 \
-    --hash=sha256:ff9598a8e20518ee0d557745890cc4435b9578489e2dcbc69c4f81fa060caf7c
+nltk==3.10.4 \
+    --hash=sha256:44679f4e9220abfd496d2c8cdb22f8425ccbe557604f9aa5cacb1c44003dabc1 \
+    --hash=sha256:769ba5413f265b7d3e87cd163cc28efa01e29eeef8bb6080bc907949d9fcfb51
     # via
     #   -r requirements/test/xpu.in
     #   rouge-score
@@ -3613,59 +3612,71 @@ opencv-python-headless==5.0.0.93 \
     #   albucore
     #   albumentations
     #   mistral-common
-opentelemetry-api==1.44.0 \
-    --hash=sha256:67647e5e9566edcf421166fdf022b3537f818635daa852b289e34604dc6fb33a \
-    --hash=sha256:94b98c893a91b88657eaac1e3ba89618cdb85be6918196705354f34728b2cdef
+opentelemetry-api==1.45.2 \
+    --hash=sha256:2cbd737377e710ee740d261c94e93fa0f08e6d037c18f17513cc0a2d94479a34 \
+    --hash=sha256:d7b0008e21e5fd61cbe7a7f34ca3b6905a78ab677d9bc395e299359c75cda6b4
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
     #   -r requirements/test/xpu.in
     #   mcp
+    #   opentelemetry-exporter-http-transport
     #   opentelemetry-exporter-otlp-proto-grpc
     #   opentelemetry-exporter-otlp-proto-http
     #   opentelemetry-sdk
     #   opentelemetry-semantic-conventions
-opentelemetry-exporter-otlp==1.44.0 \
-    --hash=sha256:4a498fa8d8fd8be9e8e2d175fe5524a3fe581ccffadd8509db86526a5fb97051 \
-    --hash=sha256:af1cde7c33ea8ed624bf04ac49a885730fe44c1f1ad698656e592c38f70ce106
+opentelemetry-exporter-http-transport==0.66b2 \
+    --hash=sha256:66d6ed810a515432c8891da9a834464332fd70badeca45bdeeae81b4280c903b \
+    --hash=sha256:fd5f5b490c099acda1cd7b909d5e8981436bf18cc8c6098d302d114c271720e9
+    # via opentelemetry-exporter-otlp-proto-http
+opentelemetry-exporter-otlp==1.45.2 \
+    --hash=sha256:52c8b9f268289c92c08b3a97f48c63d6e5c037f25ca1f6f29ef162fb78974afc \
+    --hash=sha256:879044ba65b8b1be7a0d9d904afb76700e96d2a4d36700918d9325c9ee3b8be4
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
     #   -r requirements/test/xpu.in
-opentelemetry-exporter-otlp-proto-common==1.44.0 \
-    --hash=sha256:9a9fe61bba73d802904bc989f1d6b4a7b1ee40f06c40e98d6f85af65aaebb694 \
-    --hash=sha256:dc87a5a5bc58f149a56d1547e4691588fa12994cdc3bc039a694ccb3375862ac
+opentelemetry-exporter-otlp-common==0.66b2 \
+    --hash=sha256:06f5a9b88638e310efa1f1d206cdf6b75393e112aba4e174a963416192bd1028 \
+    --hash=sha256:ace86efb75489f925f1ef809856ae5f0c7db534e4afdc624530222228b1236a5
     # via
     #   opentelemetry-exporter-otlp-proto-grpc
     #   opentelemetry-exporter-otlp-proto-http
-opentelemetry-exporter-otlp-proto-grpc==1.44.0 \
-    --hash=sha256:40d1ae9e03fcc36de3cbac610cc99f35894938bff9cfd90fc4ec68bd85448463 \
-    --hash=sha256:6a1a645ea182a2f59440c51fa8301d309f3324a8f9d65f8395584b064b67ee4e
+opentelemetry-exporter-otlp-proto-common==1.45.2 \
+    --hash=sha256:af483b24217028892f017096731b794b196b785025d2e6808874720fd0b05a80 \
+    --hash=sha256:f1f2806f3f28ce7938033823e50934fcd91595a39de38e69a28a51e19f40fc6d
+    # via
+    #   opentelemetry-exporter-otlp-proto-grpc
+    #   opentelemetry-exporter-otlp-proto-http
+opentelemetry-exporter-otlp-proto-grpc==1.45.2 \
+    --hash=sha256:8a48d60835e90536846bd82de487bfbd81bccb5a1b3d0fb82edeea17db07395c \
+    --hash=sha256:9e4a6490ca7711479fec7c519425bc09808abbc9a2a1775528edecf200d19a5a
     # via opentelemetry-exporter-otlp
-opentelemetry-exporter-otlp-proto-http==1.44.0 \
-    --hash=sha256:838592fce774c1c8bb7b9a0a7facbfa82e17be5a8a4e94cef10cb84ae026bae3 \
-    --hash=sha256:c633d7270ad6b57cd4cfbe8b0007a9e2e7c0cb50bd6c50fe2a7b245f721a09d8
+opentelemetry-exporter-otlp-proto-http==1.45.2 \
+    --hash=sha256:5984a3fb46bc4628e4e2b85d4a6e72637e03962aae6cf372791137768a4ad939 \
+    --hash=sha256:6e4d025138829d0ee57946930c2ccad6491ad4d92a958e9c7eea69278fe60cfc
     # via opentelemetry-exporter-otlp
-opentelemetry-proto==1.44.0 \
-    --hash=sha256:898b155a0e1557afd867478fb6158e8122a46329ca0bb8dc53cc55e98f017f56 \
-    --hash=sha256:c547a79c2f8c0c515d31509154682e5921c7cfd5ca67b70e1f9266e2c3e103f3
+opentelemetry-proto==1.45.2 \
+    --hash=sha256:03a7ca1b43f89fd5b965d5975902bb2515c0c86e2428b456836e9a6149c6235a \
+    --hash=sha256:bd8d23cf770605b0af9b7be2071d26a464fea289d35429abfd2a66226114ad64
     # via
     #   opentelemetry-exporter-otlp-proto-common
     #   opentelemetry-exporter-otlp-proto-grpc
     #   opentelemetry-exporter-otlp-proto-http
-opentelemetry-sdk==1.44.0 \
-    --hash=sha256:cebe7f65dc12f26ead75c6064de12fd2a9052e5060c0272d402cfa203aae123b \
-    --hash=sha256:df081c4c6bcfdb1211e3e86140376792643128a25f8d72d1d27675936e7e96ad
+opentelemetry-sdk==1.45.2 \
+    --hash=sha256:7eec4de13dd21ff3a1670dcb0e02079e692736f94d733dfdce5af461d884248d \
+    --hash=sha256:ff974ea70ee4f1d51e2ec152db37c2b626c7bf82bb3f7d86114fd8704e7199c6
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
     #   -r requirements/test/xpu.in
+    #   opentelemetry-exporter-otlp-common
     #   opentelemetry-exporter-otlp-proto-grpc
     #   opentelemetry-exporter-otlp-proto-http
     #   opentelemetry-semantic-conventions-ai
-opentelemetry-semantic-conventions==0.65b0 \
-    --hash=sha256:1cacde7b0ad306f84c5ef08c3dbe1bbaf20165bba6f8bff43b670e555a086bcb \
-    --hash=sha256:f9b2b81e9d5b64f11bc952075e7e9c7fb0aab075c7fd1c46d597f1b919852d60
+opentelemetry-semantic-conventions==0.66b2 \
+    --hash=sha256:4cbe61e5f9275d57ab31708446e7938ef4291ebbe6a7fca6f7a629c5acae87d8 \
+    --hash=sha256:7da5f1a5dc4383eb66711d4d3d3e71824d9403ac1559fea021cc103c1a4c4976
     # via
     #   opentelemetry-sdk
     #   opentelemetry-semantic-conventions-ai
@@ -5329,6 +5340,7 @@ requests==2.34.2 \
     #   modelscope
     #   msal
     #   mteb
+    #   opentelemetry-exporter-http-transport
     #   opentelemetry-exporter-otlp-proto-http
     #   pooch
     #   schemathesis
@@ -6283,9 +6295,9 @@ tenacity==9.1.4 \
     # via
     #   gpt-oss
     #   lm-eval
-tensorizer==2.10.1 \
-    --hash=sha256:079a4aa1db03fb6fe4e6949a78cd5f6b0070e074421da4b34216db58973dce65 \
-    --hash=sha256:fe39940548a287c84891ee9dd966d6e87575312625ba46c9eda11b0b79d05028
+tensorizer==2.12.1 \
+    --hash=sha256:20c765c5c71d2db3eaa7f9af53620d00d79659b3a98100e93ed508fa69b0d441 \
+    --hash=sha256:8af9b3be54f31d08d1928e3f25bfaaa963cdc8d716d09559c68ec014f8beb440
     # via -r requirements/test/xpu.in
 termcolor==3.3.0 \
     --hash=sha256:348871ca648ec6a9a983a13ab626c0acce02f515b9e1983332b17af7979521c5 \
@@ -6508,9 +6520,9 @@ triton-xpu==3.9.0 \
     # via
     #   torch
     #   triton
-truststore==0.10.4 \
-    --hash=sha256:9d91bd436463ad5e4ee4aba766628dd6cd7010cf3e2461756b3303710eebc301 \
-    --hash=sha256:adaeaecf1cbb5f4de3b1959b42d41f6fab57b2b1666adb59e89cb0b53361d981
+truststore==0.10.5 \
+    --hash=sha256:30d36967ccaded5cbb38d602c433f53600036c79d502f4533a49b60a03bbefcd \
+    --hash=sha256:9aaaedaefaf06d8b206278cf8b5012bc897f485a874503501e12d776df78951c
     # via
     #   httpcore2
     #   httpx2
