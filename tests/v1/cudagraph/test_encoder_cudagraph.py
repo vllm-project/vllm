@@ -1930,3 +1930,45 @@ def test_step3_vl_postprocess_clones_global_only_item():
     )
     assert torch.equal(dest[0], global_out)
     assert dest[0].data_ptr() != global_out.data_ptr()
+
+
+class TestKimiVLCaptureMaxSeqlen:
+    """Kimi-VL bakes max_seqlen into the graph at capture. MoonViT attention
+    runs on pre-merge patches, so it must cover the patches of one image that
+    uses the whole token budget."""
+
+    @staticmethod
+    def _captured_max_seqlen(token_budget: int, max_batch_size: int) -> int:
+        from vllm.model_executor.models.kimi_vl import (
+            KimiVLForConditionalGeneration as KimiVL,
+        )
+
+        def prepare_encoder_metadata(grid_hws_list, *, max_seqlen_override, **_):
+            return {"max_seqlen": torch.tensor(max_seqlen_override)}
+
+        fake = SimpleNamespace(
+            config=SimpleNamespace(
+                vision_config=SimpleNamespace(merge_kernel_size=(2, 2), patch_size=14)
+            ),
+            vision_tower=SimpleNamespace(
+                encoder=SimpleNamespace(
+                    rope_2d=SimpleNamespace(max_height=512, max_width=512)
+                ),
+                prepare_encoder_metadata=prepare_encoder_metadata,
+            ),
+        )
+        inputs = KimiVL.prepare_encoder_cudagraph_capture_inputs(
+            cast(Any, fake),
+            token_budget,
+            max_batch_size,
+            0,
+            torch.device("cpu"),
+            torch.float32,
+        )
+        return int(inputs.values["max_seqlen"])
+
+    @pytest.mark.parametrize("token_budget", [64, 256, 1024])
+    def test_covers_one_image_using_the_whole_budget(self, token_budget):
+        # One image of token_budget merged tokens has token_budget * 2 * 2 patches.
+        full_budget_image_patches = token_budget * 2 * 2
+        assert self._captured_max_seqlen(token_budget, 4) >= full_budget_image_patches
