@@ -830,6 +830,10 @@ class RoutedExperts(PluggableLayer):
                     loaded_weight,
                     hidden_dim=0,
                 )
+                # w2 is row-parallel: its bias is added before the TP
+                # all-reduce, so only one rank may hold it.
+                if self.moe_config.tp_rank != 0:
+                    loaded_weight = torch.zeros_like(loaded_weight)
                 copy_weight_(expert_data, loaded_weight)
             else:
                 self._load_w13(

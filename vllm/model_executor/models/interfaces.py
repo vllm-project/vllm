@@ -731,7 +731,7 @@ class SupportsLoRA(Protocol):
     is_non_gated_moe: ClassVar[bool] = False
     # The `embedding_module` and `embedding_padding_modules`
     # are empty by default.
-    embedding_modules: ClassVar[dict[str, str]] = {}
+    embedding_modules: dict[str, str] = {}
     packed_modules_mapping: dict[str, list[str]] = {}
     # Module prefixes to skip during LoRA loading (e.g., ["mtp."] for MTP layers)
     lora_skip_prefixes: ClassVar[list[str]] = []
