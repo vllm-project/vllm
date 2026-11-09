@@ -16,4 +16,3 @@ server_args: >-
   --kv-cache-dtype fp8
 env:
   VLLM_ROCM_USE_AITER: "1"
-  VLLM_USE_V2_MODEL_RUNNER: "1"
