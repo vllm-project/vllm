@@ -742,6 +742,8 @@ class WhisperDummyInputsBuilder(BaseDummyInputsBuilder[WhisperProcessingInfo]):
 
 
 class WhisperMultiModalProcessor(EncDecMultiModalProcessor[WhisperProcessingInfo]):
+    skip_decoder_start_token: bool = True
+
     def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
         return self.dummy_inputs.get_dummy_text(mm_counts)
 
@@ -858,7 +860,7 @@ class WhisperForConditionalGeneration(
         stt_config = stt_params.stt_config
         language = stt_params.language
         task_type = stt_params.task_type
-        request_prompt = stt_params.request_prompt
+        request_prompt = stt_params.request_prompt.strip()
 
         if language is None:
             raise ValueError(
@@ -866,7 +868,7 @@ class WhisperForConditionalGeneration(
             )
 
         decoder_text = (
-            f"<|startofprev|>{request_prompt}" if request_prompt else ""
+            f"<|startofprev|> {request_prompt}" if request_prompt else ""
         ) + f"<|startoftranscript|><|{language}|><|{task_type}|><|notimestamps|>"
 
         return ExplicitEncoderDecoderPrompt(
