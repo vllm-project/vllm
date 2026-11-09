@@ -158,7 +158,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         extra_config = self.kv_transfer_config.kv_connector_extra_config
         self._chunked_push = bool(
             extra_config.get("enable_chunked_push", False)
-            and self.kv_transfer_config.is_kv_producer
+            and self.kv_transfer_config.kv_role == "kv_producer"
         )
         self._chunk_defer_timeout = float(
             extra_config.get("chunked_push_defer_timeout", 60.0)
