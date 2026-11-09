@@ -721,8 +721,8 @@ fn extract_media_parts(
     };
     parts
         .map(|part| match part? {
-            ChatContentPart::Text { .. } => {
-                bail_multimodal!("renderer reported a text part as multimodal content")
+            ChatContentPart::Text { .. } | ChatContentPart::ToolReference { .. } => {
+                bail_multimodal!("renderer reported a non-media part as multimodal content")
             }
             ChatContentPart::ImageUrl {
                 image_url,
