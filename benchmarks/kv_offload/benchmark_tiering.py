@@ -287,6 +287,7 @@ class BenchmarkRun:
         with VLLMServer(config_path, self.run_dir / "vllm.log", self.port):
             print("  [4/5] Running guidellm benchmark...")
             result = {
+                "name": self.spec.name,
                 "spec": asdict(self.spec),
                 "status": "ok",
                 **self.guidellm.run(self.spec, self.run_dir / "guidellm.log"),
@@ -364,7 +365,7 @@ class BenchmarkSession:
 def compare(session_a: Path, session_b: Path) -> None:
     def load(d: Path) -> dict:
         results = json.loads((d / "results.json").read_text())
-        return {r["spec"]["name"] if "spec" in r else r["name"]: r for r in results}
+        return {r.get("name") or RunSpec(**r["spec"]).name: r for r in results}
 
     a, b = load(session_a), load(session_b)
     print(f"{'run':<60} {'metric':<30} {session_a.name:>12} {session_b.name:>12}")
