@@ -125,13 +125,11 @@ serving_tests() {
     kill -s SIGTERM $server_pid &'
 }
 
-# Run each suite in its own bash so a failure in one doesn't skip the others.
 shard_2() {
-  local rc=0
-  bash -c kernel_tests_2 || rc=1
-  bash -c model_tests || rc=1
-  bash -c serving_tests || rc=1
-  return "$rc"
+  set -e
+  kernel_tests_2
+  model_tests
+  serving_tests
 }
 
 print_packages
