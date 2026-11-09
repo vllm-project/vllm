@@ -87,13 +87,9 @@ def transfer_run_periodically(
         except Exception as exc:
             if not state.parallel_config.enable_fault_tolerance:
                 raise
-            # Report the failure so step() raises on every rank and FT takes
-            # over; keep the thread alive so EPLB can resume after a retry.
-            # Known race: FT recovery does not quiesce this thread, so a cycle
-            # still running when reset_eplb_async_state() clears this error
-            # can set it again (or run a stale queued signal) and fault the
-            # first rearrangement after recovery. Epoch checks here are not
-            # enough, because ranks can disagree on whether to run a cycle.
+            # step() raises this on every rank; the thread stays up for retry.
+            # TODO: FT recovery does not stop this thread, so a cycle still
+            # running at reset can set this error again after it is cleared.
             # https://github.com/vllm-project/vllm/issues/66144#issuecomment-6693152754
             state.async_worker_error = exc
             logger.exception(

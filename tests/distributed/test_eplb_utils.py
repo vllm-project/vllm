@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import time
+import queue
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -16,11 +16,13 @@ from vllm.distributed import (
     initialize_model_parallel,
 )
 from vllm.distributed.eplb import async_worker
+from vllm.distributed.eplb import eplb_state as eplb_state_module
 from vllm.distributed.eplb.eplb_state import (
     EplbState,
     _commit_eplb_maps,
     _commit_eplb_maps_for_layer,
 )
+from vllm.distributed.eplb.eplb_utils import CpuGpuEvent
 from vllm.distributed.parallel_state import get_ep_group
 from vllm.platforms import current_platform
 from vllm.v1.worker.sentinel.eplb_redistribute import reset_eplb_async_state
@@ -218,25 +220,67 @@ def eplb_dist_init(tmp_path):
     cleanup_dist_env_and_memory()
 
 
-def _start_ft_async_eplb_with_failing_worker(monkeypatch):
-    """Start single-rank async EPLB under fault tolerance whose worker fails
-    every layer transfer. On one rank the EP group stands in for the EPLB group.
+class _WorkerProbe:
+    """Reports each point where the async worker blocks, so a test can advance
+    in lockstep with it instead of sleeping or polling.
+
+    The worker reports "idle" before waiting for a rearrange signal and
+    "published" before waiting for the main thread to consume a layer result.
+    Everything the worker did before a report happens-before the test reads it.
     """
-    num_layers, num_experts, interval = 2, 4, 2
+
+    # Only turns a deadlock into a failure; a healthy run never waits this long.
+    HANG_TIMEOUT_S = 60
+
+    def __init__(self) -> None:
+        self._reports: queue.Queue[str] = queue.Queue()
+
+    def event(self, report: str) -> CpuGpuEvent:
+        probe = self
+
+        class _ReportingEvent(CpuGpuEvent):
+            def wait(self, stream: torch.Stream | None = None) -> None:
+                probe._reports.put(report)
+                super().wait(stream)
+
+        return _ReportingEvent()
+
+    def expect(self, report: str) -> None:
+        assert self._reports.get(timeout=self.HANG_TIMEOUT_S) == report
+        assert self._reports.empty()
+
+
+def _start_ft_async_eplb(monkeypatch, num_failures: int):
+    """Start single-rank async EPLB under fault tolerance whose first
+    ``num_failures`` layer transfers raise. On one rank the EP group stands in
+    for the EPLB group. Returns once the worker is waiting for a signal.
+    """
+    num_layers, num_experts, window = 2, 4, 2
     device = torch.device(current_platform.device_type)
+    probe = _WorkerProbe()
     monkeypatch.setattr(async_worker, "get_eplb_group", get_ep_group)
     monkeypatch.setattr(
         async_worker,
         "run_rebalance_experts",
         lambda model_state, eplb_state, phy2log_cpu, stream: phy2log_cpu.clone(),
     )
+    monkeypatch.setattr(async_worker, "CpuGpuEvent", lambda: probe.event("published"))
     failures: list[Exception] = []
+    transferred: list[int] = []
 
-    def failing_transfer_layer(**kwargs):
-        failures.append(RuntimeError(f"injected transfer failure {len(failures)}"))
-        raise failures[-1]
+    def transfer_layer(*, layer_idx: int, **kwargs) -> None:
+        if len(failures) < num_failures:
+            failures.append(RuntimeError(f"injected transfer failure {len(failures)}"))
+            raise failures[-1]
+        transferred.append(layer_idx)
 
-    monkeypatch.setattr(async_worker, "transfer_layer", failing_transfer_layer)
+    monkeypatch.setattr(async_worker, "transfer_layer", transfer_layer)
+    applied: list[int] = []
+    monkeypatch.setattr(
+        eplb_state_module,
+        "move_from_buffer",
+        lambda *, expert_weights, **kwargs: applied.append(expert_weights),
+    )
 
     phy2log = torch.arange(num_experts, device=device).repeat(num_layers, 1)
     model_state = _make_model_state(
@@ -246,13 +290,14 @@ def _start_ft_async_eplb_with_failing_worker(monkeypatch):
     )
     model_state.model.num_moe_layers = num_layers
     model_state.model.num_logical_experts = num_experts
+    model_state.model.expert_weights = list(range(num_layers))
     model_state.rebalanced = False
     model_state.pending_result = None
     model_state.expert_load_pass = torch.zeros(
         num_layers, num_experts, dtype=torch.int32, device=device
     )
     model_state.expert_load_window = torch.zeros(
-        interval, num_layers, num_experts, dtype=torch.int32, device=device
+        window, num_layers, num_experts, dtype=torch.int32, device=device
     )
 
     parallel_config = ParallelConfig()
@@ -261,22 +306,29 @@ def _start_ft_async_eplb_with_failing_worker(monkeypatch):
     if state.device_index is None:
         pytest.skip("async EPLB needs a CUDA or XPU device")
     state.is_async = True
-    state.expert_load_window_size = interval
-    state.expert_rearrangement_step_interval = interval
-    state.expert_rearrangement_step = interval - 1
+    state.expert_load_window_size = window
+    # Large enough that consuming layer results never triggers another
+    # rearrangement; tests trigger one explicitly with _signal_rearrangement.
+    state.expert_rearrangement_step_interval = 1000
     state.model_states = {"m": model_state}
+    state.rearrange_event = probe.event("idle")
     state.start_async_loop()
-    return state, model_state, failures
+    probe.expect("idle")
+    return SimpleNamespace(
+        state=state,
+        model_state=model_state,
+        probe=probe,
+        failures=failures,
+        transferred=transferred,
+        applied=applied,
+    )
 
 
-def _step_until_raise(state: EplbState, max_steps: int = 1000) -> Exception | None:
-    for _ in range(max_steps):
-        try:
-            state.step()
-        except RuntimeError as exc:
-            return exc
-        time.sleep(0.01)
-    return None
+def _signal_rearrangement(state: EplbState) -> None:
+    """Run the step that starts a rearrangement and signals the worker."""
+    state.expert_rearrangement_step = state.expert_rearrangement_step_interval - 1
+    state.step()
+    assert state.model_states["m"].rebalanced
 
 
 def test_async_worker_failure_raises_under_fault_tolerance(eplb_dist_init, monkeypatch):
@@ -284,26 +336,41 @@ def test_async_worker_failure_raises_under_fault_tolerance(eplb_dist_init, monke
     failure must still reach step() so that FT can recover. Otherwise EPLB
     stalls silently with every rank waiting for the failed layer.
     """
-    state, _, failures = _start_ft_async_eplb_with_failing_worker(monkeypatch)
+    run = _start_ft_async_eplb(monkeypatch, num_failures=1)
 
-    exc = _step_until_raise(state)
+    _signal_rearrangement(run.state)
+    run.probe.expect("idle")
+    with pytest.raises(RuntimeError) as exc_info:
+        run.state.step()
 
-    assert exc is not None, "a worker failure under FT never reached step()"
-    assert exc.__cause__ is failures[0]
-    assert state.async_worker.is_alive()
+    assert exc_info.value.__cause__ is run.failures[0]
+    assert run.state.async_worker.is_alive()
 
 
-def test_fault_tolerance_reset_rearms_async_eplb(eplb_dist_init, monkeypatch):
-    """After an FT reset, the surviving worker runs the next rearrangement."""
-    state, model_state, failures = _start_ft_async_eplb_with_failing_worker(monkeypatch)
-    assert _step_until_raise(state) is not None
+def test_fault_tolerance_reset_recovers_async_eplb(eplb_dist_init, monkeypatch):
+    """After a one-time worker failure and an FT reset, the next rearrangement
+    runs to completion: every layer is transferred and applied, and step()
+    no longer raises.
+    """
+    run = _start_ft_async_eplb(monkeypatch, num_failures=1)
+    _signal_rearrangement(run.state)
+    run.probe.expect("idle")
+    with pytest.raises(RuntimeError):
+        run.state.step()
 
-    reset_eplb_async_state(SimpleNamespace(eplb_state=state))
-    assert state.async_worker_error is None
-    assert not model_state.rebalanced
+    reset_eplb_async_state(SimpleNamespace(eplb_state=run.state))
+    assert run.state.async_worker_error is None
+    assert not run.model_state.rebalanced
 
-    state.expert_rearrangement_step = state.expert_rearrangement_step_interval - 1
-    exc = _step_until_raise(state)
+    _signal_rearrangement(run.state)
+    num_layers = run.model_state.model.num_moe_layers
+    for _ in range(num_layers):
+        run.probe.expect("published")
+        run.state.step()
+    run.probe.expect("idle")
 
-    assert exc is not None
-    assert exc.__cause__ is failures[1]
+    assert run.transferred == list(range(num_layers))
+    assert run.applied == list(range(num_layers))
+    assert not run.model_state.rebalanced
+    assert run.state.async_worker_error is None
+    assert len(run.failures) == 1
