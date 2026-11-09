@@ -117,9 +117,32 @@ class FlashInferCuteDSLBatchedExperts(mk.FusedMoEExpertsModular):
         activation_key: QuantKey | None,
         activation_format: mk.FusedMoEActivationFormat,
     ) -> tuple[bool, str | None]:
+        supported, reason = mk.FusedMoEExperts.is_supported_config(
+            cls, moe_config, weight_key, activation_key, activation_format
+        )
+        if not supported or (weight_key, activation_key) != (
+            kMxfp8Static,
+            kMxfp8Dynamic,
+        ):
+            return supported, reason
+        # Only the DeepEP low-latency dispatch hands over unquantized MXFP8
+        # activations.
+        if not moe_config.use_deepep_ll_kernels:
+            return False, "kernel requires DeepEP low-latency dispatch for mxfp8"
+        # The MXFP8 path applies plain SiLU-and-mul without expert biases.
+        if (
+            moe_config.has_bias
+            or moe_config.swiglu_limit is not None
+            or moe_config.swiglu_alpha is not None
+            or moe_config.swiglu_beta is not None
+        ):
+            return False, (
+                "kernel does not support mxfp8 with expert biases or a "
+                "clamped or scaled SwiGLU"
+            )
         # Both MXFP8 GEMM K dims (hidden and intermediate) must be whole
         # 128-column tiles; the quantizers pad activations to that width.
-        if (weight_key, activation_key) == (kMxfp8Static, kMxfp8Dynamic) and (
+        if (
             moe_config.hidden_dim % 128 != 0
             or moe_config.intermediate_size_per_partition % 128 != 0
         ):
@@ -129,9 +152,7 @@ class FlashInferCuteDSLBatchedExperts(mk.FusedMoEExpertsModular):
                 f"{moe_config.intermediate_size_per_partition} "
                 "(not multiples of 128)"
             )
-        return mk.FusedMoEExperts.is_supported_config(
-            cls, moe_config, weight_key, activation_key, activation_format
-        )
+        return True, None
 
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
         # Let PrepareAndFinalize::finalize() decide the impl.
