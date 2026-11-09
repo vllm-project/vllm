@@ -31,6 +31,9 @@ Do not open one-off PRs for tiny edits (single typo, isolated style change, one 
     - Test commands run and results.
     - Model evaluation results when the change affects output, accuracy, or serving.
     - Clear statement that AI assistance was used.
+- User-visible changes (features, CLI args, config fields, env vars, models,
+  hardware, defaults, deprecations) must update the rendered docs in the same PR;
+  follow [Documenting User-Visible Changes](docs/contributing/README.md#documenting-user-visible-changes).
 - Before opening a PR (drafts included) or requesting re-review, run the [`pr-checklist`](.agents/skills/pr-checklist/SKILL.md) skill and address its findings.
 
 ### Fail-closed behavior
@@ -85,7 +88,9 @@ When adding tests:
 
 - **Design before you write.** Answer four questions first: what is the module
   for, what is its I/O contract, what failure am I guarding against, and what is
-  the cheapest level that catches it (unit over integration over e2e)?
+  the cheapest level that actually reproduces it? Fixes to user-visible
+  behavior need a test through a real entry point (`LLM`, OpenAI server); see
+  [`tests/AGENTS.md`](tests/AGENTS.md).
 - **Reuse before create.** Extend existing test files, `conftest.py` fixtures, and
   helpers; add a new file only when no nearby suite fits.
 - **Test behavior with intent.** Assert observable outcomes through public APIs;
@@ -119,6 +124,7 @@ pre-commit run ruff-check --all-files
 The line length limit for Python code is 88 characters. If you are not sure, use pre-commit to check.
 
 Use [Google-style docstrings](https://google.github.io/styleguide/pyguide.html#38-comments-and-docstrings) (`Args:`/`Returns:`/`Raises:` sections), not reStructuredText/Sphinx fields (`:param:`, `:return:`, `:rtype:`).
+Docstrings render as Markdown: write code in single backticks, not double backticks or Sphinx roles like `:class:`, and wrap shapes and indexing like `[block][2][16]` in backticks so mkdocs does not read them as cross-references (the `check-docstring-style` hook enforces this).
 
 ### Coding style guidelines
 
@@ -154,3 +160,5 @@ vulnerability process.
 - **Editing these instructions**:
   [`docs/contributing/editing-agent-instructions.md`](docs/contributing/editing-agent-instructions.md)
   — Rules for modifying AGENTS.md or any domain-specific guide it references.
+- **Rust frontend (`rust/`)**: [`rust/AGENTS.md`](rust/AGENTS.md)
+  — Crate ownership, design principles, Python parity, and testing conventions.

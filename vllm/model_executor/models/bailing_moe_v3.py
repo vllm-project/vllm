@@ -1100,9 +1100,8 @@ class BailingMoeV3KimiDeltaAttention(PluggableLayer, MambaBase):
             assert g1_non_spec is not None and beta_non_spec is not None
             assert state_indices is not None
             assert has_initial_state is not None
-            zero_idx = state_indices[~has_initial_state]
-            recurrent_state[zero_idx] = 0
             initial_state = recurrent_state_active[state_indices].contiguous()
+            initial_state.masked_fill_(~has_initial_state[:, None, None, None], 0)
             out, last_state = chunk_kda(
                 q=q,
                 k=k,
@@ -1204,7 +1203,9 @@ class BailingMoeV3MoE(nn.Module):
             intermediate_size=config.moe_intermediate_size,
             renormalize=True,
             quant_config=quant_config,
-            activation="silu",
+            activation=(
+                "swiglustep" if self.expert_swiglu_limit is not None else "silu"
+            ),
             swiglu_limit=self.expert_swiglu_limit,
             prefix=f"{prefix}.experts",
             scoring_func="sigmoid",
@@ -1412,7 +1413,10 @@ class BailingMoeV3Model(nn.Module):
 
 
 class BailingMoeV3ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsPP):
-    hf_to_vllm_mapper = WeightsMapper(orig_to_new_substr={".attention.": ".self_attn."})
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_substr={".attention.": ".self_attn."},
+        orig_to_new_prefix={"attention.": "self_attn."},
+    )
 
     packed_modules_mapping = {
         "gate_up_proj": ["gate_proj", "up_proj"],

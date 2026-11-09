@@ -16,35 +16,37 @@ use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::response::sse::Event;
 use axum::response::{IntoResponse, Response};
-use base64::Engine as _;
 use futures::{Stream, StreamExt as _, pin_mut};
 use thiserror_ext::AsReport as _;
 use tracing::{error, info, trace};
 use tracing_futures::Instrument as _;
-use vllm_engine_core_client::protocol::dtype::TensorDtype;
 use vllm_engine_core_client::protocol::logprobs::{Logprobs, PositionLogprobs};
 use vllm_engine_core_client::protocol::multimodal::MmFeatureSpec;
-use vllm_engine_core_client::protocol::tensor::WireNdArray;
 use vllm_llm::{
-    CollectedGenerateOutput, FinishReason, GenerateOutput, GenerateOutputStreamExt as _, TokenUsage,
+    AuxOutputRows, CollectedGenerateOutput, FinishReason, GenerateOutput,
+    GenerateOutputStreamExt as _, TokenUsage,
 };
 
 use self::convert::{ResponseOptions, prepare_generate_request};
 use self::types::{
-    GenerateLogProb, GenerateLogProbs, GenerateLogProbsContent, GenerateLogprob, GenerateResponse,
-    GenerateResponseChoice, GenerateResponseStreamChoice, GenerateStreamResponse,
-    MultiModalPlaceholders, PerRequestMetrics, PlaceholderRangeInfo, SpeculativeDecodingMetrics,
-    StreamingSpeculativeDecodingMetrics,
+    GenerateLogProb, GenerateLogProbs, GenerateLogProbsContent, GenerateLogprob,
+    GenerateOutputMode, GenerateResponse, GenerateResponseChoice, GenerateResponseStreamChoice,
+    GenerateStreamResponse, MultiModalPlaceholders, PerRequestMetrics, PlaceholderRangeInfo,
 };
 pub(crate) use self::types::{GenerateRequest, GenerateSamplingParams};
 pub(crate) use self::validate::validate_request_compat;
 use crate::config::ApiServerOptions;
 use crate::error::{ApiError, bail_server_error, engine_error, server_error, text_submit_error};
 use crate::routes::openai::utils::logprobs::clamp_logprob;
+use crate::routes::openai::utils::metrics::{
+    SpeculativeDecodingMetrics, StreamingSpeculativeDecodingMetrics,
+};
 use crate::routes::openai::utils::types::Usage;
 use crate::routes::openai::utils::validated_json::ValidatedJson;
+use crate::routes::output_log::LoggedOutput;
 use crate::state::AppState;
-use crate::utils::{resolve_request_context, sse_response};
+use crate::utils::npy_base64;
+use crate::utils::{resolve_request_context, sse_response, unix_timestamp};
 
 /// Validate one token-in/token-out request and proxy it into the shared
 /// `vllm-text` stack.
@@ -94,6 +96,7 @@ pub async fn generate(
 
     let api_server_options = state.api_server_options;
     let stream = prepared.stream;
+    let created = unix_timestamp();
     let raw_stream = match state
         .chat
         .text()
@@ -132,13 +135,18 @@ pub async fn generate(
         }
     };
 
-    let response = match collect_generate(
-        collected,
-        prepared.request_id,
-        api_server_options,
-        prepared.options,
-        mm_placeholders,
-    ) {
+    // Inside the request span, so the logs it emits carry the request ID.
+    let response = match request_span.in_scope(|| {
+        collect_generate(
+            collected,
+            prepared.request_id,
+            prepared.response_model,
+            created,
+            api_server_options,
+            prepared.options,
+            mm_placeholders,
+        )
+    }) {
         Ok(response) => response,
         Err(error) => return error.into_response(),
     };
@@ -171,10 +179,12 @@ async fn generate_chunk_stream(
     let mut prompt_token_ids = None;
     let mut usage = TokenUsage::default();
     let mut spec_decode_metrics = None;
+    let mut routed_experts = AuxOutputRows::default();
 
     while let Some(next) = stream.next().await {
         match next {
             Ok(output) => {
+                routed_experts.append(output.routed_experts);
                 if let Some(metrics) = output.spec_decode_metrics {
                     spec_decode_metrics = Some(SpeculativeDecodingMetrics::from(*metrics));
                 }
@@ -187,7 +197,7 @@ async fn generate_chunk_stream(
                     }
                 }
                 usage.prompt_token_count = prompt_tokens.unwrap_or_default();
-                usage.cached_token_count = usage.cached_token_count.max(output.cached_token_count);
+                usage.prompt_cache_usage.merge(output.prompt_cache_usage);
 
                 let token_ids = output.token_ids;
                 usage.output_token_count = usage.output_token_count.saturating_add(token_ids.len());
@@ -226,20 +236,33 @@ async fn generate_chunk_stream(
 
                 let stop_reason =
                     finish_reason.as_ref().and_then(|reason| reason.as_stop_reason().cloned());
+                // Like Python, the spans and the routed-expert rows cover the
+                // whole request on the final chunk only.
+                let weight_versions = output.weight_versions.filter(|_| finish_reason.is_some());
+                let routed_experts = if finish_reason.is_some() {
+                    std::mem::take(&mut routed_experts)
+                        .concat()
+                        .map_err(|error| server_error!("{}", error.to_report_string()))?
+                } else {
+                    None
+                };
                 let prompt_token_ids = prompt_token_ids.take();
                 y.yield_ok(GenerateStreamResponse {
                     request_id: request_id.clone(),
+                    output_mode: GenerateOutputMode::Tokens,
                     choices: vec![GenerateResponseStreamChoice {
                         index: 0,
                         logprobs,
                         finish_reason: finish_reason.map(|reason| reason.as_str().to_string()),
                         stop_reason,
                         token_ids,
+                        routed_experts: routed_experts.as_ref().map(npy_base64).transpose()?,
                         sampling_mask: output.sampling_mask.map(|mask| mask.rows),
-                        weight_versions: output.weight_versions,
+                        weight_versions,
                     }],
-                    usage: include_continuous_usage
-                        .then(|| Usage::from_token_usage(usage, enable_prompt_tokens_details)),
+                    usage: include_continuous_usage.then(|| {
+                        Usage::from_token_usage(usage, enable_prompt_tokens_details, None)
+                    }),
                     mm_placeholders: prompt_token_ids.as_ref().and_then(|_| mm_placeholders.take()),
                     prompt_token_ids,
                     metrics: None,
@@ -259,8 +282,13 @@ async fn generate_chunk_stream(
     if include_usage {
         y.yield_ok(GenerateStreamResponse {
             request_id,
+            output_mode: GenerateOutputMode::Tokens,
             choices: Vec::new(),
-            usage: Some(Usage::from_token_usage(usage, enable_prompt_tokens_details)),
+            usage: Some(Usage::from_token_usage(
+                usage,
+                enable_prompt_tokens_details,
+                None,
+            )),
             prompt_token_ids: None,
             mm_placeholders: None,
             metrics: spec_decode_metrics.map(|speculative_decoding| PerRequestMetrics {
@@ -278,12 +306,16 @@ async fn generate_chunk_stream(
 fn collect_generate(
     collected: CollectedGenerateOutput,
     request_id: String,
+    response_model: String,
+    created: u64,
     ApiServerOptions {
         enable_log_requests,
+        enable_prompt_tokens_details,
+        log_outputs,
         ..
     }: ApiServerOptions,
     ResponseOptions {
-        // Ignored: non-streaming raw generate responses do not include usage.
+        // Ignored: like Python, non-streaming responses always include usage.
         include_usage: _,
         // Ignored: continuous usage is a streaming-only option.
         include_continuous_usage: _,
@@ -293,9 +325,9 @@ fn collect_generate(
     }: ResponseOptions,
     mm_placeholders: Option<MultiModalPlaceholders>,
 ) -> Result<GenerateResponse, ApiError> {
-    if let FinishReason::Error(Some(error)) = &collected.finish_reason
-        && error.retryable
-    {
+    // Like Python, which raises every engine-typed error, a typed error fails
+    // the request; an untyped one is reported as finish reason `error`.
+    if let FinishReason::Error(Some(error)) = &collected.finish_reason {
         return Err(engine_error(Some(error)));
     }
     let logprobs = if include_logprobs {
@@ -310,7 +342,10 @@ fn collect_generate(
     };
     let prompt_logprobs = if include_prompt_logprobs {
         match collected.prompt_logprobs.as_ref() {
-            Some(prompt_logprobs) => Some(raw_prompt_logprobs_to_maps(prompt_logprobs)),
+            Some(prompt_logprobs) => Some(raw_prompt_logprobs_to_maps(
+                prompt_logprobs,
+                collected.prompt_token_ids.len(),
+            )),
             // A single-token prompt has no scored positions; same mapping
             // as /v1/completions.
             None if collected.prompt_token_ids.len() == 1 => Some(vec![None]),
@@ -335,15 +370,29 @@ fn collect_generate(
             "generate finished"
         );
     }
+    // Like Python, raw generate logs only the output token IDs.
+    if log_outputs.logs_complete() && !collected.token_ids.is_empty() {
+        log_outputs.log(
+            LoggedOutput::Response,
+            "",
+            Some(&collected.token_ids),
+            Some(&finish_reason),
+        );
+    }
 
     Ok(GenerateResponse {
         request_id,
+        model: response_model,
+        created,
+        usage: Usage::from_token_usage(collected.usage, enable_prompt_tokens_details, None),
+        output_mode: GenerateOutputMode::Tokens,
         choices: vec![GenerateResponseChoice {
             index: 0,
             logprobs,
             finish_reason: Some(finish_reason),
             stop_reason,
             token_ids: collected.token_ids,
+            routed_experts: collected.routed_experts.as_ref().map(npy_base64).transpose()?,
             sampling_mask: collected.sampling_mask.map(|mask| mask.rows),
             weight_versions: collected.weight_versions,
         }],
@@ -396,10 +445,14 @@ fn raw_logprobs_to_generate(logprobs: &Logprobs) -> Result<GenerateLogProbs, Api
     })
 }
 
+/// Like Python, positions with no scored row (the first token and those up to
+/// `prompt_logprob_start`) are `None`, so the list spans the whole prompt.
 fn raw_prompt_logprobs_to_maps(
     prompt_logprobs: &Logprobs,
+    prompt_len: usize,
 ) -> Vec<Option<HashMap<u32, GenerateLogprob>>> {
-    std::iter::once(None)
+    let num_unscored = prompt_len.saturating_sub(prompt_logprobs.positions.len()).max(1);
+    std::iter::repeat_n(None, num_unscored)
         .chain(
             prompt_logprobs
                 .positions
@@ -467,29 +520,6 @@ fn position_to_logprob_map(position: &PositionLogprobs) -> HashMap<u32, Generate
         .collect()
 }
 
-/// Encode a float32 matrix as Python `numpy2base64` does.
-fn npy_base64(array: &WireNdArray) -> Result<String, ApiError> {
-    let (TensorDtype::F32, Some(data), [rows, cols]) = (
-        array.dtype.scalar,
-        array.data.as_raw_view(),
-        array.shape.as_slice(),
-    ) else {
-        bail_server_error!("prompt_token_id_logprobs: expected a float32 matrix");
-    };
-    let mut header =
-        format!("{{'descr': '<f4', 'fortran_order': False, 'shape': ({rows}, {cols}), }}");
-    header.push_str(&" ".repeat(21 - rows.to_string().len()));
-    header.push_str(&" ".repeat(64 - (11 + header.len()) % 64));
-    header.push('\n');
-
-    let mut npy = Vec::with_capacity(10 + header.len() + data.len());
-    npy.extend_from_slice(b"\x93NUMPY\x01\x00");
-    npy.extend_from_slice(&(header.len() as u16).to_le_bytes());
-    npy.extend_from_slice(header.as_bytes());
-    npy.extend_from_slice(data);
-    Ok(base64::engine::general_purpose::STANDARD.encode(npy))
-}
-
 fn format_token_id(token_id: u32) -> String {
     format!("token_id:{token_id}")
 }
@@ -541,10 +571,12 @@ mod tests {
     use std::sync::Arc;
 
     use futures::{TryStreamExt as _, stream};
+    use vllm_engine_core_client::protocol::dtype::TensorDtype;
     use vllm_engine_core_client::protocol::multimodal::{MmModality, PlaceholderRange};
     use vllm_engine_core_client::protocol::output::{RequestSpecDecodeMetrics, StopReason};
     use vllm_engine_core_client::protocol::sampling_mask::SamplingMask;
-    use vllm_llm::GeneratePromptInfo;
+    use vllm_engine_core_client::protocol::tensor::WireNdArray;
+    use vllm_llm::{GeneratePromptInfo, PromptCacheUsage, WeightVersionSpan};
 
     use super::*;
 
@@ -638,12 +670,13 @@ mod tests {
                 token_ids: Vec::new(),
                 logprobs: None,
                 finish_reason: None,
-                cached_token_count: 0,
+                prompt_cache_usage: Default::default(),
                 kv_transfer_params: None,
                 ec_transfer_params: None,
                 sampling_mask: None,
                 spec_decode_metrics: None,
                 weight_versions: None,
+                routed_experts: Default::default(),
                 timestamps: Default::default(),
             }),
             Ok(GenerateOutput {
@@ -656,12 +689,16 @@ mod tests {
                 token_ids: vec![33],
                 logprobs: None,
                 finish_reason: Some(FinishReason::stop_eos()),
-                cached_token_count: 2,
+                prompt_cache_usage: PromptCacheUsage {
+                    cached_token_count: 2,
+                    cache_creation_token_count: 0,
+                },
                 kv_transfer_params: None,
                 ec_transfer_params: None,
                 sampling_mask: None,
                 spec_decode_metrics: None,
                 weight_versions: None,
+                routed_experts: Default::default(),
                 timestamps: Default::default(),
             }),
         ]);
@@ -744,12 +781,13 @@ mod tests {
             token_ids,
             logprobs: None,
             finish_reason,
-            cached_token_count: 0,
+            prompt_cache_usage: Default::default(),
             kv_transfer_params: None,
             ec_transfer_params: None,
             sampling_mask: None,
             spec_decode_metrics: None,
             weight_versions: None,
+            routed_experts: Default::default(),
             timestamps: Default::default(),
         }
     }
@@ -784,6 +822,25 @@ mod tests {
         let chunks = collect_chunks(vec![output], false, None).await;
 
         assert_eq!(chunks[0].choices[0].sampling_mask, Some(vec![vec![33, 44]]));
+    }
+
+    #[tokio::test]
+    async fn generate_chunk_stream_returns_weight_versions_on_final_chunk_only() {
+        let span = |end| WeightVersionSpan {
+            version: "v1".into(),
+            start: 0,
+            end,
+        };
+        let mut first = stream_output(Some(&[11]), vec![33], None);
+        first.weight_versions = Some(vec![span(1)]);
+        let mut last = stream_output(None, vec![44], Some(FinishReason::Length));
+        last.weight_versions = Some(vec![span(2)]);
+
+        let chunks = collect_chunks(vec![first, last], false, None).await;
+
+        let weight_versions: Vec<_> =
+            chunks.iter().map(|chunk| chunk.choices[0].weight_versions.clone()).collect();
+        assert_eq!(weight_versions, [None, Some(vec![span(2)])]);
     }
 
     #[tokio::test]
@@ -916,7 +973,7 @@ mod tests {
             usage: TokenUsage {
                 prompt_token_count: 2,
                 output_token_count: 1,
-                cached_token_count: 0,
+                prompt_cache_usage: Default::default(),
             },
             kv_transfer_params: None,
             ec_transfer_params: None,
@@ -926,11 +983,14 @@ mod tests {
             }),
             spec_decode_metrics: None,
             weight_versions: None,
+            routed_experts: None,
         };
 
         let response = collect_generate(
             output,
             "raw-1".to_string(),
+            "model".to_string(),
+            0,
             ApiServerOptions::default(),
             ResponseOptions::default(),
             Some(MultiModalPlaceholders::from([(
@@ -948,14 +1008,28 @@ mod tests {
         assert_eq!(response.choices[0].sampling_mask, Some(vec![vec![30, 40]]));
     }
 
-    #[test]
-    fn prompt_token_id_logprobs_match_numpy2base64() {
-        let scores =
-            WireNdArray::from_f32(vec![2, 3], vec![-0.5, -1.5, -2.5, -3.5, -4.5, -5.5]).unwrap();
-        // numpy2base64(np.array([[-0.5, -1.5, -2.5], [-3.5, -4.5, -5.5]], np.float32))
+    #[tokio::test]
+    async fn generate_chunk_stream_returns_routed_experts_on_final_chunk() {
+        // Each output carries its own rows; the final chunk joins them.
+        let rows = |start: u8| {
+            AuxOutputRows::from(WireNdArray::from_raw(
+                TensorDtype::U8,
+                vec![1, 3, 2],
+                (start..start + 6).collect(),
+            ))
+        };
+        let mut first = stream_output(Some(&[11]), vec![33], None);
+        first.routed_experts = rows(0);
+        let mut terminal = stream_output(None, vec![44], Some(FinishReason::Length));
+        terminal.routed_experts = rows(6);
+
+        let chunks = collect_chunks(vec![first, terminal], false, None).await;
+
+        assert_eq!(chunks[0].choices[0].routed_experts, None);
+        let all_rows = WireNdArray::from_raw(TensorDtype::U8, vec![2, 3, 2], (0..12).collect());
         assert_eq!(
-            npy_base64(&scores).unwrap(),
-            "k05VTVBZAQB2AHsnZGVzY3InOiAnPGY0JywgJ2ZvcnRyYW5fb3JkZXInOiBGYWxzZSwgJ3NoYXBlJzogKDIsIDMpLCB9ICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAoAAAC/AADAvwAAIMAAAGDAAACQwAAAsMA="
+            chunks[1].choices[0].routed_experts,
+            Some(npy_base64(&all_rows).unwrap())
         );
     }
 
@@ -981,11 +1055,14 @@ mod tests {
             sampling_mask: None,
             spec_decode_metrics: Some(metrics.clone()),
             weight_versions: None,
+            routed_experts: None,
         };
 
         let response = collect_generate(
             output,
             "raw-metrics".to_string(),
+            "model".to_string(),
+            0,
             ApiServerOptions::default(),
             ResponseOptions::default(),
             None,
@@ -1066,7 +1143,7 @@ mod tests {
             usage: TokenUsage {
                 prompt_token_count: 2,
                 output_token_count: 1,
-                cached_token_count: 0,
+                prompt_cache_usage: Default::default(),
             },
             kv_transfer_params: None,
             ec_transfer_params: None,
@@ -1074,11 +1151,14 @@ mod tests {
             sampling_mask: None,
             spec_decode_metrics: None,
             weight_versions: None,
+            routed_experts: None,
         };
 
         let response = collect_generate(
             output,
             "raw-1".to_string(),
+            "model".to_string(),
+            0,
             ApiServerOptions::default(),
             ResponseOptions {
                 return_token_ids: true,
@@ -1103,19 +1183,22 @@ mod tests {
             usage: vllm_llm::TokenUsage {
                 prompt_token_count: prompt_token_ids.len(),
                 output_token_count: 1,
-                cached_token_count: 0,
+                prompt_cache_usage: Default::default(),
             },
             kv_transfer_params: None,
             ec_transfer_params: None,
             sampling_mask: None,
             spec_decode_metrics: None,
             weight_versions: None,
+            routed_experts: None,
             prompt_token_ids,
         };
 
         let response = collect_generate(
             output_without_payload(vec![9707]),
             "raw-1".to_string(),
+            "model".to_string(),
+            0,
             ApiServerOptions::default(),
             ResponseOptions {
                 include_prompt_logprobs: true,
@@ -1131,6 +1214,8 @@ mod tests {
         collect_generate(
             output_without_payload(vec![9707, 11]),
             "raw-2".to_string(),
+            "model".to_string(),
+            0,
             ApiServerOptions::default(),
             ResponseOptions {
                 include_prompt_logprobs: true,
@@ -1139,6 +1224,20 @@ mod tests {
             None,
         )
         .expect_err("multi-token prompt without payload is an engine failure");
+    }
+
+    #[test]
+    fn raw_prompt_logprobs_pad_positions_before_prompt_logprob_start() {
+        // A 5-token prompt with prompt_logprob_start=1 scores tokens 2..=4.
+        let prompt_logprobs = Logprobs {
+            positions: [33, 44, 55].map(|id| position(&[(id, -1.0, 1)])).to_vec(),
+        };
+        let maps = raw_prompt_logprobs_to_maps(&prompt_logprobs, 5);
+        assert_eq!(maps.len(), 5);
+        assert!(maps[..2].iter().all(Option::is_none));
+        for (map, id) in maps[2..].iter().zip([33, 44, 55]) {
+            assert!(map.as_ref().unwrap().contains_key(&id));
+        }
     }
 
     #[tokio::test]
@@ -1180,7 +1279,7 @@ mod tests {
             usage: TokenUsage {
                 prompt_token_count: 2,
                 output_token_count: 2,
-                cached_token_count: 0,
+                prompt_cache_usage: Default::default(),
             },
             kv_transfer_params: None,
             ec_transfer_params: None,
@@ -1188,11 +1287,14 @@ mod tests {
             sampling_mask: None,
             spec_decode_metrics: None,
             weight_versions: None,
+            routed_experts: None,
         };
 
         let response = collect_generate(
             output,
             "raw-stop".to_string(),
+            "model".to_string(),
+            0,
             ApiServerOptions::default(),
             ResponseOptions::default(),
             None,
@@ -1204,5 +1306,55 @@ mod tests {
             response.choices[0].stop_reason,
             Some(StopReason::TokenId(7))
         );
+    }
+
+    /// Like Python, the non-streaming envelope reports cached prompt tokens
+    /// under `--enable-prompt-tokens-details`, which is what disaggregated
+    /// serving reads from it.
+    #[test]
+    fn collect_generate_reports_cached_prompt_tokens_in_usage() {
+        let output = CollectedGenerateOutput {
+            request_id: "raw-usage".to_string(),
+            prompt_logprobs: None,
+            prompt_token_id_logprobs: None,
+            token_ids: vec![30],
+            logprobs: None,
+            finish_reason: FinishReason::stop_eos(),
+            usage: TokenUsage {
+                prompt_token_count: 4,
+                output_token_count: 1,
+                prompt_cache_usage: PromptCacheUsage {
+                    cached_token_count: 3,
+                    cache_creation_token_count: 1,
+                },
+            },
+            kv_transfer_params: None,
+            ec_transfer_params: None,
+            prompt_token_ids: vec![10, 20, 30, 40],
+            sampling_mask: None,
+            spec_decode_metrics: None,
+            weight_versions: None,
+            routed_experts: None,
+        };
+
+        let response = collect_generate(
+            output,
+            "raw-usage".to_string(),
+            "model".to_string(),
+            0,
+            ApiServerOptions {
+                enable_prompt_tokens_details: true,
+                ..Default::default()
+            },
+            ResponseOptions::default(),
+            None,
+        )
+        .expect("response");
+
+        let usage = serde_json::to_value(&response.usage).expect("usage serializes");
+        assert_eq!(usage["prompt_tokens"], 4);
+        assert_eq!(usage["completion_tokens"], 1);
+        assert_eq!(usage["total_tokens"], 5);
+        assert_eq!(usage["prompt_tokens_details"]["cached_tokens"], 3);
     }
 }

@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, Mock
 
 import pytest
 
-from vllm.config import AttentionConfig
+from vllm.config import AttentionConfig, CompilationConfig, SpeculativeConfig
 from vllm.v1.attention.backends.mla import indexer
 
 
@@ -123,13 +123,19 @@ def test_rocm_fp4_builder_selects_bounded_graph_stable_schedule(
 
     config = _config("mxfp4")
     config.model_config.max_model_len = 1024
+    config.model_config.hf_text_config = config.model_config.hf_config
     config.attention_config.sparse_mla_prefill_workspace_factor = 1
     config.parallel_config.tensor_parallel_size = 1
     config.parallel_config.cp_kv_cache_interleave_size = 1
     config.scheduler_config = SimpleNamespace(max_num_seqs=4, max_num_batched_tokens=64)
-    config.speculative_config = SimpleNamespace(num_speculative_tokens=next_n - 1)
-    config.compilation_config = SimpleNamespace(
-        max_cudagraph_capture_size=max_capture, cudagraph_capture_sizes=capture_sizes
+    config.speculative_config = (
+        SpeculativeConfig(method="ngram", num_speculative_tokens=next_n - 1)
+        if next_n > 1
+        else None
+    )
+    config.compilation_config = CompilationConfig(
+        max_cudagraph_capture_size=max_capture,
+        cudagraph_capture_sizes=capture_sizes or [],
     )
     spec = MLAAttentionSpec(
         block_size=256,

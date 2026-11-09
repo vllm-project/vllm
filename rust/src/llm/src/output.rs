@@ -21,6 +21,7 @@ use vllm_engine_core_client::{
 };
 
 use crate::RequestTimestamps;
+use crate::aux_output::AuxOutputRows;
 use crate::error::Result;
 use crate::inflight::RequestGuard;
 use crate::request_metrics::{RequestMetricsTracker, current_unix_timestamp_secs};
@@ -40,8 +41,30 @@ pub struct TokenUsage {
     pub prompt_token_count: usize,
     /// Number of output tokens generated.
     pub output_token_count: usize,
+    /// Prompt-cache accounting reported by the engine.
+    pub prompt_cache_usage: PromptCacheUsage,
+}
+
+/// Prompt-cache accounting for one request, reported by the engine's prefill
+/// stats.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PromptCacheUsage {
     /// Number of prompt tokens served from cache.
     pub cached_token_count: usize,
+    /// Number of prompt tokens newly written to the local prefix cache.
+    pub cache_creation_token_count: usize,
+}
+
+impl PromptCacheUsage {
+    /// Fold in the accounting carried by a later output of the same request.
+    ///
+    /// Prefill stats arrive on one output only and the other outputs carry
+    /// zero, so each count keeps the largest value seen.
+    pub fn merge(&mut self, later: Self) {
+        self.cached_token_count = self.cached_token_count.max(later.cached_token_count);
+        self.cache_creation_token_count =
+            self.cache_creation_token_count.max(later.cache_creation_token_count);
+    }
 }
 
 /// Final raw token output plus terminal stream metadata.
@@ -65,6 +88,8 @@ pub struct CollectedGenerateOutput {
     /// Per-request speculative-decoding metrics from the terminal output.
     pub spec_decode_metrics: Option<RequestSpecDecodeMetrics>,
     pub weight_versions: Option<Vec<WeightVersionSpan>>,
+    /// Routed-expert rows for the whole request.
+    pub routed_experts: Option<WireNdArray>,
 }
 
 /// Prompt-scoped metadata emitted only once on the first [`GenerateOutput`] for
@@ -173,8 +198,8 @@ pub struct GenerateOutput {
     pub logprobs: Option<Logprobs>,
     /// Terminal finish reason, when this is the final output for the request.
     pub finish_reason: Option<FinishReason>,
-    /// Number of prompt tokens served from cache, when reported by prefill stats.
-    pub cached_token_count: usize,
+    /// Prompt-cache accounting, when reported by prefill stats.
+    pub prompt_cache_usage: PromptCacheUsage,
     /// Connector-specific KV transfer parameters for disaggregated serving.
     pub kv_transfer_params: Option<Box<serde_json::Value>>,
     /// Connector-specific encoder cache transfer parameters for disaggregated
@@ -184,8 +209,17 @@ pub struct GenerateOutput {
     pub sampling_mask: Option<SamplingMask>,
     /// Per-request speculative-decoding metrics, present on terminal outputs.
     pub spec_decode_metrics: Option<Box<RequestSpecDecodeMetrics>>,
-    /// Weight-version spans over all output tokens, set on terminal outputs only.
+    /// Weight-version spans over all output tokens so far; `None` if tokens
+    /// arrived but no label was reported. Set on every output, not only
+    /// terminal ones, because text decoding may finish the request locally
+    /// after matching a stop string and then cuts the spans at the truncated
+    /// token count.
     pub weight_versions: Option<Vec<WeightVersionSpan>>,
+    /// Routed-expert rows the engine sent with this output. Consumers append
+    /// the rows of every output they keep and concatenate them when the
+    /// request finishes, so text decoding can drop the rows of tokens cut off
+    /// by a stop string.
+    pub routed_experts: AuxOutputRows,
     /// Snapshot of engine lifecycle timestamps after this output.
     ///
     /// Every output carries a snapshot because text decoding may finish the
@@ -240,12 +274,13 @@ impl GenerateOutput {
                 None => self.sampling_mask = Some(next_mask),
             }
         }
-        self.cached_token_count = self.cached_token_count.max(next.cached_token_count);
+        self.prompt_cache_usage.merge(next.prompt_cache_usage);
         self.finish_reason = next.finish_reason;
         self.kv_transfer_params = next.kv_transfer_params;
         self.ec_transfer_params = next.ec_transfer_params;
         self.spec_decode_metrics = next.spec_decode_metrics;
         self.weight_versions = next.weight_versions;
+        self.routed_experts.append(next.routed_experts);
         self.timestamps = next.timestamps;
     }
 }
@@ -270,12 +305,13 @@ impl GenerateOutput {
             token_ids,
             logprobs: None,
             finish_reason,
-            cached_token_count: 0,
+            prompt_cache_usage: Default::default(),
             kv_transfer_params: None,
             ec_transfer_params: None,
             sampling_mask: None,
             spec_decode_metrics: None,
             weight_versions: None,
+            routed_experts: AuxOutputRows::default(),
             timestamps: RequestTimestamps::default(),
         }
     }
@@ -289,6 +325,7 @@ impl GenerateOutput {
 /// - For errors or unexpected engine-side closes, the stream terminates with an error.
 pub struct GenerateOutputStream {
     pending_prompt_info: Option<Box<GeneratePromptInfo>>,
+    remote_prefill_cached_tokens: Option<usize>,
     raw_stream: EngineCoreOutputStream,
     request_metrics: RequestMetricsTracker,
     /// (weight version, first output-token index) for each span.
@@ -304,11 +341,13 @@ impl GenerateOutputStream {
     /// output stream.
     pub(crate) fn new(
         prompt_token_ids: Arc<[u32]>,
+        remote_prefill_cached_tokens: Option<usize>,
         raw_stream: EngineCoreOutputStream,
         request_metrics: RequestMetricsTracker,
         request_guard: RequestGuard,
     ) -> Self {
         Self {
+            remote_prefill_cached_tokens,
             pending_prompt_info: Some(Box::new(GeneratePromptInfo {
                 prompt_token_ids,
                 prompt_logprobs: None,
@@ -385,11 +424,18 @@ impl GenerateOutputStream {
                 row_count: mask.rows.len(),
             });
         }
-        let cached_token_count = raw
-            .prefill_stats
-            .as_ref()
-            .map(|stats| stats.num_cached_tokens as usize)
-            .unwrap_or(0);
+        let prompt_cache_usage = PromptCacheUsage {
+            cached_token_count: self
+                .remote_prefill_cached_tokens
+                .or_else(|| {
+                    raw.prefill_stats.as_ref().map(|stats| stats.num_cached_tokens as usize)
+                })
+                .unwrap_or(0),
+            cache_creation_token_count: raw
+                .prefill_stats
+                .as_ref()
+                .map_or(0, |stats| stats.num_cache_creation_tokens as usize),
+        };
 
         // An engine error means the request was rejected before it ran.
         let rejected = raw.error.is_some();
@@ -400,11 +446,7 @@ impl GenerateOutputStream {
         {
             self.request_metrics.record_finished(received_at, finish_reason.clone());
         }
-        let weight_versions = if finish_reason.is_some() {
-            self.weight_version_spans()
-        } else {
-            None
-        };
+        let weight_versions = self.weight_version_spans();
 
         let output = GenerateOutput {
             request_id: raw.request_id,
@@ -412,12 +454,13 @@ impl GenerateOutputStream {
             token_ids: raw.new_token_ids,
             logprobs,
             finish_reason,
-            cached_token_count,
+            prompt_cache_usage,
             kv_transfer_params: raw.kv_transfer_params,
             ec_transfer_params: raw.ec_transfer_params,
             sampling_mask,
             spec_decode_metrics: raw.spec_decode_metrics,
             weight_versions,
+            routed_experts: AuxOutputRows::from_engine(raw.routed_experts),
             timestamps: self.request_metrics.timestamps(),
         };
 
@@ -498,11 +541,13 @@ impl<T: Stream<Item = Result<GenerateOutput>> + Send> T {
             let mut prompt_token_ids = None;
             let mut prompt_logprobs = None;
             let mut prompt_token_id_logprobs = None;
-            let mut cached_token_count = 0;
+            let mut prompt_cache_usage = PromptCacheUsage::default();
             let mut collected: Option<CollectedGenerateOutput> = None;
+            let mut routed_experts = AuxOutputRows::default();
 
             while let Some(output) = stream.next().await.transpose()? {
-                cached_token_count = cached_token_count.max(output.cached_token_count);
+                prompt_cache_usage.merge(output.prompt_cache_usage);
+                routed_experts.append(output.routed_experts);
                 let sampling_mask = output.sampling_mask;
                 if let Some(info) = output.prompt_info {
                     if prompt_token_ids.is_none() {
@@ -540,13 +585,14 @@ impl<T: Stream<Item = Result<GenerateOutput>> + Send> T {
                         usage: TokenUsage {
                             prompt_token_count: prompt_token_ids.as_ref().map_or(0, Vec::len),
                             output_token_count: 0,
-                            cached_token_count,
+                            prompt_cache_usage,
                         },
                         kv_transfer_params: None,
                         ec_transfer_params: None,
                         sampling_mask,
                         spec_decode_metrics: None,
                         weight_versions: None,
+                        routed_experts: None,
                     });
                 }
 
@@ -556,12 +602,13 @@ impl<T: Stream<Item = Result<GenerateOutput>> + Send> T {
                     collected.usage = TokenUsage {
                         prompt_token_count: collected.prompt_token_ids.len(),
                         output_token_count: collected.token_ids.len(),
-                        cached_token_count,
+                        prompt_cache_usage,
                     };
                     collected.kv_transfer_params = output.kv_transfer_params.map(|value| *value);
                     collected.ec_transfer_params = output.ec_transfer_params.map(|value| *value);
                     collected.spec_decode_metrics = output.spec_decode_metrics.map(|value| *value);
                     collected.weight_versions = output.weight_versions;
+                    collected.routed_experts = routed_experts.concat()?;
                     if let Some(mask) = collected.sampling_mask.as_ref()
                         && mask.rows.len() != collected.token_ids.len()
                     {
