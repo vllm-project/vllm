@@ -43,6 +43,12 @@ def _compare(actual: torch.Tensor, expected: torch.Tensor) -> dict[str, float]:
     }
 
 
+def check_sampled(sampled: torch.Tensor, vocab_size: int) -> dict[str, Any]:
+    # Rejection sampling leaves rows past each request's accepted tokens unset.
+    first = sampled[:, 0]
+    return {"valid_token_ids": bool(((first >= 0) & (first < vocab_size)).all())}
+
+
 def write_input_ids(
     batch: BenchBatch, input_batch: InputBatch, input_ids: torch.Tensor | None
 ) -> None:
@@ -82,6 +88,7 @@ class ForwardBench:
         profile_prefix: str | None = None,
         *,
         include_drafter: bool = True,
+        include_sampler: bool = True,
     ):
         self.runner = runner
         self.batch = batch
@@ -95,6 +102,8 @@ class ForwardBench:
         self.result: dict[str, Any] = {}
         self.include_drafter = include_drafter
         self.drafter: DraftBench | None = None
+        self.include_sampler = include_sampler
+        self.sampled: torch.Tensor | None = None
 
     def run(self) -> dict[str, Any]:
         runner, model = self.runner, self.runner.model
@@ -151,24 +160,56 @@ class ForwardBench:
                     + self.runner.block_tables.input_block_tables
                 )
             self.drafter.prepare(self._input_batch, context)
-        self.result["timing_scope"] = (
-            "target_and_drafter" if self.drafter is not None else "target_only"
-        )
+        # Only the last PP rank samples.
+        sample = self.include_sampler and self.runner.is_last_pp_rank
+        self.result["timing_scope"] = {
+            (False, False): "target_only",
+            (True, False): "target_and_sampler",
+            (False, True): "target_and_drafter",
+            (True, True): "target_sampler_and_drafter",
+        }[(sample, self.drafter is not None)]
 
         def run_model() -> Any:
             for name, value in saved.items():
                 setattr(context, name, value)
             with override_forward_context(context):
                 output = self._model_forward(**inputs)
+            handler = self.runner.pp_handler
             if not self.runner.is_last_pp_rank:
-                output = self.runner.pp_handler.relay_aux_hidden_states(
+                # The pipeline bench sends this output to the next stage itself.
+                output = handler.relay_aux_hidden_states(
                     inputs["intermediate_tensors"], output
                 )
-            if self.drafter is not None:
-                self.drafter.propose(output)
+            else:
+                if sample:
+                    self._sample(output)
+                if self.drafter is not None:
+                    # The runner completes the returned output itself; only the
+                    # drafter needs the full aux hidden states here.
+                    draft_input = output
+                    if self.runner.use_aux_hidden_state_outputs and handler is not None:
+                        draft_input = handler.add_upstream_aux_hidden_states(
+                            inputs["intermediate_tensors"], output
+                        )
+                    self.drafter.propose(draft_input)
             return output
 
         return run_model
+
+    def _sample(self, output: Any) -> None:
+        """Sample, or rejection-sample verify rows, as `sample_tokens` does.
+
+        The drafter keeps its fixed fully-accepted inputs, so the sampled
+        tokens feed nothing.
+        """
+        runner = self.runner
+        hidden = _first_tensor(output)
+        input_batch = self._input_batch
+        if runner.pcp_manager is not None:
+            hidden, _, input_batch = runner.pcp_manager.restore_for_sampling(
+                hidden, None
+            )
+        self.sampled = runner.sample(hidden, input_batch, None)[0].sampled_token_ids
 
     def _check_batch(self, input_batch: InputBatch) -> None:
         """Fail unless the runner built exactly the requested batch."""
@@ -234,11 +275,19 @@ class ForwardBench:
                 self._events[1].record()
         hidden = _first_tensor(output)
 
+        sampled = self.sampled
         graph.replay()
         torch.accelerator.synchronize()
         first = hidden.clone()
+        first_sampled = sampled.clone() if sampled is not None else None
         graph.replay()
         torch.accelerator.synchronize()
+        if sampled is not None:
+            assert first_sampled is not None
+            self.result["sampler"] = {
+                **check_sampled(sampled, self.runner.model_config.get_vocab_size()),
+                "graph_deterministic": bool(torch.equal(first_sampled, sampled)),
+            }
         self.result.update(
             # Same step from the same restored state: should match exactly.
             eager_repeat=_compare(reference, eager),

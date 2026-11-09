@@ -10,7 +10,7 @@ import time
 import traceback
 import weakref
 from collections import deque
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Sequence, Sized
 from concurrent.futures import Future, InvalidStateError, ThreadPoolExecutor
 from contextlib import suppress
 from dataclasses import dataclass
@@ -96,13 +96,17 @@ class FutureWrapper(Future):
         get_response: Callable[[], Any],
         aggregate: Callable = lambda x: x,
         response_ready: Callable[[], bool] | None = None,
+        wait_for_response: Callable[[Sized, float], None] | None = None,
     ):
         self.futures_queue = futures_queue
         self.get_response = get_response
         self.aggregate = aggregate
-        # Check, waiting at most briefly, for whether get_response() can return
-        # without waiting. If None, poll() treats the response as ready (and blocks).
+        # Non-blocking check for whether get_response() can return without
+        # waiting. If None, poll() treats the response as ready (and blocks).
         self.response_ready = response_ready
+        # Spins until get_response() is ready, the given collection is non-empty
+        # or time.monotonic() reaches the given deadline.
+        self.wait_for_response = wait_for_response
         super().__init__()
         self.futures_queue.appendleft(self)
 
@@ -124,6 +128,13 @@ class FutureWrapper(Future):
             self.futures_queue.pop()
             future._wait_for_response()
         return True
+
+    def wait_briefly(self, pending: Sized, deadline: float) -> None:
+        """Wait for the oldest uncollected response, until `pending` is non-empty
+        or time.monotonic() reaches `deadline`. Call after poll() returns False."""
+        wait_for_response = self.futures_queue[-1].wait_for_response
+        if wait_for_response is not None:
+            wait_for_response(pending, deadline)
 
     def _wait_for_response(self):
         try:
@@ -562,11 +573,18 @@ class MultiprocExecutor(Executor):
 
             return responses[0] if output_rank is not None else responses
 
+        def wait_for_response(pending: Sized, deadline: float) -> None:
+            for mq in response_mqs:
+                if not mq.readable():
+                    mq.spin_until_readable(pending, deadline)
+                    return
+
         future = FutureWrapper(
             self.futures_queue,
             get_response=get_response,
             aggregate=aggregate,
             response_ready=lambda: all(mq.readable() for mq in response_mqs),
+            wait_for_response=wait_for_response,
         )
 
         return future if non_block else future.result()
