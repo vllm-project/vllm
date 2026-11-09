@@ -988,3 +988,43 @@ def test_k2build_dsa_asserts(monkeypatch):
             k2.build(dataclasses.replace(base, **over))
     with pytest.raises(AssertionError):  # 16 rows: two requests
         k2.build(dataclasses.replace(base, tokens=16, dsa=1, dsa_p=16))
+
+
+@pytest.mark.parametrize(
+    "bs", [1, 2, 3, 7, 48, 64, 96, 576, 1000, 1152, 2048, 2304, 4095, (1 << 26) - 1]
+)
+def test_dsa_fold_index_math(bs):
+    """``dsa_attn``'s fold divides by ``fold_word``'s magic: every token's
+    block and row are // and %'s (the converter's), at any block size, over a
+    block's edges, the table's end, int32's ends and random tokens; negative and
+    out-of-table tokens the invalid slot."""
+    import random
+
+    from vllm.models.kimi_k3.amd.specialized_decode.mono.attention.dsa_fold import (
+        fold_slot,
+        fold_unpack,
+        fold_word,
+    )
+
+    word = fold_word(bs)
+    assert 0 <= word < 1 << 63 and fold_unpack(word)[1] == bs
+    m, _, s = fold_unpack(word)
+    rng = random.Random(bs)
+    i32 = (1 << 31) - 1
+    toks = [0, 1, bs - 1, bs, bs + 1, i32, i32 - 1, i32 - bs, i32 // bs * bs]
+    toks += [k * bs + d for k in (2, 3, 1000, i32 // bs) for d in (-1, 0, 1)]
+    toks += [rng.randrange(0, i32 + 1) for _ in range(2000)]
+    for tok in toks:
+        if 0 <= tok <= i32:
+            assert (tok * m) >> s == tok // bs, (bs, tok)
+    nblk = max(1, min(64, 5000 // bs))
+    bt = rng.sample(range(4 * nblk), nblk)
+    bsr = bs + rng.randrange(0, 100)
+    end = nblk * bs
+    table = [0, bs - 1, bs, end - 1, end, end + 5, -1, -2, -i32 - 1, i32]
+    table += [rng.randrange(-bs, end + bs) for _ in range(500)]
+    for tok in table:
+        want = bt[tok // bs] * bsr + tok % bs if 0 <= tok < end else None
+        for invalid in (0, -1):
+            got = fold_slot(tok, bt, bsr, word, invalid)
+            assert got == (invalid if want is None else want), (bs, tok)

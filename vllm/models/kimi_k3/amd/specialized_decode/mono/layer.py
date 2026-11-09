@@ -309,6 +309,7 @@ ABI = KernelAbi(
         "m1c_vscale",
         "dsa_bt",
         "dsa_bsr",
+        "dsa_bsm",
         "w_o",
         "prefix",
         "blocks",
@@ -631,6 +632,7 @@ def build(key: K2Build):
         m1c_vscale: Int32,
         dsa_bt: Int64,
         dsa_bsr: Int32,
+        dsa_bsm: Int64,
         w_o: Int64,
         prefix: Int64,
         blocks: Int64,
@@ -911,6 +913,7 @@ def build(key: K2Build):
                     "c_log2": m1c_scale,
                     "idx_bytes": m1c_vscale,
                     "bsr": dsa_bsr,
+                    "bsm": dsa_bsm,
                 }
                 if bid >= cta0:
                     dsa_stage(c, dk, bid - cta0, tid, dlds, dargs)
@@ -1055,6 +1058,7 @@ def build(key: K2Build):
         m1c_vscale: Int32,
         dsa_bt: Int64,
         dsa_bsr: Int32,
+        dsa_bsm: Int64,
         w_o: Int64,
         prefix: Int64,
         blocks: Int64,
@@ -1112,6 +1116,7 @@ def build(key: K2Build):
             m1c_vscale,
             dsa_bt,
             dsa_bsr,
+            dsa_bsm,
             w_o,
             prefix,
             blocks,
@@ -1155,11 +1160,11 @@ def ptr(t):
 
 
 def dsa_args(key: K2Build, m1b_in, dsa_in) -> list:
-    """The DSA stage's ABI words (M1c's slots, then ``dsa_bt`` / ``dsa_bsr``):
-    q, kv, idx (or with the fold the top-k), iptr, c_log2, idx's bytes (the
-    block table's), bt, bsr; zeros without it."""
+    """The DSA stage's ABI words (M1c's slots, then ``dsa_bt`` / ``dsa_bsr`` /
+    ``dsa_bsm``): q, kv, idx (or with the fold the top-k), iptr, c_log2, idx's
+    bytes (the block table's), bt, bsr, bsm; zeros without it."""
     if dsa_in is None:
-        return [0] * 8
+        return [0] * 9
     dk = dsa_build(key)
     a = dsa.host_args(dk, **dsa_in)
     # the stage's strides are the build's constants (``layer.build``)
@@ -1172,7 +1177,7 @@ def dsa_args(key: K2Build, m1b_in, dsa_in) -> list:
     assert lse.dtype == torch.float32
     pages = a["topk"] if key.dsa_fold else a["idx"]
     return [a["q"], a["kv"], pages, a["iptr"], a["c_log2"], a["idx_bytes"],
-            a["bt"], a["bsr"]]  # fmt: skip
+            a["bt"], a["bsr"], a["bsm"]]  # fmt: skip
 
 
 def k2_launch(
@@ -1238,7 +1243,7 @@ def k2_launch(
         core.data_ptr(),
         *(m1b.host_args(key.m1b_ranks, **m1b_in) if m1b_in is not None else [0] * 16),
         *(
-            [*m1c.host_args(**m1c_in), 0, 0]
+            [*m1c.host_args(**m1c_in), 0, 0, 0]
             if m1c_in is not None
             else dsa_args(key, m1b_in, dsa_in)
         ),

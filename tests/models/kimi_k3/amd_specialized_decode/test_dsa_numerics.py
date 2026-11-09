@@ -482,14 +482,17 @@ def _convert(bt, topk, iptr, bsr: int, invalid: int = 0, bs: int = BS):
 @needs_gfx950
 @pytest.mark.parametrize("splits", [16, 32])
 @pytest.mark.parametrize("has_invalid", [False, True])
-@pytest.mark.parametrize("bs,nblk,bsr", [(BS, 80, 80), (2048, 4, 2100)])
+@pytest.mark.parametrize(
+    "bs,nblk,bsr",
+    [(BS, 80, 80), (2048, 4, 2100), (1152, 4, 1190), (576, 8, 576), (48, 48, 50)],
+)
 @torch.inference_mode()
 def test_dsa_fold_matches_converter(splits, has_invalid, bs, nblk, bsr):
     """U7: the in-kernel fold (the indexer's top-k, the block table, the flat
-    pitch) against ``dsa_attn`` on the converter's rows, bit for bit: a pitch
-    past the block size (64, and the hybrid engine's 2048), rows of every
-    length, -1 and out-of-table positions (the converter's row 0, or with
-    ``has_invalid`` masked)."""
+    pitch) against ``dsa_attn`` on the converter's rows, bit for bit: block
+    sizes of powers of 2 and not (the packed DSA block's 1152, a small 48), a
+    pitch past the block size, rows of every length, -1 and out-of-table
+    positions (the converter's row 0, or with ``has_invalid`` masked)."""
     from vllm.models.kimi_k3.amd.specialized_decode.mono.attention.dsa_attn import (
         DsaAttnBuild,
     )
@@ -528,26 +531,30 @@ def test_dsa_fold_matches_converter(splits, has_invalid, bs, nblk, bsr):
 
 @needs_gfx950
 @pytest.mark.parametrize("splits", [16, 32])
-@pytest.mark.parametrize("fold", [False, True])
+@pytest.mark.parametrize(
+    "fold,bs,nblk,bsr",
+    [(False, BS, 80, 80), (True, BS, 80, 80), (True, 1152, 4, 1190)],
+)
 @torch.inference_mode()
-def test_dsa_stage_matches_standalone(splits, fold):
+def test_dsa_stage_matches_standalone(splits, fold, bs, nblk, bsr):
     """U6 (one GPU): K2's DSA stage (``standalone`` False: 512 threads, waves
     4 .. 7 the body's barriers only) in a launch of its own gives the
-    standalone kernel's partials, bit for bit."""
+    standalone kernel's partials, bit for bit (the fold at a block size of a
+    power of 2 and not)."""
     from vllm.models.kimi_k3.amd.specialized_decode.mono.attention import dsa_attn
     from vllm.models.kimi_k3.amd.specialized_decode.mono.attention.dsa_attn import (
         DsaAttnBuild,
     )
 
     g = torch.Generator().manual_seed(60 + splits + fold)
-    nblk, bsr = 80, 80
-    rec, bt, topk, iptr = _paged(nblk, bsr, [TOPK, 1, 2047, 129, 128, 700, TOPK, 3], g)
+    lens = [TOPK, 1, 2047, 129, 128, 700, TOPK, 3]
+    rec, bt, topk, iptr = _paged(nblk, bsr, lens, g, bs=bs)
     q, scale = _q(g), _scale()
     ins = dict(q=q, kv=rec, iptr=iptr, scale=scale)
     if fold:
-        ins.update(topk=topk, bt=bt, bsr=bsr, bs=BS)
+        ins.update(topk=topk, bt=bt, bsr=bsr, bs=bs)
     else:
-        ins.update(idx=_convert(bt, topk, iptr, bsr))
+        ins.update(idx=_convert(bt, topk, iptr, bsr, bs=bs))
     got = []
     for standalone in (True, False):
         key = DsaAttnBuild(

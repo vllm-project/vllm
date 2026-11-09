@@ -31,7 +31,8 @@ stage (``layer``'s ``dsa`` 2): item v on CTA ``geometry``'s cta0 + v of K2's
 CTAs. ``fold`` reads the indexer's logical top-k row and the request's block
 table instead of the converter's rows: slot ``bt[tok // bs] * bsr + tok % bs``
 (``triton_convert_req_index_to_global_index``'s, its invalid entries 0), the
-block size ``bs`` a launch's (the engine sets it after the builds).
+block size ``bs`` a launch's (the engine sets it after the builds), any size:
+``tok // bs`` a multiply by ``dsa_fold.fold_word``'s magic (``bsm``).
 """
 
 from dataclasses import dataclass
@@ -83,6 +84,12 @@ from vllm.models.kimi_k3.amd.ops.flydsl_sparse_mla_gfx950 import (
     _xmax,
     _xsum,
 )
+from vllm.models.kimi_k3.amd.specialized_decode.mono.attention.dsa_fold import (
+    BS_BITS,
+    BS_POS,
+    LG_POS,
+    fold_word,
+)
 from vllm.models.kimi_k3.amd.specialized_decode.mono.common.ops import CM_DEV, traced
 from vllm.models.kimi_k3.amd.specialized_decode.mono.common.plan import (
     BLOCKS,
@@ -92,7 +99,6 @@ from vllm.models.kimi_k3.amd.specialized_decode.mono.common.plan import (
 )
 
 TOPK = 2048  # the indexer's top-k: a row's indices at most
-BS_SHIFT = 26  # the fold's ``bsr`` word: pitch | log2(block size) << BS_SHIFT
 TILE = _TILE  # the body's tokens a tile
 KVL = 512  # kv_lora_rank
 ENTRY = 576  # the query's row a head: the latent's 512, the rope's 64
@@ -131,6 +137,7 @@ ABI = KernelAbi(
         "c_log2",
         "idx_bytes",
         "bsr",
+        "bsm",
     )
 )
 
@@ -273,9 +280,12 @@ def _body(c, key: DsaAttnBuild, v):
         # the request's block table row, its idx_bytes / 4 blocks
         bt_t = _BoundedI32(a["bt"], a["idx_bytes"])
         nblk = fx.Int32(a["idx_bytes"]) // 4
-        # the pitch, log2 of the block size in bits BS_SHIFT ..
-        bsr = fx.Int32(a["bsr"]) & ((1 << BS_SHIFT) - 1)
-        bs_log2 = fx.Int32(a["bsr"]) >> BS_SHIFT
+        # the pitch; ``fold_word``'s m, block size and shift s = 31 + L
+        bsr = fx.Int32(a["bsr"])
+        bsm = fx.Int64(a["bsm"])
+        mag = bsm & ((1 << BS_POS) - 1)
+        bs = fx.Int32(bsm >> BS_POS) & ((1 << BS_BITS) - 1)
+        bs_sh = (bsm >> LG_POS) + 31
 
     # ---- Q prologue: lane (h = t, g) holds all 128 dims of block g as fp8 hi/lo
     h_ok = t < H
@@ -338,12 +348,11 @@ def _body(c, key: DsaAttnBuild, v):
         ix = fx.Int32(src[r_beg + p])
         if const_expr(key.fold):
             # the converter's slot: block table entry, then the row in it;
-            # an invalid token (or block) its 0, -1 (masked) with has_invalid
-            blk = ix >> bs_log2
+            # an invalid token (or block) its 0, -1 (masked) with has_invalid.
+            # blk = ix // bs for ix >= 0 (``dsa_fold``: exact below 2^31)
+            blk = fx.Int32((fx.Int64(ix) * mag) >> bs_sh)
             ok = (ix >= 0) & (blk < nblk)
-            row = fx.Int32(bt_t[ok.select(blk, fx.Int32(0))]) * bsr + (
-                ix - (blk << bs_log2)
-            )
+            row = fx.Int32(bt_t[ok.select(blk, fx.Int32(0))]) * bsr + (ix - blk * bs)
             ix = ok.select(row, fx.Int32(-1 if has_invalid else 0))
         return (p < r_len).select(ix, fx.Int32(-1))
 
@@ -627,6 +636,7 @@ def build(key: DsaAttnBuild):
         c_log2: Int32,
         idx_bytes: Int32,
         bsr: Int32,
+        bsm: Int64,
     ):
         _ = keyed
         lds = fx.SharedAllocator().allocate(Smem).peek()
@@ -648,6 +658,7 @@ def build(key: DsaAttnBuild):
                 "c_log2": c_log2,
                 "idx_bytes": idx_bytes,
                 "bsr": bsr,
+                "bsm": bsm,
             },
         }
         if const_expr(key.standalone):
@@ -674,6 +685,7 @@ def build(key: DsaAttnBuild):
         c_log2: Int32,
         idx_bytes: Int32,
         bsr: Int32,
+        bsm: Int64,
         stream: fx.Stream = _STREAM,
     ):
         _ = keyed
@@ -692,6 +704,7 @@ def build(key: DsaAttnBuild):
             c_log2,
             idx_bytes,
             bsr,
+            bsm,
         ).launch(grid=(grid,), block=(threads,), stream=stream)
 
     # the stock kernel's: two waves a SIMD, IEEE math
@@ -736,7 +749,8 @@ def host_args(
     flat physical rows (row t's ``idx[iptr[t]:iptr[t + 1]]``). With it:
     ``topk`` the indexer's logical [>= S, 2048] int32, ``bt`` the request's
     block table row (int32, dense), ``bsr`` the flat rows a block
-    (``flat_kv_row_view``'s pitch) and ``bs`` the block size (a power of 2)."""
+    (``flat_kv_row_view``'s pitch) and ``bs`` the block size (any, < 2^26:
+    ``bsm`` its ``fold_word``)."""
     assert q.dtype == torch.bfloat16 and q.stride(-1) == 1
     assert q.shape[1:] == (key.heads, ENTRY) and q.size(0) >= key.tokens
     assert q.stride(0) % 2 == 0 and q.stride(1) % 2 == 0
@@ -755,19 +769,21 @@ def host_args(
         "topk_st": 0,
         "bt": 0,
         "bsr": 0,
+        "bsm": 0,
     }
     if key.fold:
         assert idx is None and topk.dtype == torch.int32 and bt.dtype == torch.int32
         assert topk.size(-1) == TOPK and topk.stride(-1) == 1
         assert topk.size(0) >= key.tokens and bt.dim() == 1 and bt.stride(0) == 1
-        assert 0 < bs <= bsr < 1 << BS_SHIFT and bs & (bs - 1) == 0
+        assert 0 < bs <= bsr < 1 << 31
         assert bt.numel() < 1 << 29
         out.update(
             topk=topk.data_ptr(),
             topk_st=topk.stride(0),
             bt=bt.data_ptr(),
             idx_bytes=bt.numel() * 4,
-            bsr=bsr | (bs.bit_length() - 1) << BS_SHIFT,
+            bsr=bsr,
+            bsm=fold_word(bs),
         )
     else:
         assert topk is None and bt is None

@@ -162,7 +162,8 @@ mono/            kernel source
     layer.py     K2
     attention/   kda.py (K1), mla.py (M1a), mla_back.py (M1b),
                  mla_attn.py + mla_attn_geom.py (M1c), dsa_attn.py (DSA
-                 split-K sparse MLA), back.py
+                 split-K sparse MLA) + dsa_fold.py (its top-k fold's block
+                 division), back.py
     stages/      moe.py, gemv.py
     common/      device ops, mailbox sync, MX helpers, plan / build keys
                  (adapted from ROCm/ATOM atom/mono, MIT)
