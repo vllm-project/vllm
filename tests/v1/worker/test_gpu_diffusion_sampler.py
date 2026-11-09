@@ -14,6 +14,7 @@ import vllm.utils.gpu_sync_debug as gsd
 from vllm.model_executor.models import diffusion_gemma as dg
 from vllm.sampling_params import SamplingParams
 from vllm.utils.gpu_sync_debug import with_gpu_sync_check
+from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.worker.gpu.sample.logprob import LogprobTokenIdsState
 from vllm.v1.worker.gpu.sample.states import SamplingStates
 
@@ -159,7 +160,7 @@ def test_logprobs_reach_the_emitting_step_without_a_host_sync(sync_check_error):
     its commit step. A request without logprobs gets no rows. The host never
     learns which slots converged, so no step syncs with the GPU."""
     num_reqs, canvas_len, vocab, hidden = 3, 16, 1024, 32
-    torch.manual_seed(0)
+    set_random_seed(0)
     weight = torch.randn(vocab, hidden, device=DEVICE)
     one_step = {"diffusion_max_steps": 1}
     params = [
@@ -192,11 +193,10 @@ def test_logprobs_reach_the_emitting_step_without_a_host_sync(sync_check_error):
 def test_constrained_reads_report_their_allowed_ids_without_a_host_sync(
     sync_check_error,
 ):
-    """Read-only reads sharing one allowed set (the structured-decisions
-    path) emit at convergence with every allowed id's logprob, without a
-    host sync."""
+    """Constrained read-only reads sharing one allowed set emit at
+    convergence with every allowed id's logprob, without a host sync."""
     num_reqs, canvas_len, vocab, hidden = 2, 16, 1024, 32
-    torch.manual_seed(0)
+    set_random_seed(0)
     weight = torch.randn(vocab, hidden, device=DEVICE)
     allowed = [3, 5, 700, 1000]
     extra = {"diffusion_max_steps": 1, "diffusion_read_only": 1}
@@ -230,7 +230,7 @@ def test_full_vocab_logprobs_come_on_the_commit_step(sync_check_error):
     top-2 request in the same batch. Both get their rows on the step they
     emit, through syncs the checker is told about."""
     num_reqs, canvas_len, vocab, hidden = 2, 16, 1024, 32
-    torch.manual_seed(0)
+    set_random_seed(0)
     weight = torch.randn(vocab, hidden, device=DEVICE)
     one_step = {"diffusion_max_steps": 1}
     params = [

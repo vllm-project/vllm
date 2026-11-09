@@ -15,6 +15,7 @@ from vllm.model_executor.models.diffusion_gemma_sampler import (
     stash_converged_logprobs,
 )
 from vllm.sampling_params import SamplingParams
+from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.worker.gpu.sample.logprob import (
     LogprobTokenIdsState,
     compute_topk_scores,
@@ -138,32 +139,28 @@ def test_leading_masked_block_keeps_a_finite_entropy():
     assert sample[0].item() == 8500
 
 
-def _by_value_then_id(ids: torch.Tensor, lps: torch.Tensor) -> torch.Tensor:
-    """Ids ordered by logprob, ties by id: torch.topk orders tied top-k ids
-    arbitrarily, the stash kernels by id."""
-    by_id = ids.argsort(dim=-1, stable=True)
-    lps = lps.gather(-1, by_id)
-    return ids.gather(-1, by_id).gather(
-        -1, lps.argsort(dim=-1, descending=True, stable=True)
-    )
-
-
 @pytest.mark.parametrize("num_logprobs", [0, 5, 128])
 @pytest.mark.parametrize("with_ids", [False, True])
 @pytest.mark.parametrize("logits_mode", [False, True])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 def test_stashed_logprobs_match_compute_topk_scores(
-    num_logprobs: int, with_ids: bool, logits_mode: bool
+    num_logprobs: int, with_ids: bool, logits_mode: bool, dtype: torch.dtype
 ):
     """The stash kernels report what compute_topk_scores reports for the
-    scaled rows, up to the order of tied top-k ids, and touch only the
-    converged slots' real rows. bf16 logits tie often, so the argmax, rank
-    and top-k tie conventions are exercised."""
-    torch.manual_seed(0)
+    scaled rows and touch only the converged slots' real rows. Which tied id
+    makes a top-k cutoff is not guaranteed by either side, so the top-k ids
+    are compared by the values they hold, and as a set only where the cutoff
+    is not tied."""
+    set_random_seed(0)
     # A row spans several kernel chunks of 16 * 1024 logits.
     n, W, vocab, max_reqs, cl = 5, 4, 40001, 8, 6
-    tile = (torch.randn(n * W, vocab, device="cuda") * 3).to(torch.bfloat16)
+    tile = (torch.randn(n * W, vocab, device="cuda") * 3).to(dtype)
+    # 129 distinct maxima, exact in bf16: every top-k cutoff is clear.
+    tile[0, 300:39000:300] = 16 + 0.5 * torch.arange(129, device="cuda")
     # A max tied across chunks: the argmax is the first, the rank counts both.
     tile[1, [7, 39000]] = 20.0
+    # A max tied 201 times across chunks straddles every top-k cutoff.
+    tile[2, ::200] = 25.0
     # A row top_k left 3 logits of: the rest of its top-k ties at -inf.
     tile[3 * W] = float("-inf")
     tile[3 * W, [5, 17000, 40000]] = 1.0
@@ -224,14 +221,18 @@ def test_stashed_logprobs_match_compute_topk_scores(
             continue
         ids, lps = stash_ids[slot, :v, :width], stash_lps[slot, :v, :width]
         # Both sides divide by the temperature with IEEE fp32 division, so
-        # ids and ranks match exactly; the logsumexp is a float reduction.
+        # the argmax and rank match exactly; the logsumexp is a float reduction.
         torch.testing.assert_close(lps, ref.logprobs[rows], rtol=1.3e-6, atol=1e-5)
         assert torch.equal(stash_ranks[slot, :v], ref.selected_token_ranks[rows])
         assert torch.equal(ids[:, 0], ref.logprob_token_ids[rows, 0])
-        assert torch.equal(
-            _by_value_then_id(ids[:, 1:], lps[:, 1:]),
-            _by_value_then_id(ref.logprob_token_ids[rows, 1:], ref.logprobs[rows, 1:]),
-        )
+        held, ref_ids = scaled[rows], ref.logprob_token_ids[rows]
+        assert torch.equal(held.gather(1, ids), held.gather(1, ref_ids))
+        if with_ids and slot == 4:
+            assert torch.equal(ids, ref_ids)
+        elif num_logprobs:
+            top = held.topk(num_logprobs + 1, dim=-1).values
+            untied = top[:, -2] > top[:, -1]
+            assert torch.equal(ids[untied].sort().values, ref_ids[untied].sort().values)
         # Padded as compute_topk_scores pads a mixed batch.
         assert not stash_ids[slot, :v, width:].any()
         assert torch.isneginf(stash_lps[slot, :v, width:]).all()
