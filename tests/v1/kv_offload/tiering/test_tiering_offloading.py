@@ -14,6 +14,7 @@ import os
 import threading
 import uuid
 from collections.abc import Iterable
+from typing import cast
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -2018,12 +2019,16 @@ def test_tiering_spec_segments_region_and_skips_scheduler_prefault(monkeypatch):
         worker_kv_bytes_per_block=page,
         world_size=2,
     )
-    worker = TieringOffloadingSpec(config).create_worker(MagicMock())
+    worker = cast(
+        region_module.SharedOffloadRegion,
+        TieringOffloadingSpec(config).create_worker(MagicMock()),
+    )
     spec = TieringOffloadingSpec(config)
     try:
         worker_populated = len(populated)
         manager = spec.get_manager()
         scheduler = spec._scheduler_mmap
+        assert scheduler is not None
         assert worker_populated > 0 and len(populated) == worker_populated
         assert len(scheduler._segments) > 1
         assert scheduler._segments == worker._segments
