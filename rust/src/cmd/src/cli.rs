@@ -485,14 +485,15 @@ pub struct SharedRuntimeArgs {
     #[serde(default)]
     pub log_error_stack: Option<bool>,
 
-    /// Register the scale-out `/inference/v1/generate` endpoint.
+    /// Register the scale-out `/inference/v1/generate` endpoint. Defaults to
+    /// `VLLM_SERVER_DEV_MODE`.
     #[arg(
         long,
         default_missing_value = "true",
         num_args = 0..=1
     )]
     #[serde(default)]
-    pub enable_scale_out: bool,
+    pub enable_scale_out: Option<bool>,
 
     /// Enable the `/tokenizer_info` endpoint. May expose chat
     /// templates and other tokenizer configuration.
@@ -1011,7 +1012,7 @@ impl SharedRuntimeArgs {
             enable_per_request_metrics: self.enable_per_request_metrics,
             enable_request_id_headers: self.enable_request_id_headers,
             log_error_stack: self.log_error_stack.unwrap_or(self.server_dev_mode),
-            enable_scale_out: self.enable_scale_out,
+            enable_scale_out: self.enable_scale_out.unwrap_or(self.server_dev_mode),
             enable_tokenizer_info_endpoint: self.enable_tokenizer_info_endpoint,
             skip_model_name_validation: self.skip_model_name_validation,
             server_dev_mode: self.server_dev_mode,
