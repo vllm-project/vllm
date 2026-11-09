@@ -21,6 +21,24 @@ _ACT_QUANT_KEYS = {
 }
 
 
+def _is_supported_group_size(c: MPLinearLayerConfig) -> bool:
+    """Whether Humming keeps group boundaries on its 128-row K tiles.
+
+    The kernel flushes a group's scales at the end of every warp tile, so a
+    group that ends inside a 128-row tile gets its partial sums scaled with the
+    next group's scales. Group sizes that divide 128, are multiples of 128, span
+    the whole K dimension, or are channelwise (-1) are exact.
+    """
+    group_size = c.group_size
+    if group_size == -1:
+        return True
+    return (
+        group_size in (16, 32, 64)
+        or group_size % 128 == 0
+        or group_size == c.partition_weight_shape[0]
+    )
+
+
 class HummingLinearKernel(MPLinearKernel):
     @classmethod
     def get_min_capability(cls) -> int:
@@ -34,6 +52,11 @@ class HummingLinearKernel(MPLinearKernel):
             return False, "Humming is not installed"
         if c.act_type.itemsize == 1 and c.act_type not in _ACT_QUANT_KEYS:
             return False, f"Activation type ({c.act_type}) not supported by Humming"
+        if not _is_supported_group_size(c):
+            return False, (
+                f"Group size ({c.group_size}) is not supported by Humming: "
+                "it does not tile the kernel's 128-row K blocks"
+            )
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
