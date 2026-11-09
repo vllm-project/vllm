@@ -661,8 +661,6 @@ steps:
   source_file_dependencies:
   - vllm/models/glm5next/nvidia/specialized_decode/
   - vllm/models/common/ops/moe_tail_fusion/
-  - vllm/models/kimi_k3/nvidia/specialized_decode/cutedsl/
-  - vllm/models/deepseek_v41/nvidia/ops/cute_dsl/
   - tests/models/glm5next/
   commands:
   # decode_backend=latency_specialized is for GB300 (SM103); no CI agent has four of them.

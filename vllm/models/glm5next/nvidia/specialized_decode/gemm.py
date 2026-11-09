@@ -78,9 +78,7 @@ class Projection:
                 policies[m] = tactics[tile]
         self.split_k = None
         if policies:
-            from vllm.models.kimi_k3.nvidia.specialized_decode.cutedsl.gemm.projection import (  # noqa: E501
-                PreparedProjection,
-            )
+            from .cutedsl.projection import PreparedProjection
 
             self.split_k = PreparedProjection(weight, policies).prepare()
 

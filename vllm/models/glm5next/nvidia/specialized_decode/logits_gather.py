@@ -33,7 +33,8 @@ from vllm.models.common.ops.moe_tail_fusion.primitives import (
     to_cute,
     to_cute_dynamic,
 )
-from vllm.models.kimi_k3.nvidia.specialized_decode.cutedsl.common.primitives import (
+
+from .cutedsl.primitives import (
     asm,
     load_vector,
     store_words,

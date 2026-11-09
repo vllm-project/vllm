@@ -32,11 +32,11 @@ import cutlass.cute as cute
 import torch
 from cutlass import Float32, Int64, Uint32
 
-from vllm.models.kimi_k3.nvidia.specialized_decode.cutedsl.common.host import (
+from .cutedsl.host import (
     stream,
     to_cute,
 )
-from vllm.models.kimi_k3.nvidia.specialized_decode.cutedsl.common.primitives import (
+from .cutedsl.primitives import (
     copy_evict,
     div_rn,
     load_vector,
@@ -46,7 +46,6 @@ from vllm.models.kimi_k3.nvidia.specialized_decode.cutedsl.common.primitives imp
     store_words,
     unpack_bf16,
 )
-
 from .shared_expert import (
     GROUP,
     _group_scale,

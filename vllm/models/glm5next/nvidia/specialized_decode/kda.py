@@ -17,20 +17,24 @@ import torch
 
 from vllm.distributed import tensor_model_parallel_all_reduce
 from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
-from vllm.models.kimi_k3.nvidia.specialized_decode.cutedsl.common.host import (
+
+from .cutedsl.host import (
     layout,
     stream,
     to_cute,
 )
-from vllm.models.kimi_k3.nvidia.specialized_decode.cutedsl.kda.prepared import (
-    decode_conv_weight,
-)
-
 from .dsa_attention import head_gemv
 from .gemm import Projection
 from .kda_split import executable
 
 HEAD_DIM = 128
+
+
+def decode_conv_weight(weight):
+    """The [3, width, D] (Q, K, V) decode layout of the [3 * D, 1, width] conv
+    weight (from Kimi K3's `kda/prepared.py`)."""
+    width = weight.shape[-1]
+    return weight.detach().view(3, -1, width).transpose(1, 2).contiguous()
 
 
 class KdaStage:

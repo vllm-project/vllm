@@ -7,7 +7,7 @@ by name, e.g. `{"moe": "1-4:per_route,8-16:grouped"}`."""
 
 from collections.abc import Mapping
 
-from vllm.models.kimi_k3.nvidia.specialized_decode.cutedsl.common.policy import (
+from .cutedsl.policy import (
     batch_table,
 )
 

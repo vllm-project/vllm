@@ -20,11 +20,13 @@ import cutlass.cute as cute
 import torch
 from cutlass import Float32, Int32, Int64, Uint32
 
-from vllm.models.kimi_k3.nvidia.specialized_decode.cutedsl.common.host import (
+from vllm.utils.deep_gemm import mqa_logits_use_mx_scales
+
+from .cutedsl.host import (
     stream,
     to_cute,
 )
-from vllm.models.kimi_k3.nvidia.specialized_decode.cutedsl.common.primitives import (
+from .cutedsl.primitives import (
     alloc,
     asm,
     load_vector,
@@ -34,8 +36,6 @@ from vllm.models.kimi_k3.nvidia.specialized_decode.cutedsl.common.primitives imp
     shared_address,
     wait,
 )
-from vllm.utils.deep_gemm import mqa_logits_use_mx_scales
-
 from .indexer_query import DIM, hadamard_quant, indexer_query, store_weight
 from .linear import planned
 from .mega_moe import _store_bf16

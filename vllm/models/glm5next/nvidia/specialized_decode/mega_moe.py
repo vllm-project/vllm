@@ -25,12 +25,12 @@ import torch
 from cutlass import Float32, Int32, Int64, Uint8, Uint32, Uint64
 from cutlass.cute.arch import store_async_dsmem
 
-from vllm.models.kimi_k3.nvidia.specialized_decode.cutedsl.common.host import (
+from .cutedsl.host import (
     stream,
     tensor_maps,
     to_cute,
 )
-from vllm.models.kimi_k3.nvidia.specialized_decode.cutedsl.common.primitives import (
+from .cutedsl.primitives import (
     acquire_tensormap_asm,
     alloc,
     asm,

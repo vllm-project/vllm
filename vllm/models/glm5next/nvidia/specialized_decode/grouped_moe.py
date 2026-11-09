@@ -36,11 +36,11 @@ import cutlass.cute as cute
 import torch
 from cutlass import Float32, Int32, Int64, Uint8, Uint32, Uint64
 
-from vllm.models.kimi_k3.nvidia.specialized_decode.cutedsl.common.host import (
+from .cutedsl.host import (
     stream,
     to_cute,
 )
-from vllm.models.kimi_k3.nvidia.specialized_decode.cutedsl.common.primitives import (
+from .cutedsl.primitives import (
     acquire_tensormap_asm,
     alloc,
     asm,
@@ -65,7 +65,6 @@ from vllm.models.kimi_k3.nvidia.specialized_decode.cutedsl.common.primitives imp
     wait,
     wait_tmem,
 )
-
 from .mega_moe import (
     FP8_MAX,
     STAGE_BYTES,

@@ -23,13 +23,13 @@ import cutlass.cute as cute
 import torch
 from cutlass import Float32, Int64, Uint32
 
-from vllm.models.kimi_k3.nvidia.specialized_decode.cutedsl.common.host import (
+from .cutedsl.host import (
     _checked,
     resolve_kernel,
     stream,
     to_cute,
 )
-from vllm.models.kimi_k3.nvidia.specialized_decode.cutedsl.common.primitives import (
+from .cutedsl.primitives import (
     asm,
     bits_float,
     div_rn,

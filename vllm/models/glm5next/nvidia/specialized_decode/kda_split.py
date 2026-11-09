@@ -14,11 +14,11 @@ from cutlass import BFloat16, Float32, Int32, Int64, Uint32
 from cutlass.cute.arch import store_async_dsmem
 from cutlass.cute.runtime import make_fake_stream
 
-from vllm.models.kimi_k3.nvidia.specialized_decode.cutedsl.common.host import fake
-from vllm.models.kimi_k3.nvidia.specialized_decode.cutedsl.common.policy import (
+from .cutedsl.host import fake
+from .cutedsl.policy import (
     batch_table,
 )
-from vllm.models.kimi_k3.nvidia.specialized_decode.cutedsl.common.primitives import (  # noqa: E501
+from .cutedsl.primitives import (  # noqa: E501
     alloc,
     asm,
     at,

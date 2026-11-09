@@ -26,11 +26,15 @@ from vllm.models.glm5next.nvidia.ops.kpool_compress import (
     expand_pools_and_append_tail,
     kpool_decode_update_and_maybe_write_cache_batched,
 )
-from vllm.models.kimi_k3.nvidia.specialized_decode.cutedsl.common.host import (
+from vllm.utils.deep_gemm import mqa_logits_use_mx_scales
+from vllm.utils.torch_utils import current_stream
+from vllm.v1.attention.backends.mla.index_group import SparseMLAIndexGroup
+
+from .cutedsl.host import (
     stream,
     to_cute,
 )
-from vllm.models.kimi_k3.nvidia.specialized_decode.cutedsl.common.primitives import (
+from .cutedsl.primitives import (
     asm,
     bits_float,
     float_bits,
@@ -39,10 +43,6 @@ from vllm.models.kimi_k3.nvidia.specialized_decode.cutedsl.common.primitives imp
     store_words,
     unpack_bf16,
 )
-from vllm.utils.deep_gemm import mqa_logits_use_mx_scales
-from vllm.utils.torch_utils import current_stream
-from vllm.v1.attention.backends.mla.index_group import SparseMLAIndexGroup
-
 from .linear import planned
 from .shared_expert import _round_bf16
 

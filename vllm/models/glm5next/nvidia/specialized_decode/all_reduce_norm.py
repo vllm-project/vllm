@@ -28,6 +28,9 @@ from cutlass.cute.runtime import make_fake_compact_tensor
 from vllm.distributed import get_tp_group
 from vllm.model_executor.layers.fused_moe.moe_output import MoEOutput
 from vllm.models.common.ops.moe_tail_fusion.primitives import (
+    ACTIVE_STAGE,
+    LAMPORT_GENERATIONS,
+    NEXT_STAGE,
     VEC_BF16,
     WARP_SIZE,
     bf16x8_to_packed_u32x4,
@@ -45,14 +48,9 @@ from vllm.models.common.ops.moe_tail_fusion.primitives import (
     to_cute,
     to_cute_dynamic,
 )
-from vllm.models.deepseek_v41.nvidia.ops.cute_dsl.all_reduce_mhc import (
-    ACTIVE_STAGE,
-    LAMPORT_GENERATIONS,
-    NEXT_STAGE,
-    _QuadFinalizePublishDeviceKernel,
-)
 
 from .all_reduce_mhc import _gmem_ptr, _PublishDeviceKernel
+from .cutedsl.finalize_publish import _QuadFinalizePublishDeviceKernel
 
 
 class _EmbedPublishDeviceKernel:

@@ -18,11 +18,11 @@ import cutlass.cute as cute
 import torch
 from cutlass import Float32, Int32, Uint32
 
-from vllm.models.kimi_k3.nvidia.specialized_decode.cutedsl.common.host import (
+from .cutedsl.host import (
     stream,
     to_cute,
 )
-from vllm.models.kimi_k3.nvidia.specialized_decode.cutedsl.common.primitives import (
+from .cutedsl.primitives import (
     asm,
     bf16x2,
     bits_float,
@@ -34,7 +34,6 @@ from vllm.models.kimi_k3.nvidia.specialized_decode.cutedsl.common.primitives imp
     warp_max_abs,
     warp_sum,
 )
-
 from .mega_moe import _store_bf16
 from .shared_expert import _round_bf16
 

@@ -45,14 +45,17 @@ The executor reads the stock modules and never modifies them.
 | `gemm.py`, `linear.py` | BF16 projections on the skinny and split-K GEMMs |
 | `logits_gather.py` | LM head gather |
 | `policy.py` | Which implementation each stage runs per token count |
+| `cutedsl/` | Copies of the Kimi K3 CuTe DSL helpers (host, policy, primitives, split-K GEMM) and DeepSeek-V4.1's finalize publish kernel |
 
-Kimi K3 (CuTe DSL primitives, split-K GEMM, `batch_table`) and DeepSeek-V4.1
-(Lamport all-reduce primitives) code is imported unchanged from those model
-directories; a change there changes this path, so run this package's tests as
-well. Keep this package's changes inside `vllm/models/glm5next/`: when a shared
-kernel needs a GLM-only variant, copy it here (as `kda_split.py` does) instead
-of editing the other model's code, and send generic changes to shared layers
-(attention backends, speculators, MoE experts) as their own PRs.
+The Kimi K3 CuTe DSL helpers (host, policy, primitives, split-K GEMM) and
+DeepSeek-V4.1's finalize publish kernel this package uses are copies under
+`cutedsl/`, unchanged apart from imports, so a change in those models' trees
+does not change this path; `kda_split.py` is K3's `KdaSplit` with GLM's gate
+folded in. Only `vllm/models/common/` is imported. Keep this package's changes
+inside `vllm/models/glm5next/`: when a shared kernel needs a GLM-only variant,
+copy it here instead of editing the other model's code, and send generic
+changes to shared layers (attention backends, speculators, MoE experts) as
+their own PRs.
 
 ## Policy
 
