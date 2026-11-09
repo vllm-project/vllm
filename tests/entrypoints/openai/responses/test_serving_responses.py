@@ -2444,6 +2444,8 @@ async def test_stream_completed_response_reuses_streamed_items(monkeypatch):
     streamed = [e.item for e in events if e.type == "response.output_item.done"]
     assert events[-1].response.output == streamed
     _, message, function_call = streamed
+    text_done = next(e for e in events if e.type == "response.output_text.done")
+    assert [lp.token for lp in text_done.logprobs] == ["Hi"]
     assert [lp.token for lp in message.content[0].logprobs] == ["Hi"]
     assert function_call.call_id == "chatcmpl-tool-parser-id"
 
