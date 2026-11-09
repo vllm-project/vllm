@@ -22,7 +22,6 @@ from typing import TYPE_CHECKING
 import torch
 from torch import nn
 from transformers import PreTrainedModel
-from transformers.modeling_outputs import BaseModelOutputWithPast
 
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -30,9 +29,10 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.model_executor.models.interfaces_base import VllmModelForTextGeneration
-from vllm.model_executor.models.transformers.fx_utils import forward_parameters
 from vllm.model_executor.models.transformers.utils import (
+    head_forward_kwargs,
     init_on_device_without_buffers,
+    replace_base_model,
 )
 from vllm.model_executor.models.utils import PPMissingLayer, maybe_prefix
 from vllm.transformers_utils.dynamic_module import get_transformers_model_class
@@ -45,40 +45,6 @@ if TYPE_CHECKING:
 
 OUTPUT_HEAD_ATTR = "output_head"
 """Attribute in which to store the output head."""
-
-_FORWARD_KWARGS = {
-    "return_dict": True,
-    "use_cache": False,
-    "output_router_logits": False,
-}
-"""`ForCausalLM.forward` arguments which must not ask the base model for more."""
-
-
-class _BaseModelOutput(BaseModelOutputWithPast):
-    """Has every other output a `ForCausalLM` may read (e.g. `cross_attentions`),
-    as `None`."""
-
-    def __getattr__(self, name: str):
-        if name.startswith("_"):
-            raise AttributeError(name)
-        return None
-
-
-class _OpaqueBaseModel(nn.Module):
-    """Stands in for the base model, and its children (e.g. OPT's `model.decoder`),
-    returning `inputs_embeds` as its output."""
-
-    def __init__(self, children: Iterable[str]):
-        super().__init__()
-        self.children_names = frozenset(children)
-
-    def forward(self, *args, inputs_embeds: torch.Tensor, **kwargs):
-        return _BaseModelOutput(last_hidden_state=inputs_embeds)
-
-    def __getattr__(self, name: str):
-        if name in self.__dict__.get("children_names", ()):
-            return self
-        return super().__getattr__(name)
 
 
 class _OutputEmbeddings:
@@ -100,7 +66,7 @@ def to_output_head(
     """Turn `model`, a `ForCausalLM`, into its output head in place.
 
     The base model, the submodule of type `base_model_cls`, is replaced with
-    `_OpaqueBaseModel`, so `model(inputs_embeds=h)` applies everything the
+    `OpaqueBaseModel`, so `model(inputs_embeds=h)` applies everything the
     `ForCausalLM` applies after its base model (e.g. a dense -> act -> norm
     transform, a soft cap, a scale), with `project` in place of the output
     embeddings.
@@ -117,17 +83,8 @@ def to_output_head(
     vocab_size = model.config.get_text_config().vocab_size
     if not isinstance(embeddings, nn.Linear) or embeddings.out_features != vocab_size:
         return None
-    base_model_name = next(
-        (n for n, m in model.named_modules() if n and isinstance(m, base_model_cls)),
-        None,
-    )
-    if base_model_name is None:
+    if not replace_base_model(model, base_model_cls):
         return None
-
-    parent_name, _, child_name = base_model_name.rpartition(".")
-    parent = model.get_submodule(parent_name)
-    base_model = getattr(parent, child_name)
-    setattr(parent, child_name, _OpaqueBaseModel(dict(base_model.named_children())))
     params = {id(embeddings.weight): "lm_head.weight"}
     if embeddings.bias is not None:
         params[id(embeddings.bias)] = "lm_head.bias"
@@ -144,12 +101,6 @@ def to_output_head(
                 delattr(module, child_name)
                 setattr(module, child_name, _OutputEmbeddings(project))
     return embeddings, renames
-
-
-def output_head_kwargs(model: PreTrainedModel) -> dict[str, bool]:
-    """The `_FORWARD_KWARGS` which `model.forward` takes."""
-    parameters = forward_parameters(type(model))
-    return {k: v for k, v in _FORWARD_KWARGS.items() if k in parameters}
 
 
 def probe_output_head(model: PreTrainedModel, hidden_size: int) -> bool:
@@ -169,7 +120,7 @@ def probe_output_head(model: PreTrainedModel, hidden_size: int) -> bool:
         e.project = lambda hidden_states: hidden_states
     hidden_states = torch.randn(1, 3, hidden_size, device=device)
     try:
-        logits = model(inputs_embeds=hidden_states, **output_head_kwargs(model)).logits
+        logits = model(inputs_embeds=hidden_states, **head_forward_kwargs(model)).logits
     finally:
         for e, project in zip(output_embeddings, projections):
             e.project = project
@@ -186,7 +137,7 @@ class CausalMixin(VllmModelForTextGeneration, Base):
         self.output_head_renames: dict[str, str] = {}
         """Checkpoint name -> vLLM name, for the output head's weights."""
         self.output_head_kwargs: dict[str, bool] = {}
-        """Arguments for the output head's forward, from `_FORWARD_KWARGS`."""
+        """Arguments for the output head's forward, from `head_forward_kwargs`."""
 
         if self.pp_group.is_last_rank:
             found = self._create_output_head()
@@ -244,7 +195,7 @@ class CausalMixin(VllmModelForTextGeneration, Base):
             return None, embeddings.in_features
         for name, _ in model.named_parameters():
             self.output_head_renames[name] = maybe_prefix(OUTPUT_HEAD_ATTR, name)
-        self.output_head_kwargs = output_head_kwargs(model)
+        self.output_head_kwargs = head_forward_kwargs(model)
         return model, embeddings.in_features
 
     def _project(self, hidden_states: torch.Tensor) -> torch.Tensor:

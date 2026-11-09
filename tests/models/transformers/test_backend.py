@@ -19,6 +19,8 @@ from transformers import (
     AutoConfig,
     AutoModel,
     AutoModelForCausalLM,
+    AutoModelForSequenceClassification,
+    AutoModelForTokenClassification,
     PreTrainedConfig,
 )
 
@@ -39,6 +41,11 @@ from vllm.model_executor.models.transformers.causal import (
 from vllm.model_executor.models.transformers.fusers import AttentionFuser
 from vllm.model_executor.models.transformers.fusers.attention import VLLM_ATTN_IMPL
 from vllm.model_executor.models.transformers.multimodal import MultiModalMixin
+from vllm.model_executor.models.transformers.pooling import (
+    ClassificationHead,
+    probe_classification_head,
+)
+from vllm.model_executor.models.transformers.utils import replace_base_model
 from vllm.model_executor.models.utils import StageMissingLayer
 from vllm.transformers_utils import dynamic_module
 from vllm.transformers_utils.dynamic_module import get_transformers_model_class
@@ -1015,6 +1022,94 @@ def test_transformers_model_class_honours_remote_code_config(monkeypatch):
             {"trust_remote_code": True, "revision": "abc", "code_revision": "def"},
         )
     ]
+
+
+def build_classifier(auto_cls, model_type: str, **overrides):
+    """A tiny HF `For*Classification` model of one layer, in float32, on CPU."""
+    config = AutoConfig.for_model(
+        model_type,
+        num_hidden_layers=1,
+        hidden_size=64,
+        intermediate_size=128,
+        num_attention_heads=4,
+        vocab_size=VOCAB_SIZE,
+        num_labels=3,
+        pad_token_id=0,
+        **overrides,
+    )
+    return auto_cls.from_config(config, dtype=torch.float32).eval()
+
+
+def classification_head(model, pooled: bool) -> ClassificationHead:
+    base_model_cls = type(model.base_model)
+    assert replace_base_model(model, base_model_cls)
+    return ClassificationHead(model, pooled, torch.float32)
+
+
+CLASSIFIERS = [
+    # (model_type, vLLM pooling type, overrides)
+    ("modernbert", "CLS", {"classifier_pooling": "cls"}),
+    ("modernbert", "MEAN", {"classifier_pooling": "mean"}),
+    # Pools inside its `classifier`
+    ("roberta", "CLS", {}),
+    # Pools inside its `pooler`, then applies a dense layer
+    ("deberta-v2", "CLS", {}),
+    # Applies an inline `nn.ReLU()`
+    ("distilbert", "CLS", {"dim": 64, "n_layers": 1, "n_heads": 4}),
+    # Scores every token, then picks the last
+    ("qwen3", "LAST", {"num_key_value_heads": 2, "head_dim": 16}),
+]
+
+
+@pytest.mark.parametrize(("model_type", "pooling_type", "overrides"), CLASSIFIERS)
+@pytest.mark.parametrize("pooled", [True, False], ids=["seq_cls", "token_cls"])
+def test_classification_head_reproduces_logits(
+    model_type, pooling_type, overrides, pooled
+):
+    """The head applied to vLLM's pooled (or per token) hidden states gives HF's
+    logits, and the probe accepts it."""
+    torch.manual_seed(0)
+    auto_cls = (
+        AutoModelForSequenceClassification
+        if pooled
+        else AutoModelForTokenClassification
+    )
+    model = build_classifier(auto_cls, model_type, **overrides)
+    input_ids = torch.randint(1, VOCAB_SIZE, (1, 6))
+    with torch.no_grad():
+        expected = model(input_ids=input_ids).logits
+        hidden_states = model.base_model(input_ids=input_ids).last_hidden_state[0]
+        head = classification_head(model, pooled)
+        if pooled:
+            hidden_states = {
+                "CLS": hidden_states[:1],
+                "MEAN": hidden_states.mean(0, keepdim=True),
+                "LAST": hidden_states[-1:],
+            }[pooling_type]
+        actual = head(hidden_states)
+    torch.testing.assert_close(actual, expected.reshape(actual.shape))
+    hidden_size = model.config.get_text_config().hidden_size
+    assert probe_classification_head(head, hidden_size, pooling_type) is None
+
+
+def test_classification_head_probe_rejects_wrong_pooling():
+    """A mean pooling model can't follow CLS pooling, unless the user chose it."""
+    model = build_classifier(
+        AutoModelForSequenceClassification, "modernbert", classifier_pooling="mean"
+    )
+    head = classification_head(model.to("meta"), pooled=True)
+    reason = probe_classification_head(head, 64, "CLS")
+    assert reason is not None and "pool" in reason
+    assert probe_classification_head(head, 64, "MEAN") is None
+    assert probe_classification_head(head, 64, None) is None
+
+
+def test_classification_head_probe_rejects_base_model_pooler():
+    """BERT classifies `pooler_output`, which the base model computes."""
+    model = build_classifier(AutoModelForSequenceClassification, "bert")
+    head = classification_head(model, pooled=True)
+    reason = probe_classification_head(head, 64, "CLS")
+    assert reason is not None and "failed to run" in reason
 
 
 # The smallest sizes the fused MoE kernels accept
