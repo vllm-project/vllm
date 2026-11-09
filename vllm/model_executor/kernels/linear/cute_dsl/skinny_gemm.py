@@ -27,7 +27,7 @@ class SkinnyGemmConfig:
 
 
 def row_stride_ok(a: torch.Tensor, config: SkinnyGemmConfig) -> bool:
-    """Whether the vectorized A loads stay aligned for a row-major ``a``.
+    """Whether the vectorized A loads stay aligned for a row-major `a`.
 
     The kernel reads A through its layout, so column slices of a wider buffer
     are supported without a copy.

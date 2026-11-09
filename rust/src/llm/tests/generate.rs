@@ -32,8 +32,8 @@ use vllm_engine_core_client::test_utils::{
 };
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig, EngineId};
 use vllm_llm::{
-    Error, FinishReason, GenerateOutputStreamExt as _, GeneratePromptInfo, GenerateRequest, Llm,
-    WeightVersionSpan,
+    EngineCoreLlm, Error, FinishReason, GenerateOutputStreamExt as _, GeneratePromptInfo,
+    GenerateRequest, WeightVersionSpan,
 };
 use vllm_metrics::METRICS;
 use zeromq::prelude::{SocketRecv, SocketSend};
@@ -199,7 +199,7 @@ async fn connect_async_llm_with_ipc(
     client_index: u32,
     model_name: &str,
     ipc: &IpcNamespace,
-) -> Llm {
+) -> EngineCoreLlm {
     let client = EngineCoreClient::connect(
         EngineCoreClientConfig::new_single(handshake_address)
             .with_model_name(model_name)
@@ -211,7 +211,7 @@ async fn connect_async_llm_with_ipc(
     )
     .await
     .unwrap();
-    Llm::new(client)
+    EngineCoreLlm::new(client)
 }
 
 fn request_metrics_model_name(prefix: &str) -> String {
@@ -245,7 +245,7 @@ async fn generate_streams_outputs() {
                 assert!(request.request_id.starts_with("req-delta-"));
                 assert_ne!(request.request_id, "req-delta");
                 assert_eq!(request.client_index, 7);
-                assert_eq!(request.prompt_token_ids, Some(vec![11, 22]));
+                assert_eq!(request.prompt_token_ids, Some(vec![11, 22].into()));
 
                 send_outputs(
                     push,
@@ -438,23 +438,29 @@ async fn generate_merges_outputs_by_stream_interval() {
     assert_eq!(
         weight_versions,
         [
-            None,
-            None,
+            Some(vec![span("v7", 0, 1)]),
+            Some(vec![span("v7", 0, 2), span("v8", 2, 5)]),
             Some(vec![span("v7", 0, 2), span("v8", 2, 5), span("v7", 5, 7)])
         ]
     );
-    let routed_experts: Vec<_> =
-        outputs.iter().map(|output| output.routed_experts.clone()).collect();
+    // Each output carries the rows of its own tokens, merged like the tokens.
+    let routed_rows = |token_ids: &[u32]| {
+        WireNdArray::from_raw(
+            TensorDtype::U8,
+            vec![token_ids.len(), 1, 2],
+            token_ids.iter().flat_map(|&id| [id as u8, 0]).collect(),
+        )
+    };
+    let routed_experts: Vec<_> = outputs
+        .iter()
+        .map(|output| output.routed_experts.clone().concat().unwrap())
+        .collect();
     assert_eq!(
         routed_experts,
         [
-            None,
-            None,
-            Some(Box::new(WireNdArray::from_raw(
-                TensorDtype::U8,
-                vec![7, 1, 2],
-                vec![1, 0, 2, 0, 3, 0, 4, 0, 5, 0, 6, 0, 7, 0],
-            )))
+            Some(routed_rows(&[1])),
+            Some(routed_rows(&[2, 3, 4, 5])),
+            Some(routed_rows(&[6, 7])),
         ]
     );
     let last_token_timestamps: Vec<_> =
@@ -488,6 +494,7 @@ async fn collect_output_aggregates_raw_tokens_logprobs_and_terminal_metadata() {
                                     num_prompt_tokens: 2,
                                     num_cached_tokens: 1,
                                     num_local_cached_tokens: 1,
+                                    num_cache_creation_tokens: 1,
                                     ..Default::default()
                                 })),
                                 new_sampling_mask: Some(MaybeWireSamplingMask::Direct(
@@ -541,7 +548,11 @@ async fn collect_output_aggregates_raw_tokens_logprobs_and_terminal_metadata() {
     assert_eq!(collected.prompt_token_ids, vec![11, 22]);
     assert_eq!(collected.token_ids, vec![33, 44]);
     assert_eq!(collected.finish_reason, FinishReason::stop_eos());
-    assert_eq!(collected.usage.cached_token_count, 1);
+    assert_eq!(collected.usage.prompt_cache_usage.cached_token_count, 1);
+    assert_eq!(
+        collected.usage.prompt_cache_usage.cache_creation_token_count,
+        1
+    );
     assert_eq!(collected.prompt_logprobs, Some(prompt_logprobs()));
     assert_eq!(
         collected.logprobs.as_ref().map(|lp| lp.positions.len()),
@@ -571,7 +582,7 @@ async fn collect_output_rejects_partial_sampling_mask() {
         token_ids: vec![33, 44],
         logprobs: None,
         finish_reason: Some(FinishReason::Length),
-        cached_token_count: 0,
+        prompt_cache_usage: Default::default(),
         kv_transfer_params: None,
         ec_transfer_params: None,
         sampling_mask: Some(SamplingMask {
@@ -579,7 +590,7 @@ async fn collect_output_rejects_partial_sampling_mask() {
         }),
         spec_decode_metrics: None,
         weight_versions: None,
-        routed_experts: None,
+        routed_experts: Default::default(),
         timestamps: Default::default(),
     };
 
@@ -666,11 +677,17 @@ async fn remote_prefill_cache_usage_preserves_decoder_metrics() {
             .generate(request)
             .await
             .unwrap()
-            .inspect(|output| streamed_counts.push(output.as_ref().unwrap().cached_token_count))
+            .inspect(|output| {
+                streamed_counts.push(output.as_ref().unwrap().prompt_cache_usage.cached_token_count)
+            })
             .collect_output()
             .await
             .unwrap();
-        results.push((name, streamed_counts, collected.usage.cached_token_count));
+        results.push((
+            name,
+            streamed_counts,
+            collected.usage.prompt_cache_usage.cached_token_count,
+        ));
         expected.push((
             name,
             vec![remote_count.unwrap_or(7), remote_count.unwrap_or(0)],
@@ -1010,6 +1027,49 @@ async fn abort_by_external_id_aborts_all_internal_requests() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn connecting_exports_zero_valued_request_metrics_before_any_request() {
+    let ipc = IpcNamespace::new().unwrap();
+    let handshake_address = ipc.handshake_endpoint();
+    let engine_id = EngineId::from_engine_index(3);
+    let model_name = request_metrics_model_name("metrics-startup-model");
+
+    let (shutdown_tx, engine_task) = spawn_mock_engine_task(
+        handshake_address.clone(),
+        engine_id.clone(),
+        |_dealer, _push| Box::pin(async {}),
+    );
+    let llm = connect_async_llm_with_ipc(handshake_address, 0, &model_name, &ipc).await;
+
+    let rendered = METRICS.render().unwrap();
+    let mut series: Vec<_> = rendered
+        .lines()
+        .filter(|line| line.contains(&model_name))
+        .filter(|line| {
+            line.starts_with("vllm:request_success_total")
+                || line.starts_with("vllm:prompt_tokens_total")
+                || line.starts_with("vllm:generation_tokens_total")
+                || line.starts_with("vllm:e2e_request_latency_seconds_count")
+        })
+        .map(|line| line.replace(&model_name, "<model>"))
+        .collect();
+    series.sort();
+    expect_test::expect![[r#"
+        vllm:e2e_request_latency_seconds_count{model_name="<model>",engine="3"} 0
+        vllm:generation_tokens_total{model_name="<model>",engine="3"} 0
+        vllm:prompt_tokens_total{model_name="<model>",engine="3"} 0
+        vllm:request_success_total{model_name="<model>",engine="3",finished_reason="abort"} 0
+        vllm:request_success_total{model_name="<model>",engine="3",finished_reason="error"} 0
+        vllm:request_success_total{model_name="<model>",engine="3",finished_reason="length"} 0
+        vllm:request_success_total{model_name="<model>",engine="3",finished_reason="repetition"} 0
+        vllm:request_success_total{model_name="<model>",engine="3",finished_reason="stop"} 0"#]]
+    .assert_eq(&series.join("\n"));
+
+    let _ = shutdown_tx.send(());
+    engine_task.await.unwrap();
+    llm.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn generate_records_request_metrics_in_prometheus_output() {
     let ipc = IpcNamespace::new().unwrap();
     let handshake_address = ipc.handshake_endpoint();
@@ -1155,6 +1215,106 @@ async fn generate_records_request_metrics_in_prometheus_output() {
     llm.shutdown().await.unwrap();
 }
 
+/// The engine reports `watermarking` on a request's first output only with a
+/// `watermark_config`; the frontend counts each request at finish by what the
+/// engine applied and whether the request asked for it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn generate_records_watermark_status_reported_by_engine() {
+    let ipc = IpcNamespace::new().unwrap();
+    let handshake_address = ipc.handshake_endpoint();
+    let engine_id = EngineId::from_engine_index(5);
+    let model_name = request_metrics_model_name("watermark-model");
+    // (request id, requested, applied by the engine): a greedy request the
+    // sampler cannot watermark, an opt-out the engine enforces, and a plain
+    // opt-out.
+    let cases = [
+        ("req-greedy", true, false),
+        ("req-enforced", false, true),
+        ("req-opt-out", false, false),
+    ];
+
+    let (shutdown_tx, engine_task) = spawn_mock_engine_task(
+        handshake_address.clone(),
+        engine_id.clone(),
+        move |dealer, push| {
+            Box::pin(async move {
+                for (_, requested, applied) in cases {
+                    let add = recv_engine_message(dealer).await;
+                    let request: EngineCoreRequest = rmp_serde::from_slice(&add[1]).unwrap();
+                    assert_eq!(request.sampling_params.unwrap().watermarking, requested);
+                    send_outputs(
+                        push,
+                        RequestBatchOutputs {
+                            engine_index: 5,
+                            outputs: vec![EngineCoreOutput {
+                                watermarking: Some(applied),
+                                ..request_output(&request.request_id, vec![1], None)
+                            }],
+                            ..Default::default()
+                        }
+                        .into(),
+                    )
+                    .await;
+                    send_outputs(
+                        push,
+                        RequestBatchOutputs {
+                            engine_index: 5,
+                            outputs: vec![request_output(
+                                &request.request_id,
+                                vec![2],
+                                Some(EngineCoreFinishReason::Length),
+                            )],
+                            finished_requests: Some(BTreeSet::from([request.request_id])),
+                            ..Default::default()
+                        }
+                        .into(),
+                    )
+                    .await;
+                }
+            })
+        },
+    );
+
+    let llm = connect_async_llm_with_ipc(handshake_address, 0, &model_name, &ipc).await;
+    let watermark_series = || {
+        let rendered = METRICS.render().unwrap();
+        let mut series: Vec<_> = rendered
+            .lines()
+            .filter(|line| line.starts_with("vllm:watermark_requests_total"))
+            .filter(|line| line.contains(&model_name))
+            .filter_map(|line| line.split_once("status=")?.1.split_once('}'))
+            .map(|(status, count)| format!("{}={}", status.trim_matches('"'), count.trim()))
+            .collect();
+        series.sort();
+        if series.is_empty() {
+            "no series".to_string()
+        } else {
+            series.join(" ")
+        }
+    };
+    // Nothing reveals a watermark config before the engine reports one.
+    let mut progression = vec![format!("start: {}", watermark_series())];
+
+    for (request_id, requested, _) in cases {
+        let mut request = sample_generate_request(request_id, 8);
+        request.sampling_params.watermarking = requested;
+        let output = llm.generate(request).await.unwrap().collect_output().await.unwrap();
+        assert_eq!(output.finish_reason, FinishReason::Length);
+        progression.push(format!("{request_id}: {}", watermark_series()));
+    }
+
+    expect_test::expect![[r#"
+        start: no series
+        req-greedy: not_watermarked=0 skipped=1 watermarked=0
+        req-enforced: not_watermarked=0 skipped=1 watermarked=1
+        req-opt-out: not_watermarked=1 skipped=1 watermarked=1"#]]
+    .assert_eq(&progression.join("\n"));
+
+    let _ = shutdown_tx.send(());
+    engine_task.await.unwrap();
+    llm.shutdown().await.unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn generate_without_engine_stats_exports_only_frontend_observed_metrics() {
     let ipc = IpcNamespace::new().unwrap();
@@ -1226,7 +1386,7 @@ async fn generate_without_engine_stats_exports_only_frontend_observed_metrics() 
     )
     .await
     .unwrap();
-    let llm = Llm::new(client);
+    let llm = EngineCoreLlm::new(client);
     let mut request = sample_generate_request("req-no-log-stats", 8);
     request.arrival_time = None;
     request.lora_request = Some(LoraRequest {

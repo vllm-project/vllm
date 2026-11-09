@@ -9,8 +9,8 @@ Kimi K2 tool call format::
     <|tool_call_argument_begin|>{"city": "Tokyo"}<|tool_call_end|>
     <|tool_calls_section_end|>
 
-The header before ``<|tool_call_argument_begin|>`` is Kimi's native tool
-call id. The function name is the final component before ``:N``.
+The header before `<|tool_call_argument_begin|>` is Kimi's native tool
+call id. The function name is the final component before `:N`.
 """
 
 from __future__ import annotations

@@ -65,8 +65,12 @@ def state(monkeypatch, request):
     cfg.model_config.enable_prompt_embeds = False
     cfg.model_config.uses_mrope = False
     cfg.model_config.is_multimodal_model = False
+    cfg.model_config.supports_multimodal_inputs = False
     cfg.scheduler_config.max_num_seqs = 16
     cfg.scheduler_config.max_num_batched_tokens = 1024
+    cfg.scheduler_config.max_num_scheduled_tokens = None
+    cfg.scheduler_config.long_prefill_token_threshold = 0
+    cfg.speculative_config = None
     cfg.parallel_config.data_parallel_size = 1
     cfg.parallel_config.enable_expert_parallel = False
     cfg.parallel_config.prefill_context_parallel_size = getattr(request, "param", 1)
@@ -149,6 +153,25 @@ def _prepare(state, batch, cg_mode):
     return (None, None) if replay is None else (replay, state.builds[-2])
 
 
+def test_replay_builders_built_before_first_trimmed_step(state, monkeypatch):
+    """Builder init uploads to the device, so an untrimmed warmup batch must
+    build the replay builders before any step trims."""
+    copies: list = []
+
+    def copy_attn_groups(groups, prefixes):
+        copies.append(prefixes)
+        return []
+
+    monkeypatch.setattr(state, "_copy_attn_groups", copy_attn_groups)
+    replay, _ = _prepare(
+        state, _input_batch([1, 1], [10, 20], [False, False]), CUDAGraphMode.NONE
+    )
+    assert replay is None and len(copies) == 2
+    batch = _input_batch(QUERY_LENS, SEQ_LENS, PREFILLING)
+    replay, _ = _prepare(state, batch, CUDAGraphMode.NONE)
+    assert replay is not None and len(copies) == 2
+
+
 def test_replay_batch_keeps_each_request_window(state):
     state._replay_start_np[2] = 50  # the encoder-side replay start of request 2
     batch = _input_batch(QUERY_LENS, SEQ_LENS, PREFILLING)
@@ -178,7 +201,7 @@ def test_replay_batch_keeps_each_request_window(state):
         "swa_first": first.attn_metadata,
     }
     assert torch.equal(context.slot_mapping["mla"], _slot_mappings(401)[1, rows])
-    assert context.dp_metadata is None and context.is_padding is None
+    assert context.dp_metadata is None and not context.is_padding.any()
 
 
 def test_replay_context_restores_tp_routing_rows(state):
@@ -186,11 +209,12 @@ def test_replay_context_restores_tp_routing_rows(state):
     batch = _input_batch(QUERY_LENS, SEQ_LENS, PREFILLING)
     replay, _ = _prepare(state, batch, CUDAGraphMode.NONE)
     context = replay.forward_context
-    assert context.is_padding is None and context.dp_metadata is None
+    assert context.dp_metadata is None
     count = len(REPLAY_ROWS)
     assert context.batch_descriptor.num_tokens == count
     capturer = RoutedExpertsCapturer.__new__(RoutedExpertsCapturer)
     capturer.dp_rank, capturer.tp_size = 0, 2
+    capturer.restore_rows = capturer._restore_local_topk_ids
     capturer.device_buffer = torch.full((401, 1, 2), -1, device=DEVICE)
     expected = torch.tensor(REPLAY_ROWS, device=DEVICE)[:, None].expand(-1, 2)
     gathered = torch.cat((expected, torch.full((1, 2), -1, device=DEVICE)))
@@ -457,6 +481,7 @@ def test_idle_dp_rank_dummy_trims_with_its_peers(dp_state):
     assert replay is not None and replay.rows.shape[0] == 1
     dp_metadata = replay.forward_context.dp_metadata
     assert dp_metadata.num_tokens_across_dp_cpu.tolist() == [1, 129]
+    assert replay.forward_context.is_padding.tolist() == [True]
 
 
 def test_zero_prefix_window_warms_gather_and_skips_pad(monkeypatch):
@@ -496,7 +521,12 @@ def test_zero_prefix_window_warms_gather_and_skips_pad(monkeypatch):
     cfg.parallel_config.prefill_context_parallel_size = 1
     cfg.compilation_config.fast_moe_cold_start = False
     cfg.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
-    layers = SimpleNamespace(window=WINDOW, replay_batch=None, metadata_prefixes=set())
+    layers = SimpleNamespace(
+        window=WINDOW,
+        replay_batch=None,
+        metadata_prefixes=set(),
+        first_swa_prefix="swa",
+    )
     model = SimpleNamespace(token_lookback_depth=0, decoder_replay_layers=layers)
     groups = SimpleNamespace(
         kv_cache_groups=[
@@ -546,5 +576,67 @@ def test_dp_ranks_pad_to_one_replay_graph(dp_state):
     replay, _ = _prepare(dp_state, batch, CUDAGraphMode.NONE)
     assert dp_state.replay_cudagraphs.dispatch.call_args.args[:2] == (3, 300)
     assert replay.forward_context.batch_descriptor.num_tokens == 512
+    is_padding = replay.forward_context.is_padding
+    assert is_padding.shape == (512,)
+    assert not is_padding[: len(REPLAY_ROWS)].any()
+    assert is_padding[len(REPLAY_ROWS) :].all()
     dp_metadata = replay.forward_context.dp_metadata
     assert dp_metadata.num_tokens_across_dp_cpu.tolist() == [512, 512]
+
+
+def test_prefill_replays_only_the_prompt_tail(state):
+    """Without graphs the last 2 * WINDOW prompt tokens replay: a chunk before them
+    replays one row, and chunks whose window reaches back past them get a floor."""
+
+    def chunk(start, length, prompt=500):
+        batch = replace(
+            _input_batch([length], [start + length], [True]),
+            prefill_len_np=np.array([prompt], dtype=np.int32),
+            num_computed_prefill_tokens_np=np.array([start], dtype=np.int32),
+        )
+        return _prepare(state, batch, CUDAGraphMode.NONE)
+
+    assert chunk(0, 200)[0].rows.tolist() == [199]
+    replay, build = chunk(200, 100)
+    assert replay.rows.tolist() == list(range(44, 100))
+    assert build.replay_start.tolist() == [244]
+    for start, length in ((300, 1), (301, 26), (327, 44), (370, 1)):
+        replay, build = chunk(start, length)
+        assert replay.rows.tolist() == list(range(length))
+        assert build.replay_start.tolist() == [244]
+    assert chunk(371, 100) == (None, None)
+
+
+@pytest.mark.parametrize(
+    ("override", "min_remaining"),
+    [
+        ({}, 512 + 2 * WINDOW),
+        ({"long_prefill_token_threshold": 640}, None),
+        ({"supports_multimodal_inputs": True}, None),
+        ({"policy": "priority"}, None),
+        ({"max_num_new_slots_for_drafting": 63}, None),  # taken per request
+        ({"num_speculative_tokens": 64}, None),  # adaptive verification drops all
+    ],
+)
+def test_skipped_tails_stay_out_of_graphs(override, min_remaining):
+    """Chunks whose window reaches past the replayed tail must miss CUDA graphs: a
+    chunk cut short runs with at least its prefill cap less every draft."""
+    from vllm.models.deepseek_v41.nvidia import model_state
+
+    config = SimpleNamespace(
+        supports_multimodal_inputs=False,
+        policy="fcfs",
+        cudagraph_mode=CUDAGraphMode.PIECEWISE,
+        max_cudagraph_capture_size=512,
+        max_num_seqs=256,
+        max_num_batched_tokens=16384,
+        max_num_scheduled_tokens=None,
+        long_prefill_token_threshold=0,
+        max_num_new_slots_for_drafting=0,
+        enable_adaptive_verification=True,
+        num_speculative_tokens=0,
+    )
+    vars(config).update(override)
+    parts = ("model", "compilation", "scheduler", "speculative")
+    cfg = SimpleNamespace(**{f"{part}_config": config for part in parts})
+    assert model_state._skip_tail_min_remaining(cfg, WINDOW) == min_remaining

@@ -750,7 +750,6 @@ class TestIntegrationScenarios:
         ):
             output = ModelRunnerOutput(
                 req_ids=[f"req_{i}"],
-                req_id_to_index={f"req_{i}": 0},
                 sampled_token_ids=[[123]],  # dummy token
                 logprobs=None,
                 prompt_logprobs_dict={},

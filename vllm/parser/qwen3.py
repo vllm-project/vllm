@@ -10,8 +10,8 @@ Qwen3 XML tool call format::
     </function>
     </tool_call>
 
-The argument body consists of ``<parameter=NAME>VALUE</parameter>`` tags.
-The ``_qwen3_arg_converter`` parses these into a JSON object.
+The argument body consists of `<parameter=NAME>VALUE</parameter>` tags.
+The `_qwen3_arg_converter` parses these into a JSON object.
 """
 
 from __future__ import annotations
@@ -56,6 +56,7 @@ _PARAM_RE = re.compile(
     re.DOTALL,
 )
 _PARTIAL_PARAM_RE = re.compile(r"<\s*parameter\s*=\s*([^>]+)>(.*)$", re.DOTALL)
+_PARAM_OPENER_RE = re.compile(r"<\s*parameter\s*=")
 
 
 def _trim_wrapping_newlines(value: str) -> str:
@@ -67,22 +68,60 @@ def _trim_wrapping_newlines(value: str) -> str:
     return value
 
 
-def _qwen3_arg_converter(raw_args: str, partial: bool) -> str:
-    params: dict[str, object] = {}
+class _ClosedParams:
+    """Closed parameters of a raw argument text, reused by longer texts.
 
-    for match in _PARAM_RE.finditer(raw_args):
-        name = match.group(1)
-        value = match.group(2)
-        params[name] = _trim_wrapping_newlines(value)
+    Raw arguments only grow while a call streams, so a parse of a text that
+    extends `text` resumes after its last closed parameter.
+    """
 
+    __slots__ = ("text", "end", "params", "outside")
+
+    def __init__(self) -> None:
+        self.text = ""  # raw text the closed parameters depend on
+        self.end = 0  # end of the last closed parameter in ``text``
+        self.params: dict[str, str] = {}
+        self.outside = ""  # text before ``end`` outside the closed parameters
+
+
+def _qwen3_parse_params(
+    raw_args: str, partial: bool, closed: _ClosedParams | None = None
+) -> tuple[dict[str, str], re.Match | None]:
+    """Return the closed parameters, trimmed, and the open trailing one."""
+    params: dict[str, str] = {}
+    outside: list[str] = []
+    pos = 0
+    if closed is not None and raw_args.startswith(closed.text):
+        params.update(closed.params)
+        outside.append(closed.outside)
+        pos = closed.end
+    start = pos
+
+    for match in _PARAM_RE.finditer(raw_args, pos):
+        outside.append(raw_args[pos : match.start()])
+        params[match.group(1)] = _trim_wrapping_newlines(match.group(2))
+        pos = match.end()
+
+    if closed is not None and pos > start:
+        # A value closed by the next opener holds only while that opener follows.
+        opener = _PARAM_OPENER_RE.match(raw_args, pos)
+        closed.text = raw_args[: opener.end() if opener else pos]
+        closed.end = pos
+        closed.params = dict(params)
+        closed.outside = "".join(outside)
+
+    open_param = None
     if partial:
-        remaining = _PARAM_RE.sub("", raw_args)
-        m = _PARTIAL_PARAM_RE.search(remaining)
-        if m:
-            name = m.group(1)
-            value = m.group(2)
-            if name:
-                params[name] = _trim_wrapping_newlines(value)
+        open_param = _PARTIAL_PARAM_RE.search("".join(outside) + raw_args[pos:])
+    return params, open_param
+
+
+def _qwen3_arg_converter(
+    raw_args: str, partial: bool, closed: _ClosedParams | None = None
+) -> str:
+    params, open_param = _qwen3_parse_params(raw_args, partial, closed)
+    if open_param is not None and open_param.group(1):
+        params[open_param.group(1)] = _trim_wrapping_newlines(open_param.group(2))
 
     return json.dumps(params, ensure_ascii=False)
 
@@ -101,20 +140,20 @@ def _param_value_end_window(text: str) -> str:
 
 
 def _param_value_extender(
-    raw_args: str, trim_newlines: bool
+    raw_args: str, trim_newlines: bool, closed: _ClosedParams | None = None
 ) -> ArgValueExtender | None:
-    """Extend the open trailing ``<parameter=...>`` value of *raw_args*.
+    """Extend the open trailing `<parameter=...>` value of *raw_args*.
 
     The extender streams exactly what the converter would for the same text.
-    With *trim_newlines* it follows ``_trim_wrapping_newlines``: it drops a
+    With *trim_newlines* it follows `_trim_wrapping_newlines`: it drops a
     leading newline of the value and holds back a trailing one.
     """
-    match = _PARTIAL_PARAM_RE.search(_PARAM_RE.sub("", raw_args))
+    closed_params, match = _qwen3_parse_params(raw_args, True, closed)
     if match is None:
         return None
     name, value = match.group(1), match.group(2)
     # A repeated key keeps its first position, so its value is not last.
-    if any(m.group(1) == name for m in _PARAM_RE.finditer(raw_args)):
+    if name in closed_params:
         return None
 
     window = _param_value_end_window(value)
@@ -141,8 +180,10 @@ def _param_value_extender(
     return extend
 
 
-def _qwen3_arg_value_extender(raw_args: str) -> ArgValueExtender | None:
-    return _param_value_extender(raw_args, trim_newlines=True)
+def _qwen3_arg_value_extender(
+    raw_args: str, closed: _ClosedParams | None = None
+) -> ArgValueExtender | None:
+    return _param_value_extender(raw_args, trim_newlines=True, closed=closed)
 
 
 @functools.cache
@@ -290,11 +331,11 @@ def qwen3_config(
 
 
 class Qwen3Parser(ParserEngine):
-    """Qwen3 parser: ``<think>``/``</think>`` reasoning +
-    ``<tool_call>`` XML tool calls in a single engine.
+    """Qwen3 parser: `<think>`/`</think>` reasoning +
+    `<tool_call>` XML tool calls in a single engine.
 
-    - ``<tool_call>`` as implicit reasoning end (a grammar transition, so it
-      also feeds ``is_reasoning_end`` and the structured-output gate)
+    - `<tool_call>` as implicit reasoning end (a grammar transition, so it
+      also feeds `is_reasoning_end` and the structured-output gate)
 
     Subclasses that share the grammar but differ only in the four wrapper
     token strings (reasoning + tool-call) override the class attributes
@@ -333,6 +374,13 @@ class Qwen3Parser(ParserEngine):
             tools,
             **kwargs,
         )
+        # Each streaming conversion resumes after the last closed parameter.
+        if self._arg_converter is _qwen3_arg_converter:
+            closed = _ClosedParams()
+            self._arg_converter = functools.partial(_qwen3_arg_converter, closed=closed)
+            self._arg_value_extender = functools.partial(
+                _qwen3_arg_value_extender, closed=closed
+            )
 
     def extract_reasoning(
         self,

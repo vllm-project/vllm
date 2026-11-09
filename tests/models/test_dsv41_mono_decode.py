@@ -8,6 +8,7 @@ the whole-layer kernels run the FFN launch on the same steps, from wo_b's
 unreduced output."""
 
 import sys
+from collections import defaultdict
 from types import ModuleType, SimpleNamespace
 
 import pytest
@@ -80,7 +81,7 @@ def _inputs(rows=M):
 @pytest.fixture
 def run(monkeypatch):
     """Call the mono path for one layer under a forward context built from
-    ``mode`` and ``metadata``; returns (result, runner calls)."""
+    `mode` and `metadata`; returns (result, runner calls)."""
 
     def _run(
         mode=CUDAGraphMode.FULL,
@@ -396,7 +397,7 @@ def _config(monokernel=True, **parallel):
 
 def _deployment(monkeypatch, cdna=4, cus=256, tp=2, target=None):
     """A deployment the kernels take (the runner module stubbed: no FlyDSL).
-    ``target`` is the architecture FlyDSL compiles for, by default the GPU's."""
+    `target` is the architecture FlyDSL compiles for, by default the GPU's."""
     import vllm.platforms.rocm as rocm
 
     monkeypatch.delenv("VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4", raising=False)
@@ -732,6 +733,64 @@ def test_rocm_attention_takes_the_gfx942_indexer_with_the_flag(
     assert rocm.DeepseekV41Gfx942Indexer.attn_cls is Gfx942SparseAttnIndexer
 
 
+@pytest.mark.parametrize("monokernel", [True, False])
+@pytest.mark.parametrize("cdna", [3, 4])
+def test_swa_decode_meta_runs_on_cdna3_and_cdna4_with_the_flag(
+    monkeypatch, cdna, monokernel
+):
+    """swa_decode_meta's kernel is plain Triton, so with --monokernel a decode
+    batch gets its SWA metadata from the one launch on CDNA4 (gfx950) as on
+    CDNA3 (gfx942). Without the flag, the builder keeps vLLM's build."""
+    import vllm.platforms.rocm as rocm_platform
+    from vllm.models.deepseek_v41.amd import ops, rocm
+    from vllm.models.deepseek_v41.amd.ops import swa_decode_meta
+
+    monkeypatch.setattr(ops, "current_platform", SimpleNamespace(is_rocm=lambda: True))
+    monkeypatch.setattr(rocm_platform, "get_cdna_version", lambda: cdna)
+    monkeypatch.setattr(ops, "_monokernel", ops._monokernel)
+    ops.record_monokernel(_config(monokernel=monokernel))
+    launches = []
+    monkeypatch.setattr(
+        swa_decode_meta, "launch", lambda *args, noncausal: launches.append(noncausal)
+    )
+    ints = lambda *shape: torch.zeros(shape, dtype=torch.int32)  # noqa: E731
+    builder = SimpleNamespace(
+        decode_threshold=M,
+        window_size=md.SWA_WIDTH,
+        block_size=128,
+        decode_swa_indices=ints(64, 1, md.SWA_WIDTH),
+        decode_swa_lens=ints(64),
+        is_valid_token=torch.zeros(64, dtype=torch.bool),
+        token_to_req_indices=ints(64),
+        no_replay_start=ints(2),
+        decode_swa_ragged_indices_buffer=ints(64 * md.SWA_WIDTH),
+        decode_swa_ragged_indptr_buffer=ints(65),
+        build_tile_scheduler=lambda rows: defaultdict(lambda: None),
+        _build_deepseek_v4_metadata=lambda *args: {},
+    )
+    query_start_loc = torch.tensor([0, M], dtype=torch.int32)
+    cam = SimpleNamespace(
+        causal=True,
+        max_query_len=M,
+        num_reqs=1,
+        num_actual_tokens=M,
+        query_start_loc=query_start_loc,
+        query_start_loc_cpu=query_start_loc,
+        seq_lens=torch.tensor([1000], dtype=torch.int32),
+        seq_lens_cpu_upper_bound=torch.tensor([1000], dtype=torch.int32),
+        slot_mapping=torch.arange(M),
+        block_table_tensor=ints(1, 8),
+        token_to_req_indices=lambda buffer: buffer[:M],
+    )
+    out = swa_decode_meta.build(
+        builder, 0, cam, False, None, rocm.DeepseekV41ROCMAiterSparseSWAMetadata
+    )
+    # No later test may see this test's cached gate.
+    ops.record_monokernel(_config(monokernel=False))
+    assert launches == ([False] if monokernel else [])
+    assert (out is not None) is monokernel
+
+
 def test_dspark_speculator_asks_the_draft_model_first():
     """A draft model that samples a step itself returns True, and vLLM's
     loop then does not run. The stub speculator has none of the loop's
@@ -752,21 +811,78 @@ def test_dspark_speculator_asks_the_draft_model_first():
     assert calls == [(spec, 2, hidden)]
 
 
-@pytest.mark.parametrize("taken", [True, False])
-def test_dspark_draft_model_samples_with_fused_markov(monkeypatch, taken):
+@pytest.mark.parametrize(
+    "cdna, monokernel, rows, taken",
+    [
+        (4, True, 5, True),
+        (4, True, 6, False),
+        (3, True, 8, True),
+        (4, False, 1, False),
+    ],
+)
+def test_dspark_draft_model_samples_with_fused_markov(
+    monkeypatch, cdna, monokernel, rows, taken
+):
     """The DSv4.1 draft model answers the speculator with fused_markov, which
     returns False for a step that the fused launches do not take."""
-    from vllm.models.deepseek_v41.amd import dspark
+    import vllm.platforms.rocm as rocm_platform
+    from vllm.model_executor.layers.vocab_parallel_embedding import (
+        UnquantizedEmbeddingMethod,
+    )
+    from vllm.models.deepseek_v41.amd import dspark, ops
     from vllm.models.deepseek_v41.amd.ops import fused_markov
+    from vllm.v1.worker.gpu.spec_decode.draft_logits import DraftLogitsCache
 
-    calls = []
+    monkeypatch.setattr(ops, "current_platform", SimpleNamespace(is_rocm=lambda: True))
+    monkeypatch.setattr(rocm_platform, "get_cdna_version", lambda: cdna)
+    monkeypatch.setattr(ops, "_monokernel", ops._monokernel)
+    ops.record_monokernel(_config(monokernel=monokernel))
+    launches = []
 
-    def sample_sequential(s, n, h):
-        calls.append((s, n, h))
-        return taken
+    class _Kernel:
+        def __getitem__(self, grid):
+            return lambda *args, num_warps=None, **kw: launches.append(num_warps)
 
-    monkeypatch.setattr(fused_markov, "sample_sequential", sample_sequential)
-    spec, hidden = object(), torch.zeros(4, 8)
+    monkeypatch.setattr(fused_markov, "_markov_step_kernel", _Kernel())
+    monkeypatch.setattr(fused_markov, "_markov_last_kernel", _Kernel())
+    monkeypatch.setattr(fused_markov, "_buffers", {})
+    n_spec, vocab = 2, 512
+    bf16 = lambda *shape: torch.zeros(shape, dtype=torch.bfloat16)  # noqa: E731
+    head = SimpleNamespace(
+        markov_w1=SimpleNamespace(weight=bf16(vocab, 4)),
+        markov_w2=SimpleNamespace(
+            weight=bf16(vocab, 4), quant_method=UnquantizedEmbeddingMethod()
+        ),
+    )
+    spec = SimpleNamespace(
+        num_speculative_steps=n_spec,
+        model=SimpleNamespace(
+            model=SimpleNamespace(markov_head=head),
+            compute_draft_logits=lambda hidden: bf16(len(hidden), vocab),
+        ),
+        draft_logits=DraftLogitsCache(
+            rows, n_spec, vocab, dtype=torch.bfloat16, fill=0.0, device="cpu"
+        ),
+        draft_watermarker=None,
+        _d2t_scatter_index=None,
+        use_confidence_head=False,
+        acceptance_estimator=None,
+        sample_indices=torch.arange(rows * n_spec),
+        sample_idx_mapping=torch.zeros(rows * n_spec, dtype=torch.int64),
+        sample_pos=torch.zeros(rows * n_spec, dtype=torch.int64),
+        draft_tokens=torch.zeros(rows, n_spec + 1, dtype=torch.int64),
+        use_fp64_gumbel=False,
+        input_buffers=SimpleNamespace(input_ids=None),
+        _anchor_idx=None,
+        temperature=None,
+        seeds=None,
+    )
     model_cls = dspark.DSparkDeepseekV4ForCausalLM
-    assert model_cls.sample_sequential(None, spec, 2, hidden) is taken
-    assert calls == [(spec, 2, hidden)]
+    try:
+        got = model_cls.sample_sequential(
+            None, spec, rows, torch.zeros(rows * n_spec, 8)
+        )
+    finally:
+        ops.record_monokernel(_config(monokernel=False))
+    assert got is taken
+    assert launches == ([fused_markov.NUM_WARPS] * n_spec + [None] if taken else [])

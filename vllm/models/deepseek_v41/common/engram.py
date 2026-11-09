@@ -2,41 +2,25 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Engram: n-gram hash lookups gated into the hyper-connection stream.
 
-Port of the reference ``inference/engram.py`` + ``Engram`` /
-``ParallelEngramEmbedding`` from ``inference/model.py`` (DeepSeek V4.1
+Port of the reference `inference/engram.py` + `Engram` /
+`ParallelEngramEmbedding` from `inference/model.py` (DeepSeek V4.1
 checkpoint layout). Engram modules live on the backbone layers listed in
-``engram_layer_ids`` only.
+`engram_layer_ids` only.
 
-Two pieces of cross-forward state are needed because vLLM streams tokens
-chunk-by-chunk while an n-gram at position ``p`` needs the token ids at
-``p-1..p-3``:
+An n-gram at position `p` needs the token ids at `p-1..p-3` while vLLM
+streams tokens chunk-by-chunk:
 
-- ``token_map``: token id -> compressed vocab id, built once from the
+- `token_map`: token id -> compressed vocab id, built once from the
   model's tokenizer at init (deterministic; asserted against
-  ``engram_compressed_vocab_size``).
-- ``hash_cache``: one int32 slot per KV slot of the first local layer's
-  sliding-window cache, holding the compressed id (or DEAD) of the token
-  last written to that slot. Slots are stable per (request, position) —
-  the block table pins a position to a physical slot, prefix-cache hits
-  reuse both the physical blocks and the identical token ids, and
-  spec-decode rollbacks rewrite the same slots — so lookbacks read back
-  exactly what the owning request wrote. Lookback depth (3) is far inside
-  the sliding window (128), so window eviction never frees a block a
-  live lookback still needs.
-
-  Slots are not part of the KV cache, so KV loaded from another instance
-  (P/D, offload connectors) leaves them unwritten. The runner therefore
-  passes ``lookback_token_ids``, the ids just before each request's chunk
-  start, which take precedence over the slots. The V2 runner reads them
-  from its device-resident token history and needs no slot cache; the V1
-  runner's CPU token table holds placeholders for generated tokens under
-  async scheduling, so it passes prompt positions only and keeps the slot
-  cache for the rest.
+  `engram_compressed_vocab_size`).
+- `lookback_token_ids`: the ids just before each request's chunk start,
+  which the runner reads from its device-resident token history.
 """
 
 import ctypes
 import mmap
 import os
+import platform
 import sys
 import tempfile
 import weakref
@@ -75,6 +59,7 @@ from vllm.models.deepseek_v41.common.ops.query_quant import (
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.utils.cpu_resource_utils import get_available_memory
 from vllm.utils.platform_utils import is_uva_available
 from vllm.utils.torch_utils import get_accelerator_view_from_cpu_tensor
 
@@ -250,40 +235,11 @@ class EngramLayout:
         return cls(config)
 
 
-@triton.jit(do_not_specialize=["num_tokens"])
-def _write_hash_cache_kernel(
-    input_ids,
-    token_map,
-    dead_mask,
-    slot_mapping,
-    cache,
-    num_tokens,
-    input_stride,
-    mask_stride,
-    slot_stride,
-    BLOCK_SIZE: tl.constexpr,
-    dead_id,
-):
-    token_idx = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    slot = tl.load(
-        slot_mapping + token_idx * slot_stride, token_idx < num_tokens, other=-1
-    ).to(tl.int64)
-    valid = (token_idx < num_tokens) & (slot >= 0)
-    token = tl.load(input_ids + token_idx * input_stride, valid, other=0)
-    value = tl.load(token_map + token, valid, other=0)
-    dead = tl.load(dead_mask + token_idx * mask_stride, valid, other=False)
-    value = tl.where(dead, dead_id, value)
-    tl.store(cache + slot, value, valid)
-
-
 # Keep request shapes out of the cache key so one warmed variant covers runtime batches.
 @triton.jit(
     do_not_specialize=[
         "num_tokens",
-        "num_slots",
         "num_query_rows",
-        "num_table_rows",
-        "max_blocks",
     ]
 )
 def _hash_ids_kernel(
@@ -291,28 +247,20 @@ def _hash_ids_kernel(
     token_map,
     dead_mask,
     positions,
-    block_table,
     query_start_loc,
     multipliers,
     primes,
     offsets,
-    cache,
     lookback_token_ids,
     lookback_dead_mask,
     output,
     num_tokens,
-    num_slots,
     pad_id,
     input_stride,
     mask_stride,
     position_stride,
-    table_stride,
-    table_col_stride,
     query_stride,
     num_query_rows,
-    num_table_rows,
-    max_blocks,
-    cache_block_size,
     MAX_NGRAM: tl.constexpr,
     num_heads,
     BLOCK_T: tl.constexpr,
@@ -382,28 +330,8 @@ def _hash_ids_kernel(
         )
         window_source = tl.where(window_dead, dead_id, window_source)
 
-        if cache is not None:
-            clamped = tl.minimum(
-                tl.maximum(lookback, 0), max_blocks * cache_block_size - 1
-            )
-            block_row = tl.minimum(req, num_table_rows - 1)
-            needs_cache = valid & ~in_batch & ~known
-            block = tl.load(
-                block_table
-                + block_row * table_stride
-                + (clamped // cache_block_size) * table_col_stride,
-                needs_cache,
-                other=0,
-            ).to(tl.int64)
-            slot = tl.minimum(
-                tl.maximum(block * cache_block_size + clamped % cache_block_size, 0),
-                num_slots - 1,
-            )
-            fallback = tl.load(cache + slot, needs_cache, other=0)
-        else:
-            fallback = tl.full((BLOCK_T,), pad_id, tl.int32)
         source = tl.where(
-            in_batch, batch_source, tl.where(known, window_source, fallback)
+            in_batch, batch_source, tl.where(known, window_source, pad_id)
         ).to(tl.int64)
         blocked |= (lookback < 0) | (source == dead_id)
         value = tl.where(blocked, pad_id, source)
@@ -424,9 +352,7 @@ def _hash_ids_kernel(
 class NgramHashState(nn.Module):
     """Maps each position to the hash ids of the n-grams ending there.
 
-    Stateless on the V2 runner, which supplies every lookback token id. On
-    the V1 runner it also keeps `hash_cache`, the slot-keyed rolling store
-    of compressed ids (see module docstring), for generated tokens.
+    Stateless: the runner supplies every lookback token id.
     """
 
     def __init__(
@@ -438,11 +364,7 @@ class NgramHashState(nn.Module):
         super().__init__()
         self.layout = layout
         self.swa_cache_module = swa_cache_module
-        self.block_size: int = swa_cache_module.block_size
         self.lookback_depth: int = layout.max_ngram_size - 1
-        self.use_slot_cache: bool = not vllm_config.use_v2_model_runner
-        self._cache: torch.Tensor | None = None
-        self._kv_cache_ref: weakref.ReferenceType[torch.Tensor] | None = None
 
         model_config = vllm_config.model_config
         from transformers import AutoTokenizer
@@ -478,35 +400,14 @@ class NgramHashState(nn.Module):
         )
 
     def ensure_cache(self) -> bool:
-        """Lazily size the slot-keyed cache from the bound SWA KV cache.
-
-        Returns False while the KV cache is unbound (profile run); the caller
-        skips engram hashing then. Without the slot cache only that check
-        remains.
-        """
-        kv_cache = self.swa_cache_module.kv_cache
-        if kv_cache.numel() == 0:
-            self._cache = None
-            self._kv_cache_ref = None
-            return False
-        if not self.use_slot_cache:
-            return True
-        if self._kv_cache_ref is not None and self._kv_cache_ref() is kv_cache:
-            return True
-        # Graph memory profiling binds a temporary, smaller KV cache first.
-        # Rebinding must discard its hash history without retaining KV storage.
-        self._cache = torch.zeros(
-            kv_cache.shape[0] * self.block_size,
-            dtype=torch.int32,
-            device=kv_cache.device,
-        )
-        self._kv_cache_ref = weakref.ref(kv_cache)
-        return True
+        """Return False while the KV cache is unbound (profile run); the caller
+        skips engram hashing then."""
+        return self.swa_cache_module.kv_cache.numel() > 0
 
     def dummy_hashes(
         self, input_ids: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Participate in DP lookups without valid rows or hash-cache updates."""
+        """Participate in DP lookups without valid rows."""
         num_tokens = input_ids.shape[0]
         num_layers, max_ngram = self.multipliers.shape
         num_heads = self.primes.shape[-1]
@@ -526,15 +427,12 @@ class NgramHashState(nn.Module):
         dead_mask: torch.Tensor,
         lookback_token_ids: torch.Tensor,
         lookback_dead_mask: torch.Tensor,
-        slot_mapping: torch.Tensor | None,
-        block_table: torch.Tensor | None,
     ) -> torch.Tensor:
         """Compute [tokens, layers, hash columns] int32 n-gram hashes.
 
         History comes from the current chunk, then the runner's lookback
-        window, then the optional V1 slot cache. V2 needs only one launch.
+        window.
         """
-        cache = self._cache if self.use_slot_cache else None
         num_tokens = input_ids.shape[0]
         num_layers, max_ngram = self.multipliers.shape
         num_heads = self.primes.shape[-1]
@@ -543,50 +441,25 @@ class NgramHashState(nn.Module):
         )
         if num_tokens == 0:
             return output
-        if self.use_slot_cache:
-            assert cache is not None and slot_mapping is not None
-            assert block_table is not None
-            # Finish writes before other thread blocks read fallback history.
-            _write_hash_cache_kernel[(triton.cdiv(num_tokens, 256),)](
-                input_ids,
-                self.token_map,
-                dead_mask,
-                slot_mapping,
-                cache,
-                num_tokens,
-                input_ids.stride(0),
-                dead_mask.stride(0),
-                slot_mapping.stride(0),
-                256,
-                DEAD_ID,
-            )
         _hash_ids_kernel[(triton.cdiv(num_tokens, 32), num_layers)](
             input_ids,
             self.token_map,
             dead_mask,
             positions,
-            block_table,
             query_start_loc,
             self.multipliers,
             self.primes,
             self.offsets,
-            cache,
             lookback_token_ids,
             lookback_dead_mask,
             output,
             num_tokens,
-            cache.shape[0] if cache is not None else 0,
             self.pad_id,
             input_stride=input_ids.stride(0),
             mask_stride=dead_mask.stride(0),
             position_stride=positions.stride(0),
-            table_stride=block_table.stride(0) if block_table is not None else 0,
-            table_col_stride=block_table.stride(1) if block_table is not None else 0,
             query_stride=query_start_loc.stride(0),
             num_query_rows=query_start_loc.numel() - 1,
-            num_table_rows=block_table.shape[0] if block_table is not None else 0,
-            max_blocks=block_table.shape[1] if block_table is not None else 0,
-            cache_block_size=self.block_size,
             MAX_NGRAM=max_ngram,
             num_heads=num_heads,
             BLOCK_T=32,
@@ -778,51 +651,142 @@ def gather_engram_hashes(
     return dp_group.all_gather(hash_ids, dim=0)
 
 
+def describe_error(exc: Exception) -> str:
+    return f"{type(exc).__name__}: {exc}"
+
+
+def gather_errors(group: GroupCoordinator, error: str | None) -> str:
+    """Each rank's error, joined; empty if every rank succeeded."""
+    errors: list[str | None] = [None] * group.world_size
+    torch.distributed.all_gather_object(errors, error, group=group.cpu_group)
+    return "; ".join(
+        f"EDP rank {rank}: {error}" for rank, error in enumerate(errors) if error
+    )
+
+
+def _shm_shortfall(num_bytes: int) -> str | None:
+    """Why /dev/shm cannot hold a table of this size, or None if it can."""
+    if not os.path.isdir(SHM_PATH):
+        return f"{SHM_PATH} is not mounted"
+    try:
+        check_shm_free_space(num_bytes, allocation_name="Engram tables")
+    except Exception as exc:
+        return describe_error(exc)
+    # tmpfs pages beyond available host memory are faulted in by the OOM killer.
+    available = get_available_memory()
+    if num_bytes > available:
+        return (
+            f"{num_bytes / 2**30:.1f} GiB exceeds the "
+            f"{available / 2**30:.1f} GiB of available host memory"
+        )
+    return None
+
+
+def _allow_any_numa_node(address: int, num_bytes: int) -> None:
+    """Let a mapping's pages spill to any NUMA node despite --numa-bind.
+
+    mbind(MPOL_LOCAL) overrides the task's membind for this range: pages still
+    go to the faulting CPU's node first, then to any other node.
+    """
+    sys_mbind = {"aarch64": 235, "x86_64": 237}.get(platform.machine())
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.syscall.restype = ctypes.c_long
+    if sys_mbind is None or libc.syscall(
+        ctypes.c_long(sys_mbind),
+        ctypes.c_void_p(address),
+        ctypes.c_ulong(num_bytes),
+        ctypes.c_int(4),  # MPOL_LOCAL
+        None,
+        ctypes.c_ulong(0),
+        ctypes.c_uint(0),
+    ):
+        logger.warning_once(
+            "Engram mbind(MPOL_LOCAL) failed; /dev/shm tables follow the "
+            "process memory policy: %s",
+            os.strerror(ctypes.get_errno()),
+        )
+
+
 class DPSharedEngramStorage:
-    """Registered host weights shared by a node-local DP group with one writer."""
+    """Host weights shared by a node-local DP group with one writer: host-NUMA
+    cuMem where FABRIC handles work, else a registered /dev/shm mapping."""
 
     def __init__(
         self, num_rows: int, dim: int, block_size: int, group: GroupCoordinator
     ) -> None:
         self.group = group
         weight_bytes = num_rows * dim
-        storage = self._allocate(weight_bytes + weight_bytes // block_size)
-        self.weight = storage[:weight_bytes].view(torch.float8_e4m3fn).view(-1, dim)
-        self.weight_scale_inv = storage[weight_bytes:].view(-1, dim // block_size)
-        self._views: tuple[torch.Tensor, torch.Tensor] | None = None
+        num_bytes = weight_bytes + weight_bytes // block_size
 
-    def _allocate(self, num_bytes: int) -> torch.Tensor:
-        """Map and register one physical allocation across a node-local DP group."""
-        group = self.group
+        def split_table(table: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+            weight = table[:weight_bytes].view(torch.float8_e4m3fn).view(-1, dim)
+            return weight, table[weight_bytes:].view(-1, dim // block_size)
+
+        views = None
+        if current_platform.is_cuda():
+            from vllm.models.deepseek_v41.nvidia.ops import engram_host_table
+
+            views = engram_host_table.share_host_table(num_bytes, group)
+        # The GPU maps cuMem host memory with 2M pages, /dev/shm with 64K pages.
+        self.huge_pages = views is not None
+        host, gpu = views or self.share_shm_table(num_bytes, group)
+        self.weight, self.weight_scale_inv = split_table(host)
+        self._views = split_table(gpu)
+
+    @staticmethod
+    def share_shm_table(
+        num_bytes: int, group: GroupCoordinator
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Map and register one /dev/shm file across a node-local DP group.
+
+        Returns CPU and GPU views of the file. Raises on every rank, leaving
+        nothing mapped, if any rank fails.
+        """
         with ExitStack() as stack:
             path = error = None
-            if group.rank_in_group == 0:
+            if group.rank_in_group == 0 and not (error := _shm_shortfall(num_bytes)):
                 try:
-                    check_shm_free_space(num_bytes)
                     backing_file = stack.enter_context(
                         tempfile.NamedTemporaryFile(prefix="vllm_engram_", dir=SHM_PATH)
                     )
                     backing_file.truncate(num_bytes)
                     path = backing_file.name
                 except Exception as exc:
-                    error = f"{type(exc).__name__}: {exc}"
+                    error = describe_error(exc)
             path, error = group.broadcast_object((path, error))
             if error is not None:
                 raise RuntimeError(
                     "Engram shared-memory creation failed on EDP rank 0: " + error
                 )
 
-            mapping = owner = tensor = None
+            mapping = None
             try:
                 with open(path, "r+b") as file:
                     mapping = mmap.mmap(file.fileno(), num_bytes, flags=mmap.MAP_SHARED)
+            except Exception as exc:
+                error = describe_error(exc)
+            if failures := gather_errors(group, error):
+                del mapping
+                raise RuntimeError(
+                    "Engram shared-memory initialization failed: " + failures
+                )
+            # Unlink while the file is still sparse, so a crash during the slow
+            # registration below cannot orphan the table.
+            stack.close()
+            assert mapping is not None
+
+            owner = tensor = None
+            try:
                 owner = np.frombuffer(mapping, dtype=np.uint8)
                 pointer = owner.ctypes.data
+                _allow_any_numa_node(pointer, num_bytes)
                 tensor = torch.from_numpy(owner)
                 result = torch.cuda.cudart().cudaHostRegister(pointer, num_bytes, 0)
                 if result.value != 0:
                     raise RuntimeError(f"cudaHostRegister failed: {result}")
-                finalizer = weakref.finalize(owner, self._unregister, mapping, pointer)
+                finalizer = weakref.finalize(
+                    owner, DPSharedEngramStorage._unregister, mapping, pointer
+                )
                 finalizer.atexit = False  # type: ignore[misc]
                 # The UVA helper otherwise allocates a private pinned copy.
                 if not tensor.is_pinned():
@@ -830,24 +794,16 @@ class DPSharedEngramStorage:
                         "cudaHostRegister did not pin the shared Engram mapping"
                     )
             except Exception as exc:
-                error = f"{type(exc).__name__}: {exc}"
+                error = describe_error(exc)
 
-            # Also fences peer mappings before the leader unlinks the file.
-            errors: list[str | None] = [None] * group.world_size
-            torch.distributed.all_gather_object(errors, error, group=group.cpu_group)
-            failures = "; ".join(
-                f"EDP rank {rank}: {error}"
-                for rank, error in enumerate(errors)
-                if error is not None
-            )
-            if failures:
+            if failures := gather_errors(group, error):
                 # Dropping the owner runs the finalizer; the mapping then unmaps.
                 del tensor, owner, mapping
                 raise RuntimeError(
                     "Engram shared-memory initialization failed: " + failures
                 )
             assert tensor is not None
-            return tensor
+            return tensor, get_accelerator_view_from_cpu_tensor(tensor)
 
     @staticmethod
     def _unregister(mapping: mmap.mmap, pointer: int) -> None:
@@ -874,16 +830,11 @@ class DPSharedEngramStorage:
             self.weight_scale_inv.data_ptr(),
         ):
             raise RuntimeError("Shared Engram parameter storage must not be replaced")
-        if self._views is None:
-            self._views = (
-                get_accelerator_view_from_cpu_tensor(self.weight),
-                get_accelerator_view_from_cpu_tensor(self.weight_scale_inv),
-            )
         return self._views
 
 
 def can_share_engram_tables(layout: EngramLayout, block_size: int = 32) -> bool:
-    """Whether co-located DP replicas exist and /dev/shm can hold the full tables."""
+    """Whether co-located DP replicas exist and can hold the full tables."""
     if get_engram_dp_size() == 1:
         logger.warning_once(
             "Engram DP replicas are not co-located on one node; "
@@ -895,16 +846,9 @@ def can_share_engram_tables(layout: EngramLayout, block_size: int = 32) -> bool:
     )
     group = get_engram_dp_group()
     assert group is not None
-    # Only the leader allocates, so every replica follows its check.
-    error = None
-    if group.rank_in_group == 0:
-        if not os.path.isdir(SHM_PATH):
-            error = f"{SHM_PATH} is not mounted"
-        else:
-            try:
-                check_shm_free_space(num_bytes, allocation_name="Engram tables")
-            except Exception as exc:
-                error = f"{type(exc).__name__}: {exc}"
+    # Only the leader allocates, so every replica follows its check. /dev/shm
+    # must fit even where cuMem will, since it is the fallback.
+    error = _shm_shortfall(num_bytes) if group.rank_in_group == 0 else None
     error = group.broadcast_object(error)
     if error is not None:
         logger.warning_once(
@@ -1069,7 +1013,10 @@ class ParallelEngramEmbedding(nn.Module):
                 self.part_num_embeddings,
                 dim,
                 self.part_num_embeddings * (dim + dim // block_size) / 1024**3,
-                "shared across DP replicas" if dp_shared_memory else "per rank",
+                "per rank"
+                if self._shared_memory is None
+                else "shared across DP replicas via "
+                + ("cuMem" if self._shared_memory.huge_pages else "/dev/shm"),
             )
 
     def _get_shard_info(self) -> tuple[int, int]:
@@ -1162,6 +1109,13 @@ class ParallelEngramEmbedding(nn.Module):
                 os.strerror(ctypes.get_errno()),
             )
 
+    @property
+    def _uses_small_host_pages(self) -> bool:
+        """Whether the GPU maps this host table with pages too small for its TLB."""
+        if self._shared_memory is not None:
+            return not self._shared_memory.huge_pages
+        return self.cpu_offload and self._packed is None
+
     def _storage(self) -> tuple[torch.Tensor, torch.Tensor]:
         if self._shared_memory is not None:
             return self._shared_memory.get_views(self.weight, self.weight_scale_inv)
@@ -1191,8 +1145,7 @@ class ParallelEngramEmbedding(nn.Module):
         ids_stride_t, ids_stride_h = indices.stride()
         sort_min_rows, _ = _engram_lookup_thresholds(indices.device)
         sort = (
-            self.cpu_offload
-            and self._packed is None
+            self._uses_small_host_pages
             and sort_min_rows is not None
             and rows >= sort_min_rows
         )
@@ -1459,14 +1412,10 @@ def _engram_unpack_fp8_kernel(
     tl.store(scales + layer * scales_stride + offset, scale)
 
 
-class EngramBatch(nn.Module):
-    """Stage every Engram layer's WKV input as MXFP8 with one exchange.
-
-    A module so the model owns the peer exchange's pointer buffers.
-    """
+class EngramBatch:
+    """Stage every Engram layer's WKV input as MXFP8 with one exchange."""
 
     def __init__(self, layers: list["Engram"], max_tokens: int) -> None:
-        super().__init__()
         first = layers[0].layer_hash_index
         hash_indices = [layer.layer_hash_index for layer in layers]
         assert hash_indices == list(range(first, first + len(layers)))
@@ -1503,8 +1452,7 @@ class EngramBatch(nn.Module):
 
             self.peer_exchange = EngramPeerExchange.create(layers, max_peer_slot)
         for layer in layers:
-            # Owned by the model; keep it out of each layer's submodules.
-            object.__setattr__(layer, "_batch", self)
+            layer._batch = self
             # The layers read this batch's staging instead of their BF16 rows.
             layer.staged_rows = layer.staged_rows.new_empty(
                 (0, *layer.staged_rows.shape[1:])
@@ -1624,17 +1572,8 @@ class Engram(nn.Module):
         # suffix rule.
         self.embed_tokens = self._create_embedding(layout, layer_hash_index)
         n_hash_cols = (layout.max_ngram_size - 1) * layout.n_heads
-        # Without sequence parallelism every TP rank holds every token, so
-        # shard the output columns instead of replicating the projection.
-        self.wkv = ColumnParallelLinear(
-            n_hash_cols * layout.head_dim,
-            self.dim * (self.hc_mult + 1),
-            bias=False,
-            gather_output=True,
-            quant_config=quant_config,
-            return_bias=False,
-            prefix=f"{prefix}.wkv",
-            disable_tp=use_sequence_parallel,
+        self.wkv = self._create_wkv(
+            n_hash_cols * layout.head_dim, quant_config, f"{prefix}.wkv"
         )
         self.q_weight = nn.Parameter(
             torch.empty(self.hc_mult, self.dim, dtype=torch.bfloat16),
@@ -1647,6 +1586,22 @@ class Engram(nn.Module):
 
         max_tokens = get_current_vllm_config().scheduler_config.max_num_batched_tokens
         self._init_staging(max_tokens, layout.head_dim)
+
+    def _create_wkv(
+        self, input_size: int, quant_config: QuantizationConfig | None, prefix: str
+    ) -> ColumnParallelLinear:
+        # Without sequence parallelism every TP rank holds every token, so
+        # shard the output columns instead of replicating the projection.
+        return ColumnParallelLinear(
+            input_size,
+            self.dim * (self.hc_mult + 1),
+            bias=False,
+            gather_output=True,
+            quant_config=quant_config,
+            return_bias=False,
+            prefix=prefix,
+            disable_tp=self.use_sequence_parallel,
+        )
 
     def _create_embedding(
         self, layout: EngramLayout, layer_hash_index: int
@@ -1772,6 +1727,16 @@ class Engram(nn.Module):
             if token_mask is not None:
                 token_mask = token_mask[start : start + num_kv_tokens]
 
+        return self._post_wkv(hidden_states, kv, token_mask, num_kv_tokens)
+
+    def _post_wkv(
+        self,
+        hidden_states: torch.Tensor,
+        kv: torch.Tensor,
+        token_mask: torch.Tensor | None,
+        num_kv_tokens: int,
+    ) -> torch.Tensor:
+        """The gated update from the `wkv` output of `num_kv_tokens` tokens."""
         num_tokens, hc_mult, dim = hidden_states.shape
         assert hc_mult == self.hc_mult and dim == self.dim
         assert kv.ndim == 2 and kv.shape[1] == (hc_mult + 1) * dim
