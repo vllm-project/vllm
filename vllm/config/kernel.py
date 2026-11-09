@@ -180,6 +180,8 @@ SparseIndexerTopkBackend = Literal[
     "aiter",
 ]
 
+FlashInferSparseMLAKernel = Literal["auto", "trtllm", "prims_ts"]
+
 # DeepGEMM consumes the DeepSeek-V4 MXFP4 checkpoint recipe. CuTeDSL is
 # selected by quantization methods and is not architecture-specific.
 FLASHINFER_MOE_EP_ARCHITECTURES = frozenset(
@@ -374,6 +376,17 @@ class KernelConfig:
     On SM100 decode without DCP, cooperative and persistent (including auto
     selecting them) read BF16 logits directly and widen scores inside the
     kernel, avoiding a full FP32 logits copy.
+    """
+
+    flashinfer_sparse_mla_kernel: FlashInferSparseMLAKernel = "auto"
+    """Kernel of the SM100 FLASHINFER_MLA_SPARSE backend for D576 sparse MLA.
+    Available options:
+
+    - "auto": prims_ts for nvfp4_ds_mla, and for a per-tensor fp8 cache under
+      DCP (decode_context_parallel_size > 1) when it can run; else trtllm-gen
+    - "trtllm": trtllm-gen; nvfp4_ds_mla caches cannot use this backend
+    - "prims_ts": FlashInfer's task-scheduled sparse MLA decode, also for a
+      per-tensor fp8 cache
     """
 
     linear_backend: LinearBackend = "auto"

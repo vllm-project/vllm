@@ -374,9 +374,16 @@ def resolve_kv_cache_layout(
         if isinstance(spec, AttentionSpec) and spec.uses_slot_mapping
     }
     page_sizes = {spec.page_size_bytes for spec in kv_cache_specs}
-    if len(dcp_sharding) > 1 and len(page_sizes) > 1:
+    is_hybrid = any(isinstance(spec, MambaSpec) for spec in kv_cache_specs)
+    if len(dcp_sharding) > 1 and len(page_sizes) > 1 and not is_hybrid:
         # Sharded target and replicated draft caches need independent groups.
         # Block-outer layouts can pack those groups without equalizing pages.
+        # Targets with linear-attention layers (MambaSpec: Mamba, KDA, GDN) are
+        # not narrowed to block-outer layouts: they keep a layer-compact layout,
+        # and page unification pads the draft's smaller pages up to the target's.
+        # Their state pages force large blocks (1536 tokens for Kimi-K3 at TP8)
+        # that packed attention caches cannot split into kernel blocks, and NIXL
+        # cannot transfer packed rows that hold the state.
         candidates = [layout for layout in candidates if layout.is_block_outermost]
         if not candidates:
             raise ValueError(
