@@ -38,7 +38,12 @@ from vllm.model_executor.layers.quantization.online.moe_base import (
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
     mxfp4_quantize,
 )
-from vllm.model_executor.layers.quantization.utils.quant_utils import kMxfp4Dynamic
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kMxfp4Dynamic,
+    kMxfp6E2M3Dynamic,
+    kMxfp6E3M2Dynamic,
+    kMxfp8Dynamic,
+)
 from vllm.model_executor.utils import replace_parameter
 
 # MXFP4 block size (elements per shared e8m0 scale), same as the checkpoint
@@ -174,21 +179,43 @@ class Mxfp4OnlineMoEMethod(OnlineMoEMethodBase):
             config=self.moe, activation_key=self.activation_quant_key
         )
         # The oracle may fall back to a backend computing another activation
-        # format (EMULATION computes MXFP4): reject an override it cannot honour.
-        backend_key = (
-            kMxfp4Dynamic
-            if self.mxfp4_backend == Mxfp4MoeBackend.EMULATION
-            else _backend_activation_key(self.mxfp4_backend)
-        )
-        if (
-            self.activation_quant_key != kMxfp4Dynamic
-            and self.activation_quant_key != backend_key
-        ):
-            raise NotImplementedError(
-                f"online MXFP4 MoE backend '{self.mxfp4_backend}' cannot honour "
-                f"activation={self.activation_quant_key}; it computes "
-                f"activation={backend_key}."
+        # format: reject an override it cannot honour.
+        # EMULATION supports MXFP4, MXFP6 (E3M2, E2M3), FP8, and unquantized (None).
+        emulation_supported = self.activation_quant_key in (
+            None,
+            kMxfp4Dynamic,
+            kMxfp6E3M2Dynamic,
+            kMxfp6E2M3Dynamic,
+        ) or (
+            self.activation_quant_key is not None
+            and (
+                self.activation_quant_key == kMxfp8Dynamic
+                or self.activation_quant_key.dtype
+                in (
+                    torch.float8_e4m3fn,
+                    torch.float8_e4m3fnuz,
+                    torch.float8_e5m2,
+                    torch.float8_e5m2fnuz,
+                )
             )
+        )
+        if self.mxfp4_backend == Mxfp4MoeBackend.EMULATION:
+            if not emulation_supported:
+                raise NotImplementedError(
+                    f"online MXFP4 MoE backend '{self.mxfp4_backend}' cannot honour "
+                    f"activation={self.activation_quant_key}."
+                )
+        else:
+            backend_key = _backend_activation_key(self.mxfp4_backend)
+            if (
+                self.activation_quant_key != kMxfp4Dynamic
+                and self.activation_quant_key != backend_key
+            ):
+                raise NotImplementedError(
+                    f"online MXFP4 MoE backend '{self.mxfp4_backend}' cannot honour "
+                    f"activation={self.activation_quant_key}; it computes "
+                    f"activation={backend_key}."
+                )
 
     def maybe_roundup_sizes(
         self,
@@ -314,12 +341,13 @@ class Mxfp4OnlineMoEMethod(OnlineMoEMethodBase):
             w2_scale=w2_scale,
             w1_bias=getattr(layer, "w13_bias", None),
             w2_bias=getattr(layer, "w2_bias", None),
-            a1_scale=layer.w13_input_scale,
-            a2_scale=layer.w2_input_scale,
+            a1_scale=getattr(layer, "w13_input_scale", None),
+            a2_scale=getattr(layer, "w2_input_scale", None),
             swiglu_limit=getattr(layer, "swiglu_limit", None),
             gemm1_alpha=getattr(layer, "swiglu_alpha", None),
             gemm1_beta=getattr(layer, "swiglu_beta", None),
             layer=layer,
+            activation_key=self.activation_quant_key,
         )
 
     def process_weights_after_loading(self, layer: Module) -> None:

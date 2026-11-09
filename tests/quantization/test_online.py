@@ -127,8 +127,11 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8Static128BlockSym,
     kFp8StaticChannelSym,
     kFp8StaticTensorSym,
+    kInt8Dynamic32Sym,
     kMxfp4Dynamic,
     kMxfp4Static,
+    kMxfp6E2M3Dynamic,
+    kMxfp6E3M2Dynamic,
     kMxfp8Dynamic,
     kMxfp8Static,
     kNvfp4Dynamic,
@@ -301,11 +304,68 @@ def test_online_mxfp4_activation_key_is_honoured_or_rejected(
         assert method.kernel.config.activation_quant_key == activation_quant_key
     elif activation_quant_key != kMxfp4Dynamic:  # The default may run BF16.
         computed_key = (
-            kMxfp4Dynamic
+            activation_quant_key
             if method.mxfp4_backend == Mxfp4MoeBackend.EMULATION
             else _backend_activation_key(method.mxfp4_backend)
         )
         assert computed_key == activation_quant_key
+
+
+@pytest.mark.parametrize(
+    ("activation_key", "expected_quant_dtype"),
+    [
+        (None, None),
+        (kMxfp4Dynamic, "mxfp4"),
+        (kMxfp6E3M2Dynamic, "mxfp6_e3m2"),
+        (kMxfp6E2M3Dynamic, "mxfp6_e2m3"),
+        (kMxfp8Dynamic, "mxfp8"),
+        (kFp8Dynamic128Sym, "fp8"),
+    ],
+)
+def test_online_mxfp4_moe_emulation_activation_formats(
+    default_vllm_config,
+    monkeypatch,
+    activation_key,
+    expected_quant_dtype,
+) -> None:
+    """EMULATION backend in Mxfp4OnlineMoEMethod honors activation overrides."""
+    default_vllm_config.model_config = SimpleNamespace(
+        quantization_config=None,
+        dtype=torch.bfloat16,
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.online.mxfp4.select_mxfp4_moe_backend",
+        lambda *args, **kwargs: (Mxfp4MoeBackend.EMULATION, None),
+    )
+    moe_config = _TestRoutedExperts().moe_config
+    method = Mxfp4OnlineMoEMethod(moe=moe_config, activation_quant_key=activation_key)
+    assert method.mxfp4_backend == Mxfp4MoeBackend.EMULATION
+
+    layer = SimpleNamespace(
+        w13_weight_scale=torch.empty(0),
+        w2_weight_scale=torch.empty(0),
+    )
+    quant_config = method.get_fused_moe_quant_config(layer=layer)
+    assert quant_config is not None
+    assert quant_config.weight_quant_dtype == "mxfp4"
+    assert quant_config.quant_dtype == expected_quant_dtype
+
+
+def test_online_mxfp4_moe_emulation_rejects_unsupported_activation(
+    default_vllm_config, monkeypatch
+) -> None:
+    """EMULATION backend rejects unsupported activation schemes like INT8."""
+    default_vllm_config.model_config = SimpleNamespace(
+        quantization_config=None,
+        dtype=torch.bfloat16,
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.online.mxfp4.select_mxfp4_moe_backend",
+        lambda *args, **kwargs: (Mxfp4MoeBackend.EMULATION, None),
+    )
+    moe_config = _TestRoutedExperts().moe_config
+    with pytest.raises(NotImplementedError, match="cannot honour activation"):
+        Mxfp4OnlineMoEMethod(moe=moe_config, activation_quant_key=kInt8Dynamic32Sym)
 
 
 @pytest.mark.skipif(

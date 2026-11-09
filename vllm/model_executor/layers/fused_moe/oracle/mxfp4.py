@@ -53,6 +53,8 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kInt4Static32,
     kMxfp4Dynamic,
     kMxfp4Static,
+    kMxfp6E2M3Dynamic,
+    kMxfp6E3M2Dynamic,
     kMxfp8Dynamic,
 )
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import all_close_1d
@@ -2087,6 +2089,7 @@ def make_mxfp4_moe_quant_config(
     a1_scale: torch.Tensor | None = None,
     a2_scale: torch.Tensor | None = None,
     layer: "RoutedExperts | None" = None,
+    activation_key: QuantKey | None = None,
 ) -> FusedMoEQuantConfig | None:
     """Create a FusedMoEQuantConfig for the given MXFP4 backend."""
     if mxfp4_backend in FLASHINFER_MOE_EP_MXFP4_BACKENDS:
@@ -2205,6 +2208,60 @@ def make_mxfp4_moe_quant_config(
             gemm1_beta=gemm1_beta,
             gemm1_clamp_limit=swiglu_limit,
         )
+    elif mxfp4_backend == Mxfp4MoeBackend.EMULATION:
+        if activation_key is None:
+            return mxfp4_w4a16_moe_quant_config(
+                w1_bias=w1_bias,
+                w2_bias=w2_bias,
+                w1_scale=w1_scale,
+                w2_scale=w2_scale,
+                gemm1_clamp_limit=swiglu_limit,
+            )
+        if activation_key == kMxfp6E3M2Dynamic:
+            quant_dtype = "mxfp6_e3m2"
+        elif activation_key == kMxfp6E2M3Dynamic:
+            quant_dtype = "mxfp6_e2m3"
+        elif activation_key == kMxfp8Dynamic:
+            return mxfp4_mxfp8_moe_quant_config(
+                w1_scale=w1_scale,
+                w2_scale=w2_scale,
+                a1_scale=a1_scale,
+                a2_scale=a2_scale,
+                w1_bias=w1_bias,
+                w2_bias=w2_bias,
+                gemm1_alpha=gemm1_alpha,
+                gemm1_beta=gemm1_beta,
+                gemm1_clamp_limit=swiglu_limit,
+            )
+        elif activation_key.dtype in (
+            torch.float8_e4m3fn,
+            torch.float8_e4m3fnuz,
+            torch.float8_e5m2,
+            torch.float8_e5m2fnuz,
+        ):
+            return mxfp4_w4a8_moe_quant_config(
+                w1_scale=w1_scale,
+                w2_scale=w2_scale,
+                a1_scale=a1_scale,
+                a2_scale=a2_scale,
+                w1_bias=w1_bias,
+                w2_bias=w2_bias,
+                gemm1_clamp_limit=swiglu_limit,
+            )
+        else:
+            quant_dtype = "mxfp4"
+
+        return ocp_mx_moe_quant_config(
+            quant_dtype=quant_dtype,
+            weight_dtype="mxfp4",
+            w1_bias=w1_bias,
+            w2_bias=w2_bias,
+            w1_scale=w1_scale,
+            w2_scale=w2_scale,
+            gemm1_alpha=gemm1_alpha,
+            gemm1_beta=gemm1_beta,
+            gemm1_clamp_limit=swiglu_limit,
+        )
     else:
         return ocp_mx_moe_quant_config(
             quant_dtype="mxfp4",
@@ -2220,6 +2277,8 @@ def make_mxfp4_moe_quant_config(
 
 _MXFP4_SCHEME_CANDIDATES: list[tuple[QuantKey, QuantKey | None]] = [
     (kMxfp4Static, kMxfp4Dynamic),
+    (kMxfp4Static, kMxfp6E3M2Dynamic),
+    (kMxfp4Static, kMxfp6E2M3Dynamic),
     (kMxfp4Static, kMxfp8Dynamic),
     (kMxfp4Static, kFp8Dynamic128Sym),
     (kMxfp4Static, kFp8StaticTensorSym),

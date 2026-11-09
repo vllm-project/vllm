@@ -23,6 +23,7 @@ from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     TRITON_BACKENDS,
     Mxfp4MoeBackend,
+    _resolve_activation_key,
     backend_to_kernel_cls,
     convert_gpt_oss_weight_to_mxfp4_moe_kernel_format,
     convert_weight_to_mxfp4_moe_kernel_format,
@@ -1079,6 +1080,18 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             w2_scale = layer.w2_weight_scale
 
         if self.mxfp4_backend == Mxfp4MoeBackend.EMULATION:
+            act_key = _resolve_activation_key(self.activation_key)
+            if act_key is not None:
+                return make_mxfp4_moe_quant_config(
+                    mxfp4_backend=self.mxfp4_backend,
+                    w1_scale=w1_scale,
+                    w2_scale=w2_scale,
+                    w1_bias=w1_bias,
+                    w2_bias=w2_bias,
+                    swiglu_limit=swiglu_limit,
+                    layer=layer,
+                    activation_key=act_key,
+                )
             # Canonical ``mxfp4`` checkpoints are weight-only W4A16. The
             # generic EMULATION config is W4A4, so preserve BF16 activations
             # while the fallback dequantizes only the weights.
