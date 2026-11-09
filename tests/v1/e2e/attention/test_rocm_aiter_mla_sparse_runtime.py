@@ -92,6 +92,9 @@ GLM52 = DummyModel(
         "num_hidden_layers": 4,
         "index_topk_freq": 4,
         "index_skip_topk_offset": 1,
+        # The HF config lists one indexer kind per layer, which wins over
+        # the frequency fields: layer 0 runs the indexer, 1-3 share its top-k.
+        "indexer_types": ["full", "shared", "shared", "shared"],
     },
     logit_gain=2.0,
     tolerance={"auto": 0.8},
