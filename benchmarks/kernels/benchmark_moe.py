@@ -988,7 +988,7 @@ def get_quantization_group_size(config) -> int | None:
     """Extract the quantization group size from the HF model config.
 
     This reads directly from the HuggingFace config object (as returned by
-    ``get_config()``), not from vLLM's quantization config classes.
+    `get_config()`), not from vLLM's quantization config classes.
 
     Supports AWQ/GPTQ-style configs (direct 'group_size' key) and
     compressed-tensors configs (nested inside 'config_groups').
