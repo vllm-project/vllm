@@ -25,6 +25,11 @@ logger = init_logger(__name__)
 # Receive-row bounds are rounded up to this many rows (as SGLang's MORI path does).
 _RECV_ROW_ALIGN = 32
 
+# Most rows a segmented receive may hand the experts (world_size * stride),
+# relative to the rows all ranks send; uneven DP batches fall back to the
+# compact receive past it. Matches SGLang's MORI path.
+_SEGMENTED_MAX_ROW_INFLATION = 1.25
+
 
 class MoriEPv2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
     """Prepare/finalize over MORI EPv2 ops: one op, or one per DBO microbatch.
@@ -33,6 +38,8 @@ class MoriEPv2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
     staging buffers, so each DBO microbatch uses its own op.
     With `async_ll`, prepare_async/finalize_async return the receive as the
     hook, and the shared experts run between a combine's send and its receive.
+    An AsyncLL op built with MORI's segmented receive layout lands each
+    source's rows in its own segment, which the experts read in place.
     """
 
     def __init__(
@@ -233,12 +240,81 @@ class MoriEPv2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         weights, ids = self._dispatch_args(
             a1, topk_weights, topk_ids, apply_router_weight_on_input
         )
+        stride = self._segment_stride(a1, mori_op)
+        # Passed only when set, so MORI builds without the segmented layout work.
+        segment = {"segment_stride": stride} if stride else {}
         # The returned views hold the received rows once dispatch_recv has run.
         *received, self._routings[ubatch_id] = mori_op.dispatch_send(
-            a1, weights, None, ids, return_routing=True
+            a1, weights, None, ids, return_routing=True, **segment
         )
+        if stride:
+            return mori_op.dispatch_recv, lambda: self._segmented_result(*received)
         return mori_op.dispatch_recv, lambda: self._finish_dispatch(
             a1, *received, quant_config=quant_config
+        )
+
+    def _segment_stride(self, a1: torch.Tensor, mori_op: Any) -> int:
+        """Rows per source of a segmented receive, or 0 for the compact one.
+
+        MORI needs every rank to run the same stride, so it is derived only
+        from what all ranks share: the op, graph capture and the DP token
+        counts. The experts then get world_size * stride rows; the holes
+        between the segments carry another rank's expert with weight 0, which
+        only experts that read just the local experts (AITER) drop.
+        """
+        if not self._experts_read_recv_rows_only:
+            return 0
+        if not getattr(mori_op.cfg, "async_ll_segmented", False):
+            return 0
+        if torch.cuda.is_current_stream_capturing():
+            return 0
+        dp_meta = (
+            get_forward_context().dp_metadata
+            if is_forward_context_available()
+            else None
+        )
+        if dp_meta is None:
+            return 0
+        tokens = dp_meta.num_tokens_across_dp_cpu
+        n_dp = tokens.numel()
+        if n_dp == 0 or self.num_dispatchers_ % n_dp != 0:
+            return 0
+        # Each dispatcher sends at most its DP rank's batch.
+        stride = -(-max(int(tokens.max()), 1) // _RECV_ROW_ALIGN) * _RECV_ROW_ALIGN
+        rows_sent = self.num_dispatchers_ // n_dp * int(tokens.sum())
+        if (
+            stride > mori_op.cfg.effective_max_recv_per_rank
+            or self.num_dispatchers_ * stride > _SEGMENTED_MAX_ROW_INFLATION * rows_sent
+        ):
+            return 0
+        if a1.shape[0] > stride:
+            # Falling back on this rank alone would desynchronize the ranks.
+            raise RuntimeError(
+                f"MORI EPv2: {a1.shape[0]} tokens exceed the segment stride "
+                f"{stride} derived from the DP token counts {tokens.tolist()}"
+            )
+        logger.info_once("MORI EPv2: AsyncLL dispatch uses the segmented receive")
+        return stride
+
+    @staticmethod
+    def _segmented_result(
+        dispatch_a1: torch.Tensor,
+        dispatch_weights: torch.Tensor,
+        dispatch_scale: torch.Tensor | None,
+        dispatch_ids: torch.Tensor,
+        dispatch_recv_token_num: torch.Tensor,
+    ) -> mk.PrepareResultType:
+        # Every one of the world_size * stride rows is an input and the holes
+        # are already routed off this rank; dispatch_recv_token_num counts all.
+        return (
+            dispatch_a1,
+            dispatch_scale,
+            mk.ExpertTokensMetadata(
+                expert_num_tokens=dispatch_recv_token_num,
+                expert_num_tokens_cpu=None,
+            ),
+            dispatch_ids,
+            dispatch_weights,
         )
 
     def _dispatch_args(

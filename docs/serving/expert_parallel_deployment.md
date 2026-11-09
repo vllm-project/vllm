@@ -117,6 +117,7 @@ vllm serve deepseek-ai/DeepSeek-V4-Pro \
 | `0` | EPv1 |
 
 On gfx950, `MORI_ENABLE_SDMA=1` makes EPv2 run its AsyncLL kernels, which move tokens by SDMA, when the installed MoRI has them; gfx1250 keeps native EPv2.
+Where the installed MoRI also has the AsyncLL segmented receive layout ([ROCm/mori#918](https://github.com/ROCm/mori/pull/918)), the AITER experts read the received tokens in place instead of MoRI copying them into a compact buffer first; nothing needs to be set.
 
 On EPv2, `mori` supports `--enable-dbo` with native and AsyncLL kernels. DBO speeds up prefill but slows decode here, so set a large `--dbo-decode-token-threshold` or enable DBO on prefill instances only.
 

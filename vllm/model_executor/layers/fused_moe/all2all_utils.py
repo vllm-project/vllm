@@ -43,6 +43,7 @@ from vllm.utils.import_utils import (
     has_mori,
     has_nixl_ep,
     mori_epv2_has_own_sdma_queue,
+    mori_epv2_has_segmented_recv,
 )
 from vllm.utils.math_utils import cdiv
 
@@ -402,6 +403,11 @@ def maybe_make_prepare_finalize(
             # DBO issues both microbatches on one stream: one SDMA queue per op.
             if mori_epv2_has_own_sdma_queue():
                 all_to_all_args.update(async_ll_own_sdma_queue=True)
+            # Where the op supports it, MORI lands each source's rows in its own
+            # segment and the experts read them in place, skipping the copy
+            # into a compact buffer.
+            if mori_epv2_has_segmented_recv():
+                all_to_all_args.update(async_ll_recv_layout="auto")
         prepare_finalize = MoriEPv2PrepareAndFinalize(
             _make_mori_epv2_ops(all2all_manager, all_to_all_args),
             max_tokens_per_rank=moe.max_num_tokens,

@@ -689,6 +689,20 @@ def mori_epv2_has_own_sdma_queue() -> bool:
     return "async_ll_own_sdma_queue" in fields
 
 
+@cache
+def mori_epv2_has_segmented_recv() -> bool:
+    """Whether MoRI can land AsyncLL dispatches in a per-source segmented layout
+    the experts read in place (ROCm/mori#918)."""
+    if not mori_epv2_has_async_ll():
+        return False
+    from mori.ops.dispatch_combine_v2 import (  # type: ignore[import-not-found]
+        EpDispatchCombineConfig,
+    )
+
+    fields = getattr(EpDispatchCombineConfig, "__dataclass_fields__", {})
+    return "async_ll_recv_layout" in fields
+
+
 def has_fbgemm_gpu() -> bool:
     """Whether the optional `fbgemm_gpu` package is available."""
     return _has_module("fbgemm_gpu")

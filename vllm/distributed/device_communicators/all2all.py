@@ -1073,6 +1073,10 @@ def _mori_epv2_arena_bytes(cfg) -> int:
         # AsyncLL has its own arena layout; take MORI's region table.
         from mori.ops.dispatch_combine_v2.internode_regions import asyncll_regions
 
+        if getattr(cfg, "async_ll_recv_layout", "compact") == "auto":
+            # The op resolves "auto" when it is built; size for the larger
+            # segmented layout it may pick.
+            cfg = replace(cfg, async_ll_recv_layout="segmented")
         regions = asyncll_regions(cfg)
         return sum(nbytes for _, nbytes in regions) + len(regions) * 256
     # The hip backend pads scale rows to 128 B; FlyDSL uses the unpadded row.

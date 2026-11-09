@@ -754,3 +754,99 @@ def test_async_ll_microbatches_receive_in_the_peers_seam(monkeypatch):
         ("combine_send", "op0")
     )
     assert prepare_finalize._routings == [None, None]
+
+
+class _SegmentedOp(FakeOp):
+    """AsyncLL op built with MORI's segmented receive layout."""
+
+    def __init__(self, segmented=True, max_recv_per_rank=64, **kwargs):
+        super().__init__(**kwargs)
+        self.cfg = SimpleNamespace(
+            async_ll_segmented=segmented, effective_max_recv_per_rank=max_recv_per_rank
+        )
+        self.segment_stride: int | None = None
+
+    def dispatch_send(self, *args, segment_stride=None, **kwargs):
+        self.segment_stride = segment_stride
+        return FakeOp.dispatch(self, *args, **kwargs)
+
+    def dispatch_recv(self):
+        pass
+
+    def combine_send(self, *args, **kwargs):
+        return FakeOp.combine(self, *args, **kwargs)
+
+    def combine_recv(self):
+        pass
+
+
+def _prepare_segmented(
+    monkeypatch, op, num_tokens_across_dp, num_tokens=4, aiter=True, capturing=False
+):
+    ctx = SimpleNamespace(
+        dp_metadata=SimpleNamespace(
+            num_tokens_across_dp_cpu=torch.tensor(num_tokens_across_dp)
+        )
+    )
+    monkeypatch.setattr(mori_epv2, "is_forward_context_available", lambda: True)
+    monkeypatch.setattr(mori_epv2, "get_forward_context", lambda: ctx)
+    monkeypatch.setattr(
+        mori_epv2, "get_dp_group", lambda: SimpleNamespace(rank_in_group=0)
+    )
+    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: capturing)
+    prepare_finalize = _make_pf(op, async_ll=True)
+    prepare_finalize._experts_read_recv_rows_only = aiter
+    return prepare_finalize.prepare(
+        torch.ones(num_tokens, 4, dtype=torch.bfloat16),
+        torch.ones(num_tokens, 2, dtype=torch.bfloat16),
+        torch.zeros(num_tokens, 2, dtype=torch.int64),
+        num_experts=8,
+        expert_map=None,
+        apply_router_weight_on_input=False,
+        quant_config=SimpleNamespace(is_per_tensor=False, a1_scale=None),
+    )
+
+
+def test_segmented_receive_is_read_in_place(monkeypatch):
+    # 4 ranks of up to 31 tokens: stride 32, 4 * 32 = 128 rows for 120 sent.
+    op = _SegmentedOp(recv=128)
+    a1, _, meta, ids, weights = _prepare_segmented(monkeypatch, op, [30, 31, 29, 30])
+    assert op.segment_stride == 32
+    # The whole receive is the experts' input: no bound, no row clearing.
+    for t, buf in ((a1, op.recv_a1), (ids, op.recv_ids), (weights, op.recv_weights)):
+        assert t.data_ptr() == buf.data_ptr() and t.shape[0] == buf.shape[0]
+    assert torch.isnan(a1).all() and (ids == 5).all()
+    assert int(meta.expert_num_tokens) == 128
+
+
+@pytest.mark.parametrize(
+    "op_kwargs,num_tokens_across_dp,prepare_kwargs",
+    [
+        # Uneven DP batches: 4 * 32 rows for 35 sent pads past the bound.
+        ({}, [32, 1, 1, 1], {}),
+        # The stride must fit MORI's per-source receive.
+        ({"max_recv_per_rank": 16}, [30, 31, 29, 30], {}),
+        # Ops without the layout, captured graphs and experts that would
+        # compute the holes keep the compact receive.
+        ({"segmented": False}, [30, 31, 29, 30], {}),
+        ({}, [30, 31, 29, 30], {"capturing": True}),
+        ({}, [30, 31, 29, 30], {"aiter": False}),
+    ],
+)
+def test_compact_receive_where_segments_do_not_apply(
+    monkeypatch, op_kwargs, num_tokens_across_dp, prepare_kwargs
+):
+    op = _SegmentedOp(recv=7, **op_kwargs)
+    a1, _, _, ids, _ = _prepare_segmented(
+        monkeypatch, op, num_tokens_across_dp, **prepare_kwargs
+    )
+    assert op.segment_stride is None
+    # The compact receive: bounded rows, the ones past the count cleared.
+    assert a1.shape[0] < op.recv_a1.shape[0] and (ids[7:] == -1).all()
+
+
+def test_rank_beyond_the_stride_raises(monkeypatch):
+    # Stale DP counts on one rank must not make it fall back alone.
+    op = _SegmentedOp(recv=7)
+    with pytest.raises(RuntimeError, match="segment stride"):
+        _prepare_segmented(monkeypatch, op, [30, 31, 29, 30], num_tokens=40)
