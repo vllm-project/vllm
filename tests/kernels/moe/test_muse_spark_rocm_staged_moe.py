@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""MuseSpark1x ROCm MXFP4 experts through AITER's two-stage MoE API.
+"""MuseSpark ROCm MXFP4 experts through AITER's two-stage MoE API.
 
 On one GPU, the native-route experts must match the repeated-input experts bit
 for bit. On 2 and 8 GPUs, the column-sharded down projection must match the
@@ -116,9 +116,9 @@ def test_column_sharded_down_deployments(monkeypatch, kwargs, expected) -> None:
 
 
 def _post_expert_norm() -> torch.nn.Module:
-    from vllm.models.muse_spark.common.layers import MuseSpark1xRMSNormWithInputScale
+    from vllm.models.muse_spark.common.layers import MuseSparkRMSNormWithInputScale
 
-    norm = MuseSpark1xRMSNormWithInputScale(
+    norm = MuseSparkRMSNormWithInputScale(
         hidden_size=HIDDEN,
         eps=1e-5,
         has_weight=True,

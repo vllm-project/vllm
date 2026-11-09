@@ -3,25 +3,25 @@
 """MuseSpark MXFP4 MoE through AITER's two-stage API.
 
 The post-expert RMSNorm is per route, so the experts must return the unreduced
-``[T, top_k, H]`` outputs. The stock path gets them by repeating the input
-``top_k`` times and running AITER on ``T * top_k`` top-1 routes. With AITER's
-``fused_moe_stage1`` / ``fused_moe_stage2`` this module instead
+`[T, top_k, H]` outputs. The stock path gets them by repeating the input
+`top_k` times and running AITER on `T * top_k` top-1 routes. With AITER's
+`fused_moe_stage1` / `fused_moe_stage2` this module instead
 
-* runs the experts on the native ``[T, top_k]`` routes, one input row per
-  token, with stage 2 writing every route to its own row (``per_slot``). The
+* runs the experts on the native `[T, top_k]` routes, one input row per
+  token, with stage 2 writing every route to its own row (`per_slot`). The
   kernels are the ones AITER selects for the repeated-input call
-  (``config_shape``), so the route outputs are unchanged. Under EP, routes to
+  (`config_shape`), so the route outputs are unchanged. Under EP, routes to
   experts this rank does not own are left unwritten.
 * at TP > 1, for large eager batches, also runs stage 2 column-sharded: it
   all-gathers stage 2's MXFP4 input and E8M0 scales along the intermediate dim
   (each rank's slice is whole 32-element quant groups, so the gathered tensors
   are exactly the full-width quantization) and multiplies them by a second
-  copy of ``w2`` that holds this rank's ``H / tp`` output rows. That gives
+  copy of `w2` that holds this rank's `H / tp` output rows. That gives
   every route's exact output on those columns, so the post-expert norm needs
-  only a ``[T, top_k]`` sum-of-squares all-reduce and an all-gather of the
-  finalized columns (see ``ops/column_sharded_finalize.py``) instead of a
-  reduce-scatter of ``[T, top_k, H]`` partial sums. The second ``w2`` is as
-  large as the rank's regular ``w2`` shard.
+  only a `[T, top_k]` sum-of-squares all-reduce and an all-gather of the
+  finalized columns (see `ops/column_sharded_finalize.py`) instead of a
+  reduce-scatter of `[T, top_k, H]` partial sums. The second `w2` is as
+  large as the rank's regular `w2` shard.
 """
 
 import inspect
@@ -66,8 +66,8 @@ def aiter_has_staged_moe() -> bool:
 
 
 def _config_shape(num_tokens: int, top_k: int, is_ep: bool) -> tuple[int, int]:
-    """``(tokens, topk)`` of the repeated-input call, whose tuned AITER rows
-    the native-route call runs: ``T * top_k`` top-1 routes, plus under EP the
+    """`(tokens, topk)` of the repeated-input call, whose tuned AITER rows
+    the native-route call runs: `T * top_k` top-1 routes, plus under EP the
     always-masked slot AITER's EP convention appends to every row."""
     return num_tokens * top_k, 1 + int(is_ep)
 
@@ -123,7 +123,7 @@ def staged_moe_supported(
     *,
     is_ep: bool,
 ) -> bool:
-    """Whether :func:`staged_fused_moe` can run a batch of ``num_tokens``. A
+    """Whether `staged_fused_moe` can run a batch of `num_tokens`. A
     config lookup only; nothing is compiled or launched."""
     return aiter_has_staged_moe() and _stage2_overridable(
         _config_shape(num_tokens, top_k, is_ep),
@@ -156,7 +156,7 @@ def column_sharded_down_supported(moe_config: FusedMoEConfig) -> bool:
 
 
 def _all_to_all_rows(x: torch.Tensor) -> torch.Tensor:
-    """``[E, H, c]`` intermediate slice of every row -> ``[E, H / tp, tp * c]``
+    """`[E, H, c]` intermediate slice of every row -> `[E, H / tp, tp * c]`
     full intermediate dim of this rank's rows (bytes)."""
     x = x.view(torch.uint8)
     tp_size = get_tensor_model_parallel_world_size()
@@ -173,20 +173,20 @@ def _all_to_all_rows(x: torch.Tensor) -> torch.Tensor:
 
 @dataclass
 class ColumnShardedDownWeights:
-    """This rank's output rows of ``w2`` in AITER's stage2 layout."""
+    """This rank's output rows of `w2` in AITER's stage2 layout."""
 
     w2: torch.Tensor
-    """``[E, H / tp, I / 2]`` FP4, shuffled."""
+    """`[E, H / tp, I / 2]` FP4, shuffled."""
     w2_scale: torch.Tensor
-    """``[E, H / tp, I / 32]`` E8M0, shuffled."""
+    """`[E, H / tp, I / 32]` E8M0, shuffled."""
 
     @classmethod
     def from_checkpoint(
         cls, w2: torch.Tensor, w2_scale: torch.Tensor
     ) -> "ColumnShardedDownWeights":
-        """Re-shard this rank's raw (unshuffled) ``w2[E, H, I / tp]`` and its
+        """Re-shard this rank's raw (unshuffled) `w2[E, H, I / tp]` and its
         scales to output rows with one all-to-all each, then shuffle them the
-        way the AITER MXFP4 backend shuffles the regular ``w2``."""
+        way the AITER MXFP4 backend shuffles the regular `w2`."""
         from aiter import dtypes
         from aiter.utility.fp4_utils import e8m0_shuffle
 
@@ -205,18 +205,18 @@ class ColumnShardedDownWeights:
 
 @dataclass
 class ColumnShardedRoutes:
-    """Per-route expert outputs on this rank's ``H / tp`` output columns,
+    """Per-route expert outputs on this rank's `H / tp` output columns,
     handed from the experts to the finalize."""
 
     routes: torch.Tensor
-    """``[T, top_k, H / tp]``, unweighted."""
+    """`[T, top_k, H / tp]`, unweighted."""
 
 
 def all_gather_columns(
     x: torch.Tensor, out: torch.Tensor | None = None
 ) -> torch.Tensor:
-    """All-gather TP shards ``[n, c]`` along columns into ``[n, tp * c]``
-    (written into ``out`` when given): AITER's all-gather in row chunks that
+    """All-gather TP shards `[n, c]` along columns into `[n, tp * c]`
+    (written into `out` when given): AITER's all-gather in row chunks that
     fit its IPC buffer, else RCCL. Eager only."""
     comm = getattr(get_tp_group().device_communicator, "aiter_ar_comm", None)
     if comm is not None and not comm.disabled and x.is_contiguous():
@@ -236,8 +236,8 @@ def all_gather_columns(
 
 
 def _all_gather_byte_columns(x: torch.Tensor) -> torch.Tensor:
-    """:func:`all_gather_columns` of a 1-byte ``[n, c]`` tensor, moved as bf16
-    pairs (``c`` must be even)."""
+    """`all_gather_columns` of a 1-byte `[n, c]` tensor, moved as bf16
+    pairs (`c` must be even)."""
     gathered = all_gather_columns(x.view(torch.uint8).view(torch.bfloat16))
     return gathered.view(torch.uint8).view(x.dtype)
 
@@ -284,22 +284,22 @@ def staged_fused_moe(
     column_weights: ColumnShardedDownWeights | None = None,
 ) -> torch.Tensor | ColumnShardedRoutes:
     """The MXFP4 SiLU expert output of every route, weighted by
-    ``topk_weights``, in ``route_out[T, top_k, H]``; or, with
-    ``column_weights``, on this rank's ``H / tp`` columns in the front of
-    ``route_out``'s storage.
+    `topk_weights`, in `route_out[T, top_k, H]`; or, with
+    `column_weights`, on this rank's `H / tp` columns in the front of
+    `route_out`'s storage.
 
     Args:
-        hidden_states: ``[T, H]`` bf16 expert input, one row per token.
+        hidden_states: `[T, H]` bf16 expert input, one row per token.
         w1: AITER-shuffled MXFP4 gate/up expert weights.
         w2: AITER-shuffled MXFP4 down expert weights.
-        topk_ids: ``[T, top_k]`` int32 global expert ids.
-        topk_weights: ``[T, top_k]`` fp32 route weights.
-        w1_scale: ``w1``'s E8M0 block scales.
-        w2_scale: ``w2``'s E8M0 block scales.
-        route_out: ``[T, top_k, H]`` bf16 destination.
-        expert_mask: EP only, AITER's ``[global_E + 1]`` ownership mask.
+        topk_ids: `[T, top_k]` int32 global expert ids.
+        topk_weights: `[T, top_k]` fp32 route weights.
+        w1_scale: `w1`'s E8M0 block scales.
+        w2_scale: `w2`'s E8M0 block scales.
+        route_out: `[T, top_k, H]` bf16 destination.
+        expert_mask: EP only, AITER's `[global_E + 1]` ownership mask.
         moe_sorting_dispatch_policy: AITER sorting dispatch policy.
-        column_weights: TP only, this rank's output rows of ``w2``. Every TP
+        column_weights: TP only, this rank's output rows of `w2`. Every TP
             rank must pass them for the same batch: the gathers inside are
             collectives. The decision to use them depends only on shapes and
             AITER's tuned configs, so it is the same on every rank.

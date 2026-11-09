@@ -71,6 +71,13 @@ _SHUTDOWN_DRAIN_TIMEOUT_S = 3.0
 # enough to avoid busy-spinning the scheduler thread.
 _DRAIN_SLEEP_S = 0.001
 
+# Longest a reaped session's still-running transfer keeps its source pins.
+# NIXL may never report a wedged transfer terminal, and a hold without a
+# bound would look like a full cache; past this the handle is released.
+# The peer cannot reconnect while it holds retained transfers (see
+# _retained_peer), so this also bounds how long it stays unreachable.
+_RETAINED_HOLD_CAP_S = 30.0
+
 # Idle sessions are only reaped when remaining capacity is at most this
 # many slots. Session setup is expensive; below this headroom, keep idle
 # peers so a later burst does not pay handshake again.
@@ -86,7 +93,7 @@ _RECONNECT_MAX_BACKOFF_S = 60.0
 
 
 def _remote_prefiller_params(kv_params: dict | None) -> dict | None:
-    """Return the ``remote_prefiller`` sub-dict, or None if absent.
+    """Return the `remote_prefiller` sub-dict, or None if absent.
 
     Set on decoder requests to name the remote prefiller they pull from;
     carries kv_request_id, remote_host, remote_port.
@@ -97,7 +104,7 @@ def _remote_prefiller_params(kv_params: dict | None) -> dict | None:
 
 
 def _remote_decoder_params(kv_params: dict | None) -> dict | None:
-    """Return the ``remote_decoder`` sub-dict, or None if absent.
+    """Return the `remote_decoder` sub-dict, or None if absent.
 
     Set on prefiller requests to name the remote decoder they serve;
     carries kv_request_id.
@@ -108,7 +115,7 @@ def _remote_decoder_params(kv_params: dict | None) -> dict | None:
 
 
 def _remote_kv_source_params(kv_params: dict | None) -> dict | None:
-    """Return the ``remote_kv_source`` sub-dict, or None if absent.
+    """Return the `remote_kv_source` sub-dict, or None if absent.
 
     Set on symmetric-P2P consumer requests to name the remote source they
     pull from; carries kv_request_id, remote_host, remote_port.
@@ -119,7 +126,7 @@ def _remote_kv_source_params(kv_params: dict | None) -> dict | None:
 
 
 def _peer_id_from_params(role_params: dict) -> str | None:
-    """Build ``host:port`` peer_id from a role-scoped sub-dict, or None."""
+    """Build `host:port` peer_id from a role-scoped sub-dict, or None."""
     host = role_params.get("remote_host")
     port = role_params.get("remote_port")
     if host and port:
@@ -140,7 +147,7 @@ class P2PSourceInfo:
 class P2PDestInfo:
     """Producer side: a remote fetches this request's blocks from us.
 
-    ``kv_request_id`` is None when the ``remote_decoder`` block is present
+    `kv_request_id` is None when the `remote_decoder` block is present
     but malformed (no id); the block's presence still marks the request as
     remote-decode, so submit_store must fail rather than store locally.
     """
@@ -149,8 +156,8 @@ class P2PDestInfo:
 
 
 def _parse_source(kv_params: dict | None) -> P2PSourceInfo | None:
-    """Parse the consumer sub-dict (PD ``remote_prefiller`` or symmetric
-    ``remote_kv_source``) into a ``P2PSourceInfo``, or None if absent/incomplete."""
+    """Parse the consumer sub-dict (PD `remote_prefiller` or symmetric
+    `remote_kv_source`) into a `P2PSourceInfo`, or None if absent/incomplete."""
     role = _remote_prefiller_params(kv_params)
     do_probe = False
     if role is None:
@@ -170,7 +177,7 @@ def _parse_source(kv_params: dict | None) -> P2PSourceInfo | None:
 
 
 def _parse_dest(kv_params: dict | None) -> P2PDestInfo | None:
-    """Parse the producer ``remote_decoder`` sub-dict into a ``P2PDestInfo``,
+    """Parse the producer `remote_decoder` sub-dict into a `P2PDestInfo`,
     or None if the block is absent (not a remote-decode request)."""
     role = _remote_decoder_params(kv_params)
     if role is None:
@@ -181,8 +188,8 @@ def _parse_dest(kv_params: dict | None) -> P2PDestInfo | None:
 def _annotate_req_context(req_context: ReqContext) -> None:
     """Parse kv_transfer_params once and cache the P2P routing state.
 
-    Called from ``on_new_request``; later calls for the same request read
-    the cached ``P2PSourceInfo``/``P2PDestInfo`` via ``get_state`` instead
+    Called from `on_new_request`; later calls for the same request read
+    the cached `P2PSourceInfo`/`P2PDestInfo` via `get_state` instead
     of re-parsing.
     """
     source = _parse_source(req_context.kv_transfer_params)
@@ -217,13 +224,16 @@ class P2PSecondaryTierManager(SecondaryTierManager):
     over the same control connection.
 
     Never entered concurrently: every public method runs under the tiering
-    manager's ``lock``, held either by the scheduler thread for the length of
+    manager's `lock`, held either by the scheduler thread for the length of
     a step or by the tier-poll thread for the length of one round. Peers are
-    not driven by the engine, so this tier sets ``tolerates_off_thread_polling``
+    not driven by the engine, so this tier sets `tolerates_off_thread_polling`
     to be serviced from that thread too; without it a peer's lookup or fetch
     waits for a step boundary, which on a saturated rank can be seconds.
-    ``has_pending_work()`` keeps the engine ticking so the control transport
-    and existing sessions are polled even when no requests are scheduled.
+
+    `has_pending_work()` reports peer-originated work, not idle polling,
+    so a peer-only engine can pause and shut down. The tiering manager keeps
+    the engine ticking when the tier-poll thread is off or another secondary
+    tier exists.
     """
 
     cache_hit_source: ClassVar[CacheHitSource] = CacheHitSource.P2P
@@ -243,48 +253,48 @@ class P2PSecondaryTierManager(SecondaryTierManager):
     ) -> None:
         """Initialize the P2P secondary tier manager.
 
-        All keyword arguments after ``primary_kv_view`` come from the
-        ``secondary_tiers`` entry in ``kv_connector_extra_config``. See
-        ``docs/features/kv_offloading_usage.md`` for the user-facing
+        All keyword arguments after `primary_kv_view` come from the
+        `secondary_tiers` entry in `kv_connector_extra_config`. See
+        `docs/features/kv_offloading_usage.md` for the user-facing
         configuration reference.
 
         Args:
-            offloading_spec: Owning ``OffloadingSpec`` (provides normalized
+            offloading_spec: Owning `OffloadingSpec` (provides normalized
                 model, parallel, and cache layout configuration).
             primary_kv_view: Memoryview over the CPU primary tier; the
                 NIXL agent registers this region for RDMA transfers.
-            tier_type: Tier identifier (defaults to ``"p2p"``).
+            tier_type: Tier identifier (defaults to `"p2p"`).
             host: Address the ZMQ control socket binds to, used verbatim
                 as both the bind address and the identity peers dial back
-                (mirrors the NIXL connector's ``VLLM_NIXL_SIDE_CHANNEL_HOST``;
+                (mirrors the NIXL connector's `VLLM_NIXL_SIDE_CHANNEL_HOST`;
                 no auto-detection). Defaults to
-                ``VLLM_P2P_SIDE_CHANNEL_HOST`` (``localhost``) when not set;
+                `VLLM_P2P_SIDE_CHANNEL_HOST` (`localhost`) when not set;
                 must be set to the node's routable IP for cross-host P2P so
                 remote peers can reach the socket.
             port: Base port for the ZMQ control socket. Must be
                 reachable from peers. Defaults to
-                ``VLLM_P2P_SIDE_CHANNEL_PORT`` (``5710``) when not set.
-                The bound port is ``base + data_parallel_index`` so each
+                `VLLM_P2P_SIDE_CHANNEL_PORT` (`5710`) when not set.
+                The bound port is `base + data_parallel_index` so each
                 DP replica gets a distinct port (one socket per replica,
                 like NIXL); for DP=1 the offset is 0.
-            backends: NIXL transport backends (e.g. ``["UCX"]``,
-                ``["MOONCAKE"]``, ``["LIBFABRIC"]``). Defaults to
-                ``["UCX"]``. When any non-UCX backend is requested, the
-                NIXL agent is initialized with ``backends=...``;
+            backends: NIXL transport backends (e.g. `["UCX"]`,
+                `["MOONCAKE"]`, `["LIBFABRIC"]`). Defaults to
+                `["UCX"]`. When any non-UCX backend is requested, the
+                NIXL agent is initialized with `backends=...`;
                 otherwise it falls back to a UCX-only agent with
-                ``num_threads`` threads.
+                `num_threads` threads.
             num_threads: NIXL agent worker threads for the UCX-only
-                branch. Ignored when ``backends`` contains a non-UCX
+                branch. Ignored when `backends` contains a non-UCX
                 entry.
             unbound_store_timeout_s: Seconds a producer holds stored blocks
                 for a consumer that has not fetched them yet, before
-                ``_reap_unbound_stores`` drops them. Raise it for
+                `_reap_unbound_stores` drops them. Raise it for
                 deployments whose prefills outlast the default; the blocks
                 keep primary-tier slots pinned for the whole window.
             **kwargs: Reserved for future tier-specific options.
 
         Raises:
-            ValueError: If ``unbound_store_timeout_s`` is not a positive
+            ValueError: If `unbound_store_timeout_s` is not a positive
                 number, or anything convertible to one.
 
         """
@@ -400,6 +410,10 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         # at the top of the next ``serve_external_requests`` where the
         # handle is valid.
         self._failed_serve_ctxs: list[ReqContext] = []
+        # transfer_id → (peer_id, store job_ids, retained_at) for transfers
+        # of reaped sessions that may still be writing; see _poll_retained.
+        self._retained: dict[int, tuple[str, frozenset[int], float]] = {}
+        self._retained_force_released = 0
 
     # ------------------------------------------------------------------
     # SecondaryTierManager interface
@@ -419,9 +433,11 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         # in on_schedule_end batches the LookupMsg; a later step's
         # lookup() returns HIT/MISS once LookupRespMsg has arrived.
         # PD path (``remote_prefiller`` sub-dict only) keeps the eager HIT.
+        # Until the peer acks the handshake, prefill locally rather than wait
+        # up to VLLM_P2P_HANDSHAKE_TIMEOUT_S on a peer that may be gone.
         if source.do_probe:
             session = self._sessions.get(source.peer_id)
-            if session is None:
+            if session is None or not session.ready:
                 return LookupResult.MISS
             result = session.register_lookup(source.kv_request_id, key)
             if result is True:
@@ -438,16 +454,16 @@ class P2PSecondaryTierManager(SecondaryTierManager):
     def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:
         """Parse kv_transfer_params once and open the outbound session.
 
-        Parses the P2P routing state onto ``req_context`` (cached for the
+        Parses the P2P routing state onto `req_context` (cached for the
         later lookup/submit/finish calls). On the consumer side
-        (``remote_prefiller`` for PD or ``remote_kv_source`` for symmetric
+        (`remote_prefiller` for PD or `remote_kv_source` for symmetric
         P2P), open a session toward the producer at remote_host:remote_port
         so submit_load can issue FetchMsg as soon as it fires. On the
         prefiller side, sessions are created when the consumer's inbound
         connection arrives in _accept_new_peers — submit_store no longer
         pre-creates anything.
 
-        Producer-leg requests (``remote_decoder`` present) ask for
+        Producer-leg requests (`remote_decoder` present) ask for
         REQUEST_LEVEL: the peer needs every block of the request, not just
         the ones this request computed.
         """
@@ -466,38 +482,53 @@ class P2PSecondaryTierManager(SecondaryTierManager):
     def on_request_finished(self, req_context: ReqContext) -> None:
         """Cancels pending loads and prunes session-scoped state.
 
-        Consumer side (``remote_prefiller`` for PD or ``remote_kv_source``
+        Consumer side (`remote_prefiller` for PD or `remote_kv_source`
         for symmetric-P2P): looks up the session by peer_id because the
         producer's address is what addresses the client-role load to
         cancel; also drops any pending symmetric-P2P lookup state via
-        ``session.finish_request``.
-        Prefiller side (``remote_decoder`` set): looks up via kv_request_id
+        `session.finish_request`.
+        Prefiller side (`remote_decoder` set): looks up via kv_request_id
         because peer_id is no longer carried on store-time
         kv_transfer_params; if a session has bound the id, finish it. If
         no session has bound the id yet, this is a no-op: parked batches
         in `_unbound_stores` are left in place and cleaned up only by
         `_reap_unbound_stores` after `_unbound_store_timeout_s`.
+
+        A PD prefiller request may carry both roles: `remote_kv_source`
+        (pull cached blocks from a P2P source) and `remote_decoder` (serve
+        the decoder). Each role is finished independently, on its own
+        session. Both roles may share one session when the source and the
+        decoder are the same node; that session is then finished once per
+        distinct kv_request_id.
         """
         source = req_context.get_state(P2PSourceInfo)
         dest = req_context.get_state(P2PDestInfo)
-        kv_request_id = source.kv_request_id if source is not None else None
-        if kv_request_id is None and dest is not None:
-            kv_request_id = dest.kv_request_id
-        if not kv_request_id:
+        source_id = source.kv_request_id if source is not None else None
+        dest_id = dest.kv_request_id if dest is not None else None
+        if source_id is None and dest_id is None:
             return
-        self._failed_req_ids.discard(kv_request_id)
+        if source_id is not None:
+            self._failed_req_ids.discard(source_id)
+        if dest_id is not None and dest_id != source_id:
+            self._failed_req_ids.discard(dest_id)
 
+        source_session = None
         if source is not None:
-            session = self._sessions.get(source.peer_id)
-            if session is not None:
-                session.finish_request(kv_request_id)
-            return
+            source_session = self._sessions.get(source.peer_id)
+            if source_session is not None:
+                source_session.finish_request(source.kv_request_id)
 
-        # Prefiller-side finish: identify the session via kv_request_id.
-        session = self._kv_to_session.pop(kv_request_id, None)
-        if session is not None:
-            session.finish_request(kv_request_id)
-            return
+        if dest_id is not None:
+            # Prefiller-side finish: identify the session via kv_request_id.
+            dest_session = self._kv_to_session.pop(dest_id, None)
+            # Same node as source and decoder (e.g. multi-turn with fixed
+            # P/D, P pulls the previous turn back from D): both roles share
+            # one session, and finish_request above already finished the
+            # server role for this id.
+            if dest_session is not None and not (
+                dest_session is source_session and dest_id == source_id
+            ):
+                dest_session.finish_request(dest_id)
 
     @override
     def submit_store(self, job_metadata: TransferJob) -> None:
@@ -646,28 +677,48 @@ class P2PSecondaryTierManager(SecondaryTierManager):
 
     @override
     def has_pending_work(self) -> bool:
-        # The engine tick is the only driver of _control.poll() and
-        # session.poll(); without it we miss new peer connects and
-        # inbound fetch messages on existing sessions. Keep the engine
-        # ticking for the lifetime of this manager.
-        return True
+        # Idle polling is excluded, or the engine could never go idle; the
+        # tiering manager keeps it ticking when the tier-poll thread is off.
+        return bool(
+            self._finished_jobs
+            or self._failed_serve_ctxs
+            or self._unbound_stores
+            or any(s.has_pending_work for s in self._sessions.values())
+        )
 
     @override
     def drain_jobs(self) -> None:
         """Block until every submitted load/store job has completed or failed.
 
-        Loops calling ``_poll_once()`` until no session has outstanding
-        inbound loads or in-flight outbound stores. Mid-flight transfers
-        are NOT cancelled — the caller (``TieringOffloadingManager.reset_cache``)
-        needs the primary memoryview to be quiescent, not aborted. Results
-        accumulate in ``_finished_jobs`` and are surfaced by the next
-        ``get_finished_jobs()`` call.
+        Fail stores still waiting for a fetch, then poll until no session has
+        outstanding inbound loads or in-flight outbound stores, and no reaped session's
+        transfer is still retained (bounded by its hold cap). Mid-flight
+        transfers are NOT cancelled — the caller
+        (`TieringOffloadingManager.reset_cache`) needs the primary
+        memoryview to be quiescent, not aborted. Results
+        accumulate in `_finished_jobs` and are surfaced by the next
+        `get_finished_jobs()` call.
+
+        Inbound loads are aborted up front rather than waited out: a peer
+        that never writes would otherwise block the reset for the full load
+        timeout. Each is failed at once with a deferred release and stays
+        pending until its AbortAck, or until a missed AbortAck disconnects
+        the session and the reap's close() sets the event, so every event
+        is set on return.
         """
         start = time.monotonic()
+        self._reap_unbound_stores(force=True)
+        self._kv_to_session.clear()
+        for session in self._sessions.values():
+            self._drain_session_stores(session)
+            session.abort_loads()
+
         warned = False
         while True:
-            self._poll_once()
-            pending = any(s.has_pending_work for s in self._sessions.values())
+            self._poll_once(draining=True)
+            pending = bool(self._retained) or any(
+                s.has_pending_work for s in self._sessions.values()
+            )
             if not pending:
                 return
             if not warned and time.monotonic() - start > 5.0:
@@ -678,12 +729,24 @@ class P2PSecondaryTierManager(SecondaryTierManager):
                 warned = True
             time.sleep(_DRAIN_SLEEP_S)
 
+    def _drain_session_stores(
+        self, session: P2PSession, kv_request_ids: Iterable[str] | None = None
+    ) -> None:
+        result = session.drain_stores(kv_request_ids)
+        self._finished_jobs.extend(
+            JobResult(store.job_id, success=store.success) for store in result.stores
+        )
+        now = time.monotonic()
+        for kid in result.reaped_pd_ids:
+            self._reaped_stores[kid] = now
+            self._kv_to_session.pop(kid, None)
+
     @override
     def serve_external_requests(self, parent: ParentManager) -> None:
         """Serve inbound peer lookups against the tiering manager.
 
         Called once per scheduler step (before this tier's
-        ``on_schedule_end``) with a ``parent`` handle valid only for the
+        `on_schedule_end`) with a `parent` handle valid only for the
         duration of the call — the sole window in which the P2P server
         role may query the tiering manager. First release bookkeeping for
         the failed serves left by a reaped session, then let every live
@@ -717,8 +780,8 @@ class P2PSecondaryTierManager(SecondaryTierManager):
     def _get_or_create_session(self, peer_id: str) -> P2PSession | None:
         """Return the existing session for peer_id, or open one outbound.
 
-        Consumer-side helper for on_new_request: when ``remote_prefiller``
-        (PD) or ``remote_kv_source`` (symmetric P2P) is set, the consumer
+        Consumer-side helper for on_new_request: when `remote_prefiller`
+        (PD) or `remote_kv_source` (symmetric P2P) is set, the consumer
         must reach the producer at peer_id. If we already have a session
         toward that peer (from a prior load or a peer-initiated inbound),
         reuse it; otherwise open an outbound ControlConnection and build a
@@ -730,7 +793,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         session = self._sessions.get(peer_id)
         if session is not None:
             return session
-        if self._reconnect_wait(peer_id) > 0:
+        if self._reconnect_wait(peer_id) > 0 or self._retained_peer(peer_id):
             return None
 
         max_peers = envs.VLLM_P2P_MAX_PEERS
@@ -803,6 +866,17 @@ class P2PSecondaryTierManager(SecondaryTierManager):
                     conn.send({TYPE_KEY: DisconnectMsg.TYPE})
                 conn.close()
                 continue
+            if self._retained_peer(conn.peer_id):
+                logger.info(
+                    "P2P %s: rejecting inbound peer %s — its reaped "
+                    "session's transfers are still running",
+                    self._local_id,
+                    conn.peer_id,
+                )
+                with contextlib.suppress(Exception):
+                    conn.send({TYPE_KEY: DisconnectMsg.TYPE})
+                conn.close()
+                continue
             try:
                 existing = self._sessions.get(conn.peer_id)
                 if existing is not None:
@@ -852,6 +926,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
                 self._finished_jobs.append(JobResult(job_id=job_id, success=False))
             for job_id in close_result.failed_stores:
                 self._finished_jobs.append(JobResult(job_id=job_id, success=False))
+            self._retain(pid, close_result.retained)
             # Fail every client-side request (in-flight loads plus unresolved
             # symmetric-P2P probes) toward the dead peer so lookup() returns
             # MISS (local prefill) instead of RETRY forever — even if a fresh
@@ -877,6 +952,70 @@ class P2PSecondaryTierManager(SecondaryTierManager):
                 fault_info,
             )
 
+    def _retain(self, peer_id: str, retained: dict[int, frozenset[int]]) -> None:
+        """Hold a reaped session's still-running transfers and their pins."""
+        if not retained:
+            return
+        now = time.monotonic()
+        for tid, job_ids in retained.items():
+            self._retained[tid] = (peer_id, job_ids, now)
+        logger.warning(
+            "P2P %s: peer %s reaped with %d transfers still running; holding "
+            "their source pins until they stop (at most %.0fs)",
+            self._local_id,
+            peer_id,
+            len(retained),
+            _RETAINED_HOLD_CAP_S,
+        )
+
+    def _poll_retained(self) -> None:
+        """Unpin retained transfers once they stop, or at the hold cap.
+
+        A store job is failed only once no retained transfer reads it.
+        """
+        if not self._retained:
+            return
+        released = list(self._data.poll_retired())
+        deadline = time.monotonic() - _RETAINED_HOLD_CAP_S
+        expired = [
+            tid
+            for tid, (_, _, retained_at) in self._retained.items()
+            if retained_at <= deadline and tid not in released
+        ]
+        if expired:
+            self._data.force_release_retired(expired)
+            self._retained_force_released += len(expired)
+            logger.error(
+                "P2P %s: %d transfers of reaped peers still running after "
+                "%.0fs; releasing their handles and source pins anyway "
+                "(%d so far)",
+                self._local_id,
+                len(expired),
+                _RETAINED_HOLD_CAP_S,
+                self._retained_force_released,
+            )
+        jobs: set[int] = set()
+        for tid in (*released, *expired):
+            entry = self._retained.pop(tid, None)
+            if entry is not None:
+                jobs |= entry[1]
+        for job_id in jobs - self._retained_job_ids():
+            self._finished_jobs.append(JobResult(job_id=job_id, success=False))
+
+    def _retained_job_ids(self) -> set[int]:
+        return {jid for _, job_ids, _ in self._retained.values() for jid in job_ids}
+
+    def _retained_peer(self, peer_id: str) -> bool:
+        """Whether a reaped session of *peer_id* still has running transfers.
+
+        Its registration stays until they stop. A new session would load
+        the peer's NIXL agent again under the same name: NIXL keeps the old
+        UCX endpoints, possibly failed, and the old registration's release
+        removes the agent under the new one. So the peer stays out until
+        the transfers stop, at most _RETAINED_HOLD_CAP_S.
+        """
+        return any(pid == peer_id for pid, _, _ in self._retained.values())
+
     def _schedule_reconnect_backoff(self, peer_id: str) -> float:
         """Record a data-plane fault for *peer_id*; return its reconnect wait.
 
@@ -901,7 +1040,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         entry = self._reconnect_backoff.get(peer_id)
         return 0.0 if entry is None else entry[1] - time.monotonic()
 
-    def _reap_unbound_stores(self) -> None:
+    def _reap_unbound_stores(self, *, force: bool = False) -> None:
         """Time out submit_store batches that no peer has ever fetched.
 
         Walks `_unbound_stores` for entries whose oldest batch is older
@@ -929,7 +1068,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         expired: list[str] | None = None
         for kid, batches in self._unbound_stores.items():
             # Batches are appended in arrival order, so the head is oldest.
-            if batches and batches[0].submitted_at <= deadline:
+            if batches and (force or batches[0].submitted_at <= deadline):
                 if expired is None:
                     expired = []
                 expired.append(kid)
@@ -942,23 +1081,24 @@ class P2PSecondaryTierManager(SecondaryTierManager):
                 self._finished_jobs.append(
                     JobResult(job_id=batch.job_id, success=False)
                 )
-            logger.warning(
-                "P2P %s: unbound store kv_request_id=%s timed out after %.0fs "
-                "without a fetch — failing %d job(s)",
-                self._local_id,
-                kid,
-                self._unbound_store_timeout_s,
-                len(batches),
-            )
+            if not force:
+                logger.warning(
+                    "P2P %s: unbound store kv_request_id=%s timed out after %.0fs "
+                    "without a fetch — failing %d job(s)",
+                    self._local_id,
+                    kid,
+                    self._unbound_store_timeout_s,
+                    len(batches),
+                )
 
     def _reap_idle_sessions(self) -> None:
         """Evict idle sessions when remaining peer slots are scarce.
 
         A session is idle when it has no pending work and its last activity
-        timestamp exceeds ``VLLM_P2P_IDLE_TIMEOUT_S``. Eviction runs only
-        when ``len(_sessions) >= VLLM_P2P_MAX_PEERS - _IDLE_REAP_HEADROOM``
+        timestamp exceeds `VLLM_P2P_IDLE_TIMEOUT_S`. Eviction runs only
+        when `len(_sessions) >= VLLM_P2P_MAX_PEERS - _IDLE_REAP_HEADROOM`
         so a quiet but healthy mesh is not torn down. Uses the same
-        teardown path as ``_reap_dead_sessions``.
+        teardown path as `_reap_dead_sessions`.
         """
         idle_timeout = envs.VLLM_P2P_IDLE_TIMEOUT_S
         if idle_timeout <= 0:
@@ -988,6 +1128,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
                 self._finished_jobs.append(JobResult(job_id=job_id, success=False))
             for job_id in close_result.failed_stores:
                 self._finished_jobs.append(JobResult(job_id=job_id, success=False))
+            self._retain(pid, close_result.retained)
             self._failed_req_ids.update(close_result.failed_req_ids)
             self._failed_serve_ctxs.extend(close_result.failed_serves)
             self._data.remove_remote_peer(pid)
@@ -1002,11 +1143,11 @@ class P2PSecondaryTierManager(SecondaryTierManager):
     # Polling
     # ------------------------------------------------------------------
 
-    def _poll_once(self) -> None:
+    def _poll_once(self, *, draining: bool = False) -> None:
         """One sweep of the polling work.
 
         Drains the control transport, polls every session, accumulates
-        their results into ``_finished_jobs``, and reaps any dead sessions.
+        their results into `_finished_jobs`, and reaps any dead sessions.
         Runs under the tiering manager's lock, on the scheduler thread or on
         the tier-poll thread.
         """
@@ -1025,20 +1166,35 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             result = session.poll()
             for lr in result.loads:
                 self._finished_jobs.append(
-                    JobResult(job_id=lr.job_id, success=lr.success)
+                    JobResult(
+                        job_id=lr.job_id,
+                        success=lr.success,
+                        deferred_release=lr.deferred_release,
+                    )
                 )
-                if not lr.success:
+                if not lr.success and not lr.request_finished:
                     self._failed_req_ids.add(lr.kv_request_id)
             for sr in result.stores:
                 self._finished_jobs.append(
                     JobResult(job_id=sr.job_id, success=sr.success)
                 )
+            if draining:
+                if result.new_fetch_ids:
+                    self._drain_session_stores(session, result.new_fetch_ids)
+                continue
             # Bind kv_request_id → session for any FetchMsg this tick and
             # replay any submit_store batches parked while no peer was
             # asking. ServerRole.on_fetch already recorded the demand
             # inline in dispatch, so the replayed add_stored_blocks calls
             # match that demand and submit transfers immediately.
             for kv_request_id in result.new_fetch_ids:
+                if kv_request_id in result.terminal_fetch_ids:
+                    self._kv_to_session.pop(kv_request_id, None)
+                    for batch in self._unbound_stores.pop(kv_request_id, ()):
+                        self._finished_jobs.append(
+                            JobResult(job_id=batch.job_id, success=False)
+                        )
+                    continue
                 if kv_request_id in self._reaped_stores:
                     # This id's blocks were already reaped, so no
                     # submit_store will ever satisfy the demand on_fetch
@@ -1066,6 +1222,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         self._reap_dead_sessions()
         self._reap_unbound_stores()
         self._reap_idle_sessions()
+        self._poll_retained()
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -1090,6 +1247,11 @@ class P2PSecondaryTierManager(SecondaryTierManager):
                 )
         self._unbound_stores.clear()
         self._reaped_stores.clear()
+        # The drain above already waited on retained transfers too, and
+        # _data.close() releases whatever is left.
+        for job_id in self._retained_job_ids():
+            self._finished_jobs.append(JobResult(job_id=job_id, success=False))
+        self._retained.clear()
         self._control.close()
         self._data.close()
 
@@ -1104,6 +1266,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         wedged peer must not hang shutdown.
         """
         ids = [tid for s in self._sessions.values() for tid in s._server._inflight]
+        ids.extend(self._retained)
         if not ids:
             return
         deadline = time.monotonic() + _SHUTDOWN_DRAIN_TIMEOUT_S

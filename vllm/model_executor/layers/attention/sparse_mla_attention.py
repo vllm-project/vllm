@@ -3,7 +3,7 @@
 """Shared MHA implementation and metadata builder for sparse MLA backends."""
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from shutil import which
 from typing import TYPE_CHECKING, Any, ClassVar, Generic, TypeVar
 
@@ -11,7 +11,7 @@ import numpy as np
 import torch
 
 from vllm import _custom_ops as ops
-from vllm.config import get_current_vllm_config
+from vllm.config import CUDAGraphMode, get_current_vllm_config
 from vllm.distributed import (
     get_dcp_group,
     get_tensor_model_parallel_world_size,
@@ -33,6 +33,7 @@ from vllm.triton_utils import tl, triton
 from vllm.utils.flashinfer import has_flashinfer
 from vllm.utils.torch_utils import (
     PIN_MEMORY,
+    async_tensor_h2d,
     np_to_pinned_tensor,
 )
 from vllm.v1.attention.backend import AttentionLayer, AttentionMetadataBuilder
@@ -50,6 +51,7 @@ from vllm.v1.attention.backends.mla.sparse_utils import (
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 from vllm.v1.attention.ops.dcp import MLADCPManager
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
+from vllm.v1.attention.ops.shardq import ShardQMetadata, build_shardq_split
 from vllm.v1.hisparse.runtime import (
     HiSparsePrefillStagingPlan,
     build_hisparse_prefill_staging_plan,
@@ -163,9 +165,46 @@ class SparseMLACommonMetadata(MLACommonMetadata[MLACommonDecodeMetadata]):
     prefill_max_seq_len: int = 0
     prefill: SparseMLAPrefillMetadata | None = None
     cp_kv_cache_interleave_size: int = 1
+    # Set on token-sharded TP prefill steps (see vllm.v1.attention.ops.shardq).
+    shardq: ShardQMetadata | None = None
+    # Index of the first query token's top-k in the top-k buffer.
+    topk_start: int = 0
 
 
 T = TypeVar("T", bound=SparseMLACommonMetadata)
+
+
+def build_shardq_metadata(
+    common_attn_metadata: "CommonAttentionMetadata",
+    vllm_config: "VllmConfig",
+    metadata: SparseMLACommonMetadata,
+    device: torch.device,
+) -> ShardQMetadata | None:
+    """This step's ShardQ, with `metadata` narrowed to this rank's tokens,
+    or None."""
+    split = build_shardq_split(common_attn_metadata, vllm_config)
+    if split is None:
+        return None
+    num_decode_tokens = split.num_decode_tokens
+    shardq = ShardQMetadata(
+        num_decode_tokens=num_decode_tokens,
+        num_tokens_per_rank=split.num_tokens_per_rank.tolist(),
+        token_ids=async_tensor_h2d(split.token_ids, device=device),
+        rank_offsets=async_tensor_h2d(
+            np.r_[0, np.cumsum(split.num_tokens_per_rank)], device=device
+        ),
+    )
+    # The indexer wrote these tokens' top-k compactly after the decodes.
+    shardq.attn_metadata = replace(
+        metadata,
+        num_decodes=0,
+        num_decode_tokens=0,
+        req_id_per_token=metadata.req_id_per_token[
+            shardq.local_token_ids + num_decode_tokens
+        ],
+        topk_start=num_decode_tokens,
+    )
+    return shardq
 
 
 class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
@@ -254,6 +293,10 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
                 )
         self._prefill_backend = (
             layer_prefill_backend.clone() if layer_prefill_backend is not None else None
+        )
+        layers = vllm_config.compilation_config.static_forward_context
+        self.use_shardq = any(
+            getattr(layers[name], "use_shardq", False) for name in layer_names
         )
 
     def _init_reorder_batch_threshold(
@@ -417,7 +460,7 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
             )
             self._prefill_backend.prepare_metadata(prefill)
 
-        return self.metadata_cls(  # type: ignore[call-arg]
+        metadata = self.metadata_cls(  # type: ignore[call-arg]
             num_reqs=common_attn_metadata.num_reqs,
             max_query_len=common_attn_metadata.max_query_len,
             max_seq_len=common_attn_metadata.max_seq_len,
@@ -437,6 +480,11 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
             prefill=prefill,
             cp_kv_cache_interleave_size=self.cp_kv_cache_interleave_size,
         )
+        if self.use_shardq:
+            metadata.shardq = build_shardq_metadata(
+                common_attn_metadata, self.vllm_config, metadata, self.device
+            )
+        return metadata
 
     @staticmethod
     def _build_prefill_fields(
@@ -639,6 +687,8 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], SharedTopkIndicesBuffer, Generic
     # Reuse the index group's top-k conversion only for uniform decode batches
     # of multi-layer groups; other batches convert per layer.
     group_conversion_decode_only: ClassVar[bool] = False
+    # Whether forward_mqa runs ShardQ metadata and is validated.
+    supports_shardq: ClassVar[bool] = False
 
     def __init__(
         self,
@@ -713,6 +763,21 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], SharedTopkIndicesBuffer, Generic
             v_head_dim=v_head_dim,
             kv_cache_dtype=kv_cache_dtype,
         )
+        vllm_config = get_current_vllm_config()
+        parallel_config = vllm_config.parallel_config
+        cudagraph_mode = (
+            vllm_config.compilation_config.cudagraph_mode or CUDAGraphMode.NONE
+        )
+        # The attention layer decides whether to use ShardQ.
+        self.use_shardq = (
+            self.supports_shardq
+            and vllm_config.attention_config.sparse_mla_shard_q
+            and vllm_config.attention_config.hisparse_config is None
+            and parallel_config.tensor_parallel_size > 1
+            and parallel_config.decode_context_parallel_size == 1
+            and parallel_config.prefill_context_parallel_size == 1
+            and cudagraph_mode.mixed_mode() != CUDAGraphMode.FULL
+        )
 
     def record_logical_topk_ready(self) -> None:
         if self.index_group is not None:
@@ -750,7 +815,8 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], SharedTopkIndicesBuffer, Generic
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         assert self.topk_indices_buffer is not None
         num_tokens = q[0].shape[0] if isinstance(q, tuple) else q.shape[0]
-        topk = self.topk_indices_buffer[:num_tokens]
+        topk_start = attn_metadata.topk_start
+        topk = self.topk_indices_buffer[topk_start : topk_start + num_tokens]
         num_decode_tokens = attn_metadata.num_decode_tokens
         block_size = attn_metadata.block_size
         index_group = self.index_group
@@ -769,10 +835,15 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], SharedTopkIndicesBuffer, Generic
                     NUM_TOPK_TOKENS=topk.shape[1],
                     return_valid_counts=True,
                 )
-            elif self.group_conversion_decode_only and not (
-                index_group is not None
-                and index_group.num_layers > 1
-                and num_decode_tokens >= num_tokens
+            # A mixed ShardQ step's decode tokens take the index group's
+            # conversion, so its token-sharded ones convert here.
+            elif topk_start or (
+                self.group_conversion_decode_only
+                and not (
+                    index_group is not None
+                    and index_group.num_layers > 1
+                    and num_decode_tokens >= num_tokens
+                )
             ):
                 physical_topk, valid_counts = triton_convert_req_index_to_global_index(
                     attn_metadata.req_id_per_token[:num_tokens],

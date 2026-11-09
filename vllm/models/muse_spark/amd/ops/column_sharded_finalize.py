@@ -2,12 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """MuseSpark post-expert finalize over a column shard of the routes.
 
-When each TP rank holds every route's output on its own ``H / tp`` columns
-(rather than a partial sum over all ``H`` columns), the per-route RMSNorm only
-needs the sum of squares across ranks: each rank computes its ``[T, K]``
-partial sums of squares (:func:`route_sum_squares`), the caller all-reduces
-them, and :func:`column_sharded_finalize` normalizes, weights and sums the
-routes on the local columns. Same math as ``fused_post_expert_finalize``.
+When each TP rank holds every route's output on its own `H / tp` columns
+(rather than a partial sum over all `H` columns), the per-route RMSNorm only
+needs the sum of squares across ranks: each rank computes its `[T, K]`
+partial sums of squares (`route_sum_squares`), the caller all-reduces
+them, and `column_sharded_finalize` normalizes, weights and sums the
+routes on the local columns. Same math as `fused_post_expert_finalize`.
 """
 
 import torch
@@ -107,13 +107,13 @@ def route_sum_squares(
     gain_center: float,
     weight_first: bool,
 ) -> torch.Tensor:
-    """``[T, K]`` fp32 sums of squares of each route over the local columns.
+    """`[T, K]` fp32 sums of squares of each route over the local columns.
 
     Args:
-        routed: ``[T, K, H_local]`` per-route outputs on this rank's columns.
-        weight: ``[H_local]`` slice of the norm weight, or ``None``.
-        gain_center: Added to ``weight`` (0.0 when unused).
-        weight_first: Square ``x * (w + gain_center)`` instead of ``x``.
+        routed: `[T, K, H_local]` per-route outputs on this rank's columns.
+        weight: `[H_local]` slice of the norm weight, or `None`.
+        gain_center: Added to `weight` (0.0 when unused).
+        weight_first: Square `x * (w + gain_center)` instead of `x`.
 
     """
     T, K, H = routed.shape
@@ -152,19 +152,19 @@ def column_sharded_finalize(
     weight_first: bool,
     out: torch.Tensor,
 ) -> torch.Tensor:
-    """``out[t] = sum_k tw[t, k] * norm(routed[t, k])`` on the local columns.
+    """`out[t] = sum_k tw[t, k] * norm(routed[t, k])` on the local columns.
 
     Args:
-        routed: ``[T, K, H_local]`` per-route outputs on this rank's columns.
-        weight: ``[H_local]`` slice of the norm weight, or ``None``.
-        topk_weights: ``[T, K]`` router weights.
-        sum_squares: ``[T, K]`` fp32 sums of squares over all ``hidden_size``
-            columns (:func:`route_sum_squares` all-reduced over TP).
-        hidden_size: The full norm width ``H``.
+        routed: `[T, K, H_local]` per-route outputs on this rank's columns.
+        weight: `[H_local]` slice of the norm weight, or `None`.
+        topk_weights: `[T, K]` router weights.
+        sum_squares: `[T, K]` fp32 sums of squares over all `hidden_size`
+            columns (`route_sum_squares` all-reduced over TP).
+        hidden_size: The full norm width `H`.
         eps: Norm epsilon.
-        gain_center: Added to ``weight`` (0.0 when unused).
-        weight_first: ``rms_norm(x * w)`` when True, else ``rms_norm(x) * w``.
-        out: ``[T, H_local]`` destination.
+        gain_center: Added to `weight` (0.0 when unused).
+        weight_first: `rms_norm(x * w)` when True, else `rms_norm(x) * w`.
+        out: `[T, H_local]` destination.
 
     """
     T, K, H = routed.shape
