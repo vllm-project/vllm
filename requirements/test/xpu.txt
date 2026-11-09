@@ -900,9 +900,9 @@ cohere-melody==0.13.4 \
 colorama==0.4.6 \
     --hash=sha256:4f1d9991f5acc0ca119f9d443620b77f9d6b33703e51011c16baf57afb285fc6
     # via sacrebleu
-compressed-tensors==0.17.0 \
-    --hash=sha256:15c20d06bdbcf35b51fc99fd125e7b9be1e1855567c33b7a46dfac26ad6fb126 \
-    --hash=sha256:4a1b89b508f7efb8ffb4eee8a6e69e0452d9b080cae130146025c64fbe9fa9aa
+compressed-tensors==0.20.1 \
+    --hash=sha256:15307c904904219cafcb57d55f16b1bd6baf108d0421b65dfa79eece01672382 \
+    --hash=sha256:d06d475945d27cb1959a53dd9e3005e0d29237897c56ce3335bb220f9f2fa8ae
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
@@ -4220,6 +4220,7 @@ psutil==7.2.2 \
     # via
     #   -r requirements/test/../common.txt
     #   accelerate
+    #   compressed-tensors
     #   peft
     #   tensorizer
 py-cpuinfo==9.0.0 \
