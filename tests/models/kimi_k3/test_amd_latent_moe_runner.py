@@ -6,7 +6,7 @@ A wrong shard offset or a dropped accumulation still runs and still produces
 plausible text, so these pin the arithmetic rather than the behaviour.
 """
 
-from types import MethodType, SimpleNamespace
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -17,16 +17,16 @@ from torch.multiprocessing import spawn
 from tests.utils import (
     ensure_current_vllm_config,
     init_test_distributed_environment,
+    multi_gpu_marks,
     multi_gpu_test,
 )
 from vllm.distributed import get_tp_group
-from vllm.model_executor.layers.fused_moe.router.gate_linear import GateLinear
 from vllm.model_executor.layers.fused_moe.runner import moe_runner
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ColumnParallelLinear, ReplicatedLinear
 from vllm.models.kimi_k3.amd import latent_moe_runner
 from vllm.models.kimi_k3.amd.latent_moe_runner import ROCmLatentMoERunner
-from vllm.models.kimi_k3.amd.linear import KimiMLP, KimiMoE, KimiRoutedOutputTransform
+from vllm.models.kimi_k3.amd.linear import KimiMoE, KimiRoutedOutputTransform
 from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_open_port
 
@@ -234,12 +234,81 @@ def _check_writes_only_its_own_shard(
     torch.testing.assert_close(local[:, end:], before[:, end:], atol=0, rtol=0)
 
 
+def _kimi_k3_moe(prefix: str, tp_world: int, num_experts: int = 896) -> KimiMoE:
+    from vllm.model_executor.layers.quantization.base_config import (
+        QuantizeMethodBase,
+    )
+    from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
+
+    config = KimiLinearConfig(
+        hidden_size=HIDDEN_SIZE,
+        hidden_act="situ",
+        activation_situ_beta=4.0,
+        activation_situ_linear_beta=25.0,
+        moe_intermediate_size=384 * tp_world,
+        num_experts=num_experts,
+        num_experts_per_token=16,
+        num_shared_experts=2,
+        routed_expert_hidden_size=LATENT_SIZE,
+        latent_moe_use_norm=True,
+        rms_norm_eps=EPS,
+    )
+    torch.manual_seed(0)
+    moe = KimiMoE(config, prefix=prefix)
+    for name, param in moe.named_parameters():
+        if param.dim() == 1:
+            param.data.fill_(1.0 if "norm" in name else 0.0)
+        else:
+            param.data.normal_(0.0, param.shape[-1] ** -0.5)
+    for module in moe.modules():
+        quant_method = getattr(module, "quant_method", None)
+        if isinstance(quant_method, QuantizeMethodBase):
+            quant_method.process_weights_after_loading(module)
+    return moe
+
+
+def _check_merged_front_matches_unmerged(
+    device: torch.device, tp_world: int, rank: int
+) -> None:
+    from vllm.config import get_current_vllm_config
+    from vllm.forward_context import set_forward_context
+    from vllm.model_executor.model_loader.weight_utils import finalize_model_weights
+    from vllm.v1.worker.workspace import init_workspace_manager
+
+    vllm_config = get_current_vllm_config()
+    init_workspace_manager(device.index)
+    torch.set_default_dtype(DTYPE)
+    with (
+        set_forward_context(None, vllm_config),
+        torch.device(device),
+        torch.inference_mode(),
+    ):
+        moe = _kimi_k3_moe("model.layers.0.mlp", tp_world)
+        xs = {}
+        for num_tokens in (64, 512, 4096, 8192):
+            torch.manual_seed(num_tokens)
+            xs[num_tokens] = torch.randn(num_tokens, HIDDEN_SIZE)
+        unmerged = {num_tokens: moe(x) for num_tokens, x in xs.items()}
+        finalize_model_weights(moe)
+        assert moe.merged_front_weight is not None
+        for num_tokens, x in xs.items():
+            ref = unmerged[num_tokens]
+            torch.testing.assert_close(
+                moe(x), ref, atol=2**-6 * ref.abs().max().item(), rtol=0
+            )
+
+        other = _kimi_k3_moe("model.layers.1.mlp", tp_world, num_experts=384)
+        finalize_model_weights(other)
+        assert other.merged_front_weight is None
+
+
 _CHECKS = {
     "matches_replicated": _check_matches_replicated,
     "matches_replicated_ep": _check_matches_replicated_under_ep,
     "presharded_matches_replicated": _check_presharded_matches_replicated,
     "unfused_gathers": _check_unfused_tail_gathers_full_hidden,
     "own_shard_only": _check_writes_only_its_own_shard,
+    "merged_front_matches_unmerged": _check_merged_front_matches_unmerged,
 }
 
 
@@ -445,149 +514,17 @@ def test_falls_back_when_the_config_breaks_the_shard(
     assert runner._up_proj_shard_size == 0
 
 
-def _merged_front_moe(down_quant_method=None, num_experts=896) -> SimpleNamespace:
-    moe = SimpleNamespace(
-        gate=GateLinear(
-            HIDDEN_SIZE,
-            num_experts,
-            bias=False,
-            out_dtype=torch.float32,
-            prefix="gate",
-        ),
-        routed_expert_down_proj=ReplicatedLinear(
-            HIDDEN_SIZE, LATENT_SIZE, bias=False, prefix="routed_expert_down_proj"
-        ),
-        shared_experts=KimiMLP(
-            HIDDEN_SIZE,
-            768,
-            "situ",
-            reduce_results=False,
-            prefix="shared_experts",
-            activation_situ_beta=4.0,
-            activation_situ_linear_beta=25.0,
-        ),
-        experts=_runner(
-            _tail_shardable=True,
-            moe_config=SimpleNamespace(
-                is_lora_enabled=False,
-                is_sequence_parallel=False,
-                dp_size=1,
-                pcp_size=1,
-                ep_size=1,
-            ),
-        ),
-        moe_hidden_size=LATENT_SIZE,
-        merged_front_weight=None,
-    )
-    object.__setattr__(
-        moe.experts, "routed_input_transform", moe.routed_expert_down_proj
-    )
-    moe._merged_front_core = MethodType(KimiMoE._merged_front_core, moe)
-    torch.manual_seed(0)
-    for layer in (
-        moe.gate,
-        moe.routed_expert_down_proj,
-        moe.shared_experts.gate_up_proj,
-        moe.shared_experts.down_proj,
-    ):
-        layer.weight.data.normal_(0.0, layer.weight.shape[1] ** -0.5)
-    if down_quant_method is not None:
-        moe.routed_expert_down_proj.quant_method = down_quant_method
-    KimiMoE.process_weights_after_loading(moe)
-    return moe
-
-
-@pytest.fixture(scope="module")
-def merged_front_env():
-    from vllm._aiter_ops import rocm_aiter_ops
-    from vllm.distributed import cleanup_dist_env_and_memory
+@pytest.mark.parametrize(
+    "tp_size", [pytest.param(n, marks=multi_gpu_marks(num_gpus=n)) for n in (2, 4, 8)]
+)
+def test_merged_front_matches_unmerged(
+    tp_size: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
     from vllm.platforms.rocm import on_gfx950
 
     if not on_gfx950():
         pytest.skip("The merged MoE front needs gfx950")
-    mp = pytest.MonkeyPatch()
-    mp.setenv("VLLM_ROCM_USE_AITER", "1")
-    mp.setattr(
-        ROCmLatentMoERunner, "_fused_output_is_reduced", property(lambda _: False)
-    )
-    mp.setattr(
-        ROCmLatentMoERunner,
-        "_quant_method",
-        property(lambda _: SimpleNamespace(has_unpadded_output=False)),
-    )
-    mp.setattr(
-        ROCmLatentMoERunner,
-        "_forward_impl",
-        lambda self, routed, logits, shared: (routed, logits, shared),
-    )
-    rocm_aiter_ops.refresh_env_variables()
-    torch.set_default_dtype(DTYPE)
-    try:
-        with ensure_current_vllm_config(), torch.device("cuda"):
-            init_test_distributed_environment(1, 1, 0, str(get_open_port()))
-            yield
-    finally:
-        torch.set_default_dtype(torch.float32)
-        cleanup_dist_env_and_memory()
-        mp.undo()
-        rocm_aiter_ops.refresh_env_variables()
-
-
-@pytest.fixture(scope="module")
-def merged_front(merged_front_env) -> SimpleNamespace:
-    return _merged_front_moe()
-
-
-def test_merged_front_weight_backs_the_projections(merged_front) -> None:
-    moe = merged_front
-    start = 0
-    for layer in (
-        moe.shared_experts.gate_up_proj,
-        moe.gate,
-        moe.routed_expert_down_proj,
-    ):
-        assert layer.weight.data_ptr() == moe.merged_front_weight[start].data_ptr()
-        start += layer.weight.shape[0]
-    assert start == moe.merged_front_weight.shape[0]
-    assert moe.experts.merged_front_core is not None
-
-
-@pytest.mark.parametrize("num_tokens", [64, 512, 4096, 8192])
-@torch.inference_mode()
-def test_merged_front_matches_separate_projections(
-    merged_front, num_tokens: int
-) -> None:
-    moe = merged_front
-    torch.manual_seed(num_tokens)
-    x = torch.randn(num_tokens, HIDDEN_SIZE, device="cuda", dtype=DTYPE)
-    routed, logits, shared = moe._merged_front_core(x)
-
-    torch.testing.assert_close(logits, moe.gate(x)[0], atol=2e-3, rtol=2e-3)
-    torch.testing.assert_close(
-        routed, moe.routed_expert_down_proj(x)[0], atol=2e-2, rtol=1.6e-2
-    )
-    if 256 < num_tokens <= 4096:
-        gate_up, _ = moe.shared_experts.gate_up_proj(x)
-        torch.testing.assert_close(
-            shared, moe.shared_experts.act_fn(gate_up), atol=2e-2, rtol=2e-2
-        )
-    else:
-        assert shared is x
-
-
-@torch.inference_mode()
-def test_shared_experts_take_the_activation(merged_front) -> None:
-    shared = merged_front.shared_experts
-    x = torch.randn(64, HIDDEN_SIZE, device="cuda", dtype=DTYPE)
-    gate_up, _ = shared.gate_up_proj(x)
-    torch.testing.assert_close(
-        shared(shared.act_fn(gate_up)), shared(x), atol=3e-2, rtol=2e-2
-    )
-
-
-@pytest.mark.parametrize(
-    "kwargs", [{"down_quant_method": object()}, {"num_experts": 384}]
-)
-def test_merged_front_skips_unsupported_layers(merged_front_env, kwargs) -> None:
-    moe = _merged_front_moe(**kwargs)
-    assert moe.merged_front_weight is None
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER_MOE", "0")
+    monkeypatch.setenv("VLLM_ROCM_QUICK_REDUCE_QUANTIZATION", "NONE")
+    _run_ranks("merged_front_matches_unmerged", tp_size)
