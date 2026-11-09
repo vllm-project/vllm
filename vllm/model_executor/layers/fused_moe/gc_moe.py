@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Hopper GC MoE with packed MXFP4 routed and fused FP8 shared experts."""
+"""SM90/SM100 GC MoE with MXFP4 routed and fused FP8 shared experts."""
 
 from typing import Any, ClassVar
 
@@ -11,10 +11,12 @@ from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.distributed import get_ep_group
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.model_executor.layers.fused_moe.deep_gemm_mega_moe import (
+    MEGA_MOE_MXFP4,
     DeepGemmMegaMoEExperts,
     MegaMoEWeightSpec,
     _linear_weight_scale,
 )
+from vllm.model_executor.layers.fused_moe.prepare_megamoe import prepare_megamoe_inputs
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
@@ -143,6 +145,51 @@ def _get_num_tokens_bound(capacity: int) -> int:
     return max(1, min(capacity, tokens))
 
 
+def _prepare_gc_inputs_sm100(hidden_states, topk_weights, topk_ids, buffer):
+    import gc_moe
+
+    tokens = hidden_states.shape[0]
+    block_m = gc_moe.get_block_m_for_gc_moe(
+        buffer.group.size(),
+        buffer.num_experts,
+        buffer.num_max_tokens_per_rank,
+        tokens,
+        buffer.num_topk,
+    )
+    prepare_megamoe_inputs(
+        hidden_states,
+        topk_weights,
+        topk_ids,
+        buffer.x[:tokens],
+        buffer.x_sf[:tokens],
+        buffer.topk_idx[:tokens],
+        buffer.topk_weights[:tokens],
+        shared_x_sf=buffer.shared_l1_acts_sf,
+        shared_block_m=block_m,
+    )
+
+
+def _pack_gc_sm100_weights(weights):
+    """Pack original row/K32 scales before GC interleaves and tiles weights."""
+    data, scales = weights
+    if scales.dtype == torch.float32:
+        mantissa, exponent = torch.frexp(scales)
+        if not torch.all((mantissa == 0.5) & (exponent >= -126) & (exponent <= 128)):
+            raise ValueError(
+                "SM100 GC shared weight scales must be exact finite UE8M0 powers "
+                "of two; arbitrary FP32 scales require weight requantization"
+            )
+        scales = (exponent + 126).to(torch.uint8)
+    scales = scales.contiguous().view(torch.int32)
+    packed = torch.empty(
+        (*scales.shape[:-2], scales.shape[-1], scales.shape[-2]),
+        dtype=torch.int32,
+        device=scales.device,
+    ).transpose(-1, -2)
+    packed.copy_(scales)
+    return data, packed
+
+
 class GcMoEExperts(DeepGemmMegaMoEExperts):
     """Reuse native model/loading contracts with GC-owned layouts and launches.
 
@@ -175,19 +222,51 @@ class GcMoEExperts(DeepGemmMegaMoEExperts):
         self._gc = gc_moe
         self._prepared = False
         super().__init__(vllm_config, **kwargs)
+        self._is_sm90 = current_platform.is_device_capability(
+            90,
+            device_id=self.w13_weight.device.index
+            if self.w13_weight.device.index is not None
+            else torch.accelerator.current_device_index(),
+        )
+        if self.weight_format != MEGA_MOE_MXFP4:
+            raise ValueError("gc_moe requires MXFP4 routed weights")
+        if (
+            self.activation.name != "swiglu"
+            or self.activation.beta != 0.0
+            or self.activation.alpha <= 0.0
+            or (self._is_sm90 and self.activation.alpha != 1.0)
+        ):
+            raise ValueError(
+                "gc_moe requires swiglu with beta=0 and positive alpha; "
+                "SM90 additionally requires alpha=1"
+            )
         if self.num_experts != self.num_logical_experts:
             raise ValueError("gc_moe does not support redundant experts")
 
     @staticmethod
     def check_supported(device, hidden_size, intermediate_size):
-        if not current_platform.is_device_capability(90, device_id=device.index or 0):
-            raise NotImplementedError("gc_moe requires SM90 GPUs")
-        if not (
-            512 <= hidden_size <= 8192
-            and hidden_size % 512 == 0
-            and 256 <= intermediate_size <= 4096
-            and intermediate_size % 256 == 0
-        ):
+        device_id = (
+            device.index
+            if device.index is not None
+            else torch.accelerator.current_device_index()
+        )
+        if current_platform.is_device_capability(90, device_id=device_id):
+            supported = (
+                512 <= hidden_size <= 8192
+                and hidden_size % 512 == 0
+                and 256 <= intermediate_size <= 4096
+                and intermediate_size % 256 == 0
+            )
+        elif current_platform.is_device_capability_family(100, device_id=device_id):
+            supported = (
+                hidden_size > 0
+                and hidden_size % 256 == 0
+                and 0 < intermediate_size <= 4096
+                and intermediate_size % 128 == 0
+            )
+        else:
+            raise NotImplementedError("gc_moe requires SM90 or SM100-family GPUs")
+        if not supported:
             raise ValueError("Unsupported gc_moe hidden or intermediate size")
 
     def _fusable_shared_experts(self, shared_experts):
@@ -242,7 +321,7 @@ class GcMoEExperts(DeepGemmMegaMoEExperts):
         if is_scale:
             if dst.dtype == torch.float32:
                 if src.dtype in (torch.uint8, torch.float8_e8m0fnu):
-                    src = torch.exp2(src.view(torch.uint8).float() - 127)
+                    src = src.view(torch.float8_e8m0fnu).float()
                 else:
                     src = src.float()
             else:
@@ -262,6 +341,7 @@ class GcMoEExperts(DeepGemmMegaMoEExperts):
     def get_symm_buffer(self):
         group = get_ep_group().device_group
         key = (
+            self._is_sm90,
             id(group),
             torch.accelerator.current_device_index(),
             self.num_experts,
@@ -272,7 +352,12 @@ class GcMoEExperts(DeepGemmMegaMoEExperts):
             self.num_shared_experts,
         )
         if key not in self._symm_buffers:
-            self._symm_buffers[key] = self._gc.get_symm_buffer_for_gc_moe_sm90(
+            allocate = (
+                self._gc.get_symm_buffer_for_gc_moe_sm90
+                if self._is_sm90
+                else self._gc.get_symm_buffer_for_gc_moe
+            )
+            self._symm_buffers[key] = allocate(
                 group,
                 self.num_experts,
                 self.max_num_tokens,
@@ -289,13 +374,18 @@ class GcMoEExperts(DeepGemmMegaMoEExperts):
             return
         if torch.cuda.is_current_stream_capturing():
             raise RuntimeError("Warm up gc_moe before CUDA Graph capture")
-        convert = self._gc.transform_weights_for_gc_moe_sm90
-        self._routed_weights = convert(self.l1_weights, self.l2_weights)
-        self._shared_weights = convert(
-            self._kernel_weights("shared_l1"),
-            self._kernel_weights("shared_l2"),
-            shared_recipe=(1, 1, 32),
-        )
+        shared = (self._kernel_weights("shared_l1"), self._kernel_weights("shared_l2"))
+        if self._is_sm90:
+            convert = self._gc.transform_weights_for_gc_moe_sm90
+            self._routed_weights = convert(self.l1_weights, self.l2_weights)
+            self._shared_weights = convert(*shared, shared_recipe=(1, 1, 32))
+        else:
+            convert = self._gc.transform_weights_for_gc_moe
+            self._routed_weights = convert(
+                _pack_gc_sm100_weights(self.l1_weights),
+                _pack_gc_sm100_weights(self.l2_weights),
+            )
+            self._shared_weights = convert(*map(_pack_gc_sm100_weights, shared))
         # Keep the checkpoint parameter names while retiring the raw storage.
         for name, values in zip(
             ("w13", "w2", "shared_l1", "shared_l2"),
@@ -319,9 +409,19 @@ class GcMoEExperts(DeepGemmMegaMoEExperts):
         buffer = self.get_symm_buffer()
         if self.capture_fn is not None:
             self.capture_fn(topk_ids)
-        _prepare_gc_inputs(hidden_states, topk_weights, topk_ids, buffer)
+        kwargs: dict[str, int | float]
+        if self._is_sm90:
+            _prepare_gc_inputs(hidden_states, topk_weights, topk_ids, buffer)
+            launch = self._gc.sm90_fp8_fp4_gc_moe
+            kwargs = dict(
+                num_tokens_bound=_get_num_tokens_bound(buffer.num_max_tokens_per_rank)
+            )
+        else:
+            _prepare_gc_inputs_sm100(hidden_states, topk_weights, topk_ids, buffer)
+            launch = self._gc.fp8_fp4_gc_moe
+            kwargs = dict(activation_alpha=self.activation.alpha)
         output = torch.empty_like(hidden_states, dtype=torch.bfloat16)
-        self._gc.sm90_fp8_fp4_gc_moe(
+        launch(
             output,
             *self._routed_weights,
             buffer,
@@ -329,7 +429,7 @@ class GcMoEExperts(DeepGemmMegaMoEExperts):
             shared_l2_weights=self._shared_weights[1],
             shared_recipe=(1, 1, 32),
             activation_clamp=self.activation.clamp,
-            num_tokens_bound=_get_num_tokens_bound(buffer.num_max_tokens_per_rank),
             fast_math=self.fast_math,
+            **kwargs,
         )
         return output

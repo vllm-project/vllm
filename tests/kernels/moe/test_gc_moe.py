@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""GC shared ownership and changing-input CUDA Graph replay on SM90.
+"""GC shared ownership and changing-input CUDA Graph replay on SM90/SM100.
 
 Run in an environment with the optional gc-moe dependencies installed.
 """
@@ -23,7 +23,11 @@ from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_default_torch_dtype
 
 pytestmark = pytest.mark.skipif(
-    not current_platform.is_device_capability(90), reason="GC MoE requires SM90"
+    not (
+        current_platform.is_device_capability(90)
+        or current_platform.is_device_capability_family(100)
+    ),
+    reason="GC MoE requires SM90 or SM100-family GPUs",
 )
 
 
@@ -131,6 +135,123 @@ def test_gc_preparation_matches_original_quantization(
             check()
         del graph
     buffer.destroy()
+
+
+@pytest.mark.parametrize(
+    "tokens,hidden,strided",
+    [
+        (0, 512, False),
+        (2, 5120, True),
+        (65, 5120, False),
+        (513, 512, False),
+        (1025, 512, False),
+    ],
+)
+def test_sm100_preparation_packs_and_swizzles_shared_scales(
+    dist_init, tokens, hidden, strided
+):
+    """SM100 aliases input data but needs K32 packed and block-M-swizzled scales."""
+    import gc_moe
+    import torch.distributed as dist
+
+    from vllm.model_executor.layers.fused_moe.gc_moe import _prepare_gc_inputs_sm100
+    from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+        per_token_group_quant_fp8,
+    )
+
+    torch.manual_seed(42)
+    buffer = gc_moe.get_symm_buffer_for_gc_moe(
+        dist.group.WORLD, 32, tokens + 2, 6, hidden, 256, num_shared_experts=1
+    )
+    x = torch.randn(
+        (tokens + 2, hidden + (16 if strided else 0)),
+        dtype=torch.bfloat16,
+        device="cuda",
+    )[1 : tokens + 1, :hidden]
+    step = 2 if strided else 1
+    ids = torch.randint(0, 32, (tokens, 6 * step), device="cuda", dtype=torch.int32)[
+        :, ::step
+    ]
+    weights = torch.rand((tokens, 6 * step), device="cuda")[:, ::step]
+    if tokens:
+        ids[0, 0] = -1
+        x[0, :128] = 0
+    bm = gc_moe.get_block_m_for_gc_moe(1, 32, buffer.num_max_tokens_per_rank, tokens, 6)
+    rows = torch.arange(tokens, device="cuda")
+    within = rows % bm
+    sf_rows = (
+        rows // bm * ((bm + 127) // 128 * 128)
+        + within // 128 * 128
+        + within % 32 * 4
+        + within % 128 // 32
+    )
+
+    def check():
+        assert buffer.x.data_ptr() == buffer.shared_l1_acts.data_ptr()
+        if tokens:
+            quantized, sf = per_token_group_quant_fp8(x, 32, eps=1e-4, use_ue8m0=True)
+            packed = (sf.view(torch.int32) >> 23).to(torch.uint8).view(torch.int32)
+            torch.testing.assert_close(
+                buffer.x[:tokens].view(torch.uint8),
+                quantized.view(torch.uint8),
+                rtol=0,
+                atol=0,
+            )
+            torch.testing.assert_close(buffer.x_sf[:tokens], packed, rtol=0, atol=0)
+            expected_shared_sf = torch.zeros_like(buffer.shared_l1_acts_sf)
+            expected_shared_sf[sf_rows] = packed
+            torch.testing.assert_close(
+                buffer.shared_l1_acts_sf, expected_shared_sf, rtol=0, atol=0
+            )
+        assert torch.count_nonzero(buffer.x[tokens:].view(torch.uint8)) == 0
+        assert torch.count_nonzero(buffer.x_sf[tokens:]) == 0
+        torch.testing.assert_close(buffer.topk_idx[:tokens], ids.long(), rtol=0, atol=0)
+        torch.testing.assert_close(
+            buffer.topk_weights[:tokens], weights, rtol=0, atol=0
+        )
+
+    _prepare_gc_inputs_sm100(x, weights, ids, buffer)
+    check()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        _prepare_gc_inputs_sm100(x, weights, ids, buffer)
+    for value in (0, 1):
+        x.fill_(value)
+        ids.add_(1).remainder_(32)
+        weights.mul_(-1)
+        graph.replay()
+        check()
+    del graph
+    buffer.destroy()
+
+
+@pytest.mark.parametrize("grouped", [False, True])
+def test_sm100_weight_scales_preserve_ue8m0_values(grouped):
+    """Packing must be lossless, including UE8M0's subnormal FP32 endpoint."""
+    from vllm.model_executor.layers.fused_moe.gc_moe import _pack_gc_sm100_weights
+
+    exponents = torch.tensor([0, 126, 127, 254], dtype=torch.uint8, device="cuda")
+    expected = exponents.expand((2, 128, 4) if grouped else (128, 4)).contiguous()
+    data = torch.zeros(
+        (2, 128, 64) if grouped else (128, 128),
+        dtype=torch.int8 if grouped else torch.float8_e4m3fn,
+        device="cuda",
+    )
+    for scales in (expected, expected.view(torch.float8_e8m0fnu).float()):
+        _, packed = _pack_gc_sm100_weights((data, scales))
+        torch.testing.assert_close(packed, expected.view(torch.int32), rtol=0, atol=0)
+        assert packed.stride(-2) == 1
+        assert packed.stride(-1) == 128
+
+
+@pytest.mark.parametrize("scale", [0.0, -1.0, 0.75, float("inf"), float("nan")])
+def test_sm100_rejects_shared_scales_that_would_change_weights(scale):
+    from vllm.model_executor.layers.fused_moe.gc_moe import _pack_gc_sm100_weights
+
+    data = torch.zeros((128, 128), dtype=torch.float8_e4m3fn, device="cuda")
+    scales = torch.full((128, 4), scale, dtype=torch.float32, device="cuda")
+    with pytest.raises(ValueError, match="exact finite UE8M0"):
+        _pack_gc_sm100_weights((data, scales))
 
 
 @pytest.mark.parametrize(
