@@ -5,6 +5,7 @@ import pytest
 import torch
 from transformers import NemotronHConfig
 
+import vllm.platforms
 from vllm.config import (
     CacheConfig,
     CompilationConfig,
@@ -15,10 +16,12 @@ from vllm.config import (
 )
 from vllm.config.elastic import ElasticConfig, SliceConfig, elastic_phase
 from vllm.config.speculative import SpeculativeConfig
+from vllm.distributed.parallel_state import GroupCoordinator
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
 from vllm.exceptions import VLLMValidationError
 from vllm.model_executor.models.nemotron_h_elastic import _local_prefix_size
+from vllm.platforms.cpu import CpuPlatform
 from vllm.sampling_params import SamplingParams
 from vllm.utils.hashing import sha256
 from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
@@ -32,6 +35,7 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.structured_output import StructuredOutputManager
+from vllm.v1.worker.gpu import cudagraph_utils
 
 pytestmark = pytest.mark.cpu_test
 
@@ -147,6 +151,47 @@ def test_hf_overrides_enable_runtime_slicing(elastic_config):
     assert config.profiles["sliced"] == SliceConfig(64, 64)
     assert config.think_end_token_id == 13
     assert not hasattr(NemotronHConfig.from_pretrained(path), "elastic_thinking")
+
+
+def test_decode_graph_plan_keeps_both_widths(elastic_config, tmp_path, monkeypatch):
+    """Uniform decode tables must not let one width shadow the other."""
+    platform = CpuPlatform()
+    monkeypatch.setattr(vllm.platforms, "current_platform", platform)
+    monkeypatch.setattr(cudagraph_utils, "current_platform", platform)
+    # Only plan the graphs; no GPU pool or CUDA capture is needed.
+    monkeypatch.setattr(platform, "get_global_graph_pool", lambda: None)
+    torch.distributed.init_process_group(
+        "gloo",
+        init_method=f"file://{tmp_path / 'gloo'}",
+        rank=0,
+        world_size=1,
+    )
+    group = GroupCoordinator([[0]], 0, "gloo", use_device_communicator=False)
+    try:
+        monkeypatch.setattr(cudagraph_utils, "get_pp_group", lambda: group)
+        elastic_config.compilation_config = CompilationConfig(
+            mode=0,
+            cudagraph_mode="FULL_DECODE_ONLY",
+            decode_cudagraph_capture_request_sizes=[1, 2],
+            prefill_cudagraph_capture_token_sizes=[],
+            max_cudagraph_capture_size=2,
+        )
+        manager = cudagraph_utils.CudaGraphManager(
+            elastic_config,
+            torch.device("cpu"),
+            elastic_config.compilation_config.cudagraph_mode,
+            decode_query_lens={1: 2},
+        )
+        assert manager.needs_capture()
+        for phase in ("full", "sliced"):
+            table = manager._decode_descs[(1, 0, 1, phase)]
+            assert [(d.num_reqs, d.elastic_phase) for d in table[1:]] == [
+                (1, phase),
+                (2, phase),
+            ]
+    finally:
+        group.destroy()
+        torch.distributed.destroy_process_group()
 
 
 @pytest.mark.parametrize("checkpoint_default", [None, "sliced", "auto"])
