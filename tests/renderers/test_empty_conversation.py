@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """An empty conversation must be rejected whatever the renderer.
 
-The HF tokenizer refuses one inside ``apply_chat_template``, but renderers with
+The HF tokenizer refuses one inside `apply_chat_template`, but renderers with
 their own chat encoding (e.g. DeepSeek V3.2/V4/V4.1) render it to a bare BOS
 prompt, from which the model generates unrelated text.
 """
@@ -22,7 +22,7 @@ from vllm.renderers.params import ChatParams, TokenizeParams
 
 
 class _Rendered(Exception):
-    """Raised by the stub once a conversation reaches ``render_messages``."""
+    """Raised by the stub once a conversation reaches `render_messages`."""
 
 
 def _renderer() -> BaseRenderer:
