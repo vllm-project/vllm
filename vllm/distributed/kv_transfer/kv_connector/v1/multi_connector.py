@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any, cast
 import torch
 
 from vllm.config import VllmConfig
-from vllm.config.kv_transfer import KVTransferConfig
+from vllm.config.kv_transfer import KVCacheAccess, KVTransferConfig
 from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBaseType
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
@@ -235,17 +235,16 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         return True
 
     @classmethod
-    def registers_kv_cache_memory(cls, kv_transfer_config: "KVTransferConfig") -> bool:
+    def kv_cache_access(cls, kv_transfer_config: "KVTransferConfig") -> KVCacheAccess:
+        access = KVCacheAccess.IN_PROCESS
         for conn_config in kv_transfer_config.kv_connector_extra_config.get(
             "connectors", []
         ):
             child_config = KVTransferConfig(
                 **{"engine_id": kv_transfer_config.engine_id, **conn_config}
             )
-            connector_cls = KVConnectorFactory.get_connector_class(child_config)
-            if connector_cls.registers_kv_cache_memory(child_config):
-                return True
-        return False
+            access |= KVConnectorFactory.kv_cache_access(child_config)
+        return access
 
     @property
     def requires_kv_delivery(self) -> bool:

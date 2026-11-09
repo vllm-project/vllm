@@ -22,6 +22,7 @@ from vllm.config import (
     SpeculativeConfig,
     VllmConfig,
 )
+from vllm.config.kv_transfer import KVCacheAccess
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
@@ -360,8 +361,16 @@ class RegistersKVCacheTestConnector(ExampleConnector):
     """External connector that registers the device KV cache for RDMA."""
 
     @classmethod
-    def registers_kv_cache_memory(cls, kv_transfer_config: KVTransferConfig) -> bool:
-        return True
+    def kv_cache_access(cls, kv_transfer_config: KVTransferConfig) -> KVCacheAccess:
+        return KVCacheAccess.REGISTERS
+
+
+class ExportsKVCacheTestConnector(ExampleConnector):
+    """External connector that exports the device KV cache to another process."""
+
+    @classmethod
+    def kv_cache_access(cls, kv_transfer_config: KVTransferConfig) -> KVCacheAccess:
+        return KVCacheAccess.EXPORTS_FD
 
 
 class TestExampleConnector(ExampleConnector):

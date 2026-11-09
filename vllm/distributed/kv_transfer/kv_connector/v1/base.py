@@ -48,6 +48,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import torch
 
+from vllm.config.kv_transfer import KVCacheAccess
 from vllm.logger import init_logger
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -202,16 +203,14 @@ class KVConnectorBase_V1(ABC):
         return False
 
     @classmethod
-    def registers_kv_cache_memory(cls, kv_transfer_config: "KVTransferConfig") -> bool:
-        """Whether the connector's workers register the device KV cache with an
-        RDMA or UCX engine. The extensible KV cache then backs each segment with
-        a single physical allocation, which memory registration requires.
-
-        Consulted for external connectors (`kv_connector_module_path`),
-        including inside MultiConnector; in-tree connectors are listed in
-        `_KV_CACHE_REGISTERING_CONNECTORS`. Defaults to False.
+    def kv_cache_access(cls, kv_transfer_config: "KVTransferConfig") -> KVCacheAccess:
+        """How the connector's workers reach the device KV cache, as
+        `KVCacheAccess` flags, which decide how the extensible KV cache
+        allocates it, or whether it can be used: e.g. `REGISTERS` if they
+        register it with a UCX or RDMA engine, which requires each segment to
+        be backed by a single physical allocation. Defaults to `IN_PROCESS`.
         """
-        return False
+        return KVCacheAccess.IN_PROCESS
 
     @property
     def requires_kv_delivery(self) -> bool:
