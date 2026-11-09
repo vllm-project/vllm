@@ -391,7 +391,6 @@ class DeepseekV32Attention(MLAAttention):
             mla_kv_cache=mla_kv_cache,
             mla_kv_cache_dtype=self.kv_cache_dtype,
             mla_k_scale=mla_k_scale,
-            skip_scale=self._k_scale_float == 1.0,
             has_indexer=has_indexer,
             index_rope_interleave=self._index_rope_interleave,
             kv_c_out=kv_c_out,
