@@ -8849,6 +8849,12 @@ def test_candidate_budget_caps_the_drafts(budget):
     assert view.num_free_blocks >= 0
 
 
+@pytest.mark.parametrize("budget", [1.5, 2.0, "2", None])
+def test_candidate_budget_must_be_an_int(budget):
+    with pytest.raises(ValueError, match="candidate_budget returned.*must be an int"):
+        _budget_steps(budget)
+
+
 def test_candidate_budget_is_not_asked_without_scheduled_requests():
     scheduler = create_scheduler(num_speculative_tokens=3)
     views = []

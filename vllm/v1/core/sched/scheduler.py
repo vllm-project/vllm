@@ -554,6 +554,8 @@ class Scheduler(SchedulerInterface):
             block_size=self.block_size,
         )
         budget = self.speculator_config.candidate_budget(view)
+        if not isinstance(budget, int):
+            raise ValueError(f"candidate_budget returned {budget!r}; must be an int.")
         if not 1 <= budget <= self.num_spec_tokens + 1:
             raise ValueError(
                 f"candidate_budget returned {budget}, outside "
