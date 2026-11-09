@@ -1254,7 +1254,7 @@ def _xfer_meta(
 
 @contextlib.contextmanager
 def mooncake_register_worker(
-    kv_cache_config, *, kv_role: str = "kv_consumer", vllm_config=None
+    kv_cache_config, *, kv_role: str = "kv_consumer", vllm_config=None, tp_size=1
 ):
     """Build a worker whose engine registration and sender thread are patched."""
     if vllm_config is None:
@@ -1265,6 +1265,10 @@ def mooncake_register_worker(
     with (
         set_current_vllm_config(vllm_config),
         patch_worker_dependencies(),
+        patch(
+            f"{connector_mod}.get_tensor_model_parallel_world_size",
+            return_value=tp_size,
+        ),
         patch(f"{connector_mod}.threading.Event"),
         patch(f"{connector_mod}.threading.Thread") as mock_thread,
     ):

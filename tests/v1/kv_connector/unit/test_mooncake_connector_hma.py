@@ -7,6 +7,7 @@ send trimming, and group-count invariant checking in _build_transfer_params.
 """
 
 import asyncio
+import ctypes
 from unittest.mock import patch
 
 import pytest
@@ -31,10 +32,12 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     MLAAttentionSpec,
     SparseCacheRole,
+    UniformTypeKVCacheSpecs,
 )
 
 from .test_mooncake_connector import (
     FakeMooncakeWrapper,
+    _xfer_meta,
     mooncake_register_worker,
     patch_worker_dependencies,
 )
@@ -599,27 +602,124 @@ def test_failed_receive_waits_for_every_peer(swa_enabled, outcomes):
         worker.shutdown()
 
 
-def _hisparse_producer_cache_config():
+def _hisparse_producer_cache_config(*, packed=False):
+    specs = {
+        name: MLAAttentionSpec(
+            block_size=16,
+            num_kv_heads=1,
+            head_size=16,
+            dtype=torch.float16,
+            cache_role=role,
+        )
+        for name, role in [
+            ("model.layers.0.source", SparseCacheRole.SPARSE),
+            ("model.layers.0.indexer", SparseCacheRole.INDEXER),
+        ]
+    }
+    groups = [KVCacheGroupSpec([name], spec) for name, spec in specs.items()]
+    if packed:
+        groups = [
+            KVCacheGroupSpec(
+                list(specs),
+                UniformTypeKVCacheSpecs(block_size=16, kv_cache_specs=specs),
+            )
+        ]
     return KVCacheConfig(
         num_blocks=10,
         kv_cache_tensors=[],
-        kv_cache_groups=[
-            KVCacheGroupSpec(
-                [name],
-                MLAAttentionSpec(
-                    block_size=16,
-                    num_kv_heads=1,
-                    head_size=16,
-                    dtype=torch.float16,
-                    cache_role=role,
-                ),
-            )
-            for name, role in [
-                ("source", SparseCacheRole.SPARSE),
-                ("indexer", SparseCacheRole.INDEXER),
-            ]
-        ],
+        kv_cache_groups=groups,
     )
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    "packed,source_group,descending",
+    [(True, 0, False), (True, 1, True), (False, 0, False), (False, 1, True)],
+)
+def test_hisparse_group_remap_copies_only_requested_pages(
+    packed, source_group, descending
+):
+    """One P group feeds two D groups without copying cached pages or padding."""
+    page = 512
+    if packed:
+        backing = torch.zeros((10, 2 * page), dtype=torch.uint8)
+        source, indexer = backing[:, :page], backing[:, page:]
+    else:
+        source = torch.zeros((10, page), dtype=torch.uint8)
+        indexer = torch.zeros_like(source)
+    source_ids = [4, 3, 2, 1] if descending else [1, 2, 3, 4]
+    for position, block_id in enumerate(source_ids):
+        source[block_id].fill_(10 + position)
+        indexer[block_id].fill_(100 + position)
+    original_source, original_indexer = source.clone(), indexer.clone()
+
+    host = torch.full((10, page), 0xCC, dtype=torch.uint8)
+    gpu = torch.full((10, page + 64), 0xCC, dtype=torch.uint8)
+    host_ids = [6, 5] if descending else [5, 6]
+    indexer_ids = [8, 2, 7]
+    expected_host, expected_gpu = host.clone(), gpu.clone()
+    for position, block_id in zip([2, 3], host_ids):
+        expected_host[block_id].fill_(10 + position)
+    for position, block_id in zip([0, 2, 3], indexer_ids):
+        expected_gpu[block_id, 32 : 32 + page].fill_(100 + position)
+
+    remote = [
+        TransferRegion(
+            "model.layers.0.source", 0, host.data_ptr(), page, page, source_group
+        ),
+        TransferRegion(
+            "model.layers.0.indexer",
+            0,
+            gpu.data_ptr() + 32,
+            page + 64,
+            page,
+            1 - source_group,
+        ),
+    ]
+    destination_ids = [host_ids, indexer_ids]
+    positions = [[2, 3], [0, 2, 3]]
+    if source_group == 1:
+        destination_ids.reverse()
+        positions.reverse()
+    meta = _xfer_meta(
+        remote,
+        {"d": ("x", destination_ids)},
+        hisparse_protocol=1,
+        host_group_indices=[source_group],
+        group_block_sizes=[16, 16],
+        registered_cache_roles=["sparse", "indexer"],
+        req_block_positions={"d": positions},
+    )
+    send = SendBlockMeta(
+        "p", "x", [source_ids], asyncio.Event(), local_block_positions=[[0, 1, 2, 3]]
+    )
+    config = create_vllm_config(
+        kv_connector="MooncakeConnector",
+        kv_role="kv_producer",
+        hf_overrides={"model_type": "deepseek_v2", "kv_lora_rank": 16},
+    )
+    with mooncake_register_worker(
+        _hisparse_producer_cache_config(packed=True), vllm_config=config
+    ) as (worker, _):
+        worker.register_kv_caches(
+            {"model.layers.0.source": source, "model.layers.0.indexer": indexer}
+        )
+        local, remote, error = worker._prepare_transfer_regions(meta)
+        assert error is None
+        sources, destinations, lengths, errors, message = asyncio.run(
+            worker._build_transfer_params([("d", send)], meta, local, remote)
+        )
+
+    assert errors == [] and message is None
+    assert sum(lengths) == 5 * page
+    for src, dst, length in zip(sources, destinations, lengths):
+        ctypes.memmove(dst, src, length)
+    assert torch.equal(host, expected_host)
+    assert torch.equal(gpu, expected_gpu)
+    assert torch.equal(source, original_source)
+    assert torch.equal(indexer, original_indexer)
+    # Adjacent full pages can share a descriptor; strided subpages cannot.
+    assert lengths == ([page, page] if packed else [2 * page]) + [page] * 3
 
 
 @pytest.mark.cpu_test
@@ -651,14 +751,17 @@ def test_hisparse_import_keeps_rank_private_indexer(rank, shared, expected_sourc
         req_block_positions={"d": [[1, 2], [3]]},
     )
     local = [
-        TransferRegion("source", 0, 1000, 100, 10, 0),
-        TransferRegion("indexer", 0, 2000, 100, 10, 0),
+        TransferRegion("model.layers.0.source", 0, 1000, 100, 10, 0),
+        TransferRegion("model.layers.0.indexer", 0, 2000, 100, 10, 0),
     ]
     remote = [
-        TransferRegion("source", 0, 3000, 100, 10, 0),
-        TransferRegion("indexer", 0, 4000, 100, 10, 1),
+        TransferRegion("model.layers.0.source", 0, 3000, 100, 10, 0),
+        TransferRegion("model.layers.0.indexer", 0, 4000, 100, 10, 1),
     ]
-    with mooncake_register_worker(_hisparse_producer_cache_config()) as (worker, _):
+    with mooncake_register_worker(_hisparse_producer_cache_config(), tp_size=2) as (
+        worker,
+        _,
+    ):
         sources, destinations, lengths, errors, message = asyncio.run(
             worker._build_transfer_params([("d", send)], meta, local, remote)
         )
@@ -669,8 +772,13 @@ def test_hisparse_import_keeps_rank_private_indexer(rank, shared, expected_sourc
 
 
 @pytest.mark.cpu_test
-@pytest.mark.parametrize("positions", [[[1, 2], [4]], [[1, 2], [2, 1]], [[1, 2]]])
-def test_hisparse_import_rejects_incomplete_page_plan_atomically(positions):
+@pytest.mark.parametrize(
+    "positions,indexer_bytes",
+    [([[1, 2], [4]], 10), ([[1, 2], [2, 1]], 10), ([[1, 2]], 10), ([[1, 2], [2]], 11)],
+)
+def test_hisparse_import_rejects_incomplete_page_plan_atomically(
+    positions, indexer_bytes
+):
     """A bad indexer plan must discard even previously planned host descriptors."""
     send = SendBlockMeta(
         "p", "x", [[1, 2, 3]], asyncio.Event(), local_block_positions=[[0, 1, 2]]
@@ -689,12 +797,12 @@ def test_hisparse_import_rejects_incomplete_page_plan_atomically(positions):
         req_block_positions={"d": positions},
     )
     local = [
-        TransferRegion("source", 0, 1000, 100, 10, 0),
-        TransferRegion("indexer", 0, 2000, 100, 10, 0),
+        TransferRegion("model.layers.0.source", 0, 1000, 100, 10, 0),
+        TransferRegion("model.layers.0.indexer", 0, 2000, 100, 10, 0),
     ]
     remote = [
-        TransferRegion("source", 0, 3000, 100, 10, 0),
-        TransferRegion("indexer", 0, 4000, 100, 10, 1),
+        TransferRegion("model.layers.0.source", 0, 3000, 100, 10, 0),
+        TransferRegion("model.layers.0.indexer", 0, 4000, 100, indexer_bytes, 1),
     ]
     with mooncake_register_worker(_hisparse_producer_cache_config()) as (worker, _):
         sources, destinations, lengths, errors, message = asyncio.run(
@@ -709,12 +817,12 @@ def test_hisparse_import_rejects_incomplete_page_plan_atomically(positions):
 def test_hisparse_semantic_layout_requires_compatible_roles(incompatible):
     """Independent group numbers are valid only under the sparse-MLA contract."""
     local = [
-        TransferRegion("source", 0, 1000, 100, 10, 0),
-        TransferRegion("indexer", 0, 2000, 100, 10, 0),
+        TransferRegion("model.layers.0.source", 0, 1000, 100, 10, 0),
+        TransferRegion("model.layers.0.indexer", 0, 2000, 100, 10, 0),
     ]
     remote = [
-        TransferRegion("source", 0, 3000, 100, 10, 0),
-        TransferRegion("indexer", 0, 4000, 100, 10, 1),
+        TransferRegion("model.layers.0.source", 0, 3000, 100, 10, 0),
+        TransferRegion("model.layers.0.indexer", 0, 4000, 100, 10, 1),
     ]
     meta = MooncakeXferMetadata(
         remote_hostname="d",
@@ -738,7 +846,9 @@ def test_hisparse_semantic_layout_requires_compatible_roles(incompatible):
     elif incompatible == "tp":
         meta.remote_tp_size = 4
     elif incompatible == "opaque":
-        remote[1] = TransferRegion("indexer", 0, 4000, 100, 10, -1, (0, 1))
+        remote[1] = TransferRegion(
+            "model.layers.0.indexer", 0, 4000, 100, 10, -1, (0, 1)
+        )
     config = create_vllm_config(
         kv_connector="MooncakeConnector",
         hf_overrides={"model_type": "deepseek_v2", "kv_lora_rank": 16},
