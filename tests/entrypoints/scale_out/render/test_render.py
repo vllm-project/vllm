@@ -38,7 +38,7 @@ from vllm.entrypoints.serve.utils.api_utils import create_json_response
 from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.sampling_params import SamplingParams
 
-MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
+MODEL_NAME = "vllm-project/tiny-random-LlamaForCausalLM"
 GPT_OSS_MODEL_NAME = "openai/gpt-oss-20b"
 DEEPSEEK_V41_MODEL_NAME = "deepseek-ai/DeepSeek-V4.1-Flash"
 
@@ -810,8 +810,8 @@ async def test_chat_completion_render_with_sampling_params(client):
     "max_tokens", [{"max_tokens": 16}, {}], ids=["sixteen", "omitted"]
 )
 async def test_completion_render_keeps_default_max_tokens(client, max_tokens):
-    """``max_tokens=16`` (also the completions default) equals the
-    ``SamplingParams`` default; /render must still return it, or generate
+    """`max_tokens=16` (also the completions default) equals the
+    `SamplingParams` default; /render must still return it, or generate
     treats it as unset."""
     response = await client.post(
         "/v1/completions/render",
@@ -1184,3 +1184,19 @@ async def test_messages_render_tool_search_result_for_deepseek_v41(
         "<｜User｜><tool_result>get_weather</tool_result>\n\n"
         "<tool_result>notes</tool_result><｜Assistant｜>"
     ) in detokenize.json()["prompt"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("override", ["omitted", None, False, True])
+async def test_render_omits_null_token_id_override(client, override):
+    """Default requests must not send a new field to older generate nodes."""
+    body = {"model": MODEL_NAME, "messages": [{"role": "user", "content": "Hi"}]}
+    if override != "omitted":
+        body["return_tokens_as_token_ids"] = override
+    response = await client.post("/v1/chat/completions/render", json=body)
+    response.raise_for_status()
+    context = response.json()["parse_context"]
+    if override is None or override == "omitted":
+        assert "return_tokens_as_token_ids" not in context
+    else:
+        assert context["return_tokens_as_token_ids"] is override

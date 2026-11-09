@@ -4,9 +4,9 @@
 
 Single bridging point for the kernels V4.1 shares verbatim with V4: the
 re-exports below are the only place this package reaches into
-``vllm.models.deepseek_v4``, so submodules import them from ``.`` instead of
-naming the V4 path themselves. Keep these imports above the ``.``-relative
-ones — ``indexer_k_store`` reads them off this partially-initialized module.
+`vllm.models.deepseek_v4`, so submodules import them from `.` instead of
+naming the V4 path themselves. Keep these imports above the `.`-relative
+ones — `indexer_k_store` reads them off this partially-initialized module.
 """
 
 from vllm.models.deepseek_v4.common.ops.fused_indexer_q import (

@@ -280,22 +280,28 @@ def main():
             (
                 "Single image",
                 [image],
-                "What word is on the red road sign? Reply with only that word "
-                "in uppercase.",
+                (
+                    "What word is on the red road sign? Reply with only that word "
+                    "in uppercase."
+                ),
                 "STOP",
             ),
             (
                 "Two different images",
                 image_pair,
-                "Do these pictures contain both flowers and birds? "
-                "Reply with only YES or NO.",
+                (
+                    "Do these pictures contain both flowers and birds? "
+                    "Reply with only YES or NO."
+                ),
                 "YES",
             ),
             (
                 "Same image twice",
                 [image, image],
-                "Read the red road sign in each image, in image order. Reply "
-                "with only the two uppercase words separated by a comma and a space.",
+                (
+                    "Read the red road sign in each image, in image order. Reply with "
+                    "only the two uppercase words separated by a comma and a space."
+                ),
                 "STOP, STOP",
             ),
         ]

@@ -283,7 +283,7 @@ class CudaPlatformBase(Platform):
 
     @classmethod
     def get_cuda_runtime_major(cls) -> int:
-        """Major ``torch.version.cuda`` version, or ``0`` if undetermined."""
+        """Major `torch.version.cuda` version, or `0` if undetermined."""
         major = (torch.version.cuda or "0").split(".", 1)[0]
         return int(major) if major.isdigit() else 0
 
@@ -696,7 +696,7 @@ class CudaPlatformBase(Platform):
         )
 
     @classmethod
-    def is_integrated_gpu(cls, device_id: int = 0) -> bool:
+    def is_integrated_gpu(cls, device_id: int | None = 0) -> bool:
         return bool(torch.cuda.get_device_properties(device_id).is_integrated)
 
     @classmethod
