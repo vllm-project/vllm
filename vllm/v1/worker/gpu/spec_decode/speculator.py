@@ -76,8 +76,6 @@ class BaseSpeculator(ABC):
     """
 
     num_query_per_req: int = 1
-    # Extra query slots reserved per request outside the regular queries.
-    num_extra_query_per_req: int = 0
     supports_mm_inputs: bool = False
     # Draft logits for probabilistic rejection sampling, or None for
     # greedy-draft verification and for speculators without a draft model.
@@ -128,6 +126,26 @@ class BaseSpeculator(ABC):
         """Prepare draft-side watermarking before `propose`. No-op by default."""
         return
 
+    def add_request(self, req_index: int) -> None:
+        """A new request was assigned request-state slot `req_index`, e.g. to
+        reset per-slot state. No-op by default."""
+        return
+
+    def on_requests_finished(self, finished_req_ids: set[str]) -> None:
+        """Requests finished (not preempted), before their request-state slots
+        are freed so their token history is still readable. No-op by default."""
+        return
+
+    def reset_state(self) -> None:
+        """Forget anything learned across requests, called after the warmup
+        requests have finished. No-op by default."""
+        return
+
+    def update_max_model_len(self, max_model_len: int) -> None:
+        """Apply a reduced max_model_len. Auto-fit can call this after capture,
+        when CUDA graphs no longer see Python values. No-op by default."""
+        return
+
 
 class DraftModelSpeculator(BaseSpeculator):
     # Draft prefill runs on the target's batch, so it can reuse the target
@@ -148,6 +166,12 @@ class DraftModelSpeculator(BaseSpeculator):
         self.max_num_reqs = self.scheduler_config.max_num_seqs
         self.max_num_tokens = self.scheduler_config.max_num_batched_tokens
         self.draft_max_seq_len = self.max_model_len
+        # Draft steps in CUDA graphs read the length limit from here rather
+        # than a constant baked at capture, so an auto-fit reduction after
+        # capture (`update_max_model_len`) also applies to graph replays.
+        self.max_model_len_gpu = torch.tensor(
+            self.max_model_len, dtype=torch.int32, device=device
+        )
         # We need to get the hidden size from the draft model config because
         # the draft model's hidden size can be different from the target model's
         # hidden size (e.g., Llama 3.3 70B).
@@ -240,6 +264,9 @@ class DraftModelSpeculator(BaseSpeculator):
     def max_model_len(self) -> int:
         # Auto-fit can reduce the limit after the speculator is built.
         return self.vllm_config.model_config.max_model_len
+
+    def update_max_model_len(self, max_model_len: int) -> None:
+        self.max_model_len_gpu.fill_(max_model_len)
 
     @abstractmethod
     def load_draft_model(
@@ -736,3 +763,11 @@ class DraftModelSpeculator(BaseSpeculator):
         for groups in self.attn_groups:
             for group in groups:
                 group.update_draft_decode_metadata(attn_metadata)
+
+    def _map_kernel_block_tables(self) -> None:
+        """Refresh the persistent kernel block tables a FULL graph reads."""
+        for groups in self.attn_groups:
+            for group in groups:
+                group.map_to_kernel_block_table(
+                    self.block_tables.input_block_tables[group.kv_cache_group_id]
+                )

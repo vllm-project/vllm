@@ -211,6 +211,47 @@ form pulls over Mooncake RDMA and requires `--seed-token`.
     unauthenticated peer cannot hold up the engines loading from the daemon.
     Keep the listener on a trusted network and treat the token as a secret.
 
+## Sharing warmup caches through Mooncake (optional)
+
+D2D seeding needs a live source daemon. As an alternative, the daemon can
+share its warmup caches through pluggable shared stores, so a new node can
+fetch them even when no source replica is online. `--warmup-cache-stores`
+takes a comma-separated list of store backends; the `mooncake` backend uses
+a [Mooncake](https://github.com/kvcache-ai/Mooncake) distributed store.
+Point `MOONCAKE_CONFIG_PATH` at the same JSON configuration used by
+[MooncakeStoreConnector](mooncake_store_connector_usage.md#configure-mooncake):
+
+```bash
+MOONCAKE_CONFIG_PATH=/path/to/mooncake_config.json \
+vllm preload --model /path/to/model --tensor-parallel-size 4 \
+    --warmup-cache-stores mooncake
+```
+
+After tuning, each daemon publishes its per-rank autotune table to every
+configured store under keys of the form
+`vllm-warmup-cache/<kind>/<config-hash>/<filename>`, in addition to writing
+its local disk cache. All tiers share one interface: the local disk is
+always tier zero, and the stores listed in `--warmup-cache-stores`
+follow it in list order — reads take the first tier that hits, writes fan
+out to all of them. During warmup a daemon pulls its table from the shared stores first, in
+list order; when no store has it — or none are configured — it falls back
+to D2D seeding from a live source daemon, and finally tunes in place.
+Stores come first because they are built for read fan-out, while a D2D
+fetch makes a busy peer proxy the same bytes. This covers a cold start
+with no live source daemon and nodes whose cache root is ephemeral. When
+serving peers, a daemon answers from the same chain: disk first, then the
+stores. Whatever it fetches is validated and installed to the local disk
+cache as usual. A misspelled store name or a store that cannot be
+configured fails daemon startup immediately; at runtime, store operations
+are best-effort and never block warmup.
+
+Prefer the `standalone-store` topology for this use case. In `embedded` mode
+every daemon contributes `global_segment_size` of host memory to the pool,
+which is hard to justify for kilobyte-sized JSON artifacts. Note that the
+store is a trust boundary: any writer in the Mooncake cluster can influence
+the autotune tables other nodes load, so only point daemons at a trusted
+deployment.
+
 ## How it works
 
 1. `vllm preload` spawns one daemon process per GPU. Each daemon loads its
@@ -232,6 +273,12 @@ form pulls over Mooncake RDMA and requires `--seed-token`.
 Tied weights (e.g. `lm_head.weight` sharing storage with
 `embed_tokens.weight`) are exported once and re-established as aliases in the
 engine, preserving parameter identity.
+
+Shared weights count toward the engine's `gpu_memory_utilization` budget.
+If IPC loading falls back to disk, the engine removes the corresponding external
+weight charge before profiling its locally loaded weights for KV cache sizing.
+The updated budget must still fit the available GPU memory; fallback does not
+stop the daemon or release its cached weights in zero-copy mode.
 
 ## Multi-node and data parallelism
 
@@ -337,7 +384,9 @@ Socket paths are derived from the GPU UUID, so they are stable regardless of
 - **Warmup cache seeding**: only the v1 per-rank FlashInfer autotune cache is
   seeded; single-rank daemons use FlashInfer's managed v2 store and always
   tune in place. Seeding requires a trusted network — the TCP channel is
-  authenticated by a shared token but unencrypted.
+  authenticated by a shared token but unencrypted. The optional shared
+  stores (`--warmup-cache-stores`) serve the same tables without a live
+  source daemon.
 - **Weight seeding**: `peer_ipc` cannot cross hosts, because a CUDA IPC
   handle is node-local; `rdma` requires Mooncake on both sides. A mirror
   copies the weights into its own memory, so it does not depend on the
@@ -353,6 +402,25 @@ Socket paths are derived from the GPU UUID, so they are stable regardless of
   support for pre-processed weights (the daemon transfers weights *after*
   quantization post-processing). Unsupported methods raise
   `UnsupportedQuantForIPCError`.
+  Online `fp8_per_tensor`, `fp8_per_channel`, and `fp8_per_block` dense
+  linear layers support CUDA IPC with the CUTLASS linear backend. Set
+  `--kernel-config '{"linear_backend": "cutlass"}'` on both the daemon and
+  engine; the block variant additionally requires a GPU supported by the
+  CUTLASS block-FP8 kernel. Online `mxfp8` linear layers can reuse weights
+  with an MXFP8 kernel that supports pre-processed weights, including
+  FlashInfer CUTLASS on Blackwell.
+  The engine reuses the quantized weights and scales without running online
+  quantization again. This does not enable online MoE quantization or
+  conversion from an already quantized checkpoint.
+  Serialized ModelOpt `FP8` (per-tensor) and `FP8_PER_CHANNEL_PER_TOKEN`
+  linear layers also support CUDA IPC with the CUTLASS linear backend.
+  Set the same `--kernel-config '{"linear_backend": "cutlass"}'` on the daemon
+  and engine. Engines reuse the processed weights and scales, including
+  fused-projection scales and output padding. This does not enable ModelOpt
+  block FP8, FP8 MoE, or other FP8 linear backends.
+  ModelOpt NVFP4 MoE supports the TRT-LLM and vLLM CUTLASS backends. With
+  CUTLASS, the daemon fuses activation scales once; engines reuse the fused
+  scales without modifying the daemon's shared tensors.
 - **Consistency**: the daemon and engine must run the same vLLM version and
   agree on model, dtype, quantization, and TP/DP layout, otherwise the
   fingerprint mismatch triggers the disk fallback.
@@ -376,6 +444,11 @@ with the shared `--seed-token` (constant-time comparison), and
 an unauthenticated peer that stops sending is cut off by a whole-message
 deadline instead of blocking the accept loop. The channel is unencrypted —
 bind it to a trusted network.
+
+The optional shared stores (`--warmup-cache-stores`) trust the store
+they are pointed at: a writer in the store's cluster can influence the
+autotune tables a daemon installs, so use them only with a trusted
+deployment.
 
 See the [security documentation](../usage/security.md) for vLLM's general
 threat model.

@@ -27,23 +27,23 @@ _CONNECT_TIMEOUT_S = 5.0
 
 
 class WeightsSeedPayload(TypedDict):
-    """What a source daemon's ``weights`` resolve sends to a peer loader."""
+    """What a source daemon's `weights` resolve sends to a peer loader."""
 
     cache_config: dict[str, Any]
-    """``dataclass_to_json(WeightCacheKey)`` of the source's shard."""
+    """`dataclass_to_json(WeightCacheKey)` of the source's shard."""
     model: str
     manifest: dict[str, Any]
-    """Storage manifest, as :func:`build_manifest` produces."""
+    """Storage manifest, as `build_manifest` produces."""
     aliases: dict[str, str]
     attrs: dict[str, bool]
     seed: dict[str, Any]
-    """Mover-specific transfer seed; ``seed["backend"]`` picks the mover."""
+    """Mover-specific transfer seed; `seed["backend"]` picks the mover."""
 
 
 def build_manifest(
     tensors: Mapping[str, torch.Tensor], kinds: Mapping[str, TensorKind]
 ) -> tuple[dict[str, Any], list[torch.UntypedStorage]]:
-    """Describe ``tensors`` as views over their unique storages."""
+    """Describe `tensors` as views over their unique storages."""
     storages: list[torch.UntypedStorage] = []
     index_by_storage: dict[tuple[torch.device, int], int] = {}
     views: dict[str, dict[str, Any]] = {}
@@ -171,7 +171,7 @@ def seed_address(
 
 
 def peer_cache_config(config: "VllmConfig", *, is_draft: bool) -> "VllmConfig":
-    """Switch one daemon's config to the ``peer_cache`` load format."""
+    """Switch one daemon's config to the `peer_cache` load format."""
     extra = dict(config.load_config.model_loader_extra_config or {})
     extra["is_draft"] = is_draft
     return replace(

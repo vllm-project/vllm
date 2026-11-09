@@ -32,7 +32,6 @@ import torch
 from torch import nn
 from transformers import PreTrainedConfig
 
-from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (
     get_pp_group,
@@ -94,7 +93,7 @@ def _normalize_hyv4_config(config: PreTrainedConfig) -> PreTrainedConfig:
 class HYV4DecoderLayer(nn.Module):
     """One HY V4 decoder layer: MLA attention plus a dense or MoE MLP.
 
-    When``config.enable_ihc`` is set the layer runs on ``hc_mult`` residual
+    When`config.enable_ihc` is set the layer runs on `hc_mult` residual
     channels and each sub-block is wrapped by an `HYV4HCLayer` boundary;
     otherwise it uses the standard single-stream residual.
     """
@@ -236,7 +235,6 @@ class HYV4DecoderLayer(nn.Module):
         return hidden_states, None
 
 
-@support_torch_compile
 class HYV4Model(nn.Module):
     """HY V4 backbone."""
 
@@ -739,9 +737,6 @@ class HYV4ForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
         drop_mapper = WeightsMapper(orig_to_new_prefix=drop_prefixes)
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper | drop_mapper)
-
-    def process_weights_after_loading(self) -> None:
-        self.model.process_weights_after_loading()
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         return self.model.get_expert_mapping()

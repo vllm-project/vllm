@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Flint's dense-linear and elementwise ops against high-precision references:
-the small-M NVFP4 / BF16 GEMVs (``nvfp4_gemv``, incl. the fused SiLU-and-mul
+the small-M NVFP4 / BF16 GEMVs (`nvfp4_gemv`, incl. the fused SiLU-and-mul
 epilogue), the large-M dequantize + cuBLAS path and global-scale check
-(``linear``), and the Triton norms and SiLU-and-mul (``norm``)."""
+(`linear`), and the Triton norms and SiLU-and-mul (`norm`)."""
 
 import pytest
 import torch

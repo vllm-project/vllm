@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The ``rdma`` weight mover: pull storages through the Mooncake TransferEngine."""
+"""The `rdma` weight mover: pull storages through the Mooncake TransferEngine."""
 
 from collections.abc import Mapping
 

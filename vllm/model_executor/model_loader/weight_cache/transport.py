@@ -1,6 +1,23 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Daemon-to-daemon seeding over authenticated JSON/TCP or local pickle."""
+"""Daemon-to-daemon seeding over authenticated JSON/TCP or local pickle.
+
+A `Seedable` is one kind of state a daemon can seed to or from a peer
+daemon, including warmup caches and weight shards. The target names what it
+wants by kind and key fields; the source resolves the key to a payload; the
+target validates and installs it:
+
+    request:  {"kind": "flashinfer_autotune", <key fields>..., "token": "..."}
+    response: {"status": "ok", "payload": <kind-specific>}
+              {"status": "miss"} | {"status": "error", "message": "..."}
+
+Remote payloads are JSON values. Large binary state (weights) must not be
+inlined: the payload then describes the transfer (e.g. a storage manifest), and
+the caller drives the data plane itself.
+
+The TCP connection is unencrypted beyond the shared token; keep the listener
+on a trusted network.
+"""
 
 import contextlib
 import hmac
@@ -36,17 +53,23 @@ class Seedable(Protocol):
 
     kind: str
 
+    def request_params(self, ctx: Any) -> dict[str, Any]:
+        """Target side: the key fields identifying what this rank needs."""
+        ...
+
     def resolve(self, request: dict[str, Any]) -> Any | None:
-        """Source side: the payload named by ``request``; None on a miss."""
+        """Source side: produce the payload named by `request`.
+
+        Validate the wire key first — raise an error on any malformed field
+        (`ValueError` for bad values, `KeyError` for missing ones), before
+        touching local state. The transport turns it into an error response.
+        Return None on a miss.
+        """
         ...
 
     def validate_remote(self, request: dict[str, Any]) -> None:
         """Raise ValueError to refuse the request on the remote JSON plane."""
         return None
-
-    def request_params(self, ctx: Any) -> dict[str, Any]:
-        """Target side: the key fields identifying what this rank needs."""
-        ...
 
     def validate_payload(self, payload: Any) -> Any:
         """Target side: validate the fetched payload, or raise ValueError."""
@@ -108,7 +131,10 @@ class SeedTransport:
         return self._seed_config.source
 
     def adopt(self, seedable: Seedable, ctx: Any) -> None:
-        """Best-effort: fetch and install, or fall back to the local path."""
+        """Best-effort: fetch and install `seedable` from the source daemon.
+
+        Any failure degrades to the local path with a log line.
+        """
         try:
             payload = self.fetch(seedable, ctx)
         except Exception as e:

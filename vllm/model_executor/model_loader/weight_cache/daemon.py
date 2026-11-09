@@ -22,8 +22,8 @@ Tensor, expert, data and pipeline parallelism are supported.
 For multi-node tensor parallelism, run one launcher per node with a shared
 rendezvous so the global TP group forms across nodes (CUDA IPC handles are
 node-local, so each node serves only its local GPUs' shards). Reuse the same
-``--nnodes``/``--node-rank``/``--master-addr`` flags you pass the engine, plus a
-``--weight-cache-master-port`` distinct from the engine's ``--master-port``:
+`--nnodes`/`--node-rank`/`--master-addr` flags you pass the engine, plus a
+`--weight-cache-master-port` distinct from the engine's `--master-port`:
 
     # node 0 (8 local GPUs)
     vllm preload \\
@@ -36,17 +36,17 @@ node-local, so each node serves only its local GPUs' shards). Reuse the same
         --nnodes 2 --node-rank 1 --master-addr 10.0.0.1 \\
         --weight-cache-master-port 29600
 
-The global TP rank of local GPU ``i`` on node ``r`` is
-``r * (tp_size // nnodes) + i``, matching vLLM's contiguous per-node rank
+The global TP rank of local GPU `i` on node `r` is
+`r * (tp_size // nnodes) + i`, matching vLLM's contiguous per-node rank
 assignment, so each engine worker maps its shard from the daemon on its own
 node. With pipeline parallelism each node additionally runs one daemon per PP
-stage; the global rank is ``pp_rank * tp_size + tp_rank``.
+stage; the global rank is `pp_rank * tp_size + tp_rank`.
 
 For data parallelism (e.g. a TP1 x DP16 x EP decode fleet) run one launcher per
-node with the engine's DP placement flags. Local GPU ``i`` serves DP rank
-``start_rank + i // tp_size`` and TP rank ``i % tp_size``, and all
-``dp_size * tp_size`` daemons form one world group on
-``--data-parallel-address``/``--weight-cache-master-port`` so the expert
+node with the engine's DP placement flags. Local GPU `i` serves DP rank
+`start_rank + i // tp_size` and TP rank `i % tp_size`, and all
+`dp_size * tp_size` daemons form one world group on
+`--data-parallel-address`/`--weight-cache-master-port` so the expert
 shards are laid out exactly as in the engine:
 
     # node r (4 local GPUs)
@@ -57,9 +57,9 @@ shards are laid out exactly as in the engine:
         --weight-cache-master-port 29600
 
 Data parallelism also combines with multi-node tensor parallelism: pass both
-flag sets (``--nnodes``/``--node-rank``/``--master-addr`` and the DP flags with
-a reachable ``--data-parallel-address``). Each node then serves a contiguous
-block of the ``dp_size * tp_size`` global ranks, e.g. TP8 x DP2 on 4 nodes:
+flag sets (`--nnodes`/`--node-rank`/`--master-addr` and the DP flags with
+a reachable `--data-parallel-address`). Each node then serves a contiguous
+block of the `dp_size * tp_size` global ranks, e.g. TP8 x DP2 on 4 nodes:
 
     # node r (4 local GPUs)
     vllm preload \\
@@ -70,16 +70,16 @@ block of the ``dp_size * tp_size`` global ranks, e.g. TP8 x DP2 on 4 nodes:
 
 With MTP, EAGLE or EAGLE3 speculative decoding the launcher additionally
 starts a draft daemon group that caches the draft model. It uses its own cache
-key, Unix sockets (``*_draft.sock``) and rendezvous port
-(``--weight-cache-draft-master-port``, default ``--weight-cache-master-port +
-1``), so each process serves exactly one model role. Other draft types are not
+key, Unix sockets (`*_draft.sock`) and rendezvous port
+(`--weight-cache-draft-master-port`, default `--weight-cache-master-port +
+1`), so each process serves exactly one model role. Other draft types are not
 cached and keep loading from disk in the engine.
 
 Seeding a replica from another
 ==============================
 
 A second replica's daemons can seed their shards from a loaded replica
-with ``--weight-cache-seed``; see ``docs/features/preload.md``.
+with `--weight-cache-seed`; see `docs/features/preload.md`.
 """
 
 import contextlib
@@ -90,7 +90,7 @@ import os
 import select
 import socket
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 
 import torch
 
@@ -173,11 +173,12 @@ class WeightCacheDaemon:
         pp_rank: int = 0,
         seed_config: SeedConfig | None = None,
         device_index: int | None = None,
+        warmup_cache_stores: Iterable[str] = (),
     ):
         parallel_config = vllm_config.parallel_config
         if parallel_config.enable_eplb:
             raise ValueError("The weight cache daemon does not support EPLB.")
-        self.warmup_caches = [FlashInferWarmupCache()]
+        self.warmup_caches = [FlashInferWarmupCache(warmup_cache_stores)]
         self.weight_seed = WeightShardSeed(self)
         self.d2d = SeedTransport([*self.warmup_caches, self.weight_seed], seed_config)
         # Seed peers are served on their own thread; this serializes their
@@ -570,6 +571,7 @@ def _run_daemon(
     pp_rank: int = 0,
     seed_config: SeedConfig | None = None,
     device_index: int | None = None,
+    warmup_cache_stores: Iterable[str] = (),
 ) -> None:
     # Spawned daemons start with logging unconfigured, like engine workers.
     if logging_config := getattr(vllm_config, "logging_config", None):
@@ -585,6 +587,7 @@ def _run_daemon(
         pp_rank,
         seed_config=seed_config,
         device_index=device_index,
+        warmup_cache_stores=warmup_cache_stores,
     )
     daemon.load_model()
     daemon.warmup()
@@ -597,13 +600,13 @@ def _run_daemon(
 def plan_local_ranks(
     parallel_config: ParallelConfig,
 ) -> list[tuple[int, int, int, int]]:
-    """``(local_rank, dp_rank, pp_rank, tp_rank)`` for every local daemon.
+    """`(local_rank, dp_rank, pp_rank, tp_rank)` for every local daemon.
 
-    Global ranks enumerate DP, PP, then TP: ``global = dp_rank * pp_size *
-    tp_size + pp_rank * tp_size + tp_rank``.
-    With ``--nnodes`` the engine hands each node a contiguous block of global
-    ranks, so node ``r`` serves ``node_rank * local + i``; without it a
-    launcher's block starts at ``--data-parallel-start-rank * tp_size``.
+    Global ranks enumerate DP, PP, then TP: `global = dp_rank * pp_size *
+    tp_size + pp_rank * tp_size + tp_rank`.
+    With `--nnodes` the engine hands each node a contiguous block of global
+    ranks, so node `r` serves `node_rank * local + i`; without it a
+    launcher's block starts at `--data-parallel-start-rank * tp_size`.
     """
     tp_size = parallel_config.tensor_parallel_size
     pp_size = parallel_config.pipeline_parallel_size

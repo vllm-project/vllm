@@ -6,7 +6,7 @@ Each QSA layer keeps a fixed circular buffer of raw index keys (the
 compressor state) and one compressed key. MRoPE models pack exact three-axis
 positions beside the raw keys; text models derive group positions from
 logical positions. The compressor state uses one block per request, while
-    the compressed owner uses ``MLAAttentionSpec.tokens_per_state`` so its block
+    the compressed owner uses `MLAAttentionSpec.tokens_per_state` so its block
 table follows the main KV-cache lifecycle. Their physical tensor storage is
 shared by the generic cache-layout planner.
 """
@@ -46,7 +46,7 @@ from vllm.v1.kv_cache_interface import (
 
 
 def canonical_qsa_rope_positions(positions: torch.Tensor) -> torch.Tensor:
-    """Return exact per-token positions as ``[tokens, 1, 3]`` int64 rows."""
+    """Return exact per-token positions as `[tokens, 1, 3]` int64 rows."""
     if positions.ndim == 1:
         positions = positions.unsqueeze(0).expand(3, -1)
     elif positions.ndim != 2 or positions.shape[0] not in (1, 3):
@@ -166,7 +166,7 @@ def compressed_qsa_slot_mapping(
     compress_ratio: int,
     out: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Build boundary-only slots for an ``MLAAttentionSpec`` QSA cache."""
+    """Build boundary-only slots for an `MLAAttentionSpec` QSA cache."""
     if storage_block_size <= 0 or compress_ratio <= 0:
         raise ValueError("QSA block size and compression ratio must be positive")
     compressed_positions = torch.div(
@@ -894,7 +894,7 @@ __all__ = [
 
 
 def qsa_kv_cache_dtype(cache_config: CacheConfig, prefix: str) -> CacheDType | str:
-    """The layer's KV cache dtype, honoring ``--kv-cache-dtype-skip-layers``."""
+    """The layer's KV cache dtype, honoring `--kv-cache-dtype-skip-layers`."""
     from vllm.model_executor.models.utils import extract_layer_index
 
     if str(extract_layer_index(prefix)) in cache_config.kv_cache_dtype_skip_layers:

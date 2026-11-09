@@ -81,7 +81,7 @@ class WeightMover(ABC):
 
 
 def get_mover(name: SeedBackend, *, device_index: int | None = None) -> WeightMover:
-    """The mover for a backend; ``device_index`` pins the peer_ipc device."""
+    """The mover for a backend; `device_index` pins the peer_ipc device."""
     if name == PEER_IPC_BACKEND:
         from vllm.model_executor.model_loader.weight_cache.weight_seed.peer_ipc import (
             PeerIpcMover,

@@ -7,9 +7,12 @@ warm restarts (weights mapped from the daemon via CUDA IPC) must both serve
 identical outputs.
 """
 
+import json
+import multiprocessing
 import os
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
@@ -18,6 +21,7 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field, replace
+from pathlib import Path
 from typing import Any
 
 import psutil
@@ -27,8 +31,21 @@ import regex as re
 from tests.utils import create_new_process_for_each_test
 from vllm import SamplingParams
 from vllm.assets.image import ImageAsset
+from vllm.model_executor.model_loader.weight_cache.artifact_store import (
+    MooncakeArtifactStore,
+    artifact_key,
+)
+from vllm.model_executor.model_loader.weight_cache.warmup_cache import (
+    FlashInferWarmupCache,
+)
 from vllm.platforms import current_platform
+from vllm.utils.flashinfer import has_flashinfer
 from vllm.utils.network_utils import get_open_port
+
+pytestmark = pytest.mark.skipif(
+    not current_platform.is_cuda_alike(),
+    reason="Weight cache IPC sharing requires CUDA or ROCm",
+)
 
 
 class WeightCacheDaemon:
@@ -121,7 +138,9 @@ class WeightCacheDaemon:
                 if time.monotonic() > deadline:
                     raise
                 if self._proc is not None and self._proc.poll() is not None:
-                    raise AssertionError("vllm preload exited before ready") from None
+                    raise AssertionError(
+                        f"vllm preload exited before ready: {self.logs}"
+                    ) from None
                 time.sleep(2)
 
     def _stop(self) -> None:
@@ -232,6 +251,32 @@ QWEN_CASE = ModelCase(
     ),
 )
 
+# Online FP8 exercises the runtime weight transpose and kernel state that
+# must survive mapping the daemon's processed tensors into a fresh engine.
+FP8_CASE = ModelCase(
+    model="facebook/opt-125m",
+    prompts=["Hello, my name is", "The capital of France is"],
+    llm_kwargs=dict(
+        quantization="fp8_per_tensor",
+        kernel_config={"linear_backend": "cutlass"},
+        attention_config={"backend": "TRITON_ATTN"},
+        dtype="bfloat16",
+        gpu_memory_utilization=0.2,
+        enforce_eager=True,
+        max_model_len=512,
+    ),
+    daemon_args=[
+        "--quantization",
+        "fp8_per_tensor",
+        "--dtype",
+        "bfloat16",
+        "--attention-backend",
+        "TRITON_ATTN",
+        "--kernel-config",
+        '{"linear_backend": "cutlass"}',
+    ],
+)
+
 # Kimi K3 adds the mxfp4-pack MoE path (post-load kernel setup runs in
 # pre-processed mode) and a vision tower, exercised with an image request.
 K3_CASE = ModelCase(
@@ -308,7 +353,7 @@ def test_ipc_cache_cold_start_and_warm_restart(
     really came from the daemon — for the MTP case, both the target's and the
     draft's daemon groups.
 
-    Cases with ``check_flashinfer_cache`` additionally cover in-daemon
+    Cases with `check_flashinfer_cache` additionally cover in-daemon
     autotune (default-on with `--enable-flashinfer-autotune`): each daemon
     tunes before binding its socket and must write the on-disk FlashInfer
     autotune cache, and the restart engine must load tactics from it instead
@@ -317,8 +362,6 @@ def test_ipc_cache_cold_start_and_warm_restart(
     so they never hit the daemon's file by design; reuse is proven against
     the file the earlier in-process engines wrote.
     """
-    if not current_platform.is_cuda_alike():
-        pytest.skip("Weight cache IPC sharing requires CUDA or ROCm")
     if case is K3_CASE and not current_platform.is_device_capability_family(100):
         pytest.skip("Kimi K3 IPC weight cache requires an SM100 MXFP4 backend")
     if case.check_flashinfer_cache:
@@ -331,6 +374,166 @@ def test_ipc_cache_cold_start_and_warm_restart(
         # inherit it.
         monkeypatch.setenv("VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR", str(tmp_path))
     run_cold_start_and_warm_restart(vllm_runner, case, tmp_path, capfd)
+
+
+@pytest.mark.skipif(
+    not (current_platform.is_cuda() and current_platform.has_device_capability(89)),
+    reason="Online FP8 CUTLASS weight cache requires SM89+",
+)
+@pytest.mark.parametrize("quantization", ["fp8_per_tensor", "fp8_per_channel"])
+def test_ipc_cache_online_fp8(vllm_runner, quantization, tmp_path, monkeypatch):
+    """Online FP8 weights are shared without requantizing on warm restarts."""
+    _run_online_quantization(
+        vllm_runner, quantization, "cutlass", tmp_path, monkeypatch
+    )
+
+
+@pytest.mark.skipif(
+    not (current_platform.is_cuda() and current_platform.has_device_capability(100)),
+    reason="Block FP8/MXFP8 online weight cache requires SM100+",
+)
+@pytest.mark.parametrize(
+    "quantization,linear_backend",
+    [("fp8_per_block", "cutlass"), ("mxfp8", "flashinfer_cutlass")],
+)
+def test_ipc_cache_online_blackwell(
+    vllm_runner, quantization, linear_backend, tmp_path, monkeypatch
+):
+    """Reuse packed block scales with the same backend on each restart."""
+    _run_online_quantization(
+        vllm_runner, quantization, linear_backend, tmp_path, monkeypatch
+    )
+
+
+def _run_online_quantization(
+    vllm_runner, quantization, linear_backend, tmp_path, monkeypatch
+):
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    kernel_config = {"linear_backend": linear_backend}
+    daemon_args = list(FP8_CASE.daemon_args)
+    daemon_args[daemon_args.index("--quantization") + 1] = quantization
+    daemon_args[daemon_args.index("--kernel-config") + 1] = json.dumps(kernel_config)
+    case = ModelCase(
+        model=FP8_CASE.model,
+        prompts=FP8_CASE.prompts,
+        llm_kwargs={
+            **FP8_CASE.llm_kwargs,
+            "quantization": quantization,
+            "kernel_config": kernel_config,
+        },
+        daemon_args=daemon_args,
+    )
+    run_cold_start_and_warm_restart(vllm_runner, case, tmp_path)
+
+
+MODELOPT_FP8_CASE = ModelCase(
+    model="CedricHwang/qwen2.5-0.5b-modelopt-fp8-pc-pt",
+    prompts=["The capital of France is", "Hello, my name is"],
+    llm_kwargs=dict(
+        revision="d9c87375a9b950b1c7965a1110ac6ca455929726",
+        dtype="bfloat16",
+        gpu_memory_utilization=0.2,
+        enforce_eager=True,
+        max_model_len=512,
+        attention_config={"backend": "TRITON_ATTN"},
+        kernel_config={"linear_backend": "cutlass"},
+    ),
+    daemon_args=[
+        "--revision",
+        "d9c87375a9b950b1c7965a1110ac6ca455929726",
+        "--dtype",
+        "bfloat16",
+        "--attention-backend",
+        "TRITON_ATTN",
+        "--kernel-config",
+        '{"linear_backend": "cutlass"}',
+    ],
+)
+
+
+@pytest.mark.skipif(
+    not (current_platform.is_cuda() and current_platform.has_device_capability(89)),
+    reason="ModelOpt FP8 CUTLASS weight cache requires SM89+",
+)
+def test_ipc_cache_modelopt_fp8(vllm_runner, tmp_path, monkeypatch):
+    """Serialized ModelOpt FP8 tensors survive repeated IPC attachment."""
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    run_cold_start_and_warm_restart(vllm_runner, MODELOPT_FP8_CASE, tmp_path)
+
+
+NVFP4_CASE = ModelCase(
+    model="nvidia/Qwen3-30B-A3B-NVFP4",
+    prompts=["The capital of France is", "Hello, my name is"],
+    llm_kwargs=dict(
+        dtype="bfloat16",
+        gpu_memory_utilization=0.3,
+        enforce_eager=True,
+        max_model_len=512,
+        attention_config={"backend": "TRITON_ATTN"},
+        kernel_config={"moe_backend": "cutlass", "linear_backend": "cutlass"},
+    ),
+    daemon_args=[
+        "--dtype",
+        "bfloat16",
+        "--attention-backend",
+        "TRITON_ATTN",
+        "--kernel-config",
+        '{"moe_backend": "cutlass", "linear_backend": "cutlass"}',
+    ],
+)
+
+
+@pytest.mark.skipif(
+    not (current_platform.is_cuda() and current_platform.has_device_capability(100)),
+    reason="NVFP4 CUTLASS MoE requires SM100+",
+)
+def test_ipc_cache_nvfp4_cutlass(vllm_runner, tmp_path, monkeypatch):
+    """Repeated IPC attachment must not fuse the shared MoE scales again."""
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    run_cold_start_and_warm_restart(vllm_runner, NVFP4_CASE, tmp_path)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="Requires CUDA or ROCm"
+)
+def test_ipc_fallback_restores_memory_budget(vllm_runner, enable_pickle):
+    """A reachable but incompatible daemon must not reduce the disk-load budget."""
+    model = "Qwen/Qwen3-0.6B"
+    budgets = []
+    outputs = []
+    with WeightCacheDaemon(
+        model,
+        tp_size=1,
+        extra_args=["--dtype", "bfloat16", "--disable-flashinfer-autotune"],
+    ) as daemon:
+        daemon.wait_until_ready()
+        for load_format in ("auto", "ipc_cache"):
+            extra = (
+                {"socket_dir": daemon.socket_dir, "fallback": True}
+                if load_format == "ipc_cache"
+                else {}
+            )
+            with vllm_runner(
+                model,
+                dtype="float16",
+                load_format=load_format,
+                model_loader_extra_config=extra,
+                enforce_eager=True,
+                gpu_memory_utilization=0.1,
+                max_model_len=1024,
+                max_num_batched_tokens=1024,
+                max_num_seqs=1,
+                kernel_config={"enable_flashinfer_autotune": False},
+            ) as llm:
+                budgets.append(
+                    llm.collective_rpc(lambda worker: worker.requested_memory)[0]
+                )
+                outputs.append(
+                    llm.generate_greedy(["The capital of France is"], max_tokens=8)
+                )
+
+    assert budgets[1] == budgets[0], "Disk fallback retained the external weight charge"
+    assert outputs[1] == outputs[0]
 
 
 @create_new_process_for_each_test()
@@ -347,8 +550,6 @@ def test_ipc_cache_cold_start_and_warm_restart_tp2_ep(vllm_runner, tmp_path):
 def test_d2d_warmup_cache_seeding(vllm_runner, tmp_path):
     """A mirror daemon adopts the source's autotune cache over D2D, skips
     re-tuning, and serves outputs identical to the default-loader baseline."""
-    if not current_platform.is_cuda_alike():
-        pytest.skip("Weight cache IPC sharing requires CUDA or ROCm")
     if not current_platform.is_device_capability_family(100):
         pytest.skip("Kimi K3 IPC weight cache requires an SM100 MXFP4 backend")
     from vllm.utils.flashinfer import has_flashinfer
@@ -421,6 +622,92 @@ def test_d2d_warmup_cache_seeding(vllm_runner, tmp_path):
     assert mirror_outputs == baseline_outputs
 
 
+@create_new_process_for_each_test()
+@pytest.mark.distributed(num_gpus=2)
+def test_mooncake_warmup_cache_store_e2e(vllm_runner, tmp_path, monkeypatch):
+    """Autotune tables published to a Mooncake store let a fresh daemon
+    generation skip tuning with no source daemon online."""
+    if not current_platform.is_cuda_alike():
+        pytest.skip("Weight cache IPC sharing requires CUDA or ROCm")
+    if not current_platform.is_device_capability_family(100):
+        pytest.skip("Kimi K3 IPC weight cache requires an SM100 MXFP4 backend")
+    if not (has_flashinfer() and current_platform.has_device_capability(90)):
+        pytest.skip("FlashInfer autotune requires FlashInfer and SM90+")
+
+    # tp=2 for the v1 per-rank path; small token budget keeps the sweep short.
+    case = replace(
+        K3_CASE,
+        prompts=K3_CASE.prompts[:2],
+        images=None,
+        llm_kwargs={
+            **K3_CASE.llm_kwargs,
+            "tensor_parallel_size": 2,
+            "max_model_len": 1024,
+            "max_num_batched_tokens": 256,
+        },
+        daemon_args=[
+            *K3_CASE.daemon_args,
+            "--max-num-batched-tokens",
+            "256",
+            # Keep the daemon's config hash identical to the engine's.
+            "--max-model-len",
+            "1024",
+            "--enforce-eager",
+            "--max-num-seqs",
+            "1",
+        ],
+    )
+    # The baseline engine tunes from scratch in its own empty cache root.
+    monkeypatch.setenv(
+        "VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR", str(tmp_path / "engine_baseline")
+    )
+    baseline_outputs = generate(vllm_runner, case, None, fallback=True)
+    assert all(text for _, texts in baseline_outputs for text in texts)
+
+    log_dir = os.environ.get("D2D_E2E_LOG_DIR")
+    log_file = (
+        (lambda name: os.path.join(log_dir, name)) if log_dir else lambda name: None
+    )
+    with MooncakeCluster(tmp_path, monkeypatch):
+        with WeightCacheDaemon(
+            case.model,
+            tp_size=2,
+            extra_args=[*case.daemon_args, "--warmup-cache-stores", "mooncake"],
+            env_extra={"VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR": str(tmp_path / "gen1")},
+            log_file=log_file("mooncake-gen1.log"),
+        ) as gen1:
+            gen1.wait_until_ready()
+            # The store started empty, so the first generation tuned in place.
+            assert "Running FlashInfer autotune" in gen1.logs
+            published = "Published the FlashInfer autotune table"
+            assert gen1.logs.count(published) == 2
+
+        # gen1 is fully stopped: only the Mooncake store can serve the tables.
+        with WeightCacheDaemon(
+            case.model,
+            tp_size=2,
+            extra_args=[*case.daemon_args, "--warmup-cache-stores", "mooncake"],
+            env_extra={"VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR": str(tmp_path / "gen2")},
+            log_file=log_file("mooncake-gen2.log"),
+        ) as gen2:
+            gen2.wait_until_ready()
+            adopted = "Adopted the FlashInfer autotune table from a shared store"
+            assert gen2.logs.count(adopted) == 2
+            assert "Running FlashInfer autotune" not in gen2.logs
+
+            # The engine hits the daemon-written table: same root, same hash.
+            monkeypatch.setenv(
+                "VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR", str(tmp_path / "gen2")
+            )
+            cache_files = set((tmp_path / "gen2").rglob("*.json"))
+            gen2_outputs = generate(vllm_runner, case, gen2.socket_dir, fallback=False)
+            assert set((tmp_path / "gen2").rglob("*.json")) == cache_files, (
+                "gen2 engine re-tuned instead of hitting the daemon's cache"
+            )
+
+    assert gen2_outputs == baseline_outputs
+
+
 def run_cold_start_and_warm_restart(vllm_runner, case: ModelCase, tmp_path, capfd=None):
     # Baseline: plain disk loading with the default loader.
     baseline_outputs = generate(
@@ -444,8 +731,8 @@ def run_cold_start_and_warm_restart(vllm_runner, case: ModelCase, tmp_path, capf
         tp_size=case.llm_kwargs.get("tensor_parallel_size", 1),
         extra_args=case.daemon_args,
     ) as d:
-        warm_outputs = generate(vllm_runner, case, d.socket_dir, fallback=False)
         d.wait_until_ready()
+        warm_outputs = generate(vllm_runner, case, d.socket_dir, fallback=False)
         if case.check_flashinfer_cache:
             # Each daemon tunes before its ready report; exactly one new file
             # (their OPENAI_API_SERVER-keyed table) must appear.
@@ -840,8 +1127,8 @@ def test_ipc_loader_copy_mode_reports_no_external_weight_memory():
 
 
 def _serve_one(handler):
-    """Fake ``IpcModelLoader._connect``: serve each request on a thread and
-    close the accepted connection afterwards, like ``serve_forever``.
+    """Fake `IpcModelLoader._connect`: serve each request on a thread and
+    close the accepted connection afterwards, like `serve_forever`.
 
     Returns the fake and the list of server threads it started.
     """
@@ -969,6 +1256,26 @@ def test_daemon_releases_cublas_workspaces():
         "daemon retained BLAS workspaces"
     )
     torch.testing.assert_close(result, torch.full_like(result, 128), rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("is_draft,fallback_bytes", [(False, 8), (True, 4)])
+def test_external_weight_fallback_preserves_other_role(is_draft, fallback_bytes):
+    """Only the failed role's charge is reported, at most once."""
+    from vllm.model_executor.model_loader.weight_cache.utils import (
+        ExternalWeightCharges,
+        record_external_weight_charge,
+        record_external_weight_fallback,
+    )
+
+    accounting = ExternalWeightCharges()
+    with accounting.track():
+        record_external_weight_charge("target.sock", False, 8)
+        record_external_weight_charge("draft.sock", True, 4)
+        source = "draft.sock" if is_draft else "target.sock"
+        record_external_weight_fallback(source, is_draft)
+        record_external_weight_fallback(source, is_draft)
+        record_external_weight_fallback("uncharged.sock", False)
+    assert accounting.fallback_bytes == fallback_bytes
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
@@ -1324,20 +1631,22 @@ def test_transport_cuts_off_trickling_peer(monkeypatch):
 
 
 def test_warmup_cache_install_writes_table(tmp_path, monkeypatch):
-    """Install writes the fetched table to the rank's on-disk cache path."""
+    """Install writes the fetched table to the rank's disk tier."""
     import json
 
-    from vllm.model_executor.model_loader.weight_cache import warmup_cache
     from vllm.model_executor.model_loader.weight_cache.warmup_cache import (
         FlashInferWarmupCache,
     )
 
-    target = tmp_path / "autotune_configs_dp0_rank0.json"
-    monkeypatch.setattr(
-        warmup_cache, "resolve_rank_flashinfer_autotune_file", lambda _: target
-    )
+    monkeypatch.setenv("VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR", str(tmp_path))
+    config_hash = "a" * 64
+    kind = FlashInferWarmupCache()
+    params = {"config_hash": config_hash, "dp_rank": 0, "rank": 0}
+    monkeypatch.setattr(kind, "request_params", lambda _: params)
+
     table = {"records": {"op": {"shape": 1}}}
-    FlashInferWarmupCache().install(None, {"autotune_configs_dp0_rank0.json": table})
+    kind.install(None, {"autotune_configs_dp0_rank0.json": table})
+    target = tmp_path / config_hash / "autotune_configs_dp0_rank0.json"
     assert json.loads(target.read_text()) == table
 
 
@@ -1474,3 +1783,162 @@ def test_d2d_weight_seeding_cross_host(vllm_runner, tmp_path, monkeypatch):
             )
 
     assert mirror_outputs == baseline_outputs
+
+
+def _mooncake_peer(key: str, payload: bytes, mode: str) -> None:
+    """Second-process body: put/get through a real MooncakeArtifactStore."""
+    from vllm.model_executor.model_loader.weight_cache.artifact_store import (
+        MooncakeArtifactStore,
+    )
+
+    store = MooncakeArtifactStore()
+    if mode == "put":
+        store.put(key, payload)
+    assert store.get(key) == payload, f"peer {mode} mismatch"
+
+
+class MooncakeCluster:
+    """A real mooncake master plus a standalone-store segment owner."""
+
+    def __init__(self, tmp_path, monkeypatch):
+        self._tmp_path = tmp_path
+        self._monkeypatch = monkeypatch
+        self._procs: list[subprocess.Popen] = []
+        self._log_chunks: list[str] = []
+
+    def _binary(self, name: str) -> str:
+        path = shutil.which(name)
+        if path is not None:
+            return path
+        try:
+            import mooncake
+        except ImportError:
+            pytest.skip("mooncake is not installed")
+        candidate = Path(mooncake.__file__).parent / name
+        if not candidate.exists():
+            pytest.skip(f"the {name} binary is not available")
+        return str(candidate)
+
+    def __enter__(self) -> "MooncakeCluster":
+        self.master_port = get_open_port()
+        self.master_addr = f"127.0.0.1:{self.master_port}"
+        self._start(
+            [
+                self._binary("mooncake_master"),
+                "-port",
+                str(self.master_port),
+                "-metrics_port",
+                str(get_open_port()),
+            ]
+        )
+        deadline = time.monotonic() + 30
+        while True:
+            try:
+                socket.create_connection(("127.0.0.1", self.master_port), timeout=1)
+                break
+            except OSError:
+                if time.monotonic() > deadline:
+                    raise RuntimeError(
+                        f"mooncake_master did not start:\n{self.logs}"
+                    ) from None
+                time.sleep(0.2)
+
+        config = {
+            "metadata_server": "P2PHANDSHAKE",
+            "master_server_address": self.master_addr,
+            "protocol": "tcp",
+            "mode": "standalone-store",
+            "global_segment_size": 0,
+            "local_buffer_size": "16MB",
+        }
+        config_path = self._tmp_path / "mooncake.json"
+        config_path.write_text(json.dumps(config))
+        self._monkeypatch.setenv("MOONCAKE_CONFIG_PATH", str(config_path))
+        self._monkeypatch.setenv(
+            "VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR", str(self._tmp_path / "disk_cache")
+        )
+        self._start(
+            [
+                self._binary("mooncake_client"),
+                "-master_server_address",
+                self.master_addr,
+                "-metadata_server",
+                "P2PHANDSHAKE",
+                "-protocol",
+                "tcp",
+                "-global_segment_size",
+                "256MB",
+            ]
+        )
+
+        # The store round-trips only after the client has mounted its segment.
+        store = MooncakeArtifactStore()
+        deadline = time.monotonic() + 60
+        while True:
+            store.put("vllm-warmup-cache/probe", b"ok")
+            if store.get("vllm-warmup-cache/probe") == b"ok":
+                return self
+            if time.monotonic() > deadline:
+                raise RuntimeError(f"mooncake store is not ready:\n{self.logs}")
+            time.sleep(0.5)
+
+    def __exit__(self, *exc_info) -> None:
+        for proc in reversed(self._procs):
+            proc.terminate()
+        for proc in self._procs:
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+
+    @property
+    def logs(self) -> str:
+        return "".join(self._log_chunks)
+
+    def _start(self, cmd: list[str]) -> None:
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
+        )
+        self._procs.append(proc)
+        threading.Thread(target=self._drain, args=(proc,), daemon=True).start()
+
+    def _drain(self, proc: subprocess.Popen) -> None:
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            self._log_chunks.append(line)
+
+    def run_peer(self, key: str, payload: bytes, mode: str) -> None:
+        """Drive a second MooncakeArtifactStore in a separate process."""
+        proc = multiprocessing.get_context("spawn").Process(
+            target=_mooncake_peer, args=(key, payload, mode)
+        )
+        proc.start()
+        proc.join(timeout=180)
+        if proc.is_alive():
+            proc.kill()
+            raise TimeoutError(f"peer {mode} timed out:\n{self.logs}")
+        assert proc.exitcode == 0, f"peer {mode} failed (see captured stderr)"
+
+
+def test_mooncake_store_cross_process_e2e(tmp_path, monkeypatch):
+    """A real Mooncake cluster shares autotune tables across processes."""
+    with MooncakeCluster(tmp_path, monkeypatch) as cluster:
+        kind = FlashInferWarmupCache(store_names=["mooncake"])
+        filename = "autotune_configs_dp0_rank0.json"
+        params = {"config_hash": "9" * 64, "dp_rank": 0, "rank": 0}
+        monkeypatch.setattr(kind, "request_params", lambda _: params)
+
+        # This process publishes; a second process reads it from the store.
+        table = {"records": {"op": {"shape": 1}}}
+        table_bytes = json.dumps(table).encode()
+        kind.install(None, {filename: table})
+        kind._publish_autotune_table(None)
+        key = artifact_key("flashinfer_autotune", params["config_hash"], filename)
+        cluster.run_peer(key, table_bytes, "get")
+
+        # A second process publishes; resolve falls through disk to the store.
+        peer_table = {"records": {"op": {"shape": "peer"}}}
+        peer_bytes = json.dumps(peer_table).encode()
+        peer_key = artifact_key("flashinfer_autotune", "8" * 64, filename)
+        cluster.run_peer(peer_key, peer_bytes, "put")
+        assert kind.resolve(_warmup_cache_request("8" * 64)) == {filename: peer_table}

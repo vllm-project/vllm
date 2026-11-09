@@ -83,7 +83,7 @@ class UnsupportedPlatformForIPCError(Exception):
 def check_ipc_platform_support() -> None:
     """Hard-error unless the current platform can share CUDA IPC handles.
 
-    Only CUDA/ROCm tensors get a real IPC handle from ``TensorEntry``; other
+    Only CUDA/ROCm tensors get a real IPC handle from `TensorEntry`; other
     platforms (e.g. XPU) would silently ship every tensor by value instead.
 
     Raises:
@@ -126,7 +126,7 @@ def check_ipc_quant_support(model: torch.nn.Module) -> None:
 
     Raises:
         UnsupportedQuantForIPCError: If any quant method does not declare
-            ``supports_pre_processed_weights``.
+            `supports_pre_processed_weights`.
 
     """
     for name, module in model.named_modules():
@@ -166,7 +166,7 @@ def get_socket_path(
     *,
     is_draft: bool = False,
 ) -> str:
-    """Socket path of a daemon group; ``is_draft=False`` is the target.
+    """Socket path of a daemon group; `is_draft=False` is the target.
 
     The GPU uuid is hashed to keep the name well under the AF_UNIX path
     limit (~108 bytes) even with the draft role suffix.
@@ -195,7 +195,7 @@ def ensure_private_socket_dir(directory: str, strict_perms: bool = True) -> None
 def verify_private_dir(directory: str, strict_perms: bool = True) -> None:
     """Verify a directory is a real dir owned by us and not world/group readable.
 
-    When ``strict_perms`` is False the group/world permission bits are not
+    When `strict_perms` is False the group/world permission bits are not
     checked; this is used for directories the operator explicitly configured
     (they own the trust decision), while the auto-derived per-user directory is
     always checked strictly.
@@ -485,7 +485,7 @@ class WeightCacheState(NamedTuple):
 
 
 def parse_seed_address(address: str) -> str | tuple[str, int]:
-    """Split a seed address into a Unix socket path or a ``(host, port)``."""
+    """Split a seed address into a Unix socket path or a `(host, port)`."""
     if "/" in address or ":" not in address:
         return os.path.expanduser(address)
     return split_host_port(address)
@@ -543,7 +543,7 @@ def recv_json(
     Args:
         sock: Connected socket.
         max_size: Largest payload accepted.
-        deadline: ``time.monotonic()`` by which the whole message must have
+        deadline: `time.monotonic()` by which the whole message must have
             arrived; a per-read timeout alone lets a peer trickle bytes
             forever.
 

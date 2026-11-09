@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The ``peer_ipc`` weight mover: copy storages through CUDA IPC on one host."""
+"""The `peer_ipc` weight mover: copy storages through CUDA IPC on one host."""
 
 from collections.abc import Mapping
 

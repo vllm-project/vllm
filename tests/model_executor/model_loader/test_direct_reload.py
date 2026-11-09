@@ -1,14 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Direct weight reload (``VLLM_RELOAD_MODE=direct``) on a toy model whose
+"""Direct weight reload (`VLLM_RELOAD_MODE=direct`) on a toy model whose
 post-load processing has the hazards found on real models:
 
 (a) a parent derives a separate tensor from a child's weight (MLA W_UK/W_UV
     from a quantized kv_b_proj);
 (b) post-load processing changes a weight's layout;
-(c) the model's loader writes a weight without its ``weight_loader`` (MiMo);
+(c) the model's loader writes a weight without its `weight_loader` (MiMo);
 (d) post-load processing consumes a checkpoint tensor, which stays
-    registered as a retired parameter (NVFP4 ``weight_scale_2``);
+    registered as a retired parameter (NVFP4 `weight_scale_2`);
 (e) post-load processing that must never run on converted bytes (packing);
 (f) post-load processing grows a weight (padding): a reload writes it into
     the existing storage to keep its address.
@@ -156,7 +156,7 @@ def _checkpoint(scale: float = 1.0) -> dict[str, torch.Tensor]:
 
 
 def _cold_start(weights: dict[str, torch.Tensor]) -> _ToyModel:
-    """As ``BaseModelLoader.load_model`` does."""
+    """As `BaseModelLoader.load_model` does."""
     with _DEVICE:
         model = _ToyModel()
     model.load_weights(weights.items())
@@ -191,7 +191,7 @@ def _state(model: torch.nn.Module) -> dict[str, tuple]:
 
 
 def _assert_same(actual: dict, expected: dict, names=None, addresses=False) -> None:
-    """Layout and bytes (and addresses) equal, for ``names`` or every tensor."""
+    """Layout and bytes (and addresses) equal, for `names` or every tensor."""
     if names is None:
         assert sorted(actual) == sorted(expected)
         names = sorted(expected)
@@ -289,8 +289,9 @@ class TestRefusals:
     def test_refused_begin_leaves_the_model_untouched(self):
         # proj is viewed back first, in module order; mimo's storage is short
         model = _cold_start(_checkpoint())
-        owner, (_, _, dtype, offset), attrs = model.mimo.weight._ckpt
-        model.mimo.weight._ckpt = (owner, ((64, 64), (64, 1), dtype, offset), attrs)
+        owner, (_, _, dtype, offset), attrs, storage = model.mimo.weight._ckpt
+        layout = ((64, 64), (64, 1), dtype, offset)
+        model.mimo.weight._ckpt = (owner, layout, attrs, storage)
         before = _state(model)
         with pytest.raises(RuntimeError, match="checkpoint layout needs"):
             begin_direct_reload(model)
@@ -458,6 +459,26 @@ def test_reload_keeps_address_of_padded_or_emptied_weight(monkeypatch, fn):
         )
 
     monkeypatch.setattr(_ToyModel, "__init__", with_fn)
+    model = _cold_start(_checkpoint())
+    ptrs = _ptrs(_state(model))
+    _reload(model, _checkpoint(1.01))
+    _assert_same(_state(model), _state(_cold_start(_checkpoint(1.01))))
+    assert _ptrs(_state(model)) == ptrs
+
+
+def test_reload_into_weight_moved_to_an_offset(monkeypatch):
+    def move(layer):  # DeepSeek-V4 ROCm GEMM fusion: `set_` into a shared buffer
+        w = layer.weight
+        if w.storage_offset() == 0:  # once; reloads refill it there
+            w.data = torch.cat((torch.zeros_like(w), w))[len(w) :]
+
+    init = _ToyModel.__init__
+
+    def with_move(self):
+        init(self)
+        self.proj.quant_method = _Method(move)
+
+    monkeypatch.setattr(_ToyModel, "__init__", with_move)
     model = _cold_start(_checkpoint())
     ptrs = _ptrs(_state(model))
     _reload(model, _checkpoint(1.01))

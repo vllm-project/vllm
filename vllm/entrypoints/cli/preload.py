@@ -18,7 +18,7 @@ see vllm/model_executor/model_loader/weight_cache/daemon.py for the rank
 layout and rendezvous details.
 
 A second replica's daemons can instead pull their weights from a loaded
-replica (``--weight-cache-seed``); see ``docs/features/preload.md``.
+replica (`--weight-cache-seed`); see `docs/features/preload.md`.
 """
 
 import argparse
@@ -252,6 +252,16 @@ class PreloadSubcommand(CLISubcommand):
             "speculative draft daemon group, whose listeners sit past the "
             "target group's port block.",
         )
+        parser.add_argument(
+            "--warmup-cache-stores",
+            type=str,
+            default=None,
+            help="Comma-separated shared store backends mirroring the "
+            "warmup caches (e.g. 'mooncake', connected via "
+            "MOONCAKE_CONFIG_PATH). The local disk cache is always the "
+            "first tier; these add shared tiers that reads fall back to "
+            "and tuned tables are published to.",
+        )
 
     @staticmethod
     def cmd(args: argparse.Namespace) -> None:
@@ -362,6 +372,11 @@ class PreloadSubcommand(CLISubcommand):
             )
         }
         _validate_seed_args(args, world_size=world_size, num_groups=len(groups))
+        warmup_cache_stores = [
+            name.strip()
+            for name in (args.warmup_cache_stores or "").split(",")
+            if name.strip()
+        ]
 
         def _seed_endpoint(
             host: str | None, base_port: int | None, offset: int
@@ -429,6 +444,7 @@ class PreloadSubcommand(CLISubcommand):
                             mirror_devices[local_rank]
                             if mirror_devices is not None
                             else None,
+                            warmup_cache_stores,
                         ),
                         name=(
                             f"vllm-weight-cache-{format_daemon_role(is_draft)}-"
