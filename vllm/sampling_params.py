@@ -433,9 +433,9 @@ class SamplingParams(
 
     thinking_loop_break: bool | Literal["force", "ramp"] | None = None
     """Per-request control for server-configured reasoning loop breaking
-    (``ReasoningConfig.loop_break_*``). ``None`` (default) or ``True`` follows
-    the server configuration, ``False`` opts this request out, and ``"force"``
-    or ``"ramp"`` picks the release in place of ``loop_break_release``. No value
+    (`ReasoningConfig.loop_break_*`). `None` (default) or `True` follows
+    the server configuration, `False` opts this request out, and `"force"`
+    or `"ramp"` picks the release in place of `loop_break_release`. No value
     enables the feature on a server that has not configured it."""
 
     repetition_detection: RepetitionDetectionParams | None = None
@@ -503,7 +503,7 @@ class SamplingParams(
         # rebind every later positional argument of existing callers.
         thinking_loop_break: bool | Literal["force", "ramp"] | None = None,
     ) -> "SamplingParams":
-        """Build SamplingParams from request fields, using defaults for ``None``."""
+        """Build SamplingParams from request fields, using defaults for `None`."""
         if logit_bias is not None:
             # Fast path uses a dict comprehension; on failure we iterate once
             # to identify the exact offending entry for the error message.

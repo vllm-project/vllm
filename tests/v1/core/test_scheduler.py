@@ -3099,7 +3099,7 @@ def test_per_request_spec_decode_acceptance_disabled_by_default():
 def test_thinking_loop_break_is_recorded_on_its_request():
     """The model runner reports which requests broke a reasoning loop; the
     event rides that request's output to the frontend, which counts it in
-    ``vllm:thinking_loop_breaks``."""
+    `vllm:thinking_loop_breaks`."""
     scheduler = create_scheduler()
     requests = create_requests(num_requests=2, num_tokens=4)
     for request in requests:

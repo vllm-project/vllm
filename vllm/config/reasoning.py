@@ -31,24 +31,24 @@ class ReasoningConfig:
 
     loop_break_max_pattern_size: int = 0
     """Maximum N-gram pattern size for reasoning-scoped repetition detection.
-    When > 0 (together with ``loop_break_min_count``), a request whose current
+    When > 0 (together with `loop_break_min_count`), a request whose current
     reasoning section ends in a repeating token pattern is forced out of
-    reasoning via ``reasoning_end_str`` — instead of looping until
-    ``max_tokens`` or a ``thinking_token_budget`` — and then answers normally.
+    reasoning via `reasoning_end_str` — instead of looping until
+    `max_tokens` or a `thinking_token_budget` — and then answers normally.
     Set to 0 (the default) to disable. Detection semantics match
-    ``SamplingParams.repetition_detection``, which by contrast finishes the
+    `SamplingParams.repetition_detection`, which by contrast finishes the
     whole request. The CPU model runner without Triton rejects a config with
     this set."""
 
     loop_break_min_pattern_size: int = 0
     """Minimum N-gram pattern size for reasoning loop breaking. If 0, it
-    defaults to 1. Must be <= ``loop_break_max_pattern_size``. A cycle of
-    period ``p`` is only detected at candidate lengths divisible by ``p``, so
+    defaults to 1. Must be <= `loop_break_max_pattern_size`. A cycle of
+    period `p` is only detected at candidate lengths divisible by `p`, so
     raising this CAN hide a shorter cycle when no multiple of its period falls
-    in ``[min, max]``: a 3-token cycle is missed at min=max=4 and caught at
+    in `[min, max]`: a 3-token cycle is missed at min=max=4 and caught at
     min=4, max=6. A single repeated token (period 1) matches at every length,
     which is why separator runs still fire. Tune benign repeats out with
-    ``loop_break_min_count`` rather than by raising this."""
+    `loop_break_min_count` rather than by raising this."""
 
     loop_break_min_count: int = 0
     """Number of consecutive repetitions of a pattern that triggers reasoning
@@ -62,18 +62,18 @@ class ReasoningConfig:
     """Check for loops every this many newly accepted reasoning tokens."""
 
     loop_break_release: Literal["force", "ramp"] = "force"
-    """How a detected loop ends the reasoning section. ``"force"`` writes
-    ``reasoning_end_str`` at once. ``"ramp"`` adds a logit bias that grows with
+    """How a detected loop ends the reasoning section. `"force"` writes
+    `reasoning_end_str` at once. `"ramp"` adds a logit bias that grows with
     every token to the first token of the parser's own end marker, so the model
-    closes the section itself, and writes ``reasoning_end_str`` only if it has
-    not closed it within ``loop_break_ramp_max_tokens`` tokens."""
+    closes the section itself, and writes `reasoning_end_str` only if it has
+    not closed it within `loop_break_ramp_max_tokens` tokens."""
 
     loop_break_ramp_increment: float = Field(default=2.0, gt=0)
-    """Logit bias the ``"ramp"`` release adds per token, before temperature."""
+    """Logit bias the `"ramp"` release adds per token, before temperature."""
 
     loop_break_ramp_max_tokens: int = Field(default=32, ge=1)
-    """Tokens the ``"ramp"`` release runs before falling back to writing
-    ``reasoning_end_str``."""
+    """Tokens the `"ramp"` release runs before falling back to writing
+    `reasoning_end_str`."""
 
     _reasoning_start_token_ids: list[int] | None = field(
         default=None, init=False, repr=False
