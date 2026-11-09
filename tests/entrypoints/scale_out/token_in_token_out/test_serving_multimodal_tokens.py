@@ -233,7 +233,7 @@ async def test_content_parts_generates_tokens(client, test_image):
 async def test_features_with_content_parts(client, test_image, cached):
     """Earlier items as features plus a new raw item must match /render.
 
-    With ``cached``, features carry only ``mm_hashes`` (as in the docs), so
+    With `cached`, features carry only `mm_hashes` (as in the docs), so
     the earlier item resolves from the cache filled by a previous request.
     """
     old_url = encode_image_url(test_image, format="PNG")
