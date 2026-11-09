@@ -1131,7 +1131,8 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
             for i in range(start_block, end_block):
                 if (
                     i >= shift
-                    and (i - shift) % per_segment >= per_segment - need - extra_tail_blocks
+                    and (i - shift) % per_segment
+                    >= per_segment - need - extra_tail_blocks
                 ):
                     mask[i - start_block] = True
 
@@ -1156,7 +1157,8 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
                 aligned = boundary_tokens // alignment_tokens * alignment_tokens
                 end = aligned // block_size + shift
                 for j in range(
-                    max(start_block, end - need - extra_tail_blocks), min(end_block, end)
+                    max(start_block, end - need - extra_tail_blocks),
+                    min(end_block, end),
                 ):
                     mask[j - start_block] = True
 
