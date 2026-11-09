@@ -106,6 +106,7 @@ NKM_FACTORS_WVSPLITK = [
     (5, 1000, 2048),
     # Speculative-decode batch
     (5, 2048, 2560),
+    (5, 4096, 16384),  # large out_dim: the YTILE=4 tile on MI3xx
 ]
 
 # N is bucketed up to its next ^2 (16/32/64/128) and the remainder is masked
