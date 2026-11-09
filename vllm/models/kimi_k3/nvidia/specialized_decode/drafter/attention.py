@@ -589,21 +589,13 @@ def draft_forward_mqa(
         FlashInferMLAImpl,
         _get_workspace_buffer,
     )
-    from vllm.v1.kv_cache_interface import is_quantized_kv_cache
 
     if not isinstance(impl, FlashInferMLAImpl) or isinstance(q, tuple):
         return None
     k = foldable(attn_metadata, q.shape[0])
     if k == 0:
         return None
-    if impl.bmm1_scale is None:
-        impl.bmm1_scale = impl.scale
-        if is_quantized_kv_cache(impl.kv_cache_dtype):
-            impl.bmm1_scale *= layer._q_scale_float * layer._k_scale_float
-    if impl.bmm2_scale is None:
-        impl.bmm2_scale = 1.0
-        if is_quantized_kv_cache(impl.kv_cache_dtype):
-            impl.bmm2_scale *= layer._k_scale_float
+    bmm1_scale, bmm2_scale = impl.host_bmm_scales(layer)
     return_lse = impl.need_to_return_lse_for_decode
     decode = attn_metadata.decode
     cake = not return_lse and cake_supported(
@@ -619,8 +611,8 @@ def draft_forward_mqa(
         kv_lora_rank=impl.kv_lora_rank,
         qk_nope_head_dim=impl.qk_nope_head_dim,
         qk_rope_head_dim=impl.qk_rope_head_dim,
-        bmm1_scale=impl.bmm1_scale,
-        bmm2_scale=impl.bmm2_scale,
+        bmm1_scale=bmm1_scale,
+        bmm2_scale=bmm2_scale,
         workspace=_cake_workspace(q.device)
         if cake
         else _get_workspace_buffer(return_lse),
@@ -635,17 +627,7 @@ def draft_forward_mqa(
 
 def _scales(impl, layer):
     """The stock decode's bmm1 / bmm2 scales (`FlashInferMLAImpl.forward_mqa`)."""
-    from vllm.v1.kv_cache_interface import is_quantized_kv_cache
-
-    if impl.bmm1_scale is None:
-        impl.bmm1_scale = impl.scale
-        if is_quantized_kv_cache(impl.kv_cache_dtype):
-            impl.bmm1_scale *= layer._q_scale_float * layer._k_scale_float
-    if impl.bmm2_scale is None:
-        impl.bmm2_scale = 1.0
-        if is_quantized_kv_cache(impl.kv_cache_dtype):
-            impl.bmm2_scale *= layer._k_scale_float
-    return impl.bmm1_scale, impl.bmm2_scale
+    return impl.host_bmm_scales(layer)
 
 
 LOG2E = 1.4426950408889634

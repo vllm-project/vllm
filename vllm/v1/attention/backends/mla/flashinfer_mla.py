@@ -319,7 +319,7 @@ class FlashInferMLAImpl(MLACommonImpl[FlashInferMLAMetadata]):
         )
         self._mla_counter_bytes: int | None = None
 
-    def _host_bmm_scales(self, layer: AttentionLayer) -> tuple[float, float]:
+    def host_bmm_scales(self, layer: AttentionLayer) -> tuple[float, float]:
         # V is the latent kv_c, quantized with k_scale.
         bmm1_scale = self.scale
         bmm2_scale = 1.0
@@ -334,7 +334,7 @@ class FlashInferMLAImpl(MLACommonImpl[FlashInferMLAMetadata]):
         device = layer._k_scale.device
         for name, value in zip(
             ("_bmm1_scale_device", "_bmm2_scale_device"),
-            self._host_bmm_scales(layer),
+            self.host_bmm_scales(layer),
         ):
             refill_derived(
                 self,
@@ -450,7 +450,7 @@ class FlashInferMLAImpl(MLACommonImpl[FlashInferMLAMetadata]):
             bmm2_scale = self._bmm2_scale_device
         else:
             # Read at every forward: a reload can change the q/k scales.
-            bmm1_scale, bmm2_scale = self._host_bmm_scales(layer)
+            bmm1_scale, bmm2_scale = self.host_bmm_scales(layer)
         if decode_backend:
             extra_kwargs["backend"] = decode_backend
         elif kv_c_and_k_pe_cache.shape[-2] in (32, 64):
