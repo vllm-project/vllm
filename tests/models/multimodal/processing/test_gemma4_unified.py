@@ -82,7 +82,7 @@ def test_compute_num_soft_tokens_does_not_exceed_max_soft_tokens(
     image_height: int,
     max_soft_tokens: int,
 ):
-    """Verify ``_compute_num_soft_tokens`` caps output at ``max_soft_tokens``."""
+    """Verify `_compute_num_soft_tokens` caps output at `max_soft_tokens`."""
     ctx = build_model_context(
         model_id,
         mm_processor_kwargs={"do_pan_and_scan": True},
@@ -264,12 +264,12 @@ def test_mm_device_do_normalize():
 
 
 def test_dummy_audio_length_falls_back_for_the_unified_extractor():
-    """The unified audio feature extractor does not define ``fft_length``.
+    """The unified audio feature extractor does not define `fft_length`.
 
-    ``Gemma4DummyInputsBuilder.get_dummy_mm_data`` read that attribute
-    unconditionally, so memory profiling raised ``AttributeError`` for every
+    `Gemma4DummyInputsBuilder.get_dummy_mm_data` read that attribute
+    unconditionally, so memory profiling raised `AttributeError` for every
     unified Gemma 4 deployment in which audio is the modality with the largest
-    per-item token count -- which is the case as soon as ``audio_seq_length``
+    per-item token count -- which is the case as soon as `audio_seq_length`
     is raised above the video budget.
     """
 

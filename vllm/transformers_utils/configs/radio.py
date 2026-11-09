@@ -37,7 +37,7 @@ class RadioConfig(PreTrainedConfig):
         norm_type: The normalization type to use.
         layer_norm_eps: The epsilon used by the layer normalization layers.
         initializer_factor: A factor for initializing all weight matrices.
-        layerscale_value: Initial value for the LayerScale ``lambda1`` parameters.
+        layerscale_value: Initial value for the LayerScale `lambda1` parameters.
         hidden_act: The non-linear activation function in the encoder.
         cpe_max_size: Maximum image size for position embeddings.
         norm_mean: Mean values for image normalization (RGB channels).
@@ -46,7 +46,7 @@ class RadioConfig(PreTrainedConfig):
             (RGB channels). Defaults to (0.26862954, 0.26130258, 0.27577711)).
         register_multiple: Number of register tokens to use.
         cpe_num_registers: Explicit CPE register-token count, used by checkpoints
-            that set ``register_multiple=0`` (e.g. C-RADIOv3) instead.
+            that set `register_multiple=0` (e.g. C-RADIOv3) instead.
         teachers: A list of teacher model configurations. Each teacher configuration is
             a dict with keys like "name" and some may have "use_summary".
         cls_token_per_teacher: Whether to use a separate CLS token for each teacher.
@@ -60,7 +60,7 @@ class RadioConfig(PreTrainedConfig):
             input size 3*T*P*P is used for both (images are duplicated T times).
         num_channels: Number of input image channels (RGB -> 3).
 
-    ``num_cls_tokens``, ``num_registers``, ``summary_idxs`` and ``max_img_size``
+    `num_cls_tokens`, `num_registers`, `summary_idxs` and `max_img_size`
     are derived from the fields above so the model reads a single canonical
     schema (these were previously computed inside the model).
 

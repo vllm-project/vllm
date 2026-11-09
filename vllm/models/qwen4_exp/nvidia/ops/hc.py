@@ -203,10 +203,10 @@ def hc_up_gate_mix_supported(w_up: torch.Tensor, hc_count: int) -> bool:
 def hc_up_gate_mix(
     lowrank: torch.Tensor, xn: torch.Tensor, w_up: torch.Tensor
 ) -> torch.Tensor:
-    """``hc_gate_mix(xn, F.linear(lowrank, w_up), 4)`` in one SM100 kernel.
+    """`hc_gate_mix(xn, F.linear(lowrank, w_up), 4)` in one SM100 kernel.
 
     The gate stays on chip in fp32 (the chain rounds it to bf16) and the
-    sigmoid uses ``tanh.approx``; results are within one bf16 ULP of an fp32
+    sigmoid uses `tanh.approx`; results are within one bf16 ULP of an fp32
     reference.
     Only hc_count 4, hidden size 2560 and rank 320 are supported.
     """

@@ -503,7 +503,7 @@ def _compiled_sample_step(
     """Compiled decode step: confidence → accept/renoise → convergence, as
     vectorized PyTorch ops over [num_decode, CL] tensors. The per-position
     statistics (argmax, Gumbel-max sample, entropy, softmax) come from one
-    pass over the logits in ``sample_row_stats``."""
+    pass over the logits in `sample_row_stats`."""
     num_decode = decode_slots.shape[0]
     device = decode_slots.device
 
@@ -645,7 +645,7 @@ def _compiled_sample_step(
 class DiffusionGemmaRequestStates:
     """Pre-allocated GPU tensors for DiffusionGemma per-request state.
 
-    Follows the indexed-slot pattern used by ``RequestState``.
+    Follows the indexed-slot pattern used by `RequestState`.
     """
 
     def __init__(
@@ -791,7 +791,7 @@ class DiffusionGemmaRequestStates:
         self.constrained.pop(slot_idx, None)
 
     def set_seed_canvas(self, slot_idx: int, ids: list[int]) -> None:
-        """``ids`` covers the slot's canvas width; positions past it are never
+        """`ids` covers the slot's canvas width; positions past it are never
         scheduled."""
         self.seed_canvas[slot_idx, : len(ids)] = async_tensor_h2d(
             ids, dtype=torch.int64, device=self.device
@@ -800,7 +800,7 @@ class DiffusionGemmaRequestStates:
         self.seeded_slots.add(slot_idx)
 
     def set_pins(self, slot_idx: int, positions: list[int]) -> None:
-        """Hold ``positions`` of the slot's seed canvas through every denoise
+        """Hold `positions` of the slot's seed canvas through every denoise
         step. Validated against the request's canvas width upstream."""
         self.pin_mask[slot_idx].fill_(False)
         self.pin_mask[
@@ -808,7 +808,7 @@ class DiffusionGemmaRequestStates:
         ] = True
 
     def allowed_tensor(self, ids: tuple[int, ...]) -> torch.Tensor:
-        """``ids`` as an int64 tensor on the device, built once per tuple."""
+        """`ids` as an int64 tensor on the device, built once per tuple."""
         t = self._allowed_cache.get(ids)
         if t is None:
             t = torch.tensor(ids, dtype=torch.int64, device=self.device)
@@ -818,7 +818,7 @@ class DiffusionGemmaRequestStates:
         return t
 
     def batch_allowed(self, slots: list[int]) -> torch.Tensor | None:
-        """The allowed ids shared by every one of ``slots``, or None.
+        """The allowed ids shared by every one of `slots`, or None.
 
         None means the step runs over the full vocabulary. The sampler then
         masks each constrained slot's logit rows to its own set, so a
@@ -838,7 +838,7 @@ class DiffusionGemmaRequestStates:
     def apply_seed_canvases(
         self, slots_np: np.ndarray, slots_gpu: torch.Tensor
     ) -> None:
-        """Replace the canvas of every seeded slot among ``slots_gpu``."""
+        """Replace the canvas of every seeded slot among `slots_gpu`."""
         if self.seeded_slots.isdisjoint(slots_np.tolist()):
             return
         self.canvas[slots_gpu] = torch.where(
@@ -1149,7 +1149,7 @@ _NO_PENALTIES_STATE = SimpleNamespace(output_bin_counts=None)
 class DiffusionSampler:
     """Batched accept/renoise sampler for DiffusionGemma.
 
-    Follows the same structure as ``vllm.v1.worker.gpu.sample.sampler.Sampler``:
+    Follows the same structure as `vllm.v1.worker.gpu.sample.sampler.Sampler`:
     decomposed into named methods, all GPU state in pre-allocated buffers,
     no GPU→CPU syncs on the hot path.
     """
