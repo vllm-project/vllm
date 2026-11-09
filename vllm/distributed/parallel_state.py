@@ -41,7 +41,7 @@ import torch
 import torch.distributed
 import torch.distributed._functional_collectives as funcol
 import torch.distributed._symmetric_memory
-from torch.distributed import Backend, ProcessGroup, Store
+from torch.distributed import Backend, PrefixStore, ProcessGroup, Store
 from torch.distributed.constants import default_pg_timeout
 
 import vllm.envs as envs
@@ -63,6 +63,7 @@ from vllm.utils.torch_utils import (
 )
 
 if TYPE_CHECKING:
+    from vllm.config import ParallelConfig
     from vllm.distributed.stateless_coordinator import StatelessGroupCoordinator
 
 
@@ -1382,6 +1383,12 @@ class GroupCoordinator:
         """
         torch.distributed.barrier(group=self.cpu_group)
 
+    def all_gather_object(self, obj: Any) -> list[Any]:
+        """Gather one picklable object from every rank over the CPU group."""
+        objs: list[Any] = [None] * self.world_size
+        torch.distributed.all_gather_object(objs, obj, group=self.cpu_group)
+        return objs
+
     def cpu_all_reduce_(self, tensor: torch.Tensor) -> torch.Tensor:
         """In-place SUM all-reduce of a small CPU tensor over `cpu_group`."""
         return cpu_all_reduce_(tensor, self.cpu_group, self.cpu_timeout)
@@ -1624,6 +1631,43 @@ def get_engram_dp_group() -> GroupCoordinator | None:
 def get_engram_dp_size() -> int:
     """Number of DP replicas one engram embedding table is sharded over."""
     return _ENGRAM_DP.world_size if _ENGRAM_DP is not None else 1
+
+
+class StatelessObjectGroup:
+    """GroupCoordinator's object collectives over a TCPStore.
+
+    Independent DP ranks share no torch.distributed group, so co-located ranks
+    use this to agree on one shared host table while loading. Metadata only.
+    """
+
+    def __init__(self, group: StatelessProcessGroup, timeout_s: float) -> None:
+        self._group = group
+        self._timeout_s = timeout_s
+        self.rank_in_group = group.rank
+        self.world_size = group.world_size
+
+    def broadcast_object(self, obj: Any | None = None, src: int = 0) -> Any:
+        return self._group.broadcast_obj(obj, src=src)
+
+    def all_gather_object(self, obj: Any) -> list[Any]:
+        return self._group.all_gather_obj(obj)
+
+    def barrier(self) -> None:
+        self._group.barrier(timeout=self._timeout_s)
+
+    def destroy(self) -> None:
+        pass
+
+
+# Co-located independent DP ranks that load one shared host table.
+_INDEPENDENT_DP_TABLE: StatelessObjectGroup | None = None
+# The table leader loads it while the other ranks wait in a barrier.
+_INDEPENDENT_DP_TABLE_TIMEOUT_S = 3600
+
+
+def get_engram_table_share_group() -> GroupCoordinator | StatelessObjectGroup | None:
+    """Return the co-located DP ranks that map one shared Engram host table."""
+    return _ENGRAM_DP if _ENGRAM_DP is not None else _INDEPENDENT_DP_TABLE
 
 
 _DCP: GroupCoordinator | None = None
@@ -2082,6 +2126,32 @@ def _engram_dp_shard_size(
     return shard_size
 
 
+def _init_independent_dp_table_group(
+    parallel_config: "ParallelConfig",
+) -> StatelessObjectGroup | None:
+    """Group this worker with the same worker of every co-located independent
+    DP rank, through a TCPStore on the now unused DP master port."""
+    size = parallel_config._independent_dp_size_local
+    dp_rank = parallel_config.data_parallel_rank_local
+    if size <= 1 or dp_rank is None or parallel_config.nnodes > 1:
+        return None
+    worker_rank = get_world_group().rank_in_group
+    store = create_tcp_store(
+        "127.0.0.1",
+        parallel_config.data_parallel_master_port,
+        is_master=dp_rank == 0 and worker_rank == 0,
+        wait_for_workers=False,
+        timeout=timedelta(seconds=_INDEPENDENT_DP_TABLE_TIMEOUT_S),
+    )
+    group = StatelessProcessGroup(
+        rank=dp_rank,
+        world_size=size,
+        store=PrefixStore(f"independent_dp_table/{worker_rank}", store),
+    )
+    logger.info_once("Independent DP table-sharing group size: %d", size)
+    return StatelessObjectGroup(group, _INDEPENDENT_DP_TABLE_TIMEOUT_S)
+
+
 def initialize_model_parallel(
     tensor_model_parallel_size: int = 1,
     pipeline_model_parallel_size: int = 1,
@@ -2213,19 +2283,22 @@ def initialize_model_parallel(
     assert _ENGRAM_DP is None, "engram data parallel group is already initialized"
     engram_dp_size = 1
     engram_config = config.engram_config
+    # Qwen4Exp only shares its PLE table over this group. embedding_across_dp
+    # spreads the table's vocab over the DP ranks, so they hold different rows.
+    shares_ple_table = (
+        engram_config is not None
+        and config.model_config is not None
+        and config.model_config.architecture
+        in ("Qwen4ExpForCausalLM", "Qwen4ExpForConditionalGeneration")
+        and bool(engram_config.dp_shared_memory)
+        and not engram_config.embedding_across_dp
+    )
     if (
         engram_config is not None
         and config.model_config is not None
         and (
             config.model_config.architecture == "DeepseekV41ForCausalLM"
-            # Qwen4Exp only shares its PLE table over this group. embedding_across_dp
-            # spreads the table's vocab over the DP ranks, so they hold different rows.
-            or (
-                config.model_config.architecture
-                in ("Qwen4ExpForCausalLM", "Qwen4ExpForConditionalGeneration")
-                and engram_config.dp_shared_memory
-                and not engram_config.embedding_across_dp
-            )
+            or shares_ple_table
         )
         and not enable_elastic_ep
     ):
@@ -2260,6 +2333,10 @@ def initialize_model_parallel(
             engram_dp_size,
             tensor_model_parallel_size,
         )
+    global _INDEPENDENT_DP_TABLE
+    assert _INDEPENDENT_DP_TABLE is None, "independent DP table group exists"
+    if shares_ple_table and parallel_config.independent_data_parallel:
+        _INDEPENDENT_DP_TABLE = _init_independent_dp_table_group(parallel_config)
 
     # Build the DCP model-parallel groups.
     global _DCP
@@ -2537,6 +2614,8 @@ def destroy_model_parallel():
     if _ENGRAM_DP and _ENGRAM_DP is not _DP:
         _ENGRAM_DP.destroy()
     _ENGRAM_DP = None
+    global _INDEPENDENT_DP_TABLE
+    _INDEPENDENT_DP_TABLE = None
     if _DP:
         _DP.destroy()
     _DP = None

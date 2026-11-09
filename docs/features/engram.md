@@ -172,6 +172,11 @@ and falls back to per-replica (or DP-sharded) tables with a warning when:
 Requirements: `cpu_offload` enabled, `--data-parallel-size > 1`, and a shared
 IPC namespace across the co-located replicas.
 
+With `--independent-data-parallel`, Qwen4Exp replicas share no process group,
+so co-located replicas agree on the shared table through a TCPStore on the DP
+master port while the model loads, and nothing is exchanged afterwards.
+`embedding_across_dp` is not supported in that mode.
+
 ## Limitations
 
 - CUDA-alike platforms only.

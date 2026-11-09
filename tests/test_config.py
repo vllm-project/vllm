@@ -1531,6 +1531,53 @@ def test_engram_rejects_elastic_cross_dp(option):
         EngramConfig(**{option: True}).verify_parallel_config(parallel)
 
 
+def test_independent_data_parallel_rejects_expert_parallel():
+    with pytest.raises(ValueError, match="independent_data_parallel"):
+        ParallelConfig(
+            data_parallel_size=2,
+            independent_data_parallel=True,
+            enable_expert_parallel=True,
+            distributed_executor_backend="mp",
+        )
+
+
+@pytest.mark.parametrize(
+    "is_moe, independent, expected",
+    [(True, False, True), (True, True, False), (False, False, False)],
+)
+def test_dp_ranks_in_lockstep(is_moe: bool, independent: bool, expected: bool):
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(is_moe=is_moe),
+        parallel_config=SimpleNamespace(independent_data_parallel=independent),
+    )
+    assert VllmConfig.dp_ranks_in_lockstep.fget(config) is expected
+
+
+def test_independent_dp_rank_keeps_local_dp_size():
+    parallel = ParallelConfig(
+        data_parallel_size=4,
+        data_parallel_size_local=4,
+        independent_data_parallel=True,
+        distributed_executor_backend="mp",
+    )
+    parallel.reconfigure_for_independent_dp_rank()
+    assert parallel.data_parallel_size == 1
+    assert parallel._independent_dp_size_local == 4
+    # The engine re-validates its config after this reset.
+    assert parallel.num_dp_replicas == 4
+    EngramConfig(dp_shared_memory=True).verify_parallel_config(parallel)
+
+
+def test_engram_rejects_independent_dp_across_dp():
+    parallel = ParallelConfig(
+        data_parallel_size=2,
+        independent_data_parallel=True,
+        distributed_executor_backend="mp",
+    )
+    with pytest.raises(ValueError, match="independent_data_parallel"):
+        EngramConfig(embedding_across_dp=True).verify_parallel_config(parallel)
+
+
 def test_engram_dp_shared_memory_requires_cpu_offload():
     with pytest.raises(ValueError, match="requires cpu_offload"):
         EngramConfig(cpu_offload=False, dp_shared_memory=True)

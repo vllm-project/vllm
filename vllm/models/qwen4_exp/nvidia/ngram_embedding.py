@@ -11,7 +11,11 @@ from torch import nn
 from transformers import Qwen4ExpTextConfig
 
 from vllm.config import get_current_vllm_config
-from vllm.distributed import get_engram_dp_group, get_etp_group, get_tp_group
+from vllm.distributed import (
+    get_engram_table_share_group,
+    get_etp_group,
+    get_tp_group,
+)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
@@ -438,7 +442,7 @@ class Qwen4ExpNGramEmbedding(nn.Module):
             else Qwen4ExpPLESharedHostEmbedding
             if engram_config is not None
             and engram_config.dp_shared_memory
-            and get_engram_dp_group() is not None
+            and get_engram_table_share_group() is not None
             else Qwen4ExpPLEPinnedHostEmbedding
             if engram_config is not None and engram_config.cpu_offload
             else Qwen4ExpPLEDeviceEmbedding

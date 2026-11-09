@@ -35,6 +35,7 @@ from vllm.distributed import cleanup_dist_env_and_memory, parallel_state
 from vllm.distributed.parallel_state import (
     get_engram_dp_group,
     get_engram_dp_size,
+    get_engram_table_share_group,
     init_distributed_environment,
     initialize_model_parallel,
 )
@@ -56,7 +57,7 @@ from vllm.models.deepseek_v41.common.engram import (
 )
 from vllm.models.qwen4_exp.common import ngram_embedding as ple_ops
 from vllm.platforms import current_platform
-from vllm.utils.network_utils import get_open_port
+from vllm.utils.network_utils import get_open_port, get_open_ports_list
 from vllm.utils.system_utils import update_environment_variables
 
 WORLD_SIZE = 4
@@ -428,7 +429,7 @@ def _check_shared_storage_lifetime_and_failures(failure):
 def _check_ple_shared_table(shm_fits):
     """Qwen4Exp's PLE table is one /dev/shm mapping per EDP group, loaded by its
     leader; without room in /dev/shm, every rank loads its own table."""
-    group = get_engram_dp_group()
+    group = get_engram_table_share_group()
     with pytest.MonkeyPatch.context() as patch:
         if not shm_fits:
             patch.setattr(engram_ops, "_shm_shortfall", lambda num_bytes: "too small")
@@ -843,6 +844,67 @@ def _check_prefetch_replay(
                 expected = expected[tp_rank * tokens : (tp_rank + 1) * tokens]
             torch.testing.assert_close(output, expected, atol=0, rtol=0)
         torch.accelerator.synchronize()
+
+
+def _independent_dp_worker(rank: int, table_port: int, world_ports: list[int]) -> None:
+    """One independent DP rank: its own single-process world, no DP group."""
+    torch.accelerator.set_device_index(rank)
+    update_environment_variables(
+        {
+            "RANK": "0",
+            "LOCAL_RANK": "0",
+            "WORLD_SIZE": "1",
+            "MASTER_ADDR": "localhost",
+            "MASTER_PORT": str(world_ports[rank]),
+        }
+    )
+    vllm_config = VllmConfig(
+        parallel_config=ParallelConfig(
+            data_parallel_size=WORLD_SIZE,
+            data_parallel_size_local=WORLD_SIZE,
+            data_parallel_rank=rank,
+            independent_data_parallel=True,
+        ),
+        scheduler_config=SchedulerConfig(
+            max_model_len=8,
+            is_encoder_decoder=False,
+            max_num_batched_tokens=8,
+            max_num_seqs=8,
+        ),
+    )
+    # As run_engine_core does before starting the workers.
+    parallel_config = vllm_config.parallel_config
+    parallel_config.data_parallel_rank_local = rank
+    parallel_config.reconfigure_for_independent_dp_rank()
+    parallel_config.data_parallel_master_port = table_port
+    vllm_config.engram_config = EngramConfig(dp_shared_memory=True)
+    vllm_config.model_config = SimpleNamespace(
+        architecture="Qwen4ExpForCausalLM",
+        is_moe=True,
+        sleep_mode_offload_cudagraph=False,
+    )
+    try:
+        init_distributed_environment()
+        with set_current_vllm_config(vllm_config):
+            initialize_model_parallel()
+        assert get_engram_dp_group() is None
+        group = get_engram_table_share_group()
+        assert (group.rank_in_group, group.world_size) == (rank, WORLD_SIZE)
+        for shm_fits in (True, False):
+            _check_ple_shared_table(shm_fits)
+    finally:
+        cleanup_dist_env_and_memory()
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="CUDA or ROCm required"
+)
+def test_ple_table_shared_across_independent_dp_ranks():
+    """Independent DP ranks share no process group, yet load one PLE table."""
+    if torch.accelerator.device_count() < WORLD_SIZE:
+        pytest.skip(f"Need {WORLD_SIZE} GPUs to run the test.")
+    ports = get_open_ports_list(WORLD_SIZE + 1)
+    mp.spawn(_independent_dp_worker, args=(ports[0], ports[1:]), nprocs=WORLD_SIZE)
 
 
 @pytest.mark.skipif(

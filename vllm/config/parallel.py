@@ -155,7 +155,8 @@ class ParallelConfig:
     the process world size but does not increase the KV-cache shard count."""
     data_parallel_size: int = Field(default=1, ge=1)
     """Number of data parallel groups. MoE layers will be sharded according to
-    the product of the tensor, prefill-context, and data parallel sizes."""
+    the product of the tensor, prefill-context, and data parallel sizes, unless
+    `independent_data_parallel` is set."""
     data_parallel_size_local: int = Field(default=1, ge=0)
     """Number of local data parallel groups. A value of 0 is a sentinel used by
     the engine-args layer to signal that data parallelism was specified
@@ -189,6 +190,11 @@ class ParallelConfig:
     between local data parallel ranks, but an external LB balances
     between vLLM nodes/replicas. Set explicitly in conjunction with
     --data-parallel-start-rank."""
+    independent_data_parallel: bool = False
+    """Run every DP rank of a MoE model as an independent full replica, as for
+    dense models: MoE layers are sharded only within the rank (by TP) instead of
+    across the DP ranks, and ranks never synchronize forward passes. Each rank
+    must hold the full model. Has no effect for dense models."""
     is_moe_model: bool | None = None
     """Whether the deployed model is MoE (if known)."""
     enable_hc_sp: bool = False
@@ -485,6 +491,13 @@ class ParallelConfig:
     """Equal to the data parallel rank but not used for torch process groups
     and not overridden for dense models."""
 
+    _independent_dp_size: int = 1
+    """DP size before `reconfigure_for_independent_dp_rank` resets it."""
+
+    _independent_dp_size_local: int = 1
+    """Local DP size before `reconfigure_for_independent_dp_rank` resets it, so
+    co-located independent ranks can still find each other."""
+
     _api_process_count: int = Field(default=1, gt=0)
     """
     The number of API processes initialized.
@@ -600,6 +613,14 @@ class ParallelConfig:
                     "NUMA binding lists cannot be combined with numa_bind=False."
                 )
             self.numa_bind = True
+
+        if self.independent_data_parallel and (
+            self.enable_expert_parallel or self.enable_elastic_ep
+        ):
+            raise ValueError(
+                "independent_data_parallel runs each DP rank as a full replica "
+                "and cannot be combined with expert parallelism or elastic EP."
+            )
 
         if self.enable_eplb:
             if not current_platform.is_cuda_alike() and not current_platform.is_xpu():
@@ -1019,6 +1040,8 @@ class ParallelConfig:
             "data_parallel_rank_local",
             "data_parallel_size_local",
             "data_parallel_index",
+            "_independent_dp_size",
+            "_independent_dp_size_local",
             "data_parallel_backend",
             "data_parallel_external_lb",
             "data_parallel_hybrid_lb",
@@ -1129,6 +1152,11 @@ class ParallelConfig:
                 raise ValueError(
                     "Offline data parallel mode is not supported/useful"
                     " for dense models."
+                )
+            if self.data_parallel_size > 1 and self.independent_data_parallel:
+                raise ValueError(
+                    "Offline data parallel mode is not supported/useful with "
+                    "independent_data_parallel; run separate processes instead."
                 )
 
         max_dp_size = self.elastic_ep_max_dp_size
@@ -1286,11 +1314,18 @@ class ParallelConfig:
 
         return self
 
+    @property
+    def num_dp_replicas(self) -> int:
+        """DP size, counting ranks reconfigured to run independently."""
+        return max(self.data_parallel_size, self._independent_dp_size)
+
     def reconfigure_for_independent_dp_rank(self) -> None:
-        """Reconfigure for a single independent non-MoE DP rank."""
+        """Reconfigure for a single independent DP rank."""
         # Capture these before changing DP fields.
         nnodes = self.nnodes_within_dp
         node_rank = self.node_rank_within_dp
+        self._independent_dp_size = self.data_parallel_size
+        self._independent_dp_size_local = self.data_parallel_size_local
         self.data_parallel_size = 1
         self.data_parallel_size_local = 1
         self.data_parallel_rank = 0

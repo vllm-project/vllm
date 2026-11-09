@@ -106,10 +106,20 @@ class EngramConfig:
     def verify_parallel_config(self, parallel_config: "ParallelConfig") -> None:
         """Reject unsupported embedding parallel topologies."""
         if self.dp_shared_memory:
-            if parallel_config.data_parallel_size <= 1:
+            # Independent ranks run with DP=1 but still share one table.
+            if parallel_config.num_dp_replicas <= 1:
                 raise ValueError("dp_shared_memory requires data_parallel_size > 1.")
             if parallel_config.enable_elastic_ep:
                 raise ValueError("dp_shared_memory is not supported with elastic EP.")
+        if (
+            self.embedding_across_dp
+            and parallel_config.data_parallel_size > 1
+            and parallel_config.independent_data_parallel
+        ):
+            raise ValueError(
+                "Engram embedding_across_dp exchanges rows between DP ranks every "
+                "step and is not supported with independent_data_parallel."
+            )
         if (
             self.embedding_across_dp
             and parallel_config.data_parallel_size > 1

@@ -1731,12 +1731,13 @@ class EngineCoreProc(EngineCore):
             signal.signal(signal.SIGINT, signal_handler)
 
             parallel_config.data_parallel_index = dp_rank
-            if data_parallel and vllm_config.model_config.is_moe:
+            if data_parallel and vllm_config.dp_ranks_in_lockstep:
                 # Set data parallel rank for this engine process.
                 parallel_config.data_parallel_rank = dp_rank
                 engine_core = DPEngineCoreProc(*args, **kwargs)
             else:
-                # Non-MoE DP ranks are completely independent, so treat like DP=1.
+                # Non-MoE and independent DP ranks share no collectives, so treat
+                # them like DP=1.
                 # Note that parallel_config.data_parallel_index will still reflect
                 # the original DP rank.
                 parallel_config.reconfigure_for_independent_dp_rank()
@@ -2583,8 +2584,8 @@ class DPEngineCoreProc(EngineCoreProc):
         client_handshake_address: str | None = None,
         tensor_queue: Queue | None = None,
     ):
-        assert vllm_config.model_config.is_moe, (
-            "DPEngineCoreProc should only be used for MoE models"
+        assert vllm_config.dp_ranks_in_lockstep, (
+            "DPEngineCoreProc should only be used for lockstep MoE DP"
         )
 
         self.dp_sync_interval = vllm_config.parallel_config.dp_sync_interval

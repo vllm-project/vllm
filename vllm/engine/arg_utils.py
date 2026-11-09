@@ -560,6 +560,7 @@ class EngineArgs:
     data_parallel_hybrid_lb: bool = False
     data_parallel_external_lb: bool = False
     data_parallel_multi_port_external_lb: bool = False
+    independent_data_parallel: bool = ParallelConfig.independent_data_parallel
     data_parallel_backend: DataParallelBackend = ParallelConfig.data_parallel_backend
     enable_hc_sp: bool = ParallelConfig.enable_hc_sp
     enable_expert_parallel: bool = ParallelConfig.enable_expert_parallel
@@ -1314,6 +1315,10 @@ class EngineArgs:
             help="Run a node-local supervisor that launches one external-LB API "
             "server per local data parallel rank and exposes aggregated health on "
             "a supervisor port.",
+        )
+        parallel_group.add_argument(
+            "--independent-data-parallel",
+            **parallel_kwargs["independent_data_parallel"],
         )
         parallel_group.add_argument("--enable-hc-sp", **parallel_kwargs["enable_hc_sp"])
         parallel_group.add_argument(
@@ -2490,10 +2495,11 @@ class EngineArgs:
         if (
             self.data_parallel_size > 1
             and data_parallel_external_lb
-            and not model_config.is_moe
+            and (not model_config.is_moe or self.independent_data_parallel)
         ):
             raise ValueError(
-                "Non-MoE models do not support external data parallel mode. "
+                "Non-MoE models and independent data parallel do not support "
+                "external data parallel mode. "
                 "For external load balancing, launch independent vLLM "
                 "instances without --data-parallel-* arguments."
             )
@@ -2621,6 +2627,7 @@ class EngineArgs:
             is_moe_model=model_config.is_moe,
             enable_hc_sp=self.enable_hc_sp,
             enable_expert_parallel=self.enable_expert_parallel,
+            independent_data_parallel=self.independent_data_parallel,
             enable_batch_sharded_sampling=self.enable_batch_sharded_sampling,
             enable_ep_weight_filter=self.enable_ep_weight_filter,
             all2all_backend=self.all2all_backend,
