@@ -228,7 +228,9 @@ class ReadStrategy(ABC):
             return
         generator = engine_client.generate(
             tokens_input(list(prompts[0][:shared]), cache_salt=cache_salt),
-            SamplingParams(max_tokens=1, temperature=0.0),
+            # The warm's one-token output is discarded; detokenizing it
+            # would decode the shared prefix on the event loop.
+            SamplingParams(max_tokens=1, temperature=0.0, detokenize=False),
             f"{request_id}-prefix",
             lora_request=lora_request,
             trace_headers=trace_headers,
@@ -1599,6 +1601,9 @@ class KnowLineStrategy(ReadStrategy):
                     f"{self.max_model_len - 1} tokens, got {len(prompt_ids)}"
                 )
             engine_inputs.append(tokens_input(prompt_ids, cache_salt=cache_salt))
+            # The read scores the reply's logprobs, never its text;
+            # detokenizing would prime a decoder with the whole prompt
+            # on every read.
             if n_options > MAX_LOGPROB_TOKEN_IDS:
                 # Too many labels for logprob_token_ids: mask the rest out.
                 params.append(
@@ -1607,6 +1612,7 @@ class KnowLineStrategy(ReadStrategy):
                         temperature=0.0,
                         allowed_token_ids=ids,
                         logprobs=n_options,
+                        detokenize=False,
                     )
                 )
             else:
@@ -1615,6 +1621,7 @@ class KnowLineStrategy(ReadStrategy):
                         max_tokens=1,
                         temperature=0.0,
                         logprob_token_ids=ids,
+                        detokenize=False,
                     )
                 )
             label_groups.append(ids)
