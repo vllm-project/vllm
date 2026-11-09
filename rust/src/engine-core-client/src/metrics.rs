@@ -6,10 +6,11 @@ use std::collections::BTreeSet;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use vllm_metrics::{
-    CacheHitSourceLabels, EngineLabels, EnginePositionLabels, EngineSleepStateLabels, F64Gauge,
-    Family, HistogramMetric, KvFetchStageLabels, LoraAdapterNames, LoraInfoLabels,
-    MooncakeOperationCounterFamily, MooncakeOperationHistogramFamily, MooncakeOperationLabels,
-    RequestMetrics, SchedulerLogStatsAccumulator, SchedulerMetrics, U64Counter, U64Gauge,
+    CacheConfigInfoLabels, CacheHitSourceLabels, EngineLabels, EnginePositionLabels,
+    EngineSleepStateLabels, F64Gauge, Family, HistogramMetric, KvFetchStageLabels,
+    LoraAdapterNames, LoraInfoLabels, MooncakeOperationCounterFamily,
+    MooncakeOperationHistogramFamily, MooncakeOperationLabels, RequestMetrics,
+    SchedulerLogStatsAccumulator, SchedulerMetrics, U64Counter, U64Gauge,
     UmbpOperationCounterFamily, UmbpOperationLabels, WaitingReasonLabels,
 };
 
@@ -163,10 +164,22 @@ impl SchedulerStatsRecorder {
         let engines = engines
             .iter()
             .filter_map(|engine| {
-                let engine = engine.engine_id.engine_index()?;
+                let engine_index = engine.engine_id.engine_index()?;
+                let ready = &engine.ready_response;
+                metrics
+                    .cache_config_info
+                    .get_or_create(&CacheConfigInfoLabels {
+                        engine: engine_index,
+                        num_gpu_blocks: ready.num_gpu_blocks,
+                        block_size: ready.block_size,
+                        kv_cache_size_tokens: ready
+                            .kv_cache_size_tokens
+                            .map_or_else(|| "None".to_string(), |tokens| tokens.to_string()),
+                    })
+                    .set(1);
                 Some((
-                    engine,
-                    resolve_scheduler_stats_handles(metrics, model_name, engine),
+                    engine_index,
+                    resolve_scheduler_stats_handles(metrics, model_name, engine_index),
                 ))
             })
             .collect();
@@ -624,10 +637,41 @@ mod tests {
     use vllm_metrics::Metrics;
 
     use crate::metrics::LoraInfoExporter;
+    use crate::mock_engine::default_ready_response;
+    use crate::protocol::handshake::EngineCoreReadyResponse;
     use crate::protocol::stats::{
         KvConnectorStats, KvFetchReqsByStage, MooncakeOperation, MooncakeRecord, MooncakeStats,
         MooncakeStatus, MooncakeTransferStats, MultiConnectorStats, NixlStats, SchedulerStats,
     };
+    use crate::transport::{ConnectedEngine, EngineId};
+
+    #[test]
+    fn cache_config_info_exports_each_engines_reported_capacity() {
+        let metrics = Metrics::new();
+        let engines = [(2, 8, 16, Some(96)), (5, 0, 32, Some(0)), (9, 4, 64, None)].map(
+            |(index, num_gpu_blocks, block_size, kv_cache_size_tokens)| ConnectedEngine {
+                engine_id: EngineId::from_engine_index(index),
+                ready_response: EngineCoreReadyResponse {
+                    num_gpu_blocks,
+                    block_size,
+                    kv_cache_size_tokens,
+                    ..default_ready_response()
+                },
+            },
+        );
+        super::SchedulerStatsRecorder::new(&metrics.scheduler, "model", &engines);
+
+        let rendered = metrics.render().unwrap();
+        let series = rendered
+            .lines()
+            .filter(|line| line.starts_with("vllm:cache_config_info{"))
+            .sorted()
+            .join("\n");
+        expect![[r#"
+            vllm:cache_config_info{engine="2",num_gpu_blocks="8",block_size="16",kv_cache_size_tokens="96"} 1
+            vllm:cache_config_info{engine="5",num_gpu_blocks="0",block_size="32",kv_cache_size_tokens="0"} 1
+            vllm:cache_config_info{engine="9",num_gpu_blocks="4",block_size="64",kv_cache_size_tokens="None"} 1"#]].assert_eq(&series);
+    }
 
     fn names(values: &[&str]) -> BTreeSet<String> {
         values.iter().map(|name| (*name).to_string()).collect()

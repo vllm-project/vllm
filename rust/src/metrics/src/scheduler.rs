@@ -70,6 +70,16 @@ pub struct EngineLabels {
     pub engine: u32,
 }
 
+/// Cache configuration reported by the engine handshake.
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct CacheConfigInfoLabels {
+    pub engine: u32,
+    pub num_gpu_blocks: u64,
+    pub block_size: u64,
+    /// Token capacity, or Python's `"None"` when the engine does not report it.
+    pub kv_cache_size_tokens: String,
+}
+
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub struct CacheHitSourceLabels {
     pub model_name: String,
@@ -251,6 +261,9 @@ pub struct SchedulerMetrics {
     pub scheduler_kv_fetch_by_stage: Family<KvFetchStageLabels, U64Gauge>,
     pub kv_cache_usage: Family<EngineLabels, F64Gauge>,
 
+    /// Initial cache configuration, with a constant value of 1.
+    pub cache_config_info: Family<CacheConfigInfoLabels, U64Gauge>,
+
     /// `vllm:engine_sleep_state`, set by the engine client's sleep and wake
     /// calls rather than from `SchedulerStats`.
     pub engine_sleep_state: Family<EngineSleepStateLabels, U64Gauge>,
@@ -365,6 +378,13 @@ impl SchedulerMetrics {
             "vllm:kv_cache_usage_perc",
             "KV-cache usage. 1 means 100 percent usage",
             kv_cache_usage.clone(),
+        );
+
+        let cache_config_info = Family::default();
+        registry.register(
+            "vllm:cache_config_info",
+            "Information of the LLMEngine CacheConfig",
+            cache_config_info.clone(),
         );
 
         let engine_sleep_state = Family::default();
@@ -700,6 +720,7 @@ impl SchedulerMetrics {
             scheduler_waiting_by_reason,
             scheduler_kv_fetch_by_stage,
             kv_cache_usage,
+            cache_config_info,
             engine_sleep_state,
             lora_info,
             cache_config_info,

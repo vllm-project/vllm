@@ -386,6 +386,11 @@ We use this concept for the `vllm:cache_config_info` metric:
 vllm:cache_config_info{block_size="16",cache_dtype="auto",cpu_offload_gb="0",enable_prefix_caching="False",gpu_memory_utilization="0.9",...} 1.0
 ```
 
+The Rust frontend exports this metric per engine with the handshake's `engine`,
+`num_gpu_blocks`, `block_size`, and `kv_cache_size_tokens` labels. The token
+capacity is the value reported by the engine; `"None"` means it was not reported,
+while `"0"` represents a reported zero capacity.
+
 However, `prometheus_client` has
 [never supported Info metrics in multiprocessing mode](https://github.com/prometheus/client_python/pull/300) -
 for [unclear reasons](gh-pr:7279#discussion_r1710417152). We
