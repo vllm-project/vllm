@@ -304,6 +304,7 @@ def _unchanged(folder_a: str, folder_b: str) -> list[str]:
     return unchanged
 
 
+KERNEL_CONFIG = {"enable_flashinfer_autotune": False}
 ENGINE_KWARGS = dict(
     enable_prefix_caching=False,
     max_model_len=256,
@@ -312,7 +313,7 @@ ENGINE_KWARGS = dict(
     # autotuning off keeps kernel choice stable across engines; the fresh and
     # refit engines compile separately (their model paths differ), so
     # Inductor's reduction configs are fixed too
-    kernel_config={"enable_flashinfer_autotune": False},
+    kernel_config=KERNEL_CONFIG,
     compilation_config={"inductor_compile_config": {"deterministic": True}},
     # the worker's weight-update session needs a transfer backend
     weight_transfer_config={"backend": "ipc"},
@@ -326,9 +327,7 @@ async def _engine(model: str, case: "RefitCase", mode: str, monkeypatch):
         AsyncEngineArgs(
             model=model,
             enable_sleep_mode=case.sleep,
-            **ENGINE_KWARGS,
-            **case.engine,
-            **case.parallel,
+            **{**ENGINE_KWARGS, **case.engine, **case.parallel},
         )
     )
     try:
@@ -353,8 +352,10 @@ async def _rpc(engine: AsyncLLM, fn, *args) -> list:
 
 
 async def _last(stream):
+    out = None
     async for out in stream:
         pass
+    assert out is not None, "the request produced no output"
     return out
 
 
@@ -437,6 +438,8 @@ DEEPSEEK_V3_FP8 = f"{DEEPSEEK_V3}-FP8_DYNAMIC"
 
 NIGHTLY = (pytest.mark.slow_test,)  # CI runs these in the nightly step only
 GPT_OSS = "openai/gpt-oss-20b"
+# pinned: the only TRT-LLM MXFP4 reload coverage, not left to the oracle
+TRTLLM_MOE = dict(kernel_config={**KERNEL_CONFIG, "moe_backend": "flashinfer_trtllm"})
 
 REFIT_CASES = [
     # one GPU
@@ -459,10 +462,10 @@ REFIT_CASES = [
     RefitCase("deepseek-v3", "bf16", DEEPSEEK_V3, marks=NIGHTLY),
     RefitCase("deepseek-v3", "fp8", DEEPSEEK_V3_FP8),
     RefitCase("deepseek-v3", "nvfp4a16", f"{DEEPSEEK_V3}-NVFP4A16", marks=NIGHTLY),
-    RefitCase("gpt-oss", "mxfp4", GPT_OSS),  # padded MoE
+    RefitCase("gpt-oss", "mxfp4", GPT_OSS, engine=TRTLLM_MOE),  # padded MoE
     # level 2 must keep the state post-load processing reruns from (e.g. the
     # TRT-LLM MXFP4 permute indices)
-    RefitCase("gpt-oss", "mxfp4", GPT_OSS, sleep=True),
+    RefitCase("gpt-oss", "mxfp4", GPT_OSS, engine=TRTLLM_MOE, sleep=True),
     RefitCase("nemotron-h", "bf16", "nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16"),
     # two GPUs
     *(
