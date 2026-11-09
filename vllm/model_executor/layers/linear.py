@@ -460,7 +460,7 @@ class ColumnParallelLinear(LinearBase):
         disable_tp: If true, weights matrix won't be sharded through tp rank.
         tp_rank: Override the tensor-parallel rank used for sharding. Defaults to
             the global TP rank. Used to shard at a coarser granularity than one
-            shard per rank (see ``DCPGroupColumnParallelLinear``).
+            shard per rank (see `DCPGroupColumnParallelLinear`).
         tp_size: Override the tensor-parallel world size used for sharding.
             Defaults to the global TP world size.
 
@@ -650,11 +650,11 @@ class DCPGroupColumnParallelLinear(ColumnParallelLinear):
 
     With Decode Context Parallelism (DCP) the KV cache is sharded across a DCP
     group, so MLA decode must attend the group's full head set. This layer shards
-    its output across DCP *groups* (effective tp size ``tp_size //
-    dcp_world_size``) rather than across every rank, so each rank in a group
+    its output across DCP *groups* (effective tp size `tp_size //
+    dcp_world_size`) rather than across every rank, so each rank in a group
     holds the whole group's heads, letting decode skip the query all-gather.
 
-    :meth:`forward` returns the group's full head set. :meth:`_local_view`
+    `forward` returns the group's full head set. `_local_view`
     extracts this rank's TP shard for prefill.
     """
 
@@ -677,7 +677,7 @@ class DCPGroupColumnParallelLinear(ColumnParallelLinear):
     def _local_view(self, out: torch.Tensor) -> torch.Tensor:
         """Slice this rank's tp head shard from a group-heads output.
 
-        ``out`` is head-shaped, i.e. ``(..., group_heads, head_dim)``.
+        `out` is head-shaped, i.e. `(..., group_heads, head_dim)`.
         """
         if self.group_size == 1:
             return out
@@ -1415,14 +1415,14 @@ class MinimaxM3QKVParallelLinearWithIndexer(QKVParallelLinear):
 
         [q | k | v | index_q | index_k]
 
-    ``index_q`` must have the same head count as the KV heads
-    (``total_num_index_heads == total_num_kv_heads``) and ``index_head_size ==
-    head_size``, so it shards exactly like K/V -- including the KV-head
-    *replication* path when ``tp_size > total_num_kv_heads`` (this is what makes
-    a TP size greater than the KV-head count work). ``index_k`` is a single
+    `index_q` must have the same head count as the KV heads
+    (`total_num_index_heads == total_num_kv_heads`) and `index_head_size ==
+    head_size`, so it shards exactly like K/V -- including the KV-head
+    *replication* path when `tp_size > total_num_kv_heads` (this is what makes
+    a TP size greater than the KV-head count work). `index_k` is a single
     shared head, replicated to every rank.
 
-    ``replicate_index_q`` moves ``index_q`` onto that replicated path too, so
+    `replicate_index_q` moves `index_q` onto that replicated path too, so
     every rank projects all the index heads rather than its own. That is what
     indexer context parallelism needs: it inverts the split, scoring every head
     against a shard of the blocks instead of one head against all of them.
@@ -1597,10 +1597,10 @@ class KimiK3MergedQKVGateLinear(MergedColumnParallelLinear):
 
     NOTE: Kimi-K3-specific. This is tailored to its replicated Q/KV latent
     projections and tensor-parallel output gate; it is not a general-purpose
-    linear layer. It lives here alongside ``MergedColumnParallelLinear``, whose
+    linear layer. It lives here alongside `MergedColumnParallelLinear`, whose
     sharding and weight-loading machinery it reuses.
 
-    The per-rank shard layout is ``[q_a | kv_a | gate]``. The latent shards
+    The per-rank shard layout is `[q_a | kv_a | gate]`. The latent shards
     stay replicated across tensor-parallel ranks while the gate shard is
     tensor-parallel, matching the standalone projections they replace.
     """

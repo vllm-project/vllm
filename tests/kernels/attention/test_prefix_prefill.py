@@ -994,7 +994,7 @@ def test_contexted_kv_attention_alibi(
 
     query_start = 0
     key_start = 0
-    for i, (query_len, seq_len) in enumerate(zip(query_lens, seq_lens)):
+    for query_len, seq_len in zip(query_lens, seq_lens):
         query_end = query_start + query_len
         key_end = key_start + seq_len
 
