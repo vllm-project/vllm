@@ -1314,7 +1314,7 @@ class SupportsRealtime(Protocol):
     """Whether earlier segments belong in this segment's context.
 
     True suits models whose realtime prompt is a running conversation and which
-    consume ``input_stream``. Models that emit a fresh single-turn prompt per
+    consume `input_stream`. Models that emit a fresh single-turn prompt per
     segment must set this False: the generic streaming carry-over would turn
     their own transcripts into conversation history, and segments with weak
     acoustic evidence then reproduce earlier ones.

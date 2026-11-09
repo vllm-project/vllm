@@ -1953,7 +1953,7 @@ class Scheduler(SchedulerInterface):
         Discards the last sampled output token from the prior input chunk.
 
         Models whose realtime prompt is a complete single turn per segment opt
-        out of that carry-over via ``SupportsRealtime.realtime_carries_context``
+        out of that carry-over via `SupportsRealtime.realtime_carries_context`
         and are restarted from the new chunk instead.
         """
         if not self._realtime_carries_context():
