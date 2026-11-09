@@ -526,8 +526,10 @@ def is_valid_config(config: MoETestConfig) -> tuple[bool, str | None]:
     if config.use_routed_input_transform and config.use_gate:
         return (
             False,
-            "routed_input_transform not supported with gate because of "
-            "padding problems",
+            (
+                "routed_input_transform not supported with gate because of "
+                "padding problems"
+            ),
         )
 
     # TODO: disable for now
@@ -537,8 +539,10 @@ def is_valid_config(config: MoETestConfig) -> tuple[bool, str | None]:
     ]:
         return (
             False,
-            "routed_input_transform not supported with DeepEP backends because "
-            "of padding problems",
+            (
+                "routed_input_transform not supported with DeepEP backends because "
+                "of padding problems"
+            ),
         )
 
     # routed_input_transform + quantization + high hidden dimensions
@@ -550,8 +554,10 @@ def is_valid_config(config: MoETestConfig) -> tuple[bool, str | None]:
     ):
         return (
             False,
-            "routed_input_transform + quantization + higher hidden dimensions "
-            "leads to large differences.",
+            (
+                "routed_input_transform + quantization + higher hidden dimensions "
+                "leads to large differences."
+            ),
         )
 
     # Skip modelopt_fp4 if not on B100+ (compute capability 10.0+) or gfx950.
@@ -585,8 +591,10 @@ def is_valid_config(config: MoETestConfig) -> tuple[bool, str | None]:
         ):
             return (
                 False,
-                "DeepEP low latency requires a batched NVFP4 MoE backend, "
-                "which is not available on gfx950.",
+                (
+                    "DeepEP low latency requires a batched NVFP4 MoE backend, "
+                    "which is not available on gfx950."
+                ),
             )
 
         if config.backend in MORI_BACKENDS:

@@ -256,10 +256,6 @@ class HummingConfig(QuantizationConfig):
             return config
         return None
 
-    def get_layer_input_schema(self, config: dict[str, Any], prefix: str):
-        config = self.get_layer_input_config(config, prefix)
-        return None if config is None else _hm.BaseInputSchema.from_config(config)
-
     def get_quant_config_for_layer(
         self, prefix: str, layer_type: str
     ) -> "HummingLayerQuantizationConfig | None":
