@@ -156,10 +156,10 @@ export MORI_GPU_ARCHS="gfx950"
 # path fails to come up.
 export MORI_ENABLE_HOST_PROXY="${MORI_ENABLE_HOST_PROXY:-1}"
 
-# NIXL UCX defaults: RC on ionic_0, GPU-direct RDMA.
+# NIXL UCX defaults: RC on all ionic NICs, GPU-direct RDMA.
 if [[ "${KV_CONNECTOR:-}" == Nixl* ]]; then
-    export UCX_TLS="${UCX_TLS:-rc_verbs,ud_verbs,tcp,self,rocm}"
-    export UCX_NET_DEVICES="${UCX_NET_DEVICES:-ionic_0:1,lo}"
+    export UCX_TLS="${UCX_TLS:-rc_verbs,ud_verbs,self,rocm}"
+    export UCX_NET_DEVICES="${UCX_NET_DEVICES:-${_IB_DEVICES//,/:1,}:1}"
     export UCX_IB_GID_INDEX="${UCX_IB_GID_INDEX:-${_IB_GID_INDEX}}"
     export UCX_UD_VERBS_ETH_DGID_CHECK="${UCX_UD_VERBS_ETH_DGID_CHECK:-n}"
     export UCX_IB_GPU_DIRECT_RDMA="${UCX_IB_GPU_DIRECT_RDMA:-yes}"
@@ -168,6 +168,7 @@ if [[ "${KV_CONNECTOR:-}" == Nixl* ]]; then
     export UCX_KEEPALIVE_INTERVAL="${UCX_KEEPALIVE_INTERVAL:-inf}"
     export UCX_UD_VERBS_RX_QUEUE_LEN="${UCX_UD_VERBS_RX_QUEUE_LEN:-1024}"
     export UCX_RCACHE_MAX_UNRELEASED="${UCX_RCACHE_MAX_UNRELEASED:-1024}"
+    export UCX_ROCM_COPY_DMABUF="${UCX_ROCM_COPY_DMABUF:-no}"
     export ACCURACY_NUM_CONCURRENT="${ACCURACY_NUM_CONCURRENT:-1}"
 fi
 

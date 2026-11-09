@@ -411,6 +411,7 @@ configure_decode() {
 # Expects role globals set by configure_prefill/configure_decode.
 build_server_cmd() {
     HOST_IP="${IP_ARRAY[$NODE_RANK]:-}"   # own IP for --host binding, if known
+    [[ "${KV_CONNECTOR:-}" == Nixl* ]] && export VLLM_NIXL_SIDE_CHANNEL_HOST="${VLLM_NIXL_SIDE_CHANNEL_HOST:-${HOST_IP}}"
     load_model_flags
     LOGF="${LOG_PATH}/${ROLE}_${PARALLEL_MODE}_node${NODE_RANK}_$(date +%Y%m%d_%H%M%S).log"
     CMD=(vllm serve "${MODEL_PATH}")
