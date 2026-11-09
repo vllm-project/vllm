@@ -1958,7 +1958,7 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
         return self._resolve_layer_field(prefix, "quant_algo")
 
     def _resolve_layer_field(self, prefix: str, field: str) -> Any:
-        """Look up a ``quantized_layers`` field for a vLLM-side layer prefix.
+        """Look up a `quantized_layers` field for a vLLM-side layer prefix.
 
         Tries three strategies in order:
         1. Direct lookup in `quantized_layers`.
@@ -2596,11 +2596,11 @@ class KMxfp8Static(QuantKeyScheme):
 
 
 class KInt8Static(QuantKeyScheme):
-    """Symmetric int8 weight with a scale per ``ctx.group_size`` input elements
+    """Symmetric int8 weight with a scale per `ctx.group_size` input elements
     (INT8_PB_WO). Weight-role only.
 
-    The checkpoint stores int8 ``[out, in]``; the loader repacks it into the
-    WNA16 kernels' layout: uint8b128 (``q + 128``), four per int32 along the
+    The checkpoint stores int8 `[out, in]`; the loader repacks it into the
+    WNA16 kernels' layout: uint8b128 (`q + 128`), four per int32 along the
     input dim.
     """
 

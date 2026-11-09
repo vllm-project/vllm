@@ -841,8 +841,8 @@ def _pack_int8_pb_wo_weight(
     group_size: int,
     dtype: torch.dtype,
 ):
-    """Store ``name`` as ModelOpt INT8_PB_WO in ``weights`` and the ``dtype``
-    weight the kernels dequantize it to in ``reference``."""
+    """Store `name` as ModelOpt INT8_PB_WO in `weights` and the `dtype`
+    weight the kernels dequantize it to in `reference`."""
     value = weights[f"{name}.weight"].float()
     groups = value.reshape(value.shape[0], -1, group_size)
     scale = groups.abs().amax(dim=-1) / 127
