@@ -42,6 +42,12 @@ def _weight(w, s):
     return w.float() * s.repeat_interleave(128, 0).repeat_interleave(128, 1)
 
 
+def _fp8_ulp(q):
+    """The distance to the next e4m3 value at each element of ``q``."""
+    exponent = torch.floor(torch.log2(q.float().abs().clamp_min(2**-6)))
+    return torch.exp2(exponent - 3)
+
+
 def _route(logits, bias):
     scores = logits.float().sigmoid()
     ids = (scores + bias).topk(TOP_K, dim=-1).indices
@@ -134,25 +140,37 @@ def test_mega_moe_matches_reference(grouped, tokens, ue8m0):
     x = _dequant(*_quant(x, reciprocal=True, ue8m0=ue8m0))
 
     def expert(w31, w31_s, w2, w2_s, token: int):
+        """The reference output and, per element, the most that two FP8
+        rounding flips of the hidden could move it."""
         up, gate = (_weight(w31, w31_s) @ x[token]).split(INTER)
         act = F.silu(gate.clamp(max=LIMIT)) * up.clamp(-LIMIT, LIMIT)
-        return _weight(w2, w2_s) @ _dequant(*_quant(act))
+        hidden, scale = _quant(act)
+        w2 = _weight(w2, w2_s)
+        step = w2.abs() * _dequant(_fp8_ulp(hidden), scale)
+        return w2 @ _dequant(hidden, scale), step.topk(2).values.sum(1)
+
+    def check(value, rows):
+        # The kernel sums GEMM1 in another order, so at a few elements the
+        # hidden it rounds to FP8 lands one step from the reference's; the
+        # outputs are BF16.
+        ref, flips = (torch.stack(part) for part in zip(*rows))
+        error = (value.float() - ref).abs()
+        allowed = flips + ref.abs() / 256 + 1e-6
+        assert (error <= allowed).all(), (error / allowed).max()
 
     w31, w31_s, w2, w2_s = w["routed"]
-    ref = torch.stack(
+    check(
+        out,
         [
             expert(w31[e], w31_s[e], w2[e], w2_s[e], t)
             for t in range(tokens)
             for e in ids[t].tolist()
-        ]
+        ],
     )
-    # BF16 outputs; rare FP8 rounding flips of the hidden move a few elements.
-    torch.testing.assert_close(out.float(), ref, atol=5e-3 * ref.abs().max(), rtol=0)
     if grouped:
         se31, se31_s, se2, se2_s = w["shared"]
-        ref = torch.stack([expert(se31, se31_s, se2, se2_s, t) for t in range(tokens)])
-        torch.testing.assert_close(
-            shared_out[0].float(), ref, atol=5e-3 * ref.abs().max(), rtol=0
+        check(
+            shared_out[0], [expert(se31, se31_s, se2, se2_s, t) for t in range(tokens)]
         )
 
 
