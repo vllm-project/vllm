@@ -1801,6 +1801,10 @@ def maybe_remap_kv_scale_name(name: str, params_dict: dict) -> str | None:
     # would otherwise double-apply the `.attn` prefix and drop the weight.
     if name in params_dict:
         return name
+    # The cache-scale mapper's `.attn.{q,k,v}_scale`, for an attention layer
+    # that holds its scales itself (e.g. DeepSeek V3.2's MLA `self_attn`).
+    if (unnested := re.sub(r"\.attn(\.[qkv]_scale)$", r"\1", name)) in params_dict:
+        return unnested
     if name.endswith(".kv_scale"):
         logger.warning_once(
             "DEPRECATED. Found kv_scale in the checkpoint. "
@@ -1875,8 +1879,6 @@ def maybe_remap_kv_scale_name(name: str, params_dict: dict) -> str | None:
             ".v_cache.scale",
         )
     ):
-        import regex as re
-
         for pattern, replacement in scale_mapping_patterns:
             if re.search(pattern, name):
                 remapped_name = re.sub(pattern, replacement, name)

@@ -91,9 +91,8 @@ def test_mla_loads_checkpoint_kv_scales(vllm_runner, monkeypatch, kv_scale_check
 def test_flashinfer_mla_decode_follows_kv_scale_reload(
     vllm_runner, monkeypatch, kv_scale_checkpoint, reload_mode
 ):
-    """A dummy start captures the decode CUDA graphs with dummy KV scales (1.0);
-    after reloading the checkpoint, decode must match a cold start on it. Both
-    the bmm scales and the cache write's scale must follow the reload."""
+    """A dummy start captures the decode CUDA graphs with dummy KV scales; after
+    reloading the checkpoint, decode must match a cold start on it."""
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
     monkeypatch.setenv("VLLM_RELOAD_MODE", reload_mode)
     kwargs = dict(
@@ -115,7 +114,8 @@ def test_flashinfer_mla_decode_follows_kv_scale_reload(
         llm.collective_rpc(
             "reload_weights", kwargs={"weights_path": kv_scale_checkpoint}
         )
-        assert all(s == (KV_SCALE,) * 3 for s in llm.collective_rpc(_mla_kv_scales)[0])
+        scales = llm.collective_rpc(_mla_kv_scales)[0]
+        assert scales and all(s == (KV_SCALE,) * 3 for s in scales), scales
         reloaded = llm.generate_greedy_logprobs(PROMPTS, 16, num_logprobs=5)
 
     check_logprobs_close(

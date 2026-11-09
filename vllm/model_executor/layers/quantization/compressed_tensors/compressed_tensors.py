@@ -210,7 +210,12 @@ class CompressedTensorsConfig(QuantizationConfig):
                 )
             return CompressedTensorsEmbeddingWNA16Int(weight_quant)
 
-        if isinstance(layer, (Attention, MLAAttention)):
+        if isinstance(layer, Attention) or (
+            # MLA (one latent head) only with per-tensor checkpoint KV scales.
+            isinstance(layer, MLAAttention)
+            and self.kv_cache_scheme is not None
+            and self.kv_cache_scheme.get("strategy") == "tensor"
+        ):
             return CompressedTensorsKVCacheMethod(self)
         if isinstance(layer, RoutedExperts):
             return CompressedTensorsMoEMethod.get_moe_method(

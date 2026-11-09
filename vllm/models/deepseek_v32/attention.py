@@ -539,8 +539,6 @@ class DeepseekV32Attention(MLAAttention):
                 cache_slot_mapping,
                 self.kv_cache_dtype,
                 self._k_scale,
-                self._k_scale_float == 1.0
-                and self.kv_cache_dtype in ("fp8", "fp8_e4m3", "fp8_e5m2"),
             )
 
         num_actual = attn_metadata.num_actual_tokens  # type: ignore[attr-defined]

@@ -285,6 +285,11 @@ class TestMaybeRemapKvScaleName:
         mapped = QuantizationConfig.get_cache_scale_mapper()._map_name(prefix + name)
         assert mapped is not None
         assert maybe_remap_kv_scale_name(mapped, params) == mla + expected
+        # DeepSeek V3.2: the MLA layer is `self_attn` itself.
+        dsa = {prefix + "self_attn." + s: None for s in ("k_scale", "v_scale")}
+        if expected != "q_scale":
+            expect = prefix + "self_attn." + expected
+            assert maybe_remap_kv_scale_name(mapped, dsa) == expect
 
 
 def test_checkpoint_weight_mapper_discards_serialized_g_idx():
