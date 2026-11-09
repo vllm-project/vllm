@@ -194,6 +194,7 @@ class HiSparseCoordinator:
         self._copy_by_block: dict[int, BlockHashWithGroupId] = {}
         # Unpinned GPU block id -> (request, page) pairs still reading it.
         self._owners: dict[int, tuple[tuple[str, int], ...]] = {}
+        self._reuse_watcher = self._on_block_reused
 
     @property
     def gpu_pool(self) -> BlockPool:
@@ -430,7 +431,7 @@ class HiSparseCoordinator:
                 released.append(block)
         state.pinned_clean.difference_update(unpinned)
         state.unpinned_pages.update(unpinned)
-        self.gpu_pool.unpin_blocks(released, self._on_block_reused)
+        self.gpu_pool.unpin_blocks(released, self._reuse_watcher)
 
     def _unpin_clean_pages(self, request_id: str, state: _HiSparseRequestState) -> None:
         # Tail first, so a prefix loses its tail pages before its head.
@@ -1008,7 +1009,7 @@ class HiSparseCoordinator:
                     continue
                 dropped.append(page_idx)
             if released:
-                self.gpu_pool.unpin_blocks(released, self._on_block_reused)
+                self.gpu_pool.unpin_blocks(released, self._reuse_watcher)
             manager.drop_resident_pages(request_id, dropped)
 
 
