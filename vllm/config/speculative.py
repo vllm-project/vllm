@@ -1775,6 +1775,22 @@ class SpeculativeConfig:
                 "may degrade model outputs."
             )
 
+        if (
+            self.method == "suffix"
+            and self.rejection_sample_method in ("fly", "synthetic")
+            and self.suffix_decoding_corpus_tokens > 0
+            and self.suffix_decoding_max_cached_requests > 0
+        ):
+            raise ValueError(
+                f"rejection_sample_method={self.rejection_sample_method!r} can "
+                "accept draft tokens that the target model rejects. With "
+                "method='suffix', drafts can come from the cross-request corpus, "
+                "so content from other requests can appear in this request's "
+                "output. Set suffix_decoding_corpus_tokens=0 to disable the "
+                "corpus, or use a lossless rejection_sample_method "
+                "('standard' or 'block')."
+            )
+
         self.verify_equal_vocab_size_if_draft_model()
         return self
 
