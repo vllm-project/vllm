@@ -309,9 +309,9 @@ def test_mm_cache_miss_raises_and_recovers():
     """A P0/P1 multimodal cache drift must be recoverable, not a hard crash.
 
     Reproduces the production failure: the P0 sender cache believes an item is
-    cached on P1 (so it sends ``data=None``), but the P1 receiver cache does not
-    have it. The receiver must raise ``MultiModalCacheMissError`` (carrying the
-    hash) instead of asserting; ``P0.invalidate()`` must drop the stale shadow
+    cached on P1 (so it sends `data=None`), but the P1 receiver cache does not
+    have it. The receiver must raise `MultiModalCacheMissError` (carrying the
+    hash) instead of asserting; `P0.invalidate()` must drop the stale shadow
     entry; and resending the item with data must repopulate both caches.
 
     Caches are built directly (not via the registry) so the test needs no real
@@ -1077,7 +1077,7 @@ async def test_release_kv_cache_resends_mm_payload(use_async, release_error):
     renderer = renderer_from_config(VllmConfig(model_config=model_config))
     renderer._mm_processor_cache = sender
 
-    def release():
+    def release(reset_connector: bool):
         if release_error:
             raise RuntimeError(release_error)
         receiver.clear_cache()

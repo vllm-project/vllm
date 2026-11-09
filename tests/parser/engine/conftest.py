@@ -23,13 +23,13 @@ def make_mock_tokenizer(
 
     Args:
         vocab: Mapping of token text to token ID.
-        special_tokens: Which tokens to mark as special.  When ``None``
+        special_tokens: Which tokens to mark as special.  When `None`
             (the default), every key in *vocab* is treated as special —
             convenient when the vocab only contains delimiter tokens.
 
     The returned mock supports get_vocab(), encode(), and decode().
     decode() maps known token IDs back to their text and falls back to
-    chr(id) for ASCII IDs or ``<id>`` for others.
+    chr(id) for ASCII IDs or `<id>` for others.
 
     """
     id_to_text = {v: k for k, v in vocab.items()}

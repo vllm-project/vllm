@@ -19,8 +19,8 @@ LMCache integrates with vLLM v1 in two ways:
 
 ### MP mode with the extensible KV cache
 
-vLLM's extensible KV cache (`--enable-extensible-kv-cache`, on by default with
-the V2 model runner where supported) allocates the KV cache through the CUDA
+vLLM's extensible KV cache (`--enable-extensible-kv-cache`, on by default
+where supported) allocates the KV cache through the CUDA
 VMM API, which legacy CUDA IPC cannot share. With `LMCacheMPConnector` it
 therefore stays off unless the connector's `kv_connector_extra_config` sets
 `"lmcache.mp.use_vmm_api": true`, also when the connector is nested in

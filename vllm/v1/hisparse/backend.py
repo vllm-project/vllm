@@ -96,16 +96,14 @@ class CUDAHiSparseBackend(HiSparseBackend):
             )
 
     def pin_tensor(self, tensor: torch.Tensor) -> None:
-        from vllm.v1.simple_kv_offload.cuda_mem_ops import pin_tensor
+        from vllm.utils.host_memory import pin_tensor
 
         pin_tensor(tensor)
 
     def unpin_tensor(self, tensor: torch.Tensor) -> None:
-        cudart = torch.cuda.cudart()
-        error = cudart.cudaHostUnregister(tensor.data_ptr())
-        if error.value != 0:
-            cudart.cudaGetLastError()
-            raise RuntimeError(f"cudaHostUnregister failed (code={error.value}).")
+        from vllm.utils.host_memory import unpin_tensor
+
+        unpin_tensor(tensor)
 
     def create_cache_ops(self, runtime: HiSparseRuntime) -> Any:
         return torch.ops._C_cache_ops
