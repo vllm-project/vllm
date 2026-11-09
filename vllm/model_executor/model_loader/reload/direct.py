@@ -87,7 +87,7 @@ def loadable_tensors(model: torch.nn.Module) -> Iterator[tuple[str, torch.Tensor
 
 
 def _config_refusal(vllm_config: VllmConfig) -> str | None:
-    """Why ``vllm_config`` cannot reload directly."""
+    """Why `vllm_config` cannot reload directly."""
     from vllm.model_executor.layers.quantization.online.base import (
         OnlineQuantizationConfig,
     )
@@ -128,7 +128,7 @@ def _config_refusal(vllm_config: VllmConfig) -> str | None:
 def check_direct_reload_support(
     model: torch.nn.Module, vllm_config: VllmConfig | None = None
 ) -> None:
-    """Raise if ``model`` or ``vllm_config`` (default: the current one) is
+    """Raise if `model` or `vllm_config` (default: the current one) is
     known to reload incorrectly; warn once per class for a model that is not
     `SupportsDirectReload`. Runs at weight-transfer engine creation and in
     `begin_direct_reload`, so a server that never updates is not refused."""

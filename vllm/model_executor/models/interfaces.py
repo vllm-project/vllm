@@ -1239,21 +1239,21 @@ def supports_replayssm(
 
 @runtime_checkable
 class SupportsDirectReload(Protocol):
-    """Direct weight reload (``VLLM_RELOAD_MODE=direct``) opt-in.
+    """Direct weight reload (`VLLM_RELOAD_MODE=direct`) opt-in.
 
     - Validated: a model class lists this among its own bases (not inherited).
-    - Refused: a module or quant method sets ``supports_direct_reload = False``
+    - Refused: a module or quant method sets `supports_direct_reload = False`
       and a reason (inherited); a direct update raises.
     - Neither: a direct update warns once per class.
     """
 
     supports_direct_reload: bool = True
     direct_reload_unsupported_reason: str | None = None
-    """Required when ``supports_direct_reload`` is False."""
+    """Required when `supports_direct_reload` is False."""
 
 
 def supports_direct_reload(model_cls: type) -> bool:
-    """Whether ``model_cls`` is validated with direct reload: it lists
+    """Whether `model_cls` is validated with direct reload: it lists
     `SupportsDirectReload` among its own bases (not inherited). A class the
     loader generates around a model class (expert substitution) counts as the
     class it wraps."""
