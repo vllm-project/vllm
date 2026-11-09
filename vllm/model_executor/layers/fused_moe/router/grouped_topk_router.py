@@ -42,6 +42,34 @@ def fused_grouped_topk(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     assert hidden_states.size(0) == gating_output.size(0), "Number of tokens mismatch"
 
+    # Single-group CUDA routing changes score reconstruction above 1024 tokens.
+    if (
+        envs.VLLM_BATCH_INVARIANT
+        and current_platform.is_cuda()
+        and num_expert_group == 1
+        and topk_group == 1
+        and 256 <= gating_output.shape[1] < 1024
+        and gating_output.shape[0] > 1024
+    ):
+        weights, indices = [], []
+        for start in range(0, gating_output.shape[0], 1024):
+            end = start + 1024
+            chunk_weights, chunk_indices = fused_grouped_topk(
+                hidden_states[start:end],
+                gating_output[start:end],
+                topk,
+                renormalize,
+                e_score_correction_bias,
+                num_expert_group,
+                topk_group,
+                scoring_func,
+                routed_scaling_factor,
+                None if is_padding is None else is_padding[start:end],
+            )
+            weights.append(chunk_weights)
+            indices.append(chunk_indices)
+        return torch.cat(weights), torch.cat(indices)
+
     kernel_padding = is_padding if current_platform.is_cuda() else None
     if scoring_func == "sigmoid":
         # Fully fused kernel path for sigmoid
