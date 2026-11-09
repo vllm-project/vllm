@@ -169,6 +169,35 @@ def _resolve_kda_prefill_backend(
     return "flashkda" if supported and backend != "triton" else "triton"
 
 
+def _resolve_kda_decode_backend(
+    backend: str,
+    head_dim: int,
+    conv_size: int,
+    num_spec: int,
+    recurrent_state_dtype: torch.dtype,
+    lower_bound: float | None,
+) -> str:
+    """Pick the decode path: `aiter` (AITER's single-launch Gluon kernel for the
+    conv update, recurrence and gated RMSNorm) or `stock` (separate launches).
+    `backend` comes from `additional_config.kda_decode_backend`; only `auto` can
+    pick `aiter`, and it needs an fp32 state, head_dim 128, a width-4 conv, no
+    spec decode and AITER's kernel. Without a lower bound the stock kernel falls
+    back to -5.0 while AITER switches to the unbounded gate, so that config
+    keeps the stock chain."""
+    if backend not in ("auto", "native", "flashinfer", "triton"):
+        raise ValueError(f"Unsupported KDA decode backend: {backend}")
+    eligible = (
+        backend == "auto"
+        and recurrent_state_dtype == torch.float32
+        and head_dim == 128
+        and conv_size == 4
+        and lower_bound is not None
+        and num_spec == 0
+        and bool(rocm_aiter_ops.is_kda_gluon_decode_available())
+    )
+    return "aiter" if eligible else "stock"
+
+
 def _fused_qkv_conv1d(
     conv_size: int, projection_size: int, tp_size: int, tp_rank: int, prefix: str
 ) -> ColumnParallelLinear:
@@ -313,26 +342,17 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             prefix=f"{prefix}.conv1d",
         )
         additional_config = vllm_config.additional_config
-        decode_backend = (
+        decode_backend = _resolve_kda_decode_backend(
             additional_config.get("kda_decode_backend", "auto")
             if isinstance(additional_config, dict)
-            else "auto"
+            else "auto",
+            self.head_dim,
+            self.conv_size,
+            self.num_spec,
+            recurrent_state_dtype,
+            config.linear_lower_bound,
         )
-        if decode_backend not in ("auto", "native", "flashinfer", "triton"):
-            raise ValueError(f"Unsupported KDA decode backend: {decode_backend}")
-        # AITER's single-launch decode needs an fp32 state, head_dim 128 and a
-        # width-4 conv. Without a lower bound the stock kernel falls back to -5.0
-        # while AITER switches to the unbounded gate, so that config keeps the
-        # stock chain, as do spec decode and any explicit --kda-decode-backend.
-        self._use_aiter_decode = (
-            decode_backend == "auto"
-            and recurrent_state_dtype == torch.float32
-            and self.head_dim == 128
-            and self.conv_size == 4
-            and config.linear_lower_bound is not None
-            and self.num_spec == 0
-            and bool(rocm_aiter_ops.is_kda_gluon_decode_available())
-        )
+        self._use_aiter_decode = decode_backend == "aiter"
         if self._use_aiter_decode:
             logger.info_once("GLM-5.3-Flash KDA decode: AITER single-launch kernel.")
         self._register_decode_conv1d_weight()
