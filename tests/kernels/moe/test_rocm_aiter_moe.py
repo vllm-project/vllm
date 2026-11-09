@@ -6,7 +6,7 @@ This file owns the ROCm-specific fused-MoE custom-op path:
 - custom-op registration and fake-tensor support
 - enablement gating for `VLLM_ROCM_USE_AITER_MOE` and shared experts
 - BF16 accuracy for the fused MoE kernel on representative shapes
-- CDNA4+ 128x128 block FP8 accuracy (``AiterFp8BlockExperts``)
+- CDNA4+ 128x128 block FP8 accuracy (`AiterFp8BlockExperts`)
 - AITER MXFP4 MoE support per arch (incl. the MXFP4 experts check), and the
   gfx950-only W4A16 accuracy and determinism
 - MoE-facing FP8 group-quant activation quality
@@ -1593,7 +1593,7 @@ def test_aiter_fused_moe_mi3xx_fp8_accuracy():
     [(1, 256, 7168, 16, 6), (83, 512, 512, 8, 2), (1335, 4608, 7168, 2, 1)],
 )
 def test_aiter_fused_moe_block_fp8_accuracy(M, N, K, E, topk, default_vllm_config):
-    """The 128x128 block FP8 MoE path used by ``AiterFp8BlockExperts`` should
+    """The 128x128 block FP8 MoE path used by `AiterFp8BlockExperts` should
     match the block FP8 reference. AITER keeps the intermediate in fp32 and
     quantizes with torch's rounding, so the reference does the same."""
     from aiter import ActivationType, QuantType
