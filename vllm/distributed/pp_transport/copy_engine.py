@@ -201,7 +201,7 @@ class CopyEngineTransport(PPTransport):
     def recv(self, pp_group: "GroupCoordinator") -> IntermediateTensors:
         """This step's tensors, as views of the persistent tensors. The wait
         for the previous stage and the copy are queued on the current stream
-        when ``.tensors`` is first read, so GPU work queued before then (input
+        when `.tensors` is first read, so GPU work queued before then (input
         preparation) overlaps the transfer, as with NCCL."""
         from vllm.v1.worker.gpu_worker import AsyncIntermediateTensors
 
