@@ -323,20 +323,18 @@ class DeepseekV4DecoderLayer(nn.Module):
     def process_weights_after_loading(self) -> None:
         if self.mono is not None:
             self.mono.build_runner(self.attn_norm.weight.device)
-        self.refresh_derived_weights()
-        if self.mhc_overlap is not None and self.hc_ffn_fn_packed is not None:
-            self.mhc_overlap.prepare_mega_mhc(self.hidden_size, self.hc_ffn_fn.device)
-
-    def refresh_derived_weights(self) -> None:
         if not self.use_mega_mhc or not self.hc_attn_fn.is_cuda:
             return
-        # Refilled in place, so captured graphs read the reloaded weights.
+        # Reloads and in-place updates end here too; refilled in place, so
+        # captured graphs read the new weights.
         for name in ("hc_attn_fn", "hc_ffn_fn"):
             refill_derived(
                 self,
                 f"{name}_packed",
                 rocm_aiter_ops.mega_mhc_pack_fn(getattr(self, name)),
             )
+        if self.mhc_overlap is not None:
+            self.mhc_overlap.prepare_mega_mhc(self.hidden_size, self.hc_ffn_fn.device)
 
     @staticmethod
     def _hc_collapse(x: torch.Tensor, pre_mix: torch.Tensor) -> torch.Tensor:

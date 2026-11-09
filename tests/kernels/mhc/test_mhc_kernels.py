@@ -1667,9 +1667,10 @@ def test_mhc_pre_delayed_rocm_aiter_mega(num_tokens, seam):
 
 @requires_rocm_mega_mhc
 def test_deepseek_v41_rocm_mega_mhc_refit_reaches_captured_graph():
-    """Refreshing after an in-place weight refit repacks fn into the same
-    tensor, so a graph captured before the refit replays with the new gates,
-    also when the refit bypassed the version counter (`param.data.copy_`)."""
+    """Rerunning `process_weights_after_loading` after an in-place weight
+    refit, as every reload path does, repacks fn into the same tensor, so a
+    graph captured before the refit replays with the new gates, also when the
+    refit bypassed the version counter (`param.data.copy_`)."""
     from vllm.models.deepseek_v41.amd.model import DeepseekV4DecoderLayer
 
     set_random_seed(0)
@@ -1677,10 +1678,11 @@ def test_deepseek_v41_rocm_mega_mhc_refit_reaches_captured_graph():
     residual, fn, hc_scale, hc_base, norm_weight = _mega_mhc_inputs(num_tokens)
     layer = DeepseekV4DecoderLayer.__new__(DeepseekV4DecoderLayer)
     nn.Module.__init__(layer)
+    layer.mono = layer.mhc_overlap = None
     layer.use_mega_mhc = True
     layer.hc_attn_fn = nn.Parameter(fn.clone(), requires_grad=False)
     layer.hc_ffn_fn = nn.Parameter(fn.clone(), requires_grad=False)
-    layer.refresh_derived_weights()
+    layer.process_weights_after_loading()
     packed = layer.hc_ffn_fn_packed
     args = (residual, layer.hc_ffn_fn, hc_scale, hc_base, 1e-6, 1e-6, 1e-6, 2.0, 20)
     kwargs = _mega_mhc_seam_kwargs(num_tokens, hidden_size, "post", norm_weight)
@@ -1700,7 +1702,7 @@ def test_deepseek_v41_rocm_mega_mhc_refit_reaches_captured_graph():
 
     new_fn = torch.randn_like(fn) * 0.01
     layer.hc_ffn_fn.data.copy_(new_fn)
-    layer.refresh_derived_weights()
+    layer.process_weights_after_loading()
     assert layer.hc_ffn_fn_packed is packed
     residual.normal_()
     kwargs["sublayer_out"].normal_()
