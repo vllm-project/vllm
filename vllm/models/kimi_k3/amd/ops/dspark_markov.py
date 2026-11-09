@@ -114,8 +114,8 @@ def _record(value, idx, tag):
 
 @triton.jit
 def _poll(ptr, offs, mask, tag, err_ptr):
-    """Re-load the records at ``ptr + offs`` until every masked one carries
-    ``tag``; return them with the tag cleared (INT64_MIN where masked)."""
+    """Re-load the records at `ptr + offs` until every masked one carries
+    `tag`; return them with the tag cleared (INT64_MIN where masked)."""
     rec = tl.atomic_add(ptr + offs, 0, mask=mask, sem="relaxed", scope="sys")
     bad = tl.sum((mask & (((rec >> _TS) & _TM) != tag)).to(tl.int32))
     t0 = _now()
@@ -131,7 +131,7 @@ def _poll(ptr, offs, mask, tag, err_ptr):
 
 @triton.jit
 def _winners(mail_ptr, step, rv, tag, err_ptr, WORLD: tl.constexpr, WP2: tl.constexpr):
-    """The tokens chosen at ``step`` for every row (one poll for all rows)."""
+    """The tokens chosen at `step` for every row (one poll for all rows)."""
     j = tl.arange(0, WP2)
     ridx = tl.arange(0, _MR)
     rec = _poll(
@@ -150,7 +150,7 @@ def _shard_tile(
     stage_off, HAS_CACHE: tl.constexpr, WORLD: tl.constexpr,
 ):  # fmt: skip
     """The logits of one register tile of this rank's vocabulary rows (token
-    ids ``v``), stored into the local cache and every peer's staging; returns
+    ids `v`), stored into the local cache and every peer's staging; returns
     the tile's Gumbel-max."""
     w = ((wbits + z).to(tl.int32) << 16).to(tl.float32, bitcast=True)
     acc = tl.sum(w * e[None, :], axis=1)
@@ -343,7 +343,7 @@ def _sharded_markov_kernel(
 
 class ShardedMarkov:
     """Peer buffers + launcher on one TP rank. The constructor is collective
-    over ``cpu_group`` (before graph capture); every rank calls ``sample``
+    over `cpu_group` (before graph capture); every rank calls `sample`
     the same number of times with the same rows."""
 
     def __init__(
@@ -406,11 +406,11 @@ class ShardedMarkov:
         temperature, seeds, draft_logits, draft_tokens, markov_embeds_out=None,
         mode=None, warmup=False,
     ):  # fmt: skip
-        """``base_logits`` [rows, n_spec, Vb] bf16 holds this rank's vocabulary
-        row ``voff`` at column ``base_col`` (``voff`` for the full logits, 0
-        for the lm_head's local shard). Writes ``draft_tokens`` [rows, n_spec],
-        the full-vocabulary ``draft_logits`` rows, and the Markov embeddings
-        into ``markov_embeds_out`` [rows, n_spec, rank] if given. ``warmup``:
+        """`base_logits` [rows, n_spec, Vb] bf16 holds this rank's vocabulary
+        row `voff` at column `base_col` (`voff` for the full logits, 0
+        for the lm_head's local shard). Writes `draft_tokens` [rows, n_spec],
+        the full-vocabulary `draft_logits` rows, and the Markov embeddings
+        into `markov_embeds_out` [rows, n_spec, rank] if given. `warmup`:
         only compile the launches' kernels (no launch, not collective)."""
         rows, n_spec, _ = base_logits.shape
         mode = mode or self.mode(rows)
@@ -512,7 +512,7 @@ def _lm_head_shard(model) -> tuple[int, int] | None:
 
 
 class ShardedMarkovSampler:
-    """The draft model's ``sample_sequential`` (the speculator asks it before
+    """The draft model's `sample_sequential` (the speculator asks it before
     its own loop): the sharded chain fed by the lm_head's local logits."""
 
     def __init__(self, spec, rank, world, cpu_group):
@@ -586,7 +586,7 @@ class ShardedMarkovSampler:
         return True
 
     def _launch(self, spec, num_reqs, base, warmup=False):
-        """The chain over ``base`` [num_reqs, n_spec, vlocal] (``warmup``: a
+        """The chain over `base` [num_reqs, n_spec, vlocal] (`warmup`: a
         stand-in of its layout, compile only); returns the Markov embeddings
         buffer, or None without the confidence head."""
         n_spec = spec.num_speculative_steps
@@ -620,7 +620,7 @@ class ShardedMarkovSampler:
         return emb
 
     def after_step(self) -> None:
-        """Once per draft step on every TP rank (``DSparkSpeculator.propose``):
+        """Once per draft step on every TP rank (`DSparkSpeculator.propose`):
         raises on every rank once a rank gave up waiting for a peer's record.
         The draft tokens of that call are then unreliable (the rejection
         sampler keeps the output correct) and the ranks are out of step."""

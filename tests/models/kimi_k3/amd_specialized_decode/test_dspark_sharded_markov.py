@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Kimi-K3 DSpark sharded Markov sampling (ROCm, TP8) vs vLLM's loop.
 
-Reference: ``DSparkSpeculator._sample_sequential``'s loop with a real
-``DSparkMarkovHead`` (163840 x 256, random weights) and ``gumbel_sample``.
+Reference: `DSparkSpeculator._sample_sequential`'s loop with a real
+`DSparkMarkovHead` (163840 x 256, random weights) and `gumbel_sample`.
 Both launch modes, 1 / 4 rows, temperatures 1.0 / 0.6 / 0.0, padding rows:
 draft tokens match, every rank's draft logits cache matches up to the bias's
 last bf16 bit, and a CUDA graph replays to the eager result.
@@ -36,7 +36,7 @@ def _on_gfx950() -> bool:
 
 
 class _LogitsProcessor:
-    """The draft's LogitsProcessor; ``skip_gather`` gives this rank's shard."""
+    """The draft's LogitsProcessor; `skip_gather` gives this rank's shard."""
 
     def __init__(self, lp, local):
         self.lp, self.local, self.scale, self.soft_cap = lp, local, 1.0, None
