@@ -161,6 +161,8 @@ class RoutedExperts(PluggableLayer):
         # End random parameters
         self._loaded_expert_biases: set[str] = set()
 
+        # Set by the compressed-tensors quant config
+        self.ct_transforms: torch.nn.Module | None = None
         self.quant_method = self._get_quant_method(
             self.layer_name,
             self.quant_config,
@@ -1025,7 +1027,13 @@ class RoutedExperts(PluggableLayer):
         expert_mapping = self.get_expert_mapping(include_fused=True)
         mapping_by_expert = _index_expert_mapping(expert_mapping)
 
+        ct_transforms = getattr(self, "ct_transforms", None)
         for expert_name, loaded_weight in weights:
+            if ct_transforms is not None and (
+                name := ct_transforms.load_weight(expert_name, loaded_weight)
+            ):
+                yield name
+                continue
             qual_name = f"{self.layer_name}.{expert_name}"
             expert_key = qual_name.partition("experts.")[2].partition(".")[0]
             named_expert = (
@@ -1410,6 +1418,11 @@ class RoutedExperts(PluggableLayer):
     # Execution
     #
 
+    def process_weights_after_loading(self) -> None:
+        """Install compressed-tensors transforms once the final kernel exists."""
+        if self.ct_transforms is not None:
+            self.ct_transforms.process_weights_after_loading(self)
+
     def forward_modular(
         self,
         x: torch.Tensor,
@@ -1436,6 +1449,9 @@ class RoutedExperts(PluggableLayer):
 
         """
         assert not self.quant_method.is_monolithic
+
+        if self.ct_transforms is not None:
+            x = self.ct_transforms(x)  # after routing, before activation quant
 
         # Modular kernels use pre-computed routing
         return self.quant_method.apply(

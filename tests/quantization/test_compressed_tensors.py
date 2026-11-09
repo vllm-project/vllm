@@ -1007,7 +1007,7 @@ def test_compressed_tensors_mxfp4(vllm_runner):
         assert output
 
 
-def _mxfp4_moe_layer(monkeypatch, input_activations):
+def _mxfp4_moe_layer(monkeypatch, input_activations, transform_config=None):
     from types import SimpleNamespace
 
     from tests.kernels.moe.utils import make_dummy_moe_config
@@ -1041,6 +1041,7 @@ def _mxfp4_moe_layer(monkeypatch, input_activations):
                     "input_activations": input_activations,
                 }
             },
+            "transform_config": transform_config,
         }
     )
     return RoutedExperts(
@@ -1050,6 +1051,7 @@ def _mxfp4_moe_layer(monkeypatch, input_activations):
         quant_config,
         expert_map_manager=SimpleNamespace(
             local_num_experts=2,
+            num_fused_shared_experts=0,
             placement_strategy="linear",
             expert_map=None,
             expert_mask=None,
@@ -1094,6 +1096,84 @@ def test_mxfp4_moe_with_fp8_inputs_shares_native_mxfp4_method(monkeypatch):
 
     assert layer.w13_weight is w13
     assert layer.w13_weight_packed is w13
+
+
+_W13 = r"re:.*experts\.\d+\.w[13]$"
+_W2 = r"re:.*experts\.\d+\.w2$"
+
+
+def _moe_transform(targets, location="input", **scheme):
+    return {
+        "type": "hadamard",
+        **scheme,
+        "apply": [{"targets": targets, "location": location}],
+    }
+
+
+@pytest.mark.parametrize(
+    "groups,error,match",
+    [
+        pytest.param(
+            {"u": _moe_transform([_W13], location="output")},
+            NotImplementedError,
+            "output transforms are not supported",
+            id="output_location",
+        ),
+        pytest.param(
+            {"u": _moe_transform([_W13], randomize=True)},
+            NotImplementedError,
+            "randomized transforms",
+            id="randomize",
+        ),
+        pytest.param(
+            {"u": _moe_transform([_W13], type="random-matrix")},
+            NotImplementedError,
+            "type random-matrix is not supported",
+            id="unsupported_type",
+        ),
+        pytest.param(
+            {"u": _moe_transform([_W13], requires_grad=True)},
+            NotImplementedError,
+            "learned hadamard",
+            id="learned_hadamard",
+        ),
+        pytest.param(
+            {"u": _moe_transform([_W13]), "v": _moe_transform([_W13])},
+            NotImplementedError,
+            "Multiple online transforms",
+            id="multiple_schemes",
+        ),
+        pytest.param(
+            {"u": _moe_transform([r"re:.*experts\.0\.w2$"])},
+            ValueError,
+            "w2 input transforms must be identical",
+            id="experts_mismatch",
+        ),
+    ],
+)
+def test_compressed_tensors_moe_transform_rejections(monkeypatch, groups, error, match):
+    """Expert transforms are shared, input-located, non-learned Hadamards;
+    anything else fails at layer construction rather than at runtime."""
+    with pytest.raises(error, match=match):
+        _mxfp4_moe_layer(monkeypatch, None, {"config_groups": groups})
+
+
+def test_compressed_tensors_moe_transform_input_hadamard(monkeypatch, dist_init):
+    groups = {"u": _moe_transform([_W13]), "v": _moe_transform([_W2])}
+    layer = _mxfp4_moe_layer(monkeypatch, None, {"config_groups": groups})
+
+    transforms = layer.ct_transforms
+    assert transforms.w13.transforms[0].scheme_name == "u"
+    assert transforms.w2.transforms[0].scheme_name == "v"
+    assert transforms.w13.weight.partitions[0].shape == (64, 64)
+    assert transforms.w2.weight.partitions[0].shape == (32, 32)
+
+    # The shared matrix can be loaded from any expert.
+    matrix = torch.randn(32, 32)
+    assert transforms.load_weight("1.w2.v_input.weight", matrix) == (
+        "ct_transforms.w2.weight"
+    )
+    assert torch.equal(transforms.w2.weight.partitions[0], matrix)
 
 
 @pytest.mark.skipif(

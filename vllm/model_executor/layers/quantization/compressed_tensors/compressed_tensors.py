@@ -58,6 +58,9 @@ from vllm.model_executor.layers.quantization.compressed_tensors.transform.linear
     CompressedTensorsLinearTransformMethod,
     get_linear_transform_schemes,
 )
+from vllm.model_executor.layers.quantization.compressed_tensors.transform.moe import (  # noqa: E501
+    create_moe_transforms,
+)
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     find_matched_target,
     is_activation_quantization_format,
@@ -213,6 +216,9 @@ class CompressedTensorsConfig(QuantizationConfig):
         if isinstance(layer, Attention):
             return CompressedTensorsKVCacheMethod(self)
         if isinstance(layer, RoutedExperts):
+            layer.ct_transforms = create_moe_transforms(
+                layer, prefix, self.transform_config
+            )
             return CompressedTensorsMoEMethod.get_moe_method(
                 self, layer, layer_name=prefix
             )
