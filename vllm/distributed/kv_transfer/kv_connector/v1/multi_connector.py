@@ -137,6 +137,16 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
     - Load KV from the first connector that advertises available tokens from
       get_num_new_matched_tokens(), based on the order in the config.
     - Save to all connectors.
+
+    By default, get_num_new_matched_tokens() is called on every connector, even
+    after one reports a hit. Set `quick_load_from_first_only: true` in
+    kv_connector_extra_config to stop the lookup at the first connector with a
+    hit (e.g. skip a costly store lookup on a P/D decoder, when NIXL already
+    has the KV cache). Connectors after the hit then skip the lookup for that
+    request, but still receive update_state_after_alloc() with 0 tokens. Only
+    enable this if no later connector relies on its lookup for bookkeeping
+    (e.g. LMCacheMPConnector) or to avoid saving blocks it already holds
+    (e.g. LMCacheConnectorV1).
     """
 
     @classmethod
@@ -188,6 +198,11 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
             self._ktc_kv_transfer_config.append(temp_config.kv_transfer_config)
 
         assert vllm_config.kv_transfer_config is not None
+        self._quick_load_from_first_only = bool(
+            vllm_config.kv_transfer_config.kv_connector_extra_config.get(
+                "quick_load_from_first_only", False
+            )
+        )
         self._all_support_hma = MultiConnector.all_children_support_hma(
             vllm_config.kv_transfer_config
         )
@@ -485,6 +500,8 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
             if to_return[0] == 0 and toks > 0:
                 self._requests_to_connector[request.request_id] = i
                 to_return = (toks, load_async)
+                if self._quick_load_from_first_only:
+                    break
         return to_return
 
     def get_external_cache_hit_sources(

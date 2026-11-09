@@ -206,8 +206,7 @@ def test_register_finished_partial_tail_notifies_every_connector():
     )
 
 
-@pytest.fixture
-def mc() -> MultiConnector:
+def _make_mock_multi_connector(**extra_config: Any) -> MultiConnector:
     """MultiConnector using two mocked connectors."""
     mock_connector_config = {
         "kv_connector": "MockConnector",
@@ -219,6 +218,7 @@ def mc() -> MultiConnector:
         kv_connector="MultiConnector",
         kv_connector_extra_config={
             "connectors": [mock_connector_config, mock_connector_config],
+            **extra_config,
         },
     )
 
@@ -233,6 +233,44 @@ def mc() -> MultiConnector:
     )
 
     return mc
+
+
+@pytest.fixture
+def mc() -> MultiConnector:
+    return _make_mock_multi_connector()
+
+
+@pytest.mark.parametrize("quick_load_from_first_only", [False, True])
+@pytest.mark.parametrize("first_hit", [False, True])
+def test_quick_load_from_first_only(quick_load_from_first_only, first_hit):
+    mc = _make_mock_multi_connector(
+        quick_load_from_first_only=quick_load_from_first_only
+    )
+    request = MagicMock(request_id="request")
+    first, second = mc._connectors
+    first.get_num_new_matched_tokens.return_value = (
+        (16, False) if first_hit else (0, False)
+    )
+    second.get_num_new_matched_tokens.return_value = (32, False)
+
+    expected = (16, False) if first_hit else (32, False)
+    assert mc.get_num_new_matched_tokens(request, 0) == expected
+    assert mc._requests_to_connector[request.request_id] == (0 if first_hit else 1)
+    first.get_num_new_matched_tokens.assert_called_once_with(request, 0)
+    if quick_load_from_first_only and first_hit:
+        second.get_num_new_matched_tokens.assert_not_called()
+    else:
+        second.get_num_new_matched_tokens.assert_called_once_with(request, 0)
+
+    # Connectors that were not chosen still see the allocation, with 0 tokens.
+    blocks = MagicMock()
+    mc.update_state_after_alloc(request, blocks, expected[0])
+    first.update_state_after_alloc.assert_called_once_with(
+        request, blocks, 16 if first_hit else 0
+    )
+    second.update_state_after_alloc.assert_called_once_with(
+        request, blocks, 0 if first_hit else 32
+    )
 
 
 @pytest.mark.parametrize("chosen", [0, 1])
