@@ -108,7 +108,6 @@ def mock_output(out, tok=100):
     ids = list(out.num_scheduled_tokens.keys())
     return ModelRunnerOutput(
         req_ids=ids,
-        req_id_to_index={r: i for i, r in enumerate(ids)},
         sampled_token_ids=[[tok] for _ in ids],
         logprobs=None,
         prompt_logprobs_dict={},

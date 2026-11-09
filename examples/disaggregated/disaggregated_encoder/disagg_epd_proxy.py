@@ -5,7 +5,7 @@
 
 Use static server URLs, or --dynamic-registration for launcher-managed HTTP
 registration of E, P/PD and D instances. Both modes route OpenAI-compatible
-``/v1/chat/completions`` requests through encoder and inference clusters and
+`/v1/chat/completions` requests through encoder and inference clusters and
 share encoder fan-out, metadata-only rewriting, prefill, and retry/streaming
 forwarding.
 
@@ -58,7 +58,7 @@ DEFAULT_FAIL_THRESHOLD = 3
 DEFAULT_EVICTED_TTL = 900.0
 
 
-class InstanceRole(str, enum.Enum):
+class InstanceRole(enum.StrEnum):
     ENCODE = "encode"
     PREFILL = "prefill"
     DECODE = "decode"
@@ -71,7 +71,7 @@ class InstanceRecord:
 
     Attributes:
         role: Which stage this instance serves.
-        url: Base OpenAI-compatible URL, e.g. ``http://host:8000``.
+        url: Base OpenAI-compatible URL, e.g. `http://host:8000`.
         ec_zmq_addrs: Mooncake TP-rank-0 control addresses, one per DP replica,
             supplied by the launcher from the consumer's fixed port config.
         dp_size: Data-parallel replicas behind `url`, so the proxy can pick
@@ -1281,11 +1281,12 @@ async def _post_if_available(
 ) -> dict | None:
     """POST `payload` to `url`.
 
-    Returns
-    -------
-    • The decoded JSON body on success (2xx)
-    • None if the endpoint does not exist (404)
-    • Raises for anything else.
+    Returns:
+        The decoded JSON body on success (2xx), or None if the endpoint does
+        not exist (404).
+
+    Raises:
+        aiohttp.ClientResponseError: For any other status.
 
     """
     try:
