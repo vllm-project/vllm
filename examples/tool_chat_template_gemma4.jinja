@@ -381,7 +381,11 @@
         {%- if not enable_thinking -%}
             {{- '<|channel>thought\n<channel|>' -}}
         {%- endif -%}
-    {%- elif ns.prev_message_type == 'tool_response' and enable_thinking -%}
-        {{- '<|channel>thought\n' -}}
+    {%- elif ns.prev_message_type == 'tool_response' -%}
+        {%- if enable_thinking -%}
+            {{- '<|channel>thought\n' -}}
+        {%- else -%}
+            {{- '<|channel>thought\n<channel|>' -}}
+        {%- endif -%}
     {%- endif -%}
 {%- endif -%}

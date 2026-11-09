@@ -226,6 +226,7 @@ class TestGemma4ChatTemplate:
         ]
         result = _render(gemma4_template, messages, add_generation_prompt=True)
         assert not result.strip().endswith("<|turn>model\n")
+        assert result.rstrip("\n").endswith("<|channel>thought\n<channel|>")
 
     def test_reasoning_in_tool_chains(self, gemma4_template):
         """Reasoning field on assistant with tool_calls after last user
