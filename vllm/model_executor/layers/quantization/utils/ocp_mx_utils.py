@@ -100,6 +100,7 @@ def ocp_mx_weight_dtype_and_rows(
 class OCP_MX_Scheme(str, Enum):
     w_mxfp4 = "w_mxfp4"
     w_mxfp4_a_mxfp4 = "w_mxfp4_a_mxfp4"
+    w_mxfp4_a_mxfp8 = "w_mxfp4_a_mxfp8"
     w_mxfp4_a_mxfp6_e3m2 = "w_mxfp4_a_mxfp6_e3m2"
     w_mxfp4_a_mxfp6_e2m3 = "w_mxfp4_a_mxfp6_e2m3"
     w_mxfp4_a_fp8 = "w_mxfp4_a_fp8"
@@ -122,6 +123,8 @@ class OCP_MX_Scheme(str, Enum):
             return cls.w_mxfp6_e2m3
         elif input_dtype == "mxfp4" and weight_dtype == "mxfp4":
             return cls.w_mxfp4_a_mxfp4
+        elif input_dtype == "mxfp8_e4m3" and weight_dtype == "mxfp4":
+            return cls.w_mxfp4_a_mxfp8
         elif input_dtype == "mxfp6_e3m2" and weight_dtype == "mxfp4":
             return cls.w_mxfp4_a_mxfp6_e3m2
         elif input_dtype == "mxfp6_e2m3" and weight_dtype == "mxfp4":

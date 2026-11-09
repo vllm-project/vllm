@@ -1567,6 +1567,7 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         kMxfp4Dynamic,
         kMxfp6E3M2Dynamic,
         kMxfp6E2M3Dynamic,
+        kMxfp8Dynamic,
         kFp8DynamicTensorSym,
         kFp8StaticTensorSym,
         None,
@@ -1637,6 +1638,12 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
             self.mxfp4_backend, self.experts_cls = select_mxfp4_moe_backend(
                 moe, activation_key=kMxfp4Dynamic
             )
+        elif self.ocp_mx_scheme == "w_mxfp4_a_mxfp8":
+            # MXFP4 weights + dynamic per-group MXFP8 activations. No fused
+            # backend consumes per-group E8M0 activations on this path yet, so
+            # emulation dequantizes the weights and fake-quantizes the
+            # activations back to bf16.
+            self.mxfp4_backend = Mxfp4MoeBackend.EMULATION
 
         # Validation for unsupported schemes
         if any(

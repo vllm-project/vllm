@@ -30,6 +30,7 @@ from vllm.model_executor.layers.quantization.utils.mxfp6_utils import (
     quant_dequant_mxfp6,
 )
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+    dequant_mxfp8_to_bf16,
     mxfp8_e4m3_quantize,
     xpu_mxfp8_quantize,
 )
@@ -405,6 +406,18 @@ def _fp8_quantize_dequantize(
     return A, None
 
 
+def _mxfp8_e4m3_quantize_dequantize(
+    A: torch.Tensor,
+) -> tuple[torch.Tensor, None]:
+    """Fake-quantize to MXFP8 E4M3 and return bf16, matching `_mxfp4_quantize`.
+
+    The scales stay in the plain `(M, K / 32)` layout: they are consumed here
+    and never handed to a kernel that expects the swizzled arrangement.
+    """
+    quantized, scales = mxfp8_e4m3_quantize(A, is_sf_swizzled_layout=False)
+    return dequant_mxfp8_to_bf16(quantized, scales).to(A.dtype), None
+
+
 def _mxfp8_e4m3_quantize(
     A: torch.Tensor,
     A_scale: torch.Tensor | None,
@@ -498,10 +511,7 @@ def moe_kernel_quantize_input(
         # TODO: `quant_dtype == "mxfp8"` is ambiguous,
         # should be fp8_e4m3. OCP MX also defines `fp8_e5m2`.
         if not current_platform.is_xpu() and quantization_emulation:
-            raise NotImplementedError(
-                "moe_kernel_quantize_input does not support quant_dtype='mxfp8' MOE "
-                "quantization emulation. Please open an issue."
-            )
+            return _mxfp8_e4m3_quantize_dequantize(A)
         # Non-swizzled (M, K/32) uint8 UE8M0 scales; deepgemm_moe_permute packs
         # them for DeepGEMM, TRTLLM takes them as-is.
         return _mxfp8_e4m3_quantize(

@@ -2528,6 +2528,221 @@ def test_emulation_a_mxfp6_moe_forward_quantizes_activations():
     )
 
 
+def test_mxfp8_e4m3_is_ocp_scheme_and_bare_mxfp8_is_not():
+    """Quark's MXFP8 activation spelling must not collide with bare "mxfp8".
+
+    Quark records dynamic MXFP8 activations as "mxfp8_e4m3". The non-OCP MXFP8
+    backends (b12x, flashinfer) already use bare "mxfp8" and require
+    `ocp_mx_scheme is None`; mapping that name would make their batched
+    experts assert.
+    """
+    from vllm.model_executor.layers.fused_moe.config import (
+        FusedMoEQuantConfig,
+        ocp_mx_moe_quant_config,
+    )
+
+    assert (
+        OCP_MX_Scheme.from_quant_dtype("mxfp8_e4m3", "mxfp4")
+        == OCP_MX_Scheme.w_mxfp4_a_mxfp8
+    )
+    assert OCP_MX_Scheme.from_quant_dtype("mxfp8", "mxfp4") is None
+
+    scale = torch.empty(1, dtype=torch.uint8)
+    quark = ocp_mx_moe_quant_config(
+        quant_dtype="mxfp8_e4m3",
+        weight_dtype="mxfp4",
+        w1_scale=scale,
+        w2_scale=scale,
+    )
+    assert quark.quant_dtype == "mxfp8_e4m3"
+    assert quark.ocp_mx_scheme == OCP_MX_Scheme.w_mxfp4_a_mxfp8
+
+    bare = FusedMoEQuantConfig.make(
+        quant_dtype="mxfp8",
+        weight_dtype="mxfp4",
+        w1_scale=scale,
+        w2_scale=scale,
+    )
+    assert bare.quant_dtype == "mxfp8"
+    assert bare.ocp_mx_scheme is None
+
+
+@pytest.mark.skipif(not ROCM_AVAILABLE, reason="emulation backend targets ROCm")
+def test_quark_mxfp4_mxfp8_selects_emulation():
+    """MXFP4 weights + dynamic MXFP8 activations have no fused backend yet."""
+    from vllm.config import VllmConfig, set_current_vllm_config
+    from vllm.config.model import ModelConfig
+    from vllm.model_executor.layers.fused_moe import FusedMoEConfig
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+    from vllm.model_executor.layers.fused_moe.config import (
+        FusedMoEParallelConfig,
+        RoutingMethodType,
+    )
+    from vllm.model_executor.layers.fused_moe.experts.ocp_mx_emulation_moe import (
+        OCP_MXQuantizationEmulationTritonExperts,
+    )
+    from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import Mxfp4MoeBackend
+    from vllm.model_executor.layers.quantization.quark.quark_moe import (
+        QuarkOCP_MX_MoEMethod,
+    )
+    from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        kMxfp4Static,
+        kMxfp8Dynamic,
+    )
+
+    moe_config = FusedMoEConfig(
+        num_experts=4,
+        experts_per_token=1,
+        hidden_dim=256,
+        intermediate_size=256,
+        num_local_experts=4,
+        num_logical_experts=4,
+        moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
+        activation=MoEActivation.SILU,
+        in_dtype=torch.bfloat16,
+        device="cuda:0",
+        routing_method=RoutingMethodType.Renormalize,
+    )
+    vllm_config = VllmConfig()
+    vllm_config.model_config = ModelConfig()
+    with set_current_vllm_config(vllm_config):
+        method = QuarkOCP_MX_MoEMethod(moe_config, kMxfp4Static, kMxfp8Dynamic)
+
+    assert method.ocp_mx_scheme == OCP_MX_Scheme.w_mxfp4_a_mxfp8
+    assert method.input_dtype == "mxfp8_e4m3"
+    assert method.mxfp4_backend is Mxfp4MoeBackend.EMULATION
+    assert method.experts_cls is OCP_MXQuantizationEmulationTritonExperts
+
+
+@pytest.mark.skipif(not ROCM_AVAILABLE, reason="emulation backend targets ROCm")
+@torch.inference_mode()
+def test_emulation_a_mxfp8_moe_forward():
+    """MXFP4 weights with fake-quantized MXFP8 activations.
+
+    The reference is the weight-only emulation on the same packed weights, so
+    the gap is the activation quantization. MXFP8 should land much closer to
+    that reference than MXFP4 activations do.
+    """
+    from vllm.config import VllmConfig, set_current_vllm_config
+    from vllm.model_executor.layers.fused_moe import FusedMoEConfig
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+    from vllm.model_executor.layers.fused_moe.config import (
+        FusedMoEParallelConfig,
+        RoutingMethodType,
+        mxfp4_w4a16_moe_quant_config,
+        ocp_mx_moe_quant_config,
+    )
+    from vllm.model_executor.layers.fused_moe.experts.ocp_mx_emulation_moe import (
+        OCP_MXQuantizationEmulationTritonExperts,
+    )
+    from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
+        Mxfp4MoeBackend,
+        make_mxfp4_moe_kernel,
+    )
+    from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
+        mxfp4_quantize,
+    )
+    from vllm.v1.worker.workspace import init_workspace_manager
+
+    init_workspace_manager(torch.accelerator.current_device_index())
+
+    num_experts, topk = 8, 2
+    hidden_size, intermediate_size, num_tokens = 256, 256, 64
+    dtype, device = torch.bfloat16, "cuda:0"
+
+    torch.manual_seed(0)
+    w13, w13_scale = mxfp4_quantize(
+        torch.randn(
+            num_experts, 2 * intermediate_size, hidden_size, dtype=dtype, device=device
+        )
+        / 8
+    )
+    w2, w2_scale = mxfp4_quantize(
+        torch.randn(
+            num_experts, hidden_size, intermediate_size, dtype=dtype, device=device
+        )
+        / 8
+    )
+    w13, w2 = w13.contiguous(), w2.contiguous()
+    w13_scale, w2_scale = w13_scale.contiguous(), w2_scale.contiguous()
+
+    torch.manual_seed(1)
+    hidden_states = torch.randn(num_tokens, hidden_size, dtype=dtype, device=device)
+    topk_weights, topk_ids = torch.topk(
+        torch.randn(num_tokens, num_experts, dtype=torch.float32, device=device),
+        k=topk,
+        dim=-1,
+    )
+    topk_weights = torch.softmax(topk_weights, dim=-1).to(dtype)
+    topk_ids = topk_ids.to(torch.int32)
+
+    def run(quant_config):
+        moe_config = FusedMoEConfig(
+            num_experts=num_experts,
+            experts_per_token=topk,
+            hidden_dim=hidden_size,
+            intermediate_size=intermediate_size,
+            num_local_experts=num_experts,
+            num_logical_experts=num_experts,
+            moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
+            activation=MoEActivation.SILU,
+            in_dtype=dtype,
+            device=device,
+            routing_method=RoutingMethodType.Renormalize,
+        )
+        with set_current_vllm_config(VllmConfig()):
+            kernel = make_mxfp4_moe_kernel(
+                moe_quant_config=quant_config,
+                moe_config=moe_config,
+                mxfp4_backend=Mxfp4MoeBackend.EMULATION,
+                experts_cls=OCP_MXQuantizationEmulationTritonExperts,
+                routing_tables=None,
+            )
+            return kernel.apply(
+                hidden_states=hidden_states,
+                w1=w13,
+                w2=w2,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                activation=MoEActivation.SILU,
+                global_num_experts=num_experts,
+                expert_map=None,
+                apply_router_weight_on_input=False,
+            )
+
+    def rel(a, b):
+        return (a.float() - b.float()).norm() / b.float().norm()
+
+    # A fresh quant config per run: the experts null the weight scales on it.
+    a_mxfp8 = ocp_mx_moe_quant_config(
+        quant_dtype="mxfp8_e4m3",
+        weight_dtype="mxfp4",
+        w1_scale=w13_scale,
+        w2_scale=w2_scale,
+    )
+    assert a_mxfp8.ocp_mx_scheme == OCP_MX_Scheme.w_mxfp4_a_mxfp8
+    out_a_mxfp8 = run(a_mxfp8)
+
+    a_mxfp4 = ocp_mx_moe_quant_config(
+        quant_dtype="mxfp4",
+        weight_dtype="mxfp4",
+        w1_scale=w13_scale,
+        w2_scale=w2_scale,
+    )
+    out_a_mxfp4 = run(a_mxfp4)
+
+    weight_only = mxfp4_w4a16_moe_quant_config(w1_scale=w13_scale, w2_scale=w2_scale)
+    out_weight_only = run(weight_only)
+
+    assert torch.isfinite(out_a_mxfp8).all()
+    rel_mxfp8 = rel(out_a_mxfp8, out_weight_only).item()
+    rel_mxfp4 = rel(out_a_mxfp4, out_weight_only).item()
+    assert rel_mxfp8 > 0.0, "MXFP8 fake-quant left the activation unchanged"
+    # Group-32 E4M3 is far finer than MXFP4. 0.04 was measured on this shape.
+    assert rel_mxfp8 < 0.12, rel_mxfp8
+    assert rel_mxfp8 < rel_mxfp4, (rel_mxfp8, rel_mxfp4)
+
+
 # (backend, activation, hidden_in, inter_in, hidden_out, inter_out)
 #
 # The AITER_MXFP4_MXFP4 (W4A4) rows are the ones this table exists for: the

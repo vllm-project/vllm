@@ -550,12 +550,16 @@ class FusedMoEQuantConfig:
         - gemm1_beta: Optional MXFP4 TRTLLM SwiGLU beta parameter.
         - gemm1_clamp_limit: Optional MXFP4 TRTLLM SwiGLU clamp limit.
         """
+        # "mxfp8_e4m3" is the OCP MX spelling Quark uses for MXFP4 weights with
+        # MXFP8 activations; it maps to an OCP_MX_Scheme, while bare "mxfp8" is
+        # the activation dtype of the non-OCP MXFP8 backends and does not.
         assert not isinstance(quant_dtype, str) or quant_dtype in {
             "nvfp4",
             "mxfp4",
             "mxfp6_e3m2",
             "mxfp6_e2m3",
             "mxfp8",
+            "mxfp8_e4m3",
         }
         assert not isinstance(weight_dtype, str) or weight_dtype in {
             "nvfp4",
