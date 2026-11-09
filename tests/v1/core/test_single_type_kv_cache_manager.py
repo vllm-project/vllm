@@ -351,7 +351,7 @@ def test_dflash_window_backs_only_each_chunks_tail():
         enable_caching=False,
         kv_cache_group_id=0,
         scheduler_block_size=4,
-        max_admission_blocks_per_request=10**9,
+        max_admission_blocks_per_request=8,
     )
     num_free_blocks = block_pool.get_num_free_blocks()
 
@@ -378,6 +378,24 @@ def test_dflash_window_backs_only_each_chunks_tail():
     manager.remove_skipped_blocks("r", 80)
     assert resident_blocks() == [18, 19, 20]
     assert block_pool.get_num_free_blocks() == num_free_blocks - 3
+
+    # Admission subtracts the three held blocks from the eight-block cap.
+    assert (
+        manager.get_num_blocks_to_allocate(
+            "r", 81, [], 80, 80, 80, apply_admission_cap=True
+        )
+        == 5
+    )
+
+    # A later chunk adds four blocks, with another null run before its tail.
+    manager.allocate_new_blocks("r", 121, 120)
+    assert block_pool.get_num_free_blocks() == num_free_blocks - 7
+    assert (
+        manager.get_num_blocks_to_allocate(
+            "r", 121, [], 120, 120, 120, apply_admission_cap=True
+        )
+        == 1
+    )
 
 
 @pytest.mark.parametrize("max_in_flight_steps", [1, 2])

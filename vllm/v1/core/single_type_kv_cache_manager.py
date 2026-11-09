@@ -975,11 +975,7 @@ class RSWAManager(FullAttentionManager):
 class SlidingWindowManager(SingleTypeKVCacheManager):
     def __init__(self, kv_cache_spec: SlidingWindowSpec, **kwargs) -> None:
         super().__init__(kv_cache_spec, **kwargs)
-        self.sliding_window = kv_cache_spec.sliding_window
-        # Extra trailing tokens to retain below the window (never attended) so a
-        # multi-module MTP store-side lag can still reconstruct the window from
-        # cached blocks.
-        self.extra_retained_tokens = kv_cache_spec.extra_retained_tokens
+        self.num_retained_tokens = kv_cache_spec.num_retained_tokens
 
     @classmethod
     def _contiguous_blocks_for_hit(
@@ -1207,10 +1203,7 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
             The number of tokens that will be skipped for attention computation.
 
         """
-        return max(
-            0,
-            num_computed_tokens - self.sliding_window + 1 - self.extra_retained_tokens,
-        )
+        return max(0, num_computed_tokens - self.num_retained_tokens)
 
 
 class DFlashSlidingWindowManager(SlidingWindowManager):
@@ -1282,8 +1275,10 @@ class DFlashSlidingWindowManager(SlidingWindowManager):
             # is set by the steps in flight; a short one never spans more than
             # its tokens.
             assert self.max_admission_blocks_per_request is not None
+            blocks = self.req_to_blocks.get(request_id, ())
+            start = self._num_null_prefix_blocks.get(request_id, 0)
             num_held_blocks = sum(
-                not block.is_null for block in self.req_to_blocks.get(request_id, ())
+                not blocks[i].is_null for i in range(start, len(blocks))
             )
             num_required_blocks = min(
                 cdiv(num_tokens, self.block_size),
@@ -1336,14 +1331,7 @@ class DFlashSlidingWindowManager(SlidingWindowManager):
             num_request_tokens = max_length
         max_num_blocks = max_length // block_size
         first_block = (
-            max(
-                num_request_tokens
-                - kv_cache_spec.sliding_window
-                + 1
-                - kv_cache_spec.extra_retained_tokens,
-                0,
-            )
-            // block_size
+            max(num_request_tokens - kv_cache_spec.num_retained_tokens, 0) // block_size
         )
         computed_blocks: tuple[list[KVCacheBlock], ...] = tuple(
             [block_pool.null_block] * max_num_blocks for _ in kv_cache_group_ids
@@ -1390,16 +1378,11 @@ class DFlashSlidingWindowManager(SlidingWindowManager):
         # KV only for a request ending within the window past it, so sparse
         # retention keeps just the boundary tails.
         block_size = kv_cache_spec.block_size
+        num_retained_tokens = kv_cache_spec.num_retained_tokens
         mask = [False] * (end_block - start_block)
         for boundary_tokens in reachable_boundaries:
             hit_tokens = boundary_tokens // alignment_tokens * alignment_tokens
-            first_read = max(
-                boundary_tokens
-                + 2
-                - kv_cache_spec.sliding_window
-                - kv_cache_spec.extra_retained_tokens,
-                0,
-            )
+            first_read = max(boundary_tokens + 1 - num_retained_tokens, 0)
             for j in range(
                 max(start_block, first_read // block_size),
                 min(end_block, hit_tokens // block_size),
