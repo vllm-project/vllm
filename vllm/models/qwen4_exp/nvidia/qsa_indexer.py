@@ -97,7 +97,7 @@ def _tp_prefill_sharding_supported(vllm_config: VllmConfig) -> bool:
     return (
         current_platform.is_cuda()
         and current_platform.is_device_capability(90)
-        and parallel.tensor_parallel_size == 4
+        and parallel.tensor_parallel_size in (4, 8)
         and parallel.nnodes == 1
         and parallel.distributed_executor_backend == "mp"
         and parallel.decode_context_parallel_size == 1
@@ -116,7 +116,7 @@ def _use_tp_prefill_sharding(
     token_topk: int,
     compress_ratio: int,
 ) -> bool:
-    # Only the measured BF16 H20/TP4 large-prefill regime amortizes exchange.
+    # Only the measured BF16 H20 large-prefill regimes amortize exchange.
     return (
         enabled
         and q.dtype == torch.bfloat16

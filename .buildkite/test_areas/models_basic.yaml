@@ -425,10 +425,10 @@ steps:
   commands:
     - pytest -v -s models/qwen4_exp/test_hc_ops.py
 
-- label: ":nvidia: (H100) [Nightly] Qwen4 Exp QSA TP4"
-  key: qwen4-exp-qsa-tp4
+- label: ":nvidia: (H100) [Nightly] Qwen4 Exp QSA TP4 and TP8"
+  key: qwen4-exp-qsa-tp
   device: h100
-  num_devices: 4
+  num_devices: 8
   optional: true
   timeout_in_minutes: 20
   working_dir: "/vllm-workspace/tests"
