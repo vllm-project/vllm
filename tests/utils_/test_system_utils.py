@@ -209,6 +209,7 @@ if pid == 0:
     signal.alarm(900)
     llm = LLM(
         model="hmellor/tiny-random-LlamaForCausalLM",
+        dtype="float16",
         enforce_eager=True,
         gpu_memory_utilization=0.2,
         max_model_len=64,
