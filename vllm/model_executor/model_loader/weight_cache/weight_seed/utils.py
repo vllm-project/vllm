@@ -4,15 +4,16 @@
 
 import socket
 from collections.abc import Mapping
+from dataclasses import fields
 from typing import TYPE_CHECKING, Any, TypedDict, cast
 
 import torch
+from pydantic import TypeAdapter
 
 from vllm.config import replace
 from vllm.model_executor.model_loader.weight_cache.protocol import (
     TensorKind,
     WeightCacheKey,
-    json_to_dataclass,
     parse_seed_address,
     recv_msg,
     send_msg,
@@ -30,7 +31,7 @@ class WeightsSeedPayload(TypedDict):
     """What a source daemon's `weights` resolve sends to a peer loader."""
 
     cache_config: dict[str, Any]
-    """`dataclass_to_json(WeightCacheKey)` of the source's shard."""
+    """`asdict(WeightCacheKey)` of the source's shard."""
     model: str
     manifest: dict[str, Any]
     """Storage manifest, as `build_manifest` produces."""
@@ -250,7 +251,13 @@ def validate_weights_payload(
     for key in ("aliases", "attrs"):
         if payload.get(key) is not None and not isinstance(payload[key], dict):
             raise ValueError(f"Seed daemon returned malformed {key}")
-    source_key = json_to_dataclass(WeightCacheKey, payload.get("cache_config"))
+    cache_config = payload.get("cache_config")
+    if not isinstance(cache_config, dict):
+        raise ValueError("Seed daemon returned a malformed cache key")
+    declared = {f.name for f in fields(WeightCacheKey)}
+    if unknown := set(cache_config) - declared:
+        raise ValueError(f"Unknown WeightCacheKey fields: {sorted(unknown)}")
+    source_key = TypeAdapter(WeightCacheKey).validate_python(cache_config)
     mismatched = seed_mismatches(expected_key, source_key, model, source_model)
     if mismatched:
         hint = (

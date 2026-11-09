@@ -2,15 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The weights seedable: a daemon both serves and fetches its shard."""
 
+import contextlib
 import threading
 import time
+from dataclasses import asdict
 from typing import TYPE_CHECKING, Any
 
 from vllm.logger import init_logger
-from vllm.model_executor.model_loader.weight_cache.protocol import (
-    WeightCacheKey,
-    dataclass_to_json,
-)
 from vllm.model_executor.model_loader.weight_cache.transport import Seedable
 from vllm.model_executor.model_loader.weight_cache.weight_seed.core import (
     PEER_IPC_BACKEND,
@@ -35,27 +33,6 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 WEIGHT_COPY_LEASE_TIMEOUT_S = 300.0
-
-
-def _reject_lease(transport: Any) -> None:
-    try:
-        acknowledge_lease(transport)
-    except Exception as e:
-        logger.warning("Could not reject weight-cache lease: %s", e)
-
-
-def validate_weights_payload_or_reject(
-    transport: Any,
-    payload: Any,
-    expected_key: WeightCacheKey,
-    model: str,
-) -> WeightsSeedPayload:
-    """Validate a payload without masking validation errors with ack failures."""
-    try:
-        return validate_weights_payload(payload, expected_key, model)
-    except Exception:
-        _reject_lease(transport)
-        raise
 
 
 class WeightShardSeed(Seedable):
@@ -141,7 +118,7 @@ class WeightShardSeed(Seedable):
             with self._lease_condition:
                 self._active_copies += 1
             return {
-                "cache_config": dataclass_to_json(daemon.cache_key),
+                "cache_config": asdict(daemon.cache_key),
                 # Matched instead of the checkpoint fingerprint by a mirror
                 # without the safetensors to hash (see seed_mismatches).
                 "model": daemon.model_config.model,
@@ -160,6 +137,11 @@ class WeightShardSeed(Seedable):
     def validate_payload(self, payload: Any) -> WeightsSeedPayload:
         """Structural checks plus the shard fingerprint against this daemon."""
         daemon = self._daemon
-        return validate_weights_payload_or_reject(
-            daemon.d2d, payload, daemon.cache_key, daemon.model_config.model
-        )
+        try:
+            return validate_weights_payload(
+                payload, daemon.cache_key, daemon.model_config.model
+            )
+        except Exception:
+            with contextlib.suppress(Exception):
+                acknowledge_lease(daemon.d2d)
+            raise
