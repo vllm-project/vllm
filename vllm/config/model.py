@@ -53,6 +53,7 @@ from vllm.transformers_utils.model_arch_config_convertor import (
     MODEL_ARCH_CONFIG_CONVERTORS,
     ModelArchConfigConvertorBase,
 )
+from vllm.transformers_utils.processor import processor_has_attr
 from vllm.transformers_utils.repo_utils import resolve_revision
 from vllm.transformers_utils.runai_utils import ObjectStorageModel, is_runai_obj_uri
 from vllm.transformers_utils.utils import maybe_model_redirect
@@ -539,8 +540,9 @@ class ModelConfig:
             factors["mm_enable_mm_embeds"] = self.multimodal_config.enable_mm_embeds
         return factors
 
+    @classmethod
     def _update_nested(
-        self,
+        cls,
         target: PreTrainedConfig | dict[str, Any],
         updates: dict[str, Any],
     ) -> None:
@@ -558,7 +560,7 @@ class ModelConfig:
                     isinstance(nested_target, dict)
                     or hasattr(nested_target, "__dict__")
                 ):
-                    self._update_nested(nested_target, value)
+                    cls._update_nested(nested_target, value)
                     continue
 
             # Set the value (base case)
@@ -567,8 +569,9 @@ class ModelConfig:
             else:
                 setattr(target, key, value)
 
+    @classmethod
     def _apply_dict_overrides(
-        self,
+        cls,
         config: PreTrainedConfig,
         overrides: dict[str, Any],
     ) -> None:
@@ -579,7 +582,7 @@ class ModelConfig:
             attr = getattr(config, key, None)
             if attr is not None and isinstance(attr, PreTrainedConfig):
                 # It's a nested config - recursively update it
-                self._update_nested(attr, value)
+                cls._update_nested(attr, value)
             else:
                 # It's a dict-valued parameter - set it directly
                 setattr(config, key, value)
@@ -1172,6 +1175,14 @@ class ModelConfig:
                 cls += "EmbeddingModel"
             elif task == "classify":
                 cls += "ForSequenceClassification"
+        elif cls == "TransformersMultiModal" and processor_has_attr(
+            self.model,
+            self.hf_config.model_type,
+            "apply_transcription_request",
+            revision=self.revision,
+            trust_remote_code=self.trust_remote_code,
+        ):
+            cls += "ForTranscription"
         else:
             cls += "ForCausalLM"
         return cls
