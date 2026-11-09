@@ -3,8 +3,8 @@
 """Combined top-k/top-p masking on top of FlashInfer candidate selection.
 
 FlashInfer selects the ``top_k_max`` highest logits per row. A fused Triton
-kernel then applies the per-row top-k cutoff, filters by top-p and scatters the
-survivors back into a dense masked-logit tensor.
+kernel then orders the candidates, applies the per-row top-k cutoff, filters by
+top-p and scatters the survivors back into the logits, masked in place.
 
 Eligibility follows FlashInfer's top-k-first gate: every row must have an active
 per-row top-k within ``[1, MAX_TOP_K]`` and the vocabulary must be large enough.
@@ -61,7 +61,7 @@ def apply_top_k_top_p_flashinfer(
     p: torch.Tensor | None,
     top_k_bounds: tuple[int, int],
 ) -> torch.Tensor:
-    """Return dense masked logits for a batch that passed the eligibility gate.
+    """Mask a batch that passed the eligibility gate, in place.
 
     Args:
         logits: [batch_size, vocab_size] logits to mask.
@@ -70,45 +70,45 @@ def apply_top_k_top_p_flashinfer(
         top_k_bounds: Host-side (min, max) of ``k`` over all rows.
 
     Returns:
-        A new [batch_size, vocab_size] tensor with masked logits set to -inf.
+        ``logits``, with masked logits set to -inf.
 
     """
     import flashinfer
 
     top_k_min, top_k_max = top_k_bounds
-    # The scatter ignores candidate order unless top-p or per-row k needs it.
+    # The tie-break alone fixes the selected set, so FlashInfer can skip sorting
+    # and deterministic ordering. The kernel below orders the candidates itself.
     values, indices = flashinfer.top_k(
         logits.contiguous(),
         top_k_max,
-        sorted=p is not None or top_k_min != top_k_max,
-        deterministic=True,
+        sorted=False,
+        deterministic=False,
         tie_break=1,
         dsa_graph_safe=logits.shape[-1] % 4 != 0,
     )
-    masked = torch.full_like(logits, float("-inf"))
+    logits.fill_(float("-inf"))
     if p is None and top_k_min == top_k_max:
-        return masked.scatter_(1, indices, values)
+        return logits.scatter_(1, indices, values)
     _candidates_to_logits_kernel[(logits.shape[0],)](
         values,
         indices,
         k,
         p,
-        masked,
+        logits,
         values.stride(0),
         values.stride(1),
         indices.stride(0),
         indices.stride(1),
-        masked.stride(0),
-        masked.stride(1),
+        logits.stride(0),
+        logits.stride(1),
         k.stride(0),
         p.stride(0) if p is not None else 0,
         top_k_max,
         p is not None,
-        top_k_min == top_k_max,
         triton.next_power_of_2(top_k_max),
         num_warps=4,
     )
-    return masked
+    return logits
 
 
 @triton.jit
@@ -128,34 +128,42 @@ def _candidates_to_logits_kernel(
     p_stride,
     TOP_K_MAX: tl.constexpr,
     HAS_P: tl.constexpr,
-    UNIFORM_K: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
-    """Filter [batch, top_k_max] FP32 candidates and scatter retained logits."""
+    """Order [batch, top_k_max] FP32 candidates by (logit desc, index asc), cut
+    them at the row's k and p, and scatter the retained logits."""
     row = tl.program_id(0)
     offset = tl.arange(0, BLOCK)
-    rank = TOP_K_MAX - 1 - offset
     valid = offset < TOP_K_MAX
     value = tl.load(
-        values_ptr + row * value_row_stride + rank * value_col_stride,
+        values_ptr + row * value_row_stride + offset * value_col_stride,
         mask=valid,
         other=-float("inf"),
     ).to(tl.float32)
     index = tl.load(
-        indices_ptr + row * index_row_stride + rank * index_col_stride,
+        indices_ptr + row * index_row_stride + offset * index_col_stride,
         mask=valid,
         other=0,
-    )
-    if not UNIFORM_K:
-        row_k = tl.load(k_ptr + row * k_stride)
-        value = tl.where(rank < row_k, value, -float("inf"))
-    keep = valid
+    ).to(tl.int64)
+    # Ascending sort key: the order-preserving uint32 of the logit, inverted into
+    # a signed high word, with the index in the low word.
+    bits = tl.where(value == 0, 0.0, value).to(tl.int32, bitcast=True)
+    bits = bits.to(tl.int64) & 0xFFFFFFFF
+    ordered = tl.where(bits >= 0x80000000, 0xFFFFFFFF - bits, bits + 0x80000000)
+    key = ((0x7FFFFFFF - ordered) << 32) | index
+    key = tl.sort(tl.where(valid, key, 0x7FFFFFFFFFFFFFFF), 0)
+    index = key & 0xFFFFFFFF
+    ordered = 0x7FFFFFFF - (key >> 32)
+    bits = tl.where(ordered >= 0x80000000, ordered - 0x80000000, 0xFFFFFFFF - ordered)
+    value = bits.to(tl.uint32).to(tl.float32, bitcast=True)
+    keep = offset < tl.load(k_ptr + row * k_stride)
     if HAS_P:
-        weight = tl.exp(value - tl.max(value, 0))
-        probability = weight / tl.sum(weight, 0)
-        cumulative = tl.cumsum(probability, 0)
+        top = tl.max(tl.where(keep, value, -float("inf")), 0)
+        weight = tl.where(keep, tl.exp(value - top), 0.0)
+        # Keep the smallest prefix whose mass reaches p.
+        before = tl.cumsum(weight, 0) - weight
         p = tl.load(p_ptr + row * p_stride)
-        keep = valid & (~(cumulative <= 1.0 - p) | (offset == TOP_K_MAX - 1))
+        keep = keep & (before < p * tl.sum(weight, 0))
     tl.store(
         output_ptr + row * output_row_stride + index * output_col_stride,
         value,
