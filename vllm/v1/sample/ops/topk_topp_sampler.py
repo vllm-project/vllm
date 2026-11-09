@@ -515,6 +515,7 @@ def apply_top_k_top_p(
 
     has_topp_only_rows must be True if any row has p < 1 and
     k >= logits.shape[-1] (no active top-k).
+    The logits tensor may be updated in-place (always on the CUDA filter path).
     """
     if p is None and k is None:
         return logits

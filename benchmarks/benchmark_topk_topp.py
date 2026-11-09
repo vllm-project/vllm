@@ -48,6 +48,7 @@ class BenchmarkConfig:
     p_values: torch.Tensor | None  # [batch_size] or None
     description: str
     ops_pct: float = 0.0  # Percentage of ops relative to batch size
+    real_logits: bool = False  # Rows tiled from --logits-file instead of Zipf
 
 
 def calculate_ops_pct(
@@ -106,6 +107,36 @@ def create_logits(
     return logits
 
 
+def tile_rows(rows: torch.Tensor, batch_size: int) -> torch.Tensor:
+    """Repeat captured logit rows until the batch is full."""
+    repeats = -(-batch_size // rows.shape[0])
+    return rows.repeat(repeats, 1)[:batch_size].contiguous()
+
+
+def create_real_configs(
+    batch_sizes: list[int], vocab_size: int, device: str = "cuda"
+) -> list[BenchmarkConfig]:
+    """Top-p 0.95 alone and with top-k 20 (common model defaults) on real logits."""
+    configs = []
+    for batch_size in batch_sizes:
+        p = torch.full((batch_size,), 0.95, dtype=torch.float32, device=device)
+        k = torch.full((batch_size,), 20, dtype=torch.int32, device=device)
+        for name, k_values in (("real_topp", None), ("real_topk_topp", k)):
+            configs.append(
+                BenchmarkConfig(
+                    name=f"{name}_b{batch_size}_v{vocab_size // 1000}k",
+                    batch_size=batch_size,
+                    vocab_size=vocab_size,
+                    k_values=k_values,
+                    p_values=p,
+                    description=f"{name} (p=0.95, k=20 if set), batch={batch_size}",
+                    ops_pct=calculate_ops_pct(k_values, p, vocab_size, batch_size),
+                    real_logits=True,
+                )
+            )
+    return configs
+
+
 def apply_top_k_top_p_flashinfer_mask(logits, k, p):
     """Keep top-k in logits; adapt probability-based top-p back to logits."""
     if k is not None:
@@ -125,6 +156,41 @@ IMPLEMENTATIONS = {
     "flashinfer-mask": apply_top_k_top_p_flashinfer_mask,
     "pytorch": apply_top_k_top_p_pytorch,
 }
+
+
+def implementation(name: str, config: BenchmarkConfig):
+    """The callable for name, with Triton given the host-side hint MRV2 passes."""
+    func = IMPLEMENTATIONS[name]
+    if name != "triton":
+        return func
+    hint = has_topp_only_rows(config)
+    return lambda logits, k, p: func(logits, k, p, has_topp_only_rows=hint)
+
+
+def has_topp_only_rows(config: BenchmarkConfig) -> bool:
+    k, p = config.k_values, config.p_values
+    if p is None:
+        return False
+    no_k = torch.ones_like(p, dtype=torch.bool) if k is None else k >= config.vocab_size
+    return bool((no_k & (p < 1)).any())
+
+
+def exact_reference(
+    logits: torch.Tensor, k: torch.Tensor | None, p: torch.Tensor | None
+) -> torch.Tensor:
+    """FP64 filter in (logit desc, index asc) order: exactly k tokens, then the
+    smallest prefix with mass >= p. apply_top_k_top_p_pytorch is no reference on
+    tied logits (bf16 lm_head rows): it keeps every tie at the k-th logit, and
+    its unstable sort keeps arbitrary ties at the top-p cutoff."""
+    values, order = logits.double().sort(dim=-1, descending=True, stable=True)
+    ranks = torch.arange(logits.shape[1], device=logits.device)
+    keep = ranks < (logits.shape[1] if k is None else k[:, None])
+    if p is not None:
+        probs = values.masked_fill(~keep, -float("inf")).softmax(dim=-1)
+        before = probs.cumsum(dim=-1) - probs
+        keep = keep & ((before < p[:, None]) | (p[:, None] >= 1))
+    kept = torch.empty_like(keep).scatter_(1, order, keep)
+    return logits.masked_fill(~kept, -float("inf"))
 
 
 def measure_memory() -> tuple[int, int]:
@@ -283,23 +349,27 @@ def run_benchmark(
     num_finite_logits: int | None = None,
     check: bool = False,
     output: Path | None = None,
+    real_rows: torch.Tensor | None = None,
 ):
     """Run selected implementations with identical inputs and masked-logit outputs."""
     results = []
 
     for index, config in enumerate(configs):
-        logits = create_logits(
-            config.batch_size,
-            config.vocab_size,
-            num_finite_logits=num_finite_logits,
-        )
+        if config.real_logits:
+            logits = tile_rows(real_rows, config.batch_size)
+        else:
+            logits = create_logits(
+                config.batch_size,
+                config.vocab_size,
+                num_finite_logits=num_finite_logits,
+            )
         checks = {}
         if check:
             checks = check_implementations(logits, config, implementations)
         k, p = config.k_values, config.p_values
         timings = {}
         for name in implementations:
-            func = IMPLEMENTATIONS[name]
+            func = implementation(name, config)
             reset_memory_stats()
             times = bench_gpu_time_with_cupti(
                 # note: measured runtime includes logits.clone()
@@ -330,12 +400,12 @@ def check_implementations(
     config: BenchmarkConfig,
     implementations: list[str],
 ) -> dict:
-    """Compare filtered distributions against PyTorch outside the timed region."""
+    """Compare filtered distributions against the exact reference, untimed."""
     k, p = config.k_values, config.p_values
-    reference = apply_top_k_top_p_pytorch(logits.clone(), k, p).softmax(dim=-1)
+    reference = exact_reference(logits, k, p).softmax(dim=-1)
     checks = {}
     for name in implementations:
-        actual = IMPLEMENTATIONS[name](logits.clone(), k, p).softmax(dim=-1)
+        actual = implementation(name, config)(logits.clone(), k, p).softmax(dim=-1)
         total_variation = (actual - reference).abs().sum(-1).max().item() / 2
         checks[name] = {
             "close": torch.allclose(actual, reference, rtol=1e-5, atol=1e-6),
@@ -438,10 +508,18 @@ def main():
             "topp_partial",
             "topk_topp_whole",
             "mixed_partial",
+            "real_topp",
+            "real_topk_topp",
         ],
         help="Run only the selected scenarios (default: all)",
     )
     parser.add_argument("--output", type=Path, help="Save incremental JSONL results")
+    parser.add_argument(
+        "--logits-file",
+        type=Path,
+        help="Captured [rows, vocab] FP32 logits (torch.save), adds the real_* "
+        "scenarios with the rows tiled to each batch size",
+    )
 
     args = parser.parse_args()
     if args.output is not None:
@@ -460,6 +538,10 @@ def main():
 
     # Create configs
     configs = create_benchmark_configs(args.batch_sizes, args.vocab_sizes)
+    real_rows = None
+    if args.logits_file is not None:
+        real_rows = torch.load(args.logits_file).float().cuda()
+        configs += create_real_configs(args.batch_sizes, real_rows.shape[1])
     if args.scenarios is not None:
         configs = [c for c in configs if c.name.split("_b")[0] in args.scenarios]
 
@@ -473,6 +555,7 @@ def main():
         implementations=args.implementations,
         check=args.check,
         output=args.output,
+        real_rows=real_rows,
     )
 
     # Print summary

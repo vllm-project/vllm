@@ -557,7 +557,7 @@ void top_k_top_p_filter(torch::stable::Tensor& logits,
                         const std::optional<torch::stable::Tensor>& p,
                         torch::stable::Tensor& workspace);
 
-int64_t top_k_top_p_filter_workspace_size(int64_t sm_count);
+int64_t top_k_top_p_filter_workspace_size(int64_t device);
 #endif
 
 void selective_scan_fwd(

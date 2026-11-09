@@ -659,7 +659,7 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
   ops.def(
       "top_k_top_p_filter(Tensor! logits, Tensor? k, Tensor? p, "
       "Tensor! workspace) -> ()");
-  ops.def("top_k_top_p_filter_workspace_size(int sm_count) -> int");
+  ops.def("top_k_top_p_filter_workspace_size(int device) -> int");
 #endif
 
   // Activation ops

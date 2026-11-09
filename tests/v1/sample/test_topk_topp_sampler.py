@@ -1022,6 +1022,8 @@ def _make_logits(kind: str, batch: int, vocab: int, gen: Generator) -> torch.Ten
     if kind == "zeros":
         return torch.zeros(batch, vocab)
     logits = torch.randn(batch, vocab, generator=gen)
+    if kind == "huge":  # thinking-budget forcing, at a sampled position
+        logits[:, 0] = 1e9
     return logits.bfloat16().float() if kind == "bf16" else logits
 
 
@@ -1062,8 +1064,11 @@ class TestCudaTopkToppExact:
             ("zipf", 200, 131072, None, 0.9),
             ("normal", 256, 32768, None, 0.9),
             ("bf16", 64, 65536, "mixed", "mixed"),
+            ("normal", 8, 131072, 5000, 0.9),
             ("normal", 8, 65536, 30000, None),
             ("zeros", 8, 65536, 20, 0.5),
+            ("huge", 4, 131072, None, 0.95),
+            ("huge", 1, 248320, None, 0.95),
             ("normal", 3, 65537, "mixed", "mixed"),
         ],
     )
@@ -1092,7 +1097,11 @@ class TestCudaTopkToppExact:
             graph.replay()
             _assert_exact_filter(source, logits, k, p)
 
-    def test_sampler_dispatches_to_cuda_filter(self, monkeypatch: pytest.MonkeyPatch):
+    @pytest.mark.parametrize("enabled", ["1", "0"])
+    def test_sampler_dispatches_to_cuda_filter(
+        self, monkeypatch: pytest.MonkeyPatch, enabled: str
+    ):
+        monkeypatch.setenv("VLLM_USE_CUDA_TOPK_TOPP_FILTER", enabled)
         import vllm.v1.sample.ops.topk_topp_sampler as sampler_ops
 
         calls = []
@@ -1105,7 +1114,7 @@ class TestCudaTopkToppExact:
         logits = torch.randn(8, 32000, generator=self.generator)
         k = torch.full((8,), 50, dtype=torch.int32)
         apply_top_k_top_p(logits, k, None)
-        assert calls == [logits.shape]
+        assert calls == ([logits.shape] if enabled == "1" else [])
 
 
 # =============================================================================

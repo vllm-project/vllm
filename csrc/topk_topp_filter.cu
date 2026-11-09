@@ -18,10 +18,12 @@
 // Nuclei beyond the store use a value-space window pass; rows the candidates
 // cannot handle at all use an exact multi-pass radix selection over the row.
 //
-// Semantics match apply_top_k_top_p_pytorch: top-k by logit, then top-p on the
-// renormalized top-k distribution, keeping the smallest prefix of the
-// (logit desc, index asc) order whose mass reaches p. Masses use 2^-44
-// fixed point, so sums are exact and deterministic.
+// Semantics: exactly k tokens by logit, ties broken by lowest index (like the
+// Triton kernel, while apply_top_k_top_p_pytorch keeps every tie at the k-th
+// logit), then top-p on the renormalized top-k distribution, keeping the
+// smallest prefix of the (logit desc, index asc) order whose mass reaches p.
+// Masses are FP32 exp() rounded to 2^-44 fixed point, so sums are
+// deterministic.
 
 #include <cooperative_groups.h>
 #include <cuda_runtime.h>
@@ -52,7 +54,10 @@ constexpr unsigned KEEP_P =
     STORE * 5 / 8;  // retained after compaction, top-p only
 constexpr unsigned KEY_NEGINF = 0x007fffffu;
 constexpr unsigned NO_CANDIDATES = 0xffffffffu;
-constexpr float MASS_SCALE = 17592186044416.f;  // 2^44, supports vocab < 2^20
+constexpr int MAX_VOCAB = 1 << 20;
+constexpr float MASS_SCALE = 17592186044416.f;  // 2^44
+// A row mass is a sum of at most MAX_VOCAB terms of at most MASS_SCALE.
+static_assert(double(MASS_SCALE) * MAX_VOCAB <= 18446744073709551616.0);
 constexpr int OK = 0, GLOBAL = 1;
 constexpr int SBINS = 256;       // sample histogram bins
 constexpr float SB_NATS = 32.f;  // sample histogram range below the sample max
@@ -194,6 +199,11 @@ __device__ __forceinline__ unsigned ordered(float x) {
 
 __device__ __forceinline__ float from_ordered(unsigned key) {
   return __uint_as_float((key & 0x80000000u) ? (key & 0x7fffffffu) : ~key);
+}
+
+// Clamps before the conversion: a forced logit (1e9) puts d far outside int.
+__device__ __forceinline__ int clamp_bin(float d, int bins) {
+  return int(fminf(fmaxf(d, 0.f), float(bins - 1)));
 }
 
 __device__ __forceinline__ U64 fixed_mass(unsigned key, float maximum) {
@@ -843,8 +853,7 @@ __device__ void record_sample(Shared& s, const float4 (&v)[SVECS], float top) {
     for (int c = 0; c < 4; ++c) {
       float y = lane(v[j], c);
       if (y == -INFINITY) continue;
-      atomicAdd(&s.shist[min(SBINS - 1, int((top - y) * (SBINS / SB_NATS)))],
-                1u);
+      atomicAdd(&s.shist[clamp_bin((top - y) * (SBINS / SB_NATS), SBINS)], 1u);
     }
   if (!CL) return;
   __syncthreads();
@@ -1236,9 +1245,7 @@ struct Bins {
   __device__ bool in_domain(unsigned key, float y) const {
     return key <= tk && y >= lo;
   }
-  __device__ int bin(float y) const {
-    return min(WBINS - 1, max(0, int((hi - y) * inv)));
-  }
+  __device__ int bin(float y) const { return clamp_bin((hi - y) * inv, WBINS); }
 };
 
 // Warp 0: first bin where above + cumulative mass reaches target.
@@ -1480,7 +1487,11 @@ __device__ void process_row(Shared& s, Store store, Ring& ring, float* x,
   a.need_sum = use_p && !use_k;
   a.keep_rank = use_k ? max(CAP / 2, kk + 1) : KEEP_P;
   a.min_needed = use_k ? kk : 1u;
-  a.target = use_k ? min(CAP / 2, max(1024u, 8 * kk)) : TARGET_P;
+  // 8x margin for small k, and 2x (over 5 sigma of the sample estimate) for
+  // large k, so the expected candidates cover k and one stream suffices.
+  a.target =
+      use_k ? max(min(CAP / 2, max(1024u, 8 * kk)), min(MAX_CAND_K, 2 * kk))
+            : TARGET_P;
   a.sample = vocab > STAGE;
   a.vocab = vocab;
   a.sample_size = sample_size;
@@ -1732,10 +1743,10 @@ int choose_splits(const Plan& pl, int batch, int vocab) {
   while (fits(splits * 2) && batch <= pl.clusters[splits * 2] &&
          batch * splits * 2 <= pl.sms / 2)
     splits *= 2;
-  // Up to two CTAs per SM, small clusters with shallow rings still cut the
-  // per-row latency, which dominates when each CTA would get one row. This
-  // pays off only for long rows.
-  if (splits == 1 && vocab >= 16 * STAGE && fits(2) && batch <= 2 * pl.sms)
+  // Up to one row per SM, small clusters with shallow rings still cut the
+  // per-row latency. This pays off only for long rows. Past one row per SM,
+  // one CTA per row is faster (B300: 10% to 30% at 160 to 296 rows).
+  if (splits == 1 && vocab >= 16 * STAGE && fits(2) && batch <= pl.sms)
     splits = fits(4) && batch * 4 * 8 <= 2 * pl.sms * 7 ? 4 : 2;
   return splits;
 }
@@ -1748,8 +1759,11 @@ int64_t workspace_bytes(int64_t sm_count) {
 }  // namespace topk_topp_filter
 }  // namespace vllm
 
-int64_t top_k_top_p_filter_workspace_size(int64_t sm_count) {
-  return vllm::topk_topp_filter::workspace_bytes(sm_count);
+// Also initializes the device plan, outside the first call of the op.
+int64_t top_k_top_p_filter_workspace_size(int64_t device) {
+  namespace tf = vllm::topk_topp_filter;
+  const torch::stable::accelerator::DeviceGuard device_guard(int(device));
+  return tf::workspace_bytes(tf::plan(int(device)).sms);
 }
 
 void top_k_top_p_filter(torch::stable::Tensor& logits,
@@ -1764,7 +1778,7 @@ void top_k_top_p_filter(torch::stable::Tensor& logits,
                   "top_k_top_p_filter: logits must be a 2D float32 CUDA tensor "
                   "with contiguous rows");
   const int64_t batch = logits.size(0), vocab = logits.size(1);
-  STD_TORCH_CHECK(vocab < (int64_t(1) << 20),
+  STD_TORCH_CHECK(vocab < tf::MAX_VOCAB,
                   "top_k_top_p_filter: vocab must be below 2^20, got ", vocab);
   if (k)
     STD_TORCH_CHECK(

@@ -49,6 +49,7 @@ if TYPE_CHECKING:
     VLLM_LOG_STATS_INTERVAL: float = 10.0
     VLLM_TRACE_FUNCTION: int = 0
     VLLM_USE_FLASHINFER_SAMPLER: bool = True
+    VLLM_USE_CUDA_TOPK_TOPP_FILTER: bool = True
     VLLM_PP_LAYER_PARTITION: str | None = None
     VLLM_CPU_KVCACHE_SPACE: int | None = 0
     VLLM_CPU_OMP_THREADS_BIND: str = "auto"
@@ -930,6 +931,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
         bool(int(os.environ["VLLM_USE_FLASHINFER_SAMPLER"]))
         if "VLLM_USE_FLASHINFER_SAMPLER" in os.environ
         else True
+    ),
+    # Whether apply_top_k_top_p uses the CUDA filter kernel (SM90, SM100 and
+    # SM103, FP32 logits). Set to 0 to use the Triton kernel instead.
+    "VLLM_USE_CUDA_TOPK_TOPP_FILTER": lambda: bool(
+        int(os.getenv("VLLM_USE_CUDA_TOPK_TOPP_FILTER", "1"))
     ),
     # Pipeline stage partition strategy
     "VLLM_PP_LAYER_PARTITION": lambda: os.getenv("VLLM_PP_LAYER_PARTITION", None),
