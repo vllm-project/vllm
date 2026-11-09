@@ -74,7 +74,11 @@ def _fake_worker(
     wrapper._mark_transfer_terminal_locked = lambda transfer_id: None
     wrapper._is_transfer_terminal_locked = lambda transfer_id: False
     worker = SimpleNamespace(
-        moriio_wrapper=wrapper, tp_rank=tp_rank, xfer_stats=MoRIIOKVConnectorStats()
+        moriio_wrapper=wrapper,
+        tp_rank=tp_rank,
+        pp_rank=0,
+        pp_size=1,
+        xfer_stats=MoRIIOKVConnectorStats(),
     )
     if set_remote_dp_size_local is not None:
         worker.remote_dp_size_local = set_remote_dp_size_local
@@ -144,7 +148,7 @@ def _real_wrapper() -> MoRIIOWrapper:
     wrapper.done_req_ids = []
     wrapper.done_remote_allocate_req_dict = {}
     wrapper.done_write_cache_req_ids = []
-    wrapper._write_done_counts = {}
+    wrapper._write_done_senders = {}
     wrapper.failed_write_cache_req_ids = []
     wrapper._terminal_transfer_ids = OrderedDict()
     return wrapper
@@ -284,8 +288,8 @@ def test_execute_write_task_writes_every_fanout_target():
     worker = _fake_worker(alloc)
     session_engine_ids: list[str] = []
 
-    worker.get_engine_name_with_dp_tp = (
-        lambda engine_id, dp_rank, tp_rank: f"{engine_id}_dp{dp_rank}_tp{tp_rank}"
+    worker.get_engine_name_with_dp_tp = lambda engine_id, dp_rank, tp_rank: (
+        f"{engine_id}_dp{dp_rank}_tp{tp_rank}"
     )
 
     def _get_built_session(engine_id: str):

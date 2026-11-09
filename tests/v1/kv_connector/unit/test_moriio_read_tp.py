@@ -118,8 +118,8 @@ def _make_reader(
 ) -> list:
     """Route the decode rank's reads to the prefill ranks; return its releases.
 
-    With ``prewarmed`` (session key -> dialed prefill rank, filled by
-    ``_prewarm``), a read may only use a session the eager handshake opened.
+    With `prewarmed` (session key -> dialed prefill rank, filled by
+    `_prewarm`), a read may only use a session the eager handshake opened.
     """
     worker = consumer.worker
     released: list = []
@@ -245,7 +245,7 @@ def _read_all(
 ):
     """Run every decode rank's READ; return the releases per prefill rank.
 
-    ``advertised_tp`` is the prefill TP size the request carries, which is 0
+    `advertised_tp` is the prefill TP size the request carries, which is 0
     when the proxy does not forward it.
     """
     if advertised_tp is None:

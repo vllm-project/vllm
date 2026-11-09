@@ -2,27 +2,27 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Single-node MoRIIO P/D checks on dummy weights, in WRITE and READ mode.
 
-Each case serves a real model architecture with ``--load-format dummy``, widened
-by ``moriio_wide_dummy`` (see ``DUMMY_WEIGHT_RANGE``): the
+Each case serves a real model architecture with `--load-format dummy`, widened
+by `moriio_wide_dummy` (see `DUMMY_WEIGHT_RANGE`): the
 config keeps the real hidden size, head geometry, MLA ranks and recurrent-state
 shapes, so the connector registers and transfers exactly the production cache
 layout, but the layer stack is cut to a few layers that still contain every
 cache-group kind and the MoE is cut to a handful of experts. Dummy weights are
 seeded, so the prefill, decode and reference servers hold identical weights.
-Cases marked ``HMA_off`` run every server with
-``--disable-hybrid-kv-cache-manager``, so all layers, sliding-window ones
+Cases marked `HMA_off` run every server with
+`--disable-hybrid-kv-cache-manager`, so all layers, sliding-window ones
 included, share a single cache group.
 
 Prefill runs on one GPU, decode on another, and MoRI moves the KV over xGMI:
 prefill pushes it in WRITE mode, and decode pulls it in READ mode (cases
-marked ``READ``). The proxy runs a READ request's prefill to completion before
+marked `READ`). The proxy runs a READ request's prefill to completion before
 it sends the request to decode.
 Either way decode computes the last prompt token itself. For hybrid models
-prefill computes only the first ``n - 1`` tokens and transfers the KV and the
+prefill computes only the first `n - 1` tokens and transfers the KV and the
 recurrent state after them. For attention-only models prefill computes and
-transfers all ``n``, and decode's scheduler, seeing the whole prompt cached,
+transfers all `n`, and decode's scheduler, seeing the whole prompt cached,
 recomputes the last token. A direct serve splits the same prompt the same way
-when the first ``n - 1`` tokens end on a chunk boundary that both servers share,
+when the first `n - 1` tokens end on a chunk boundary that both servers share,
 so the prompts are chosen to make that happen: one is a single chunk plus one
 token, the others are a whole number of hybrid cache blocks plus one token
 (prefix caching ends chunks on block boundaries) or, for attention-only models,
@@ -36,8 +36,8 @@ separately started servers can drift apart by a few bf16 logit steps. Guards:
 * decode must report an external prefix-cache hit for every transferred token
   of every prompt, so the match is not a local recompute;
 * changing the first half of a prompt must move the direct serve's log-probs by
-  at least ``MIN_CONTEXT_EFFECT``, so a wrong prefix would be visible;
-* ``test_corrupted_prefill_state_is_detected`` makes prefill compute its KV with
+  at least `MIN_CONTEXT_EFFECT`, so a wrong prefix would be visible;
+* `test_corrupted_prefill_state_is_detected` makes prefill compute its KV with
   a different norm epsilon (same shapes, different values) and requires every
   prompt to fail the comparison.
 """
@@ -533,10 +533,10 @@ def _open_port() -> int:
 
 
 def _open_port_block(size: int = _PORT_BLOCK) -> int:
-    """First port of ``size`` consecutive free ports no other server got.
+    """First port of `size` consecutive free ports no other server got.
 
     The block is below the kernel's ephemeral range: MoRIIO binds these ports
-    only after the model loads, and until then any ``bind(0)`` (RCCL, gloo,
+    only after the model loads, and until then any `bind(0)` (RCCL, gloo,
     ZMQ) could be given a released ephemeral port.
     """
     with open("/proc/sys/net/ipv4/ip_local_port_range") as f:
@@ -829,7 +829,7 @@ def _reference(
 ) -> Reference:
     """Direct serve; also checks that the comparison can see a wrong prefix.
 
-    It runs at the decode TP size unless ``tp`` is given.
+    It runs at the decode TP size unless `tp` is given.
     """
     selector, devices = _visible_devices()
     devices = devices[: tp or case.decode_tp]

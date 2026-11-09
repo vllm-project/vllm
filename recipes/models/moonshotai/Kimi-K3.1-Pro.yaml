@@ -5,11 +5,11 @@ meta:
   provider: "Moonshot AI"
   description: "2.8T-parameter native multimodal MoE with Kimi Delta Attention, sparse MLA, and a 1M-token context window"
   date_added: 2026-11-02
-  date_updated: 2026-11-05
+  date_updated: 2026-11-08
   tasks:
     - multimodal
     - text
-  performance_headline: "TP8 on two GB300 trays or one B300 node, or one MI355X node, for the MXFP4 checkpoint"
+  performance_headline: "TP8 on two GB300 trays or one B300 node, or one MI355X node, for the MXFP4 checkpoint; TP32 on a 4-host TPU slice"
   related_recipes:
     - "moonshotai/Kimi-K3"
   default_hardware: gb300
@@ -18,6 +18,7 @@ meta:
     vr200: supported
     810e: verified
     m890: verified
+    ironwood: supported
 
 model:
   model_id: "moonshotai/Kimi-K3.1-Pro"
@@ -61,26 +62,43 @@ features:
       - '{"model":"Inferact/Kimi-K3.1-Pro-DSpark-preview","num_speculative_tokens":5,"method":"dspark","draft_sample_method":"probabilistic"}'
     hardware_overrides:
       # MI355X runs the draft on ROCM_AITER_MLA, and the draft's FP8 KV assumes
-      # an FP8 target KV. 5 draft tokens is the AgentX TP8 preset's value.
+      # an FP8 target KV. The AgentX TP8 presets set their own token count:
+      # 3 at concurrency 48 and 7 at concurrency 1.
       mi355x:
         args:
           - "--kv-cache-dtype"
           - "fp8"
           - "--speculative-config"
           - '{"model":"Inferact/Kimi-K3.1-Pro-DSpark-preview","num_speculative_tokens":5,"method":"dspark","attention_backend":"ROCM_AITER_MLA","kv_cache_dtype":"fp8","draft_sample_method":"probabilistic"}'
+    # TPU: #2775 validated DSpark with 7 draft tokens, but DSpark plus
+    # --async-scheduling (always on for TPU here) hits the spec-decode warmup
+    # bug fixed by vllm-project/vllm-torchtpu#2770, still open — so the feature
+    # is gated off on TPU until it lands.
+    hardware:
+      ironwood: unsupported
   text_only:
     description: "Skip the vision encoder for text-only workloads; frees its memory for KV cache."
+    # Always on in the TPU override (the TPU path is text-only), so the toggle
+    # would be a no-op there.
+    hardware:
+      ironwood: unsupported
     args:
       - "--language-model-only"
   low_latency_decode:
     label: "Low-latency decode"
-    description: "Run decode steps on the fused CuTe DSL decode path (latency_specialized), which covers the sparse attention layers. Fastest at low concurrency; needs FULL decode CUDA graphs."
-    # Qualified at TP8 and TP8 + DCP8 without expert parallelism.
+    description: "Run decode steps on the fused latency_specialized decode path (CuTe DSL kernels on NVIDIA, FlyDSL kernels on MI355X). Fastest at low concurrency; needs FULL decode CUDA graphs. On MI355X it needs speculative decoding and at most 16 decode rows per step; see the concurrency-1 preset."
+    # Qualified at TP8 and TP8 + DCP8 without expert parallelism. On MI355X it
+    # also needs speculative decoding, no KV offload connector, max-num-seqs
+    # 1, 2, 4 or 8 with max-num-seqs x (1 + draft tokens) <= 16, and an FP32
+    # KDA recurrent state; without DCP only 3 or 7 draft tokens at
+    # max-num-seqs 1 or 2. See the concurrency-1 preset.
     strategies:
       - single_node_tp
       - multi_node_tp
     hardware:
       ppu: unsupported
+      # The fused decode path has CUDA and ROCm kernels only.
+      ironwood: unsupported
     args:
       - "--additional-config"
       - '{"decode_backend":"latency_specialized"}'
@@ -89,6 +107,8 @@ features:
     description: "Store the MLA latent in NVFP4 instead of FP8 for about 1.5x the KV cache tokens; the indexer keys stay FP8."
     hardware:
       ppu: unsupported
+      # NVFP4 is a Blackwell format; TPU serves with FP8 KV cache.
+      ironwood: unsupported
     args:
       - "--kv-cache-dtype"
       - "nvfp4_ds_mla"
@@ -104,7 +124,7 @@ variants:
     precision: mxfp4
     # 1561 GB of safetensors x 1.2.
     vram_minimum_gb: 1874
-    supported_hardware: [b300, gb300, vr200, mi355x, 810e, m890]
+    supported_hardware: [b300, gb300, vr200, mi355x, 810e, m890, ironwood]
     description: "MXFP4 routed-expert weights (~1.56 TB on disk); attention, shared experts and the vision tower stay in BF16."
     hardware_overrides:
       810e:
@@ -121,6 +141,33 @@ variants:
       vr200:
         docker_image: "vllm/vllm-openai:kimi-k31-cu134"
         install: { pip: false }
+      # TPU serving runs through vllm-torchtpu (vllm-project/vllm-torchtpu).
+      # K3.1 support is under review as vllm-project/vllm-torchtpu#2775; until
+      # it merges, the Install tab builds from the staging branch kimi-k31pro.
+      # The TPU path is text-only (the vision tower is not loaded) and was
+      # validated at TP32 / EP32 on a 2x2x4 TPU v7x slice (4 hosts, 16 chips,
+      # 32 devices).
+      ironwood:
+        install:
+          docker: false
+          pip:
+            command: "git clone https://github.com/vllm-project/vllm-torchtpu.git && cd vllm-torchtpu && git checkout kimi-k31pro && VLLM_TARGET_DEVICE=empty uv sync --group vllm && source .venv/bin/activate"
+            note: "Source build of vLLM-TorchTPU from the kimi-k31pro branch (Python 3.12, uv; its vllm group builds the pinned vLLM 0.32.0). Tracks vllm-torchtpu#2775 until it merges into main."
+        extra_env:
+          TPU_VLLM_ENABLE_UNIFIED_BLOCK_POOL: "1"
+          TPU_MOE_HIERARCHICAL_EP: "1"
+        # Settings every TPU serve needs. The run-specific tuning of the
+        # validated config (context, batch, compile sizes) lives in the
+        # v7x_validated / v7x_dcp8 presets, sourced to #2775.
+        extra_args:
+          - "--language-model-only"
+          - "--limit-mm-per-prompt"
+          - '{"image":0,"video":0}'
+          - "--enable-ep-weight-filter"
+          - "--kv-cache-dtype"
+          - "fp8"
+          - "--async-scheduling"
+          - "--enable-prefix-caching"
 
 compatible_strategies:
   - single_node_tp
@@ -132,6 +179,8 @@ strategy_hardware:
   multi_node_tep:
     810e: supported
     m890: supported
+    # The validated TPU layout is TP32 with expert parallelism (EP32).
+    ironwood: supported
   single_node_tp:
     810e: unsupported
     m890: unsupported
@@ -141,9 +190,15 @@ strategy_hardware:
   multi_node_tp:
     810e: unsupported
     m890: unsupported
+    # TPU offers only TP+EP (the validated layout); plain multi-node TP is
+    # not offered there.
+    ironwood: unsupported
+  # PD disaggregation has not been validated on TPU, and the default NIXL
+  # connector is CUDA-oriented.
   pd_cluster:
     810e: unsupported
     m890: unsupported
+    ironwood: unsupported
 
 # One B300 or MI355X node (8 GPUs) or two GB300 / VR200 trays (2 x 4 GPUs) hold the checkpoint.
 strategy_min_gpus:
@@ -152,6 +207,9 @@ strategy_min_gpus:
   multi_node_tp: 8
   810e: 32
   m890: 32
+  # The validated TPU layout spans a 2x2x4 v7x slice: TP32 over 4 hosts
+  # (16 chips, 32 devices).
+  ironwood: 32
 
 default_strategy: single_node_tp
 
@@ -179,14 +237,16 @@ hardware_overrides:
 
 presets:
   mi355x_agentx:
-    label: "AgentX TP8"
+    label: "AgentX TP8, concurrency 48"
     hardware: mi355x
     strategy: single_node_tp
     workload: "Agentic (InferenceX AgentX)"
-    description: "Concurrency 48 on one MI355X node: TP8 with DCP8, the K3.1 DSpark draft, host KV offload and the reduced-precision knobs of the best-performance band."
+    description: "Concurrency 48 on one MI355X node: TP8 with DCP8, the K3.1 DSpark draft with 3 tokens and host KV offload, with linear layers, MoE combine and all-reduce in BF16."
     select:
       frontend: python
-      features: { spec_decoding: true, text_only: true }
+      # Low-latency decode stated off: the builder keeps any feature a preset
+      # doesn't name, and the concurrency-1 preset turns it on.
+      features: { spec_decoding: true, text_only: true, low_latency_decode: false }
       kv_offload: simple
     args:
       - "--load-format"
@@ -196,6 +256,9 @@ presets:
       - "--enable-prefix-caching"
       - "--kv-cache-dtype"
       - "fp8"
+      # The K3.1 precision policy keeps the KDA recurrent state in FP32.
+      - "--mamba-ssm-cache-dtype"
+      - "float32"
       - "--stream-interval"
       - "10"
       - "--decode-context-parallel-size"
@@ -206,24 +269,25 @@ presets:
       - "1"
       - "--prefix-match-unit"
       - "64"
+      - "--moe-backend"
+      - "auto"
+      - "--seed"
+      - "7"
+      - "--disable-uvicorn-access-log"
       - "--max-num-seqs"
       - "48"
       - "--max-num-batched-tokens"
       - "10240"
       - "--gpu-memory-utilization"
-      - "0.92"
+      - "0.91"
       - "--attention-config"
-      - '{"mla_prefill_backend":"ROCM_AITER_FA","indexer_kv_dtype":"mxfp4"}'
+      - '{"indexer_kv_dtype":"mxfp4"}'
       - "--additional-config"
       - '{"kda_prefill_backend":"fused"}'
-      # Online FP8 per-channel for the KDA input projections only; routed
-      # experts keep their MXFP4 weights.
-      - "--quantization-config"
-      - '{"targets":{"*in_proj_qkvgfab":"fp8_per_channel"}}'
-      # The decode batches (48 requests x (1 + 5 draft tokens), so 6 to 288 in
-      # steps of 6), then the prefill sizes up to --max-num-batched-tokens.
+      # The decode batches (48 requests x (1 + 3 draft tokens), so 4 to 192 in
+      # steps of 4), then the prefill sizes up to --max-num-batched-tokens.
       - "--compilation-config"
-      - '{"mode":3,"cudagraph_mode":"FULL_AND_PIECEWISE","max_cudagraph_capture_size":10240,"custom_ops":["+fused_rms_norm_gated"],"cudagraph_capture_sizes":[6,12,18,24,30,36,42,48,54,60,66,72,78,84,90,96,102,108,114,120,126,132,138,144,150,156,162,168,174,180,186,192,198,204,210,216,222,228,234,240,246,252,258,264,270,276,282,288,320,352,384,416,448,480,512,640,768,896,1024,1280,1536,1792,2048,2560,3072,3584,4096,4608,5120,6144,6400,7168,8192,8704,10240]}'
+      - '{"mode":3,"cudagraph_mode":"FULL_AND_PIECEWISE","max_cudagraph_capture_size":10240,"custom_ops":["+fused_rms_norm_gated"],"cudagraph_capture_sizes":[4,8,12,16,20,24,28,32,36,40,44,48,52,56,60,64,68,72,76,80,84,88,92,96,100,104,108,112,116,120,124,128,132,136,140,144,148,152,156,160,164,168,172,176,180,184,188,192,224,256,288,320,352,384,416,448,480,512,640,768,896,1024,1280,1536,1792,2048,2560,3072,3584,4096,4608,5120,6144,6400,7168,8192,8704,10240]}'
     env:
       VLLM_USE_V2_MODEL_RUNNER: "1"
       VLLM_FASTSAFETENSORS_QUEUE_SIZE: "-1"
@@ -239,48 +303,222 @@ presets:
       VLLM_USE_DIRECT_DCP_A2A: "0"
       VLLM_USE_DIRECT_DCP_Q_GATHER: "0"
       VLLM_USE_DIRECT_DCP_KV_GATHER: "0"
-      # MoE stage-2 sums the per-route outputs through MXFP8 instead of BF16.
-      AITER_FLYDSL_STAGE2_FP8: "1"
-      # Lossy: tensor-parallel all-reduces of 16 MiB and more go through INT4.
-      VLLM_ROCM_QUICK_REDUCE_QUANTIZATION: "INT4"
-      VLLM_ROCM_QUICK_REDUCE_MIN_SIZE_BYTES_MB: "16"
+      # The K3.1 precision policy keeps MoE combine and all-reduce in BF16.
+      AITER_FLYDSL_STAGE2_FP8: "0"
+      VLLM_ROCM_QUICK_REDUCE_QUANTIZATION: "NONE"
+      AITER_BF16_FP8_MOE_BOUND: "0"
+      HSA_NO_SCRATCH_RECLAIM: "1"
+      # Back the offload pool with transparent huge pages: torch's CPU allocator
+      # only calls madvise(MADV_HUGEPAGE) when this is set.
+      THP_MEM_ALLOC_ENABLE: "1"
+      # Long agentic prefills.
+      VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "1200"
+      PYTHONNOUSERSITE: "1"
       # As in the benchmark lane.
       PYTHONHASHSEED: "42"
     # The Simple option's connector (SimpleCPUOffloadConnector, kv_both,
     # lazy_offload false) with the lane's 1799 GB of host DRAM split per rank.
+    # kda_prefill_backend is merged rather than left in args alone, because a
+    # feature's --additional-config would replace the preset's.
     json_args:
+      "--speculative-config": { num_speculative_tokens: 3, rejection_sample_method: block }
       "--kv-transfer-config": { kv_connector_extra_config: { cpu_bytes_to_use_per_rank: 224875000000 } }
+      "--additional-config": { kda_prefill_backend: fused }
     runbook: |
-      The single-node MI355X TP8 AgentX configuration at concurrency 48, from the K3.1 best-performance band. It is a BF16 serving config plus three reduced-precision knobs. It serves text with tool-call and reasoning parsers, using DCP8/A2A.
+      The single-node MI355X TP8 AgentX configuration at concurrency 48. It follows the concurrency-48 point of InferenceX's MI355X vLLM AgentX lane (SemiAnalysisAI/InferenceX#4887), measured on the image digest named in the [concurrency-1 preset](#preset-mi355x_agentx_c1). It keeps linear layers, MoE combine and all-reduce in BF16 and serves text with tool-call and reasoning parsers, using DCP8/A2A.
 
       **Serving config.**
-      - **`--max-num-seqs 48` and capture sizes 6 to 10240.** At concurrency 48, decode batches are at most 48 requests × 6 rows (1 + 5 draft tokens), so the sizes 6 to 288 in steps of 6 cover every decode step exactly. The list then continues from 320 up to 10240, the value of `--max-num-batched-tokens`, to cover the prefill steps.
-      - **`VLLM_USE_BREAKABLE_CUDAGRAPH=1`.** K3.1 has no `torch.compile` submodule, so vLLM resolves `FULL_AND_PIECEWISE` to `FULL_DECODE_ONLY` and captures decode only. Breakable graphs are what let it capture the prefill sizes above 288 as well, so the AMD profile turns them on. They cost graph memory, which comes out of the KV cache: with the old 2-to-576 list (`--max-num-seqs 96`) they took 63.1 GiB and the server did not start. Keep the capture list to the sizes the workload really uses.
+      - **`--max-num-seqs 48` and capture sizes 4 to 10240.** At concurrency 48, decode batches are at most 48 requests × 4 rows (1 + 3 draft tokens), so the sizes 4 to 192 in steps of 4 cover every decode step exactly. The list then continues from 224 up to 10240, the value of `--max-num-batched-tokens`, to cover the prefill steps.
+      - **`VLLM_USE_BREAKABLE_CUDAGRAPH=1`.** K3.1 has no `torch.compile` submodule, so vLLM resolves `FULL_AND_PIECEWISE` to `FULL_DECODE_ONLY` and captures decode only. Breakable graphs are what let it capture the prefill sizes as well, so the AMD profile turns them on. They cost graph memory, which comes out of the KV cache: with an old 2-to-576 list (`--max-num-seqs 96`) they took 63.1 GiB and the server did not start. Keep the capture list to the sizes the workload really uses.
       - **`--max-num-batched-tokens 10240`.** With prefix caching, the hybrid KV manager ends every non-final prefill chunk on a block boundary. In this preset (with the dense MLA DSpark draft sharing the block row) K3.1's packed DSA block is 1152 tokens, so after the decode rows a chunk floors to 9216 tokens (6912 at 8192).
-      - **`--gpu-memory-utilization 0.92`** gives more KV. Keep at least about 6 GiB free per GPU.
+      - **`--gpu-memory-utilization 0.91`.** Kernel scratch is allocated outside this budget, so leave headroom.
       - **The indexer key cache is MXFP4** (`indexer_kv_dtype`). AITER needs padded FP4 indexer pages for it. Stock AITER asserts on the page stride at startup.
-      - `ROCM_AITER_FA` is named as the MLA prefill backend, which ROCm already picks first. `VLLM_ROCM_DCP_AITER_ALLGATHER=1`, the FlyDSL sparse-MLA kernels and the DSA DCP prefill paths are on. `kda_prefill_backend: fused` prefills the KDA layers with the fused gfx950 kernel.
-      - **Spec decoding** (the Spec decoding feature, on in this preset) uses the K3.1 DSpark draft (5 layers, not the K3 draft) with 5 tokens, `ROCM_AITER_MLA` attention, FP8 KV, probabilistic drafting and vLLM's default (standard) rejection sampler. The draft is [`Inferact/Kimi-K3.1-Pro-DSpark-preview`](https://huggingface.co/Inferact/Kimi-K3.1-Pro-DSpark-preview).
+      - `VLLM_ROCM_DCP_AITER_ALLGATHER=1`, the FlyDSL sparse-MLA kernels and the DSA DCP prefill paths are on. `kda_prefill_backend: fused` prefills the KDA layers with the fused gfx950 kernel.
+      - **Spec decoding** (the Spec decoding feature, on in this preset) uses the K3.1 DSpark draft (5 layers, not the K3 draft) with 3 tokens, `ROCM_AITER_MLA` attention, FP8 KV, probabilistic drafting and block rejection, as in the benchmark lane. The draft is [`Inferact/Kimi-K3.1-Pro-DSpark-preview`](https://huggingface.co/Inferact/Kimi-K3.1-Pro-DSpark-preview).
       - The **Simple** KV-offload option gets 224,875,000,000 bytes of host DRAM per rank. Size `cpu_bytes_to_use_per_rank` to your host.
 
-      **Reduced precision (best-performance band).** The serving config keeps linear layers, MoE combine and all-reduce in BF16. This preset adds:
-      - `--quantization-config '{"targets":{"*in_proj_qkvgfab":"fp8_per_channel"}}'`: only the KDA input projections are quantized online to FP8 per channel.
-      - `AITER_FLYDSL_STAGE2_FP8=1`: the FlyDSL MoE down projection writes its per-route outputs as MXFP8 before they are summed.
-      - `VLLM_ROCM_QUICK_REDUCE_QUANTIZATION=INT4` with `VLLM_ROCM_QUICK_REDUCE_MIN_SIZE_BYTES_MB=16`: all-reduces of 16 MiB and more use the lossy INT4 codec. To serve with BF16 all-reduce, unset both.
-
-      Drop all three for BF16 precision.
-
-      **Environment outside the builder.** The lane also sets `AITER_BF16_FP8_MOE_BOUND=0` (the SiTUv2 path does not read it), `VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1200` for long agentic prefills, `PYTHONNOUSERSITE=1`, `HSA_NO_SCRATCH_RECLAIM=0`, and `HSA_SCRATCH_SINGLE_LIMIT_ASYNC=25769803776` (24 GiB), which caps a single asynchronous scratch allocation.
+      **Precision.** As the K3.1 precision policy requires: BF16 all-reduce (`VLLM_ROCM_QUICK_REDUCE_QUANTIZATION=NONE`), BF16 MoE combine (`AITER_FLYDSL_STAGE2_FP8=0`), BF16 KDA input projections (no `--quantization-config`) and an FP32 KDA recurrent state (`--mamba-ssm-cache-dtype float32`).
 
       ### Throughput measurement only (synthetic acceptance)
 
-      The AgentX runs replace real verification with synthetic acceptance at the golden acceptance length for 5 draft tokens, 3.62. Only `--speculative-config` changes:
+      To measure throughput the AgentX way, replace real verification with synthetic acceptance at InferenceX's K3.1 DSpark golden acceptance length for 3 draft tokens, 2.88. Only `--speculative-config` changes:
 
       ```bash
-      --speculative-config '{"model":"Inferact/Kimi-K3.1-Pro-DSpark-preview","num_speculative_tokens":5,"method":"dspark","attention_backend":"ROCM_AITER_MLA","kv_cache_dtype":"fp8","draft_sample_method":"probabilistic","rejection_sample_method":"synthetic","synthetic_acceptance_length":3.62}'
+      --speculative-config '{"model":"Inferact/Kimi-K3.1-Pro-DSpark-preview","num_speculative_tokens":3,"method":"dspark","attention_backend":"ROCM_AITER_MLA","kv_cache_dtype":"fp8","draft_sample_method":"probabilistic","rejection_sample_method":"synthetic","synthetic_acceptance_length":2.88}'
       ```
 
       Synthetic acceptance skips real verification. Never use it to serve users or to evaluate accuracy.
+
+  mi355x_agentx_c1:
+    label: "AgentX TP8, concurrency 1"
+    hardware: mi355x
+    strategy: single_node_tp
+    workload: "Agentic (InferenceX AgentX)"
+    description: "Concurrency 1 on one MI355X node: plain TP8 without DCP, KV cache on the GPU, the K3.1 DSpark draft with 7 tokens and the low-latency decode backend, with linear layers, MoE combine and all-reduce in BF16."
+    select:
+      frontend: python
+      features: { spec_decoding: true, text_only: true, low_latency_decode: true }
+      # Stated off: the builder keeps the previous preset's offload otherwise,
+      # and the low-latency decode backend refuses the offload connector.
+      kv_offload: off
+    args:
+      - "--load-format"
+      - "fastsafetensors"
+      - "--max-model-len"
+      - "1048576"
+      - "--enable-prefix-caching"
+      - "--kv-cache-dtype"
+      - "fp8"
+      # The low-latency decode backend needs an FP32 KDA recurrent state.
+      - "--mamba-ssm-cache-dtype"
+      - "float32"
+      - "--stream-interval"
+      - "10"
+      - "--prefix-match-unit"
+      - "64"
+      - "--moe-backend"
+      - "auto"
+      - "--seed"
+      - "7"
+      - "--disable-uvicorn-access-log"
+      - "--max-num-seqs"
+      - "1"
+      - "--max-num-batched-tokens"
+      - "16384"
+      - "--gpu-memory-utilization"
+      - "0.90"
+      - "--attention-config"
+      - '{"indexer_kv_dtype":"mxfp4"}'
+      # Kept when Low-latency decode is off; json_args merges the same key into
+      # the feature's --additional-config when it is on.
+      - "--additional-config"
+      - '{"kda_prefill_backend":"fused"}'
+      # Decode only: 1 request x (1 + 7 draft tokens) = 8 rows, inside 2 to 16.
+      - "--compilation-config"
+      - '{"mode":3,"cudagraph_mode":"FULL_AND_PIECEWISE","max_cudagraph_capture_size":16,"custom_ops":["+fused_rms_norm_gated"],"cudagraph_capture_sizes":[2,4,6,8,10,12,14,16]}'
+    json_args:
+      "--speculative-config": { num_speculative_tokens: 7, rejection_sample_method: block }
+      "--additional-config": { kda_prefill_backend: fused }
+    env:
+      # Only decode sizes are captured, so breakable graphs buy nothing; this
+      # overrides the AMD profile's "1".
+      VLLM_USE_BREAKABLE_CUDAGRAPH: "0"
+      VLLM_USE_V2_MODEL_RUNNER: "1"
+      VLLM_FASTSAFETENSORS_QUEUE_SIZE: "-1"
+      VLLM_ROCM_AITER_MLA_ASM_PADDING: "asm"
+      VLLM_ROCM_USE_AITER_FLYDSL_SPARSE_MLA: "1"
+      # AITER reads its own variable for the same kernels.
+      AITER_FLYDSL_SPARSE_MLA: "1"
+      # Inherited from the lane's DCP env, as InferenceX ran this point; DCP is
+      # off here.
+      VLLM_ROCM_AITER_MLA_DCP_VERIFY: "asm"
+      VLLM_ROCM_DCP_AITER_ALLGATHER: "1"
+      VLLM_ROCM_DSA_DCP_GLOBAL_KEY_PREFILL: "1"
+      VLLM_ROCM_DSA_DCP_ROWSHARD_PREFILL: "1"
+      VLLM_USE_DIRECT_DCP_A2A: "0"
+      VLLM_USE_DIRECT_DCP_Q_GATHER: "0"
+      VLLM_USE_DIRECT_DCP_KV_GATHER: "0"
+      # The K3.1 precision policy keeps MoE combine and all-reduce in BF16.
+      AITER_FLYDSL_STAGE2_FP8: "0"
+      VLLM_ROCM_QUICK_REDUCE_QUANTIZATION: "NONE"
+      AITER_BF16_FP8_MOE_BOUND: "0"
+      HSA_NO_SCRATCH_RECLAIM: "1"
+      # Inherited from the lane, where it backs the offload pool; KV offload is
+      # off here.
+      THP_MEM_ALLOC_ENABLE: "1"
+      VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "1200"
+      PYTHONNOUSERSITE: "1"
+      # As in the benchmark lane.
+      PYTHONHASHSEED: "42"
+    runbook: |
+      The single-node MI355X TP8 AgentX configuration at concurrency 1 (one user, lowest latency). It keeps linear layers, MoE combine and all-reduce in BF16, as [AgentX TP8, concurrency 48](#preset-mi355x_agentx) does. It serves text with tool-call and reasoning parsers. It follows the concurrency-1 point of InferenceX's MI355X vLLM AgentX lane (SemiAnalysisAI/InferenceX#4887) and has been measured only on the image digest below.
+
+      **Serving config.**
+      - **Plain TP8, no DCP, KV cache on the GPU (KV offload off).** At one request DCP's extra KV capacity isn't needed: the InferenceX concurrency-1 server log reported about 2.8M KV tokens for TP8 with FP8 KV, 2.7x a 1M-token request.
+      - **Low-latency decode** (the Low-latency decode feature, on in this preset) sets `decode_backend: latency_specialized`. On MI355X it runs pure decode steps of up to 16 rows on fused FlyDSL kernels; prefill and mixed steps run the default path. Among other startup checks, it needs: TP8 with no expert, data or pipeline parallelism; AITER on, the `ROCM_AITER_MLA` attention backend and an fp8 (E4M3) KV cache; speculative decoding on; no KV offload connector (only MoRIIO or Mooncake consumers are allowed); `--max-num-seqs` 1, 2, 4 or 8 with `--max-num-seqs` × (1 + draft tokens) ≤ 16; a BF16 KDA `in_proj` (no `--quantization-config`); and an FP32 KDA recurrent state. Without DCP it serves only 3 or 7 draft tokens with `--max-num-seqs` 1 or 2.
+      - **`--max-num-seqs 1` and capture sizes 2 to 16.** A decode step is 1 request × 8 rows (1 + 7 draft tokens), so 8 is the size that matters. No prefill size is captured, so `VLLM_USE_BREAKABLE_CUDAGRAPH=0` overrides the AMD profile and `FULL_AND_PIECEWISE` resolves to FULL decode graphs only.
+      - **Spec decoding** uses the K3.1 DSpark draft with 7 tokens, `ROCM_AITER_MLA` attention, FP8 KV, probabilistic drafting and block rejection, as in the benchmark lane.
+      - `--max-num-batched-tokens 16384` floors to 14 packed 1152-token DSA blocks per prefill chunk. `--gpu-memory-utilization 0.90` leaves headroom for kernel scratch.
+
+      **Image.** This preset starts only on the `vllm/vllm-openai-rocm:kimi-k31` image; InferenceX measured `sha256:5f47cc1004d9a7ac65f8a913725edb20c62c99a07e31cbf4ba21741bd0b4f9b1`, whose server log shows the specialized decode active without DCP. Current vLLM main does not yet serve K3.1 on this path without DCP: there it also requires `VLLM_ROCM_USE_AITER_FP4BMM=1` and still refuses K3.1's sparse (indexer) MLA layers, so the command above fails at startup on main or nightly images.
+
+      **Inherited environment.** The env also carries the lane's DCP variables (`VLLM_ROCM_AITER_MLA_DCP_VERIFY`, `VLLM_ROCM_DCP_AITER_ALLGATHER`, `VLLM_ROCM_DSA_DCP_*`, `VLLM_USE_DIRECT_DCP_*`) and `THP_MEM_ALLOC_ENABLE=1`, which backs the KV offload pool there, so that it matches the InferenceX run exactly. DCP and KV offload are off in this preset, so they are expected to have no effect.
+
+      ### Throughput measurement only (synthetic acceptance)
+
+      To measure throughput the AgentX way, replace real verification with synthetic acceptance at InferenceX's K3.1 DSpark golden acceptance length for 7 draft tokens, 3.69. Only `--speculative-config` changes:
+
+      ```bash
+      --speculative-config '{"model":"Inferact/Kimi-K3.1-Pro-DSpark-preview","num_speculative_tokens":7,"method":"dspark","attention_backend":"ROCM_AITER_MLA","kv_cache_dtype":"fp8","draft_sample_method":"probabilistic","rejection_sample_method":"synthetic","synthetic_acceptance_length":3.69}'
+      ```
+
+      Synthetic acceptance skips real verification. Never use it to serve users or to evaluate accuracy.
+
+  # The exact configuration vllm-project/vllm-torchtpu#2775 validated on a
+  # 2x2x4 TPU v7x slice (TP32 / EP32, 4 hosts, 16 chips, 32 devices).
+  v7x_validated:
+    label: "Validated TEP32 (v7x)"
+    hardware: ironwood
+    strategy: multi_node_tep
+    workload: "Accuracy validation (GSM8K)"
+    description: "The #2775 validation config on a 2x2x4 v7x slice: complete GSM8K at 97.50%, prefix-cache hits returning identical tokens and logprobs, BEAM-1M matching the GPU reference."
+    select:
+      nodes: 4
+    args:
+      - "--max-model-len"
+      - "10240"
+      - "--max-num-batched-tokens"
+      - "8192"
+      - "--max-num-seqs"
+      - "16"
+      - "--gpu-memory-utilization"
+      - "0.82"
+      - "--compilation-config"
+      - '{"compile_sizes":[1,8,16,8192]}'
+    source:
+      href: "https://github.com/vllm-project/vllm-torchtpu/pull/2775"
+      key: "kimi-k31-pro-v7x-tp32-ep32"
+      revision: "af0fce9305f4e591e54892153ea86d49deaf1ccb"
+    runbook: |
+      The configuration vllm-torchtpu#2775 validated on the real checkpoint on a 2x2x4 TPU v7x slice: complete GSM8K at **97.50%** (1,286/1,319), prefix-cache probes returning identical tokens and logprobs, and BEAM-1M long context matching the GPU reference.
+
+      #2775 ran one `vllm serve` driver over a Ray cluster (`TPU_MULTIHOST_BACKEND=ray`); the builder renders torchtpu's default multiprocessing backend (per-host `--nnodes` / `--node-rank` / `--headless`). The flags match; the multi-host transport differs. GSM8K ran through the completions API, so the default-on chat and tool-call parsers were not exercised on TPU.
+
+      GSM8K capped outputs at 1,024 tokens with 8 concurrent requests; `--max-model-len 10240` and `--max-num-seqs 16` come from that run, not from a serving-quality target.
+
+  # The TP32 + DCP8 arm of the same validation: DCP8 shards the MLA latent and
+  # indexer-key caches across the TP group, holding about 8x the KV tokens per
+  # device at some decode-speed cost.
+  v7x_dcp8:
+    label: "Validated TEP32 + DCP8 (v7x)"
+    hardware: ironwood
+    strategy: multi_node_tep
+    workload: "Accuracy validation (GSM8K)"
+    description: "TEP32 + DCP8 on the same 2x2x4 v7x slice: complete GSM8K at 97.42%. Pick it when KV capacity, not decode speed, is the limit. DSpark does not support DCP on TPU, so this preset keeps Spec decoding off."
+    select:
+      nodes: 4
+      features: { spec_decoding: false }
+    args:
+      - "--decode-context-parallel-size"
+      - "8"
+      - "--cp-kv-cache-interleave-size"
+      - "4"
+      - "--max-model-len"
+      - "10240"
+      - "--max-num-batched-tokens"
+      - "8192"
+      - "--max-num-seqs"
+      - "16"
+      - "--gpu-memory-utilization"
+      - "0.82"
+      - "--compilation-config"
+      - '{"compile_sizes":[8,16,8192]}'
+    source:
+      href: "https://github.com/vllm-project/vllm-torchtpu/pull/2775"
+      key: "kimi-k31-pro-v7x-tp32-ep32-dcp8"
+      revision: "af0fce9305f4e591e54892153ea86d49deaf1ccb"
+    runbook: |
+      The TP32 + DCP8 arm of the vllm-torchtpu#2775 validation on the same slice: complete GSM8K at **97.42%** (1,285/1,319), with prefix-cache and long-context checks matching the TP32 arm. Compile sizes drop the 1-batch capture (DCP decode batches start at 8).
 
 # DCP8 over the TP8 group (one B300 node or two GB300 trays).
 decode_context_parallel:
@@ -367,6 +605,13 @@ strategy_overrides:
       parallelism: dep
       tp: 1
 
+notes:
+  # TPU serving is text-only: the command always carries --language-model-only
+  # and zeroed mm limits, and the Text only feature toggle is gated off there.
+  - title: "Text-only on TPU"
+    when: { hardware: [ironwood] }
+    body: "TPU serving runs through vllm-torchtpu, which does not load the vision tower for K3.1 — the command always carries `--language-model-only` and image/video are disabled."
+
 guide: |
   ## Overview
 
@@ -382,14 +627,20 @@ guide: |
   image (CUDA 13.4). It uses the Blackwell flags and hasn't been tuned or verified on Rubin.
 
   On MI355X, one node takes the same TP8 layout with the AMD profile's AITER environment, in the
-  day-0 `vllm/vllm-openai-rocm:kimi-k31` image. So far only the
-  [AgentX TP8](#preset-mi355x_agentx) configuration has run on MI355X: the tuned single-node AgentX
-  configuration for concurrency 48, with DCP8, the K3.1 DSpark draft and host KV offload.
+  day-0 `vllm/vllm-openai-rocm:kimi-k31` image. Two single-node AgentX configurations have run
+  on MI355X, both InferenceX points: [AgentX TP8, concurrency 48](#preset-mi355x_agentx), with
+  DCP8, the K3.1 DSpark draft and host KV offload, and
+  [AgentX TP8, concurrency 1](#preset-mi355x_agentx_c1), InferenceX's concurrency-1 point with
+  plain TP8, GPU KV and the low-latency decode backend, which needs the image the preset names.
 
   On Zhenwu PPUs, the default MXFP4 checkpoint runs without speculative decoding on
   two 16-PPU 810E nodes with TP32 / EP32, or four 8-PPU M890 nodes with TP8 / DP4 / EP32.
   On 810E, `ppu_deep_gemm_w4a16` loads the checkpoint with a W4A16 compute path.
   Use the PPU image specified for each hardware configuration.
+
+  On TPU, the model is served by [vLLM torch-TPU](https://github.com/vllm-project/vllm-torchtpu),
+  text-only: the vision tower is not loaded. The validated layout is TP32 with expert
+  parallelism on a 2x2x4 TPU v7x slice (16 chips, 32 devices, on 4 hosts). See [TPU serving](#tpu-serving).
 
   ## Tensor + expert parallelism
 
@@ -415,12 +666,48 @@ guide: |
   to within 6% of TP8. It requires the V2 model runner and FULL decode CUDA graphs (the
   defaults), TP8 or TP8 + DCP8, and no expert parallelism in this recipe.
 
+  On MI355X the same switch selects fused FlyDSL decode kernels. They cover only pure decode
+  steps of up to 16 rows, so among other checks they also need speculative decoding,
+  `--max-num-seqs` 1, 2, 4 or 8 with `--max-num-seqs` × (1 + draft tokens) ≤ 16, BF16 KDA
+  projections, an FP32 KDA recurrent state (`--mamba-ssm-cache-dtype float32`) and no KV
+  offload. Without DCP they serve only 3 or 7 draft tokens at `--max-num-seqs` 1 or 2, so the
+  MI355X default of 5 draft tokens needs DCP8. The
+  [concurrency-1 preset](#preset-mi355x_agentx_c1) shows a working setup, on the image it
+  names; current vLLM main does not yet run K3.1 on this path without DCP. The concurrency-48
+  preset does not qualify, so leave the feature off there.
+
   ## NVFP4 KV cache
 
   The **NVFP4 KV cache** feature stores the MLA latent in NVFP4 (352 bytes per token per layer
   instead of 576) and holds about 1.5x the KV cache tokens of FP8. The indexer keys stay FP8,
   so the top-2048 token selection is unchanged. GSM8K matched FP8 on 8x GB300 (96.1% vs 96.2%);
   long-context accuracy has not been measured yet.
+
+  ## TPU serving
+
+  TPU serving runs through [vLLM torch-TPU](https://github.com/vllm-project/vllm-torchtpu) and
+  is text-only: the vision tower is not loaded. K3.1 support is under review as
+  [vllm-torchtpu#2775](https://github.com/vllm-project/vllm-torchtpu/pull/2775); until it merges,
+  the Install tab on TPU builds from the `kimi-k31pro` staging branch (Python 3.12, uv). No
+  published image or wheel carries it yet.
+
+  The generated command uses vllm-torchtpu's default multiprocessing multi-host backend: run the
+  head command on the slice's first host and the worker commands on the remaining hosts (the
+  builder renders both). The **Multi-Node TEP** strategy at 4 nodes matches the validated flags of
+  [vllm-torchtpu#2775](https://github.com/vllm-project/vllm-torchtpu/pull/2775) with two
+  differences: #2775 ran one driver over a Ray cluster (`TPU_MULTIHOST_BACKEND=ray`), and its
+  GSM8K validation used the completions API, so the default-on chat and tool-call parsers were not
+  exercised on TPU. Validated on a 2x2x4 TPU v7x slice with an FP8 latent KV cache, the unified
+  block pool and prefix caching: the complete GSM8K split scored 97.50% (TP32) and 97.42%
+  (TP32 + DCP8), prefix-cache hits returned identical tokens and logprobs, and the BEAM-1M
+  long-context benchmark matched the GPU reference. The run-specific sizing of that validation
+  (10K context, 16 sequences, compile sizes) is not the TPU default — it lives in the two
+  **Validated** presets: [TEP32](#preset-v7x_validated) and
+  [TEP32 + DCP8](#preset-v7x_dcp8) for KV-capacity-bound workloads.
+
+  **Spec decoding is gated off on TPU for now**: DSpark with `--async-scheduling` (always on in
+  this configuration) needs [vllm-torchtpu#2770](https://github.com/vllm-project/vllm-torchtpu/pull/2770),
+  still open. #2775 validated DSpark with 7 draft tokens once that fix is in.
 
   ## Prefill/decode disaggregation
 
