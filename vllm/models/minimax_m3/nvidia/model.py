@@ -1246,6 +1246,11 @@ class MiniMaxM3DecoderLayer(nn.Module):
             _use_sequence_parallel(vllm_config) and not is_mtp_block
         )
         self.replicate_attn = envs.VLLM_MINIMAX_M3_REPLICATE_ATTN
+        if self.replicate_attn:
+            # Nothing re-syncs ranks after a replicated block: autotune must agree.
+            from vllm.triton_utils.tp_synced_autotune import install
+
+            install()
         if self.replicate_attn and _use_sequence_parallel(vllm_config):
             raise NotImplementedError(
                 "VLLM_MINIMAX_M3_REPLICATE_ATTN is not supported with the "
