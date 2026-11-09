@@ -4,29 +4,29 @@
 Unlimited-OCR-2 uses DASH attention, 16 crops and independent per-page cropping.
 The processor behavior described below applies to Unlimited-OCR v1.
 
-Unlimited-OCR (``baidu/Unlimited-OCR``) shares
-the exact DeepSeek-OCR (gundam, ``base_size=1024`` / ``image_size=640`` / crop)
+Unlimited-OCR (`baidu/Unlimited-OCR`) shares
+the exact DeepSeek-OCR (gundam, `base_size=1024` / `image_size=640` / crop)
 vision stack: a DeepEncoder (SAM-ViT-B + CLIP-L) followed by a linear MLP
 projector, with the same image-token tiling layout. The only difference is the
 language backbone, which is a DeepSeek-V2 *MoE* (64 routed + 2 shared experts,
-``first_k_dense_replace=1``) that uses plain multi-head attention
-(``use_mla=False``, ``qk_nope_head_dim == qk_rope_head_dim == 0``) instead of
+`first_k_dense_replace=1`) that uses plain multi-head attention
+(`use_mla=False`, `qk_nope_head_dim == qk_rope_head_dim == 0`) instead of
 the dense MLA decoder used by DeepSeek-OCR.
 
-vLLM's ``DeepseekV2DecoderLayer`` already dispatches to the plain-MHA
-``DeepseekAttention`` whenever ``qk_nope_head_dim == qk_rope_head_dim == 0`` and
+vLLM's `DeepseekV2DecoderLayer` already dispatches to the plain-MHA
+`DeepseekAttention` whenever `qk_nope_head_dim == qk_rope_head_dim == 0` and
 builds the MoE blocks straight from the config, so the whole DeepSeek-OCR
 multimodal wrapper can be reused verbatim. Model-specific config (language
 backbone architecture, FlexAttention for R-SWA, vision encoder backend, and
-``rswa_window``) is applied in ``UnlimitedOCRForCausalLMConfig``.
+`rswa_window`) is applied in `UnlimitedOCRForCausalLMConfig`.
 
 Attention backend: the reference applies Reference Sliding Window Attention
 (R-SWA) -- the prompt/image tokens form a globally-visible prefix while the
 *generated* tokens additionally attend only a fixed sliding window (128) of
 recent tokens. We reproduce this with backend-specific custom masks: FA4 uses a
-``mask_mod``, FlexAttention uses a Triton block mask, and TritonAttention uses a
+`mask_mod`, FlexAttention uses a Triton block mask, and TritonAttention uses a
 unified-attention decode mask. FlashInfer's paged decode exposes no custom mask.
-The window size is published via ``model_config.rswa_window``, which the model
+The window size is published via `model_config.rswa_window`, which the model
 runner reads to plumb per-request prefix lengths into the attention metadata.
 
 The *vision encoder* (DeepEncoder's CLIP stage, head_dim 64) is unaffected and
@@ -39,18 +39,18 @@ transparently fall back to it if FlashInfer is requested.
 Image processing
 ----------------
 Unlimited-OCR supports up to 32 local crops (vs 6 for DeepSeek-OCR), i.e.
-``dynamic_preprocess`` runs with ``max_num=32``.
+`dynamic_preprocess` runs with `max_num=32`.
 
 Multi-image requests fall back to non-crop mode: crop ("gundam") mode is only
 used for single-image input. DeepSeek-OCR does *not* have this restriction.
 
 Because that fallback makes the per-image processor output depend on *how many*
 images are in the request, it breaks the assumption behind vLLM's per-item
-multimodal processing cache (``MultiModalProcessorOnlyCache``). We handle this
-the same way ``DeepseekVL2MultiModalProcessor`` does: only the single-image case
+multimodal processing cache (`MultiModalProcessorOnlyCache`). We handle this
+the same way `DeepseekVL2MultiModalProcessor` does: only the single-image case
 (which always crops) is cached, while multi-image requests bypass the cache and
-are recomputed fresh -- see ``_cached_apply_hf_processor`` below. This keeps the
-processing cache consistent (verified by ``test_processing_correctness``).
+are recomputed fresh -- see `_cached_apply_hf_processor` below. This keeps the
+processing cache consistent (verified by `test_processing_correctness`).
 """
 
 import math
@@ -198,10 +198,10 @@ class UnlimitedOCRMultiModalProcessor(DeepseekOCRMultiModalProcessor):
     """Multimodal processor for Unlimited-OCR.
 
     Disables crop mode for multi-image requests (to stay consistent with
-    ``UnlimitedOCRProcessor.tokenize_with_images``), and -- since that makes the
+    `UnlimitedOCRProcessor.tokenize_with_images`), and -- since that makes the
     per-image output depend on the request's image count -- bypasses the
     per-item processing cache for multi-image requests, exactly like
-    ``DeepseekVL2MultiModalProcessor``.
+    `DeepseekVL2MultiModalProcessor`.
 
     DeepSeek-OCR does *not* apply either of these.
     """
