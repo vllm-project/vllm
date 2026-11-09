@@ -18,9 +18,31 @@ from vllm.model_executor.layers.fused_moe import (
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes.compressed_tensors_wNa16 import (  # noqa
     WNA16_SUPPORTED_BITS,
 )
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+    kNvfp4Dynamic,
+    kNvfp4DynamicToken,
+)
 from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
+
+
+def nvfp4_moe_activation_key(
+    use_a16: bool, activation_override: QuantKey | None
+) -> QuantKey:
+    """FC1 input scheme for an NVFP4 MoE, applying ``moe.activation``."""
+    if activation_override is None:
+        return kNvfp4Dynamic
+    if use_a16:
+        raise ValueError("NVFP4 activation overrides require a W4A4 checkpoint.")
+    if activation_override not in (kNvfp4Dynamic, kNvfp4DynamicToken):
+        raise ValueError(
+            "Unsupported compressed-tensors NVFP4 MoE activation override: "
+            f"{activation_override}. Use quantization_config.moe.activation="
+            "'nvfp4_per_token' or omit the override."
+        )
+    return activation_override
 
 
 class CompressedTensorsMoEMethod(FusedMoEMethodBase):
@@ -156,7 +178,12 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
                     f"format or None for NVFP4A16, found {input_quant}"
                 )
             return CompressedTensorsW4A4Nvfp4MoEMethod(
-                layer.moe_config, layer_name, use_a16=(input_quant is None)
+                layer.moe_config,
+                layer_name,
+                use_a16=(input_quant is None),
+                activation_key=nvfp4_moe_activation_key(
+                    input_quant is None, quant_config.moe_activation_override
+                ),
             )
         elif (
             quant_config._is_fp8_w8a8_sm90(weight_quant, input_quant)

@@ -15,6 +15,7 @@ from compressed_tensors.quantization import (
 from compressed_tensors.transform import TransformConfig
 
 from vllm.config import get_current_vllm_config_or_none
+from vllm.config.quantization import QuantizationConfigArgs
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
@@ -97,6 +98,7 @@ class CompressedTensorsConfig(QuantizationConfig):
         transform_config: dict[str, Any] | None = None,
         total_num_heads: int | None = None,
         total_num_kv_heads: int | None = None,
+        quantization_args: QuantizationConfigArgs | None = None,
     ):
         super().__init__()
         self.ignore = ignore
@@ -107,6 +109,10 @@ class CompressedTensorsConfig(QuantizationConfig):
         self.config = config
         self.total_num_heads = total_num_heads
         self.total_num_kv_heads = total_num_kv_heads
+        moe_spec = quantization_args.moe if quantization_args is not None else None
+        self.moe_activation_override: QuantKey | None = (
+            moe_spec.activation if moe_spec is not None else None
+        )
 
         if transform_config:
             self.transform_config = TransformConfig.model_validate(transform_config)
@@ -251,6 +257,7 @@ class CompressedTensorsConfig(QuantizationConfig):
                 grps_without_attn_quant[k] = v
             config["config_groups"] = grps_without_attn_quant
 
+        quantization_args = config.pop("_online_quantization_args", None)
         ignore: list[str] = cast(list[str], config.get("ignore", []))
         quant_format = cast(str, config.get("format"))
         target_scheme_map = cls._quantization_scheme_map_from_config(config=config)
@@ -267,6 +274,7 @@ class CompressedTensorsConfig(QuantizationConfig):
             kv_cache_scheme=config.get("kv_cache_scheme"),
             total_num_heads=config.get("total_num_heads"),
             total_num_kv_heads=config.get("total_num_kv_heads"),
+            quantization_args=quantization_args,
         )
 
     @classmethod
