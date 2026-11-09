@@ -899,6 +899,76 @@ def test_dsa_reasons_fallbacks(monkeypatch, env, dcp, over, why):
         assert any(why in r for r in reasons), reasons
 
 
+def _pre_layer(fix=None):
+    """A DSA layer as ``dsa.prologue_reasons`` sees it: the loaded weights'
+    shapes and dtypes (meta tensors), W_UK_T as vLLM's MLA views it."""
+    from vllm.models.kimi_k3.amd.dsa import KimiK3DSAIndexerKNorm
+
+    def lin(n, k, dtype=torch.bfloat16):
+        return SimpleNamespace(weight=torch.empty(n, k, dtype=dtype, device="meta"))
+
+    def norm(n):
+        return SimpleNamespace(weight=torch.empty(n, dtype=torch.bfloat16))
+
+    kv_b = torch.empty(12 * 256, 512, dtype=torch.bfloat16, device="meta")
+    ind = SimpleNamespace(
+        use_fp4=True, k_index_norm=KimiK3DSAIndexerKNorm(128, 1e-5),
+        wk_index=lin(128, 7168), wv_index=lin(32, 7168), wq_index=lin(4096, 1536),
+    )  # fmt: skip
+    a = SimpleNamespace(W_UK_T=kv_b.T.view(512, 12, 256)[..., :128].permute(1, 2, 0))
+    w = SimpleNamespace(
+        mla_attn=a, indexer=ind, rotary_emb=None, indexer_rope_emb=None,
+        g_proj=lin(1536, 7168), fused_qkv_a_proj=lin(2112, 7168),
+        q_b_proj=lin(2304, 1536), q_a_layernorm=norm(1536), kv_a_layernorm=norm(512),
+    )  # fmt: skip
+    if fix is not None:
+        fix(w)
+    return SimpleNamespace(self_attn=SimpleNamespace(mla_attn=w))
+
+
+@pytest.mark.parametrize(
+    "fix, why",
+    [
+        (None, None),
+        (lambda w: setattr(w.indexer, "use_fp4", False), "FP8 indexer"),
+        (
+            lambda w: setattr(w.indexer, "k_index_norm", SimpleNamespace()),
+            "key norm other than the LayerNorm",
+        ),
+        (lambda w: setattr(w, "rotary_emb", object()), "NoPE only"),
+        (lambda w: setattr(w, "g_proj", None), "no output gate"),
+        (
+            lambda w: setattr(
+                w.indexer.wq_index,
+                "weight",
+                torch.empty(4096, 1536, dtype=torch.float8_e4m3fn, device="meta"),
+            ),
+            "w_iq",
+        ),
+        (
+            lambda w: setattr(
+                w.mla_attn,
+                "W_UK_T",
+                torch.empty(12, 512, 128, dtype=torch.bfloat16).transpose(1, 2),
+            ),
+            "W_UK_T",
+        ),
+    ],
+)
+def test_dsa_prologue_reasons(fix, why):
+    """VLLM_KIMI_SD_DSA_PROLOGUE: D1a serves the MXFP4 indexer with its key
+    LayerNorm, NoPE, the output gate, dense bf16 weights and W_UK_T latent
+    contiguous; anything else is a reason (DsaM1Layer raises on it)."""
+    pytest.importorskip("flydsl")
+    from vllm.models.kimi_k3.amd.specialized_decode.runtime import dsa
+
+    reasons = dsa.prologue_reasons(_pre_layer(fix))
+    if why is None:
+        assert reasons == []
+    else:
+        assert any(why in r for r in reasons), reasons
+
+
 def _dsa_decode(monkeypatch, mode: str, agree: bool = True):
     from vllm.models.kimi_k3.amd.specialized_decode.runtime import dsa
 
