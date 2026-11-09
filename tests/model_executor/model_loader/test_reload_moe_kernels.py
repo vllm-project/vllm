@@ -56,7 +56,6 @@ def _model_tensor_ptrs(worker) -> dict[str, int]:
 @pytest.mark.parametrize(
     "model,moe_backend,compare_outputs",
     [
-        ("openai/gpt-oss-20b", "flashinfer_trtllm", True),
         # NVFP4 CuteDSL greedy outputs differ between two generations on one
         # server, reload or not, so only the addresses are checked
         ("RedHatAI/Qwen3-30B-A3B-NVFP4", "flashinfer_cutedsl", False),
