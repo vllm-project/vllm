@@ -4,7 +4,7 @@
 
 The cut in this fixture is layer 1, so replay starts at layer 1. That is the
 same boundary as production layer 20, on a 4-layer stand-in. The final
-``mhc_post`` and the aux capture at that cut both run on the window rows.
+`mhc_post` and the aux capture at that cut both run on the window rows.
 """
 
 from types import SimpleNamespace
@@ -32,7 +32,7 @@ _HEAD_DIM = 512
 
 
 class _RocmKvInsert:
-    """SWA cache from ``forward_kv``, checked against the KV-only insert."""
+    """SWA cache from `forward_kv`, checked against the KV-only insert."""
 
     def __init__(self, num_tokens: int):
         from vllm.models.deepseek_v41.attention import _use_v41_mxfp8_kv_record

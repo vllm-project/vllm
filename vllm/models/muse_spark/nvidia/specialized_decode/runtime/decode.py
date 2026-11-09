@@ -296,8 +296,8 @@ class SpecializedDecode:
         """This step's decode plan, or None to run the stock forward instead.
 
         Steps that run the stock forward:
-        - pipeline-parallel stage inputs (``intermediate_tensors``);
-        - token counts other than ``BATCHES``;
+        - pipeline-parallel stage inputs (`intermediate_tensors`);
+        - token counts other than `BATCHES`;
         - steps outside a CUDA graph capture (profiling, warmup and the warmup run
           before each capture), so every stock kernel runs before its capture;
         - PIECEWISE steps, keyed by token count alone and so captured as stock;
@@ -341,7 +341,7 @@ class SpecializedDecode:
     def captured(
         self, b: int, fallback: str | None, step: Step | None = None
     ) -> Step | None:
-        """Logs each capture-time outcome once and returns ``step``."""
+        """Logs each capture-time outcome once and returns `step`."""
         outcome = f"stock forward ({fallback})" if fallback else "specialized decode"
         message = f"Muse Spark decode graph for {b} tokens: {outcome}"
         if message not in self.logged:
