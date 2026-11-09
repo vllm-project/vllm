@@ -12,14 +12,15 @@ from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import get_current_vllm_config
 from vllm.config.kernel import MoEBackend
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe.all2all_utils import (
-    maybe_make_prepare_finalize,
-)
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
     fp8_w8a8_moe_quant_config,
     fp8_w8a16_moe_quant_config,
+)
+from vllm.model_executor.layers.fused_moe.oracle.base import (
+    MoEKernelOracle,
+    make_moe_kernel,
 )
 from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
@@ -400,6 +401,17 @@ def resolve_fp8_moe_weight_block_shape(
     )
 
 
+class Fp8MoEKernelOracle(MoEKernelOracle[Fp8MoeBackend]):
+    """FP8 MoE backend selection for one deployment configuration."""
+
+    name = "Fp8"
+
+    def backend_to_kernel_cls(
+        self, backend: Fp8MoeBackend
+    ) -> list[type[mk.FusedMoEExperts]]:
+        return backend_to_kernel_cls(backend)
+
+
 def select_fp8_moe_backend(
     config: FusedMoEConfig,
     weight_key: QuantKey | None,
@@ -416,41 +428,7 @@ def select_fp8_moe_backend(
     # if we are using the batched or standard expert format, which
     # if not ideal. Once we unify TP + DP/EP, we can select P/F first.
     activation_format = config.activation_format
-
-    def _make_log_backend(backend: Fp8MoeBackend):
-        available_backend_strs = [b.value for b in AVAILABLE_BACKENDS]
-        return (
-            f"Using {backend.value} Fp8 MoE backend out "
-            f"of potential backends: {available_backend_strs}."
-        )
-
-    def _make_log_unsupported(backend: Fp8MoeBackend, reason: str | None) -> str:
-        if reason:
-            return (
-                f"FP8 MoE backend {backend.value} does not support the "
-                f"deployment configuration since {reason}."
-            )
-        else:
-            return (
-                f"FP8 MoE backend '{backend.value}' does not support the "
-                "deployment configuration."
-            )
-
-    def _return_or_raise(
-        backend: Fp8MoeBackend,
-        config: FusedMoEConfig,
-        weight_key: QuantKey | None,
-        activation_key: QuantKey | None,
-        activation_format: mk.FusedMoEActivationFormat,
-    ) -> tuple[Fp8MoeBackend, type[mk.FusedMoEExperts]]:
-        for k_cls in backend_to_kernel_cls(backend):
-            supported, reason = k_cls.is_supported_config(
-                k_cls, config, weight_key, activation_key, activation_format
-            )
-            if supported:
-                logger.info_once(_make_log_backend(backend))
-                return backend, k_cls
-        raise ValueError(_make_log_unsupported(backend, reason))
+    oracle = Fp8MoEKernelOracle(config, weight_key, activation_key)
 
     # Handle explicit moe_backend from user.
     runner_backend = config.moe_backend
@@ -477,9 +455,7 @@ def select_fp8_moe_backend(
                 "vLLM CUTLASS FP8 MoE backend is disabled for this configuration."
             )
 
-        return _return_or_raise(
-            requested_backend, config, weight_key, activation_key, activation_format
-        )
+        return oracle.return_or_raise(requested_backend, AVAILABLE_BACKENDS)
 
     # Handle explicit DeepGEMM FP8 configuration.
     if envs.is_set("VLLM_USE_DEEP_GEMM") or envs.is_set("VLLM_MOE_USE_DEEP_GEMM"):
@@ -492,9 +468,7 @@ def select_fp8_moe_backend(
                 if activation_format.is_batched
                 else Fp8MoeBackend.DEEPGEMM
             )
-            return _return_or_raise(
-                backend, config, weight_key, activation_key, activation_format
-            )
+            return oracle.return_or_raise(backend, AVAILABLE_BACKENDS)
     elif (model_config := get_current_vllm_config().model_config) is not None and (
         should_auto_disable_deep_gemm(
             getattr(model_config.hf_text_config, "model_type", None)
@@ -513,11 +487,9 @@ def select_fp8_moe_backend(
         if skip_aiter_moe:
             if Fp8MoeBackend.AITER in AVAILABLE_BACKENDS:
                 AVAILABLE_BACKENDS.remove(Fp8MoeBackend.AITER)
-        else:
+        elif envs.is_set("VLLM_ROCM_USE_AITER_MOE"):
             backend = Fp8MoeBackend.AITER
-            return _return_or_raise(
-                backend, config, weight_key, activation_key, activation_format
-            )
+            return oracle.return_or_raise(backend, AVAILABLE_BACKENDS)
 
     if not allow_vllm_cutlass:
         AVAILABLE_BACKENDS.remove(Fp8MoeBackend.VLLM_CUTLASS)
@@ -525,19 +497,10 @@ def select_fp8_moe_backend(
 
     # Select kernels in order of backend.
     for backend in AVAILABLE_BACKENDS:
-        for k_cls in backend_to_kernel_cls(backend):
-            supported, reason = k_cls.is_supported_config(
-                k_cls,
-                config,
-                weight_key,
-                activation_key,
-                activation_format,
-            )
-            if supported:
-                logger.info_once(_make_log_backend(backend))
-                return backend, k_cls
-            else:
-                logger.debug_once(_make_log_unsupported(backend, reason))
+        kernel_cls, _ = oracle.try_backend(backend)
+        if kernel_cls is not None:
+            logger.info_once(oracle.make_log_backend(backend, AVAILABLE_BACKENDS))
+            return backend, kernel_cls
 
     # TODO(rob): per discussion with TPU team, we need a way to register
     # MoE backends by OOT plugins, rather than having an explicit list
@@ -677,14 +640,6 @@ def convert_to_fp8_moe_kernel_format(
             w2_scale=w2_scale,
             w2_input_scale=w2_input_scale,
             is_trtllm=(fp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM),
-        )
-    elif fp8_backend == Fp8MoeBackend.XPU:
-        from vllm.model_executor.layers.fused_moe.experts.xpu_moe import (
-            prepare_fp8_moe_layer_for_xpu,
-        )
-
-        w13, w13_scale, w2, w2_scale = prepare_fp8_moe_layer_for_xpu(
-            w13, w13_scale, w2, w2_scale
         )
     elif fp8_backend == Fp8MoeBackend.CPU:
         from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
@@ -858,45 +813,19 @@ def make_fp8_moe_kernel(
     fp8_backend: Fp8MoeBackend,
     routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
 ) -> mk.FusedMoEKernel:
-    # Create Prepare/Finalize.
-    prepare_finalize = maybe_make_prepare_finalize(
-        moe=moe_config,
-        quant_config=moe_quant_config,
-        routing_tables=routing_tables,
-        allow_new_interface=True,
-        use_monolithic=issubclass(experts_cls, mk.FusedMoEExpertsMonolithic),
-        # CUTLASS block-FP8 experts quantize inside the kernel, so all-to-all
-        # carries BF16/FP16 activations rather than FP8 values and scales.
-        input_dtype=(
-            moe_config.in_dtype
-            if fp8_backend == Fp8MoeBackend.FLASHINFER_CUTLASS
-            and moe_quant_config.is_block_quantized
-            else None
-        ),
+    return make_moe_kernel(
+        moe_quant_config,
+        moe_config,
+        experts_cls,
+        routing_tables,
+        prepare_finalize_kwargs={
+            # CUTLASS block-FP8 experts quantize inside the kernel, so all2all
+            # carries BF16/FP16 activations rather than FP8 values and scales.
+            "input_dtype": (
+                moe_config.in_dtype
+                if fp8_backend == Fp8MoeBackend.FLASHINFER_CUTLASS
+                and moe_quant_config.is_block_quantized
+                else None
+            ),
+        },
     )
-    assert prepare_finalize is not None
-
-    logger.info_once("Using %s", prepare_finalize.__class__.__name__)
-
-    # Create Experts.
-    if prepare_finalize.activation_format.is_batched:
-        max_num_tokens = prepare_finalize.max_num_tokens_per_rank()
-        assert max_num_tokens is not None
-        experts = experts_cls(
-            moe_config=moe_config,
-            quant_config=moe_quant_config,
-            max_num_tokens=max_num_tokens,
-            num_dispatchers=prepare_finalize.num_dispatchers(),
-        )
-    else:
-        experts = experts_cls(
-            moe_config=moe_config,
-            quant_config=moe_quant_config,
-        )
-
-    kernel = mk.FusedMoEKernel(
-        prepare_finalize,
-        experts,
-    )
-
-    return kernel

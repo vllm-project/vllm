@@ -5,9 +5,9 @@
 
 The checkpoint layout is:
 
-* ``model.whisper_encoder.*``: Whisper-medium encoder weights.
-* ``model.vq_adaptor.*``: 4x time-merge projector.
-* ``model.language_model.*``: Qwen3-0.6B decoder weights.
+* `model.whisper_encoder.*`: Whisper-medium encoder weights.
+* `model.vq_adaptor.*`: 4x time-merge projector.
+* `model.language_model.*`: Qwen3-0.6B decoder weights.
 """
 
 import math
@@ -631,6 +631,11 @@ class MossTranscribeDiarizeForConditionalGeneration(
 
     @classmethod
     def get_generation_prompt(cls, stt_params: SpeechToTextParams) -> PromptType:
+        if stt_params.task_type != "transcribe":
+            raise ValueError(
+                f'MOSS-Transcribe-Diarize only supports "transcribe", '
+                f"got {stt_params.task_type}"
+            )
         stt_config = stt_params.stt_config
         question = stt_params.request_prompt or DEFAULT_MOSS_TRANSCRIBE_DIARIZE_PROMPT
         question = question.strip() or DEFAULT_MOSS_TRANSCRIBE_DIARIZE_PROMPT
@@ -654,7 +659,7 @@ class MossTranscribeDiarizeForConditionalGeneration(
 
     @classmethod
     def parse_diarized_transcript(cls, text: str) -> list[DiarizedTranscriptionSegment]:
-        """Parse MOSS's canonical ``[start][Sxx]text[end]`` transcript."""
+        """Parse MOSS's canonical `[start][Sxx]text[end]` transcript."""
         headers: list[tuple[re.Match[str], float, str]] = []
         for match in _MOSS_DIARIZED_HEADER_RE.finditer(text):
             start = parse_diarized_timestamp(match["start"])
