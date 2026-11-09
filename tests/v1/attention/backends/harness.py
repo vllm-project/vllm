@@ -62,17 +62,20 @@ def make_paged_batch(
 
     Block-table rows are padded with block 0, as the model runner does.
     ``num_padded_tokens`` > sum(query_lens) leaves trailing padding slots of
-    -1, as a CUDA-graph-padded batch does.
+    -1, as a CUDA-graph-padded batch does. A request may have no query tokens:
+    seq_len 0 is a FULL CUDA graph padding row, seq_len > 0 a request whose KV
+    an async connector is still loading.
     """
     assert len(query_lens) == len(seq_lens)
-    assert all(0 < q <= s for q, s in zip(query_lens, seq_lens))
+    assert all(0 <= q <= s for q, s in zip(query_lens, seq_lens))
+    assert any(q > 0 for q in query_lens)
     gen = torch.Generator().manual_seed(seed)
     needed = blocks_needed(seq_lens, block_size)
     num_blocks = num_blocks or needed + 1
     assert num_blocks >= needed + 1
     # Block 0 is reserved as the pad value and never holds a request's page.
     perm = torch.randperm(num_blocks - 1, generator=gen)[:needed] + 1
-    max_blocks = max(math.ceil(s / block_size) for s in seq_lens)
+    max_blocks = max(1, *(math.ceil(s / block_size) for s in seq_lens))
     block_table = torch.zeros(len(seq_lens), max_blocks, dtype=torch.int32)
     slots, query_slots = [], []
     cursor = 0
