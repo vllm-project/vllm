@@ -27,11 +27,11 @@ Which hits need a cache segment in RL:
 
 | Option | Approach | Assessment |
 |---|---|---|
-| C0 | No cache; cap hits at `aux_start` and recompute | Loses prefix sharing (35% throughput loss measured on a 30B MoE); creates second computations |
+| C0 | No cache; cap hits at `aux_start` and recompute | Loses prefix sharing: every turn recomputes the context it could have hit; creates second computations |
 | C1 | Engine-local block-row cache allocated and evicted with the KV; blocks missing from the session written at request end | Exact; ~1% of the KV for R3 on DeepSeek-V4.1-Flash; ~54 GB raw for the indexer per engine |
 | C2 | R3 as an extra KV-cache layer (#64383) | "KV hit ⇒ rows present" across KV tiers including offload; 0.21% of KV capacity; needs a host group with one slot per token |
 | C3 | Store keyed by global block hash (#57968) | One copy, but per-batch release loses rows still shared, and pool pressure drops them |
-| C6 | **The delivery pool doubles as the session's cache**: a hit is allowed only up to what the session already published | **Chosen.** No extra memory, works for the indexer too. Cases 1–3 are covered; case 4 is truncated (<1% of prefill at frontier scale) |
+| C6 | **The delivery pool doubles as the session's cache**: a hit is allowed only up to what the session already published | **Chosen.** No extra memory, works for the indexer too. Cases 1–3 are covered; case 4 is truncated, so each session computes a shared prefix once itself |
 
 ## Write granularity
 
@@ -73,7 +73,7 @@ Rows are labelled with the version of the forward that computed them, stamped wh
 
 | Event | Option | Assessment |
 |---|---|---|
-| Memory full | drop rows / fail the request / block / **offload to SSD** | **Offload** on eviction (never at put, which loses objects); without SSD, **block** with an in-flight cap |
+| Memory full | drop rows / fail the request / block / **offload to SSD** | **Offload** on eviction (never at put, which loses objects), with sessions admitted by free disk; without SSD, pin, admit by pool size and **block** writers when the pool is full |
 | Holder dies or disk fails | restart and continue / **abort the step** | A dead holder's objects are listed but unreadable, and a failing disk makes every put fail: **abort** on holder death or when puts stop landing |
 | Any write fails | report the missing rows / substitute a later recompute / **fail the request** | A recompute can be of another version and its label would be wrong. Reporting missing rows would keep the rest of the request but needs per-row bookkeeping in the writer and the reader, for failures that are rare. The request **fails** as a whole: an **error marker per request** in place of its manifest (a session-wide marker would fail every sibling), and the reader fails any request whose manifest lists an object that does not exist |
 | Preemption | finish the request / **stash and resume** | Finishing loses rows computed before the preemption: **stash** |
@@ -111,7 +111,7 @@ On DeepSeek-V4.1 layers past 20 attend through a 128-row sliding window, and vLL
 
 ## The five designs compared
 
-All five share the delivery segment (W1/W3, K2, backpressure, admission cap, session release) and differ in the cache segment.
+All five share the delivery segment (W1/W3, K2, admission by free disk, session release) and differ in the cache segment. The X4/X5 comparison predates the SSD store and ran with a fixed pool and an in-flight cap.
 
 | Design | Cache segment | Result |
 |---|---|---|
@@ -123,7 +123,7 @@ All five share the delivery segment (W1/W3, K2, backpressure, admission cap, ses
 
 | Failure | c1 / c0 / P-S / P-B | P-A |
 |---|---|---|
-| Delivery memory full | offload to SSD (backpressure without SSD), nothing dropped | cache and delivery are one copy: neither evictable nor deletable |
+| Delivery memory full | offload to SSD, admission by free disk (without SSD: pinned, admission by pool size, writers block); nothing dropped | cache and delivery are one copy: neither evictable nor deletable |
 | Writer process dies | only that process's undelivered rows; the trajectory is regenerated | every engine sharing the prefix loses them |
 | Trainer done | delete the session | shared blocks need reference counting |
 

@@ -13,13 +13,13 @@ Measurements behind the [protocol](protocol.md). The designs are described in [d
 
 ## How correctness is checked
 
-Each request is read back through its manifest and compared three ways:
+Correctness is checked against an independent reference, not only against what the engine itself returned. Each request is read back through its manifest and compared three ways:
 
 - **Inline:** the rows the engine returned with the response.
 - **Reference:** each trajectory's own first computation, dumped by the engine per step after the rejected speculative suffix is dropped. For a fork, positions before the fork point come from the parent. Rows of drafts the scheduler later truncated are skipped.
 - **Version segments:** the manifest's segments must match the weight versions the trajectory saw.
 
-The inline check is blind at prefix-hit positions: the engine reads those inline rows back from the same store, so "delivered = inline" holds even if both are another trajectory's rows. Errors in the hardening section below were only visible against the reference.
+The inline check is blind at prefix-hit positions: the engine reads those inline rows back from the same store, so "delivered = inline" holds even if both are another trajectory's rows. Errors in the hardening section below were only visible against the reference. The reference comparison has not yet been run at full depth (engine overhead: full depth against bounded replay).
 
 Engine events that do not occur on their own in a short test are triggered through the engine's real code paths:
 
@@ -40,7 +40,7 @@ Engine events that do not occur on their own in a short test are triggered throu
 | ID | What | Pass criterion | Result |
 |---|---|---|---|
 | X0 | Output sanity; KV capacity; where an R3 KV layer can attach | real numbers | pass |
-| X1 | Correctness per design | 0 missing, 0 wrong | all five designs pass |
+| X1 | Correctness per design | 0 missing, 0 wrong | c1, P-S, P-B and P-A pass; c0 is compared in X4/X5 |
 | X1b | Row determinism across schedules | bitwise identical | `auto` pass; `deep_gemm_mega_moe` failed, fixed |
 | X2 | Throughput with aux outputs on; engine-local store vs Mooncake at 8 replicas; each hop vs its ceiling | measured | full depth at 14.6K: 58–62% less time than bounded replay in every arm; on the earlier bounded-replay build, exact rows cost about 41% at the top scenario, and with partial capture and capture off the output lock all outputs cost 4.0% there (two interleaved rounds); full depth at the top scenario not yet run |
 | X4/X5 | Requested means delivered; freed once used | 0 missing, 0 leaks | pass down to a 16 MB pool |
@@ -198,7 +198,7 @@ Times are the median replica. In the run with reduced host work one replica sat 
 
 The arm without the indexer ran nearly the same code in the earlier build and in the capture-thread run, and cost −0.4% in one and −2.9% in the other. Run-to-run spread at this scale is therefore at least 2 points, and a single top run cannot resolve the effect of one change. The one-node gains (71 → 39 s over no indexer at 14.6K, the lock time gone at 512K) did not show at the top. The writer is not the cause there: in the capture-thread run puts took 0.71 ms at p99, the capture queue held at most one item, and the writer was blocked about 0 s, except on the slowest replica, which had one 4 s stall and 11.6 s blocked in all. All outputs write 53 GB per replica, against 15 GB without the indexer. Factors present only at the top, such as five replicas writing to one pool node over RDMA, are not yet tested. The interleaved run, which alternates the arms twice on the same nodes, puts the cost of all outputs at 4.0% and of all but the indexer at 2.1%; these are the top-scenario numbers the README cites.
 
-On the GB200 cluster the checker's readback of one replica ran at about 25 MB/s and 6,831 keys still failed after three retries; they are reported missing, with 0 wrong rows, while the pool holds every object (no eviction). The same readback on GB300 takes 130–210 s with nothing missing. Reads of large objects that outlive the 1 s read lease are the suspect; this is the trainer-side path and is still open. In that GB200 run each replica wrote 106.6 GB in 427,573 puts with no retry: indexer 91.1 GB (3,419 bytes per token, before deep slots were dropped from blocks), R3 13.2 GB, hidden 2.1 GB, cone patches 0.33 GB.
+On the GB200 cluster the checker's readback of one replica ran at about 25 MB/s and 6,831 keys still failed after three retries; the checker counted them missing, with 0 wrong rows, while the pool holds every object (no eviction). The same readback on GB300 takes 130–210 s with nothing missing. Reads of large objects that outlive the 1 s read lease are the suspect; this is the trainer-side path and is still open. In that GB200 run each replica wrote 106.6 GB in 427,573 puts with no retry: indexer 91.1 GB (3,419 bytes per token, before deep slots were dropped from blocks), R3 13.2 GB, hidden 2.1 GB, cone patches 0.33 GB.
 
 #### One node, 14.6K context, bounded replay
 
@@ -246,7 +246,7 @@ Two nodes, 4× ConnectX-7 NDR (400 Gb/s) per node.
 | zstd-3, one thread | 180 MB/s | — | the hop that matters on the write side |
 | Indexer decode on the trainer, numpy | 110–210 MB/s | memory bandwidth | the hop that matters overall |
 
-At the top scenario (512K, 51 sessions in flight per replica, 8 replicas) each replica writes ~45 MB/s, 0.2% of the pool node's NICs. Per replica, measured inside the run:
+In the 8-replica 512K run (Scale, third row; 51 sessions in flight per replica) each replica writes ~45 MB/s, 0.2% of the pool node's NICs. Per replica, measured inside the run:
 
 - **One TP rank writes:** put calls equal successes; there are no redundant puts.
 - **Writer thread:** moving indexer encoding to a 4-thread pool and batching ready puts cut the writer's wait on encoding from 1,517 s to 310 s, R3 queueing from 1.5 s to 0.056 s, and scheduling pauses on writer backlog from 78–102 s to 0.
@@ -330,16 +330,20 @@ P-S, R3 + indexer (GPU packing) + hidden, a weight-version bump after every step
 
 | Run | Scale | Requests | R3 / indexer rows | Missing / wrong | Version segments | Hidden | Released |
 |---|---|---|---|---|---|---|---|
-| 512K | 13 replicas × 51 sessions × 108 turns, 768 GB pool, RDMA over InfiniBand | 71,604 | 3.48e8 each | 0 / 0 | 71,604, 0 failures | last request per session: 42,432 rows, logprob error 0.041 | 663/663 |
+| 512K | 13 replicas × 51 sessions × 108 turns, 768 GB pool, RDMA over InfiniBand | 71,604 | 3.48e8 each | 0 / 0 | 71,604, 0 failures | last request per session: 42,432 rows; fp8 hidden states, before exact float32 (logprob error 0.041) | 663/663 |
 | 512K, high fidelity (real text, weights perturbed every step) | 5 replicas × 51 sessions × 108 turns | 27,540 | 1.33e8 each | 0 / 0 | 27,540, 0 failures | 119,630 rows, 0 bad | 255/255 |
 | 512K, hardened code, 51 sessions in flight | 8 replicas × 51 sessions × 16 turns, 700 GB pool node + 160 GB per replica node, hard-pinned | 816 per replica | — | 0 / 0 per session, 0 evictions | — | — | 51/51 per replica |
 
-The first two runs predate the hardening below. Their sessions hold one trajectory each; branches and engine events are covered by the regression tests.
+All three ran on the bounded-replay build. The first two predate the hardening below and exact hidden states. Their sessions hold one trajectory each; branches and engine events are covered by the regression tests.
 
 The third run exposed two store requirements, now in protocol §9:
 
 - Without pinning, an in-flight cap sized for short-context indexer bytes let 1.3 TB into a 700 GB pool, and Mooncake evicted 1.81M keys.
 - Taking down a finished replica's segment removed objects of the replicas still reading.
+
+## Context compaction (smoke)
+
+8 rollouts, each compacted into 3 segments: the summarizing request extends its segment's trajectory and each continuation is a new trajectory of the session (protocol §11). 0 missing and 0 wrong over 604,480 rows. The admission estimate (protocol §8) was 209.7 MB per session against 109.4 MB written, conservative by about 1.9×.
 
 ## KV offload to an SSD tier (E0)
 
@@ -403,6 +407,8 @@ Rollouts on SSD are 1–2% slower (median +1.3%, mean +1.8%); reading every sess
 | Holder killed | the master still lists every key, every get returns empty; puts fail |
 | Disk writes failing (file size limit) | `FILE_WRITE_FAIL` per bucket, partial files left (15 GB for 2 GB of data), memory stays full, every later put fails; no acked object lost |
 | `--quota_bytes=1 GB` | no effect on the offload directory |
+
+**Release under concurrent writes.** Keys still being written survive the first force removal; the second removal, after the writers report nothing pending, removes them. `remove_by_regex` scans every key of the store (36–74 ms at 200K keys) and silently skips keys whose replica is incomplete or still being replicated, returning only the count it removed. This is why release removes twice (protocol §8).
 
 These are the rules of protocol §9: offload on eviction only, a long `client_ttl`, force removal, one fresh directory per holder and job deleted at job end, an abort on a dead holder or on puts that stop landing, and disk headroom monitored outside the store.
 
