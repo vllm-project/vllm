@@ -86,7 +86,7 @@ def _normalize_hyv4_config(config: PreTrainedConfig) -> PreTrainedConfig:
 class HYV4DecoderLayer(nn.Module):
     """One HY V4 decoder layer: MLA attention plus a dense or MoE MLP.
 
-    When``config.enable_ihc`` is set the layer runs on ``hc_mult`` residual
+    When`config.enable_ihc` is set the layer runs on `hc_mult` residual
     channels and each sub-block is wrapped by an `HYV4HCLayer` boundary;
     otherwise it uses the standard single-stream residual.
     """

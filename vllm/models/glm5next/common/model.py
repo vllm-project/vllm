@@ -875,10 +875,10 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
     ) -> torch.Tensor:
         """Completed residual stream entering a layer, as one hidden vector.
 
-        mHC layers defer their final ``hc_post`` into the next layer's fused
-        pre-op, so ``hidden_states`` holds the raw layer output while the
+        mHC layers defer their final `hc_post` into the next layer's fused
+        pre-op, so `hidden_states` holds the raw layer output while the
         widened stream is completed here and contracted back to
-        ``hidden_size``. Non-mHC layers already return the summed stream.
+        `hidden_size`. Non-mHC layers already return the summed stream.
         """
         if post is None:
             return hidden_states
@@ -1422,7 +1422,7 @@ def _fused_shared_experts_tuned(parallel_config: ParallelConfig) -> bool:
 
 def _num_fused_shared_experts(n_shared_experts: int | None, enabled: bool) -> int:
     """Expert slots the fused MoE appends for the shared expert; must match the
-    ``num_fused_shared_experts`` that ``FusedMoE`` allocates."""
+    `num_fused_shared_experts` that `FusedMoE` allocates."""
     if not enabled or n_shared_experts is None:
         return 0
     if n_shared_experts > 1:
@@ -1436,7 +1436,7 @@ def _num_fused_shared_experts(n_shared_experts: int | None, enabled: bool) -> in
 
 
 def _fused_shared_expert_name(name: str, n_routed_experts: int) -> str:
-    """Point a checkpoint ``mlp.shared_experts.*`` tensor at the fused MoE's
+    """Point a checkpoint `mlp.shared_experts.*` tensor at the fused MoE's
     shared-expert slot, which follows the routed experts; other names are
     returned unchanged."""
     return name.replace("mlp.shared_experts.", f"mlp.experts.{n_routed_experts}.", 1)
@@ -1460,8 +1460,8 @@ def _mla_proj_checkpoint_tensor(
     kv_a_pad_size: int,
 ) -> tuple[str, torch.Tensor]:
     """A checkpoint tensor of an MLA projection, in the form its parameter
-    loads: Quark's ``weight_scale`` under the ``weight_scale_inv`` name, and a
-    NoPE ``kv_a_proj_with_mqa`` with zero rows (and scale blocks) for the RoPE
+    loads: Quark's `weight_scale` under the `weight_scale_inv` name, and a
+    NoPE `kv_a_proj_with_mqa` with zero rows (and scale blocks) for the RoPE
     part the checkpoint omits. Each tensor is adapted on its own, so a weight
     and its scale can arrive in any order and in different calls."""
     suffix = next((s for s in _FP8_ATTN_PROJS if s in name), None)

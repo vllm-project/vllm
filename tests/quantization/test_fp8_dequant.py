@@ -3,12 +3,12 @@
 """Checkpoint weights that are stored in FP8 but run in BF16.
 
 - `Fp8DequantLinearMethod` (GLM5-next MLA projections): the checkpoint's own
-  block-FP8 ``weight`` and ``weight_scale_inv``, dequantized after loading.
-- The sparse-attention indexer: ``wk`` in the checkpoint's layout (block,
-  per-channel or MX scales), ``weights_proj`` in BF16, fused into one BF16
+  block-FP8 `weight` and `weight_scale_inv`, dequantized after loading.
+- The sparse-attention indexer: `wk` in the checkpoint's layout (block,
+  per-channel or MX scales), `weights_proj` in BF16, fused into one BF16
   weight after loading.
 
-Each checkpoint tensor loads on its own (any order, one per ``load_weights``
+Each checkpoint tensor loads on its own (any order, one per `load_weights`
 call), and an update may send the weight whole in BF16 instead, without its
 scale. Direct and layerwise reloads end with the bytes of a cold start, at the
 cold-start addresses."""
@@ -75,8 +75,8 @@ def _ptrs(model: torch.nn.Module) -> dict[str, int]:
 
 
 def _reload(model, ckpt, mode, model_config, monkeypatch, reverse=False):
-    """Send every tensor in its own ``load_weights`` call, as RL updates do
-    (``reverse``: weights before their scales)."""
+    """Send every tensor in its own `load_weights` call, as RL updates do
+    (`reverse`: weights before their scales)."""
     monkeypatch.setenv("VLLM_RELOAD_MODE", mode)
     start_reload(model)
     items = list(ckpt.items())
@@ -109,7 +109,7 @@ class _MlaModel(torch.nn.Module):
 
 
 def _mla_checkpoint(seed: int) -> dict[str, torch.Tensor]:
-    """``layer.shard.param`` -> tensor, scales first."""
+    """`layer.shard.param` -> tensor, scales first."""
     ckpt = {}
     for shard, rows in enumerate(_OUT):
         weight, ckpt[f"qkv_a.{shard}.weight_scale_inv"] = _block_fp8(
@@ -253,7 +253,7 @@ class _IndexerModel(torch.nn.Module):
 
 
 def _wk_checkpoint(layout: str, gen: torch.Generator):
-    """``wk`` checkpoint tensors (scale first) and their dequantization."""
+    """`wk` checkpoint tensors (scale first) and their dequantization."""
     if layout == "block":
         weight, scale = _block_fp8(_WK, _HIDDEN, int(gen.initial_seed()))
         return {"wk.weight_scale_inv": scale, "wk.weight": weight}, _dequant(
@@ -343,7 +343,7 @@ def test_indexer_fused_weight(model_config, layout, scales_first):
 )
 @pytest.mark.parametrize("mode", ["direct", "layerwise"])
 def test_indexer_reload_fp8_or_bf16(monkeypatch, model_config, layout, cold, mode):
-    """Each load sends ``wk`` whole, either in the checkpoint's FP8 layout or
+    """Each load sends `wk` whole, either in the checkpoint's FP8 layout or
     in BF16 without a scale (as RL trainers do). Every reload ends with the
     dequantized weight in the fused rows, at the cold-start addresses."""
     monkeypatch.setenv("VLLM_RELOAD_MODE", mode)

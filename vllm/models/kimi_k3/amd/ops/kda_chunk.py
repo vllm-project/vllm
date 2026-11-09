@@ -2,10 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """ROCm entry point for the fused Kimi-K3 KDA chunk kernel.
 
-The kernel in ``csrc/kimi_k3/fused_kda_chunk_kernel_rocm.cu``
+The kernel in `csrc/kimi_k3/fused_kda_chunk_kernel_rocm.cu`
 replaces the chunk-state recurrence and the output GEMM of the Triton chunk
 path with a single launch that keeps the per-chunk state in registers, so the
-``[chunks, H, V, K]`` state tensor and the recomputed values never reach HBM.
+`[chunks, H, V, K]` state tensor and the recomputed values never reach HBM.
 """
 
 from functools import cache
@@ -86,8 +86,8 @@ def fused_kda_prologue(
     w/u recompute. Returns the operands the fused chunk kernel consumes.
 
     The kernel can also apply the depthwise conv and its silu, in which case
-    ``q``/``k``/``v`` are the three raw bands of the QKV projection and
-    ``conv_state`` is updated in place. This path is currently not used.
+    `q`/`k`/`v` are the three raw bands of the QKV projection and
+    `conv_state` is updated in place. This path is currently not used.
     """
     # `beta` and `g` reach the layer as last-dim slices of the fused QKVGFAB
     # projection and carry its row stride. The kernel reads both with an
@@ -154,21 +154,21 @@ def _chunk_groups(chunks_per_seq: int, num_seqs: int, num_heads: int) -> int:
     """How many parallel chunk groups to cut each sequence into.
 
     The scan composes the group operators with the exact transfer
-    ``M_g = prod_c (diag(d_c) - w_c^T kg_c)``, so the composition error does
+    `M_g = prod_c (diag(d_c) - w_c^T kg_c)`, so the composition error does
     not grow with group length and the choice is purely a machine fit:
 
-    * ``fill1``/``fill2``: the largest G whose pass-one / pass-two grid still
+    * `fill1`/`fill2`: the largest G whose pass-one / pass-two grid still
       fits in one scheduling batch. Rows are launched in blocks of at most
-      ``kBV = 128``, so pass one (``kV + kK`` rows) needs two blocks per
-      ``(n, h, g)`` and pass two one. Past a pass's fill point its block count
+      `kBV = 128`, so pass one (`kV + kK` rows) needs two blocks per
+      `(n, h, g)` and pass two one. Past a pass's fill point its block count
       grows as fast as its depth shrinks and the rung stops paying.
-    * ``_DEEP_LEN``: unless the groups are still long, where pass two's halving
+    * `_DEEP_LEN`: unless the groups are still long, where pass two's halving
       is worth letting pass one spill to a second batch.
-    * ``_MIN_LEN``: below this many chunks per group the per-group fixed cost
+    * `_MIN_LEN`: below this many chunks per group the per-group fixed cost
       exceeds what the shorter walk saves.
 
-    ``G == 2`` is depth-neutral -- two passes of ``nt/2`` -- and only doubles
-    staging, so the split is taken only from ``G >= 4``.
+    `G == 2` is depth-neutral -- two passes of `nt/2` -- and only doubles
+    staging, so the split is taken only from `G >= 4`.
     """
     cus = _num_cus(torch.accelerator.current_device_index())
     nh = max(num_seqs * num_heads, 1)
@@ -222,39 +222,39 @@ def fused_kda_chunk(
     """Run the chunk recurrence and the output projection in one launch.
 
     Args:
-        qg: ``q * exp2(gk_cumsum)``, ``[1, T, H, 128]``.
+        qg: `q * exp2(gk_cumsum)`, `[1, T, H, 128]`.
         w: chunk-local WY representation of the gated keys.
         u: chunk-local WY representation of the values.
-        kg_t: chunk-major transposed gated keys, ``[chunks, H, 128, 64]``.
-        aqk: intra-chunk query-key attention, ``[chunks, H, 64, 64]``.
-        decay: ``exp2`` of each chunk's last gate row, ``[chunks, H, 128]``.
-        out: output buffer, ``[1, T, H, 128]``; may alias ``u``'s source.
+        kg_t: chunk-major transposed gated keys, `[chunks, H, 128, 64]`.
+        aqk: intra-chunk query-key attention, `[chunks, H, 64, 64]`.
+        decay: `exp2` of each chunk's last gate row, `[chunks, H, 128]`.
+        out: output buffer, `[1, T, H, 128]`; may alias `u`'s source.
         scale: scale applied to the query-key products.
         cu_seqlens: int32 cumulative sequence lengths.
-        initial_state: fp32 per-sequence initial recurrent state, or ``None``.
+        initial_state: fp32 per-sequence initial recurrent state, or `None`.
         output_final_state: whether to return the final recurrent state.
         chunk_offsets: int32 per-sequence first chunk index.
         checkpoint_state: destination for the mid-prefill state snapshots,
-            fp32 or bf16 ``[rows, H, 128, 128]``. Without
-            ``checkpoint_state_indices`` it is a staging buffer indexed by
+            fp32 or bf16 `[rows, H, 128, 128]`. Without
+            `checkpoint_state_indices` it is a staging buffer indexed by
             sequence; with them it can be the paged state cache itself.
-        checkpoint_offsets: int32 ``[N]`` token offsets, each relative to its
+        checkpoint_offsets: int32 `[N]` token offsets, each relative to its
             sequence's first query token, at which to snapshot the recurrent
-            state. ``0`` disables the export for that sequence. A non-zero
-            offset must be a multiple of :data:`KDA_CHECKPOINT_ALIGNMENT`;
+            state. `0` disables the export for that sequence. A non-zero
+            offset must be a multiple of `KDA_CHECKPOINT_ALIGNMENT`;
             the kernel skips any that is not, so the caller has to filter
             rather than rely on the store happening.
-        checkpoint_state_indices: optional int32 ``[N]`` destination row per
+        checkpoint_state_indices: optional int32 `[N]` destination row per
             sequence. A negative row disables the export for that sequence.
         state_cache: the paged recurrent state, fp32 or bf16
-            ``[slots, H, 128, 128]``. When given, the walk reads sequence
-            ``n``'s initial state from row ``state_indices[n]`` and writes its
+            `[slots, H, 128, 128]`. When given, the walk reads sequence
+            `n`'s initial state from row `state_indices[n]` and writes its
             final state back to the same row, which removes the gather and the
             scatter that otherwise bracket this kernel. Replaces
-            ``initial_state`` / ``output_final_state``, and the returned final
-            state is then ``None`` because it is already in the cache.
-        state_indices: int32 ``[N]`` cache row per sequence.
-        has_initial_state: bool ``[N]``; a false entry starts that sequence
+            `initial_state` / `output_final_state`, and the returned final
+            state is then `None` because it is already in the cache.
+        state_indices: int32 `[N]` cache row per sequence.
+        has_initial_state: bool `[N]`; a false entry starts that sequence
             from a zero state and its cache row is read only, never before the
             walk writes it.
 

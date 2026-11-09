@@ -1147,10 +1147,10 @@ def _patch_mxfp8_moe_backend(monkeypatch) -> None:
 def test_quant_method_dispatch_mixed_mxfp4_mxfp8_experts(
     monkeypatch, default_vllm_config
 ):
-    """A per-layer ``<experts prefix>*`` entry selects MXFP8 for that layer's routed
+    """A per-layer `<experts prefix>*` entry selects MXFP8 for that layer's routed
     experts only; other layers keep the global MXFP4, and the glob does not reach
-    the layer's shared experts (``shared_experts`` does not start with
-    ``experts``)."""
+    the layer's shared experts (`shared_experts` does not start with
+    `experts`)."""
     config = QuarkConfig(
         {
             "global_quant_config": _MXFP4_MOE_SPEC,
@@ -1182,8 +1182,8 @@ def test_quant_method_dispatch_mixed_mxfp4_mxfp8_experts(
 
 
 def test_quark_w8a8_mxfp8_moe_weight_shapes(monkeypatch):
-    """The parameters match the checkpoint layout: E4M3 ``[E, rows, cols]`` and
-    uint8 E8M0 ``[E, rows, cols / 32]``, sharded as block scales."""
+    """The parameters match the checkpoint layout: E4M3 `[E, rows, cols]` and
+    uint8 E8M0 `[E, rows, cols / 32]`, sharded as block scales."""
     _patch_mxfp8_moe_backend(monkeypatch)
     method = QuarkW8A8Mxfp8MoEMethod(
         _make_test_moe_config(), kMxfp8Static, kMxfp8Dynamic
@@ -2438,13 +2438,17 @@ class TestQuarkInt4Format:
                         torch.zeros(1),
                     ),
                     (
-                        "model.language_model.layers.0.mlp.shared_expert_gate"
-                        ".weight_scale",
+                        (
+                            "model.language_model.layers.0.mlp.shared_expert_gate"
+                            ".weight_scale"
+                        ),
                         torch.zeros(1),
                     ),
                     (
-                        "model.language_model.layers.0.mlp.shared_expert_gate"
-                        ".weight_zero_point",
+                        (
+                            "model.language_model.layers.0.mlp.shared_expert_gate"
+                            ".weight_zero_point"
+                        ),
                         torch.zeros(1),
                     ),
                 ]

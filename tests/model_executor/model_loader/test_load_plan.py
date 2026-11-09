@@ -3,11 +3,11 @@
 """Load plan on tiny CPU models.
 
 Invariant, for these models (whose loaders set no module state): planning
-(after ``start_reload``, as the NCCL engine does at the first update) changes
+(after `start_reload`, as the NCCL engine does at the first update) changes
 no registration, attribute, address or layout, and no
 bytes outside checkpoint tensors, and a direct reload that copies each
-name's boxes into its ``get_dest`` tensors (and sends fallbacks in full through
-``load_weights``) leaves every tensor byte for byte as a cold start on the same
+name's boxes into its `get_dest` tensors (and sends fallbacks in full through
+`load_weights`) leaves every tensor byte for byte as a cold start on the same
 weights, at the same addresses, on the first update and on later ones that
 reuse the plan.
 """
@@ -27,6 +27,7 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.model_loader.reload import (
     finish_reload,
+    lifecycle,
     load_planned,
     plan_loads,
     start_reload,
@@ -46,6 +47,8 @@ BF16 = torch.bfloat16
 @pytest.fixture(autouse=True)
 def _direct_mode(monkeypatch):
     monkeypatch.setenv("VLLM_RELOAD_MODE", "direct")
+    # several tests start a reload they never finish; restore the flag after each
+    monkeypatch.setattr(lifecycle, "_weight_update_active", False)
 
 
 def _param(*shape, dtype=BF16, loader=None) -> torch.nn.Parameter:
@@ -56,9 +59,9 @@ def _param(*shape, dtype=BF16, loader=None) -> torch.nn.Parameter:
 
 
 class _Toy(torch.nn.Module):
-    """Loads ``name`` through its parameter's ``weight_loader`` (or
-    ``default_weight_loader``); ``stacked`` maps checkpoint names to a fused
-    parameter and shard id, as models' ``stacked_params_mapping`` does."""
+    """Loads `name` through its parameter's `weight_loader` (or
+    `default_weight_loader`); `stacked` maps checkpoint names to a fused
+    parameter and shard id, as models' `stacked_params_mapping` does."""
 
     stacked: dict[str, tuple[str, object]] = {}
     skipped: frozenset[str] = frozenset()
@@ -97,7 +100,7 @@ def _cold_start(make, weights):
 
 
 def _planned_reload(model, plan: LoadPlan, weights) -> None:
-    """What an engine does after ``start_reload``: boxes into their
+    """What an engine does after `start_reload`: boxes into their
     destinations, fallbacks in full, in batches of two as a packed transfer
     hands them over."""
     items = list(weights.items())
@@ -126,10 +129,10 @@ def _registrations(model):
 
 
 def _plan(model, shapes, mirrors=()) -> LoadPlan:
-    """``plan_loads`` (after ``start_reload``), checking that planning changed
+    """`plan_loads` (after `start_reload`), checking that planning changed
     no registration, module attribute, address or layout, and no bytes but
     those of checkpoint tensors (the bake runs loaders' constant writes and
-    reads of their destination for real) and of ``mirrors``: other tensors a
+    reads of their destination for real) and of `mirrors`: other tensors a
     fallback's loader writes from its destination."""
     state, registrations = _state(model), _registrations(model)
     plan = plan_loads(model, _metadata(shapes))
@@ -172,7 +175,7 @@ def _check_plan_equals_cold_start(make, shapes, mirrors=()):
 
 
 def _offset(dest: torch.Tensor, param: torch.Tensor) -> int:
-    """Where ``dest`` starts in ``param``'s storage, relative to ``param``."""
+    """Where `dest` starts in `param`'s storage, relative to `param`."""
     return dest.storage_offset() - param.storage_offset()
 
 
@@ -320,7 +323,7 @@ _E, _I, _H = 4, 4, 3
 
 
 def _experts_model(ep_rank: int, ep_size: int, tp_rank: int, tp_size: int):
-    """``experts.gate_up_proj`` [E, 2I, H] and ``experts.down_proj`` [E, H, I]
+    """`experts.gate_up_proj` [E, 2I, H] and `experts.down_proj` [E, H, I]
     (transformers v5), loaded one expert at a time as RoutedExperts does."""
     local = range(ep_rank * _E // ep_size, (ep_rank + 1) * _E // ep_size)
     i_shard = _I // tp_size
@@ -371,7 +374,7 @@ def test_fused_experts_under_ep(ep_rank):
 
 @pytest.mark.parametrize("tp_rank", [0, 1])
 def test_fused_experts_under_expert_tp(tp_rank):
-    """Also pins the internal ``Write``/``Region`` form (RFC §11), which CI
+    """Also pins the internal `Write`/`Region` form (RFC §11), which CI
     compares across ranks."""
     _, plan = _check_plan_equals_cold_start(
         _experts_model(0, 1, tp_rank, 2), _EXPERT_SHAPES
@@ -433,7 +436,7 @@ def test_fallbacks(loader, reason):
 
 def test_noop_to_and_constant_fill_stay_direct():
     """A constant write into a checkpoint tensor (padding, as
-    ``VocabParallelEmbedding`` fills) runs while planning and stays out of
+    `VocabParallelEmbedding` fills) runs while planning and stays out of
     the plan: post-load processing owns padding."""
 
     def loader(param, loaded):
@@ -511,7 +514,7 @@ def _mirror_norm(mirror, param, loaded):
 )
 def test_mirror_buffer_falls_back(loader, reason):
     """Kimi-K3 KDA's decode copies: a loader that also writes a non-persistent
-    buffer, behind ``if not param.is_meta``, is a fallback so the buffer is
+    buffer, behind `if not param.is_meta`, is a fallback so the buffer is
     reloaded too."""
 
     def make():
@@ -564,7 +567,7 @@ def test_tensors_sharing_one_storage():
 
 
 def _two_names(loader_a):
-    """``a`` through ``loader_a``, ``b`` a plain copy."""
+    """`a` through `loader_a`, `b` a plain copy."""
 
     def make():
         model = _Toy()
@@ -608,8 +611,8 @@ def test_meta_failure_is_not_called_a_value_read():
 
 
 class _Paired(_Toy):
-    """Stashes ``weight_a`` until ``weight_b`` arrives: a list that ends up
-    empty again, or an attribute that stays (``keep_stash``)."""
+    """Stashes `weight_a` until `weight_b` arrives: a list that ends up
+    empty again, or an attribute that stays (`keep_stash`)."""
 
     keep_stash = False
 
@@ -634,7 +637,7 @@ class _Paired(_Toy):
 @pytest.mark.parametrize("keep_stash", [False, True])
 def test_paired_loader_is_refused(monkeypatch, keep_stash):
     """Whether the loader keeps its stash or not, the combined write is
-    labelled ``weight_a``, so ``weight_b`` writes nothing itself and the plan
+    labelled `weight_a`, so `weight_b` writes nothing itself and the plan
     is refused."""
     monkeypatch.setattr(_Paired, "keep_stash", keep_stash)
     shapes = {"layer.weight_a": ((4,), BF16), "layer.weight_b": ((4,), BF16)}
@@ -647,7 +650,7 @@ def test_paired_loader_is_refused(monkeypatch, keep_stash):
 
 
 class _PairedWithValueRead(_Toy):
-    """``weight_a`` is stashed until ``weight_b`` arrives, and ``x``, which
+    """`weight_a` is stashed until `weight_b` arrives, and `x`, which
     arrives between them, reads its values."""
 
     def __init__(self):
@@ -669,9 +672,9 @@ class _PairedWithValueRead(_Toy):
 
 
 def test_a_stop_resumes_without_replaying_names():
-    """A stop resumes ``load_weights`` after the stopped name instead of
+    """A stop resumes `load_weights` after the stopped name instead of
     replaying the names before it, so the stash holds only this bake's
-    ``weight_a``: the pair is refused, not silently "not needed"."""
+    `weight_a`: the pair is refused, not silently "not needed"."""
     shapes = {
         "layer.weight_a": ((4,), BF16),
         "x.weight": ((4,), BF16),
@@ -686,7 +689,7 @@ def test_a_stop_resumes_without_replaying_names():
 
 def test_a_trace_kept_past_planning_fails_loudly(monkeypatch):
     """A loader that keeps an incoming tensor on the module keeps a planning
-    trace; using it in a later ``load_weights`` raises instead of writing
+    trace; using it in a later `load_weights` raises instead of writing
     nowhere."""
     monkeypatch.setattr(_Paired, "keep_stash", True)
     shapes = {"layer.weight_a": ((4,), BF16), "layer.weight_b": ((4,), BF16)}
@@ -702,7 +705,7 @@ def test_a_trace_kept_past_planning_fails_loudly(monkeypatch):
 
 def test_overlapping_writes_fall_back():
     """Both tied names write the same storage: only they go through
-    ``load_weights``, in arrival order as at cold start."""
+    `load_weights`, in arrival order as at cold start."""
 
     def make():
         model = _toy_model()
@@ -736,7 +739,7 @@ def test_duplicate_names_are_refused():
 
 
 def test_plan_outside_a_direct_reload_is_refused():
-    """The plan takes its layout from what ``begin_direct_reload`` applied."""
+    """The plan takes its layout from what `begin_direct_reload` applied."""
     make, shapes = _single(None)
     model = _cold_start(make, _checkpoint(shapes, 0))
     with pytest.raises(RuntimeError, match="between start_reload and finish_reload"):

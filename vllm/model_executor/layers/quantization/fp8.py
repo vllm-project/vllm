@@ -473,9 +473,9 @@ def dequantized_fp8_config(
 class Fp8DequantLinearMethod(LinearMethodBase):
     """An FP8 checkpoint layer that runs in BF16.
 
-    ``base``, the checkpoint's linear method, creates the checkpoint's
-    parameters, so ``weight`` and its scale load independently (in any order
-    and any number of ``load_weights`` calls). The weight may also arrive whole
+    `base`, the checkpoint's linear method, creates the checkpoint's
+    parameters, so `weight` and its scale load independently (in any order
+    and any number of `load_weights` calls). The weight may also arrive whole
     in BF16, as RL trainers send it; it then needs no scale. Post-load
     processing dequantizes an FP8 weight (block, per-channel or MX scales) to
     BF16 and retires the scales. A reload first restores the checkpoint layout
@@ -548,7 +548,7 @@ class Fp8DequantLinearMethod(LinearMethodBase):
 
 
 def _view_as(param: torch.Tensor, dtype: torch.dtype) -> torch.Tensor | None:
-    """``param``'s storage viewed in ``dtype`` with its shape, if it fits."""
+    """`param`'s storage viewed in `dtype` with its shape, if it fits."""
     storage = param.untyped_storage()
     if (
         param.is_contiguous()

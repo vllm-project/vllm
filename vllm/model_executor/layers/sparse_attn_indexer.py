@@ -9,6 +9,7 @@ import torch.distributed as dist
 from torch import nn
 
 import vllm.envs as envs
+from vllm import _cpu_ops as cpu_ops
 from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
@@ -128,18 +129,18 @@ def _merge_dcp_topk_global(
 ) -> None:
     """Merge each DCP rank's local top-K into the global top-K.
 
-    ``topk_indices`` are this rank's local top-K positions into its 1/N KV
+    `topk_indices` are this rank's local top-K positions into its 1/N KV
     shard. A token in the global top-K must also be in its owning rank's local
-    top-K (at most ``topk_tokens - 1`` tokens rank globally above it, hence at
+    top-K (at most `topk_tokens - 1` tokens rank globally above it, hence at
     most that many on its own rank), so exchanging only the per-rank local
     candidates is exact -- equivalent to all-gathering the full logit matrix,
-    but it ships ``dcp_world_size * topk_tokens`` candidates instead of the whole
-    score row. Overwrites ``topk_indices`` with global token ids (``-1`` for
+    but it ships `dcp_world_size * topk_tokens` candidates instead of the whole
+    score row. Overwrites `topk_indices` with global token ids (`-1` for
     padding); the attention backend localizes them back to physical slots per
     rank.
-    The selector keys only the score bits that ``logits_dtype`` (the dtype the
+    The selector keys only the score bits that `logits_dtype` (the dtype the
     MQA logits were computed in, before the FP32 upcast) carries and the id
-    bits that positions below ``num_positions`` use.
+    bits that positions below `num_positions` use.
     """
     if dcp_world_size <= 1:
         return
@@ -341,7 +342,7 @@ def _upcast_logits_kernel(src_ptr, dst_ptr, row_ends_ptr, stride, BLOCK: tl.cons
 def as_fp32_logits(logits: torch.Tensor, row_ends: torch.Tensor) -> torch.Tensor:
     """Upcast BF16 MQA logits for the FP32 top-k kernels.
 
-    Only columns below ``row_ends`` (int32, one per row) are converted, the
+    Only columns below `row_ends` (int32, one per row) are converted, the
     span the consumers read; DeepGEMM's aligned row stride is kept.
     """
     if logits.dtype == torch.float32:
@@ -365,7 +366,7 @@ def _decode_chunk_ranges(
     rows: int, width: int, budget: int, itemsize: int
 ) -> list[tuple[int, int]]:
     """Partition independent Q rows under a payload budget of logits whose
-    elements take ``itemsize`` bytes."""
+    elements take `itemsize` bytes."""
     if budget < 0:
         raise ValueError("Decode logits budget must be nonnegative")
     if not rows or not budget or rows * width * itemsize <= budget:
@@ -405,7 +406,7 @@ def _varlen_decode_rows(
     end: int,
 ) -> None:
     """The varlen (SM100) decode logits, candidate selection and top-k of rows
-    ``[start, end)``, with the slice's own DeepGEMM schedule."""
+    `[start, end)`, with the slice's own DeepGEMM schedule."""
     assert decode.indices is not None
     seq_lens = decode.seq_lens[start:end]
     indices = decode.indices[start:end]
@@ -484,7 +485,7 @@ def kv_cache_as_quant_view(
     head_dim: int,
     use_fp4_cache: bool,
 ) -> torch.Tensor:
-    """4D ``[num_blocks, block_size, 1, head_width]`` view expected by
+    """4D `[num_blocks, block_size, 1, head_width]` view expected by
     DeepGEMM, from the 3D indexer kv-cache allocation."""
     if use_fp4_cache:
         assert kv_cache.ndim == 3 and kv_cache.dtype == torch.uint8
@@ -768,10 +769,12 @@ def sparse_attn_indexer(
             scales_spec,
             *gather_specs,
         )
-        # Under ShardQ the chunks index the shardq_gather_indices tokens.
+        # Under ShardQ the chunks index the shardq_gather_indices tokens. The
+        # caller may have computed the query and weights of just those.
         prefill_q, prefill_q_scale, prefill_weights = q_quant, q_scale, weights
-        if (indices := prefill_metadata.shardq_gather_indices) is not None:
-            assert candidate_blocks is None
+        indices = prefill_metadata.shardq_gather_indices
+        assert indices is None or candidate_blocks is None
+        if indices is not None and q_quant.shape[0] != indices.shape[0]:
             prefill_q, prefill_weights = q_quant[indices], weights[indices]
             if q_scale is not None:
                 prefill_q_scale = q_scale[indices]
@@ -1449,12 +1452,12 @@ class SparseAttnIndexer(CustomOp):
         """CPU sparse attention indexer: cache write stays eager Python glue
         (own K-cache layout, not shared with the main attention cache
         write). PREFILL and DECODE both call the ported
-        ``fp8_paged_mqa_logits_cpu``/``topk_transform_512_cpu`` kernels,
-        which read the paged K-cache directly via ``page_table`` -- no
+        `fp8_paged_mqa_logits_cpu`/`topk_transform_512_cpu` kernels,
+        which read the paged K-cache directly via `page_table` -- no
         eager gather step, no per-request Python loop.
 
-        ``prefill_metadata.chunks`` always has exactly one entry here:
-        ``DeepseekV4CPUIndexerMetadataBuilder`` overrides the base chunk
+        `prefill_metadata.chunks` always has exactly one entry here:
+        `DeepseekV4CPUIndexerMetadataBuilder` overrides the base chunk
         split to always return the whole step's prefill batch as one
         chunk, since the base chunking only bounds CUDA/XPU's dense M*N
         logits tensor and flat K-gather workspace, neither of which this
@@ -1550,7 +1553,7 @@ class SparseAttnIndexer(CustomOp):
                 # flat-gather buffer this paged path no longer allocates).
                 max_seq_len = int(local_seq_lens.max().item())
 
-                logits = ops.fp8_paged_mqa_logits_cpu(
+                logits = cpu_ops.fp8_paged_mqa_logits_cpu(
                     q_slice,
                     kv_view,
                     weights[chunk.token_start : chunk.token_end],
@@ -1564,7 +1567,7 @@ class SparseAttnIndexer(CustomOp):
                     dtype=torch.int32,
                     device=kv_cache.device,
                 )
-                ops.topk_transform_512_cpu(
+                cpu_ops.topk_transform_512_cpu(
                     logits,
                     local_seq_lens,
                     page_table,
@@ -1601,7 +1604,7 @@ class SparseAttnIndexer(CustomOp):
                 block_size = kv_cache.shape[1]
                 kv_view = kv_cache.view(kv_cache.shape[0], -1)
 
-                logits = ops.fp8_paged_mqa_logits_cpu(
+                logits = cpu_ops.fp8_paged_mqa_logits_cpu(
                     q_quant[:num_decode_tokens],
                     kv_view,
                     weights[:num_decode_tokens],
@@ -1621,7 +1624,7 @@ class SparseAttnIndexer(CustomOp):
                     dtype=torch.int32,
                     device=kv_cache.device,
                 )
-                ops.topk_transform_512_cpu(
+                cpu_ops.topk_transform_512_cpu(
                     logits,
                     seq_lens,
                     block_table,
@@ -1639,11 +1642,11 @@ def init_indexer_wk_weights_proj(
     quant_config: QuantizationConfig | None,
     prefix: str,
 ) -> None:
-    """Build the indexer's checkpoint layers ``wk`` (BF16, or FP8 as the
+    """Build the indexer's checkpoint layers `wk` (BF16, or FP8 as the
     checkpoint stores it and run in BF16: `Fp8DequantLinearMethod`) and
-    ``weights_proj`` (BF16), and ``wk_weights_proj``, the BF16 linear that runs
-    both as one GEMM. Its weight is not a parameter: it holds ``wk`` and
-    ``weights_proj``'s rows and is refilled after every load and every in-place
+    `weights_proj` (BF16), and `wk_weights_proj`, the BF16 linear that runs
+    both as one GEMM. Its weight is not a parameter: it holds `wk` and
+    `weights_proj`'s rows and is refilled after every load and every in-place
     reload of the runtime weights (`fuse_indexer_wk_weights_proj` from the
     indexer's post-load hook)."""
 
@@ -1693,10 +1696,10 @@ def init_indexer_wk_weights_proj(
 
 
 def fuse_indexer_wk_weights_proj(indexer: nn.Module) -> None:
-    """Fill the fused BF16 ``wk_weights_proj`` weight in place (captured CUDA
-    graphs keep its address) from ``wk`` and ``weights_proj``, copying only a
+    """Fill the fused BF16 `wk_weights_proj` weight in place (captured CUDA
+    graphs keep its address) from `wk` and `weights_proj`, copying only a
     part that is not already a view of its rows (e.g. dots3's own
-    ``weights_proj``)."""
+    `weights_proj`)."""
     proj = indexer.wk_weights_proj
     if proj.weight.is_meta:  # weight cache IPC load: only parameters arrive
         proj.weight = torch.empty_like(proj.weight, device=indexer.wk.weight.device)
