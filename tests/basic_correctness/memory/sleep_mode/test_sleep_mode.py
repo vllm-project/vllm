@@ -95,7 +95,6 @@ def _model_state(worker) -> dict[str, list]:
     ],
 )
 def test_deep_sleep(model, monkeypatch, gpu_memory_cleared):
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
     # Needed for collective_rpc to run a function on the worker.
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
     free, total = torch.accelerator.get_memory_info()
@@ -210,7 +209,7 @@ def test_deep_sleep_lora_tp2(monkeypatch):
     """Level-2 sleep/wake/reload with enable_lora=True and TP=2.
 
     With TP > 1 the LoRA logits processor carries
-    ``sharded_to_full_mapping_gpu``, a permanent index mapping used to
+    `sharded_to_full_mapping_gpu`, a permanent index mapping used to
     reorder gathered logits. Level-2 sleep must preserve it, like the rest
     of the LoRA state.
     """
@@ -290,7 +289,6 @@ def test_sleep_cudagraph_pool(monkeypatch, mode, breakable, tp, offload):
     """Each capture site uses the pool, exact across sleeps; TP=2 needs
     unregistered custom AR; off changes nothing."""
     for name, value in [
-        ("VLLM_USE_V2_MODEL_RUNNER", "1"),
         ("VLLM_USE_BREAKABLE_CUDAGRAPH", "1" if breakable else "0"),
         ("VLLM_ALLOW_INSECURE_SERIALIZATION", "1"),
         ("VLLM_ALLREDUCE_USE_FLASHINFER", "0"),
@@ -335,7 +333,6 @@ def test_sleep_cudagraph_pool_aiter_fused_ar_group_quant(monkeypatch):
     """The fused AITER AR + RMSNorm + per-group FP8 quant captures into the
     cuMem pool without IPC-registering its input, across sleeps."""
     for name, value in [
-        ("VLLM_USE_V2_MODEL_RUNNER", "1"),
         ("VLLM_ROCM_USE_AITER", "1"),
         ("VLLM_ALLOW_INSECURE_SERIALIZATION", "1"),
     ]:
@@ -511,14 +508,18 @@ def test_deep_sleep_fp8_kvcache_with_undefined_remap(
     llm.wake_up(tags=["weights"])
     llm.collective_rpc("reload_weights")
 
-    original_create_and_map = cumem.create_and_map
+    original_create_and_map = cumem.CuMemAllocator._create_and_map
 
     def create_and_map_with_poison(handle) -> None:
         original_create_and_map(handle)
         _, size, ptr, _ = handle
         cumem.libcudart.cudaMemset(ptr, 0xA5, size)
 
-    monkeypatch.setattr(cumem, "create_and_map", create_and_map_with_poison)
+    monkeypatch.setattr(
+        cumem.CuMemAllocator,
+        "_create_and_map",
+        staticmethod(create_and_map_with_poison),
+    )
 
     # New requests must overwrite undefined remapped KV bytes before reading them.
     llm.wake_up(tags=["kv_cache"])

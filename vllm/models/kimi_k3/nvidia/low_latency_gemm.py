@@ -2,16 +2,16 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Kimi-K3 decode GEMM selection for unquantized BF16 on SM90/SM100/SM103/SM107.
 
-Dispatch is purely by local ``(N, K)`` shape and token count ``M`` — the module
-name plays no role. Each measured shape maps to a :class:`ProjectionSpec`
+Dispatch is purely by local `(N, K)` shape and token count `M` — the module
+name plays no role. Each measured shape maps to a `ProjectionSpec`
 holding the winning backend per token count. The static part of the decision is
-resolved once per module at install time into a small ``{M: call}`` plan, so the
+resolved once per module at install time into a small `{M: call}` plan, so the
 per-forward path is a single dict lookup.
 
 The supported capabilities carry separate measured tables:
-:data:`KIMI_K3_PROJECTIONS` was tuned on B300 (SM103),
-:data:`KIMI_K3_PROJECTIONS_SM100` on B200 (SM100), and
-:data:`KIMI_K3_PROJECTIONS_SM90` on H200 (SM90). The per-(shape, M) winners
+`KIMI_K3_PROJECTIONS` was tuned on B300 (SM103),
+`KIMI_K3_PROJECTIONS_SM100` on B200 (SM100), and
+`KIMI_K3_PROJECTIONS_SM90` on H200 (SM90). The per-(shape, M) winners
 genuinely differ between the parts, so the tables must not be merged. SM107
 (Rubin) reuses the SM103 table: the plan was validated end-to-end on SM107
 hardware, but apart from 3584x7168 the per-M crossovers have not been
@@ -69,8 +69,8 @@ _KDA_TP_SIZE = 8
 def _kda_qkvg_flashinfer_backend() -> Literal["cute-dsl"] | None:
     """Return the tested FlashInfer backend for the low-M QKVG branch.
 
-    FlashInfer's ``cute-dsl`` BF16 GEMM supports SM100 and SM103, but rejects
-    SM90 during backend validation. Other capabilities use ``torch.mm`` for
+    FlashInfer's `cute-dsl` BF16 GEMM supports SM100 and SM103, but rejects
+    SM90 during backend validation. Other capabilities use `torch.mm` for
     QKVG while retaining the concurrent F_A/beta and F_B branch.
     """
     if current_platform.is_device_capability(
@@ -665,7 +665,7 @@ def select_kimi_k3_backend(
     *,
     has_residual: bool = False,
 ) -> Backend | None:
-    """Backend for a local ``(N, K)`` at ``num_tokens``, or None to fall back."""
+    """Backend for a local `(N, K)` at `num_tokens`, or None to fall back."""
     spec = KIMI_K3_PROJECTIONS.get((n, k))
     return _backend_for(spec, num_tokens, has_residual) if spec is not None else None
 
@@ -768,10 +768,10 @@ def run_kda_projection_overlap(
     """Run the TP8 KDA decode projection branches concurrently.
 
     Args:
-        hidden_states: Packed BF16 input with shape ``[M, 7168]``.
+        hidden_states: Packed BF16 input with shape `[M, 7168]`.
         packed_weight: Existing Q/K/V/G/F_A/beta/pad weight with shape
-            ``[6288, 7168]``.
-        f_b_weight: F_B weight with shape ``[1536, 128]``.
+            `[6288, 7168]`.
+        f_b_weight: F_B weight with shape `[1536, 128]`.
         aux_stream: Stream for the F_A/beta then F_B branch.
         events: Start and completion events for the stream fork and join.
 
@@ -915,7 +915,7 @@ def try_low_latency_gemm(
     """Run the shape-selected low-latency kernel, or None to fall back.
 
     Resolves the plan from the shape table on each call; production installs a
-    precomputed plan (see :func:`enable_kimi_k3_low_latency_gemm`) and does not
+    precomputed plan (see `enable_kimi_k3_low_latency_gemm`) and does not
     use this path.
     """
     if envs.VLLM_BATCH_INVARIANT or not _runtime_ok(x, weight):
@@ -940,7 +940,7 @@ def low_latency_linear(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
 
 def request_low_latency_warmup(weight: torch.Tensor) -> None:
     """Warm up the measured CuTe configs for a weight that no linear module owns
-    (``enable_kimi_k3_low_latency_gemm`` only covers modules)."""
+    (`enable_kimi_k3_low_latency_gemm` only covers modules)."""
     table = _low_latency_table()
     spec = table.get(tuple(weight.shape)) if table is not None else None
     if spec is not None and shape_dynamic_skinny_gemm.is_available():
@@ -1046,9 +1046,9 @@ def enable_kimi_k3_low_latency_gemm(
     """Install shape-selected low-latency GEMMs and register CuTe warmups.
 
     Modules are matched purely by type, an exactly-unquantized method, and a
-    local ``(N, K)`` present in the current device's measured table
-    (:data:`KIMI_K3_PROJECTIONS` on SM103 and SM107,
-    :data:`KIMI_K3_PROJECTIONS_SM100` on SM100, :data:`KIMI_K3_PROJECTIONS_SM90`
+    local `(N, K)` present in the current device's measured table
+    (`KIMI_K3_PROJECTIONS` on SM103 and SM107,
+    `KIMI_K3_PROJECTIONS_SM100` on SM100, `KIMI_K3_PROJECTIONS_SM90`
     on SM90).
     """
     if dtype != torch.bfloat16:

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Kimi K3 specialized decode: a CuTe decode executor over the stock backbone, enabled
-by ``additional_config={"decode_backend": "latency_specialized"}``."""
+by `additional_config={"decode_backend": "latency_specialized"}`."""
 
 from dataclasses import dataclass
 
@@ -76,8 +76,13 @@ def dsa_fi_kernels(vllm_config) -> tuple[str, ...]:
 def prims_ts_rows(vllm_config) -> tuple[int, ...]:
     """The prims_ts plans' row capacities: the deployment's CUDA graph sizes and the
     powers of two up to its widest call (FLASHINFER_MLA_SPARSE's buckets)."""
-    # FLASHINFER_MLA_SPARSE does not run prims_ts yet.
-    return ()
+    if not dsa_fi_kernels(vllm_config):
+        return ()
+    from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import (
+        _prims_ts_row_buckets,
+    )
+
+    return _prims_ts_row_buckets(vllm_config)
 
 
 def kda_dtypes(vllm_config):
@@ -166,8 +171,6 @@ def unsupported(vllm_config) -> str | None:
         (envs.VLLM_BATCH_INVARIANT, "batch invariance"),
         (vllm_config.model_config.enable_sleep_mode, "sleep mode"),
         (vllm_config.lora_config is not None, "LoRA"),
-        # The runner's ModelState hooks build the executor and prepare the KV layouts.
-        (not vllm_config.use_v2_model_runner, "the V1 model runner"),
         # The decode loop runs in forward; a compiled forward would trace it.
         (compilation.mode == CompilationMode.STOCK_TORCH_COMPILE, "torch.compile"),
         # The loop runs only in FULL decode graphs; eager and PIECEWISE steps run stock.
@@ -241,7 +244,15 @@ def dsa_unsupported(vllm_config) -> str | None:
         return "DSA indexer keys normalized other than by LayerNorm"
     dtype = vllm_config.cache_config.cache_dtype
     if dtype in FI_CACHE_DTYPES:
-        return f"DSA layers on a {dtype} cache without FlashInfer prims_ts"
+        from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import (
+            _prims_ts_unsupported_reason,
+        )
+
+        reason = _prims_ts_unsupported_reason(vllm_config, dtype)
+        if reason is not None:
+            return (
+                f"DSA layers on a {dtype} cache without FlashInfer prims_ts: {reason}"
+            )
     return None
 
 
