@@ -15,8 +15,7 @@ import torch
 
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
-from vllm.v1.kv_cache_interface import CircularBufferSpec
-from vllm.v1.worker.block_table import get_block_table_width
+from vllm.v1.kv_cache_interface import CircularBufferSpec, get_block_table_width
 from vllm.v1.worker.gpu.block_table import BlockTables
 
 pytestmark = pytest.mark.skipif(

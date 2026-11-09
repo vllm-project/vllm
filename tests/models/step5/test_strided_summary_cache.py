@@ -14,7 +14,7 @@ import torch
 from vllm.platforms import current_platform
 
 pytestmark = pytest.mark.skipif(
-    not current_platform.is_cuda(), reason="Step5 kernels require CUDA"
+    not current_platform.is_cuda_alike(), reason="Step5 kernels require a GPU"
 )
 
 BLOCK_SIZE = 16
@@ -64,7 +64,7 @@ def _slots(positions):
 
 
 def _run_updates(cache: Cache, key, z):
-    from vllm.models.step5.nvidia.ops.summary_update import (
+    from vllm.models.step5.common.ops.summary_update import (
         build_prefill_groups,
         update_decode,
         update_prefill,
@@ -135,8 +135,8 @@ def test_summary_updates_match_on_strided_blocks():
 
 
 def test_summary_reads_match_on_strided_blocks():
-    from vllm.models.step5.nvidia.ops.sparse_indexer import pack_summary_pages
-    from vllm.models.step5.nvidia.ops.sparse_indexer_scores import (
+    from vllm.models.step5.common.ops.sparse_indexer import pack_summary_pages
+    from vllm.models.step5.common.ops.sparse_indexer_scores import (
         decode_summary_scores,
     )
 

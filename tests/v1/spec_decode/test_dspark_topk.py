@@ -16,6 +16,8 @@ from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import 
 from vllm.model_executor.models.qwen3_dspark import DSparkMarkovHead
 from vllm.platforms import current_platform
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
+from vllm.v1.worker.gpu.spec_decode.draft_logits import DraftLogitsCache
+from vllm.v1.worker.gpu.spec_decode.dspark import speculator as speculator_module
 from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
 
 
@@ -86,7 +88,9 @@ def test_dspark_revisited_position_uses_step_seed(use_fp64):
     spec.temperature = torch.ones(batch, device=device)
     spec.seeds = torch.arange(batch, dtype=torch.int64, device=device)
     spec._step_cols = torch.arange(2, dtype=torch.int32, device=device)
-    spec.draft_logits = torch.empty(batch, 2, 2, device=device)
+    spec.draft_logits = DraftLogitsCache(
+        batch, 2, 2, dtype=torch.float32, fill=0.0, device=device
+    )
     logits = torch.tensor([0.7, 0.3], device=device).log().expand(batch, -1)
     mapping = torch.arange(batch, device=device)
     positions = torch.full((batch,), 22, dtype=torch.int64, device=device)
@@ -103,7 +107,7 @@ def test_dspark_revisited_position_uses_step_seed(use_fp64):
         positions - 1,
         apply_temperature=True,
         is_drafting=True,
-        logits_cache=spec.draft_logits,
+        logits_cache=spec.draft_logits.values,
         logits_cache_col=spec._step_cols[0],
         use_fp64=use_fp64,
     )
@@ -281,3 +285,127 @@ def test_nvfp4_gathered_markov_bias_kernel_matches_reference(batch_size: int):
         torch.testing.assert_close(
             logits.gather(1, index), expected, rtol=1e-2, atol=6.25e-2
         )
+
+
+class _TransitionDraft:
+    """Draft model whose Markov bias is a fixed row per previous token."""
+
+    def __init__(self, transitions: torch.Tensor, transform: bool):
+        self.transitions = transitions
+        if transform:
+            self.apply_output_logit_transform = lambda logits: logits * 0.5
+
+    def markov_embed(self, token_ids: torch.Tensor) -> torch.Tensor:
+        return self.transitions[token_ids]
+
+    def markov_bias(self, markov_embed: torch.Tensor) -> torch.Tensor:
+        return markov_embed
+
+    def map_draft_to_target(self, draft_ids: torch.Tensor) -> torch.Tensor:
+        return draft_ids
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@pytest.mark.parametrize(
+    ("logits_dtype", "bias_dtype", "greedy", "reduced_vocab", "transform", "fused"),
+    [
+        pytest.param(torch.bfloat16, torch.bfloat16, 0, 0, 0, True, id="bf16"),
+        pytest.param(torch.float16, torch.float16, 0, 0, 0, True, id="fp16"),
+        pytest.param(torch.float32, torch.float32, 0, 0, 0, True, id="fp32"),
+        pytest.param(torch.bfloat16, torch.float32, 0, 0, 0, False, id="mixed-dtype"),
+        pytest.param(torch.float32, torch.float32, 1, 0, 0, False, id="greedy"),
+        pytest.param(torch.float32, torch.float32, 0, 1, 0, False, id="reduced-vocab"),
+        pytest.param(torch.float32, torch.float32, 0, 0, 1, False, id="transform"),
+    ],
+)
+def test_markov_chain_matches_adding_bias_first(
+    monkeypatch, logits_dtype, bias_dtype, greedy, reduced_vocab, transform, fused
+):
+    """Whether or not the Gumbel kernel adds the Markov bias, the chain draws the
+    same tokens and caches the same logits as adding the bias before sampling."""
+    device = torch.device("cuda")
+    # The last row is a padding slot; 2049 leaves a partial last block. Rounding
+    # the sum to the logits dtype only shows on near-tied draws, hence the rows.
+    num_reqs, num_steps, vocab = 1024, 3, 2049
+    target_vocab = vocab + 100 if reduced_vocab else vocab
+    torch.manual_seed(0)
+    base_logits = torch.randn(
+        num_reqs, num_steps, vocab, device=device, dtype=logits_dtype
+    )
+    transitions = torch.randn(target_vocab, vocab, device=device, dtype=bias_dtype)
+    model = _TransitionDraft(transitions, bool(transform))
+    prev = torch.randint(target_vocab, (num_reqs,), device=device)
+    idx_map = torch.arange(num_reqs, device=device).unsqueeze(1).repeat(1, num_steps)
+    idx_map[-1] = -1
+    sample_pos = 100 + torch.arange(num_steps, device=device).expand(num_reqs, -1)
+    cache_dtype = torch.promote_types(logits_dtype, bias_dtype)
+
+    def speculator() -> DSparkSpeculator:
+        spec = DSparkSpeculator.__new__(DSparkSpeculator)
+        spec.model = model
+        spec.num_speculative_steps = num_steps
+        spec.use_confidence_head = False
+        spec.acceptance_estimator = None
+        spec.draft_watermarker = None
+        spec.use_fp64_gumbel = False
+        spec.temperature = torch.tensor([0.0, 0.6, 1.0, 1.3], device=device).repeat(
+            num_reqs // 4
+        )
+        spec.seeds = torch.arange(num_reqs, dtype=torch.int64, device=device)
+        spec._step_cols = torch.arange(num_steps, dtype=torch.int32, device=device)
+        spec.draft_logits = None
+        if not greedy:
+            spec.draft_logits = DraftLogitsCache(
+                num_reqs,
+                num_steps,
+                target_vocab,
+                dtype=cache_dtype,
+                fill=0.0,
+                device=device,
+            )
+        spec._d2t_scatter_index = None
+        if reduced_vocab:
+            spec._d2t_scatter_index = torch.arange(vocab, device=device) + 100
+            spec._draft_scatter_buf = torch.full(
+                (num_reqs, target_vocab),
+                float("-inf"),
+                dtype=cache_dtype,
+                device=device,
+            )
+        # As load_model sets it; the mixed-dtype case falls back in the loop.
+        spec._fuse_markov_bias = not (greedy or reduced_vocab or transform)
+        return spec
+
+    fused_steps = []
+
+    def spy(*args, **kwargs):
+        fused_steps.append(kwargs.get("bias") is not None)
+        return gumbel_sample(*args, **kwargs)
+
+    monkeypatch.setattr(speculator_module, "gumbel_sample", spy)
+    spec = speculator()
+    tokens = torch.empty(num_reqs, num_steps, dtype=torch.int64, device=device)
+    spec._sample_markov_chain(
+        base_logits,
+        torch.zeros(num_reqs * num_steps, 1, device=device),
+        prev,
+        idx_map,
+        sample_pos,
+        tokens,
+    )
+    assert sum(fused_steps) == (num_steps if fused else 0)
+
+    reference = speculator()
+    expected = tokens.new_empty(tokens.shape)
+    for i in range(num_steps):
+        logits = base_logits[:, i] + transitions[prev]
+        if transform:
+            logits = model.apply_output_logit_transform(logits)
+        prev = reference._sample_logits(logits, idx_map[:, i], sample_pos[:, i], i)
+        expected[:, i] = prev
+
+    assert torch.equal(tokens, expected)
+    if not greedy:
+        assert spec.draft_logits is not None and reference.draft_logits is not None
+        assert spec.draft_logits.values.any()
+        assert torch.equal(spec.draft_logits.values, reference.draft_logits.values)
