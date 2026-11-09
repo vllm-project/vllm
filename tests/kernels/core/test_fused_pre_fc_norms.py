@@ -4,7 +4,7 @@
 Qwen3.5 MTP drafter.
 
 The kernel must match the eager 3-op reference: two Gemma-style RMSNorms
-(scale by ``1 + weight``, fp32 accumulation) followed by a last-dim concat.
+(scale by `1 + weight`, fp32 accumulation) followed by a last-dim concat.
 """
 
 import pytest

@@ -264,17 +264,17 @@ def _peer_connect_msg(
 
 
 class FakeParent:
-    """Configurable :class:`ParentManager` for server-role tests.
+    """Configurable `ParentManager` for server-role tests.
 
-    ``stored`` is the dict of ready blocks (key → primary block_id).
-    ``pending`` and ``retry`` script the first lookup() result for those
+    `stored` is the dict of ready blocks (key → primary block_id).
+    `pending` and `retry` script the first lookup() result for those
     keys; subsequent lookups behave normally (a key that promised
     HIT_PENDING / RETRY can later be promoted to HIT by adding it to
-    ``stored`` and removing it from ``pending``/``retry``). ``calls``
+    `stored` and removing it from `pending`/`retry`). `calls`
     captures every parent invocation in order for assertions.
 
-    Injected per-step via ``session.serve_external_requests(parent)`` —
-    not held by the session, matching how ``TieringOffloadingManager``
+    Injected per-step via `session.serve_external_requests(parent)` —
+    not held by the session, matching how `TieringOffloadingManager`
     hands the tier a handle valid only for that call.
     """
 
@@ -1292,7 +1292,7 @@ class TestLookupFlow:
         A request with no newly-registered keys is not revisited: after a
         flush the work-list is empty, an idle re-flush sends nothing, and a
         subsequent register re-arms exactly the one affected id — even while
-        an unrelated request stays live in ``_requests``.
+        an unrelated request stays live in `_requests`.
         """
         session, conn, _ = _make_session()
         _activate(session, conn)
@@ -1475,10 +1475,10 @@ class TestLookupFlow:
         assert fetches == []
 
     def test_server_lookup_deferred_until_serve_then_all_misses(self):
-        """``poll()`` only enqueues an inbound LookupMsg — no response is
-        sent until ``serve_external_requests``. With an all-miss parent
+        """`poll()` only enqueues an inbound LookupMsg — no response is
+        sent until `serve_external_requests`. With an all-miss parent
         the aggregated LookupRespMsg carries the same keys and
-        ``hits=[False, ...]``."""
+        `hits=[False, ...]`."""
         session, conn, _ = _make_session()
         _activate(session, conn)
 
@@ -1654,7 +1654,7 @@ class TestServerLookupHandling:
 
     def test_pending_timeout_replies_miss_no_store_job(self):
         """A HIT_PENDING key that stays pending past the batch
-        ``deadline`` is force-MISS and never pinned; the deferred
+        `deadline` is force-MISS and never pinned; the deferred
         aggregate response fires with hits=[False]."""
         cb = FakeParent(pending={OffloadKey(b"hA")})
         session, conn, _ = _make_session()
@@ -1725,7 +1725,7 @@ class TestServerLookupHandling:
         assert all(c[0] != "on_request_finished" for c in cb.calls)
 
     def test_wire_finish_drops_pending_batches_for_kv_request_id(self):
-        """``ServerRole.finish(kv_request_id)`` drops every parked batch
+        """`ServerRole.finish(kv_request_id)` drops every parked batch
         whose kv_request_id matches and queues its ctx for the next
         serve's on_request_finished."""
         cb = FakeParent(pending={OffloadKey(b"hA"), OffloadKey(b"hB")})
@@ -2864,7 +2864,7 @@ class TestFinishRequestServerSide:
         """write_blocks returns None on a SECOND match while a first transfer
         is still inflight. The request should NOT finalize until the inflight
         completes, then the elif branch in collect_results
-        (``finishing and not _has_inflight_for(...)``) finalizes it as failure.
+        (`finishing and not _has_inflight_for(...)`) finalizes it as failure.
         """
         session, conn, transport = _make_session()
         _activate(session, conn)
