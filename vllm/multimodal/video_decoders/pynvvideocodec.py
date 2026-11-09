@@ -5,7 +5,8 @@ import os
 import tempfile
 import threading
 from contextlib import contextmanager, suppress
-from typing import ClassVar, NamedTuple
+from functools import lru_cache
+from typing import Any, ClassVar, NamedTuple
 
 import numpy as np
 import numpy.typing as npt
@@ -112,6 +113,24 @@ def _decoder_surface_bytes(width: int, height: int) -> int:
     return width * height * 3 * PYNVVIDEOCODEC_DECODER_CACHE_SIZE
 
 
+# Distinct (device, codec, chroma format, bit depth) combinations; real deployments
+# see a handful, so this bound only guards against unbounded growth.
+PYNVVIDEOCODEC_DECODER_CAPS_CACHE_SIZE = 64
+
+
+@lru_cache(maxsize=PYNVVIDEOCODEC_DECODER_CAPS_CACHE_SIZE)
+def _get_decoder_caps(
+    nvc, device_index: int, codec, chroma_format, bit_depth: int
+) -> dict[str, Any]:
+    """`nvc.GetDecoderCaps`, cached per device and stream format.
+
+    Each call takes ~180 ms and holds the GIL, which stalls every other request in
+    the API process; the result only depends on these arguments. Callers must not
+    mutate the returned dict.
+    """
+    return nvc.GetDecoderCaps(device_index, codec, chroma_format, bit_depth)
+
+
 def _pynvvideocodec_exception_types(nvc) -> tuple[type[Exception], ...]:
     return tuple(
         exception_type
@@ -132,13 +151,13 @@ def _pynvvc_frames_to_nhwc(frames):
 class PyNvVideoCodecDecoderSlot:
     """A retained PyNv decoder slot and its CUDA stream.
 
-    The decoder is reused across requests: ``reconfigure_decoder`` repoints the
+    The decoder is reused across requests: `reconfigure_decoder` repoints the
     existing decoder at each new source instead of paying a fresh
-    ``SimpleDecoder`` construction per request. Construction (CUVID parser +
+    `SimpleDecoder` construction per request. Construction (CUVID parser +
     decoder + surface-pool allocation) is the dominant per-request cost, so
     reconfiguring is far cheaper. Decoder dimensions are bounded at construction
     so resolution changes do not replace its native frame pool. A single decoder
-    serves both metadata (``len``/``get_stream_metadata``) and frame decode -- no
+    serves both metadata (`len`/`get_stream_metadata`) and frame decode -- no
     separate metadata decoder.
     """
 
@@ -343,7 +362,8 @@ class PyNvVideoCodecVideoBackendMixin:
         demuxer = nvc.CreateDemuxer(file_path)
         width = demuxer.Width()
         height = demuxer.Height()
-        caps = nvc.GetDecoderCaps(
+        caps = _get_decoder_caps(
+            nvc,
             cls._DEVICE_INDEX,
             demuxer.GetNvCodecId(),
             demuxer.ChromaFormat(),

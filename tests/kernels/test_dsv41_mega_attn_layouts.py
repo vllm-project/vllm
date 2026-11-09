@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Layout plumbing for DeepSeek V4.1 mega attention.
 
-The kernel's Q and O layouts are produced by permuting ``wq_b`` rows and
-``wo_a`` columns in their weight loaders, so what has to hold is that the
+The kernel's Q and O layouts are produced by permuting `wq_b` rows and
+`wo_a` columns in their weight loaders, so what has to hold is that the
 permuted GEMMs agree with a reference that permutes the activation instead.
 """
 
@@ -27,7 +27,7 @@ HEAD_DIM = 512
 
 
 def _load(checkpoint: torch.Tensor, perm: torch.Tensor, dim: int) -> torch.Tensor:
-    """Load ``checkpoint`` into a fresh parameter through a permuting loader."""
+    """Load `checkpoint` into a fresh parameter through a permuting loader."""
     param = torch.nn.Parameter(torch.empty_like(checkpoint), requires_grad=False)
     param.weight_loader = default_weight_loader
     permute_on_load(param, perm, dim)

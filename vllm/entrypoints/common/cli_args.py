@@ -9,7 +9,7 @@ import json
 import ssl
 from collections.abc import Sequence
 from dataclasses import field
-from typing import Any, Literal
+from typing import Any, Literal, get_args
 
 import vllm.envs as envs
 from vllm.config import config
@@ -23,6 +23,7 @@ from vllm.entrypoints.launchers.utils.constants import (
 )
 from vllm.entrypoints.openai.models.protocol import LoRAModulePath
 from vllm.logger import init_logger
+from vllm.renderers import ReasoningEffort
 from vllm.renderers.chat_utils import (
     ChatTemplateContentFormatOption,
     validate_chat_template,
@@ -106,6 +107,13 @@ class BaseFrontendArgs:
     with request values taking precedence. Useful for setting default
     behavior for reasoning models. Example: '{"enable_thinking": false}'
     to disable thinking mode by default for Qwen3/DeepSeek models."""
+    reasoning_effort_map: dict[str, str] | None = None
+    """JSON mapping that rewrites a request's reasoning effort to a value the
+    chat template supports, for templates that silently fall back on efforts
+    they do not recognize. Applies to the effort set through the Chat
+    Completions, Responses and Anthropic Messages APIs; efforts not listed
+    pass through unchanged. Example: '{"medium": "low", "xhigh": "max"}'
+    for a template that only knows low, high and max."""
     response_role: str = "assistant"
     """The role name to return if `request.add_generation_prompt=true`."""
     return_tokens_as_token_ids: bool = False
@@ -172,31 +180,33 @@ class BaseFrontendArgs:
     --enable-log-outputs is set.
     """
     cohere_is_reasoning_model: bool = True
-    """Cohere ``/cohere/v2/chat`` only. Whether the served model is a
+    """Cohere `/cohere/v2/chat` only. Whether the served model is a
     reasoning Command-family model. When True (default), the assistant's
-    chain-of-thought is surfaced as a ``thinking`` content block (or
-    ``content-*`` events on the stream). When False, reasoning is
-    surfaced as Cohere's ``tool_plan`` field (or ``tool-plan-delta``
+    chain-of-thought is surfaced as a `thinking` content block (or
+    `content-*` events on the stream). When False, reasoning is
+    surfaced as Cohere's `tool_plan` field (or `tool-plan-delta`
     events) whenever the model emits tool calls, matching older non-
     reasoning Command models. Has no effect on the non-Cohere
     endpoints."""
     cohere_format: str = "cmd4"
-    """Cohere ``--tokenizer-mode cohere`` only. Which Cohere prompt
-    format to render: ``cmd4`` (current Command A+ models; default) or
-    ``cmd3`` (earlier Cmd-A and Cmd-A reasoning models). Selecting the
+    """Cohere `--tokenizer-mode cohere` only. Which Cohere prompt
+    format to render: `cmd4` (current Command A+ models; default) or
+    `cmd3` (earlier Cmd-A and Cmd-A reasoning models). Selecting the
     wrong format silently produces a prompt the model wasn't trained
     on, which most commonly manifests as the model emitting text but no
     citations / tool calls / thinking blocks. Equivalent to passing
-    ``--default-chat-template-kwargs '{"cohere_format": "..."}'`` -- any
-    explicit request-level ``chat_template_kwargs.cohere_format`` takes
+    `--default-chat-template-kwargs '{"cohere_format": "..."}'` -- any
+    explicit request-level `chat_template_kwargs.cohere_format` takes
     priority."""
     anthropic_disabled_thinking_effort: AnthropicDisabledThinkingEffortOption = "auto"
-    """Anthropic ``/v1/messages`` only. The ``reasoning_effort`` used for
-    requests with ``thinking: {"type": "disabled"}``. ``none`` turns thinking
-    off for models that support it; ``low`` suits models that always think
-    (e.g. GLM-5.3) or reject ``none`` (e.g. gpt-oss). ``auto`` (default) uses
-    ``low`` when the renderer rejects ``none`` or renders it the same as a
-    thinking effort, and ``none`` otherwise."""
+    """The `reasoning_effort` used for Anthropic Messages, token counting,
+    and render requests with `thinking: {"type": "disabled"}` or
+    `thinking: {"type": "between_tools"}`.
+    `none` turns thinking off for models that support it; `low` suits
+    models that always think
+    (e.g. GLM-5.3) or reject `none` (e.g. gpt-oss). `auto` (default) uses
+    `low` when the renderer rejects `none` or renders it the same as a
+    thinking effort, and `none` otherwise."""
     log_error_stack: bool = envs.VLLM_SERVER_DEV_MODE
     """If set to True, log the stack trace of error responses"""
     tokens_only: bool = False
@@ -212,17 +222,17 @@ class BaseFrontendArgs:
     always register their required endpoints regardless of this flag.
     """
     fingerprint_mode: Literal["full", "hash", "custom", "none"] = "full"
-    """Controls the ``system_fingerprint`` field on responses.
+    """Controls the `system_fingerprint` field on responses.
 
-    - ``full`` (default): ``vllm-<version>[-<parallelism>]-<hash8>``. Encodes
+    - `full` (default): `vllm-<version>[-<parallelism>]-<hash8>`. Encodes
       server version, non-trivial parallelism degrees (tp/pp/dp/ep), and an
       8-char config hash.
-    - ``hash``: ``vllm-<version>-<hash8>``. Parallelism stripped.
-    - ``custom``: emits the literal string from ``--fingerprint-value``.
-    - ``none``: the field is omitted (serialized as ``null``).
+    - `hash`: `vllm-<version>-<hash8>`. Parallelism stripped.
+    - `custom`: emits the literal string from `--fingerprint-value`.
+    - `none`: the field is omitted (serialized as `null`).
     """
     fingerprint_value: str | None = None
-    """Literal fingerprint string used when ``--fingerprint-mode=custom``."""
+    """Literal fingerprint string used when `--fingerprint-mode=custom`."""
 
     @classmethod
     def _customize_cli_kwargs(
@@ -232,10 +242,11 @@ class BaseFrontendArgs:
         """Customize argparse kwargs before arguments are registered.
 
         Subclasses should override this and call
-        ``super()._customize_cli_kwargs(frontend_kwargs)`` first.
+        `super()._customize_cli_kwargs(frontend_kwargs)` first.
         """
         # Special case: default_chat_template_kwargs needs json.loads type
         frontend_kwargs["default_chat_template_kwargs"]["type"] = json.loads
+        frontend_kwargs["reasoning_effort_map"]["type"] = json.loads
 
         # Special case: LoRA modules need custom parser action and
         # optional_type(str)
@@ -254,7 +265,7 @@ class BaseFrontendArgs:
     def add_cli_args(cls, parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         """Register CLI arguments for this frontend class.
 
-        Subclasses should override ``_customize_cli_kwargs`` instead of
+        Subclasses should override `_customize_cli_kwargs` instead of
         this method so that base-class postprocessing is always applied.
         """
         from vllm.engine.arg_utils import get_kwargs
@@ -326,11 +337,11 @@ class FrontendArgs(BaseFrontendArgs):
     """If provided, the server will require one of these keys to be presented in
     the header.
 
-    Warning: this only authenticates endpoints under the `/v1`, `/v2`, and
-    `/inference` path prefixes. Other endpoints on the same server, including
-    `/invocations` (which exposes the same inference capabilities as `/v1`),
-    remain unauthenticated. Do not rely on `--api-key` alone to secure vLLM;
-    see
+    Warning: this only authenticates endpoints under the `/v1`, `/v2`,
+    `/inference`, and `/cohere` path prefixes. Other endpoints on the same
+    server, including `/invocations` (which exposes the same inference
+    capabilities as `/v1`), remain unauthenticated. Do not rely on `--api-key`
+    alone to secure vLLM; see
     https://docs.vllm.ai/en/latest/usage/security.html#api-key-authentication-limitations
     for what it does and does not protect."""
     ssl_keyfile: str | None = None
@@ -438,6 +449,14 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         help="Run in headless mode. See multi-node data parallel "
         "documentation for more details.",
     )
+    # Internal: the Rust frontend's managed `serve` passes its local handshake
+    # endpoint so that headless engines also handshake with it.
+    parser.add_argument(
+        "--headless-client-handshake-address",
+        type=str,
+        default=None,
+        help=argparse.SUPPRESS,
+    )
     parser.add_argument(
         "--api-server-count",
         "-asc",
@@ -499,6 +518,25 @@ def validate_grpc_port_arg(args: argparse.Namespace) -> None:
         raise ValueError("--grpc-port must differ from --port when HTTP uses TCP")
 
 
+def validate_reasoning_effort_map(effort_map: Any) -> None:
+    if effort_map is None:
+        return
+
+    efforts = get_args(ReasoningEffort)
+    if not isinstance(effort_map, dict) or not all(
+        isinstance(value, str) for value in effort_map.values()
+    ):
+        raise ValueError(
+            "Error: --reasoning-effort-map must be a JSON object mapping "
+            "reasoning efforts to strings."
+        )
+    if unknown := sorted(set(effort_map) - set(efforts)):
+        raise ValueError(
+            f"Error: --reasoning-effort-map has unknown efforts {unknown}; "
+            f"keys must be one of {list(efforts)}."
+        )
+
+
 def validate_parsed_serve_args(args: argparse.Namespace):
     """Quick checks for model serve args that raise prior to loading."""
     # `vllm launch <component>` builds its parser with make_arg_parser too (see
@@ -518,6 +556,7 @@ def validate_parsed_serve_args(args: argparse.Namespace):
         )
 
     validate_grpc_port_arg(args)
+    validate_reasoning_effort_map(getattr(args, "reasoning_effort_map", None))
 
     # Enable auto tool needs a tool call parser to be valid
     if args.enable_auto_tool_choice and not args.tool_call_parser:
