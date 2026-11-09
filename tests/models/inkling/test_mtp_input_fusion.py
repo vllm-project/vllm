@@ -2,11 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Bit-exactness tests for the fused MTP depth-layer input kernel.
 
-``embed_dual_rmsnorm_cat`` must match the unfused module sequence exactly:
+`embed_dual_rmsnorm_cat` must match the unfused module sequence exactly:
 each rmsnorm computes in fp32 and rounds to bf16 at the same points as the
-vendored ``rmsnorm`` kernel (including the bf16 round-trip between the
+vendored `rmsnorm` kernel (including the bf16 round-trip between the
 chained backbone embed_norm and the depth embed_norm), and the fused row
-gather matches ``F.embedding``.
+gather matches `F.embedding`.
 """
 
 import pytest
@@ -85,6 +85,7 @@ def test_embed_rmsnorm(n: int, t: int, ids_dtype: torch.dtype) -> None:
 
     # Gather + embed_norm (base model / MTP prefill embed path).
     out = embed_rmsnorm(ids, table, w, EPS)
+    assert isinstance(out, torch.Tensor)
     assert out.shape == (t, n)
     assert torch.equal(out, rmsnorm(ref_emb, w, EPS) if t else ref_emb)
 
