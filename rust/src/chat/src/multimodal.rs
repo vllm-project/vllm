@@ -721,8 +721,8 @@ fn extract_media_parts(
     };
     parts
         .map(|part| match part? {
-            ChatContentPart::Text { .. } => {
-                bail_multimodal!("renderer reported a text part as multimodal content")
+            ChatContentPart::Text { .. } | ChatContentPart::ToolReference { .. } => {
+                bail_multimodal!("renderer reported a non-media part as multimodal content")
             }
             ChatContentPart::ImageUrl {
                 image_url,
@@ -1700,6 +1700,25 @@ mod tests {
             .with_regular_token("<｜deepseek_image｜>", DEEPSEEK_V41_IMAGE_ID)
             .with_regular_token("<|place_holder_mm_span_0436|>", DEEPSEEK_V41_IMAGE_PAD_ID);
         test_info("deepseek_v41", config, tokenizer)
+    }
+
+    #[test]
+    fn kimi_k31_resolves_kimi_k3_image_support_by_model_type() {
+        const KIMI_MEDIA_PAD_ID: u32 = 163605;
+        let config = serde_json::json!({
+            "model_type": "kimi_k31",
+            "media_placeholder_token_id": KIMI_MEDIA_PAD_ID,
+        });
+        let tokenizer = TestTokenizer::new().with_regular_token("<|media_pad|>", KIMI_MEDIA_PAD_ID);
+        // The test model ID (`kimi_k31-test`) does not contain `kimi-k3`, so
+        // only the model type can select the K3 spec.
+        let info = test_info("kimi_k31", config, tokenizer);
+
+        assert_eq!(
+            info.placeholder_token(Modality::Image),
+            Some("<|media_pad|>")
+        );
+        assert_eq!(info.placeholder_token(Modality::Video), None);
     }
 
     #[test]

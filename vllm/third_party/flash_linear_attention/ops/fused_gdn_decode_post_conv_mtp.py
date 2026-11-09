@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Triton port of the fused GDN MTP decode kernel (``fused_gdn_decode_post_conv_mtp``).
+"""Triton port of the fused GDN MTP decode kernel (`fused_gdn_decode_post_conv_mtp`).
 
 The CUDA kernel in csrc only builds for CUDA 13, so on ROCm every Qwen3.5 GDN layer's
 speculative-decode step runs the unfused path: ~8 small copy/cat/fill kernels around the
 recurrent kernel plus the gated RMSNorm. This does the post-conv work in two launches.
 The update kernel reads q/k/v and a/b in place from the projections and runs the gated
 delta-rule update over each request's tokens (same state reads and writes as
-``fused_sigmoid_gating_delta_rule_update``: start from the state of the last accepted token,
+`fused_sigmoid_gating_delta_rule_update`: start from the state of the last accepted token,
 store the state after every token, slot index <= 0 means no state). Like that kernel it tiles
 the value dimension, so a small batch still fills the GPU; every tile writes its outputs and
 their sum of squares. The epilogue then applies the gated RMSNorm, the only step that needs
@@ -150,9 +150,9 @@ def fused_gdn_decode_post_conv_mtp_triton(
     norm_eps: float,
     output_gate_activation: str,
 ) -> torch.Tensor:
-    """Same arguments and result as ``ops.fused_gdn_decode_post_conv_mtp``.
+    """Same arguments and result as `ops.fused_gdn_decode_post_conv_mtp`.
 
-    ``out`` and ``output_gate`` are [tokens, HV, V]; ``state`` is [slots, HV, V, K].
+    `out` and `output_gate` are [tokens, HV, V]; `state` is [slots, HV, V, K].
     """
     HV, V = out.shape[-2:]
     K = state.shape[-1]
