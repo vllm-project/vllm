@@ -1781,9 +1781,9 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             qkvz: packed [q, k, v, z] projection (num_tokens, qkvz_dim)
             ba:   packed [b, a] gating vectors    (num_tokens, 2*num_heads)
             z_out: **output** buffer for z        (num_tokens, num_heads,
-                   head_dim); mutated in-place. ``None`` when the layer uses the
-                   fused AITER kernel (``use_aiter_fused_gdn_decode``): the gated
-                   RMSNorm is then applied too and ``core_attn_out`` receives the
+                   head_dim); mutated in-place. `None` when the layer uses the
+                   fused AITER kernel (`use_aiter_fused_gdn_decode`): the gated
+                   RMSNorm is then applied too and `core_attn_out` receives the
                    normed output.
             core_attn_out: Pre-allocated output buffer for attention results.
 
@@ -2698,7 +2698,7 @@ def qwen_gdn_attention_core_fused_norm_rocm(
     normed_out: torch.Tensor,
     layer_name: LayerNameType,
 ) -> None:
-    """conv1d + recurrence + gated RMSNorm into ``normed_out`` (mutated in-place)."""
+    """conv1d + recurrence + gated RMSNorm into `normed_out` (mutated in-place)."""
     layer_name = _resolve_layer_name(layer_name)
     forward_context: ForwardContext = get_forward_context()
     self = forward_context.no_compile_layers[layer_name]
