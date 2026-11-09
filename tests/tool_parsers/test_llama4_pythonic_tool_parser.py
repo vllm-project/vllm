@@ -61,6 +61,11 @@ ESCAPED_STRING_FUNCTION_CALL = FunctionCall(
 PYTHON_TAG_FUNCTION_OUTPUT = (
     "<|python_start|>[get_weather(city='LA', metric='C')]<|python_end|>"
 )
+RESERVED_KEYWORD_FUNCTION_OUTPUT = "[search(query='vllm', from='google', in='docs')]"
+RESERVED_KEYWORD_FUNCTION_CALL = FunctionCall(
+    name="search",
+    arguments='{"query": "vllm", "from": "google", "in": "docs"}',
+)
 
 
 @pytest.mark.parametrize("streaming", [True, False])
@@ -199,6 +204,18 @@ TEST_CASES = [
             FunctionCall(name="register_user", arguments='{"name": "Doe", "age": 9}'),
         ],
         id="parallel_calls_nonstreaming",
+    ),
+    pytest.param(
+        True,
+        RESERVED_KEYWORD_FUNCTION_OUTPUT,
+        [RESERVED_KEYWORD_FUNCTION_CALL],
+        id="reserved_keyword_streaming",
+    ),
+    pytest.param(
+        False,
+        RESERVED_KEYWORD_FUNCTION_OUTPUT,
+        [RESERVED_KEYWORD_FUNCTION_CALL],
+        id="reserved_keyword_nonstreaming",
     ),
 ]
 

@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import ast
+import json
 from collections.abc import Sequence
 
 import regex as re
@@ -11,6 +12,7 @@ import vllm.envs as envs
 from vllm.entrypoints.generate.base.protocol import (
     DeltaMessage,
     ExtractedToolCallInformation,
+    ToolCall,
 )
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
@@ -25,6 +27,8 @@ from vllm.tool_parsers.utils import (
     compute_tool_delta,
     handle_single_tool,
     make_valid_python,
+    rename_reserved_kwargs,
+    restore_reserved_kwarg_names,
 )
 
 logger = init_logger(__name__)
@@ -63,6 +67,16 @@ class Llama4PythonicToolParser(ToolParser):
     def current_tool_index(self, value: int) -> None:
         self.current_tool_id = value
 
+    @staticmethod
+    def _restore_reserved(tool_call: ToolCall) -> ToolCall:
+        """Restore parameter names renamed by `rename_reserved_kwargs`."""
+        if tool_call.function and tool_call.function.arguments:
+            arguments = json.loads(tool_call.function.arguments)
+            restored = restore_reserved_kwarg_names(arguments)
+            if restored != arguments:
+                tool_call.function.arguments = json.dumps(restored, ensure_ascii=False)
+        return tool_call
+
     def extract_tool_calls(
         self, model_output: str, request: ChatCompletionRequest
     ) -> ExtractedToolCallInformation:
@@ -92,18 +106,24 @@ class Llama4PythonicToolParser(ToolParser):
                 tools_called=False, tool_calls=[], content=model_output
             )
 
+        renamed_output, kw_renamed = rename_reserved_kwargs(model_output)
+        parse_target = renamed_output if kw_renamed else model_output
+
         try:
-            module = ast.parse(model_output)
+            module = ast.parse(parse_target)
             parsed = getattr(module.body[0], "value", None)
             if isinstance(parsed, ast.List) and all(
                 isinstance(e, ast.Call) for e in parsed.elts
             ):
+                tool_calls = [
+                    handle_single_tool(e)  # type: ignore
+                    for e in parsed.elts
+                ]
+                if kw_renamed:
+                    tool_calls = [self._restore_reserved(tc) for tc in tool_calls]
                 return ExtractedToolCallInformation(
                     tools_called=True,
-                    tool_calls=[
-                        handle_single_tool(e)  # type: ignore
-                        for e in parsed.elts
-                    ],
+                    tool_calls=tool_calls,
                     content=None,
                 )
             else:
@@ -136,6 +156,10 @@ class Llama4PythonicToolParser(ToolParser):
                 current_text = current_text[len("<|python_start|>") :]
             if current_text.endswith("<|python_end|>"):
                 current_text = current_text[: current_text.rfind("<|python_end|>")]
+            renamed_text, kw_renamed = rename_reserved_kwargs(current_text)
+            if kw_renamed:
+                current_text = renamed_text
+
             valid_and_added_text = make_valid_python(current_text)
             if valid_and_added_text is None:
                 return None
@@ -151,6 +175,8 @@ class Llama4PythonicToolParser(ToolParser):
                 handle_single_tool(e)  # type: ignore
                 for e in parsed.elts
             ]
+            if kw_renamed:
+                tool_calls = [self._restore_reserved(tc) for tc in tool_calls]
 
             tool_deltas = []
             for index, new_call in enumerate(tool_calls):
