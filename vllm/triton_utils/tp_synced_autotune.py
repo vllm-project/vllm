@@ -8,11 +8,13 @@ TP hides this, because the next all-reduce gives every rank the same sum. Code w
 ranks compute the same thing on their own with no all-reduce after it (replicated
 layers, indexers, per-rank recurrent state) then lets the ranks drift apart.
 
-Under VLLM_TRITON_SYNC_AUTOTUNE_TP=1 every rank uses rank 0's benchmark timings, so
-the argmin is the same everywhere. Sync happens only inside a model forward pass,
-where all ranks of a TP group launch the same kernels with the same shapes; a kernel
-autotuned outside it (or by one rank only) keeps its local timings, so it cannot hang.
-One CPU broadcast per benchmarked config, and only when a kernel meets a new shape key.
+Under VLLM_TRITON_SYNC_AUTOTUNE_TP=1, when a kernel meets a new shape key, TP rank 0
+resolves it as usual (Triton's on-disk autotune cache, or a benchmark) and broadcasts
+the chosen config and its timings; the other ranks adopt them without benchmarking or
+reading their own disk cache, so a cache that is warm on some ranks only cannot split
+them. Sync happens only inside a model forward pass, where all ranks of a TP group
+launch the same kernels with the same shapes; a kernel autotuned outside it (or by one
+rank only) resolves locally, so it cannot hang. One CPU broadcast per kernel and key.
 
 Layouts where ranks of a TP group run kernels on rank-dependent shapes (expert
 parallelism, sequence-parallel MoE, decode/prefill context parallelism) could make one
@@ -56,16 +58,64 @@ def _sync_group() -> Any | None:
     return group if group.world_size > 1 else None
 
 
-def sync_timing(timing: Any) -> Any:
-    """Return TP rank 0's timing for this config (identity when not syncing)."""
-    group = _sync_group()
-    if group is None:
-        return timing
-    import torch.distributed as dist
+def _resolve_locally(autotuner, original, tuning_key, configs, bench_fn) -> bool:
+    """Triton's own path: disk cache if this autotuner uses one, else benchmark."""
+    if getattr(autotuner, "_vllm_disk_cache", True):
+        return original(autotuner, tuning_key, configs, bench_fn)
+    bench_fn()
+    return False
 
-    box = [timing]
-    dist.broadcast_object_list(box, src=group.ranks[0], group=group.cpu_group)
-    return box[0]
+
+def _check_disk_cache(original):
+    """Wrap Autotuner.check_disk_cache, where every first-time key is resolved."""
+
+    def check_disk_cache(self, tuning_key, configs, bench_fn):
+        group = _sync_group()
+        if group is None:
+            return _resolve_locally(self, original, tuning_key, configs, bench_fn)
+        import torch.distributed as dist
+
+        fingerprint = [str(c) for c in configs]
+        is_src = dist.get_rank() == group.ranks[0]
+        box: list[Any] = [None]
+        used_cache = False
+        if is_src:
+            used_cache = _resolve_locally(self, original, tuning_key, configs, bench_fn)
+            best = self.cache[tuning_key]
+            box[0] = (
+                fingerprint,
+                fingerprint.index(str(best)),
+                [self.configs_timings.get(c) for c in configs],
+            )
+        dist.broadcast_object_list(box, src=group.ranks[0], group=group.cpu_group)
+        if is_src:
+            return used_cache
+        src_fingerprint, best_index, timings = box[0]
+        if src_fingerprint != fingerprint:
+            # Pruning gave this rank other candidates; nothing to adopt.
+            logger.warning_once(
+                "TP-synced autotune: rank 0 tuned other configs for %s; tuning here.",
+                getattr(self, "fn", self),
+            )
+            return _resolve_locally(self, original, tuning_key, configs, bench_fn)
+        self.cache[tuning_key] = configs[best_index]
+        self.configs_timings = dict(zip(configs, timings))
+        return True
+
+    return check_disk_cache
+
+
+def _init(original):
+    """Route every first-time key through check_disk_cache, remembering whether the
+    autotuner itself wanted the on-disk cache."""
+    from triton import knobs
+
+    def __init__(self, *args, **kwargs):
+        original(self, *args, **kwargs)
+        self._vllm_disk_cache = self.cache_results
+        self.cache_results = not knobs.runtime.interpret
+
+    return __init__
 
 
 def configure(parallel_config: Any) -> None:
@@ -94,7 +144,10 @@ def configure(parallel_config: Any) -> None:
 
 
 def install() -> None:
-    """Wrap Autotuner._bench so its timings come from TP rank 0."""
+    """Make Triton autotuners resolve new keys on TP rank 0 and share the result.
+
+    Autotuners created before this call are synced only if they use the on-disk
+    autotune cache (on by default in vLLM, see env_override.py)."""
     global _installed
     if _installed:
         return
@@ -104,11 +157,7 @@ def install() -> None:
     import importlib
 
     Autotuner = importlib.import_module("triton.runtime.autotuner").Autotuner
-    original_bench = Autotuner._bench
-
-    def _bench(self, *args, **kwargs):
-        return sync_timing(original_bench(self, *args, **kwargs))
-
-    Autotuner._bench = _bench
+    Autotuner.__init__ = _init(Autotuner.__init__)
+    Autotuner.check_disk_cache = _check_disk_cache(Autotuner.check_disk_cache)
     _installed = True
-    logger.info("Triton autotune timings are synced across tensor-parallel ranks.")
+    logger.info("Triton autotune choices are synced across tensor-parallel ranks.")
