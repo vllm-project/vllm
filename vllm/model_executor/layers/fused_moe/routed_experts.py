@@ -505,7 +505,7 @@ class RoutedExperts(PluggableLayer):
         dimension and tensor rank.
 
         For 2D weight tensors the two data dims are (0, 1). For 3D tensors
-        with an expert dimension at dim 0, they are (1, 2). ``shard_dim``
+        with an expert dimension at dim 0, they are (1, 2). `shard_dim`
         occupies one of these; the hidden dimension is the other.
         For 1D tensors (e.g. per-channel scales) returns 0.
         """
@@ -1216,14 +1216,14 @@ class RoutedExperts(PluggableLayer):
             ckpt_up_proj_name: Name of up projection in checkpoint
             num_experts: Number of logical (non-redundant) experts
             num_redundant_experts: Number of redundant experts
-            lora_base_layer_prefix: LoRA ``base_layer.`` prefix for the
-                ``weight_name`` (checkpoint) side
-            lora_base_layer_prefix_on_param_name: same, for the ``param_name``
-                side. Independent because ``get_expert_mapping`` resolves
-                ``param_name`` via ``getattr`` against this layer's bare
-                ``w13_weight``/``w2_weight`` (no prefix), while
-                ``make_expert_params_mapping`` indexes the model-wide
-                ``params_dict`` (prefix included).
+            lora_base_layer_prefix: LoRA `base_layer.` prefix for the
+                `weight_name` (checkpoint) side
+            lora_base_layer_prefix_on_param_name: same, for the `param_name`
+                side. Independent because `get_expert_mapping` resolves
+                `param_name` via `getattr` against this layer's bare
+                `w13_weight`/`w2_weight` (no prefix), while
+                `make_expert_params_mapping` indexes the model-wide
+                `params_dict` (prefix included).
             include_fused: Prepend the fused pre-fused-checkpoint entries
             is_gated: Whether w13 holds gate and up (gated activation) or a
                 single up projection. Selects the fused checkpoint layout.
