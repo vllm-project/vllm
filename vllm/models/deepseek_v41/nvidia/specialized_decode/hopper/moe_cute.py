@@ -45,7 +45,7 @@ import cutlass
 import cutlass.cute as cute
 from cutlass import Float32, Int32, Int64, Uint32
 
-from .moe_ptx import (
+from .ptx import (
     atom_add_acqrel_gpu,
     atom_add_relaxed,
     bf16x2_to_f16x2,

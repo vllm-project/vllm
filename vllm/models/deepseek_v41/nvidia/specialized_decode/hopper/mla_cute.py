@@ -29,7 +29,7 @@ from cutlass.cute.nvgpu import warpgroup
 from cutlass.utils import LayoutEnum
 from quack import layout_utils, sm90_utils
 
-from .mla_ptx import (
+from .ptx import (
     bf16x2_to_f16x2,
     bf16x2_unpack,
     bulk_g2s,

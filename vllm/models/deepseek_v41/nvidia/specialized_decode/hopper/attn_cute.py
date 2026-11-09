@@ -23,7 +23,7 @@ import cutlass.cute as cute
 from cutlass import Float32, Int32, Int64
 from cutlass.cute.arch import inline_ptx
 
-from .mla_ptx import (
+from .ptx import (
     bf16x2_to_f16x2,
     dq_e4m3x4_f16,
     dq_e4m3x4_f16_2,

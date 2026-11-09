@@ -1,7 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""PTX building blocks of the Hopper low-batch MoE kernel (`moe_cute`)."""
+"""Inline PTX building blocks of the Hopper executor's CuTe DSL kernels: the
+low-batch MoE (`moe_cute`), the small-batch sparse MLA (`mla_cute`,
+`attn_cute`) and the mHC mixes (`mhc_cute`)."""
 
+import cutlass
 from cutlass import Float32, Int32, Int64, Uint32
 from cutlass._mlir.dialects import llvm
 from cutlass.cutlass_dsl import T, dsl_user_op
@@ -344,24 +347,24 @@ def mbar_wait(addr, phase, *, loc=None, ip=None):
 
 
 @dsl_user_op
-def bulk_g2s(dst, src, nbytes, mbar, policy, *, loc=None, ip=None):
-    """cp.async.bulk global->shared, completion on `mbar`; L2 cache hint."""
-    _asm(
-        None,
-        [
-            _i32(dst, loc, ip),
-            _i64(src, loc, ip),
-            _i32(nbytes, loc, ip),
-            _i32(mbar, loc, ip),
-            _i64(policy, loc, ip),
-        ],
-        "cp.async.bulk.shared::cluster.global.mbarrier::complete_tx::bytes.L2::cache_hint"
-        " [$0], [$1], $2, [$3], $4;",
-        "r,l,r,r,l",
-        loc,
-        ip,
-        side_effects=True,
-    )
+def bulk_g2s(dst, src, nbytes, mbar, policy=None, *, loc=None, ip=None):
+    """cp.async.bulk global->shared, completion as tx bytes on `mbar`; with an
+    L2 cache hint when `policy` is given."""
+    operands = [
+        _i32(dst, loc, ip),
+        _i64(src, loc, ip),
+        _i32(nbytes, loc, ip),
+        _i32(mbar, loc, ip),
+    ]
+    text = "cp.async.bulk.shared::cluster.global.mbarrier::complete_tx::bytes"
+    constraints = "r,l,r,r"
+    if policy is None:
+        text += " [$0], [$1], $2, [$3];"
+    else:
+        operands.append(_i64(policy, loc, ip))
+        text += ".L2::cache_hint [$0], [$1], $2, [$3], $4;"
+        constraints += ",l"
+    _asm(None, operands, text, constraints, loc, ip, side_effects=True)
 
 
 @dsl_user_op
@@ -1163,3 +1166,501 @@ def popc(x, *, loc=None, ip=None) -> Int32:
             ip,
         )
     )
+
+
+# ---------------------------------------------- small-batch sparse MLA
+
+
+def _ex(v, i):
+    return Uint32(llvm.extractvalue(T.i32(), v, [i]))
+
+
+@dsl_user_op
+def ld_nc_v4(addr: Int64, *, loc=None, ip=None):
+    """128-bit non-coherent global load (KV records, read-only)."""
+    v = _asm(
+        llvm.StructType.get_literal([T.i32()] * 4),
+        [Int64(addr).ir_value(loc=loc, ip=ip)],
+        "ld.global.nc.L1::no_allocate.L2::256B.v4.u32 {$0, $1, $2, $3}, [$4];",
+        "=r,=r,=r,=r,l",
+        loc,
+        ip,
+    )
+    return _ex(v, 0), _ex(v, 1), _ex(v, 2), _ex(v, 3)
+
+
+@dsl_user_op
+def ld_nc_v2(addr: Int64, *, loc=None, ip=None):
+    v = _asm(
+        llvm.StructType.get_literal([T.i32()] * 2),
+        [Int64(addr).ir_value(loc=loc, ip=ip)],
+        "ld.global.nc.v2.u32 {$0, $1}, [$2];",
+        "=r,=r,l",
+        loc,
+        ip,
+    )
+    return _ex(v, 0), _ex(v, 1)
+
+
+@dsl_user_op
+def ld_nc_b32(addr: Int64, *, loc=None, ip=None) -> Int32:
+    return Int32(
+        _asm(
+            T.i32(),
+            [Int64(addr).ir_value(loc=loc, ip=ip)],
+            "ld.global.nc.b32 $0, [$1];",
+            "=r,l",
+            loc,
+            ip,
+        )
+    )
+
+
+@dsl_user_op
+def ld_nc_u8(addr: Int64, *, loc=None, ip=None) -> Int32:
+    return Int32(
+        _asm(
+            T.i32(),
+            [Int64(addr).ir_value(loc=loc, ip=ip)],
+            "ld.global.nc.u8 $0, [$1];",
+            "=r,l",
+            loc,
+            ip,
+        )
+    )
+
+
+@dsl_user_op
+def ld_f32(addr: Int64, *, loc=None, ip=None) -> Float32:
+    return Float32(
+        _asm(
+            T.f32(),
+            [Int64(addr).ir_value(loc=loc, ip=ip)],
+            "ld.global.nc.f32 $0, [$1];",
+            "=f,l",
+            loc,
+            ip,
+        )
+    )
+
+
+@dsl_user_op
+def st_shared_v4(
+    addr: Int32, a: Uint32, b: Uint32, c: Uint32, d: Uint32, *, loc=None, ip=None
+):
+    _asm(
+        None,
+        [
+            Int32(addr).ir_value(loc=loc, ip=ip),
+            Uint32(a).ir_value(loc=loc, ip=ip),
+            Uint32(b).ir_value(loc=loc, ip=ip),
+            Uint32(c).ir_value(loc=loc, ip=ip),
+            Uint32(d).ir_value(loc=loc, ip=ip),
+        ],
+        "st.shared.v4.b32 [$0], {$1, $2, $3, $4};",
+        "r,r,r,r,r",
+        loc,
+        ip,
+        side_effects=True,
+    )
+
+
+@dsl_user_op
+def st_global_b32(addr: Int64, a: Uint32, *, loc=None, ip=None):
+    _asm(
+        None,
+        [Int64(addr).ir_value(loc=loc, ip=ip), Uint32(a).ir_value(loc=loc, ip=ip)],
+        "st.global.b32 [$0], $1;",
+        "l,r",
+        loc,
+        ip,
+        side_effects=True,
+    )
+
+
+@dsl_user_op
+def st_global_v4(
+    addr: Int64, a: Uint32, b: Uint32, c: Uint32, d: Uint32, *, loc=None, ip=None
+):
+    _asm(
+        None,
+        [
+            Int64(addr).ir_value(loc=loc, ip=ip),
+            Uint32(a).ir_value(loc=loc, ip=ip),
+            Uint32(b).ir_value(loc=loc, ip=ip),
+            Uint32(c).ir_value(loc=loc, ip=ip),
+            Uint32(d).ir_value(loc=loc, ip=ip),
+        ],
+        "st.global.v4.b32 [$0], {$1, $2, $3, $4};",
+        "l,r,r,r,r",
+        loc,
+        ip,
+        side_effects=True,
+    )
+
+
+@dsl_user_op
+def st_shared_b32(addr: Int32, a: Uint32, *, loc=None, ip=None):
+    _asm(
+        None,
+        [Int32(addr).ir_value(loc=loc, ip=ip), Uint32(a).ir_value(loc=loc, ip=ip)],
+        "st.shared.b32 [$0], $1;",
+        "r,r",
+        loc,
+        ip,
+        side_effects=True,
+    )
+
+
+@dsl_user_op
+def dq_e4m3x4_f16(w: Uint32, s1: Uint32, *, loc=None, ip=None):
+    """4 x e4m3 -> 2 x f16x2 (hardware cvt), times f16x2 scale s1."""
+    v = _asm(
+        llvm.StructType.get_literal([T.i32()] * 2),
+        [Uint32(w).ir_value(loc=loc, ip=ip), Uint32(s1).ir_value(loc=loc, ip=ip)],
+        "{\n\t.reg .b16 l, h;\n\t.reg .b32 a, b;\n\t"
+        "mov.b32 {l, h}, $2;\n\t"
+        "cvt.rn.f16x2.e4m3x2 a, l;\n\t"
+        "cvt.rn.f16x2.e4m3x2 b, h;\n\t"
+        "mul.rn.f16x2 $0, a, $3;\n\t"
+        "mul.rn.f16x2 $1, b, $3;\n\t}",
+        "=r,=r,r,r",
+        loc,
+        ip,
+    )
+    return _ex(v, 0), _ex(v, 1)
+
+
+@dsl_user_op
+def dq_e4m3x4_f16_2(w: Uint32, s1: Uint32, s2: Uint32, *, loc=None, ip=None):
+    """Same with a two-step scale (for scales below the f16 normal range)."""
+    v = _asm(
+        llvm.StructType.get_literal([T.i32()] * 2),
+        [
+            Uint32(w).ir_value(loc=loc, ip=ip),
+            Uint32(s1).ir_value(loc=loc, ip=ip),
+            Uint32(s2).ir_value(loc=loc, ip=ip),
+        ],
+        "{\n\t.reg .b16 l, h;\n\t.reg .b32 a, b;\n\t"
+        "mov.b32 {l, h}, $2;\n\t"
+        "cvt.rn.f16x2.e4m3x2 a, l;\n\t"
+        "cvt.rn.f16x2.e4m3x2 b, h;\n\t"
+        "mul.rn.f16x2 a, a, $3;\n\t"
+        "mul.rn.f16x2 b, b, $3;\n\t"
+        "mul.rn.f16x2 $0, a, $4;\n\t"
+        "mul.rn.f16x2 $1, b, $4;\n\t}",
+        "=r,=r,r,r,r",
+        loc,
+        ip,
+    )
+    return _ex(v, 0), _ex(v, 1)
+
+
+@dsl_user_op
+def cvt_f16x2(a: Float32, b: Float32, *, loc=None, ip=None) -> Uint32:
+    return Uint32(
+        _asm(
+            T.i32(),
+            [Float32(b).ir_value(loc=loc, ip=ip), Float32(a).ir_value(loc=loc, ip=ip)],
+            "cvt.rn.f16x2.f32 $0, $1, $2;",
+            "=r,f,f",
+            loc,
+            ip,
+        )
+    )
+
+
+@dsl_user_op
+def ld_shared_v2(addr: Int32, *, loc=None, ip=None):
+    v = _asm(
+        llvm.StructType.get_literal([T.i32()] * 2),
+        [Int32(addr).ir_value(loc=loc, ip=ip)],
+        "ld.shared.v2.u32 {$0, $1}, [$2];",
+        "=r,=r,r",
+        loc,
+        ip,
+        side_effects=True,
+    )
+    return _ex(v, 0), _ex(v, 1)
+
+
+@dsl_user_op
+def bf16x2_unpack(w: Uint32, *, loc=None, ip=None):
+    v = _asm(
+        llvm.StructType.get_literal([T.f32()] * 2),
+        [Uint32(w).ir_value(loc=loc, ip=ip)],
+        "{\n\t.reg .b32 a, b;\n\tshl.b32 a, $2, 16;\n\tand.b32 b, $2, 0xFFFF0000;\n\tmov.b32 $0, a;\n\tmov.b32 $1, b;\n\t}",  # noqa: E501
+        "=f,=f,r",
+        loc,
+        ip,
+    )
+    return Float32(llvm.extractvalue(T.f32(), v, [0])), Float32(
+        llvm.extractvalue(T.f32(), v, [1])
+    )
+
+
+@dsl_user_op
+def ld_cg_v4(addr: Int64, *, loc=None, ip=None):
+    v = _asm(
+        llvm.StructType.get_literal([T.i32()] * 4),
+        [Int64(addr).ir_value(loc=loc, ip=ip)],
+        "ld.global.cg.v4.u32 {$0, $1, $2, $3}, [$4];",
+        "=r,=r,=r,=r,l",
+        loc,
+        ip,
+        side_effects=True,
+    )
+    return _ex(v, 0), _ex(v, 1), _ex(v, 2), _ex(v, 3)
+
+
+@dsl_user_op
+def ld_cg_b32(addr: Int64, *, loc=None, ip=None) -> Int32:
+    return Int32(
+        _asm(
+            T.i32(),
+            [Int64(addr).ir_value(loc=loc, ip=ip)],
+            "ld.global.cg.b32 $0, [$1];",
+            "=r,l",
+            loc,
+            ip,
+            side_effects=True,
+        )
+    )
+
+
+@dsl_user_op
+def st_global_u8(addr: Int64, v: Int32, *, loc=None, ip=None):
+    _asm(
+        None,
+        [Int64(addr).ir_value(loc=loc, ip=ip), Int32(v).ir_value(loc=loc, ip=ip)],
+        "st.global.u8 [$0], $1;",
+        "l,r",
+        loc,
+        ip,
+        side_effects=True,
+    )
+
+
+@cutlass.cutlass_dsl.dsl_user_op
+def st_i32(addr: Int64, v: Int32, *, loc=None, ip=None):
+    _asm(
+        None,
+        [Int64(addr).ir_value(), Int32(v).ir_value()],
+        "st.global.b32 [$0], $1;",
+        "l,r",
+        loc,
+        ip,
+        side_effects=True,
+    )
+
+
+@cutlass.cutlass_dsl.dsl_user_op
+def st_u8(addr: Int64, v: Int32, *, loc=None, ip=None):
+    _asm(
+        None,
+        [Int64(addr).ir_value(), Int32(v).ir_value()],
+        "st.global.u8 [$0], $1;",
+        "l,r",
+        loc,
+        ip,
+        side_effects=True,
+    )
+
+
+@dsl_user_op
+def ld_nc_i64(addr: Int64, *, loc=None, ip=None) -> Int64:
+    return Int64(
+        _asm(
+            T.i64(),
+            [Int64(addr).ir_value(loc=loc, ip=ip)],
+            "ld.global.nc.b64 $0, [$1];",
+            "=l,l",
+            loc,
+            ip,
+        )
+    )
+
+
+@dsl_user_op
+def ld_nc_v4f(addr: Int64, *, loc=None, ip=None):
+    v = _asm(
+        llvm.StructType.get_literal([T.f32()] * 4),
+        [Int64(addr).ir_value(loc=loc, ip=ip)],
+        "ld.global.nc.v4.f32 {$0, $1, $2, $3}, [$4];",
+        "=f,=f,=f,=f,l",
+        loc,
+        ip,
+    )
+    return tuple(Float32(llvm.extractvalue(T.f32(), v, [i])) for i in range(4))
+
+
+@dsl_user_op
+def ld_dsmem_v4(addr: Int32, *, loc=None, ip=None):
+    """128-bit load from a cluster peer's shared memory (`mapa` address)."""
+    v = _asm(
+        llvm.StructType.get_literal([T.i32()] * 4),
+        [Int32(addr).ir_value(loc=loc, ip=ip)],
+        "ld.shared::cluster.v4.u32 {$0, $1, $2, $3}, [$4];",
+        "=r,=r,=r,=r,r",
+        loc,
+        ip,
+        side_effects=True,
+    )
+    return _ex(v, 0), _ex(v, 1), _ex(v, 2), _ex(v, 3)
+
+
+@dsl_user_op
+def ld_dsmem_v2f(addr: Int32, *, loc=None, ip=None):
+    v = _asm(
+        llvm.StructType.get_literal([T.f32()] * 2),
+        [Int32(addr).ir_value(loc=loc, ip=ip)],
+        "ld.shared::cluster.v2.f32 {$0, $1}, [$2];",
+        "=f,=f,r",
+        loc,
+        ip,
+        side_effects=True,
+    )
+    return Float32(llvm.extractvalue(T.f32(), v, [0])), Float32(
+        llvm.extractvalue(T.f32(), v, [1])
+    )
+
+
+@dsl_user_op
+def st_shared_v2f(addr: Int32, a: Float32, b: Float32, *, loc=None, ip=None):
+    _asm(
+        None,
+        [
+            Int32(addr).ir_value(loc=loc, ip=ip),
+            Float32(a).ir_value(loc=loc, ip=ip),
+            Float32(b).ir_value(loc=loc, ip=ip),
+        ],
+        "st.shared.v2.f32 [$0], {$1, $2};",
+        "r,f,f",
+        loc,
+        ip,
+        side_effects=True,
+    )
+
+
+# ------------------------------------------------------------ mHC mixes
+
+
+def _v(x, cls, loc, ip):
+    return cls(x).ir_value(loc=loc, ip=ip)
+
+
+@dsl_user_op
+def cp_async_16(dst, src, *, loc=None, ip=None):
+    """16-byte cp.async global -> shared, L2 only."""
+    _asm(
+        None,
+        [_v(dst, Int32, loc, ip), _v(src, Int64, loc, ip)],
+        "cp.async.cg.shared.global [$0], [$1], 16;",
+        "r,l",
+        loc,
+        ip,
+        side_effects=True,
+    )
+
+
+@dsl_user_op
+def cp_async_wait_all(*, loc=None, ip=None):
+    _asm(None, [], "cp.async.wait_all;", "", loc, ip, side_effects=True)
+
+
+@dsl_user_op
+def sts128_f32(addr, a, b, c, d, *, loc=None, ip=None):
+    _asm(
+        None,
+        [_v(addr, Int32, loc, ip)] + [_v(t, Float32, loc, ip) for t in (a, b, c, d)],
+        "st.shared.v4.f32 [$0], {$1, $2, $3, $4};",
+        "r,f,f,f,f",
+        loc,
+        ip,
+        side_effects=True,
+    )
+
+
+@dsl_user_op
+def cluster_sync(*, loc=None, ip=None):
+    """barrier.cluster arrive (release) + wait (acquire), all threads."""
+    _asm(
+        None,
+        [],
+        "barrier.cluster.arrive.release.aligned;\nbarrier.cluster.wait.acquire.aligned;",
+        "",
+        loc,
+        ip,
+        side_effects=True,
+    )
+
+
+@dsl_user_op
+def cluster_rank(*, loc=None, ip=None) -> Int32:
+    return Int32(_asm(T.i32(), [], "mov.u32 $0, %cluster_ctarank;", "=r", loc, ip))
+
+
+@dsl_user_op
+def mma_tf32_1688(c, a0, a1, a2, a3, b0, b1, *, loc=None, ip=None):
+    """D = A B + C, m16n8k8, TF32 inputs (FP32 bit patterns), FP32
+    accumulators (4 floats)."""
+    r = _asm(
+        llvm.StructType.get_literal([T.f32()] * 4),
+        [_v(t, Float32, loc, ip) for t in c]
+        + [_v(t, Uint32, loc, ip) for t in (a0, a1, a2, a3, b0, b1)],
+        "mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32 "
+        "{$0, $1, $2, $3}, {$8, $9, $10, $11}, {$12, $13}, {$4, $5, $6, $7};",
+        "=f,=f,=f,=f,f,f,f,f,r,r,r,r,r,r",
+        loc,
+        ip,
+    )
+    return tuple(
+        Float32(llvm.extractvalue(T.f32(), r, [i], loc=loc, ip=ip)) for i in range(4)
+    )
+
+
+@dsl_user_op
+def u32_as_f32(v, *, loc=None, ip=None) -> Float32:
+    return Float32(
+        _asm(T.f32(), [_v(v, Uint32, loc, ip)], "mov.b32 $0, $1;", "=f,r", loc, ip)
+    )
+
+
+@dsl_user_op
+def cluster_arrive_relaxed(*, loc=None, ip=None):
+    _asm(
+        None,
+        [],
+        "barrier.cluster.arrive.relaxed.aligned;",
+        "",
+        loc,
+        ip,
+        side_effects=True,
+    )
+
+
+@dsl_user_op
+def cluster_wait(*, loc=None, ip=None):
+    _asm(None, [], "barrier.cluster.wait.aligned;", "", loc, ip, side_effects=True)
+
+
+@dsl_user_op
+def tf32_rna(v, *, loc=None, ip=None) -> Uint32:
+    """FP32 bits rounded to TF32 (nearest), as the TF32 GEMMs that round their
+    FP32 operands (DeepGEMM's prenorm GEMM) see them; `mma.sync` itself
+    ignores the low mantissa bits."""
+    return Uint32(
+        _asm(
+            T.i32(),
+            [_v(v, Uint32, loc, ip)],
+            "cvt.rna.tf32.f32 $0, $1;",
+            "=r,r",
+            loc,
+            ip,
+        )
+    )
+
+
+@dsl_user_op
+def cp_async_commit(*, loc=None, ip=None):
+    _asm(None, [], "cp.async.commit_group;", "", loc, ip, side_effects=True)

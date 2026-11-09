@@ -21,7 +21,7 @@ import cutlass
 import cutlass.cute as cute
 from cutlass import Float32, Int32, Int64, Uint32
 
-from .mhc_ptx import (
+from .ptx import (
     cluster_arrive_relaxed,
     cluster_rank,
     cluster_sync,
@@ -29,20 +29,18 @@ from .mhc_ptx import (
     cp_async_16,
     cp_async_commit,
     cp_async_wait_all,
-    mma_tf32_1688,
-    smem_u32,
-    sts128_f32,
-    tf32_rna,
-    u32_as_f32,
-)
-from .moe_ptx import (
     griddep_launch,
     griddep_wait,
     lds128,
     lds_f32,
     mapa,
+    mma_tf32_1688,
+    smem_addr,
     st_cluster_f32,
     stg_f32,
+    sts128_f32,
+    tf32_rna,
+    u32_as_f32,
 )
 
 HIDDEN = 5120
@@ -116,7 +114,7 @@ class MixesKernel:
         nt = self.tiles
         r0 = chunk * (8 * nt)
         m = cutlass.min(M - r0, 8 * nt)
-        s_fn = smem_u32(smem)
+        s_fn = smem_addr(smem)
         s_x = s_fn + FN_BYTES
         s_recv = s_x + 8 * nt * MIX_PITCH
         rank = cluster_rank()
