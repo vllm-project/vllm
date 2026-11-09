@@ -35,8 +35,8 @@ from vllm.model_executor.model_loader.weight_cache.artifact_store import (
     MooncakeArtifactStore,
     artifact_key,
 )
-from vllm.model_executor.model_loader.weight_cache.warmup_cache import (
-    flashinfer_autotune,
+from vllm.model_executor.model_loader.weight_cache.warmup_cache.flashinfer_autotune import (  # noqa: E501
+    FlashInferWarmupCache,
 )
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer
@@ -1494,14 +1494,12 @@ def test_warmup_cache_request_validation_and_miss(tmp_path, monkeypatch):
     """The source validates the wire key before touching the filesystem."""
     monkeypatch.setenv("VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR", str(tmp_path))
     from vllm.model_executor.model_loader.weight_cache.seed import SeedTransport
-    from vllm.model_executor.model_loader.weight_cache.warmup_cache import (
-        flashinfer_autotune,
+    from vllm.model_executor.model_loader.weight_cache.warmup_cache.flashinfer_autotune import (  # noqa: E501
+        FlashInferWarmupCache,
     )
 
     def handle(request):
-        return SeedTransport(
-            [flashinfer_autotune.FlashInferWarmupCache()]
-        ).handle_request(request)
+        return SeedTransport([FlashInferWarmupCache()]).handle_request(request)
 
     assert handle("not a dict")["status"] == "error"
     assert handle(_warmup_cache_request(kind="bogus"))["status"] == "error"
@@ -1521,11 +1519,11 @@ def test_warmup_cache_metadata_gate():
     pytest.importorskip("flashinfer")
     from flashinfer.autotuner.autotuner import _collect_metadata
 
-    from vllm.model_executor.model_loader.weight_cache.warmup_cache import (
-        flashinfer_autotune,
+    from vllm.model_executor.model_loader.weight_cache.warmup_cache.flashinfer_autotune import (  # noqa: E501
+        FlashInferWarmupCache,
     )
 
-    kind = flashinfer_autotune.FlashInferWarmupCache()
+    kind = FlashInferWarmupCache()
     filename = "autotune_configs_dp0_rank0.json"
 
     matching = {filename: {"_metadata": _collect_metadata(), "records": {}}}
@@ -1558,8 +1556,8 @@ def test_remote_warmup_cache_listener(tmp_path, monkeypatch):
         SeedConfig,
         SeedTransport,
     )
-    from vllm.model_executor.model_loader.weight_cache.warmup_cache import (
-        flashinfer_autotune,
+    from vllm.model_executor.model_loader.weight_cache.warmup_cache.flashinfer_autotune import (  # noqa: E501
+        FlashInferWarmupCache,
     )
 
     config_hash = "b" * 64
@@ -1569,7 +1567,7 @@ def test_remote_warmup_cache_listener(tmp_path, monkeypatch):
     (cache_dir / "autotune_configs_dp0_rank0.json").write_text(json.dumps(table))
 
     transport = SeedTransport(
-        [flashinfer_autotune.FlashInferWarmupCache()],
+        [FlashInferWarmupCache()],
         SeedConfig(listen=("127.0.0.1", 0), token="test-secret"),
     )
     address = transport.start_listener()
@@ -1632,13 +1630,13 @@ def test_warmup_cache_install_writes_table(tmp_path, monkeypatch):
     """Install writes the fetched table to the rank's disk tier."""
     import json
 
-    from vllm.model_executor.model_loader.weight_cache.warmup_cache import (
-        flashinfer_autotune,
+    from vllm.model_executor.model_loader.weight_cache.warmup_cache.flashinfer_autotune import (  # noqa: E501
+        FlashInferWarmupCache,
     )
 
     monkeypatch.setenv("VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR", str(tmp_path))
     config_hash = "a" * 64
-    kind = flashinfer_autotune.FlashInferWarmupCache()
+    kind = FlashInferWarmupCache()
     params = {"config_hash": config_hash, "dp_rank": 0, "rank": 0}
     monkeypatch.setattr(kind, "request_params", lambda _: params)
 
@@ -1966,7 +1964,7 @@ def test_mooncake_store_cross_process_e2e(tmp_path, monkeypatch):
     )
 
     with MooncakeCluster(tmp_path, monkeypatch) as cluster:
-        kind = flashinfer_autotune.FlashInferWarmupCache(store_names=["mooncake"])
+        kind = FlashInferWarmupCache(store_names=["mooncake"])
         filename = "autotune_configs_dp0_rank0.json"
         params = {"config_hash": "9" * 64, "dp_rank": 0, "rank": 0}
         monkeypatch.setattr(kind, "request_params", lambda _: params)

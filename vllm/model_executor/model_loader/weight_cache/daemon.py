@@ -129,12 +129,12 @@ from vllm.model_executor.model_loader.weight_cache.utils import (
     format_daemon_role,
     is_draft_model_cacheable,
 )
-from vllm.model_executor.model_loader.weight_cache.warmup_cache import (
-    flashinfer_autotune,
-)
 from vllm.model_executor.model_loader.weight_cache.warmup_cache.base import WarmupCache
 from vllm.model_executor.model_loader.weight_cache.warmup_cache.compiled import (
     CompileArtifactWarmupCache,
+)
+from vllm.model_executor.model_loader.weight_cache.warmup_cache.flashinfer_autotune import (  # noqa: E501
+    FlashInferWarmupCache,
 )
 from vllm.platforms import current_platform
 from vllm.utils.mem_utils import format_gib
@@ -230,7 +230,7 @@ class WeightCacheDaemon:
         self.seed_config = seed_config or SeedConfig()
         warmup_cache_stores = tuple(warmup_cache_stores)
         self.warmup_caches: list[WarmupCache] = [
-            flashinfer_autotune.FlashInferWarmupCache(warmup_cache_stores),
+            FlashInferWarmupCache(warmup_cache_stores),
             CompileArtifactWarmupCache(warmup_cache_stores),
         ]
         self.d2d = SeedTransport(self.warmup_caches, self.seed_config)
