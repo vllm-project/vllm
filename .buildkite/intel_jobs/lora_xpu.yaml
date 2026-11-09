@@ -6,7 +6,7 @@ steps:
   key: lora
   device: intel_gpu
   timeout_in_minutes: 40
-  parallelism: 6
+  parallelism: 10
   optional: true
   working_dir: .
   no_plugin: true
