@@ -401,7 +401,7 @@ def _runtime_ok(x: torch.Tensor, weight: torch.Tensor) -> bool:
 @functools.cache
 def _warp_splitk_module() -> Any | None:
     """FlashInfer's CuTe DSL warp split-K BF16 GEMM, called directly so every
-    (N, K, M) runs its measured tactic: ``flashinfer.mm_bf16`` takes no tactic
+    (N, K, M) runs its measured tactic: `flashinfer.mm_bf16` takes no tactic
     and would use its autotuner or heuristic default instead."""
     try:
         from flashinfer.gemm.kernels import dense_bf16_gemm_warp_splitk
