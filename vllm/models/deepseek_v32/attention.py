@@ -302,7 +302,7 @@ class DeepseekV32Attention(MLAAttention):
                 get_tp_group().all_gather(self.W_UK_T.contiguous(), dim=0),
             )
 
-    def uses_sp_shardq(self) -> bool:
+    def uses_fused_sp_shardq(self) -> bool:
         if not self.use_sp_shardq:
             return False
         metadata, _, _, _ = get_attention_context(self.layer_name)
@@ -326,7 +326,7 @@ class DeepseekV32Attention(MLAAttention):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
-        sequence_parallel = self.uses_sp_shardq()
+        sequence_parallel = self.uses_fused_sp_shardq()
         full_num_tokens = positions.shape[0]
         cache_positions = positions
         if sequence_parallel:

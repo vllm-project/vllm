@@ -146,7 +146,7 @@ class DeepseekV32DecoderLayer(torch.nn.Module):
             hidden_states, residual = fused_allreduce_rms_norm(
                 hidden_states, residual, self.input_layernorm
             )
-        if self.use_sequence_parallel and not self.self_attn.uses_sp_shardq():
+        if self.use_sequence_parallel and not self.self_attn.uses_fused_sp_shardq():
             hidden_states = sp_all_gather(hidden_states)[:full_num_tokens]
 
         # self_attn's o_proj runs reduce_results=False; reduce before RMSNorm.
