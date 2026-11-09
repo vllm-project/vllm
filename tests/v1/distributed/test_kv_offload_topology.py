@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Offloaded KV from one tensor-parallel size must not serve another."""
+"""Check tensor-parallel cache isolation for head-sharded direct KV pages."""
 
 import time
 
@@ -25,6 +25,7 @@ def _generate(vllm_runner, tensor_parallel_size, root_dir):
     with vllm_runner(
         MODEL,
         tensor_parallel_size=tensor_parallel_size,
+        block_size=BLOCK_SIZE,
         enforce_eager=True,
         max_model_len=2048,
         gpu_memory_utilization=0.3,
@@ -59,11 +60,7 @@ def _generate(vllm_runner, tensor_parallel_size, root_dir):
     )
 
 
-def test_direct_layout_is_not_shared_across_tp_sizes(
-    vllm_runner, tmp_path, monkeypatch
-):
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
-
+def test_direct_layout_is_not_shared_across_tp_sizes(vllm_runner, tmp_path):
     cached_by_writer, _ = _generate(vllm_runner, 1, tmp_path)
     assert cached_by_writer == 0
 

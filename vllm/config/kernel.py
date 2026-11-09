@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any, Final, Literal
 
 from pydantic import Field, field_validator
 
-from vllm.config.utils import config, get_hash_factors, hash_factors
+from vllm.config.utils import CompileFactors, config, get_compile_factors
 from vllm.logger import init_logger
 
 if TYPE_CHECKING:
@@ -37,14 +37,14 @@ class IrOpPriorityConfig:
     gelu_and_mul_sparse: list[str] = Field(default_factory=list)
     """Priority list for vllm.ir.ops.gelu_and_mul_sparse"""
 
-    def compute_hash(self) -> str:
+    def compile_factors(self) -> CompileFactors:
         """Produces a hash unique to the pass configuration.
         Any new fields that affect compilation should be added to the hash.
         Any future fields that don't affect compilation should be excluded.
 
         Also, manually add IR op impl UUIDs to make sure they affect the compile cache.
         """
-        factors = get_hash_factors(self, set())
+        factors = get_compile_factors(self, set())
 
         # Implementations are hidden from Dynamo,
         # so they don't show up in the traced files list.
@@ -61,7 +61,7 @@ class IrOpPriorityConfig:
             for name, p in asdict(self).items()  # type: ignore[call-overload]
         }
 
-        return hash_factors(factors)
+        return factors
 
     @field_validator("*", mode="before")
     @classmethod
@@ -180,6 +180,8 @@ SparseIndexerTopkBackend = Literal[
     "aiter",
 ]
 
+FlashInferSparseMLAKernel = Literal["auto", "trtllm", "prims_ts"]
+
 # DeepGEMM consumes the DeepSeek-V4 MXFP4 checkpoint recipe. CuTeDSL is
 # selected by quantization methods and is not architecture-specific.
 FLASHINFER_MOE_EP_ARCHITECTURES = frozenset(
@@ -194,14 +196,14 @@ FLASHINFER_MOE_EP_ARCHITECTURES = frozenset(
 def bind_passthrough_all2all_backend(
     moe_backend: str, parallel_config: "ParallelConfig"
 ) -> None:
-    """Bind ``all2all_backend="passthrough"`` to MoE backends that own their
+    """Bind `all2all_backend="passthrough"` to MoE backends that own their
     expert-parallel communication (currently the FlashInfer MoE-EP megakernels).
 
-    Such a deployment gets ``passthrough`` when the all2all backend is left at
+    Such a deployment gets `passthrough` when the all2all backend is left at
     its default and rejects any other explicit choice; the value is meaningless
     with a MoE backend that relies on the framework to communicate. The CLI does
     not offer the value; the early return keeps repeated
-    ``set_platform_defaults`` calls idempotent.
+    `set_platform_defaults` calls idempotent.
     """
     a2a = parallel_config.all2all_backend
     if moe_backend in FLASHINFER_MOE_EP_BACKENDS:
@@ -290,6 +292,12 @@ class KernelConfig:
     enable_rocm_segmented_attn_autotune: bool = False
     """If True, autotune ROCm segmented attention during kernel warmup on RDNA GPUs."""
 
+    enable_rocm_aiter_gemm_warmup: bool = False
+    """If True, run a dummy forward at every AITER tuned-GEMM token bucket up to
+    `max_num_batched_tokens` during kernel warmup on ROCm, so AITER builds those
+    kernels at startup instead of stalling the first requests that hit each
+    bucket. Costs one dummy forward per bucket (164 at 8192 tokens)."""
+
     # TODO(roberto): Remove after registered CuTeDSL warmups are migrated
     # to the shared JIT warmup infrastructure.
     # https://github.com/vllm-project/vllm/pull/47451
@@ -303,7 +311,10 @@ class KernelConfig:
     """If True, run the eligible layers of decode steps on the model's
     MonoKernel: a persistent kernel that runs most or all of one decoder layer
     in a single launch (DeepSeek-V4.1 on MI355X, DeepSeek-V4-Pro at TP8 on
-    MI355X). A deployment that cannot run it is refused at startup."""
+    MI355X; Muse Spark MXFP4 on MI355X with tensor parallel size 8, expert
+    parallelism and a 7-token DSpark draft, for speculative verify steps of 1-16
+    requests, with bf16 MoE activations instead of the checkpoint's MXFP4). A
+    deployment that cannot run it is refused at startup."""
 
     moe_backend: MoEBackend = "auto"
     """Backend for MoE expert computation kernels. Available options:
@@ -362,9 +373,20 @@ class KernelConfig:
 
     Explicit values raise RuntimeError when their constraints are not met.
 
-    On SM100 decode without DCP, persistent (including auto selecting it)
-    reads BF16 logits directly and widens scores inside the kernel, avoiding
-    a full FP32 logits copy. Cooperative still requires FP32 logits.
+    On SM100 decode without DCP, cooperative and persistent (including auto
+    selecting them) read BF16 logits directly and widen scores inside the
+    kernel, avoiding a full FP32 logits copy.
+    """
+
+    flashinfer_sparse_mla_kernel: FlashInferSparseMLAKernel = "auto"
+    """Kernel of the SM100 FLASHINFER_MLA_SPARSE backend for D576 sparse MLA.
+    Available options:
+
+    - "auto": prims_ts for nvfp4_ds_mla, and for a per-tensor fp8 cache under
+      DCP (decode_context_parallel_size > 1) when it can run; else trtllm-gen
+    - "trtllm": trtllm-gen; nvfp4_ds_mla caches cannot use this backend
+    - "prims_ts": FlashInfer's task-scheduled sparse MLA decode, also for a
+      per-tensor fp8 cache
     """
 
     linear_backend: LinearBackend = "auto"
@@ -400,8 +422,8 @@ class KernelConfig:
         default=None, min_length=1
     )
     """Backend overrides keyed by linear quantization scheme. Overrides take
-    precedence over ``linear_backend``; for example,
-    ``{"nvfp4_w4a16": "humming"}``."""
+    precedence over `linear_backend`; for example,
+    `{"nvfp4_w4a16": "humming"}`."""
 
     rdna_hybrid_w4a16_prefill_dequant: RDNAHybridW4A16PrefillDequantMode = "disable"
     """Cache a dense dequantized copy of each weight for the RDNA hybrid W4A16
@@ -447,7 +469,7 @@ class KernelConfig:
             return value.lower().replace("-", "_")
         return value
 
-    def compute_hash(self) -> str:
+    def compile_factors(self) -> CompileFactors:
         """Produces a hash unique to the pass configuration.
         Any new fields that affect compilation should be added to the hash.
         Any future fields that don't affect compilation should be excluded.
@@ -457,13 +479,11 @@ class KernelConfig:
             "enable_jit_warmup",
             "enable_flashinfer_autotune",
             "enable_rocm_segmented_attn_autotune",
-            "ir_op_priority",  # handled separately below
+            "enable_rocm_aiter_gemm_warmup",
         }
         if self.linear_backend_per_quant is None:
             ignored_factors.add("linear_backend_per_quant")
-        factors = get_hash_factors(self, ignored_factors)
-        factors["ir_op_priority"] = self.ir_op_priority.compute_hash()
-        return hash_factors(factors)
+        return get_compile_factors(self, ignored_factors)
 
     @field_validator(
         "enable_flashinfer_autotune",

@@ -121,9 +121,9 @@ Secondary tiers are not supported yet on engines whose workers span several node
 
 By default, each worker copies its own GPU page to the CPU tier unchanged, so an offloaded block is stored in whatever form that worker happens to hold it.
 
-Direct layouts use topology-specific filesystem and object-store keys and P2P compatibility fields. Changing TP changes the order of each rank's local layers in the stored block, so matching block sizes alone does not make the bytes compatible. Same-topology reuse remains supported. Supported replicated MLA layouts, whose ranks hold identical KV bytes, retain their shared identity.
+For head-sharded attention, a direct block holds each rank's local layers in sequence. Changing TP size changes their byte offsets even when the total block size stays the same. The filesystem and object-store tiers include the topology in their storage keys, and P2P peers check it before exchanging blocks. Supported replicated MLA layouts can share a cache across TP sizes because each rank holds identical KV bytes.
 
-Existing head-sharded direct caches from Model Runner V1 (MRV1, `VLLM_USE_V2_MODEL_RUNNER=0`) that previously used a topology-independent namespace become cold after upgrading, even with the same TP size. Their filesystem entries and object-store objects are not deleted. Direct caches that were already topology-specific, and certified canonical or replicated layouts, retain their namespaces.
+When upgrading from Model Runner V1, a head-sharded direct cache that used a topology-independent namespace starts cold, even at the same TP size. Its files and objects stay in the old namespace.
 
 With `"canonical_layout": true`, workers instead convert their local pages into one common representation, the canonical page: the block's complete KV (every KV head and every token), with each worker writing its slice into a fixed position. The format is versioned and doesn't depend on how a particular engine splits the KV across its workers.
 
@@ -305,6 +305,19 @@ The object-store tier (`type: "obj"`) offloads blocks to an S3-compatible object
 | `access_key`, `secret_key`, `session_token` | no | `""` | Explicit credentials. When left empty, the NIXL OBJ plugin falls back to the AWS SDK default credential provider chain (IAM roles, environment variables, credential files), which enables workload-identity auth on Kubernetes. |
 | `region` | no | `""` | Bucket region, if the endpoint requires one. |
 | `ca_bundle` | no | `""` | CA bundle path for TLS verification. |
+| `backend_params` | no | `{}` | Additional NIXL OBJ backend parameters, passed through as strings (booleans become `true`/`false`). Use it for options such as `use_virtual_addressing`, `req_checksum`, `resp_checksum`, `accelerated` and `type`; see the [NIXL OBJ plugin README](https://github.com/ai-dynamo/nixl/blob/main/src/plugins/obj/README.md). The connection fields above and `num_threads` cannot be overridden here. |
+
+For example, to enable the accelerated (S3-over-RDMA) object-store engine of a specific vendor:
+
+```json
+{
+  "bucket": "kv",
+  "endpoint_override": "s3.example:9000",
+  "backend_params": {"accelerated": true, "type": "dell"}
+}
+```
+
+`type` selects the vendor-specific accelerated engine registered in the NIXL OBJ plugin; which values are available depends on the installed NIXL release (`dell` is the engine shipped in NIXL 1.5.2). `accelerated` without a `type` initializes an accelerated client that still transfers over plain S3 on that release.
 
 Object keys follow the same run-configuration digest scheme as the filesystem tier (see [On-Disk Layout](#on-disk-layout)) and are stored under the optional `prefix`. The [Cross-Process Sharing](#cross-process-sharing) behavior applies to shared buckets as well, so instances sharing a bucket produce identical keys for identical content; set a shared `PYTHONHASHSEED` if you want a custom seed. At startup the tier probes object store connectivity and fails fast with a configuration error if the bucket is unreachable.
 
@@ -324,6 +337,10 @@ Block content hashes must match across instances for peers to exchange blocks (s
 | `unbound_store_timeout_s` | no | `60` | Seconds a producer holds stored blocks for a consumer that has not fetched them yet. Raise it for deployments whose prefills outlast the default; the blocks keep primary-tier CPU slots pinned for the whole window. Once it expires a late fetch is rejected in a single round trip, so the consumer falls back to local prefill immediately. |
 
 The `backends` and `num_threads` options mirror the conditional logic used by [`NixlConnector`](nixl_connector_usage.md#selecting-a-nixl-transport-backend-plugin): when any non-UCX backend is configured, NIXL is initialised with `backends=...`; otherwise it falls back to a UCX-only agent with the configured `num_threads`. This lets the P2P tier use a different transport (e.g. `MOONCAKE`, `GDS_MT`, `LIBFABRIC`) than the main `NixlConnector` running in the same process.
+
+Fetches queued while the peer handshake is pending fail locally if the request
+finishes or its load deadline expires. They do not wait for an abort
+acknowledgement, and a delayed handshake cannot send these retired fetches.
 
 A producer parks a request's blocks until the consumer's `FetchMsg` arrives; if none arrives
 within `unbound_store_timeout_s` the blocks are released so they stop pinning primary-tier
@@ -416,6 +433,10 @@ Runtime handshake for a P2P (or P/D) pull, once the orchestrator has set the key
 6. The producer performs the **NIXL WRITE** transfer and sends **`TransferDone`** with a success status.
 7. On `get_finished`, hits are loaded into GPU as ordinary cache hits; misses are recomputed by the engine.
 
+A transfer completion or abort acknowledgement already received when the
+connection closes still settles its load. Disconnect suppresses messages that
+would start new work; it does not discard these buffered terminal confirmations.
+
 In classic **P/D mode** (`remote_prefiller` set, no `remote_kv_source`), the lookup phase (steps 2–4) is skipped: the decode consumer assumes the prefiller holds all of the request's blocks, so every block `lookup()` returns an immediate hit and the consumer jumps straight to the **`FetchMsg`** in step 5. The `LookupMsg`/`LookupRespMsg` round-trip only happens in P2P mode, where the consumer does not know in advance which blocks the peer has cached.
 
 ### Out-of-Tree Secondary Tiers
@@ -468,6 +489,32 @@ Example (OpenAI-compatible completions request):
   }
 }
 ```
+
+## Huge pages for `SimpleCPUOffloadConnector`
+
+With `kv_offload_backend="cpu"`, set `cpu_hugepage_block_size` to `"2MB"` or
+`"1GB"` in `kv_connector_extra_config` to back the CPU KV caches with Linux
+HugeTLB pages (Linux 5.14 or newer):
+
+```json
+{
+  "kv_connector": "SimpleCPUOffloadConnector",
+  "kv_role": "kv_both",
+  "kv_connector_extra_config": {
+    "cpu_bytes_to_use_per_rank": 137438953472,
+    "cpu_hugepage_block_size": "1GB"
+  }
+}
+```
+
+Reserve enough pages on the host for every rank, rounding each rank's cache
+size up to a whole page. Containers also need a matching hugetlb allowance, for
+example Kubernetes `hugepages-1Gi`. If the pool or the limit is too small,
+startup fails; there is no fallback to ordinary pages.
+
+Without this key, the caches use ordinary pages, and `THP_MEM_ALLOC_ENABLE=1`
+requests transparent huge pages. In both cases, the memory follows the worker's
+NUMA policy, for example from `--numa-bind`.
 
 ## Explicit pool sizing for `SimpleCPUOffloadConnector`
 

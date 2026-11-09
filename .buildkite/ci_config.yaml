@@ -12,9 +12,13 @@ run_all_patterns:
   - "requirements/build/cuda.txt"
   - "requirements/test/cuda.txt"
   - "setup.py"
-  - "csrc/"
   - "cmake/"
   - ".buildkite/check-torch-abi.py"
+# csrc/ is decided by ci-selector on CUDA, from the kernel recordings. AMD is
+# not selected yet, so a csrc/ change still runs every AMD step (ROCm compiles
+# these sources through HIPify). Uses run_all_exclude_patterns below.
+amd_run_all_patterns:
+  - "csrc/"
 run_all_exclude_patterns:
   - "docker/Dockerfile."
   - "csrc/cpu/"

@@ -139,7 +139,7 @@ impl InferenceServiceImpl {
             text_request.data_parallel_rank = data_parallel_rank;
 
             if !lora_name.is_empty() {
-                if !self.state.engine_core_client().ready_response().supports_lora {
+                if !self.state.llm().info().supports_lora {
                     return Err(Status::failed_precondition(
                         "engine was not started with LoRA enabled",
                     ));
@@ -261,6 +261,7 @@ impl pb::inference_server::Inference for InferenceServiceImpl {
             sampling_mask: collected.sampling_mask,
             spec_decode_metrics: collected.spec_decode_metrics,
             weight_versions: collected.weight_versions,
+            routed_experts: collected.routed_experts.map(Box::new),
             timestamps: collected.timestamps,
         };
 

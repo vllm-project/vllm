@@ -48,7 +48,7 @@ def get_offloading_group_ids(kv_cache_config: "KVCacheConfig") -> tuple[int, ...
 def _group_kv_bytes_per_block(group: "KVCacheGroupSpec") -> int:
     """Return the physical bytes occupied by one block of a cache group.
 
-    Worker configs may retain ``UniformTypeKVCacheSpecs`` while scheduler
+    Worker configs may retain `UniformTypeKVCacheSpecs` while scheduler
     configs flatten that wrapper to one representative per-layer spec.  Keep
     the result invariant across those two representations.
     """
@@ -205,10 +205,11 @@ def build_offloading_config(
 
     canonical_layout = bool(extra_config.get("canonical_layout", False))
 
-    # Direct pages concatenate each worker's layers before the next worker,
-    # so changing TP changes the byte layout even with head-sharded attention.
+    # Only canonical pages can be parallelism-invariant: they are
+    # topology-free, so every config whose mappings derive portable, group by
+    # group, qualifies; certification happens per layer at registration and
+    # create_worker fails closed on this flag.
     is_parallelism_agnostic = False
-    # Canonical mappings are also certified per layer at worker registration.
     if canonical_layout:
         tp_size = parallel_config.tensor_parallel_size
         total_kv_heads = vllm_config.model_config.get_total_num_kv_heads()
