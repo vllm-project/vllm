@@ -381,11 +381,10 @@ def test_host_buffer_save_includes_prefix_cache_hit_blocks():
     assert req_id not in connector_scheduler._reqs_save_state
 
 
-@pytest.mark.parametrize("use_v2_model_runner", [False, True])
-def test_host_buffer_save_restarts_after_preemption(use_v2_model_runner: bool):
+def test_host_buffer_save_restarts_after_preemption():
     """Preemption between prefill chunks frees the request's blocks. When it is
-    scheduled again (as a resumed request with the V1 model runner, as a new
-    one with V2), every block it covers is copied again from token 0."""
+    scheduled again, as a new request, every block it covers is copied again
+    from token 0."""
     block_size = 16
     vllm_config = create_vllm_config(
         block_size=block_size,
@@ -393,7 +392,6 @@ def test_host_buffer_save_restarts_after_preemption(use_v2_model_runner: bool):
         kv_role="kv_producer",
     )
     scheduler = create_scheduler(vllm_config)
-    scheduler.use_v2_model_runner = use_v2_model_runner
     connector_scheduler = scheduler.get_kv_connector().connector_scheduler
     connector_scheduler.use_host_buffer = True
     request = create_request(
@@ -413,10 +411,7 @@ def test_host_buffer_save_restarts_after_preemption(use_v2_model_runner: bool):
     scheduler._preempt_request(request, 0.0)
 
     out2 = scheduler.schedule()
-    if use_v2_model_runner:
-        assert [r.req_id for r in out2.scheduled_new_reqs] == [req_id]
-    else:
-        assert out2.scheduled_cached_reqs.resumed_req_ids == {req_id}
+    assert [r.req_id for r in out2.scheduled_new_reqs] == [req_id]
     (saved2,) = out2.kv_connector_metadata.reqs_to_save[req_id].local_block_ids
     (table,) = scheduler.kv_cache_manager.get_block_ids(req_id)
     assert saved2 == table[: -(-40 // block_size)]
@@ -440,6 +435,7 @@ def test_host_buffer_save_hybrid_attention_and_mamba():
     kv_cache_config = make_kv_cache_config(
         block_size, mamba_enabled=True, mamba_block_size=max_model_len
     )
+    kv_cache_config.hash_block_size = block_size
     scheduler = create_scheduler(
         vllm_config,
         kv_cache_config=kv_cache_config,
