@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""NIXL P/D for Mamba hybrids in align mode with ``ssm_boundary_state_xfer``:
+"""NIXL P/D for Mamba hybrids in align mode with `ssm_boundary_state_xfer`:
 the decode pod caches the prompt's last block-boundary state, so a later turn
 sent to it alone gets a prefix hit. Drives real P and D schedulers."""
 
+from dataclasses import replace
 from unittest.mock import patch
 
 import pytest
@@ -23,6 +24,7 @@ from .utils import (
     create_scheduler,
     create_vllm_config,
     make_kv_cache_config,
+    set_mtp_config,
 )
 
 pytestmark = pytest.mark.cpu_test
@@ -38,7 +40,11 @@ def _cpu_device_type():
 
 
 def _make_scheduler(
-    kv_role: str, num_mamba_groups: int = 1, ssm_boundary_state_xfer: bool = True
+    kv_role: str,
+    num_mamba_groups: int = 1,
+    ssm_boundary_state_xfer: bool = True,
+    mtp: bool = False,
+    eagle_block_drop: bool = True,
 ):
     vllm_config = create_vllm_config(
         block_size=BLOCK_SIZE,
@@ -46,6 +52,11 @@ def _make_scheduler(
         kv_role=kv_role,
         kv_connector_extra_config={"ssm_boundary_state_xfer": ssm_boundary_state_xfer},
     )
+    if mtp:
+        set_mtp_config(vllm_config, disable_lookahead_block_hashes=True)
+        vllm_config.speculative_config.disable_eagle_block_drop = not eagle_block_drop
+        # The default: keep only the replay-boundary states.
+        vllm_config.cache_config.prefix_cache_retention_interval = 0
     vllm_config.scheduler_config.disable_hybrid_kv_cache_manager = False
     vllm_config.scheduler_config.async_scheduling = False
     vllm_config.cache_config.mamba_cache_mode = "align"
@@ -55,11 +66,17 @@ def _make_scheduler(
         mamba_cache_mode="align",
         num_blocks=200,
     )
+    kv_cache_config.hash_block_size = BLOCK_SIZE
     mamba_group = kv_cache_config.kv_cache_groups[MAMBA_GROUP]
     for i in range(1, num_mamba_groups):
         kv_cache_config.kv_cache_groups.append(
             KVCacheGroupSpec([f"mamba_extra{i}"], mamba_group.kv_cache_spec)
         )
+    if mtp:
+        kv_cache_config.kv_cache_groups = [
+            replace(group, is_eagle_group=True)
+            for group in kv_cache_config.kv_cache_groups
+        ]
     return create_scheduler(
         vllm_config, kv_cache_config=kv_cache_config, hash_block_size=BLOCK_SIZE
     )
@@ -83,7 +100,7 @@ def _make_request(request_id: str, prompt: list[int], max_tokens: int) -> Reques
 def _run_prefill(
     prefiller, prompt: list[int], request_id: str = "p-1"
 ) -> tuple[Request, dict]:
-    """Prefill ``prompt`` on the producer until it finishes; return the
+    """Prefill `prompt` on the producer until it finishes; return the
     request and the kv_transfer_params handed to the decoder."""
     request = _make_request(request_id, prompt, max_tokens=1)
     request.kv_transfer_params = dict(do_remote_prefill=False, do_remote_decode=True)
@@ -95,7 +112,6 @@ def _run_prefill(
         else:
             model_output = ModelRunnerOutput(
                 req_ids=[request.request_id],
-                req_id_to_index={request.request_id: 0},
                 sampled_token_ids=[[]],
             )
         engine_outputs = prefiller.update_from_output(scheduler_output, model_output)
@@ -111,7 +127,7 @@ def _run_decode(
     num_output: int,
     request_id: str = "d-1",
 ):
-    """Receive ``prompt`` from the prefiller, decode ``num_output`` tokens and
+    """Receive `prompt` from the prefiller, decode `num_output` tokens and
     finish. Returns the local SSM block ids the decoder asked to receive into
     and the generated tokens."""
     request = _make_request(request_id, prompt, max_tokens=num_output)
@@ -236,7 +252,6 @@ def test_aborted_prefill_releases_boundary_pin():
         scheduler_output,
         ModelRunnerOutput(
             req_ids=[request.request_id],
-            req_id_to_index={request.request_id: 0},
             sampled_token_ids=[[]],
         ),
     )
@@ -270,4 +285,96 @@ def test_every_mamba_group_sends_and_caches_its_boundary_state():
     assert [len(g) for g in params["remote_block_ids"]] == [4, 2, 2, 2]
 
     _, output_tokens = _run_decode(decoder, prompt, params, num_output=3)
+    assert _decode_pod_hit(decoder, prompt, output_tokens) == 48
+
+
+# With EAGLE/MTP block dropping and the default sparse retention (interval 0),
+# the prefiller keeps only the replay-boundary state one block below the last
+# aligned boundary of the n computed tokens, n // 16 * 16 - 16
+# (kv_cache_coordinator.replay_boundaries). Pinning n // 16 * 16 instead
+# never matches an offered state, so nothing is sent.
+@pytest.mark.parametrize(
+    "prompt_len,boundary",
+    [
+        (58, 32),  # n = 57
+        (49, 32),  # n = 48, block-aligned: the running state is not retained
+        (64, 32),  # n = 63
+    ],
+)
+def test_mtp_sends_and_caches_replay_boundary_state(prompt_len, boundary):
+    prefiller = _make_scheduler("kv_producer", mtp=True)
+    decoder = _make_scheduler("kv_consumer", mtp=True)
+    prompt = _turn1_prompt(prompt_len)
+
+    _, params = _run_prefill(prefiller, prompt)
+    assert params.get("remote_ssm_boundary_tokens") == boundary
+    assert len(params["remote_block_ids"][MAMBA_GROUP]) == 2
+
+    local_ssm_block_ids, output_tokens = _run_decode(
+        decoder, prompt, params, num_output=3
+    )
+    assert len(local_ssm_block_ids) == 2
+    assert _decode_pod_hit(decoder, prompt, output_tokens) == boundary
+
+
+def test_mtp_without_transfer_decode_pod_misses():
+    """Baseline for the test above: today the decode pod re-prefills."""
+    prefiller = _make_scheduler("kv_producer", ssm_boundary_state_xfer=False, mtp=True)
+    decoder = _make_scheduler("kv_consumer", ssm_boundary_state_xfer=False, mtp=True)
+    prompt = _turn1_prompt(58)
+
+    _, params = _run_prefill(prefiller, prompt)
+    local_ssm_block_ids, output_tokens = _run_decode(
+        decoder, prompt, params, num_output=3
+    )
+    assert len(local_ssm_block_ids) == 1
+    assert _decode_pod_hit(decoder, prompt, output_tokens) == 0
+
+
+def test_mtp_every_mamba_group_sends_and_caches_its_boundary_state():
+    prefiller = _make_scheduler("kv_producer", num_mamba_groups=3, mtp=True)
+    decoder = _make_scheduler("kv_consumer", num_mamba_groups=3, mtp=True)
+    prompt = _turn1_prompt(58)
+
+    _, params = _run_prefill(prefiller, prompt)
+    assert params.get("remote_ssm_boundary_tokens") == 32
+    assert [len(g) for g in params["remote_block_ids"][MAMBA_GROUP:]] == [2, 2, 2]
+
+    _, output_tokens = _run_decode(decoder, prompt, params, num_output=3)
+    assert _decode_pod_hit(decoder, prompt, output_tokens) == 32
+
+
+def test_mtp_prefiller_holds_boundary_state_until_sent():
+    prefiller = _make_scheduler("kv_producer", mtp=True)
+    request, params = _run_prefill(prefiller, _turn1_prompt(58))
+    assert params.get("remote_ssm_boundary_tokens") == 32
+    boundary = prefiller.kv_cache_manager.block_pool.blocks[
+        params["remote_block_ids"][MAMBA_GROUP][0]
+    ]
+    assert boundary.ref_cnt > 0
+
+    scheduler_output = prefiller.schedule()
+    prefiller.update_from_output(
+        scheduler_output,
+        create_model_runner_output([], finished_sending={request.request_id}),
+    )
+    prefiller.schedule()
+    assert boundary.ref_cnt == 0
+    assert boundary.block_hash is not None
+
+
+@pytest.mark.parametrize("prompt_len,boundary", [(58, 48), (49, None)])
+def test_mtp_without_block_drop_keeps_last_prompt_boundary(prompt_len, boundary):
+    """EAGLE group tags alone must not shift a retained checkpoint."""
+    prefiller = _make_scheduler("kv_producer", mtp=True, eagle_block_drop=False)
+    decoder = _make_scheduler("kv_consumer", mtp=True, eagle_block_drop=False)
+    for scheduler in (prefiller, decoder):
+        coordinator = scheduler.kv_cache_manager.coordinator
+        assert coordinator.eagle_group_ids
+        assert not coordinator.drop_eagle_group_ids
+
+    prompt = _turn1_prompt(prompt_len)
+    _, params = _run_prefill(prefiller, prompt)
+    assert params.get("remote_ssm_boundary_tokens") == boundary
+    _, output_tokens = _run_decode(decoder, prompt, params, num_output=2)
     assert _decode_pod_hit(decoder, prompt, output_tokens) == 48

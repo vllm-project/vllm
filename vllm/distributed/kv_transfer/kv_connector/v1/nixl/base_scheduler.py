@@ -208,8 +208,21 @@ class NixlBaseConnectorScheduler:
             and parallel_config.decode_context_parallel_size == 1
         )
         self._kv_cache_manager: KVCacheManager | None = None
+        self._eagle_block_drop = False
         # P side: req -> (boundary tokens, pinned state block per align group).
         self._boundary_pins: dict[ReqId, tuple[int, dict[int, KVCacheBlock]]] = {}
+        if self._ssm_boundary_transfer:
+            logger.info(
+                "SSM boundary-state transfer enabled for align groups %s",
+                self._align_ssm_groups,
+            )
+        elif vllm_config.kv_transfer_config.get_from_extra_config(
+            "ssm_boundary_state_xfer", False
+        ):
+            logger.warning(
+                "ssm_boundary_state_xfer is ignored: it needs the pull connector, "
+                "a Mamba align-mode group, prefix caching and DCP == 1."
+            )
 
         if self.is_bidirectional_kv_xfer_enabled and self.kv_recompute_threshold > 0:
             logger.info(
@@ -228,6 +241,15 @@ class NixlBaseConnectorScheduler:
 
     def bind_kv_cache_manager(self, kv_cache_manager: "KVCacheManager") -> None:
         self._kv_cache_manager = kv_cache_manager
+        self._eagle_block_drop = bool(kv_cache_manager.coordinator.drop_eagle_group_ids)
+
+    def _ssm_boundary_tokens(self, num_tokens: int) -> int:
+        """Highest retained prefill checkpoint. With EAGLE/MTP block dropping,
+        sparse retention keeps the replay boundary one block earlier."""
+        boundary = num_tokens // self.block_size * self.block_size
+        if self._eagle_block_drop:
+            boundary -= self.block_size
+        return boundary
 
     def on_new_request(self, request: "Request") -> None:
         """Track a request that may need heartbeats."""
@@ -236,7 +258,7 @@ class NixlBaseConnectorScheduler:
             self._truncate_request_for_prefill(request)
             if self._ssm_boundary_transfer:
                 n = request.num_prompt_tokens
-                boundary = n // self.block_size * self.block_size
+                boundary = self._ssm_boundary_tokens(n)
                 if 0 < boundary < n:
                     self._boundary_pins[request.request_id] = (boundary, {})
 
@@ -304,7 +326,7 @@ class NixlBaseConnectorScheduler:
 
         Use this at every block-id exchange point. Pass `clip_ssm=False`
         for per-step partial lists (host-buffer save), where the SSM strip
-        does not apply. ``keep_ssm_boundary`` also keeps a reserved boundary
+        does not apply. `keep_ssm_boundary` also keeps a reserved boundary
         state just before the running state in align-mode SSM groups.
         """
         if len(block_ids) == 0:
@@ -632,6 +654,12 @@ class NixlBaseConnectorScheduler:
                 for i, blocks in enumerate(block_ids)
             )
             return block_ids, boundary
+        logger.debug(
+            "Request %s: no SSM boundary state sent (boundary=%d, pinned=%s)",
+            request.request_id,
+            boundary,
+            sorted(pins),
+        )
         self._release_boundary_pins(request.request_id)
         return block_ids, None
 
@@ -644,10 +672,12 @@ class NixlBaseConnectorScheduler:
         if not self._ssm_boundary_transfer or self._kv_cache_manager is None:
             return
         boundary = params.get("remote_ssm_boundary_tokens") if params else None
-        expected = num_loaded_tokens // self.block_size * self.block_size
+        expected = self._ssm_boundary_tokens(num_loaded_tokens)
         if boundary != expected or num_computed_tokens >= boundary:
             return
-        self._kv_cache_manager.reserve_external_boundary_blocks(request.request_id)
+        self._kv_cache_manager.reserve_external_boundary_blocks(
+            request.request_id, boundary
+        )
 
     def has_pending_push_work(self) -> bool:
         return False
