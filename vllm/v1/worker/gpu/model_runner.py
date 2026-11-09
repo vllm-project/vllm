@@ -2085,7 +2085,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             assert self.intermediate_tensors is not None
             if not dummy_run:
                 assert self.pp_handler is not None
-                self.pp_handler.check_received_dtypes(
+                self.pp_handler.check_received_tensors(
                     intermediate_tensors.tensors, self.intermediate_tensors.tensors
                 )
             n = input_batch.num_tokens_after_padding

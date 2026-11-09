@@ -38,13 +38,34 @@ class PendingRecv:
     draft_tokens: torch.Tensor | None = None  # [num_reqs, num_speculative_steps]
 
 
-def warn_on_lossy_receive(
+def check_received_tensors(
     received: dict[str, torch.Tensor], buffers: dict[str, torch.Tensor]
 ) -> None:
-    """Warn when a persistent buffer has less float precision or range than the
-    tensor received into it, since the per-step copy rounds silently."""
+    """Check tensors received from the previous PP stage against the persistent
+    buffers they are copied into. The per-step copy drops tensors without a
+    buffer, broadcasts mismatched trailing dimensions and rounds to the buffer's
+    dtype without an error."""
+    if missing := buffers.keys() - received.keys():
+        raise ValueError(
+            f"The previous pipeline stage does not send the intermediate tensors "
+            f"{sorted(missing)} that this stage expects."
+        )
+    if unexpected := received.keys() - buffers.keys():
+        logger.warning(
+            "PP intermediate tensors %s from the previous stage have no buffer on "
+            "this stage and are dropped. Declare them in the model's "
+            "make_empty_intermediate_tensors.",
+            sorted(unexpected),
+        )
     for name, buffer in buffers.items():
-        src, dst = received[name].dtype, buffer.dtype
+        tensor = received[name]
+        if tensor.shape[1:] != buffer.shape[1:]:
+            raise ValueError(
+                f"PP intermediate tensor {name!r} has per-token shape "
+                f"{tuple(tensor.shape[1:])}, but its buffer on this stage has "
+                f"{tuple(buffer.shape[1:])}."
+            )
+        src, dst = tensor.dtype, buffer.dtype
         if src == dst or not (src.is_floating_point and dst.is_floating_point):
             continue
         src_info, dst_info = torch.finfo(src), torch.finfo(dst)
@@ -121,17 +142,17 @@ class PPHandler:
         # Whether sampled tokens were broadcast this step.
         self.sampled_tokens_broadcast = False
         self.aux_hidden_state_relay_keys: tuple[str, ...] = ()
-        self.checked_received_dtypes = False
+        self.checked_received_tensors = False
 
     def on_req_idx_freed(self, req_idx: int) -> None:
         self.req_idx_gen_np[req_idx] += 1
 
-    def check_received_dtypes(
+    def check_received_tensors(
         self, received: dict[str, torch.Tensor], buffers: dict[str, torch.Tensor]
     ) -> None:
-        if not self.checked_received_dtypes:
-            warn_on_lossy_receive(received, buffers)
-            self.checked_received_dtypes = True
+        if not self.checked_received_tensors:
+            check_received_tensors(received, buffers)
+            self.checked_received_tensors = True
 
     def _sample_len(self, input_batch: InputBatch) -> int:
         # Width of the sampled-token broadcast. Must be the same on all ranks.

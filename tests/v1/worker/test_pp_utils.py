@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """PP helpers of the V2 model runner: which rows the sampled-token broadcast
-must carry, and which received-tensor copies lose precision."""
+must carry, and which received tensors do not match their buffers."""
 
 from unittest.mock import Mock
 
@@ -191,8 +191,29 @@ def test_warns_only_when_the_buffer_narrows(
     received = {"hidden_states": torch.zeros(4, 8, dtype=received_dtype)}
     buffers = {"hidden_states": torch.zeros(4, 8, dtype=buffer_dtype)}
 
-    pp_utils.warn_on_lossy_receive(received, buffers)
+    pp_utils.check_received_tensors(received, buffers)
 
     warnings = [r.getMessage() for r in caplog_vllm.records if r.levelname == "WARNING"]
     assert len(warnings) == int(lossy)
     assert all("'hidden_states'" in w for w in warnings)
+
+
+def test_rejects_a_missing_or_reshaped_tensor():
+    """A missing tensor would leave the buffer stale, and a per-token shape that
+    broadcasts into the buffer would fill it with wrong values."""
+    buffers = {"hidden_states": torch.zeros(4, 2, 8)}
+
+    with pytest.raises(ValueError, match="does not send"):
+        pp_utils.check_received_tensors({}, buffers)
+    with pytest.raises(ValueError, match="per-token shape"):
+        pp_utils.check_received_tensors({"hidden_states": torch.zeros(4, 8)}, buffers)
+
+
+def test_warns_about_a_tensor_without_a_buffer(caplog_vllm):
+    """The per-step copy drops a received tensor that has no buffer."""
+    received = {"hidden_states": torch.zeros(4, 8), "ds_3": torch.zeros(4, 8)}
+
+    pp_utils.check_received_tensors(received, {"hidden_states": torch.zeros(4, 8)})
+
+    warnings = [r.getMessage() for r in caplog_vllm.records if r.levelname == "WARNING"]
+    assert len(warnings) == 1 and "'ds_3'" in warnings[0]
