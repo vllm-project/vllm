@@ -176,7 +176,9 @@ def test_latent_pass_matches_reference(
         buf["wg_t"],
         buf["wu_t"],
         buf["wd_t"],
-        torch.cat([buf["wg_t"], buf["wu_t"]], dim=1),
+        # On ROCm this is the buffer process_weights_after_loading built, so the
+        # concatenation the GEMM MLP actually runs on is covered here too.
+        buf.get("wgu_t", torch.cat([buf["wg_t"], buf["wu_t"]], dim=1)),
         do_mlp=do_mlp,
         kc=kc,
         rc=rc,
