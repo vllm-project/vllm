@@ -219,22 +219,22 @@ class UnlimitedOCRForCausalLMConfig(VerifyAndUpdateConfig):
     def verify_and_update_config(vllm_config: "VllmConfig") -> None:
         """Configure Unlimited-OCR attention backends for R-SWA and vision.
 
-        Backend selection — controlled by the standard ``--attention-config``
+        Backend selection — controlled by the standard `--attention-config`
         CLI argument (priority order):
 
-          1. ``--attention-config '{"backend": "FLASH_ATTN"}'``
+          1. `--attention-config '{"backend": "FLASH_ATTN"}'`
              → FA4 + rswa_mask_mod.  Exact token-level R-SWA.
-               ``flash_attn_version`` is forced to 4 if not already set (R-SWA
+               `flash_attn_version` is forced to 4 if not already set (R-SWA
                mask_mod requires FA4; FA3 cannot express it).  Raises if FA4 is
                not available on this device.
 
-          2. ``--attention-config '{"backend": "FLEX_ATTENTION"}'``
+          2. `--attention-config '{"backend": "FLEX_ATTENTION"}'`
              → FlexAttention R-SWA via Triton block mask.
 
-          3. ``--attention-config '{"backend": "TRITON_ATTN"}'``
+          3. `--attention-config '{"backend": "TRITON_ATTN"}'`
              → Triton unified attention with an R-SWA decode mask.
 
-          4. ``--attention-config '{"backend": "auto"}'`` (or omitted)
+          4. `--attention-config '{"backend": "auto"}'` (or omitted)
              → Auto-detect: FA4 if available (H20/H100 SM90), else TritonAttention.
 
         Regardless of backend, prefix caching is disabled for this model: R-SWA
@@ -418,11 +418,6 @@ class UnlimitedOCRForCausalLMConfig(VerifyAndUpdateConfig):
         from vllm.config.compilation import CompilationMode, CUDAGraphMode
         from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
-        if not vllm_config.use_v2_model_runner:
-            raise ValueError(
-                "Unlimited-OCR-2 requires Model Runner V2; set "
-                "VLLM_USE_V2_MODEL_RUNNER=1"
-            )
         # Generic JIT warmup submits text-only requests, which DASH cannot use.
         vllm_config.kernel_config.enable_jit_warmup = False
         compilation = vllm_config.compilation_config
@@ -604,7 +599,7 @@ class DiffusionGemmaModelForBlockDiffusionConfig(VerifyAndUpdateConfig):
         """Set up the diffusion config and defaults for DiffusionGemma.
 
         Auto-creates DiffusionConfig from the HF config when the user
-        didn't pass ``--diffusion-config``. Diffusion sampling params are
+        didn't pass `--diffusion-config`. Diffusion sampling params are
         read straight from generation_config.json at sampler-build time
         (see DiffusionGemma's custom_sampler), not injected here.
         """
@@ -750,15 +745,15 @@ class KimiK3ForConditionalGenerationConfig(VerifyAndUpdateConfig):
     """Route MXFP4-checkpointed Kimi-K3 MoE experts to the MXFP4 interface.
 
     Kimi-K3 ships its routed experts as compressed-tensors
-    ``mxfp4-pack-quantized`` (``quant_method="compressed-tensors"``), which
-    lands them on ``CompressedTensorsW4A4Mxfp4MoEMethod`` and its narrow kernel
-    selection. Rewriting ``quant_method`` to ``"mxfp4"`` selects ``Mxfp4Config``
-    (hence ``Mxfp4MoEMethod``) with its full backend set, while any non-MXFP4
+    `mxfp4-pack-quantized` (`quant_method="compressed-tensors"`), which
+    lands them on `CompressedTensorsW4A4Mxfp4MoEMethod` and its narrow kernel
+    selection. Rewriting `quant_method` to `"mxfp4"` selects `Mxfp4Config`
+    (hence `Mxfp4MoEMethod`) with its full backend set, while any non-MXFP4
     checkpoint is left untouched. Covers both the main model and the MTP draft.
 
-    ``model_arch_config.quantization_config`` is a separate dict, snapshotted in
-    ``ModelConfig.__init__`` before this hook runs, and it is what
-    ``_verify_quantization`` reads when resolving the quant method. Patch it
+    `model_arch_config.quantization_config` is a separate dict, snapshotted in
+    `ModelConfig.__init__` before this hook runs, and it is what
+    `_verify_quantization` reads when resolving the quant method. Patch it
     alongside the hf configs so the rewrite lands before resolution; otherwise
     the main model still resolves to compressed-tensors.
     """
@@ -809,9 +804,8 @@ class GptOssForCausalLMConfig(VerifyAndUpdateConfig):
         from vllm.platforms import current_platform
 
         compilation_config = vllm_config.compilation_config
-        use_v2_model_runner = vllm_config.use_v2_model_runner
         # Only override when the user has not set any capture size, and not on
-        # SM100 with model runner V2, whose defaults are already wider.
+        # SM100, whose defaults are already wider.
         if all(
             getattr(compilation_config, name) is None
             for name in (
@@ -822,32 +816,25 @@ class GptOssForCausalLMConfig(VerifyAndUpdateConfig):
                 "decode_cudagraph_capture_request_sizes",
                 "max_decode_cudagraph_capture_requests",
             )
-        ) and not (
-            use_v2_model_runner and current_platform.is_device_capability_family(100)
-        ):
-            if use_v2_model_runner:
-                # Cover every target decode query length as the legacy 1024-token cap
-                # does. Data parallelism turns dynamic speculative decoding off later.
-                query_lens = (
-                    vllm_config.get_decode_cudagraph_query_lens(
-                        vllm_config.uniform_decode_query_len
-                    )
-                    if vllm_config.parallel_config.data_parallel_size == 1
-                    else [vllm_config.uniform_decode_query_len]
+        ) and not current_platform.is_device_capability_family(100):
+            # Cover every target decode query length as the legacy 1024-token cap
+            # does. Data parallelism turns dynamic speculative decoding off later.
+            query_lens = (
+                vllm_config.get_decode_cudagraph_query_lens(
+                    vllm_config.uniform_decode_query_len
                 )
-                # The token sizes the legacy 1024-token cap captures.
-                max_tokens = min(
-                    vllm_config.scheduler_config.max_num_batched_tokens, 1024
-                )
-                sizes = {1, 2, 4, *range(8, 256, 8), *range(256, 1024, 16)}
-                compilation_config.prefill_cudagraph_capture_token_sizes = sorted(
-                    {s for s in sizes if s < max_tokens} | {max_tokens}
-                )
-                compilation_config.max_decode_cudagraph_capture_requests = 1024 // min(
-                    query_lens
-                )
-            else:
-                compilation_config.max_cudagraph_capture_size = 1024
+                if vllm_config.parallel_config.data_parallel_size == 1
+                else [vllm_config.uniform_decode_query_len]
+            )
+            # The token sizes the legacy 1024-token cap captures.
+            max_tokens = min(vllm_config.scheduler_config.max_num_batched_tokens, 1024)
+            sizes = {1, 2, 4, *range(8, 256, 8), *range(256, 1024, 16)}
+            compilation_config.prefill_cudagraph_capture_token_sizes = sorted(
+                {s for s in sizes if s < max_tokens} | {max_tokens}
+            )
+            compilation_config.max_decode_cudagraph_capture_requests = 1024 // min(
+                query_lens
+            )
             logger.info(
                 "Overriding max cuda graph capture size to %d for performance.", 1024
             )
