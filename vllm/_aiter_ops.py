@@ -2806,7 +2806,7 @@ class rocm_aiter_ops:
         )
 
         host_cu_seqlens = torch.tensor(
-            [0, *itertools.accumulate(seq_lens_cpu)], dtype=torch.int32
+            [0, *itertools.accumulate(seq_lens_cpu)], dtype=torch.int32, device="cpu"
         )
         metadata = build_gated_delta_rule_prefill_metadata(
             seq_lens_cpu,
