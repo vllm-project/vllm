@@ -1019,6 +1019,11 @@ class MLAAttentionImpl(AttentionImplBase[T], Generic[T]):
     def get_fp8_ds_mla_row_bytes(self) -> int:
         return 656
 
+    def process_kv_scales_after_loading(self, layer: AttentionLayer) -> None:
+        """Derive state from `layer`'s q/k/v scales. Runs after every load and
+        reload, once the scales are final and before any CUDA graph replays."""
+        return
+
     @abstractmethod
     def __init__(
         self,

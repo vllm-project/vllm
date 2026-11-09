@@ -1366,6 +1366,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         # Let per-backend impls do their own weight packing first (no-op
         # unless overridden), mirroring Attention.process_weights_after_loading.
         self.impl.process_weights_after_loading(act_dtype)
+        # The KV-cache quant method has set this layer's scales by now.
+        cast(MLAAttentionImpl, self.impl).process_kv_scales_after_loading(self)
 
         if self.is_amx_bmm_enabled:
             # AMXMLAImpl already packed its own W_UK/W_UV above, for both

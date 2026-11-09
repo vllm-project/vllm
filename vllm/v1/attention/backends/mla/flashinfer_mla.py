@@ -22,6 +22,7 @@ from vllm.model_executor.layers.attention.mla_attention import (
     MLACommonMetadataBuilder,
     QueryLenSupport,
 )
+from vllm.model_executor.utils import refill_derived
 from vllm.platforms.interface import DeviceCapability
 from vllm.v1.attention.backend import (
     AttentionCGSupport,
@@ -301,6 +302,12 @@ class FlashInferMLAImpl(MLACommonImpl[FlashInferMLAMetadata]):
                 "FlashInferMLAImpl"
             )
 
+        # With a quantized KV cache, trtllm-gen decode reads its bmm scales from
+        # these fp32 device tensors at launch, so FULL CUDA graphs follow a
+        # reload that changes the q/k scales. Refilled in place (same address)
+        # by process_kv_scales_after_loading.
+        self._bmm1_scale_device: torch.Tensor | None = None
+        self._bmm2_scale_device: torch.Tensor | None = None
         # Worst-case decode batch for the persistent trtllm-gen multi-CTA-KV
         # counter buffer (see _get_multi_ctas_kv_counter_buffer). Captured here
         # (config is in scope during construction) so the byte size can be
@@ -320,6 +327,20 @@ class FlashInferMLAImpl(MLACommonImpl[FlashInferMLAMetadata]):
             bmm1_scale *= layer._q_scale_float * layer._k_scale_float
             bmm2_scale *= layer._k_scale_float
         return bmm1_scale, bmm2_scale
+
+    def process_kv_scales_after_loading(self, layer: AttentionLayer) -> None:
+        if not is_quantized_kv_cache(self.kv_cache_dtype):
+            return
+        device = layer._k_scale.device
+        for name, value in zip(
+            ("_bmm1_scale_device", "_bmm2_scale_device"),
+            self._host_bmm_scales(layer),
+        ):
+            refill_derived(
+                self,
+                name,
+                torch.tensor([value], dtype=torch.float32, device=device),
+            )
 
     def forward_mqa(
         self,
@@ -419,8 +440,17 @@ class FlashInferMLAImpl(MLACommonImpl[FlashInferMLAMetadata]):
             )
             extra_kwargs["cum_seq_lens_q"] = cum_seq_lens_q
             extra_kwargs["max_q_len"] = max_q_len
-        # Read at every forward: a reload can change the q/k scales.
-        bmm1_scale, bmm2_scale = self._host_bmm_scales(layer)
+        bmm1_scale: float | torch.Tensor
+        bmm2_scale: float | torch.Tensor
+        if decode_backend is None and self._bmm1_scale_device is not None:
+            # auto resolves to trtllm-gen here: it is the only MLA decode
+            # backend that takes tensor scales (cute-dsl rejects them).
+            assert self._bmm2_scale_device is not None
+            bmm1_scale = self._bmm1_scale_device
+            bmm2_scale = self._bmm2_scale_device
+        else:
+            # Read at every forward: a reload can change the q/k scales.
+            bmm1_scale, bmm2_scale = self._host_bmm_scales(layer)
         if decode_backend:
             extra_kwargs["backend"] = decode_backend
         elif kv_c_and_k_pe_cache.shape[-2] in (32, 64):

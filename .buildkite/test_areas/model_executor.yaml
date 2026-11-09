@@ -83,3 +83,20 @@ steps:
   dind: false
   depends_on:
   - image-build-amd
+
+- label: ":nvidia: (B200) MLA KV-cache scales"
+  key: mla-kv-scales-b200
+  timeout_in_minutes: 30
+  working_dir: "/vllm-workspace/tests"
+  device: b200-k8s
+  source_file_dependencies:
+  - vllm/model_executor/layers/attention/mla_attention.py
+  - vllm/model_executor/layers/quantization/compressed_tensors/compressed_tensors.py
+  - vllm/model_executor/layers/quantization/fp8.py
+  - vllm/model_executor/layers/quantization/kv_cache.py
+  - vllm/model_executor/layers/quantization/modelopt.py
+  - vllm/model_executor/model_loader/weight_utils.py
+  - vllm/v1/attention/backends/mla/flashinfer_mla.py
+  - tests/model_executor/model_loader/test_mla_kv_scales.py
+  commands:
+  - pytest -v -s model_executor/model_loader/test_mla_kv_scales.py
