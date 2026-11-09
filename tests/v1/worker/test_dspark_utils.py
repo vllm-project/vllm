@@ -17,9 +17,6 @@ from vllm.v1.worker.gpu.spec_decode.dspark.utils import _get_dspark_parallel_con
 from vllm.v1.worker.gpu.spec_decode.eagle import utils as eagle_utils
 from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
 
-TARGET_VOCAB = 16
-HIDDEN_SIZE = 8
-
 
 @dataclass
 class _FakeHFConfig:
@@ -31,13 +28,17 @@ class _FakeModelConfig:
     hf_config: _FakeHFConfig
 
 
+@dataclass
 class _FakeDraftModelConfig:
-    def __init__(self, vocab_size: int, draft_vocab_size: int):
-        self._vocab_size = vocab_size
-        self.hf_config = SimpleNamespace(draft_vocab_size=draft_vocab_size)
+    vocab_size: int
+    draft_vocab_size: int
+    hf_config: SimpleNamespace = field(init=False)
+
+    def __post_init__(self) -> None:
+        self.hf_config = SimpleNamespace(draft_vocab_size=self.draft_vocab_size)
 
     def get_vocab_size(self) -> int:
-        return self._vocab_size
+        return self.vocab_size
 
 
 @dataclass
@@ -101,23 +102,29 @@ def _fake_pp(world_size: int = 1):
     return lambda: SimpleNamespace(world_size=world_size, is_first_rank=True)
 
 
-def _embedding(fill: float | None = None, vocab_size: int = TARGET_VOCAB):
-    embedding = nn.Embedding(vocab_size, HIDDEN_SIZE)
+def _embed(
+    fill: float | None = None, vocab_size: int = 16, hidden_size: int = 8
+) -> nn.Embedding:
+    embedding = nn.Embedding(vocab_size, hidden_size)
     if fill is not None:
         with torch.no_grad():
             embedding.weight.fill_(fill)
     return embedding
 
 
-def _lm_head(fill: float | None = None, vocab_size: int = TARGET_VOCAB):
-    head = nn.Linear(HIDDEN_SIZE, vocab_size, bias=False)
+def _lm_head(
+    fill: float | None = None, vocab_size: int = 16, hidden_size: int = 8
+) -> nn.Linear:
+    head = nn.Linear(hidden_size, vocab_size, bias=False)
     if fill is not None:
         with torch.no_grad():
             head.weight.fill_(fill)
     return head
 
 
-def _target_model(embed_tokens: nn.Module | None, lm_head: nn.Module | None):
+def _target_model(
+    embed_tokens: nn.Module | None, lm_head: nn.Module | None
+) -> nn.Module:
     target = nn.Module()
     target.model = nn.Module()
     target.model.embed_tokens = embed_tokens
@@ -127,8 +134,10 @@ def _target_model(embed_tokens: nn.Module | None, lm_head: nn.Module | None):
 
 def _run_dspark_vocab_case(monkeypatch, input_vocab_size: int, output_vocab_size: int):
     monkeypatch.setattr(eagle_utils, "get_pp_group", _fake_pp())
-    target_embed = _embedding()
-    target_head = _lm_head()
+    target_vocab_size = 16
+    hidden_size = 8
+    target_embed = _embed(vocab_size=target_vocab_size, hidden_size=hidden_size)
+    target_head = _lm_head(vocab_size=target_vocab_size, hidden_size=hidden_size)
     target = _target_model(target_embed, target_head)
     draft = _DraftWrapper()
     error: Exception | None = None
@@ -141,7 +150,7 @@ def _run_dspark_vocab_case(monkeypatch, input_vocab_size: int, output_vocab_size
             ),
             target_model=target,
             target_language_model=target,
-            target_vocab_size=TARGET_VOCAB,
+            target_vocab_size=target_vocab_size,
             draft_lm_head_quantization=None,
         )
     except Exception as exc:
@@ -150,9 +159,9 @@ def _run_dspark_vocab_case(monkeypatch, input_vocab_size: int, output_vocab_size
     first_forward_error: Exception | None = None
     if error is None:
         try:
-            input_id = min(input_vocab_size, TARGET_VOCAB) - 1
+            input_id = min(input_vocab_size, target_vocab_size) - 1
             draft.embed_input_ids(torch.tensor([input_id]))
-            draft.compute_logits(torch.ones(1, HIDDEN_SIZE))
+            draft.compute_logits(torch.ones(1, hidden_size))
         except Exception as exc:
             first_forward_error = exc
 
@@ -160,6 +169,7 @@ def _run_dspark_vocab_case(monkeypatch, input_vocab_size: int, output_vocab_size
         draft=draft,
         target_embed=target_embed,
         target_head=target_head,
+        target_vocab_size=target_vocab_size,
         loader_error=error,
         first_forward_error=first_forward_error,
     )
@@ -232,9 +242,7 @@ def test_dspark_vocab_gates_share_only_compatible_target_modules(
     expect_head_shared,
     expect_loader_error,
 ):
-    result = _run_dspark_vocab_case(
-        monkeypatch, input_vocab_size, output_vocab_size
-    )
+    result = _run_dspark_vocab_case(monkeypatch, input_vocab_size, output_vocab_size)
 
     assert (
         result.draft.model.embed_tokens is result.target_embed
@@ -246,7 +254,9 @@ def test_dspark_vocab_gates_share_only_compatible_target_modules(
     else:
         assert isinstance(result.loader_error, ValueError)
         assert expect_loader_error in str(result.loader_error)
-        assert f"target vocab_size={TARGET_VOCAB}" in str(result.loader_error)
+        assert f"target vocab_size={result.target_vocab_size}" in str(
+            result.loader_error
+        )
 
 
 @pytest.mark.parametrize(
@@ -257,12 +267,12 @@ def test_dspark_ownership_combinations_preserve_share_when_weights_match(
     monkeypatch, has_own_embed_tokens, has_own_lm_head
 ):
     monkeypatch.setattr(eagle_utils, "get_pp_group", _fake_pp())
-    target_embed = _embedding(fill=1.0)
+    target_embed = _embed(fill=1.0)
     target_head = _lm_head(fill=1.0)
     draft = _DraftWrapper(
         has_own_embed_tokens=has_own_embed_tokens,
         has_own_lm_head=has_own_lm_head,
-        embed_tokens=_embedding(fill=1.0),
+        embed_tokens=_embed(fill=1.0),
         lm_head=_lm_head(fill=1.0),
     )
 
@@ -281,8 +291,8 @@ def test_dspark_ownership_combinations_preserve_share_when_weights_match(
     ("draft_embed", "expect_shared"),
     [
         pytest.param(None, False, id="missing"),
-        pytest.param(_embedding(fill=1.0), True, id="matching"),
-        pytest.param(_embedding(fill=2.0), False, id="different"),
+        pytest.param(_embed(fill=1.0), True, id="matching"),
+        pytest.param(_embed(fill=2.0), False, id="different"),
         pytest.param(_QuantizedModule(), False, id="quantized"),
     ],
 )
@@ -290,7 +300,7 @@ def test_owned_embedding_is_only_replaced_when_it_matches_target(
     monkeypatch, draft_embed, expect_shared
 ):
     monkeypatch.setattr(eagle_utils, "get_pp_group", _fake_pp())
-    target_embed = _embedding(fill=1.0)
+    target_embed = _embed(fill=1.0)
     draft = _DraftWrapper(has_own_embed_tokens=True, embed_tokens=draft_embed)
 
     eagle_utils.maybe_share_target_embed(
