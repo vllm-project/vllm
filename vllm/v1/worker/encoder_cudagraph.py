@@ -592,8 +592,31 @@ class EncoderCudaGraphManager:
         self,
         mm_kwargs: dict[str, Any],
     ) -> list[torch.Tensor]:
-        """Execute the local batch with at most one replay per path."""
+        """Keep fixed-shape items in compatible, bounded microbatches."""
         item_specs = self._get_item_specs(mm_kwargs)
+        if not any(spec.batch_key is not None for spec in item_specs):
+            return self._execute_local_batch(mm_kwargs, item_specs)
+
+        groups: dict[Hashable | None, list[int]] = {}
+        for index, spec in enumerate(item_specs):
+            groups.setdefault(spec.batch_key, []).append(index)
+        outputs: dict[int, torch.Tensor] = {}
+        for indices in groups.values():
+            for start in range(0, len(indices), self.max_batch_size):
+                batch = indices[start : start + self.max_batch_size]
+                selected, _ = self._select_items(mm_kwargs, batch)
+                result = self._execute_local_batch(
+                    selected, [item_specs[i] for i in batch]
+                )
+                outputs.update(zip(batch, result))
+        return [outputs[i] for i in range(len(item_specs))]
+
+    def _execute_local_batch(
+        self,
+        mm_kwargs: dict[str, Any],
+        item_specs: list[EncoderItemSpec],
+    ) -> list[torch.Tensor]:
+        """Execute one compatible batch with at most one replay per path."""
         num_items = len(item_specs)
         paths = tuple(self.path_token_budgets)
         per_item_path_tokens = {
@@ -613,6 +636,9 @@ class EncoderCudaGraphManager:
             range(num_items), key=lambda i: per_item_out_tokens[i], reverse=True
         )
         batch_mm_kwargs, axis_keys = self._select_items(mm_kwargs, batch_indices)
+        fits = fits and all(
+            key in axis for key, axis in zip(axis_keys, self._capture_axes)
+        )
         graph_outputs: dict[str, torch.Tensor] = {}
         all_eager = True
 

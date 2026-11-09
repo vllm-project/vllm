@@ -3,7 +3,8 @@
 
 import asyncio
 import math
-from collections.abc import AsyncGenerator, Iterable, Iterator, Mapping
+from collections.abc import AsyncGenerator, Hashable, Iterable, Iterator, Mapping
+from typing import Any
 
 import numpy as np
 import torch
@@ -12,13 +13,18 @@ from mistral_common.protocol.transcription.request import (
     TranscriptionRequest,
 )
 from mistral_common.tokens.tokenizers.audio import Audio, AudioConfig
+from torch.nn import functional as F
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.config.speech_to_text import SpeechToTextParams
 from vllm.inputs import PromptType, TokensPrompt
 from vllm.logger import init_logger
-from vllm.model_executor.models.interfaces import MultiModalEmbeddings, SupportsRealtime
+from vllm.model_executor.models.interfaces import (
+    MultiModalEmbeddings,
+    SupportsEncoderCudaGraph,
+    SupportsRealtime,
+)
 from vllm.model_executor.models.voxtral import (
     VoxtralDummyInputsBuilder,
     VoxtralForConditionalGeneration,
@@ -33,11 +39,20 @@ from vllm.multimodal.processing.processor import (
     MultiModalProcessingResult,
     PlaceholderFeaturesInfo,
 )
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers import cached_tokenizer_from_config
 from vllm.utils.torch_utils import is_torch_equal_or_newer
+from vllm.v1.worker.encoder_cudagraph_defs import (
+    ENCODER_CUDAGRAPH_AXIS_KEYS_KWARG,
+    EncoderCudaGraphCaptureInputs,
+    EncoderCudaGraphConfig,
+    EncoderCudaGraphPathConfig,
+    EncoderCudaGraphReplayBuffers,
+    EncoderItemSpec,
+)
 
-from .utils import _flatten_embeddings
+from .utils import _flatten_embeddings, scatter_output_slices
 
 logger = init_logger(__name__)
 
@@ -237,7 +252,9 @@ class VoxtralRealtimeBuffer:
     dummy_inputs=VoxtralDummyInputsBuilder,
 )
 @support_torch_compile
-class VoxtralRealtimeGeneration(VoxtralForConditionalGeneration, SupportsRealtime):
+class VoxtralRealtimeGeneration(
+    VoxtralForConditionalGeneration, SupportsRealtime, SupportsEncoderCudaGraph
+):
     requires_raw_input_tokens = True
     # transformers' currently has limited support for MistralCommon backend
     # and cached_get_processor. Let's skip until fixed
@@ -262,6 +279,187 @@ class VoxtralRealtimeGeneration(VoxtralForConditionalGeneration, SupportsRealtim
 
         audio_config = self.tokenizer.instruct.audio_encoder.audio_config
         self.n_delay_tokens = audio_config.get_num_delay_tokens()
+        prompt = (
+            self.tokenizer.instruct.start()
+            + self.tokenizer.instruct.audio_encoder.encode_streaming_tokens()
+        )
+        rate = audio_config.sampling_rate
+        stride = int(audio_config.raw_audio_length_per_tok)
+        ahead = int(audio_config.streaming_look_ahead_ms * rate / 1000)
+        back = int(audio_config.streaming_look_back_ms * rate / 1000)
+        self._frontend_graph_lengths = (
+            stride + ahead + back,
+            len(prompt) * stride + ahead,
+        )
+        self._frontend_graph_startup_tokens = len(prompt)
+        requested_batch = (
+            vllm_config.compilation_config.encoder_cudagraph_max_vision_items_per_batch
+        )
+        self._frontend_graph_max_batch = requested_batch or min(
+            32, vllm_config.scheduler_config.max_num_seqs
+        )
+        batch = self._frontend_graph_max_batch
+        buckets = [1 << i for i in range(batch.bit_length()) if 1 << i < batch]
+        self._frontend_graph_batch_buckets = tuple([*buckets, batch])
+        compilation = vllm_config.compilation_config
+        self._frontend_graph_token_budget = (
+            max(compilation.encoder_cudagraph_token_budgets)
+            if compilation.encoder_cudagraph_token_budgets
+            else max(
+                len(prompt),
+                min(
+                    len(prompt) * batch,
+                    compilation.encoder_cudagraph_max_token_budget
+                    or len(prompt) * batch,
+                ),
+            )
+        )
+        clamp = self.whisper_encoder.config.global_log_mel_max
+        self._frontend_graph_enabled = (
+            current_platform.is_cuda()
+            and vllm_config.model_config.dtype == torch.bfloat16
+            and vllm_config.lora_config is None
+            and isinstance(clamp, float)
+            and clamp != 0
+        )
+
+    def get_encoder_cudagraph_config(self) -> EncoderCudaGraphConfig:
+        return EncoderCudaGraphConfig(
+            modalities=["audio"] if self._frontend_graph_enabled else [],
+            buffer_keys=["audio_arrays"],
+            out_hidden_size=self.config.audio_config.d_model
+            * self.config.audio_config.block_pool_size,
+            # The axes fully specify the layout; capture one aggregate budget.
+            paths={
+                "default": EncoderCudaGraphPathConfig(
+                    min_token_budget=self._frontend_graph_token_budget
+                )
+            },
+            capture_axes=(
+                self._frontend_graph_batch_buckets,
+                self._frontend_graph_lengths,
+            ),
+        )
+
+    def get_input_modality(self, mm_kwargs: dict[str, Any]) -> str:
+        return "audio"
+
+    def get_encoder_cudagraph_budget_range(
+        self, vllm_config: VllmConfig
+    ) -> tuple[int, int]:
+        startup_tokens = self._frontend_graph_startup_tokens
+        return startup_tokens, startup_tokens * self._frontend_graph_max_batch
+
+    def get_encoder_cudagraph_item_specs(
+        self, mm_kwargs: dict[str, Any]
+    ) -> list[EncoderItemSpec]:
+        audios = self._parse_and_validate_audio_arrays(**mm_kwargs)
+        if audios is None:
+            return []
+        stride = int(self.audio_config.raw_audio_length_per_tok)
+        return [
+            EncoderItemSpec(
+                input_size=audio.numel(),
+                output_tokens=max(1, audio.numel() // stride),
+                batch_key=(audio.numel(), audio.dtype, audio.device, audio.ndim),
+            )
+            for audio in audios
+        ]
+
+    def select_encoder_cudagraph_items(
+        self, mm_kwargs: dict[str, Any], indices: list[int]
+    ) -> dict[str, Any]:
+        audios = self._parse_and_validate_audio_arrays(**mm_kwargs)
+        assert audios is not None
+        selected = [audios[i] for i in indices]
+        buckets = self._frontend_graph_batch_buckets
+        batch = next((size for size in buckets if size >= len(selected)), None)
+        length: int | None = self._frontend_graph_lengths[0]
+        if selected:
+            audio = selected[0]
+            length = (
+                audio.numel()
+                if (
+                    audio.is_cuda
+                    and audio.ndim == 1
+                    and audio.dtype in (torch.float32, torch.bfloat16)
+                )
+                else None
+            )
+        return {
+            "audio_arrays": selected,
+            ENCODER_CUDAGRAPH_AXIS_KEYS_KWARG: (batch, length),
+        }
+
+    def prepare_encoder_cudagraph_capture_inputs(
+        self,
+        token_budget: int,
+        max_batch_size: int,
+        max_frames_per_batch: int,
+        device: torch.device,
+        dtype: torch.dtype,
+        path: str = "default",
+        axis_keys: tuple[Hashable, ...] | None = None,
+    ) -> EncoderCudaGraphCaptureInputs:
+        assert axis_keys is not None
+        batch, length = axis_keys
+        assert isinstance(batch, int) and isinstance(length, int)
+        return EncoderCudaGraphCaptureInputs(
+            values={
+                "audio_arrays": torch.zeros(
+                    (batch, length), device=device, dtype=torch.float32
+                ),
+            }
+        )
+
+    def prepare_encoder_cudagraph_replay_buffers(
+        self,
+        mm_kwargs: dict[str, Any],
+        max_batch_size: int,
+        max_frames_per_batch: int,
+        path: str = "default",
+    ) -> EncoderCudaGraphReplayBuffers:
+        audios = self._parse_and_validate_audio_arrays(**mm_kwargs)
+        assert audios is not None
+        return EncoderCudaGraphReplayBuffers(
+            values={"audio_arrays": torch.stack(audios)}
+        )
+
+    def encoder_cudagraph_forward(
+        self, inputs: dict[str, torch.Tensor], path: str = "default"
+    ) -> torch.Tensor:
+        # An FP32 Hann window promotes BF16 input before STFT in the native path.
+        mel = self.whisper_encoder.compute_whisper_melspec(inputs["audio_arrays"]).to(
+            self.whisper_encoder.dtype
+        )
+        mel = mel[..., mel.shape[-1] % 2 :]
+        encoder = self.whisper_encoder.whisper_encoder
+        hidden = F.gelu(encoder.conv1(mel))
+        hidden = F.gelu(encoder.conv2(hidden)).transpose(1, 2)
+        pool = self.config.audio_config.block_pool_size
+        hidden = hidden[:, hidden.shape[1] % pool :, :].contiguous()
+        return hidden.reshape(hidden.shape[0], hidden.shape[1] // pool, -1)
+
+    def encoder_eager_forward(
+        self, mm_kwargs: dict[str, Any], path: str = "default"
+    ) -> torch.Tensor:
+        outputs = self.embed_multimodal(**mm_kwargs)
+        assert isinstance(outputs, (list, tuple))
+        return torch.cat(outputs, dim=0)
+
+    def postprocess_encoder_output(
+        self,
+        outputs: dict[str, torch.Tensor],
+        indices: list[int],
+        per_item_out_tokens: list[int],
+        dest: dict[int, torch.Tensor] | list[torch.Tensor | None],
+        clone: bool = False,
+        batch_mm_kwargs: dict[str, Any] | None = None,
+    ) -> None:
+        output = outputs["default"]
+        if output.ndim == 3:
+            output = output[: len(indices)].flatten(0, 1)
+        scatter_output_slices(output, indices, per_item_out_tokens, dest, clone)
 
     # for realtime transcription
     @classmethod

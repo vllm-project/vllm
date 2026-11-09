@@ -39,6 +39,45 @@ For two-tower vision encoders (e.g., DeepSeek-OCR's SAM + CLIP with dynamic tili
     For Qwen2-VL and Qwen2.5-VL only FA2 and FA3 has been tested.
     Encoder CUDA Graph has also been tested with AMD MI350X (gfx950) used `--mm-encoder-attn-backend=FLASH_ATTN` (the ROCm default).
 
+## Voxtral Realtime audio frontend
+
+Voxtral Realtime can capture GPU log-mel extraction and causal convolutions
+using the same encoder graph manager. Enable this optional path for
+`mistralai/Voxtral-Mini-4B-Realtime-2602` with:
+
+```bash
+vllm serve mistralai/Voxtral-Mini-4B-Realtime-2602 \
+    --tokenizer-mode mistral --config-format mistral --load-format mistral \
+    --compilation-config '{"cudagraph_mm_encoder": true}'
+```
+
+This option is off by default. Voxtral Realtime already includes its
+transformer encoder and decoder in decode graphs; this option adds the audio
+frontend that runs before them. It preserves the checkpoint, streaming steps,
+lookahead, padding and per-item normalization.
+
+Startup capture uses separate waveform-length and batch axes. With the default
+streaming configuration, inputs contain 49,960 samples at startup and 2,160
+samples thereafter. Batch capacities are powers of two up to
+`min(32, max_num_seqs)`. The existing
+`encoder_cudagraph_max_vision_items_per_batch` option overrides that maximum.
+An aggregate token budget avoids duplicate captures of the same layout.
+The existing token-budget options still bound replay coverage; batches that
+exceed that budget use the eager frontend.
+
+Inputs are grouped by exact waveform length, dtype and device, then split into
+bounded microbatches. Unsupported lengths use the original eager frontend;
+waveforms are never padded in time to fit a graph. Outputs are copied before a
+later replay can overwrite them. Streaming input need not wait for a batch to
+fill, and no request-time capture occurs.
+
+The initial support targets BF16 checkpoints on CUDA, with FP32 or BF16 audio
+inputs and a fixed log-mel clamp. Other configurations and LoRA use the eager
+frontend. Frontend graphs share the existing startup capture, memory profiling
+and graph pools. Their memory reduces the space available for KV cache at a
+fixed GPU-memory budget. Batch padding can change BF16 rounding, so evaluate
+transcription accuracy on the target workload.
+
 ## Motivation
 
 Vision encoder inference incurs CUDA kernel launch overhead on the host side. The overhead is more significant when the batch size is small or image size is small.
@@ -151,7 +190,7 @@ Five fields in `CompilationConfig` control encoder CUDA Graphs:
 * `cudagraph_mm_encoder` (`bool`, default `False`) — enable CUDA Graph capture for multimodal encoder. When enabled, captures the full encoder forward as a CUDA Graph for each token budget level.
 * `encoder_cudagraph_token_budgets` (`list[int]`, default `[]`) — token budget levels for capture. If empty (default), auto-inferred from model architecture on the subdivided grid (see above). User-provided values override auto-inference.
 * `encoder_cudagraph_max_token_budget` (`int | None`, default `5120`) — largest auto-generated token budget. Must be positive or `None`. A batch with more tokens runs eagerly. `None` captures up to the model's largest budget. Ignored when `encoder_cudagraph_token_budgets` is set.
-* `encoder_cudagraph_max_vision_items_per_batch` (`int`, default `0`) — maximum number of images/videos per batch during capture. If 0 (default), auto-inferred as `max_budget // min_budget`. A batch with more items runs eagerly in one forward.
+* `encoder_cudagraph_max_vision_items_per_batch` (`int`, default `0`) — maximum number of items per batch during capture. For vision encoders, 0 auto-infers `max_budget // min_budget`, and oversized batches run eagerly in one forward. [Voxtral Realtime](#voxtral-realtime-audio-frontend) uses this as its audio microbatch cap instead.
 * `encoder_cudagraph_max_frames_per_batch` (`int`, default `None`) — maximum number of video frames per batch during capture. If `None` (default), auto-inferred as `encoder_cudagraph_max_vision_items_per_batch * max_frames_per_video` (`max_frames_per_video` is a model-specific value from `EncoderCudaGraphConfig`, computed by `get_max_frames_per_video()` on the model). If we limit the video count per prompt to `0`, it will also be set to `0` (i.e., fall back to image-only mode).
 
 Multi-path mode is configured at the model level through `EncoderCudaGraphConfig.paths`. Each `EncoderCudaGraphPathConfig` can set a path-specific minimum budget and whether zero-token batches are allowed. The manager automatically generates separate budget lists and uses the same execution loop for single- and multi-path models.
