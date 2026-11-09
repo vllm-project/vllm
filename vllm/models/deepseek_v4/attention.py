@@ -48,6 +48,7 @@ from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivati
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.models.utils import extract_layer_index
+from vllm.models.deepseek_v4.common.grouped_wo_a import DeepseekV4GroupedWoA
 from vllm.models.deepseek_v4.common.rope import build_deepseek_v4_rope
 from vllm.models.deepseek_v4.compressor import DeepseekCompressor
 from vllm.platforms import current_platform
@@ -96,11 +97,11 @@ def _resolve_dsv4_kv_cache_dtype(
     kv_cache_dtype: str,
     cache_config: CacheConfig | None,
 ) -> tuple[str, torch.dtype]:
-    """Map ``(layout, --kv-cache-dtype)`` to ``(cache_dtype_str, torch_dtype)``.
+    """Map `(layout, --kv-cache-dtype)` to `(cache_dtype_str, torch_dtype)`.
 
     Both layouts are paged; they differ in the per-token block format. The
-    ``fp8_ds_mla`` format is UE8M0 block-scaled fp8 packed as ``uint8`` (the
-    canonical ``fp8_ds_mla`` string is written back onto ``cache_config`` so the
+    `fp8_ds_mla` format is UE8M0 block-scaled fp8 packed as `uint8` (the
+    canonical `fp8_ds_mla` string is written back onto `cache_config` so the
     page-size specs pick the 576B per-token slot). Plain-row backends store each
     token's KV row in its element dtype: bf16 or per-tensor FP8 E4M3.
     """
@@ -132,12 +133,12 @@ def _resolve_dsv4_kv_cache_dtype(
 class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
     """DeepseekV4 MLA attention layer.
 
-    The platform-specific sparse-MLA forward (``forward_mqa`` /
-    ``get_padded_num_q_heads`` / ``_o_proj`` / ``backend_cls``) is provided by a
-    subclass — ``DeepseekV4FlashMLAAttention`` /
-    ``DeepseekV4FlashInferSM120Attention`` /
-    ``DeepseekV4FlashInferMLAAttention`` (CUDA) or
-    ``DeepseekV4ROCMAiterMLAAttention`` (ROCm) — selected by the platform-specific
+    The platform-specific sparse-MLA forward (`forward_mqa` /
+    `get_padded_num_q_heads` / `_o_proj` / `backend_cls`) is provided by a
+    subclass — `DeepseekV4FlashMLAAttention` /
+    `DeepseekV4FlashInferSM120Attention` /
+    `DeepseekV4FlashInferMLAAttention` (CUDA) or
+    `DeepseekV4ROCMAiterMLAAttention` (ROCm) — selected by the platform-specific
     deepseek_v4 model module. The base is never instantiated directly.
     """
 
@@ -161,9 +162,9 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         """Q head count the q/output buffers are allocated at.
 
         The layer allocates the q/output buffers at
-        ``[N, get_padded_num_q_heads(n_local_heads), head_dim]``. Must satisfy
-        ``result >= num_heads``. Backends with no padding constraint return
-        ``num_heads``.
+        `[N, get_padded_num_q_heads(n_local_heads), head_dim]`. Must satisfy
+        `result >= num_heads`. Backends with no padding constraint return
+        `num_heads`.
         """
         raise NotImplementedError
 
@@ -175,7 +176,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         positions: torch.Tensor,
         output: "torch.Tensor | QuantizedActivation",
     ) -> None:
-        """Platform-specific sparse MLA forward; writes attention into ``output``."""
+        """Platform-specific sparse MLA forward; writes attention into `output`."""
         raise NotImplementedError
 
     @abstractmethod
@@ -184,8 +185,8 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
     ) -> torch.Tensor:
         """Inverse-RoPE + wo_a + wo_b output projection (platform-specific).
 
-        ``o`` is the live heads of the bf16 attention output, or the
-        QuantizedActivation of a layer whose ``_alloc_attn_out`` returns one.
+        `o` is the live heads of the bf16 attention output, or the
+        QuantizedActivation of a layer whose `_alloc_attn_out` returns one.
         """
         raise NotImplementedError
 
@@ -268,9 +269,10 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         )
 
         self.kv_norm = RMSNorm(self.head_dim, self.eps)
-        self.wo_a = ColumnParallelLinear(
+        self.wo_a = DeepseekV4GroupedWoA(
             self.n_heads * self.head_dim // self.n_groups,
             self.n_groups * self.o_lora_rank,
+            n_groups=self.n_groups,
             bias=False,
             quant_config=quant_config,
             return_bias=False,
@@ -319,13 +321,6 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
                 prefix=f"{prefix}.indexer",
                 aux_stream=indexer_aux_stream,
             )
-
-        self._prepare_and_attn_fn = self._prepare_and_attn
-        if not vllm_config.use_v2_model_runner:
-            # MRV1's piecewise capture only tolerates the wide eager region: with
-            # the narrow one the attention input preparation stays in the captured
-            # graph and MRV1 produces garbage (#51430).
-            self._prepare_and_attn_fn = self._prepare_and_attn_eager
 
         self.aux_stream_list = aux_stream_list
         # [0]: GEMM start / post-GEMM event0. [1..3]: GEMM done events;
@@ -489,7 +484,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         )
         qr, qr_scale, kv = self._split_qkv_and_norm(qr_kv)
 
-        self._prepare_and_attn_fn(
+        self._prepare_and_attn(
             hidden_states,
             qr,
             kv,
@@ -507,12 +502,12 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
     def _alloc_attn_out(
         self, num_tokens: int, hidden_states: torch.Tensor
     ) -> "torch.Tensor | QuantizedActivation":
-        """The buffer ``forward_mqa`` fills.
+        """The buffer `forward_mqa` fills.
 
-        A bf16 ``[num_tokens, padded_heads, head_dim]`` buffer by default, whose
-        padding heads are sliced off before ``_o_proj``. A layer whose kernel
+        A bf16 `[num_tokens, padded_heads, head_dim]` buffer by default, whose
+        padding heads are sliced off before `_o_proj`. A layer whose kernel
         also does the inverse RoPE and the FP8 cast returns a
-        QuantizedActivation instead and gets it back in ``_o_proj`` whole.
+        QuantizedActivation instead and gets it back in `_o_proj` whole.
         """
         return torch.empty(
             (num_tokens, self.padded_heads, self.head_dim),
@@ -525,8 +520,8 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
     ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor]:
         """Split the fused q-lora / kv projection and RMSNorm both halves.
 
-        ``qr_scale`` is None on the shared path. The ROCm subclass returns
-        a pre-quantized fp8 ``qr`` together with its per-1x128 fp32 scales,
+        `qr_scale` is None on the shared path. The ROCm subclass returns
+        a pre-quantized fp8 `qr` together with its per-1x128 fp32 scales,
         which the downstream wq_b projections consume directly.
         """
         qr, kv = qr_kv.split([self.q_lora_rank, self.head_dim], dim=-1)
@@ -538,36 +533,6 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             self.eps,
         )
         return qr, None, kv
-
-    @eager_break_during_capture
-    def _prepare_and_attn_eager(
-        self,
-        hidden_states: torch.Tensor,
-        qr: torch.Tensor,
-        kv: torch.Tensor,
-        qr_scale: torch.Tensor | None,
-        kv_score: torch.Tensor,
-        indexer_kv_score: torch.Tensor,
-        indexer_weights: torch.Tensor,
-        positions: torch.Tensor,
-        o_padded: "torch.Tensor | QuantizedActivation",
-    ) -> None:
-        """Wide eager region: the whole of ``_prepare_and_attn`` runs eagerly.
-
-        The nested ``_sparse_indexer_and_attn`` break runs inline, since
-        ``add_eager`` clears ``_capturing`` before invoking this.
-        """
-        self._prepare_and_attn(
-            hidden_states,
-            qr,
-            kv,
-            qr_scale,
-            kv_score,
-            indexer_kv_score,
-            indexer_weights,
-            positions,
-            o_padded,
-        )
 
     def _prepare_and_attn(
         self,
@@ -660,7 +625,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
     ) -> torch.Tensor:
         """Project the q-lora input to the query heads.
 
-        ``qr_scale`` is only set by the ROCm fused path, where ``qr`` is
+        `qr_scale` is only set by the ROCm fused path, where `qr` is
         already fp8-quantized with per-1x128 scales and must bypass the
         linear's internal re-quantization (apply_weights would quantize
         the fp8 input again).
@@ -696,11 +661,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             compressor = self.compressor
 
             def compressor_kv_score() -> torch.Tensor:
-                return torch.mm(
-                    hidden_states,
-                    compressor.fused_wkv_wgate.weight.T,
-                    out_dtype=torch.float32,
-                )
+                return compressor.fused_wkv_wgate(hidden_states)
 
             aux_fns[0] = compressor_kv_score
 
@@ -713,11 +674,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
                 return weights
 
             def indexer_compressor_kv_score() -> torch.Tensor:
-                return torch.mm(
-                    hidden_states,
-                    indexer.compressor.fused_wkv_wgate.weight.T,
-                    out_dtype=torch.float32,
-                )
+                return indexer.compressor.fused_wkv_wgate(hidden_states)
 
             aux_fns[1] = indexer_weights_proj
             aux_fns[2] = indexer_compressor_kv_score
@@ -1170,8 +1127,8 @@ class DeepseekV4Indexer(nn.Module):
     ) -> torch.Tensor:
         """Project the q-lora input to the indexer query heads.
 
-        Same bypass as ``DeepseekV4Attention._wq_b_proj``: on ROCm the fused
-        norm path hands over pre-quantized fp8 ``qr`` with per-1x128 scales,
+        Same bypass as `DeepseekV4Attention._wq_b_proj`: on ROCm the fused
+        norm path hands over pre-quantized fp8 `qr` with per-1x128 scales,
         so the linear's internal re-quantization must be skipped.
         """
         if qr_scale is None:

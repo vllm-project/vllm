@@ -10,6 +10,7 @@ import hashlib
 import inspect
 import json
 import os
+import random
 import sys
 import tempfile
 import threading
@@ -161,6 +162,16 @@ def _natural_sort_key(filepath: str) -> list:
     ]
 
 
+def _shuffle_files(files: list[str]) -> list[str]:
+    """Return *files* shuffled with a rank-dependent seed."""
+    rank = get_world_group().rank
+    # Sort first so the permutation does not depend on the input order
+    shuffled = sorted(files, key=_natural_sort_key)
+    random.Random(rank).shuffle(shuffled)
+    logger.info("Shuffled %d safetensors files with seed %d", len(shuffled), rank)
+    return shuffled
+
+
 def maybe_download_from_modelscope(
     model: str,
     revision: str | None = None,
@@ -206,6 +217,8 @@ def get_quant_config(
     from vllm.config.quantization import (
         _ONLINE_SHORTHANDS,
         QuantizationConfigArgs,
+        QuantSpec,
+        merge_quantization_config,
         resolve_quantization_config,
     )
     from vllm.model_executor.layers.quantization.modelopt import (
@@ -326,6 +339,16 @@ def get_quant_config(
     # is not set yet.
     if quant_cls is OnlineQuantizationConfig and online_args is not None:
         assert isinstance(online_args, QuantizationConfigArgs)
+        # Activation-only overrides apply to pre-quantized checkpoints; without
+        # a weight key, standalone online quantization would silently no-op.
+        specs = [(kind, getattr(online_args, kind)) for kind in ("linear", "moe")]
+        specs += [(f"targets[{p}]", t) for p, t in (online_args.targets or {}).items()]
+        for name, spec in specs:
+            if isinstance(spec, QuantSpec) and "weight" not in spec.fields_set:
+                raise ValueError(
+                    f"quantization_config.{name} = {spec} does not set a weight "
+                    "quantization key, which online quantization requires."
+                )
         return OnlineQuantizationConfig(args=online_args)
 
     model_name_or_path = (
@@ -365,8 +388,10 @@ def get_quant_config(
             assert fp8_args is not None
             return OnlineQuantizationConfig(args=fp8_args)
         if model_config.quantization in _ONLINE_SHORTHANDS:
-            args = online_args or _ONLINE_SHORTHANDS[model_config.quantization]
-            assert isinstance(args, QuantizationConfigArgs)
+            assert not isinstance(online_args, dict)
+            args = merge_quantization_config(
+                _ONLINE_SHORTHANDS[model_config.quantization], online_args
+            )
             return OnlineQuantizationConfig(args=args)
         return maybe_compose_online_quantization(quant_cls())
 
@@ -377,8 +402,10 @@ def get_quant_config(
     ]
     if len(quant_config_files) == 0:
         if model_config.quantization in _ONLINE_SHORTHANDS:
-            args = online_args or _ONLINE_SHORTHANDS[model_config.quantization]
-            assert isinstance(args, QuantizationConfigArgs)
+            assert not isinstance(online_args, dict)
+            args = merge_quantization_config(
+                _ONLINE_SHORTHANDS[model_config.quantization], online_args
+            )
             return OnlineQuantizationConfig(args=args)
         raise ValueError(f"Cannot find the config file for {model_config.quantization}")
     if len(quant_config_files) > 1:
@@ -645,7 +672,7 @@ def _normalize_module_prefixes(
 
 
 def _mapped_weight_name(weights_mapper: "WeightsMapper | None", key: str) -> str | None:
-    """Apply ``WeightsMapper.map_name`` when present; else identity."""
+    """Apply `WeightsMapper.map_name` when present; else identity."""
     if weights_mapper is None:
         return key
     return weights_mapper.map_name(key)
@@ -666,9 +693,9 @@ def _shared_hf_root_module_prefixes(
 ) -> tuple[str, ...]:
     """Module prefixes that are also an HF root for non-LM weights.
 
-    E.g. Molmo/Phi-4-MM/Muse mark LM as ``model`` while vision HF keys stay
-    under ``model.vision_*`` / ``model.embed_tokens_extend.*``. Detected via
-    ``WeightsMapper.orig_to_new_prefix`` (no hard-coded name list).
+    E.g. Molmo/Phi-4-MM/Muse mark LM as `model` while vision HF keys stay
+    under `model.vision_*` / `model.embed_tokens_extend.*`. Detected via
+    `WeightsMapper.orig_to_new_prefix` (no hard-coded name list).
     """
     if weights_mapper is None:
         return ()
@@ -698,15 +725,15 @@ def resolve_mm_encoder_only_lm_prefixes(
     *,
     weights_mapper: "WeightsMapper | None" = None,
 ) -> tuple[str, ...] | None:
-    """Resolve vLLM LM *module* prefixes for ``--mm-encoder-only`` shard skip.
+    """Resolve vLLM LM *module* prefixes for `--mm-encoder-only` shard skip.
 
-    Prefixes come from ``_language_model_names``. Classification of HF index
-    keys is done later via optional ``weights_mapper`` (see
-    ``filter_mm_encoder_only_safetensors_files``), so this helper does **not**
+    Prefixes come from `_language_model_names`. Classification of HF index
+    keys is done later via optional `weights_mapper` (see
+    `filter_mm_encoder_only_safetensors_files`), so this helper does **not**
     hard-code Qwen/HF nest lists.
 
-    Returns ``None`` (leave the safetensors file list unchanged) when
-    ``_language_model_names`` is empty/missing, or when a module prefix is a
+    Returns `None` (leave the safetensors file list unchanged) when
+    `_language_model_names` is empty/missing, or when a module prefix is a
     shared HF checkpoint root for both LM and non-LM weights — fail-closed so
     Molmo / Phi-4-MM / Muse cannot under-load the encoder.
     """
@@ -737,16 +764,16 @@ def filter_mm_encoder_only_safetensors_files(
 ) -> list[str]:
     """Drop safetensors shards that only contain language-model weights.
 
-    Used with ``--mm-encoder-only`` so Encoder-only EPD instances avoid reading
+    Used with `--mm-encoder-only` so Encoder-only EPD instances avoid reading
     pure LM shards from disk/DRAM.
 
-    Each HF index key is classified by mapping through ``weights_mapper`` (when
-    provided) and testing the *vLLM* name against ``language_model_prefixes``.
+    Each HF index key is classified by mapping through `weights_mapper` (when
+    provided) and testing the *vLLM* name against `language_model_prefixes`.
     Without a mapper, HF names are compared directly (identity checkpoint
-    layout, e.g. Kimi ``language_model.*``).
+    layout, e.g. Kimi `language_model.*`).
 
     A shard is kept if it contains any non-LM key. Without an index file,
-    returns ``hf_weights_files`` unchanged.
+    returns `hf_weights_files` unchanged.
     """
     prefixes = tuple(language_model_prefixes)
     if not prefixes:
@@ -1102,6 +1129,7 @@ def safetensors_weights_iterator(
     *,
     safetensors_prefetch_num_threads: int = DEFAULT_SAFETENSORS_PREFETCH_NUM_THREADS,
     safetensors_prefetch_block_size: int = DEFAULT_SAFETENSORS_PREFETCH_BLOCK_SIZE,
+    shuffle_safetensors_files: bool = False,
 ) -> Generator[tuple[str, torch.Tensor], None, None]:
     """Iterate over the weights in the model safetensor files.
 
@@ -1179,6 +1207,9 @@ def safetensors_weights_iterator(
             block_size=safetensors_prefetch_block_size,
         )
 
+    if shuffle_safetensors_files:
+        sorted_files = _shuffle_files(sorted_files)
+
     leftover_state_dict: dict[str, torch.Tensor] = {}
     for st_file in tqdm(
         sorted_files,
@@ -1235,12 +1266,16 @@ def multi_thread_safetensors_weights_iterator(
     hf_weights_files: list[str],
     use_tqdm_on_load: bool,
     max_workers: int = 4,
+    shuffle_safetensors_files: bool = False,
 ) -> Generator[tuple[str, torch.Tensor], None, None]:
     """Multi-Thread iterate over the weights in the model safetensor files."""
 
     def _load_file(st_file: str):
         result = load_file(st_file, device="cpu")
         return result
+
+    if shuffle_safetensors_files:
+        hf_weights_files = _shuffle_files(hf_weights_files)
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
         # Note to use generator here so we do not store all the loaded files in memory
@@ -1511,18 +1546,20 @@ def multi_thread_pt_weights_iterator(
             del state
 
 
-def finalize_model_weights(model: torch.nn.Module) -> None:
-    """Run every module's own post-load hook after a full load or reload,
-    each module after all of its submodules.
+def finalize_model_weights(
+    model: torch.nn.Module, target_device: torch.device | None = None
+) -> None:
+    """Run every module's own post-load hook after a full load or reload, each
+    after all of its submodules. Every load and update path finishes here.
 
-    Quantization methods, the submodules of quantized layers (their quant
-    method processes them) and attention layers are skipped: the loader runs
-    them in its earlier per-layer passes, which later passes may read.
+    Quantization methods and the submodules of quantized layers are skipped:
+    their quant method processes them, in the loader's per-layer pass.
     """
     from vllm.model_executor.layers.attention import is_deferred_attention_layer
     from vllm.model_executor.layers.quantization.base_config import (
         QuantizeMethodBase,
     )
+    from vllm.model_executor.model_loader.utils import device_loading_context
 
     seen: set[torch.nn.Module] = set()
 
@@ -1538,13 +1575,14 @@ def finalize_model_weights(model: torch.nn.Module) -> None:
         yield module
 
     for module in children_first(model):
-        if isinstance(module, QuantizeMethodBase) or is_deferred_attention_layer(
-            module
-        ):
+        if isinstance(module, QuantizeMethodBase):
             continue
         hook = getattr(module, "process_weights_after_loading", None)
         if callable(hook):
-            hook()
+            # only attention hooks need offloaded weights on the device
+            device = target_device if is_deferred_attention_layer(module) else None
+            with device_loading_context(module, device):
+                hook()
 
 
 def default_weight_loader(param: torch.Tensor, loaded_weight: torch.Tensor) -> None:

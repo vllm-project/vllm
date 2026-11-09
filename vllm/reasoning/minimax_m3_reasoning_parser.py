@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 from vllm.entrypoints.generate.base.protocol import DeltaMessage
 from vllm.reasoning.basic_parsers import BaseThinkingReasoningParser
+from vllm.v1.token_buffer import rfind_token_sequences, rfind_tokens
 
 if TYPE_CHECKING:
     from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
@@ -23,8 +24,8 @@ class MiniMaxM3ReasoningParser(BaseThinkingReasoningParser):
     generated marker text may be tokenized into smaller pieces. The streaming
     parser therefore uses text markers for extraction instead of relying on the
     single vocabulary IDs. The chat template may also prefill the start marker
-    when ``thinking_mode="enabled"``, so generated text can begin directly
-    inside a reasoning block without emitting ``<mm:think>`` again.
+    when `thinking_mode="enabled"`, so generated text can begin directly
+    inside a reasoning block without emitting `<mm:think>` again.
     """
 
     @property
@@ -88,25 +89,13 @@ class MiniMaxM3ReasoningParser(BaseThinkingReasoningParser):
     def _contains_token_sequence(
         token_ids: Sequence[int], marker_ids: Sequence[int]
     ) -> bool:
-        if not marker_ids or len(marker_ids) > len(token_ids):
-            return False
-        marker_len = len(marker_ids)
-        return any(
-            tuple(token_ids[i : i + marker_len]) == tuple(marker_ids)
-            for i in range(len(token_ids) - marker_len + 1)
-        )
+        return rfind_token_sequences(token_ids, (marker_ids,))[0] >= 0
 
     @staticmethod
     def _rfind_token_sequence(
         token_ids: Sequence[int], marker_ids: Sequence[int]
     ) -> int:
-        if not marker_ids or len(marker_ids) > len(token_ids):
-            return -1
-        marker_len = len(marker_ids)
-        for i in range(len(token_ids) - marker_len, -1, -1):
-            if tuple(token_ids[i : i + marker_len]) == tuple(marker_ids):
-                return i
-        return -1
+        return rfind_token_sequences(token_ids, (marker_ids,))[0]
 
     @staticmethod
     def _ends_with_token_sequence_prefix(
@@ -125,10 +114,8 @@ class MiniMaxM3ReasoningParser(BaseThinkingReasoningParser):
         # reasoning markers; only the last message (the generation prompt)
         # tells whether generation starts inside reasoning. Output-only ids
         # contain no message-begin token and are returned whole.
-        for i in range(len(input_ids) - 1, -1, -1):
-            if input_ids[i] == self._message_begin_token_id:
-                return input_ids[i + 1 :]
-        return input_ids
+        i = rfind_tokens(input_ids, (self._message_begin_token_id,))
+        return input_ids[i + 1 :] if i >= 0 else input_ids
 
     @staticmethod
     def _strip_partial_marker_suffix(text: str, marker: str) -> str:
@@ -325,11 +312,9 @@ class MiniMaxM3ReasoningParser(BaseThinkingReasoningParser):
         return count
 
     def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
-        input_ids = self._last_message_ids(input_ids)
-        start_index = self._rfind_token_sequence(input_ids, self._start_token_ids)
-        end_index = self._rfind_token_sequence(input_ids, self._end_token_ids)
-        if end_index < 0:
-            return False
-        if start_index < 0:
-            return True
-        return end_index > start_index
+        # Ended if the newest marker is an end marker (a start wins a tie).
+        _, k = rfind_token_sequences(
+            self._last_message_ids(input_ids),
+            (self._start_token_ids, self._end_token_ids),
+        )
+        return k == 1

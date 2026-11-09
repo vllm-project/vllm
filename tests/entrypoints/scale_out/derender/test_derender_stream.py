@@ -71,7 +71,7 @@ from vllm.tokenizers.mistral import MistralTokenizer
 from vllm.transformers_utils.repo_utils import with_retry
 from vllm.utils import random_uuid
 
-MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
+MODEL_NAME = "vllm-project/tiny-random-LlamaForCausalLM"
 
 
 def _merge_fake_deltas(
@@ -1168,7 +1168,7 @@ class TestStreamLogprobs:
         last_chunk = None
         # One token per chunk: every entry after the first needs cross-chunk
         # context to resolve without U+FFFD.
-        for i, tid in enumerate(token_ids):
+        for tid in token_ids:
             last_chunk, state = await derenderer.derender_chat_stream(
                 model=MODEL_NAME,
                 generate_chunk=_make_stream_chunk(
@@ -1582,8 +1582,8 @@ class TestDerenderChatStreamParsed:
     async def test_finish_reason_rewritten_to_tool_calls(
         self, parsed_derenderer, engine_finish_reason, expected_finish_reason
     ):
-        """A streamed tool call is reported as ``tool_calls`` only at a
-        natural stop; a ``length`` cut must stay visible."""
+        """A streamed tool call is reported as `tool_calls` only at a
+        natural stop; a `length` cut must stay visible."""
         chat_request = _chat_request(
             tools=[{"type": "function", "function": {"name": "get_weather"}}],
             tool_choice="auto",
@@ -2263,8 +2263,9 @@ class TestServingDerenderStreamValidation:
 
 
 @pytest.fixture(scope="module")
-def server():
-    with RemoteLaunchRenderServer(MODEL_NAME, []) as remote_server:
+def server(request):
+    args = getattr(request, "param", [])
+    with RemoteLaunchRenderServer(MODEL_NAME, args) as remote_server:
         yield remote_server
 
 
@@ -2959,3 +2960,66 @@ async def test_stream_parsed_missing_prompt_token_ids_rejected(parser_client):
     )
     assert resp.status_code == 400
     assert "prompt_token_ids" in resp.json()["error"]["message"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("endpoint", "server", "server_flag"),
+    [
+        (endpoint, args, flag)
+        for endpoint in ("chat", "parsed", "completion")
+        for flag in (False, True)
+        for args in [
+            (["--return-tokens-as-token-ids"] if flag else [])
+            + (
+                ["--tool-call-parser", "hermes", "--enable-auto-tool-choice"]
+                if endpoint == "parsed"
+                else []
+            )
+        ]
+    ],
+    indirect=["server"],
+    scope="module",
+)
+@pytest.mark.parametrize("override", [None, False, True])
+async def test_streaming_derender_logprob_override(
+    client, tokenizer, server_flag, endpoint, override
+):
+    """Plain/parsed chat and completion chunks honor the request override."""
+    token_id = tokenizer.convert_tokens_to_ids("▁true")
+    logprobs = _generate_logprobs([token_id])
+    logprobs["content"][0]["top_logprobs"] = [{"token_id": token_id, "logprob": -0.5}]
+    chunk = _make_stream_chunk(
+        [token_id], finish_reason="length", logprobs=logprobs
+    ).model_dump(mode="json")
+    chat = endpoint != "completion"
+    original = (
+        {"messages": [], "logprobs": True, "top_logprobs": 1}
+        if chat
+        else {"prompt": "Hi", "logprobs": 1}
+    )
+    if override is not None:
+        original["return_tokens_as_token_ids"] = override
+    response = await client.post(
+        f"/v1/{'chat/completions' if chat else 'completions'}/derender",
+        json={
+            "stream": True,
+            "prompt_token_ids": tokenizer.encode("Hi"),
+            "generate_chunk": chunk,
+            "chat_request" if chat else "completion_request": original,
+        },
+    )
+    response.raise_for_status()
+    placeholders = server_flag if override is None else override
+    expected = f"token_id:{token_id}" if placeholders else " true"
+    choice = response.json()["chunk"]["choices"][0]
+    if chat:
+        entry = choice["logprobs"]["content"][0]
+        assert (entry["token"], entry["bytes"]) == (
+            expected,
+            None if placeholders else list(b" true"),
+        )
+        assert entry["top_logprobs"][0]["token"] == expected
+    else:
+        assert choice["logprobs"]["tokens"] == [expected]
+        assert choice["logprobs"]["top_logprobs"] == [{expected: -0.5}]
