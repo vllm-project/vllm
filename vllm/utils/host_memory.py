@@ -2,10 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Host memory registration for CUDA/HIP DMA transfers."""
 
+import itertools
 import math
 import mmap
 
 import torch
+
+from vllm.utils.math_utils import round_up
 
 HOST_REGISTER_CHUNK_BYTES = 256 << 30
 
@@ -26,6 +29,22 @@ def unpin_tensor(tensor: torch.Tensor) -> None:
         raise RuntimeError(f"cudaHostUnregister failed (code={err.value}).")
 
 
+def host_tensor_offsets(
+    tensor_sizes: list[int],
+    max_chunk_bytes: int = HOST_REGISTER_CHUNK_BYTES,
+    *,
+    page_size: int = mmap.PAGESIZE,
+) -> list[int]:
+    offsets = []
+    chunk_start = offset = 0
+    for size in tensor_sizes:
+        if offset + size - chunk_start > max_chunk_bytes - page_size:
+            offset = chunk_start = round_up(offset, page_size)
+        offsets.append(offset)
+        offset += size
+    return offsets
+
+
 def host_registration_ranges(
     tensor_sizes: list[int],
     num_blocks: int,
@@ -33,27 +52,32 @@ def host_registration_ranges(
     max_chunk_bytes: int = HOST_REGISTER_CHUNK_BYTES,
     *,
     page_size: int = mmap.PAGESIZE,
+    tensor_offsets: list[int] | None = None,
 ) -> tuple[tuple[int, int], ...]:
     """Split a shared pool without bisecting any tensor's host block.
 
     Keep registration boundaries aligned to the backing pages. CUDA batch
-    copies reject descriptors spanning adjacent registrations.
+    copies reject descriptors spanning adjacent registrations. Tensors are
+    packed back to back unless `tensor_offsets` places them.
     """
     if total_size % page_size:
         raise ValueError("Host pool must be page aligned.")
     if max_chunk_bytes < page_size:
         raise ValueError("Host registration chunks must span at least one page.")
+    if tensor_offsets is None:
+        tensor_offsets = list(itertools.accumulate(tensor_sizes, initial=0))[:-1]
 
     tensors: list[tuple[int, int, int]] = []
     tensor_start = 0
-    for tensor_size in tensor_sizes:
+    for offset, tensor_size in zip(tensor_offsets, tensor_sizes):
         if tensor_size % num_blocks:
             raise ValueError(
                 f"Host tensor size {tensor_size} is not divisible by "
                 f"{num_blocks} blocks."
             )
-        tensor_end = tensor_start + tensor_size
-        tensors.append((tensor_start, tensor_end, tensor_size // num_blocks))
+        assert offset >= tensor_start
+        tensor_end = offset + tensor_size
+        tensors.append((offset, tensor_end, tensor_size // num_blocks))
         tensor_start = tensor_end
     if tensor_start > total_size:
         raise ValueError("Host tensors exceed the shared host pool.")
