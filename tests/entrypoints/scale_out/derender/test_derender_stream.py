@@ -1582,8 +1582,8 @@ class TestDerenderChatStreamParsed:
     async def test_finish_reason_rewritten_to_tool_calls(
         self, parsed_derenderer, engine_finish_reason, expected_finish_reason
     ):
-        """A streamed tool call is reported as ``tool_calls`` only at a
-        natural stop; a ``length`` cut must stay visible."""
+        """A streamed tool call is reported as `tool_calls` only at a
+        natural stop; a `length` cut must stay visible."""
         chat_request = _chat_request(
             tools=[{"type": "function", "function": {"name": "get_weather"}}],
             tool_choice="auto",
