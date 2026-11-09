@@ -4,15 +4,15 @@
 """Inference-only NVIDIA Nemotron-3.5-Transcribe.
 
 A NeMo speech-language model. The audio tower (log-mel, Parallel Expert
-Encoder, projection; see ``nemotron3_5_transcribe_audio.py``) turns each
+Encoder, projection; see `nemotron3_5_transcribe_audio.py`) turns each
 80 ms of audio into one embedding, and those embeddings replace the
-``<|audio|>`` placeholders in the prompt of a NemotronH decoder (hybrid
+`<|audio|>` placeholders in the prompt of a NemotronH decoder (hybrid
 Mamba, MoE and attention layers).
 
-The checkpoint uses NeMo names: the audio tower under ``perception.*``, the
-decoder under ``llm.*``, the multi-token-prediction head under ``llm.mtp.*``
+The checkpoint uses NeMo names: the audio tower under `perception.*`, the
+decoder under `llm.*`, the multi-token-prediction head under `llm.mtp.*`
 and an optional CTC timestamp head, which is not loaded, under
-``ctc_timestamp.*``.
+`ctc_timestamp.*`.
 """
 
 from collections.abc import Iterable, Iterator, Mapping, Sequence
@@ -133,7 +133,7 @@ ISO639_1_SUPPORTED_LANGS = {
 
 
 def _num_audio_embeddings(audio_config: Mapping[str, Mapping], num_samples: int) -> int:
-    """Embeddings the audio tower produces for ``num_samples`` samples."""
+    """Embeddings the audio tower produces for `num_samples` samples."""
     preprocessor = audio_config["preprocessor"]
     factor = audio_config["asr_encoder"]["subsampling_factor"]
     n_fft = preprocessor["n_fft"]
@@ -144,7 +144,7 @@ def _num_audio_embeddings(audio_config: Mapping[str, Mapping], num_samples: int)
 def _transcription_clip_s(
     audio_config: Mapping[str, Mapping], max_model_len: int
 ) -> int:
-    """Longest piece ``/v1/audio/transcriptions`` sends: at most an hour, and short
+    """Longest piece `/v1/audio/transcriptions` sends: at most an hour, and short
     enough that its embeddings and transcript fit in the context."""
     sample_rate = audio_config["preprocessor"]["sample_rate"]
     hour = 3600
@@ -159,7 +159,7 @@ def _transcription_clip_s(
 def _max_audio_samples(
     audio_config: Mapping[str, Mapping], seq_len: int, override_samples: int | None
 ) -> int:
-    """Longest audio whose embeddings fit in ``seq_len`` beside a short prompt."""
+    """Longest audio whose embeddings fit in `seq_len` beside a short prompt."""
     preprocessor = audio_config["preprocessor"]
     min_samples = preprocessor["hop_length"]
     limit = int(
@@ -225,13 +225,13 @@ class Nemotron3_5TranscribeProcessingInfo(BaseProcessingInfo):
     def get_max_audio_samples(
         self, seq_len: int, override_samples: int | None = None
     ) -> int:
-        """Longest audio whose embeddings fit in ``seq_len`` beside a short prompt."""
+        """Longest audio whose embeddings fit in `seq_len` beside a short prompt."""
         return _max_audio_samples(
             self.get_hf_config().audio_config, seq_len, override_samples
         )
 
     def get_audio_length_override(self) -> int | None:
-        """The audio length set with ``--limit-mm-per-prompt``, in samples."""
+        """The audio length set with `--limit-mm-per-prompt`, in samples."""
         options = self.ctx.get_mm_config().limit_per_prompt.get("audio")
         return getattr(options, "length", None)
 
@@ -369,7 +369,7 @@ def _pad_vocab_rows(tensor: torch.Tensor, vocab_size: int) -> torch.Tensor:
 def _decoder_weights(
     weights: Iterable[tuple[str, torch.Tensor]], vocab_size: int
 ) -> Iterator[tuple[str, torch.Tensor]]:
-    """Shape the mapped decoder tensors for ``NemotronHForCausalLM``.
+    """Shape the mapped decoder tensors for `NemotronHForCausalLM`.
 
     NeMo packs the routed experts of each MoE layer into two tensors; the FP8 and
     NVFP4 checkpoints have one tensor per expert, with its quantization scales.
@@ -388,9 +388,9 @@ def _decoder_weights(
 def _mtp_weights(
     weights: Iterable[tuple[str, torch.Tensor]],
 ) -> Iterator[tuple[str, torch.Tensor]]:
-    """Select the MTP head's NeMo tensors and rename them for ``NemotronHMTP``.
+    """Select the MTP head's NeMo tensors and rename them for `NemotronHMTP`.
 
-    The head is ``llm.mtp.*``; the drafter shares the target's embedding and LM
+    The head is `llm.mtp.*`; the drafter shares the target's embedding and LM
     head.
     """
     for name, tensor in weights:
@@ -636,7 +636,7 @@ class Nemotron3_5TranscribeMTP(NemotronHMTP, SupportsMultiModalEmbeddings):
 
     One attention-plus-MoE block, trained to be reused for every draft token.
     It was trained on the decoder's input stream, so it receives the audio
-    embeddings at the ``<|audio|>`` positions, not the placeholder embedding.
+    embeddings at the `<|audio|>` positions, not the placeholder embedding.
     """
 
     def embed_input_ids(

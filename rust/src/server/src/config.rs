@@ -22,6 +22,7 @@ use vllm_engine_core_client::{CoordinatorMode as EngineCoreCoordinatorMode, Tran
 use vllm_metrics::CustomHistogramBuckets;
 use vllm_text::backend::hf::{HfOverrides, ModelSource};
 
+use crate::fingerprint::FingerprintMode;
 use crate::routes::openai::utils::types::ReasoningEffort;
 
 /// Default keep-alive idle timeout (seconds); also the head-read bound
@@ -78,6 +79,10 @@ pub struct ApiServerOptions {
     pub default_return_tokens_as_token_ids: bool,
     /// Include request timing metrics in OpenAI chat and completion responses.
     pub enable_per_request_metrics: bool,
+    /// Stream usage on every chat and completions request, as if it set
+    /// `stream_options` with `include_usage` and `continuous_usage_stats`
+    /// (`--enable-force-include-usage`).
+    pub force_include_usage: bool,
     /// When `true`, set `X-Request-Id` on every HTTP response.
     pub enable_request_id_headers: bool,
     /// When `true`, log every error response at ERROR (`--log-error-stack`).
@@ -390,6 +395,8 @@ pub struct Config {
     pub stream_interval: NonZeroU32,
     /// HTTP/API-server behavior switches.
     pub api_server_options: ApiServerOptions,
+    /// What `system_fingerprint` reports on chat and completion responses.
+    pub fingerprint_mode: FingerprintMode,
     /// CORS settings applied to every HTTP response.
     pub cors: CorsConfig,
     /// HTTP access log settings.
