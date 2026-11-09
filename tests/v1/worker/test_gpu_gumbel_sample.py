@@ -587,7 +587,6 @@ def test_kept_gumbel_sample_matches_masked_logits(use_fp64: bool):
         apply_top_k_top_p_triton,
         top_k_top_p_kept_tokens_triton,
     )
-    from vllm.v1.worker.gpu.sample.gumbel import kept_gumbel_sample
 
     num_reqs, vocab_size, max_kept = 512, 151936, 256
     gen = torch.Generator(DEVICE).manual_seed(0)
@@ -604,8 +603,7 @@ def test_kept_gumbel_sample_matches_masked_logits(use_fp64: bool):
     k = k.to(torch.int32)
     kept = top_k_top_p_kept_tokens_triton(logits, k, p, max_kept)
     masked = apply_top_k_top_p_triton(logits.clone(), k, p)
-    expected = gumbel_sample(
-        masked, *args, apply_temperature=True, is_drafting=False, use_fp64=use_fp64
-    )
-    actual = kept_gumbel_sample(*kept, *args, apply_temperature=True, use_fp64=use_fp64)
+    kwargs = dict(apply_temperature=True, is_drafting=False, use_fp64=use_fp64)
+    expected = gumbel_sample(masked, *args, **kwargs)
+    actual = gumbel_sample(logits, *args, **kwargs, kept=kept)
     assert torch.equal(actual, expected)

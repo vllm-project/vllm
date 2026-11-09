@@ -1834,15 +1834,12 @@ def test_sharded_draft_logits_cache_writes(num_shards: int):
 def test_kept_rejection_sample_matches_masked_logits(
     has_draft_logits: bool, use_fp64: bool
 ):
-    """Verifying from the compact kept tokens samples what rejection_sample
-    samples from the masked logits, with greedy rows, placeholder drafts and
+    """rejection_sample over the compact kept tokens samples what it samples
+    from the masked logits, with greedy rows, placeholder drafts and
     draft tokens outside the kept set."""
     from vllm.v1.sample.ops.topk_topp_triton import (
         apply_top_k_top_p_triton,
         top_k_top_p_kept_tokens_triton,
-    )
-    from vllm.v1.worker.gpu.spec_decode.kept_rejection_sampler import (
-        kept_rejection_sample,
     )
 
     torch.manual_seed(0)
@@ -1896,8 +1893,8 @@ def test_kept_rejection_sample_matches_masked_logits(
         skip_masked_vocab_blocks=True,
         **inputs,
     )
-    sampled, num_sampled = kept_rejection_sample(
-        kept, _draft_logits(draft_values), vocab_size=vocab_size, **inputs
+    sampled, num_sampled = _rejection_sample(
+        target_logits=logits, draft_logits=draft_values, kept=kept, **inputs
     )
 
     assert torch.equal(num_sampled, ref_num_sampled)

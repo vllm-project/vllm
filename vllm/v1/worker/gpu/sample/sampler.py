@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import os
 from collections.abc import Sequence
 
 import numpy as np
@@ -23,7 +22,7 @@ from vllm.v1.sample.ops.topk_topp_triton import top_k_top_p_kept_tokens_triton
 from vllm.v1.worker.gpu.input_batch import InputBatch, get_num_sampled_and_rejected
 from vllm.v1.worker.gpu.metrics.logits import get_num_nans
 from vllm.v1.worker.gpu.sample.bad_words import BadWordsState
-from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample, kept_gumbel_sample
+from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 from vllm.v1.worker.gpu.sample.logit_bias import LogitBiasState
 from vllm.v1.worker.gpu.sample.logits_processor.interface import (
     LogitsContext,
@@ -100,10 +99,8 @@ class Sampler:
         self.use_xpu_sampler = (
             not return_sampling_mask and not use_fp64_gumbel and xpu_sampler_supported()
         )
-        # Prototype opt-in: sample top-k rows from their kept tokens.
-        self.use_kept_tokens = (
-            current_platform.is_cuda() and os.environ.get("VLLM_KEPT_TOKENS") == "1"
-        )
+        # Sample top-k rows from their kept tokens instead of the masked logits.
+        self.use_kept_tokens = current_platform.is_cuda()
 
     def add_request(self, req_idx: int, sampling_params: SamplingParams) -> None:
         needs_processing = self.sampling_states.add_request(req_idx, sampling_params)
@@ -369,25 +366,21 @@ class Sampler:
                 )
             else:  # Use XPU sampler
                 sampled, _ = xpu_sample(processed_logits, top_k, top_p)
-        elif max_kept is not None:
-            assert top_k is not None
-            # The returned logits stay unmasked, which no caller reads here.
-            kept = top_k_top_p_kept_tokens_triton(
-                processed_logits, top_k, top_p, max_kept
-            )
-            sampled = kept_gumbel_sample(
-                *kept,
-                expanded_idx_mapping,
-                self.sampling_states.temperature.gpu,
-                self.sampling_states.seeds.gpu,
-                pos,
-                apply_temperature=False,
-                use_fp64=self.use_fp64_gumbel,
-            )
         else:
-            processed_logits = apply_top_k_top_p(
-                processed_logits, top_k, top_p, has_topp_only_rows=has_topp_only_rows
-            )
+            kept = None
+            if max_kept is not None:
+                assert top_k is not None
+                # The returned logits stay unmasked, which no caller reads here.
+                kept = top_k_top_p_kept_tokens_triton(
+                    processed_logits, top_k, top_p, max_kept
+                )
+            else:
+                processed_logits = apply_top_k_top_p(
+                    processed_logits,
+                    top_k,
+                    top_p,
+                    has_topp_only_rows=has_topp_only_rows,
+                )
             sampled = gumbel_sample(
                 processed_logits,
                 expanded_idx_mapping,
@@ -397,5 +390,6 @@ class Sampler:
                 apply_temperature=False,
                 is_drafting=False,
                 use_fp64=self.use_fp64_gumbel,
+                kept=kept,
             )
         return sampled, processed_logits

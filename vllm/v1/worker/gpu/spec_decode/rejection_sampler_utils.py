@@ -5,8 +5,10 @@ import torch
 from vllm.triton_utils import tl, tldevice, triton
 from vllm.v1.worker.gpu.sample.gumbel import (
     gumbel_block_argmax,
+    load_logits_block,
     spec_step_seed,
     tl_rand32,
+    token_at,
 )
 from vllm.v1.worker.gpu.sample.watermark import philox_gumbel_block_argmax
 from vllm.v1.worker.gpu.spec_decode.draft_logits import (
@@ -151,15 +153,37 @@ def _compute_global_logprobs_and_logsumexp(
     draft_local_max_stride,
     draft_local_sumexp_ptr,
     draft_local_sumexp_stride,
+    kept_ids_ptr,
+    kept_logits_ptr,
+    num_kept_ptr,
+    max_kept,
     vocab_num_blocks,
     PADDED_VOCAB_NUM_BLOCKS: tl.constexpr,
     HAS_DRAFT_LOGITS: tl.constexpr,
+    KEPT_BLOCK_SIZE: tl.constexpr,
 ):
-    target_logit = tl.load(
-        target_logits_ptr + logit_idx * target_logits_stride + token,
-        mask=mask,
-        other=float("-inf"),
-    ).to(tl.float32)
+    if kept_ids_ptr is None:
+        target_logit = tl.load(
+            target_logits_ptr + logit_idx * target_logits_stride + token,
+            mask=mask,
+            other=float("-inf"),
+        ).to(tl.float32)
+    else:
+        # A token outside the row's kept tokens has target probability 0.
+        ids, logits, kept_mask = load_logits_block(
+            None,
+            0,
+            logit_idx,
+            0,
+            0,
+            kept_ids_ptr,
+            kept_logits_ptr,
+            num_kept_ptr,
+            max_kept,
+            KEPT_BLOCK_SIZE,
+        )
+        is_token = kept_mask & (ids == token) & mask
+        target_logit = tl.max(tl.where(is_token, logits, float("-inf")))
     target_lse = _compute_global_logsumexp(
         target_local_max_ptr,
         target_local_max_stride,
@@ -245,9 +269,14 @@ def _compute_local_logits_stats_kernel(
     expanded_local_pos_ptr,
     # [max_num_reqs]
     temp_ptr,
+    kept_ids_ptr,
+    kept_logits_ptr,
+    num_kept_ptr,
+    max_kept,
     vocab_size,
     num_logits,
     BLOCK_SIZE: tl.constexpr,
+    TARGET_BLOCK_SIZE: tl.constexpr,
     HAS_DRAFT_LOGITS: tl.constexpr,
 ):
     logit_idx = tl.program_id(0).to(tl.int64)
@@ -263,16 +292,24 @@ def _compute_local_logits_stats_kernel(
     block_idx = tl.program_id(1)
     block_offsets = block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     mask = block_offsets < vocab_size
+    target_ids, target_logits, _ = load_logits_block(
+        target_logits_ptr,
+        target_logits_stride,
+        logit_idx,
+        block_idx,
+        vocab_size,
+        kept_ids_ptr,
+        kept_logits_ptr,
+        num_kept_ptr,
+        max_kept,
+        TARGET_BLOCK_SIZE,
+    )
+    target_logits = target_logits.to(tl.float32)
 
     if temp == 0.0:
         # Greedy sampling. Only the target max/argmax are needed.
-        target_logits = tl.load(
-            target_logits_ptr + logit_idx * target_logits_stride + block_offsets,
-            mask=mask,
-            other=float("-inf"),
-        ).to(tl.float32)
         value, idx = tl.max(target_logits, axis=0, return_indices=True)
-        token_id = block_idx * BLOCK_SIZE + idx
+        token_id = token_at(target_ids, idx, block_idx, TARGET_BLOCK_SIZE, kept_ids_ptr)
         tl.store(
             target_local_argmax_ptr
             + logit_idx * target_local_argmax_stride
@@ -285,11 +322,6 @@ def _compute_local_logits_stats_kernel(
         )
     else:
         # Get local target max and summed exponentials.
-        target_logits = tl.load(
-            target_logits_ptr + logit_idx * target_logits_stride + block_offsets,
-            mask=mask,
-            other=float("-inf"),
-        ).to(tl.float32)
         target_max, target_sumexp = _compute_max_and_sumexp(target_logits)
         tl.store(
             target_local_max_ptr + logit_idx * target_local_max_stride + block_idx,
@@ -405,9 +437,14 @@ def _compute_cumulative_log_p_kernel(
                     draft_local_max_stride,
                     draft_local_sumexp_ptr,
                     draft_local_sumexp_stride,
+                    None,  # kept_ids_ptr
+                    None,  # kept_logits_ptr
+                    None,  # num_kept_ptr
+                    0,  # max_kept
                     vocab_num_blocks,
                     PADDED_VOCAB_NUM_BLOCKS,
                     HAS_DRAFT_LOGITS,
+                    1,  # KEPT_BLOCK_SIZE
                 )
             )
             log_p = tl.minimum(log_p + (target_logprob - draft_logprob), 0.0)
@@ -500,9 +537,14 @@ def _compute_local_residual_mass_kernel(
         draft_local_max_stride,
         draft_local_sumexp_ptr,
         draft_local_sumexp_stride,
+        None,  # kept_ids_ptr
+        None,  # kept_logits_ptr
+        None,  # num_kept_ptr
+        0,  # max_kept
         vocab_num_blocks,
         PADDED_VOCAB_NUM_BLOCKS,
         True,  # HAS_DRAFT_LOGITS
+        1,  # KEPT_BLOCK_SIZE
     )
 
     # Compute the residual mass: max(p_i * M_b(x|x_{<i}) - M_s(x|x_{<i}), 0)
@@ -572,12 +614,17 @@ def _rejection_kernel(
     # [num_logits]
     fly_entropy_ptr,
     fly_entropy_threshold,
+    kept_ids_ptr,
+    kept_logits_ptr,
+    num_kept_ptr,
+    max_kept,
     vocab_num_blocks,
     PADDED_VOCAB_NUM_BLOCKS: tl.constexpr,
     HAS_DRAFT_LOGITS: tl.constexpr,
     SYNTHETIC_MODE: tl.constexpr,
     USE_BLOCK_VERIFICATION: tl.constexpr,
     FLY_WINDOW_SIZE: tl.constexpr,
+    KEPT_BLOCK_SIZE: tl.constexpr,
 ):
     req_idx = tl.program_id(0)
     req_state_idx = tl.load(idx_mapping_ptr + req_idx).to(tl.int64)
@@ -699,9 +746,14 @@ def _rejection_kernel(
                         draft_local_max_stride,
                         draft_local_sumexp_ptr,
                         draft_local_sumexp_stride,
+                        kept_ids_ptr,
+                        kept_logits_ptr,
+                        num_kept_ptr,
+                        max_kept,
                         vocab_num_blocks,
                         PADDED_VOCAB_NUM_BLOCKS,
                         HAS_DRAFT_LOGITS,
+                        KEPT_BLOCK_SIZE,
                     )
                 )
                 if FLY_WINDOW_SIZE == 0 or pending_rejection < 0:
@@ -864,6 +916,10 @@ def _resample_kernel(
     watermarking_skip_mask_ptr,
     watermark_key_0,
     watermark_key_1,
+    kept_ids_ptr,
+    kept_logits_ptr,
+    num_kept_ptr,
+    max_kept,
     vocab_size,
     BLOCK_SIZE: tl.constexpr,
     HAS_DRAFT_LOGITS: tl.constexpr,
@@ -896,13 +952,19 @@ def _resample_kernel(
     is_valid_rejected_draft = rejected_draft_token >= 0
 
     block_idx = tl.program_id(1)
-    block = block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    mask = block < vocab_size
-    target_logits = tl.load(
-        target_logits_ptr + resample_token_idx * target_logits_stride + block,
-        mask=mask,
-        other=float("-inf"),
-    ).to(tl.float32)
+    block, target_logits, mask = load_logits_block(
+        target_logits_ptr,
+        target_logits_stride,
+        resample_token_idx,
+        block_idx,
+        vocab_size,
+        kept_ids_ptr,
+        kept_logits_ptr,
+        num_kept_ptr,
+        max_kept,
+        BLOCK_SIZE,
+    )
+    target_logits = target_logits.to(tl.float32)
 
     if SKIP_MASKED_BLOCKS and tl.max(target_logits, axis=0) == float("-inf"):
         # No target token survives in this block (e.g. top-k/top-p masked it),
@@ -1042,7 +1104,7 @@ def _resample_kernel(
             vocab_size,
             USE_FP64=USE_FP64,
         )
-    token_id = block_idx * BLOCK_SIZE + idx
+    token_id = token_at(block, idx, block_idx, BLOCK_SIZE, kept_ids_ptr)
     tl.store(
         resampled_local_argmax_ptr
         + req_idx * resampled_local_argmax_stride
@@ -1155,8 +1217,18 @@ def rejection_sample(
     fly_entropy_threshold: float = 0.3,
     fly_entropy_top_k: int = 3,
     skip_masked_vocab_blocks: bool = False,
+    # The target rows' kept tokens from `top_k_top_p_kept_tokens_triton`, read
+    # instead of target_logits: (ids, logits, count), [num_logits, max_kept] each.
+    kept: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     assert target_logits.ndim == 2 and target_logits.stride(-1) == 1
+    kept_ids, kept_logits, num_kept = kept or (None, None, None)
+    max_kept = kept_ids.shape[1] if kept_ids is not None else 0
+    kept_block_size = triton.next_power_of_2(max(max_kept, 1))
+    # These read target logits outside the kernels that take kept tokens.
+    assert kept is None or not (
+        use_block_verification or fly_window_size > 0 or contexts is not None
+    )
     draft_logits = None
     draft_logits_row_mapping = None
     if draft_logits_cache is not None:
@@ -1222,6 +1294,9 @@ def rejection_sample(
     # (for non-greedy requests).
     VOCAB_BLOCK_SIZE = 8192
     vocab_num_blocks = triton.cdiv(vocab_size, VOCAB_BLOCK_SIZE)
+    if kept is not None and draft_logits is None:
+        # The kept tokens fit in block 0, and no draft row needs the others.
+        vocab_num_blocks = 1
     padded_vocab_num_blocks = triton.next_power_of_2(vocab_num_blocks)
     target_local_argmax = target_logits.new_empty(
         num_logits, vocab_num_blocks, dtype=torch.int64
@@ -1258,9 +1333,14 @@ def rejection_sample(
         expanded_idx_mapping,
         expanded_local_pos,
         temperature,
+        kept_ids,
+        kept_logits,
+        num_kept,
+        max_kept,
         vocab_size,
         num_logits,
         BLOCK_SIZE=VOCAB_BLOCK_SIZE,
+        TARGET_BLOCK_SIZE=kept_block_size if kept is not None else VOCAB_BLOCK_SIZE,
         HAS_DRAFT_LOGITS=has_draft_logits,
     )
 
@@ -1385,18 +1465,25 @@ def rejection_sample(
         local_residual_mass.stride(0) if local_residual_mass is not None else 0,
         fly_entropy,
         fly_entropy_threshold,
+        kept_ids,
+        kept_logits,
+        num_kept,
+        max_kept,
         vocab_num_blocks,
         PADDED_VOCAB_NUM_BLOCKS=padded_vocab_num_blocks,
         HAS_DRAFT_LOGITS=has_draft_logits,
         SYNTHETIC_MODE=synthetic_conditional_rates is not None,
         USE_BLOCK_VERIFICATION=use_block_verification,
         FLY_WINDOW_SIZE=fly_window_size,
+        KEPT_BLOCK_SIZE=kept_block_size,
         num_warps=1,
     )
 
     # Resample the rejected/bonus tokens.
     RESAMPLE_BLOCK_SIZE = 1024
     resample_num_blocks = triton.cdiv(vocab_size, RESAMPLE_BLOCK_SIZE)
+    if kept is not None:
+        RESAMPLE_BLOCK_SIZE, resample_num_blocks = kept_block_size, 1
     padded_resample_num_blocks = triton.next_power_of_2(resample_num_blocks)
     resampled_local_argmax = target_logits.new_empty(
         num_reqs, resample_num_blocks, dtype=torch.int64
@@ -1433,6 +1520,10 @@ def rejection_sample(
         watermarking_skip_mask_bytes,
         watermark_key_0,
         watermark_key_1,
+        kept_ids,
+        kept_logits,
+        num_kept,
+        max_kept,
         vocab_size,
         BLOCK_SIZE=RESAMPLE_BLOCK_SIZE,
         HAS_DRAFT_LOGITS=has_draft_logits,
