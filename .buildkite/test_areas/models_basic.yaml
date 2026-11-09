@@ -88,6 +88,7 @@ steps:
   - tests/models/test_muse_spark_nvidia_shared_rope.py
   - tests/models/test_muse_spark_logits_local.py
   - tests/models/test_muse_spark_rocm_shared_rope.py
+  - tests/models/test_muse_spark_rocm_fused_markov_sampling.py
   - tests/models/test_muse_spark_rocm_mono.py
   - tests/kernels/models/amd/test_muse_spark_fused_markov.py
   commands:
@@ -109,6 +110,7 @@ steps:
       models/test_muse_spark_nvidia_shared_rope.py
       models/test_muse_spark_logits_local.py
       models/test_muse_spark_rocm_shared_rope.py
+      models/test_muse_spark_rocm_fused_markov_sampling.py
       models/test_muse_spark_rocm_mono.py
       kernels/models/amd/test_muse_spark_fused_markov.py
   mirror:
@@ -145,8 +147,13 @@ steps:
       - vllm/models/muse_spark/
       - vllm/v1/worker/gpu/spec_decode/dspark/
       - vllm/v1/worker/gpu/sample/gumbel.py
+      - vllm/v1/worker/gpu/spec_decode/draft_logits.py
+      - vllm/v1/worker/gpu/sample/greedy_argmax.py
+      - vllm/model_executor/layers/quantization/online/
+      - vllm/model_executor/layers/vocab_parallel_embedding.py
       - tests/models/test_muse_spark_logits_local.py
       - tests/models/test_muse_spark_rocm_shared_rope.py
+      - tests/models/test_muse_spark_rocm_fused_markov_sampling.py
       - tests/models/test_muse_spark_rocm_mono.py
       - tests/kernels/models/amd/test_muse_spark_fused_markov.py
       commands:
@@ -170,6 +177,7 @@ steps:
         models/test_muse_spark_nvidia_shared_rope.py
         models/test_muse_spark_logits_local.py
         models/test_muse_spark_rocm_shared_rope.py
+        models/test_muse_spark_rocm_fused_markov_sampling.py
         models/test_muse_spark_rocm_mono.py
         kernels/models/amd/test_muse_spark_fused_markov.py
         models/test_utils.py::test_merge_multimodal_embeddings_no_sync
