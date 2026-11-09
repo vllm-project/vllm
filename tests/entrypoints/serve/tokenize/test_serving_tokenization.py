@@ -118,6 +118,57 @@ async def test_tokenize_chat_skips_mm_cache_for_renderer_only_path():
     )
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("tools", "expected_tool_names"),
+    [
+        pytest.param([], None, id="empty-tools-is-no-tools"),
+        pytest.param(None, None, id="omitted-tools"),
+        pytest.param(
+            [{"type": "function", "function": {"name": "get_weather"}}],
+            ["get_weather"],
+            id="non-empty-tools-kept",
+        ),
+    ],
+)
+async def test_tokenize_chat_passes_empty_tools_as_none(tools, expected_tool_names):
+    """`tools: []` must render like the chat route, which treats it as no tools.
+
+    Templates that test `tools is not none` would otherwise add their tool
+    instructions to the /tokenize prompt but not to the chat prompt.
+    """
+    mock_engine = MagicMock(spec=AsyncLLM)
+    mock_engine.errored = False
+    mock_engine.model_config = MockModelConfig()
+    mock_engine.input_processor = MagicMock()
+    mock_engine.renderer = MagicMock()
+
+    serving = _build_serving_tokenization(mock_engine)
+    serving.online_renderer.preprocess_chat = AsyncMock(  # type: ignore[method-assign]
+        return_value=(
+            [{"role": "user", "content": "Test"}],
+            [{"prompt_token_ids": [1, 2, 3]}],
+        )
+    )
+
+    body: dict[str, Any] = {
+        "model": MODEL_NAME,
+        "messages": [{"role": "user", "content": "Test prompt"}],
+    }
+    if tools is not None:
+        body["tools"] = tools
+    request = TokenizeChatRequest.model_validate(body)
+
+    response = await serving.create_tokenize(request, MagicMock(headers={}))
+
+    assert isinstance(response, TokenizeResponse)
+    tool_dicts = serving.online_renderer.preprocess_chat.call_args.kwargs["tool_dicts"]
+    if expected_tool_names is None:
+        assert tool_dicts is None
+    else:
+        assert [t["function"]["name"] for t in tool_dicts] == expected_tool_names
+
+
 @pytest.mark.skip_global_cleanup
 def test_tokenize_chat_forwards_response_format_to_renderer():
     """Structured formats must affect Mistral tokenization, not just generation."""
