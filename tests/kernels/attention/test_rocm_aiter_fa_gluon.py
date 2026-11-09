@@ -131,16 +131,25 @@ def test_build_zeroes_null_block(monkeypatch):
     assert kv_cache[1:].isnan().all()
 
 
-def test_decode_passes_shuffle_views_to_gluon(monkeypatch):
+@pytest.mark.parametrize("kv_row_size", [False, True])
+def test_decode_passes_shuffle_views_to_gluon(monkeypatch, kv_row_size):
     from vllm._aiter_ops import rocm_aiter_ops
     from vllm.v1.attention.backends import rocm_aiter_fa_gluon
     from vllm.v1.attention.backends.rocm_aiter_fa_gluon import (
         AiterFlashAttentionGluonImpl,
     )
 
-    kernel_args = {}
+    kernel_args, split_args = {}, {}
+
+    def recommended_splits(num_seqs, heads, **kwargs):
+        split_args.update(kwargs)
+        return 2
+
     monkeypatch.setattr(
-        rocm_aiter_fa_gluon, "get_recommended_splits", lambda num_seqs, heads: 2
+        rocm_aiter_fa_gluon, "get_recommended_splits", recommended_splits
+    )
+    monkeypatch.setattr(
+        rocm_aiter_ops, "pa_gluon_splits_support_kv_row_size", lambda: kv_row_size
     )
     monkeypatch.setattr(
         rocm_aiter_fa_gluon,
@@ -167,3 +176,5 @@ def test_decode_passes_shuffle_views_to_gluon(monkeypatch):
     assert kernel_args["value_cache"].data_ptr() == value_cache.data_ptr()
     assert kernel_args["exp_sums"].shape == (2, 4, 2, 6)
     assert kernel_args["block_tables"].dtype == torch.int32
+    expected = {"head_size": 256, "kv_cache_dtype": torch.bfloat16}
+    assert split_args == (expected if kv_row_size else {})

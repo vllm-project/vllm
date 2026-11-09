@@ -146,7 +146,12 @@ class AiterFlashAttentionGluonImpl(AiterFlashAttentionImpl):
         num_blocks, block_size, num_kv_heads, head_size = key_cache.shape
         num_heads = query.shape[1]
         x = 16 // key_cache.element_size()
-        splits = get_recommended_splits(num_decodes, num_kv_heads)
+        split_kwargs = (
+            {"head_size": head_size, "kv_cache_dtype": key_cache.dtype}
+            if rocm_aiter_ops.pa_gluon_splits_support_kv_row_size()
+            else {}
+        )
+        splits = get_recommended_splits(num_decodes, num_kv_heads, **split_kwargs)
         partial_shape = (num_decodes, num_kv_heads, splits, num_heads // num_kv_heads)
         exp_sums = torch.empty(partial_shape, dtype=torch.float32, device=query.device)
         pa_decode_gluon(
