@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The warmup must cover every specialization the sampler will launch.
 
-``_philox_gumbel_kernel`` is keyed on the Philox key halves, on the logits
+`_philox_gumbel_kernel` is keyed on the Philox key halves, on the logits
 dtype (model dtype when the sampler passes logits through, fp32 when logits
 processing copies them) and on whether a skip mask is passed, so a missing
 combination leaves a request paying the compile this module exists to remove.
@@ -42,10 +42,10 @@ def _sampler(
     speculative: bool,
     use_fp64_gumbel: bool,
 ) -> GPUWatermarkSampler:
-    """The sampler ``GPUModelRunner`` builds for this config.
+    """The sampler `GPUModelRunner` builds for this config.
 
-    Mirrors ``vllm/v1/worker/gpu/model_runner.py:473-486``. ``__new__`` skips
-    ``Sampler.__init__``, which allocates UVA-backed device buffers; the warmup
+    Mirrors `vllm/v1/worker/gpu/model_runner.py:473-486`. `__new__` skips
+    `Sampler.__init__`, which allocates UVA-backed device buffers; the warmup
     only reads the three attributes set here.
     """
     watermarker = create_watermarker(watermark_config)
@@ -118,7 +118,7 @@ def test_no_warmup_without_a_watermarked_sampler(
     """A rank that does not sample launches nothing to warm.
 
     Only the final pipeline stage of a generative model holds a
-    ``GPUWatermarkSampler``; on any other rank the kernel is never launched.
+    `GPUWatermarkSampler`; on any other rank the kernel is never launched.
     """
     calls = _capture_calls(monkeypatch)
     watermark_sample_warmup(
@@ -129,9 +129,9 @@ def test_no_warmup_without_a_watermarked_sampler(
 
 
 def test_no_warmup_off_cuda(monkeypatch: pytest.MonkeyPatch) -> None:
-    """``GumbelWatermarker`` launches the kernel only on a CUDA-alike device.
+    """`GumbelWatermarker` launches the kernel only on a CUDA-alike device.
 
-    Elsewhere -- an XPU worker inherits ``kernel_warmup`` from the CUDA worker
+    Elsewhere -- an XPU worker inherits `kernel_warmup` from the CUDA worker
     -- the sampler takes the torch path, so warming would compile a kernel
     nothing launches.
     """
@@ -156,7 +156,7 @@ def test_single_key_warms_both_logits_dtypes(
 
 
 def test_dual_key_warms_both_derived_keys(monkeypatch: pytest.MonkeyPatch) -> None:
-    """``DualKeyGumbelWatermarker.sample`` launches the kernel once per key.
+    """`DualKeyGumbelWatermarker.sample` launches the kernel once per key.
 
     The halves of a derived key exceed 2**31, so each key is typed i64/i32 by
     magnitude and a wrong key compiles a specialization the engine never uses.
@@ -194,7 +194,7 @@ def test_dual_key_alpha_bounds_warm_one_key(
 def test_speculative_config_warms_the_target_role_only(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Under spec decode the sampler holds ``create_target_watermarker()``.
+    """Under spec decode the sampler holds `create_target_watermarker()`.
 
     Rows without draft tokens sample through it, so the sampler path launches
     key B alone; the draft key runs in the speculator's own sampler.
@@ -242,9 +242,9 @@ def test_warmup_argument_dtypes_match_the_runtime_buffers(
 ) -> None:
     """Contexts are int32, the sampling state int64 indices and fp32 temperatures.
 
-    ``GPUWatermarkSampler._get_contexts`` gathers from the int32 request-state
-    token ids, ``expanded_idx_mapping``/``positions``/``seeds`` are int64 and
-    ``SamplingStates.temperature`` is fp32; warming other dtypes compiles
+    `GPUWatermarkSampler._get_contexts` gathers from the int32 request-state
+    token ids, `expanded_idx_mapping`/`positions`/`seeds` are int64 and
+    `SamplingStates.temperature` is fp32; warming other dtypes compiles
     specializations no engine launches.
     """
     calls = _capture_calls(monkeypatch)
@@ -265,10 +265,10 @@ def test_warmup_argument_dtypes_match_the_runtime_buffers(
 def test_use_fp64_follows_the_path_that_forwards_it(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Only the mixed path forwards the sampler's ``use_fp64_gumbel``.
+    """Only the mixed path forwards the sampler's `use_fp64_gumbel`.
 
-    ``GumbelWatermarker._sample_watermarked`` launches the mask-free variant
-    with the ``use_fp64=False`` default, so warming it with fp64 would compile
+    `GumbelWatermarker._sample_watermarked` launches the mask-free variant
+    with the `use_fp64=False` default, so warming it with fp64 would compile
     a specialization the engine never launches and miss the one it does.
     """
     calls = _capture_calls(monkeypatch)

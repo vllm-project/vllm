@@ -738,8 +738,10 @@ def test_extraction_without_a_prompt_splits_like_main():
     "system, thinking",
     [
         (
-            "Think first. Put your notes after 'Here's my thought process:' "
-            "and the answer after 'Here's my response:'.",
+            (
+                "Think first. Put your notes after 'Here's my thought process:' "
+                "and the answer after 'Here's my response:'."
+            ),
             True,
         ),
         ("Be brief.", False),

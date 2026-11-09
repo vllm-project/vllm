@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Structured output with ``--reasoning-parser granite``.
+"""Structured output with `--reasoning-parser granite`.
 
 The grammar applies only after the parser reports the reasoning end: after
-the response marker with ``thinking`` on, and from the first token with it off.
+the response marker with `thinking` on, and from the first token with it off.
 """
 
 import json

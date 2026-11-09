@@ -11,7 +11,6 @@ import numpy as np
 from vllm.config import VllmConfig
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
-from vllm.parser.engine.adapters import ParserEngineReasoningAdapter
 from vllm.reasoning import ReasoningParserManager
 from vllm.tokenizers import cached_tokenizer_from_config
 from vllm.utils.import_utils import LazyLoader
@@ -273,7 +272,7 @@ class StructuredOutputManager:
         if structured_req.masked_reasoning_end_ids is None:
             masked: tuple[int, ...] = ()
             reasoner = self._get_reasoner(request)
-            if isinstance(reasoner, ParserEngineReasoningAdapter):
+            if reasoner is not None and reasoner.implicit_reasoning_end_token_ids:
                 grammar = structured_req.grammar
                 assert isinstance(grammar, StructuredOutputGrammar)
                 masked = tuple(
@@ -326,11 +325,8 @@ class StructuredOutputManager:
         if num_spec_tokens <= 0:
             return _NO_SPEC_TOKENS
 
-        # Engine-based parsers also report whether the end token is content.
-        if (
-            isinstance(reasoner, ParserEngineReasoningAdapter)
-            and reasoner.reasoning_end_token_ids
-        ):
+        # Parsers that know their end tokens also report whether one is content.
+        if reasoner.reasoning_end_token_ids:
             end = reasoner.find_reasoning_end(spec_tokens)
             if end is not None:
                 constraint_start = end.offset + 1

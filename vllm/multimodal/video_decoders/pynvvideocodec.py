@@ -122,7 +122,7 @@ PYNVVIDEOCODEC_DECODER_CAPS_CACHE_SIZE = 64
 def _get_decoder_caps(
     nvc, device_index: int, codec, chroma_format, bit_depth: int
 ) -> dict[str, Any]:
-    """``nvc.GetDecoderCaps``, cached per device and stream format.
+    """`nvc.GetDecoderCaps`, cached per device and stream format.
 
     Each call takes ~180 ms and holds the GIL, which stalls every other request in
     the API process; the result only depends on these arguments. Callers must not
@@ -151,13 +151,13 @@ def _pynvvc_frames_to_nhwc(frames):
 class PyNvVideoCodecDecoderSlot:
     """A retained PyNv decoder slot and its CUDA stream.
 
-    The decoder is reused across requests: ``reconfigure_decoder`` repoints the
+    The decoder is reused across requests: `reconfigure_decoder` repoints the
     existing decoder at each new source instead of paying a fresh
-    ``SimpleDecoder`` construction per request. Construction (CUVID parser +
+    `SimpleDecoder` construction per request. Construction (CUVID parser +
     decoder + surface-pool allocation) is the dominant per-request cost, so
     reconfiguring is far cheaper. Decoder dimensions are bounded at construction
     so resolution changes do not replace its native frame pool. A single decoder
-    serves both metadata (``len``/``get_stream_metadata``) and frame decode -- no
+    serves both metadata (`len`/`get_stream_metadata`) and frame decode -- no
     separate metadata decoder.
     """
 
