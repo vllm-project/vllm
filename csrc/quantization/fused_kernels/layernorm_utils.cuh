@@ -516,11 +516,11 @@ __device__ void norm_and_quant(
 
     q8x4_t<scalar_out_t> out;
 
-    // Group quant multiplies by the reciprocal of the scale (one div per
-    // group), matching per_token_group_quant_8bit. Per-token fp8 must keep
-    // exact division for FBGemm parity, so it is excluded here.
-    constexpr bool mul_by_recip = (group_size > 0) || is_scale_inverted;
-
+    // Group quant must divide by the exact per-group scale: the scale is a
+    // plain fp32 value here (never a power-of-two UE8M0 scale), so
+    // multiplying by its reciprocal costs an extra rounding that can move
+    // values that land exactly on an 8-bit boundary. Per-token fp8 keeps
+    // exact division for FBGemm parity as well.
     float scale_val;
 
     if constexpr (group_size > 0) {
@@ -533,7 +533,8 @@ __device__ void norm_and_quant(
       } else {
         scale_idx = blockIdx.x * num_groups + i * VEC_SIZE / group_size;
       }
-      scale_val = 1.0f / scale[scale_idx];
+      scale_val =
+          is_scale_inverted ? 1.0f / scale[scale_idx] : scale[scale_idx];
     } else {
       scale_val = *scale;
     }
@@ -542,8 +543,9 @@ __device__ void norm_and_quant(
     for (int j = 0; j < VEC_SIZE; ++j) {
       y[j] = static_cast<scalar_t>(x.val[j] * rms) * w.val[j];
     }
-    ScaledQuant<scalar_out_t, mul_by_recip>::template quant_vec_fn<VEC_SIZE>(
-        out.val, y, scale_val);
+    ScaledQuant<scalar_out_t,
+                is_scale_inverted>::template quant_vec_fn<VEC_SIZE>(out.val, y,
+                                                                    scale_val);
     vec_output[i] = out;
   }
 }

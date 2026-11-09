@@ -74,20 +74,25 @@ __device__ __forceinline__ float ComputeGroupScale(
   return y_s;
 }
 
-template <typename T, typename DST_DTYPE>
+template <typename T, typename DST_DTYPE, bool USE_RECIP = false>
 __device__ __forceinline__ void QuantizeGroup(
     const T* __restrict__ smem_group, DST_DTYPE* __restrict__ group_output,
     const int group_size, const int lane_id, const int threads_per_group,
     const float y_s, const float min_8bit, const float max_8bit) {
   constexpr int vec_size = 16 / sizeof(T);
 
-  // One div.rn per group instead of per element; the register-resident
-  // kernel does the same, keeping both schedules bit-identical.
+  // Multiplying by the reciprocal is only exact for power-of-two (UE8M0)
+  // scales; otherwise the extra rounding can move values that land exactly
+  // on an 8-bit boundary, so divide per element instead. The
+  // register-resident kernel does the same, keeping both schedules
+  // bit-identical.
   const float inv_y = 1.0f / y_s;
 
   // quantize shared -> global 8-bit
   auto scalar_op_quant = [&] __device__(DST_DTYPE& dst, const T& src) {
-    float q = fminf(fmaxf(static_cast<float>(src) * inv_y, min_8bit), max_8bit);
+    const float scaled = USE_RECIP ? static_cast<float>(src) * inv_y
+                                   : static_cast<float>(src) / y_s;
+    float q = fminf(fmaxf(scaled, min_8bit), max_8bit);
     dst = DST_DTYPE(q);
   };
 
@@ -165,8 +170,9 @@ __global__ void per_token_group_quant_8bit_kernel(
   if (valid_group) {
     DST_DTYPE* group_output =
         static_cast<DST_DTYPE*>(output_q) + block_group_offset;
-    QuantizeGroup<T, DST_DTYPE>(smem_group, group_output, group_size, lane_id,
-                                threads_per_group, y_s, min_8bit, max_8bit);
+    QuantizeGroup<T, DST_DTYPE, SCALE_UE8M0>(
+        smem_group, group_output, group_size, lane_id, threads_per_group, y_s,
+        min_8bit, max_8bit);
   }
 
 #if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
@@ -279,14 +285,16 @@ __global__ void per_token_group_quant_8bit_register_kernel(
       }
     }
 
-    // One div.rn per group; the smem path (QuantizeGroup) does the same,
-    // keeping both schedules bit-identical.
+    // Multiplying by the reciprocal is only exact for power-of-two (UE8M0)
+    // scales; otherwise the extra rounding can move values that land exactly
+    // on an 8-bit boundary, so divide per element instead. The smem path
+    // (QuantizeGroup) does the same, keeping both schedules bit-identical.
     const float inv_y = 1.0f / y_s;
     uint32_t packed[VEC_SIZE / 4] = {};
 #pragma unroll
     for (int i = 0; i < VEC_SIZE; ++i) {
       const float v = static_cast<float>(regs[i]);
-      const float scaled = v * inv_y;
+      const float scaled = SCALE_UE8M0 ? v * inv_y : v / y_s;
       const float q = fminf(fmaxf(scaled, min_8bit), max_8bit);
       DST_DTYPE qb = DST_DTYPE(q);
       const uint8_t byte = *reinterpret_cast<uint8_t*>(&qb);
