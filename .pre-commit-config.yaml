@@ -80,6 +80,21 @@ repos:
       ]
       files: ^requirements/(common|cuda|test/(cuda|kv_connectors_cuda))\.(in|txt|overrides)$
     - id: pip-compile
+      alias: pip-compile-quantization-deps
+      name: pip-compile-quantization-deps
+      args: [
+        requirements/test/quantization_deps.in,
+        -o, requirements/test/quantization_deps_cuda.txt,
+        --generate-hashes,
+        # The image installs these into /opt/quantization-deps; their deps are in requirements/test/cuda.txt.
+        --no-deps,
+        --index-strategy, unsafe-best-match,
+        --torch-backend, cu132,
+        --python-platform, x86_64-manylinux_2_28,
+        --python-version, "3.12",
+      ]
+      files: ^requirements/test/quantization_deps(\.in|_cuda\.txt)$
+    - id: pip-compile
       alias: pip-compile-rocm
       name: pip-compile-rocm
       args: [
