@@ -137,13 +137,12 @@ def _get_priority_backends(
         else:
             _move_to_front(_AVAILABLE_BACKENDS, Fp8MoeBackend.TRITON)
 
-    # On SM120 for Block Fp8, prefer Triton over DeepGEMM for TP.
+    # On SM120 for Block Fp8, prefer Triton over DeepGEMM for TP and EP.
     if (
         current_platform.is_cuda()
         and current_platform.is_device_capability(120)
         and activation_key == kFp8Dynamic128Sym
         and weight_key == kFp8Static128BlockSym
-        and moe_config.moe_parallel_config.ep_size == 1
     ):
         _move_to_front(_AVAILABLE_BACKENDS, Fp8MoeBackend.TRITON)
 
