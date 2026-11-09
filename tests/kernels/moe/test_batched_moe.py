@@ -260,9 +260,12 @@ def test_batched_mm(
 
 
 @pytest.mark.parametrize("scale_shape", ["[E]", "[E,1,1]"])
-def test_batched_mm_per_tensor_weight_per_token_act(scale_shape: str):
-    """Per-tensor weight scales must broadcast along N when activations are
-    quantized per token, instead of indexing into other experts' scales."""
+@pytest.mark.parametrize("bias_case", ["none", "varying", "cancellation"])
+def test_batched_mm_per_tensor_weight_per_token_act(scale_shape: str, bias_case: str):
+    """Expert scales and biases broadcast along N with per-token quantization.
+
+    Bias must be added after dequantization and before output rounding.
+    """
     if torch.float8_e4m3fn not in DTYPES or (
         current_platform.is_cuda_alike()
         and not current_platform.has_device_capability(89)
@@ -288,6 +291,21 @@ def test_batched_mm_per_tensor_weight_per_token_act(scale_shape: str):
     assert B_scale is not None and B_scale.numel() == E
     B_scale = B_scale.view(-1) if scale_shape == "[E]" else B_scale.view(-1, 1, 1)
 
+    bias = None
+    if bias_case == "varying":
+        bias = torch.arange(E * N, device=DEVICE, dtype=torch.float32).view(N, E).T
+        bias = bias / 128
+    elif bias_case == "cancellation":
+        A_q = torch.ones_like(A_q, dtype=torch.bfloat16).to(A_q.dtype)
+        B_q = torch.ones_like(B_q, dtype=torch.bfloat16)
+        B_q[:, :, 0] = 1.25
+        B_q = B_q.to(A_q.dtype)
+        assert A_scale is not None
+        A_scale.fill_(0.25)
+        B_scale.fill_(0.5)
+        bias = torch.full((E, N), -K / 8, device=DEVICE, dtype=torch.float32)
+        num_expert_tokens[1] = 0
+
     test_output = torch.zeros((E, M, N), dtype=torch.bfloat16, device=DEVICE)
     invoke_moe_batched_triton_kernel(
         A_q,
@@ -303,18 +321,26 @@ def test_batched_mm_per_tensor_weight_per_token_act(scale_shape: str):
         False,
         config={"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 16, "BLOCK_SIZE_K": 32},
         per_act_token_quant=True,
+        B_bias=bias,
     )
 
     ref_output = native_batched_masked_quant_matmul(
         A_q,
         B_q,
-        torch.zeros_like(test_output),
+        torch.zeros_like(test_output, dtype=torch.float32),
         num_expert_tokens,
         A_scale,
         B_scale.view(-1, 1, 1),
         None,
         True,
     )
+    if bias is not None:
+        valid = torch.arange(M, device=DEVICE)[None, :] < num_expert_tokens[:, None]
+        ref_output = torch.where(valid[:, :, None], ref_output + bias[:, None, :], 0)
+    ref_output = ref_output.to(test_output.dtype)
+    if bias_case == "cancellation":
+        torch.testing.assert_close(test_output, ref_output, atol=0, rtol=0)
+        return
     torch.testing.assert_close(test_output, ref_output, atol=6e-2, rtol=6e-2)
 
 
