@@ -23,39 +23,17 @@ from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.v1.worker.ubatching import (
+    dbo_comm_handoff_enabled,
     dbo_current_ubatch_id,
     dbo_enabled,
     dbo_get_previous_event,
+    dbo_record_stream,
     dbo_switch_to_comm,
     dbo_switch_to_compute,
     dbo_switch_to_compute_sync,
     dbo_yield_and_switch_from_comm_to_compute,
     dbo_yield_and_switch_from_compute_to_comm,
 )
-
-
-def _dbo_handoff() -> bool:
-    """Whether dispatch/combine should hand off compute <-> comm stream.
-
-    Graph capture keeps every collective on the capture stream, so the
-    handoff is limited to eager steps.
-    """
-    return dbo_enabled() and not torch.cuda.is_current_stream_capturing()
-
-
-def _dbo_record_stream(*tensors: torch.Tensor | None) -> None:
-    """Mark tensors allocated on the other DBO stream as used by this one.
-
-    Under DBO, DeepEP allocates its outputs on the comm stream while the
-    experts read them on the compute stream, and the reverse holds for the
-    dispatch and combine inputs. Without this, the caching allocator can hand
-    a freed block to the other ubatch while kernels on this stream still read
-    it.
-    """
-    stream = torch.cuda.current_stream()
-    for t in tensors:
-        if t is not None:
-            t.record_stream(stream)
 
 
 def _quantize_before_dispatch(
@@ -244,7 +222,7 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
                 n = tokens.shape[0]
             num_max_tokens_per_rank = 1 << max(n - 1, 0).bit_length()
 
-        handoff = _dbo_handoff()
+        handoff = dbo_comm_handoff_enabled()
         previous_event = None
         if handoff:
             # Capture the event on the compute stream before yielding so it
@@ -253,7 +231,7 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             # Dispatch blocks the CPU (and syncs it in prefill), so let the
             # other ubatch enqueue its compute first.
             dbo_yield_and_switch_from_compute_to_comm()
-            _dbo_record_stream(tokens, token_scales, rank_topk_ids, rank_topk_weights)
+            dbo_record_stream(tokens, token_scales, rank_topk_ids, rank_topk_weights)
 
         (
             recv_x,
@@ -543,12 +521,12 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
                 f"got {fused_expert_output.dtype}"
             )
 
-        handoff = _dbo_handoff()
+        handoff = dbo_comm_handoff_enabled()
         previous_event = None
         if handoff:
             previous_event = dbo_get_previous_event(self.buffer.capture)
             dbo_yield_and_switch_from_compute_to_comm()
-            _dbo_record_stream(fused_expert_output)
+            dbo_record_stream(fused_expert_output)
 
         # DBO drives its own handoff schedule; keep the combine synchronous
         # there (the receiver then only performs the copy).

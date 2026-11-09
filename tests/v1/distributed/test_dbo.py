@@ -44,6 +44,7 @@ MAX_NUM_SEQS = 64  # Increased from 16 to trigger decode DBO
 DEEPEP_BACKENDS = [
     "deepep_low_latency",
     "deepep_high_throughput",
+    "deepep_v2",
 ]
 
 
