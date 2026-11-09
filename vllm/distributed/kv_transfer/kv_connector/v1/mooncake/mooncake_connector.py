@@ -641,8 +641,6 @@ class MooncakeXferMetadata(
     # Random per register_kv_caches, so ids never repeat across restarts.
     # 0 means the peer sends the layout on every pull.
     layout_id: int = 0
-    # Tokens per page in each destination transfer group.
-    group_block_sizes: list[int] = msgspec.field(default_factory=list)
 
 
 class MooncakeXferResponseStatus(IntEnum):
@@ -2302,12 +2300,8 @@ class MooncakeConnectorWorker:
             if source is None:
                 return "Destination has no matching producer layer"
             spec = self._layer_specs[source.layer_name]
-            if (
-                not isinstance(spec, MLAAttentionSpec)
-                or destination.group_index >= len(meta.group_block_sizes)
-                or spec.block_size != meta.group_block_sizes[destination.group_index]
-            ):
-                return "Incompatible region-mapped token block size"
+            if not isinstance(spec, MLAAttentionSpec):
+                return "Region-mapped imports require MLA layers"
         return None
 
     def _bind_sender_thread_device(self) -> None:
@@ -3151,7 +3145,6 @@ class MooncakeConnectorWorker:
             tuple(meta.registered_group_indices),
             tuple(tuple(groups) for groups in meta.registered_shared_group_ids),
             tuple(meta.registered_row_offsets),
-            tuple(meta.group_block_sizes),
         )
         cached = self._prepared_transfer_regions.get(cache_key)
         if cached is not None:
@@ -3272,7 +3265,6 @@ class MooncakeConnectorWorker:
             meta.remote_pp_size,
             meta.remote_tp_size,
             meta.layout_id,
-            tuple(meta.group_block_sizes),
         )
 
     def _remember_peer_layout(
@@ -3321,12 +3313,6 @@ class MooncakeConnectorWorker:
             )
             for req_id, pull_meta in pull_metas.items()
         }
-        group_block_sizes: list[int] = []
-        if self.kv_cache_config.hisparse_host_num_blocks is not None:
-            group_block_sizes = [
-                group.kv_cache_spec.block_size
-                for group in self.kv_cache_config.transfer_groups
-            ]
         if not include_layout:
             return MooncakeXferMetadata(
                 remote_hostname=self.hostname,
@@ -3339,7 +3325,6 @@ class MooncakeConnectorWorker:
                 kv_caches_base_addr=[],
                 block_lens=[],
                 kv_block_lens=[],
-                group_block_sizes=group_block_sizes,
             )
         return MooncakeXferMetadata(
             remote_hostname=self.hostname,
@@ -3359,7 +3344,6 @@ class MooncakeConnectorWorker:
                 list(groups) for groups in self.region_shared_groups
             ],
             registered_row_offsets=self.region_row_offsets,
-            group_block_sizes=group_block_sizes,
         )
 
     def _validate_head_resharding_layout(

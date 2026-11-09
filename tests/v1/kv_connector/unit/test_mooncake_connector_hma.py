@@ -680,11 +680,7 @@ def test_hisparse_group_remap_copies_only_requested_pages(
     destination_ids = [host_ids, indexer_ids]
     if source_group == 1:
         destination_ids.reverse()
-    meta = _xfer_meta(
-        remote,
-        {"d": ("x", destination_ids)},
-        group_block_sizes=[16, 16],
-    )
+    meta = _xfer_meta(remote, {"d": ("x", destination_ids)})
     send = SendBlockMeta("p", "x", [source_ids], asyncio.Event())
     config = create_vllm_config(
         kv_connector="MooncakeConnector",
@@ -791,7 +787,6 @@ def test_hisparse_import_rejects_incomplete_page_plan_atomically(
         kv_caches_base_addr=[],
         block_lens=[],
         kv_block_lens=[],
-        group_block_sizes=[16, 16],
     )
     local = [
         TransferRegion("model.layers.0.source", 0, 1000, 100, 10, 0),
@@ -810,7 +805,7 @@ def test_hisparse_import_rejects_incomplete_page_plan_atomically(
 
 
 @pytest.mark.cpu_test
-@pytest.mark.parametrize("incompatible", [None, "layers", "block_size", "tp", "opaque"])
+@pytest.mark.parametrize("incompatible", [None, "layers", "tp", "opaque"])
 def test_hisparse_semantic_layout_requires_compatible_geometry(incompatible):
     """Independent group numbers are valid only under the sparse-MLA contract."""
     local = [
@@ -830,12 +825,9 @@ def test_hisparse_semantic_layout_requires_compatible_geometry(incompatible):
         kv_caches_base_addr=[],
         block_lens=[],
         kv_block_lens=[],
-        group_block_sizes=[16, 16],
     )
     if incompatible == "layers":
         remote.pop()
-    elif incompatible == "block_size":
-        meta.group_block_sizes[1] = 32
     elif incompatible == "tp":
         meta.remote_tp_size = 4
     elif incompatible == "opaque":
