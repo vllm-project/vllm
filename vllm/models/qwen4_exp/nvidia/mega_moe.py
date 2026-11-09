@@ -6,9 +6,8 @@ Routed experts stored as MXFP8, MXFP4 or BF16 load straight into the kernel
 layout. `--quantization` / `--quantization-config` can force another MegaMoE
 format, and the experts are then requantized as they load. Block-FP8 experts,
 which MegaMoE cannot run, are requantized to MXFP8 unless a format is forced.
-The MTP drafter's config does not carry the online config, so its experts keep
-their default format. The sigmoid-gated shared expert stays unfused and runs on
-an aux stream next to the router.
+The MTP drafter's config does not carry the online config. The sigmoid-gated
+shared expert stays unfused and runs on an aux stream next to the router.
 """
 
 from collections.abc import Iterable
@@ -23,7 +22,6 @@ from vllm.distributed import get_ep_group, get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import RoutedExperts
 from vllm.model_executor.layers.fused_moe.deep_gemm_mega_moe import (
-    MEGA_MOE_BF16,
     MEGA_MOE_MXFP4,
     MEGA_MOE_MXFP8,
     MEGA_MOE_WEIGHT_FORMATS,
@@ -48,7 +46,6 @@ from vllm.model_executor.layers.quantization.utils.config_utils import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     is_layer_skipped,
     kMxfp4Static,
-    kMxfp8Dynamic,
     kMxfp8Static,
 )
 from vllm.model_executor.models.qwen2_moe import Qwen2MoeMLP
@@ -58,8 +55,6 @@ from vllm.utils.torch_utils import aux_stream, current_stream
 
 logger = init_logger(__name__)
 
-# K values per UE8M0 scale of the MX formats.
-_MX_GROUP = 32
 _CHECKPOINT_SHARDS = {"gate_proj": "w1", "up_proj": "w3", "down_proj": "w2"}
 # Per-expert tensors of one projection, by checkpoint expert format. Formats
 # MegaMoE runs share the name of their MEGA_MOE_* format; "fp8_block" is the
@@ -70,23 +65,11 @@ _SHARD_TENSORS = {
     "mxfp8": ("weight", "weight_scale"),
     "mxfp4": ("weight", "weight_scale"),
 }
-# Online targets a layer can be forced to.
-_ONLINE_FORMATS = {
-    kMxfp8Dynamic: MEGA_MOE_MXFP8,
-    kMxfp8Static: MEGA_MOE_MXFP8,
-    kMxfp4Static: MEGA_MOE_MXFP4,
-}
+_ONLINE_FORMATS = {kMxfp8Static: MEGA_MOE_MXFP8, kMxfp4Static: MEGA_MOE_MXFP4}
 # Bounds the FP32 temporaries of one requantize call to a few GiB: at EP1,
 # one projection batches every routed expert.
 _REQUANTIZE_CHUNK_ELEMENTS = 1 << 27
-
-
-def _deep_gemm_utils():
-    return import_module(f"{_import_deep_gemm().__name__}.utils")
-
-
-def _ue8m0_to_float(exponent: torch.Tensor) -> torch.Tensor:
-    return (exponent.view(torch.uint8).to(torch.int32) << 23).view(torch.float32)
+_E2M1_VALUES = torch.tensor([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0])
 
 
 def dequantize_experts(
@@ -96,20 +79,20 @@ def dequantize_experts(
     if checkpoint_format == "bf16":
         return weight.float()
     assert scale is not None
-    if checkpoint_format == "fp8_block":
-        rows, cols = weight.shape
-        scale = scale.float()
-        scale = scale.repeat_interleave(rows // scale.shape[0], 0)
-        scale = scale.repeat_interleave(cols // scale.shape[1], 1)
-        return weight.float() * scale
-    utils = _deep_gemm_utils()
     if checkpoint_format == "mxfp4":
-        return utils.cast_back_from_fp4(
-            weight.view(torch.uint8), _ue8m0_to_float(scale), gran_k=_MX_GROUP
-        )
-    return utils.cast_back_from_fp8(
-        weight.view(torch.float8_e4m3fn), _ue8m0_to_float(scale), gran_k=_MX_GROUP
-    )
+        # E2M1 pairs, element 2i in the low nibble (OCP MX).
+        codes = weight.view(torch.uint8)
+        codes = torch.stack([codes & 0xF, codes >> 4], dim=-1).flatten(-2).long()
+        values = _E2M1_VALUES.to(weight.device)
+        values = torch.cat([values, -values])[codes]
+    else:
+        values = weight.float()
+    if checkpoint_format != "fp8_block":
+        # UE8M0 exponents.
+        scale = (scale.view(torch.uint8).to(torch.int32) << 23).view(torch.float32)
+    rows, cols = values.shape
+    scale = scale.float().repeat_interleave(rows // scale.shape[0], 0)
+    return values * scale.repeat_interleave(cols // scale.shape[1], 1)
 
 
 def requantize_experts(
@@ -120,20 +103,17 @@ def requantize_experts(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Requantize `[N, K]` checkpoint expert weights to MXFP8 or MXFP4.
 
-    Rounds as DeepGEMM's `per_token_cast_to_fp8` / `per_token_cast_to_fp4`
-    and returns the scales as `[N, K // 32]` UE8M0 exponents. Rows are
-    independent, so experts may be stacked along dim 0.
+    Rounds as DeepGEMM's own casts and returns the scales as `[N, K // 32]`
+    UE8M0 exponents. Rows are independent, so experts may be stacked.
     """
-    utils = _deep_gemm_utils()
+    utils = import_module(f"{_import_deep_gemm().__name__}.utils")
     cast = (
         utils.per_token_cast_to_fp4
         if weight_format is MEGA_MOE_MXFP4
         else utils.per_token_cast_to_fp8
     )
     values, sf = cast(
-        dequantize_experts(weight, scale, checkpoint_format),
-        use_ue8m0=True,
-        gran_k=_MX_GROUP,
+        dequantize_experts(weight, scale, checkpoint_format), use_ue8m0=True, gran_k=32
     )
     # Power-of-two FP32 scales: the exponent bits are the UE8M0 value.
     return values, (sf.view(torch.int32) >> 23).to(torch.uint8)
@@ -193,9 +173,7 @@ def mega_moe_expert_formats(
         is not None
     ):
         source, quant_key_str, target_pattern, spec, _ = resolved
-        weight_format = (
-            None if spec.weight is None else _ONLINE_FORMATS.get(spec.weight)
-        )
+        weight_format = _ONLINE_FORMATS.get(spec.weight) if spec.weight else None
         if weight_format is None:
             raise NotImplementedError(
                 f"Qwen4Exp MegaMoE runs routed experts as mxfp8 or mxfp4; "
@@ -217,15 +195,7 @@ def mega_moe_expert_formats(
             "the format explicitly."
         )
         return checkpoint_format, MEGA_MOE_MXFP8
-    weight_format = MEGA_MOE_WEIGHT_FORMATS[checkpoint_format]
-    if weight_format is MEGA_MOE_BF16 and not hasattr(
-        _import_deep_gemm(), MEGA_MOE_BF16.kernel
-    ):
-        raise NotImplementedError(
-            "This DeepGEMM build has no BF16 MegaMoE kernel; requantize the BF16 "
-            "routed experts with --quantization mxfp8 or mxfp4."
-        )
-    return checkpoint_format, weight_format
+    return checkpoint_format, MEGA_MOE_WEIGHT_FORMATS[checkpoint_format]
 
 
 def flush_mega_moe_requantize(model: nn.Module) -> None:
@@ -271,7 +241,7 @@ class Qwen4ExpMegaMoEExperts(DeepGemmMegaMoEExperts):
         self.quant_method = _FinishRequantize()
         self.checkpoint_format = checkpoint_format
         self._shard_tensors = _SHARD_TENSORS[checkpoint_format]
-        self.requantizes = checkpoint_format != self.weight_format.name
+        self._requantizes = checkpoint_format != self.weight_format.name
         # Parameters may sit on meta (weight-cache IPC loading, layerwise
         # reload), so stage and requantize on the current GPU.
         self._requantize_device = torch.device(
@@ -300,7 +270,7 @@ class Qwen4ExpMegaMoEExperts(DeepGemmMegaMoEExperts):
                 and self.checkpoint_format == "bf16"
             ):
                 # Fused [E, N, K] BF16 experts; gate rows precede up rows.
-                loaded |= self._param_names("w2" if name == "down_proj" else "w13")
+                loaded |= self._params_of("w2" if name == "down_proj" else "w13")
                 for expert_id in self._owned_experts:
                     if name == "down_proj":
                         self._load_shard(expert_id, "w2", "weight", tensor[expert_id])
@@ -322,19 +292,18 @@ class Qwen4ExpMegaMoEExperts(DeepGemmMegaMoEExperts):
                 )
             expert, proj, kind = parts
             shard_id = _CHECKPOINT_SHARDS[proj]
-            loaded |= self._param_names("w2" if shard_id == "w2" else "w13")
+            loaded |= self._params_of("w2" if shard_id == "w2" else "w13")
             if self._map_global_expert_id(int(expert)):
                 self._load_shard(int(expert), shard_id, kind, tensor)
         return loaded
 
-    def _param_names(self, prefix: str) -> set[str]:
-        names = (f"{prefix}_weight", f"{prefix}_weight_scale")
-        return {name for name in names if hasattr(self, name)}
+    def _params_of(self, prefix: str) -> set[str]:
+        return {name for name in self._parameters if name.startswith(f"{prefix}_")}
 
     def _load_shard(
         self, expert_id: int, shard_id: str, kind: str, tensor: torch.Tensor
     ) -> None:
-        if not self.requantizes:
+        if not self._requantizes:
             prefix = "w2" if shard_id == "w2" else "w13"
             param_name = (
                 f"{prefix}_weight" if kind == "weight" else f"{prefix}_weight_scale"
@@ -412,6 +381,13 @@ class Qwen4ExpMegaMoeBlock(nn.Module):
             raise NotImplementedError(
                 "Qwen4Exp MegaMoE requires expert parallel. Enable it with "
                 "--enable-expert-parallel."
+            )
+        placement = parallel_config.expert_placement_strategy
+        if placement != "linear":
+            # The EP weight filter would hand this rank other experts.
+            raise NotImplementedError(
+                "Qwen4Exp MegaMoE places experts linearly; got "
+                f"--expert-placement-strategy {placement}."
             )
         self.tp_size = get_tensor_model_parallel_world_size()
         if self.tp_size > 1:

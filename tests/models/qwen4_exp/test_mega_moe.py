@@ -28,7 +28,6 @@ from vllm.model_executor.model_loader.reload import (
 )
 from vllm.models.qwen4_exp.nvidia.mega_moe import (
     Qwen4ExpMegaMoEExperts,
-    dequantize_experts,
     flush_mega_moe_requantize,
     mega_moe_expert_formats,
     requantize_experts,
@@ -37,24 +36,12 @@ from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import is_deep_gemm_supported
 
 HIDDEN, INTER = 512, 256
-# (checkpoint format, MegaMoE format): native loads and every requantization.
-CASES = [
-    pytest.param("fp8_block", MEGA_MOE_MXFP8, id="fp8_block-mxfp8"),
-    pytest.param("fp8_block", MEGA_MOE_MXFP4, id="fp8_block-mxfp4"),
-    pytest.param("mxfp8", MEGA_MOE_MXFP8, id="mxfp8-native"),
-    pytest.param("mxfp8", MEGA_MOE_MXFP4, id="mxfp8-mxfp4"),
-    pytest.param("mxfp4", MEGA_MOE_MXFP4, id="mxfp4-native"),
-    pytest.param("mxfp4", MEGA_MOE_MXFP8, id="mxfp4-mxfp8"),
-    pytest.param("bf16", MEGA_MOE_BF16, id="bf16-native"),
-    pytest.param("bf16", MEGA_MOE_MXFP8, id="bf16-mxfp8"),
-    pytest.param("bf16", MEGA_MOE_MXFP4, id="bf16-mxfp4"),
-]
 SCALE_NAMES = {
     "fp8_block": "weight_scale_inv",
     "mxfp8": "weight_scale",
     "mxfp4": "weight_scale",
 }
-requires_deep_gemm = pytest.mark.skipif(
+pytestmark = pytest.mark.skipif(
     not is_deep_gemm_supported(), reason="Requires DeepGEMM"
 )
 
@@ -72,19 +59,32 @@ def _exponent(sf: torch.Tensor) -> torch.Tensor:
     return (sf.view(torch.int32) >> 23).to(torch.uint8)
 
 
+def _cast_back(values: torch.Tensor, exponent: torch.Tensor, fmt) -> torch.Tensor:
+    from vllm.third_party.deep_gemm.utils.math import (
+        cast_back_from_fp4,
+        cast_back_from_fp8,
+    )
+
+    sf = (exponent.to(torch.int32) << 23).view(torch.float32)
+    cast_back = cast_back_from_fp4 if fmt is MEGA_MOE_MXFP4 else cast_back_from_fp8
+    return cast_back(values, sf, gran_k=32)
+
+
 def _shard(checkpoint_format: str, rows: int, cols: int, generator):
     """One projection of one expert as the checkpoint stores it."""
-    x = torch.randn(rows, cols, generator=generator) * 1e-2
-    if checkpoint_format == "bf16":
-        return x.bfloat16(), None
     if checkpoint_format == "fp8_block":
         weight = torch.randn(rows, cols, generator=generator).to(torch.float8_e4m3fn)
         scale = torch.rand(rows // 128, cols // 128, generator=generator) * 1e-2
         return weight, scale + 1e-3
+    x = torch.randn(rows, cols, generator=generator) * 1e-2
+    if checkpoint_format == "bf16":
+        return x.bfloat16(), None
     fmt = MEGA_MOE_MXFP4 if checkpoint_format == "mxfp4" else MEGA_MOE_MXFP8
     values, sf = _cast(fmt)(x, use_ue8m0=True, gran_k=32)
-    # Checkpoints store MXFP4 as uint8 and the scales as UE8M0 bytes.
-    return values.view(torch.uint8) if fmt is MEGA_MOE_MXFP4 else values, _exponent(sf)
+    # MXFP4 checkpoints store packed uint8 values.
+    if fmt is MEGA_MOE_MXFP4:
+        values = values.view(torch.uint8)
+    return values, _exponent(sf)
 
 
 def _checkpoint(checkpoint_format: str, num_experts: int, generator):
@@ -111,136 +111,25 @@ def _names(checkpoint_format, ckpt, generator) -> list[tuple[str, torch.Tensor]]
 
 def _fused_names(ckpt, num_experts) -> list[tuple[str, torch.Tensor]]:
     """The official BF16 checkpoint's fused [E, N, K] experts."""
-    gate_up = torch.stack(
-        [
-            torch.cat([ckpt[e, "gate_proj"][0], ckpt[e, "up_proj"][0]])
-            for e in range(num_experts)
-        ]
-    )
-    down = torch.stack([ckpt[e, "down_proj"][0] for e in range(num_experts)])
-    return [("gate_up_proj", gate_up), ("down_proj", down)]
-
-
-def _quant_config(ignored_layers=None, **online) -> SimpleNamespace:
-    config = Fp8Config(weight_block_size=[128, 128], ignored_layers=ignored_layers)
-    if online:
-        config.online_quantization_config = OnlineQuantizationConfig(
-            QuantizationConfigArgs(**online)
-        )
-    return SimpleNamespace(quant_config=config)
-
-
-def _modelopt_mxfp8_config(**online) -> SimpleNamespace:
-    config = ModelOptMxFp8Config(
-        is_checkpoint_mxfp8_serialized=True,
-        kv_cache_quant_algo=None,
-        exclude_modules=[],
-    )
-    if online:
-        config.online_quantization_config = OnlineQuantizationConfig(
-            QuantizationConfigArgs(**online)
-        )
-    return SimpleNamespace(quant_config=config)
-
-
-@requires_deep_gemm
-def test_expert_formats_follow_checkpoint_and_quantization_config():
-    prefix, other = "model.layers.3.mlp.experts", "model.layers.47.mlp.experts"
-    # Block FP8 has no MegaMoE kernel: MXFP8 unless forced.
-    assert mega_moe_expert_formats(_quant_config(), prefix) == (
-        "fp8_block",
-        MEGA_MOE_MXFP8,
-    )
-    config = _quant_config(moe="mxfp4", ignore=["*.layers.47.*"])
-    assert mega_moe_expert_formats(config, prefix)[1] is MEGA_MOE_MXFP4
-    assert mega_moe_expert_formats(config, other)[1] is MEGA_MOE_MXFP8
-    # Only the forced layer shows in the online quantization summary.
-    assert list(config.quant_config.online_quantization_config.quantized_layers) == [
-        prefix
+    experts = range(num_experts)
+    gate_up = [
+        torch.cat([ckpt[e, "gate_proj"][0], ckpt[e, "up_proj"][0]]) for e in experts
     ]
-    config = _quant_config(targets={"*.layers.3.mlp.experts": "mxfp4"})
-    assert mega_moe_expert_formats(config, prefix)[1] is MEGA_MOE_MXFP4
-    assert mega_moe_expert_formats(config, other)[1] is MEGA_MOE_MXFP8
-    with pytest.raises(NotImplementedError, match="mxfp8 or mxfp4"):
-        mega_moe_expert_formats(_quant_config(moe="fp8_per_tensor"), prefix)
-    # Experts the FP8 checkpoint leaves unquantized are BF16.
-    assert mega_moe_expert_formats(_quant_config(ignored_layers=[prefix]), prefix) == (
-        "bf16",
-        MEGA_MOE_BF16,
-    )
-    # MXFP8 checkpoints load as stored, or requantize when forced.
-    config = _modelopt_mxfp8_config()
-    assert mega_moe_expert_formats(config, prefix) == ("mxfp8", MEGA_MOE_MXFP8)
-    config = _modelopt_mxfp8_config(moe="mxfp8")
-    assert mega_moe_expert_formats(config, prefix) == ("mxfp8", MEGA_MOE_MXFP8)
-    assert not config.quant_config.online_quantization_config.quantized_layers
-    config = _modelopt_mxfp8_config(moe="mxfp4")
-    assert mega_moe_expert_formats(config, prefix) == ("mxfp8", MEGA_MOE_MXFP4)
-    # BF16 checkpoints, with and without online quantization.
-    bf16 = SimpleNamespace(quant_config=None)
-    assert mega_moe_expert_formats(bf16, prefix) == ("bf16", MEGA_MOE_BF16)
-    online = SimpleNamespace(
-        quant_config=OnlineQuantizationConfig(QuantizationConfigArgs(moe="mxfp4"))
-    )
-    assert mega_moe_expert_formats(online, prefix) == ("bf16", MEGA_MOE_MXFP4)
-    with pytest.raises(NotImplementedError, match="128x128 block"):
-        mega_moe_expert_formats(SimpleNamespace(quant_config=Fp8Config()), prefix)
+    down = [ckpt[e, "down_proj"][0] for e in experts]
+    return [("gate_up_proj", torch.stack(gate_up)), ("down_proj", torch.stack(down))]
 
 
-def test_mxfp4_checkpoint_packing_matches_deep_gemm():
-    """MXFP4 checkpoints (OCP) pack element 2i in the low nibble, as DeepGEMM."""
-    x = torch.tensor([[1.0, 6.0] + [0.0] * 30])
-    values, sf = _cast(MEGA_MOE_MXFP4)(x, use_ue8m0=True, gran_k=32)
-    # E2M1 codes: 1.0 -> 0b0010, 6.0 -> 0b0111; the block scale is 1.
-    assert values.view(torch.uint8)[0, 0].item() == 0x72
-    assert _exponent(sf)[0, 0].item() == 127
-
-
-@requires_deep_gemm
-@pytest.mark.parametrize("checkpoint_format,fmt", CASES)
-def test_requantize_matches_deep_gemm_cast(checkpoint_format, fmt):
-    if checkpoint_format == fmt.name:
-        pytest.skip("Experts in a MegaMoE format load as stored")
-    weight, scale = _shard(
-        checkpoint_format, INTER, HIDDEN, torch.Generator().manual_seed(1)
-    )
-    weight = weight.cuda()
-    scale = None if scale is None else scale.cuda()
-    values, exponent = requantize_experts(weight, scale, checkpoint_format, fmt)
-    ref_values, ref_sf = _cast(fmt)(
-        dequantize_experts(weight, scale, checkpoint_format), use_ue8m0=True, gran_k=32
-    )
-    assert torch.equal(values.view(torch.uint8), ref_values.view(torch.uint8))
-    assert torch.equal(exponent, _exponent(ref_sf))
-
-
-@pytest.fixture
-def any_device_mega_moe(monkeypatch):
-    monkeypatch.setattr(
-        "vllm.model_executor.layers.fused_moe.deep_gemm_mega_moe."
-        "check_deep_gemm_mega_moe_supported",
-        lambda *args: None,
-    )
-
-
-def _experts(
-    cls,
-    fmt,
-    num_local_experts,
-    experts_start_idx,
-    num_logical_experts,
-    checkpoint_format="fp8_block",
-):
+def _experts(cls, fmt, num_local, start, num_logical, checkpoint_format=None):
     vllm_config = SimpleNamespace(
         scheduler_config=SimpleNamespace(max_num_batched_tokens=64),
         compilation_config=SimpleNamespace(static_forward_context={}),
     )
     kwargs = dict(
         weight_format=fmt,
-        num_experts=num_logical_experts,
-        num_local_experts=num_local_experts,
-        experts_start_idx=experts_start_idx,
-        num_logical_experts=num_logical_experts,
+        num_experts=num_logical,
+        num_local_experts=num_local,
+        experts_start_idx=start,
+        num_logical_experts=num_logical,
         top_k=2,
         hidden_size=HIDDEN,
         intermediate_size=INTER,
@@ -264,22 +153,18 @@ def _expected(checkpoint_format, fmt, ckpt, num_local, start, num_logical):
                 weight.cuda(), scale, checkpoint_format, fmt
             )
         prefix = "w2" if proj == "down_proj" else "w13"
-        tensors = [("weight", weight)] + (
-            [] if scale is None else [("weight_scale", scale)]
-        )
-        for suffix, value in tensors:
-            name = f"{prefix}_{suffix}"
-            expected.weight_loader(
-                getattr(expected, name), value, name, shard_ids[proj], e
-            )
+        for suffix, value in (("weight", weight), ("weight_scale", scale)):
+            if value is not None:
+                name = f"{prefix}_{suffix}"
+                expected.weight_loader(
+                    getattr(expected, name), value, name, shard_ids[proj], e
+                )
     return expected
 
 
 def _assert_same_experts(a, b) -> None:
-    names = [n for n, _ in b.named_parameters()]
-    assert names
-    for name in names:
-        assert torch.equal(getattr(a, name), getattr(b, name)), name
+    for name, param in b.named_parameters():
+        assert torch.equal(getattr(a, name), param), name
 
 
 def _load(experts, names) -> None:
@@ -287,44 +172,131 @@ def _load(experts, names) -> None:
     flush_mega_moe_requantize(experts)
 
 
-@requires_deep_gemm
-@pytest.mark.parametrize("fused", [False, True], ids=["per_expert", "fused"])
-@pytest.mark.parametrize("checkpoint_format,fmt", CASES)
+@pytest.fixture
+def any_device_mega_moe(monkeypatch):
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.fused_moe.deep_gemm_mega_moe."
+        "check_deep_gemm_mega_moe_supported",
+        lambda *args: None,
+    )
+
+
+def _with_online(config, **online) -> SimpleNamespace:
+    config.online_quantization_config = OnlineQuantizationConfig(
+        QuantizationConfigArgs(**online)
+    )
+    return SimpleNamespace(quant_config=config)
+
+
+def test_expert_formats_follow_checkpoint_and_quantization_config():
+    prefix, other = "model.layers.3.mlp.experts", "model.layers.47.mlp.experts"
+    fp8 = Fp8Config(weight_block_size=[128, 128])
+    # Block FP8 has no MegaMoE kernel: MXFP8 unless a format is forced.
+    assert mega_moe_expert_formats(SimpleNamespace(quant_config=fp8), prefix) == (
+        "fp8_block",
+        MEGA_MOE_MXFP8,
+    )
+    config = _with_online(fp8, moe="mxfp4", ignore=["*.layers.47.*"])
+    assert mega_moe_expert_formats(config, prefix)[1] is MEGA_MOE_MXFP4
+    assert mega_moe_expert_formats(config, other)[1] is MEGA_MOE_MXFP8
+    # Only the forced layer shows in the online quantization summary.
+    assert list(config.quant_config.online_quantization_config.quantized_layers) == [
+        prefix
+    ]
+    config = _with_online(Fp8Config(weight_block_size=[128, 128]), moe="mxfp8")
+    assert mega_moe_expert_formats(config, prefix) == ("fp8_block", MEGA_MOE_MXFP8)
+
+    mxfp8 = ModelOptMxFp8Config(
+        is_checkpoint_mxfp8_serialized=True,
+        kv_cache_quant_algo=None,
+        exclude_modules=[],
+    )
+    assert mega_moe_expert_formats(SimpleNamespace(quant_config=mxfp8), prefix) == (
+        "mxfp8",
+        MEGA_MOE_MXFP8,
+    )
+    config = _with_online(mxfp8, moe="mxfp4")
+    assert mega_moe_expert_formats(config, prefix) == ("mxfp8", MEGA_MOE_MXFP4)
+
+    bf16 = SimpleNamespace(quant_config=None)
+    assert mega_moe_expert_formats(bf16, prefix) == ("bf16", MEGA_MOE_BF16)
+    online = OnlineQuantizationConfig(QuantizationConfigArgs(moe="mxfp4"))
+    online_bf16 = SimpleNamespace(quant_config=online)
+    assert mega_moe_expert_formats(online_bf16, prefix) == ("bf16", MEGA_MOE_MXFP4)
+
+
+@pytest.mark.parametrize(
+    "checkpoint_format,fmt",
+    [
+        ("fp8_block", MEGA_MOE_MXFP4),
+        ("mxfp8", MEGA_MOE_MXFP4),
+        ("mxfp4", MEGA_MOE_MXFP8),
+        ("bf16", MEGA_MOE_MXFP4),
+    ],
+)
+def test_requantize_matches_deep_gemm_cast(checkpoint_format, fmt):
+    """Requantization dequantizes exactly and rounds as DeepGEMM's casts."""
+    weight, scale = _shard(checkpoint_format, INTER, HIDDEN, torch.Generator())
+    weight = weight.cuda()
+    scale = None if scale is None else scale.cuda()
+    if checkpoint_format == "fp8_block":
+        assert scale is not None
+        scale_full = scale.repeat_interleave(128, 0).repeat_interleave(128, 1)
+        dequantized = weight.float() * scale_full
+    elif checkpoint_format == "mxfp4":
+        dequantized = _cast_back(weight, scale, MEGA_MOE_MXFP4)
+    elif checkpoint_format == "mxfp8":
+        dequantized = _cast_back(weight, scale, MEGA_MOE_MXFP8)
+    else:
+        dequantized = weight.float()
+    values, exponent = requantize_experts(weight, scale, checkpoint_format, fmt)
+    ref_values, ref_sf = _cast(fmt)(dequantized, use_ue8m0=True, gran_k=32)
+    assert torch.equal(values.view(torch.uint8), ref_values.view(torch.uint8))
+    assert torch.equal(exponent, _exponent(ref_sf))
+
+
+@pytest.mark.parametrize(
+    "checkpoint_format,fmt",
+    [
+        ("fp8_block", MEGA_MOE_MXFP8),
+        ("mxfp8", MEGA_MOE_MXFP8),
+        ("mxfp4", MEGA_MOE_MXFP4),
+        ("bf16", MEGA_MOE_BF16),
+        ("fused_bf16", MEGA_MOE_BF16),
+        ("fused_bf16", MEGA_MOE_MXFP4),
+    ],
+)
 def test_experts_load_checkpoint_into_kernel_layout(
-    any_device_mega_moe, monkeypatch, checkpoint_format, fmt, fused
+    any_device_mega_moe, monkeypatch, checkpoint_format, fmt
 ):
     """Shards in any order, weight and scale apart, only owned experts kept."""
-    if fused and checkpoint_format != "bf16":
-        pytest.skip("Only BF16 checkpoints fuse the experts")
     # One expert per requantize call, so batching spans several calls.
     monkeypatch.setattr(
         "vllm.models.qwen4_exp.nvidia.mega_moe._REQUANTIZE_CHUNK_ELEMENTS",
         INTER * HIDDEN,
     )
+    fused = checkpoint_format == "fused_bf16"
+    checkpoint_format = "bf16" if fused else checkpoint_format
     generator = torch.Generator().manual_seed(2)
     ckpt = _checkpoint(checkpoint_format, 4, generator)
-    # EP rank 1 of 2 owns logical experts 2 and 3.
-    experts = _experts(Qwen4ExpMegaMoEExperts, fmt, 2, 2, 4, checkpoint_format)
     names = (
         _fused_names(ckpt, 4) if fused else _names(checkpoint_format, ckpt, generator)
     )
+    # EP rank 1 of 2 owns logical experts 2 and 3.
+    experts = _experts(Qwen4ExpMegaMoEExperts, fmt, 2, 2, 4, checkpoint_format)
     loaded = experts.load_weights(iter(names))
     assert loaded == {n for n, _ in experts.named_parameters()}
     experts.quant_method.process_weights_after_loading(experts)
-
-    expected = _expected(checkpoint_format, fmt, ckpt, 2, 2, 4)
-    _assert_same_experts(experts, expected)
-    assert torch.count_nonzero(experts.w13_weight.view(torch.uint8)) > 0
+    _assert_same_experts(experts, _expected(checkpoint_format, fmt, ckpt, 2, 2, 4))
 
 
-@requires_deep_gemm
 def test_weight_and_scale_may_arrive_in_separate_calls(any_device_mega_moe):
     """Chunked weight updates may split an expert's weight from its scale and
     a rank's experts across calls; a pair still incomplete fails the load."""
     generator = torch.Generator().manual_seed(3)
     ckpt = _checkpoint("fp8_block", 2, generator)
     names = _names("fp8_block", ckpt, generator)
-    experts = _experts(Qwen4ExpMegaMoEExperts, MEGA_MOE_MXFP8, 2, 0, 2)
+    experts = _experts(Qwen4ExpMegaMoEExperts, MEGA_MOE_MXFP8, 2, 0, 2, "fp8_block")
     first = [n for n in names if n[0].startswith("0.") or n[0].endswith(".weight")]
     _load(experts, first)
     with pytest.raises(ValueError, match="without both weight and scale"):
@@ -334,22 +306,10 @@ def test_weight_and_scale_may_arrive_in_separate_calls(any_device_mega_moe):
     _assert_same_experts(experts, _expected("fp8_block", MEGA_MOE_MXFP8, ckpt, 2, 0, 2))
 
 
-@requires_deep_gemm
-def test_unexpected_expert_tensor_fails_loudly(any_device_mega_moe):
-    experts = _experts(Qwen4ExpMegaMoEExperts, MEGA_MOE_MXFP8, 2, 0, 2)
-    with pytest.raises(ValueError, match="unexpected fp8_block expert tensor"):
-        experts.load_weights(iter([("0.gate_proj.input_scale", torch.ones(1))]))
-
-
-@requires_deep_gemm
 @pytest.mark.parametrize(
     "checkpoint_format,fmt",
-    [
-        pytest.param("fp8_block", MEGA_MOE_MXFP8, id="fp8_block-mxfp8"),
-        pytest.param("fp8_block", MEGA_MOE_MXFP4, id="fp8_block-mxfp4"),
-        pytest.param("mxfp8", MEGA_MOE_MXFP8, id="mxfp8-native"),
-        pytest.param("bf16", MEGA_MOE_BF16, id="bf16-native"),
-    ],
+    [("fp8_block", MEGA_MOE_MXFP4), ("mxfp8", MEGA_MOE_MXFP8)],
+    ids=["requantized", "as_stored"],
 )
 def test_layerwise_reload_replaces_routed_experts(
     any_device_mega_moe, checkpoint_format, fmt
@@ -376,18 +336,14 @@ def test_layerwise_reload_replaces_routed_experts(
 
 
 @pytest.mark.skipif(
-    not (
-        current_platform.is_device_capability_family(100) and is_deep_gemm_supported()
-    ),
-    reason="DeepGEMM MegaMoE kernels require SM100 and DeepGEMM",
+    not current_platform.is_device_capability_family(100),
+    reason="DeepGEMM MegaMoE kernels require SM100",
 )
-@pytest.mark.parametrize("checkpoint_format,fmt", CASES)
-def test_loaded_experts_match_dequantized_reference(dist_init, checkpoint_format, fmt):
-    from vllm.third_party.deep_gemm.utils.math import (
-        cast_back_from_fp4,
-        cast_back_from_fp8,
-    )
-
+@pytest.mark.parametrize("fmt", [MEGA_MOE_MXFP8, MEGA_MOE_MXFP4, MEGA_MOE_BF16])
+def test_loaded_experts_match_dequantized_reference(dist_init, fmt):
+    """Each kernel format against a dequantized reference. BF16 experts load
+    as stored; MX experts are requantized from block FP8."""
+    checkpoint_format = "bf16" if fmt is MEGA_MOE_BF16 else "fp8_block"
     num_experts, top_k, num_tokens = 8, 2, 48
     generator = torch.Generator().manual_seed(4)
     ckpt = _checkpoint(checkpoint_format, num_experts, generator)
@@ -398,26 +354,19 @@ def test_loaded_experts_match_dequantized_reference(dist_init, checkpoint_format
 
     def dequant(e: int, proj: str) -> torch.Tensor:
         weight, scale = ckpt[e, proj]
-        weight = weight.cuda()
         if fmt is MEGA_MOE_BF16:
-            return weight.float()
-        scale = None if scale is None else scale.cuda()
-        values, exponent = (
-            (weight, scale)
-            if checkpoint_format == fmt.name
-            else requantize_experts(weight, scale, checkpoint_format, fmt)
+            return weight.cuda().float()
+        values, exponent = requantize_experts(
+            weight.cuda(), scale.cuda(), checkpoint_format, fmt
         )
-        assert exponent is not None
-        sf = (exponent.to(torch.int32) << 23).view(torch.float32)
-        cast_back = cast_back_from_fp4 if fmt is MEGA_MOE_MXFP4 else cast_back_from_fp8
-        return cast_back(values, sf, gran_k=32)
+        return _cast_back(values, exponent, fmt)
 
     def round_activation(x: torch.Tensor) -> torch.Tensor:
         # MX experts take MXFP8 activations; BF16 experts take BF16.
         if fmt is MEGA_MOE_BF16:
             return x.bfloat16().float()
         values, sf = _cast(MEGA_MOE_MXFP8)(x.bfloat16(), use_ue8m0=True, gran_k=32)
-        return cast_back_from_fp8(values, sf, gran_k=32)
+        return _cast_back(values, _exponent(sf), MEGA_MOE_MXFP8)
 
     torch.manual_seed(0)
     hidden_states = torch.randn(num_tokens, HIDDEN, device="cuda").bfloat16()

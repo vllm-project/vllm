@@ -142,7 +142,6 @@ Currently supported combinations are:
 | Serialized compressed-tensors NVFP4 MoE | any online MoE method | Target-specific hardware requirements |
 | Serialized ModelOpt NVFP4 MoE | any online MoE method | Target-specific hardware requirements |
 | Serialized Quark NVFP4 MoE | any online MoE method | Target-specific hardware requirements |
-| Serialized BF16, 128x128 block-FP8, MXFP8 or MXFP4 Qwen4Exp MoE on the `deep_gemm_mega_moe` backend | `mxfp8` or `mxfp4` | Blackwell, `--enable-expert-parallel`, tensor parallel size 1 |
 
 For example, serialized ModelOpt MXFP8 linears can be converted to
 per-channel-weight/per-token-activation FP8 at load time:
@@ -159,19 +158,6 @@ for example compressed-tensors NVFP4 experts to online MXFP4:
 ```bash
 vllm serve RedHatAI/Qwen3-30B-A3B-NVFP4 \
   --quantization-config '{"targets":{"*mlp.experts*":"mxfp4"}}'
-```
-
-With the DeepGEMM MegaMoE backend, Qwen4Exp routed experts stored as BF16, MXFP8
-or MXFP4 run as stored. MegaMoE cannot run 128x128 block-FP8 experts, so they are
-requantized to MXFP8 with a warning. `moe` (`mxfp8` or `mxfp4`) forces a format,
-and `ignore`/`targets` patterns pick it per layer. The MTP drafter keeps the
-default format:
-
-```bash
-vllm serve Qwen/Qwen3.8-Flash-Next-FP8 \
-  --data-parallel-size 4 --enable-expert-parallel \
-  --kernel-config '{"moe_backend":"deep_gemm_mega_moe"}' \
-  --quantization-config '{"moe":"mxfp4"}'
 ```
 
 !!! info
