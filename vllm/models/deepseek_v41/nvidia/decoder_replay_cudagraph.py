@@ -75,11 +75,11 @@ class DecoderReplayCudaGraphManager(CudaGraphManager):
         prepare: Callable[[BatchExecutionDescriptor], None],
         stream: torch.cuda.Stream | None = None,
     ) -> None:
-        """Capture each size on the replay batch ``prepare`` sets on the layers.
+        """Capture each size on the replay batch `prepare` sets on the layers.
 
-        On the model graphs' ``stream`` they share its free blocks of the graph
+        On the model graphs' `stream` they share its free blocks of the graph
         pool: a replay graph runs in a model graph's eager break, after it has
-        gathered its inputs into ``input_buffers`` and before the model graph
+        gathered its inputs into `input_buffers` and before the model graph
         reads its outputs from the break's own buffers, so no model graph
         tensor in the pool is live while it runs. Aux hidden states captured
         before the replay layers would be, so with those it keeps its own.
@@ -105,7 +105,7 @@ class DecoderReplayCudaGraphManager(CudaGraphManager):
         self.layers.replay_batch = None
 
     def run(self, rows: torch.Tensor, inputs: tuple) -> tuple[torch.Tensor, ...]:
-        """Replay the forward context's graph on ``rows`` of ``inputs``."""
+        """Replay the forward context's graph on `rows` of `inputs`."""
         num_rows = rows.shape[0]
         for buf, t in zip(self.input_buffers, inputs):
             torch.index_select(t, 0, rows, out=buf[:num_rows])

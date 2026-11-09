@@ -1213,8 +1213,8 @@ ACTIVATIONS = {
 
 
 def _quantize(w: torch.Tensor, spec: MegaMoEWeightSpec):
-    """Return checkpoint ``(weight, scale, global_scale)`` and the dequantized
-    weight; NVFP4 takes ``global_scale`` as ``weight_scale_2``."""
+    """Return checkpoint `(weight, scale, global_scale)` and the dequantized
+    weight; NVFP4 takes `global_scale` as `weight_scale_2`."""
     from vllm.third_party.deep_gemm.utils.math import (
         cast_back_from_fp4,
         cast_back_from_fp8,
@@ -1243,7 +1243,7 @@ def _quantize(w: torch.Tensor, spec: MegaMoEWeightSpec):
 
 
 def _round_trip(x: torch.Tensor, quant, nvfp4_scale: float | None = None):
-    """What the kernel computes on: x after ``quant`` (None keeps BF16)."""
+    """What the kernel computes on: x after `quant` (None keeps BF16)."""
     from vllm.third_party.deep_gemm.utils.math import (
         cast_back_from_fp8,
         per_token_cast_to_fp8,
@@ -1284,7 +1284,7 @@ def _activate(h: torch.Tensor, act: MegaMoEActivation) -> torch.Tensor:
 def _expert(x, w13, w2, weight, fmt, act, l2_scale):
     """Reference routed expert. MX and BF16 weight the activation before the
     L2 dispatch; NVFP4 quantizes the unweighted activation with the global
-    ``l2_scale`` and weights the BF16 output."""
+    `l2_scale` and weights the BF16 output."""
     a = _activate(x @ w13.t(), act)
     if fmt.hidden_quant == kNvfp4DynamicToken:
         a = _round_trip(a, fmt.hidden_quant, l2_scale)
@@ -1330,7 +1330,7 @@ KERNEL_FORMATS = {"mxfp4": MEGA_MOE_MXFP4_SM90} if is_sm90 else MEGA_MOE_WEIGHT_
     ],
 )
 def test_deep_gemm_mega_moe_matches_reference(dist_init, fmt_name, shared, act_name):
-    """``shared`` is the fused shared-expert dtype; None runs it unfused."""
+    """`shared` is the fused shared-expert dtype; None runs it unfused."""
     fmt, act = KERNEL_FORMATS[fmt_name], ACTIVATIONS[act_name]
     shared_spec = next(
         (spec for spec in fmt.shared if spec.dtype == shared), fmt.shared[0]

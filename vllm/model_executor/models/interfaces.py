@@ -357,7 +357,7 @@ class SupportsMultiModal(SupportsMultiModalEmbeddings, Protocol):
 
         Tower model components are automatically skipped when `--limit-mm-per-prompt`
         is set to zero for all of their modalities, and on pipeline stages after the
-        first under Model Runner V2, which runs encoders on the first stage only.
+        first, since encoders run on the first stage only.
 
         If `targets` is set, instead include descendants that are an instance
         of `targets`, even if they aren't direct children.
@@ -389,9 +389,7 @@ class SupportsMultiModal(SupportsMultiModalEmbeddings, Protocol):
                     targets=targets,
                 )
                 if all(mm_config.get_limit_per_prompt(m) == 0 for m in modalities)
-                or (
-                    vllm_config.use_v2_model_runner and not get_pp_group().is_first_rank
-                )
+                or not get_pp_group().is_first_rank
                 else nullcontext()
             ):
                 yield
@@ -444,7 +442,7 @@ class SupportsMultiModal(SupportsMultiModalEmbeddings, Protocol):
         mm_kwargs: "MultiModalKwargsItem | None",
         num_mm_embeds: int,
     ) -> tuple[int, int | None]:
-        """Return ``(tower_tokens, connector_tokens)`` for multimodal LoRA mappings.
+        """Return `(tower_tokens, connector_tokens)` for multimodal LoRA mappings.
 
         MM LoRA uses these counts to build adapter mappings for the tower and
         connector forwards. Models with multiple modalities can override this
@@ -680,7 +678,7 @@ def supports_score_template(
 class SupportsKVCacheGrouping(Protocol):
     """The interface required for models that own their KV cache grouping.
 
-    .. note::
+    !!! note
         Experimental. The classmethod contract may change as model-owned
         grouping stabilizes.
 
@@ -1355,16 +1353,16 @@ class SupportsTranscription(Protocol):
     """
 
     supports_diarized_transcription: ClassVar[bool] = False
-    """Enables the ``diarized_json`` response format for the model."""
+    """Enables the `diarized_json` response format for the model."""
 
     supports_explicit_language_detection: ClassVar[bool] = False
     """
     Transcription models that require an explicit language detection step
     (e.g. Whisper needs a separate forward pass to predict the language
-    token) should set this to ``True`` and implement
-    :meth:`get_language_detection_prompt` and
-    :meth:`parse_language_detection_output` and
-    :meth:`get_language_token_ids`.
+    token) should set this to `True` and implement
+    `get_language_detection_prompt` and
+    `parse_language_detection_output` and
+    `get_language_token_ids`.
     """
 
     no_space_languages: ClassVar[set[str]] = {"ja", "zh"}
@@ -1464,7 +1462,7 @@ class SupportsTranscription(Protocol):
     def parse_diarized_transcript(cls, text: str) -> list[DiarizedTranscriptionSegment]:
         """Parse the model-specific diarized transcript format.
 
-        Only models that set ``supports_diarized_transcription`` must override
+        Only models that set `supports_diarized_transcription` must override
         this method.
         """
         raise NotImplementedError
@@ -1490,7 +1488,7 @@ class SupportsTranscription(Protocol):
         """Return a prompt that triggers language detection.
 
         Only needs to be implemented when
-        ``supports_explicit_language_detection`` is ``True``.
+        `supports_explicit_language_detection` is `True`.
         """
         raise NotImplementedError
 
@@ -1503,7 +1501,7 @@ class SupportsTranscription(Protocol):
         """Parse the detected language from model output token IDs.
 
         Only needs to be implemented when
-        ``supports_explicit_language_detection`` is ``True``.
+        `supports_explicit_language_detection` is `True`.
         """
         raise NotImplementedError
 
@@ -1517,7 +1515,7 @@ class SupportsTranscription(Protocol):
         Used to constrain language detection to only produce valid language tokens.
 
         Only needs to be implemented when
-        ``supports_explicit_language_detection`` is ``True``.
+        `supports_explicit_language_detection` is `True`.
         """
         raise NotImplementedError
 
@@ -1585,13 +1583,13 @@ def supports_any_eagle(
 class LocalArgmaxMixin:
     """Mixin for draft model heads in speculative decoding.
 
-    Provides a D2T-aware ``get_top_tokens`` that preserves the
+    Provides a D2T-aware `get_top_tokens` that preserves the
     local-argmax communication reduction even when the draft vocabulary
     is smaller than the target vocabulary.
 
-    When ``draft_id_to_target_id`` is present (shape ``(draft_vocab_size,)``,
+    When `draft_id_to_target_id` is present (shape `(draft_vocab_size,)`,
     containing per-token offset to target vocab id), the draft argmax index
-    ``k`` is mapped to the target vocab id via::
+    `k` is mapped to the target vocab id via::
 
         target_id = k + draft_id_to_target_id[k]
 
@@ -1600,9 +1598,9 @@ class LocalArgmaxMixin:
     O(batch * 2 * tp_size) communication instead of O(batch * vocab_size).
 
     Requires the subclass to expose:
-        ``self.logits_processor``: LogitsProcessor
-        ``self.lm_head``: ParallelLMHead
-        ``self.draft_id_to_target_id`` (optional): nn.Parameter
+        `self.logits_processor`: LogitsProcessor
+        `self.lm_head`: ParallelLMHead
+        `self.draft_id_to_target_id` (optional): nn.Parameter
     """
 
     logits_processor: "LogitsProcessor"
@@ -1622,16 +1620,19 @@ class LocalArgmaxMixin:
 
 class EagleModelMixin:
     start_layer: int
+    end_layer: int
     aux_hidden_state_layers: tuple[int, ...] = ()
     supports_aux_hidden_states_over_pp: ClassVar[bool] = False
     AUX_HIDDEN_STATE_KEY: ClassVar[str] = "aux_hidden_states_"
     _aux_slot_base_cached: int = 0
-    _aux_upstream_total_cached: int = 0
+    # The previous PP stage takes the aux hidden state at its last layer,
+    # which is this stage's start_layer.
+    _aux_first_local_layer: int = 0
 
     def _set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
         self.aux_hidden_state_layers = tuple(sorted(set(layers)))
         self._aux_slot_base_cached = 0
-        self._aux_upstream_total_cached = 0
+        self._aux_first_local_layer = 0
         self._cache_aux_pp_layout()
 
     def _cache_aux_pp_layout(self) -> None:
@@ -1643,14 +1644,12 @@ class EagleModelMixin:
         if not model_parallel_is_initialized():
             return
         pp = get_pp_group()
-        if pp.world_size < 2:
+        if pp.world_size < 2 or pp.is_first_rank:
             return
-        if not pp.is_first_rank:
-            self._aux_slot_base_cached = bisect_right(
-                self.aux_hidden_state_layers, self.start_layer
-            )
-        if pp.is_last_rank:
-            self._aux_upstream_total_cached = self._aux_slot_base_cached
+        self._aux_slot_base_cached = bisect_right(
+            self.aux_hidden_state_layers, self.start_layer
+        )
+        self._aux_first_local_layer = self.start_layer + 1
 
     def _maybe_add_hidden_state(
         self,
@@ -1659,7 +1658,10 @@ class EagleModelMixin:
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None,
     ) -> list[torch.Tensor]:
-        if layer_idx in self.aux_hidden_state_layers:
+        if (
+            layer_idx >= self._aux_first_local_layer
+            and layer_idx in self.aux_hidden_state_layers
+        ):
             value = hidden_states + residual if residual is not None else hidden_states
             aux_hidden_states.append(value)
         return aux_hidden_states
@@ -1675,24 +1677,54 @@ class EagleModelMixin:
             for i, t in enumerate(aux_hidden_states)
         }
 
+    def aux_hidden_state_slot_keys(self) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        """`IntermediateTensors` keys of the aux hidden states this PP stage
+        receives from earlier stages, and of those it takes and sends on (none
+        on the last stage).
+
+        The forward returns only the aux hidden states this stage takes; the
+        runner adds the received ones once, on the last stage.
+        """
+        from vllm.distributed.parallel_state import get_pp_group
+
+        pp = get_pp_group()
+        if pp.world_size < 2:
+            return (), ()
+        base = self._aux_slot_base_cached
+        end = (
+            base
+            if pp.is_last_rank
+            else bisect_right(self.aux_hidden_state_layers, self.end_layer)
+        )
+        key = self.AUX_HIDDEN_STATE_KEY
+        return (
+            tuple(f"{key}{i}" for i in range(base)),
+            tuple(f"{key}{i}" for i in range(base, end)),
+        )
+
     def collect_remote_aux_hidden_states(
         self, intermediate_tensors: "IntermediateTensors | None"
     ) -> list[torch.Tensor]:
-        total = self._aux_upstream_total_cached
-        if total == 0:
-            return []
+        """Deprecated, kept for out-of-tree models: returns []. The model runner
+        now adds the earlier PP stages' aux hidden states on the last stage."""
+        return []
 
-        assert intermediate_tensors is not None
-        out: list[torch.Tensor] = []
-        for i in range(total):
-            key = f"{self.AUX_HIDDEN_STATE_KEY}{i}"
-            if key not in intermediate_tensors.tensors:
-                raise RuntimeError(
-                    f"Missing {key} from PP intermediate tensors: "
-                    f"{sorted(intermediate_tensors.tensors)}"
-                )
-            out.append(intermediate_tensors[key])
-        return out
+
+def _get_decoder_holder(model: object) -> object:
+    parent_ref = model
+    if hasattr(model, "get_language_model"):
+        parent_ref = model.get_language_model()
+    elif hasattr(model, "language_model"):
+        parent_ref = model.language_model
+    # A multimodal model that builds its decoder inside `_mark_language_model`
+    # has get_language_model() return the decoder itself, with no `.model`.
+    return getattr(parent_ref, "model", parent_ref)
+
+
+def get_eagle_decoder(model: object) -> EagleModelMixin | None:
+    """The decoder of `model` that takes the aux hidden states, if any."""
+    holder = _get_decoder_holder(model)
+    return holder if isinstance(holder, EagleModelMixin) else None
 
 
 @runtime_checkable
@@ -1748,17 +1780,8 @@ class SupportsEagle3(SupportsEagleBase, Protocol):
                 hidden states.
 
         """
-        parent_ref = self
-        if hasattr(self, "get_language_model"):
-            parent_ref = self.get_language_model()
-        elif hasattr(self, "language_model"):
-            parent_ref = self.language_model
-        # A multimodal model that builds its decoder inside
-        # `_mark_language_model` has get_language_model() return the inner
-        # decoder itself, which IS the EagleModelMixin and has no further
-        # `.model`. Unwrap only when there is something to unwrap.
-        holder = getattr(parent_ref, "model", parent_ref)
-        assert isinstance(holder, EagleModelMixin), (
+        holder = get_eagle_decoder(self)
+        assert holder is not None, (
             "Model instance must inherit from EagleModelMixin to set auxiliary layers"
         )
         holder._set_aux_hidden_state_layers(layers)
@@ -1773,13 +1796,7 @@ class SupportsEagle3(SupportsEagleBase, Protocol):
             Tuple of layer indices for auxiliary hidden state outputs.
 
         """
-        parent_ref = self
-        if hasattr(self, "get_language_model"):
-            parent_ref = self.get_language_model()
-        elif hasattr(self, "language_model"):
-            parent_ref = self.language_model
-        # Same unwrap-only-if-needed rule as set_aux_hidden_state_layers.
-        holder = getattr(parent_ref, "model", parent_ref)
+        holder = _get_decoder_holder(self)
         assert hasattr(holder, "layers"), (
             "Model instance must have 'layers' attribute to get number of layers"
         )
@@ -1857,7 +1874,7 @@ class SupportsEncoderCudaGraph(Protocol):
     capture/replay.
 
     Models implement these methods to provide the
-    :class:`EncoderCudaGraphManager` with all model-specific logic
+    `EncoderCudaGraphManager` with all model-specific logic
     (input handling, metadata computation, forward pass) without the
     manager needing to know model internals.
     """
@@ -1890,8 +1907,8 @@ class SupportsEncoderCudaGraph(Protocol):
         - max_token_budget: estimated largest budget worth capturing
           (e.g. max_num_batched_tokens)
 
-        Used when ``encoder_cudagraph_token_budgets`` and/or
-        ``encoder_cudagraph_max_vision_items_per_batch`` are not explicitly
+        Used when `encoder_cudagraph_token_budgets` and/or
+        `encoder_cudagraph_max_vision_items_per_batch` are not explicitly
         specified by the user.
         """
         ...
@@ -1924,9 +1941,9 @@ class SupportsEncoderCudaGraph(Protocol):
           patch offsets, subset grid_thw by indices.
         - Batched models (CLIP): index pixel_values along dim 0.
 
-        Models that configure ``EncoderCudaGraphConfig.capture_axes`` must
+        Models that configure `EncoderCudaGraphConfig.capture_axes` must
         additionally store the resolved per-axis keys (one key per axis, in
-        order) under ``ENCODER_CUDAGRAPH_AXIS_KEYS_KWARG`` in the returned
+        order) under `ENCODER_CUDAGRAPH_AXIS_KEYS_KWARG` in the returned
         dict; the manager pops it before the kwargs are used elsewhere.
         """
         ...
@@ -1946,6 +1963,10 @@ class SupportsEncoderCudaGraph(Protocol):
         Override this for models that require additional processing on the raw
         encoder output prior to scattering, e.g. Step3-VL, which merges features
         according to dynamic patch counts before scattering.
+
+        With `clone=True`, the tensors written to `dest` must not alias
+        `outputs`: they are graph output buffers, shared across the token
+        budgets of a path, that the next replay overwrites.
         """
         from vllm.model_executor.models.utils import scatter_output_slices
 
@@ -1973,7 +1994,7 @@ class SupportsEncoderCudaGraph(Protocol):
             dtype: Dtype of the dummy inputs and buffers.
             path: Configured encoder path.
             axis_keys: The resolved capture-axis keys (one per axis of
-                ``EncoderCudaGraphConfig.capture_axes``) this capture is for.
+                `EncoderCudaGraphConfig.capture_axes`) this capture is for.
                 None or empty when no capture axes are configured; models
                 without capture axes ignore it.
 
@@ -1987,7 +2008,12 @@ class SupportsEncoderCudaGraph(Protocol):
         max_frames_per_batch: int,
         path: str = "default",
     ) -> "EncoderCudaGraphReplayBuffers":
-        """Compute buffer values from actual batch inputs for replay."""
+        """Compute buffer values from actual batch inputs for replay.
+
+        Must provide every capture buffer that smaller budgets share as a prefix
+        view: other budgets' captures overwrite its capture-time contents, so
+        the manager raises if replay omits it.
+        """
         ...
 
     def encoder_cudagraph_forward(
