@@ -1084,9 +1084,6 @@ class MambaModelConfig(VerifyAndUpdateConfig):
                     cache_config.mamba_cache_mode,
                     model_config.architecture,
                 )
-            assert vllm_config.scheduler_config.enable_chunked_prefill, (
-                "Chunked prefill is required for Mamba prefix caching."
-            )
             # By default, mamba block size will be set to max_model_len (see
             # below). When enabling prefix caching, we align mamba block size
             # to the block size as the basic granularity for prefix caching.
@@ -1568,10 +1565,9 @@ class Qwen3_5ForSlotDecisionConfig(Qwen3_5ForConditionalGenerationConfig):
                 f"backend for full attention, not {backend.name}"
             )
 
-        # Each prompt is prefilled from its cache hit in one step: with chunked
-        # prefill off, or by PrefixLMScheduler, as the Mamba prefix cache needs
-        # chunked prefill. PrefixLMScheduler also reads streamed requests causally.
-        scheduler_config.enable_chunked_prefill = cache_config.enable_prefix_caching
+        # Each prompt is prefilled from its cache hit in one step, or waits.
+        # PrefixLMScheduler also reads streamed requests causally.
+        scheduler_config.enable_chunked_prefill = False
         scheduler_config.scheduler_cls = prefix_lm_schedulers[0]
         scheduler_config.long_prefill_token_threshold = 0
         # As EngineArgs does with chunked prefill off, raise the step budget to

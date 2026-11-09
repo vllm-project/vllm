@@ -165,7 +165,7 @@ def test_config_prefills_each_prompt_in_one_step(change, prefix_caching):
     backend = change.get("attention_config.backend", TRITON)
     assert config.attention_config.backend == backend
     assert config.cache_config.enable_prefix_caching == prefix_caching
-    assert scheduler_config.enable_chunked_prefill == prefix_caching
+    assert not scheduler_config.enable_chunked_prefill
     assert scheduler_config.scheduler_cls == f"{PREFIX_LM}Scheduler"
     assert scheduler_config.long_prefill_token_threshold == 0
 

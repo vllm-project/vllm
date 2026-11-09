@@ -2,8 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Prefix caching for PrefixLM requests, which send their prefix length in
 `extra_args["prefix_lm_len"]`: salts each prefix's blocks by its digest, as the KV
-of every prefix token depends on the whole prefix, caps hits at the prefix and
-prefills the rest of the prompt in one step."""
+of every prefix token depends on the whole prefix, and caps hits at the prefix.
+The model turns chunked prefill off, so the rest of the prompt is prefilled in
+one step."""
 
 import copy
 import hashlib
@@ -64,17 +65,6 @@ class PrefixLMScheduler(Scheduler):
             cls = PrefixLMAsyncScheduler
         return super().__new__(cls)
 
-    def __init__(self, *args, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
-        # Scheduler calls _mamba_block_aligned_split only in this mode.
-        if self.cache_config.enable_prefix_caching and not (
-            self.need_mamba_block_aligned_split
-        ):
-            raise ValueError(
-                f"{type(self).__name__} needs a hybrid model in Mamba 'align' "
-                "cache mode"
-            )
-
     def add_request(self, request: Request) -> None:
         params = request.sampling_params
         if (
@@ -124,42 +114,12 @@ class PrefixLMScheduler(Scheduler):
         cap = min(prefix_len, request.num_tokens - 1)
         if max_cache_hit_length is not None:
             cap = min(cap, max_cache_hit_length)
-        return super()._get_local_prefix_cache_hit(request, cap)
-
-    def _mamba_block_aligned_split(
-        self,
-        request: Request,
-        num_new_tokens: int,
-        num_new_local_computed_tokens: int = 0,
-        num_external_computed_tokens: int = 0,
-    ) -> int:
-        start = (
-            request.num_computed_tokens
-            + num_new_local_computed_tokens
-            + num_external_computed_tokens
+        blocks, num_tokens, _, diverged = super()._get_local_prefix_cache_hit(
+            request, cap
         )
-        prefix_lm = (
-            start < request.num_prompt_tokens
-            and _request_prefix_lm_len(request) is not None
-        )
-        if (
-            prefix_lm
-            and start % self.cache_config.block_size == 0
-            and start + num_new_tokens == request.num_tokens
-        ):
-            # A whole prompt from a block boundary needs no Mamba split, which
-            # would stop at a shared-prefix junction.
-            return num_new_tokens
-        num_new_tokens = super()._mamba_block_aligned_split(
-            request,
-            num_new_tokens,
-            num_new_local_computed_tokens,
-            num_external_computed_tokens,
-        )
-        if prefix_lm and start + num_new_tokens < request.num_prompt_tokens:
-            # Zero keeps the request waiting at the head of the queue.
-            return 0
-        return num_new_tokens
+        # No shared-prefix junction: Mamba alignment would end a step there,
+        # inside the prefix.
+        return blocks, num_tokens, 0, diverged
 
 
 class PrefixLMAsyncScheduler(PrefixLMScheduler, AsyncScheduler): ...

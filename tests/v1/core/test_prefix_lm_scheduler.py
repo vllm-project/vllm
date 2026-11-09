@@ -39,7 +39,8 @@ MAMBA = MambaSpec(
 def make_scheduler(budget: int = 256, cls: type[Scheduler] = PrefixLMScheduler):
     return create_scheduler(
         max_num_batched_tokens=budget,
-        max_model_len=2048,
+        enable_chunked_prefill=False,
+        max_model_len=budget,
         enable_prefix_caching=True,
         skip_tokenizer_init=True,
         mamba_spec=MAMBA,
@@ -94,7 +95,7 @@ def test_hits_stop_at_the_prefix_and_prompts_prefill_whole(cls):
 
     assert step(scheduler, make_request("q1", q1, 40)) == {"q1": (0, 70)}
     # q1 left Mamba state only at 64, past the prefix. q2's attention hit at 32
-    # is a junction where alignment would stop, and the step would wait forever.
+    # is a junction where alignment would stop, inside the prefix.
     assert step(scheduler, make_request("q2", q2, 40)) == {"q2": (0, 70)}
     # The prefix alone leaves its state at 32.
     assert step(scheduler, make_request("prefix", prefix, 40)) == {"prefix": (0, 40)}
@@ -149,18 +150,10 @@ def test_requests_get_the_salt_of_their_prefix(prefix_len, salt, hit, expected):
 
 
 def test_streamed_requests_are_read_causally():
-    request = make_request("streamed", list(range(150)), 40, resumable=True)
-    assert step(make_scheduler(100), request) == {"streamed": (0, 96)}
-
-
-def test_needs_mamba_align_mode_only_with_prefix_caching():
-    kwargs = {"skip_tokenizer_init": True, "scheduler_cls": PrefixLMScheduler}
-    with pytest.raises(ValueError, match="align"):
-        create_scheduler(enable_prefix_caching=True, **kwargs)
-    # Without the cache it starts, and still reads streamed requests causally.
-    request = make_request("streamed", list(range(150)), 40, resumable=True)
-    create_scheduler(**kwargs).add_request(request)
-    assert PREFIX_LM_LEN not in request.sampling_params.extra_args
+    request = make_request("streamed", list(range(70)), 40, resumable=True)
+    step(make_scheduler(), request)
+    assert PREFIX_LM_LEN not in (request.sampling_params.extra_args or {})
+    assert request.cache_salt.startswith("causal:")
 
 
 @pytest.mark.parametrize("async_scheduling", [False, True])
