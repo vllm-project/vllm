@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Dispatch DSV4.1 mHC operations and overlap coefficient generation."""
 
-from functools import partial
+from functools import cache, partial
 from typing import TYPE_CHECKING, cast
 
 import torch
@@ -21,6 +21,7 @@ from vllm.model_executor.layers.fused_moe.moe_output import (
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.deep_gemm import is_deep_gemm_supported
+from vllm.utils.import_utils import has_cutedsl
 
 from .mega_mhc import (
     can_use_mega_mhc,
@@ -189,6 +190,19 @@ def mhc_pre_delayed_overlap(
     return outputs
 
 
+@cache
+def _mhc_boundary_supported() -> bool:
+    return current_platform.is_device_capability_family(100) and has_cutedsl()
+
+
+def _mhc_boundary(*args):
+    if not _mhc_boundary_supported():
+        return None
+    from .mhc_boundary import mhc_shifted_post_pre_boundary
+
+    return mhc_shifted_post_pre_boundary(*args)
+
+
 def mhc_shifted_post_pre(
     x: torch.Tensor | MoEOutput,
     residual: torch.Tensor,
@@ -284,7 +298,7 @@ def mhc_shifted_post_pre(
     assert isinstance(x, torch.Tensor)
     if can_use_mega_mhc(x, residual, pre_mix, norm_weight, capture_aux):
         assert pre_mix is not None and norm_weight is not None
-        outputs = mhc_shifted_post_pre_deep_gemm(
+        args = (
             x,
             residual,
             pre_mix,
@@ -301,6 +315,9 @@ def mhc_shifted_post_pre(
             norm_weight,
             norm_eps,
         )
+        # Decode-size batches run one CuTe DSL kernel: the same TF32 products,
+        # one cluster-wide pass instead of Mega mHC's.
+        outputs = _mhc_boundary(*args) or mhc_shifted_post_pre_deep_gemm(*args)
         return *outputs, x.new_empty(0, x.shape[1])
 
     return mhc_fused_post_pre_delayed_tilelang(
