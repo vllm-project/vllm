@@ -769,6 +769,12 @@ class ResponsesRequest(OpenAIBaseModel):
                     processed_input.append(item)
                     continue
 
+                if not normalized_item.get("content"):
+                    raise VLLMValidationError(
+                        "Assistant message content must not be empty.",
+                        parameter="input",
+                    )
+
                 try:
                     processed_input.append(ResponseOutputMessage(**normalized_item))
                 except ValidationError:
