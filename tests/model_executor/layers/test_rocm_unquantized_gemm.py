@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import sys
+import types
 from unittest.mock import MagicMock
 
 import pytest
@@ -316,12 +318,14 @@ def test_rocm_unquantized_gemm_gfx1x_n_gt_5_falls_back(monkeypatch, m):
     assert torch.allclose(out, ref, atol=1e-3, rtol=1e-3)
 
 
-def test_rocm_unquantized_gemm_gfx950_wvsplitkrc_path(monkeypatch):
-    x = torch.randn(1024, 16, dtype=torch.float16).t()
+@pytest.mark.parametrize("n", [6, 9, 16])
+def test_rocm_unquantized_gemm_gfx950_wvsplitkrc_path(monkeypatch, n):
+    x = torch.randn(1024, n, dtype=torch.float16).t()
     weight = torch.randn(256, 1024, dtype=torch.float16)
-    assert x.stride() == (1, 16)
+    assert x.stride() == (1, n)
 
     monkeypatch.setattr(utils, "use_aiter_triton_gemm", lambda *args: False)
+    monkeypatch.setattr(utils.rocm_aiter_ops, "is_tgemm_enabled", lambda: False)
     monkeypatch.setattr(utils.envs, "VLLM_ROCM_USE_SKINNY_GEMM", True)
     monkeypatch.setattr("vllm.platforms.rocm.on_gfx1x", lambda: False)
     monkeypatch.setattr("vllm.platforms.rocm.on_gfx9", lambda: False)
@@ -341,4 +345,65 @@ def test_rocm_unquantized_gemm_gfx950_wvsplitkrc_path(monkeypatch):
     wvsplitk_mock.assert_not_called()
     x_view = wvsplitkrc_mock.call_args.args[0]
     assert x_view.is_contiguous()
+    assert torch.allclose(out, ref, atol=1e-3, rtol=1e-3)
+
+
+@pytest.mark.parametrize("n", range(1, 17))
+@pytest.mark.parametrize(("m", "k"), [(256, 1024), (4096, 1024), (6144, 4096)])
+def test_wvsplitkrc_dispatch_sizes_narrow_batches_as_one_n_tile(n, m, k):
+    # wvSplitKrc() runs every n <= 16 on its N = 16 instantiation, so the host
+    # side must pick the same chunkk and apply the same CU budget as for n = 16.
+    assert utils.wvsplitkrc_dispatch(n, k, m, 256) == utils.wvsplitkrc_dispatch(
+        16, k, m, 256
+    )
+
+
+@pytest.mark.parametrize(
+    ("n", "m", "aiter_tgemm", "expected"),
+    [
+        (5, 256, False, "wvSplitK"),
+        (6, 256, False, "wvSplitKrc"),
+        (8, 256, False, "wvSplitKrc"),
+        # Over the CU budget (ceil(4096 / 64) * ceil(1024 / 512) > 120 CUs).
+        (6, 4096, False, "fallback"),
+        (8, 4096, False, "fallback"),
+        # With AITER's tuned GEMM enabled, wvSplitKrc starts at n = 10.
+        (8, 256, True, "tgemm"),
+        (10, 256, True, "wvSplitKrc"),
+    ],
+)
+def test_rocm_unquantized_gemm_gfx950_small_batch_dispatch(
+    monkeypatch, n, m, aiter_tgemm, expected
+):
+    x = torch.randn(n, 1024, dtype=torch.float16)
+    weight = torch.randn(m, 1024, dtype=torch.float16)
+
+    monkeypatch.setattr(utils, "use_aiter_triton_gemm", lambda *args: False)
+    monkeypatch.setattr(utils.envs, "VLLM_ROCM_USE_SKINNY_GEMM", True)
+    monkeypatch.setattr(utils.rocm_aiter_ops, "is_tgemm_enabled", lambda: aiter_tgemm)
+    monkeypatch.setattr("vllm.platforms.rocm.on_gfx1x", lambda: False)
+    monkeypatch.setattr("vllm.platforms.rocm.on_gfx9", lambda: True)
+    monkeypatch.setattr("vllm.platforms.rocm.on_gfx950", lambda: True)
+    monkeypatch.setattr("vllm.platforms.rocm.on_gfx1250", lambda: False)
+    monkeypatch.setattr(utils, "num_compute_units", lambda: 120)
+
+    wvsplitkrc_mock = MagicMock(side_effect=lambda x_view, w, _, __: x_view @ w.t())
+    monkeypatch.setattr(utils.ops, "wvSplitKrc", wvsplitkrc_mock)
+    wvsplitk_mock = MagicMock(side_effect=lambda w, x_view, _, __: x_view @ w.t())
+    monkeypatch.setattr(utils.ops, "wvSplitK", wvsplitk_mock)
+    tgemm_mock = MagicMock()
+    tgemm_mock.mm.side_effect = lambda x_, w, _: x_ @ w.t()
+    monkeypatch.setitem(
+        sys.modules, "aiter", sys.modules.get("aiter") or types.ModuleType("aiter")
+    )
+    monkeypatch.setitem(
+        sys.modules, "aiter.tuned_gemm", types.SimpleNamespace(tgemm=tgemm_mock)
+    )
+
+    out = utils.rocm_unquantized_gemm_impl(x, weight, None)
+    ref = torch.nn.functional.linear(x, weight, None)
+
+    assert wvsplitkrc_mock.called == (expected == "wvSplitKrc")
+    assert wvsplitk_mock.called == (expected == "wvSplitK")
+    assert tgemm_mock.mm.called == (expected == "tgemm")
     assert torch.allclose(out, ref, atol=1e-3, rtol=1e-3)

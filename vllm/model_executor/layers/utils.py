@@ -269,8 +269,9 @@ def wvsplitkrc_dispatch(n: int, k: int, m: int, cu_count: int) -> tuple[int, boo
         split-K workspace admit the shape at all.
 
     """
-    # Next ^2 of n
-    N_p2 = 1 << (n - 1).bit_length()
+    # Next ^2 of n, floored at 16: wvSplitKrc() runs every n <= 16 on its
+    # N = 16 instantiation.
+    N_p2 = max(16, 1 << (n - 1).bit_length())
     # How many of 4 waves in a group can work on same 16 Ms at same time?
     # This reduces the Ms each group works on, i.e. increasing the CUs needed.
     GrpsShrB = min(N_p2 // 16, 4)
@@ -457,13 +458,18 @@ def rocm_unquantized_gemm_impl(
         bias is None or bias.is_contiguous()
     )
 
+    # wvSplitK is faster up to n == 5. Below 16 rows wvSplitKrc costs about as
+    # much as at n == 16, and AITER's tuned GEMM beats that on most decode
+    # shapes, so with AITER n < 10 goes to tgemm.
+    min_n_wvsplitkrc = 10 if rocm_aiter_ops.is_tgemm_enabled() else 6
+
     use_skinny_reduce_counting = (
         envs.VLLM_ROCM_USE_SKINNY_GEMM
         and on_gfx950()
         and x.dtype in [torch.float16, torch.bfloat16]
         and x.dim() == 2
         and (
-            10 <= n <= 128
+            min_n_wvsplitkrc <= n <= 128
             and k % 8 == 0
             and k > 512
             and m % 16 == 0

@@ -46,7 +46,10 @@ torch::Tensor wvSplitKrc(const at::Tensor& in_a, const at::Tensor& in_b,
       {N_in, M_in},
       torch::TensorOptions().dtype(in_a.dtype()).device(in_a.device()));
 
-  auto N_p2 = 1U << (32 - __builtin_clz(N_in - 1));
+  // Next ^2 of N, floored at one 16-row N tile: only N_p2 in {16, 32, 64, 128}
+  // is instantiated, and the N = 16 one bounds its A loads and C stores by the
+  // actual N, so a narrower batch runs on it.
+  auto N_p2 = (N_in <= 16) ? 16U : (1U << (32 - __builtin_clz(N_in - 1)));
 
   dim3 grid(CuCount);
 

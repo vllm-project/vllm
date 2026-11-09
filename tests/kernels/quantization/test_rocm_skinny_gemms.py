@@ -110,6 +110,9 @@ NKM_FACTORS_WVSPLITK = [
 
 # N is bucketed up to its next ^2 (16/32/64/128) and the remainder is masked
 N_FACTORS_WVSPLITKRC = [
+    1,
+    6,
+    9,
     13,
     16,
     17,
@@ -207,8 +210,8 @@ def test_rocm_wvsplitkrc_kernel(n, k, m, dtype, padded_a, bias_mode, xnorm, seed
     torch.manual_seed(seed)
     cu_count = num_compute_units()
 
-    # Next ^2 of n
-    N_p2 = 1 << (n - 1).bit_length()
+    # Next ^2 of n, floored at the narrowest (16-row) N instantiation
+    N_p2 = max(16, 1 << (n - 1).bit_length())
     # With 64 Ms per CU (each of 4 SIMDs working on a 16x16 tile),
     # and each working on a 512-shard of K, how many CUs would we need?
     rndup_cus = ((m + 64 - 1) // 64) * ((k + 512 - 1) // 512)
