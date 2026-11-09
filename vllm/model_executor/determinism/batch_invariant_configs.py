@@ -1216,6 +1216,168 @@ _BATCH_INVARIANT_MATMUL_TUNED_CONFIGS: dict[
             ),
         ),
     },
+    # AMD Instinct MI355X (gfx950). Every entry keeps BLOCK_K=64 (the default), so
+    # each config reproduces the default 128x128x64 config bit for bit, not only
+    # batch-invariantly; M > 256 uses the default.
+    "gfx950": {
+        (6288, 7168): _MatmulShapeConfig(
+            block_k=64,
+            m_buckets=(
+                (8, _MatmulMConfig(16, 32, 2, 4)),
+                (32, _MatmulMConfig(16, 64, 2, 4)),
+                (128, _MatmulMConfig(64, 64, 4, 4)),
+                (256, _MatmulMConfig(128, 64, 8, 4)),
+                (512, _MatmulMConfig(128, 128, 8, 3)),
+            ),
+        ),
+        (3584, 7168): _MatmulShapeConfig(
+            block_k=64,
+            m_buckets=(
+                (8, _MatmulMConfig(16, 16, 2, 4)),
+                (32, _MatmulMConfig(16, 32, 2, 4)),
+                (64, _MatmulMConfig(16, 64, 2, 4)),
+                (256, _MatmulMConfig(64, 64, 4, 4)),
+                (512, _MatmulMConfig(128, 128, 8, 3)),
+            ),
+        ),
+        (1536, 7168): _MatmulShapeConfig(
+            block_k=64,
+            m_buckets=(
+                (32, _MatmulMConfig(16, 16, 2, 4)),
+                (64, _MatmulMConfig(16, 32, 2, 4)),
+                (128, _MatmulMConfig(64, 16, 2, 4)),
+                (256, _MatmulMConfig(64, 64, 4, 4)),
+                (512, _MatmulMConfig(128, 128, 8, 3)),
+            ),
+        ),
+        (7168, 1536): _MatmulShapeConfig(
+            block_k=64,
+            m_buckets=(
+                (8, _MatmulMConfig(16, 32, 2, 4)),
+                (32, _MatmulMConfig(16, 64, 2, 4)),
+                (128, _MatmulMConfig(64, 64, 4, 4)),
+                (256, _MatmulMConfig(128, 64, 8, 4)),
+                (512, _MatmulMConfig(128, 128, 8, 3)),
+            ),
+        ),
+        (7168, 768): _MatmulShapeConfig(
+            block_k=64,
+            m_buckets=(
+                (8, _MatmulMConfig(16, 32, 2, 4)),
+                (32, _MatmulMConfig(16, 64, 2, 4)),
+                (128, _MatmulMConfig(64, 64, 4, 4)),
+                (256, _MatmulMConfig(128, 64, 8, 3)),
+                (512, _MatmulMConfig(128, 128, 8, 3)),
+            ),
+        ),
+        (4096, 1536): _MatmulShapeConfig(
+            block_k=64,
+            m_buckets=(
+                (8, _MatmulMConfig(16, 16, 2, 4)),
+                (32, _MatmulMConfig(32, 16, 2, 4)),
+                (64, _MatmulMConfig(64, 16, 2, 4)),
+                (256, _MatmulMConfig(64, 64, 4, 4)),
+                (512, _MatmulMConfig(128, 128, 8, 3)),
+            ),
+        ),
+        (2304, 1536): _MatmulShapeConfig(
+            block_k=64,
+            m_buckets=(
+                (8, _MatmulMConfig(16, 16, 2, 4)),
+                (32, _MatmulMConfig(16, 32, 2, 4)),
+                (64, _MatmulMConfig(64, 16, 2, 4)),
+                (256, _MatmulMConfig(64, 64, 4, 4)),
+                (512, _MatmulMConfig(128, 128, 8, 3)),
+            ),
+        ),
+        (1536, 128): _MatmulShapeConfig(
+            block_k=64,
+            m_buckets=(
+                (8, _MatmulMConfig(16, 32, 2, 3)),
+                (64, _MatmulMConfig(32, 16, 2, 3)),
+                (128, _MatmulMConfig(64, 16, 2, 3)),
+                (256, _MatmulMConfig(64, 32, 2, 3)),
+                (512, _MatmulMConfig(128, 128, 8, 3)),
+            ),
+        ),
+        (8448, 7168): _MatmulShapeConfig(
+            block_k=64,
+            m_buckets=(
+                (8, _MatmulMConfig(16, 64, 2, 4)),
+                (64, _MatmulMConfig(64, 64, 4, 4)),
+                (128, _MatmulMConfig(128, 64, 8, 4)),
+                (256, _MatmulMConfig(128, 128, 8, 4)),
+                (512, _MatmulMConfig(128, 128, 8, 3)),
+            ),
+        ),
+        (7168, 4224): _MatmulShapeConfig(
+            block_k=64,
+            m_buckets=(
+                (8, _MatmulMConfig(16, 32, 2, 4)),
+                (32, _MatmulMConfig(16, 64, 2, 4)),
+                (128, _MatmulMConfig(64, 64, 4, 4)),
+                (256, _MatmulMConfig(128, 64, 8, 4)),
+                (512, _MatmulMConfig(128, 128, 8, 3)),
+            ),
+        ),
+        (896, 7168): _MatmulShapeConfig(
+            block_k=64,
+            m_buckets=(
+                (64, _MatmulMConfig(16, 16, 2, 4)),
+                (128, _MatmulMConfig(16, 32, 2, 4)),
+                (256, _MatmulMConfig(16, 64, 2, 4)),
+                (512, _MatmulMConfig(128, 128, 8, 3)),
+            ),
+        ),
+        (896, 3584): _MatmulShapeConfig(
+            block_k=64,
+            m_buckets=(
+                (64, _MatmulMConfig(16, 16, 2, 4)),
+                (128, _MatmulMConfig(32, 16, 2, 4)),
+                (256, _MatmulMConfig(64, 16, 2, 4)),
+                (512, _MatmulMConfig(128, 128, 8, 3)),
+            ),
+        ),
+        (6144, 4096): _MatmulShapeConfig(
+            block_k=64,
+            m_buckets=(
+                (8, _MatmulMConfig(16, 32, 2, 4)),
+                (32, _MatmulMConfig(16, 64, 2, 4)),
+                (128, _MatmulMConfig(64, 64, 4, 4)),
+                (256, _MatmulMConfig(128, 64, 8, 4)),
+                (512, _MatmulMConfig(128, 128, 8, 3)),
+            ),
+        ),
+        (4096, 4096): _MatmulShapeConfig(
+            block_k=64,
+            m_buckets=(
+                (8, _MatmulMConfig(16, 16, 2, 4)),
+                (32, _MatmulMConfig(32, 16, 2, 4)),
+                (64, _MatmulMConfig(16, 64, 2, 4)),
+                (256, _MatmulMConfig(64, 64, 4, 4)),
+                (512, _MatmulMConfig(128, 128, 8, 3)),
+            ),
+        ),
+        (28672, 4096): _MatmulShapeConfig(
+            block_k=64,
+            m_buckets=(
+                (64, _MatmulMConfig(64, 128, 8, 3)),
+                (128, _MatmulMConfig(128, 128, 8, 3)),
+                (256, _MatmulMConfig(128, 256, 8, 3)),
+                (512, _MatmulMConfig(128, 128, 8, 3)),
+            ),
+        ),
+        (4096, 14336): _MatmulShapeConfig(
+            block_k=64,
+            m_buckets=(
+                (8, _MatmulMConfig(16, 16, 2, 4)),
+                (32, _MatmulMConfig(32, 16, 2, 4)),
+                (64, _MatmulMConfig(64, 16, 2, 4)),
+                (256, _MatmulMConfig(64, 64, 4, 4)),
+                (512, _MatmulMConfig(128, 128, 8, 3)),
+            ),
+        ),
+    },
 }
 
 _TUNED_MATMUL_CONFIGS_FOR_DEVICE: dict[tuple[int, int], _MatmulShapeConfig] | None = (
@@ -1238,6 +1400,17 @@ def _get_tuned_matmul_arch_family(capability: DeviceCapability | None) -> str | 
     return None
 
 
+def _get_current_tuned_matmul_arch_family() -> str | None:
+    if current_platform.is_rocm():
+        # ROCm reports gfx950 as capability 9.5, which would alias "hopper".
+        from vllm.platforms.rocm import on_gfx950
+
+        return "gfx950" if on_gfx950() else None
+    if current_platform.is_cuda():
+        return _get_tuned_matmul_arch_family(current_platform.get_device_capability())
+    return None
+
+
 def resolve_tuned_matmul_configs() -> None:
     global _TUNED_MATMUL_CONFIGS_FOR_DEVICE
     global _TUNED_MATMUL_CONFIGS_RESOLVED
@@ -1246,10 +1419,7 @@ def resolve_tuned_matmul_configs() -> None:
         return
 
     # Normal vLLM initialization resolves this before torch.compile tracing.
-    capability = (
-        current_platform.get_device_capability() if current_platform.is_cuda() else None
-    )
-    arch_family = _get_tuned_matmul_arch_family(capability)
+    arch_family = _get_current_tuned_matmul_arch_family()
     if arch_family is None:
         _TUNED_MATMUL_CONFIGS_FOR_DEVICE = None
     else:
