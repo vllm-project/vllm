@@ -1316,6 +1316,7 @@ def test_spec_blocks_without_draft_counts(mode: str, num_spec: int):
         assert manager.take_spec_state_block_counts() == {}
         request.step(None)
         assert len(request.blocks) >= state + 1 + num_spec
+        assert manager._spec_state_idx == manager._spec_span_end == {}
     else:
         for num_drafts in (0, 2, 0):
             request.step(num_drafts, 1)

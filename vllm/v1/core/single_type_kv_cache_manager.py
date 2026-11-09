@@ -1728,12 +1728,12 @@ class MambaManager(SingleTypeKVCacheManager):
         roll `state_idx` back by rejected drafts, but not the blocks laid out
         for it). The span end bounds the columns this step's verify writes.
         """
-        if self.num_speculative_blocks == 0:
+        # Without draft counts the static layout never reads the record.
+        if self.num_speculative_blocks == 0 or num_draft_tokens is None:
             return
-        if num_draft_tokens is not None:
-            self._spec_span_end[request_id] = (
-                state_idx + 1 + min(num_draft_tokens, self.num_speculative_blocks)
-            )
+        self._spec_span_end[request_id] = (
+            state_idx + 1 + min(num_draft_tokens, self.num_speculative_blocks)
+        )
         state_idx = max(state_idx, self._spec_state_idx.get(request_id, -1))
         self._spec_state_idx[request_id] = state_idx
 
