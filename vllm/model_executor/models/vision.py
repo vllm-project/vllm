@@ -114,9 +114,9 @@ def get_vit_attn_backend(
 
 
 def get_multimodal_config() -> MultiModalConfig | None:
-    """Return the current ``MultiModalConfig``, or ``None`` when no engine
+    """Return the current `MultiModalConfig`, or `None` when no engine
     config context is active (e.g., during unit tests) or when the current
-    ``model_config`` does not carry a ``multimodal_config`` (e.g., minimal
+    `model_config` does not carry a `multimodal_config` (e.g., minimal
     stubs used in tests)."""
     vllm_config = get_current_vllm_config_or_none()
     if vllm_config is None or vllm_config.model_config is None:
@@ -126,10 +126,10 @@ def get_multimodal_config() -> MultiModalConfig | None:
 
 def get_fp8_padded_hidden_size(num_heads: int, head_dim: int) -> int | None:
     """Return the padded hidden size for FP8 ViT encoder attention, or
-    ``None`` when FP8 is not enabled.
+    `None` when FP8 is not enabled.
 
-    cuDNN FP8 prefill attention requires ``head_dim`` to be a multiple of
-    16. For non-aligned ``head_dim`` (e.g. 72), Q/K/V are padded to the
+    cuDNN FP8 prefill attention requires `head_dim` to be a multiple of
+    16. For non-aligned `head_dim` (e.g. 72), Q/K/V are padded to the
     nearest multiple of 16.
     """
     mm_cfg = get_multimodal_config()

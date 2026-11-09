@@ -67,7 +67,7 @@ if TYPE_CHECKING:
     from vllm.config.load import LoadConfig
     from vllm.config.parallel import ParallelConfig
     from vllm.model_executor.layers.quantization import QuantizationMethods
-    from vllm.v1.sample.logits_processor import LogitsProcessor
+    from vllm.v1.worker.gpu.sample.logits_processor.interface import LogitsProcessor
 else:
     PreTrainedConfig = Any
 
@@ -137,7 +137,7 @@ _RUNNER_CONVERTS: dict[RunnerType, list[ConvertType]] = {
 def _modelopt_mixed_has_nvfp4(quant_config: dict[str, Any] | None) -> bool:
     """Whether a ModelOpt MIXED_PRECISION checkpoint quantizes any layer to NVFP4.
 
-    ``W4A16_NVFP4`` is excluded on purpose: it quantizes weights only, so there
+    `W4A16_NVFP4` is excluded on purpose: it quantizes weights only, so there
     is no activation quantization for the fusion passes to act on.
     """
     layers = (quant_config or {}).get("quantized_layers")
@@ -230,9 +230,11 @@ class ModelConfig:
     hf_text_config: PreTrainedConfig = field(init=False)
     """The Hugging Face config of the text model (same as hf_config for text models)."""
     is_submodel_config: bool = field(default=False, init=False)
-    """Whether this is a submodule view derived by `VllmConfig.with_hf_config`
-    (e.g. a multimodal model's text stack). Its architecture list is empty, so
-    deployment-level validation must not run against it."""
+    """Whether this is a view derived from an already-validated `VllmConfig`: a
+    submodule view from `VllmConfig.with_hf_config` (e.g. a multimodal model's text
+    stack, whose architecture list may be empty) or a draft model's view that
+    reuses the target's configs. Deployment-level validation must not run against
+    it."""
     word_embeddings_untied_by_checkpoint: bool = field(default=False, init=False)
     """Whether `tie_word_embeddings` was overridden to `False` because the checkpoint
     contains an `lm_head` of its own. The two may still turn out to be identical, in
@@ -280,7 +282,7 @@ class ModelConfig:
     determine the data type of the weights."""
     quantization_config: dict[str, Any] | QuantizationConfigArgs | None = None
     """User-facing quantization configuration. Carries per-layer-kind specs
-    (linear, moe) and ignore patterns; see :class:`QuantizationConfigArgs`.
+    (linear, moe) and ignore patterns; see `QuantizationConfigArgs`.
     Auto-populated from the matching online shorthand when `quantization` is
     one of the values in `ONLINE_QUANT_SHORTHAND_NAMES`."""
     allow_deprecated_quantization: bool = False
@@ -385,12 +387,12 @@ class ModelConfig:
     sleep_preserve_parameter_names: list[str] = field(default_factory=list)
     """Parameter-name globs to preserve across level-2 sleep.
     Use target globs for frozen Engram table weights and scales omitted by the
-    trainer (e.g. ``*.engram.embed_tokens.weight*``).
-    Use ``draft.<name>`` for draft-private parameters, or ``draft.*`` for all.
+    trainer (e.g. `*.engram.embed_tokens.weight*`).
+    Use `draft.<name>` for draft-private parameters, or `draft.*` for all.
     The sender must omit these parameters; loaders must preserve their storage."""
     sleep_mode_backend: str = "cumem"
-    """Mechanism used to free and restore GPU state for sleep mode. ``"cumem"``
-    (default) uses the built-in ``CuMemAllocator`` and is behavior-compatible
+    """Mechanism used to free and restore GPU state for sleep mode. `"cumem"`
+    (default) uses the built-in `CuMemAllocator` and is behavior-compatible
     with prior releases. Additional backends (CUDA checkpoint, CRIU, durable
     snapshot) may be registered in-tree or by plugins (RFC #34303)."""
     sleep_mode_offload_cudagraph: bool = False
@@ -398,7 +400,7 @@ class ModelConfig:
     Takes effect with enable_sleep_mode, the cumem backend and CUDA graphs."""
     enable_nccl_comm_suspend: bool = False
     """Enable releasing NCCL communicator memory during sleep mode
-    (``ncclCommSuspend``/``ncclCommResume``). Experimental; when disabled
+    (`ncclCommSuspend`/`ncclCommResume`). Experimental; when disabled
     (the default) sleep still releases weights/KV-cache memory as before."""
     checkpoint_prepare_on_startup: bool = False
     """Prepare each engine for a process checkpoint once it starts, as
@@ -1019,17 +1021,17 @@ class ModelConfig:
     def _supports_multimodal_for_mm_prefix(self) -> bool:
         """Whether multimodal inputs can still appear for this deployment.
 
-        This runs more than once per config: once early in ``__post_init__``
-        (before ``multimodal_config`` exists), again after it is created, and
-        then for every ``get_model_arch_config`` regeneration -- notably
-        ``with_hf_config``, which deep-copies this ``ModelConfig`` and swaps
-        ``hf_config`` for a text-only submodule (e.g. ``Gemma4ForCausalLM``).
+        This runs more than once per config: once early in `__post_init__`
+        (before `multimodal_config` exists), again after it is created, and
+        then for every `get_model_arch_config` regeneration -- notably
+        `with_hf_config`, which deep-copies this `ModelConfig` and swaps
+        `hf_config` for a text-only submodule (e.g. `Gemma4ForCausalLM`).
 
         The result is cached for correctness, not just to save work: on the
-        ``with_hf_config`` copy the submodule architecture has no registered
+        `with_hf_config` copy the submodule architecture has no registered
         multimodal processor, so re-querying the registry would raise and be
-        treated as text-only, wrongly clearing ``is_mm_prefix_lm`` even when a
-        vision modality is still enabled (e.g. ``image=0`` but video allowed).
+        treated as text-only, wrongly clearing `is_mm_prefix_lm` even when a
+        vision modality is still enabled (e.g. `image=0` but video allowed).
         The deep-copied cache preserves the top-level decision instead.
         """
         if self.multimodal_config is None:
@@ -1687,7 +1689,7 @@ class ModelConfig:
     ) -> int:
         """Returns the number of KV heads per GPU.
 
-        Pass ``arch_config`` (from ``model_arch_config[layer_idx]``) to size a
+        Pass `arch_config` (from `model_arch_config[layer_idx]`) to size a
         single layer of a heterogeneous model rather than the model as a whole.
         """
         if self.use_mla:
@@ -1709,7 +1711,7 @@ class ModelConfig:
     ) -> int:
         """Returns the number of attention heads per GPU.
 
-        Pass ``arch_config`` (from ``model_arch_config[layer_idx]``) to size a
+        Pass `arch_config` (from `model_arch_config[layer_idx]`) to size a
         single layer of a heterogeneous model rather than the model as a whole.
         """
         arch_config = arch_config or self.model_arch_config
