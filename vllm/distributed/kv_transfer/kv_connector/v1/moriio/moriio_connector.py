@@ -228,7 +228,7 @@ def validate_moriio_heterogeneous_tp_kv_heads(
 
 
 def get_moriio_peer_tp_size(params: dict[str, Any] | None, local_tp_size: int) -> int:
-    """TP size of the peer named in ``kv_transfer_params``; unknown means equal."""
+    """TP size of the peer named in `kv_transfer_params`; unknown means equal."""
     params = params or {}
     return int(params.get("remote_tp_size") or params.get("tp_size") or local_tp_size)
 
@@ -515,7 +515,7 @@ def _split_kv_cache_group_kinds(
     mamba_group_indices) by whether each group's layers are MambaSpecs.
 
     Groups that opt out of external transfer are absent from
-    ``KVCacheConfig.transfer_groups``. Returned indices address that filtered
+    `KVCacheConfig.transfer_groups`. Returned indices address that filtered
     sequence and therefore also the connector's transfer block payload.
     """
     attn: list[int] = []
@@ -883,11 +883,11 @@ class MoRIIOConnectorScheduler:
         """Scheduler hook fired when a request is admitted.
 
         The hybrid P-side truncation must land here rather than in
-        ``get_num_new_matched_tokens``: the scheduler runs the local prefix
+        `get_num_new_matched_tokens`: the scheduler runs the local prefix
         cache lookup first and only then asks the connector, so truncating
         there shortens a prompt whose cache hit was already measured against
-        the full length. On a full hit that leaves ``num_computed_tokens ==
-        num_tokens`` and trips the scheduler's ``num_new_tokens > 0`` assert.
+        the full length. On a full hit that leaves `num_computed_tokens ==
+        num_tokens` and trips the scheduler's `num_new_tokens > 0` assert.
         """
         if not (self.is_producer and self._has_mamba):
             return
@@ -901,7 +901,7 @@ class MoRIIOConnectorScheduler:
 
         The decoder recomputes the last token locally to derive h(N) correctly
         (see the READ len-1 accounting in get_num_new_matched_tokens). Guarded
-        by ``_p_side_truncated`` to avoid repeated truncation across a
+        by `_p_side_truncated` to avoid repeated truncation across a
         preemption/reschedule. Mirrors the NIXL scheduler.
         """
         params = request.kv_transfer_params
@@ -1026,24 +1026,24 @@ class MoRIIOConnectorScheduler:
         ------------------------------------------------
         Both legs of a disagg pair must agree on a single prefill DP rank,
         otherwise the notify lands on a rank that never handshook and the
-        request hangs until ``VLLM_MORIIO_DEFERRED_TIMEOUT_S``.
+        request hangs until `VLLM_MORIIO_DEFERRED_TIMEOUT_S`.
 
         The routing authority is the external router/sidecar, NOT the
-        connector. The llm-d routing sidecar computes ``H = pickDPRank(uuid,
-        dp_size)`` (see ``dp_rank.go``) once and pins BOTH legs to ``H`` two
-        ways: the ``X-data-parallel-rank`` dispatch header (which vLLM engine
-        the leg lands on) and ``kv_transfer_params.remote_dp_rank=H`` (which
-        prefill rank this notify targets), with ``remote_dp_rank_override=True``.
+        connector. The llm-d routing sidecar computes `H = pickDPRank(uuid,
+        dp_size)` (see `dp_rank.go`) once and pins BOTH legs to `H` two
+        ways: the `X-data-parallel-rank` dispatch header (which vLLM engine
+        the leg lands on) and `kv_transfer_params.remote_dp_rank=H` (which
+        prefill rank this notify targets), with `remote_dp_rank_override=True`.
 
-        The connector consumes ``remote_dp_rank`` verbatim and does NOT
+        The connector consumes `remote_dp_rank` verbatim and does NOT
         self-derive a rank: an independent hash here could disagree with the
         router's dispatch pin and misroute the notify. For the returnable paths
         (READ / serial WRITE) the prefill leg also echoes back the rank it ran
-        on via ``request_finished`` so routing is pure propagation.
+        on via `request_finished` so routing is pure propagation.
 
         The owning rank is the only one that originates the notify
-        (``remote_dp_rank_override`` -> global-rank match; otherwise the
-        ``_is_kv_master`` anti-duplicate gate). See the inline comments
+        (`remote_dp_rank_override` -> global-rank match; otherwise the
+        `_is_kv_master` anti-duplicate gate). See the inline comments
         below for the exactly-once-across-pods reasoning.
         """
         params = request.kv_transfer_params
@@ -1340,8 +1340,8 @@ class MoRIIOConnectorScheduler:
             block_ids: Per-KV-cache-group local block ids.
 
         Returns:
-            ``block_ids`` with every full-attention group truncated to
-            ``ceil(num_prompt_tokens / block_size)`` leading blocks;
+            `block_ids` with every full-attention group truncated to
+            `ceil(num_prompt_tokens / block_size)` leading blocks;
             sliding-window groups are left unchanged.
 
         """
@@ -1383,8 +1383,8 @@ class MoRIIOConnectorScheduler:
     ) -> bool:
         """Whether this step completes the prompt.
 
-        ``build_connector_meta`` runs before ``_update_after_schedule``, so
-        ``num_computed_tokens`` excludes the current chunk; add this step's
+        `build_connector_meta` runs before `_update_after_schedule`, so
+        `num_computed_tokens` excludes the current chunk; add this step's
         scheduled tokens. Token progress is lookahead-safe unlike block counts.
         """
         num_scheduled = scheduler_output.num_scheduled_tokens.get(req.request_id, 0)
@@ -1580,9 +1580,9 @@ class MoRIIOConnectorScheduler:
         """Once a request is finished, determine whether request blocks
         should be freed now or will be sent asynchronously and freed later.
 
-        ``block_ids`` normally contains all cache groups. Hybrid READ callers from
-        ``request_finished_all_groups`` pass the attention groups and the
-        recurrent-state groups separately in ``mamba_block_groups``.
+        `block_ids` normally contains all cache groups. Hybrid READ callers from
+        `request_finished_all_groups` pass the attention groups and the
+        recurrent-state groups separately in `mamba_block_groups`.
         """
         request_id = request.request_id
         params = request.kv_transfer_params
@@ -1702,19 +1702,19 @@ class MoRIIOConnectorScheduler:
 
         Called every scheduler step (when there is KV connector output),
         BEFORE the scheduler's finished_sending free loop. We rewrite
-        ``connector_output.finished_sending`` in place so it contains
+        `connector_output.finished_sending` in place so it contains
         exactly the producer requests that are safe for the scheduler to
         free this step, letting the scheduler keep the plain upstream
-        ``assert req_id in self.requests`` + ``_free_blocks`` path:
+        `assert req_id in self.requests` + `_free_blocks` path:
 
-        * An ACK whose request is in ``_deferred_send_deadlines``
+        * An ACK whose request is in `_deferred_send_deadlines`
           (request_finished ran with delay_free_blocks=True, so the
           scheduler is holding its blocks) is surfaced -> freed now.
         * An ACK that arrives BEFORE its request finished is parked in
-          ``_pending_sent_acks`` and released on a later step once the
-          request enters ``_deferred_send_deadlines``.
+          `_pending_sent_acks` and released on a later step once the
+          request enters `_deferred_send_deadlines`.
         * In READ mode, a deferred send whose ACK never arrives is reaped
-          after ``_defer_timeout``. WRITE-mode timeouts are owned by the worker,
+          after `_defer_timeout`. WRITE-mode timeouts are owned by the worker,
           which marks the transfer terminal before ACKing the block release.
         * A parked ACK that never matches a deferral before its own
           deadline is a stale duplicate (e.g. a real ACK landing after the
@@ -2432,14 +2432,14 @@ class MoRIIOConnectorWorker:
 
     @staticmethod
     def _contiguous_byte_alias(tensor: torch.Tensor) -> torch.Tensor:
-        """Return a contiguous uint8 view over ``tensor``'s full byte extent.
+        """Return a contiguous uint8 view over `tensor`'s full byte extent.
 
-        KDA conv/ssm caches are slot-strided views (``stride(0)`` may exceed the
+        KDA conv/ssm caches are slot-strided views (`stride(0)` may exceed the
         per-slot element count), so they are non-contiguous and cannot be passed
-        to ``register_torch_tensor``. This aliases the same storage (zero-copy,
-        identical ``data_ptr``) as a flat uint8 tensor spanning
-        ``shape[0] * stride(0)`` elements -- the full slot-strided extent that
-        transfer offsets (``slot * stride(0) * elem``) address.
+        to `register_torch_tensor`. This aliases the same storage (zero-copy,
+        identical `data_ptr`) as a flat uint8 tensor spanning
+        `shape[0] * stride(0)` elements -- the full slot-strided extent that
+        transfer offsets (`slot * stride(0) * elem`) address.
         """
         esz = tensor.element_size()
         storage_nbytes = tensor.untyped_storage().nbytes()
@@ -3762,7 +3762,7 @@ class MoRIIOConnectorWorker:
         target: WriteTarget,
         remote_engine_id: EngineId | None = None,
     ) -> tuple[list[int], list[int], list[int]]:
-        """Offsets writing ``target``'s KV heads of a block into the peer."""
+        """Offsets writing `target`'s KV heads of a block into the peer."""
         remote_wire = remote_moriio_meta.kv_head_layouts.get(layer_name)
         local_layout = self.kv_head_layouts.get(layer_name)
         if remote_wire is None or local_layout is None:
@@ -3795,7 +3795,7 @@ class MoRIIOConnectorWorker:
         remote_moriio_meta: MoRIIOAgentMetadata,
         target: WriteTarget,
     ) -> tuple[list[int], list[int], list[int], int]:
-        """(local, remote, sizes, n_conv) writing ``target``'s state slice."""
+        """(local, remote, sizes, n_conv) writing `target`'s state slice."""
         remote_wire = remote_moriio_meta.mamba_state_layouts.get(layer_name)
         if remote_wire is None:
             raise MoRIIOError(

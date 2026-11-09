@@ -285,7 +285,7 @@ class TestBackpressure:
 
     def _backdate_held_jobs(self, age_s: float):
         """Set submit_time on all in-flight store jobs so they appear
-        to have taken ``age_s`` seconds when completed."""
+        to have taken `age_s` seconds when completed."""
         self.manager._processed_jobs_this_step = False
         now = time.monotonic()
         for meta in self.manager._jobs.values():

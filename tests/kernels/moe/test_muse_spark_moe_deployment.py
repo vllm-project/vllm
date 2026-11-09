@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Deployment policy for the MuseSpark1x post-expert-norm MoE (CPU only)."""
+"""Deployment policy for the Muse Spark post-expert-norm MoE (CPU only)."""
 
 import pytest
 import torch
@@ -105,7 +105,7 @@ def test_unsupported_deployments_are_rejected(kwargs, reason):
 
 
 def test_routing_is_only_constrained_when_the_kernel_routes():
-    """Modular experts take topk_ids from MuseSpark1xRouter, so any routing works."""
+    """Modular experts take topk_ids from MuseSparkRouter, so any routing works."""
     config = _moe_config(routing_method=RoutingMethodType.Unspecified)
     validate_deployment(config, kernel_routes=False)
 

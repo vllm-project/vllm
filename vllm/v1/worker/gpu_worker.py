@@ -11,7 +11,7 @@ from contextlib import AbstractContextManager, ExitStack, contextmanager, nullco
 from datetime import timedelta
 from fnmatch import filter as fnmatch_filter
 from types import NoneType
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 import torch
 import torch.nn as nn
@@ -140,14 +140,10 @@ def _min_across_ranks(value: int) -> int:
     return all_reduce_int(get_world_group().cpu_group, value)
 
 
-def _num_workspace_lanes(vllm_config: VllmConfig, use_v2_model_runner: bool) -> int:
+def _num_workspace_lanes(vllm_config: VllmConfig) -> int:
     spec_config = vllm_config.speculative_config
     return (
-        2
-        if use_v2_model_runner
-        and spec_config is not None
-        and spec_config.uses_separate_workspace_lane
-        else 1
+        2 if spec_config is not None and spec_config.uses_separate_workspace_lane else 1
     )
 
 
@@ -181,8 +177,7 @@ def maybe_rocm_profiling_fallback(profile_result: MemoryProfilingResult) -> int 
 if TYPE_CHECKING:
     from vllm.device_allocator.sleep_mode_backend import SleepModeBackend
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
-    from vllm.v1.worker.gpu.model_runner import GPUModelRunner as GPUModelRunnerV2
-    from vllm.v1.worker.gpu_model_runner import GPUModelRunner
+    from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
 
 class AsyncIntermediateTensors(IntermediateTensors):
@@ -226,13 +221,8 @@ class Worker(WorkerBase):
         distributed_init_method: str,
         is_driver_worker: bool = False,
     ):
-        self.use_v2_model_runner = vllm_config.use_v2_model_runner
-        if (
-            self.use_v2_model_runner
-            and not HAS_TRITON
-            and not current_platform.uses_standalone_cpu_model_runner()
-        ):
-            raise ValueError("Model Runner V2 requires Triton.")
+        if not HAS_TRITON and not current_platform.uses_standalone_cpu_model_runner():
+            raise ValueError("vLLM's model runner requires Triton.")
 
         super().__init__(
             vllm_config=vllm_config,
@@ -425,12 +415,7 @@ class Worker(WorkerBase):
         if current_platform.is_cpu():
             return nullcontext()
 
-        allocator = get_mem_allocator_instance()
-        if tag == "weights":
-            assert allocator.get_current_usage() == 0, (
-                "CuMem allocator can only be used for one instance per process."
-            )
-        return allocator.use_memory_pool(tag=tag)
+        return get_mem_allocator_instance().use_memory_pool(tag=tag)
 
     @contextmanager
     def _scoped_allocator_max_split(self, max_split_size_mb: int):
@@ -525,8 +510,6 @@ class Worker(WorkerBase):
                 current_platform.dist_backend,
             )
 
-            if self.use_v2_model_runner:
-                logger.info_once("Using V2 Model Runner")
             warn_if_flashinfer_kernels_missing()
 
             # Set random seed.
@@ -563,6 +546,9 @@ class Worker(WorkerBase):
 
             # take current memory snapshot after external weights are ready
             self.init_snapshot = init_snapshot = MemorySnapshot(device=self.device)
+            if self.cache_config.enable_extensible_kv_cache:
+                # Read as the final sizing reads the free memory it compares.
+                self.init_free_memory = current_platform.free_device_memory(self.device)
             self.requested_memory = request_memory(
                 init_snapshot, self.cache_config, external_weight_memory
             )
@@ -582,32 +568,25 @@ class Worker(WorkerBase):
         init_workspace_manager(
             self.device,
             num_ubatches,
-            _num_workspace_lanes(self.vllm_config, self.use_v2_model_runner),
+            _num_workspace_lanes(self.vllm_config),
             # Scratch holds no state across steps: discard it on sleep.
             alloc_context=lambda: self._maybe_get_memory_pool_context("workspace"),
         )
-        self.model_runner: GPUModelRunner = self._make_model_runner()
+        with self._maybe_get_memory_pool_context(tag="runtime"):
+            self.model_runner: GPUModelRunner = self._make_model_runner()
         if self.rank == 0:
             # If usage stat is enabled, collect relevant info.
             report_usage_stats(self.vllm_config)
 
     def _make_model_runner(self) -> "GPUModelRunner":
         """Construct the platform's model runner; subclasses override this."""
-        if self.use_v2_model_runner:
-            if self.vllm_config.is_mm_encoder_only:
-                from vllm.v1.worker.mm_encoder_model_runner import (
-                    MMEncoderModelRunner as GPUModelRunnerV2,
-                )
-            else:
-                from vllm.v1.worker.gpu.model_runner import (  # type: ignore[assignment]
-                    GPUModelRunner as GPUModelRunnerV2,
-                )
+        if self.vllm_config.is_mm_encoder_only:
+            from vllm.v1.worker.mm_encoder_model_runner import MMEncoderModelRunner
 
-            # HACK(woosuk): This is a temporary fix to avoid type errors.
-            return GPUModelRunnerV2(self.vllm_config, self.device)  # type: ignore
-        from vllm.v1.worker.gpu_model_runner import GPUModelRunner as GPUModelRunnerV1
+            return MMEncoderModelRunner(self.vllm_config, self.device)
+        from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
-        return GPUModelRunnerV1(self.vllm_config, self.device)
+        return GPUModelRunner(self.vllm_config, self.device)
 
     def handle_ft_command(self, ft_request):
         assert self.worker_sentinel is not None
@@ -754,7 +733,7 @@ class Worker(WorkerBase):
         ):
             self.model_runner.profile_run(randomize_inputs=self.randomize_dummy_inputs)
 
-        # Profile CUDA graph memory if graphs will be captured. The V2 runner
+        # Profile CUDA graph memory if graphs will be captured. The runner
         # decides itself, since encoder graphs don't depend on cudagraph_mode.
         # ROCm is included: #44825 moved the profiler to
         # torch.accelerator.get_memory_info (reliable on ROCm, as used by
@@ -765,9 +744,6 @@ class Worker(WorkerBase):
         cudagraph_memory_estimate = 0
         may_capture_graphs = (
             current_platform.is_cuda_alike() or current_platform.is_xpu()
-        ) and (
-            self.use_v2_model_runner
-            or self.vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
         )
         if may_capture_graphs and envs.VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS:
             cudagraph_memory_estimate = self.model_runner.profile_cudagraph_memory()
@@ -960,14 +936,14 @@ class Worker(WorkerBase):
         )
         with runtime_pool:
             if self.cache_config.enable_extensible_kv_cache:
-                self._v2_model_runner().initialize_kv_cache(
+                self.model_runner.initialize_kv_cache(
                     kv_cache_config,
                     kv_cache_allocation_context=allocation_context,
                     extensible=True,
                 )
                 # Warmup commits blocks as it goes; keep the profiled activation
                 # peak free for the steps it runs.
-                kv_cache = self._v2_model_runner().extensible_kv_cache
+                kv_cache = self.model_runner.extensible_kv_cache
                 assert kv_cache is not None
                 kv_cache.reserved_headroom_bytes = getattr(
                     self, "peak_activation_memory", 0
@@ -1030,21 +1006,15 @@ class Worker(WorkerBase):
             self._external_weight_charges.current_bytes,
         )
 
-    def _v2_model_runner(self) -> "GPUModelRunnerV2":
-        assert self.use_v2_model_runner
-        return cast("GPUModelRunnerV2", self.model_runner)
-
     def extend_kv_cache(self, num_blocks: int) -> None:
         """Commit the final size of an extensible KV cache."""
-        extend_kv_cache(self._v2_model_runner(), self._kv_cache_config, num_blocks)
+        extend_kv_cache(self.model_runner, self._kv_cache_config, num_blocks)
         self.cache_config.num_gpu_blocks = num_blocks
 
     @instrument(span_name="Warmup (GPU)")
     def compile_or_warm_up_model(self) -> CompilationTimes:
-        if not self.use_v2_model_runner:
-            return self._compile_or_warm_up_model()
-        # MRV2 warmup forwards record expert load like real ones.
-        with self.model_runner.eplb.suppress():  # type: ignore
+        # Warmup forwards record expert load like real ones.
+        with self.model_runner.eplb.suppress():
             return self._compile_or_warm_up_model()
 
     def _compile_or_warm_up_model(self) -> CompilationTimes:
@@ -1096,31 +1066,28 @@ class Worker(WorkerBase):
         # cuda graph capture.
         kernel_warmup(self)
 
-        if self.use_v2_model_runner:
-            # An extensible KV cache is sized from the peak of these full-batch
-            # steps, so they also run when JIT warmup is off (enforce_eager).
-            if (
-                self.vllm_config.kernel_config.enable_jit_warmup
-                or self.cache_config.enable_extensible_kv_cache
-            ):
-                # A workspace resize after capture frees what the graphs point at.
-                warmup_kernels(
-                    self.model_runner, self.execute_model, self.sample_tokens
-                )
-            if self.cache_config.enable_extensible_kv_cache:
-                run_kv_cache_sizing_warmup(
-                    self._v2_model_runner(), self.execute_model, self.sample_tokens
-                )
-                # Measure before capture, whose persistent allocations would
-                # hide part of the peak from a later peak - current.
-                kv_cache = self._v2_model_runner().extensible_kv_cache
-                assert kv_cache is not None
-                stats = torch.accelerator.memory_stats(self.device)
-                kv_cache.reserved_headroom_bytes = max(
-                    kv_cache.reserved_headroom_bytes,
-                    stats.get("allocated_bytes.all.peak", 0)
-                    - stats.get("allocated_bytes.all.current", 0),
-                )
+        # An extensible KV cache is sized from the peak of these full-batch
+        # steps, so they also run when JIT warmup is off (enforce_eager).
+        if (
+            self.vllm_config.kernel_config.enable_jit_warmup
+            or self.cache_config.enable_extensible_kv_cache
+        ):
+            # A workspace resize after capture frees what the graphs point at.
+            warmup_kernels(self.model_runner, self.execute_model, self.sample_tokens)
+        if self.cache_config.enable_extensible_kv_cache:
+            run_kv_cache_sizing_warmup(
+                self.model_runner, self.execute_model, self.sample_tokens
+            )
+            # Measure before capture, whose persistent allocations would
+            # hide part of the peak from a later peak - current.
+            kv_cache = self.model_runner.extensible_kv_cache
+            assert kv_cache is not None
+            stats = torch.accelerator.memory_stats(self.device)
+            kv_cache.reserved_headroom_bytes = max(
+                kv_cache.reserved_headroom_bytes,
+                stats.get("allocated_bytes.all.peak", 0)
+                - stats.get("allocated_bytes.all.current", 0),
+            )
 
         cuda_graph_memory_bytes = 0
         if not self.model_config.enforce_eager:
@@ -1201,43 +1168,17 @@ class Worker(WorkerBase):
 
             maybe_save_startup_plan(self, kv_cache_memory_bytes_to_requested_limit)
 
-        if not self.use_v2_model_runner and get_pp_group().is_last_rank:
-            # V1: Warm up sampler and preallocate memory buffer for logits and other
-            # sampling related tensors of max possible shape to avoid memory
-            # fragmentation issue.
-            # NOTE: This is called after `capture_model` on purpose to prevent
-            # memory buffers from being cleared by `torch.accelerator.empty_cache`.
+        if get_pp_group().is_last_rank and not self.model_runner.is_pooling_model:
+            # Warm up the sampler and keep its max-batch buffers (e.g. the
+            # fp32 logits copy) cached after the empty_cache() in
+            # capture_model(), so later steps reuse them instead of reserving
+            # a new, larger block at each new batch size.
             max_num_reqs = min(
                 self.scheduler_config.max_num_seqs,
                 self.scheduler_config.max_num_batched_tokens,
             )
-
-            # We skip EPLB here since we don't want to record dummy metrics
-            hidden_states, last_hidden_states = self.model_runner._dummy_run(
-                num_tokens=max_num_reqs,
-                skip_eplb=True,
-                cudagraph_runtime_mode=CUDAGraphMode.NONE,
-            )
-            if self.model_runner.is_pooling_model:
-                self.model_runner._dummy_pooler_run(hidden_states)
-            else:
-                self.model_runner._dummy_sampler_run(hidden_states=last_hidden_states)
-
-        if (
-            self.use_v2_model_runner
-            and get_pp_group().is_last_rank
-            and not self.model_runner.is_pooling_model
-        ):
-            # MRV2 counterpart of the V1 warm-up above: keep the sampler's
-            # max-batch buffers (e.g. the fp32 logits copy) cached after the
-            # empty_cache() in capture_model(), so later steps reuse them
-            # instead of reserving a new, larger block at each new batch size.
-            max_num_reqs = min(
-                self.scheduler_config.max_num_seqs,
-                self.scheduler_config.max_num_batched_tokens,
-            )
-            # Take the hidden states from a dummy forward pass, as V1 does, so they
-            # have the LM head's input size (e.g. OPT projects to a smaller size).
+            # Take the hidden states from a dummy forward pass so they have
+            # the LM head's input size (e.g. OPT projects to a smaller size).
             _, sample_hidden_states = self.model_runner._dummy_run(
                 num_tokens=max_num_reqs, skip_eplb=True
             )
@@ -1275,7 +1216,7 @@ class Worker(WorkerBase):
 
         num_kv_blocks = None
         if self.cache_config.enable_extensible_kv_cache:
-            kv_cache = self._v2_model_runner().extensible_kv_cache
+            kv_cache = self.model_runner.extensible_kv_cache
             assert kv_cache is not None
             # Every rank must size the KV cache identically.
             num_kv_blocks = _min_across_ranks(
@@ -1283,7 +1224,7 @@ class Worker(WorkerBase):
                     kv_cache,
                     self.vllm_config,
                     self.device,
-                    init_free_memory=self.init_snapshot.free_memory,
+                    init_free_memory=self.init_free_memory,
                     requested_memory=int(self.requested_memory),
                 )
             )
@@ -1310,11 +1251,8 @@ class Worker(WorkerBase):
 
     def _get_cudagraph_capture_context(self) -> AbstractContextManager[None]:
         """Let the configured profiler observe CUDA graph capture."""
-        if not self.use_v2_model_runner:
-            return nullcontext()
         if self.profiler is None:
-            model_runner = cast("GPUModelRunnerV2", self.model_runner)
-            if not model_runner.needs_cudagraph_capture():
+            if not self.model_runner.needs_cudagraph_capture():
                 return nullcontext()
             self.profiler = create_graph_capture_profiler(
                 self.profiler_config, global_rank=self.rank
@@ -1338,12 +1276,10 @@ class Worker(WorkerBase):
     def supports_draft_weight_updates(self) -> bool:
         engine = self.weight_transfer_engine
         speculative_config = self.speculative_config
-        get_draft_model = getattr(self.model_runner, "get_draft_model", None)
         return (
             engine is not None
             and engine.supports_draft_weight_update
-            and callable(get_draft_model)
-            and get_draft_model() is not None
+            and self.model_runner.get_draft_model() is not None
             and speculative_config is not None
             and speculative_config.draft_model_config is not None
         )
@@ -1531,12 +1467,8 @@ class Worker(WorkerBase):
             output = self.model_runner.execute_model(
                 scheduler_output, intermediate_tensors
             )
-            if (
-                self.use_v2_model_runner
-                and self.model_runner.is_pooling_model
-                and output is None
-            ):
-                output = self.model_runner.pool()  # type: ignore
+            if self.model_runner.is_pooling_model and output is None:
+                output = self.model_runner.pool()
             if isinstance(
                 output, ModelRunnerOutput | AsyncModelRunnerOutput | NoneType
             ):
@@ -1558,8 +1490,8 @@ class Worker(WorkerBase):
         )
         self._pp_send_work = handles[1:]
 
-        if self.use_v2_model_runner and self.model_runner.is_pooling_model:
-            return self.model_runner.pool()  # type: ignore
+        if self.model_runner.is_pooling_model:
+            return self.model_runner.pool()
         return None
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
@@ -1635,9 +1567,8 @@ class Worker(WorkerBase):
         )
 
     def execute_dummy_batch(self) -> None:
-        num_tokens = getattr(self.model_runner, "uniform_decode_query_len", 1)
         self.model_runner._dummy_run(
-            num_tokens,
+            self.model_runner.decode_query_len,
             uniform_decode=True,
             randomize_inputs=self.randomize_dummy_inputs,
         )
@@ -1848,7 +1779,7 @@ class Worker(WorkerBase):
 
         # Weight transfer bypasses GPUModelRunner.reload_weights().
         if not self._weight_update_is_draft:
-            self.model_runner.reset_lora_state()
+            self.model_runner.on_target_weights_replaced()
 
     def shutdown(self) -> None:
         gc.unfreeze()
