@@ -757,7 +757,7 @@ def test_moriio_handshake_returns_metadata(mock_parallel_groups):
 
 
 def test_resolve_host_ip_prefers_extra_config():
-    """An explicit ``host_ip`` in kv_connector_extra_config overrides get_ip()
+    """An explicit `host_ip` in kv_connector_extra_config overrides get_ip()
     (so an external router can advertise a routable/internal address); an
     absent or empty value falls back to get_ip()."""
     assert resolve_host_ip({"host_ip": "10.0.0.7"}) == "10.0.0.7"
@@ -1182,19 +1182,13 @@ def test_single_group_path_unchanged():
     assert scheduler.get_exchange_clipped_blocks(blocks) == blocks
 
 
-class _FakeSpecConfig(SimpleNamespace):
-    """Minimal speculative_config stand-in. Any drafter-capability probe
-    (use_dflash/use_eagle/use_dspark/uses_draft_model/...) defaults to False so
-    VllmConfig.num_lookahead_tokens resolves cleanly as upstream adds methods."""
-
-    def __getattr__(self, name: str):
-        if name.startswith(("use_", "uses_")):
-            return lambda *a, **k: False
-        raise AttributeError(name)
-
-
 def _fake_speculative_config(num_speculative_tokens: int = 1) -> SimpleNamespace:
-    return _FakeSpecConfig(num_speculative_tokens=num_speculative_tokens)
+    """Minimal speculative_config stand-in, enough for
+    VllmConfig.num_lookahead_tokens."""
+    return SimpleNamespace(
+        num_speculative_tokens=num_speculative_tokens,
+        speculator_config=SimpleNamespace(num_lookahead_tokens=num_speculative_tokens),
+    )
 
 
 def _spec_vllm_config() -> VllmConfig:

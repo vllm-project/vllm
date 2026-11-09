@@ -5,30 +5,30 @@
 In WRITE mode every prefill (producer) rank pushes its own shard of the KV
 cache and recurrent state into the decode (consumer) ranks that need it:
 
-* consumer TP > producer TP (fan-out): producer rank ``p`` feeds consumer ranks
-  ``p * r .. p * r + r - 1``. MLA latents and replicated KV heads are copied
+* consumer TP > producer TP (fan-out): producer rank `p` feeds consumer ranks
+  `p * r .. p * r + r - 1`. MLA latents and replicated KV heads are copied
   whole to each of them; split KV heads and mamba state are sliced, and each
   consumer gets its slice.
-* producer TP > consumer TP (fan-in): consumer rank ``d`` is fed by producer
-  ranks ``d * r .. d * r + r - 1``. Split KV heads and mamba state are
+* producer TP > consumer TP (fan-in): consumer rank `d` is fed by producer
+  ranks `d * r .. d * r + r - 1`. Split KV heads and mamba state are
   gathered: each producer writes its shard at its offset inside the consumer's
   block. Copies that would be identical (MLA, replicated heads) are written by
   one producer only.
 
-Heads follow vLLM's sharding: with ``tp_size <= num_kv_heads`` rank ``i`` holds
-heads ``[i * n, (i + 1) * n)`` with ``n = num_kv_heads // tp_size``; with more
-ranks than heads every rank holds the single head ``i * num_kv_heads //
-tp_size``.
+Heads follow vLLM's sharding: with `tp_size <= num_kv_heads` rank `i` holds
+heads `[i * n, (i + 1) * n)` with `n = num_kv_heads // tp_size`; with more
+ranks than heads every rank holds the single head `i * num_kv_heads //
+tp_size`.
 
 A consumer with decode context parallelism (DCP) shards the tokens of its MLA
 caches instead. A producer with the same DCP size holds the same shard on the
 same rank. A producer without DCP writes each consumer DCP rank
-(``tp_rank % dcp_size``) the tokens it holds: with ``I =
-cp_kv_cache_interleave_size``, token ``t`` lives on DCP rank ``(t // I) %
-dcp_size`` at position ``p = (t // (I * dcp_size)) * I + t % I`` of that rank's
-share, i.e. in its block ``p // block_size``. ``I`` divides the block size, so
-each group of ``I`` tokens is contiguous on both sides and is one write
-(``dcp_write_runs``); with ``I == block_size`` a group is a whole block.
+(`tp_rank % dcp_size`) the tokens it holds: with `I =
+cp_kv_cache_interleave_size`, token `t` lives on DCP rank `(t // I) %
+dcp_size` at position `p = (t // (I * dcp_size)) * I + t % I` of that rank's
+share, i.e. in its block `p // block_size`. `I` divides the block size, so
+each group of `I` tokens is contiguous on both sides and is one write
+(`dcp_write_runs`); with `I == block_size` a group is a whole block.
 """
 
 from collections.abc import Sequence
@@ -245,8 +245,8 @@ def validate_peer_dcp_layout(
 
     Equal DCP sizes transfer rank to rank. A WRITE producer without DCP can
     also write into a DCP consumer, one write per group of interleaved tokens,
-    for MLA layers only (``non_mla_layer`` names another DCP-sharded layer);
-    ``whole_block_layer`` names a layer whose blocks can only be written whole,
+    for MLA layers only (`non_mla_layer` names another DCP-sharded layer);
+    `whole_block_layer` names a layer whose blocks can only be written whole,
     which needs the consumer's interleave to be the block size. A peer that
     does not advertise its layout predates these checks and is accepted as
     before.
@@ -312,10 +312,10 @@ def dcp_write_runs(
     interleave_size: int,
     dcp_rank: int,
 ) -> DCPWriteRuns:
-    """Runs of ``interleave_size`` producer tokens that consumer DCP rank
-    ``dcp_rank`` holds, in the rank's token order.
+    """Runs of `interleave_size` producer tokens that consumer DCP rank
+    `dcp_rank` holds, in the rank's token order.
 
-    A rank that holds none of them (a prompt shorter than ``dcp_size`` runs)
+    A rank that holds none of them (a prompt shorter than `dcp_size` runs)
     gets empty runs and must still be sent write_done.
     """
     runs = np.arange(

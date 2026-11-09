@@ -38,9 +38,9 @@ class LayerTransferGeometry(NamedTuple):
 class MambaTransferGeometry(NamedTuple):
     """Geometry of a hybrid (mamba/KDA) layer's recurrent state.
 
-    A KDA layer's packed page is exposed as ``conv_state`` and ``ssm_state``
+    A KDA layer's packed page is exposed as `conv_state` and `ssm_state`
     views. Each is slot-strided, so a slot's bytes live at
-    ``slot * slot_stride * element_size`` and span ``slot_bytes``. The two
+    `slot * slot_stride * element_size` and span `slot_bytes`. The two
     tensors are registered as two separate MoRIIO regions per layer.
     """
 
@@ -59,10 +59,10 @@ def get_mamba_transfer_geometry(
 ) -> MambaTransferGeometry:
     """Derive the slot-strided geometry of a KDA layer's conv + ssm state.
 
-    ``conv``/``ssm`` are zero-copy views over the layer's packed page. Slot byte
-    offset is ``slot * slot_stride * element_size`` and each
-    slot spans ``subtensor[0].numel() * element_size`` bytes; the whole tensor
-    is registered as one region (``*_region_len`` bytes).
+    `conv`/`ssm` are zero-copy views over the layer's packed page. Slot byte
+    offset is `slot * slot_stride * element_size` and each
+    slot spans `subtensor[0].numel() * element_size` bytes; the whole tensor
+    is registered as one region (`*_region_len` bytes).
     """
     if conv.ndim == 0 or ssm.ndim == 0 or conv.shape[0] == 0 or ssm.shape[0] == 0:
         raise ValueError("KDA conv/ssm caches must contain at least one slot")
@@ -516,11 +516,11 @@ def get_token_run_table(
     run_tokens: int,
     latent_size: int | None,
 ) -> tuple[np.ndarray, np.ndarray] | None:
-    """Byte ranges of a run of ``run_tokens`` tokens in a block of this layer.
+    """Byte ranges of a run of `run_tokens` tokens in a block of this layer.
 
-    Returns ``(offsets, sizes)``: ``offsets[i]`` are the ranges, relative to
-    the block, of the run that starts at slot ``i * run_tokens``, and every run
-    has ranges of the same ``sizes``. Only an MLA latent of ``latent_size``
+    Returns `(offsets, sizes)`: `offsets[i]` are the ranges, relative to
+    the block, of the run that starts at slot `i * run_tokens`, and every run
+    has ranges of the same `sizes`. Only an MLA latent of `latent_size`
     elements per token qualifies; any other layer returns None and can only be
     copied in whole blocks.
     """
@@ -555,10 +555,10 @@ def compute_token_run_offsets(
         [list[int], list[int], list[int]], tuple[list[int], list[int], list[int]]
     ] = merge_contiguous_offsets,
 ) -> tuple[list[int], list[int], list[int]]:
-    """Offsets copying runs of ``run_tokens`` tokens between blocks of the
+    """Offsets copying runs of `run_tokens` tokens between blocks of the
     same layout.
 
-    ``runs`` holds the local block id and slot and the remote block id and
+    `runs` holds the local block id and slot and the remote block id and
     slot of each run's first token.
     """
     table = get_token_run_table(
@@ -600,7 +600,7 @@ class MambaOffsetTemplate(NamedTuple):
     Homogeneous-TP geometry (conv/ssm slot strides, conv sub-projection
     offsets, ssm per-slot size) is identical across requests and across the
     homogeneous GDN layers, so it is computed once and reused; only the
-    per-request slot bases vary (see ``apply_mamba_offset_template``).
+    per-request slot bases vary (see `apply_mamba_offset_template`).
     """
 
     num_slots: int
@@ -618,9 +618,9 @@ def build_mamba_offset_template(
 ) -> MambaOffsetTemplate:
     """Precompute the slot-independent conv+ssm offset decomposition.
 
-    Only homogeneous TP (``tp_ratio == 1``) is supported; heterogeneous TP is
-    gated with ``NotImplementedError`` (see the design doc). The returned
-    template is a pure function of the layer geometry and ``split_info``, so it
+    Only homogeneous TP (`tp_ratio == 1`) is supported; heterogeneous TP is
+    gated with `NotImplementedError` (see the design doc). The returned
+    template is a pure function of the layer geometry and `split_info`, so it
     can be cached and reused across requests without recomputation.
     """
     if tp_ratio != 1:
@@ -656,7 +656,7 @@ def apply_mamba_offset_template(
     local_slots: list[int],
     remote_slots: list[int],
 ) -> tuple[list[int], list[int], list[int]]:
-    """Apply per-request slot bases to a cached ``MambaOffsetTemplate``.
+    """Apply per-request slot bases to a cached `MambaOffsetTemplate`.
 
     Conv sub-projection entries (all slots) come first, followed by one ssm
     entry per slot.
@@ -710,8 +710,8 @@ def compute_mamba_conv_split_count(
 ) -> int:
     """Number of leading conv entries in a KDA layer transfer plan.
 
-    Entries ``[:count]`` are conv sub-projections (conv region/session);
-    entries ``[count:]`` are the per-slot ssm state (ssm region/session).
+    Entries `[:count]` are conv sub-projections (conv region/session);
+    entries `[count:]` are the per-slot ssm state (ssm region/session).
     """
     return len(local_slots) * len(split_info.local_conv_offsets)
 
@@ -719,9 +719,9 @@ def compute_mamba_conv_split_count(
 class HeadLayout(NamedTuple):
     """Byte addressing of one attention layer's KV heads in its region.
 
-    Offsets are relative to the layer's registered region. ``plane_offsets``
+    Offsets are relative to the layer's registered region. `plane_offsets`
     holds the start of the K and V planes when they are stored apart, or
-    ``(0,)`` when K and V are packed into each head's content.
+    `(0,)` when K and V are packed into each head's content.
     """
 
     num_heads: int
@@ -868,10 +868,10 @@ def compute_head_slice_offsets(
         [list[int], list[int], list[int]], tuple[list[int], list[int], list[int]]
     ] = merge_contiguous_offsets,
 ) -> tuple[list[int], list[int], list[int]]:
-    """Offsets copying ``num_heads`` heads of each local block into a remote one.
+    """Offsets copying `num_heads` heads of each local block into a remote one.
 
-    Local heads ``[local_head, local_head + num_heads)`` land on remote heads
-    ``[remote_head, remote_head + num_heads)``; every other remote head is
+    Local heads `[local_head, local_head + num_heads)` land on remote heads
+    `[remote_head, remote_head + num_heads)`; every other remote head is
     left for the producer rank that holds it.
     """
     if (
@@ -986,7 +986,7 @@ def compute_mamba_slice_offsets(
 ) -> tuple[list[int], list[int], list[int], int]:
     """(local, remote, sizes, n_conv) moving one target's share of the state.
 
-    Entries ``[:n_conv]`` address the conv region; the rest the SSM region.
+    Entries `[:n_conv]` address the conv region; the rest the SSM region.
     Each conv sub-projection and the SSM state are sharded across TP ranks
     independently, so each is sliced or gathered on its own.
     """

@@ -127,6 +127,50 @@ def check_model_available(model: str) -> None:
     model_info.check_transformers_version(on_fail="skip")
 
 
+@pytest.mark.core_model
+def test_audio_tensor_inputs(vllm_runner: type[VllmRunner]) -> None:
+    audio, sample_rate = AudioAsset("mary_had_lamb").audio_and_sample_rate
+    if sample_rate != WHISPER_SAMPLE_RATE:
+        audio = AudioResampler(target_sr=WHISPER_SAMPLE_RATE).resample(
+            audio, orig_sr=sample_rate
+        )
+
+    with vllm_runner(
+        "openai/whisper-tiny",
+        dtype="half",
+        max_model_len=448,
+        max_num_batched_tokens=2048,
+        max_num_seqs=1,
+        enforce_eager=True,
+        enable_prefix_caching=False,
+        mm_processor_cache_gb=0,
+    ) as vllm_model:
+        reference = vllm_model.generate_greedy_logprobs(
+            [VLLM_PROMPT], 16, num_logprobs=5, audios=[audio]
+        )
+        assert reference[0][0]
+
+        audio_tensor = torch.as_tensor(audio)
+        audio_cases = {
+            "CPU with gradients": audio_tensor.requires_grad_(True),
+            "CUDA": audio_tensor.detach().to("cuda"),
+            "CUDA with gradients": audio_tensor.detach()
+            .to("cuda")
+            .requires_grad_(True),
+        }
+        for name, tensor in audio_cases.items():
+            result = vllm_model.generate_greedy_logprobs(
+                [VLLM_PROMPT], 16, num_logprobs=5, audios=[tensor]
+            )
+            assert result[0][0]
+            check_logprobs_close(
+                outputs_0_lst=reference,
+                outputs_1_lst=result,
+                name_0="NumPy",
+                name_1=name,
+            )
+
+
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [64])
 def test_beam_search_encoder_decoder(
@@ -266,7 +310,7 @@ def test_parse_language_detection_output():
 
 
 def test_create_fake_bias_for_k_proj_injects_out_features():
-    """Packed k_proj weights get a zeros bias of length ``out_features``."""
+    """Packed k_proj weights get a zeros bias of length `out_features`."""
     from vllm.model_executor.models.whisper import _create_fake_bias_for_k_proj
 
     packed = torch.ones(2, 16)

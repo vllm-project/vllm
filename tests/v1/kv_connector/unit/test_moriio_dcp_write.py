@@ -482,7 +482,7 @@ def test_write_between_equal_dcp_sizes_is_rank_to_rank(monkeypatch):
 
 def _handshake_worker(is_producer: bool, handshake) -> MoRIIOConnectorWorker:
     """Rank 0 of a prefill instance with TP 1 in WRITE mode or of a decode
-    instance with TP 2 in READ mode; ``handshake`` stands in for the peer."""
+    instance with TP 2 in READ mode; `handshake` stands in for the peer."""
     worker = MoRIIOConnectorWorker.__new__(MoRIIOConnectorWorker)
     worker.is_producer = is_producer
     worker.mode = MoRIIOMode.WRITE if is_producer else MoRIIOMode.READ

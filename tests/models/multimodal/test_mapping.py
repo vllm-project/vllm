@@ -76,8 +76,8 @@ def test_cosmos3_new_checkpoint_weights_mapper():
 
 def test_cosmos3_modelopt_quantizer_weights_mapper():
     """ModelOpt/Diffusers FP8 checkpoints ship native fake-quant buffers
-    (``*_quantizer._amax`` / ``._scale``) alongside the vLLM-consumable
-    ``weight_scale`` / ``input_scale`` sidecars. vLLM must drop the former
+    (`*_quantizer._amax` / `._scale`) alongside the vLLM-consumable
+    `weight_scale` / `input_scale` sidecars. vLLM must drop the former
     (it has no parameter for them) while keeping the latter."""
     from vllm.model_executor.models.cosmos3 import Cosmos3ForConditionalGeneration
 
@@ -186,8 +186,8 @@ def test_cosmos3_edge_checkpoint_weights_mapper():
 
 def test_cosmos3_edge_modelopt_quantizer_weights_mapper():
     """ModelOpt/Diffusers FP8 checkpoints ship native fake-quant buffers
-    (``*_quantizer._amax`` / ``._scale``) alongside the vLLM-consumable
-    ``weight_scale`` / ``input_scale`` sidecars. vLLM must drop the former
+    (`*_quantizer._amax` / `._scale`) alongside the vLLM-consumable
+    `weight_scale` / `input_scale` sidecars. vLLM must drop the former
     (it has no parameter for them) while keeping the latter."""
     from vllm.model_executor.models.cosmos3_edge import (
         Cosmos3EdgeForConditionalGeneration,
@@ -342,7 +342,7 @@ def test_hf_model_weights_mapper(model_arch: str):
     hf_dummy_model = create_dummy_model(model_id, model_arch)
     hf_converted_weights = hf_dummy_model.named_parameters()
     hf_converted_buffers = hf_dummy_model.named_buffers()
-    mapper: WeightsMapper = model_cls.hf_to_vllm_mapper
+    mapper: WeightsMapper = getattr(model_cls, "hf_to_vllm_mapper")  # noqa: B009
 
     mapped_original_weights = mapper.apply(original_weights)
     mapped_hf_converted_weights = mapper.apply(hf_converted_weights)
@@ -363,8 +363,7 @@ def test_hf_model_weights_mapper(model_arch: str):
         config = hf_dummy_model.config
         key = "tie_word_embeddings"
         if getattr(config.get_text_config(), key, False) or getattr(config, key, False):
-            mapped_tied_weights = mapper.apply((k, None) for k in tied)
-            tied_weight_names = set(map(lambda x: x[0], mapped_tied_weights))
+            tied_weight_names = set(mapper.apply_list(tied))
             ref_weight_names -= tied_weight_names
 
     weights_missing = ref_weight_names - weight_names

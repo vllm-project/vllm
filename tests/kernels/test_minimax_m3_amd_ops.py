@@ -16,21 +16,22 @@ tests assert the two agree within tolerance:
   * Native MXFP8 MoE (dot_scaled grouped GEMM)   -> dequant-to-bf16 MoE math
   * Strided K/V sparse-PA cache insert           -> contiguous-copy insert
 
-The native MXFP8 GEMMs also guard the ``dot_scaled`` rhs-scale orientation: the
-scale is loaded ``[N, K//32]`` and passed WITHOUT transpose; a stray ``.T``
-makes the shape ``[K//32, N]`` and Triton raises before producing output, so any
+The native MXFP8 GEMMs also guard the `dot_scaled` rhs-scale orientation: the
+scale is loaded `[N, K//32]` and passed WITHOUT transpose; a stray `.T`
+makes the shape `[K//32, N]` and Triton raises before producing output, so any
 regression there fails these tests loudly.
 
 Hardware scope: the whole module is ROCm-only (these are the AMD path; NVIDIA
 uses the FlashInfer kernels). The norm/activation/quant kernels run on any ROCm
-arch; the native MXFP8 ``dot_scaled`` linear/MoE tests are additionally gated to
-CDNA4 gfx95x (``@requires_gfx950``) since gfx942 uses the BF16 emulation path.
+arch; the native MXFP8 `dot_scaled` linear/MoE tests are additionally gated to
+CDNA4 gfx95x (`@requires_gfx950`) since gfx942 uses the BF16 emulation path.
 
 Run:  pytest tests/kernels/test_minimax_m3_amd_ops.py -v
 """
 
 import pytest
 import torch
+from transformers import PreTrainedConfig
 
 from vllm.platforms import current_platform
 
@@ -46,17 +47,23 @@ from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (  # noqa:
     mxfp8_e4m3_quantize,
 )
 from vllm.models.minimax_m3.amd.model import (  # noqa: E402
+    MiniMAXGemmaRMSNorm,
+    MiniMaxM3MLP,
+    MiniMaxM3SparseAttention,
+    _build_rotary_emb,
     _can_fuse_input_norm_mxfp8,
     _kv_insert_operand,
 )
 from vllm.models.minimax_m3.amd.ops import (  # noqa: E402
     gemma_fused_add_rmsnorm,
     gemma_fused_add_rmsnorm_mxfp8,
+    gemma_fused_add_rmsnorm_mxfp8_and_bf16,
     gemma_rmsnorm,
     swiglu_oai_quantize_mxfp8,
     swiglu_oai_split,
 )
 from vllm.models.minimax_m3.amd.ops.gemma_rmsnorm import _num_warps  # noqa: E402
+from vllm.platforms.rocm import on_gfx942  # noqa: E402
 
 DEVICE = "cuda"
 EPS = 1e-6
@@ -134,7 +141,7 @@ def test_gemma_fused_add_rmsnorm(shape, dtype):
 
 @torch.inference_mode()
 def test_gemma_rmsnorm_per_head_strided():
-    """q_norm/k_norm normalize a non-contiguous ``qkv.split`` slice over head_dim."""
+    """q_norm/k_norm normalize a non-contiguous `qkv.split` slice over head_dim."""
     torch.manual_seed(0)
     T, H, D, kv = 7, 48, 128, 8
     total = (H + 2 * kv) * D
@@ -157,7 +164,7 @@ def _mxfp8_edge_case_inputs(n: int, dtype: torch.dtype):
     """(x, residual, weight) whose normed output covers the MXFP8 block cases.
 
     Through the weight, every row gets a huge block (scale above 1.0), an
-    all-zero block, and a tiny block (``1 + w == 2**-8``). Rows: 32 ordinary
+    all-zero block, and a tiny block (`1 + w == 2**-8`). Rows: 32 ordinary
     rows with a residual, then an all-zero row, a row of tiny values, a row
     whose first block dwarfs the rest, and a row of partly-zero blocks.
     """
@@ -187,7 +194,7 @@ def _mxfp8_edge_case_inputs(n: int, dtype: torch.dtype):
 @torch.inference_mode()
 def test_gemma_fused_add_rmsnorm_mxfp8_bitwise_eq_unfused(n, dtype):
     """The MXFP8 epilogue writes the same values, E8M0 scales and residual as
-    ``gemma_fused_add_rmsnorm`` followed by ``mxfp8_e4m3_quantize``."""
+    `gemma_fused_add_rmsnorm` followed by `mxfp8_e4m3_quantize`."""
     x, res, w = _mxfp8_edge_case_inputs(n, dtype)
     m = x.shape[0]
     # A leading batch dim is flattened into the quantized rows.
@@ -206,6 +213,147 @@ def test_gemma_fused_add_rmsnorm_mxfp8_bitwise_eq_unfused(n, dtype):
     assert torch.equal(got_q.view(torch.uint8), ref_q.view(torch.uint8))
     assert torch.equal(got_scale, ref_scale)
     assert torch.equal(got_res, ref_res)
+
+
+@pytest.mark.parametrize("n", [2048, 6144])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@torch.inference_mode()
+def test_gemma_fused_add_rmsnorm_mxfp8_and_bf16_bitwise_eq_unfused(n, dtype):
+    """The variant that also stores the normed rows matches the unfused norm
+    (bf16 output) and norm + `mxfp8_e4m3_quantize` (values, scales)."""
+    x, res, w = _mxfp8_edge_case_inputs(n, dtype)
+    m = x.shape[0]
+
+    got_q, got_scale, got_normed, got_res = gemma_fused_add_rmsnorm_mxfp8_and_bf16(
+        x, res, w, EPS
+    )
+    normed, ref_res = gemma_fused_add_rmsnorm(x, res, w, EPS)
+    ref_q, ref_scale = mxfp8_e4m3_quantize(normed)
+
+    assert got_normed.shape == x.shape and got_normed.dtype == dtype
+    assert torch.equal(got_normed, normed)
+    assert torch.equal(got_q.view(torch.uint8), ref_q.view(torch.uint8))
+    assert torch.equal(got_scale, ref_scale)
+    assert torch.equal(got_res, ref_res)
+    assert got_q.shape == (m, n)
+
+
+@pytest.mark.parametrize("return_normed", [True, False])
+@pytest.mark.parametrize("tp_size", [1, 4])
+@torch.inference_mode()
+def test_allreduce_gemma_rms_norm_mxfp8(monkeypatch, tp_size, return_normed):
+    """The fused post-attention norm equals all-reduce + norm + quant, and
+    defers (None) to a fused all-reduce + norm kernel when one applies."""
+    from vllm.model_executor.layers import fused_allreduce_gemma_rms_norm as far
+
+    reduced_inputs = []
+
+    def _fake_all_reduce(t):
+        reduced_inputs.append(t)
+        return t * 2  # distinguishable from the un-reduced partial
+
+    monkeypatch.setattr(far, "get_tensor_model_parallel_world_size", lambda: tp_size)
+    monkeypatch.setattr(far, "tensor_model_parallel_all_reduce", _fake_all_reduce)
+    monkeypatch.setattr(far, "_can_use_flashinfer", lambda *a: (False, 0))
+    monkeypatch.setattr(far, "_can_use_aiter_fused_ar_rms", lambda *a: False)
+
+    n, m = 6144, 37
+    torch.manual_seed(0)
+    x = torch.randn(m, n, device=DEVICE, dtype=torch.bfloat16)
+    res = torch.randn(m, n, device=DEVICE, dtype=torch.bfloat16)
+    norm = MiniMAXGemmaRMSNorm(n, eps=EPS).to(DEVICE, torch.bfloat16)
+    norm.weight.data.normal_(0, 0.1)
+
+    got = far.allreduce_gemma_rms_norm_mxfp8(x, res, norm, return_normed)
+    assert got is not None
+    x_q, x_scale, normed, res_out = got
+    reduced = x * 2 if tp_size > 1 else x
+    assert len(reduced_inputs) == (1 if tp_size > 1 else 0)
+    ref_normed, ref_res = gemma_fused_add_rmsnorm(reduced, res, norm.weight, EPS)
+    ref_q, ref_scale = mxfp8_e4m3_quantize(ref_normed)
+    assert torch.equal(x_q.view(torch.uint8), ref_q.view(torch.uint8))
+    assert torch.equal(x_scale, ref_scale)
+    assert torch.equal(res_out, ref_res)
+    if return_normed:
+        assert normed is not None and torch.equal(normed, ref_normed)
+    else:
+        assert normed is None
+
+    # A fused all-reduce + norm kernel (no quant epilogue) keeps priority.
+    if tp_size > 1:
+        monkeypatch.setattr(far, "_can_use_aiter_fused_ar_rms", lambda *a: True)
+        assert far.allreduce_gemma_rms_norm_mxfp8(x, res, norm, return_normed) is None
+
+
+@requires_gfx950
+@torch.inference_mode()
+def test_shared_expert_gate_up_on_post_norm_quant(dist_init):
+    """gate_up_proj on the post-attention norm's MXFP8 output equals the
+    unfused norm -> linear (shared expert gate_up shape, TP4)."""
+    from vllm.model_executor.layers.fusion.quant_activation import (
+        QuantizedActivation,
+    )
+    from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        kMxfp8Dynamic,
+    )
+
+    n, k, m = 1536, 6144, 32
+    layer, scheme = _quark_mxfp8_linear(n, k)
+    assert _can_fuse_input_norm_mxfp8(layer)
+    scheme.process_weights_after_loading(layer)
+    x = torch.randn(m, k, device=DEVICE, dtype=torch.bfloat16)
+    res = torch.randn(m, k, device=DEVICE, dtype=torch.bfloat16)
+    w = torch.randn(k, device=DEVICE, dtype=torch.bfloat16) * 0.1
+    x_q, x_scale, normed, _ = gemma_fused_add_rmsnorm_mxfp8_and_bf16(x, res, w, EPS)
+    qa = QuantizedActivation(x_q, x_scale, x.dtype, x.shape, kMxfp8Dynamic)
+    assert torch.equal(
+        scheme.apply_weights(layer, qa), scheme.apply_weights(layer, normed)
+    )
+
+
+@torch.inference_mode()
+def test_mlp_prequant_handoff():
+    """`set_prequant` replaces gate_up_proj's input only when the shared
+    expert is called with the very tensor that was quantized, and only once."""
+    from vllm.model_executor.layers.fusion.quant_activation import (
+        QuantizedActivation,
+    )
+    from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        kMxfp8Dynamic,
+    )
+
+    mlp = object.__new__(MiniMaxM3MLP)
+    torch.nn.Module.__init__(mlp)
+    mlp.fuse_act_quant_mxfp8 = False
+    seen = []
+
+    def _gate_up(x):
+        seen.append(x)
+        return torch.zeros(4, 16, device=DEVICE, dtype=torch.bfloat16), None
+
+    mlp.gate_up_proj = _gate_up
+    mlp.down_proj = lambda x: (x, None)
+    mlp.swiglu_alpha, mlp.swiglu_beta, mlp.swiglu_limit = 1.702, 1.0, 7.0
+
+    x = torch.randn(4, 8, device=DEVICE, dtype=torch.bfloat16)
+    other = x.clone()  # a different tensor than the one that was quantized
+    qa = QuantizedActivation(
+        x.to(torch.float8_e4m3fn),
+        torch.zeros(4, 1, device=DEVICE, dtype=torch.uint8),
+        x.dtype,
+        x.shape,
+        kMxfp8Dynamic,
+    )
+    mlp.set_prequant(x, qa)
+    mlp(x)
+    assert seen[-1] is qa
+    mlp(x)  # consumed by the first forward
+    assert seen[-1] is x
+    mlp.set_prequant(x, qa)
+    mlp(other)
+    assert seen[-1] is other
+    mlp(qa)  # a quantized input passes through untouched
+    assert seen[-1] is qa
 
 
 # --------------------------------------------------------------------------- #
@@ -251,6 +399,68 @@ def test_swiglu_oai_quantize_mxfp8_uses_e4m3_range_for_scale():
 
     assert torch.equal(got_s, ref_s)
     assert torch.equal(got_q, ref_q)
+
+
+@pytest.mark.parametrize("m", [1, 8, 32, 128, 192])
+@pytest.mark.parametrize("inter", [768, 3072])
+@pytest.mark.parametrize("block_m", [8, 16, 64])
+@torch.inference_mode()
+def test_swiglu_oai_quantize_mxfp8_vs_unfused(m, inter, block_m):
+    """Fused swiglu + quant against swiglu -> bf16 -> quant. It skips the bf16
+    rounding of the activation, so a few E4M3 codes (and, rarely, a block scale)
+    differ; against the fp32 activation it is at least as accurate."""
+    torch.manual_seed(m + inter)
+    gate_up = (torch.randn(m, 2 * inter, device=DEVICE) * 8).to(torch.bfloat16)
+    alpha, beta, limit = 1.702, 1.0, 7.0
+
+    got_q, got_s = swiglu_oai_quantize_mxfp8(
+        gate_up, alpha, beta, limit, block_m=block_m
+    )
+    act_bf16 = swiglu_oai_split(gate_up, alpha, beta, limit)
+    ref_q, ref_s = mxfp8_e4m3_quantize(act_bf16)
+    assert got_q.shape == ref_q.shape and got_s.shape == ref_s.shape
+
+    assert (got_s != ref_s).float().mean().item() < 1e-3
+    assert (got_q.view(torch.uint8) != ref_q.view(torch.uint8)).float().mean() < 0.05
+
+    act_f32 = _ref_swiglu(gate_up.float(), alpha, beta, limit).float()
+    got_err = _relerr(dequant_mxfp8_to_bf16(got_q, got_s), act_f32)
+    ref_err = _relerr(dequant_mxfp8_to_bf16(ref_q, ref_s), act_f32)
+    assert got_err <= ref_err * 1.001 + 1e-6
+
+
+@requires_gfx950
+@pytest.mark.parametrize("m", [1, 8, 16, 17, 32, 128])
+@pytest.mark.parametrize("n,k", [(6144, 768), (6144, 3072)])  # shared expert, dense
+@torch.inference_mode()
+def test_mlp_down_proj_on_swiglu_quant(dist_init, m, n, k):
+    """down_proj on the fused swiglu + quant output stays within MXFP8 quant
+    noise of the unfused swiglu -> linear, and the fused-quant GEMM keeps its
+    own path where it already quantizes in-kernel (M <= 16, K <= 1024)."""
+    from vllm.model_executor.layers.fusion.quant_activation import (
+        QuantizedActivation,
+    )
+    from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        kMxfp8Dynamic,
+    )
+
+    layer, scheme = _quark_mxfp8_linear(n, k)
+    assert _can_fuse_input_norm_mxfp8(layer)
+    scheme.process_weights_after_loading(layer)
+    mlp = object.__new__(MiniMaxM3MLP)
+    torch.nn.Module.__init__(mlp)
+    mlp.down_proj = layer
+    in_gemm = mlp._down_proj_quantizes_in_gemm(m)
+    assert in_gemm == (m <= 16 and k <= 1024)
+
+    gate_up = (torch.randn(m, 2 * k, device=DEVICE) * 4).to(torch.bfloat16)
+    act = swiglu_oai_split(gate_up, 1.702, 1.0, 7.0)
+    act_q, act_s = swiglu_oai_quantize_mxfp8(gate_up, 1.702, 1.0, 7.0, block_m=16)
+    qa = QuantizedActivation(act_q, act_s, act.dtype, act.shape, kMxfp8Dynamic)
+    got = scheme.apply_weights(layer, qa)
+    ref = scheme.apply_weights(layer, act)
+    assert got.shape == ref.shape == (m, n)
+    assert _relerr(got, ref) < 3e-2
 
 
 # --------------------------------------------------------------------------- #
@@ -374,14 +584,14 @@ def test_mxfp8_native_moe(T, H, inter, E, top_k):
 # Native MXFP8 grouped GEMM (dot_scaled) vs pure-PyTorch grouped matmul
 # --------------------------------------------------------------------------- #
 def _ref_grouped_gemm(a_deq, w_deq, topk_ids, a_div, num_valid, mul_weight=None):
-    """Pure-PyTorch reference for ``_grouped_gemm_mxfp8``.
+    """Pure-PyTorch reference for `_grouped_gemm_mxfp8`.
 
-    For each routed (expanded) token ``tid in [0, num_valid)`` the kernel writes
-    ``out[tid] = a[tid // a_div] @ w[expert(tid)].T`` (fp32 accumulate), optionally
-    scaled by ``mul_weight[tid]``. The expert for ``tid`` is ``topk_ids.flatten()
-    [tid]`` (row-major expansion: ``tid = token*top_k + slot``). This is computed
-    here with plain ``torch.matmul`` on the dequantized operands — independent of
-    the Triton ``dot_scaled`` path and of the (separate) aiter backend.
+    For each routed (expanded) token `tid in [0, num_valid)` the kernel writes
+    `out[tid] = a[tid // a_div] @ w[expert(tid)].T` (fp32 accumulate), optionally
+    scaled by `mul_weight[tid]`. The expert for `tid` is `topk_ids.flatten()
+    [tid]` (row-major expansion: `tid = token*top_k + slot`). This is computed
+    here with plain `torch.matmul` on the dequantized operands — independent of
+    the Triton `dot_scaled` path and of the (separate) aiter backend.
     """
     eids = topk_ids.reshape(-1)
     n = w_deq.shape[1]
@@ -399,13 +609,13 @@ def _ref_grouped_gemm(a_deq, w_deq, topk_ids, a_div, num_valid, mul_weight=None)
 @pytest.mark.parametrize("weighted", [False, True])
 @torch.inference_mode()
 def test_mxfp8_grouped_gemm_native(T, N, K, E, top_k, weighted):
-    """Directly exercise ``_grouped_gemm_mxfp8`` against a non-Triton reference.
+    """Directly exercise `_grouped_gemm_mxfp8` against a non-Triton reference.
 
-    Covers both call modes used by ``fused_moe_mxfp8_native``:
-      * ``weighted=False`` -> g1: ``a_div=top_k`` (a-row shared across the top_k
+    Covers both call modes used by `fused_moe_mxfp8_native`:
+      * `weighted=False` -> g1: `a_div=top_k` (a-row shared across the top_k
         expansions of a token), no per-token weight.
-      * ``weighted=True``  -> g2: ``a_div=1`` (one a-row per expansion), output
-        scaled by ``topk_weights``.
+      * `weighted=True`  -> g2: `a_div=1` (one a-row per expansion), output
+        scaled by `topk_weights`.
     """
     from vllm.model_executor.layers.fused_moe.experts.mxfp8_native_moe import (
         _grouped_gemm_mxfp8,
@@ -468,7 +678,7 @@ def test_mxfp8_linear_emulation_bf16_at_load(
     shape, act_dtype, dequant_at_load, monkeypatch
 ):
     """EmulationMxfp8LinearKernel load-time BF16 dequant (default) and the
-    ``VLLM_MXFP8_EMULATION_DEQUANT_AT_LOAD=0`` per-step fallback must produce the
+    `VLLM_MXFP8_EMULATION_DEQUANT_AT_LOAD=0` per-step fallback must produce the
     same result; the dtype-match (BF16/FP16 activations) must also hold."""
     from vllm.model_executor.kernels.linear.mxfp8.emulation import (
         EmulationMxfp8LinearKernel,
@@ -518,9 +728,9 @@ def test_mxfp8_linear_emulation_bf16_at_load(
 @pytest.mark.parametrize("shape", [(5120, 576), (5120, 288), (256, 2048)])
 @torch.inference_mode()
 def test_mxfp8_rocm_native_unaligned_k_dequantizes_at_load(shape):
-    """``dot_scaled`` tiles K by 128, so an unaligned weight must not reach it.
+    """`dot_scaled` tiles K by 128, so an unaligned weight must not reach it.
 
-    ``process_weights_after_loading`` converts those to BF16 once; a weight that
+    `process_weights_after_loading` converts those to BF16 once; a weight that
     never went through it has to fall back per step rather than take the
     invalid path, which is what keying the dispatch on the weight dtype alone
     would do.
@@ -675,8 +885,8 @@ def test_fused_input_norm_mxfp8_off_under_batch_invariance(dist_init, monkeypatc
 # ``(expert_map >= 0)``, which collapsed an already-0/1 mask to all-ones and
 # produced EP garbage).
 def _capture_expert_mask(expert_mask, *, global_num_experts):
-    """Drive the real ``AiterMxfp8Experts.apply`` mask branch and capture the
-    ``expert_mask`` it forwards to ``rocm_aiter_ops.fused_moe``."""
+    """Drive the real `AiterMxfp8Experts.apply` mask branch and capture the
+    `expert_mask` it forwards to `rocm_aiter_ops.fused_moe`."""
     from types import SimpleNamespace
     from unittest import mock
 
@@ -741,7 +951,7 @@ def test_aiter_mxfp8_apply_forwards_expert_mask_unchanged():
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm only")
 def test_routed_experts_expert_map_delegates_to_kernel():
     """RoutedExperts.expert_map returns the 0/1 mask only for kernels that set
-    ``consumes_expert_mask`` (AITER), and the canonical -1 map otherwise -- keyed
+    `consumes_expert_mask` (AITER), and the canonical -1 map otherwise -- keyed
     on the resolved kernel, not the global aiter switch."""
     from types import SimpleNamespace
 
@@ -786,7 +996,7 @@ def _fused_qkv_kv_slices(num_tokens, num_kv_heads, head_dim, num_q_heads=16):
 
 
 def _asm_kv_cache(pages, num_kv_heads, head_dim):
-    """Page-16 K/V cache views matching ``_ensure_aiter_sparse_pa_kv_cache``."""
+    """Page-16 K/V cache views matching `_ensure_aiter_sparse_pa_kv_cache`."""
     x = 16 // torch.tensor([], dtype=torch.bfloat16).element_size()
     key = torch.zeros(
         (pages, num_kv_heads, head_dim // x, 16, x),
@@ -843,3 +1053,149 @@ def test_kv_insert_operand_copies_unsupported_layouts():
 
     flat = k.reshape(32, -1)
     assert _kv_insert_operand(flat).is_contiguous()
+
+
+@pytest.mark.skipif(not on_gfx942(), reason="Requires gfx942.")
+@torch.inference_mode()
+def test_gfx942_native_qknorm_rope_writes_main_and_index_caches():
+    """The gfx942 fallback writes both caches and ignores padded slots."""
+    from types import SimpleNamespace
+
+    torch.manual_seed(0)
+    num_tokens = 3
+    num_heads = 2
+    num_kv_heads = num_idx_heads = 1
+    head_dim = idx_head_dim = 16
+    block_size = 4
+
+    attention = object.__new__(MiniMaxM3SparseAttention)
+    torch.nn.Module.__init__(attention)
+    attention.num_heads = num_heads
+    attention.num_kv_heads = num_kv_heads
+    attention.num_idx_heads = num_idx_heads
+    attention.head_dim = head_dim
+    attention.idx_head_dim = idx_head_dim
+    attention.q_size = num_heads * head_dim
+    attention.kv_size = num_kv_heads * head_dim
+    attention.index_q_size = num_idx_heads * idx_head_dim
+    attention.layer_name = "model.layers.0.self_attn"
+    attention.skip_index_topk = False
+    attention.kv_cache_dtype = "fp8"
+
+    attention.q_norm = MiniMAXGemmaRMSNorm(head_dim).to(
+        device=DEVICE, dtype=torch.bfloat16
+    )
+    attention.k_norm = MiniMAXGemmaRMSNorm(head_dim).to(
+        device=DEVICE, dtype=torch.bfloat16
+    )
+    attention.index_q_norm = MiniMAXGemmaRMSNorm(idx_head_dim).to(
+        device=DEVICE, dtype=torch.bfloat16
+    )
+    attention.index_k_norm = MiniMAXGemmaRMSNorm(idx_head_dim).to(
+        device=DEVICE, dtype=torch.bfloat16
+    )
+    config = PreTrainedConfig(
+        rope_theta=10000.0,
+        partial_rotary_factor=0.5,
+        max_position_embeddings=32,
+    )
+    from vllm.config import VllmConfig, set_current_vllm_config
+
+    with set_current_vllm_config(VllmConfig()):
+        attention.rotary_emb = _build_rotary_emb(config, head_dim).to(DEVICE)
+    attention.index_rotary_emb = attention.rotary_emb
+
+    fp8_dtype = current_platform.fp8_dtype()
+    attention.kv_cache = torch.zeros(
+        2,
+        num_kv_heads,
+        block_size,
+        2 * head_dim,
+        device=DEVICE,
+        dtype=fp8_dtype,
+    )
+    attention._k_scale = torch.ones((), device=DEVICE, dtype=torch.float32)
+    attention._v_scale = torch.ones((), device=DEVICE, dtype=torch.float32)
+    index_cache = torch.zeros(
+        2, block_size, idx_head_dim, device=DEVICE, dtype=torch.bfloat16
+    )
+    index_prefix = "model.layers.0.self_attn.indexer"
+    attention.indexer = SimpleNamespace(
+        index_cache=SimpleNamespace(
+            dtype=torch.bfloat16,
+            kv_cache=index_cache,
+            prefix=index_prefix,
+        )
+    )
+
+    width = (
+        attention.q_size
+        + 2 * attention.kv_size
+        + attention.index_q_size
+        + attention.idx_head_dim
+    )
+    qkv = torch.randn(num_tokens, width, device=DEVICE, dtype=torch.bfloat16).mul_(0.25)
+    positions = torch.tensor([0, 1, 2], device=DEVICE, dtype=torch.long)
+    main_slots = torch.tensor([0, -1, 5], device=DEVICE, dtype=torch.long)
+    index_slots = torch.tensor([2, -1, 6], device=DEVICE, dtype=torch.long)
+
+    q_raw, k_raw, v_raw, index_q_raw, index_k_raw = qkv.clone().split(
+        [
+            attention.q_size,
+            attention.kv_size,
+            attention.kv_size,
+            attention.index_q_size,
+            attention.idx_head_dim,
+        ],
+        dim=-1,
+    )
+    expected_q = attention.q_norm(q_raw.view(num_tokens, num_heads, head_dim))
+    expected_k = attention.k_norm(k_raw.view(num_tokens, num_kv_heads, head_dim))
+    expected_q, expected_k = attention.rotary_emb.forward_native(
+        positions, expected_q, expected_k
+    )
+    expected_index_q = attention.index_q_norm(
+        index_q_raw.view(num_tokens, num_idx_heads, idx_head_dim)
+    )
+    expected_index_k = attention.index_k_norm(
+        index_k_raw.view(num_tokens, idx_head_dim)
+    )
+    expected_index_q, expected_index_k = attention.index_rotary_emb.forward_native(
+        positions, expected_index_q, expected_index_k
+    )
+    assert expected_k is not None
+    assert expected_index_k is not None
+
+    q, index_q = attention._native_gfx942_qknorm_rope_cache(
+        qkv,
+        positions,
+        {
+            attention.layer_name: main_slots,
+            index_prefix: index_slots,
+        },
+    )
+
+    torch.testing.assert_close(q, expected_q.reshape(num_tokens, -1))
+    assert index_q is not None
+    torch.testing.assert_close(index_q, expected_index_q.reshape(num_tokens, -1))
+
+    expected_v = v_raw.view(num_tokens, num_kv_heads, head_dim)
+    for token, slot in ((0, 0), (2, 5)):
+        block, offset = divmod(slot, block_size)
+        assert torch.equal(
+            attention.kv_cache[block, 0, offset, :head_dim],
+            expected_k[token, 0].to(fp8_dtype),
+        )
+        assert torch.equal(
+            attention.kv_cache[block, 0, offset, head_dim:],
+            expected_v[token, 0].to(fp8_dtype),
+        )
+    assert torch.count_nonzero(attention.kv_cache[0, 0, 1]) == 0
+
+    for token, slot in ((0, 2), (2, 6)):
+        block, offset = divmod(slot, block_size)
+        assert torch.equal(
+            index_cache[block, offset],
+            expected_index_k[token].to(index_cache.dtype),
+        )
+    assert torch.count_nonzero(index_cache[0, 1]) == 0
