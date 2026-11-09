@@ -378,6 +378,42 @@ def has_non_text_content(messages: Any) -> bool:
     return False
 
 
+def normalize_message_reasoning_content(msg: dict[str, Any]) -> None:
+    """Rename the deprecated ``reasoning_content`` field of one message in place.
+
+    ``reasoning`` wins when both are set. Request validators that already loop
+    over the messages call this directly to keep a single pass.
+    """
+    reasoning_content = msg.pop("reasoning_content", None)
+    if reasoning_content is not None and msg.get("reasoning") is None:
+        msg["reasoning"] = reasoning_content
+
+
+def normalize_reasoning_content(data: Any) -> Any:
+    """Rename the deprecated ``reasoning_content`` message field to ``reasoning``.
+
+    Renderers only read ``reasoning``, so every request type carrying chat
+    messages must run this or the thinking of clients using the old name is
+    silently dropped from the rendered prompt.
+
+    Args:
+        data: Raw request payload, as passed to a "before" model validator.
+
+    Returns:
+        The payload, with assistant messages normalized in place.
+
+    """
+    if not isinstance(data, dict):
+        return data
+    messages = data.get("messages")
+    if not isinstance(messages, list):
+        return data
+    for msg in messages:
+        if isinstance(msg, dict):
+            normalize_message_reasoning_content(msg)
+    return data
+
+
 def parse_chat_message_content_parts(
     role: str,
     parts: Iterable[ChatCompletionContentPartParam],
