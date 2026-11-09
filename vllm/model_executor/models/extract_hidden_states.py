@@ -359,12 +359,13 @@ class ExtractHiddenStatesModel(nn.Module):
     def forward(self, hidden_states: torch.Tensor) -> None:
         """Process and cache hidden states.
 
+        Runs the cache-only attention layer purely for its side effect of
+        writing hidden states to the KV cache. The layer output is discarded
+        and this method returns ``None``.
+
         Args:
             hidden_states: Hidden states from target model
                           shape: [num_tokens, num_hidden_states, hidden_size]
-
-        Returns:
-            Tuple of (dummy_output, dummy_output) - both unused
 
         """
         # Call dummy attention layer to cache hidden states
