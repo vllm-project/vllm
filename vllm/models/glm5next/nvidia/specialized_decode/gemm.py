@@ -8,7 +8,7 @@ MTP draft projections at 4-64 tokens.
 The main model keeps cuBLAS at 8+ tokens on the KDA projections: the skinny
 GEMM falls behind it there, and the split-K tactics measured slower on the KDA
 in_proj at B4/B8 (14.4 vs 10.7 us). The DSA projections take the split-K GEMM
-at 4-64 tokens where their shape has a tactic (policy ``dsa_proj``).
+at 4-64 tokens where their shape has a tactic (policy `dsa_proj`).
 """
 
 import torch
@@ -57,7 +57,7 @@ SPLIT_K = {
 
 
 class Projection:
-    """``x @ weight.T`` for 1, 2 or 4 tokens; ``split_k_tokens`` take the split-K
+    """`x @ weight.T` for 1, 2 or 4 tokens; `split_k_tokens` take the split-K
     GEMM instead where their token tile has a tactic."""
 
     def __init__(self, weight, split_k_tokens=()):

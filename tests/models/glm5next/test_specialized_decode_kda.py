@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The specialized decode's fused KDA core (``KdaStage`` on Kimi K3's KdaSplit) at
+"""The specialized decode's fused KDA core (`KdaStage` on Kimi K3's KdaSplit) at
 32 and 64 tokens, plain decode and q = 4 verify, against an FP64 reference: its
 output and recurrent-state error must not exceed the stock kernels' (conv update,
 F_B GEMM, fused recurrence, gated RMSNorm), and its conv rows must match. With
@@ -26,7 +26,7 @@ pytestmark = pytest.mark.skipif(
 
 
 class _Case:
-    """Weights, caches and inputs for ``requests`` x ``q`` tokens."""
+    """Weights, caches and inputs for `requests` x `q` tokens."""
 
     def __init__(self, requests, q):
         g = torch.Generator(device="cuda").manual_seed(requests * 8 + q)
@@ -159,7 +159,7 @@ class _Case:
 
     def reference(self, exact_gate=False):
         """FP64 outputs, the states written per slot and the conv rows per slot;
-        ``exact_gate``: from the FP64 g_b_proj instead of the BF16 one."""
+        `exact_gate`: from the FP64 g_b_proj instead of the BF16 one."""
         gates = self.gate.double()
         if exact_gate:
             gates = self.g_a().double() @ self.g_b.double().T

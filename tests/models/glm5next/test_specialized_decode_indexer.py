@@ -83,7 +83,7 @@ def test_query_epilogue_matches_unfused(tokens):
 @pytest.mark.parametrize("tokens", [1, 16])
 def test_fused_query_matches_pair(tokens):
     """The projection kernel with the query epilogue inside writes what the
-    projection and ``indexer_query`` write; repeated calls advance its grid
+    projection and `indexer_query` write; repeated calls advance its grid
     barrier."""
     from vllm.models.glm5next.nvidia.specialized_decode.indexer import (
         IndexerProjection,
@@ -126,7 +126,7 @@ def test_fused_query_matches_pair(tokens):
 @pytest.mark.parametrize("fused", [False, True])
 def test_bf16_head_weights_round_fp32(fused):
     """BF16 head weights (for the SM100 MQA logits) are the FP32 ones rounded
-    as ``.to(torch.bfloat16)`` rounds them."""
+    as `.to(torch.bfloat16)` rounds them."""
     from vllm.models.glm5next.nvidia.specialized_decode.indexer import (
         IndexerProjection,
     )

@@ -2,10 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """KDA decode stage: the stock input projection and low-rank output-gate GEMMs,
 then one fused kernel (conv update, L2 norm, F_B projection and decay, delta-rule
-update, gated RMSNorm) in place of four, then the stock o_proj. At ``fold_tokens``
+update, gated RMSNorm) in place of four, then the stock o_proj. At `fold_tokens`
 the fused kernel also runs g_b_proj (its gate warp, during the state update).
 
-The fused kernel is a copy of Kimi K3's ``KdaSplit`` (``kda_split``). GLM-5.3-Flash
+The fused kernel is a copy of Kimi K3's `KdaSplit` (`kda_split`). GLM-5.3-Flash
 has the same KDA math (bounded sigmoid gate, sigmoid beta, conv width 4, head dim
 128, BF16 conv and FP32 recurrent state) but packs its projection as q, k, v, b,
 f_a, g_a and has a low-rank output gate (g_a -> g_b_proj) where K3 has a full-rank
@@ -127,7 +127,7 @@ class KdaStage:
         return projected[:, start : start + HEAD_DIM]
 
     def run(self, x, metadata, q, reduce=True):
-        """The attention output, TP-reduced unless ``reduce`` is False."""
+        """The attention output, TP-reduced unless `reduce` is False."""
         a = self.attention
         skinny = self.projections
         if skinny is not None and not skinny[0].supports(x.shape[0]):

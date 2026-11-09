@@ -13,7 +13,7 @@ FP32 sums, BF16 gate/up and SwiGLU outputs.
 Each warp loads its weight rows into registers before the PDL wait. After it, each
 CTA quantizes the activations once into shared memory, and lane l takes 16-byte
 chunk l of every 512 bytes of a row. Products run as mixed-precision FMAs: FP8
-weights and activations widen exactly to F16 pairs, which ``fma.rn.f32.f16``
+weights and activations widen exactly to F16 pairs, which `fma.rn.f32.f16`
 multiplies exactly and adds in FP32, one instruction per product.
 """
 
@@ -53,7 +53,7 @@ CTAS_PER_SM = 4
 
 @asm((Uint32, Uint32), pure=True)
 def _f16x4(word):
-    """The four E4M3 values of ``word`` (low byte first) as two exact F16x2 words."""
+    """The four E4M3 values of `word` (low byte first) as two exact F16x2 words."""
     code = "{ .reg .b16 lo,hi; mov.b32 {lo,hi},$2; "
     code += "cvt.rn.f16x2.e4m3x2 $0,lo; cvt.rn.f16x2.e4m3x2 $1,hi; }"
     return code, "=r,=r,r", (word,)
@@ -61,7 +61,7 @@ def _f16x4(word):
 
 @asm(Float32, pure=True)
 def _fma_f16x2(a, b, c):
-    """``c`` plus the two products of the F16x2 words ``a`` and ``b``: each product
+    """`c` plus the two products of the F16x2 words `a` and `b`: each product
     exact, each sum rounded in FP32."""
     code = "{ .reg .b16 al,ah,bl,bh; .reg .f32 t; mov.b32 {al,ah},$1; "
     code += "mov.b32 {bl,bh},$2; fma.rn.f32.f16 t,al,bl,$3; "
@@ -90,7 +90,7 @@ def _round_bf16(value):
 
 def _group_scale(amax, ue8m0: bool):
     """Amax / 448 (amax at least 1e-10), rounded up to a power of two when
-    ``ue8m0``, and its IEEE reciprocal."""
+    `ue8m0`, and its IEEE reciprocal."""
     scale = div_rn(cute.arch.fmax(amax, Float32(1e-10)), Float32(FP8_MAX))
     if ue8m0:
         bits = Uint32(float_bits(cute.arch.fmax(scale, Float32(1e-10))))
@@ -103,15 +103,15 @@ def _group_scale(amax, ue8m0: bool):
 
 
 def _dot(weights, values, total):
-    """``total`` plus the dot product of two lists of F16x2 words."""
+    """`total` plus the dot product of two lists of F16x2 words."""
     for i in range(len(weights)):
         total = _fma_f16x2(weights[i], values[i], total)
     return total
 
 
 def _reduce_rows(values, lane):
-    """Warp sums of ``len(values)`` (a power of two up to 32) per-lane values:
-    returns the sum of value ``(lane >> shift) % len(values)`` and ``shift``.
+    """Warp sums of `len(values)` (a power of two up to 32) per-lane values:
+    returns the sum of value `(lane >> shift) % len(values)` and `shift`.
     Each halving step trades half the values with the partner lane."""
     count = len(values)
     offset = 16
@@ -244,8 +244,8 @@ class _GateUpKernel:
 
 
 def _store_rows(values, lane, out, first, n, rows):
-    """Warp-sums ``values`` (token-major, ``rows`` per token) and stores each as
-    BF16 at ``out[token, first + row]``."""
+    """Warp-sums `values` (token-major, `rows` per token) and stores each as
+    BF16 at `out[token, first + row]`."""
     total, shift = _reduce_rows(values, lane)
     index = (lane >> shift) % len(values)
     pointer = out.iterator + index // rows * n + first + index % rows

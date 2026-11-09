@@ -36,7 +36,7 @@ INDEXER_PROJECTIONS = ("wq_b", "wk_weights_proj")
 
 
 def _override(obj, name: str, value, enabled: bool):
-    """Sets ``obj.name`` to ``value`` for one call if ``enabled``."""
+    """Sets `obj.name` to `value` for one call if `enabled`."""
     if not enabled:
         return nullcontext()
     return _swap(obj, name, value)
@@ -455,7 +455,7 @@ class SpecializedDecode(LayerStages):
             self.head = head
 
     def compute_logits(self, logits_processor, lm_head, hidden_states):
-        """``logits_processor(lm_head, hidden_states)`` on the CuTe head GEMM and
+        """`logits_processor(lm_head, hidden_states)` on the CuTe head GEMM and
         NVLink gather, or None for the stock ones."""
         rows = hidden_states.shape[0]
         if (
@@ -514,7 +514,7 @@ class SpecializedDecode(LayerStages):
         )
 
     def reduced_boundary(self, layer, x, residual, post, comb, fn, scale, base, norm):
-        """``boundary`` of a TP-partial sublayer output."""
+        """`boundary` of a TP-partial sublayer output."""
         assert self.ar_mhc is not None
         return self.ar_mhc(
             x,
@@ -536,7 +536,7 @@ class SpecializedDecode(LayerStages):
         """This step's decode plan, or None to run the stock forward instead.
 
         Steps that run the stock forward:
-        - pipeline-parallel stage inputs (``intermediate_tensors``);
+        - pipeline-parallel stage inputs (`intermediate_tensors`);
         - token counts without a planned path (above 64 or not a multiple of q);
         - steps outside a CUDA graph capture (profiling, warmup and the warmup run
           before each capture), so every stock kernel runs before its capture;
@@ -599,8 +599,8 @@ class SpecializedDecode(LayerStages):
         return Step(q, positions, by_layer)
 
     def layer(self, layer, x, partial, residual, post, comb, step: Step):
-        """``Glm5NextDecoderLayer.forward`` for a decode step (mHC, no SP).
-        ``partial``: whether ``x`` still needs its TP all-reduce."""
+        """`Glm5NextDecoderLayer.forward` for a decode step (mHC, no SP).
+        `partial`: whether `x` still needs its TP all-reduce."""
         if post is None:
             if layer.layer_idx == 0:
                 x = hc_expand(x, layer.n)

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""DSA attention stage (``dsa_attn``): the MLA half of the DSA layer around the
+"""DSA attention stage (`dsa_attn`): the MLA half of the DSA layer around the
 indexer and the TRTLLM-Gen sparse attention kernel, in CuTe kernels.
 
 Stock decode runs the q/kv a-norm (Triton), then after the indexer's top-k the
@@ -8,17 +8,17 @@ MLA KV cache write, the cuBLAS absorb bmm (query x W_UK), the query FP8 quant
 and a zero fill of the attention kernel's multi-CTA counters, all between the
 top-k and the attention, then the cuBLAS W_UV bmm. Here:
 
-- ``norm`` is ``fused_q_kv_rmsnorm`` in CuTe;
-- ``head_gemv`` with ``cache`` is the absorb bmm with the static FP8 query quant
+- `norm` is `fused_q_kv_rmsnorm` in CuTe;
+- `head_gemv` with `cache` is the absorb bmm with the static FP8 query quant
   as its epilogue, and M more CTAs write the normed latent into the FP8 KV cache
-  (``concat_and_cache_mla``). It runs right after ``q_b_proj``, before the
+  (`concat_and_cache_mla`). It runs right after `q_b_proj`, before the
   indexer, so only the index remap separates the top-k from the attention;
 - the attention kernel gets one caller-owned counter buffer (it resets the
   counters itself), so FlashInfer zero-fills none per call;
-- ``head_gemv`` is the W_UV bmm (and, for the KDA stage, the output gate's
+- `head_gemv` is the W_UV bmm (and, for the KDA stage, the output gate's
   g_b_proj).
 
-The bmms are per-head ``x @ W`` products with W row-major [I, J]: a thread
+The bmms are per-head `x @ W` products with W row-major [I, J]: a thread
 holds RPT rows of eight consecutive columns, loaded before the PDL wait, and
 the row groups are summed across lanes and warps in a fixed order. Their FP32
 sums differ from cuBLAS's only in summation order; the BF16 rounding and the
@@ -60,24 +60,24 @@ _compiled: dict = {}
 
 @asm(Float32, pure=True)
 def _div_full(a, b):
-    """Triton's FP32 ``/``."""
+    """Triton's FP32 `/`."""
     return "div.full.f32 $0,$1,$2;", "=f,f,f", (a, b)
 
 
 @asm(Float32, pure=True)
 def _rsqrt(value):
-    """Triton's ``tl.rsqrt``."""
+    """Triton's `tl.rsqrt`."""
     return "rsqrt.approx.f32 $0,$1;", "=f,f", (value,)
 
 
 @cute.jit
 def _clamp_fp8(value: Float32):
-    """``scaled_fp8_conversion``'s clamp before the saturating conversion."""
+    """`scaled_fp8_conversion`'s clamp before the saturating conversion."""
     return cute.arch.fmax(cute.arch.fmin(value, Float32(FP8_MAX)), Float32(-FP8_MAX))
 
 
 class _NormKernel:
-    """``fused_q_kv_rmsnorm`` of the a-projection's q and kv parts (CTA (t, 0)
+    """`fused_q_kv_rmsnorm` of the a-projection's q and kv parts (CTA (t, 0)
     and (t, 1)). A thread owns eight values; the sum of squares adds the
     thread's, then the lanes' and then the warps' partials."""
 
@@ -114,7 +114,7 @@ class _NormKernel:
     def row(
         self, qkv, weight, out, partial, t, tid, start, size: cutlass.Constexpr, eps
     ):
-        """The thread's eight columns of the ``size``-wide part at ``start``."""
+        """The thread's eight columns of the `size`-wide part at `start`."""
         lane = cute.arch.lane_idx()
         warp = cute.arch.make_warp_uniform(cute.arch.warp_idx())
         active = tid < size // 8
@@ -154,8 +154,8 @@ class _NormKernel:
 
 
 def norm(qkv, q_weight, kv_weight, eps, q_size):
-    """``fused_q_kv_rmsnorm(qkv[:, :q_size], qkv[:, q_size:], ...)``: the normed
-    (q [M, q_size], kv [M, kv_size]) BF16 parts of ``qkv``."""
+    """`fused_q_kv_rmsnorm(qkv[:, :q_size], qkv[:, q_size:], ...)`: the normed
+    (q [M, q_size], kv [M, kv_size]) BF16 parts of `qkv`."""
     m, pitch = qkv.shape
     kv_size = kv_weight.shape[0]
     assert qkv.stride(1) == 1 and qkv.stride(0) == pitch
@@ -175,16 +175,16 @@ def norm(qkv, q_weight, kv_weight, eps, q_size):
 
 
 class _HeadGemvKernel:
-    """``out[t, h] = x[t, h] @ W[h]`` for ``heads`` row-major [I, J] weights.
+    """`out[t, h] = x[t, h] @ W[h]` for `heads` row-major [I, J] weights.
 
-    CTA (h, tile) owns J columns ``tile * cols ...``; thread (g, c) holds rows
-    ``g * rpt ...`` of columns ``8c ...``, loaded before the PDL wait. Lanes of
+    CTA (h, tile) owns J columns `tile * cols ...`; thread (g, c) holds rows
+    `g * rpt ...` of columns `8c ...`, loaded before the PDL wait. Lanes of
     one column group sum their row groups with butterflies, then the warps' sums
-    add in warp order. ``fp8``: the BF16 product times the inverse of
-    ``scale[0]``, clamped and converted as the stock static FP8 quant.
+    add in warp order. `fp8`: the BF16 product times the inverse of
+    `scale[0]`, clamped and converted as the stock static FP8 quant.
 
-    ``cache`` (latent width): CTA ``gemv CTAs + t`` writes token t's latent row
-    into the FP8 KV cache as ``concat_and_cache_mla`` (``kv / k_scale``, padded
+    `cache` (latent width): CTA `gemv CTAs + t` writes token t's latent row
+    into the FP8 KV cache as `concat_and_cache_mla` (`kv / k_scale`, padded
     slots skipped).
     """
 
@@ -349,7 +349,7 @@ TACTICS = {
 
 
 def _flat(tensor):
-    """``tensor``'s storage span as a 1-D view."""
+    """`tensor`'s storage span as a 1-D view."""
     span = sum((n - 1) * s for n, s in zip(tensor.shape, tensor.stride())) + 1
     return tensor.as_strided((span,), (1,))
 
@@ -361,18 +361,18 @@ def head_gemv(
     scale: torch.Tensor | None = None,
     cache: tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
 ):
-    """``out[t, h] = x[t, h] @ weight[h]`` with ``x`` [M, H, I] BF16 (any token
-    stride) and ``weight`` [H, I, J] BF16 (J contiguous); ``out`` [M, H, J] is
-    BF16, or FP8 (statically quantized by ``scale``, a one-element FP32 tensor)
-    when ``scale`` is given.
+    """`out[t, h] = x[t, h] @ weight[h]` with `x` [M, H, I] BF16 (any token
+    stride) and `weight` [H, I, J] BF16 (J contiguous); `out` [M, H, J] is
+    BF16, or FP8 (statically quantized by `scale`, a one-element FP32 tensor)
+    when `scale` is given.
 
     Args:
         x: [M, H, I] BF16 activations.
         weight: [H, I, J] BF16 weights.
         out: [M, H, J] BF16 or FP8 output.
-        scale: the static FP8 scale of an FP8 ``out``.
+        scale: the static FP8 scale of an FP8 `out`.
         cache: optionally (kv [M, L] BF16, kv_cache [blocks, block size, L] FP8,
-            slots int64, k_scale), written as ``concat_and_cache_mla``.
+            slots int64, k_scale), written as `concat_and_cache_mla`.
 
     """
     m, heads, rows = x.shape
@@ -421,8 +421,8 @@ def head_gemv(
 
 
 class DsaAttentionStage:
-    """``MultiHeadLatentAttentionWrapper.forward`` of a DSA layer inside planned
-    steps of up to ``MAX_TOKENS`` tokens. Installed as the wrapper's ``forward``;
+    """`MultiHeadLatentAttentionWrapper.forward` of a DSA layer inside planned
+    steps of up to `MAX_TOKENS` tokens. Installed as the wrapper's `forward`;
     every other call runs the stock forward."""
 
     def __init__(self, attention, value_up_tokens: set[int]):

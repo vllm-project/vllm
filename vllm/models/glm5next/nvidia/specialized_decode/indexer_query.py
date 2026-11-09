@@ -6,10 +6,10 @@ the query heads and weights that DeepGEMM's MQA logits need (stock: five
 kernels).
 
 One warp per query head, four values per lane: the Hadamard stages of strides 1
-and 2 stay in a lane, the others pair lanes ``l`` and ``l ^ (stride / 4)``. The
+and 2 stay in a lane, the others pair lanes `l` and `l ^ (stride / 4)`. The
 butterflies, the rounding and the power-of-two scale (the stock kernel's
 accurate log2, read off the exponent bits where that is exact) follow
-``fwht128_quant_fp8`` bit for bit.
+`fwht128_quant_fp8` bit for bit.
 """
 
 import cuda.bindings.driver as cuda
@@ -50,7 +50,7 @@ def _ceil(value):
 
 @cute.jit
 def _exponent(x: Float32):
-    """``ceil(log2(x))`` with the stock kernel's accurate log2, for positive x.
+    """`ceil(log2(x))` with the stock kernel's accurate log2, for positive x.
 
     From the bits unless the mantissa is barely above a power of two (where the
     rounded log2 can land on the exponent itself) or x is not normal.
@@ -67,7 +67,7 @@ def _exponent(x: Float32):
 @cute.jit
 def hadamard_quant(got, lane):
     """One query head, a warp's four values per lane (two BF16x2 words), as
-    ``fwht128_quant_fp8``: (the lane's FP8x4 word, the head's power-of-two scale).
+    `fwht128_quant_fp8`: (the lane's FP8x4 word, the head's power-of-two scale).
     """
     x = cute.make_rmem_tensor(cute.make_layout((4,)), Float32)
     for i in cutlass.range_constexpr(2):
@@ -104,8 +104,8 @@ def hadamard_quant(got, lane):
 
 @cute.jit
 def store_weight(w_out, t, head, value, padded: cutlass.Constexpr, bf16):
-    """``w_out[t, head] = value``, rounded to BF16 (as ``.to(torch.bfloat16)``)
-    when ``bf16``."""
+    """`w_out[t, head] = value`, rounded to BF16 (as `.to(torch.bfloat16)`)
+    when `bf16`."""
     if cutlass.const_expr(bf16):
         _store_bf16(w_out.iterator + t * padded + head, value)
     else:

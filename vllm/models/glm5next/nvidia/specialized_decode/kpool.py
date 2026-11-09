@@ -1,17 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The kpool indexer's decode kernels in CuTe DSL, bit for bit with the stock
-Triton kernels of ``ops/kpool_compress.py`` and ``as_fp32_logits``.
+Triton kernels of `ops/kpool_compress.py` and `as_fp32_logits`.
 
-``kpool_update`` is the decode tail stash plus pool compression: one warp per
+`kpool_update` is the decode tail stash plus pool compression: one warp per
 request walks its tokens in position order (a completing token reads the
 stashes of the earlier ones), four dimensions per lane. The softmax, the
 Hadamard butterflies (strides 1 and 2 in a lane, 4..64 across lanes, as in
-``indexer_query``), the BF16 roundings, the accurate log2 and the UE8M0 scale
-follow the stock kernel's PTX: ``ex2.approx`` of ``(s - max) * log2(e)``, FMA
-accumulation in pool order and ``div.full`` divisions.
+`indexer_query`), the BF16 roundings, the accurate log2 and the UE8M0 scale
+follow the stock kernel's PTX: `ex2.approx` of `(s - max) * log2(e)`, FMA
+accumulation in pool order and `div.full` divisions.
 
-``upcast_logits`` is ``as_fp32_logits`` with 16-byte accesses.
+`upcast_logits` is `as_fp32_logits` with 16-byte accesses.
 """
 
 import cuda.bindings.driver as cuda
@@ -54,7 +54,7 @@ LOG2E = 1.4426950408889634
 
 @asm(Float32, pure=True)
 def _exp(score, peak):
-    """Triton's ``tl.exp(score - peak)``: ``ex2.approx`` of the product with
+    """Triton's `tl.exp(score - peak)`: `ex2.approx` of the product with
     log2(e), each step rounded on its own."""
     code = "{ .reg .f32 d; sub.f32 d,$1,$2; mul.f32 d,d,0f3FB8AA3B; "
     return code + "ex2.approx.f32 $0,d; }", "=f,f,f", (score, peak)
@@ -72,7 +72,7 @@ def _add(a, b):
 
 @asm(Float32, pure=True)
 def _div(a, b):
-    """Triton's FP32 ``/``."""
+    """Triton's FP32 `/`."""
     return "div.full.f32 $0,$1,$2;", "=f,f,f", (a, b)
 
 
@@ -91,7 +91,7 @@ def _bf16x4(words):
 
 
 class _UpdateKernel:
-    """One warp per request; lane ``l`` owns dimensions ``4l .. 4l + 3``."""
+    """One warp per request; lane `l` owns dimensions `4l .. 4l + 3`."""
 
     def __init__(self, pool, ring, page, page_bytes, tail_block, tail_half):
         self.pool, self.ring, self.page = pool, ring, page
@@ -252,8 +252,8 @@ def kpool_update(
     positions: torch.Tensor,
     pool_size: int,
 ) -> None:
-    """``kpool_decode_update_and_maybe_write_cache_batched`` with power-of-two
-    UE8M0 (MX) scales; the same arguments, ``head_dim`` 128."""
+    """`kpool_decode_update_and_maybe_write_cache_batched` with power-of-two
+    UE8M0 (MX) scales; the same arguments, `head_dim` 128."""
     requests, tokens = key.shape[0], key.shape[1]
     if requests == 0 or tokens == 0:
         return
@@ -286,8 +286,8 @@ def kpool_update(
 
 
 class _UpcastKernel:
-    """CTA ``(row, split)`` converts the row's 8-element chunks ``split``,
-    ``split + splits``, ... below the row end; one chunk per thread."""
+    """CTA `(row, split)` converts the row's 8-element chunks `split`,
+    `split + splits`, ... below the row end; one chunk per thread."""
 
     def __init__(self, threads: int, pdl: bool = True):
         self.threads, self.pdl = threads, pdl
@@ -339,7 +339,7 @@ def upcast_logits(
     pdl=True,
     cap=1024,
 ) -> torch.Tensor:
-    """``as_fp32_logits`` for BF16 logits whose row stride is 16-byte aligned."""
+    """`as_fp32_logits` for BF16 logits whose row stride is 16-byte aligned."""
     out = torch.empty_strided(
         logits.shape, logits.stride(), dtype=torch.float32, device=logits.device
     )
@@ -364,8 +364,8 @@ def upcast_logits(
 
 
 class _ExpandKernel:
-    """Thread ``g`` of row ``r`` writes the four token ids of pool
-    ``pool_ids[r, g]`` with one 16-byte store; CTA 0's first ``pool - 1``
+    """Thread `g` of row `r` writes the four token ids of pool
+    `pool_ids[r, g]` with one 16-byte store; CTA 0's first `pool - 1`
     threads write the trailing incomplete pool."""
 
     def __init__(self, pool: int, groups: int, threads: int, pdl: bool):
@@ -422,7 +422,7 @@ def expand_pools(
     threads: int = EXPAND_THREADS,
     pdl: bool = True,
 ) -> torch.Tensor:
-    """``expand_pools_and_append_tail`` into ``out`` for int32 pool ids."""
+    """`expand_pools_and_append_tail` into `out` for int32 pool ids."""
     rows, groups = pool_ids.shape
     out_cols = groups * pool_size + pool_size - 1
     assert pool_ids.dtype == torch.int32 and pool_ids.stride(1) == 1
@@ -458,14 +458,14 @@ def expand_pools(
 
 
 class _RemapKernel:
-    """``expand_pools_and_append_tail`` and the sparse MLA index remap with
+    """`expand_pools_and_append_tail` and the sparse MLA index remap with
     COMPACT_TO_FRONT in one CTA per query row.
 
-    Thread ``g`` maps pool ``pool_ids[row, g]``: its tokens share one KV block,
+    Thread `g` maps pool `pool_ids[row, g]`: its tokens share one KV block,
     so the pool is valid or invalid as a whole and every compacted offset is a
     multiple of 4 (one 16-byte store). The column order of the stock compaction
     is kept: history pools by rank, then the trailing incomplete pool, then -1.
-    Rows from ``expanded`` on hold no indices (the stock path filled them with
+    Rows from `expanded` on hold no indices (the stock path filled them with
     -1).
     """
 
@@ -574,9 +574,9 @@ def expand_and_remap(
     stride_rows: int,
     seq_offset: int = 1,
 ) -> None:
-    """``triton_convert_req_index_to_global_index(..., return_valid_counts=True)``
-    of the ``expand_pools_and_append_tail`` rows of ``pool_ids``, the rest of the
-    ``out.shape[0]`` rows read as -1. Writes ``out`` and ``counts``."""
+    """`triton_convert_req_index_to_global_index(..., return_valid_counts=True)`
+    of the `expand_pools_and_append_tail` rows of `pool_ids`, the rest of the
+    `out.shape[0]` rows read as -1. Writes `out` and `counts`."""
     expanded, groups = pool_ids.shape
     rows, width = out.shape
     assert rows == req_ids.shape[0] and counts.shape[0] >= rows
@@ -613,7 +613,7 @@ def expand_and_remap(
 class FusedRemap:
     """A sparse MLA index group's conversion that expands a deferred pool top-k
     and remaps it in one kernel, on the group's side stream as the stock
-    conversion. Installed as the group's ``_convert_once``; without a deferred
+    conversion. Installed as the group's `_convert_once`; without a deferred
     top-k it runs the stock conversion."""
 
     def __init__(self, group, stage: "KpoolStage"):
@@ -666,11 +666,11 @@ class FusedRemap:
 
 class KpoolStage:
     """The kpool indexer decode kernels inside planned steps (stage
-    ``dsa_kpool``), reached from the stock indexer through
-    ``sparse_indexer.SPECIALIZED_KPOOL``.
+    `dsa_kpool`), reached from the stock indexer through
+    `sparse_indexer.SPECIALIZED_KPOOL`.
 
-    With ``fuse`` every DSA layer's index group converts through ``FusedRemap``:
-    the indexer then leaves its uniform decode rows as pool ids (``defer``) and
+    With `fuse` every DSA layer's index group converts through `FusedRemap`:
+    the indexer then leaves its uniform decode rows as pool ids (`defer`) and
     skips filling the logical top-k buffer, which no consumer reads.
     """
 
@@ -718,7 +718,7 @@ class KpoolStage:
         return self.pool_buffer.view(-1)[: rows * groups].view(rows, groups)
 
     def defer(self, pool_ids, positions, pool_size: int) -> None:
-        """Leaves the expansion of ``pool_ids`` to the layer's index remap."""
+        """Leaves the expansion of `pool_ids` to the layer's index remap."""
         assert self.pending is None, "a deferred kpool top-k was not consumed"
         assert pool_ids.data_ptr() == self.pool_buffer.data_ptr()
         self.pending = (pool_ids, positions, pool_size)

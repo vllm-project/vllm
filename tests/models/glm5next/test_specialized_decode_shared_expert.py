@@ -19,7 +19,7 @@ pytestmark = pytest.mark.skipif(
 
 def _quant(x, ue8m0):
     """Dequantized FP8 per 128 with scale amax / 448 (a power of two when
-    ``ue8m0``), like per_token_group_quant_fp8."""
+    `ue8m0`), like per_token_group_quant_fp8."""
     blocks = x.float().unflatten(-1, (-1, 128))
     amax = blocks.abs().amax(-1).clamp_min(1e-10)
     # IEEE division: dividing by a Python scalar multiplies by its reciprocal.

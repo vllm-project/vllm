@@ -3,12 +3,12 @@
 """Lamport TP all-reduce fused with GLM-5.3-Flash's mHC sublayer boundary.
 
 A publish kernel multicasts each rank's partial sublayer output into a Lamport
-mailbox (DSV4.1's ``AllReduceMHC`` protocol). One cluster of CTAs per token
+mailbox (DSV4.1's `AllReduceMHC` protocol). One cluster of CTAs per token
 then
 
-1. polls its fragments of every rank's contribution (lane ``r`` of each
-   four-lane group reads rank ``r``) and sums them,
-2. post-mixes the four residual streams (lane ``j`` owns stream ``j``),
+1. polls its fragments of every rank's contribution (lane `r` of each
+   four-lane group reads rank `r`) and sums them,
+2. post-mixes the four residual streams (lane `j` owns stream `j`),
 3. reduces the 24-way prenorm GEMV and the sum of squares over the cluster
    through distributed shared memory,
 4. collapses the streams with the pre-mix and RMS-normalizes them after a
@@ -235,8 +235,8 @@ class _BoundaryDeviceKernel:
         cluster_sums: cute.Pointer,
         cluster_rank: Int32,
     ) -> None:
-        """Sums ``values`` over the CTA and stores the sums into every peer's
-        ``cluster_sums[cluster_rank]`` slot."""
+        """Sums `values` over the CTA and stores the sums into every peer's
+        `cluster_sums[cluster_rank]` slot."""
         tidx, _, _ = cute.arch.thread_idx()
         lane = cute.arch.lane_idx()
         warp = cute.arch.warp_idx()
@@ -500,7 +500,7 @@ def _dot_bf16x8(a, b, *, loc=None, ip=None) -> Float32:
 
 @cute.jit
 def _warp_reduce_scatter(values: list) -> Float32:
-    """Sums 32 per-lane values over the warp; lane ``i`` returns sum ``i``."""
+    """Sums 32 per-lane values over the warp; lane `i` returns sum `i`."""
     lane = cute.arch.lane_idx()
     for step in cutlass.range_constexpr(5):
         width = WARP_SIZE >> (step + 1)
@@ -520,7 +520,7 @@ def _warp_reduce_scatter(values: list) -> Float32:
 
 
 class _GroupBoundaryDeviceKernel(_BoundaryDeviceKernel):
-    """The boundary for ``tokens`` tokens per cluster, for large batches: one
+    """The boundary for `tokens` tokens per cluster, for large batches: one
     load of the hc_fn rows into registers serves every token of the cluster,
     the residual streams are staged in shared memory before the PDL wait, and
     the tokens share the two cluster reductions."""
@@ -962,14 +962,14 @@ class _MixesDeviceKernel:
 
 
 class AllReduceMhcBoundary:
-    """``tensor_model_parallel_all_reduce`` + ``hc_fused_post_pre`` for up to
-    ``max_num_tokens`` tokens: two kernels on the current stream and one on a
+    """`tensor_model_parallel_all_reduce` + `hc_fused_post_pre` for up to
+    `max_num_tokens` tokens: two kernels on the current stream and one on a
     side stream.
 
     The returned post-mix and residual mix are written on the side stream; the
-    next call joins it, and a stock consumer must call ``join`` first.
+    next call joins it, and a stock consumer must call `join` first.
     Construction is collective over the TP group; one instance serves every
-    boundary of the model, which run one after another. ``cluster_tokens``
+    boundary of the model, which run one after another. `cluster_tokens`
     maps a token count to the tokens each cluster takes (1 if absent).
     """
 
@@ -1142,7 +1142,7 @@ class AllReduceMhcBoundary:
         norm_weight: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Return the residual streams, post-mix, residual mix and layer input
-        of ``hc_fused_post_pre`` applied to the TP sum of ``x``.
+        of `hc_fused_post_pre` applied to the TP sum of `x`.
 
         Args:
             x: [M, hidden] BF16 TP-partial sublayer output, or a MoE output

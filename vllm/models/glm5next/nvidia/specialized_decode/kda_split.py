@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Kimi K3's cluster-split KDA recurrence (``KdaSplit``) with GLM-5.3-Flash's low-rank
+"""Kimi K3's cluster-split KDA recurrence (`KdaSplit`) with GLM-5.3-Flash's low-rank
 output gate folded in, and its GB300 TP4 schedules. An optional fifth warp projects F_B
 and multicasts the decays while the main warps run the convolution and query/key
 normalization."""
@@ -51,7 +51,7 @@ load_staged = partial(
 
 @asm((Float32, Int32), pure=True)
 def reciprocal_guess(denominator):
-    """``sigmoid_reciprocal``'s refined fast path (IEEE mode) and whether it holds."""
+    """`sigmoid_reciprocal`'s refined fast path (IEEE mode) and whether it holds."""
     code = "{ .reg .f32 r,error,neg_error; .reg .b32 bits; .reg .pred regular; "
     code += "mov.b32 bits,$2; add.u32 bits,bits,0x01800000; "
     code += "and.b32 bits,bits,0x7f800000; setp.gt.u32 regular,bits,0x01ffffff; "
@@ -67,7 +67,7 @@ def reciprocal_rn(value):
 
 @cute.jit
 def sigmoids(values):
-    """``sigmoid(v, False)`` of every value, bit for bit, with all fast paths ahead
+    """`sigmoid(v, False)` of every value, bit for bit, with all fast paths ahead
     of the division fallbacks' branches (verify tokens get ILP)."""
     count: cutlass.Constexpr = len(values)
     den = [Float32(1) + cute.math.exp(-Float32(v), fastmath=True) for v in values]
@@ -84,7 +84,7 @@ def sigmoids(values):
 
 
 def advance(base, n):
-    """``base + n``, or ``base`` itself for a static zero ``n`` (keeps q = 1 code)."""
+    """`base + n`, or `base` itself for a static zero `n` (keeps q = 1 code)."""
     return base + n if n else base
 
 
@@ -101,7 +101,7 @@ class KdaSplit:
     padding (never written) and active rows own distinct slots. Weights must be ready
     at launch; each run waits for prior cache restoration and slot publication.
 
-    ``schedule`` = (early, lanes per state row, minimum CTAs per SM, CTAs per head);
+    `schedule` = (early, lanes per state row, minimum CTAs per SM, CTAs per head);
     zeros keep the batch defaults. Two CTAs per head give each CTA 64 state rows and
     each gate lane two decays. Early issues every load the predecessor does not
     produce (slot, state and conv rows, conv / F_B / norm weights) before the PDL
@@ -115,7 +115,7 @@ class KdaSplit:
     time, which frees the registers that held them across the input phase; early 3
     (two CTAs per head) also stages the gate warp's F_B rows.
 
-    ``tokens`` q > 1 (speculative verify; ``batch`` counts requests, rows b * q + t)
+    `tokens` q > 1 (speculative verify; `batch` counts requests, rows b * q + t)
     runs each request's q tokens in order with vLLM's spec cache semantics: slots
     [B, >= q] and accepted [B] (an extra last tensor, read early like the slots); the
     state comes from slot[b, accepted - 1] and token t's state goes to slot[b, t] if
@@ -123,7 +123,7 @@ class KdaSplit:
     [c_accepted, c_accepted + 1, x_0, ..., x_q-1]. Token t's F_B row is MMA column t;
     CTA t % C normalizes token t.
 
-    ``low_rank_gate``: the output-gate operand is the [batch, 128]
+    `low_rank_gate`: the output-gate operand is the [batch, 128]
     low-rank activation g_a, and an extra last tensor is the [heads x 128, 128] up
     projection; each CTA's gate warp projects the gates of its value partition's
     features (FP32, every token) while the main warps update the state, and sends
@@ -461,7 +461,7 @@ class KdaSplit:
 
     @cute.jit
     def store_rows(self, history, state_row, span, lanes, when=None):
-        """Store the passes in ``span`` of the CTA's state rows (``when``: predicated
+        """Store the passes in `span` of the CTA's state rows (`when`: predicated
         on it, without branches)."""
         (start, stop), (group, group_lane) = span, lanes
         for p in cutlass.range_constexpr(start, stop):
@@ -484,8 +484,8 @@ class KdaSplit:
 
     @cute.jit
     def update(self, history, dots, operands, lanes, span, staged):
-        """Decay, delta-rule update and query dot of the passes in ``span``, whose rows
-        ``staged`` (if given) first supplies from shared memory."""
+        """Decay, delta-rule update and query dot of the passes in `span`, whose rows
+        `staged` (if given) first supplies from shared memory."""
         kr, qr, decays, shared_v, beta = operands
         (group, lane), (start, stop) = lanes, span
         if cutlass.const_expr(staged is not None):
@@ -522,7 +522,7 @@ class KdaSplit:
         """Project one value partition and multicast its decays to every CTA. Modes fix
         the F_B reduction order: 0 = one chain of eight MMAs, 1 = four chains of two,
         2 = sixteen 8-FMA partials summed in a butterfly. Projection math stays IEEE.
-        ``staged_rows``: shared [copy, lane, 4] words; each lane cp.asyncs its own
+        `staged_rows`: shared [copy, lane, 4] words; each lane cp.asyncs its own
         16-byte F_B operands there before the PDL wait and reads them back after it."""
         f_a, a_log, dt_bias, lower_bound, weight = (args[i] for i in (4, 6, 7, 13, 16))
         head, token, value_base, lane = coords
@@ -723,7 +723,7 @@ class KdaSplit:
         """sigmoid(g_a @ weight.T) of the partition's features and every token, tiles
         of 16 features as MMA rows (token columns, as in the F_B projection), to the
         tokens' normalizing CTAs. Each lane cp.asyncs its own weight fragments through
-        a ring of up to four tiles in ``ring`` ([copy, lane] 16-byte words)."""
+        a ring of up to four tiles in `ring` ([copy, lane] 16-byte words)."""
         (shared_gate, gate_out), (head, token, value_base, lane) = targets, coords
         group, quarter = lane >> 2, lane & 3
         tiles: cutlass.Constexpr = self.rows // 16
@@ -780,7 +780,7 @@ class KdaSplit:
 
     @cute.jit
     def setup(self, barrier, gate_barrier, partition, thread, gate_out=None):
-        """Thread 0 arms the output (leader), decay and (``gate_out``) low-rank gate
+        """Thread 0 arms the output (leader), decay and (`gate_out`) low-rank gate
         barriers; the CTA arrives on the cluster barrier peers wait on before their
         sends."""
         tokens, cluster = self.tokens, self.cluster

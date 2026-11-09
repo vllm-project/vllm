@@ -33,7 +33,7 @@ def _reference(x, w13, e13, w2, e2, ue8m0):
 
 def _stock(x, w13, e13, w2, e2, ue8m0):
     """Input quant, DeepGEMM, clamped SwiGLU, quant, DeepGEMM, as the stock
-    ``Glm5NextMLP`` runs a decode step."""
+    `Glm5NextMLP` runs a decode step."""
     from vllm.model_executor.layers.quantization.utils.fp8_utils import (
         per_token_group_quant_fp8_packed_for_deepgemm,
     )

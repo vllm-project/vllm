@@ -5,7 +5,7 @@
 Stock gathers the [M, vocab / tp] shards with NCCL into [tp, M, vocab / tp] and
 permutes that into [M, vocab]: ~62 us of all-gather and ~19 us of copy at 64 rows
 (the verify step of MTP3 at 16 requests, or 64 requests without MTP). Here each
-rank stores its shard into column block ``rank`` of every rank's symmetric
+rank stores its shard into column block `rank` of every rank's symmetric
 [M, vocab] buffer over NVLink, then every CTA meets its counterparts on the other
 ranks at a flag barrier, and the caller reads the local buffer. Unicast stores
 to the peers beat one NVLS multicast store per vector (34 vs 39 us at 64 rows,
@@ -128,7 +128,7 @@ class _GatherKernel:
 
 
 class LogitsGather:
-    """``tensor_model_parallel_all_gather`` of [M, vocab shard] BF16 logits for
+    """`tensor_model_parallel_all_gather` of [M, vocab shard] BF16 logits for
     M <= capacity, returned as a view of a buffer that the next gather but one
     overwrites. Construction is collective over the TP group."""
 

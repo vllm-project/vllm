@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The MTP draft's fused vocab-parallel embedding all-reduce + enorm / hnorm
-against the gathered embedding and a naive PyTorch ``fused_eh_norm``."""
+against the gathered embedding and a naive PyTorch `fused_eh_norm`."""
 
 import pytest
 import ray

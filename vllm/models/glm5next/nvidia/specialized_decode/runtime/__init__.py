@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """GLM-5.3-Flash specialized decode: a decode executor over the stock backbone for
-GB300 TP4, enabled by ``additional_config={"decode_backend": "latency_specialized"}``.
+GB300 TP4, enabled by `additional_config={"decode_backend": "latency_specialized"}`.
 """
 
 from dataclasses import dataclass
@@ -131,8 +131,10 @@ def unsupported(vllm_config) -> list[str]:
         # it maintains neither other cache dtypes nor ReplaySSM / RecoverSSM records.
         (
             kda_dtypes(vllm_config) != (torch.bfloat16, torch.float32),
-            "KDA cache dtypes other than a BF16 conv state and an FP32 recurrent "
-            "state (mamba cache dtype)",
+            (
+                "KDA cache dtypes other than a BF16 conv state and an FP32 recurrent "
+                "state (mamba cache dtype)"
+            ),
         ),
         (
             vllm_config.cache_config.use_replayssm

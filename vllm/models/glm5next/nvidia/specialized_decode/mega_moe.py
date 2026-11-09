@@ -66,8 +66,8 @@ IDESC = (1 << 4) | ((COLUMNS >> 3) << 17) | ((TILE >> 4) << 24)
 
 @asm()
 def _umma_block(d, a, b, instruction, accumulate, empty):
-    """Four K32 FP8 UMMAs of one 128-K block into ``d`` (the first accumulates
-    iff ``accumulate``) from the elected lane, then commit the weight stage."""
+    """Four K32 FP8 UMMAs of one 128-K block into `d` (the first accumulates
+    iff `accumulate`) from the elected lane, then commit the weight stage."""
     mma = "tcgen05.mma.cta_group::1.kind::f8f6f4"
     commit = "tcgen05.commit.cta_group::1.mbarrier::arrive::one.shared::cluster.b64"
     code = "{ .reg .pred e,p0,pt; .reg .b64 a1,a2,a3,b1,b2,b3; "
@@ -320,7 +320,7 @@ class _MegaKernel:
 
     @cute.jit
     def top_k_pick(self, logits, offsets, route, lane):
-        """Expert ``route % top_k`` of the route's token and its weight: sigmoid
+        """Expert `route % top_k` of the route's token and its weight: sigmoid
         scores (approximate exp and divide, a few ulp), top-k by score plus bias
         (ties: lower expert), renormalized and scaled. Lane l holds experts
         l + 32 j."""
@@ -481,7 +481,7 @@ class _MegaKernel:
         hrecv,
     ):  # fmt: skip
         """Clamped SwiGLU of this up tile, FP8 per 128 (scale amax / 448), sent as
-        hidden K block ``tile`` (logical order, row ``tile`` of B tile ``tile``)
+        hidden K block `tile` (logical order, row `tile` of B tile `tile`)
         with its scale to every CTA of the cluster."""
         wait(gate_recv, 0, scope="cta")
         limit = Float32(self.limit)

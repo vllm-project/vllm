@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The specialized decode's DSA attention kernels against an FP64 PyTorch
 reference: no larger error than the stock kernels they replace (cuBLAS bmm,
-``fused_q_kv_rmsnorm``, ``concat_and_cache_mla``, static ``scaled_fp8_quant``)."""
+`fused_q_kv_rmsnorm`, `concat_and_cache_mla`, static `scaled_fp8_quant`)."""
 
 import pytest
 import torch
@@ -19,7 +19,7 @@ pytestmark = pytest.mark.skipif(
 
 def _kv_b_weights(g):
     """W_UK_T [N, P, L] and W_UV [N, L, V] as views of one kv_b_proj weight, the
-    way ``MLAAttention`` derives them."""
+    way `MLAAttention` derives them."""
     weight = torch.randn(HEADS * (NOPE + V), LATENT, generator=g, device="cuda")
     weight = (weight * LATENT**-0.5).bfloat16()
     w_uk, w_uv = weight.T.view(LATENT, HEADS, NOPE + V).split([NOPE, V], dim=-1)
@@ -54,7 +54,7 @@ def test_value_up_matches_bmm(tokens):
 @pytest.mark.parametrize("q_scale", [0.75])
 def test_absorb_quant_matches_bmm_and_quant(tokens, q_scale):
     """The absorb bmm with the static query quant fused: the FP8 bytes of the
-    stock bmm + ``scaled_fp8_quant`` but where the two BF16 products round
+    stock bmm + `scaled_fp8_quant` but where the two BF16 products round
     differently, and no larger error against the FP64 reference."""
     from vllm import _custom_ops as ops
     from vllm.models.glm5next.nvidia.specialized_decode.dsa_attention import (
@@ -110,7 +110,7 @@ def test_norm_matches_stock(tokens):
 @pytest.mark.parametrize("tokens", [1, 8])
 @pytest.mark.parametrize("k_scale", [0.5])
 def test_absorb_writes_kv_cache_as_stock(tokens, k_scale):
-    """The absorb kernel's cache CTAs write ``concat_and_cache_mla``'s FP8 bytes
+    """The absorb kernel's cache CTAs write `concat_and_cache_mla`'s FP8 bytes
     at the valid slots of a padded-stride cache and nothing else, and leave
     the query as it is without them."""
     from vllm import _custom_ops as ops
@@ -152,7 +152,7 @@ def test_absorb_writes_kv_cache_as_stock(tokens, k_scale):
 @pytest.mark.parametrize("tokens", [1, 8])
 def test_kda_gate_matches_linear(tokens):
     """The KDA output gate's g_b_proj (rank 128 -> 16 heads x 128) on a strided
-    slice of the in_proj output, as ``head_gemv`` of one head."""
+    slice of the in_proj output, as `head_gemv` of one head."""
     from vllm.models.glm5next.nvidia.specialized_decode.dsa_attention import (
         head_gemv,
     )

@@ -4,7 +4,7 @@
 draft's FULL-graph steps.
 
 The MTP layer has no mHC streams, so its boundaries are a fused all-reduce,
-residual add and RMSNorm (``AllReduceNorm``) where the main model fuses the
+residual add and RMSNorm (`AllReduceNorm`) where the main model fuses the
 all-reduce with mHC. The vocab-parallel embedding's all-reduce takes the same
 mailbox, fused with the enorm / hnorm of the eh_proj input. The draft's BF16
 projections run the split-K GEMM above two tokens.
@@ -163,7 +163,7 @@ class SpecializedDraft(LayerStages):
         return None
 
     def reduced_norm(self, x, partial, residual, norm):
-        """``norm(x + residual)`` and the new residual of a sublayer output."""
+        """`norm(x + residual)` and the new residual of a sublayer output."""
         if partial:
             assert self.ar_norm is not None
             return self.ar_norm(x, residual, norm.weight.data)
@@ -172,9 +172,9 @@ class SpecializedDraft(LayerStages):
     def run(
         self, mtp, step: Step, input_ids, inputs_embeds, previous_hidden_states, rows
     ):
-        """``Glm5NextMultiTokenPredictorLayer.forward`` of a planned step.
+        """`Glm5NextMultiTokenPredictorLayer.forward` of a planned step.
 
-        ``rows``: the speculator's per-request last-token rows. A draft prefill
+        `rows`: the speculator's per-request last-token rows. A draft prefill
         (q tokens per request) samples only those rows, so after the attention
         (which writes every token's KV) only they run on; the other output rows
         are left unset."""

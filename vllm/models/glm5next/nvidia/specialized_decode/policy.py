@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Which implementation each stage runs for a step of ``tokens`` tokens (requests x
-tokens per request). Every entry is a ``batch_table`` spec; token counts an entry
-leaves out run the stock kernels. ``additional_config["policy"]`` replaces entries
-by name, e.g. ``{"moe": "1-4:per_route,8-16:grouped"}``."""
+"""Which implementation each stage runs for a step of `tokens` tokens (requests x
+tokens per request). Every entry is a `batch_table` spec; token counts an entry
+leaves out run the stock kernels. `additional_config["policy"]` replaces entries
+by name, e.g. `{"moe": "1-4:per_route,8-16:grouped"}`."""
 
 from collections.abc import Mapping
 
@@ -75,7 +75,7 @@ class Policy:
         }
 
     def __call__(self, stage: str, tokens: int) -> str | None:
-        """The implementation ``stage`` runs at ``tokens``, None for stock."""
+        """The implementation `stage` runs at `tokens`, None for stock."""
         return self.tables[stage].get(tokens)
 
     def enabled(self, stage: str) -> bool:

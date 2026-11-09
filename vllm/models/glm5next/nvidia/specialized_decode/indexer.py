@@ -3,15 +3,15 @@
 """DSA indexer stage: the indexer's input projections and per-token query
 epilogue in one kernel instead of eleven.
 
-Stock decode runs the indexer key (``wk``), its FP32 head weights (an FP32 copy
-of ``weights_proj`` against an FP32 copy of the input) and the kpool gate as a
+Stock decode runs the indexer key (`wk`), its FP32 head weights (an FP32 copy
+of `weights_proj` against an FP32 copy of the input) and the kpool gate as a
 skinny GEMM, an upcast, a cuBLAS dot with its reduce and a split-K GEMM with its
 reduce. Here one GEMM reads the concatenated [wk; weights_proj; gate] rows once and
 writes each part in its stock dtype: the products of BF16 values are exact in
 FP32, so only the summation order differs. The same kernel then does the work
-of ``indexer_query`` (key LayerNorm, Hadamard quant, weight scaling and head
-padding; see ``_ProjectionKernel.fused_kernel``); token counts where that is
-slower run the projection and ``indexer_query`` as two kernels.
+of `indexer_query` (key LayerNorm, Hadamard quant, weight scaling and head
+padding; see `_ProjectionKernel.fused_kernel`); token counts where that is
+slower run the projection and `indexer_query` as two kernels.
 """
 
 import cuda.bindings.driver as cuda
@@ -72,12 +72,12 @@ def _remote_f32(address, rank):
 
 
 class _ProjectionKernel:
-    """``x @ weight.T`` on mma.sync: tokens are the m16, weight rows the n8.
+    """`x @ weight.T` on mma.sync: tokens are the m16, weight rows the n8.
 
-    A cluster of ``split`` CTAs owns 8 weight rows, each CTA a K part and each
-    warp a ``span`` of it. The dot product does not care which K a fragment
+    A cluster of `split` CTAs owns 8 weight rows, each CTA a K part and each
+    warp a `span` of it. The dot product does not care which K a fragment
     slot holds, so lane (g, q) keeps the contiguous 16-byte chunks
-    ``q * 8 + 32 p`` of the span for weight row g and tokens g and g + 8, and
+    `q * 8 + 32 p` of the span for weight row g and tokens g and g + 8, and
     the loaded words are the mma fragments as they are. The weights are loaded
     into registers before the PDL wait; the warps' and the cluster's partial
     sums are added in shared memory.
@@ -174,7 +174,7 @@ class _ProjectionKernel:
 
     @cute.jit
     def gemv(self, x, b, partial, rank, warp, lane):
-        """Each warp's partial C tiles of its K span, into ``partial``."""
+        """Each warp's partial C tiles of its K span, into `partial`."""
         g = lane // 4
         pairs = self.span // 32
         first = (rank * self.warps + warp) * self.span + lane % 4 * 8
@@ -244,8 +244,8 @@ class _ProjectionKernel:
         norm_w: cute.Tensor, norm_b: cute.Tensor, slots: cute.Tensor,
         scale: Float32, eps: Float32,
     ):  # fmt: skip
-        """The projection in the fused row order (``_fused_layout``) with the
-        query epilogue: CTA ``first_head + h`` owns head h's weight row and its
+        """The projection in the fused row order (`_fused_layout`) with the
+        query epilogue: CTA `first_head + h` owns head h's weight row and its
         query (warp w the tokens w, w + warps, ...), and the first cluster holds
         the key rows, whose LayerNorm statistics it combines over DSMEM."""
         tid, _, _ = cute.arch.thread_idx()
@@ -394,7 +394,7 @@ _compiled: dict = {}
 def _fused_layout(key: int, heads: int, gate: int) -> tuple[list[int], int]:
     """(source row of every fused slot, -1 for a zero row; first head CTA).
 
-    The key rows fill the first CTAs (one cluster), then CTA ``first + h`` holds
+    The key rows fill the first CTAs (one cluster), then CTA `first + h` holds
     head h and up to seven gate rows; the CTAs pad to whole clusters."""
     order = list(range(key))
     first = key // ROWS
@@ -410,7 +410,7 @@ def _fused_layout(key: int, heads: int, gate: int) -> tuple[list[int], int]:
 
 class IndexerProjection:
     """(key BF16, head weights FP32, kpool gate BF16) of the layer input, or with
-    ``fused`` also the query epilogue of ``indexer_query`` in the same kernel."""
+    `fused` also the query epilogue of `indexer_query` in the same kernel."""
 
     def __init__(self, indexer):
         self.key = indexer.head_dim
@@ -457,8 +457,8 @@ class IndexerProjection:
 
     def fused(self, x, q, norm, scale: float, padded: int, weights_dtype=torch.float32):
         """(q_fp8 [M, padded, 128], scaled head weights [M, padded], normed key
-        [M, 128] BF16, kpool gate [M, 128] BF16), as ``__call__`` followed by
-        ``indexer_query``."""
+        [M, 128] BF16, kpool gate [M, 128] BF16), as `__call__` followed by
+        `indexer_query`."""
         m, k = x.shape
         assert x.is_contiguous() and q.is_contiguous()
         dev = x.device
@@ -489,9 +489,9 @@ class IndexerProjection:
 
 
 class IndexerStage:
-    """``Indexer.forward`` with the fused projection inside planned steps.
+    """`Indexer.forward` with the fused projection inside planned steps.
 
-    Installed as the indexer's ``forward``: the DSA attention calls it from its
+    Installed as the indexer's `forward`: the DSA attention calls it from its
     stock module, and every call outside a planned step runs the stock forward.
     """
 

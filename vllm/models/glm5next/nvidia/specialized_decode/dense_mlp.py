@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The dense (first ``first_k_dense_replace``) layers' MLP of a few decode tokens
+"""The dense (first `first_k_dense_replace`) layers' MLP of a few decode tokens
 as two CuTe kernels, in place of input quant, DeepGEMM gate_up, SwiGLU, quant and
 DeepGEMM down.
 
@@ -12,7 +12,7 @@ K 16q..16q+15 of rows g and g + 8, and the two mmas of the step take its first
 and last eight bytes. Any K order is fine as long as A and B agree.
 
 The CTA's weights stream into shared memory (cp.async, L2 evict-first) and,
-for the first ``in_regs`` steps, into registers before the PDL wait, so a whole
+for the first `in_regs` steps, into registers before the PDL wait, so a whole
 layer's weights are in flight at launch. After the wait the tiles' warps of a K
 slice split its tokens and quantize them once for the CTA (FP8 per 128 with the
 stock scale rule): every CTA reads and quantizes the whole input, so fewer,
@@ -66,7 +66,7 @@ MAX_TOKENS = 8
 
 class _MmaGemv:
     """BF16 [tokens, rows] = FP8-quantized BF16 [tokens, k] input times the FP8
-    [rows, k] weight; with ``swiglu`` the clamped SwiGLU [tokens, rows / 2] of the
+    [rows, k] weight; with `swiglu` the clamped SwiGLU [tokens, rows / 2] of the
     gate (first half) and up (second half) rows."""
 
     def __init__(
@@ -106,7 +106,7 @@ class _MmaGemv:
         return tile * 16 + half * 8 + g
 
     def _slot(self, staged, warp, h, step):
-        """Shared words of step ``step``, half ``h`` of the warp's weights."""
+        """Shared words of step `step`, half `h` of the warp's weights."""
         return staged + ((warp * self.staged + step - self.in_regs) * 2 + h) * 128
 
     @cute.kernel
@@ -251,7 +251,7 @@ class _MmaGemv:
         )  # fmt: skip
 
     def _summed(self, partial, src, i):
-        """Partial sum ``i`` of lane ``src``, over the tile's warps."""
+        """Partial sum `i` of lane `src`, over the tile's warps."""
         value = Float32(0.0)
         for v in range(self.slices):
             value = value + _load_scale(partial, (v * 32 + src) * 4 + i)
@@ -259,7 +259,7 @@ class _MmaGemv:
 
     @cute.jit
     def epilogue(self, partial, out, cta, tid):
-        """Tile ``cta``'s outputs from its warps' partial sums."""
+        """Tile `cta`'s outputs from its warps' partial sums."""
         tokens = self.tokens
         if cutlass.const_expr(self.swiglu):
             # Element (token t, gate row g): C column t of lane 4g + t / 2.
@@ -295,7 +295,7 @@ DOWN_SHAPE = (2, 4, 1)
 
 class DenseMlp:
     """FP8 block-scaled gate_up with the clamped SwiGLU, then the down projection
-    of a TP shard of ``Glm5NextMLP`` (output still TP-partial)."""
+    of a TP shard of `Glm5NextMLP` (output still TP-partial)."""
 
     def __init__(self, w13, w13_scale, w2, w2_scale, limit: float, ue8m0: bool):
         self.w13, self.w2 = w13.contiguous(), w2.contiguous()

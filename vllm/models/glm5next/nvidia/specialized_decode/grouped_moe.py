@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Routed experts plus the shared expert of 8-64 decode tokens as one persistent
-kernel, grouped by expert, on the TRTLLM-Gen FP8 weights (see ``mega_moe``).
+kernel, grouped by expert, on the TRTLLM-Gen FP8 weights (see `mega_moe`).
 
-One CTA per SM. CTA ``t`` routes and quantizes token ``t`` into a global plan;
+One CTA per SM. CTA `t` routes and quantizes token `t` into a global plan;
 every CTA then cuts the routes into units of up to 16 tokens of one expert (the
 shared expert's first, then the routed experts in expert order), and splits the
 weight stages (two 128 x 128 K blocks of one row tile) evenly over the CTAs:
@@ -17,7 +17,7 @@ weight stages (two 128 x 128 K blocks of one row tile) evenly over the CTAs:
 - FC2: (unit, output row tile) jobs, claimed in chunks from a counter as each
   CTA's FC1 ends (so the CTAs that finish FC1 first take more); a job waits
   for its unit's four hidden blocks and writes each route's BF16 output row
-  (finalize-ready, like ``mega_moe``).
+  (finalize-ready, like `mega_moe`).
 
 Above 40 units both lists are cut in halves A and B and every CTA runs FC1(A),
 FC1(B), FC2(A), FC2(B), so FC2(A)'s hidden blocks are ready by the time it runs.
@@ -99,7 +99,7 @@ IDESC = (1 << 4) | ((GROUP >> 3) << 17) | ((TILE >> 4) << 24)
 
 @asm()
 def _umma(d, a, b, instruction):
-    """Four K32 FP8 UMMAs of one 128-K block into ``d`` (the first overwrites)
+    """Four K32 FP8 UMMAs of one 128-K block into `d` (the first overwrites)
     from the elected lane."""
     mma = "tcgen05.mma.cta_group::1.kind::f8f6f4"
     code = "{ .reg .pred e,pf,pt; .reg .b64 a1,a2,a3,b1,b2,b3; "
@@ -124,7 +124,7 @@ def _red_add(pointer, value):
 
 @asm(Uint32)
 def _atomic_inc(pointer, limit):
-    """``old >= limit ? 0 : old + 1``; returns ``old``."""
+    """`old >= limit ? 0 : old + 1`; returns `old`."""
     return "atom.inc.relaxed.gpu.global.u32 $0,[$1],$2;", "=r,l,r", (pointer, limit)
 
 
@@ -436,7 +436,7 @@ class _GroupedKernel:
 
     @cute.jit
     def finish_tokens(self, out, shared_out, final, weights, cta, tid):
-        """``final`` = the routes' rows weighted by their routing weights (FP32,
+        """`final` = the routes' rows weighted by their routing weights (FP32,
         in top-k order) plus the shared expert's output, eight columns a thread."""
         per_token = self.hidden // 8
         for v in cutlass.range(
@@ -472,7 +472,7 @@ class _GroupedKernel:
 
     @cute.jit
     def route(self, logits, bias, ids, weights, token, lane):
-        """Top-k of ``token`` (sigmoid scores plus bias, ties to the lower expert,
+        """Top-k of `token` (sigmoid scores plus bias, ties to the lower expert,
         weights renormalized and scaled); lane l holds experts l + 32 j."""
         per = self.experts // 32
         scores = cute.make_rmem_tensor(cute.make_layout((per,)), Float32)
@@ -513,7 +513,7 @@ class _GroupedKernel:
 
     @cute.jit
     def quantize(self, x, plan_x, plan_s, token, e):
-        """FP8 per 128 of ``token`` like per_token_group_quant_fp8 (with its UE8M0
+        """FP8 per 128 of `token` like per_token_group_quant_fp8 (with its UE8M0
         scale rounding when the stock path uses it); thread e quantizes 32
         values."""
         kb = e // 4
@@ -635,7 +635,7 @@ class _GroupedKernel:
 
     @cute.jit
     def rank_routes(self, picks, mask, eoff, flat, i):
-        """``flat``: each expert's routes in token order (rows ``eoff[e]``..)."""
+        """`flat`: each expert's routes in token order (rows `eoff[e]`..)."""
         for r in cutlass.range(i, self.routes, THREADS - 32, unroll=1):
             e = picks[r]
             token = r // self.top_k
@@ -825,12 +825,12 @@ class _GroupedKernel:
         self, sm, full, empty, posted, plan_x, plan_s, hidden, hscale, unit_ready,
         lane, w13_scale, w2_scale, s13_scale, s2_scale, gatherer,
     ):  # fmt: skip
-        """Stages ``gatherer``, ``gatherer + GATHERERS``, ... up to END: each
+        """Stages `gatherer`, `gatherer + GATHERERS`, ... up to END: each
         stage's B tile, the unit's token rows of K blocks kb.. (FC1: the
         quantized tokens, FC2: the unit's hidden), 128B-swizzled (16B chunk c of
         row j at c ^ (j % 8)); and its column scales (weight block scale times
         the token's activation or hidden scale) into the scale ring, which the
-        epilogue reads at most ``stages + slots`` stages later."""
+        epilogue reads at most `stages + slots` stages later."""
         uoff = view(sm.iterator, self.off_uoff, Int32, self.max_units + 1)
         ucnt = view(sm.iterator, self.off_ucnt, Int32, self.max_units)
         flat = view(sm.iterator, self.off_flat, Int32, self.routes + self.tokens)
@@ -1038,7 +1038,7 @@ class _GroupedKernel:
 
     @cute.jit
     def owner(self, s, size):
-        """The CTA whose range of a ``size``-stage half holds stage ``s``."""
+        """The CTA whose range of a `size`-stage half holds stage `s`."""
         return ((s + 1) * self.grid - 1) // size
 
     @cute.jit
@@ -1046,7 +1046,7 @@ class _GroupedKernel:
         self, sm, cta, e, row, lane, quadrant, half, unit, n, opened, count, up,
         gate, scal, logical, hidden, hscale, partial, pair_count, unit_ready,
     ):  # fmt: skip
-        """End of this CTA's piece (stages ``opened``..``n``) of a pair: finish
+        """End of this CTA's piece (stages `opened`..`n`) of a pair: finish
         the pair, or publish the partial and finish the pair if it is the pair's
         last piece."""
         w = self.width
@@ -1100,7 +1100,7 @@ class _GroupedKernel:
     @cute.jit
     def finish(self, sm, e, row, lane, quadrant, unit, pair, count, up, gate,
                logical, hidden, hscale, unit_ready):  # fmt: skip
-        """Clamped SwiGLU of hidden block ``pair``, FP8 per 128 per token (scale
+        """Clamped SwiGLU of hidden block `pair`, FP8 per 128 per token (scale
         amax / 448), published for FC2."""
         w = self.width
         amax_buf = view(sm.iterator, self.off_amax, Float32, 4 * w)
@@ -1173,8 +1173,8 @@ class GroupedExperts:
     def __init__(
         self, w13, w13_scale, w2, w2_scale, top_k, limit, scale, ue8m0, shared
     ):
-        """``shared``: the shared expert's TRTLLM-Gen-layout (w13, FP32 scales, w2,
-        FP32 scales) with one expert each (see ``shared_weights``)."""
+        """`shared`: the shared expert's TRTLLM-Gen-layout (w13, FP32 scales, w2,
+        FP32 scales) with one expert each (see `shared_weights`)."""
         experts, nk1, n1, _ = w13.shape
         self.hidden, self.inter, self.experts = nk1 * TILE, n1 // 2, experts
         self.top_k, self.limit, self.scale, self.ue8m0 = top_k, limit, scale, ue8m0
@@ -1215,7 +1215,7 @@ class GroupedExperts:
         self, tokens: list[int], logits_dtype: torch.dtype, finalized=()
     ) -> None:
         """Compiles the kernel for these token counts before graph capture;
-        ``finalized``: the token counts that run with ``finalize``."""
+        `finalized`: the token counts that run with `finalize`."""
         device = self.w13.device
         bias = torch.zeros(self.experts, device=device)
         for m in tokens:
@@ -1232,7 +1232,7 @@ class GroupedExperts:
     ):
         """BF16 [M * top_k, hidden] routed expert outputs (one row per route),
         int32 [M, top_k] experts, FP32 [M, top_k] routing weights and the shared
-        expert's BF16 [M, hidden] output; with ``finalize``, the BF16 [M, hidden]
+        expert's BF16 [M, hidden] output; with `finalize`, the BF16 [M, hidden]
         MoE output (routing-weighted routes plus the shared expert) instead.
 
         Args:

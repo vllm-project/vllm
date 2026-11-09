@@ -4,7 +4,7 @@
 
 The boundary of the MTP draft layer, which has no mHC streams: the sublayer's
 partial output (or its MoE output, top-k reduction still open) is multicast
-into a Lamport mailbox by ``all_reduce_mhc``'s publish kernels, then one CTA
+into a Lamport mailbox by `all_reduce_mhc`'s publish kernels, then one CTA
 per token polls every rank's contribution, sums it, adds the residual and
 RMS-normalizes the sum.
 
@@ -56,8 +56,8 @@ from .all_reduce_mhc import _gmem_ptr, _PublishDeviceKernel
 
 
 class _EmbedPublishDeviceKernel:
-    """Multicasts this rank's embedding rows of ``ids`` (zeros for ids outside
-    its ``[start, start + rows)`` shard) into the Lamport mailbox."""
+    """Multicasts this rank's embedding rows of `ids` (zeros for ids outside
+    its `[start, start + rows)` shard) into the Lamport mailbox."""
 
     def __init__(
         self, *, hidden: int, tp: int, rank: int, capacity_m: int, start: int, rows: int
@@ -122,7 +122,7 @@ class _EmbedPublishDeviceKernel:
 
 class _EmbedNormDeviceKernel:
     """One CTA per token: sums the published embedding, zeroes it at position
-    0, and writes ``[enorm(embedding), hnorm(previous)]``."""
+    0, and writes `[enorm(embedding), hnorm(previous)]`."""
 
     def __init__(self, *, hidden: int, tp: int, capacity_m: int, eps: float):
         self.hidden = hidden
@@ -389,8 +389,8 @@ class _NormDeviceKernel:
 
 
 class AllReduceNorm:
-    """``tensor_model_parallel_all_reduce`` + ``RMSNorm(x, residual)`` for up to
-    ``max_num_tokens`` tokens: a publish kernel and a norm kernel.
+    """`tensor_model_parallel_all_reduce` + `RMSNorm(x, residual)` for up to
+    `max_num_tokens` tokens: a publish kernel and a norm kernel.
 
     Construction is collective over the TP group; one instance serves every
     boundary of its model, which run one after another.
@@ -501,8 +501,8 @@ class AllReduceNorm:
     def prepare_embedding(
         self, weight: torch.Tensor, start: int, rows: int, eps: float
     ):
-        """Compiles ``embed_norm`` for the vocabulary shard ``weight`` whose
-        first ``rows`` rows hold token ids ``[start, start + rows)``."""
+        """Compiles `embed_norm` for the vocabulary shard `weight` whose
+        first `rows` rows hold token ids `[start, start + rows)`."""
         hidden, capacity = self.hidden_size, self.capacity
         assert weight.dtype == torch.bfloat16 and weight.is_contiguous()
         assert weight.shape[1] == hidden
@@ -561,8 +561,8 @@ class AllReduceNorm:
         enorm: torch.Tensor,
         hnorm: torch.Tensor,
     ) -> torch.Tensor:
-        """``fused_eh_norm`` of the vocab-parallel embedding of ``ids``:
-        ``[M, 2 * hidden]`` = ``[enorm(embedding), hnorm(previous)]``, the
+        """`fused_eh_norm` of the vocab-parallel embedding of `ids`:
+        `[M, 2 * hidden]` = `[enorm(embedding), hnorm(previous)]`, the
         embedding zeroed at position 0."""
         publish, norm, _ = self._embed[weight.data_ptr()]
         hidden = self.hidden_size
@@ -596,7 +596,7 @@ class AllReduceNorm:
         residual: torch.Tensor,
         norm_weight: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """``(RMSNorm(sum + residual), sum + residual)`` of the TP sum of ``x``.
+        """`(RMSNorm(sum + residual), sum + residual)` of the TP sum of `x`.
 
         Args:
             x: [M, hidden] BF16 TP-partial sublayer output, or a MoE output

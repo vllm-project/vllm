@@ -18,8 +18,8 @@ pytestmark = pytest.mark.skipif(
 
 
 def _quant(x, reciprocal=False, ue8m0=False):
-    """FP8 per 128 along the last dim with scale amax / 448; ``reciprocal``
-    multiplies by 1 / scale and ``ue8m0`` rounds the scale up to a power of
+    """FP8 per 128 along the last dim with scale amax / 448; `reciprocal`
+    multiplies by 1 / scale and `ue8m0` rounds the scale up to a power of
     two, like per_token_group_quant_fp8."""
     blocks = x.float().unflatten(-1, (-1, 128))
     amax = blocks.abs().amax(-1).clamp_min(1e-10)
@@ -43,7 +43,7 @@ def _weight(w, s):
 
 
 def _fp8_ulp(q):
-    """The distance to the next e4m3 value at each element of ``q``."""
+    """The distance to the next e4m3 value at each element of `q`."""
     exponent = torch.floor(torch.log2(q.float().abs().clamp_min(2**-6)))
     return torch.exp2(exponent - 3)
 
@@ -181,7 +181,7 @@ def _errors(value, ref):
 
 
 def _mlp(w31, w31_s, w2, w2_s, x, quant_hidden):
-    """FP64 expert MLP of FP8 (UE8M0) tokens; ``quant_hidden`` rounds the hidden
+    """FP64 expert MLP of FP8 (UE8M0) tokens; `quant_hidden` rounds the hidden
     to FP8 per 128 like TRTLLM-Gen does."""
     x = _dequant(*_quant(x, ue8m0=True)).double()
     up, gate = (x @ _weight(w31, w31_s).double().t()).split(INTER, dim=-1)

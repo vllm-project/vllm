@@ -3,9 +3,9 @@
 """Skinny projections for stock BF16 linear modules inside planned decode steps.
 
 Stages that still call stock modules (the DSA attention) reach their BF16
-projections through ``quant_method.apply``; ``route`` wraps that call so a planned
+projections through `quant_method.apply`; `route` wraps that call so a planned
 step's 1 or 2 token counts take the skinny projection, the counts given to
-``route`` the split-K GEMM (DSA layers and the MTP draft), and every other call
+`route` the split-K GEMM (DSA layers and the MTP draft), and every other call
 (prefills, stock steps, other counts) the stock GEMM. At 4 tokens the DSA layer
 measured slower with the skinny projection in place (124.6 -> 128.8 us per
 layer at B4), although the projections alone are faster.
@@ -57,7 +57,7 @@ class _RoutedApply:
 
 def route(module, split_k_tokens=()) -> bool:
     """Routes a BF16 linear module's decode GEMMs; False if it cannot.
-    ``split_k_tokens``: token counts above ``MAX_TOKENS`` to route to split-K."""
+    `split_k_tokens`: token counts above `MAX_TOKENS` to route to split-K."""
     weight = getattr(module, "weight", None)
     if weight is None or weight.dtype != torch.bfloat16 or weight.dim() != 2:
         return False
