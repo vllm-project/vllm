@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""M1c ``mla_attn``: Kimi-K3's MLA decode attention at TP8 + DCP1, the bf16
-query (M1a ``qbf16``) against the fp8 latent cache, split over the KV: one pass
+"""M1c `mla_attn`: Kimi-K3's MLA decode attention at TP8 + DCP1, the bf16
+query (M1a `qbf16`) against the fp8 latent cache, split over the KV: one pass
 a split, every split's partial (bf16 o, f32 LSE) for a combine (M1b's).
 
-One launch, ``BLOCKS`` CTAs x ``THREADS`` threads. A CTA a (head group, split):
-16 query rows (``16 / qlen`` heads x qlen positions) against a chunk of the
+One launch, `BLOCKS` CTAs x `THREADS` threads. A CTA a (head group, split):
+16 query rows (`16 / qlen` heads x qlen positions) against a chunk of the
 request's KV. The split's CTAs (every head group) share an XCD, so a chunk
 streams from HBM once into that XCD's L2.
 
@@ -25,7 +25,7 @@ streams from HBM once into that XCD's L2.
 
 A split with no token of the request (or none before its causal bound) leaves
 LSE -inf and o 0. Rows are causal: position i of the request's qlen sees its
-KV up to ``seq_len - qlen + i``.
+KV up to `seq_len - qlen + i`.
 """
 
 from dataclasses import dataclass, replace
@@ -175,7 +175,7 @@ def hw_log2(x):
 
 def mfma_f8(a, b, c):
     """16x16x128 E4M3 x E4M3 MFMA, unscaled (scale operands 0: LLVM's
-    v_mfma_f32_16x16x128_f8f6f4): ``a`` / ``b`` 8 dwords (QK and PV)."""
+    v_mfma_f32_16x16x128_f8f6f4): `a` / `b` 8 dwords (QK and PV)."""
     zero = as_ir_value(fx.Int32(0))
     return fx.Vector(
         rocdl.mfma_scale_f32_16x16x128_f8f6f4(
@@ -195,7 +195,7 @@ def fp8_unpack4(w):
 
 
 def fp8_pack4(a, b, c, d):
-    """Four f32 (in range) -> one dword of four E4M3, RNE (``ops``' but the
+    """Four f32 (in range) -> one dword of four E4M3, RNE (`ops`' but the
     first pair over a poison dword: no zeroing move)."""
     lo = fx.Int32(
         rocdl.cvt_pk_fp8_f32(T.i32, a, b, fx.Int32(llvm.mlir_poison(T.i32)), False)
@@ -216,18 +216,18 @@ def fp8_split4(x):
 
 
 def xp_at(r, h, k, lane):
-    """The P dword of (row tile r, hi / lo h, tiles 4 k ..) of ``lane``."""
+    """The P dword of (row tile r, hi / lo h, tiles 4 k ..) of `lane`."""
     return (((r * 2 + h) * 2 + k) * 64 + lane) * 4
 
 
 @traced
 def q_split(c, rows, at):
-    """The CTA's bf16 Q rows (slot 1: ``[row][ENTRY]``) -> E4M3 hi, lo of q 2^k
+    """The CTA's bf16 Q rows (slot 1: `[row][ENTRY]`) -> E4M3 hi, lo of q 2^k
     (a power of two a row: its |max| in [128, 256)): hi + lo is q exactly,
     bf16's 8 bits E4M3's 4 + 4 (lo q - hi, a multiple of hi's ulp / 16; but
-    below 2^-9 of 2^k: 2^-17 of the row's |max|). At dword ``at``:
-    ``[hi | lo][row][ENTRY]`` bytes, the tail chunk's also at ``qt``; a row's
-    2^-k at ``xm`` + row. A row 16 threads, 4 latents a unit (``tid % 16`` +
+    below 2^-9 of 2^k: 2^-17 of the row's |max|). At dword `at`:
+    `[hi | lo][row][ENTRY]` bytes, the tail chunk's also at `qt`; a row's
+    2^-k at `xm` + row. A row 16 threads, 4 latents a unit (`tid % 16` +
     16 i)."""
     tid = c["tid"]
     rr = tid // 16
@@ -270,9 +270,9 @@ def q_split(c, rows, at):
 
 
 def q_parts(c, r, at, rows):
-    """Row tile r's B operands from ``q_split``'s: QK step s's hi, lo
-    (s < ``QSTEPS``: line s), 8 dwords each (a lane 32 B at 32 g of the line,
-    K's order); the tail's stay in LDS (``qt``)."""
+    """Row tile r's B operands from `q_split`'s: QK step s's hi, lo
+    (s < `QSTEPS`: line s), 8 dwords each (a lane 32 B at 32 g of the line,
+    K's order); the tail's stay in LDS (`qt`)."""
     row = r * TILE + c["lane"] % TILE
     g = c["lane"] // TILE
 
@@ -321,14 +321,14 @@ assert all(sig(t + 8, tp) == sig(t, tp) ^ 4 for t in range(8) for tp in (0, 1))
 
 
 def lines_at(t, tp, col):
-    """Token t's 16 B ``col`` of line s: its byte in the slot (from line s's
-    chunk 2 s, a tile 1 KB: 8 tokens x 128 B), the DMA lane ``8 (t % 8) +
-    (col ^ sig)`` of chunk 2 s + t // 8."""
+    """Token t's 16 B `col` of line s: its byte in the slot (from line s's
+    chunk 2 s, a tile 1 KB: 8 tokens x 128 B), the DMA lane `8 (t % 8) +
+    (col ^ sig)` of chunk 2 s + t // 8."""
     return (t // 8) * WAVES * TILEW * 4 + (t % 8) * LINE + 16 * (col ^ sig(t, tp))
 
 
 def dma_lane(lane):
-    """(token, 16 B cc) tail DMA lane ``lane`` carries (it lands at position
+    """(token, 16 B cc) tail DMA lane `lane` carries (it lands at position
     lane)."""
     cc = lane // 16
     return 4 * (lane % 4) + ((lane // 4) % 4 + 4 - cc) % 4, cc
@@ -336,7 +336,7 @@ def dma_lane(lane):
 
 def vtr_lane(lane, wave, i, lines=True):
     """This lane's byte in a block's (line wave // 2) of the 8 B it gives a
-    V^T transpose read of latent tile i (``tr_read``; tiles 2 n .. at + 2 n
+    V^T transpose read of latent tile i (`tr_read`; tiles 2 n .. at + 2 n
     TILEW): lane k of a 16 its half k % 2 of the 16 B 4 (wave % 2) + i of
     token 4 g + k // 2 % 4 of tile k // 8 -> lane m: latent 64 wave + 16 i +
     m, tokens 4 g .. of tiles 2 n, 2 n + 1."""
@@ -350,7 +350,7 @@ def vtr_lane(lane, wave, i, lines=True):
 
 
 def tr_read(addr):
-    """ds_read_b64_tr_b8 at LDS byte ``addr``: a lane m of 16 byte m % 8 of
+    """ds_read_b64_tr_b8 at LDS byte `addr`: a lane m of 16 byte m % 8 of
     the 8 B of lanes m // 8 + 2 e (byte e), as two dwords."""
     p3 = llvm.inttoptr(ir.Type.parse("!llvm.ptr<3>"), as_ir_value(fx.Int32(addr)))
     return fx.Vector(rocdl.ds_read_tr8_b64(T.vec(2, T.i32), p3).result)
@@ -370,9 +370,9 @@ def idx_load(c, b):
 
 
 def dma_offs(c, idx):
-    """``k_dma``'s sources of ``idx_load``'s indices: the tail chunk's (16 B
+    """`k_dma`'s sources of `idx_load`'s indices: the tail chunk's (16 B
     dcc), line chunks' tokens lane // 8 and + 8 (their 16 B column
-    ``sig``-swizzled); bytes off the pool (``wide``: addresses)."""
+    `sig`-swizzled); bytes off the pool (`wide`: addresses)."""
     cols = (
         (c["dcc"] * 16, c["dcol"], c["dcol"] ^ 64)
         if const_expr(c["lines"])
@@ -387,10 +387,10 @@ def dma_offs(c, idx):
 
 
 def k_dma(c, b, offs, ps=None, tile=None):
-    """Block b's K tile of this wave (or ``tile``; ``dma_offs``) -> slot
+    """Block b's K tile of this wave (or `tile`; `dma_offs`) -> slot
     b % 2: a DMA a chunk (64 lanes x 16 B: line s's 8 tokens, the tail's 16).
     Inline asm: LLVM's own wait for an LDS DMA would hold this block's slot
-    reads for the next block's DMA too; ``vmwait`` / ``wait_dma`` are the only
+    reads for the next block's DMA too; `vmwait` / `wait_dma` are the only
     waits."""
     ps = range(KLOADS) if ps is None else ps
     tile = c["wave"] if tile is None else tile
@@ -427,8 +427,8 @@ def k_dma(c, b, offs, ps=None, tile=None):
 
 
 def lds_dma(src, dst):
-    """A global_load_lds_dwordx4: lane i's 16 B at ``src`` -> LDS byte
-    ``dst`` (uniform) + 16 i. (Every LDS DMA here an ``s_nop`` between its M0
+    """A global_load_lds_dwordx4: lane i's 16 B at `src` -> LDS byte
+    `dst` (uniform) + 16 i. (Every LDS DMA here an `s_nop` between its M0
     write and the load: right after the write the load could read a stale M0,
     the warp-specialized waves' K / index DMAs then landing in another slot:
     nondeterministic outputs.)"""
@@ -462,8 +462,8 @@ def idx_dma(c, b, t0=None, n=1):
 
 
 def idx_lds(c, b):
-    """This lane's DMA tokens' page indices of block b (``idx_dma``'s; as
-    ``idx_load``)."""
+    """This lane's DMA tokens' page indices of block b (`idx_dma`'s; as
+    `idx_load`)."""
     xb = c["xi"] + ((b % 2) * WAVES + c["wave"]) * TILE
     if const_expr(not c["lines"]):
         return (fx.ptr_load(xb + c["dt"]),)
@@ -489,8 +489,8 @@ def wait_dma():
 
 
 def xm_row(c, r, row):
-    """The waves' values of row ``row`` of row tile r in xm
-    (``[r][row][wave]``: two b128 reads)."""
+    """The waves' values of row `row` of row tile r in xm
+    (`[r][row][wave]`: two b128 reads)."""
     v = [
         fx.Vector(
             fx.ptr_load(
@@ -506,7 +506,7 @@ def xm_row(c, r, row):
 def v_reads(c, b, dma):
     """V^T of the slot's block b by transpose reads, the A of a 16x16x128 fp8
     MFMA a latent tile i: a lane's 32 B tile w's tokens 4 g .. at 4 w (P's
-    order); ``dma`` the hook ``v<i>``'s K chunks before tile i's reads."""
+    order); `dma` the hook `v<i>`'s K chunks before tile i's reads."""
     vw = (c["wave"] // 2) * 2 if const_expr(c["lines"]) else c["wave"]
     vt = c["ks_b"] + ((b % 2) * SLOT + vw * WAVES * TILEW) * 4
     va = []
@@ -524,9 +524,9 @@ def v_reads(c, b, dma):
 @traced
 def stage_block(c, b, st, dma, kwait, masked):
     """One block (its K in slot b % 2) into the running (m, l, O) of each of
-    the CTA's row tiles (K and V^T read once for all); ``dma(hook)``
-    issues the hook's of block b + 1's K chunks (``DMA``), ``kwait(p)`` waits
-    for this wave's chunk p of block b; ``masked``: a block with a token past
+    the CTA's row tiles (K and V^T read once for all); `dma(hook)`
+    issues the hook's of block b + 1's K chunks (`DMA`), `kwait(p)` waits
+    for this wave's chunk p of block b; `masked`: a block with a token past
     the chunk or a row's causal bound (else every score kept)."""
     lane, wave = c["lane"], c["wave"]
     row = lane % TILE
@@ -684,7 +684,7 @@ def stage_block(c, b, st, dma, kwait, masked):
 
 
 def block(c, b, st, masked):
-    """Block b (``stage_block``) behind the top barrier, its DMA hooks."""
+    """Block b (`stage_block`) behind the top barrier, its DMA hooks."""
     rt = c["rt"]
     # the slot block b + 1's DMA takes was the last block's (its PV
     # over): the waves in step; block b's own K waits a chunk
@@ -788,8 +788,8 @@ def run(c):
 
 
 def chunk_dma(c, src, imm, dst):
-    """One chunk DMA (``k_dma``'s): ``src`` + ``imm`` (an offset off the pool,
-    or ``wide`` an address) -> LDS byte ``dst`` (uniform; lane i its 16 B at
+    """One chunk DMA (`k_dma`'s): `src` + `imm` (an offset off the pool,
+    or `wide` an address) -> LDS byte `dst` (uniform; lane i its 16 B at
     + 16 i)."""
     if const_expr(c["wide"]):
         lds_dma(src + imm, dst)
@@ -809,7 +809,7 @@ def chunk_dma(c, src, imm, dst):
 
 
 def ws_offs(c, b, t):
-    """This lane's DMA source of tile t of block b (``dma_offs``, its index
+    """This lane's DMA source of tile t of block b (`dma_offs`, its index
     from the index slot)."""
     return dma_offs(
         c, (fx.ptr_load(c["xi"] + ((b % 2) * WAVES + t) * TILE + c["dt"]),)
@@ -817,8 +817,8 @@ def ws_offs(c, b, t):
 
 
 def ws_dmas(c, bb, ps, hooks=("all",)):
-    """This wave's DMA hook of block bb's tile's chunks ``ps`` (``k_dma``'s),
-    spread over ``hooks`` (the first ones one more)."""
+    """This wave's DMA hook of block bb's tile's chunks `ps` (`k_dma`'s),
+    spread over `hooks` (the first ones one more)."""
     if const_expr(c["dbg"] == 1):
         return lambda hook: None
     offs = (ws_offs(c, bb, c["wave"]),)
@@ -838,7 +838,7 @@ def ws_dmas(c, bb, ps, hooks=("all",)):
 
 def ws_vtile(c, b, i):
     """V^T latent tile i (of 8: 128 v + 16 i ..) of the slot's block b
-    (``v_reads``'): 8 dwords."""
+    (`v_reads`'): 8 dwords."""
     vt = c["vb"] + ((b % 2) * SLOT + (i // 4) * WAVES * TILEW) * 4 + c["vtr"][i % 4]
     tr = [tr_read(vt + n * 2 * TILEW * 4) for n in range(4)]
     return fx.Vector.from_elements(
@@ -848,7 +848,7 @@ def ws_vtile(c, b, i):
 
 @traced
 def ws_qk_block(c, b, st, masked):
-    """QK wave step b: S of block b's tiles 2 w, 2 w + 1 (``stage_block``'s
+    """QK wave step b: S of block b's tiles 2 w, 2 w + 1 (`stage_block`'s
     QK), the max over the QK waves (B1), block b + 2's tile DMA'd, P(b) -> xp,
     alpha -> xm (B2: block b + 1's landed)."""
     lane, wave = c["lane"], c["wave"]
@@ -969,7 +969,7 @@ def ws_qk_block(c, b, st, masked):
 
 @traced
 def ws_qk(c):
-    """The QK waves' steps (``ws_qk_block``), the last block's PV's barriers,
+    """The QK waves' steps (`ws_qk_block`), the last block's PV's barriers,
     then the l over the waves and the LSE."""
     lane, wave = c["lane"], c["wave"]
     row = lane % TILE
@@ -1006,7 +1006,7 @@ def ws_qk(c):
 
 
 def ws_l(c, r, row):
-    """Row ``row`` of row tile r's l: the QK waves' (xm) summed."""
+    """Row `row` of row tile r's l: the QK waves' (xm) summed."""
     xw = fx.Vector(
         fx.ptr_load(
             c["xm"] + (r * TILE + row) * WAVES,
@@ -1018,8 +1018,8 @@ def ws_l(c, r, row):
 
 @traced
 def ws_pv_block(c, b, st):
-    """PV wave step b: O += V^T P^T of block b - 1 (its V^T ``va`` read in
-    step b - 1, P from xp, alpha from xm), B1 after ``WS_B1``
+    """PV wave step b: O += V^T P^T of block b - 1 (its V^T `va` read in
+    step b - 1, P from xp, alpha from xm), B1 after `WS_B1`
     latent tiles, V^T(b) read before it (block b's slot then free); after B1
     block b + 2's chunks DMA'd (block b + 1's landed by B2)."""
     lane = c["lane"]
@@ -1080,7 +1080,7 @@ def ws_pv_block(c, b, st):
 @traced
 def ws_pv(c):
     """The PV waves' steps: step 0 V^T(0) and block 1's DMA, then
-    ``ws_pv_block`` a block (one behind the QK waves), then o = O / l."""
+    `ws_pv_block` a block (one behind the QK waves), then o = O / l."""
     lane, wave, g = c["lane"], c["wave"], c["lane"] // TILE
     row = lane % TILE
     rt = c["rt"]
@@ -1138,7 +1138,7 @@ def ws_pv(c):
 
 @traced
 def ws_run(c):
-    """Warp-specialized blocks (``WSPEC``): the QK waves', the PV waves'."""
+    """Warp-specialized blocks (`WSPEC`): the QK waves', the PV waves'."""
     wv = uniform(c["wave"])
     if wv < QKW:
         ws_qk(c)
@@ -1157,8 +1157,8 @@ def check(s: int, q: int, rt: int = 0):
 
 
 def smem(qlen: int, rt: int = 0, ws: int = -1):
-    """The LDS of a CTA (``cta``'s ks / xm / xp / xi; xp P's hi | lo, then
-    the tail Q's tail hi | lo, ``qt``)."""
+    """The LDS of a CTA (`cta`'s ks / xm / xp / xi; xp P's hi | lo, then
+    the tail Q's tail hi | lo, `qt`)."""
     rt = rt or RTILES[qlen]
     xpn = rt * WAVES * 64 * 2
 
@@ -1174,9 +1174,9 @@ def smem(qlen: int, rt: int = 0, ws: int = -1):
 
 @traced
 def cta(c):
-    """CTA ``c["bid"]``'s (head group, split): its partial stored (cache
-    modifier ``c["cm"]``), then ``c["done"](flag)`` when given (``ctas``).
-    ``c["args"]``: qb, kv, pages, indptr, part_o, part_lse, scale, vscale."""
+    """CTA `c["bid"]`'s (head group, split): its partial stored (cache
+    modifier `c["cm"]`), then `c["done"](flag)` when given (`ctas`).
+    `c["args"]`: qb, kv, pages, indptr, part_o, part_lse, scale, vscale."""
     s, q, a = c["S"], c["Q"], c["args"]
     rt = c.get("rt") or RTILES[q]
     ws = wspec(rt, c.get("ws", -1))
@@ -1378,11 +1378,11 @@ def f32_bits(x: float) -> int:
 def mla_attn(
     key: MlaAttnBuild, *, q, kv, pages, indptr, part_o, part_lse, scale, kv_scale=1.0
 ):
-    """Host launcher. ``q`` [S, 12, 576] bf16; ``kv`` [tokens, 576] fp8 rows
-    (dense); ``pages`` int32 flat token indices, ``indptr`` [requests + 1]
-    int32 (a request's KV ``pages[indptr[r]:indptr[r + 1]]``); ``part_o`` /
-    ``part_lse`` of ``partial_shapes(key)``, bf16 / f32. ``scale`` the softmax
-    scale, ``kv_scale`` the cache's dequant (folded into QK and o)."""
+    """Host launcher. `q` [S, 12, 576] bf16; `kv` [tokens, 576] fp8 rows
+    (dense); `pages` int32 flat token indices, `indptr` [requests + 1]
+    int32 (a request's KV `pages[indptr[r]:indptr[r + 1]]`); `part_o` /
+    `part_lse` of `partial_shapes(key)`, bf16 / f32. `scale` the softmax
+    scale, `kv_scale` the cache's dequant (folded into QK and o)."""
     so, sl = partial_shapes(key)
     assert part_o.shape == so and part_o.dtype == torch.bfloat16
     assert part_lse.shape == sl and part_lse.dtype == torch.float32
@@ -1400,13 +1400,13 @@ def mla_attn(
 
 
 def wide_kv(kv) -> bool:
-    """The build's ``wide`` for KV pool ``kv``: a DMA's 32-bit offset off the
+    """The build's `wide` for KV pool `kv`: a DMA's 32-bit offset off the
     pool's base (a token row's end at most) won't reach past 4 GiB."""
     return kv.numel() > 2**32
 
 
 def host_args(*, q, kv, pages, indptr, scale, kv_scale=1.0):
-    """(qb, kv, pages, indptr, scale, vscale) of the kernel (``mla_attn``'s
+    """(qb, kv, pages, indptr, scale, vscale) of the kernel (`mla_attn`'s
     inputs but the partials; K2's fused M1c's)."""
     assert (
         q.dtype == torch.bfloat16 and q.is_contiguous() and q.shape[1:] == (NH, ENTRY)

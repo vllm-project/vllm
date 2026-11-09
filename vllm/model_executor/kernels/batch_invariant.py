@@ -194,10 +194,10 @@ def sparse_paged_indices(
     extra_lens: torch.Tensor | None,
 ) -> None:
     """Write each token's paged SWA and compressed top-k slots for FlashMLA's
-    sparse decode kernel, ``-1`` for holes, with lengths from its position.
+    sparse decode kernel, `-1` for holes, with lengths from its position.
 
-    Tokens ``[token_offset, token_offset + num_tokens)`` land in output rows
-    ``[0, num_tokens)``. The visible window and the compressed length follow
+    Tokens `[token_offset, token_offset + num_tokens)` land in output rows
+    `[0, num_tokens)`. The visible window and the compressed length follow
     the eager prefill path, so a (request, position) gets the same lists in
     any batch, chunk or step.
     """
@@ -267,9 +267,9 @@ def combine_swa_first_indices(
     N: int,
     out: tuple[torch.Tensor, torch.Tensor] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """``combine_topk_swa_indices`` laid out in the mega decode kernel's slot
-    space, ``[swa padded to the window; topk]``, with length
-    ``window + topk_len``, so prefill blocks a row's KV as decode does."""
+    """`combine_topk_swa_indices` laid out in the mega decode kernel's slot
+    space, `[swa padded to the window; topk]`, with length
+    `window + topk_len`, so prefill blocks a row's KV as decode does."""
     require_batch_invariant_kernel()
     if out is None:
         num_tokens = topk_indices.shape[0]
@@ -305,8 +305,8 @@ def topk_lens_by_position(
     lengths: torch.Tensor,
 ) -> None:
     """Write each token's compressed top-k length from its position,
-    ``max(min((pos + 1) // compress_ratio, top_k), 0)``, as
-    ``combine_topk_swa_indices`` gives prefill rows; invalid tokens get 0."""
+    `max(min((pos + 1) // compress_ratio, top_k), 0)`, as
+    `combine_topk_swa_indices` gives prefill rows; invalid tokens get 0."""
     require_batch_invariant_kernel()
     torch.ops.vllm_batch_invariant.topk_lens_by_position(
         token_to_req,
@@ -338,8 +338,8 @@ def gather_replay_batch(
 ) -> None:
     """Gather a replay stage's trailing rows of each request: their batch rows,
     query offsets, positions, slot mappings and window KV start (no lower
-    than ``seq_len - kept_rows`` for a trimmed request); with
-    ``prev_dropped_before`` also each row's index among the previous stage's
+    than `seq_len - kept_rows` for a trimmed request); with
+    `prev_dropped_before` also each row's index among the previous stage's
     rows."""
     require_batch_invariant_kernel()
     torch.ops.vllm_batch_invariant.gather_replay_batch(
