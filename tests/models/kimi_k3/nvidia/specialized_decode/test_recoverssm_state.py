@@ -124,7 +124,7 @@ def test_model_state_hands_itself_to_the_specialized_decode() -> None:
 
 def test_model_state_installs_it_for_deferred_stock_kda_layers() -> None:
     """Without the specialized decode, KDA layers that verify with the deferred
-    kernel (``deferred_verify``) get the same install: records by request slot
+    kernel (`deferred_verify`) get the same install: records by request slot
     after a scratch row and the deferred runner state."""
     records = KDARecoverSSMRecords(
         torch.zeros(2, 3, 4, 8), torch.zeros(2, 3, 4, 16, dtype=torch.bfloat16)

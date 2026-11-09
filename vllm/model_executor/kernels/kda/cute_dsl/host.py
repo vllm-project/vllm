@@ -30,7 +30,7 @@ def architecture(device):
 
 
 def fake(shape, stride=None, dtype=torch.bfloat16, align=16):
-    """Row-major unless ``stride`` is given."""
+    """Row-major unless `stride` is given."""
     stride = stride or tuple(math.prod(shape[i + 1 :]) for i in range(len(shape)))
     dtype = _DTYPES.get(dtype, dtype)
     return make_fake_tensor(dtype, shape, stride, assumed_align=align)

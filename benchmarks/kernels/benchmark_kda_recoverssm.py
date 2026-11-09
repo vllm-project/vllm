@@ -3,18 +3,18 @@
 """Benchmark the deferred KDA RecoverSSM verify against the model's RecoverSSM path.
 
 The baseline is the RecoverSSM path of an FP32-state KDA layer per speculative
-step: per layer the short convolution (``causal_conv1d_update``), the F_B gate
-projection, the Triton RecoverSSM verify (``kda_recoverssm_verify``) and the gated
+step: per layer the short convolution (`causal_conv1d_update`), the F_B gate
+projection, the Triton RecoverSSM verify (`kda_recoverssm_verify`) and the gated
 RMSNorm, then after sampling the commit that folds the accepted tokens into every
-layer's checkpoint (``KDARecoverSSMCommitContext.commit``). The deferred path runs one
-kernel per layer (``KdaDeferredVerify``: the last step's accepted tokens replayed
+layer's checkpoint (`KDARecoverSSMCommitContext.commit`). The deferred path runs one
+kernel per layer (`KdaDeferredVerify`: the last step's accepted tokens replayed
 into the checkpoint, then the verify) and after sampling only records the accepted
 counts. The floor is a copy of every layer's state pages: the one read and one
 write of the state that a deferred step needs.
 
 Each figure is a CUDA graph replay over all KDA layers, each with its own caches,
 so every layer reads a cold state as in decode. The conv state layout follows
-``VLLM_SSM_CONV_STATE_LAYOUT`` (default SD). Run the GLM-5.3-Flash shapes per rank
+`VLLM_SSM_CONV_STATE_LAYOUT` (default SD). Run the GLM-5.3-Flash shapes per rank
 with:
 
     python benchmarks/kernels/benchmark_kda_recoverssm.py --model glm5next

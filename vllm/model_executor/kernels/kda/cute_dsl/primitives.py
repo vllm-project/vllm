@@ -13,7 +13,7 @@ from cutlass.cutlass_dsl import T, dsl_user_op
 
 
 def ptx(assembly, constraints, operands=(), result=None, *, effects, loc=None, ip=None):
-    """One verbatim asm block; a tuple ``result`` (even a 1-tuple) returns a tuple."""
+    """One verbatim asm block; a tuple `result` (even a 1-tuple) returns a tuple."""
     if isinstance(result, tuple) and len(result) == 1:
         args = (assembly, constraints, operands, result[0])
         return (ptx(*args, effects=effects, loc=loc, ip=ip),)
@@ -45,7 +45,7 @@ def ptx(assembly, constraints, operands=(), result=None, *, effects, loc=None, i
 
 
 def asm(result=None, *, pure=False):
-    """``f(*args) -> (code, constraints, operands[, result, pure])`` as one inline-PTX
+    """`f(*args) -> (code, constraints, operands[, result, pure])` as one inline-PTX
     op. Pointer operands pass their address: 32-bit for "r" (shared), 64-bit for "l"."""
 
     def wrap(fn):
@@ -84,7 +84,7 @@ def bits_float(bits):
 
 
 def bf16(word, high=False):
-    """FP32 of the low (or high) BF16 half of ``word``."""
+    """FP32 of the low (or high) BF16 half of `word`."""
     return bits_float(word & 0xFFFF0000 if high else word << 16)
 
 
@@ -113,14 +113,14 @@ def mma(a, b, accumulator, *, fp8=False, bf16=False):
 
 
 def mma_into(acc, a, b, **kwargs):
-    """``acc += a @ b`` with one ``mma``; ``acc`` is a four-element register view."""
+    """`acc += a @ b` with one `mma`; `acc` is a four-element register view."""
     result = mma(a, b, tuple(acc[k] for k in range(4)), **kwargs)
     for k in range(4):
         acc[k] = result[k]
 
 
 def at(tensor, *coord):
-    """Pointer to ``tensor[coord]``."""
+    """Pointer to `tensor[coord]`."""
     return tensor.iterator + cute.crd2idx(coord, tensor.layout)
 
 
@@ -131,7 +131,7 @@ def zeros(shape, dtype):
 
 
 def alloc(allocator, dtype, shape, align=16):
-    """Row-major ``shape`` tensor from a ``SmemAllocator``."""
+    """Row-major `shape` tensor from a `SmemAllocator`."""
     stride = None
     if isinstance(shape, tuple):
         stride = tuple(math.prod(shape[i + 1 :]) for i in range(len(shape)))
@@ -153,9 +153,9 @@ def load_words(
     word_type="b32",
     result_type=Uint32,
 ):
-    """``count`` words (a tuple); ``scope`` is a relaxed load at that scope.
-    ``mutable`` (a side-effecting load) for data written during the step (activations,
-    tables, refills). Only static weights use ``evict_first``."""
+    """`count` words (a tuple); `scope` is a relaxed load at that scope.
+    `mutable` (a side-effecting load) for data written during the step (activations,
+    tables, refills). Only static weights use `evict_first`."""
     space = "global" + (f".{cache_policy}" if cache_policy else "")
     if shared:
         space = "shared"
@@ -184,7 +184,7 @@ load_f32x4 = partial(load_words, count=4, result_type=Float32, word_type="f32")
 
 @asm()
 def store_f32x4(pointer, values, when=None):
-    """``when``: a predicate, so callers need no branch."""
+    """`when`: a predicate, so callers need no branch."""
     code = "st.global.v4.f32 [$0], {$1, $2, $3, $4};"
     if when is None:
         return code, "l,f,f,f,f", (pointer, *values)
@@ -194,8 +194,8 @@ def store_f32x4(pointer, values, when=None):
 
 @asm()
 def push_float(pointer, value, barrier, peer, when=None):
-    """DSMEM store of one FP32 ``value`` (or a 4-tuple) completing on ``barrier``
-    (``when``: predicated on it)."""
+    """DSMEM store of one FP32 `value` (or a 4-tuple) completing on `barrier`
+    (`when`: predicated on it)."""
     values = tuple(map(Float32, value if isinstance(value, tuple) else (value,)))
     vector, registers = _vector(len(values), 1)
     b, p, w = (f"${len(values) + i}" for i in (1, 2, 3))
@@ -214,7 +214,7 @@ def push_float(pointer, value, barrier, peer, when=None):
 
 @asm()
 def copy_g2s(dst, src, size=16, barrier=None, *, evict_first=False):
-    """16-byte cp.async, or a static/dynamic ``size`` bulk copy on ``barrier``."""
+    """16-byte cp.async, or a static/dynamic `size` bulk copy on `barrier`."""
     operands = [dst, src]
     policy = hint = tail = ""
     if evict_first:
@@ -243,8 +243,8 @@ def prefetch_bytes(src, size):
 
 @asm(Int32)
 def try_wait(barrier, phase=0, *, test=False, scope="cluster"):
-    """Acquire parity probe at ``scope`` ("cluster", or "cta" when every arrival is
-    CTA-local); ``test`` is the non-blocking probe of phase 0."""
+    """Acquire parity probe at `scope` ("cluster", or "cta" when every arrival is
+    CTA-local); `test` is the non-blocking probe of phase 0."""
     op, parity = ("test_wait", "0") if test else ("try_wait", "$2")
     code = f"{{ .reg .pred p; mbarrier.{op}.parity.acquire.{scope}.shared::cta.b64 "
     code += f"p,[$1],{parity}; selp.u32 $0,1,0,p; }}"
@@ -272,7 +272,7 @@ def launch(kernel, args, grid, block, cluster=None, pdl=True, **options):
 
 @cute.jit
 def scatter_reduce(values, lane, count: cutlass.Constexpr[int]):
-    """Warp-reduce ``count`` values; lane groups end up owning one value each."""
+    """Warp-reduce `count` values; lane groups end up owning one value each."""
     selected = Int32(0)
     for stage in cutlass.range_constexpr(5):
         offset = 16 >> stage

@@ -5,17 +5,17 @@
 The RecoverSSM verify of a speculative step reads each request's checkpoint
 without writing it, and the commit after sampling reads it again to fold the
 accepted tokens in: two reads and one write of the state per step. Deferred, the
-commit only records each request's accepted count (``pending``, per request
+commit only records each request's accepted count (`pending`, per request
 slot, whose verify records stay in the same slot); the next verify replays those
 tokens into the checkpoint from the records, writes it back and verifies the new
 window from it: one read and one write of the state per step.
 
 One kernel runs a layer's verify step: the short convolution, the q / k
 normalization, the F_B gate projection and decays, the replay, the chunked verify
-and the gated RMSNorm (``cute_dsl/fused_tc.py``: persistent, the dot products and
+and the gated RMSNorm (`cute_dsl/fused_tc.py`: persistent, the dot products and
 the gate on the tensor cores; where it does not fit shared memory,
-``cute_dsl/fused_ws.py``, persistent and warp specialized, for large steps, else
-``cute_dsl/fused.py``, one item per CTA or cluster). ``fused_ws`` and ``fused`` are
+`cute_dsl/fused_ws.py`, persistent and warp specialized, for large steps, else
+`cute_dsl/fused.py`, one item per CTA or cluster). `fused_ws` and `fused` are
 copied from the Kimi-K3 specialized decode.
 """
 
@@ -52,9 +52,9 @@ def decode_conv_weight(weight: torch.Tensor) -> torch.Tensor:
 
 
 def tensor_cores_fit(heads, tokens, conv_dim_first, conv_size, max_requests, device):
-    """Whether KdaFusedTC runs a layer of ``heads`` x 128 at q ``tokens`` (conv
-    window q + 2 of ``conv_size``-byte elements) for steps of up to
-    ``max_requests`` requests: its operands fit shared memory."""
+    """Whether KdaFusedTC runs a layer of `heads` x 128 at q `tokens` (conv
+    window q + 2 of `conv_size`-byte elements) for steps of up to
+    `max_requests` requests: its operands fit shared memory."""
     sms = torch.cuda.get_device_properties(device).multi_processor_count
     items = fused_tc.cta_items(heads, max_requests, sms)
     smem = fused_tc.shared_bytes(
@@ -65,7 +65,7 @@ def tensor_cores_fit(heads, tokens, conv_dim_first, conv_size, max_requests, dev
 
 def _kernel(heads, max_requests, requests, tokens, conv_state, qkv):
     """KdaFusedTC where its operands stream in (16-byte aligned rows, a conv window
-    of at least q + 2) and fit shared memory at ``max_requests`` requests (any
+    of at least q + 2) and fit shared memory at `max_requests` requests (any
     batch up to that), else KdaFusedWS from WS_MIN_ITEMS items, else KdaFused."""
     items = heads * requests
     shape, stride = conv_state.shape, conv_state.stride()
@@ -101,7 +101,7 @@ _BATCH_OPERANDS = frozenset((0, 3, 4, 5, 8, 9, 10, 11, 14, 15, 16, 17, 18))
 
 class KdaDeferredVerify:
     """The deferred RecoverSSM verify of one KDA layer shape (heads, window) for
-    steps of up to ``max_requests`` requests. KdaFusedTC compiles once per operand
+    steps of up to `max_requests` requests. KdaFusedTC compiles once per operand
     layout with the batch read at run time; the fallbacks compile per batch."""
 
     def __init__(self, num_heads: int, window: int, max_requests: int) -> None:
@@ -133,17 +133,17 @@ class KdaDeferredVerify:
         pending: torch.Tensor,
         out: torch.Tensor,
     ) -> torch.Tensor:
-        """One verify step of ``B = state_indices.shape[0]`` requests of ``q``
-        tokens each. ``qkv`` [B q, 3 H K] is the projection before the conv,
-        ``gate`` [B q, H K] the output gate, ``f_a`` [B q, K], ``beta`` [B q, H]
-        (raw), ``conv_weight`` [3, width, H K] (``decode_conv_weight``),
-        ``conv_state`` [slots, 3 H K, window] (a transposed view for the
-        state-len-first layout), ``f_b_weight`` [H K, K], ``norm_weight`` [K]
-        FP32, ``state`` [slots, H, K, K] FP32 and ``state_indices`` [B, n]
-        (column 0: the checkpoint slot). ``correction`` / ``key_gate`` are the
-        verify records by record slot, ``record_rows`` [B] each request's record
-        slot and ``pending`` [record slots] the accepted tokens of its last
-        verify not yet in its checkpoint. Writes ``out`` [B q, H K], the replayed
+        """One verify step of `B = state_indices.shape[0]` requests of `q`
+        tokens each. `qkv` [B q, 3 H K] is the projection before the conv,
+        `gate` [B q, H K] the output gate, `f_a` [B q, K], `beta` [B q, H]
+        (raw), `conv_weight` [3, width, H K] (`decode_conv_weight`),
+        `conv_state` [slots, 3 H K, window] (a transposed view for the
+        state-len-first layout), `f_b_weight` [H K, K], `norm_weight` [K]
+        FP32, `state` [slots, H, K, K] FP32 and `state_indices` [B, n]
+        (column 0: the checkpoint slot). `correction` / `key_gate` are the
+        verify records by record slot, `record_rows` [B] each request's record
+        slot and `pending` [record slots] the accepted tokens of its last
+        verify not yet in its checkpoint. Writes `out` [B q, H K], the replayed
         checkpoints, the rolled conv window and the new records."""
         requests = state_indices.shape[0]
         operands = (
@@ -212,7 +212,7 @@ def record_pending(
     pending: torch.Tensor,
     null_block_id: int,
 ) -> None:
-    """The deferred commit of a prepared commit plan (``commit_lens``)."""
+    """The deferred commit of a prepared commit plan (`commit_lens`)."""
     _record_pending_kernel[(state_indices.shape[0],)](
         state_indices, commit_lens, record_rows, pending, null_block_id,
         state_indices.stride(0), num_warps=1,

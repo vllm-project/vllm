@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Persistent fused replay verify for large steps (KdaFusedTC): KdaFused's math
-(deferred RecoverSSM, see ``fused``) with the state dot products and the F_B gate
+(deferred RecoverSSM, see `fused`) with the state dot products and the F_B gate
 projection on the tensor cores, in head tiles.
 
 KdaFusedWS holds an item's state in the registers of an 8-warp scan group and forms
@@ -9,7 +9,7 @@ the 2q dot products with FP32 FMAs over shared-memory broadcasts, one item at a
 time, and its prep reloads the head's F_B rows and conv taps for every item: at
 large steps it runs at about 2.5x the state traffic. Here:
 
-- the CTAs walk **head tiles** (``TILE`` requests of one head, tiles strided over
+- the CTAs walk **head tiles** (`TILE` requests of one head, tiles strided over
   the CTAs), each CTA's item lookups (state slot, record slot, pending count)
   resolved once into shared memory; the loader warp brings each tile's F_B rows
   [128, 128] into one of two buffers by TMA, and the prep warpgroups (a tile's
@@ -103,7 +103,7 @@ def sw128(dtype, rows, cols):
 
 
 def pieces(count):
-    """Power-of-two piece sizes covering ``count`` values for scatter_reduce, with
+    """Power-of-two piece sizes covering `count` values for scatter_reduce, with
     the fewest shuffles (a piece of 2^k values takes 2^k + 4 - k)."""
     best: list[tuple[int, tuple[int, ...]]] = [(0, ())]
     for n in range(1, count + 1):
@@ -117,8 +117,8 @@ def pieces(count):
 
 @cute.jit
 def piece_sums(values, lane, warp, sums):
-    """Warp sums of ``values`` (each summed over the lanes in the same order as one
-    scatter_reduce) into ``sums[i, warp]``."""
+    """Warp sums of `values` (each summed over the lanes in the same order as one
+    scatter_reduce) into `sums[i, warp]`."""
     start = 0
     for size in pieces(len(values)):
         part = [values[start + i] if start + i < len(values) else Float32(0)
@@ -139,7 +139,7 @@ def float_bits(value):
 
 @cute.jit
 def residual(value):
-    """``value`` minus its TF32 truncation (how the tensor cores read FP32)."""
+    """`value` minus its TF32 truncation (how the tensor cores read FP32)."""
     return value - bits_float(float_bits(value) & Uint32(0xFFFFE000))
 
 
@@ -278,13 +278,13 @@ def staging_bytes(tokens, rq, conv_dim_first, window, conv_size):
 
 
 def cta_items(heads, requests, ctas):
-    """Items of the CTA with the most at ``requests`` requests."""
+    """Items of the CTA with the most at `requests` requests."""
     tiles = -(-requests // TILE) * heads
     return -(-tiles // ctas) * TILE
 
 
 def shared_bytes(tokens, rq, conv_dim_first, window, conv_size, items):
-    """With ``items`` per CTA (their lookup table)."""
+    """With `items` per CTA (their lookup table)."""
     staging = staging_bytes(tokens, rq, conv_dim_first, window, conv_size)
     sums = 2 * 64 * 4 * 4 + 2 * 32 * 4 * 4 + 8 * 4 * 4 + 2 * tokens * K * 2
     quarters_fb = 4 * QUARTER_BYTES + 2 * FB_BYTES
@@ -293,8 +293,8 @@ def shared_bytes(tokens, rq, conv_dim_first, window, conv_size, items):
 
 
 class KdaFusedTC(KdaFusedWS):
-    """KdaFused's operands and semantics on ``ctas`` persistent CTAs, for steps of
-    up to ``max_requests`` requests (the batch is read at run time)."""
+    """KdaFused's operands and semantics on `ctas` persistent CTAs, for steps of
+    up to `max_requests` requests (the batch is read at run time)."""
 
     def __init__(self, heads, tokens, gate_mode, has_bias, conv_dim_first, window,
                  ctas, max_requests):  # fmt: skip
@@ -360,7 +360,7 @@ class KdaFusedTC(KdaFusedWS):
     @cute.jit
     def tma_box(self, atom, tensor, buf, layout, tile: cutlass.Constexpr, coord,
                 barrier, store: cutlass.Constexpr):  # fmt: skip
-        """Warp-wide: one TMA box between ``buf`` and ``tensor`` tile ``coord``."""
+        """Warp-wide: one TMA box between `buf` and `tensor` tile `coord`."""
         s_buf = cute.make_tensor(buf.iterator, layout)
         g_buf = cute.local_tile(tensor, tile, coord)
         t_smem, t_gmem = cpasync.tma_partition(
@@ -385,7 +385,7 @@ class KdaFusedTC(KdaFusedWS):
 
     @cute.jit
     def load_quarter(self, args, tma, buf, page, quarter, barrier, lane):
-        """Warp-wide: key quarter ``quarter`` of a page (head, slot, live); none if
+        """Warp-wide: key quarter `quarter` of a page (head, slot, live); none if
         not live."""
         head, slot, live = page
         if lane == 0:
@@ -401,7 +401,7 @@ class KdaFusedTC(KdaFusedWS):
 
     @cute.jit
     def item_constants(self, args, c, j, coeff, conv_bias):
-        """Channel c's conv taps and bias (into ``coeff``, ``conv_bias``), dt_bias
+        """Channel c's conv taps and bias (into `coeff`, `conv_bias`), dt_bias
         and A_log of item j's head, and the raw beta of its token c % q (any item:
         a request past the batch reads the last one's)."""
         weights, bias, beta = args[1], args[2], args[5]

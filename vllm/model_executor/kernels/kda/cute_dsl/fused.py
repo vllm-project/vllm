@@ -5,16 +5,16 @@ verify of this step in one pass over the FP32 state, the verify in chunked form.
 
 Deferred RecoverSSM. After sampling, the runner no longer folds the accepted tokens
 into the checkpoint; it records per request (its request-state slot) how many of the
-last verify's tokens were accepted (``pending``). The verify records of a request
+last verify's tokens were accepted (`pending`). The verify records of a request
 stay in its request-indexed record slot. The next verify of that request, per
 (request, head):
 
-1. reads the checkpoint S_0 and replays the ``n = pending`` accepted tokens of the
+1. reads the checkpoint S_0 and replays the `n = pending` accepted tokens of the
    previous step from its records in the commit's closed form,
 
        S_n = S_0 * D_n + sum_{t<n} u_t (kn_t * P_t),  P_t = prod_{t<s<n} d_s,
 
-   (``u_t`` the recorded corrections, ``kn_t`` the normalized recorded keys, ``d_t``
+   (`u_t` the recorded corrections, `kn_t` the normalized recorded keys, `d_t`
    the recorded gates' decays, D_n = prod_{s<n} d_s), and writes S_n back as the
    new checkpoint (nothing to write for n = 0); the convolution window is read at
    the offset n - 1 the commit's compaction would have rolled it by;
@@ -41,7 +41,7 @@ Precision: FP32 state and math; BF16 roundings at the stock points (convolution 
 SiLU outputs, raw gates, recurrence outputs, conv window); only the FP32 rounding of
 the recurrence differs from stock (chunked form, as the user allowed).
 
-Layout: a cluster of ``split`` CTAs per (request, head) splits the state rows (the
+Layout: a cluster of `split` CTAs per (request, head) splits the state rows (the
 rows of the chunked form are independent): each CTA streams its 128 / split rows and
 recomputes the shared per-item operands (convolution, norms, gate projection, pair
 products); the RMSNorm's sum of squares is exchanged over DSMEM. split = 1 is one
@@ -97,10 +97,10 @@ def b_index(tokens, t, s):
 
 
 class KdaFused:
-    """``tokens`` q, ``gate_mode`` the F_B chain order (KdaWide's), ``split`` CTAs
+    """`tokens` q, `gate_mode` the F_B chain order (KdaWide's), `split` CTAs
     per (request, head). Operands: PreparedKda's RecoverSSM verify operands, then
-    ``record_rows`` [B] (each request's record / pending slot; < 0: none) and
-    ``pending`` [slots] (accepted tokens of the last verify not yet in the
+    `record_rows` [B] (each request's record / pending slot; < 0: none) and
+    `pending` [slots] (accepted tokens of the last verify not yet in the
     checkpoint)."""
 
     def __init__(self, heads, tokens, gate_mode, has_bias, split):

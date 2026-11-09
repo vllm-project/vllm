@@ -2,13 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Persistent warp-specialized fused replay verify (KdaFusedWS): KdaFused's math
 (deferred RecoverSSM: the replay of the pending accepted tokens, the checkpoint
-write and the chunked verify, see ``fused``) on KdaWS's schedule.
+write and the chunked verify, see `fused`) on KdaWS's schedule.
 
-One CTA per SM walks every ``ctas``-th (request, head) item (strided, see kernel):
+One CTA per SM walks every `ctas`-th (request, head) item (strided, see kernel):
 
 - two **prep warpgroups** (thread c = channel c; warpgroup w takes items w, w + 2,
   ...) stream each item in (projection rows and conv window by cp.async, the
-  item's old records into their staging, with ``stage_fb`` also the F_B rows of
+  item's old records into their staging, with `stage_fb` also the F_B rows of
   the second gate pass), run the convolution, SiLU, norms, F_B gate projection and
   decays, and fill one of four operand blocks: the chunk
   vectors Gamma_t k_t and Gamma_t q_t, the replay keys kn_t P_t and D_n, the old
@@ -109,7 +109,7 @@ def shared_bytes(tokens, rq, conv_dim_first, window, conv_size, stage_fb=False):
 
 
 class KdaFusedWS:
-    """KdaFused's operands and semantics on ``ctas`` persistent CTAs."""
+    """KdaFused's operands and semantics on `ctas` persistent CTAs."""
 
     strided = True  # item order (see kernel)
     registers = (SCAN_REGISTERS, PREP_REGISTERS)
@@ -211,8 +211,8 @@ class KdaFusedWS:
 
     @cute.jit
     def stage_f_b(self, args, fbm, p, head):
-        """cp.async the F_B rows of ``head``'s second gate pass: rows 32 w + 16 + i
-        of prep warp w (i < 16) into row 16 w + i of ``fbm``."""
+        """cp.async the F_B rows of `head`'s second gate pass: rows 32 w + 16 + i
+        of prep warp w (i < 16) into row 16 w + i of `fbm`."""
         f_b = args[16]
         granules: cutlass.Constexpr = K // 8  # per row
         for i in cutlass.range_constexpr(FB_ROWS * granules // PREP_THREADS):
@@ -251,7 +251,7 @@ class KdaFusedWS:
 
     @cute.jit
     def decay(self, a, raw_g, dt, lower_bound):
-        """``a`` = exp(A_log)."""
+        """`a` = exp(A_log)."""
         gate = lower_bound * triton_sigmoid(a * (raw_g + dt))
         return triton_exp(gate)
 
