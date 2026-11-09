@@ -25,6 +25,7 @@ The class provides the following primitives:
 
 import enum
 from abc import ABC, abstractmethod
+from collections.abc import Collection
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -242,6 +243,21 @@ class ECConnectorBase(ABC):
     def on_new_request(self, request: "Request") -> None:
         """Optionally start nonblocking prefetch after a request is enqueued."""
         return
+
+    def on_new_request_with_cache(
+        self, request: "Request", local_cache_hashes: Collection[str]
+    ) -> None:
+        """Notify arrival with read-only hints; preserve existing callbacks."""
+        self.on_new_request(request)
+
+    def ensure_cache_available_with_cache(
+        self,
+        request: "Request",
+        num_computed_tokens: int,
+        local_cache_hashes: Collection[str],
+    ) -> bool:
+        """Preserve admission for connectors that do not use GPU cache hints."""
+        return self.ensure_cache_available(request, num_computed_tokens)
 
     @abstractmethod
     def has_cache_item(

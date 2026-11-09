@@ -92,8 +92,6 @@ class _FakeExecutor:
         error: str | None = None,
         queue_time: float = 0.0,
         transfer_time: float = 0.0,
-        submit_time: float | None = None,
-        io_end_time: float | None = None,
     ) -> None:
         submission = self.submissions[job_id]
         self.completions.append(
@@ -106,8 +104,6 @@ class _FakeExecutor:
                 queue_time=queue_time,
                 transfer_time=transfer_time,
                 error=error,
-                submit_time=submit_time,
-                io_end_time=io_end_time,
             )
         )
 
@@ -527,23 +523,3 @@ def test_manager_shutdown_drains_completions_and_rejects_submission(
     assert not manager.submit_write(_CACHE_KEY, [memoryview(b"data")], 4)
     assert not manager.submit_read(_CACHE_KEY, [memoryview(bytearray(4))])
     manager.shutdown()
-
-
-def test_read_result_preserves_executor_timestamps(tmp_path):
-    executor = _FakeExecutor()
-    manager = ECFileSystemTierManager(
-        root_dir=tmp_path,
-        namespace_digest=_NAMESPACE_DIGEST,
-        capacity_bytes=_CAPACITY_BYTES,
-        n_read_threads=1,
-        n_write_threads=1,
-        executor=executor,
-    )
-    assert manager.submit_write(_CACHE_KEY, [memoryview(b"data")], 4)
-    executor.finish(0, success=True)
-    manager.poll_completed_writes()
-    assert manager.submit_read(_CACHE_KEY, [memoryview(bytearray(4))])
-    executor.finish(1, success=True, submit_time=1.0, io_end_time=2.0)
-    (completion,) = manager.poll_completed_reads()
-    assert completion.submit_time == 1.0
-    assert completion.io_end_time == 2.0

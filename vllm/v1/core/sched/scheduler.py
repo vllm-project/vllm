@@ -846,9 +846,10 @@ class Scheduler(SchedulerInterface):
             if (
                 self.ec_connector is not None
                 and request.mm_features
-                and not self.ec_connector.ensure_cache_available(
+                and not self.ec_connector.ensure_cache_available_with_cache(
                     request,
                     request.num_computed_tokens - request.num_output_placeholders,
+                    self.encoder_cache_manager.get_cached_mm_hashes(request),
                 )
             ):
                 req_index += 1
@@ -2766,8 +2767,10 @@ class Scheduler(SchedulerInterface):
         return (
             self.ec_connector is not None
             and bool(request.mm_features)
-            and not self.ec_connector.ensure_cache_available(
-                request, num_computed_tokens
+            and not self.ec_connector.ensure_cache_available_with_cache(
+                request,
+                num_computed_tokens,
+                self.encoder_cache_manager.get_cached_mm_hashes(request),
             )
         )
 
@@ -3119,7 +3122,9 @@ class Scheduler(SchedulerInterface):
                 request.record_event(EngineCoreEventType.QUEUED)
 
             if self.ec_connector is not None:
-                self.ec_connector.on_new_request(request)
+                self.ec_connector.on_new_request_with_cache(
+                    request, self.encoder_cache_manager.get_cached_mm_hashes(request)
+                )
 
     def finish_requests(
         self, request_ids: str | Iterable[str] | None, finished_status: RequestStatus

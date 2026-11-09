@@ -10,7 +10,6 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from stat import S_ISREG
-from time import monotonic
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 from uuid import uuid4
 
@@ -33,9 +32,6 @@ if TYPE_CHECKING:
     from vllm.distributed.ec_transfer.ec_connector.tiering.executor import (
         ECFileIOCompletion,
         ECFileIOStats,
-    )
-    from vllm.distributed.ec_transfer.ec_connector.tiering.metrics import (
-        ECTieringStats,
     )
 
 logger = init_logger(__name__)
@@ -60,8 +56,6 @@ class ECReadResult:
     queue_time: float = 0.0
     transfer_time: float = 0.0
     error: str | None = None
-    submit_time: float | None = None
-    io_end_time: float | None = None
 
 
 @dataclass(frozen=True)
@@ -132,7 +126,6 @@ class ECFileSystemTierManager:
         fsync: bool = False,
         backpressure: ECFileSystemBackpressureConfig | None = None,
         executor: _ECFileIOExecutor | None = None,
-        stats: ECTieringStats | None = None,
     ) -> None:
         if capacity_bytes <= 0:
             raise ValueError("filesystem capacity_bytes must be positive")
@@ -149,7 +142,6 @@ class ECFileSystemTierManager:
         self._used_bytes = 0
         self._fsync = fsync
         self._executor = executor
-        self._stats = stats
         self._backpressure_detector: BackpressureDetector | None = None
         if backpressure is not None and backpressure.enabled:
             self._backpressure_detector = EMABackpressureDetector(
@@ -168,16 +160,7 @@ class ECFileSystemTierManager:
         self._read_pins: Counter[str] = Counter()
         self._completed_reads: deque[ECReadResult] = deque()
         self._completed_writes: deque[ECWriteResult] = deque()
-        recovery_started = monotonic()
         self._recover_index()
-        self._recovery_seconds = monotonic() - recovery_started
-        self._recovered_entries = len(self._entries)
-        self._recovered_bytes = self._used_bytes
-        if self._stats is not None:
-            self._stats.increment("fs_recoveries")
-            self._stats.set_gauge("fs_recovery_seconds", self._recovery_seconds)
-            self._stats.set_gauge("fs_recovered_entries", self._recovered_entries)
-            self._stats.set_gauge("fs_recovered_bytes", self._recovered_bytes)
         self._evict_to_capacity()
 
     @property
@@ -193,15 +176,6 @@ class ECFileSystemTierManager:
     def io_stats(self) -> ECFileIOStats:
         """Return the executor's current non-blocking pressure snapshot."""
         return self._executor.stats()
-
-    @property
-    def recovery_stats(self) -> tuple[float, int, int]:
-        """Return startup index recovery time, entries, and bytes."""
-        return (
-            self._recovery_seconds,
-            self._recovered_entries,
-            self._recovered_bytes,
-        )
 
     def contains(self, cache_key: str) -> bool:
         """Return an in-memory membership decision without filesystem I/O."""
@@ -341,8 +315,6 @@ class ECFileSystemTierManager:
                 queue_time=completion.queue_time,
                 transfer_time=completion.transfer_time,
                 error=completion.error,
-                submit_time=completion.submit_time,
-                io_end_time=completion.io_end_time,
             )
         )
         self._evict_to_capacity()
@@ -454,8 +426,6 @@ class ECFileSystemTierManager:
                 return
             self._pending_deletes[job_id] = indexed_entry
             self._deleting_keys.add(cache_key)
-            if self._stats is not None:
-                self._stats.increment("fs_evictions")
 
 
 @runtime_checkable

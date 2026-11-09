@@ -146,6 +146,17 @@ class EncoderCacheManager:
         mm_hash = request.mm_features[input_id].identifier
         return self.num_embeds_by_hash.get(mm_hash)
 
+    def get_cached_mm_hashes(self, request: Request) -> frozenset[str]:
+        """Snapshot compatible resident entries without acquiring references."""
+        if not self.cached:
+            return frozenset()
+        return frozenset(
+            feature.identifier
+            for i, feature in enumerate(request.mm_features)
+            if self.get_cached_num_encoder_embeds(request, i)
+            == request.get_num_encoder_embeds(i)
+        )
+
     def can_allocate(
         self,
         request: Request,

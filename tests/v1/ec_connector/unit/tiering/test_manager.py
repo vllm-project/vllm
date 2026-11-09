@@ -302,8 +302,6 @@ def test_scheduler_admission_publishes_completion_and_preserves_h2d_pin(
     primary, secondary, manager = _bounded_promotion_manager()
     scheduler = object.__new__(module.ECTieringScheduler)
     scheduler._tiering_manager = manager
-    scheduler._fs_wait_started = {}
-    scheduler._stats = module.ECTieringStats()
     scheduler._primary = primary
     scheduler._region = primary._region
     scheduler._cache = primary._cache
@@ -325,8 +323,6 @@ def test_scheduler_admission_publishes_completion_and_preserves_h2d_pin(
     )
     request = SimpleNamespace(request_id="r1", mm_features=[feature])
 
-    now = [100.0]
-    monkeypatch.setattr(module, "monotonic", lambda: now[0])
     if arrival_prefetch:
         scheduler.on_new_request(request)
         assert len(secondary.read_submissions) == 1
@@ -334,10 +330,7 @@ def test_scheduler_admission_publishes_completion_and_preserves_h2d_pin(
     assert not scheduler.ensure_cache_available(request, 0)
     assert len(secondary.read_submissions) == 1
     _complete_promotion(secondary)
-    now[0] = 105.0
     assert scheduler.ensure_cache_available(request, 0)
-    assert scheduler._fs_wait_started == {}
-    assert scheduler._stats.data["histograms"]["fs_request_wait_seconds"] == [5.0]
     assert primary.get("loaded").ready
     scheduler.update_state_after_alloc(request, 0)
     assert "loaded" in scheduler._pending_loads
@@ -458,48 +451,147 @@ def test_shutdown_drains_prefetch_and_releases_ready_reservations():
     assert primary.alloc("other", 2) is not None
 
 
-def test_promotion_measures_publication_delay_and_counts_shared_prefetch(monkeypatch):
-    from vllm.distributed.ec_transfer.ec_connector.tiering import manager as module
-    from vllm.distributed.ec_transfer.ec_connector.tiering.metrics import ECTieringStats
+@pytest.fixture
+def indexed_scheduler(tmp_path):
+    """Real mmap, index, executor and scheduler; only reuse the config builder."""
+    from tests.v1.ec_connector.unit.utils import create_ec_vllm_config
+    from vllm.distributed.ec_transfer.ec_connector.tiering.io import store_entry
+    from vllm.distributed.ec_transfer.ec_connector.tiering.layout import (
+        get_ec_entry_path,
+        get_ec_temporary_path,
+    )
+    from vllm.distributed.ec_transfer.ec_connector.tiering.scheduler import (
+        ECTieringScheduler,
+    )
 
-    primary = _FakePrimary()
-    secondary = _FakeSecondary()
-    stats = ECTieringStats()
-    manager = ECTieringManager(primary, secondary, _NAMESPACE_DIGEST, stats)
-    key = build_ec_cache_key(_NAMESPACE_DIGEST, "loaded", "image", 2, 8)
-    secondary.entries.add(key)
-    for request_id in ("r1", "r1", "r2"):
-        manager.prefetch_entry(request_id, "loaded", "image", 2, (2, 1), 4)
-    assert stats.data["counters"]["fs_prefetch_reads"] == 1
-    secondary.read_completions.append(
-        ECReadResult(
-            cache_key=key,
-            success=True,
-            file_size_bytes=8,
-            submit_time=1.0,
-            io_end_time=3.0,
+    config = create_ec_vllm_config()
+    config.model_config.model = "test-encoder"
+    config.model_config.revision = None
+    config.ec_transfer_config.ec_connector_extra_config = {
+        "ec_cpu_bytes": 1 << 20,
+        "secondary_tiers": [
+            {
+                "type": "fs",
+                "root_dir": str(tmp_path),
+                "capacity_bytes": 1 << 20,
+                "n_read_threads": 1,
+                "n_write_threads": 1,
+            }
+        ],
+    }
+    digest = ECTieringScheduler._build_namespace(config).digest()
+    for identifier in ("A", "B"):
+        key = build_ec_cache_key(digest, identifier, "image", 2, 128)
+        path = get_ec_entry_path(tmp_path, digest, key)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        store_entry(
+            path, get_ec_temporary_path(path, "seed"), [memoryview(bytes(128))], 128
         )
+    scheduler = ECTieringScheduler(config)
+    try:
+        yield scheduler
+    finally:
+        scheduler.shutdown()
+
+
+def image_request(*identifiers):
+    from vllm.multimodal.inputs import MultiModalFeatureSpec, PlaceholderRange
+    from vllm.sampling_params import SamplingParams
+    from vllm.v1.request import Request
+
+    return Request(
+        request_id="gpu-hint",
+        prompt_token_ids=[0] * (2 * len(identifiers)),
+        sampling_params=SamplingParams(max_tokens=1),
+        pooling_params=None,
+        mm_features=[
+            MultiModalFeatureSpec(
+                data=None,
+                modality="image",
+                identifier=identifier,
+                mm_position=PlaceholderRange(offset=2 * i, length=2),
+            )
+            for i, identifier in enumerate(identifiers)
+        ],
     )
-    monkeypatch.setattr(module, "monotonic", lambda: 5.0)
-    manager.poll()
-    assert primary.get("loaded").ready
-    assert stats.data["histograms"]["fs_read_publish_seconds"] == [4.0]
-    assert stats.data["histograms"]["fs_read_completion_delay_seconds"] == [2.0]
-    manager.poll()
-    assert stats.data["histograms"]["fs_read_completion_delay_seconds"] == [2.0]
 
 
-def test_failed_cpu_allocation_is_counted_without_submitting_a_read():
-    from vllm.distributed.ec_transfer.ec_connector.tiering.metrics import ECTieringStats
+def test_gpu_hit_skips_filesystem_and_eviction_reenables_demand(indexed_scheduler):
+    scheduler = indexed_scheduler
+    request = image_request("A")
+    assert scheduler.ensure_cache_available(request, 0, {"A"})
+    scheduler.on_new_request(request, local_cache_hashes={"A"})
+    assert not scheduler._tiering_manager._pending_reads
+    # A later, fresh snapshot must allow a demand load after GPU eviction.
+    assert not scheduler.ensure_cache_available(request, 0, set())
+    assert len(scheduler._tiering_manager._pending_reads) == 1
 
-    primary = _FakePrimary()
-    primary.alloc_enabled = False
-    secondary = _FakeSecondary()
-    stats = ECTieringStats()
-    manager = ECTieringManager(primary, secondary, _NAMESPACE_DIGEST, stats)
-    secondary.entries.add(
-        build_ec_cache_key(_NAMESPACE_DIGEST, "loaded", "image", 2, 8)
+
+def test_mixed_images_prefetch_only_gpu_miss_and_gpu_hit_bypasses_pending_read(
+    indexed_scheduler,
+):
+    scheduler = indexed_scheduler
+    request = image_request("A", "B")
+    scheduler.on_new_request(request, local_cache_hashes={"A"})
+    assert len(scheduler._tiering_manager._pending_reads) == 1
+    # A concurrent request may have populated B on GPU while its prefetch runs.
+    assert scheduler.ensure_cache_available(request, 0, {"A", "B"})
+    assert scheduler._primary.get("A") is None
+
+
+def test_gpu_cache_snapshot_is_read_only_and_expires_after_eviction():
+    from vllm.v1.core.encoder_cache_manager import EncoderCacheManager
+
+    cache = EncoderCacheManager(cache_size=2)
+    resident = image_request("A")
+    assert cache.can_allocate(resident, 0, 2, 0)
+    cache.allocate(resident, 0)
+    cache.free(resident)
+    references = {key: set(refs) for key, refs in cache.cached.items()}
+    reclaimable = cache.num_freeable_slots
+    incoming = image_request("A", "B")
+    assert cache.get_cached_mm_hashes(incoming) == frozenset({"A"})
+    assert cache.cached == references
+    assert cache.num_freeable_slots == reclaimable
+    other = image_request("B")
+    assert cache.can_allocate(other, 0, 2, 0)
+    cache.allocate(other, 0)
+    assert cache.get_cached_mm_hashes(incoming) == frozenset({"B"})
+
+
+def test_gpu_snapshot_does_not_hide_incompatible_embedding_count():
+    from vllm.multimodal.inputs import MultiModalFeatureSpec, PlaceholderRange
+    from vllm.sampling_params import SamplingParams
+    from vllm.v1.core.encoder_cache_manager import EncoderCacheManager
+    from vllm.v1.request import Request
+
+    cache = EncoderCacheManager(cache_size=4)
+    resident = image_request("A")
+    cache.allocate(resident, 0)
+    incompatible = Request(
+        request_id="different-shape",
+        prompt_token_ids=[0] * 3,
+        sampling_params=SamplingParams(max_tokens=1),
+        pooling_params=None,
+        mm_features=[
+            MultiModalFeatureSpec(
+                data=None,
+                modality="image",
+                identifier="A",
+                mm_position=PlaceholderRange(offset=0, length=3),
+            )
+        ],
     )
-    assert not manager.ensure_primary_entry("loaded", "image", 2, (2, 1), 4)
-    assert stats.data["counters"]["fs_cpu_alloc_failures"] == 1
-    assert secondary.read_submissions == []
+    assert cache.get_cached_mm_hashes(incompatible) == frozenset()
+
+
+def test_cpu_ready_gpu_miss_loads_without_filesystem_read(indexed_scheduler):
+    scheduler = indexed_scheduler
+    request = image_request("A")
+    scheduler._primary.alloc("A", 2, (2, 32))
+    scheduler._primary.mark_ready("A")
+    scheduler.on_new_request(request, local_cache_hashes=set())
+    assert scheduler.ensure_cache_available(request, 0, set())
+    assert not scheduler._tiering_manager._pending_reads
+    scheduler.update_state_after_alloc(request, 0)
+    assert "A" in scheduler._pending_loads

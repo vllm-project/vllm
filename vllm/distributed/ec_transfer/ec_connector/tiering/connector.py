@@ -5,7 +5,8 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from collections.abc import Collection
+from typing import TYPE_CHECKING
 
 from vllm.distributed.ec_transfer.ec_connector.cpu.connector import (
     ECCPUConnector,
@@ -13,12 +14,6 @@ from vllm.distributed.ec_transfer.ec_connector.cpu.connector import (
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
-    from vllm.distributed.ec_transfer.ec_connector.metrics import (
-        ECConnectorPromMetrics,
-        ECConnectorStats,
-        PromMetric,
-        PromMetricT,
-    )
     from vllm.v1.request import Request
 
 
@@ -31,49 +26,37 @@ class ECTieringConnector(ECCPUConnector):
         if callback is not None:
             callback(request)
 
+    def on_new_request_with_cache(
+        self, request: Request, local_cache_hashes: Collection[str]
+    ) -> None:
+        from vllm.distributed.ec_transfer.ec_connector.tiering.scheduler import (
+            ECTieringScheduler,
+        )
+
+        if isinstance(self.connector_scheduler, ECTieringScheduler):
+            self.connector_scheduler.on_new_request(request, local_cache_hashes)
+        else:
+            self.on_new_request(request)
+
+    def ensure_cache_available_with_cache(
+        self,
+        request: Request,
+        num_computed_tokens: int,
+        local_cache_hashes: Collection[str],
+    ) -> bool:
+        from vllm.distributed.ec_transfer.ec_connector.tiering.scheduler import (
+            ECTieringScheduler,
+        )
+
+        if isinstance(self.connector_scheduler, ECTieringScheduler):
+            return self.connector_scheduler.ensure_cache_available(
+                request, num_computed_tokens, local_cache_hashes
+            )
+        return self.ensure_cache_available(request, num_computed_tokens)
+
     def _make_scheduler(self, vllm_config: VllmConfig):
         from vllm.distributed.ec_transfer.ec_connector.tiering.scheduler import (
             ECTieringScheduler,
         )
 
         return ECTieringScheduler(vllm_config)
-
-    def _make_worker(self, vllm_config: VllmConfig):
-        from vllm.distributed.ec_transfer.ec_connector.tiering.worker import (
-            ECTieringWorker,
-        )
-
-        return ECTieringWorker(vllm_config)
-
-    def get_ec_connector_stats(self) -> ECConnectorStats | None:
-        if self.connector_scheduler is not None:
-            return self.connector_scheduler.get_stats()
-        if self.connector_worker is not None:
-            return self.connector_worker.get_stats()
-        return None
-
-    @classmethod
-    def build_ec_connector_stats(
-        cls, data: dict[str, Any] | None = None
-    ) -> ECConnectorStats:
-        from vllm.distributed.ec_transfer.ec_connector.tiering.metrics import (
-            ECTieringStats,
-        )
-
-        return ECTieringStats(data=data) if data is not None else ECTieringStats()
-
-    @classmethod
-    def build_prom_metrics(
-        cls,
-        vllm_config: VllmConfig,
-        metric_types: dict[type[PromMetric], type[PromMetricT]],
-        labelnames: list[str],
-        per_engine_labelvalues: dict[int, list[object]],
-    ) -> ECConnectorPromMetrics:
-        from vllm.distributed.ec_transfer.ec_connector.tiering.metrics import (
-            ECTieringPromMetrics,
-        )
-
-        return ECTieringPromMetrics(
-            vllm_config, metric_types, labelnames, per_engine_labelvalues
-        )

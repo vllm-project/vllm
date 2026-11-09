@@ -7,7 +7,6 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from time import monotonic
 from typing import Protocol
 
 from vllm.distributed.ec_transfer.ec_connector.tiering.filesystem import (
@@ -17,7 +16,6 @@ from vllm.distributed.ec_transfer.ec_connector.tiering.filesystem import (
 from vllm.distributed.ec_transfer.ec_connector.tiering.layout import (
     build_ec_cache_key,
 )
-from vllm.distributed.ec_transfer.ec_connector.tiering.metrics import ECTieringStats
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -88,12 +86,10 @@ class ECTieringManager:
         primary: _PrimaryTier,
         secondary: _SecondaryTier,
         namespace_digest: str,
-        stats: ECTieringStats | None = None,
     ) -> None:
         self._primary = primary
         self._secondary = secondary
         self._namespace_digest = namespace_digest
-        self._stats = stats
         self._descriptors: dict[str, _StoreDescriptor] = {}
         self._pending_writes: dict[str, str] = {}
         self._pending_reads: dict[str, str] = {}
@@ -101,7 +97,6 @@ class ECTieringManager:
         self._prefetch_requests: dict[str, set[str]] = {}
         self._prefetch_waiters: dict[str, set[str]] = {}
         self._prefetch_holds: set[str] = set()
-        self._prefetch_ready_times: dict[str, float] = {}
 
     def prefetch_entry(
         self,
@@ -126,8 +121,6 @@ class ECTieringManager:
                 element_size,
                 reclaim_prefetch=False,
             )
-            if self._stats is not None and identifier in self._pending_read_identifiers:
-                self._stats.increment("fs_prefetch_reads")
         if (
             identifier in self._pending_read_identifiers
             or identifier in self._prefetch_holds
@@ -151,16 +144,9 @@ class ECTieringManager:
                 del self._prefetch_waiters[key]
                 if key in self._prefetch_holds:
                     self._prefetch_holds.remove(key)
-                    self._prefetch_ready_times.pop(key, None)
                     self._primary.unpin(key)
         if not identifiers:
             del self._prefetch_requests[request_id]
-
-    def on_primary_load(self, identifier: str) -> None:
-        """Measure the first load dispatch of a retained prefetched entry."""
-        ready = self._prefetch_ready_times.pop(identifier, None)
-        if ready is not None and self._stats is not None:
-            self._stats.observe("fs_ready_to_load_seconds", monotonic() - ready)
 
     def _forget_prefetch(self, identifier: str) -> None:
         for request_id in tuple(self._prefetch_waiters.get(identifier, ())):
@@ -221,8 +207,6 @@ class ECTieringManager:
         if not accepted:
             self._primary.unpin(identifier)
             return
-        if self._stats is not None:
-            self._stats.increment("fs_writes")
         self._pending_writes[descriptor.cache_key] = identifier
 
     def ensure_primary_entry(
@@ -283,11 +267,8 @@ class ECTieringManager:
             for key in tuple(self._prefetch_holds):
                 self._primary.unpin(key)
             self._prefetch_holds.clear()
-            self._prefetch_ready_times.clear()
             entry = self._primary.alloc(identifier, num_blocks, shape)
         if entry is None:
-            if self._stats is not None:
-                self._stats.increment("fs_cpu_alloc_failures")
             return False
         try:
             destinations = self._primary.block_views(entry.block_ids)
@@ -303,8 +284,6 @@ class ECTieringManager:
         if not accepted:
             self._primary.discard(identifier)
             return True
-        if self._stats is not None:
-            self._stats.increment("fs_reads")
         self._pending_reads[cache_key] = identifier
         self._pending_read_identifiers.add(identifier)
         return False
@@ -313,37 +292,13 @@ class ECTieringManager:
         """Publish completed loads and release pins for completed stores."""
         read_completions = self._secondary.poll_completed_reads()
         for completion in read_completions:
-            if self._stats is not None:
-                self._stats.increment("fs_read_completions")
-                self._stats.observe("fs_read_queue_seconds", completion.queue_time)
-                self._stats.observe(
-                    "fs_read_transfer_seconds", completion.transfer_time
-                )
-                if completion.success:
-                    self._stats.increment("fs_read_bytes", completion.file_size_bytes)
-                else:
-                    self._stats.increment("fs_read_failures")
             identifier = self._pending_reads.pop(completion.cache_key)
             self._pending_read_identifiers.remove(identifier)
             if completion.success:
                 self._primary.mark_ready(identifier)
-                if self._stats is not None:
-                    published = monotonic()
-                    if completion.submit_time is not None:
-                        self._stats.observe(
-                            "fs_read_publish_seconds",
-                            published - completion.submit_time,
-                        )
-                    if completion.io_end_time is not None:
-                        self._stats.observe(
-                            "fs_read_completion_delay_seconds",
-                            published - completion.io_end_time,
-                        )
                 if self._prefetch_waiters.get(identifier):
                     self._primary.pin(identifier)
                     self._prefetch_holds.add(identifier)
-                    if self._stats is not None:
-                        self._prefetch_ready_times[identifier] = published
             else:
                 self._primary.discard(identifier)
                 self._forget_prefetch(identifier)
@@ -355,16 +310,6 @@ class ECTieringManager:
 
         write_completions = self._secondary.poll_completed_writes()
         for completion in write_completions:
-            if self._stats is not None:
-                self._stats.increment("fs_write_completions")
-                self._stats.observe("fs_write_queue_seconds", completion.queue_time)
-                self._stats.observe(
-                    "fs_write_transfer_seconds", completion.transfer_time
-                )
-                if completion.success:
-                    self._stats.increment("fs_write_bytes", completion.file_size_bytes)
-                else:
-                    self._stats.increment("fs_write_failures")
             identifier = self._pending_writes.pop(completion.cache_key)
             self._primary.unpin(identifier)
             if not completion.success:

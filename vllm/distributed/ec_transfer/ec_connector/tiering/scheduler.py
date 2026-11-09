@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 from collections.abc import Collection
-from time import monotonic
 from typing import TYPE_CHECKING
 
 from vllm.distributed.ec_transfer.ec_connector.cpu.common import (
@@ -31,7 +30,6 @@ from vllm.distributed.ec_transfer.ec_connector.tiering.layout import (
 from vllm.distributed.ec_transfer.ec_connector.tiering.manager import (
     ECTieringManager,
 )
-from vllm.distributed.ec_transfer.ec_connector.tiering.metrics import ECTieringStats
 from vllm.distributed.ec_transfer.ec_connector.tiering.primary import (
     ECCPUPrimaryAdapter,
 )
@@ -47,8 +45,6 @@ class ECTieringScheduler(ECCPUScheduler):
     """Extend the CPU scheduler with asynchronous secondary-tier transfers."""
 
     def __init__(self, vllm_config: VllmConfig) -> None:
-        self._stats = ECTieringStats()
-        self._fs_wait_started: dict[str, float] = {}
         self._tiering_manager: ECTieringManager | None = None
         self._filesystem: ECFileSystemTierManager | None = None
         super().__init__(vllm_config)
@@ -70,13 +66,11 @@ class ECTieringScheduler(ECCPUScheduler):
                 n_write_threads=fs_config.n_write_threads,
                 fsync=fs_config.fsync,
                 backpressure=fs_config.backpressure,
-                stats=self._stats,
             )
             self._tiering_manager = ECTieringManager(
                 self._primary,
                 filesystem,
                 namespace_digest,
-                self._stats,
             )
             self._filesystem = filesystem
         except Exception:
@@ -85,16 +79,14 @@ class ECTieringScheduler(ECCPUScheduler):
             super().shutdown()
             raise
 
-    def has_cache_item(self, identifier: str) -> bool:
-        hit = super().has_cache_item(identifier)
-        self._stats.increment("cpu_hits" if hit else "recomputes")
-        return hit
-
-    def on_new_request(self, request: Request) -> None:
+    def on_new_request(
+        self, request: Request, local_cache_hashes: Collection[str] = ()
+    ) -> None:
         if self._tiering_manager is None or not self._is_consumer:
             return
-        started = monotonic()
         for feature in request.mm_features:
+            if feature.identifier in local_cache_hashes:
+                continue
             num_tokens = feature.mm_position.get_num_embeds()
             shape = (
                 num_tokens,
@@ -108,43 +100,13 @@ class ECTieringScheduler(ECCPUScheduler):
                 shape,
                 self._dtype.itemsize,
             )
-        self._stats.observe("fs_prefetch_submit_seconds", monotonic() - started)
 
     def request_finished(self, request: Request):
         try:
             return super().request_finished(request)
         finally:
-            self._fs_wait_started.pop(request.request_id, None)
             if self._tiering_manager is not None:
                 self._tiering_manager.release_prefetch(request.request_id)
-
-    def get_stats(self) -> ECTieringStats | None:
-        if self._filesystem is not None:
-            io_stats = self._filesystem.io_stats()
-            self._stats.set_gauge("fs_used_bytes", self._filesystem.used_bytes)
-            self._stats.set_gauge("fs_capacity_bytes", self._filesystem.capacity_bytes)
-            recovery_seconds, recovered_entries, recovered_bytes = (
-                self._filesystem.recovery_stats
-            )
-            self._stats.set_gauge("fs_recovery_seconds", recovery_seconds)
-            self._stats.set_gauge("fs_recovered_entries", recovered_entries)
-            self._stats.set_gauge("fs_recovered_bytes", recovered_bytes)
-            for key in (
-                "pending_read_jobs",
-                "pending_read_bytes",
-                "pending_write_jobs",
-                "pending_write_bytes",
-            ):
-                self._stats.set_gauge(key, getattr(io_stats, key))
-            self._stats.set_gauge(
-                "oldest_read_queue_seconds", io_stats.oldest_read_queue_age
-            )
-            self._stats.set_gauge(
-                "oldest_write_queue_seconds", io_stats.oldest_write_queue_age
-            )
-        if self._stats.is_empty():
-            return None
-        return self._stats.clone_and_reset()
 
     @staticmethod
     def _build_namespace(vllm_config: VllmConfig) -> ECCacheNamespace:
@@ -169,7 +131,6 @@ class ECTieringScheduler(ECCPUScheduler):
     def update_state_after_alloc(self, request: Request, index: int) -> None:
         super().update_state_after_alloc(request, index)
         if self._tiering_manager is not None:
-            self._tiering_manager.on_primary_load(request.mm_features[index].identifier)
             # The CPU scheduler has acquired the H2D pin before we release ours.
             self._tiering_manager.release_prefetch(
                 request.request_id, request.mm_features[index].identifier
@@ -213,9 +174,16 @@ class ECTieringScheduler(ECCPUScheduler):
         if self._tiering_manager is None or not self._is_consumer:
             return True
 
-        check_started = monotonic()
         all_ready = True
         for feature in request.mm_features:
+            if (
+                local_cache_hashes is not None
+                and feature.identifier in local_cache_hashes
+            ):
+                self._tiering_manager.release_prefetch(
+                    request.request_id, feature.identifier
+                )
+                continue
             position = feature.mm_position
             if position.offset + position.length <= num_computed_tokens:
                 continue
@@ -232,13 +200,6 @@ class ECTieringScheduler(ECCPUScheduler):
                 self._dtype.itemsize,
             ):
                 all_ready = False
-        if all_ready:
-            started = self._fs_wait_started.pop(request.request_id, None)
-            if started is not None:
-                self._stats.observe("fs_request_wait_seconds", monotonic() - started)
-        elif request.request_id not in self._fs_wait_started:
-            self._fs_wait_started[request.request_id] = monotonic()
-        self._stats.observe("fs_admission_check_seconds", monotonic() - check_started)
         return all_ready
 
     def build_connector_meta(
@@ -260,6 +221,5 @@ class ECTieringScheduler(ECCPUScheduler):
                 self._tiering_manager.shutdown()
                 self._tiering_manager = None
                 self._filesystem = None
-            self._fs_wait_started.clear()
         finally:
             super().shutdown()
