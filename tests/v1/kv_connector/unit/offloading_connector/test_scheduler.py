@@ -7007,6 +7007,7 @@ def test_hit_larger_than_bounded_tier_loads_every_group_at_one_boundary():
     )
     config = SimpleNamespace(
         speculative_config=None,
+        num_hash_lookahead_tokens=0,
         cache_config=SimpleNamespace(
             enable_prefix_caching=True,
             prefix_cache_retention_interval=retention_interval,
