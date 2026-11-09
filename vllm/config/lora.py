@@ -147,6 +147,13 @@ class LoRAConfig:
                 "`enable_lora`."
             )
 
+        if envs.VLLM_USE_HW_AGNOSTIC and model_config.using_transformers_backend():
+            raise ValueError(
+                "LoRA is not supported with VLLM_USE_HW_AGNOSTIC=1: LoRA wraps the "
+                "in-tree linear layers, which the hw-agnostic layers do not derive "
+                "from. Unset VLLM_USE_HW_AGNOSTIC or run without `enable_lora`."
+            )
+
         if self.lora_dtype in (None, "auto"):
             self.lora_dtype = model_config.dtype
         elif isinstance(self.lora_dtype, str):
