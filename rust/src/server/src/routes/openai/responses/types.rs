@@ -372,6 +372,8 @@ pub struct ResponsesRequest {
     pub ignore_eos: bool,
     #[serde(default = "default_true")]
     pub skip_special_tokens: bool,
+    /// Accepted as a no-op, as on chat completions.
+    #[allow(dead_code)]
     #[serde(default = "default_true")]
     pub spaces_between_special_tokens: bool,
     #[serde(default)]
