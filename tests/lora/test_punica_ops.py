@@ -659,9 +659,9 @@ def test_add_lora_fused_moe_early_exit(device):
 def test_torch_ops_bgmv_skips_no_lora_tokens():
     """The CPU torch bgmv ops must apply no delta to tokens with index -1.
 
-    ``token_lora_indices`` uses -1 to mark "no LoRA" (PunicaWrapperBase); the
-    triton kernels early-exit on ``lora_id == -1``. The torch reference indexed
-    ``lora_weights[-1]`` instead, applying the last stacked adapter to
+    `token_lora_indices` uses -1 to mark "no LoRA" (PunicaWrapperBase); the
+    triton kernels early-exit on `lora_id == -1`. The torch reference indexed
+    `lora_weights[-1]` instead, applying the last stacked adapter to
     base-model tokens in a mixed batch. Fixing bgmv also fixes sgmv, which
     delegates to it.
     """

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Per-layer attention providers (input projection, KDA/MLA core, o-projection) and
-the helpers ``SpecializedDecode.build_providers`` uses."""
+the helpers `SpecializedDecode.build_providers` uses."""
 
 from typing import Any
 
@@ -12,6 +12,9 @@ from vllm.model_executor.kernels.linear.cute_dsl.skinny_gemm import (
     shape_dynamic_skinny_gemm,
 )
 from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
+from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import (
+    trtllm_gen_query_heads,
+)
 
 from ..cutedsl.dsa.attn_ds import TOPK
 from ..cutedsl.dsa.index import DIM, HEADS
@@ -96,7 +99,7 @@ def step_cap(dsa: bool, dcp: bool) -> int:
 def wide_caps(dcp: bool, recoverssm: bool = False) -> dict[str, int]:
     """Per attention layer kind, the most rows of a wide step its specialized input
     projection and core take (0: the stock attention module), at most ATTENTION_MAX.
-    ``recoverssm``: the KDA layers verify with RecoverSSM records."""
+    `recoverssm`: the KDA layers verify with RecoverSSM records."""
     caps = {kind: WIDE_ROWS[kind, dcp] for kind in ("mla", "dsa")}
     caps["kda"] = KDA_WIDE_ROWS[recoverssm]
     assert all(0 <= rows <= ATTENTION_MAX for rows in caps.values()), caps
@@ -120,7 +123,7 @@ def projection_policies(tp, rows, batches):
 
 class SkinnyProjection:
     """B1/B2 skinny GEMM; static K loads two weight tiles before the PDL wait (the
-    projections now run ``DecodeProjection``; kept for the layer benchmarks)."""
+    projections now run `DecodeProjection`; kept for the layer benchmarks)."""
 
     def __init__(self, weight, fallback):
         self.weight, self.fallback, k = weight, fallback, weight.shape[1]
@@ -276,7 +279,7 @@ class Attention:
         self.prefetch.fork("attention_moe", self.layer.layer_idx, projected.shape[0])
 
     def run_core(self, projected, local, caches, metadata, slot_mapping, q):
-        """The KDA / MLA / DSA core of the projected rows into ``local``."""
+        """The KDA / MLA / DSA core of the projected rows into `local`."""
         b = projected.shape[0]
         if self.kind == "dsa":
             self.run_dsa(projected, local, caches, metadata, slot_mapping, q)
@@ -322,8 +325,8 @@ class Attention:
         return out
 
     def run_wide(self, x, caches, metadata, slot_mapping, q):
-        """A wide step's attention (``x``: the normalized rows of a batch in
-        ``self.wide``): the specialized input projection and core, then the stock
+        """A wide step's attention (`x`: the normalized rows of a batch in
+        `self.wide`): the specialized input projection and core, then the stock
         o_proj with its TP all-reduce, as the stock module ends. Returns its output."""
         projected, local = self.storage[x.shape[0]]
         projected = self.projection.run(x, projected)
@@ -336,7 +339,7 @@ class Attention:
 
 
 def dsa_scratch(runtime, cap):
-    """The DSA layers' shared rows (``cap``: one per prepared batch row): the BF16
+    """The DSA layers' shared rows (`cap`: one per prepared batch row): the BF16
     query (heads past the local ones stay zero), the normalized q_c, the indexer
     projection, FP8 query and head weights, and FlashInfer's flat top-k rows,
     their counts, latent (up to 128 heads) and LSE."""
@@ -375,7 +378,7 @@ def dcp_box(runtime, heads, dsa=False, flashinfer=False, partials="default"):
     layer: a q mailbox padded to the sparse decode's heads, BF16 for FlashMLA
     sparse's 64 or 128, FP8 for FlashInfer's trtllm-gen / prims_ts query heads),
     one slot per prepared batch row (at least 64). The partial rows DcpValue
-    exchanges: ``partials`` ("default": the layer kind's, see
+    exchanges: `partials` ("default": the layer kind's, see
     mla.dcp.PARTIALS_DEFAULT)."""
     name = "dsa_dcp_box" if dsa else "dcp_box"
     if getattr(runtime, name) is None:
@@ -390,10 +393,7 @@ def dcp_box(runtime, heads, dsa=False, flashinfer=False, partials="default"):
         interleave = parallel.cp_kv_cache_interleave_size
         q_heads = None
         if dsa and flashinfer:
-            # trtllm-gen MLA decode takes no head count between 64 and 128.
-            q_heads = group.world_size * heads
-            if 64 < q_heads < 128:
-                q_heads = 128
+            q_heads = trtllm_gen_query_heads(group.world_size * heads)
         elif dsa:
             q_heads = 64 if group.world_size * heads <= 64 else 128
         # The wide rows of this box's own layer kind (the MLA box past 64 rows only
