@@ -346,6 +346,18 @@ def gdn_round(c, r):
     nv = c["gdn"].nv
     n = c["S"] * nv * NVCH
     task = (c["bid"] + (BLOCKS - c["goff"])) % BLOCKS + BLOCKS * r
+    if c.get("qp", False) and n == BLOCKS and c["goff"] == 0:
+        # ``qp``: a block of NVCH consecutive tasks is one head's chunks, so
+        # block t NV + h is token t's head h. The owner heads 0 and 8 of
+        # tokens 0 and 1 are blocks 0, 8, 16 and 24. Blocks 0, 16 and 24
+        # swap places with blocks 9, 10 and 11, so that all owner tasks
+        # run on CTAs 64 .. 95, whose in_proj tasks are v rows. The front
+        # CTAs and the CTAs with two in_proj tasks then run no owner task.
+        assert nv == 16 and NVCH == 8, "qp's swaps are for 16 heads of 8 chunks"
+        q = task // NVCH
+        for qa, qb in ((0, 9), (16, 10), (24, 11)):
+            q = (q == qa).select(fx.Int32(qb), (q == qb).select(fx.Int32(qa), q))
+        task = q * NVCH + task % NVCH
     tc = fx.min(task, n - 1)
     cr = dict(c)
     for name, m in (("qkl", 2 * HD), ("vloc", VCH), ("ol", VCH), ("scal", 4)):

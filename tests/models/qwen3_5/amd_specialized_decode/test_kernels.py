@@ -153,11 +153,16 @@ def test_gdn_block_matches_vllm_ops(
     "s,n_real,first", [(1, 1, False), (2, 2, False), (5, 4, False), (8, 7, True)]
 )
 @torch.inference_mode()
-def test_gdn_block_mxfp6_matches_vllm_ops(s: int, n_real: int, first: bool) -> None:
+def test_gdn_block_mxfp6_matches_vllm_ops(
+    monkeypatch: pytest.MonkeyPatch, s: int, n_real: int, first: bool
+) -> None:
     """The GDN block with the MXFP6 in_proj_qkvz (``q6``, fp6_pack's layout)
     against the same ops on the weight rounded to MXFP6 (round_e2m3), which
     the model's prefill GEMM multiplies with the bf16 x rows, as the kernel
-    does. Only the summation order of in_proj differs."""
+    does. Only the summation order of in_proj differs. At 2 rows the GDN
+    tasks fill one round, so the task placement ``qp`` also moves the owner
+    heads' tasks. The build without ``qp`` must give the same outputs bit for
+    bit."""
     from vllm.models.qwen3_5.amd.specialized_decode.mono import blocks
     from vllm.models.qwen3_5.amd.specialized_decode.mono import layout as L
     from vllm.models.qwen3_5.amd.specialized_decode.runtime.mxfp6 import (
@@ -173,39 +178,46 @@ def test_gdn_block_mxfp6_matches_vllm_ops(s: int, n_real: int, first: bool) -> N
     ba = F.linear(x, w["w_ba"])
     conv_ref, rstate_ref, core_ref = _gdn_core_ref(w, n_real, qkvz, ba)
     key = blocks.GdnBuild(tokens=s, first=first, q6=True)
-    conv_state, rstate = w["conv_state"].clone(), w["rstate"].clone()
-    core = torch.full((s, L.CORE), float("nan"), dtype=bf, device="cuda")
-    res_out = torch.full_like(w["hidden"], float("nan"))
-    scratch = torch.zeros(
-        blocks.scratch_bytes(blocks.gdn_scratch_layout(key)),
-        dtype=torch.uint8,
-        device="cuda",
-    )
-    hl = _health()
-    blocks.gdn_block(
-        key,
-        hidden=w["hidden"],
-        residual=w["residual"],
-        res_out=res_out,
-        ln_w=w["ln_w"],
-        w_qkvz=w6q,
-        w_qkvzs=w6s,
-        w_ba=w["w_ba"],
-        conv_w=w["conv_w"],
-        conv_state=conv_state,
-        a_log=w["a_log"],
-        dt_bias=w["dt_bias"],
-        norm_w=w["norm_w"],
-        rstate=rstate,
-        st_idx=w["st_idx"],
-        core=core,
-        scratch=scratch,
-        epoch=torch.ones(1, dtype=torch.int32, device="cuda"),
-        **hl,
-        layer=0,
-    )
-    torch.accelerator.synchronize()
-    assert not hl["health"].any()
+    assert key.qp
+
+    def run() -> tuple[torch.Tensor, ...]:
+        conv_state, rstate = w["conv_state"].clone(), w["rstate"].clone()
+        core = torch.full((s, L.CORE), float("nan"), dtype=bf, device="cuda")
+        res_out = torch.full_like(w["hidden"], float("nan"))
+        scratch = torch.zeros(
+            blocks.scratch_bytes(blocks.gdn_scratch_layout(key)),
+            dtype=torch.uint8,
+            device="cuda",
+        )
+        hl = _health()
+        blocks.gdn_block(
+            key,
+            hidden=w["hidden"],
+            residual=w["residual"],
+            res_out=res_out,
+            ln_w=w["ln_w"],
+            w_qkvz=w6q,
+            w_qkvzs=w6s,
+            w_ba=w["w_ba"],
+            conv_w=w["conv_w"],
+            conv_state=conv_state,
+            a_log=w["a_log"],
+            dt_bias=w["dt_bias"],
+            norm_w=w["norm_w"],
+            rstate=rstate,
+            st_idx=w["st_idx"],
+            core=core,
+            scratch=scratch,
+            epoch=torch.ones(1, dtype=torch.int32, device="cuda"),
+            **hl,
+            layer=0,
+        )
+        torch.accelerator.synchronize()
+        assert not hl["health"].any()
+        return res_out, core, conv_state, rstate
+
+    got = run()
+    res_out, core, conv_state, rstate = got
     torch.testing.assert_close(res_out, res, atol=0, rtol=0)
     live = w["st_idx"][:n_real].long()
     errs = {
@@ -218,6 +230,18 @@ def test_gdn_block_mxfp6_matches_vllm_ops(s: int, n_real: int, first: bool) -> N
     assert torch.equal(core[n_real:], torch.zeros_like(core[n_real:]))
     torch.testing.assert_close(rstate[0], w["rstate"][0], atol=0, rtol=0)
     torch.testing.assert_close(conv_state[0], w["conv_state"][0], atol=0, rtol=0)
+
+    # qp only moves tasks between CTAs. qp is not a field of the build key,
+    # so the build without it gets an empty build cache and a key tuple of
+    # its own, which makes it compile instead of returning the qp kernel.
+    key_tuple = blocks.key_tuple
+    monkeypatch.setattr(blocks, "_GDN", {})
+    monkeypatch.setattr(blocks.GdnBuild, "qp", property(lambda self: False))
+    monkeypatch.setattr(
+        blocks, "key_tuple", lambda k, d: (*key_tuple(k, d), ("qp", False))
+    )
+    for name, a, b in zip(("res_out", "core", "conv_state", "rstate"), run(), got):
+        assert torch.equal(a, b), f"{name} differs without qp"
 
 
 @pytest.mark.parametrize("s", [1, 2, 5, 8])

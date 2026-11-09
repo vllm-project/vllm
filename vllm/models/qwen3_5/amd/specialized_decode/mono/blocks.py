@@ -112,6 +112,7 @@ RS_PER = E // R_TASKS  # 32
 # rows below which the layer block takes the router logits through o_proj
 RM_MAX = 5
 GDN_TASKS = L.NV * NVCH  # GDN tasks a token
+Z0 = L.CONV  # in_proj_qkvz's first z row
 # rows from which x goes through MXFP4 once, on the norm tasks (``N.stage_xq``)
 GDN_XQ_MIN = 4
 # rows up to which every GDN CTA computes the rows' rstd itself (``N.local_rstd``)
@@ -124,6 +125,9 @@ SPLIT_MIN = 8
 LAYER_SLOT = L.MAX_LAYERS
 
 assert SPLIT_MIN >= PS_MIN and GDN_LOCAL_MAX < GDN_XQ_MIN
+# The MXFP6 in_proj (qp) puts the q, k and v tasks, those before z, on the
+# CTAs between the front ones and the ones with two tasks.
+assert Z0 % ROWS == 0 and Z0 // ROWS == QQ0 - NRED
 assert RM_CH * RM_K == CK + H // TP and R0 + RM_TASKS <= BLOCKS
 assert OTASKS == 2 * BLOCKS and BLOCKS < QTASKS <= 2 * BLOCKS
 assert BA_TASKS <= NRED and PS0 + L.RI // moe.UG_COLS <= BLOCKS
@@ -140,8 +144,18 @@ class GdnBuild:
     norm_eps: float = 1e-6  # the gated norm
     shuffled: bool = True  # in_proj_qkvz in the ASM FP4 GEMM layout, else Triton's
     # in_proj_qkvz in MXFP6 E2M3, in the layout of runtime.mxfp6.fp6_pack,
-    # multiplied with the bf16 x rows (W6A16). x is not quantized.
+    # multiplied with the bf16 x rows (W6A16). x is not quantized. The
+    # in_proj tasks are placed by what waits for them (``qp``).
     q6: bool = False
+
+    @property
+    def qp(self) -> bool:
+        """The q, k and v tasks run on CTAs with one in_proj task and no
+        front. The CTAs with two in_proj tasks run z tasks and issue their
+        second task's weights after the x loads. When the GDN tasks fill one
+        round of BLOCKS, the owner tasks of the key heads run on CTAs 64 ..
+        95. The outputs are those of the build without it, bit for bit."""
+        return self.q6
 
     @property
     def xq(self) -> bool:
@@ -467,7 +481,10 @@ def build_gdn(key: GdnBuild):
         rs: fx.Array[fx.Float32, 16, 16]
 
     keyed = key_tuple(key, source_digest())
-    name = f"qwen38_sd_gdn_s{s}_f{int(key.first)}_w{int(key.shuffled)}_q{int(key.q6)}"
+    name = (
+        f"qwen38_sd_gdn_s{s}_f{int(key.first)}_w{int(key.shuffled)}"
+        f"_q{int(key.q6)}_p{int(key.qp)}"
+    )
 
     @flyc.kernel(name=name, known_block_size=[THREADS, 1, 1])
     def kgdn(
@@ -509,6 +526,7 @@ def build_gdn(key: GdnBuild):
             "gdn": L.GDN,
             "shuffled": key.shuffled,
             "q6": key.q6,
+            "qp": key.qp,
             "ba_of": lambda c, t, h: G.ba_sums(c, t, h, BA_PARTS),
             "ba_parts": BA_PARTS,
             "z_gate": G.silu,
@@ -557,7 +575,52 @@ def build_gdn(key: GdnBuild):
         src = (hidden, 0, None if key.first else residual)
         if bid < NRED:
             N.stage_front(c, bid, src, not key.local)
-        if const_expr(key.q6):
+        if const_expr(key.qp):
+            # ``qp``: the front CTAs 0 .. 63 keep z tasks 255 .. 192 and load
+            # their weights after the front, as without qp. CTAs 64 .. 223
+            # run tasks 159 .. 0, so the q, k and v rows, which the conv of
+            # every GDN task polls, come from CTAs with one in_proj task.
+            # CTAs 224 .. 255 run z tasks 191 .. 160 and then 287 .. 256.
+            # Only the gated norm at the end reads z. Each group of CTAs
+            # issues all its loads in its own branch, in this order. A load
+            # issued before the branch whose value only the branch uses is
+            # moved into the branch by the compiler, behind the loads that
+            # are already there. x is not quantized (q6).
+            def load_x():
+                if const_expr(key.local):
+                    N.local_rstd(c, src)
+                else:
+                    N.load_rstd(c)
+                N.x_rows_to_lds(c, src, H, 0)
+
+            if bid < NRED:
+                rga = BLOCKS - 1 - bid
+                opsa = qkvz_loads(c, rga)
+                if bid < BA_TASKS:
+                    bops = G.ba_loads(c, bid, BA_PARTS, BA_K)
+                    load_x()
+                    G.stage_ba(c, bid, bops, BA_PARTS, BA_K)
+                    stage_qkvz(c, rga, opsa)
+                if bid >= BA_TASKS:
+                    load_x()
+                    stage_qkvz(c, rga, opsa)
+            if (bid >= NRED) & (bid < QQ0):
+                rgb = QQ0 - 1 - bid
+                opsb = qkvz_loads(c, rgb)
+                load_x()
+                stage_qkvz(c, rgb, opsb)
+            if bid >= QQ0:
+                # The x loads go out behind the first task's weights only.
+                # The second task's weights go out after them, and the first
+                # task's MFMAs run while they are on their way.
+                rgc = Z0 // ROWS + BLOCKS - 1 - bid
+                rgc2 = 2 * BLOCKS - 1 - bid
+                opsc = qkvz_loads(c, rgc)
+                load_x()
+                opsc2 = qkvz_loads(c, rgc2)
+                stage_qkvz(c, rgc, opsc)
+                stage_qkvz(c, rgc2, opsc2)
+        elif const_expr(key.q6):
             # With q6, in_proj_qkvz multiplies the bf16 rows in LDS, so x is
             # not quantized and stage_ba reads the same full rows.
             def load_x():
