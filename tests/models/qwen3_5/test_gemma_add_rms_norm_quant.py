@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Qwen3.5 Gemma add-RMSNorm + input quant vs the unfused production chain
 (flashinfer gemma norm, then scaled_fp8_quant / scaled_fp4_quant), plus the
-unquantized ``gemma_add_rms_norm`` (pre-SM80 fallback) vs a naive fp32
+unquantized `gemma_add_rms_norm` (pre-SM80 fallback) vs a naive fp32
 reference."""
 
 import pytest
@@ -112,8 +112,11 @@ def test_gemma_add_rms_norm_quant_matches_chain(
     assert (dist > 0).float().mean().item() <= 1e-4
 
 
-@pytest.mark.parametrize("H", [5120, 2112])
-@pytest.mark.parametrize("num_tokens", NUM_TOKENS)
+# 2048: Qwen3.5-2B/35B-A3B hidden size; 2056: not a multiple of 16, to
+# exercise the column mask (every production hidden size is).
+@pytest.mark.parametrize("H", [2048, 2056])
+# Decode sizes, and both sides of the num_warps switch (384).
+@pytest.mark.parametrize("num_tokens", [1, 7, 384, 385])
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("has_residual", [True, False])
 @torch.inference_mode()

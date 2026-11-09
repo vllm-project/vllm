@@ -7,7 +7,7 @@ Replaces `gemma_fused_add_rmsnorm` followed by a standalone static FP8
 values are computed from the bf16-rounded normed activation with the same
 scale arithmetic as those kernels, so codes match the unfused chain.
 
-``gemma_add_rms_norm`` is the same kernel without the quant epilogue, used
+`gemma_add_rms_norm` is the same kernel without the quant epilogue, used
 as the pre-SM80 fallback where flashinfer's norm module cannot JIT-build.
 """
 
@@ -226,10 +226,10 @@ def gemma_add_rms_norm(
     weight: torch.Tensor,
     eps: float,
 ) -> torch.Tensor:
-    """Gemma RMSNorm of ``x (+ residual)`` without quantization.
+    """Gemma RMSNorm of `x (+ residual)` without quantization.
 
     The pre-SM80 fallback for flashinfer's norm kernels, whose JIT build
-    fails there. ``x`` is read only; ``residual`` is updated in place.
+    fails there. `x` is read only; `residual` is updated in place.
     Returns the normed activation in x's dtype.
     """
     assert x.dim() == 2 and x.is_contiguous()
