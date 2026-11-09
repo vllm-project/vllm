@@ -692,9 +692,10 @@ def test_nixl_hisparse_full_block_import_keeps_a_writable_tail(num_tokens):
     assert not coordinator.build_offload_command().page_transfers
 
     coordinator.finish_host_import(request.request_id, failed=False)
-    transfers = coordinator.build_offload_command().page_transfers
-    assert len(transfers) == 1
-    restore = transfers[0]
+    # The tail comes first; the pool has room to promote the rest.
+    restore, *promotions = coordinator.build_offload_command().page_transfers
+    assert len(promotions) == len(source) - 1
+    assert all(promotion.restore for promotion in promotions)
     assert restore.restore
     assert restore.host_block_id == source[-1].block_id
     assert restore.resident_block_ids == (resident[-1].block_id,)
@@ -741,13 +742,86 @@ def test_hisparse_aborted_tail_restore_retains_both_endpoints():
     host_tail, gpu_tail = source[-1], resident[-1]
     coordinator = get_hisparse_coordinator(manager)
     coordinator.finish_host_import(request.request_id, failed=False)
-    restore = coordinator.build_offload_command().page_transfers[0]
+    transfers = coordinator.build_offload_command().page_transfers
     manager.free(request)
     assert host_tail.ref_cnt == gpu_tail.ref_cnt == 1
-    coordinator.update_spills({restore.transfer_id: 2}, {restore.transfer_id: 1})
+    coordinator.update_spills(
+        {t.transfer_id: 2 for t in transfers}, {t.transfer_id: 1 for t in transfers}
+    )
     assert host_tail.ref_cnt == gpu_tail.ref_cnt == 1
-    coordinator.update_spills({}, {restore.transfer_id: 1})
+    coordinator.update_spills({}, {t.transfer_id: 1 for t in transfers})
     assert host_tail.ref_cnt == gpu_tail.ref_cnt == 0
+    assert not coordinator.has_pending_work()
+
+
+@pytest.mark.parametrize("has_room", [True, False])
+def test_hisparse_import_promotes_host_pages_when_pool_has_room(has_room):
+    """An import lands on host; spare GPU pages bring its whole prefix back."""
+    manager = make_hisparse_kv_cache_manager(256, 16)
+    num_tokens = 4 * HISPARSE_BLOCK_SIZE + 1
+    request = make_request(
+        "import", list(range(num_tokens)), HISPARSE_BLOCK_SIZE, sha256
+    )
+    assert allocate_external_prefix(manager, request, num_tokens) is not None
+    source, _, resident, _ = manager.get_blocks(request.request_id).blocks
+    coordinator = get_hisparse_coordinator(manager)
+    pool = coordinator.gpu_pool
+    if not has_room:
+        # Other requests hold everything above the transition watermark.
+        pool.get_new_blocks(
+            pool.get_num_free_blocks() - coordinator.transition_watermark
+        )
+
+    coordinator.finish_host_import(request.request_id, failed=False)
+    transfers = coordinator.build_offload_command().page_transfers
+    assert all(transfer.restore for transfer in transfers)
+    promoted = range(4) if has_room else range(0)
+    assert [t.host_block_id for t in transfers] == [
+        source[-1].block_id,
+        *(source[page].block_id for page in promoted),
+    ]
+    row = _resident_block_ids(manager, request.request_id)
+    assert [block_id != 0 for block_id in row] == [has_room] * 4 + [True]
+    assert [t.resident_block_ids for t in transfers[1:]] == [
+        (row[page],) for page in promoted
+    ]
+    # The worker reads promoted pages only once the residency update ships with
+    # the restores that fill them.
+    updates = coordinator.take_residency_updates([request.request_id])
+    assert updates[request.request_id].block_ids == (row,)
+
+    gpu_blocks = [pool.blocks[block_id] for block_id in row]
+    counts = {t.transfer_id: 1 for t in transfers}
+    coordinator.update_spills(counts, counts)
+    # Promoted pages are clean copies of host pages, so the residency policy
+    # treats them like any other clean page: readable, but reclaimable.
+    state = coordinator.request_states[request.request_id]
+    assert state.pinned_clean | state.unpinned_pages == set(promoted)
+
+    manager.free(request)
+    assert all(block.ref_cnt == 0 for block in gpu_blocks if not block.is_null)
+    assert not coordinator.has_pending_work()
+
+
+def test_hisparse_aborted_promotion_keeps_pages_until_restored():
+    """An abort cannot recycle GPU pages a queued promotion still writes."""
+    manager = make_hisparse_kv_cache_manager(256, 16)
+    num_tokens = 2 * HISPARSE_BLOCK_SIZE + 1
+    request = make_request(
+        "import", list(range(num_tokens)), HISPARSE_BLOCK_SIZE, sha256
+    )
+    assert allocate_external_prefix(manager, request, num_tokens) is not None
+    coordinator = get_hisparse_coordinator(manager)
+    coordinator.finish_host_import(request.request_id, failed=False)
+    transfers = coordinator.build_offload_command().page_transfers
+    assert len(transfers) == 3
+    row = _resident_block_ids(manager, request.request_id)
+    gpu_blocks = [coordinator.gpu_pool.blocks[block_id] for block_id in row]
+    manager.free(request)
+    assert all(block.ref_cnt == 1 for block in gpu_blocks)
+    counts = {t.transfer_id: 1 for t in transfers}
+    coordinator.update_spills(counts, counts)
+    assert all(block.ref_cnt == 0 for block in gpu_blocks)
     assert not coordinator.has_pending_work()
 
 
