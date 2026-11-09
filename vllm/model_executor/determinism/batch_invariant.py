@@ -282,7 +282,10 @@ def matmul_descriptor_persistent(
 
 
 def matmul_persistent(
-    a: torch.Tensor, b: torch.Tensor, bias: torch.Tensor | None = None
+    a: torch.Tensor,
+    b: torch.Tensor,
+    bias: torch.Tensor | None = None,
+    out_dtype: torch.dtype | None = None,
 ):
     # Check constraints.
     assert a.shape[1] == b.shape[0], "Incompatible dimensions"
@@ -295,7 +298,7 @@ def matmul_persistent(
     K, N = b.shape
     dtype = a.dtype
     # Allocates output.
-    c = torch.empty((M, N), device=a.device, dtype=dtype)
+    c = torch.empty((M, N), device=a.device, dtype=out_dtype or dtype)
 
     # 1D launch kernel where each block gets its own program.
     def grid(META):
@@ -504,7 +507,7 @@ def _softmax_kernel(
     BLOCK_SIZE: tl.constexpr,
     LOG: tl.constexpr = False,
 ):
-    """Compute softmax, or log_softmax when ``LOG``, along the last dimension of a
+    """Compute softmax, or log_softmax when `LOG`, along the last dimension of a
     2D tensor. Each block handles one row of the input tensor, in a fixed block
     order, so the result never depends on the row count.
     """
@@ -776,6 +779,24 @@ def mm_batch_invariant(a, b, bias=None):
             bias = bias.contiguous()
         return matmul_descriptor_persistent(a, b, bias=bias)
     return matmul_persistent(a, b, bias=bias)
+
+
+def mm_dtype_batch_invariant(a, b, out_dtype, *, out=None):
+    # Same dtype checks as ATen's CUDA mm.dtype / mm.dtype_out.
+    if a.dtype != b.dtype:
+        raise RuntimeError("input dtypes must be the same")
+    if out_dtype != a.dtype and not (
+        out_dtype == torch.float32 and a.dtype in (torch.float16, torch.bfloat16)
+    ):
+        raise RuntimeError(
+            "out_dtype must be the same as input dtype or fp32 for fp16/bf16 inputs"
+        )
+    if out is not None and out.dtype != out_dtype:
+        raise RuntimeError(
+            "out_dtype must be the same as the dtype of the provided out tensor"
+        )
+    result = matmul_persistent(a, b, out_dtype=out_dtype)
+    return result if out is None else out.copy_(result)
 
 
 def matmul_batch_invariant(a, b, *, out=None):
@@ -1073,12 +1094,12 @@ def rms_norm_batch_invariant(
     Args:
         input: Input tensor of shape (..., hidden_size)
         weight: Weight tensor of shape (hidden_size,), or None to skip the
-            per-channel multiply (``RMSNorm(has_weight=False)``)
+            per-channel multiply (`RMSNorm(has_weight=False)`)
         eps: Small constant for numerical stability
         residual: Optional residual tensor fused into the normalization path
 
     Returns:
-        RMS normalized tensor, or ``(output, residual_out)`` when ``residual``
+        RMS normalized tensor, or `(output, residual_out)` when `residual`
         is provided
 
     """
@@ -1132,6 +1153,67 @@ def linear_batch_invariant(input, weight, bias=None):
     return output.view(*input.shape[:-1], output.shape[-1])
 
 
+def dequantize_gptq_weight(
+    qweight: torch.Tensor,
+    scales: torch.Tensor,
+    *,
+    num_bits: int,
+    group_size: int,
+    zero_bias: int,
+) -> torch.Tensor:
+    """Unpack a symmetric GPTQ weight (no act-order) to `scales.dtype`.
+
+    `qweight` is in the checkpoint layout: `[K // pack_factor, N]` int32
+    with `pack_factor` consecutive input rows packed into each element,
+    lowest bits first. Returns `(q - zero_bias) * scale` of shape `[K, N]`.
+    """
+    packed_rows, output_size = qweight.shape
+    pack_factor = 32 // num_bits
+    input_size = packed_rows * pack_factor
+    if group_size == -1:
+        group_size = input_size
+    num_groups = input_size // group_size
+    assert scales.shape == (num_groups, output_size), (
+        f"Unexpected GPTQ scales shape {tuple(scales.shape)} for "
+        f"K={input_size}, N={output_size}, group_size={group_size}"
+    )
+
+    shifts = (
+        torch.arange(pack_factor, device=qweight.device, dtype=torch.int32) * num_bits
+    )
+    mask = (1 << num_bits) - 1
+    unpacked = (qweight.unsqueeze(1) >> shifts.view(1, -1, 1)) & mask
+    weight = unpacked.to(scales.dtype) - zero_bias
+    weight = weight.view(num_groups, group_size, output_size) * scales.unsqueeze(1)
+    return weight.view(input_size, output_size)
+
+
+def gptq_linear_batch_invariant(
+    x: torch.Tensor,
+    qweight: torch.Tensor,
+    scales: torch.Tensor,
+    *,
+    num_bits: int,
+    group_size: int,
+    zero_bias: int,
+    bias: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """GPTQ linear without Marlin: the Marlin GEMM picks its tiling and K-split
+    from the number of tokens, so dequantize the checkpoint weight and use the
+    batch-invariant matmul instead."""
+    weight = dequantize_gptq_weight(
+        qweight,
+        scales,
+        num_bits=num_bits,
+        group_size=group_size,
+        zero_bias=zero_bias,
+    )
+    output = matmul_batch_invariant(x, weight.to(x.dtype))
+    if bias is not None:
+        output.add_(bias)
+    return output
+
+
 @triton.jit
 def _fixed_order_sum_kernel(
     src_ptr,  # (WORLD_SIZE, numel) gathered contributions, rank-major
@@ -1142,9 +1224,9 @@ def _fixed_order_sum_kernel(
     BLOCK_SIZE: tl.constexpr,
     LARGE: tl.constexpr,
 ):
-    """Sum ``WORLD_SIZE`` contributions in ascending rank order, fp32 accumulator.
+    """Sum `WORLD_SIZE` contributions in ascending rank order, fp32 accumulator.
 
-    An output element sums exactly ``WORLD_SIZE`` values in a compile-time
+    An output element sums exactly `WORLD_SIZE` values in a compile-time
     constant order and rounds once, so the result depends only on the rank
     ordering and never on how many elements are being reduced.
     """
@@ -1173,7 +1255,7 @@ def all_reduce_batch_invariant(
     contributions are summed changes with the number of tokens in the batch.
 
     Instead, all-gather the contributions -- pure data movement, so bitwise
-    reproducible at any size -- and reduce them with ``_fixed_order_sum_kernel``.
+    reproducible at any size -- and reduce them with `_fixed_order_sum_kernel`.
     """
     world_size = dist.get_world_size(group)
     if world_size == 1:
@@ -1206,21 +1288,21 @@ def reduce_scatter_batch_invariant(
 ) -> torch.Tensor:
     """Sum reduce-scatter over dim 0 whose result does not depend on the size.
 
-    ``ncclReduceScatter`` picks its chunking from the message size just as
-    ``ncclAllReduce`` does. Route around it the same way
-    ``all_reduce_batch_invariant`` does: an all-to-all sends rank ``d`` exactly
+    `ncclReduceScatter` picks its chunking from the message size just as
+    `ncclAllReduce` does. Route around it the same way
+    `all_reduce_batch_invariant` does: an all-to-all sends rank `d` exactly
     the rows it owns from every rank -- pure data movement, so bitwise
     reproducible however the library chunks it -- and lands them rank-major,
-    which is the layout ``_fixed_order_sum_kernel`` already consumes.
+    which is the layout `_fixed_order_sum_kernel` already consumes.
 
-    ``sizes`` (the reduce-scatterv case) changes only *which* rows a rank
+    `sizes` (the reduce-scatterv case) changes only *which* rows a rank
     receives, never how the received contributions are summed, so variable
     shard sizes are invariant for the same reason.
 
     Args:
         input_: Contiguous full-size input; dim 0 is the scattered axis.
         group: Process group, defaults to the world group.
-        sizes: Per-rank row counts. Uniform split when ``None``.
+        sizes: Per-rank row counts. Uniform split when `None`.
 
     Returns:
         This rank's shard of the sum.
@@ -1322,6 +1404,10 @@ def enable_batch_invariant_mode():
             # invariant; install the triton persistent matmul overrides for
             # mm/addmm/matmul/linear.
             _batch_invariant_LIB.impl("aten::mm", mm_batch_invariant, key)
+            _batch_invariant_LIB.impl("aten::mm.dtype", mm_dtype_batch_invariant, key)
+            _batch_invariant_LIB.impl(
+                "aten::mm.dtype_out", mm_dtype_batch_invariant, key
+            )
             _batch_invariant_LIB.impl("aten::addmm", addmm_batch_invariant, key)
             _batch_invariant_LIB.impl("aten::mm.out", mm_out_batch_invariant, key)
             _batch_invariant_LIB.impl("aten::addmm.out", addmm_out_batch_invariant, key)
@@ -1390,9 +1476,6 @@ def enable_batch_invariant_mode():
 
 def override_envs_for_invariance():
     os.environ["VLLM_ALLREDUCE_USE_SYMM_MEM"] = "0"
-    # Only the 1-stage kernel has a size- and rank-independent reduction order.
-    os.environ["VLLM_CUSTOM_ALLREDUCE_ALGO"] = "1stage"
-
     os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
 
     if current_platform.is_rocm():
@@ -1424,6 +1507,10 @@ def override_envs_for_invariance():
 
     # torch.compile settings
     os.environ["VLLM_USE_AOT_COMPILE"] = "0"
+    import torch._inductor.config as inductor_config
+
+    if hasattr(inductor_config, "batch_invariant"):
+        inductor_config.batch_invariant = True
 
 
 def init_batch_invariance():

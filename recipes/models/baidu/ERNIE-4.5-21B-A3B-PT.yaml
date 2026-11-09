@@ -1,0 +1,148 @@
+meta:
+  title: "ERNIE-4.5"
+  slug: "ernie-4.5"
+  provider: "Ernie (Baidu)"
+  description: "Baidu ERNIE 4.5 MoE text models (21B-A3B, 300B-A47B) with BF16 and FP8 support plus ERNIE-MTP speculative decoding"
+  date_added: 2025-09-03
+  date_updated: 2026-04-17
+  tasks:
+    - text
+  related_recipes:
+    - baidu/ERNIE-4.5-VL-28B-A3B-PT
+
+model:
+  model_id: "baidu/ERNIE-4.5-21B-A3B-PT"
+  min_vllm_version: "0.10.1"
+  architecture: moe
+  parameter_count: "21B"
+  active_parameters: "3B"
+  context_length: 131072
+  base_args: []
+  base_env: {}
+
+features:
+  spec_decoding:
+    description: "ERNIE-MTP (multi-token prediction) speculative decoding"
+    args:
+      - "--speculative-config"
+      - '{"method":"ernie_mtp","model":"baidu/ERNIE-4.5-21B-A3B-PT","num_speculative_tokens":1}'
+
+opt_in_features:
+  - spec_decoding
+
+variants:
+  default:
+    precision: bf16
+    vram_minimum_gb: 106
+    description: "BF16 weights; fits on 1x80GB GPU (21B variant)"
+
+  "300b":
+    model_id: "baidu/ERNIE-4.5-300B-A47B-PT"
+    precision: bf16
+    vram_minimum_gb: 640
+    description: "300B total / 47B active; 8x80GB with FP8 online, 16x80GB for BF16"
+    extra_args:
+      - "--tensor-parallel-size"
+      - "8"
+      - "--gpu-memory-utilization"
+      - "0.95"
+      - "--quantization"
+      - "fp8"
+
+compatible_strategies:
+  - single_node_tp
+  - multi_node_tp
+  - multi_node_tep
+  - multi_node_dep
+
+kv_offload_support:
+  offloading_cpu: verified
+  offloading_fs: verified
+
+hardware_overrides:
+  amd:
+    extra_args:
+      - "--gpu-memory-utilization"
+      - "0.9"
+    extra_env:
+      VLLM_ROCM_USE_AITER: "1"
+      SAFETENSORS_FAST_GPU: "1"
+strategy_overrides: {}
+
+guide: |
+  ## Overview
+
+  ERNIE 4.5 is Baidu's MoE language model family. This recipe covers the text-only
+  variants:
+
+  - `baidu/ERNIE-4.5-21B-A3B-PT` — 21B total / 3B active (fits on 1x80GB)
+  - `baidu/ERNIE-4.5-300B-A47B-PT` — 300B total / 47B active (8x80GB FP8 or 16x80GB BF16)
+
+  Both support ERNIE-MTP speculative decoding via `--speculative-config`.
+
+  ## Prerequisites
+
+  - transformers >= 4.54.0
+  - vLLM >= 0.10.1
+  - Hardware depends on variant (see above)
+
+  ### Install vLLM
+
+  ```bash
+  uv venv --python 3.12 --seed
+  source .venv/bin/activate
+  uv pip install vllm --torch-backend=auto
+  ```
+
+  ## Launch commands
+
+  21B on 1x80GB GPU:
+
+  ```bash
+  vllm serve baidu/ERNIE-4.5-21B-A3B-PT
+  ```
+
+  300B on 8x80GB with vLLM FP8 online quantization:
+
+  ```bash
+  vllm serve baidu/ERNIE-4.5-300B-A47B-PT \
+    --tensor-parallel-size 8 \
+    --gpu-memory-utilization 0.95 \
+    --quantization fp8
+  ```
+
+  300B on 16x80GB native BF16 (multi-node via Ray):
+
+  ```bash
+  vllm serve baidu/ERNIE-4.5-300B-A47B-PT --tensor-parallel-size 16
+  ```
+
+  ERNIE-MTP speculative decoding (21B example):
+
+  ```bash
+  vllm serve baidu/ERNIE-4.5-21B-A3B-PT \
+    --speculative-config '{"method":"ernie_mtp","model":"baidu/ERNIE-4.5-21B-A3B-PT","num_speculative_tokens":1}'
+  ```
+
+  ## Client Usage
+
+  Standard OpenAI-compatible API; model ID is the HF repo.
+
+  ## Benchmarking
+
+  ```bash
+  vllm bench serve \
+    --model baidu/ERNIE-4.5-21B-A3B-PT \
+    --dataset-name random \
+    --random-input-len 8000 --random-output-len 1000 \
+    --request-rate 10 --num-prompts 16 --ignore-eos
+  ```
+
+  Test configurations: prompt-heavy (8k/1k), decode-heavy (1k/8k), balanced (1k/1k).
+  Vary `--num-prompts` across 1, 16, 32, 64, 128, 256, 512.
+
+  ## References
+
+  - [ERNIE-4.5-21B-A3B-PT](https://huggingface.co/baidu/ERNIE-4.5-21B-A3B-PT)
+  - [ERNIE-4.5-300B-A47B-PT](https://huggingface.co/baidu/ERNIE-4.5-300B-A47B-PT)
+  - [vLLM multi-node deployment](https://docs.vllm.ai/en/latest/serving/parallelism_scaling.html)

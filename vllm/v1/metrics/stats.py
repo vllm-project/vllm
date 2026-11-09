@@ -351,25 +351,25 @@ class RequestSpecDecodeMetrics:
     """Per-output-sequence speculative-decoding statistics accumulator.
 
     Accumulates, over one sequence's verify steps, a histogram of accepted
-    draft-token counts (``j``, draft-only) and the total number of proposed
-    draft tokens. When ``detailed`` is requested it also records the ordered
-    per-step accepted/proposed sequences (``summary`` omits them). Tracked per
-    engine ``Request`` (one per sampled sequence, so ``n > 1`` yields one per
-    child), surfaced via ``EngineCoreOutput`` and the response
-    ``metrics.speculative_decoding`` for single-sequence requests (see
-    ``to_dict``).
+    draft-token counts (`j`, draft-only) and the total number of proposed
+    draft tokens. When `detailed` is requested it also records the ordered
+    per-step accepted/proposed sequences (`summary` omits them). Tracked per
+    engine `Request` (one per sampled sequence, so `n > 1` yields one per
+    child), surfaced via `EngineCoreOutput` and the response
+    `metrics.speculative_decoding` for single-sequence requests (see
+    `to_dict`).
 
     Fields:
-        num_spec_tokens: Configured ``num_speculative_tokens`` (the max ``k``);
+        num_spec_tokens: Configured `num_speculative_tokens` (the max `k`);
             also the histogram's upper bound.
-        histogram: Dense counts indexed by accepted draft tokens ``j``
-            (length ``num_spec_tokens + 1``).
+        histogram: Dense counts indexed by accepted draft tokens `j`
+            (length `num_spec_tokens + 1`).
         num_draft_tokens: Total proposed draft tokens, after the
-            grammar-invalidated (``num_invalid_spec_tokens``) adjustment.
+            grammar-invalidated (`num_invalid_spec_tokens`) adjustment.
         per_step_accepted: Ordered accepted-draft count per verify step
-            (``detailed`` only; empty otherwise).
+            (`detailed` only; empty otherwise).
         per_step_drafted: Ordered proposed-draft count per verify step
-            (``detailed`` only; empty otherwise).
+            (`detailed` only; empty otherwise).
     """
 
     num_spec_tokens: int
@@ -395,13 +395,13 @@ class RequestSpecDecodeMetrics:
             self.per_step_drafted.append(num_draft_tokens)
 
     def to_dict(self) -> dict[str, Any]:
-        """Payload matching ``SpeculativeDecodingMetrics`` for the response.
+        """Payload matching `SpeculativeDecodingMetrics` for the response.
 
-        ``acceptance_histogram`` is a dense list indexed by accepted draft count
-        ``j`` (length ``num_spec_tokens + 1``). ``mean_acceptance_length``
-        includes the bonus token (``j + 1``); ``draft_acceptance_rate`` is
+        `acceptance_histogram` is a dense list indexed by accepted draft count
+        `j` (length `num_spec_tokens + 1`). `mean_acceptance_length`
+        includes the bonus token (`j + 1`); `draft_acceptance_rate` is
         draft-only, full precision. Per-step arrays are included only when
-        populated (``detailed`` level).
+        populated (`detailed` level).
         """
         num_spec_steps = sum(self.histogram)
         num_accepted = sum(j * count for j, count in enumerate(self.histogram))
@@ -476,6 +476,10 @@ class IterationStats:
 
     def __init__(self):
         self.iteration_timestamp = time.time()
+        # Read once per iteration: update_from_output runs per request per
+        # step, and each envs attribute access re-reads the environment
+        # in processes that never enable the envs cache (the API server).
+        self.compute_nans_in_logits = envs.VLLM_COMPUTE_NANS_IN_LOGITS
         self.num_generation_tokens = 0
         self.prompt_token_stats = PromptTokenStats()
         self.num_preempted_reqs = 0
@@ -527,11 +531,15 @@ class IterationStats:
         # Track if this request is corrupted (only check once per request)
         # Early exit if already marked as corrupted to avoid redundant checks
         if (
-            envs.VLLM_COMPUTE_NANS_IN_LOGITS
+            self.compute_nans_in_logits
             and not req_stats.is_corrupted
             and output.num_nans_in_logits > 0
         ):
             req_stats.is_corrupted = True
+
+        # EngineCore reports what it applied, including enforced opt-outs.
+        if output.watermarking is not None:
+            req_stats.is_watermarked = output.watermarking
 
         # Process request-level engine core events
         if output.events is not None:

@@ -169,6 +169,42 @@ def test_prepare_keeps_nonexpanded_layout_across_capture_transitions(
 
 
 @requires_deep_ep_v2
+def test_prepare_masks_tensor_wide_scale_after_nonexpanded_dispatch(monkeypatch):
+    """A tensor-wide scale must ignore uninitialized rows past the receive tail."""
+    tokens = torch.ones(3, 8, dtype=torch.bfloat16)
+    pf = _make_pf(tokens)
+    pf.defer_globalize = True
+    masked_scale = torch.ones(1)
+    quantize_scales: list[torch.Tensor] = []
+
+    def masked_amax_scale(expert_x, quant_dtype, *, num_valid):
+        assert num_valid.item() == 3
+        return masked_scale
+
+    def quantize_input(expert_x, scale, **kwargs):
+        quantize_scales.append(scale)
+        return expert_x, None
+
+    monkeypatch.setattr(_dv2, "masked_amax_scale", masked_amax_scale)
+    monkeypatch.setattr(_dv2, "moe_kernel_quantize_input", quantize_input)
+
+    recv = pf.prepare_async(
+        tokens,
+        torch.ones(3, 2),
+        torch.zeros(3, 2, dtype=torch.int64),
+        8,
+        None,
+        False,
+        FusedMoEQuantConfig.make(torch.float8_e4m3fn),
+        defer_input_quant=False,
+    )
+    recv()
+
+    assert len(quantize_scales) == 1
+    assert quantize_scales[0] is masked_scale
+
+
+@requires_deep_ep_v2
 def test_finalize_async_defers_join_to_receiver():
     out_src = torch.full((4, 8), 7.0, dtype=torch.bfloat16)
     pf = _make_pf(out_src)

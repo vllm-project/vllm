@@ -118,7 +118,7 @@ hadamard_transform_kernel(b16* a, b16* out, int total_num_chunks) {
     int64_t threadid = threadIdx.x % 32;
     extern __shared__ b32 bfrag_arr[]; // num_chunks * warps_per_block * 128
     int64_t real_num_chunks = ((blockid + 1) * num_chunks) > total_num_chunks ? (total_num_chunks - (blockid * num_chunks)) : num_chunks;
-    int64_t diff_num_chunks = real_num_chunks - num_chunks;
+    int64_t diff_num_chunks = num_chunks - real_num_chunks;
 
     b32* a_start_ptr = (b32*) (a + blockid * num_chunks * 256); // offset a to where this warp starts
     b32* out_start_ptr = (b32*) (out + blockid * num_chunks * 256);
@@ -135,6 +135,13 @@ hadamard_transform_kernel(b16* a, b16* out, int total_num_chunks) {
 
     #pragma unroll
     for (int64_t k = 0; k < num_chunks; k++) {
+        // The last warp may own fewer chunks than num_chunks: loading the
+        // rest would read past the end of `a`. The cp.async.wait_group counts
+        // below already assume only real_num_chunks groups were committed.
+        if constexpr(enable_mask) {
+            if (k >= real_num_chunks)
+                break;
+        }
         size_t shared_ptr = __cvta_generic_to_shared(b_frag_ptr);
         #if (__CUDA_ARCH__ >= 900) // SM90
             asm volatile(
@@ -382,6 +389,9 @@ hadamard_transform_kernel(b16* a, b16* out, int total_num_chunks) {
                         SWITCH_WAIT_ASYNC_LOAD_GROUP(29)
                         SWITCH_WAIT_ASYNC_LOAD_GROUP(30)
                         SWITCH_WAIT_ASYNC_LOAD_GROUP(31)
+                        default:
+                            asm volatile("cp.async.wait_group 0;\n");
+                            break;
                     }
                 } else {
                     switch(k) {
@@ -417,6 +427,9 @@ hadamard_transform_kernel(b16* a, b16* out, int total_num_chunks) {
                         SWITCH_WAIT_ASYNC_LOAD_GROUP(29)
                         SWITCH_WAIT_ASYNC_LOAD_GROUP(30)
                         SWITCH_WAIT_ASYNC_LOAD_GROUP(31)
+                        default:
+                            asm volatile("cp.async.wait_group 0;\n");
+                            break;
                     }
                 }
             }

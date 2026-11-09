@@ -15,9 +15,8 @@ from typing import Any
 import vllm.envs as envs
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient
+from vllm.entrypoints.common.cli_args import init_parser_plugin
 from vllm.logger import configure_logging_from_args, init_logger
-from vllm.reasoning import ReasoningParserManager
-from vllm.tool_parsers import ToolParserManager
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.system_utils import decorate_logs
 
@@ -51,7 +50,7 @@ async def build_async_engine_client(
     # Context manager to handle engine_client lifecycle
     # Ensures everything is shutdown and cleaned up on error/exit
     engine_args = AsyncEngineArgs.from_cli_args(args)
-    from ..cli_args import propagate_flash_late_interaction
+    from vllm.entrypoints.common.cli_args import propagate_flash_late_interaction
 
     propagate_flash_late_interaction(args, engine_args)
     if client_config:
@@ -181,11 +180,7 @@ async def run_server_worker(
     listen_address, sock, args, client_config=None, **uvicorn_kwargs
 ) -> None:
     """Run a single API server worker."""
-    if args.tool_parser_plugin and len(args.tool_parser_plugin) > 3:
-        ToolParserManager.import_tool_parser(args.tool_parser_plugin)
-
-    if args.reasoning_parser_plugin and len(args.reasoning_parser_plugin) > 3:
-        ReasoningParserManager.import_reasoning_parser(args.reasoning_parser_plugin)
+    init_parser_plugin(args)
 
     peer_loads = None
     if client_config and "api_server_loads" in client_config:
@@ -209,13 +204,12 @@ async def run_server_worker(
 def main():
     import uvloop
 
-    from vllm.entrypoints.serve.utils.api_utils import cli_env_setup
-    from vllm.utils.argparse_utils import FlexibleArgumentParser
-
-    from ..cli_args import (
+    from vllm.entrypoints.common.cli_args import (
         make_arg_parser,
         validate_parsed_serve_args,
     )
+    from vllm.entrypoints.common.startup import cli_env_setup
+    from vllm.utils.argparse_utils import FlexibleArgumentParser
 
     # NOTE(simon):
     # This section should be in sync with vllm/entrypoints/cli/main.py for CLI

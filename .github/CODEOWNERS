@@ -8,7 +8,7 @@
 /vllm/distributed/kv_transfer/kv_connector/v1/hisparse @MatthewBonanni @LucasWilkinson
 /vllm/lora @jeejeelee
 /vllm/model_executor/layers/attention @LucasWilkinson @MatthewBonanni
-/vllm/model_executor/layers/fused_moe @mgoin @pavanimajety @zyongye @wzhao18
+/vllm/model_executor/layers/fused_moe @mgoin @pavanimajety @zyongye @wzhao18 @bnellnm
 /vllm/model_executor/layers/quantization @mgoin @robertgshaw2-redhat @tlrmchlsmth @yewentao256 @pavanimajety @zyongye
 /vllm/model_executor/layers/mamba @tdoublep @tomeras91 @ZJY0516
 /vllm/model_executor/layers/mamba/gdn/qwen_gdn_linear_attn.py @tdoublep @ZJY0516 @vadiklyutiy
@@ -115,7 +115,6 @@
 /vllm/v1/executor @njhill
 /vllm/v1/worker @njhill
 /vllm/v1/worker/mamba_utils.py @njhill @ZJY0516
-/vllm/v1/worker/kv_connector_model_runner_mixin.py @orozery @NickLucche @ivanium
 /vllm/v1/worker/encoder_cudagraph.py @shen-shanshan
 /vllm/v1/worker/encoder_cudagraph_defs.py @shen-shanshan
 
@@ -123,6 +122,7 @@
 /vllm/v1/worker/gpu @WoosukKwon @njhill @yewentao256
 /vllm/v1/worker/gpu/kv_connector.py @orozery
 /vllm/v1/worker/gpu/model_states/mamba_hybrid.py @WoosukKwon @njhill @yewentao256 @ZJY0516
+/vllm/v1/worker/gpu/spec_decode @WoosukKwon @njhill @yewentao256 @TheEpicDolphin
 
 # CI & building
 /.buildkite @Harry-Chen @khluu
@@ -138,6 +138,7 @@
 /tests/evals @mgoin @vadiklyutiy @AndreasKaratzas @ZJY0516
 /tests/kernels @mgoin @tlrmchlsmth @WoosukKwon @yewentao256 @zyongye @AndreasKaratzas
 /tests/kernels/ir @ProExpertProg @tjtanaa
+/tests/kernels/moe @bnellnm
 /tests/models @DarkLight1337 @ywang96 @AndreasKaratzas
 /tests/multimodal @DarkLight1337 @ywang96 @NickLucche @shen-shanshan
 /tests/multimodal/media @Isotr0py
@@ -164,10 +165,14 @@
 .readthedocs.yaml @hmellor
 mkdocs.yaml @hmellor
 
+# Model recipes
+/recipes @esmeetu
+
 # Linting
 /tools/pre_commit/.markdownlint.yaml @hmellor
 .pre-commit-config.yaml @hmellor
 /tools/pre_commit @hmellor
+/tools/pre_commit/*_allowlist.txt
 
 # CPU
 /vllm/v1/worker/cpu* @bigPYJ1151 @xuechendi
@@ -214,7 +219,8 @@ mkdocs.yaml @hmellor
 /vllm/v1/attention/ops/triton_unified_attention.py @tdoublep
 /vllm/third_party/flash_linear_attention @ZJY0516 @vadiklyutiy
 /vllm/model_executor/layers/mamba/ops/gdn_chunk_cutedsl @gau-nernst
-/vllm/model_executor/layers/fused_moe/router/bf16x3_router_gemm_cutedsl.py @gau-nernst
+/vllm/model_executor/layers/fused_moe/router/bf16x3_router_gemm_sm100.py @gau-nernst
+/vllm/model_executor/layers/fused_moe/router/bf16x3_router_gemm_sm90.py @gau-nernst
 /vllm/model_executor/kernels/linear/cute_dsl/gemm_rs_ar.py @gau-nernst
 /vllm/cute_utils @gau-nernst
 
