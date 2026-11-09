@@ -3,7 +3,7 @@
 """Tests for the deferred-patch helper used by vllm/env_override.py.
 
 The Inductor backports in env_override.py are applied lazily, right after
-the patched torch module is imported, so that ``import vllm`` does not pull
+the patched torch module is imported, so that `import vllm` does not pull
 in the Inductor stack. These tests use a throwaway module instead of torch so
 they run regardless of which backports the installed torch version needs.
 """

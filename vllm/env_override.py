@@ -776,18 +776,18 @@ def _apply_cpp_indirect_assert_patch():
 
 
 def _run_after_module_import(module_name: str, callback: Callable[[], None]) -> None:
-    """Run ``callback`` right after ``module_name`` has been imported.
+    """Run `callback` right after `module_name` has been imported.
 
-    If the module is already in ``sys.modules`` the callback runs now.
-    Otherwise a ``MetaPathFinder`` wraps the module loader's ``exec_module``
+    If the module is already in `sys.modules` the callback runs now.
+    Otherwise a `MetaPathFinder` wraps the module loader's `exec_module`
     so the callback runs right after the module body has finished executing,
     before the import machinery hands the module back to the importer. This
-    lets ``vllm.env_override`` patch Inductor internals without importing the
-    Inductor stack eagerly during ``import vllm`` (~0.5-0.75 s, >1400
+    lets `vllm.env_override` patch Inductor internals without importing the
+    Inductor stack eagerly during `import vllm` (~0.5-0.75 s, >1400
     modules), which only processes that actually compile should pay.
 
-    The finder stays on ``sys.meta_path`` until the callback has run: a bare
-    ``importlib.util.find_spec(module_name)`` probe also consults it without
+    The finder stays on `sys.meta_path` until the callback has run: a bare
+    `importlib.util.find_spec(module_name)` probe also consults it without
     importing anything, and must not use it up before the real import.
     """
     import sys
