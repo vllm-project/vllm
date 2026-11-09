@@ -613,7 +613,8 @@ fn render_fake_content(content: &ChatContent, placeholder: &str) -> vllm_chat::R
             let mut out = String::new();
             for part in parts {
                 match part {
-                    ChatContentPart::Text { text } => out.push_str(text),
+                    ChatContentPart::Text { text }
+                    | ChatContentPart::ToolReference { name: text } => out.push_str(text),
                     ChatContentPart::ImageUrl { .. }
                     | ChatContentPart::VideoUrl { .. }
                     | ChatContentPart::InputAudio { .. }
@@ -749,7 +750,8 @@ async fn test_models_with_engine_outputs_and_backend_inner(
     .expect("connect client");
 
     (
-        ChatLlm::from_shared_backend(test_llm(client), backend),
+        ChatLlm::from_shared_backend(test_llm(client), backend)
+            .with_served_model_name("test-model"),
         engine_task,
     )
 }
@@ -3379,13 +3381,19 @@ async fn request_metrics_use_served_model_name_label() {
         engine_id.clone(),
         |dealer, push| {
             boxed_test_future(async move {
-                let add = recv_engine_message(dealer).await;
-                let request = decode_add_request(&add);
-                send_outputs(
-                    push,
-                    engine_outputs_for_request(&request.request_id, default_stream_output_specs()),
-                )
-                .await;
+                // One chat, one completion and one Responses request.
+                for _ in 0..3 {
+                    let add = recv_engine_message(dealer).await;
+                    let request = decode_add_request(&add);
+                    send_outputs(
+                        push,
+                        engine_outputs_for_request(
+                            &request.request_id,
+                            default_stream_output_specs(),
+                        ),
+                    )
+                    .await;
+                }
             })
         },
     ));
@@ -3400,7 +3408,8 @@ async fn request_metrics_use_served_model_name_label() {
     )
     .await
     .expect("connect client");
-    let chat = ChatLlm::from_shared_backend(test_llm(client), Arc::new(FakeChatBackend::new()));
+    let chat = ChatLlm::from_shared_backend(test_llm(client), Arc::new(FakeChatBackend::new()))
+        .with_served_model_name("served-model-metrics");
     let mut app = build_router(Arc::new(AppState::new(
         vec![
             "served-model-metrics".to_string(),
@@ -3409,6 +3418,28 @@ async fn request_metrics_use_served_model_name_label() {
         chat,
     )));
     let before = METRICS.render().unwrap();
+
+    // A failed render is not recorded: the fake renderer cannot render a
+    // request chat template.
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "served-model-alias",
+                        "messages": [{"role": "user", "content": "hello"}],
+                        "chat_template": "{{ messages }}"
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 
     let response = app
         .call(
@@ -3432,6 +3463,49 @@ async fn request_metrics_use_served_model_name_label() {
     assert_eq!(response.status(), StatusCode::OK);
     let _ = to_bytes(response.into_body(), usize::MAX).await.unwrap();
 
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "served-model-alias",
+                        "prompt": "hello"
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let _ = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+
+    // Responses renders through the chat renderer, so it counts as `chat`.
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/responses")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "served-model-alias",
+                        "input": "hello"
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let _ = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+
     let after = METRICS.render().unwrap();
     assert_eq!(
         metric_delta(
@@ -3440,8 +3514,22 @@ async fn request_metrics_use_served_model_name_label() {
             "vllm:request_success_total",
             Some("model_name=\"served-model-metrics\",engine=\"0\",finished_reason=\"stop\""),
         ),
-        1.0
+        3.0
     );
+    for (request_type, count) in [("chat", 2.0), ("completion", 1.0)] {
+        assert_eq!(
+            metric_delta(
+                &before,
+                &after,
+                "vllm:request_render_duration_seconds_count",
+                Some(&format!(
+                    "model_name=\"served-model-metrics\",request_type=\"{request_type}\""
+                )),
+            ),
+            count,
+            "{request_type}"
+        );
+    }
     engine_task.await.expect("mock engine task");
 }
 
