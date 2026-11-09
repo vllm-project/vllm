@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Adapters that expose :class:`ParserEngine` through the legacy
-:class:`ReasoningParser` and :class:`ToolParser` interfaces.
+"""Adapters that expose `ParserEngine` through the legacy
+`ReasoningParser` and `ToolParser` interfaces.
 
 This lets parser engines flow through the existing serving-layer code
 paths that expect separate reasoning and tool parser instances, without
@@ -33,12 +33,12 @@ if TYPE_CHECKING:
 
 
 class ParserEngineReasoningAdapter(ReasoningParser):
-    """Adapts a :class:`ParserEngine` to the :class:`ReasoningParser`
+    """Adapts a `ParserEngine` to the `ReasoningParser`
     interface so parser engines can be used as reasoning parsers in the
     existing serving code.
 
-    Subclasses set :attr:`_parser_engine_cls` to the concrete
-    :class:`ParserEngine` class.
+    Subclasses set `_parser_engine_cls` to the concrete
+    `ParserEngine` class.
     """
 
     _parser_engine_cls: type[ParserEngine]
@@ -171,23 +171,23 @@ class ParserEngineReasoningAdapter(ReasoningParser):
 
 
 class ParserEngineToolAdapter(ToolParser):
-    """Adapts a :class:`ParserEngine` to the :class:`ToolParser` interface.
+    """Adapts a `ParserEngine` to the `ToolParser` interface.
 
-    :meth:`extract_tool_calls` starts the parser engine in ``CONTENT``
+    `extract_tool_calls` starts the parser engine in `CONTENT`
     state so it can parse reasoning-stripped content (i.e. the output of
-    :meth:`ReasoningParser.extract_reasoning`).
+    `ReasoningParser.extract_reasoning`).
 
     When no reasoning parser is configured at the serving layer, the
-    owning :class:`~vllm.parser.abstract_parser.Parser` sets
-    :attr:`skip_reasoning_parsing` so reasoning markup — plain content
+    owning `Parser` sets
+    `skip_reasoning_parsing` so reasoning markup — plain content
     in that configuration — passes through verbatim instead of being
     consumed or reclassified by the engine. The engine honors the flag
     only for markers that are reasoning-exclusive in its config; a
     grammar like Inkling, whose block closer is shared with text and
     tool blocks, keeps parsing unchanged.
 
-    Subclasses set :attr:`_parser_engine_cls` to the concrete
-    :class:`ParserEngine` class.
+    Subclasses set `_parser_engine_cls` to the concrete
+    `ParserEngine` class.
     """
 
     _parser_engine_cls: type[ParserEngine]

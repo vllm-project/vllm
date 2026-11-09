@@ -180,3 +180,18 @@ def test_hc_up_gate_mix(num_tokens: int) -> None:
     expected = hc_gate_mix(xn, F.linear(lowrank, w_up), HC)
 
     torch.testing.assert_close(actual, expected, atol=1e-2, rtol=1e-2)
+
+
+def test_hc_padding_shard_is_not_expected_from_checkpoints(dist_init) -> None:
+    """Checkpoints carry only the down and block-inject rows, not the padding."""
+    from vllm.models.qwen4_exp.common.hyperconnection import HyperConnectionConfig
+    from vllm.models.qwen4_exp.nvidia.hyperconnection import GatedResidual
+
+    hc = GatedResidual(HyperConnectionConfig())
+    assert hc.pad_size > 0
+    linear = hc.input_mix_weight_down_block_inject
+    for shard_id, rows in ((0, hc.hc_lowrank), (1, hc.hc_count)):
+        weight = torch.ones(rows, hc.hyper_hidden_size)
+        weight.shard_id = shard_id
+        set(linear.load_weights([("weight", weight)]))
+    assert linear.pop_missing_shards() == []

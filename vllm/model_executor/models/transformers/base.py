@@ -68,10 +68,10 @@ from vllm.model_executor.models.transformers.fusers.attention import (
 from vllm.model_executor.models.transformers.utils import (
     attrsetter,
     can_enable_torch_compile,
-    disable_noop_dynamic_rope,
     get_feature_request_tip,
     init_on_device_without_buffers,
     log_replacement,
+    maybe_disable_dynamic_rope_update,
     named_state,
     replace_conv_class,
     replace_embedding_class,
@@ -118,9 +118,6 @@ class Base(
     SupportsEagle3,
 ):
     hf_to_vllm_mapper: WeightsMapper
-
-    # TODO transformers will have a util to get these
-    embedding_modules = {"embed_tokens": "input_embeddings"}
 
     def __init__(self, *, vllm_config: "VllmConfig", prefix: str = ""):
         nn.Module.__init__(self)
@@ -185,12 +182,21 @@ class Base(
         ):
             self.model: PreTrainedModel = self._create_model()
 
+        # LoRA matches embeddings by the last part of their name, which varies by model
+        input_embeddings = set(self.model.get_input_embeddings().modules())
+        embedding_modules = {
+            name.rpartition(".")[2]: "input_embeddings"
+            for name, module in self.model.named_modules()
+            if module in input_embeddings and isinstance(module, nn.Embedding)
+        }
+        self.embedding_modules = self.embedding_modules | embedding_modules
+
         # Create weight name to module qualname mapper
         self._create_hf_to_vllm_mapper()
         # Remove layers not on this pipeline parallel rank
         self.pipeline_parallel()
-        # Skip the device sync of dynamic rope where it can never rescale
-        disable_noop_dynamic_rope(self.model.get_decoder(), vllm_config)
+        # Skip the device sync of rope updates where `inv_freq` can be fixed
+        maybe_disable_dynamic_rope_update(self.model.get_decoder(), vllm_config)
         # Substitute remaining layers with vLLM's layers as needed
         self.recursive_replace()
         # Create attention instances for KV cache allocation
@@ -718,10 +724,8 @@ class Base(
         # In encoder models, the attention layers will have `is_causal=False`
         is_encoder = lambda module: not getattr(module, "is_causal", True)
         has_encoder = lambda model: any(is_encoder(m) for m in model.modules())
-        is_multimodal = lambda config: config != config.get_text_config()
-        # vLLM does not support encoder-decoder models, so if any encoder layer is
-        # found in a text only model, we assume the whole model is an encoder model
-        if has_encoder(self.model) and not is_multimodal(self.config):
+        # A VLM's text model may be bidirectional over the multimodal prefix
+        if has_encoder(self.model) and not self.model_config.is_multimodal_model:
             return EncoderOnlyAttention
         if self.model_config.use_mla:
             if any(

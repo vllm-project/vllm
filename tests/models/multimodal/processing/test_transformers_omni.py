@@ -146,7 +146,7 @@ def test_omni_multimodal_processor(model_id):
     for modality in _modalities(model_id):
         assert len(result["mm_placeholders"][modality]) == 1
         assert len(result["mm_kwargs"][modality]) == 1
-    assert info.get_max_audio_tokens() > 0
+    assert info.get_max_audio_tokens(info.ctx.model_config.max_model_len) > 0
 
     hf_inputs = hf_processor(text=prompt, **_hf_mm_kwargs(mm_data), return_tensors="pt")
     assert result["prompt_token_ids"] == hf_inputs["input_ids"][0].tolist()
