@@ -233,9 +233,8 @@ class Scheduler(SchedulerInterface):
         # self.waiting: a block-holder must never sit behind a request whose
         # failed allocation would stop the scheduling scan.
         self.kv_holding_waiting = create_request_queue(self.policy)
-        # With --max-num-inflight-kv-loads, requests that may load KV async but
-        # haven't started, kept apart so their loads can start while the batch
-        # is full without scanning past requests that need a running slot.
+        # With either async-load limit, keep requests that may load KV async
+        # separate so throttling their loads doesn't block local requests.
         self.async_kv_waiting = create_request_queue(self.policy)
         # Waiting requests that are deferred, i.e. were skipped by the scheduling
         # scan or enqueued in a blocked status.
@@ -1093,7 +1092,11 @@ class Scheduler(SchedulerInterface):
                     request_queue = self.kv_holding_waiting
                     if not request_queue and self._pause_state == PauseState.UNPAUSED:
                         request_queue = self._next_waiting_queue(take_async_kv)
-                elif take_async_kv and self._pause_state == PauseState.UNPAUSED:
+                elif (
+                    take_async_kv
+                    and self.scheduler_config.max_num_inflight_kv_loads
+                    and self._pause_state == PauseState.UNPAUSED
+                ):
                     # No running slot or token budget left: start async KV loads
                     # only, which take neither until their KV has arrived.
                     request_queue = self.async_kv_waiting
@@ -2772,7 +2775,10 @@ class Scheduler(SchedulerInterface):
             self.kv_holding_waiting.add_request(request)
         elif (
             self.connector is not None
-            and self.scheduler_config.max_num_inflight_kv_loads
+            and (
+                self.scheduler_config.max_num_inflight_kv_loads
+                or self.scheduler_config.max_async_kv_loads_per_step
+            )
             and self.connector.may_load_async(request)
         ):
             self.async_kv_waiting.add_request(request)
