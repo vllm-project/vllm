@@ -192,7 +192,7 @@ class Base(
         # Create weight name to module qualname mapper
         self._create_hf_to_vllm_mapper()
         # Remove layers not on this pipeline parallel rank
-        self.start_layer, _ = self._pp_indices()
+        self.start_layer, self.end_layer = self._pp_indices()
         self.pipeline_parallel()
         # Skip the device sync of rope updates where `inv_freq` can be fixed
         maybe_disable_dynamic_rope_update(self.model.get_decoder(), vllm_config)
