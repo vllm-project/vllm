@@ -93,6 +93,9 @@ def moe_mmk(
     stride_am: tl.int64 = 0,
     stride_bn: tl.int64 = 0,
     USE_TD: tl.constexpr = False,
+    b_bias_ptr=None,
+    stride_bias_e: tl.constexpr = 0,
+    stride_bias_n: tl.constexpr = 0,
 ):
     offs_k = tl.arange(0, BLOCK_K)
 
@@ -182,16 +185,15 @@ def moe_mmk(
         b_ptrs += BLOCK_K * stride_bk
 
     if use_w8a16:
-        accumulator = (accumulator * b_scale).to(compute_type)
-    elif use_w8a8:
-        if group_k > 0 and group_n > 0:
-            accumulator = accumulator.to(compute_type)
-        else:
-            accumulator = (accumulator * a_scale * b_scale).to(compute_type)
-    else:
-        accumulator = accumulator.to(compute_type)
+        accumulator *= b_scale
+    elif use_w8a8 and not (group_k > 0 and group_n > 0):
+        accumulator = accumulator * a_scale * b_scale
 
-    return accumulator
+    if b_bias_ptr is not None:
+        bias = tl.load(b_bias_ptr + expert_id * stride_bias_e + offs_bn * stride_bias_n)
+        accumulator += bias[None, :]
+
+    return accumulator.to(compute_type)
 
 
 @triton.jit
@@ -236,6 +238,9 @@ def expert_triton_kernel(
     BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
     USE_TD: tl.constexpr = False,
+    b_bias_ptr=None,
+    stride_bias_e: tl.constexpr = 0,
+    stride_bias_n: tl.constexpr = 0,
 ):
     offs_m = tl.arange(0, BLOCK_M)
     offs_n = tl.arange(0, BLOCK_N) % N
@@ -288,6 +293,9 @@ def expert_triton_kernel(
         stride_am,
         stride_bn,
         USE_TD,
+        b_bias_ptr,
+        stride_bias_e,
+        stride_bias_n,
     )
 
     # store in C
@@ -343,6 +351,9 @@ def batched_triton_kernel(
     BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
     USE_TD: tl.constexpr = False,
+    b_bias_ptr=None,
+    stride_bias_e: tl.constexpr = 0,
+    stride_bias_n: tl.constexpr = 0,
 ):
     expert_id = tl.program_id(axis=0)
     e_num_tokens = tl.load(expert_num_tokens + expert_id)
@@ -424,6 +435,9 @@ def batched_triton_kernel(
         BLOCK_N,
         BLOCK_K,
         USE_TD,
+        b_bias_ptr,
+        stride_bias_e,
+        stride_bias_n,
     )
 
 
@@ -473,6 +487,9 @@ def batched_triton_kernel_swapped(
     BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
     USE_TD: tl.constexpr = False,
+    b_bias_ptr=None,
+    stride_bias_e: tl.constexpr = 0,
+    stride_bias_n: tl.constexpr = 0,
 ):
     # axis 0 is M_blocks * N_blocks
     pid_mn = tl.program_id(axis=0)
@@ -554,6 +571,9 @@ def batched_triton_kernel_swapped(
         BLOCK_N,
         BLOCK_K,
         USE_TD,
+        b_bias_ptr,
+        stride_bias_e,
+        stride_bias_n,
     )
 
 
@@ -593,6 +613,7 @@ def invoke_moe_batched_triton_kernel(
     config: dict[str, int],
     per_act_token_quant: bool,
     block_shape: list[int] | None = None,
+    B_bias: torch.Tensor | None = None,
 ):
     assert not use_int4_w4a16
     max_num_tokens = A.size(1)
@@ -711,6 +732,9 @@ def invoke_moe_batched_triton_kernel(
         BLOCK_N=BLOCK_N,
         BLOCK_K=BLOCK_K,
         USE_TD=use_td,
+        b_bias_ptr=B_bias,
+        stride_bias_e=0 if B_bias is None else B_bias.stride(0),
+        stride_bias_n=0 if B_bias is None else B_bias.stride(1),
         **launch_options,
     )
 
@@ -1144,6 +1168,7 @@ class BatchedTritonExperts(mk.FusedMoEExpertsModular):
             A_scale=a1q_scale,
             B_scale=self.w1_scale,
             B_zp=self.w1_zp,
+            B_bias=self.w1_bias,
             use_fp8_w8a8=self.quant_config.use_fp8_w8a8,
             use_int8_w8a16=self.quant_config.use_int8_w8a16,
             use_int4_w4a16=self.quant_config.use_int4_w4a16,
@@ -1190,6 +1215,7 @@ class BatchedTritonExperts(mk.FusedMoEExpertsModular):
             A_scale=a2q_scale,
             B_scale=self.w2_scale,
             B_zp=self.w2_zp,
+            B_bias=self.w2_bias,
             use_fp8_w8a8=self.quant_config.use_fp8_w8a8,
             use_int8_w8a16=self.quant_config.use_int8_w8a16,
             use_int4_w4a16=self.quant_config.use_int4_w4a16,

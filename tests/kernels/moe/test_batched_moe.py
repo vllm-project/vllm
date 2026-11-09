@@ -22,9 +22,14 @@ from vllm.model_executor.layers.fused_moe.activation import (
     MoEActivation,
     apply_moe_activation,
 )
+from vllm.model_executor.layers.fused_moe.config import biased_moe_quant_config
 from vllm.model_executor.layers.fused_moe.experts.fused_batched_moe import (
     BatchedTritonExperts,
     invoke_moe_batched_triton_kernel,
+)
+from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEKernel
+from vllm.model_executor.layers.fused_moe.prepare_finalize.batched import (
+    BatchedPrepareAndFinalize,
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl
@@ -787,6 +792,91 @@ def test_batched_experts_end_to_end(m, n, k, e, topk):
         triton_output = batched_moe(a, w1, w2, topk_weight, topk_ids)
 
     torch.testing.assert_close(triton_output, baseline_output, atol=3e-2, rtol=2e-2)
+
+
+@pytest.mark.parametrize(
+    ("bias_part", "cancellation"),
+    [
+        ("none", False),
+        ("up", False),
+        ("down", False),
+        pytest.param("up", True, id="up-cancellation"),
+        pytest.param("down", True, id="down-cancellation"),
+    ],
+)
+@pytest.mark.parametrize("activation", [MoEActivation.SILU, MoEActivation.SWIGLUOAI])
+def test_batched_experts_preserve_bias(bias_part, cancellation, activation):
+    """Both expert biases must be applied before rounding the GEMM output."""
+    from vllm.v1.worker.workspace import init_workspace_manager
+
+    device = current_platform.device_type
+    init_workspace_manager(torch.device(f"{device}:0"))
+    m, e, n, k = 3, 2, 128, 128
+    x = torch.zeros((m, k), device=device, dtype=torch.bfloat16)
+    w1 = torch.zeros((e, 2 * n, k), device=device, dtype=x.dtype)
+    w2 = torch.zeros((e, k, n), device=device, dtype=x.dtype)
+    b1 = (
+        torch.ones((e, 2 * n), device=device, dtype=x.dtype)
+        if bias_part == "up"
+        else None
+    )
+    b2 = (
+        torch.arange(e * k, device=device, dtype=torch.float32).view(k, e).T
+        if bias_part == "down"
+        else None
+    )
+    expected_value = 0.0
+    if bias_part == "up" or cancellation:
+        value = torch.tensor(0.25 if cancellation and bias_part == "up" else 1.0)
+        if activation == MoEActivation.SILU:
+            activated = torch.nn.functional.silu(value) * value
+        else:
+            activated = value * torch.sigmoid(1.702 * value) * (value + 1)
+        activated_value = activated.to(x.dtype).item()
+    if bias_part == "up":
+        w2.copy_(torch.eye(k, device=device, dtype=x.dtype).expand_as(w2))
+        expected_value = activated_value
+        if cancellation:
+            x.fill_(1)
+            w1.fill_(1)
+            w1[:, :, 0] = 1.25
+            assert b1 is not None
+            b1.fill_(-128)
+    elif cancellation:
+        b1 = torch.ones((e, 2 * n), device=device, dtype=x.dtype)
+        w2.fill_(1)
+        w2[:, :, 0] = 1.25
+        assert b2 is not None
+        b2.fill_(-128 * activated_value)
+        expected_value = activated_value / 4
+    expected = torch.full_like(x, expected_value)
+    if b2 is not None and not cancellation:
+        expected.copy_(b2[[0, 1, 0]])
+    config = make_dummy_moe_config(
+        num_experts=e,
+        experts_per_token=1,
+        hidden_dim=k,
+        intermediate_size=n,
+        activation=activation,
+    )
+    config.has_bias = bias_part != "none"
+    kernel = FusedMoEKernel(
+        BatchedPrepareAndFinalize(64, num_dispatchers=1, num_local_experts=e, rank=0),
+        BatchedTritonExperts(config, biased_moe_quant_config(b1, b2), 64, 1),
+    )
+    with set_current_vllm_config(vllm_config):
+        actual = kernel.apply(
+            x,
+            w1,
+            w2,
+            torch.ones((m, 1), device=device, dtype=torch.float32),
+            torch.tensor([[0], [1], [0]], device=device, dtype=torch.int32),
+            activation=activation,
+            apply_router_weight_on_input=False,
+            global_num_experts=e,
+            expert_map=None,
+        )
+    torch.testing.assert_close(actual, expected, atol=0, rtol=0)
 
 
 def test_batched_triton_backend_mapping():
