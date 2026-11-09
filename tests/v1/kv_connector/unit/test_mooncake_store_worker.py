@@ -5445,10 +5445,11 @@ def test_lookup_applies_swa_mask_before_accessing_hashes():
 
     worker.lookup(96, block_hashes)
 
-    # Full-attention chunks (compact hashes at 3, 7, 11) plus only the reachable
-    # SWA boundary tails (chunks 3, 7, 11) are hash-accessed. Every masked SWA
-    # chunk in between is skipped before both the hash access and key build.
-    assert accessed_before_rpc == [3, 7, 11, 3, 7, 11]
+    # Full-attention chunks (compact hashes at 3, 7, 11) and only the reachable
+    # SWA boundary tails (chunks 3, 7, 11) need hashes, each accessed once. Every
+    # masked SWA chunk in between is skipped before both the hash access and key
+    # build.
+    assert accessed_before_rpc == [3, 7, 11]
 
 
 # ---------------------------------------------------------------------------

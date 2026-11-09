@@ -24,6 +24,7 @@ from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from typing import Any, Literal, TypeVar, cast
 
+import numpy as np
 import torch
 import zmq
 
@@ -2474,10 +2475,13 @@ class MooncakeStoreWorker:
         if not block_hashes or token_len <= 0:
             return MooncakeLookupResult(0)
 
-        # Build per-(group, hash) candidate keys expanded across rank namespaces.
-        # candidate_meta stores (group, hash_bytes, end_token) for each key slice.
+        # Build per-(group, unit) candidate keys expanded across rank namespaces,
+        # in bulk: this runs on the worker process, where holding the GIL stalls
+        # model kernel launches, and fine-grained hits give a long prompt tens of
+        # thousands of candidates. candidates holds (group, end_tokens, hash_idx).
         candidate_keys: list[str] = []
-        candidate_meta: list[tuple[int, bytes, int]] = []
+        candidates: list[tuple[int, np.ndarray, np.ndarray]] = []
+        hash_hex: dict[int, str] = {}
         fine_grained = self.coord.enable_partial_hash_hits
         lookup_masks = None if fine_grained else self.coord.lookup_mask(token_len)
         for g_idx, db in enumerate(self.token_dbs):
@@ -2490,20 +2494,27 @@ class MooncakeStoreWorker:
             max_units = (
                 min(token_len, len(block_hashes) * self.hash_block_size) // unit_size
             )
-            for unit_id in range(max_units):
-                block_id = unit_id * unit_size // spec_block_size
-                if lookup_mask is not None and (
-                    block_id >= len(lookup_mask) or not lookup_mask[block_id]
-                ):
-                    continue
-                end_token = (unit_id + 1) * unit_size
-                h = block_hashes[end_token // self.hash_block_size - 1]
-                hash_hex = h.hex()
-                for key_prefix in key_prefixes:
-                    candidate_keys.append(
-                        PoolKey.build_key_string(key_prefix, hash_hex)
-                    )
-                candidate_meta.append((g_idx, bytes(h), end_token))
+            end_tokens = np.arange(1, max_units + 1) * unit_size
+            if lookup_mask is not None:
+                block_ids = (end_tokens - unit_size) // spec_block_size
+                keep = block_ids < len(lookup_mask)
+                keep[keep] = np.asarray(lookup_mask, dtype=bool)[block_ids[keep]]
+                end_tokens = end_tokens[keep]
+            if len(end_tokens) == 0:
+                continue
+            hash_idx = end_tokens // self.hash_block_size - 1
+            idx = hash_idx.tolist()
+            hash_hex.update(
+                (i, block_hashes[i].hex())
+                for i in dict.fromkeys(idx)
+                if i not in hash_hex
+            )
+            candidate_keys += [
+                PoolKey.build_key_string(key_prefix, hash_hex[i])
+                for i in idx
+                for key_prefix in key_prefixes
+            ]
+            candidates.append((g_idx, end_tokens, hash_idx))
 
         if not candidate_keys:
             return MooncakeLookupResult(0)
@@ -2535,24 +2546,28 @@ class MooncakeStoreWorker:
         # A (group, hash) is "present" only when every namespace that will be
         # loaded has it (per-group count: sharded groups need every rank's
         # shard, replicated groups one namespace per unique KV head).
+        res_present = np.asarray(res) == 1
         exists_set = set()
         pos = 0
-        previous_page = None
-        preceding_chunks_present = True
-        for g_idx, hash_bytes, end_token in candidate_meta:
+        for g_idx, end_tokens, hash_idx in candidates:
             spec_block_size = self._kv_cache_groups[g_idx].kv_cache_spec.block_size
-            page = (g_idx, (end_token - 1) // spec_block_size)
-            if page != previous_page:
-                preceding_chunks_present = True
-                previous_page = page
             count = len(self._lookup_key_prefixes[g_idx])
-            present = all(res[pos + j] == 1 for j in range(count))
-            # A page-prefix hit covers every Store chunk before its final chunk.
-            if preceding_chunks_present and present:
-                exists_set.add((g_idx, hash_bytes))
-            if end_token % self.token_dbs[g_idx].chunk_size == 0:
-                preceding_chunks_present &= present
-            pos += count
+            n = len(end_tokens)
+            present = res_present[pos : pos + n * count].reshape(n, count).all(axis=1)
+            pos += n * count
+            # A page-prefix hit covers every Store chunk before its final chunk:
+            # a unit counts only if no chunk end before it on its page is missing.
+            missing_chunk_end = ~present & (
+                end_tokens % self.token_dbs[g_idx].chunk_size == 0
+            )
+            missing_before = np.cumsum(missing_chunk_end) - missing_chunk_end
+            page = (end_tokens - 1) // spec_block_size
+            new_page = np.r_[True, page[1:] != page[:-1]]
+            page_first = np.maximum.accumulate(np.where(new_page, np.arange(n), 0))
+            hit = present & (missing_before == missing_before[page_first])
+            exists_set.update(
+                (g_idx, bytes(block_hashes[i])) for i in hash_idx[hit].tolist()
+            )
 
         hit, load_masks = self._longest_hit(
             num_tokens, token_len, block_hashes, exists_set
