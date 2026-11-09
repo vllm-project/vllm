@@ -280,6 +280,8 @@ def _resolve(**settings):
     [
         (None, None, None),
         ("use_pp", True, "pipeline parallelism (no tree path broadcast)" + _LOWERED),
+        ("pcp_manager", object(), "prefill context parallelism" + _LOWERED),
+        ("dcp_size", 2, "decode context parallelism" + _LOWERED),
         (
             "parallel_config",
             ParallelConfig(enable_dbo=True),
