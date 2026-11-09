@@ -88,7 +88,7 @@ Rows are labelled with the version of the forward that computed them, stamped wh
 ## Encodings
 
 - R3: uint16 ids (384 experts); 9-bit packing would save 7 of 16 bits (44%).
-- Top-k: int32 ids plus fp32 logprobs, k = 128: 1 KB per generated token, through the store in generated chunks (W3); inline it cost 46.8% of rollout time at k = 128 and is not recommended. Narrower fields (17-bit ids, bf16 logprobs) would about halve it and are not used. Mask: CSR.
+- Top-k: int32 ids plus fp32 logprobs, k = 128: 1 KB per generated token, through the store in generated chunks (W3); returned in the response through vLLM's frontend instead it cost 46.8% of rollout time, so aux delivers top-k only through the store. Narrower fields (17-bit ids, bf16 logprobs) would about halve it and are not used. Mask: CSR.
 - Indexer: 20-bit packing plus zstd, 4.6–6.7× up to 128K context and ~2.9× at 512K; packing on the GPU, zstd on the host. The codec in use stores each cell's ascending positions as deltas split into byte planes before zstd (experiments X6).
 - Hidden: the exact `lm_head` input, uncompressed.
 - Every field carries a codec name.

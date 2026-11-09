@@ -2,7 +2,7 @@
 
 The reader library is the one supported way to read a rollout's aux outputs from the store. It is `oc_reader.py` under `tools/rl_aux_output/` on the implementation branch (README, Status). It depends on numpy and zstandard; `ml_dtypes` is optional and only needed to get bf16 hidden states as numbers.
 
-It is for store mode; inline mode returns rows in the response (protocol §12). This contract covers R3, the indexer and hidden states. Top-k logprobs are stored like hidden states (protocol §1); their reader support is part of the implementation branch and returns, per request, `[generated length, 128]` int32 ids and `[generated length, 128]` fp32 logprobs for positions `[hidden_start, n_rows)`. The sampling mask is not in the reader.
+It is for store mode; inline mode returns R3 rows with each completion (protocol §12). This contract covers R3, the indexer and hidden states. Top-k logprobs are stored like hidden states (protocol §1); their reader support is part of the implementation branch and returns, per request, `[generated length, 128]` int32 ids and `[generated length, 128]` fp32 logprobs for positions `[hidden_start, n_rows)`. The sampling mask is not in the reader.
 
 ```python
 sample = read_sample(get, manifest_key, n_rows, want=("r3", "indexer", "hidden"), strict=False,

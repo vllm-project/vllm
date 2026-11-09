@@ -18,7 +18,7 @@ The sampled token's logprob is returned inline with the response; that number is
 
 **Hidden states are exact.** They are stored as the very values that entered `lm_head`, so the trainer's full-vocabulary logits differ from the engine's only by its own matmul (logprob error max 7.8e-4).
 
-**Top-k logprobs.** k = 128, at generated positions only, delivered through the store like hidden states: captured on the GPU at sampling, written in generated chunks per request (§4), and read back as `[generated length, 128]` int32 ids plus `[generated length, 128]` fp32 logprobs. On the bounded-replay build with partial capture, k = 128 through the store took 1,202.4 s against 1,236.3 s without top-k on the one-node 14.6K workload (same node; no measurable cost), and the stored logprob of the sampled token equals the inline one exactly. Returning k = 128 inline from the frontend instead made rollouts 46.8% longer on the same build and workload, so inline top-k is not recommended (experiments: top-k logprobs).
+**Top-k logprobs.** k = 128, at generated positions only, delivered through the store like hidden states: captured on the GPU at sampling, written in generated chunks per request (§4), and read back as `[generated length, 128]` int32 ids plus `[generated length, 128]` fp32 logprobs. On the bounded-replay build with partial capture, k = 128 through the store took 1,202.4 s against 1,236.3 s without top-k on the one-node 14.6K workload (same node; no measurable cost), and the stored logprob of the sampled token equals the inline one exactly. Returning k = 128 in the response through vLLM's frontend instead made rollouts 46.8% longer on the same build and workload, which is why top-k is delivered only through the store (experiments: top-k logprobs).
 
 **Indexer rows.** A cell (one position, one indexer layer) holds the top-k selected positions in ascending order with the `-1` pads last. That is the order the engine's top-k produces and the trainer's top-k kernel expects, so replay compares cells as sequences, not sets. Every codec must restore exactly this order on decode; a decoder that reorders pads still passes any set-based check while replay silently loses its effect.
 
@@ -35,7 +35,7 @@ The sampled token's logprob is returned inline with the response; that number is
 **Two delivery modes.**
 
 - *Store mode*, the subject of §3–§11: rows go to a store keyed per session, and the store doubles as the session's prefix cache, so rows for prefix-hit positions are always there (§6.2). The design space calls this design P-S ("pool as session cache").
-- *Inline mode* (§12), for small scale: rows come back in the response. Rows for prefix-hit positions come from an engine-local block-row cache, allocated and evicted with the KV; the design space calls that cache c1.
+- *Inline mode* (§12), for small scale: R3 rows come back in the response; the other outputs are delivered only in store mode. Rows for prefix-hit positions come from an engine-local block-row cache, allocated and evicted with the KV; the design space calls that cache c1.
 
 The store is Mooncake: a master places objects on holders, each a process that contributes a memory segment and, by default, a local SSD directory (§8, §9).
 
@@ -62,6 +62,8 @@ The store is Mooncake: a master places objects on holders, each a process that c
 | `aux_parent` | For the first request of a fork: the parent trajectory (`""` for the session's root). The fork takes over the parent's state at the fork point. Ignored without `aux_trajectory`. |
 | `aux_start` | "I already have the first `aux_start` rows." For the next turn of a trajectory it must equal the previous request's real row count (`prompt + generated − 1`): the engine cannot tell real rows from truncated drafts (§6.7), so it relies on this value to know which previous rows came first. |
 
+**Names in the current overlay.** `aux_outputs`, `aux_session`, `aux_trajectory`, `aux_parent` and `aux_start` are the intended API names. The overlay on the implementation branch (README, Status) takes them under other names today: `SamplingParams(routed_experts_prompt_start=<aux_start>, extra_args={"oc_session": ..., "oc_traj": ..., ...})`, with the parent in `extra_args` for a fork's first request. Which outputs are produced is set per engine by environment variables, not per request (README, Status).
+
 Sampling-parameter constraints (when requesting `topk_logprobs`, `sampling_mask` or `hidden_states`): temperature, `top_k`, `top_p`, `min_p` and token masking are allowed; with any truncation or masking `top_k ≤ 256`; parameters that change logit values (penalties, `logit_bias`) are rejected because the trainer cannot reconstruct them.
 
 **Response.**
@@ -77,7 +79,7 @@ Sampling-parameter constraints (when requesting `topk_logprobs`, `sampling_mask`
 - `status` is always present when `aux_outputs` was requested; `unavailable` only if the store is unreachable. A response without `aux` to a request that asked for it is an error.
 - **A write failure is not visible in the response.** The failure of an object another trajectory or writer published can become known after the response was sent (§6.9), so `status: ok` and a manifest reference do not prove delivery. The reader reports the failure (`error` in the sample, consumer contract), and the trainer drops the sample. Whether to regenerate the trajectory (under a new `aux_trajectory`) or drop its group is the framework's choice.
 - `<req>` is the caller-visible request id (engine-internal ids carry a random suffix).
-- **Inline mode** (small scale) returns the rows in the response instead of the store; it is specified in §12.
+- **Inline mode** (small scale) returns R3 rows in the response instead of the store; it is specified in §12.
 
 **Manifest** (one per request, covering the whole sequence `[0, rows)`):
 
@@ -301,16 +303,15 @@ Training framework:
 
 ## 12. Inline mode
 
-At small scale (one node, short multi-turn agents) rows are returned in the response and nothing goes to a store. Delivery needs no session or trajectory.
+At small scale (one node, short multi-turn agents) R3 rows are returned in the response and nothing goes to a store. Delivery needs no session or trajectory. Inline mode carries R3 only: the indexer, hidden states and top-k logprobs are delivered only through the store.
 
-- **Response.** `aux` carries the rows themselves instead of a manifest reference: per requested output, the rows `[aux_start, rows)` with the same per-token shape and dtype as the store fields (§1), on DeepSeek-V4.1-Flash R3 as `[rows, 40, 6]` uint16 and the indexer as `[rows, 8, 512]` cells in engine order. The exact field names and wire encoding are defined by the overlay (README, Status). The reader of the consumer contract is for store mode only.
-- **Outputs.** R3 and the indexer were returned inline in every correctness run (experiments X1). Top-k inline works but is not recommended at k = 128 (§1). Hidden states inline are not covered by the experiments; deliver them, and top-k, through the store.
-- **Range.** The request sets `aux_start` to the end of the rows the framework already holds, and the response returns `[aux_start, rows)`. The framework keeps earlier turns' rows and concatenates them, so a next turn's re-prefill of the previous turn's unfinished block is not returned again.
-- **Prefix hits.** Rows for hit positions inside that range come from the engine-local block-row cache (c1), allocated and evicted with the KV and scoped to the engine's generation (§6.6). For R3 it costs about 1% of the KV on DeepSeek-V4.1-Flash; for the indexer about 54 GB raw per engine (scenarios §10).
+- **Response.** In the current build there is no separate `aux` object. Each completion carries `RequestOutput.outputs[i].routed_experts`, a numpy array `[rows, MoE layers, top-k experts]` of expert ids (`[rows, 40, 6]` uint16 on DeepSeek-V4.1-Flash) covering `[routed_experts_prompt_start, end)`, i.e. `[aux_start, rows)`. It travels in vLLM's normal output serialization (msgpack with numpy arrays over the engine-core IPC). The reader of the consumer contract is for store mode only.
+- **Range.** The request sets `aux_start` to the end of the rows the framework already holds. The framework keeps earlier turns' rows and concatenates them, so a next turn's re-prefill of the previous turn's unfinished block is not returned again.
+- **Prefix hits.** Rows for hit positions inside that range come from the engine-local block-row cache (c1), allocated and evicted with the KV and scoped to the engine's generation (§6.6). It is an LRU cache whose capacity is `AuxOutputConfig.max_bytes`, by default derived from the KV capacity; for R3 it costs about 1% of the KV on DeepSeek-V4.1-Flash (scenarios §10).
 - **Cache loss.** The cache is per-replica engine state, lost on a restart. When a hit's block is no longer cached, the position is recomputed, and the row returned is the computation this request actually used.
 - **Limits.** The cache reads hit rows from a generation-scoped base store. Its version records describe spliced rows rather than the base payload, and a request parked across a generation change reads the new generation. Store mode does not use this path.
 
-Design c1 in experiment X1 delivered every row of all 112 requests, equal to the inline rows (experiments: designs compared).
+Design c1 in experiment X1 delivered every R3 row of all 112 requests, equal to the inline rows (experiments: designs compared).
 
 ## 13. Known limits
 

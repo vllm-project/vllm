@@ -15,7 +15,7 @@ Measurements behind the [protocol](protocol.md). The designs are described in [d
 
 Correctness is checked against an independent reference, not only against what the engine itself returned. Each request is read back through its manifest and compared three ways:
 
-- **Inline:** the rows the engine returned with the response.
+- **Inline:** the R3 rows the engine returned with the response (inline mode carries R3 only).
 - **Reference:** each trajectory's own first computation, dumped by the engine per step after the rejected speculative suffix is dropped. For a fork, positions before the fork point come from the parent. Rows of drafts the scheduler later truncated are skipped.
 - **Version segments:** the manifest's segments must match the weight versions the trajectory saw.
 
@@ -291,7 +291,7 @@ Top-k logprobs at k = 128 (int32 id + fp32 logprob, 1 KB per generated token). O
 
 | Path | Without top-k | With top-k |
 |---|---|---|
-| Inline, returned in the response by the frontend | 1,164.6 s | 1,709.7 s (+46.8%) |
+| In the response, through vLLM's frontend (not an aux path) | 1,164.6 s | 1,709.7 s (+46.8%) |
 | Store, chunked per request like hidden states (both arms on one node) | 1,236.3 s | 1,202.4 s (no measurable cost) |
 
 The store path delivered 131,072 rows with 0 bad rows. The sampled token was in the stored top-128 for 99.3% of rows, and its stored logprob equals the inline sampled logprob exactly.
