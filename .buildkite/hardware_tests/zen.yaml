@@ -10,6 +10,7 @@ steps:
   - zen-cpu-image-build
   allow_dependency_failure: true
   soft_fail: true
+  optional: true
   device: zen5
   no_plugin: true
   source_file_dependencies:
@@ -24,6 +25,7 @@ steps:
   - requirements/build/cpu.txt
   - requirements/test/cpu.txt
   - cmake/cpu_extension.cmake
+  - vllm/_cpu_ops.py
   - vllm/model_executor/layers/utils.py
   - vllm/model_executor/kernels/linear/zentorch_utils.py
   - vllm/model_executor/kernels/linear/scaled_mm/zentorch.py
@@ -62,6 +64,7 @@ steps:
   - zen-cpu-image-build
   allow_dependency_failure: true
   soft_fail: true
+  optional: true
   device: zen5
   no_plugin: true
   source_file_dependencies:

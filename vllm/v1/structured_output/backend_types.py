@@ -117,7 +117,7 @@ class StructuredOutputBackend(ABC):
                 output request.
             grammar_spec (str): The grammar specification to compile.
             stop_token_ids (set[int] | None): The request's EOS and user
-                stop-token ids (``SamplingParams.all_stop_token_ids``), masked
+                stop-token ids (`SamplingParams.all_stop_token_ids`), masked
                 until the grammar terminates.
 
         Returns:

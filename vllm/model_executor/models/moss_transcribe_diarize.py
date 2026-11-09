@@ -5,9 +5,9 @@
 
 The checkpoint layout is:
 
-* ``model.whisper_encoder.*``: Whisper-medium encoder weights.
-* ``model.vq_adaptor.*``: 4x time-merge projector.
-* ``model.language_model.*``: Qwen3-0.6B decoder weights.
+* `model.whisper_encoder.*`: Whisper-medium encoder weights.
+* `model.vq_adaptor.*`: 4x time-merge projector.
+* `model.language_model.*`: Qwen3-0.6B decoder weights.
 """
 
 import math
@@ -659,7 +659,7 @@ class MossTranscribeDiarizeForConditionalGeneration(
 
     @classmethod
     def parse_diarized_transcript(cls, text: str) -> list[DiarizedTranscriptionSegment]:
-        """Parse MOSS's canonical ``[start][Sxx]text[end]`` transcript."""
+        """Parse MOSS's canonical `[start][Sxx]text[end]` transcript."""
         headers: list[tuple[re.Match[str], float, str]] = []
         for match in _MOSS_DIARIZED_HEADER_RE.finditer(text):
             start = parse_diarized_timestamp(match["start"])
