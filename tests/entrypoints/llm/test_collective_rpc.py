@@ -7,6 +7,25 @@ import torch
 from ...utils import create_new_process_for_each_test
 
 
+@create_new_process_for_each_test()
+def test_model_inspection_requires_explicit_call(vllm_runner):
+    """Object display shows a summary; explicit inspection returns the model tree."""
+    model_name = "vllm-project/tiny-random-LlamaForCausalLM"
+    with vllm_runner(
+        model_name,
+        enforce_eager=True,
+        max_model_len=32,
+        max_num_seqs=1,
+        gpu_memory_utilization=0.1,
+    ) as runner:
+        llm = runner.llm
+        assert repr(llm) == f"LLM(model={model_name!r})"
+
+        inspection = llm.get_model_inspection()
+        assert "LlamaForCausalLM" in inspection
+        assert "(embed_tokens):" in inspection
+
+
 @pytest.mark.parametrize("tp_size", [1, 2])
 @pytest.mark.parametrize("backend", ["mp", "ray"])
 @create_new_process_for_each_test()

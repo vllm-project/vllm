@@ -71,7 +71,6 @@ class DefaultModelState(ModelState):
         if self.mm_prefix_prompt_lens is not None:
             self.mm_prefix_prompt_lens[new_req_data.req_id] = new_req_data.prompt_len
         if self.rope_state is not None:
-            assert new_req_data.prefill_token_ids is not None
             # `prompt_embeds` is a passthrough modality with no grid info, but
             # M-RoPE assumes per-feature grids. Filter it out.
             mm_features = [
