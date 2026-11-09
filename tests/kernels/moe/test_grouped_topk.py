@@ -293,23 +293,19 @@ def test_grouped_topk_single_group_large_batch():
 def test_grouped_topk_single_group_weights_ignore_batch_size(renormalize: bool):
     """The block and warp kernels must return the same weights for the same logits."""
     set_random_seed(0)
-    logits = torch.randn((1, 288), dtype=torch.float32, device="cuda")
+    logits = torch.randn((1025, 288), dtype=torch.float32, device="cuda")
     bias = torch.zeros(288, dtype=torch.float32, device="cuda")
     bias[:8] = 8.0
 
-    results = [
-        _run_single_group_topk(
-            logits.repeat(num_tokens, 1),
-            bias,
-            8,
-            scoring_func="sigmoid",
-            renormalize=renormalize,
-        )
-        for num_tokens in (1024, 1025)
-    ]
+    block_weights, block_ids = _run_single_group_topk(
+        logits[:-1], bias, 8, scoring_func="sigmoid", renormalize=renormalize
+    )
+    warp_weights, warp_ids = _run_single_group_topk(
+        logits, bias, 8, scoring_func="sigmoid", renormalize=renormalize
+    )
 
-    assert torch.equal(results[0][1][0], results[1][1][0])
-    assert torch.equal(results[0][0][0], results[1][0][0])
+    torch.testing.assert_close(warp_ids[:-1], block_ids)
+    torch.testing.assert_close(warp_weights[:-1], block_weights, rtol=0, atol=0)
 
 
 @pytest.mark.skipif(
