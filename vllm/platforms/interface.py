@@ -1210,6 +1210,15 @@ class Platform:
         raise NotImplementedError
 
     @classmethod
+    def free_device_memory(cls, device: torch.device | None = None) -> int:
+        """Free bytes on device (None: the current one) to size memory from.
+        Platforms whose reported free memory is too low override this.
+        """
+        from vllm.utils.mem_utils import device_memory_info
+
+        return device_memory_info(device)[0]
+
+    @classmethod
     def get_punica_wrapper(cls) -> str:
         """Return the punica wrapper for current platform."""
         raise NotImplementedError
