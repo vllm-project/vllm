@@ -106,9 +106,9 @@ def _reset_breakable_tls():
 def cuda_capture_stream():
     """A non-default CUDA stream suitable for cudagraph capture.
 
-    ``CUDAGraph.capture_begin`` refuses to capture from the default
+    `CUDAGraph.capture_begin` refuses to capture from the default
     stream, so all capture-using tests need to run under
-    ``torch.cuda.stream(...)`` for a separate stream.
+    `torch.cuda.stream(...)` for a separate stream.
     """
     if not HAS_DEVICE_GRAPH:
         pytest.skip("CUDA or XPU graph required")
@@ -356,7 +356,7 @@ def test_capture_replay_matches_eager_simple(cuda_capture_stream):
     Note: during capture, the *captured* kernels are recorded but NOT
     executed (that's CUDA-graph semantics). Only the eager segments
     actually mutate state at capture time. So we check correctness after
-    ``replay()``, not after ``with cap:`` exits.
+    `replay()`, not after `with cap:` exits.
     """
     from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphCapture
 
@@ -599,7 +599,7 @@ def test_exception_in_body_clears_active(cuda_capture_stream):
 def test_nested_decorated_op_runs_inline(cuda_capture_stream):
     """A decorated op invoked from inside another decorated op's eager
     body must execute inline -- starting a second eager break mid-flight
-    corrupts the segment state and explodes ``_begin_segment``'s assert.
+    corrupts the segment state and explodes `_begin_segment`'s assert.
 
     This mirrors the deepseek_v4_attention case where the outer attention
     op's impl internally dispatches sparse_attn_indexer (also decorated).

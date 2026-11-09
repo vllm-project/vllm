@@ -85,7 +85,7 @@ def asr_inter_chunk_separator(
 ) -> str:
     """Space to insert between ASR text chunks for streaming and non-streaming join.
 
-    Languages in ``no_space_languages`` (e.g. Chinese, Japanese) use an empty
+    Languages in `no_space_languages` (e.g. Chinese, Japanese) use an empty
     separator; others use a single ASCII space.
     """
     return "" if language and language.lower() in no_space_languages else " "
@@ -111,7 +111,7 @@ def _word_probability(pieces: list[str], probs: list[float | None]) -> float | N
 
     A word that is nothing but punctuation keeps the mean over all its tokens,
     so it still gets a score. Tokens with no known probability are skipped;
-    ``None`` if none is known.
+    `None` if none is known.
     """
     lo, hi = 0, len(pieces)
     while lo < hi and _is_punctuation(pieces[lo], _LEADING_PUNCTUATION):
@@ -128,10 +128,10 @@ def _token_probability(
     j: int,
     tid: int,
 ) -> float | None:
-    """Probability of output token ``j`` (sampled id ``tid``), if known.
+    """Probability of output token `j` (sampled id `tid`), if known.
 
-    ``log_probs`` is aligned with the output tokens, one entry per sampled
-    token, as ``_get_verbose_segments`` also reads it.
+    `log_probs` is aligned with the output tokens, one entry per sampled
+    token, as `_get_verbose_segments` also reads it.
     """
     if log_probs is None or j >= len(log_probs):
         return None
@@ -275,8 +275,8 @@ class SpeechToTextBaseServing(GenerateBaseServing):
         """Auto-detect the spoken language from an audio chunk.
 
         Delegates prompt construction and output parsing to the model class
-        via ``get_language_detection_prompt`` and
-        ``parse_language_detection_output``.
+        via `get_language_detection_prompt` and
+        `parse_language_detection_output`.
         """
         prompt = self.model_cls.get_language_detection_prompt(
             audio_chunk,
@@ -485,9 +485,9 @@ class SpeechToTextBaseServing(GenerateBaseServing):
         )
 
     def _wants_word_probabilities(self, request: SpeechToTextRequest) -> bool:
-        """Whether word timestamps should also carry ``probability``.
+        """Whether word timestamps should also carry `probability`.
 
-        Opt-in per request (``include_word_probabilities``): reading the sampled
+        Opt-in per request (`include_word_probabilities`): reading the sampled
         token's logprob is not free, so plain word-timestamp requests skip it.
         """
         return self._wants_word_timestamps(request) and bool(
@@ -497,14 +497,14 @@ class SpeechToTextBaseServing(GenerateBaseServing):
     def _needs_segments(self, request: SpeechToTextRequest) -> bool:
         """Whether this response has to carry segment-level detail.
 
-        Segments need ``logprobs=1`` for ``avg_logprob`` and are cut on timestamp
+        Segments need `logprobs=1` for `avg_logprob` and are cut on timestamp
         tokens, which the decoder prompt has to ask the model for
-        (``_preprocess_verbose_prompt``). Word onsets need neither, so a
+        (`_preprocess_verbose_prompt`). Word onsets need neither, so a
         word-only request can skip all of it.
 
-        Note the default: ``timestamp_granularities`` is ``[]``, *not*
-        ``["segment"]``, and a plain ``verbose_json`` request must still return
-        segments -- gating on ``"segment" in granularities`` would drop them.
+        Note the default: `timestamp_granularities` is `[]`, *not*
+        `["segment"]`, and a plain `verbose_json` request must still return
+        segments -- gating on `"segment" in granularities` would drop them.
         """
         if request.response_format != "verbose_json":
             return False
@@ -544,10 +544,10 @@ class SpeechToTextBaseServing(GenerateBaseServing):
     ) -> DictPrompt:
         """Parse the model's prompt, asking for timestamp tokens only if needed.
 
-        ``_preprocess_verbose_prompt`` swaps ``<|notimestamps|>`` for
-        ``<|0.00|>``, asking the model to emit timestamp tokens, and only segment
+        `_preprocess_verbose_prompt` swaps `<|notimestamps|>` for
+        `<|0.00|>`, asking the model to emit timestamp tokens, and only segment
         cutting reads those. A word-only request therefore keeps the prompt the
-        model built -- byte for byte the one ``json`` uses -- which also keeps
+        model built -- byte for byte the one `json` uses -- which also keeps
         models never trained on timestamp tokens in their normal decode regime.
         """
         if self._needs_segments(request):
@@ -564,10 +564,10 @@ class SpeechToTextBaseServing(GenerateBaseServing):
         """Group generated tokens into words with (start, end) seconds from the
         per-position onset times computed by the worker's cross-attention DTW.
 
-        With ``log_probs``, each word also carries ``probability``: the mean
+        With `log_probs`, each word also carries `probability`: the mean
         probability of its tokens as sampled, over the full vocabulary, leaving
-        out punctuation-only tokens at the word's edges (``_word_probability``).
-        Without ``log_probs`` it is ``None``.
+        out punctuation-only tokens at the word's edges (`_word_probability`).
+        Without `log_probs` it is `None`.
         """
         tok = self.tokenizer
         ts_begin = cast(int, tok.convert_tokens_to_ids("<|0.00|>"))
@@ -645,12 +645,16 @@ class SpeechToTextBaseServing(GenerateBaseServing):
             )
             # verbose_json rebuilds ``text`` from the segments it just cut.
             text_parts = [segment.text for segment in segments]
+        elif request.response_format == "diarized_json":
+            text_parts = [output.text]
         else:
             # Nothing to rebuild ``text`` from, so take it where the ``json`` and
             # ``text`` formats take it. Skipping this returns word timestamps
             # alongside an empty ``text``, which every text consumer downstream
             # then silently drops.
-            text_parts = [self.model_cls.post_process_output(output.text)]
+            text_parts = [
+                self.model_cls.post_process_output(output.text, self.model_config)
+            ]
 
         if want_words:
             words = self._collect_words(
@@ -666,11 +670,11 @@ class SpeechToTextBaseServing(GenerateBaseServing):
     ) -> "list[TranscriptionWord]":
         """Group one output's onsets into words, warning when none come out.
 
-        ``with_probability`` hands the output's logprobs to the grouping. It is
+        `with_probability` hands the output's logprobs to the grouping. It is
         decided by the request, not by whether logprobs exist: a request that
         also asked for segments has them, but did not ask for word scores.
 
-        ``words: null`` is indistinguishable from audio that had no speech, so
+        `words: null` is indistinguishable from audio that had no speech, so
         the miss is only visible in the log. Outputs holding no word tokens are
         silence, not a failure, and the warning is logged on a power-of-two
         schedule to bound a systematic failure to a few lines.
@@ -809,11 +813,13 @@ class SpeechToTextBaseServing(GenerateBaseServing):
         # constrained by the size of the input audio, which is mapped to a
         # fixed-size log-mel-spectogram. Still, allow for fewer tokens to be
         # generated by respecting the extra completion tokens arg.
+        # A checkpoint's default output limit is for a chunk, not a whole recording
+        is_chunked = self.asr_config.max_audio_clip_s is not None
         max_tokens = get_max_tokens(
             max_model_len,
             request.max_completion_tokens,
             input_len,
-            self.default_sampling_params,
+            self.default_sampling_params if is_chunked else {},
         )
 
         if request.use_beam_search:
@@ -953,7 +959,9 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                     "seconds": int(math.ceil(duration_s)),
                 }
                 if request.response_format == "diarized_json":
-                    diarized_segments = self.model_cls.parse_diarized_transcript(text)
+                    diarized_segments = self.model_cls.parse_diarized_transcript(
+                        text, self.model_config
+                    )
                     if not diarized_segments:
                         return self.create_error_response(
                             "Model output did not contain a valid diarized transcript"

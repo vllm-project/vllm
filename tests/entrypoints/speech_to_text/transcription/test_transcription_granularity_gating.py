@@ -1,16 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""``timestamp_granularities`` decides which machinery a request pays for.
+"""`timestamp_granularities` decides which machinery a request pays for.
 
-A ``verbose_json`` request that only asks for ``word`` needs none of the
-segment-level work: no logprobs (only ``avg_logprob`` reads them), no segment
-cutting, and no ``<|notimestamps|>`` -> ``<|0.00|>`` prompt swap (timestamp
+A `verbose_json` request that only asks for `word` needs none of the
+segment-level work: no logprobs (only `avg_logprob` reads them), no segment
+cutting, and no `<|notimestamps|>` -> `<|0.00|>` prompt swap (timestamp
 tokens are what segments are cut on; word onsets come from cross-attention DTW).
-Word ``probability`` is opt-in per request (``include_word_probabilities``) and
-then needs the sampled token's logprob only (``logprobs=0``).
+Word `probability` is opt-in per request (`include_word_probabilities`) and
+then needs the sampled token's logprob only (`logprobs=0`).
 These tests pin that gating, and pin the regression it is easy to cause: a plain
-``verbose_json`` request sends ``timestamp_granularities=[]``, not
-``["segment"]``, so a naive ``"segment" in granularities`` check would silently
+`verbose_json` request sends `timestamp_granularities=[]`, not
+`["segment"]`, so a naive `"segment" in granularities` check would silently
 drop its segments.
 """
 
@@ -57,7 +57,7 @@ class _FakeModelCls:
     supports_segment_timestamp = True
 
     @staticmethod
-    def post_process_output(text: str) -> str:
+    def post_process_output(text: str, model_config) -> str:
         return f"post({text})"
 
 
@@ -100,7 +100,7 @@ class _FakeLogprob:
 
 
 class _FakeOutput:
-    """The single ``CompletionOutput`` slice the response formatter reads."""
+    """The single `CompletionOutput` slice the response formatter reads."""
 
     def __init__(self, token_ids, text="raw text", logprobs=None, word_align=None):
         self.token_ids = token_ids
@@ -143,9 +143,9 @@ def _word_only(**kwargs) -> TranscriptionRequest:
 def test_plain_verbose_json_still_needs_segments():
     """The OpenAI default is empty, but plain verbose_json still means segments.
 
-    This is the regression gate: ``timestamp_granularities`` defaults to ``[]``,
-    so gating on ``"segment" in granularities`` would drop segments from every
-    plain ``verbose_json`` request.
+    This is the regression gate: `timestamp_granularities` defaults to `[]`,
+    so gating on `"segment" in granularities` would drop segments from every
+    plain `verbose_json` request.
     """
     request = _request(response_format="verbose_json")
     assert request.timestamp_granularities == []
@@ -211,7 +211,7 @@ def test_word_only_request_does_not_request_logprobs():
 
 
 def test_word_probabilities_request_the_sampled_token_only():
-    """``logprobs=0`` returns the sampled token's logprob; ``1`` would add a
+    """`logprobs=0` returns the sampled token's logprob; `1` would add a
     top-k over the vocabulary that word probability never reads."""
     serving = _FakeServing()
     params = SamplingParams()
@@ -243,7 +243,7 @@ def test_include_word_probabilities_alone_does_nothing():
 
 
 def test_plain_verbose_json_requests_logprobs():
-    """Segment ``avg_logprob`` reads them, so it must still get them."""
+    """Segment `avg_logprob` reads them, so it must still get them."""
     serving = _FakeServing()
     params = SamplingParams()
     serving._apply_verbose_params(_request(response_format="verbose_json"), params)
@@ -298,9 +298,9 @@ def test_word_only_request_keeps_notimestamps():
 def test_word_only_prompt_is_identical_to_the_json_prompt():
     """The fast path must not become its own prompt variant.
 
-    ``_group_words`` recovers the decoder-prompt length by differencing, so the
+    `_group_words` recovers the decoder-prompt length by differencing, so the
     prompt is allowed to change length -- but there is no reason for a word-only
-    request to differ from a plain ``json`` one, and keeping them identical is
+    request to differ from a plain `json` one, and keeping them identical is
     what makes the two comparable in a measurement.
     """
     serving = _FakeServing()
@@ -337,11 +337,11 @@ def _collect(serving, request, output, start_time=0.0):
 
 
 def test_word_only_response_text_comes_from_the_raw_output():
-    """``verbose_json`` normally rebuilds ``text`` by joining its segments.
+    """`verbose_json` normally rebuilds `text` by joining its segments.
 
-    With no segments to join, ``text`` has to come from the raw output the way
-    ``json`` gets it -- otherwise the response carries word timestamps and an
-    empty ``text``, which every downstream text consumer silently drops.
+    With no segments to join, `text` has to come from the raw output the way
+    `json` gets it -- otherwise the response carries word timestamps and an
+    empty `text`, which every downstream text consumer silently drops.
     """
     serving = _FakeServing()
     output = _FakeOutput(
@@ -512,8 +512,8 @@ def test_translation_segments_are_untouched():
 
 
 def test_word_probability_is_the_mean_of_its_token_probabilities():
-    """Each word averages ``exp(logprob)`` of its own tokens (the per-word
-    aggregation faster-whisper uses: ``np.mean(text_token_probs[i:j])``)."""
+    """Each word averages `exp(logprob)` of its own tokens (the per-word
+    aggregation faster-whisper uses: `np.mean(text_token_probs[i:j])`)."""
     import math
 
     serving = _FakeServing()
@@ -558,7 +558,7 @@ def test_word_probability_is_none_without_logprobs():
 
 
 def test_word_only_response_carries_word_probability():
-    """End to end through ``_collect_output_parts``: the output's logprobs
+    """End to end through `_collect_output_parts`: the output's logprobs
     reach the words on the word-only path, which has no segments."""
     import math
 

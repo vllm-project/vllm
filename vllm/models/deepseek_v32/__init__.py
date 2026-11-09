@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""DeepSeek V3.2 (``deepseek_v32``) platform entry point.
+"""DeepSeek V3.2 (`deepseek_v32`) platform entry point.
 
 DeepSeek V3.2 introduced the DeepSeek Sparse Attention (DSA) architecture:
 MLA + a "lightning indexer" that selects the top-k tokens for a sparse MLA
 attend. The same model code serves any DSA checkpoint, including GLM-5.2
-(``glm_moe_dsa``), which reuses this architecture.
+(`glm_moe_dsa`), which reuses this architecture.
 
 The CUDA and ROCm implementations select capability-specific kernels
 internally and fall back when an optimization is unavailable. Other platforms
