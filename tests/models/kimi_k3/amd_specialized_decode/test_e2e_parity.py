@@ -518,6 +518,7 @@ def _check_layers(worker, launches: int) -> None:
     from tests.models.kimi_k3.amd_specialized_decode import test_numerics as N
     from vllm.distributed import get_tp_group
     from vllm.models.kimi_k3.amd.specialized_decode.mono import layer as k2_mod
+    from vllm.models.kimi_k3.amd.specialized_decode.mono.abi import FAILED
     from vllm.models.kimi_k3.amd.specialized_decode.runtime import layers
 
     decode = _decode(worker)
@@ -541,7 +542,7 @@ def _check_layers(worker, launches: int) -> None:
             if len(decode.layer_errors) >= launches:
                 return launch(step, positions, prefix_sum, block_residual, prefix_delta)
             layer, runner = kernel.layer, kernel.runner
-            kda = hasattr(kernel, "caches")
+            kda = isinstance(kernel, layers.WholeLayer)
             ins = {
                 "prefix": prefix_sum.clone(),
                 "delta": None if prefix_delta is None else prefix_delta.clone(),
@@ -554,19 +555,26 @@ def _check_layers(worker, launches: int) -> None:
             rec: dict = {}
             k2 = layers._k2
 
-            def spy(layer_, runner_, core, prefix, blocks, reset=False):
+            def spy(layer_, runner_, core, prefix, blocks, reset=False, **m1):
                 # K1's scratch and K2's inputs, before K2 reuses the scratch
                 rec["k1_scratch"] = runner_.scratch.clone()
                 rec["core"], rec["prefix"] = core.clone(), prefix.clone()
                 rec["blocks"] = blocks.clone()
-                rec["key"] = layers._k2_key(layer_, runner_, core.size(0), reset)
-                return k2(layer_, runner_, core, prefix, blocks, reset)
+                fused = m1.get("m1b_in") is not None
+                rec["key"] = layers._k2_key(layer_, runner_, core.size(0), reset, fused)
+                out = k2(layer_, runner_, core, prefix, blocks, reset, **m1)
+                if fused:
+                    # M1b in K2's launch wrote o_proj's input
+                    rec["core"] = core.clone()
+                return out
 
             layers._k2, layers._k2_key = spy, plain_key
             try:
                 got = launch(step, positions, prefix_sum, block_residual, prefix_delta)
             finally:
                 layers._k2, layers._k2_key = k2, k2_key
+            # a wait that gave up (abi.WAIT_SECONDS) left stale taps
+            assert not int(runner.health[FAILED]), (layer.layer_idx, "a wait gave up")
             errs = {}
             if kda:
                 ins["after"] = [c[ins["slots"]].clone() for c in kernel.caches()]
@@ -579,6 +587,10 @@ def _check_layers(worker, launches: int) -> None:
             k2m = N._k2_vllm_check(runner, rec["key"], w, mw, got[0], got[2], ops, tag)
             errs.update({f"k2_{k}": v for k, v in k2m.items()})
             decode.layer_errors.append((layer.layer_idx, errs))
+            # a peer's next launch must not wait (abi.WAIT_SECONDS, then go on
+            # with stale words) on a rank still checking, nor push into the
+            # regions it reads
+            get_tp_group().barrier()
             return got
 
         kernel.launch = checked
