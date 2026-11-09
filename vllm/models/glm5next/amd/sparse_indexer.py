@@ -293,11 +293,8 @@ def sparse_attn_indexer_kpool(
                 scale_fmt,
             )
 
-    # Decode rows on the uniform (no-padding) kpool path are written full-width
-    # by expand_pools_and_append_tail(out=...) (tail columns get -1 in-kernel),
-    # and the short-decode path rewrites them full-width too, so only the rows
-    # after them need the -1 fill. Saves one fill launch per layer on the
-    # decode cudagraph.
+    # The decode paths below write their rows full-width (tail -1 included),
+    # so only the rows after them need the -1 fill.
     decode_rows_self_filled = (
         has_decode
         and index_kpool > 1
@@ -447,10 +444,7 @@ def sparse_attn_indexer_kpool(
             if index_kpool > 1:
                 if positions is not None:
                     # Fused expand-pools + append-tail into one Triton kernel
-                    # (replaces ~25 elementwise ops). seq_len is token-granular
-                    # (pos+1, added in-kernel); the kernel derives pool_len
-                    # internally, reads int32 pool ids directly and writes
-                    # straight into the topk buffer rows.
+                    # (replaces ~25 elementwise ops); seq_len = pos + 1.
                     kpool_ops.expand_pools_and_append_tail(
                         pool_topk,
                         positions[chunk.token_start : chunk.token_end],
@@ -697,10 +691,7 @@ def sparse_attn_indexer_kpool(
 
         # Resolve to token-level indices in the output buffer.
         if index_kpool > 1 and decode_rows_self_filled:
-            # Uniform layout: row r is flat decode token r, so seq_len is
-            # positions[r] + 1. One launch reads int32 pool ids and int64
-            # positions as-is and writes the full buffer row (incl. -1 tail),
-            # replacing int32->int64, int64->int32, +1, fill and copy launches.
+            # Uniform layout: row r is decode token r, seq_len = positions[r] + 1.
             assert positions is not None
             n = pool_topk.shape[0]
             kpool_ops.expand_pools_and_append_tail(

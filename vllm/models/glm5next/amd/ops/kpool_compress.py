@@ -929,9 +929,7 @@ def _expand_pools_and_append_tail_kernel(
     cols = tile * BLOCK_COLS + tl.arange(0, BLOCK_COLS)
     mask = cols < out_cols
 
-    # SEQ_LEN_OFFSET=1 lets callers pass raw int64 ``positions`` (seq_len =
-    # pos + 1) instead of materialising ``positions.to(int32) + 1`` (two
-    # elementwise launches per layer on the decode graph).
+    # SEQ_LEN_OFFSET=1: callers pass positions, seq_len = pos + 1.
     seq_len = tl.load(seq_lens_ptr + row).to(tl.int32) + SEQ_LEN_OFFSET
     pool_len = seq_len // POOL_SIZE
     tail_start = pool_len * POOL_SIZE
