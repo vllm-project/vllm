@@ -41,7 +41,7 @@ from vllm.v1.attention.backends.registry import AttentionBackendEnum
 def _vllm_config(**over) -> SimpleNamespace:
     """A supported config: TP8, DCP8 (interleave 1), 7 speculative tokens,
     max_num_seqs 1, an fp8 KV cache, FULL graphs, MRV2.
-    ``over`` sets dotted paths, e.g. ``{"parallel_config.data_parallel_size": 2}``."""
+    `over` sets dotted paths, e.g. `{"parallel_config.data_parallel_size": 2}`."""
     spec = SimpleNamespace(
         num_speculative_tokens=7,
         enable_adaptive_verification=False,
@@ -544,7 +544,7 @@ class _Kernel:
 
 def _decode(monkeypatch, mode=CUDAGraphMode.FULL, md=None):
     """An executor with kernels on layers 1 and 2 at widths 4 and 8, bound to a
-    KV cache, under a forward context of ``mode``."""
+    KV cache, under a forward context of `mode`."""
     decode = object.__new__(SpecializedDecode)
     decode.config = DecodeConfig(q=4)
     decode.runner = SimpleNamespace(kda_prefix="kda", mla_prefix="")
@@ -672,7 +672,7 @@ def test_qkv_gate_weights_split_the_merged_gate():
 def test_m1c_runs_where_its_splits_share_out():
     """M1c's KV splits share out evenly over a width's requests: qlen 4's 80
     splits over 12 rows (3 requests) don't (DCP1 refuses that step,
-    ``test_unserved_steps_are_refused``)."""
+    `test_unserved_steps_are_refused`)."""
     from vllm.models.kimi_k3.amd.specialized_decode.runtime.layers import (
         m1c_at,
         m1c_splits,

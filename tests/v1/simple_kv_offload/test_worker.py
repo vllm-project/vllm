@@ -596,12 +596,12 @@ def _dsa_specs(num_layers: int, block_size: int) -> dict[str, KVCacheSpec]:
     """A DSA model's per-layer specs (DeepSeek-V3.2, GLM-5.2).
 
     Each decoder layer contributes an MLA latent cache and the indexer's key
-    cache, whose pages differ in size (``MLAAttentionSpec`` off ``head_size``:
+    cache, whose pages differ in size (`MLAAttentionSpec` off `head_size`:
     512 + 64 for the latent, 128 fp8 keys + one fp32 scale per 128 elements for
-    the indexer). Both are ``MLAAttentionSpec`` with the same block size, so the
-    hybrid allocator puts them in one ``UniformTypeKVCacheSpecs`` cache group.
-    See ``DeepseekV32IndexerCache.get_kv_cache_spec`` and
-    ``MLAAttention.get_kv_cache_spec``.
+    the indexer). Both are `MLAAttentionSpec` with the same block size, so the
+    hybrid allocator puts them in one `UniformTypeKVCacheSpecs` cache group.
+    See `DeepseekV32IndexerCache.get_kv_cache_spec` and
+    `MLAAttention.get_kv_cache_spec`.
     """
     specs: dict[str, KVCacheSpec] = {}
     for i in range(num_layers):
@@ -626,7 +626,7 @@ def test_register_mixed_page_sizes_in_one_cache_group(monkeypatch):
 
     The MLA latent and indexer key caches of a layer have different page sizes,
     so the allocation has no single per-layer block size to reinterpret it with:
-    ``num_layers * (mla_page + indexer_page)`` is not a multiple of either page.
+    `num_layers * (mla_page + indexer_page)` is not a multiple of either page.
     Registration must derive each region from the placement metadata instead.
     """
     num_layers = 4
@@ -689,7 +689,7 @@ def test_register_mixed_page_sizes_in_one_cache_group(monkeypatch):
 def test_register_mixed_page_sizes_odd_block_counts(monkeypatch, rank_blocks):
     """Registration holds at block counts that are not powers of two.
 
-    ``num_blocks`` comes out of ``available_memory // bytes_per_block``, so
+    `num_blocks` comes out of `available_memory // bytes_per_block`, so
     any integer is reachable. Registration derives regions from the config's
     own block count and strides, and the CPU pool rounds down from the same
     per-block byte total; none of it assumes anything about how the count
@@ -736,10 +736,10 @@ def test_register_mixed_page_sizes_odd_block_counts(monkeypatch, rank_blocks):
 def test_mixed_page_byte_placement_is_dcp_invariant():
     """DCP scales a block's token span, not its byte placement.
 
-    ``get_kv_cache_config_from_groups`` never reads
-    ``decode_context_parallel_size``, so every placement field registration
+    `get_kv_cache_config_from_groups` never reads
+    `decode_context_parallel_size`, so every placement field registration
     derives regions from is identical at dcp=1 and dcp=2. What DCP scales is
-    the block's token span, reported by ``resolve_kv_cache_block_sizes``;
+    the block's token span, reported by `resolve_kv_cache_block_sizes`;
     checking that it doubles proves DCP was actually in effect, or the
     identity above would be trivially true.
     """
