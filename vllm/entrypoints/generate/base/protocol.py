@@ -297,10 +297,10 @@ _MAX_KV_TRANSFER_PP_SIZE = 256
 def validate_kv_transfer_params(
     params: dict[str, Any] | None,
 ) -> dict[str, Any] | None:
-    """Validate safety-critical fields in ``kv_transfer_params``.
+    """Validate safety-critical fields in `kv_transfer_params`.
 
     Prevents attacker-controlled values (e.g. an arbitrarily large
-    ``tp_size``) from reaching the KV connector, where they could cause
+    `tp_size`) from reaching the KV connector, where they could cause
     unbounded memory allocation.
     """
     if params is None:

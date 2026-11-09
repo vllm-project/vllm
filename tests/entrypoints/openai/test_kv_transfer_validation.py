@@ -103,6 +103,7 @@ class TestCompletionRequestKvTransferValidation:
             prompt="hello",
             kv_transfer_params={"tp_size": 4, "remote_port": 8080},
         )
+        assert req.kv_transfer_params is not None
         assert req.kv_transfer_params["tp_size"] == 4
 
     def test_accepts_none(self):
