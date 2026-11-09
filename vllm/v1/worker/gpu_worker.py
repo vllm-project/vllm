@@ -1332,6 +1332,7 @@ class Worker(WorkerBase):
             and get_draft_model() is not None
             and speculative_config is not None
             and speculative_config.draft_model_config is not None
+            and not self._weight_update_target_uses_eplb(is_draft=True)
         )
 
     def _set_draft_weight_update_target(self) -> None:
@@ -1673,14 +1674,19 @@ class Worker(WorkerBase):
                 "Please set weight_transfer_config to enable weight transfer."
             )
 
-    def _check_eplb_weight_update(self, *, is_draft: bool = False) -> None:
+    def _weight_update_target_uses_eplb(self, *, is_draft: bool) -> bool:
         eplb_state = getattr(self.model_runner, "eplb_state", None)
         if eplb_state is None:
-            return
+            return False
 
         model = self.get_draft_model() if is_draft else self.get_model()
         moe_model = get_mixture_of_experts_model(model)
-        if any(state.model is moe_model for state in eplb_state.model_states.values()):
+        return any(
+            state.model is moe_model for state in eplb_state.model_states.values()
+        )
+
+    def _check_eplb_weight_update(self, *, is_draft: bool = False) -> None:
+        if self._weight_update_target_uses_eplb(is_draft=is_draft):
             raise RuntimeError(
                 "Weight updates are not supported for models managed by EPLB: "
                 "checkpoint loading does not preserve expert mappings, and pending "

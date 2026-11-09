@@ -45,7 +45,12 @@ def test_expert_parallel_without_eplb_accepts_weight_updates(vllm_runner, monkey
 
 def test_eplb_rejects_weight_updates(vllm_runner):
     with vllm_runner(
-        MODEL,
+        "luccafong/deepseek_mtp_main_random",
+        speculative_config={
+            "method": "mtp",
+            "model": "luccafong/deepseek_mtp_draft_random",
+            "num_speculative_tokens": 1,
+        },
         enable_eplb=True,
         eplb_config={
             "num_redundant_experts": 0,
@@ -55,6 +60,12 @@ def test_eplb_rejects_weight_updates(vllm_runner):
         },
         **ENGINE_KWARGS,
     ) as runner:
-        for method in ("reload_weights", "start_weight_update"):
+        llm = runner.llm
+        assert llm.collective_rpc("supports_draft_weight_updates") == [False, False]
+        for method in (
+            "reload_weights",
+            "start_weight_update",
+            "start_draft_weight_update",
+        ):
             with pytest.raises(Exception, match="models managed by EPLB"):
-                runner.llm.collective_rpc(method)
+                llm.collective_rpc(method)
