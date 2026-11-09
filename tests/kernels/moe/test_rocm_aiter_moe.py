@@ -34,7 +34,7 @@ from tests.kernels.moe.utils import _interleave_gate_up_rows
 from tests.kernels.utils import _assert_deterministic
 from vllm._aiter_ops import is_aiter_found_and_supported
 from vllm.platforms import current_platform
-from vllm.platforms.rocm import get_cdna_version, on_gfx942, on_gfx950, on_gfx1250
+from vllm.platforms.rocm import get_cdna_version, on_gfx942, on_gfx950
 from vllm.utils.torch_utils import set_random_seed
 
 pytestmark = pytest.mark.skipif(
@@ -1041,7 +1041,13 @@ def test_aiter_quant_type_matches_aiter():
 # MXFP4 kernel tests ------------------------------------------------------
 
 
-def test_aiter_mxfp4_quant_scheme_support_matches_arch():
+@pytest.mark.parametrize(
+    ("arch", "w4a16", "w4a4"),
+    [("gfx942", False, False), ("gfx950", True, True), ("gfx1250", False, True)],
+)
+def test_aiter_mxfp4_quant_scheme_support_matches_arch(
+    monkeypatch: pytest.MonkeyPatch, arch: str, w4a16: bool, w4a4: bool
+):
     """AITER MXFP4 MoE runs W4A16 only on gfx950, and W4A4 also on gfx1250."""
     from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
         AiterMxfp4Experts,
@@ -1050,11 +1056,13 @@ def test_aiter_mxfp4_quant_scheme_support_matches_arch():
         kMxfp4Dynamic,
         kMxfp4Static,
     )
+    from vllm.platforms import rocm
 
-    assert AiterMxfp4Experts._supports_quant_scheme(kMxfp4Static, None) is on_gfx950()
-    assert AiterMxfp4Experts._supports_quant_scheme(kMxfp4Static, kMxfp4Dynamic) is (
-        on_gfx950() or on_gfx1250()
-    )
+    for name in ("gfx950", "gfx1250"):
+        monkeypatch.setattr(rocm, f"on_{name}", lambda name=name: name == arch)
+
+    assert AiterMxfp4Experts._supports_quant_scheme(kMxfp4Static, None) is w4a16
+    assert AiterMxfp4Experts._supports_quant_scheme(kMxfp4Static, kMxfp4Dynamic) is w4a4
 
 
 def _fake_rocm_arch(monkeypatch: pytest.MonkeyPatch, arch: str) -> None:
