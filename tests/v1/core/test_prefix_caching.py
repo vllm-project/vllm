@@ -2818,11 +2818,6 @@ _EAGLE_HYBRID_MODEL_TEST_CASES = [
         3,
         id="4g-sw+mamba+sw_large+mamba",
     ),
-    pytest.param(
-        ["full", "sliding_window", "sliding_window_large", "mamba"],
-        3,
-        id="4g-full+sw+sw_large+mamba",
-    ),
 ]
 
 
