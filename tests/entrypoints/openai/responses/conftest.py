@@ -56,14 +56,14 @@ async def retry_for_tool_call(
     max_retries: int = DEFAULT_MAX_RETRIES,
     **create_kwargs: Any,
 ):
-    """Call ``client.responses.create`` up to *max_retries* times, returning
+    """Call `client.responses.create` up to *max_retries* times, returning
     the first response that contains an output item of *expected_tool_type*.
 
     Returns the **last** response if none match so the caller's assertions
     fire with a clear diagnostic.
     """
     last_response = None
-    for attempt in range(max_retries):
+    for _ in range(max_retries):
         response = await client.responses.create(model=model, **create_kwargs)
         last_response = response
         if any(
@@ -83,12 +83,12 @@ async def retry_streaming_for(
     max_retries: int = DEFAULT_MAX_RETRIES,
     **create_kwargs: Any,
 ) -> list:
-    """Call ``client.responses.create(stream=True)`` up to *max_retries*
+    """Call `client.responses.create(stream=True)` up to *max_retries*
     times, returning the first event list where *validate_events* returns
-    ``True``.
+    `True`.
     """
     last_events: list = []
-    for attempt in range(max_retries):
+    for _ in range(max_retries):
         stream = await client.responses.create(
             model=model, stream=True, **create_kwargs
         )
@@ -183,9 +183,9 @@ def _validate_event_ordering(events: list) -> None:
 def _validate_field_consistency(events: list) -> None:
     """Validate item_id, output_index, and content_index consistency.
 
-    Tracks the active output item established by ``output_item.added``
+    Tracks the active output item established by `output_item.added`
     and verifies that all subsequent events for that item carry matching
-    identifiers until ``output_item.done`` closes it.
+    identifiers until `output_item.done` closes it.
     """
     _SESSION_EVENTS = {
         "response.created",
@@ -302,10 +302,10 @@ def validate_streaming_event_stack(
     Checks three aspects:
     1. **Event pairing** — start/end events are properly nested
        (stack-based matching derived from *pairs_of_event_types*).
-    2. **Event ordering** — envelope events (``created``,
-       ``in_progress``, ``completed``) appear at the correct positions.
-    3. **Field consistency** — ``item_id``, ``output_index``, and
-       ``content_index`` are consistent across related events within
+    2. **Event ordering** — envelope events (`created`,
+       `in_progress`, `completed`) appear at the correct positions.
+    3. **Field consistency** — `item_id`, `output_index`, and
+       `content_index` are consistent across related events within
        each output item's lifecycle.
     """
     _validate_event_pairing(events, pairs_of_event_types)
@@ -321,7 +321,7 @@ def log_response_diagnostics(
     """Extract and log diagnostic info from a Responses API response.
 
     Logs reasoning, tool-call attempts, MCP items, and output types so
-    that CI output (``pytest -s`` or ``--log-cli-level=INFO``) gives
+    that CI output (`pytest -s` or `--log-cli-level=INFO`) gives
     full visibility into model behaviour even on passing runs.
 
     Returns the extracted data so callers can make additional assertions

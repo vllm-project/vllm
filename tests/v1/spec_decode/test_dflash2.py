@@ -817,6 +817,52 @@ def test_context_kv_uses_quantized_projection_fallback(monkeypatch):
     assert [projection.calls for projection in projections] == [1, 1]
 
 
+def test_ripple_draft_skips_context_rope_on_nope_layers(monkeypatch):
+    """The Ripple drafter routes to its own class, whose context keys carry RoPE
+    exactly where the layer's queries do."""
+    from torch import nn
+
+    from vllm.config.speculative import SpeculativeConfig
+    from vllm.model_executor.models import qwen3_dflash
+    from vllm.model_executor.models.ricursive_dflash2 import RicursiveDFlash2Model
+
+    def draft_config(**kwargs):
+        config = SimpleNamespace(
+            architectures=["DFlash2DraftModel"], model_type="qwen3", **kwargs
+        )
+        config.update = lambda d: config.__dict__.update(d)
+        return config
+
+    routed = SpeculativeConfig.hf_config_override(draft_config(no_rope_layers=[1]))
+    assert routed.architectures == ["DFlash2RicursiveDraftModel"]
+    plain = SpeculativeConfig.hf_config_override(draft_config())
+    assert plain.architectures == ["DFlash2DraftModel"]
+
+    def fake_rope(positions, query, key, head_size, cache, is_neox):
+        # Marks rotated keys with 100 + position.
+        query.add_(positions[:, None].to(query.dtype) + 100)
+
+    monkeypatch.setattr(qwen3_dflash.ops, "rotary_embedding", fake_rope)
+    model = RicursiveDFlash2Model.__new__(RicursiveDFlash2Model)
+    nn.Module.__init__(model)
+    model.config = SimpleNamespace(no_rope_layers=[1])
+    model._rope_cos_sin_cache = torch.zeros(1)
+    model._rope_head_size = 4
+    model._rope_is_neox = True
+
+    num_layers, num_ctx, head_dim = 3, 2, 4
+    keys = torch.arange(num_layers * num_ctx * head_dim, dtype=torch.float32)
+    keys = keys.view(num_layers, num_ctx, 1, head_dim)
+    all_k = keys.clone()
+    positions = torch.tensor([5, 6])
+    model._apply_context_rope(all_k, positions)
+
+    rotated = keys + (positions.float() + 100).view(1, num_ctx, 1, 1)
+    torch.testing.assert_close(all_k[0], rotated[0])
+    torch.testing.assert_close(all_k[1], keys[1])
+    torch.testing.assert_close(all_k[2], rotated[2])
+
+
 def test_score_edges_keeps_out_of_vocabulary_anchors_in_range():
     """A request in chunked prefill anchors on its next prompt token, which can
     lie past the draft vocabulary (a multimodal placeholder)."""
