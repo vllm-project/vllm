@@ -75,7 +75,7 @@ Rows are labelled with the version of the forward that computed them, stamped wh
 |---|---|---|
 | Memory full | drop rows / fail the request / block / **offload to SSD** | **Offload** on eviction (never at put, which loses objects); without SSD, **block** with an in-flight cap |
 | Holder dies or disk fails | restart and continue / **abort the step** | A dead holder's objects are listed but unreadable, and a failing disk makes every put fail: **abort** on holder death or when puts stop landing |
-| Any write fails | report the missing rows / substitute a later recompute / **fail the request** | A recompute can be of another version and its label would be wrong. Reporting missing rows keeps the rest of the request but needs per-row bookkeeping on both sides; failures are rare, so for now the request fails as a whole, by an **error marker per request** (a session-wide marker would fail every sibling) |
+| Any write fails | report the missing rows / substitute a later recompute / **fail the request** | A recompute can be of another version and its label would be wrong. Reporting missing rows would keep the rest of the request but needs per-row bookkeeping in the writer and the reader, for failures that are rare. The request **fails** as a whole: an **error marker per request** in place of its manifest (a session-wide marker would fail every sibling), and the reader fails any request whose manifest lists an object that does not exist |
 | Preemption | finish the request / **stash and resume** | Finishing loses rows computed before the preemption: **stash** |
 | KV-load rewind | crash / **mark invalid from the rewind point** | Rows computed on invalid KV are reported, never delivered |
 
@@ -129,7 +129,7 @@ All five share the delivery segment (W1/W3, K2, backpressure, admission cap, ses
 
 ## Not adopted
 
-- **Write at request end, hard-pin forever, fail the request on write errors** (the SGLang output-store approach). Its good parts are kept: self-describing references, the engine deleting undeliverable objects, codecs, pre-registered read buffers.
+- **Write at request end and hard-pin forever** (the SGLang output-store approach). Its good parts are kept: failing the request on write errors, self-describing references, the engine deleting undeliverable objects, codecs, pre-registered read buffers.
 - **Distributed reference counting:** the driver already knows when a session is consumed.
 - **Engine-side admission:** the engine cannot tell a new trajectory from the next turn of an old one; blocking the latter deadlocks.
 - **Per-field keys:** 3–5× more master operations; range reads within one object do the same.

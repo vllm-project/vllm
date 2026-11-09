@@ -77,7 +77,7 @@ Sampling-parameter constraints (when requesting `topk_logprobs`, `sampling_mask`
 | `tail_start`, `tail_nbytes` | the tail object covering `[tail_start, rows)`; it can span several blocks |
 | `rows` | rows covered; can exceed `L−1` (see §7) |
 | `weight_versions` | `[[start, version], ...]` covering `[0, rows)`, describing the stored objects |
-| `fields` | per output: name, dtype, per-token shape, codec, layout, `missing` and `holes` counts; for sampling-following outputs the chunk count and every chunk's row count (`chunk_lens`: a preemption flushes a short chunk). Hidden states: codec `raw` stores each row as `d` values of the field's `dtype`, the dtype that enters `lm_head`. Indexer: the codec of block and tail objects |
+| `fields` | per output: name, dtype, per-token shape, codec, layout; for sampling-following outputs the chunk count and every chunk's row count (`chunk_lens`: a preemption flushes a short chunk). Hidden states: codec `raw` stores each row as `d` values of the field's `dtype`, the dtype that enters `lm_head`. Indexer: the codec of block and tail objects |
 | `invalid_from` | first position computed on invalid KV, if the engine ever rewound this request (§6.8); rows from here are not valid |
 
 ## 4. Objects
@@ -112,7 +112,7 @@ Rows are captured from the forward, per request, at the captured positions (not 
 
 Allowed only up to the longest prefix the session already published (the delivery pool is the session's cache). Rows for hit positions are therefore always in the pool. Cross-session hits are truncated.
 
-A hit can end mid-block. The rows of that block before the hit point were computed by whoever filled the block, and this request never captured them. When the request publishes the block, those rows are taken from the session's stored object for the block, which is the object whose KV the hit used. If that object cannot be read, the block is reported missing. Pad rows are never published as valid.
+A hit can end mid-block. The rows of that block before the hit point were computed by whoever filled the block, and this request never captured them. When the request publishes the block, those rows are taken from the session's stored object for the block, which is the object whose KV the hit used. If that object cannot be read, the block cannot be written, and the request fails like any request with a failed write (§6.9). Pad rows are never published as valid.
 
 ### 6.3 The next turn of a trajectory
 
@@ -201,7 +201,7 @@ aux.release_session(job, session)  # after the session is consumed and the step 
 
 - **read** reads the manifest, then the blocks, chunks and tail, and returns rows for `[0, L−1)`:
   - truncate to `L−1`: the manifest can cover more rows (async scheduling computes one more position; speculative decoding can capture truncated drafts);
-  - check the error marker: a failed request fails the sample; so does a block the manifest lists that cannot be read, or a nonzero `missing`/`holes` count;
+  - check that every object the manifest lists exists, in one batched existence check: if one is absent, or decodes to a malformed object, the request has failed and so does the sample; without a manifest, an error marker fails the request at once;
   - verify each block's tokens against the sample;
   - R3 sanity: the 6 expert ids in a row are distinct; an all-zero row is an error;
   - replay compares expert sets; rows whose set is unchanged keep the trainer's own ids and weights;
