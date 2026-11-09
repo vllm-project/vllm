@@ -67,10 +67,10 @@ from vllm.model_executor.models.transformers.fusers.attention import (
 from vllm.model_executor.models.transformers.utils import (
     attrsetter,
     can_enable_torch_compile,
-    disable_noop_dynamic_rope,
     get_feature_request_tip,
     init_on_device_without_buffers,
     log_replacement,
+    maybe_disable_dynamic_rope_update,
     named_state,
     replace_conv_class,
     replace_embedding_class,
@@ -189,8 +189,8 @@ class Base(
         self._create_hf_to_vllm_mapper()
         # Remove layers not on this pipeline parallel rank
         self.pipeline_parallel()
-        # Skip the device sync of dynamic rope where it can never rescale
-        disable_noop_dynamic_rope(self.model.get_decoder(), vllm_config)
+        # Skip the device sync of rope updates where `inv_freq` can be fixed
+        maybe_disable_dynamic_rope_update(self.model.get_decoder(), vllm_config)
         # Substitute remaining layers with vLLM's layers as needed
         self.recursive_replace()
         # Create attention instances for KV cache allocation
