@@ -73,9 +73,6 @@ def unsupported(vllm_config) -> list[str]:
     from vllm.model_executor.layers.mamba.mamba_utils import (
         MambaStateDtypeCalculator,
     )
-    from vllm.models.qwen4_exp.common.hyperconnection import (
-        is_hc_sequence_parallel_enabled,
-    )
 
     mc, pc, cc = (
         vllm_config.model_config,
@@ -96,11 +93,11 @@ def unsupported(vllm_config) -> list[str]:
         (pc.prefill_context_parallel_size != 1, "prefill context parallelism"),
         # the kernels read one batch's attention metadata per step
         (pc.use_ubatching, "DBO (dual-batch overlap)"),
-        # the kernels take and return every token row on every rank
-        (
-            is_hc_sequence_parallel_enabled(vllm_config),
-            "sequence parallelism (HC or MoE)",
-        ),
+        # the kernels take and return every token row on every rank. HC SP
+        # (--enable-hc-sp) passes: only vLLM's forward shards rows, a planned
+        # step bypasses it and runs the PLE layer on every row (full_rows).
+        # MoE SP runs the experts on each rank's own rows.
+        (pc.use_sequence_parallel_moe, "MoE sequence parallelism"),
         (vllm_config.lora_config is not None, "LoRA"),
         (vllm_config.kv_transfer_config is not None, "KV transfer connectors"),
         (

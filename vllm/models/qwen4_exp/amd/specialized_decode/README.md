@@ -65,7 +65,7 @@ a layer, up to ~80 rows on one; uniform: ~470), so the schedule
 
 Default-deny, in three stages, each reporting every reason in one error
 (`runtime/__init__.py`, `runtime/guards.py`): the config (TP other than 2,
-PP, DP, EP, EPLB, DCP, PCP, DBO, HC/MoE sequence parallelism, LoRA, KV
+PP, DP, EP, EPLB, DCP, PCP, DBO, MoE sequence parallelism, LoRA, KV
 connectors, routed-expert capture, speculative decoding, sleep mode, CPU
 weight offload, weight updates, GDN prefix caching, other GDN cache dtypes,
 an unfused shared expert, the V1 runner, `STOCK_TORCH_COMPILE`, other model

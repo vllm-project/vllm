@@ -211,7 +211,10 @@ class SpecializedDecode:
         seq, stats = 0, True
         for i, layer in enumerate(model.layers):
             if layer.ple is not None:
-                state = layer.ple(state, input_ids, query_start_loc, ngram_context)
+                # every row on every rank, also when --enable-hc-sp built it
+                state = layer.ple(
+                    state, input_ids, query_start_loc, ngram_context, full_rows=True
+                )
                 stats = True
             keys = la.keys(layer, rows, stats)
             dyn = {"state": state, "x": x}

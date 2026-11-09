@@ -292,13 +292,20 @@ class Qwen4ExpNGramEmbedding(nn.Module):
             self.ngram_embedding.weight.is_pinned(),
         )
 
-    def _sp_shard_embeddings(self, embeddings: torch.Tensor) -> torch.Tensor:
-        """Shard embedding token rows, optionally reducing vocabulary contributions."""
+    def _sp_shard_embeddings(
+        self, embeddings: torch.Tensor, full_rows: bool
+    ) -> torch.Tensor:
+        """Shard embedding token rows, or keep every row (`full_rows`),
+        optionally reducing vocabulary contributions."""
         # Each embedding element has one vocabulary owner, including FP8 bytes.
         output_dtype = embeddings.dtype
         if is_fp8(embeddings):
             embeddings = embeddings.view(torch.int8)
-        if self.use_reduce_scatter:
+        if full_rows:
+            if self.use_reduce_scatter:
+                # The table's own reduction when built with reduce_results.
+                embeddings = get_etp_group().all_reduce(embeddings)
+        elif self.use_reduce_scatter:
             embeddings = sp_reduce_scatter(embeddings)
         else:
             embeddings = sp_shard(embeddings)
@@ -309,8 +316,11 @@ class Qwen4ExpNGramEmbedding(nn.Module):
         input_ids: torch.Tensor,
         query_start_loc: torch.Tensor,
         ngram_context: torch.Tensor,
+        *,
+        full_rows: bool = False,
     ) -> torch.Tensor:
-        """Return full embeddings or a token shard after combining vocabulary owners."""
+        """Return full embeddings or a token shard after combining vocabulary
+        owners. `full_rows`: every token row even when built for SP."""
         input_ids = input_ids.reshape(-1)
         ngram_ids = input_ids.new_empty(
             (input_ids.shape[0], self.ngram_heads), dtype=torch.int64
@@ -345,7 +355,7 @@ class Qwen4ExpNGramEmbedding(nn.Module):
             )
         if not self.use_sequence_parallel:
             return output
-        return self._sp_shard_embeddings(output)
+        return self._sp_shard_embeddings(output, full_rows)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         """Load hash buffers and checkpoint-split embedding rows."""
@@ -728,18 +738,23 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
         input_ids: torch.Tensor,
         query_start_loc: torch.Tensor,
         ngram_context: torch.Tensor,
+        *,
+        full_rows: bool = False,
     ) -> torch.Tensor:
+        """`full_rows`: `hidden_states` and the result hold every token row
+        even when the layer is built for sequence parallelism (the specialized
+        decode's steps); by default they follow the build."""
+        sequence_parallel = self.use_sequence_parallel and not full_rows
         input_ids = input_ids.reshape(-1)
-        if (
-            not self.use_sequence_parallel
-            and input_ids.shape[0] != hidden_states.shape[0]
-        ):
+        if not sequence_parallel and input_ids.shape[0] != hidden_states.shape[0]:
             raise ValueError(
                 "PLE expects input_ids and hidden_states to have the same "
                 f"token length, got {input_ids.shape[0]} and "
                 f"{hidden_states.shape[0]}"
             )
-        embeddings = self.ple_embedding(input_ids, query_start_loc, ngram_context)
+        embeddings = self.ple_embedding(
+            input_ids, query_start_loc, ngram_context, full_rows=full_rows
+        )
         embeddings = self.ple_embedding.ngram_embedding.dequantize(
             embeddings, hidden_states.dtype
         )
@@ -757,7 +772,7 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
         # The short-conv op is a piecewise-graph splitting op: state routing
         # reads runtime request metadata. It accumulates the convolution and
         # the outer residual into gated_output.
-        if self.use_sequence_parallel:
+        if sequence_parallel:
             # Only convolution needs full tokens. Add residuals on local shards.
             conv_input = sp_all_gather(conv_input)[: input_ids.shape[0]]
             # Metadata may omit padding tokens or all tokens during profiling.

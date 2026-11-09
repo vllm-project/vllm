@@ -133,7 +133,8 @@ def _make_decoder(config: VllmConfig, rank: int) -> Qwen4ExpDecoderLayer:
 
 
 def _check_decoder_ple(rank: int) -> None:
-    """Compare HC SP with full tokens across a PLE prefill and cached decode."""
+    """Compare HC SP with full tokens across a PLE prefill and cached decode,
+    and (ROCm) the PLE's full-row calls the specialized decode makes."""
     configs = [_make_config(rank, hc_sp=enabled) for enabled in (False, True)]
     layers = [_make_decoder(config, rank) for config in configs]
     states = []
@@ -145,6 +146,10 @@ def _check_decoder_ple(rank: int) -> None:
             state = state.transpose(-1, -2).contiguous()
         ple.kv_cache = (state,)
         states.append(state)
+    # (layer, full_rows) per PLE call, each with its own conv state: the layer
+    # without SP by default and with full_rows, the HC SP layer with full_rows.
+    lanes = ((0, False), (0, True), (1, True))
+    lane_states = [torch.zeros_like(states[i]) for i, _ in lanes]
 
     # Three prefill tokens straddle the TP=2 boundary and require SP padding.
     for case in (
@@ -193,6 +198,33 @@ def _check_decoder_ple(rank: int) -> None:
                 outputs.append(tuple(x.clone() for x in output))
         torch.testing.assert_close(outputs[1], outputs[0], atol=0.002, rtol=0.02)
         torch.testing.assert_close(states[1], states[0], atol=0.002, rtol=0.02)
+
+        # The specialized decode (ROCm --monokernel) calls the PLE on every row.
+        if not current_platform.is_rocm():
+            continue
+        lane_outputs = []
+        for (i, full_rows), state in zip(lanes, lane_states):
+            ple = layers[i].ple
+            assert ple is not None
+            decoder_state, ple.kv_cache = ple.kv_cache, (state,)
+            with (
+                set_current_vllm_config(configs[i]),
+                set_forward_context({ple.prefix: metadata}, configs[i]),
+            ):
+                if hasattr(ple, "start_prefetch"):
+                    ple.start_prefetch(ids, qsl, context)
+                output = ple(hidden, ids, qsl, context, full_rows=full_rows)
+            ple.kv_cache = decoder_state
+            lane_outputs.append(output.clone())
+        # Without SP, full_rows selects the same computation.
+        torch.testing.assert_close(lane_outputs[1], lane_outputs[0], atol=0, rtol=0)
+        torch.testing.assert_close(lane_states[1], lane_states[0], atol=0, rtol=0)
+        torch.testing.assert_close(
+            lane_outputs[2], lane_outputs[0], atol=0.002, rtol=0.02
+        )
+        torch.testing.assert_close(
+            lane_states[2], lane_states[0], atol=0.002, rtol=0.02
+        )
 
 
 def _check_moe_sp(rank: int, config: VllmConfig) -> None:
