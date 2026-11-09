@@ -60,9 +60,8 @@ uncached suffix; holes within that suffix are unsupported. The producer pairs
 the requested pages with the suffix of its corresponding source group.
 Unsupported layouts fail before any data transfer.
 
-The producer advertises its connector version through bootstrap registration.
-The decoder rejects this import path if the producer or bootstrap server does
-not advertise a compatible version.
+Run the same code revision on both endpoints. This experimental path does not
+negotiate connector versions or guarantee interoperability across revisions.
 
 For a shared host pool, decoder TP rank 0 registers and requests the host memory;
 other ranks omit host pages from their wire requests. Every decoder rank still
