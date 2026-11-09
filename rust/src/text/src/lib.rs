@@ -8,6 +8,8 @@
 //! and the thin generate-facing backend interface live here.
 
 use std::mem::take;
+use std::num::NonZeroU32;
+use std::time::Instant;
 
 pub use backend::{
     DynTextBackend, GenerationConfigMode, SamplingHints, SamplingLimits, TextBackend,
@@ -28,6 +30,7 @@ use trait_set::trait_set;
 use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputBackend;
 pub use vllm_llm::FinishReason;
 use vllm_llm::{BoxGenerateOutputStream, GenerateRequest, Llm};
+use vllm_metrics::{METRICS, RenderRequestType};
 use vllm_tokenizer::DynTokenizer;
 
 pub mod backend;
@@ -200,6 +203,9 @@ pub struct TextLlm {
     llm: Box<dyn Llm>,
     /// Shared engine-free request preparation.
     processor: TextRequestProcessor,
+    /// The `model_name` label of the render metric: the frontend's primary
+    /// served name, as for every other frontend metric.
+    served_model_name: String,
 }
 
 impl TextLlm {
@@ -209,11 +215,25 @@ impl TextLlm {
         // The engine-reported value reflects the post-profiling, auto-fitted
         // KV cache limit used at runtime.
         let max_model_len = llm.info().max_model_len;
+        let served_model_name = backend.model_id().to_owned();
 
         Self {
             llm: Box::new(llm),
             processor: TextRequestProcessor::new(backend, max_model_len),
+            served_model_name,
         }
+    }
+
+    /// Set the served model name that labels frontend metrics, the backend
+    /// model ID by default.
+    pub fn with_served_model_name(mut self, served_model_name: impl Into<String>) -> Self {
+        self.served_model_name = served_model_name.into();
+        self
+    }
+
+    /// Return the served model name that labels frontend metrics.
+    pub fn served_model_name(&self) -> &str {
+        &self.served_model_name
     }
 
     /// Override the maximum accepted logprobs count.
@@ -267,42 +287,79 @@ impl TextLlm {
     }
 
     /// Tokenize if needed, lower to a generate request, and return the raw
-    /// token stream.
+    /// token stream. Like Python's token-in-token-out route, this records no
+    /// render duration.
     pub async fn generate_raw(&self, request: TextRequest) -> Result<BoxGenerateOutputStream> {
         let prepared = self.processor.prepare(request)?;
-        self.submit(prepared.generate_request).await
+        let mut streams = self.submit(prepared.generate_request, NonZeroU32::MIN).await?;
+        Ok(streams.pop().expect("one output stream per sample"))
     }
 
     /// Tokenize if needed, lower to a generate request, and stream
     /// incrementally decoded text.
     pub async fn generate(&self, request: TextRequest) -> Result<impl TextOutputStream> {
-        let prepared = self.processor.prepare(request)?;
-        self.generate_prepared(prepared).await
+        let mut streams = self.generate_n(request, NonZeroU32::MIN).await?;
+        Ok(streams.pop().expect("one output stream per sample"))
     }
 
-    /// Stream incrementally decoded text for one already prepared request.
-    pub async fn generate_prepared(
+    /// Tokenize and lower one request once, submit it as `n` parallel samples,
+    /// and stream each sample's incrementally decoded text, in index order.
+    pub async fn generate_n(
+        &self,
+        request: TextRequest,
+        n: NonZeroU32,
+    ) -> Result<Vec<impl TextOutputStream + use<>>> {
+        // Like Python's `render_completion`, record successful renders
+        // (tokenization).
+        let render_start = Instant::now();
+        let prepared = self.processor.prepare(request)?;
+        METRICS.renderer.observe_request_render_duration(
+            &self.served_model_name,
+            RenderRequestType::Completion,
+            render_start.elapsed(),
+        );
+        self.generate_prepared_n(prepared, n).await
+    }
+
+    /// Submit one already prepared request as `n` parallel samples and stream
+    /// each sample's incrementally decoded text, in index order.
+    pub async fn generate_prepared_n(
         &self,
         PreparedTextRequest {
             text_request,
             generate_request,
         }: PreparedTextRequest,
-    ) -> Result<impl TextOutputStream> {
-        let raw_stream = self.submit(generate_request).await?;
-        let tokenizer = self.processor.tokenizer();
-        let decoded_stream = output::decoded_text_event_stream(
-            text_request.request_id,
-            tokenizer,
-            raw_stream,
-            text_request.decode_options,
-            text_request.intermediate,
-        );
+        n: NonZeroU32,
+    ) -> Result<Vec<impl TextOutputStream + use<>>> {
+        // Like Python's `SamplingParams`, checked against the resolved
+        // temperature, after model generation-config defaults. Python raises a
+        // positive temperature below 0.01 to 0.01 first, so only zero is greedy.
+        if n > NonZeroU32::MIN && generate_request.sampling_params.temperature == 0.0 {
+            return Err(Error::GreedyParallelSampling { n: n.get() });
+        }
 
-        Ok(decoded_stream)
+        let raw_streams = self.submit(generate_request, n).await?;
+        let tokenizer = self.processor.tokenizer();
+        Ok(raw_streams
+            .into_iter()
+            .map(|raw_stream| {
+                output::decoded_text_event_stream(
+                    text_request.request_id.clone(),
+                    tokenizer.clone(),
+                    raw_stream,
+                    text_request.decode_options.clone(),
+                    text_request.intermediate,
+                )
+            })
+            .collect())
     }
 
-    /// Submit one lowered request to the engine.
-    async fn submit(&self, generate_request: GenerateRequest) -> Result<BoxGenerateOutputStream> {
+    /// Submit one lowered request to the engine as `n` parallel samples.
+    async fn submit(
+        &self,
+        generate_request: GenerateRequest,
+        n: NonZeroU32,
+    ) -> Result<Vec<BoxGenerateOutputStream>> {
         // The engine compiles grammars with its own tokenizer, which it skips
         // along with this frontend under `--skip-tokenizer-init`. A render-only
         // frontend forwards the constraint to an engine it does not configure.
@@ -310,7 +367,7 @@ impl TextLlm {
             return Err(Error::TokenizerUnavailable);
         }
 
-        Ok(self.llm.generate(generate_request).await?)
+        Ok(self.llm.generate_n(generate_request, n).await?)
     }
 
     /// Abort in-flight requests by their external (user-supplied) request ids.

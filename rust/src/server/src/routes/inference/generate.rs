@@ -16,17 +16,15 @@ use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::response::sse::Event;
 use axum::response::{IntoResponse, Response};
-use base64::Engine as _;
 use futures::{Stream, StreamExt as _, pin_mut};
 use thiserror_ext::AsReport as _;
 use tracing::{error, info, trace};
 use tracing_futures::Instrument as _;
-use vllm_engine_core_client::protocol::dtype::Endianness;
 use vllm_engine_core_client::protocol::logprobs::{Logprobs, PositionLogprobs};
 use vllm_engine_core_client::protocol::multimodal::MmFeatureSpec;
-use vllm_engine_core_client::protocol::tensor::WireNdArray;
 use vllm_llm::{
-    CollectedGenerateOutput, FinishReason, GenerateOutput, GenerateOutputStreamExt as _, TokenUsage,
+    AuxOutputRows, CollectedGenerateOutput, FinishReason, GenerateOutput,
+    GenerateOutputStreamExt as _, TokenUsage,
 };
 
 use self::convert::{ResponseOptions, prepare_generate_request};
@@ -47,6 +45,7 @@ use crate::routes::openai::utils::types::Usage;
 use crate::routes::openai::utils::validated_json::ValidatedJson;
 use crate::routes::output_log::LoggedOutput;
 use crate::state::AppState;
+use crate::utils::npy_base64;
 use crate::utils::{resolve_request_context, sse_response, unix_timestamp};
 
 /// Validate one token-in/token-out request and proxy it into the shared
@@ -180,10 +179,12 @@ async fn generate_chunk_stream(
     let mut prompt_token_ids = None;
     let mut usage = TokenUsage::default();
     let mut spec_decode_metrics = None;
+    let mut routed_experts = AuxOutputRows::default();
 
     while let Some(next) = stream.next().await {
         match next {
             Ok(output) => {
+                routed_experts.append(output.routed_experts);
                 if let Some(metrics) = output.spec_decode_metrics {
                     spec_decode_metrics = Some(SpeculativeDecodingMetrics::from(*metrics));
                 }
@@ -235,8 +236,16 @@ async fn generate_chunk_stream(
 
                 let stop_reason =
                     finish_reason.as_ref().and_then(|reason| reason.as_stop_reason().cloned());
-                // Like Python, the spans cover the whole output on the final chunk only.
+                // Like Python, the spans and the routed-expert rows cover the
+                // whole request on the final chunk only.
                 let weight_versions = output.weight_versions.filter(|_| finish_reason.is_some());
+                let routed_experts = if finish_reason.is_some() {
+                    std::mem::take(&mut routed_experts)
+                        .concat()
+                        .map_err(|error| server_error!("{}", error.to_report_string()))?
+                } else {
+                    None
+                };
                 let prompt_token_ids = prompt_token_ids.take();
                 y.yield_ok(GenerateStreamResponse {
                     request_id: request_id.clone(),
@@ -247,11 +256,7 @@ async fn generate_chunk_stream(
                         finish_reason: finish_reason.map(|reason| reason.as_str().to_string()),
                         stop_reason,
                         token_ids,
-                        routed_experts: output
-                            .routed_experts
-                            .as_deref()
-                            .map(npy_base64)
-                            .transpose()?,
+                        routed_experts: routed_experts.as_ref().map(npy_base64).transpose()?,
                         sampling_mask: output.sampling_mask.map(|mask| mask.rows),
                         weight_versions,
                     }],
@@ -515,40 +520,6 @@ fn position_to_logprob_map(position: &PositionLogprobs) -> HashMap<u32, Generate
         .collect()
 }
 
-/// Encode an ndarray as Python `numpy2base64` (`np.save`, then base64) does.
-fn npy_base64(array: &WireNdArray) -> Result<String, ApiError> {
-    let Some(data) = array.data.as_raw_view() else {
-        bail_server_error!("ndarray data was not resolved");
-    };
-    // NumPy writes `|` for single-byte types; vLLM hosts are little-endian.
-    let byte_order = match array.dtype.endianness {
-        _ if array.dtype.scalar.element_size() == 1 => '|',
-        Endianness::Big => '>',
-        Endianness::Little | Endianness::Native => '<',
-    };
-    let code = &array.dtype.to_string()[1..];
-    let dims: Vec<_> = array.shape.iter().map(ToString::to_string).collect();
-    let shape = match dims.as_slice() {
-        [dim] => format!("({dim},)"),
-        dims => format!("({})", dims.join(", ")),
-    };
-    let mut header =
-        format!("{{'descr': '{byte_order}{code}', 'fortran_order': False, 'shape': {shape}, }}");
-    // NumPy reserves room to grow the first axis in place.
-    if let Some(first) = dims.first() {
-        header.push_str(&" ".repeat(21 - first.len()));
-    }
-    header.push_str(&" ".repeat(64 - (11 + header.len()) % 64));
-    header.push('\n');
-
-    let mut npy = Vec::with_capacity(10 + header.len() + data.len());
-    npy.extend_from_slice(b"\x93NUMPY\x01\x00");
-    npy.extend_from_slice(&(header.len() as u16).to_le_bytes());
-    npy.extend_from_slice(header.as_bytes());
-    npy.extend_from_slice(data);
-    Ok(base64::engine::general_purpose::STANDARD.encode(npy))
-}
-
 fn format_token_id(token_id: u32) -> String {
     format!("token_id:{token_id}")
 }
@@ -604,6 +575,7 @@ mod tests {
     use vllm_engine_core_client::protocol::multimodal::{MmModality, PlaceholderRange};
     use vllm_engine_core_client::protocol::output::{RequestSpecDecodeMetrics, StopReason};
     use vllm_engine_core_client::protocol::sampling_mask::SamplingMask;
+    use vllm_engine_core_client::protocol::tensor::WireNdArray;
     use vllm_llm::{GeneratePromptInfo, PromptCacheUsage, WeightVersionSpan};
 
     use super::*;
@@ -704,7 +676,7 @@ mod tests {
                 sampling_mask: None,
                 spec_decode_metrics: None,
                 weight_versions: None,
-                routed_experts: None,
+                routed_experts: Default::default(),
                 timestamps: Default::default(),
             }),
             Ok(GenerateOutput {
@@ -726,7 +698,7 @@ mod tests {
                 sampling_mask: None,
                 spec_decode_metrics: None,
                 weight_versions: None,
-                routed_experts: None,
+                routed_experts: Default::default(),
                 timestamps: Default::default(),
             }),
         ]);
@@ -815,7 +787,7 @@ mod tests {
             sampling_mask: None,
             spec_decode_metrics: None,
             weight_versions: None,
-            routed_experts: None,
+            routed_experts: Default::default(),
             timestamps: Default::default(),
         }
     }
@@ -1036,64 +1008,28 @@ mod tests {
         assert_eq!(response.choices[0].sampling_mask, Some(vec![vec![30, 40]]));
     }
 
-    #[test]
-    fn routed_experts_match_numpy2base64() {
-        // Expected values are numpy2base64 of the same arrays.
-        let cases = [
-            (
-                // np.arange(12, dtype=np.uint8).reshape(2, 3, 2)
-                WireNdArray::from_raw(TensorDtype::U8, vec![2, 3, 2], (0..12).collect()),
-                "k05VTVBZAQB2AHsnZGVzY3InOiAnfHUxJywgJ2ZvcnRyYW5fb3JkZXInOiBGYWxzZSwgJ3NoYXBlJzogKDIsIDMsIDIpLCB9ICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAoAAQIDBAUGBwgJCgs=",
-            ),
-            (
-                // np.arange(6, dtype="<i4").reshape(3, 1, 2)
-                WireNdArray::from_i32(vec![3, 1, 2], (0..6).collect()).unwrap(),
-                "k05VTVBZAQB2AHsnZGVzY3InOiAnPGk0JywgJ2ZvcnRyYW5fb3JkZXInOiBGYWxzZSwgJ3NoYXBlJzogKDMsIDEsIDIpLCB9ICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAoAAAAAAQAAAAIAAAADAAAABAAAAAUAAAA=",
-            ),
-            (
-                // np.arange(3, dtype="<u2")
-                WireNdArray::from_raw(TensorDtype::U16, vec![3], vec![0, 0, 1, 0, 2, 0]),
-                "k05VTVBZAQB2AHsnZGVzY3InOiAnPHUyJywgJ2ZvcnRyYW5fb3JkZXInOiBGYWxzZSwgJ3NoYXBlJzogKDMsKSwgfSAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAoAAAEAAgA=",
-            ),
-            (
-                // np.zeros((0, 2, 2), dtype=np.uint8)
-                WireNdArray::from_raw(TensorDtype::U8, vec![0, 2, 2], Vec::new()),
-                "k05VTVBZAQB2AHsnZGVzY3InOiAnfHUxJywgJ2ZvcnRyYW5fb3JkZXInOiBGYWxzZSwgJ3NoYXBlJzogKDAsIDIsIDIpLCB9ICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAo=",
-            ),
-        ];
-        for (array, expected) in cases {
-            assert_eq!(npy_base64(&array).unwrap(), expected, "{array:?}");
-        }
-    }
-
     #[tokio::test]
     async fn generate_chunk_stream_returns_routed_experts_on_final_chunk() {
-        let rows = WireNdArray::from_raw(TensorDtype::U8, vec![2, 3, 2], (0..12).collect());
+        // Each output carries its own rows; the final chunk joins them.
+        let rows = |start: u8| {
+            AuxOutputRows::from(WireNdArray::from_raw(
+                TensorDtype::U8,
+                vec![1, 3, 2],
+                (start..start + 6).collect(),
+            ))
+        };
+        let mut first = stream_output(Some(&[11]), vec![33], None);
+        first.routed_experts = rows(0);
         let mut terminal = stream_output(None, vec![44], Some(FinishReason::Length));
-        terminal.routed_experts = Some(Box::new(rows.clone()));
+        terminal.routed_experts = rows(6);
 
-        let chunks = collect_chunks(
-            vec![stream_output(Some(&[11]), vec![33], None), terminal],
-            false,
-            None,
-        )
-        .await;
+        let chunks = collect_chunks(vec![first, terminal], false, None).await;
 
         assert_eq!(chunks[0].choices[0].routed_experts, None);
+        let all_rows = WireNdArray::from_raw(TensorDtype::U8, vec![2, 3, 2], (0..12).collect());
         assert_eq!(
             chunks[1].choices[0].routed_experts,
-            Some(npy_base64(&rows).unwrap())
-        );
-    }
-
-    #[test]
-    fn prompt_token_id_logprobs_match_numpy2base64() {
-        let scores =
-            WireNdArray::from_f32(vec![2, 3], vec![-0.5, -1.5, -2.5, -3.5, -4.5, -5.5]).unwrap();
-        // numpy2base64(np.array([[-0.5, -1.5, -2.5], [-3.5, -4.5, -5.5]], np.float32))
-        assert_eq!(
-            npy_base64(&scores).unwrap(),
-            "k05VTVBZAQB2AHsnZGVzY3InOiAnPGY0JywgJ2ZvcnRyYW5fb3JkZXInOiBGYWxzZSwgJ3NoYXBlJzogKDIsIDMpLCB9ICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAoAAAC/AADAvwAAIMAAAGDAAACQwAAAsMA="
+            Some(npy_base64(&all_rows).unwrap())
         );
     }
 
