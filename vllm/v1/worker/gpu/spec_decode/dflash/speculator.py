@@ -551,6 +551,11 @@ class DFlashSpeculator(DraftModelSpeculator):
         assert self.draft_kv_cache_group_id >= 0
         # Support multiple draft KV cache groups by preparing inputs once for each
         for i, gid in enumerate(self.draft_kv_cache_group_ids):
+            block_stride = self.block_tables.block_sizes[gid]
+            group = self.attn_groups[gid][0]
+            if group.kernel_block_stride:
+                assert group.kernel_block_size is not None
+                block_stride = group.kernel_block_stride * group.kernel_block_size
             prepare_dflash_inputs(
                 self.input_buffers,
                 self.block_tables.slot_mappings[gid],
@@ -570,6 +575,7 @@ class DFlashSpeculator(DraftModelSpeculator):
                 seeds,
                 self.block_tables.input_block_tables[gid],
                 self.block_tables.block_sizes[gid],
+                block_stride,
                 self.block_tables.cp_rank,
                 self.dcp_size,
                 self.block_tables.cp_interleave,
@@ -581,9 +587,6 @@ class DFlashSpeculator(DraftModelSpeculator):
                 self.max_model_len,
                 self.sample_from_anchor,
                 num_reqs,
-                _block_stride_rows(
-                    self.attn_groups[gid], self.block_tables.block_sizes[gid]
-                ),
             )
 
         if num_speculative_tokens == 0:
@@ -774,7 +777,7 @@ def _prepare_dflash_inputs_kernel(
     # Scalars
     parallel_drafting_token_id,
     block_size,
-    block_stride_rows,
+    block_stride,
     num_query_per_req,
     num_speculative_steps,
     max_num_reqs,
@@ -858,7 +861,7 @@ def _prepare_dflash_inputs_kernel(
         ctx_pos,
         ctx_block_id,
         block_size,
-        block_stride_rows,
+        block_stride,
         cp_rank,
         CP_SIZE,
         CP_INTERLEAVE,
@@ -897,7 +900,7 @@ def _prepare_dflash_inputs_kernel(
         query_pos,
         q_block_id,
         block_size,
-        block_stride_rows,
+        block_stride,
         cp_rank,
         CP_SIZE,
         CP_INTERLEAVE,
@@ -945,15 +948,6 @@ def _prepare_dflash_inputs_kernel(
         tl.store(out_seeds_ptr + req_state_idx, tl.load(seeds_ptr + req_state_idx))
 
 
-def _block_stride_rows(attn_groups: list[AttentionGroup], block_size: int) -> int:
-    """Rows between block starts, including other layers' pages in a packed row."""
-    for group in attn_groups:
-        if group.kernel_block_stride and not group.kv_cache_spec.uses_slot_mapping:
-            assert group.kernel_block_size is not None
-            return group.kernel_block_stride * group.kernel_block_size
-    return block_size
-
-
 def prepare_dflash_inputs(
     input_buffers: InputBuffers,
     query_slot_mapping: torch.Tensor,
@@ -980,6 +974,7 @@ def prepare_dflash_inputs(
     # [max_num_reqs, max_num_blocks]
     block_table: torch.Tensor,
     block_size: int,
+    block_stride: int,
     cp_rank: int,
     cp_size: int,
     cp_interleave: int,
@@ -991,7 +986,6 @@ def prepare_dflash_inputs(
     max_model_len: int,
     sample_from_anchor: bool = False,
     num_reqs_override: int | None = None,
-    block_stride_rows: int | None = None,
 ) -> None:
     num_reqs = input_batch.num_reqs if num_reqs_override is None else num_reqs_override
     assert num_reqs <= input_batch.num_reqs
@@ -1029,7 +1023,7 @@ def prepare_dflash_inputs(
         block_table.stride(0),
         parallel_drafting_token_id,
         block_size,
-        block_size if block_stride_rows is None else block_stride_rows,
+        block_stride,
         num_query_per_req,
         num_speculative_steps,
         max_num_reqs,

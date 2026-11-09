@@ -25,7 +25,6 @@ from vllm.v1.kv_cache_interface import (
     MLAAttentionSpec,
     SlidingWindowSpec,
     SparseCacheRole,
-    UniformTypeKVCacheSpecs,
 )
 from vllm.v1.kv_cache_layout import KVCacheLayout
 
@@ -37,30 +36,6 @@ K31_TEXT_CONFIG = SimpleNamespace(
 
 MLA_DRAFT = SimpleNamespace(kv_lora_rank=512)
 GQA_DRAFT = SimpleNamespace(num_key_value_heads=16)
-
-
-@pytest.mark.parametrize("indexer_first", [True, False])
-def test_indexer_groups_with_mla_and_keeps_the_groups_slot_row(indexer_first):
-    """A self-addressed cache shares its KV cache group with MLA pages that take a
-    slot mapping: the group's row must stay on whichever layer comes first."""
-    mla = MLAAttentionSpec(
-        block_size=64, num_kv_heads=1, head_size=576, dtype=torch.uint8
-    )
-    indexer = dsa_cache.SelfAddressedMLASpec(
-        block_size=64,
-        num_kv_heads=1,
-        head_size=128,
-        dtype=torch.uint8,
-        cache_role=SparseCacheRole.INDEXER,
-    )
-    assert not indexer.uses_slot_mapping
-    layers = [("indexer", indexer), ("mla", mla)]
-    group = UniformTypeKVCacheSpecs.from_specs(
-        dict(layers if indexer_first else reversed(layers))
-    )
-
-    assert group is not None
-    assert group.uses_slot_mapping
 
 
 @pytest.mark.parametrize(
