@@ -1112,8 +1112,8 @@ def _build_tiering_spec(secondary_tiers, *, top_level_backpressure=None):
 def test_partial_tier_backpressure_inherits_top_level_defaults():
     """A partial tier override still inherits missing fields.
 
-    Field-by-field merge means an override that sets only ``high_water_s``
-    keeps ``backpressure_cls`` (and any other field) from the top-level
+    Field-by-field merge means an override that sets only `high_water_s`
+    keeps `backpressure_cls` (and any other field) from the top-level
     default, so the resolved dict reaching the factory is complete.
     """
     spec = _build_tiering_spec(

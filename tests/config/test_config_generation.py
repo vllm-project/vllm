@@ -121,7 +121,7 @@ def test_unrecognized_env(monkeypatch):
 
 
 def test_get_diff_sampling_param_includes_penalties():
-    """``--override-generation-config`` must apply presence_penalty and
+    """`--override-generation-config` must apply presence_penalty and
     frequency_penalty as server-side defaults, like the other sampling
     params. Regression test for the whitelist silently dropping them.
 
@@ -150,11 +150,11 @@ def test_get_diff_sampling_param_includes_penalties():
 
 
 def test_generation_config_penalties_survive_diff_sampling_filter():
-    """``generation_config.json`` penalties must survive the diff-sampling
+    """`generation_config.json` penalties must survive the diff-sampling
     whitelist (regression for #50767, auto path).
 
-    Covers the ``generation_config="auto"`` branch, where the override
-    dict is empty and the values come from ``try_get_generation_config``.
+    Covers the `generation_config="auto"` branch, where the override
+    dict is empty and the values come from `try_get_generation_config`.
     """
     from types import SimpleNamespace
 

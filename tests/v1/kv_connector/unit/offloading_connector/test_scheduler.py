@@ -736,7 +736,7 @@ def test_max_load_tokens_caps_tokens_beyond_gpu_prefix():
 
 def _hybrid_lookup(stored: set[OffloadKey]):
     """Full attention (group 0) holds every chunk; Mamba (group 1) only
-    the boundary states in ``stored``."""
+    the boundary states in `stored`."""
 
     def lookup(key: OffloadKey, req_context: ReqContext) -> LookupResult:
         if get_offload_group_idx(key) == 0:
@@ -1723,7 +1723,7 @@ def test_eagle_partial_tail_round_trip_serves_mamba_checkpoint(cow_on_proof_step
     """Store, finish and resend a 30-token prompt with an EAGLE group.
 
     The resend hits the Mamba checkpoint at 24 only through the EAGLE
-    group's proof key at 28. With ``cow_on_proof_step``, the steps follow core:
+    group's proof key at 28. With `cow_on_proof_step`, the steps follow core:
     the prefill stops at 24, and the CoW hand-off arrives on the step that
     computes tokens 24-30. The producer models a turn that loaded its prefix
     from the offload tier, so that its tail is stored.

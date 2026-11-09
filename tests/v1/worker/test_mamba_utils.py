@@ -195,7 +195,7 @@ def postprocess_mamba(
 ):
     """CPU reference for the align-mode postprocess.
 
-    Used as a golden against the GPU fused kernel (``postprocess_mamba_gpu``).
+    Used as a golden against the GPU fused kernel (`postprocess_mamba_gpu`).
     Mirrors what the production code did before the fused kernel replaced it;
     kept here because production no longer has a CPU implementation.
     """
@@ -408,10 +408,10 @@ def _make_dual_states(
     dict[str, MagicMock],
 ]:
     """Allocate conv+temporal state tensors for the Python path, clone them for
-    the GPU path, and build matching ``forward_context`` dicts for both.
+    the GPU path, and build matching `forward_context` dicts for both.
 
-    Returns ``(conv_py, temporal_py, conv_gpu, temporal_gpu, fwd_py, fwd_gpu)``
-    where the four state lists are parallel to ``layer_names``.
+    Returns `(conv_py, temporal_py, conv_gpu, temporal_gpu, fwd_py, fwd_gpu)`
+    where the four state lists are parallel to `layer_names`.
     """
     n_blocks = num_blocks if num_blocks is not None else cfg.num_blocks
     conv_py = [
@@ -455,7 +455,7 @@ def _make_dual_layer_state(
     dict[str, MagicMock],
     dict[str, MagicMock],
 ]:
-    """Single-layer convenience form of ``_make_dual_states``."""
+    """Single-layer convenience form of `_make_dual_states`."""
     conv_py, temporal_py, conv_gpu, temporal_gpu, fwd_py, fwd_gpu = _make_dual_states(
         cfg, [layer_name], device, num_blocks=num_blocks
     )
@@ -1560,7 +1560,7 @@ class TestPostprocessMambaFusedKernel:
     def test_src_addr_equals_dst_addr_skips_copy_and_sets_accepted_to_1(
         self, device, test_config
     ):
-        """Test the ``src_addr == dst_addr`` early-return path in
+        """Test the `src_addr == dst_addr` early-return path in
         postprocess_mamba_fused_kernel matches Python behavior.
 
         When src_addr == dst_addr (source and destination memory addresses are
@@ -1703,7 +1703,7 @@ class TestPostprocessMambaFusedKernel:
     def test_same_block_idx_with_offset_copies_then_sets_accepted_to_1(
         self, device, test_config
     ):
-        """Test the ``src_block_idx == dest_block_idx`` post-copy update in
+        """Test the `src_block_idx == dest_block_idx` post-copy update in
         postprocess_mamba_fused_kernel matches Python behavior.
 
         When src_block_idx == dest_block_idx but accept_token_bias > 0, both
@@ -1874,8 +1874,8 @@ class TestPostprocessMambaFusedKernel:
         2. src_block_idx != dest_block_idx
 
         Therefore:
-        - The ``src_addr == dst_addr`` early-return does NOT trigger
-        - The ``src_block_idx == dest_block_idx`` post-copy update does NOT trigger
+        - The `src_addr == dst_addr` early-return does NOT trigger
+        - The `src_block_idx == dest_block_idx` post-copy update does NOT trigger
         - Copy happens normally
         - num_accepted_tokens remains UNCHANGED
 
@@ -2736,14 +2736,14 @@ class TestPostprocessMambaFusedKernel:
 
     def test_temporal_copy_with_bias_ge_2(self, device, test_config):
         """Coverage test for the temporal-state block-table stride arithmetic
-        when ``accept_token_bias >= 2``.
+        when `accept_token_bias >= 2`.
 
         The kernel computes, for temporal (non-conv) states::
 
             actual_src_block_idx = src_block_idx + accept_token_bias
             actual_src_block_id = block_table[req, actual_src_block_idx]
 
-        A ``bias == 1`` case only reads one slot ahead of ``src_block_idx``
+        A `bias == 1` case only reads one slot ahead of `src_block_idx`
         in the block table. This test isolates the larger-stride case, where
         an off-by-one would read the wrong physical block after multiple
         tokens are accepted across a block boundary.

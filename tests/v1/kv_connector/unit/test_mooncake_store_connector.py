@@ -817,7 +817,7 @@ def _poll_lookup(client, req_id, num_tokens=128, block_hashes=(), timeout=5.0):
 
 
 def _gated_recv(gate: threading.Event, value: int):
-    """Mock recv side-effect that blocks until ``gate`` is set, so the
+    """Mock recv side-effect that blocks until `gate` is set, so the
     executor's lookup can be held pending deterministically."""
 
     def recv(flags: int = 0) -> bytes:

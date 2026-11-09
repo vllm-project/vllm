@@ -4,8 +4,8 @@
 and the KDA offset-template cache.
 
 These exercise the highest-risk, otherwise-untested scheduler logic without a
-GPU or the ``mori`` runtime: per-group block-id splitting, the READ/WRITE
-``N-1`` token accounting, P-side prompt truncation, and offset-template cache
+GPU or the `mori` runtime: per-group block-id splitting, the READ/WRITE
+`N-1` token accounting, P-side prompt truncation, and offset-template cache
 wiring.
 """
 
@@ -61,7 +61,7 @@ def restore_moriio_role():
 
 
 class _FakeScheduler(moriio_connector.MoRIIOConnectorScheduler):  # type: ignore[name-defined]
-    """Constructs a scheduler without the heavy real ``__init__``; only the
+    """Constructs a scheduler without the heavy real `__init__`; only the
     attributes read by the method under test are set."""
 
     def __init__(self, **attrs):
@@ -166,6 +166,7 @@ def _gate_vllm_config(
         num_speculative_tokens=num_speculative_tokens,
         parallel_config=SimpleNamespace(
             tensor_parallel_size=1,
+            pipeline_parallel_size=1,
             decode_context_parallel_size=dcp_size,
             data_parallel_rank=0,
             data_parallel_size_local=1,
@@ -509,8 +510,8 @@ def test_scheduler_rejects_non_dspark_speculative_hybrid_write():
 def _dspark_wrapped_attention_config(*, dcp_sharded: bool = True):
     """Mamba first, so a wrapped full-attention group at index 1 has to be found.
 
-    A bare ``isinstance(FullAttentionSpec)`` misses the wrapper and leaves
-    ``_full_attn_group_idx`` at its initial 0, which is the Mamba group.
+    A bare `isinstance(FullAttentionSpec)` misses the wrapper and leaves
+    `_full_attn_group_idx` at its initial 0, which is the Mamba group.
     """
     full = FullAttentionSpec(
         block_size=4,
@@ -1292,6 +1293,33 @@ def test_register_kv_caches_allows_hybrid_divergent_block_len():
 
     assert worker.block_lens == {"layer0": 2112, "layer1": 9216}
     assert worker.block_len == 9216
+
+
+def test_register_kv_caches_advertises_where_each_layer_starts():
+    """Peers holding other layers (pipeline stages) find a layer by name."""
+    Geom = moriio_layout.LayerTransferGeometry
+    caches = {
+        "layer0": torch.zeros(2, 4, 16, 1, 8, dtype=torch.float16),
+        "layer1": torch.zeros(2, 4, 16, 1, 8, dtype=torch.float16),
+    }
+    geoms = {
+        name: Geom(4, 16, 2112, 132, 2112, None, None, 1, 1, False) for name in caches
+    }
+    worker = _make_register_worker(caches, geoms)
+    advertised = []
+
+    def _listener(metadata, ready_event, *_args, **_kwargs):
+        advertised.append(metadata)
+        ready_event.set()
+
+    worker._moriio_handshake_listener = _listener
+    worker.register_kv_caches(caches)
+
+    assert advertised[0].layer_base_addr_index == {"layer0": 0, "layer1": 1}
+    assert advertised[0].kv_caches_base_addr == [
+        caches["layer0"].data_ptr(),
+        caches["layer1"].data_ptr(),
+    ]
 
 
 def test_register_kv_caches_rejects_divergent_block_size():

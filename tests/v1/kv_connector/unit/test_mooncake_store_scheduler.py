@@ -1524,7 +1524,7 @@ def test_partial_tail_follows_lookahead_checkpoint(
 def test_shared_prefix_junction_handoff_adds_no_attention_tail(
     completed, mamba_tails, publish, expected
 ):
-    """``--enable-mamba-shared-prefix-checkpoint`` also hands off a sub-block
+    """`--enable-mamba-shared-prefix-checkpoint` also hands off a sub-block
     Mamba state at the shared-prefix junction, below the prompt checkpoint."""
     groups = [
         KVCacheGroupSpec(

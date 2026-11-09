@@ -4,7 +4,7 @@
 
 Verifies that BlockStored/BlockRemoved events carry the correct storage
 medium (MEDIUM_CPU / MEDIUM_STORAGE) and per-group metadata when
-``enable_kv_cache_events`` is set, and that no events are emitted when it
+`enable_kv_cache_events` is set, and that no events are emitted when it
 is unset.
 """
 
@@ -196,7 +196,7 @@ def _do_eager_store(
     num_blocks: int = 2,
     lora_request: LoRARequest | None = None,
 ) -> tuple[object, Request]:
-    """Run an eager store of ``num_blocks`` and complete it.
+    """Run an eager store of `num_blocks` and complete it.
 
     Returns (meta, req) for further assertions.
     """

@@ -444,12 +444,12 @@ def test_hybrid_mamba_align_partial_hash_hit():
 def test_eagle_group_registers_unaligned_tail_under_partial_hash_hits():
     """An EAGLE group must not re-floor what partial hash hits leaves un-floored.
 
-    ``cache_blocks`` decides once how far a request may be registered, and with
+    `cache_blocks` decides once how far a request may be registered, and with
     fine-grained partial hash hits that bound is the raw token count. The EAGLE
     branch then re-derives its own bound for the lookahead block; if it rounds
-    down to ``scheduler_block_size`` again, everything between the last aligned
-    boundary and the tail stops being registered -- ``(n % scheduler_block_size)
-    - manager.block_size`` tokens per call, which is most of a segment whenever
+    down to `scheduler_block_size` again, everything between the last aligned
+    boundary and the tail stops being registered -- `(n % scheduler_block_size)
+    - manager.block_size` tokens per call, which is most of a segment whenever
     the group's own block is much smaller than the scheduler block.
     """
     hash_block_size = 2
@@ -777,7 +777,7 @@ def test_transient_checkpoint_evicts_retained_boundary_hash():
 
 @pytest.mark.parametrize("prompt_len", [120, 104, 96])
 def test_prompt_end_checkpoint_survives_block_aligned_cache_count(prompt_len):
-    """At the default match unit the hybrid coordinator hands ``cache_blocks``
+    """At the default match unit the hybrid coordinator hands `cache_blocks`
     a block-aligned token count, which is below the prompt length whenever the
     prompt is not block-aligned. The prompt-end checkpoint is the replay
     boundary and must stay published under retention_interval=0; only a
@@ -2068,7 +2068,7 @@ def test_mamba_coarse_checkpoint_retained_below_eagle_proof_boundary():
     """Without a prefix-match unit there is no partial tail, so the only
     checkpoint comes from the retention mask. A prompt ending just past its
     last block boundary pinned that checkpoint where eagle can never resume,
-    so under ``retention_interval=0`` the reachable block was masked out and
+    so under `retention_interval=0` the reachable block was masked out and
     the next turn missed entirely.
     """
     block_size = 4
@@ -2636,7 +2636,7 @@ def test_snapshot_handoff_dense_default_retention():
 
 
 def _run_chunked_prefill(manager, req, chunk_size, num_chunks):
-    """Prefill ``req`` one ``chunk_size`` chunk per scheduler step, yielding the
+    """Prefill `req` one `chunk_size` chunk per scheduler step, yielding the
     boundary-state hand-offs offered (and claimed) at each step."""
     computed_blocks, num_computed, _ = manager.get_computed_blocks(req)
     for step in range(num_chunks):
@@ -2697,7 +2697,7 @@ def test_boundary_state_offer_includes_more_mamba_groups_than_two():
 
 def test_boundary_states_offered_past_prompt_for_resumed_prefill():
     """The core offers every committed boundary, including past
-    ``num_prompt_tokens``. A resumed request re-prefills its generated tokens
+    `num_prompt_tokens`. A resumed request re-prefills its generated tokens
     and every group re-saves them, so filtering on the original prompt length
     would silently strip the mamba key for boundaries full attention still
     stores; only the connector knows where its save window ends."""
@@ -2743,7 +2743,7 @@ def test_boundary_states_offered_past_prompt_for_resumed_prefill():
 def test_prompt_end_checkpoint_survives_sparse_retention_with_coarse_hash():
     """With hash_block_size == mamba block size (no fine-grained matching), the
     hybrid coordinator caches the final chunk only up to its last full block,
-    so the managers see ``num_tokens < num_prompt_tokens`` there too. The
+    so the managers see `num_tokens < num_prompt_tokens` there too. The
     prompt-end checkpoint must still be published under retention_interval=0,
     otherwise the next request that extends this prompt misses the prefix.
     """

@@ -399,7 +399,7 @@ def _unpacked_conv_weight(layer) -> torch.Tensor:
 
     On AMX and aarch64+bf16 the conv1d weight is packed in place at load time,
     so the torch spec-decode path relies on the un-packed copy stashed by
-    ``dispatch_cpu_unquantized_gemm``.
+    `dispatch_cpu_unquantized_gemm`.
     """
     w = getattr(layer.conv1d, "_cpu_unpacked_conv_weight", None)
     if w is not None:
@@ -505,7 +505,7 @@ def _spec_forward(
     """Run the GDN core for the multi-query (speculative) tokens.
 
     Returns the core attention output for the spec tokens, in the same token
-    order as ``mixed_qkv_spec`` (i.e. ordered by ``spec_query_start_loc``).
+    order as `mixed_qkv_spec` (i.e. ordered by `spec_query_start_loc`).
     """
     num_spec_decodes = attn_metadata_i.num_spec_decodes
     spec_state_indices = attn_metadata_i.spec_state_indices_tensor
@@ -754,7 +754,7 @@ def _spec_aware_nonspec_subset(
 ) -> torch.Tensor:
     """Process non-spec (prefill) tokens that coexist with spec sequences.
 
-    Returns outputs ordered like ``non_spec_token_indx``.
+    Returns outputs ordered like `non_spec_token_indx`.
     """
     has_initial_state = attn_metadata_i.has_initial_state
     prefill_state_indices = attn_metadata_i.prefill_state_indices
