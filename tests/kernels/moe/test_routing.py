@@ -27,6 +27,7 @@ from vllm.model_executor.layers.fused_moe.router.fused_topk_router import (
 )
 from vllm.model_executor.layers.fused_moe.router.grouped_topk_router import (
     GroupedTopKRouter,
+    grouped_topk,
 )
 from vllm.model_executor.layers.fused_moe.router.router_factory import (
     create_fused_moe_router,
@@ -835,6 +836,67 @@ def test_grouped_topk(
             renormalize,
             routed_scaling_factor,
         )
+
+
+@pytest.mark.parametrize("m,k", MK_S)
+@pytest.mark.parametrize("top_k", TOP_KS)
+@pytest.mark.parametrize(
+    "global_num_experts,num_expert_group,topk_group",
+    [
+        (256, 1, 1),  # single group, as in checkpoints with n_group == 1
+        (64, 8, 8),  # as many groups selected as there are groups
+    ],
+)
+@pytest.mark.parametrize("renormalize", [False, True])
+@pytest.mark.parametrize("with_bias", [False, True])
+@pytest.mark.parametrize("routed_scaling_factor", [1.0, 1.1])
+@pytest.mark.parametrize("scoring_func", ["sigmoid", "softmax"])
+def test_grouped_topk_all_groups_selected(
+    m: int,
+    k: int,
+    top_k: int,
+    global_num_experts: int,
+    num_expert_group: int,
+    topk_group: int,
+    renormalize: bool,
+    with_bias: bool,
+    routed_scaling_factor: float,
+    scoring_func: str,
+):
+    """``grouped_topk`` skips group selection when every group is selected.
+
+    The skip is only valid if it is a no-op, so the results must still match
+    the reference implementation that always builds and applies the group
+    mask. ``grouped_topk`` is called directly because the router factory may
+    legitimately dispatch some of these configurations elsewhere.
+    """
+    e_score_correction_bias = (
+        make_e_score_correction_bias(0.9, global_num_experts) if with_bias else None
+    )
+    hidden_states, router_logits = make_test_data(m, k, global_num_experts)
+
+    weights, ids = grouped_topk(
+        hidden_states,
+        router_logits,
+        top_k,
+        renormalize,
+        num_expert_group,
+        topk_group,
+        scoring_func,
+        routed_scaling_factor,
+        e_score_correction_bias,
+    )
+    baseline_weights, baseline_ids = baseline_grouped_topk(
+        router_logits,
+        top_k,
+        num_expert_group,
+        topk_group,
+        scoring_func,
+        renormalize,
+        e_score_correction_bias,
+        routed_scaling_factor,
+    )
+    assert_routing_results_close(weights, ids, baseline_weights, baseline_ids)
 
 
 @pytest.mark.parametrize("m,k", MK_S)

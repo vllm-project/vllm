@@ -136,27 +136,37 @@ def grouped_topk(
         # scores for expert selection but original scores for routing weights
         original_scores = scores
         scores = scores + e_score_correction_bias.unsqueeze(0)
-        group_scores = (
-            scores.view(num_token, num_expert_group, -1).topk(2, dim=-1)[0].sum(dim=-1)
-        )
-    else:
-        group_scores = (
-            scores.view(num_token, num_expert_group, -1).max(dim=-1).values
-        )  # [n, n_group]
 
     # For batch invariance, use sorted=True to ensure deterministic expert selection
     use_sorted = envs.VLLM_BATCH_INVARIANT
-    group_idx = torch.topk(group_scores, k=topk_group, dim=-1, sorted=use_sorted)[
-        1
-    ]  # [n, top_k_group]
-    group_mask = torch.zeros_like(group_scores)  # [n, n_group]
-    group_mask.scatter_(1, group_idx, 1)  # [n, n_group]
-    score_mask = (
-        group_mask.unsqueeze(-1)
-        .expand(num_token, num_expert_group, scores.size(-1) // num_expert_group)
-        .reshape(num_token, -1)
-    )  # [n, e]
-    tmp_scores = scores.masked_fill(~score_mask.bool(), float("-inf"))  # [n, e]
+
+    if topk_group >= num_expert_group:
+        # Every group is selected, so the group mask is all ones and masking
+        # is a no-op.
+        tmp_scores = scores  # [n, e]
+    else:
+        if e_score_correction_bias is not None:
+            group_scores = (
+                scores.view(num_token, num_expert_group, -1)
+                .topk(2, dim=-1)[0]
+                .sum(dim=-1)
+            )
+        else:
+            group_scores = (
+                scores.view(num_token, num_expert_group, -1).max(dim=-1).values
+            )  # [n, n_group]
+
+        group_idx = torch.topk(group_scores, k=topk_group, dim=-1, sorted=use_sorted)[
+            1
+        ]  # [n, top_k_group]
+        group_mask = torch.zeros_like(group_scores)  # [n, n_group]
+        group_mask.scatter_(1, group_idx, 1)  # [n, n_group]
+        score_mask = (
+            group_mask.unsqueeze(-1)
+            .expand(num_token, num_expert_group, scores.size(-1) // num_expert_group)
+            .reshape(num_token, -1)
+        )  # [n, e]
+        tmp_scores = scores.masked_fill(~score_mask.bool(), float("-inf"))  # [n, e]
 
     if e_score_correction_bias is not None:
         topk_ids = torch.topk(tmp_scores, k=topk, dim=-1, sorted=use_sorted)[1]
