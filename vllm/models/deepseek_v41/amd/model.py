@@ -23,6 +23,7 @@ from vllm.forward_context import (
 )
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.mhc.triton import MHC_POST_COLLAPSE_RMS_NORM_KERNEL
+from vllm.model_executor.layers.fused_embed_norm import make_input_embedding
 from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
@@ -34,10 +35,7 @@ from vllm.model_executor.layers.mhc import (
     MHCPreDelayedOp,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.vocab_parallel_embedding import (
-    ParallelLMHead,
-    VocabParallelEmbedding,
-)
+from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import (
     EagleModelMixin,
@@ -585,11 +583,12 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             self.candidate_block_buffer = None
 
         if get_pp_group().is_first_rank:
-            self.embed_tokens = VocabParallelEmbedding(
+            self.embed_tokens = make_input_embedding(
                 config.vocab_size,
                 config.hidden_size,
                 quant_config=quant_config,
                 prefix=f"{prefix}.embed_tokens",
+                tie_word_embeddings=getattr(config, "tie_word_embeddings", False),
             )
         else:
             self.embed_tokens = PPMissingLayer()
