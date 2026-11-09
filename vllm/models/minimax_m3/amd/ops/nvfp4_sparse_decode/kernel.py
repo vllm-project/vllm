@@ -11,16 +11,16 @@ and widened to bf16; scores and softmax are fp32, P is bf16. Wave w owns keys
   S^T = K Q^T      v_mfma_f32_16x16x32_bf16, A = K, B = Q^T
   O^T += V^T P^T   A = V^T, B = P^T straight from the S^T accumulators
 
-The waves combine through LDS. With ``splits`` > 1 every split stores its
+The waves combine through LDS. With `splits` > 1 every split stores its
 unnormalized partial and the last split of a row to arrive combines them in
 split order, so the result does not depend on arrival order.
 
-With ``fp8_out`` the final O (after the split merge) is not stored as bf16 but
+With `fp8_out` the final O (after the split merge) is not stored as bf16 but
 as MXFP8 for the o_proj GEMM that follows: E4M3 values and row-major E8M0
 scales, one scale per 32 output dims. A lane of the final store owns exactly one
-such 32-dim block (head ``n``, dims ``32 g .. 32 g + 31``), so the quantization
+such 32-dim block (head `n`, dims `32 g .. 32 g + 31`), so the quantization
 needs no cross-lane exchange. It quantizes the same bf16-rounded values the
-bf16 store would write, with the arithmetic of ``mxfp8_e4m3_quantize``.
+bf16 store would write, with the arithmetic of `mxfp8_e4m3_quantize`.
 """
 
 import flydsl.compiler as flyc
@@ -70,7 +70,7 @@ def _nnan():
 
 
 def _bf16x2_e4m3(word, hi):
-    """E4M3 bytes 0, 1 (``hi``: 2, 3) of ``word`` -> one dword of two bf16."""
+    """E4M3 bytes 0, 1 (`hi`: 2, 3) of `word` -> one dword of two bf16."""
     return Vec(
         fx.rocdl.cvt_scalef32_pk_bf16_fp8(
             Vec.make_type(2, fx.BFloat16),
@@ -84,8 +84,8 @@ def _bf16x2_e4m3(word, hi):
 def _k_bf16x8(codes, tab_lo, tab_hi):
     """Eight K codes under one block scale -> four dwords of bf16 pairs.
 
-    ``tab_lo`` / ``tab_hi`` hold the e4m3 keys of magnitudes 0-3 / 4-7 for the
-    block scale (``nvfp4_e4m3_lut``).
+    `tab_lo` / `tab_hi` hold the e4m3 keys of magnitudes 0-3 / 4-7 for the
+    block scale (`nvfp4_e4m3_lut`).
     """
     even = perm(tab_hi, tab_lo, codes & MAG4) ^ ((codes << 4) & SIGN4)
     odd = perm(tab_hi, tab_lo, (codes >> 4) & MAG4) ^ (codes & SIGN4)
@@ -178,8 +178,8 @@ def compile_nvfp4_sparse_decode(
         topk: top-k width (one lane per slot).
         xcds: if > 0, workgroup w runs on XCD w % xcds and a request's rows and
             a row's splits are placed on one XCD.
-        fp8_out: store the output as MXFP8 values + E8M0 scales (``arg_oq``,
-            ``arg_os``) instead of bf16 (``arg_out``, unused then).
+        fp8_out: store the output as MXFP8 values + E8M0 scales (`arg_oq`,
+            `arg_os`) instead of bf16 (`arg_out`, unused then).
 
     """
     assert 1 <= topk <= 64 and splits >= 1
@@ -337,7 +337,7 @@ def compile_nvfp4_sparse_decode(
         )
 
         def slot_at(mask):
-            """The lowest slot left in ``mask``, the first one when empty."""
+            """The lowest slot left in `mask`, the first one when empty."""
             return (mask != fx.Int64(0)).select(
                 fx.Int32(fx.math.cttz(mask).to(fx.Int32)), first
             )
@@ -422,8 +422,8 @@ def compile_nvfp4_sparse_decode(
             results = yield [fx.as_ir_value(x) for x in state]
 
         def store_out_mxfp8(acc, inv):
-            """O as E4M3 + E8M0, bit-identical to ``mxfp8_e4m3_quantize`` of the
-            bf16 ``store_out`` writes. Lane (n, g) holds dims 32 g.. of head n."""
+            """O as E4M3 + E8M0, bit-identical to `mxfp8_e4m3_quantize` of the
+            bf16 `store_out` writes. Lane (n, g) holds dims 32 g.. of head n."""
             # 16 dwords of bf16 pairs; element t = 8 e + 2 j (+ 1) of the block.
             words = [
                 pk_bf16(acc[2 * j][e] * inv, acc[2 * j + 1][e] * inv)

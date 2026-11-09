@@ -95,7 +95,7 @@ def record_row(args, request):
 
 
 def advance(base, n):
-    """``base + n``, or ``base`` itself for a static zero ``n`` (keeps q = 1 code)."""
+    """`base + n`, or `base` itself for a static zero `n` (keeps q = 1 code)."""
     return base + n if n else base
 
 
@@ -113,7 +113,7 @@ class KdaSplit:
     must be ready at launch; each run waits for prior cache restoration and slot
     publication.
 
-    ``schedule`` = (early, lanes per state row, minimum CTAs per SM, CTAs per head);
+    `schedule` = (early, lanes per state row, minimum CTAs per SM, CTAs per head);
     zeros keep the batch defaults. Two CTAs per head give each CTA 64 state rows and
     each gate lane two decays. Early issues every load the predecessor does not
     produce (slot, state and conv rows, conv / F_B / norm weights) before the PDL
@@ -127,7 +127,7 @@ class KdaSplit:
     time, which frees the registers that held them across the input phase; early 3
     (two CTAs per head) also stages the gate warp's F_B rows.
 
-    ``tokens`` q > 1 (speculative verify; ``batch`` counts requests, rows b * q + t)
+    `tokens` q > 1 (speculative verify; `batch` counts requests, rows b * q + t)
     runs each request's q tokens in order with vLLM's spec cache semantics: slots
     [B, >= q] and accepted [B] (an extra last tensor, read early like the slots); the
     state comes from slot[b, accepted - 1] and token t's state goes to slot[b, t] if
@@ -135,14 +135,14 @@ class KdaSplit:
     [c_accepted, c_accepted + 1, x_0, ..., x_q-1]. Token t's F_B row is MMA column t;
     CTA t % C normalizes token t.
 
-    ``record`` (verify only, RecoverSSM): the state slot is a checkpoint the verify
+    `record` (verify only, RecoverSSM): the state slot is a checkpoint the verify
     leaves unchanged, and two more last tensors take the records the commit after
     sampling folds the accepted tokens in with: the correction [R, H, q, V] (FP32)
     and the key and raw gate [R, H, q, 2K] (BF16), row R = request.
 
     Every step has the precision of the composed decode production runs (next to its
-    speculative config, at q = 1 too), Triton ``causal_conv1d_update`` ->
-    ``fused_recurrent_kda`` -> ``rms_norm_gated``: the convolution's Q/K/V and the
+    speculative config, at q = 1 too), Triton `causal_conv1d_update` ->
+    `fused_recurrent_kda` -> `rms_norm_gated`: the convolution's Q/K/V and the
     recurrence's output round to BF16, and every step uses the Triton formula
     (x / (1 + exp(-x)), q / sqrt(|q|^2 + eps) * scale, 1 / sqrt(var + eps)) and
     instructions."""
@@ -485,7 +485,7 @@ class KdaSplit:
 
     @cute.jit
     def store_rows(self, history, state_row, span, lanes, when=None):
-        """Store the passes in ``span`` of the CTA's state rows (``when``: predicated
+        """Store the passes in `span` of the CTA's state rows (`when`: predicated
         on it, without branches)."""
         (start, stop), (group, group_lane) = span, lanes
         for p in cutlass.range_constexpr(start, stop):
@@ -508,8 +508,8 @@ class KdaSplit:
 
     @cute.jit
     def update(self, history, dots, operands, lanes, span, staged, record=(None, 0)):
-        """Decay, delta-rule update and query dot of the passes in ``span``, whose rows
-        ``staged`` (if given) first supplies from shared memory. ``record``: the
+        """Decay, delta-rule update and query dot of the passes in `span`, whose rows
+        `staged` (if given) first supplies from shared memory. `record`: the
         token's corrections [V] (if given) and the CTA's first value row."""
         kr, qr, decays, shared_v, beta = operands
         (group, lane), (start, stop) = lanes, span
@@ -549,7 +549,7 @@ class KdaSplit:
         """Project one value partition and multicast its decays to every CTA. Modes fix
         the F_B reduction order: 0 = one chain of eight MMAs, 1 = four chains of two,
         2 = sixteen 8-FMA partials summed in a butterfly. Projection math stays IEEE.
-        ``staged_rows``: shared [copy, lane, 4] words; each lane cp.asyncs its own
+        `staged_rows`: shared [copy, lane, 4] words; each lane cp.asyncs its own
         16-byte F_B operands there before the PDL wait and reads them back after it."""
         f_a, a_log, dt_bias, lower_bound, weight = (args[i] for i in (4, 6, 7, 13, 16))
         head, token, value_base, lane = coords
@@ -720,7 +720,7 @@ class KdaSplit:
     def multicast(self, acc, gates, targets, lane, key_gate=None):
         """Decays (q > 1) of the lane's D fragments (feature rows, token columns 2
         quarter + {0, 1}) to every CTA's shared [token, 128] decays; with
-        ``key_gate`` [q, 2K] (RecoverSSM), also the raw gates."""
+        `key_gate` [q, 2K] (RecoverSSM), also the raw gates."""
         (a, lower_bound, dt, features), (shared_decay, barrier, value_base) = (
             gates,
             targets,

@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Specialized sparse MLA decode of a DCP K3.1 DSA layer on a per-tensor FP8 cache
-(``SparseDcpDecode``): every rank's gathered query heads (the q mailbox) over this
-rank's compacted flat KV rows (the exact top-k merge's ``rows`` / ``valid``).
+(`SparseDcpDecode`): every rank's gathered query heads (the q mailbox) over this
+rank's compacted flat KV rows (the exact top-k merge's `rows` / `valid`).
 
 Why: at the latency checkpoint (DCP8, 5 verify rows) each row attends ~256 local
 keys. FlashInfer's prims_ts decode (split-KV over 80 CTAs plus its reduction,
@@ -27,7 +27,7 @@ chunk of up to CHUNK keys:
            in registers with byte permutes), FP32 accumulation
 then the cluster merges (FP32): CTA s of the cluster takes columns s / SPLIT of the
 16 heads, weights each CTA's partial by exp2(max_c - max), and writes
-BF16(sum * k_scale / total) and LSE = max + log2(total / 448) (``push``: into the
+BF16(sum * k_scale / total) and LSE = max + log2(total / 448) (`push`: into the
 owners' mailbox slot, base 2, as DcpValue's push; else the latent [B, Q, 512] and
 natural-log LSE [B, Q] DcpValue reads).
 
@@ -101,7 +101,7 @@ def prmt(a, b, selector: int):
 
 @asm()
 def store_fp8_pair_shared(pointer, low: Float32, high: Float32):
-    """E4M3 (satfinite, RN) of ``low``, ``high`` as two bytes of shared memory."""
+    """E4M3 (satfinite, RN) of `low`, `high` as two bytes of shared memory."""
     code = "{ .reg .b16 pair; cvt.rn.satfinite.e4m3x2.f32 pair,$2,$1; "
     code += "st.shared.b16 [$0],pair; }"
     return code, "r,f,f,~{memory}", (pointer, low, high)
@@ -121,11 +121,11 @@ def transpose4(w):
 
 
 class SparseDcpDecode:
-    """``batch`` rows, ``heads`` gathered query heads (a multiple of 16; the q
-    mailbox and outputs hold ``padded`` rows per token), the merge's row width
-    ``width`` (its K). ``push`` (owner heads H, DCP, mailbox rows): push the
+    """`batch` rows, `heads` gathered query heads (a multiple of 16; the q
+    mailbox and outputs hold `padded` rows per token), the merge's row width
+    `width` (its K). `push` (owner heads H, DCP, mailbox rows): push the
     merged rows and base-2 LSEs into their owners' DcpValue "bf16" mailbox and
-    re-arm the q mailbox rows read (DcpValue ``pushed`` then only merges)."""
+    re-arm the q mailbox rows read (DcpValue `pushed` then only merges)."""
 
     def __init__(self, batch, heads, padded, width, push=None):
         assert heads % HEADS == 0 and heads <= padded
@@ -339,7 +339,7 @@ class SparseDcpDecode:
     @cute.jit
     def merge(self, args, inbox, stats, tile, split, b, tid):
         """Columns split * COLS .. + COLS of the 16 heads over the cluster's
-        partials (FP32, in ``inbox`` / ``stats``): thread t takes head t // 32, 4
+        partials (FP32, in `inbox` / `stats`): thread t takes head t // 32, 4
         columns."""
         latent, lse_out = args[4:6]
         out_scale = args[7]
@@ -398,15 +398,15 @@ class SparseDcpDecode:
 
 
 def sparse_for(rows, gathered, padded):
-    """Whether a DCP batch of ``rows`` runs SparseDcpDecode (``gathered`` query
-    heads of a ``padded``-row q mailbox)."""
+    """Whether a DCP batch of `rows` runs SparseDcpDecode (`gathered` query
+    heads of a `padded`-row q mailbox)."""
     fits = gathered % HEADS == 0 and gathered <= padded
     return fits and batch_table(SPARSE_DCP).get(rows) == "sparse"
 
 
 @cache
 def compile_sparse(batch, heads, padded, width, cap, device, push=None):
-    """SparseDcpDecode of ``batch`` rows (the q mailbox of ``cap`` rows; ``push``:
+    """SparseDcpDecode of `batch` rows (the q mailbox of `cap` rows; `push`:
     (owner heads, DCP) to push into the DcpValue mailbox)."""
     query = fake((cap, padded, ROW), None, torch.uint8)
     kv = fake((cute.sym_int(), ROW), (ROW, 1), torch.uint8)
@@ -436,10 +436,10 @@ def run_sparse(
     out_scale,
     push=None,
 ):
-    """``query`` [cap, padded, 576] (FP8 bytes), ``kv`` [N, 576] (the flat cache
-    rows), ``rows`` [>= B, K] / ``valid``: this rank's flat rows and counts ->
-    ``latent`` [B, padded, 512] BF16 and ``lse`` [B, padded] FP32 (first ``heads``
-    heads), or with ``push`` (DcpMailbox, parity, rank) into the owners' mailbox."""
+    """`query` [cap, padded, 576] (FP8 bytes), `kv` [N, 576] (the flat cache
+    rows), `rows` [>= B, K] / `valid`: this rank's flat rows and counts ->
+    `latent` [B, padded, 512] BF16 and `lse` [B, padded] FP32 (first `heads`
+    heads), or with `push` (DcpMailbox, parity, rank) into the owners' mailbox."""
     args: tuple = (
         to_cute(query.view(torch.uint8)),
         to_cute(kv.view(torch.uint8)),

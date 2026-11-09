@@ -294,14 +294,14 @@ class KVCacheManager:
         Args:
             request: The request to get the computed blocks.
             max_cache_hit_length: Upper bound on the hit length. Defaults to
-                ``request.get_max_cache_hit_length()``; explicit bounds can only
+                `request.get_max_cache_hit_length()`; explicit bounds can only
                 reduce the request's cache hit limit.
 
         Returns:
             A tuple containing:
                 - A list of blocks that are computed for the request.
                 - The number of computed tokens.
-                - ``shared_prefix_boundary``: the block-aligned token position of
+                - `shared_prefix_boundary`: the block-aligned token position of
                   a shared prefix that a sparse-retention group (Mamba / sliding
                   window) has not cached yet (Marconi-style APC), or 0 if none.
                   Pinned so sparse prefix-cache retention does not drop
@@ -360,18 +360,18 @@ class KVCacheManager:
         full-attention hit as the local prefix only when all attention groups
         agree. The connector transfers the remaining suffix, and Mamba state
         is transferred unconditionally by
-        nixl's ``_apply_prefix_caching`` - and flag when that hit ran deeper
+        nixl's `_apply_prefix_caching` - and flag when that hit ran deeper
         than a lagging group. Such a hit only has a valid Mamba state at its
         boundary if the connector supplies it, so the caller must fall back to
-        ``get_computed_blocks`` to reconcile when no external tokens are found.
+        `get_computed_blocks` to reconcile when no external tokens are found.
 
         Attention groups (including the draft) must agree on the local prefix:
         unlike Mamba state, their missing blocks are not always transferred.
         Non-hybrid models and divergent attention hits use the reconciled lookup.
 
         Returns:
-            The ``get_computed_blocks`` triple (blocks, number of local computed
-            tokens, shared-prefix boundary) plus ``hit_diverged``.
+            The `get_computed_blocks` triple (blocks, number of local computed
+            tokens, shared-prefix boundary) plus `hit_diverged`.
 
         """
         coordinator = self.coordinator
@@ -840,7 +840,7 @@ class KVCacheManager:
 
         An external hit can supply the final Mamba state even when the local
         Mamba group ends before this endpoint. Other groups must cover it.
-        Pure slicing: refcounts are untouched and ``blocks`` is not mutated.
+        Pure slicing: refcounts are untouched and `blocks` is not mutated.
         """
         truncated: list[list[KVCacheBlock]] = []
         for group_blocks, manager, group in zip(
@@ -909,7 +909,7 @@ class KVCacheManager:
     ) -> dict[str, list[tuple[int, int, int]]]:
         """Drain this step's boundary-state hand-offs for a KV connector.
 
-        Returns ``{request_id: [(group_id, block_id, boundary_tokens), ...]}``
+        Returns `{request_id: [(group_id, block_id, boundary_tokens), ...]}`
         for mamba "align" boundary states: the
         request's committed boundary-state snapshots and, on a sub-block partial
         hit, the CoW copy of its last-prompt-boundary state. Only mamba "align"
