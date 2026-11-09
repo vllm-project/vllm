@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Qwen3.5 Gemma add-RMSNorm + input quant vs the unfused production chain
-(flashinfer gemma norm, then scaled_fp8_quant / scaled_fp4_quant)."""
+(flashinfer gemma norm, then scaled_fp8_quant / scaled_fp4_quant), plus the
+unquantized ``gemma_add_rms_norm`` (pre-SM80 fallback) vs flashinfer."""
 
 import pytest
 import torch
@@ -107,3 +108,49 @@ def test_gemma_add_rms_norm_quant_matches_chain(
         dist = (_fp8_codes(q) - _fp8_codes(ref_q)).abs()
     assert dist.max().item() <= 1
     assert (dist > 0).float().mean().item() <= 1e-4
+
+
+@pytest.mark.parametrize("H", [5120, 2112])
+@pytest.mark.parametrize("num_tokens", NUM_TOKENS)
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("has_residual", [True, False])
+@torch.inference_mode()
+def test_gemma_add_rms_norm_matches_flashinfer(
+    H: int, num_tokens: int, dtype: torch.dtype, has_residual: bool
+):
+    """The unquantized kernel (pre-SM80 flashinfer fallback) vs flashinfer."""
+    from flashinfer.norm import gemma_fused_add_rmsnorm, gemma_rmsnorm
+
+    from vllm.models.qwen3_5.nvidia.ops.fused_norm_quant import gemma_add_rms_norm
+
+    g = torch.Generator(device="cuda").manual_seed(num_tokens)
+    w = (torch.rand(H, generator=g, device="cuda") * 3.5 - 1.0).to(dtype)
+    w[:64] = -0.99609375
+    x = torch.randn(num_tokens, H, generator=g, device="cuda").to(dtype)
+    residual = (torch.randn(num_tokens, H, generator=g, device="cuda") * 4).to(dtype)
+    residual[:, 7] *= 50  # outlier channel
+
+    ref_res = residual.clone()
+    if has_residual:
+        ref_y = x.clone()
+        gemma_fused_add_rmsnorm(ref_y, ref_res, w, 1e-6)
+    else:
+        ref_y = gemma_rmsnorm(x, w, 1e-6)
+
+    x_in = x.clone()
+    res = residual.clone()
+    y = gemma_add_rms_norm(x_in, res if has_residual else None, w, 1e-6)
+
+    torch.testing.assert_close(x_in, x, rtol=0, atol=0)
+    torch.testing.assert_close(res, ref_res, rtol=0, atol=0)
+    # The fp32 sum of squares is reduced in a different order, so values
+    # landing within ~1 fp32 ulp of a rounding boundary can flip: mismatches
+    # are at most 1 ulp of the output dtype, at a rate ~2^-13 per element
+    # for fp16 and ~2^-16 for bf16.
+    yc = y.view(torch.uint16).int()
+    rc = ref_y.view(torch.uint16).int()
+    codes = lambda t: torch.where(t >= 32768, -(t & 0x7FFF), t)
+    dist = (codes(yc) - codes(rc)).abs()
+    assert dist.max().item() <= 1
+    rate = (dist > 0).float().mean().item()
+    assert rate <= (1e-3 if dtype == torch.float16 else 1e-4), rate

@@ -6,6 +6,9 @@ Replaces `gemma_fused_add_rmsnorm` followed by a standalone static FP8
 (`scaled_fp8_quant`) or NVFP4 (`scaled_fp4_quant`) kernel. The quantized
 values are computed from the bf16-rounded normed activation with the same
 scale arithmetic as those kernels, so codes match the unfused chain.
+
+``gemma_add_rms_norm`` is the same kernel without the quant epilogue, used
+as the pre-SM80 fallback where flashinfer's norm module cannot JIT-build.
 """
 
 import torch
@@ -65,6 +68,7 @@ def _gemma_add_rms_norm_quant_kernel(
     eps,
     H: tl.constexpr,
     HAS_RESIDUAL: tl.constexpr,
+    HAS_QUANT: tl.constexpr,
     QUANT_NVFP4: tl.constexpr,
     WRITE_Y: tl.constexpr,
     launch_pdl: tl.constexpr,
@@ -91,7 +95,8 @@ def _gemma_add_rms_norm_quant_kernel(
     if HAS_RESIDUAL:
         r = tl.load(res_ptr + row * H + cols, mask=mask, other=0.0)
     w = tl.load(w_ptr + cols, mask=mask, other=0.0)
-    scale = tl.load(scale_ptr)
+    if HAS_QUANT:
+        scale = tl.load(scale_ptr)
 
     h = x.to(tl.float32)
     if HAS_RESIDUAL:
@@ -102,38 +107,40 @@ def _gemma_add_rms_norm_quant_kernel(
     rstd = tl.rsqrt(var + eps)
     # Round to the activation dtype, like the unfused norm output.
     y = (h * rstd * (1.0 + w.to(tl.float32))).to(x_ptr.dtype.element_ty)
-    if WRITE_Y:
+    if not HAS_QUANT or WRITE_Y:
         tl.store(y_ptr + row * H + cols, y, mask=mask)
-    y = y.to(tl.float32)
 
-    if QUANT_NVFP4:
-        # scaled_fp4_quant numerics; `scale` is the global scale (448 * 6 / amax).
-        vmax = tl.max(tl.max(tl.abs(y), axis=2), axis=1)
-        sf = scale * (vmax * _rcp_approx_ftz(tl.full((G,), 6.0, tl.float32)))
-        sf_fp8 = tl.minimum(sf, FP8_MAX).to(tl.float8e4nv)
-        sf32 = sf_fp8.to(tl.float32)
-        out_scale = tl.where(
-            sf32 != 0.0, _rcp_approx_ftz(sf32 * _rcp_approx_ftz(scale)), 0.0
-        )
-        lo, hi = tl.split(y * out_scale[:, None, None])
-        pcols = g[:, None] * 8 + pair[None, :]
-        tl.store(
-            q_ptr + row * (H // 2) + pcols, _cvt_e2m1x2(lo, hi), mask=pcols < H // 2
-        )
+    if HAS_QUANT:
+        y = y.to(tl.float32)
+        if QUANT_NVFP4:
+            # scaled_fp4_quant numerics; `scale` is the global scale
+            # (448 * 6 / amax).
+            vmax = tl.max(tl.max(tl.abs(y), axis=2), axis=1)
+            sf = scale * (vmax * _rcp_approx_ftz(tl.full((G,), 6.0, tl.float32)))
+            sf_fp8 = tl.minimum(sf, FP8_MAX).to(tl.float8e4nv)
+            sf32 = sf_fp8.to(tl.float32)
+            out_scale = tl.where(
+                sf32 != 0.0, _rcp_approx_ftz(sf32 * _rcp_approx_ftz(scale)), 0.0
+            )
+            lo, hi = tl.split(y * out_scale[:, None, None])
+            pcols = g[:, None] * 8 + pair[None, :]
+            tl.store(
+                q_ptr + row * (H // 2) + pcols, _cvt_e2m1x2(lo, hi), mask=pcols < H // 2
+            )
 
-        # Swizzled 128x4 scale layout [m_tile, k_tile, 32, 4, 4].
-        num_k_tiles: tl.constexpr = (H // 16 + 3) // 4
-        sf_off = (
-            ((row >> 7) * num_k_tiles + (g >> 2)) * 512
-            + (row & 31) * 16
-            + ((row >> 5) & 3) * 4
-            + (g & 3)
-        )
-        tl.store(sf_ptr + sf_off, sf_fp8, mask=g < H // 16)
-    else:
-        inv_scale = tl.math.div_rn(1.0, scale)
-        q = tl.clamp(y * inv_scale, -FP8_MAX, FP8_MAX)
-        tl.store(q_ptr + row * H + cols, q, mask=mask)
+            # Swizzled 128x4 scale layout [m_tile, k_tile, 32, 4, 4].
+            num_k_tiles: tl.constexpr = (H // 16 + 3) // 4
+            sf_off = (
+                ((row >> 7) * num_k_tiles + (g >> 2)) * 512
+                + (row & 31) * 16
+                + ((row >> 5) & 3) * 4
+                + (g & 3)
+            )
+            tl.store(sf_ptr + sf_off, sf_fp8, mask=g < H // 16)
+        else:
+            inv_scale = tl.math.div_rn(1.0, scale)
+            q = tl.clamp(y * inv_scale, -FP8_MAX, FP8_MAX)
+            tl.store(q_ptr + row * H + cols, q, mask=mask)
 
     if launch_pdl and not TRIGGER_EARLY:
         tl.extra.cuda.gdc_launch_dependents()
@@ -204,6 +211,7 @@ def gemma_add_rms_norm_quant(
         eps,
         H=H,
         HAS_RESIDUAL=residual is not None,
+        HAS_QUANT=True,
         QUANT_NVFP4=nvfp4,
         WRITE_Y=write_y,
         num_warps=16 if max_m_16_warps >= M else 4,
@@ -214,3 +222,54 @@ def gemma_add_rms_norm_quant(
         TRIGGER_EARLY=M <= 128,
     )
     return q, block_scale, y
+
+
+def gemma_add_rms_norm(
+    x: torch.Tensor,
+    residual: torch.Tensor | None,
+    weight: torch.Tensor,
+    eps: float,
+) -> torch.Tensor:
+    """Gemma RMSNorm of ``x (+ residual)`` without quantization.
+
+    The pre-SM80 fallback for flashinfer's ``gemma_rmsnorm`` /
+    ``gemma_fused_add_rmsnorm``, whose JIT build fails there.
+
+    Args:
+        x: (num_tokens, hidden) bf16/fp16 activation, contiguous. Read only.
+        residual: same shape as x, or None. Updated in place to x + residual.
+        weight: (hidden,) Gemma norm weight; the norm scales by (1 + weight).
+        eps: RMS norm epsilon.
+
+    Returns:
+        The normed activation in x's dtype.
+
+    """
+    assert x.dim() == 2 and x.is_contiguous()
+    assert x.dtype in (torch.bfloat16, torch.float16)
+    assert residual is None or (residual.shape == x.shape and residual.is_contiguous())
+    assert weight.shape == (x.shape[1],) and weight.is_contiguous()
+    M, H = x.shape
+    y = torch.empty_like(x)
+    if M == 0:
+        return y
+
+    _gemma_add_rms_norm_quant_kernel[(M,)](
+        x,
+        residual if residual is not None else x,
+        weight,
+        x,  # scale, q, sf: unread when HAS_QUANT=False
+        x,
+        x,
+        y,
+        eps,
+        H=H,
+        HAS_RESIDUAL=residual is not None,
+        HAS_QUANT=False,
+        QUANT_NVFP4=False,
+        WRITE_Y=True,
+        num_warps=16 if M <= 384 else 4,
+        launch_pdl=current_platform.is_arch_support_pdl(),
+        TRIGGER_EARLY=M <= 128,
+    )
+    return y

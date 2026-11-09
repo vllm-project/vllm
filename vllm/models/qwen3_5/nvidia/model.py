@@ -37,7 +37,6 @@ from transformers import (
     Qwen3_5TextConfig,
 )
 
-from vllm import ir
 from vllm.config import MultiModalConfig, VllmConfig
 from vllm.distributed import (
     get_pp_group,
@@ -130,7 +129,11 @@ from vllm.utils.flashinfer import has_flashinfer
 
 from .ops.fused_allreduce_norm_quant import fused_allreduce_gemma_rms_norm_quant
 from .ops.fused_gdn_gated_norm import fused_gdn_gated_rms_norm
-from .ops.fused_norm_quant import FP8_DTYPE, gemma_add_rms_norm_quant
+from .ops.fused_norm_quant import (
+    FP8_DTYPE,
+    gemma_add_rms_norm,
+    gemma_add_rms_norm_quant,
+)
 
 logger = init_logger(__name__)
 
@@ -179,13 +182,13 @@ def _fused_gdn_gated_rms_norm_quant(
 
 
 class Qwen3_5RMSNorm(GemmaRMSNorm):
-    """Gemma-style RMS normalization backed by flashinfer kernels, or by
-    the `vllm.ir` norm ops below SM80 or without FlashInfer.
+    """Gemma-style RMS normalization backed by flashinfer kernels, or by the
+    Triton `gemma_add_rms_norm` below SM80 or without FlashInfer (its norm
+    module cannot JIT-build there).
 
-    When `residual` is given, the fused add + norm is applied and the
-    updated `(x, residual)` pair is returned. The flashinfer path updates
-    `x` and `residual` in place, the `ir` path does not: use the returned
-    tensors.
+    When `residual` is given, the fused add + norm is applied in place and
+    the updated `(normed, residual)` pair is returned; the flashinfer path
+    also updates `x` in place. Use the returned tensors.
 
     `reduce_inputs`: in `forward_fused`, an `x` that comes with a
     residual is the un-reduced TP partial of a row-parallel linear, and the
@@ -208,11 +211,8 @@ class Qwen3_5RMSNorm(GemmaRMSNorm):
         residual: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         if not self.use_flashinfer:
-            # Same dtype as x so the fused vllm_c kernels are eligible.
-            weight = (self.weight.float() + 1.0).to(x.dtype)
-            if residual is None:
-                return ir.ops.rms_norm(x, weight, self.variance_epsilon)
-            return ir.ops.fused_add_rms_norm(x, residual, weight, self.variance_epsilon)
+            y = gemma_add_rms_norm(x, residual, self.weight, self.variance_epsilon)
+            return (y, residual) if residual is not None else y
 
         from flashinfer.norm import gemma_fused_add_rmsnorm, gemma_rmsnorm
 
