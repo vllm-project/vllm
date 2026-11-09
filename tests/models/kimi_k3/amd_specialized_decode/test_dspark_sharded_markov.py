@@ -72,6 +72,7 @@ def _speculator(head, lp, base, base_local, device):
     class Spec:
         _sample_sequential = DSparkSpeculator._sample_sequential
         _sample_markov_chain = DSparkSpeculator._sample_markov_chain
+        _markov_step = DSparkSpeculator._markov_step
         _sample_logits = DSparkSpeculator._sample_logits
         _maybe_predict_acceptance = DraftModelSpeculator._maybe_predict_acceptance
 
@@ -83,6 +84,8 @@ def _speculator(head, lp, base, base_local, device):
     s.acceptance_estimator = None
     s.draft_watermarker = None
     s._d2t_scatter_index = None
+    # As load_model sets it here: the Gumbel kernel adds the Markov bias.
+    s._fuse_markov_bias = True
     s.use_fp64_gumbel = False
     s.sample_indices = torch.arange(MAX_REQS * NSPEC, device=device)
     s.sample_idx_mapping = torch.zeros(
