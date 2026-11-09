@@ -274,11 +274,6 @@ def test_get_kv_connector_stats_returns_and_resets():
     assert worker.get_kv_connector_stats() is None
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="The worker stub lacks the KV lease setup from #64193 "
-    "(no _kv_lease_duration); no fix yet",
-)
 def test_expired_request_bumps_counter():
     import asyncio
 
