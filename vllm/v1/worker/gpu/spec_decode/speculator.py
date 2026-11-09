@@ -129,18 +129,13 @@ class BaseSpeculator(ABC):
         return
 
     def add_request(self, req_index: int, new_req_data: NewRequestData) -> None:
-        """A new request was assigned request-state slot `req_index`, e.g. to
-        reset per-slot state. No-op by default."""
+        """A new or resumed request was assigned request-state slot
+        `req_index`, e.g. to reset per-slot state. No-op by default."""
         return
 
     def on_requests_finished(self, finished_req_ids: set[str]) -> None:
         """Requests finished (not preempted), before their request-state slots
         are freed so their token history is still readable. No-op by default."""
-        return
-
-    def on_requests_preempted(self, preempted_req_ids: set[str]) -> None:
-        """Requests preempted, before their request-state slots are freed. They
-        are added again when they resume. No-op by default."""
         return
 
     def reset_state(self) -> None:

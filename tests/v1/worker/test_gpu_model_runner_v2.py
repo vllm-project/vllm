@@ -650,9 +650,6 @@ def test_speculator_request_hooks():
         def on_requests_finished(self, req_ids):
             events.extend(("finished", r) for r in req_ids if r in slots)
 
-        def on_requests_preempted(self, req_ids):
-            events.extend(("preempted", r) for r in req_ids if r in slots)
-
     runner = GPUModelRunner.__new__(GPUModelRunner)
     runner.speculator = RecordingSpeculator()
     runner.req_states = SimpleNamespace(
@@ -681,4 +678,4 @@ def test_speculator_request_hooks():
     scheduler_output.preempted_req_ids = {"b"}
     runner.finish_requests(scheduler_output)
 
-    assert events == [("add", "a"), ("add", "b"), ("finished", "a"), ("preempted", "b")]
+    assert events == [("add", "a"), ("add", "b"), ("finished", "a")]

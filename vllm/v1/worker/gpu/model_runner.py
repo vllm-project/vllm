@@ -1255,8 +1255,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.speculator.on_requests_finished(finished_req_ids)
         preempted_req_ids = scheduler_output.preempted_req_ids
         if preempted_req_ids:
-            if self.speculator is not None:
-                self.speculator.on_requests_preempted(preempted_req_ids)
             finished_req_ids = finished_req_ids.union(preempted_req_ids)
         # Sorted so every TP rank frees request slots in the same order.
         # Features like batch-sharded sampling derive rank request ownership
