@@ -11,6 +11,16 @@ pytestmark = pytest.mark.skipif(
     not current_platform.is_rocm(), reason="ROCm MXFP4 indexer"
 )
 
+# TODO: drop once AITER's row-group FP4 MQA logits kernel accepts physical page
+# strides. score_paged reads the index cache in place, whose pages pitch 4352
+# bytes (payload + scales), but flydsl_pa_mqa_logits_fp4_rowgroup asserts
+# contiguous pages in every AITER release so far (v0.1.29 included).
+_needs_strided_rowgroup = pytest.mark.xfail(
+    raises=AssertionError,
+    strict=True,
+    reason="AITER row-group FP4 MQA logits needs contiguous pages",
+)
+
 
 def test_cache_write_preserves_neighboring_packed_layers():
     from vllm.models.kimi_k3.amd.ops.fp4_indexer import store_keys
@@ -32,6 +42,7 @@ def test_cache_write_preserves_neighboring_packed_layers():
     torch.testing.assert_close(storage, expected, rtol=0, atol=0)
 
 
+@_needs_strided_rowgroup
 @pytest.mark.parametrize("return_scores", [False, True])
 def test_indexer_piecewise_replay_refreshes_batch_metadata(return_scores):
     """Replay the registered op across decode, mixed and prefill batches."""
@@ -213,6 +224,7 @@ def test_indexer_piecewise_replay_refreshes_batch_metadata(return_scores):
     torch.cuda.current_stream().wait_stream(stream)
 
 
+@_needs_strided_rowgroup
 @pytest.mark.parametrize("return_scores", [False, True])
 def test_decode_graph_does_not_select_poisoned_logits_tail(return_scores):
     from vllm.models.kimi_k3.amd.dsa import _select
