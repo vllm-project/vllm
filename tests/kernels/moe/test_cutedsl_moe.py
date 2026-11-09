@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+import dataclasses
+
 import pytest
 
 from vllm.platforms import current_platform
@@ -16,8 +18,12 @@ import torch
 from flashinfer import fp4_quantize
 from torch.nn import functional as F
 
+import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from tests.kernels.moe.utils import make_dummy_moe_config
 from vllm.model_executor.layers.activation import SiluAndMul
+from vllm.model_executor.layers.fused_moe.config import FusedMoEParallelConfig
 from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutedsl_batched_moe import (  # noqa: E501
+    FlashInferCuteDSLBatchedExperts,
     flashinfer_cutedsl_moe_masked,
     flashinfer_cutedsl_mxfp8_moe_masked,
     swizzle_mxfp8_moe_weight_scales,
@@ -25,6 +31,10 @@ from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutedsl_batched_moe
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     dequant_mxfp8_to_bf16,
     mxfp8_e4m3_quantize,
+)
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kMxfp8Dynamic,
+    kMxfp8Static,
 )
 from vllm.utils.flashinfer import (
     flashinfer_cutedsl_grouped_gemm_nt_masked as cutedsl_gmm_masked,
@@ -589,6 +599,51 @@ def test_flashinfer_cutedsl_mxfp8_moe_masked(
         act = F.silu(gate_up[:, :inter_dim].float()) * gate_up[:, inter_dim:]
         ref = quant_dequant_mxfp8(act.to(torch.bfloat16)).float() @ w2_ref[i].T
         torch.testing.assert_close(out[i, :m], ref.to(out.dtype), atol=3e-2, rtol=5e-2)
+
+
+@pytest.mark.parametrize(
+    "overrides, supported",
+    [
+        pytest.param({}, True, id="supported"),
+        pytest.param({"all2all_backend": "nixl_ep"}, False, id="nixl_ep"),
+        pytest.param({"has_bias": True}, False, id="bias"),
+        pytest.param({"swiglu_limit": 7.0}, False, id="swiglu_limit"),
+        pytest.param({"swiglu_alpha": 1.702}, False, id="swiglu_alpha"),
+        pytest.param({"swiglu_beta": 1.0}, False, id="swiglu_beta"),
+        pytest.param({"hidden_dim": 192}, False, id="unaligned_hidden"),
+        pytest.param({"intermediate_size": 192}, False, id="unaligned_inter"),
+    ],
+)
+def test_flashinfer_cutedsl_batched_mxfp8_supported_config(
+    overrides: dict, supported: bool
+):
+    """MXFP8 needs the DeepEP low-latency dispatch, plain SiLU-and-mul without
+    expert biases, and 128-aligned hidden and intermediate sizes."""
+    overrides = dict(overrides)
+    moe_config = make_dummy_moe_config(
+        hidden_dim=overrides.pop("hidden_dim", 256),
+        intermediate_size=overrides.pop("intermediate_size", 128),
+    )
+    moe_config.moe_parallel_config = dataclasses.replace(
+        FusedMoEParallelConfig.make_no_parallel(),
+        dp_size=2,
+        ep_size=2,
+        use_ep=True,
+        all2all_backend=overrides.pop("all2all_backend", "deepep_low_latency"),
+    )
+    for name, value in overrides.items():
+        setattr(moe_config, name, value)
+
+    result, reason = FlashInferCuteDSLBatchedExperts.is_supported_config(
+        FlashInferCuteDSLBatchedExperts,
+        moe_config,
+        kMxfp8Static,
+        kMxfp8Dynamic,
+        mk.FusedMoEActivationFormat.BatchedExperts,
+    )
+    assert result == supported
+    if not supported:
+        assert reason is not None and "mxfp8" in reason
 
 
 @pytest.mark.parametrize(
