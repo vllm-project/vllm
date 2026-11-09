@@ -134,7 +134,7 @@ from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.network_utils import get_ip
 from vllm.utils.torch_utils import resolve_kv_cache_dtype_string
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
-from vllm.v1.sample.logits_processor import LogitsProcessor
+from vllm.v1.worker.gpu.sample.logits_processor.interface import LogitsProcessor
 from vllm.version import __version__ as VLLM_VERSION
 
 if TYPE_CHECKING:
@@ -300,13 +300,13 @@ def _maybe_add_docs_url(cls: Any) -> str:
 def _expand_json_human_readable_numbers(val: str) -> str:
     """Expand human-readable number suffixes in a JSON string.
 
-    Based on :func:`human_readable_int` so that the ``k/m/g/t`` (decimal) and
-    ``K/M/G/T`` (binary) conventions work out the box.
+    Based on `human_readable_int` so that the `k/m/g/t` (decimal) and
+    `K/M/G/T` (binary) conventions work out the box.
     Also works inside JSON config arguments such
-    as ``--kv-transfer-config '{"cpu_bytes_to_use": 80m}'``.
+    as `--kv-transfer-config '{"cpu_bytes_to_use": 80m}'`.
 
     Only bare (unquoted) tokens are replaced so that JSON string values
-    like ``"model_name"`` are never modified.
+    like `"model_name"` are never modified.
     """
     # Split on quoted strings so we only touch non-string regions.
     parts = re.split(r'("(?:[^"\\]|\\.)*")', val)
@@ -477,7 +477,7 @@ _DISABLE_CASCADE_ATTN_DEPRECATION_MESSAGE = (
 
 
 class DeprecatedLogConfigFileAction(argparse.Action):
-    """Warn when the legacy ``--log-config-file`` option is used."""
+    """Warn when the legacy `--log-config-file` option is used."""
 
     def __call__(self, parser, namespace, values, option_string=None):
         warnings.warn(_LOG_CONFIG_FILE_DEPRECATION_MESSAGE, stacklevel=1)
@@ -642,7 +642,7 @@ class EngineArgs:
     quantization_config: "dict[str, Any] | QuantizationConfigArgs | None" = None
     """User-facing quantization configuration. Carries per-layer-kind
     QuantSpecs (linear, moe) and ignore patterns; see
-    :class:`QuantizationConfigArgs`. Auto-populated from the matching online
+    `QuantizationConfigArgs`. Auto-populated from the matching online
     shorthand when `quantization` is one of the values in
     `ONLINE_QUANT_SHORTHAND_NAMES`."""
     allow_deprecated_quantization: bool = ModelConfig.allow_deprecated_quantization
@@ -716,6 +716,10 @@ class EngineArgs:
 
     scheduler_reserve_full_isl: bool = SchedulerConfig.scheduler_reserve_full_isl
     prefill_schedule_interval: int = SchedulerConfig.prefill_schedule_interval
+    cache_aware_admission_window: int = SchedulerConfig.cache_aware_admission_window
+    cache_aware_admission_threshold: float = (
+        SchedulerConfig.cache_aware_admission_threshold
+    )
 
     watermark: float = SchedulerConfig.watermark
 
@@ -837,6 +841,7 @@ class EngineArgs:
 
     use_tqdm_on_load: bool = LoadConfig.use_tqdm_on_load
     pt_load_map_location: str | dict[str, str] = LoadConfig.pt_load_map_location
+    shuffle_safetensors_files: bool = LoadConfig.shuffle_safetensors_files
 
     logits_processors: list[str | type[LogitsProcessor]] | None = (
         ModelConfig.logits_processors
@@ -1108,6 +1113,10 @@ class EngineArgs:
         load_group.add_argument("--use-tqdm-on-load", **load_kwargs["use_tqdm_on_load"])
         load_group.add_argument(
             "--pt-load-map-location", **load_kwargs["pt_load_map_location"]
+        )
+        load_group.add_argument(
+            "--shuffle-safetensors-files",
+            **load_kwargs["shuffle_safetensors_files"],
         )
 
         # Attention arguments
@@ -1818,6 +1827,14 @@ class EngineArgs:
             **scheduler_kwargs["prefill_schedule_interval"],
         )
         scheduler_group.add_argument(
+            "--cache-aware-admission-window",
+            **scheduler_kwargs["cache_aware_admission_window"],
+        )
+        scheduler_group.add_argument(
+            "--cache-aware-admission-threshold",
+            **scheduler_kwargs["cache_aware_admission_threshold"],
+        )
+        scheduler_group.add_argument(
             "--disable-hybrid-kv-cache-manager",
             **scheduler_kwargs["disable_hybrid_kv_cache_manager"],
         )
@@ -2110,6 +2127,7 @@ class EngineArgs:
             ignore_patterns=self.ignore_patterns,
             use_tqdm_on_load=self.use_tqdm_on_load,
             pt_load_map_location=self.pt_load_map_location,
+            shuffle_safetensors_files=self.shuffle_safetensors_files,
         )
 
     def create_speculative_config(
@@ -2694,6 +2712,8 @@ class EngineArgs:
             scheduler_reserve_full_isl=self.scheduler_reserve_full_isl,
             watermark=self.watermark,
             prefill_schedule_interval=self.prefill_schedule_interval,
+            cache_aware_admission_window=self.cache_aware_admission_window,
+            cache_aware_admission_threshold=self.cache_aware_admission_threshold,
             disable_hybrid_kv_cache_manager=self.disable_hybrid_kv_cache_manager,
             async_scheduling=self.async_scheduling,
             stream_interval=self.stream_interval,
@@ -2800,7 +2820,7 @@ class EngineArgs:
             mamba_config.stochastic_rounding_philox_rounds = (
                 self.mamba_cache_philox_rounds
             )
-        mamba_config.validate_ssu_algorithm()
+        mamba_config.__post_init__()
 
         # Kernel config overrides
         kernel_config = copy.deepcopy(self.kernel_config)

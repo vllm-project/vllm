@@ -2127,8 +2127,8 @@ async def _stream_truncated_by_length(serving: OpenAIServingResponses):
 
 @pytest.mark.asyncio
 async def test_responses_stream_truncated_by_length_reports_incomplete():
-    """A max_output_tokens cut must end the stream with ``response.incomplete``
-    and mark the cut item ``incomplete`` in both ``output_item.done`` and the
+    """A max_output_tokens cut must end the stream with `response.incomplete`
+    and mark the cut item `incomplete` in both `output_item.done` and the
     final response (#57998)."""
     events = await _stream_truncated_by_length(_make_serving_instance())
 
@@ -2144,8 +2144,8 @@ async def test_responses_stream_truncated_by_length_reports_incomplete():
 
 @pytest.mark.asyncio
 async def test_background_stream_replay_stops_on_response_incomplete():
-    """Replaying a stored background stream must end at ``response.incomplete``
-    as it does at ``response.completed``, instead of waiting for more events."""
+    """Replaying a stored background stream must end at `response.incomplete`
+    as it does at `response.completed`, instead of waiting for more events."""
     serving = _make_serving_instance()
     events = await _stream_truncated_by_length(serving)
     assert isinstance(events[-1], ResponseIncompleteEvent)
