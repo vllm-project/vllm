@@ -37,6 +37,11 @@ class ElasticConfig:
         hf = getattr(config.model_config, "hf_config", None)
         if hf is None or getattr(hf, "elastic_use_lazy_slicing", False) is not True:
             return None
+        if config.aux_output_config.enabled:
+            raise ValueError(
+                "Elastic does not support auxiliary outputs "
+                "(--enable-return-routed-experts)"
+            )
         dimensions = getattr(hf, "elastic_thinking", {})
         full = SliceConfig(hf.hidden_size, hf.moe_intermediate_size)
         sliced = SliceConfig(

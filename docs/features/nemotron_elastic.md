@@ -108,6 +108,8 @@ and Triton MoE. Pipeline/data/expert parallelism, quantization, LoRA, speculativ
 decoding and disaggregated serving are outside its supported scope. The full
 checkpoint must fit across the tensor-parallel ranks even when every request
 chooses `sliced`.
+Auxiliary outputs (`--enable-return-routed-experts`) are not supported with Elastic,
+including requests that use `full`.
 
 ## Verify the implementation
 

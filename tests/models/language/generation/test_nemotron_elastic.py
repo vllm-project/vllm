@@ -172,6 +172,32 @@ def tiny_elastic_engine(
 
 
 @pytest.mark.hybrid_model
+def test_elastic_llm_rejects_routed_expert_outputs(
+    vllm_runner, monkeypatch, tiny_elastic_checkpoint
+):
+    """Fail at engine construction instead of returning stale routed IDs."""
+    path, _ = tiny_elastic_checkpoint
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    with (
+        pytest.raises(ValueError, match="Elastic.*auxiliary outputs"),
+        vllm_runner(
+            path,
+            skip_tokenizer_init=True,
+            dtype="bfloat16",
+            max_model_len=256,
+            max_num_batched_tokens=256,
+            enforce_eager=True,
+            async_scheduling=False,
+            enable_prefix_caching=True,
+            enable_return_routed_experts=True,
+            kernel_config={"moe_backend": "triton"},
+            compilation_config={"mode": 0},
+        ),
+    ):
+        pytest.fail("Elastic accepted routed-expert auxiliary outputs")
+
+
+@pytest.mark.hybrid_model
 def test_elastic_logits_and_recovery(tiny_elastic_engine, record_property):
     """Check logits, including after a real EngineCore cache reset/preemption."""
     llm, models = tiny_elastic_engine

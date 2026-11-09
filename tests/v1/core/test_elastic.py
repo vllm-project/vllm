@@ -1,12 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from dataclasses import replace
+
 import pytest
 import torch
 from transformers import NemotronHConfig
 
 import vllm.platforms
 from vllm.config import (
+    AuxOutputConfig,
     CacheConfig,
     CompilationConfig,
     KernelConfig,
@@ -252,6 +255,30 @@ def test_unsupported_elastic_settings_are_rejected(elastic_config, unsupported):
         elastic_config.parallel_config.enable_expert_parallel = True
     with pytest.raises(ValueError, match="[Ee]lastic"):
         ElasticConfig.from_vllm_config(elastic_config)
+
+
+@pytest.mark.parametrize("return_routed_experts", [False, True])
+def test_elastic_scheduler_rejects_routed_expert_outputs(
+    elastic_config, return_routed_experts
+):
+    """Reject auxiliary capture before sliced MoE can return stale expert IDs."""
+    config = replace(
+        elastic_config,
+        cache_config=CacheConfig(block_size=16, enable_prefix_caching=True),
+        aux_output_config=AuxOutputConfig(
+            enable_return_routed_experts=return_routed_experts
+        ),
+    )
+    if return_routed_experts:
+        with pytest.raises(ValueError, match="Elastic.*auxiliary outputs"):
+            make_scheduler(config)
+    else:
+        scheduler = make_scheduler(config)
+        assert scheduler.elastic is not None
+        assert scheduler.elastic.profiles == {
+            "full": SliceConfig(128, 128),
+            "sliced": SliceConfig(64, 64),
+        }
 
 
 @pytest.mark.parametrize("tp_size", [1, 2, 4])
