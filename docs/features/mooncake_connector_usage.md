@@ -58,7 +58,7 @@ token block sizes, and per-layer payload sizes must agree even when group
 numbers differ between nodes. Each decoder group must request a contiguous
 uncached suffix; holes within that suffix are unsupported. The producer pairs
 the requested pages with the suffix of its corresponding source group.
-Unsupported layouts fail before any data transfer.
+Incompatible region layouts fail before any data transfer.
 
 Run the same code revision on both endpoints. This experimental path does not
 negotiate connector versions or guarantee interoperability across revisions.
