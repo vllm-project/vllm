@@ -59,7 +59,6 @@ from vllm.models.qwen4_exp.nvidia.ngram_embedding import (
     Qwen4ExpPLEFp8EmbeddingMethod,
     Qwen4ExpPLENvFp4EmbeddingMethod,
     Qwen4ExpPLEPinnedHostEmbedding,
-    Qwen4ExpPLESharedHostEmbedding,
     Qwen4ExpPLEUnquantizedEmbeddingMethod,
     stage_checkpoint_rows,
 )
@@ -2833,76 +2832,3 @@ def test_amd_ngram_embedding_matches_reference_under_compile(
     )
     expected = loaded_weight[ngram_ids.cpu()].flatten(-2).to(device)
     torch.testing.assert_close(output.float(), expected.float(), rtol=0, atol=0)
-
-
-def _shared_ple_embedding(
-    monkeypatch: pytest.MonkeyPatch, rank_in_group: int
-) -> Qwen4ExpPLESharedHostEmbedding:
-    """A shared PLE embedding in a two-rank group whose leader decides for all."""
-    embedding = Qwen4ExpPLESharedHostEmbedding.__new__(Qwen4ExpPLESharedHostEmbedding)
-    nn.Module.__init__(embedding)
-    embedding._shared_group = SimpleNamespace(
-        rank_in_group=rank_in_group,
-        world_size=2,
-        cpu_group=object(),
-        broadcast_object=lambda obj=None, src=0: obj,
-    )
-    embedding._shared_ptrs = set()
-    monkeypatch.setattr(
-        torch.distributed,
-        "all_gather_object",
-        lambda out, obj, group=None: out.__setitem__(slice(None), [obj] * len(out)),
-    )
-    return embedding
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs cudaHostRegister")
-@pytest.mark.parametrize("shm_fits", [True, False])
-def test_shared_ple_table_is_mapped_where_shm_fits_it(
-    monkeypatch: pytest.MonkeyPatch, shm_fits: bool
-) -> None:
-    """A table is pinned either way: shared from /dev/shm when it fits there,
-    otherwise one per rank."""
-    embedding = _shared_ple_embedding(monkeypatch, rank_in_group=0)
-    if not shm_fits:
-
-        def too_small(*args, **kwargs):
-            raise RuntimeError("too small")
-
-        monkeypatch.setattr(ngram_embedding_module, "check_shm_free_space", too_small)
-    weight = embedding.allocate_embedding_weight(4, 2, torch.float8_e4m3fn)
-    assert weight.shape == (4, 2) and weight.dtype == torch.float8_e4m3fn
-    assert weight.is_pinned()
-    assert (weight.data_ptr() in embedding._shared_ptrs) == shm_fits
-
-
-@pytest.mark.parametrize("rank_in_group", [0, 1])
-def test_shared_ple_loader_writes_once_and_fences_every_rank(
-    monkeypatch: pytest.MonkeyPatch, rank_in_group: int
-) -> None:
-    """Rank 0 copies the shard into a shared table; every rank barriers so the
-    table is complete when the last loader call returns; a per-rank tensor is
-    loaded by every rank and needs no fence."""
-    embedding = _shared_ple_embedding(monkeypatch, rank_in_group)
-    embedding.weight = nn.Parameter(torch.zeros(4, 2), requires_grad=False)
-    embedding.weight_scale = nn.Parameter(torch.zeros(1), requires_grad=False)
-    embedding._shared_ptrs.add(embedding.weight.data_ptr())
-    parent_calls: list[tuple[str, int | None]] = []
-    barriers: list[object] = []
-
-    def parent_loader(self, param, loaded_weight, checkpoint_start=None):
-        parent_calls.append(
-            ("weight" if param is self.weight else "scale", checkpoint_start)
-        )
-
-    monkeypatch.setattr(Qwen4ExpPLEPinnedHostEmbedding, "weight_loader", parent_loader)
-    monkeypatch.setattr(
-        torch.distributed, "barrier", lambda group=None: barriers.append(group)
-    )
-
-    embedding.weight_loader(embedding.weight, torch.ones(2, 2), checkpoint_start=2)
-    embedding.weight_loader(embedding.weight_scale, torch.tensor([0.5]))
-
-    expected_weight_calls = [("weight", 2)] if rank_in_group == 0 else []
-    assert parent_calls == [*expected_weight_calls, ("scale", None)]
-    assert barriers == [embedding._shared_group.cpu_group]

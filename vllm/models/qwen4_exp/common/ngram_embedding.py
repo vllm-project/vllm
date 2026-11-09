@@ -7,15 +7,10 @@ n-gram embedding table can be kept in pinned host memory and looked up through
 Unified Virtual Addressing on any CUDA-alike platform.
 """
 
-import mmap
-import tempfile
 import threading
-import weakref
 from abc import ABC, abstractmethod
-from contextlib import ExitStack
 from typing import ClassVar
 
-import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import nn
@@ -26,10 +21,6 @@ from vllm.distributed import (
     get_engram_dp_group,
     get_etp_group,
     get_tp_group,
-)
-from vllm.distributed.device_communicators.shm_broadcast import (
-    SHM_PATH,
-    check_shm_free_space,
 )
 from vllm.forward_context import DPMetadata, get_forward_context
 from vllm.logger import init_logger
@@ -63,6 +54,7 @@ from vllm.model_executor.parameter import (
     PerTensorScaleParameter,
 )
 from vllm.model_executor.utils import set_weight_attrs
+from vllm.models.deepseek_v41.common.engram import DPSharedEngramStorage
 from vllm.triton_utils import tl, triton
 from vllm.utils.platform_utils import is_uva_available
 from vllm.utils.torch_utils import get_accelerator_view_from_cpu_tensor
@@ -866,22 +858,13 @@ class Qwen4ExpPLEPinnedHostEmbedding(Qwen4ExpPLEEmbedding):
         )
 
 
-def _unregister_shared_ple_mapping(mapping: mmap.mmap, pointer: int) -> None:
-    # Torch storage retains the numpy owner, including through cached UVA views.
-    # Keep its mmap alive until CUDA has released the registration.
-    result = torch.cuda.cudart().cudaHostUnregister(pointer)
-    if result.value != 0:
-        logger.warning("PLE cudaHostUnregister failed: %s", result)
-
-
 class Qwen4ExpPLESharedHostEmbedding(Qwen4ExpPLEPinnedHostEmbedding):
     """Pinned-host PLE tables mapped once per node for co-located DP replicas.
 
     With `EngramConfig.dp_shared_memory`, the node-local Engram DP group maps
-    each table from one `/dev/shm` file and registers it with CUDA, so
+    each table from one /dev/shm file (as DeepSeek V4.1's Engram does), so
     lookups are the pinned backend's; only the group leader loads it. A table
-    that does not fit in the leader's /dev/shm stays per rank. Mirrors
-    `DPSharedEngramStorage` in the DeepSeek V4.1 Engram implementation.
+    that cannot be shared stays per rank.
     """
 
     def __init__(self, *args, **kwargs) -> None:
@@ -898,63 +881,17 @@ class Qwen4ExpPLESharedHostEmbedding(Qwen4ExpPLEPinnedHostEmbedding):
         dtype: torch.dtype,
     ) -> torch.Tensor:
         num_bytes = num_embeddings * embedding_dim * dtype.itemsize
-        group = self._shared_group
-        with ExitStack() as stack:
-            path = error = None
-            if group.rank_in_group == 0:
-                try:
-                    check_shm_free_space(num_bytes, allocation_name="PLE table")
-                    backing_file = stack.enter_context(
-                        tempfile.NamedTemporaryFile(prefix="vllm_ple_", dir=SHM_PATH)
-                    )
-                    backing_file.truncate(num_bytes)
-                    path = backing_file.name
-                except Exception as exc:
-                    error = f"{type(exc).__name__}: {exc}"
-            # Every rank follows the leader, or peers would wait on its fences.
-            path, error = group.broadcast_object((path, error))
-            if error is not None:
-                logger.warning_once("Keeping one PLE table per DP replica: %s", error)
-                return super().allocate_embedding_weight(
-                    num_embeddings, embedding_dim, dtype
-                )
-
-            mapping = owner = tensor = None
-            try:
-                with open(path, "r+b") as file:
-                    mapping = mmap.mmap(file.fileno(), num_bytes, flags=mmap.MAP_SHARED)
-                owner = np.frombuffer(mapping, dtype=np.uint8)
-                pointer = owner.ctypes.data
-                tensor = torch.from_numpy(owner)
-                result = torch.cuda.cudart().cudaHostRegister(pointer, num_bytes, 0)
-                if result.value != 0:
-                    raise RuntimeError(f"cudaHostRegister failed: {result}")
-                finalizer = weakref.finalize(
-                    owner, _unregister_shared_ple_mapping, mapping, pointer
-                )
-                finalizer.atexit = False  # type: ignore[misc]
-                # The UVA helper otherwise allocates a private pinned copy.
-                if not tensor.is_pinned():
-                    raise RuntimeError("cudaHostRegister did not pin the PLE table")
-            except Exception as exc:
-                error = f"{type(exc).__name__}: {exc}"
-
-            # Also fences peer mappings before the leader unlinks the file.
-            errors: list[str | None] = [None] * group.world_size
-            torch.distributed.all_gather_object(errors, error, group=group.cpu_group)
-            failures = "; ".join(
-                f"EDP rank {rank}: {err}"
-                for rank, err in enumerate(errors)
-                if err is not None
+        try:
+            table, _ = DPSharedEngramStorage.share_shm_table(
+                num_bytes, self._shared_group
             )
-            if failures:
-                # Dropping the owner runs the finalizer; the mapping then unmaps.
-                del tensor, owner, mapping
-                raise RuntimeError(
-                    "shared PLE table initialization failed: " + failures
-                )
-            assert tensor is not None
-        weight = tensor.view(dtype).view(num_embeddings, embedding_dim)
+        except RuntimeError as exc:
+            # Raised on every rank of the group, so all of them fall back.
+            logger.warning_once("Keeping one PLE table per DP replica: %s", exc)
+            return super().allocate_embedding_weight(
+                num_embeddings, embedding_dim, dtype
+            )
+        weight = table.view(dtype).view(num_embeddings, embedding_dim)
         self._shared_ptrs.add(weight.data_ptr())
         return weight
 

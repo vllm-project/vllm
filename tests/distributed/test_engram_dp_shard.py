@@ -54,6 +54,7 @@ from vllm.models.deepseek_v41.common.engram import (
     engram_head_shard_rank,
     gather_engram_hashes,
 )
+from vllm.models.qwen4_exp.common import ngram_embedding as ple_ops
 from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_open_port
 from vllm.utils.system_utils import update_environment_variables
@@ -226,6 +227,8 @@ def _worker(rank: int, tp_size: int, port: int) -> None:
             _check_shared_storage_lifetime_and_failures(failure)
         for failure in (None, "create", "import"):
             _check_cumem_host_table(failure)
+        for shm_fits in (True, False):
+            _check_ple_shared_table(shm_fits)
 
         # GPU peer reads need NVLink P2P, which CI's L4s lack.
         p2p = current_platform.is_fully_connected(
@@ -420,6 +423,30 @@ def _check_shared_storage_lifetime_and_failures(failure):
             mapped = ref()
             assert mapped is None or mapped.closed
         assert all(not path.exists() for path in paths)
+
+
+def _check_ple_shared_table(shm_fits):
+    """Qwen4Exp's PLE table is one /dev/shm mapping per EDP group, loaded by its
+    leader; without room in /dev/shm, every rank loads its own table."""
+    group = get_engram_dp_group()
+    with pytest.MonkeyPatch.context() as patch:
+        if not shm_fits:
+            patch.setattr(engram_ops, "_shm_shortfall", lambda num_bytes: "too small")
+        embedding = ple_ops.Qwen4ExpPLESharedHostEmbedding(
+            8,
+            DIM,
+            params_dtype=torch.bfloat16,
+            padding_size=1,
+            prefix="test.ple_embedding",
+            embedding_method=ple_ops.Qwen4ExpPLEUnquantizedEmbeddingMethod(),
+        )
+    # Every rank offers different rows; a shared table holds the leader's.
+    offered = torch.full((8, DIM), group.rank_in_group + 1.0, dtype=torch.bfloat16)
+    embedding.weight_loader(embedding.weight, offered)
+    expected = 1.0 if shm_fits else group.rank_in_group + 1.0
+    assert embedding.weight.is_pinned()
+    assert torch.all(embedding.weight == expected)
+    group.barrier()
 
 
 def _check_cumem_host_table(failure):

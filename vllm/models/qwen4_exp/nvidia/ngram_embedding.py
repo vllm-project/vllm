@@ -44,7 +44,6 @@ __all__ = [
     "Qwen4ExpPLEFp8EmbeddingMethod",
     "Qwen4ExpPLENvFp4EmbeddingMethod",
     "Qwen4ExpPLEPinnedHostEmbedding",
-    "Qwen4ExpPLESharedHostEmbedding",
     "Qwen4ExpPLEUnquantizedEmbeddingMethod",
     "Qwen4ExpNGramEmbedding",
 ]
