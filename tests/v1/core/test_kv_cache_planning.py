@@ -2101,9 +2101,11 @@ def test_dflash_drafter_sliding_window_layers_back_only_their_tail(
     """Only a DFlash-family drafter's own sliding-window layers get the
     tail-only spec, and only on Model Runner V2, whose speculator writes no
     context KV into null blocks."""
-    monkeypatch.setattr(
-        VllmConfig, "use_v2_model_runner", property(lambda _: use_v2_model_runner)
-    )
+    from vllm.config import set_current_vllm_config
+    from vllm.model_executor.layers.attention import Attention
+    from vllm.v1.attention.backends.cpu_attn import CPUAttentionBackend
+
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", str(int(use_v2_model_runner)))
     config = VllmConfig(model_config=ModelConfig(max_model_len=1024))
     config.cache_config.kv_cache_layout = "BLHNC"
     config.speculative_config = fake_speculative_config(
@@ -2119,10 +2121,34 @@ def test_dflash_drafter_sliding_window_layers_back_only_their_tail(
         use_multi_module_mtp=lambda: False,
         parallel_drafting=False,
     )
+    with set_current_vllm_config(config):
+        target = Attention(
+            num_heads=1,
+            head_size=64,
+            scale=0.125,
+            cache_config=config.cache_config,
+            per_layer_sliding_window=64,
+            prefix="layers.1",
+            attn_backend=CPUAttentionBackend,
+        )
+        draft = Attention(
+            num_heads=1,
+            head_size=64,
+            scale=0.125,
+            cache_config=config.cache_config,
+            per_layer_sliding_window=64,
+            prefix="draft.0",
+            attn_backend=CPUAttentionBackend,
+        )
+        draft.is_draft_layer = True
+        target_spec = target.get_kv_cache_spec(config)
+        draft_spec = draft.get_kv_cache_spec(config)
+    assert isinstance(target_spec, SlidingWindowSpec)
+    assert isinstance(draft_spec, SlidingWindowSpec)
     specs = {
         "layers.0": new_kv_cache_spec(),
-        "layers.1": new_sliding_window_spec(sliding_window=64),
-        "draft.0": _as_draft(new_sliding_window_spec(sliding_window=64)),
+        "layers.1": target_spec,
+        "draft.0": _as_draft(draft_spec),
     }
     configs = get_kv_cache_configs(config, [specs], [2**30])
     spec_by_layer = {

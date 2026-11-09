@@ -174,6 +174,10 @@ class SingleTypeKVCacheManager(ABC):
             and num_local_computed_tokens % self.block_size != 0
         )
 
+    def get_num_blocks_to_reserve(self, request_id: str, num_tokens: int) -> int | None:
+        """Return a reservation, or None to use the allocation-based admission check."""
+        return None
+
     def get_num_blocks_to_allocate(
         self,
         request_id: str,
@@ -1259,41 +1263,16 @@ class DFlashSlidingWindowManager(SlidingWindowManager):
         # Draft steps read only from the tail below the target tokens.
         return max(num_tokens_main_model - self.tail_tokens, 0) // self.block_size
 
-    def get_num_blocks_to_allocate(
-        self,
-        request_id: str,
-        num_tokens: int,
-        new_computed_blocks: Sequence[KVCacheBlock],
-        total_computed_tokens: int,
-        num_local_computed_tokens: int,
-        num_tokens_main_model: int,
-        apply_admission_cap: bool = False,
-        prefill_end: int = 0,
-    ) -> int:
-        if apply_admission_cap:
-            # Steps back only their own tail, so a long request's peak holding
-            # is set by the steps in flight; a short one never spans more than
-            # its tokens.
-            assert self.max_admission_blocks_per_request is not None
-            blocks = self.req_to_blocks.get(request_id, ())
-            start = self._num_null_prefix_blocks.get(request_id, 0)
-            num_held_blocks = sum(
-                not blocks[i].is_null for i in range(start, len(blocks))
-            )
-            num_required_blocks = min(
-                cdiv(num_tokens, self.block_size),
-                self.max_admission_blocks_per_request,
-            )
-            return max(num_required_blocks - num_held_blocks, 0)
-        return super().get_num_blocks_to_allocate(
-            request_id,
-            num_tokens,
-            new_computed_blocks,
-            total_computed_tokens,
-            num_local_computed_tokens,
-            num_tokens_main_model,
-            prefill_end=prefill_end,
+    def get_num_blocks_to_reserve(self, request_id: str, num_tokens: int) -> int:
+        # The request span bounds short prompts; in-flight tails bound long ones.
+        assert self.max_admission_blocks_per_request is not None
+        blocks = self.req_to_blocks.get(request_id, ())
+        start = self._num_null_prefix_blocks.get(request_id, 0)
+        num_held_blocks = sum(not blocks[i].is_null for i in range(start, len(blocks)))
+        num_required_blocks = min(
+            cdiv(num_tokens, self.block_size), self.max_admission_blocks_per_request
         )
+        return max(num_required_blocks - num_held_blocks, 0)
 
     @classmethod
     def find_longest_cache_hit(

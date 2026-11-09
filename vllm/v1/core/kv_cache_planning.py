@@ -29,7 +29,6 @@ from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     ChunkedLocalAttentionSpec,
     CircularBufferSpec,
-    DFlashSlidingWindowSpec,
     FullAttentionSpec,
     HiddenStateCacheSpec,
     HiSparseHotSpec,
@@ -1628,37 +1627,6 @@ def get_kv_cache_configs(
     return kv_cache_configs
 
 
-def _use_dflash_sliding_window_specs(
-    vllm_config: VllmConfig, kv_cache_spec: dict[str, KVCacheSpec]
-) -> None:
-    """Give a DFlash/DSpark drafter's regular-attention sliding-window layers
-    ``DFlashSlidingWindowSpec``, in place. Sliding-window MLA draft layers
-    (``SlidingWindowMLASpec``) keep their spec.
-
-    Their KV is read only past the last target token, so only its tail is
-    backed. Model Runner V2 only: its DFlash speculator writes no context KV
-    for positions whose block is null.
-    """
-    spec_config = vllm_config.speculative_config
-    if spec_config is None or spec_config.method not in ("dflash", "dspark"):
-        return
-    draft_specs = {
-        name: spec
-        for name, spec in kv_cache_spec.items()
-        if spec.is_draft and type(spec) is SlidingWindowSpec
-    }
-    if not draft_specs or not vllm_config.use_v2_model_runner:
-        return
-    for layer_name, spec in draft_specs.items():
-        kv_cache_spec[layer_name] = replace_as(
-            spec,
-            DFlashSlidingWindowSpec,
-            num_speculative_tokens=vllm_config.num_speculative_tokens,
-            max_in_flight_steps=vllm_config.max_concurrent_batches,
-            num_lookahead_tokens=vllm_config.num_lookahead_tokens,
-        )
-
-
 def get_global_kv_cache_groups(
     vllm_config: VllmConfig,
     kv_cache_specs: list[dict[str, KVCacheSpec]],
@@ -1694,7 +1662,6 @@ def get_global_kv_cache_groups(
             merged_kv_cache_specs[layer_name] = replace(
                 layer_spec, extra_retained_tokens=extra_retained_tokens
             )
-    _use_dflash_sliding_window_specs(vllm_config, merged_kv_cache_specs)
 
     # Get global KV cache groups. This also handles spec unification for
     # hybrid models when disable_hybrid_kv_cache_manager is enabled.

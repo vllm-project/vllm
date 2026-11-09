@@ -46,10 +46,12 @@ from vllm.v1.attention.backend import (
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.selector import get_attn_backend
 from vllm.v1.kv_cache_interface import (
+    DFlashSlidingWindowSpec,
     FullAttentionSpec,
     KVCacheSpec,
     SlidingWindowSpec,
     get_kv_quant_mode,
+    replace_as,
 )
 
 if TYPE_CHECKING:
@@ -672,7 +674,7 @@ class Attention(nn.Module, AttentionLayerBase):
                 block_size,
                 kv_cache_spec,
             )
-            return SlidingWindowSpec(
+            spec = SlidingWindowSpec(
                 block_size=sw_block_size,
                 num_kv_heads=self.num_kv_heads,
                 head_size=self.head_size,
@@ -682,6 +684,22 @@ class Attention(nn.Module, AttentionLayerBase):
                 sliding_window=self.sliding_window,
                 page_size_padded=shared_page,
             )
+            speculative_config = vllm_config.speculative_config
+            if (
+                self.is_draft_layer
+                and speculative_config is not None
+                and speculative_config.method in ("dflash", "dspark")
+                and vllm_config.use_v2_model_runner
+            ):
+                # MRV2's context-KV writer skips null block-table entries.
+                return replace_as(
+                    spec,
+                    DFlashSlidingWindowSpec,
+                    num_speculative_tokens=vllm_config.num_speculative_tokens,
+                    max_in_flight_steps=vllm_config.max_concurrent_batches,
+                    num_lookahead_tokens=vllm_config.num_lookahead_tokens,
+                )
+            return spec
         else:
             return FullAttentionSpec(
                 block_size=block_size,

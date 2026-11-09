@@ -250,6 +250,13 @@ class KVCacheCoordinator(ABC):
                     apply_admission_cap=apply_admission_cap,
                 )
             else:
+                if apply_admission_cap:
+                    reservation = manager.get_num_blocks_to_reserve(
+                        request_id, num_tokens
+                    )
+                    if reservation is not None:
+                        num_blocks_to_allocate += reservation
+                        continue
                 num_blocks_to_allocate += manager.get_num_blocks_to_allocate(
                     request_id,
                     num_tokens,

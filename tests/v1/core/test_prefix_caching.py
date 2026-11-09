@@ -5050,7 +5050,9 @@ def test_dflash_drafter_hit_needs_cached_drafter_kv_only_in_its_window(
 
     req0 = make_request("0", list(range(40)), block_size, sha256)
     computed_blocks, _, _ = manager.get_computed_blocks(req0)
-    blocks = manager.allocate_slots(req0, 40, 0, computed_blocks)
+    blocks = manager.allocate_slots(
+        req0, 40, 0, computed_blocks, full_sequence_must_fit=True
+    )
     assert blocks is not None
     _, draft_ids = blocks.get_block_ids()
     # The 40-token prefill backs drafter blocks from (40 - 10) // 4 = 7 on.
@@ -5073,7 +5075,11 @@ def test_dflash_drafter_hit_needs_cached_drafter_kv_only_in_its_window(
     assert draft_hit_ids == [0] * min(9, num_hit_blocks) + draft_ids[9:num_hit_blocks]
 
     blocks = manager.allocate_slots(
-        req1, 44 - num_computed_tokens, num_computed_tokens, computed_blocks
+        req1,
+        44 - num_computed_tokens,
+        num_computed_tokens,
+        computed_blocks,
+        full_sequence_must_fit=True,
     )
     assert blocks is not None
     held = [b for b in manager.coordinator.get_blocks("1")[1] if not b.is_null]
@@ -5717,18 +5723,23 @@ def test_block_lookup_cache_multi_blocks_per_key():
     assert cache.pop(key1, 12) is None
 
 
-def test_can_fit_full_sequence_swa_cap_admits_long_prompt():
-    """Hybrid full+SWA model with a pool sized at the startup minimum should
-    admit a prompt longer than the SWA cap, because SlidingWindowManager
-    recycles blocks during chunked prefill (issue #39734)."""
+@pytest.mark.parametrize(
+    ("spec_cls", "spec_kwargs", "num_blocks", "fits"),
+    [
+        (SlidingWindowSpec, {}, 46, True),
+        (SlidingWindowSpec, {}, 45, False),
+        (DFlashSlidingWindowSpec, {"num_speculative_tokens": 2}, 45, True),
+        (DFlashSlidingWindowSpec, {"num_speculative_tokens": 2}, 44, False),
+    ],
+)
+def test_can_fit_full_sequence_swa_cap_admits_long_prompt(
+    spec_cls, spec_kwargs, num_blocks, fits
+):
+    """Admission reserves the full request's peak holding, not one chunk's."""
     block_size = 16
     sliding_window = 4 * block_size  # 64 tokens
     max_num_batched_tokens = 8 * block_size  # 128 tokens
     max_model_len = 64 * block_size  # 1024 tokens — much larger than the SWA cap
-    # Startup pool sizing: full demands cdiv(max_model_len, bs) = 64 blocks,
-    # SWA demands cdiv(SW-1+max_batched, bs) + 1 = cdiv(191, 16) + 1 = 13.
-    # Pool minimum = 64 + 13 = 77; +1 for the null block.
-    num_blocks = 64 + 13 + 1
 
     config = KVCacheConfig(
         num_blocks=num_blocks,
@@ -5745,12 +5756,13 @@ def test_can_fit_full_sequence_swa_cap_admits_long_prompt():
             ),
             KVCacheGroupSpec(
                 ["layer_swa"],
-                SlidingWindowSpec(
+                spec_cls(
                     block_size=block_size,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float32,
                     sliding_window=sliding_window,
+                    **spec_kwargs,
                 ),
             ),
         ],
@@ -5765,16 +5777,14 @@ def test_can_fit_full_sequence_swa_cap_admits_long_prompt():
         hash_block_size=block_size,
     )
 
-    # A prompt that is shorter than max_model_len but longer than SW + chunk:
-    # cdiv(prompt_len, bs) = 32 blocks. Without the cap, admission would
-    # demand 32 (full) + 32 (SWA) = 64 blocks. With the cap, SWA contributes
-    # only 13, so total = 32 + 13 = 45 ≤ pool size.
+    # The target needs 32 blocks. SWA reserves ceil((63 + 128) / 16) + 1
+    # = 13; DFlash reserves two 66-token tails, each spanning at most 6 blocks.
+    # Including the null block, the admission thresholds are 46 and 45.
     prompt_len = 32 * block_size
     req = make_request("long", list(range(prompt_len)), block_size, sha256)
 
-    assert (
-        manager.allocate_slots(req, block_size, full_sequence_must_fit=True) is not None
-    )
+    blocks = manager.allocate_slots(req, block_size, full_sequence_must_fit=True)
+    assert (blocks is not None) is fits
 
 
 @pytest.mark.parametrize(("reserved_blocks", "fits"), [(4, True), (10, False)])

@@ -380,22 +380,12 @@ def test_dflash_window_backs_only_each_chunks_tail():
     assert block_pool.get_num_free_blocks() == num_free_blocks - 3
 
     # Admission subtracts the three held blocks from the eight-block cap.
-    assert (
-        manager.get_num_blocks_to_allocate(
-            "r", 81, [], 80, 80, 80, apply_admission_cap=True
-        )
-        == 5
-    )
+    assert manager.get_num_blocks_to_reserve("r", 81) == 5
 
     # A later chunk adds four blocks, with another null run before its tail.
     manager.allocate_new_blocks("r", 121, 120)
     assert block_pool.get_num_free_blocks() == num_free_blocks - 7
-    assert (
-        manager.get_num_blocks_to_allocate(
-            "r", 121, [], 120, 120, 120, apply_admission_cap=True
-        )
-        == 1
-    )
+    assert manager.get_num_blocks_to_reserve("r", 121) == 1
 
 
 @pytest.mark.parametrize("max_in_flight_steps", [1, 2])
@@ -457,12 +447,7 @@ def test_dflash_window_admission_reserves_at_most_the_request_span(
         scheduler_block_size=4,
         max_admission_blocks_per_request=12,
     )
-    assert (
-        manager.get_num_blocks_to_allocate(
-            "r", num_tokens, [], 0, 0, num_tokens, apply_admission_cap=True
-        )
-        == num_reserved_blocks
-    )
+    assert manager.get_num_blocks_to_reserve("r", num_tokens) == num_reserved_blocks
 
 
 @pytest.mark.parametrize(
