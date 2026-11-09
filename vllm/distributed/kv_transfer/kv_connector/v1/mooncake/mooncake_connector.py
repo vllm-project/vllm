@@ -394,7 +394,6 @@ def _align_transfer_regions(
     remote_regions: list[TransferRegion],
     *,
     allow_partial_layers: bool = False,
-    allow_group_remap: bool = False,
 ) -> tuple[list[TransferRegion], list[TransferRegion], str | None]:
     """Align KV transfer regions by registered layer-name occurrence.
 
@@ -447,39 +446,37 @@ def _align_transfer_regions(
                     f"{remote_region.layer_index}."
                 ),
             )
-        if not allow_group_remap and (
-            local_region.group_index != remote_region.group_index
-        ):
-            return (
-                [],
-                [],
-                (
-                    "Mooncake registered group index mismatch for "
-                    f"{local_region.layer_name}: producer="
-                    f"{local_region.group_index}, consumer="
-                    f"{remote_region.group_index}."
-                ),
-            )
-        if (
-            not allow_group_remap
-            and local_region.shared_group_ids
-            and remote_region.shared_group_ids
-            and local_region.shared_group_ids != remote_region.shared_group_ids
-        ):
-            return (
-                [],
-                [],
-                (
-                    "Mooncake shared-group set mismatch for "
-                    f"{local_region.layer_name}: producer="
-                    f"{local_region.shared_group_ids}, consumer="
-                    f"{remote_region.shared_group_ids}."
-                ),
-            )
         aligned_local.append(local_region)
         aligned_remote.append(remote_region)
 
     return aligned_local, aligned_remote, None
+
+
+def _validate_group_layout(
+    local_regions: list[TransferRegion],
+    remote_regions: list[TransferRegion],
+) -> str | None:
+    """Check that paired regions can use the ordinary group-indexed planner."""
+    for local_region, remote_region in zip(local_regions, remote_regions):
+        if local_region.group_index != remote_region.group_index:
+            return (
+                "Mooncake registered group index mismatch for "
+                f"{local_region.layer_name}: producer="
+                f"{local_region.group_index}, consumer="
+                f"{remote_region.group_index}."
+            )
+        if (
+            local_region.shared_group_ids
+            and remote_region.shared_group_ids
+            and local_region.shared_group_ids != remote_region.shared_group_ids
+        ):
+            return (
+                "Mooncake shared-group set mismatch for "
+                f"{local_region.layer_name}: producer="
+                f"{local_region.shared_group_ids}, consumer="
+                f"{remote_region.shared_group_ids}."
+            )
+    return None
 
 
 def _coalesce_contiguous_transfer_regions(
@@ -3286,20 +3283,23 @@ class MooncakeConnectorWorker:
             remote_shared,
             remote_row_offsets,
         )
-        if meta.hisparse_protocol:
-            error = self._validate_hisparse_layout(meta, local_regions, remote_regions)
-            if error:
-                return finish([], [], error)
         pre_align_local = local_regions
         pre_align_remote = remote_regions
         local_regions, remote_regions, align_err = _align_transfer_regions(
             local_regions,
             remote_regions,
             allow_partial_layers=meta.remote_pp_size != self.pp_size,
-            allow_group_remap=bool(meta.hisparse_protocol),
         )
         if align_err is not None:
             return finish([], [], align_err)
+        if meta.hisparse_protocol:
+            layout_err = self._validate_hisparse_layout(
+                meta, pre_align_local, pre_align_remote
+            )
+        else:
+            layout_err = _validate_group_layout(local_regions, remote_regions)
+        if layout_err is not None:
+            return finish([], [], layout_err)
         # Head checks must see every layer name. Coalesce keeps only the first.
         head_err = self._validate_head_resharding_layout(
             meta.remote_tp_size, local_regions
