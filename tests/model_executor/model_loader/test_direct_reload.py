@@ -171,17 +171,22 @@ class _RowwiseOnlineMethod(OnlineArrivalMixin, _OnlineMethod):
     """An online scheme with one int8 scale per ``group`` rows: a direct
     reload quantizes each arriving shard at once."""
 
-    def __init__(self, group):
+    def __init__(self, group, reduces=False):
         super().__init__(self._quantize)
-        self.group = group
+        self.group, self.reduces = group, reduces
 
     def arrival_row_group(self, layer, name):
         return self.group if name == "weight" else None
 
+    def reduces_across_ranks(self, layer, name):
+        return self.reduces
+
     def quantize_param(self, layer, name, weight):
         rows, cols = weight.shape
         blocks = -(-rows // self.group)
-        padded = torch.nn.functional.pad(weight.float(), (0, 0, 0, blocks * self.group - rows))
+        padded = torch.nn.functional.pad(
+            weight.float(), (0, 0, 0, blocks * self.group - rows)
+        )
         scale = padded.view(blocks, -1).abs().amax(-1, keepdim=True) / 127
         row_scale = scale.repeat_interleave(self.group, 0)[:rows]
         return (weight.float() / row_scale).round().to(torch.int8), scale
@@ -514,7 +519,7 @@ class TestOnlineStaging:
         from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 
         class _OwnLoader(RoutedExperts):
-            def weight_loader(self, param, loaded_weight, *args, expert_id):
+            def weight_loader(self, param, loaded_weight, *args, expert_id):  # type: ignore[override]
                 if expert_id < 2:  # the whole padded expert, as gpt-oss
                     param.data[expert_id].copy_(loaded_weight)
 
@@ -525,14 +530,18 @@ class TestOnlineStaging:
             param.weight_loader(param, torch.ones(param.shape[1:]), expert_id=expert)
             assert layer.quant_method.processed == (i == len(loads) - 1)
 
-    @pytest.mark.parametrize("group,on_arrival", [(1, True), (2, True), (4, False)])
+    @pytest.mark.parametrize(
+        "group,reduces,on_arrival",
+        [(1, False, True), (2, False, True), (4, False, False), (1, True, False)],
+    )
     def test_row_local_scheme_quantizes_shards_on_arrival(
-        self, monkeypatch, group, on_arrival
+        self, monkeypatch, group, reduces, on_arrival
     ):
         # a scheme whose scales cover only their own rows quantizes each
         # arriving shard (here the two halves of a merged weight) at once,
-        # holding no high-precision copy; a shard that splits a group of rows
-        # is buffered instead; either way the result equals a cold start
+        # holding no high-precision copy; a shard that splits a group of rows,
+        # or a scale reduced across ranks, is buffered instead; either way the
+        # result equals a cold start
         init = _ToyModel.__init__
 
         def merged(param, loaded_weight, rows=None):
@@ -541,7 +550,7 @@ class TestOnlineStaging:
         def with_rowwise_scheme(self):
             init(self)
             online = self.deq.online
-            online.quant_method = _RowwiseOnlineMethod(group)
+            online.quant_method = _RowwiseOnlineMethod(group, reduces)
             self.deq.quant_method = _Method(lambda layer: None)
             online.weight.weight_loader = merged
             initialize_online_processing(online)
@@ -559,7 +568,9 @@ class TestOnlineStaging:
         assert alive() is None or not on_arrival and _DEVICE.type == "cpu"
         assert bool(info.loaded_weights) is not on_arrival
         assert ("weight" in info.arrival) is on_arrival
-        online.weight.weight_loader(online.weight, new["deq.online.weight"][2:], slice(2, 4))
+        online.weight.weight_loader(
+            online.weight, new["deq.online.weight"][2:], slice(2, 4)
+        )
         model.load_weights((n, t) for n, t in new.items() if n != "deq.online.weight")
         finish_direct_reload(model, _MODEL_CONFIG, _DEVICE)
         _assert_same(_state(model), _state(_cold_start(new)))
@@ -589,7 +600,8 @@ class TestOnlineStaging:
         del received
         if _DEVICE.type != "cpu":  # host sources may stay (file-backed) views
             assert alive() is None
-        (name, copies), = get_layerwise_info(model.deq.online).loaded_weights
+        ((name, copies),) = get_layerwise_info(model.deq.online).loaded_weights
+        assert isinstance(copies, list)
         assert sum(source.numel() for *_, source in copies) == shard.numel()
         model.load_weights((n, t) for n, t in new.items() if n != "deq.online.weight")
         finish_direct_reload(model, _MODEL_CONFIG, _DEVICE)
@@ -703,7 +715,12 @@ def _check_arrival_equals_whole(method, moe, name):
             index = (expert, slice(first, end), cols) if moe else slice(first, end)
             view = param.data[index]
             copies.append(
-                (view.size(), view.stride(), view.storage_offset(), weight[index].clone())
+                (
+                    view.size(),
+                    view.stride(),
+                    view.storage_offset(),
+                    weight[index].clone(),
+                )
             )
     info = LayerReloadingInfo(({}, {}), torch.device("cuda"))
     assert _quantize_on_arrival(layer, info, name, copies)
@@ -711,7 +728,9 @@ def _check_arrival_equals_whole(method, moe, name):
         info.arrival[name].outputs, method.quantize_param(layer, name, weight)
     ):
         assert arrived.shape == whole.shape
-        assert torch.equal(arrived.view(torch.uint8), whole.contiguous().view(torch.uint8))
+        assert torch.equal(
+            arrived.view(torch.uint8), whole.contiguous().view(torch.uint8)
+        )
 
 
 class TestRefusals:

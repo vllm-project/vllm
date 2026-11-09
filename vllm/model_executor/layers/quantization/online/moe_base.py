@@ -154,6 +154,7 @@ class OnlineMoEMethodBase(
             padded = layer.w2_weight.shape[-1]
         else:
             unpadded, padded = self.moe.hidden_dim_unpadded, layer.w2_weight.shape[-2]
+        assert unpadded is not None  # set in the config's __post_init__
         if unpadded % group and unpadded != padded:
             return None
         return group

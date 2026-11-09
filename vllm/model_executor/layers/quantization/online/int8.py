@@ -60,9 +60,11 @@ class Int8OnlineMoEMethod(OnlineMoEMethodBase):
         layer._already_called_process_weights_after_loading = True
 
     def arrival_row_group(self, layer: Module, name: str) -> int | None:
-        if name == "w2_weight" and self.moe.tp_size > 1:
-            return None  # its scale is reduced over the ranks sharding it
         return self._row_local(layer, name, 1)
+
+    def reduces_across_ranks(self, layer: Module, name: str) -> bool:
+        # w2's scale is reduced over the ranks sharding its input dim
+        return name == "w2_weight" and self.moe.tp_size > 1
 
     def quantize_param(
         self, layer: Module, name: str, weight: torch.Tensor
@@ -75,7 +77,8 @@ class Int8OnlineMoEMethod(OnlineMoEMethodBase):
         )
         if name == "w2_weight":
             amax = weight_amax(weight, dim=-1)
-            amax = amax_for_moe_weight_quant(amax, self.moe.tp_size)
+            if self.reduces_across_ranks(layer, name):
+                amax = amax_for_moe_weight_quant(amax, self.moe.tp_size)
         for expert in range(weight.shape[0]):
             w = weight[expert, :, :]
             if name == "w2_weight":

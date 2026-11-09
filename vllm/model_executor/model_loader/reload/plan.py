@@ -31,8 +31,6 @@ import torch
 from vllm.logger import init_logger
 from vllm.model_executor.utils import storage_view
 
-from .utils import stages_online_quant
-
 from .bake import Copy, Targets, Traced, trace_loads
 from .direct import direct_reload_active, direct_reload_enabled
 from .geometry import (
@@ -44,6 +42,7 @@ from .geometry import (
     byte_runs,
     merge_writes,
 )
+from .utils import stages_online_quant
 
 if TYPE_CHECKING:
     from vllm.distributed.weight_transfer.base import ParamMeta

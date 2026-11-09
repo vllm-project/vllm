@@ -510,17 +510,17 @@ class Fp8PtpcOnlineLinearMethod(OnlineLinearBase):
         layer._already_called_process_weights_after_loading = True
 
     def arrival_row_group(self, layer: Module, name: str) -> int | None:
-        if name != "weight" or _is_tp_sharded(layer, reduces_output_dim=False):
-            return None  # a row-parallel scale is reduced over the TP group
-        return 1
+        return 1 if name == "weight" else None
+
+    def reduces_across_ranks(self, layer: Module, name: str) -> bool:
+        # a row-parallel scale is reduced over the TP group
+        return _is_tp_sharded(layer, reduces_output_dim=False)
 
     def quantize_param(
         self, layer: Module, name: str, weight: torch.Tensor
     ) -> tuple[torch.Tensor, ...]:
         amax = weight_amax(weight, dim=-1, keepdim=True)
-        amax = amax_for_tp_weight_quant(
-            amax, _is_tp_sharded(layer, reduces_output_dim=False)
-        )
+        amax = amax_for_tp_weight_quant(amax, self.reduces_across_ranks(layer, name))
         weight_scale = _fp8_channel_scale(amax)
         return _fp8_quant_per_channel(weight, weight_scale), weight_scale
 
@@ -872,9 +872,11 @@ class Fp8PtpcOnlineMoEMethod(_Fp8OnlineMoEBase):
             )
 
     def arrival_row_group(self, layer: Module, name: str) -> int | None:
-        if name == "w2_weight" and self.moe.tp_size > 1:
-            return None  # its scale is reduced over the ranks sharding it
         return self._row_local(layer, name, 1)
+
+    def reduces_across_ranks(self, layer: Module, name: str) -> bool:
+        # w2's scale is reduced over the ranks sharding its input dim
+        return name == "w2_weight" and self.moe.tp_size > 1
 
     def quantize_param(
         self, layer: Module, name: str, weight: torch.Tensor
@@ -882,7 +884,8 @@ class Fp8PtpcOnlineMoEMethod(_Fp8OnlineMoEBase):
         qweight = torch.empty_like(weight, dtype=current_platform.fp8_dtype())
         if name == "w2_weight":
             amax = weight_amax(weight, dim=-1, keepdim=True)
-            amax = amax_for_moe_weight_quant(amax, self.moe.tp_size)
+            if self.reduces_across_ranks(layer, name):
+                amax = amax_for_moe_weight_quant(amax, self.moe.tp_size)
             scale = _fp8_channel_scale(amax)
             for expert in range(weight.shape[0]):
                 qweight[expert] = _fp8_quant_per_channel(weight[expert], scale[expert])

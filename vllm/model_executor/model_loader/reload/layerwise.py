@@ -242,7 +242,8 @@ def make_online_process_loader(layer: torch.nn.Module, param_name: str) -> Calla
             num_loaded, ret, views = _record_copies(original_loader, bound_args)
             # deferred processing would keep every layer's outputs at once
             quantized = (
-                bool(views)
+                views is not None
+                and len(views) > 0
                 and not info.defer_processing
                 and _quantize_on_arrival(layer, info, param_name, views)
             )
@@ -417,7 +418,7 @@ def _quantize_on_arrival(
     method = layer.quant_method
     row_group = getattr(method, "arrival_row_group", None)
     group = row_group(layer, name) if row_group is not None else None
-    if group is None:
+    if group is None or method.reduces_across_ranks(layer, name):
         return False
     if any(buffered == name for buffered, _ in info.loaded_weights):
         return False  # earlier loads of it were buffered
@@ -470,7 +471,9 @@ def _write_arrival(layer, method, name, param, state, box, source, info) -> None
         rows = torch.zeros(*shape, param.shape[-1], dtype=param.dtype)
         rows[..., :cols] = source.reshape(*shape, cols)
     lead = tuple(slice(a, a + n) for a, n in zip(lead_start, lead_size))
-    written = state.written[(*lead, slice(first // state.group, -(-end // state.group)))]
+    written = state.written[
+        (*lead, slice(first // state.group, -(-end // state.group)))
+    ]
     if written.any():
         raise RuntimeError(f"{type(layer).__name__}.{name}: rows loaded twice")
     written.fill_(True)
