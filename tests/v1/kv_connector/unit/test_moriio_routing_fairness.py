@@ -2,15 +2,15 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Hardware-fair KV-read routing across MoRIIO heterogeneous P/D configs.
 
-Dependency-light (no GPU / ROCm / mori): builds bare ``MoRIIOConnectorWorker``
-instances via ``object.__new__`` and drives the REAL read-source routing
-decision (``_resolve_read_source`` / ``_next_flex_tp_rank``) directly -- no
+Dependency-light (no GPU / ROCm / mori): builds bare `MoRIIOConnectorWorker`
+instances via `object.__new__` and drives the REAL read-source routing
+decision (`_resolve_read_source` / `_next_flex_tp_rank`) directly -- no
 routing logic is re-implemented here, so a future change to those functions is
 what these tests exercise.
 
 Scope -- the CONNECTOR (decode-side) read routing. The connector never selects
-the prefill instance; the proxy does and hands the connector a ``remote_host`` +
-``remote_dp_rank`` per request. The connector's only fairness lever is WHICH
+the prefill instance; the proxy does and hands the connector a `remote_host` +
+`remote_dp_rank` per request. The connector's only fairness lever is WHICH
 prefill (dp, tp) rank each read targets, and the RFC's deployments collapse to
 three real connector behaviours:
 
@@ -21,7 +21,7 @@ three real connector behaviours:
 These assume the proxy delivers a FAIR request stream (each prefill instance +
 owner dp-rank an equal share) and verify the connector never re-introduces a
 bottleneck. That proxy contract is checked separately against the real
-``flat_interleaved_dp_route`` in the toy-proxy tests (PR #46115).
+`flat_interleaved_dp_route` in the toy-proxy tests (PR #46115).
 
 A node runs one of two modes (8 GPUs each):
   * TP8   -> (dp_size, tp_size) = (1, 8); MLA latent KV REPLICATED on all ranks.
@@ -30,6 +30,7 @@ A node runs one of two modes (8 GPUs each):
 
 from collections import Counter
 from dataclasses import dataclass
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -88,6 +89,8 @@ def make_decode_worker(*, world_size: int, tp_rank: int, dp_rank: int):
     w.tp_rank = tp_rank
     w.dp_rank = dp_rank
     w.use_mla = True
+    # The round-robin spreads reads over prefill NICs, so it runs over RDMA.
+    w.moriio_config = SimpleNamespace(backend="rdma")
     return w
 
 
@@ -124,8 +127,8 @@ def build_decode_workers(cfg: PDConfig) -> list:
 def prefill_target_multiset(cfg: PDConfig, rounds: int) -> Counter:
     """Drive the REAL _resolve_read_source over a fair input stream; tally which
     prefill GPU each read targets. The only modelled assumption is the proxy
-    contract -- each owner dp-rank delivered equally (``for owner_dp in
-    range(p_dp)``); no proxy algorithm is reproduced."""
+    contract -- each owner dp-rank delivered equally (`for owner_dp in
+    range(p_dp)`); no proxy algorithm is reproduced."""
     workers = build_decode_workers(cfg)
     hits: Counter = Counter()
     for _ in range(rounds):

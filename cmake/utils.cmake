@@ -172,11 +172,14 @@ function (vllm_finalize_hipify_target)
   list(REMOVE_DUPLICATES ALL_BYPRODUCTS)
 
   set(CSRC_BUILD_DIR ${CMAKE_CURRENT_BINARY_DIR}/csrc)
+  set(HIPIFY_MANIFEST ${CMAKE_CURRENT_BINARY_DIR}/hipify-source-map.json)
   add_custom_target(
     hipify_all
-    COMMAND ${Python_EXECUTABLE} ${CMAKE_SOURCE_DIR}/cmake/hipify.py -p ${CMAKE_SOURCE_DIR}/csrc -o ${CSRC_BUILD_DIR} ${ALL_SRCS}
+    COMMAND ${Python_EXECUTABLE} ${CMAKE_SOURCE_DIR}/cmake/hipify.py -p ${CMAKE_SOURCE_DIR}/csrc -o ${CSRC_BUILD_DIR} --manifest ${HIPIFY_MANIFEST} ${ALL_SRCS}
     DEPENDS ${CMAKE_SOURCE_DIR}/cmake/hipify.py ${ALL_SRCS}
-    BYPRODUCTS ${ALL_BYPRODUCTS}
+    BYPRODUCTS ${ALL_BYPRODUCTS} ${HIPIFY_MANIFEST}
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    VERBATIM
     COMMENT "Running hipify on all extension source files.")
 endfunction()
 
@@ -470,14 +473,17 @@ function(cuda_archs_loose_intersection OUT_CUDA_ARCHS SRC_CUDA_ARCHS TGT_CUDA_AR
   list(REMOVE_DUPLICATES _PTX_ARCHS)
   list(REMOVE_DUPLICATES _SRC_CUDA_ARCHS)
 
-  # Handle architecture-specific suffixes (a/f) for SRC entries.
-  # First try exact base match (x.y), then cross-suffix match (x.ya / x.yf).
-  # For 'f' (family) suffix: if no exact/cross match, fall back to major-version
-  # match — e.g. SRC="12.0f" matches TGT="12.1a" since SM121 is in the SM12x
-  # family. The output uses TGT's value to preserve the user's compilation flags.
+  # Handle architecture-specific suffixes (a/f) for SRC entries. Each step runs
+  # over all SRC entries before the next, so a family fallback never takes a
+  # TGT entry that another SRC entry matches by name:
+  #  1. exact base match: TGT has x.y, output SRC's x.ya / x.yf;
+  #  2. cross-suffix match: TGT has x.ya (preferred) or x.yf, output that;
+  #  3. family fallback ('f' only): x.yf code never runs on a lower minor, so
+  #     take the first remaining TGT entry with the same major and a version
+  #     >= x.y, highest x.y first (an approximation of the CUDA family table).
+  #     E.g. SRC="12.0f" matches TGT="12.1a". The output uses TGT's value to
+  #     preserve the user's compilation flags.
   set(_CUDA_ARCHS)
-  # Resolve exact base matches before family fallbacks so a generic entry such
-  # as 10.0f cannot consume a 10.7 target that has a 10.7f source entry.
   foreach(_arch ${_SRC_CUDA_ARCHS})
     if(_arch MATCHES "[af]$")
       string(REGEX REPLACE "[af]$" "" _base "${_arch}")
@@ -490,6 +496,7 @@ function(cuda_archs_loose_intersection OUT_CUDA_ARCHS SRC_CUDA_ARCHS TGT_CUDA_AR
     endif()
   endforeach()
 
+  set(_family_bases)
   foreach(_arch ${_SRC_CUDA_ARCHS})
     if(_arch MATCHES "[af]$")
       list(REMOVE_ITEM _SRC_CUDA_ARCHS "${_arch}")
@@ -501,19 +508,24 @@ function(cuda_archs_loose_intersection OUT_CUDA_ARCHS SRC_CUDA_ARCHS TGT_CUDA_AR
         list(REMOVE_ITEM _TGT_CUDA_ARCHS "${_base}f")
         list(APPEND _CUDA_ARCHS "${_base}f")
       elseif(_arch MATCHES "f$")
-        # Family suffix: match any TGT entry in the same major version family.
-        string(REGEX REPLACE "^([0-9]+)\\..*$" "\\1" _src_major "${_base}")
-        foreach(_tgt ${_TGT_CUDA_ARCHS})
-          string(REGEX REPLACE "[af]$" "" _tgt_base "${_tgt}")
-          string(REGEX REPLACE "^([0-9]+)\\..*$" "\\1" _tgt_major "${_tgt_base}")
-          if(_tgt_major STREQUAL _src_major)
-            list(REMOVE_ITEM _TGT_CUDA_ARCHS "${_tgt}")
-            list(APPEND _CUDA_ARCHS "${_tgt}")
-            break()
-          endif()
-        endforeach()
+        list(APPEND _family_bases "${_base}")
       endif()
     endif()
+  endforeach()
+
+  list(SORT _family_bases COMPARE NATURAL ORDER DESCENDING)
+  foreach(_base ${_family_bases})
+    string(REGEX REPLACE "^([0-9]+)\\..*$" "\\1" _src_major "${_base}")
+    foreach(_tgt ${_TGT_CUDA_ARCHS})
+      string(REGEX REPLACE "[af]$" "" _tgt_base "${_tgt}")
+      string(REGEX REPLACE "^([0-9]+)\\..*$" "\\1" _tgt_major "${_tgt_base}")
+      if(_tgt_major STREQUAL _src_major AND
+         _tgt_base VERSION_GREATER_EQUAL _base)
+        list(REMOVE_ITEM _TGT_CUDA_ARCHS "${_tgt}")
+        list(APPEND _CUDA_ARCHS "${_tgt}")
+        break()
+      endif()
+    endforeach()
   endforeach()
 
   # Symmetric handling: if TGT has x.ya/f and SRC has x.y (without suffix),

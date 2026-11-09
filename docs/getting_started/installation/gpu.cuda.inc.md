@@ -285,6 +285,12 @@ uv pip install -e .
 vLLM offers an official Docker image for deployment.
 The image can be used to run OpenAI compatible server and is available on Docker Hub as [vllm/vllm-openai](https://hub.docker.com/r/vllm/vllm-openai/tags).
 
+The default CUDA release images use Ubuntu 24.04. Separate `-ubuntu2404`
+release tags are no longer published. Use `latest` or `v<version>` instead of
+`latest-ubuntu2404` or `v<version>-ubuntu2404`; for architecture-specific tags,
+use `latest-x86_64` / `latest-aarch64` or `v<version>-x86_64` /
+`v<version>-aarch64`.
+
 ```bash
 docker run --runtime nvidia --gpus all \
     -v ~/.cache/huggingface:/root/.cache/huggingface \
@@ -458,11 +464,6 @@ mode on VR200 and R100.
 BuildKit does not automatically invalidate cached layers when a mutable Git
 ref changes. Use `--no-cache-filter extensions-build` to refresh an empty,
 branch, or tag revision.
-
-Set `BUILD_NIXL=true` to build NIXL from source. NIXL's release wheels do not
-include the NIXL EP extension for the PyTorch nightly used by the Rubin build.
-The build uses the NIXL version pinned in `requirements/kv_connectors.txt` and
-replaces the NIXL packages installed from the KV-connector requirements.
 
 For `FINAL_BASE_IMAGE`, use the public, multi-arch
 `nvidia/cuda:13.4.1-base-ubuntu24.04` image. Set `NCCL_VERSION` to 2.32.3 or

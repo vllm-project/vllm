@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use vllm_tokenizer::{DecodedText, DynTokenizer};
 use winnow::ascii::{multispace0 as ws0, multispace1 as ws1};
 use winnow::combinator::{alt, delimited, eof, repeat, seq, terminated};
 use winnow::prelude::*;
@@ -10,7 +11,7 @@ use xgrammar_structural_tag::format::Format;
 
 use super::parameters::ToolSchemas;
 use super::utils::{MarkerScanState, parse_buffered_event, safe_text_len_mul, take_until_marker};
-use super::{Result, ToolCallDelta, ToolParser, ToolParserOutput};
+use super::{Result, ToolCallDelta, ToolParser, ToolParserError, ToolParserOutput};
 use crate::output_grammar::{self, OutputGrammarContext, OutputGrammarError};
 use crate::tool::{StructuralTagBuilder, Tool};
 
@@ -111,7 +112,7 @@ impl MinimaxM2ToolParser {
 }
 
 impl ToolParser for MinimaxM2ToolParser {
-    fn create(tools: &[Tool]) -> Result<Box<dyn ToolParser>>
+    fn create(tools: &[Tool], _tokenizer: DynTokenizer) -> Result<Box<dyn ToolParser>>
     where
         Self: Sized + 'static,
     {
@@ -154,8 +155,8 @@ impl ToolParser for MinimaxM2ToolParser {
         Ok(Some(visible.clone()))
     }
 
-    fn parse_into(&mut self, chunk: &str, output: &mut ToolParserOutput) -> Result<()> {
-        self.buffer.push_str(chunk);
+    fn parse_into(&mut self, chunk: DecodedText, output: &mut ToolParserOutput) -> Result<()> {
+        self.buffer.push_str(&chunk.text);
 
         while let Some((event, consumed_len)) = parse_buffered_event(&self.buffer, |input| {
             parse_next_minimax_m2_event(input, &mut self.mode)
@@ -174,7 +175,9 @@ impl ToolParser for MinimaxM2ToolParser {
                 output.push_text(&self.buffer);
             }
             MinimaxM2Mode::ToolBlock { .. } => {
-                return Err(parsing_failed!("incomplete MiniMax M2 tool call"));
+                return Err(ToolParserError::IncompleteToolCall {
+                    parser: "MiniMax M2",
+                });
             }
             MinimaxM2Mode::Done => {}
         }

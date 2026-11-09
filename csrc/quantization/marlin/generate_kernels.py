@@ -7,19 +7,11 @@ import sys
 
 import jinja2
 
-ARCHS = []
-SUPPORT_FP8 = False
 SUPPORT_SM75 = False
 SUPPORT_SM80 = False
 for arch in sys.argv[1].split(","):
     arch = arch[: arch.index(".") + 2].replace(".", "")
     arch = int(arch)
-    # SM89 and the SM12x family (SM120 RTX 5090, SM121 DGX Spark GB10)
-    # fully support mma.sync.aligned.m16n8k32.row.col.f32.e4m3.e4m3.f32.
-    # SM90 and SM100 can use this PTX, but it’s simulated
-    # with FP16 MMA, so it cannot achieve any acceleration.
-    if arch == 89 or arch // 10 == 12:
-        SUPPORT_FP8 = True
     if arch >= 80:
         SUPPORT_SM80 = True
     if arch == 75:
@@ -116,48 +108,6 @@ QUANT_CONFIGS = [
         "thread_m_blocks": THREAD_M_BLOCKS,
         "group_blocks": [2],
     },
-    # AWQ-INT4 with INT8 activation
-    {
-        "a_type": ["kS8"],
-        "b_type": "kU4",
-        "thread_configs": THREAD_CONFIGS,
-        "thread_m_blocks": [1, 2, 3, 4],
-        "group_blocks": [-1, 2, 4, 8],
-    },
-    # GPTQ-INT4 with INT8 activation
-    {
-        "a_type": ["kS8"],
-        "b_type": "kU4B8",
-        "thread_configs": THREAD_CONFIGS,
-        "thread_m_blocks": [1, 2, 3, 4],
-        "group_blocks": [-1, 2, 4, 8],
-    },
-    # GPTQ-INT4 with FP8 activation
-    {
-        "a_type": ["kFE4M3fn"],
-        "b_type": "kU4B8",
-        "thread_configs": THREAD_CONFIGS,
-        "thread_m_blocks": [1, 2, 3, 4],
-        "group_blocks": [-1, 2, 4, 8],
-    },
-    # AWQ-INT4 with FP8 activation
-    {
-        "a_type": ["kFE4M3fn"],
-        "b_type": "kU4",
-        "thread_configs": THREAD_CONFIGS,
-        "thread_m_blocks": [1, 2, 3, 4],
-        "group_blocks": [-1, 2, 4, 8],
-    },
-    # MXFP4 with FP8 activation
-    {
-        "a_type": ["kFE4M3fn"],
-        "b_type": "kFE2M1f",
-        "c_type": ["kBFloat16"],
-        "s_type": "kFE8M0fnu",
-        "thread_configs": THREAD_CONFIGS,
-        "thread_m_blocks": [1, 2, 3, 4],
-        "group_blocks": [2],
-    },
 ]
 
 # Kernels are written next to the kernel.h / marlin_template.h they include.
@@ -190,14 +140,12 @@ def generate_new_kernels():
         all_thread_configs = quant_config["thread_configs"]
 
         for a_type, c_type in itertools.product(a_types, c_types):
-            if not SUPPORT_FP8 and a_type == "kFE4M3fn":
-                continue
-            if "16" in a_type and "16" in c_type and a_type != c_type:
+            if a_type != c_type:
                 continue
             s_type = quant_config.get("s_type", c_type)
             if (a_type, b_type, c_type) not in result_dict:
                 result_dict[(a_type, b_type, c_type)] = []
-                if a_type in ["kFloat16", "kS8"] and c_type == "kFloat16":
+                if a_type == "kFloat16" and c_type == "kFloat16":
                     sm_75_result_dict[(a_type, b_type, c_type)] = []
 
             for group_blocks, m_blocks, thread_configs in itertools.product(
@@ -294,9 +242,7 @@ def generate_new_kernels():
 
             file_content = FILE_HEAD + "\n\n"
             file_content += "\n\n".join(all_template_str_list) + "\n\n}\n"
-            if a_type == "kFE4M3fn":
-                filename = f"sm89_kernel_{a_type[1:]}_{b_type[1:]}_{c_type[1:]}.cu"
-            elif result_dict_tmp is sm_75_result_dict:
+            if result_dict_tmp is sm_75_result_dict:
                 filename = f"sm75_kernel_{a_type[1:]}_{b_type[1:]}_{c_type[1:]}.cu"
             else:
                 filename = f"sm80_kernel_{a_type[1:]}_{b_type[1:]}_{c_type[1:]}.cu"
@@ -305,13 +251,6 @@ def generate_new_kernels():
 
             write_if_changed(filename, file_content)
             written.add(filename)
-
-    if not SUPPORT_FP8 and kernel_selector_str != FILE_HEAD_COMMENT:
-        kernel_selector_str += (
-            "else if (a_type == vllm::kFE4M3fn)\n"
-            "  STD_TORCH_CHECK(false, "
-            '"marlin kernel with fp8 activation is not built.");'
-        )
 
     write_if_changed("kernel_selector.h", kernel_selector_str)
 

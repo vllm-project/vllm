@@ -69,7 +69,7 @@ VISION_PROMPT = {
 
 async def _generate(engine: AsyncLLM, request_id: str, n: int = 1) -> RequestOutput:
     async def run() -> RequestOutput:
-        async for out in engine.generate(
+        async for out in engine.generate(  # noqa: B007
             request_id=request_id,
             prompt=TEXT_PROMPT,
             sampling_params=SamplingParams(max_tokens=5, n=n),
@@ -157,7 +157,7 @@ def test_cuda_profiler_requests_reach_engine_core(monkeypatch: pytest.MonkeyPatc
 
     assert engine.profiler is None
     engine_core.profile_async.assert_has_awaits(
-        [call(True, None, None, None), call(False)]
+        [call(True, None, None, None, profiler_kwargs=None), call(False)]
     )
 
 
@@ -200,6 +200,7 @@ def test_profile_forwards_overrides_rejects_duplicate_and_allows_restart(
             "session",
             delay_iterations=5,
             max_iterations=2,
+            profiler_kwargs={"record_shapes": True},
         )
         with pytest.raises(ProfilerAlreadyActiveError) as exc_info:
             await engine.start_profile("duplicate")
@@ -212,9 +213,15 @@ def test_profile_forwards_overrides_rejects_duplicate_and_allows_restart(
 
     engine_core.profile_async.assert_has_awaits(
         [
-            call(True, "session", 5, 2),
+            call(
+                True,
+                "session",
+                5,
+                2,
+                profiler_kwargs={"record_shapes": True},
+            ),
             call(False),
-            call(True, "next-session", None, None),
+            call(True, "next-session", None, None, profiler_kwargs=None),
             call(False),
         ]
     )
@@ -239,7 +246,7 @@ def test_stop_profile_waits_for_inflight_start(monkeypatch: pytest.MonkeyPatch):
         start_rpc_entered = asyncio.Event()
         release_start_rpc = asyncio.Event()
 
-        async def profile_async(is_start, *args):
+        async def profile_async(is_start, *args, **kwargs):
             if is_start:
                 start_rpc_entered.set()
                 await release_start_rpc.wait()
@@ -284,7 +291,7 @@ def test_interrupted_engine_profile_start_skips_frontend_profiler(
     async def profile():
         start_rpc_entered = asyncio.Event()
 
-        async def profile_async(is_start, *args):
+        async def profile_async(is_start, *args, **kwargs):
             if not is_start:
                 return
             start_rpc_entered.set()
@@ -368,7 +375,7 @@ def test_stop_after_cancelled_frontend_start_stops_frontend_profiler(
     assert frontend_profiler._running is False
     assert engine._profile_session_active is False
     assert engine_core.profile_async.await_args_list == [
-        call(True, None, None, None),
+        call(True, None, None, None, profiler_kwargs=None),
         call(False),
     ]
 
@@ -409,10 +416,10 @@ def test_multi_client_profile_uses_idempotent_engine_requests(
 
     engine_core.profile_async.assert_has_awaits(
         [
-            call(True, None, None, None),
-            call(True, None, None, None),
+            call(True, None, None, None, profiler_kwargs=None),
+            call(True, None, None, None, profiler_kwargs=None),
             call(False),
-            call(True, None, None, None),
+            call(True, None, None, None, profiler_kwargs=None),
         ]
     )
 
@@ -1120,7 +1127,7 @@ async def test_pause_resume_basic():
 
         # Engine should still work after all cycles
         sampling_params = SamplingParams(max_tokens=5)
-        async for out in engine.generate(
+        async for out in engine.generate(  # noqa: B007
             request_id="post-cycles",
             prompt=TEXT_PROMPT,
             sampling_params=sampling_params,
@@ -1231,7 +1238,7 @@ async def test_pause_wait():
 
         async def gen():
             nonlocal request_completed
-            async for out in engine.generate(
+            async for out in engine.generate(  # noqa: B007
                 request_id="test-wait",
                 prompt=TEXT_PROMPT,
                 sampling_params=sampling_params,
@@ -1334,7 +1341,7 @@ async def test_pause_keep_multi_request():
         any_token_generated = asyncio.Event()
 
         async def gen_multi(request_id: str):
-            async for out in engine.generate(
+            async for out in engine.generate(  # noqa: B007
                 request_id=request_id,
                 prompt=TEXT_PROMPT,
                 sampling_params=sampling_params,

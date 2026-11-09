@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Breakable CUDA graph capture/replay.
 
-This is an alternative to :class:`CUDAGraphWrapper` that replaces vLLM's
+This is an alternative to `CUDAGraphWrapper` that replaces vLLM's
 torch.compile-based FX graph splitting with runtime stream-capture
 breaks.
 
@@ -13,7 +13,7 @@ attention / kv-cache custom ops at the dispatcher to end the current
 stream capture, run the op eagerly, and resume capture.
 
 The captured artifact is a list of zero-arg callables -- the bound
-``CUDAGraph.replay`` for graph segments, or the user fn for eager
+`CUDAGraph.replay` for graph segments, or the user fn for eager
 segments -- replayed in order at inference time.
 
 Eager segments must operate on the same static buffers used during
@@ -35,8 +35,7 @@ import torch
 
 import vllm.envs as envs
 from vllm.compilation.cudagraph_pool import capture_pool
-from vllm.compilation.monitor import validate_cudagraph_capturing_enabled
-from vllm.config import CUDAGraphMode, VllmConfig
+from vllm.config import CompilationConfig, CUDAGraphMode, VllmConfig
 from vllm.forward_context import (
     BatchDescriptor,
     get_forward_context,
@@ -51,7 +50,16 @@ from vllm.utils.torch_utils import weak_ref_tensor, weak_ref_tensors
 logger = init_logger(__name__)
 
 
-def is_breakable_cudagraph_enabled() -> bool:
+def is_breakable_cudagraph_enabled(
+    compilation_config: CompilationConfig | None = None,
+) -> bool:
+    if (
+        compilation_config is not None
+        and compilation_config.use_breakable_cudagraph is not None
+    ):
+        return compilation_config.use_breakable_cudagraph
+    # Unresolved config (e.g. a standalone CompilationConfig built outside
+    # VllmConfig): fall back to the environment variable.
     return bool(envs.VLLM_USE_BREAKABLE_CUDAGRAPH)
 
 
@@ -69,23 +77,23 @@ def eager_break_during_capture(fn: F) -> F:
     for the breakable cudagraph capture.
 
     When the decorated function is invoked outside of a
-    :class:`BreakableCUDAGraphCapture` context, it executes normally.
+    `BreakableCUDAGraphCapture` context, it executes normally.
 
     When invoked inside a capture context, it ends the current cudagraph
     segment, runs the function eagerly on the capture stream, records the
     callable for replay, and starts a fresh segment.
 
     **In-place output buffer required.** Decorated ops must write into a
-    caller-provided output tensor; a fresh tensor returned by ``fn`` would
+    caller-provided output tensor; a fresh tensor returned by `fn` would
     change address each replay and break downstream graph segments.
 
     **Decorator order matters.** Apply as the *outermost* decorator if
     there are other decorators that introduce host-side side effects
     around the call -- the canonical example is
-    ``@maybe_transfer_kv_layer`` for PD-disaggregation, whose
-    ``wait_for_layer_load`` and ``save_kv_layer`` calls must run in the
+    `@maybe_transfer_kv_layer` for PD-disaggregation, whose
+    `wait_for_layer_load` and `save_kv_layer` calls must run in the
     eager segment, not inside the captured cudagraph. Putting
-    ``@eager_break_during_capture`` *inside* such a decorator would
+    `@eager_break_during_capture` *inside* such a decorator would
     record those side effects into the graph and hang on replay.
 
     The correct order is::
@@ -95,8 +103,6 @@ def eager_break_during_capture(fn: F) -> F:
         def unified_attention_with_output(...):
             ...
     """
-    if not is_breakable_cudagraph_enabled():
-        return fn
 
     @functools.wraps(fn)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
@@ -126,7 +132,7 @@ def eager_break_during_capture(fn: F) -> F:
 
 
 class BreakableCUDAGraphCapture:
-    """Stream-capture context that supports eager breaks via :meth:`add_eager`.
+    """Stream-capture context that supports eager breaks via `add_eager`.
 
     Usage::
 
@@ -196,10 +202,10 @@ class BreakableCUDAGraphCapture:
         self._capturing = False
 
     def add_eager(self, fn: Callable[[], Any]) -> Any:
-        """End the current capture segment, run ``fn`` eagerly on the
-        capture stream, record ``fn`` for replay, and start a new segment.
+        """End the current capture segment, run `fn` eagerly on the
+        capture stream, record `fn` for replay, and start a new segment.
 
-        Returns whatever ``fn`` returned during this (capture-time) call.
+        Returns whatever `fn` returned during this (capture-time) call.
         Replay does not return values; callers should propagate any
         downstream dependencies via static output buffers.
         """
@@ -247,20 +253,20 @@ class _BreakableEntry:
 
 
 class BreakableCUDAGraphWrapper:
-    """Drop-in replacement for :class:`CUDAGraphWrapper` that uses
-    :class:`BreakableCUDAGraphCapture` instead of a single monolithic
-    ``torch.cuda.graph()`` capture.
+    """Drop-in replacement for `CUDAGraphWrapper` that uses
+    `BreakableCUDAGraphCapture` instead of a single monolithic
+    `torch.cuda.graph()` capture.
 
-    Same dispatch contract as ``CUDAGraphWrapper``:
-        * If no ``forward_context`` is available, run the underlying
+    Same dispatch contract as `CUDAGraphWrapper`:
+        * If no `forward_context` is available, run the underlying
           callable eagerly.
         * If runtime mode mismatch / NONE, run eagerly.
-        * Otherwise, lazily capture per ``batch_descriptor`` and replay
+        * Otherwise, lazily capture per `batch_descriptor` and replay
           on subsequent invocations with the same descriptor.
 
-    When ``runtime_mode`` is given, only that mode is captured/replayed;
+    When `runtime_mode` is given, only that mode is captured/replayed;
     other non-NONE modes fall through, so the wrapper can be nested under
-    a ``CUDAGraphWrapper`` for another mode.
+    a `CUDAGraphWrapper` for another mode.
     """
 
     _all_instances: ClassVar[weakref.WeakSet[BreakableCUDAGraphWrapper]] = (
@@ -372,8 +378,6 @@ class BreakableCUDAGraphWrapper:
         args: tuple[Any, ...],
         kwargs: dict[str, Any],
     ) -> Any:
-        validate_cudagraph_capturing_enabled()
-
         entry.input_addresses = self._collect_tensor_addresses(args, kwargs)
 
         # Match torch.cuda.graph()'s pre-capture cleanup, which we bypass.

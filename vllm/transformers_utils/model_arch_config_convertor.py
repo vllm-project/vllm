@@ -264,6 +264,8 @@ class ModelArchConfigConvertorBase:
                         quant_cfg["quant_method"] = "modelopt"
                     elif quant_algo_upper == "NVFP4":
                         quant_cfg["quant_method"] = "modelopt_fp4"
+                    elif quant_algo_upper == "MIXED_PRECISION":
+                        quant_cfg["quant_method"] = "modelopt_mixed"
                     else:
                         raise ValueError(f"Unknown ModelOpt quant algo: {quant_algo}")
 
@@ -342,10 +344,10 @@ class ModelArchConfigConvertorBase:
     def is_mm_prefix_lm(self, supports_multimodal: bool = True) -> bool:
         """Whether to use bidirectional attention for mm positions.
 
-        ``supports_multimodal`` is False when the deployment is configuration-
+        `supports_multimodal` is False when the deployment is configuration-
         disabled for multimodal inputs (text-only serving). In that case
         mm_prefix is unnecessary and must stay off so attention backends
-        without ``supports_mm_prefix()`` remain eligible.
+        without `supports_mm_prefix()` remain eligible.
         """
         if not supports_multimodal:
             return False

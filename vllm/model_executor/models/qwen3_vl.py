@@ -120,6 +120,7 @@ from vllm.utils.cache import LRUCache
 from vllm.utils.collection_utils import is_list_of
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.torch_utils import PIN_MEMORY
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.worker.encoder_cudagraph_defs import EncoderCudaGraphReplayBuffers
 
 from ...utils.gpu_sync_debug import gpu_sync_allowed
@@ -144,6 +145,8 @@ from .qwen2_5_vl import (
     Qwen2_5_VLVideoEmbeddingInputs,
     Qwen2_5_VLVideoInputs,
     Qwen2_5_VLVideoPixelInputs,
+    _pad_cumulative_seqlens_buffer,
+    _pad_flashinfer_cu_seqlens_buffer,
 )
 from .qwen2_vl import (
     Qwen2VLMultiModalDataParser,
@@ -263,7 +266,7 @@ if HAS_TRITON:
     ) -> torch.Tensor:
         """Launch the fused Triton kernel for one (t,h,w) grid.
 
-        Returns a tensor of shape ``(t * h * w, hidden_dim)`` with the
+        Returns a tensor of shape `(t * h * w, hidden_dim)` with the
         bilinearly-interpolated position embeddings in spatial-merge order.
         """
         assert h % m_size == 0 and w % m_size == 0, (
@@ -309,7 +312,7 @@ def pos_embed_interpolate_native(
 ) -> torch.Tensor:
     """Eager PyTorch bilinear position-embedding interpolation.
 
-    Returns a tensor of shape ``(t * h * w, hidden_dim)`` with the
+    Returns a tensor of shape `(t * h * w, hidden_dim)` with the
     bilinearly-interpolated position embeddings in spatial-merge order.
     """
     assert h % m_size == 0 and w % m_size == 0, (
@@ -2146,6 +2149,19 @@ class Qwen3VLForConditionalGeneration(
                 "max_seqlen",
                 "sequence_lengths",
             ],
+            # FlashInfer packs the q/k/o and v offsets into one cu_seqlens
+            # tensor, split at its midpoint. Replays usually pad to a smaller
+            # batch bucket than capture, so each half has to be copied into
+            # its own half of the capture buffer. Other backends repeat the
+            # last offset so padded sequences have zero length, as in
+            # Qwen2.5-VL.
+            padding_logics={
+                "cu_seqlens": (
+                    _pad_flashinfer_cu_seqlens_buffer
+                    if self.visual.attn_backend == AttentionBackendEnum.FLASHINFER
+                    else _pad_cumulative_seqlens_buffer
+                )
+            },
             out_hidden_size=self.visual.out_hidden_size,
             max_frames_per_video=max_frames,
         )
@@ -3179,7 +3195,7 @@ class Qwen3VLForConditionalGeneration(
                 batch.
                 **NOTE**: If mrope is enabled (default setting for Qwen3VL
                 opensource models), the shape will be `(3, seq_len)`,
-                otherwise it will be `(seq_len,).
+                otherwise it will be `(seq_len,)`.
             intermediate_tensors: Intermediate tensors from previous pipeline
                 stages.
             inputs_embeds: Pre-computed input embeddings.
