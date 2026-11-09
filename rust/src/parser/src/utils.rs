@@ -85,19 +85,35 @@ fn scan_markers<'i, I: MarkerStream<'i>, M: MarkerLike>(
     let start = input.offset();
     let mut from = from.max(start);
     while let Some(at) = input.next_candidate(markers, from) {
-        for marker in markers {
-            let mut probe = input.clone();
-            probe.next_slice(at - start);
-            match marker.as_marker().parse_next(&mut probe) {
-                Ok(_) => return Ok(Scan::Found(at)),
-                Err(ErrMode::Backtrack(_)) => {}
-                Err(ErrMode::Incomplete(_)) => return Ok(Scan::Pending(at)),
-                Err(error @ ErrMode::Cut(_)) => return Err(error),
-            }
+        let mut probe = input.clone();
+        probe.next_slice(at - start);
+        match peek_markers(&probe, markers) {
+            Ok(()) => return Ok(Scan::Found(at)),
+            Err(ErrMode::Backtrack(_)) => {}
+            Err(ErrMode::Incomplete(_)) => return Ok(Scan::Pending(at)),
+            Err(error @ ErrMode::Cut(_)) => return Err(error),
         }
         from = at + 1;
     }
     Ok(Scan::Clear(start + input.eof_offset()))
+}
+
+/// Match any of `markers` at the cursor without consuming it.
+///
+/// Markers are tried in order like an `alt` over them: the first that matches
+/// or needs more input decides, and an empty list never matches.
+pub fn peek_markers<'i, I: MarkerStream<'i>, M: MarkerLike>(
+    input: &I,
+    markers: &[M],
+) -> ModalResult<()> {
+    for marker in markers {
+        match marker.as_marker().parse_next(&mut input.clone()) {
+            Ok(_) => return Ok(()),
+            Err(ErrMode::Backtrack(_)) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Err(ErrMode::Backtrack(ContextError::new()))
 }
 
 /// Parse a safe text run before the next marker.

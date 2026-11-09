@@ -20,10 +20,14 @@
 mod cohere_cmd;
 mod deepseek_r1;
 mod deepseek_v3;
+mod deepseek_v4;
 mod delimited;
 mod glm45;
+mod glm47;
 mod hy;
 mod kimi;
+mod kimi_k2;
+mod minimax_m2;
 mod minimax_m3;
 mod qwen3;
 mod seed_oss;
@@ -38,12 +42,16 @@ use crate::output_grammar::{self, OutputGrammarContext};
 pub use self::cohere_cmd::CohereCmdReasoningParser;
 pub use self::deepseek_r1::DeepSeekR1ReasoningParser;
 pub use self::deepseek_v3::DeepSeekV3ReasoningParser;
+pub use self::deepseek_v4::DeepSeekV4ReasoningParser;
 pub(crate) use self::delimited::{
     DelimitedReasoningParser, DelimitedReasoningParserBuilder, last_reasoning_boundary,
 };
 pub use self::glm45::Glm45ReasoningParser;
+pub use self::glm47::Glm47ReasoningParser;
 pub(crate) use self::hy::HyReasoningParser;
 pub use self::kimi::KimiReasoningParser;
+pub use self::kimi_k2::KimiK2ReasoningParser;
+pub use self::minimax_m2::MiniMaxM2ReasoningParser;
 pub use self::minimax_m3::MiniMaxM3ReasoningParser;
 pub use self::qwen3::Qwen3ReasoningParser;
 pub use self::seed_oss::SeedOssReasoningParser;
@@ -54,20 +62,10 @@ pub type NemotronV3ReasoningParser = Step3p5ReasoningParser;
 /// Step3 and DeepSeek R1 prefill a newline after the reasoning opener.
 pub type Step3ReasoningParser = DeepSeekR1ReasoningParser;
 
-/// DeepSeek V4 currently shares the DeepSeek V3 reasoning parser.
-pub type DeepSeekV4ReasoningParser = DeepSeekV3ReasoningParser;
 /// DeepSeek V4.1 uses bare `<think>...</think>` delimiters.
 pub type DeepSeekV41ReasoningParser = DeepSeekV3ReasoningParser;
-/// GLM-4.7 and GLM-5 use bare reasoning delimiters.
-pub type Glm47ReasoningParser = DeepSeekV3ReasoningParser;
-/// Kimi K2 currently shares the DeepSeek V3 reasoning parser.
-// TODO: kimi k2 may implicitly end reasoning by starting a tool call section
-// using <|tool_calls_section_begin|>, we should support that.
-pub type KimiK2ReasoningParser = DeepSeekV3ReasoningParser;
 /// MiMo V2 uses bare `<think>...</think>` delimiters.
 pub type MiMoReasoningParser = DeepSeekV3ReasoningParser;
-/// MiniMax M2 currently shares the Qwen3 reasoning parser.
-pub type MiniMaxM2ReasoningParser = Qwen3ReasoningParser;
 
 /// Result alias for reasoning parser operations.
 pub type Result<T> = std::result::Result<T, ReasoningError>;

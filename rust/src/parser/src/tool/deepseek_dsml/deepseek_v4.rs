@@ -3,8 +3,9 @@
 
 use vllm_tokenizer::{DecodedText, DynTokenizer, Tokenizer};
 
-use super::{DeepSeekDsmlToolParser, DsmlTokens};
+use super::{DeepSeekDsmlToolParser, DsmlTokens, dsml_marker, dsml_token};
 use crate::tool::{Result, StructuralTagBuilder, Tool, ToolParser, ToolParserOutput};
+use crate::utils::Marker;
 
 /// Tool parser for DeepSeek V4 models.
 ///
@@ -45,6 +46,15 @@ impl DeepSeekV4ToolParser {
             tokenizer,
             DsmlTokens::V4,
         ))
+    }
+
+    /// The tool-calls opener as this parser matches it. The DeepSeek V4
+    /// reasoning parser ends reasoning there.
+    pub(crate) fn tool_calls_start(tokenizer: &dyn Tokenizer) -> Marker {
+        dsml_marker(
+            dsml_token(tokenizer).as_ref(),
+            DsmlTokens::V4.tool_calls_start,
+        )
     }
 }
 
