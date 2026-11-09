@@ -322,6 +322,10 @@ silu_and_mul_scaled_nvfp4_experts_quantize = _lazy_import_wrapper(
 scaled_fp4_grouped_quantize = _lazy_import_wrapper(
     "flashinfer", "scaled_fp4_grouped_quantize"
 )
+mxfp8_grouped_quantize = _lazy_import_wrapper("flashinfer", "mxfp8_grouped_quantize")
+silu_and_mul_mxfp8_experts_quantize = _lazy_import_wrapper(
+    "flashinfer", "silu_and_mul_mxfp8_experts_quantize"
+)
 nvfp4_block_scale_interleave = _lazy_import_wrapper(
     "flashinfer.fp4_quantization", "block_scale_interleave"
 )
@@ -606,6 +610,25 @@ def has_flashinfer_cutedsl_grouped_gemm_nt_masked() -> bool:
         ("flashinfer.cute_dsl.blockscaled_gemm", "grouped_gemm_nt_masked"),
         ("flashinfer", "scaled_fp4_grouped_quantize"),
         ("flashinfer", "silu_and_mul_scaled_nvfp4_experts_quantize"),
+    ]
+
+    for module_name, attr_name in required_functions:
+        mod = _get_submodule(module_name)
+        if not mod or not hasattr(mod, attr_name):
+            return False
+    return True
+
+
+@functools.cache
+def has_flashinfer_cutedsl_mxfp8_grouped_gemm_nt_masked() -> bool:
+    """Return `True` if FlashInfer CuteDSL masked MXFP8 MoE is available."""
+    if not has_flashinfer_cutedsl():
+        return False
+
+    required_functions = [
+        ("flashinfer.cute_dsl.blockscaled_gemm", "grouped_gemm_nt_masked"),
+        ("flashinfer", "mxfp8_grouped_quantize"),
+        ("flashinfer", "silu_and_mul_mxfp8_experts_quantize"),
     ]
 
     for module_name, attr_name in required_functions:
@@ -1335,6 +1358,8 @@ __all__ = [
     "flashinfer_fp4_quantize",
     "silu_and_mul_scaled_nvfp4_experts_quantize",
     "scaled_fp4_grouped_quantize",
+    "mxfp8_grouped_quantize",
+    "silu_and_mul_mxfp8_experts_quantize",
     "nvfp4_block_scale_interleave",
     "flashinfer_cute_dsl_fused_moe_nvfp4",
     "has_flashinfer_localized_moe",
@@ -1355,6 +1380,7 @@ __all__ = [
     "has_flashinfer_nvlink_one_sided",
     "has_flashinfer_cutlass_fused_moe",
     "has_flashinfer_cutedsl_grouped_gemm_nt_masked",
+    "has_flashinfer_cutedsl_mxfp8_grouped_gemm_nt_masked",
     "has_flashinfer_recurrent_kda",
     "has_flashinfer_fused_kda_decode",
     "has_flashinfer_cutedsl_moe_nvfp4",

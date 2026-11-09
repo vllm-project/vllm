@@ -18,6 +18,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 _SUPPORTED_BACKENDS = (
     Fp8MoeBackend.FLASHINFER_TRTLLM,
     Fp8MoeBackend.DEEPGEMM,
+    Fp8MoeBackend.FLASHINFER_CUTEDSL_BATCHED,
     Fp8MoeBackend.MARLIN,
     Fp8MoeBackend.XPU,
     # AITER FlyDSL (gfx950): auto-picked by select_mxfp8_moe_backend when
@@ -31,6 +32,7 @@ _SUPPORTED_BACKENDS = (
 
 _BACKEND_NAME_MAP: dict[str, Fp8MoeBackend] = {
     "flashinfer_trtllm": Fp8MoeBackend.FLASHINFER_TRTLLM,
+    "flashinfer_cutedsl": Fp8MoeBackend.FLASHINFER_CUTEDSL_BATCHED,
     "deep_gemm": Fp8MoeBackend.DEEPGEMM,
     "marlin": Fp8MoeBackend.MARLIN,
     "xpu": Fp8MoeBackend.XPU,
@@ -55,6 +57,12 @@ def _mxfp8_backend_to_kernel_cls(
         )
 
         return [DeepGemmExperts]
+    if backend == Fp8MoeBackend.FLASHINFER_CUTEDSL_BATCHED:
+        from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutedsl_batched_moe import (  # noqa: E501
+            FlashInferCuteDSLMxfp8BatchedExperts,
+        )
+
+        return [FlashInferCuteDSLMxfp8BatchedExperts]
     if backend == Fp8MoeBackend.AITER_MXFP8:
         from vllm.model_executor.layers.fused_moe.experts.aiter_mxfp8_moe import (
             AiterMxfp8Experts,

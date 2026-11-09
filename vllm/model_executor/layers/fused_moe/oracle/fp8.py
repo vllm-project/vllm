@@ -80,6 +80,9 @@ class Fp8MoeBackend(Enum):
     TRITON_MXFP8 = "TRITON_MXFP8"
     # MXFP8 MoE via AITER (FlyDSL two-stage grouped GEMM) on gfx950.
     AITER_MXFP8 = "AITER_MXFP8"
+    # MXFP8 MoE via FlashInfer CuteDSL masked grouped GEMMs on the batched
+    # activation format (e.g. DeepEP low-latency) on SM100/SM103.
+    FLASHINFER_CUTEDSL_BATCHED = "FLASHINFER_CUTEDSL_BATCHED"
 
 
 def _get_priority_backends(
@@ -663,6 +666,13 @@ def convert_to_fp8_moe_kernel_format(
         w13, w13_scale, w2, w2_scale = prepare_fp8_w8a8_moe_layer_for_cpu(
             w13, w2, w13_scale, w2_scale
         )
+    elif fp8_backend == Fp8MoeBackend.FLASHINFER_CUTEDSL_BATCHED:
+        from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutedsl_batched_moe import (  # noqa: E501
+            swizzle_mxfp8_moe_weight_scales,
+        )
+
+        w13_scale = swizzle_mxfp8_moe_weight_scales(w13_scale)
+        w2_scale = swizzle_mxfp8_moe_weight_scales(w2_scale)
     else:
         if fp8_backend not in [
             Fp8MoeBackend.TRITON,
