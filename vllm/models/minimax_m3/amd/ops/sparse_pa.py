@@ -10,6 +10,7 @@ except ModuleNotFoundError:
     import triton
     import triton.language as tl
 
+from vllm.model_executor.layers.quantization.utils.quant_utils import get_fp8_min_max
 from vllm.models.minimax_m3.common.ops.sparse_attn import SPARSE_BLOCK_SIZE
 
 ASM_PAGE_SIZE = 16
@@ -46,10 +47,10 @@ def _write_sparse_block_table_row_from_values(
 ):
     """Compact one query's selected logical blocks into physical page-16 ids.
 
-    ``BLOCK_PAGE_STRIDE`` is how many page ids a block spans, which is
-    ``PAGES_PER_BLOCK`` when each K/V side is its own dense plane and twice
+    `BLOCK_PAGE_STRIDE` is how many page ids a block spans, which is
+    `PAGES_PER_BLOCK` when each K/V side is its own dense plane and twice
     that when both sides share a block. Padded rows carry a negative
-    ``abs_pos``, which clamps the causal range to empty.
+    `abs_pos`, which clamps the causal range to empty.
     """
     causal_len = tl.maximum(abs_pos + 1, 0)
     self_blk = abs_pos // SPARSE_BLOCK_SIZE_C
@@ -296,6 +297,7 @@ def _insert_index_cache_kernel(
     CACHE_BLOCK_SIZE: tl.constexpr,
     HEAD_DIM: tl.constexpr,
     BLOCK_D: tl.constexpr,
+    FP8_MAX: tl.constexpr,
 ):
     pid_t = tl.program_id(0)
     offs_d = tl.arange(0, BLOCK_D)
@@ -312,6 +314,8 @@ def _insert_index_cache_kernel(
     )
     mask = (slot >= 0) & (offs_d < HEAD_DIM)
     value = tl.load(src, mask=offs_d < HEAD_DIM, other=0.0)
+    if FP8_MAX > 0:
+        value = tl.clamp(value.to(tl.float32), -FP8_MAX, FP8_MAX)
     # The side cache carries its own dtype (bf16, or e4m3 for the fp8 indexer),
     # so convert rather than leaning on the store's implicit cast.
     tl.store(dst, value.to(dst.dtype.element_ty), mask=mask)
@@ -336,6 +340,9 @@ def minimax_m3_insert_index_cache(
         raise ValueError("MiniMax-M3 index cache requires contiguous head dimension")
 
     head_dim = index_k.shape[1]
+    fp8_max = 0.0
+    if index_cache.element_size() == 1:
+        fp8_max = get_fp8_min_max()[1]
     _insert_index_cache_kernel[(index_k.shape[0],)](
         index_k,
         index_cache,
@@ -349,6 +356,7 @@ def minimax_m3_insert_index_cache(
         CACHE_BLOCK_SIZE=index_cache.shape[1],
         HEAD_DIM=head_dim,
         BLOCK_D=triton.next_power_of_2(head_dim),
+        FP8_MAX=fp8_max,
         num_warps=4,
     )
 
@@ -363,7 +371,7 @@ def minimax_m3_sparse_block_page_stride(
 ) -> int:
     """How many page ids one sparse block spans.
 
-    Each side owns ``PAGES_PER_SPARSE_BLOCK`` pages. When the sides are dense
+    Each side owns `PAGES_PER_SPARSE_BLOCK` pages. When the sides are dense
     planes a block is exactly that wide; when they interleave, a block covers
     both sides' pages and V is reached from the same page id at a fixed offset.
     """
@@ -384,7 +392,7 @@ def minimax_m3_rebase_block_table_to_page16(
     """Rebase a logical page table onto AITER's page-16 page numbering.
 
     The page ids AITER's top-k emits for the attend are
-    ``block_table[blk] * pages_per_block + j``, and ``pages_per_block`` is fixed
+    `block_table[blk] * pages_per_block + j`, and `pages_per_block` is fixed
     at AITER build time to one side's pages. An interleaved block spans both
     sides, so the only way to reach its pages through that kernel is to hand it
     a table already scaled to the wider stride. The caller does this once per
