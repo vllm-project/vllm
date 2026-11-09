@@ -170,6 +170,11 @@ def test_expert_formats_follow_checkpoint_and_quantization_config():
     assert list(config.quant_config.online_quantization_config.quantized_layers) == [
         prefix
     ]
+    config = _with_online(
+        Fp8Config(weight_block_size=[128, 128]), targets={prefix: "mxfp4"}
+    )
+    assert mega_moe_expert_formats(config, prefix)[1] is MEGA_MOE_MXFP4
+    assert mega_moe_expert_formats(config, other)[1] is MEGA_MOE_MXFP8
     config = _with_online(Fp8Config(weight_block_size=[128, 128]), moe="mxfp8")
     assert mega_moe_expert_formats(config, prefix) == ("fp8_block", MEGA_MOE_MXFP8)
 

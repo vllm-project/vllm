@@ -54,7 +54,8 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.model_executor.models.qwen2_moe import Qwen2MoeMLP
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import _import_deep_gemm
-from vllm.utils.torch_utils import aux_stream, current_stream
+from vllm.utils.multi_stream_utils import maybe_execute_in_parallel
+from vllm.utils.torch_utils import aux_stream
 
 logger = init_logger(__name__)
 
@@ -239,16 +240,15 @@ class Qwen4ExpMegaMoEExperts(DeepGemmMegaMoEExperts):
                 and self.checkpoint_format == "bf16"
             ):
                 # Fused [E, N, K] BF16 experts; gate rows precede up rows.
-                loaded |= self._params_of("w2" if name == "down_proj" else "w13")
                 for expert_id in range(self.num_logical_experts):
                     if not self._map_global_expert_id(expert_id):
                         continue
                     if name == "down_proj":
-                        self._load_shard(expert_id, "w2", "weight", tensor[expert_id])
-                        continue
-                    w1, w3 = tensor[expert_id].chunk(2)
-                    self._load_shard(expert_id, "w1", "weight", w1)
-                    self._load_shard(expert_id, "w3", "weight", w3)
+                        shards = [("w2", tensor[expert_id])]
+                    else:
+                        shards = list(zip(("w1", "w3"), tensor[expert_id].chunk(2)))
+                    for shard_id, shard in shards:
+                        loaded |= self._load_shard(expert_id, shard_id, "weight", shard)
                 continue
             parts = name.split(".")
             if (
@@ -262,26 +262,24 @@ class Qwen4ExpMegaMoEExperts(DeepGemmMegaMoEExperts):
                     f"{{{','.join(self._shard_tensors)}}}."
                 )
             expert, proj, kind = parts
-            shard_id = _CHECKPOINT_SHARDS[proj]
-            loaded |= self._params_of("w2" if shard_id == "w2" else "w13")
             if self._map_global_expert_id(int(expert)):
-                self._load_shard(int(expert), shard_id, kind, tensor)
+                loaded |= self._load_shard(
+                    int(expert), _CHECKPOINT_SHARDS[proj], kind, tensor
+                )
         return loaded
-
-    def _params_of(self, prefix: str) -> set[str]:
-        return {name for name in self._parameters if name.startswith(f"{prefix}_")}
 
     def _load_shard(
         self, expert_id: int, shard_id: str, kind: str, tensor: torch.Tensor
-    ) -> None:
+    ) -> set[str]:
+        """Write or requantize one checkpoint tensor; return the parameters
+        written, so the loader still flags a parameter nothing reached."""
         if self.checkpoint_format == self.weight_format.name:
             suffix = "weight" if kind == "weight" else "weight_scale"
-            self._write(expert_id, shard_id, suffix, tensor)
-            return
+            return {self._write(expert_id, shard_id, suffix, tensor)}
         pending = self.pending_shards.setdefault((expert_id, shard_id), {})
         pending[kind] = tensor
         if len(pending) < len(self._shard_tensors):
-            return
+            return set()
         del self.pending_shards[(expert_id, shard_id)]
         scale = None
         if self.checkpoint_format != "bf16":
@@ -292,16 +290,19 @@ class Qwen4ExpMegaMoEExperts(DeepGemmMegaMoEExperts):
             self.checkpoint_format,
             self.weight_format,
         )
-        self._write(expert_id, shard_id, "weight", weight)
-        self._write(expert_id, shard_id, "weight_scale", scale)
+        return {
+            self._write(expert_id, shard_id, "weight", weight),
+            self._write(expert_id, shard_id, "weight_scale", scale),
+        }
 
     def _write(
         self, expert_id: int, shard_id: str, suffix: str, tensor: torch.Tensor
-    ) -> None:
+    ) -> str:
         name = f"{'w2' if shard_id == 'w2' else 'w13'}_{suffix}"
         param = getattr(self, name)
         # The parameter's own loader: layerwise reload wraps it.
         param.weight_loader(param, tensor, name, shard_id=shard_id, expert_id=expert_id)
+        return name
 
 
 class Qwen4ExpMegaMoeBlock(nn.Module):
@@ -375,9 +376,7 @@ class Qwen4ExpMegaMoeBlock(nn.Module):
         self.shared_stream = (
             None if envs.VLLM_DISABLE_SHARED_EXPERTS_STREAM else aux_stream()
         )
-        if self.shared_stream is not None:
-            self.shared_input_ready = torch.cuda.Event()
-            self.shared_output_ready = torch.cuda.Event()
+        self.shared_events = (torch.cuda.Event(), torch.cuda.Event())
         checkpoint_format, weight_format = mega_moe_expert_formats(
             vllm_config, f"{prefix}.experts"
         )
@@ -401,20 +400,18 @@ class Qwen4ExpMegaMoeBlock(nn.Module):
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        if self.shared_stream is None:
-            shared_out = self.shared_expert(hidden_states)
-        else:
-            self.shared_input_ready.record(current_stream())
-            with torch.cuda.stream(self.shared_stream):
-                self.shared_input_ready.wait(self.shared_stream)
-                shared_out = self.shared_expert(hidden_states)
-                self.shared_output_ready.record(self.shared_stream)
-        router_logits, _ = self.gate(hidden_states)
-        topk_weights, topk_ids, _ = fused_topk(
-            hidden_states, router_logits, self.top_k, self.renormalize
+        def route():
+            router_logits, _ = self.gate(hidden_states)
+            return fused_topk(
+                hidden_states, router_logits, self.top_k, self.renormalize
+            )
+
+        (topk_weights, topk_ids, _), shared_out = maybe_execute_in_parallel(
+            route,
+            lambda: self.shared_expert(hidden_states),
+            *self.shared_events,
+            self.shared_stream,
         )
-        if self.shared_stream is not None:
-            self.shared_output_ready.wait(current_stream())
         y = self.experts(hidden_states, topk_weights, topk_ids)
         y += shared_out
         return y
