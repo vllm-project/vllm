@@ -4,7 +4,7 @@
 
 These lock in the redesign that addresses the PR #45043 review feedback
 (njhill): the connector must NOT self-derive a DP rank, and the prefill leg
-must *return* the rank it actually ran on via ``request_finished`` so the
+must *return* the rank it actually ran on via `request_finished` so the
 decode->prefill notify is routed by pure propagation (READ / serial WRITE),
 not by an independent hash on each side.
 
@@ -28,6 +28,7 @@ def _producer(global_dp_rank: int, dp_size: int, dp_size_local: int):
     s = SimpleNamespace(
         is_producer=True,
         _is_hma_required=False,
+        _has_mamba=False,
         blocks_per_sw=[0],
         _global_dp_rank=global_dp_rank,
         engine_id="engine-abc",

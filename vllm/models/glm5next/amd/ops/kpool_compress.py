@@ -2,18 +2,26 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """kpool (key-pooling) Triton kernels for the sparse-attention indexer.
 
-The cache stores POOLS (1 entry per ``pool_size`` consecutive tokens) rather
-than individual tokens. ``compress_ratio == pool_size`` on the kv_cache_spec
+The cache stores POOLS (1 entry per `pool_size` consecutive tokens) rather
+than individual tokens. `compress_ratio == pool_size` on the kv_cache_spec
 makes the metadata builder emit pool-granular slot_mapping / seq_lens /
 cu_seq_lens / page_table for free; this file supplies the compress-write
-kernel (replacing ``indexer_k_quant_and_cache``) and the pool-level topk
+kernel (replacing `indexer_k_quant_and_cache`) and the pool-level topk
 helpers (select pools -> expand to tokens -> append tail).
 """
 
 from __future__ import annotations
 
+from typing import Any
+
 import torch
 
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    DispatchSpec,
+    TritonWarmupTensor,
+    triton_kernel_dispatcher_with_warmup,
+    triton_ptr_range,
+)
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
@@ -68,7 +76,7 @@ def _hadamard128(x):
 # Fused pool compression and cache write.
 
 
-@triton.jit
+@triton.jit(do_not_specialize_on_alignment=["loc_ptr"])
 def _kpool_softmax_rotate_write_cache_kernel(
     buf_fp8_ptr,
     buf_fp32_ptr,
@@ -98,7 +106,7 @@ def _kpool_softmax_rotate_write_cache_kernel(
     BLOCK_D: tl.constexpr,
 ):
     """One program per pool. softmax(slot_score+ape)-weighted sum of slot_k ->
-    Hadamard-128 -> per-vector fp8 absmax quant -> write to cache at ``loc``."""
+    Hadamard-128 -> per-vector fp8 absmax quant -> write to cache at `loc`."""
     row = tl.program_id(0)
     do_write = True
     if HAS_WRITE_MASK:
@@ -191,6 +199,81 @@ def _kpool_softmax_rotate_write_cache_kernel(
         tl.store(compressed_scale_ptr + row, scale)
 
 
+def _kpool_compress_warmup_inputs(
+    *, k_cache, pool_size: int, head_dim: int, round_scale: bool
+) -> dict[str, Any]:
+    kv_cache = k_cache.kv_cache
+    page_size = kv_cache.shape[1]
+    buf_numel_per_page = kv_cache.stride(0)
+    buf_ptr_range_bytes = triton_ptr_range(kv_cache)
+    # With return_compressed=False the compressed outputs alias the cache views.
+    buf_fp8 = TritonWarmupTensor(FP8_DTYPE, ptr_range_bytes=buf_ptr_range_bytes)
+    buf_fp32 = TritonWarmupTensor(torch.float32, ptr_range_bytes=buf_ptr_range_bytes)
+    return dict(
+        buf_fp8_ptr=buf_fp8,
+        buf_fp32_ptr=buf_fp32,
+        slot_k_ptr=TritonWarmupTensor(torch.bfloat16, shape=(1, pool_size, head_dim)),
+        slot_score_ptr=TritonWarmupTensor(
+            torch.bfloat16, shape=(1, pool_size, head_dim)
+        ),
+        ape_ptr=TritonWarmupTensor(torch.float32, shape=(pool_size, head_dim)),
+        loc_ptr=TritonWarmupTensor(torch.int64),
+        write_mask_ptr=TritonWarmupTensor(torch.bool),
+        compressed_k_ptr=buf_fp8,
+        compressed_scale_ptr=buf_fp32,
+        page_size=page_size,
+        buf_numel_per_page=buf_numel_per_page,
+        head_dim=head_dim,
+        round_scale=round_scale,
+        has_write_mask=True,
+        return_compressed=False,
+        write_cache=True,
+    )
+
+
+@triton_kernel_dispatcher_with_warmup(
+    kernel=_kpool_softmax_rotate_write_cache_kernel,
+    warmup_inputs=_kpool_compress_warmup_inputs,
+)
+def kpool_compress_dispatch(
+    buf_fp8_ptr,
+    buf_fp32_ptr,
+    slot_k_ptr,
+    slot_score_ptr,
+    ape_ptr,
+    loc_ptr,
+    write_mask_ptr,
+    compressed_k_ptr,
+    compressed_scale_ptr,
+    page_size: int,
+    buf_numel_per_page: int,
+    head_dim: int,
+    round_scale: bool,
+    has_write_mask: bool,
+    return_compressed: bool,
+    write_cache: bool,
+) -> DispatchSpec:
+    return (slot_k_ptr.shape[0],), dict(
+        slot_k_stride_0=slot_k_ptr.stride(0),
+        slot_k_stride_1=slot_k_ptr.stride(1),
+        slot_score_stride_0=slot_score_ptr.stride(0),
+        slot_score_stride_1=slot_score_ptr.stride(1),
+        ape_stride_0=ape_ptr.stride(0),
+        PAGE_SIZE=page_size,
+        BUF_NUMEL_PER_PAGE=buf_numel_per_page,
+        POOL_SIZE=slot_k_ptr.shape[1],
+        HEAD_DIM=head_dim,
+        S_OFFSET_NBYTES_IN_PAGE=page_size * head_dim,
+        FP8_MAX=FP8_MAX,
+        PRESHUFFLE=page_size > 1,
+        ROUND_SCALE=round_scale,
+        HAS_WRITE_MASK=has_write_mask,
+        RETURN_COMPRESSED=return_compressed,
+        WRITE_CACHE=write_cache,
+        BLOCK_D=triton.next_power_of_2(head_dim),
+    )
+
+
 def kpool_compress_and_write_cache(
     kv_cache: torch.Tensor,
     slot_k: torch.Tensor,
@@ -204,20 +287,20 @@ def kpool_compress_and_write_cache(
     return_compressed: bool = False,
     write_cache: bool = True,
 ):
-    """Compress ``pool_size`` tokens into one fp8 K and write at ``loc``.
+    """Compress `pool_size` tokens into one fp8 K and write at `loc`.
 
     Args:
-        kv_cache: indexer K cache ``[num_blocks, block_size, head_dim+4]`` uint8.
-        slot_k: ``[n_pools, pool_size, head_dim]`` bf16 — raw per-token K.
-        slot_score: ``[n_pools, pool_size, head_dim]`` — per-token gate score.
-        ape: ``[pool_size, head_dim]`` fp32 — per-slot position bias.
-        loc: ``[n_pools]`` int64 — flat physical slot per pool.
+        kv_cache: indexer K cache `[num_blocks, block_size, head_dim+4]` uint8.
+        slot_k: `[n_pools, pool_size, head_dim]` bf16 — raw per-token K.
+        slot_score: `[n_pools, pool_size, head_dim]` — per-token gate score.
+        ape: `[pool_size, head_dim]` fp32 — per-slot position bias.
+        loc: `[n_pools]` int64 — flat physical slot per pool.
         pool_size: Number of tokens compressed into one cache entry.
         head_dim: Indexer head dimension.
-        write_mask: ``[n_pools]`` bool — pools to write, or None for all.
+        write_mask: `[n_pools]` bool — pools to write, or None for all.
         round_scale: Round each fp8 scale down to a power of two.
         return_compressed: Also return the compressed K and scales.
-        write_cache: Write the compressed result into ``kv_cache``.
+        write_cache: Write the compressed result into `kv_cache`.
 
     """
     assert slot_k.ndim == 3
@@ -261,7 +344,6 @@ def kpool_compress_and_write_cache(
     buf_fp32 = buf.view(torch.float32)
     # bytes per page (last dim of kv_cache) viewed as uint8
     buf_numel_per_page = buf.stride(0)
-    s_offset_nbytes_in_page = page_size * head_dim
 
     if return_compressed:
         compressed_k = torch.empty(
@@ -279,7 +361,7 @@ def kpool_compress_and_write_cache(
     if page_size > 1:
         assert page_size % 16 == 0, "ROCm preshuffle requires 16-token tiles"
 
-    _kpool_softmax_rotate_write_cache_kernel[(slot_k.shape[0],)](
+    kpool_compress_dispatch(
         buf_fp8,
         buf_fp32,
         slot_k,
@@ -289,23 +371,13 @@ def kpool_compress_and_write_cache(
         write_mask,
         compressed_k,
         compressed_scale,
-        slot_k.stride(0),
-        slot_k.stride(1),
-        slot_score.stride(0),
-        slot_score.stride(1),
-        ape.stride(0),
-        PAGE_SIZE=page_size,
-        BUF_NUMEL_PER_PAGE=buf_numel_per_page,
-        POOL_SIZE=slot_k.shape[1],
-        HEAD_DIM=head_dim,
-        S_OFFSET_NBYTES_IN_PAGE=s_offset_nbytes_in_page,
-        FP8_MAX=FP8_MAX,
-        PRESHUFFLE=page_size > 1,
-        ROUND_SCALE=round_scale,
-        HAS_WRITE_MASK=has_write_mask,
-        RETURN_COMPRESSED=return_compressed,
-        WRITE_CACHE=write_cache,
-        BLOCK_D=triton.next_power_of_2(head_dim),
+        page_size,
+        buf_numel_per_page,
+        head_dim,
+        round_scale,
+        has_write_mask,
+        return_compressed,
+        write_cache,
     )
 
     if return_compressed:
@@ -316,7 +388,9 @@ def kpool_compress_and_write_cache(
 # Seed each request's incomplete pool into its paged tail during prefill.
 
 
-@triton.jit
+@triton.jit(
+    do_not_specialize=["n_tokens"], do_not_specialize_on_alignment=["tslot_ptr"]
+)
 def _kpool_tail_seed_kernel(
     key_ptr,
     score_ptr,
@@ -327,37 +401,88 @@ def _kpool_tail_seed_kernel(
     KPOOL_HEAD: tl.constexpr,
     HEAD_DIM: tl.constexpr,
     KPOOL: tl.constexpr,
+    RING: tl.constexpr,
     BLOCK_D: tl.constexpr,
 ):
-    """Copy token ``i``'s raw K + gate into its request's tail block.
+    """Copy token `i`'s raw K + gate into its request's tail ring.
 
-    Token ``i`` is among its request's last KPOOL tokens iff the token KPOOL
+    Token `i` is among its request's last KPOOL tokens iff the token KPOOL
     ahead belongs to a different tail block (or is past the batch / padding,
-    slot < 0). ``tslot = block * KPOOL + pos % KPOOL``; the destination is
-    ``tail[block, {0:K, 1:score}, pos % KPOOL, :]``.
+    slot < 0). `tslot = block * RING + pos % RING`; the destination is
+    `tail[block, {0:K, 1:score}, pos % RING, :]`.
     """
     i = tl.program_id(0)
     t = tl.load(tslot_ptr + i).to(tl.int64)
     if t < 0:
         return
-    blk = t // KPOOL  # t >= 0 here, so trunc == floor
+    blk = t // RING  # t >= 0 here, so trunc == floor
     ahead = tl.load(tslot_ptr + i + KPOOL, mask=i + KPOOL < n_tokens, other=-1).to(
         tl.int64
     )
     # Match the torch semantics exactly: a negative ahead slot floors to a
     # block id that differs from every real block -> token is in the tail.
     # Only divide non-negative slots (Triton int div truncates, torch floors).
-    if ahead >= 0 and ahead // KPOOL == blk:
+    if ahead >= 0 and ahead // RING == blk:
         return
     offs = tl.arange(0, BLOCK_D)
     m = offs < HEAD_DIM
     block_base = blk * TAIL_BLOCK_ELEMS
-    base = block_base + (t % KPOOL) * HEAD_DIM
+    base = block_base + (t % RING) * HEAD_DIM
     k = tl.load(key_ptr + i * HEAD_DIM + offs, mask=m)
     s = tl.load(score_ptr + i * HEAD_DIM + offs, mask=m)
     tl.store(tail_ptr + base + offs, k, mask=m)
     tl.store(
-        tail_ptr + block_base + KPOOL_HEAD + (t % KPOOL) * HEAD_DIM + offs, s, mask=m
+        tail_ptr + block_base + KPOOL_HEAD + (t % RING) * HEAD_DIM + offs, s, mask=m
+    )
+
+
+def _kpool_tail_seed_warmup_inputs(
+    *, tail_cache, kpool: int, head_dim: int
+) -> dict[str, Any]:
+    tail_kv_cache = tail_cache.kv_cache
+    tail_block_elems = tail_kv_cache.stride(0)
+    kpool_head = tail_kv_cache.stride(1)
+    ring = tail_kv_cache.shape[2]
+    tail_ptr_range_bytes = triton_ptr_range(tail_kv_cache)
+    return dict(
+        key_ptr=TritonWarmupTensor(torch.bfloat16),
+        score_ptr=TritonWarmupTensor(torch.bfloat16),
+        tslot_ptr=TritonWarmupTensor(torch.int64),
+        tail_ptr=TritonWarmupTensor(
+            torch.bfloat16, ptr_range_bytes=tail_ptr_range_bytes
+        ),
+        n_tokens=1,
+        tail_block_elems=tail_block_elems,
+        kpool_head=kpool_head,
+        head_dim=head_dim,
+        kpool=kpool,
+        ring=ring,
+    )
+
+
+@triton_kernel_dispatcher_with_warmup(
+    kernel=_kpool_tail_seed_kernel,
+    warmup_inputs=_kpool_tail_seed_warmup_inputs,
+)
+def kpool_tail_seed_dispatch(
+    key_ptr,
+    score_ptr,
+    tslot_ptr,
+    tail_ptr,
+    n_tokens: int,
+    tail_block_elems: int,
+    kpool_head: int,
+    head_dim: int,
+    kpool: int,
+    ring: int,
+) -> DispatchSpec:
+    return (n_tokens,), dict(
+        TAIL_BLOCK_ELEMS=tail_block_elems,
+        KPOOL_HEAD=kpool_head,
+        HEAD_DIM=head_dim,
+        KPOOL=kpool,
+        RING=ring,
+        BLOCK_D=triton.next_power_of_2(head_dim),
     )
 
 
@@ -375,17 +500,17 @@ def kpool_seed_tail_cache(
     n = tslot.shape[0]
     if n == 0:
         return
-    _kpool_tail_seed_kernel[(n,)](
+    kpool_tail_seed_dispatch(
         key,
         gate_score,
         tslot,
         tail_kv_cache,
         n,
-        TAIL_BLOCK_ELEMS=tail_kv_cache.stride(0),
-        KPOOL_HEAD=tail_kv_cache.stride(1),
-        HEAD_DIM=head_dim,
-        KPOOL=kpool,
-        BLOCK_D=triton.next_power_of_2(head_dim),
+        tail_kv_cache.stride(0),
+        tail_kv_cache.stride(1),
+        head_dim,
+        kpool,
+        tail_kv_cache.shape[2],
     )
 
 
@@ -412,6 +537,7 @@ def _kpool_decode_update_batched_kernel(
     PAGE_SIZE: tl.constexpr,
     BUF_NUMEL_PER_PAGE: tl.constexpr,
     POOL_SIZE: tl.constexpr,
+    RING: tl.constexpr,
     TAIL_BLOCK_ELEMS: tl.constexpr,
     KPOOL_HEAD: tl.constexpr,
     HEAD_DIM: tl.constexpr,
@@ -426,12 +552,9 @@ def _kpool_decode_update_batched_kernel(
     Replaces the caller's per-token sequential launch loop. The intra-request
     iteration MUST stay in position order: a pool-completion at token t* reads
     the tail-ring slots that tokens t < t* (same request) just stashed in this
-    same invocation. ``tl.range`` iterates sequentially within the program, so
+    same invocation. `tl.range` iterates sequentially within the program, so
     those stashes are visible to the later completion read. Cross-request
-    programs are independent (distinct tail blocks). With NEXT_N < POOL_SIZE
-    (the spec-verify case: NEXT_N ~= num_spec+1, POOL_SIZE=16) at most one
-    completion can occur per request per call, but the ordered loop is correct
-    for any NEXT_N.
+    programs are independent (distinct tail blocks). RING >= POOL_SIZE.
     """
     req = tl.program_id(0)
     offs = tl.arange(0, BLOCK_D)
@@ -445,7 +568,7 @@ def _kpool_decode_update_batched_kernel(
         pos_valid = (cache_loc >= 0) & (pos >= 0)
 
         slot = safe_pos % POOL_SIZE
-        phys_slot = safe_pos % POOL_SIZE
+        phys_slot = safe_pos % RING
 
         # Derive the tail block from THIS token's tail_slot (the request's block
         # is constant across a pool, but a padded / invalid entry carries a
@@ -453,7 +576,7 @@ def _kpool_decode_update_batched_kernel(
         # token's base address). Clamp so an invalid entry can never form an
         # out-of-bounds base; the accesses below are gated on pos_valid anyway.
         tail_slot = tl.load(tail_slot_mapping_ptr + idx)
-        block = tl.maximum(tail_slot, 0).to(tl.int64) // POOL_SIZE
+        block = tl.maximum(tail_slot, 0).to(tl.int64) // RING
         block_base = block * TAIL_BLOCK_ELEMS
 
         # The tail-ring stash must run for EVERY real token, so it is gated on
@@ -481,7 +604,7 @@ def _kpool_decode_update_batched_kernel(
             max_score = tl.full((BLOCK_D,), -float("inf"), tl.float32)
             for pool_slot in tl.static_range(0, POOL_SIZE):
                 is_current = pool_slot == slot
-                phys = (pool_logical_start + pool_slot) % POOL_SIZE
+                phys = (pool_logical_start + pool_slot) % RING
                 score_buf = tl.load(
                     tail_kv_ptr + block_base + KPOOL_HEAD + phys * HEAD_DIM + offs,
                     mask=dim_mask,
@@ -499,7 +622,7 @@ def _kpool_decode_update_batched_kernel(
             denom = tl.full((BLOCK_D,), 0.0, tl.float32)
             for pool_slot in tl.static_range(0, POOL_SIZE):
                 is_current = pool_slot == slot
-                phys = (pool_logical_start + pool_slot) % POOL_SIZE
+                phys = (pool_logical_start + pool_slot) % RING
                 score_buf = tl.load(
                     tail_kv_ptr + block_base + KPOOL_HEAD + phys * HEAD_DIM + offs,
                     mask=dim_mask,
@@ -579,26 +702,26 @@ def kpool_decode_update_and_maybe_write_cache_batched(
     head_dim: int = INDEX_HEAD_DIM,
     round_scale: bool = True,
 ) -> None:
-    """Batched decode-step kpool update for spec verify (``next_n > 1``).
+    """Batched decode-step kpool update for spec verify (`next_n > 1`).
 
     One launch replaces the caller's per-token loop. Inputs are grouped per
-    request: ``[num_requests, next_n, ...]``. Each program handles one
-    request's ``next_n`` tokens in position order (see the kernel docstring for
+    request: `[num_requests, next_n, ...]`. Each program handles one
+    request's `next_n` tokens in position order (see the kernel docstring for
     why ordering is required for pool-completion correctness).
 
-    Plain decode (``next_n == 1``) is handled here too — the kernel collapses
+    Plain decode (`next_n == 1`) is handled here too — the kernel collapses
     to a single-iteration loop.
 
     Args:
-        kv_cache: indexer K cache ``[num_blocks, block_size, head_dim+4]`` uint8.
-        tail_kv_cache: paged tail cache ``[num_blocks, 2, pool_size, head_dim]``
+        kv_cache: indexer K cache `[num_blocks, block_size, head_dim+4]` uint8.
+        tail_kv_cache: paged tail cache `[num_blocks, 2, pool_size, head_dim]`
             bf16 (K at half 0, gate score at half 1).
-        tail_slot_mapping: ``[num_requests, next_n]`` int32.
-        key: ``[num_requests, next_n, head_dim]`` bf16.
-        slot_score: ``[num_requests, next_n, head_dim]`` bf16.
-        ape: ``[pool_size, head_dim]`` fp32.
-        slot_mapping: ``[num_requests, next_n]`` int32.
-        positions: ``[num_requests, next_n]`` int32.
+        tail_slot_mapping: `[num_requests, next_n]` int32.
+        key: `[num_requests, next_n, head_dim]` bf16.
+        slot_score: `[num_requests, next_n, head_dim]` bf16.
+        ape: `[pool_size, head_dim]` fp32.
+        slot_mapping: `[num_requests, next_n]` int32.
+        positions: `[num_requests, next_n]` int32.
         pool_size: Number of tokens compressed into one cache entry.
         head_dim: Indexer head dimension.
         round_scale: Round each fp8 scale down to a power of two.
@@ -609,7 +732,8 @@ def kpool_decode_update_and_maybe_write_cache_batched(
         return
     assert tail_kv_cache.ndim == 4
     assert tail_kv_cache.shape[1] == 2
-    assert tail_kv_cache.shape[2] == pool_size
+    ring = tail_kv_cache.shape[2]
+    assert ring >= pool_size and ring % pool_size == 0, (ring, pool_size)
     assert tail_kv_cache.shape[3] == head_dim
     assert tail_kv_cache.dtype == torch.bfloat16
     assert key.ndim == 3 and key.shape[2] == head_dim
@@ -658,6 +782,7 @@ def kpool_decode_update_and_maybe_write_cache_batched(
         PAGE_SIZE=page_size,
         BUF_NUMEL_PER_PAGE=buf.stride(0),
         POOL_SIZE=pool_size,
+        RING=ring,
         TAIL_BLOCK_ELEMS=tail_kv_cache.stride(0),
         KPOOL_HEAD=tail_kv_cache.stride(1),
         HEAD_DIM=head_dim,
@@ -673,7 +798,7 @@ def kpool_decode_update_and_maybe_write_cache_batched(
 
 
 def history_group_budget_for_topk(topk: int, pool_size: int) -> int:
-    """Number of pools to select so that expanding yields ``topk`` tokens."""
+    """Number of pools to select so that expanding yields `topk` tokens."""
     assert topk % pool_size == 0
     return topk // pool_size
 
@@ -728,7 +853,7 @@ def append_tail_to_topk(
 ) -> torch.Tensor:
     """Append non-pooled tail tokens after expanded history tokens.
 
-    ``index_kpool_always_select_tail`` keeps the (incomplete) trailing pool so
+    `index_kpool_always_select_tail` keeps the (incomplete) trailing pool so
     the most recent tokens are always attended to.
     """
     assert topk_result.dtype == torch.int32
@@ -830,12 +955,12 @@ def expand_pools_and_append_tail(
     seq_lens: torch.Tensor,
     pool_size: int,
 ) -> torch.Tensor:
-    """Fuse ``expand_pools_to_tokens`` + ``append_tail_to_topk`` (identity path).
+    """Fuse `expand_pools_to_tokens` + `append_tail_to_topk` (identity path).
 
-    Produces the same ``[rows, topk + pool_size - 1]`` int32 output as calling
-    the two functions in sequence when neither ``page_table`` nor
-    ``topk_offsets`` is passed — the only path used by the GLM-5.3-Flash indexer.
-    The kernel derives ``pool_len = seq_len // pool_size`` internally, so the
+    Produces the same `[rows, topk + pool_size - 1]` int32 output as calling
+    the two functions in sequence when neither `page_table` nor
+    `topk_offsets` is passed — the only path used by the GLM-5.3-Flash indexer.
+    The kernel derives `pool_len = seq_len // pool_size` internally, so the
     caller no longer needs to precompute it. Replaces ~25 elementwise kernels
     with one Triton launch.
     """

@@ -22,7 +22,6 @@ from collections.abc import Iterable, Iterator
 from itertools import islice
 
 import torch
-import torch.nn.functional as F
 from torch import nn
 
 from vllm.config import CacheConfig, VllmConfig
@@ -34,6 +33,7 @@ from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
+    GateLinear,
     MoERunner,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -78,7 +78,7 @@ def _normalize_expert_bias(
 ) -> Iterator[tuple[str, torch.Tensor]]:
     """Zero-mean the MoE router's per-expert score bias for load balance.
 
-    The rename to ``e_score_correction_bias`` is done by the mapper; only the
+    The rename to `e_score_correction_bias` is done by the mapper; only the
     tensor adjustment lives here, since a WeightsMapper cannot transform data.
     """
     for name, w in weights:
@@ -91,11 +91,11 @@ class Param2MoEAttention(nn.Module):
     """Grouped-Query Attention (GQA) for Param2MoE.
 
     Notable differences from a vanilla GQA layer:
-      * The checkpoint fuses Q, K, V into a single ``query_key_value`` weight.
-        vLLM receives it already renamed to ``qkv_proj`` by the weight-name
-        translator and loads it directly; ``QKVParallelLinear`` splits the
-        fused ``[Q|K|V]`` tensor internally.
-      * Optional per-head RMS norms on Q and K (``use_qk_norm=True``).
+      * The checkpoint fuses Q, K, V into a single `query_key_value` weight.
+        vLLM receives it already renamed to `qkv_proj` by the weight-name
+        translator and loads it directly; `QKVParallelLinear` splits the
+        fused `[Q|K|V]` tensor internally.
+      * Optional per-head RMS norms on Q and K (`use_qk_norm=True`).
     """
 
     def __init__(
@@ -289,10 +289,12 @@ class Param2MoEMoEBlock(nn.Module):
         self.norm_expert_prob: bool = getattr(config, "norm_topk_prob", True)
         self.score_function: str = getattr(config, "score_function", "sigmoid")
 
-        self.gate = nn.Linear(
+        self.gate = GateLinear(
             self.hidden_size,
             self.num_experts,
-            bias=False,
+            out_dtype=torch.float32,
+            params_dtype=torch.float32,
+            prefix=f"{prefix}.gate",
         )
 
         if getattr(config, "moe_router_enable_expert_bias", True):
@@ -350,15 +352,11 @@ class Param2MoEMoEBlock(nn.Module):
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
 
-        # Router: both input and weight must be float32 for numerical
-        # stability (mirrors the original Param2MoEGate behaviour).
-        # The gate nn.Linear weight lives in the model dtype (bfloat16),
-        # so we must cast both explicitly via F.linear instead of calling
-        # self.gate() which would hit a dtype mismatch.
-        router_logits = F.linear(
-            hidden_states.float(),
-            self.gate.weight.float(),
-        ).to(hidden_states.dtype)
+        # Router logits are accumulated in float32 for numerical stability
+        # (mirrors the original Param2MoEGate behaviour) and handed to the
+        # experts in the activation dtype.
+        router_logits, _ = self.gate(hidden_states)
+        router_logits = router_logits.to(hidden_states.dtype)
 
         expert_output = self.experts(
             hidden_states=hidden_states,
@@ -371,7 +369,7 @@ class Param2MoEMoEBlock(nn.Module):
 class Param2MoEDecoderLayer(nn.Module):
     """Single transformer decoder block.
 
-    Dense for the first ``first_k_dense_replace`` layers; MoE thereafter.
+    Dense for the first `first_k_dense_replace` layers; MoE thereafter.
     """
 
     def __init__(

@@ -2,16 +2,16 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Regression test for causal masking in the AITER MLA verify MTP path.
 
-When ``num_heads < 16`` the ROCm AITER MLA backend cannot use the ASM decode
-kernel for a multi-token block, so ``AiterMLAImpl.forward_mqa`` routes verify
-through ``mla_gluon``'s native 4-D MTP entry (``q`` shaped
-``[batch, qlen, nhead, dim]`` with ``use_2d_view=False``). aiter applies the
-causal tail internally: position ``t`` attends KV ``[0, seq_len - qlen + t]``.
+When `num_heads < 16` the ROCm AITER MLA backend cannot use the ASM decode
+kernel for a multi-token block, so `AiterMLAImpl.forward_mqa` routes verify
+through `mla_gluon`'s native 4-D MTP entry (`q` shaped
+`[batch, qlen, nhead, dim]` with `use_2d_view=False`). aiter applies the
+causal tail internally: position `t` attends KV `[0, seq_len - qlen + t]`.
 
-The test drives the real builder and ``forward_mqa`` over a multi-token decode
+The test drives the real builder and `forward_mqa` over a multi-token decode
 batch, intercepts the arguments actually handed to the Gluon kernel, and pins
-that the 4-D MTP contract is used with per-request ``block_table`` and
-``cache_seqlens`` rather than a flattened per-token paged-KV view.
+that the 4-D MTP contract is used with per-request `block_table` and
+`cache_seqlens` rather than a flattened per-token paged-KV view.
 """
 
 import types
@@ -73,7 +73,7 @@ def _seq_lens() -> list[int]:
 def _run_verify_block():
     """Drive the real builder + forward_mqa over one multi-token verify block.
 
-    Returns ``(metadata, captured)`` where ``captured`` holds the Gluon kwargs.
+    Returns `(metadata, captured)` where `captured` holds the Gluon kwargs.
     """
     from tests.v1.attention.utils import (
         BatchSpec,
@@ -82,6 +82,7 @@ def _run_verify_block():
     )
     from vllm.config import SpeculativeConfig
     from vllm.config.vllm import set_current_vllm_config
+    from vllm.v1.attention.backends.mla.rocm_aiter_mla import AiterMLAImpl
     from vllm.v1.attention.backends.registry import AttentionBackendEnum
     from vllm.v1.kv_cache_interface import MLAAttentionSpec
     from vllm.v1.worker.workspace import init_workspace_manager
@@ -106,7 +107,7 @@ def _run_verify_block():
     vllm_config.speculative_config = SpeculativeConfig(
         method="ngram", num_speculative_tokens=QLEN - 1
     )
-    vllm_config.model_config.get_num_attention_heads = types.MethodType(
+    vllm_config.model_config.get_num_attention_heads = types.MethodType(  # type: ignore[method-assign]
         lambda self, parallel_config, arch_config=None: NUM_QUERY_HEADS,
         vllm_config.model_config,
     )
@@ -202,6 +203,7 @@ def _run_verify_block():
             lambda: spy,
         ),
     ):
+        assert isinstance(impl, AiterMLAImpl)
         impl.forward_mqa((q_nope, q_pe), kv_cache, metadata, layer=None)
 
     return metadata, captured

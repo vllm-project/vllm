@@ -2,27 +2,31 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import cached_property
 from typing import TYPE_CHECKING
 
-from vllm.config.ec_manager_config import EncoderCacheManagerMetadata
 from vllm.multimodal.utils import strip_covered_mm_data
+from vllm.utils.gc_utils import untrack_long_lists
 
 if TYPE_CHECKING:
     import numpy as np
     import numpy.typing as npt
     import torch
 
+    from vllm.distributed.aux_output_connector.connector import (
+        AuxOutputConnectorMetadata,
+    )
     from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorMetadata
     from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
     from vllm.lora.request import LoRARequest
-    from vllm.multimodal.inputs import MultiModalFeatureSpec
+    from vllm.multimodal.inputs import MultiModalFeatureSpec, MultiModalKwargsItem
     from vllm.pooling_params import PoolingParams
     from vllm.sampling_params import SamplingParams
     from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
     from vllm.v1.request import Request
 else:
+    AuxOutputConnectorMetadata = object
     ECConnectorMetadata = object
     KVConnectorMetadata = object
     KVCacheBlockCopy = object
@@ -43,18 +47,19 @@ class NewRequestData:
     block_ids: tuple[list[int], ...]
     num_computed_tokens: int
     lora_request: LoRARequest | None
+    # All the tokens to prefill: the prompt, plus any generated tokens on resume.
+    prefill_token_ids: list[int]
     prompt_embeds: "torch.Tensor | None" = None
     prompt_is_token_ids: list[bool] | None = None
-
-    # Only used for v2 model runner.
-    prefill_token_ids: list[int] | None = None
+    # DeepSeek-V4.1 only: SWA bounded replay; see Request.replay_start.
+    replay_start: int = 0
 
     @classmethod
     def from_request(
         cls,
         request: Request,
         block_ids: tuple[list[int], ...],
-        prefill_token_ids: list[int] | None = None,
+        prefill_token_ids: list[int],
         uses_mrope: bool = False,
     ) -> "NewRequestData":
         return cls(
@@ -73,7 +78,13 @@ class NewRequestData:
             prompt_embeds=request.prompt_embeds,
             prompt_is_token_ids=request.prompt_is_token_ids,
             prefill_token_ids=prefill_token_ids,
+            replay_start=request.replay_start,
         )
+
+    def __setstate__(self, state: dict) -> None:
+        self.__dict__.update(state)
+        # Workers receive these by pickle and keep them only for this step.
+        untrack_long_lists((self.prompt_is_token_ids, *self.block_ids))
 
     @property
     def prompt_len(self) -> int:
@@ -109,14 +120,11 @@ class NewRequestData:
         prompt_embeds_shape = (
             self.prompt_embeds.shape if self.prompt_embeds is not None else None
         )
-        prefill_token_ids_len = (
-            len(self.prefill_token_ids) if self.prefill_token_ids is not None else None
-        )
         return (
             f"NewRequestData("
             f"req_id={self.req_id},"
             f"prompt_token_ids_len={prompt_token_ids_len},"
-            f"prefill_token_ids_len={prefill_token_ids_len},"
+            f"prefill_token_ids_len={len(self.prefill_token_ids)},"
             f"mm_features={self.mm_features},"
             f"sampling_params={self.sampling_params},"
             f"block_ids={self.block_ids},"
@@ -130,16 +138,10 @@ class NewRequestData:
 @dataclass
 class CachedRequestData:
     req_ids: list[str]
-    # For request ids not in resumed_req_ids, new_block_ids will be appended to
-    # the request's block IDs. For those in the set, new_block_ids will be used as the
-    # request's block IDs instead of appending to the existing block IDs.
-    resumed_req_ids: set[str]
     # NOTE(woosuk): new_token_ids is only used for pipeline parallelism.
     # When PP is not used, new_token_ids will be empty.
     new_token_ids: list[list[int]]
-    # MRV1-only: For requests not scheduled in the last step, propagate the token ids
-    # to the connector. Won't contain requests scheduled in the prior step.
-    all_token_ids: dict[str, list[int]]
+    # Blocks to append to the request's existing block IDs.
     new_block_ids: list[tuple[list[int], ...] | None]
     num_computed_tokens: list[int]
     num_output_tokens: list[int]
@@ -147,15 +149,10 @@ class CachedRequestData:
     # Version of dataclass repr with token IDs obfuscated.
     def anon_repr(self) -> str:
         new_token_ids_lens = [len(toks) for toks in self.new_token_ids]
-        all_token_ids_lens = {
-            req_id: len(toks) for req_id, toks in self.all_token_ids.items()
-        }
         return (
             f"CachedRequestData("
             f"req_ids={self.req_ids},"
-            f"resumed_req_ids={self.resumed_req_ids},"
             f"new_token_ids_lens={new_token_ids_lens},"
-            f"all_token_ids_lens={all_token_ids_lens},"
             f"new_block_ids={self.new_block_ids},"
             f"num_computed_tokens={self.num_computed_tokens},"
             f"num_output_tokens={self.num_output_tokens}"
@@ -187,9 +184,7 @@ class CachedRequestData:
     def make_empty(cls) -> "CachedRequestData":
         return cls(
             req_ids=[],
-            resumed_req_ids=set(),
             new_token_ids=[],
-            all_token_ids={},
             new_block_ids=[],
             num_computed_tokens=[],
             num_output_tokens=[],
@@ -246,9 +241,6 @@ class SchedulerOutput:
     # E.g., if a request has [0, 1], it could mean the vision encoder needs
     # to process that the request's 0-th and 1-th images in the current step.
     scheduled_encoder_inputs: dict[str, list[int]]
-    # Number of common prefix blocks for all requests in each KV cache group.
-    # This can be used for cascade attention.
-    num_common_prefix_blocks: list[int]
 
     # Request IDs that are finished in between the previous and the current
     # steps. This is used to notify the workers about the finished requests
@@ -257,6 +249,13 @@ class SchedulerOutput:
     # list of mm_hash strings associated with the encoder outputs to be
     # freed from the encoder cache.
     free_encoder_mm_hashes: list[str]
+
+    # Request-local CPU payload updates: None releases a consumed input; a
+    # payload restores it for re-encoding after KV-load rollback. GPU embeddings
+    # and the feature's identifier/placeholder metadata are unaffected.
+    encoder_input_updates: dict[str, dict[int, "MultiModalKwargsItem | None"]] = field(
+        default_factory=dict
+    )
 
     scheduled_encoder_input_stats: ScheduledEncoderInputStats | None = None
 
@@ -282,10 +281,11 @@ class SchedulerOutput:
     # synchronously during this step (load_async=False).
     has_sync_kv_loads: bool = False
 
+    # Execution-auxiliary output control metadata consumed by the worker connector.
+    aux_output_connector_metadata: AuxOutputConnectorMetadata | None = None
+
     # EC Cache Connector metadata
     ec_connector_metadata: ECConnectorMetadata | None = None
-    # EC Cache Manager metadata
-    ec_manager_metadata: EncoderCacheManagerMetadata | None = None
     # Block IDs freshly allocated from the pool during this scheduling step.
     # The worker zeros the corresponding GPU memory before the blocks are used,
     # preventing stale NaN/data from corrupting attention or SSM computation.
@@ -294,15 +294,17 @@ class SchedulerOutput:
     # CoW copies to apply after zeroing new blocks and before forward.
     kv_cache_block_copies: list[KVCacheBlockCopy] | None = None
 
-    # Complete block-table rows that replace incrementally appended block IDs.
-    block_table_updates: dict[str, tuple[list[int], ...]] | None = None
-
     # Scheduler-local; always None by the time this reaches a worker.
     kv_connector_block_state: KVConnectorBlockState | None = None
 
     # Dynamic speculative decoding: optimal K chosen by scheduler.
     # Number of spec tokens to schedule for the next step.
     num_spec_tokens_to_schedule: int = 0
+
+    # Whether no scheduled request can use the drafts proposed after this step
+    # (non-final prefill chunks, or requests sure to reach max_tokens), so the
+    # drafter can skip proposing them.
+    skip_drafts: bool = False
 
     @classmethod
     def make_empty(cls) -> "SchedulerOutput":
@@ -313,7 +315,6 @@ class SchedulerOutput:
             total_num_scheduled_tokens=0,
             scheduled_spec_decode_tokens={},
             scheduled_encoder_inputs={},
-            num_common_prefix_blocks=[],
             finished_req_ids=set(),
             free_encoder_mm_hashes=[],
         )

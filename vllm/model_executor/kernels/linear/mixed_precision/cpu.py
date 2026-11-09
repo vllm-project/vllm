@@ -3,12 +3,13 @@
 
 import torch
 
-from vllm import _custom_ops as ops
+from vllm import _cpu_ops as ops
 from vllm import envs
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     pack_quantized_values_into_int32,
     unpack_quantized_values_into_int32,
 )
+from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.scalar_type import scalar_types
 
@@ -30,30 +31,38 @@ class CPUWNA16LinearKernel(MPLinearKernel):
         if c.weight_type not in _CPUWNA16_SUPPORTED_QUANT_TYPES:
             return (
                 False,
-                f"Quant type ({c.weight_type}) not supported by "
-                "CPUWNA16, supported types are: "
-                f"{_CPUWNA16_SUPPORTED_QUANT_TYPES}",
+                (
+                    f"Quant type ({c.weight_type}) not supported by "
+                    "CPUWNA16, supported types are: "
+                    f"{_CPUWNA16_SUPPORTED_QUANT_TYPES}"
+                ),
             )
 
         if c.group_size != -1 and c.group_size % 2 != 0:
             return (
                 False,
-                f"Group size ({c.group_size}) not supported by "
-                "CPUWNA16, supported group sizes are multiples of 2",
+                (
+                    f"Group size ({c.group_size}) not supported by "
+                    "CPUWNA16, supported group sizes are multiples of 2"
+                ),
             )
 
         if c.partition_weight_shape[0] % 32 != 0:
             return (
                 False,
-                f"Input size ({c.partition_weight_shape[0]}) not supported by "
-                "CPUWNA16, supported sizes are multiples of 32",
+                (
+                    f"Input size ({c.partition_weight_shape[0]}) not supported by "
+                    "CPUWNA16, supported sizes are multiples of 32"
+                ),
             )
 
         if c.partition_weight_shape[1] % 32 != 0:
             return (
                 False,
-                f"Output size ({c.partition_weight_shape[1]}) not supported by "
-                "CPUWNA16, supported sizes are multiples of 32",
+                (
+                    f"Output size ({c.partition_weight_shape[1]}) not supported by "
+                    "CPUWNA16, supported sizes are multiples of 32"
+                ),
             )
 
         return True, None
@@ -100,12 +109,13 @@ class CPUWNA16LinearKernel(MPLinearKernel):
             packed_zp = getattr(layer, self.w_zp_name)
         else:
             # w4a8 kernel always requires zp, allocate a fake zp
-            assert self.w_zp_name
-            packed_zp = torch.nn.Parameter(
+            self.w_zp_name = "w_zp"
+            replace_parameter(
+                layer,
+                self.w_zp_name,
                 torch.ones(group_num, zp_output_size, dtype=torch.int32) * -2004318072,
-                requires_grad=False,
             )
-            setattr(layer, self.w_zp_name, packed_zp)
+            packed_zp = getattr(layer, self.w_zp_name)
 
         # FIXME: some bugs in convert_weight_packed_scale_zp with GPTQ format,
         # repack to AWQ weight
@@ -136,13 +146,13 @@ class CPUWNA16LinearKernel(MPLinearKernel):
         if layer.bias is not None:
             layer.bias.data = layer.bias.float()
 
-        packed_weight.data = blocked_w
-        scales.data = blocked_s
-        packed_zp.data = blocked_zp
+        replace_parameter(layer, self.w_q_name, blocked_w)
+        replace_parameter(layer, self.w_s_name, blocked_s)
+        replace_parameter(layer, self.w_zp_name, blocked_zp)
 
     def process_weights_after_loading(self, layer: torch.nn.Module):
-        if (not self.config.zero_points) and (self.w_zp_name is not None):
-            setattr(layer, self.w_zp_name, None)
+        if not self.config.zero_points:
+            self._retire_unused_zp(layer)
 
         weights = getattr(layer, self.w_q_name)
         # Require GPTQ pack format
@@ -213,5 +223,10 @@ def _get_isa_hint(dtype: torch.dtype) -> str:
         return "amx"
     elif current_platform.get_cpu_architecture() == CpuArchEnum.RISCV:
         return "rvv"
+    elif (
+        dtype == torch.bfloat16
+        and current_platform.get_cpu_architecture() == CpuArchEnum.POWERPC
+    ):
+        return "vsx"
     else:
         return "vec"

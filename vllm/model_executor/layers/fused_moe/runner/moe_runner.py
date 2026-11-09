@@ -45,6 +45,8 @@ from vllm.model_executor.layers.fused_moe.runner.shared_experts import (
     SharedExperts,
     SharedExpertsOrder,
 )
+from vllm.model_executor.layers.utils import dispatch_unquantized_gemm
+from vllm.model_executor.utils import refill_derived
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import (
     _USE_LAYERNAME,
@@ -63,7 +65,7 @@ def register_layer_for_moe_forward_op(
     prefix = layer.layer_name
     compilation_config = vllm_config.compilation_config
     if prefix in compilation_config.static_forward_context:
-        raise ValueError("Duplicate layer name: {}".format(prefix))
+        raise ValueError(f"Duplicate layer name: {prefix}")
     compilation_config.static_forward_context[prefix] = layer
     compilation_config.static_all_moe_layers.append(prefix)
 
@@ -201,7 +203,7 @@ direct_register_custom_op(
     op_func=_moe_forward,
     mutates_args=["hidden_states"],
     fake_impl=_moe_forward_fake,
-    tags=(torch.Tag.needs_fixed_stride_order,),
+    tags=(torch.Tag.needs_exact_strides,),
 )
 
 
@@ -209,7 +211,7 @@ direct_register_custom_op(
     op_name="moe_forward_shared",
     op_func=_moe_forward_shared,
     fake_impl=_moe_forward_shared_fake,
-    tags=(torch.Tag.needs_fixed_stride_order,),
+    tags=(torch.Tag.needs_exact_strides,),
 )
 
 
@@ -273,7 +275,7 @@ class MoERunner(MoERunnerInterface):
 
         # When both gates are present and FSE is enabled, fuse their
         # weight matrices into [num_experts + num_shared, hidden] so one
-        # F.linear produces combined logits. The topk kernel can then
+        # GEMM produces combined logits. The topk kernel can then
         # apply routing softmax and shared expert activation (sigmoid)
         # in a single launch.
         self._fse_fuse_gate = gate is not None and shared_expert_gate is not None
@@ -300,7 +302,10 @@ class MoERunner(MoERunnerInterface):
     def load_weights(
         self, weights: Iterable[tuple[str, torch.Tensor]]
     ) -> Iterable[str]:
-        return self.routed_experts.load_weights(weights)
+        # routed_experts reports names relative to itself, but callers such as
+        # AutoWeightsLoader qualify what this returns with the runner's prefix.
+        for name in self.routed_experts.load_weights(weights):
+            yield f"routed_experts.{name}"
 
     def _select_forward(self) -> Callable:
         if current_platform.is_tpu():
@@ -337,19 +342,22 @@ class MoERunner(MoERunnerInterface):
         if self._shared_experts is not None:
             self._shared_experts._set_moe_config(new_moe_config)
 
-    def _maybe_fuse_gate_weights(self):
-        """Fuse router and shared expert gate weights on first call.
+    def process_weights_after_loading(self) -> None:
+        """Fuse router and shared expert gate weights.
 
         Cannot be done at __init__ because gate weights are loaded after
-        module construction (via weight_loader). Called once from
-        _forward_impl before the first forward pass.
+        module construction (via weight_loader). The loader runs this after
+        every load or reload, refilling the fused tensor in place so captured
+        CUDA graphs see updated gates.
         """
-        if self._combined_gate_weight is None:
-            assert self.gate is not None and self.shared_expert_gate is not None
-            self._combined_gate_weight = torch.cat(
-                [self.gate.weight, self.shared_expert_gate.weight],
-                dim=0,
-            )
+        if not self._fse_fuse_gate:
+            return
+        assert self.gate is not None and self.shared_expert_gate is not None
+        refill_derived(
+            self,
+            "_combined_gate_weight",
+            torch.cat([self.gate.weight, self.shared_expert_gate.weight], dim=0),
+        )
 
     @property
     def _quant_method(self) -> FusedMoEMethodBase:
@@ -458,10 +466,10 @@ class MoERunner(MoERunnerInterface):
         transforms are applied.
 
         A transform that commutes with the TP sum is exempt: if
-        ``sum_r T(x_r) == T(sum_r x_r)``, applying the transform to the local
+        `sum_r T(x_r) == T(sum_r x_r)`, applying the transform to the local
         partial output and letting the existing late all-reduce sum the
         combined result is equivalent, and costs one collective instead of two.
-        Such a transform opts out by setting ``reduce_commutative = True``.
+        Such a transform opts out by setting `reduce_commutative = True`.
         The default is False, so transforms that do not declare themselves
         keep being reduced early.
         """
@@ -615,6 +623,7 @@ class MoERunner(MoERunnerInterface):
 
         if self.routed_experts.quant_method.is_monolithic:
             # Monolithic kernels: pass router_logits to routed_experts
+            router_logits = self.router.prepare_monolithic_logits(router_logits)
             fused_out = self.routed_experts.forward_monolithic(
                 x=hidden_states,
                 router_logits=router_logits,
@@ -656,7 +665,11 @@ class MoERunner(MoERunnerInterface):
         """
         ctx = get_forward_context()
         return (
-            ctx.dp_metadata.sp_local_sizes(self.moe_config.sp_size)
+            ctx.dp_metadata.sp_local_sizes(
+                self.moe_config.sp_size,
+                pcp_size=self.moe_config.pcp_size,
+                use_ep=self.moe_config.use_ep,
+            )
             if ctx.dp_metadata
             else nullcontext()
         )
@@ -715,7 +728,7 @@ class MoERunner(MoERunnerInterface):
             )
 
         # Record before `_maybe_pad_hidden_states` pads activations to match
-        # `moe_config.hidden_dim`, e.g. after `align_trtllm_fp4_moe_hidden_dim_for_fi`
+        # `moe_config.hidden_dim`, e.g. after `align_fp4_moe_hidden_dim_for_fi`
         # so routed output can be trimmed before
         # shared+routed add / latent up proj if needed.
 
@@ -897,8 +910,9 @@ class MoERunner(MoERunnerInterface):
         # NOTE: in future PR, MoE runner will always hold the gate.
         if self.gate is not None:
             if self._fse_fuse_gate:
-                self._maybe_fuse_gate_weights()
-                router_logits = F.linear(hidden_states, self._combined_gate_weight)
+                router_logits = dispatch_unquantized_gemm()(
+                    self, hidden_states, self._combined_gate_weight, None
+                )
             else:
                 router_logits, _ = self.gate(hidden_states)
 

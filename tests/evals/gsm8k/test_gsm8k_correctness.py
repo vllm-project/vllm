@@ -5,7 +5,7 @@ Replacement for lm-eval-harness with better performance and control.
 
 Usage:
 pytest -s -v tests/evals/gsm8k/test_gsm8k_correctness.py \
-    --config-list-file=configs/models-small.txt
+    --config-list-file=configs/models-small.yaml
 """
 
 import shlex
@@ -87,6 +87,28 @@ def get_acceptance_length(server_url: str) -> float:
     return 1.0 + num_accepted / num_drafts
 
 
+def check_prefix_cache_hits(server_url: str, expected: bool) -> None:
+    """Check that the evaluated requests exercised the configured cache mode."""
+    response = requests.get(f"{server_url.rstrip('/').removesuffix('/v1')}/metrics")
+    response.raise_for_status()
+    hits = []
+    for line in response.text.splitlines():
+        name, _, value = line.rpartition(" ")
+        if name.split("{")[0] == "vllm:prefix_cache_hits_total":
+            hits.append(float(value))
+    assert hits, "prefix-cache hit metric is missing"
+    total_hits = sum(hits)
+    print(f"  Prefix-cache hit tokens: {total_hits:g}")
+    if expected:
+        assert total_hits > 0, (
+            "prefix caching was enabled but no cached tokens were reused"
+        )
+    else:
+        assert total_hits == 0, (
+            "prefix caching was disabled but cached tokens were reused"
+        )
+
+
 def test_gsm8k_correctness(config_filename):
     """Test GSM8K correctness for a given model configuration."""
     eval_config = yaml.safe_load(config_filename.read_text(encoding="utf-8"))
@@ -109,15 +131,17 @@ def test_gsm8k_correctness(config_filename):
             "Its W2A16 (uint2b2) scheme has no kernel outside CUDA."
         )
 
-    # TODO(akaratza): Enable DeepSeek-V3.2 and DeepSeek-R1 on ROCm platforms
     if current_platform.is_rocm() and (
         "deepseek-ai/DeepSeek-V3.2" in eval_config["model_name"]
         or "deepseek-ai/DeepSeek-R1" in eval_config["model_name"]
     ):
-        pytest.skip(
-            "Skipping DeepSeek-V3.2 and DeepSeek-R1 on ROCm platforms "
-            "due to agent pool disk space issues and pod evictions."
-        )
+        from vllm.platforms.rocm import get_cdna_version
+
+        if get_cdna_version() < 4:
+            pytest.skip(
+                "Skipping DeepSeek-V3.2 and DeepSeek-R1 on ROCm platforms below "
+                "CDNA 4 due to agent pool disk space issues and pod evictions."
+            )
     if current_platform.is_rocm() and (
         "Qwen3.5-35B-A3B-MXFP4-AITER-TP2" in config_filename.name
     ):
@@ -128,6 +152,12 @@ def test_gsm8k_correctness(config_filename):
                 "Skipping Qwen3.5-35B-A3B-MXFP4-AITER-TP2 on non-GFX950 platforms. "
                 "The quantization scheme is not supported on non-GFX950 platforms."
             )
+    if "--all2all-backend=moonep" in eval_config.get("server_args", ""):
+        from vllm.utils.import_utils import has_moonep
+
+        if not has_moonep():
+            pytest.skip("Skipping MoonEP config: the moonep package is not installed.")
+
     # Parse server arguments from config (use shlex to handle quoted strings)
     server_args_str = eval_config.get("server_args", "")
     server_args = shlex.split(server_args_str) if server_args_str else []
@@ -170,7 +200,19 @@ def test_gsm8k_correctness(config_filename):
         server_url = remote_server.url_for("v1")
         print(f"Server started at: {server_url}")
 
+        # Run before any traffic: EPLB may rearrange experts after a few steps.
+        for method in eval_config.get("startup_rpc_checks", []):
+            response = requests.post(
+                remote_server.url_for("collective_rpc"), json={"method": method}
+            )
+            response.raise_for_status()
+            results = response.json()["results"]
+            print(f"  {method}: {results}")
+            assert results and not any(results), f"{method} failed: {results}"
+
         results = run_gsm8k_eval(eval_config, server_url)
+        if "expect_prefix_cache_hits" in eval_config:
+            check_prefix_cache_hits(server_url, eval_config["expect_prefix_cache_hits"])
 
         measured_metric = results["accuracy"]
         expected_metric = eval_config["accuracy_threshold"]

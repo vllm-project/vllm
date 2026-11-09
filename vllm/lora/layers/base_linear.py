@@ -3,7 +3,7 @@
 
 
 import torch
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 from vllm import envs
 from vllm.config import get_current_vllm_config
@@ -98,14 +98,14 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         self.layer_name = self.base_layer.prefix + ".lora_linear_async"
         compilation_config = vllm_config.compilation_config
         if self.layer_name in compilation_config.static_forward_context:
-            raise ValueError("Duplicate layer name: {}".format(self.layer_name))
+            raise ValueError(f"Duplicate layer name: {self.layer_name}")
         compilation_config.static_forward_context[self.layer_name] = self
 
     def create_lora_weights(
         self,
         max_loras: int,
         lora_config: LoRAConfig,
-        model_config: PretrainedConfig | None = None,
+        model_config: PreTrainedConfig | None = None,
     ) -> None:
         self.lora_config = lora_config
         if isinstance(self.base_layer, ReplicatedLinear):

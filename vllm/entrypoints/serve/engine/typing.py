@@ -1,10 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Protocol, TypeAlias
+from typing import TypeAlias
 
-from vllm.config import ModelConfig
-from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
 from vllm.entrypoints.openai.chat_completion.protocol import (
     BatchChatCompletionRequest,
     ChatCompletionRequest,
@@ -34,22 +32,6 @@ from vllm.entrypoints.speech_to_text.transcription.protocol import (
     TranscriptionResponse,
 )
 from vllm.entrypoints.speech_to_text.translation.protocol import TranslationRequest
-from vllm.renderers import ChatParams, TokenizeParams
-
-
-class RendererRequest(Protocol):
-    def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
-        raise NotImplementedError
-
-
-class RendererChatRequest(RendererRequest, Protocol):
-    def build_chat_params(
-        self,
-        default_template: str | None,
-        default_template_content_format: ChatTemplateContentFormatOption,
-    ) -> ChatParams:
-        raise NotImplementedError
-
 
 CompletionLikeRequest: TypeAlias = (
     CompletionRequest

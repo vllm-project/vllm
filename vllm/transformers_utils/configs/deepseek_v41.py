@@ -2,17 +2,17 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import Any
 
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 
-class DeepseekV41Config(PretrainedConfig):
+class DeepseekV41Config(PreTrainedConfig):
     """DeepSeek V4.1 config.
 
-    The HF config nests the text model under ``text_config`` and the vision
-    tower under ``vision_config``. The vLLM model code (ported from
-    ``deepseek_v4``) reads flat attributes, so both sub-configs are flattened
+    The HF config nests the text model under `text_config` and the vision
+    tower under `vision_config`. The vLLM model code (ported from
+    `deepseek_v4`) reads flat attributes, so both sub-configs are flattened
     onto the top level here: text fields are exposed as-is, vision fields
-    with the ``vision_*`` naming used by ``deepseek_v41.common.vision``.
+    with the `vision_*` naming used by `deepseek_v41.common.vision`.
     """
 
     model_type = "deepseek_v41"
@@ -34,7 +34,7 @@ class DeepseekV41Config(PretrainedConfig):
         for key, value in text_config.items():
             if key == "model_type":
                 continue
-            # Don't clobber PretrainedConfig properties (e.g. is_encoder_decoder).
+            # Don't clobber PreTrainedConfig properties (e.g. is_encoder_decoder).
             if isinstance(getattr(type(self), key, None), property):
                 continue
             setattr(self, key, value)

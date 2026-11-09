@@ -36,7 +36,7 @@ from einops import rearrange
 from transformers import BaseImageProcessor, BatchFeature
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions, VideoDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions, VideoDummyOptions
 from vllm.distributed import parallel_state
 from vllm.distributed import utils as dist_utils
 from vllm.inputs import MultiModalDataDict
@@ -479,25 +479,25 @@ class Ernie4_5_VisionTransformer(nn.Module):
     ) -> dict[str, torch.Tensor]:
         """Compute encoder metadata outside the CUDA graph.
 
-        Splits the rotary embeddings, ``cu_seqlens`` and ``max_seqlen`` out of
+        Splits the rotary embeddings, `cu_seqlens` and `max_seqlen` out of
         `forward` so they can be precomputed on the host side and fed into a
         captured graph through fixed buffers. Shared by the eager path, CUDA
         graph capture and CUDA graph replay
 
         Args:
-            grid_thw: Per-frame grid sizes as a ``[num_frames, 3]`` tensor or
-                an equivalent list of ``[t, h, w]``.
-            num_pad: Legacy ``cu_seqlens`` padding
-            max_batch_size: If set, pad ``cu_seqlens`` to ``max_batch_size + 1``
+            grid_thw: Per-frame grid sizes as a `[num_frames, 3]` tensor or
+                an equivalent list of `[t, h, w]`.
+            num_pad: Legacy `cu_seqlens` padding
+            max_batch_size: If set, pad `cu_seqlens` to `max_batch_size + 1`
                 entries for a fixed graph buffer shape.
-            max_seqlen_override: If set, use this value for ``max_seqlen``
-                instead of deriving it from ``cu_seqlens``. CUDA graph capture
-                bakes ``max_seqlen`` at capture time, so it must cover the
+            max_seqlen_override: If set, use this value for `max_seqlen`
+                instead of deriving it from `cu_seqlens`. CUDA graph capture
+                bakes `max_seqlen` at capture time, so it must cover the
                 worst-case replay.
-            device: Device for the returned tensors. Defaults to ``self.device``.
+            device: Device for the returned tensors. Defaults to `self.device`.
 
         Returns:
-            Dict with ``rotary_pos_emb``, ``cu_seqlens`` and ``max_seqlen``.
+            Dict with `rotary_pos_emb`, `cu_seqlens` and `max_seqlen`.
 
         """
         if device is None:
@@ -881,7 +881,7 @@ class Ernie4_5_VLProcessingInfo(BaseProcessingInfo):
         return self.ctx.model_config.hf_config
 
     def get_hf_processor(self, **kwargs: object):
-        return self.ctx.get_hf_processor(use_fast=True, **kwargs)
+        return self.ctx.get_hf_processor(**kwargs)
 
     def get_image_processor(self, **kwargs: object):
         return self.get_hf_processor(**kwargs).image_processor
@@ -1276,33 +1276,26 @@ class Ernie4_5_VLDummyInputsBuilder(BaseDummyInputsBuilder[Ernie4_5_VLProcessing
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
-        num_images = mm_counts.get("image", 0)
-        num_videos = mm_counts.get("video", 0)
-
         target_width, target_height = self.info.get_image_size_with_most_features()
         target_num_frames = self.info.get_num_frames_with_most_features(
             seq_len, mm_counts
         )
 
-        image_overrides = mm_options.get("image")
-        video_overrides = mm_options.get("video")
-        assert video_overrides is None or isinstance(video_overrides, VideoDummyOptions)
-
         return {
             "image": self._get_dummy_images(
                 width=target_width,
                 height=target_height,
-                num_images=num_images,
-                overrides=image_overrides,
+                num_images=mm_counts.get("image", 0),
+                overrides=mm_options.get("image"),
             ),
             "video": self._get_dummy_videos(
                 width=target_width,
                 height=target_height,
                 num_frames=target_num_frames,
-                num_videos=num_videos,
-                overrides=video_overrides,
+                num_videos=mm_counts.get("video", 0),
+                overrides=mm_options.get("video"),
             ),
         }
 
@@ -1600,11 +1593,10 @@ class Ernie4_5_VLMoeForConditionalGeneration(
     #
     # Only the vision transformer (self.vision_model) is captured into the
     # CUDA graph. The VariableResolutionResamplerModel (spatial merge +
-    # projection) runs eagerly in encoder_eager_forward / postprocess_
-    # encoder_output because its temporal path performs host-side (numpy)
-    # indexing that cannot be captured. Image only: video uses a temporal
-    # conv that changes the output token count, so it falls back to the
-    # eager multimodal path for now.
+    # projection) runs eagerly in postprocess_encoder_output because its
+    # temporal path performs host-side (numpy) indexing that cannot be
+    # captured. Image only: video uses a temporal conv that changes the output
+    # token count, so it falls back to the eager multimodal path for now.
 
     def get_encoder_cudagraph_config(self):
         from vllm.v1.worker.encoder_cudagraph_defs import EncoderCudaGraphConfig
@@ -1736,14 +1728,13 @@ class Ernie4_5_VLMoeForConditionalGeneration(
     def encoder_eager_forward(
         self, mm_kwargs: dict[str, Any], path: str = "default"
     ) -> torch.Tensor:
-        # Eager fallback: run the full pipeline (ViT + resampler). The result
-        # is scattered directly, so it must be the post-merge embeddings.
+        # ViT only, like the graph: postprocess_encoder_output runs the
+        # resampler on both outputs.
         pixel_values = mm_kwargs["pixel_values"].type(self.vision_model.dtype)
         grid_thw = async_tensor_h2d(
             mm_kwargs["image_grid_thw"], self.vision_model.device
         )
-        image_features = self.vision_model(pixel_values, grid_thw)
-        return self.resampler_model(image_features, grid_thw)
+        return self.vision_model(pixel_values, grid_thw)
 
     def postprocess_encoder_output(
         self,

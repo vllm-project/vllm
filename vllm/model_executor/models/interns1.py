@@ -12,17 +12,17 @@ from typing import Annotated, Literal, TypeAlias, TypedDict
 import regex as re
 import torch
 import torch.nn as nn
-from transformers import BatchFeature, InternVLProcessor, PretrainedConfig
+from transformers import BatchFeature, InternVLProcessor, PreTrainedConfig
 from transformers.activations import ACT2FN
-from transformers.models.got_ocr2.image_processing_got_ocr2_fast import (
-    GotOcr2ImageProcessorFast,
+from transformers.models.got_ocr2.image_processing_got_ocr2 import (
+    GotOcr2ImageProcessor,
 )
 from transformers.models.internvl.video_processing_internvl import (
     InternVLVideoProcessor,
 )
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions, VideoDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.models.interns1_vit import InternS1VisionModel
@@ -202,7 +202,7 @@ class InternS1ProcessingInfo(BaseProcessingInfo):
         processor: InternVLProcessor,
         mm_kwargs: Mapping[str, object],
     ) -> int:
-        image_processor: GotOcr2ImageProcessorFast = processor.image_processor
+        image_processor: GotOcr2ImageProcessor = processor.image_processor
 
         num_image_patches = image_processor.get_number_of_image_patches(
             image_height,
@@ -299,35 +299,29 @@ class InternS1DummyInputsBuilder(BaseDummyInputsBuilder[InternS1ProcessingInfo])
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
         target_width, target_height = self.info.get_image_size_with_most_features()
         target_num_frames = self.info.get_num_frames_with_most_features(
             seq_len, mm_counts
         )
-        num_images = mm_counts.get("image", 0)
-        num_videos = mm_counts.get("video", 0)
 
         config = self.info.get_hf_config()
         image_size_h, image_size_w = config.vision_config.image_size
-
-        image_overrides = mm_options.get("image")
-        video_overrides = mm_options.get("video")
-        assert video_overrides is None or isinstance(video_overrides, VideoDummyOptions)
 
         return {
             "image": self._get_dummy_images(
                 width=target_width,
                 height=target_height,
-                num_images=num_images,
-                overrides=image_overrides,
+                num_images=mm_counts.get("image", 0),
+                overrides=mm_options.get("image"),
             ),
             "video": self._get_dummy_videos(
                 width=image_size_w,
                 height=image_size_h,
                 num_frames=target_num_frames,
-                num_videos=num_videos,
-                overrides=video_overrides,
+                num_videos=mm_counts.get("video", 0),
+                overrides=mm_options.get("video"),
             ),
         }
 
@@ -618,7 +612,7 @@ class InternS1ForConditionalGeneration(
 
     def _init_vision_model(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None,
         *,
         prefix: str,
@@ -631,7 +625,7 @@ class InternS1ForConditionalGeneration(
             prefix=prefix,
         )
 
-    def _init_mlp1(self, config: PretrainedConfig) -> nn.Module:
+    def _init_mlp1(self, config: PreTrainedConfig) -> nn.Module:
         return InternS1MultiModalProjector(config)
 
     def pixel_shuffle(self, x, scale_factor=0.5):

@@ -35,12 +35,12 @@ def compute_aligned_M_and_alignment(
 
     `alignment_used` may be smaller than the caller-supplied `alignment` on
     SM100/SM120 when DeepGEMM can JIT a smaller BLOCK_M for the per-call
-    expected_m. Callers that index by block size (e.g. ``M_sum // block_m``)
+    expected_m. Callers that index by block size (e.g. `M_sum // block_m`)
     or assert workspace alignment must use the returned `alignment_used`,
     not their original `alignment` argument.
 
-    Prefer this over the int-returning :func:`compute_aligned_M` when the
-    GEMM call site needs to wrap itself in ``mk_alignment_scope`` or
+    Prefer this over the int-returning `compute_aligned_M` when the
+    GEMM call site needs to wrap itself in `mk_alignment_scope` or
     otherwise reason about the actual per-expert padding.
     """
     if (expert_tokens_meta is not None) and (
@@ -89,13 +89,13 @@ def compute_aligned_M(
     alignment: int,
     expert_tokens_meta: mk.ExpertTokensMetadata | None,
 ) -> int:
-    """Return ``M_sum`` only (backward-compat wrapper).
+    """Return `M_sum` only (backward-compat wrapper).
 
-    Equivalent to :func:`compute_aligned_M_and_alignment`'s first return
+    Equivalent to `compute_aligned_M_and_alignment`'s first return
     value. Existing downstream callers and the warmup path that only size
     a workspace use this. Call sites that need the actual per-expert
-    alignment (to wrap GEMMs in ``mk_alignment_scope``) should use
-    :func:`compute_aligned_M_and_alignment` instead.
+    alignment (to wrap GEMMs in `mk_alignment_scope`) should use
+    `compute_aligned_M_and_alignment` instead.
     """
     M_sum, _ = compute_aligned_M_and_alignment(
         M, num_topk, local_num_experts, alignment, expert_tokens_meta
@@ -119,6 +119,7 @@ def _fwd_kernel_ep_scatter_1(
     BLOCK_E: tl.constexpr,
     BLOCK_EXPERT_NUM: tl.constexpr,
     ALIGN_M: tl.constexpr,
+    USE_PSUM_LAYOUT: tl.constexpr,
 ):
     cur_expert = tl.program_id(0)
 
@@ -140,20 +141,22 @@ def _fwd_kernel_ep_scatter_1(
     tl.store(expert_start_loc + cur_expert, cur_expert_start)
     cur_expert_token_num = tl.load(num_recv_tokens_per_expert + cur_expert)
 
-    m_indices_start_ptr = m_indices + cur_expert_start
-    off_expert = tl.arange(0, BLOCK_E)
+    if USE_PSUM_LAYOUT:
+        # Logical ends include preceding experts' alignment gaps.
+        tl.store(m_indices + cur_expert, cur_expert_start + cur_expert_token_num)
+    else:
+        m_indices_start_ptr = m_indices + cur_expert_start
+        off_expert = tl.arange(0, BLOCK_E)
 
-    # any rows in the per-expert aligned region that do not correspond to
-    # real tokens are left untouched here and should remain initialized to
-    # -1 so DeepGEMM can skip them
-    for start_m in tl.range(0, cur_expert_token_num, BLOCK_E):
-        offs = start_m + off_expert
-        mask = offs < cur_expert_token_num
-        tl.store(
-            m_indices_start_ptr + offs,
-            cur_expert,
-            mask=mask,
-        )
+        # Unwritten padding retains the -1 initialization.
+        for start_m in tl.range(0, cur_expert_token_num, BLOCK_E):
+            offs = start_m + off_expert
+            mask = offs < cur_expert_token_num
+            tl.store(
+                m_indices_start_ptr + offs,
+                cur_expert,
+                mask=mask,
+            )
 
 
 @triton.jit
@@ -285,6 +288,7 @@ def ep_scatter(
     align_m: int = 128,
     block_size: int = 128,
     pack_ue8m0: bool = False,
+    use_psum_layout: bool = False,
 ):
     # BLOCK_E is the m_indices fill-loop tile (masked), independent of align_m.
     BLOCK_E = 128
@@ -295,7 +299,10 @@ def ep_scatter(
     # grid = (triton.cdiv(hidden_size, BLOCK_D), num_experts)
     grid = num_experts
 
-    assert m_indices.shape[0] % align_m == 0
+    if use_psum_layout:
+        assert m_indices.shape == (num_experts,)
+    else:
+        assert m_indices.shape[0] % align_m == 0
     assert expert_start_loc.shape[0] == num_experts
 
     # pack_ue8m0: scatter packs 4 UE8M0 bytes per int32; else copies scales as-is.
@@ -311,6 +318,7 @@ def ep_scatter(
         BLOCK_E=BLOCK_E,
         BLOCK_EXPERT_NUM=triton.next_power_of_2(num_experts),
         ALIGN_M=align_m,
+        USE_PSUM_LAYOUT=use_psum_layout,
     )
 
     grid = min(recv_topk.shape[0], 1024 * 8)
@@ -407,7 +415,7 @@ def _fwd_kernel_ep_gather(
 
         tl.store(
             output_tensor
-            + cur_token * output_tensor_stride0
+            + tl.cast(cur_token, tl.int64) * output_tensor_stride0
             + cur_block * BLOCK_D
             + off_d,
             accumulator.to(output_tensor.dtype.element_ty),
@@ -465,6 +473,7 @@ def deepgemm_moe_permute(
     expert_tokens_meta: mk.ExpertTokensMetadata | None,
     aq_out: torch.Tensor | None = None,
     block_size: int | None = None,
+    use_psum_layout: bool = False,
 ):
     assert aq.ndim == 2
     assert topk_ids.dtype.is_signed, "The kernel uses -1 to represent invalid topk_ids"
@@ -509,25 +518,23 @@ def deepgemm_moe_permute(
     else:
         aq_scale_out = torch.zeros((M_sum, sf_k), device=device, dtype=torch.float32)
 
-    # DeepGEMM uses negative values in m_indices (here expert_ids) to mark
-    # completely invalid / padded blocks that should be skipped. We always
-    # initialize expert_ids to -1 so any row that is not explicitly written
-    # by the scatter kernel will be treated as invalid and skipped by
-    # DeepGEMM's scheduler.
-    expert_ids = torch.full(
-        (M_sum,),
-        fill_value=-1,
-        device=device,
-        dtype=torch.int32,
-    )
+    if use_psum_layout:
+        grouped_layout = torch.empty(
+            (local_num_experts,), device=device, dtype=torch.int32
+        )
+    else:
+        # Negative expert IDs mark padding for the contiguous scheduler.
+        grouped_layout = torch.full(
+            (M_sum,), fill_value=-1, device=device, dtype=torch.int32
+        )
     inv_perm = torch.empty(topk_ids.shape, device=device, dtype=torch.int32)
 
     expert_num_tokens = None
     if expert_tokens_meta is not None:
         expert_num_tokens = expert_tokens_meta.expert_num_tokens
     if expert_num_tokens is None:
-        # A cudagraph-decode carrier may hold only psum_recv_per_rank and leave
-        # expert_num_tokens None; count locally as in the meta-absent case.
+        # A DeepEP v2 cudagraph-decode carrier leaves expert_num_tokens None
+        # (no CPU sync in that mode); count locally as in the meta-absent case.
         expert_num_tokens = count_expert_num_tokens(
             topk_ids, local_num_experts, expert_map
         )
@@ -541,14 +548,15 @@ def deepgemm_moe_permute(
         expert_map=expert_map,
         output_tensor=aq_out,
         output_tensor_scale=aq_scale_out,
-        m_indices=expert_ids,
+        m_indices=grouped_layout,
         output_index=inv_perm,
         align_m=align_used,
         block_size=block_k,
         pack_ue8m0=pack_ue8m0,
+        use_psum_layout=use_psum_layout,
     )
 
-    return aq_out, aq_scale_out, expert_ids, inv_perm, align_used
+    return aq_out, aq_scale_out, grouped_layout, inv_perm, align_used
 
 
 def deepgemm_unpermute_and_reduce(

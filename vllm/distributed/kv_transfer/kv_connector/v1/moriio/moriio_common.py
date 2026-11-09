@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
+import math
 import os
 import threading
 import time
@@ -30,7 +31,9 @@ from vllm.utils.network_utils import (
 )
 
 if TYPE_CHECKING:
-    pass
+    from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_tp_mapping import (
+        MoRIIOWriteTPMapping,
+    )
 
 from dataclasses import field
 from enum import Enum
@@ -42,7 +45,15 @@ Transfer = tuple[int, float]
 EngineId = str
 ReqId = str
 TransferId = str
-TransferOffsetsKey = tuple[str, tuple[int, ...], tuple[int, ...], torch.dtype]
+# (layer, cache shape, cache stride, dtype, destination TP rank)
+TransferOffsetsKey = tuple[str, tuple[int, ...], tuple[int, ...], torch.dtype, int]
+
+
+def _positive_finite_timeout(name: str, value: Any) -> float:
+    timeout = float(value)
+    if not math.isfinite(timeout) or timeout <= 0:
+        raise ValueError(f"{name} must be finite and greater than zero")
+    return timeout
 
 
 class MoRIIOTransferAck(NamedTuple):
@@ -55,12 +66,19 @@ class WriteTask:
     request_id: ReqId
     transfer_id: TransferId
     dst_engine_id: str
-    local_block_ids: list[int]
-    remote_block_ids_hint: list[int] | None
+    local_block_ids: BlockIds
+    remote_block_ids_hint: BlockIds | None
     layer_name: str
     event: torch.cuda.Event
     remote_notify_port: int
     remote_ip: str
+    remote_tp_size: int | None = None
+    multi_pod_hosts: list[str] = field(default_factory=list)
+    remote_dp_size_local: int = 0
+    remote_dp_size: int = 1
+    # Consumer ranks this producer rank writes, and what each receives. None
+    # writes the whole shard to the consumer rank with this producer's index.
+    tp_mapping: "MoRIIOWriteTPMapping | None" = None
     enqueue_time: float = field(default_factory=time.perf_counter)
     retried: int = 0
 
@@ -83,13 +101,18 @@ class LayerTransferPlan:
 class RemoteAllocInfo:
     """Information about remote block allocation."""
 
-    block_ids: list[int]
+    block_ids: BlockIds | None
     writes_done: int = 0
     writes_expected: int | None = None
     decode_dp_rank: int = 0
     completion_request_id: str | None = None
-    completion_remote_notify_port: int | None = None
+    completion_notify_port: int | None = None
     completion_remote_ip: str | None = None
+    # (ip, notify port) -> producer ranks writing into that consumer rank.
+    completion_notify_targets: dict[tuple[str, int], int] = field(default_factory=dict)
+    # Set once the targets above are known, even when there are none (a
+    # producer whose copy another producer writes still has to finish).
+    completion_targets_resolved: bool = False
     completion_notified: bool = False
     transfer_statuses: list[Any] = field(default_factory=list)
     transfer_offsets: dict[
@@ -116,6 +139,13 @@ class MoRIIOAgentMetadata(
     num_blocks: int
     block_len: int
     attn_backend_name: str
+    # Per-layer HeadLayout / MambaStateLayout wire forms, so a producer with a
+    # different TP size can address head and state slices of these caches.
+    kv_head_layouts: dict[str, list[int]] = {}
+    mamba_state_layouts: dict[str, list[int]] = {}
+    # Tokens per block of each attention layer. Hybrid models size attention
+    # blocks to the recurrent-state page, which depends on the TP size.
+    attention_block_sizes: dict[str, int] = {}
 
 
 class RoleManager:
@@ -160,6 +190,20 @@ class MoRIIOMode(Enum):
     WRITE = "write"
 
 
+class TransferBatchState(Enum):
+    """Verdict for a group of transfer statuses that belong to one request.
+
+    A request's KV transfer is spread over one status per layer (two for a KDA
+    layer), so a single status never decides the request: PENDING means at
+    least one is still in flight and none has failed, FAILED means at least
+    one failed, DONE means all succeeded.
+    """
+
+    DONE = "done"
+    FAILED = "failed"
+    PENDING = "pending"
+
+
 class MoRIIOError(Exception):
     """Base exception for MoRIIO operations."""
 
@@ -196,7 +240,7 @@ def get_port_offset(dp_rank: int, tp_rank: int, tp_size: int = 1) -> int:
 def fold_local_rank(global_dp_rank: int, dp_size_local: int) -> int:
     """Fold a global DP rank into its pod-local rank [0, dp_size_local).
 
-    ``dp_size_local == 0`` is the external-DP sentinel (local size unknown):
+    `dp_size_local == 0` is the external-DP sentinel (local size unknown):
     return the rank unchanged, since a global DP rank is always < the global
     DP size so no folding is needed and the modulo is skipped (never divides
     by zero).
@@ -207,7 +251,7 @@ def fold_local_rank(global_dp_rank: int, dp_size_local: int) -> int:
 def pod_index(global_dp_rank: int, dp_size_local: int) -> int:
     """Pod index (0-based) a global DP rank lives on for Wide-EP multi-pod.
 
-    ``dp_size_local == 0`` (external-DP sentinel) collapses to a single pod.
+    `dp_size_local == 0` (external-DP sentinel) collapses to a single pod.
     """
     return global_dp_rank // dp_size_local if dp_size_local else 0
 
@@ -215,10 +259,10 @@ def pod_index(global_dp_rank: int, dp_size_local: int) -> int:
 def resolve_host_ip(extra_config: dict) -> str:
     """The IP this MoRIIO process advertises for KV transfer.
 
-    Honors an explicit ``host_ip`` in ``kv_connector_extra_config`` before
-    falling back to ``get_ip()``. An external router/orchestrator can set it to
+    Honors an explicit `host_ip` in `kv_connector_extra_config` before
+    falling back to `get_ip()`. An external router/orchestrator can set it to
     the node's routable address; this is required under frameworks (e.g. Ray)
-    where ``get_ip()`` resolves to an unroutable public IP and ``VLLM_HOST_IP``
+    where `get_ip()` resolves to an unroutable public IP and `VLLM_HOST_IP`
     cannot be propagated to the worker processes that bind the transfer engine.
     """
     return extra_config.get("host_ip") or get_ip()
@@ -260,6 +304,7 @@ class MoRIIOConfig:
     tp_size: int
     transfer_timeout: float
     defer_timeout: float
+    recv_abort_timeout: float
     read_mode: bool = False
     qp_per_transfer: int = 1
     post_batch_size: int = -1
@@ -282,8 +327,10 @@ class MoRIIOConfig:
         #                     WRITE mode.
         # transfer_timeout -> Timeout for waiting_for_transfer_complete before
         #                     raising TransferError (sec).
-        # defer_timeout    -> Timeout before a deferred send with no finished_sending
-        #                     notification is reaped and its blocks force-freed (sec).
+        # defer_timeout    -> Timeout for deferred WRITE allocation or a missing
+        #                     READ release notification (sec).
+        # recv_abort_timeout -> Timeout before an in-flight recv whose RDMA
+        #                     completion never arrived is aborted (sec).
 
         # Knobs for RDMA transfers, ignored if on xgmi backend
         # qp_per_transfer  -> Number of RDMA Queue Pairs per KV transfer.
@@ -315,13 +362,29 @@ class MoRIIOConfig:
                 "must be one of 'rdma' or 'xgmi'."
             )
 
-        transfer_timeout = float(
+        transfer_timeout = _positive_finite_timeout(
+            "kv_connector_extra_config.transfer_timeout",
             extra_config.get(
                 "transfer_timeout", MoRIIOConstants.DEFAULT_TRANSFER_TIMEOUT
-            )
+            ),
         )
-        defer_timeout = float(
-            extra_config.get("defer_timeout", MoRIIOConstants.DEFAULT_DEFER_TIMEOUT)
+        defer_timeout = _positive_finite_timeout(
+            "kv_connector_extra_config.defer_timeout",
+            extra_config.get("defer_timeout", MoRIIOConstants.DEFAULT_DEFER_TIMEOUT),
+        )
+        legacy_recv_abort_timeout = os.environ.get("VLLM_MORIIO_TRANSFER_TIMEOUT_S")
+        if legacy_recv_abort_timeout is not None:
+            logger.warning_once(
+                "The environment variable VLLM_MORIIO_TRANSFER_TIMEOUT_S is "
+                "deprecated. Set 'recv_abort_timeout' inside "
+                "kv_transfer_config.kv_connector_extra_config instead."
+            )
+        recv_abort_timeout = _positive_finite_timeout(
+            "kv_connector_extra_config.recv_abort_timeout",
+            extra_config.get(
+                "recv_abort_timeout",
+                legacy_recv_abort_timeout or MoRIIOConstants.DEFAULT_RECV_ABORT_TIMEOUT,
+            ),
         )
 
         return cls(
@@ -347,6 +410,7 @@ class MoRIIOConfig:
             backend=backend,
             transfer_timeout=transfer_timeout,
             defer_timeout=defer_timeout,
+            recv_abort_timeout=recv_abort_timeout,
         )
 
 
@@ -370,10 +434,14 @@ class MoRIIOConstants:
     # Timeout (seconds) for waiting_for_transfer_complete before raising TransferError.
     # Overridable via kv_connector_extra_config["transfer_timeout"].
     DEFAULT_TRANSFER_TIMEOUT = 30.0
-    # Timeout (seconds) before a deferred send with no finished_sending
-    # notification is reaped and its blocks force-freed.
+    # Timeout (seconds) for deferred WRITE allocation or a missing READ release
+    # notification.
     # Overridable via kv_connector_extra_config["defer_timeout"].
     DEFAULT_DEFER_TIMEOUT = 60.0
+    # Timeout (seconds) before an in-flight recv whose RDMA completion was lost
+    # is aborted, so the decode worker does not hang on it forever.
+    # Overridable via kv_connector_extra_config["recv_abort_timeout"].
+    DEFAULT_RECV_ABORT_TIMEOUT = 120.0
 
 
 # The router embeds both zmq_addresses in the request_id:
@@ -393,12 +461,12 @@ def parse_moriio_zmq_address(
 ) -> tuple[str, int, int]:
     """Parse the MoRI-IO zmq address into its components.
 
-    Parses ``"host:IP,handshake:PORT,notify:PORT"`` into
+    Parses `"host:IP,handshake:PORT,notify:PORT"` into
         (host, handshake_port, notify_port).
 
     Each key-value pair is split on the *first* colon so that IPv6 addresses
-    (e.g. ``host:::1``) are handled correctly.  Raises ``ValueError`` if any
-    of ``host``, ``handshake``, or ``notify`` keys are absent or if the port
+    (e.g. `host:::1`) are handled correctly.  Raises `ValueError` if any
+    of `host`, `handshake`, or `notify` keys are absent or if the port
     values are non-numeric.
     """
     parts: dict[str, str] = {}
@@ -423,12 +491,12 @@ def get_peer_zmq_from_request_id(request_id: str, is_producer: bool) -> str | No
     The producer (prefill) needs the decode's address; the consumer (decode)
     needs the prefill's address.
 
-    Returns ``None`` when the request_id does not encode peer info. The
-    llm-d routing sidecar (``llm-d-inference-scheduler``) does not embed
-    addresses in ``request_id``; instead it passes ``remote_host``,
-    ``remote_handshake_port`` and ``remote_notify_port`` explicitly in
-    ``kv_transfer_params``. Callers must handle the ``None`` return by
-    falling back to those fields. See ``add_new_req`` for the canonical
+    Returns `None` when the request_id does not encode peer info. The
+    llm-d routing sidecar (`llm-d-inference-scheduler`) does not embed
+    addresses in `request_id`; instead it passes `remote_host`,
+    `remote_handshake_port` and `remote_notify_port` explicitly in
+    `kv_transfer_params`. Callers must handle the `None` return by
+    falling back to those fields. See `add_new_req` for the canonical
     fallback path.
     """
     if is_producer:
@@ -486,35 +554,35 @@ class MoRIIOConnectorMetadata(KVConnectorMetadata):
         kv_transfer_params: dict[str, Any],
         write_mode=False,
     ):
-        """Ingest a peer's ``kv_transfer_params`` into a typed ``ReqMeta``.
+        """Ingest a peer's `kv_transfer_params` into a typed `ReqMeta`.
 
         This is the single place peer info enters the connector. The
-        ``kv_transfer_params`` contract (as produced by the llm-d sidecar /
-        vLLM router, or echoed by the prefill leg's ``request_finished``):
+        `kv_transfer_params` contract (as produced by the llm-d sidecar /
+        vLLM router, or echoed by the prefill leg's `request_finished`):
 
         Required (always):
-          * ``transfer_id``        -- stable id shared by both legs.
-          * ``remote_engine_id``   -- peer engine id for the handshake table.
-          * ``remote_block_ids``   -- peer block ids (may be [] in WRITE mode,
+          * `transfer_id`        -- stable id shared by both legs.
+          * `remote_engine_id`   -- peer engine id for the handshake table.
+          * `remote_block_ids`   -- peer block ids (may be [] in WRITE mode,
                                       where decode allocates its own blocks).
 
         Peer address -- ONE of the following two must resolve:
-          * embedded in ``request_id`` (vLLM-router PD id form), OR
-          * explicit ``remote_host`` + ``remote_handshake_port`` +
-            ``remote_notify_port`` (llm-d sidecar / returnable path).
+          * embedded in `request_id` (vLLM-router PD id form), OR
+          * explicit `remote_host` + `remote_handshake_port` +
+            `remote_notify_port` (llm-d sidecar / returnable path).
           If neither resolves we raise -- there is no safe default host/port.
 
         Optional (defaulted):
-          * ``tp_size``              (default 1) -- peer TP size.
-          * ``remote_dp_size``       (default 1) -- peer GLOBAL DP size.
-          * ``remote_dp_size_local`` (default = ``remote_dp_size``) -- per-pod
+          * `tp_size`              (default 1) -- peer TP size.
+          * `remote_dp_size`       (default 1) -- peer GLOBAL DP size.
+          * `remote_dp_size_local` (default = `remote_dp_size`) -- per-pod
                                       DP size for Wide-EP multi-pod port/host
                                       folding; 0/absent means single-pod.
-          * ``remote_hosts``         (default [remote_host]) -- per-pod IP list
-                                      indexed by ``pod_idx = rank // dp_local``.
+          * `remote_hosts`         (default [remote_host]) -- per-pod IP list
+                                      indexed by `pod_idx = rank // dp_local`.
 
-        Routing keys consumed elsewhere (NOT here): ``remote_dp_rank`` /
-        ``remote_dp_rank_override`` gate the decode->prefill notify target in
+        Routing keys consumed elsewhere (NOT here): `remote_dp_rank` /
+        `remote_dp_rank_override` gate the decode->prefill notify target in
         MoRIIOConnectorScheduler; they are router-authoritative and never
         self-derived (see that class's request routing contract).
         """
@@ -567,9 +635,12 @@ class MoRIIOConnectorMetadata(KVConnectorMetadata):
             remote_handshake_port=int(remote_handshake_port),
             remote_notify_port=int(remote_notify_port),
             # Remote peer TP degree (used as remote_tp_size downstream). The
-            # proxy advertises it under "remote_tp_size"; #46332 read "tp_size"
-            # which is absent on WRITE producer requests -> defaulted to 1 ->
-            # rank collapse. Read the right key; 0 == unknown (== homogeneous).
+            # decode side must know the prefiller's TP degree to map producer
+            # ranks onto the correct decode rank (and vice versa). The old plain
+            # "tp_size" key (#46332) is absent on WRITE producer requests and
+            # defaulted to 1, collapsing every producer rank onto decode rank 0
+            # and corrupting the transfer; prefer "remote_tp_size". 0 == unknown
+            # (treated as homogeneous downstream).
             tp_size=int(
                 kv_transfer_params.get("remote_tp_size")
                 or kv_transfer_params.get("tp_size")

@@ -4,7 +4,7 @@ import functools
 from collections.abc import Callable
 from typing import Any, ParamSpec, TypeVar
 
-from torch import fx as fx
+import torch
 
 from vllm import envs
 from vllm._aiter_ops import rocm_aiter_ops
@@ -35,7 +35,6 @@ if current_platform.is_cuda_alike() or current_platform.is_xpu():
         RMSNormReshapeFusionPass,
     )
     from .fusion.qk_norm_rope_fusion import QKNormRoPEFusionPass
-    from .fusion.sequence_parallelism import SequenceParallelismPass
     from .utility.split_coalescing import SplitCoalescingPass
 
 if current_platform.is_cuda_alike():
@@ -48,9 +47,16 @@ if current_platform.is_cuda_alike():
     from .fusion.rope_kvcache_fusion import RopeKVCacheFusionPass
     from .utility.scatter_split_replace import ScatterSplitReplacementPass
 
+if current_platform.is_rocm() and rocm_aiter_ops.is_enabled():
+    from vllm.platforms.rocm import on_gfx950
+
+    from .fusion.muse_glimmer_qk_rope_cache_fusion import (
+        MuseGlimmerQkRopeCacheFusionPass,
+    )
+    from .fusion.muse_glimmer_sandwich_norm_fusion import MuseSandwichNormFusionPass
+
 if current_platform.is_cuda():
     from .fusion.allreduce_rms_fusion import AllReduceFusionPass
-    from .fusion.collective_fusion import AsyncTPPass
 
 if current_platform.is_xpu():
     from .fusion.act_quant_fusion import ActivationQuantFusionPass
@@ -105,7 +111,7 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
         self.passes: list[InductorPass] = []
 
     @with_pattern_match_debug
-    def __call__(self, graph: fx.Graph) -> None:
+    def __call__(self, graph: torch.fx.Graph) -> None:
         VllmInductorPass.dump_prefix = 0  # reset dump index
 
         compile_range = get_pass_context().compile_range
@@ -156,11 +162,6 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
             if self.pass_config.eliminate_noops:
                 self.passes += [NoOpEliminationPass(config)]
 
-            if self.pass_config.enable_sp:
-                self.passes += [SequenceParallelismPass(config)]
-                if self.pass_config.fuse_gemm_comms:
-                    self.passes += [AsyncTPPass(config)]
-
             if enable_transformers_norm_canonicalization:
                 self.passes += [AddRMSNormFusionPass(config)]
 
@@ -200,10 +201,38 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
                 ):
                     self.passes += [RocmAiterSiluMulFp8GroupQuantFusionPass(config)]
 
-            if self.pass_config.fuse_qk_norm_rope_kvcache:
+            muse_sandwich_norm = (
+                current_platform.is_rocm()
+                and rocm_aiter_ops.is_enabled()
+                and on_gfx950()
+                and model_config is not None
+                and model_config.dtype == torch.bfloat16
+                and model_config.architecture
+                in {
+                    "MuseGlimmerForCausalLM",
+                    "MuseGlimmerForConditionalGeneration",
+                }
+            )
+            if muse_sandwich_norm:
+                self.passes += [MuseSandwichNormFusionPass(config)]
+
+            muse_qk_rope_cache = (
+                current_platform.is_rocm()
+                and rocm_aiter_ops.is_enabled()
+                and model_config is not None
+                and model_config.architecture
+                in {
+                    "MuseGlimmerForCausalLM",
+                    "MuseGlimmerForConditionalGeneration",
+                }
+            )
+            if self.pass_config.fuse_qk_norm_rope_kvcache or muse_qk_rope_cache:
                 self.passes += [SplitCoalescingPass(config)]
                 self.passes += [ScatterSplitReplacementPass(config)]
-                self.passes += [QkNormRopeKvCacheFusionPass(config)]
+                if muse_qk_rope_cache:
+                    self.passes += [MuseGlimmerQkRopeCacheFusionPass(config)]
+                if self.pass_config.fuse_qk_norm_rope_kvcache:
+                    self.passes += [QkNormRopeKvCacheFusionPass(config)]
 
             if self.pass_config.fuse_mla_dual_rms_norm and rocm_aiter_ops.is_enabled():
                 self.passes += [MLADualRMSNormFusionPass(config)]
@@ -240,7 +269,7 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
         """
         passes = []
 
-        state: dict[str, Any] = {"pass_config": self.pass_config.compute_hash()}
+        state: dict[str, Any] = {"pass_config": self.pass_config.compile_factors()}
         for pass_ in self.passes:
             passes.append(pass_.uuid())
 

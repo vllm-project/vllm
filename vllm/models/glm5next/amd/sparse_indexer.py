@@ -8,10 +8,11 @@ import vllm.envs as envs
 from vllm import _custom_ops  # noqa: F401  # registers the torch.ops._C kernels
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
-from vllm.config import get_current_vllm_config_or_none
+from vllm.config import CUDAGraphMode, get_current_vllm_config_or_none
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
+from vllm.model_executor.layers.indexer_topk import get_indexer_topk
 from vllm.models.glm5next.amd.ops import kpool_compress as kpool_ops
 from vllm.models.glm5next.common.sparse_indexer import (
     RADIX_TOPK_WORKSPACE_SIZE,
@@ -24,6 +25,13 @@ from vllm.models.glm5next.common.sparse_indexer import (
     kv_cache_as_quant_view,
 )
 from vllm.platforms import current_platform
+from vllm.platforms.rocm import (
+    _ON_GFX942,
+    _ON_GFX950,
+    _ON_GFX1151,
+    _ON_RDNA,
+)
+from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import (
     LayerNameType,
     _encode_layer_name,
@@ -33,9 +41,15 @@ from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerMetadata,
 )
 from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
+from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+    _max_decode_logits_rows,
+)
 from vllm.v1.worker.workspace import current_workspace_manager
 
 logger = init_logger(__name__)
+
+_GFX950_KPOOL_AITER_MAX_POOLS = 256 * 1024  # (1M ctx)
+_GFX950_KPOOL_AITER_MIN_POOLS = 16 * 1024
 
 # kpool write helper: form pools from the current token batch and compress them
 # into the index K cache via the fused Triton kernel.
@@ -51,9 +65,9 @@ def _kpool_compress_insert(
     head_dim: int,
     round_scale: bool,
 ) -> None:
-    """Pool ``kpool`` consecutive tokens into one fp8 K and write at pool slots.
+    """Pool `kpool` consecutive tokens into one fp8 K and write at pool slots.
 
-    ``slot_mapping`` is pool-granular (compress_ratio == kpool on the spec):
+    `slot_mapping` is pool-granular (compress_ratio == kpool on the spec):
     only the *last* token of each complete pool carries a valid (>=0) slot;
     intra-pool tokens are -1. Every position is treated as a pool-completion
     candidate and non-completions are masked off inside the kernel. Compacting
@@ -87,6 +101,51 @@ def _kpool_compress_insert(
     )
 
 
+def _kpool_decode_topk_backend(
+    configured: str,
+    *,
+    num_rows: int,
+    max_valid_seq_len: int,
+    select_k: int,
+    index_kpool: int,
+    full_cudagraph: bool,
+) -> str:
+    """Select the topk backend for decodes.
+
+    Heuristic based on ctx lengths:
+    - <16k pools: in-tree hip kernel
+    - 16-256k pools: use aiter
+    - >256k pools: in-tree because not measured on >1m ctx
+
+    Since under FULL cudagraphs we cannot access the context length,
+    and the aiter kernel does not always outperform the in-tree kernel,
+    we default to in-tree kernel under FULL cudagraphs. Users can opt in
+    if they know their context length is long enough to benefit from aiter.
+    """
+    if (
+        configured != "auto"
+        or full_cudagraph
+        or not rocm_aiter_ops.is_indexer_top_k_enabled()
+    ):
+        return configured
+    if rocm_aiter_ops.is_indexer_top_k_supported(
+        is_prefill=False,
+        compress_ratio=index_kpool,
+        num_rows=num_rows,
+        max_valid_seq_len=max_valid_seq_len,
+    ):
+        return "aiter"
+    if (
+        index_kpool > 1
+        and select_k == 512
+        and _GFX950_KPOOL_AITER_MIN_POOLS
+        <= max_valid_seq_len
+        <= _GFX950_KPOOL_AITER_MAX_POOLS
+    ):
+        return "aiter"
+    return configured
+
+
 @eager_break_during_capture
 def sparse_attn_indexer_kpool(
     hidden_states: torch.Tensor,
@@ -100,7 +159,7 @@ def sparse_attn_indexer_kpool(
     scale_fmt: str | None,
     topk_tokens: int,
     head_dim: int,
-    max_model_len: int,
+    max_pool_len: int,
     total_seq_lens: int,
     topk_indices_buffer: torch.Tensor,
     skip_k_cache_insert: bool,
@@ -117,6 +176,7 @@ def sparse_attn_indexer_kpool(
     # path and when the tail cache is disabled.
     tail_kv_cache: torch.Tensor | None = None,
     tail_prefix: str | None = None,
+    topk_backend: str = "auto",
 ) -> torch.Tensor:
     # careful! this will be None in dummy run
     attn_metadata = get_forward_context().attn_metadata
@@ -126,37 +186,35 @@ def sparse_attn_indexer_kpool(
     # assert isinstance(attn_metadata, dict)
     if not isinstance(attn_metadata, dict):
         # Reserve workspace for indexer during profiling run
+        workspace_manager = current_workspace_manager()
         values_spec, scales_spec = _gather_workspace_shapes(
             total_seq_lens, head_dim, fp8_dtype, use_fp4_cache
         )
-        current_workspace_manager().get_simultaneous(
+        workspace_manager.get_simultaneous(
             values_spec,
             scales_spec,
             ((RADIX_TOPK_WORKSPACE_SIZE,), torch.uint8),
         )
 
-        # Reserve profiler-visible memory for the worst-case decode logits,
-        # whose shape is [B * next_n, max_model_len]. This profiling branch
-        # returns before invoking the logits kernel itself.
-        cfg = get_current_vllm_config_or_none()
-        worst_decode_tokens = 0
-        if cfg is not None:
-            sched = cfg.scheduler_config
-            num_spec = (
-                cfg.speculative_config.num_speculative_tokens
-                if cfg.speculative_config is not None
-                else 0
+        # Reserve workspace for the worst-case decode logits, whose shape in
+        # rocm_fp8_paged_mqa_logits is [B * next_n, max_pool_len] (or
+        # [H, B * next_n, max_pool_len] on the stage1 fallback path). This
+        # profiling branch returns before invoking the logits kernel itself.
+        decode_rows = _max_decode_logits_rows(hidden_states.shape[0])
+        if _ON_GFX942 or _ON_GFX950 or (_ON_RDNA and not _ON_GFX1151):
+            workspace_manager.get_simultaneous(
+                ((decode_rows, max_pool_len), torch.float32),
             )
-            worst_decode_tokens = min(
-                sched.max_num_seqs * (num_spec + 1),
-                sched.max_num_batched_tokens,
+        else:
+            workspace_manager.get_simultaneous(
+                ((q_quant.shape[1], decode_rows, max_pool_len), torch.float32),
             )
-        # float32 logits -> 4 bytes/element; uint8 sentinel so elems == bytes.
-        decode_logits_elems = worst_decode_tokens * max_model_len * 4
+
+        # Transient prefill logits peak memory, produced by rocm_fp8_mqa_logits
+        # while the workspace's k_quant and k_scale views are live.
         prefill_cap_elems = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
-        max_logits_elems = max(decode_logits_elems, prefill_cap_elems)
         _ = torch.empty(
-            max_logits_elems, dtype=torch.uint8, device=hidden_states.device
+            prefill_cap_elems, dtype=torch.uint8, device=hidden_states.device
         )
 
         return topk_indices_buffer
@@ -345,16 +403,33 @@ def sparse_attn_indexer_kpool(
                     chunk.token_start : chunk.token_end, :topk_tokens
                 ]
 
-            torch.ops._C.top_k_per_row_prefill(
-                logits,
-                chunk.cu_seqlen_ks,
-                chunk.cu_seqlen_ke,
-                topk_dst,
-                num_rows,
-                logits.stride(0),
-                logits.stride(1),
-                select_k,
-            )
+            if rocm_aiter_ops.is_indexer_top_k_supported(
+                is_prefill=True,
+                compress_ratio=index_kpool,
+                num_rows=num_rows,
+            ):
+                from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+                    _launch_aiter_top_k_per_row_prefill,
+                )
+
+                _launch_aiter_top_k_per_row_prefill(
+                    logits,
+                    chunk.cu_seqlen_ks,
+                    chunk.cu_seqlen_ke,
+                    topk_dst,
+                    select_k,
+                )
+            else:
+                torch.ops._C.top_k_per_row_prefill(
+                    logits,
+                    chunk.cu_seqlen_ks,
+                    chunk.cu_seqlen_ke,
+                    topk_dst,
+                    num_rows,
+                    logits.stride(0),
+                    logits.stride(1),
+                    select_k,
+                )
 
             if index_kpool > 1:
                 pool_ids = pool_topk.to(torch.int64)
@@ -566,7 +641,7 @@ def sparse_attn_indexer_kpool(
             seq_lens,
             decode_metadata.block_table,
             decode_metadata.schedule_metadata,
-            max_model_len=max_model_len,
+            max_model_len=max_pool_len,
         )
         num_rows = logits.shape[0]
         # kpool: logits are pool-granular -> select topk_tokens//kpool pools,
@@ -580,15 +655,29 @@ def sparse_attn_indexer_kpool(
         else:
             topk_dst = topk_indices_buffer[:num_padded_tokens, :topk_tokens]
 
-        torch.ops._C.top_k_per_row_decode(
+        full_cudagraph = (
+            get_forward_context().cudagraph_runtime_mode == CUDAGraphMode.FULL
+        )
+        if full_cudagraph:
+            topk_max_seq_len = max_pool_len * index_kpool
+        else:
+            topk_max_seq_len = attn_metadata_narrowed.max_seq_len
+
+        resolved_backend = _kpool_decode_topk_backend(
+            topk_backend,
+            num_rows=num_rows,
+            max_valid_seq_len=cdiv(topk_max_seq_len, index_kpool),
+            select_k=select_k,
+            index_kpool=index_kpool,
+            full_cudagraph=full_cudagraph,
+        )
+        get_indexer_topk(resolved_backend)(
             logits,
-            next_n,
             seq_lens,
+            next_n,
             topk_dst,
-            num_rows,
-            logits.stride(0),
-            logits.stride(1),
             select_k,
+            topk_max_seq_len,
         )
 
         # Resolve to token-level indices in the output buffer.
@@ -645,7 +734,7 @@ class SparseAttnIndexerKpool(CustomOp):
         scale_fmt: str,
         topk_tokens: int,
         head_dim: int,
-        max_model_len: int,
+        max_pool_len: int,
         max_total_seq_len: int,
         topk_indices_buffer: torch.Tensor,
         skip_k_cache_insert: bool = False,
@@ -659,13 +748,37 @@ class SparseAttnIndexerKpool(CustomOp):
         self.scale_fmt = scale_fmt
         self.topk_tokens = topk_tokens
         self.head_dim = head_dim
-        self.max_model_len = max_model_len
+        self.max_pool_len = max_pool_len
         self.max_total_seq_len = max_total_seq_len
         self.topk_indices_buffer = topk_indices_buffer
         self.skip_k_cache_insert = skip_k_cache_insert
         self.use_fp4_cache = use_fp4_cache
+        cfg = get_current_vllm_config_or_none()
+        self.topk_backend = (
+            cfg.kernel_config.sparse_indexer_topk_backend if cfg is not None else "auto"
+        )
+        if cfg is not None and cfg.parallel_config.decode_context_parallel_size > 1:
+            raise NotImplementedError(
+                "SparseAttnIndexerKpool on ROCm does not support DCP."
+            )
+        model_config = cfg.model_config if cfg is not None else None
+        hf_config = model_config.hf_text_config if model_config is not None else None
+        index_kpool = getattr(hf_config, "index_kpool", None) or 1
+        if index_kpool > 1:
+            kpool_ops.kpool_compress_dispatch.register_warmup(
+                k_cache=k_cache,
+                pool_size=index_kpool,
+                head_dim=head_dim,
+                round_scale=scale_fmt is not None,
+            )
+            if tail_cache is not None:
+                kpool_ops.kpool_tail_seed_dispatch.register_warmup(
+                    tail_cache=tail_cache,
+                    kpool=index_kpool,
+                    head_dim=head_dim,
+                )
 
-    def forward_native(
+    def forward_hip(
         self,
         hidden_states: torch.Tensor,
         q_quant: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
@@ -698,7 +811,7 @@ class SparseAttnIndexerKpool(CustomOp):
                 self.scale_fmt,
                 self.topk_tokens,
                 self.head_dim,
-                self.max_model_len,
+                self.max_pool_len,
                 self.max_total_seq_len,
                 self.topk_indices_buffer,
                 skip_k_cache_insert=self.skip_k_cache_insert,
@@ -715,7 +828,7 @@ class SparseAttnIndexerKpool(CustomOp):
             self.scale_fmt,
             self.topk_tokens,
             self.head_dim,
-            self.max_model_len,
+            self.max_pool_len,
             self.max_total_seq_len,
             self.topk_indices_buffer,
             self.skip_k_cache_insert,
@@ -726,4 +839,28 @@ class SparseAttnIndexerKpool(CustomOp):
             positions,
             self.tail_cache.kv_cache if self.tail_cache is not None else None,
             self.tail_cache.prefix if self.tail_cache is not None else None,
+            self.topk_backend,
+        )
+
+    def forward_native(
+        self,
+        hidden_states: torch.Tensor,
+        q_quant: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+        k: torch.Tensor,
+        weights: torch.Tensor,
+        *,
+        gate_score: torch.Tensor | None = None,
+        compress_ape: torch.Tensor | None = None,
+        index_kpool: int = 1,
+        positions: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        return self.forward_hip(
+            hidden_states,
+            q_quant,
+            k,
+            weights,
+            gate_score=gate_score,
+            compress_ape=compress_ape,
+            index_kpool=index_kpool,
+            positions=positions,
         )
