@@ -221,6 +221,8 @@ def _note_memory_contributors(
 
 
 class GPUModelRunner(LoRAModelRunnerMixin):
+    _execution_memory_prepared: bool = False
+
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
@@ -1118,14 +1120,23 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.pooling_runner.dummy_pooler_run(hidden_states)
 
     @torch.inference_mode()
+    def prepare_execution_memory(self) -> None:
+        """Call the model's optional `prepare_execution_memory` once, before
+        KV cache memory is measured."""
+        if self._execution_memory_prepared:
+            return
+        prepare_memory = getattr(self.model, "prepare_execution_memory", None)
+        if prepare_memory is not None:
+            prepare_memory()
+        self._execution_memory_prepared = True
+
+    @torch.inference_mode()
     def profile_run(self, randomize_inputs: bool = False) -> None:
         if self.vllm_config.aux_output_config.enabled:
             self.aux_output_connector = get_aux_output_connector(
                 self.model, self.vllm_config
             )
-        prepare_memory = getattr(self.model, "prepare_execution_memory", None)
-        if prepare_memory is not None:
-            prepare_memory()
+        self.prepare_execution_memory()
         if self.supports_mm_inputs and self.is_first_pp_rank:
             mm_config = self.model_config.multimodal_config
             if mm_config is not None and not mm_config.skip_mm_profiling:

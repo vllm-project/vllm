@@ -2,7 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
+from functools import partial
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -265,7 +266,11 @@ def test_memory_profile_bounds_decode_logits_rows(monkeypatch, kv_cache_memory_b
         vllm_config=config,
         randomize_dummy_inputs=True,
         cache_config=SimpleNamespace(kv_cache_memory_bytes=kv_cache_memory_bytes),
-        model_runner=SimpleNamespace(profile_run=profile_run, model_memory_usage=0),
+        model_runner=SimpleNamespace(
+            prepare_execution_memory=lambda: None,
+            profile_run=profile_run,
+            model_memory_usage=0,
+        ),
         init_snapshot=SimpleNamespace(free_memory=2),
         _scoped_allocator_max_split=lambda **kwargs: nullcontext(),
     )
@@ -278,6 +283,96 @@ def test_memory_profile_bounds_decode_logits_rows(monkeypatch, kv_cache_memory_b
     with pytest.raises(Profiled):
         gpu_worker.Worker.determine_available_memory(worker)
     assert get_current_vllm_config_or_none() is None
+
+
+@pytest.mark.parametrize("fail", [False, True])
+def test_execution_memory_is_prepared_before_the_split_limit(monkeypatch, fail):
+    """The model's execution memory is prepared once inside the profiling
+    window at the original allocator settings, so the split limit does not
+    strand its capture and warm-up buffers in segments of their own; the limit
+    covers only the profile run and is restored on failure."""
+    from vllm.v1.worker.gpu.model_runner import GPUModelRunner
+
+    original = "garbage_collection_threshold:0.8"
+    allocator = {"settings": original}
+    events = []
+
+    class Model(torch.nn.Module):
+        def prepare_execution_memory(self):
+            events.append(("prepare", allocator["settings"]))
+
+    class Stop(Exception):
+        pass
+
+    def dummy_run(*args, **kwargs):
+        events.append(("profile", allocator["settings"]))
+        if fail:
+            raise RuntimeError("profiling failed")
+        return None, None
+
+    @contextmanager
+    def memory_profiling(*args, **kwargs):
+        events.append("window opens")
+        try:
+            yield SimpleNamespace()
+        finally:
+            events.append("window closes")
+
+    def stop_after_profiling():
+        raise Stop
+
+    config = SimpleNamespace(aux_output_config=SimpleNamespace(enabled=False))
+    runner = GPUModelRunner.__new__(GPUModelRunner)
+    runner.vllm_config = config
+    runner.model = Model()
+    runner.model_memory_usage = 0
+    runner.aux_output_connector = None
+    runner.supports_mm_inputs = False
+    runner.is_last_pp_rank = False
+    runner.max_num_tokens = 8
+    runner.encoder_cache = None
+    runner.pooling_runner = None
+    monkeypatch.setattr(runner, "_dummy_run", dummy_run)
+    monkeypatch.setattr(runner, "profile_cudagraph_memory", stop_after_profiling)
+    worker = SimpleNamespace(
+        vllm_config=config,
+        randomize_dummy_inputs=False,
+        cache_config=SimpleNamespace(kv_cache_memory_bytes=None),
+        model_runner=runner,
+        init_snapshot=SimpleNamespace(),
+    )
+    worker._scoped_allocator_max_split = partial(
+        gpu_worker.Worker._scoped_allocator_max_split, worker
+    )
+    monkeypatch.setattr(current_platform, "is_cuda_alike", lambda: True)
+    monkeypatch.setattr(torch.cuda.memory, "get_allocator_backend", lambda: "native")
+    monkeypatch.setattr(
+        torch._C,
+        "_accelerator_getAllocatorSettings",
+        lambda: allocator["settings"],
+        raising=False,
+    )
+    monkeypatch.setattr(
+        torch._C,
+        "_accelerator_setAllocatorSettings",
+        lambda settings: allocator.update(settings=settings),
+        raising=False,
+    )
+    monkeypatch.setattr(torch.accelerator, "synchronize", lambda: None)
+    monkeypatch.setattr(gpu_worker, "maybe_apply_startup_plan", lambda _: None)
+    monkeypatch.setattr(gpu_worker, "memory_profiling", memory_profiling)
+    monkeypatch.setenv("VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS", "1")
+
+    with pytest.raises(RuntimeError if fail else Stop):
+        gpu_worker.Worker.determine_available_memory(worker)
+
+    assert events == [
+        "window opens",
+        ("prepare", original),
+        ("profile", f"{original},max_split_size_mb:20"),
+        "window closes",
+    ]
+    assert allocator["settings"] == original
 
 
 @pytest.mark.parametrize(
@@ -327,6 +422,7 @@ def test_cudagraph_memory_profile_runs_only_when_applied(
         model_config=SimpleNamespace(multimodal_config=None),
         parallel_config=SimpleNamespace(),
         model_runner=SimpleNamespace(
+            prepare_execution_memory=lambda: None,
             profile_run=lambda **kwargs: None,
             model_memory_usage=0,
             profile_cudagraph_memory=profile_cudagraph_memory,

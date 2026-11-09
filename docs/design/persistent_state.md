@@ -65,9 +65,12 @@ A persistent-state model uses these Model Runner V2 hooks:
   `prepare_step` on the dummy and profiling runs that happen before its state
   slots are bound. Without it, `prepare_step` runs only once slots exist.
 - An optional `prepare_execution_memory()` method on the model is called once
-  at the start of `profile_run`, before KV cache memory is measured. Allocate
+  before the profiling run, before KV cache memory is measured. Allocate
   long-lived execution buffers there, such as workspaces or captured graphs, so
   they are counted before the remaining memory is divided into state pages.
+  When the budget is profiled, the worker calls it inside the profiling window
+  at the configured allocator settings, before it limits allocator block
+  splitting for the profiling run.
 - `ModelState.post_warmup()` is called once, after every warmup stage and
   before the worker serves. Use it to check that nothing a captured graph reads
   moved during warmup.

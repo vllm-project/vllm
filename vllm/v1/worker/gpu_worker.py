@@ -721,6 +721,14 @@ class Worker(WorkerBase):
                 self.init_snapshot,
                 weights_memory=int(self.model_runner.model_memory_usage),
             ) as profile_result,
+            set_current_vllm_config(self.vllm_config),
+        ):
+            # Model execution memory (e.g. captured graphs) is prepared before
+            # the split limit: under it, a cached segment at or above the limit
+            # is never reused for a smaller request, so each mid-size buffer of
+            # a capture or warm-up takes a new segment, and those held by graph
+            # pools cannot be released. memory_profiling still counts it.
+            self.model_runner.prepare_execution_memory()
             # Workspaces (e.g. the MoE workspace) grow in steps during this pass,
             # freeing each smaller buffer. Without a split limit, a later small
             # allocation can be carved out of a freed multi-GiB block and pin the
@@ -728,10 +736,10 @@ class Worker(WorkerBase):
             # counted as consumed and taken from the KV cache. Blocks above the
             # limit are never split, so they stay releasable. Exits before
             # memory_profiling measures, restoring the original limit.
-            self._scoped_allocator_max_split(max_split_size_mb=20),
-            set_current_vllm_config(self.vllm_config),
-        ):
-            self.model_runner.profile_run(randomize_inputs=self.randomize_dummy_inputs)
+            with self._scoped_allocator_max_split(max_split_size_mb=20):
+                self.model_runner.profile_run(
+                    randomize_inputs=self.randomize_dummy_inputs
+                )
 
         # Profile CUDA graph memory if graphs will be captured. The runner
         # decides itself, since encoder graphs don't depend on cudagraph_mode.
