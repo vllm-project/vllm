@@ -461,7 +461,7 @@ def test_qsa_ring_capacity_covers_one_speculative_step(
 
 
 def test_qsa_kv_cache_dtype_honors_skip_layers() -> None:
-    """``--kv-cache-dtype-skip-layers`` keeps the listed QSA layers unquantized.
+    """`--kv-cache-dtype-skip-layers` keeps the listed QSA layers unquantized.
 
     The MTP layer's own attention is the one that matters on Flash-Next: FP8
     there cuts draft acceptance at depth while the target layers stay FP8.

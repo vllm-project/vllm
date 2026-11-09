@@ -3,26 +3,26 @@
 """Fused Gemma-style RMSNorm for AMD ROCm via Triton.
 
 Gemma RMSNorm = normalize(x) * (1 + weight), computed in fp32. FlashInfer's
-``gemma_rmsnorm`` / ``gemma_fused_add_rmsnorm`` CUDA kernels are unavailable on
+`gemma_rmsnorm` / `gemma_fused_add_rmsnorm` CUDA kernels are unavailable on
 ROCm, so the AMD path previously used a ~8-op PyTorch sequence (float cast, add,
 pow, mean, rsqrt, two muls, cast) — each a separate kernel launch materializing
 fp32 intermediates. These kernels collapse that into a single pass per row.
 
 Entry points:
-  * ``gemma_rmsnorm(x, w, eps)``                 -> normalized tensor
-  * ``gemma_fused_add_rmsnorm(x, res, w, eps)``  -> (normalized, x + res)
-  * ``gemma_fused_add_rmsnorm_mxfp8(x, res, w, eps)``
+  * `gemma_rmsnorm(x, w, eps)`                 -> normalized tensor
+  * `gemma_fused_add_rmsnorm(x, res, w, eps)`  -> (normalized, x + res)
+  * `gemma_fused_add_rmsnorm_mxfp8(x, res, w, eps)`
         -> (MXFP8 values, E8M0 scales, x + res): the fused add + norm with the
            per-32-block MXFP8 activation quant as an epilogue, so a following
            MXFP8 linear need not quantize its input again.
-  * ``gemma_fused_add_rmsnorm_mxfp8_and_bf16(x, res, w, eps)``
+  * `gemma_fused_add_rmsnorm_mxfp8_and_bf16(x, res, w, eps)`
         -> (MXFP8 values, E8M0 scales, normed, x + res): the same, plus the
            normed rows in the input dtype for consumers that cannot take MXFP8.
 
-Both normalize over the last dim and broadcast ``weight`` (shape [N]) over it,
+Both normalize over the last dim and broadcast `weight` (shape [N]) over it,
 so they serve both the full-hidden norms (input/post-attn/final) and the
 per-head q_norm/k_norm (N == head_dim). Inputs may be non-contiguous views
-(e.g. ``qkv.split`` slices); strides are passed through and outputs are written
+(e.g. `qkv.split` slices); strides are passed through and outputs are written
 contiguous.
 """
 
@@ -190,15 +190,15 @@ def gemma_fused_add_rmsnorm_mxfp8(
     weight: torch.Tensor,
     eps: float,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """``gemma_fused_add_rmsnorm`` with the normed output quantized to MXFP8.
+    """`gemma_fused_add_rmsnorm` with the normed output quantized to MXFP8.
 
-    Bit-identical to ``mxfp8_e4m3_quantize(gemma_fused_add_rmsnorm(...)[0])``.
+    Bit-identical to `mxfp8_e4m3_quantize(gemma_fused_add_rmsnorm(...)[0])`.
 
     Returns:
-        ``(x_q, x_scale, residual_out)``: ``x_q`` float8_e4m3fn ``[M, N]`` and
-        ``x_scale`` uint8 E8M0 ``[M, N // 32]`` (row-major, not swizzled), with
-        the leading dims of ``x`` flattened into ``M``; ``residual_out`` has
-        the shape of ``x``.
+        `(x_q, x_scale, residual_out)`: `x_q` float8_e4m3fn `[M, N]` and
+        `x_scale` uint8 E8M0 `[M, N // 32]` (row-major, not swizzled), with
+        the leading dims of `x` flattened into `M`; `residual_out` has
+        the shape of `x`.
 
     """
     n = x.shape[-1]
@@ -216,14 +216,14 @@ def gemma_fused_add_rmsnorm_mxfp8_and_bf16(
     weight: torch.Tensor,
     eps: float,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """``gemma_fused_add_rmsnorm_mxfp8`` that also writes the bf16 normed row.
+    """`gemma_fused_add_rmsnorm_mxfp8` that also writes the bf16 normed row.
 
     For a norm whose output feeds both an MXFP8 linear and bf16 consumers (the
     MoE router and routed experts next to the shared expert's gate_up_proj).
 
     Returns:
-        ``(x_q, x_scale, normed, residual_out)``; ``normed`` is bit-identical
-        to ``gemma_fused_add_rmsnorm(...)[0]``.
+        `(x_q, x_scale, normed, residual_out)`; `normed` is bit-identical
+        to `gemma_fused_add_rmsnorm(...)[0]`.
 
     """
     n = x.shape[-1]

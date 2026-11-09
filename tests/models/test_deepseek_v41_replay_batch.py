@@ -278,8 +278,8 @@ def test_replay_batch_keeps_device_decode_boundaries(state):
 
 
 def _replay_gather_case(kept_rows, prev_kept_rows=None):
-    """A batch of decodes and prefills, trimmed to their last ``kept_rows``
-    rows (and, for a later stage, the previous stage's ``prev_kept_rows``)."""
+    """A batch of decodes and prefills, trimmed to their last `kept_rows`
+    rows (and, for a later stage, the previous stage's `prev_kept_rows`)."""
     query_lens = [1, 300, 100, 5000, 7, 129]
     seq_lens = [500, 300, 300, 9000, 7, 4000]
     trims = [False, True, False, True, True, True]

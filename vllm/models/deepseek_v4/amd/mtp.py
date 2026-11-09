@@ -2,13 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """MTP draft model for DeepSeek V4 (internal codename: DeepseekV4).
 
-Split from ``deepseek_mtp.py`` because the V4 architecture introduces several
+Split from `deepseek_mtp.py` because the V4 architecture introduces several
 pieces that have no analogue in V3/V32:
-  * separate ``e_proj`` / ``h_proj`` with fp8 linear quantization (instead of
-    the fused ``eh_proj``);
-  * ``hc_head`` hypercompressed vocab projection applied in ``compute_logits``;
-  * ``DeepseekV4DecoderLayer`` with its own aux-stream management;
-  * V4-specific checkpoint weight-name remapping in ``load_weights``.
+  * separate `e_proj` / `h_proj` with fp8 linear quantization (instead of
+    the fused `eh_proj`);
+  * `hc_head` hypercompressed vocab projection applied in `compute_logits`;
+  * `DeepseekV4DecoderLayer` with its own aux-stream management;
+  * V4-specific checkpoint weight-name remapping in `load_weights`.
 """
 
 import typing

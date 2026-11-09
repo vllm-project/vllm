@@ -3,10 +3,10 @@
 """Decoder-side SWA bounded replay: running the replay layers on their batch.
 
 Once the last KV-source layer has written every row's KV, it and the layers past
-it (which own only SWA KV) run on each request's last ``window`` rows only.
-``DeepseekV41ModelState`` prepares those rows as a sub-batch with attention
+it (which own only SWA KV) run on each request's last `window` rows only.
+`DeepseekV41ModelState` prepares those rows as a sub-batch with attention
 metadata and a forward context of its own, like a microbatch;
-``DecoderReplayLayers`` gathers the layer inputs by its rows, runs the layers
+`DecoderReplayLayers` gathers the layer inputs by its rows, runs the layers
 under that context and scatters the outputs back to batch rows. FULL graphs and
 small PIECEWISE ones keep the layers on the whole batch; larger PIECEWISE graphs
 break out to the replay batch, which may run in a graph of its own
@@ -29,9 +29,9 @@ from vllm.model_executor.layers.fused_moe.moe_output import MoEOutput
 
 
 def exact_replay_rows(window: int, num_layers: int) -> int:
-    """Trailing rows to recompute so that the last ``window`` rows' outputs come
-    out as in the full forward after ``num_layers`` sliding-window layers: a
-    row's window reaches ``window - 1`` rows back, so each layer the exact rows
+    """Trailing rows to recompute so that the last `window` rows' outputs come
+    out as in the full forward after `num_layers` sliding-window layers: a
+    row's window reaches `window - 1` rows back, so each layer the exact rows
     lose that many at their low end."""
     return window + num_layers * (window - 1)
 
@@ -39,9 +39,9 @@ def exact_replay_rows(window: int, num_layers: int) -> int:
 def exact_replay_stages(
     window: int, cut: int, end: int, layers_per_stage: int
 ) -> list[tuple[int, int, int]]:
-    """``(first layer, end layer, rows)`` of each replay stage of layers
-    ``cut``..``end``: a stage runs each request's last ``rows`` rows, as many as
-    the layers from its first one on need for the last ``window`` rows to come
+    """`(first layer, end layer, rows)` of each replay stage of layers
+    `cut`..`end`: a stage runs each request's last `rows` rows, as many as
+    the layers from its first one on need for the last `window` rows to come
     out exact. The cut writes every row's KV, so the first stage keeps the rows
     of the layer after it."""
     stages = []
@@ -57,8 +57,8 @@ def exact_replay_stages(
 
 @dataclass
 class ReplayStage:
-    """A later replay stage: ``select`` picks its rows out of the previous stage's
-    outputs, ``rows`` are their batch rows."""
+    """A later replay stage: `select` picks its rows out of the previous stage's
+    outputs, `rows` are their batch rows."""
 
     rows: torch.Tensor
     select: torch.Tensor
@@ -68,8 +68,8 @@ class ReplayStage:
 
 @dataclass
 class ReplayBatch:
-    """One forward's replay batch; ``run_graph`` is set when it runs in a graph.
-    ``stages`` run after it on fewer rows each (layer-wise exact replay)."""
+    """One forward's replay batch; `run_graph` is set when it runs in a graph.
+    `stages` run after it on fewer rows each (layer-wise exact replay)."""
 
     rows: torch.Tensor
     forward_context: ForwardContext
@@ -81,22 +81,22 @@ class ReplayBatch:
 class DecoderReplayLayers:
     """Runs the replay layers on the step's replay batch.
 
-    ``run_layers`` takes a batch's layer inputs and returns its per-row outputs;
-    ``write_batch_kv`` takes them too and writes the first replay layer's KV for
-    every row. ``metadata_prefixes`` are the attention metadata keys the layers
-    read, so the replay batch builds only those. ``first_swa_prefix`` keys the
+    `run_layers` takes a batch's layer inputs and returns its per-row outputs;
+    `write_batch_kv` takes them too and writes the first replay layer's KV for
+    every row. `metadata_prefixes` are the attention metadata keys the layers
+    read, so the replay batch builds only those. `first_swa_prefix` keys the
     first replay layer's SWA metadata, built with the batch's window starts.
-    ``has_early_aux`` tells whether layers before the replay layers capture aux
+    `has_early_aux` tells whether layers before the replay layers capture aux
     hidden states, which the forward holds across the replay layers.
-    ``kept_rows`` is how many trailing rows of each prefill the layers run on:
-    ``window`` by default, more when their outputs must match the full forward.
+    `kept_rows` is how many trailing rows of each prefill the layers run on:
+    `window` by default, more when their outputs must match the full forward.
 
-    With ``stage_rows`` the layers run in stages instead, each on fewer trailing
-    rows (``exact_replay_stages``): ``run_stage(i, *inputs)`` runs stage ``i``
+    With `stage_rows` the layers run in stages instead, each on fewer trailing
+    rows (`exact_replay_stages`): `run_stage(i, *inputs)` runs stage `i`
     and returns its output, pre-mix, post-mix, res-mix and residual (the last
     stage: its collapsed output and pre-mix), then the aux hidden states it
-    captures. ``stage_metadata_prefixes`` are the metadata keys each stage reads.
-    ``select_shared_rows(select)`` keeps the given rows of the per-row buffers
+    captures. `stage_metadata_prefixes` are the metadata keys each stage reads.
+    `select_shared_rows(select)` keeps the given rows of the per-row buffers
     layers share across stages (indexer top-k, candidate blocks).
     """
 
@@ -154,7 +154,7 @@ class DecoderReplayLayers:
         return self.replay_batch is not None
 
     def graph_uses_replay_batch(self, num_tokens: int) -> bool:
-        """Whether a PIECEWISE graph of ``num_tokens`` breaks out to the replay
+        """Whether a PIECEWISE graph of `num_tokens` breaks out to the replay
         batch; capture and the model state's runtime replay batch share it."""
         return self.trim_threshold is not None and num_tokens >= self.trim_threshold
 

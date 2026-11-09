@@ -99,10 +99,10 @@ class SharedOffloadRegion:
     the kernel reclaims the memory when the last worker exits, no matter
     how it exits; mappings taken before the unlink stay valid.
 
-    ``populate_shard=(index, count)`` pre-faults only this worker's contiguous
+    `populate_shard=(index, count)` pre-faults only this worker's contiguous
     share, for layouts where every worker maps the same bytes. The barrier
     also waits for all shards to finish pre-faulting before returning.
-    ``num_segments`` splits backing files beneath the contiguous mapping.
+    `num_segments` splits backing files beneath the contiguous mapping.
     """
 
     BLOCK_SIZE_ALIGNMENT: int = mmap.PAGESIZE
@@ -415,7 +415,7 @@ class SharedOffloadRegion:
         """Return a zero-copy memoryview over the entire KV buffer.
 
         Shape: (num_chunks, row_stride_bytes). Secondary tiers address
-        chunk *b* as ``view[b]``.
+        chunk *b* as `view[b]`.
         """
         kv_tensor = self._base.view(self.num_chunks, self._row_stride)
         np_arr = kv_tensor.numpy()
