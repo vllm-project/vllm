@@ -14,10 +14,10 @@ write of the state that a deferred step needs.
 
 Each figure is a CUDA graph replay over all KDA layers, each with its own caches,
 so every layer reads a cold state as in decode. The conv state layout follows
-`VLLM_SSM_CONV_STATE_LAYOUT` (default SD). Run the GLM-5.3-Flash shapes per rank
-with:
+`VLLM_SSM_CONV_STATE_LAYOUT` (default SD). Run the Kimi-K3 shapes per rank (see
+`--model` for the others) with:
 
-    python benchmarks/kernels/benchmark_kda_recoverssm.py --model glm5next
+    python benchmarks/kernels/benchmark_kimi_k3_kda_recoverssm.py --model kimi_k3
 """
 
 import argparse
@@ -49,16 +49,21 @@ K = 128
 LOWER_BOUND = -5.0
 NORM_EPS = 1e-5
 CONV_WIDTH = 4
+# Elements Kimi-K3's in_proj_qkvgfab pads a projection row to (BF16 weights).
+PROJECTION_ALIGN = 16
 # Per model: KDA heads per rank, KDA layers, verify window (1 + draft tokens).
 _MODELS = {
     "glm5next": (64, 34, 6),
     "kimi_k3": (96, 69, 5),
+    # Kimi-K3.1 with the DSpark draft at 5 tokens: a TP8 rank and a DEP rank.
+    "kimi_k31_tp8": (12, 69, 6),
+    "kimi_k31_dep": (96, 69, 6),
 }
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model", choices=tuple(_MODELS), default="glm5next")
+    parser.add_argument("--model", choices=tuple(_MODELS), default="kimi_k3")
     parser.add_argument(
         "--batch",
         type=int,
@@ -125,20 +130,21 @@ def conv_view(layer: SimpleNamespace) -> torch.Tensor:
 
 
 def make_inputs(heads: int, tokens: int, gen: torch.Generator):
-    """(qkv, beta, F_A) views of a GLM-5.3 [q k v | b | f_a | g_a] projection, and
-    the output gate (g_b_proj's output, which both paths take)."""
+    """(qkv, beta, F_A, output gate) views of a Kimi-K3 [q k v g | f_a | b]
+    projection, its rows padded as `in_proj_qkvgfab` pads them."""
     dim = heads * K
+    width = 4 * dim + K + heads
     projected = torch.randn(
-        tokens, 3 * dim + heads + 2 * K, device="cuda", generator=gen
+        tokens, width + -width % PROJECTION_ALIGN, device="cuda", generator=gen
     ).bfloat16()
-    f_a = projected[:, 3 * dim + heads : 3 * dim + heads + K]
+    f_a = projected[:, 4 * dim : 4 * dim + K]
     f_a.copy_(
         (torch.randn(f_a.shape, device="cuda", generator=gen) * 1.5)
         .round()
         .clamp(-3, 3)
     )
-    gate = torch.randn(tokens, dim, device="cuda", generator=gen).bfloat16()
-    return projected[:, : 3 * dim], projected[:, 3 * dim : 3 * dim + heads], f_a, gate
+    beta = projected[:, 4 * dim + K : width]
+    return projected[:, : 3 * dim], beta, f_a, projected[:, 3 * dim : 4 * dim]
 
 
 def vllm_layer(layer, x, beta, f_a, gate, slots, starts, ones, window):
