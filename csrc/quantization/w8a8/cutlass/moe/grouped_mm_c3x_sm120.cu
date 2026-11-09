@@ -14,6 +14,7 @@ namespace {
 template <typename InType, typename OutType,
           template <typename, typename, typename> typename Epilogue>
 struct sm120_fp8_config_default {
+  // M in (16384, inf)
   static_assert(std::is_same<InType, cutlass::float_e4m3_t>());
   // SM120 / SM121 (consumer Blackwell / DGX Spark) FP8 grouped GEMM with
   // tensor/token-level FP8 scaling (scaling done in epilogue, not mainloop).
@@ -21,7 +22,7 @@ struct sm120_fp8_config_default {
   // Blockwise expects per-block scale factors in the mainloop layout,
   // which our model does not provide).
   using KernelSchedule =
-      cutlass::gemm::KernelPtrArrayTmaWarpSpecializedCooperativeSm120<2>;
+      cutlass::gemm::KernelPtrArrayTmaWarpSpecializedPingpongSm120<2>;
   using EpilogueSchedule = cutlass::epilogue::collective::EpilogueScheduleAuto;
   using TileShape = cute::Shape<cute::_128, cute::_128, cute::_128>;
   using ClusterShape = cute::Shape<cute::_1, cute::_1, cute::_1>;
@@ -34,16 +35,33 @@ struct sm120_fp8_config_default {
 
 template <typename InType, typename OutType,
           template <typename, typename, typename> typename Epilogue>
-struct sm120_fp8_config_M64 {
-  // M in [1, 64]. Must stay in sync with swap_ab in run_cutlass_moe_fp8,
-  // which writes the problem sizes transposed for these M.
+struct sm120_fp8_config_M1536 {
+  // M in [1, 1536]
   static_assert(std::is_same<InType, cutlass::float_e4m3_t>());
   using KernelSchedule =
-      cutlass::gemm::KernelPtrArrayTmaWarpSpecializedCooperativeSm120<2>;
+      cutlass::gemm::KernelPtrArrayTmaWarpSpecializedPingpongSm120<2>;
   using EpilogueSchedule = cutlass::epilogue::collective::EpilogueScheduleAuto;
   // N = 32 is the minimum: the SM120 ptr-array builder always selects the x4
   // LDSM copy atom for B, which needs a 32-wide N tile.
   using TileShape = cute::Shape<cute::_128, cute::_32, cute::_128>;
+  using ClusterShape = cute::Shape<cute::_1, cute::_1, cute::_1>;
+  using ArchTag = cutlass::arch::Sm120;
+
+  using Cutlass3xGemm =
+      cutlass_3x_group_gemm<InType, OutType, ArchTag, Epilogue, TileShape,
+                            ClusterShape, KernelSchedule, EpilogueSchedule,
+                            true>;
+};
+
+template <typename InType, typename OutType,
+          template <typename, typename, typename> typename Epilogue>
+struct sm120_fp8_config_M16384 {
+  // M in (1536, 16384]
+  static_assert(std::is_same<InType, cutlass::float_e4m3_t>());
+  using KernelSchedule =
+      cutlass::gemm::KernelPtrArrayTmaWarpSpecializedPingpongSm120<2>;
+  using EpilogueSchedule = cutlass::epilogue::collective::EpilogueScheduleAuto;
+  using TileShape = cute::Shape<cute::_128, cute::_64, cute::_128>;
   using ClusterShape = cute::Shape<cute::_1, cute::_1, cute::_1>;
   using ArchTag = cutlass::arch::Sm120;
 
@@ -76,15 +94,24 @@ void run_cutlass_moe_mm_sm120(torch::stable::Tensor& out_tensors,
       b_tensors.scalar_type() == torch::headeronly::ScalarType::Float8_e4m3fn,
       "B tensors must be of type float8_e4m3fn.");
 
-  using Cutlass3xGemmDefault = typename sm120_fp8_config_default<
+  using Cutlass3xGemmM1536 = typename sm120_fp8_config_M1536<
       InType, OutType, vllm::c3x::ScaledEpilogueArray>::Cutlass3xGemm;
-  using Cutlass3xGemmM64 = typename sm120_fp8_config_M64<
+  using Cutlass3xGemmM16384 = typename sm120_fp8_config_M16384<
+      InType, OutType, vllm::c3x::ScaledEpilogueArray>::Cutlass3xGemm;
+  using Cutlass3xGemmDefault = typename sm120_fp8_config_default<
       InType, OutType, vllm::c3x::ScaledEpilogueArray>::Cutlass3xGemm;
 
   uint32_t const m = a_tensors.size(0);
 
-  if (m <= 64) {
-    cutlass_group_gemm_caller<Cutlass3xGemmM64>(
+  // Swap-AB for m <= SWAP_AB_THRESHOLD_SM120 (moe_data.cu): each expert's few
+  // tokens then pad to the 32/64-wide N tile instead of the 128-row M tile.
+  if (m <= 1536) {
+    cutlass_group_gemm_caller<Cutlass3xGemmM1536>(
+        out_tensors, a_tensors, b_tensors, a_scales, b_scales, expert_offsets,
+        problem_sizes, a_strides, b_strides, c_strides, per_act_token,
+        per_out_ch);
+  } else if (m <= 16384) {
+    cutlass_group_gemm_caller<Cutlass3xGemmM16384>(
         out_tensors, a_tensors, b_tensors, a_scales, b_scales, expert_offsets,
         problem_sizes, a_strides, b_strides, c_strides, per_act_token,
         per_out_ch);
