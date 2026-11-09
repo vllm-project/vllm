@@ -28,6 +28,7 @@ from vllm.v1.attention.backends.mamba2_attn import (
 )
 from vllm.v1.attention.backends.recoverssm_metadata import (
     RecoverSSMMetadata,
+    RecoverSSMMetadataBuilder,
     RecoverSSMPostprocessMetadata,
 )
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheGroupSpec, MambaSpec
@@ -103,10 +104,67 @@ def test_add_request_seeds_state_idx_in_mamba_blocks() -> None:
     state.prompt_embeds_state = None
     state.num_accepted_tokens_gpu = torch.ones(2, dtype=torch.int32)
     state._mamba_state_idx_gpu = torch.zeros(2, dtype=torch.int32)
+    state.recoverssm = None
 
     state.add_request(1, SimpleNamespace(num_computed_tokens=107_360))
 
     assert state._mamba_state_idx_gpu[1] == 121
+
+
+def test_departing_requests_fold_their_pending_replay() -> None:
+    """A request leaving the runner (finished, preempted, or re-added for its next
+    streaming input chunk, which keeps its state) has its pending replay folded
+    into its checkpoint at once; an arriving request starts from its prefilled
+    checkpoint."""
+    state = object.__new__(MambaHybridModelState)
+    state._align_mode = False
+    state.rope_state = None
+    state.prompt_embeds_state = None
+    state.num_accepted_tokens_gpu = torch.ones(4, dtype=torch.int32)
+    state.recoverssm = RecoverSSMState(4, torch.device("cpu"))
+    folded = []
+
+    class Builder(RecoverSSMMetadataBuilder):
+        use_recoverssm = True
+
+        def fold_pending(self, slots, pending) -> None:
+            folded.append((slots.tolist(), pending.tolist()))
+
+    builder = Builder()
+    groups = [[SimpleNamespace(get_metadata_builder=lambda ubatch: builder)]]
+    state.recoverssm.bind(groups, None)  # type: ignore[arg-type]
+    for req_id, slot in (("done", 1), ("session", 2)):
+        state.add_request(slot, SimpleNamespace(req_id=req_id, num_computed_tokens=0))
+    state.recoverssm.pending.fill_(3)
+
+    state.remove_request("done")
+    state.remove_request("session")
+    state.add_request(2, SimpleNamespace(req_id="session", num_computed_tokens=9))
+    state.add_request(1, SimpleNamespace(req_id="new", num_computed_tokens=0))
+
+    assert folded == [([1], [3, 3, 3, 3]), ([2], [3, 3, 3, 3])]
+    assert state.recoverssm.pending.tolist() == [3, 0, 0, 3]
+
+
+def test_recoverssm_bind_reaches_builders_under_capture() -> None:
+    """FULL CUDA graphs capture the deferred verify, so capture builds bind the
+    runner state too, with no request slots."""
+
+    class Builder(RecoverSSMMetadataBuilder):
+        def __init__(self, use_recoverssm: bool) -> None:
+            self.use_recoverssm = use_recoverssm
+
+    deferring, plain = Builder(True), Builder(False)
+    groups = [
+        [SimpleNamespace(get_metadata_builder=lambda ubatch, b=b: b)]
+        for b in (deferring, plain, object())
+    ]
+    state = RecoverSSMState(2, torch.device("cpu"))
+
+    state.bind(groups, None)  # type: ignore[arg-type]
+
+    assert deferring.recoverssm_state is state and state.request_slots is None
+    assert plain.recoverssm_state is None
 
 
 def test_padded_prompt_tail_builds_as_spec_decode(
@@ -545,7 +603,7 @@ def test_flashinfer_replayssm_prefix_uses_original_accepted_counts() -> None:
 
 
 def test_recoverssm_commits_accepted_window_after_v2_sampling() -> None:
-    state = RecoverSSMState()
+    state = RecoverSSMState(2, torch.device("cpu"))
     metadata = Mock(spec=RecoverSSMMetadata)
     metadata.commit_recoverssm_state.return_value = None
     num_sampled = torch.tensor([3, 1], dtype=torch.int32)
@@ -585,7 +643,7 @@ def test_recoverssm_align_tracks_mixed_batch_state_and_neutralizes_copy_bias(
     state._mamba_state_idx_gpu = torch.full(
         (5,), -1, dtype=torch.int32, device=GPU_DEVICE
     )
-    state.recoverssm = RecoverSSMState()
+    state.recoverssm = RecoverSSMState(5, torch.device(GPU_DEVICE))
     state.num_accepted_tokens_gpu = torch.full(
         (5,), 9, dtype=torch.int32, device=GPU_DEVICE
     )

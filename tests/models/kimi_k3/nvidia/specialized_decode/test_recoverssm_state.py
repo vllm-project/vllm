@@ -54,7 +54,7 @@ def test_add_request_zeroes_the_pending_count() -> None:
     assert isinstance(state, RecoverSSMState)
     assert state.pending.dtype == torch.int32 and state.pending.tolist() == [0] * 4
     state.pending.copy_(torch.tensor([3, 2, 4, 1], dtype=torch.int32))
-    state.add_request(2)
+    state.add_request("r", 2)
     assert state.pending.tolist() == [3, 2, 0, 1]
 
 
@@ -90,7 +90,7 @@ def _fake_base_init(use_recoverssm: bool):
     def init(self, vllm_config, model, encoder_cache, device):
         self.max_num_reqs = 8
         self.device = device
-        self.recoverssm = RecoverSSMState() if use_recoverssm else None
+        self.recoverssm = RecoverSSMState(8, device) if use_recoverssm else None
 
     return init
 
@@ -125,69 +125,3 @@ def test_install_model_state_only_with_recoverssm() -> None:
     install_model_state(plain)
     assert plain.recoverssm is None
     assert "add_request" not in vars(plain) and "prepare_attn" not in vars(plain)
-
-
-def test_installed_add_request_resets_the_slot_after_the_base() -> None:
-    calls = []
-
-    def base_add_request(self, req_index, new_req_data):
-        calls.append((req_index, self.recoverssm.pending[req_index].item()))
-
-    with patch.object(MambaHybridModelState, "add_request", base_add_request):
-        state = _make_state(use_recoverssm=True)
-        install_model_state(state)
-        assert isinstance(state.recoverssm, DeferredRecoverSSMState)
-        state.recoverssm.pending.fill_(3)
-        state.add_request(5, SimpleNamespace())
-    assert calls == [(5, 3)]
-    assert state.recoverssm.pending.tolist() == [3] * 5 + [0] + [3] * 2
-
-
-def test_installed_prepare_attn_binds_before_the_metadata_build() -> None:
-    groups, deferring, _ = _groups()
-    idx_mapping = torch.tensor([1, 4, 0], dtype=torch.int32)
-    input_batch = SimpleNamespace(idx_mapping=idx_mapping)
-    seen = []
-
-    def base_prepare_attn(
-        self,
-        input_batch,
-        cudagraph_mode,
-        block_tables,
-        slot_mappings,
-        attn_groups,
-        kv_cache_config,
-        for_capture=False,
-        ubatch_idx=0,
-        model_specific_attn_metadata=None,
-    ):
-        seen.append(
-            [
-                (
-                    getattr(b, "recoverssm_pending", None) is self.recoverssm.pending,
-                    b.recoverssm_request_slots,
-                )
-                for b in deferring
-            ]
-        )
-        return {"for_capture": for_capture}
-
-    with patch.object(MambaHybridModelState, "prepare_attn", base_prepare_attn):
-        state = _make_state(use_recoverssm=True)
-        install_model_state(state)
-        out = state.prepare_attn(input_batch, None, (), None, groups, None)
-        assert out == {"for_capture": False}
-        assert seen[-1] == [(True, idx_mapping), (True, idx_mapping)]
-
-        out = state.prepare_attn(
-            input_batch, None, (), None, groups, None, for_capture=True
-        )
-        assert out == {"for_capture": True}
-        assert seen[-1] == [(True, None), (True, None)]
-
-    # Without the install (stock) nothing is bound.
-    plain = _make_state(use_recoverssm=True)
-    groups, deferring, _ = _groups()
-    with patch.object(MambaHybridModelState, "prepare_attn", lambda self, *a, **k: {}):
-        plain.prepare_attn(input_batch, None, (), None, groups, None)
-    assert all(getattr(b, "recoverssm_pending", None) is None for b in deferring)

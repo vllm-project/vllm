@@ -329,6 +329,7 @@ class KDADeferredCommitContext(KDARecoverSSMCommitContext):
             self.A_log,
             self.dt_bias,
             state_indices,
+            None,
             self.commit_lens,
             self.final_state_indices,
             self.boundary_state_indices,

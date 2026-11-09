@@ -102,7 +102,9 @@ class MambaHybridModelState(DefaultModelState):
                 self.max_num_reqs, dtype=torch.bool, device=self.device
             )
         self.recoverssm = (
-            RecoverSSMState() if self.cache_config.use_kda_recoverssm else None
+            RecoverSSMState(self.max_num_reqs, self.device)
+            if self.cache_config.use_kda_recoverssm
+            else None
         )
         if self._align_mode or self._use_flashinfer_replayssm:
             self._mamba_ctx: MambaSpecDecodeGPUContext | None = None
@@ -124,6 +126,8 @@ class MambaHybridModelState(DefaultModelState):
         super().add_request(req_index, new_req_data)
         # Must reset the speculative acceptance count in this idx which could be stale.
         self.num_accepted_tokens_gpu[req_index].fill_(1)
+        if self.recoverssm is not None:
+            self.recoverssm.add_request(new_req_data.req_id, req_index)
         if self._align_mode:
             # Seed the running state block from the resumed/prefilled position.
             # The column is in mamba blocks. cache_config.block_size is the
@@ -134,6 +138,11 @@ class MambaHybridModelState(DefaultModelState):
             self._mamba_state_idx_gpu[req_index].fill_(
                 (new_req_data.num_computed_tokens - 1) // mamba_block_size
             )
+
+    def remove_request(self, req_id: str) -> None:
+        super().remove_request(req_id)
+        if self.recoverssm is not None:
+            self.recoverssm.remove_request(req_id)
 
     def _get_mamba_group_info(
         self, kv_cache_config: KVCacheConfig
@@ -341,6 +350,10 @@ class MambaHybridModelState(DefaultModelState):
             num_accepted_tokens=num_accepted_tokens,
             num_decode_draft_tokens_cpu=num_decode_draft_tokens_cpu,
         )
+        if self.recoverssm is not None:
+            self.recoverssm.bind(
+                attn_groups, None if for_capture else input_batch.idx_mapping
+            )
         attn_metadata = build_attn_metadata(
             attn_groups=attn_groups,
             num_reqs=num_reqs,

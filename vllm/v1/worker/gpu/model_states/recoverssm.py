@@ -6,15 +6,66 @@ from typing import Any
 import torch
 
 from vllm.triton_utils import tl, triton
-from vllm.v1.attention.backends.recoverssm_metadata import RecoverSSMMetadata
+from vllm.v1.attention.backends.recoverssm_metadata import (
+    RecoverSSMMetadata,
+    RecoverSSMMetadataBuilder,
+)
 from vllm.v1.worker.utils import AttentionGroup
 
 
 class RecoverSSMState:
-    """Coordinates RecoverSSM metadata between attention and postprocessing."""
+    """Coordinates RecoverSSM metadata between attention and postprocessing.
 
-    def __init__(self) -> None:
+    Builders that defer the commit after sampling to the next verify keep, per
+    request slot, the accepted tokens of its last verify not yet in its checkpoint
+    (`pending`); the next verify replays them from that slot's records. A pending
+    replay lives only while its request is in the runner: when the request leaves
+    (finished, preempted, or re-added for its next streaming input chunk), it is
+    folded into the checkpoint before the slot or the state is used again."""
+
+    def __init__(self, max_num_reqs: int, device: torch.device) -> None:
         self._step: tuple[RecoverSSMMetadata, ...] | None = None
+        self.pending = torch.zeros(max_num_reqs, dtype=torch.int32, device=device)
+        self.slot_ids = torch.arange(max_num_reqs, dtype=torch.int32, device=device)
+        # The step's request slots, None under capture.
+        self.request_slots: torch.Tensor | None = None
+        self.builders: list[RecoverSSMMetadataBuilder] = []
+        self.slots: dict[str, int] = {}
+
+    def add_request(self, req_id: str, req_index: int) -> None:
+        self.slots[req_id] = req_index
+        # A new or resumed request starts from a prefilled checkpoint.
+        self.pending[req_index].fill_(0)
+
+    def remove_request(self, req_id: str) -> None:
+        """Fold the leaving request's pending replay into its checkpoint now,
+        before its slot is reused and before the step writes any state (the
+        scheduler may hand a finished request's blocks to another, which zeroes
+        them first)."""
+        slot = self.slots.pop(req_id, None)
+        if slot is None:
+            return
+        for builder in self.builders:
+            builder.fold_pending(self.slot_ids[slot : slot + 1], self.pending)
+
+    def bind(
+        self,
+        attn_groups: list[list[AttentionGroup]],
+        request_slots: torch.Tensor | None,
+    ) -> None:
+        """Before the metadata build: the step's request slots, and this state on
+        the RecoverSSM builders."""
+        self.request_slots = request_slots
+        self.builders = []
+        for group_list in attn_groups:
+            for group in group_list:
+                builder = group.get_metadata_builder(0)
+                if (
+                    isinstance(builder, RecoverSSMMetadataBuilder)
+                    and builder.use_recoverssm
+                ):
+                    builder.recoverssm_state = self
+                    self.builders.append(builder)
 
     def record_step(
         self,

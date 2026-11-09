@@ -29,6 +29,7 @@ from vllm.v1.attention.backends.gdn_attn import (
 )
 from vllm.v1.attention.backends.recoverssm_metadata import (
     RecoverSSMMetadata,
+    RecoverSSMMetadataBuilder,
     RecoverSSMPostprocessMetadata,
 )
 from vllm.v1.attention.backends.utils import (
@@ -154,6 +155,48 @@ def stage_spec_decode_metadata(
     )
 
 
+@triton.jit(do_not_specialize=["num_spec_decodes", "num_rows"])
+def _stage_deferred_rows_kernel(
+    request_slots_ptr,
+    spec_request_indices_ptr,
+    pending_ptr,
+    record_rows_ptr,
+    num_accepted_ptr,
+    writers_ptr,
+    num_spec_decodes,
+    num_rows,
+    stride_writers,
+    NUM_HEADS: tl.constexpr,
+    BLOCK_HEADS: tl.constexpr,
+    HAS_SLOTS: tl.constexpr,
+    HAS_REQUEST_INDICES: tl.constexpr,
+    BLOCK_ROWS: tl.constexpr,
+):
+    """Each speculative row's record slot (its request slot; -1 past the real rows
+    and under capture) with its verify writer counts zeroed, and the conv state
+    offset of its pending replay as an accepted-token count (1: none)."""
+    rows = tl.program_id(0) * BLOCK_ROWS + tl.arange(0, BLOCK_ROWS)
+    live = rows < num_spec_decodes
+    staged = rows < num_rows
+    record_rows = tl.full([BLOCK_ROWS], -1, tl.int32)
+    if HAS_SLOTS:
+        batch_rows = rows
+        if HAS_REQUEST_INDICES:
+            batch_rows = tl.load(spec_request_indices_ptr + rows, mask=live, other=0)
+        record_rows = tl.load(request_slots_ptr + batch_rows, mask=live, other=-1).to(
+            tl.int32
+        )
+    tl.store(record_rows_ptr + rows, record_rows, mask=staged)
+    heads = tl.arange(0, BLOCK_HEADS)
+    tl.store(
+        writers_ptr + record_rows[:, None] * stride_writers + heads[None, :],
+        tl.zeros([BLOCK_ROWS, BLOCK_HEADS], tl.int32),
+        mask=staged[:, None] & (heads[None, :] < NUM_HEADS),
+    )
+    pending = tl.load(pending_ptr + record_rows, mask=record_rows >= 0, other=0)
+    tl.store(num_accepted_ptr + rows, tl.maximum(pending, 1), mask=live)
+
+
 @dataclass
 class KDARecoverSSMAlignMetadata:
     block_table: torch.Tensor
@@ -162,11 +205,27 @@ class KDARecoverSSMAlignMetadata:
 
 
 @dataclass
+class KDARecoverSSMDeferred:
+    """A step's deferred RecoverSSM commit. Each speculative row keeps its verify
+    records in its request slot (`record_rows`); its verify first replays that
+    slot's `pending` tokens into the checkpoint, and the commit after sampling
+    leaves the accepted tokens pending unless they move the checkpoint or complete
+    a mamba block (align)."""
+
+    record_rows: torch.Tensor  # [>= spec rows] int32, -1: none
+    pending: torch.Tensor  # [max_num_reqs] int32, per request slot
+    # [max_num_reqs, H] int32, per request slot and head: the Triton verify's
+    # programs done reading the slot's records (zero at the step's start).
+    writers: torch.Tensor
+
+
+@dataclass
 class KDARecoverSSMCommitMetadata:
     state_indices: torch.Tensor
     query_start_loc: torch.Tensor
     request_indices: torch.Tensor | None
     align: KDARecoverSSMAlignMetadata | None
+    deferred: KDARecoverSSMDeferred | None = None
 
 
 @dataclass
@@ -179,6 +238,9 @@ class KimiK3KDAMetadata(GDNAttentionMetadata, RecoverSSMMetadata):
     recoverssm_context: "KDARecoverSSMCommitContext | None" = field(
         default=None, repr=False, compare=False
     )
+    recoverssm_deferred: KDARecoverSSMDeferred | None = field(
+        default=None, repr=False, compare=False
+    )
 
     def commit_recoverssm_state(
         self, num_accepted_tokens: torch.Tensor
@@ -189,6 +251,7 @@ class KimiK3KDAMetadata(GDNAttentionMetadata, RecoverSSMMetadata):
         context = self.recoverssm_context
         assert context is not None
         align = commit.align
+        deferred = commit.deferred
         context.commit(
             num_accepted_tokens,
             commit.state_indices[: self.num_spec_decodes, 0],
@@ -199,6 +262,8 @@ class KimiK3KDAMetadata(GDNAttentionMetadata, RecoverSSMMetadata):
                 align.num_computed_tokens if align is not None else None
             ),
             mamba_block_size=align.block_size if align is not None else None,
+            record_rows=deferred.record_rows if deferred is not None else None,
+            pending=deferred.pending if deferred is not None else None,
         )
         if align is None:
             return None
@@ -211,7 +276,7 @@ class KimiK3KDAMetadata(GDNAttentionMetadata, RecoverSSMMetadata):
         )
 
 
-class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
+class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder, RecoverSSMMetadataBuilder):
     # Overrides GDN's UNIFORM_BATCH: adaptive verification requires ALWAYS from every
     # builder, and KDA reads per-request offsets off device within a fixed k+1 window,
     # so one k+1 graph replays any 1..k+1 mix.
@@ -251,6 +316,65 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
                 dtype=torch.int32,
                 device=device,
             )
+            # Staged so FULL CUDA graphs read the step's record slots.
+            self.deferred_record_rows = torch.full(
+                (max_num_reqs,), -1, dtype=torch.int32, device=device
+            )
+            self.deferred_writers: torch.Tensor | None = None
+
+    def _stage_deferred(
+        self,
+        num_reqs: int,
+        num_spec_decodes: int,
+        spec_request_indices: torch.Tensor | None,
+    ) -> KDARecoverSSMDeferred | None:
+        """Defer the commit of Triton RecoverSSM layers (bound runner state only):
+        stage each speculative row's record slot, and its pending replay's conv
+        offset into `recoverssm_num_accepted_tokens`."""
+        state = self.recoverssm_state
+        context = self._get_recoverssm_context()
+        if state is None or context.backend != "triton":
+            return None
+        assert self.recoverssm_num_accepted_tokens is not None
+        writers = self.deferred_writers
+        num_heads = context.checkpoints[0].shape[1]
+        if writers is None:
+            # One count per layer group: its layers verify one after another.
+            # Row -1 serves the rows that own no request slot.
+            writers = torch.zeros(
+                (1 + state.pending.shape[0], num_heads),
+                dtype=torch.int32,
+                device=state.pending.device,
+            )[1:]
+            self.deferred_writers = writers
+        slots = state.request_slots
+        num_rows = max(num_reqs, num_spec_decodes)
+        block_rows = 32
+        _stage_deferred_rows_kernel[(triton.cdiv(num_rows, block_rows),)](
+            slots,
+            spec_request_indices,
+            state.pending,
+            self.deferred_record_rows,
+            self.recoverssm_num_accepted_tokens,
+            writers,
+            num_spec_decodes,
+            num_rows,
+            writers.stride(0),
+            NUM_HEADS=num_heads,
+            BLOCK_HEADS=triton.next_power_of_2(num_heads),
+            HAS_SLOTS=slots is not None,
+            HAS_REQUEST_INDICES=spec_request_indices is not None,
+            BLOCK_ROWS=block_rows,
+            num_warps=1,
+        )
+        return KDARecoverSSMDeferred(self.deferred_record_rows, state.pending, writers)
+
+    def fold_pending(self, slots: torch.Tensor, pending: torch.Tensor) -> None:
+        """Fold the pending replays of request slots `slots` (requests leaving the
+        runner) into their checkpoints in every layer of the group."""
+        context = self.recoverssm_context
+        if context is not None and context.backend == "triton":
+            context.fold_pending(slots, pending)
 
     def _get_recoverssm_context(self) -> "KDARecoverSSMCommitContext":
         context = self.recoverssm_context
@@ -328,6 +452,7 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
                 spec_sequence_masks_cpu = None
 
         spec_request_indices = None
+        deferred = None
         spec_token_start = None
         non_spec_token_start = None
         if num_spec_decodes == 0:
@@ -507,6 +632,9 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
 
             if self.use_recoverssm:
                 assert self.recoverssm_num_accepted_tokens is not None
+                deferred = self._stage_deferred(
+                    m.num_reqs, num_spec_decodes, spec_request_indices
+                )
                 num_accepted_tokens = self.recoverssm_num_accepted_tokens[
                     :num_spec_decodes
                 ]
@@ -590,6 +718,7 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
                 query_start_loc=spec_query_start_loc,
                 request_indices=spec_request_indices,
                 align=align,
+                deferred=deferred,
             )
 
         flashinfer_prefill_query_start_loc = None
@@ -640,6 +769,7 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
                 if recoverssm_commit is not None
                 else None
             ),
+            recoverssm_deferred=deferred,
             nums_dict=nums_dict,
             batch_ptr=batch_ptr,
             token_chunk_offset_ptr=token_chunk_offset_ptr,

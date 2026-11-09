@@ -6,9 +6,9 @@ objects, without changing their classes:
 - the KDA layers (`install_layers`, before the specialized providers are built):
   verify records indexed by record slot (with a scratch row) and a verify that
   flushes the pending replays and writes the records to each request's record slot;
-- the model runner state (`install_model_state`): the per-request pending replay
-  counts (`DeferredRecoverSSMState`), reset per new request and bound, with the
-  step's request slots, to the KDA metadata builders before their build;
+- the model runner state (`install_model_state`): a `DeferredRecoverSSMState`,
+  whose bind sets the builders up, with the step's request slots, in place of the
+  stock deferred commit;
 - the KDA metadata builders (`install_builder`, on first bind): the
   `fp32_deferred` commit context, and each step's `recoverssm_deferred`."""
 
@@ -36,23 +36,14 @@ from .kernels import kda_recoverssm_verify
 
 
 class DeferredRecoverSSMState(RecoverSSMState):
-    """`pending` [max_num_reqs]: per request-state slot, the accepted tokens of its
-    last verify not yet folded into its checkpoint, for the KDA metadata builders
-    that defer the commit to the next verify (those `install_builder` set up);
-    other builders never see it."""
-
-    def __init__(self, max_num_reqs: int, device: torch.device) -> None:
-        super().__init__()
-        self.pending = torch.zeros(max_num_reqs, dtype=torch.int32, device=device)
-
-    def add_request(self, req_index: int) -> None:
-        # A new or resumed request starts from a committed (prefilled) state.
-        self.pending[req_index].fill_(0)
+    """The runner state's RecoverSSM with the specialized decode: its `pending`
+    counts are those of the KDA metadata builders `install_builder` sets up, which
+    defer the commit their own way instead of the stock one."""
 
     def bind(
         self,
         attn_groups: list[list[AttentionGroup]],
-        idx_mapping: torch.Tensor | None,
+        request_slots: torch.Tensor | None,
     ) -> None:
         """Hand deferring builders the step's request slots (None: capture or
         dummy batches, whose rows own no request) and, once, the pending counts.
@@ -66,51 +57,15 @@ class DeferredRecoverSSMState(RecoverSSMState):
                     continue
                 if getattr(builder, "recoverssm_pending", None) is not self.pending:
                     install_builder(builder, self.pending)
-                builder.recoverssm_request_slots = idx_mapping
+                builder.recoverssm_request_slots = request_slots
 
 
 def install_model_state(state: Any) -> None:
     """Install the deferred RecoverSSM on a `KimiK3ModelState` (no-op without
-    RecoverSSM): its `recoverssm` becomes a `DeferredRecoverSSMState`, and its
-    `add_request` / `prepare_attn` reset a new request's pending count after the
-    base and bind the KDA builders before the metadata build."""
-    if state.recoverssm is None:
-        return
-    deferred = DeferredRecoverSSMState(state.max_num_reqs, state.device)
-    state.recoverssm = deferred
-    base_add_request = state.add_request
-    base_prepare_attn = state.prepare_attn
-
-    def add_request(req_index, new_req_data) -> None:
-        base_add_request(req_index, new_req_data)
-        deferred.add_request(req_index)
-
-    def prepare_attn(
-        input_batch,
-        cudagraph_mode,
-        block_tables,
-        slot_mappings,
-        attn_groups,
-        kv_cache_config,
-        for_capture=False,
-        ubatch_idx=0,
-        model_specific_attn_metadata=None,
-    ) -> dict[str, Any]:
-        deferred.bind(attn_groups, None if for_capture else input_batch.idx_mapping)
-        return base_prepare_attn(
-            input_batch,
-            cudagraph_mode,
-            block_tables,
-            slot_mappings,
-            attn_groups,
-            kv_cache_config,
-            for_capture=for_capture,
-            ubatch_idx=ubatch_idx,
-            model_specific_attn_metadata=model_specific_attn_metadata,
-        )
-
-    state.add_request = add_request
-    state.prepare_attn = prepare_attn
+    RecoverSSM): its `recoverssm` becomes a `DeferredRecoverSSMState`, which the
+    base state resets per new request and binds before the metadata build."""
+    if state.recoverssm is not None:
+        state.recoverssm = DeferredRecoverSSMState(state.max_num_reqs, state.device)
 
 
 class _DeferredStepCommit:
@@ -124,13 +79,12 @@ class _DeferredStepCommit:
 
     def commit(self, *args, **kwargs) -> None:
         deferred = self.deferred
-        self.context.commit(  # type: ignore[misc]
-            *args,
-            **kwargs,
+        kwargs.update(
             record_rows=deferred.record_rows,
             pending=deferred.pending,
             eager=deferred.eager,
         )
+        self.context.commit(*args, **kwargs)  # type: ignore[misc]
 
 
 def install_builder(builder: KimiK3KDAMetadataBuilder, pending: torch.Tensor) -> None:
@@ -208,7 +162,7 @@ def install_builder(builder: KimiK3KDAMetadataBuilder, pending: torch.Tensor) ->
                 )
                 step = _DeferredStepCommit(context, deferred)
                 metadata.recoverssm_context = step  # type: ignore[assignment]
-        metadata.recoverssm_deferred = deferred  # type: ignore[attr-defined]
+        metadata.recoverssm_deferred = deferred  # type: ignore[assignment]
         return metadata
 
     builder._get_recoverssm_context = get_context  # type: ignore[method-assign]
