@@ -8,6 +8,7 @@ send trimming, and group-count invariant checking in _build_transfer_params.
 
 import asyncio
 import ctypes
+from dataclasses import replace
 from unittest.mock import patch
 
 import pytest
@@ -660,7 +661,7 @@ def test_hisparse_group_remap_copies_only_requested_pages(
     expected_host, expected_gpu = host.clone(), gpu.clone()
     for position, block_id in zip([2, 3], host_ids):
         expected_host[block_id].fill_(10 + position)
-    for position, block_id in zip([0, 2, 3], indexer_ids):
+    for position, block_id in zip([1, 2, 3], indexer_ids):
         expected_gpu[block_id, 32 : 32 + page].fill_(100 + position)
 
     remote = [
@@ -677,22 +678,14 @@ def test_hisparse_group_remap_copies_only_requested_pages(
         ),
     ]
     destination_ids = [host_ids, indexer_ids]
-    positions = [[2, 3], [0, 2, 3]]
     if source_group == 1:
         destination_ids.reverse()
-        positions.reverse()
     meta = _xfer_meta(
         remote,
         {"d": ("x", destination_ids)},
-        hisparse_protocol=1,
-        host_group_indices=[source_group],
         group_block_sizes=[16, 16],
-        registered_cache_roles=["sparse", "indexer"],
-        req_block_positions={"d": positions},
     )
-    send = SendBlockMeta(
-        "p", "x", [source_ids], asyncio.Event(), local_block_positions=[[0, 1, 2, 3]]
-    )
+    send = SendBlockMeta("p", "x", [source_ids], asyncio.Event())
     config = create_vllm_config(
         kv_connector="MooncakeConnector",
         kv_role="kv_producer",
@@ -726,29 +719,32 @@ def test_hisparse_group_remap_copies_only_requested_pages(
 @pytest.mark.parametrize(
     "rank,shared,expected_sources",
     [
-        (0, True, [1200, 1300, 2400]),
+        (0, True, [1300, 1400, 2400]),
         (1, True, [2400]),
-        (1, False, [1200, 1300, 2400]),
+        (1, False, [1300, 1400, 2400]),
     ],
 )
 def test_hisparse_import_keeps_rank_private_indexer(rank, shared, expected_sources):
-    """D's host/indexer prefixes differ; only shared host bytes have an owner."""
-    send = SendBlockMeta(
-        "p", "x", [[1, 2, 3, 4]], asyncio.Event(), local_block_positions=[[0, 1, 2, 3]]
+    """D filters shared host writes while retaining every rank's completion state."""
+    send = SendBlockMeta("p", "x", [[1, 2, 3, 4]], asyncio.Event())
+    decoder_config = _hisparse_producer_cache_config()
+    decoder_config = replace(
+        decoder_config,
+        kv_cache_groups=[
+            replace(decoder_config.kv_cache_groups[0], host_resident=True),
+            decoder_config.kv_cache_groups[1],
+        ],
+        hisparse_host_num_blocks=10,
+        hisparse_shared_host_pool=shared,
     )
-    meta = MooncakeXferMetadata(
-        remote_hostname="d",
-        remote_port=1,
-        remote_tp_size=2,
-        remote_tp_rank=rank,
-        req_blocks={"d": ("x", [[5, 6], [7]])},
-        kv_caches_base_addr=[],
-        block_lens=[],
-        kv_block_lens=[],
-        hisparse_protocol=1,
-        host_group_indices=[0],
-        shared_host_owner=0 if shared else -1,
-        req_block_positions={"d": [[1, 2], [3]]},
+    pull = _make_pull_meta("d", [[5, 6], [7]])
+    with mooncake_register_worker(
+        decoder_config, tp_size=2, tp_rank=rank
+    ) as (decoder, _):
+        meta = decoder._build_pull_metadata({"d": pull}, include_layout=False)
+    assert pull.local_block_ids == [[5, 6], [7]]
+    assert meta.req_blocks["d"][1] == (
+        [[], [7]] if shared and rank != 0 else [[5, 6], [7]]
     )
     local = [
         TransferRegion("model.layers.0.source", 0, 1000, 100, 10, 0),
@@ -773,28 +769,29 @@ def test_hisparse_import_keeps_rank_private_indexer(rank, shared, expected_sourc
 
 @pytest.mark.cpu_test
 @pytest.mark.parametrize(
-    "positions,indexer_bytes",
-    [([[1, 2], [4]], 10), ([[1, 2], [2, 1]], 10), ([[1, 2]], 10), ([[1, 2], [2]], 11)],
+    "destination_ids,indexer_bytes",
+    [
+        ([[5, 6], [7, 8, 9, 10]], 10),
+        ([[5, 6], [0]], 10),
+        ([[5, 6]], 10),
+        ([[5, 6], [7]], 11),
+    ],
 )
 def test_hisparse_import_rejects_incomplete_page_plan_atomically(
-    positions, indexer_bytes
+    destination_ids, indexer_bytes
 ):
     """A bad indexer plan must discard even previously planned host descriptors."""
-    send = SendBlockMeta(
-        "p", "x", [[1, 2, 3]], asyncio.Event(), local_block_positions=[[0, 1, 2]]
-    )
+    send = SendBlockMeta("p", "x", [[1, 2, 3]], asyncio.Event())
     meta = MooncakeXferMetadata(
         remote_hostname="d",
         remote_port=1,
         remote_tp_size=1,
         remote_tp_rank=0,
-        req_blocks={"d": ("x", [[5, 6], [7]])},
+        req_blocks={"d": ("x", destination_ids)},
         kv_caches_base_addr=[],
         block_lens=[],
         kv_block_lens=[],
-        hisparse_protocol=1,
-        host_group_indices=[0],
-        req_block_positions={"d": positions},
+        group_block_sizes=[16, 16],
     )
     local = [
         TransferRegion("model.layers.0.source", 0, 1000, 100, 10, 0),
@@ -813,8 +810,8 @@ def test_hisparse_import_rejects_incomplete_page_plan_atomically(
 
 
 @pytest.mark.cpu_test
-@pytest.mark.parametrize("incompatible", [None, "role", "block_size", "tp", "opaque"])
-def test_hisparse_semantic_layout_requires_compatible_roles(incompatible):
+@pytest.mark.parametrize("incompatible", [None, "layers", "block_size", "tp", "opaque"])
+def test_hisparse_semantic_layout_requires_compatible_geometry(incompatible):
     """Independent group numbers are valid only under the sparse-MLA contract."""
     local = [
         TransferRegion("model.layers.0.source", 0, 1000, 100, 10, 0),
@@ -833,14 +830,10 @@ def test_hisparse_semantic_layout_requires_compatible_roles(incompatible):
         kv_caches_base_addr=[],
         block_lens=[],
         kv_block_lens=[],
-        hisparse_protocol=1,
-        host_group_indices=[0],
-        shared_host_owner=0,
         group_block_sizes=[16, 16],
-        registered_cache_roles=["sparse", "indexer"],
     )
-    if incompatible == "role":
-        meta.registered_cache_roles[1] = "sparse"
+    if incompatible == "layers":
+        remote.pop()
     elif incompatible == "block_size":
         meta.group_block_sizes[1] = 32
     elif incompatible == "tp":
@@ -858,5 +851,5 @@ def test_hisparse_semantic_layout_requires_compatible_roles(incompatible):
     with mooncake_register_worker(
         _hisparse_producer_cache_config(), vllm_config=config
     ) as (worker, _):
-        error = worker._validate_hisparse_layout(meta, local, remote)
+        error = worker._validate_region_mapped_layout(meta, local, remote)
     assert (error is None) == (incompatible is None)

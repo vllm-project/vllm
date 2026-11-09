@@ -45,6 +45,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     PromMetricT,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_utils import (
+    MOONCAKE_CONNECTOR_VERSION,
     MooncakeBootstrapServer,
     RegisterWorkerPayload,
 )
@@ -652,15 +653,8 @@ class MooncakeXferMetadata(
     # Random per register_kv_caches, so ids never repeat across restarts.
     # 0 means the peer sends the layout on every pull.
     layout_id: int = 0
-    # Versioned contract: both endpoints must supply logical page positions.
-    hisparse_protocol: int = 0
+    # Token block sizes for independently indexed groups with suffix pairing.
     group_block_sizes: list[int] = msgspec.field(default_factory=list)
-    host_group_indices: list[int] = msgspec.field(default_factory=list)
-    shared_host_owner: int = -1
-    registered_cache_roles: list[str] = msgspec.field(default_factory=list)
-    req_block_positions: dict[ReqId, list[list[int]]] = msgspec.field(
-        default_factory=dict
-    )
 
 
 class MooncakeXferResponseStatus(IntEnum):
@@ -734,7 +728,6 @@ class PullReqMeta:
     # A failure is sticky; still settle later peer results before releasing
     # destination blocks to prevent write-after-free from delayed peer writes.
     failed: bool = False
-    local_block_positions: list[list[int]] | None = None
 
 
 @dataclass
@@ -747,7 +740,6 @@ class SendBlockMeta:
     need_send: int = 0
     sent: int = 0
     sending: int = 0
-    local_block_positions: list[list[int]] | None = None
 
 
 class MooncakeConnectorMetadata(KVConnectorMetadata):
@@ -757,7 +749,6 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
         self.reqs_to_recv: dict[EngineId, dict[ReqId, PullReqMeta]] = defaultdict(dict)
         self.reqs_to_send: dict[ReqId, tuple[TransferId, list[list[int]]]] = {}
         self.reqs_not_processed: set[TransferId] = set()
-        self.block_positions: dict[ReqId, list[list[int]]] = {}
         # D side: lease renewals to send this step, by remote P engine.
         self.lease_heartbeats: dict[EngineId, LeaseHeartbeat] = {}
 
@@ -1053,7 +1044,6 @@ class MooncakeConnectorScheduler:
         # Reqs to remove from processed set because they're not to send after
         # remote prefill or aborted.
         self._reqs_not_processed: set[TransferId] = set()
-        self._recv_block_positions: dict[ReqId, list[list[int]]] = {}
 
         # D side: requests whose KV P still holds under a lease, from arrival
         # until the pull settles. A request can wait in the queue for longer
@@ -1236,17 +1226,28 @@ class MooncakeConnectorScheduler:
                     else ()
                 )
                 local_block_ids = self.get_sw_clipped_blocks(unhashed_block_ids)
-                if self.kv_cache_config.hisparse_host_num_blocks is not None:
-                    self._recv_block_positions[request.request_id] = [
-                        [
-                            position
-                            for position, block in enumerate(blocks.blocks[group_id])
-                            if block.block_hash is None and not block.is_null
-                        ]
-                        if num_external_tokens > 0
-                        else []
-                        for group_id in self.kv_cache_config.transfer_group_ids
-                    ]
+                if (
+                    self.kv_cache_config.hisparse_host_num_blocks is not None
+                    and num_external_tokens > 0
+                ):
+                    for group_id in self.kv_cache_config.transfer_group_ids:
+                        group = blocks.blocks[group_id]
+                        start = next(
+                            (
+                                i
+                                for i, block in enumerate(group)
+                                if block.block_hash is None and not block.is_null
+                            ),
+                            len(group),
+                        )
+                        if any(
+                            block.block_hash is not None or block.is_null
+                            for block in group[start:]
+                        ):
+                            raise ValueError(
+                                "Mooncake region-mapped imports require an "
+                                "uncached suffix without holes"
+                            )
                 # Get unhashed blocks to pull from remote.
                 self._reqs_need_recv[request.request_id] = (request, local_block_ids)
                 if not any(local_block_ids):
@@ -1285,11 +1286,6 @@ class MooncakeConnectorScheduler:
                     local_block_ids=block_ids,
                     kv_transfer_params=req.kv_transfer_params,
                 )
-                positions = self._recv_block_positions.pop(req_id, None)
-                if positions is not None:
-                    engine_id = req.kv_transfer_params["remote_engine_id"]
-                    pull_meta = meta.reqs_to_recv[engine_id][req_id]
-                    pull_meta.local_block_positions = positions
             self._reqs_need_recv.clear()
 
             # Renew every lease in one message per P engine, every
@@ -1318,12 +1314,6 @@ class MooncakeConnectorScheduler:
                     kv_transfer_params=req.kv_transfer_params,
                     load_remote_cache=False,
                 )
-                # Sparse MLA groups retain all request pages, including P hits.
-                # Sliding-window/state groups keep the legacy protocol.
-                if block_ids and not any(self.blocks_per_sw) and not self._has_mamba:
-                    meta.block_positions[req_id] = [
-                        list(range(len(group))) for group in block_ids
-                    ]
             self._reqs_need_send.clear()
             meta.reqs_not_processed = self._reqs_not_processed
             self._reqs_not_processed = set()
@@ -1456,6 +1446,7 @@ class MooncakeConnectorWorker:
         )
 
         self._remote_agents: dict[EngineId, dict[int, dict[int, str]]] = {}
+        self._remote_connector_versions: dict[str, int] = {}
         self._pending_bootstrap_queries: dict[str, asyncio.Event] = {}
         self.side_channel_port: int = 0  # we will bind it in register_kv_caches()
         self.engine_id: EngineId = engine_id
@@ -1480,8 +1471,8 @@ class MooncakeConnectorWorker:
             tuple,
             tuple[list[TransferRegion], list[TransferRegion], str | None],
         ] = {}
-        # (host, port, tp_rank, pp_size, tp_size, layout_id) -> regions, in LRU
-        # order. Filled only after a pull that actually carried the layout.
+        # Peer identity and geometry -> regions, in LRU order.
+        # Filled only after a pull that actually carried the layout.
         self._layout_by_peer: OrderedDict[
             tuple, tuple[list[TransferRegion], list[TransferRegion]]
         ] = OrderedDict()
@@ -1651,6 +1642,7 @@ class MooncakeConnectorWorker:
             tp_rank=self.tp_rank,
             pp_rank=self.pp_rank,
             addr=worker_addr,
+            connector_version=MOONCAKE_CONNECTOR_VERSION,
         )
         timeout = envs.VLLM_MOONCAKE_CONNECTOR_TIMEOUT
         max_attempts = _BOOTSTRAP_MAX_ATTEMPTS
@@ -2095,18 +2087,11 @@ class MooncakeConnectorWorker:
                     local_regions, remote_regions, region_runs
                 ):
                     local_ids, remote_ids, run_starts, run_lens = runs
-                    # Validate follower pages too, then omit shared host bytes.
-                    if (
-                        remote_region.group_index in agent_meta.host_group_indices
-                        and agent_meta.shared_host_owner >= 0
-                        and agent_meta.remote_tp_rank != agent_meta.shared_host_owner
-                    ):
-                        continue
-                    if agent_meta.hisparse_protocol and (
+                    if agent_meta.group_block_sizes and (
                         local_region.kv_block_len != remote_region.kv_block_len
                     ):
                         raise ValueError(
-                            "HiSparse source and destination payloads differ"
+                            "Region-mapped source and destination payloads differ"
                         )
                     if len(local_ids) == 0:
                         continue
@@ -2191,17 +2176,7 @@ class MooncakeConnectorWorker:
     ) -> list[tuple[np.ndarray, ...]]:
         """Pair pages once per endpoint group pair, retaining region order."""
         remote_block_ids_per_group = agent_meta.req_blocks[d_req_id][1]
-        local_positions = send_meta.local_block_positions
-        remote_positions = agent_meta.req_block_positions.get(d_req_id)
-        if agent_meta.hisparse_protocol:
-            from .hisparse_plan import pair_pages
-
-            if local_positions is None or remote_positions is None:
-                raise ValueError("HiSparse imports require logical page positions")
-            if len(remote_positions) != len(remote_block_ids_per_group):
-                raise ValueError("Missing HiSparse group page positions")
-            if len(local_positions) != len(send_meta.local_block_ids):
-                raise ValueError("Missing producer group page positions")
+        if agent_meta.group_block_sizes:
             local_block_ids_by_group = send_meta.local_block_ids
             remote_block_ids_by_group = remote_block_ids_per_group
         else:
@@ -2285,18 +2260,24 @@ class MooncakeConnectorWorker:
                 remote_region.shared_group_ids,
             )
             if group_key not in block_runs:
-                if agent_meta.hisparse_protocol:
+                if agent_meta.group_block_sizes:
                     source_group = local_region.group_index
                     destination_group = remote_region.group_index
                     if source_group < 0 or destination_group < 0:
-                        raise ValueError("Opaque groups cannot use HiSparse planning")
-                    assert local_positions is not None and remote_positions is not None
-                    local_ids, remote_ids = pair_pages(
-                        local_block_ids_by_group[source_group],
-                        local_positions[source_group],
-                        remote_block_ids_by_group[destination_group],
-                        remote_positions[destination_group],
-                    )
+                        raise ValueError(
+                            "Opaque groups cannot use region-mapped planning"
+                        )
+                    local_ids = local_block_ids_by_group[source_group]
+                    remote_ids = remote_block_ids_by_group[destination_group]
+                    if len(local_ids) < len(remote_ids):
+                        raise ValueError(
+                            "Producer has fewer pages than the destination"
+                        )
+                    if any(block <= 0 for block in local_ids + remote_ids):
+                        raise ValueError(
+                            "Region-mapped imports cannot transfer null pages"
+                        )
+                    local_ids = local_ids[-len(remote_ids):] if remote_ids else []
                     local_ids, remote_ids = _normalize_paired_block_order(
                         local_ids, remote_ids
                     )
@@ -2325,53 +2306,42 @@ class MooncakeConnectorWorker:
             region_runs.append(block_runs[group_key])
         return region_runs
 
-    def _validate_hisparse_layout(
+    def _validate_region_mapped_layout(
         self,
         meta: MooncakeXferMetadata,
         local: list[TransferRegion],
         remote: list[TransferRegion],
     ) -> str | None:
         if (
-            meta.hisparse_protocol != 1
-            or self.tp_size != meta.remote_tp_size
+            self.tp_size != meta.remote_tp_size
             or self.pp_size != 1
             or meta.remote_pp_size != 1
             or self._physical_blocks_per_logical_kv_block != 1
             or not self.use_mla
         ):
-            return "HiSparse imports require v1, matching TP and unsplit MLA pages"
-        if len(local) != len(remote) or len(remote) != len(meta.registered_cache_roles):
-            return "HiSparse imports require complete per-layer role metadata"
-        if len(meta.host_group_indices) != 1 or meta.shared_host_owner not in (-1, 0):
-            return "Invalid HiSparse host ownership metadata"
-        roles = {
-            id(region): role
-            for region, role in zip(remote, meta.registered_cache_roles)
-        }
+            return "Region-mapped imports require equal TP, PP1 and unsplit MLA pages"
+        if len(local) != len(remote):
+            return "Region-mapped imports require the same layers on both endpoints"
         for region in local + remote:
             if region.group_index < 0 or region.shared_group_ids not in (
                 (),
                 (region.group_index,),
             ):
-                return "HiSparse imports cannot transfer opaque multi-group regions"
+                return "Region-mapped imports do not support opaque multi-group regions"
         local_by_name = {region.layer_name: region for region in local}
         if len(local_by_name) != len(local):
-            return "HiSparse MLA imports require one region per layer"
+            return "Region-mapped MLA imports require one region per layer"
         for destination in remote:
             source = local_by_name.get(destination.layer_name)
             if source is None:
-                return "HiSparse destination has no matching producer layer"
+                return "Destination has no matching producer layer"
             spec = self._layer_specs[source.layer_name]
             if (
                 not isinstance(spec, MLAAttentionSpec)
-                or roles[id(destination)] != spec.cache_role.value
                 or destination.group_index >= len(meta.group_block_sizes)
                 or spec.block_size != meta.group_block_sizes[destination.group_index]
             ):
-                return "Incompatible HiSparse cache role or token block size"
-            host = destination.group_index in meta.host_group_indices
-            if host != (spec.cache_role.value == "sparse"):
-                return "HiSparse host group must contain sparse source regions only"
+                return "Incompatible region-mapped token block size"
         return None
 
     def _bind_sender_thread_device(self) -> None:
@@ -2805,6 +2775,15 @@ class MooncakeConnectorWorker:
             metadata = self._build_pull_metadata(
                 pull_metas, include_layout=include_layout
             )
+            if metadata.group_block_sizes and self._remote_connector_versions.get(
+                worker_addr, 0
+            ) != MOONCAKE_CONNECTOR_VERSION:
+                self._handle_failed_recv(
+                    pull_metas,
+                    req_ids,
+                    "Producer did not advertise a compatible Mooncake connector version",
+                )
+                return
             encoded_data = self._encoder.encode(metadata)
             logger.debug(
                 "MooncakeXferMetadata to %s is %d bytes (%s).",
@@ -2983,6 +2962,13 @@ class MooncakeConnectorWorker:
                         for tp_rank, tp_entry in dp_entry["worker_addr"].items()
                     }
                     self._tp_size[remote_engine_id] = len(dp_entry["worker_addr"])
+                    self._remote_connector_versions.update(
+                        {
+                            addr: dp_entry.get("connector_version", 0)
+                            for tp_entry in dp_entry["worker_addr"].values()
+                            for addr in tp_entry.values()
+                        }
+                    )
         except Exception as e:
             logger.error(
                 "Failed to connect to bootstrap server %s (%s): %s",
@@ -3144,7 +3130,6 @@ class MooncakeConnectorWorker:
                 send_meta = self.reqs_need_send[transfer_id]
                 send_meta.p_req_id = p_req_id
                 send_meta.local_block_ids = block_ids
-                send_meta.local_block_positions = metadata.block_positions.get(p_req_id)
                 send_meta.expire_time = time.perf_counter() + (
                     self._kv_lease_duration or envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT
                 )
@@ -3216,11 +3201,7 @@ class MooncakeConnectorWorker:
             tuple(meta.registered_group_indices),
             tuple(tuple(groups) for groups in meta.registered_shared_group_ids),
             tuple(meta.registered_row_offsets),
-            meta.hisparse_protocol,
             tuple(meta.group_block_sizes),
-            tuple(meta.host_group_indices),
-            meta.shared_host_owner,
-            tuple(meta.registered_cache_roles),
         )
         cached = self._prepared_transfer_regions.get(cache_key)
         if cached is not None:
@@ -3292,8 +3273,8 @@ class MooncakeConnectorWorker:
         )
         if align_err is not None:
             return finish([], [], align_err)
-        if meta.hisparse_protocol:
-            layout_err = self._validate_hisparse_layout(
+        if meta.group_block_sizes:
+            layout_err = self._validate_region_mapped_layout(
                 meta, pre_align_local, pre_align_remote
             )
         else:
@@ -3312,7 +3293,7 @@ class MooncakeConnectorWorker:
         # gating on use_mla alone would promote and then fail the length check
         # for a non-replicated MLA rank with tp_ratio != 1.
         tp_ratio = _get_tp_ratio(self.tp_size, meta.remote_tp_size)
-        if not meta.hisparse_protocol and (
+        if not meta.group_block_sizes and (
             tp_ratio == 1 or self._producer_cache_is_replicated()
         ):
             covered_both_sides = len(local_regions) == len(pre_align_local) and len(
@@ -3342,6 +3323,7 @@ class MooncakeConnectorWorker:
             meta.remote_pp_size,
             meta.remote_tp_size,
             meta.layout_id,
+            tuple(meta.group_block_sizes),
         )
 
     def _remember_peer_layout(
@@ -3373,30 +3355,30 @@ class MooncakeConnectorWorker:
         *,
         include_layout: bool,
     ) -> MooncakeXferMetadata:
+        skip_host = self.kv_cache_config.hisparse_shared_host_pool and self.tp_rank != 0
+        # Filter the wire request only; all ranks retain their completion state.
         req_blocks = {
-            req_id: (pull_meta.transfer_id, pull_meta.local_block_ids)
+            req_id: (
+                pull_meta.transfer_id,
+                [
+                    [] if group.host_resident else ids
+                    for group, ids in zip(
+                        self.kv_cache_config.transfer_groups,
+                        pull_meta.local_block_ids,
+                    )
+                ]
+                if skip_host
+                else pull_meta.local_block_ids,
+            )
             for req_id, pull_meta in pull_metas.items()
         }
-        hisparse_fields: dict[str, Any] = {}
+        layout_fields: dict[str, Any] = {}
         if self.kv_cache_config.hisparse_host_num_blocks is not None:
-            hisparse_fields = dict(
-                hisparse_protocol=1,
+            layout_fields = dict(
                 group_block_sizes=[
                     group.kv_cache_spec.block_size
                     for group in self.kv_cache_config.transfer_groups
                 ],
-                host_group_indices=[
-                    index
-                    for index, group in enumerate(self.kv_cache_config.transfer_groups)
-                    if group.host_resident
-                ],
-                shared_host_owner=(
-                    0 if self.kv_cache_config.hisparse_shared_host_pool else -1
-                ),
-                req_block_positions={
-                    req_id: pull_meta.local_block_positions or []
-                    for req_id, pull_meta in pull_metas.items()
-                },
             )
         if not include_layout:
             return MooncakeXferMetadata(
@@ -3410,7 +3392,7 @@ class MooncakeConnectorWorker:
                 kv_caches_base_addr=[],
                 block_lens=[],
                 kv_block_lens=[],
-                **hisparse_fields,
+                **layout_fields,
             )
         return MooncakeXferMetadata(
             remote_hostname=self.hostname,
@@ -3430,15 +3412,7 @@ class MooncakeConnectorWorker:
                 list(groups) for groups in self.region_shared_groups
             ],
             registered_row_offsets=self.region_row_offsets,
-            registered_cache_roles=[
-                spec.cache_role.value
-                if isinstance(spec := self._layer_specs[name], MLAAttentionSpec)
-                else ""
-                for name in self.registered_layer_names
-            ]
-            if hisparse_fields
-            else [],
-            **hisparse_fields,
+            **layout_fields,
         )
 
     def _validate_head_resharding_layout(
