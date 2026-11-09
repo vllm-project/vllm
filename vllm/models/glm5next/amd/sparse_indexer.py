@@ -42,6 +42,7 @@ from vllm.v1.attention.backends.mla.indexer import (
 )
 from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
 from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+    _decode_logits_workspace,
     _max_decode_logits_rows,
 )
 from vllm.v1.worker.workspace import current_workspace_manager
@@ -202,9 +203,7 @@ def sparse_attn_indexer_kpool(
         # profiling branch returns before invoking the logits kernel itself.
         decode_rows = _max_decode_logits_rows(hidden_states.shape[0])
         if _ON_GFX942 or _ON_GFX950 or (_ON_RDNA and not _ON_GFX1151):
-            workspace_manager.get_simultaneous(
-                ((decode_rows, max_pool_len), torch.float32),
-            )
+            _decode_logits_workspace(decode_rows, max_pool_len)
         else:
             workspace_manager.get_simultaneous(
                 ((q_quant.shape[1], decode_rows, max_pool_len), torch.float32),
