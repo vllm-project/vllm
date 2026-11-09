@@ -141,9 +141,21 @@ steps:
       - tests/models/test_utils.py
       - tests/models/hy_v4/test_triton_ihc.py
       - vllm/models/muse_spark/
+      - vllm/model_executor/layers/quantization/online/fp8.py
+      - vllm/model_executor/layers/quantization/online/lm_head.py
+      - vllm/model_executor/kernels/linear/__init__.py
+      - vllm/model_executor/kernels/linear/scaled_mm/
+      - vllm/model_executor/layers/vocab_parallel_embedding.py
+      - vllm/model_executor/model_loader/utils.py
+      - vllm/model_executor/models/qwen3_dflash.py
+      - vllm/model_executor/models/qwen3_dspark.py
+      - vllm/model_executor/models/utils.py
+      - vllm/v1/worker/gpu/spec_decode/dspark/
+      - vllm/v1/worker/gpu/spec_decode/eagle/utils.py
       - tests/models/test_muse_spark_logits_local.py
       - tests/models/test_muse_spark_rocm_shared_rope.py
       - tests/models/test_muse_spark_rocm_mono.py
+      - tests/models/test_muse_spark_rocm_draft_fp8.py
       commands:
       - >-
         pytest -v -s
@@ -166,6 +178,7 @@ steps:
         models/test_muse_spark_logits_local.py
         models/test_muse_spark_rocm_shared_rope.py
         models/test_muse_spark_rocm_mono.py
+        models/test_muse_spark_rocm_draft_fp8.py
         models/test_utils.py::test_merge_multimodal_embeddings_no_sync
       - VLLM_ROCM_USE_AITER=1 pytest -v -s models/test_hyv4_rocm.py -m 'not distributed'
       - pytest -v -s models/hy_v4/test_triton_ihc.py

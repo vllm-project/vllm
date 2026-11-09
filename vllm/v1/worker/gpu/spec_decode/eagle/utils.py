@@ -51,6 +51,11 @@ def share_target_lm_head(
     """Install the target lm_head, or its quantized copy, on a drafter that
     shares it. Returns the installed head, or None if the drafter keeps its own.
     """
+    if quantization is not None and getattr(
+        draft_model, "quantizes_own_lm_head", False
+    ):
+        # The drafter built its own lm_head with this quantization.
+        return None
     draft_lm_head = getattr(draft_model, "lm_head", None)
     if not (
         can_share
