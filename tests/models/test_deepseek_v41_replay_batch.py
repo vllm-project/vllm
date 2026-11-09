@@ -65,8 +65,12 @@ def state(monkeypatch, request):
     cfg.model_config.enable_prompt_embeds = False
     cfg.model_config.uses_mrope = False
     cfg.model_config.is_multimodal_model = False
+    cfg.model_config.supports_multimodal_inputs = False
     cfg.scheduler_config.max_num_seqs = 16
     cfg.scheduler_config.max_num_batched_tokens = 1024
+    cfg.scheduler_config.max_num_scheduled_tokens = None
+    cfg.scheduler_config.long_prefill_token_threshold = 0
+    cfg.speculative_config = None
     cfg.parallel_config.data_parallel_size = 1
     cfg.parallel_config.enable_expert_parallel = False
     cfg.parallel_config.prefill_context_parallel_size = getattr(request, "param", 1)
@@ -554,3 +558,61 @@ def test_dp_ranks_pad_to_one_replay_graph(dp_state):
     assert is_padding[len(REPLAY_ROWS) :].all()
     dp_metadata = replay.forward_context.dp_metadata
     assert dp_metadata.num_tokens_across_dp_cpu.tolist() == [512, 512]
+
+
+def test_prefill_replays_only_the_prompt_tail(state):
+    """Without graphs the last 2 * WINDOW prompt tokens replay: a chunk before them
+    replays one row, and chunks whose window reaches back past them get a floor."""
+
+    def chunk(start, length, prompt=500):
+        batch = replace(
+            _input_batch([length], [start + length], [True]),
+            prefill_len_np=np.array([prompt], dtype=np.int32),
+            num_computed_prefill_tokens_np=np.array([start], dtype=np.int32),
+        )
+        return _prepare(state, batch, CUDAGraphMode.NONE)
+
+    assert chunk(0, 200)[0].rows.tolist() == [199]
+    replay, build = chunk(200, 100)
+    assert replay.rows.tolist() == list(range(44, 100))
+    assert build.replay_start.tolist() == [244]
+    for start, length in ((300, 1), (301, 26), (327, 44), (370, 1)):
+        replay, build = chunk(start, length)
+        assert replay.rows.tolist() == list(range(length))
+        assert build.replay_start.tolist() == [244]
+    assert chunk(371, 100) == (None, None)
+
+
+@pytest.mark.parametrize(
+    ("override", "min_remaining"),
+    [
+        ({}, 512 + 2 * WINDOW),
+        ({"long_prefill_token_threshold": 640}, None),
+        ({"supports_multimodal_inputs": True}, None),
+        ({"policy": "priority"}, None),
+        ({"max_num_new_slots_for_drafting": 63}, None),  # taken per request
+        ({"num_speculative_tokens": 64}, None),  # adaptive verification drops all
+    ],
+)
+def test_skipped_tails_stay_out_of_graphs(override, min_remaining):
+    """Chunks whose window reaches past the replayed tail must miss CUDA graphs: a
+    chunk cut short runs with at least its prefill cap less every draft."""
+    from vllm.models.deepseek_v41.nvidia import model_state
+
+    config = SimpleNamespace(
+        supports_multimodal_inputs=False,
+        policy="fcfs",
+        cudagraph_mode=CUDAGraphMode.PIECEWISE,
+        max_cudagraph_capture_size=512,
+        max_num_seqs=256,
+        max_num_batched_tokens=16384,
+        max_num_scheduled_tokens=None,
+        long_prefill_token_threshold=0,
+        max_num_new_slots_for_drafting=0,
+        enable_adaptive_verification=True,
+        num_speculative_tokens=0,
+    )
+    vars(config).update(override)
+    parts = ("model", "compilation", "scheduler", "speculative")
+    cfg = SimpleNamespace(**{f"{part}_config": config for part in parts})
+    assert model_state._skip_tail_min_remaining(cfg, WINDOW) == min_remaining
