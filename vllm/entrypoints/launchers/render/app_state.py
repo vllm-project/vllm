@@ -26,10 +26,10 @@ async def init_render_app_state(
 ) -> None:
     """Initialise FastAPI app state for a CPU-only render server.
 
-    Unlike :func:`init_app_state` this function does not require an
-    :class:`~vllm.engine.protocol.EngineClient`; it bootstraps the
+    Unlike `init_app_state` this function does not require an
+    `EngineClient`; it bootstraps the
     preprocessing pipeline (renderer, input_processor)
-    directly from the :class:`~vllm.config.VllmConfig`.
+    directly from the `VllmConfig`.
     """
     served_model_names = args.served_model_name or [args.model]
     model_registry = OpenAIModelRegistry(
@@ -74,6 +74,7 @@ async def init_render_app_state(
         tool_strict_level=args.tool_strict_level,
         reasoning_parser=reasoning_parser,
         default_chat_template_kwargs=default_chat_template_kwargs,
+        reasoning_effort_map=args.reasoning_effort_map,
         log_error_stack=args.log_error_stack,
     )
     state.online_renderer.warmup()
@@ -91,7 +92,9 @@ async def init_render_app_state(
         tool_strict_level=args.tool_strict_level,
         reasoning_parser=reasoning_parser,
         default_chat_template_kwargs=default_chat_template_kwargs,
+        reasoning_effort_map=args.reasoning_effort_map,
         log_error_stack=args.log_error_stack,
+        return_tokens_as_token_ids=args.return_tokens_as_token_ids,
     )
 
     state.openai_serving_models = model_registry

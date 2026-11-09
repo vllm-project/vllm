@@ -52,7 +52,13 @@ from vllm.inputs import (
 )
 from vllm.logger import init_logger
 from vllm.parser import Parser, ParserManager
-from vllm.renderers import BaseRenderer, ChatParams, TokenizeParams, merge_kwargs
+from vllm.renderers import (
+    BaseRenderer,
+    ChatParams,
+    TokenizeParams,
+    map_reasoning_effort,
+    merge_kwargs,
+)
 from vllm.renderers.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
@@ -64,6 +70,7 @@ from vllm.renderers.inputs.preprocess import (
     parse_model_prompt,
     prompt_to_seq,
 )
+from vllm.renderers.metrics import observe_request_render_duration
 from vllm.utils.mistral import is_mistral_tokenizer, is_mistral_tool_parser
 from vllm.utils.mistral import mt as _mt
 
@@ -109,11 +116,11 @@ def _reused_prompt_token_ids(
     """Pop prompt token ids forwarded for decode-side reuse, if any.
 
     Disaggregated serving carries the prefill stage's ids in
-    ``kv_transfer_params`` so the decode stage can skip re-tokenizing. Removing
+    `kv_transfer_params` so the decode stage can skip re-tokenizing. Removing
     the key keeps the id list out of the engine's sampling metadata.
 
-    Returns None without checking the ids when ``echo`` is set or ``messages``
-    has non-text content, since both need ``messages`` to be rendered.
+    Returns None without checking the ids when `echo` is set or `messages`
+    has non-text content, since both need `messages` to be rendered.
     Otherwise raises VLLMValidationError if the ids are malformed or out of
     vocabulary.
     """
@@ -168,6 +175,7 @@ class OnlineRenderer:
         reasoning_parser: str | None = None,
         tool_strict_level: str | None = None,
         default_chat_template_kwargs: dict[str, Any] | None = None,
+        reasoning_effort_map: dict[str, str] | None = None,
         log_error_stack: bool = False,
     ) -> None:
         self.model_config = model_config
@@ -194,6 +202,7 @@ class OnlineRenderer:
         self.default_chat_template_kwargs: dict[str, Any] = (
             default_chat_template_kwargs or {}
         )
+        self.reasoning_effort_map: dict[str, str] = reasoning_effort_map or {}
         self.trust_request_chat_template = trust_request_chat_template
         self.trust_request_mm_kwargs = trust_request_mm_kwargs
 
@@ -217,6 +226,7 @@ class OnlineRenderer:
             request.build_chat_params(
                 self.chat_template,
                 self.chat_template_content_format,
+                self.reasoning_effort_map,
             )
             .with_defaults(self.default_chat_template_kwargs)
             .chat_template_kwargs
@@ -233,12 +243,13 @@ class OnlineRenderer:
         Called directly by render_chat_request and delegated to by
         OpenAIServingChat.render_chat_request after its engine-aware checks.
 
-        Decode-side token reuse (ids forwarded in ``kv_transfer_params``) is
-        handled deeper, in ``preprocess_chat`` / ``_make_request_with_harmony``,
+        Decode-side token reuse (ids forwarded in `kv_transfer_params`) is
+        handled deeper, in `preprocess_chat` / `_make_request_with_harmony`,
         so it skips only templating and tokenization while tool-choice
-        validation and ``adjust_request`` still run and the output is
+        validation and `adjust_request` still run and the output is
         detokenized (text-out).
         """
+        render_start = time.perf_counter()
         tokenizer = self.renderer.tokenizer
 
         tool_parser = self.parser.tool_parser_cls if self.parser is not None else None
@@ -315,6 +326,11 @@ class OnlineRenderer:
                 request, should_include_tools
             )
 
+        observe_request_render_duration(
+            cast(str, self.model_config.served_model_name),
+            "chat",
+            time.perf_counter() - render_start,
+        )
         return conversation, engine_inputs
 
     async def render_responses(
@@ -420,8 +436,9 @@ class OnlineRenderer:
                 build_harmony_preamble(
                     instructions=instructions,
                     tools=request.tools if with_custom_tools else None,
-                    reasoning_effort=(
-                        request.reasoning.effort if request.reasoning else None
+                    reasoning_effort=map_reasoning_effort(
+                        request.reasoning.effort if request.reasoning else None,
+                        self.reasoning_effort_map,
                     ),
                     with_custom_tools=with_custom_tools,
                     **descriptions,
@@ -519,10 +536,10 @@ class OnlineRenderer:
     def adjust_harmony_request(
         self, request: ChatCompletionRequest | ResponsesRequest
     ) -> None:
-        """Apply the Harmony parser's ``adjust_request`` to ``request`` in place.
+        """Apply the Harmony parser's `adjust_request` to `request` in place.
 
         Every Harmony render path must call this before sampling params are
-        built from ``request``.
+        built from `request`.
         """
         if self.parser is None:
             return
@@ -562,7 +579,10 @@ class OnlineRenderer:
         # if the model supports it. TODO: Support browsing.
         assert not self.supports_browsing
         assert not self.supports_code_interpreter
-        if (reasoning_effort := request.reasoning_effort) == "none":
+        reasoning_effort = map_reasoning_effort(
+            request.reasoning_effort, self.reasoning_effort_map
+        )
+        if reasoning_effort == "none":
             raise VLLMValidationError(
                 f"Harmony does not support {reasoning_effort=}",
                 parameter="reasoning_effort",
@@ -597,6 +617,7 @@ class OnlineRenderer:
         Called directly by render_completion_request and delegated to by
         OpenAIServingCompletion.render_completion_request after its engine-aware checks.
         """
+        render_start = time.perf_counter()
         prompt_input = request.prompt
         if request.suffix is not None:
             if request.echo:
@@ -665,6 +686,11 @@ class OnlineRenderer:
             skip_mm_cache=skip_mm_cache,
         )
 
+        observe_request_render_duration(
+            cast(str, self.model_config.served_model_name),
+            "completion",
+            time.perf_counter() - render_start,
+        )
         return engine_inputs
 
     def create_error_response(
@@ -783,8 +809,11 @@ class OnlineRenderer:
         )
 
         tok_params = request.build_tok_params(self.model_config)
+        build_kwargs: dict[str, Any] = {}
+        if isinstance(request, (ChatCompletionRequest, ResponsesRequest)):
+            build_kwargs["reasoning_effort_map"] = self.reasoning_effort_map
         chat_params = request.build_chat_params(
-            default_template, default_template_content_format
+            default_template, default_template_content_format, **build_kwargs
         ).with_defaults(
             default_template_kwargs,
             default_media_io_kwargs=(mm_config.media_io_kwargs if mm_config else None),

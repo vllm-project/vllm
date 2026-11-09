@@ -31,7 +31,7 @@ from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext, is_usage_stats_enabled, usage_message
 from vllm.utils.network_utils import ZmqListener, get_open_zmq_ipc_path, get_tcp_uri
 from vllm.utils.system_utils import decorate_logs, kill_process_tree, set_process_title
-from vllm.utils.torch_utils import PIN_MEMORY
+from vllm.utils.torch_utils import PIN_MEMORY, TORCH_DTYPE_TO_NUMPY_DTYPE
 from vllm.v1.core.sched.output import SchedulerOutput
 
 if TYPE_CHECKING:
@@ -155,10 +155,10 @@ def get_engine_client_zmq_addr(
     host: str,
     port: int = 0,
 ) -> str:
-    """Return an IPC path (``local_only=True``) or ``tcp://host:port``.
+    """Return an IPC path (`local_only=True`) or `tcp://host:port`.
 
-    ``port=0`` lets the kernel assign the port at ``bind()`` time; the
-    caller must recover it via ``getsockopt(zmq.LAST_ENDPOINT)``."""
+    `port=0` lets the kernel assign the port at `bind()` time; the
+    caller must recover it via `getsockopt(zmq.LAST_ENDPOINT)`."""
     if local_only:
         return get_open_zmq_ipc_path()
     return get_tcp_uri(host, port)
@@ -672,19 +672,6 @@ def _shutdown_processes_and_cleanup_listeners(
             listener.cleanup()
 
 
-def copy_slice(
-    from_tensor: torch.Tensor, to_tensor: torch.Tensor, length: int
-) -> torch.Tensor:
-    """Copy the first length elements of a tensor into another tensor in a
-    non-blocking manner.
-
-    Used to copy pinned CPU tensor data to pre-allocated GPU tensors.
-
-    Returns the sliced target tensor.
-    """
-    return to_tensor[:length].copy_(from_tensor[:length], non_blocking=True)
-
-
 def report_usage_stats(
     vllm_config, usage_context: UsageContext = UsageContext.ENGINE_CONTEXT
 ) -> None:
@@ -740,7 +727,11 @@ def report_usage_stats(
             # Common configuration
             "dtype": str(model_config.dtype),
             "block_size": vllm_config.cache_config.block_size,
-            "gpu_memory_utilization": vllm_config.cache_config.gpu_memory_utilization,
+            # Reported at worker init: the extensible KV cache default (1.0) is
+            # still shown if the driver probe later falls back to 0.92.
+            "gpu_memory_utilization": (
+                vllm_config.cache_config.resolved_gpu_memory_utilization
+            ),
             "kv_cache_memory_bytes": vllm_config.cache_config.kv_cache_memory_bytes,
             # Quantization
             "quantization": model_config.quantization,
@@ -811,6 +802,15 @@ def tensor_data(tensor: torch.Tensor) -> memoryview:
         A memoryview of the tensor data as uint8.
 
     """
+    if tensor.is_cpu and tensor.is_contiguous():
+        # Avoid several torch ops, each of which releases and re-acquires the GIL.
+        # View dtypes NumPy cannot export as bytes.
+        try:
+            if tensor.dtype not in TORCH_DTYPE_TO_NUMPY_DTYPE:
+                tensor = tensor.view(torch.uint8)
+            return memoryview(tensor.numpy()).cast("B")
+        except (TypeError, RuntimeError):
+            pass
     return tensor.flatten().cpu().contiguous().view(torch.uint8).numpy().data
 
 
