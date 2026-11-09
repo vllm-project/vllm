@@ -187,10 +187,7 @@ class ForwardBench:
                     # The runner completes the returned output itself; only the
                     # drafter needs the full aux hidden states here.
                     draft_input = output
-                    if (
-                        self.runner.use_aux_hidden_state_outputs
-                        and handler is not None
-                    ):
+                    if self.runner.use_aux_hidden_state_outputs and handler is not None:
                         draft_input = handler.add_upstream_aux_hidden_states(
                             inputs["intermediate_tensors"], output
                         )
