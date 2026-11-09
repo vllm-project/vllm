@@ -105,7 +105,7 @@ def _patch_one_decode_step(monkeypatch, layer: kda.Glm5NextLinearAttention) -> N
 
 
 def test_decode_reads_refitted_fused_conv(conv1d, monkeypatch):
-    """Decode must hand the conv kernel ``conv1d.weight`` itself, not a copy
+    """Decode must hand the conv kernel `conv1d.weight` itself, not a copy
     cached by an earlier forward, so refits reach the address FULL cudagraphs
     capture (#55087)."""
     layer = _decode_layer(conv1d)
@@ -143,8 +143,8 @@ def _aiter_layout(weights: list[torch.Tensor]) -> torch.Tensor:
 
 
 def test_aiter_decode_reads_refitted_fused_conv(conv1d, monkeypatch):
-    """AITER's decode reads ``decode_conv1d_weight``, a ``[3, K, C]`` copy of
-    ``conv1d.weight``. Refits through load_weights and through the layerwise
+    """AITER's decode reads `decode_conv1d_weight`, a `[3, K, C]` copy of
+    `conv1d.weight`. Refits through load_weights and through the layerwise
     reload must refresh it in place, at the address FULL cudagraphs capture."""
     layer = _decode_layer(conv1d)
     layer.conv_size = KERNEL

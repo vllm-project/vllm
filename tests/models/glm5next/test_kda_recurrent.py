@@ -283,10 +283,10 @@ def _aiter_kda_decode_runnable() -> bool:
 def test_aiter_decode_route_follows_replayed_step(dist_init, monkeypatch, dim_first):
     """AITER's single-launch decode kernel runs on plain decode steps only.
 
-    Breakable PIECEWISE graphs replay ``_forward`` against each step's metadata,
+    Breakable PIECEWISE graphs replay `_forward` against each step's metadata,
     so the route is chosen there. Capture on an all-decode batch, then replay a
     mixed step (stock chain) and a decode step (one fused launch); a route fixed
-    in ``forward`` fails one of the two. The reference is a layer built without
+    in `forward` fails one of the two. The reference is a layer built without
     AITER, with the same weights and caches, in the same conv-state layout.
     """
     from transformers import Glm5NextTextConfig
@@ -433,7 +433,7 @@ def test_aiter_decode_route_follows_replayed_step(dist_init, monkeypatch, dim_fi
         graphs[name] = (capture, static_hidden, output)
 
     def replay(name: str, step_metadata: GDNAttentionMetadata, hidden: torch.Tensor):
-        """The outputs, caches and fused launches of one replay of graph ``name``
+        """The outputs, caches and fused launches of one replay of graph `name`
         from the saved caches."""
         capture, static_hidden, output = graphs[name]
         launches.clear()

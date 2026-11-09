@@ -426,14 +426,14 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             )
 
     def _register_decode_conv1d_weight(self) -> None:
-        """Register ``decode_conv1d_weight``, the q|k|v conv weight in the
-        ``[3, conv_size, dim]`` layout AITER's decode kernel reads (None when
+        """Register `decode_conv1d_weight`, the q|k|v conv weight in the
+        `[3, conv_size, dim]` layout AITER's decode kernel reads (None when
         that kernel is not used).
 
         It is allocated once, so cudagraphs keep its address, and refreshed
-        from ``conv1d.weight`` after every load and layerwise reload
-        (``process_weights_after_loading``) and after every ``conv1d.weight``
-        shard load, which covers refits through ``load_weights`` outside the
+        from `conv1d.weight` after every load and layerwise reload
+        (`process_weights_after_loading`) and after every `conv1d.weight`
+        shard load, which covers refits through `load_weights` outside the
         reload lifecycle.
         """
         decode_conv1d_weight = None
@@ -611,7 +611,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         core_attn_out: torch.Tensor,
         out_gate: torch.Tensor | None = None,
     ) -> None:
-        """With ``out_gate``, also apply the gated RMSNorm that ``forward`` skips."""
+        """With `out_gate`, also apply the gated RMSNorm that `forward` skips."""
         forward_context = get_forward_context()
         attn_metadata_raw = forward_context.attn_metadata
 
