@@ -81,7 +81,7 @@ See related papers for more details (<https://arxiv.org/pdf/2401.08671> or <http
 
 ## Qwen3.8-Flash-Next QSA prefill
 
-On a single NVIDIA SM90 node with tensor parallel size 4 or 8 and the multiprocessing executor, the Qwen4Exp QSA indexer automatically distributes large prefill query batches across ranks and gathers the selected indices. The measured path uses BF16 indexer Q/K, four 128-dimensional indexer heads, a 2048-token selection budget, and compression ratio 4. It requires at least 4096 actual prefill rows in the scheduling step and a maximum context length of at least 65536 tokens; `--max-num-batched-tokens` alone does not determine eligibility. Smaller batches retain replicated selection, including a token budget of 799.
+On a single NVIDIA SM90 node with tensor parallel size 4 or 8 and the multiprocessing executor, the Qwen4Exp QSA indexer automatically distributes large prefill query batches across ranks and gathers the selected indices. The measured path uses BF16 indexer Q/K, four 128-dimensional indexer heads, a 2048-token selection budget, and compression ratio 4. It requires at least 4096 actual prefill rows in the scheduling step and a maximum context length of at least 65536 tokens; `--max-num-batched-tokens` alone does not determine eligibility. Smaller batches retain replicated selection.
 
 Decode remains unchanged. DCP, PCP, batch-invariant execution, disabled PyNCCL, NCCL symmetric-memory collectives, and FULL graphs for mixed batches retain replicated selection. The optimization adds no CLI option; changing the prefill token budget affects scheduling independently of this optimization.
 
