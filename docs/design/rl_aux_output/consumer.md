@@ -38,8 +38,7 @@ for token `p + 1`).
 | `indexer` | int32 `[n, idx_layers, topk]` | Top-k indices to replay, in engine order: ascending positions, `-1` pads last. `-1` is a pad entry inside a delivered cell, `-2` means not replayed. |
 | `indexer_layers` | list | Model layer of each indexer slot. |
 | `indexer_replay_mask`, `indexer_version` | `[n, idx_layers]` | As for R3. |
-| `hidden` | `[m, d]` | The `lm_head` input for positions `hidden_start + i`. Codec `raw` (the default): the exact stored values in the manifest's dtype, e.g. float32; for bf16 without `ml_dtypes` installed, uint16 bit patterns (view them as bfloat16 in torch). Codec `fp8`: float32, dequantized. Rows of missing chunks are NaN; go by `missing.rows`, which lists them for every codec and dtype. |
-| `hidden_fp8`, `hidden_scale` | uint8 `[m, d]`, float32 `[m]` | Codec `fp8` only: the stored e4m3 codes and row scales, for decoding on the GPU. |
+| `hidden` | `[m, d]` | The `lm_head` input for positions `hidden_start + i`. Codec `raw` (the default): the exact stored values in the manifest's dtype, e.g. float32; for bf16 without `ml_dtypes` installed, uint16 bit patterns (view them as bfloat16 in torch). Rows of missing chunks are NaN; go by `missing.rows`, which lists them for every dtype. |
 | `hidden_start` | int | First position with a hidden row: `P - 1` of this request. |
 | `weight_version` | int64 `[n]` | Version of each row's shallow cells (from the manifest's segments); `-1` = unknown. |
 | `version_unknown`, `version_unknown_count` | bool `[n]`, int | Delivered rows (not in `missing.rows`) whose weight version, or the version of one of their replayed cells, is unknown. They stay replayable and do not make `ok` False. |
@@ -60,7 +59,7 @@ for token `p + 1`).
   wider than one byte); a row that fails is in `missing.rows`.
 - Codecs are validated strictly; nothing is decoded on a guess. Indexer objects must carry the
   manifest's codec tag, and indexer patches are decoded by their own `idx_codec`. Hidden states
-  must name a known codec (`raw` or `fp8`), and every chunk is checked against the field's dtype
+  must name codec `raw`, and every chunk is checked against the field's dtype
   and row width before any size is computed from it. An unknown codec or a mismatch is reported
   missing, never decoded.
 - Decoded indexer cells are byte-identical to the engine's: ascending positions, `-1` pads last.
@@ -94,10 +93,9 @@ for token `p + 1`).
    replayed, but their version must not feed importance weights or freshness filters: treat them
    as stale (worst-case version) or drop them from any version-dependent term.
 6. **Hidden states** cover only this request's generated positions `[hidden_start, n_rows)`. For
-   earlier turns read their own manifests. Check the codec in the manifest's hidden field: `raw`
-   rows are the exact `lm_head` input and can feed the LM head directly; `fp8` rows are an
-   approximation (decode `hidden_fp8 * hidden_scale` on the GPU, or use `hidden`). Do not
-   recompute the behavior logprob from either; use the inline sampled logprob.
+   earlier turns read their own manifests. The rows are the exact `lm_head` input and can feed
+   the LM head directly. Do not recompute the behavior logprob from them; use the inline sampled
+   logprob.
 7. **Release** the session (`<job>/<session>/`) after the step commits.
 
 ## Example

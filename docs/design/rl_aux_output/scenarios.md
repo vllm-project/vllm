@@ -131,7 +131,7 @@ Setup: TP4 + EP4, BI on. The frontier column keeps the workload from section 1 a
 |---|---|---|---|---|---|
 | R3 | all | 480 B (40 × 6 × uint16) | 96 MB | 5.0 GB | 6.7 GB |
 | top-k 256 | generated | 2 KB | 41 MB | 2.1 GB | 2.8 GB |
-| hidden (`lm_head` input, fp8 + per-token scale) | generated | ≈5 KB (hidden 5120) | 102 MB | 5.2 GB | 7.0 GB |
+| hidden (`lm_head` input, float32) | generated | 16 KB | 328 MB | 16.6 GB | 22 GB |
 | indexer, raw (8 × 512 × int32) | all | 16 KB | 3.3 GB | 170 GB | 227 GB |
 | indexer, 20-bit + zstd (measured) | all | 2.5–3.6 KB | 0.5–0.7 GB | 26–37 GB | 35–50 GB |
 
@@ -139,4 +139,4 @@ Setup: TP4 + EP4, BI on. The frontier column keeps the workload from section 1 a
   - R3 as a block-row cache (or KV layer): ≈1.6 GB per engine, ~1% of the KV.
   - Indexer: ≈54 GB raw, ≈10 GB compressed.
 - **Indexer compression.** Selections are bitwise reproducible under BI. Compressed, the indexer is 5–7× R3, and fits in the same delivery store.
-- **Hidden states.** fp8 hidden times the teacher's `lm_head` is within full-vocabulary KL < 1e-3 of vLLM's distribution. The behavior logprob must still come from the inline per-token logprob, because recomputed logits are not bitwise equal.
+- **Hidden states.** Delivered exactly, the trainer's `lm_head` reproduces vLLM's distribution up to its own matmul (logprob error max 7.8e-4). The behavior logprob must still come from the inline per-token logprob, because recomputed logits are not bitwise equal.

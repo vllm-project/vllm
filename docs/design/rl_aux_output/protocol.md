@@ -12,11 +12,11 @@ Status: draft (v5). Measurements behind each rule are in [experiments](experimen
 | `indexer_topk` | KV | all | 8 layers × 512 × 20 bit, zstd: ~2.5–3.6 KB (16 KB raw) | sparse-attention replay |
 | `topk_logprobs` | sampling | generated | k × 8 B | truncated distillation, KL |
 | `sampling_mask` | sampling | generated | CSR, ≤ 256 ids per row | reconstruct the truncated/masked support |
-| `hidden_states` | sampling | generated | `lm_head` input in the dtype that enters `lm_head` (codec `raw`): 16 KB as float32; optional fp8 + per-token scale (codec `fp8`): ~4.1 KB | full-vocabulary student training |
+| `hidden_states` | sampling | generated | `lm_head` input in the dtype that enters `lm_head` (codec `raw`): 16 KB as float32 | full-vocabulary student training |
 
 The sampled token's logprob is returned inline with the response; that number is the behavior probability. Logits recomputed from hidden states are not bitwise equal to vLLM's (max diff 2e-4 even in fp32), so trainers must not try to reproduce the behavior logprob from them.
 
-**Hidden states are exact by default.** They are stored as the very values that entered `lm_head`, so the trainer's full-vocabulary logits differ from the engine's only by its own matmul (logprob error max 7.8e-4 against about 0.3 with fp8). fp8 is a size option, chosen per deployment, and the manifest says which one a request used.
+**Hidden states are exact.** They are stored as the very values that entered `lm_head`, so the trainer's full-vocabulary logits differ from the engine's only by its own matmul (logprob error max 7.8e-4).
 
 **Indexer rows.** A cell (one position, one indexer layer) holds the top-k selected positions in ascending order with the `-1` pads last. That is the order the engine's top-k produces and the trainer's top-k kernel expects, so replay compares cells as sequences, not sets. Every codec must restore exactly this order on decode; a decoder that reorders pads still passes any set-based check while replay silently loses its effect.
 
@@ -77,7 +77,7 @@ Sampling-parameter constraints (when requesting `topk_logprobs`, `sampling_mask`
 | `tail_start`, `tail_nbytes` | the tail object covering `[tail_start, rows)`; it can span several blocks |
 | `rows` | rows covered; can exceed `L−1` (see §7) |
 | `weight_versions` | `[[start, version], ...]` covering `[0, rows)`, describing the stored objects |
-| `fields` | per output: name, dtype, per-token shape, codec, layout, `missing` and `holes` counts; for sampling-following outputs the chunk count and every chunk's row count (`chunk_lens`: a preemption flushes a short chunk). Hidden states: codec `raw` stores each row as `d` values of the field's `dtype`, the dtype that enters `lm_head`; codec `fp8` stores `d` e4m3 codes plus one float32 scale per row. Indexer: the codec of block and tail objects (patches name theirs in `r3_cone`) |
+| `fields` | per output: name, dtype, per-token shape, codec, layout, `missing` and `holes` counts; for sampling-following outputs the chunk count and every chunk's row count (`chunk_lens`: a preemption flushes a short chunk). Hidden states: codec `raw` stores each row as `d` values of the field's `dtype`, the dtype that enters `lm_head`. Indexer: the codec of block and tail objects (patches name theirs in `r3_cone`) |
 | `invalid_from` | first position computed on invalid KV, if the engine ever rewound this request (§6.8); rows from here are not valid |
 | `r3_cone` | partial capture only (§6.11): the trajectory's patch list, `ends`, and `uncovered` counts |
 
@@ -250,7 +250,7 @@ Every acked object stays readable until its session is released. A listed object
 **Both:**
 
 - **Segment lifetime.** Mooncake keeps one replica per object by default, so an object lives on whichever holder it was placed on, in memory or on that holder's disk. A holder must stay up until every consumer of every object placed on it has read and released. Taking down one replica's segment when that replica finished removed other replicas' objects.
-- **Sizing with real bytes per token.** At 512K context the indexer is 10 KB per token packed and about 5.6 KB after zstd (ratio ~1.8, against 4.6–6.7 at short context); under partial capture blocks omit the deep indexer slots, which shrinks it further. R3 adds 480 B per token, and hidden states 16 KB per generated token as exact float32 (about 4.1 KB as fp8). Admission (§8) must use the numbers of the configured codecs at the target context; measure them on a short run at that context, since numbers from short contexts over-admit by about 2×.
+- **Sizing with real bytes per token.** At 512K context the indexer is 10 KB per token packed and about 5.6 KB after zstd (ratio ~1.8, against 4.6–6.7 at short context); under partial capture blocks omit the deep indexer slots, which shrinks it further. R3 adds 480 B per token, and hidden states 16 KB per generated token as exact float32. Admission (§8) must use the numbers of the configured codecs at the target context; measure them on a short run at that context, since numbers from short contexts over-admit by about 2×.
 - **At job end,** force-remove everything under `<job>/`, report the number of keys removed as a leak metric (expected 0), then delete each holder's offload directory.
 
 ## 10. Checklist

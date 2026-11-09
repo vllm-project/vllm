@@ -14,7 +14,7 @@ A row has to exist for two different reasons:
 | R3 | all | yes | 480 B | no, it must match the rollout's routing |
 | top-k + mask | generated | no | 2 KB + ≤ 1 KB | no, it is the sampling-time distribution |
 | indexer | all | yes | 16 KB raw, 2.5–3.6 KB compressed | only under BI with the same weights |
-| hidden | generated, or teacher prompt positions | in the teacher case | 10 KB bf16, ~5 KB fp8 | no |
+| hidden | generated, or teacher prompt positions | in the teacher case | 16 KB float32 (exact) | no |
 
 ## Cache segment: where rows for prefix hits come from
 
@@ -90,7 +90,7 @@ Rows are labelled with the version of the forward that computed them, stamped wh
 - R3: uint16 ids (384 experts); 9-bit packing would save 44%.
 - Top-k: 17-bit ids plus bf16 logprobs; mask: CSR.
 - Indexer: 20-bit packing plus zstd (4.6–6.7×); packing on the GPU, zstd on the host. Delta encoding does not help.
-- Hidden: fp8 with a per-token scale.
+- Hidden: the exact `lm_head` input, uncompressed.
 - Every field carries a codec name.
 
 ## Hidden states for full-vocabulary distillation

@@ -45,7 +45,7 @@ Engine events that do not occur on their own in a short test are triggered throu
 | X2 | Throughput with aux outputs on; engine-local store vs Mooncake at 8 replicas; each hop vs its ceiling | measured | as built about −41% at the top scenario; with partial capture, CUDA graph `FULL` and capture off the output lock: one node at 512K −2.2% (all outputs), top scenario −2.1% to −6.1% across runs (all outputs) |
 | X4/X5 | Requested means delivered; freed once used | 0 missing, 0 leaks | pass down to a 16 MB pool |
 | X6 | Indexer encoding | ratio, order, bytes | 4.6–6.7× up to 128K; rows restored in engine order; deep slots out of blocks: 51.2 → 14.1 GB per run |
-| X7 | Hidden states: exact vs fp8 | logprob error, bytes, time | exact (`raw`) is the default: error max 7.8e-4 vs ~0.3 for fp8, no measurable time cost |
+| X7 | Hidden states, delivered exactly | logprob error, bytes, time | error max 7.8e-4, 16 KB per generated token, cost within noise |
 | X9 | Trainer logprob recompute with R3 and indexer replay | aligned rows; gap vs a self-perturbation floor | delivered = exact; remaining gap is trainer-engine numerics |
 | E0 | KV offload to an NVMe tier | recompute, time, aux complete | −23% time and 9× less recompute with a 4 GB CPU tier; 0 missing |
 | Scale | 512K, 108 turns, shared pool | 0 missing, 0 wrong | pass |
@@ -261,11 +261,8 @@ The hidden state is the input of `lm_head`; the trainer multiplies it by the LM 
 |---|---|
 | fp32 `lm_head(hidden)` vs vLLM logits | max abs diff 2.1e-4, not bitwise |
 | bf16 | max abs diff 0.062 |
-| fp8 e4m3 + per-token scale | full-vocabulary KL mean 4.4e-4–8.7e-4, max 1.9e-3–2.8e-3; argmax agreement 98–100% |
 
-Through the delivery path every fp8 row was the exact requantization; KL mean 7.7e-4, max 0.012.
-
-**Exact delivery is the default.** Codec `raw` stores the rows in the dtype that enters the LM head, float32 on this build: 16 KB per generated token, against 4.1 KB for fp8. Recomputing the sampled tokens' logprobs from the delivered rows gives an error of max 7.8e-4 and mean 3e-6, against a max of about 0.3 with fp8; the residual is the checker's own matmul, which is not bitwise equal to vLLM's (first row of the table). In every later regression the max stays at or below 6.7e-4 with 0 bad rows, including across forced preemption. Cost on the 128K one-node workload (same node, one run each): 223.7 s against 222.9 s with fp8, within noise, with 1.0 GB of hidden states in the run. fp8 stays available and produces the same bytes as before.
+So rows are delivered exactly, in the dtype that enters the LM head, float32 on this build: 16 KB per generated token. Recomputing the sampled tokens' logprobs from the delivered rows gives an error of max 7.8e-4 and mean 3e-6; the residual is the checker's own matmul, which is not bitwise equal to vLLM's (first row of the table). In every later regression the max stays at or below 6.7e-4 with 0 bad rows, including across forced preemption. Cost on the 128K one-node workload: within run-to-run noise, with 1.0 GB of hidden states in the run.
 
 ## Trainer-side replay and training-inference mismatch (X9)
 
