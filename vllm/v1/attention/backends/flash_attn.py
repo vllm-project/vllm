@@ -77,6 +77,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     KVQuantMode,
     SlidingWindowSpec,
+    get_kv_quant_mode,
     is_quantized_kv_cache,
 )
 from vllm.v1.worker.cp_utils import (
@@ -305,9 +306,9 @@ class FlashAttentionBackend(AttentionBackend):
             if vllm_config is None or vllm_config.model_config is None:
                 return None
             head_size = vllm_config.model_config.get_head_size()
-            uses_fp8_kv = vllm_config.cache_config.cache_dtype in (
-                "fp8",
-                "fp8_e4m3",
+            uses_fp8_kv = (
+                get_kv_quant_mode(vllm_config.cache_config.cache_dtype)
+                == KVQuantMode.FP8_PER_TENSOR
             )
         else:
             if not isinstance(kv_cache_spec, AttentionSpec):
@@ -502,7 +503,10 @@ class FlashAttentionBackend(AttentionBackend):
                 supports_fa4_hd256=True,
             )
         ):
-            return "FP8 KV requires FA3 (SM90), equal-d512 FA4 (SM90), or FA4 (SM100)."
+            return (
+                "FP8 KV requires FA3 (SM90), FA4 with equal head sizes 64, 96, 128, "
+                "192, 256 or 512 (SM90), or FA4 (SM100)."
+            )
         if (
             use_mm_prefix
             and get_flash_attn_version(
@@ -718,6 +722,7 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             head_size_v=head_size_v,
             kv_cache_block_size=self.block_size,
             supports_fa4_hd256=True,
+            fp8_kv_cache=kv_cache_spec.kv_quant_mode == KVQuantMode.FP8_PER_TENSOR,
         )
         self.aot_schedule = fa_version == 3
         self.fa4_hd256 = fa_version == 4 and uses_fa4_hd256_kernel(
@@ -1116,6 +1121,7 @@ class FlashAttentionImpl(AttentionImpl):
             has_sinks=sinks is not None,
             requires_softcap=bool(self.logits_soft_cap),
             supports_fa4_hd256=True,
+            fp8_kv_cache=self.kv_quant_mode == KVQuantMode.FP8_PER_TENSOR,
         )
         self.fa4_hd256 = self.vllm_flash_attn_version == 4 and uses_fa4_hd256_kernel(
             head_size
@@ -1166,7 +1172,8 @@ class FlashAttentionImpl(AttentionImpl):
         uses_sm90_fa4_fp8_kv_dequant = (
             self.vllm_flash_attn_version == 4
             and current_platform.is_device_capability_family(90)
-            and self.kv_cache_dtype in ("fp8", "fp8_e4m3")
+            and head_size == 512
+            and self.kv_quant_mode == KVQuantMode.FP8_PER_TENSOR
         )
         self.supports_quant_query_input = flash_attn_supports_quant_query_input() and (
             not uses_sm90_fa4_fp8_kv_dequant
