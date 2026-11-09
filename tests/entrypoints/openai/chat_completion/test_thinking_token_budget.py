@@ -414,7 +414,7 @@ def loop_break_server():
 
 
 def _thinking_loop_breaks(server: RemoteOpenAIServer) -> float:
-    """The value the server exports for ``vllm:thinking_loop_breaks_total``."""
+    """The value the server exports for `vllm:thinking_loop_breaks_total`."""
     response = requests.get(server.url_for("metrics"))
     response.raise_for_status()
     for family in text_string_to_metric_families(response.text):
@@ -429,7 +429,7 @@ def _thinking_loop_breaks(server: RemoteOpenAIServer) -> float:
 
 @pytest.mark.asyncio
 async def test_thinking_loop_breaks_are_counted(loop_break_server):
-    """A broken loop adds one to ``vllm:thinking_loop_breaks_total`` and an
+    """A broken loop adds one to `vllm:thinking_loop_breaks_total` and an
     opted-out request adds none."""
     async with loop_break_server.get_async_client() as client:
         before = _thinking_loop_breaks(loop_break_server)

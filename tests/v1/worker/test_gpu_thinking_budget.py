@@ -341,13 +341,13 @@ class MockIntervalReasoningConfig(MockReasoningConfig):
 
 
 def _filler(n: int, base: int = 10) -> list[int]:
-    """``n`` distinct non-repeating tokens, clear of the marker token ids."""
+    """`n` distinct non-repeating tokens, clear of the marker token ids."""
     assert base + n <= START
     return list(range(base, base + n))
 
 
 def _append_committed(req_states: RequestState, at: int, tokens: list[int]) -> None:
-    """Commit ``tokens`` the way ``post_update`` does after a sampling step."""
+    """Commit `tokens` the way `post_update` does after a sampling step."""
     req_states.all_token_ids.stage_write(3, at, tokens)
     req_states.total_len.stage_write_elem(3, at + len(tokens))
     req_states.apply_staged_writes()
@@ -382,7 +382,7 @@ def test_v2_loop_break_forces_end_on_repeating_reasoning_tail():
 
 def test_v2_loop_break_reports_each_fire_once():
     """Detection happens on device; each one is handed to the host once, with
-    the section length, for the ``vllm:thinking_loop_breaks`` counter."""
+    the section length, for the `vllm:thinking_loop_breaks` counter."""
     tokens = [1, START, *_filler(20), 7, 8, 7, 8, 7, 8]
     _, state = _loop_break_state(tokens)
     idx_mapping = torch.tensor([3], dtype=torch.int32, device=DEVICE)
@@ -447,7 +447,7 @@ def test_v2_loop_break_ignores_repetition_outside_reasoning():
 
 def test_v2_loop_break_pattern_may_not_span_the_section_start():
     """The tail is clamped to the section start, so a repeat that only closes
-    by reaching back past ``<think>`` is not a reasoning loop."""
+    by reaching back past `<think>` is not a reasoning loop."""
     spanning = [1, 7, 8, 7, 8, START, 7, 8, 7, 8]
     _, state = _loop_break_state(spanning, config=MockShortPatternReasoningConfig())
     out = _apply(
@@ -472,7 +472,7 @@ def test_v2_loop_break_pattern_may_not_span_the_section_start():
 
 
 def test_v2_loop_break_honours_the_check_interval():
-    """Detection runs only every ``loop_break_check_interval`` tokens."""
+    """Detection runs only every `loop_break_check_interval` tokens."""
     tokens = [1, START, 7, 8, 7, 8]
     req_states, state = _loop_break_state(tokens, config=MockIntervalReasoningConfig())
 
@@ -544,7 +544,7 @@ def test_v2_loop_break_rearms_after_the_section_closes():
 
 
 def test_v2_loop_break_per_request_opt_out():
-    """``thinking_loop_break=False`` turns loop breaking off for the request."""
+    """`thinking_loop_break=False` turns loop breaking off for the request."""
     tokens = [1, START, *_filler(20), 7, 8, 7, 8, 7, 8]
     _, state = _loop_break_state(
         tokens, params=SamplingParams(thinking_loop_break=False)
@@ -558,7 +558,7 @@ def test_v2_loop_break_per_request_opt_out():
 
 
 def test_v2_loop_break_opt_in_cannot_enable_an_unconfigured_server():
-    """``True`` cannot turn on a feature the server has not configured."""
+    """`True` cannot turn on a feature the server has not configured."""
     tokens = [1, START, *_filler(20), 7, 8, 7, 8, 7, 8]
     _, state = _loop_break_state(
         tokens,
@@ -574,7 +574,7 @@ def test_v2_loop_break_opt_in_cannot_enable_an_unconfigured_server():
 
 
 def test_v2_loop_break_rejects_a_degenerate_min_count():
-    """``min_count`` below 2 makes the tail comparison vacuously true, so it has
+    """`min_count` below 2 makes the tail comparison vacuously true, so it has
     to disable the feature rather than fire on every request."""
 
     class Degenerate(MockReasoningConfig):
@@ -712,7 +712,7 @@ class MockLoopBreakDistinctEndConfig(MockDistinctEndReasoningConfig):
 
 
 def test_v2_thinking_budget_stops_after_a_committed_forced_end_sequence():
-    """``reasoning_end_str`` may carry a transition phrase, so the sequence
+    """`reasoning_end_str` may carry a transition phrase, so the sequence
     forcing writes can differ from the parser's natural marker. Committing it
     ends the section; otherwise forcing restarts and the answer never begins."""
     tokens = [1, START, 10, 11, 12]
@@ -913,7 +913,7 @@ def test_v2_ramp_finishes_a_multi_token_marker_the_model_started():
 
 
 def test_v2_request_picks_the_release():
-    """``thinking_loop_break`` picks the release per request."""
+    """`thinking_loop_break` picks the release per request."""
     _, state = _loop_break_state(
         _LOOPING,
         config=MockRampDistinctEndConfig(),

@@ -102,9 +102,9 @@ class ThinkingBudgetState:
     def _init_loop_break(self, reasoning_config: "ReasoningConfig | None") -> None:
         """Set up reasoning-scoped loop breaking, if the server configured it.
 
-        Detection semantics mirror ``check_sequence_repetition``, which rejects
+        Detection semantics mirror `check_sequence_repetition`, which rejects
         a degenerate parameter set rather than firing on it; the equivalent
-        rejection here has to happen on the host, because a ``min_count`` below
+        rejection here has to happen on the host, because a `min_count` below
         2 would make the on-device tail comparison vacuously true.
         """
         max_pattern = getattr(reasoning_config, "loop_break_max_pattern_size", 0)
@@ -160,14 +160,14 @@ class ThinkingBudgetState:
     def _loop_break_ramp_tokens_for(
         self, sampling_params: SamplingParams
     ) -> int | None:
-        """Tokens a request's release ramps before forcing: 0 for ``"force"``,
+        """Tokens a request's release ramps before forcing: 0 for `"force"`,
         None when loop breaking is off for the request.
 
-        ``thinking_loop_break=False`` opts a request out; ``None`` or ``True``
-        follows the server configuration, and ``"force"`` or ``"ramp"`` picks
+        `thinking_loop_break=False` opts a request out; `None` or `True`
+        follows the server configuration, and `"force"` or `"ramp"` picks
         the release. No value enables the feature on a server that has not
         configured it, because the detection parameters live in
-        ``ReasoningConfig``.
+        `ReasoningConfig`.
         """
         if not self.loop_break_enabled:
             return None
@@ -364,10 +364,10 @@ def _update_committed_marker_cache_kernel(
     """Track the last reasoning start and the last reasoning end.
 
     A section ends on either sequence: the parser's natural marker, or the
-    sequence forcing writes when ``reasoning_end_str`` carries a transition
+    sequence forcing writes when `reasoning_end_str` carries a transition
     phrase and so differs from it. Missing the forced one leaves the section
     open after forcing completes, and forcing then restarts forever.
-    ``TRACK_FORCED_END`` is off when the two sequences are equal, where the
+    `TRACK_FORCED_END` is off when the two sequences are equal, where the
     natural scan already covers both.
     """
     req_state_idx = tl.load(req_ids_ptr + tl.program_id(0))
@@ -511,8 +511,8 @@ def _loop_break_detect_kernel(
     """Flag requests whose open reasoning section ends in a repeating pattern.
 
     Runs on committed tokens only, after
-    ``_update_committed_marker_cache_kernel`` has refreshed the section
-    boundary, and before ``_thinking_budget_kernel`` reads the flag.
+    `_update_committed_marker_cache_kernel` has refreshed the section
+    boundary, and before `_thinking_budget_kernel` reads the flag.
     """
     req_state_idx = tl.load(req_ids_ptr + tl.program_id(0))
     fired = tl.load(loop_break_fired_ptr + req_state_idx)
@@ -818,7 +818,7 @@ def apply_thinking_budget(
     loop_break_min_reasoning_tokens: int = 0,
     loop_break_check_interval: int = 1,
 ) -> None:
-    """Apply thinking budgets and reasoning loop breaking to ``logits`` in place."""
+    """Apply thinking budgets and reasoning loop breaking to `logits` in place."""
     num_tokens = logits.shape[0]
     start_len = reasoning_start_token_ids.shape[0]
     natural_end_len = natural_reasoning_end_token_ids.shape[0]
