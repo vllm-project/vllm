@@ -380,6 +380,7 @@ fn convert_content(content: MessageContent) -> Result<ChatContent, ApiError> {
                     format: input_audio.format,
                     uuid,
                 }),
+                ContentPart::ToolReference { name } => Ok(ChatContentPart::ToolReference { name }),
             })
             .try_collect()
             .map(ChatContent::Parts),
@@ -1450,6 +1451,52 @@ mod tests {
         .unwrap_err();
 
         expect!["Only assistant messages can have a 'refusal' content type."]
+            .assert_eq(&error.to_error_response().error.message);
+    }
+
+    #[test]
+    fn prepare_chat_request_maps_tool_reference_parts() {
+        let request = |reference: &str| -> ChatCompletionRequest {
+            serde_json::from_value(json!({
+                "model": "Qwen/Qwen1.5-0.5B-Chat",
+                "messages": [
+                    {"role": "user", "content": "find a weather tool"},
+                    {"role": "assistant", "tool_calls": [{
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "tool_search", "arguments": "{}"},
+                    }]},
+                    {"role": "tool", "tool_call_id": "call_1", "content": [
+                        {"type": "tool_reference", "name": reference},
+                    ]},
+                ],
+                "tools": [
+                    {"type": "function", "function": {"name": "tool_search"}},
+                    {"type": "function", "function": {"name": "get_weather"}, "defer_loading": true},
+                ],
+            }))
+            .expect("tool_reference parts parse")
+        };
+        let prepare = |reference| {
+            prepare_chat_request(
+                request(reference),
+                &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+                ResolvedRequestContext::default(),
+            )
+        };
+
+        let prepared = prepare("get_weather").expect("request is valid");
+        assert_eq!(
+            prepared.chat_request.messages[2],
+            VllmChatMessage::tool_response(
+                vec![ChatContentPart::tool_reference("get_weather")],
+                "call_1",
+            )
+        );
+
+        let error = prepare("get_time").unwrap_err();
+        assert_eq!(error.status_code(), StatusCode::BAD_REQUEST);
+        expect!["tool_reference `get_time` was not found in the available tools"]
             .assert_eq(&error.to_error_response().error.message);
     }
 
