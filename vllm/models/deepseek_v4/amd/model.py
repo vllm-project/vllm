@@ -971,7 +971,7 @@ class DeepseekV4DecoderLayer(nn.Module):
     ):
         """Reduce HC residual streams to the next sub-layer input.
 
-        When ``norm_weight`` is set, RMSNorm is fused into the pre kernel.
+        When `norm_weight` is set, RMSNorm is fused into the pre kernel.
         """
         post_mix, res_mix, layer_input = self.mhc_pre(
             residual=x,
@@ -1465,8 +1465,8 @@ def _redirect_shared_expert_name(
     """Route a DSV4 shared-expert checkpoint name to its final parameter name.
 
     Fused layers go to the appended routed-expert slot. When any layer is fused
-    the weight mapper leaves the checkpoint ``.w2`` names untouched, so
-    non-fused layers still need the native ``down_proj`` parameter name.
+    the weight mapper leaves the checkpoint `.w2` names untouched, so
+    non-fused layers still need the native `down_proj` parameter name.
     """
     if ".ffn.shared_experts.w" not in name:
         return name

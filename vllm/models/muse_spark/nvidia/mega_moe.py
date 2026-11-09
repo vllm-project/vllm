@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""MuseSpark1x routed experts on DeepGEMM BF16 and NVFP4 MegaMoE kernels.
+"""Muse Spark routed experts on DeepGEMM BF16 and NVFP4 MegaMoE kernels.
 
 The ModelOpt NVFP4 checkpoint maps onto the kernel without requantization.
 """
@@ -34,7 +34,7 @@ from vllm.models.muse_spark.nvidia.ops.prepare_megamoe_nvfp4 import (
 from vllm.utils.deep_gemm import _import_deep_gemm
 
 if TYPE_CHECKING:
-    from vllm.models.muse_spark.nvidia.model import MuseSpark1xRMSNorm
+    from vllm.models.muse_spark.nvidia.model import MuseSparkRMSNorm
 
 logger = init_logger(__name__)
 
@@ -106,7 +106,7 @@ class MuseSparkMegaMoEExperts(nn.Module):
         top_k: int,
         hidden_size: int,
         intermediate_size: int,
-        post_expert_norm: "MuseSpark1xRMSNorm",
+        post_expert_norm: "MuseSparkRMSNorm",
         num_max_tokens_per_rank: int,
         is_sequence_parallel: bool = False,
         is_nvfp4: bool = True,
@@ -131,7 +131,7 @@ class MuseSparkMegaMoEExperts(nn.Module):
         self.weight_layout = "trtllm" if self.trtllm_token_threshold else "native"
         if hidden_size % 256 != 0 or intermediate_size % 256 != 0:
             raise ValueError(
-                "MuseSpark1x MegaMoE requires hidden and intermediate "
+                "Muse Spark MegaMoE requires hidden and intermediate "
                 "sizes to be multiples of 256 for its shared BF16/NVFP4 "
                 f"buffer layouts; got {hidden_size}/{intermediate_size}."
             )
@@ -401,7 +401,7 @@ class MuseSparkMegaMoEExperts(nn.Module):
     def input_buffer(self, num_tokens: int):
         if num_tokens > self.max_num_tokens:
             raise ValueError(
-                f"MuseSpark1x MegaMoE got {num_tokens} tokens, but the "
+                f"Muse Spark MegaMoE got {num_tokens} tokens, but the "
                 f"symmetric buffer was sized for {self.max_num_tokens}."
             )
         assert self._transformed_l1 is not None, "finalize_weights() not called"

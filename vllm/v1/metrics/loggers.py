@@ -175,12 +175,12 @@ class LoggingStatLogger(StatLoggerBase):
 
     @property
     def log_prefix(self):
-        return "Engine {:03d}: ".format(self.engine_index)
+        return f"Engine {self.engine_index:03d}: "
 
     def _log_prefix_for_engine(self, engine_idx: int) -> str:
         if self.engine_index == engine_idx:
             return self.log_prefix
-        return "Engine {:03d}: ".format(engine_idx)
+        return f"Engine {engine_idx:03d}: "
 
     def _log_iteration_details(
         self, scheduler_stats: SchedulerStats, engine_idx: int
@@ -370,7 +370,7 @@ class AggregatedLoggingStatLogger(LoggingStatLogger, AggregateStatLoggerBase):
 
     @property
     def log_prefix(self):
-        return "{} Engines Aggregated: ".format(len(self.engine_indexes))
+        return f"{len(self.engine_indexes)} Engines Aggregated: "
 
     def _enable_perf_stats(self) -> bool:
         # Adding per_gpu perf stats across engines can lead to misleading numbers.
