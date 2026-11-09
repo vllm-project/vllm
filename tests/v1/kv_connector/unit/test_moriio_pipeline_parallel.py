@@ -296,7 +296,7 @@ def _remote_meta(*, advertise_index: bool = True) -> MoRIIOAgentMetadata:
 
 
 def _stage_worker(layers: list[str]) -> MoRIIOConnectorWorker:
-    """A worker holding ``layers`` in one shared memory region."""
+    """A worker holding `layers` in one shared memory region."""
     worker = MoRIIOConnectorWorker.__new__(MoRIIOConnectorWorker)
     worker.kv_layer_mr_offset = {name: i * LAYER_BYTES for i, name in enumerate(layers)}
     worker.layer_base_addr_index = {name: i for i, name in enumerate(layers)}
