@@ -135,6 +135,19 @@ Expert parallelism is a specialized form of parallelism for Mixture of Experts (
 Expert parallelism is enabled by setting `enable_expert_parallel=True`, which will use expert parallelism instead of tensor parallelism for MoE layers.
 It will use the same degree of parallelism as what you have set for tensor parallelism.
 
+#### SM90 MegaMoE Prefill
+
+With block-FP8 weights, `--moe-backend flashinfer_moe_ep_cutedsl` and
+`--enable-expert-parallel`, pure TP groups can avoid processing replicated tokens
+in every expert-parallel rank. When the TP and EP groups coincide, batches of at
+least 2048 tokens are partitioned across ranks and their outputs are gathered
+back into the original order. This happens automatically; there is no extra flag.
+
+Smaller batches and configurations using DP, prefill context parallelism, or
+sequence parallelism retain their existing execution path. The extra output
+gather makes the benefit workload-dependent; validate prefill latency and decode
+latency together when choosing a batch token budget.
+
 ### Data Parallelism (DP)
 
 Data parallelism replicates the entire model across multiple GPU sets and processes different batches of requests in parallel.

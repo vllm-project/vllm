@@ -19,7 +19,7 @@ FlashInfer's config types, so config drift fails on any CI runner with
 FlashInfer installed.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from types import SimpleNamespace
 
 import pytest
@@ -241,9 +241,9 @@ def _moe_config(
     backend: str,
 ) -> FusedMoEConfig:
     parallel = FusedMoEParallelConfig.make(
-        tp_size_=1,
+        tp_size_=vllm_config.parallel_config.tensor_parallel_size,
         pcp_size_=1,
-        dp_size_=world_size,
+        dp_size_=vllm_config.parallel_config.data_parallel_size,
         sp_size_=1,
         vllm_parallel_config=vllm_config.parallel_config,
     )
@@ -386,24 +386,35 @@ def _init_warmup_forward(
     geometry: Geometry,
     backend: str,
     block_fp8: bool = False,
+    tensor_parallel: bool = False,
 ) -> None:
     set_env_vars_and_device(env)
     vllm_config = VllmConfig()
-    vllm_config.parallel_config.data_parallel_size = world_size
+    vllm_config.parallel_config.data_parallel_size = (
+        1 if tensor_parallel else world_size
+    )
+    vllm_config.parallel_config.tensor_parallel_size = (
+        world_size if tensor_parallel else 1
+    )
     vllm_config.parallel_config.enable_expert_parallel = True
     vllm_config.kernel_config.moe_backend = backend
     if block_fp8:
         # What KernelConfig binds for megakernel backends.
         vllm_config.parallel_config.all2all_backend = "passthrough"
-        vllm_config.parallel_config.data_parallel_rank = int(env["RANK"])
+        vllm_config.parallel_config.data_parallel_rank = (
+            0 if tensor_parallel else int(env["RANK"])
+        )
 
     with set_current_vllm_config(vllm_config):
         ensure_model_parallel_initialized(
-            tensor_model_parallel_size=1, pipeline_model_parallel_size=1
+            tensor_model_parallel_size=vllm_config.parallel_config.tensor_parallel_size,
+            pipeline_model_parallel_size=1,
         )
         rank = torch.distributed.get_rank()
         device = torch.device(f"cuda:{rank}")
         moe = _moe_config(vllm_config, geometry, world_size, device, backend)
+        if tensor_parallel:
+            moe.max_num_tokens = 4096
         if block_fp8:
             weight_key, activation_key = kFp8Static128BlockSym, kFp8Dynamic128Sym
             make_weights = _local_block_fp8_expert_weights
@@ -429,6 +440,9 @@ def _init_warmup_forward(
         )
         try:
             adapter.warmup()
+            if tensor_parallel:
+                _check_replicated_tp_prefill(adapter, geometry, device, vllm_config)
+                return
 
             topk_ids, topk_weights = _routing(geometry, rank, device)
             # Serving runs the model under inference mode, where the
@@ -494,6 +508,58 @@ def test_block_fp8_init_warmup_forward_is_exact_on_grid_inputs(
         pytest.skip(f"Need at least {world_size} GPUs")
     distributed_run(
         _init_warmup_forward, world_size, geometry, FLASHINFER_MOE_EP_CUTEDSL, True
+    )
+
+
+def _check_replicated_tp_prefill(adapter, geometry, device, config):
+    """Replicated rows survive uneven TP slicing and changed-input graph replay."""
+    ids, weights = _routing(geometry, 0, device)
+    hidden = _hidden_states(geometry, device, X_SENTINEL_FP8)
+    oracle = _expected_output(geometry, ids, weights)
+    for count in (2047, 2048, 2049, 4095, 4096):
+        repeats = (count + NUM_TOKENS_PER_RANK - 1) // NUM_TOKENS_PER_RANK
+        x, routes, scores, expected = (
+            tensor.repeat(repeats, 1)[:count].contiguous()
+            for tensor in (hidden, ids, weights, oracle)
+        )
+        with (
+            torch.inference_mode(),
+            set_forward_context(None, config, num_tokens=count),
+        ):
+            output = adapter(x, routes, scores)
+            torch.accelerator.synchronize()
+            assert torch.equal(output, expected)
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                output = adapter(x, routes, scores)
+            x.copy_(x.roll(1, 0))
+            routes.copy_(routes.roll(1, 0))
+            scores.copy_(scores.roll(1, 0).mul(0.5))
+            graph.replay()
+            torch.accelerator.synchronize()
+            assert torch.equal(output, expected.roll(1, 0).mul(0.5))
+
+
+@pytest.mark.skipif(
+    not current_platform.is_device_capability(90),
+    reason="The block-FP8 FlashInfer MoE-EP megakernel requires SM90",
+)
+@pytest.mark.parametrize(
+    "geometry", (BLOCK_FP8_GEOMETRIES[0], BLOCK_FP8_GEOMETRIES[-1]), ids=("glm", "qwen")
+)
+@pytest.mark.parametrize("world_size", [2, 4])
+def test_block_fp8_replicated_tp_prefill_preserves_rows(world_size, geometry):
+    pytest.importorskip("flashinfer.moe_ep")
+    pytest.importorskip("nvshmem.core")
+    if torch.accelerator.device_count() < world_size:
+        pytest.skip(f"Need at least {world_size} GPUs")
+    distributed_run(
+        _init_warmup_forward,
+        world_size,
+        geometry,
+        FLASHINFER_MOE_EP_CUTEDSL,
+        True,
+        True,
     )
 
 
@@ -732,14 +798,25 @@ def _fake_mega_layer(
     return layer_args
 
 
-def _adapter_moe(backend: str, geometry: Geometry) -> SimpleNamespace:
-    return SimpleNamespace(
+def _adapter_moe(backend: str, geometry: Geometry) -> FusedMoEConfig:
+    return FusedMoEConfig(
+        moe_parallel_config=replace(
+            FusedMoEParallelConfig.make_no_parallel(),
+            dp_size=2,
+            ep_size=2,
+            use_ep=True,
+        ),
         moe_backend=backend,
         num_experts=geometry.num_experts,
+        num_local_experts=geometry.num_experts // 2,
+        num_logical_experts=geometry.num_experts,
         experts_per_token=geometry.top_k,
         hidden_dim=geometry.hidden_size,
         intermediate_size=geometry.intermediate_size,
         max_num_tokens=MAX_TOKENS_PER_RANK,
+        activation=MoEActivation.SILU,
+        in_dtype=torch.bfloat16,
+        device=torch.device("cpu"),
         swiglu_limit=10.0,
         routing_method=_routing_method(backend),
     )

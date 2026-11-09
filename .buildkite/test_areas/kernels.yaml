@@ -951,6 +951,29 @@ steps:
 #       - tools/benchmark_helion_kernels.py
 
  
+- label: ":nvidia: (H100) [Nightly] MegaMoE TP Prefill"
+  key: kernels-megamoe-tp-prefill-4xh100
+  timeout_in_minutes: 30
+  working_dir: "/vllm-workspace/"
+  device: h100
+  num_devices: 4
+  optional: true
+  source_file_dependencies:
+  - vllm/model_executor/layers/fused_moe/flashinfer_moe_ep.py
+  - tests/kernels/moe/test_flashinfer_moe_ep.py
+  commands:
+  - uv venv --system-site-packages .venv
+  - >-
+    uv pip install --python .venv/bin/python nvshmem4py-cu13==0.3.1
+    "nvidia-nvshmem-cu13==$(.venv/bin/python -c
+    'from importlib.metadata import version; print(version("nvidia-nvshmem-cu13"))')"
+  - >-
+    .venv/bin/python -c
+    "import flashinfer.moe_ep, nvshmem.core, torch; assert torch.cuda.device_count() >= 4; assert torch.cuda.get_device_capability() == (9, 0)"
+  - >-
+    .venv/bin/python -m pytest -v -s
+    tests/kernels/moe/test_flashinfer_moe_ep.py -k replicated_tp_prefill
+
 - label: ":nvidia: (H100) [Nightly] FP8 MoE Kernels"
   key: kernels-fp8-moe-test-1xh100
   automatic_shard: true
