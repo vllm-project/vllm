@@ -201,6 +201,7 @@ if [[ "${is_rocm}" == "1" && -n "${PYTHON_ONLY_COMPILE_PYTHON:-}" ]]; then
     VLLM_PRECOMPILED_WHEEL_COMMIT=$merge_base_commit VLLM_USE_PRECOMPILED=1 \
         uv pip install -e . --extra-index-url https://stable.repo.amd.com/rocm/whl-next/ \
         --extra-index-url https://nightly.repo.amd.com/rocm/whl-next/ \
+        --index-strategy unsafe-best-match \
         "torch[device-${rocm_arch}]==${torch_version}" \
         "torchvision[device-${rocm_arch}]==${torchvision_version}"
     # Use the venv's own ROCm SDK and amdsmi bindings, not the image's.
