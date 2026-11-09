@@ -3,7 +3,7 @@
 """Tests for the apply-time Triton kernel override registry.
 
 The registry must let out-of-tree platforms replace kernels defined as
-plain ``@triton.jit`` functions, patching every hold-site (defining
+plain `@triton.jit` functions, patching every hold-site (defining
 module, from-import copies, and JIT warmup owners) so that existing call
 sites dispatch to the override without any core-side decoration.
 """
@@ -143,8 +143,8 @@ def test_override_owner_launch_goes_through_impl(_fake_module: Any) -> None:
 def test_override_forwards_grid_to_kernel_like_impl(_fake_module: Any) -> None:
     """A Triton-kernel override takes over the launch natively via __getitem__.
 
-    The override mirrors a real ``@triton.jit`` kernel: it binds the grid
-    in ``__getitem__`` and is launched by keyword under the original
+    The override mirrors a real `@triton.jit` kernel: it binds the grid
+    in `__getitem__` and is launched by keyword under the original
     kernel's parameter names, which the KernelOverride forwards unchanged.
     """
     seen: list[Any] = []
@@ -246,7 +246,7 @@ def test_register_triton_kernel_swaps_raw_for_device_function(
 ) -> None:
     """Triton-kernel impls (device functions included) are swapped raw.
 
-    A ``KernelOverride`` is not a Triton JITFunction, so wrapping the
+    A `KernelOverride` is not a Triton JITFunction, so wrapping the
     callee would break an outer kernel's compilation; a Triton kernel
     implementation must replace the original by identity in the defining
     module and in from-import copies, where the inliner looks.
