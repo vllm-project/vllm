@@ -17,19 +17,31 @@ length entries of each row (-1 for a negative entry). It does not write the
 ragged entries past indptr[-1], which
 _compute_global_topk_ragged_indices_and_indptr_old also leaves uninitialized.
 
-On gfx942 with --monokernel (`ops.enabled()`), batches
-of up to MAX_ROWS rows use it. tests/kernels/models/amd/test_dsv41_gfx942_decode_meta.py
-compares it with _compute_global_topk_ragged_indices_and_indptr_old.
+On gfx942 and gfx950 with --monokernel (`ops.monokernel_cdna3_or_4()`),
+batches of up to MAX_ROWS rows (MAX_ROWS_GFX950 on gfx950) use it.
+tests/kernels/models/amd/test_dsv41_gfx942_decode_meta.py compares it with
+_compute_global_topk_ragged_indices_and_indptr_old.
 """
+
+import functools
 
 import torch
 
-from vllm.models.deepseek_v41.amd.ops import enabled
+from vllm.models.deepseek_v41.amd.ops import monokernel_cdna3_or_4
 from vllm.triton_utils import tl, triton
 
 # One program holds a ROWS x topk tile of int32. 16 rows of top-512 are 16
 # values per thread with 8 warps.
 MAX_ROWS = 16
+# gfx950: the 4 launches are faster from 9 rows, where the tile grows to 16 rows.
+MAX_ROWS_GFX950 = 8
+
+
+@functools.cache
+def _max_rows() -> int:
+    from vllm.platforms.rocm import get_cdna_version
+
+    return MAX_ROWS_GFX950 if get_cdna_version() == 4 else MAX_ROWS
 
 
 @triton.jit(do_not_specialize=["num_tokens", "topk_stride", "block_table_stride"])
@@ -133,13 +145,12 @@ def pack(
 ):
     """The fused packing, or None when the batch takes
     _compute_global_topk_ragged_indices_and_indptr_old."""
-    if not enabled():
-        return None
-    topk_indices = topk_indices.reshape(topk_indices.shape[0], -1)
     num_tokens = topk_indices.shape[0]
+    if not monokernel_cdna3_or_4() or not 0 < num_tokens <= _max_rows():
+        return None
+    topk_indices = topk_indices.reshape(num_tokens, -1)
     if (
-        not 0 < num_tokens <= MAX_ROWS
-        or topk_indices.stride(1) != 1
+        topk_indices.stride(1) != 1
         or topk_indices.dtype != torch.int32
         or is_valid_token.shape[0] != num_tokens
     ):

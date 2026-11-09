@@ -215,9 +215,9 @@ def compute_global_topk_ragged_indices_and_indptr(
     block_size: int,
     is_valid_token: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    # On gfx942 with --monokernel, a decode batch of up to 16
-    # rows is packed with one launch instead of 4 (topk_pack.py). Other
-    # batches return None there and take the function below.
+    # On gfx942 and gfx950 with --monokernel, a decode batch of up to 16 rows
+    # (8 on gfx950) is packed with one launch instead of 4 (topk_pack.py).
+    # Other batches return None there and take the function below.
     from vllm.models.deepseek_v41.amd.ops import topk_pack
 
     fused = topk_pack.pack(

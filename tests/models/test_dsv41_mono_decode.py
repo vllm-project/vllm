@@ -791,6 +791,63 @@ def test_swa_decode_meta_runs_on_cdna3_and_cdna4_with_the_flag(
     assert (out is not None) is monokernel
 
 
+@pytest.mark.parametrize(
+    "cdna, monokernel, rows, taken",
+    [
+        (4, True, 1, True),
+        (4, True, 8, True),
+        (4, True, 9, False),
+        (3, True, 16, True),
+        (3, True, 17, False),
+        (4, False, 1, False),
+        (3, False, 1, False),
+    ],
+)
+def test_topk_pack_runs_on_cdna3_and_cdna4_with_the_flag(
+    monkeypatch, cdna, monokernel, rows, taken
+):
+    """topk_pack's kernel is plain Triton, so with --monokernel a decode batch
+    packs its global top-k with the one launch on CDNA4 (gfx950) as on CDNA3
+    (gfx942), up to 8 rows on CDNA4 and 16 on CDNA3. Other batches, and runs
+    without the flag, take vLLM's 4 launches."""
+    import vllm.platforms.rocm as rocm_platform
+    from vllm.models.deepseek_v41.amd import ops, rocm
+    from vllm.models.deepseek_v41.amd.ops import topk_pack
+
+    monkeypatch.setattr(ops, "current_platform", SimpleNamespace(is_rocm=lambda: True))
+    monkeypatch.setattr(rocm_platform, "get_cdna_version", lambda: cdna)
+    monkeypatch.setattr(ops, "_monokernel", ops._monokernel)
+    ops.record_monokernel(_config(monokernel=monokernel))
+    topk_pack._max_rows.cache_clear()
+    launches = []
+
+    def launch(topk, *args):
+        launches.append(topk.shape[0])
+        return "fused"
+
+    monkeypatch.setattr(topk_pack, "launch", launch)
+    monkeypatch.setattr(
+        rocm,
+        "_compute_global_topk_ragged_indices_and_indptr_old",
+        lambda *args: "vllm",
+    )
+    ints = lambda *shape: torch.zeros(shape, dtype=torch.int32)  # noqa: E731
+    try:
+        out = rocm.compute_global_topk_ragged_indices_and_indptr(
+            ints(rows, 512),
+            ints(rows),
+            ints(1, 8),
+            64,
+            torch.ones(rows, dtype=torch.bool),
+        )
+    finally:
+        # No later test may see this test's cached gate or row cap.
+        ops.record_monokernel(_config(monokernel=False))
+        topk_pack._max_rows.cache_clear()
+    assert launches == ([rows] if taken else [])
+    assert out == ("fused" if taken else "vllm")
+
+
 def test_dspark_speculator_asks_the_draft_model_first():
     """A draft model that samples a step itself returns True, and vLLM's
     loop then does not run. The stub speculator has none of the loop's
