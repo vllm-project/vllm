@@ -208,12 +208,7 @@ pub async fn decoded_text_event_stream(
                 prompt_logprobs: output
                     .prompt_logprobs()
                     .map(|logprobs| {
-                        decode_prompt_logprobs(
-                            text_tokenizer,
-                            prompt_token_ids,
-                            logprobs,
-                            decode_options.skip_special_tokens,
-                        )
+                        decode_prompt_logprobs(text_tokenizer, prompt_token_ids, logprobs)
                     })
                     .transpose()?,
             })
@@ -289,9 +284,7 @@ pub async fn decoded_text_event_stream(
 
         let mut decoded_logprobs = new_logprobs
             .as_ref()
-            .map(|logprobs| {
-                decode_logprobs(text_tokenizer, logprobs, decode_options.skip_special_tokens)
-            })
+            .map(|logprobs| decode_logprobs(text_tokenizer, logprobs))
             .transpose()?;
 
         if !intermediate {
@@ -784,6 +777,98 @@ mod tests {
             &collected.finish_reason,
             logprob_tokens,
         ));
+    }
+
+    /// `skip_special_tokens` applies to the output text only: sampled,
+    /// candidate and prompt logprob tokens keep special tokens' spelling either
+    /// way, like Python's `convert_ids_list_to_tokens`.
+    #[tokio::test]
+    async fn logprob_tokens_keep_special_token_spelling() {
+        const BOS: u32 = 300;
+        const SEP: u32 = 301;
+        const EOS: u32 = 302;
+        let entries = |token_ids: &[u32]| PositionLogprobs {
+            entries: token_ids
+                .iter()
+                .map(|&token_id| TokenLogprob {
+                    token_id,
+                    logprob: -0.5,
+                    rank: 1,
+                })
+                .collect(),
+        };
+
+        let mut results = Vec::new();
+        for skip_special_tokens in [true, false] {
+            let tokenizer: DynTokenizer = Arc::new(
+                TestTokenizer::new()
+                    .with_special_token("<s>", BOS)
+                    .with_special_token("<sep>", SEP)
+                    .with_special_token("</s>", EOS),
+            );
+            let mut output = GenerateOutput::for_test(
+                Some(Arc::from([BOS, b'h' as u32])),
+                vec![b'a' as u32, SEP, b'b' as u32, EOS],
+                Some(FinishReason::Stop(Some(StopReason::TokenId(EOS)))),
+            );
+            output.prompt_info.as_mut().unwrap().prompt_logprobs = Some(Logprobs {
+                positions: vec![entries(&[b'h' as u32, BOS])],
+            });
+            output.logprobs = Some(Logprobs {
+                positions: vec![
+                    entries(&[b'a' as u32, EOS]),
+                    entries(&[SEP]),
+                    entries(&[b'b' as u32]),
+                    entries(&[EOS]),
+                ],
+            });
+
+            let collected = decoded_text_event_stream(
+                "test".into(),
+                tokenizer,
+                stream::iter([Ok(output)]),
+                TextDecodeOptions {
+                    skip_special_tokens,
+                    ..Default::default()
+                },
+                false,
+            )
+            .collect_output()
+            .await
+            .unwrap();
+
+            let prompt = collected.prompt_logprobs.as_ref().unwrap();
+            let logprob_tokens: Vec<_> = std::iter::once(prompt.first_token.clone())
+                .chain(
+                    prompt
+                        .scored_positions
+                        .iter()
+                        .chain(collected.logprobs.iter().flat_map(|logprobs| &logprobs.positions))
+                        .flat_map(|position| &position.entries)
+                        .map(|entry| entry.token.clone()),
+                )
+                .collect();
+            results.push((
+                skip_special_tokens,
+                collected.text,
+                logprob_tokens.join(" "),
+            ));
+        }
+        expect_test::expect![[r#"
+            [
+                (
+                    true,
+                    "ab",
+                    "<s> h <s> a </s> <sep> b </s>",
+                ),
+                (
+                    false,
+                    "a<sep>b",
+                    "<s> h <s> a </s> <sep> b </s>",
+                ),
+            ]
+        "#]]
+        .assert_debug_eq(&results);
     }
 
     struct DropRecordingStream {
