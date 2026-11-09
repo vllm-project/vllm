@@ -70,17 +70,18 @@ from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.utils.collection_utils import as_list
+from vllm.utils.gc_utils import untracked_list
 from vllm.utils.serial_utils import numpy2base64
 
 logger = init_logger(__name__)
 
 
 def _get_mm_token_counts(engine_input: EngineInput) -> dict[str, int]:
-    """Sum per-modality placeholder tokens from ``mm_placeholders``.
+    """Sum per-modality placeholder tokens from `mm_placeholders`.
 
-    Keyed by modality name; ``PlaceholderRange.length`` is the placeholder's
+    Keyed by modality name; `PlaceholderRange.length` is the placeholder's
     prompt token span, so each sum matches the placeholder tokens already
-    counted in ``usage.prompt_tokens``.
+    counted in `usage.prompt_tokens`.
     """
     mm_placeholders = cast(
         MultiModalPlaceholders | None, engine_input.get("mm_placeholders")
@@ -98,7 +99,7 @@ def _make_prompt_tokens_details(
     num_cache_creation_tokens: int | None,
     mm_token_counts: dict[str, int] | None,
 ) -> PromptTokenUsageInfo | None:
-    """Build ``prompt_tokens_details`` from cached + multimodal token counts."""
+    """Build `prompt_tokens_details` from cached + multimodal token counts."""
     if not enable_prompt_tokens_details:
         return None
     if (
@@ -201,6 +202,7 @@ class OpenAIServingChat(GenerateBaseServing):
             request.build_chat_params(
                 self.chat_template,
                 self.chat_template_content_format,
+                self.online_renderer.reasoning_effort_map,
             )
             .with_defaults(self.default_chat_template_kwargs)
             .chat_template_kwargs
@@ -223,11 +225,11 @@ class OpenAIServingChat(GenerateBaseServing):
     def _engine_chat_template_kwargs(
         self, chat_template_kwargs: dict[str, Any]
     ) -> dict[str, Any]:
-        """Subclass hook to narrow ``chat_template_kwargs`` for the engine.
+        """Subclass hook to narrow `chat_template_kwargs` for the engine.
 
         The same dict is used twice: to build the API-server-side parser
         instance, and to populate
-        ``EngineCoreRequest.reasoning_parser_kwargs`` for the engine-core
+        `EngineCoreRequest.reasoning_parser_kwargs` for the engine-core
         side. The latter crosses ZMQ as msgpack, so a handler that stashes
         request-scoped state only the API-server-side parser needs (values
         msgpack can't encode, or payloads not worth shipping) can drop
@@ -442,12 +444,12 @@ class OpenAIServingChat(GenerateBaseServing):
         return request.messages[-1]["role"]
 
     def _create_chat_message(self, *args: Any, **kwargs: Any) -> ChatMessage:
-        """Construct the response :class:`ChatMessage` for the non-streaming path.
+        """Construct the response `ChatMessage` for the non-streaming path.
 
         Subclasses can swap in a specialized `ChatMessage` subclass
         (e.g. `CohereServingChatV2` returning `CohereChatMessage`)
         without duplicating the field selection in
-        ``assemble_chat_message_fields``. The default returns a plain
+        `assemble_chat_message_fields`. The default returns a plain
         `ChatMessage`.
         """
         return ChatMessage(*args, **kwargs)
@@ -458,13 +460,13 @@ class OpenAIServingChat(GenerateBaseServing):
         *,
         parser: Parser | None,
     ) -> ChatMessage:
-        """Subclass hook to enrich a fully-constructed :class:`ChatMessage`.
+        """Subclass hook to enrich a fully-constructed `ChatMessage`.
 
         Default is a no-op. Subclasses that need to surface parser-side
-        extras (e.g. :class:`CohereServingChatV2` reading grounding
+        extras (e.g. `CohereServingChatV2` reading grounding
         citations off the reasoning parser and populating
-        :class:`CohereChatMessage.citations`) override this to inspect
-        ``parser`` and mutate/replace ``message``.
+        `CohereChatMessage.citations`) override this to inspect
+        `parser` and mutate/replace `message`.
         """
         return message
 
@@ -525,7 +527,9 @@ class OpenAIServingChat(GenerateBaseServing):
         # Send response for each token for each request.n (index)
         num_choices = 1 if request.n is None else request.n
         # TODO: Remove once all reasoning parsers use the Parser Engine.
-        generated_token_ids: list[list[int]] = [[] for _ in range(num_choices)]
+        generated_token_ids: list[list[int]] = [
+            untracked_list() for _ in range(num_choices)
+        ]
         previous_reasoning_tokens = [0] * num_choices
         finish_reason_sent = [False] * num_choices
         num_prompt_tokens = 0
@@ -544,12 +548,20 @@ class OpenAIServingChat(GenerateBaseServing):
                     ChatStreamProcessor(
                         request,
                         self._make_parser(request, tokenizer, chat_template_kwargs),
+                        enable_auto_tools=self.enable_auto_tools,
+                        parser_cls=self.parser_cls,
                     )
                     for _ in range(num_choices)
                 ]
             else:
                 processors = [
-                    ChatStreamProcessor(request, None) for _ in range(num_choices)
+                    ChatStreamProcessor(
+                        request,
+                        None,
+                        enable_auto_tools=self.enable_auto_tools,
+                        parser_cls=None,
+                    )
+                    for _ in range(num_choices)
                 ]
         except Exception as e:
             logger.exception("Error in parser creation.")
@@ -621,6 +633,14 @@ class OpenAIServingChat(GenerateBaseServing):
                                     _make_completion_tokens_details(0)
                                     if self._include_reasoning_tokens_details
                                     else None
+                                ),
+                                # Known from the first output, so the first
+                                # chunk's prompt split matches the final one.
+                                prompt_tokens_details=_make_prompt_tokens_details(
+                                    self.enable_prompt_tokens_details,
+                                    num_cached_tokens,
+                                    num_cache_creation_tokens,
+                                    mm_token_counts,
                                 ),
                             )
 
@@ -809,6 +829,9 @@ class OpenAIServingChat(GenerateBaseServing):
                         created=created_time,
                         choices=[choice_data],
                         model=model_name,
+                        kv_transfer_params=(
+                            res.kv_transfer_params if finish_reason_sent[i] else None
+                        ),
                     )
                     # Stamp the fingerprint on terminal chunks only (those with
                     # finish_reason set). When ``include_usage`` is on, the

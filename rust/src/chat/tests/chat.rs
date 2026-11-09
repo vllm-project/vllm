@@ -22,9 +22,11 @@ use vllm_engine_core_client::protocol::output::{
     EngineCoreFinishReason, EngineCoreOutput, EngineCoreOutputs, RequestBatchOutputs, StopReason,
 };
 use vllm_engine_core_client::protocol::request::EngineCoreRequest;
-use vllm_engine_core_client::test_utils::{IpcNamespace, spawn_mock_engine_task};
+use vllm_engine_core_client::test_utils::{
+    IpcNamespace, decode_prompt_token_ids, spawn_mock_engine_task,
+};
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig};
-use vllm_llm::Llm;
+use vllm_llm::EngineCoreLlm;
 use vllm_text::tokenizer::DynTokenizer;
 use vllm_text::{
     DecodedLogprobs, DecodedPositionLogprobs, DecodedPromptLogprobs, DecodedTokenLogprob, Prompt,
@@ -148,7 +150,7 @@ async fn connect_chat_llm_with_ipc(
     .await
     .unwrap();
     ChatLlm::from_shared_backend(
-        Llm::new(client).with_request_id_randomization(false),
+        EngineCoreLlm::new(client).with_request_id_randomization(false),
         backend,
     )
 }
@@ -338,9 +340,7 @@ async fn chat_streams_text_events() {
                 // more fields here in the future
                 assert_eq!(
                     String::from_utf8(
-                        request
-                            .prompt_token_ids
-                            .clone()
+                        decode_prompt_token_ids(&request)
                             .unwrap()
                             .into_iter()
                             .map(|id| id as u8)
@@ -1346,8 +1346,13 @@ async fn chat_stream_and_collect_preserve_prompt_and_sample_logprobs() {
     let mut request = sample_request("chat-logprobs");
     request.sampling_params.logprobs = Some(1);
     request.sampling_params.prompt_logprobs = Some(1);
+    request.return_prompt_text = true;
 
     let mut stream = chat.chat(request.clone()).await.unwrap();
+    assert_eq!(
+        stream.prompt_text(),
+        Some("system: You are terse.\nuser: Say hi\nassistant:")
+    );
     match next_semantic(&mut stream).await.unwrap().unwrap() {
         ChatEvent::Start {
             prompt_token_ids,
@@ -1432,6 +1437,10 @@ async fn chat_stream_and_collect_preserve_prompt_and_sample_logprobs() {
     request.request_id = "chat-logprobs-collect".to_string();
     let collected = chat.chat(request).await.unwrap().collect_message().await.unwrap();
     assert_eq!(collected.message.text(), "Hi");
+    assert_eq!(
+        collected.prompt_text.as_deref(),
+        Some("system: You are terse.\nuser: Say hi\nassistant:")
+    );
     assert_eq!(
         collected.prompt_logprobs,
         Some(DecodedPromptLogprobs {

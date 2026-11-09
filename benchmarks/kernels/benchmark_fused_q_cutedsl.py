@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Compare the CuTeDSL and Triton implementations of the DSA fused query op.
 
-``fused_q`` dispatches to the CuTeDSL kernel on SM100 when the dtypes and
+`fused_q` dispatches to the CuTeDSL kernel on SM100 when the dtypes and
 shapes are supported and falls back to Triton otherwise. This benchmark forces
 each path so the two can be compared directly.
 """

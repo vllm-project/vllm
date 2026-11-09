@@ -7,12 +7,12 @@ use axum::Json;
 use axum::extract::rejection::QueryRejection;
 use axum::extract::{Query, RawQuery, State};
 use serde::{Deserialize, Serialize};
-use vllm_engine_core_client::protocol::utility::PauseMode;
+use vllm_engine_core_client::protocol::utility::{PauseMode, SleepLevel};
 use vllm_metrics::METRICS;
 
 use crate::error::ApiError;
 use crate::state::AppState;
-use crate::utils::utility_call_error;
+use crate::utils::{deserialize_query_bool, utility_call_error};
 
 #[derive(Serialize)]
 pub(crate) struct IsSleepingResponse {
@@ -22,7 +22,7 @@ pub(crate) struct IsSleepingResponse {
 #[derive(Serialize)]
 pub struct SleepResponse {
     status: &'static str,
-    level: u32,
+    level: SleepLevel,
 }
 
 #[derive(Serialize)]
@@ -40,17 +40,31 @@ pub struct WakeUpResponse {
 #[derive(Debug, Deserialize)]
 pub(crate) struct SleepParams {
     #[serde(default = "default_sleep_level")]
-    level: u32,
+    level: SleepLevel,
     #[serde(default)]
     mode: PauseMode,
+    #[serde(
+        default = "default_reset_connector",
+        deserialize_with = "deserialize_query_bool"
+    )]
+    reset_connector: bool,
 }
 
-const fn default_sleep_level() -> u32 {
-    1
+#[derive(Debug, Deserialize)]
+pub(crate) struct ReleaseKvCacheMemoryParams {
+    #[serde(
+        default = "default_reset_connector",
+        deserialize_with = "deserialize_query_bool"
+    )]
+    reset_connector: bool,
 }
 
-fn invalid_query(error: QueryRejection) -> ApiError {
-    ApiError::invalid_request(error.body_text(), None)
+const fn default_sleep_level() -> SleepLevel {
+    SleepLevel::OffloadWeights
+}
+
+const fn default_reset_connector() -> bool {
+    true
 }
 
 /// Put the engine to sleep.
@@ -58,18 +72,16 @@ pub async fn sleep(
     State(state): State<Arc<AppState>>,
     params: Result<Query<SleepParams>, QueryRejection>,
 ) -> Result<Json<SleepResponse>, ApiError> {
-    let Query(SleepParams { level, mode }) = params.map_err(invalid_query)?;
-    if level > 2 {
-        return Err(ApiError::invalid_request(
-            "level must be between 0 and 2",
-            Some("level"),
-        ));
-    }
+    let Query(SleepParams {
+        level,
+        mode,
+        reset_connector,
+    }) = params?;
     let _recorder = METRICS.api_server.record_sleep_mode_operation("sleep");
 
     state
         .engine_core_client()
-        .sleep(level, mode)
+        .sleep(level, mode, reset_connector)
         .await
         .map_err(|error| utility_call_error("sleep", error))?;
 
@@ -82,11 +94,13 @@ pub async fn sleep(
 /// Release KV cache memory while keeping model weights resident.
 pub async fn release_kv_cache_memory(
     State(state): State<Arc<AppState>>,
+    params: Result<Query<ReleaseKvCacheMemoryParams>, QueryRejection>,
 ) -> Result<Json<ReleaseKvCacheMemoryResponse>, ApiError> {
+    let Query(ReleaseKvCacheMemoryParams { reset_connector }) = params?;
     let _recorder = METRICS.api_server.record_sleep_mode_operation("release_kv_cache_memory");
     state
         .engine_core_client()
-        .release_kv_cache_memory()
+        .release_kv_cache_memory(reset_connector)
         .await
         .map_err(|error| utility_call_error("release_kv_cache_memory", error))?;
 
