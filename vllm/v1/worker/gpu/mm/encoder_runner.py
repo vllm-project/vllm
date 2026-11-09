@@ -244,6 +244,9 @@ class EncoderRunner:
 
             cur_query_start = query_start[i]
             cur_query_end = query_end[i]
+            # An idle PCP rank can retain a request with no local tokens.
+            if cur_query_start == cur_query_end:
+                continue
 
             mm_features = self.encoder_cache.mm_features[req_id]
             lo, hi = get_mm_features_in_window(

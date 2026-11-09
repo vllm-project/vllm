@@ -121,7 +121,7 @@ def _make_runner(
     cache = EncoderCache()
     cache.mm_features["req0"] = features
     for f in cached:
-        length = f.mm_position.length
+        length = f.mm_position.get_num_embeds()
         cache.encoder_outputs[f.identifier] = torch.arange(
             length * HIDDEN, dtype=torch.float32
         ).reshape(length, HIDDEN)
@@ -152,6 +152,72 @@ def _gather(
         num_computed_tokens=np.array([num_computed]),
         draft_lookahead=draft_lookahead,
     )
+
+
+def test_empty_pcp_segment_inside_image_span():
+    """An idle PCP rank must not gather a zero-width slice of an image."""
+    feature = _feature("image", offset=8, length=10)
+    runner = _make_runner([feature], cached=[feature])
+
+    mm_embeds, is_mm_embed = _gather(
+        runner, num_scheduled=0, num_computed=10, draft_lookahead=0
+    )
+
+    assert mm_embeds == []
+    assert is_mm_embed.numel() == 0
+
+
+@pytest.mark.parametrize("with_embed_mask", [False, True])
+def test_pcp_segments_gather_image_embeddings_in_local_order(with_embed_mask):
+    """Repeated request IDs use each segment's absolute image offset."""
+    feature = _feature("image", offset=8, length=10)
+    if with_embed_mask:
+        feature = replace(
+            feature,
+            mm_position=PlaceholderRange(
+                offset=8,
+                length=10,
+                is_embed=torch.tensor(
+                    [True, False, True, True, False, True, True, False, True, True]
+                ),
+            ),
+        )
+    runner = _make_runner([feature], cached=[feature])
+    image = runner.encoder_cache.encoder_outputs[feature.identifier]
+    # A leading text row, two noncontiguous parts of the same image, and an
+    # empty PCP segment whose cursor is inside the image.
+    starts = np.array([6, 14, 10])
+    lengths = np.array([5, 5, 0])
+    mm_embeds, is_mm_embed = runner.gather_mm_embeddings(
+        req_ids=["req0"] * 3,
+        total_num_scheduled_tokens=10,
+        num_scheduled_tokens=lengths,
+        query_start_loc=np.array([0, 5, 10, 10]),
+        prefill_lens=np.full(3, 1000),
+        num_computed_tokens=starts,
+    )
+
+    assert len(mm_embeds) == 2
+    if with_embed_mask:
+        expected = [image[:2], image[4:7]]
+        expected_mask = [
+            False,
+            False,
+            True,
+            False,
+            True,
+            True,
+            False,
+            True,
+            True,
+            False,
+        ]
+    else:
+        expected = [image[:3], image[6:10]]
+        expected_mask = [False, False, True, True, True, True, True, True, True, False]
+    for actual, reference in zip(mm_embeds, expected, strict=True):
+        torch.testing.assert_close(actual, reference, rtol=0, atol=0)
+    assert is_mm_embed.tolist() == expected_mask
 
 
 def test_draft_lookahead_uses_boundary_feature_when_cached():
