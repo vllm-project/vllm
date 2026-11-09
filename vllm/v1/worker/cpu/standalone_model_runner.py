@@ -332,6 +332,9 @@ class StandaloneCPUModelRunner(LoRAModelRunnerMixin):
     def get_draft_model(self) -> torch.nn.Module | None:
         return None
 
+    def on_target_weights_replaced(self) -> None:
+        """Called by the worker after a weight transfer; nothing derives from them."""
+
     def reload_weights(
         self,
         weights_iterator: Iterable[tuple[str, torch.Tensor]] | None = None,
@@ -344,7 +347,6 @@ class StandaloneCPUModelRunner(LoRAModelRunnerMixin):
         reload_weights(
             vllm_config, model, weights_iterator, weights_path, is_checkpoint_format
         )
-        self.reset_lora_state()
         self.reset_encoder_cache()
         self.reset_mm_cache()
 
