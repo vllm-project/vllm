@@ -850,12 +850,12 @@ def mhc_fused_multi_tilelang(
     tile_n: int = 12,
     tok: int = 4,
 ) -> tilelang.JITKernel:
-    """``mhc_fused_tilelang`` for ``tok`` tokens per block (batch invariance).
+    """`mhc_fused_tilelang` for `tok` tokens per block (batch invariance).
 
-    Each block loads its weight slice once for ``tok`` tokens; every output
+    Each block loads its weight slice once for `tok` tokens; every output
     keeps the single-token kernel's arithmetic (per-thread FMA chain over the
     same h indices, warp reduce, cross-warp sum in warp order), so its bits
-    match ``mhc_fused_tilelang`` with the same ``n_thr`` and split count.
+    match `mhc_fused_tilelang` with the same `n_thr` and split count.
     """
     m = T.dynamic("num_tokens")
     split_k = T.dynamic("split_k")
