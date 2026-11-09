@@ -87,7 +87,7 @@ class ReasoningParser:
         detokenizer holds back text.  This method returns the engine's
         *processed* state, not a raw token-ID check.
 
-        Only called for parsers with ``engine_based_streaming = True``.
+        Only called for parsers with `engine_based_streaming = True`.
         """
         return False
 
@@ -98,14 +98,10 @@ class ReasoningParser:
         It is used in structured engines like `xgrammar` to check if the
         reasoning content ends in the model output.
 
-        Parameters
-        ----------
-        input_ids: list[int]
-            The input_ids of the model output.
+        Args:
+            input_ids: The input_ids of the model output.
 
-        Returns
-        -------
-        bool
+        Returns:
             True if the reasoning content ends in the input_ids.
 
         """
@@ -121,16 +117,12 @@ class ReasoningParser:
         `input_ids` the entire model output and `delta_ids` are the last few
         computed tokens of the model output (like during a decode step).
 
-        Parameters
-        ----------
-        input_ids: list[int]
-            The entire model output.
-        delta_ids: list[int]
-            The last few computed tokens of the model output at the current decode step.
+        Args:
+            input_ids: The entire model output.
+            delta_ids: The last few computed tokens of the model output at the
+                current decode step.
 
-        Returns
-        -------
-        bool
+        Returns:
             True if the reasoning content ends in the `delta_ids` on a
             decode step.
 
@@ -141,14 +133,10 @@ class ReasoningParser:
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
         """Extract content token ids from the input_ids.
 
-        Parameters
-        ----------
-        input_ids: list[int]
-            The input_ids of the model output.
+        Args:
+            input_ids: The input_ids of the model output.
 
-        Returns
-        -------
-        list[int]
+        Returns:
             The extracted content from the input_ids.
 
         """
@@ -157,9 +145,9 @@ class ReasoningParser:
         """Count the number of reasoning tokens in a sequence.
 
         Text-based reasoning models typically wrap their chain-of-thought
-        between special start/end tokens (e.g., ``<think> ... </think>``).
+        between special start/end tokens (e.g., `<think> ... </think>`).
         Implementations that support reasoning token counting should override
-        this method. The default implementation returns ``0`` so existing
+        this method. The default implementation returns `0` so existing
         parsers remain unchanged unless they explicitly opt in.
 
         Args:
