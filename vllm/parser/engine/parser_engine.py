@@ -61,6 +61,7 @@ class ToolCallSlot:
     __slots__ = (
         "id",
         "name",
+        "completed",
         "_args_parts",
         "_args_joined",
         "name_sent",
@@ -74,6 +75,7 @@ class ToolCallSlot:
     def __init__(self) -> None:
         self.id: str = ""
         self.name: str = ""
+        self.completed: bool = False
         self._args_parts: list[str] = []
         self._args_joined: str | None = ""
         self.name_sent: bool = False
@@ -1032,8 +1034,10 @@ class ParserEngine(Parser):
         if idx >= len(self._tool_slots):
             return
 
-        remaining = self._flush_arg_converter(idx)
         slot = self._tool_slots[idx]
+        slot.completed = True
+
+        remaining = self._flush_arg_converter(idx)
 
         if not slot.name_sent:
             name = slot.name or self._try_extract_name(idx) or ""
@@ -1199,6 +1203,12 @@ class ParserEngine(Parser):
 
         tool_calls: list[ToolCall] = []
         for slot in self._tool_slots:
+            # A slot that never received TOOL_CALL_END holds a call the model
+            # truncated before finishing (e.g. cut inside the tool name at
+            # max_tokens): finalizing it would execute a call the model never
+            # made, so it is dropped rather than completed with empty args.
+            if not slot.completed:
+                continue
             if not slot.name and not slot.args:
                 continue
 

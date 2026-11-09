@@ -1450,10 +1450,10 @@ class TestMalformedDsmlNoise:
         self, mock_tokenizer, mock_request, wrapper
     ):
         """A registered spelling mentioned in prose behaves exactly like a
-        prose mention of the real wrapper: the opener starts a tool block and
-        the rest of the message is dropped. That is pre-existing behavior of
-        `<｜DSML｜tool_calls>`; the variants must not differ from it either
-        way."""
+        prose mention of the real wrapper: the opener starts a tool block
+        and an invoke-less block falls back to content verbatim (#62051).
+        The variants must not differ from the canonical spelling either
+        way, modulo the spelling itself."""
         template = "The opener looks like {} and then params follow. Done."
         text = template.format(wrapper)
         reference = template.format(DSML_TOOL_START)
@@ -1463,7 +1463,8 @@ class TestMalformedDsmlNoise:
             reference, mock_request
         )
         assert result.tools_called == expected.tools_called
-        assert result.content == expected.content
+        assert result.content == text
+        assert expected.content == reference
 
         results = simulate_tool_streaming(
             self._parser(mock_tokenizer), mock_request, list(text)
@@ -1471,7 +1472,9 @@ class TestMalformedDsmlNoise:
         expected_results = simulate_tool_streaming(
             self._parser(mock_tokenizer), mock_request, list(reference)
         )
-        assert collect_content(results) == collect_content(expected_results)
+        assert collect_content(results) == collect_content(expected_results).replace(
+            DSML_TOOL_START, wrapper
+        )
 
     @pytest.mark.parametrize("wrapper", _WRAPPER_VARIANTS)
     @pytest.mark.parametrize("chunk_size", [1, 3, None], ids=lambda c: f"chunk={c}")
@@ -1515,3 +1518,26 @@ class TestMalformedDsmlNoise:
         assert output.tool_calls[0]["name"] == "get_weather"
         assert json.loads(output.tool_calls[0]["arguments"]) == {"city": "Seoul"}
         assert "DSML" not in (output.content or "")
+
+
+class TestInvokeLessToolBlock:
+    """A tool block with no invoke is not a tool call: the block falls back
+    to content verbatim instead of being dropped silently (#62051)."""
+
+    def test_falls_back_to_content(self, mock_tokenizer, mock_request):
+        parser = DeepSeekV4Parser(
+            mock_tokenizer, chat_template_kwargs={"thinking": False}
+        )
+        text = (
+            f"Before tools.{DSML_TOOL_START}\n<url>https://x.com</url>\n{DSML_TOOL_END}"
+        )
+
+        result = parser.extract_tool_calls(text, mock_request)
+
+        assert result.tools_called is False
+        assert result.tool_calls == []
+        assert result.content == text
+
+        results = simulate_tool_streaming(parser, mock_request, list(text))
+        assert collect_content(results) == text
+        assert "url" in collect_content(results)
