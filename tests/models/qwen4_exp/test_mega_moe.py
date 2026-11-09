@@ -32,87 +32,50 @@ from vllm.models.qwen4_exp.nvidia.mega_moe import (
 from vllm.utils.deep_gemm import is_deep_gemm_supported
 
 HIDDEN, INTER = 512, 256
-SCALE_NAMES = {
-    "fp8_block": "weight_scale_inv",
-    "mxfp8": "weight_scale",
-    "mxfp4": "weight_scale",
-}
 pytestmark = pytest.mark.skipif(
     not is_deep_gemm_supported(), reason="Requires DeepGEMM"
 )
-
-
-def _cast(fmt):
-    from vllm.third_party.deep_gemm.utils.math import (
-        per_token_cast_to_fp4,
-        per_token_cast_to_fp8,
-    )
-
-    return per_token_cast_to_fp4 if fmt is MEGA_MOE_MXFP4 else per_token_cast_to_fp8
-
-
-def _exponent(sf: torch.Tensor) -> torch.Tensor:
-    return (sf.view(torch.int32) >> 23).to(torch.uint8)
-
-
-def _cast_back(values: torch.Tensor, exponent: torch.Tensor, fmt) -> torch.Tensor:
-    from vllm.third_party.deep_gemm.utils.math import (
-        cast_back_from_fp4,
-        cast_back_from_fp8,
-    )
-
-    sf = (exponent.to(torch.int32) << 23).view(torch.float32)
-    cast_back = cast_back_from_fp4 if fmt is MEGA_MOE_MXFP4 else cast_back_from_fp8
-    return cast_back(values, sf, gran_k=32)
-
-
-def _shard(checkpoint_format: str, rows: int, cols: int, generator):
-    """One projection of one expert as the checkpoint stores it."""
-    if checkpoint_format == "fp8_block":
-        weight = torch.randn(rows, cols, generator=generator).to(torch.float8_e4m3fn)
-        scale = torch.rand(rows // 128, cols // 128, generator=generator) * 1e-2
-        return weight, scale + 1e-3
-    x = torch.randn(rows, cols, generator=generator) * 1e-2
-    if checkpoint_format == "bf16":
-        return x.bfloat16(), None
-    fmt = MEGA_MOE_MXFP4 if checkpoint_format == "mxfp4" else MEGA_MOE_MXFP8
-    values, sf = _cast(fmt)(x, use_ue8m0=True, gran_k=32)
-    # MXFP4 checkpoints store packed uint8 values.
-    if fmt is MEGA_MOE_MXFP4:
-        values = values.view(torch.uint8)
-    return values, _exponent(sf)
+dg_math = pytest.importorskip("vllm.third_party.deep_gemm.utils.math")
+CASTS = {
+    "mxfp8": dg_math.per_token_cast_to_fp8,
+    "mxfp4": dg_math.per_token_cast_to_fp4,
+}
 
 
 def _checkpoint(checkpoint_format: str, num_experts: int, generator):
+    """{(expert, proj): (weight, scale)} as the checkpoint stores them."""
     shapes = {
         "gate_proj": (INTER, HIDDEN),
         "up_proj": (INTER, HIDDEN),
         "down_proj": (HIDDEN, INTER),
     }
-    return {
-        (e, proj): _shard(checkpoint_format, *shape, generator)
-        for e in range(num_experts)
-        for proj, shape in shapes.items()
-    }
+    ckpt = {}
+    for e in range(num_experts):
+        for proj, (rows, cols) in shapes.items():
+            if checkpoint_format == "fp8_block":
+                weight = torch.randn(rows, cols, generator=generator)
+                scale = torch.rand(rows // 128, cols // 128, generator=generator)
+                ckpt[e, proj] = weight.to(torch.float8_e4m3fn), scale * 1e-2 + 1e-3
+                continue
+            x = torch.randn(rows, cols, generator=generator) * 1e-2
+            if checkpoint_format == "bf16":
+                ckpt[e, proj] = x.bfloat16(), None
+                continue
+            values, sf = CASTS[checkpoint_format](x, use_ue8m0=True, gran_k=32)
+            # MXFP4 checkpoints store packed uint8 values; scales are UE8M0 bytes.
+            if checkpoint_format == "mxfp4":
+                values = values.view(torch.uint8)
+            ckpt[e, proj] = values, (sf.view(torch.int32) >> 23).to(torch.uint8)
+    return ckpt
 
 
 def _names(checkpoint_format, ckpt, generator) -> list[tuple[str, torch.Tensor]]:
     """Per-expert checkpoint tensors in a random order."""
     names = [(f"{e}.{p}.weight", w) for (e, p), (w, _) in ckpt.items()]
     if checkpoint_format != "bf16":
-        scale_name = SCALE_NAMES[checkpoint_format]
+        scale_name = "weight_scale" if "mx" in checkpoint_format else "weight_scale_inv"
         names += [(f"{e}.{p}.{scale_name}", s) for (e, p), (_, s) in ckpt.items()]
     return [names[i] for i in torch.randperm(len(names), generator=generator)]
-
-
-def _fused_names(ckpt, num_experts) -> list[tuple[str, torch.Tensor]]:
-    """The official BF16 checkpoint's fused [E, N, K] experts."""
-    experts = range(num_experts)
-    gate_up = [
-        torch.cat([ckpt[e, "gate_proj"][0], ckpt[e, "up_proj"][0]]) for e in experts
-    ]
-    down = [ckpt[e, "down_proj"][0] for e in experts]
-    return [("gate_up_proj", torch.stack(gate_up)), ("down_proj", torch.stack(down))]
 
 
 def _experts(cls, fmt, num_local, start, num_logical, checkpoint_format=None):
@@ -138,16 +101,6 @@ def _experts(cls, fmt, num_local, start, num_logical, checkpoint_format=None):
         return cls(vllm_config, **kwargs)
 
 
-def _dequantize(weight, scale, checkpoint_format) -> torch.Tensor:
-    if checkpoint_format == "bf16":
-        return weight.float()
-    if checkpoint_format == "fp8_block":
-        scale = scale.repeat_interleave(128, 0).repeat_interleave(128, 1)
-        return weight.float() * scale
-    mx = MEGA_MOE_MXFP4 if checkpoint_format == "mxfp4" else MEGA_MOE_MXFP8
-    return _cast_back(weight, scale, mx)
-
-
 def _expected(checkpoint_format, fmt, ckpt, num_local, start, num_logical):
     """Experts written shard by shard through the generic MegaMoE loader,
     requantized with DeepGEMM's own casts."""
@@ -155,10 +108,22 @@ def _expected(checkpoint_format, fmt, ckpt, num_local, start, num_logical):
     shard_ids = {"gate_proj": "w1", "up_proj": "w3", "down_proj": "w2"}
     for (e, proj), (weight, scale) in ckpt.items():
         if checkpoint_format != fmt.name:
-            scale = None if scale is None else scale.cuda()
-            x = _dequantize(weight.cuda(), scale, checkpoint_format)
-            weight, sf = _cast(fmt)(x, use_ue8m0=True, gran_k=32)
-            scale = _exponent(sf)
+            weight = weight.cuda()
+            if checkpoint_format == "bf16":
+                x = weight.float()
+            elif checkpoint_format == "fp8_block":
+                block = scale.cuda().repeat_interleave(128, 0).repeat_interleave(128, 1)
+                x = weight.float() * block
+            else:
+                sf = (scale.cuda().to(torch.int32) << 23).view(torch.float32)
+                cast_back = (
+                    dg_math.cast_back_from_fp4
+                    if checkpoint_format == "mxfp4"
+                    else dg_math.cast_back_from_fp8
+                )
+                x = cast_back(weight, sf, gran_k=32)
+            weight, sf = CASTS[fmt.name](x, use_ue8m0=True, gran_k=32)
+            scale = (sf.view(torch.int32) >> 23).to(torch.uint8)
         prefix = "w2" if proj == "down_proj" else "w13"
         for suffix, value in (("weight", weight), ("weight_scale", scale)):
             if value is not None:
@@ -172,10 +137,6 @@ def _expected(checkpoint_format, fmt, ckpt, num_local, start, num_logical):
 def _assert_same_experts(a, b) -> None:
     for name, param in b.named_parameters():
         assert torch.equal(getattr(a, name), param), name
-
-
-def _load(experts, names) -> None:
-    experts.load_weights(iter(names))
 
 
 @pytest.fixture
@@ -256,12 +217,22 @@ def test_experts_load_checkpoint_into_kernel_layout(
     checkpoint_format = "bf16" if fused else checkpoint_format
     generator = torch.Generator().manual_seed(2)
     ckpt = _checkpoint(checkpoint_format, 4, generator)
-    names = (
-        _fused_names(ckpt, 4) if fused else _names(checkpoint_format, ckpt, generator)
-    )
+    if fused:
+        # The official BF16 checkpoint's [E, N, K] experts, gate rows first.
+        gate_up = [
+            torch.cat([ckpt[e, "gate_proj"][0], ckpt[e, "up_proj"][0]])
+            for e in range(4)
+        ]
+        down = [ckpt[e, "down_proj"][0] for e in range(4)]
+        names = [
+            ("gate_up_proj", torch.stack(gate_up)),
+            ("down_proj", torch.stack(down)),
+        ]
+    else:
+        names = _names(checkpoint_format, ckpt, generator)
     # EP rank 1 of 2 owns logical experts 2 and 3.
     experts = _experts(Qwen4ExpMegaMoEExperts, fmt, 2, 2, 4, checkpoint_format)
-    loaded = experts.load_weights(iter(names))
+    loaded = experts.load_weights(names)
     assert loaded == {n for n, _ in experts.named_parameters()}
     experts.quant_method.process_weights_after_loading(experts)
     _assert_same_experts(experts, _expected(checkpoint_format, fmt, ckpt, 2, 2, 4))
@@ -275,10 +246,10 @@ def test_weight_and_scale_may_arrive_in_separate_calls(any_device_mega_moe):
     names = _names("fp8_block", ckpt, generator)
     experts = _experts(Qwen4ExpMegaMoEExperts, MEGA_MOE_MXFP8, 2, 0, 2, "fp8_block")
     first = [n for n in names if n[0].startswith("0.") or n[0].endswith(".weight")]
-    _load(experts, first)
+    experts.load_weights(first)
     with pytest.raises(ValueError, match="without both weight and scale"):
         experts.quant_method.process_weights_after_loading(experts)
-    _load(experts, [n for n in names if n not in first])
+    experts.load_weights([n for n in names if n not in first])
     experts.quant_method.process_weights_after_loading(experts)
     _assert_same_experts(experts, _expected("fp8_block", MEGA_MOE_MXFP8, ckpt, 2, 0, 2))
 
@@ -293,12 +264,12 @@ def test_layerwise_reload_replaces_routed_experts(any_device_mega_moe):
     experts = _experts(Qwen4ExpMegaMoEExperts, fmt, 2, 0, 2, checkpoint_format)
     with torch.device("cuda"):
         record_metadata_for_reloading(experts)
-    _load(experts, _names(checkpoint_format, old, generator))
+    experts.load_weights(_names(checkpoint_format, old, generator))
     experts.quant_method.process_weights_after_loading(experts)
     pointers = {n: p.data_ptr() for n, p in experts.named_parameters()}
 
     initialize_layerwise_reload(experts)
-    _load(experts, _names(checkpoint_format, new, generator))
+    experts.load_weights(_names(checkpoint_format, new, generator))
     finalize_layerwise_reload(experts, None)
 
     _assert_same_experts(experts, _expected(checkpoint_format, fmt, new, 2, 0, 2))
