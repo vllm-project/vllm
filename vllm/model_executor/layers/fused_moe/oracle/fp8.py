@@ -649,6 +649,12 @@ def convert_to_fp8_moe_kernel_format(
         w13, w13_scale, w2, w2_scale = prepare_fp8_moe_layer_for_xpu(
             w13, w13_scale, w2, w2_scale
         )
+    elif fp8_backend == Fp8MoeBackend.HPC:
+        from vllm.model_executor.layers.fused_moe.hpc_moe import (
+            prepare_fp8_moe_layer_for_hpc,
+        )
+
+        w13_scale, w2_scale = prepare_fp8_moe_layer_for_hpc(w13_scale, w2_scale)
     elif fp8_backend == Fp8MoeBackend.CPU:
         from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
             prepare_fp8_moe_layer_for_cpu,
@@ -670,7 +676,6 @@ def convert_to_fp8_moe_kernel_format(
             Fp8MoeBackend.VLLM_CUTLASS,
             Fp8MoeBackend.BATCHED_VLLM_CUTLASS,
             Fp8MoeBackend.XPU,
-            Fp8MoeBackend.HPC,
             # EMULATION dequantizes weights at runtime; NATIVE_MXFP8 consumes
             # the MXFP8 weights as-is — neither needs a load-time layout change.
             Fp8MoeBackend.EMULATION,

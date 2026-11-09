@@ -38,6 +38,12 @@ from vllm.model_executor.layers.fused_moe.experts.triton_deep_gemm_moe import (
 from vllm.model_executor.layers.fused_moe.fused_moe import (
     try_get_optimal_moe_config,
 )
+from vllm.model_executor.layers.fused_moe.hpc_moe import HPCExperts
+from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
+    Fp8MoeBackend,
+    convert_to_fp8_moe_kernel_format,
+    make_fp8_moe_quant_config,
+)
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8,
 )
@@ -683,6 +689,62 @@ def test_w8a8_block_fp8_fused_moe_refined_block_scales(tp_rank, workspace_init):
         )
         out = fused_experts(
             a, w1, w2, topk_weights, topk_ids, quant_config=quant_config
+        )
+
+    torch.testing.assert_close(out, ref_out, atol=0.035, rtol=0.035)
+
+
+# (N, K) block counts whose scale K-dim is not a multiple of 4 exercise the
+# padding HPC requires; (256, 6144) is GLM-5 at TP8 (down-proj K/128 = 2).
+@pytest.mark.parametrize(("M", "N", "K"), [(7, 256, 6144), (128, 384, 640)])
+@pytest.mark.skipif(
+    not HPCExperts._supports_current_device(), reason="HPC MoE not available."
+)
+@torch.inference_mode()
+def test_w8a8_block_fp8_hpc_fused_moe(M, N, K, workspace_init):
+    E, topk = 32, 8
+    block_size = [128, 128]
+    torch.manual_seed(0)
+    a = torch.randn((M, K), dtype=torch.bfloat16) / 10
+    score = torch.randn((M, E), dtype=torch.bfloat16)
+    (_, w1, w1_s, _), (_, w2, w2_s, _) = make_test_weights(
+        E, N, K, torch.bfloat16, torch.float8_e4m3fn, block_shape=block_size
+    )
+    topk_weights, topk_ids, _ = fused_topk(a, score.float(), topk, False)
+
+    w1, w2, w1_s_hpc, w2_s_hpc = convert_to_fp8_moe_kernel_format(
+        Fp8MoeBackend.HPC, torch.nn.Module(), w1, w2, w1_s, w2_s, None, None
+    )
+    quant_config = make_fp8_moe_quant_config(
+        Fp8MoeBackend.HPC, w1_s_hpc, w2_s_hpc, None, None, block_shape=block_size
+    )
+    moe_config = make_dummy_moe_config(
+        num_experts=E, experts_per_token=topk, hidden_dim=K, intermediate_size=N
+    )
+    hpc_moe = mk.FusedMoEKernel(
+        maybe_make_prepare_finalize(
+            moe=moe_config,
+            quant_config=quant_config,
+            allow_new_interface=True,
+            use_monolithic=False,
+        ),
+        HPCExperts(moe_config, quant_config),
+    )
+
+    with set_current_vllm_config(vllm_config):
+        ref_out = torch_w8a8_block_fp8_moe(
+            a, w1, w2, w1_s, w2_s, topk_weights, topk_ids, block_size
+        )
+        out = hpc_moe.apply(
+            a,
+            w1,
+            w2,
+            topk_weights,
+            topk_ids,
+            activation=MoEActivation.SILU,
+            apply_router_weight_on_input=False,
+            expert_map=None,
+            global_num_experts=E,
         )
 
     torch.testing.assert_close(out, ref_out, atol=0.035, rtol=0.035)

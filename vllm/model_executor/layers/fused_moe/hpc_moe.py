@@ -25,6 +25,21 @@ from vllm.utils.hpc import has_hpc, hpc_fuse_moe, hpc_fuse_moe_blockwise
 logger = init_logger(__name__)
 
 
+def prepare_fp8_moe_layer_for_hpc(
+    w13_scale: torch.Tensor, w2_scale: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Pad the K-block dim of block-fp8 weight scales to a multiple of 4,
+    as required by hpc fuse_moe_blockwise. Per-tensor scales pass through."""
+
+    def _pad(scale: torch.Tensor) -> torch.Tensor:
+        pad = -scale.size(-1) % 4
+        if scale.ndim != 3 or pad == 0:
+            return scale
+        return torch.nn.functional.pad(scale, (0, pad))
+
+    return _pad(w13_scale), _pad(w2_scale)
+
+
 class HPCExperts(mk.FusedMoEExpertsModular):
     """MoE implementation powered by [HPC](https://github.com/Tencent/hpc-ops).
 
