@@ -2,13 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """ROCm entry points for the fused Kimi-K3 KDA decode kernel.
 
-The kernel in ``csrc/kimi_k3/fused_kda_decode_kernel_rocm.cu``
+The kernel in `csrc/kimi_k3/fused_kda_decode_kernel_rocm.cu`
 replaces, for a pure non-speculative decode batch, the three Triton launches
 and two copies the AMD KDA layer otherwise runs per layer: the packed causal
 conv1d update, the recurrent delta-rule step, and the gated output RMSNorm.
 
 The kernel wants a width-major conv weight and an fp32 norm weight, so the
-layer stages both once in ``process_weights_after_loading``.
+layer stages both once in `process_weights_after_loading`.
 """
 
 import torch
@@ -30,6 +30,7 @@ def is_fused_kda_decode_supported(
     num_spec: int,
     input_dtype: torch.dtype,
     conv_state_dtype: torch.dtype,
+    recurrent_state_dtype: torch.dtype,
 ) -> bool:
     """Whether the fused decode kernel can serve this layer on this device."""
     from vllm.platforms.rocm import on_gfx942, on_gfx950
@@ -41,6 +42,7 @@ def is_fused_kda_decode_supported(
         or num_spec != 0
         or input_dtype != torch.bfloat16
         or conv_state_dtype != torch.bfloat16
+        or recurrent_state_dtype != torch.float32
         or is_conv_state_dim_first()
         or not hasattr(torch.ops._C, "fused_kda_decode")
     ):

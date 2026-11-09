@@ -3,8 +3,8 @@
 """Adapted from vllm/model_executor/kernels/linear/cute_dsl/ll_bf16.py.
 
 Fused Qwen4Exp mHC down projection + SiLU epilogue, where
-columns < lora_rank get ``silu(bf16(acc) / hc_count)``, the hc_count
-injection-logit columns pass through as ``bf16(acc)``, and the pad columns
+columns < lora_rank get `silu(bf16(acc) / hc_count)`, the hc_count
+injection-logit columns pass through as `bf16(acc)`, and the pad columns
 are never computed. Output is bf16 (ll_bf16's fp32-output bonus is given up
 to preserve the production rounding boundary).
 
