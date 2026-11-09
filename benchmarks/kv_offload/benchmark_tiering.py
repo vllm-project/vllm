@@ -16,7 +16,7 @@ Full sweep:
 Single run:
     python benchmarks/kv_offload/benchmark_tiering.py run <fs-dir> \
         <concurrency> <small|large> [<prefill|decode|prefill-decode>] \
-        [--files small|large] [--prefix-tokens small|medium|large]
+        [--files small|large] [--prefix-tokens 5k|20k|100k]
 
 Compare two session dirs:
     python benchmarks/kv_offload/benchmark_tiering.py compare main_dir pr_dir
@@ -50,7 +50,7 @@ BENCH_PROMPT_TOKENS = 4096
 # FS-file granularity: KV block_size 16 -> small files, 1024 -> large files.
 FILE_SIZES = {"block16": 16, "block1024": 1024}
 # Shared prefix length (tokens) driven into the FS tier.
-PROMPT_SIZES = {"small": 5_000, "medium": 20_000, "large": 100_000}
+PROMPT_SIZES = {"5k": 5_000, "20k": 20_000, "100k": 100_000}
 # CPU tier budget in bytes.
 CPU_SIZES = {"24g": 24 * 1024**3, "200g": 200 * 1024**3}
 CONCURRENCY_SWEEP = (16, 32, 64)
@@ -91,7 +91,7 @@ def build_sweeps(mode: str) -> list[RunSpec]:
     if mode == "quick":
         # ~1 hour: 8 runs x ~7.5 min (bench + startup + teardown).
         return [
-            RunSpec(p, f, "medium", 64, cpu)
+            RunSpec(p, f, "20k", 64, cpu)
             for cpu in CPU_SIZES
             for p in ("prefill", "decode")
             for f in FILE_SIZES
@@ -440,7 +440,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument(
         "--prefix-tokens",
         choices=sorted(PROMPT_SIZES),
-        default="medium",
+        default="20k",
         help="turn-0 prompt length (shared prefix driven into the FS tier)",
     )
 
