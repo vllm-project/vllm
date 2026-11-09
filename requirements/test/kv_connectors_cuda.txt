@@ -1328,15 +1328,17 @@ mdurl==0.1.2 \
     # via
     #   -c requirements/test/cuda.txt
     #   markdown-it-py
-mooncake-transfer-engine-cuda13==0.3.13.post1 \
-    --hash=sha256:09bb24ad54b2ce42f38e6772710ab5c711372dd52beedae37605cea65bc47ba6 \
-    --hash=sha256:0b20c7f2d1cc8f2775bcd6b788e1a2f7816d4a5e834ea5b84e428a055fe6a2c3 \
-    --hash=sha256:12bd6f4509020c42ec7f09ea19f5ab3f79513c806447727f83866ecdf97a0279 \
-    --hash=sha256:155bcb1b02d07f4b78268641880ada0558abeac1e5db0624f879f35bba4c8cd6 \
-    --hash=sha256:4bb1fd45e4ca03105dcec194dd77fa53255e71bf26306707d599261e8e0f4b03 \
-    --hash=sha256:a4fd1fa628b6409d345e112fd419e976959971a0e29f4aaf8b3119648791ebdf \
-    --hash=sha256:aa0700f95d33f12f9ee62b538d919fc2e3d020dd81d3d2b1fa3659854236f8c6 \
-    --hash=sha256:cb65980041bc09ad79cbf60bb09e7aca11a7408af31503def8fa4aa99a679cec
+mooncake-transfer-engine-cuda13==0.3.14 \
+    --hash=sha256:15c54971584f1d16e939a6c4b05af0a8447a19f5a59ad70a58962786b0bdb0f3 \
+    --hash=sha256:1ab47d346d935b66d5a4df07ed6138aba4fd720b3ebae3b3e0059bfe58d75f63 \
+    --hash=sha256:1fc1d8597e5501d6967a3d2835878500460d7dd40999f6f987131126dcba5c8f \
+    --hash=sha256:24311f9d3a0a7c84509a094df4a3fd20978db32c35c16f0e6a7474b63dbc5fda \
+    --hash=sha256:504d4a9aa848dd417f61eb4acb349b4a23f2e033469657c41f63b4fe32b4c6c6 \
+    --hash=sha256:6efbc7dab08f3dcfeab83bfbb9e277070b142ffc3a69782d278d94b0e4d80e16 \
+    --hash=sha256:74fa5f0684b143167503e33f85cccb9ca687d3f9843d4b594dbd5342c7df3e17 \
+    --hash=sha256:c2866f1258d8b257776515dc5ef9024389f1ab0a8d13c5df3aa1b2e91e4b6471 \
+    --hash=sha256:d05029875c4cbdbc7c5c023c5e7fa01a91552bce001190c9ddfa26d05119fa43 \
+    --hash=sha256:f453fe42b314d8256214d06845286982e606fd7d9019c9c45b6bc8b463658df4
     # via -r requirements/test/kv_connectors_cuda.in
 mpmath==1.3.0 \
     --hash=sha256:7a28eb2a9774d00c7bc92411c19a89209d5da7c4c9a9e227be8330a23a25b91f \
