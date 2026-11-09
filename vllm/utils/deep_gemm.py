@@ -42,8 +42,7 @@ def get_paged_mqa_page_sizes() -> tuple[int, ...]:
 
 
 def get_paged_mqa_kv_alignment() -> int | None:
-    """Byte alignment at which the paged-MQA logits kernels accept KV pages: 16
-    (TMA) on SM90 and SM100; None elsewhere, where pages must stay whole."""
+    """Byte alignment the paged-MQA logits kernels accept KV pages at (TMA)."""
     if current_platform.is_device_capability_family(
         90
     ) or current_platform.is_device_capability_family(100):

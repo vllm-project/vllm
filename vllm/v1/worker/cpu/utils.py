@@ -59,7 +59,7 @@ class CPUKVBlockZeroer(KVBlockZeroer):
                 kv_cache = static_forward_context[layer_name].kv_cache
                 if not isinstance(kv_cache, torch.Tensor):
                     continue
-                if group.kernel_block_stride:
+                if group.manager_block_stride:
                     kv_cache = group.map_kv_cache_to_manager_blocks(
                         kv_cache, num_blocks
                     )

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
@@ -313,11 +313,8 @@ class Glm5NextIndexerBackend(DeepseekV32IndexerBackend):
         return [index_kpool * n for n in get_paged_mqa_page_sizes()]
 
     @classmethod
-    def customize_spec(cls, spec: AttentionSpec) -> AttentionSpec:
-        return replace(
-            super().customize_spec(spec),
-            kernel_block_byte_alignment=get_paged_mqa_kv_alignment(),
-        )
+    def get_kernel_block_alignment(cls) -> int | None:
+        return get_paged_mqa_kv_alignment()
 
 
 class KpoolTailBackend(DeepseekV32IndexerBackend):

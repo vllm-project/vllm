@@ -167,7 +167,7 @@ class KVBlockZeroer:
                 kv = static_forward_context[layer_name].kv_cache
                 if not isinstance(kv, torch.Tensor):
                     continue
-                if group.kernel_block_stride:
+                if group.manager_block_stride:
                     # Bound views address kernel blocks; zero by manager block.
                     kv = group.map_kv_cache_to_manager_blocks(kv, num_blocks)
                 if kv.device.type != self.device.type:
@@ -267,13 +267,12 @@ class AttentionGroup:
     kv_cache_group_id: int
     # Set when the backend needs blocks smaller than the KV cache manager's: its
     # block tables and KV cache views then address kernel blocks, kernel block j
-    # of block b having id b * kernel_block_stride + j * kernel_block_id_step.
-    # Both are set when a packed KV cache is bound (other layers' pages sit
-    # between its blocks); otherwise the stride stays 0 and the kernel blocks per
-    # block are used.
+    # of block b being b * manager_block_stride + kernel_block_offsets[j]. Both
+    # are set when a packed KV cache is bound (other layers' pages sit between
+    # its blocks); otherwise the stride stays 0 and the kernel blocks per block
+    # are used.
     kernel_block_size: int | None = None
-    kernel_block_stride: int = 0
-    kernel_block_id_step: int = 1
+    manager_block_stride: int = 0
     # Persistent per ubatch: CUDA graphs capture the mapped block table.
     kernel_block_table: torch.Tensor | None = None
     kernel_block_offsets: torch.Tensor | None = None
@@ -325,7 +324,12 @@ class AttentionGroup:
                 dtype=torch.int32,
                 device=device,
             )
-            self._init_kernel_block_offsets(device)
+            if not self.manager_block_stride:
+                self.kernel_block_offsets = torch.arange(
+                    spec.block_size // self.kernel_block_size,
+                    dtype=torch.int32,
+                    device=device,
+                )
         self.metadata_builders = [
             builder_cls(
                 kv_cache_spec_builder,
@@ -388,18 +392,10 @@ class AttentionGroup:
         torch.add(
             self.kernel_block_offsets,
             block_table.unsqueeze(-1),
-            alpha=self.kernel_block_stride or blocks_per_kv_block,
+            alpha=self.manager_block_stride or blocks_per_kv_block,
             out=out.unflatten(1, (cols, -1)),
         )
         return out
-
-    def _init_kernel_block_offsets(self, device: torch.device | str) -> None:
-        assert self.kernel_block_size is not None
-        self.kernel_block_offsets = self.kernel_block_id_step * torch.arange(
-            self.kv_cache_spec.block_size // self.kernel_block_size,
-            dtype=torch.int32,
-            device=device,
-        )
 
     def map_kv_cache_to_kernel_blocks(self, kv_cache: torch.Tensor) -> torch.Tensor:
         """Views a packed cache in manager blocks as kernel blocks."""
@@ -411,21 +407,15 @@ class AttentionGroup:
         # Token and pooled caches are written through manager-block slot
         # mappings, so only compressed caches (written from their block table)
         # can be mapped.
-        # Kernel block ids count id_stride elements, the largest unit dividing
-        # both the block stride and the kernel block size. Ids finer than a
-        # kernel block need a spec whose kernels accept that alignment.
-        kernel_block_elems = kernel_rows * kv_cache.stride(-2)
-        id_stride = math.gcd(kv_cache.stride(0), kernel_block_elems)
-        alignment = spec.kernel_block_byte_alignment
+        kernel_block = kernel_rows * kv_cache.stride(-2)
+        page_stride = math.gcd(kv_cache.stride(0), kernel_block)
+        alignment = self.backend.get_kernel_block_alignment() or (
+            kernel_block * kv_cache.element_size()
+        )
         if (
             spec.tokens_per_state <= 1
             or kv_cache.shape[1] != 1
-            or (
-                id_stride != kernel_block_elems
-                and (
-                    alignment is None or id_stride * kv_cache.element_size() % alignment
-                )
-            )
+            or page_stride * kv_cache.element_size() % alignment
         ):
             raise ValueError(
                 f"{self.backend.get_name()} needs {self.kernel_block_size}-token "
@@ -434,36 +424,39 @@ class AttentionGroup:
                 f"{self.kernel_block_size} or set VLLM_KV_CACHE_LAYOUT to a "
                 "layer-compact layout (e.g. LBNHC)."
             )
-        # The view spans the other layers' pages between blocks (never
-        # addressing them), which ``view`` cannot express.
-        kernel_blocks_per_block = kv_cache.shape[-2] // kernel_rows
-        self.kernel_block_stride = kv_cache.stride(0) // id_stride
-        self.kernel_block_id_step = kernel_block_elems // id_stride
-        self._init_kernel_block_offsets(kv_cache.device)
-        num_ids = (kv_cache.shape[0] - 1) * self.kernel_block_stride + (
-            (kernel_blocks_per_block - 1) * self.kernel_block_id_step + 1
+        # Kernel block j of block b is b * manager_block_stride +
+        # kernel_block_offsets[j]; blocks not whole kernel blocks apart give
+        # overlapping kernel blocks. The view spans the other layers' pages
+        # between blocks (never addressing them), which ``view`` cannot express.
+        self.manager_block_stride = kv_cache.stride(0) // page_stride
+        kernel_block_step = kernel_block // page_stride
+        self.kernel_block_offsets = kernel_block_step * torch.arange(
+            kv_cache.shape[-2] // kernel_rows, dtype=torch.int32, device=kv_cache.device
         )
-        if num_ids > torch.iinfo(torch.int32).max + 1:
+        num_pages = (kv_cache.shape[0] - 1) * self.manager_block_stride + (
+            (kv_cache.shape[-2] // kernel_rows - 1) * kernel_block_step + 1
+        )
+        if num_pages > torch.iinfo(torch.int32).max + 1:
             raise ValueError(
-                f"{self.backend.get_name()} kernel block ids reach {num_ids}, "
-                "past the int32 block table range. Reduce the KV cache size or "
-                "set VLLM_KV_CACHE_LAYOUT to a layer-compact layout (e.g. LBNHC)."
+                f"{self.backend.get_name()} kernel blocks exceed the int32 block "
+                "table range. Reduce the KV cache size or set VLLM_KV_CACHE_LAYOUT "
+                "to a layer-compact layout (e.g. LBNHC)."
             )
         return kv_cache.as_strided(
-            (num_ids, *kv_cache.shape[1:-2], kernel_rows, kv_cache.shape[-1]),
-            (id_stride, *kv_cache.stride()[1:]),
+            (num_pages, *kv_cache.shape[1:-2], kernel_rows, kv_cache.shape[-1]),
+            (page_stride, *kv_cache.stride()[1:]),
         )
 
     def map_kv_cache_to_manager_blocks(
         self, kv_cache: torch.Tensor, num_blocks: int
     ) -> torch.Tensor:
         """Views a packed cache in kernel blocks as manager blocks."""
-        assert self.kernel_block_stride
+        assert self.manager_block_stride
         spec = self.kv_cache_spec
         rows = spec.get_num_kernel_states(spec.block_size)
         return kv_cache.as_strided(
             (num_blocks, *kv_cache.shape[1:-2], rows, kv_cache.shape[-1]),
-            (kv_cache.stride(0) * self.kernel_block_stride, *kv_cache.stride()[1:]),
+            (kv_cache.stride(0) * self.manager_block_stride, *kv_cache.stride()[1:]),
         )
 
     def get_metadata_builder(self, ubatch_id: int = 0) -> AttentionMetadataBuilder:

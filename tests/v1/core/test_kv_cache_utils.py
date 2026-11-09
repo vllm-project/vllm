@@ -228,15 +228,15 @@ def test_hisparse_derived_specs_do_not_affect_kv_cache_layout(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("kernel_block_byte_alignment", "indexer_block_size", "indexer_stride_alignment"),
-    [(None, 64, MultipleOf(64)), (16, 2048, 16)],
+    ("indexer_stride_alignment", "indexer_block_size"),
+    [(MultipleOf(64), 64), (16, 2048)],
 )
 def test_hisparse_packs_hot_layers_up_to_largest_device_page(
-    kernel_block_byte_alignment, indexer_block_size, indexer_stride_alignment
+    indexer_stride_alignment, indexer_block_size
 ):
     """Hybrid models share the device pool with larger non-MLA pages; hot
     layers must pack up to that page, not one group per index group. Indexer
-    blocks fill that page only if their kernels accept sub-block offsets;
+    blocks fill that page only if they need not be whole kernel blocks apart;
     otherwise filling would pad every pool block to whole kernel blocks."""
     mla = dict(block_size=64, num_kv_heads=1, dtype=torch.bfloat16)
     specs: dict[str, KVCacheSpec] = {}
@@ -247,8 +247,7 @@ def test_hisparse_packs_hot_layers_up_to_largest_device_page(
         specs[f"model.layers.{layer}.self_attn.indexer"] = MLAAttentionSpec(
             head_size=128,
             cache_role=SparseCacheRole.INDEXER,
-            block_stride_alignment=MultipleOf(64),
-            kernel_block_byte_alignment=kernel_block_byte_alignment,
+            block_stride_alignment=indexer_stride_alignment,
             **mla,
         )
     specs["model.layers.2.self_attn"] = FullAttentionSpec(

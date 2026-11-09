@@ -42,7 +42,7 @@ def _group_tensors(
 ) -> Iterator[torch.Tensor]:
     for name in group.layer_names:
         cache = kv_caches.get(name)
-        if group.kernel_block_stride:
+        if group.manager_block_stride:
             assert isinstance(cache, torch.Tensor)
             cache = group.map_kv_cache_to_manager_blocks(cache, num_blocks)
         yield from _tensors(cache)

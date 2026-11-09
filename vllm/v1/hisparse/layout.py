@@ -2,13 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections import defaultdict
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import cast
 
 from vllm.config import VllmConfig
 from vllm.config.kv_transfer import hisparse_host_pool_gib
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
+from vllm.v1.attention.backend import MultipleOf
 from vllm.v1.hisparse.runtime import (
     ResolvedHiSparseConfig,
     get_hisparse_host_block_stride,
@@ -236,12 +237,10 @@ def _lay_out_hisparse_groups(
 
 
 def _fill_indexer_block(spec: MLAAttentionSpec, pages: int) -> MLAAttentionSpec:
-    if spec.kernel_block_byte_alignment is None:
+    # Kernels that need fixed pages whole pages apart keep one page per block.
+    if isinstance(spec.block_stride_alignment, MultipleOf):
         return spec
-    return replace(
-        spec.copy_with_new_block_size(spec.block_size * pages),
-        block_stride_alignment=spec.kernel_block_byte_alignment,
-    )
+    return spec.copy_with_new_block_size(spec.block_size * pages)
 
 
 def _group_page_bytes(group: KVCacheGroupSpec) -> int:

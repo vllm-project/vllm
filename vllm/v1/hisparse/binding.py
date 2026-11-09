@@ -4,6 +4,7 @@
 
 from collections.abc import Mapping
 from copy import copy
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -81,11 +82,15 @@ def resolve_hisparse_specs(
         [mla_specs[name] for name in indexer_names],
     )
     resized_specs: dict[str, KVCacheSpec] = {
-        name: spec.copy_with_new_block_size(
-            indexer_block_size if name in indexer_names else block_size
-        )
+        name: spec.copy_with_new_block_size(block_size)
         for name, spec in mla_specs.items()
     }
+    for name in indexer_names:
+        spec = mla_specs[name].copy_with_new_block_size(indexer_block_size)
+        alignment = attn_layers[name].get_attn_backend().get_kernel_block_alignment()
+        if alignment is not None:
+            spec = replace(spec, block_stride_alignment=alignment)
+        resized_specs[name] = spec
     groups = get_hisparse_kv_cache_groups(vllm_config, resized_specs)
     assert groups is not None
     return fit_mamba_blocks_to_attention(

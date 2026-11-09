@@ -223,6 +223,12 @@ class AttentionBackend(ABC):
         return False
 
     @classmethod
+    def get_kernel_block_alignment(cls) -> int | None:
+        """Byte alignment the kernels accept kernel blocks at, if finer than a
+        kernel block. Packed blocks need not then be whole kernel blocks apart."""
+        return None
+
+    @classmethod
     def supports_device_cpu_query_lens_mismatch(cls) -> bool:
         """Whether this backend can run a batch whose device query_start_loc disagrees
         with the CPU one; backends that plan off the CPU query lengths must opt out.
