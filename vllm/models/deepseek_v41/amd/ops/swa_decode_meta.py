@@ -35,10 +35,17 @@ import torch
 from vllm.models.deepseek_v41.amd.ops import monokernel_cdna3_or_4
 from vllm.triton_utils import tl, triton
 
-# One program holds all rows of the batch in registers, as a ROWS x WIDTH
-# tile of int32. 32 rows of a 128 wide window are 16 values per thread.
-MAX_ROWS = 32
+# One program holds all rows of the batch in registers, as a ROWS x BLOCK
+# tile of int32. 64 rows take a DSpark step of 8 requests with 5 drafts
+# (48 target rows, 40 draft-block rows).
+MAX_ROWS = 64
 TAIL_BLOCK = 1024
+# About TILE_PER_LANE tile entries per lane, at 4 to 16 waves of 64 lanes
+TILE_PER_LANE = 8
+
+
+def _num_warps(rows: int, block: int) -> int:
+    return max(4, min(16, rows * block // (64 * TILE_PER_LANE)))
 
 
 @triton.jit(do_not_specialize=["num_tokens", "lens_size"])
@@ -152,6 +159,8 @@ def launch(
     the ragged form into ragged and indptr, in one launch. noncausal builds
     the DSpark draft block's rows, whose width is the index tensor's."""
     width = indices.shape[-1]
+    rows = triton.next_power_of_2(num_tokens)
+    block = triton.next_power_of_2(width)
     _decode_swa_meta_kernel[(1,)](
         slot_mapping,
         is_valid,
@@ -171,11 +180,11 @@ def launch(
         window_size,
         block_size,
         WIDTH=width,
-        BLOCK=triton.next_power_of_2(width),
-        ROWS=triton.next_power_of_2(num_tokens),
+        BLOCK=block,
+        ROWS=rows,
         TAIL=TAIL_BLOCK,
         NONCAUSAL=noncausal,
-        num_warps=4,
+        num_warps=_num_warps(rows, block),
     )
 
 

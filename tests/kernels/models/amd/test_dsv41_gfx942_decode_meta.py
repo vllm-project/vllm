@@ -35,8 +35,9 @@ def _swa_case(g, max_rows):
     (block 0) and block sizes 64 and 128. Returns None when the batch has more
     rows than the fused launch takes."""
     block_size = (64, 128)[int(torch.randint(0, 2, (1,), generator=g))]
-    num_reqs = int(torch.randint(1, 6, (1,), generator=g))
     q_len = (1, 6)[int(torch.randint(0, 2, (1,), generator=g))]
+    # Up to max_rows rows, so that the tallest tile and its warp count run.
+    num_reqs = int(torch.randint(1, max_rows // q_len + 1, (1,), generator=g))
     lens = []
     for _ in range(num_reqs):
         kind = int(torch.randint(0, 3, (1,), generator=g))
