@@ -12,8 +12,10 @@ import itertools
 from types import SimpleNamespace
 
 import pytest
+import ray
 import torch
 
+from tests.utils import init_test_distributed_environment, multi_process_parallel
 from vllm.config import CUDAGraphMode
 from vllm.forward_context import ForwardContext, override_forward_context
 from vllm.models.deepseek_v41.nvidia import flashmla
@@ -948,6 +950,131 @@ def test_low_batch_moe_is_repeatable_on_a_dirty_workspace(dist_init, workspace_i
         torch.accelerator.synchronize()
         for i, out in zip(order, got):
             assert same(out, want[i]), i
+
+
+@ray.remote(num_gpus=1, max_calls=1)
+def _moe_feeds_the_fused_finalize(monkeypatch, tp_size, pp_size, rank, port):
+    from vllm.config import (
+        KernelConfig,
+        VllmConfig,
+        set_current_vllm_config,
+    )
+    from vllm.distributed.parallel_state import ensure_model_parallel_initialized
+    from vllm.models.deepseek_v41.nvidia.specialized_decode.boundary.all_reduce import (  # noqa: E501
+        BoundaryAllReduce,
+    )
+    from vllm.models.deepseek_v41.nvidia.specialized_decode.hopper import moe
+    from vllm.models.deepseek_v41.nvidia.specialized_decode.hopper.decode import (
+        FUSED_MAX_ROWS,
+    )
+    from vllm.v1.worker.workspace import init_workspace_manager
+
+    # Ray leaves CUDA_VISIBLE_DEVICES as the test's (multi_process_parallel), so
+    # rank r runs on the r-th visible GPU.
+    device = torch.device(f"cuda:{rank}")
+    torch.accelerator.set_device_index(device)
+    config = VllmConfig(kernel_config=KernelConfig(moe_backend="humming"))
+    with set_current_vllm_config(config):
+        init_test_distributed_environment(tp_size, pp_size, rank, port)
+        ensure_model_parallel_initialized(tp_size, pp_size)
+        init_workspace_manager(device)
+        num_experts, top_k = MOE_SHAPES[0]
+        g = torch.Generator(device=device).manual_seed(17)
+        bias = torch.randn(num_experts, generator=g, device=device) * 0.05
+        with torch.accelerator.device_index(device.index):
+            mod = moe.HopperLowBatchMoE.of(_moe_ffn(num_experts, top_k, bias)[0])
+        assert mod is not None
+        all_reduce = BoundaryAllReduce(
+            SimpleNamespace(hidden_size=MOE_HIDDEN, hc_mult=4, num_experts_per_tok=6),
+            quantize_layer_input=False,
+            max_num_tokens=FUSED_MAX_ROWS,
+            finalize_metadata_before_pdl=False,
+        )
+        assert all_reduce.bt_min_finalize_rows <= 96
+        # The residual and mixes are replicated; each rank's MoE input
+        # and routing its own.
+        mixes_g = torch.Generator(device=device).manual_seed(5)
+        g.manual_seed(100 + rank)
+
+        def inputs(m):
+            x = torch.randn(m, MOE_HIDDEN, generator=g, device=device).bfloat16()
+            logits = torch.randn(m, num_experts, generator=g, device=device)
+            mixes = (
+                torch.randn(
+                    m, 4, MOE_HIDDEN, generator=mixes_g, device=device
+                ).bfloat16(),
+                torch.rand(m, 4, generator=mixes_g, device=device),
+                torch.randn(m, 4, 4, generator=mixes_g, device=device) * 0.1,
+                torch.rand(m, 4, generator=mixes_g, device=device),
+                torch.randn(MOE_HIDDEN, generator=mixes_g, device=device).bfloat16(),
+            )
+            return x, logits, mixes
+
+        def boundary(x, logits, mixes):
+            residual, post, comb, pre, weight = mixes
+            routed, shared = mod(x, logits)
+            out = all_reduce.finalize(
+                routed.gemm2_permuted,
+                routed.expert_weights,
+                routed.expanded_idx_to_permuted_idx,
+                shared,
+                residual,
+                post,
+                comb,
+                pre,
+                weight,
+                1e-6,
+            )
+            return routed, shared, out
+
+        def reference(routed, shared, mixes):
+            # One FP32 FMA per route in route order, the shared add, one
+            # rounding (as the finalize sums), then the plain fused path.
+            rows = routed.expanded_idx_to_permuted_idx
+            acc = torch.zeros(rows.shape[0], MOE_HIDDEN, device=device)
+            for k in range(top_k):
+                valid = (rows[:, k] >= 0).unsqueeze(-1)
+                routed_k = routed.gemm2_permuted[rows[:, k].clamp_min(0).long()]
+                acc.addcmul_(
+                    torch.where(valid, routed_k.float(), 0.0),
+                    torch.where(valid, routed.expert_weights[:, k : k + 1], 0.0),
+                )
+            residual, post, comb, pre, weight = mixes
+            reduced = (acc + shared.float()).bfloat16()
+            return all_reduce(reduced, residual, post, comb, pre, weight, 1e-6)
+
+        def same(got, want):
+            return all(torch.equal(a, b) for a, b in zip(got, want))
+
+        for m in (1, 6, 12, 48, 96, 144):
+            calls = [inputs(m), inputs(m)]
+            want = []
+            for call in calls:
+                routed, shared, out = boundary(*call)
+                out = tuple(t.clone() for t in out)
+                assert same(out, reference(routed, shared, call[2])), m
+                want.append(out)
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                got = [boundary(*call)[2] for call in calls]
+            for _ in range(3):
+                graph.replay()
+                torch.accelerator.synchronize()
+                assert all(same(o, w) for o, w in zip(got, want)), m
+
+
+def test_low_batch_moe_feeds_the_fused_finalize(monkeypatch):
+    """The low-batch MoE kernel and the boundary's fused all-reduce + mHC
+    finalize the executor launches right after it (PDL), at TP2: the finalize
+    reads the route map and routing weights the MoE kernel writes only after
+    its grid-dependency wait (`finalize_metadata_before_pdl=False`). Each
+    call follows one of another routing, so a read of the previous call's map
+    or weights shows; eagerly and replayed from a CUDA graph, LL and BT
+    finalize, bit for bit against the plain fused all-reduce of the reduced
+    output."""
+    if torch.accelerator.device_count() < 2:
+        pytest.skip("needs two SM90 GPUs with NVLink multicast")
+    multi_process_parallel(monkeypatch, 2, 1, _moe_feeds_the_fused_finalize)
 
 
 # ------------------------------------------------------------------ mHC pre

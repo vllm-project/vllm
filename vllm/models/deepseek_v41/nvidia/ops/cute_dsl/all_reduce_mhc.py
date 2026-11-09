@@ -331,6 +331,7 @@ class _QuadFinalizePublishDeviceKernel:
         fp32_weights: bool = False,
         owner_capacity: int | None = None,
         elements_per_thread: int = QUAD_BF16,
+        load_metadata_before_pdl: bool = True,
     ) -> None:
         if elements_per_thread not in (QUAD_BF16, VEC_BF16):
             raise ValueError("elements_per_thread must be 4 or 8")
@@ -361,6 +362,8 @@ class _QuadFinalizePublishDeviceKernel:
         self.ctas_per_token = math.ceil(self.fragments / threads)
         self.include_shared_expert = include_shared_expert
         self.load_shared_expert_before_pdl = load_shared_expert_before_pdl
+        # Off when the previous grid writes the route map and weights.
+        self.load_metadata_before_pdl = load_metadata_before_pdl
         self.enable_pdl = enable_pdl
         self.prefetch_group = prefetch_group
         self.prefetch_groups = (top_k + prefetch_group - 1) // prefetch_group
@@ -415,6 +418,9 @@ class _QuadFinalizePublishDeviceKernel:
         smem = cutlass.utils.SmemAllocator()
         staged_indices = smem.allocate_array(Int32, self.top_k)
         staged_weights = smem.allocate_array(Float32, self.top_k)
+        wait_first = self.enable_pdl and not self.load_metadata_before_pdl
+        if cutlass.const_expr(wait_first):
+            cute.arch.griddepcontrol_wait()
         metadata_index = Int32(tidx)
         while metadata_index < Int32(self.top_k):
             element = Int64(token) * self.top_k + Int64(metadata_index)
@@ -464,7 +470,7 @@ class _QuadFinalizePublishDeviceKernel:
                     )
                     shared_values.store(self.unpack(self.load_words(shared_pointer)))
 
-        if cutlass.const_expr(self.enable_pdl):
+        if cutlass.const_expr(self.enable_pdl and not wait_first):
             cute.arch.griddepcontrol_wait()
 
         if cutlass.const_expr(  # noqa: SIM102
@@ -1196,7 +1202,10 @@ class AllReduceMHC:
     then write only the post-mixed streams, for a consumer that collapses them
     itself. Calls of `bt_min_rows` rows or more (finalize:
     `bt_min_finalize_rows`) use the two-shot BT protocol, with its own
-    mailboxes and generation state.
+    mailboxes and generation state. `finalize` stages its route map and
+    weights before its grid-dependency wait; with
+    `finalize_metadata_before_pdl` False it stages them after it, for a MoE
+    kernel that writes them in the grid just before.
     """
 
     def __init__(
@@ -1209,6 +1218,7 @@ class AllReduceMHC:
         device: torch.device,
         quantize_layer_input: bool = False,
         residual_only: bool = False,
+        finalize_metadata_before_pdl: bool = True,
     ) -> None:
         group = get_tp_group().device_group
         self.hidden_size = hidden = hidden_size
@@ -1260,6 +1270,7 @@ class AllReduceMHC:
                     enable_pdl=True,
                     prefetch_group=top_k,
                     fp32_weights=True,
+                    load_metadata_before_pdl=finalize_metadata_before_pdl,
                 ),
                 make_fake_dynamic_compact_tensor(
                     BFloat16, alignment=16, divisibility=hidden
@@ -1289,7 +1300,15 @@ class AllReduceMHC:
             )
             self._owner_capacity = owner_capacity = math.ceil(capacity / tp)
             if bt_enabled:
-                self._compile_bt(hidden, top_k, tp, rank, capacity, owner_capacity)
+                self._compile_bt(
+                    hidden,
+                    top_k,
+                    tp,
+                    rank,
+                    capacity,
+                    owner_capacity,
+                    finalize_metadata_before_pdl,
+                )
             # Stand-ins for the MXFP8 outputs of the unquantized variants,
             # which never touch them.
             self._no_quant_output = torch.empty(16, dtype=torch.uint8, device=device)
@@ -1405,6 +1424,7 @@ class AllReduceMHC:
         rank: int,
         capacity: int,
         owner_capacity: int,
+        finalize_metadata_before_pdl: bool,
     ) -> None:
         """Compile the BT publish, finalize publish and owner-reduce kernels."""
         self._bt_publish = cute.compile(
@@ -1443,6 +1463,7 @@ class AllReduceMHC:
                 fp32_weights=True,
                 owner_capacity=owner_capacity,
                 elements_per_thread=VEC_BF16,
+                load_metadata_before_pdl=finalize_metadata_before_pdl,
             ),
             make_fake_dynamic_compact_tensor(
                 BFloat16, alignment=16, divisibility=hidden

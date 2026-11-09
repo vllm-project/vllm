@@ -27,7 +27,13 @@ class BoundaryAllReduce(AllReduceMHC):
         config: PreTrainedConfig,
         quantize_layer_input: bool,
         max_num_tokens: int = FUSED_MHC_MAX_ROWS,
+        finalize_metadata_before_pdl: bool = True,
     ) -> None:
+        group = get_tp_group()
+        # The executor is built after weight loading, which (the Engram tables'
+        # pinning) can skew the ranks by about the 300 s the mailbox's
+        # symmetric-memory rendezvous waits for its peers.
+        group.barrier()
         super().__init__(
             hidden_size=config.hidden_size,
             hc_mult=config.hc_mult,
@@ -36,8 +42,8 @@ class BoundaryAllReduce(AllReduceMHC):
             device=current_platform.current_device(),
             quantize_layer_input=quantize_layer_input,
             residual_only=True,
+            finalize_metadata_before_pdl=finalize_metadata_before_pdl,
         )
-        group = get_tp_group()
         self.tp = group.world_size
         self.rank = group.rank_in_group
         self._published: torch.Tensor | None = None
