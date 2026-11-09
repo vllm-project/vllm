@@ -85,7 +85,7 @@ from vllm.v1.kv_cache_interface import MambaSpec
 from ..common.hyperconnection import is_hc_sequence_parallel_enabled
 from .hyperconnection import GatedResidual, HyperConnectionConfig
 from .low_latency_gemm import enable_qwen4_exp_low_latency_gemm
-from .mega_moe import Qwen4ExpMegaMoeBlock, flush_mega_moe_requantize
+from .mega_moe import Qwen4ExpMegaMoeBlock
 from .ops.cute_dsl.hc_down_silu import request_hc_down_silu_warmup
 from .ple_layer import Qwen4ExpPLELayer
 from .qsa import Qwen4ExpQSAAttention
@@ -712,7 +712,6 @@ class Qwen4ExpModel(nn.Module):
             weights,
             mapper=mapper,
         )
-        flush_mega_moe_requantize(self)
         return loaded
 
 

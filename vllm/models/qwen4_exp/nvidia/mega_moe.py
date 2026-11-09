@@ -198,19 +198,8 @@ def mega_moe_expert_formats(
     return checkpoint_format, MEGA_MOE_WEIGHT_FORMATS[checkpoint_format]
 
 
-def flush_mega_moe_requantize(model: nn.Module) -> None:
-    """Requantize the complete expert shards buffered by `load_weights`.
-
-    Half pairs stay buffered: a chunked weight update may pass an expert's
-    weight and its scale in different calls.
-    """
-    for module in model.modules():
-        if isinstance(module, Qwen4ExpMegaMoEExperts):
-            module.flush_requantize()
-
-
 class _FinishRequantize(QuantizeMethodBase):
-    """Flushes the experts; fails on shards missing their weight or scale."""
+    """Requantizes the experts still buffered after loading."""
 
     requires_device_loading = False
     supports_pre_processed_weights = True
@@ -223,7 +212,7 @@ class _FinishRequantize(QuantizeMethodBase):
 
     def process_weights_after_loading(self, layer: nn.Module) -> None:
         assert isinstance(layer, Qwen4ExpMegaMoEExperts)
-        layer.flush_requantize(strict=True)
+        layer.finish_requantize()
 
 
 class Qwen4ExpMegaMoEExperts(DeepGemmMegaMoEExperts):
@@ -327,10 +316,12 @@ class Qwen4ExpMegaMoEExperts(DeepGemmMegaMoEExperts):
         if len(ready) == len(self._owned_experts):
             self._requantize_ready(shard_id)
 
-    def flush_requantize(self, strict: bool = False) -> None:
+    def finish_requantize(self) -> None:
+        """Requantize the shards of experts this load left partly complete; a
+        chunked update may split a rank's experts across `load_weights` calls."""
         for shard_id in list(self._ready_shards):
             self._requantize_ready(shard_id)
-        if strict and self._pending_shards:
+        if self._pending_shards:
             raise ValueError(
                 f"{self.prefix}: expert shards without both weight and scale: "
                 f"{sorted(self._pending_shards)[:4]}"

@@ -54,7 +54,6 @@ from vllm.sequence import IntermediateTensors
 from ..common.hyperconnection import is_hc_sequence_parallel_enabled
 from .hyperconnection import GatedResidual, HyperConnectionConfig
 from .low_latency_gemm import enable_qwen4_exp_low_latency_gemm
-from .mega_moe import flush_mega_moe_requantize
 from .model import (
     _EXTRA_WEIGHTS_MAPPER,
     _QWEN4_EXP_IGNORED_MISSING_SUFFIXES,
@@ -503,9 +502,7 @@ class Qwen4ExpMTP(nn.Module, SupportsHCSP, SupportsPP, Qwen4ExpMixtureOfExperts)
             self,
             ignore_unexpected_suffixes=_QWEN4_EXP_IGNORED_MISSING_SUFFIXES.copy(),
         )
-        loaded = loader.load_weights(remap_weight_names(), mapper=mapper)
-        flush_mega_moe_requantize(self)
-        return loaded
+        return loader.load_weights(remap_weight_names(), mapper=mapper)
 
 
 __all__ = ["Qwen4ExpMTP", "Qwen4ExpMultiTokenPredictor"]
