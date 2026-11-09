@@ -88,7 +88,7 @@ TOPK = 16
 PREFILL_FMHA_CHUNK_SIZE = 8192
 SPIN_LIMIT = 1 << 26
 # Speculative methods whose drafter does not reuse the target's sparse layers.
-_SPEC_METHODS = (None, "eagle", "eagle3", "ngram", "suffix", "draft_model")
+_SPEC_METHODS = (None, "eagle", "eagle3", "ngram", "suffix", "draft_model", "dspark")
 
 
 class MiniMaxM3IndexerMSABackend(MiniMaxM3IndexerBackend):
