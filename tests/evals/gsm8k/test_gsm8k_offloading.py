@@ -12,7 +12,7 @@ it until success also waits for offloading to complete.
 
 Correctness is enforced via GSM8K accuracy on both runs: corrupt reloaded
 KV drops accuracy below threshold.  The reload itself is only asserted for
-configs with ``assert_reload``, so elsewhere a silently skipped reload
+configs with `assert_reload`, so elsewhere a silently skipped reload
 (e.g. offloading disabled) would not be flagged.
 
 Covers both KV offloading connectors (OffloadingConnector and
@@ -217,7 +217,7 @@ MODELS = [
         id="simple-nemotron-h-8b",
         model="nvidia/Nemotron-H-8B-Base-8K",
         connector="SimpleCPUOffloadConnector",
-        accuracy_threshold=0.43 if current_platform.is_rocm() else 0.45,
+        accuracy_threshold=0.45,
     ),
     OffloadingModelConfig(
         id="simple-gemma-4-e4b-it",

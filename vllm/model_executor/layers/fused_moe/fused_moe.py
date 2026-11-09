@@ -1657,7 +1657,7 @@ direct_register_custom_op(
 
 def _weights_host_resident(*weights: torch.Tensor) -> bool:
     """True when any of the expert weights is read from host memory in place,
-    as UVA weight offloading (``--offload-backend uva``) leaves them."""
+    as UVA weight offloading (`--offload-backend uva`) leaves them."""
     return any(getattr(w, "_vllm_is_uva_offloaded", False) for w in weights)
 
 
