@@ -299,6 +299,8 @@ def test_unlimited_ocr2_excess_markers_survive_preemption(
         max_model_len=1024,
         max_num_seqs=2,
         max_num_batched_tokens=128,
+        # 80 blocks x 16 tokens fit one request but not both; preemption needs it.
+        block_size=16,
         num_gpu_blocks_override=80,
         kv_cache_memory_bytes=1024**3,
         enable_chunked_prefill=True,
