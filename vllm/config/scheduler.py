@@ -68,11 +68,11 @@ class SchedulerConfig:
     max_num_active_seqs: int | None = Field(default=None, ge=1)
     """Maximum number of requests the scheduler admits into RUNNING.
 
-    ``max_num_seqs`` sizes the model runner (per-request buffers and CUDA
+    `max_num_seqs` sizes the model runner (per-request buffers and CUDA
     graph capture) and is also the default admission limit. Setting this
     lowers only the number of requests that may occupy RUNNING, so decode
     batches stay smaller without shrinking runner or graph capacity. Must
-    be ``<= max_num_seqs``. ``None`` (default) keeps current behavior.
+    be `<= max_num_seqs`. `None` (default) keeps current behavior.
     """
 
     max_num_inflight_kv_loads: int | None = Field(default=None, ge=1)
@@ -81,9 +81,9 @@ class SchedulerConfig:
     and waiting for a running slot.
 
     Setting it also lets requests the connector may load asynchronously
-    (``KVConnectorBase_V1.may_load_async``, by default P/D remote-prefill
+    (`KVConnectorBase_V1.may_load_async`, by default P/D remote-prefill
     requests) start their loads while the running batch is full, so they are
-    ready when a slot frees. ``None`` (default) keeps current behavior: no cap,
+    ready when a slot frees. `None` (default) keeps current behavior: no cap,
     and loads start only when a running slot is free.
     """
 
@@ -108,10 +108,10 @@ class SchedulerConfig:
     instance. This bounds vLLM's otherwise unbounded request queue and is
     primarily a coarse capacity valve.
 
-    Unlike ``max_num_seqs``, which applies per data-parallel rank, this
+    Unlike `max_num_seqs`, which applies per data-parallel rank, this
     limit is enforced in the API server process and counts in-flight
     requests across all DP ranks it routes to. Size it as roughly
-    ``data_parallel_size * max_num_seqs`` plus the desired queue depth if
+    `data_parallel_size * max_num_seqs` plus the desired queue depth if
     it should not bind before per-rank admission does."""
 
     max_num_queued_tokens: int | None = Field(default=None, ge=0)
@@ -120,23 +120,23 @@ class SchedulerConfig:
     are rejected with HTTP 503.
 
     This is a TTFT QoS mechanism: by setting it to
-    ``target_TTFT * prefill_throughput`` you reject requests when the
+    `target_TTFT * prefill_throughput` you reject requests when the
     prefill backlog would exceed the latency target.  In a disaggregated
     prefill-decode setup this maps directly to the prefill pool's
     capacity.
 
-    Like ``max_num_queued_reqs``, this limit is enforced in the API
+    Like `max_num_queued_reqs`, this limit is enforced in the API
     server process and covers the prefill backlog across all DP ranks it
-    routes to, so ``prefill_throughput`` in the formula above is the
+    routes to, so `prefill_throughput` in the formula above is the
     aggregate throughput of the deployment.
 
     Note: the count is conservative.  A partially prefilled request
-    still contributes its full ``prompt_len`` until it transitions out
+    still contributes its full `prompt_len` until it transitions out
     of the prefill phase, because the scheduler's per-iteration
-    ``num_computed_tokens`` progress is not propagated to the API
-    server process during prefill (``EngineCoreOutput`` is only
+    `num_computed_tokens` progress is not propagated to the API
+    server process during prefill (`EngineCoreOutput` is only
     emitted once the request starts producing tokens).  Similarly,
-    prefix-cache hits (``num_cached_tokens``) are only known to the
+    prefix-cache hits (`num_cached_tokens`) are only known to the
     OutputProcessor after prefill completes.  This overestimates the
     real backlog, causing earlier rejection than strictly necessary
     — the safe direction for QoS.  The impact is limited to long

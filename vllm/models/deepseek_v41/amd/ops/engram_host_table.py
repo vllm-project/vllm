@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Engram host tables in HIP VMM host memory, shared across DP ranks by dmabuf FD.
 
-The ROCm counterpart of ``nvidia/ops/engram_host_table.py``. HIP cannot export
+The ROCm counterpart of `nvidia/ops/engram_host_table.py`. HIP cannot export
 host allocations as FABRIC handles, so rank 0 sends POSIX FDs to its peers over
 a unix socket. GPUs map these allocations with large pages, unlike the 4K pages
 of a /dev/shm mapping on hosts without shmem THP, so random row lookups miss
@@ -70,7 +70,7 @@ class _AccessDesc(ctypes.Structure):
 
 
 class ExportedHostTable(NamedTuple):
-    """What a peer needs to map a table; the FDs travel over ``socket_path``."""
+    """What a peer needs to map a table; the FDs travel over `socket_path`."""
 
     padded_bytes: int
     socket_path: str
@@ -240,7 +240,7 @@ def _map_table(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Map a table on the GPU and the CPU, importing its FDs unless given handles.
 
-    Imported handles are appended to ``handles``; the caller releases them and
+    Imported handles are appended to `handles`; the caller releases them and
     closes the FDs, since the mappings keep the allocations alive. HIP grants
     no CPU access to imported host allocations, so the CPU maps the dmabuf FDs
     directly. Returns CPU and GPU uint8 views; either keeps the mappings alive.
