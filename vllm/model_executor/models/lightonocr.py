@@ -1,19 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterable, Mapping, Sequence
-from typing import TypeVar
 
 import torch
 import torch.nn as nn
-from transformers import (
-    BatchFeature,
-    PixtralVisionConfig,
-)
+from transformers import BatchFeature
 
 from vllm.config import VllmConfig
 from vllm.model_executor.models.mistral3 import (
     Mistral3DummyInputsBuilder,
     Mistral3ForConditionalGeneration,
+    Mistral3ImageEmbeddingInputs,
+    Mistral3ImageInputs,
     Mistral3MultiModalProjector,
     Mistral3ProcessingInfo,
     init_vision_tower_for_mistral3,
@@ -27,15 +25,16 @@ from vllm.model_executor.models.utils import (
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargsItems
-from vllm.multimodal.parse import ImageProcessorItems, MultiModalDataItems
+from vllm.multimodal.parse import (
+    ImageEmbeddingItems,
+    ImageProcessorItems,
+    MultiModalDataItems,
+)
 from vllm.multimodal.processing import (
     BaseMultiModalProcessor,
     PromptReplacement,
     PromptUpdate,
-    PromptUpdateDetails,
 )
-
-_I = TypeVar("_I", bound=Mistral3ProcessingInfo)
 
 
 class LightOnOCRProcessingInfo(Mistral3ProcessingInfo):
@@ -50,8 +49,21 @@ class LightOnOCRProcessingInfo(Mistral3ProcessingInfo):
 
 
 class LightOnOCRMultiModalProcessor(BaseMultiModalProcessor[LightOnOCRProcessingInfo]):
-    def _get_hf_processor_text(self, mm_counts: Mapping[str, int]) -> str:
+    def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
         return self.dummy_inputs.get_dummy_text(mm_counts)
+
+    def _call_hf_processor(
+        self,
+        hf_data: Mapping[str, object],
+        hf_kwargs: Mapping[str, object],
+    ) -> BatchFeature:
+        # The checkpoint sets `do_pad: null`, which disables padding since
+        # Transformers v5.18, so images of different sizes cannot be stacked.
+        return self.info.ctx.call_hf_processor(
+            self.info.get_hf_processor(**hf_kwargs),
+            hf_data,
+            {**hf_kwargs, "do_pad": True},
+        )
 
     def _postprocess_hf_mm_data(
         self,
@@ -61,27 +73,6 @@ class LightOnOCRMultiModalProcessor(BaseMultiModalProcessor[LightOnOCRProcessing
     ) -> BatchFeature:
         if not mm_data:
             return processed_data
-
-        input_ids = processed_data.get("input_ids")
-        if input_ids is not None:
-            processor = self.info.get_hf_processor()
-            tokenizer = self.info.get_tokenizer()
-            vocab = tokenizer.get_vocab()
-
-            break_id = vocab.get(processor.image_break_token)
-            end_id = vocab.get(processor.image_end_token)
-
-            # create mask to remove break/end tokens
-            keep_mask = ~torch.isin(
-                input_ids,
-                torch.tensor([break_id, end_id]),
-            )
-
-            processed_data["input_ids"] = input_ids[keep_mask].unsqueeze(0)
-            if "attention_mask" in processed_data:
-                processed_data["attention_mask"] = processed_data["attention_mask"][
-                    keep_mask
-                ].unsqueeze(0)
 
         # un-pad pixel_values per-image so caches remain independent.
         pixel_values = processed_data.get("pixel_values")
@@ -113,18 +104,20 @@ class LightOnOCRMultiModalProcessor(BaseMultiModalProcessor[LightOnOCRProcessing
         hf_config = self.info.get_hf_config()
         image_token_id = hf_config.image_token_index
 
-        assert isinstance(hf_config.vision_config, PixtralVisionConfig)
-        encoder_info = PixtralHFEncoderInfo(hf_config)
-
         def replace(item_idx: int):
-            images = mm_items.get_items("image", ImageProcessorItems)
-            size = images.get_image_size(item_idx)
-            ncols, nrows = encoder_info.get_patch_grid_size(
-                image_width=size.width, image_height=size.height
+            images = mm_items.get_items(
+                "image", (ImageEmbeddingItems, ImageProcessorItems)
             )
+            if isinstance(images, ImageEmbeddingItems):
+                num_image_tokens = images.get_feature_size(item_idx)
+            else:
+                assert isinstance(images, ImageProcessorItems)
+                size = images.get_image_size(item_idx)
+                num_image_tokens = self.info.get_num_image_tokens(
+                    image_width=size.width, image_height=size.height
+                )
             # break/end tokens are not used in LightOnOCR
-            tokens = [image_token_id] * (ncols * nrows)
-            return PromptUpdateDetails.select_token_id(tokens, image_token_id)
+            return [image_token_id] * num_image_tokens
 
         return [
             PromptReplacement(
@@ -139,6 +132,8 @@ class LightOnOCRMultiModalProcessor(BaseMultiModalProcessor[LightOnOCRProcessing
     dummy_inputs=Mistral3DummyInputsBuilder,
 )
 class LightOnOCRForConditionalGeneration(Mistral3ForConditionalGeneration):
+    supports_mm_device_do_normalize = False
+
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             "model.vision_encoder.": "vision_tower.",
@@ -186,6 +181,15 @@ class LightOnOCRForConditionalGeneration(Mistral3ForConditionalGeneration):
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
         )
+
+    def _parse_and_validate_image_input(
+        self, **kwargs: object
+    ) -> Mistral3ImageInputs | None:
+        image_embeds = kwargs.get("image_embeds")
+        if image_embeds is not None:
+            return Mistral3ImageEmbeddingInputs(data=image_embeds)
+
+        return super()._parse_and_validate_image_input(**kwargs)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)

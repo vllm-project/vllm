@@ -4,14 +4,14 @@
 
 The indexer scores KV blocks with the index heads and selects the top-k blocks
 (plus fixed init/local blocks) that the main block-sparse attention
-(``sparse_attention.py``) then attends to. It owns its own side cache
-(``MiniMaxM3IndexerCache``, one index-key vector per token), metadata, and
+(`sparse_attention.py`) then attends to. It owns its own side cache
+(`MiniMaxM3IndexerCache`, one index-key vector per token), metadata, and
 metadata builder, mirroring how DeepSeek V4 keeps the indexer separate from the
 main attention.
 
-``MiniMaxM3Indexer`` is the ``nn.Module`` the attention layer holds (like
-``DeepseekV4Indexer``); it picks a kernel impl in ``__init__`` (via
-``select_indexer_impl_cls``) and delegates ``forward`` to it.
+`MiniMaxM3Indexer` is the `nn.Module` the attention layer holds (like
+`DeepseekV4Indexer`); it picks a kernel impl in `__init__` (via
+`select_indexer_impl_cls`) and delegates `forward` to it.
 """
 
 from dataclasses import dataclass
@@ -55,6 +55,7 @@ from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheSpec,
     MLAAttentionSpec,
+    SparseCacheRole,
 )
 
 logger = init_logger(__name__)
@@ -90,7 +91,7 @@ class MiniMaxM3IndexerBackend(AttentionBackend):
         return [128]
 
     @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
         return [128]
 
     @classmethod
@@ -102,7 +103,7 @@ class MiniMaxM3IndexerCache(nn.Module, AttentionLayerBase):
     """Side KV cache for the indexer's per-token index keys (key-only).
 
     Registers itself in the static forward context so the KV-cache manager
-    allocates it (like ``DeepseekV32IndexerCache``).
+    allocates it (like `DeepseekV32IndexerCache`).
     """
 
     def __init__(
@@ -110,24 +111,34 @@ class MiniMaxM3IndexerCache(nn.Module, AttentionLayerBase):
         head_dim: int,
         prefix: str,
         cache_config: CacheConfig | None = None,
-        indexer_kv_dtype: IndexerKVDType = "bf16",
+        indexer_kv_dtype: IndexerKVDType | str = "bf16",
         backend_cls: type[AttentionBackend] = MiniMaxM3IndexerBackend,
     ) -> None:
         super().__init__()
+        # Per-token storage width in elements of ``dtype``.
+        self.head_size = head_dim
         if indexer_kv_dtype in ("fp8", "fp8_e4m3"):
-            cache_dtype = torch.float8_e4m3fn
+            cache_dtype = query_dtype = current_platform.fp8_dtype()
         elif indexer_kv_dtype == "bf16":
-            cache_dtype = torch.bfloat16
+            cache_dtype = query_dtype = torch.bfloat16
+        elif indexer_kv_dtype == "nvfp4":
+            # Packed NVFP4 pages scored by the MSA Q8KV4 indexer with e4m3 Q.
+            cache_dtype, query_dtype = torch.uint8, torch.float8_e4m3fn
+            self.head_size = head_dim // 2 + head_dim // 16
         else:
             raise NotImplementedError(
                 f"indexer_kv_dtype={indexer_kv_dtype!r} is not supported by the "
-                "MiniMax M3 indexer cache (only 'bf16' or 'fp8'/'fp8_e4m3')."
+                "MiniMax M3 indexer cache (only 'bf16', 'fp8'/'fp8_e4m3' or "
+                "'nvfp4')."
             )
         self.kv_cache = torch.tensor([])
         self.head_dim = head_dim
         self.indexer_kv_dtype = indexer_kv_dtype
-        # Side-cache storage dtype: bf16, or e4m3 for the fp8 score path.
+        # Side-cache storage dtype: bf16, e4m3 for the fp8 score path, or uint8
+        # for packed NVFP4.
         self.dtype = cache_dtype
+        # Index-query dtype the fused qk-norm/rope kernel emits.
+        self.query_dtype = query_dtype
         self.prefix = prefix
         self.cache_config = cache_config
         # Impl-chosen backend -> each impl gets its own builder (get_attn_backend).
@@ -146,8 +157,9 @@ class MiniMaxM3IndexerCache(nn.Module, AttentionLayerBase):
         return MLAAttentionSpec(
             block_size=vllm_config.cache_config.block_size,
             num_kv_heads=1,
-            head_size=self.head_dim,
+            head_size=self.head_size,
             dtype=self.dtype,
+            cache_role=SparseCacheRole.INDEXER,
         )
 
     def forward(self) -> None: ...
@@ -170,7 +182,7 @@ class MiniMaxM3IndexerPrefillMetadata:
 
 @dataclass
 class MiniMaxM3IndexerDecodeMetadata:
-    """Per-decode state (cudagraph-safe). ``decode_query_len`` is the uniform
+    """Per-decode state (cudagraph-safe). `decode_query_len` is the uniform
     per-request query length (1, or 1 + num_speculative_tokens)."""
 
     seq_lens: torch.Tensor  # [num_decodes] int32
@@ -204,7 +216,7 @@ class MiniMaxM3IndexerMetadataBuilder(
     AttentionMetadataBuilder[MiniMaxM3IndexerMetadata]
 ):
     """Abstract base: shared setup only. The Triton and MSA builders are
-    parallel subclasses that each own their full ``build`` (no shared code)."""
+    parallel subclasses that each own their full `build` (no shared code)."""
 
     # Full cudagraphs for uniform decode batches (incl. spec-decode verify).
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
@@ -222,9 +234,8 @@ class MiniMaxM3IndexerMetadataBuilder(
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
         hf_config = vllm_config.model_config.hf_config
         text_config = getattr(hf_config, "text_config", hf_config)
-        sparse_cfg = text_config.sparse_attention_config
         # Index-query head count from model config (cache spec has 1 vec/token).
-        total_index_heads = sparse_cfg["sparse_num_index_heads"]
+        total_index_heads = text_config.index_n_heads
         tp_size = get_tensor_model_parallel_world_size()
         if total_index_heads >= tp_size:
             assert total_index_heads % tp_size == 0
@@ -330,9 +341,9 @@ class MiniMaxM3IndexerImpl(nn.Module):
     """Abstract base for the indexer kernel impls.
 
     Each impl owns its side cache and reports its backend via
-    ``indexer_backend_cls`` (so each gets its own builder). The Triton and MSA
-    subclasses each own a full ``forward`` returning ``(decode_topk,
-    prefill_topk)`` -- no shared forward code.
+    `indexer_backend_cls` (so each gets its own builder). The Triton and MSA
+    subclasses each own a full `forward` returning `(decode_topk,
+    prefill_topk)` -- no shared forward code.
     """
 
     # Set by each impl so the side cache reports the matching backend + builder.
@@ -352,7 +363,7 @@ class MiniMaxM3IndexerImpl(nn.Module):
         local_blocks: int = 0,
         score_type: str = "max",
         cache_config: CacheConfig | None = None,
-        indexer_kv_dtype: IndexerKVDType = "bf16",
+        indexer_kv_dtype: IndexerKVDType | str = "bf16",
         topk_indices_buffer: torch.Tensor | None = None,
     ) -> None:
         super().__init__()
@@ -369,6 +380,18 @@ class MiniMaxM3IndexerImpl(nn.Module):
         # Shared, stable-address top-k output buffer (set by the model for the
         # cudagraph-safe MSA impl); None -> impl allocates fresh (eager).
         self.topk_indices_buffer = topk_indices_buffer
+        topk_completion_counter = None
+        if current_platform.is_rocm() and topk_indices_buffer is not None:
+            topk_completion_counter = torch.zeros(
+                topk_indices_buffer.shape[:2],
+                dtype=torch.int32,
+                device=topk_indices_buffer.device,
+            )
+        self.register_buffer(
+            "topk_completion_counter",
+            topk_completion_counter,
+            persistent=False,
+        )
         # Owns the side cache (registers itself in the static forward context).
         self.index_cache = MiniMaxM3IndexerCache(
             head_dim=index_head_dim,
@@ -378,11 +401,16 @@ class MiniMaxM3IndexerImpl(nn.Module):
             backend_cls=type(self).indexer_backend_cls,
         )
 
+    def reserve_workspace(self) -> None:
+        """Reserve the workspace-manager scratch `forward` needs; called from
+        the memory-profiling run, which skips `forward`."""
+        return
+
     def forward(
         self,
         index_query: torch.Tensor,
     ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
-        """Return ``(decode_topk, prefill_topk)``; implemented per kernel impl."""
+        """Return `(decode_topk, prefill_topk)`; implemented per kernel impl."""
         raise NotImplementedError
 
 
@@ -392,6 +420,11 @@ class MiniMaxM3IndexerTritonImpl(MiniMaxM3IndexerImpl):
     def forward(
         self,
         index_query: torch.Tensor,
+        *,
+        attention_block_table: torch.Tensor | None = None,
+        sparse_block_table_out: torch.Tensor | None = None,
+        sparse_context_lens_out: torch.Tensor | None = None,
+        block_page_stride: int | None = None,
     ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
         attn_metadata = get_forward_context().attn_metadata
         if not isinstance(attn_metadata, dict):
@@ -417,6 +450,19 @@ class MiniMaxM3IndexerTritonImpl(MiniMaxM3IndexerImpl):
         if index_md.num_decodes > 0:
             d = index_md.decode
             assert d is not None
+            fused_sparse_kwargs = {}
+            if attention_block_table is not None:
+                fused_sparse_kwargs = {
+                    "attention_block_table": attention_block_table,
+                    "sparse_block_table_out": sparse_block_table_out,
+                    "sparse_context_lens_out": sparse_context_lens_out,
+                    "block_page_stride": block_page_stride,
+                }
+            decode_backend_kwargs = {}
+            if current_platform.is_rocm():
+                decode_backend_kwargs["completion_counter"] = (
+                    self.topk_completion_counter
+                )
             decode_topk = minimax_m3_index_decode(
                 iq[:nd],
                 kv,
@@ -430,6 +476,8 @@ class MiniMaxM3IndexerTritonImpl(MiniMaxM3IndexerImpl):
                 d.decode_query_len,
                 d.max_decode_query_len,
                 out=buf_htk,
+                **fused_sparse_kwargs,
+                **decode_backend_kwargs,
             )
         if index_md.num_prefills > 0:
             p = index_md.prefill
@@ -461,23 +509,86 @@ class MiniMaxM3IndexerTritonImpl(MiniMaxM3IndexerImpl):
 def select_indexer_impl_cls(
     *,
     topk_blocks: int,
-    indexer_kv_dtype: IndexerKVDType = "bf16",
+    indexer_kv_dtype: IndexerKVDType | str = "bf16",
 ) -> type[MiniMaxM3IndexerImpl]:
     """Pick the indexer impl off the platform, top-k count, and cache dtype.
 
-    On Blackwell (SM100) with ``topk_blocks == 16`` (the only width fmha_sm100's
-    ``sparse_topk_select`` kernel supports), the fmha_sm100 score + top-k path is
-    used for both bf16 and fp8 index caches. Everything else falls back to the
-    Triton indexer (bf16 only).
+    On Blackwell (SM100) with `topk_blocks == 16` (the only width fmha_sm100's
+    `sparse_topk_select` kernel supports), the fmha_sm100 score + top-k path is
+    used for both bf16 and fp8 index caches. An nvfp4 index cache uses the MSA
+    Q8KV4/Q8KV8 paged indexers (SM100/SM103/SM107 only). Everything else falls back to
+    the Triton indexer, with fp8 restricted to CUDA platforms that advertise fp8
+    support and to ROCm gfx942 (MI300-series, CDNA3). gfx950 (MI350-series)
+    takes the fp8 path through the AITER indexer instead, so this fallback
+    stays bf16-only there.
     """
-    if indexer_kv_dtype in ("mxfp4", "nvfp4"):
-        raise NotImplementedError(
-            f"indexer_kv_dtype={indexer_kv_dtype!r} needs the (not-yet-added) "
-            "CuteDSL indexer impl."
+    if get_current_vllm_config().attention_config.minimax_m3_indexer_cp:
+        # AttentionConfig already rejects non-bf16 index caches; platform and
+        # TP size are only known here.
+        tp_size = get_tensor_model_parallel_world_size()
+        if not current_platform.is_rocm() or tp_size < 2:
+            raise ValueError(
+                "attention_config.minimax_m3_indexer_cp requires ROCm with "
+                f"tensor_parallel_size > 1 (got tensor_parallel_size={tp_size})"
+            )
+        if indexer_kv_dtype != "bf16":
+            raise ValueError(
+                "attention_config.minimax_m3_indexer_cp requires a bf16 index "
+                f"cache, got indexer_kv_dtype={indexer_kv_dtype!r}"
+            )
+        from vllm.models.minimax_m3.amd.indexer_context_parallel import (
+            MiniMaxM3IndexerTritonCPImpl,
         )
-    is_sm100 = (
-        current_platform.is_cuda() and current_platform.is_device_capability_family(100)
-    )
+
+        logger.info_once(
+            "MiniMax M3 indexer: selected Triton CP (context-parallel, ROCm) "
+            "[topk_blocks=%d, tp=%d]",
+            topk_blocks,
+            tp_size,
+        )
+        return MiniMaxM3IndexerTritonCPImpl
+    if indexer_kv_dtype == "mxfp4":
+        raise NotImplementedError(
+            "indexer_kv_dtype='mxfp4' is not supported by the MiniMax M3 indexer."
+        )
+    is_cuda = current_platform.is_cuda()
+    is_fp8 = indexer_kv_dtype in ("fp8", "fp8_e4m3")
+    if is_fp8:
+        if current_platform.is_rocm():
+            from vllm.platforms.rocm import on_gfx942
+
+            fp8_ok = on_gfx942()
+        else:
+            fp8_ok = is_cuda and current_platform.supports_fp8()
+        if not fp8_ok:
+            raise NotImplementedError(
+                f"indexer_kv_dtype={indexer_kv_dtype!r} requires CUDA fp8 "
+                "support or ROCm gfx942 for the Triton indexer. ROCm gfx950 "
+                "supports fp8 through the AITER MSA indexer."
+            )
+    is_sm100 = is_cuda and current_platform.is_device_capability_family(100)
+    if indexer_kv_dtype == "nvfp4":
+        if not (
+            is_cuda
+            and (
+                current_platform.is_device_capability(100)
+                or current_platform.is_device_capability(103)
+                or current_platform.is_device_capability(107)
+            )
+        ):
+            raise NotImplementedError(
+                "indexer_kv_dtype='nvfp4' requires an SM100, SM103 or SM107 GPU."
+            )
+        from vllm.models.minimax_m3.nvidia.indexer_nvfp4 import (
+            MiniMaxM3IndexerNvfp4Impl,
+        )
+
+        logger.info_once(
+            "MiniMax M3 indexer: selected NVFP4 (MSA Q8KV4 decode, Q8KV8 prefill) "
+            "[topk_blocks=%d]",
+            topk_blocks,
+        )
+        return MiniMaxM3IndexerNvfp4Impl
     use_msa = (
         is_sm100
         and topk_blocks == 16
@@ -496,7 +607,7 @@ def select_indexer_impl_cls(
             indexer_kv_dtype,
         )
         return MiniMaxM3IndexerMSAImpl
-    if indexer_kv_dtype != "bf16":
+    if indexer_kv_dtype not in ("bf16", "fp8", "fp8_e4m3"):
         raise NotImplementedError(
             f"indexer_kv_dtype={indexer_kv_dtype!r} is not supported by the "
             "Triton indexer impl."
@@ -512,10 +623,10 @@ def select_indexer_impl_cls(
 
 
 class MiniMaxM3Indexer(nn.Module):
-    """Indexer module held by the attention layer (like ``DeepseekV4Indexer``).
+    """Indexer module held by the attention layer (like `DeepseekV4Indexer`).
 
-    Picks the kernel impl in ``__init__`` (``select_indexer_impl_cls``) and
-    delegates ``forward``; exposes the impl's side cache via ``index_cache``.
+    Picks the kernel impl in `__init__` (`select_indexer_impl_cls`) and
+    delegates `forward`; exposes the impl's side cache via `index_cache`.
     """
 
     def __init__(
@@ -532,7 +643,7 @@ class MiniMaxM3Indexer(nn.Module):
         local_blocks: int = 0,
         score_type: str = "max",
         cache_config: CacheConfig | None = None,
-        indexer_kv_dtype: IndexerKVDType = "bf16",
+        indexer_kv_dtype: IndexerKVDType | str = "bf16",
         topk_indices_buffer: torch.Tensor | None = None,
     ) -> None:
         super().__init__()
@@ -564,8 +675,49 @@ class MiniMaxM3Indexer(nn.Module):
     def num_index_heads(self) -> int:
         return self.impl.num_index_heads
 
+    def reserve_workspace(self) -> None:
+        self.impl.reserve_workspace()
+
     def forward(
         self,
         index_query: torch.Tensor,
+        *,
+        attention_block_table: torch.Tensor | None = None,
+        sparse_block_table_out: torch.Tensor | None = None,
+        sparse_context_lens_out: torch.Tensor | None = None,
+        block_page_stride: int | None = None,
     ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
-        return self.impl(index_query)
+        if attention_block_table is None and all(
+            arg is None
+            for arg in (
+                sparse_block_table_out,
+                sparse_context_lens_out,
+                block_page_stride,
+            )
+        ):
+            return self.impl(index_query)
+        if attention_block_table is None or any(
+            arg is None
+            for arg in (
+                sparse_block_table_out,
+                sparse_context_lens_out,
+                block_page_stride,
+            )
+        ):
+            raise ValueError(
+                "MiniMax-M3 fused decode sparse-table arguments must be "
+                "provided together"
+            )
+        if not current_platform.is_rocm() or not isinstance(
+            self.impl, MiniMaxM3IndexerTritonImpl
+        ):
+            raise ValueError(
+                "MiniMax-M3 fused decode sparse-table construction is ROCm-only"
+            )
+        return self.impl(
+            index_query,
+            attention_block_table=attention_block_table,
+            sparse_block_table_out=sparse_block_table_out,
+            sparse_context_lens_out=sparse_context_lens_out,
+            block_page_stride=block_page_stride,
+        )

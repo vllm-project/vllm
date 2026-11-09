@@ -42,7 +42,10 @@ from vllm.distributed import (
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.fused_moe import FusedMoEFactory
+from vllm.model_executor.layers.fused_moe import (
+    FusedMoEFactory,
+    GateLinear,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -164,10 +167,9 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
         self.n_physical_experts = self.n_logical_experts + self.n_redundant_experts
         self.n_local_physical_experts = self.n_physical_experts // self.ep_size
 
-        self.gate = ReplicatedLinear(
+        self.gate = GateLinear(
             config.hidden_size,
             config.num_experts,
-            bias=False,
             quant_config=quant_config,
             prefix=f"{prefix}.gate",
         )
@@ -175,6 +177,8 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
         shared_expert_intermediate_size = getattr(
             config, "shared_expert_intermediate_size", 0
         )
+        self.shared_expert_gate: ReplicatedLinear | None
+        self.shared_expert: Qwen3MoeMLP | None
         if shared_expert_intermediate_size > 0:
             self.shared_expert_gate = ReplicatedLinear(
                 config.hidden_size,
@@ -252,6 +256,7 @@ class Qwen3MoeAttention(nn.Module):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         dual_chunk_attention_config: dict[str, Any] | None = None,
+        mrope_positions_factor: int = 4,
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -299,7 +304,14 @@ class Qwen3MoeAttention(nn.Module):
             max_position=max_position_embeddings,
             rope_parameters=rope_parameters,
             dual_chunk_attention_config=dual_chunk_attention_config,
+            mrope_positions_factor=mrope_positions_factor,
         )
+        attention_kwargs: dict[str, Any] = {}
+        if dual_chunk_attention_config:
+            attention_kwargs = {
+                "layer_idx": extract_layer_index(prefix),
+                "dual_chunk_attention_config": dual_chunk_attention_config,
+            }
         self.attn = Attention(
             self.num_heads,
             self.head_dim,
@@ -308,12 +320,7 @@ class Qwen3MoeAttention(nn.Module):
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
-            **{
-                "layer_idx": extract_layer_index(prefix),
-                "dual_chunk_attention_config": dual_chunk_attention_config,
-            }
-            if dual_chunk_attention_config
-            else {},
+            **attention_kwargs,
         )
 
         self.q_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
@@ -346,6 +353,7 @@ class Qwen3MoeDecoderLayer(nn.Module):
         vllm_config: VllmConfig,
         prefix: str = "",
         is_fused_checkpoint_transposed: bool = False,
+        mrope_positions_factor: int = 4,
     ) -> None:
         super().__init__()
 
@@ -371,6 +379,7 @@ class Qwen3MoeDecoderLayer(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
             dual_chunk_attention_config=dual_chunk_attention_config,
+            mrope_positions_factor=mrope_positions_factor,
         )
 
         # `mlp_only_layers` in the config.

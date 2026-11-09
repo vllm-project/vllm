@@ -34,24 +34,26 @@ def _is_flashmla_available() -> tuple[bool, str | None]:
     if not _flashmla_C_AVAILABLE:
         return (
             False,
-            "vllm._flashmla_C is not available, likely was not "
-            "compiled due to insufficient nvcc version or a supported arch "
-            "was not in the list of target arches to compile for.",
+            (
+                "vllm._flashmla_C is not available, likely was not "
+                "compiled due to insufficient nvcc version or a supported arch "
+                "was not in the list of target arches to compile for."
+            ),
         )
     if not _flashmla_extension_C_AVAILABLE:
         return (
             False,
-            "vllm._flashmla_extension_C is not available, likely "
-            "was not compiled due to a build error.",
+            (
+                "vllm._flashmla_extension_C is not available, likely "
+                "was not compiled due to a build error."
+            ),
         )
 
     return True, None
 
 
 def is_flashmla_dense_supported() -> tuple[bool, str | None]:
-    """
-    Return: is_supported_flag, unsupported_reason (optional).
-    """
+    """Return: is_supported_flag, unsupported_reason (optional)."""
     is_available, maybe_reason = _is_flashmla_available()
     if not is_available:
         return False, maybe_reason
@@ -61,9 +63,7 @@ def is_flashmla_dense_supported() -> tuple[bool, str | None]:
 
 
 def is_flashmla_sparse_supported() -> tuple[bool, str | None]:
-    """
-    Return: is_supported_flag, unsupported_reason (optional).
-    """
+    """Return: is_supported_flag, unsupported_reason (optional)."""
     is_available, maybe_reason = _is_flashmla_available()
     if not is_available:
         return False, maybe_reason

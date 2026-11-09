@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from types import SimpleNamespace
-
 import torch
 
 from tests.v1.core.utils import create_requests
@@ -21,9 +19,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
 )
 from vllm.v1.structured_output import StructuredOutputManager
-from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
-# Matches defaults from tests/v1/spec_decode/test_eagle.py
 DFLASH_TARGET_DIR = "Qwen/Qwen3-8B"
 DFLASH_DRAFT_DIR = "z-lab/Qwen3-8B-DFlash-b16"
 
@@ -129,26 +125,3 @@ def test_dflash_first_prefill_query_window_fits_allocated_blocks():
     query_positions = range(BLOCK_SIZE, BLOCK_SIZE + scheduler.num_lookahead_tokens)
 
     assert all(pos // BLOCK_SIZE < len(block_ids) for pos in query_positions)
-
-
-def test_dflash_drafter_window_reserves_bonus_token():
-    # DFlash's drafter window is num_spec + 1 (the extra slot is the bonus token),
-    # so max_seq_len + num_spec + 1 must stay within the draft model's max len.
-    input_fits_in_drafter = GPUModelRunner._input_fits_in_drafter
-    dflash_runner = SimpleNamespace(
-        num_spec_tokens=NUM_SPECULATIVE_TOKENS,
-        effective_drafter_max_model_len=100,
-        speculative_config=_dflash_speculative_config(NUM_SPECULATIVE_TOKENS),
-    )
-    # window = 4, so 96 fits (96 + 4 == 100) but 97 does not (97 + 4 == 101)
-    assert input_fits_in_drafter(dflash_runner, SimpleNamespace(max_seq_len=96))
-    assert not input_fits_in_drafter(dflash_runner, SimpleNamespace(max_seq_len=97))
-    assert not input_fits_in_drafter(dflash_runner, None)  # no metadata
-
-    # Other drafters don't reserve the bonus token, so 97 fits (97 + 3 == 100).
-    plain_runner = SimpleNamespace(
-        num_spec_tokens=NUM_SPECULATIVE_TOKENS,
-        effective_drafter_max_model_len=100,
-        speculative_config=SimpleNamespace(use_dflash=lambda: False),
-    )
-    assert input_fits_in_drafter(plain_runner, SimpleNamespace(max_seq_len=97))

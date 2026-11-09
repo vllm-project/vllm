@@ -161,7 +161,7 @@ class TurboQuantAttentionBackend(AttentionBackend):
         return (KVCacheLayout.LBNHC,)
 
     @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
         return [16, 32, 64, 128]
 
     @classmethod
@@ -346,7 +346,6 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
             else head_size
         )
         self._val_data_bytes = math.ceil(head_size * cfg.effective_value_quant_bits / 8)
-        self._n_centroids = cfg.n_centroids if not cfg.key_fp8 else 1
 
         # Detect flash-attn version (FA2/3/4) for prefill paths.
         self.fa_version = get_flash_attn_version(head_size=head_size)
@@ -1140,6 +1139,7 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
                 and self.tq_config.effective_value_quant_bits == 4
                 and self.head_size == 128
                 and flydsl_gqa_ok
+                and kv_cache.shape[1] in (16, 32)
                 and self.sinks is None
                 and not (self.sliding_window and self.sliding_window > 0)
             )

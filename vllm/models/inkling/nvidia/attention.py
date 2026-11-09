@@ -35,7 +35,7 @@ from vllm.v1.kv_cache_interface import (
 from ..configs import InklingModelConfig
 from .layernorm import InklingRMSNorm
 from .ops.fa4_rel_attention import (
-    INKLING_FA4_REL_ATTENTION_KERNEL,
+    _INKLING_FA4_REL_ATTENTION_KERNEL,
     bucket_max_seqlen_q,
     inkling_fa4_num_splits,
 )
@@ -52,7 +52,7 @@ def compute_log_scaling_tau(
 
 
 class RelLogitsProj(nn.Module):
-    """Project the per-head relative branch ``r`` to per-distance logits."""
+    """Project the per-head relative branch `r` to per-distance logits."""
 
     def __init__(self, d_rel: int, rel_extent: int) -> None:
         super().__init__()
@@ -174,6 +174,9 @@ class InklingAttention(nn.Module, AttentionLayerBase):
         compilation_config.static_forward_context[prefix] = self
         self.kv_cache = torch.tensor([])  # replaced by bind_kv_cache
 
+        if vllm_config.kernel_config.enable_jit_warmup:
+            _INKLING_FA4_REL_ATTENTION_KERNEL.register_warmup()
+
     def get_attn_backend(self) -> type[AttentionBackend]:
         return FlashAttentionBackend
 
@@ -257,7 +260,7 @@ class InklingAttention(nn.Module, AttentionLayerBase):
                 fa_md.slot_mapping,
                 off_k,
                 off_v,
-                self.conv_owner.block_size,
+                self.conv_owner.cache_block_size,
                 log_scaling if not self.is_local else None,
             )
             q = q.view(num_tokens, self.num_heads, self.head_dim)
@@ -289,7 +292,7 @@ class InklingAttention(nn.Module, AttentionLayerBase):
             num_kv_heads=self.num_kv_heads,
             max_kv_len=self._max_kv_len,
         )
-        INKLING_FA4_REL_ATTENTION_KERNEL(
+        _INKLING_FA4_REL_ATTENTION_KERNEL(
             q[:nt],
             key_cache,
             value_cache,

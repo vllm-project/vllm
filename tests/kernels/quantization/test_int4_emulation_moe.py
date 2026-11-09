@@ -240,6 +240,29 @@ def _make_awq_moe_weights(E, K, N, group_size, asym=False):
     )
 
 
+def _canonicalize_gptq_moe_inputs(
+    w13: torch.Tensor,
+    w2: torch.Tensor,
+    w13_scale: torch.Tensor,
+    w2_scale: torch.Tensor,
+    w13_qzeros: torch.Tensor | None,
+    w2_qzeros: torch.Tensor | None,
+):
+    """Convert GPTQ K-first tensors to the oracle's canonical N-first layout."""
+
+    def transpose(value: torch.Tensor | None) -> torch.Tensor | None:
+        return value.transpose(1, 2).contiguous() if value is not None else None
+
+    return (
+        w13.transpose(1, 2).contiguous(),
+        w2.transpose(1, 2).contiguous(),
+        w13_scale.transpose(1, 2).contiguous(),
+        w2_scale.transpose(1, 2).contiguous(),
+        transpose(w13_qzeros),
+        transpose(w2_qzeros),
+    )
+
+
 def _run_emulation_forward(
     experts, w13_bf16, w2_bf16, hidden_states, topk_weights, topk_ids, E, K, N
 ):
@@ -478,7 +501,8 @@ def test_gptq_process_weights_shapes_and_values(E, K, N, group_size, asym):
     w13, w13s, w13z, w13_ref, w2, w2s, w2z, w2_ref = _make_gptq_moe_weights(
         E, K, N, group_size, asym
     )
-    result = _process_weights_emulation_gptq(w13, w2, w13s, w2s, w13z, w2z)
+    gptq_inputs = _canonicalize_gptq_moe_inputs(w13, w2, w13s, w2s, w13z, w2z)
+    result = _process_weights_emulation_gptq(*gptq_inputs)
     w13_out, w2_out = result[0], result[1]
 
     assert w13_out.shape == (E, 2 * N, K)
@@ -561,7 +585,7 @@ def test_gptq_awq_process_weights_agree(E, K, N, group_size, asym):
         g2s_list.append(s2)
         a2s_list.append(s2)
 
-    gptq_res = _process_weights_emulation_gptq(
+    gptq_inputs = _canonicalize_gptq_moe_inputs(
         torch.stack(g13_list),
         torch.stack(g2_list),
         torch.stack(g13s_list),
@@ -569,6 +593,7 @@ def test_gptq_awq_process_weights_agree(E, K, N, group_size, asym):
         torch.stack(g13z_list) if asym else None,
         torch.stack(g2z_list) if asym else None,
     )
+    gptq_res = _process_weights_emulation_gptq(*gptq_inputs)
     awq_res = _process_weights_emulation_awq(
         torch.stack(a13_list),
         torch.stack(a2_list),
@@ -615,7 +640,7 @@ def test_gptq_vs_awq_forward_agree(E, K, N, top_k, group_size, num_tokens):
         g2s_list.append(s2)
         a2s_list.append(s2.clone())
 
-    gptq_res = _process_weights_emulation_gptq(
+    gptq_inputs = _canonicalize_gptq_moe_inputs(
         torch.stack(g13_list),
         torch.stack(g2_list),
         torch.stack(g13s_list),
@@ -623,6 +648,7 @@ def test_gptq_vs_awq_forward_agree(E, K, N, top_k, group_size, num_tokens):
         None,
         None,
     )
+    gptq_res = _process_weights_emulation_gptq(*gptq_inputs)
     awq_res = _process_weights_emulation_awq(
         torch.stack(a13_list),
         torch.stack(a2_list),
@@ -750,7 +776,7 @@ def test_ep_output_matches_no_ep(E, K, N, top_k, group_size, num_tokens, ep_size
         if fmt == "gptq"
         else _process_weights_emulation_awq
     )
-    res = process_fn(
+    process_inputs = (
         torch.stack(packed13_list),
         torch.stack(packed2_list),
         torch.stack(scales13_list),
@@ -758,6 +784,9 @@ def test_ep_output_matches_no_ep(E, K, N, top_k, group_size, num_tokens, ep_size
         None,
         None,
     )
+    if fmt == "gptq":
+        process_inputs = _canonicalize_gptq_moe_inputs(*process_inputs)
+    res = process_fn(*process_inputs)
     w13_all, w2_all = res[0], res[1]  # [E, 2N, K], [E, K, N]
 
     hidden_states = torch.randn(num_tokens, K, dtype=torch.bfloat16, device=device)
@@ -855,7 +884,7 @@ def test_ep_gptq_awq_agree(E, K, N, top_k, group_size, num_tokens, ep_size):
         g2s_list.append(s2)
         a2s_list.append(s2.clone())
 
-    gptq_res = _process_weights_emulation_gptq(
+    gptq_inputs = _canonicalize_gptq_moe_inputs(
         torch.stack(g13_list),
         torch.stack(g2_list),
         torch.stack(g13s_list),
@@ -863,6 +892,7 @@ def test_ep_gptq_awq_agree(E, K, N, top_k, group_size, num_tokens, ep_size):
         None,
         None,
     )
+    gptq_res = _process_weights_emulation_gptq(*gptq_inputs)
     awq_res = _process_weights_emulation_awq(
         torch.stack(a13_list),
         torch.stack(a2_list),
@@ -954,7 +984,7 @@ def test_ep_partial_rank_no_active_experts(
         scales13_list.append(s13)
         scales2_list.append(s2)
 
-    res = _process_weights_emulation_gptq(
+    gptq_inputs = _canonicalize_gptq_moe_inputs(
         torch.stack(packed13_list),
         torch.stack(packed2_list),
         torch.stack(scales13_list),
@@ -962,6 +992,7 @@ def test_ep_partial_rank_no_active_experts(
         None,
         None,
     )
+    res = _process_weights_emulation_gptq(*gptq_inputs)
     w13_all, w2_all = res[0], res[1]
 
     # Force topk_ids to only use experts in [0, num_local) — rank 0's slice
@@ -1029,7 +1060,7 @@ def test_ep_sum_equals_full_forward(E, K, N, top_k, group_size, num_tokens, ep_s
         scales13_list.append(s13)
         scales2_list.append(s2)
 
-    res = _process_weights_emulation_gptq(
+    gptq_inputs = _canonicalize_gptq_moe_inputs(
         torch.stack(packed13_list),
         torch.stack(packed2_list),
         torch.stack(scales13_list),
@@ -1037,6 +1068,7 @@ def test_ep_sum_equals_full_forward(E, K, N, top_k, group_size, num_tokens, ep_s
         None,
         None,
     )
+    res = _process_weights_emulation_gptq(*gptq_inputs)
     w13_all, w2_all = res[0], res[1]
 
     # Fix routing so every token uses exactly 2 consecutive experts (round-robin)
@@ -1143,7 +1175,7 @@ def test_emulation_output_close_to_bf16_reference(
         if fmt == "gptq"
         else _process_weights_emulation_awq
     )
-    res = process_fn(
+    process_inputs = (
         torch.stack(packed13_list),
         torch.stack(packed2_list),
         torch.stack(scales13_list),
@@ -1151,6 +1183,9 @@ def test_emulation_output_close_to_bf16_reference(
         None,
         None,
     )
+    if fmt == "gptq":
+        process_inputs = _canonicalize_gptq_moe_inputs(*process_inputs)
+    res = process_fn(*process_inputs)
     w13_bf16, w2_bf16 = res[0], res[1]
 
     dummy_scale = torch.ones(1, dtype=torch.float16, device=device)

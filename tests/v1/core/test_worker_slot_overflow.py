@@ -3,12 +3,12 @@
 """Regression tests for the V2 model runner "No free indices" assertion.
 
 The V2 model runner stores per-request state in a fixed-size slab sized to
-``max_num_seqs`` (``RequestState.free_indices`` in
-``vllm/v1/worker/gpu/states.py``). A slot is occupied from the moment a request
-appears in ``scheduled_new_reqs`` (worker ``add_requests``) until it appears in
-``finished_req_ids``/``preempted_req_ids`` (worker ``finish_requests``), with a
-defensive same-id ``_remove_request`` on re-add. If the scheduler ever lets the
-number of slot-holding requests exceed ``max_num_seqs``, ``add_request`` trips::
+`max_num_seqs` (`RequestState.free_indices` in
+`vllm/v1/worker/gpu/states.py`). A slot is occupied from the moment a request
+appears in `scheduled_new_reqs` (worker `add_requests`) until it appears in
+`finished_req_ids`/`preempted_req_ids` (worker `finish_requests`), with a
+defensive same-id `_remove_request` on re-add. If the scheduler ever lets the
+number of slot-holding requests exceed `max_num_seqs`, `add_request` trips::
 
     assert len(self.free_indices) > 0, "No free indices"
 
@@ -32,9 +32,9 @@ pytestmark = pytest.mark.cpu_test
 class WorkerSlots:
     """Faithful model of the V2 model runner's request-slot accounting.
 
-    Mirrors ``GPUModelRunner.finish_requests`` + ``add_requests`` and
-    ``RequestState.add_request``/``remove_request`` (the ``free_indices`` pool).
-    ``apply`` raises ``AssertionError("No free indices")`` exactly where the real
+    Mirrors `GPUModelRunner.finish_requests` + `add_requests` and
+    `RequestState.add_request`/`remove_request` (the `free_indices` pool).
+    `apply` raises `AssertionError("No free indices")` exactly where the real
     worker would, so a scheduler over-admission surfaces as the same failure.
     """
 
@@ -64,7 +64,6 @@ class WorkerSlots:
 def _model_runner_output(req_ids: list[str], sampled: list[list[int]]):
     return ModelRunnerOutput(
         req_ids=req_ids,
-        req_id_to_index={req_id: i for i, req_id in enumerate(req_ids)},
         sampled_token_ids=sampled,
         logprobs=None,
         prompt_logprobs_dict={},
@@ -77,12 +76,12 @@ def test_streaming_pause_does_not_over_admit_worker_slot():
     new request must not be admitted on top of it.
 
     Repro of the "No free indices" crash: the session pauses into
-    WAITING_FOR_STREAMING_REQ (removed from ``running`` but never reported as
+    WAITING_FOR_STREAMING_REQ (removed from `running` but never reported as
     finished/preempted, so the worker keeps its slot), then a different request
     is admitted into the single slot.
     """
     STOP_TOKEN = 7
-    scheduler = create_scheduler(max_num_seqs=1, use_v2_model_runner=True)
+    scheduler = create_scheduler(max_num_seqs=1)
     slots = WorkerSlots(max_num_reqs=1)
 
     # A resumable streaming session.
@@ -105,8 +104,8 @@ def test_streaming_pause_does_not_over_admit_worker_slot():
     # still holds its slot.
     scheduler.update_from_output(out, _model_runner_output(["session"], [[STOP_TOKEN]]))
     assert session.status == RequestStatus.WAITING_FOR_STREAMING_REQ
-    # A blocked waiting status lands in skipped_waiting, not the main queue.
-    assert session in scheduler.skipped_waiting
+    # The paused session keeps its KV blocks, so it lands in kv_holding_waiting.
+    assert session in scheduler.kv_holding_waiting
     assert scheduler.num_waiting_for_streaming_input == 1
 
     # A different request arrives while the session is paused.
@@ -136,7 +135,7 @@ def test_reset_prefix_cache_priority_does_not_over_admit_worker_slot():
     is admitted.
     """
     scheduler = create_scheduler_with_priority(
-        max_num_seqs=1, enable_prefix_caching=True, use_v2_model_runner=True
+        max_num_seqs=1, enable_prefix_caching=True
     )
     slots = WorkerSlots(max_num_reqs=1)
 
@@ -182,7 +181,7 @@ def test_reset_prefix_cache_same_step_resume_purges_then_re_adds():
     scheduled_new_reqs. The worker runs finish_requests before add_requests, so
     the request's slot is purged and then cleanly re-added.
     """
-    scheduler = create_scheduler(max_num_seqs=1, use_v2_model_runner=True)
+    scheduler = create_scheduler(max_num_seqs=1)
     slots = WorkerSlots(max_num_reqs=1)
 
     (req_a,) = create_requests(

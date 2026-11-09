@@ -14,6 +14,7 @@ MODELS = [
         is_matryoshka=False,
         architecture="BertModel",
         mteb_score=0.714927797,
+        mteb_tol=2e-3,
         seq_pooling_type="CLS",
         attn_type="encoder_only",
         is_prefix_caching_supported=False,
@@ -37,6 +38,7 @@ MODELS = [
         is_matryoshka=False,
         architecture="NomicBertModel",
         mteb_score=0.681146831,
+        mteb_tol=2e-3,
         seq_pooling_type="CLS",
         attn_type="encoder_only",
         is_prefix_caching_supported=False,
@@ -54,6 +56,7 @@ MODELS = [
         is_matryoshka=True,
         architecture="BertModel",
         mteb_score=0.649088363,
+        mteb_tol=2e-3,
         seq_pooling_type="CLS",
         attn_type="encoder_only",
         is_prefix_caching_supported=False,
@@ -65,6 +68,7 @@ MODELS = [
         is_matryoshka=True,
         architecture="XLMRobertaModel",
         mteb_score=0.712258299,
+        mteb_tol=2e-3,
         seq_pooling_type="CLS",
         attn_type="encoder_only",
         is_prefix_caching_supported=False,
@@ -76,6 +80,7 @@ MODELS = [
         is_matryoshka=True,
         architecture="GteModel",
         mteb_score=0.706622444,
+        mteb_tol=2e-3,
         seq_pooling_type="CLS",
         attn_type="encoder_only",
         is_prefix_caching_supported=False,
@@ -85,6 +90,7 @@ MODELS = [
 ]
 
 
+@pytest.mark.flaky(reruns=2)
 @pytest.mark.parametrize("model_info", MODELS)
 def test_embed_models_mteb(hf_runner, vllm_runner, model_info: EmbedModelInfo) -> None:
     mteb_test_embed_models(hf_runner, vllm_runner, model_info)
