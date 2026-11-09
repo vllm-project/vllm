@@ -25,6 +25,7 @@ if not is_aiter_found_and_supported():
         allow_module_level=True,
     )
 
+from vllm.config import VllmConfig
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.mla import rocm_aiter_mla_sparse as sparse_mod
 
@@ -130,6 +131,13 @@ def test_rocm_index_conversion_respects_packed_valid_counts():
     torch.testing.assert_close(output, expected, rtol=0, atol=0)
 
 
+def _cpu_token_to_req(metadata):
+    return torch.repeat_interleave(
+        torch.arange(metadata.num_reqs, dtype=torch.int32),
+        metadata.query_start_loc_cpu.diff(),
+    )
+
+
 def _make_builder():
     builder = object.__new__(sparse_mod.ROCMAiterMLASparseMetadataBuilder)
     max_num_batched_tokens = 8
@@ -147,13 +155,7 @@ def _make_builder():
     builder.use_shardq = False
     builder._prefill_backend = None
 
-    def cpu_token_to_req(metadata):
-        return torch.repeat_interleave(
-            torch.arange(metadata.num_reqs, dtype=torch.int32),
-            metadata.query_start_loc_cpu.diff(),
-        )
-
-    builder._build_req_id_per_token = cpu_token_to_req  # type: ignore[method-assign]
+    builder._build_req_id_per_token = _cpu_token_to_req  # type: ignore[method-assign]
     builder.req_id_per_token_buffer = torch.zeros(
         max_num_batched_tokens, dtype=torch.int32, device="cpu"
     )
@@ -295,22 +297,29 @@ def _construct_builder(monkeypatch, impl: SimpleNamespace, cache_dtype: str):
         hf_text_config=hf_text_config,
         max_model_len=64,
         get_num_attention_heads=lambda parallel_config: 16,
+        model_arch_config=SimpleNamespace(total_num_attention_heads=16),
     )
+    # Real default configs for everything but the model and the layer.
+    defaults = VllmConfig()
+    defaults.cache_config.cache_dtype = cache_dtype
+    defaults.cache_config.block_size = 1
     vllm_config = SimpleNamespace(
         model_config=model_config,
-        cache_config=SimpleNamespace(cache_dtype=cache_dtype),
-        parallel_config=SimpleNamespace(
-            prefill_context_parallel_size=1, decode_context_parallel_size=1
-        ),
-        scheduler_config=SimpleNamespace(max_num_batched_tokens=8),
+        cache_config=defaults.cache_config,
+        parallel_config=defaults.parallel_config,
+        scheduler_config=defaults.scheduler_config,
+        attention_config=defaults.attention_config,
         speculative_config=None,
         compilation_config=SimpleNamespace(
-            static_forward_context={"layers.0": SimpleNamespace(impl=impl)}
+            static_forward_context={
+                "layers.0": SimpleNamespace(impl=impl, prefill_backend=None)
+            }
         ),
     )
     fake_aiter = _FakeAiter("aiter")
     fake_aiter.dtypes = SimpleNamespace(
         bf16=torch.bfloat16,
+        fp8=current_platform.fp8_dtype(),
         d_dtypes={"fp8": torch.uint8, "bf16": torch.bfloat16},
     )
     fake_aiter.get_mla_metadata_info_v1 = Mock(
@@ -354,6 +363,7 @@ def test_fp8_ds_mla_build_skips_persistent_planner_and_sync(monkeypatch):
     assert not builder._use_persistent_metadata
     events: list[str] = []
     fake_aiter = _patch_build_deps(monkeypatch, events)
+    builder._build_req_id_per_token = _cpu_token_to_req  # type: ignore[method-assign]
 
     md = builder.build(
         common_prefix_len=0, common_attn_metadata=_make_common_metadata()
