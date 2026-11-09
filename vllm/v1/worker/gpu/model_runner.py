@@ -2075,17 +2075,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 model_inputs["input_ids"] = None
             model_inputs["inputs_embeds"] = None
 
-            # Prepare the intermediate tensors.
+            # Prepare the intermediate tensors. Each stage pads to its own CUDA
+            # graph sizes, so the previous stage may send fewer rows than this
+            # stage runs. Copy only the real tokens; the rest is padding.
             assert intermediate_tensors is not None
             assert self.intermediate_tensors is not None
+            if not dummy_run:
+                num_tokens = input_batch.num_tokens
+                for k, v in self.intermediate_tensors.tensors.items():
+                    v[:num_tokens].copy_(intermediate_tensors.tensors[k][:num_tokens])
             n = input_batch.num_tokens_after_padding
-            new_tensors = {
-                k: v[:n]
-                if dummy_run
-                else v[:n].copy_(intermediate_tensors.tensors[k][:n])
-                for k, v in self.intermediate_tensors.tensors.items()
-            }
-            model_inputs["intermediate_tensors"] = IntermediateTensors(new_tensors)
+            model_inputs["intermediate_tensors"] = self.intermediate_tensors[:n]
             del intermediate_tensors
 
         # Update the EPLB meta.

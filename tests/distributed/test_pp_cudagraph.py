@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import json
+
 import pytest
 
 from vllm.config.cache import CacheConfig
@@ -51,3 +53,45 @@ def test_pp_cudagraph(
     eager_args = cudagraph_args + ["--enforce-eager"]
 
     compare_two_settings(MODEL_NAME, eager_args, cudagraph_args)
+
+
+@pytest.mark.skipif(
+    not (current_platform.is_cuda() and current_platform.has_device_capability(90)),
+    reason="Below SM90, FlashInfer captures spec-decode batches without TRT-LLM",
+)
+@create_new_process_for_each_test()
+def test_pp_cudagraph_mode_differs_across_stages():
+    """Each stage resolves its CUDA graph mode from its own attention layers.
+
+    Only the last stage holds the draft. Its FlashInfer attention cannot capture
+    spec-decode batches without TRT-LLM, so that stage falls back to PIECEWISE
+    while the first stage keeps FULL decode graphs. The last stage then pads
+    decode batches beyond the rows the first stage sends.
+    """
+    speculative_config = {
+        "method": "eagle3",
+        "model": "RedHatAI/Qwen3-8B-speculator.eagle3",
+        "num_speculative_tokens": 2,
+        "attention_backend": "FLASHINFER",
+    }
+    common_args = [
+        "--pipeline-parallel-size",
+        "2",
+        "--distributed-executor-backend",
+        "mp",
+        "--max-model-len",
+        "2048",
+        "--attention-backend",
+        "TRITON_ATTN",
+        "--attention-config",
+        json.dumps({"use_trtllm_attention": False}),
+        "--speculative-config",
+        json.dumps(speculative_config),
+        "--load-format",
+        "auto",
+    ]
+    eager_args = common_args + ["--enforce-eager"]
+
+    compare_two_settings(
+        "Qwen/Qwen3-8B", eager_args, common_args, include_seeded_sampling=False
+    )
