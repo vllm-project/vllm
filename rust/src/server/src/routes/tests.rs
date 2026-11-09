@@ -3705,6 +3705,97 @@ async fn non_stream_chat_returns_json_response() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn system_fingerprint_is_reported_on_the_last_message_like_python() {
+    let mut lines = Vec::new();
+    let cases = [
+        ("/v1/chat/completions", false),
+        ("/v1/completions", false),
+        // `echo` with `max_tokens=0` streams the prompt on its own branch.
+        ("/v1/completions", true),
+    ];
+    for (uri, prompt_only) in cases {
+        for (stream, include_usage) in [(false, false), (true, false), (true, true)] {
+            let (chat, engine_task) = test_models_with_engine_outputs_and_backend(
+                b"engine-openai-fingerprint",
+                default_stream_output_specs(),
+                Arc::new(FakeChatBackend::new()),
+            )
+            .await;
+            let mut app = build_router(Arc::new(
+                AppState::new(vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()], chat)
+                    .with_system_fingerprint(Some("vllm-0.33.0-c84c7d4f".to_string())),
+            ));
+            let mut body = json!({"stream": stream});
+            if include_usage {
+                body["stream_options"] = json!({"include_usage": true});
+            }
+            if uri == "/v1/chat/completions" {
+                body["messages"] = json!([{"role": "user", "content": "hello"}]);
+            } else {
+                body["prompt"] = json!("hello");
+            }
+            if prompt_only {
+                body["echo"] = json!(true);
+                body["max_tokens"] = json!(0);
+            }
+            let response = app
+                .call(
+                    Request::builder()
+                        .method("POST")
+                        .uri(uri)
+                        .header("content-type", "application/json")
+                        .body(Body::from(body.to_string()))
+                        .expect("build request"),
+                )
+                .await
+                .expect("call app");
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+            engine_task.await.expect("mock engine task");
+
+            // One entry per message: whether it carries the fingerprint, and
+            // which kind of message it is.
+            let messages = if stream {
+                sse_json_payloads(std::str::from_utf8(&body).expect("utf8 body"))
+            } else {
+                vec![serde_json::from_slice(&body).expect("decode json")]
+            };
+            let summary = messages
+                .iter()
+                .map(|message| {
+                    let kind = if message["choices"].as_array().is_some_and(Vec::is_empty) {
+                        "usage"
+                    } else if message["choices"][0]["finish_reason"].is_string() {
+                        "finish"
+                    } else {
+                        "delta"
+                    };
+                    match message.get("system_fingerprint") {
+                        Some(fingerprint) => format!("{kind}={fingerprint}"),
+                        None => kind.to_string(),
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+            lines.push(format!(
+                "{uri} prompt_only={prompt_only} stream={stream} include_usage={include_usage}: {summary}"
+            ));
+        }
+    }
+    expect_test::expect![[r#"
+        /v1/chat/completions prompt_only=false stream=false include_usage=false: finish="vllm-0.33.0-c84c7d4f"
+        /v1/chat/completions prompt_only=false stream=true include_usage=false: delta delta delta finish="vllm-0.33.0-c84c7d4f"
+        /v1/chat/completions prompt_only=false stream=true include_usage=true: delta delta delta finish usage="vllm-0.33.0-c84c7d4f"
+        /v1/completions prompt_only=false stream=false include_usage=false: finish="vllm-0.33.0-c84c7d4f"
+        /v1/completions prompt_only=false stream=true include_usage=false: delta delta delta finish="vllm-0.33.0-c84c7d4f"
+        /v1/completions prompt_only=false stream=true include_usage=true: delta delta delta finish usage="vllm-0.33.0-c84c7d4f"
+        /v1/completions prompt_only=true stream=false include_usage=false: finish="vllm-0.33.0-c84c7d4f"
+        /v1/completions prompt_only=true stream=true include_usage=false: delta finish="vllm-0.33.0-c84c7d4f"
+        /v1/completions prompt_only=true stream=true include_usage=true: delta finish usage="vllm-0.33.0-c84c7d4f""#]].assert_eq(&lines.join("\n"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn chat_return_prompt_text_reports_the_rendered_prompt() {
     for stream in [false, true] {
         let (mut app, engine_task) = test_app_with_backend_and_engine_request_check(
@@ -5264,6 +5355,80 @@ async fn stream_continuous_usage_stats_adds_usage_to_chat_chunks() {
         .expect("final usage chunk");
     assert_eq!(usage_chunk["usage"]["prompt_tokens"], 22);
     assert_eq!(usage_chunk["usage"]["completion_tokens"], 3);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn force_include_usage_streams_continuous_usage_regardless_of_stream_options() {
+    let mut lines = Vec::new();
+    for uri in ["/v1/chat/completions", "/v1/completions"] {
+        for stream_options in [None, Some(json!({"include_usage": false}))] {
+            let (chat, engine_task) = test_models_with_engine_outputs_and_backend(
+                b"engine-openai-force-include-usage",
+                default_stream_output_specs(),
+                Arc::new(FakeChatBackend::new()),
+            )
+            .await;
+            let mut app = build_router(Arc::new(
+                AppState::new(vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()], chat)
+                    .with_api_server_options(ApiServerOptions {
+                        force_include_usage: true,
+                        ..Default::default()
+                    }),
+            ));
+            let mut body = json!({"stream": true});
+            if let Some(stream_options) = &stream_options {
+                body["stream_options"] = stream_options.clone();
+            }
+            if uri == "/v1/chat/completions" {
+                body["messages"] = json!([{"role": "user", "content": "hello"}]);
+            } else {
+                body["prompt"] = json!("hello");
+            }
+            let response = app
+                .call(
+                    Request::builder()
+                        .method("POST")
+                        .uri(uri)
+                        .header("content-type", "application/json")
+                        .body(Body::from(body.to_string()))
+                        .expect("build request"),
+                )
+                .await
+                .expect("call app");
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+            engine_task.await.expect("mock engine task");
+
+            // One entry per chunk: its kind and the completion tokens of its
+            // usage, if any.
+            let summary = sse_json_payloads(std::str::from_utf8(&body).expect("utf8 body"))
+                .iter()
+                .map(|chunk| {
+                    let kind = if chunk["choices"].as_array().is_some_and(Vec::is_empty) {
+                        "usage"
+                    } else if chunk["choices"][0]["finish_reason"].is_string() {
+                        "finish"
+                    } else {
+                        "delta"
+                    };
+                    match chunk.get("usage") {
+                        Some(usage) => format!("{kind}={}", usage["completion_tokens"]),
+                        None => kind.to_string(),
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+            let stream_options =
+                stream_options.map_or_else(|| "absent".to_string(), |options| options.to_string());
+            lines.push(format!("{uri} stream_options={stream_options}: {summary}"));
+        }
+    }
+    expect_test::expect![[r#"
+        /v1/chat/completions stream_options=absent: delta=0 delta=1 delta=2 finish=3 usage=3
+        /v1/chat/completions stream_options={"include_usage":false}: delta=0 delta=1 delta=2 finish=3 usage=3
+        /v1/completions stream_options=absent: delta=1 delta=2 delta=3 finish=3 usage=3
+        /v1/completions stream_options={"include_usage":false}: delta=1 delta=2 delta=3 finish=3 usage=3"#]].assert_eq(&lines.join("\n"));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -8388,7 +8553,11 @@ async fn sleep_route_uses_python_compatible_default_query_values() {
             assert_eq!(array[2], Value::from("sleep"));
             assert_eq!(
                 array[3],
-                Value::Array(vec![Value::from(1_u64), Value::from("abort")])
+                Value::Array(vec![
+                    Value::from(1_u64),
+                    Value::from("abort"),
+                    Value::from(true),
+                ])
             );
 
             send_outputs(push, utility_outputs(call_id, utility_none_result())).await;
@@ -8496,6 +8665,64 @@ async fn sleep_route_rejects_invalid_query_before_engine_dispatch() {
     }
 }
 
+async fn assert_route_sends_utility_args(
+    uri: &'static str,
+    method: &'static str,
+    args: Vec<Value>,
+) {
+    let (app, engine_task) = test_admin_app_with_engine_script(move |dealer, push| {
+        boxed_test_future(async move {
+            let utility = recv_engine_message(dealer).await;
+            let payload = decode_value(&utility[1]).expect("decode utility payload");
+            let array = payload.as_array().expect("utility payload array");
+            let call_id = array[1].as_u64().expect("call id");
+
+            assert_eq!(array[2], Value::from(method));
+            assert_eq!(array[3], Value::Array(args));
+
+            send_outputs(push, utility_outputs(call_id, utility_none_result())).await;
+        })
+    })
+    .await;
+
+    let response = app
+        .clone()
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri(uri)
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    engine_task.await.expect("mock engine task");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn sleep_route_forwards_reset_connector_opt_out() {
+    assert_route_sends_utility_args(
+        "/sleep?reset_connector=false",
+        "sleep",
+        vec![Value::from(1_u64), Value::from("abort"), Value::from(false)],
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn release_kv_cache_memory_route_forwards_reset_connector_opt_out() {
+    assert_route_sends_utility_args(
+        "/release_kv_cache_memory?reset_connector=false",
+        "release_kv_cache_memory",
+        vec![Value::from(false)],
+    )
+    .await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn release_kv_cache_memory_route_sends_expected_utility_call() {
@@ -8510,7 +8737,7 @@ async fn release_kv_cache_memory_route_sends_expected_utility_call() {
             let call_id = array[1].as_u64().expect("call id");
 
             assert_eq!(array[2], Value::from("release_kv_cache_memory"));
-            assert_eq!(array[3], Value::Array(Vec::new()));
+            assert_eq!(array[3], Value::Array(vec![Value::from(true)]));
 
             send_outputs(push, utility_outputs(call_id, utility_none_result())).await;
         })

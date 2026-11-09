@@ -11,15 +11,15 @@ parser reads ATEM markup out of those channels.
 Four areas, in order:
 
   1. non-streaming tool-call extraction, including channel scoping (an
-     ``<atem:invoke>`` echoed inside reasoning must never become a call);
+     `<atem:invoke>` echoed inside reasoning must never become a call);
   2. the reasoning -> tool-parser handoff, which regressed once by returning
-     ``content=None`` and starving the tool parser;
+     `content=None` and starving the tool parser;
   3. streaming, where markers routinely straddle chunk boundaries, plus
-     truncation isolation for an unterminated ``to=self`` block;
+     truncation isolation for an unterminated `to=self` block;
   4. tool-name normalization against the tools registered on the request.
 
 These drive the parsers directly and need no checkpoint. The tests that require
-a real tokenizer live in ``test_muse_glimmer_parse_delta.py``.
+a real tokenizer live in `test_muse_glimmer_parse_delta.py`.
 """
 
 import json
@@ -73,7 +73,7 @@ _NO_REQ = cast(ChatCompletionRequest, None)
 
 
 def _req(*names: str) -> ChatCompletionRequest:
-    """A request with ``names`` registered as tools."""
+    """A request with `names` registered as tools."""
     return cast(
         ChatCompletionRequest,
         SimpleNamespace(
@@ -83,7 +83,7 @@ def _req(*names: str) -> ChatCompletionRequest:
 
 
 def _call(name):
-    """One tool-call turn invoking ``name``."""
+    """One tool-call turn invoking `name`."""
     return (
         f"<|start|>assistant to={name}<|message|>"
         f'<atem:function_calls>\n<atem:invoke name="{name}">\n'
@@ -236,7 +236,7 @@ def test_reasoning_then_parallel_calls():
 
 
 def _stream(raw: str, chunk: int):
-    """Feed ``raw`` incrementally in ``chunk``-char steps through BOTH streaming
+    """Feed `raw` incrementally in `chunk`-char steps through BOTH streaming
     parsers; return (reasoning, content, tool_calls)."""
     reasoning, content, toolcalls = [], [], []
     prev = ""
