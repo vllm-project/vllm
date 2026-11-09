@@ -2060,3 +2060,17 @@ def supports_encoder_cudagraph(
     model: type[object] | object,
 ) -> TypeIs[type[SupportsEncoderCudaGraph]] | TypeIs[SupportsEncoderCudaGraph]:
     return isinstance(model, SupportsEncoderCudaGraph)
+
+
+@runtime_checkable
+class SupportsCudagraphCaptureWarmup(Protocol):
+    """Submodule needing one-time warmup before CUDA graph capture begins."""
+
+    def warmup_before_capture(self, device: torch.device) -> None: ...
+
+
+def warmup_before_capture(model: nn.Module, device: torch.device) -> None:
+    """Calls `warmup_before_capture` on every submodule that implements it."""
+    for module in model.modules():
+        if isinstance(module, SupportsCudagraphCaptureWarmup):
+            module.warmup_before_capture(device)

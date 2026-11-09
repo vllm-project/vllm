@@ -7,6 +7,7 @@ import torch
 
 import vllm._custom_ops as ops
 from tests.kernels.quant_utils import ref_dynamic_per_tensor_fp8_quant
+from tests.utils import fork_new_process_for_each_test
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.platforms import current_platform
 from vllm.platforms.rocm import on_gfx950
@@ -419,3 +420,62 @@ def test_rocm_wvsplitk_fp8_kernel(
         torch.testing.assert_close(out, ref_out, atol=0.07, rtol=5e-2)
     else:
         torch.testing.assert_close(out, ref_out, atol=1e-2, rtol=1e-2)
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="only test for rocm")
+@fork_new_process_for_each_test
+def test_wvsplitkrc_first_call_inside_capture_fails_without_warmup():
+    """Without warmup, wvSplitKrc as the first call on this device cannot
+    create its split-K workspace pool inside a CUDA graph capture.
+
+    This reproduces the failure that warmup_rocm_skinny_gemm_workspaces
+    (vllm/model_executor/layers/utils.py) exists to avoid: PIECEWISE capture
+    taking the unfused q_b_proj path made wvSplitKrc the first user of the
+    pool inside a capture, raising "split-K workspace pool cannot be
+    allocated during graph capture".
+    """
+    if not on_gfx950():
+        pytest.skip("wvSplitKrc workspace pool is only lazily created on gfx950")
+
+    x = torch.zeros(16, 1024, dtype=torch.bfloat16, device="cuda")
+    weight = torch.zeros(32, 1024, dtype=torch.bfloat16, device="cuda")
+
+    stream = torch.cuda.Stream()
+    graph = torch.cuda.CUDAGraph()
+    with (
+        pytest.raises(RuntimeError),
+        torch.cuda.stream(stream),
+        torch.cuda.graph(graph),
+    ):
+        ops.wvSplitKrc(x, weight, num_compute_units())
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="only test for rocm")
+@fork_new_process_for_each_test
+def test_warmup_rocm_skinny_gemm_workspaces_enables_capture():
+    """After warmup_rocm_skinny_gemm_workspaces, wvSplitKrc can be captured
+    (and replayed) inside a CUDA graph, because the split-K workspace pool
+    already exists on the device.
+    """
+    from vllm.model_executor.layers.utils import warmup_rocm_skinny_gemm_workspaces
+
+    if not on_gfx950():
+        pytest.skip("wvSplitKrc workspace pool is only lazily created on gfx950")
+
+    device = torch.device("cuda")
+    warmup_rocm_skinny_gemm_workspaces(device)
+
+    n, k, m = 16, 1024, 32
+    x = torch.rand(n, k, device=device, dtype=torch.bfloat16) * 2 - 1
+    weight = torch.rand(m, k, device=device, dtype=torch.bfloat16) * 2 - 1
+    ref_out = torch.nn.functional.linear(x, weight)
+
+    stream = torch.cuda.Stream()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.stream(stream), torch.cuda.graph(graph):
+        out = ops.wvSplitKrc(x, weight, num_compute_units())
+    torch.cuda.current_stream().wait_stream(stream)
+
+    graph.replay()
+    torch.accelerator.synchronize()
+    torch.testing.assert_close(out, ref_out, atol=1e-2, rtol=1e-2)

@@ -644,6 +644,107 @@ def test_nested_decorated_op_runs_inline(cuda_capture_stream):
     assert inner_calls == 2  # replay invokes the outer's lambda again
 
 
+def _capture_kimi_mla_wrapper(cudagraph_mode, marker, monkeypatch):
+    """Capture KimiK3MultiHeadLatentAttentionWrapper.forward under
+    decode-like metadata, with each attention path writing a distinct value
+    into `marker` through a real tensor op (so capture records which path
+    ran, instead of only observing which one was called in Python)."""
+    import torch.nn as nn
+
+    from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphCapture
+    from vllm.forward_context import override_forward_context
+    from vllm.models.kimi_k3.amd import mla as mla_mod
+
+    hidden_states = torch.zeros(4, 8, dtype=torch.bfloat16, device=DEVICE_TYPE)
+    attention = SimpleNamespace(
+        q_lora_rank=2,
+        kv_lora_rank=4,
+        qk_rope_head_dim=2,
+        qk_head_dim=4,
+        num_heads=2,
+        v_head_dim=4,
+        fused_qkv_a_proj=lambda hs: (
+            torch.zeros(4, 8, dtype=torch.bfloat16, device=DEVICE_TYPE),
+            None,
+        ),
+        q_a_layernorm=nn.Identity(),
+        _normalize_q_kv=lambda q, kv: (q, kv),
+        q_b_proj=lambda q: (torch.zeros(4, 8, dtype=q.dtype, device=q.device), None),
+        rotary_emb=None,
+        indexer=None,
+        dcp_q_replicate=False,
+        _fused_qk_prep=True,
+        _qkv_gate_fused=False,
+        _fold_qb_uk=False,
+        _fused_decode=lambda q, kv, pe, shape, *args: marker.fill_(1.0),
+        g_proj=None,
+        o_proj=lambda value: (value, None),
+    )
+    attention.mla_attn = lambda q, kv, pe, **kwargs: marker.fill_(2.0)
+    attention.mla_attn.layer_name = "test"
+    monkeypatch.setattr(
+        mla_mod,
+        "get_attention_context",
+        lambda _: (
+            SimpleNamespace(num_actual_tokens=4, num_decode_tokens=4),
+            None,
+            torch.zeros(1),
+            torch.arange(4),
+        ),
+    )
+
+    cap = BreakableCUDAGraphCapture()
+    with (
+        override_forward_context(
+            SimpleNamespace(cudagraph_runtime_mode=cudagraph_mode)
+        ),
+        cap,
+    ):
+        mla_mod.KimiK3MultiHeadLatentAttentionWrapper.forward(
+            attention, torch.arange(4, device=DEVICE_TYPE), hidden_states
+        )
+    return cap
+
+
+def test_piecewise_capture_replays_regular_mla_path(
+    cuda_capture_stream, monkeypatch: pytest.MonkeyPatch
+):
+    """A PIECEWISE capture must bake the regular MLA path even when
+    capture-time metadata looks decode-only: PIECEWISE graphs replay for
+    prefill and mixed batches too, so baking in the decode-only fused
+    kernels would replay them on the wrong inputs.
+    """
+    from vllm.config import CUDAGraphMode
+
+    marker = torch.zeros(4, 8, dtype=torch.bfloat16, device=DEVICE_TYPE)
+    cap = _capture_kimi_mla_wrapper(CUDAGraphMode.PIECEWISE, marker, monkeypatch)
+
+    marker.zero_()
+    cap.replay()
+    torch.accelerator.synchronize()
+    assert torch.equal(marker, torch.full_like(marker, 2.0))
+
+
+@pytest.mark.parametrize("cudagraph_mode_name", ["NONE", "FULL"])
+def test_full_and_none_capture_replay_fused_mla_path(
+    cuda_capture_stream, monkeypatch: pytest.MonkeyPatch, cudagraph_mode_name
+):
+    """Control for test_piecewise_capture_replays_regular_mla_path: under
+    the same decode-like metadata, NONE/FULL capture (which only ever
+    replays decode-shaped batches) bakes the fused decode path.
+    """
+    from vllm.config import CUDAGraphMode
+
+    cudagraph_mode = getattr(CUDAGraphMode, cudagraph_mode_name)
+    marker = torch.zeros(4, 8, dtype=torch.bfloat16, device=DEVICE_TYPE)
+    cap = _capture_kimi_mla_wrapper(cudagraph_mode, marker, monkeypatch)
+
+    marker.zero_()
+    cap.replay()
+    torch.accelerator.synchronize()
+    assert torch.equal(marker, torch.full_like(marker, 1.0))
+
+
 # ---------------------------------------------------------------------------
 # BreakableCUDAGraphWrapper: runtime_mode dispatch gating
 # ---------------------------------------------------------------------------

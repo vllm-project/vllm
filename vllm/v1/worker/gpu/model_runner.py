@@ -55,7 +55,10 @@ from vllm.model_executor.layers.quantization.online.lm_head import (
 )
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader.reload.inplace import reload_weights
-from vllm.model_executor.models.interfaces import requires_raw_input_tokens
+from vllm.model_executor.models.interfaces import (
+    requires_raw_input_tokens,
+    warmup_before_capture,
+)
 from vllm.model_executor.offloader import (
     create_offloader,
     get_offloader,
@@ -1155,6 +1158,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             return 0
 
         compilation_counter.num_gpu_runner_capture_triggers += 1
+
+        warmup_before_capture(self.model, self.device)
 
         start_time = time.perf_counter()
         with freeze_gc_for_cudagraph_capture():

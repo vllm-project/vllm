@@ -8,6 +8,7 @@ import torch
 
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import get_current_vllm_config
+from vllm.forward_context import in_piecewise_cudagraph
 from vllm.model_executor.layers.attention.attention import get_attention_context
 from vllm.model_executor.layers.attention.mla_attention import split_kv_b_proj
 from vllm.model_executor.layers.fusion.quant_activation import (
@@ -21,6 +22,7 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.mla import MultiHeadLatentAttentionWrapper
 from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
+from vllm.model_executor.layers.utils import warmup_rocm_skinny_gemm_workspaces
 from vllm.model_executor.utils import refill_derived
 from vllm.platforms import current_platform
 
@@ -29,9 +31,24 @@ _OPT_ROT_DIM = 64
 _OPT_MIN_SIZE = 2048
 
 
+def _fused_decode_applicable(attn_metadata, slot_mapping, kv_cache) -> bool:
+    # PIECEWISE graphs replay any batch shape; this check only sees the
+    # decode-only capture batch.
+    return (
+        attn_metadata is not None
+        and slot_mapping is not None
+        and kv_cache.numel() > 0
+        and attn_metadata.num_actual_tokens == attn_metadata.num_decode_tokens
+        and not in_piecewise_cudagraph()
+    )
+
+
 class KimiK3MultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
     """Kimi-K3 MLA wrapper with eager AITER q/kv RMSNorm and output gate
     fusions and a fused decode Q-prep path."""
+
+    def warmup_before_capture(self, device: torch.device) -> None:
+        warmup_rocm_skinny_gemm_workspaces(device)
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
@@ -374,12 +391,7 @@ class KimiK3MultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
             attn_metadata, layer, kv_cache, slot_mapping = get_attention_context(
                 self.mla_attn.layer_name
             )
-            fuse = (
-                attn_metadata is not None
-                and slot_mapping is not None
-                and kv_cache.numel() > 0
-                and attn_metadata.num_actual_tokens == attn_metadata.num_decode_tokens
-            )
+            fuse = _fused_decode_applicable(attn_metadata, slot_mapping, kv_cache)
 
         if fuse and self._fold_qb_uk and llama_4_scaling is None:
             q = q_proj_input
