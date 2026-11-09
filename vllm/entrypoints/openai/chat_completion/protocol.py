@@ -74,15 +74,15 @@ _INT64_MAX = 2**63 - 1
 
 
 def _check_legacy_function_fields(data: dict) -> None:
-    """Reject the legacy ``functions``/``function_call`` request fields.
+    """Reject the legacy `functions`/`function_call` request fields.
 
-    vLLM only supports the modern ``tools``/``tool_choice`` API. The legacy
+    vLLM only supports the modern `tools`/`tool_choice` API. The legacy
     fields are not part of the request model, so they would otherwise land in
-    ``model_extra`` and be silently ignored, answering the client's tool
-    request with ordinary text. OpenAI treats ``[]`` and ``null`` as omitted,
-    and ``"auto"`` as the default, so those carry no tool instruction and are
-    accepted. ``"none"`` is a real "do not call tools" instruction whenever
-    ``tools`` is set, which would otherwise be dropped, so it is rejected
+    `model_extra` and be silently ignored, answering the client's tool
+    request with ordinary text. OpenAI treats `[]` and `null` as omitted,
+    and `"auto"` as the default, so those carry no tool instruction and are
+    accepted. `"none"` is a real "do not call tools" instruction whenever
+    `tools` is set, which would otherwise be dropped, so it is rejected
     there too.
     """
     functions = data.get("functions")

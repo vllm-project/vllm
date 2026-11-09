@@ -496,10 +496,10 @@ async def test_inconsistent_tool_choice_and_tools(
 async def test_legacy_function_fields_rejected(
     client: openai.AsyncOpenAI, extra_body: dict, param: str
 ):
-    """Legacy ``functions``/``function_call`` are unsupported and must be
+    """Legacy `functions`/`function_call` are unsupported and must be
     rejected instead of being silently dropped, which would answer the tool
     request with ordinary text. Uses the same real server as the modern
-    ``tools`` tests below."""
+    `tools` tests below."""
     with pytest.raises(openai.BadRequestError) as excinfo:
         await client.chat.completions.create(
             model=MODEL_NAME,
@@ -516,8 +516,8 @@ async def test_legacy_function_fields_rejected(
 @pytest.mark.asyncio
 async def test_tools_still_work_with_legacy_validator(client: openai.AsyncOpenAI):
     """The new rejection must not disturb a modern tool request on a real
-    server; ``function_call: "none"`` alongside ``tools`` is a suppressed tool
-    request and is rejected, while a normal ``tools`` call still succeeds."""
+    server; `function_call: "none"` alongside `tools` is a suppressed tool
+    request and is rejected, while a normal `tools` call still succeeds."""
     with pytest.raises(openai.BadRequestError) as excinfo:
         await client.chat.completions.create(
             model=MODEL_NAME,

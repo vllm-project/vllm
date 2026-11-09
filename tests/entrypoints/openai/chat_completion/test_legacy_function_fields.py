@@ -1,14 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Legacy ``functions``/``function_call`` requests must be rejected, not ignored.
+"""Legacy `functions`/`function_call` requests must be rejected, not ignored.
 
-The legacy Chat Completions fields are not part of ``ChatCompletionRequest``,
+The legacy Chat Completions fields are not part of `ChatCompletionRequest`,
 so requests carrying them used to validate cleanly (they landed in
-``model_extra``), the fields were dropped, and the server answered a tool
+`model_extra`), the fields were dropped, and the server answered a tool
 request with ordinary text. These tests pin the explicit 400 instead, at the
 protocol level and through the real HTTP route, while confirming that modern
-``tools``/``tool_choice`` and the supported assistant-message
-``function_call`` field are untouched.
+`tools`/`tool_choice` and the supported assistant-message
+`function_call` field are untouched.
 """
 
 from argparse import Namespace
@@ -88,15 +88,15 @@ def test_legacy_function_call_error_names_field_and_replacement():
     ],
 )
 def test_omitted_and_no_op_legacy_values_still_validate(extra):
-    """OpenAI treats ``[]``/``null`` as omitted and ``"auto"`` as the default.
-    ``"none"`` is only a no-op without ``tools``; with ``tools`` it is a real
+    """OpenAI treats `[]`/`null` as omitted and `"auto"` as the default.
+    `"none"` is only a no-op without `tools`; with `tools` it is a real
     "do not call tools" instruction and is covered separately."""
     ChatCompletionRequest.model_validate(_request(**extra))
 
 
 def test_function_call_none_with_tools_rejected():
-    """``function_call: "none"`` suppresses tool calls, and dropping it would
-    let the caller's explicit instruction through as ``tool_choice="auto"``."""
+    """`function_call: "none"` suppresses tool calls, and dropping it would
+    let the caller's explicit instruction through as `tool_choice="auto"`."""
     with pytest.raises(
         VLLMValidationError, match=r"parameter=function_call"
     ) as excinfo:
@@ -135,7 +135,7 @@ def test_modern_tools_unaffected():
 
 
 def test_assistant_message_function_call_still_supported():
-    """``function_call`` inside an assistant message is the supported
+    """`function_call` inside an assistant message is the supported
     round-trip field and is not the legacy top-level request parameter."""
     request = ChatCompletionRequest.model_validate(
         {
