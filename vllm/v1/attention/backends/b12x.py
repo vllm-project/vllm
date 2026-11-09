@@ -42,9 +42,9 @@ from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheLayout,
     KVCacheSpec,
+    get_block_table_width,
     is_quantized_kv_cache,
 )
-from vllm.v1.worker.block_table import get_block_table_width
 from vllm.v1.worker.workspace import current_workspace_manager
 
 logger = init_logger(__name__)
@@ -67,12 +67,12 @@ def _max_page_table_width(
     is_hybrid: bool,
     block_size: int | None = None,
 ) -> int:
-    """Page-table capacity the plans for ``page_size`` must accept.
+    """Page-table capacity the plans for `page_size` must accept.
 
-    The worker sizes its block table for the KV manager block (``block_size``)
+    The worker sizes its block table for the KV manager block (`block_size`)
     and, when that block is larger than the kernel page, expands every entry
-    into ``block_size // page_size`` kernel pages. Mirror that expansion so the
-    table handed to ``forward()`` always fits the plan.
+    into `block_size // page_size` kernel pages. Mirror that expansion so the
+    table handed to `forward()` always fits the plan.
     """
     if block_size is None or block_size % page_size != 0:
         # The manager block is not known yet (the platform applies

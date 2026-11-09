@@ -25,8 +25,11 @@ from vllm.v1.attention.backends.b12x import (
     _max_page_table_width,
 )
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheLayout
-from vllm.v1.worker.block_table import get_block_table_width
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheLayout,
+    get_block_table_width,
+)
 from vllm.v1.worker.utils import select_common_block_size
 
 
@@ -185,9 +188,9 @@ def test_b12x_attention_hybrid_cache_capacity_includes_expansion() -> None:
 def _worker_kernel_block_table_width(
     max_model_len: int, block_size: int, kernel_block_size: int
 ) -> int:
-    """Row length of the block table the worker hands to ``forward()``: the
-    manager block table (``AttentionGroup.create_metadata_builders``), with
-    every entry expanded into ``block_size // kernel_block_size`` kernel pages.
+    """Row length of the block table the worker hands to `forward()`: the
+    manager block table (`AttentionGroup.create_metadata_builders`), with
+    every entry expanded into `block_size // kernel_block_size` kernel pages.
     """
     width = get_block_table_width(cdiv(max_model_len, block_size), block_size)
     return width * (block_size // kernel_block_size)
@@ -200,7 +203,7 @@ def test_b12x_attention_plan_capacity_fits_expanded_block_table(
 ) -> None:
     """A manager block that is a multiple of a kernel page (block_size 192,
     or 2176 from hybrid alignment) is split into kernel pages by the worker,
-    so the page table it passes is wider than ``cdiv(max_model_len, page)``.
+    so the page table it passes is wider than `cdiv(max_model_len, page)`.
     The plans must be sized for that expanded table.
     """
     kernel_block_size = select_common_block_size(
