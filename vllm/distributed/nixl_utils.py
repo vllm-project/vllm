@@ -94,7 +94,7 @@ def is_nixl_available() -> bool:
 
 @functools.cache
 def check_nixl_version(min_version: str) -> None:
-    """Raise if the installed NIXL package is older than ``min_version``."""
+    """Raise if the installed NIXL package is older than `min_version`."""
     from importlib.metadata import packages_distributions, version
 
     from packaging.version import Version
@@ -111,7 +111,7 @@ def check_nixl_version(min_version: str) -> None:
 
 
 def alias_nixl_for_ray() -> None:
-    """Let Ray's ``nixl._api`` import resolve to the ROCm implementation."""
+    """Let Ray's `nixl._api` import resolve to the ROCm implementation."""
     if not current_platform.is_rocm() or "nixl._api" in sys.modules:
         return
 

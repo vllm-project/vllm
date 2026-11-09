@@ -95,7 +95,6 @@ def test_shared_reuse_requires_content_stable_identifiers():
     config.ec_transfer_config.ec_connector = "ECMooncakeConnector"
     config.ec_transfer_config.ec_connector_extra_config["cross_encoder_cache"] = True
     config.model_config.multimodal_config = MultiModalConfig(mm_processor_cache_gb=0)
-    config.use_v2_model_runner = True
     config.lora_config = None
     with pytest.raises(ValueError, match="mm_processor_cache_gb"):
         MooncakeECConfig.from_vllm_config(config)

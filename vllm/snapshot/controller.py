@@ -26,8 +26,8 @@ def _child_engine_argv(
 ) -> tuple[str, ...]:
     """Build the child argv from the first argv source that is present.
 
-    In order: an explicit ``engine_argv`` from the caller, the process argv
-    tail when invoked as ``vllm snapshot create ...``, then the bare model from
+    In order: an explicit `engine_argv` from the caller, the process argv
+    tail when invoked as `vllm snapshot create ...`, then the bare model from
     the parsed args. Whichever source wins, snapshot options are stripped and
     sleep mode is appended.
     """
