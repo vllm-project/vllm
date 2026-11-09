@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import mmap
 import time
-from contextlib import nullcontext
 from unittest.mock import MagicMock
 
 import pytest
@@ -24,9 +23,6 @@ if not current_platform.is_cuda_alike():
     pytest.skip("Requires CUDA or ROCm", allow_module_level=True)
 
 from tests.v1.attention.utils import dense_kv_cache_tensor, dense_kv_cache_views
-from tests.v1.kv_connector.unit.test_kv_connector_lifecycle import (
-    _make_empty_scheduler_output,
-)
 from vllm.config import CacheConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.simple_cpu_offload_connector import (
     SimpleCPUOffloadConnector,
@@ -36,6 +32,7 @@ from vllm.v1.core.kv_cache_planning import (
     is_kv_cache_spec_uniform,
 )
 from vllm.v1.core.kv_cache_utils import resolve_kv_cache_block_sizes
+from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
@@ -60,7 +57,6 @@ from vllm.v1.simple_kv_offload.metadata import (
 from vllm.v1.simple_kv_offload.sizing import sync_num_offload_blocks_across_workers
 from vllm.v1.simple_kv_offload.worker import SimpleCPUOffloadWorker
 from vllm.v1.worker.gpu.kv_connector import ActiveKVConnector
-from vllm.v1.worker.kv_connector_model_runner_mixin import KVConnectorModelRunnerMixin
 from vllm.v1.worker.utils import allocate_kv_cache
 
 NUM_BLOCKS = 64
@@ -69,6 +65,19 @@ ITERS = 30
 # Keep the compute stream busy so the KV write lands late; this makes the
 # store-vs-compute race deterministic instead of timing-dependent.
 SLEEP_CYCLES = 50_000_000
+
+
+def _make_empty_scheduler_output() -> SchedulerOutput:
+    return SchedulerOutput(
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=CachedRequestData.make_empty(),
+        num_scheduled_tokens={},
+        total_num_scheduled_tokens=0,
+        scheduled_spec_decode_tokens={},
+        scheduled_encoder_inputs={},
+        finished_req_ids=set(),
+        free_encoder_mm_hashes=[],
+    )
 
 
 def _make_worker(
@@ -96,8 +105,7 @@ def _make_backend() -> tuple[DmaCopyBackend, torch.Tensor, torch.Tensor]:
     return backend, gpu["k"], cpu["k"]
 
 
-@pytest.mark.parametrize("use_v2", [False, True])
-def test_no_forward_step_completes_cpu_store(monkeypatch, use_v2):
+def test_no_forward_step_completes_cpu_store(monkeypatch):
     """A finished request's final store must drain without another model step."""
     backend, gpu, cpu = _make_backend()
     worker = _make_worker(None, 0)
@@ -108,23 +116,16 @@ def test_no_forward_step_completes_cpu_store(monkeypatch, use_v2):
     output.kv_connector_metadata = SimpleCPUOffloadMetadata(
         store_event=0, store_gpu_blocks=[0], store_cpu_blocks=[0]
     )
-    module = "vllm.v1.worker.kv_connector_model_runner_mixin"
-    monkeypatch.setattr(f"{module}.get_kv_transfer_group", lambda: connector)
-    monkeypatch.setattr(f"{module}.set_forward_context", lambda *a: nullcontext())
-    monkeypatch.setattr(f"{module}.get_forward_context", lambda: None)
     try:
         gpu.fill_(91)
-        if use_v2:
-            active = ActiveKVConnector.__new__(ActiveKVConnector)
-            active.kv_connector = connector
-            active._disabled = False
-            active._pending_load_kwargs = None
-            module = "vllm.v1.worker.gpu.kv_connector"
-            monkeypatch.setattr(f"{module}.is_forward_context_available", lambda: True)
-            monkeypatch.setattr(f"{module}.get_forward_context", lambda: None)
-            result = active.no_forward(output)
-        else:
-            result = KVConnectorModelRunnerMixin.kv_connector_no_forward(output, None)
+        active = ActiveKVConnector.__new__(ActiveKVConnector)
+        active.kv_connector = connector
+        active._disabled = False
+        active._pending_load_kwargs = None
+        module = "vllm.v1.worker.gpu.kv_connector"
+        monkeypatch.setattr(f"{module}.is_forward_context_available", lambda: True)
+        monkeypatch.setattr(f"{module}.get_forward_context", lambda: None)
+        result = active.no_forward(output)
         completion = (
             result.kv_connector_output.kv_connector_worker_meta
             if result.kv_connector_output is not None
@@ -154,20 +155,25 @@ def test_deferred_store_waits_for_draft_forward(monkeypatch):
     output.kv_connector_metadata = SimpleCPUOffloadMetadata(
         store_event=0, store_gpu_blocks=[0], store_cpu_blocks=[0]
     )
-    module = "vllm.v1.worker.kv_connector_model_runner_mixin"
-    monkeypatch.setattr(f"{module}.get_kv_transfer_group", lambda: connector)
-    monkeypatch.setattr(f"{module}.has_kv_transfer_group", lambda: True)
+    active = ActiveKVConnector.__new__(ActiveKVConnector)
+    active.kv_connector = connector
+    active._disabled = False
+    active._pending_load_kwargs = None
+    module = "vllm.v1.worker.gpu.kv_connector"
+    monkeypatch.setattr(f"{module}.is_forward_context_available", lambda: True)
     monkeypatch.setattr(f"{module}.get_forward_context", lambda: None)
     launch = MagicMock(wraps=backend.launch_copy)
     monkeypatch.setattr(backend, "launch_copy", launch)
     try:
-        with KVConnectorModelRunnerMixin._get_kv_connector_output(
-            output, defer_finalize=True
-        ):
-            gpu.fill_(17)
+        active.pre_forward(output)
+        # Target forward.
+        gpu.fill_(17)
+        active.finish_forward()
+        active.post_forward(set(), defer_finalize=True)
         launch.assert_not_called()
+        # Draft forward writes the final KV.
         gpu.fill_(91)
-        KVConnectorModelRunnerMixin.finalize_kv_connector()
+        active.finalize_step()
         assert launch.call_count == 1
         completion = None
         deadline = time.monotonic() + 5
@@ -590,12 +596,12 @@ def _dsa_specs(num_layers: int, block_size: int) -> dict[str, KVCacheSpec]:
     """A DSA model's per-layer specs (DeepSeek-V3.2, GLM-5.2).
 
     Each decoder layer contributes an MLA latent cache and the indexer's key
-    cache, whose pages differ in size (``MLAAttentionSpec`` off ``head_size``:
+    cache, whose pages differ in size (`MLAAttentionSpec` off `head_size`:
     512 + 64 for the latent, 128 fp8 keys + one fp32 scale per 128 elements for
-    the indexer). Both are ``MLAAttentionSpec`` with the same block size, so the
-    hybrid allocator puts them in one ``UniformTypeKVCacheSpecs`` cache group.
-    See ``DeepseekV32IndexerCache.get_kv_cache_spec`` and
-    ``MLAAttention.get_kv_cache_spec``.
+    the indexer). Both are `MLAAttentionSpec` with the same block size, so the
+    hybrid allocator puts them in one `UniformTypeKVCacheSpecs` cache group.
+    See `DeepseekV32IndexerCache.get_kv_cache_spec` and
+    `MLAAttention.get_kv_cache_spec`.
     """
     specs: dict[str, KVCacheSpec] = {}
     for i in range(num_layers):
@@ -620,7 +626,7 @@ def test_register_mixed_page_sizes_in_one_cache_group(monkeypatch):
 
     The MLA latent and indexer key caches of a layer have different page sizes,
     so the allocation has no single per-layer block size to reinterpret it with:
-    ``num_layers * (mla_page + indexer_page)`` is not a multiple of either page.
+    `num_layers * (mla_page + indexer_page)` is not a multiple of either page.
     Registration must derive each region from the placement metadata instead.
     """
     num_layers = 4
@@ -683,7 +689,7 @@ def test_register_mixed_page_sizes_in_one_cache_group(monkeypatch):
 def test_register_mixed_page_sizes_odd_block_counts(monkeypatch, rank_blocks):
     """Registration holds at block counts that are not powers of two.
 
-    ``num_blocks`` comes out of ``available_memory // bytes_per_block``, so
+    `num_blocks` comes out of `available_memory // bytes_per_block`, so
     any integer is reachable. Registration derives regions from the config's
     own block count and strides, and the CPU pool rounds down from the same
     per-block byte total; none of it assumes anything about how the count
@@ -730,10 +736,10 @@ def test_register_mixed_page_sizes_odd_block_counts(monkeypatch, rank_blocks):
 def test_mixed_page_byte_placement_is_dcp_invariant():
     """DCP scales a block's token span, not its byte placement.
 
-    ``get_kv_cache_config_from_groups`` never reads
-    ``decode_context_parallel_size``, so every placement field registration
+    `get_kv_cache_config_from_groups` never reads
+    `decode_context_parallel_size`, so every placement field registration
     derives regions from is identical at dcp=1 and dcp=2. What DCP scales is
-    the block's token span, reported by ``resolve_kv_cache_block_sizes``;
+    the block's token span, reported by `resolve_kv_cache_block_sizes`;
     checking that it doubles proves DCP was actually in effect, or the
     identity above would be trivially true.
     """

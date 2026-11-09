@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Pre-expert RMSNorm written once per route, in the ``[T * top_k, H]`` layout
+"""Pre-expert RMSNorm written once per route, in the `[T * top_k, H]` layout
 the ROCm MXFP4 (AITER top-1 per route) experts take."""
 
 import torch
@@ -48,7 +48,7 @@ def fused_rmsnorm_expand(
     input_scale: bool,
     repeats: int,
 ) -> torch.Tensor:
-    """RMSNorm of ``x`` written ``repeats`` times per row."""
+    """RMSNorm of `x` written `repeats` times per row."""
     assert x.dim() == 2 and x.is_contiguous()
     T, D = x.shape
     out = torch.empty((T, repeats, D), dtype=x.dtype, device=x.device)
@@ -73,8 +73,8 @@ def fused_rmsnorm_expand(
 
 
 def take_expanded(hidden_states: torch.Tensor, repeats: int) -> torch.Tensor | None:
-    """The ``[T * repeats, D]`` buffer behind a :func:`fused_rmsnorm_expand`
-    result, or ``None`` if ``hidden_states`` is not one."""
+    """The `[T * repeats, D]` buffer behind a `fused_rmsnorm_expand`
+    result, or `None` if `hidden_states` is not one."""
     out = getattr(hidden_states, _EXPANDED_ATTR, None)
     if (
         out is None

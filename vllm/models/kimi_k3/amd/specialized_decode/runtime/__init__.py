@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Kimi-K3 specialized decode on MI355X (layer mode), enabled by
-``additional_config={"decode_backend": "latency_specialized"}``.
+`additional_config={"decode_backend": "latency_specialized"}`.
 
-``specialized_decode_config`` runs in the model's ``__init__``, before the weights
+`specialized_decode_config` runs in the model's `__init__`, before the weights
 load. It returns None for the stock decode, and raises with every reason from
-``unsupported`` when the specialized decode is requested for a deployment it cannot
+`unsupported` when the specialized decode is requested for a deployment it cannot
 serve. Checks that need the loaded weights run when the executor is built
-(``decode.SpecializedDecode``), those that need the KV cache in ``prepare_kv``."""
+(`decode.SpecializedDecode`), those that need the KV cache in `prepare_kv`."""
 
 from dataclasses import dataclass
 
@@ -106,7 +106,7 @@ def specialized_decode_config(vllm_config) -> DecodeConfig | None:
 
 def m1_reasons(vllm_config) -> list[str]:
     """Why the MLA layers cannot run M1 (empty: they can). At DCP8 not a refusal:
-    those layers run vLLM's attention ops instead, then K2 (``step_reasons``)."""
+    those layers run vLLM's attention ops instead, then K2 (`step_reasons`)."""
     import vllm.envs as envs
     from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
@@ -136,7 +136,7 @@ def unsupported(vllm_config) -> list[str]:
     """Every reason this deployment cannot run the specialized decode (empty: it
     can). Config only: the loaded weights are checked when the executor is built.
     Default-deny: every feature below is refused, the kernels serve none of them.
-    What only M1 needs is not refused at DCP8 (``m1_reasons``)."""
+    What only M1 needs is not refused at DCP8 (`m1_reasons`)."""
     import vllm.envs as envs
     from vllm.config import CompilationMode
     from vllm.model_executor.layers.mamba.mamba_utils import (
@@ -211,15 +211,12 @@ def unsupported(vllm_config) -> list[str]:
         (
             MambaStateDtypeCalculator.kda_state_dtype(mc.dtype, cc.mamba_cache_dtype)
             != (torch.bfloat16, torch.float32),
-            "KDA cache dtypes other than a BF16 conv state and an FP32 recurrent "
-            "state (mamba cache dtype)",
+            (
+                "KDA cache dtypes other than a BF16 conv state and an FP32 recurrent "
+                "state (mamba cache dtype)"
+            ),
         ),
         (cc.use_replayssm or cc.use_kda_recoverssm, "ReplaySSM / RecoverSSM"),
-        # the model state hooks build the executor and bind it to each KV cache
-        (
-            not vllm_config.use_v2_model_runner,
-            "the V1 model runner (set VLLM_USE_V2_MODEL_RUNNER=1)",
-        ),
         # plan() and the layer kernels run in forward; a compiled forward would
         # trace them
         (
@@ -243,8 +240,8 @@ def unsupported(vllm_config) -> list[str]:
 
 
 def m1c_serves(q: int, seqs: int) -> bool:
-    """M1c runs every step of 1 .. ``seqs`` requests at qlen ``q``: its KV splits
-    share out evenly over the requests (``layers.m1c_at``)."""
+    """M1c runs every step of 1 .. `seqs` requests at qlen `q`: its KV splits
+    share out evenly over the requests (`layers.m1c_at`)."""
     if q not in M1C_QLENS:
         return False
     from vllm.models.kimi_k3.amd.specialized_decode.mono.attention import (
@@ -256,14 +253,16 @@ def m1c_serves(q: int, seqs: int) -> bool:
 
 def step_reasons(vllm_config, check_m1c: bool = True) -> list[str]:
     """The (max_num_seqs, speculative tokens) pairs served: a full step fits one
-    launch, and at DCP1 every step runs M1c (``check_m1c``: M1c's geometry needs
+    launch, and at DCP1 every step runs M1c (`check_m1c`: M1c's geometry needs
     the kernels' modules, so only on a supported platform)."""
     k = vllm_config.speculative_config.num_speculative_tokens
     seqs = vllm_config.scheduler_config.max_num_seqs
     if seqs not in MAX_SEQS or seqs * (k + 1) > MAX_ROWS:
         return [
-            f"max_num_seqs {seqs} at {k} speculative tokens (max_num_seqs 1, 2, 4 "
-            f"or 8 with max_num_seqs x (k + 1) <= {MAX_ROWS})"
+            (
+                f"max_num_seqs {seqs} at {k} speculative tokens (max_num_seqs 1, 2, 4 "
+                f"or 8 with max_num_seqs x (k + 1) <= {MAX_ROWS})"
+            )
         ]
     if vllm_config.parallel_config.decode_context_parallel_size != 1:
         return []
@@ -272,8 +271,10 @@ def step_reasons(vllm_config, check_m1c: bool = True) -> list[str]:
         return ["DCP1 without M1 (" + "; ".join(m1) + ")"]
     if check_m1c and not m1c_serves(k + 1, seqs):
         return [
-            f"DCP1 at {k} speculative tokens, max_num_seqs {seqs} (DCP1 runs M1c "
-            "only: 3 or 7 speculative tokens, max_num_seqs 1 or 2; use DCP8)"
+            (
+                f"DCP1 at {k} speculative tokens, max_num_seqs {seqs} (DCP1 runs M1c "
+                "only: 3 or 7 speculative tokens, max_num_seqs 1 or 2; use DCP8)"
+            )
         ]
     return []
 
