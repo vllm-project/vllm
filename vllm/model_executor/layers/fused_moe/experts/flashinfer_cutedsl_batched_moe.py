@@ -390,10 +390,6 @@ class FlashInferCuteDSLMxfp8BatchedExperts(mk.FusedMoEExpertsModular):
             and quant_config.gemm1_clamp_limit is None
         ), "Clamped or scaled SiLU is not supported."
 
-    @property
-    def expects_unquantized_inputs(self) -> bool:
-        return True
-
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
         return mk.FusedMoEActivationFormat.BatchedExperts
