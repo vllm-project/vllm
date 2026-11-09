@@ -6,9 +6,9 @@ Two fused paths fold the packed causal conv1d update, the gated delta-rule
 recurrence and the gated output RMSNorm into one launch, updating the conv
 state and the recurrent state in place:
 
-* the vLLM HIP kernel ``ops.fused_kda_decode`` (gfx942 / gfx950), and
-* AITER's Gluon kernels behind ``rocm_aiter_ops`` (CDNA4+): the packed
-  non-spec decode and the speculative-decode ``fused_recurrent_kda``.
+* the vLLM HIP kernel `ops.fused_kda_decode` (gfx942 / gfx950), and
+* AITER's Gluon kernels behind `rocm_aiter_ops` (CDNA4+): the packed
+  non-spec decode and the speculative-decode `fused_recurrent_kda`.
 
 Every output of each is compared against the unfused path the AMD layer falls
 back to, with the argument layout the layer itself uses.
@@ -67,8 +67,8 @@ def _requires_kernel() -> None:
 class KdaDecodeInputs:
     """One decode step of a Kimi-K3 KDA layer, in the layer's own layout.
 
-    ``num_spec`` > 0 sizes the conv state for speculative decoding
-    (``conv_width - 1 + num_spec`` taps, as ``kda_state_shape`` does).
+    `num_spec` > 0 sizes the conv state for speculative decoding
+    (`conv_width - 1 + num_spec` taps, as `kda_state_shape` does).
     """
 
     def __init__(
@@ -314,7 +314,7 @@ def test_fused_kda_decode_without_output_norm() -> None:
 def test_fused_kda_decode_skips_null_block_padding() -> None:
     """A CUDA-graph decode batch is padded with NULL_BLOCK_ID (0).
 
-    gdn_attn.py fills the tail of ``non_spec_state_indices_tensor`` with 0, and
+    gdn_attn.py fills the tail of `non_spec_state_indices_tensor` with 0, and
     the Triton chain zeroes those rows' output while leaving slot 0 alone. The
     fused kernel must do the same rather than read-modify-write slot 0's state
     once per padded row.
@@ -344,7 +344,7 @@ def test_decode_weights_staged_after_loading(
 ) -> None:
     """The fused-decode weight copies must not depend on the weight loaders.
 
-    Loaders that bypass ``weight_loader`` (e.g. ``--load-format dummy``) left
+    Loaders that bypass `weight_loader` (e.g. `--load-format dummy`) left
     them uninitialized, so decode could read NaN. Loading runs with grad mode
     on, so the copies must also stay out of autograd. A kernel-format reload
     overwrites the weights in place and reruns the post-load hook, which must
@@ -526,7 +526,7 @@ def test_aiter_packed_decode_leaves_untouched_slots_alone() -> None:
 def test_aiter_packed_decode_skips_null_block_padding() -> None:
     """A CUDA-graph decode batch is padded with NULL_BLOCK_ID (0).
 
-    gdn_attn.py fills the tail of ``non_spec_state_indices_tensor`` with 0 and
+    gdn_attn.py fills the tail of `non_spec_state_indices_tensor` with 0 and
     the Triton chain leaves slot 0 alone; the fused kernel's pad_slot_guard
     must do the same rather than read-modify-write slot 0 once per padded row.
     """
@@ -554,10 +554,10 @@ def test_aiter_packed_decode_skips_null_block_padding() -> None:
 
 
 class SpecBatch:
-    """A spec-only KDA batch: ``num_spec + 1`` query tokens per request at most.
+    """A spec-only KDA batch: `num_spec + 1` query tokens per request at most.
 
-    ``seq_lens`` are the per-request query lengths, ``num_accepted`` the tokens
-    verified in the previous step; ``state_indices`` is the [N, num_spec + 1]
+    `seq_lens` are the per-request query lengths, `num_accepted` the tokens
+    verified in the previous step; `state_indices` is the [N, num_spec + 1]
     per-token slot table the GDN metadata hands the layer.
     """
 

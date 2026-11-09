@@ -149,8 +149,8 @@ class Gemma4UnifiedProcessingInfo(Gemma4ProcessingInfo):
     """ProcessingInfo for the Gemma4 Unified variant.
 
     Two field-name differences from the tower-based parent:
-      * config → ``Gemma4UnifiedConfig`` (not ``Gemma4Config``)
-      * vision_config.``num_soft_tokens`` (not ``default_output_length``)
+      * config → `Gemma4UnifiedConfig` (not `Gemma4Config`)
+      * vision_config.`num_soft_tokens` (not `default_output_length`)
 
     Everything else (token sequencing, audio limits, video frame budget,
     parser construction) is inherited unchanged.
@@ -227,16 +227,16 @@ class Gemma4UnifiedForConditionalGeneration(Gemma4ForConditionalGeneration):
 
     Inherits multimodal embedding routing, PLE handling, bidirectional
     attention helpers, language-model forward, LoRA, and pipeline-parallel
-    support from :class:`Gemma4ForConditionalGeneration`.  Overrides only:
+    support from `Gemma4ForConditionalGeneration`.  Overrides only:
 
-      * ``__init__`` — builds the encoder-free vision embedder instead of
-        SigLIP/audio towers (LightOnOCR-style: ``nn.Module.__init__`` +
-        full rebuild, no ``super().__init__()``).
-      * ``hf_to_vllm_mapper`` — adds the ``model.vision_embedder.`` prefix.
-      * ``_process_image_input`` / ``_process_video_input`` /
-        ``_process_audio_input`` — encoder-free projection paths.
-      * ``load_weights`` — ignore-prefix list excludes the absent towers.
-      * ``get_mm_mapping`` — no tower entries.
+      * `__init__` — builds the encoder-free vision embedder instead of
+        SigLIP/audio towers (LightOnOCR-style: `nn.Module.__init__` +
+        full rebuild, no `super().__init__()`).
+      * `hf_to_vllm_mapper` — adds the `model.vision_embedder.` prefix.
+      * `_process_image_input` / `_process_video_input` /
+        `_process_audio_input` — encoder-free projection paths.
+      * `load_weights` — ignore-prefix list excludes the absent towers.
+      * `get_mm_mapping` — no tower entries.
     """
 
     # The encoder-free path consumes rescaled pixels from the processor.

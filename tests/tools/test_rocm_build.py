@@ -133,7 +133,7 @@ case $2 in
     fi ;;
   bake)
     echo "bake ${*:5}" >> "$CALLS"
-    echo "cache: ${CACHE:-own only}" >&2
+    echo "cache: ${CACHE:-own only}, to: ${CACHE_TO:-none}" >&2
     [[ $5 == --metadata-file ]] && for t in stack-rocm stack-wheels runtime test-deps
     do
       printf '  "%s": {\\n    "containerimage.digest": "sha256:%064d"\\n  },\\n' "$t" 1
@@ -242,13 +242,14 @@ def test_release_never_ships_images_from_the_ci_repo(tmp_path, mode):
     assert "vllm-ci-cache" not in stderr and "cache: own only" in stderr
 
 
-def test_ci_builds_reuse_the_trusted_images(tmp_path):
+@pytest.mark.parametrize("pull_request", ["7", "false"])
+def test_ci_builds_reuse_the_trusted_images(tmp_path, pull_request):
     status, stderr, calls = run_build(
         tmp_path,
         "base",
         ROCM_CI_REPO="rocm/vllm-dev",
         existing=TRUSTED_KEYED,
-        BUILDKITE_PULL_REQUEST="7",
+        BUILDKITE_PULL_REQUEST=pull_request,
     )
     assert status == 0, stderr
     assert not built_tags(calls, stderr)
@@ -276,6 +277,26 @@ def test_untrusted_builds_get_their_own_namespace(
     assert status == 0, stderr
     tags = built_tags(calls, stderr)
     assert tags and all(t.startswith(f"rocm/vllm-dev:{prefix}") for t in tags)
+
+
+@pytest.mark.parametrize(("pull_request", "prefix"), [("7", "pr7-"), ("false", "br-")])
+def test_only_pr_builds_read_back_their_rocm_vllm_dev_namespace(
+    tmp_path, pull_request, prefix
+):
+    # Any PR can push to rocm/vllm-dev, e.g. the br-main- tags a nightly would reuse.
+    status, stderr, calls = run_build(
+        tmp_path,
+        "base",
+        ROCM_CI_REPO="rocm/vllm-dev",
+        existing=(f"rocm/vllm-dev:{prefix}",),
+        BUILDKITE_PULL_REQUEST=pull_request,
+    )
+    assert status == 0, stderr
+    is_pr = pull_request != "false"
+    assert (stderr.count("Reusing rocm/vllm-dev:") == 3) == is_pr
+    assert (len(built_tags(calls, stderr)) == 3) != is_pr
+    assert ("to: none" in stderr) != is_pr
+    assert is_pr or "cache: rocm/vllm-ci-cache" in stderr  # still reads main's cache
 
 
 def test_ci_build_uploads_the_kernel_symbol_map_when_asked(tmp_path):
@@ -394,6 +415,32 @@ def test_a_pr_that_changes_the_stack_builds_it_without_waiting(tmp_path):
     assert status == 0, stderr
     assert "waiting for main's build" not in stderr
     assert len(built_tags(calls, stderr)) == 3
+
+
+def test_only_a_stack_the_build_pushed_can_be_cached(tmp_path):
+    # /ci rocm cache copies rocm-rocm-stack-built: never a stack this PR's CI reused,
+    # since other PRs' CI can push to its tags first.
+    for name, existing in (("built", ()), ("reused", ("rocm/vllm-dev:pr7-",))):
+        (tmp_path / name).mkdir()
+        status, stderr, calls = run_build(
+            tmp_path / name,
+            "base",
+            existing,
+            ROCM_CI_REPO="rocm/vllm-dev",
+            BUILDKITE_PULL_REQUEST="7",
+            CHANGED="docker/Dockerfile.rocm_base",
+        )
+        assert status == 0, stderr
+        built = [c for c in calls if c.startswith("meta rocm-rocm-stack-built ")]
+        if name == "reused":
+            assert "Reusing rocm/vllm-dev:pr7-stack-rocm-" in stderr
+            assert not built
+            continue
+        stack = r"rocm/vllm-dev:pr7-stack-rocm-\w+"
+        assert re.fullmatch(
+            rf"meta rocm-rocm-stack-built {stack}@sha256:\w+ {stack}-wheels@sha256:\w+",
+            built[0],
+        ), built
 
 
 def test_a_pr_that_changes_requirements_waits_only_for_the_stack(tmp_path):

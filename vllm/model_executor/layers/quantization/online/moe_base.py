@@ -162,7 +162,7 @@ class OnlineMoEMethodBase(
     def get_weights_for_quantization(
         self, layer: torch.nn.Module
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Return the high precision ``(w13, w2)`` of all local experts."""
+        """Return the high precision `(w13, w2)` of all local experts."""
         if self.requantization_source is None:
             return layer.w13_weight, layer.w2_weight
         w13, w2 = self.quantize_weights(layer, lambda w13, w2: (w13, w2))
@@ -171,7 +171,7 @@ class OnlineMoEMethodBase(
     def iter_weights_for_quantization(
         self, layer: torch.nn.Module
     ) -> Iterator[tuple[slice, torch.Tensor, torch.Tensor]]:
-        """Yield ``(experts, w13, w2)`` for groups of experts to quantize.
+        """Yield `(experts, w13, w2)` for groups of experts to quantize.
 
         The source dequantizes in chunks to bound staging memory. Without a source,
         all routed experts are yielded at once. Fused shared experts come last.
@@ -218,11 +218,11 @@ class OnlineMoEMethodBase(
 
         Args:
             layer: Layer to quantize.
-            quantize: Maps ``(w13, w2)`` of a group of experts to tensors, e.g.
-                ``(w13, w13_scale, w2, w2_scale)``.
+            quantize: Maps `(w13, w2)` of a group of experts to tensors, e.g.
+                `(w13, w13_scale, w2, w2_scale)`.
 
         Returns:
-            The ``quantize`` outputs for all local experts.
+            The `quantize` outputs for all local experts.
 
         """
         num_experts = layer.local_num_experts

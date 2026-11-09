@@ -64,7 +64,7 @@ class _RecordingEngine:
 class _RecordingModelRunner:
     def __init__(self, raise_on_reload: bool = False) -> None:
         self.seen_config: VllmConfig | None = None
-        self.reset_lora_calls = 0
+        self.target_hook_calls = 0
         self.raise_on_reload = raise_on_reload
         self.model = nn.Module()
 
@@ -76,8 +76,8 @@ class _RecordingModelRunner:
     def get_model(self) -> nn.Module:
         return self.model
 
-    def reset_lora_state(self) -> None:
-        self.reset_lora_calls += 1
+    def on_target_weights_replaced(self) -> None:
+        self.target_hook_calls += 1
 
     def get_draft_model(self) -> nn.Module | None:
         return None
@@ -159,7 +159,7 @@ def test_start_update_finish_delegates_to_engine():
     assert worker._weight_update_active is False
     assert not Worker.has_incomplete_weight_update(worker)
     assert engine.seen_configs == [worker.vllm_config] * 3
-    assert worker.model_runner.reset_lora_calls == 1
+    assert worker.model_runner.target_hook_calls == 1
 
 
 @pytest.mark.parametrize(
@@ -212,7 +212,7 @@ def test_rank_local_update_uses_data_parallel_index_after_reconfigure():
     assert worker._weight_update_active is True
 
 
-def test_finish_draft_session_keeps_lora_state(monkeypatch):
+def test_finish_draft_session_skips_the_target_hook(monkeypatch):
     engine = _RecordingEngine()
     engine.supports_draft_weight_update = True
     worker = _make_worker(engine)
@@ -223,7 +223,7 @@ def test_finish_draft_session_keeps_lora_state(monkeypatch):
     Worker.finish_weight_update(worker)
 
     assert isinstance(worker.model_runner, _RecordingModelRunner)
-    assert worker.model_runner.reset_lora_calls == 0
+    assert worker.model_runner.target_hook_calls == 0
 
 
 def test_refused_draft_start_keeps_weights_complete(monkeypatch):
