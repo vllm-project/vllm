@@ -481,9 +481,11 @@ class ParallelConfig:
     _allow_auto_resolve_cp_interleave_size: bool = True
     """Whether NIXL may select the interleave size automatically."""
 
-    data_parallel_index: int = Field(init=False)
+    data_parallel_index: int = Field(default=-1, ge=-1)
     """Equal to the data parallel rank but not used for torch process groups
-    and not overridden for dense models."""
+    and not overridden for dense models. Kept across `replace` once
+    `data_parallel_size` is 1, so configs derived on an independent DP rank
+    keep its replica index. -1 derives it from `data_parallel_rank`."""
 
     _api_process_count: int = Field(default=1, gt=0)
     """
@@ -1143,7 +1145,8 @@ class ParallelConfig:
                 f"the initial data_parallel_size ({self.data_parallel_size})."
             )
 
-        self.data_parallel_index = self.data_parallel_rank
+        if self.data_parallel_index < 0 or self.data_parallel_size > 1:
+            self.data_parallel_index = self.data_parallel_rank
 
         if self.distributed_executor_backend == "external_launcher":
             os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"

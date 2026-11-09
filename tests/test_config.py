@@ -49,7 +49,7 @@ from vllm.config.load import LoadConfig
 from vllm.config.mamba import MambaBackendEnum
 from vllm.config.profiler import ProfilerConfig
 from vllm.config.speculative import _validate_qwen3_omni_dspark
-from vllm.config.utils import get_field, hash_config
+from vllm.config.utils import get_field, hash_config, replace
 from vllm.config.vllm import OPTIMIZATION_LEVEL_TO_CONFIG, OptimizationLevel
 from vllm.platforms import current_platform
 from vllm.sampling_params import BeamSearchParams
@@ -1838,6 +1838,37 @@ def test_reconfigure_for_independent_dp_rank_on_multinode_dense_model():
     assert parallel_config.nnodes == 1
     assert parallel_config.node_rank == 0
     assert parallel_config.world_size == 8
+
+
+@pytest.mark.parametrize("dp_rank", [0, 3])
+def test_replace_keeps_data_parallel_index_on_independent_dp_rank(dp_rank: int):
+    """Configs derived on an independent DP rank (e.g. draft models) must keep
+    the replica index that keys the per-replica torch.compile cache."""
+    parallel_config = ParallelConfig(
+        data_parallel_size=4,
+        data_parallel_rank=dp_rank,
+        distributed_executor_backend="mp",
+    )
+    parallel_config.reconfigure_for_independent_dp_rank()
+
+    derived = replace(parallel_config, tensor_parallel_size=2)
+
+    assert derived.data_parallel_rank == 0
+    assert derived.data_parallel_index == dp_rank
+    assert parallel_config.data_parallel_index == dp_rank
+
+
+def test_replace_rederives_data_parallel_index_with_coupled_dp():
+    """With coupled DP the index follows a replaced `data_parallel_rank`."""
+    parallel_config = ParallelConfig(
+        data_parallel_size=4,
+        data_parallel_rank=1,
+        distributed_executor_backend="mp",
+    )
+
+    derived = replace(parallel_config, data_parallel_rank=2)
+
+    assert derived.data_parallel_index == 2
 
 
 @pytest.mark.parametrize("data_parallel_size", [4, 8])
