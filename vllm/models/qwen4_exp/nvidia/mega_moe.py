@@ -7,10 +7,16 @@ layout. `--quantization` / `--quantization-config` can force another MegaMoE
 format, and the experts are then requantized as they load. Block-FP8 experts,
 which MegaMoE cannot run, are requantized to MXFP8 unless a format is forced.
 The MTP drafter's config does not carry the online config, so its experts
-take the default format. The sigmoid-gated shared expert stays unfused and runs
-on an aux stream next to the router.
+take the default format.
+
+The shared expert is fused into the same launch, weighted per token by its
+sigmoid gate (DeepGEMM's `shared_expert_weights`), when the installed DeepGEMM
+supports it and its checkpoint tensors can be requantized like the routed
+experts'. Otherwise it stays unfused and runs on an aux stream next to the
+router.
 """
 
+import inspect
 from collections.abc import Iterable
 
 import torch
@@ -28,6 +34,7 @@ from vllm.model_executor.layers.fused_moe.deep_gemm_mega_moe import (
     DeepGemmMegaMoEExperts,
     MegaMoEActivation,
     MegaMoEWeightFormat,
+    MegaMoEWeightSpec,
 )
 from vllm.model_executor.layers.fused_moe.router.fused_topk_router import fused_topk
 from vllm.model_executor.layers.fused_moe.router.gate_linear import GateLinear
@@ -52,6 +59,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp8Static,
 )
 from vllm.model_executor.models.qwen2_moe import Qwen2MoeMLP
+from vllm.model_executor.models.utils import AutoWeightsLoader
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import _import_deep_gemm
 from vllm.utils.multi_stream_utils import maybe_execute_in_parallel
@@ -184,6 +192,55 @@ def mega_moe_expert_formats(
     return checkpoint_format, MEGA_MOE_WEIGHT_FORMATS[checkpoint_format]
 
 
+def _checkpoint_shared_expert_format(
+    quant_config: QuantizationConfig | None, prefix: str
+) -> str | None:
+    """The format the checkpoint stores the shared expert at `prefix` in, or
+    None if the fused loader cannot read it.
+
+    Checkpoints may keep it unquantized next to quantized routed experts: the
+    official FP8 checkpoint lists it in `modules_to_not_convert`.
+    """
+    if quant_config is None or isinstance(quant_config, OnlineQuantizationConfig):
+        return "bf16"
+    if not isinstance(quant_config, Fp8Config):
+        return None
+    # The checkpoint's own projection names, as `modules_to_not_convert` lists
+    # them: `gate_up_proj` would depend on the model's packed-modules mapping.
+    skipped = {
+        is_layer_skipped(
+            f"{prefix}.{proj}",
+            quant_config.ignored_layers,
+            match_mode=quant_config.ignored_layers_match_mode,
+        )
+        for proj in _CHECKPOINT_SHARDS
+    }
+    if skipped == {True}:
+        return "bf16"
+    if (
+        skipped == {False}
+        and quant_config.weight_block_size == [128, 128]
+        and quant_config.store_dtype is None
+    ):
+        return "fp8_block"
+    return None
+
+
+def _fuses_gated_shared_expert(
+    shared_checkpoint_format: str | None, weight_format: MegaMoEWeightFormat
+) -> bool:
+    """Whether the gated shared expert can run inside the MegaMoE launch."""
+    if weight_format.uses_nvfp4_api or shared_checkpoint_format is None:
+        # No per-token shared weights in nvfp4_mega_moe, or a shared-expert
+        # checkpoint format the fused loader does not read.
+        return False
+    kernel = getattr(_import_deep_gemm(), weight_format.kernel, None)
+    return (
+        kernel is not None
+        and "shared_expert_weights" in inspect.signature(kernel).parameters
+    )
+
+
 class _CheckLoaded(QuantizeMethodBase):
     """Run by vLLM after loading: fails if an expert shard got its weight but
     not its scale, or the reverse, instead of leaving that expert zeroed."""
@@ -202,7 +259,7 @@ class _CheckLoaded(QuantizeMethodBase):
         if layer.pending_shards:
             raise ValueError(
                 f"{layer.prefix}: expert shards without both weight and scale: "
-                f"{sorted(layer.pending_shards)[:4]}"
+                f"{sorted(layer.pending_shards, key=str)[:4]}"
             )
 
 
@@ -215,12 +272,20 @@ class Qwen4ExpMegaMoEExperts(DeepGemmMegaMoEExperts):
     """
 
     def __init__(
-        self, vllm_config: VllmConfig, checkpoint_format: str, **kwargs
+        self,
+        vllm_config: VllmConfig,
+        checkpoint_format: str,
+        shared_expert_intermediate_size: int = 0,
+        shared_checkpoint_format: str = "bf16",
+        **kwargs,
     ) -> None:
+        # Read by `_fusable_shared_experts` during the base constructor.
+        self._shared_expert_intermediate_size = shared_expert_intermediate_size
         super().__init__(vllm_config, activation=MegaMoEActivation(), **kwargs)
         self.quant_method = _CheckLoaded()
         self.checkpoint_format = checkpoint_format
         self._shard_tensors = _SHARD_TENSORS[checkpoint_format]
+        self.shared_checkpoint_format = shared_checkpoint_format
         # Parameters may sit on meta (weight-cache IPC loading, layerwise
         # reload), so requantize on the current GPU.
         self._device = torch.device(
@@ -228,11 +293,34 @@ class Qwen4ExpMegaMoEExperts(DeepGemmMegaMoEExperts):
         )
         # Tensors of expert shards still missing their weight or scale; a
         # chunked weight update may split the two across load_weights calls.
-        self.pending_shards: dict[tuple[int, str], dict[str, torch.Tensor]] = {}
+        # Key (None, shard) is the fused shared expert.
+        self.pending_shards: dict[tuple[int | None, str], dict[str, torch.Tensor]] = {}
+
+    def _fusable_shared_experts(
+        self, shared_experts: nn.Module | None
+    ) -> tuple[int, MegaMoEWeightSpec | None]:
+        """Fuse the shared expert at the precision of a routed expert slice.
+
+        Its checkpoint tensors are requantized as they load, like the routed
+        experts', so only its size and the installed DeepGEMM decide.
+        """
+        size = self._shared_expert_intermediate_size
+        if size == 0:
+            return 0, None
+        if size % self.intermediate_size:
+            raise ValueError(
+                f"Shared expert intermediate size {size} is not a multiple of "
+                f"the routed {self.intermediate_size}."
+            )
+        spec = self.weight_format.shared[0]
+        if not self._kernel_fuses_shared_experts(spec):
+            raise ValueError("The installed DeepGEMM cannot fuse shared experts.")
+        return size // self.intermediate_size, spec
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         """Load `{expert}.{gate,up,down}_proj.{weight,<scale>}` or the fused
-        `gate_up_proj` / `down_proj` BF16 tensors of every expert."""
+        `gate_up_proj` / `down_proj` BF16 tensors of every expert, and the
+        fused shared expert's tensors as `shared.{gate,up,down}_proj.*`."""
         loaded: set[str] = set()
         for name, tensor in weights:
             if (
@@ -251,44 +339,54 @@ class Qwen4ExpMegaMoEExperts(DeepGemmMegaMoEExperts):
                         loaded |= self._load_shard(expert_id, shard_id, "weight", shard)
                 continue
             parts = name.split(".")
+            shared = parts[0] == "shared" and self.has_fused_shared_experts
+            fmt = self.shared_checkpoint_format if shared else self.checkpoint_format
             if (
                 len(parts) != 3
                 or parts[1] not in _CHECKPOINT_SHARDS
-                or parts[2] not in self._shard_tensors
+                or parts[2] not in _SHARD_TENSORS[fmt]
             ):
                 raise ValueError(
-                    f"{self.prefix}: unexpected {self.checkpoint_format} expert "
-                    f"tensor {name!r}; expected {{expert}}.{{gate,up,down}}_proj."
-                    f"{{{','.join(self._shard_tensors)}}}."
+                    f"{self.prefix}: unexpected {fmt} expert tensor {name!r}; "
+                    "expected {expert,shared}.{gate,up,down}_proj."
+                    f"{{{','.join(_SHARD_TENSORS[fmt])}}}."
                 )
             expert, proj, kind = parts
-            if self._map_global_expert_id(int(expert)):
+            if shared:
+                loaded |= self._load_shard(None, _CHECKPOINT_SHARDS[proj], kind, tensor)
+            elif self._map_global_expert_id(int(expert)):
                 loaded |= self._load_shard(
                     int(expert), _CHECKPOINT_SHARDS[proj], kind, tensor
                 )
         return loaded
 
     def _load_shard(
-        self, expert_id: int, shard_id: str, kind: str, tensor: torch.Tensor
+        self, expert_id: int | None, shard_id: str, kind: str, tensor: torch.Tensor
     ) -> set[str]:
-        """Write or requantize one checkpoint tensor; return the parameters
+        """Write or requantize one checkpoint tensor of a routed expert, or of
+        the fused shared expert when `expert_id` is None; return the parameters
         written, so the loader still flags a parameter nothing reached."""
-        if self.checkpoint_format == self.weight_format.name:
+        target, checkpoint_format = self.weight_format, self.checkpoint_format
+        if expert_id is None:
+            # The shared expert runs at `shared_spec`: MXFP8 next to MX experts.
+            assert self.shared_spec is not None
+            if self.shared_spec.scale_group_k:
+                target = MEGA_MOE_MXFP8
+            checkpoint_format = self.shared_checkpoint_format
+        if checkpoint_format == target.name:
             suffix = "weight" if kind == "weight" else "weight_scale"
             return {self._write(expert_id, shard_id, suffix, tensor)}
+        shard_tensors = _SHARD_TENSORS[checkpoint_format]
         pending = self.pending_shards.setdefault((expert_id, shard_id), {})
         pending[kind] = tensor
-        if len(pending) < len(self._shard_tensors):
+        if len(pending) < len(shard_tensors):
             return set()
         del self.pending_shards[(expert_id, shard_id)]
         scale = None
-        if self.checkpoint_format != "bf16":
-            scale = pending[self._shard_tensors[1]].to(self._device)
+        if checkpoint_format != "bf16":
+            scale = pending[shard_tensors[1]].to(self._device)
         weight, scale = _requantize(
-            pending["weight"].to(self._device),
-            scale,
-            self.checkpoint_format,
-            self.weight_format,
+            pending["weight"].to(self._device), scale, checkpoint_format, target
         )
         return {
             self._write(expert_id, shard_id, "weight", weight),
@@ -296,8 +394,14 @@ class Qwen4ExpMegaMoEExperts(DeepGemmMegaMoEExperts):
         }
 
     def _write(
-        self, expert_id: int, shard_id: str, suffix: str, tensor: torch.Tensor
+        self, expert_id: int | None, shard_id: str, suffix: str, tensor: torch.Tensor
     ) -> str:
+        if expert_id is None:
+            name = f"shared_{'l2' if shard_id == 'w2' else 'l1'}_{suffix}"
+            param = getattr(self, name)
+            # The shared loader reads the shard and kind from the name.
+            param.weight_loader(param, tensor, f"shared_experts.{shard_id}.{suffix}")
+            return name
         name = f"{'w2' if shard_id == 'w2' else 'w13'}_{suffix}"
         param = getattr(self, name)
         # The parameter's own loader: layerwise reload wraps it.
@@ -362,29 +466,42 @@ class Qwen4ExpMegaMoeBlock(nn.Module):
             quant_config=None,
             prefix=f"{prefix}.shared_expert_gate",
         )
-        self.shared_expert = Qwen2MoeMLP(
-            hidden_size=config.hidden_size,
-            intermediate_size=config.shared_expert_intermediate_size,
-            hidden_act=config.hidden_act,
-            quant_config=vllm_config.quant_config,
-            reduce_results=False,
-            expert_gate=self.shared_expert_gate,
-            prefix=f"{prefix}.shared_expert",
+        checkpoint_format, weight_format = mega_moe_expert_formats(
+            vllm_config, f"{prefix}.experts"
         )
-        # The shared MLP overlaps the router on the aux stream and joins before
-        # the MegaMoE launch, which needs every SM.
+        shared_checkpoint_format = _checkpoint_shared_expert_format(
+            vllm_config.quant_config, f"{prefix}.shared_expert"
+        )
+        fuse_shared = _fuses_gated_shared_expert(
+            shared_checkpoint_format, weight_format
+        )
+        logger.info_once(
+            "Qwen4Exp MegaMoE runs %s routed experts (checkpoint: %s), shared "
+            "expert %s (checkpoint: %s).",
+            weight_format.name,
+            checkpoint_format,
+            "fused" if fuse_shared else "unfused",
+            shared_checkpoint_format,
+        )
+        # A fused shared expert lives in `self.experts`; its gate stays here.
+        self.shared_expert: Qwen2MoeMLP | None = None
+        if not fuse_shared:
+            self.shared_expert = Qwen2MoeMLP(
+                hidden_size=config.hidden_size,
+                intermediate_size=config.shared_expert_intermediate_size,
+                hidden_act=config.hidden_act,
+                quant_config=vllm_config.quant_config,
+                reduce_results=False,
+                expert_gate=self.shared_expert_gate,
+                prefix=f"{prefix}.shared_expert",
+            )
+        # The unfused shared MLP (or the fused one's gate) overlaps the router
+        # on the aux stream and joins before the MegaMoE launch, which needs
+        # every SM.
         self.shared_stream = (
             None if envs.VLLM_DISABLE_SHARED_EXPERTS_STREAM else aux_stream()
         )
         self.shared_events = (torch.cuda.Event(), torch.cuda.Event())
-        checkpoint_format, weight_format = mega_moe_expert_formats(
-            vllm_config, f"{prefix}.experts"
-        )
-        logger.info_once(
-            "Qwen4Exp MegaMoE runs %s routed experts (checkpoint: %s).",
-            weight_format.name,
-            checkpoint_format,
-        )
         self.experts = Qwen4ExpMegaMoEExperts(
             vllm_config,
             checkpoint_format=checkpoint_format,
@@ -396,6 +513,11 @@ class Qwen4ExpMegaMoeBlock(nn.Module):
             top_k=self.top_k,
             hidden_size=config.hidden_size,
             intermediate_size=config.moe_intermediate_size,
+            shared_expert_intermediate_size=(
+                config.shared_expert_intermediate_size if fuse_shared else 0
+            ),
+            # Read only when the shared expert is fused.
+            shared_checkpoint_format=shared_checkpoint_format or "bf16",
             prefix=f"{prefix}.experts",
         )
 
@@ -406,12 +528,42 @@ class Qwen4ExpMegaMoeBlock(nn.Module):
                 hidden_states, router_logits, self.top_k, self.renormalize
             )
 
-        (topk_weights, topk_ids, _), shared_out = maybe_execute_in_parallel(
-            route,
-            lambda: self.shared_expert(hidden_states),
-            *self.shared_events,
-            self.shared_stream,
+        shared_expert = self.shared_expert
+        if shared_expert is not None:
+            (topk_weights, topk_ids, _), shared_out = maybe_execute_in_parallel(
+                route,
+                lambda: shared_expert(hidden_states),
+                *self.shared_events,
+                self.shared_stream,
+            )
+            y = self.experts(hidden_states, topk_weights, topk_ids)
+            y += shared_out
+            return y
+
+        def shared_gate() -> torch.Tensor:
+            gate_logits, _ = self.shared_expert_gate(hidden_states)
+            return torch.sigmoid(gate_logits.view(-1).float())
+
+        (topk_weights, topk_ids, _), shared_weights = maybe_execute_in_parallel(
+            route, shared_gate, *self.shared_events, self.shared_stream
         )
-        y = self.experts(hidden_states, topk_weights, topk_ids)
-        y += shared_out
-        return y
+        return self.experts(
+            hidden_states, topk_weights, topk_ids, shared_expert_weights=shared_weights
+        )
+
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        """Route a fused shared expert's checkpoint tensors to the experts as
+        `experts.shared.{gate,up,down}_proj.*`."""
+
+        def rename(name: str, tensor: torch.Tensor) -> str:
+            if self.shared_expert is None and name.startswith("shared_expert."):
+                proj, _, kind = name.removeprefix("shared_expert.").partition(".")
+                if proj == "gate_up_proj":
+                    # Stacked by the model's weights mapper; undo it.
+                    proj = ("gate_proj", "up_proj")[tensor.shard_id]
+                return f"experts.shared.{proj}.{kind}"
+            return name
+
+        return AutoWeightsLoader(self).load_weights(
+            (rename(name, tensor), tensor) for name, tensor in weights
+        )

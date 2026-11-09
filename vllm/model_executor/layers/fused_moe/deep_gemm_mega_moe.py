@@ -735,6 +735,7 @@ class DeepGemmMegaMoEExperts(nn.Module):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         shared_experts: nn.Module | None = None,
+        shared_expert_weights: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Run the routed and shared experts on this rank's tokens.
 
@@ -745,6 +746,9 @@ class DeepGemmMegaMoEExperts(nn.Module):
             shared_experts: Unfused shared MLP, run on `hidden_states` and
                 added to the output. Must be `None` when this layer fused the
                 shared expert at construction.
+            shared_expert_weights: FP32 `[num_tokens]` per-token weight of the
+                fused shared expert's output (e.g. a sigmoid gate); `None`
+                adds it unweighted.
 
         Returns:
             BF16 `[num_tokens, hidden_size]` routed plus shared expert output.
@@ -832,6 +836,12 @@ class DeepGemmMegaMoEExperts(nn.Module):
         if self.has_fused_shared_experts:
             kwargs["shared_l1_weights"] = self._kernel_weights("shared_l1")
             kwargs["shared_l2_weights"] = self._kernel_weights("shared_l2")
+            if shared_expert_weights is not None:
+                kwargs["shared_expert_weights"] = shared_expert_weights
+        elif shared_expert_weights is not None:
+            raise ValueError(
+                f"{self.prefix}: shared_expert_weights needs a fused shared expert."
+            )
         y = torch.empty_like(hidden_states, dtype=torch.bfloat16)
         getattr(deep_gemm, fmt.kernel)(
             y,
