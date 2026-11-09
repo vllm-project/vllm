@@ -295,6 +295,7 @@ Training framework:
 
 ## 12. Known limits
 
+- **Release is per session.** A long agentic session (hundreds of trajectories, up to about a day) keeps every object until it is released, including the copies of blocks recomputed at a new version after each weight update resets the GPU prefix cache. GRPO groups are trained within one step, so session release fits them; long sessions are the costly case. Two follow-ups are possible: release a trajectory's private objects (its tails, manifests and `hash~<tag>` copies) when that trajectory is consumed, by ownership alone; or release single blocks by reference counts kept per session, which needs the writer to know who lists each name, the trainer to report each request it consumed, and the engine to stop hitting deleted blocks.
 - **Teacher scoring at prompt positions.** On-policy distillation runs a teacher over the student's sequence as a prompt and needs the teacher's top-k logprobs (or hidden states) at those prompt positions. Top-k and hidden states are captured at generated positions only; prompt positions need a capture over `[aux_start, P)` stored like blocks.
 - **Contexts that are not append-only** (history reasoning dropped, rewritten or truncated context) re-prefill from the rewrite point every turn: rows are correct, but prefix reuse and the decode-end snapshot do not apply, and the full-deep cost grows with every rewritten turn.
 
