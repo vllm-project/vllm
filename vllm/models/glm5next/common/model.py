@@ -509,6 +509,11 @@ class Glm5NextDecoderLayer(nn.Module):
         self.layer_kind = "kda" if is_kda_layer else "mla"
         self.is_sequence_parallel = parallel_config.use_sequence_parallel_moe
         replicate = self.layer_kind in _replicated_mixer_kinds()
+        if replicate:
+            # Nothing re-syncs ranks after a replicated block: autotune must agree.
+            from vllm.triton_utils.tp_synced_autotune import install
+
+            install()
         if replicate and self.is_sequence_parallel:
             raise NotImplementedError(
                 "VLLM_GLM5NEXT_REPLICATE_MIXER is not supported with "
