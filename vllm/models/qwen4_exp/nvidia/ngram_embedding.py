@@ -438,11 +438,14 @@ class Qwen4ExpNGramEmbedding(nn.Module):
             if engram_config is not None and engram_config.cpu_offload
             else Qwen4ExpPLEDeviceEmbedding
         )
-        # A TP reduce-scatter covers all vocabulary owners only when ETP=TP.
+        tp_group = get_tp_group()
+        etp_group = get_etp_group()
+        # Fuse ETP reduction with SP sharding only when both groups have the
+        # same ranks. Otherwise, keep the collectives on their own groups.
         # Disk-offload ranks hold full rows, so they only shard tokens.
         self.use_reduce_scatter = (
             self.use_sequence_parallel
-            and get_etp_group().world_size == get_tp_group().world_size
+            and set(etp_group.ranks) == set(tp_group.ranks)
             and embedding_cls is not Qwen4ExpPLEDiskOffloadEmbedding
         )
         self.ngram_embedding = embedding_cls(

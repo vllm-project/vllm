@@ -291,6 +291,7 @@ class Qwen4ExpDecoderLayer(nn.Module):
         if prev_block_output is None:
             assert prev_injection is None
         attn_hc = self.attn_hyper_connection
+        ple_output_is_full_tokens = False
         if self.ple is not None:
             # PLE adds directly to the multi-stream state, so pending HC state
             # must be materialized before the addition.
@@ -308,6 +309,7 @@ class Qwen4ExpDecoderLayer(nn.Module):
                 query_start_loc,
                 ngram_context,
             )
+            ple_output_is_full_tokens = self.ple.use_sequence_parallel
 
         # Fuse a pending combine with this HC module's mix when possible.
         if prev_block_output is not None:
@@ -318,8 +320,14 @@ class Qwen4ExpDecoderLayer(nn.Module):
             hidden_states, block_input, injection = attn_hc.mix(hidden_states)
 
         if self.use_hc_sequence_parallel:
-            # Positions retain the full token axis for both text and MRoPE inputs.
-            block_input = sp_all_gather(block_input)[: positions.shape[-1]]
+            if ple_output_is_full_tokens:
+                # PLE gathered its output with the convolution input. Keep the
+                # attention input full and restore HC state to local token rows.
+                hidden_states = sp_shard(hidden_states)
+                injection = sp_shard(injection)
+            else:
+                # Positions retain the full token axis for text and MRoPE.
+                block_input = sp_all_gather(block_input)[: positions.shape[-1]]
         if self.layer_type == "linear_attention":
             attn_out = self.linear_attn(hidden_states=block_input)
         elif self.layer_type in _QSA_LAYER_TYPES:
@@ -442,7 +450,9 @@ class Qwen4ExpModel(nn.Module):
             )
 
         self.start_layer, self.end_layer, self.layers = make_layers(
-            config.num_hidden_layers, get_layer, prefix=f"{prefix}.layers"
+            config.num_hidden_layers,
+            get_layer,
+            prefix=f"{prefix}.layers",
         )
         self.fused_shared_expert_layers = get_fused_shared_expert_layers(
             self,

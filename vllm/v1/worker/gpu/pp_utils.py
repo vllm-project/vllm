@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Pipeline Parallelism utils for V2 Model Runner."""
+"""Pipeline-parallel utilities for GPU workers."""
 
 from collections import deque
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
@@ -14,6 +15,19 @@ from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.worker.gpu.input_batch import InputBatch
+
+if TYPE_CHECKING:
+    from vllm.config import VllmConfig
+
+
+def get_pp_all_gather_tensors(vllm_config: "VllmConfig") -> dict[str, bool] | None:
+    """Keep sequence-parallel hidden-state shards intact across PP boundaries."""
+    parallel_config = vllm_config.parallel_config
+    if parallel_config.tensor_parallel_size <= 1 or not (
+        parallel_config.enable_hc_sp or parallel_config.use_sequence_parallel_moe
+    ):
+        return None
+    return {"hidden_states": False}
 
 
 @dataclass
