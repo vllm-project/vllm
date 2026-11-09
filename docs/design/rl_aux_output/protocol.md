@@ -201,6 +201,7 @@ One snapshot is 128 rows × 40 layers, about 2.7 MB, against about 692 MB for a 
 
 - **Append-only history.** Multi-turn reuse needs each prompt to extend the previous one token for token. A chat template that drops earlier turns' reasoning changes the prefix, and every turn re-prefills from the first changed token at full depth (Known limits).
 - **No speculative decoding with the decode-end snapshot.** The first version of the snapshot patch refuses speculative decoding. With speculative decoding, only prompt-end snapshots apply.
+- **Enforced, not optional.** The worker refuses to start with aux outputs on and `swa_bounded_replay=True`, the drivers default it off, and the reader rejects a manifest written by the earlier partial-capture build. There is no partial-capture mode.
 
 **Cost.** At 14.6K context, 512 sessions × 16 turns on one node, full depth took 58–62% less time than bounded replay in every arm, R3 off included, with 0 missing and 0 wrong rows; decode-end snapshots took another 10.5% off (experiments: full depth). The 512K top scenario has not been run at full depth.
 
