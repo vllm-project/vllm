@@ -88,16 +88,34 @@ def _use_rocm_sparse_triton(
     )
 
 
-def _is_long_bf16_prefill(
+def _use_triton_long_bf16_prefill(
     kv_dtype: torch.dtype,
     metadata: "ROCMAiterMLASparseMetadata",
 ) -> bool:
+    """Only gfx942 routes long pure BF16 prefills to Triton.
+
+    Other archs must keep persistent AITER metadata for these batches.
+    """
+    from vllm.platforms.rocm import on_gfx942
+
     return (
-        kv_dtype == torch.bfloat16
+        on_gfx942()
+        and kv_dtype == torch.bfloat16
         and metadata.num_decodes == 0
         and metadata.num_prefills > 0
         and metadata.prefill_max_seq_len > metadata.topk_tokens
     )
+
+
+def _aiter_uses_persistent_mla_decode(
+    num_tokens: int, num_heads: int, q_dtype: torch.dtype, kv_dtype: torch.dtype
+) -> bool:
+    """AITER ignores persistent metadata for some gfx950 BF16 16-head batches."""
+    try:
+        from aiter.mla import _use_persistent_mla_decode
+    except ImportError:
+        return True
+    return _use_persistent_mla_decode(num_tokens, num_heads, 1, q_dtype, kv_dtype)
 
 
 @triton.jit
@@ -781,12 +799,17 @@ class ROCMAiterMLASparseMetadataBuilder(
         reduce_indptr = None
         reduce_final_map = None
         reduce_partial_map = None
-        is_long_pure_bf16_prefill = _is_long_bf16_prefill(self._mla_kv_dtype, metadata)
         if (
             self._use_persistent_metadata
             and not use_triton_sparse
-            and not is_long_pure_bf16_prefill
+            and not _use_triton_long_bf16_prefill(self._mla_kv_dtype, metadata)
             and num_tokens > 0
+            and _aiter_uses_persistent_mla_decode(
+                num_tokens,
+                self._num_attention_heads,
+                self._mla_q_dtype,
+                self._mla_kv_dtype,
+            )
         ):
             with gpu_sync_allowed():
                 seq_lens_cpu = common_attn_metadata.seq_lens[:num_reqs].cpu().numpy()
@@ -834,7 +857,6 @@ class ROCMAiterMLASparseMetadataBuilder(
                     dtype_q=self._mla_q_dtype,
                     dtype_kv=self._mla_kv_dtype,
                 )
-                torch.cuda.current_stream(self.device).synchronize()
                 self._prev_metadata_key = metadata_key
             work_meta_data = self._mla_work_meta_data
             work_indptr = self._mla_work_indptr
@@ -1095,13 +1117,9 @@ class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
             )
         )
 
-        # Long BF16 prefills omit persistent metadata. gfx942's
-        # nonpersistent ASM path is unsupported or unsafe for these shapes.
         # Sink attention has its own Triton/LSE dispatch below.
-        triton_prefill_fallback = (
-            not need_lse
-            and on_gfx942()
-            and _is_long_bf16_prefill(kv_c_and_k_pe_cache.dtype, attn_metadata)
+        triton_prefill_fallback = not need_lse and _use_triton_long_bf16_prefill(
+            kv_c_and_k_pe_cache.dtype, attn_metadata
         )
         if (
             triton_sink_fallback
@@ -1231,7 +1249,7 @@ class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
         assert kv_indptr is not None
         if need_lse:
             # gfx942 has no persistent MLA code object that writes final LSE.
-            # The split-KV path consumes the same ragged indices and is exact.
+            # The split-KV path consumes the same ragged-index layout.
             assert attn_metadata.qo_indptr is not None
             assert attn_metadata.paged_kv_last_page_len is not None
             lse = rocm_aiter_ops.mla_decode_fwd_lse(
