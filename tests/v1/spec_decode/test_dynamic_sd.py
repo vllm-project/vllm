@@ -177,6 +177,36 @@ def test_scheduler_clamps_dsd_k_to_runtime_num_speculative_tokens():
     assert output.num_spec_tokens_to_schedule == 3
 
 
+def test_scheduler_keys_dsd_tier_on_running_batch_during_ramp():
+    """The tier follows the running batch -- the concurrency the schedule is
+    expressed in -- not the per-step scheduled count.
+
+    With PP=2 a request whose prompt is fully scheduled stays running but is
+    not scheduled again until its output returns. Admitting one request per
+    step therefore ramps the running batch while the step keeps scheduling
+    only the newest request's prefill: the per-step key would hold the wave
+    in the K=max tier for the whole ramp, while the running-batch key drops
+    to the K=0 band as the wave forms.
+    """
+    scheduler = create_scheduler(
+        pipeline_parallel_size=2,
+        max_num_seqs=8,
+        max_num_batched_tokens=64,
+        num_speculative_tokens=3,
+        num_speculative_tokens_per_batch_size=[(1, 4, 3), (5, 8, 0)],
+    )
+    requests = create_requests(num_requests=5, num_tokens=8)
+    for request in requests:
+        scheduler.add_request(request)
+        output = scheduler.schedule()
+        # Only the newly admitted request's prefill is scheduled; the older
+        # requests stay running unscheduled, awaiting their PP output.
+        assert len(output.num_scheduled_tokens) == 1
+
+    assert len(scheduler.running) == 5
+    assert output.num_spec_tokens_to_schedule == 0
+
+
 def test_scheduler_falls_back_to_static_k_when_dsd_not_configured():
     scheduler = create_scheduler(
         max_num_seqs=4,

@@ -1761,12 +1761,13 @@ class Scheduler(SchedulerInterface):
             self._free_cow_retained_blocks(cow_retained_blocks, self.sched_step_seq + 1)
         pending_kv_cache_block_copies = kv_cache_block_copies or None
 
-        # Dynamic speculative decoding: compute optimal K
+        # Dynamic speculative decoding: compute optimal K from the running
+        # batch size -- the concurrency the schedule is expressed in. The
+        # per-step scheduled count collapses to 1-2 during a chunked-prefill
+        # ramp, pinning a large wave to the K=max tier for the whole ramp.
         num_spec_tokens_to_schedule = self.num_spec_tokens
-        if self.dynamic_sd_lookup is not None and len(num_scheduled_tokens) > 0:
-            num_spec_tokens_to_schedule = self.dynamic_sd_lookup[
-                len(num_scheduled_tokens)
-            ]
+        if self.dynamic_sd_lookup is not None and self.running:
+            num_spec_tokens_to_schedule = self.dynamic_sd_lookup[len(self.running)]
 
         scheduled_encoder_input_stats = None
         if (
