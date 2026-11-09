@@ -738,3 +738,35 @@ def test_committed_kv_cache_tensors_match_views(vmm, layout):
                 assert view.stride(0) * view.element_size() == tensor.block_stride
     finally:
         kv_cache.free()
+
+
+@requires_cuda
+def test_capture_gets_the_memory_warmup_committed(vmm, vllm_runner, monkeypatch):
+    """Warmup's KV blocks are released before CUDA graph capture, so large
+    graphs (e.g. encoder graphs) fit; the cache regrows after capture."""
+    from vllm.v1.worker.gpu.model_runner import GPUModelRunner
+
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    committed_at_capture = []
+    capture_model = GPUModelRunner.capture_model
+
+    def recording_capture_model(self, *args, **kwargs):
+        if self.extensible_kv_cache is not None:
+            committed_at_capture.append(self.extensible_kv_cache.num_committed_blocks)
+        return capture_model(self, *args, **kwargs)
+
+    monkeypatch.setattr(GPUModelRunner, "capture_model", recording_capture_model)
+    prompts = ["The capital of France is", "One, two, three,"]
+    outputs = {}
+    for extensible in (True, False):
+        with vllm_runner(
+            "Qwen/Qwen3-0.6B",
+            max_model_len=256,
+            enable_extensible_kv_cache=extensible,
+        ) as runner:
+            outputs[extensible] = runner.generate_greedy(prompts, max_tokens=16)
+            num_blocks = runner.llm.llm_engine.vllm_config.cache_config.num_gpu_blocks
+            assert num_blocks > 1
+    # Only the null block stays committed for capture.
+    assert committed_at_capture == [1]
+    assert outputs[True] == outputs[False]
