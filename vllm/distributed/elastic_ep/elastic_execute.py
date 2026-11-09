@@ -12,9 +12,11 @@ import torch
 import torch.nn as nn
 from torch.distributed import P2POp
 
+from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphWrapper
 from vllm.compilation.cuda_graph import CUDAGraphWrapper
 from vllm.compilation.wrapper import reset_compile_wrapper
 from vllm.config import ParallelConfig, set_current_vllm_config
+from vllm.config.utils import hash_config_cached
 from vllm.distributed import (
     get_dp_group,
     get_ep_group,
@@ -54,7 +56,8 @@ from vllm.platforms import current_platform
 from vllm.utils import is_moe_layer
 from vllm.v1.engine import ReconfigureDistributedRequest, ReconfigureRankType
 from vllm.v1.worker.dp_utils import skip_dp_coordination
-from vllm.v1.worker.gpu_ubatch_wrapper import UBatchWrapper
+from vllm.v1.worker.gpu.cudagraph_utils import CudaGraphManager
+from vllm.v1.worker.gpu.eplb_utils import preserve_serving_state
 from vllm.v1.worker.workspace import lock_workspace, unlock_workspace
 
 logger = init_logger(__name__)
@@ -170,6 +173,17 @@ class ElasticEPScalingExecutor:
         return can_reuse_fused_moe_kernel(
             self.worker.vllm_config.parallel_config,
         )
+
+    @contextmanager
+    def _suppress_eplb(self) -> Iterator[None]:
+        # A rank warming up alone must not advance the EPLB step counter.
+        runner = self.worker.model_runner
+        was_suppressed = runner.eep_eplb_suppressed
+        runner.eep_eplb_suppressed = True
+        try:
+            yield
+        finally:
+            runner.eep_eplb_suppressed = was_suppressed
 
     @contextmanager
     def _disable_flashinfer_autotune(self) -> Iterator[None]:
@@ -363,7 +377,7 @@ class ElasticEPScalingExecutor:
         eplb_state = self.worker.model_runner.eplb_state
         assert eplb_state is not None
         eplb_state.drain_async()
-        eplb_model_state = eplb_state.model_states[model_config.compute_hash()]
+        eplb_model_state = eplb_state.model_states[hash_config_cached(model_config)]
         physical_to_logical = eplb_model_state.physical_to_logical_map_buffer
         broadcast_expert_mapping(
             physical_to_logical=physical_to_logical,
@@ -421,20 +435,54 @@ class ElasticEPScalingExecutor:
         self._staged_moe_quant_methods.clear()
 
     def _release_cuda_graphs(self) -> None:
-        if isinstance(self.worker.model_runner.model, CUDAGraphWrapper):
-            wrapper = self.worker.model_runner.model
-            wrapper.concrete_cudagraph_entries = {}
-
-        elif isinstance(self.worker.model_runner.model, UBatchWrapper):
-            self.worker.model_runner.model.clear_graphs()
+        runner = self.worker.model_runner
+        if runner.cudagraph_manager is not None:
+            runner.cudagraph_manager.release_graphs()
+        speculator = runner.speculator
+        for attr in vars(speculator).values() if speculator else ():
+            if isinstance(attr, CudaGraphManager):
+                attr.release_graphs()
 
         torch.compiler.reset()
         with set_current_vllm_config(self.worker.vllm_config):
             reset_compile_wrapper(self.worker.model_runner.get_model())
+            if draft_model := getattr(speculator, "model", None):
+                reset_compile_wrapper(draft_model)
 
         gc.collect()
         torch.accelerator.synchronize()
         torch.accelerator.empty_cache()
+        self._switch_to_fresh_graph_pool()
+
+    def _switch_to_fresh_graph_pool(self) -> None:
+        # Libraries may keep capture-time tensors alive after their graphs are
+        # released (e.g. FlyDSL retains the last launch's DLPack arguments), so
+        # the old pool cannot be erased. Re-capturing into that pool trips the
+        # allocator's "use_count > 0" assert; capture into a fresh one instead.
+        platform_cls = type(current_platform)
+        if platform_cls._global_graph_pool is None:
+            return
+        new_pool = current_platform.graph_pool_handle()
+        platform_cls._global_graph_pool = new_pool
+
+        model_runner = self.worker.model_runner
+        manager = model_runner.cudagraph_manager
+        speculator = model_runner.speculator
+        managers = [manager] + [
+            attr
+            for attr in (vars(speculator).values() if speculator else ())
+            if isinstance(attr, CudaGraphManager)
+        ]
+        for m in managers:
+            if m is not None and m.pool is not None:
+                m.pool = new_pool
+
+        wrappers: list[CUDAGraphWrapper | BreakableCUDAGraphWrapper] = [
+            *CUDAGraphWrapper._all_instances,
+            *BreakableCUDAGraphWrapper._all_instances,
+        ]
+        for wrapper in wrappers:
+            wrapper.graph_pool = new_pool
 
     def switch_and_remove(self) -> None:
         # Removing ranks skipped preparation, so wait for prior cleanup here.
@@ -499,7 +547,7 @@ class ElasticEPScalingExecutor:
         eplb_state = self.worker.model_runner.eplb_state
         assert eplb_state is not None
         model_config = self.worker.model_runner.model_config
-        eplb_model_state = eplb_state.model_states[model_config.compute_hash()]
+        eplb_model_state = eplb_state.model_states[hash_config_cached(model_config)]
 
         num_physical_experts = num_local_experts * new_ep_size
         num_logical_experts = eplb_model_state.logical_replica_count.shape[1]
@@ -675,27 +723,12 @@ class ElasticEPScalingExecutor:
             self.warm_and_capture()
 
     def warm_and_capture(self) -> None:
-        # Save and clear block tables so the dummy MoE forward doesn't
-        # write dummy slot mappings into real KV-cache blocks.
-        multi_block_table = self.worker.model_runner.input_batch.block_table
-        saved_block_tables: list[tuple[torch.Tensor, torch.Tensor]] = []
-        for bt in multi_block_table.block_tables:
-            saved_block_tables.append(
-                (bt.block_table.gpu.clone(), bt.block_table.cpu.clone())
-            )
-        multi_block_table.clear()
-
         # _ensure_workspace_size allocates a fresh tensor on grow, leaving
         # any captured CUDA graph with a stale data pointer; drop graphs
         # before re-warm so captures realign with the resized buffer.
         self._release_cuda_graphs()
         unlock_workspace()
 
-        # Grow the MoE workspace at max_num_tokens. compile_or_warm_up_model
-        # alone only exercises cudagraph-capture sizes and can leave the
-        # workspace too small for post-reshuffle routing. Use _dummy_run
-        # directly with skip_eplb=True so dummy routing doesn't pollute the
-        # just-rebalanced EPLB stats.
         runner = self.worker.model_runner
         all2all_manager = get_ep_all2all_manager()
         reuse_kernel = self._can_reuse_fused_moe_kernel()
@@ -703,14 +736,15 @@ class ElasticEPScalingExecutor:
             skip_dp_coordination() if reuse_kernel else nullcontext(),
             all2all_manager.mask_remote_ranks() if reuse_kernel else nullcontext(),
             self._disable_flashinfer_autotune() if reuse_kernel else nullcontext(),
+            self._suppress_eplb(),
+            preserve_serving_state(runner),
         ):
-            runner._dummy_run(runner.max_num_tokens, is_profile=True, skip_eplb=True)
+            runner._dummy_run(
+                runner.max_num_tokens,
+                is_profile=True,
+                skip_eplb=True,
+                randomize_inputs=self.worker.randomize_dummy_inputs,
+            )
             self.worker.compile_or_warm_up_model()
 
         lock_workspace()
-
-        for bt, (saved_gpu, saved_cpu) in zip(
-            multi_block_table.block_tables, saved_block_tables
-        ):
-            bt.block_table.gpu.copy_(saved_gpu)
-            bt.block_table.cpu.copy_(saved_cpu)

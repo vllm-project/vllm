@@ -117,10 +117,7 @@ MESSAGES_INVALID_CALL = [
 
 # Expected outputs
 FUNC_CALC = "calculator"
-FUNC_ARGS_CALC = '{"expression":"123 + 456"}'
-
 FUNC_TIME = "get_time"
-FUNC_ARGS_TIME = '{"city": "New York"}'
 
 
 # ==========================================================

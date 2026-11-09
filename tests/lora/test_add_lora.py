@@ -38,7 +38,7 @@ async def requests_processing_time(llm, lora_requests: list[LoRARequest]) -> flo
     for lora_request in lora_requests:
         lora_int_id = lora_request.lora_int_id
         generator = llm.generate(
-            prompt=TextPrompt(prompt=f"hello {lora_int_id}", multi_modal_data=None),  # type: ignore
+            prompt=TextPrompt(prompt=f"hello {lora_int_id}", multi_modal_data=None),
             sampling_params=sampling_params,
             lora_request=lora_request,
             request_id=f"test{lora_int_id}",
@@ -46,7 +46,7 @@ async def requests_processing_time(llm, lora_requests: list[LoRARequest]) -> flo
         generators.append(generator)
 
     all_gens = merge_async_iterators(*generators)
-    async for i, res in all_gens:
+    async for _ in all_gens:
         pass
 
     end = time.perf_counter()

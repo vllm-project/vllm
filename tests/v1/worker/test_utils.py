@@ -13,7 +13,7 @@ import torch
 
 import vllm.v1.attention.backends.mla.index_group as index_group_module
 import vllm.v1.hisparse.runtime as hisparse_runtime_module
-from vllm.config import CUDAGraphMode
+from vllm.config import CacheConfig, CUDAGraphMode
 from vllm.config.mamba import MambaBackendEnum, MambaConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.hisparse import (
     worker as hisparse_worker_module,
@@ -24,23 +24,101 @@ from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.worker import (
     _select_written_row_mirrors,
     _SlotMappingStaging,
 )
+from vllm.model_executor.layers.attention.sparse_mla_attention import (
+    SparseMLACommonMetadata,
+)
 from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
+from vllm.platforms import current_platform
+from vllm.utils.mem_constants import GiB_bytes
+from vllm.utils.mem_utils import MemorySnapshot
+from vllm.v1.core.kv_cache_planning import get_kv_cache_config_from_groups
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
+from vllm.v1.hisparse.backend import CUDAHiSparseBackend, HiSparseBackend
+from vllm.v1.hisparse.runtime import HiSparseCacheHandle
 from vllm.v1.hisparse.types import SparseKVPageTransfer, SparseKVRowMirror
+from vllm.v1.kv_cache_interface import (
+    KVCacheConfig,
+    KVCacheGroupSpec,
+    KVCacheLayout,
+    MambaSpec,
+)
+from vllm.v1.worker.replayssm_utils import (
+    get_replayssm_block_copy_tensors,
+    initialize_replayssm_ring_trackers,
+)
 from vllm.v1.worker.utils import (
+    allocate_kv_cache,
     bind_kv_cache,
     bind_kv_cache_to_layers,
+    clear_layer_kv_caches,
     copy_kv_cache_blocks_inplace,
+    request_memory,
 )
+
+
+@pytest.mark.parametrize("packed_bytes", [False, True])
+def test_hisparse_resident_gather_preserves_stride_and_payload(packed_bytes):
+    # Include a gap between physical pages and select reordered/repeated rows.
+    backing = torch.arange(24, dtype=torch.float32)
+    source = backing.as_strided((2, 2, 4), (12, 4, 1))
+    expected = torch.stack([backing[16:20], backing[0:4], backing[12:16], backing[0:4]])
+    if packed_bytes:
+        source = source.view(torch.uint8)
+    destination = torch.empty((4, 4), dtype=torch.float32)
+
+    HiSparseBackend().gather_resident_rows(
+        source, destination, torch.tensor([3, 0, 2, -1])
+    )
+
+    torch.testing.assert_close(destination, expected, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize(
+    "tokens,decode_tokens,requests,query_len,max_rows,expected",
+    [
+        (4, 4, 4, 1, 8, True),
+        (8, 8, 2, 4, 8, True),
+        (4, 4, 1, 4, 8, True),
+        (8, 4, 2, 4, 8, False),
+        (9, 9, 3, 3, 8, False),
+        (0, 0, 0, 1, 8, False),
+        (4, 4, 0, 4, 8, False),
+        (4, 4, 1, 0, 8, False),
+    ],
+)
+def test_hisparse_group_prefetch_requires_bounded_decode_only(
+    tokens, decode_tokens, requests, query_len, max_rows, expected
+):
+    metadata = SparseMLACommonMetadata(
+        num_reqs=requests,
+        max_query_len=query_len,
+        max_seq_len=128,
+        num_actual_tokens=tokens,
+        query_start_loc=torch.zeros(requests + 1, dtype=torch.int32),
+        slot_mapping=torch.arange(tokens, dtype=torch.int64),
+        block_table=torch.zeros((requests, 2), dtype=torch.int32),
+        req_id_per_token=torch.zeros(tokens, dtype=torch.int32),
+        num_decodes=requests,
+        num_decode_tokens=decode_tokens,
+        num_prefills=0,
+    )
+
+    assert (
+        hisparse_runtime_module.is_hisparse_group_prefetch_batch(metadata, max_rows)
+        is expected
+    )
+    assert not hisparse_runtime_module.is_hisparse_group_prefetch_batch(None, max_rows)
 
 
 def _make_hisparse_worker() -> HiSparseConnectorWorker:
     worker = object.__new__(HiSparseConnectorWorker)
-    worker.refines_row_mirrors = False
+    worker.backend = CUDAHiSparseBackend()
     worker._slot_mapping_staging = None
     worker._row_mirror_num_rows = 0
     worker._per_layer_mirrored = set()
     worker._submitted_mirror_layers = set()
+    worker._draft_layers = ()
+    worker._draft_mirror_pending = False
     worker._pending_dma_descriptors = deque()
     worker._dma_free_descriptors = []
     worker.host_write_events = (MagicMock(), MagicMock())
@@ -53,7 +131,17 @@ def _make_hisparse_worker() -> HiSparseConnectorWorker:
     worker._metrics_event = MagicMock()
     worker._metrics_pending = False
     worker.leader_runtimes = []
+    worker._invalidate_written_slots = MagicMock()
     return worker
+
+
+def _as_cache_handles(*handles: SimpleNamespace) -> list[HiSparseCacheHandle]:
+    """Hand the worker SimpleNamespace stand-ins for its cache handles.
+
+    Each stand-in carries only the HiSparseCacheHandle fields its test's code
+    path reads, so reading any other field still raises AttributeError.
+    """
+    return [*handles]  # type: ignore[list-item]  # SimpleNamespace stand-ins
 
 
 def test_hisparse_worker_get_kv_connector_stats_reads_completed_snapshot(monkeypatch):
@@ -69,11 +157,9 @@ def test_hisparse_worker_get_kv_connector_stats_reads_completed_snapshot(monkeyp
         stats_row_bytes=16,
         copy_stream=MagicMock(),
     )
-    worker.leader_runtimes = [SimpleNamespace(index_group=group)]
+    worker.leader_runtimes = [SimpleNamespace(index_group=group)]  # type: ignore[list-item]  # runtime stand-in
     monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: False)
-    monkeypatch.setattr(
-        hisparse_worker_module, "current_stream", lambda: compute_stream
-    )
+    monkeypatch.setattr(torch.accelerator, "current_stream", lambda: compute_stream)
 
     assert worker.get_kv_connector_stats() is None
     compute_stream.wait_stream.assert_called_once_with(group.copy_stream)
@@ -87,6 +173,11 @@ def test_hisparse_worker_get_kv_connector_stats_reads_completed_snapshot(monkeyp
         "cache_hits": [12],
         "cache_misses": [4],
         "host_to_device_bytes": [64],
+        "host_cache_usage_perc": [],
+        "pending_page_transfers": [],
+        "host_block_lifetime_seconds": [],
+        "host_block_idle_before_evict_seconds": [],
+        "host_block_reuse_gap_seconds": [],
     }
 
 
@@ -139,20 +230,16 @@ def test_hisparse_appends_reference_slots_within_a_mirror_phase(monkeypatch):
     """Separate context and query writes must share one mirror phase."""
     worker = _make_hisparse_worker()
     worker.is_host_writer = True
-    worker.refines_row_mirrors = True
     state = _SlotMappingStaging(
         MagicMock(), MagicMock(), torch.empty(4, dtype=torch.int64)
     )
     worker._slot_mapping_staging = state
     handle = SimpleNamespace(runtime=SimpleNamespace(resident_source_index=1))
-    worker.cache_layer_names = ["layer"]
-    worker.cache_handles = [handle]
-    worker._layer_mirror_callbacks = (MagicMock(),)
+    worker.cache_handles = _as_cache_handles(handle)
     worker._row_mirror_num_rows = 1
     worker._submitted_mirror_layers = set()
     main_stream = MagicMock()
-    monkeypatch.setattr(hisparse_worker_module, "current_stream", lambda: main_stream)
-    monkeypatch.setattr(torch.cuda, "stream", lambda stream: nullcontext())
+    monkeypatch.setattr(torch.accelerator, "current_stream", lambda: main_stream)
 
     handle.slot_mapping = torch.tensor([7, 8], dtype=torch.int64)
     worker._stage_row_mirror_mapping(2)
@@ -206,7 +293,7 @@ def _hisparse_parallel_config(**overrides):
 
 def test_hisparse_shares_host_pool_only_for_local_tp(monkeypatch):
     monkeypatch.setattr(
-        hisparse_runtime_module.current_platform, "is_cuda_alike", lambda: True
+        hisparse_runtime_module, "get_hisparse_backend", CUDAHiSparseBackend
     )
     config = SimpleNamespace(parallel_config=_hisparse_parallel_config())
 
@@ -229,7 +316,7 @@ def test_hisparse_shares_host_pool_only_for_local_tp(monkeypatch):
 @pytest.mark.skip_global_cleanup
 def test_hisparse_shared_host_pool_uses_one_replicated_mmap(monkeypatch):
     page = mmap.PAGESIZE
-    tp_group = MagicMock()
+    tp_group = MagicMock(rank_in_group=1, world_size=2)
     monkeypatch.setattr(hisparse_runtime_module, "get_tp_group", lambda: tp_group)
 
     class FakeSharedOffloadRegion:
@@ -241,19 +328,7 @@ def test_hisparse_shared_host_pool_uses_one_replicated_mmap(monkeypatch):
             self.base_tensor = torch.empty(self.total_size_bytes, dtype=torch.int8)
             self.is_pinned = False
             self.pinned_addresses = []
-            self.view_sizes = []
-            self.offset = 0
-
-        def create_next_canonical_view(self, size):
-            self.view_sizes.append(size)
-            view = torch.as_strided(
-                self.base_tensor,
-                size=(self.kwargs["num_chunks"], size),
-                stride=(self.kwargs["kv_bytes_per_chunk"], 1),
-                storage_offset=self.offset,
-            )
-            self.offset += size
-            return view
+            kwargs["barrier"]()
 
         def cleanup(self):
             pass
@@ -264,34 +339,30 @@ def test_hisparse_shared_host_pool_uses_one_replicated_mmap(monkeypatch):
     registration_ranges = MagicMock(return_value=((0, page), (page, 4 * page)))
     monkeypatch.setattr(
         hisparse_runtime_module,
-        "_hisparse_registration_ranges",
+        "host_registration_ranges",
         registration_ranges,
     )
     pinned: list[torch.Tensor] = []
 
     def pin_tensor(tensor):
+        tp_group.barrier.assert_called_once_with()
         pinned.append(tensor)
 
     monkeypatch.setattr(hisparse_runtime_module, "pin_tensor", pin_tensor)
     config = SimpleNamespace(
         instance_id="instance",
-        parallel_config=_hisparse_parallel_config(
-            tensor_parallel_size=1,
-            world_size=1,
-            distributed_executor_backend="uni",
-        ),
+        parallel_config=_hisparse_parallel_config(),
     )
 
-    pools, private_pools, region = hisparse_runtime_module.allocate_hisparse_host_pools(
+    pinned_pools, region = hisparse_runtime_module.allocate_hisparse_host_pools(
         config,
         [24, 40],
         num_blocks=4,
         host_block_stride=page,
-        use_shared_host_pool=True,
     )
 
-    assert region is not None
-    assert private_pools == []
+    assert isinstance(region, FakeSharedOffloadRegion)
+    assert [t.data_ptr() for t in pinned_pools] == [t.data_ptr() for t in pinned]
     assert region.kwargs == {
         "engine_id": "hisparse_instance_dp3",
         "num_chunks": 1,
@@ -300,25 +371,29 @@ def test_hisparse_shared_host_pool_uses_one_replicated_mmap(monkeypatch):
         "cpu_page_size": 64,
         "barrier": tp_group.barrier,
         "creator_memory_check": hisparse_runtime_module.check_hisparse_host_memory,
-        "populate_only_on_creator": True,
+        "populate_shard": (1, 2),
+        "num_segments": hisparse_runtime_module.REGION_SEGMENTS,
     }
-    assert region.view_sizes == [24, 40]
-    assert [pool.shape for pool in pools] == [(24,), (40,)]
-    registration_ranges.assert_called_once_with([24, 40], 4, page)
+    registration_ranges.assert_called_once_with([24, 40], 4, 4 * page)
     assert [
         (tensor.data_ptr() - region.base_tensor.data_ptr(), tensor.nbytes)
         for tensor in pinned
     ] == [(0, page), (page, 3 * page)]
-    assert region.is_pinned
+    assert not region.is_pinned
 
 
 @pytest.mark.parametrize("fail_registration", [None, 1, 2])
 def test_shared_host_pool_tracks_successful_registrations(
     monkeypatch, fail_registration
 ):
-    """Only successful registrations may be unregistered on allocation failure."""
+    """Only successful registrations may be unpinned on allocation failure."""
+    monkeypatch.setattr(
+        hisparse_runtime_module, "get_hisparse_backend", CUDAHiSparseBackend
+    )
+    monkeypatch.setattr(torch.accelerator, "synchronize", lambda: None)
     page = mmap.PAGESIZE
-    monkeypatch.setattr(hisparse_runtime_module, "get_tp_group", MagicMock())
+    tp_group = MagicMock(rank_in_group=0, world_size=2)
+    monkeypatch.setattr(hisparse_runtime_module, "get_tp_group", lambda: tp_group)
     backing = torch.empty(3 * page, dtype=torch.uint8)
     region = MagicMock(base_tensor=backing, pinned_addresses=[], is_pinned=False)
     monkeypatch.setattr(
@@ -326,13 +401,14 @@ def test_shared_host_pool_tracks_successful_registrations(
     )
     monkeypatch.setattr(
         hisparse_runtime_module,
-        "_hisparse_registration_ranges",
+        "host_registration_ranges",
         lambda *args: ((0, page), (page, 3 * page)),
     )
     cudart = MagicMock()
     cudart.cudaHostRegister.side_effect = [
         SimpleNamespace(value=int(fail_registration == i)) for i in (1, 2)
     ]
+    cudart.cudaHostUnregister.return_value = SimpleNamespace(value=0)
     monkeypatch.setattr(torch.cuda, "cudart", lambda: cudart)
     config = SimpleNamespace(
         instance_id="test", parallel_config=SimpleNamespace(data_parallel_index=0)
@@ -342,16 +418,13 @@ def test_shared_host_pool_tracks_successful_registrations(
         if fail_registration
         else nullcontext()
     )
+    result = None
     with context:
-        hisparse_runtime_module.allocate_hisparse_host_pools(
-            config, [3 * page], 3, page, use_shared_host_pool=True
+        result = hisparse_runtime_module.allocate_hisparse_host_pools(
+            config, [3 * page], 3, page
         )
     successful = 2 if fail_registration is None else fail_registration - 1
-    assert region.pinned_addresses == [
-        backing.data_ptr() + i * page for i in range(successful)
-    ]
-    assert region.is_pinned == bool(successful)
-    assert region.cleanup.call_count == int(fail_registration is not None)
+    pinned_ptrs = [backing.data_ptr() + i * page for i in range(successful)]
     attempts = 2 if fail_registration is None else fail_registration
     assert (
         cudart.cudaHostRegister.call_args_list
@@ -360,12 +433,24 @@ def test_shared_host_pool_tracks_successful_registrations(
             call(backing.data_ptr() + page, 2 * page, 0),
         ][:attempts]
     )
+    assert region.pinned_addresses == []
+    assert not region.is_pinned
+    if fail_registration is None:
+        assert result is not None
+        assert [t.data_ptr() for t in result[0]] == pinned_ptrs
+        cudart.cudaHostUnregister.assert_not_called()
+        region.cleanup.assert_not_called()
+    else:
+        assert cudart.cudaHostUnregister.call_args_list == [
+            call(ptr) for ptr in reversed(pinned_ptrs)
+        ]
+        region.cleanup.assert_called_once_with()
 
 
 def test_shared_host_pool_registers_layer_spans_in_one_backing(monkeypatch):
     """Aliased tensor configs must not count the shared backing once per view."""
     region = SimpleNamespace(base_tensor=torch.empty(64, dtype=torch.int8))
-    allocate = MagicMock(return_value=([], [], region))
+    allocate = MagicMock(return_value=([], region))
     monkeypatch.setattr(
         hisparse_runtime_module, "allocate_hisparse_host_pools", allocate
     )
@@ -389,30 +474,27 @@ def test_shared_host_pool_registers_layer_spans_in_one_backing(monkeypatch):
     vllm_config = SimpleNamespace()
     pool = hisparse_runtime_module.HiSparseHostPool(vllm_config, config)
     backing = pool.allocate(44)
-    allocate.assert_called_once_with(
-        vllm_config, [12, 12, 20], 4, 16, use_shared_host_pool=True
-    )
+    allocate.assert_called_once_with(vllm_config, [12, 12, 20], 4, 16)
     assert backing.numel() == 44
     assert backing.data_ptr() == region.base_tensor.data_ptr()
     assert pool.registered is region.base_tensor
 
 
-def test_hisparse_registration_chunks_end_between_host_blocks():
-    """Registration seams must not bisect a DMA-addressable host block."""
-    page = mmap.PAGESIZE
-    ranges = hisparse_runtime_module._hisparse_registration_ranges(
-        tensor_sizes=[4 * 3 * page, 4 * 5 * page],
-        num_blocks=4,
-        host_block_stride=8 * page,
-        max_chunk_bytes=10 * page,
+@pytest.mark.parametrize(
+    ("page_size", "split"),
+    [(mmap.PAGESIZE, (12 << 20) - 65536), (2 << 20, 6 << 20)],
+)
+def test_hisparse_registration_chunks_end_between_host_blocks(page_size, split):
+    """Registrations must cover whole backing pages and whole host blocks."""
+    ranges = hisparse_runtime_module.host_registration_ranges(
+        tensor_sizes=[6 << 20, 10 << 20],
+        num_blocks=32,
+        total_size=16 << 20,
+        max_chunk_bytes=12 << 20,
+        page_size=page_size,
     )
 
-    assert ranges == (
-        (0, 9 * page),
-        (9 * page, 17 * page),
-        (17 * page, 27 * page),
-        (27 * page, 32 * page),
-    )
+    assert ranges == ((0, split), (split, 16 << 20))
 
 
 def test_copy_cpu_kv_cache_logical_blocks_ignores_storage_padding():
@@ -436,6 +518,43 @@ def test_copy_cpu_kv_cache_logical_blocks_ignores_storage_padding():
     assert (backing[9] == -1).all()
 
 
+def test_bind_kv_cache_keeps_scheduler_block_views_for_runner():
+    """Block copies index scheduler blocks, so the runner keeps the unmapped
+    views while a packed layer is bound with kernel blocks."""
+
+    class _Layer:
+        def bind_kv_cache(self, kv_cache):
+            self.kv_cache = kv_cache
+
+    num_blocks, row = 4, 64
+    storage = torch.zeros(num_blocks * row)
+    # Two layers packed into one block row: an 8x4 page, then a 4x2 page
+    # split into two 2-row kernel blocks.
+    mla = storage.as_strided((num_blocks, 8, 4), (row, 4, 1))
+    indexer = storage.as_strided((num_blocks, 1, 4, 2), (row, 8, 2, 1), 40)
+    # The indexer in 2-row kernel blocks: block b's kernel block j is b * 16 + j.
+    mapped = indexer.as_strided((50, 1, 2, 2), (4, 8, 2, 1))
+    kv_caches = {"layers.0.attn": mla, "layers.1.indexer": indexer}
+    ctx = {name: _Layer() for name in kv_caches}
+    runner_kv_caches: list[torch.Tensor] = []
+
+    bind_kv_cache(
+        kv_caches,
+        ctx,
+        runner_kv_caches,
+        layer_kv_caches={**kv_caches, "layers.1.indexer": mapped},
+    )
+
+    assert ctx["layers.1.indexer"].kv_cache is mapped
+    assert runner_kv_caches == [mla, indexer]
+    copies = [KVCacheBlockCopy(1, 3)]
+    with pytest.raises(AssertionError, match="not divisible"):
+        copy_kv_cache_blocks_inplace([mapped], num_blocks, copies)
+    storage[row : 2 * row] = 7
+    copy_kv_cache_blocks_inplace(runner_kv_caches, num_blocks, copies)
+    assert (mla[3] == 7).all() and (indexer[3] == 7).all()
+
+
 @pytest.mark.parametrize("shared,rank", [(False, 0), (True, 0), (True, 1)])
 @pytest.mark.parametrize("has_copies", [False, True])
 def test_hisparse_host_copy_waits_for_writes_on_writer_only(
@@ -447,12 +566,10 @@ def test_hisparse_host_copy_waits_for_writes_on_writer_only(
     worker.host_caches = [cache]
     worker.host_num_blocks = 2
     worker.shared_host_region = object() if shared else None
+    worker.is_host_writer = not shared or rank == 0
     event = MagicMock()
     event.synchronize.side_effect = lambda: cache[0].fill_(7)
     barrier = MagicMock()
-    monkeypatch.setattr(
-        hisparse_worker_module, "get_tensor_model_parallel_rank", lambda: rank
-    )
     monkeypatch.setattr(
         hisparse_worker_module, "get_tp_group", lambda: SimpleNamespace(barrier=barrier)
     )
@@ -472,8 +589,10 @@ def test_hisparse_worker_updates_request_state_mapping_in_place(monkeypatch):
     worker.request_state_indices = torch.arange(4, dtype=torch.int32)
     worker._pending_invalid_block_ids = [5]
     invalidations = []
-    worker.invalidate_blocks = lambda blocks, states: invalidations.append(
-        (blocks.copy(), states.clone())
+    monkeypatch.setattr(
+        worker,
+        "invalidate_blocks",
+        lambda blocks, states: invalidations.append((blocks.copy(), states.clone())),
     )
     original_ptr = worker.request_state_indices.data_ptr()
     monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: False)
@@ -490,7 +609,7 @@ def test_hisparse_worker_updates_request_state_mapping_in_place(monkeypatch):
     assert worker._pending_invalid_block_ids == []
 
 
-def test_hisparse_pre_forward_transfer_builds_page_descriptors():
+def test_hisparse_transfer_builds_page_descriptors(monkeypatch):
     worker = _make_hisparse_worker()
     worker.is_host_writer = True
     worker.kernel_block_size = 2
@@ -498,37 +617,42 @@ def test_hisparse_pre_forward_transfer_builds_page_descriptors():
     destination = torch.empty((6, 4), dtype=torch.uint8)
     worker.resident_caches = (source,)
     worker.host_caches = (destination,)
-    worker.cache_handles = [
+    worker.cache_handles = _as_cache_handles(
         SimpleNamespace(runtime=SimpleNamespace(resident_source_index=0))
-    ]
+    )
     worker._dma_free_descriptors = []
-    worker._submit_dma_descriptors = MagicMock()
+    submit_dma_descriptors = MagicMock()
+    monkeypatch.setattr(worker, "_submit_dma_descriptors", submit_dma_descriptors)
 
-    worker._enqueue_transfers([SparseKVPageTransfer(7, 2, (1,), after_forward=False)])
+    worker._enqueue_transfers([SparseKVPageTransfer(7, 2, (1,))])
 
-    descriptors, count = worker._submit_dma_descriptors.call_args.args
+    descriptors, count = submit_dma_descriptors.call_args.args
     assert count == 1
     assert descriptors.src[:count].tolist() == [
         source.data_ptr() + source.stride(0) * source.element_size()
     ]
     assert descriptors.dst[:count].tolist() == [destination.data_ptr() + 4 * 4]
     assert descriptors.sizes[:count].tolist() == [2 * 4]
-    assert worker._submit_dma_descriptors.call_args.kwargs["transfer_ids"] == (7,)
+    assert submit_dma_descriptors.call_args.kwargs["transfer_ids"] == (7,)
 
 
-def test_hisparse_eager_mirror_records_transfer_without_page_copy():
+def test_hisparse_eager_mirror_records_transfer_without_page_copy(monkeypatch):
     worker = _make_hisparse_worker()
-    worker.cache_handles = [
+    worker.cache_handles = _as_cache_handles(
         SimpleNamespace(runtime=SimpleNamespace(eager_host_mirror=True))
-    ]
-    worker._record_transfer_completion = MagicMock()
-    worker._enqueue_transfers = MagicMock()
-    transfers = [SparseKVPageTransfer(7, 2, (1,), after_forward=False)]
+    )
+    record_transfer_completion = MagicMock()
+    enqueue_transfers = MagicMock()
+    monkeypatch.setattr(
+        worker, "_record_transfer_completion", record_transfer_completion
+    )
+    monkeypatch.setattr(worker, "_enqueue_transfers", enqueue_transfers)
+    transfers = [SparseKVPageTransfer(7, 2, (1,))]
 
     worker._submit_transfers(transfers)
 
-    worker._record_transfer_completion.assert_called_once_with(transfers)
-    worker._enqueue_transfers.assert_not_called()
+    record_transfer_completion.assert_called_once_with(transfers)
+    enqueue_transfers.assert_not_called()
 
 
 @pytest.mark.parametrize("is_host_writer", [False, True])
@@ -539,6 +663,9 @@ def test_hisparse_tail_restore_preserves_imported_rows(
     """Restore externally pinned host rows on every rank under sync checking."""
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA is required for the device copy check")
+    monkeypatch.setattr(
+        hisparse_runtime_module, "get_hisparse_backend", CUDAHiSparseBackend
+    )
     worker = _make_hisparse_worker()
     worker.is_host_writer = is_host_writer
     worker.kernel_block_size = 4
@@ -553,7 +680,7 @@ def test_hisparse_tail_restore_preserves_imported_rows(
             sum(cache.nbytes for cache in worker.host_caches)
         )
         request.addfinalizer(
-            lambda: hisparse_runtime_module.release_pinned_state([], [registered])
+            lambda: hisparse_runtime_module.release_pinned_state([registered])
         )
         host_caches = host_pool.view(torch.float32).view(2, 12, 2).unbind()
         for destination, source in zip(host_caches, worker.host_caches):
@@ -562,16 +689,21 @@ def test_hisparse_tail_restore_preserves_imported_rows(
     worker.resident_caches = tuple(
         torch.full((4, 4, 2), -1.0, device=device) for _ in range(2)
     )
-    worker.cache_handles = [
-        SimpleNamespace(
-            runtime=SimpleNamespace(resident_source_index=i, eager_host_mirror=True)
+    worker.cache_handles = _as_cache_handles(
+        *(
+            SimpleNamespace(
+                runtime=SimpleNamespace(resident_source_index=i, eager_host_mirror=True)
+            )
+            for i in range(2)
         )
-        for i in range(2)
-    ]
-    worker._record_transfer_completion = MagicMock()
+    )
+    record_transfer_completion = MagicMock()
+    monkeypatch.setattr(
+        worker, "_record_transfer_completion", record_transfer_completion
+    )
     stream = torch.cuda.current_stream() if device == "cuda" else MagicMock()
-    monkeypatch.setattr(hisparse_worker_module, "current_stream", lambda: stream)
-    transfer = SparseKVPageTransfer(7, 2, (1, 3), False, restore=True)
+    monkeypatch.setattr(torch.accelerator, "current_stream", lambda: stream)
+    transfer = SparseKVPageTransfer(7, 2, (1, 3), restore=True)
 
     restore_pages = worker._restore_pages
     if device == "cuda":
@@ -591,24 +723,26 @@ def test_hisparse_tail_restore_preserves_imported_rows(
         cache[block, 2:] = 999
         assert torch.equal(cache[block, :2].cpu(), host[8:10])
         assert torch.all(cache[0] == -1)
-    worker._record_transfer_completion.assert_called_once_with(
-        [transfer], stream=stream
-    )
+    record_transfer_completion.assert_called_once_with([transfer], stream=stream)
 
 
-def test_hisparse_lazy_mirror_copies_transfer_pages():
+def test_hisparse_lazy_mirror_copies_transfer_pages(monkeypatch):
     worker = _make_hisparse_worker()
-    worker.cache_handles = [
+    worker.cache_handles = _as_cache_handles(
         SimpleNamespace(runtime=SimpleNamespace(eager_host_mirror=False))
-    ]
-    worker._record_transfer_completion = MagicMock()
-    worker._enqueue_transfers = MagicMock()
-    transfers = [SparseKVPageTransfer(7, 2, (1,), after_forward=False)]
+    )
+    record_transfer_completion = MagicMock()
+    enqueue_transfers = MagicMock()
+    monkeypatch.setattr(
+        worker, "_record_transfer_completion", record_transfer_completion
+    )
+    monkeypatch.setattr(worker, "_enqueue_transfers", enqueue_transfers)
+    transfers = [SparseKVPageTransfer(7, 2, (1,))]
 
     worker._submit_transfers(transfers)
 
-    worker._enqueue_transfers.assert_called_once_with(transfers)
-    worker._record_transfer_completion.assert_not_called()
+    enqueue_transfers.assert_called_once_with(transfers)
+    record_transfer_completion.assert_not_called()
 
 
 def test_hisparse_dma_row_mirror_builds_descriptors(monkeypatch):
@@ -619,12 +753,11 @@ def test_hisparse_dma_row_mirror_builds_descriptors(monkeypatch):
     destination = torch.empty((6, 4), dtype=torch.uint8)
     worker.resident_caches = (source,)
     worker.host_caches = (destination,)
-    worker.cache_handles = [
+    worker.cache_handles = _as_cache_handles(
         SimpleNamespace(
             runtime=SimpleNamespace(resident_source_index=0), decode_batch=True
         )
-    ]
-    worker.hot_backing = SimpleNamespace(device=torch.device("cuda:0"))
+    )
     worker.dma_stream = MagicMock()
     worker.host_write_event = MagicMock()
     worker._dma_free_descriptors = []
@@ -635,14 +768,9 @@ def test_hisparse_dma_row_mirror_builds_descriptors(monkeypatch):
     current_stream = MagicMock()
     event = MagicMock()
     swap_blocks_batch = MagicMock()
-    monkeypatch.setattr(
-        hisparse_worker_module, "current_stream", lambda: current_stream
-    )
-    monkeypatch.setattr(torch.cuda, "stream", lambda stream: nullcontext())
+    monkeypatch.setattr(torch.accelerator, "current_stream", lambda: current_stream)
     monkeypatch.setattr(torch, "Event", lambda: event)
-    monkeypatch.setattr(
-        hisparse_worker_module.ops, "swap_blocks_batch", swap_blocks_batch
-    )
+    monkeypatch.setattr(worker.backend, "swap_blocks_batch", swap_blocks_batch)
 
     worker._set_row_mirrors((SparseKVRowMirror((3,), 4, 1),))
     worker._enqueue_row_dma(range(1))
@@ -657,7 +785,7 @@ def test_hisparse_dma_row_mirror_builds_descriptors(monkeypatch):
     assert worker._dma_submitted
 
 
-def test_hisparse_row_dma_uses_resident_spans():
+def test_hisparse_row_dma_uses_resident_spans(monkeypatch):
     worker = _make_hisparse_worker()
     source = torch.empty((2, 2, 4), dtype=torch.uint8)
     destination = torch.empty((12, 4), dtype=torch.uint8)
@@ -665,11 +793,11 @@ def test_hisparse_row_dma_uses_resident_spans():
     worker.kernel_block_size = 2
     worker.resident_caches = (source,)
     worker.host_caches = (destination,)
-    worker.cache_handles = [
+    worker.cache_handles = _as_cache_handles(
         SimpleNamespace(
             runtime=SimpleNamespace(resident_source_index=0), decode_batch=True
         )
-    ]
+    )
     worker._set_row_mirrors(
         (
             SparseKVRowMirror((0,), 4, 2),
@@ -677,11 +805,12 @@ def test_hisparse_row_dma_uses_resident_spans():
         )
     )
     worker._dma_free_descriptors = []
-    worker._submit_dma_descriptors = MagicMock()
+    submit_dma_descriptors = MagicMock()
+    monkeypatch.setattr(worker, "_submit_dma_descriptors", submit_dma_descriptors)
 
     worker._enqueue_row_dma(range(1))
 
-    descriptors, count = worker._submit_dma_descriptors.call_args.args
+    descriptors, count = submit_dma_descriptors.call_args.args
     assert count == 2
     assert descriptors.src[:count].tolist() == [
         source.data_ptr(),
@@ -700,12 +829,10 @@ def test_hisparse_finish_forward_mirrors_all_layers_once(monkeypatch):
     leader = SimpleNamespace(
         eager_host_mirror=True,
         is_group_leader=True,
-        invalidate_written_slots=MagicMock(),
     )
     follower = SimpleNamespace(
         eager_host_mirror=True,
         is_group_leader=False,
-        invalidate_written_slots=MagicMock(),
     )
     handles = [
         SimpleNamespace(
@@ -722,40 +849,38 @@ def test_hisparse_finish_forward_mirrors_all_layers_once(monkeypatch):
     worker = _make_hisparse_worker()
     worker.is_host_writer = True
     worker.cache_handles = handles
-    worker.hot_backing = SimpleNamespace(device=torch.device("cuda:0"))
     worker._set_row_mirrors((SparseKVRowMirror((0, 0), 7, 3),))
     worker._dma_submitted = False
     worker._per_layer_mirrored = set()
     worker._submitted_mirror_layers = set()
     worker._post_forward_transfers = []
-    worker._enqueue_row_dma = MagicMock()
+    enqueue_row_dma = MagicMock()
+    monkeypatch.setattr(worker, "_enqueue_row_dma", enqueue_row_dma)
+    invalidate_written_slots = MagicMock()
+    monkeypatch.setattr(worker, "_invalidate_written_slots", invalidate_written_slots)
     worker.host_write_event = MagicMock()
     worker._forward_ready_event = MagicMock()
     current_stream = MagicMock()
-    monkeypatch.setattr(
-        hisparse_worker_module, "current_stream", lambda: current_stream
-    )
+    monkeypatch.setattr(torch.accelerator, "current_stream", lambda: current_stream)
 
     worker.finish_forward()
 
     worker._forward_ready_event.record.assert_called_once_with()
-    worker._enqueue_row_dma.assert_called_once_with(
+    enqueue_row_dma.assert_called_once_with(
         (0, 1), ready_event=worker._forward_ready_event
     )
-    leader.invalidate_written_slots.assert_called_once()
-    torch.testing.assert_close(
-        leader.invalidate_written_slots.call_args.args[0], dst_slots
-    )
-    follower.invalidate_written_slots.assert_not_called()
+    invalidate_written_slots.assert_called_once()
+    leaders, written_slots, _ = invalidate_written_slots.call_args.args
+    assert leaders == [leader]
+    torch.testing.assert_close(written_slots, dst_slots)
     worker.host_write_event.record.assert_called_once_with(current_stream)
 
 
-def test_hisparse_finish_forward_does_not_repeat_per_layer_mirrors():
+def test_hisparse_finish_forward_does_not_repeat_per_layer_mirrors(monkeypatch):
     slots = torch.tensor([7, 8], dtype=torch.int64)
     runtime = SimpleNamespace(
         eager_host_mirror=False,
         is_group_leader=False,
-        invalidate_written_slots=MagicMock(),
     )
     handles = [
         SimpleNamespace(
@@ -775,38 +900,17 @@ def test_hisparse_finish_forward_does_not_repeat_per_layer_mirrors():
     worker._set_row_mirrors((SparseKVRowMirror((0, 0), 7, 2),))
     worker._per_layer_mirrored = {0, 1}
     worker._submitted_mirror_layers = {0, 1}
-    worker._enqueue_row_dma = MagicMock()
+    enqueue_row_dma = MagicMock()
+    monkeypatch.setattr(worker, "_enqueue_row_dma", enqueue_row_dma)
 
     worker._enqueue_host_mirror()
 
-    worker._enqueue_row_dma.assert_not_called()
+    enqueue_row_dma.assert_not_called()
 
 
-def test_hisparse_finish_forward_submits_lazy_post_forward_transfer(monkeypatch):
-    runtime = SimpleNamespace(eager_host_mirror=False)
-    worker = _make_hisparse_worker()
-    worker.is_host_writer = True
-    worker.cache_handles = [SimpleNamespace(runtime=runtime, num_actual_tokens=0)]
-    transfer = SparseKVPageTransfer(7, 2, (1,), after_forward=True)
-    worker._post_forward_transfers = [transfer]
-    worker._forward_ready_event = MagicMock()
-    worker._enqueue_host_mirror = MagicMock()
-    worker._submit_transfers = MagicMock()
-    worker._dma_submitted = False
-    worker._submitted_mirror_layers = set()
-    worker._finish_mirror_phase = MagicMock()
-    worker._release_completed_dma_descriptors = MagicMock()
-    stream = MagicMock()
-    monkeypatch.setattr(hisparse_worker_module, "current_stream", lambda: stream)
-
-    worker.finish_forward()
-
-    worker._finish_mirror_phase.assert_called_once_with(worker._forward_ready_event)
-    worker._submit_transfers.assert_called_once_with([transfer])
-    worker.host_write_event.record.assert_called_once_with(stream)
-
-
-def test_hisparse_prefill_mirrors_source_groups_and_flushes_partial_group():
+def test_hisparse_prefill_mirrors_source_groups_and_flushes_partial_group(
+    monkeypatch,
+):
     slots = torch.tensor([7, 8], dtype=torch.int64)
     source_indices = [0, 0, 1, 1, 1, 1, 2]
     handles = [
@@ -832,27 +936,27 @@ def test_hisparse_prefill_mirrors_source_groups_and_flushes_partial_group():
     worker._per_layer_mirrored = set()
     worker._submitted_mirror_layers = set()
     worker._layer_ready_events = tuple(MagicMock() for _ in handles)
-    worker._enqueue_row_dma = MagicMock()
+    enqueue_row_dma = MagicMock()
+    monkeypatch.setattr(worker, "_enqueue_row_dma", enqueue_row_dma)
 
     for layer_index in range(5):
         worker._enqueue_layer_mirror(layer_index)
 
-    worker._enqueue_row_dma.assert_called_once_with(
+    enqueue_row_dma.assert_called_once_with(
         (0, 1), ready_event=worker._layer_ready_events[1]
     )
     worker._enqueue_host_mirror(ready_event=worker._layer_ready_events[-1])
-    assert worker._enqueue_row_dma.call_args_list[1].args == ((2, 3, 4),)
-    assert worker._enqueue_row_dma.call_args_list[1].kwargs == {
+    assert enqueue_row_dma.call_args_list[1].args == ((2, 3, 4),)
+    assert enqueue_row_dma.call_args_list[1].kwargs == {
         "ready_event": worker._layer_ready_events[-1]
     }
 
 
-def test_hisparse_finish_forward_rejects_partial_per_layer_mirror():
+def test_hisparse_finish_forward_rejects_partial_per_layer_mirror(monkeypatch):
     slots = torch.tensor([7, 8], dtype=torch.int64)
     runtime = SimpleNamespace(
         eager_host_mirror=False,
         is_group_leader=False,
-        invalidate_written_slots=MagicMock(),
     )
     handles = [
         SimpleNamespace(
@@ -872,7 +976,7 @@ def test_hisparse_finish_forward_rejects_partial_per_layer_mirror():
     worker._set_row_mirrors((SparseKVRowMirror((0, 0), 7, 2),))
     worker._per_layer_mirrored = {0}
     worker._submitted_mirror_layers = set()
-    worker._enqueue_row_dma = MagicMock()
+    monkeypatch.setattr(worker, "_enqueue_row_dma", MagicMock())
 
     with pytest.raises(RuntimeError, match="did not mirror every active layer"):
         worker._enqueue_host_mirror()
@@ -881,23 +985,20 @@ def test_hisparse_finish_forward_rejects_partial_per_layer_mirror():
 def test_hisparse_finish_forward_orders_next_forward_after_dma(monkeypatch):
     current_stream = MagicMock()
     worker = _make_hisparse_worker()
-    worker.hot_backing = SimpleNamespace(device=torch.device("cuda:0"))
     worker.is_host_writer = True
     worker._dma_submitted = True
     worker.host_write_event = MagicMock()
-    worker.cache_handles = [
+    worker.cache_handles = _as_cache_handles(
         SimpleNamespace(
             runtime=SimpleNamespace(eager_host_mirror=True), num_actual_tokens=0
         )
-    ]
+    )
     worker._post_forward_transfers = []
     worker._pending_dma_descriptors = deque()
     worker._dma_free_descriptors = []
     worker._forward_ready_event = MagicMock()
-    worker._finish_mirror_phase = MagicMock()
-    monkeypatch.setattr(
-        hisparse_worker_module, "current_stream", lambda: current_stream
-    )
+    monkeypatch.setattr(worker, "_finish_mirror_phase", MagicMock())
+    monkeypatch.setattr(torch.accelerator, "current_stream", lambda: current_stream)
 
     worker.finish_forward()
 
@@ -910,7 +1011,6 @@ def test_hisparse_finish_forward_mirrors_standalone_mtp_cache(monkeypatch):
     runtime = SimpleNamespace(
         eager_host_mirror=True,
         is_group_leader=False,
-        invalidate_written_slots=MagicMock(),
     )
     inactive = SimpleNamespace(
         runtime=runtime,
@@ -932,15 +1032,16 @@ def test_hisparse_finish_forward_mirrors_standalone_mtp_cache(monkeypatch):
     )
     worker = _make_hisparse_worker()
     worker.is_host_writer = True
-    worker.cache_handles = [inactive, mtp]
+    worker.cache_handles = _as_cache_handles(inactive, mtp)
     worker._set_row_mirrors((SparseKVRowMirror((0,), 7, 2),))
     worker._per_layer_mirrored = set()
     worker._submitted_mirror_layers = set()
-    worker._enqueue_row_dma = MagicMock()
+    enqueue_row_dma = MagicMock()
+    monkeypatch.setattr(worker, "_enqueue_row_dma", enqueue_row_dma)
 
     worker._enqueue_host_mirror()
 
-    worker._enqueue_row_dma.assert_called_once_with((1,), ready_event=None)
+    enqueue_row_dma.assert_called_once_with((1,), ready_event=None)
 
 
 def test_hisparse_shared_host_reader_skips_mirror(monkeypatch):
@@ -949,7 +1050,6 @@ def test_hisparse_shared_host_reader_skips_mirror(monkeypatch):
     leader = SimpleNamespace(
         eager_host_mirror=True,
         is_group_leader=True,
-        invalidate_written_slots=MagicMock(),
     )
     handle = SimpleNamespace(
         runtime=leader,
@@ -962,15 +1062,19 @@ def test_hisparse_shared_host_reader_skips_mirror(monkeypatch):
     )
     worker = _make_hisparse_worker()
     worker.is_host_writer = False
-    worker.cache_handles = [handle]
+    worker.cache_handles = _as_cache_handles(handle)
     worker._set_row_mirrors((SparseKVRowMirror((0,), 7, 2),))
     worker._per_layer_mirrored = set()
-    worker._enqueue_row_dma = MagicMock()
+    enqueue_row_dma = MagicMock()
+    monkeypatch.setattr(worker, "_enqueue_row_dma", enqueue_row_dma)
+    invalidate_written_slots = MagicMock()
+    monkeypatch.setattr(worker, "_invalidate_written_slots", invalidate_written_slots)
 
     worker._enqueue_host_mirror()
 
-    worker._enqueue_row_dma.assert_not_called()
-    leader.invalidate_written_slots.assert_called_once()
+    enqueue_row_dma.assert_not_called()
+    invalidate_written_slots.assert_called_once()
+    assert invalidate_written_slots.call_args.args[0] == [leader]
 
 
 def test_hisparse_shared_host_reader_skips_transfer_completion():
@@ -981,7 +1085,7 @@ def test_hisparse_shared_host_reader_skips_transfer_completion():
     worker._enqueued_transfer_ids = []
     worker._pending_transfer_events = []
 
-    worker._record_transfer_completion([SparseKVPageTransfer(1, 2, (3,), True)])
+    worker._record_transfer_completion([SparseKVPageTransfer(1, 2, (3,))])
 
     assert worker._enqueued_transfer_ids == []
     assert worker._pending_transfer_events == []
@@ -998,8 +1102,8 @@ def test_hisparse_writer_records_transfer_completion_after_dma(monkeypatch):
 
     worker._record_transfer_completion(
         [
-            SparseKVPageTransfer(3, 2, (1,), False),
-            SparseKVPageTransfer(7, 4, (5,), True),
+            SparseKVPageTransfer(3, 2, (1,)),
+            SparseKVPageTransfer(7, 4, (5,)),
         ]
     )
 
@@ -1012,7 +1116,6 @@ def test_hisparse_writer_records_transfer_completion_after_dma(monkeypatch):
 def test_hisparse_step_waits_for_previous_host_write(monkeypatch, is_host_writer):
     worker = _make_hisparse_worker()
     worker.is_host_writer = is_host_writer
-    worker.hot_backing = SimpleNamespace(device=torch.device("cuda:1"))
     host_write_events = (MagicMock(), MagicMock())
     worker.host_write_events = host_write_events
     worker.host_write_event = host_write_events[1]
@@ -1021,7 +1124,7 @@ def test_hisparse_step_waits_for_previous_host_write(monkeypatch, is_host_writer
     worker.host_num_blocks = 1
     worker._post_forward_transfers = []
     worker._pending_invalid_block_ids = []
-    worker.cache_handles = [
+    worker.cache_handles = _as_cache_handles(
         SimpleNamespace(
             runtime=SimpleNamespace(eager_host_mirror=True),
             decode_batch=False,
@@ -1030,12 +1133,11 @@ def test_hisparse_step_waits_for_previous_host_write(monkeypatch, is_host_writer
             num_decode_tokens=0,
             req_id_per_token=None,
         )
-    ]
+    )
     worker._per_layer_mirrored = set()
     worker._submitted_mirror_layers = set()
-    worker._layer_mirror_callbacks = ()
     stream = MagicMock()
-    monkeypatch.setattr(hisparse_worker_module, "current_stream", lambda: stream)
+    monkeypatch.setattr(torch.accelerator, "current_stream", lambda: stream)
 
     worker.start_step(
         SimpleNamespace(
@@ -1045,6 +1147,7 @@ def test_hisparse_step_waits_for_previous_host_write(monkeypatch, is_host_writer
             row_mirrors={},
             all_context_pages_resident=True,
             row_mirrors_from_resident=False,
+            residency_updates={},
         ),
         None,
     )
@@ -1056,6 +1159,7 @@ def test_hisparse_step_waits_for_previous_host_write(monkeypatch, is_host_writer
             row_mirrors={},
             all_context_pages_resident=True,
             row_mirrors_from_resident=False,
+            residency_updates={},
         ),
         None,
     )
@@ -1073,15 +1177,13 @@ def test_hisparse_shared_host_block_copy_has_one_writer(
 ):
     worker = _make_hisparse_worker()
     worker.shared_host_region = object()
+    worker.is_host_writer = tp_rank == 0
     worker.host_caches = (torch.empty(4, 1),)
     worker.host_num_blocks = 4
     previous_event = MagicMock()
     copies = (KVCacheBlockCopy(0, 1),)
     copy_blocks = MagicMock()
     tp_group = MagicMock()
-    monkeypatch.setattr(
-        hisparse_worker_module, "get_tensor_model_parallel_rank", lambda: tp_rank
-    )
     monkeypatch.setattr(hisparse_worker_module, "get_tp_group", lambda: tp_group)
     monkeypatch.setattr(
         hisparse_worker_module, "copy_kv_cache_blocks_inplace", copy_blocks
@@ -1106,20 +1208,19 @@ def test_hisparse_empty_step_does_not_replay_stale_host_mirror(monkeypatch):
     )
     worker = _make_hisparse_worker()
     worker.is_host_writer = True
-    worker.hot_backing = SimpleNamespace(device=torch.device("cpu"))
     worker.host_write_event = MagicMock()
     worker._forward_ready_event = MagicMock()
     worker.host_caches = ()
     worker.host_num_blocks = 1
-    worker.cache_handles = [handle]
+    worker.cache_handles = _as_cache_handles(handle)
     worker._per_layer_mirrored = set()
     worker._submitted_mirror_layers = set()
-    worker._layer_mirror_callbacks = (MagicMock(),)
     worker._post_forward_transfers = []
     worker._pending_invalid_block_ids = []
-    worker._enqueue_host_mirror = MagicMock(wraps=worker._enqueue_host_mirror)
+    enqueue_host_mirror = MagicMock(wraps=worker._enqueue_host_mirror)
+    monkeypatch.setattr(worker, "_enqueue_host_mirror", enqueue_host_mirror)
     stream = MagicMock()
-    monkeypatch.setattr(hisparse_worker_module, "current_stream", lambda: stream)
+    monkeypatch.setattr(torch.accelerator, "current_stream", lambda: stream)
 
     worker.start_step(
         SimpleNamespace(
@@ -1129,18 +1230,22 @@ def test_hisparse_empty_step_does_not_replay_stale_host_mirror(monkeypatch):
             row_mirrors={},
             all_context_pages_resident=True,
             row_mirrors_from_resident=False,
+            residency_updates={},
         ),
         None,
     )
     worker.finish_forward()
 
-    worker._enqueue_host_mirror.assert_called_once_with(worker._forward_ready_event)
+    enqueue_host_mirror.assert_called_once_with(worker._forward_ready_event)
     assert handle.num_actual_tokens == 0
     torch.testing.assert_close(handle.mirror_slot_mapping, torch.tensor([4, 5]))
 
 
 def test_hisparse_cache_handles_join_index_groups_during_construction(monkeypatch):
     """Followers must not allocate duplicate runtime state before profiling."""
+    monkeypatch.setattr(
+        hisparse_runtime_module, "get_hisparse_backend", CUDAHiSparseBackend
+    )
     config = SimpleNamespace(
         scheduler_config=SimpleNamespace(
             max_num_seqs=2,
@@ -1153,8 +1258,9 @@ def test_hisparse_cache_handles_join_index_groups_during_construction(monkeypatc
     resolved = hisparse_runtime_module.ResolvedHiSparseConfig(
         top_k=4,
         device_buffer_size=8,
+        max_union_rows=8,
     )
-    monkeypatch.setattr(hisparse_runtime_module, "_has_hisparse_ops", lambda: True)
+    monkeypatch.setattr(CUDAHiSparseBackend, "check_available", lambda self: None)
     monkeypatch.setattr(
         hisparse_runtime_module.ResolvedHiSparseConfig,
         "from_vllm_config",
@@ -1175,8 +1281,16 @@ def test_hisparse_cache_handles_join_index_groups_during_construction(monkeypatc
         hisparse_runtime_module, "_create_shared_topk_state", create_shared_state
     )
     monkeypatch.setattr(hisparse_runtime_module, "_create_copy_stream", create_stream)
-    monkeypatch.setattr(index_group_module, "_create_side_stream", lambda _: object())
-    monkeypatch.setattr(index_group_module, "_create_event", lambda: object())
+    monkeypatch.setattr(
+        torch,
+        "Stream",
+        lambda device: object(),
+    )
+    monkeypatch.setattr(
+        torch,
+        "Event",
+        lambda: object(),
+    )
     index_group_builder = index_group_module.SparseMLAIndexGroupBuilder(
         torch.empty((2, 4), dtype=torch.int32)
     )
@@ -1231,11 +1345,12 @@ def test_hisparse_worker_shutdown_releases_pinned_state(monkeypatch):
     worker.cache_handles = []
     worker.pinned_host_pools = []
     worker.shared_host_region = object()
+    worker.vllm_config = SimpleNamespace(instance_id="shutdown")
+    pool = hisparse_runtime_module.get_hisparse_host_pool(worker.vllm_config, None)
     released = False
 
-    def release_pinned_state(runtimes, pinned_host_pools, shared_host_region):
+    def release_pinned_state(pinned_host_pools, shared_host_region):
         nonlocal released
-        assert runtimes == []
         assert pinned_host_pools == []
         assert shared_host_region is worker.shared_host_region
         released = True
@@ -1247,16 +1362,20 @@ def test_hisparse_worker_shutdown_releases_pinned_state(monkeypatch):
     worker.shutdown()
 
     assert released
+    new_pool = hisparse_runtime_module.get_hisparse_host_pool(worker.vllm_config, None)
+    assert new_pool is not pool
+    hisparse_runtime_module.drop_hisparse_host_pool(worker.vllm_config)
 
 
 class _TestReplaySSMMixer(MambaMixer2):
-    def __init__(self):
+    def __init__(self, backend: MambaBackendEnum = MambaBackendEnum.FLASHINFER):
         torch.nn.Module.__init__(self)
         self.use_replayssm = True
-        self.mamba_config = MambaConfig(backend=MambaBackendEnum.FLASHINFER)
+        self.use_flashinfer_replayssm = backend == MambaBackendEnum.FLASHINFER
+        self.state_alignment = 16
+        self.mamba_config = MambaConfig(backend=backend)
         self._replayssm_ring_start = torch.empty(0, dtype=torch.int32)
         self._replayssm_prev_num_accepted = torch.empty(0, dtype=torch.int32)
-        self._updates_replayssm_trackers = True
 
     def get_state_shape(self) -> tuple[tuple[int, ...], ...]:
         return ((2,), (3,), (4,), (5,), (6,))
@@ -1265,45 +1384,172 @@ class _TestReplaySSMMixer(MambaMixer2):
         return (torch.float32,) * 5
 
 
-def _packed_replayssm_cache(num_blocks: int) -> torch.Tensor:
-    return torch.full((num_blocks, 1, 1, 80), 0, dtype=torch.int8)
-
-
-@pytest.mark.parametrize("layers_only", [False, True])
-def test_bind_kv_cache_shares_replayssm_trackers_by_cache_group(layers_only):
+@pytest.mark.parametrize("layout", [KVCacheLayout.LBNHC, KVCacheLayout.BLHNC])
+def test_bind_and_copy_replayssm_cache_by_group(monkeypatch, layout):
+    monkeypatch.setattr(
+        "vllm.v1.worker.utils.async_tensor_h2d",
+        lambda array, *, device, **_: torch.from_numpy(array).to(device),
+    )
     mixers = [_TestReplaySSMMixer() for _ in range(3)]
-    layer_names = [f"layers.{i}.mixer" for i in range(3)]
-    ctx = dict(zip(layer_names, mixers))
-    # Reverse insertion order: updater must follow layer index, not dict order.
-    kv_cache = {
-        layer_names[2]: _packed_replayssm_cache(4),
-        layer_names[1]: _packed_replayssm_cache(4),
-        layer_names[0]: _packed_replayssm_cache(4),
-    }
-    kv_cache_groups = [
-        SimpleNamespace(layer_names=[layer_names[0], layer_names[2]]),
-        SimpleNamespace(layer_names=[layer_names[1]]),
+    names = [f"layers.{i}.mixer" for i in range(3)]
+    ctx = dict(zip(names, mixers))
+    spec = MambaSpec(
+        block_size=16,
+        shapes=mixers[0].get_state_shape(),
+        dtypes=mixers[0].get_state_dtype(),
+        page_size_padded=128,
+        state_alignment=16,
+        block_stride_alignment=16,
+    )
+    groups = [
+        KVCacheGroupSpec([names[0], names[2]], spec),
+        KVCacheGroupSpec([names[1]], spec),
     ]
+    config = SimpleNamespace(
+        cache_config=CacheConfig(),
+        attention_config=SimpleNamespace(hisparse_config=None),
+    )
+    config.cache_config.kv_cache_layout = layout.name
+    budget = 4 * 256
+    kv_config = get_kv_cache_config_from_groups(config, groups, budget)
+    assert kv_config.num_blocks == 4
+    pages = allocate_kv_cache(kv_config, torch.device("cpu"), layout)
+    pages = {name: pages[name] for name in reversed(names)}
+    runner_pages: list[torch.Tensor] = []
+    bind_kv_cache(pages, ctx, runner_pages)
+    initialize_replayssm_ring_trackers(kv_config, ctx)
+    # ROCm rounds the shared allocation up to a 4 KiB RDMA page.
+    expected_storage_size = 4096 if current_platform.is_rocm() else budget
+    assert pages[names[0]].untyped_storage().nbytes() == expected_storage_size
+    for mixer in mixers:
+        assert len(mixer.kv_cache) == 5
+    assert mixers[0]._replayssm_ring_start is mixers[2]._replayssm_ring_start
+    assert (
+        mixers[0]._replayssm_prev_num_accepted is mixers[2]._replayssm_prev_num_accepted
+    )
+    assert mixers[0]._replayssm_ring_start is not mixers[1]._replayssm_ring_start
+    extra = get_replayssm_block_copy_tensors(ctx)
+    assert len({tensor.data_ptr() for tensor in extra}) == 4
+    assert all(tensor.is_contiguous() and tensor.shape == (4,) for tensor in extra)
+    assert all(torch.count_nonzero(tensor) == 0 for tensor in extra)
 
-    if layers_only:
-        bind_kv_cache_to_layers(kv_cache, ctx, kv_cache_groups=kv_cache_groups)
-    else:
-        bind_kv_cache(kv_cache, ctx, [], kv_cache_groups=kv_cache_groups)
+    # Group A owns block 1; group B owns block 2 in the same backing storage.
+    for state in mixers[1].kv_cache:
+        state[2].fill_(99)
+    states = (*mixers[0].kv_cache, *mixers[2].kv_cache)
+    for index, state in enumerate(states, start=1):
+        state[1].fill_(index)
+    for index, state in enumerate(states, start=1):
+        assert torch.all(state[1] == index)
+    assert all(torch.all(state[2] == 99) for state in mixers[1].kv_cache)
+    for index, tensor in enumerate(
+        (mixers[0]._replayssm_ring_start, mixers[0]._replayssm_prev_num_accepted),
+        start=7,
+    ):
+        tensor[1] = index
+    before = {name: page.clone() for name, page in pages.items()}
+    copy_kv_cache_blocks_inplace([*runner_pages, *extra], 4, [KVCacheBlockCopy(1, 3)])
+    for name, page in pages.items():
+        assert torch.equal(page[3], before[name][1])
+        assert torch.equal(page[:3], before[name][:3])
+    assert mixers[2]._replayssm_ring_start[3] == 7
+    assert mixers[2]._replayssm_prev_num_accepted[3] == 8
+    assert torch.count_nonzero(mixers[1]._replayssm_ring_start) == 0
+    assert torch.count_nonzero(mixers[1]._replayssm_prev_num_accepted) == 0
 
-    assert (
-        mixers[0]._replayssm_ring_start.data_ptr()
-        == mixers[2]._replayssm_ring_start.data_ptr()
+    clear_layer_kv_caches(mixers)
+    for mixer in mixers:
+        assert not mixer.kv_cache
+        assert mixer._replayssm_ring_start.numel() == 0
+        assert mixer._replayssm_prev_num_accepted.numel() == 0
+
+
+def test_rebind_kv_cache_keeps_replayssm_trackers():
+    """Cache resizing preserves the tracker addresses captured by CUDA graphs."""
+    mixers = [_TestReplaySSMMixer() for _ in range(2)]
+    names = [f"layers.{i}.mixer" for i in range(2)]
+    ctx = dict(zip(names, mixers))
+    spec = MambaSpec(
+        block_size=16,
+        shapes=mixers[0].get_state_shape(),
+        dtypes=mixers[0].get_state_dtype(),
+        page_size_padded=128,
+        state_alignment=16,
     )
-    assert (
-        mixers[0]._replayssm_prev_num_accepted.data_ptr()
-        == mixers[2]._replayssm_prev_num_accepted.data_ptr()
+    config = KVCacheConfig(
+        num_blocks=8,
+        kv_cache_tensors=[],
+        kv_cache_groups=[KVCacheGroupSpec(names, spec)],
     )
-    assert (
-        mixers[1]._replayssm_ring_start.data_ptr()
-        != mixers[0]._replayssm_ring_start.data_ptr()
+    pages = {name: torch.zeros((9, 1, 1, 128), dtype=torch.int8) for name in names}
+
+    def bind(num_blocks):
+        config.num_blocks = num_blocks
+        bind_kv_cache_to_layers(
+            {n: page[:num_blocks] for n, page in pages.items()}, ctx
+        )
+        initialize_replayssm_ring_trackers(config, ctx)
+
+    bind(8)
+    ring_start = mixers[0]._replayssm_ring_start
+    prev_accepted = mixers[0]._replayssm_prev_num_accepted
+    ring_start[3] = 7
+    prev_accepted[3] = 2
+    for num_blocks in (8, 5):
+        bind(num_blocks)
+        for mixer in mixers:
+            for actual, original in (
+                (mixer._replayssm_ring_start, ring_start),
+                (mixer._replayssm_prev_num_accepted, prev_accepted),
+            ):
+                assert actual.data_ptr() == original.data_ptr()
+                assert actual.shape == (num_blocks,)
+                assert torch.equal(actual, original[:num_blocks])
+        assert mixers[0]._replayssm_ring_start is mixers[1]._replayssm_ring_start
+        assert (
+            mixers[0]._replayssm_prev_num_accepted
+            is mixers[1]._replayssm_prev_num_accepted
+        )
+
+    bind(9)
+    assert mixers[0]._replayssm_ring_start.data_ptr() != ring_start.data_ptr()
+    assert mixers[0]._replayssm_prev_num_accepted.data_ptr() != prev_accepted.data_ptr()
+    assert all(
+        tensor.shape == (9,) and torch.count_nonzero(tensor) == 0
+        for tensor in get_replayssm_block_copy_tensors(ctx)
     )
-    # Group {0, 2} shares trackers; layer 2 (not 0) updates after both run.
-    assert [m._updates_replayssm_trackers for m in mixers] == [False, True, True]
+
+
+def test_triton_replayssm_plans_in_first_layer_of_each_group():
+    mixers = [_TestReplaySSMMixer(MambaBackendEnum.TRITON) for _ in range(3)]
+    names = [f"layers.{i}.mixer" for i in range(3)]
+    ctx = dict(zip(names, mixers))
+    spec = MambaSpec(
+        block_size=16,
+        shapes=mixers[0].get_state_shape(),
+        dtypes=mixers[0].get_state_dtype(),
+        page_size_padded=128,
+        state_alignment=16,
+    )
+    # Group order differs from execution order.
+    config = KVCacheConfig(
+        num_blocks=4,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec([names[2], names[0]], spec),
+            KVCacheGroupSpec([names[1]], spec),
+        ],
+    )
+    bind_kv_cache_to_layers(
+        {name: torch.zeros((4, 1, 1, 128), dtype=torch.int8) for name in names}, ctx
+    )
+    initialize_replayssm_ring_trackers(config, ctx)
+
+    assert mixers[0]._replayssm_ring_start is mixers[2]._replayssm_ring_start
+    assert mixers[0]._replayssm_ring_start is not mixers[1]._replayssm_ring_start
+    assert mixers[0]._replayssm_ring_start.shape == (4,)
+    assert [m._plans_replayssm_decode for m in mixers] == [True, True, False]
+    assert get_replayssm_block_copy_tensors(ctx) == []
 
 
 def test_bind_kv_cache(default_vllm_config):
@@ -1390,3 +1636,36 @@ def test_bind_kv_cache_draft_model(default_vllm_config):
     assert runner_kv_caches[1] is kv_cache["draft_model.layers.0.attn"]
     assert runner_kv_caches[2] is kv_cache["model.layers.1.attn"]
     assert runner_kv_caches[3] is kv_cache["draft_model.layers.1.attn"]
+
+
+def _memory_snapshot(total_gib: int, free_gib: int) -> MemorySnapshot:
+    return MemorySnapshot(
+        free_memory=free_gib * GiB_bytes,
+        total_memory=total_gib * GiB_bytes,
+        device="cpu",
+        auto_measure=False,
+    )
+
+
+def test_request_memory_charges_external_weights():
+    """Externally held weights are charged against the utilization budget;
+    the engine is granted only the remainder."""
+    cache_config = CacheConfig(gpu_memory_utilization=0.9)
+    # 70 GiB of a 100 GiB device is held externally before the worker starts.
+    snapshot = _memory_snapshot(total_gib=100, free_gib=30)
+
+    with pytest.raises(ValueError, match="less than desired"):
+        request_memory(snapshot, cache_config)
+
+    # 90 GiB budget - 70 GiB external = 20 GiB for the engine.
+    assert request_memory(snapshot, cache_config, 70 * GiB_bytes) == 20 * GiB_bytes
+
+    # The external weights alone exceed the utilization budget.
+    with pytest.raises(ValueError, match="exceed the desired"):
+        request_memory(snapshot, cache_config, 95 * GiB_bytes)
+
+    # Other tenants squeeze free memory below the engine's remainder.
+    with pytest.raises(ValueError, match="less than the engine's budget"):
+        request_memory(
+            _memory_snapshot(total_gib=100, free_gib=10), cache_config, 70 * GiB_bytes
+        )

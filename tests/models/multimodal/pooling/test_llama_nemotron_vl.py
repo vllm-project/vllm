@@ -10,7 +10,6 @@ Both variants share a SigLIP vision encoder with a bidirectional LLaMA backbone.
 
 from collections.abc import Sequence
 from io import BytesIO
-from pathlib import Path
 
 import pybase64 as base64
 import pytest
@@ -18,12 +17,18 @@ import torch
 from PIL import Image
 from transformers import AutoModel, AutoModelForSequenceClassification, AutoProcessor
 
-from vllm.entrypoints.chat_utils import (
+from vllm.entrypoints.pooling.scoring.typing import ScoreMultiModalParam
+from vllm.model_executor.layers.fusion.mm_input_norm import FusedMMInputNorm
+from vllm.platforms import current_platform
+from vllm.renderers.chat_utils import (
     ChatCompletionContentPartImageParam,
     ChatCompletionContentPartTextParam,
 )
-from vllm.entrypoints.pooling.scoring.typing import ScoreMultiModalParam
-from vllm.platforms import current_platform
+from vllm.transformers_utils.processors.nemotron_vl import (
+    SIGLIP_MEAN,
+    SIGLIP_STD,
+    LlamaNemotronVLEmbedImageProcessor,
+)
 
 from ....conftest import IMAGE_ASSETS, HfRunner, PromptImageInput, VllmRunner
 from ....utils import ROCM_ENGINE_KWARGS
@@ -50,6 +55,99 @@ HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts(
 )
 
 MODELS = ["nvidia/llama-nemotron-embed-vl-1b-v2"]
+
+
+@pytest.mark.parametrize("model", MODELS)
+@pytest.mark.parametrize(
+    ("async_scheduling", "long_prefill_token_threshold"),
+    [(True, 0), (False, 128)],
+    ids=["async-encoder-cache-pressure", "sync-prefill-threshold"],
+)
+def test_image_embeddings_without_chunked_prefill(
+    vllm_runner, model, monkeypatch, async_scheduling, long_prefill_token_threshold
+):
+    """Encoder pressure and prefill caps must preserve whole bidirectional prompts."""
+    # Queue both requests before scheduling, independent of arrival timing.
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    images = [Image.new("RGB", (512, 512), color=color) for color in ("red", "blue")]
+    prompts = [f"{PASSAGE_PREFIX}<image>"] * len(images)
+    # ROCM_ENGINE_KWARGS also sets max_num_seqs, which this test needs at 2.
+    engine_kwargs = {**ROCM_ENGINE_KWARGS, "max_num_seqs": 2}
+    # The 384-token encoder cache fits one 256-token image, but not both.
+    with vllm_runner(
+        model,
+        runner="pooling",
+        dtype="half",
+        max_model_len=384,
+        max_num_batched_tokens=384,
+        async_scheduling=async_scheduling,
+        long_prefill_token_threshold=long_prefill_token_threshold,
+        enable_chunked_prefill=False,
+        enforce_eager=True,
+        trust_remote_code=True,
+        limit_mm_per_prompt={"image": 1},
+        mm_processor_kwargs={"max_dynamic_patch": 1, "use_thumbnail": False},
+        **engine_kwargs,
+    ) as vllm_model:
+        batched = vllm_model.embed(prompts, images=images)
+        individual = [
+            vllm_model.embed([prompt], images=[image])[0]
+            for prompt, image in zip(prompts, images)
+        ]
+    check_embeddings_close(
+        embeddings_0_lst=individual,
+        embeddings_1_lst=batched,
+        name_0="individual",
+        name_1="batch",
+    )
+
+
+@pytest.mark.usefixtures("default_vllm_config")
+def test_device_normalization_matches_cpu_transform() -> None:
+    device = current_platform.device_type
+    image = Image.new("RGB", (48, 32), color=(12, 128, 240))
+    processor_kwargs = dict(
+        image_size=32,
+        min_dynamic_patch=1,
+        max_dynamic_patch=1,
+        dynamic_image_size=True,
+        use_thumbnail=False,
+    )
+
+    cpu_processor = LlamaNemotronVLEmbedImageProcessor(**processor_kwargs)
+    device_processor = LlamaNemotronVLEmbedImageProcessor(
+        **processor_kwargs, do_rescale=False, do_normalize=False
+    )
+
+    expected = cpu_processor._images_to_pixel_values_lst([image])[0]
+    raw_pixels = device_processor._images_to_pixel_values_lst([image])[0]
+    input_norm = FusedMMInputNorm(
+        image_mean=list(SIGLIP_MEAN),
+        image_std=list(SIGLIP_STD),
+        rescale_factor=1 / 255,
+    ).to(device)
+    actual = input_norm(
+        raw_pixels.flatten(start_dim=1).to(device), expected.dtype
+    ).view_as(expected)
+
+    assert raw_pixels.dtype == torch.uint8
+    torch.testing.assert_close(actual, expected.to(device))
+
+
+@pytest.mark.parametrize(("do_rescale", "do_normalize"), [(True, False), (False, True)])
+def test_device_normalization_rejects_partial_cpu_processing(
+    do_rescale: bool, do_normalize: bool
+) -> None:
+    with pytest.raises(ValueError, match="both enabled or both disabled"):
+        LlamaNemotronVLEmbedImageProcessor(
+            image_size=32,
+            min_dynamic_patch=1,
+            max_dynamic_patch=1,
+            dynamic_image_size=True,
+            use_thumbnail=False,
+            do_rescale=do_rescale,
+            do_normalize=do_normalize,
+        )
 
 
 def _run_test(
@@ -136,7 +234,7 @@ def test_models(
     _run_test(
         hf_runner,
         vllm_runner,
-        input_cases,  # type: ignore[arg-type]
+        input_cases,
         model,
         dtype=dtype,
     )
@@ -147,13 +245,6 @@ def test_models(
 # ---------------------------------------------------------------------------
 
 RERANKER_MODELS = ["nvidia/llama-nemotron-rerank-vl-1b-v2"]
-
-# The tokenizer's built-in chat template is not suitable for the Score/Rerank
-# APIs (it's inherited from the base LLM).  We must use the provided override.
-_RERANKER_SCORE_TEMPLATE = (
-    Path(__file__).parents[4]
-    / "examples/pooling/score/template/nemotron-vl-rerank.jinja"
-).read_text()
 
 RERANKER_TEXT_QUERY = "How is AI improving the intelligence and capabilities of robots?"
 RERANKER_TEXT_DOCS = [
@@ -227,7 +318,11 @@ def _run_vllm_reranker(
     dtype: str,
     input_cases: Sequence[RerankerCase],
 ) -> list[list[float]]:
-    """Run all vLLM reranker cases in one model lifecycle."""
+    """Run all vLLM reranker cases in one model lifecycle.
+
+    The checkpoint declares its score template in its Sentence Transformers
+    config, so no chat template is passed.
+    """
     with vllm_runner(
         model,
         runner="pooling",
@@ -244,11 +339,7 @@ def _run_vllm_reranker(
             if not has_images:
                 queries = [query] * len(docs)
                 doc_texts = [doc_text for doc_text, _ in docs]
-                outputs = vllm_model.score(
-                    queries,
-                    doc_texts,
-                    chat_template=_RERANKER_SCORE_TEMPLATE,
-                )
+                outputs = vllm_model.score(queries, doc_texts)
             else:
                 query_params = [
                     ScoreMultiModalParam(
@@ -280,11 +371,7 @@ def _run_vllm_reranker(
                         )
                     doc_params.append(ScoreMultiModalParam(content=content))
 
-                raw_outputs = vllm_model.llm.score(
-                    query_params,
-                    doc_params,
-                    chat_template=_RERANKER_SCORE_TEMPLATE,
-                )
+                raw_outputs = vllm_model.llm.score(query_params, doc_params)
                 outputs = [output.outputs.score for output in raw_outputs]
 
             scores_per_case.append(outputs)

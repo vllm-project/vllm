@@ -42,6 +42,7 @@ import torch.distributed
 import torch.distributed._functional_collectives as funcol
 import torch.distributed._symmetric_memory
 from torch.distributed import Backend, ProcessGroup, Store
+from torch.distributed.constants import default_pg_timeout
 
 import vllm.envs as envs
 from vllm.distributed.device_communicators.base_device_communicator import (
@@ -49,6 +50,8 @@ from vllm.distributed.device_communicators.base_device_communicator import (
 )
 from vllm.distributed.utils import (
     StatelessProcessGroup,
+    cpu_all_reduce_,
+    create_tcp_store,
     get_cached_tcp_store_client,
 )
 from vllm.logger import init_logger
@@ -82,13 +85,13 @@ class Handle(Protocol):
 class _RetainedHandle:
     """Handle that retains source tensors until all posted work completes.
 
-    Used by ``isend_object`` to keep the serialized CPU tensors alive while
-    gloo copies them in the background; ``wait`` drops the refs once drained.
+    Used by `isend_object` to keep the serialized CPU tensors alive while
+    gloo copies them in the background; `wait` drops the refs once drained.
 
-    ``wait`` must be idempotent: gloo ``Work.wait()`` is single-shot for
+    `wait` must be idempotent: gloo `Work.wait()` is single-shot for
     point-to-point operations — calling it a second time on an already
     completed send blocks forever (verified empirically). Both the worker's
-    top-of-step drain of ``_pp_send_work`` and ``_reap_completed_isends``
+    top-of-step drain of `_pp_send_work` and `_reap_completed_isends`
     may wait the same entry's metadata handle, so the second caller must
     not re-wait the underlying works.
     """
@@ -164,10 +167,10 @@ def _register_group(group: "GroupCoordinator") -> None:
 def _apply_to_device_comms(
     action: Callable[[DeviceCommunicatorBase], None],
 ) -> None:
-    """Apply ``action`` to every group's device communicator.
+    """Apply `action` to every group's device communicator.
 
     Walks the registered parallel groups and skips those without a device
-    communicator (absent at ``world_size == 1``).
+    communicator (absent at `world_size == 1`).
     """
     comms = []
     for group_ref in _groups.values():
@@ -294,9 +297,9 @@ def patched_fused_scaled_matmul_reduce_scatter_fake(
 
 
 def _platform_device_type() -> str:
-    """Return the device-type string (e.g. ``"cuda"``, ``"xpu"``, ``"cpu"``)
+    """Return the device-type string (e.g. `"cuda"`, `"xpu"`, `"cpu"`)
     for the current platform, in the form expected by
-    ``torch.distributed.init_process_group(backend=...)``.
+    `torch.distributed.init_process_group(backend=...)`.
     """
     from vllm.platforms import current_platform
 
@@ -311,11 +314,11 @@ def _platform_device_type() -> str:
 
 
 def _device_backend_str(torch_distributed_backend: str | Backend) -> str:
-    """Normalize ``torch_distributed_backend`` to the ``"<device>:<backend>"``
-    format required by ``split_group``'s ``backend`` argument.
+    """Normalize `torch_distributed_backend` to the `"<device>:<backend>"`
+    format required by `split_group`'s `backend` argument.
 
-    Accepts either a bare backend name (e.g. ``"nccl"``) or an already-prefixed
-    string (e.g. ``"cuda:nccl"``).
+    Accepts either a bare backend name (e.g. `"nccl"`) or an already-prefixed
+    string (e.g. `"cuda:nccl"`).
     """
     backend_str = str(torch_distributed_backend)
     if ":" in backend_str:
@@ -328,11 +331,11 @@ def _create_subgroups_split_group(
     group_name: str,
     torch_distributed_backend: str | Backend,
 ) -> tuple[ProcessGroup, ProcessGroup]:
-    """Create the device + CPU subgroups for ``GroupCoordinator`` via
-    ``torch.distributed.split_group``.
+    """Create the device + CPU subgroups for `GroupCoordinator` via
+    `torch.distributed.split_group`.
 
-    ``split_group`` is collective on the parent group, so every parent rank
-    must enter with the same ``split_ranks`` definition. Each rank receives
+    `split_group` is collective on the parent group, so every parent rank
+    must enter with the same `split_ranks` definition. Each rank receives
     the subgroup it belongs to.
     """
     from vllm.distributed.utils import (
@@ -474,6 +477,13 @@ class GroupCoordinator:
         self_device_group = None
         self_cpu_group = None
 
+        from vllm.distributed.utils import (
+            get_cpu_distributed_timeout_or_none,
+            get_distributed_timeout_or_none,
+        )
+
+        self.cpu_timeout = get_cpu_distributed_timeout_or_none()
+
         # VLLM_DISTRIBUTED_USE_SPLIT_GROUP gates the new ``split_group``
         # codepath. Default (False) preserves the legacy ``new_group`` path.
         if envs.VLLM_DISTRIBUTED_USE_SPLIT_GROUP:
@@ -487,12 +497,6 @@ class GroupCoordinator:
                     self.rank_in_group = ranks.index(self.rank)
                     break
         else:
-            from vllm.distributed.utils import (
-                get_cpu_distributed_timeout_or_none,
-                get_distributed_timeout_or_none,
-            )
-
-            timeout = get_cpu_distributed_timeout_or_none()
             device_timeout = get_distributed_timeout_or_none()
 
             for ranks in group_ranks:
@@ -505,7 +509,7 @@ class GroupCoordinator:
                 # processes through the CPU.
                 with suppress_stdout():
                     cpu_group = torch.distributed.new_group(
-                        ranks, backend="gloo", timeout=timeout
+                        ranks, backend="gloo", timeout=self.cpu_timeout
                     )
                 if self.rank in ranks:
                     self.ranks = ranks
@@ -522,6 +526,10 @@ class GroupCoordinator:
 
         self.cpu_group = self_cpu_group
         self.device_group = self_device_group
+
+        # Dead DP slots under fault-tolerance scale-down (empty when FT is
+        # off); read by the DP allreduce to neutralize dead columns.
+        self.dead_dp_ranks: set[int] = set()
 
         from vllm.platforms import current_platform
 
@@ -801,6 +809,19 @@ class GroupCoordinator:
             raise ValueError("No device communicator found")
         return self.device_communicator.reduce_scatterv(input_, dim, sizes)
 
+    def reduce_scatterv_into_output(
+        self,
+        input_: torch.Tensor,
+        output: torch.Tensor,
+        dim: int = -1,
+        sizes: list[int] | None = None,
+    ) -> torch.Tensor:
+        if self.device_communicator is None:
+            raise ValueError("No device communicator found")
+        return self.device_communicator.reduce_scatterv_into_output(
+            input_, output, dim, sizes
+        )
+
     def _reduce_scatter_out_place(self, input_: torch.Tensor, dim: int) -> torch.Tensor:
         if self.device_communicator is None:
             raise ValueError("No device communicator found")
@@ -941,9 +962,9 @@ class GroupCoordinator:
         return obj
 
     def isend_object(self, obj: Any, dst: int) -> Handle:
-        """Non-blocking ``send_object``: isend size + pickled object on the
+        """Non-blocking `send_object`: isend size + pickled object on the
         CPU group. Returns a handle that retains the serialized source
-        tensors until ``wait`` drains both sends.
+        tensors until `wait` drains both sends.
         """
         assert dst < self.world_size, f"Invalid dst rank ({dst})"
         assert dst != self.rank_in_group, (
@@ -1108,22 +1129,22 @@ class GroupCoordinator:
         return None
 
     def _reap_completed_isends(self) -> None:
-        """Lazily drop self-retained ``isend_tensor_dict`` entries that have
+        """Lazily drop self-retained `isend_tensor_dict` entries that have
         completed, oldest first (FIFO).
 
-        gloo ``Work.is_completed()`` is unreliable (it can report completion
+        gloo `Work.is_completed()` is unreliable (it can report completion
         before the background copy of the source buffer finishes), so the
-        metadata handle (``handles[0]``, a gloo-backed ``_RetainedHandle``) is
+        metadata handle (`handles[0]`, a gloo-backed `_RetainedHandle`) is
         never used as the completion gate. Instead we gate on the tensor-send
-        handles (``handles[1:]``), which run on the device backend where
-        ``is_completed()`` is reliable. Once all tensor sends are done the
+        handles (`handles[1:]`), which run on the device backend where
+        `is_completed()` is reliable. Once all tensor sends are done the
         peer must already have posted the matching tensor recvs — and since
         the receiver ingests metadata before tensors, the gloo metadata send
-        is then guaranteed complete, so ``wait()`` on it is ~instant and only
+        is then guaranteed complete, so `wait()` on it is ~instant and only
         serves to drop the retained refs.
 
-        Metadata-only entries (``handles[1:]`` empty, e.g. an empty
-        ``IntermediateTensors``) have no reliable completion signal; drop them
+        Metadata-only entries (`handles[1:]` empty, e.g. an empty
+        `IntermediateTensors`) have no reliable completion signal; drop them
         best-effort without blocking on the gloo metadata wait.
         """
         pending = getattr(self, "_pending_isends", None)
@@ -1154,11 +1175,11 @@ class GroupCoordinator:
         """Send the input tensor dictionary asynchronously.
 
         The returned handles are additionally self-retained in
-        ``self._pending_isends`` (together with the sent source tensors) and
+        `self._pending_isends` (together with the sent source tensors) and
         reaped lazily on subsequent calls, so fire-and-forget callers that
         drop the handles cannot free or overwrite the send buffers while the
         sends are still in flight. Callers that do keep the handles may
-        ``wait()`` them as before; the retention entry is dropped on reap
+        `wait()` them as before; the retention entry is dropped on reap
         either way.
         """
         if self.world_size <= 1:
@@ -1361,6 +1382,10 @@ class GroupCoordinator:
         """
         torch.distributed.barrier(group=self.cpu_group)
 
+    def cpu_all_reduce_(self, tensor: torch.Tensor) -> torch.Tensor:
+        """In-place SUM all-reduce of a small CPU tensor over `cpu_group`."""
+        return cpu_all_reduce_(tensor, self.cpu_group, self.cpu_timeout)
+
     def send(self, tensor: torch.Tensor, dst: int | None = None) -> None:
         """Sends a tensor to the destination rank in a blocking way."""
         """NOTE: `dst` is the local rank of the destination rank."""
@@ -1441,6 +1466,32 @@ class GroupCoordinator:
             return self.device_communicator.combine(hidden_states, is_sequence_parallel)
         else:
             return hidden_states
+
+    def allocate_combine_input(
+        self,
+        shape: tuple[int, ...],
+        dtype: torch.dtype,
+        device: torch.device,
+        is_sequence_parallel: bool = False,
+    ) -> torch.Tensor | None:
+        if self.device_communicator is None:
+            return None
+        return self.device_communicator.allocate_combine_input(
+            shape, dtype, device, is_sequence_parallel
+        )
+
+    def combine_into_output(
+        self,
+        hidden_states: torch.Tensor,
+        output: torch.Tensor,
+        is_sequence_parallel: bool = False,
+    ) -> torch.Tensor:
+        if self.device_communicator is None:
+            output.copy_(hidden_states)
+            return output
+        return self.device_communicator.combine_into_output(
+            hidden_states, output, is_sequence_parallel
+        )
 
 
 _WORLD: GroupCoordinator | None = None
@@ -1528,7 +1579,7 @@ def _replace_active_groups(
     """Replace the active groups and return the groups they replaced.
 
     The caller must destroy the returned DP, EP, WORLD, and EPLB groups
-    collectively and in that order. Pass all-``None`` to remove the active
+    collectively and in that order. Pass all-`None` to remove the active
     groups without replacement.
     """
     global _WORLD, _DP, _EP, _EPLB, _NODE_COUNT
@@ -1584,7 +1635,7 @@ def get_dcp_group() -> GroupCoordinator:
 
 
 def get_dcp_world_size_and_rank(enabled: bool = True) -> tuple[int, int]:
-    """Return ``(world_size, rank)`` in the DCP group, or ``(1, 0)`` when disabled
+    """Return `(world_size, rank)` in the DCP group, or `(1, 0)` when disabled
     (e.g. a replicated draft cache) or the group is uninitialized (unit tests)."""
     if not enabled or _DCP is None:
         return 1, 0
@@ -1639,8 +1690,13 @@ def get_pcp_group() -> GroupCoordinator:
     return _PCP
 
 
+def _aiter_registers_graph_buffers(group: GroupCoordinator) -> bool:
+    comm = getattr(group.device_communicator, "aiter_ar_comm", None)
+    return comm is not None and comm.registers_graph_buffers
+
+
 @contextmanager
-def graph_capture(device: torch.device):
+def graph_capture(device: torch.device, stream: torch.cuda.Stream | None = None):
     """`graph_capture` is a context manager which should surround the code that
     is capturing the CUDA graph. Its main purpose is to ensure that some
     operations will be run after the graph is captured, before the graph
@@ -1652,12 +1708,26 @@ def graph_capture(device: torch.device):
     the graph capture is running on a separate stream from the default stream,
     in order to explicitly distinguish the kernels to capture
     from other kernels possibly launched on background in the default stream.
+    A given `stream` is reused instead, so graphs captured on it share the
+    caching allocator's free blocks of the graph pool.
     """
-    context = GraphCaptureContext(torch.cuda.Stream(device=device))
+    from vllm.device_allocator.alloc_conf import non_expandable_allocations
+    from vllm.platforms import current_platform
+
+    tp, pp, dp = get_tp_group(), get_pp_group(), get_dp_group()
+    context = GraphCaptureContext(stream or torch.cuda.Stream(device=device))
+    # Let AITER all-reduce register captured buffers instead of copying them.
+    # Not with DP AITER collectives: they reduce workspaces allocated earlier.
+    non_expandable = (
+        current_platform.is_rocm()
+        and _aiter_registers_graph_buffers(tp)
+        and not _aiter_registers_graph_buffers(dp)
+    )
     with (
-        get_tp_group().graph_capture(context),
-        get_pp_group().graph_capture(context),
-        get_dp_group().graph_capture(context),
+        non_expandable_allocations() if non_expandable else nullcontext(),
+        tp.graph_capture(context),
+        pp.graph_capture(context),
+        dp.graph_capture(context),
     ):
         yield context
 
@@ -1683,9 +1753,9 @@ def _init_process_group_for_split_group(
     timeout: timedelta | None,
 ) -> None:
     """Initialize the default PG with both CPU (gloo) and device (e.g. nccl)
-    backends and an eager ``device_id`` binding so that subgroups can be
-    created via ``split_group`` (which requires the parent communicator to
-    be eagerly initialized). Falls back to ``gloo`` on CPU-only systems.
+    backends and an eager `device_id` binding so that subgroups can be
+    created via `split_group` (which requires the parent communicator to
+    be eagerly initialized). Falls back to `gloo` on CPU-only systems.
     """
     if torch.accelerator.is_available() and backend != "gloo":
         init_backend = "cpu:gloo,cuda:nccl"
@@ -1710,10 +1780,10 @@ def _init_process_group_for_split_group(
 
 
 def _validate_default_pg_for_split_group() -> None:
-    """When an external launcher (e.g. ``torchrun``) initialized the default
-    PG, ``GroupCoordinator`` cannot patch in additional backends or change
-    the eager-init behavior — ``split_group`` only selects subsets of an
-    existing parent. Validate that the parent has both ``device_id`` and a
+    """When an external launcher (e.g. `torchrun`) initialized the default
+    PG, `GroupCoordinator` cannot patch in additional backends or change
+    the eager-init behavior — `split_group` only selects subsets of an
+    existing parent. Validate that the parent has both `device_id` and a
     CPU (gloo) backend, and emit a descriptive error pointing at the exact
     init call to update otherwise.
     """
@@ -1790,6 +1860,7 @@ def init_distributed_environment(
 
     config = get_current_vllm_config_or_none()
     enable_elastic_ep = config is not None and config.parallel_config.enable_elastic_ep
+    world_pg_store: Store | None = None
     if (
         config is not None
         and config.parallel_config.distributed_executor_backend != "external_launcher"
@@ -1813,7 +1884,46 @@ def init_distributed_environment(
             distributed_init_method = get_distributed_init_method(ip, port)
         else:
             ip = parallel_config.data_parallel_master_ip
-            port = parallel_config.get_next_dp_init_port()
+            if (
+                parallel_config._coord_store_port
+                and not torch.distributed.is_initialized()
+            ):
+                # Group rank 0 lets the world-group TCPStore bind port 0
+                # and publishes the kernel-assigned port via the
+                # coordination store. A one-shot client of our own: the
+                # cached one is inherited across fork and shared with
+                # sibling workers.
+                coord_store = create_tcp_store(
+                    ip,
+                    parallel_config._coord_store_port,
+                    is_master=False,
+                    wait_for_workers=False,
+                )
+                if rank == 0:
+                    # Workers can only connect once the port is published.
+                    world_pg_store = create_tcp_store(
+                        ip,
+                        0,
+                        world_size=world_size,
+                        is_master=True,
+                        wait_for_workers=False,
+                        timeout=timeout or default_pg_timeout,
+                        multi_tenant=True,
+                    )
+                    port = world_pg_store.port
+                    coord_store.set("world_pg_port", str(port).encode())
+                else:
+                    port = int(coord_store.get("world_pg_port").decode())
+                    world_pg_store = create_tcp_store(
+                        ip,
+                        port,
+                        world_size=world_size,
+                        is_master=False,
+                        timeout=timeout or default_pg_timeout,
+                        multi_tenant=True,
+                    )
+            else:
+                port = parallel_config.get_next_dp_init_port()
             distributed_init_method = get_distributed_init_method(ip, port)
             logger.debug(
                 "Adjusting world_size=%d rank=%d distributed_init_method=%s for DP",
@@ -1843,8 +1953,8 @@ def init_distributed_environment(
                 "Fallback Gloo backend is not available."
             )
             backend = "gloo"
-        store = None
-        if distributed_init_method.startswith("file://"):
+        store = world_pg_store
+        if store is None and distributed_init_method.startswith("file://"):
             store = torch.distributed.FileStore(
                 distributed_init_method.removeprefix("file://"), world_size
             )
@@ -2109,14 +2219,23 @@ def initialize_model_parallel(
         and config.model_config.architecture == "DeepseekV41ForCausalLM"
         and not enable_elastic_ep
     ):
-        engram_dp_size = _engram_dp_shard_size(
-            world_size,
-            data_parallel_size,
-            tensor_model_parallel_size
-            * pipeline_model_parallel_size
-            * prefill_context_model_parallel_size,
-        )
-    if engram_dp_size > 1:
+        if (
+            not engram_config.cpu_offload
+            and engram_config.embedding_across_dp
+            and tensor_model_parallel_size == 1
+        ):
+            # GPU tables are read from peers' HBM, so every DP rank must share
+            # one NVLink domain (e.g. GB200 NVL72).
+            engram_dp_size = data_parallel_size
+        else:
+            engram_dp_size = _engram_dp_shard_size(
+                world_size,
+                data_parallel_size,
+                tensor_model_parallel_size
+                * pipeline_model_parallel_size
+                * prefill_context_model_parallel_size,
+            )
+    if 1 < engram_dp_size < data_parallel_size:
         group_ranks = (
             all_ranks.permute(0, 2, 3, 4, 1).reshape(-1, engram_dp_size).unbind(0)
         )
@@ -2204,6 +2323,9 @@ def initialize_model_parallel(
         _DP = init_model_parallel_group(
             group_ranks, get_world_group().local_rank, backend, group_name="dp"
         )
+    if 1 < engram_dp_size == data_parallel_size:
+        # Same ranks as the DP group: reuse its communicators.
+        _ENGRAM_DP = _DP
 
     global _EP
     assert _EP is None, "expert parallel group is already initialized"
@@ -2363,6 +2485,11 @@ def get_tensor_model_parallel_rank() -> int:
     return get_tp_group().rank_in_group
 
 
+def get_pipeline_model_parallel_rank() -> int:
+    """Return my rank for the pipeline model parallel group."""
+    return get_pp_group().rank_in_group
+
+
 def get_node_count() -> int:
     """Return the total number of nodes in the distributed environment."""
     assert _NODE_COUNT is not None, "distributed environment is not initialized"
@@ -2381,11 +2508,6 @@ def destroy_model_parallel():
         _TP.destroy()
     _TP = None
 
-    global _ENGRAM_DP
-    if _ENGRAM_DP:
-        _ENGRAM_DP.destroy()
-    _ENGRAM_DP = None
-
     global _DCP
     if _DCP:
         _DCP.destroy()
@@ -2401,7 +2523,10 @@ def destroy_model_parallel():
         _PP.destroy()
     _PP = None
 
-    global _DP
+    global _DP, _ENGRAM_DP
+    if _ENGRAM_DP and _ENGRAM_DP is not _DP:
+        _ENGRAM_DP.destroy()
+    _ENGRAM_DP = None
     if _DP:
         _DP.destroy()
     _DP = None

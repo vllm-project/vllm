@@ -23,7 +23,7 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding.mrope import triton_mrope
 from vllm.model_executor.layers.rotary_embedding.mrope_vit_setup import (
-    vit_mrope_setup,
+    VitMropeSetup,
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.utils import maybe_prefix
@@ -42,8 +42,7 @@ class MiniMaxVLPatchEmbed(nn.Module):
 
     def __init__(self, config: PreTrainedConfig) -> None:
         super().__init__()
-        compression = config.img_token_compression_config
-        temporal_patch_size = compression.get("temporal_patch_size", 2)
+        temporal_patch_size = config.temporal_patch_size
         patch_size = config.patch_size
         num_channels = config.num_channels
 
@@ -59,11 +58,12 @@ class MiniMaxVLPatchEmbed(nn.Module):
             stride=(temporal_patch_size, patch_size, patch_size),
             bias=False,
         )
+        # The checkpoint stores this weight in fp32 (the vision tower's only
+        # fp32 tensor); keep it that way so the conv runs at full precision.
+        self.patch_embedding.to(torch.float32)
 
     def forward(self, pixel_values: torch.Tensor) -> torch.Tensor:
         # pixel_values: (N, C * temporal_patch_size * patch_size²)
-        if self.patch_embedding.weight.dtype != pixel_values.dtype:
-            self.patch_embedding = self.patch_embedding.to(pixel_values.dtype)
         x = pixel_values.reshape(
             pixel_values.shape[0],
             self.num_channels,
@@ -71,13 +71,14 @@ class MiniMaxVLPatchEmbed(nn.Module):
             self.patch_size,
             self.patch_size,
         )
-        return self.patch_embedding(x).reshape(x.shape[0], -1)
+        out = self.patch_embedding(x.to(self.patch_embedding.weight.dtype))
+        return out.reshape(x.shape[0], -1).to(pixel_values.dtype)
 
 
 class MiniMaxVLAttention(nn.Module):
     """Multi-head attention with MiniMax's partial 3D RoPE.
 
-    Partial means only the first ``rot_dim`` (< head_dim) dimensions of
+    Partial means only the first `rot_dim` (< head_dim) dimensions of
     Q and K are rotated; the remaining dims are passed through unchanged.
     """
 
@@ -293,7 +294,7 @@ class MiniMaxVLEncoder(nn.Module):
 class MiniMaxVLVisionTransformer(nn.Module):
     """CLIP-based ViT with 3D RoPE (t/h/w decomposed).
 
-    Faithfully mirrors the reference ``MiniMaxVLVisionTransformer``.
+    Faithfully mirrors the reference `MiniMaxVLVisionTransformer`.
     FLASHINFER backend is not supported; standard flash-attn is used.
     """
 
@@ -306,9 +307,8 @@ class MiniMaxVLVisionTransformer(nn.Module):
         prefix: str = "",
     ) -> None:
         super().__init__()
-        compression = config.img_token_compression_config
-        self.spatial_merge_size: int = compression.get("spatial_merge_size", 2)
-        self.temporal_patch_size: int = compression.get("temporal_patch_size", 2)
+        self.spatial_merge_size: int = config.spatial_merge_size
+        self.temporal_patch_size: int = config.temporal_patch_size
         self.vision_segment_max_frames: int | None = getattr(
             config, "vision_segment_max_frames", None
         )
@@ -336,7 +336,7 @@ class MiniMaxVLVisionTransformer(nn.Module):
         self.w_dim = int(2 * ((rope_dims // 3) // 2))
         # rot_dim = t_dim + h_dim + w_dim (may be < head_dim)
 
-        rope_theta: float = getattr(config, "rope_theta", 10000.0)
+        rope_theta: float = config.rope_parameters["rope_theta"]
         inv_freq_t = 1.0 / (
             rope_theta
             ** (torch.arange(0, self.t_dim, 2, dtype=torch.float32) / self.t_dim)
@@ -352,6 +352,8 @@ class MiniMaxVLVisionTransformer(nn.Module):
         self.register_buffer("inv_freq_t", inv_freq_t, persistent=False)
         self.register_buffer("inv_freq_h", inv_freq_h, persistent=False)
         self.register_buffer("inv_freq_w", inv_freq_w, persistent=False)
+        # Pluggable so OOT platforms can substitute the setup kernel.
+        self.mrope_setup = VitMropeSetup()
 
         self.embeddings = MiniMaxVLPatchEmbed(config)
         self.pre_layrnorm = nn.LayerNorm(embed_dim, eps=config.layer_norm_eps)
@@ -392,19 +394,33 @@ class MiniMaxVLVisionTransformer(nn.Module):
                     out.append([min(max_f, t - i), h, w])
         return out
 
-    # ── Forward ──────────────────────────────────────────────────────────
+    # ── Encoder metadata (shared by eager forward and CUDA graph replay) ──
 
-    def forward(
+    def prepare_encoder_metadata(
         self,
-        pixel_values: torch.Tensor,
         grid_thw: list[list[int]],
-    ) -> torch.Tensor:
-        # pixel_values: (total_N, C * temporal_patch_size * patch_size²)
-        # Output:       (total_N, hidden_size)
+        *,
+        device: torch.device,
+        max_batch_size: int | None = None,
+        max_seqlen_override: int | None = None,
+    ) -> dict[str, torch.Tensor | None]:
+        """Build all grid-dependent forward inputs as standalone tensors.
 
-        hidden = self.embeddings(pixel_values)  # (total_N, hidden_size)
-        hidden = self.pre_layrnorm(hidden)
+        The eager path calls this per forward; encoder CUDA graphs call it at
+        capture (dummy grids, padded to fixed buffer sizes) and before each
+        replay (real grids, unpadded — the manager's padding logic completes
+        the captured buffers).
 
+        Args:
+            grid_thw: per-item [t, h, w] patch grids (host metadata).
+            device: device for the attention metadata tensors.
+            max_batch_size: pad cu_seqlens to this many segments with empty
+                (zero-length) trailing segments; None leaves it unpadded.
+            max_seqlen_override: bake this max_seqlen instead of deriving it
+                from the grids; CUDA graph capture passes a worst-case value
+                because max_seqlen is a CPU scalar baked into the graph.
+
+        """
         limited = self._apply_max_frames_limit(grid_thw)
 
         # Token-level cumulative sequence lengths (one segment per limited grid).
@@ -412,15 +428,23 @@ class MiniMaxVLVisionTransformer(nn.Module):
         cu_seqlens_np = np.zeros(len(lens) + 1, dtype=np.int32)
         np.cumsum(np.array(lens, dtype=np.int32), out=cu_seqlens_np[1:])
 
+        if max_batch_size is not None and len(lens) < max_batch_size:
+            pad = np.full(max_batch_size - len(lens), cu_seqlens_np[-1], dtype=np.int32)
+            cu_seqlens_np = np.concatenate([cu_seqlens_np, pad])
+
         # Backend-specific encoder metadata. For FLASH_ATTN this returns the raw
         # token cu_seqlens, the max segment length, and sequence_lengths=None;
         # for FLASHINFER (cuDNN) it repacks cu_seqlens into element-offset
         # indptrs, buckets max_seqlen, and builds padded per-sequence lengths.
         sequence_lengths = MMEncoderAttention.maybe_compute_seq_lens(
-            self.attn_backend, cu_seqlens_np, hidden.device
+            self.attn_backend, cu_seqlens_np, device
         )
         max_seqlen = torch.tensor(
-            MMEncoderAttention.compute_max_seqlen(self.attn_backend, cu_seqlens_np),
+            max_seqlen_override
+            if max_seqlen_override is not None
+            else MMEncoderAttention.compute_max_seqlen(
+                self.attn_backend, cu_seqlens_np
+            ),
             dtype=torch.int32,
         )
         cu_seqlens = MMEncoderAttention.maybe_recompute_cu_seqlens(
@@ -428,19 +452,58 @@ class MiniMaxVLVisionTransformer(nn.Module):
             cu_seqlens_np,
             self.hidden_size,
             self.tp_size,
-            hidden.device,
+            device,
         )
 
         # 3D RoPE cos/sin: (3, total_N, half_rot_dim) fp32 t/h/w planes for
         # triton_mrope from one fused setup kernel. Kept fp32 so the kernel
         # computes the rotation in fp32, matching the reference.
-        rotary_cos, rotary_sin = vit_mrope_setup(
+        rotary_cos, rotary_sin = self.mrope_setup(
             self.inv_freq_t,
             self.inv_freq_h,
             self.inv_freq_w,
             limited,
             self.spatial_merge_size,
         )
+
+        return {
+            "rotary_cos": rotary_cos,
+            "rotary_sin": rotary_sin,
+            "cu_seqlens": cu_seqlens,
+            "max_seqlen": max_seqlen,
+            "sequence_lengths": sequence_lengths,
+        }
+
+    # ── Forward ──────────────────────────────────────────────────────────
+
+    def forward(
+        self,
+        pixel_values: torch.Tensor,
+        grid_thw: list[list[int]] | None = None,
+        *,
+        encoder_metadata: dict[str, torch.Tensor | None] | None = None,
+    ) -> torch.Tensor:
+        # pixel_values: (total_N, C * temporal_patch_size * patch_size²)
+        # Output:       (total_N, hidden_size)
+
+        hidden = self.embeddings(pixel_values)  # (total_N, hidden_size)
+        hidden = self.pre_layrnorm(hidden)
+
+        if encoder_metadata is None:
+            assert grid_thw is not None
+            encoder_metadata = self.prepare_encoder_metadata(
+                grid_thw, device=hidden.device
+            )
+
+        cu_seqlens = encoder_metadata["cu_seqlens"]
+        rotary_cos = encoder_metadata["rotary_cos"]
+        rotary_sin = encoder_metadata["rotary_sin"]
+        max_seqlen = encoder_metadata["max_seqlen"]
+        sequence_lengths = encoder_metadata.get("sequence_lengths")
+        assert cu_seqlens is not None
+        assert rotary_cos is not None
+        assert rotary_sin is not None
+        assert max_seqlen is not None
 
         # Encoder expects (N, 1, hidden_size) — add batch dim
         hidden = hidden.unsqueeze(1)
@@ -557,8 +620,7 @@ class MiniMaxVLVisionModel(nn.Module):
         prefix: str = "",
     ) -> None:
         super().__init__()
-        compression = config.img_token_compression_config
-        spatial_merge_size: int = compression.get("spatial_merge_size", 2)
+        spatial_merge_size: int = config.spatial_merge_size
         self.spatial_merge_size = spatial_merge_size
         self.use_data_parallel = is_vit_use_data_parallel()
 
@@ -594,15 +656,23 @@ class MiniMaxVLVisionModel(nn.Module):
             prefix=maybe_prefix(prefix, "patch_merge_mlp"),
         )
 
-        self.dtype = self.vision_model.embeddings.patch_embedding.weight.dtype
+        # Tower compute dtype; the patch embedding weight stays fp32 (see
+        # MiniMaxVLPatchEmbed), so take it from the projector instead.
+        self.dtype = self.multi_modal_projector.linear_1.weight.dtype
         self.out_hidden_size = text_hidden_size
 
     def forward(
         self,
         pixel_values: torch.Tensor,
-        grid_thw: list[list[int]],
+        grid_thw: list[list[int]] | None = None,
+        *,
+        encoder_metadata: dict[str, torch.Tensor | None] | None = None,
     ) -> torch.Tensor:
-        hidden = self.vision_model(pixel_values=pixel_values, grid_thw=grid_thw)
+        hidden = self.vision_model(
+            pixel_values=pixel_values,
+            grid_thw=grid_thw,
+            encoder_metadata=encoder_metadata,
+        )
         if hidden.dim() == 3:
             hidden = hidden.squeeze(0)
         hidden = self.multi_modal_projector(hidden)

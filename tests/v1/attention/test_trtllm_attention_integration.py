@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Integration tests for TRTLLM gen-full attention through FlashInfer."""
 
+import dataclasses
 import unittest.mock
 from functools import partial
 
@@ -169,13 +170,13 @@ def _create_nvfp4_hnd_kv_cache(
     reshape_and_cache_flash, using the same block-table layout as
     create_and_prepopulate_kv_cache.
 
-    The returned tensor is dtype ``uint8`` with head-group layout
-      ``(num_blocks, 2 * num_kv_heads, block_size, full_dim)``
-    where K heads occupy the first ``num_kv_heads`` heads and V heads the second.
-    Each ``full_dim = head_size // 2 + head_size // 16`` block packs two regions:
-      - **FP4 data** (``head_size // 2`` bytes): pairs of E2M1 values,
+    The returned tensor is dtype `uint8` with head-group layout
+      `(num_blocks, 2 * num_kv_heads, block_size, full_dim)`
+    where K heads occupy the first `num_kv_heads` heads and V heads the second.
+    Each `full_dim = head_size // 2 + head_size // 16` block packs two regions:
+      - **FP4 data** (`head_size // 2` bytes): pairs of E2M1 values,
         two per byte.
-      - **FP8 block scales** (``head_size // 16`` bytes): one E4M3
+      - **FP8 block scales** (`head_size // 16` bytes): one E4M3
         scale per 16-element block.
 
     Args:
@@ -193,7 +194,7 @@ def _create_nvfp4_hnd_kv_cache(
             during quantization.
 
     Returns:
-        ``torch.Tensor``: The nvfp4 kv_cache tensor (uint8, LBHNC-strided).
+        `torch.Tensor`: The nvfp4 kv_cache tensor (uint8, LBHNC-strided).
 
     """
     # First create a bf16 cache so block tables are populated.
@@ -513,3 +514,50 @@ def test_trtllm_gen_nvfp4_kv_integration(batch_spec_name: str):
         kv_cache_dtype="nvfp4",
         model_name=MODEL_NVFP4,
     )
+
+
+@torch.inference_mode()
+def test_trtllm_gen_draft_decode_metadata_tracks_in_place_seq_lens(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Fused draft steps reuse the step-1 build after advancing seq_lens in
+    place, so its decode metadata must match the split path's step-2 rebuild."""
+    monkeypatch.setattr(
+        "vllm.utils.flashinfer.supports_trtllm_attention",
+        unittest.mock.Mock(return_value=True),
+    )
+    monkeypatch.setattr(
+        "vllm.v1.attention.backends.flashinfer.get_per_layer_parameters",
+        _mock_get_per_layer_parameters,
+    )
+    vllm_config = create_vllm_config(
+        model_name=MODEL, block_size=BLOCK_SIZE, num_gpu_blocks=NUM_GPU_BLOCKS
+    )
+    model_config = vllm_config.model_config
+    kv_cache_spec = FullAttentionSpec(
+        block_size=BLOCK_SIZE,
+        num_kv_heads=model_config.get_num_kv_heads(vllm_config.parallel_config),
+        head_size=model_config.get_head_size(),
+        dtype=model_config.dtype,
+    )
+    device = torch.device(f"{DEVICE_TYPE}:0")
+    with set_current_vllm_config(vllm_config):
+        builder = FlashInferMetadataBuilder(
+            kv_cache_spec, ["test_layer_0"], vllm_config, device
+        )
+    assert builder.supports_draft_decode_metadata_update
+
+    step1 = create_common_attn_metadata(BATCH_SPECS["decode_only"], BLOCK_SIZE, device)
+    reused = builder.build(common_prefix_len=0, common_attn_metadata=step1)
+    step1.seq_lens.add_(1)
+    step2 = dataclasses.replace(step1, seq_lens_cpu_upper_bound=step1.seq_lens.cpu())
+    rebuilt = builder.build(common_prefix_len=0, common_attn_metadata=step2)
+
+    assert isinstance(reused.decode, FlashInferTrtllmAPIDecode)
+    for field in dataclasses.fields(reused.decode):
+        value = getattr(reused.decode, field.name)
+        expected = getattr(rebuilt.decode, field.name)
+        if isinstance(value, torch.Tensor):
+            assert torch.equal(value, expected), field.name
+        else:
+            assert value == expected, field.name

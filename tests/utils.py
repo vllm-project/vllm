@@ -184,8 +184,8 @@ def _run_in_new_process_group(
 class RemoteVLLMServer:
     """Base class for launching vLLM server subprocesses for testing.
 
-    Subclasses must override ``_create_cli_subcommand`` and
-    ``_start_server``.
+    Subclasses must override `_create_cli_subcommand` and
+    `_start_server`.
     """
 
     DUMMY_API_KEY = "token-abc123"  # vLLM's OpenAI server does not need API key
@@ -309,7 +309,7 @@ class RemoteVLLMServer:
     def _shutdown(self) -> None:
         """Kill the server process tree and wait for GPU memory release.
 
-        Called from both ``__exit__`` (normal path) and ``__init__``
+        Called from both `__exit__` (normal path) and `__init__`
         (when the server fails to start). Must be safe to call even if
         the process is already dead.
         """
@@ -381,7 +381,7 @@ class RemoteVLLMServer:
     def _terminate_process_tree(self) -> None:
         """Kill the server process tree without waiting for GPU memory release.
 
-        Split out from ``_shutdown`` so that ``shutdown_many`` can run this
+        Split out from `_shutdown` so that `shutdown_many` can run this
         phase in parallel for sibling servers and then wait for GPU memory
         release once at the end.
         """
@@ -430,10 +430,10 @@ class RemoteVLLMServer:
     def shutdown_many(cls, servers: Sequence["RemoteVLLMServer"]) -> None:
         """Shut down multiple sibling servers and wait for GPU memory once.
 
-        Test fixtures that hold several ``RemoteVLLMServer`` instances at
-        once must NOT shut them down by calling each server's ``__exit__``
+        Test fixtures that hold several `RemoteVLLMServer` instances at
+        once must NOT shut them down by calling each server's `__exit__`
         sequentially: every server measures total GPU memory across all
-        visible devices in ``_wait_for_gpu_memory_release``, so the first
+        visible devices in `_wait_for_gpu_memory_release`, so the first
         server's wait blocks the full timeout because later sibling
         servers are still holding GPU memory.
 
@@ -483,14 +483,14 @@ class RemoteVLLMServer:
         """SIGKILL any processes still in the server's process group
         and wait for them to exit.
 
-        Because the server is launched with ``start_new_session=True``,
+        Because the server is launched with `start_new_session=True`,
         all its children (EngineCore, workers, etc.) share the same
         pgid. After the root process is killed, stragglers -- especially
         on ROCm where GPU contexts linger until the *process* exits --
         must be reaped explicitly.
 
-        Uses ``/proc`` to scan for pgid members so this works even after
-        the parent has been reaped (unlike ``psutil.Process.children``).
+        Uses `/proc` to scan for pgid members so this works even after
+        the parent has been reaped (unlike `psutil.Process.children`).
         """
         if pgid is None:
             return
@@ -736,7 +736,7 @@ class RemoteVLLMServer:
 
 
 class RemoteOpenAIServer(RemoteVLLMServer):
-    """Launches ``vllm serve`` for testing OpenAI-compatible endpoints."""
+    """Launches `vllm serve` for testing OpenAI-compatible endpoints."""
 
     def _get_process_termination_timeout(self) -> float:
         engine_timeout = get_engine_process_shutdown_timeout(
@@ -774,7 +774,7 @@ class RemoteOpenAIServer(RemoteVLLMServer):
 
 
 class RemoteLaunchRenderServer(RemoteVLLMServer):
-    """Launches ``vllm launch render`` for GPU-less serving tests."""
+    """Launches `vllm launch render` for GPU-less serving tests."""
 
     def _create_cli_subcommand(self):
         return ServeSubcommand()
@@ -830,7 +830,7 @@ class RemoteOpenAIServerCustom(RemoteOpenAIServer):
         self.proc: Process = cast(Any, ctx).Process(
             target=_run_in_new_process_group,
             args=(self.child_process_fxn, env_dict, model, vllm_serve_args),
-        )  # type: ignore[assignment]
+        )
         with _temporarily_sanitized_pythonpath_env():
             self.proc.start()
 
@@ -1165,7 +1165,6 @@ def compare_two_settings(
     method: str = "generate",
     max_wait_seconds: float | None = None,
     include_seeded_sampling: bool = True,
-    force_v1_runner: bool = False,
 ) -> None:
     """Launch API server with two different sets of arguments/environments
     and compare the results of the API calls.
@@ -1178,9 +1177,6 @@ def compare_two_settings(
         env2: The second set of environment variables to pass to the API server.
         include_seeded_sampling: Whether to include temperature=1.0 seeded
             sampling checks in the default generate comparison.
-        force_v1_runner: Whether to pin all compared settings to the v1 model
-            runner to avoid mixing model runner differences into correctness
-            tests.
 
     """
     compare_all_settings(
@@ -1190,7 +1186,6 @@ def compare_two_settings(
         method=method,
         max_wait_seconds=max_wait_seconds,
         include_seeded_sampling=include_seeded_sampling,
-        force_v1_runner=force_v1_runner,
     )
 
 
@@ -1202,7 +1197,6 @@ def compare_all_settings(
     method: str = "generate",
     max_wait_seconds: float | None = None,
     include_seeded_sampling: bool = True,
-    force_v1_runner: bool = False,
 ) -> None:
     """Launch API server with several different sets of arguments/environments
     and compare the results of the API calls with the first set of arguments.
@@ -1213,16 +1207,8 @@ def compare_all_settings(
         all_envs: A list of environment dictionaries to pass to the API server.
         include_seeded_sampling: Whether to include temperature=1.0 seeded
             sampling checks in the default generate comparison.
-        force_v1_runner: Whether to pin all compared settings to the v1 model
-            runner to avoid mixing model runner differences into correctness
-            tests.
 
     """
-    if force_v1_runner:
-        all_envs = [
-            {"VLLM_USE_V2_MODEL_RUNNER": "0", **(env or {})} for env in all_envs
-        ]
-
     trust_remote_code = False
     for args in all_args:
         if "--trust-remote-code" in args:
@@ -1364,6 +1350,11 @@ def ensure_current_vllm_config():
             yield
 
 
+def _test_rendezvous_path(token: int | str) -> str:
+    """File store shared by every rank of one multi_process_parallel run."""
+    return f"{tempfile.gettempdir()}/vllm_dist_test_{token}"
+
+
 def init_test_distributed_environment(
     tp_size: int,
     pp_size: int,
@@ -1382,8 +1373,18 @@ def init_test_distributed_environment(
         set_current_vllm_config,
     )
     from vllm.platforms import current_platform
+    from vllm.utils.network_utils import aiter_requires_tcp_store
 
-    distributed_init_method = f"tcp://localhost:{distributed_init_port}"
+    # get_open_port() closes its probe socket before the ranks bind, leaving
+    # the port unreserved, so prefer a file store as the executors do. This
+    # runs in every Ray worker, so the path must come from the shared token
+    # rather than a per-call uuid4(), or each rank would get its own file.
+    if aiter_requires_tcp_store():
+        distributed_init_method = f"tcp://localhost:{distributed_init_port}"
+    else:
+        distributed_init_method = (
+            f"file://{_test_rendezvous_path(distributed_init_port)}"
+        )
     backend = current_platform.dist_backend
 
     if data_parallel_size > 1:
@@ -1490,6 +1491,8 @@ def multi_process_parallel(
         ray.get(refs)
     finally:
         ray.shutdown()
+        # All ranks are gone, so the file store has no readers left.
+        Path(_test_rendezvous_path(distributed_init_port)).unlink(missing_ok=True)
 
 
 def assert_rocm_custom_allreduce_backend_state(
@@ -1722,11 +1725,11 @@ def wait_for_memory_to_settle(
     threshold_ratio: float | dict[int, float] | None = 0.1,
     timeout_s: float = 240,
 ) -> None:
-    """Block until ROCm or XPU device VRAM usage drops below ``threshold_ratio``.
+    """Block until ROCm or XPU device VRAM usage drops below `threshold_ratio`.
 
     ROCm and XPU reclaims GPU memory more lazily than CUDA, so back-to-back model
     loads in a single test process can OOM the *next* engine/model startup
-    even after ``cleanup_dist_env_and_memory``. This gives the driver time to
+    even after `cleanup_dist_env_and_memory`. This gives the driver time to
     actually release VRAM before the next allocation. No-op off ROCm.
     """
     if not current_platform.is_rocm() and not current_platform.is_xpu():
@@ -1885,16 +1888,16 @@ def spawn_new_process_for_each_test(f: Callable[_P, None]) -> Callable[_P, None]
 
     The child resolves the test function by importing its module and looking
     it up by qualified name, rather than reconstructing it from a cloudpickle
-    blob. Pickling the function by value would also pickle its ``__globals__``
+    blob. Pickling the function by value would also pickle its `__globals__`
     by value — turning module-level singletons (e.g.
-    ``vllm.compilation.counter.compilation_counter``) into stale clones in
+    `vllm.compilation.counter.compilation_counter`) into stale clones in
     the child, so increments performed by the production code in the child
     would never be observable to the test.
 
     The child inherits the parent's stdout/stderr so its output (engine
     cores, NCCL, CUDA, ...) reaches the test runner live; the Python-level
-    traceback or skip reason is serialized to ``tb_file`` for propagation. A
-    native crash leaves ``tb_file`` empty — the diagnostic is then only in
+    traceback or skip reason is serialized to `tb_file` for propagation. A
+    native crash leaves `tb_file` empty — the diagnostic is then only in
     the inherited subprocess output.
     """
 

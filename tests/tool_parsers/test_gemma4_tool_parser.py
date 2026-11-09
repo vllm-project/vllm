@@ -8,6 +8,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.parser.gemma4 import (
     TOOL_CALL_END,
     TOOL_CALL_START,
@@ -115,6 +116,21 @@ def mock_request():
     request.tools = []
     request.tool_choice = "auto"
     return request
+
+
+def test_named_custom_tool_choice_skips_structured_outputs(mock_tokenizer):
+    # Responses custom tools ride the function shim, so a named custom choice
+    # must route like a named function choice, not into guided JSON.
+    tools = [{"type": "custom", "name": "emit_command"}]
+    request = ResponsesRequest(
+        input="hi",
+        tools=tools,
+        tool_choice={"type": "custom", "name": "emit_command"},
+    )
+    Gemma4EngineToolParser(mock_tokenizer, tools=tools).adjust_request(request)
+
+    assert request.skip_special_tokens is False
+    assert request.structured_outputs is None
 
 
 # ---------------------------------------------------------------------------
@@ -790,10 +806,10 @@ class TestStreamingExtraction:
         )
 
     def _collect_tool_calls_by_index(self, results):
-        """Group streamed tool-call fragments by their ``index``.
+        """Group streamed tool-call fragments by their `index`.
 
-        Returns ``{index: {"name": str | None, "arguments": str}}`` where
-        ``arguments`` is the concatenation of every streamed argument
+        Returns `{index: {"name": str | None, "arguments": str}}` where
+        `arguments` is the concatenation of every streamed argument
         fragment for that index (which should form valid JSON once complete).
         """
         by_index: dict[int, dict[str, Any]] = {}
@@ -818,9 +834,9 @@ class TestStreamingExtraction:
     def test_streaming_single_chunk_complete_tool_call(self, parser, mock_request):
         """A backend may deliver a whole tool call in one streaming delta.
 
-        The start token, ``call:name{...}`` payload and the end token all
+        The start token, `call:name{...}` payload and the end token all
         arrive in a single chunk. The parser must still emit one
-        ``DeltaToolCall`` with the correct name + complete arguments JSON
+        `DeltaToolCall` with the correct name + complete arguments JSON
         (rather than swallowing it and finishing with finish_reason="stop").
         """
         chunks = [
@@ -849,13 +865,15 @@ class TestStreamingExtraction:
     def test_streaming_multi_chunk_batched_tool_calls(self, parser, mock_request):
         """A single delta may batch MULTIPLE complete tool calls.
 
-        ``<|tool_call>...<tool_call|><|tool_call>...<tool_call|>`` arriving in
+        `<|tool_call>...<tool_call|><|tool_call>...<tool_call|>` arriving in
         one chunk must emit BOTH calls (one DeltaToolCall each, with distinct
         indices), not just the first.
         """
         chunks = [
-            '<|tool_call>call:get_weather{location:<|"|>London<|"|>}<tool_call|>'
-            '<|tool_call>call:get_time{timezone:<|"|>GMT<|"|>}<tool_call|>',
+            (
+                '<|tool_call>call:get_weather{location:<|"|>London<|"|>}<tool_call|>'
+                '<|tool_call>call:get_time{timezone:<|"|>GMT<|"|>}<tool_call|>'
+            ),
         ]
 
         results = self._simulate_streaming(parser, mock_request, chunks)

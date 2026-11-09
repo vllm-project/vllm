@@ -8,9 +8,13 @@ use futures::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use tracing::{Level, debug, trace};
 use vllm_engine_core_client::AbortCause;
-use vllm_engine_core_client::protocol::output::StopReason;
+use vllm_engine_core_client::protocol::output::{RequestSpecDecodeMetrics, StopReason};
 use vllm_engine_core_client::protocol::sampling_mask::SamplingMask;
-use vllm_llm::{FinishReason, GenerateOutput, TokenUsage};
+use vllm_engine_core_client::protocol::tensor::WireNdArray;
+use vllm_llm::{
+    AuxOutputRows, FinishReason, GenerateOutput, PromptCacheUsage, RequestTimestamps, TokenUsage,
+    WeightVersionSpan,
+};
 use vllm_tokenizer::{DecodedText, DynTokenizer, IncrementalDecoder};
 
 use super::logprobs::{
@@ -28,6 +32,10 @@ pub struct TextDecodeOptions {
     /// in. Stop strings found within the first `min_tokens` tokens are
     /// ignored.
     pub min_tokens: u32,
+    /// Whether to detokenize the output. When false, the output is never
+    /// decoded: text and logprob token strings stay empty.
+    /// `TextRequest::validate` rejects stop strings in that case.
+    pub detokenize: bool,
 }
 
 impl Default for TextDecodeOptions {
@@ -37,6 +45,24 @@ impl Default for TextDecodeOptions {
             include_stop_str_in_output: false,
             stop_strings: None,
             min_tokens: 0,
+            detokenize: true,
+        }
+    }
+}
+
+impl TextDecodeOptions {
+    /// If we are excluding stop strings from output, we need to buffer
+    /// the output so that we don't return the beginning of a stop string
+    /// when streaming the outputs.
+    fn min_bytes_to_buffer(&self) -> usize {
+        match self.include_stop_str_in_output {
+            true => 0,
+            false => self
+                .stop_strings
+                .as_ref()
+                .and_then(|stops| stops.iter().map(|ss| ss.len()).max())
+                .unwrap_or(1)
+                .saturating_sub(1),
         }
     }
 }
@@ -47,12 +73,22 @@ pub struct Finished {
     pub usage: TokenUsage,
     pub finish_reason: FinishReason,
     /// Connector-specific KV transfer parameters for disaggregated serving.
-    pub kv_transfer_params: Option<serde_json::Value>,
+    /// Kept boxed as received from `vllm-llm`, so the chat events built from
+    /// this stay small without boxing again.
+    pub kv_transfer_params: Option<Box<serde_json::Value>>,
     /// Connector-specific encoder cache transfer parameters for disaggregated
     /// serving.
-    pub ec_transfer_params: Option<serde_json::Value>,
+    pub ec_transfer_params: Option<Box<serde_json::Value>>,
     /// Sampling support sets aligned with all generated token positions.
     pub sampling_mask: Option<SamplingMask>,
+    /// Per-request speculative-decoding statistics emitted by the engine.
+    pub spec_decode_metrics: Option<RequestSpecDecodeMetrics>,
+    /// Weight-version spans over all generated token positions.
+    pub weight_versions: Option<Vec<WeightVersionSpan>>,
+    /// Routed-expert rows for the whole request, without the rows of tokens
+    /// cut off by a stop string. Boxed like `kv_transfer_params`.
+    pub routed_experts: Option<Box<WireNdArray>>,
+    pub timestamps: RequestTimestamps,
 }
 
 /// Sample metadata emitted by one engine output update.
@@ -106,6 +142,31 @@ pub enum DecodedTextEvent {
     },
 }
 
+/// Decoder for requests with detokenization disabled. Like Python's base
+/// `IncrementalDetokenizer`, it never calls the tokenizer.
+struct TokenOnlyDecoder;
+
+impl IncrementalDecoder for TokenOnlyDecoder {
+    fn push_token(&mut self, _token_id: u32) -> vllm_tokenizer::Result<usize> {
+        Ok(0)
+    }
+
+    fn next_chunk(&mut self) -> Option<DecodedText> {
+        None
+    }
+
+    fn flush(
+        &mut self,
+        _truncate_output_to: Option<usize>,
+    ) -> vllm_tokenizer::Result<(Option<DecodedText>, DecodedText)> {
+        Ok((None, DecodedText::default()))
+    }
+
+    fn output(&self) -> &str {
+        ""
+    }
+}
+
 /// Convert the output token stream from the `vllm_llm` layer into incrementally
 /// decoded text.
 #[try_stream]
@@ -119,15 +180,17 @@ pub async fn decoded_text_event_stream(
 ) -> crate::Result<()> {
     let mut decoder: Option<Box<dyn IncrementalDecoder>> = None;
     let mut prompt_token_count = 0_usize;
-    let mut cached_token_count = 0_usize;
+    let mut prompt_cache_usage = PromptCacheUsage::default();
     let mut sampled_token_ids = Vec::new();
     let mut output_token_count: usize = 0;
     let mut sampled_logprobs: Option<DecodedLogprobs> = None;
     let mut sampling_mask: Option<SamplingMask> = None;
+    let mut routed_experts = AuxOutputRows::default();
+    let text_tokenizer = decode_options.detokenize.then_some(tokenizer.as_ref());
 
     while let Some(next) = raw_stream.next().await {
         let output = next?;
-        cached_token_count = cached_token_count.max(output.cached_token_count);
+        prompt_cache_usage.merge(output.prompt_cache_usage);
 
         // If it's the first output, init states and yield `Start` event.
         if decoder.is_none() {
@@ -135,22 +198,14 @@ pub async fn decoded_text_event_stream(
                 output.prompt_token_ids().expect("first llm output must carry prompt token ids");
             prompt_token_count = prompt_token_ids.len();
 
-            let dec = tokenizer.create_decode_stream(
-                prompt_token_ids,
-                decode_options.skip_special_tokens,
-                // If we are excluding stop strings from output, we need to buffer
-                // the output so that we don't return the beginning of a stop string
-                // when streaming the outputs.
-                match decode_options.include_stop_str_in_output {
-                    true => 0,
-                    false => decode_options
-                        .stop_strings
-                        .as_ref()
-                        .and_then(|stops| stops.iter().map(|ss| ss.len()).max())
-                        .unwrap_or(1)
-                        .saturating_sub(1),
-                },
-            );
+            let dec = match text_tokenizer {
+                Some(tokenizer) => tokenizer.create_decode_stream(
+                    prompt_token_ids,
+                    decode_options.skip_special_tokens,
+                    decode_options.min_bytes_to_buffer(),
+                ),
+                None => Box::new(TokenOnlyDecoder),
+            };
             decoder = Some(dec);
 
             y.yield_ok(DecodedTextEvent::Start {
@@ -158,12 +213,7 @@ pub async fn decoded_text_event_stream(
                 prompt_logprobs: output
                     .prompt_logprobs()
                     .map(|logprobs| {
-                        decode_prompt_logprobs(
-                            tokenizer.as_ref(),
-                            prompt_token_ids,
-                            logprobs,
-                            decode_options.skip_special_tokens,
-                        )
+                        decode_prompt_logprobs(text_tokenizer, prompt_token_ids, logprobs)
                     })
                     .transpose()?,
             })
@@ -173,6 +223,8 @@ pub async fn decoded_text_event_stream(
 
         let kv_transfer_params = output.kv_transfer_params;
         let ec_transfer_params = output.ec_transfer_params;
+        let spec_decode_metrics = output.spec_decode_metrics.map(|metrics| *metrics);
+        let mut weight_versions = output.weight_versions;
         let mut finish_reason = output.finish_reason;
         let mut stop_str_matched = false;
         let suppress_terminal_stop_token = finish_reason.as_ref().is_some_and(|r| r.is_stop())
@@ -218,9 +270,13 @@ pub async fn decoded_text_event_stream(
         let mut new_token_ids = output.token_ids;
         let mut new_logprobs = output.logprobs;
         let mut new_sampling_mask = output.sampling_mask;
+        let mut new_routed_experts = output.routed_experts;
 
         // Trim tokens and logprobs if we matched stop string.
         if let Some(num_tokens) = truncate_tokens_to {
+            // Like Python's `_trim_surplus_tokens`, drop the routed-expert
+            // rows of the cut tokens from the end of this output's rows.
+            new_routed_experts.drop_trailing(new_token_ids.len() - num_tokens)?;
             new_token_ids.truncate(num_tokens);
             if let Some(logprobs) = &mut new_logprobs {
                 logprobs.positions.truncate(num_tokens);
@@ -231,28 +287,23 @@ pub async fn decoded_text_event_stream(
         }
 
         output_token_count += new_token_ids.len();
+        routed_experts.append(new_routed_experts);
         if let Some(mut mask) = new_sampling_mask {
             sampling_mask.get_or_insert_default().rows.append(&mut mask.rows);
         }
 
-        let decoded_logprobs = new_logprobs
+        let mut decoded_logprobs = new_logprobs
             .as_ref()
-            .map(|logprobs| {
-                decode_logprobs(
-                    tokenizer.as_ref(),
-                    logprobs,
-                    decode_options.skip_special_tokens,
-                )
-            })
+            .map(|logprobs| decode_logprobs(text_tokenizer, logprobs))
             .transpose()?;
 
         if !intermediate {
             sampled_token_ids.extend(&new_token_ids);
-            if let Some(dlp) = decoded_logprobs.as_ref() {
+            if let Some(dlp) = decoded_logprobs.take() {
                 sampled_logprobs
                     .get_or_insert_with(|| DecodedLogprobs { positions: vec![] })
                     .positions
-                    .extend_from_slice(&dlp.positions);
+                    .extend(dlp.positions);
             }
         }
 
@@ -267,6 +318,15 @@ pub async fn decoded_text_event_stream(
                 }
                 .into());
             }
+            // The spans cover every token received; cut them at the stop-string
+            // truncated count, like Python's spans over its truncated output.
+            if let Some(spans) = weight_versions.as_mut() {
+                spans.retain(|span| span.start < output_token_count);
+                if let Some(last) = spans.last_mut() {
+                    last.end = last.end.min(output_token_count);
+                }
+            }
+            let routed_experts = std::mem::take(&mut routed_experts).concat()?;
             // Flush any remaining buffered text.
             let (last_chunk, full_decoded) = decoder.flush(truncate_output_to)?;
             let text_len = full_decoded.text.len();
@@ -309,12 +369,16 @@ pub async fn decoded_text_event_stream(
                     usage: TokenUsage {
                         prompt_token_count,
                         output_token_count,
-                        cached_token_count,
+                        prompt_cache_usage,
                     },
                     finish_reason: reason,
                     kv_transfer_params,
                     ec_transfer_params,
                     sampling_mask,
+                    spec_decode_metrics,
+                    weight_versions,
+                    routed_experts: routed_experts.map(Box::new),
+                    timestamps: output.timestamps,
                 })),
             })
             .await;
@@ -378,7 +442,8 @@ mod tests {
     use vllm_engine_core_client::AbortCause;
     use vllm_engine_core_client::protocol::logprobs::{Logprobs, PositionLogprobs, TokenLogprob};
     use vllm_llm::GenerateOutput;
-    use vllm_tokenizer::{TokenAnchor, TokenAttribution, test_utils::TestTokenizer};
+    use vllm_tokenizer::test_utils::{PanickingTokenizer, TestTokenizer};
+    use vllm_tokenizer::{TokenAnchor, TokenAttribution};
 
     use super::*;
     use crate::output::TextOutputStreamExt as _;
@@ -541,7 +606,25 @@ mod tests {
                 name: "utf8 byte fallback resolves across engine updates",
                 outputs: vec![
                     GenerateOutput::for_test(Some(Arc::clone(&prompt)), vec![0xe4], None),
-                    GenerateOutput::for_test(None, vec![0xbd, 0xa0], Some(FinishReason::Length)),
+                    GenerateOutput {
+                        spec_decode_metrics: Some(Box::new(RequestSpecDecodeMetrics {
+                            num_spec_tokens: 2,
+                            histogram: vec![0, 1, 0],
+                            num_draft_tokens: 2,
+                            ..Default::default()
+                        })),
+                        timestamps: RequestTimestamps {
+                            queued_ts: 8.0,
+                            scheduled_ts: 9.0,
+                            first_token_ts: 10.0,
+                            last_token_ts: 11.5,
+                        },
+                        ..GenerateOutput::for_test(
+                            None,
+                            vec![0xbd, 0xa0],
+                            Some(FinishReason::Length),
+                        )
+                    },
                 ],
                 expected: vec![
                     DecodedTextEvent::Start {
@@ -557,12 +640,26 @@ mod tests {
                             usage: TokenUsage {
                                 prompt_token_count: 0,
                                 output_token_count: 3,
-                                cached_token_count: 0,
+                                prompt_cache_usage: Default::default(),
                             },
                             finish_reason: FinishReason::Length,
                             kv_transfer_params: None,
                             ec_transfer_params: None,
                             sampling_mask: None,
+                            spec_decode_metrics: Some(RequestSpecDecodeMetrics {
+                                num_spec_tokens: 2,
+                                histogram: vec![0, 1, 0],
+                                num_draft_tokens: 2,
+                                ..Default::default()
+                            }),
+                            timestamps: RequestTimestamps {
+                                queued_ts: 8.0,
+                                scheduled_ts: 9.0,
+                                first_token_ts: 10.0,
+                                last_token_ts: 11.5,
+                            },
+                            weight_versions: None,
+                            routed_experts: None,
                         }),
                     ),
                 ],
@@ -587,7 +684,7 @@ mod tests {
                             usage: TokenUsage {
                                 prompt_token_count: 0,
                                 output_token_count: 2,
-                                cached_token_count: 0,
+                                prompt_cache_usage: Default::default(),
                             },
                             finish_reason: FinishReason::Stop(Some(StopReason::TokenId(
                                 b'!' as u32,
@@ -595,6 +692,10 @@ mod tests {
                             kv_transfer_params: None,
                             ec_transfer_params: None,
                             sampling_mask: None,
+                            spec_decode_metrics: None,
+                            weight_versions: None,
+                            routed_experts: None,
+                            timestamps: Default::default(),
                         }),
                     ),
                 ],
@@ -605,6 +706,183 @@ mod tests {
             let actual = run_intermediate(case.outputs, TextDecodeOptions::default()).await;
             assert_eq!(actual, case.expected, "{}", case.name);
         }
+    }
+
+    /// Without detokenization, a request gets token IDs, logprob values, usage
+    /// and finish info without any tokenizer call.
+    #[tokio::test]
+    async fn detokenize_false_keeps_sampled_metadata_without_tokenizer() {
+        let logprobs = |token_ids: &[u32]| Logprobs {
+            positions: token_ids
+                .iter()
+                .map(|&token_id| PositionLogprobs {
+                    entries: vec![TokenLogprob {
+                        token_id,
+                        logprob: -0.5,
+                        rank: 1,
+                    }],
+                })
+                .collect(),
+        };
+        let prompt = ascii_tokens("hi");
+        let mut output = GenerateOutput::for_test(
+            Some(Arc::from(prompt.clone())),
+            ascii_tokens("a!"),
+            Some(FinishReason::Stop(Some(StopReason::TokenId(b'!' as u32)))),
+        );
+        output.prompt_info.as_mut().unwrap().prompt_logprobs = Some(logprobs(&prompt[1..]));
+        output.logprobs = Some(logprobs(&ascii_tokens("a!")));
+
+        let collected = decoded_text_event_stream(
+            "test".into(),
+            Arc::new(PanickingTokenizer),
+            stream::iter([Ok(output)]),
+            TextDecodeOptions {
+                detokenize: false,
+                ..Default::default()
+            },
+            false,
+        )
+        .collect_output()
+        .await
+        .unwrap();
+
+        let logprob_tokens: Vec<_> = collected
+            .prompt_logprobs
+            .iter()
+            .flat_map(|prompt| &prompt.scored_positions)
+            .chain(collected.logprobs.iter().flat_map(|logprobs| &logprobs.positions))
+            .flat_map(|position| &position.entries)
+            .map(|entry| (entry.token_id, entry.token.as_str()))
+            .collect();
+        expect_test::expect![[r#"
+            (
+                "",
+                [
+                    97,
+                    33,
+                ],
+                Stop(
+                    Some(
+                        TokenId(
+                            33,
+                        ),
+                    ),
+                ),
+                [
+                    (
+                        105,
+                        "",
+                    ),
+                    (
+                        97,
+                        "",
+                    ),
+                    (
+                        33,
+                        "",
+                    ),
+                ],
+            )
+        "#]]
+        .assert_debug_eq(&(
+            &collected.text,
+            &collected.token_ids,
+            &collected.finish_reason,
+            logprob_tokens,
+        ));
+    }
+
+    /// `skip_special_tokens` applies to the output text only: sampled,
+    /// candidate and prompt logprob tokens keep special tokens' spelling either
+    /// way, like Python's `convert_ids_list_to_tokens`.
+    #[tokio::test]
+    async fn logprob_tokens_keep_special_token_spelling() {
+        const BOS: u32 = 300;
+        const SEP: u32 = 301;
+        const EOS: u32 = 302;
+        let entries = |token_ids: &[u32]| PositionLogprobs {
+            entries: token_ids
+                .iter()
+                .map(|&token_id| TokenLogprob {
+                    token_id,
+                    logprob: -0.5,
+                    rank: 1,
+                })
+                .collect(),
+        };
+
+        let mut results = Vec::new();
+        for skip_special_tokens in [true, false] {
+            let tokenizer: DynTokenizer = Arc::new(
+                TestTokenizer::new()
+                    .with_special_token("<s>", BOS)
+                    .with_special_token("<sep>", SEP)
+                    .with_special_token("</s>", EOS),
+            );
+            let mut output = GenerateOutput::for_test(
+                Some(Arc::from([BOS, b'h' as u32])),
+                vec![b'a' as u32, SEP, b'b' as u32, EOS],
+                Some(FinishReason::Stop(Some(StopReason::TokenId(EOS)))),
+            );
+            output.prompt_info.as_mut().unwrap().prompt_logprobs = Some(Logprobs {
+                positions: vec![entries(&[b'h' as u32, BOS])],
+            });
+            output.logprobs = Some(Logprobs {
+                positions: vec![
+                    entries(&[b'a' as u32, EOS]),
+                    entries(&[SEP]),
+                    entries(&[b'b' as u32]),
+                    entries(&[EOS]),
+                ],
+            });
+
+            let collected = decoded_text_event_stream(
+                "test".into(),
+                tokenizer,
+                stream::iter([Ok(output)]),
+                TextDecodeOptions {
+                    skip_special_tokens,
+                    ..Default::default()
+                },
+                false,
+            )
+            .collect_output()
+            .await
+            .unwrap();
+
+            let prompt = collected.prompt_logprobs.as_ref().unwrap();
+            let logprob_tokens: Vec<_> = std::iter::once(prompt.first_token.clone())
+                .chain(
+                    prompt
+                        .scored_positions
+                        .iter()
+                        .chain(collected.logprobs.iter().flat_map(|logprobs| &logprobs.positions))
+                        .flat_map(|position| &position.entries)
+                        .map(|entry| entry.token.clone()),
+                )
+                .collect();
+            results.push((
+                skip_special_tokens,
+                collected.text,
+                logprob_tokens.join(" "),
+            ));
+        }
+        expect_test::expect![[r#"
+            [
+                (
+                    true,
+                    "ab",
+                    "<s> h <s> a </s> <sep> b </s>",
+                ),
+                (
+                    false,
+                    "a<sep>b",
+                    "<s> h <s> a </s> <sep> b </s>",
+                ),
+            ]
+        "#]]
+        .assert_debug_eq(&results);
     }
 
     struct DropRecordingStream {
@@ -632,12 +910,19 @@ mod tests {
     async fn stream_stop_string_sets_task_local_abort_cause_on_raw_stream_drop() {
         let prompt: Arc<[u32]> = Arc::from([]);
         let dropped_cause = Arc::new(Mutex::new(None));
+        let timestamps = RequestTimestamps {
+            queued_ts: 1.0,
+            scheduled_ts: 2.0,
+            first_token_ts: 3.0,
+            last_token_ts: 4.0,
+        };
         let raw_stream = DropRecordingStream {
-            next: Some(Ok(GenerateOutput::for_test(
-                Some(prompt),
-                ascii_tokens("hello"),
-                Some(FinishReason::Length),
-            ))),
+            // The engine output is not terminal. The frontend terminates the
+            // request after decoding the configured stop string.
+            next: Some(Ok(GenerateOutput {
+                timestamps,
+                ..GenerateOutput::for_test(Some(prompt), ascii_tokens("hello"), None)
+            })),
             dropped_cause: Arc::clone(&dropped_cause),
         };
         let tokenizer: DynTokenizer = Arc::new(TestTokenizer::new());
@@ -655,6 +940,7 @@ mod tests {
 
         assert_eq!(output.text, "he");
         assert!(output.finish_reason.is_stop());
+        assert_eq!(output.timestamps, timestamps);
         assert_eq!(
             *dropped_cause.lock().unwrap(),
             Some(AbortCause::StopStringMatched)
@@ -720,6 +1006,39 @@ mod tests {
             })
         );
         assert_eq!(output.usage.output_token_count, 4);
+    }
+
+    #[tokio::test]
+    async fn stream_stop_string_cuts_weight_version_spans_at_truncated_count() {
+        let span = |version: &str, start, end| WeightVersionSpan {
+            version: version.into(),
+            start,
+            end,
+        };
+        let mut first = GenerateOutput::for_test(Some(Arc::from([])), ascii_tokens("ab"), None);
+        first.weight_versions = Some(vec![span("v1", 0, 2)]);
+        // One merged output whose tokens span two more weight versions; the
+        // stop string ends inside the `v2` span.
+        let mut second = GenerateOutput::for_test(None, ascii_tokens("cxyz"), None);
+        second.weight_versions = Some(vec![span("v1", 0, 2), span("v2", 2, 5), span("v3", 5, 6)]);
+        let tokenizer: DynTokenizer = Arc::new(TestTokenizer::new());
+
+        let output = decoded_text_event_stream(
+            "test-weight-versions-stop".into(),
+            tokenizer,
+            stream::iter([Ok(first), Ok(second)]),
+            opts(&["cx"], 0),
+            false,
+        )
+        .collect_output()
+        .await
+        .unwrap();
+
+        assert_eq!(output.token_ids, ascii_tokens("abcx"));
+        assert_eq!(
+            output.weight_versions,
+            Some(vec![span("v1", 0, 2), span("v2", 2, 4)])
+        );
     }
 
     #[tokio::test]
