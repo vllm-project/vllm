@@ -26,7 +26,6 @@ from vllm.platforms import current_platform
 from vllm.utils.flashinfer import (
     flashinfer_cutedsl_grouped_gemm_nt_masked,
     has_flashinfer_cutedsl_grouped_gemm_nt_masked,
-    has_flashinfer_cutedsl_mxfp8_grouped_gemm_nt_masked,
     mxfp8_grouped_quantize,
     nvfp4_block_scale_interleave,
     scaled_fp4_grouped_quantize,
@@ -39,6 +38,13 @@ logger = init_logger(__name__)
 
 
 class FlashInferCuteDSLBatchedExperts(mk.FusedMoEExpertsModular):
+    """NVFP4 or MXFP8 (W8A8) experts on the batched activation format.
+
+    MXFP8 experts take the dispatched activations unquantized and quantize only
+    the valid rows of each expert; their weight scales must be swizzled at load
+    time with `swizzle_mxfp8_moe_weight_scales`.
+    """
+
     def __init__(
         self,
         moe_config: FusedMoEConfig,
@@ -52,17 +58,20 @@ class FlashInferCuteDSLBatchedExperts(mk.FusedMoEExpertsModular):
             max_num_tokens=max_num_tokens,
             num_dispatchers=num_dispatchers,
         )
-        assert quant_config.quant_dtype == "nvfp4", (
-            "Only nvfp4 quantization are currently supported."
+        assert quant_config.quant_dtype in ("nvfp4", "mxfp8"), (
+            "Only nvfp4 and mxfp8 quantization are currently supported."
         )
         self.out_dtype = moe_config.in_dtype
         self.use_deep_ep_ll_nvfp4_dispatch = (
-            envs.VLLM_DEEPEPLL_NVFP4_DISPATCH and moe_config.use_deepep_ll_kernels
+            quant_config.quant_dtype == "nvfp4"
+            and envs.VLLM_DEEPEPLL_NVFP4_DISPATCH
+            and moe_config.use_deepep_ll_kernels
         )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        layer.w13_weight_scale_2.data.mul_(layer.w13_input_scale)
-        layer.w2_weight_scale_2.data.mul_(layer.w2_input_scale)
+        if self.quant_dtype == "nvfp4":
+            layer.w13_weight_scale_2.data.mul_(layer.w13_input_scale)
+            layer.w2_weight_scale_2.data.mul_(layer.w2_input_scale)
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
@@ -88,6 +97,7 @@ class FlashInferCuteDSLBatchedExperts(mk.FusedMoEExpertsModular):
     ) -> bool:
         SUPPORTED_W_A = [
             (kNvfp4Static, kNvfp4Dynamic),
+            (kMxfp8Static, kMxfp8Dynamic),
         ]
         return (weight_key, activation_key) in SUPPORTED_W_A
 
@@ -98,6 +108,30 @@ class FlashInferCuteDSLBatchedExperts(mk.FusedMoEExpertsModular):
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
         return True
+
+    @staticmethod
+    def is_supported_config(
+        cls: type[mk.FusedMoEExperts],
+        moe_config: FusedMoEConfig,
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+        activation_format: mk.FusedMoEActivationFormat,
+    ) -> tuple[bool, str | None]:
+        # Both MXFP8 GEMM K dims (hidden and intermediate) must be whole
+        # 128-column tiles; the quantizers pad activations to that width.
+        if (weight_key, activation_key) == (kMxfp8Static, kMxfp8Dynamic) and (
+            moe_config.hidden_dim % 128 != 0
+            or moe_config.intermediate_size_per_partition % 128 != 0
+        ):
+            return False, (
+                "kernel does not support mxfp8 hidden size "
+                f"{moe_config.hidden_dim} or intermediate size "
+                f"{moe_config.intermediate_size_per_partition} "
+                "(not multiples of 128)"
+            )
+        return mk.FusedMoEExperts.is_supported_config(
+            cls, moe_config, weight_key, activation_key, activation_format
+        )
 
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
         # Let PrepareAndFinalize::finalize() decide the impl.
@@ -155,8 +189,8 @@ class FlashInferCuteDSLBatchedExperts(mk.FusedMoEExpertsModular):
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool | None,
     ):
-        assert self.quant_dtype == "nvfp4", (
-            "Only nvfp4 quantization are currently supported."
+        assert self.quant_dtype in ("nvfp4", "mxfp8"), (
+            "Only nvfp4 and mxfp8 quantization are currently supported."
         )
         # Ensure w1_scale and w2_scale are not None before calling view
         assert self.w1_scale is not None and self.w2_scale is not None, (
@@ -167,6 +201,20 @@ class FlashInferCuteDSLBatchedExperts(mk.FusedMoEExpertsModular):
         assert hidden_states.ndim == 3
         assert self.w1_scale.ndim == 3
         assert self.w2_scale.ndim == 3
+
+        if self.quant_dtype == "mxfp8":
+            assert a1q_scale is None, "Expected unquantized activations."
+            flashinfer_cutedsl_mxfp8_moe_masked(
+                hidden_states=hidden_states,
+                w1=w1,
+                w1_blockscale=self.w1_scale,
+                w2=w2,
+                w2_blockscale=self.w2_scale,
+                masked_m=expert_num_tokens,
+                workspace=workspace2,
+                out=output,
+            )
+            return
 
         input_global_scale = (
             None if self.use_deep_ep_ll_nvfp4_dispatch else self.a1_gscale
@@ -356,149 +404,6 @@ def flashinfer_cutedsl_moe_masked(
         alpha_dtype=get_cute_dtype(w2_alpha),
     )  # in logical [m, k, l]
     out = out.permute(2, 0, 1)
-
-
-class FlashInferCuteDSLMxfp8BatchedExperts(mk.FusedMoEExpertsModular):
-    """MXFP8 (W8A8) experts on the batched activation format.
-
-    The experts consume the dispatched activations unquantized
-    ([num_local_experts, max_tokens, hidden], e.g. from DeepEP low-latency) and
-    quantize only the valid rows of each expert before both masked grouped
-    GEMMs. The weight scales must be swizzled at load time with
-    `swizzle_mxfp8_moe_weight_scales`.
-    """
-
-    def __init__(
-        self,
-        moe_config: FusedMoEConfig,
-        quant_config: FusedMoEQuantConfig,
-        max_num_tokens: int,
-        num_dispatchers: int,
-    ):
-        super().__init__(
-            moe_config=moe_config,
-            quant_config=quant_config,
-            max_num_tokens=max_num_tokens,
-            num_dispatchers=num_dispatchers,
-        )
-        assert quant_config.quant_dtype == "mxfp8", (
-            "Only mxfp8 quantization is supported."
-        )
-        assert (
-            quant_config.gemm1_alpha is None
-            and quant_config.gemm1_beta is None
-            and quant_config.gemm1_clamp_limit is None
-        ), "Clamped or scaled SiLU is not supported."
-
-    @staticmethod
-    def activation_format() -> mk.FusedMoEActivationFormat:
-        return mk.FusedMoEActivationFormat.BatchedExperts
-
-    @staticmethod
-    def _supports_current_device() -> bool:
-        p = current_platform
-        return (
-            p.is_cuda()
-            and p.is_device_capability_family(100)
-            and has_flashinfer_cutedsl_mxfp8_grouped_gemm_nt_masked()
-        )
-
-    @staticmethod
-    def _supports_no_act_and_mul() -> bool:
-        return False
-
-    @staticmethod
-    def _supports_quant_scheme(
-        weight_key: QuantKey | None,
-        activation_key: QuantKey | None,
-    ) -> bool:
-        return (weight_key, activation_key) == (kMxfp8Static, kMxfp8Dynamic)
-
-    @staticmethod
-    def _supports_activation(activation: MoEActivation) -> bool:
-        return activation == MoEActivation.SILU
-
-    @staticmethod
-    def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
-        return True
-
-    @staticmethod
-    def _supports_shape(hidden_dim: int) -> bool:
-        # Both GEMM K dims (hidden and intermediate) must be whole 128-column
-        # MXFP8 tiles; the quantizers pad activations to that width.
-        return hidden_dim % 128 == 0
-
-    @staticmethod
-    def is_supported_config(
-        cls: type[mk.FusedMoEExperts],
-        moe_config: FusedMoEConfig,
-        weight_key: QuantKey | None,
-        activation_key: QuantKey | None,
-        activation_format: mk.FusedMoEActivationFormat,
-    ) -> tuple[bool, str | None]:
-        if moe_config.intermediate_size_per_partition % 128 != 0:
-            return False, (
-                f"kernel does not support intermediate size "
-                f"{moe_config.intermediate_size_per_partition} (not a multiple of 128)"
-            )
-        return mk.FusedMoEExperts.is_supported_config(
-            cls, moe_config, weight_key, activation_key, activation_format
-        )
-
-    def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
-        # Let PrepareAndFinalize::finalize() decide the impl.
-        return TopKWeightAndReduceDelegate()
-
-    def workspace_shapes(
-        self,
-        M: int,
-        N: int,
-        K: int,
-        topk: int,
-        global_num_experts: int,
-        local_num_experts: int,
-        expert_tokens_meta: mk.ExpertTokensMetadata | None,
-        activation: MoEActivation,
-    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
-        # workspace2 holds the gate/up GEMM output; the output holds the down
-        # GEMM output.
-        output_shape = (local_num_experts, M, K)
-        workspace2 = (local_num_experts, M, N)
-        workspace1 = output_shape
-        return (workspace1, workspace2, output_shape)
-
-    def apply(
-        self,
-        output: torch.Tensor,
-        hidden_states: torch.Tensor,
-        w1: torch.Tensor,
-        w2: torch.Tensor,
-        topk_weights: torch.Tensor,
-        topk_ids: torch.Tensor,
-        activation: MoEActivation,
-        global_num_experts: int,
-        expert_map: torch.Tensor | None,
-        a1q_scale: torch.Tensor | None,
-        a2_scale: torch.Tensor | None,
-        workspace13: torch.Tensor | None,
-        workspace2: torch.Tensor | None,
-        expert_tokens_meta: mk.ExpertTokensMetadata | None,
-        apply_router_weight_on_input: bool | None,
-    ):
-        assert a1q_scale is None, "Expected unquantized activations."
-        assert self.w1_scale is not None and self.w2_scale is not None
-        assert expert_tokens_meta is not None
-        assert hidden_states.ndim == 3
-        flashinfer_cutedsl_mxfp8_moe_masked(
-            hidden_states=hidden_states,
-            w1=w1,
-            w1_blockscale=self.w1_scale,
-            w2=w2,
-            w2_blockscale=self.w2_scale,
-            masked_m=expert_tokens_meta.expert_num_tokens,
-            workspace=workspace2,
-            out=output,
-        )
 
 
 def swizzle_mxfp8_moe_weight_scales(scale: torch.Tensor) -> torch.Tensor:
