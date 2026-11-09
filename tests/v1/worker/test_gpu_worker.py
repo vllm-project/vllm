@@ -111,6 +111,8 @@ def test_load_model_preserves_compiled_graphs_at_runtime(monkeypatch):
     )
 
     monkeypatch.delenv("OMP_NUM_THREADS", raising=False)
+    # No PP group here; "auto" would set up a PP transport.
+    monkeypatch.setenv("VLLM_PP_TRANSPORT", "nccl")
     monkeypatch.setattr(gpu_worker, "has_ec_transfer", lambda: False)
     monkeypatch.setattr(
         gpu_worker, "set_current_vllm_config", lambda config: nullcontext()

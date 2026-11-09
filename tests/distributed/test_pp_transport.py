@@ -10,7 +10,6 @@ import pytest
 import ray
 import torch
 
-from vllm import _custom_ops as ops
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.distributed.pp_transport import create_pp_transport
 from vllm.distributed.pp_transport.copy_engine import (
@@ -86,6 +85,9 @@ def chain_worker(monkeypatch, tp_size, pp_size, rank, distributed_init_port):
 def one_rank_fails_worker(monkeypatch, tp_size, pp_size, rank, distributed_init_port):
     torch.accelerator.set_device_index(rank)
     init_test_distributed_environment(1, pp_size, rank, distributed_init_port)
+    # Imported here: Ray cannot pickle the module as a global of this function.
+    from vllm import _custom_ops as ops
+
     pp_group = get_pp_group()
     if pp_group.rank_in_group == 1:
 
