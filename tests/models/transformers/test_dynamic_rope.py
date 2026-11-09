@@ -1,17 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for skipping dynamic rope's device sync where it can never rescale."""
+"""Tests for how the backend handles Transformers' dynamic rope updates."""
 
 from types import SimpleNamespace
 
 import pytest
 import torch
-from transformers import HunYuanDenseV1Config, LlamaConfig
+from transformers import HunYuanDenseV1Config, LlamaConfig, Phi3Config
 from transformers.models.hunyuan_v1_dense.modeling_hunyuan_v1_dense import (
     HunYuanDenseV1RotaryEmbedding,
 )
 from transformers.models.llama.modeling_llama import LlamaRotaryEmbedding
+from transformers.models.phi3.modeling_phi3 import Phi3RotaryEmbedding
 
+from vllm.model_executor.models.transformers.fx_utils import trace
 from vllm.model_executor.models.transformers.utils import (
     can_enable_torch_compile,
     disable_noop_dynamic_rope,
@@ -25,6 +27,13 @@ CONFIG_KWARGS = dict(
     max_position_embeddings=MAX_POSITION_EMBEDDINGS,
 )
 DYNAMIC = {"rope_type": "dynamic", "factor": 4.0, "rope_theta": 1e4}
+LONGROPE = {
+    "rope_type": "longrope",
+    "short_factor": [1.0] * 8,
+    "long_factor": [4.0] * 8,
+    "original_max_position_embeddings": MAX_POSITION_EMBEDDINGS // 2,
+    "rope_theta": 1e4,
+}
 
 
 def make_vllm_config(hf_config, max_model_len: int) -> SimpleNamespace:
@@ -84,3 +93,22 @@ def test_disable_noop_dynamic_rope(monkeypatch, config, rotary_cls):
     monkeypatch.setattr(torch, "max", no_sync)
     actual = rotary_emb(*inputs)
     assert all(torch.equal(e, a) for e, a in zip(expected, actual))
+
+
+def test_trace_restores_longrope_state():
+    """Tracing must not leave the proxies `@dynamic_rope_update` writes on the
+    module, or the real forward reads them."""
+    config = Phi3Config(
+        **CONFIG_KWARGS,
+        original_max_position_embeddings=MAX_POSITION_EMBEDDINGS // 2,
+        rope_parameters=dict(LONGROPE),
+    )
+    rotary_emb = Phi3RotaryEmbedding(config)
+    buffers = dict(rotary_emb.named_buffers())
+
+    trace(rotary_emb)
+
+    after = dict(rotary_emb.named_buffers())
+    assert after.keys() == buffers.keys()
+    assert all(after[name] is buffer for name, buffer in buffers.items())
+    assert "long_inv_freq" not in vars(rotary_emb)
