@@ -131,7 +131,9 @@ def test_lookahead_finish_saves_only_computed_kv(scheduled_compute, preempted):
     scheduler.update_state_after_alloc(request, KVCacheBlocks((blocks,)), 0)
     if scheduled_compute:
         output = SchedulerOutput.make_empty()
-        output.scheduled_new_reqs = [NewRequestData.from_request(request, block_ids)]
+        output.scheduled_new_reqs = [
+            NewRequestData.from_request(request, block_ids, request.prefill_token_ids)
+        ]
         output.num_scheduled_tokens = {"r": 32}
         output.total_num_scheduled_tokens = 32
         scheduler.build_connector_meta(output)
