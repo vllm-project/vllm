@@ -809,13 +809,6 @@ class Base(
         if input_ids is not None and inputs_embeds is not None:
             input_ids = None
 
-        aux_embeddings = None
-        if 0 in self.aux_hidden_state_layers and self.pp_group.is_first_rank:
-            if inputs_embeds is None:
-                inputs_embeds = self.embed_input_ids(input_ids)
-                input_ids = None
-            aux_embeddings = inputs_embeds[0, ...]
-
         outputs = self.model(
             input_ids=input_ids,
             inputs_embeds=inputs_embeds,
@@ -832,8 +825,10 @@ class Base(
         if self._output_aux_hidden_states_kwargs:
             # Layers on other PP ranks capture nothing
             aux_hidden_states = [x[0][0, ...] for x in outputs[1:] if x]
-        if aux_embeddings is not None:
-            aux_hidden_states.insert(0, aux_embeddings)
+        # The input embedding isn't called when the caller passes `inputs_embeds`
+        caller_embeds = inputs_embeds if self.pp_group.is_first_rank else None
+        if 0 in self.aux_hidden_state_layers and caller_embeds is not None:
+            aux_hidden_states.insert(0, caller_embeds[0, ...])
 
         if not self.pp_group.is_last_rank:
             return IntermediateTensors(
@@ -876,13 +871,16 @@ class Base(
             self.model._can_record_outputs = {}
 
         self._set_aux_hidden_state_layers(layers)
-        target_class = self._target_class
+        embeddings = self.model.get_input_embeddings()
         for layer in self.aux_hidden_state_layers:
-            # The input to layer 0 is captured in `forward`
+            # The input to a layer is the output of the module before it
             if layer == 0:
-                continue
-            # layer - 1 because we want the input to the layer
-            layer_name = self._layer_names[layer - 1]
+                target_class = type(embeddings)
+                modules = self.model.named_modules()
+                layer_name = next(n for n, m in modules if m is embeddings)
+            else:
+                target_class = self._target_class
+                layer_name = self._layer_names[layer - 1]
             layer_key = f"aux_hidden_state_{layer}"
             aux_hidden_state_i = OutputRecorder(target_class, layer_name=layer_name)
             self.model._can_record_outputs[layer_key] = aux_hidden_state_i

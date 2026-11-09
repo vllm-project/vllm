@@ -383,7 +383,6 @@ def test_extract_layer_zero_is_input_embeddings(tmp_path, model_impl):
             "kv_connector_extra_config": {"shared_storage_path": str(tmp_path)},
         },
         max_model_len=256,
-        enforce_eager=True,
         gpu_memory_utilization=0.4,
     )
     hidden_size = llm.llm_engine.model_config.get_hidden_size()
