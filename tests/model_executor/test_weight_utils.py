@@ -522,7 +522,8 @@ def test_auto_prefetch_selection(
 ):
     """Auto-prefetch respects filesystem, RAM, and explicit lazy settings."""
     checkpoint = tmp_path / "model.safetensors"
-    save_file({"weight": torch.ones(2)}, checkpoint)
+    expected = torch.ones(2, device="cpu")
+    save_file({"weight": expected}, checkpoint)
     monkeypatch.setattr(weight_utils, "_get_fs_type", lambda _: fs_type)
     monkeypatch.setattr(
         weight_utils,
@@ -544,7 +545,7 @@ def test_auto_prefetch_selection(
         )
     )
 
-    assert torch.equal(weights["weight"], torch.ones(2))
+    assert torch.equal(weights["weight"], expected)
     assert prefetched == ([str(checkpoint)] if should_prefetch else [])
 
 
