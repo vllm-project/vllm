@@ -24,7 +24,6 @@ If you only need to use the distributed environment without model/pipeline
 """
 
 import contextlib
-import copy
 import gc
 import pickle
 import weakref
@@ -1644,47 +1643,44 @@ def get_dcp_world_size_and_rank(enabled: bool = True) -> tuple[int, int]:
 
 
 _PP: GroupCoordinator | None = None
-# Single-rank view of `_PP` while `single_pp_stage()` is active. A module global,
-# like the forward context, so that torch.compile traces `get_pp_group()`.
+# This rank alone as a PP group, created when PP > 1 for `single_pp_stage()`.
 _PP_SINGLE_STAGE: GroupCoordinator | None = None
+# Whether `get_pp_group()` returns `_PP_SINGLE_STAGE`. A module global, like the
+# forward context, so that torch.compile traces `get_pp_group()`.
+_IN_SINGLE_PP_STAGE = False
 
 
 def get_pp_group() -> GroupCoordinator:
-    if _PP_SINGLE_STAGE is not None:
-        return _PP_SINGLE_STAGE
-    assert _PP is not None, "pipeline model parallel group is not initialized"
-    return _PP
+    group = _PP_SINGLE_STAGE if _IN_SINGLE_PP_STAGE else _PP
+    assert group is not None, "pipeline model parallel group is not initialized"
+    return group
 
 
 @contextmanager
 def single_pp_stage() -> Iterator[None]:
     """Run models on this rank as the only pipeline stage.
 
-    Within the context, `get_pp_group()` returns a view of the PP group that
-    contains only this rank. Speculative decoding runs the draft model whole on
-    the last PP rank: built and run in this context, model code that reads its
-    stage from the PP group behaves as at PP=1. The view does not support PP
-    communication. Without a PP group (unit tests), the context does nothing.
+    Within the context, `get_pp_group()` returns a PP group that contains only
+    this rank. Speculative decoding runs the draft model whole on the last PP
+    rank: built and run in this context, model code that reads its stage from
+    the PP group, or communicates over it, behaves as at PP=1. Without a PP
+    group of more than one rank (PP=1, unit tests), the context does nothing.
     """
-    global _PP_SINGLE_STAGE
-    if _PP is None or get_pp_group().world_size == 1:
+    global _IN_SINGLE_PP_STAGE
+    if _PP_SINGLE_STAGE is None or _IN_SINGLE_PP_STAGE:
         yield
         return
-    view = copy.copy(_PP)
-    view.ranks = [_PP.rank]
-    view.world_size = 1
-    view.rank_in_group = 0
-    _PP_SINGLE_STAGE = view
+    _IN_SINGLE_PP_STAGE = True
     try:
         yield
     finally:
-        _PP_SINGLE_STAGE = None
+        _IN_SINGLE_PP_STAGE = False
 
 
 def in_single_pp_stage() -> bool:
     """Whether `single_pp_stage()` is active on a PP group of more than one
     rank, i.e. the other pipeline stages do not run the current model."""
-    return _PP_SINGLE_STAGE is not None
+    return _IN_SINGLE_PP_STAGE
 
 
 _DP: GroupCoordinator | None = None
@@ -2343,6 +2339,17 @@ def initialize_model_parallel(
         group_ranks, get_world_group().local_rank, backend, group_name="pp"
     )
 
+    # Build one PP group per rank for `single_pp_stage()`.
+    global _PP_SINGLE_STAGE
+    assert _PP_SINGLE_STAGE is None, "single-stage PP group is already initialized"
+    if pipeline_model_parallel_size > 1:
+        _PP_SINGLE_STAGE = init_model_parallel_group(
+            [[rank] for ranks in group_ranks for rank in ranks],
+            get_world_group().local_rank,
+            backend,
+            group_name="pp_single_stage",
+        )
+
     global _DP
     assert _DP is None, "data parallel group is already initialized"
     group_ranks = all_ranks.transpose(1, 4).reshape(-1, data_parallel_size).unbind(0)
@@ -2555,10 +2562,13 @@ def destroy_model_parallel():
         _PCP.destroy()
     _PCP = None
 
-    global _PP
+    global _PP, _PP_SINGLE_STAGE
     if _PP:
         _PP.destroy()
     _PP = None
+    if _PP_SINGLE_STAGE:
+        _PP_SINGLE_STAGE.destroy()
+    _PP_SINGLE_STAGE = None
 
     global _DP, _ENGRAM_DP
     if _ENGRAM_DP and _ENGRAM_DP is not _DP:

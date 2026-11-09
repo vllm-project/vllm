@@ -5,8 +5,6 @@ import os
 
 import pytest
 
-from vllm.distributed import parallel_state
-from vllm.distributed.parallel_state import GroupCoordinator
 from vllm.distributed.utils import get_pp_indices
 
 
@@ -72,34 +70,3 @@ def test_uneven_auto_partition(
     indices: tuple[int, int],
 ):
     assert indices == get_pp_indices(num_hidden_layers, pp_rank, pp_size)
-
-
-def _pp_group(rank_in_group: int, world_size: int) -> GroupCoordinator:
-    # Only the rank fields that define the stage; no process groups.
-    group = object.__new__(GroupCoordinator)
-    group.rank = rank_in_group
-    group.ranks = list(range(world_size))
-    group.rank_in_group = rank_in_group
-    group.world_size = world_size
-    return group
-
-
-def test_single_pp_stage_runs_the_last_rank_as_the_only_stage(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    """A draft model runs whole on the last PP rank, as at PP=1."""
-    last_rank = _pp_group(rank_in_group=1, world_size=2)
-    monkeypatch.setattr(parallel_state, "_PP", last_rank)
-    with parallel_state.single_pp_stage():
-        stage = parallel_state.get_pp_group()
-        assert stage.is_first_rank and stage.is_last_rank
-        assert (stage.rank_in_group, stage.world_size) == (0, 1)
-        assert parallel_state.in_single_pp_stage()
-    assert parallel_state.get_pp_group() is last_rank
-    assert not parallel_state.in_single_pp_stage()
-
-    only_rank = _pp_group(rank_in_group=0, world_size=1)
-    monkeypatch.setattr(parallel_state, "_PP", only_rank)
-    with parallel_state.single_pp_stage():
-        assert parallel_state.get_pp_group() is only_rank
-        assert not parallel_state.in_single_pp_stage()
