@@ -1346,10 +1346,10 @@ class SpeculativeConfig:
     ) -> PreTrainedConfig:
         """Apply dict rope overrides, then the draft arch rewrite.
 
-        Dict patches run first so nested keys (``text_config.rope_parameters``)
-        apply before arch mapping may promote ``text_config``. Nested wrappers
+        Dict patches run first so nested keys (`text_config.rope_parameters`)
+        apply before arch mapping may promote `text_config`. Nested wrappers
         are skipped on flat draft configs, where setting them would create a
-        bare ``text_config`` dict that ``get_text_config()`` picks up instead.
+        bare `text_config` dict that `get_text_config()` picks up instead.
         """
         overrides = {
             key: value
@@ -1375,10 +1375,10 @@ class SpeculativeConfig:
         target is instantiated at full size even when the target is shrunk.
 
         Dict overrides are mostly target-specific key patches, but
-        rope-relevant keys (``rope_parameters`` / ``rope_scaling`` /
-        ``rope_theta``, including nested ``text_config``) must reach the
+        rope-relevant keys (`rope_parameters` / `rope_scaling` /
+        `rope_theta`, including nested `text_config`) must reach the
         draft or a YaRN-style target override leaves the draft on native
-        rope (#58080). ``max_position_embeddings`` stays target-only so the
+        rope (#58080). `max_position_embeddings` stays target-only so the
         draft max-model-len clamp keeps holding (#63909).
 
         The composed override must stay picklable: the draft `ModelConfig`
