@@ -1754,6 +1754,8 @@ class MooncakeCluster:
         self._start(
             [
                 self._binary("mooncake_client"),
+                "-port",
+                str(get_open_port()),
                 "-master_server_address",
                 self.master_addr,
                 "-metadata_server",

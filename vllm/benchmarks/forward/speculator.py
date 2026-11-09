@@ -34,7 +34,7 @@ class DraftBench:
         )
         self.num_sampled = torch.tensor(accepted, device=runner.device)
         self.num_rejected = torch.zeros_like(self.num_sampled)
-        # Fixed valid bonus token: target logits and rejection sampling are not timed.
+        # Fixed valid bonus token, independent of the timed target sampling.
         self.last_sampled = torch.zeros_like(runner.req_states.last_sampled_tokens)
         self.dp_sync_state = (
             DPSyncState(
