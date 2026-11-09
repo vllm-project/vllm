@@ -1171,13 +1171,13 @@ def test_triton_unified_attn_use_td(
 ) -> None:
     """Exercise the USE_TD (tensor-descriptor) Q/K/V load/store path.
 
-    Covers both 2D and 3D kernels via ``seq_threshold_3D``. Three routes
-    to the USE_TD_QO=False fallback (pointer path for Q/O with TD still
+    Covers both 2D and 3D kernels via `seq_threshold_3D`. Three routes
+    to the `USE_TD_QO=False` fallback (pointer path for Q/O with TD still
     active for KV tile loads):
 
-    - non-pow2 ``num_queries_per_kv`` via ``NUM_HEADS`` entry ``(5, 1)``,
-    - non-pow2 ``head_size`` via ``HEAD_SIZES_USE_TD`` entry ``96``.
-    - CUDA query lengths at or below ``MAX_3D_QUERY_LEN``.
+    - non-pow2 `num_queries_per_kv` via `NUM_HEADS` entry `(5, 1)`.
+    - non-pow2 `head_size` via `HEAD_SIZES_USE_TD` entry `96`.
+    - CUDA query lengths at or below `MAX_3D_QUERY_LEN`.
     """
     _run_use_td_case(
         seq_lens=seq_lens,

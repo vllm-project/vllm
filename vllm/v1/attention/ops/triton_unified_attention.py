@@ -1145,6 +1145,8 @@ def unified_attention(
     # ``shape`` already matches ``block_shape`` on the inner axis.
     _is_pow2_nq = (num_queries_per_kv & (num_queries_per_kv - 1)) == 0
     _is_pow2_hs = head_size == head_size_padded
+    # Performance choice: keep short CUDA decode Q/O on pointers; K/V TD
+    # remains enabled for query lengths <= MAX_3D_QUERY_LEN.
     use_td_qo = (
         use_td
         and _is_pow2_nq
@@ -1365,11 +1367,10 @@ def unified_attention(
     if launch_num_stages is not None:
         launch_kwargs["num_stages"] = launch_num_stages
 
-    if use_td:
+    if use_td and current_platform.is_cuda_alike():
         # The hoisted 3D descriptor requires a PyTorch-backed scratch
-        # allocator to be registered (Triton raises "no allocator was
-        # set" otherwise on CUDA TD paths). Register it in the current
-        # Triton context before launching the TD kernel.
+        # allocator on CUDA-alike TD paths. Triton stores it in the current
+        # context, so register it immediately before launching the kernel.
         set_triton_allocator(q.device)
 
     kernel_unified_attention[grid](
