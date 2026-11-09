@@ -508,7 +508,7 @@ def test_deep_sleep_fp8_kvcache_with_undefined_remap(
     llm.wake_up(tags=["weights"])
     llm.collective_rpc("reload_weights")
 
-    original_create_and_map = cumem.CuMemAllocator.create_and_map
+    original_create_and_map = cumem.CuMemAllocator._create_and_map
 
     def create_and_map_with_poison(handle) -> None:
         original_create_and_map(handle)
@@ -517,7 +517,7 @@ def test_deep_sleep_fp8_kvcache_with_undefined_remap(
 
     monkeypatch.setattr(
         cumem.CuMemAllocator,
-        "create_and_map",
+        "_create_and_map",
         staticmethod(create_and_map_with_poison),
     )
 
