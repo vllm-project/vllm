@@ -1,12 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Each text-generation architecture that declares `SupportsPP` gives the same
-prompt logprobs and greedy tokens with pipeline parallelism as without it.
+prompt logprobs, greedy tokens and their logprobs with pipeline parallelism as
+without it.
 
 The registry example of each architecture is cut to a few layers and loaded
 with random weights seeded by each parameter's name. Parameter names carry
 global layer indices, so every pipeline layout holds the same weights, and no
 checkpoint is downloaded.
+
+CI sets `VLLM_TRITON_FORCE_FIRST_CONFIG=1`: Triton autotuning picks configs per
+process by timing, so two engines could otherwise run different kernels.
 """
 
 import hashlib
@@ -209,13 +213,18 @@ def _run(
             (output,) = llm.generate(
                 TokensPrompt(prompt_token_ids=token_ids), params, use_tqdm=False
             )
+            completion = output.outputs[0]
             results.append(
                 {
                     "prompt_logprobs": [
                         lp[tok].logprob
                         for tok, lp in zip(token_ids[1:], output.prompt_logprobs[1:])
                     ],
-                    "tokens": list(output.outputs[0].token_ids),
+                    "tokens": list(completion.token_ids),
+                    "logprobs": [
+                        lp[tok].logprob
+                        for tok, lp in zip(completion.token_ids, completion.logprobs)
+                    ],
                 }
             )
         return results
@@ -225,7 +234,8 @@ def _max_logprob_diff(ref: list[dict], test: list[dict]) -> float:
     return max(
         abs(a - b)
         for r, t in zip(ref, test)
-        for a, b in zip(r["prompt_logprobs"], t["prompt_logprobs"])
+        for key in ("prompt_logprobs", "logprobs")
+        for a, b in zip(r[key], t[key])
     )
 
 
@@ -237,7 +247,7 @@ def _check_equivalent(vllm_runner, arch: str, pp_size: int) -> None:
     # Same weights and batch shapes: every correct layout is bitwise equal, and
     # a single changed weight can move the logprobs by as little as 0.1.
     assert ref == test, (
-        f"PP={pp_size} prompt logprobs differ by up to {_max_logprob_diff(ref, test)}"
+        f"PP={pp_size} logprobs differ by up to {_max_logprob_diff(ref, test)}"
     )
 
 
