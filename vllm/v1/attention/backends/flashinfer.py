@@ -1154,7 +1154,22 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                     )
             return self._noncausal_prefill_wrapper
 
-        if self._prefill_wrapper is None:
+        if self._prefill_wrapper is None and current_platform.is_device_capability_family(120):
+            # SM120 (consumer/prosumer Blackwell) prefill kernels: FlashInfer's
+            # paged batch-prefill path has open correctness gaps on SM12x
+            # (e.g. flashinfer#5608/#3297 family). Mixed-length chunked prefill
+            # batches with prefix-cache reuse have been observed to fault
+            # (CUDA illegal memory access / hang) with GQA bf16 head_dim 128
+            # on FlashInfer 0.7.0.post1 and 0.7.3, while the same plan/run
+            # arguments succeed against the bare FlashInfer API. FA2 is the
+            # stable path on this arch family.
+            logger.warning_once(
+                "Using the FlashInfer attention backend on SM120: the paged "
+                "batch-prefill path is not yet validated on this architecture "
+                "family and may fault under chunked prefill with prefix-cache "
+                "reuse. Consider --attention-backend FLASH_ATTN if you hit "
+                "CUDA illegal memory access errors."
+            )
             if self.use_dcp:
                 self._prefill_wrapper = BatchDCPPrefillWrapper(
                     workspace_buffer=self._get_workspace_buffer(),
