@@ -575,12 +575,12 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsQuant)
             self.language_model = init_vllm_registered_model(
                 vllm_config=vllm_config,
                 # The prefix is empty intentionally because default prefix of
-                # LlamaForCausalLM is "model"
+                # Phi3ForCausalLM is "model"
                 prefix="",
-                # We don't directly initialize vLLM's LlamaForCausalLM so we
+                # We don't directly initialize vLLM's Phi3ForCausalLM so we
                 # can automatically apply embedding wrapper if this model is
                 # initialized as an embedding model
-                architectures=["LlamaForCausalLM"],
+                architectures=["Phi3ForCausalLM"],
             )
 
         self.make_empty_intermediate_tensors = (
