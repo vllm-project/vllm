@@ -159,7 +159,8 @@ def _part_text(part: str | Mapping[str, Any]) -> str | None:
     part_type = part.get("type", "text")
     if part_type not in TEXT_PART_TYPES:
         return None
-    return MM_PARSER_MAP[part_type](part)  # type: ignore[arg-type]
+    text = MM_PARSER_MAP[part_type](part)  # type: ignore[arg-type]
+    return text if isinstance(text, str) else None
 
 
 def _to_tool_calls(
