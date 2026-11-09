@@ -1114,21 +1114,39 @@ def _extrapolate_full_graph_memory(mem_samples: list[int], total_graphs: int) ->
 def _init_minimal_kv_cache_for_profiling(runner: "GPUModelRunner") -> None:
     """Allocate the smallest KV cache that still lets every graph be captured."""
     from vllm.v1.core.kv_cache_config_builder import get_kv_cache_config_builder
-    from vllm.v1.core.kv_cache_planning import get_kv_cache_groups_from_builder
+    from vllm.v1.core.kv_cache_planning import (
+        get_kv_cache_groups_from_builder,
+        get_max_num_blocks,
+    )
 
     kv_cache_spec = runner.get_kv_cache_spec()
     builder = get_kv_cache_config_builder(runner.vllm_config)
     kv_cache_groups = get_kv_cache_groups_from_builder(
         builder, runner.vllm_config, kv_cache_spec
     )
-    # At least one block per sequence is required to capture the graphs.
-    min_blocks = (
-        min(runner.max_num_reqs, runner.compilation_config.max_cudagraph_capture_size)
-        or 1
-    )
-    minimal_config = builder.get_kv_cache_config_from_groups(
-        runner.vllm_config, kv_cache_groups, num_blocks=min_blocks
-    )
+    cache_config = runner.vllm_config.cache_config
+    override = cache_config.num_gpu_blocks_override
+    max_num_blocks = get_max_num_blocks(runner.vllm_config, kv_cache_groups)
+    if max_num_blocks is not None:
+        # A bounded pool (persistent state) profiles at its runtime bound,
+        # whatever block count the override later sets.
+        min_blocks = max_num_blocks
+        cache_config.num_gpu_blocks_override = None
+    else:
+        # At least one block per sequence is required to capture the graphs.
+        min_blocks = (
+            min(
+                runner.max_num_reqs,
+                runner.compilation_config.max_cudagraph_capture_size,
+            )
+            or 1
+        )
+    try:
+        minimal_config = builder.get_kv_cache_config_from_groups(
+            runner.vllm_config, kv_cache_groups, num_blocks=min_blocks
+        )
+    finally:
+        cache_config.num_gpu_blocks_override = override
 
     runner.initialize_kv_cache(minimal_config, is_profiling=True)
     runner.cache_config.num_gpu_blocks = minimal_config.num_blocks
@@ -1148,6 +1166,9 @@ def _teardown_profiling_state(runner: "GPUModelRunner") -> None:
         runner.model_state._mamba_group_ids = []
     if hasattr(runner.model_state, "_mamba_spec"):
         runner.model_state._mamba_spec = None
+    if getattr(runner, "state_slots", None) is not None:
+        runner.state_slots = None
+        runner.model_state.state_slots = None
     if hasattr(runner, "kv_caches"):
         runner.kv_caches.clear()
     if hasattr(runner, "attn_groups"):

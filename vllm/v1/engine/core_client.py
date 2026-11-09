@@ -11,7 +11,7 @@ from array import array
 from collections import Counter, defaultdict
 from collections.abc import Awaitable, Callable, Sequence
 from concurrent.futures import Future
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from multiprocessing.queues import Queue
 from threading import Thread
 from typing import Any, TypeAlias, TypeVar
@@ -52,6 +52,8 @@ from vllm.v1.engine import (
     PauseMode,
     ReconfigureDistributedRequest,
     ReconfigureRankType,
+    StreamAdmissionError,
+    StreamAdmissionResult,
     UtilityOutput,
 )
 from vllm.v1.engine.coordinator import DPCoordinator
@@ -326,6 +328,18 @@ class EngineCoreClient(ABC):
         raise NotImplementedError
 
     async def reset_encoder_cache_async(self) -> None:
+        raise NotImplementedError
+
+    async def admit_stream_async(
+        self,
+        request: EngineCoreRequest,
+        *,
+        on_release: Callable[[BaseException | None], None] | None = None,
+        on_forget: Callable[[], None] | None = None,
+    ) -> StreamAdmissionResult:
+        raise NotImplementedError
+
+    async def wait_stream_retired_async(self, request_id: str) -> None:
         raise NotImplementedError
 
     async def sleep_async(
@@ -960,6 +974,153 @@ class MPClient(EngineCoreClient):
         return dict(self._kv_event_sources)
 
 
+# Retired streams kept for a wait that has not been made yet.
+MAX_UNWAITED_RETIREMENTS = 1024
+
+
+@dataclass
+class _TrackedStream:
+    caller_id: str
+    retired: asyncio.Future[None]
+    # Called once the stream can no longer hold a slot: with None once it has
+    # retired, else with the error its waits raise (refused, never sent, or a
+    # dead engine).
+    on_release: Callable[[BaseException | None], None] | None
+    # Called once nothing will report the stream's retirement any more.
+    on_forget: Callable[[], None] | None
+    # Admission replies still outstanding, including those of retries.
+    admissions: set[asyncio.Future[Any]] = field(default_factory=set)
+    accepted: bool = False
+    # A retirement that arrived while an admission reply was outstanding.
+    retired_early: bool = False
+    waiters: int = 0
+    released: bool = field(default=False, init=False)
+
+    def release(self, error: BaseException | None = None) -> None:
+        if not self.released:
+            self.released = True
+            if self.on_release is not None:
+                self.on_release(error)
+
+    def forget(self, error: BaseException | None = None) -> None:
+        self.release(error)
+        if self.on_forget is not None:
+            self.on_forget()
+
+
+class _StreamRetirements:
+    """Admitted streams tracked from admission until their retirement is
+    waited for (see docs/design/persistent_state.md, "Retirement signal")."""
+
+    def __init__(self) -> None:
+        self.streams: dict[str, _TrackedStream] = {}
+        # Retired streams no wait has returned yet, oldest retirement first.
+        self.unwaited: dict[str, _TrackedStream] = {}
+        self.dead = False
+
+    def track(
+        self,
+        request: EngineCoreRequest,
+        admission: asyncio.Future[Any],
+        on_release: Callable[[BaseException | None], None] | None,
+        on_forget: Callable[[], None] | None,
+    ) -> None:
+        request_id = request.request_id
+        if (stream := self.streams.get(request_id)) is None:
+            caller_id = request.external_req_id or request_id
+            for retired_id, retired in list(self.unwaited.items()):
+                if retired.caller_id == caller_id or retired_id == request_id:
+                    del self.unwaited[retired_id]
+                    retired.forget()
+            stream = self.streams[request_id] = _TrackedStream(
+                caller_id,
+                asyncio.get_running_loop().create_future(),
+                on_release,
+                on_forget,
+            )
+        # A retry of a live admission joins its tracking.
+        stream.admissions.add(admission)
+
+    def admission_done(
+        self,
+        request_id: str,
+        admission: asyncio.Future[Any],
+        error: BaseException | None,
+    ) -> None:
+        """An admission reply arrived (`error` is None if it was accepted), or
+        the admission was never sent."""
+        stream = self.streams.get(request_id)
+        if stream is None or admission not in stream.admissions:
+            return
+        stream.admissions.discard(admission)
+        stream.accepted |= error is None
+        if stream.admissions:
+            return
+        if stream.retired_early:
+            self._retire(request_id, stream)
+        elif not stream.accepted:
+            assert error is not None
+            del self.streams[request_id]
+            if stream.waiters:
+                stream.retired.set_exception(error)
+            stream.forget(error)
+
+    def retire(self, request_ids: list[str]) -> None:
+        for request_id in request_ids:
+            if (stream := self.streams.get(request_id)) is None:
+                continue
+            if stream.admissions:
+                # Waits keep waiting until the admission reply arrives.
+                stream.retired_early = True
+            else:
+                self._retire(request_id, stream)
+
+    def _retire(self, request_id: str, stream: _TrackedStream) -> None:
+        del self.streams[request_id]
+        stream.release()
+        # Wakes the waits; the first one to return consumes the retirement.
+        stream.retired.set_result(None)
+        self.unwaited[request_id] = stream
+        if len(self.unwaited) > MAX_UNWAITED_RETIREMENTS:
+            oldest = next(iter(self.unwaited))
+            self.unwaited.pop(oldest).forget()
+
+    def fail(self) -> None:
+        """The engine died: pending waits never report a retirement."""
+        self.dead = True
+        for stream in self.streams.values():
+            stream.release(EngineDeadError())
+            if stream.waiters:
+                stream.retired.set_exception(EngineDeadError())
+            for admission in stream.admissions:
+                if not admission.done():
+                    admission.set_exception(EngineDeadError())
+        self.streams.clear()
+        self.unwaited.clear()
+
+    async def wait(self, request_id: str) -> None:
+        if self.dead:
+            raise EngineDeadError()
+        stream = self.unwaited.get(request_id) or self.streams.get(request_id)
+        if stream is None:
+            raise ValueError(
+                f"Stream {request_id!r} is not tracked: it is unknown, was "
+                "already waited for, or its retirement was dropped"
+            )
+        stream.waiters += 1
+        try:
+            await asyncio.shield(stream.retired)
+        finally:
+            stream.waiters -= 1
+        # A wait that has not returned when the engine dies never reports the
+        # retirement that woke it.
+        if self.dead:
+            raise EngineDeadError()
+        if self.unwaited.get(request_id) is stream:
+            del self.unwaited[request_id]
+            stream.forget()
+
+
 def _process_utility_output(
     output: UtilityOutput, utility_results: dict[int, AnyFuture]
 ):
@@ -1204,6 +1365,10 @@ class AsyncMPClient(MPClient):
         self.client_count = client_count
         self.client_index = client_index
         self.outputs_queue = asyncio.Queue[EngineCoreOutputs | Exception]()
+        self.stream_retirements = _StreamRetirements()
+        # Admission replies collected in the background, and aborts of streams
+        # admitted after their admission call was cancelled.
+        self._admission_tasks: set[asyncio.Task] = set()
 
         # locally-cached engine status
         self._engine_status: dict[int, dict] = {}
@@ -1242,6 +1407,7 @@ class AsyncMPClient(MPClient):
         notification_callback_handler: (
             Callable[[AsyncMPClient, Sequence[Any]], Any] | None
         ) = getattr(self.__class__, "eep_process_engine_core_notification", None)
+        stream_retirements = self.stream_retirements
 
         async def process_outputs_socket():
             try:
@@ -1249,6 +1415,9 @@ class AsyncMPClient(MPClient):
                     frames = await output_socket.recv_multipart(copy=False)
                     resources.validate_alive(frames)
                     outputs: EngineCoreOutputs = decoder.decode(frames)
+                    # Before the filter below, which drops retirement-only batches.
+                    if outputs.retired_streams:
+                        stream_retirements.retire(outputs.retired_streams)
                     if outputs.utility_output:
                         if (
                             outputs.utility_output.call_id == EEP_NOTIFICATION_CALL_ID
@@ -1291,8 +1460,10 @@ class AsyncMPClient(MPClient):
                     if outputs.outputs or outputs.scheduler_stats:
                         outputs_queue.put_nowait(outputs)
             except Exception as e:
+                stream_retirements.fail()
                 outputs_queue.put_nowait(e)
             except asyncio.CancelledError:
+                stream_retirements.fail()
                 outputs_queue.put_nowait(EngineDeadError())
 
         resources.output_queue_task = asyncio.create_task(
@@ -1372,6 +1543,124 @@ class AsyncMPClient(MPClient):
         request.client_index = self.client_index
         await self._send_input(EngineCoreRequestType.ADD, _with_packed_prompt(request))
         self._ensure_output_queue_task()
+
+    async def admit_stream_async(
+        self,
+        request: EngineCoreRequest,
+        *,
+        on_release: Callable[[BaseException | None], None] | None = None,
+        on_forget: Callable[[], None] | None = None,
+    ) -> StreamAdmissionResult:
+        """Admit a stream, tracking it from before the admission is sent so
+        that no retirement is missed.
+
+        `on_release` is called once the stream can no longer hold a slot, with
+        the error its pending waits raise or None once it has retired, and
+        `on_forget` once its retirement can no longer be waited for.
+        """
+        self.ensure_alive()
+        # The admission is sent without its prompt, so refuse a prompt here as
+        # the engine would, before anything is tracked or sent.
+        if request.prompt_token_ids is not None and len(request.prompt_token_ids):
+            raise ValueError("Admission requires an empty resumable sampling request")
+        # The admitted stream's outputs return to this client, as for an ADD.
+        request.client_index = self.client_index
+        request_id = request.request_id
+        call_id = uuid.uuid1().int >> 64
+        admission = asyncio.get_running_loop().create_future()
+        self.utility_results[call_id] = admission
+        self.stream_retirements.track(request, admission, on_release, on_forget)
+        message = (
+            EngineCoreRequestType.UTILITY.value,
+            *self.encoder.encode(
+                (
+                    self.client_index,
+                    call_id,
+                    "admit_stream",
+                    # An admission has no prompt, so no token array crosses the
+                    # utility path, whose arguments are decoded as builtins.
+                    (msgspec.structs.replace(request, prompt_token_ids=None),),
+                )
+            ),
+        )
+        send: asyncio.Future | None = None
+        try:
+            send = asyncio.ensure_future(
+                self._send_input_message(message, self.core_engine)
+            )
+            await send
+        except BaseException as e:
+            # Whether it was sent depends on the send, not on where the
+            # cancellation landed.
+            if send is None or not (
+                send.done() and not send.cancelled() and send.exception() is None
+            ):
+                # Never sent, so the engine cannot admit it.
+                self.utility_results.pop(call_id, None)
+                self.stream_retirements.admission_done(
+                    request_id,
+                    admission,
+                    ValueError(f"Admission of stream {request_id!r} was not sent")
+                    if isinstance(e, asyncio.CancelledError)
+                    else e,
+                )
+                raise
+            self._collect_late_admission(request_id, admission)
+            raise
+        # Once sent, the reply is collected even if the caller is cancelled.
+        reply = self._collect_admission(request_id, admission)
+        try:
+            return await asyncio.shield(reply)
+        except asyncio.CancelledError:
+            reply.add_done_callback(self._abort_late_admission)
+            raise
+
+    def _collect_admission(
+        self, request_id: str, admission: asyncio.Future[Any]
+    ) -> asyncio.Task:
+        self._ensure_output_queue_task()
+        reply = asyncio.ensure_future(self._finish_admission(request_id, admission))
+        self._admission_tasks.add(reply)
+        reply.add_done_callback(self._admission_tasks.discard)
+        return reply
+
+    def _collect_late_admission(
+        self, request_id: str, admission: asyncio.Future[Any]
+    ) -> None:
+        self._collect_admission(request_id, admission).add_done_callback(
+            self._abort_late_admission
+        )
+
+    async def _finish_admission(
+        self, request_id: str, admission: asyncio.Future[Any]
+    ) -> StreamAdmissionResult:
+        try:
+            result = msgspec.convert(await admission, StreamAdmissionResult)
+        except BaseException as e:
+            self.stream_retirements.admission_done(request_id, admission, e)
+            raise
+        self.stream_retirements.admission_done(
+            request_id,
+            admission,
+            None if result.accepted else StreamAdmissionError(result),
+        )
+        return result
+
+    def _abort_late_admission(self, reply: asyncio.Future) -> None:
+        # Nobody can feed a stream whose admission call was cancelled.
+        if reply.cancelled() or reply.exception() is not None:
+            return
+        result: StreamAdmissionResult = reply.result()
+        if result.accepted:
+            task = asyncio.ensure_future(self.abort_requests_async([result.request_id]))
+            self._admission_tasks.add(task)
+            task.add_done_callback(self._admission_tasks.discard)
+
+    async def wait_stream_retired_async(self, request_id: str) -> None:
+        """Return once the admitted stream `request_id` has retired."""
+        if self.resources.engine_dead:
+            raise EngineDeadError()
+        await self.stream_retirements.wait(request_id)
 
     async def abort_requests_async(self, request_ids: list[str]) -> None:
         if request_ids and not self.resources.engine_dead:

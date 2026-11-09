@@ -24,6 +24,7 @@ from vllm.v1.kv_cache_interface import (
     CrossAttentionSpec,
     KVCacheSpec,
     MambaSpec,
+    PersistentStateSpec,
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.request import Request
@@ -153,6 +154,12 @@ def run_mixed_prefill_decode_warmup(
         )
     if num_tokens < 3:
         return False
+    kv_cache_groups = model_runner.kv_cache_config.kv_cache_groups
+    if any(isinstance(g.kv_cache_spec, PersistentStateSpec) for g in kv_cache_groups):
+        # The synthetic requests below carry no scheduler-issued state handles
+        # and assume token prefill and decode, while a persistent-state
+        # request's first step is model-defined. Neither fits, so skip.
+        return False
 
     decode_req_id = f"{req_id_prefix}_decode_"
     prefill_req_id = f"{req_id_prefix}_prefill_"
@@ -162,7 +169,6 @@ def run_mixed_prefill_decode_warmup(
     decode_token_ids = _warmup_token_ids(model_runner, decode_prompt_len)
     prefill_token_ids = _warmup_token_ids(model_runner, prefill_len)
 
-    kv_cache_groups = model_runner.kv_cache_config.kv_cache_groups
     block_count = _warmup_block_counter(model_runner)
     kv_cache_specs = [g.kv_cache_spec for g in kv_cache_groups]
     decode_prefill_block_counts = [

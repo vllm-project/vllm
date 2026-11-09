@@ -49,6 +49,7 @@ from vllm.v1.core.encoder_cache_manager import EncoderCacheManager
 from vllm.v1.core.kv_cache_coordinator import HybridKVCacheCoordinator
 from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
+from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.diffusion_scheduler import (
     DiffusionAsyncScheduler,
     DiffusionScheduler,
@@ -57,6 +58,7 @@ from vllm.v1.core.sched.diffusion_scheduler import (
 from vllm.v1.core.sched.interface import PauseState
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
+from vllm.v1.core.sched.state_scheduler import StateScheduler
 from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
 from vllm.v1.engine import FinishReason
 from vllm.v1.engine.core import EngineCore
@@ -9172,3 +9174,2005 @@ def test_cpu_encoder_input_updates_preserve_shm_handles():
     )
     assert scheduler.schedule().encoder_input_updates == {request.request_id: {1: None}}
     assert request.mm_features[0].data is handle
+
+
+def _state_scheduler(*, log_stats=False, num_slots=2):
+    from tests.v1.core.utils import create_state_spec, get_kv_cache_configs
+
+    base = create_scheduler(max_num_seqs=2, max_model_len=32)
+    base.vllm_config.cache_config.kv_cache_layout = "LBNHC"
+    spec = create_state_spec()
+    # One page is the null block; the rest are usable slots.
+    config = get_kv_cache_configs(
+        base.vllm_config, [{"state": spec}], [(num_slots + 1) * spec.page_size_bytes]
+    )[0]
+    return StateScheduler(
+        vllm_config=base.vllm_config,
+        kv_cache_config=config,
+        block_size=1,
+        log_stats=log_stats,
+        structured_output_manager=base.structured_output_manager,
+    )
+
+
+def _state_output(step, *, acknowledge=True):
+    from copy import deepcopy
+
+    from vllm.v1.kv_cache_interface import StateCompletion
+
+    ids = list(step.num_scheduled_tokens)
+    return ModelRunnerOutput(
+        req_ids=ids,
+        sampled_token_ids=[[42] for _ in ids],
+        state_completion=(
+            StateCompletion(
+                step.state_step_seq,
+                deepcopy(step.state_slot_handles),
+                deepcopy(step.state_cleanup_handles),
+            )
+            if acknowledge
+            else None
+        ),
+    )
+
+
+def _stream_core(*, num_slots=2):
+    core = object.__new__(EngineCore)
+    core.scheduler = _state_scheduler(num_slots=num_slots)
+    core.request_block_hasher = None
+    core.vllm_config = core.scheduler.vllm_config
+    core.scheduler.stream_admissions.clock = lambda: 100.0
+    return core
+
+
+def _stream_request(request_id="stream"):
+    from vllm.v1.engine import EngineCoreRequest
+
+    # Token 7 is the park token, which state models declare as EOS.
+    params = SamplingParams(max_tokens=4)
+    params.update_from_generation_config({}, 7)
+    return EngineCoreRequest(
+        request_id=request_id,
+        prompt_token_ids=[],
+        mm_features=None,
+        sampling_params=params,
+        pooling_params=None,
+        arrival_time=1.0,
+        lora_request=None,
+        cache_salt=None,
+        data_parallel_rank=None,
+        resumable=True,
+    )
+
+
+def _admit_stream(core, request=None):
+    return core.admit_stream(request or _stream_request())
+
+
+def _stream_chunk(core=None, *, closed=False, request_id="stream", tokens=(1, 2, 3)):
+    from vllm.v1.engine import StreamAdmissionContext
+
+    payload = _stream_request(request_id)
+    payload.prompt_token_ids = list(tokens)
+    payload.stream_admission = StreamAdmissionContext(closed)
+    return Request.from_engine_core_request(payload, None)
+
+
+def _pausable_stream_core():
+    import queue
+
+    from vllm.v1.engine.core import EngineCoreProc, EngineShutdownState
+
+    core = object.__new__(EngineCoreProc)
+    core.__dict__.update(_stream_core().__dict__)
+    core.model_executor = Mock()
+    core.batch_queue = None
+    core.engines_running = False
+    core.shutdown_state = EngineShutdownState.RUNNING
+    core.reject_new_requests = False
+    core.output_queue = queue.Queue()
+    core._idle_state_callbacks = []
+    return core
+
+
+@pytest.mark.parametrize("mode", ["abort", "wait"])
+def test_stream_admission_pause_refuses_without_slots(mode):
+    """A paused engine refuses new streams without remembering the refusal."""
+    core = _pausable_stream_core()
+    admissions = core.scheduler.stream_admissions
+    free_slots = admissions.manager.num_free_slots
+    core.pause_generation(mode=mode, clear_cache=False)
+    for _ in range(2):
+        refused = _admit_stream(core)
+        assert not refused.accepted
+        assert refused.reason == "engine_paused"
+        assert refused.status == "refused"
+        assert admissions.manager.num_free_slots == free_slots
+        assert not core.scheduler.requests and not core.scheduler.waiting
+        assert not admissions.sessions
+    assert admissions.refusals["engine_paused"] == 2
+
+    core.resume_scheduler()
+    assert _admit_stream(core).accepted
+    assert admissions.manager.num_free_slots == free_slots - 1
+
+
+def test_stream_admission_accepted_replay_survives_wait_pause():
+    from vllm.v1.engine import EngineCoreRequestType
+
+    core = _pausable_stream_core()
+    admissions = core.scheduler.stream_admissions
+    accepted = _admit_stream(core)
+    handle = admissions.manager.get("stream")
+    deadline = admissions.next_deadline()
+    core.pause_generation(mode="wait", clear_cache=False)
+    assert _admit_stream(core) == accepted
+    assert admissions.manager.get("stream") == handle
+    assert admissions.next_deadline() == deadline
+    assert not admissions.refusals
+    core._handle_client_request(EngineCoreRequestType.ADD, (_stream_chunk(core), 0))
+    assert admissions.sessions["stream"].status == "live"
+    assert core.output_queue.empty()
+
+
+def test_stream_admission_paused_add_rejection_preserves_incoming_identity():
+    """A tagged ADD absent from the scheduler is rejected without finishing its ID."""
+    from vllm.v1.engine import EngineCoreRequestType
+
+    core = _pausable_stream_core()
+    admissions = core.scheduler.stream_admissions
+    free_slots = admissions.manager.num_free_slots
+    core.pause_generation(mode="wait", clear_cache=False)
+    request = _stream_chunk(core)
+    request.client_index = 7
+    core._handle_client_request(EngineCoreRequestType.ADD, (request, 0))
+
+    client, batch = core.output_queue.get_nowait()
+    (output,) = batch.outputs
+    assert client == 7
+    assert output.request_id == request.request_id
+    assert output.finish_reason == FinishReason.ERROR
+    assert output.error.code == "engine_paused" and output.error.retryable
+    assert output.stream_output.context == request.stream_admission
+    assert output.stream_output.rejection == "engine_paused"
+    assert not batch.finished_requests
+    assert core.output_queue.empty()
+    assert not core.scheduler.requests and not core.scheduler.waiting
+    assert not admissions.sessions
+    assert admissions.manager.num_free_slots == free_slots
+
+
+@pytest.mark.parametrize(
+    "fault",
+    [
+        "allocate",
+        "pool",
+        "free_queue",
+        "enqueue",
+        "waiting_queue",
+        "insert",
+        "request_handle",
+        "slot_handle",
+        "request_blocks",
+        "generation",
+        "completion",
+        "request_table",
+        "session_table",
+    ],
+)
+def test_failed_utility_body_rolls_back_admission(monkeypatch, fault):
+    """Every transaction boundary unwinds before utility failure is returned."""
+    from vllm.v1.engine import UtilityOutput
+    from vllm.v1.engine.core import EngineCoreProc
+
+    core = _stream_core()
+    scheduler = core.scheduler
+    admissions = scheduler.stream_admissions
+    manager = scheduler.kv_cache_manager.coordinator.state_managers["state"]
+    boundaries = {
+        "allocate": (manager, "allocate"),
+        "pool": (manager.block_pool, "get_new_blocks"),
+        "free_queue": (manager.block_pool.free_block_queue, "popleft_n"),
+        "enqueue": (scheduler, "_enqueue_waiting_request"),
+        "waiting_queue": (scheduler.kv_holding_waiting, "add_request"),
+        "insert": (admissions, "_insert_parked_request"),
+    }
+    tables = {
+        "request_handle": (manager, "_requests"),
+        "slot_handle": (manager, "_handles"),
+        "request_blocks": (manager, "req_to_blocks"),
+        "generation": (manager, "_generations"),
+        "completion": (manager, "_completed"),
+        "request_table": (scheduler, "requests"),
+        "session_table": (admissions, "sessions"),
+    }
+    before_free = manager.block_pool.free_block_queue.get_all_free_blocks()
+    before_generations = manager._generations.copy()
+
+    with monkeypatch.context() as m:
+        if fault in boundaries:
+            target, name = boundaries[fault]
+            original = getattr(target, name)
+
+            def fail_after(*args, **kwargs):
+                original(*args, **kwargs)
+                raise RuntimeError("injected admission failure")
+
+            m.setattr(target, name, fail_after)
+        else:
+            target, name = tables[fault]
+            original_table = getattr(target, name)
+
+            class FailAfterSet(type(original_table)):  # type: ignore[misc]
+                failed = False
+
+                def __setitem__(self, key, value):
+                    super().__setitem__(key, value)
+                    if not self.failed:
+                        self.failed = True
+                        raise RuntimeError("injected admission failure")
+
+            table = FailAfterSet()
+            if isinstance(original_table, list):
+                table.extend(original_table)
+            else:
+                table.update(original_table)
+            m.setattr(target, name, table)
+        replies: list[UtilityOutput] = []
+        EngineCoreProc._invoke_utility_method(
+            "admit_stream",
+            lambda: _admit_stream(core),
+            UtilityOutput(1),
+            replies.append,
+        )
+        assert not manager._requests and not manager._handles
+        assert not manager.req_to_blocks
+        assert manager._generations == before_generations
+        assert manager.block_pool.free_block_queue.get_all_free_blocks() == before_free
+    assert "injected admission failure" in replies[0].failure_message
+    assert manager.num_free_slots == 2
+    assert manager.get("stream") is None
+    assert not scheduler.requests and not scheduler.waiting
+    assert not scheduler.kv_holding_waiting and not scheduler.deferred_waiting
+    assert scheduler.num_waiting_for_streaming_input == 0
+    assert not scheduler.state_retirements and not scheduler.finished_req_ids
+    assert not admissions.sessions
+    assert _admit_stream(core).accepted
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("prompt_token_ids", [1]),
+        ("resumable", False),
+        ("stream_admission", "invalid"),
+        ("abort_immediately", True),
+        ("data_parallel_rank", 1),
+    ],
+)
+def test_stream_admission_validation_recovers(field, value):
+    core = _stream_core()
+    invalid = _stream_request()
+    setattr(invalid, field, value)
+    with pytest.raises(ValueError):
+        _admit_stream(core, invalid)
+    assert not core.scheduler.requests
+    assert not core.scheduler.stream_admissions.sessions
+    assert _admit_stream(core).accepted
+
+
+@pytest.mark.parametrize("params", [SamplingParams(n=2), SamplingParams(stop=["end"])])
+def test_stream_admission_rejects_unsupported_streaming_params(params):
+    core = _stream_core()
+    invalid = _stream_request()
+    invalid.sampling_params = params
+    with pytest.raises(ValueError):
+        _admit_stream(core, invalid)
+    assert not core.scheduler.requests
+    assert _admit_stream(core).accepted
+
+
+@pytest.mark.parametrize("unsupported", ["structured_outputs", "pooling"])
+def test_stream_admission_refuses_structured_outputs_and_pooling(unsupported):
+    """Admission requires a plain sampling request."""
+    core = _stream_core()
+    invalid = _stream_request()
+    if unsupported == "pooling":
+        invalid.sampling_params = None
+        invalid.pooling_params = PoolingParams(task="embed")
+    else:
+        invalid.sampling_params = SamplingParams(
+            structured_outputs=StructuredOutputsParams(regex="[0-9]+")
+        )
+    free_slots = core.scheduler.stream_admissions.manager.num_free_slots
+    with pytest.raises(ValueError):
+        _admit_stream(core, invalid)
+    assert not core.scheduler.requests
+    assert not core.scheduler.stream_admissions.sessions
+    assert core.scheduler.stream_admissions.manager.num_free_slots == free_slots
+    assert _admit_stream(core).accepted
+
+
+def test_lost_utility_reply_reclaims_admission():
+    """A retry keeps the original deadline; abandonment needs no API release."""
+    core = _stream_core()
+    scheduler = core.scheduler
+    admissions = scheduler.stream_admissions
+    first = _admit_stream(core)
+    deadline = admissions.next_deadline()
+    admissions.clock = lambda: deadline - 1
+    assert _admit_stream(core) == first
+    assert admissions.next_deadline() == deadline
+    admissions.clock = lambda: deadline
+    admissions.expire()
+    assert admissions.expiries == {"never_fed": 1}
+    assert not scheduler.requests and not admissions.sessions
+    assert _admit_stream(core, _stream_request("replacement")).accepted
+
+
+@pytest.mark.parametrize("change", ["structured", "embeds", "mm_offset", "mm_overrun"])
+def test_unsupported_stream_input_refused_before_preprocessing(change):
+    from vllm.exceptions import VLLMValidationError
+    from vllm.sampling_params import StructuredOutputsParams
+    from vllm.v1.engine import StreamAdmissionContext
+    from vllm.v1.structured_output import StructuredOutputManager
+
+    core = _stream_core()
+    core.mm_receiver_cache = None
+    core.prefix_hash_config = None
+    manager = StructuredOutputManager(core.scheduler.vllm_config)
+    core.structured_output_manager = manager
+    assert _admit_stream(core).accepted
+    payload = _stream_request()
+    payload.prompt_token_ids = [1, 2, 3]
+    payload.stream_admission = StreamAdmissionContext()
+    if change == "structured":
+        payload.sampling_params = SamplingParams(
+            structured_outputs=StructuredOutputsParams(regex="[0-9]+")
+        )
+    elif change == "embeds":
+        payload.prompt_embeds = torch.zeros(3, 4)
+    elif change == "mm_offset":
+        payload.mm_features = _stream_mm_chunk(offset=3).mm_features
+    else:
+        payload.mm_features = _stream_mm_chunk(offset=0, length=4).mm_features
+    with pytest.raises(VLLMValidationError, match="stream input"):
+        core.preprocess_add_request(payload)
+    if change == "structured":
+        # A refused update must not select or initialize a grammar backend.
+        assert manager.backend is None and manager.backend_name is None
+    assert core.scheduler.stream_admissions.sessions["stream"].status == "never_fed"
+
+
+def test_admission_refuses_without_mutation_when_full():
+    core = _stream_core()
+    scheduler = core.scheduler
+    assert _admit_stream(core).accepted
+    assert _admit_stream(core, _stream_request("second")).accepted
+    manager = scheduler.kv_cache_manager.coordinator.state_managers["state"]
+    before = dict(scheduler.requests), list(scheduler.waiting), manager.num_free_slots
+    refused = _admit_stream(core, _stream_request("third"))
+    assert not refused.accepted and refused.reason == "capacity"
+    assert before == (
+        dict(scheduler.requests),
+        list(scheduler.waiting),
+        manager.num_free_slots,
+    )
+    assert _admit_stream(core, _stream_request("third")) == refused
+    # Never scheduled, so its slot needs no fence and frees at once.
+    scheduler.finish_requests("stream", RequestStatus.FINISHED_ABORTED)
+    assert _admit_stream(core, _stream_request("third")).accepted
+
+
+def test_stream_admission_respects_active_limit_with_spare_physical_slots():
+    core = _stream_core()
+    scheduler = core.scheduler
+    scheduler.max_num_active_reqs = 1
+    assert _admit_stream(core).accepted
+    assert _admit_stream(core, _stream_request("second")).reason == "active_limit"
+    scheduler.add_request(_stream_chunk(core))
+    step = scheduler.schedule()
+    assert step.num_scheduled_tokens == {"stream": 3}
+    scheduler.update_from_output(step, _state_output(step))
+    scheduler.finish_requests("stream", RequestStatus.FINISHED_ABORTED)
+    cleanup = scheduler.schedule()
+    scheduler.update_from_output(cleanup, _state_output(cleanup))
+    assert _admit_stream(core, _stream_request("second")).accepted
+
+
+def test_stream_admission_request_id_conflicts():
+    """Only an identical retry of a live session is idempotent."""
+    core = _stream_core()
+    scheduler = core.scheduler
+    admissions = scheduler.stream_admissions
+    original = _stream_request()
+    accepted = _admit_stream(core, original)
+    assert accepted.accepted
+    for field, value in [("priority", 1), ("client_index", 1), ("arrival_time", 2.0)]:
+        changed = _stream_request()
+        setattr(changed, field, value)
+        assert _admit_stream(core, changed).reason == "request_id_in_use"
+    assert _admit_stream(core, original) == accepted
+    assert admissions.refusals == {"request_id_in_use": 3}
+
+    # An ordinary request with the ID is not an admission to replay.
+    ordinary = Request.from_engine_core_request(_stream_request("ordinary"), None)
+    scheduler.add_request(ordinary)
+    assert (
+        _admit_stream(core, _stream_request("ordinary")).reason == "request_id_in_use"
+    )
+    assert scheduler.requests["ordinary"] is ordinary
+    assert "ordinary" not in admissions.sessions
+
+
+def test_stream_closing_input_ends_at_eos_and_retains_slot_until_fence():
+    """A resumable input that closes input ends its session at EOS instead of
+    parking; the retiring session keeps its ID and slot until the fence."""
+    core = _stream_core()
+    scheduler = core.scheduler
+    admissions = scheduler.stream_admissions
+    assert _admit_stream(core).accepted
+    scheduler.add_request(_stream_chunk(core, closed=True))
+    step = scheduler.schedule()
+    output = _state_output(step)
+    output.sampled_token_ids = [[7]]
+    result = scheduler.update_from_output(step, output)
+    (terminal,) = [o for batch in result.values() for o in batch.outputs]
+    assert terminal.finish_reason == FinishReason.STOP
+    assert terminal.stream_output.context.input_closed
+    assert "stream" not in scheduler.requests
+    assert not admissions.sessions
+    manager = scheduler.kv_cache_manager.coordinator.state_managers["state"]
+    # The retiring session still owns its ID and its slot.
+    assert _admit_stream(core).reason == "request_id_in_use"
+    assert manager.num_free_slots == 1
+    cleanup = scheduler.schedule()
+    scheduler.update_from_output(cleanup, _state_output(cleanup))
+    assert manager.num_free_slots == 2
+    assert not admissions.sessions and not scheduler.state_retirements
+    assert not admissions.expiries
+    assert _admit_stream(core, _stream_request("replacement")).accepted
+
+
+def test_parked_idle_deadline_recovers_and_feed_cancels_never_fed():
+    core = _stream_core()
+    scheduler = core.scheduler
+    admissions = scheduler.stream_admissions
+    _admit_stream(core)
+    chunk = _stream_chunk(core)
+    scheduler.add_request(chunk)
+    assert admissions.next_deadline() is None
+    step = scheduler.schedule()
+    output = _state_output(step)
+    output.sampled_token_ids = [[7]]
+    scheduler.update_from_output(step, output)
+    assert _admit_stream(core).status == "parked"
+    deadline = admissions.next_deadline()
+    admissions.clock = lambda: deadline
+    admissions.expire()
+    cleanup = scheduler.schedule()
+    scheduler.update_from_output(cleanup, _state_output(cleanup))
+    assert admissions.expiries == {"parked_idle": 1}
+    assert _admit_stream(core, _stream_request("replacement")).accepted
+
+
+def test_stream_late_chunk_after_expiry_is_refused():
+    """A chunk for an expired stream cannot create a request or touch another."""
+    core = _stream_core()
+    scheduler = core.scheduler
+    admissions = scheduler.stream_admissions
+    _admit_stream(core)
+    stale = _stream_chunk()
+    admissions.clock = lambda: 115.0
+    scheduler.add_request(stale)
+    assert not scheduler.requests and not admissions.sessions
+    _, rejection = scheduler.state_error_outputs[-1]
+    assert rejection.request_id == "stream"
+    assert rejection.stream_output.rejection == "unknown_admission"
+    assert _admit_stream(core, _stream_request("next")).accepted
+    scheduler.add_request(stale)
+    core.abort_requests(["stream"])
+    assert admissions.sessions["next"].status == "never_fed"
+    scheduler.add_request(_stream_chunk(request_id="next"))
+    assert admissions.sessions["next"].status == "live"
+    assert scheduler.schedule().num_scheduled_tokens == {"next": 3}
+
+
+def test_stream_queued_final_add_and_nonrenewable_drain_deadline():
+    core = _stream_core()
+    scheduler = core.scheduler
+    admissions = scheduler.stream_admissions
+    _admit_stream(core)
+    scheduler.add_request(_stream_chunk(core, closed=True))
+    deadline = admissions.next_deadline()
+    admissions.clock = lambda: deadline - 1
+    scheduler.add_request(_stream_chunk(core, closed=True))
+    final = _stream_chunk(core)
+    final.resumable = False
+    scheduler.add_request(final)
+    assert admissions.next_deadline() == deadline
+    step = scheduler.schedule()
+    output = _state_output(step)
+    output.sampled_token_ids = [[7]]
+    scheduler.update_from_output(step, output)
+    assert not scheduler.requests and not admissions.sessions
+    # The retiring session still owns its ID.
+    assert _admit_stream(core).reason == "request_id_in_use"
+    cleanup = scheduler.schedule()
+    scheduler.update_from_output(cleanup, _state_output(cleanup))
+    assert not scheduler.state_retirements
+    assert not admissions.expiries
+
+
+def test_stream_deadline_scheduler_abort_output_and_occupied_counts():
+    core = _stream_core()
+    core.scheduler = _state_scheduler(log_stats=True)
+    scheduler = core.scheduler
+    admissions = scheduler.stream_admissions
+    admissions.clock = lambda: 100.0
+    _admit_stream(core)
+    assert admissions.occupied() == {
+        "never_fed": 1,
+        "live": 0,
+        "parked": 0,
+        "draining": 0,
+        "retiring": 0,
+    }
+    assert scheduler.make_stats().stream_occupied == admissions.occupied()
+    scheduler.add_request(_stream_chunk(core, closed=True))
+    assert admissions.occupied()["draining"] == 1
+    step = scheduler.schedule()
+    scheduler.update_from_output(step, _state_output(step))
+    admissions.clock = lambda: 140.0
+    cleanup = scheduler.schedule()
+    assert admissions.occupied()["retiring"] == 1
+    outputs = scheduler.update_from_output(cleanup, _state_output(cleanup))
+    assert outputs[0].outputs[0].finish_reason == FinishReason.ABORT
+    assert not any(admissions.occupied().values())
+    assert scheduler.make_stats().stream_expiries == {"draining": 1}
+    assert _admit_stream(core, _stream_request("replacement")).accepted
+
+
+def test_stream_admission_utility_wire_round_trip(monkeypatch):
+    import queue
+
+    import msgspec
+
+    from vllm.v1.engine import (
+        EngineCoreOutputs,
+        EngineCoreRequestType,
+        StreamAdmissionResult,
+    )
+    from vllm.v1.engine.core import EngineCoreProc, EngineShutdownState
+    from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
+
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "0")
+    core = _stream_core()
+    proc = object.__new__(EngineCoreProc)
+    proc.scheduler = core.scheduler
+    proc.shutdown_state = EngineShutdownState.RUNNING
+    proc.output_queue = queue.Queue()
+    encoder = MsgpackEncoder()
+    decoder = MsgpackDecoder()
+    for sequence in range(1, 4):
+        # As the client sends it: no prompt.
+        args = (
+            msgspec.structs.replace(
+                _stream_request(str(sequence)), prompt_token_ids=None
+            ),
+        )
+        proc._handle_client_request(
+            EngineCoreRequestType.UTILITY,
+            (0, sequence, "admit_stream", decoder.decode(encoder.encode(args))),
+        )
+        _, output = proc.output_queue.get_nowait()
+        decoded = MsgpackDecoder(EngineCoreOutputs).decode(encoder.encode(output))
+        assert decoded.utility_output.failure_message is None
+        result = msgspec.convert(
+            decoded.utility_output.result.result, type=StreamAdmissionResult
+        )
+        assert result.accepted == (sequence < 3)
+    assert result.reason == "capacity"
+
+
+@pytest.mark.parametrize("state", [False, True, "overdue"])
+def test_idle_engine_wakes_for_stream_deadline_only(state):
+    import queue
+    from collections import deque
+
+    from vllm.v1.engine.core import EngineCoreProc, EngineShutdownState
+
+    core = _stream_core()
+    if state:
+        _admit_stream(core)
+        admissions = core.scheduler.stream_admissions
+        if state == "overdue":
+            admissions.clock = lambda: 116.0
+    else:
+        core.scheduler = create_scheduler(max_num_seqs=2, max_model_len=32)
+    proc = object.__new__(EngineCoreProc)
+    proc.scheduler = core.scheduler
+    proc.shutdown_state = EngineShutdownState.RUNNING
+    proc.engines_running = False
+    proc.batch_queue = None
+    proc.process_input_queue_block = True
+    proc._idle_state_callbacks = []
+    proc._deferred_inputs = deque()
+    proc.aborts_queue = queue.Queue()
+    proc.input_queue = Mock()
+    proc.input_queue.empty.return_value = True
+
+    def wait_for_input(**kwargs):
+        if state:
+            assert kwargs["timeout"] == (0.0 if state == "overdue" else 15.0)
+            admissions.clock = lambda: 115.0
+        else:
+            assert kwargs == {"block": True}
+        raise queue.Empty
+
+    proc.input_queue.get.side_effect = wait_for_input
+    proc._process_input_queue()
+    proc.input_queue.get.assert_called_once()
+    if state:
+        _step_stream_core(core)
+        assert not proc.scheduler.requests
+        assert _admit_stream(core, _stream_request("replacement")).accepted
+
+
+def _step_stream_core(core):
+    from contextlib import nullcontext
+
+    core.model_executor = Mock()
+    core.model_executor.execute_model.side_effect = lambda step, **kwargs: Mock(
+        result=lambda: _state_output(step)
+    )
+    core.capture_iteration_details = lambda step: nullcontext()
+    core.log_error_detail = lambda step: nullcontext()
+    core._process_aborts_queue = lambda: None
+    core._attach_iteration_details = lambda *args: None
+    core._weight_version = None
+    return core.step()
+
+
+def test_stream_deadline_inprocess_idle_step_expires_session():
+    """An in-process caller has no input-queue timer to expire a parked stream."""
+    core = _stream_core()
+    assert _admit_stream(core).accepted
+    assert not core.scheduler.has_requests()
+    core.scheduler.stream_admissions.clock = lambda: 115.0
+    outputs, executed = _step_stream_core(core)
+    assert not executed
+    (output,) = outputs[0].outputs
+    assert output.finish_reason == FinishReason.ABORT
+    # The session-ending output closes input; nothing was applied.
+    assert output.stream_output.context == _seq_context(0, True)
+    assert output.stream_output.rejection is None
+    assert not core.scheduler.requests
+    assert core.scheduler.stream_admissions.expiries == {"never_fed": 1}
+
+
+def test_abort_inflight_reclaims_slot_and_reopens_admission():
+    """Abort fences the slot until state completion, without API release."""
+    scheduler = _state_scheduler()
+    a, b, c = create_requests(num_requests=3, num_tokens=4)
+    for req in (a, b):
+        scheduler.add_request(req)
+    step = scheduler.schedule()
+    manager = scheduler.kv_cache_manager.coordinator.state_managers["state"]
+    old = manager.get(a.request_id)
+    scheduler.finish_requests(a.request_id, RequestStatus.FINISHED_ABORTED)
+    scheduler.add_request(c)
+    assert manager.allocate(c.request_id) is None
+    scheduler.update_from_output(step, _state_output(step))
+    cleanup = scheduler.schedule()
+    assert c.request_id not in cleanup.num_scheduled_tokens
+    scheduler.update_from_output(cleanup, _state_output(cleanup))
+    replacement = scheduler.schedule()
+    assert c.request_id in replacement.num_scheduled_tokens
+    new = manager.get(c.request_id)
+    assert new.slot == old.slot and new.generation > old.generation
+    assert manager.get(b.request_id) == step.state_slot_handles[b.request_id]["state"]
+
+
+def test_immediate_replacement_without_external_release():
+    """A completed request releases through the same scheduler fence."""
+    scheduler = _state_scheduler()
+    a, b, c = create_requests(num_requests=3, num_tokens=4)
+    for req in (a, b):
+        scheduler.add_request(req)
+    step = scheduler.schedule()
+    scheduler.update_from_output(step, _state_output(step))
+    scheduler.finish_requests(a.request_id, RequestStatus.FINISHED_ABORTED)
+    scheduler.add_request(c)
+    cleanup = scheduler.schedule()
+    assert c.request_id not in cleanup.num_scheduled_tokens
+    scheduler.update_from_output(cleanup, _state_output(cleanup))
+    assert c.request_id in scheduler.schedule().num_scheduled_tokens
+
+
+def test_state_preemption_ends_session():
+    """State cannot be reconstructed by replaying prompt tokens."""
+    scheduler = _state_scheduler()
+    (req,) = create_requests(num_requests=1, num_tokens=4)
+    scheduler.add_request(req)
+    step = scheduler.schedule()
+    scheduler.running.remove(req)
+    scheduler._preempt_request(req, 0.0)
+    assert req.status == RequestStatus.FINISHED_ERROR
+    assert req not in scheduler.waiting
+    manager = scheduler.kv_cache_manager.coordinator.state_managers["state"]
+    assert manager.num_free_slots == 1
+    scheduler.update_from_output(step, _state_output(step))
+    assert manager.num_free_slots == 1
+    cleanup = scheduler.schedule()
+    scheduler.update_from_output(cleanup, _state_output(cleanup))
+    assert manager.num_free_slots == 2
+
+
+def test_missing_state_ack_quarantines_only_affected_slots():
+    """An unrelated later completion cannot release a missing write fence."""
+    scheduler = _state_scheduler()
+    a, b = create_requests(num_requests=2, num_tokens=4)
+    scheduler.add_request(a)
+    step = scheduler.schedule()
+    scheduler.finish_requests(a.request_id, RequestStatus.FINISHED_ABORTED)
+    scheduler.update_from_output(step, _state_output(step, acknowledge=False))
+    scheduler.add_request(b)
+    next_step = scheduler.schedule()
+    output = _state_output(next_step)
+    # Acknowledging only B does not acknowledge A's cleanup.
+    output.state_completion.cleanup_handles.clear()
+    scheduler.update_from_output(next_step, output)
+    scheduler.finish_requests(b.request_id, RequestStatus.FINISHED_ABORTED)
+    manager = scheduler.kv_cache_manager.coordinator.state_managers["state"]
+    assert manager.num_free_slots == 0
+    cleanup = scheduler.schedule()
+    output = _state_output(cleanup)
+    # Acknowledging only A does not acknowledge B's cleanup.
+    del output.state_completion.cleanup_handles[b.request_id]
+    scheduler.update_from_output(cleanup, output)
+    assert manager.num_free_slots == 1
+    assert len(scheduler.state_retirements) == 1
+    retry = scheduler.schedule()
+    scheduler.update_from_output(retry, _state_output(retry))
+    assert manager.num_free_slots == 2
+
+
+def test_parked_state_retains_slot_until_terminal():
+    """Parking preserves ownership; only terminal retirement frees it."""
+    scheduler = _state_scheduler()
+    (req,) = create_requests(num_requests=1, num_tokens=4)
+    req.resumable = True
+    scheduler.add_request(req)
+    step = scheduler.schedule()
+    manager = scheduler.kv_cache_manager.coordinator.state_managers["state"]
+    handle = manager.get(req.request_id)
+    output = _state_output(step)
+    output.sampled_token_ids = [[EOS_TOKEN_ID]]
+    scheduler.update_from_output(step, output)
+    assert req.status == RequestStatus.WAITING_FOR_STREAMING_REQ
+    assert manager.get(req.request_id) == handle
+    assert manager.num_free_slots == 1
+    scheduler.finish_requests(req.request_id, RequestStatus.FINISHED_ABORTED)
+    assert manager.num_free_slots == 1
+    cleanup = scheduler.schedule()
+    scheduler.update_from_output(cleanup, _state_output(cleanup))
+    assert manager.num_free_slots == 2
+
+
+def test_stale_state_completion_cannot_update_reused_request_id():
+    """Late progress from a retired generation cannot change its replacement."""
+    scheduler = _state_scheduler()
+    (req,) = create_requests(num_requests=1, num_tokens=4)
+    scheduler.add_request(req)
+    step = scheduler.schedule()
+    scheduler.update_from_output(step, _state_output(step))
+    scheduler.finish_requests(req.request_id, RequestStatus.FINISHED_ABORTED)
+    (replacement,) = create_requests(num_requests=1, num_tokens=4)
+    scheduler.add_request(replacement)
+    cleanup = scheduler.schedule()
+    assert replacement.request_id not in cleanup.num_scheduled_tokens
+    scheduler.update_from_output(cleanup, _state_output(cleanup))
+    scheduler.schedule()
+    scheduler.update_from_output(step, _state_output(step))
+    assert replacement.status == RequestStatus.RUNNING
+    assert replacement.num_output_tokens == 0
+
+
+def test_state_stop_output_reclaims_without_external_release():
+    scheduler = _state_scheduler()
+    (req,) = create_requests(num_requests=1, num_tokens=4, stop_token_ids=[42])
+    scheduler.add_request(req)
+    step = scheduler.schedule()
+    scheduler.update_from_output(step, _state_output(step))
+    manager = scheduler.kv_cache_manager.coordinator.state_managers["state"]
+    assert req.status == RequestStatus.FINISHED_STOPPED
+    assert manager.get(req.request_id) is None
+    assert manager.num_free_slots == 1
+    cleanup = scheduler.schedule()
+    scheduler.update_from_output(cleanup, _state_output(cleanup))
+    assert manager.num_free_slots == 2
+
+
+def test_partial_state_ack_quarantines_only_missing_request():
+    scheduler = _state_scheduler()
+    a, b = create_requests(num_requests=2, num_tokens=4)
+    scheduler.add_request(a)
+    scheduler.add_request(b)
+    step = scheduler.schedule()
+    from vllm.v1.kv_cache_interface import StateCompletion
+
+    output = _state_output(step)
+    output.state_completion = StateCompletion(
+        step.state_step_seq, {b.request_id: step.state_slot_handles[b.request_id]}
+    )
+    results = scheduler.update_from_output(step, output)
+    assert a.status == RequestStatus.FINISHED_ERROR
+    assert a.num_output_tokens == 0
+    assert b.status == RequestStatus.RUNNING
+    assert b.num_output_tokens == 1
+    assert any(
+        o.request_id == a.request_id and o.finish_reason is not None
+        for batch in results.values()
+        for o in batch.outputs
+    )
+    scheduler.finish_requests(b.request_id, RequestStatus.FINISHED_ABORTED)
+    manager = scheduler.kv_cache_manager.coordinator.state_managers["state"]
+    assert manager.num_free_slots == 0
+    assert len(scheduler.state_retirements) == 2
+    assert not scheduler.deferred_frees
+
+
+@pytest.mark.parametrize("wrong_ack", ["missing", "generation", "session", "step"])
+def test_state_cleanup_recovers_without_new_client_request(wrong_ack):
+    from dataclasses import replace
+
+    from vllm.v1.kv_cache_interface import StateCompletion
+
+    scheduler = _state_scheduler()
+    (req,) = create_requests(num_requests=1, num_tokens=4)
+    scheduler.add_request(req)
+    step = scheduler.schedule()
+    scheduler.update_from_output(step, _state_output(step))
+    scheduler.finish_requests(req.request_id, RequestStatus.FINISHED_ABORTED)
+    manager = scheduler.kv_cache_manager.coordinator.state_managers["state"]
+    assert manager.num_free_slots == 1
+    cleanup = scheduler.schedule()
+    handle = cleanup.state_cleanup_handles[req.request_id]["state"]
+    output = _state_output(cleanup, acknowledge=False)
+    handles = {req.request_id: {"state": handle}}
+    seq = cleanup.state_step_seq
+    if wrong_ack == "generation":
+        handles[req.request_id]["state"] = replace(handle, generation=99)
+    elif wrong_ack == "session":
+        handles = {"other": {"state": handle}}
+    elif wrong_ack == "step":
+        seq -= 1
+    if wrong_ack != "missing":
+        output.state_completion = StateCompletion(seq, {}, handles)
+    scheduler.update_from_output(cleanup, output)
+    assert manager.num_free_slots == 1
+    assert scheduler.has_requests()
+    retry = scheduler.schedule()
+    assert not retry.finished_req_ids
+    assert not retry.num_scheduled_tokens
+    assert retry.state_cleanup_handles == cleanup.state_cleanup_handles
+    scheduler.update_from_output(retry, _state_output(retry))
+    assert manager.num_free_slots == 2
+    assert not scheduler.has_requests()
+
+
+def test_state_cleanup_missing_ack_after_retry_fails_without_reuse():
+    """A worker that never fences cleanup stops the engine, not polls it."""
+    scheduler = _state_scheduler()
+    (req,) = create_requests(num_requests=1, num_tokens=4)
+    scheduler.add_request(req)
+    step = scheduler.schedule()
+    scheduler.update_from_output(step, _state_output(step))
+    scheduler.finish_requests(req.request_id, RequestStatus.FINISHED_ABORTED)
+    cleanup = scheduler.schedule()
+    scheduler.update_from_output(cleanup, _state_output(cleanup, acknowledge=False))
+    retry = scheduler.schedule()
+    with pytest.raises(RuntimeError, match="not acknowledged after cleanup"):
+        scheduler.update_from_output(retry, _state_output(retry, acknowledge=False))
+    manager = scheduler.kv_cache_manager.coordinator.state_managers["state"]
+    assert manager.num_free_slots == 1
+    assert len(scheduler.state_retirements) == 1
+
+
+def test_state_cleanup_late_ack_releases_without_token_replay():
+    scheduler = _state_scheduler()
+    (req,) = create_requests(num_requests=1, num_tokens=4)
+    scheduler.add_request(req)
+    step = scheduler.schedule()
+    scheduler.update_from_output(step, _state_output(step))
+    scheduler.finish_requests(req.request_id, RequestStatus.FINISHED_ABORTED)
+    cleanup = scheduler.schedule()
+    scheduler.update_from_output(cleanup, _state_output(cleanup, acknowledge=False))
+    manager = scheduler.kv_cache_manager.coordinator.state_managers["state"]
+    assert manager.num_free_slots == 1
+    scheduler._complete_state_slots(cleanup, _state_output(cleanup))
+    assert manager.num_free_slots == 2
+    assert req.num_output_tokens == 1
+
+
+def test_state_slot_never_dispatched_releases_immediately():
+    scheduler = _state_scheduler()
+    (req,) = create_requests(num_requests=1, num_tokens=4)
+    scheduler.add_request(req)
+    manager = scheduler.kv_cache_manager.coordinator.state_managers["state"]
+    assert manager.allocate(req.request_id) is not None
+    scheduler.finish_requests(req.request_id, RequestStatus.FINISHED_ABORTED)
+    assert manager.num_free_slots == 2
+    assert not scheduler.state_retirements
+
+
+@pytest.mark.parametrize("change", ["untagged", "stop", "structured", "embeds"])
+def test_stream_admission_rejected_add_cannot_abort_session(change):
+    """A rejected update leaves the session and its deadline untouched."""
+    from vllm.sampling_params import StructuredOutputsParams
+
+    core = _stream_core()
+    admissions = core.scheduler.stream_admissions
+    _admit_stream(core)
+    deadline = admissions.next_deadline()
+    rejected = _stream_chunk(core)
+    rejected.abort_immediately = True
+    expected = "unsupported_update"
+    if change == "untagged":
+        rejected.stream_admission = None
+        expected = "identity_mismatch"
+    elif change == "stop":
+        rejected.sampling_params = SamplingParams(stop=["end"])
+    elif change == "embeds":
+        rejected.prompt_embeds = torch.zeros(3, 4)
+        rejected.prompt_is_token_ids = [True, False, True]
+    else:
+        rejected.sampling_params = SamplingParams(
+            structured_outputs=StructuredOutputsParams(regex="[0-9]+")
+        )
+    before = core.scheduler.requests["stream"]
+    core.add_request(rejected)
+    assert core.scheduler.requests["stream"] is before
+    assert before.status == RequestStatus.WAITING_FOR_STREAMING_REQ
+    assert not before.streaming_queue
+    assert admissions.sessions["stream"].status == "never_fed"
+    assert admissions.next_deadline() == deadline
+    _, output = core.scheduler.state_error_outputs[-1]
+    assert output.stream_output.context == rejected.stream_admission
+    assert output.stream_output.rejection == expected
+
+
+def test_stream_admission_unknown_update_delivers_correlated_error():
+    from vllm.v1.engine import EngineCoreOutputs, FinishReason
+    from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
+
+    core = _stream_core()
+    unknown = _stream_chunk(core)
+    unknown.client_index = 7
+    core.add_request(unknown)
+    assert not core.scheduler.requests
+    assert core.scheduler.has_requests()
+    step = core.scheduler.schedule()
+    outputs = core.scheduler.update_from_output(step, _state_output(step))
+    decoded = MsgpackDecoder(EngineCoreOutputs).decode(
+        MsgpackEncoder().encode(outputs[7])
+    )
+    (error,) = decoded.outputs
+    assert error.request_id == unknown.request_id
+    assert error.stream_output.context == unknown.stream_admission
+    assert error.stream_output.rejection == "unknown_admission"
+    assert error.finish_reason == FinishReason.ERROR
+    assert not core.scheduler.has_requests()
+
+
+def test_stream_admission_ordinary_preaborted_add_still_aborts():
+    core = _stream_core()
+    request = create_requests(num_requests=1, num_tokens=4)[0]
+    request.abort_immediately = True
+    core.add_request(request)
+    assert request.request_id not in core.scheduler.requests
+    assert request.status == RequestStatus.FINISHED_ABORTED
+
+
+@pytest.mark.parametrize("identity", ["tagged", "untagged"])
+@pytest.mark.parametrize(
+    "cause", ["preprocessing_error", "shutdown", "mm_cache_miss", "validation_error"]
+)
+def test_stream_admission_ingress_rejection_preserves_identity(
+    identity, cause, monkeypatch
+):
+    """A rejected ADD cannot report completion of a reused request ID."""
+    import queue
+    from copy import deepcopy
+
+    from vllm.exceptions import VLLMValidationError
+    from vllm.multimodal.cache import MultiModalCacheMissError
+    from vllm.v1.engine import EngineCoreOutputs, EngineCoreRequest
+    from vllm.v1.engine.core import EngineCoreProc, EngineShutdownState
+    from vllm.v1.engine.core_client import _with_packed_prompt
+    from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
+
+    core = _stream_core()
+    context = _stream_chunk(core).stream_admission
+    assert _admit_stream(core).accepted
+    scheduler = core.scheduler
+    replacement = scheduler.requests["stream"]
+    sessions_before = deepcopy(scheduler.stream_admissions.sessions)
+    finished_before = scheduler.finished_req_ids.copy()
+    handle_before = scheduler.stream_admissions.manager.get("stream")
+
+    proc = object.__new__(EngineCoreProc)
+    proc.scheduler = scheduler
+    proc.vllm_config = scheduler.vllm_config
+    proc.output_queue = queue.Queue()
+    proc.mm_receiver_cache = None
+    proc.request_block_hasher = None
+    proc.prefix_hash_config = None
+    proc.engine_index = 2
+    proc.shutdown_state = EngineShutdownState.REQUESTED
+    payload = _stream_request()
+    payload.prompt_token_ids = [1]
+    payload.client_index = 7
+    payload.stream_admission = context if identity != "untagged" else None
+    # As a frontend sends it: the prompt packed as an int32 ndarray.
+    payload = MsgpackDecoder(EngineCoreRequest).decode(
+        MsgpackEncoder().encode(_with_packed_prompt(payload))
+    )
+    if cause == "preprocessing_error":
+
+        def fail(*args, **kwargs):
+            raise ValueError("preprocessing failed")
+
+        monkeypatch.setattr(Request, "from_engine_core_request", fail)
+        with pytest.raises(ValueError):
+            proc.preprocess_add_request(payload)
+        proc._handle_request_preproc_error(payload)
+    elif cause == "shutdown":
+        request, _ = proc.preprocess_add_request(payload)
+        assert proc._reject_add_in_shutdown(request)
+    elif cause == "validation_error":
+        proc._handle_request_validation_error(
+            payload, VLLMValidationError("invalid stream update")
+        )
+    else:
+        proc._handle_mm_cache_miss(payload, MultiModalCacheMissError(["missing"]))
+
+    client, batch = proc.output_queue.get_nowait()
+    batch = MsgpackDecoder(EngineCoreOutputs).decode(MsgpackEncoder().encode(batch))
+    (output,) = batch.outputs
+    assert client == 7
+    assert output.request_id == "stream"
+    assert output.finish_reason == (
+        FinishReason.ABORT if cause == "shutdown" else FinishReason.ERROR
+    )
+    if identity != "untagged":
+        assert output.stream_output.context == context
+        assert output.stream_output.rejection == cause
+        assert not batch.finished_requests
+    else:
+        assert output.stream_output is None
+        assert set(batch.finished_requests) == {"stream"}
+    assert output.mm_cache_miss_hashes == (
+        ["missing"] if cause == "mm_cache_miss" else None
+    )
+    if cause == "mm_cache_miss":
+        assert batch.engine_index == 2
+    if cause == "validation_error":
+        assert output.error.code == "validation_error"
+        assert output.error.message == "invalid stream update"
+    assert proc.output_queue.empty()
+    assert scheduler.requests["stream"] is replacement
+    assert replacement.status == RequestStatus.WAITING_FOR_STREAMING_REQ
+    assert not replacement.streaming_queue
+    assert scheduler.stream_admissions.sessions == sessions_before
+    assert scheduler.stream_admissions.manager.get("stream") == handle_before
+    assert scheduler.finished_req_ids == finished_before
+
+
+def test_stream_admission_abort_outputs_keep_admitted_contexts():
+    """Actual terminal outputs retain each session identity and finished ID."""
+    import queue
+
+    from vllm.v1.engine.core import EngineCoreProc
+
+    core = _stream_core()
+    for request_id, client in [("1", 7), ("2", 8)]:
+        payload = _stream_request(request_id)
+        payload.client_index = client
+        assert _admit_stream(core, payload).accepted
+    ordinary = create_requests(num_requests=1, num_tokens=4)[0]
+    ordinary.client_index = 7
+    core.add_request(ordinary)
+    requests = list(core.scheduler.requests.values())
+    contexts = {r.request_id: r.stream_admission for r in requests}
+    clients = {r.request_id: r.client_index for r in requests}
+    proc = object.__new__(EngineCoreProc)
+    proc.output_queue = queue.Queue()
+    proc._send_abort_outputs(
+        core.scheduler.finish_requests(None, RequestStatus.FINISHED_ABORTED)
+    )
+    seen = set()
+    while not proc.output_queue.empty():
+        client, batch = proc.output_queue.get_nowait()
+        assert set(batch.finished_requests) == {o.request_id for o in batch.outputs}
+        for output in batch.outputs:
+            assert client == clients[output.request_id]
+            context = contexts[output.request_id]
+            if context is None:
+                assert output.stream_output is None
+            else:
+                # A session-ending output closes input; nothing was applied.
+                assert output.stream_output.context == _seq_context(0, True)
+                assert output.stream_output.rejection is None
+            assert output.finish_reason == FinishReason.ABORT
+            seen.add(output.request_id)
+    assert seen == set(contexts)
+
+
+@pytest.mark.parametrize("queued", [False, True])
+def test_state_stream_replaces_history_only_at_legal_park(queued):
+    core = _stream_core()
+    assert _admit_stream(core).accepted
+    scheduler = core.scheduler
+    chunk = _stream_chunk(core, tokens=[3])
+    scheduler.add_request(chunk)
+    step = scheduler.schedule()
+    handle = step.state_slot_handles["stream"]["state"]
+    output = _state_output(step)
+    output.sampled_token_ids = [[6]]
+    scheduler.update_from_output(step, output)
+    step = scheduler.schedule()
+    replacement = _stream_chunk(core)
+    if queued:
+        scheduler.add_request(replacement)
+    output = _state_output(step)
+    output.sampled_token_ids = [[7]]
+    scheduler.update_from_output(step, output)
+    if not queued:
+        scheduler.add_request(replacement)
+    session = scheduler.requests["stream"]
+    assert session.prompt_token_ids == [1, 2, 3]
+    assert list(session.all_token_ids) == [1, 2, 3]
+    assert session.num_computed_tokens == 0
+    assert not session.output_token_ids
+    assert (
+        scheduler.kv_cache_manager.coordinator.state_managers["state"].get("stream")
+        == handle
+    )
+    assert scheduler.num_waiting_for_streaming_input == 0
+
+
+@pytest.mark.parametrize("queued", [False, True])
+def test_state_stream_stop_token_terminates_instead_of_parking(queued):
+    """Only EOS parks a state stream; a configured stop token ends it."""
+    core = _stream_core()
+    assert _admit_stream(core).accepted
+    scheduler = core.scheduler
+    manager = scheduler.kv_cache_manager.coordinator.state_managers["state"]
+    chunk = _stream_chunk(core, tokens=[3])
+    scheduler.add_request(chunk)
+    session = scheduler.requests["stream"]
+    session.sampling_params.stop_token_ids = [6]
+    free_while_held = manager.num_free_slots
+    step = scheduler.schedule()
+    old = step.state_slot_handles["stream"]["state"]
+    replacement = _stream_chunk(core)
+    if queued:
+        scheduler.add_request(replacement)
+    output = _state_output(step)
+    output.sampled_token_ids = [[6]]
+    result = scheduler.update_from_output(step, output)
+    assert session.status == RequestStatus.FINISHED_STOPPED
+    assert session.stop_reason == 6
+    assert not session.resumable
+    assert list(session.all_token_ids) == [3, 6]
+    assert "stream" not in scheduler.requests
+    outputs = [o for group in result.values() for o in group.outputs]
+    assert [(o.finish_reason, o.stop_reason) for o in outputs] == [
+        (FinishReason.STOP, 6)
+    ]
+    if not queued:
+        scheduler.add_request(replacement)
+        assert "stream" not in scheduler.requests
+    cleanup = scheduler.schedule()
+    assert cleanup.state_cleanup_handles["stream"]["state"] == old
+    assert manager.num_free_slots == free_while_held
+    scheduler.update_from_output(cleanup, _state_output(cleanup))
+    assert manager.num_free_slots == free_while_held + 1
+
+
+@pytest.mark.parametrize("queued", [False, True])
+def test_state_stream_replaces_only_after_park_not_length_stop(queued):
+    core = _stream_core()
+    assert _admit_stream(core).accepted
+    assert _admit_stream(core, _stream_request("peer")).accepted
+    scheduler = core.scheduler
+    manager = scheduler.kv_cache_manager.coordinator.state_managers["state"]
+    peer_handle = manager.get("peer")
+    chunk = _stream_chunk(core, tokens=[3])
+    chunk.max_tokens = chunk.sampling_params.max_tokens = 1
+    scheduler.add_request(chunk)
+    session = scheduler.requests["stream"]
+    step = scheduler.schedule()
+    old = step.state_slot_handles["stream"]["state"]
+    replacement = _stream_chunk(core)
+    if queued:
+        scheduler.add_request(replacement)
+    output = _state_output(step)
+    output.sampled_token_ids = [[6]]
+    result = scheduler.update_from_output(step, output)
+    assert session.status == RequestStatus.FINISHED_LENGTH_CAPPED
+    assert not session.resumable
+    assert "stream" not in scheduler.requests
+    assert scheduler.num_waiting_for_streaming_input == 1  # The admitted peer.
+    assert [o.finish_reason for group in result.values() for o in group.outputs] == [
+        FinishReason.LENGTH
+    ]
+    if not queued:
+        scheduler.add_request(replacement)
+        assert "stream" not in scheduler.requests
+    assert manager.get("peer") == peer_handle
+    assert manager.num_free_slots == 0
+    assert not _admit_stream(core, _stream_request("next")).accepted
+    cleanup = scheduler.schedule()
+    assert cleanup.state_cleanup_handles["stream"]["state"] == old
+    assert manager.num_free_slots == 0
+    scheduler.update_from_output(cleanup, _state_output(cleanup))
+    assert _admit_stream(core, _stream_request("next")).accepted
+    new = manager.get("next")
+    assert new.slot == old.slot and new.generation > old.generation
+    assert manager.get("peer") == peer_handle
+
+
+class _CustomStateScheduler(StateScheduler):
+    pass
+
+
+class _AsyncStateScheduler(StateScheduler, AsyncScheduler):
+    pass
+
+
+@pytest.mark.parametrize(
+    ("scheduler_cls", "expected"),
+    [
+        (None, StateScheduler),
+        (_CustomStateScheduler, _CustomStateScheduler),
+        (Scheduler, None),
+        (DiffusionScheduler, None),
+        (_AsyncStateScheduler, None),
+    ],
+)
+def test_state_layout_selects_state_scheduler(scheduler_cls, expected):
+    from vllm.v1.core.sched.state_scheduler import get_scheduler_cls
+
+    scheduler = _state_scheduler()
+    scheduler_config = scheduler.vllm_config.scheduler_config
+    scheduler_config.scheduler_cls = scheduler_cls
+    if expected is None:
+        with pytest.raises(ValueError, match="StateScheduler subclass"):
+            get_scheduler_cls(scheduler_config, scheduler.kv_cache_config)
+    else:
+        assert (
+            get_scheduler_cls(scheduler_config, scheduler.kv_cache_config) is expected
+        )
+
+
+def test_attention_layout_keeps_configured_scheduler():
+    from vllm.v1.core.sched.state_scheduler import get_scheduler_cls
+
+    scheduler = create_scheduler()
+    assert (
+        get_scheduler_cls(
+            scheduler.vllm_config.scheduler_config, scheduler.kv_cache_config
+        )
+        is Scheduler
+    )
+    with pytest.raises(ValueError, match="persistent-state KV cache"):
+        StateScheduler(
+            vllm_config=scheduler.vllm_config,
+            kv_cache_config=scheduler.kv_cache_config,
+            block_size=16,
+            structured_output_manager=scheduler.structured_output_manager,
+        )
+
+
+def test_state_error_only_step_keeps_client_batch_and_stats():
+    from vllm.v1.core.sched.interface import AddRequestDisposition
+    from vllm.v1.engine import StreamAdmissionContext
+
+    scheduler = _state_scheduler(log_stats=True)
+    payload = _stream_request("unknown")
+    payload.stream_admission = StreamAdmissionContext()
+    payload.client_index = 7
+    request = Request.from_engine_core_request(payload, None)
+    assert scheduler.add_request(request) is AddRequestDisposition.REJECTED
+    step = scheduler.schedule()
+    outputs = scheduler.update_from_output(step, _state_output(step))
+    assert list(outputs) == [7]
+    assert outputs[7].outputs[0].request_id == "unknown"
+    assert outputs[7].outputs[0].finish_reason == FinishReason.ERROR
+    assert outputs[7].scheduler_stats is not None
+
+
+def test_tagged_add_cannot_touch_ordinary_request():
+    from vllm.v1.engine import StreamAdmissionContext
+
+    core = object.__new__(EngineCore)
+    core.scheduler = create_scheduler()
+    existing = Request.from_engine_core_request(_stream_request(), None)
+    core.add_request(existing)
+    payload = _stream_request()
+    payload.stream_admission = StreamAdmissionContext()
+    tagged = Request.from_engine_core_request(payload, None)
+    tagged.abort_immediately = True
+    with pytest.raises(ValueError, match="requires persistent state"):
+        core.add_request(tagged)
+    assert core.scheduler.requests["stream"] is existing
+    assert existing.status == RequestStatus.WAITING
+    assert not existing.streaming_queue
+
+
+def test_tagged_update_refused_without_state_scheduler():
+    from vllm.exceptions import VLLMValidationError
+    from vllm.v1.engine import StreamAdmissionContext
+
+    core = object.__new__(EngineCore)
+    core.scheduler = create_scheduler()
+    payload = _stream_request()
+    payload.stream_admission = StreamAdmissionContext()
+    with pytest.raises(VLLMValidationError, match="requires persistent state"):
+        core.preprocess_add_request(payload)
+
+
+def test_state_model_failure_retires_only_matching_live_handle():
+    from dataclasses import replace
+
+    scheduler = _state_scheduler()
+    requests = create_requests(num_requests=2, num_tokens=1)
+    for request in requests:
+        scheduler.add_request(request)
+    step = scheduler.schedule()
+    output = _state_output(step)
+    failed_id, survivor_id = [r.request_id for r in requests]
+    output.state_completion = replace(
+        output.state_completion, failed_req_ids=frozenset({failed_id, "unknown"})
+    )
+    result = scheduler.update_from_output(step, output)
+    assert failed_id not in scheduler.requests
+    assert scheduler.requests[survivor_id].output_token_ids
+    failures = [
+        o
+        for values in result.values()
+        for o in values.outputs
+        if o.request_id == failed_id
+    ]
+    assert len(failures) == 1 and failures[0].finish_reason == FinishReason.ERROR
+    manager = scheduler.kv_cache_manager.coordinator.state_managers["state"]
+    old = step.state_slot_handles[failed_id]["state"]
+    cleanup = scheduler.schedule()
+    scheduler.update_from_output(cleanup, _state_output(cleanup))
+    replacement = manager.allocate(failed_id)
+    assert replacement.generation > old.generation
+    scheduler._complete_state_slots(step, output)
+    assert manager.get(failed_id) == replacement
+
+
+def test_admitted_stream_is_not_starved_by_a_request_waiting_for_a_slot():
+    """An admitted session already owns its slot, so an older queued request
+    that cannot get one must not stall the waiting loop ahead of its input."""
+    core = _stream_core(num_slots=1)
+    scheduler = core.scheduler
+    (blocked,) = create_requests(num_requests=1, num_tokens=4)
+    scheduler.add_request(blocked)
+    assert _admit_stream(core).accepted
+    scheduler.add_request(_stream_chunk(core))
+    step = scheduler.schedule()
+    assert step.num_scheduled_tokens == {"stream": 3}
+    assert blocked.status == RequestStatus.WAITING
+
+
+def test_first_stream_input_drains_under_pause_new():
+    """A never-fed admission holds a slot, so its first input drains while the
+    scheduler admits only requests that already hold KV."""
+    core = _stream_core()
+    scheduler = core.scheduler
+    assert _admit_stream(core).accepted
+    scheduler.set_pause_state(PauseState.PAUSED_NEW)
+    assert scheduler.get_num_unfinished_requests() == 0
+    scheduler.add_request(_stream_chunk(core))
+    assert scheduler.get_num_unfinished_requests() == 1
+    step = scheduler.schedule()
+    assert step.num_scheduled_tokens == {"stream": 3}
+
+
+def test_stream_continuation_queued_while_running_keeps_slot_priority():
+    """A continuation that arrives mid-turn replaces the prompt at EOS; the
+    session must stay ahead of requests that still need a slot."""
+    core = _stream_core(num_slots=1)
+    scheduler = core.scheduler
+    assert _admit_stream(core).accepted
+    scheduler.add_request(_stream_chunk(core))
+    step = scheduler.schedule()
+    assert step.num_scheduled_tokens == {"stream": 3}
+    scheduler.add_request(_stream_chunk(core))
+    (blocked,) = create_requests(num_requests=1, num_tokens=4)
+    scheduler.add_request(blocked)
+    output = _state_output(step)
+    output.sampled_token_ids = [[7]]
+    scheduler.update_from_output(step, output)
+    assert scheduler.requests["stream"].status == RequestStatus.WAITING
+    step = scheduler.schedule()
+    assert step.num_scheduled_tokens == {"stream": 3}
+    assert blocked.status == RequestStatus.WAITING
+
+
+def _stream_mm_chunk(offset, length=1):
+    chunk = _stream_chunk()
+    chunk.mm_features = [
+        MultiModalFeatureSpec(
+            data=MultiModalKwargsItem.dummy(),
+            mm_position=PlaceholderRange(offset=offset, length=length),
+            identifier="image",
+            modality="image",
+        )
+    ]
+    return chunk
+
+
+# Placements a three-token replacement prompt cannot hold: one starts past its
+# end, the other starts inside it but runs past the end.
+_MISPLACED_MM = pytest.mark.parametrize(
+    ("offset", "length"), [(5, 1), (0, 4)], ids=["starts_outside", "overruns_end"]
+)
+
+
+@_MISPLACED_MM
+@pytest.mark.parametrize("while_running", [False, True])
+def test_invalid_multimodal_update_is_rejected_without_ending_session(
+    while_running, offset, length
+):
+    """A multimodal position outside the replacement prompt is a correlated
+    rejection; the session, its slot and its deadline are untouched."""
+    from collections import deque
+
+    core = _stream_core()
+    scheduler = core.scheduler
+    admissions = scheduler.stream_admissions
+    assert _admit_stream(core).accepted
+    if while_running:
+        scheduler.add_request(_stream_chunk(core))
+        step = scheduler.schedule()
+    record = dataclasses.replace(admissions.sessions["stream"])
+    deadline = admissions.next_deadline()
+    bad = _stream_mm_chunk(offset, length)
+    bad.client_index = 3
+    scheduler.add_request(bad)
+    client, rejection = scheduler.state_error_outputs[-1]
+    assert client == 3
+    assert rejection.request_id == "stream"
+    assert rejection.finish_reason == FinishReason.ERROR
+    assert rejection.stream_output.rejection == "validation_error"
+    assert admissions.sessions["stream"] == record
+    assert admissions.next_deadline() == deadline
+    if while_running:
+        assert scheduler.requests["stream"].streaming_queue == deque()
+        output = _state_output(step)
+        output.sampled_token_ids = [[7]]
+        scheduler.update_from_output(step, output)
+    session = scheduler.requests["stream"]
+    assert session.status == RequestStatus.WAITING_FOR_STREAMING_REQ
+    scheduler.add_request(_stream_chunk(core))
+    assert scheduler.schedule().num_scheduled_tokens == {"stream": 3}
+
+
+def test_encoder_decoder_stream_input_may_outrun_its_prompt():
+    """An encoder-decoder item is encoder input at position 0, not a span of
+    the decoder prompt, so its length is not bounded by the prompt; only the
+    start position is checked."""
+    core = _stream_core()
+    scheduler = core.scheduler
+    scheduler.is_encoder_decoder = True
+    assert _admit_stream(core).accepted
+    scheduler.add_request(_stream_mm_chunk(offset=0, length=4))
+    assert not scheduler.state_error_outputs
+    session = scheduler.requests["stream"]
+    assert session.status == RequestStatus.WAITING
+    assert session.mm_features[0].mm_position.length == 4
+    assert scheduler.stream_admissions.sessions["stream"].status == "live"
+    bad = _stream_mm_chunk(offset=5)
+    scheduler.add_request(bad)
+    assert scheduler.state_error_outputs[-1][1].stream_output.rejection == (
+        "validation_error"
+    )
+
+
+@_MISPLACED_MM
+@pytest.mark.parametrize("while_running", [False, True])
+def test_invalid_multimodal_continuation_of_ordinary_stream_is_rejected(
+    while_running, offset, length
+):
+    """A resumable request that was never admitted replaces its prompt the
+    same way; a misplaced position is refused before replacement or queueing."""
+    scheduler = _state_scheduler()
+    (req,) = create_requests(num_requests=1, num_tokens=4)
+    req.resumable = True
+    scheduler.add_request(req)
+    step = scheduler.schedule()
+    output = _state_output(step)
+    output.sampled_token_ids = [[EOS_TOKEN_ID]]
+    if not while_running:
+        scheduler.update_from_output(step, output)
+        assert req.status == RequestStatus.WAITING_FOR_STREAMING_REQ
+    bad = Request(
+        request_id=req.request_id,
+        prompt_token_ids=[1, 2, 3],
+        sampling_params=req.sampling_params,
+        pooling_params=None,
+        mm_features=_stream_mm_chunk(offset, length).mm_features,
+        resumable=True,
+    )
+    bad.client_index = 3
+    scheduler.add_request(bad)
+    client, rejection = scheduler.state_error_outputs[-1]
+    assert client == 3
+    assert rejection.request_id == req.request_id
+    assert rejection.finish_reason == FinishReason.ERROR
+    assert rejection.stream_output.rejection == "validation_error"
+    assert not req.streaming_queue
+    if while_running:
+        scheduler.update_from_output(step, output)
+    assert req.status == RequestStatus.WAITING_FOR_STREAMING_REQ
+    good = Request(
+        request_id=req.request_id,
+        prompt_token_ids=[1, 2, 3],
+        sampling_params=req.sampling_params,
+        pooling_params=None,
+        resumable=True,
+    )
+    scheduler.add_request(good)
+    assert scheduler.schedule().num_scheduled_tokens == {req.request_id: 3}
+
+
+@_MISPLACED_MM
+def test_ordinary_stream_invalid_continuation_rejected_through_engine_core(
+    offset, length
+):
+    """Through preprocessing and EngineCore.add_request, a never-admitted
+    stream's misplaced continuation is a correlated rejection: no terminal
+    output, the parked session stays live, and the next valid input runs."""
+    core = _stream_core()
+    core.mm_receiver_cache = None
+    core.prefix_hash_config = None
+    scheduler = core.scheduler
+
+    def send(payload):
+        request, _ = core.preprocess_add_request(payload)
+        core.add_request(request)
+        return request
+
+    first = _stream_request("plain")
+    first.prompt_token_ids = [1, 2, 3]
+    first.client_index = 3
+    session = send(first)
+    assert session.status == RequestStatus.WAITING
+    step = scheduler.schedule()
+    output = _state_output(step)
+    output.sampled_token_ids = [[7]]
+    scheduler.update_from_output(step, output)
+    assert session.status == RequestStatus.WAITING_FOR_STREAMING_REQ
+
+    bad = _stream_request("plain")
+    bad.prompt_token_ids = [1, 2, 3]
+    bad.mm_features = _stream_mm_chunk(offset, length).mm_features
+    bad.client_index = 3
+    send(bad)
+    client, rejection = scheduler.state_error_outputs[-1]
+    assert client == 3
+    assert rejection.request_id == "plain"
+    assert rejection.finish_reason == FinishReason.ERROR
+    assert rejection.stream_output.rejection == "validation_error"
+    assert scheduler.requests["plain"] is session
+    assert session.status == RequestStatus.WAITING_FOR_STREAMING_REQ
+    assert not session.streaming_queue
+    assert not scheduler.finished_req_ids
+
+    good = _stream_request("plain")
+    good.prompt_token_ids = [4, 5, 6]
+    send(good)
+    assert scheduler.schedule().num_scheduled_tokens == {"plain": 3}
+
+
+def _seq_context(update_seq, closed=False):
+    from vllm.v1.engine import StreamAdmissionContext
+
+    return StreamAdmissionContext(update_seq=update_seq, input_closed=closed)
+
+
+def _seq_chunk(update_seq, *, closed=False, resumable=True, tokens=(1, 2, 3)):
+    """One numbered input of the admitted stream "stream"; a close when not
+    resumable (its placeholder prompt is ignored)."""
+    payload = _stream_request()
+    payload.prompt_token_ids = list(tokens) if resumable else [0]
+    payload.resumable = resumable
+    payload.stream_admission = _seq_context(update_seq, closed)
+    return Request.from_engine_core_request(payload, None)
+
+
+def _close_chunk(update_seq):
+    return _seq_chunk(update_seq, closed=True, resumable=False)
+
+
+def _install_state_executor(core, sampled=42, *, acknowledge=True, failed=()):
+    """A worker stub: every scheduled request samples `sampled` and the state
+    completion reports `failed` requests."""
+    from contextlib import nullcontext
+
+    def execute(step, **kwargs):
+        output = _state_output(step, acknowledge=acknowledge)
+        output.sampled_token_ids = [[sampled] for _ in output.req_ids]
+        if failed:
+            output.state_completion = dataclasses.replace(
+                output.state_completion, failed_req_ids=frozenset(failed)
+            )
+        return Mock(result=lambda: output)
+
+    core.model_executor = Mock()
+    core.model_executor.execute_model.side_effect = execute
+    core.capture_iteration_details = lambda step: nullcontext()
+    core.log_error_detail = lambda step: nullcontext()
+    core._process_aborts_queue = lambda: None
+    core._attach_iteration_details = lambda *args: None
+    core._weight_version = None
+
+
+def _step_state_core(core, sampled=42, *, acknowledge=True, failed=()):
+    """One EngineCore.step() over `_install_state_executor`."""
+    _install_state_executor(core, sampled, acknowledge=acknowledge, failed=failed)
+    outputs, _ = core.step()
+    return outputs
+
+
+def _stream_outputs(batches, request_id="stream"):
+    return [
+        output
+        for batch in batches.values()
+        for output in batch.outputs
+        if output.request_id == request_id
+    ]
+
+
+def _retired_by_client(batches):
+    return {
+        client: list(batch.retired_streams)
+        for client, batch in batches.items()
+        if batch.retired_streams
+    }
+
+
+def test_admitted_stream_update_seq_follows_applied_input():
+    """An input's context is copied onto the session when it is applied, at
+    once or from the queue, and each output carries the context captured
+    before stop handling applies the next queued input."""
+    core = _stream_core()
+    assert _admit_stream(core).accepted
+    core.add_request(_seq_chunk(1))
+    (output,) = _stream_outputs(_step_state_core(core, 42))
+    assert output.stream_output.context == _seq_context(1)
+    core.add_request(_seq_chunk(2))
+    (eos,) = _stream_outputs(_step_state_core(core, 7))
+    assert eos.finish_reason == FinishReason.STOP
+    assert eos.stream_output.context == _seq_context(1)
+    (output,) = _stream_outputs(_step_state_core(core, 42))
+    assert output.stream_output.context == _seq_context(2)
+    (eos,) = _stream_outputs(_step_state_core(core, 7))
+    assert eos.stream_output.context == _seq_context(2)
+    session = core.scheduler.requests["stream"]
+    assert session.status == RequestStatus.WAITING_FOR_STREAMING_REQ
+    core.add_request(_seq_chunk(3))
+    (output,) = _stream_outputs(_step_state_core(core, 42))
+    assert output.stream_output.context == _seq_context(3)
+
+
+def test_admitted_stream_rejection_carries_incoming_context():
+    core = _stream_core()
+    assert _admit_stream(core).accepted
+    core.add_request(_seq_chunk(1))
+    core.add_request(_seq_chunk(2, tokens=()))
+    outputs = _stream_outputs(_step_state_core(core, 42))
+    rejections = [o for o in outputs if o.stream_output.rejection is not None]
+    (rejection,) = rejections
+    assert rejection.stream_output.rejection == "empty_update"
+    assert rejection.stream_output.context == _seq_context(2)
+    (ran,) = [o for o in outputs if o.stream_output.rejection is None]
+    assert ran.stream_output.context == _seq_context(1)
+    assert core.scheduler.requests["stream"].stream_admission == _seq_context(1)
+
+
+@pytest.mark.parametrize("state", ["never_fed", "parked"])
+def test_admitted_stream_close_on_idle_session_has_one_terminal_output(state):
+    """A close with nothing queued ends a parked or never-fed session at once
+    with a terminal STOP output that carries no tokens and the close's seq."""
+    core = _stream_core()
+    assert _admit_stream(core).accepted
+    close_seq = 1
+    if state == "parked":
+        core.add_request(_seq_chunk(1))
+        _step_state_core(core, 7)
+        assert (
+            core.scheduler.requests["stream"].status
+            == RequestStatus.WAITING_FOR_STREAMING_REQ
+        )
+        close_seq = 2
+    core.add_request(_close_chunk(close_seq))
+    assert "stream" not in core.scheduler.requests
+    outputs = []
+    for _ in range(3):
+        outputs += _stream_outputs(_step_state_core(core))
+    (terminal,) = outputs
+    assert terminal.finish_reason == FinishReason.STOP
+    assert terminal.new_token_ids == []
+    assert terminal.stream_output.context == _seq_context(close_seq, True)
+    assert terminal.stream_output.rejection is None
+
+
+def test_admitted_stream_queued_close_drains_accepted_inputs_in_order():
+    """A close queued behind a running input runs every accepted input; the
+    ending output carries the last input's seq and input_closed=True."""
+    core = _stream_core()
+    assert _admit_stream(core).accepted
+    core.add_request(_seq_chunk(1))
+    first = _stream_outputs(_step_state_core(core, 42))
+    core.add_request(_seq_chunk(2, tokens=(4, 5)))
+    core.add_request(_close_chunk(3))
+    boundary = _stream_outputs(_step_state_core(core, 7))
+    session = core.scheduler.requests["stream"]
+    assert session.prompt_token_ids == [4, 5]
+    final = _stream_outputs(_step_state_core(core, 7))
+    contexts = [o.stream_output.context for o in first + boundary + final]
+    assert contexts == [_seq_context(1), _seq_context(1), _seq_context(2, True)]
+    assert boundary[0].finish_reason == FinishReason.STOP
+    assert final[0].finish_reason == FinishReason.STOP
+    assert final[0].new_token_ids == [7]
+    assert "stream" not in core.scheduler.requests
+    assert not _stream_outputs(_step_state_core(core))
+
+
+@pytest.mark.parametrize("queued", [False, True])
+def test_admitted_stream_resumable_closing_input_runs_then_ends(queued):
+    """A resumable input with input_closed=True runs before the session ends.
+    Its outputs without a finish reason carry its context unchanged; an earlier
+    input's EOS output does not close; the closing input's EOS ends the session."""
+    core = _stream_core()
+    assert _admit_stream(core).accepted
+    outputs = []
+    expected = []
+    if queued:
+        core.add_request(_seq_chunk(1))
+        outputs += _stream_outputs(_step_state_core(core, 42))
+        core.add_request(_seq_chunk(2, closed=True))
+        outputs += _stream_outputs(_step_state_core(core, 7))
+        expected += [(None, _seq_context(1)), (FinishReason.STOP, _seq_context(1))]
+        last = 2
+    else:
+        core.add_request(_seq_chunk(1, closed=True))
+        last = 1
+    outputs += _stream_outputs(_step_state_core(core, 42))
+    assert "stream" in core.scheduler.requests
+    outputs += _stream_outputs(_step_state_core(core, 7))
+    expected += [
+        (None, _seq_context(last, True)),
+        (FinishReason.STOP, _seq_context(last, True)),
+    ]
+    assert [(o.finish_reason, o.stream_output.context) for o in outputs] == expected
+    assert "stream" not in core.scheduler.requests
+
+
+@pytest.mark.parametrize(
+    "cause",
+    [
+        "abort",
+        "never_fed_abort",
+        "parked_expiry",
+        "never_fed_expiry",
+        "preemption",
+        "stop_token",
+        "length",
+        "failed_step",
+        "worker_failure",
+        "draining_expiry",
+    ],
+)
+def test_admitted_stream_every_terminal_output_carries_input_closed(cause):
+    """Abort, expiry, preemption, a failed state step and a non-EOS stop all
+    end the session with a finish reason and input_closed=True."""
+    import queue
+
+    from vllm.v1.engine.core import EngineCoreProc
+
+    core = _stream_core()
+    scheduler = core.scheduler
+    assert _admit_stream(core).accepted
+    seq = 0
+    outputs = []
+    if not cause.startswith("never_fed"):
+        seq = 1
+        chunk = _seq_chunk(1, closed=cause == "draining_expiry")
+        if cause == "length":
+            chunk.max_tokens = chunk.sampling_params.max_tokens = 1
+        core.add_request(chunk)
+        if cause == "stop_token":
+            scheduler.requests["stream"].sampling_params.stop_token_ids = [6]
+    if cause in ("abort", "never_fed_abort"):
+        if cause == "abort":
+            outputs += _stream_outputs(_step_state_core(core, 42))
+        proc = object.__new__(EngineCoreProc)
+        proc.output_queue = queue.Queue()
+        proc._send_abort_outputs(
+            scheduler.finish_requests("stream", RequestStatus.FINISHED_ABORTED)
+        )
+        _, batch = proc.output_queue.get_nowait()
+        outputs += batch.outputs
+        expected = FinishReason.ABORT
+    elif cause.endswith("expiry"):
+        if cause == "parked_expiry":
+            outputs += _stream_outputs(_step_state_core(core, 7))
+        elif cause == "draining_expiry":
+            outputs += _stream_outputs(_step_state_core(core, 42))
+            assert scheduler.stream_admissions.sessions["stream"].status == "draining"
+        scheduler.stream_admissions.clock = lambda: 1000.0
+        outputs += _stream_outputs(_step_state_core(core))
+        expected = FinishReason.ABORT
+    elif cause == "preemption":
+        step = scheduler.schedule()
+        request = scheduler.requests["stream"]
+        scheduler.running.remove(request)
+        scheduler._preempt_request(request, 0.0)
+        outputs += _stream_outputs(
+            scheduler.update_from_output(step, _state_output(step))
+        )
+        expected = FinishReason.ERROR
+    elif cause == "failed_step":
+        outputs += _stream_outputs(_step_state_core(core, acknowledge=False))
+        expected = FinishReason.ERROR
+    elif cause == "worker_failure":
+        outputs += _stream_outputs(_step_state_core(core, failed={"stream"}))
+        expected = FinishReason.ERROR
+    elif cause == "stop_token":
+        outputs += _stream_outputs(_step_state_core(core, 6))
+        expected = FinishReason.STOP
+    else:
+        outputs += _stream_outputs(_step_state_core(core, 42))
+        expected = FinishReason.LENGTH
+    assert "stream" not in scheduler.requests
+    *earlier, terminal = outputs
+    # Earlier outputs keep their input's context unchanged, including the EOS
+    # of a non-closing input; only a closing input's context closes input.
+    closing = _seq_context(seq, cause == "draining_expiry")
+    assert [o.stream_output.context for o in earlier] == [closing] * len(earlier)
+    assert terminal.finish_reason == expected
+    assert terminal.stream_output.context == _seq_context(seq, True)
+
+
+def test_stream_retirement_signal_never_scheduled_release_reported_once():
+    """A never-scheduled slot released at once (fence 0) names the stream once,
+    for the client that admitted it, even in a batch with no other output."""
+    core = _stream_core()
+    payload = _stream_request()
+    payload.client_index = 3
+    assert _admit_stream(core, payload).accepted
+    core.abort_requests(["stream"])
+    reported = [_retired_by_client(_step_state_core(core)) for _ in range(3)]
+    assert [r for r in reported if r] == [{3: ["stream"]}]
+
+
+def test_stream_retirement_signal_waits_for_fenced_release():
+    """A scheduled slot is reported only once the worker completion releases
+    it, and an ordinary state request is never reported."""
+    core = _stream_core()
+    scheduler = core.scheduler
+    payload = _stream_request()
+    payload.client_index = 3
+    assert _admit_stream(core, payload).accepted
+    core.add_request(_seq_chunk(1))
+    (ordinary,) = create_requests(num_requests=1, num_tokens=4)
+    ordinary.client_index = 3
+    scheduler.add_request(ordinary)
+    step = scheduler.schedule()
+    assert set(step.num_scheduled_tokens) == {"stream", ordinary.request_id}
+    core.abort_requests(["stream", ordinary.request_id])
+    in_flight = scheduler.update_from_output(step, _state_output(step))
+    assert not _retired_by_client(in_flight)
+    assert scheduler.state_retirements
+    reported = [_retired_by_client(_step_state_core(core)) for _ in range(3)]
+    assert not scheduler.state_retirements
+    assert [r for r in reported if r] == [{3: ["stream"]}]
+
+
+def test_stream_retirement_signal_quarantined_slot_reported_after_release():
+    core = _stream_core()
+    scheduler = core.scheduler
+    assert _admit_stream(core).accepted
+    core.add_request(_seq_chunk(1))
+    _step_state_core(core, 42)
+    core.abort_requests(["stream"])
+    missed = _step_state_core(core, acknowledge=False)
+    assert not _retired_by_client(missed)
+    assert scheduler.state_retirements
+    reported = [_retired_by_client(_step_state_core(core)) for _ in range(3)]
+    assert not scheduler.state_retirements
+    assert [r for r in reported if r] == [{0: ["stream"]}]
+
+
+def test_stream_retirement_only_batch_reaches_output_queue():
+    """A retirement with nothing else to output is put on EngineCoreProc's
+    output queue, for the admitting client, by the ordinary busy-loop steps."""
+    import queue
+    from collections import deque
+
+    from vllm.v1.engine import EngineCoreRequestType
+
+    proc = _pausable_stream_core()
+    payload = _stream_request()
+    payload.client_index = 5
+    assert _admit_stream(proc, payload).accepted
+    _install_state_executor(proc)
+    proc.step_fn = proc.step
+    proc.check_for_draft_tokens = False
+    proc.input_queue = queue.Queue()
+    proc.aborts_queue = queue.Queue()
+    proc._deferred_inputs = deque()
+    proc.process_input_queue_block = False
+    proc.input_queue.put_nowait((EngineCoreRequestType.ABORT, ["stream"]))
+    for _ in range(3):
+        proc._process_input_queue()
+        proc._process_engine_step()
+    batches = []
+    while not proc.output_queue.empty():
+        batches.append(proc.output_queue.get_nowait())
+    retired = [(client, batch) for client, batch in batches if batch.retired_streams]
+    assert [(client, list(b.retired_streams)) for client, b in retired] == [
+        (5, ["stream"])
+    ]
+    ((_, batch),) = retired
+    assert batch.outputs == []
+
+
+@pytest.mark.parametrize("tokens", [[4, 5, 6], [0]], ids=["multi_token", "one_token"])
+def test_admitted_stream_frontend_packed_input_is_checked_and_applied(tokens):
+    """Frontends send an input's prompt as an int32 ndarray: it passes the
+    multimodal placement check and replaces the session prompt, whether
+    applied at once to a parked session or dequeued after an EOS."""
+    core = _stream_core()
+    core.mm_receiver_cache = None
+    core.prefix_hash_config = None
+    scheduler = core.scheduler
+    assert _admit_stream(core).accepted
+
+    def send(update_seq, prompt, mm_features=None):
+        payload = _stream_request()
+        payload.prompt_token_ids = np.array(prompt, dtype=np.int32)
+        payload.mm_features = mm_features
+        payload.stream_admission = _seq_context(update_seq)
+        request, _ = core.preprocess_add_request(payload)
+        core.add_request(request)
+
+    send(1, tokens, _stream_mm_chunk(0).mm_features)
+    session = scheduler.requests["stream"]
+    assert not scheduler.state_error_outputs
+    assert session.prompt_token_ids == tokens
+    assert list(session.all_token_ids) == tokens
+    assert session.num_prompt_tokens == len(tokens)
+    assert session.stream_admission == _seq_context(1)
+
+    session.mm_features = []
+    step = scheduler.schedule()
+    assert step.num_scheduled_tokens == {"stream": len(tokens)}
+    send(2, tokens[::-1] + [9])
+    output = _state_output(step)
+    output.sampled_token_ids = [[7]]
+    scheduler.update_from_output(step, output)
+    assert scheduler.requests["stream"] is session
+    assert session.prompt_token_ids == tokens[::-1] + [9]
+    assert list(session.all_token_ids) == tokens[::-1] + [9]
+    assert session.stream_admission == _seq_context(2)

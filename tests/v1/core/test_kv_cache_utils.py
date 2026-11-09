@@ -3,6 +3,7 @@
 import copy
 import hashlib
 import importlib
+import os
 from collections.abc import Callable
 from dataclasses import replace
 from types import SimpleNamespace
@@ -2472,3 +2473,348 @@ def test_null_head_len():
         assert null_head_len(table) == expected
     blocks = KVCacheBlocks(([null] * 4 + real, [null] + real[:1] + [null]))
     assert blocks.get_unhashed_block_ids_all_groups() == [[1, 2, 3], [1]]
+
+
+def test_persistent_state_layout_and_capacity():
+    from tests.v1.core.utils import create_scheduler, create_state_spec
+    from vllm.v1.core.kv_cache_manager import KVCacheManager
+    from vllm.v1.worker.utils import allocate_kv_cache
+
+    config = create_scheduler(max_num_seqs=4, max_model_len=32).vllm_config
+    config.cache_config.kv_cache_layout = "LBNHC"
+    spec = create_state_spec()
+    planned = get_kv_cache_configs(
+        config, [{"state": spec}], [3 * spec.page_size_bytes]
+    )[0]
+    assert planned.num_blocks == 3
+    raw = allocate_kv_cache(
+        planned, torch.device("cpu"), config.cache_config.get_resolved_kv_cache_layout()
+    )["state"]
+    assert raw.numel() == 3 * spec.page_size_bytes
+    manager = KVCacheManager(
+        kv_cache_config=planned,
+        max_model_len=32,
+        enable_caching=False,
+        scheduler_block_size=1,
+        hash_block_size=1,
+    ).coordinator.state_managers["state"]
+    a = manager.allocate("a")
+    b = manager.allocate("b")
+    assert a is not None and b is not None
+    assert manager.allocate("c") is None
+    assert manager.get("a") == a and manager.get("b") == b
+    assert manager.num_free_slots == 0
+    assert manager.allocate_new_blocks("a", 1_000_000, 1_000_000) == []
+    assert manager.get("a") == a
+    manager.retire("a", 1)
+    assert not manager.release(a, 1)
+    assert manager.allocate("c") is None
+    manager.complete(a, 1)
+    assert manager.release(a, 1)
+    c = manager.allocate("c")
+    assert c is not None
+    assert c.slot == a.slot and c.generation == a.generation + 1
+    with pytest.raises(ValueError, match="Stale"):
+        manager.complete(a, 2)
+
+
+@pytest.mark.parametrize(
+    ("budget_pages", "override", "num_blocks"), [(100, None, 3), (100, 2, 2)]
+)
+def test_persistent_state_block_bound(budget_pages, override, num_blocks):
+    from tests.v1.core.utils import create_scheduler, create_state_spec
+
+    config = create_scheduler(max_num_seqs=2, max_model_len=32).vllm_config
+    config.cache_config.kv_cache_layout = "LBNHC"
+    config.cache_config.num_gpu_blocks_override = override
+    spec = create_state_spec()
+    budget = budget_pages * spec.page_size_bytes
+    planned = get_kv_cache_configs(config, [{"state": spec}], [budget])[0]
+    # max_num_seqs slots plus the null block, unless the override sets the count.
+    assert planned.num_blocks == num_blocks
+
+
+def test_persistent_state_block_bound_hook():
+    from tests.v1.core.utils import create_scheduler, create_state_spec
+
+    config = create_scheduler(max_num_seqs=2, max_model_len=32).vllm_config
+    spec = create_state_spec()
+    wrapped = UniformTypeKVCacheSpecs(block_size=1, kv_cache_specs={"state": spec})
+    attention = FullAttentionSpec(
+        block_size=16, num_kv_heads=1, head_size=8, dtype=torch.float32
+    )
+    assert spec.max_num_blocks(config) == wrapped.max_num_blocks(config) == 3
+    assert attention.max_num_blocks(config) is None
+
+
+def test_persistent_state_partial_initializer_groups():
+    from functools import partial
+
+    from tests.v1.core.utils import create_scheduler, create_state_spec
+    from vllm.v1.kv_cache_interface import PersistentStateSpec
+
+    config = create_scheduler(max_num_seqs=2, max_model_len=32).vllm_config
+    config.cache_config.kv_cache_layout = "LBNHC"
+    base = create_state_spec()
+    zeros = partial(torch.full, fill_value=0)
+    spec = PersistentStateSpec(
+        state_name=base.state_name,
+        descriptors=[replace(d, initializer=zeros) for d in base.descriptors],
+        page_size_bytes=base.page_size_bytes,
+    )
+    planned = get_kv_cache_configs(config, [{"state": spec}], [4096])[0]
+    assert planned.kv_cache_groups[0].kv_cache_spec is spec
+
+
+@pytest.mark.parametrize(
+    ("num_specs", "budgets"), [(2, [4096, 4096]), (1, [4096, 0]), (1, [])]
+)
+def test_persistent_state_requires_one_worker(num_specs, budgets):
+    from tests.v1.core.utils import create_scheduler, create_state_spec
+
+    config = create_scheduler(max_num_seqs=2, max_model_len=32).vllm_config
+    config.cache_config.kv_cache_layout = "LBNHC"
+    specs = [{"state": create_state_spec()}] * num_specs
+    groups = kv_cache_planning.get_global_kv_cache_groups(config, specs)
+    with pytest.raises(ValueError, match="one engine worker"):
+        kv_cache_planning.get_kv_cache_configs(config, specs, budgets, groups)
+
+
+@pytest.mark.parametrize("wrap", [False, True])
+def test_persistent_state_plans_through_platform_builder(monkeypatch, wrap):
+    from tests.v1.core.utils import create_scheduler, create_state_spec
+
+    config = create_scheduler(max_num_seqs=2, max_model_len=32).vllm_config
+    config.cache_config.kv_cache_layout = "LBNHC"
+    spec = create_state_spec()
+    wrapped = UniformTypeKVCacheSpecs(block_size=1, kv_cache_specs={"state": spec})
+    calls: list[int] = []
+
+    class RecordingBuilder(kv_cache_planning.DefaultKVCacheConfigBuilder):
+        def get_kv_cache_groups(self, vllm_config, kv_cache_spec):
+            if wrap:
+                return [KVCacheGroupSpec(["state"], wrapped)]
+            return super().get_kv_cache_groups(vllm_config, kv_cache_spec)
+
+        def get_kv_cache_config_from_groups(self, vllm_config, groups, num_blocks):
+            calls.append(num_blocks)
+            return super().get_kv_cache_config_from_groups(
+                vllm_config, groups, num_blocks
+            )
+
+    monkeypatch.setattr(
+        kv_cache_planning,
+        "get_kv_cache_config_builder",
+        lambda vllm_config: RecordingBuilder(),
+    )
+    budget = 100 * spec.page_size_bytes
+    if wrap:
+        with pytest.raises(ValueError, match="one state cache group"):
+            get_kv_cache_configs(config, [{"state": spec}], [budget])
+        return
+    planned = get_kv_cache_configs(config, [{"state": spec}], [budget])[0]
+    # The builder sees the one-block size probe, then exactly the bounded count.
+    assert calls[0] == 1 and calls[-1] == 3
+    assert planned.num_blocks == 3
+    assert planned.kv_cache_groups == [KVCacheGroupSpec(["state"], spec)]
+
+
+@pytest.mark.parametrize("kind", ["attention", "mamba"])
+def test_persistent_state_mixed_layout_refused(kind):
+    from tests.v1.core.utils import create_scheduler, create_state_spec
+
+    config = create_scheduler(max_num_seqs=2, max_model_len=32).vllm_config
+    other = (
+        FullAttentionSpec(
+            block_size=16, num_kv_heads=1, head_size=8, dtype=torch.float32
+        )
+        if kind == "attention"
+        else MambaSpec(block_size=16, shapes=((4,),), dtypes=(torch.float32,))
+    )
+    with pytest.raises(ValueError, match="state-only cache layout"):
+        get_kv_cache_configs(
+            config, [{"state": create_state_spec(), "other": other}], [4096]
+        )
+
+
+@pytest.mark.parametrize(
+    "owner,option,value",
+    [
+        ("scheduler_config", "async_scheduling", True),
+        ("parallel_config", "tensor_parallel_size", 2),
+        ("parallel_config", "pipeline_parallel_size", 2),
+        ("parallel_config", "data_parallel_size", 2),
+        ("parallel_config", "decode_context_parallel_size", 2),
+        ("parallel_config", "prefill_context_parallel_size", 2),
+        ("parallel_config", "enable_dbo", True),
+        (
+            None,
+            "speculative_config",
+            SpeculativeConfig(model="ngram", num_speculative_tokens=1),
+        ),
+        (None, "kv_transfer_config", object()),
+        ("cache_config", "enable_prefix_caching", True),
+        ("model_config", "enable_sleep_mode", True),
+        ("model_config", "enable_cumem_allocator", True),
+    ],
+)
+def test_persistent_state_unsupported_config_refused(owner, option, value):
+    from tests.v1.core.utils import create_scheduler, create_state_spec
+
+    config = create_scheduler(max_num_seqs=2, max_model_len=32).vllm_config
+    setattr(getattr(config, owner) if owner else config, option, value)
+    with pytest.raises(ValueError, match="Persistent state does not support"):
+        get_kv_cache_configs(config, [{"state": create_state_spec()}], [4096])
+
+
+def test_persistent_state_budget_override_cannot_manufacture_capacity():
+    from tests.v1.core.utils import create_scheduler, create_state_spec
+
+    config = create_scheduler(max_num_seqs=2, max_model_len=32).vllm_config
+    config.cache_config.kv_cache_layout = "LBNHC"
+    config.cache_config.num_gpu_blocks_override = 4
+    with pytest.raises(ValueError, match="KV budget"):
+        get_kv_cache_configs(config, [{"state": create_state_spec()}], [96])
+
+
+_CONTRIBUTORS = ("first_example_option", "second_example_option")
+
+
+def _state_rejection(spec, budget_pages, override, auto_fit):
+    from tests.v1.core.utils import create_scheduler
+
+    config = create_scheduler(max_num_seqs=2, max_model_len=32).vllm_config
+    config.cache_config.kv_cache_layout = "LBNHC"
+    # The executor turns the extensible KV cache off for persistent state
+    # before planning; the config defaults it on for a CUDA host.
+    config.cache_config.enable_extensible_kv_cache = False
+    config.cache_config.num_gpu_blocks_override = override
+    if auto_fit:
+        config.model_config.original_max_model_len = -1
+    budget = int(budget_pages * spec.page_size_bytes)
+    with pytest.raises(ValueError) as rejected:
+        get_kv_cache_configs(config, [{"state": spec}], [budget])
+    return str(rejected.value)
+
+
+@pytest.mark.parametrize("contributors", [_CONTRIBUTORS, ()], ids=["named", "none"])
+@pytest.mark.parametrize(
+    ("budget_pages", "override", "auto_fit", "kind"),
+    [
+        (0, None, False, "No available memory"),
+        (1, None, False, "No available memory"),
+        (1.5, None, False, "To serve at least one request"),
+        (3, 4, False, "exceeds the KV budget"),
+        (1, None, True, "Cannot auto-fit"),
+        (1.5, None, True, "Cannot auto-fit"),
+    ],
+    ids=["no-page", "one-page", "fractional", "override", "auto-fit", "auto-fit-frac"],
+)
+def test_persistent_state_rejection_names_memory_contributors(
+    contributors, budget_pages, override, auto_fit, kind
+):
+    """A rejected state budget names the options the model says consume memory.
+
+    Fewer than two pages cannot hold the null page and one slot, and four pages
+    exceed a three-page budget. The names are inserted into the message the
+    rejection gives without them, which keeps its advice.
+    """
+    from tests.v1.core.utils import create_state_spec
+
+    baseline = _state_rejection(create_state_spec(), budget_pages, override, auto_fit)
+    message = _state_rejection(
+        create_state_spec(memory_contributors=contributors),
+        budget_pages,
+        override,
+        auto_fit,
+    )
+    assert kind in baseline
+    if not override:
+        assert "gpu_memory_utilization" in baseline
+    if not contributors:
+        assert message == baseline
+        return
+    prefix = len(os.path.commonprefix([baseline, message]))
+    suffix = len(os.path.commonprefix([baseline[::-1], message[::-1]]))
+    assert prefix + suffix >= len(baseline)
+    inserted = message[prefix : len(message) - min(suffix, len(baseline) - prefix)]
+    for name in _CONTRIBUTORS:
+        assert name in inserted
+
+
+def test_persistent_state_memory_contributors_are_diagnostic():
+    """Contributors survive planning and copying without changing identity."""
+    from tests.v1.core.utils import create_scheduler, create_state_spec
+    from vllm.v1.kv_cache_interface import PersistentStateSpec
+
+    base = create_state_spec()
+    named = create_state_spec(memory_contributors=_CONTRIBUTORS)
+    assert base.memory_contributors == ()
+    assert create_state_spec(memory_contributors=()).memory_contributors == ()
+    assert named.memory_contributors == _CONTRIBUTORS
+    assert named == base and hash(named) == hash(base)
+    assert named.schema_id == base.schema_id
+    # deepcopy rebuilds the frozen spec through __reduce_ex__, as pickle does.
+    moved = copy.deepcopy(named)
+    assert moved.memory_contributors == _CONTRIBUTORS
+    assert moved == named and moved.schema_id == named.schema_id
+    merged = PersistentStateSpec.merge([named, copy.deepcopy(named)])
+    assert merged.memory_contributors == _CONTRIBUTORS
+    with pytest.raises(AssertionError):
+        PersistentStateSpec.merge([named, base])
+
+    config = create_scheduler(max_num_seqs=2, max_model_len=32).vllm_config
+    config.cache_config.kv_cache_layout = "LBNHC"
+    planned = get_kv_cache_configs(config, [{"state": named}], [4096])[0]
+    planned_spec = planned.kv_cache_groups[0].kv_cache_spec
+    assert planned_spec.memory_contributors == _CONTRIBUTORS
+
+
+@pytest.mark.parametrize(
+    ("contributors", "error"),
+    [
+        (("",), ValueError),
+        (("same", "same"), ValueError),
+        ((1,), TypeError),
+        ("first_example_option", TypeError),
+        ("", TypeError),
+    ],
+    ids=["empty-name", "duplicate", "not-str", "bare-str", "empty-bare-str"],
+)
+def test_persistent_state_memory_contributors_validated(contributors, error):
+    from tests.v1.core.utils import create_state_spec
+
+    with pytest.raises(error, match="memory contributor"):
+        create_state_spec(memory_contributors=contributors)
+
+
+@pytest.mark.parametrize(
+    "change", ["overlap", "extent", "page_alignment", "dtype_alignment"]
+)
+def test_persistent_state_layout_rejects_invalid_components(change):
+    from tests.v1.core.utils import create_state_spec
+    from vllm.v1.kv_cache_interface import (
+        PersistentStateDescriptor,
+        PersistentStateSpec,
+    )
+
+    spec = create_state_spec()
+    descriptors = spec.descriptors
+    size = spec.page_size_bytes
+    if change == "overlap":
+        descriptors = (
+            descriptors[0],
+            PersistentStateDescriptor("other", (4,), torch.float32, 0, 16, torch.zeros),
+        )
+    elif change == "extent":
+        size = 16
+    elif change == "page_alignment":
+        size = 33
+    else:
+        with pytest.raises(ValueError, match="dtype-misaligned"):
+            PersistentStateDescriptor("bad", (1,), torch.int64, 4, 4, torch.zeros)
+        return
+    with pytest.raises(ValueError):
+        PersistentStateSpec(
+            descriptors=descriptors, page_size_bytes=size, state_name="bad"
+        )

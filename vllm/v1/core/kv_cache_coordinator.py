@@ -107,6 +107,9 @@ class KVCacheCoordinator(ABC):
         num_prefill_lookahead: int = 0,
         num_hash_lookahead_tokens: int = 0,
     ):
+        from vllm.v1.core.state_slot_manager import validate_state_groups
+
+        validate_state_groups(kv_cache_config.kv_cache_groups)
         self.kv_cache_config = kv_cache_config
         # The scheduling granularity (LCM of all group block sizes), must be a multiple
         # of the hash_block_size and the block size of each group.
@@ -174,6 +177,15 @@ class KVCacheCoordinator(ABC):
             )
             for i, kv_cache_group in enumerate(self.kv_cache_config.kv_cache_groups)
         )
+        from vllm.v1.core.state_slot_manager import PersistentStateManager
+
+        self.state_managers = {
+            group.layer_names[0]: manager
+            for group, manager in zip(
+                kv_cache_config.kv_cache_groups, self.single_type_managers
+            )
+            if isinstance(manager, PersistentStateManager)
+        }
         # Match Mamba checkpoints to Eagle's attention replay boundary.
         if use_eagle:
             for manager in self.single_type_managers:

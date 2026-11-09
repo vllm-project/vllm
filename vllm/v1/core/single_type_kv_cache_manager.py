@@ -2681,6 +2681,10 @@ def get_manager_for_kv_cache_spec(
 
 def register_all_kvcache_specs(vllm_config):
     """Built-in spec registration"""
+    from vllm.v1.core.state_slot_manager import PersistentStateManager
+    from vllm.v1.kv_cache_interface import PersistentStateSpec
+
+    KVCacheSpecRegistry.register(PersistentStateSpec, PersistentStateManager)
     KVCacheSpecRegistry.register_role_manager(
         KVCacheGroupRole.HISPARSE_SOURCE, HiSparseSourceManager
     )

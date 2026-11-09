@@ -72,8 +72,13 @@ from vllm.v1.core.kv_cache_utils import (
     resolve_kv_cache_block_sizes,
     update_kv_cache_capacity,
 )
-from vllm.v1.core.sched.interface import PauseState, SchedulerInterface
+from vllm.v1.core.sched.interface import (
+    AddRequestDisposition,
+    PauseState,
+    SchedulerInterface,
+)
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.core.sched.state_scheduler import get_scheduler_cls
 from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
 from vllm.v1.engine import (
     EEP_NOTIFICATION_CALL_ID,
@@ -89,6 +94,9 @@ from vllm.v1.engine import (
     PrefixHashConfig,
     ReconfigureDistributedRequest,
     ReconfigureRankType,
+    StreamAdmissionResult,
+    StreamOutput,
+    StreamUpdateRejection,
     UtilityOutput,
     UtilityResult,
 )
@@ -178,7 +186,7 @@ class EngineCore:
         self.structured_output_manager = StructuredOutputManager(vllm_config)
 
         # Setup scheduler.
-        Scheduler = vllm_config.scheduler_config.get_scheduler_cls()
+        Scheduler = get_scheduler_cls(vllm_config.scheduler_config, kv_cache_config)
 
         if len(kv_cache_config.kv_cache_groups) == 0:  # noqa: SIM102
             # Encoder models without KV cache don't support
@@ -561,6 +569,16 @@ class EngineCore:
             )
         return metadata
 
+    def admit_stream(self, request: EngineCoreRequest) -> StreamAdmissionResult:
+        """Atomically admit an empty stream; retries never extend its deadline."""
+        admissions = self.scheduler.stream_admissions
+        if admissions is None:
+            raise ValueError("Stream admission requires persistent state")
+        admissions.expire()
+        return admissions.admit(
+            request, reject_new_requests=getattr(self, "reject_new_requests", False)
+        )
+
     def add_request(self, request: Request, request_wave: int = 0):
         """Add request to the scheduler.
 
@@ -601,7 +619,9 @@ class EngineCore:
                 "Disabling ECTransfer for this request."
             )
 
-        self.scheduler.add_request(request)
+        disposition = self.scheduler.add_request(request)
+        if disposition is AddRequestDisposition.REJECTED:
+            return
         if request.abort_immediately:
             # Immediately abort so the connector's request_finished hook runs
             # to free any pre-admission KV-transfer resources.
@@ -719,7 +739,13 @@ class EngineCore:
         # Check for any requests remaining in the scheduler - unfinished,
         # or finished and not yet removed from the batch.
         if not self.scheduler.has_requests():
-            return {}, False
+            # Idle streams need expiry even for in-process callers without a timer.
+            admissions = self.scheduler.stream_admissions
+            if admissions is None:
+                return {}, False
+            admissions.expire()
+            if not self.scheduler.has_requests():
+                return {}, False
         scheduler_output = self.scheduler.schedule(self._should_throttle_prefills())
         future = self.model_executor.execute_model(scheduler_output, non_block=True)
         grammar_output = self.scheduler.get_grammar_bitmask(scheduler_output)
@@ -1261,6 +1287,19 @@ class EngineCore:
         This function could be directly used in input processing thread to allow
         request initialization running in parallel with Model forward
         """
+        if request.stream_admission is not None:
+            admissions = self.scheduler.stream_admissions
+            if admissions is None:
+                raise VLLMValidationError("Stream admission requires persistent state")
+            # Before grammar init, so a refused update has no side effects.
+            if admissions.unsupported_input(request):
+                raise VLLMValidationError("Unsupported parameters for a stream input")
+            # Only here is a validation error reported as a stream rejection; a
+            # never-admitted stream's continuation is decided by the scheduler.
+            if admissions.misplaced_multimodal_input(request):
+                raise VLLMValidationError(
+                    "Multimodal position outside the stream input's prompt"
+                )
         # Note on thread safety: no race condition.
         # `mm_receiver_cache` is reset at the end of LLMEngine init,
         # and will only be accessed in the input processing thread afterwards.
@@ -1824,6 +1863,7 @@ class EngineCoreProc(EngineCore):
             self._handle_client_request(*self._deferred_inputs.popleft())
 
         waited = False
+        admissions = self.scheduler.stream_admissions
         while not self.has_work() and self.is_running():
             # Notify callbacks waiting for engine to become idle.
             self._notify_idle_state_callbacks()
@@ -1836,10 +1876,17 @@ class EngineCoreProc(EngineCore):
                     waited = True
             block = self.process_input_queue_block
             try:
+                deadline = admissions.next_deadline() if admissions else None
                 with get_watch_dog().disable():
-                    req = self.input_queue.get(block=block)
+                    if block and admissions is not None and deadline is not None:
+                        req = self.input_queue.get(
+                            timeout=max(0.0, deadline - admissions.clock())
+                        )
+                    else:
+                        req = self.input_queue.get(block=block)
                 self._handle_client_request(*req)
             except queue.Empty:
+                # Return to step(), which expires idle streams before its early exit.
                 break
             if not block:
                 break
@@ -1996,7 +2043,7 @@ class EngineCoreProc(EngineCore):
             "[shutdown] EngineCore: rejecting new request request_id=%s",
             request.request_id,
         )
-        self._send_abort_outputs_to_client([request.request_id], request.client_index)
+        self._send_rejected_add_output(request, "shutdown", FinishReason.ABORT)
         return True
 
     def _reject_add_while_paused(self, request: Request) -> bool:
@@ -2012,9 +2059,12 @@ class EngineCoreProc(EngineCore):
             message="Generation is paused. Please retry after it resumes.",
             retryable=True,
         )
-        self._send_finish_outputs_to_client(
-            [request.request_id], request.client_index, FinishReason.ERROR, error
-        )
+        if request.stream_admission is None:
+            self._send_finish_outputs_to_client(
+                [request.request_id], request.client_index, FinishReason.ERROR, error
+            )
+        else:
+            self._send_rejected_add_output(request, "engine_paused", error=error)
         if request.kv_transfer_params:
             # Let the KV connector free any remote blocks held for it.
             request.abort_immediately = True
@@ -2351,22 +2401,11 @@ class EngineCoreProc(EngineCore):
             request.request_id,
             err.mm_hashes,
         )
-        self.output_queue.put_nowait(
-            (
-                request.client_index,
-                EngineCoreOutputs(
-                    engine_index=self.engine_index,
-                    finished_requests={request.request_id},
-                    outputs=[
-                        EngineCoreOutput(
-                            request_id=request.request_id,
-                            new_token_ids=[],
-                            finish_reason=FinishReason.ERROR,
-                            mm_cache_miss_hashes=err.mm_hashes,
-                        )
-                    ],
-                ),
-            )
+        self._send_rejected_add_output(
+            request,
+            "mm_cache_miss",
+            mm_cache_miss_hashes=err.mm_hashes,
+            engine_index=self.engine_index,
         )
 
     @staticmethod
@@ -2393,18 +2432,24 @@ class EngineCoreProc(EngineCore):
         logger.exception(
             "Unexpected error pre-processing request %s", request.request_id
         )
-        self._send_error_outputs_to_client([request.request_id], request.client_index)
+        self._send_rejected_add_output(request, "preprocessing_error")
 
     def _handle_request_validation_error(
         self, request: EngineCoreRequest, error: VLLMValidationError
     ) -> None:
         logger.info("Request %s failed validation: %s", request.request_id, error)
-        self._send_finish_outputs_to_client(
-            [request.request_id],
-            request.client_index,
-            FinishReason.ERROR,
-            RequestError(code="validation_error", message=str(error)),
-        )
+        request_error = RequestError(code="validation_error", message=str(error))
+        if request.stream_admission is None:
+            self._send_finish_outputs_to_client(
+                [request.request_id],
+                request.client_index,
+                FinishReason.ERROR,
+                request_error,
+            )
+        else:
+            self._send_rejected_add_output(
+                request, "validation_error", error=request_error
+            )
 
     def pause_scheduler(
         self,
@@ -2533,25 +2578,60 @@ class EngineCoreProc(EngineCore):
         eco = EngineCoreOutputs(finished_requests=req_ids, outputs=outputs)
         self.output_queue.put_nowait((client_index, eco))
 
-    def _send_abort_outputs_to_client(
-        self, req_ids: list[str], client_index: int
+    def _send_rejected_add_output(
+        self,
+        request: EngineCoreRequest | Request,
+        rejection: StreamUpdateRejection,
+        finish_reason: FinishReason = FinishReason.ERROR,
+        *,
+        error: RequestError | None = None,
+        mm_cache_miss_hashes: list[str] | None = None,
+        engine_index: int = 0,
     ) -> None:
-        self._send_finish_outputs_to_client(req_ids, client_index, FinishReason.ABORT)
-
-    def _send_error_outputs_to_client(
-        self, req_ids: list[str], client_index: int
-    ) -> None:
-        self._send_finish_outputs_to_client(req_ids, client_index, FinishReason.ERROR)
+        # Input-thread errors use the incoming identity, never scheduler state.
+        context = request.stream_admission
+        output = EngineCoreOutput(
+            request.request_id,
+            [],
+            finish_reason=finish_reason,
+            error=error,
+            mm_cache_miss_hashes=mm_cache_miss_hashes,
+            stream_output=StreamOutput(context, rejection)
+            if context is not None
+            else None,
+        )
+        eco = EngineCoreOutputs(
+            engine_index=engine_index,
+            finished_requests={request.request_id} if context is None else None,
+            outputs=[output],
+        )
+        self.output_queue.put_nowait((request.client_index, eco))
 
     def _send_abort_outputs(self, aborted_reqs: list[Request]) -> None:
         # TODO(nick) this will be moved inside the scheduler
         if aborted_reqs:
-            # Map client_index to list of request_ids that belong to that client.
-            by_client = defaultdict[int, set[str]](set)
+            # Map client_index to the requests that belong to that client.
+            by_client = defaultdict[int, dict[str, Request]](dict)
             for request in aborted_reqs:
-                by_client[request.client_index].add(request.request_id)
-            for client_index, req_ids in by_client.items():
-                self._send_abort_outputs_to_client(list(req_ids), client_index)
+                by_client[request.client_index][request.request_id] = request
+            for client_index, requests in by_client.items():
+                outputs = [
+                    EngineCoreOutput(
+                        request.request_id,
+                        [],
+                        finish_reason=FinishReason.ABORT,
+                        stream_output=(
+                            StreamOutput(request.stream_admission.closed())
+                            if request.stream_admission is not None
+                            else None
+                        ),
+                    )
+                    for request in requests.values()
+                ]
+                eco = EngineCoreOutputs(
+                    finished_requests=set(requests), outputs=outputs
+                )
+                self.output_queue.put_nowait((client_index, eco))
 
 
 class DPEngineCoreProc(EngineCoreProc):
