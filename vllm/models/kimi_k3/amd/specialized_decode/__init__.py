@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Kimi-K3 specialized decode for ROCm (MI355X, TP8), layer mode: FlyDSL
-MonoKernels per MoE decoder layer on pure spec-verify steps, inside the stock layer
-loop. Enabled by ``additional_config={"decode_backend": "latency_specialized"}``.
+MonoKernels per MoE decoder layer on pure spec-verify steps (K1 / K2 on the KDA
+layers, M1a / M1b / K2 on the MLA layers, DCP1 or DCP8, vLLM's sparse attention
+ops then K2 on Kimi-K3.1's DSA layers), inside the stock layer loop. Enabled by
+``additional_config={"decode_backend": "latency_specialized"}``.
 
 ``hooks.py`` holds the model-side hooks (``SpecializedDecodeMixin``) and
 ``model_state.py`` the model runner state that builds the executor. ``runtime/`` is
