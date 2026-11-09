@@ -117,7 +117,7 @@ Workload: the one-node 14.6K workload (512 closed-loop agents, 16 turns growing 
 | All outputs, second pair | 1,193 s | 500 s | −58% |
 
 - **Delivery.** Every full-depth run delivered 7.44M R3 and indexer rows and 131K hidden rows, 0 missing and 0 wrong in the run's read-back check. Reading every session back took 115 s against 1,560 s on the earlier build.
-- **Cost of the outputs.** Against R3 off on the full-depth engine (394 s), all outputs took 25–27% longer in these runs. That cost has not been broken down.
+- **Cost of the outputs.** Against R3 off on the full-depth engine (394 s), all outputs took 25–27% longer. The arms are like for like: same script, node and flags, only the requested outputs differ. That cost has not been broken down; a per-output breakdown at full depth is queued.
 
 **Decode-end snapshot.** The same workload at full depth with all outputs, on another node: 440.7 s with decode-end snapshots against 492.4 s with prompt-end snapshots only (−10.5%). Per-turn time grew from 25 s to 31 s over the 16 turns, against 25 s to 35 s. 0 missing, 0 wrong. Against bounded replay with all outputs (1,209 s, on the first node; nodes differ by about 4%), that is 63% less time. No prefix-hit counter was recorded, so the gain is not yet attributed to more prefix hits.
 
@@ -128,7 +128,7 @@ Workload: the one-node 14.6K workload (512 closed-loop agents, 16 turns growing 
 
 On DeepSeek-V4.1 the layers past the last KV source (rest of 20, and 21–39) run in eager prefill steps only on each request's trailing rows. The build reads R3 as needing exact rows at every prompt position, so every new row of every request runs through those layers. Removing only the capture hook leaves the cost unchanged; removing that rule removes it. No process shows a Python hot spot; GPU utilization rises from 79% to 90%.
 
-Partial capture (design space, Not adopted) kept the stages and delivered only the deep cells sampled tokens depend on, as per-request cone patches; "blocks only" below is partial capture without the patches.
+Partial capture (design space, Not adopted) kept the stages and delivered only the deep cells (layers 20 and up) that sampled tokens depend on, written at request end as "cone patches": per-request objects holding exactly those cells, which the reader overlaid on the blocks; "blocks only" below is partial capture without the patches.
 
 **Top scenario.** 5 TP4 replicas plus a pool node (700 GB, and 160 GB per replica node), 512K context, 16 turns, 51 sessions in flight per replica, a weight update every step, 4× GB300 per replica. Arms run in sequence on the same nodes; median replica generation time; each arm once.
 
@@ -285,9 +285,16 @@ The hidden state is the input of `lm_head`; the trainer multiplies it by the LM 
 
 So rows are delivered exactly, in the dtype that enters the LM head, float32 on this build: 16 KB per generated token. Recomputing the sampled tokens' logprobs from the delivered rows gives an error of max 7.8e-4 and mean 3e-6; the residual is the checker's own matmul, which is not bitwise equal to vLLM's (first row of the table). In every later regression the max stays at or below 6.7e-4 with 0 bad rows, including across forced preemption. Cost on the 128K one-node workload: within run-to-run noise, with 1.0 GB of hidden states in the run.
 
-## Top-k logprobs inline
+## Top-k logprobs
 
-Top-k logprobs at k = 128 (1 KB per generated token), returned in the response by the frontend. One-node 14.6K workload (512 sessions × 16 turns, 256 generated tokens per turn): 1,164.6 s without top-k, 1,709.7 s with it (+46.8%). The store path (protocol §1) is not built.
+Top-k logprobs at k = 128 (int32 id + fp32 logprob, 1 KB per generated token). One-node 14.6K workload (512 sessions × 16 turns, 256 generated tokens per turn), on the bounded-replay build with partial capture, one run per arm.
+
+| Path | Without top-k | With top-k |
+|---|---|---|
+| Inline, returned in the response by the frontend | 1,164.6 s | 1,709.7 s (+46.8%) |
+| Store, chunked per request like hidden states (both arms on one node) | 1,236.3 s | 1,202.4 s (no measurable cost) |
+
+The store path delivered 131,072 rows with 0 bad rows. The sampled token was in the stored top-128 for 99.3% of rows, and its stored logprob equals the inline sampled logprob exactly.
 
 ## Trainer-side replay and training-inference mismatch (X9)
 
@@ -313,7 +320,7 @@ Top-k logprobs at k = 128 (1 KB per generated token), returned in the response b
 
 Delivered equals exact here as well, and repeats are bitwise identical. The two data sets are different rollouts, so their numbers are not comparable with each other.
 
-**Self-perturbation floor.** To judge the remaining 0.033, the same delivered data was scored twice with one rounding change in the trainer: the LM head in fp32 and in bf16. KL is the k3 estimator per token.
+**Self-perturbation floor.** To judge the remaining 0.033, the same delivered data was scored twice with one rounding change in the trainer: the LM head in fp32 and in bf16. KL is estimated per token at the sampled token with k3 = r − 1 − log r, where r = p_trainer / p_rollout (an unbiased, nonnegative estimator of KL(rollout ‖ trainer)).
 
 | | Mean abs diff | Median | p99 | KL mean | KL median |
 |---|---|---|---|---|---|
@@ -426,7 +433,7 @@ Each row is a defect found by test or review, the test that exposes it, and the 
 | Indexer blocks with rows the request never captured (a hit ending mid-block) were published with pad as valid | GRPO | 118 such blocks per run; invisible to range checks | not published; the computing request publishes them |
 | A fork took the parent's latest tail instead of the tail at the fork point | delayed fork | 5,376 wrong (inline) | 0 |
 | Writer bookkeeping grew without bound | GRPO with session release | 7,422 version records left | 184 (sessions released after the last snapshot) |
-| Speculative decoding: hidden states dropped (1 + num_draft logits rows per request), positions taken from the scheduler's run-ahead token start, hash-lagging blocks and a capture ending on a block boundary left out of the tail, multi-block tails not spliced, the previous request's computation of `aux_start` replaced, a fork's parent-computed block replaced | GRPO and forks with DSpark (`num_speculative_tokens=4`) | up to 504 missing, 46,243 wrong; hidden 127 requests bad | R3 0 missing, 0 wrong of 4.65M; indexer 0 missing; hidden 0 bad; version segments 0 failures |
+| Speculative decoding: hidden states dropped (1 + num_draft logits rows per request), positions taken from the scheduler's run-ahead token start, hash-lagging blocks and a capture ending on a block boundary left out of the tail, multi-block tails not spliced, the previous request's computation of `aux_start` replaced, a fork's parent-computed block replaced | GRPO and forks with speculative decoding (`num_speculative_tokens=4`) | up to 504 missing, 46,243 wrong; hidden 127 requests bad | R3 0 missing, 0 wrong of 4.65M; indexer 0 missing; hidden 0 bad; version segments 0 failures |
 | A block starting before `aux_start` was shared without a version check, so a block spanning the fork point could hand a fork another trajectory's rows | spec-decoding fork, per-trajectory copies forced | 861 wrong | 0 |
 | The fork-point tail was looked up by start position; a later, shorter parent turn overwrote it | spec-decoding fork, per-trajectory copies forced | 7 wrong | 0 |
 | Same-version sharing compared sets of versions, so a mixed v0/v1 block matched an all-v1 computation; identical bytes skipped the version check | review; exact per-position comparison | — | unit cases; regression unchanged |

@@ -6,7 +6,7 @@ The [protocol](protocol.md) is one point in this space. This page lays out each 
 
 A row has to exist for two different reasons:
 
-- **Cache segment.** For positions served by a prefix-cache hit, the rows must exist as long as the KV they belong to. Only outputs recorded at every position need one (R3, indexer, and hidden states when a teacher scores a student's tokens as prompt).
+- **Cache segment.** For positions served by a prefix-cache hit, the rows must exist as long as the KV they belong to. Only outputs recorded at every position need one (R3, indexer, and hidden states or top-k when a teacher scores a student's tokens as prompt; that case is needed by design but not built, protocol §13).
 - **Delivery segment.** From the moment rows are computed until the trainer has consumed them. Every output needs one.
 
 | Output | Positions | Cache segment? | Bytes/token (DeepSeek-V4.1-Flash) | Can the trainer recompute it? |
@@ -14,7 +14,7 @@ A row has to exist for two different reasons:
 | R3 | all | yes | 480 B | no, it must match the rollout's routing |
 | top-k (k = 128) + mask | generated | no | 1 KB + ≤ 1 KB | no, it is the sampling-time distribution |
 | indexer | all | yes | 16 KB raw; compressed 2.5–3.6 KB up to 128K context, ~5.6 KB at 512K | only under BI with the same weights |
-| hidden | generated, or teacher prompt positions | in the teacher case | 16 KB float32 (exact) | no |
+| hidden | generated (teacher prompt positions: not built) | in the teacher case | 16 KB float32 (exact) | no |
 
 ## Cache segment: where rows for prefix hits come from
 
@@ -87,8 +87,8 @@ Rows are labelled with the version of the forward that computed them, stamped wh
 
 ## Encodings
 
-- R3: uint16 ids (384 experts); 9-bit packing would save 44%.
-- Top-k: int32 ids plus fp32 logprobs, k = 128: 1 KB per generated token. Narrower fields (17-bit ids, bf16 logprobs) would about halve it and are not used. Mask: CSR.
+- R3: uint16 ids (384 experts); 9-bit packing would save 7 of 16 bits (44%).
+- Top-k: int32 ids plus fp32 logprobs, k = 128: 1 KB per generated token, through the store in generated chunks (W3); inline it cost 46.8% of rollout time at k = 128 and is not recommended. Narrower fields (17-bit ids, bf16 logprobs) would about halve it and are not used. Mask: CSR.
 - Indexer: 20-bit packing plus zstd, 4.6–6.7× up to 128K context and ~2.9× at 512K; packing on the GPU, zstd on the host. The codec in use stores each cell's ascending positions as deltas split into byte planes before zstd (experiments X6).
 - Hidden: the exact `lm_head` input, uncompressed.
 - Every field carries a codec name.

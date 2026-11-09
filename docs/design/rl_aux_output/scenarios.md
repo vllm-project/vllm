@@ -71,8 +71,8 @@ Deduplication across turns is mandatory at frontier scale. Rewriting the full co
 | indexer, 61 layers | 4.2 TB/s | 1.96 GB/s | 8.0 MB | 1.4B |
 
 Bandwidth is not the constraint for R3, top-k or mask. Object count is:
-- 16-position objects mean ~530K objects/s, more than a single Mooncake master handles unbatched (54K objects/s measured).
-- Larger blocks (64–256 tokens), one object per block holding every output kind, and batched puts (337K objects/s with batches of 16) bring this within budget.
+- 16-position objects mean ~530K objects/s across the cluster. A single Mooncake master's rate at this scale was not measured in these experiments.
+- Larger blocks (64–256 tokens: 4–16× fewer objects), one object per block holding every output kind, and batched puts reduce the rate.
 
 ## 6. Training side: reads per step
 
@@ -93,7 +93,7 @@ per-replica in-flight tokens × 2 × 23B active params / (4 GPUs × 5 PFLOPS FP8
 = 51 × 200K × 46 GFLOP / 8 PFLOPS ≈ 60 s
 ```
 
-That is ≈7.4% of each 807 s interval (MLP only; attention adds more). Frontier-scale runs therefore keep generating across weight versions and reuse older KV rather than recomputing in-flight requests. Prefix hits on blocks computed by an older version are normal.
+That is ≈7.4% of each 807 s interval (MLP only; attention adds more). Frontier-scale runs therefore keep generating across weight versions rather than recomputing in-flight requests at every update, and prefix hits on blocks computed by an older version are normal. In vLLM an in-flight update does reset the GPU prefix cache (protocol §6.6), so after it the old KV survives only in a KV offload tier: the reset keeps the tier unless `reset_connector=True`, and the next turn loads its context from the tier if the tier still holds it, else recomputes it (experiments E0).
 
 ## 8. Constraints on the design
 
@@ -141,4 +141,4 @@ Setup: TP4 + EP4, BI on. The frontier column keeps the workload from section 1 a
   - Indexer: ≈54 GB raw; compressed ≈10 GB at contexts up to 128K and ≈19 GB at 512K.
 - **Indexer compression.** Selections are bitwise reproducible under BI. zstd gains less as contexts grow, because the selected positions spread over the whole sequence: compressed, the indexer is 5–7× R3 up to 128K and about 12× at 512K. The frontier mean of 200K lies between the two rows; size stores with the 512K row. Either way it fits in the same delivery store.
 - **Hidden states.** Delivered exactly, the trainer's `lm_head` reproduces vLLM's distribution up to its own matmul (logprob error max 7.8e-4). The behavior logprob must still come from the inline per-token logprob, because recomputed logits are not bitwise equal.
-- **Top-k logprobs.** k = 128 at generated positions, 1 KB per generated token. Today they are returned inline, which on the one-node 14.6K workload made rollouts 46.8% longer (experiments: top-k inline). A store path like that of hidden states is planned (protocol §1).
+- **Top-k logprobs.** k = 128 at generated positions, 1 KB per generated token, delivered through the store in chunks like hidden states. Through the store they had no measurable cost on the one-node 14.6K workload; inline they made rollouts 46.8% longer (experiments: top-k logprobs).
