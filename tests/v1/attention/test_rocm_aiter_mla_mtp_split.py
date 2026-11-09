@@ -1357,19 +1357,27 @@ def _large_batch_cases():
     return cases
 
 
+def _mtp_len_cases():
+    """MTP widths 1, 3 (not a power of two) and 7: uniform with a dummy row,
+    mixed lengths, and mixed lengths under adaptive verification."""
+    cases = [(8, 1, [1, 1, 1], False), (8, 1, [1, 1, 0], False)]
+    for w in (3, 4, 7):
+        mixed = [w - 1, 1, w, 0]
+        cases += [
+            (8, w, [w, w, 0, 0], False),
+            (8, w, mixed, False),
+            (8, w, [w, w, 0, 0], True),
+            (8, w, mixed, True),
+        ]
+    return cases
+
+
 @pytest.mark.skipif(
     not torch.cuda.is_available(), reason="the fused indptr build is a Triton kernel"
 )
 @pytest.mark.parametrize(
     "max_reqs,mtp_qlen,qo_lens,varlen",
-    [
-        (8, 1, [1, 1, 1], False),
-        (8, 4, [4, 4, 0, 0], False),
-        (8, 4, [3, 1, 4, 0], False),
-        (8, 4, [4, 4, 0, 0], True),
-        (8, 4, [3, 1, 4, 0], True),
-        *_large_batch_cases(),
-    ],
+    [*_mtp_len_cases(), *_large_batch_cases()],
 )
 def test_full_cudagraph_fused_decode_indptr_matches_eager(
     full_graph_decode_mocks, max_reqs, mtp_qlen, qo_lens, varlen
