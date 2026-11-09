@@ -31,10 +31,6 @@ from vllm.v1.attention.ops.triton_attention_helpers import (
 )
 from vllm.v1.kv_cache_interface import KVQuantMode
 
-# Devices already registered with set_triton_allocator(); avoids a redundant
-# call on every unified_attention() forward pass when USE_TD is on.
-_TD_ALLOCATOR_DEVICES: set[torch.device] = set()
-
 logger = init_logger(__name__)
 is_batch_invariant = envs.VLLM_BATCH_INVARIANT
 float8_info = torch.finfo(current_platform.fp8_dtype())
@@ -1369,14 +1365,12 @@ def unified_attention(
     if launch_num_stages is not None:
         launch_kwargs["num_stages"] = launch_num_stages
 
-    if use_td and q.device not in _TD_ALLOCATOR_DEVICES:
+    if use_td:
         # The hoisted 3D descriptor requires a PyTorch-backed scratch
         # allocator to be registered (Triton raises "no allocator was
-        # set" otherwise on CUDA TD paths). Same pattern as fused_moe /
-        # GDN / LoRA's TD paths; cached per device like the newer
-        # triton_scaled_mm TD path, since this call site is per-forward-pass.
+        # set" otherwise on CUDA TD paths). Register it in the current
+        # Triton context before launching the TD kernel.
         set_triton_allocator(q.device)
-        _TD_ALLOCATOR_DEVICES.add(q.device)
 
     kernel_unified_attention[grid](
         output_ptr=out,
