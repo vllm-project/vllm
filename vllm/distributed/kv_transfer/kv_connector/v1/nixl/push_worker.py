@@ -1012,7 +1012,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         done_sending = results.finished_sending
 
         # A request retired before its count completed would leak its flag.
-        self._failed_write_reqs.difference_update(done_recving)
+        self._failed_write_reqs.difference_update(results.finished_recving)
 
         # ``_pop_done_transfers`` mutates ``_sending_transfers``; the
         # writer thread also appends to it, so guard the pop.
