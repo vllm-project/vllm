@@ -18,6 +18,9 @@ from vllm.model_executor.kernels.linear import (
 from vllm.model_executor.layers.fusion.quant_activation import (
     expose_input_quant_key,
 )
+from vllm.model_executor.layers.quantization.input_hadamard import (
+    InputHadamardFusable,
+)
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     MXFP8_SCALE_DTYPE,
     MXFP8_VALUE_DTYPE,
@@ -47,7 +50,7 @@ from .quark_scheme import QuarkScheme
 logger = init_logger(__name__)
 
 
-class QuarkOCP_MX(QuarkScheme):
+class QuarkOCP_MX(QuarkScheme, InputHadamardFusable):
     ocp_mx_linear: MxFp6LinearKernel | MxFp4LinearKernel | Mxfp8LinearKernel
     supported_activation_quant_keys = [*_ACTIVATION_QUANT_KEY_MAP.values(), None]
     supported_weight_quant_keys = [*_WEIGHT_QUANT_KEY_MAP.values()]

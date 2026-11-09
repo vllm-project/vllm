@@ -29,6 +29,9 @@ from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     mxfp4_round_up_hidden_size_and_intermediate_size,
     select_mxfp4_moe_backend,
 )
+from vllm.model_executor.layers.quantization.input_hadamard import (
+    InputHadamardFusable,
+)
 from vllm.model_executor.layers.quantization.online.fp8 import (
     OnlineLinearBase,
 )
@@ -76,7 +79,7 @@ def _quantize_mxfp4_moe_weight(
     return w_quant, w_scales
 
 
-class Mxfp4OnlineLinearMethod(OnlineLinearBase):
+class Mxfp4OnlineLinearMethod(OnlineLinearBase, InputHadamardFusable):
     """Online MXFP4 linear method.
     Loads bf16/fp16 checkpoints and quantizes weights to MXFP4 (microscaling
     FP4 with block-32 scales) during weight loading.

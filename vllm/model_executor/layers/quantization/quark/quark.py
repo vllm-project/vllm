@@ -24,6 +24,7 @@ from vllm.model_executor.layers.quantization.base_config import (  # noqa: E501
     QuantizeMethodBase,
 )
 from vllm.model_executor.layers.quantization.input_hadamard import (
+    InputHadamardFusable,
     InputHadamardLinearMethod,
 )
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
@@ -1035,7 +1036,7 @@ class QuarkConfig(QuantizationConfig):
         return cache_scale_mapper | QuantizationConfig.get_cache_scale_mapper()
 
 
-class QuarkLinearMethod(LinearMethodBase):
+class QuarkLinearMethod(LinearMethodBase, InputHadamardFusable):
     def __init__(self, quantization_config: QuarkConfig):
         self.quantization_config = quantization_config
 
@@ -1102,7 +1103,10 @@ class QuarkLinearMethod(LinearMethodBase):
         return scheme.apply_weights(layer, x, bias=bias)
 
     def fuse_input_hadamard(self, layer: torch.nn.Module, size: int) -> bool:
-        return layer.scheme.fuse_input_hadamard(layer, size)
+        scheme = layer.scheme
+        return isinstance(scheme, InputHadamardFusable) and (
+            scheme.fuse_input_hadamard(layer, size)
+        )
 
 
 class QuarkKVCacheMethod(BaseKVCacheMethod):

@@ -14,6 +14,7 @@ from vllm.model_executor.kernels.linear.mxfp4.emulation import (
 )
 from vllm.model_executor.layers.linear import LinearMethodBase
 from vllm.model_executor.layers.quantization.input_hadamard import (
+    InputHadamardFusable,
     InputHadamardLinearMethod,
     block_hadamard_rotate,
     hadamard_matrix,
@@ -182,7 +183,7 @@ def test_layerwise_reload(rotate_weight: bool, default_vllm_config):
     torch.testing.assert_close(method.apply(layer, x), x @ w.T, rtol=1e-4, atol=1e-4)
 
 
-class _FusingMethod(_DenseOnlineMethod):
+class _FusingMethod(_DenseOnlineMethod, InputHadamardFusable):
     """Takes the rotation over and records the input `apply` receives."""
 
     def fuse_input_hadamard(self, layer, size):

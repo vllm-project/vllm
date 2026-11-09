@@ -169,7 +169,7 @@ class AiterMxfp4LinearKernel(MxFp4LinearKernel):
         super().__init__(config)
         self.asm_gemm_supported = rocm_aiter_ops.is_asm_fp4_gemm_supported()
         self.use_asm_gemm = False
-        self.hadamard_rotate = False
+        self.is_hadamard_fused = False
         self.out_dtype = torch.get_default_dtype()
 
     @classmethod
@@ -249,8 +249,8 @@ class AiterMxfp4LinearKernel(MxFp4LinearKernel):
 
     def fuse_input_hadamard(self, size: int) -> bool:
         # Only the HIP activation quant of the ASM path rotates, in 32-blocks.
-        self.hadamard_rotate = self.use_asm_gemm and size == 32
-        return self.hadamard_rotate
+        self.is_hadamard_fused = self.use_asm_gemm and size == 32
+        return self.is_hadamard_fused
 
     def apply_weights(
         self,
@@ -264,7 +264,7 @@ class AiterMxfp4LinearKernel(MxFp4LinearKernel):
             layer.weight_scale,
             self.use_asm_gemm,
             self.out_dtype,
-            hadamard_rotate=self.hadamard_rotate,
+            hadamard_rotate=self.is_hadamard_fused,
         )
         if bias is not None:
             y = y + bias

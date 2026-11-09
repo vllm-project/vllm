@@ -45,6 +45,17 @@ def block_hadamard_rotate(x: torch.Tensor, hadamard: torch.Tensor) -> torch.Tens
     return rotated.flatten(-2).to(x.dtype)
 
 
+class InputHadamardFusable:
+    """Mixin for a linear method that can take over the input rotation of
+    `InputHadamardLinearMethod`, for example inside its activation quant."""
+
+    def fuse_input_hadamard(self, layer: torch.nn.Module, size: int) -> bool:
+        """Called after `process_weights_after_loading`. Return True only if
+        `apply` will now rotate each contiguous `size`-wide block of the input
+        by the orthonormal Sylvester Hadamard matrix itself."""
+        raise NotImplementedError
+
+
 @register_weight_loader_v2_supported_method
 class InputHadamardLinearMethod(LinearMethodBase):
     """Wraps a linear method and rotates the layer input by an orthonormal
@@ -58,7 +69,7 @@ class InputHadamardLinearMethod(LinearMethodBase):
     (+-1) Sylvester matrix, which is checked and then dropped.
 
     The activation rotation runs in PyTorch unless the wrapped method takes it
-    over through `LinearMethodBase.fuse_input_hadamard`.
+    over through `InputHadamardFusable`.
     """
 
     def __init__(
@@ -139,9 +150,9 @@ class InputHadamardLinearMethod(LinearMethodBase):
                     )
                 del layer.input_rotation
         self.quant_method.process_weights_after_loading(layer)
-        layer.input_hadamard_fused = self.quant_method.fuse_input_hadamard(
-            layer, self.size
-        )
+        layer.input_hadamard_fused = isinstance(
+            self.quant_method, InputHadamardFusable
+        ) and self.quant_method.fuse_input_hadamard(layer, self.size)
         if layer.input_hadamard_fused:
             logger.info_once(
                 "%s rotates its input by the %d-wide Hadamard matrix itself.",
