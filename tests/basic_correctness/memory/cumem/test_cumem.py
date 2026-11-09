@@ -100,18 +100,20 @@ def sleep_and_check_backups(llm, level: int) -> dict[int, tuple]:
 
 def _wake_up_with_poisoned_mappings(allocator, byte_value: int = 0xA5) -> None:
     """Wake discarded allocations with deterministic nonzero contents."""
-    original_create_and_map = cumem.create_and_map
+    original_create_and_map = cumem.CuMemAllocator._create_and_map
 
     def create_and_map_with_poison(handle) -> None:
         original_create_and_map(handle)
         _, size, ptr, _ = handle
         cumem.libcudart.cudaMemset(ptr, byte_value, size)
 
-    cumem.create_and_map = create_and_map_with_poison
-    try:
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setattr(
+            cumem.CuMemAllocator,
+            "_create_and_map",
+            staticmethod(create_and_map_with_poison),
+        )
         allocator.wake_up()
-    finally:
-        cumem.create_and_map = original_create_and_map
 
 
 @create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
