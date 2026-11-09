@@ -244,8 +244,6 @@ class TokenspeedMLAImpl(MLACommonImpl[MLACommonMetadata]):
                 config.compilation_config.max_cudagraph_capture_size or 0,
             )
 
-        self.softmax_scale: float | None = None
-        self.output_scale: float | None = None
         # NIXL resolves interleaving after model construction; retain the config
         # rather than caching its initial interleave size.
         self._parallel_config = config.parallel_config
@@ -308,15 +306,13 @@ class TokenspeedMLAImpl(MLACommonImpl[MLACommonMetadata]):
         else:
             q = q.view(num_decodes, -1, q.shape[-2], q.shape[-1])
 
-        if self.softmax_scale is None:
-            # FP8 KV cache is mandatory for this backend, so q_scale/k_scale
-            # always apply. softmax_scale is bmm1; output_scale is bmm2 — both
-            # required to recover the correct attention output from the FP8
-            # KV cache (V is stored as V_real/k_scale).
-            self.softmax_scale = (
-                self.scale * layer._q_scale_float * layer._k_scale_float
-            )
-            self.output_scale = layer._k_scale_float
+        # FP8 KV cache is mandatory for this backend, so q_scale/k_scale
+        # always apply. softmax_scale is bmm1; output_scale is bmm2 — both
+        # required to recover the correct attention output from the FP8
+        # KV cache (V is stored as V_real/k_scale). Read at every forward:
+        # a reload can change the q/k scales.
+        softmax_scale = self.scale * layer._q_scale_float * layer._k_scale_float
+        output_scale = layer._k_scale_float
 
         workspace = _get_workspace(
             q.device,
@@ -338,8 +334,8 @@ class TokenspeedMLAImpl(MLACommonImpl[MLACommonMetadata]):
             block_tables=block_tables,
             seq_lens=seq_lens,
             max_seq_len=attn_metadata.max_seq_len,
-            softmax_scale=self.softmax_scale,
-            output_scale=self.output_scale,
+            softmax_scale=softmax_scale,
+            output_scale=output_scale,
             enable_pdl=False,
             return_lse=return_lse,
             causal_mask=attn_metadata.causal,
