@@ -174,7 +174,9 @@ class DeepseekV32DecoderLayer(torch.nn.Module):
             hidden_states, residual = self.post_attention_layernorm(
                 hidden_states, residual
             )
-        elif self.replicate_attn:
+        elif self.replicate_attn and not self.self_attn.use_tp_path(
+            hidden_states.shape[0]
+        ):
             # Replicated attention output is already complete on every rank.
             hidden_states, residual = self.post_attention_layernorm(
                 hidden_states, residual

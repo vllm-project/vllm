@@ -223,7 +223,7 @@ class FlashInferMLASparseSM120Impl(SparseMLACommonImpl[FlashInferMLASparseMetada
         num_actual_toks = q.shape[0]
 
         output = q.new_empty(
-            (num_actual_toks, self.num_heads, self.kv_lora_rank),
+            (num_actual_toks, q.shape[1], self.kv_lora_rank),
             dtype=q.dtype,
         )
 

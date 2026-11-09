@@ -223,6 +223,7 @@ if TYPE_CHECKING:
     VLLM_KIMI_K3_GEMM_AR: bool = True
     VLLM_ENABLE_GEMM_RS: bool = False
     VLLM_DSA_REPLICATE_ATTN: bool = False
+    VLLM_DSA_REPLICATE_ATTN_MIN_TOKENS: int = 0
     VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER: bool = True
     VLLM_USE_FLASHINFER_MOE_INT4: bool = False
     VLLM_USE_LOCALITY_DOMAINS: bool = False
@@ -1761,6 +1762,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # tensor-parallel. For TP over slow links.
     "VLLM_DSA_REPLICATE_ATTN": lambda: bool(
         int(os.getenv("VLLM_DSA_REPLICATE_ATTN", "0"))
+    ),
+    # With VLLM_DSA_REPLICATE_ATTN, steps with fewer tokens than this run the
+    # attention head-sharded on slices of the replicated weights, then all-reduce.
+    "VLLM_DSA_REPLICATE_ATTN_MIN_TOKENS": lambda: int(
+        os.getenv("VLLM_DSA_REPLICATE_ATTN_MIN_TOKENS", "0")
     ),
     # Allow use of FlashInfer FP8 block-scale GEMM for linear layers.
     # This uses TensorRT-LLM kernels and requires SM90+ (Hopper).
