@@ -30,8 +30,6 @@ class _NVIDIABackend:
         k: torch.Tensor,
         v: torch.Tensor,
     ) -> torch.Tensor:
-        if attention.v_scale is not None:
-            v = v * attention.v_scale
         cache, slots = None, None
         mapping = get_forward_context().slot_mapping
         assert isinstance(mapping, dict)

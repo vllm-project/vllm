@@ -3,6 +3,7 @@
 
 import torch
 
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
 
@@ -39,9 +40,7 @@ def _conv_residual_norm_kernel(
         coefficient = tl.load(BASE + tap * WIDTH + col, valid, 0).to(
             tl.float32
         ) + tl.load(
-            DELTA + row * DELTA_ROW_STRIDE + tap * DELTA_TAP_STRIDE + group,
-            valid,
-            0,
+            DELTA + row * DELTA_ROW_STRIDE + tap * DELTA_TAP_STRIDE + group, valid, 0
         ).to(tl.float32)
         value = tl.load(X + (row - tap) * X_STRIDE + col, valid, 0).to(tl.float32)
         result = tl.fma(coefficient, value, result)
@@ -51,11 +50,8 @@ def _conv_residual_norm_kernel(
     tl.store(RESIDUAL + row * RESIDUAL_STRIDE + col, result, mask)
     variance = tl.sum(result * result, 0) / WIDTH
     weight = tl.load(WEIGHT + col, mask, 0).to(tl.float32)
-    tl.store(
-        OUTPUT + row * WIDTH + col,
-        result * tl.rsqrt(variance + EPS) * weight,
-        mask,
-    )
+    normalized = result * tl.rsqrt(variance + EPS) * weight
+    tl.store(OUTPUT + row * WIDTH + col, normalized, mask)
 
 
 def conv_residual_norm(
@@ -72,13 +68,13 @@ def conv_residual_norm(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Finish grouped convolution and update the residual before RMSNorm."""
     rows, width = hidden.shape
-    block = triton.next_power_of_2(width)
     if num_warps is None:
         num_warps = 16 if rows <= 256 else (8 if rows < 4096 else 4)
-    # Extra 64-lane wavefronts replicate the block, and a replica can reload
-    # RESIDUAL after another wavefront has updated it in place.
-    # https://github.com/triton-lang/triton/issues/12616
-    num_warps = min(num_warps, max(1, block // 64))
+    if current_platform.is_rocm():
+        # Extra 64-lane wavefronts replicate the block, and a replica can reload
+        # RESIDUAL after another wavefront has updated it in place.
+        # https://github.com/triton-lang/triton/issues/12616
+        num_warps = min(num_warps, max(1, triton.next_power_of_2(width) // 64))
     output = torch.empty_like(hidden)
     if rows:
         _conv_residual_norm_kernel[(rows,)](
@@ -97,7 +93,7 @@ def conv_residual_norm(
             base.shape[0],
             query_len,
             eps,
-            block,
+            triton.next_power_of_2(width),
             num_warps=num_warps,
             enable_fp_fusion=False,
         )

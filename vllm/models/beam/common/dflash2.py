@@ -138,7 +138,6 @@ class DFlash2BeamAttention(nn.Module):
         )
         self.q_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
         self.k_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
-        self.v_scale = config.dflash_config.get("attention_value_scale")
         backend.configure_attention(self)
 
     def forward(
@@ -337,9 +336,6 @@ class DFlash2BeamModel(nn.Module):
         self.config = config
         draft_config = config.dflash_config
         params_dtype = vllm_config.model_config.dtype
-        self.input_embedding_scale = float(
-            draft_config.get("input_embedding_scale", 1.0)
-        )
 
         # Replaced by the target's embedding when the speculator loads the draft.
         self.embed_tokens = VocabParallelEmbedding(
@@ -364,11 +360,8 @@ class DFlash2BeamModel(nn.Module):
             ]
         )
 
-        target_hidden_size = (
-            getattr(config, "target_hidden_size", None) or config.hidden_size
-        )
         self.fc = ReplicatedLinear(
-            target_hidden_size * len(draft_config["target_layer_ids"]),
+            config.hidden_size * len(draft_config["target_layer_ids"]),
             config.hidden_size,
             bias=False,
             params_dtype=params_dtype,
@@ -388,10 +381,7 @@ class DFlash2BeamModel(nn.Module):
         )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
-        embeds = self.embed_tokens(input_ids)
-        if self.input_embedding_scale != 1.0:
-            embeds = embeds * self.input_embedding_scale
-        return embeds
+        return self.embed_tokens(input_ids)
 
     def build_context_kv_weights(self) -> None:
         """Stack every layer's K/V projection and K-norm weight.
@@ -508,11 +498,9 @@ class DFlash2BeamForCausalLM(nn.Module):
             prefix=maybe_prefix(prefix, "lm_head"),
         )
         draft_config = self.config.dflash_config
-        softcap = float(draft_config.get("final_logit_softcapping") or 0.0)
         self.logits_processor = LogitsProcessor(
             self.config.vocab_size,
-            scale=float(draft_config.get("output_multiplier", 1.0)),
-            soft_cap=softcap if softcap > 0 else None,
+            soft_cap=float(draft_config["final_logit_softcapping"]),
         )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:

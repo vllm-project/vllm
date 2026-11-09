@@ -39,8 +39,6 @@ class _AMDBackend:
         k: torch.Tensor,
         v: torch.Tensor,
     ) -> torch.Tensor:
-        if attention.v_scale is not None:
-            v = v * attention.v_scale
         cache, slots = None, None
         mapping = get_forward_context().slot_mapping
         assert isinstance(mapping, dict)
@@ -91,8 +89,6 @@ class _AMDBackend:
             positions,
             rotary.cos_sin_cache,
             first.k_norm.variance_epsilon,
-            first.v_scale if first.v_scale is not None else 1.0,
-            rotary.is_neox_style,
         )
         if slot_mapping is None:
             return

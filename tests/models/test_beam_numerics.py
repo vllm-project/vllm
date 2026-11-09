@@ -306,6 +306,45 @@ def test_qk_norm_rope_inserts_only_mapped_kv(rows, kv_heads, nhd, rotary_dim, ne
     torch.testing.assert_close(cache, reference_cache, rtol=0, atol=0)
 
 
+@pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="CUDA required")
+@pytest.mark.parametrize("dim", [64, 128])
+@torch.inference_mode()
+def test_context_kv_store_matches_transform(dim):
+    """The CUDA scatter and the ROCm transform produce the same context K/V."""
+    from vllm.models.beam.amd.dflash2_context_ops import transform_context_kv
+    from vllm.models.beam.nvidia.dflash2_context_ops import store_context_kv
+
+    torch.manual_seed(42)
+    rows, layers, heads, page = 37, 3, 2, 16
+    kv = torch.randn(rows, layers, 2, heads, dim, device="cuda", dtype=torch.bfloat16)
+    weight = torch.randn(layers, dim, device="cuda", dtype=torch.bfloat16)
+    positions = torch.randperm(4 * rows, device="cuda")[:rows]
+    rope = torch.randn(4 * rows, dim, device="cuda", dtype=torch.bfloat16)
+    pages = rows // page + 2
+    caches = [
+        torch.zeros(pages, heads, page, 2 * dim, device="cuda", dtype=kv.dtype)
+        for _ in range(layers)
+    ]
+    cache_ptrs = torch.tensor(
+        [cache.data_ptr() for cache in caches], dtype=torch.int64, device="cuda"
+    )
+    slots = torch.randperm(pages * page, device="cuda")[:rows]
+    slots[-1] = -1
+
+    store_context_kv(kv, weight, positions, rope, cache_ptrs, slots, caches[0], 1e-6)
+    keys, values = transform_context_kv(kv, weight, positions, rope, 1e-6)
+    torch.testing.assert_close(values, kv[:, :, 1].transpose(0, 1), rtol=0, atol=0)
+    live = slots >= 0
+    mapped = slots[live]
+    for layer, cache in enumerate(caches):
+        stored = cache[mapped // page, :, mapped % page]
+        torch.testing.assert_close(stored[..., :dim], keys[layer][live], rtol=0, atol=0)
+        torch.testing.assert_close(
+            stored[..., dim:], values[layer][live], rtol=0, atol=0
+        )
+        assert cache.count_nonzero() == stored.count_nonzero()
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
 @torch.inference_mode()
