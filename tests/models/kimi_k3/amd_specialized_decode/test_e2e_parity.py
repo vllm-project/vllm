@@ -618,8 +618,8 @@ def _mfma_var(x, w, blocks: int):
 
     from tests.models.kimi_k3.amd_specialized_decode import test_numerics as N
 
-    c = torch.einsum("thk,hnk->thn", x, w)
-    t2 = torch.einsum("thk,hnk->thn", x * x, w * w)
+    c = torch.einsum("bhk,hnk->bhn", x, w)
+    t2 = torch.einsum("bhk,hnk->bhn", x * x, w * w)
     return c, 2 * N._sum_var(t2, c, blocks + 129)
 
 
