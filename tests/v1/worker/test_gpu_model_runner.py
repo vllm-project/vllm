@@ -1242,6 +1242,38 @@ def test_dummy_sampler_run_warms_all_greedy_rejection_sampler(monkeypatch):
     synchronize.assert_called_once_with()
 
 
+@pytest.mark.parametrize("use_ubatching", [True, False])
+def test_profile_run_sizes_unsplit_step_under_microbatching(monkeypatch, use_ubatching):
+    runner = object.__new__(GPUModelRunner)
+    runner.supports_mm_inputs = False
+    runner.parallel_config = SimpleNamespace(use_ubatching=use_ubatching)
+    runner.max_num_tokens = 64
+    runner.is_pooling_model = False
+    runner.encoder_cache = {}
+    runner._dummy_run = Mock(return_value=(torch.zeros(1), torch.zeros(1)))
+    runner._dummy_sampler_run = Mock()
+    runner._sync_device = Mock()
+    monkeypatch.setattr(
+        gpu_model_runner_module,
+        "get_pp_group",
+        lambda: SimpleNamespace(is_last_rank=True),
+    )
+
+    GPUModelRunner.profile_run(runner)
+
+    calls = runner._dummy_run.call_args_list
+    assert len(calls) == (2 if use_ubatching else 1)
+    if use_ubatching:
+        unsplit = calls[0]
+        assert unsplit.args == (64,)
+        assert unsplit.kwargs["allow_microbatching"] is False
+        assert unsplit.kwargs["is_profile"] is True
+    final = calls[-1]
+    assert final.args == (64,)
+    assert final.kwargs.get("allow_microbatching", True) is True
+    runner._dummy_sampler_run.assert_called_once()
+
+
 def test_invalid_draft_suffixes_remain_rejected_in_metadata():
     runner = object.__new__(GPUModelRunner)
     runner.device = torch.device("cpu")

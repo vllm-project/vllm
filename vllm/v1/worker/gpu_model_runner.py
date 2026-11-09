@@ -6224,6 +6224,17 @@ class GPUModelRunner(
                         for i, output in enumerate(dummy_encoder_outputs):
                             self.encoder_cache[f"tmp_{i}"] = output
 
+        if self.parallel_config.use_ubatching:
+            # A step can still run unsplit under microbatching, using the
+            # first workspace slot at full size. The workspace is locked after
+            # warmup, so that size has to be reached here too.
+            self._dummy_run(
+                self.max_num_tokens,
+                allow_microbatching=False,
+                is_profile=True,
+                randomize_inputs=randomize_inputs,
+            )
+
         # Add `is_profile` here to pre-allocate communication buffers
         hidden_states, last_hidden_states = self._dummy_run(
             self.max_num_tokens, is_profile=True, randomize_inputs=randomize_inputs
