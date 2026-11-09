@@ -7,7 +7,6 @@ from typing import Any
 
 import regex as re
 
-from vllm.entrypoints.chat_utils import make_tool_call_id
 from vllm.entrypoints.generate.base.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
@@ -21,6 +20,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionToolsParam,
 )
 from vllm.logger import init_logger
+from vllm.renderers.chat_utils import make_tool_call_id
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import (
     Tool,
@@ -105,7 +105,7 @@ class HYV3ToolParser(ToolParser):
         - oneOf  → return the oneOf list
         - fallback → [{"type": "string"}]
 
-        Note: single ``type`` has the highest priority.
+        Note: single `type` has the highest priority.
         """
         if "type" in arg_schema:
             type_val = arg_schema["type"]
@@ -539,11 +539,11 @@ class HYV3ToolParser(ToolParser):
         Strategy:
         - Track completed args and emit each one as a JSON fragment.
         - For string-typed args, stream the value character-by-character.
-        - Withhold the closing ``}`` until ``</tool_call>`` is seen.
+        - Withhold the closing `}` until `</tool_call>` is seen.
 
         We build JSON manually via fragments rather than using json.dumps
         with a cursor, because json.dumps of partial-vs-full string values
-        produces incompatible prefixes (e.g. ``""}`` vs ``"Hello"}``).
+        produces incompatible prefixes (e.g. `""}` vs `"Hello"}`).
         """
         buf = self._buffer
         is_complete = self.tool_call_end_token in buf

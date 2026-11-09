@@ -22,7 +22,7 @@ from tests.utils import (
 from vllm.distributed import get_tp_group
 from vllm.model_executor.layers.fused_moe.runner import moe_runner
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import ReplicatedLinear
+from vllm.model_executor.layers.linear import ColumnParallelLinear, ReplicatedLinear
 from vllm.models.kimi_k3.amd import latent_moe_runner
 from vllm.models.kimi_k3.amd.latent_moe_runner import ROCmLatentMoERunner
 from vllm.models.kimi_k3.amd.linear import KimiRoutedOutputTransform
@@ -40,20 +40,42 @@ EPS = 1e-5
 DTYPE = torch.bfloat16
 
 
-def _build_transform(device: torch.device) -> KimiRoutedOutputTransform:
+def _build_transform(
+    device: torch.device, *, row_sharded: bool = False
+) -> tuple[KimiRoutedOutputTransform, torch.Tensor]:
     norm = RMSNorm(LATENT_SIZE, eps=EPS).to(device=device, dtype=DTYPE)
-    up_proj = ReplicatedLinear(
-        LATENT_SIZE,
-        HIDDEN_SIZE,
-        bias=False,
-        params_dtype=DTYPE,
-        prefix="routed_expert_up_proj",
-    ).to(device=device)
 
     torch.manual_seed(0)
     norm.weight.data.copy_(1 + 0.1 * torch.randn_like(norm.weight))
-    up_proj.weight.data.copy_(torch.randn_like(up_proj.weight) / LATENT_SIZE**0.5)
-    return KimiRoutedOutputTransform(norm, up_proj)
+    full_weight = (
+        torch.randn(HIDDEN_SIZE, LATENT_SIZE, device=device, dtype=DTYPE)
+        / LATENT_SIZE**0.5
+    )
+
+    up_proj: ReplicatedLinear | ColumnParallelLinear
+    if row_sharded:
+        up_proj = ColumnParallelLinear(
+            LATENT_SIZE,
+            HIDDEN_SIZE,
+            bias=False,
+            gather_output=True,
+            params_dtype=DTYPE,
+            prefix="routed_expert_up_proj",
+        ).to(device=device)
+        up_proj.weight_loader(up_proj.weight, full_weight)
+    else:
+        up_proj = ReplicatedLinear(
+            LATENT_SIZE,
+            HIDDEN_SIZE,
+            bias=False,
+            params_dtype=DTYPE,
+            prefix="routed_expert_up_proj",
+        ).to(device=device)
+        up_proj.weight.data.copy_(full_weight)
+    return (
+        KimiRoutedOutputTransform(norm, up_proj, row_sharded=row_sharded),
+        full_weight,
+    )
 
 
 def _tail_runner(
@@ -61,17 +83,18 @@ def _tail_runner(
 ) -> ROCmLatentMoERunner:
     """A runner carrying only what the tail reads, so no engine is needed.
 
-    ``_maybe_reduce_final_output`` is left as the real base-class method, so the
+    `_maybe_reduce_final_output` is left as the real base-class method, so the
     all-reduce that stitches the shards is the real collective.
 
-    ``tp_world`` is the size of the TP process group, which is what the hidden
+    `tp_world` is the size of the TP process group, which is what the hidden
     dim is split by. Under expert parallelism the MoE config reports
-    ``tp_size=1``/``ep_size=tp_world`` for that same group, so ``use_ep`` pins
+    `tp_size=1`/`ep_size=tp_world` for that same group, so `use_ep` pins
     that the final reduce still fires.
     """
     runner = object.__new__(ROCmLatentMoERunner)
     attrs = {
         "routed_output_transform": transform,
+        "_up_proj_preshard": bool(getattr(transform, "row_sharded", False)),
         "_up_proj_shard_size": HIDDEN_SIZE // tp_world,
         "_logged_sharded_tail": False,
         "moe_config": SimpleNamespace(
@@ -101,9 +124,14 @@ def _rank_partials(
 
 
 def _check_matches_replicated(
-    device: torch.device, tp_world: int, rank: int, use_ep: bool = False
+    device: torch.device,
+    tp_world: int,
+    rank: int,
+    use_ep: bool = False,
+    row_sharded: bool = False,
 ) -> None:
-    transform = _build_transform(device)
+    transform, up_weight = _build_transform(device, row_sharded=row_sharded)
+    assert transform.norm is not None
     runner = _tail_runner(transform, tp_world, use_ep)
     group = get_tp_group().device_group
 
@@ -118,7 +146,7 @@ def _check_matches_replicated(
                 transform.norm.weight,
                 EPS,
             ),
-            transform.up_proj.weight,
+            up_weight,
         )
         expected.add_(_all_reduced(shared_output, group))
 
@@ -132,8 +160,34 @@ def _check_matches_replicated_under_ep(
 ) -> None:
     """The served config: the routed experts are expert-parallel, so the MoE
     config reports no tensor parallelism at all for a group that still splits
-    the hidden dim ``tp_world`` ways."""
+    the hidden dim `tp_world` ways."""
     _check_matches_replicated(device, tp_world, rank, use_ep=True)
+
+
+def _check_presharded_matches_replicated(
+    device: torch.device, tp_world: int, rank: int
+) -> None:
+    _check_matches_replicated(device, tp_world, rank, row_sharded=True)
+
+
+def _check_unfused_tail_gathers_full_hidden(
+    device: torch.device, tp_world: int, rank: int
+) -> None:
+    transform, up_weight = _build_transform(device, row_sharded=True)
+    assert transform.up_proj.weight.shape[0] == HIDDEN_SIZE // tp_world
+    assert transform.norm is not None
+
+    # all-gather reconstructs the full projection when all ranks feed the same
+    # input, so use one seed for all ranks.
+    torch.manual_seed(1234)
+    latent = torch.randn(4, LATENT_SIZE, device=device, dtype=DTYPE).mul_(0.01)
+
+    torch.testing.assert_close(
+        transform(latent),
+        F.linear(transform.norm(latent), up_weight),
+        atol=8e-2,
+        rtol=3e-2,
+    )
 
 
 def _check_writes_only_its_own_shard(
@@ -141,7 +195,8 @@ def _check_writes_only_its_own_shard(
 ) -> None:
     """Two ranks that swapped both weight rows and write offsets still sum to
     the right total, so inspect each slice before the final collective."""
-    transform = _build_transform(device)
+    transform, up_weight = _build_transform(device)
+    assert transform.norm is not None
     runner = _tail_runner(transform, tp_world)
     group = get_tp_group().device_group
 
@@ -169,7 +224,7 @@ def _check_writes_only_its_own_shard(
     shard = HIDDEN_SIZE // tp_world
     start, end = rank * shard, (rank + 1) * shard
     local = captured["states"]
-    projected = F.linear(latent, transform.up_proj.weight[start:end])
+    projected = F.linear(latent, up_weight[start:end])
 
     torch.testing.assert_close(
         local[:, start:end], before[:, start:end] + projected, atol=8e-2, rtol=3e-2
@@ -181,6 +236,8 @@ def _check_writes_only_its_own_shard(
 _CHECKS = {
     "matches_replicated": _check_matches_replicated,
     "matches_replicated_ep": _check_matches_replicated_under_ep,
+    "presharded_matches_replicated": _check_presharded_matches_replicated,
+    "unfused_gathers": _check_unfused_tail_gathers_full_hidden,
     "own_shard_only": _check_writes_only_its_own_shard,
 }
 
@@ -217,6 +274,16 @@ def test_sharded_tail_tp8_matches_replicated_projection() -> None:
 @multi_gpu_test(num_gpus=8)
 def test_sharded_tail_tp8_ep8_matches_replicated_projection() -> None:
     _run_ranks("matches_replicated_ep", 8)
+
+
+@multi_gpu_test(num_gpus=4)
+def test_presharded_tail_tp4_matches_replicated_projection() -> None:
+    _run_ranks("presharded_matches_replicated", 4)
+
+
+@multi_gpu_test(num_gpus=4)
+def test_presharded_unfused_tail_gathers_the_full_hidden_dim() -> None:
+    _run_ranks("unfused_gathers", 4)
 
 
 @multi_gpu_test(num_gpus=4)
@@ -264,10 +331,10 @@ def test_forward_shards_only_when_the_tail_is_valid(
 
 @pytest.fixture
 def build_runner(monkeypatch: pytest.MonkeyPatch):
-    """Construct through the real subclass ``__init__``, stubbing only the base.
+    """Construct through the real subclass `__init__`, stubbing only the base.
 
-    ``tp_world`` is the size of the TP process group and is varied independently
-    of ``moe_config.tp_size``, because under expert parallelism those two are
+    `tp_world` is the size of the TP process group and is varied independently
+    of `moe_config.tp_size`, because under expert parallelism those two are
     different numbers for the same eight ranks.
     """
     world = {"size": 8}
@@ -312,7 +379,7 @@ def build_runner(monkeypatch: pytest.MonkeyPatch):
 
 
 def test_shards_under_the_kimi_k3_serving_config(build_runner) -> None:
-    """``--tensor-parallel-size 8``, MoE experts tensor-parallel."""
+    """`--tensor-parallel-size 8`, MoE experts tensor-parallel."""
     runner = build_runner(tp_world=8, tp_size=8, ep_size=1)
 
     assert runner._tail_shardable
@@ -322,9 +389,9 @@ def test_shards_under_the_kimi_k3_serving_config(build_runner) -> None:
 def test_shards_under_the_kimi_k3_serving_config_with_expert_parallel(
     build_runner,
 ) -> None:
-    """``--tensor-parallel-size 8 --enable-expert-parallel``, what is served.
+    """`--tensor-parallel-size 8 --enable-expert-parallel`, what is served.
 
-    EP reports ``moe_config.tp_size == 1`` because each rank owns whole experts,
+    EP reports `moe_config.tp_size == 1` because each rank owns whole experts,
     but the hidden dim is still split across all eight TP ranks, so the tail
     must shard exactly as it does without EP.
     """
@@ -337,7 +404,7 @@ def test_shards_under_the_kimi_k3_serving_config_with_expert_parallel(
 def test_shards_by_the_process_group_not_the_dp_flattened_tp_size(
     build_runner,
 ) -> None:
-    """Without EP, ``moe_config.tp_size`` is flattened across DP: TP=2 x DP=2
+    """Without EP, `moe_config.tp_size` is flattened across DP: TP=2 x DP=2
     reports 4 for a TP process group of 2.
 
     Only those 2 ranks share a hidden dim and take part in the final
@@ -367,9 +434,9 @@ def test_falls_back_when_the_config_breaks_the_shard(
 ) -> None:
     """Each of these makes the sharded tail wrong, not merely slower.
 
-    ``dp-without-tp`` is DP=4 with no TP: the hidden dim is not split at all,
+    `dp-without-tp` is DP=4 with no TP: the hidden dim is not split at all,
     so there is nothing to shard and no all-reduce to stitch shards back
-    together, however large ``moe_config.tp_size`` claims to be.
+    together, however large `moe_config.tp_size` claims to be.
     """
     runner = build_runner(**override)
 
