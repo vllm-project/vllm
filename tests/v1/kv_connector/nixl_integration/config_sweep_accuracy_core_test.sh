@@ -71,5 +71,16 @@ run_tests() {
   echo "✅ All ${label} tests passed!"
 }
 
-configs=("${dense_configs[@]}" "${mode_configs[@]}" "${arch_configs[@]}")
-run_tests "default backend" ""
+all_configs=("${dense_configs[@]}" "${mode_configs[@]}" "${arch_configs[@]}")
+
+# Round-robin the configs over Buildkite parallel jobs.
+SHARD_ID=${BUILDKITE_PARALLEL_JOB:-0}
+NUM_SHARDS=${BUILDKITE_PARALLEL_JOB_COUNT:-1}
+configs=()
+for i in "${!all_configs[@]}"; do
+  if (( i % NUM_SHARDS == SHARD_ID )); then
+    configs+=("${all_configs[$i]}")
+  fi
+done
+
+run_tests "default backend, shard $((SHARD_ID + 1))/${NUM_SHARDS}" ""
