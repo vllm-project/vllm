@@ -1,13 +1,15 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use anyhow::{Context as _, Result, anyhow, bail};
 use futures::{Stream, StreamExt as _, stream};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 use vllm_engine_core_client::mock_engine::MockEngineDataSockets;
+use vllm_engine_core_client::protocol::request::{EngineCoreRequest, EngineCoreRequestType};
 use vllm_engine_core_client::protocol::utility::EngineCoreUtilityRequest;
-use vllm_engine_core_client::protocol::{
-    EngineCoreRequest, EngineCoreRequestType, decode_msgpack, encode_msgpack,
-};
+use vllm_engine_core_client::protocol::{decode_msgpack, encode_msgpack};
 use zeromq::{DealerSocket, PushSocket, SocketRecv as _, SocketSend as _, ZmqMessage};
 
 use crate::engine::{EngineInput, EngineOutput};

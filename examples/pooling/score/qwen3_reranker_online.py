@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # ruff: noqa: E501
-"""
-What is the difference between the official original version and one
+"""What is the difference between the official original version and one
 that has been converted into a sequence classification model?
 
 Qwen3-Reranker is a language model that doing reranker by using the

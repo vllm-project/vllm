@@ -1,0 +1,443 @@
+meta:
+  title: "Kimi-K2.5"
+  slug: "kimi-k2.5"
+  provider: "Moonshot AI"
+  description: "Open-source native multimodal agentic MoE model with vision-language understanding, tool calling, and thinking modes"
+  date_added: 2026-01-27
+  date_updated: 2026-07-29
+  tasks:
+    - multimodal
+    - text
+  performance_headline: "Multimodal agentic MoE model with DeepSeek-V3 backbone and MLA attention"
+  related_recipes: []
+  hardware:
+    h200: verified
+    gb200: verified
+    mi300x: verified
+    mi325x: verified
+    mi355x: verified
+
+model:
+  model_id: "moonshotai/Kimi-K2.5"
+  min_vllm_version: "0.19.1"
+  docker_image:
+    nvidia: "vllm/vllm-openai:latest"
+    amd: "vllm/vllm-openai-rocm:nightly"
+  architecture: moe
+  parameter_count: "1T"
+  active_parameters: "32B"
+  context_length: 262144
+  supports_dcp: true
+  base_args:
+    - "--trust-remote-code"
+
+features:
+  tool_calling:
+    description: "Kimi K2 tool-call parser with automatic tool choice"
+    args:
+      - "--tool-call-parser"
+      - "kimi_k2"
+      - "--enable-auto-tool-choice"
+  reasoning:
+    description: "Kimi K2 reasoning parser for extracting chain-of-thought content"
+    args:
+      - "--reasoning-parser"
+      - "kimi_k2"
+  spec_decoding:
+    description: "Eagle3 speculative decoding for accelerated inference (requires vLLM >= 0.18.0)"
+    args:
+      - "--speculative-config"
+      - '{"model":"lightseekorg/kimi-k2.5-eagle3-mla","method":"eagle3","num_speculative_tokens":3}'
+  text_only:
+    description: "Skip loading the vision encoder for text-only workloads — frees VRAM for KV cache. Mutually exclusive with encoder_parallel."
+    args:
+      - "--language-model-only"
+  encoder_parallel:
+    description: "Run the vision encoder in data-parallel mode — avoids TP comm overhead on the small encoder. Mutually exclusive with text_only."
+    args:
+      - "--mm-encoder-tp-mode"
+      - "data"
+
+opt_in_features:
+  - text_only
+
+# GB200's 4-GPU NVL4 trays keep encoder TP comm cheap — data-parallel encoder
+# isn't the default win it is on 8-GPU nodes.
+hardware_opt_in_features:
+  gb200:
+    - encoder_parallel
+
+variants:
+  default:
+    precision: int4
+    vram_minimum_gb: 714
+    description: "Packed INT4 via compressed-tensors (~595 GB on disk); fits 8×H200"
+  nvfp4:
+    model_id: "nvidia/Kimi-K2.5-NVFP4"
+    precision: nvfp4
+    vram_minimum_gb: 600
+    description: "NVIDIA NVFP4 quantized weights for Blackwell GPUs (e.g. GB200)"
+    extra_args:
+      - "--kv-cache-dtype"
+      - "fp8"
+  mxfp4:
+    model_id: "amd/Kimi-K2.5-MXFP4"
+    precision: mxfp4
+    # ~557 GB on disk (MXFP4 MoE weights + higher-precision norms/attention).
+    vram_minimum_gb: 669
+    description: "AMD Quark OCP MXFP4 weights for MI355X (gfx950); ~557 GB on disk."
+    supported_hardware:
+      - mi355x
+    # Matches the validated InferenceX single-node baseline
+    # (kimik2.5-fp4-mi355x-vllm). TP8 leaves ample KV + encoder headroom.
+    tp: 8
+    extra_args:
+      # fp8 KV cache: doubles resident capacity and halves KV read bandwidth.
+      # Measured +27% throughput at 8k/1k on MI355X with no accuracy change
+      # (GSM8K 0.9697, unchanged from bf16 KV). Same flag the nvfp4 sibling uses.
+      - "--kv-cache-dtype"
+      - "fp8"
+      # Run the small vision encoder data-parallel rather than TP — avoids
+      # TP comm overhead on the encoder.
+      - "--mm-encoder-tp-mode"
+      - "data"
+    extra_env:
+      VLLM_ROCM_USE_AITER_MOE: "1"
+      VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: "1"
+      VLLM_ROCM_USE_SKINNY_GEMM: "0"
+      AITER_MXFP4_INTERMEDIATE: "1"
+    # AITER RMSNorm is left at its default (on when AITER is enabled): a local
+    # TP4 GSM8K check measured identical accuracy on vs off (0.9697), so there is
+    # no reason to disable it the way the single-node TP<8 guard used to.
+    # HSA_NO_SCRATCH_RECLAIM is firmware-conditional (MEC < 177) — see the guide,
+    # not forced here since current MI355X firmware doesn't need it.
+    hardware_overrides:
+      mi355x:
+        docker_image: "vllm/vllm-openai-rocm:nightly"
+
+compatible_strategies:
+  - single_node_tp
+  - single_node_tep
+  - single_node_dep
+  - multi_node_tp
+  - multi_node_tp_pp
+  - multi_node_dep
+  - multi_node_tep
+  - pd_cluster
+
+hardware_overrides:
+  amd:
+    # Verified on 8× MI300X / MI355X (MI325X listed as supported but not verified).
+    extra_env:
+      VLLM_ROCM_USE_AITER: "1"
+      VLLM_ROCM_QUICK_REDUCE_QUANTIZATION: "INT4"
+
+strategy_overrides:
+  single_node_dep:
+    extra_args: []
+    extra_env: {}
+  single_node_tep:
+    extra_args: []
+    extra_env: {}
+  pd_cluster:
+    env:
+      VLLM_USE_NCCL_SYMM_MEM: "1"
+      NCCL_CUMEM_ENABLE: "1"
+      NCCL_MNNVL_ENABLE: "1"
+      NCCL_NVLS_ENABLE: "1"
+    prefill:
+      nodes: 1               # 1 GB200 node = 4 GPUs
+      parallelism: dep       # DP + expert-parallel pool
+      vllm_args:
+        - "--max-num-batched-tokens"
+        - "16384"
+        - "--block-size"
+        - "64"
+      env: {}
+    decode:
+      nodes: 1               # 4 GB200 nodes = 16 GPUs
+      parallelism: dep
+      vllm_args:
+        - "--compilation-config"
+        - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+        - "--block-size"
+        - "64"
+        - "--all2all-backend"
+        - "flashinfer_nvlink_one_sided"
+      env: {}
+
+guide: |
+  ## Overview
+
+  Kimi K2.5 is an open-source, native multimodal agentic model built through continual
+  pretraining on approximately 15 trillion mixed visual and text tokens atop Kimi-K2-Base.
+  It seamlessly integrates vision and language understanding with advanced agentic
+  capabilities, instant and thinking modes, as well as conversational and agentic paradigms.
+
+  ## Prerequisites
+
+  - **vLLM version:** >= 0.15.0 (speculative decoding with Eagle3 requires >= 0.18.0)
+  - **Hardware (BF16):** 8x H200 GPUs (verified), or equivalent aggregate VRAM (~640 GB)
+  - **Hardware (NVFP4):** 4x Blackwell GPUs (e.g. GB200)
+  - **AMD support:** 8x MI300X / MI325X / MI355X with ROCm 7.2.1 and Python 3.12
+
+  ### Install vLLM
+
+  **Pip (NVIDIA):**
+  ```bash
+  uv venv
+  source .venv/bin/activate
+  uv pip install vllm --torch-backend auto
+  ```
+
+  **Pip (AMD ROCm):**
+  ```bash
+  uv venv --python 3.12
+  source .venv/bin/activate
+  uv pip install vllm --extra-index-url https://wheels.vllm.ai/rocm
+  ```
+
+  **Docker (NVIDIA):**
+  ```bash
+  docker pull vllm/vllm-openai:latest
+  ```
+
+  ### AMD MI300X/MI325X
+
+  On 8x MI300X or MI325X (`gfx942`), use the standard W4A16 MoE path with AITER
+  and INT4 QuickReduce.
+
+  ```bash
+  export VLLM_ROCM_USE_AITER=1
+  export VLLM_ROCM_QUICK_REDUCE_QUANTIZATION=INT4
+
+  vllm serve moonshotai/Kimi-K2.5 \
+    --host 0.0.0.0 \
+    --port 8000 \
+    --trust-remote-code \
+    --tensor-parallel-size 8 \
+    --tool-call-parser kimi_k2 \
+    --enable-auto-tool-choice \
+    --reasoning-parser kimi_k2 \
+    --mm-encoder-tp-mode data
+  ```
+
+  ### AMD MI350X/MI355X
+
+  On 8x MI350X or MI355X (`gfx950`), add `--moe-backend flydsl` to use the
+  optimized FlyDSL W4A16 MoE kernel. Keep LoRA disabled for this path.
+
+  ```bash
+  export VLLM_ROCM_USE_AITER=1
+  export VLLM_ROCM_QUICK_REDUCE_QUANTIZATION=INT4
+
+  vllm serve moonshotai/Kimi-K2.5 \
+    --tensor-parallel-size 8 \
+    --trust-remote-code \
+    --mm-encoder-tp-mode data \
+    --moe-backend flydsl \
+    --compilation-config '{"pass_config": {"fuse_allreduce_rms": false}}'
+  ```
+
+  Notes:
+  - The FlyDSL INT4 MoE path does not support expert parallelism; do not add
+    `--enable-expert-parallel`.
+  - Keep `--compilation-config '{"pass_config": {"fuse_allreduce_rms": false}}'`;
+    it is required for this FlyDSL path on MI350X / MI355X.
+  - vLLM has tuned MI350X/MI355X FlyDSL configs for this Kimi shape at TP=8 and TP=4.
+  - Keep vLLM's default block size unless you are tuning long-context
+    throughput; `--block-size 64` is safe to try.
+
+  ### AMD MI355X (MXFP4 checkpoint)
+
+  The **MXFP4** variant serves the AMD Quark checkpoint
+  [`amd/Kimi-K2.5-MXFP4`](https://huggingface.co/amd/Kimi-K2.5-MXFP4) — a
+  different quantization from the packed-INT4 `moonshotai/Kimi-K2.5` FlyDSL path
+  above. It runs the AITER MXFP4 MoE path and adds an fp8 KV cache.
+
+  ```bash
+  export VLLM_ROCM_USE_AITER=1
+  export VLLM_ROCM_QUICK_REDUCE_QUANTIZATION=INT4
+
+  vllm serve amd/Kimi-K2.5-MXFP4 \
+    --tensor-parallel-size 8 \
+    --trust-remote-code \
+    --mm-encoder-tp-mode data \
+    --kv-cache-dtype fp8 \
+    --gpu-memory-utilization 0.90
+  ```
+
+  Notes:
+  - **fp8 KV cache** is the main MI355X win: it doubles resident KV capacity and
+    halves KV read bandwidth. Measured +27% throughput at 8k/1k input with no
+    accuracy change (GSM8K 0.9697, unchanged from bf16 KV).
+  - **AITER RMSNorm** stays on. A local TP4 GSM8K check on
+    the current nightly measured 0.9697.
+  - **Old firmware only:** if `rocm-smi --showfw` reports a MEC firmware version
+    below 177, add `export HSA_NO_SCRATCH_RECLAIM=1` — older firmware can't
+    reclaim RCCL scratch and vLLM crashes without it. Current MI355X firmware
+    doesn't need it.
+  - For maximum throughput on fixed-length benchmark 8k/1k or 1k/1k workloads,
+    see the benchmark reproduction section below. These are throughput-sweep
+    tunings; leave vLLM's defaults for general serving.
+
+  ### MXFP4 benchmark reproduction (InferenceX MI355X sweep)
+
+  The command above is the default serving configuration. The
+  [SemiAnalysis InferenceX](https://inferencex.semianalysis.com/) MI355X
+  benchmark lane for this checkpoint is a separate **high-concurrency benchmark**
+  configuration — not the recipe default. To reproduce that sweep, start from the
+  default command above and apply these deltas:
+
+  - Use `--tensor-parallel-size 4` (the sweep runs TP4; the default recipe keeps
+    TP8 for KV-cache and multimodal-encoder headroom).
+  - Add `--kv-cache-dtype fp8`.
+  - Use the benchmark block size and scheduler knobs: `--block-size 16`,
+    `--max-num-batched-tokens 16384`, `--max-num-seqs 512`,
+    `--async-scheduling`, and `--no-enable-prefix-caching`.
+  - Run on a current `vllm/vllm-openai-rocm:nightly` that contains the required
+    AITER Kimi MXFP4 backend.
+  - Export the AITER and INT4 quantized all-reduce env vars before launch:
+
+  ```bash
+  # Kernel selection and benchmark runtime knobs.
+  export VLLM_ROCM_USE_AITER=1
+  export VLLM_ROCM_QUICK_REDUCE_QUANTIZATION=INT4
+  export VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=1
+  export VLLM_ROCM_USE_SKINNY_GEMM=0
+  export VLLM_ROCM_USE_AITER_RMSNORM=0
+  export AITER_MXFP4_INTERMEDIATE=1
+  export AITER_BYPASS_TUNE_CONFIG=0
+  export AITER_MOE_SORT_BACKEND=auto
+  export OMP_NUM_THREADS=1
+  ```
+
+  The full reproduction serve command is then:
+
+  ```bash
+  vllm serve amd/Kimi-K2.5-MXFP4 \
+    --port "${PORT:-8000}" \
+    --tensor-parallel-size 4 \
+    --gpu-memory-utilization 0.85 \
+    --max-model-len "$MAX_MODEL_LEN" \
+    --kv-cache-dtype fp8 \
+    --block-size 16 \
+    --max-num-batched-tokens 16384 \
+    --max-num-seqs 512 \
+    --async-scheduling \
+    --trust-remote-code \
+    --no-enable-prefix-caching \
+    --mm-encoder-tp-mode data
+  ```
+
+  The benchmark script enforces `MAX_MODEL_LEN >= 9472` so the 1k/1k
+  configuration matches the locally validated server. The env vars and scheduler
+  knobs are benchmark-specific throughput settings, not default serving choices.
+
+  #### Tuned AITER MXFP4 MoE (MI355X)
+
+  For higher MoE throughput on MI355X, run the AITER MXFP4 (RadeonFlow)
+  intermediate GEMM path with fused shared experts. This requires a
+  `vllm/vllm-openai-rocm:nightly` built after vLLM
+  [#48683](https://github.com/vllm-project/vllm/pull/48683) (AITER `v0.1.16.post5`,
+  which includes the [ROCm/aiter#3832](https://github.com/ROCm/aiter/pull/3832)
+  gfx950 MXFP4 MoE backend). Export the AITER MoE kernel-selection vars and add the
+  batching/scheduling flags below. `AITER_MXFP4_INTERMEDIATE=1` is what selects the
+  RadeonFlow MXFP4 intermediate path — without it (and `VLLM_ROCM_USE_AITER=1`) the
+  MoE oracle falls back to a different kernel. Runs at TP4 or TP8; for **TP < 8**
+  disable AITER RMSNorm.
+
+  ```bash
+  export VLLM_ROCM_USE_AITER=1
+  export VLLM_ROCM_QUICK_REDUCE_QUANTIZATION=INT4
+  export VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=1
+  export VLLM_ROCM_USE_SKINNY_GEMM=0
+  export AITER_MXFP4_INTERMEDIATE=1
+  export AITER_BYPASS_TUNE_CONFIG=0
+  export AITER_MOE_SORT_BACKEND=auto
+  export OMP_NUM_THREADS=1
+  # TP < 8 only:
+  export VLLM_ROCM_USE_AITER_RMSNORM=0
+
+  vllm serve amd/Kimi-K2.5-MXFP4 \
+    --tensor-parallel-size 4 \
+    --trust-remote-code \
+    --gpu-memory-utilization 0.90 \
+    --kv-cache-dtype fp8 \
+    --block-size 16 \
+    --async-scheduling \
+    --no-enable-prefix-caching \
+    --mm-encoder-tp-mode data
+  ```
+
+  These AITER MXFP4 MoE env vars are kernel-selection choices (same MXFP4 math,
+  faster kernel), not precision reductions.
+
+  For fixed-length throughput sweeping, additionally cap `--max-model-len` to the
+  working sequence length (e.g. `9472` for an 8k/1k workload) and set
+  `--max-num-batched-tokens 16384 --max-num-seqs 512`. Leave these off for general
+  serving.
+
+  ## Client Usage
+
+  Once the vLLM server is running, consume it via the OpenAI-compatible API:
+
+  ```python
+  import time
+  from openai import OpenAI
+
+  client = OpenAI(
+      api_key="EMPTY",
+      base_url="http://localhost:8000/v1",
+      timeout=3600
+  )
+
+  messages = [
+      {
+          "role": "user",
+          "content": [
+              {
+                  "type": "image_url",
+                  "image_url": {
+                      "url": "https://ofasys-multimodal-wlcb-3-toshanghai.oss-accelerate.aliyuncs.com/wpf272043/keepme/image/receipt.png"
+                  }
+              },
+              {
+                  "type": "text",
+                  "text": "Read all the text in the image."
+              }
+          ]
+      }
+  ]
+
+  start = time.time()
+  response = client.chat.completions.create(
+      model="moonshotai/Kimi-K2.5",
+      messages=messages,
+      max_tokens=2048
+  )
+  print(f"Response costs: {time.time() - start:.2f}s")
+  print(f"Generated text: {response.choices[0].message.content}")
+  ```
+
+  ## Troubleshooting
+
+  - **OOM errors:** Lower `--gpu-memory-utilization` or adjust TP/EP to match your GPU count.
+  - **Vision encoder performance:** Use `--mm-encoder-tp-mode data` to run the vision encoder
+    in data-parallel mode. The encoder is small, so TP adds communication overhead with little gain.
+  - **Unique multimodal inputs:** Pass `--mm-processor-cache-gb 0` to avoid caching overhead.
+    For repeated inputs, `--mm-processor-cache-type shm` uses host shared memory for better
+    performance at high TP settings.
+  - **MoE kernel tuning:** Use the `benchmark_moe` script from vLLM to tune Triton kernels
+    for your specific hardware.
+  - **Async scheduling:** Enabled by default for better throughput. Disable if you encounter
+    issues, and file a bug report to vLLM.
+
+  ## References
+
+  - [Kimi-K2.5 on Hugging Face](https://huggingface.co/moonshotai/Kimi-K2.5)
+  - [NVIDIA Kimi-K2.5-NVFP4 on Hugging Face](https://huggingface.co/nvidia/Kimi-K2.5-NVFP4)
+  - [Eagle3 MLA speculative decoding model](https://huggingface.co/lightseekorg/kimi-k2.5-eagle3-mla)
+  - [vLLM multimodal inputs guide](https://docs.vllm.ai/en/latest/features/multimodal_inputs.html)
+  - [vLLM Expert Parallelism docs](https://docs.vllm.ai/en/latest/serving/expert_parallel_deployment.html)
+  - [vLLM NixlConnector usage guide](https://docs.vllm.ai/en/latest/features/nixl_connector_usage.html)

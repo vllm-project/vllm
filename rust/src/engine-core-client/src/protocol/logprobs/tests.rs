@@ -1,10 +1,13 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use std::collections::BTreeSet;
 
 use bytes::Bytes;
 use rmpv::Value;
 
-use super::{Logprobs, PositionLogprobs, TokenLogprob, decode_engine_core_outputs};
-use crate::protocol::EngineCoreFinishReason;
+use super::{Logprobs, PositionLogprobs, TokenLogprob};
+use crate::protocol::output::{EngineCoreFinishReason, decode_engine_core_outputs};
 
 fn encode_value(value: &Value) -> Vec<u8> {
     let mut out = Vec::new();
@@ -83,6 +86,7 @@ fn inline_prompt_logprobs_value() -> Value {
         ndarray_value("int64", &[2, 3], ids),
         ndarray_value("float32", &[2, 3], probs),
         ndarray_value("int64", &[2], ranks),
+        Value::Nil,
         Value::Nil,
     ])
 }
@@ -183,7 +187,7 @@ fn decodes_inline_new_logprobs() {
         Some(inline_logprobs_value()),
         None,
     )))];
-    let decoded = decode_engine_core_outputs(&frames).unwrap();
+    let decoded = decode_engine_core_outputs(&frames).unwrap().into_request_batch().unwrap();
 
     let logprobs = decoded.outputs[0].new_logprobs.clone().unwrap().into_direct().unwrap();
     assert_eq!(logprobs, expected_sample_logprobs());
@@ -214,7 +218,7 @@ fn decodes_multipart_new_logprobs() {
         ]),
         Bytes::from_static(&[1, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0]),
     ];
-    let decoded = decode_engine_core_outputs(&frames).unwrap();
+    let decoded = decode_engine_core_outputs(&frames).unwrap().into_request_batch().unwrap();
 
     let logprobs = decoded.outputs[0].new_logprobs.clone().unwrap().into_direct().unwrap();
     assert_eq!(logprobs, expected_sample_logprobs());
@@ -226,7 +230,7 @@ fn decodes_inline_prompt_logprobs() {
         None,
         Some(inline_prompt_logprobs_value()),
     )))];
-    let decoded = decode_engine_core_outputs(&frames).unwrap();
+    let decoded = decode_engine_core_outputs(&frames).unwrap().into_request_batch().unwrap();
 
     let logprobs = decoded.outputs[0]
         .new_prompt_logprobs_tensors
@@ -235,6 +239,29 @@ fn decodes_inline_prompt_logprobs() {
         .into_direct()
         .unwrap();
     assert_eq!(logprobs, expected_prompt_logprobs());
+}
+
+#[test]
+fn rejects_non_none_cu_num_generated_tokens_tensor() {
+    let Value::Array(mut fields) = inline_prompt_logprobs_value() else {
+        panic!("inline_prompt_logprobs_value must be an array");
+    };
+    fields[4] = Value::from(42);
+
+    let frames = vec![Bytes::from(encode_value(&output_wire_with_custom_fields(
+        None,
+        Some(Value::Array(fields)),
+    )))];
+
+    let error = decode_engine_core_outputs(&frames).unwrap_err();
+    let crate::error::Error::ExtValueDecode { message } = &error else {
+        panic!("expected ValueDecodeExt");
+    };
+    assert_eq!(
+        message,
+        "new_prompt_logprobs_tensors.cu_num_generated_tokens_tensor: \
+         expected None for per-request engine-core logprobs payload"
+    );
 }
 
 #[test]
@@ -252,7 +279,7 @@ fn decodes_big_endian_payloads() {
         ])),
         None,
     )))];
-    let decoded = decode_engine_core_outputs(&frames).unwrap();
+    let decoded = decode_engine_core_outputs(&frames).unwrap().into_request_batch().unwrap();
     let logprobs = decoded.outputs[0].new_logprobs.clone().unwrap().into_direct().unwrap();
     assert_eq!(
         logprobs,
@@ -273,6 +300,29 @@ fn decodes_big_endian_payloads() {
             }],
         }
     );
+}
+
+#[test]
+fn rejects_supported_array_dtypes_in_incompatible_logprobs_fields() {
+    for (ids_dtype, probs_dtype, field) in [
+        ("<u4", "<f4", "logprob_token_ids"),
+        ("<i4", "<i4", "logprobs"),
+    ] {
+        let frames = vec![Bytes::from(encode_value(&output_wire_with_custom_fields(
+            Some(Value::Array(vec![
+                ndarray_value(ids_dtype, &[1, 1], Value::Ext(3, vec![0; 4])),
+                ndarray_value(probs_dtype, &[1, 1], Value::Ext(3, vec![0; 4])),
+                ndarray_value("<i4", &[1], Value::Ext(3, vec![1, 0, 0, 0])),
+                Value::Nil,
+            ])),
+            None,
+        )))];
+        let error = decode_engine_core_outputs(&frames).unwrap_err();
+        let crate::error::Error::ExtValueDecode { message } = error else {
+            panic!("expected ExtValueDecode");
+        };
+        assert!(message.starts_with(&format!("new_logprobs.{field}: expected dtype")));
+    }
 }
 
 #[test]
@@ -299,4 +349,168 @@ fn rejects_non_none_cu_num_generated_tokens() {
         error.to_string(),
         "messagepack ext value decode failed: new_logprobs.cu_num_generated_tokens: expected None for per-request engine-core logprobs payload, got [0, 1]"
     );
+}
+
+#[test]
+fn decodes_zero_row_logprobs_as_empty() {
+    for shape in [[0usize, 0], [0, 3]] {
+        let frames = vec![Bytes::from(encode_value(&output_wire_with_custom_fields(
+            None,
+            Some(Value::Array(vec![
+                ndarray_value("<i8", &shape, Value::Ext(3, Vec::new())),
+                ndarray_value("<f4", &shape, Value::Ext(3, Vec::new())),
+                ndarray_value("<i8", &[0], Value::Ext(3, Vec::new())),
+                Value::Nil,
+            ])),
+        )))];
+        let decoded = decode_engine_core_outputs(&frames).unwrap().into_request_batch().unwrap();
+        let logprobs = decoded.outputs[0]
+            .new_prompt_logprobs_tensors
+            .clone()
+            .unwrap()
+            .into_direct()
+            .unwrap();
+        assert!(logprobs.is_empty());
+    }
+}
+
+#[test]
+fn rejects_zero_column_logprobs_with_rows() {
+    let ranks = Value::Ext(3, vec![1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0]);
+    let frames = vec![Bytes::from(encode_value(&output_wire_with_custom_fields(
+        Some(Value::Array(vec![
+            ndarray_value("<i8", &[2, 0], Value::Ext(3, Vec::new())),
+            ndarray_value("<f4", &[2, 0], Value::Ext(3, Vec::new())),
+            ndarray_value("<i8", &[2], ranks),
+            Value::Nil,
+        ])),
+        None,
+    )))];
+
+    let error = decode_engine_core_outputs(&frames).unwrap_err();
+    let crate::error::Error::ExtValueDecode { message } = &error else {
+        panic!("expected ExtValueDecode");
+    };
+    assert_eq!(
+        message,
+        "new_logprobs: zero-column logprobs payload with 2 rows"
+    );
+}
+
+fn logprobs_value(ids: &[i64], probs: &[f32], ranks: &[i64]) -> Value {
+    let rows = ranks.len();
+    let cols = ids.len() / rows;
+    Value::Array(vec![
+        ndarray_value(
+            "<i8",
+            &[rows, cols],
+            Value::Ext(3, ids.iter().flat_map(|v| v.to_le_bytes()).collect()),
+        ),
+        ndarray_value(
+            "<f4",
+            &[rows, cols],
+            Value::Ext(3, probs.iter().flat_map(|v| v.to_le_bytes()).collect()),
+        ),
+        ndarray_value(
+            "<i8",
+            &[rows],
+            Value::Ext(3, ranks.iter().flat_map(|v| v.to_le_bytes()).collect()),
+        ),
+        Value::Nil,
+    ])
+}
+
+#[test]
+fn zero_sampled_rank_does_not_fail_frame_mates() {
+    // A batched EngineCoreOutputs frame where one request's row has rank 0
+    // must still resolve; the other requests' logprobs stay intact.
+    let frames = vec![Bytes::from(encode_value(&Value::Array(vec![
+        Value::from(0),
+        Value::Array(vec![
+            Value::Array(vec![
+                Value::from("req-nan"),
+                Value::Array(vec![Value::from(7), Value::from(8)]),
+                logprobs_value(&[1, 2], &[f32::NAN, f32::NEG_INFINITY], &[0]),
+                logprobs_value(&[7, 8], &[f32::NAN, f32::NEG_INFINITY], &[0]),
+                Value::Nil,
+                Value::from(EngineCoreFinishReason::Length as u8),
+            ]),
+            Value::Array(vec![
+                Value::from("req-ok"),
+                Value::Array(vec![Value::from(9)]),
+                logprobs_value(&[3, 4], &[-3.0, -0.5], &[7]),
+                Value::Nil,
+                Value::Nil,
+                Value::from(EngineCoreFinishReason::Length as u8),
+            ]),
+        ]),
+        Value::Nil,
+        Value::from(0.0),
+        Value::Nil,
+        Value::Nil,
+    ])))];
+    let decoded = decode_engine_core_outputs(&frames).unwrap().into_request_batch().unwrap();
+
+    let bad = decoded.outputs[0].new_logprobs.as_ref().unwrap();
+    let prompt = decoded.outputs[0].new_prompt_logprobs_tensors.as_ref().unwrap();
+    let good = decoded.outputs[1].new_logprobs.as_ref().unwrap();
+    expect_test::expect![[r#"
+        (
+            Logprobs {
+                positions: [
+                    PositionLogprobs {
+                        entries: [
+                            TokenLogprob {
+                                token_id: 1,
+                                logprob: NaN,
+                                rank: 0,
+                            },
+                            TokenLogprob {
+                                token_id: 2,
+                                logprob: -inf,
+                                rank: 1,
+                            },
+                        ],
+                    },
+                ],
+            },
+            Logprobs {
+                positions: [
+                    PositionLogprobs {
+                        entries: [
+                            TokenLogprob {
+                                token_id: 7,
+                                logprob: NaN,
+                                rank: 0,
+                            },
+                            TokenLogprob {
+                                token_id: 8,
+                                logprob: -inf,
+                                rank: 1,
+                            },
+                        ],
+                    },
+                ],
+            },
+            Logprobs {
+                positions: [
+                    PositionLogprobs {
+                        entries: [
+                            TokenLogprob {
+                                token_id: 3,
+                                logprob: -3.0,
+                                rank: 7,
+                            },
+                            TokenLogprob {
+                                token_id: 4,
+                                logprob: -0.5,
+                                rank: 1,
+                            },
+                        ],
+                    },
+                ],
+            },
+        )
+    "#]]
+    .assert_debug_eq(&(&**bad, &**prompt, &**good));
 }

@@ -1,10 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from dataclasses import dataclass
+from typing import Any
+
 import torch
 import torch.nn.functional as F
 from torch import Tensor
 
+from vllm.model_executor.warmup.jit_warmup import kernel_launcher
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    LaunchSpec,
+    TritonWarmupTensor,
+    VllmTritonJitKernel,
+)
 from vllm.triton_utils import tl, triton
+from vllm.utils.math_utils import next_power_of_2
 from vllm.utils.torch_utils import direct_register_custom_op
 
 
@@ -39,7 +49,7 @@ def _rmsnorm_nw_kernel(
 def rmsnorm_nw(x: Tensor, eps: float) -> Tensor:
     """Weight-free RMSNorm over the last dimension.
 
-    Treats *x* as ``[num_rows, D]`` where ``num_rows = product(shape[:-1])``.
+    Treats *x* as `[num_rows, D]` where `num_rows = product(shape[:-1])`.
     Returns a contiguous tensor with the same shape and dtype as *x*.
     """
     orig_shape = x.shape
@@ -78,7 +88,7 @@ def _hc_head_reduce_store_kernel(
     out_stride_h: tl.constexpr,
     BLOCK_H: tl.constexpr,
 ):
-    token_idx = tl.program_id(0)
+    token_idx = tl.program_id(0).to(tl.int64)
     block_idx = tl.program_id(1)
     offsets = block_idx * BLOCK_H + tl.arange(0, BLOCK_H)
     mask = offsets < hidden_size
@@ -102,6 +112,333 @@ def _hc_head_reduce_store_kernel(
         out_ptr + token_idx * out_stride_t + offsets * out_stride_h,
         acc,
         mask=mask,
+    )
+
+
+def hc_collapse_triton(x: Tensor, pre_mix: Tensor) -> Tensor:
+    """Collapse BF16 residual streams with FP32 pre-mix coefficients."""
+    assert x.ndim == 3 and x.dtype == torch.bfloat16
+    num_tokens, hc_mult, hidden_size = x.shape
+    assert pre_mix.shape == (num_tokens, hc_mult)
+    assert pre_mix.dtype == torch.float32
+    out = torch.empty(num_tokens, hidden_size, dtype=x.dtype, device=x.device)
+    if num_tokens == 0:
+        return out
+
+    block_h = 1024
+    _hc_head_reduce_store_kernel[(num_tokens, triton.cdiv(hidden_size, block_h))](
+        pre_mix,
+        x,
+        out,
+        hidden_size,
+        hc_mult,
+        pre_mix.stride(0),
+        pre_mix.stride(1),
+        x.stride(0),
+        x.stride(1),
+        x.stride(2),
+        out.stride(0),
+        out.stride(1),
+        BLOCK_H=block_h,
+        num_warps=4,
+        # Preserve the separate FP32 multiply and sum in the Torch reference.
+        enable_fp_fusion=False,
+    )
+    return out
+
+
+def _hc_collapse_triton_fake(x: Tensor, pre_mix: Tensor) -> Tensor:
+    return torch.empty(x.shape[0], x.shape[2], dtype=x.dtype, device=x.device)
+
+
+@triton.jit
+def _mhc_post_stream(post_mix_ptr, comb_mix_ptr, t, j, xt, f0, f1, f2, f3):
+    comb = comb_mix_ptr + t * 16 + j  # comb is [source h, destination j]
+    return (
+        tl.load(post_mix_ptr + t * 4 + j) * xt
+        + tl.load(comb) * f0
+        + tl.load(comb + 4) * f1
+        + tl.load(comb + 8) * f2
+        + tl.load(comb + 12) * f3
+    ).to(tl.bfloat16)
+
+
+@triton.jit
+def _mhc_post_collapse_rms_norm_kernel(
+    residual_ptr,
+    x_ptr,
+    post_mix_ptr,
+    comb_mix_ptr,
+    pre_mix_ptr,
+    weight_ptr,
+    residual_out_ptr,
+    out_ptr,
+    norm_eps,
+    H: tl.constexpr,
+    BLOCK_H: tl.constexpr,
+):
+    """The post-mix and collapse keep the expression order of aiter's
+    `_mhc_fused_post_pre_delayed_rmsnorm_main_kernel`, so the new residual is
+    bit-identical to it."""
+    t = tl.program_id(0).to(tl.int64)
+    cols = tl.arange(0, BLOCK_H)
+    mask = cols < H
+    res = residual_ptr + t * 4 * H + cols
+    f0 = tl.load(res, mask=mask, other=0.0).to(tl.float32)
+    f1 = tl.load(res + H, mask=mask, other=0.0).to(tl.float32)
+    f2 = tl.load(res + 2 * H, mask=mask, other=0.0).to(tl.float32)
+    f3 = tl.load(res + 3 * H, mask=mask, other=0.0).to(tl.float32)
+    xt = tl.load(x_ptr + t * H + cols, mask=mask, other=0.0).to(tl.float32)
+    g0 = _mhc_post_stream(post_mix_ptr, comb_mix_ptr, t, 0, xt, f0, f1, f2, f3)
+    g1 = _mhc_post_stream(post_mix_ptr, comb_mix_ptr, t, 1, xt, f0, f1, f2, f3)
+    g2 = _mhc_post_stream(post_mix_ptr, comb_mix_ptr, t, 2, xt, f0, f1, f2, f3)
+    g3 = _mhc_post_stream(post_mix_ptr, comb_mix_ptr, t, 3, xt, f0, f1, f2, f3)
+    out_res = residual_out_ptr + t * 4 * H + cols
+    tl.store(out_res, g0, mask=mask)
+    tl.store(out_res + H, g1, mask=mask)
+    tl.store(out_res + 2 * H, g2, mask=mask)
+    tl.store(out_res + 3 * H, g3, mask=mask)
+    pre = pre_mix_ptr + t * 4
+    x1 = (
+        tl.load(pre) * g0.to(tl.float32)
+        + tl.load(pre + 1) * g1.to(tl.float32)
+        + tl.load(pre + 2) * g2.to(tl.float32)
+        + tl.load(pre + 3) * g3.to(tl.float32)
+    ).to(tl.bfloat16)
+    x1f = x1.to(tl.float32)
+    rstd = tl.math.rsqrt(tl.sum(x1f * x1f, 0) * (1.0 / H) + norm_eps)
+    w = tl.load(weight_ptr + cols, mask=mask, other=0.0).to(tl.float32)
+    tl.store(out_ptr + t * H + cols, ((x1f * rstd) * w).to(tl.bfloat16), mask=mask)
+
+
+class MHCPostCollapseRMSNormKernel(
+    VllmTritonJitKernel["MHCPostCollapseRMSNormKernel.CompileKey"]
+):
+    @dataclass(frozen=True)
+    class CompileKey:
+        hidden_size: int
+        block_h: int
+        weight_dtype: torch.dtype
+
+    kernel = staticmethod(_mhc_post_collapse_rms_norm_kernel)
+
+    def dispatch(  # type: ignore[override]
+        self, *, hidden_size: int, weight_dtype: torch.dtype
+    ) -> CompileKey:
+        return self.CompileKey(
+            hidden_size=hidden_size,
+            block_h=next_power_of_2(hidden_size),
+            weight_dtype=weight_dtype,
+        )
+
+    def get_warmup_keys(
+        self, *, hidden_size: int, weight_dtype: torch.dtype
+    ) -> list[CompileKey]:
+        return self._trace_dispatch(self.dispatch)(
+            hidden_size=hidden_size, weight_dtype=weight_dtype
+        )
+
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
+        H = compile_key.hidden_size
+        return dict(
+            residual=TritonWarmupTensor(torch.bfloat16, shape=(1, 4, H)),
+            x=TritonWarmupTensor(torch.bfloat16, shape=(1, H)),
+            post_mix=TritonWarmupTensor(torch.float32, shape=(1, 4, 1)),
+            comb_mix=TritonWarmupTensor(torch.float32, shape=(1, 4, 4)),
+            pre_mix=TritonWarmupTensor(torch.float32, shape=(1, 4)),
+            weight=TritonWarmupTensor(compile_key.weight_dtype, shape=(H,)),
+            residual_out=TritonWarmupTensor(torch.bfloat16, shape=(1, 4, H)),
+            out=TritonWarmupTensor(torch.bfloat16, shape=(1, H)),
+            norm_eps=1e-6,
+        )
+
+    @kernel_launcher
+    def __call__(
+        self,
+        residual: Tensor,
+        x: Tensor,
+        post_mix: Tensor,
+        comb_mix: Tensor,
+        pre_mix: Tensor,
+        weight: Tensor,
+        residual_out: Tensor,
+        out: Tensor,
+        norm_eps: float,
+    ) -> LaunchSpec:
+        H = residual.shape[2]
+        return (residual.shape[0],), dict(H=H, BLOCK_H=next_power_of_2(H), num_warps=16)
+
+
+MHC_POST_COLLAPSE_RMS_NORM_KERNEL = MHCPostCollapseRMSNormKernel()
+
+
+def mhc_post_collapse_rms_norm_triton(
+    residual: Tensor,
+    sublayer_out: Tensor,
+    post_layer_mix: Tensor,
+    comb_res_mix: Tensor,
+    pre_mix: Tensor,
+    norm_weight: Tensor,
+    norm_eps: float,
+) -> tuple[Tensor, Tensor]:
+    """The layer-input half of a delayed mHC seam, without the gate projection.
+
+    Applies the post block and returns the new residual and the RMSNorm of its
+    collapse with the carried `pre_mix`, which is what
+    `mhc_fused_post_pre_delayed_rms_norm_aiter` returns besides the gates.
+
+    Args:
+        residual: [T, 4, H] bf16 residual streams entering the seam.
+        sublayer_out: [T, H] bf16 output of the sublayer before the seam.
+        post_layer_mix: [T, 4, 1] fp32 post gate of the previous seam.
+        comb_res_mix: [T, 4, 4] fp32 residual comb of the previous seam.
+        pre_mix: [T, 4] fp32 pre gate carried from the previous seam.
+        norm_weight: [H] RMSNorm weight.
+        norm_eps: RMSNorm epsilon.
+
+    Returns:
+        The [T, 4, H] bf16 new residual and the [T, H] bf16 layer input.
+
+    """
+    T, hc_mult, H = residual.shape
+    assert hc_mult == 4 and residual.dtype == torch.bfloat16
+    residual_out = torch.empty_like(residual)
+    out = torch.empty(T, H, dtype=residual.dtype, device=residual.device)
+    if T:
+        MHC_POST_COLLAPSE_RMS_NORM_KERNEL(
+            residual.contiguous(),
+            sublayer_out.contiguous(),
+            post_layer_mix.contiguous(),
+            comb_res_mix.contiguous(),
+            pre_mix.contiguous(),
+            norm_weight,
+            residual_out,
+            out,
+            norm_eps,
+        )
+    return residual_out, out
+
+
+@triton.jit
+def _mhc_pre_mix_kernel(
+    gemm_ptr,
+    sqrsum_ptr,
+    hc_scale_ptr,
+    hc_base_ptr,
+    out_ptr,
+    splitk,
+    hc_mult: tl.constexpr,
+    gemm_stride_k,
+    gemm_stride_t,
+    gemm_stride_j,
+    sqrsum_stride_k,
+    sqrsum_stride_t,
+    out_stride_t,
+    out_stride_j,
+    inv_hc_hidden,
+    rms_eps,
+    hc_pre_eps,
+    SPLITK_BLOCK: tl.constexpr,
+    HC_BLOCK: tl.constexpr,
+):
+    """Recover the pre-mix gate from a split-k mHC pre GEMM output."""
+    token_idx = tl.program_id(0).to(tl.int64)
+    ks = tl.arange(0, SPLITK_BLOCK)
+    js = tl.arange(0, HC_BLOCK)
+    kmask = ks < splitk
+    jmask = js < hc_mult
+
+    # Only the first hc_mult GEMM columns feed the pre gate.
+    gemm = tl.load(
+        gemm_ptr
+        + ks[:, None] * gemm_stride_k
+        + token_idx * gemm_stride_t
+        + js[None, :] * gemm_stride_j,
+        mask=kmask[:, None] & jmask[None, :],
+        other=0.0,
+    ).to(tl.float32)
+    mixes = tl.sum(gemm, 0)
+
+    sqrsum = tl.load(
+        sqrsum_ptr + ks * sqrsum_stride_k + token_idx * sqrsum_stride_t,
+        mask=kmask,
+        other=0.0,
+    ).to(tl.float32)
+    rstd = tl.rsqrt(tl.sum(sqrsum, 0) * inv_hc_hidden + rms_eps)
+
+    scale = tl.load(hc_scale_ptr).to(tl.float32)
+    base = tl.load(hc_base_ptr + js, mask=jmask, other=0.0).to(tl.float32)
+
+    pre = tl.sigmoid(mixes * rstd * scale + base) + hc_pre_eps
+    tl.store(out_ptr + token_idx * out_stride_t + js * out_stride_j, pre, mask=jmask)
+
+
+def mhc_pre_mix_triton(
+    gemm_out: Tensor,
+    sqrsum: Tensor,
+    hc_scale: Tensor,
+    hc_base: Tensor,
+    hc_mult: int,
+    hc_hidden_size: int,
+    rms_eps: float,
+    hc_pre_eps: float,
+) -> Tensor:
+    """Pre-mix gate for the delayed mHC pre, from AITER's split-k GEMM output.
+
+    AITER's `mhc_pre_big_fuse` consumes the unreduced `[splitk, tokens,
+    hc_mult3]` GEMM output and the matching row square-sums, but only returns
+    the post and comb gates. The delayed formulation also needs the pre gate,
+    to carry into the next sublayer seam. It is the same slice of the same
+    numbers, so recover it here rather than repeating the projection.
+    """
+    assert gemm_out.ndim == 3 and gemm_out.dtype == torch.float32
+    assert sqrsum.ndim == 2 and sqrsum.dtype == torch.float32
+    splitk, num_tokens = gemm_out.shape[0], gemm_out.shape[1]
+    assert sqrsum.shape == (splitk, num_tokens)
+
+    out = torch.empty(num_tokens, hc_mult, dtype=torch.float32, device=gemm_out.device)
+    if num_tokens == 0:
+        return out
+
+    _mhc_pre_mix_kernel[(num_tokens,)](
+        gemm_out,
+        sqrsum,
+        hc_scale,
+        hc_base,
+        out,
+        splitk,
+        hc_mult,
+        gemm_out.stride(0),
+        gemm_out.stride(1),
+        gemm_out.stride(2),
+        sqrsum.stride(0),
+        sqrsum.stride(1),
+        out.stride(0),
+        out.stride(1),
+        1.0 / hc_hidden_size,
+        rms_eps,
+        hc_pre_eps,
+        SPLITK_BLOCK=triton.next_power_of_2(splitk),
+        HC_BLOCK=triton.next_power_of_2(hc_mult),
+        num_warps=1,
+        # Match the separate FP32 multiply and add in the Torch reference.
+        enable_fp_fusion=False,
+    )
+    return out
+
+
+def _mhc_pre_mix_triton_fake(
+    gemm_out: Tensor,
+    sqrsum: Tensor,
+    hc_scale: Tensor,
+    hc_base: Tensor,
+    hc_mult: int,
+    hc_hidden_size: int,
+    rms_eps: float,
+    hc_pre_eps: float,
+) -> Tensor:
+    return torch.empty(
+        gemm_out.shape[1], hc_mult, dtype=torch.float32, device=gemm_out.device
     )
 
 
@@ -171,4 +508,20 @@ direct_register_custom_op(
     op_name="hc_head_triton",
     op_func=_hc_head_triton,
     mutates_args=["out"],
+)
+
+
+direct_register_custom_op(
+    op_name="hc_collapse_triton",
+    op_func=hc_collapse_triton,
+    mutates_args=[],
+    fake_impl=_hc_collapse_triton_fake,
+)
+
+
+direct_register_custom_op(
+    op_name="mhc_pre_mix_triton",
+    op_func=mhc_pre_mix_triton,
+    mutates_args=[],
+    fake_impl=_mhc_pre_mix_triton_fake,
 )

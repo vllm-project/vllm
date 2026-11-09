@@ -3,7 +3,7 @@
 """TokenSpeed-kernel AMD MHA backend for ROCm gfx950."""
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import ClassVar
 
 import torch
@@ -13,7 +13,7 @@ from vllm.config import VllmConfig
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
 from vllm.platforms.interface import DeviceCapability
-from vllm.utils.torch_utils import is_quantized_kv_cache
+from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -33,7 +33,8 @@ from vllm.v1.attention.ops.rocm_tokenspeed_mha import (
     rocm_tokenspeed_mha_extend,
     rocm_tokenspeed_mha_prefill,
 )
-from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, is_quantized_kv_cache
+from vllm.v1.kv_cache_layout import KVCacheLayout
 
 logger = init_logger(__name__)
 
@@ -308,17 +309,28 @@ class RocmTokenspeedMHABackend(AttentionBackend):
     def get_builder_cls() -> type["RocmTokenspeedMHAMetadataBuilder"]:
         return RocmTokenspeedMHAMetadataBuilder
 
-    @staticmethod
-    def get_kv_cache_shape(
-        num_blocks: int,
-        block_size: int,
-        num_kv_heads: int,
-        head_size: int,
-        cache_dtype_str: str = "auto",
-    ) -> tuple[int, ...]:
-        if block_size != 64:
-            raise ValueError("ROCM_TOKENSPEED_MHA requires block_size=64.")
-        return (2, num_blocks, block_size, num_kv_heads, head_size)
+    @classmethod
+    def customize_spec(cls, spec: AttentionSpec) -> AttentionSpec:
+        """K and V as two head groups, so each side is one dense
+        [num_blocks, block_size, num_kv_heads, head_size] region."""
+        if spec.state_content_bytes is not None:
+            return spec
+        assert spec.head_size == spec.head_size_v, (
+            "Separate K/V head groups require symmetric K/V head sizes."
+        )
+        return replace(
+            spec,
+            num_head_slots=2,
+            state_content_bytes=spec.num_kv_heads
+            * spec.head_size
+            * get_dtype_size(spec.dtype),
+        )
+
+    @classmethod
+    def supported_kv_cache_layouts(cls) -> tuple[KVCacheLayout, ...]:
+        # The TokenSpeed kernels address each of K and V as one contiguous
+        # [num_blocks, block_size, num_kv_heads, head_size] tensor.
+        return (KVCacheLayout.LHBNC,)
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
@@ -463,7 +475,8 @@ class RocmTokenspeedMHAImpl(AttentionImpl[RocmTokenspeedMHAMetadata]):
     def _split_kv_cache(
         self, kv_cache: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        return kv_cache.unbind(0)
+        # kv_cache is logical [num_blocks, 2, block_size, num_kv_heads * head_size].
+        return kv_cache.unflatten(-1, (self.num_kv_heads, self.head_size)).unbind(1)
 
     def _prefill(
         self,

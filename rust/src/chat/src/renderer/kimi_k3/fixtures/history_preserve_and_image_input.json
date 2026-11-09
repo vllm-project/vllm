@@ -1,0 +1,31 @@
+{
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "text",
+          "text": "see this"
+        },
+        {
+          "type": "image_url",
+          "image_url": "https://example.com/a.png"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": "old answer",
+      "reasoning_content": "old reasoning"
+    },
+    {
+      "role": "user",
+      "content": "continue"
+    }
+  ],
+  "add_generation_prompt": true,
+  "template_kwargs": {
+    "thinking": true,
+    "thinking_effort": "high"
+  }
+}

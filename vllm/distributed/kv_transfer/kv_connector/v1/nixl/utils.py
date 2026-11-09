@@ -34,8 +34,7 @@ _NIXL_SUPPORTED_DEVICE.update(current_platform.get_nixl_supported_devices())
 # TODO: merge with vllm.utils.network_utils.zmq_socket_ctx
 @contextlib.contextmanager
 def zmq_ctx(socket_type: Any, addr: str) -> Iterator[zmq.Socket]:
-    """Context manager for a ZMQ socket"""
-
+    """Context manager for a ZMQ socket."""
     if socket_type not in (zmq.ROUTER, zmq.REQ):
         raise ValueError(f"Unexpected socket type: {socket_type}")
 
@@ -64,5 +63,5 @@ _RANDOM_SUFFIX_RE = re.compile(r"-[0-9a-f]{8}$", re.IGNORECASE)
 
 
 def get_base_request_id(request_id: str) -> str:
-    """Strip the per-request ``-<8 hex>`` randomization suffix, if present."""
+    """Strip the per-request `-<8 hex>` randomization suffix, if present."""
     return _RANDOM_SUFFIX_RE.sub("", request_id)

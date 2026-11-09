@@ -2,11 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for the engine-based Nemotron V3 parser.
 
-Validates that ``NemotronV3Parser`` correctly handles:
-- ``<think>``/``</think>`` reasoning with ``<tool_call>`` XML tool calls
+Validates that `NemotronV3Parser` correctly handles:
+- `<think>`/`</think>` reasoning with `<tool_call>` XML tool calls
   (same format as Qwen3)
-- Nemotron-specific reasoning/content swap when ``enable_thinking=False``
-  or ``force_nonempty_content=True``
+- Nemotron-specific reasoning/content swap when `enable_thinking=False`
+  or `force_nonempty_content=True`
 """
 
 import json
@@ -43,6 +43,7 @@ def _make_request(**chat_template_kwargs):
     request = MagicMock(spec=ChatCompletionRequest)
     request.tools = []
     request.tool_choice = "auto"
+    request.include_reasoning = True
     request.chat_template_kwargs = chat_template_kwargs or None
     return request
 

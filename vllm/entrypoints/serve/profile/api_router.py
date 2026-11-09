@@ -2,8 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+from typing import Any
+
 from fastapi import APIRouter, FastAPI, Request
 from fastapi.responses import Response
+from pydantic import BaseModel, ConfigDict
 
 from vllm.config import ProfilerConfig
 from vllm.engine.protocol import EngineClient
@@ -14,14 +17,33 @@ logger = init_logger(__name__)
 router = APIRouter()
 
 
+class StartProfileRequest(BaseModel):
+    """Optional overrides for one profiling session.
+
+    Values are validated by the engine client.
+    """
+
+    model_config = ConfigDict(extra="ignore", strict=True)
+
+    profile_prefix: str | None = None
+    delay_iterations: int | None = None
+    max_iterations: int | None = None
+    profiler_kwargs: dict[str, Any] | None = None
+
+
 def engine_client(request: Request) -> EngineClient:
     return request.app.state.engine_client
 
 
 @router.post("/start_profile")
-async def start_profile(raw_request: Request):
+async def start_profile(
+    raw_request: Request, profile_request: StartProfileRequest | None = None
+):
     logger.info("Starting profiler...")
-    await engine_client(raw_request).start_profile()
+    # Only pass supplied overrides so clients without them keep the
+    # zero-argument call.
+    overrides = profile_request.model_dump(exclude_none=True) if profile_request else {}
+    await engine_client(raw_request).start_profile(**overrides)
     logger.info("Profiler started.")
     return Response(status_code=200)
 

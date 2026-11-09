@@ -1,0 +1,200 @@
+# yaml-language-server: $schema=https://recipes.vllm.ai/recipe.schema.json
+
+meta:
+  title: "JEV-27B-VL"
+  slug: "jev-27b-vl"
+  provider: "AutoTrust"
+  description: "Dense 27B vision-language decision model on a Qwen3.8-27B backbone, with a rank-32 LoRA (jev-decision) for calibrated choices over text and images."
+  date_added: 2026-10-28
+  date_updated: 2026-10-28
+  tasks:
+    - multimodal
+    - text
+  performance_headline: "Qwen3.8-27B VL backbone; System 1 decisions through the jev-decision LoRA"
+  related_recipes:
+    - "Qwen/Qwen3.8-27B"
+
+model:
+  model_id: "autotrust/JEV-27B-VL"
+  # Model author: this checkpoint only works on vLLM >= 0.32.0.
+  # Qwen3_5ForConditionalGeneration is registered in that release.
+  min_vllm_version: "0.32.0"
+  architecture: dense
+  # safetensors parameter total is 27,781,427,952 BF16 (vision tower included).
+  parameter_count: "27B"
+  active_parameters: "27B"
+  # text_config.max_position_embeddings. The validated serve line caps the
+  # window at 32768 via --max-model-len; 256K is the backbone native length.
+  context_length: 262144
+  base_args:
+    - "--served-model-name"
+    - "autotrust/JEV-27B-VL"
+    - "--enable-lora"
+    - "--max-lora-rank"
+    - "32"
+    - "--lora-modules"
+    - "jev-decision=JEV-27B-VL/adapter_vllm"
+    - "--logprobs-mode"
+    - "processed_logprobs"
+    - "--max-model-len"
+    - "32768"
+    - "--enable-prefix-caching"
+    - "--mamba-cache-mode"
+    - "align"
+    - "--limit-mm-per-prompt"
+    - '{"image": 8}'
+    - "--max-num-seqs"
+    - "8"
+    - "--trust-request-chat-template"
+  base_env: {}
+
+# Host checkout for the LoRA. vLLM serve still pulls weights by model_id;
+# --lora-modules needs adapter_vllm on disk. Same subdirectory on the
+# ModelScope checkout. install_modes includes docker because the image
+# cannot fetch this relative path for you.
+dependencies:
+  - note: "Local layout for LoRA module jev-decision. After this download the adapter is JEV-27B-VL/adapter_vllm; a ModelScope checkout uses the same adapter_vllm directory under whatever folder you chose."
+    command: "hf download autotrust/JEV-27B-VL --local-dir JEV-27B-VL"
+    install_modes: [pip, docker]
+
+features:
+  text_only:
+    description: "Skip the vision encoder for text-only workloads and free its memory for KV cache."
+    args:
+      - "--language-model-only"
+  encoder_parallel:
+    description: "Run the vision encoder data-parallel across the tensor-parallel ranks instead of sharding it."
+    args:
+      - "--mm-encoder-tp-mode"
+      - "data"
+
+opt_in_features:
+  - text_only
+  - encoder_parallel
+
+variants:
+  default:
+    precision: bf16
+    # 55,562,855,904 bytes on disk; ceil(55.563 GB × 1.2) = 67.
+    # Uniform BF16, so params × 2 × 1.2 lands on the same budget.
+    vram_minimum_gb: 67
+    description: "BF16 weights (about 52–56 GB). The model card's quick start targets one GPU with 80 GB or more; this recipe does not mark any GPU verified."
+
+compatible_strategies:
+  - single_node_tp
+  - multi_node_tp
+  - multi_node_tp_pp
+
+# serve.sh does not set tensor-parallel-size: one GPU. 67 GB fits a single
+# high-memory GPU, so the single-node default stays TP 1 instead of the
+# whole node.
+strategy_overrides:
+  single_node_tp:
+    tp: 1
+
+guide: |
+  ## Overview
+
+  [JEV-27B-VL](https://huggingface.co/autotrust/JEV-27B-VL) is AutoTrust's
+  vision-language decision model. The checkpoint is a dense BF16
+  `Qwen3_5ForConditionalGeneration` model (about 27.8B parameters, vision
+  tower included) continued from
+  [Qwen/Qwen3.8-27B](https://huggingface.co/Qwen/Qwen3.8-27B). System 2 is
+  the served checkpoint, named `autotrust/JEV-27B-VL`. System 1 is the
+  rank-32 LoRA `jev-decision` (`adapter_vllm/`, `r` 32, `lora_alpha` 64),
+  used for calibrated choice probabilities over text or images.
+
+  This recipe has no `verified` hardware entry. The model card's quick start
+  asks for one GPU with 80 GB or more, and the card's published latency
+  figures are from a B200. Those runs are the author's, not a badge on this
+  page.
+
+  ## Prerequisites
+
+  - **vLLM:** >= 0.32.0. Earlier releases are not supported for this
+    checkpoint.
+  - **Weights:** `hf download autotrust/JEV-27B-VL --local-dir JEV-27B-VL`
+    so the LoRA path below exists. The same `adapter_vllm` directory is in
+    the [ModelScope](https://modelscope.cn/models/autotrust/JEV-27B-VL)
+    checkout; if that folder is not named `JEV-27B-VL`, point the module at
+    `<checkout>/adapter_vllm` (the HF snapshot path ends in
+    `snapshots/<rev>/adapter_vllm`).
+  - **Docker:** the image only bind-mounts the Hugging Face cache. Mount the
+    checkout into the container and keep `jev-decision` pointed at that
+    `adapter_vllm` directory.
+  - **Context:** `text_config.max_position_embeddings` is 262144. The
+    validated command uses `--max-model-len 32768` (the `serve.sh` default).
+    The card says a full 256K prompt needs about 17 GB of KV cache on top of
+    the weights, and suggests `--max-model-len 131072` on an 80 GB GPU.
+
+  ## Decision LoRA and serve flags
+
+  These flags are the model card's validated `vllm serve` line. They are
+  base arguments, not optional toggles.
+
+  - **`jev-decision`** — `--enable-lora`, `--max-lora-rank 32`, and
+    `--lora-modules jev-decision=JEV-27B-VL/adapter_vllm`. The module name
+    stays `jev-decision`. The path is the local checkout
+    `JEV-27B-VL/adapter_vllm`, or the `adapter_vllm` directory inside an
+    HF or ModelScope checkout.
+  - **`--mamba-cache-mode align`** — the Qwen3.8 hybrid backbone mixes
+    full attention with Mamba-style layers; the card serves it in `align`
+    mode.
+  - **`--limit-mm-per-prompt '{"image": 8}'`** — at most 8 images per
+    request.
+  - **`--max-num-seqs 8`** — required. The card says that with more than 8
+    sequences in one batch, vLLM's LoRA path for this multimodal class
+    returns wrong System 1 probabilities. Extra requests queue.
+  - **`--logprobs-mode processed_logprobs`** — System 1 reads post-processor
+    logprobs. On `/v1/chat/completions` or `/v1/completions` for
+    `jev-decision`, the card also says to send `top_k: 0` and `top_p: 1.0`:
+    `generation_config.json` sets `top_k` 20 and `top_p` 0.95, and those
+    defaults would truncate the returned distribution.
+  - **`--trust-request-chat-template`** — image decisions send a raw
+    decision chat template on the request. System 2 keeps the checkpoint's
+    own template.
+  - **`--served-model-name autotrust/JEV-27B-VL`** — public name for
+    System 2. `--enable-prefix-caching` matches the card's serve line.
+
+  `POST /v1/decide` is not part of stock `vllm serve`. The checkpoint ships
+  `serve_decide.py`, which starts the OpenAI server with these same flags
+  and adds that route. Stock `vllm serve` still exposes System 2 as
+  `autotrust/JEV-27B-VL` and System 1 as the LoRA model `jev-decision`.
+
+  ## Client usage
+
+  System 2 (the base checkpoint), with an image:
+
+  ```python
+  client.chat.completions.create(
+      model="autotrust/JEV-27B-VL",
+      messages=[{
+          "role": "user",
+          "content": [
+              {"type": "image_url", "image_url": {"url": image_url}},
+              {"type": "text", "text": "What does this image show?"},
+          ],
+      }],
+  )
+  ```
+
+  System 1 through the checkpoint's `/v1/decide` route (`serve_decide.py`):
+
+  ```bash
+  curl localhost:8000/v1/decide -H 'Content-Type: application/json' -d '{
+    "kind": "choice",
+    "state": "Customer: my card was charged twice for one coffee.",
+    "question": "Which team should handle this?",
+    "options": ["billing", "shipping", "tech support"]}'
+  ```
+
+  Text-only System 1 calls the LoRA directly (`model` `jev-decision`). The
+  card says those text decisions match
+  [autotrust/JEV-27B](https://huggingface.co/autotrust/JEV-27B).
+
+  ## References
+
+  - [Hugging Face model card](https://huggingface.co/autotrust/JEV-27B-VL)
+  - [ModelScope (autotrust/JEV-27B-VL)](https://modelscope.cn/models/autotrust/JEV-27B-VL)
+  - [ModelScope mirror listed on the card (AutoTrust-Labs/JEV-27B-VL)](https://www.modelscope.ai/models/AutoTrust-Labs/JEV-27B-VL)
+  - [Base model: Qwen3.8-27B](https://huggingface.co/Qwen/Qwen3.8-27B)

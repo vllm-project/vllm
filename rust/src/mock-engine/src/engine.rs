@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::hash::{Hash as _, Hasher as _};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -11,11 +14,14 @@ use tokio::sync::mpsc;
 use tokio::task::yield_now;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
+use vllm_engine_core_client::protocol::output::{
+    EngineCoreFinishReason, EngineCoreOutput, EngineCoreOutputs, RequestBatchOutputs,
+    UtilityCallOutput,
+};
+use vllm_engine_core_client::protocol::request::EngineCoreRequest;
+use vllm_engine_core_client::protocol::stats::PrefillStats;
 use vllm_engine_core_client::protocol::utility::{
     EngineCoreUtilityRequest, UtilityOutput, UtilityResultEnvelope,
-};
-use vllm_engine_core_client::protocol::{
-    EngineCoreFinishReason, EngineCoreOutput, EngineCoreOutputs, EngineCoreRequest,
 };
 
 use super::Opt;
@@ -60,13 +66,14 @@ fn empty_finish_outputs(
     let output = request_output(request_id, Vec::new(), Some(finish_reason));
     let finished_requests = BTreeSet::from([output.request_id.clone()]);
 
-    EngineCoreOutputs {
+    RequestBatchOutputs {
         engine_index,
         outputs: vec![output],
         timestamp: now_secs(),
         finished_requests: Some(finished_requests),
         ..Default::default()
     }
+    .into()
 }
 
 /// Encode a utility result into the protocol's msgpack value envelope.
@@ -87,26 +94,25 @@ fn utility_response(
     let result = match request.method_name.as_str() {
         "get_supported_tasks" => utility_envelope(vec!["generate"]),
         "is_sleeping" => utility_envelope(false),
+        "is_inference_ready" => utility_envelope(true),
         "reset_prefix_cache" => utility_envelope(true),
-        "reset_mm_cache"
-        | "reset_encoder_cache"
-        | "profile"
-        | "sleep"
-        | "wake_up"
-        | "execute_dummy_batch" => utility_envelope(()),
+        "wake_up" => utility_envelope(true),
+        "reset_mm_cache" | "reset_encoder_cache" | "profile" | "sleep" | "execute_dummy_batch" => {
+            utility_envelope(())
+        }
         _ => utility_envelope(Value::Nil),
     }?;
 
-    Ok(EngineCoreOutputs {
+    Ok(UtilityCallOutput {
         engine_index,
-        utility_output: Some(UtilityOutput {
+        timestamp: now_secs(),
+        output: UtilityOutput {
             call_id: request.call_id,
             failure_message: None,
             result: Some(result),
-        }),
-        timestamp: now_secs(),
-        ..Default::default()
-    })
+        },
+    }
+    .into())
 }
 
 /// Message sent from the frontend to the mock engine task to drive the engine loop.
@@ -144,7 +150,11 @@ impl ActiveRequest {
     ) -> Result<Self, EngineCoreFinishReason> {
         let request_id = request.request_id;
         let client_index = request.client_index;
-        let prompt_len = request.prompt_token_ids.as_ref().map(Vec::len).unwrap_or_default();
+        let prompt_len = request
+            .prompt_token_ids
+            .as_ref()
+            .map(|ids| ids.shape.iter().product())
+            .unwrap_or_default();
 
         let Some(sampling_params) = request.sampling_params else {
             warn!(
@@ -181,6 +191,11 @@ impl ActiveRequest {
 
     /// Advance this request by one mock engine step.
     fn step(&mut self, opt: &Opt) -> EngineCoreOutput {
+        let prefill_stats = (self.generated == 0).then(|| PrefillStats {
+            num_prompt_tokens: self.prompt_len as u32,
+            num_computed_tokens: self.prompt_len as u32,
+            ..Default::default()
+        });
         let remaining = self.max_tokens - self.generated;
         let chunk_len = remaining.min(opt.output_token_chunk_size);
         let mut new_token_ids = Vec::with_capacity(chunk_len);
@@ -190,11 +205,14 @@ impl ActiveRequest {
         self.generated += chunk_len;
 
         let finished = self.generated >= self.max_tokens;
-        request_output(
-            self.request_id.clone(),
-            new_token_ids,
-            finished.then_some(EngineCoreFinishReason::Length),
-        )
+        EngineCoreOutput {
+            prefill_stats: prefill_stats.map(Box::new),
+            ..request_output(
+                self.request_id.clone(),
+                new_token_ids,
+                finished.then_some(EngineCoreFinishReason::Length),
+            )
+        }
     }
 }
 
@@ -269,13 +287,14 @@ impl Engine {
                 }
                 for (client_index, (client_outputs, finished_requests)) in outputs_by_client {
                     outputs.push({
-                        let outputs = EngineCoreOutputs {
+                        let outputs = RequestBatchOutputs {
                             engine_index: self.engine_index,
                             outputs: client_outputs,
                             timestamp: now_secs(),
                             finished_requests: Some(finished_requests),
                             ..Default::default()
-                        };
+                        }
+                        .into();
                         EngineOutput {
                             client_index,
                             outputs,
@@ -357,14 +376,15 @@ impl Engine {
             .filter_map(|(client_index, (outputs, finished_requests))| {
                 (!outputs.is_empty()).then(|| EngineOutput {
                     client_index,
-                    outputs: EngineCoreOutputs {
+                    outputs: RequestBatchOutputs {
                         engine_index: self.engine_index,
                         outputs,
                         timestamp: now_secs(),
                         finished_requests: (!finished_requests.is_empty())
                             .then_some(finished_requests),
                         ..Default::default()
-                    },
+                    }
+                    .into(),
                 })
             })
             .collect()

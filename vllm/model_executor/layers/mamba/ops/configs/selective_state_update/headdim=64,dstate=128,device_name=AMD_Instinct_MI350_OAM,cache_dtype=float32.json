@@ -1,0 +1,51 @@
+{
+    "triton_version": "3.6.0",
+    "128": {
+        "BLOCK_SIZE_M": 16,
+        "num_warps": 4
+    },
+    "256": {
+        "BLOCK_SIZE_M": 16,
+        "num_warps": 4
+    },
+    "1024": {
+        "BLOCK_SIZE_M": 8,
+        "num_warps": 1
+    },
+    "2048": {
+        "BLOCK_SIZE_M": 8,
+        "num_warps": 1
+    },
+    "4096": {
+        "BLOCK_SIZE_M": 4,
+        "num_warps": 1
+    },
+    "8192": {
+        "BLOCK_SIZE_M": 32,
+        "num_warps": 2
+    },
+    "16384": {
+        "BLOCK_SIZE_M": 4,
+        "num_warps": 1
+    },
+    "32768": {
+        "BLOCK_SIZE_M": 4,
+        "num_warps": 1
+    },
+    "65536": {
+        "BLOCK_SIZE_M": 64,
+        "num_warps": 8
+    },
+    "131072": {
+        "BLOCK_SIZE_M": 64,
+        "num_warps": 8
+    },
+    "196608": {
+        "BLOCK_SIZE_M": 64,
+        "num_warps": 2
+    },
+    "262144": {
+        "BLOCK_SIZE_M": 64,
+        "num_warps": 8
+    }
+}

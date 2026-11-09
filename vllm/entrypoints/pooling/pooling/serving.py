@@ -1,22 +1,24 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from fastapi.responses import JSONResponse, Response, StreamingResponse
-from typing_extensions import assert_never
+from typing import assert_never, cast
 
+from fastapi.responses import Response, StreamingResponse
+
+from vllm.entrypoints.serve.utils.api_utils import create_json_response
+from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.outputs import PoolingRequestOutput
 from vllm.tasks import SupportedTask
 from vllm.utils.serial_utils import EmbedDType, Endianness
 
 from ..base.io_processor import PoolingIOProcessor
-from ..base.serving import PoolingServingBase
+from ..base.serving import PoolingBaseServing
 from ..factories import init_pooling_io_processors
 from ..typing import AnyPoolingRequest, PoolingServeContext
 from ..utils import (
     BytesEncodingFormat,
     JsonEncodingFormat,
     build_pooling_bytes_streaming_response,
-    get_json_response_cls,
     get_pooling_output_encoder,
     get_pooling_usage,
 )
@@ -30,7 +32,7 @@ from .protocol import (
 logger = init_logger(__name__)
 
 
-class ServingPooling(PoolingServingBase):
+class ServingPooling(PoolingBaseServing):
     request_id_prefix = "pooling"
 
     def __init__(
@@ -49,16 +51,17 @@ class ServingPooling(PoolingServingBase):
             renderer=self.renderer,
             chat_template_config=self.chat_template_config,
         )
-        self.json_response_cls = get_json_response_cls()
 
     def get_io_processor(self, request: AnyPoolingRequest) -> PoolingIOProcessor:
-        assert isinstance(request, PoolingRequest)
+        request = cast(PoolingRequest, request)
         pooling_task = self._verify_pooling_task(request)
         return self.io_processors[pooling_task]
 
     def _verify_pooling_task(self, request: PoolingRequest) -> str:
         if getattr(request, "dimensions", None) is not None:
-            raise ValueError("dimensions is currently not supported")
+            raise VLLMValidationError(
+                "dimensions is currently not supported", parameter="dimensions"
+            )
 
         if request.task is None:
             request.task = self.pooling_task
@@ -69,25 +72,28 @@ class ServingPooling(PoolingServingBase):
         assert request.task is not None
         pooling_task = request.task
 
-        # plugin task uses io_processor.parse_request to verify inputs
+        # plugin task uses io_processor.parse_data to verify inputs
         if pooling_task != "plugin" and pooling_task != self.pooling_task:
             if pooling_task not in self.supported_tasks:
-                raise ValueError(
+                raise VLLMValidationError(
                     f"Unsupported task: {pooling_task!r} "
-                    f"Supported tasks: {self.supported_tasks}"
+                    f"Supported tasks: {self.supported_tasks}",
+                    parameter="task",
                 )
             else:
-                raise ValueError(
+                raise VLLMValidationError(
                     "Try switching the model's pooling_task "
-                    f"via --pooler-config.task {request.task}."
+                    f"via --pooler-config.task {request.task}.",
+                    parameter="task",
                 )
 
         if pooling_task == "plugin" and "plugin" not in self.io_processors:
-            raise ValueError(
+            raise VLLMValidationError(
                 "No IOProcessor plugin installed. Please refer "
                 "to the documentation and to the "
                 "'prithvi_geospatial_mae_io_processor' "
-                "offline inference example for more details."
+                "offline inference example for more details.",
+                parameter="task",
             )
 
         return pooling_task
@@ -98,7 +104,7 @@ class ServingPooling(PoolingServingBase):
     ) -> Response:
         if ctx.response is not None:
             # for IOProcessorResponse
-            return self.json_response_cls(content=ctx.response.model_dump())
+            return create_json_response(ctx.response)
 
         encoding_format = ctx.request.encoding_format
         embed_dtype = ctx.request.embed_dtype
@@ -137,7 +143,7 @@ class ServingPooling(PoolingServingBase):
         encoding_format: JsonEncodingFormat,
         embed_dtype: EmbedDType,
         endianness: Endianness,
-    ) -> JSONResponse:
+    ) -> Response:
         encode_fn = get_pooling_output_encoder(
             encoding_format=encoding_format,
             embed_dtype=embed_dtype,
@@ -161,7 +167,7 @@ class ServingPooling(PoolingServingBase):
             data=items,
             usage=get_pooling_usage(final_res_batch),
         )
-        return self.json_response_cls(content=response.model_dump())
+        return create_json_response(response)
 
     def request_output_to_pooling_bytes_response(
         self,

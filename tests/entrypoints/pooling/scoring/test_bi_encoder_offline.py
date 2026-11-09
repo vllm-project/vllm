@@ -6,11 +6,10 @@ import weakref
 import pytest
 
 from tests.entrypoints.pooling.scoring.util import EncoderScoringHfRunner
-from vllm import LLM
-from vllm.distributed import cleanup_dist_env_and_memory
-from vllm.platforms import current_platform
+from vllm import PoolingParams
+from vllm.utils.mistral import is_mistral_tokenizer
 
-MODEL_NAME = "intfloat/multilingual-e5-small"
+MODEL_NAME = "vllm-project/multilingual-e5-small"
 PROMPT = "The chef prepared a delicious meal."
 EMBEDDING_SIZE = 384
 
@@ -28,30 +27,20 @@ DTYPE = "half"
 
 
 @pytest.fixture(scope="module")
-def llm():
-    # ROCm: Use FLEX_ATTENTION backend as it's the only attention backend
-    # that supports encoder-only models on ROCm.
-    attention_config = None
-    if current_platform.is_rocm():
-        attention_config = {"backend": "FLEX_ATTENTION"}
-
-    # pytest caches the fixture so we use weakref.proxy to
-    # enable garbage collection
-    llm = LLM(
-        model=MODEL_NAME,
+def llm(vllm_runner):
+    with vllm_runner(
+        MODEL_NAME,
+        max_model_len=None,
         max_num_batched_tokens=32768,
         tensor_parallel_size=1,
         gpu_memory_utilization=0.75,
         enforce_eager=True,
         seed=0,
-        attention_config=attention_config,
-    )
-
-    yield weakref.proxy(llm)
-
-    del llm
-
-    cleanup_dist_env_and_memory()
+        enable_chunked_prefill=None,
+    ) as runner:
+        # pytest caches yielded fixtures until after teardown, so use a proxy to
+        # avoid retaining the LLM while VllmRunner.__exit__ releases ROCm memory.
+        yield weakref.proxy(runner.llm)
 
 
 @pytest.fixture(scope="module")
@@ -112,3 +101,32 @@ def test_embed(llm):
     outputs = llm.encode(PROMPT, pooling_task="embed", use_tqdm=False)
     assert len(outputs) == 1
     assert len(outputs[0].outputs.data) == EMBEDDING_SIZE
+
+
+def test_token_limits_with_mistral_tokenizer(vllm_runner):
+    """MistralTokenizer cannot return offset_mapping, but scoring token limits
+    must still truncate the query and leave a short document unchanged.
+
+    Only tokenization matters, so the model has dummy weights and one layer.
+    """
+    with vllm_runner(
+        "mistralai/Mistral-7B-Instruct-v0.3",
+        runner="pooling",
+        convert="embed",
+        load_format="dummy",
+        hf_overrides={"num_hidden_layers": 1},
+        gpu_memory_utilization=0.3,
+        enforce_eager=True,
+    ) as runner:
+        llm = runner.llm
+        assert is_mistral_tokenizer(llm.get_tokenizer())
+
+        params = PoolingParams(
+            extra_kwargs={"max_tokens_per_query": 3, "max_tokens_per_doc": 100}
+        )
+        (limited,) = llm.score(
+            TEXTS_1[0], TEXTS_2[0], pooling_params=params, use_tqdm=False
+        )
+        (expected,) = llm.score("What is the", TEXTS_2[0], use_tqdm=False)
+
+    assert limited.prompt_token_ids == expected.prompt_token_ids

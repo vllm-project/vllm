@@ -1,0 +1,403 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+use std::collections::{BTreeMap, HashMap};
+
+use bytes::Bytes;
+use serde::{Deserialize, Serialize};
+use serde_default::DefaultFromSerde;
+use serde_tuple::{Deserialize_tuple, Serialize_tuple};
+use serde_with::serde_as;
+
+use crate::protocol::kv_hints::KvHintsEnvelope;
+use crate::protocol::multimodal::MmFeatures;
+use crate::protocol::sampling::EngineCoreSamplingParams;
+use crate::protocol::tensor::WireNdArray;
+use crate::protocol::{OpaqueValue, lora};
+use crate::{Error, Result};
+
+/// Request types are encoded as single-byte protocol constants so they can be
+/// sent over the ZMQ socket without an extra encoding step.
+///
+/// Original Python definition:
+/// <https://github.com/vllm-project/vllm/blob/f22d6e026798a74e6542a52ef776c054f2de572a/vllm/v1/engine/__init__.py#L217-L228>
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum EngineCoreRequestType {
+    Add = 0,
+    Abort = 1,
+    StartDpWave = 2,
+    Utility = 3,
+}
+
+impl EngineCoreRequestType {
+    /// Decode the single-byte request type frame used on the engine input
+    /// socket. Returns `None` for unrecognized values.
+    pub fn from_frame(frame: &[u8]) -> Option<Self> {
+        let [value] = frame else {
+            return None;
+        };
+
+        match value {
+            0 => Some(Self::Add),
+            1 => Some(Self::Abort),
+            2 => Some(Self::StartDpWave),
+            3 => Some(Self::Utility),
+            _ => None,
+        }
+    }
+
+    /// Encode the request type as the single-byte frame used on the engine
+    /// input socket.
+    pub fn to_frame(self) -> Bytes {
+        Bytes::from_static(match self {
+            Self::Add => b"\x00",
+            Self::Abort => b"\x01",
+            Self::StartDpWave => b"\x02",
+            Self::Utility => b"\x03",
+        })
+    }
+}
+
+/// Extra kwargs consumed by engine-side reasoning parsers.
+///
+/// Original Python construction point:
+/// <https://github.com/vllm-project/vllm/blob/cec2ec11760f9f3beabd4c90451936078bf91533/vllm/entrypoints/openai/chat_completion/serving.py#L367-L369>
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ReasoningParserKwargs {
+    /// Effective kwargs visible to the chat template for this request.
+    #[serde(default)]
+    pub chat_template_kwargs: HashMap<String, serde_json::Value>,
+}
+
+/// Engine-core add-request payload sent from frontend to engine.
+///
+/// Original Python definition:
+/// <https://github.com/vllm-project/vllm/blob/3f5bd482f5c1a5dbdffbbf68d624e20bb7032013/vllm/v1/engine/__init__.py#L80-L129>
+#[derive(Debug, Clone, PartialEq, Serialize_tuple, Deserialize_tuple, DefaultFromSerde)]
+pub struct EngineCoreRequest {
+    pub request_id: String,
+    /// A rank-1 uint32 array, so that a long prompt goes in its own auxiliary
+    /// frame and the engine copies it into a buffer, not one int per token.
+    pub prompt_token_ids: Option<WireNdArray>,
+    /// Multimodal features attached to the request.
+    pub mm_features: Option<MmFeatures>,
+    pub sampling_params: Option<EngineCoreSamplingParams>,
+    /// Pooling parameters are preserved in the schema but not yet strongly
+    /// typed.
+    pub pooling_params: Option<OpaqueValue>,
+    pub arrival_time: f64,
+    #[serde(default)]
+    pub lora_request: Option<lora::LoraRequest>,
+    #[serde(default)]
+    pub cache_salt: Option<String>,
+    #[serde(default)]
+    pub data_parallel_rank: Option<u32>,
+    /// Unsupported in the first-stage Rust client because Python uses a custom
+    /// tensor/aux-frame encoding path for this field.
+    #[serde(default)]
+    pub prompt_embeds: Option<OpaqueValue>,
+    /// Per-position mask for mixed-mode inputs (e.g. chat completion with
+    /// `prompt_embeds` content parts). `Some(true)` means real token id;
+    /// `Some(false)` means the position uses a pre-computed entry from
+    /// `prompt_embeds`. `None` for pure-tokens and pure-embeds requests.
+    #[serde(default)]
+    pub prompt_is_token_ids: Option<Vec<bool>>,
+    /// Index of the client, used to ensure outputs are sent back to the same
+    /// client when scaling out the frontend.
+    #[serde(default)]
+    pub client_index: u32,
+    /// In DP mode, indicates which wave this request is expected to belong to.
+    #[serde(default)]
+    pub current_wave: u32,
+    #[serde(default)]
+    pub priority: i32,
+    #[serde(default)]
+    pub trace_headers: Option<BTreeMap<String, String>>,
+    #[serde(default)]
+    pub resumable: bool,
+    /// Original user-provided request ID, used for output reporting and aborts.
+    #[serde(default)]
+    pub external_req_id: Option<String>,
+    #[serde(default)]
+    pub reasoning_ended: Option<bool>,
+    /// Reasoning-parser kwargs forwarded from the frontend to the
+    /// structured-output backend.
+    #[serde(default)]
+    pub reasoning_parser_kwargs: Option<ReasoningParserKwargs>,
+    /// If `true`, the request should be added to the scheduler's waiting queue
+    /// and immediately aborted, so connector-side cleanup runs via the
+    /// standard `request_finished` hook.
+    #[serde(default)]
+    pub abort_immediately: bool,
+    /// Stable session identity shared by related requests.
+    #[serde(default)]
+    pub session_id: Option<String>,
+    #[serde(default)]
+    pub kv_hints: Option<KvHintsEnvelope>,
+    /// Hashes of the prompt's full blocks, computed with the engine's
+    /// [`PrefixHashConfig`](crate::protocol::handshake::PrefixHashConfig) so
+    /// the engine doesn't hash the prompt itself. They must include any extra
+    /// keys the engine would add (LoRA, multimodal, cache salt).
+    #[serde(default)]
+    pub block_hashes: Option<Vec<BlockHash>>,
+}
+
+/// A prefix-cache block hash, carried as msgpack bin like Python `bytes`.
+#[serde_as]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct BlockHash(#[serde_as(as = "serde_with::Bytes")] pub Vec<u8>);
+
+impl EngineCoreRequest {
+    /// Validate fields intentionally not supported in the first-stage client.
+    pub fn validate(&self) -> Result<()> {
+        if self.prompt_embeds.is_some() {
+            return Err(Error::UnsupportedField {
+                context: "EngineCoreRequest",
+                field: "prompt_embeds",
+            });
+        }
+        Ok(())
+    }
+
+    /// Extract large request tensors into ordered auxiliary frames.
+    pub(crate) fn extract_aux_frames(&mut self, threshold: usize) -> Vec<Bytes> {
+        let mut aux_frames = Vec::new();
+        if let Some(ids) = &mut self.prompt_token_ids {
+            ids.extract_aux_frame(&mut aux_frames, threshold);
+        }
+        if let Some(features) = &mut self.mm_features {
+            for feature in features {
+                feature.extract_aux_frames(&mut aux_frames, threshold);
+            }
+        }
+        if let Some(params) = &mut self.sampling_params
+            && let Some(ids) = &mut params.prompt_logprob_token_ids
+        {
+            ids.extract_aux_frame(&mut aux_frames, threshold);
+        }
+        aux_frames
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rmpv::Value;
+
+    use super::*;
+    use crate::protocol::dtype::TensorDtype;
+    use crate::protocol::kv_hints::{KvHintAction, KvHintsEnvelope};
+    use crate::protocol::multimodal::{
+        MmBatchedField, MmFeatureSpec, MmField, MmFieldElem, MmKwargValue, MmModality,
+        PlaceholderRange,
+    };
+    use crate::protocol::sampling::EngineCoreSamplingParams;
+    use crate::protocol::tensor::{WireArrayData, WireNdArray, WireTensor};
+    use crate::protocol::{decode_value, encode_msgpack};
+    use crate::test_utils::{decode_add_request, decode_prompt_token_ids};
+
+    const AUX_FRAME_THRESHOLD: usize = 256;
+
+    #[test]
+    fn engine_core_request_serializes_as_full_array() {
+        let request = EngineCoreRequest {
+            request_id: "req-1".to_string(),
+            prompt_token_ids: Some(vec![1, 2, 3].into()),
+            sampling_params: Some(EngineCoreSamplingParams {
+                max_tokens: 8,
+                ..EngineCoreSamplingParams::for_test()
+            }),
+            arrival_time: 1234.5,
+            client_index: 7,
+            session_id: Some("session-1".to_string()),
+            kv_hints: Some(KvHintsEnvelope {
+                protocol_version: "0.1".to_string(),
+                message_id: "msg-1".to_string(),
+                actions: vec![KvHintAction {
+                    action_id: "action-1".to_string(),
+                    action_type: "example.action".to_string(),
+                    action_version: "1.0".to_string(),
+                    payload: BTreeMap::from([("key".to_string(), serde_json::json!("value"))]),
+                }],
+            }),
+            ..EngineCoreRequest::default()
+        };
+
+        let encoded = encode_msgpack(&request).unwrap();
+        let value = decode_value(&encoded).unwrap();
+        let array = match value {
+            Value::Array(array) => array,
+            other => panic!("expected array, got {other:?}"),
+        };
+
+        assert_eq!(array.len(), 23);
+        assert_eq!(array[0], Value::from("req-1"));
+        assert_eq!(array[2], Value::Nil);
+        assert_eq!(array[4], Value::Nil);
+        assert_eq!(array[10], Value::Nil);
+        assert_eq!(array[11], Value::from(7));
+        assert_eq!(array[20], Value::from("session-1"));
+        assert!(matches!(&array[21], Value::Map(_)));
+        // `block_hashes`, filled in by the client.
+        assert_eq!(array[22], Value::Nil);
+    }
+
+    #[test]
+    fn engine_core_request_sends_prompt_token_ids_as_ndarray() {
+        let ids = vec![1u32, 70_000, 129_279];
+        let request = EngineCoreRequest {
+            request_id: "req-1".to_string(),
+            prompt_token_ids: Some(ids.clone().into()),
+            ..EngineCoreRequest::default()
+        };
+        // A short prompt stays inline as a uint32 ndarray tuple.
+        let mut short = request.clone();
+        assert!(short.extract_aux_frames(AUX_FRAME_THRESHOLD).is_empty());
+        let encoded = encode_msgpack(&short).unwrap();
+        let Value::Array(array) = decode_value(&encoded).unwrap() else {
+            panic!("expected array");
+        };
+        let Value::Array(wire) = &array[1] else {
+            panic!("expected ndarray tuple");
+        };
+        assert_eq!(wire[0], Value::from("=u4"));
+        assert_eq!(wire[1], Value::from(vec![Value::from(3)]));
+        let decoded: EngineCoreRequest = rmp_serde::from_slice(&encoded).unwrap();
+        assert_eq!(decoded, request);
+        assert_eq!(decode_prompt_token_ids(&decoded), Some(ids));
+
+        // A long prompt goes in its own auxiliary frame, without a copy.
+        let long_ids: Vec<u32> = (0..AUX_FRAME_THRESHOLD as u32).collect();
+        let mut long = EngineCoreRequest {
+            prompt_token_ids: Some(long_ids.clone().into()),
+            ..request
+        };
+        let aux_frames = long.extract_aux_frames(AUX_FRAME_THRESHOLD);
+        assert_eq!(aux_frames.len(), 1);
+        assert_eq!(
+            aux_frames[0].as_ref(),
+            bytemuck::cast_slice::<u32, u8>(&long_ids)
+        );
+        let encoded = encode_msgpack(&long).unwrap();
+        let Value::Array(array) = decode_value(&encoded).unwrap() else {
+            panic!("expected array");
+        };
+        let Value::Array(wire) = &array[1] else {
+            panic!("expected ndarray tuple");
+        };
+        assert_eq!(wire[2], Value::from(1));
+        let frames = [
+            Bytes::from_static(b"\x00"),
+            encoded.into(),
+            aux_frames[0].clone(),
+        ];
+        assert_eq!(
+            decode_prompt_token_ids(&decode_add_request(&frames)),
+            Some(long_ids)
+        );
+    }
+
+    #[test]
+    fn engine_core_request_extracts_large_nested_tensors_in_wire_order() {
+        let inline = vec![1_u8; AUX_FRAME_THRESHOLD - 1];
+        let first_aux = vec![2_u8; AUX_FRAME_THRESHOLD];
+        let second_aux = vec![3_u8; AUX_FRAME_THRESHOLD + 1];
+        let first_aux_ptr = first_aux.as_ptr();
+        let second_aux_ptr = second_aux.as_ptr();
+        let mut request = EngineCoreRequest {
+            mm_features: Some(vec![MmFeatureSpec {
+                data: Some(BTreeMap::from([
+                    (
+                        "inline".to_string(),
+                        MmFieldElem {
+                            data: Some(MmKwargValue::Tensor(WireTensor::from_raw(
+                                TensorDtype::U8,
+                                vec![inline.len()],
+                                inline,
+                            ))),
+                            field: MmField::Batched(MmBatchedField { keep_on_cpu: false }),
+                        },
+                    ),
+                    (
+                        "nested".to_string(),
+                        MmFieldElem {
+                            data: Some(MmKwargValue::List(vec![
+                                MmKwargValue::Int(7),
+                                MmKwargValue::Tensor(WireTensor::from_raw(
+                                    TensorDtype::U8,
+                                    vec![first_aux.len()],
+                                    first_aux,
+                                )),
+                            ])),
+                            field: MmField::Batched(MmBatchedField { keep_on_cpu: false }),
+                        },
+                    ),
+                ])),
+                modality: MmModality::Image,
+                identifier: "id".to_string(),
+                mm_position: PlaceholderRange {
+                    offset: 0,
+                    length: second_aux.len(),
+                    is_embed: Some(WireTensor::from_raw(
+                        TensorDtype::Bool,
+                        vec![second_aux.len()],
+                        second_aux,
+                    )),
+                },
+                mm_hash: None,
+            }]),
+            ..EngineCoreRequest::default()
+        };
+
+        let aux_frames = request.extract_aux_frames(AUX_FRAME_THRESHOLD);
+
+        assert_eq!(aux_frames.len(), 2);
+        assert_eq!(aux_frames[0].as_ptr(), first_aux_ptr);
+        assert_eq!(aux_frames[1].as_ptr(), second_aux_ptr);
+        let feature = &request.mm_features.as_ref().unwrap()[0];
+        let MmKwargValue::Tensor(inline) =
+            feature.data.as_ref().unwrap()["inline"].data.as_ref().unwrap()
+        else {
+            panic!("expected inline tensor");
+        };
+        assert!(matches!(inline.data, WireArrayData::RawView(_)));
+        let MmKwargValue::List(nested) =
+            feature.data.as_ref().unwrap()["nested"].data.as_ref().unwrap()
+        else {
+            panic!("expected nested tensor list");
+        };
+        let MmKwargValue::Tensor(nested_tensor) = &nested[1] else {
+            panic!("expected nested tensor");
+        };
+        assert_eq!(nested_tensor.data, WireArrayData::AuxIndex(1));
+        assert_eq!(
+            feature.mm_position.is_embed.as_ref().unwrap().data,
+            WireArrayData::AuxIndex(2)
+        );
+        assert!(request.extract_aux_frames(AUX_FRAME_THRESHOLD).is_empty());
+    }
+
+    #[test]
+    fn engine_core_request_extracts_large_prompt_logprob_token_ids() {
+        let ids = WireNdArray::from_i32(vec![AUX_FRAME_THRESHOLD, 1], vec![5; AUX_FRAME_THRESHOLD])
+            .unwrap();
+        let mut request = EngineCoreRequest {
+            sampling_params: Some(EngineCoreSamplingParams {
+                prompt_logprob_token_ids: Some(ids),
+                ..EngineCoreSamplingParams::for_test()
+            }),
+            ..EngineCoreRequest::default()
+        };
+
+        let aux_frames = request.extract_aux_frames(AUX_FRAME_THRESHOLD);
+
+        assert_eq!(aux_frames.len(), 1);
+        assert_eq!(aux_frames[0].len(), AUX_FRAME_THRESHOLD * 4);
+        let params = request.sampling_params.unwrap();
+        assert_eq!(
+            params.prompt_logprob_token_ids.unwrap().data,
+            WireArrayData::AuxIndex(1)
+        );
+    }
+}

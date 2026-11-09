@@ -9,8 +9,8 @@ Note: these tests will only pass on L4 GPU.
 import pytest
 
 from tests.quantization.utils import is_quant_method_supported
+from vllm.v1.attention.backends.fa_utils import flash_attn_supports_kv_cache_dtype
 from vllm.platforms import current_platform
-from vllm.v1.attention.backends.fa_utils import get_flash_attn_version
 from ..utils import check_logprobs_close
 
 
@@ -44,7 +44,9 @@ from ..utils import check_logprobs_close
 # Due to low-precision numerical divergence, we only test logprob of 4 tokens
 @pytest.mark.parametrize("max_tokens", [4])
 @pytest.mark.parametrize("enforce_eager", [True])
-@pytest.mark.parametrize("backend", ["FLASH_ATTN"])
+@pytest.mark.parametrize(
+    "backend", [None] if current_platform.is_rocm() else ["FLASH_ATTN"]
+)
 # NOTE: Increasing this in this suite will fail CI because we currently cannot
 # reset distributed env properly. Use a value > 1 just when you test.
 @pytest.mark.parametrize("tensor_parallel_size", [1])
@@ -67,13 +69,11 @@ def test_models(
 
     if kv_cache_dtype == "fp8_e5m2" and current_platform.is_rocm():
         pytest.skip(f"{kv_cache_dtype} is currently not supported on ROCm/HIP.")
+    if kv_cache_dtype == "fp8_e5m2" and current_platform.is_cuda():
+        pytest.skip(f"{kv_cache_dtype} is not supported by FLASH_ATTN on CUDA.")
 
-    if not (
-        current_platform.is_xpu()
-        or (
-            get_flash_attn_version() == 3
-            and current_platform.is_device_capability_family(90)
-        )
+    if backend == "FLASH_ATTN" and not flash_attn_supports_kv_cache_dtype(
+        kv_cache_dtype
     ):
         pytest.skip(
             f"{kv_cache_dtype} is not supported on this GPU type with {backend} attention."

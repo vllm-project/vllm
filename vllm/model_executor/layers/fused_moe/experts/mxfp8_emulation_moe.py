@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """MXFP8 (1x32 block, E8M0 scale) MoE experts on Triton.
 
-``Mxfp8TritonExpertsBase`` stashes E8M0 weight scales for checkpoint layout.
-``Mxfp8EmulationTritonExperts`` dequantizes to BF16 and runs ``TritonExperts``
+`Mxfp8TritonExpertsBase` stashes E8M0 weight scales for checkpoint layout.
+`Mxfp8EmulationTritonExperts` dequantizes to BF16 and runs `TritonExperts`
 for devices without a native MXFP8 MoE kernel (e.g. ROCm gfx942 / MI300).
 """
 
@@ -29,7 +29,7 @@ logger = init_logger(__name__)
 
 
 class Mxfp8TritonExpertsBase(TritonExperts):
-    """Shared MXFP8 MoE setup: stash E8M0 scales, clear scales on ``quant_config``."""
+    """Shared MXFP8 MoE setup: stash E8M0 scales, clear scales on `quant_config`."""
 
     def __init__(
         self,
@@ -59,7 +59,7 @@ class Mxfp8TritonExpertsBase(TritonExperts):
 
 
 class Mxfp8EmulationTritonExperts(Mxfp8TritonExpertsBase):
-    """Dequantize MXFP8 weights to BF16 on the fly and run ``TritonExperts``."""
+    """Dequantize MXFP8 weights to BF16 on the fly and run `TritonExperts`."""
 
     def __init__(
         self,
@@ -104,20 +104,13 @@ class Mxfp8EmulationTritonExperts(Mxfp8TritonExpertsBase):
         )
 
         if activation == MoEActivation.SWIGLUOAI_UNINTERLEAVE:
-            limit = self.quant_config.gemm1_clamp_limit
-            if limit is None:
+            if self.activation_config.clamp_limit is None:
                 raise ValueError("SWIGLUOAI_UNINTERLEAVE requires gemm1_clamp_limit")
-            alpha = self.quant_config.gemm1_alpha
-            alpha = 1.702 if alpha is None else float(alpha)
-            beta = self.quant_config.gemm1_beta
-            beta = 1.0 if beta is None else float(beta)
             apply_moe_activation(
                 activation,
                 output,
                 input,
-                clamp_limit=float(limit),
-                alpha=alpha,
-                beta=beta,
+                activation_config=self.activation_config,
             )
             return
         super().activation(activation, output, input)

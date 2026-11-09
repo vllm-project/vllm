@@ -9,7 +9,6 @@ if TYPE_CHECKING:
 
     from vllm.model_executor.layers.fused_moe import FusedMoEMethodBase
     from vllm.model_executor.layers.linear import LinearMethodBase
-    from vllm.model_executor.layers.quantization import QuantizationMethods
 
     from ..config_parser import INCLayerConfig
     from ..inc import INCConfig
@@ -22,7 +21,6 @@ class INCScheme(ABC):
       - can_handle(): when does this scheme apply?
       - get_linear_method(): required — how to quantize Linear layers
       - get_moe_method(): optional — how to quantize MoE layers
-      - get_kvcache_method(): optional — how to quantize KV cache
 
     Schemes that don't support MoE/KVCache inherit the default raise.
     """
@@ -53,20 +51,6 @@ class INCScheme(ABC):
         Default raises NotImplementedError."""
         raise NotImplementedError(
             f"{type(self).__name__} does not support MoE layers. "
-            f"Layer config: {layer_config}"
-        )
-
-    def get_kvcache_method(
-        self,
-        config: "INCConfig",
-        layer: "torch.nn.Module",
-        prefix: str,
-        layer_config: "INCLayerConfig",
-    ) -> "QuantizationMethods":
-        """Optional. Override if this scheme supports KV cache quantization.
-        Default raises NotImplementedError."""
-        raise NotImplementedError(
-            f"{type(self).__name__} does not support KV cache quantization. "
             f"Layer config: {layer_config}"
         )
 

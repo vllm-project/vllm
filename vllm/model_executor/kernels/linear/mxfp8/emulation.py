@@ -2,19 +2,21 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import torch
-from torch.nn.parameter import Parameter
 
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     MXFP8_BLOCK_SIZE,
     MXFP8_SCALE_DTYPE,
     dequant_mxfp8_to_bf16,
 )
+from vllm.model_executor.utils import replace_parameter
 
 from .Mxfp8LinearKernel import Mxfp8LinearKernel, Mxfp8LinearLayerConfig
 
 
 class EmulationMxfp8LinearKernel(Mxfp8LinearKernel):
     """Software emulation fallback for MXFP8 (dequant to BF16)."""
+
+    supports_pre_processed_weights = True
 
     @classmethod
     def is_supported(
@@ -44,8 +46,8 @@ class EmulationMxfp8LinearKernel(Mxfp8LinearKernel):
 
         if envs.VLLM_MXFP8_EMULATION_DEQUANT_AT_LOAD:
             weight = dequant_mxfp8_to_bf16(weight.contiguous(), weight_scale)
-        layer.weight = Parameter(weight.contiguous(), requires_grad=False)
-        layer.weight_scale = Parameter(weight_scale, requires_grad=False)
+        replace_parameter(layer, "weight", weight.contiguous())
+        replace_parameter(layer, "weight_scale", weight_scale)
 
     def apply_weights(
         self,

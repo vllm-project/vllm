@@ -2,4 +2,6 @@ model_name: "RedHatAI/Qwen3-30B-A3B-NVFP4"
 accuracy_threshold: 0.88
 num_questions: 1319
 num_fewshot: 5
+# 30B MoE + CuTeDSL/DeepEP JIT compile can exceed the 1200s default startup wait.
+startup_max_wait_seconds: 2400
 server_args: "--enforce-eager --max-model-len 8192 --data-parallel-size 2 --enable-expert-parallel --all2all-backend deepep_low_latency --moe-backend=flashinfer_cutedsl"

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import difflib
 import io
 
 # imports for structured outputs tests
@@ -28,27 +29,33 @@ def _get_rocm_attention_config(model_name):
 
     Whisper uses cross-attention (ENCODER_DECODER) which ROCM_AITER_FA does
     not support. For Whisper we use ROCM_AITER_UNIFIED_ATTN (or TRITON_ATTN
-    as fallback); other models can use ROCM_AITER_FA.
+    as fallback). Other models use ROCM_AITER_FA only on supported CDNA3+
+    hardware and otherwise use the platform default.
     """
     from vllm.platforms import current_platform
 
     if not current_platform.is_rocm():
         return None
 
-    if "whisper" in model_name.lower():
-        try:
-            from vllm.platforms.rocm import _ON_MI3XX
+    try:
+        from vllm.platforms.rocm import get_cdna_version
 
-            if _ON_MI3XX:
-                return {"backend": "ROCM_AITER_UNIFIED_ATTN"}
-        except ImportError:
-            logger.warning(
-                "Could not import _ON_MI3XX from rocm platform, "
-                "falling back to TRITON_ATTN for Whisper."
-            )
+        cdna_version = get_cdna_version()
+    except ImportError:
+        logger.warning(
+            "Could not check cdna version from rocm platform; "
+            "using a compatible fallback attention backend."
+        )
+        cdna_version = -1
+
+    if "whisper" in model_name.lower():
+        if cdna_version > 2:
+            return {"backend": "ROCM_AITER_UNIFIED_ATTN"}
         return {"backend": "TRITON_ATTN"}
 
-    return {"backend": "ROCM_AITER_FA"}
+    if cdna_version > 2:
+        return {"backend": "ROCM_AITER_FA"}
+    return None
 
 
 def _get_server_args(attention_config):
@@ -80,7 +87,7 @@ async def client_and_model(server):
 @pytest.mark.asyncio
 async def test_non_asr_model(foscolo):
     # text to text model
-    model_name = "JackFram/llama-68m"
+    model_name = "vllm-project/llama-68m"
     attention_config = _get_rocm_attention_config(model_name)
     with RemoteOpenAIServer(
         model_name, _get_server_args(attention_config)
@@ -132,6 +139,49 @@ async def test_basic_audio_with_lora(mary_had_lamb):
         )
     out = json.loads(translation)["text"].strip().lower()
     assert "pequeño" in out.split(" ")
+
+
+@pytest.mark.asyncio
+async def test_canary_translation(mary_had_lamb):
+    """Canary cannot detect the audio's language and only translates to or
+    from English, so requests it cannot serve must fail instead of returning
+    wrong text."""
+    # NOTE - like the LoRA test above, run before the module scoped server.
+    # Canary has cross-attention, which ROCM_AITER_FA does not support, so
+    # keep the platform default backend.
+    model_name = "nvidia/canary-1b-v2"
+    with RemoteOpenAIServer(model_name, SERVER_ARGS) as remote_server:
+        client = remote_server.get_async_client()
+        translation = await client.audio.translations.create(
+            model=model_name,
+            file=mary_had_lamb,
+            extra_body=dict(language="en", to_language="de"),
+            response_format="text",
+            temperature=0.0,
+        )
+        out = json.loads(translation)["text"].strip().lower()
+        assert "kleines lamm" in out
+
+        mary_had_lamb.seek(0)
+        with pytest.raises(
+            openai.BadRequestError, match="cannot detect the audio's language"
+        ):
+            await client.audio.transcriptions.create(
+                model=model_name, file=mary_had_lamb, temperature=0.0
+            )
+
+        for extra_body, match in [
+            (None, "cannot detect the audio's language"),
+            (dict(language="de", to_language="fr"), "to or from English only"),
+        ]:
+            mary_had_lamb.seek(0)
+            with pytest.raises(openai.BadRequestError, match=match):
+                await client.audio.translations.create(
+                    model=model_name,
+                    file=mary_had_lamb,
+                    extra_body=extra_body,
+                    temperature=0.0,
+                )
 
 
 # NOTE: (NickLucche) the large-v3-turbo model was not trained on translation!
@@ -193,7 +243,7 @@ async def test_streaming_response(foscolo, client_and_model, server):
         "seed": 42,
     }
     foscolo.seek(0)
-    async with httpx.AsyncClient() as http_client:
+    async with httpx.AsyncClient(timeout=30) as http_client:
         files = {"file": foscolo}
         async with http_client.stream(
             "POST", url, headers=headers, data=data, files=files
@@ -212,11 +262,12 @@ async def test_streaming_response(foscolo, client_and_model, server):
     res_stream = translation.split()
     # NOTE There's a small non-deterministic issue here, likely in the attn
     # computation, which will cause a few tokens to be different, while still
-    # being very close semantically.
-    assert (
-        sum([x == y for x, y in zip(res_stream, res_no_stream.text.split())])
-        >= len(res_stream) * 0.87
+    # being very close semantically. Align the words rather than compare them
+    # by position: one inserted or dropped word must not shift the rest.
+    matcher = difflib.SequenceMatcher(
+        None, res_stream, res_no_stream.text.split(), autojunk=False
     )
+    assert matcher.ratio() >= 0.87, (translation, res_no_stream.text)
 
 
 @pytest.mark.asyncio
@@ -236,7 +287,7 @@ async def test_stream_options(foscolo, server):
     foscolo.seek(0)
     final = False
     continuous = True
-    async with httpx.AsyncClient() as http_client:
+    async with httpx.AsyncClient(timeout=30) as http_client:
         files = {"file": foscolo}
         async with http_client.stream(
             "POST", url, headers=headers, data=data, files=files

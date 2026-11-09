@@ -1,0 +1,5 @@
+model_name: "Qwen/Qwen3.5-4B"
+accuracy_threshold: 0.76
+num_questions: 1319
+num_fewshot: 5
+server_args: "--kv-cache-dtype octave_k3v3_compact --max-model-len 4096"
