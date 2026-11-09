@@ -223,8 +223,9 @@ def _routed_experts(prefix: str) -> RoutedExperts:
 
 
 def _layer(moe: bool) -> nn.Module:
-    indexer = _container(wk_weights_proj=_merged(WK_ROWS, WP_ROWS))
-    self_attn = _container(fused_qkv_a_proj=_merged(Q_LORA, KV_A), indexer=indexer)
+    self_attn = _container(fused_qkv_a_proj=_merged(Q_LORA, KV_A))
+    if moe:  # the dense layer reuses another layer's top-k: no indexer
+        self_attn.indexer = _container(wk_weights_proj=_merged(WK_ROWS, WP_ROWS))
     mlp = _mlp()
     if moe:
         experts = _MoERunner()
@@ -237,8 +238,9 @@ def _layer(moe: bool) -> nn.Module:
 
 @pytest.fixture
 def dsa_causal_lm(default_vllm_config, monkeypatch):
-    """`DeepseekV32ForCausalLM` over a dense layer, an MoE layer and one MTP
-    layer that the checkpoint has but the model leaves to the drafter."""
+    """`DeepseekV32ForCausalLM` over a dense layer without an indexer, an MoE
+    layer and one MTP layer that the checkpoint has but the model leaves to the
+    drafter."""
     for module in (linear, parameter):
         monkeypatch.setattr(module, "get_tensor_model_parallel_rank", lambda: 0)
         monkeypatch.setattr(module, "get_tensor_model_parallel_world_size", lambda: 1)
@@ -260,8 +262,9 @@ def dsa_causal_lm(default_vllm_config, monkeypatch):
 
 
 def _checkpoint(fp8_wk: bool = True) -> dict[str, torch.Tensor]:
-    """Hub names with per-expert routed experts. The MoE layer's indexer `wk`
-    is FP8 with block scales, as in GLM-5.x FP8, if `fp8_wk`."""
+    """Hub names with per-expert routed experts and indexer weights on every
+    layer. The MoE layer's indexer `wk` is FP8 with block scales, as in GLM-5.x
+    FP8, if `fp8_wk`."""
     gen = torch.Generator().manual_seed(0)
 
     def rand(*shape: int) -> torch.Tensor:
@@ -322,7 +325,8 @@ def _stack_experts(checkpoint: dict[str, torch.Tensor]) -> dict[str, torch.Tenso
 
 def test_per_expert_and_stacked_experts_load_alike(dsa_causal_lm):
     """Hub per-expert names and Transformers v5 stacked experts give the same
-    parameters, every parameter is loaded, and MTP tensors are left out."""
+    parameters, every parameter is loaded, and MTP tensors and the indexer
+    weights of a layer without an indexer are left out."""
     per_expert = _checkpoint()
     models = {}
     for layout, checkpoint in (
@@ -359,6 +363,20 @@ def test_per_expert_and_stacked_experts_load_alike(dsa_causal_lm):
     torch.testing.assert_close(wk_weights[:WK_ROWS], _wk_pair("block")[2])
     wp = per_expert[f"{MOE}.self_attn.indexer.weights_proj.weight"]
     assert torch.equal(wk_weights[WK_ROWS:], wp)
+
+
+def test_kv_cache_scales_are_skipped(dsa_causal_lm):
+    """The MLA attention is `self_attn` itself, so the quant config's KV-cache
+    scale names match nothing; like the hand-written loader, skip them."""
+    from vllm.model_executor.layers.quantization.fp8 import Fp8Config
+
+    checkpoint = _checkpoint()
+    for scale in ("k_scale", "v_proj.v_scale", "prob_output_scale"):
+        checkpoint[f"{MOE}.self_attn.{scale}"] = torch.tensor(0.5)
+    model = dsa_causal_lm()
+    model.quant_config = Fp8Config()
+    loaded = model.load_weights(iter(checkpoint.items()))
+    assert loaded == {name for name, _ in model.named_parameters()}
 
 
 @pytest.mark.parametrize("split_half_first", ["weight", "scale"])

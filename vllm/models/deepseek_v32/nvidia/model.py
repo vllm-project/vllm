@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterable
-from functools import partial
 from itertools import islice
 
 import torch
@@ -22,14 +21,11 @@ from vllm.model_executor.models.deepseek_v2 import (
     DeepseekV2MoE,
 )
 from vllm.model_executor.models.utils import (
-    AutoWeightsLoader,
     PPMissingLayer,
-    WeightsMapper,
     copy_pp_buffers,
     make_empty_intermediate_tensors_factory,
     make_layers,
     pp_topk_buffers,
-    skip_spec_layers,
 )
 from vllm.models.common.ops.fused_allreduce_rms_norm import fused_allreduce_rms_norm
 from vllm.models.common.ops.sequence_parallel import (
@@ -41,7 +37,7 @@ from vllm.models.common.ops.sequence_parallel import (
 from vllm.models.deepseek_v32.attention import DeepseekV32Attention
 from vllm.models.deepseek_v32.common.weights import (
     DSA_WEIGHTS_MAPPER,
-    dequantize_fp8_indexer_wk_pairs,
+    load_dsa_weights,
 )
 from vllm.sequence import IntermediateTensors
 from vllm.v1.attention.backends.mla.index_group import (
@@ -344,18 +340,9 @@ class DeepseekV32ForCausalLM(DeepseekV2ForCausalLM):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
         if self.config.model_type == "glm_moe_dsa":
             enable_glm52_low_latency_gemm(self, vllm_config.model_config.dtype)
-        self._pending_indexer_wk_fp8: dict[str, dict[str, torch.Tensor]] = {}
-        transforms = WeightsMapper(
-            weights_transforms=[
-                partial(skip_spec_layers, config=self.config),
-                partial(dequantize_fp8_indexer_wk_pairs, model=self),
-            ]
-        )
-        self.hf_to_vllm_mapper = self.hf_to_vllm_mapper | transforms
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        return load_dsa_weights(self, weights)
 
     def set_moe_parameters(self):
         # Same as the base, but keyed on the MoE block type rather than the

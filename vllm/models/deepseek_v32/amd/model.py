@@ -23,21 +23,18 @@ from vllm.model_executor.models.deepseek_v2 import (
     DeepseekV2MoE,
 )
 from vllm.model_executor.models.utils import (
-    AutoWeightsLoader,
     PPMissingLayer,
-    WeightsMapper,
     copy_pp_buffers,
     get_fused_shared_expert_layers,
     make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_fuse_shared_experts,
     pp_topk_buffers,
-    skip_spec_layers,
 )
 from vllm.models.common.ops.fused_allreduce_rms_norm import fused_allreduce_rms_norm
 from vllm.models.deepseek_v32.common.weights import (
     DSA_WEIGHTS_MAPPER,
-    dequantize_fp8_indexer_wk_pairs,
+    load_dsa_weights,
 )
 from vllm.sequence import IntermediateTensors
 
@@ -250,27 +247,14 @@ class DeepseekV32ForCausalLM(DeepseekV2ForCausalLM):
 
     hf_to_vllm_mapper = DSA_WEIGHTS_MAPPER
 
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        super().__init__(vllm_config=vllm_config, prefix=prefix)
-        self._pending_indexer_wk_fp8: dict[str, dict[str, torch.Tensor]] = {}
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         fuse_shared_experts = partial(
             maybe_fuse_shared_experts,
             n_routed_experts=self.config.n_routed_experts,
             n_shared_experts=self.config.n_shared_experts or 1,
             fused_shared_expert_layers=self.model.fused_shared_expert_layers,
         )
-        transforms = WeightsMapper(
-            weights_transforms=[
-                partial(skip_spec_layers, config=self.config),
-                fuse_shared_experts,
-                partial(dequantize_fp8_indexer_wk_pairs, model=self),
-            ]
-        )
-        self.hf_to_vllm_mapper = self.hf_to_vllm_mapper | transforms
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        return load_dsa_weights(self, weights, fuse_shared_experts)
 
     def set_moe_parameters(self):
         self.num_expert_groups = getattr(self.config, "n_group", 1)

@@ -1,23 +1,24 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Checkpoint name mapping for DSA models loaded by `AutoWeightsLoader`."""
+"""Checkpoint loading for the DSA causal LMs through `AutoWeightsLoader`."""
 
 from collections.abc import Iterable, Iterator
+from functools import partial
 
 import torch
 
-from vllm.model_executor.models.deepseek_v2 import _dequantize_fp8_indexer_wk
-from vllm.model_executor.models.utils import WeightsMapper, is_pp_missing_parameter
+from vllm.model_executor.models.deepseek_v2 import _pair_fp8_indexer_wk
+from vllm.model_executor.models.utils import (
+    AutoWeightsLoader,
+    WeightsMapper,
+    WeightsTransformFn,
+    get_pp_missing_layer_names,
+    skip_spec_layers,
+)
 
 # Routed experts (`experts.<e>.*_proj` or the stacked `experts.{gate_up,down}_proj`)
 # are left to `RoutedExperts.load_weights`.
 DSA_WEIGHTS_MAPPER = WeightsMapper(
-    orig_to_new_substr={
-        # The MLA attention is `self_attn` itself. The quant config maps KV-cache
-        # scales onto a `self_attn.attn` that DSA does not have; they were never
-        # loaded, so keep dropping them.
-        ".self_attn.attn.": None,
-    },
     orig_to_new_stacked={
         ".mlp.gate_proj.": (".mlp.gate_up_proj.", 0),
         ".mlp.up_proj.": (".mlp.gate_up_proj.", 1),
@@ -31,29 +32,65 @@ DSA_WEIGHTS_MAPPER = WeightsMapper(
 )
 
 
-def dequantize_fp8_indexer_wk_pairs(
-    weights: Iterable[tuple[str, torch.Tensor]], model: torch.nn.Module
+def _drop_absent_indexers(
+    weights: Iterable[tuple[str, torch.Tensor]], indexer_parents: frozenset[str]
+) -> Iterator[tuple[str, torch.Tensor]]:
+    """Layers that reuse another layer's top-k build no indexer, but checkpoints
+    can still ship indexer weights for them."""
+    for name, weight in weights:
+        if ".indexer." in name and name.split(".indexer.")[0] not in indexer_parents:
+            continue
+        yield name, weight
+
+
+def _dequantize_fp8_indexer_wk_pairs(
+    weights: Iterable[tuple[str, torch.Tensor]],
+    pending: dict[str, dict[str, torch.Tensor]],
+    pp_missing_layer_names: list[str],
 ) -> Iterator[tuple[str, torch.Tensor]]:
     """Yield each FP8 indexer `wk` weight in BF16, the dtype of the fused
-    `wk_weights_proj`, once its scale has arrived.
-
-    Reordering loaders (e.g. runai_streamer) can split a pair across
-    `load_weights` calls, so the pending halves are kept on `model` in
-    `_pending_indexer_wk_fp8`."""
-    pending: dict[str, dict[str, torch.Tensor]] = model._pending_indexer_wk_fp8
+    `wk_weights_proj`, once its scale has arrived. `pending` outlives the call:
+    reordering loaders (e.g. runai_streamer) can split a pair across calls."""
     for name, weight in weights:
-        is_weight = name.endswith(".weight") and weight.dtype == torch.float8_e4m3fn
-        if (
-            ".indexer.wk." not in name
-            or not (is_weight or "weight_scale" in name)
-            or is_pp_missing_parameter(name, model)
-        ):
+        paired = _pair_fp8_indexer_wk(name, weight, pending, pp_missing_layer_names)
+        if paired is None:
             yield name, weight
-            continue
-        prefix = name.rpartition(".wk.")[0]
-        pair = pending.setdefault(prefix, {})
-        pair["weight" if is_weight else "scale"] = weight
-        if len(pair) == 2:
-            del pending[prefix]
-            weight = _dequantize_fp8_indexer_wk(pair["weight"], pair["scale"])
-            yield f"{prefix}.wk.weight", weight
+        elif (dequantized := paired[1]) is not None:
+            yield f"{paired[0]}.wk.weight", dequantized
+
+
+def load_dsa_weights(
+    model: torch.nn.Module,
+    weights: Iterable[tuple[str, torch.Tensor]],
+    *transforms: WeightsTransformFn,
+) -> set[str]:
+    """`load_weights` of a DSA causal LM.
+
+    `transforms` run after MTP layers and absent indexers are dropped, before
+    FP8 indexer `wk` pairs are dequantized. The transforms are built per call
+    so that the model holds no reference to itself."""
+    pending = getattr(model, "_pending_indexer_wk_fp8", None)
+    if pending is None:
+        model._pending_indexer_wk_fp8 = pending = {}
+    indexer_parents = frozenset(
+        name.removesuffix(".indexer")
+        for name, _ in model.named_modules(remove_duplicate=False)
+        if name.endswith(".indexer")
+    )
+    mapper = DSA_WEIGHTS_MAPPER | WeightsMapper(
+        weights_transforms=[
+            partial(skip_spec_layers, config=model.config),
+            partial(_drop_absent_indexers, indexer_parents=indexer_parents),
+            *transforms,
+            partial(
+                _dequantize_fp8_indexer_wk_pairs,
+                pending=pending,
+                pp_missing_layer_names=get_pp_missing_layer_names(model),
+            ),
+        ]
+    )
+    # The MLA attention is `self_attn` itself, so the quant config's KV-cache
+    # scale names (`self_attn.attn.*_scale`) match nothing. The hand-written
+    # loader skipped them (`maybe_remap_kv_scale_name` found no parameter).
+    loader = AutoWeightsLoader(model, ignore_unexpected_suffixes=[".self_attn.attn."])
+    return loader.load_weights(weights, mapper=mapper)

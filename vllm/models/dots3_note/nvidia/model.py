@@ -51,6 +51,7 @@ from vllm.model_executor.models.deepseek_v2 import (
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     PPMissingLayer,
+    WeightsMapper,
     get_pp_missing_layer_names,
     is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
@@ -794,7 +795,8 @@ class Dots3NoteModel(DeepseekV32Model):
 
 class Dots3NoteLanguageModelForCausalLM(DeepseekV32ForCausalLM):
     model_cls = Dots3NoteModel
+    # `Dots3NoteModel.load_weights` maps the checkpoint names itself.
+    hf_to_vllm_mapper = WeightsMapper()
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        # `Dots3NoteModel.load_weights` maps the checkpoint names itself.
         return AutoWeightsLoader(self).load_weights(weights)
