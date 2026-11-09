@@ -229,16 +229,21 @@ def test_cancelled_prefetch_keeps_blocks_until_io_completes():
     assert primary.alloc("other", 2) is not None
 
 
-def test_demand_load_reclaims_speculative_holds_when_cpu_is_full():
+def test_demand_allocation_miss_preserves_other_requests_prefetch():
     primary, secondary, manager = _bounded_promotion_manager()
     manager.prefetch_entry("r1", "loaded", "image", 2, (2, 1), 4)
     _complete_promotion(secondary)
     manager.poll()
     manager.prefetch_entry("r2", "other", "image", 2, (2, 1), 4)
     assert len(secondary.read_submissions) == 1  # Early prefetch cannot steal holds.
+    assert manager.ensure_primary_entry("other", "image", 2, (2, 1), 4)
+    assert len(secondary.read_submissions) == 1
+    assert primary.get("other") is None
+    assert primary.get("loaded").ready
+    assert primary.alloc("other", 2) is None
+    manager.release_prefetch("r1")
     assert not manager.ensure_primary_entry("other", "image", 2, (2, 1), 4)
     assert len(secondary.read_submissions) == 2
-    manager.release_prefetch("r1")  # Its reclaimed pin must not be released twice.
     _complete_promotion(secondary)
     assert manager.ensure_primary_entry("other", "image", 2, (2, 1), 4)
     assert primary.get("loaded") is None

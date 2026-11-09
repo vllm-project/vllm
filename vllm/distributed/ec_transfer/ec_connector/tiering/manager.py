@@ -107,7 +107,7 @@ class ECTieringManager:
         shape: tuple[int, int],
         element_size: int,
     ) -> None:
-        """Try one early read without waiting or reclaiming other prefetch holds."""
+        """Try one early read without waiting or displacing pinned entries."""
         self.poll()
         if (
             identifier not in self._pending_read_identifiers
@@ -119,7 +119,6 @@ class ECTieringManager:
                 num_tokens,
                 shape,
                 element_size,
-                reclaim_prefetch=False,
             )
         entry = self._primary.get(identifier)
         if entry is not None and entry.ready and identifier not in self._prefetch_holds:
@@ -232,7 +231,6 @@ class ECTieringManager:
             num_tokens,
             shape,
             element_size,
-            reclaim_prefetch=True,
         )
 
     def _ensure_primary_entry(
@@ -242,8 +240,6 @@ class ECTieringManager:
         num_tokens: int,
         shape: tuple[int, int],
         element_size: int,
-        *,
-        reclaim_prefetch: bool,
     ) -> bool:
         entry = self._primary.get(identifier)
         if entry is not None:
@@ -266,12 +262,6 @@ class ECTieringManager:
             return True
 
         entry = self._primary.alloc(identifier, num_blocks, shape)
-        if entry is None and reclaim_prefetch and self._prefetch_holds:
-            # Speculative ready entries must not prevent demand admission.
-            for key in tuple(self._prefetch_holds):
-                self._primary.unpin(key)
-            self._prefetch_holds.clear()
-            entry = self._primary.alloc(identifier, num_blocks, shape)
         if entry is None:
             # No read owns a destination: let has_cache_item report a miss.
             return True
