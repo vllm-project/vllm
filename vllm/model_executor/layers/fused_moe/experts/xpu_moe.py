@@ -47,6 +47,7 @@ class XPUExperts(mk.FusedMoEExpertsModular):
         )
         self.gemm1_clamp_limit = quant_config.gemm1_clamp_limit
         self.fused_moe_impl: XpuFusedMoe | None = None
+        self._layer: torch.nn.Module | None = None
         is_xe2_or_xe3 = torch.ops._xpu_C.is_xe2_arch() or torch.ops._xpu_C.is_xe3_arch()
         self._expects_unquantized_inputs = is_xe2_or_xe3
 
@@ -111,6 +112,45 @@ class XPUExperts(mk.FusedMoEExpertsModular):
         output = (M, K)
         return (workspace1, workspace2, output)
 
+    def initialize_weights(
+        self,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        topk: int,
+        activation: MoEActivation,
+        expert_map: torch.Tensor | None,
+    ) -> None:
+        """Bind the provider and prepare its model-owned weight layout once."""
+        if self.fused_moe_impl is not None:
+            return
+        if self._layer is not None:
+            self.quant_config = self._layer.quant_method.get_fused_moe_quant_config(
+                self._layer
+            )
+        if (
+            self.quant_config is not None
+            and self.quant_config.weight_quant_dtype == "mxfp4"
+        ):
+            w1 = w1.view(torch.float4_e2m1fn_x2)
+            w2 = w2.view(torch.float4_e2m1fn_x2)
+        # XpuFusedMoe relayouts the loaded [E, N, K] weights and scales
+        # in place for this device's grouped GEMM.
+        self.fused_moe_impl = XpuFusedMoe(
+            w13=w1,
+            w13_scales=self.w1_scale,
+            w13_bias=self.w1_bias,
+            w2=w2,
+            w2_scales=self.w2_scale,
+            w2_bias=self.w2_bias,
+            n_experts_per_token=topk,
+            activation=activation.value,
+            num_experts=self.moe_config.num_local_experts,
+            ep_rank=self.moe_config.ep_rank,
+            ep_size=self.moe_config.ep_size,
+            expert_map=expert_map,
+            gemm1_clamp_limit=self.gemm1_clamp_limit,
+        )
+
     def apply(
         self,
         output: torch.Tensor,
@@ -130,30 +170,7 @@ class XPUExperts(mk.FusedMoEExpertsModular):
         apply_router_weight_on_input: bool,
     ):
         if self.fused_moe_impl is None:
-            topk = topk_ids.size(-1)
-            if (
-                self.quant_config is not None
-                and self.quant_config.weight_quant_dtype == "mxfp4"
-            ):
-                w1 = w1.view(torch.float4_e2m1fn_x2)
-                w2 = w2.view(torch.float4_e2m1fn_x2)
-            # XpuFusedMoe relayouts the loaded [E, N, K] weights and scales
-            # in place for this device's grouped GEMM.
-            self.fused_moe_impl = XpuFusedMoe(
-                w13=w1,
-                w13_scales=self.w1_scale,
-                w13_bias=self.w1_bias,
-                w2=w2,
-                w2_scales=self.w2_scale,
-                w2_bias=self.w2_bias,
-                n_experts_per_token=topk,
-                activation=activation.value,
-                num_experts=self.moe_config.num_local_experts,
-                ep_rank=self.moe_config.ep_rank,
-                ep_size=self.moe_config.ep_size,
-                expert_map=expert_map,
-                gemm1_clamp_limit=self.gemm1_clamp_limit,
-            )
+            self.initialize_weights(w1, w2, topk_ids.size(-1), activation, expert_map)
         assert self.fused_moe_impl is not None
         if self.moe_config.ep_size > 1:
             # Avoid topk_ids = -1, remap them to an
@@ -194,6 +211,20 @@ class XPUExpertsFp8(XPUExperts):
             (kFp8StaticTensorSym, kFp8DynamicTensorSym),
         ]
         return (weight_key, activation_key) in SUPPORTED_W_A
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        """Prepare layout before reload restores the captured parameter storage."""
+        self._layer = layer
+        self.initialize_weights(
+            layer.w13_weight,
+            layer.w2_weight,
+            self.moe_config.experts_per_token,
+            layer.activation,
+            layer.expert_map,
+        )
+        # Reload may restore different Parameter objects after this hook.
+        # Bind the provider to those final objects at post-load or first use.
+        self.fused_moe_impl = None
 
 
 class XPUExpertsMxFp8(XPUExpertsFp8):

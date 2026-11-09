@@ -32,6 +32,7 @@ from vllm.model_executor.kernels.linear.scaled_mm.humming import (
 from vllm.model_executor.layers.fused_moe import RoutedExperts
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
+    Fp8MoeBackend,
     select_fp8_moe_backend,
 )
 from vllm.model_executor.layers.fusion.quant_activation import (
@@ -618,6 +619,8 @@ class _Fp8OnlineMoEBase(OnlineMoEMethodBase):
                 experts_cls=self.experts_cls,
                 routing_tables=layer._expert_routing_tables(),
             )
+            if self.fp8_backend == Fp8MoeBackend.XPU:
+                self.moe_kernel.fused_experts.process_weights_after_loading(layer)
             self.moe_kernel.fused_experts.keep_constants(layer)
 
     def get_fused_moe_quant_config(

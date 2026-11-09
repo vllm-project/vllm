@@ -56,7 +56,7 @@ class FusedMoeDecode:
             self._weights[0].dtype,
             self.top_k,
             self.hidden_dim,
-            self._weights[1].shape[1],
+            self._weights[3].shape[0],
             device=self._weights[0].device,
         ):
             logger.info_once(

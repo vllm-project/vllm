@@ -44,6 +44,8 @@ steps:
     - vllm/models/qwen3_5/__init__.py
     - vllm/models/qwen3_5/xpu/
     - vllm/model_executor/layers/fused_moe/
+    - vllm/model_executor/layers/quantization/fp8.py
+    - vllm/model_executor/layers/quantization/online/fp8.py
     - vllm/model_executor/models/qwen3_next.py
     - vllm/v1/worker/xpu_worker.py
     - tests/kernels/moe/test_moe.py
@@ -69,7 +71,7 @@ steps:
       BUILD_SYCL_TLA_KERNELS=ON MOE_KERNELS_ENABLED=ON
       XPU_SPECIFIC_KERNELS_ENABLED=ON VLLM_XPU_ENABLE_XE2=ON MAX_JOBS=2
       uv pip install --no-build-isolation --no-deps --force-reinstall
-      git+https://github.com/vllm-project/vllm-xpu-kernels.git@d51074b9b9ac29b8ce1b8f2627d7c1683c0c86f5 &&
+      git+https://github.com/vllm-project/vllm-xpu-kernels.git@6a1ec18b69b00eaf67a457e0bdd40e72632feaae &&
       cd tests &&
       pytest -v -s
       kernels/moe/test_moe.py

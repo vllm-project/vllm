@@ -236,6 +236,38 @@ def test_xpu_qwen3_5_native_shared_expert_decode(xpu_qwen3_5_moe, num_tokens):
 
 
 @pytest.mark.skipif(not current_platform.is_xpu(), reason="Requires XPU execution")
+@pytest.mark.parametrize("xpu_qwen3_5_moe", [(torch.float16, True)], indirect=True)
+def test_xpu_qwen3_5_first_fallback_preserves_decode_graph(xpu_qwen3_5_moe):
+    """Fallback must not relayout weights already bound by a captured decode."""
+    from vllm.forward_context import set_forward_context
+    from vllm.model_executor.models.qwen3_next import Qwen3NextSparseMoeBlock
+
+    block, config, _ = xpu_qwen3_5_moe
+    plan = block._xpu_moe_shared_fused_plan
+    assert plan is not None, "Prepare loaded routed weights before binding decode"
+    x = torch.randn(1, block.gate.input_size, dtype=torch.float16, device=DEVICE_TYPE)
+    weights = (plan.w13, plan.w2)
+    pointers = tuple(weight.data_ptr() for weight in weights)
+    shapes = tuple(weight.shape for weight in weights)
+    stream = torch.xpu.Stream()
+    stream.wait_stream(torch.xpu.current_stream())
+    with set_forward_context(None, config), torch.inference_mode():
+        with torch.xpu.stream(stream):
+            block(x)
+            block(x)
+        torch.xpu.current_stream().wait_stream(stream)
+        graph = torch.xpu.XPUGraph()
+        with torch.xpu.graph(graph, stream=stream):
+            output = block(x)
+        expected = Qwen3NextSparseMoeBlock.forward(block, x)
+        assert tuple(weight.data_ptr() for weight in weights) == pointers
+        assert tuple(weight.shape for weight in weights) == shapes
+        graph.replay()
+        torch.xpu.synchronize()
+        torch.testing.assert_close(output, expected, rtol=1e-2, atol=1e-2)
+
+
+@pytest.mark.skipif(not current_platform.is_xpu(), reason="Requires XPU execution")
 def test_xpu_qwen3_5_forward_requires_post_load_initialization(tmp_path):
     """Forward uses stock until the post-load hook binds native fused weights."""
     from vllm.models.qwen3_5.xpu.specialized_decode.hooks import (
@@ -395,6 +427,10 @@ def test_xpu_qwen3_5_checkpoint_then_kernel_scale_reload(xpu_qwen3_5_moe):
         actual = block(x)
         expected = block.shared_expert(x)
         torch.testing.assert_close(actual, expected, rtol=1e-2, atol=1e-2)
+        from vllm.model_executor.models.qwen3_next import Qwen3NextSparseMoeBlock
+
+        fallback = Qwen3NextSparseMoeBlock.forward(block, x)
+        torch.testing.assert_close(fallback, expected, rtol=1e-2, atol=1e-2)
         assert not torch.equal(actual, before)
         assert block._xpu_moe_shared_fused_plan is plan
         assert [plan.w13_scales.data_ptr(), plan.w2_scales.data_ptr()] == scale_ptrs

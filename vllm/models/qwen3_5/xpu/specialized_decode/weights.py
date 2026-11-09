@@ -117,6 +117,9 @@ def get_weights(
     )
     if w13.ndim != 3 or w2.ndim != 3:
         return "routed weights must be rank three"
+    if shared_w13.ndim != 2 or shared_w2.ndim != 2:
+        return "shared weights must be rank two"
+    prepared = w13.shape[1:] == shared_w13.shape and w2.shape[1:] == shared_w2.shape
     if not (
         w13.dtype
         == w2.dtype
@@ -126,13 +129,13 @@ def get_weights(
         and s13.shape == s2.shape == (w13.shape[0],)
         and shared_s13.numel() == shared_s2.numel() == 1
         and gate_weight.dtype == runner.moe_config.in_dtype
-        and shared_w13.shape == w13.shape[1:]
-        and shared_w2.shape == w2.shape[1:]
+        and w13.shape[1:] == (shared_w13.shape if prepared else shared_w13.shape[::-1])
+        and w2.shape[1:] == (shared_w2.shape if prepared else shared_w2.shape[::-1])
         and w2.shape[0] == w13.shape[0]
-        and w13.shape[2] == 2 * w2.shape[1]
-        and w2.shape[2] == w13.shape[1]
+        and shared_w13.shape[1] == 2 * shared_w2.shape[0]
+        and shared_w2.shape[1] == shared_w13.shape[0]
         and 0 < runner.moe_config.experts_per_token <= w13.shape[0] <= 512
-        and gate_weight.shape in ((w13.shape[1],), (1, w13.shape[1]))
+        and gate_weight.shape in ((shared_w13.shape[0],), (1, shared_w13.shape[0]))
     ):
         return "weight dtypes, dimensions or scale shapes are incompatible"
     matrices = (w13, w2, shared_w13, shared_w2)
@@ -169,4 +172,21 @@ def prepare_weights(block: "Qwen3_5SparseMoeBlock") -> tuple[torch.Tensor, ...] 
             parameter = getattr(layer, name)
             if not parameter.is_contiguous():
                 replace_parameter(layer, name, parameter.contiguous())
-    return get_weights(block)
+    runner = cast(MoERunner, block.experts)
+    kernel = runner.routed_experts.quant_method.moe_kernel
+    assert kernel is not None
+    experts = cast(XPUExpertsFp8, kernel.fused_experts)
+    experts.initialize_weights(
+        routed.w13_weight,
+        routed.w2_weight,
+        runner.moe_config.experts_per_token,
+        runner.activation,
+        runner.expert_map,
+    )
+    weights = get_weights(block)
+    if not isinstance(weights, str) and (
+        weights[0].shape[1:] != weights[2].shape
+        or weights[1].shape[1:] != weights[3].shape
+    ):
+        return "routed provider layout is unsupported"
+    return weights

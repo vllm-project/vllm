@@ -18,8 +18,10 @@ Static eligibility is checked after weight loading:
 - The routed backend is `XPUExpertsFp8`; both shared projections use
   `XPUW8A16FP8LinearKernel`. W8A8 shared projections retain their activation
   quantization through the stock path.
-- Routed weights are FP8-e4m3 tensors shaped `[E, H, 2I]` and `[E, I, H]`, with
-  one FP32 scale per expert. Shared weights have matching `[H, 2I]` and `[I, H]`
+- Routed FP8-e4m3 weights load as `[E, 2I, H]` and `[E, H, I]`, with
+  one FP32 scale per expert. The common XPU provider prepares `[E, H, 2I]`
+  and `[E, I, H]` before the decode executor binds them.
+  Shared weights have matching `[H, 2I]` and `[I, H]`
   shapes, each with one FP32 scale. The shared gate is `[H]` or `[1, H]`, with
   the activation dtype. All tensors are on the same XPU device.
 - `1 <= top_k <= E <= 512`; `H` and `I` are positive multiples of 32. The native
@@ -63,11 +65,17 @@ also checks greedy outputs and logprob compatibility.
 
 ## Lifecycle and graphs
 
-The model loader finishes per-layer quantization before calling
-`process_weights_after_loading()`. The hook then qualifies static configuration
-and weights, prepares necessary contiguous model-owned parameters, and binds
-the executor. Graph capture and any other consumers binding parameter storage
-must run after this preparation. Forward never constructs an executor or
+The FP8 experts post-load hook asks the common XPU provider to prepare routed
+layouts during per-layer quantization, before checkpoint reload copies values
+back into captured parameter storage. It defers provider binding until those
+final parameter objects are restored. The model post-load hook then qualifies
+static configuration and weights, prepares necessary contiguous model-owned
+parameters, initializes the common provider, and binds the decode executor to
+the same parameters. The provider owns the routed weight/scale relayout; the
+fallback reuses that provider instead of changing parameter storage on its
+first forward. Graph
+capture and any other consumers binding parameter storage must run after this
+preparation. Forward never constructs an executor or
 replaces parameters.
 
 `replace_parameter()` preserves parameter objects and reload metadata where
