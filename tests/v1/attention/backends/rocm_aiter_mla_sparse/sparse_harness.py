@@ -267,7 +267,9 @@ class SparseCase:
                         topk_indices_buffer=self.topk_buffer,
                         **extra,
                     )
-                    layer.process_weights_after_loading(self.dtype)
+                    # The loader builds layers under the model dtype.
+                    layer.act_dtype = self.dtype
+                    layer.process_weights_after_loading()
                     self.layers[name] = layer
                 spec = ROCMAiterMLASparseBackend.customize_spec(
                     self.layer.get_kv_cache_spec(self.config)
