@@ -6,6 +6,7 @@ from array import array
 
 import numpy as np
 import pytest
+
 from vllm import SamplingParams
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.kv_hints import KvHintAction, KvHintsEnvelope

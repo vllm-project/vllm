@@ -54,10 +54,10 @@ def merge_request_extra_args(
     kv_transfer_params: dict[str, Any] | None = None,
     ec_transfer_params: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Copy ``vllm_xargs`` and overlay typed transfer fields.
+    """Copy `vllm_xargs` and overlay typed transfer fields.
 
     Reserved transfer keys must be sent as top-level request fields. A
-    caller-controlled ``vllm_xargs`` entry would otherwise bypass the typed
+    caller-controlled `vllm_xargs` entry would otherwise bypass the typed
     field and can plant a non-dict that later crashes EngineCore.
     """
     extra_args: dict[str, Any] = dict(vllm_xargs) if vllm_xargs else {}
