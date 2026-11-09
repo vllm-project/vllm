@@ -839,7 +839,13 @@ _AUTOMATIC_CONVERTED_MODELS = {
 _MULTIMODAL_EXAMPLE_MODELS = {
     # [Decoder-only]
     "Alpamayo2Super": _HfExamplesInfo("nvidia/Alpamayo2-Super", max_model_len=8192),
-    "AriaForConditionalGeneration": _HfExamplesInfo("rhymes-ai/Aria"),
+    "AriaForConditionalGeneration": _HfExamplesInfo(
+        "rhymes-ai/Aria",
+        min_transformers_version="5.18.0",
+        transformers_version_reason={
+            "vllm": "Needs https://github.com/huggingface/transformers/pull/48907"
+        },
+    ),
     "AudioFlamingo3ForConditionalGeneration": _HfExamplesInfo(
         "nvidia/audio-flamingo-3-hf"
     ),
@@ -1743,30 +1749,6 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         speculative_model=(
             "inference-optimization/"
             "Qwen3-8B-from-Qwen3-8B_regen-speculators.eagle3-qwen3arch-ckpt1"
-        ),
-        tokenizer="Qwen/Qwen3-8B",
-        use_original_num_layers=True,
-    ),
-    # [PEagle]
-    "PEagleDraftModel": _HfExamplesInfo(
-        "Qwen/Qwen3-8B",
-        trust_remote_code=True,
-        speculative_model="nm-testing/qwen3-8b-peagle-speculators",
-        tokenizer="Qwen/Qwen3-8B",
-        use_original_num_layers=True,
-    ),
-    "PeagleLlamaForCausalLM": _HfExamplesInfo(
-        "Qwen/Qwen3-8B",
-        trust_remote_code=True,
-        speculative_model="nm-testing/qwen3-8b-peagle-speculators",
-        tokenizer="Qwen/Qwen3-8B",
-        use_original_num_layers=True,
-    ),
-    "PeagleQwen3ForCausalLM": _HfExamplesInfo(
-        "Qwen/Qwen3-8B",
-        trust_remote_code=True,
-        speculative_model=(
-            "inference-optimization/Qwen3-8B-speculators.peagle-qwen3arch-ckpt4"
         ),
         tokenizer="Qwen/Qwen3-8B",
         use_original_num_layers=True,

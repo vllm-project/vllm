@@ -314,7 +314,7 @@ SLEEP_CYCLES = 2_000_000_000
 class DelayedFirstBroadcastGroup:
     """Fills each pack with its sentinel on the current (slot) stream; the
     first pack is zeroed and its sentinel lands only after a GPU sleep, at
-    ``first_received``."""
+    `first_received`."""
 
     def __init__(self, sentinels: list[float]):
         self.sentinels = sentinels
@@ -334,7 +334,7 @@ class DelayedFirstBroadcastGroup:
 
 class SentinelBroadcastGroup:
     """Immediately fills each pack with its own sentinel, recording whether
-    ``pending`` (once set) was still incomplete."""
+    `pending` (once set) was still incomplete."""
 
     def __init__(self, sentinels: list[float]):
         self.sentinels = sentinels
@@ -445,8 +445,8 @@ class TestPackedBroadcastDeferredConsumer:
         self, num_buffers, packs_per_layer, misaligned
     ):
         """Tensors dropped right after the replay is enqueued (as layerwise
-        reload's ``info.reset()`` does) must not let the next receive reuse
-        memory the replay still reads. With ``misaligned``, each weight follows
+        reload's `info.reset()` does) must not let the next receive reuse
+        memory the replay still reads. With `misaligned`, each weight follows
         a 4-byte prefix, so it is a copy rather than a view of its pack."""
         num_packs = packs_per_layer + 4
         # A size unique to this run keeps blocks cached by earlier tests from
@@ -825,14 +825,14 @@ class TestPackedIpcRoundtrip:
     def _run_roundtrip(self, chunk_iter, device_index, timeout=30):
         """Stream chunks through a child consumer one at a time.
 
-        ``packed_ipc_producer`` reuses a single IPC buffer for every
+        `packed_ipc_producer` reuses a single IPC buffer for every
         chunk, so the producer must not be advanced until the consumer
         has finished reading the current chunk. We enforce that with an
-        ack queue: the consumer puts ``"ack"`` after it has copied the
+        ack queue: the consumer puts `"ack"` after it has copied the
         chunk to CPU, and only then do we pull the next chunk from the
         generator.
 
-        Returns ``(num_chunks, results)``.
+        Returns `(num_chunks, results)`.
         """
         import multiprocessing as mp
 

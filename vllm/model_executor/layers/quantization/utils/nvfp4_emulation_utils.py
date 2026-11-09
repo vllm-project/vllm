@@ -94,9 +94,9 @@ def _nvfp4_gathered_bias_kernel(
 ):
     """Apply selected NVFP4 Markov-projection rows to dense logits.
 
-    BF16: ``weight[index] -> baddbmm_ -> scatter_``.
-    NVFP4: ``gather packed W2 row -> dequantize 16-element blocks -> dot with
-    Markov embedding -> add base value -> scatter corrected logit``.
+    BF16: `weight[index] -> baddbmm_ -> scatter_`.
+    NVFP4: `gather packed W2 row -> dequantize 16-element blocks -> dot with
+    Markov embedding -> add base value -> scatter corrected logit`.
 
     The fused NVFP4 path is needed because packed weights cannot be indexed as
     BF16 rows, while dequantizing the full vocabulary would defeat top-k.
@@ -367,7 +367,7 @@ def _dequantize_nvfp4_kernel(
 def _round_to_fp4(x):
     """Round float values to the nearest E2M1 representable value.
 
-    Matches the thresholds in the Python ``cast_to_fp4`` exactly.
+    Matches the thresholds in the Python `cast_to_fp4` exactly.
     """
     sign = tl.where(x < 0.0, -1.0, 1.0)
     abs_x = tl.abs(x)
@@ -695,12 +695,12 @@ def dequantize_nvfp4_moe_weights(
     """Dequantize serialized NVFP4 MoE weights for requantization.
 
     Compressed-tensors stores global encode scales, while ModelOpt stores
-    ``weight_scale_2`` as the corresponding decode multiplier. Set
-    ``invert_global_scales`` according to the source checkpoint convention.
+    `weight_scale_2` as the corresponding decode multiplier. Set
+    `invert_global_scales` according to the source checkpoint convention.
 
     Returns:
-        An iterator of ``(experts, w13, w2)`` over groups of experts, so that
-        the dequantized staging tensors stay around ``_DEQUANT_CHUNK_BYTES``.
+        An iterator of `(experts, w13, w2)` over groups of experts, so that
+        the dequantized staging tensors stay around `_DEQUANT_CHUNK_BYTES`.
 
     """
     num_experts = w13_weight_packed.shape[0]

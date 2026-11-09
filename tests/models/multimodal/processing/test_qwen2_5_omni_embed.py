@@ -72,8 +72,10 @@ def make_token_seq(
     audio_n: int, image_n: int, video_n: int, text_prefix: int = 3, text_sep: int = 2
 ):
     """Build a flat token sequence:
-      [text_prefix] [AUDIO * audio_n] [text_sep] [IMAGE * image_n]
-      [text_sep] [VIDEO * video_n] [text_sep]
+
+        [text_prefix] [AUDIO * audio_n] [text_sep] [IMAGE * image_n]
+        [text_sep] [VIDEO * video_n] [text_sep]
+
     Returns (input_ids tensor, is_multimodal mask, positions dict).
     """
     tokens = (
@@ -97,8 +99,8 @@ def make_token_seq(
 def make_interleaved_seq(
     video_chunks: list[int], audio_chunks: list[int], text_prefix: int = 2
 ):
-    """Build an interleaved sequence like use_audio_in_video:
-    [text] [V*v0] [A*a0] [V*v1] [A*a1] ...
+    """Build an interleaved sequence like `use_audio_in_video`:
+    `[text] [V*v0] [A*a0] [V*v1] [A*a1] ...`
     """
     tokens = [TEXT_TOKEN_ID] * text_prefix
     for v, a in zip(video_chunks, audio_chunks):
@@ -172,7 +174,7 @@ class TestCheckInterleavedAudioVideo:
         """Regression test for https://github.com/vllm-project/vllm/issues/35394.
 
         5 identical non-interleaved mixed-modality requests batched together:
-        each has [audio][image][video] in separate blocks with text between them.
+        each has `[audio][image][video]` in separate blocks with text between them.
         Across the batch, audio from request N falls between video blocks of
         request N and request N+1, causing the global ranges to overlap.
         check_interleaved_audio_video must return False (not a false positive).
@@ -229,8 +231,8 @@ def make_mock_model(hidden: int = 8):
     # _embed_text_input_ids: delegate to SupportsMultiModal's implementation
     from vllm.model_executor.models.interfaces import SupportsMultiModal
 
-    model._embed_text_input_ids = (
-        lambda *a, **kw: SupportsMultiModal._embed_text_input_ids(model, *a, **kw)
+    model._embed_text_input_ids = lambda *a, **kw: (
+        SupportsMultiModal._embed_text_input_ids(model, *a, **kw)
     )
 
     # super().embed_input_ids → use SupportsMultiModal.embed_input_ids
@@ -248,10 +250,8 @@ def make_mock_model(hidden: int = 8):
         )
 
     # Bind embed_input_ids as the real method
-    model.embed_input_ids = (
-        lambda *a, **kw: Qwen2_5OmniThinkerForConditionalGeneration.embed_input_ids(
-            model, *a, **kw
-        )
+    model.embed_input_ids = lambda *a, **kw: (
+        Qwen2_5OmniThinkerForConditionalGeneration.embed_input_ids(model, *a, **kw)
     )
 
     # Store super-embed for use inside the method
