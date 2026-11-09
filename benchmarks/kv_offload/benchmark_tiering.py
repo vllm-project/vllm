@@ -203,8 +203,9 @@ class VLLMServer:
 class GuideLLM:
     """Drives the guidellm load against a running server and parses metrics."""
 
-    def __init__(self, port: int) -> None:
+    def __init__(self, port: int, max_seconds: int) -> None:
         self.port = port
+        self.max_seconds = max_seconds
 
     def run(self, spec: RunSpec, log_path: Path) -> dict:
         prefix_count = max(4 * spec.concurrency, 256)
@@ -231,7 +232,7 @@ class GuideLLM:
             "--profile",
             f"kind=concurrent,streams={spec.concurrency}",
             "--constraint",
-            f"kind=max_duration,seconds={BENCH_MAX_SECONDS}",
+            f"kind=max_duration,seconds={self.max_seconds}",
             "--seed",
             f"kind=static,value={BENCH_RANDOM_SEED}",
             "--data",
@@ -265,14 +266,20 @@ class BenchmarkRun:
     """One benchmark run: cleanup, config, server, load, teardown."""
 
     def __init__(
-        self, spec: RunSpec, fs_dir: Path, session_dir: Path, port: int
+        self,
+        spec: RunSpec,
+        fs_dir: Path,
+        session_dir: Path,
+        port: int,
+        max_seconds: int,
     ) -> None:
         self.spec = spec
         self.fs_dir = fs_dir
         self.port = port
+        self.max_seconds = max_seconds
         self.run_dir = session_dir / spec.name
         self.run_dir.mkdir(parents=True, exist_ok=True)
-        self.guidellm = GuideLLM(port)
+        self.guidellm = GuideLLM(port, max_seconds)
 
     def execute(self) -> dict:
         print("=" * 70)
@@ -328,10 +335,13 @@ class BenchmarkRun:
 class BenchmarkSession:
     """Runs a list of specs and checkpoints results into a session dir."""
 
-    def __init__(self, fs_dir: Path, specs: list[RunSpec], port: int) -> None:
+    def __init__(
+        self, fs_dir: Path, specs: list[RunSpec], port: int, max_seconds: int
+    ) -> None:
         self.fs_dir = fs_dir
         self.specs = specs
         self.port = port
+        self.max_seconds = max_seconds
         self.session_dir = Path(f"benchmark_session_{datetime.now():%Y%m%d_%H%M%S}")
         self.session_dir.mkdir()
         self.results: list[dict] = []
@@ -340,7 +350,7 @@ class BenchmarkSession:
         print(f"Session dir: {self.session_dir}/")
         print(
             f"{len(self.specs)} runs "
-            f"(~{len(self.specs) * (BENCH_MAX_SECONDS + 120) // 60} min total):"
+            f"(~{len(self.specs) * (self.max_seconds + 120) // 60} min total):"
         )
         for spec in self.specs:
             print(f"  {spec.name}")
@@ -348,7 +358,7 @@ class BenchmarkSession:
         for i, spec in enumerate(self.specs, 1):
             print(f"\n[{i}/{len(self.specs)}]")
             result = BenchmarkRun(
-                spec, self.fs_dir, self.session_dir, self.port
+                spec, self.fs_dir, self.session_dir, self.port, self.max_seconds
             ).execute()
             self.results.append(result)
             self._checkpoint()
@@ -421,6 +431,12 @@ def main() -> None:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    parser.add_argument(
+        "--bench-seconds",
+        type=int,
+        default=BENCH_MAX_SECONDS,
+        help="max duration per guidellm run in seconds (default: %(default)s)",
     )
     parser.add_argument(
         "--port",
@@ -502,7 +518,7 @@ def _main() -> None:
     except (RuntimeError, subprocess.CalledProcessError) as e:
         sys.exit(f"Preflight failed: {e}")
 
-    BenchmarkSession(args.fs_dir, specs, args.port).run()
+    BenchmarkSession(args.fs_dir, specs, args.port, args.bench_seconds).run()
 
 
 if __name__ == "__main__":
