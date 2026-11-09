@@ -4,13 +4,22 @@
 rank slots, group 0 sums in rank order into the AttnRes) and TP16 fused producer +
 consumer. With `twoshot` the mailbox is the one-slot gather row of
 `common.twoshot`: the threads owning this rank's columns first reduce their
-receive slots into it (args 11-13: receive view, gather multicast address, rank)."""
+receive slots into it (args 11-13: receive view, gather multicast address, rank).
+With `ahead` (fused kernel) group 1, idle until the input arrives, also computes the
+next layer's AttnRes saved-block statistics (`ClusterAttnRes.statistics`: same
+arithmetic and exchange order) from the blocks group 0 prefetched, and stores them for
+that layer's `precomputed` AttnRes (args 11-15 after the AttnRes rows: next norm,
+next query, mixture [rows, 7168] FP32, (maximum, exponent sum) [rows, 2] FP32, next
+eps). The next layer must read the same saved blocks (its nb is this kernel's)."""
+
+from functools import partial
+from typing import Any
 
 import cutlass
 import cutlass.cute as cute
 from cutlass import Float32, Int32, Uint32
 
-from ..attn_res.kernel import arm_exchanges
+from ..attn_res.kernel import ClusterAttnRes, arm_exchanges, unpack
 from ..common.mailbox import rearm
 from ..common.primitives import (
     add_rn,
@@ -30,6 +39,7 @@ from ..common.primitives import (
     published,
     push_float,
     smem_words,
+    store_f32x4,
     store_relaxed,
     store_shared_words,
     store_words,
@@ -39,6 +49,9 @@ from ..common.primitives import (
 from ..common.primitives import wait_phase_zero_cluster as wait_phase_zero
 from ..common.twoshot import reduce
 from .producer import OprojProducer, pack8, tree_reduce
+
+# Named barrier handing group 0's prefetched saved blocks to the ahead group.
+AHEAD_BARRIER = 5
 
 
 @asm((Float32,) * 2, pure=True)
@@ -105,6 +118,13 @@ def fetch(raw, rank, pointer):
         raw[rank, j] = words[j]
 
 
+def smem_block(pf, tid, source):
+    """Saved block `source` of this thread's columns from the prefetch rows."""
+    row = cute.make_rmem_tensor((1, 8), Float32)
+    unpack(smem_words(pf.iterator + ((4 + source) * 128 + tid) * 4), row, 0)
+    return row, 0
+
+
 class OprojConsumer:
     def __init__(
         self,
@@ -113,13 +133,19 @@ class OprojConsumer:
         has_delta=True,
         groups=4,
         twoshot=False,
+        ahead=False,
     ):
         if not 0 <= nb <= 8:
             raise ValueError("Output-projection AttnRes supports zero to eight blocks")
+        if ahead and (nb == 0 or groups < 2):
+            raise ValueError("Statistics ahead need saved blocks and a second group")
         self.nb, self.has_delta = nb, has_delta
         self.groups, self.twoshot = groups, twoshot
         self.kpre = 1 << max(0, (2 * nb - 1).bit_length())
         self.npost = 4 if nb > 0 else 1
+        self.ahead: Any = ClusterAttnRes(nb) if ahead else None
+        # Exchange barriers: pre, post (and the ahead statistics).
+        self.exchanges = (2 * nb, 4 * self.npost) + ((2 * nb,) if ahead else ())
 
     @cute.jit
     def wait_exchange(self, barrier):
@@ -133,7 +159,7 @@ class OprojConsumer:
         blk = alloc(smem, Float32, 16)
         post = alloc(smem, Float32, (7, 4, 4))
         total = alloc(smem, Float32, 4)
-        bars = alloc(smem, cutlass.Uint64, 2, 8)
+        bars = alloc(smem, cutlass.Uint64, len(self.exchanges), 8)
         parts = alloc(smem, Float32, (max(1, self.groups - 1), 2, 128, 4))
         lean = self.groups == 1  # above B8: rows for this nb only (co-residency)
         pf = alloc(smem, Uint32, (4 + self.nb if lean else 12, 128, 4))
@@ -141,7 +167,7 @@ class OprojConsumer:
 
     @cute.jit
     def setup(self, bars):
-        arm_exchanges(bars, (2 * self.nb, 4 * self.npost))
+        arm_exchanges(bars, self.exchanges)
         cute.arch.cluster_arrive_relaxed()
 
     @cute.jit
@@ -183,6 +209,8 @@ class OprojConsumer:
         warp, lane = tid // 32, tid % 32
         maximum, exponent_sum, qpart = Float32(0), Float32(0), Float32(0)
         cute.arch.cp_async_wait_group(wait_groups)
+        if cutlass.const_expr(self.ahead is not None):
+            named_barrier(AHEAD_BARRIER, 256, arrive=True)  # blocks for group 1
         if cutlass.const_expr(self.nb > 0):
             weight = self.combined_weight(pf, tid)
             partial = zeros(self.kpre, Float32)
@@ -225,6 +253,37 @@ class OprojConsumer:
         else:
             cute.arch.cluster_wait()
         return maximum, exponent_sum, qpart
+
+    @cute.jit
+    def statistics_ahead(self, state, rank, token, args):
+        """Group 1: the next layer's AttnRes statistics, stored to args[2:4] (the
+        exchange buffers sit in `parts`, unused until the input has arrived)."""
+        norm, query, mixture_out, scal_out, eps = args
+        _, _, _, _, _, bars, parts, pf = state
+        tid = cute.arch.thread_idx()[0] - 128
+        col = (rank * 128 + tid) * 8
+        nxt = self.ahead
+        v = cute.make_rmem_tensor((self.nb + 4, 8), Float32)
+        nxt.weights(v, norm, query, col)
+        named_barrier(AHEAD_BARRIER, 256)  # group 0's block prefetch has landed
+        cute.arch.cluster_wait()  # every peer's ahead barrier is armed
+        base = parts.iterator
+        bufs = (
+            cute.make_tensor(base + 128, cute.make_layout(64)),
+            cute.make_tensor(base, cute.make_layout((1, 112), stride=(112, 1))),
+            cute.make_tensor(base + 112, cute.make_layout((1, 16), stride=(16, 1))),
+            cute.make_tensor(bars.iterator + 2, cute.make_layout(1)),
+        )
+        out = nxt.state()
+        block = partial(smem_block, pf, tid)
+        nxt.statistics(out, bufs, v, eps, (rank, token, tid), block, 1)
+        mixture, scal = out
+        for half in cutlass.range_constexpr(2):
+            values = tuple(mixture[0, 4 * half + i] for i in range(4))
+            store_f32x4(at(mixture_out, token, col + 4 * half), values)
+        if (rank == 0) & (tid == 0):
+            scal_out[token, 0] = scal[0]
+            scal_out[token, 1] = scal[1]
 
     def slots(self, tp):
         """Rank slots each group polls (at least four)."""
@@ -390,10 +449,10 @@ class OprojConsumer:
 
 
 class OprojFused:
-    def __init__(self, nb, *, has_delta=True):
+    def __init__(self, nb, *, has_delta=True, ahead=False):
         self.producer = OprojProducer(768, staged_blocks=0)
         # TP16 requires prefix/blocks to be ready at launch.
-        self.consumer = OprojConsumer(nb, has_delta=has_delta)
+        self.consumer = OprojConsumer(nb, has_delta=has_delta, ahead=ahead)
 
     @cute.jit
     def __call__(self, *args):
@@ -415,6 +474,11 @@ class OprojFused:
         group0 = active & (tid < 128)
         if group0:
             self.consumer.prefetch(rows, state[7], rank, cluster)
+        if cutlass.const_expr(self.consumer.ahead is not None):  # noqa: SIM102
+            # Before the producer's weight loads, so that the statistics' live
+            # registers do not overlap the weights'.
+            if active & (tid >= 128) & (tid < 256):
+                self.consumer.statistics_ahead(state, rank, cluster, rows[11:16])
         weights = self.producer.load_weight(weight, smem[2], cta)
         mix = zeros(8, Float32)
         maximum, exponent_sum, qpart = Float32(0), Float32(0), Float32(0)
