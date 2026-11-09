@@ -39,6 +39,15 @@ You can configure how the quantization scales are computed in vLLM using three d
 - `kv_cache_dtype="auto"`: Use the model's default data type
 - `kv_cache_dtype="fp8_e4m3"`: Supported on CUDA 11.8+ and ROCm (AMD GPUs)
 - `kv_cache_dtype="fp8_e5m2"`: Supported on CUDA 11.8+
+- `kv_cache_dtype="nvfp4"` on dense MLA models: see [NVFP4 KV Cache for Dense MLA](#nvfp4-kv-cache-for-dense-mla)
+
+### NVFP4 KV Cache for Dense MLA
+
+On dense MLA models (e.g. DeepSeek-V3, Kimi-K3), `kv_cache_dtype="nvfp4"` stores the 512 latent dims as NVFP4 and the 64 RoPE dims as FP8: 352 bytes per token per layer, instead of 576 for FP8.
+
+- **Requirements:** the `FLASHINFER_MLA` backend, an SM100/SM103 GPU, BF16 activations (FP8- and NVFP4-weight checkpoints are fine), a FlashInfer build with the Cake NVFP4 MLA decode ([flashinfer#6242](https://github.com/flashinfer-ai/flashinfer/pull/6242)) and a CUDA 13.4+ toolkit at runtime.
+- **At most 48 query rows per decode request:** heads per GPU × decode context parallel size × the longest decode query (1 + speculative tokens, or 1 + 2 × speculative tokens with parallel drafting on model runner V1). For example, DeepSeek-V3 (128 heads) needs a tensor-parallel size of at least 4 (data parallelism does not change heads per GPU), allows neither speculative decoding nor decode context parallelism at TP4, and allows at most 2 speculative tokens at TP8.
+- **Also refused at startup:** the Kimi-K3 DSpark draft model; `--kv-cache-dtype-skip-layers` on hybrid MLA models such as Kimi-K3; and, under FP8 prefill, an MLA draft model whose `kv_cache_dtype` mixes `nvfp4` and `fp8` with the target's.
 
 ### Skipping Specific Layers from KV-Cache Quantization
 
