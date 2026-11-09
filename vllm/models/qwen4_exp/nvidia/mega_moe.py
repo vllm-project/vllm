@@ -66,9 +66,6 @@ _SHARD_TENSORS = {
     "mxfp4": ("weight", "weight_scale"),
 }
 _ONLINE_FORMATS = {kMxfp8Static: MEGA_MOE_MXFP8, kMxfp4Static: MEGA_MOE_MXFP4}
-# Bounds the FP32 temporaries of one requantize call to a few GiB: at EP1,
-# one projection batches every routed expert.
-_REQUANTIZE_CHUNK_ELEMENTS = 1 << 27
 _E2M1_VALUES = torch.tensor([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0])
 
 
@@ -104,7 +101,7 @@ def requantize_experts(
     """Requantize `[N, K]` checkpoint expert weights to MXFP8 or MXFP4.
 
     Rounds as DeepGEMM's own casts and returns the scales as `[N, K // 32]`
-    UE8M0 exponents. Rows are independent, so experts may be stacked.
+    UE8M0 exponents.
     """
     utils = import_module(f"{_import_deep_gemm().__name__}.utils")
     cast = (
@@ -198,8 +195,9 @@ def mega_moe_expert_formats(
     return checkpoint_format, MEGA_MOE_WEIGHT_FORMATS[checkpoint_format]
 
 
-class _FinishRequantize(QuantizeMethodBase):
-    """Requantizes the experts still buffered after loading."""
+class _CheckLoaded(QuantizeMethodBase):
+    """Fails on expert shards that got their weight but not their scale, or
+    the reverse."""
 
     requires_device_loading = False
     supports_pre_processed_weights = True
@@ -212,42 +210,36 @@ class _FinishRequantize(QuantizeMethodBase):
 
     def process_weights_after_loading(self, layer: nn.Module) -> None:
         assert isinstance(layer, Qwen4ExpMegaMoEExperts)
-        layer.finish_requantize()
+        if layer.pending_shards:
+            raise ValueError(
+                f"{layer.prefix}: expert shards without both weight and scale: "
+                f"{sorted(layer.pending_shards)[:4]}"
+            )
 
 
 class Qwen4ExpMegaMoEExperts(DeepGemmMegaMoEExperts):
     """MegaMoE experts loaded from per-expert or fused checkpoint tensors.
 
     Experts stored in `weight_format` are written straight into the kernel
-    layout. Otherwise each EP rank buffers the complete shards of its own
-    experts and requantizes them per projection in a few batched calls.
+    layout. Others are requantized one expert projection at a time, once its
+    weight and scale have both arrived.
     """
 
     def __init__(
         self, vllm_config: VllmConfig, checkpoint_format: str, **kwargs
     ) -> None:
         super().__init__(vllm_config, activation=MegaMoEActivation(), **kwargs)
-        self.quant_method = _FinishRequantize()
+        self.quant_method = _CheckLoaded()
         self.checkpoint_format = checkpoint_format
         self._shard_tensors = _SHARD_TENSORS[checkpoint_format]
-        self._requantizes = checkpoint_format != self.weight_format.name
         # Parameters may sit on meta (weight-cache IPC loading, layerwise
-        # reload), so stage and requantize on the current GPU.
-        self._requantize_device = torch.device(
+        # reload), so requantize on the current GPU.
+        self._device = torch.device(
             current_platform.device_type, torch.accelerator.current_device_index()
         )
-        self._pending_shards: dict[tuple[int, str], dict[str, torch.Tensor]] = {}
-        # Complete (expert, weight, scale) shards per shard id.
-        self._ready_shards: dict[
-            str, list[tuple[int, torch.Tensor, torch.Tensor | None]]
-        ] = {}
-        # Logical experts this rank holds (redundant replicas share one).
-        self._owned_experts = sorted(
-            {
-                p % self.num_logical_experts
-                for p in range(self.experts_start_idx, self.experts_end_idx)
-            }
-        )
+        # Tensors of expert shards still missing their weight or scale; a
+        # chunked weight update may split the two across load_weights calls.
+        self.pending_shards: dict[tuple[int, str], dict[str, torch.Tensor]] = {}
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         """Load `{expert}.{gate,up,down}_proj.{weight,<scale>}` or the fused
@@ -260,7 +252,9 @@ class Qwen4ExpMegaMoEExperts(DeepGemmMegaMoEExperts):
             ):
                 # Fused [E, N, K] BF16 experts; gate rows precede up rows.
                 loaded |= self._params_of("w2" if name == "down_proj" else "w13")
-                for expert_id in self._owned_experts:
+                for expert_id in range(self.num_logical_experts):
+                    if not self._map_global_expert_id(expert_id):
+                        continue
                     if name == "down_proj":
                         self._load_shard(expert_id, "w2", "weight", tensor[expert_id])
                         continue
@@ -292,69 +286,34 @@ class Qwen4ExpMegaMoEExperts(DeepGemmMegaMoEExperts):
     def _load_shard(
         self, expert_id: int, shard_id: str, kind: str, tensor: torch.Tensor
     ) -> None:
-        if not self._requantizes:
-            prefix = "w2" if shard_id == "w2" else "w13"
-            param_name = (
-                f"{prefix}_weight" if kind == "weight" else f"{prefix}_weight_scale"
-            )
-            # The parameter's own loader: layerwise reload wraps it.
-            param = getattr(self, param_name)
-            param.weight_loader(
-                param, tensor, param_name, shard_id=shard_id, expert_id=expert_id
-            )
+        if self.checkpoint_format == self.weight_format.name:
+            suffix = "weight" if kind == "weight" else "weight_scale"
+            self._write(expert_id, shard_id, suffix, tensor)
             return
-        pending = self._pending_shards.setdefault((expert_id, shard_id), {})
-        # Stage on the GPU as it arrives: no CPU-side torch ops, which stall
-        # when several engines load on one host.
-        pending[kind] = tensor.to(self._requantize_device)
+        pending = self.pending_shards.setdefault((expert_id, shard_id), {})
+        pending[kind] = tensor
         if len(pending) < len(self._shard_tensors):
             return
-        del self._pending_shards[(expert_id, shard_id)]
-        ready = self._ready_shards.setdefault(shard_id, [])
-        scale = None if len(pending) == 1 else pending[self._shard_tensors[1]]
-        ready.append((expert_id, pending["weight"], scale))
-        if len(ready) == len(self._owned_experts):
-            self._requantize_ready(shard_id)
+        del self.pending_shards[(expert_id, shard_id)]
+        scale = None
+        if self.checkpoint_format != "bf16":
+            scale = pending[self._shard_tensors[1]].to(self._device)
+        weight, scale = requantize_experts(
+            pending["weight"].to(self._device),
+            scale,
+            self.checkpoint_format,
+            self.weight_format,
+        )
+        self._write(expert_id, shard_id, "weight", weight)
+        self._write(expert_id, shard_id, "weight_scale", scale)
 
-    def finish_requantize(self) -> None:
-        """Requantize the shards of experts this load left partly complete; a
-        chunked update may split a rank's experts across `load_weights` calls."""
-        for shard_id in list(self._ready_shards):
-            self._requantize_ready(shard_id)
-        if self._pending_shards:
-            raise ValueError(
-                f"{self.prefix}: expert shards without both weight and scale: "
-                f"{sorted(self._pending_shards)[:4]}"
-            )
-
-    def _requantize_ready(self, shard_id: str) -> None:
-        ready = self._ready_shards.pop(shard_id)
-        rows = ready[0][1].shape[0]
-        if any(w.shape != ready[0][1].shape for _, w, _ in ready):
-            raise ValueError(f"{self.prefix}: {shard_id} shards differ in shape.")
-        prefix = "w2" if shard_id == "w2" else "w13"
-        chunk = max(1, _REQUANTIZE_CHUNK_ELEMENTS // ready[0][1].numel())
-        for start in range(0, len(ready), chunk):
-            batch = ready[start : start + chunk]
-            scales = [s for _, _, s in batch if s is not None]
-            weight, scale = requantize_experts(
-                torch.cat([w for _, w, _ in batch]),
-                torch.cat(scales) if scales else None,
-                self.checkpoint_format,
-                self.weight_format,
-            )
-            for i, (expert_id, _, _) in enumerate(batch):
-                for suffix, value in (("weight", weight), ("weight_scale", scale)):
-                    param_name = f"{prefix}_{suffix}"
-                    # The parameter's own loader: layerwise reload wraps it.
-                    param = getattr(self, param_name)
-                    param.weight_loader(
-                        param,
-                        value[i * rows : (i + 1) * rows],
-                        param_name,
-                        shard_id=shard_id,
-                        expert_id=expert_id,
-                    )
+    def _write(
+        self, expert_id: int, shard_id: str, suffix: str, tensor: torch.Tensor
+    ) -> None:
+        name = f"{'w2' if shard_id == 'w2' else 'w13'}_{suffix}"
+        param = getattr(self, name)
+        # The parameter's own loader: layerwise reload wraps it.
+        param.weight_loader(param, tensor, name, shard_id=shard_id, expert_id=expert_id)
 
 
 class Qwen4ExpMegaMoeBlock(nn.Module):

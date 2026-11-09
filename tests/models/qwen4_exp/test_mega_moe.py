@@ -205,14 +205,9 @@ def test_expert_formats_follow_checkpoint_and_quantization_config():
     ],
 )
 def test_experts_load_checkpoint_into_kernel_layout(
-    any_device_mega_moe, monkeypatch, checkpoint_format, fmt
+    any_device_mega_moe, checkpoint_format, fmt
 ):
     """Shards in any order, weight and scale apart, only owned experts kept."""
-    # One expert per requantize call, so batching spans several calls.
-    monkeypatch.setattr(
-        "vllm.models.qwen4_exp.nvidia.mega_moe._REQUANTIZE_CHUNK_ELEMENTS",
-        INTER * HIDDEN,
-    )
     fused = checkpoint_format == "fused_bf16"
     checkpoint_format = "bf16" if fused else checkpoint_format
     generator = torch.Generator().manual_seed(2)
