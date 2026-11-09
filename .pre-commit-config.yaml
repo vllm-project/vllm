@@ -329,6 +329,14 @@ repos:
     entry: python tools/pre_commit/check_boolean_context_manager.py
     language: python
     types: [python]
+  - id: check-docstring-style
+    name: Check docstring Markdown style
+    entry: python tools/pre_commit/check_docstring_style.py
+    language: python
+    types: [python]
+    # Its own docstrings show the forms it rewrites
+    exclude: ^tools/pre_commit/check_docstring_style\.py$
+    additional_dependencies: [regex]
   - id: check-trust-remote-code
     name: Check for hardcoded trust_remote_code=True
     entry: python tools/pre_commit/check_trust_remote_code.py

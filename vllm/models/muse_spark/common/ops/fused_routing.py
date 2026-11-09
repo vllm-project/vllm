@@ -71,7 +71,7 @@ def _routing_kernel(
     HAS_EPS: tl.constexpr,
     USE_PDL: tl.constexpr,
 ) -> None:
-    """One program per token; constexpr ``TOPK`` keeps the selection in registers."""
+    """One program per token; constexpr `TOPK` keeps the selection in registers."""
     if USE_PDL:
         tl.extra.cuda.gdc_wait()
 
@@ -132,7 +132,7 @@ def _routing_kernel(
 
 
 def _padded_num_experts(num_experts: int) -> int:
-    """Next power of two >= ``num_experts``, at least 8."""
+    """Next power of two >= `num_experts`, at least 8."""
     return 1 << max(3, (num_experts - 1).bit_length())
 
 

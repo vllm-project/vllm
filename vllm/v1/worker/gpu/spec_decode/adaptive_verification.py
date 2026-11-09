@@ -403,7 +403,7 @@ class AdaptiveVerificationManager:
     ) -> int:
         """Token count once the draft budget is trimmed to fit.
 
-        Stashes the chosen budget in ``_batch_budget`` for the compaction and
+        Stashes the chosen budget in `_batch_budget` for the compaction and
         reallocation that follow in the same step.
         """
         assert self.cost_tables is not None

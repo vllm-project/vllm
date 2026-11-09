@@ -48,7 +48,7 @@ class StepTimingEvents:
 
 
 class StepTimingCollector:
-    """Times the steps run inside ``collect``; record calls no-op outside it.
+    """Times the steps run inside `collect`; record calls no-op outside it.
 
     Every step gets its own events, so the steps queue back-to-back and the
     block resolves them all behind one sync on the way out.

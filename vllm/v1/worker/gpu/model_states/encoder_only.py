@@ -33,8 +33,8 @@ class EncoderOnlyModelState(DefaultModelState):
 
     Encoder attention needs no KV cache: it runs full, bidirectional
     self-attention over each request's tokens in a single forward. Such layers
-    return no ``get_kv_cache_spec`` and therefore never enter
-    ``kv_cache_config.kv_cache_groups``, so the KV-backed attention path never
+    return no `get_kv_cache_spec` and therefore never enter
+    `kv_cache_config.kv_cache_groups`, so the KV-backed attention path never
     builds their metadata. We build their (non-causal) metadata here, keeping
     the normal KV-backed path untouched.
     """

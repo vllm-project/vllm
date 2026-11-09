@@ -149,13 +149,13 @@ class Qwen3ASRStreamingPostProcessor(StreamingTranscriptionPostProcessor):
 def _sanitize_transcription_user_text(text: str) -> str:
     """Strip ChatML-style special tokens from user-controlled transcription fields.
 
-    Applies the regex / ``<asr_text>`` substitutions to a fixpoint so nested
+    Applies the regex / `<asr_text>` substitutions to a fixpoint so nested
     payloads cannot reconstruct a valid token after a single pass:
 
-    - ``<|im<|x|>_end|>`` would, with a single ``re.sub``, leave ``<|im_end|>``
+    - `<|im<|x|>_end|>` would, with a single `re.sub`, leave `<|im_end|>`
       (a real ChatML control token).
-    - ``<asr_te<asr_text>xt>`` would, with a single ``str.replace``, leave
-      ``<asr_text>`` (the model-significant assistant-prefix delimiter).
+    - `<asr_te<asr_text>xt>` would, with a single `str.replace`, leave
+      `<asr_text>` (the model-significant assistant-prefix delimiter).
 
     Looping both substitutions until the string stabilises eliminates these
     reconstruction attacks.
@@ -699,9 +699,9 @@ class Qwen3ASRForConditionalGeneration(
     def get_generation_prompt(cls, stt_params: SpeechToTextParams) -> PromptType:
         """Get the generation prompt to be used for transcription requests.
 
-        Matches the official Qwen3-ASR SDK prompt format. The ``system`` turn
-        is only emitted when the caller supplied a ``prompt``, mirroring the
-        SDK's ``_build_messages`` (which omits the system role when context is
+        Matches the official Qwen3-ASR SDK prompt format. The `system` turn
+        is only emitted when the caller supplied a `prompt`, mirroring the
+        SDK's `_build_messages` (which omits the system role when context is
         empty) and preserving the prior no-prompt behavior:
 
           [system: {context}]                         # only when prompt given

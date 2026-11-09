@@ -41,7 +41,7 @@ def run_acceptance_length_eval(
 ):
     """E2E acceptance-rate validation for speculative decoding.
 
-    Drives one or more datasets (keyed in ``expected_acceptance_lengths``)
+    Drives one or more datasets (keyed in `expected_acceptance_lengths`)
     through the spec decode engine and asserts the mean acceptance length
     stays within tolerance of the reference figure for each dataset.
     """

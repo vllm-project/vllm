@@ -268,7 +268,7 @@ class Platform:
 
     @classmethod
     def import_ir_kernels(cls) -> None:
-        """The default implementation imports ``vllm.kernels``, which registers
+        """The default implementation imports `vllm.kernels`, which registers
         the built-in IR op implementations. Out-of-tree (OOT) platforms should
         override this method to import their own kernel modules.
         """
@@ -332,7 +332,7 @@ class Platform:
 
         vLLM internals use logical local IDs. Physical IDs are used only
         at platform/topology boundaries. This helper performs the final
-        translation needed by APIs such as ``torch.device("cuda:N")``.
+        translation needed by APIs such as `torch.device("cuda:N")`.
         """
         physical_device_id = cls.device_id_to_physical_device_id(device_id)
         device_control_env = os.environ.get(cls.device_control_env_var, "")
@@ -353,7 +353,7 @@ class Platform:
 
     @classmethod
     def visible_device_id_to_physical_device_id(cls, device_id: int) -> int:
-        """Map a visible accelerator ordinal (e.g. ``torch.device.index``)
+        """Map a visible accelerator ordinal (e.g. `torch.device.index`)
         to a physical device ID.
 
         This is the inverse of the env-var translation performed by
@@ -389,7 +389,7 @@ class Platform:
 
         Platforms whose Triton kernels need replacement implementations
         override this method and call
-        :func:`vllm.triton_utils.dispatcher.register_kernels`
+        `vllm.triton_utils.dispatcher.register_kernels`
         with their overrides. It runs during model runner init, before any
         kernel launch. The default implementation does nothing.
         """
@@ -616,7 +616,7 @@ class Platform:
     def get_all_gpu_pci_bus_ids(cls) -> dict[int, str]:
         """Return a mapping of device index to PCI bus ID string.
 
-        Used by ``VLLM_GPU_NIC_PCIE_MAPPING`` for RDMA NIC selection.
+        Used by `VLLM_GPU_NIC_PCIE_MAPPING` for RDMA NIC selection.
         Subclasses should override with platform-specific discovery
         (e.g. pynvml for CUDA).
         """
@@ -715,7 +715,7 @@ class Platform:
     ) -> int:
         """Smallest block size every backend accepts.
 
-        ``supports_block_size`` may be overridden to accept exact sizes only
+        `supports_block_size` may be overridden to accept exact sizes only
         (CPU_MLA takes 16 and no multiple of it), so candidates are the LCMs of
         one supported size per backend, each checked against every backend.
 
@@ -844,18 +844,18 @@ class Platform:
         higher-precision "padded specs" (skip layers today; the first/last-N
         sibling in the future). A padded spec's per-token page is larger than
         the primary's *and not an integer multiple of it*, so the trivial
-        ``unify_kv_cache_spec_page_size`` cannot reconcile them. We do it here
+        `unify_kv_cache_spec_page_size` cannot reconcile them. We do it here
         instead, before the specs are built:
 
-        1. Bump the primary ``block_size`` (kernel-aligned) until the primary
+        1. Bump the primary `block_size` (kernel-aligned) until the primary
            page is large enough to cover the largest padded-spec page.
-        2. Record that shared page in each padded spec's ``*_page_size_padded``
+        2. Record that shared page in each padded spec's `*_page_size_padded`
            hint, so it pads up to the shared page.
 
-        ``unify`` then sees equal pages and stays trivial.
+        `unify` then sees equal pages and stays trivial.
 
-        To add a padded-spec type: append its per-token page to ``padded_pages``
-        and set its ``*_page_size_padded`` hint below.
+        To add a padded-spec type: append its per-token page to `padded_pages`
+        and set its `*_page_size_padded` hint below.
         """
         from vllm.config.vllm import set_current_vllm_config
         from vllm.utils.math_utils import cdiv
@@ -1216,6 +1216,15 @@ class Platform:
         raise NotImplementedError
 
     @classmethod
+    def free_device_memory(cls, device: torch.device | None = None) -> int:
+        """Free bytes on device (None: the current one) to size memory from.
+        Platforms whose reported free memory is too low override this.
+        """
+        from vllm.utils.mem_utils import device_memory_info
+
+        return device_memory_info(device)[0]
+
+    @classmethod
     def get_punica_wrapper(cls) -> str:
         """Return the punica wrapper for current platform."""
         raise NotImplementedError
@@ -1385,9 +1394,9 @@ class Platform:
         attention in the same decoder block of an encoder-decoder model such as
         BART).
 
-        Platforms that have verified that their ``runner_kv_caches`` is not
+        Platforms that have verified that their `runner_kv_caches` is not
         impacted by this case should override this to a no-op. Otherwise the
-        default implementation raises ``NotImplementedError``.
+        default implementation raises `NotImplementedError`.
         """
         raise NotImplementedError(
             "Multiple attention layers with the same layer index are not "
@@ -1506,19 +1515,19 @@ class Platform:
         """Resolve the fully-qualified class path of the platform's KV cache
         config builder.
 
-        .. note::
-            Experimental, like the ``KVCacheConfigBuilder`` interface it selects.
+        !!! note
+            Experimental, like the `KVCacheConfigBuilder` interface it selects.
 
-        The builder supplies grouping (``get_kv_cache_groups``) and tensor
-        placement (``get_kv_cache_config_from_groups``). Vendors may override
+        The builder supplies grouping (`get_kv_cache_groups`) and tensor
+        placement (`get_kv_cache_config_from_groups`). Vendors may override
         this to return a platform-specific builder. The default builder honors a
         model implementing
-        :class:`~vllm.model_executor.models.interfaces.SupportsKVCacheGrouping`;
-        a builder that overrides ``get_kv_cache_groups`` owns grouping and
-        bypasses that model hook unless it calls ``super()``.
+        `SupportsKVCacheGrouping`;
+        a builder that overrides `get_kv_cache_groups` owns grouping and
+        bypasses that model hook unless it calls `super()`.
 
         Returns:
-            Fully-qualified class path of a ``KVCacheConfigBuilder`` subclass.
+            Fully-qualified class path of a `KVCacheConfigBuilder` subclass.
 
         """
         return "vllm.v1.core.kv_cache_planning.DefaultKVCacheConfigBuilder"
