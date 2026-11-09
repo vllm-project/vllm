@@ -893,6 +893,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         is_profile: bool = False,
         valid_dummy_state_slots: bool = False,
         randomize_inputs: bool = False,
+        num_active_loras: int | None = None,
         **kwargs,
     ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
         if skip_attn and not is_profile:
@@ -951,13 +952,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             assert self.intermediate_tensors is not None
             intermediate_tensors = self.intermediate_tensors[:num_tokens]
 
-        max_loras = self.lora_config.max_loras if self.lora_config is not None else 0
+        if num_active_loras is None:
+            num_active_loras = (
+                self.lora_config.max_loras if self.lora_config is not None else 0
+            )
         with self.maybe_dummy_run_with_lora(
             self.lora_config,
             num_scheduled_tokens=np.array(num_tokens_per_request, dtype=np.int32),
             num_sampled_tokens=None,
             remove_lora=True,
-            num_active_loras=max_loras,
+            num_active_loras=num_active_loras,
         ):
             # Execute the model.
             self.execute_model(
@@ -2156,6 +2160,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         if self.is_last_pp_rank:
             if self.use_aux_hidden_state_outputs:
+                if self.pp_handler is not None:
+                    model_output = self.pp_handler.add_upstream_aux_hidden_states(
+                        model_inputs["intermediate_tensors"], model_output
+                    )
                 assert isinstance(model_output, tuple)
                 hidden_states, aux_hidden_states = model_output
             else:
