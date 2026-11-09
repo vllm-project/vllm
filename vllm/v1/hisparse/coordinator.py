@@ -193,8 +193,6 @@ class HiSparseCoordinator:
         self.copies: dict[BlockHashWithGroupId, tuple[KVCacheBlock, ...]] = {}
         self._copy_by_block: dict[int, BlockHashWithGroupId] = {}
         # Unpinned GPU block id -> (request, page) pairs still reading it.
-        # Tuples rather than sets: a page's blocks share one owner tuple, and
-        # most blocks have a single owner.
         self._owners: dict[int, tuple[tuple[str, int], ...]] = {}
 
     @property
