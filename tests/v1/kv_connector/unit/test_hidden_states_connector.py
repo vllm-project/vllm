@@ -35,7 +35,7 @@ def _hidden(block_size: int) -> HiddenStateCacheSpec:
 
 
 def _config(*specs):
-    """Minimal stand-in exposing only ``kv_cache_groups`` (all the helpers read)."""
+    """Minimal stand-in exposing only `kv_cache_groups` (all the helpers read)."""
     return SimpleNamespace(
         kv_cache_groups=[
             KVCacheGroupSpec(layer_names=[f"layer.{i}"], kv_cache_spec=spec)
@@ -175,7 +175,7 @@ def test_hidden_state_group_isolated_from_packed_mixed_page_groups():
 
 
 def _bare_connector() -> ExampleHiddenStatesConnector:
-    """Instance with scheduler-side state but bypassing ``__init__`` (no engine)."""
+    """Instance with scheduler-side state but bypassing `__init__` (no engine)."""
     conn = ExampleHiddenStatesConnector.__new__(ExampleHiddenStatesConnector)
     conn._request_filenames = {}
     conn._pending_saves = {}
