@@ -2245,7 +2245,7 @@ class MoRIIOConnectorWorker:
     ):
         """Background thread for getting new MoRIIO handshakes.
 
-        Runs until ``stop_event`` is set. A malformed or unexpected message is
+        Runs until `stop_event` is set. A malformed or unexpected message is
         logged and dropped; it must not stop the listener, or this worker
         accepts no new handshakes until it restarts.
         """
