@@ -890,12 +890,14 @@ class _TableBuilder:
 
 _VLLM_CONFIG = SimpleNamespace(
     model_config=SimpleNamespace(max_model_len=8192),
-    scheduler_config=SimpleNamespace(max_num_seqs=4),
+    scheduler_config=SimpleNamespace(max_num_seqs=4, max_num_batched_tokens=16),
     parallel_config=SimpleNamespace(decode_context_parallel_size=1),
 )
 
 
-def _packed_group(tokens_per_state, row_bytes, supported_sizes):
+def _packed_group(
+    tokens_per_state, row_bytes, supported_sizes, writes_from_block_table=False
+):
     spec = MLAAttentionSpec(
         block_size=1024,
         num_kv_heads=1,
@@ -909,6 +911,7 @@ def _packed_group(tokens_per_state, row_bytes, supported_sizes):
         get_supported_kernel_block_sizes=lambda _=None: supported_sizes,
         get_name=lambda: "FAKE",
         customize_spec=lambda spec: spec,
+        writes_kv_cache_from_block_table=lambda: writes_from_block_table,
     )
     return AttentionGroup(backend, ["layer.0"], spec, 0)
 
@@ -958,12 +961,69 @@ def test_split_blocks_align_to_kernel_blocks(block_size, page_states):
     assert spec.get_block_stride_alignment() == max(page_states * 132, 1)
 
 
+def test_packed_token_cache_written_from_block_table_is_split():
+    """A packed token cache whose layers write it from the block table is split
+    like a compressed one: its kernel blocks address the manager blocks' rows."""
+    row, stride_rows = 132, 20 * 64
+    group = _packed_group(1, row, [64], writes_from_block_table=True)
+    group.create_metadata_builders(_VLLM_CONFIG, "cpu", kernel_block_size=1024)
+    # Each row holds its own row index.
+    backing = torch.arange(3 * stride_rows).repeat_interleave(row)
+    manager = backing.view(3, 1, stride_rows, row)[:, :, :1024]
+    pages = map_kv_caches_to_kernel_blocks({"layer.0": manager}, [group])["layer.0"]
+    metadata = create_common_attn_metadata(BatchSpec([2048], [1]), 1024, "cpu")
+    metadata.block_table_tensor = torch.tensor([[0, 2]], dtype=torch.int32)
+
+    table = group.build_metadata(metadata)
+
+    assert group.get_metadata_builder().kv_cache_spec.block_size == 64
+    second_block = pages[table[0, 16:], 0].flatten(0, 1)
+    assert torch.equal(second_block, manager[2, 0])
+
+
 def test_packed_token_cache_cannot_be_split():
     group = _packed_group(1, 1152, [64])
     group.create_metadata_builders(_VLLM_CONFIG, "cpu", kernel_block_size=1024)
     packed = torch.zeros(3, 1, 2048, 1152, dtype=torch.uint8)[:, :, :1024]
     with pytest.raises(ValueError, match="cannot be split"):
         map_kv_caches_to_kernel_blocks({"layer.0": packed}, [group])
+
+
+def test_packed_token_cache_splits_with_mapped_slots():
+    """A runner that maps slots too can split a packed token cache: slot
+    b * block_size + t is written to the row block b's offset t is read from."""
+    row, stride_rows = 8, 1280  # other layers' pages sit between blocks
+    group = _packed_group(1, row, [64])
+    group.maps_slot_mapping = True
+    group.create_metadata_builders(_VLLM_CONFIG, "cpu", kernel_block_size=1024)
+    backing = torch.arange(3 * stride_rows).repeat_interleave(row)
+    manager = backing.view(3, 1, stride_rows, row)[:, :, :1024]
+    pages = map_kv_caches_to_kernel_blocks({"layer.0": manager}, [group])["layer.0"]
+
+    slots = torch.tensor([5, 2 * 1024 + 700, -1])
+    mapped = group.map_to_kernel_slot_mapping(slots)
+    assert mapped[2] == -1
+    for (block, offset), slot in zip([(0, 5), (2, 700)], mapped[:2].tolist()):
+        assert torch.equal(pages[slot // 64, 0, slot % 64], manager[block, 0, offset])
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
+def test_kernel_slot_mapping_cuda_matches_torch():
+    """The fused CUDA slot remap matches the elementwise torch path, padded
+    (negative) slots included."""
+    row, stride_rows = 8, 1280
+    group = _packed_group(1, row, [64])
+    group.maps_slot_mapping = True
+    group.create_metadata_builders(_VLLM_CONFIG, "cpu", kernel_block_size=1024)
+    manager = torch.zeros(3 * stride_rows, 1, row).view(3, 1, stride_rows, row)
+    map_kv_caches_to_kernel_blocks({"layer.0": manager[:, :, :1024]}, [group])
+
+    slots = torch.randint(-1, 3 * 1024, (3000,))
+    slots[:3] = torch.tensor([-1, 0, 3 * 1024 - 1])
+    expected = group.map_to_kernel_slot_mapping(slots).clone()
+    out = torch.empty(slots.shape, dtype=slots.dtype, device="cuda")
+    mapped = group.map_to_kernel_slot_mapping(slots.cuda(), out=out)
+    assert torch.equal(mapped.cpu(), expected)
 
 
 def test_copy_kv_cache_blocks_overlaid_views_copy_whole_block():

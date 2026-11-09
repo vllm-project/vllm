@@ -236,9 +236,9 @@ class CudaGraphManager:
     def _build_lora_dispatch_map(self) -> tuple[dict[int, int], int]:
         """Precompute actual num_active_loras -> effective captured case.
 
-        Mirrors the num_tokens candidate expansion in ``_init_candidates``:
+        Mirrors the num_tokens candidate expansion in `_init_candidates`:
         every possible active-LoRA count is mapped ahead of time to the
-        smallest captured case that can serve it, so ``dispatch`` is a plain
+        smallest captured case that can serve it, so `dispatch` is a plain
         dict lookup instead of a per-call bisect.
         """
         captured_with_lora = sorted(c for c in self.lora_capture_cases if c > 0)
@@ -701,10 +701,14 @@ class ModelCudaGraphManager(CudaGraphManager):
         def store_capture_output(num_tokens: int, model_output: Any) -> None:
             """Copy outputs to persistent buffers, allocating on first use."""
             if self.is_last_pp_rank:
-                # Last PP rank (common case).
-                if self.use_aux_hidden_state_outputs:
+                # Last PP rank (common case). Under PP it may take no aux
+                # hidden states itself and return a bare tensor.
+                if isinstance(model_output, tuple):
                     hidden_states, aux_hidden_states = model_output
                 else:
+                    assert not (
+                        self.use_aux_hidden_state_outputs and self.is_first_pp_rank
+                    ), "The model returned no aux hidden states."
                     hidden_states = model_output
                     aux_hidden_states = []
                 if self.hidden_states is None:
@@ -991,8 +995,8 @@ def profile_cudagraph_memory(runner: "GPUModelRunner") -> int:
     """Estimate the GPU memory needed for CUDA graph capture.
 
     Called during memory profiling, *before* the real KV cache is allocated,
-    so that ``Worker.determine_available_memory`` can reserve headroom for
-    graph capture. Bootstraps a minimal KV cache, runs ``capture_model()``
+    so that `Worker.determine_available_memory` can reserve headroom for
+    graph capture. Bootstraps a minimal KV cache, runs `capture_model()`
     once, then releases everything so the real init/capture path starts clean.
 
     FULL graphs bake in KV cache pointers, so only the largest few are
@@ -1150,7 +1154,7 @@ def _init_minimal_kv_cache_for_profiling(runner: "GPUModelRunner") -> None:
 
 def _teardown_profiling_state(runner: "GPUModelRunner") -> None:
     """Release the profiling KV cache and captured graphs while keeping model
-    weights, so the real ``initialize_kv_cache`` starts from a clean slate."""
+    weights, so the real `initialize_kv_cache` starts from a clean slate."""
     torch.accelerator.synchronize()
     if hasattr(runner.model_state, "_mamba_ctx"):
         runner.model_state._mamba_ctx = None

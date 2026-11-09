@@ -155,7 +155,7 @@ class StatePoolLayout:
 
 @dataclass(frozen=True)
 class StartupPoolAccess:
-    """A state group's resident pools during ``initialize_state_slots``.
+    """A state group's resident pools during `initialize_state_slots`.
 
     It grants no slot ownership and authorizes no stores to resident pages,
     including the null page. It is valid only inside the window that issued
@@ -212,7 +212,7 @@ class StateSlotBindings:
 
     @contextmanager
     def startup_access_window(self) -> Iterator[None]:
-        """Admit startup pool access for one ``initialize_state_slots`` call.
+        """Admit startup pool access for one `initialize_state_slots` call.
 
         Windows do not nest; each one invalidates the accesses of the last.
         """
@@ -226,7 +226,7 @@ class StateSlotBindings:
 
     def startup_pool_access(self, layer: str) -> StartupPoolAccess:
         """Expose every page of a state group's pools while the runner is
-        inside ``initialize_state_slots``."""
+        inside `initialize_state_slots`."""
         if self._startup_window is None:
             raise ValueError(
                 "Startup pool access is valid only during initialize_state_slots"

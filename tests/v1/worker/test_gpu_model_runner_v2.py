@@ -653,7 +653,7 @@ def _state_only_config(monkeypatch):
 
 
 def _state_only_runner(monkeypatch, config, model_state):
-    """A CPU runner whose ``initialize_kv_cache`` runs unmodified."""
+    """A CPU runner whose `initialize_kv_cache` runs unmodified."""
     from vllm.config.compilation import CUDAGraphMode
 
     runner = GPUModelRunner.__new__(GPUModelRunner)
@@ -1001,7 +1001,7 @@ def test_startup_pool_access_expires_after_initialize_state_slots(monkeypatch):
     """Unowned resident pools are reachable only inside slot initialization.
 
     The startup access covers every page, including unbound ones, and is
-    refused once ``initialize_state_slots`` has returned.
+    refused once `initialize_state_slots` has returned.
     """
     accesses = []
 
