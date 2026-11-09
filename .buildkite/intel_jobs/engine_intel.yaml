@@ -38,7 +38,12 @@ steps:
     - >-
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
       'cd tests &&
-      pytest -v -s engine/test_arg_utils.py test_sequence.py test_logger.py test_vllm_port.py jit_monitor/test_hooks.py'
+      pytest -v -s
+      engine/test_arg_utils.py
+      test_sequence.py
+      test_logger.py
+      test_vllm_port.py
+      jit_monitor/test_hooks.py'
 
 - label: ":intel: (BMG) Engine (1 GPU)"
   key: engine-1-gpu
@@ -62,7 +67,10 @@ steps:
     - >-
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
       'cd tests &&
-      pytest -v -s v1/engine --ignore v1/engine/test_preprocess_error_handling.py --ignore v1/engine/test_core_engine_actor_manager.py &&
+      pytest -v -s
+      v1/engine
+      --ignore v1/engine/test_preprocess_error_handling.py
+      --ignore v1/engine/test_core_engine_actor_manager.py &&
       pytest -v -s test_config.py'
 
 - label: ":intel: (BMG) E2E Core"
@@ -88,12 +96,15 @@ steps:
     - vllm/model_executor/models/qwen3_next
     - vllm/config/cache.py
     - vllm/platforms/xpu.py
+    - vllm/v1/engine/
     - tests/v1/e2e/general/test_mamba_prefix_cache.py
+    - tests/v1/e2e/general/test_streaming_input.py
   commands:
     - >-
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
       'cd tests &&
-      pytest -v -s v1/e2e/general/test_mamba_prefix_cache.py'
+      pytest -v -s v1/e2e/general/test_mamba_prefix_cache.py &&
+      pytest -v -s v1/e2e/general/test_streaming_input.py'
 
 - label: ":intel: (BMG) V1 e2e (2 GPUs)"
   key: v1-e2e-2-gpus

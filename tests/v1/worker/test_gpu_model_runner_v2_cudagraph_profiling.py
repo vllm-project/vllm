@@ -3,8 +3,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Unit tests for GPUModelRunner (V2) CUDA graph memory profiling.
 
-These exercise the orchestration of ``profile_cudagraph_memory`` on CPU by
-building a runner via ``__new__`` and faking the GPU-only helpers, so the
+These exercise the orchestration of `profile_cudagraph_memory` on CPU by
+building a runner via `__new__` and faking the GPU-only helpers, so the
 control flow (bootstrap -> sample FULL graphs into a throwaway pool ->
 extrapolate -> teardown) is covered without a GPU.
 See https://github.com/vllm-project/vllm/issues/49224.
@@ -64,6 +64,7 @@ def _make_profiling_runner(
     runner.cudagraph_manager = _FakeCudaGraphManager(
         needs_capture, num_full_descs, piecewise_only
     )
+    runner.speculator = None
     runner.vllm_config = SimpleNamespace()
     runner.kv_caches = []
     runner.model_state = SimpleNamespace(
@@ -276,13 +277,17 @@ def test_profile_cudagraph_memory_restores_compilation_counters(monkeypatch):
     assert compilation_counter.num_gpu_runner_capture_triggers == triggers_before
 
 
-def test_model_runner_delegates_to_cudagraph_utils(monkeypatch):
+@pytest.mark.parametrize("extensible", [False, True])
+def test_model_runner_delegates_to_cudagraph_utils(monkeypatch, extensible):
+    """The extensible KV cache measures the capture footprint after warmup
+    instead of estimating it."""
     runner = mrv2.GPUModelRunner.__new__(mrv2.GPUModelRunner)
+    runner.cache_config = SimpleNamespace(enable_extensible_kv_cache=extensible)
     runner.eplb = EPLBController(
         SimpleNamespace(enable_eplb=False), torch.device("cpu")
     )
     monkeypatch.setattr(mrv2, "_profile_cudagraph_memory", lambda r: 42)
-    assert runner.profile_cudagraph_memory() == 42
+    assert runner.profile_cudagraph_memory() == (0 if extensible else 42)
 
 
 def test_extrapolate_full_graph_memory():
@@ -401,7 +406,9 @@ def test_profile_cudagraph_memory_swaps_and_drops_speculator_managers(monkeypatc
 
 
 @create_new_process_for_each_test("spawn")
-@pytest.mark.skipif(not cgu.current_platform.is_cuda(), reason="requires CUDA")
+@pytest.mark.skipif(
+    not cgu.current_platform.is_cuda_alike(), reason="requires CUDA or ROCm"
+)
 def test_profile_cudagraph_memory_frees_throwaway_pool(monkeypatch):
     """Profiling graph memory must be freed before teardown completes."""
 
@@ -465,12 +472,12 @@ def test_profile_cudagraph_memory_frees_throwaway_pool(monkeypatch):
 def test_teardown_profiling_state_clears_mamba_align_metadata(monkeypatch):
     """Profiling-cached Mamba align metadata must be invalidated at teardown.
 
-    ``MambaHybridModelState`` lazily caches ``_mamba_group_ids`` and
-    ``_mamba_spec`` from whichever KVCacheConfig it first sees. When the
+    `MambaHybridModelState` lazily caches `_mamba_group_ids` and
+    `_mamba_spec` from whichever KVCacheConfig it first sees. When the
     profiling config's group layout differs from the real (e.g. PP-projected)
     config, reusing the stale metadata mismatches the real block tables
     ("expected 3 block tables, got 4" at
-    ``MambaSpecDecodeGPUContext.initialize_from_forward_context``).
+    `MambaSpecDecodeGPUContext.initialize_from_forward_context`).
     """
     runner: Any = mrv2.GPUModelRunner.__new__(mrv2.GPUModelRunner)
     runner.compilation_config = SimpleNamespace(static_forward_context={})
