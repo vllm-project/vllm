@@ -2,8 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import pytest
 import torch
-from transformers import AutoModelForSequenceClassification
+from transformers import (
+    AutoModelForSequenceClassification,
+    BertConfig,
+    BertForSequenceClassification,
+)
 
+from vllm import PoolingParams
 from vllm.platforms import current_platform
 
 
@@ -104,3 +109,42 @@ def test_bert_model_runner_v2(hf_runner, vllm_runner) -> None:
         rtol=1e-2,
         atol=1e-4,
     )
+
+
+@pytest.mark.core_model
+def test_explicit_sigmoid(vllm_runner, tmp_path) -> None:
+    """Explicit Sigmoid must survive model loading and mixed activation flags."""
+    config = BertConfig(
+        vocab_size=16,
+        hidden_size=32,
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        intermediate_size=64,
+        num_labels=3,
+        sentence_transformers={"activation_fn": "torch.nn.modules.activation.Sigmoid"},
+    )
+    model = BertForSequenceClassification(config)
+    logits = torch.tensor([0.0, 2.0, -2.0])
+    with torch.no_grad():
+        model.classifier.weight.zero_()
+        model.classifier.bias.copy_(logits)
+    model.save_pretrained(tmp_path)
+
+    with vllm_runner(
+        str(tmp_path),
+        runner="pooling",
+        dtype="float",
+        max_model_len=32,
+        max_num_seqs=2,
+        enforce_eager=True,
+        skip_tokenizer_init=True,
+    ) as vllm_model:
+        for flags in ([True], [True, True], [True, False], [False, True]):
+            outputs = vllm_model.llm.classify(
+                [{"prompt_token_ids": [2, 5, 3]} for _ in flags],
+                pooling_params=[PoolingParams(use_activation=flag) for flag in flags],
+                use_tqdm=False,
+            )
+            for output, flag in zip(outputs, flags):
+                expected = logits.sigmoid() if flag else logits
+                torch.testing.assert_close(torch.tensor(output.outputs.probs), expected)

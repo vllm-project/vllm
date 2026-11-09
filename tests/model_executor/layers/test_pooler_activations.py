@@ -7,9 +7,11 @@ from types import SimpleNamespace
 import pytest
 import torch
 import torch.nn as nn
+from transformers import PreTrainedConfig
 
 from vllm.model_executor.layers.pooler.activations import (
     LambdaPoolerActivation,
+    PoolerActivation,
     PoolerClassify,
     PoolerIdentity,
     PoolerMultiLabelClassify,
@@ -171,25 +173,22 @@ class TestGetActFn:
         result = get_act_fn(cfg)
         assert isinstance(result, PoolerMultiLabelClassify)
 
-    def test_sentence_transformers_activation(self):
-        cfg = self._make_config(
-            problem_type="",
-            sentence_transformers={
-                "activation_fn": "torch.nn.modules.activation.Sigmoid"
-            },
+    @pytest.mark.parametrize(
+        "config_key",
+        ["sentence_transformers", "sbert_ce_default_activation_function"],
+    )
+    @pytest.mark.parametrize("num_labels", [1, 3])
+    def test_explicit_sigmoid(self, config_key, num_labels):
+        activation = "torch.nn.modules.activation.Sigmoid"
+        config_value = (
+            {"activation_fn": activation}
+            if config_key == "sentence_transformers"
+            else activation
         )
-        result = get_act_fn(cfg)
-        assert isinstance(result, PoolerClassify)
+        config = PreTrainedConfig(num_labels=num_labels, **{config_key: config_value})
+        logits = torch.arange(2 * num_labels, dtype=torch.float32).reshape(2, -1)
 
-    def test_sbert_activation(self):
-        cfg = self._make_config(
-            problem_type="",
-            sbert_ce_default_activation_function=(
-                "torch.nn.modules.activation.Sigmoid"
-            ),
-        )
-        result = get_act_fn(cfg)
-        assert isinstance(result, PoolerClassify)
+        torch.testing.assert_close(get_act_fn(config)(logits), logits.sigmoid())
 
     def test_default_fallback(self):
         cfg = self._make_config(problem_type="")
@@ -232,3 +231,14 @@ class TestResolveClassifierActFn:
         custom = PoolerIdentity()
         result = resolve_classifier_act_fn(None, act_fn=custom)
         assert result is custom
+
+
+@pytest.mark.parametrize("num_labels", [1, 3])
+@pytest.mark.parametrize("dim", [0, -1])
+def test_wrapped_softmax_preserves_dim(num_labels, dim):
+    activation = nn.Softmax(dim=dim)
+    logits = torch.arange(2 * num_labels, dtype=torch.float32).reshape(2, -1)
+
+    torch.testing.assert_close(
+        PoolerActivation.wraps(activation)(logits), activation(logits)
+    )

@@ -260,6 +260,10 @@ More examples can be found here: [examples/pooling/classify](../../../examples/p
 
 You can enable or disable activation via `use_activation`.
 
+When no `problem_type` selects an activation, vLLM uses the explicit Sentence
+Transformers activation configuration. For example, an explicit `Sigmoid` applies
+independently to every label, including when the model has multiple labels.
+
 ### Problem type (e.g. `multi_label_classification`)
 
 You can modify the `problem_type` via problem_type in the Hugging Face config. The supported problem types are: `single_label_classification`, `multi_label_classification`, and `regression`.
