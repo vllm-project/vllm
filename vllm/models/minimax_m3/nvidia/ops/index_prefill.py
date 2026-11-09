@@ -14,12 +14,9 @@ def _indexer_metadata(
     Slots,
     Context,
     ValidPages,
-    IndexSlots,
     num_reqs,
     num_tokens,
     num_slots,
-    rank: tl.constexpr,
-    tp: tl.constexpr,
     PAGE_SIZE: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
@@ -35,15 +32,6 @@ def _indexer_metadata(
         tl.where((position >= 0) & (slot >= 0), position // PAGE_SIZE + 1, 0),
         row < num_tokens,
     )
-    offset = slot % PAGE_SIZE
-    owner = offset % tp
-    local = offset // tp
-    sharded = slot // PAGE_SIZE * (PAGE_SIZE // tp) + local
-    tl.store(
-        IndexSlots + row,
-        tl.where((slot >= 0) & (owner == rank), sharded, -1),
-        row < num_slots,
-    )
 
 
 def prepare_indexer_metadata(
@@ -53,14 +41,10 @@ def prepare_indexer_metadata(
     slots: torch.Tensor,
     context: torch.Tensor,
     valid_pages: torch.Tensor,
-    index_slots: torch.Tensor,
-    rank: int,
-    tp: int,
     page_size: int,
 ) -> None:
-    """Write stable index-K slots, causal page counts and prefix lengths on device."""
-    assert page_size == 128 and tp in (2, 4)
-    assert slots.numel() <= index_slots.numel()
+    """Write causal page counts and prefix lengths on device."""
+    assert page_size == 128
     rows = max(seq_lens.numel(), slots.numel(), valid_pages.numel())
     _indexer_metadata[(triton.cdiv(rows, 256),)](
         query_start,
@@ -69,12 +53,9 @@ def prepare_indexer_metadata(
         slots,
         context,
         valid_pages,
-        index_slots,
         seq_lens.numel(),
         valid_pages.numel(),
         slots.numel(),
-        rank,
-        tp,
         page_size,
         256,
     )

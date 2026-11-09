@@ -958,6 +958,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             replicate_index_q=index_k_shard > 1,
         )
         self.index_q_size = self.qkv_proj.num_index_heads * self.idx_head_dim
+        self.index_k_rank = get_tensor_model_parallel_rank() if index_k_shard > 1 else 0
         # reduce_results=False: under sequence parallelism o_proj reduce-scatters
         # in forward; otherwise the all-reduce is fused with the following
         # post_attention_layernorm via fused_allreduce_gemma_rms_norm.
@@ -1176,9 +1177,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             return sp_shard(output) if self.use_sequence_parallel else output
 
         main_slot_mapping = fwd_slot_mapping[self.layer_name]
-        index_slot_mapping = self.indexer.get_slot_mapping(
-            fwd_slot_mapping[self.indexer.index_cache.prefix]
-        )
+        index_slot_mapping = fwd_slot_mapping[self.indexer.index_cache.prefix]
         # FlashInfer autotunes the GEMMs its dummy runs call: take the unfused
         # path there so qkv_proj is tuned for the M < 512 fallback.
         if isinstance(hidden_states, QuantizedActivation):
@@ -1246,6 +1245,8 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
                 kv_k_scale=self._k_scale if self.use_nvfp4_kv else None,
                 kv_v_scale=self._v_scale if self.use_nvfp4_kv else None,
                 write_qkv=not q_is_fp8,
+                index_k_tp=self.indexer.index_cache.tp_shard,
+                index_k_rank=self.index_k_rank,
             )
 
         output = torch.empty((num_tokens, self.q_size), dtype=dtype, device=device)

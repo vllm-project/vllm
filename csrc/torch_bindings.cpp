@@ -544,7 +544,7 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "str kv_cache_dtype, bool skip_index_branch=False, "
       "Tensor!? q_fp8_out=None, float q_fp8_scale=1.0, "
       "Tensor? kv_k_scale=None, Tensor? kv_v_scale=None, "
-      "bool write_qkv=True) -> ()");
+      "bool write_qkv=True, int index_k_tp=1, int index_k_rank=0) -> ()");
 
   // MiniMax-M3 DSpark draft: Gemma k-norm + partial NeoX RoPE + K/V cache
   // insert for every draft layer's context K/V in one launch.

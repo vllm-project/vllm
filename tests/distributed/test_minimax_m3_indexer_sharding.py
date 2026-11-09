@@ -40,8 +40,9 @@ def cake_indexer():
         pytest.skip("FlashInfer CAKE layer_graphs API required")
 
 
-@ray.remote(num_gpus=1, max_calls=1)
-def _indexer_sharding(monkeypatch, tp_size, pp_size, rank, distributed_init_port):
+def _indexer_sharding(
+    monkeypatch, tp_size, pp_size, rank, distributed_init_port, scenario
+):
     from vllm.distributed.parallel_state import get_tp_group
     from vllm.models.minimax_m3.nvidia import indexer_msa as msa
 
@@ -76,18 +77,30 @@ def _indexer_sharding(monkeypatch, tp_size, pp_size, rank, distributed_init_port
             init_test_distributed_environment(
                 tp_size, pp_size, rank, distributed_init_port
             )
-            _check_initialization_fallback(config, device, rank)
-            for num_layers in (1, 2, 5):
-                config.compilation_config = CompilationConfig()
+            if scenario == "fallback":
+                _check_initialization_fallback(config, device, rank)
+            else:
                 assert msa.resolve_index_k_shard(config, 4, "fp8", 16) == tp_size
                 comm = msa.get_comm()
                 assert comm is not None
-                assert comm.scores.shape == (comm.max_decode_tokens, 4, 128)
-                _check_indexer_forwards(config, device, rank, comm, num_layers)
-            config.compilation_config.static_forward_context.clear()
-            _check_indexer_forwards(config, device, rank, comm, num_layers)
-            assert comm.num_layers == num_layers
-            _check_sharding_policy(config, comm)
+                if scenario == "policy":
+                    _check_sharding_policy(config, comm)
+                else:
+                    for num_layers in (1, 2, 5):
+                        config.compilation_config = CompilationConfig()
+                        assert (
+                            msa.resolve_index_k_shard(config, 4, "fp8", 16) == tp_size
+                        )
+                        comm = msa.get_comm()
+                        _check_indexer_forwards(
+                            config, device, rank, comm, num_layers, scenario
+                        )
+                    if scenario == "reconstruction":
+                        config.compilation_config.static_forward_context.clear()
+                        _check_indexer_forwards(
+                            config, device, rank, comm, num_layers, scenario
+                        )
+                        assert comm.num_layers == num_layers
         get_tp_group().barrier()
 
 
@@ -210,7 +223,7 @@ def _roundtrip_index_caches(config, impls):
                 torch.cuda.cudart().cudaHostUnregister(cache.data_ptr())
 
 
-def _check_indexer_forwards(config, device, rank, comm, num_layers):
+def _check_indexer_forwards(config, device, rank, comm, num_layers, scenario):
     from vllm.models.minimax_m3.nvidia import indexer_msa as msa
 
     torch.manual_seed(123)
@@ -273,11 +286,6 @@ def _check_indexer_forwards(config, device, rank, comm, num_layers):
         )
         for builder in builders[1:]
     ]
-    dummy_slots = torch.full((8400,), -1, dtype=torch.int64, device=device)
-    replayed_slots = torch.empty_like(dummy_slots)
-    slot_graph = torch.cuda.CUDAGraph()
-    with set_forward_context(None, config), torch.cuda.graph(slot_graph):
-        replayed_slots.copy_(layers[1][0].get_slot_mapping(dummy_slots))
 
     def run(sharded, metadata, queries):
         impls = layers[sharded]
@@ -295,12 +303,6 @@ def _check_indexer_forwards(config, device, rank, comm, num_layers):
                 snapshot[:tokens].copy_(impl.topk_indices_buffer[:tokens])
 
     def check_local(metadata, queries, num_tokens):
-        slot_graph.replay()
-        slots = common.slot_mapping
-        expected_slots = torch.where(
-            (slots >= 0) & (slots % world == rank), slots // world, -1
-        )
-        torch.testing.assert_close(replayed_slots[: slots.numel()], expected_slots)
         run(False, metadata, queries)
         for reference, sharded in zip(*snapshots):
             torch.testing.assert_close(
@@ -351,6 +353,8 @@ def _check_indexer_forwards(config, device, rank, comm, num_layers):
         BatchSpec(seq_lens=[2691], query_lens=[1027]),
         BatchSpec(seq_lens=[129, 2305], query_lens=[1, 1]),
     ]
+    if scenario in ("offload", "reconstruction"):
+        batches = batches[:1]
     for batch in batches:
         # Exercise wrap-safe rotation, single-layer ACK fallback and mixed transitions.
         common = create_common_attn_metadata(
@@ -397,7 +401,8 @@ def _check_indexer_forwards(config, device, rank, comm, num_layers):
             )
             query[PREFILL_CHUNK_SIZE:] *= -1
             queries.append(query.to(torch.float8_e4m3fn))
-        _roundtrip_index_caches(config, layers[1])
+        if scenario == "offload":
+            _roundtrip_index_caches(config, layers[1])
         metadata = [builder.build(0, common) for builder in builders]
         for md, storage in zip(metadata[1:], prefill_storage, strict=True):
             assert md.unified_scores is None
@@ -425,6 +430,8 @@ def _check_indexer_forwards(config, device, rank, comm, num_layers):
             run(True, metadata, queries)
         check(metadata, queries, num_tokens)
 
+        if scenario != "replay":
+            continue
         if metadata[1].prefill_msa is None:
             for decode_metadata in metadata[1:]:
                 metadata[1] = decode_metadata
@@ -486,8 +493,11 @@ def _check_indexer_forwards(config, device, rank, comm, num_layers):
     reason="MiniMax M3 sharded MSA indexer requires SM100",
 )
 @pytest.mark.parametrize("tp_size", [2, 4])
-def test_msa_indexer_tp_matches_replicated(monkeypatch, tp_size, cake_indexer):
-    """Real TP score/TopK, both prefill paths, and decode graph replay."""
+@pytest.mark.parametrize(
+    "scenario", ["fallback", "policy", "parity", "offload", "replay", "reconstruction"]
+)
+def test_indexer_sharding(monkeypatch, tp_size, scenario, cake_indexer):
+    """Each case exercises one CP contract through real TP indexer objects."""
     if torch.accelerator.device_count() < tp_size:
         pytest.skip(f"Requires {tp_size} GPUs")
     if not all(
@@ -497,7 +507,12 @@ def test_msa_indexer_tp_matches_replicated(monkeypatch, tp_size, cake_indexer):
         if src != dst
     ):
         pytest.skip("Requires peer access between all TP GPUs")
-    multi_process_parallel(monkeypatch, tp_size, 1, _indexer_sharding)
+
+    @ray.remote(num_gpus=1, max_calls=1)
+    def run(monkeypatch, tp_size, pp_size, rank, port):
+        _indexer_sharding(monkeypatch, tp_size, pp_size, rank, port, scenario)
+
+    multi_process_parallel(monkeypatch, tp_size, 1, run)
 
 
 def _indexer_shards(model):
@@ -506,24 +521,13 @@ def _indexer_shards(model):
     ]
 
 
-@pytest.mark.timeout(600)
-@pytest.mark.skipif(
-    not current_platform.is_device_capability_family(100), reason="SM100 required"
-)
-@pytest.mark.parametrize("runner_version", [1, 2], ids=["mrv1", "mrv2"])
-@pytest.mark.parametrize("tp_size", [2, 4])
-def test_sharded_model_piecewise_warmup(
-    vllm_runner, tmp_path, monkeypatch, tp_size, runner_version, cake_indexer
-):
-    """Dummy warmup with bound caches must reach serving with CP still enabled."""
-    from vllm import SamplingParams
+@pytest.fixture
+def tiny_m3_checkpoint(tmp_path):
+    from safetensors.torch import save_file
+
     from vllm.transformers_utils.configs.minimax_m3 import MiniMaxM3Config
 
-    if torch.accelerator.device_count() < tp_size:
-        pytest.skip(f"Requires {tp_size} GPUs")
-    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", str(runner_version - 1))
-    MiniMaxM3Config(
+    config = MiniMaxM3Config(
         architectures=["MiniMaxM3SparseForCausalLM"],
         text_config={
             "num_hidden_layers": 2,
@@ -544,11 +548,46 @@ def test_sharded_model_piecewise_warmup(
                 "sparse_attention_freq": [1, 1],
             },
         },
-    ).save_pretrained(tmp_path)
-    with vllm_runner(
-        str(tmp_path),
+    )
+    config.save_pretrained(tmp_path)
+    cfg = config.text_config
+    hidden = cfg.hidden_size
+    generator = torch.Generator().manual_seed(123)
+    weights = {}
+
+    def add(name, *shape):
+        weights[name + ".weight"] = (
+            torch.randn(shape, generator=generator) * 0.02
+        ).bfloat16()
+
+    add("model.embed_tokens", cfg.vocab_size, hidden)
+    add("lm_head", cfg.vocab_size, hidden)
+    add("model.norm", hidden)
+    for layer in range(cfg.num_hidden_layers):
+        prefix = f"model.layers.{layer}"
+        for name in ("input_layernorm", "post_attention_layernorm"):
+            add(f"{prefix}.{name}", hidden)
+        for name, heads in (
+            ("q", cfg.num_attention_heads),
+            ("k", cfg.num_key_value_heads),
+            ("v", cfg.num_key_value_heads),
+            ("index_q", 4),
+            ("index_k", 1),
+        ):
+            add(f"{prefix}.self_attn.{name}_proj", heads * 128, hidden)
+        for name in ("q", "k", "index_q", "index_k"):
+            add(f"{prefix}.self_attn.{name}_norm", 128)
+        add(f"{prefix}.self_attn.o_proj", hidden, cfg.num_attention_heads * 128)
+        for name in ("gate_proj", "up_proj"):
+            add(f"{prefix}.mlp.{name}", cfg.dense_intermediate_size, hidden)
+        add(f"{prefix}.mlp.down_proj", hidden, cfg.dense_intermediate_size)
+    save_file(weights, tmp_path / "model.safetensors")
+    return str(tmp_path)
+
+
+def _model_options(tp_size, mode):
+    return dict(
         skip_tokenizer_init=True,
-        load_format="dummy",
         dtype="bfloat16",
         tensor_parallel_size=tp_size,
         distributed_executor_backend="mp",
@@ -558,25 +597,103 @@ def test_sharded_model_piecewise_warmup(
         max_num_batched_tokens=256,
         kv_cache_memory_bytes=128 << 20,
         enable_chunked_prefill=True,
-        enable_prefix_caching=False,
+        enable_prefix_caching=True,
         compilation_config={
             "cudagraph_mode": "PIECEWISE",
             "cudagraph_capture_sizes": [1, 2, 4],
         },
-        attention_config={"indexer_kv_dtype": "fp8", "indexer_cache_sharding": "on"},
+        attention_config={"indexer_kv_dtype": "fp8", "indexer_cache_sharding": mode},
+    )
+
+
+@pytest.mark.timeout(900)
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(100), reason="SM100 required"
+)
+@pytest.mark.parametrize("runner_version", [1, 2], ids=["mrv1", "mrv2"])
+@pytest.mark.parametrize("tp_size", [2, 4])
+def test_sharded_model_matches_replicated(
+    vllm_runner, tiny_m3_checkpoint, monkeypatch, tp_size, runner_version, cake_indexer
+):
+    """The same checkpoint must produce the same greedy tokens with CP on/off."""
+    from vllm import SamplingParams
+
+    if torch.accelerator.device_count() < tp_size:
+        pytest.skip(f"Requires {tp_size} GPUs")
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", str(runner_version - 1))
+    prompts = [
+        {"prompt_token_ids": [i % 251 for i in range(length)]} for length in (129, 2305)
+    ]
+    results = []
+    for mode in ("off", "on"):
+        with vllm_runner(tiny_m3_checkpoint, **_model_options(tp_size, mode)) as runner:
+            shards = tp_size if mode == "on" else 1
+            assert runner.llm.apply_model(_indexer_shards) == [[shards] * 2] * tp_size
+            cohorts = []
+            for _ in range(2):
+                outputs = runner.llm.generate(
+                    prompts,
+                    SamplingParams(
+                        temperature=0, max_tokens=8, ignore_eos=True, detokenize=False
+                    ),
+                    use_tqdm=False,
+                )
+                cohorts.append([out.outputs[0].token_ids for out in outputs])
+            assert all(out.num_cached_tokens > 0 for out in outputs)
+            assert cohorts[0] == cohorts[1]
+            results.append(cohorts)
+    assert results[0] == results[1]
+
+
+def _dummy_preserves_caches(worker):
+    model = worker.model_runner.get_model()
+    caches = [
+        cache
+        for layer in model.model.layers
+        for cache in (
+            layer.self_attn.kv_cache,
+            layer.self_attn.indexer.index_cache.kv_cache,
+        )
+    ]
+    before = [cache.view(torch.uint8).clone() for cache in caches]
+    worker.execute_dummy_batch()
+    return all(
+        torch.equal(cache.view(torch.uint8), saved)
+        for cache, saved in zip(caches, before)
+    )
+
+
+@pytest.mark.timeout(600)
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(100), reason="SM100 required"
+)
+@pytest.mark.parametrize("eager", [False, True], ids=["piecewise", "eager"])
+@pytest.mark.parametrize("runner_version", [1, 2], ids=["mrv1", "mrv2"])
+def test_dummy_batch_preserves_index_cache(
+    vllm_runner, tiny_m3_checkpoint, monkeypatch, eager, runner_version, cake_indexer
+):
+    """An idle worker's dummy batch must not overwrite cached prefix pages."""
+    from vllm import SamplingParams
+
+    if torch.accelerator.device_count() < 2:
+        pytest.skip("Requires 2 GPUs")
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", str(runner_version - 1))
+    with vllm_runner(
+        tiny_m3_checkpoint, **_model_options(2, "on"), enforce_eager=eager
     ) as runner:
-        assert runner.llm.apply_model(_indexer_shards) == [[tp_size, tp_size]] * tp_size
-        prompts = [{"prompt_token_ids": [1] * length} for length in (129, 2305)]
-        for _ in range(2):
-            outputs = runner.llm.generate(
-                prompts,
-                SamplingParams(
-                    temperature=0, max_tokens=8, ignore_eos=True, detokenize=False
-                ),
-                use_tqdm=False,
-            )
-            assert len(outputs) == len(prompts)
-            assert all(len(result.outputs[0].token_ids) == 8 for result in outputs)
+        assert runner.llm.apply_model(_indexer_shards) == [[2, 2]] * 2
+        prompt = [{"prompt_token_ids": [i % 251 for i in range(2305)]}]
+        params = SamplingParams(
+            temperature=0, max_tokens=8, ignore_eos=True, detokenize=False
+        )
+        reference = runner.llm.generate(prompt, params, use_tqdm=False)
+        for _ in range(3):
+            assert runner.llm.collective_rpc(_dummy_preserves_caches) == [True, True]
+            replay = runner.llm.generate(prompt, params, use_tqdm=False)
+            assert replay[0].num_cached_tokens > 0
+            assert replay[0].outputs[0].token_ids == reference[0].outputs[0].token_ids
 
 
 def _check_sharding_policy(config, original_comm):
@@ -630,7 +747,6 @@ def _check_sharding_policy(config, original_comm):
             assert resized.scores.shape[-1] == 2 * current.scores.shape[-1]
             policy.model_config.max_model_len = length
             assert msa.get_comm(policy, 4) is not resized
-    assert original_comm.num_layers == 5
     assert original_comm.max_decode_tokens == 4 * 8
 
     policy.model_config = copy(model)

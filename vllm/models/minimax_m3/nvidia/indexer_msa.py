@@ -27,7 +27,7 @@ import weakref
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, ClassVar, cast
+from typing import TYPE_CHECKING, ClassVar
 
 import torch
 
@@ -40,7 +40,6 @@ from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.models.minimax_m3.common.indexer import (
     MiniMaxM3IndexerBackend,
-    MiniMaxM3IndexerCache,
     MiniMaxM3IndexerDecodeMetadata,
     MiniMaxM3IndexerImpl,
     MiniMaxM3IndexerMetadata,
@@ -175,36 +174,6 @@ class MiniMaxM3IndexerMSAMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
             self.index_k_tp > 1
             and vllm_config.attention_config.indexer_prefill_cp == "local_score_unified"
         )
-        self.index_k_rank = 0
-        self.index_k_slots: torch.Tensor | None = None
-        if self.index_k_tp > 1:
-            self.index_k_rank = get_tensor_model_parallel_rank()
-            caches = [
-                cast(
-                    MiniMaxM3IndexerCache,
-                    vllm_config.compilation_config.static_forward_context[name],
-                )
-                for name in layer_names
-            ]
-            self.index_k_slots = caches[0].index_slot_mapping
-            if self.index_k_slots is None:
-                max_capture = (
-                    vllm_config.compilation_config.max_cudagraph_capture_size or 0
-                )
-                self.index_k_slots = torch.full(
-                    (
-                        max(
-                            vllm_config.scheduler_config.max_num_batched_tokens,
-                            max_capture,
-                        ),
-                    ),
-                    -1,
-                    dtype=torch.int64,
-                    device=device,
-                )
-            # The writer must capture this same address even without metadata.
-            for cache in caches:
-                cache.index_slot_mapping = self.index_k_slots
         # Persistent unified score buffer [T, H, MAX_K_TILES] shared by all
         # indexer layers and reused across forwards. Stable address (required
         # for the captured decode path) + fixed tile dim so the decode score
@@ -226,7 +195,7 @@ class MiniMaxM3IndexerMSAMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
             sparse = vllm_config.model_config.hf_text_config.sparse_attention_config
             plan = MSAIcpIndexerPlan(
                 world_size=self.index_k_tp,
-                rank=self.index_k_rank,
+                rank=get_tensor_model_parallel_rank(),
                 num_index_heads=heads,
                 page_size=PAGE_SIZE,
                 init_blocks=sparse.get("sparse_init_block", 0),
@@ -288,13 +257,12 @@ class MiniMaxM3IndexerMSAMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
         positions = common_attn_metadata.positions
         assert positions is not None
         num_valid_pages = self.num_valid_pages_buffer[:num_tokens]
-        if self.index_k_slots is not None:
+        if self.index_k_tp > 1:
             from vllm.models.minimax_m3.nvidia.ops.index_prefill import (
                 prepare_indexer_metadata,
             )
 
             slots = common_attn_metadata.slot_mapping
-            index_slot_mapping = self.index_k_slots[: slots.numel()]
             prepare_indexer_metadata(
                 query_start_loc[: num_reqs + 1],
                 seq_lens[:num_reqs],
@@ -302,9 +270,6 @@ class MiniMaxM3IndexerMSAMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
                 slots,
                 context_lens,
                 num_valid_pages,
-                index_slot_mapping,
-                self.index_k_rank,
-                self.index_k_tp,
                 self.page_size,
             )
         else:
@@ -567,9 +532,10 @@ class MiniMaxM3IndexerMSAImpl(MiniMaxM3IndexerImpl):
                         comm.expected_generations[slot_set] if tagged else None
                     ),
                 )
-                torch._assert_async(
-                    comm.errors == 0, "MiniMax M3 indexer CP exchange timed out"
-                )
+                if self.index_k_ordinal == comm.num_layers - 1:
+                    torch._assert_async(
+                        comm.errors == 0, "MiniMax M3 indexer CP exchange timed out"
+                    )
             else:
                 from vllm.models.minimax_m3.nvidia.ops import (
                     minimax_m3_index_decode_score_cutedsl,

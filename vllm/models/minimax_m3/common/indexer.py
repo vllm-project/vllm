@@ -143,7 +143,6 @@ class MiniMaxM3IndexerCache(nn.Module, AttentionLayerBase):
         self.prefix = prefix
         self.cache_config = cache_config
         self.tp_shard = tp_shard
-        self.index_slot_mapping: torch.Tensor | None = None
         # Impl-chosen backend -> each impl gets its own builder (get_attn_backend).
         self.backend_cls = backend_cls
         compilation_config = get_current_vllm_config().compilation_config
@@ -425,13 +424,6 @@ class MiniMaxM3IndexerImpl(nn.Module):
         the memory-profiling run, which skips ``forward``."""
         return
 
-    def get_slot_mapping(self, slot_mapping: torch.Tensor) -> torch.Tensor:
-        if self.index_cache.tp_shard > 1:
-            slots = self.index_cache.index_slot_mapping
-            assert slots is not None
-            return slots[: slot_mapping.numel()]
-        return slot_mapping
-
     def forward(
         self,
         index_query: torch.Tensor,
@@ -712,9 +704,6 @@ class MiniMaxM3Indexer(nn.Module):
 
     def reserve_workspace(self) -> None:
         self.impl.reserve_workspace()
-
-    def get_slot_mapping(self, slot_mapping: torch.Tensor) -> torch.Tensor:
-        return self.impl.get_slot_mapping(slot_mapping)
 
     def forward(
         self,

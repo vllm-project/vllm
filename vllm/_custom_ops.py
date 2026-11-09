@@ -3050,6 +3050,8 @@ def fused_minimax_m3_qknorm_rope_kv_insert(
     kv_k_scale: torch.Tensor | None = None,
     kv_v_scale: torch.Tensor | None = None,
     write_qkv: bool = True,
+    index_k_tp: int = 1,
+    index_k_rank: int = 0,
 ) -> None:
     """Fused MiniMax-M3 attention pre-processing (in-place).
 
@@ -3066,7 +3068,8 @@ def fused_minimax_m3_qknorm_rope_kv_insert(
     ``kv_cache_dtype`` selects the cache storage/conversion path; a dense
     layer's insert stores exactly what ``reshape_and_cache_flash`` would with
     unit k/v scales. If ``index_slot_mapping`` is omitted, ``slot_mapping`` is
-    used for both caches.
+    used for both caches. With ``index_k_tp > 1``, the writer maps global
+    index slots to this rank's interleaved shard and skips other ranks.
 
     If ``q_out`` / ``index_q_out`` (contiguous ``[N, nq*128]`` / ``[N,
     niq*128]``) are given, the normed/roped q / index_q are written there
@@ -3121,6 +3124,8 @@ def fused_minimax_m3_qknorm_rope_kv_insert(
         kv_k_scale,
         kv_v_scale,
         write_qkv,
+        index_k_tp,
+        index_k_rank,
     )
 
 

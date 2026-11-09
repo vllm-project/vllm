@@ -601,7 +601,7 @@ def test_sparse_full_fp8_index(
     if block_size == 128 and num_tokens > 1:
         index_slot_mapping[-1] = -1
 
-    def run(index_dtype, index_cache=None, index_slots=None):
+    def run(index_dtype, index_cache=None, index_tp=1, index_rank=0):
         qkv = qkv0.clone()
         kv_cache = torch.zeros(
             num_blocks,
@@ -631,12 +631,14 @@ def test_sparse_full_fp8_index(
             ik_w,
             num_idx_heads,
             slot_mapping,
-            index_slot_mapping if index_slots is None else index_slots,
+            index_slot_mapping,
             kv_cache,
             index_cache,
             block_size,
             q_out,
             index_q,
+            index_k_tp=index_tp,
+            index_k_rank=index_rank,
         )
         return qkv, kv_cache, index_cache, q_out, index_q
 
@@ -697,14 +699,8 @@ def test_sparse_full_fp8_index(
             )
             cache.bind_kv_cache(packed)
             assert cache.kv_cache.data_ptr() == packed.data_ptr()
-            page = index_slot_mapping // block_size
-            offset = index_slot_mapping % block_size
-            index_slots = page * (block_size // tp_shard) + offset // tp_shard
-            index_slots.masked_fill_(
-                (index_slot_mapping < 0) | (offset % tp_shard != rank), -1
-            )
             qkv_sh, kvc_sh, idxc_sh, qo_sh, iq_sh = run(
-                fp8_dtype, cache.kv_cache, index_slots
+                fp8_dtype, cache.kv_cache, tp_shard, rank
             )
             # Sharding only changes index-K storage; all query heads and the
             # main KV insert must be identical to the unsharded run.

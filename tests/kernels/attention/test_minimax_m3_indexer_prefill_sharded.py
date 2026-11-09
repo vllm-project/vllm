@@ -129,9 +129,8 @@ def test_indexer_prefill_device_plan_matches_reference(query_lens, prefixes, tp)
             torch.testing.assert_close(scores, reference, rtol=0, atol=0)
 
 
-@pytest.mark.parametrize("tp", [2, 4])
 @torch.inference_mode()
-def test_indexer_device_metadata_replay(tp):
+def test_indexer_device_metadata_replay():
     """Changing prefixes/windows must overwrite reused metadata and padded slots."""
     from vllm.models.minimax_m3.nvidia.ops.index_prefill import (
         prepare_indexer_metadata,
@@ -149,7 +148,6 @@ def test_indexer_device_metadata_replay(tp):
     slots[5] = -1
     context = torch.empty_like(seq_lens)
     valid = torch.empty_like(positions, dtype=torch.int32)
-    output_slots = torch.empty_like(slots)
     window = torch.empty((5, 5), dtype=torch.int32, device="cuda")
 
     def run():
@@ -160,16 +158,12 @@ def test_indexer_device_metadata_replay(tp):
             slots,
             context,
             valid,
-            output_slots,
-            tp - 1,
-            tp,
             page_size,
         )
         prepare_prefill_window(cu_q, seq_lens, 3, 135, window)
 
     run()
     torch.testing.assert_close(valid, valid.new_tensor([0, 1, 1, 2, 4, 0]))
-    assert output_slots[1] == -1
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
         run()
@@ -190,10 +184,3 @@ def test_indexer_device_metadata_replay(tp):
         (seq_lens.new_zeros(1), (prefix + end - begin).cumsum(0))
     ).int()
     torch.testing.assert_close(window[4], expected_kv)
-    offset = slots % page_size
-    rows = page_size // tp
-    owner = offset % tp
-    local = offset // tp
-    expected = slots // page_size * rows + local
-    expected[(slots < 0) | (owner != tp - 1)] = -1
-    torch.testing.assert_close(output_slots, expected)

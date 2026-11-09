@@ -121,6 +121,12 @@ __device__ __forceinline__ float warpReduceSum(float val) {
   return val;
 }
 
+template <typename T>
+__device__ __forceinline__ T indexShardSlot(T slot, int tp, int rank) {
+  if (tp == 1) return slot;
+  return slot >= 0 && slot % tp == rank ? slot / tp : T(-1);
+}
+
 // Gemma RMSNorm over the full head (no-op when ``weight == nullptr``), rounded
 // back to scalar_t like the materialized unfused norm output, followed by
 // partial NeoX RoPE on the leading ``rotary_dim`` dims. Each lane owns
@@ -693,8 +699,8 @@ __global__ void fusedMiniMaxM3QNormRopeKVInsertKernel(
     // NVFP4 index cache only: page stride in bytes.
     int64_t const idx_s_block,
     // NVFP4 main cache only: per-layer K/V dequantization (global) scales.
-    float const* __restrict__ kv_k_scale,
-    float const* __restrict__ kv_v_scale) {
+    float const* __restrict__ kv_k_scale, float const* __restrict__ kv_v_scale,
+    int const index_k_tp, int const index_k_rank) {
 #if (!defined(__CUDA_ARCH__) || __CUDA_ARCH__ < 800) && !defined(USE_ROCM)
   // _typeConvert<BFloat16> is unavailable on pre-Ampere; the M3 kernel only
   // runs with bf16/fp16 inputs in practice.  Discard the bf16 body there.
@@ -857,7 +863,10 @@ __global__ void fusedMiniMaxM3QNormRopeKVInsertKernel(
       if (isK || isV) {
         sm = slot_mapping[tokenIdx];
       } else if constexpr (kProcessIndex) {
-        if (isIK) sm = index_slot_mapping[tokenIdx];
+        if (isIK) {
+          sm = indexShardSlot(index_slot_mapping[tokenIdx], index_k_tp,
+                              index_k_rank);
+        }
       }
       if (sm >= 0) {  // skip padded / unscheduled tokens
         if (isIK) {
@@ -1128,7 +1137,7 @@ __device__ __forceinline__ void runWarp(
     int const niq, int const qkv_row, int const block_size,
     int64_t const kv_s_block, int64_t const kv_s_head, int64_t const kv_s_token,
     int64_t const kv_s_dim, int64_t const idx_s_block, float const kv_scale,
-    bool const write_qkv) {
+    bool const write_qkv, int const index_k_tp, int const index_k_rank) {
   constexpr bool kNorm = kRole != kV;
   constexpr bool kSlots =
       kInsertKV && (kRole == kK || kRole == kV || kRole == kIK);
@@ -1267,6 +1276,9 @@ __device__ __forceinline__ void runWarp(
       }
       sm = static_cast<int>(__shfl_sync(
           FINAL_MASK, static_cast<long long>(slot_l), it - slot_base, 32));
+      if constexpr (kRole == kIK) {
+        sm = indexShardSlot(sm, index_k_tp, index_k_rank);
+      }
       blk = static_cast<uint32_t>(sm) / static_cast<uint32_t>(block_size);
       tok = static_cast<uint32_t>(sm) - blk * block_size;
     }
@@ -1464,7 +1476,7 @@ __global__ void __launch_bounds__(kMaxWarps * 32) fusedMiniMaxM3RowGroupKernel(
     int const block_size, int64_t const kv_s_block, int64_t const kv_s_head,
     int64_t const kv_s_token, int64_t const kv_s_dim, int64_t const idx_s_block,
     float const* __restrict__ kv_k_scale, float const* __restrict__ kv_v_scale,
-    bool const write_qkv) {
+    int const index_k_tp, int const index_k_rank, bool const write_qkv) {
   #if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 800)
   extern __shared__ __align__(16) uint8_t smem[];
   Roles const roles(kQHeads, nq, nkv, niq, kInsertKV, kProcessIndex);
@@ -1485,7 +1497,8 @@ __global__ void __launch_bounds__(kMaxWarps * 32) fusedMiniMaxM3RowGroupKernel(
       qkv, q_out, q_fp8_out, index_q_out, NORM_W, cos_sin_cache, positions,   \
           SLOTS, kv_cache, index_cache, eps, q_fp8_inv_scale, num_tokens, nq, \
           niq, qkv_row, block_size, kv_s_block, kv_s_head, kv_s_token,        \
-          kv_s_dim, idx_s_block, CACHE_SCALE, write_qkv
+          kv_s_dim, idx_s_block, CACHE_SCALE, write_qkv, index_k_tp,          \
+          index_k_rank
     #define RG_RUN(ROLE, STEPS, OUT)                                         \
       runWarp<ROLE, STEPS, OUT, scalar_t, cache_t, kv_dt, kNvfp4, out_idx_t, \
               kHasIndex, kInsertKV, kFp8Idx, kNvfp4Idx>
@@ -1685,7 +1698,8 @@ void launchFusedMiniMaxM3(
     int64_t const kv_s_dim, int64_t const idx_s_block, bool const has_index,
     bool const insert_kv, bool const process_index, bool const fp8_idx,
     bool const nvfp4_idx, float const* kv_k_scale, float const* kv_v_scale,
-    bool const write_qkv, bool const slots_fit_int32, cudaStream_t stream) {
+    bool const write_qkv, bool const slots_fit_int32, int const index_k_tp,
+    int const index_k_rank, cudaStream_t stream) {
   // Index outputs are scalar_t (bf16) or e4m3 bytes (uint8_t); reinterpret the
   // void* pointers per instantiation in the LAUNCH macro.
   // Slot count must match the kernel's compile-time gating.
@@ -1742,13 +1756,14 @@ void launchFusedMiniMaxM3(
   rg_config.gridDim = dim3(1, (roles.warps + cta_warps - 1) / cta_warps);
   rg_config.dynamicSmemBytes = rg_smem(cta_warps);
 
-  #define LAUNCH_ARGS(OUT_T)                                                \
-    qkv, q_out, q_fp8_out, reinterpret_cast<OUT_T*>(index_q_out), q_norm_w, \
-        k_norm_w, iq_norm_w, ik_norm_w, cos_sin_cache, positions,           \
-        slot_mapping, index_slot_mapping, kv_cache,                         \
-        reinterpret_cast<OUT_T*>(index_cache), eps, q_fp8_inv_scale,        \
-        rotary_dim, num_tokens, nq, nkv, niq, block_size, kv_s_block,       \
-        kv_s_head, kv_s_token, kv_s_dim, idx_s_block, kv_k_scale, kv_v_scale
+  #define LAUNCH_ARGS(OUT_T)                                                  \
+    qkv, q_out, q_fp8_out, reinterpret_cast<OUT_T*>(index_q_out), q_norm_w,   \
+        k_norm_w, iq_norm_w, ik_norm_w, cos_sin_cache, positions,             \
+        slot_mapping, index_slot_mapping, kv_cache,                           \
+        reinterpret_cast<OUT_T*>(index_cache), eps, q_fp8_inv_scale,          \
+        rotary_dim, num_tokens, nq, nkv, niq, block_size, kv_s_block,         \
+        kv_s_head, kv_s_token, kv_s_dim, idx_s_block, kv_k_scale, kv_v_scale, \
+        index_k_tp, index_k_rank
   #define LAUNCH_RG(QH, HAS_INDEX, INSERT, PROCESS_INDEX, FP8, NVFP4_IDX,      \
                     OUT_T)                                                     \
     rg::launch<QH, scalar_t, cache_t, kv_dt, kNvfp4, OUT_T, HAS_INDEX, INSERT, \
@@ -1782,7 +1797,7 @@ void launchFusedMiniMaxM3(
         reinterpret_cast<OUT_T*>(index_cache), eps, q_fp8_inv_scale,        \
         rotary_dim, num_tokens, nq, nkv, niq, block_size, kv_s_block,       \
         kv_s_head, kv_s_token, kv_s_dim, idx_s_block, kv_k_scale,           \
-        kv_v_scale)
+        kv_v_scale, index_k_tp, index_k_rank)
   // clang-format on
 #endif
 
@@ -2188,7 +2203,7 @@ void launchFusedMiniMaxM3DSparkContextKV(
       static_cast<int>(block_size), kv_s_block, kv_s_head, kv_s_token,         \
       kv_s_dim, idx_s_block, has_index, insert_kv, process_index, fp8_idx,     \
       nvfp4_idx, kv_k_scale_ptr, kv_v_scale_ptr, write_qkv, slots_fit_int32,  \
-      stream)
+      static_cast<int>(index_k_tp), static_cast<int>(index_k_rank), stream)
 #define CALL_FUSED_MINIMAX_M3(_RAW_T, CACHE_T, KV_DTYPE)                       \
   CALL_FUSED_MINIMAX_M3_IMPL(CACHE_T, KV_DTYPE, false)
 // clang-format on
@@ -2219,7 +2234,8 @@ void fused_minimax_m3_qknorm_rope_kv_insert(
         q_fp8_out,  // [N, nq*128] contiguous E4M3
     double q_fp8_scale,
     std::optional<torch::stable::Tensor> kv_k_scale,  // [] f32, NVFP4 only
-    std::optional<torch::stable::Tensor> kv_v_scale, bool write_qkv) {
+    std::optional<torch::stable::Tensor> kv_v_scale, bool write_qkv,
+    int64_t index_k_tp, int64_t index_k_rank) {
   STD_TORCH_CHECK(qkv.is_cuda() && qkv.is_contiguous(),
                   "qkv must be contiguous CUDA");
   STD_TORCH_CHECK(
@@ -2373,6 +2389,18 @@ void fused_minimax_m3_qknorm_rope_kv_insert(
                                          ? &index_slot_mapping.value()
                                          : &slot_mapping.value();
     }
+  }
+  STD_TORCH_CHECK(index_k_tp == 1 || index_k_tp == 2 || index_k_tp == 4,
+                  "index_k_tp must be 1, 2 or 4");
+  STD_TORCH_CHECK(index_k_rank >= 0 && index_k_rank < index_k_tp,
+                  "index_k_rank must be in [0, index_k_tp)");
+  if (index_k_tp > 1) {
+    STD_TORCH_CHECK(
+        insert_kv && process_index && block_size == 128 &&
+            index_cache->scalar_type() == kFp8 && index_cache->dim() == 3 &&
+            index_cache->size(1) == block_size / index_k_tp &&
+            index_cache->size(2) == kHeadDim && index_cache->is_contiguous(),
+        "sharded index cache must be contiguous P128 FP8 rows");
   }
   // Optional contiguous gather targets: when given, the normed/roped q (and
   // index_q) are written here instead of in place, so callers avoid a separate
