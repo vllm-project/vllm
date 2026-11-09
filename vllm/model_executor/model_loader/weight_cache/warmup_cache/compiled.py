@@ -2,12 +2,16 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Compiled runtime artifact warmup cache."""
 
-import ctypes
+import hashlib
+from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any
 
-from vllm.logger import init_logger
+from vllm.model_executor.model_loader.weight_cache.artifact_store import (
+    STORE_BACKENDS,
+    ArtifactStore,
+    artifact_key,
+)
 from vllm.model_executor.model_loader.weight_cache.seed import Seedable
-from vllm.utils.import_utils import has_mooncake
 
 from .common import (
     BUNDLE_LIMIT,
@@ -23,8 +27,6 @@ if TYPE_CHECKING:
     from vllm.model_executor.model_loader.weight_cache.daemon import WeightCacheDaemon
     from vllm.model_executor.model_loader.weight_cache.seed import SeedTransport
 
-logger = init_logger(__name__)
-
 
 class CompileArtifactWarmupCache(Seedable):
     """Compiled runtime cache seeded as part of daemon warmup."""
@@ -34,24 +36,21 @@ class CompileArtifactWarmupCache(Seedable):
     def __init__(
         self,
         roots: tuple[CacheRoot, ...],
-        protocol: str = "rdma",
-        require_mooncake: bool = False,
-    ):
-        if protocol not in ("tcp", "rdma"):
-            raise ValueError(f"unsupported Mooncake protocol: {protocol!r}")
-        if require_mooncake and not has_mooncake():
-            raise ImportError(
-                "compiled-cache D2D seeding requires the Mooncake TransferEngine"
-            )
+        store_names: Iterable[str] = (),
+    ) -> None:
         self.roots = roots
-        self.protocol = protocol
-        self.require_mooncake = require_mooncake
+        self._store_names = tuple(store_names)
+        self._store_sources: list[ArtifactStore] | None = None
         self._manifest: CacheManifest | None = None
         self._bundle: bytes | None = None
-        self._engine: Any = None
-        self._buffer: Any = None
-        self._source_address: int | None = None
-        self._source_session: str | None = None
+        self._digest: str | None = None
+        self._key: str | None = None
+
+    @property
+    def store_sources(self) -> list[ArtifactStore]:
+        if self._store_sources is None:
+            self._store_sources = [STORE_BACKENDS[name]() for name in self._store_names]
+        return self._store_sources
 
     def warmup(self, daemon: "WeightCacheDaemon", transport: "SeedTransport") -> None:
         # Compiler outputs are created by the preceding FlashInfer warmup. A
@@ -62,30 +61,32 @@ class CompileArtifactWarmupCache(Seedable):
     def prepare(self) -> None:
         self._manifest = _manifest(self.roots)
         self._bundle = _bundle(self.roots, self._manifest)
+        self._digest = hashlib.sha256(self._bundle).hexdigest()
+        self._key = artifact_key(self.kind, self._digest, "bundle.tar")
 
     def request_params(self, ctx: Any) -> dict[str, Any]:
         return {"version": 1}
 
     def resolve(self, request: dict[str, Any]) -> dict[str, Any] | None:
-        if request.get("version") != 1 or self._manifest is None:
+        if (
+            request.get("version") != 1
+            or self._manifest is None
+            or self._bundle is None
+            or self._digest is None
+            or self._key is None
+            or not self._manifest.entries
+        ):
             return None
-        if self._bundle is None:
-            raise RuntimeError("compile cache bundle is not ready")
-        if not self._manifest.entries:
+        stores = self.store_sources
+        if not stores:
             return None
-        try:
-            descriptor = self._ensure_source()
-        except (ImportError, RuntimeError) as error:
-            logger.warning(
-                "Mooncake is unavailable for compile-cache seeding: %s", error
-            )
-            return None
+        for store in stores:
+            store.put(self._key, self._bundle)
         return {
             "manifest": self._manifest.as_dict(),
+            "key": self._key,
             "bundle_size": len(self._bundle),
-            "transport": "mooncake",
-            "protocol": self.protocol,
-            **descriptor,
+            "sha256": self._digest,
         }
 
     def validate_payload(self, payload: Any) -> dict[str, Any]:
@@ -105,15 +106,14 @@ class CompileArtifactWarmupCache(Seedable):
             raise ValueError("malformed compiled cache size")
         manifest = CacheManifest(entries, total)
         size = payload.get("bundle_size")
-        address, session = payload.get("address"), payload.get("session")
+        key, digest = payload.get("key"), payload.get("sha256")
         if (
             not isinstance(size, int)
             or size < 0
-            or payload.get("transport") != "mooncake"
-            or not isinstance(address, int)
-            or not isinstance(session, str)
+            or not isinstance(key, str)
+            or not isinstance(digest, str)
         ):
-            raise ValueError("malformed compile cache transfer descriptor")
+            raise ValueError("malformed compile cache descriptor")
         if total > BUNDLE_LIMIT:
             raise ValueError("compiled cache manifest is too large")
         if size > BUNDLE_LIMIT:
@@ -122,9 +122,14 @@ class CompileArtifactWarmupCache(Seedable):
             raise ValueError("invalid compile cache bundle size")
         if not manifest.entries and size != 0:
             raise ValueError("empty compile cache has a non-empty bundle")
-        protocol = payload.get("protocol")
-        if protocol not in ("tcp", "rdma") or protocol != self.protocol:
-            raise ValueError("unsupported Mooncake protocol")
+        if len(digest) != 64:
+            raise ValueError("malformed compiled cache bundle checksum")
+        try:
+            int(digest, 16)
+        except ValueError as error:
+            raise ValueError("malformed compiled cache bundle checksum") from error
+        if key != artifact_key(self.kind, digest, "bundle.tar"):
+            raise ValueError("compiled cache bundle key mismatch")
         root_names = {root.name for root in self.roots}
         for entry in entries:
             if (
@@ -149,61 +154,20 @@ class CompileArtifactWarmupCache(Seedable):
             raise ValueError("compiled cache manifest size mismatch")
         return {
             "manifest": manifest,
+            "key": key,
             "bundle_size": size,
-            "protocol": payload.get("protocol", "rdma"),
-            "address": address,
-            "session": session,
+            "sha256": digest,
         }
 
     def install(self, ctx: Any, payload: dict[str, Any]) -> None:
-        bundle = self._read_mooncake(payload)
-        _install(bundle, payload["manifest"], self.roots)
-
-    def _ensure_source(self) -> dict[str, Any]:
-        if self._engine is None or self._buffer is None:
-            try:
-                from mooncake.engine import TransferEngine
-
-                from vllm.utils.network_utils import get_ip
-            except ImportError as error:
-                raise RuntimeError("compile-cache seeding requires Mooncake") from error
-            if self._bundle is None:
-                raise RuntimeError("compile cache bundle is not ready")
-            engine = TransferEngine()
-            if engine.initialize(get_ip(), "P2PHANDSHAKE", self.protocol, "") != 0:
-                raise RuntimeError("Mooncake TransferEngine initialization failed")
-            buffer = ctypes.create_string_buffer(self._bundle)
-            address = ctypes.addressof(buffer)
-            if engine.register_memory(address, len(self._bundle)) != 0:
-                raise RuntimeError("Mooncake failed to register compile-cache buffer")
-            self._engine, self._buffer = engine, buffer
-            self._source_address = address
-            self._source_session = f"{get_ip()}:{engine.get_rpc_port()}"
-        assert self._source_address is not None
-        assert self._source_session is not None
-        return {"address": self._source_address, "session": self._source_session}
-
-    def _read_mooncake(self, payload: dict[str, Any]) -> bytes:
-        try:
-            from mooncake.engine import TransferEngine
-
-            from vllm.utils.network_utils import get_ip
-        except ImportError as error:
-            raise RuntimeError("compile-cache seeding requires Mooncake") from error
-        size = payload["bundle_size"]
-        engine = TransferEngine()
-        if engine.initialize(get_ip(), "P2PHANDSHAKE", payload["protocol"], "") != 0:
-            raise RuntimeError("Mooncake TransferEngine initialization failed")
-        buffer = ctypes.create_string_buffer(size)
-        address = ctypes.addressof(buffer)
-        if engine.register_memory(address, size) != 0:
-            raise RuntimeError("Mooncake failed to register compile-cache buffer")
-        try:
-            status = engine.batch_transfer_sync_read(
-                payload["session"], [address], [payload["address"]], [size]
-            )
-            if status != 0:
-                raise RuntimeError(f"Mooncake transfer failed with status {status}")
-            return buffer.raw[:size]
-        finally:
-            engine.unregister_memory(address)
+        for store in self.store_sources:
+            bundle = store.get(payload["key"])
+            if bundle is None:
+                continue
+            if len(bundle) != payload["bundle_size"]:
+                raise ValueError("compiled cache bundle size mismatch")
+            if hashlib.sha256(bundle).hexdigest() != payload["sha256"]:
+                raise ValueError("compiled cache bundle checksum mismatch")
+            _install(bundle, payload["manifest"], self.roots)
+            return
+        raise RuntimeError("compiled cache bundle is missing from every shared store")

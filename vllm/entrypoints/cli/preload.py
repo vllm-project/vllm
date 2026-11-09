@@ -33,16 +33,16 @@ from multiprocessing.process import BaseProcess
 
 from fastapi import FastAPI
 from fastapi.responses import Response
+
 from vllm.engine.arg_utils import EngineArgs
 from vllm.entrypoints.cli.types import CLISubcommand
 from vllm.entrypoints.common.startup import VLLM_SUBCMD_PARSER_EPILOG
 from vllm.logger import init_logger
-from vllm.usage.usage_lib import UsageContext
-from vllm.utils.network_utils import get_distributed_init_method, get_open_port
-
 from vllm.model_executor.model_loader.weight_cache.protocol import (
     check_ipc_platform_support,
 )
+from vllm.usage.usage_lib import UsageContext
+from vllm.utils.network_utils import get_distributed_init_method, get_open_port
 
 if typing.TYPE_CHECKING:
     from vllm.config import VllmConfig

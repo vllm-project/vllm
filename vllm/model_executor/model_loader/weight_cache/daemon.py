@@ -88,6 +88,7 @@ import time
 from collections.abc import Callable, Iterable
 
 import torch
+
 from vllm.config import (
     ParallelConfig,
     VllmConfig,
@@ -105,13 +106,8 @@ from vllm.distributed.device_communicators.flashinfer_all_reduce import (
     destroy_fi_ar_workspace,
 )
 from vllm.logger import configure_logging, init_logger
-from vllm.model_executor.model_loader.utils import process_weights_after_loading
-from vllm.platforms import current_platform
-from vllm.utils.mem_utils import format_gib
-from vllm.utils.torch_utils import set_default_torch_dtype
-from vllm.v1.worker.workspace import init_workspace_manager
-
 from vllm.model_executor.model_loader import get_model_loader
+from vllm.model_executor.model_loader.utils import process_weights_after_loading
 from vllm.model_executor.model_loader.weight_cache.protocol import (
     TensorEntry,
     WeightCacheKey,
@@ -140,6 +136,10 @@ from vllm.model_executor.model_loader.weight_cache.warmup_cache import (
     WarmupCache,
     _cache_roots,
 )
+from vllm.platforms import current_platform
+from vllm.utils.mem_utils import format_gib
+from vllm.utils.torch_utils import set_default_torch_dtype
+from vllm.v1.worker.workspace import init_workspace_manager
 
 logger = init_logger("vllm.model_executor.model_loader.weight_cache.daemon")
 

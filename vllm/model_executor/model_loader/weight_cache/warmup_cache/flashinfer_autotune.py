@@ -9,17 +9,9 @@ from typing import TYPE_CHECKING, Any
 
 import regex as re
 import torch
+
 from vllm.distributed.parallel_state import get_world_group
 from vllm.logger import init_logger
-from vllm.model_executor.warmup.flashinfer_autotune_cache import (
-    flashinfer_autotune_cache_hash,
-    flashinfer_autotune_filename,
-    flashinfer_autotune_root,
-    use_flashinfer_autotune_v2,
-)
-from vllm.platforms import current_platform
-from vllm.utils.flashinfer import has_flashinfer
-
 from vllm.model_executor.model_loader.weight_cache.artifact_store import (
     STORE_BACKENDS,
     ArtifactStore,
@@ -31,16 +23,23 @@ from vllm.model_executor.model_loader.weight_cache.utils import (
     build_warmup_runner,
     is_draft_model_cacheable,
 )
+from vllm.model_executor.warmup.flashinfer_autotune_cache import (
+    flashinfer_autotune_cache_hash,
+    flashinfer_autotune_filename,
+    flashinfer_autotune_root,
+    use_flashinfer_autotune_v2,
+)
+from vllm.platforms import current_platform
+from vllm.utils.flashinfer import has_flashinfer
 
 if TYPE_CHECKING:
-    from vllm.v1.worker.gpu.model_runner import GPUModelRunner
-
     from vllm.model_executor.model_loader.weight_cache.daemon import (
         WeightCacheDaemon,
     )
     from vllm.model_executor.model_loader.weight_cache.seed import (
         SeedTransport,
     )
+    from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
 logger = init_logger(__name__)
 _CONFIG_HASH_RE = re.compile(r"[0-9a-f]{64}")

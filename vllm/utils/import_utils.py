@@ -524,11 +524,6 @@ def has_nixl_ep() -> bool:
     return _has_module("nixl_ep")
 
 
-def has_mooncake() -> bool:
-    """Whether the Mooncake TransferEngine package is available."""
-    return _has_module("mooncake.engine")
-
-
 def has_moonep() -> bool:
     """Whether the optional `moonep` package is available."""
     return _has_module("moonep")
