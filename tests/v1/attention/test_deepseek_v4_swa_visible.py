@@ -730,7 +730,7 @@ def test_v41_bi_sparse_paged_indices(compress_ratio):
         (3, 2, 3, 0),
     ]
     results: dict[tuple[int, int], list[list]] = {}
-    for name, requests in (("prefill", prefill), ("mixed", mixed)):
+    for _name, requests in (("prefill", prefill), ("mixed", mixed)):
         batch = _paged_indices_batch(requests, compress_ratio, topk_rows, gen)
         out, lens = _run_paged_indices(batch)
         tokens = batch["token_to_req"].numel()
