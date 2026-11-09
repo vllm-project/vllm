@@ -3,7 +3,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 import jsonschema
@@ -133,7 +133,7 @@ NGRAM_SPEC_CONFIG = {
 
 EAGLE_SPEC_CONFIG = {
     "method": "eagle",
-    "model": "yuhuili/EAGLE-LLaMA3.1-Instruct-8B",
+    "model": "vllm-project/EAGLE-LLaMA3.1-Instruct-8B",
     "num_speculative_tokens": 5,
 }
 
@@ -192,7 +192,7 @@ if current_platform.is_rocm():
     platform_args["async_scheduling"] = False
 
 
-class CarType(str, Enum):
+class CarType(StrEnum):
     sedan = "sedan"
     suv = "SUV"
     truck = "Truck"
@@ -859,6 +859,46 @@ def test_structured_output_auto_mode(
             assert isinstance(parsed_json, dict)
 
 
+def test_guidance_ignore_eos_with_speculative_decoding(vllm_runner):
+    with vllm_runner(
+        "facebook/opt-125m",
+        enforce_eager=True,
+        max_model_len=128,
+        max_num_seqs=1,
+        disable_log_stats=False,
+        structured_outputs_config={"backend": "guidance"},
+        speculative_config={
+            "method": "ngram",
+            "num_speculative_tokens": 3,
+            "prompt_lookup_min": 1,
+            "prompt_lookup_max": 3,
+        },
+        **platform_args,
+    ) as runner:
+        llm = runner.get_llm()
+        tokenizer = llm.get_tokenizer()
+        a = tokenizer.encode("a", add_special_tokens=False)
+        assert len(a) == 1
+        eos = tokenizer.eos_token_id
+        output = llm.generate(
+            {"prompt_token_ids": (a + [eos]) * 8},
+            SamplingParams(
+                temperature=0,
+                max_tokens=8,
+                ignore_eos=True,
+                allowed_token_ids=a + [eos],
+                structured_outputs=StructuredOutputsParams(regex="a"),
+            ),
+        )[0].outputs[0]
+        assert list(output.token_ids[:2]) == a + [eos]
+        assert len(output.token_ids) == 8
+        assert output.finish_reason == "length"
+        assert any(
+            metric.name == "vllm:spec_decode_num_accepted_tokens" and metric.value > 0
+            for metric in llm.get_metrics()
+        )
+
+
 def test_guidance_no_additional_properties(vllm_runner):
     with vllm_runner(
         "Qwen/Qwen2.5-1.5B-Instruct",
@@ -887,10 +927,9 @@ def test_guidance_no_additional_properties(vllm_runner):
             "<|im_end|>\n<|im_start|>assistant\n"
         )
 
-        def generate_with_backend(backend):
+        def generate():
             structured_outputs_params = StructuredOutputsParams(
                 json=schema,
-                backend=backend,
                 disable_any_whitespace=True,
                 disable_additional_properties=True,
             )
@@ -909,7 +948,7 @@ def test_guidance_no_additional_properties(vllm_runner):
             jsonschema.validate(instance=parsed_json, schema=schema)
             return parsed_json
 
-        generated = generate_with_backend("guidance")
+        generated = generate()
         assert "a1" in generated
         assert "a2" in generated
         assert "a3" in generated
