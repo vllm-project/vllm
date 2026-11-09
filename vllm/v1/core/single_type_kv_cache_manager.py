@@ -533,6 +533,10 @@ class SingleTypeKVCacheManager(ABC):
             retention_interval=retention_interval,
             reachable_boundaries=reachable_boundaries,
             dcp_world_size=self.dcp_world_size,
+            # Lookahead hashing makes the trailing block unhashable, which costs
+            # the shared ceiling one block and the EAGLE pop another; the window
+            # of the best remaining hit then starts one block below the tail.
+            extra_tail_blocks=1 if self.block_pool.num_hash_lookahead_tokens else 0,
         )
         self.block_pool.cache_full_blocks(
             request=request,
@@ -558,6 +562,7 @@ class SingleTypeKVCacheManager(ABC):
         reachable_boundaries: Sequence[int] = (),
         dcp_world_size: int = 1,
         final_segment_end_block: int | None = None,
+        extra_tail_blocks: int = 0,
     ) -> list[bool] | None:
         """Per-block mask for `cache_full_blocks`. `None` means cache
         every (non-null) block — the default for full attention.
@@ -1080,6 +1085,7 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         reachable_boundaries: Sequence[int] = (),
         dcp_world_size: int = 1,
         final_segment_end_block: int | None = None,
+        extra_tail_blocks: int = 0,
     ) -> list[bool] | None:
         assert isinstance(kv_cache_spec, SlidingWindowSpec)
         if alignment_tokens is None:
@@ -1123,7 +1129,10 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
                 # Every block is reachable; cache them all.
                 return None
             for i in range(start_block, end_block):
-                if i >= shift and (i - shift) % per_segment >= per_segment - need:
+                if (
+                    i >= shift
+                    and (i - shift) % per_segment >= per_segment - need - extra_tail_blocks
+                ):
                     mask[i - start_block] = True
 
             if final_segment_end_block is not None and not use_eagle:
@@ -1131,7 +1140,8 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
                 if final_segment_size:
                     final_segment_start = final_segment_end_block - final_segment_size
                     final_tail_start = max(
-                        final_segment_start, final_segment_end_block - need
+                        final_segment_start,
+                        final_segment_end_block - need - extra_tail_blocks,
                     )
                     final_tail_end = min(end_block, final_segment_end_block)
                     for i in range(max(start_block, final_tail_start), final_tail_end):
@@ -1145,7 +1155,9 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
             for boundary_tokens in reachable_boundaries:
                 aligned = boundary_tokens // alignment_tokens * alignment_tokens
                 end = aligned // block_size + shift
-                for j in range(max(start_block, end - need), min(end_block, end)):
+                for j in range(
+                    max(start_block, end - need - extra_tail_blocks), min(end_block, end)
+                ):
                     mask[j - start_block] = True
 
         return mask
@@ -1562,6 +1574,7 @@ class MambaManager(SingleTypeKVCacheManager):
         reachable_boundaries: Sequence[int] = (),
         dcp_world_size: int = 1,
         final_segment_end_block: int | None = None,
+        extra_tail_blocks: int = 0,
     ) -> list[bool] | None:
         """Sparse Mamba state-snapshot retention.
 
