@@ -160,12 +160,21 @@ class ForwardBench:
                 setattr(context, name, value)
             with override_forward_context(context):
                 output = self._model_forward(**inputs)
+            handler = self.runner.pp_handler
             if not self.runner.is_last_pp_rank:
-                output = self.runner.pp_handler.relay_aux_hidden_states(
+                # The pipeline bench sends this output to the next stage itself.
+                output = handler.relay_aux_hidden_states(
                     inputs["intermediate_tensors"], output
                 )
-            if self.drafter is not None:
-                self.drafter.propose(output)
+            elif self.drafter is not None:
+                # The runner completes the returned output itself; only the
+                # drafter needs the full aux hidden states here.
+                draft_input = output
+                if self.runner.use_aux_hidden_state_outputs and handler is not None:
+                    draft_input = handler.add_upstream_aux_hidden_states(
+                        inputs["intermediate_tensors"], output
+                    )
+                self.drafter.propose(draft_input)
             return output
 
         return run_model

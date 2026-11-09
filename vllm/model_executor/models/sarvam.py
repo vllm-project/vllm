@@ -537,8 +537,9 @@ class SarvamMLAModel(nn.Module, EagleModelMixin):
 
         Returns:
             Intermediate tensors with local auxiliary states on non-final stages.
-            On the final stage, normalized hidden states paired with the ordered
-            auxiliary states from all stages if captured.
+            On the final stage, normalized hidden states paired with the
+            auxiliary states this stage captured, if any; the model runner adds
+            those of earlier stages.
 
         """
         if get_pp_group().is_first_rank:
@@ -553,7 +554,6 @@ class SarvamMLAModel(nn.Module, EagleModelMixin):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-        remote_aux = self.collect_remote_aux_hidden_states(intermediate_tensors)
         aux_hidden_states: list[torch.Tensor] = []
         if get_pp_group().is_first_rank:
             self._maybe_add_hidden_state(
@@ -585,7 +585,6 @@ class SarvamMLAModel(nn.Module, EagleModelMixin):
         else:
             hidden_states, _ = self.norm(hidden_states, residual)
 
-        aux_hidden_states = remote_aux + aux_hidden_states
         if len(aux_hidden_states) > 0:
             return hidden_states, aux_hidden_states
         return hidden_states
