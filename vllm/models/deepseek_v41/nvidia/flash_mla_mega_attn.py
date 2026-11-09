@@ -339,7 +339,7 @@ class DeepseekV4MegaAttnAttention(DeepseekV4FlashMLAAttention):
         """DeepGEMM's grouped einsum picks a tile config from M and
         JIT-compiles each new one (~2 s, a serving stall); under batch
         invariance it meets M values the startup sweep misses, so run every
-        smaller M once when ``wo_a`` first sees a larger batch."""
+        smaller M once when `wo_a` first sees a larger batch."""
         key = self.wo_a.weight.shape
         done = _EINSUM_WARMED_M.get(key, 0)
         if num_tokens <= done or torch.cuda.is_current_stream_capturing():
