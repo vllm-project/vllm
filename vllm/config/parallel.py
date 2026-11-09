@@ -65,12 +65,13 @@ All2AllBackend = Literal[
 
 
 @cache
-def _is_gb200_or_gb300() -> bool:
-    """Whether this is a GB200 or GB300."""
+def _is_gb200_gb300_or_vr200() -> bool:
+    """Whether this is an ARM NVL rack: GB200 and GB300 (10.0, 10.3) or VR200
+    (10.7). All of them are Blackwell/Rubin 10.x parts on a Grace or Vera host."""
     if not current_platform.is_cuda():
         return False
     if current_platform.get_cpu_architecture() != CpuArchEnum.ARM:
-        # Corner case to distinguish x86 HGX B200/B300 from ARM GB200/GB300
+        # Corner case to distinguish x86 HGX B200/B300 from ARM GB200/GB300/VR200
         return False
     try:
         return current_platform.is_device_capability_family(100)
@@ -99,9 +100,9 @@ def _prefers_one_sided_all2all(config: "ParallelConfig") -> bool:
     # The one-sided manager is not wired for elastic EP's stateless groups.
     if not config.enable_expert_parallel or config.enable_elastic_ep:
         return False
-    # GB200/GB300 carry NVLink between hosts over MNNVL, so the EP group may
-    # span nodes and any data-parallel size is served.
-    if _is_gb200_or_gb300():
+    # GB200/GB300/VR200 carry NVLink between hosts over MNNVL, so the EP group
+    # may span nodes and any data-parallel size is served.
+    if _is_gb200_gb300_or_vr200():
         return True
     # HGX has no NVLink between hosts, so the EP group must be one host's
     # 8 GPUs, placed by vLLM's own launcher. An API-server-only process has no
@@ -325,8 +326,8 @@ class ParallelConfig:
     """All2All backend for MoE expert parallel communication. Available options:
 
     - "auto": "flashinfer_nvlink_one_sided" for expert parallelism without
-      elastic EP, with at least 8 data-parallel ranks on GB200/GB300 or exactly
-      8 on a single HGX B200/B300 node launched by vLLM, for BF16/FP16, ModelOpt
+      elastic EP, with any data-parallel size on GB200/GB300/VR200 or exactly 8
+      on a single HGX B200/B300 node launched by vLLM, for BF16/FP16, ModelOpt
       NVFP4 or 128x128 block FP8 models without LoRA or a MoE-EP backend;
       "allgather_reducescatter" otherwise
 

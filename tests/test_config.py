@@ -1508,9 +1508,9 @@ def _pretend_cuda_host(monkeypatch, cpu_arch, capability) -> None:
 
 
 def _clear_platform_probes() -> None:
-    from vllm.config.parallel import _is_gb200_or_gb300, _is_hgx_b200_or_b300
+    from vllm.config.parallel import _is_gb200_gb300_or_vr200, _is_hgx_b200_or_b300
 
-    _is_gb200_or_gb300.cache_clear()
+    _is_gb200_gb300_or_vr200.cache_clear()
     _is_hgx_b200_or_b300.cache_clear()
 
 
@@ -1551,6 +1551,8 @@ def hgx_host(monkeypatch, request):
         # GB200 and GB300: datacenter Blackwell on a Grace host.
         (CpuArchEnum.ARM, (10, 0), "flashinfer_nvlink_one_sided"),
         (CpuArchEnum.ARM, (10, 3), "flashinfer_nvlink_one_sided"),
+        # VR200: Rubin (10.7) on a Vera host.
+        (CpuArchEnum.ARM, (10, 7), "flashinfer_nvlink_one_sided"),
         # HGX B200 and B300: the same GPUs on an x86 host.
         (CpuArchEnum.X86, (10, 0), "flashinfer_nvlink_one_sided"),
         (CpuArchEnum.X86, (10, 3), "flashinfer_nvlink_one_sided"),
@@ -1564,9 +1566,9 @@ def hgx_host(monkeypatch, request):
 def test_all2all_backend_defaults_to_one_sided_only_on_measured_platforms(
     monkeypatch, cpu_arch, capability, expected
 ):
-    """One-sided becomes the default only on datacenter Blackwell: GB200,
-    GB300, HGX B200 and HGX B300. Telling HGX from GB200/GB300, whose NVLink
-    spans hosts, takes the host CPU."""
+    """One-sided becomes the default only on GB200, GB300, VR200, HGX B200 and
+    HGX B300. Telling HGX from GB200/GB300/VR200, whose NVLink spans hosts,
+    takes the host CPU."""
     _pretend_cuda_host(monkeypatch, cpu_arch, capability)
     monkeypatch.setattr(
         "vllm.utils.flashinfer.has_flashinfer_nvlink_one_sided", lambda: True
