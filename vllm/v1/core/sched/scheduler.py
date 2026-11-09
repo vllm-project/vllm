@@ -762,7 +762,8 @@ class Scheduler(SchedulerInterface):
         # waiting loop is skipped until it ends. Reserve min(uncached tokens, one
         # share) per request the loop can admit, so cached-KV requests can be
         # admitted mid-prefill. Nothing is reserved when the loop cannot admit
-        # (active-request cap reached, or queued requests are paused).
+        # (active-request cap reached, or queued requests are paused), nor for
+        # requests the loop would skip for its own reasons.
         reserved_budget = 0
         num_active_reqs = len(self.running) + self.num_waiting_for_streaming_input
         # Under PAUSED_NEW only KV-holding requests drain; queued ones stay put.
@@ -771,14 +772,30 @@ class Scheduler(SchedulerInterface):
             if self._pause_state == PauseState.UNPAUSED
             else (self.kv_holding_waiting,)
         )
-        num_reservable_reqs = sum(len(queue) for queue in reservation_queues)
-        if num_reservable_reqs > 0 and num_active_reqs < self.max_num_active_reqs:
-            fair_share = input_budget // (num_running + num_reservable_reqs)
-            for request in itertools.chain(*reservation_queues):
+        running_loras: set[int] = set()
+        if self.lora_config:
+            running_loras = {
+                req.lora_request.lora_int_id
+                for req in self.running
+                if req.lora_request and req.lora_request.lora_int_id > 0
+            }
+        reservable_reqs = [
+            request
+            for request in itertools.chain(*reservation_queues)
+            if self._is_reservable_waiting_request(request, running_loras)
+        ]
+        if reservable_reqs and num_active_reqs < self.max_num_active_reqs:
+            fair_share = input_budget // (num_running + len(reservable_reqs))
+            for request in reservable_reqs:
                 remaining = max(
                     0, request.num_tokens_with_spec - request.num_computed_tokens
                 )
-                reserved_budget += min(remaining, fair_share)
+                if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
+                    # A load that finished this step can only be promoted if the
+                    # waiting loop runs, which needs a nonzero budget.
+                    reserved_budget += max(1, min(remaining, fair_share))
+                else:
+                    reserved_budget += min(remaining, fair_share)
             reserved_budget = min(reserved_budget, token_budget)
 
         # First, schedule the RUNNING requests.
@@ -3636,6 +3653,35 @@ class Scheduler(SchedulerInterface):
         elif request.num_computed_tokens == request.num_tokens:
             request.num_computed_tokens = request.num_tokens - 1
         self.finished_recving_kv_req_ids.remove(request.request_id)
+
+    def _is_reservable_waiting_request(
+        self, request: Request, running_loras: set[int]
+    ) -> bool:
+        """Whether the waiting loop could schedule this request in this step.
+
+        Read-only mirror of the skips the loop applies; promoting a blocked
+        request there mutates its state, so it cannot be reused here. Reserving
+        budget for a request the loop will skip only starves the running batch.
+        """
+        if request.status == RequestStatus.WAITING_FOR_STREAMING_REQ:
+            # Waiting for more streaming input; nothing to schedule.
+            return False
+        if request.status == RequestStatus.WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR:
+            struct_output_req = request.structured_output_request
+            if (
+                not struct_output_req
+                or struct_output_req.grammar is None
+                or isinstance(struct_output_req.grammar, Exception)
+            ):
+                return False
+        if request.num_stale_output_tokens and not request.drop_stale_output:
+            return False
+        return not (
+            self.lora_config
+            and request.lora_request
+            and len(running_loras) == self.lora_config.max_loras
+            and request.lora_request.lora_int_id not in running_loras
+        )
 
     def _handle_blocked_waiting_request(self, request: Request) -> bool:
         """Returns True if scheduling of this request should proceed, False if
