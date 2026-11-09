@@ -4,14 +4,18 @@
 use std::num::NonZeroU32;
 
 use thiserror_ext::AsReport as _;
-use vllm_text::{Prompt, SamplingParams, TextDecodeOptions, TextRequest, TextRequestProcessor};
+use vllm_text::{
+    BeamSearchParams, Prompt, SamplingParams, TextDecodeOptions, TextRequest, TextRequestProcessor,
+};
 
 use super::types::CompletionRequest;
 use crate::error::{ApiError, text_submit_error};
 use crate::lora::LoraModelResolution;
 use crate::routes::openai::completions::validate;
 use crate::routes::openai::utils::structured_outputs::convert_from_response_format_value;
-use crate::routes::openai::utils::{resolve_generation_prompt_truncation, resolve_n};
+use crate::routes::openai::utils::{
+    resolve_beam_search, resolve_generation_prompt_truncation, resolve_n,
+};
 use crate::utils::{
     ResolvedRequestContext, convert_logit_bias, merge_ec_transfer_params, merge_kv_transfer_params,
     resolve_session_id,
@@ -29,6 +33,8 @@ pub(super) struct PreparedRequest {
     pub n: NonZeroU32,
     /// Public response rendering options for route-layer helpers.
     pub options: ResponseOptions,
+    /// Set when the request uses beam search.
+    pub beam_search: Option<BeamSearchParams>,
     /// Lowered text request for the shared `vllm-text` facade.
     pub text_request: TextRequest,
 }
@@ -69,6 +75,7 @@ pub(super) fn prepare_completion_request(
 ) -> Result<PreparedRequest, ApiError> {
     validate::validate_request_compat(&request, &lora_resolution.model_names)?;
     let n = resolve_n(request.n)?;
+    let beam_search = resolve_beam_search(request.use_beam_search, n, request.length_penalty);
 
     let prompt_truncation = resolve_generation_prompt_truncation(
         request.truncate_prompt_tokens,
@@ -178,6 +185,7 @@ pub(super) fn prepare_completion_request(
         request_id,
         response_model,
         n,
+        beam_search,
         options: ResponseOptions {
             include_usage,
             include_continuous_usage,

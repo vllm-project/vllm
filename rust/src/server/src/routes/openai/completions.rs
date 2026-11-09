@@ -23,11 +23,11 @@ use tracing_futures::Instrument as _;
 use vllm_engine_core_client::protocol::output::StopReason;
 use vllm_llm::WeightVersionSpan;
 use vllm_text::{
-    DecodedPromptLogprobs, DecodedTextEvent, FinishReason, SampledDelta, TextOutputStream,
-    TextOutputStreamExt as _, TextRequest, TextRequestProcessor,
+    BeamSearchParams, DecodedPromptLogprobs, DecodedTextEvent, FinishReason, SampledDelta,
+    TextOutputStream, TextOutputStreamExt as _, TextRequest, TextRequestProcessor,
 };
 
-use self::convert::{ResponseOptions, prepare_completion_request};
+use self::convert::{PreparedRequest, ResponseOptions, prepare_completion_request};
 pub(crate) use self::types::CompletionRequest;
 use super::utils::logprobs::{
     collected_logprobs_to_openai, decoded_logprobs_to_openai, decoded_prompt_logprobs_to_openai,
@@ -116,6 +116,15 @@ pub async fn completions(
 
     let created = unix_timestamp();
     let api_server_options = state.api_server_options;
+    if let Some(params) = prepared.beam_search {
+        return match beam_search_completion(&state, prepared, params, created)
+            .instrument(request_span)
+            .await
+        {
+            Ok(response) => Json(response).into_response(),
+            Err(error) => error.into_response(),
+        };
+    }
     let text_streams = match state
         .chat
         .text()
@@ -208,6 +217,36 @@ impl ChoiceChunk for CompletionSseChunk {
         let (Self::Chunk(chunk) | Self::Usage(chunk)) = self;
         chunk.metrics = None;
     }
+}
+
+async fn beam_search_completion(
+    state: &AppState,
+    prepared: PreparedRequest,
+    params: BeamSearchParams,
+    created: u64,
+) -> Result<CompletionResponse, ApiError> {
+    let (_, beams) = (state.chat.text().beam_search(prepared.text_request, params))
+        .await
+        .map_err(|error| text_submit_error("failed to run beam search", error))?;
+    if beams.is_empty() {
+        bail_server_error!("beam search returned no beams");
+    }
+    let responses = future::try_join_all(beams.into_iter().map(|beam| {
+        collect_completion(
+            beam,
+            prepared.request_id.clone(),
+            prepared.response_model.clone(),
+            created,
+            state.system_fingerprint.clone(),
+            state.api_server_options,
+            prepared.options.clone(),
+        )
+    }))
+    .await?;
+    let mut merged = merge_choice_responses(responses);
+    // A search spans many engine requests; Python reports no metrics either.
+    merged.metrics = None;
+    Ok(merged)
 }
 
 async fn collect_completion(

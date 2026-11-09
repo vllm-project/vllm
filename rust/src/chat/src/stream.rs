@@ -9,9 +9,7 @@ use futures::Stream;
 use trait_set::trait_set;
 use vllm_engine_core_client::protocol::output::RequestSpecDecodeMetrics;
 use vllm_llm::{RequestTimestamps, WeightVersionSpan};
-use vllm_text::{
-    DecodedLogprobs, DecodedPositionLogprobs, DecodedPromptLogprobs, EffectiveSampling,
-};
+use vllm_text::{DecodedLogprobs, DecodedPromptLogprobs, EffectiveSampling};
 
 use crate::FinishReason;
 use crate::error::{Error, Result};
@@ -103,7 +101,8 @@ impl ChatEventStream {
         let mut prompt_logprobs = None;
         let mut prompt_token_ids: Arc<[u32]> = Arc::from([]);
         let prompt_text = self.prompt_text.take();
-        let mut logprob_positions: Vec<DecodedPositionLogprobs> = Vec::new();
+        // Kept when empty: a beam can stop at EOS before returning any token.
+        let mut output_logprobs: Option<DecodedLogprobs> = None;
         let mut token_ids: Vec<u32> = Vec::new();
         while let Some(event) = self.next().await.transpose()? {
             match event {
@@ -120,7 +119,10 @@ impl ChatEventStream {
                     token_ids: delta_ids,
                 } => {
                     if let Some(logprobs) = logprobs {
-                        logprob_positions.extend(logprobs.positions);
+                        output_logprobs
+                            .get_or_insert_with(|| DecodedLogprobs { positions: vec![] })
+                            .positions
+                            .extend(logprobs.positions);
                     }
                     token_ids.extend(delta_ids);
                 }
@@ -139,9 +141,7 @@ impl ChatEventStream {
                         prompt_token_ids,
                         prompt_text,
                         prompt_logprobs,
-                        logprobs: (!logprob_positions.is_empty()).then_some(DecodedLogprobs {
-                            positions: logprob_positions,
-                        }),
+                        logprobs: output_logprobs,
                         token_ids,
                         usage,
                         timestamps,

@@ -9,6 +9,7 @@ use vllm_chat::{
     ChatMessage as VllmChatMessage, ChatOptions, ChatRequest, ChatTool, ChatToolChoice,
     GenerationPromptMode, ResolvedToolContext, SamplingParams,
 };
+use vllm_text::BeamSearchParams;
 
 use super::types::ChatCompletionRequest;
 use super::validate;
@@ -18,7 +19,9 @@ use crate::routes::openai::utils::structured_outputs::convert_from_response_form
 use crate::routes::openai::utils::types::{
     ChatMessage, ContentPart, MessageContent, Tool, ToolChoice, ToolChoiceValue, ToolReference,
 };
-use crate::routes::openai::utils::{resolve_generation_prompt_truncation, resolve_n};
+use crate::routes::openai::utils::{
+    resolve_beam_search, resolve_generation_prompt_truncation, resolve_n,
+};
 use crate::utils::{
     ResolvedRequestContext, convert_logit_bias, merge_ec_transfer_params, merge_kv_transfer_params,
     resolve_session_id,
@@ -36,6 +39,8 @@ pub(super) struct PreparedRequest {
     pub n: NonZeroU32,
     /// Public response rendering options for route-layer helpers.
     pub options: ResponseOptions,
+    /// Set when the request uses beam search.
+    pub beam_search: Option<BeamSearchParams>,
     /// Lowered chat request for `vllm-chat`.
     pub chat_request: ChatRequest,
 }
@@ -79,6 +84,7 @@ pub(super) fn prepare_chat_request(
 ) -> Result<PreparedRequest, ApiError> {
     validate::validate_request_compat(&request, &lora_resolution.model_names)?;
     let n = resolve_n(request.n)?;
+    let beam_search = resolve_beam_search(request.use_beam_search, n, request.length_penalty);
 
     let prompt_truncation = resolve_generation_prompt_truncation(
         request.truncate_prompt_tokens,
@@ -124,11 +130,11 @@ pub(super) fn prepare_chat_request(
     let is_named_tool_choice = matches!(&request.tool_choice, Some(ToolChoice::Function { .. }));
 
     // Auto-enable prompt logprobs for non-streaming echo, matching Python vLLM's
-    // behavior.
+    // behavior. Python's beam search computes none, so echo does not ask for them.
     let top_logprobs = request.top_logprobs.unwrap_or(0);
     let prompt_logprobs = request
         .prompt_logprobs
-        .or((request.echo && !request.stream).then_some(top_logprobs));
+        .or((request.echo && !request.stream && !request.use_beam_search).then_some(top_logprobs));
     let include_prompt_logprobs = prompt_logprobs.is_some();
     let logprob_token_ids = request.logprob_token_ids.filter(|ids| !ids.is_empty());
     let logprobs = (request.logprobs && logprob_token_ids.is_none()).then_some(top_logprobs);
@@ -236,6 +242,7 @@ pub(super) fn prepare_chat_request(
         request_id,
         response_model,
         n,
+        beam_search,
         options: ResponseOptions {
             include_usage,
             include_continuous_usage,
