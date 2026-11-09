@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 import torch
 
+from tests.v1.spec_decode.utils import fake_speculative_config
 from vllm.config import CUDAGraphMode, ParallelConfig, VllmConfig
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.fused_moe.router.fused_topk_router import fused_topk
@@ -18,6 +19,7 @@ from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers, set_dummy_context
 from vllm.v1.worker.gpu.pcp_manager import PCPManager
 from vllm.v1.worker.gpu.spec_decode.draft_logits import DraftLogitsCache
+from vllm.v1.worker.gpu.spec_decode.dspark.config import DSparkSpeculatorConfig
 
 
 def _copy_to_cpu(value, device=None, dtype=None, out=None):
@@ -87,8 +89,8 @@ def test_validate_config_dcp_for_dspark(draft_uses_mla, dcp_size):
     config.parallel_config.prefill_context_parallel_size = 4
     config.parallel_config.decode_context_parallel_size = dcp_size
     config.model_config.hf_text_config.index_topk = 1
-    config.speculative_config = SimpleNamespace(
-        use_dspark=lambda: True,
+    config.speculative_config = fake_speculative_config(
+        DSparkSpeculatorConfig,
         draft_model_config=SimpleNamespace(use_mla=draft_uses_mla),
     )
     if draft_uses_mla and dcp_size == 2:
