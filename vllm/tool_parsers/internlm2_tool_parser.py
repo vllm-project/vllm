@@ -91,6 +91,10 @@ class Internlm2ToolParser(ToolParser):
         # an incomplete string since OpenAI only ever (as far as I have
         # seen) allows sending the entire tool/ function name at once.
         flags = Allow.ALL if self.current_tool_name_sent else Allow.ALL & ~Allow.STR
+        # An exponent can change a number's already-streamed representation
+        # (-2e-3 is first parsed as -2, then dumped as -0.002), so only
+        # parse numbers once they are complete.
+        flags &= ~Allow.NUM
 
         try:
             parsable_arr = action
