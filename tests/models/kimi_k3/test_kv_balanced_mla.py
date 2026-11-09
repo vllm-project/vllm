@@ -105,7 +105,7 @@ def test_kv_balanced_impl_runs_the_kernel():
 
 
 def _paged(rows_per_request, device):
-    """A paged FP8 cache holding ``rows_per_request`` [n, 576] FP32 rows per request
+    """A paged FP8 cache holding `rows_per_request` [n, 576] FP32 rows per request
     at shuffled pages, and its block table."""
     pages = [-(-len(rows) // PAGE) for rows in rows_per_request]
     cache = torch.zeros(sum(pages) + 2, PAGE, LATENT + ROPE, device=device)
@@ -124,7 +124,7 @@ def _paged(rows_per_request, device):
 
 
 def _shard_len(n, cp):
-    """Tokens of a length-``n`` request on rank ``rank`` of ``cp`` = (world, rank,
+    """Tokens of a length-`n` request on rank `rank` of `cp` = (world, rank,
     interleave): rank r holds the interleave-sized chunks r, r + world, ..."""
     world, rank, interleave = cp
     chunks, tail = divmod(n, interleave * world)
@@ -314,8 +314,8 @@ def test_kv_balanced_plan_replays_in_cuda_graph():
 
 
 def _layer(monkeypatch, lengths, cp, lse):
-    """The KV-balanced decode of an MLA layer over random shards of ``lengths`` on
-    rank ``cp[1]``."""
+    """The KV-balanced decode of an MLA layer over random shards of `lengths` on
+    rank `cp[1]`."""
     from vllm.models.kimi_k3.nvidia.kv_balanced_mla import decode
 
     device = torch.device("cuda")
@@ -496,7 +496,7 @@ def test_specialized_mla_core_policy():
     ],
 )
 def test_specialized_balanced_core_matches_reference(lengths, heads, q, cp):
-    """The specialized decode's balanced MLA core (``BalancedMla``: TP8 / DCP8
+    """The specialized decode's balanced MLA core (`BalancedMla`: TP8 / DCP8
     capacity, PDL launch, caller-owned output) against the FP32 reference, captured
     in a CUDA graph with the plan, as the decode step runs it."""
     from vllm.models.kimi_k3.nvidia.kv_balanced_mla.core import supports
@@ -558,7 +558,7 @@ def test_specialized_balanced_core_matches_reference(lengths, heads, q, cp):
 
 def _stock_split(heads, q, requests, max_seq, device):
     """tokenspeed_mla_decode's split count (shared by every request of the batch) for
-    ``requests`` x ``q`` query rows of ``heads`` heads and ``max_seq``."""
+    `requests` x `q` query rows of `heads` heads and `max_seq`."""
     from tokenspeed_mla import mla_decode as md
 
     fp8 = torch.float8_e4m3fn

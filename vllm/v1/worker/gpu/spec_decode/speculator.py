@@ -149,6 +149,10 @@ class BaseSpeculator(ABC):
 
 
 class DraftModelSpeculator(BaseSpeculator):
+    # Whether every slot mapping the speculator builds goes through its attention
+    # groups' map_to_kernel_slot_mapping, so packed token caches may split.
+    maps_slot_mapping = False
+
     # Draft prefill runs on the target's batch, so it can reuse the target
     # forward's attention metadata. Otherwise the drafter rebuilds it.
     can_reuse_target_attn_metadata: bool = True
@@ -397,6 +401,7 @@ class DraftModelSpeculator(BaseSpeculator):
             self.attn_vllm_config,
             self.device,
             active_layer_names=self.draft_attn_layer_names,
+            maps_slot_mapping=self.maps_slot_mapping,
         )
         self.block_tables = block_tables
         # The target model runner's buffers and attention groups. Draft

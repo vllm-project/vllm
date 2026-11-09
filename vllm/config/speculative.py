@@ -50,6 +50,29 @@ else:
 
 logger = init_logger(__name__)
 
+
+# Positional-encoding keys the draft must share with the target (#58080).
+# ``max_position_embeddings`` is deliberately excluded: shared drafts already
+# get it via ``_maybe_override_draft_max_position_embeddings`` (#63909).
+_ROPE_HF_OVERRIDE_KEYS = frozenset(
+    {
+        "rope_scaling",
+        "rope_parameters",
+        "original_max_position_embeddings",
+        "rope_theta",
+        "partial_rotary_factor",
+    }
+)
+# Nested HF configs that commonly wrap those rope fields (VL / hybrid).
+_NESTED_HF_CONFIG_KEYS = frozenset(
+    {
+        "text_config",
+        "language_config",
+        "llm_config",
+        "thinker_config",
+    }
+)
+
 MTPModelTypes = Literal[
     "deepseek_mtp",
     "dots3_note_mtp",
@@ -569,7 +592,7 @@ class SpeculativeConfig:
     num_speculative_tokens_per_batch_size: list[tuple[int, int, int]] | None = None
     """Batch-size schedule used to dynamically choose speculative-token count.
 
-    Each entry is ``(range_start, range_end, num_speculative_tokens)`` with an
+    Each entry is `(range_start, range_end, num_speculative_tokens)` with an
     inclusive batch-size range.
     """
 
@@ -693,7 +716,7 @@ class SpeculativeConfig:
     xpress_topc: int | None = Field(default=None, ge=0)
     """For XPress drafting, score each Jacobi pass only on the drafter's top-C
     base-logit candidates. 0 disables the narrowing and scores the full
-    vocabulary. Takes precedence over ``xpress_topc`` in the draft
+    vocabulary. Takes precedence over `xpress_topc` in the draft
     checkpoint's config, which is used when this is unset."""
 
     speculator_options: dict[str, Any] | None = None
@@ -702,7 +725,7 @@ class SpeculativeConfig:
 
     fly_window_size: int | None = Field(default=None, ge=1)
     """Number of subsequent native acceptance decisions checked by FLy.
-    If unset, defaults to ``min(6, num_speculative_tokens - 1)``."""
+    If unset, defaults to `min(6, num_speculative_tokens - 1)`."""
 
     fly_entropy_threshold: float = Field(default=0.3, ge=0)
     """Target top-k entropy lower bound for FLy loose acceptance."""
@@ -1305,34 +1328,94 @@ class SpeculativeConfig:
         return target_hf_overrides(hf_config)
 
     @staticmethod
+    def _select_draft_hf_overrides(
+        overrides: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Keep rope-relevant keys, including those nested under VL wrappers."""
+        selected: dict[str, Any] = {}
+        for key, value in overrides.items():
+            if key in _ROPE_HF_OVERRIDE_KEYS:
+                selected[key] = copy.deepcopy(value)
+            elif key in _NESTED_HF_CONFIG_KEYS and isinstance(value, Mapping):
+                nested = SpeculativeConfig._select_draft_hf_overrides(value)
+                if nested:
+                    selected[key] = nested
+        return selected
+
+    @staticmethod
+    def _apply_dict_then_arch_override(
+        target_hf_overrides: dict[str, Any],
+        hf_config: PreTrainedConfig,
+        transformers_mtp_overrides: dict[str, Any] | None = None,
+    ) -> PreTrainedConfig:
+        """Apply dict rope overrides, then the draft arch rewrite.
+
+        Dict patches run first so nested keys (`text_config.rope_parameters`)
+        apply before arch mapping may promote `text_config`. Nested wrappers
+        are skipped on flat draft configs, where setting them would create a
+        bare `text_config` dict that `get_text_config()` picks up instead.
+        """
+        overrides = {
+            key: value
+            for key, value in target_hf_overrides.items()
+            if key not in _NESTED_HF_CONFIG_KEYS
+            or getattr(hf_config, key, None) is not None
+        }
+        ModelConfig._apply_dict_overrides(hf_config, overrides)
+        return SpeculativeConfig.hf_config_override(
+            hf_config, transformers_mtp_overrides
+        )
+
+    @staticmethod
     def compose_draft_hf_overrides(
         target_hf_overrides: HfOverrides | None,
         transformers_mtp_overrides: dict[str, Any] | None = None,
     ) -> Callable[[PreTrainedConfig], PreTrainedConfig]:
-        """Build the ``hf_overrides`` for the draft ``ModelConfig``.
+        """Build the `hf_overrides` for the draft `ModelConfig`.
 
         Callable overrides on the target are config-to-config transforms
-        (e.g. test harnesses shrinking ``num_hidden_layers``) and must also
+        (e.g. test harnesses shrinking `num_hidden_layers`) and must also
         reach the draft config — otherwise a draft belonging to a large
         target is instantiated at full size even when the target is shrunk.
-        Dict overrides are target-specific key patches and are not applied
-        to the draft.
 
-        The composed override must stay picklable: the draft ``ModelConfig``
+        Dict overrides are mostly target-specific key patches, but
+        rope-relevant keys (`rope_parameters` / `rope_scaling` /
+        `rope_theta`, including nested `text_config`) must reach the
+        draft or a YaRN-style target override leaves the draft on native
+        rope (#58080). `max_position_embeddings` stays target-only so the
+        draft max-model-len clamp keeps holding (#63909).
+
+        The composed override must stay picklable: the draft `ModelConfig`
         is sent to spawned engine-core processes, so a local closure would
-        fail with ``Can't get local object`` during pickling. Bind the
-        target via ``functools.partial`` over a module-referenceable static
+        fail with `Can't get local object` during pickling. Bind the
+        target via `functools.partial` over a module-referenceable static
         method instead.
         """
-        if not callable(target_hf_overrides):
+        if callable(target_hf_overrides):
+            return functools.partial(
+                SpeculativeConfig._apply_composed_hf_override,
+                target_hf_overrides,
+                transformers_mtp_overrides=transformers_mtp_overrides,
+            )
+
+        if not isinstance(target_hf_overrides, Mapping) or not target_hf_overrides:
+            return functools.partial(
+                SpeculativeConfig.hf_config_override,
+                transformers_mtp_overrides=transformers_mtp_overrides,
+            )
+
+        draft_overrides = SpeculativeConfig._select_draft_hf_overrides(
+            target_hf_overrides
+        )
+        if not draft_overrides:
             return functools.partial(
                 SpeculativeConfig.hf_config_override,
                 transformers_mtp_overrides=transformers_mtp_overrides,
             )
 
         return functools.partial(
-            SpeculativeConfig._apply_composed_hf_override,
-            target_hf_overrides,
+            SpeculativeConfig._apply_dict_then_arch_override,
+            draft_overrides,
             transformers_mtp_overrides=transformers_mtp_overrides,
         )
 
