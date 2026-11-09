@@ -7,6 +7,7 @@ warm restarts (weights mapped from the daemon via CUDA IPC) must both serve
 identical outputs.
 """
 
+import importlib.util
 import json
 import multiprocessing
 import os
@@ -20,6 +21,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -28,7 +30,7 @@ import psutil
 import pytest
 import regex as re
 
-from tests.utils import create_new_process_for_each_test
+from tests.utils import create_new_process_for_each_test, wait_for_gpu_memory_to_clear
 from vllm import SamplingParams
 from vllm.assets.image import ImageAsset
 from vllm.model_executor.model_loader.weight_cache.artifact_store import (
@@ -142,6 +144,28 @@ class WeightCacheDaemon:
                         f"vllm preload exited before ready: {self.logs}"
                     ) from None
                 time.sleep(2)
+
+    def wait_for_log(self, message: str, timeout_s: float = 60) -> None:
+        deadline = time.monotonic() + timeout_s
+        while message not in self.logs:
+            if self._proc is not None and self._proc.poll() is not None:
+                raise AssertionError(
+                    f"vllm preload exited before logging {message!r}: {self.logs}"
+                )
+            if time.monotonic() > deadline:
+                raise AssertionError(
+                    f"Timed out waiting for {message!r} in daemon logs: {self.logs}"
+                )
+            time.sleep(0.1)
+
+    def wait_for_exit(self, timeout_s: float = 300) -> int:
+        assert self._proc is not None
+        try:
+            return self._proc.wait(timeout=timeout_s)
+        except subprocess.TimeoutExpired:
+            raise AssertionError(
+                f"vllm preload did not exit within {timeout_s}s: {self.logs}"
+            ) from None
 
     def _stop(self) -> None:
         assert self._proc is not None
@@ -1057,6 +1081,7 @@ def test_ipc_rope_matching(
     )
     model_config.hf_text_config.max_position_embeddings = 512
     server = object.__new__(daemon.WeightCacheDaemon)
+    server._state_lock = threading.RLock()
     server.cache_key = WeightCacheKey.from_model_config(
         model_config, 1, 0, cache_config=default_vllm_config.cache_config
     )
@@ -1160,6 +1185,7 @@ def test_ipc_loader_detects_daemon_exit(monkeypatch):
     from vllm.model_executor.model_loader.weight_cache import daemon, ipc_loader
 
     server = object.__new__(daemon.WeightCacheDaemon)
+    server._state_lock = threading.RLock()
     server._watchers = []
     connect, server_threads = _serve_one(server._handle_connection)
     load_config = LoadConfig(
@@ -1650,68 +1676,198 @@ def test_warmup_cache_install_writes_table(tmp_path, monkeypatch):
     assert json.loads(target.read_text()) == table
 
 
+def _wait_for_previous_engines() -> None:
+    import torch
+
+    wait_for_gpu_memory_to_clear(
+        devices=list(range(torch.accelerator.device_count())),
+        threshold_ratio=0.7,
+        stable_duration_s=2.0,
+        poll_interval_s=1.0,
+    )
+
+
+def _visibility_env(value: str) -> dict[str, str]:
+    env = {current_platform.device_control_env_var: value}
+    if current_platform.is_rocm():
+        env["HIP_VISIBLE_DEVICES"] = value
+    return env
+
+
+def _set_visible_devices(monkeypatch, value: str) -> None:
+    for name, env_value in _visibility_env(value).items():
+        monkeypatch.setenv(name, env_value)
+
+
+def _daemon_socket(daemon: WeightCacheDaemon, *, is_draft: bool = False) -> str:
+    paths = sorted(
+        os.path.join(daemon.socket_dir, name)
+        for name in os.listdir(daemon.socket_dir)
+        if name.endswith(".sock") and name.endswith("_draft.sock") == is_draft
+    )
+    assert len(paths) == 1
+    return paths[0]
+
+
+def _exercise_lease_release(
+    source: WeightCacheDaemon,
+    source_address: str | tuple[str, int],
+    control_socket: str,
+    backend,
+    token: str | None = None,
+    shutdown: bool = False,
+) -> dict:
+    """Hold a real copy lease open while the source handles a real release."""
+    import torch
+
+    from vllm.model_executor.model_loader.weight_cache.protocol import (
+        recv_msg,
+        send_msg,
+    )
+    from vllm.model_executor.model_loader.weight_cache.transport import (
+        SeedConfig,
+        SeedTransport,
+    )
+    from vllm.model_executor.model_loader.weight_cache.weight_seed.core import (
+        acknowledge_lease,
+        get_mover,
+    )
+
+    transport = SeedTransport(
+        seed_config=SeedConfig(source=source_address, token=token)
+    )
+    response = transport.request({"kind": "weights", "seed_backend": backend})
+    assert response is not None and response["status"] == "ok", response
+    payload = response["payload"]
+    manifest = payload["manifest"]
+    assert len(manifest["storages"]) > 1
+
+    release_response = None
+    if shutdown:
+        assert source._proc is not None
+        source._proc.terminate()
+    else:
+        release_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        release_sock.settimeout(300)
+        release_sock.connect(control_socket)
+        send_msg(release_sock, {"cmd": "release"})
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        if not shutdown:
+            release_response = executor.submit(recv_msg, release_sock)
+        source.wait_for_log("waiting for 1 weight-cache copy acknowledgement(s)")
+        if release_response is not None:
+            assert not release_response.done(), "source released before the copy ack"
+        else:
+            assert source._proc is not None
+            assert source._proc.poll() is None, "source exited before the copy ack"
+
+        copy_succeeded = False
+        try:
+            mover = get_mover(backend)
+            device = torch.device(
+                current_platform.device_type, torch.accelerator.current_device_index()
+            )
+            tensors = mover.fill(manifest, payload["seed"], device)
+            assert len(tensors) == len(manifest["tensors"])
+            copy_succeeded = True
+        finally:
+            acknowledge_lease(transport, payload, copy_succeeded=copy_succeeded)
+        if release_response is not None:
+            assert release_response.result(timeout=30)["status"] == "ok"
+
+    if shutdown:
+        assert source.wait_for_exit(timeout_s=30) == 128 + signal.SIGTERM
+    else:
+        release_sock.close()
+        source.wait_for_log("released cached weights")
+        response = transport.request({"kind": "weights", "seed_backend": backend})
+        assert response is not None and response["status"] == "error", response
+        assert "Weights were released" in response["message"]
+    return payload
+
+
 @create_new_process_for_each_test()
 @pytest.mark.distributed(num_gpus=2)
-def test_d2d_weight_seeding_same_host(vllm_runner, tmp_path, monkeypatch):
-    """A mirror daemon fills its shard from a same-host source over peer_ipc.
+@pytest.mark.parametrize(
+    "case", [QWEN_CASE, QWEN_MTP_CASE], ids=["qwen3.5", "qwen3.5-mtp"]
+)
+def test_d2d_weight_seeding_same_host(vllm_runner, monkeypatch, case):
+    """Seed target and draft shards over IPC despite different visible ordinals.
 
-    The source is pinned to GPU 0; the mirror must land on the free GPU 1
-    (the launcher infers this from the source's GPU UUIDs) and copy the
-    weights through CUDA IPC, never reading the checkpoint. Daemon sockets
-    are keyed by the daemon's GPU UUID, so engines serving from the mirror
-    must run on the mirror's GPU: this whole test process pins itself to
-    GPU 1. Identical outputs with fallback disabled prove the mirrored
-    weights are real.
+    The source sees only physical GPU 1 as ordinal 0. The mirror and the test
+    process see both GPUs, so UUID resolution must reopen the source on local
+    ordinal 1 while the mirror and engines use physical GPU 0. Graceful source
+    shutdown waits for a second, manually driven mover copy and its Unix-socket
+    ack; identical mirror outputs prove every target and draft storage was copied.
     """
-    if not current_platform.is_cuda_alike():
-        pytest.skip("Weight cache IPC sharing requires CUDA or ROCm")
+    _set_visible_devices(monkeypatch, "0,1")
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "0")
+    _wait_for_previous_engines()
 
-    # Engines (baseline and mirror-serving) run on the mirror's GPU 1; the
-    # mirror daemon itself keeps full visibility (below) because a CUDA IPC
-    # handle names the source's device by its index.
-    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "1")
-
-    baseline_outputs = generate(vllm_runner, QWEN_CASE, None, fallback=True)
+    baseline_outputs = generate(vllm_runner, case, None, fallback=True)
     assert all(text for _, texts in baseline_outputs for text in texts)
 
+    source_env = {**_visibility_env("1"), "VLLM_BATCH_INVARIANT": "0"}
+    mirror_env = {**_visibility_env("0,1"), "VLLM_BATCH_INVARIANT": "0"}
     with WeightCacheDaemon(
-        QWEN_CASE.model,
+        case.model,
         tp_size=1,
-        extra_args=QWEN_CASE.daemon_args,
-        # Pinned to GPU 0, so its IPC handles name index 0, which the mirror
-        # (full visibility) resolves to the same physical GPU.
-        env_extra={"CUDA_VISIBLE_DEVICES": "0"},
+        extra_args=case.daemon_args,
+        env_extra=source_env,
     ) as source:
         source.wait_until_ready()
-        source_socks = sorted(
-            os.path.join(source.socket_dir, name)
-            for name in os.listdir(source.socket_dir)
-            if name.endswith(".sock")
-        )
-        assert len(source_socks) == 1
+        source_sock = _daemon_socket(source)
+        if case is QWEN_MTP_CASE:
+            _daemon_socket(source, is_draft=True)
+
+        if case is QWEN_CASE:
+            with WeightCacheDaemon(
+                case.model,
+                tp_size=1,
+                extra_args=[
+                    *case.daemon_args,
+                    "--dtype",
+                    "float16",
+                    "--weight-cache-seed",
+                    source_sock,
+                ],
+                env_extra=mirror_env,
+            ) as rejected:
+                assert rejected.wait_for_exit() != 0
+                assert "'dtype'" in rejected.logs
+                assert "refusing to mirror a different weight shard" in rejected.logs
+                assert "Mirrored " not in rejected.logs
+
         with WeightCacheDaemon(
-            QWEN_CASE.model,
+            case.model,
             tp_size=1,
-            extra_args=[
-                *QWEN_CASE.daemon_args,
-                "--weight-cache-seed",
-                ",".join(source_socks),
-            ],
-            # Full visibility: the source's IPC handle names its device by
-            # index, and the mirror lands on the free GPU (GPU 1) via the
-            # launcher's placement inference.
-            env_extra={"CUDA_VISIBLE_DEVICES": "0,1"},
+            extra_args=[*case.daemon_args, "--weight-cache-seed", source_sock],
+            env_extra=mirror_env,
         ) as mirror:
             mirror.wait_until_ready()
-            # The mover reported a completed copy, through CUDA IPC.
-            assert " over peer_ipc " in mirror.logs
-            transfer = re.search(r"Mirrored .* in ([\d.]+)s", mirror.logs)
-            assert transfer is not None
-            # The copy of a tiny model takes ~1s; a pathological transport
-            # (or a silent disk fallback) would take far longer.
-            assert float(transfer.group(1)) < 10.0
+            _daemon_socket(mirror)
+            expected_copies = 1
+            if case is QWEN_MTP_CASE:
+                _daemon_socket(mirror, is_draft=True)
+                expected_copies = 2
+            transfers = re.findall(
+                r"Mirrored .* in (\d+) storage\(s\) over peer_ipc in ([\d.]+)s",
+                mirror.logs,
+            )
+            assert len(transfers) == expected_copies, mirror.logs
+            assert all(int(storages) > 1 for storages, _ in transfers)
+            assert all(float(seconds) < 10.0 for _, seconds in transfers)
+
+            payload = _exercise_lease_release(
+                source, source_sock, source_sock, "peer_ipc", shutdown=True
+            )
+            assert payload["seed"]["source_device_index"] == 0
+            source_uuid = payload["seed"]["source_gpu_uuid"]
+            assert source_uuid == current_platform.get_device_uuid(1)
+            assert source_uuid != current_platform.get_device_uuid(0)
+
             mirror_outputs = generate(
-                vllm_runner, QWEN_CASE, mirror.socket_dir, fallback=False
+                vllm_runner, case, mirror.socket_dir, fallback=False
             )
 
     assert mirror_outputs == baseline_outputs
@@ -1719,36 +1875,41 @@ def test_d2d_weight_seeding_same_host(vllm_runner, tmp_path, monkeypatch):
 
 @create_new_process_for_each_test()
 @pytest.mark.distributed(num_gpus=2)
-def test_d2d_weight_seeding_cross_host(vllm_runner, tmp_path, monkeypatch):
-    """A mirror daemon pulls its shard over the remote JSON control plane
-    with the rdma mover (Mooncake TransferEngine).
+@pytest.mark.skipif(
+    importlib.util.find_spec("mooncake") is None
+    or importlib.util.find_spec("mooncake.engine") is None,
+    reason="Cross-host weight seeding requires Mooncake TransferEngine",
+)
+def test_d2d_weight_seeding_cross_host(vllm_runner, monkeypatch):
+    """Pull and release real RDMA leases over the remote JSON control plane.
 
-    Both daemons run on this host, but the exchange goes through the
-    token-authenticated TCP listener exactly as a cross-host seed would. The
-    mirror is pinned to GPU 1; daemon sockets are keyed by GPU UUID, so the
-    engines serving from it run there too (the whole test process pins
-    itself to GPU 1, as in the same-host test). Mooncake's dmabuf path is
-    used for GPU-buffer registration on hosts without a working
-    nvidia-peermem module (export WITH_NVIDIA_PEERMEM=0 in the job
-    environment; the daemon subprocesses inherit it).
+    Both daemons run on this host, but the exchange uses the token-authenticated
+    TCP listener exactly as a cross-host seed would. The source uses GPU 0 and
+    the mirror and engines use GPU 1. A non-empty per-quant backend tuple must
+    survive the JSON fingerprint round trip. Mooncake's dmabuf path supports
+    GPU-buffer registration without a working nvidia-peermem module.
     """
-    if not current_platform.is_cuda_alike():
-        pytest.skip("Weight cache IPC sharing requires CUDA or ROCm")
-    pytest.importorskip("mooncake.engine")
+    _set_visible_devices(monkeypatch, "1")
+    monkeypatch.setenv("WITH_NVIDIA_PEERMEM", "0")
+    _wait_for_previous_engines()
 
-    # Engines (baseline and mirror-serving) run on the mirror's GPU 1.
-    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "1")
-
-    baseline_outputs = generate(vllm_runner, QWEN_CASE, None, fallback=True)
+    kernel_config = {"linear_backend_per_quant": {"fp8": "cutlass"}}
+    engine_case = replace(
+        QWEN_CASE,
+        llm_kwargs={**QWEN_CASE.llm_kwargs, "kernel_config": kernel_config},
+    )
+    baseline_outputs = generate(vllm_runner, engine_case, None, fallback=True)
     assert all(text for _, texts in baseline_outputs for text in texts)
 
     token = "d2d-rdma-test-token"
     base_port = get_open_port()
+    kernel_args = ["--kernel-config", json.dumps(kernel_config)]
     with WeightCacheDaemon(
         QWEN_CASE.model,
         tp_size=1,
         extra_args=[
             *QWEN_CASE.daemon_args,
+            *kernel_args,
             "--seed-listen-host",
             "127.0.0.1",
             "--seed-listen-port",
@@ -1756,30 +1917,42 @@ def test_d2d_weight_seeding_cross_host(vllm_runner, tmp_path, monkeypatch):
             "--seed-token",
             token,
         ],
+        env_extra=_visibility_env("0"),
     ) as source:
         source.wait_until_ready()
+        source_sock = _daemon_socket(source)
         with WeightCacheDaemon(
             QWEN_CASE.model,
             tp_size=1,
             extra_args=[
                 *QWEN_CASE.daemon_args,
+                *kernel_args,
                 "--weight-cache-seed",
                 f"127.0.0.1:{base_port}",
                 "--seed-token",
                 token,
             ],
-            # Cross-host peers cannot share GPUs; the mirror takes GPU 1
-            # (remote seeding needs no placement inference).
-            env_extra={"CUDA_VISIBLE_DEVICES": "1"},
+            env_extra=_visibility_env("1"),
         ) as mirror:
             mirror.wait_until_ready()
-            assert " over rdma " in mirror.logs
-            transfer = re.search(r"Mirrored .* in ([\d.]+)s", mirror.logs)
-            assert transfer is not None
-            # Loopback RDMA is latency-dominated (~1s); bound stalls, not bandwidth.
-            assert float(transfer.group(1)) < 10.0
+            transfers = re.findall(
+                r"Mirrored .* in (\d+) storage\(s\) over rdma in ([\d.]+)s",
+                mirror.logs,
+            )
+            assert len(transfers) == 1, mirror.logs
+            assert int(transfers[0][0]) > 1
+            # Loopback RDMA is latency-dominated; bound stalls, not bandwidth.
+            assert float(transfers[0][1]) < 10.0
+
+            _exercise_lease_release(
+                source,
+                ("127.0.0.1", base_port),
+                source_sock,
+                "rdma",
+                token,
+            )
             mirror_outputs = generate(
-                vllm_runner, QWEN_CASE, mirror.socket_dir, fallback=False
+                vllm_runner, engine_case, mirror.socket_dir, fallback=False
             )
 
     assert mirror_outputs == baseline_outputs

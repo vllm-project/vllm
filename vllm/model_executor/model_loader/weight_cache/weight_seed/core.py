@@ -31,6 +31,39 @@ def parse_seed_backend(value: Any) -> SeedBackend:
     raise ValueError(f"Unknown weight-cache seed backend {value!r}")
 
 
+def acknowledge_lease(
+    transport: Any,
+    payload: Any,
+    copy_succeeded: bool,
+) -> None:
+    """Tell the source whether it may release one resolved weight lease."""
+    if transport is None:
+        return
+    if not isinstance(payload, Mapping):
+        return
+    seed = payload.get("seed")
+    if not isinstance(seed, Mapping):
+        return
+    lease_id = seed.get("lease_id")
+    if not isinstance(lease_id, str) or not lease_id:
+        return
+    response = transport.request(
+        {
+            "kind": "weights",
+            "seed_backend": seed.get("backend"),
+            "lease_id": lease_id,
+            "copy_succeeded": copy_succeeded,
+        }
+    )
+    if response is None:
+        raise RuntimeError(f"Could not acknowledge weight-cache lease {lease_id}")
+    if response.get("status") != "ok":
+        raise RuntimeError(
+            f"Source daemon rejected weight-cache lease {lease_id}: "
+            f"{response.get('message', response)}"
+        )
+
+
 class WeightMover(ABC):
     """One mover that copies weight storages from a source daemon."""
 

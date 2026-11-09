@@ -88,6 +88,7 @@ import gc
 import multiprocessing
 import os
 import select
+import signal
 import socket
 import threading
 from collections.abc import Callable, Iterable
@@ -336,7 +337,9 @@ class WeightCacheDaemon:
             payload = self.d2d.fetch(self.weight_seed, self)
             # The weights kind answers a payload or an error, never a miss.
             assert payload is not None
-            return loader.load_model(vllm_config, model_config, payload=payload)
+            return loader.load_model(
+                vllm_config, model_config, payload=payload, transport=self.d2d
+            )
         if getattr(loader, "loads_pre_processed_weights", False):
             # The loader fetches fully post-processed weights from a peer
             # daemon and builds the model around them itself, handling
@@ -362,6 +365,12 @@ class WeightCacheDaemon:
                 so the launcher can report overall readiness.
 
         """
+
+        def _shutdown(signum, frame):
+            raise SystemExit(128 + signum)
+
+        signal.signal(signal.SIGINT, _shutdown)
+        signal.signal(signal.SIGTERM, _shutdown)
         socket_path = self._socket_path
         ensure_private_socket_dir(
             os.path.dirname(socket_path), strict_perms=self.socket_dir is None
@@ -384,34 +393,83 @@ class WeightCacheDaemon:
         )
         if ready_callback is not None:
             ready_callback()
+
         try:
             while True:
                 conn, _ = server.accept()
-                with conn:
-                    try:
-                        verify_peer_is_owner(conn)
-                        with self._state_lock:
-                            self._handle_connection(conn)
-                    except (ConnectionError, EOFError):
-                        logger.warning("Client disconnected mid-request")
-                    except Exception as e:
-                        # Report the error back instead of just closing the
-                        # socket, but don't let it take the daemon down.
-                        logger.exception(
-                            "Error handling weight cache client; continuing"
-                        )
-                        with contextlib.suppress(OSError):
-                            send_msg(conn, {"status": "error", "message": str(e)})
+                self._serve_connection(conn)
+        finally:
+            release_error = self._shutdown(server, socket_path, lock_fd)
+            if release_error:
+                raise release_error[0]
+
+    def _serve_connection(self, conn: socket.socket) -> None:
+        with conn:
+            try:
+                verify_peer_is_owner(conn)
+                self._handle_connection(conn)
+            except (ConnectionError, EOFError):
+                logger.warning("Client disconnected mid-request")
+            except Exception as e:
+                # Report the error back instead of just closing the
+                # socket, but don't let it take the daemon down.
+                logger.exception("Error handling weight cache client; continuing")
+                with contextlib.suppress(OSError):
+                    send_msg(conn, {"status": "error", "message": str(e)})
+
+    def _release_weights_on_shutdown(self, release_error: list[Exception]) -> None:
+        try:
+            self.weight_seed.release()
+        except Exception as e:
+            release_error.append(e)
+            logger.exception("Error releasing weight cache during shutdown")
+
+    def _drain_shutdown_clients(
+        self, server: socket.socket, release_thread: threading.Thread
+    ) -> None:
+        shutdown_clients = []
+        # Keep accepting local lease acknowledgements until the source
+        # registrations and weights are safe to tear down.
+        while release_thread.is_alive():
+            try:
+                conn, _ = server.accept()
+            except TimeoutError:
+                continue
+            conn.settimeout(5.0)
+            client_thread = threading.Thread(
+                target=self._serve_connection,
+                args=(conn,),
+                name="vllm-weight-cache-shutdown-client",
+                daemon=True,
+            )
+            shutdown_clients.append(client_thread)
+            client_thread.start()
+        release_thread.join()
+        for client_thread in shutdown_clients:
+            client_thread.join(timeout=5.0)
+
+    def _shutdown(
+        self, server: socket.socket, socket_path: str, lock_fd: int
+    ) -> list[Exception]:
+        release_error: list[Exception] = []
+        release_thread = threading.Thread(
+            target=self._release_weights_on_shutdown,
+            args=(release_error,),
+            name="vllm-weight-cache-shutdown-release",
+        )
+        release_thread.start()
+        server.settimeout(0.5)
+        try:
+            self._drain_shutdown_clients(server, release_thread)
         finally:
             server.close()
             for watcher in self._watchers:
                 watcher.close()
             self.d2d.close()
-            with self._state_lock:
-                self.weight_seed.release()
             if os.path.exists(socket_path):
                 os.unlink(socket_path)
             os.close(lock_fd)
+        return release_error
 
     def _acquire_gpu_lock(self, socket_path: str) -> int:
         """Take an exclusive lock guarding this GPU's socket path.
@@ -461,26 +519,35 @@ class WeightCacheDaemon:
         request = recv_msg(conn)
         cmd = request.get("cmd")
         if cmd == "get_state":
-            self._handle_get_state(conn, request)
+            with self._state_lock:
+                self._handle_get_state(conn, request)
         elif cmd == "get_memory":
-            send_msg(
-                conn,
-                {
-                    "status": "ok",
-                    "memory_bytes": exported_weight_bytes(self.model),
-                    # The launcher maps source GPUs to local device indices
-                    # when it places a same-host mirror.
-                    "gpu_uuid": get_current_device_uuid(),
-                },
-            )
+            with self._state_lock:
+                send_msg(
+                    conn,
+                    {
+                        "status": "ok",
+                        "memory_bytes": exported_weight_bytes(self.model),
+                        # The launcher maps source GPUs to local device indices
+                        # when it places a same-host mirror.
+                        "gpu_uuid": get_current_device_uuid(),
+                    },
+                )
         elif cmd == "seed":
             # A same-host peer's D2D request; the pickle plane can carry the
             # peer_ipc seed's CUDA IPC handles, which JSON cannot.
             send_msg(conn, self.d2d.handle_request(request))
         elif cmd == "release":
-            self._handle_release(conn)
+            release_conn = conn.dup()
+            threading.Thread(
+                target=self._handle_release,
+                args=(release_conn,),
+                name="vllm-weight-cache-release",
+                daemon=True,
+            ).start()
         elif cmd == "watch":
-            self._handle_watch(conn)
+            with self._state_lock:
+                self._handle_watch(conn)
         else:
             send_msg(conn, {"status": "error", "message": f"Unknown command {cmd!r}"})
 
@@ -547,16 +614,23 @@ class WeightCacheDaemon:
         self._watchers = alive
 
     def _handle_release(self, conn: socket.socket) -> None:
-        # Unregister from the NIC before the memory goes back to the driver.
-        self.weight_seed.release()
-        self.model = None
-        torch.accelerator.empty_cache()
-        logger.info(
-            "Weight cache %s daemon rank %d released cached weights",
-            self.role,
-            self.global_rank,
-        )
-        send_msg(conn, {"status": "ok"})
+        with conn:
+            try:
+                # Unregister from the NIC before the memory returns to the driver.
+                self.weight_seed.release()
+                with self._state_lock:
+                    self.model = None
+                    torch.accelerator.empty_cache()
+                logger.info(
+                    "Weight cache %s daemon rank %d released cached weights",
+                    self.role,
+                    self.global_rank,
+                )
+                send_msg(conn, {"status": "ok"})
+            except Exception as e:
+                logger.exception("Error releasing weight cache")
+                with contextlib.suppress(OSError):
+                    send_msg(conn, {"status": "error", "message": str(e)})
 
 
 def _run_daemon(

@@ -30,12 +30,15 @@ from vllm.model_executor.model_loader.weight_cache.weight_seed.core import (
     PEER_IPC_BACKEND,
     RDMA_BACKEND,
     SeedBackend,
+    acknowledge_lease,
     get_mover,
     parse_seed_backend,
 )
+from vllm.model_executor.model_loader.weight_cache.weight_seed.seed import (
+    validate_weights_payload_or_reject,
+)
 from vllm.model_executor.model_loader.weight_cache.weight_seed.utils import (
     WeightsSeedPayload,
-    validate_weights_payload,
 )
 from vllm.platforms import current_platform
 from vllm.tracing import instrument
@@ -112,6 +115,7 @@ class PeerModelLoader(BaseModelLoader):
         prefix: str = "",
         *,
         payload: WeightsSeedPayload | None = None,
+        transport: SeedTransport | None = None,
     ) -> nn.Module:
         check_weight_cache_loader_support(
             vllm_config, model_config, is_draft=self.is_draft
@@ -123,6 +127,7 @@ class PeerModelLoader(BaseModelLoader):
             # Standalone load (no injecting daemon): fetch over our own
             # client built from the extra config.
             payload = self._fetch_standalone(expected_key, model_config.model)
+        transport = transport or self.transport
         manifest = payload["manifest"]
         mover = get_mover(payload["seed"]["backend"])
         device = torch.device(
@@ -143,6 +148,7 @@ class PeerModelLoader(BaseModelLoader):
             attrs=dict(payload["attrs"]),
             load_config=self.load_config,
         )
+        acknowledge_lease(transport, payload, copy_succeeded=True)
         logger.info(
             "Loaded %d tensors from a peer daemon over %s",
             len(tensors),
@@ -164,6 +170,7 @@ class PeerModelLoader(BaseModelLoader):
         transport = SeedTransport(
             seed_config=SeedConfig(source=self.peer_source, token=self.peer_token)
         )
+        self.transport = transport
         backend = self.peer_backend
         if backend is None:
             # The address form already decides the mover: a Unix socket is
@@ -182,4 +189,7 @@ class PeerModelLoader(BaseModelLoader):
                 f"Source daemon refused the weights seed request: "
                 f"{response.get('message', response)}"
             )
-        return validate_weights_payload(response.get("payload"), expected_key, model)
+        payload = response.get("payload")
+        return validate_weights_payload_or_reject(
+            transport, payload, expected_key, model
+        )

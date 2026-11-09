@@ -102,9 +102,12 @@ vllm preload --model /path/to/model --tensor-parallel-size 4 \
     --seed-token "$TOKEN"
 ```
 
-Each rank binds and dials `base_port + group offset + its global rank`, so one
-`host:base_port` pair covers a whole replica, including the draft daemon group
-when speculative decoding is configured.
+Each rank binds and dials `base_port + group offset + its global rank`. The
+standalone `--seed-source-host` option names one source host, so it addresses a
+single-node source replica; it cannot by itself reach every node of a
+multi-node source. When mirroring weights from a multi-node source, the
+per-node `--weight-cache-seed` addresses below also provide per-node warmup
+cache sources.
 
 The exchange is keyed by the on-disk cache layout: a request names the cache
 by kind, configuration hash, DP rank and world rank, and the source resolves
@@ -154,10 +157,12 @@ vllm preload --model /path/to/model --tensor-parallel-size 4 \
     --weight-cache-seed /run/vllm-a/vllm_weight_cache_<hash0>.sock,/run/vllm-a/vllm_weight_cache_<hash1>.sock,/run/vllm-a/vllm_weight_cache_<hash2>.sock,/run/vllm-a/vllm_weight_cache_<hash3>.sock
 ```
 
-`--weight-cache-seed` takes one source socket per local GPU, in device order,
-and rank *i* of the mirror is filled from rank *i* of the source — the cache
-fingerprints are compared first, so a mismatched pairing is rejected rather
-than silently mirroring the wrong shard. The socket paths live in the
+`--weight-cache-seed` takes one source target socket per local GPU, in device
+order, and rank *i* of the mirror is filled from rank *i* of the source — the
+cache fingerprints are compared first, so a mismatched pairing is rejected
+rather than silently mirroring the wrong shard. With speculative decoding,
+always pass the target sockets; each draft daemon automatically uses the
+corresponding `*_draft.sock` path instead. The socket paths live in the
 source's `--weight-cache-socket-dir` and are named from each GPU's UUID, as
 described under [Loader configuration](#loader-configuration). The mirror
 fetches each source rank's manifest over that same owner-verified Unix
@@ -184,21 +189,28 @@ source on another host. The source has to expose its daemon-to-daemon
 listener, and both sides need the same shared token:
 
 ```bash
-# source host
+# single-node source host
 vllm preload --model /path/to/model --tensor-parallel-size 8 \
     --seed-listen-host 0.0.0.0 --seed-listen-port 29700 \
     --seed-token "$TOKEN"
 
-# mirror host
+# single-node mirror host
 vllm preload --model /path/to/model --tensor-parallel-size 8 \
     --weight-cache-seed 10.0.0.1:29700 --seed-token "$TOKEN"
 ```
 
-Each rank binds and dials `base_port + group offset + its global rank`, so
-one `host:base_port` pair covers a whole replica; the draft daemon group's
-listeners sit past the target group's block, so the same address seeds the
-draft group too. An IPv6 source is written `[address]:base_port`. The remote
-form pulls over Mooncake RDMA and requires `--seed-token`.
+For a multi-node source, pass one `host:base_port` per source node, comma
+separated in `node_rank` order (for example,
+`10.0.0.1:29700,10.0.0.2:29700`). A single `host:base_port` remains the
+single-node form. The source and mirror must be homogeneous: the same node
+count, parallel layout and rank placement, so every mirror rank has a
+rank-matched source. Each mirror node selects the address at its own
+`node_rank`, then each rank dials `base_port + group offset + its global
+rank`. The draft daemon group's listeners sit past the target group's port
+block on every source node, so the selected address seeds the draft group
+too. An IPv6 source is written `[address]:base_port`. Do not mix remote
+addresses with Unix socket paths in one list. The remote form pulls over
+Mooncake RDMA and requires `--seed-token`.
 
 !!! warning
     The seed listener is a network service. It is JSON only and
@@ -391,7 +403,8 @@ Socket paths are derived from the GPU UUID, so they are stable regardless of
   handle is node-local; `rdma` requires Mooncake on both sides. A mirror
   copies the weights into its own memory, so it does not depend on the
   source staying alive afterwards, and a mirror replica forms its own world
-  group like a normal preload.
+  group like a normal preload. Source release and graceful shutdown wait for
+  outstanding copies to acknowledge before weight memory is freed.
 - **Autotuning cannot overlap the load**: autotuning picks a tactic by timing
   candidates, so running it while a daemon is still copying weights onto the
   same GPU would measure the wrong thing and cache the wrong choice. To pay

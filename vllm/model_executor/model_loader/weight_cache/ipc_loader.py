@@ -237,7 +237,7 @@ class IpcModelLoader(BaseModelLoader):
                 vllm_config.kernel_config,
             )
             state_fetched = True
-            return self._build_model(vllm_config, model_config, prefix, state)
+            model = self._build_model(vllm_config, model_config, prefix, state)
         except (WeightCacheUnavailableError, CacheConfigMismatchError) as e:
             if not self.fallback:
                 raise
@@ -261,6 +261,17 @@ class IpcModelLoader(BaseModelLoader):
             if state_fetched and self.mode == "copy":
                 self._send_release()
             torch.accelerator.empty_cache()
+        else:
+            if self.mode == "copy":
+                self._send_release()
+            else:
+                self._watch_daemon()
+            logger.info(
+                "Mapped %d tensors from the weight cache daemon (%s mode)",
+                len(state.entries),
+                self.mode,
+            )
+            return model
         model = self._fallback_load(vllm_config, model_config, prefix)
         if self.mode == "zero_copy":
             record_external_weight_fallback(self._resolve_socket_path(), self.is_draft)
@@ -284,15 +295,6 @@ class IpcModelLoader(BaseModelLoader):
             aliases=state.aliases,
             attrs=state.attrs,
             load_config=self.load_config,
-        )
-        if self.mode == "copy":
-            self._send_release()
-        else:
-            self._watch_daemon()
-        logger.info(
-            "Mapped %d tensors from the weight cache daemon (%s mode)",
-            len(state.entries),
-            self.mode,
         )
         return model
 
@@ -456,12 +458,19 @@ class IpcModelLoader(BaseModelLoader):
             )
 
     def _send_release(self) -> None:
-        try:
-            with self._connect(self.connect_timeout_s) as conn:
-                send_msg(conn, {"cmd": "release"})
-                recv_msg(conn)
-        except (WeightCacheUnavailableError, ConnectionError, OSError):
-            logger.warning("Failed to ask the weight cache daemon to release")
+        with self._connect(self.connect_timeout_s) as conn:
+            conn.settimeout(self.state_timeout_s)
+            send_msg(conn, {"cmd": "release"})
+            response = recv_msg(conn)
+            if not isinstance(response, dict) or response.get("status") != "ok":
+                message = (
+                    response.get("message", response)
+                    if isinstance(response, dict)
+                    else response
+                )
+                raise WeightCacheUnavailableError(
+                    f"Weight cache daemon refused release: {message}"
+                )
 
     def _watch_daemon(self) -> threading.Thread | None:
         """Watch for the exit of the daemon serving the zero-copy weights.

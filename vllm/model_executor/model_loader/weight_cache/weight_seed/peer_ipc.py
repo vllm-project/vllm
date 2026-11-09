@@ -54,22 +54,28 @@ class PeerIpcMover(WeightMover):
     ) -> None:
         source_index = seed["source_device_index"]
         source_gpu_uuid = seed.get("source_gpu_uuid")
-        # The handle names a device by index, so the mirror must see the same
-        # physical GPU at that index or it would open a handle on the wrong
-        # device.
-        if (
-            source_gpu_uuid is not None
-            and current_platform.get_device_uuid(source_index) != source_gpu_uuid
-        ):
-            raise RuntimeError(
-                f"Source CUDA IPC handle names device index {source_index}, "
-                "which is a different physical GPU here; give the source and "
-                "the mirror matching CUDA_VISIBLE_DEVICES mappings."
+        if source_gpu_uuid is not None:
+            source_index = next(
+                (
+                    index
+                    for index in range(torch.accelerator.device_count())
+                    if current_platform.get_device_uuid(index) == source_gpu_uuid
+                ),
+                None,
             )
+            if source_index is None:
+                raise RuntimeError(
+                    f"Source GPU {source_gpu_uuid} is not visible to this "
+                    "mirror; cannot open its CUDA IPC handle."
+                )
         entries = seed["storages"]
         if len(entries) != len(storages):
             raise RuntimeError("Source daemon omitted manifest storages")
-        for entry, buffer in zip(entries, buffers):
-            source = entry.rebuild(source_index, retarget=False)
-            buffer.copy_(source, non_blocking=True)
-        torch.accelerator.synchronize()
+        sources = []
+        try:
+            for entry, buffer in zip(entries, buffers):
+                source = entry.rebuild(source_index)
+                sources.append(source)
+                buffer.copy_(source, non_blocking=True)
+        finally:
+            torch.accelerator.synchronize()

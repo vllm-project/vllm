@@ -21,7 +21,7 @@ import struct
 import tempfile
 import time
 from dataclasses import asdict, dataclass, fields
-from typing import Any, Literal, NamedTuple, TypeVar, get_origin
+from typing import Any, Literal, NamedTuple, TypeVar, get_args, get_origin
 
 import torch
 from torch.multiprocessing.reductions import rebuild_cuda_tensor, reduce_tensor
@@ -395,6 +395,9 @@ class WeightCacheKey:
         quant_config = getattr(hf_config, "quantization_config", None)
         checkpoint = hash_checkpoint(model_config.model) or model_config.model
         kernel_config = kernel_config or KernelConfig()
+        linear_backend_per_quant = tuple(
+            sorted((kernel_config.linear_backend_per_quant or {}).items())
+        )
         return cls(
             checkpoint=checkpoint,
             model_arch=arch,
@@ -422,9 +425,7 @@ class WeightCacheKey:
             expert_placement_strategy=expert_placement_strategy,
             moe_backend=kernel_config.moe_backend,
             linear_backend=kernel_config.linear_backend,
-            linear_backend_per_quant=tuple(
-                sorted((kernel_config.linear_backend_per_quant or {}).items())
-            ),
+            linear_backend_per_quant=linear_backend_per_quant,
         )
 
     def mismatched_fields(self, other: "WeightCacheKey") -> list[str]:
@@ -491,8 +492,22 @@ def parse_seed_address(address: str) -> str | tuple[str, int]:
     return split_host_port(address)
 
 
+def _json_to_tuple(declared_type: Any, value: Any) -> tuple:
+    if not isinstance(value, (list, tuple)):
+        raise ValueError(f"Expected an array for {declared_type}")
+    args = get_args(declared_type)
+    variadic = len(args) == 2 and args[1] is Ellipsis
+    if not variadic and len(value) != len(args):
+        raise ValueError(f"Expected {len(args)} items, got {len(value)}")
+    item_types = (args[0],) * len(value) if variadic else args
+    return tuple(
+        _json_to_tuple(item_type, item) if get_origin(item_type) is tuple else item
+        for item_type, item in zip(item_types, value)
+    )
+
+
 def json_to_dataclass(cls: type[_DataclassT], payload: Any) -> _DataclassT:
-    """Rebuild a flat dataclass from untrusted JSON, coercing tuples back."""
+    """Rebuild a flat dataclass, restoring tuples nested by JSON."""
     if not isinstance(payload, dict):
         raise ValueError(f"Expected a JSON object for {cls.__name__}")
     declared = {f.name: f for f in fields(cls)}  # type: ignore[arg-type]
@@ -501,14 +516,15 @@ def json_to_dataclass(cls: type[_DataclassT], payload: Any) -> _DataclassT:
         raise ValueError(f"Unknown {cls.__name__} fields: {sorted(unknown)}")
     values = {}
     for name, value in payload.items():
-        if isinstance(value, list) and get_origin(declared[name].type) is tuple:
-            value = tuple(value)
+        declared_type = declared[name].type
+        if get_origin(declared_type) is tuple:
+            value = _json_to_tuple(declared_type, value)
         values[name] = value
     return cls(**values)
 
 
 def dataclass_to_json(instance: Any) -> dict[str, Any]:
-    """Render a flat dataclass for the remote control plane."""
+    """Render a dataclass for the remote control plane."""
     return asdict(instance)
 
 

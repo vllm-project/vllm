@@ -191,6 +191,7 @@ class SeedTransport:
                     source, timeout=_REQUEST_TIMEOUT_S
                 ) as sock:
                     send_json(sock, {**payload, "token": self._seed_config.token})
+                    sock.settimeout(_AUTHENTICATED_TIMEOUT_S)
                     response = recv_json(sock)
         except (OSError, ValueError, WeightCacheUnavailableError) as e:
             logger.warning(

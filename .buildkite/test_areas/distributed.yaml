@@ -872,7 +872,7 @@ steps:
 
 - label: ":nvidia: (B200) Distributed Preload with Mooncake Store"
   key: preload-mooncake-store-2xb200
-  timeout_in_minutes: 20
+  timeout_in_minutes: 30
   working_dir: "/vllm-workspace/tests"
   device: b200-k8s
   num_devices: 2
@@ -885,7 +885,11 @@ steps:
   - vllm/model_executor/model_loader/weight_cache/
   env:
     VLLM_HOST_IP: "127.0.0.1"
+    WITH_NVIDIA_PEERMEM: "0"
   commands:
   # Mooncake ships in the CI image (hash-locked); verify, never install.
   - bash /vllm-workspace/.buildkite/scripts/check-kv-connectors.sh
-  - pytest -v -s model_executor/model_loader/test_weight_cache.py::test_mooncake_warmup_cache_store_e2e
+  - >-
+    pytest -v -s
+    model_executor/model_loader/test_weight_cache.py::test_mooncake_warmup_cache_store_e2e
+    model_executor/model_loader/test_weight_cache.py::test_d2d_weight_seeding_cross_host

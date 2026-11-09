@@ -144,28 +144,46 @@ def split_addresses(value: str | None) -> list[str]:
 
 
 def seed_address(
-    value: str | None, local_rank: int, global_rank: int, port_offset: int = 0
+    value: str | None,
+    local_rank: int,
+    global_rank: int,
+    port_offset: int = 0,
+    *,
+    node_rank: int = 0,
+    is_draft: bool = False,
 ) -> str | tuple[str, int] | None:
-    """Resolve one daemon's seed source address (per-GPU sockets or host:base_port)."""
-    addresses = split_addresses(value)
+    """Resolve one daemon's rank-matched source socket or remote endpoint."""
+    addresses = [parse_seed_address(address) for address in split_addresses(value)]
     if not addresses:
         return None
-    if len(addresses) > 1:
-        if local_rank >= len(addresses):
-            raise ValueError(
-                f"--weight-cache-seed has {len(addresses)} addresses but local "
-                f"GPU {local_rank} needs one; pass one address per local GPU"
-            )
-        address = parse_seed_address(addresses[local_rank])
-        if not isinstance(address, str):
-            raise ValueError(
-                "Per-GPU --weight-cache-seed addresses must be Unix socket "
-                "paths; a remote source takes a single host:base_port"
-            )
+    has_unix = any(isinstance(address, str) for address in addresses)
+    has_remote = any(not isinstance(address, str) for address in addresses)
+    if has_unix and has_remote:
+        raise ValueError(
+            "--weight-cache-seed cannot mix Unix socket paths and "
+            "host:base_port addresses"
+        )
+    if has_unix:
+        if len(addresses) > 1:
+            if local_rank >= len(addresses):
+                raise ValueError(
+                    f"--weight-cache-seed has {len(addresses)} addresses but local "
+                    f"GPU {local_rank} needs one; pass one address per local GPU"
+                )
+            address = addresses[local_rank]
+        else:
+            address = addresses[0]
+        assert isinstance(address, str)
+        if is_draft:
+            return f"{address.removesuffix('.sock')}_draft.sock"
         return address
-    address = parse_seed_address(addresses[0])
-    if isinstance(address, str):
-        return address
+    if node_rank >= len(addresses):
+        raise ValueError(
+            f"--weight-cache-seed has {len(addresses)} remote addresses but node "
+            f"rank {node_rank} needs one; pass one host:base_port per source node"
+        )
+    address = addresses[node_rank]
+    assert not isinstance(address, str)
     host, port = address
     return host, port + port_offset + global_rank
 

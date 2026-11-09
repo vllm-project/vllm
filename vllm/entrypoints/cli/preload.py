@@ -113,7 +113,12 @@ def _start_health_server(
 
 
 def _validate_seed_args(
-    args: argparse.Namespace, *, world_size: int, num_groups: int
+    args: argparse.Namespace,
+    *,
+    world_size: int,
+    num_groups: int,
+    nnodes: int,
+    local_world_size: int,
 ) -> None:
     """Validate the seed CLI options before any daemon spawns."""
     for flag, host, port in (
@@ -130,11 +135,22 @@ def _validate_seed_args(
         parse_seed_address(address)
         for address in split_addresses(args.weight_cache_seed)
     ]
+    unix_seed = any(isinstance(address, str) for address in parsed)
     remote_seed = any(not isinstance(address, str) for address in parsed)
-    if len(parsed) > 1 and remote_seed:
+    if unix_seed and remote_seed:
         raise ValueError(
-            "Per-GPU --weight-cache-seed addresses must be Unix socket "
-            "paths; a remote source takes a single host:base_port"
+            "--weight-cache-seed cannot mix Unix socket paths and "
+            "host:base_port addresses"
+        )
+    if unix_seed and len(parsed) != local_world_size:
+        raise ValueError(
+            "Unix --weight-cache-seed requires one target socket per local "
+            f"GPU; expected {local_world_size}, got {len(parsed)}"
+        )
+    if remote_seed and len(parsed) != nnodes:
+        raise ValueError(
+            "Remote --weight-cache-seed requires one host:base_port per source "
+            f"node in node_rank order; expected {nnodes}, got {len(parsed)}"
         )
     # A token only protects the TCP planes: the listener and a remote source.
     has_remote = (
@@ -244,13 +260,13 @@ class PreloadSubcommand(CLISubcommand):
             help="Fill these daemons from an already-loaded replica instead "
             "of the checkpoint: each daemon still builds its model (config "
             "files required, safetensors not) and pulls the post-processed "
-            "weights from its source rank. Either one source Unix socket "
-            "path per local GPU (comma separated, in device order) for "
-            "same-host CUDA IPC copies, or one host:base_port for cross-host "
-            "copies over Mooncake RDMA, where each rank dials base_port + "
-            "its global rank. The host:base_port form also seeds the "
-            "speculative draft daemon group, whose listeners sit past the "
-            "target group's port block.",
+            "weights from its rank-matched source. For same-host CUDA IPC, "
+            "pass one target Unix socket per local GPU (comma separated, in "
+            "device order); draft daemons use the corresponding *_draft.sock "
+            "paths. For cross-host Mooncake RDMA, pass one host:base_port per "
+            "source node (comma separated, in node_rank order); each rank "
+            "selects its node's address and dials base_port + group offset + "
+            "its global rank.",
         )
         parser.add_argument(
             "--warmup-cache-stores",
@@ -275,6 +291,9 @@ class PreloadSubcommand(CLISubcommand):
         from vllm.model_executor.model_loader.weight_cache.transport import SeedConfig
         from vllm.model_executor.model_loader.weight_cache.utils import (
             format_daemon_role,
+        )
+        from vllm.model_executor.model_loader.weight_cache.weight_seed.seed import (
+            WEIGHT_COPY_LEASE_TIMEOUT_S,
         )
 
         engine_args = EngineArgs.from_cli_args(args)
@@ -371,7 +390,13 @@ class PreloadSubcommand(CLISubcommand):
                 groups, placements
             )
         }
-        _validate_seed_args(args, world_size=world_size, num_groups=len(groups))
+        _validate_seed_args(
+            args,
+            world_size=world_size,
+            num_groups=len(groups),
+            nnodes=nnodes,
+            local_world_size=local_world_size,
+        )
         warmup_cache_stores = [
             name.strip()
             for name in (args.warmup_cache_stores or "").split(",")
@@ -399,14 +424,19 @@ class PreloadSubcommand(CLISubcommand):
 
         procs: list[BaseProcess] = []
         for group_index, (is_draft, config, init_method) in enumerate(groups):
-            # Draft daemons live past the target group's port block so both
-            # roles can be reached over a single seed host:base_port.
+            # Draft daemons live past the target group's port block at every
+            # source node.
             port_offset = group_index * world_size
             for local_rank, dp_rank, pp_rank, tp_rank in placements:
                 global_rank = dp_rank * pp_size * tp_size + pp_rank * tp_size + tp_rank
                 offset = port_offset + global_rank
                 peer_source = seed_address(
-                    args.weight_cache_seed, local_rank, global_rank, port_offset
+                    args.weight_cache_seed,
+                    local_rank,
+                    global_rank,
+                    port_offset,
+                    node_rank=node_rank,
+                    is_draft=is_draft,
                 )
                 source: str | tuple[str, int] | None
                 if peer_source is not None:
@@ -522,7 +552,9 @@ class PreloadSubcommand(CLISubcommand):
             for proc in started:
                 if proc.is_alive():
                     proc.terminate()
-            deadline = time.monotonic() + 10.0
+            # SIGTERM runs the daemon's lease-aware cleanup. Leave enough
+            # time for outstanding copies to acknowledge before escalating.
+            deadline = time.monotonic() + WEIGHT_COPY_LEASE_TIMEOUT_S + 30.0
             for proc in started:
                 proc.join(timeout=max(0.0, deadline - time.monotonic()))
             for proc in started:

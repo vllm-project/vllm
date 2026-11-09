@@ -23,6 +23,10 @@ except ImportError:
 
 logger = init_logger(__name__)
 
+# An unknown transfer state or failed unregistration must not turn into a
+# use-after-free when the failed load drops its mover and destination tensors.
+_retained_copies: list[tuple[object, list[int], list[torch.Tensor]]] = []
+
 
 class RdmaMover(WeightMover):
     """Pull storages through the Mooncake TransferEngine."""
@@ -93,16 +97,37 @@ class RdmaMover(WeightMover):
         engine, _ = self._initialize_engine()
         if engine.batch_register_memory(local_pointers, lengths) != 0:
             raise RuntimeError("Mooncake failed to register mirror storages")
+
         try:
             ret = engine.batch_transfer_sync_read(
                 session, local_pointers, remote_pointers, lengths
             )
-        finally:
-            engine.batch_unregister_memory(local_pointers)
+        except Exception as e:
+            _retained_copies.append((engine, local_pointers, buffers))
+            raise RuntimeError(
+                "Mooncake transfer raised; source and mirror buffers were retained"
+            ) from e
         if ret != 0:
-            raise RuntimeError(f"Mooncake weight-cache read failed with status {ret}")
+            # A failed or timed-out synchronous call may leave tasks in flight.
+            _retained_copies.append((engine, local_pointers, buffers))
+            raise RuntimeError(
+                f"Mooncake read returned {ret}; source and mirror buffers were retained"
+            )
+
+        ret = engine.batch_unregister_memory(local_pointers)
+        if ret != 0:
+            _retained_copies.append((engine, local_pointers, buffers))
+            raise RuntimeError(
+                "Mooncake failed to unregister mirror storages with status "
+                f"{ret}; buffers and registrations were retained"
+            )
 
     def release(self) -> None:
         if self._engine is not None and self._registered:
-            self._engine.batch_unregister_memory(list(self._registered))
+            ret = self._engine.batch_unregister_memory(list(self._registered))
+            if ret != 0:
+                raise RuntimeError(
+                    "Mooncake failed to unregister weight-cache storages with "
+                    f"status {ret}; registrations were retained"
+                )
             self._registered.clear()
