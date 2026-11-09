@@ -192,10 +192,14 @@ def fp6_pack(w):
 
 def projections(layer) -> list:
     """The linears of a decoder layer that get an MXFP6 copy: out_proj or
-    o_proj, and in a GDN layer in_proj_qkvz."""
+    o_proj, in a GDN layer in_proj_qkvz, and in a full-attention layer
+    qkv_proj, which the attention front kernel reads, if it has no bias."""
     if layer.layer_type == "linear_attention":
         return [layer.linear_attn.out_proj, layer.linear_attn.in_proj_qkvz]
-    return [layer.self_attn.o_proj]
+    out = [layer.self_attn.o_proj]
+    if getattr(layer.self_attn.qkv_proj, "bias", None) is None:
+        out.append(layer.self_attn.qkv_proj)
+    return out
 
 
 def fp6_copy(linear) -> tuple[torch.Tensor, torch.Tensor] | None:

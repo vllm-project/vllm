@@ -48,6 +48,7 @@ from vllm.models.qwen3_5.amd.specialized_decode.runtime.layers import (
     attention_core,
     gemma_norm,
 )
+from vllm.models.qwen3_5.amd.specialized_decode.runtime.mxfp6 import fp6_copy
 from vllm.models.qwen3_5.amd.specialized_decode.runtime.routing import step_reason
 
 logger = init_logger(__name__)
@@ -90,13 +91,21 @@ def compile_build(build, key) -> None:
 
 
 def _zeros(key) -> list[int]:
-    from vllm.models.qwen3_5.amd.specialized_decode.mono import blocks
+    from vllm.models.qwen3_5.amd.specialized_decode.mono import afront, blocks
 
     abi = {
         blocks.GdnBuild: blocks.GDN_ABI,
         blocks.LayerBuild: blocks.LAYER_ABI,
+        afront.AFBuild: afront.ABI,
     }[type(key)]
     return abi.zeros()
+
+
+# The KV cache blocks that the attention front build with the cache write is
+# compiled for at build time: vLLM splits this model's blocks into blocks of
+# 64 tokens for the attention kernels. A step with other blocks compiles its
+# build when it first runs.
+AF_PAGE = 64
 
 
 class SpecializedDecode:
@@ -140,7 +149,7 @@ class SpecializedDecode:
         )
 
     def _builds(self) -> list:
-        from vllm.models.qwen3_5.amd.specialized_decode.mono import blocks
+        from vllm.models.qwen3_5.amd.specialized_decode.mono import afront, blocks
 
         la = self.launch
         keys: set[tuple[Callable[[Any], Any], Any]] = set()
@@ -148,6 +157,11 @@ class SpecializedDecode:
             for i, layer in enumerate(self.model.layers):
                 if layer.layer_type == "linear_attention":
                     keys.add((blocks.build_gdn, la.gdn_key(layer, s, i == 0)))
+                elif i > 0 and fp6_copy(layer.self_attn.qkv_proj) is not None:
+                    # Both attention front builds: whether the kernel writes
+                    # the KV cache is only known at a step (``_af_kv``).
+                    for page in (None, AF_PAGE):
+                        keys.add((afront.build, la.af_key(layer, s, page)))
                 keys.add((blocks.build_layer, la.layer_key(layer, s)))
         return sorted(keys, key=lambda bk: repr(bk[1]))
 
@@ -238,6 +252,11 @@ class SpecializedDecode:
             gate = None
             if layer.layer_type == "linear_attention":
                 core, residual = la.gdn(layer, md, h, residual)
+            elif residual is not None and fp6_copy(layer.self_attn.qkv_proj):
+                # The attention front kernel runs the residual add, the norm,
+                # the MXFP6 qkv_proj, the q and k norms and RoPE in one
+                # launch, and also the KV cache write where it can.
+                core, gate, residual = la.attention_front(layer, h, residual, positions)
             else:
                 x, residual = gemma_norm(layer.input_layernorm, h, residual)
                 core, gate = attention_core(layer.self_attn, x, positions)

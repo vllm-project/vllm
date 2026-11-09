@@ -300,6 +300,12 @@ def load_ptr64(table, i):
     return (fx.Int64(uniform(pw[1])) << 32) | fx.Int64(fx.Uint32(uniform(pw[0])))
 
 
+def fp8_pack4(a, b, c, d):
+    """Four f32 (already in range) -> one dword of four E4M3 bytes, RNE."""
+    lo = fx.Int32(rocdl.cvt_pk_fp8_f32(T.i32, a, b, fx.Int32(0), False))
+    return fx.Int32(rocdl.cvt_pk_fp8_f32(T.i32, c, d, lo, True))
+
+
 def bf16_round(a):
     return fx.Float32(fx.Float32(a).to(fx.BFloat16))
 

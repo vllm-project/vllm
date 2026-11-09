@@ -140,7 +140,7 @@ def _gdn_reasons(a, fp6: bool) -> tuple[list[str], dict[str, torch.Tensor]]:
     return out, dense
 
 
-def _attention_reasons(a) -> list[str]:
+def _attention_reasons(a, fp6: bool = False) -> list[str]:
     from vllm.model_executor.models.qwen3_next import Qwen3NextAttention
 
     if not isinstance(a, Qwen3NextAttention):
@@ -154,6 +154,14 @@ def _attention_reasons(a) -> list[str]:
         and getattr(rope, "dtype", None) in (torch.float16, torch.bfloat16)
     ):
         return ["attention without the gated NeoX RoPE front"]
+    if fp6 and getattr(a.qkv_proj, "bias", None) is None:
+        # The attention front kernel reads an MXFP6 copy of qkv_proj, packed
+        # from the bf16 weight.
+        w = a.qkv_proj.weight
+        if w.dtype != torch.bfloat16:
+            return [f"qkv_proj {w.dtype} (MXFP6 projections need them bf16)"]
+        if w.shape != (2 * L.CORE + 2 * L.ATTN_HD, L.HIDDEN):
+            return [f"qkv_proj {tuple(w.shape)}"]
     return []
 
 
@@ -172,7 +180,7 @@ def _layer_reasons(layer, fp6: bool) -> list[str]:
         out += why
         dense |= more
     else:
-        out += _attention_reasons(layer.self_attn)
+        out += _attention_reasons(layer.self_attn, fp6)
     o = o_proj(layer)
     if fp6:
         # The MXFP6 copy is packed from the bf16 weight.

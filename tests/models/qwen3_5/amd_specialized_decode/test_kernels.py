@@ -220,6 +220,134 @@ def test_gdn_block_mxfp6_matches_vllm_ops(s: int, n_real: int, first: bool) -> N
     torch.testing.assert_close(conv_state[0], w["conv_state"][0], atol=0, rtol=0)
 
 
+@pytest.mark.parametrize("s", [1, 2, 5, 8])
+@pytest.mark.parametrize("kv", [False, True])
+@torch.inference_mode()
+def test_attention_front_matches_vllm_ops(s: int, kv: bool) -> None:
+    """The attention front kernel (``afront``, MXFP6 qkv_proj) against the
+    ops the model runs for a full-attention layer on the same MXFP6 values:
+    the Gemma residual add + norm, F.linear, fused_qk_rmsnorm_rope_gate and,
+    with ``kv``, reshape_and_cache_flash into an FP8 cache. Each row has its
+    own position and slot, and a slot of -1 (a graph pad row) is skipped.
+    Only the order of the fp32 sums differs, and whether the compiler fuses
+    the RoPE products into FMAs."""
+    from vllm import _custom_ops as ops
+    from vllm.model_executor.layers.fused_qk_norm_rope import (
+        fused_qk_rmsnorm_rope_gate,
+    )
+    from vllm.model_executor.layers.rotary_embedding import get_rope
+    from vllm.models.qwen3_5.amd.specialized_decode.mono import afront
+    from vllm.models.qwen3_5.amd.specialized_decode.mono import layout as L
+    from vllm.models.qwen3_5.amd.specialized_decode.runtime.mxfp6 import (
+        fp6_pack,
+        round_e2m3,
+    )
+
+    hq, hd, rd = L.CORE // afront.HEAD, afront.HEAD, 64
+    g = torch.Generator(device="cuda").manual_seed(40 + s)
+    inp = _block_input(g, s, False)
+    w = round_e2m3(_randn(g, afront.QKV, L.HIDDEN, scale=0.02))
+    w6, w6s = fp6_pack(w)
+    qn_w, kn_w = _randn(g, hd, scale=0.1), _randn(g, hd, scale=0.1)
+    rope = get_rope(
+        hd,
+        262144,
+        is_neox_style=True,
+        rope_parameters={"rope_theta": 10000000.0, "partial_rotary_factor": rd / hd},
+        dtype=bf,
+    ).to("cuda")
+    positions = torch.randint(0, 200000, (s,), device="cuda", generator=g)
+
+    x, res = _gemma_norm(inp["hidden"], inp["residual"], inp["ln_w"])
+    qkv = F.linear(x, w)
+    q_gate, k, v = qkv.split([2 * L.CORE, hd, hd], dim=-1)
+    q_ref, k_ref, gate_ref = fused_qk_rmsnorm_rope_gate(
+        q_gate.contiguous(),
+        k.contiguous(),
+        qn_w,
+        kn_w,
+        rope.cos_sin_cache,
+        positions,
+        1e-6,
+        hq,
+        1,
+        hd,
+        rd,
+        norm_beta=1.0,
+    )
+
+    out = {
+        n: torch.full((s, m), float("nan"), dtype=bf, device="cuda")
+        for n, m in (("q", L.CORE), ("k", hd), ("v", hd), ("gate", L.CORE))
+    }
+    res_out = torch.full_like(inp["hidden"], float("nan"))
+    cache = {}
+    page, blocks_n = 64, 8
+    if kv:
+        fp8 = torch.float8_e4m3fn
+        kc = torch.zeros(blocks_n, page, 1, hd, dtype=torch.uint8, device="cuda")
+        vc = torch.zeros_like(kc)
+        slots = torch.randperm(blocks_n * page, device="cuda", generator=g)[:s]
+        if s > 1:
+            slots[-1] = -1
+        k_scale = torch.tensor(0.05, device="cuda")
+        v_scale = torch.tensor(0.03, device="cuda")
+        cache = dict(
+            k_cache=kc, v_cache=vc, slot_mapping=slots, k_scale=k_scale, v_scale=v_scale
+        )
+    hl = _health()
+    afront.attn_front(
+        afront.AFBuild(tokens=s, qk=True, kv=kv, rot=rd, page=page),
+        hidden=inp["hidden"],
+        residual=inp["residual"],
+        res_out=res_out,
+        ln_w=inp["ln_w"],
+        w=w6,
+        ws=w6s,
+        q_out=out["q"],
+        k_out=out["k"],
+        v_out=out["v"],
+        gate_out=out["gate"],
+        qn_w=qn_w,
+        kn_w=kn_w,
+        cos_sin=rope.cos_sin_cache,
+        positions=positions,
+        scratch=torch.zeros(afront.SCRATCH_BYTES, dtype=torch.uint8, device="cuda"),
+        epoch=torch.ones(1, dtype=torch.int32, device="cuda"),
+        slot=3,
+        **hl,
+        **cache,
+    )
+    torch.accelerator.synchronize()
+    assert not hl["health"].any()
+    torch.testing.assert_close(res_out, res, atol=0, rtol=0)
+    assert torch.equal(out["gate"], gate_ref)
+    for name, got, want in (
+        ("q", out["q"], q_ref),
+        ("k", out["k"], k_ref),
+        ("v", out["v"], v),
+    ):
+        assert _cos(got, want) > COS_MIN, name
+        torch.testing.assert_close(got, want, atol=3e-2, rtol=2e-2)
+    if kv:
+        kr = torch.zeros_like(kc).view(fp8)
+        vr = torch.zeros_like(vc).view(fp8)
+        live = slots >= 0
+        ops.reshape_and_cache_flash(
+            out["k"][live].view(-1, 1, hd),
+            out["v"][live].view(-1, 1, hd),
+            kr,
+            vr,
+            slots[live],
+            "fp8",
+            k_scale,
+            v_scale,
+        )
+        # On the kernel's own k and v rows the cache bytes must be the same.
+        assert torch.equal(kc, kr.view(torch.uint8))
+        assert torch.equal(vc, vr.view(torch.uint8))
+
+
 def _tp_state(rank: int, tp_size: int, device) -> dict:
     """A rank's launch state as ``Launcher`` builds it: the peer buffer (the
     output rank's flags in its head), the health words, the alarm word."""
