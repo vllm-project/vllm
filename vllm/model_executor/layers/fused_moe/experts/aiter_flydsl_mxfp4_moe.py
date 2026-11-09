@@ -82,8 +82,8 @@ class AiterFlydslMxfp4Experts(AiterExperts):
         quant_config = self.quant_config
         assert moe_config.hidden_dim_unpadded is not None
         assert moe_config.intermediate_size_per_partition_unpadded is not None
-        assert hidden_states.dtype != torch.float4_e2m1fn_x2, (
-            "FlyDSL MXFP4 MoE expects BF16 activations, not MoRI FP4 dispatch"
+        assert hidden_states.dtype == torch.bfloat16, (
+            f"FlyDSL MXFP4 MoE expects BF16 activations, got {hidden_states.dtype}"
         )
         hidden_size = hidden_states.shape[1]
         # SiTU's FlyDSL kernel pads per gate/up half, so pads stay unrounded.

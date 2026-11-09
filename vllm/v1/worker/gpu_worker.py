@@ -474,7 +474,7 @@ class Worker(WorkerBase):
         if not current_platform.is_rocm():
             return False
         kv_config = self.vllm_config.kv_transfer_config
-        if kv_config is None:
+        if kv_config is None or kv_config.kv_connector != "MoRIIOConnector":
             return False
         extra = kv_config.kv_connector_extra_config or {}
         return str(extra.get("backend", "")).lower() == "fabric"

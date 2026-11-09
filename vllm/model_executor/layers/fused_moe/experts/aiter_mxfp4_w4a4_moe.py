@@ -576,16 +576,13 @@ class AiterW4A4Experts(mk.FusedMoEExpertsModular):
             x_q = hidden_states.view(torch.uint8)
             x_scale = a1q_scale.view(torch.uint8)
 
-        from vllm.platforms.rocm import on_gfx1250
-
-        if on_gfx1250():
-            # ep_sort_routing leaves gather slots past the live gates
-            # unwritten; MXFP4 quantizes per row, so gather after quant.
-            gather_src = (gather_idx.to(torch.long) // topk_ids.shape[1]).clamp_(
-                0, x_q.shape[0] - 1
-            )
-            x_q, x_scale = x_q[gather_src], x_scale[gather_src]
-            gather_idx = None
+        # ep_sort_routing leaves gather slots past the live gates
+        # unwritten; MXFP4 quantizes per row, so gather after quant.
+        gather_src = (gather_idx.to(torch.long) // topk_ids.shape[1]).clamp_(
+            0, x_q.shape[0] - 1
+        )
+        x_q, x_scale = x_q[gather_src], x_scale[gather_src]
+        gather_idx = None
 
         out = _aiter_w4a4_gemms(
             x_q,
