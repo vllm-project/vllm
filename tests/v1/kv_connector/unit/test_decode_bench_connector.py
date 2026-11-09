@@ -195,7 +195,7 @@ def test_decode_bench_connector_basic():
     assert len(block_ids) == expected_num_blocks
 
     # Verify KV caches were filled with constant value
-    for layer_name, kv_cache in runner.kv_caches.items():
+    for kv_cache in runner.kv_caches.values():
         for block_id in block_ids:
             # Check that the block was filled
             block_data = kv_cache[block_id]
@@ -385,10 +385,10 @@ def test_decode_bench_connector_selects_external_blocks_per_group():
                 # Full external blocks may already be hashed by allocate_slots().
                 KVCacheBlock(
                     block_id=2,
-                    _block_hash=make_block_hash_with_group_id(
+                    block_hash=make_block_hash_with_group_id(
                         BlockHash(b"external-full-block"), 0
                     ),
-                    _block_hash_num_tokens=48,
+                    block_hash_num_tokens=48,
                 ),
                 KVCacheBlock(block_id=3),
             ],
@@ -714,7 +714,7 @@ def test_decode_bench_connector_large_context():
     assert len(block_ids) == expected_num_blocks
 
     # Verify blocks were filled
-    for layer_name, kv_cache in runner.kv_caches.items():
+    for kv_cache in runner.kv_caches.values():
         for block_id in block_ids:
             block_data = kv_cache[block_id]
             assert torch.allclose(block_data, torch.tensor(0.015))
@@ -834,9 +834,9 @@ def test_decode_bench_connector_concurrent_requests():
     assert len(block_ids_per_group3[0]) == 1  # 1 block
 
     # Verify all blocks are filled in KV cache
-    for req_id, (block_ids_per_group, _) in metadata.reqs_to_fill.items():
+    for block_ids_per_group, _ in metadata.reqs_to_fill.values():
         block_ids = block_ids_per_group[0]
-        for layer_name, kv_cache in runner.kv_caches.items():
+        for kv_cache in runner.kv_caches.values():
             for block_id in block_ids:
                 block_data = kv_cache[block_id]
                 assert torch.allclose(block_data, torch.tensor(0.015))

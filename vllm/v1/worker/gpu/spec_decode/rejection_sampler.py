@@ -10,7 +10,6 @@ from vllm.config import SpeculativeConfig
 from vllm.config.model import PROCESSED_LOGPROBS_MODES
 from vllm.triton_utils import tl, triton
 from vllm.v1.outputs import LogprobsTensors
-from vllm.v1.spec_decode.utils import unconditional_to_conditional_rates
 from vllm.v1.watermarking.gpu_sampler import GPUWatermarkSampler
 from vllm.v1.worker.gpu.input_batch import (
     InputBatch,
@@ -32,6 +31,12 @@ from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
 # its traffic entirely.
 MAX_CHUNK_BYTES = 2**30  # 1GB
 _FP32_BYTES = 4
+
+
+def unconditional_to_conditional_rates(rates: list[float]) -> list[float]:
+    """Convert per-position unconditional rates to per-position conditional
+    rates for the early-terminating rejection loop (c_i = p_i / p_{i-1})."""
+    return [p / q if q > 0.0 else 0.0 for p, q in zip(rates, [1.0, *rates[:-1]])]
 
 
 def get_max_chunk_logits(vocab_size: int) -> int:
@@ -293,6 +298,9 @@ class RejectionSampler:
             fly_window_size=self.fly_window_size,
             fly_entropy_threshold=self.fly_entropy_threshold,
             fly_entropy_top_k=self.fly_entropy_top_k,
+            skip_masked_vocab_blocks=bool(
+                np.any(self.sampler.may_mask_logits[idx_mapping_np])
+            ),
             **self._watermarking_kwargs(
                 draft_sampled, expanded_idx_mapping, expanded_local_pos
             ),

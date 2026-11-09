@@ -37,13 +37,13 @@ JIT_MONITOR_MODELS = [
     JitModel("deepseek-ai/DeepSeek-V3", trust_remote_code=True),
     JitModel("ibm-granite/granite-4.0-tiny-preview"),
     JitModel(
-        "luccafong/deepseek_mtp_main_random",
-        draft="luccafong/deepseek_mtp_draft_random",
+        "vllm-project/deepseek_mtp_main_random",
+        draft="vllm-project/deepseek_mtp_draft_random",
         trust_remote_code=True,
     ),
     JitModel(
-        "eagle618/deepseek-v3-random",
-        draft="eagle618/eagle-deepseek-v3-random",
+        "vllm-project/deepseek-v3-random",
+        draft="vllm-project/eagle-deepseek-v3-random",
         trust_remote_code=True,
     ),
 ]
@@ -93,10 +93,10 @@ def _run_shape_battery(llm: LLM) -> None:
 
 @create_new_process_for_each_test("spawn")
 def can_run_without_jit(spec: JitModel):
-    """Boot ``spec`` with the monitor armed and run the shape battery.
+    """Boot `spec` with the monitor armed and run the shape battery.
 
     A subprocess per model is required: the monitor's hooks are process-global
-    and, once armed in ``error`` mode, stay armed. It must be spawned rather
+    and, once armed in `error` mode, stay armed. It must be spawned rather
     than forked, since forking a pytest process that already initialized CUDA
     poisons the child.
     """
