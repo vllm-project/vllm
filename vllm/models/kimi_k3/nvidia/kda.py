@@ -62,6 +62,7 @@ from vllm.models.kimi_k3.nvidia.ops.recoverssm import (
 from vllm.models.kimi_k3.nvidia.recoverssm.kernels import (
     CuteRecoverSSMVerify,
     can_use_cute_recoverssm,
+    can_use_deferred_recoverssm,
     compile_state_commit,
 )
 from vllm.platforms import current_platform
@@ -730,8 +731,9 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             self.use_recoverssm,
         )
         # RecoverSSM: this layer's verify records of a speculative step, and its
-        # verify and commit kernels: "cute" (SM10x, the short convolution fused
-        # into the verify) where they can run, else "triton".
+        # verify and commit kernels: "cute" (SM10x, BF16 state, the short
+        # convolution fused into the verify) where they can run, else "triton"
+        # (whose commit the deferred verify also uses).
         self.recoverssm_backend: Literal["cute", "triton"] | None = None
         self.recoverssm_records: KDARecoverSSMRecords | None = None
         self.recoverssm_verify: CuteRecoverSSMVerify | None = None
@@ -764,61 +766,56 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                 max_num_seqs,
                 records_bytes / max_num_seqs / 2**20,
             )
-            supported, reason = can_use_cute_recoverssm(
-                head_dim=self.head_dim,
-                window=self.spec_query_len,
-                conv_width=self.conv_size,
-                has_conv_bias=self.conv1d.bias is not None,
-                activation_dtype=vllm_config.model_config.dtype,
-                conv_state_dtype=conv_state_dtype,
-                state_dtype=recurrent_state_dtype,
-                conv_weight_dtype=self.conv1d.weight.dtype,
-                lower_bound=self.gate_lower_bound,
-            )
-            # kda_decode_backend "triton" (as set, not as resolved) keeps the
-            # Triton verify and commit.
-            forced_triton = decode_backend == "triton"
-            if forced_triton:
-                supported, reason = False, "kda_decode_backend is triton"
-            self.recoverssm_backend = "cute" if supported else "triton"
-            bf16, f32 = torch.bfloat16, torch.float32
-            dtypes = (
-                vllm_config.model_config.dtype,
-                conv_state_dtype,
-                recurrent_state_dtype,
-                self.f_b_proj.weight.dtype,
-            )
-            if (
-                not forced_triton
-                and self.recoverssm_backend == "triton"
-                and current_platform.is_cuda()
-                and current_platform.is_device_capability_family(100)
-                and (self.head_dim, self.conv_size) == (128, 4)
-                and self.conv1d.bias is None
-                and self.gate_lower_bound is not None
-                and dtypes == (bf16, bf16, f32, bf16)
-            ):
-                from vllm.model_executor.kernels.kda import deferred_recoverssm
+            # By SSM state dtype where the kernels can run: FP32 takes the
+            # deferred verify, BF16 the CuTe verify and commit. Otherwise, or
+            # with kda_decode_backend "triton" (as set: auto resolves to triton
+            # under speculation), the Triton verify and commit.
+            self.recoverssm_backend = "triton"
+            if decode_backend == "triton":
+                reason: str | None = "kda_decode_backend is triton"
+            elif recurrent_state_dtype == torch.float32:
+                supported, reason = can_use_deferred_recoverssm(
+                    num_heads=self.local_num_heads,
+                    window=self.spec_query_len,
+                    head_dim=self.head_dim,
+                    conv_width=self.conv_size,
+                    has_conv_bias=self.conv1d.bias is not None,
+                    activation_dtype=vllm_config.model_config.dtype,
+                    conv_state_dtype=conv_state_dtype,
+                    f_b_dtype=self.f_b_proj.weight.dtype,
+                    lower_bound=self.gate_lower_bound,
+                    conv_dim_first=is_conv_state_dim_first(),
+                    max_requests=max_num_seqs,
+                    device=self.conv1d.weight.device,
+                )
+                if supported:
+                    from vllm.model_executor.kernels.kda import deferred_recoverssm
 
-                if deferred_recoverssm.tensor_cores_fit(
-                    self.local_num_heads,
-                    self.spec_query_len,
-                    is_conv_state_dim_first(),
-                    bf16.itemsize,
-                    max_num_seqs,
-                    self.conv1d.weight.device,
-                ):
-                    logger.info_once("Using the deferred KDA RecoverSSM verify.")
                     self.deferred_verify = deferred_recoverssm.KdaDeferredVerify(
                         self.local_num_heads, self.spec_query_len, max_num_seqs
                     )
-            if self.recoverssm_backend == "triton":
-                if self.deferred_verify is None:
-                    logger.info_once(
-                        "Using the Triton KDA RecoverSSM verify and commit: the "
-                        "CuTe kernels cannot run (%s).",
-                        reason,
-                    )
+            else:
+                supported, reason = can_use_cute_recoverssm(
+                    head_dim=self.head_dim,
+                    window=self.spec_query_len,
+                    conv_width=self.conv_size,
+                    has_conv_bias=self.conv1d.bias is not None,
+                    activation_dtype=vllm_config.model_config.dtype,
+                    conv_state_dtype=conv_state_dtype,
+                    state_dtype=recurrent_state_dtype,
+                    conv_weight_dtype=self.conv1d.weight.dtype,
+                    lower_bound=self.gate_lower_bound,
+                )
+                if supported:
+                    self.recoverssm_backend = "cute"
+            if self.deferred_verify is not None:
+                logger.info_once("Using the deferred KDA RecoverSSM verify.")
+            elif self.recoverssm_backend == "triton":
+                logger.info_once(
+                    "Using the Triton KDA RecoverSSM verify and commit: the CuTe "
+                    "kernels cannot run (%s).",
+                    reason,
+                )
             else:
                 logger.info_once("Using the CuTe KDA RecoverSSM verify and commit.")
                 self.recoverssm_verify = CuteRecoverSSMVerify(
