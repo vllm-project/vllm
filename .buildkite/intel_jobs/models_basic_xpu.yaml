@@ -317,6 +317,35 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
     pytest --continue-on-collection-errors -v -s models/qwen4_exp/test_hc_ops.py || true'
+- label: ":nvidia: (B200) Qwen3.5"
+  key: qwen3-5-unit-tests-b200
+  device: intel_gpu
+  timeout_in_minutes: 20
+  automatic_shard: true
+  num_devices: 2
+  optional: true
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: production
+    gpu: 2+
+    mem: 24+
+  source_file_dependencies:
+  - vllm/model_executor/layers/linear.py
+  - vllm/model_executor/layers/mamba/gdn
+  - vllm/model_executor/layers/utils.py
+  - vllm/models/qwen3_5/
+  - vllm/model_executor/models/qwen3_next.py
+  - tests/models/qwen3_5/
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests &&
+    pytest --continue-on-collection-errors -v -s models/qwen3_5/ || true'
 - label: ':nvidia: (4xB200) DeepSeek-V4.1 Specialized Decode'
   key: dsv41-nvidia-specialized-decode-4xb200
   device: intel_gpu
