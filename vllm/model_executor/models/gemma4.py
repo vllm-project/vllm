@@ -21,6 +21,7 @@
 from collections.abc import Iterable
 from dataclasses import replace
 from itertools import islice
+from typing import ClassVar
 
 import torch
 from torch import nn
@@ -1009,6 +1010,8 @@ class Gemma4CrossDecoderLayers(nn.Module):
     enable_if=lambda vllm_config: not vllm_config.cache_config.kv_sharing_fast_prefill
 )
 class Gemma4Model(nn.Module, EagleModelMixin, SupportsQuant):
+    supports_aux_hidden_states_over_pp = True
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = _get_text_config(vllm_config.model_config.hf_config)
@@ -1378,13 +1381,13 @@ class Gemma4Model(nn.Module, EagleModelMixin, SupportsQuant):
         residual = None
         aux_hidden_states = self._maybe_add_hidden_state([], 0, hidden_states, residual)
         for layer_idx, layer in enumerate(
-            islice(self.layers, self.start_layer, self.end_layer)
+            islice(self.layers, self.start_layer, self.end_layer),
+            start=self.start_layer,
         ):
             # Extract the per-layer embedding for this specific layer
             if per_layer_inputs is not None:
-                actual_layer_idx = self.start_layer + layer_idx
                 layer_per_input = per_layer_inputs[
-                    :, actual_layer_idx, :
+                    :, layer_idx, :
                 ]  # (num_tokens, per_layer_dim)
             else:
                 layer_per_input = None
@@ -1401,6 +1404,7 @@ class Gemma4Model(nn.Module, EagleModelMixin, SupportsQuant):
         if not get_pp_group().is_last_rank:
             tensors: dict[str, torch.Tensor] = {
                 "hidden_states": hidden_states,
+                **self.pack_local_aux_hidden_states(aux_hidden_states),
             }
             if per_layer_inputs is not None:
                 tensors["per_layer_inputs"] = per_layer_inputs
@@ -1424,6 +1428,8 @@ class Gemma4Model(nn.Module, EagleModelMixin, SupportsQuant):
 class Gemma4ForCausalLM(
     nn.Module, SupportsLoRA, SupportsPP, MixtureOfExperts, SupportsEagle3
 ):
+    is_3d_moe_weight: ClassVar[bool] = True
+
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_substr={
             # Multimodal weights are handled by the multimodal wrapper.
@@ -1456,6 +1462,10 @@ class Gemma4ForCausalLM(
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         config = _get_text_config(vllm_config.model_config.hf_config)
+        # Nested Gemma4 checkpoints only declare architectures at the top level;
+        # the 3D MoE LoRA wrapper reads them from this config.
+        if not config.architectures:
+            config.architectures = ["Gemma4ForCausalLM"]
         quant_config = vllm_config.quant_config
 
         super().__init__()
