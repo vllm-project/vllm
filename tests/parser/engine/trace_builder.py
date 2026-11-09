@@ -195,7 +195,7 @@ def _tokenize(
 ) -> list[tuple[int, str]]:
     """Build token list from segments.
 
-    Each segment is ``(text, is_special)``.  Special segments use vocab
+    Each segment is `(text, is_special)`.  Special segments use vocab
     IDs; content segments are word-split with sequential IDs.
     """
     tokens: list[tuple[int, str]] = []
@@ -467,7 +467,7 @@ def _build_step3p5(scenario: Scenario, validate: bool = True) -> Sample:
 
 
 def _build_zaya(scenario: Scenario, validate: bool = True) -> Sample:
-    """ZAYA1: the Qwen3 grammar with ``<zyphra_tool_call>`` tags."""
+    """ZAYA1: the Qwen3 grammar with `<zyphra_tool_call>` tags."""
     sample = _build_qwen3(scenario, name="zaya", validate=False)
     rename = {"<tool_call>": ZayaParser.TOOL_START, "</tool_call>": ZayaParser.TOOL_END}
     sample = replace(
@@ -507,9 +507,11 @@ def _minimax_m2_tool_segments(tool_calls: list[ToolCallSpec]) -> list[tuple[str,
         for key, value in tc.arguments.items():
             segs.append(
                 (
-                    f'<parameter name="{key}">'
-                    f"{_minimax_m2_arg_value(value)}"
-                    "</parameter>",
+                    (
+                        f'<parameter name="{key}">'
+                        f"{_minimax_m2_arg_value(value)}"
+                        "</parameter>"
+                    ),
                     False,
                 )
             )
@@ -562,7 +564,7 @@ _MINIMAX_M3_NS = "]<]minimax[>["
 
 
 def _minimax_m3_value(value: Any) -> str:
-    """Render a value the way the M3 chat template's ``to_xml`` does."""
+    """Render a value the way the M3 chat template's `to_xml` does."""
     ns = _MINIMAX_M3_NS
     if isinstance(value, dict):
         return "".join(
@@ -725,7 +727,7 @@ def _build_nemotron_v3(scenario: Scenario, validate: bool = True) -> Sample:
 
 def _build_granite_thinking(scenario: Scenario, validate: bool = True) -> Sample:
     """Granite 4.2: the Nemotron V3 grammar plus leading-newline stripping on
-    content after ``</think>``."""
+    content after `</think>`."""
     sample = _build_qwen3(
         scenario,
         name="granite_thinking_parser",
@@ -1145,7 +1147,7 @@ def _inkling_block(
     body: str,
 ) -> None:
     """Append one Inkling content block; blocks after the first start with
-    the ``<|message_model|>`` role token (the first block continues the
+    the `<|message_model|>` role token (the first block continues the
     generation prompt directly)."""
     if segs:
         segs.append(("<|message_model|>", True))

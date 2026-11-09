@@ -334,8 +334,8 @@ def test_aiter_sparse_mla_stays_off_with_kv_connector(monkeypatch, model) -> Non
 def _swa_forward_mqa_case(
     monkeypatch, rocm, builder_cls, layer_cls, num_heads: int, compress_ratio: int
 ):
-    """An SWA-only layer of ``layer_cls`` over a mixed decode + prefill batch,
-    with a real fp8_ds_mla cache and ``builder_cls`` metadata. Returns the
+    """An SWA-only layer of `layer_cls` over a mixed decode + prefill batch,
+    with a real fp8_ds_mla cache and `builder_cls` metadata. Returns the
     layer, the builder, q, positions and the torch reference: attention with
     the sink over each token's window, before the inverse RoPE."""
     from tests.v1.attention.utils import create_vllm_config

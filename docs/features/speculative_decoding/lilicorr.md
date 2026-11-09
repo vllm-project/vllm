@@ -2,7 +2,7 @@
 
 LiLiCorr uses a DFlash backbone to produce per-position candidates, then scores
 candidate combinations with a learned correlator. It requires a compatible
-trained checkpoint and Model Runner V2, which is selected automatically.
+trained checkpoint.
 Both plain and grouped-convolution checkpoints are supported.
 
 ## Usage

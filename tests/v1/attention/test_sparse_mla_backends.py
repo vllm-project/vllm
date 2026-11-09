@@ -71,6 +71,7 @@ from vllm.model_executor.layers.attention.sparse_mla_attention import (
     SharedTopkIndicesBuffer,
     SparseMLACommonMetadata,
 )
+from vllm.utils.flashinfer import has_flashinfer_prims_ts_sparse_mla
 from vllm.utils.math_utils import cdiv
 from vllm.utils.platform_utils import num_compute_units
 from vllm.utils.torch_utils import current_stream
@@ -152,6 +153,9 @@ def _skip_cuda_specific_sparse_mla_tests_on_rocm(request):
         "test_sparse_backend_prefill_correctness",
         "test_rocm_fused_v32_dense_prefill_matches_mqa",
         "test_rocm_long_bf16_prefill_avoids_nonpersistent_aiter",
+        "test_split_indexer_prefill_chunks",
+        "test_split_indexer_prefill_chunks_single_request_overflow",
+        "test_sparse_mla_common_impl_resolves_buffer_lazily",
     }
     if (
         current_platform.is_rocm()
@@ -676,6 +680,11 @@ def test_sparse_backend_decode_correctness(
         device_capability = current_platform.get_device_capability()
         if device_capability is None or device_capability.major != 10:
             pytest.skip("The NVFP4 DS-MLA kv-cache dtype requires SM 10.x")
+        if (
+            backend_cls == FlashInferMLASparseTRTLLMBackend
+            and not has_flashinfer_prims_ts_sparse_mla()
+        ):
+            pytest.skip("nvfp4_ds_mla on FlashInfer needs its prims_ts kernel")
 
     if not backend_cls.supports_block_size(block_size):
         pytest.skip(
@@ -1041,8 +1050,11 @@ def test_sparse_backend_decode_correctness(
     assert torch.isfinite(backend_output).all()
 
     # FP8 quantization introduces some error, but should be within reasonable bounds
-    # BF16 (auto) should be very accurate, FP8 allows slightly more tolerance
-    if kv_cache_dtype.startswith("fp8"):
+    # BF16 (auto) should be very accurate, FP8 allows slightly more tolerance.
+    # nvfp4_ds_mla with an E4M3 query (FlashInfer prims_ts) has the FP8 error.
+    if kv_cache_dtype.startswith("fp8") or (
+        kv_cache_dtype == "nvfp4_ds_mla" and impl.supports_quant_query_input
+    ):
         torch.testing.assert_close(
             backend_output, sdpa_reference, rtol=0.065, atol=0.05
         )
@@ -1210,7 +1222,7 @@ def test_triton_convert_req_index_to_global_index_decode_only(
 def test_index_group_convert_during_piecewise_capture():
     """In piecewise cudagraph mode the indexer is captured while the convert
     runs in the following eager break. The convert's side stream must not
-    wait on ``logical_topk_ready`` there: an event recorded inside a captured
+    wait on `logical_topk_ready` there: an event recorded inside a captured
     segment is graph-local, and an eager wait on it raises
     cudaErrorInvalidValue."""
     device = torch.device(DEVICE_TYPE)
@@ -1575,7 +1587,7 @@ class _StubHiSparseCacheHandle(HiSparseCacheHandle):
     """A bare cache handle carrying only the attributes a test provides.
 
     Unit tests that drive one code path hand the index group a stand-in cache
-    handle; this keeps the stand-in a real ``HiSparseCacheHandle``.
+    handle; this keeps the stand-in a real `HiSparseCacheHandle`.
     """
 
     def __init__(self, **attrs: Any) -> None:
@@ -2704,7 +2716,7 @@ def test_hisparse_speculative_rows_count_a_shared_load_once():
 def test_hisparse_resolver_reads_current_request_ids():
     """The resolver must see this call's request ids, not the previous call's.
 
-    It runs on the copy stream after waiting only on ``logical_topk_ready``,
+    It runs on the copy stream after waiting only on `logical_topk_ready`,
     which the indexer records before attention writes the ids. An MTP drafter
     alternates four rows per request with one, so stale ids resolve rows
     against other requests' KV. Stalling the compute stream exposes the race.
@@ -4280,11 +4292,9 @@ def test_hisparse_keeps_speculative_rows_as_decodes():
         attention_config=SimpleNamespace(hisparse_config=object()),
         speculative_config=SimpleNamespace(
             num_speculative_tokens=3,
-            parallel_drafting=False,
             max_num_new_slots_for_drafting=0,
         ),
         parallel_config=SimpleNamespace(decode_context_parallel_size=1),
-        use_v2_model_runner=True,
     )
 
     builder._init_reorder_batch_threshold(256, supports_spec_as_decode=True)
@@ -4674,11 +4684,9 @@ def test_hisparse_flashmla_reorders_full_speculative_window_as_decode():
         attention_config=SimpleNamespace(hisparse_config=object()),
         speculative_config=SimpleNamespace(
             num_speculative_tokens=3,
-            parallel_drafting=False,
             max_num_new_slots_for_drafting=0,
         ),
         parallel_config=SimpleNamespace(decode_context_parallel_size=1),
-        use_v2_model_runner=True,
     )
 
     builder._init_reorder_batch_threshold(
@@ -4739,7 +4747,7 @@ def _fa4_impl(topk_indices_buffer, **fields):
 
 
 def _fa4_inputs(counts, *, num_heads=16, topk=128, num_blocks=4, device=DEVICE_TYPE):
-    """Decode inputs whose token ``i`` has ``counts[i]`` valid rows, -1 padded."""
+    """Decode inputs whose token `i` has `counts[i]` valid rows, -1 padded."""
     device = torch.device(device)
     block_size, kv_lora_rank, rope_dim = 64, 512, 64
     num_tokens = len(counts)
@@ -4923,7 +4931,7 @@ def test_fa4_sparse_hook_routes_lanes(monkeypatch, is_decode):
     ],
 )
 def test_fa4_sparse_gate(monkeypatch, config, expected):
-    """``validate_configuration`` on a fixed SM100: one row per gate reason."""
+    """`validate_configuration` on a fixed SM100: one row per gate reason."""
     has_flashinfer = config.get("flashinfer", True)
     monkeypatch.setattr("vllm.utils.flashinfer.has_flashinfer", lambda: has_flashinfer)
     monkeypatch.setattr(
@@ -5146,7 +5154,7 @@ def _build_sparse_dcp_vllm_config(
     cache_dtype: str = "fp8_ds_mla",
 ):
     """Minimal sparse-MLA VllmConfig for the FlashMLASparse DCP builder
-    guards. TP is simulated by mocking ``get_num_attention_heads`` to return the
+    guards. TP is simulated by mocking `get_num_attention_heads` to return the
     per-rank head count, as the decode-correctness test above does.
     """
     kv_lora_rank = 512
