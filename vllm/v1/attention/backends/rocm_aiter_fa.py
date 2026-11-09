@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention layer with AiterFlashAttention."""
 
+import functools
+import os
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from typing import ClassVar
@@ -220,6 +222,145 @@ def _grouped_fp8_varlen_attention(
             if lse is not None:
                 lse[heads, q_seq] = call_lse
     return (result, lse) if return_lse else result
+
+
+# The gfx950 head-size-256 FP8 paged-varlen ASM prefill kernel from
+# aiter#4971 only accepts 64-token pages.
+_PAGED_PREFIX_PAGE_SIZE = 64
+# AITER loads that kernel from this code object. AITER builds without it
+# still have mha_batch_prefill_func, but they run the slower CK kernel.
+_PAGED_PREFIX_CODE_OBJECT = os.path.join(
+    "gfx950", "fmha_v3_fwd", "fwd_hd256_fp8_paged_varlen.co"
+)
+
+
+@functools.cache
+def _get_mha_batch_prefill_func():
+    """Return AITER's mha_batch_prefill_func if AITER has the paged ASM kernel.
+
+    Return None when AITER lacks the function or the aiter#4971 code object,
+    so the caller keeps the gather loop instead of falling back to CK.
+    """
+    try:
+        from aiter.jit.core import AITER_ASM_DIR
+        from aiter.ops.mha import mha_batch_prefill_func
+    except ImportError:
+        return None
+    if not os.path.isfile(os.path.join(AITER_ASM_DIR, _PAGED_PREFIX_CODE_OBJECT)):
+        return None
+    return mha_batch_prefill_func
+
+
+def paged_prefix_blocks_per_page(
+    direct_fp8_context_gather: bool,
+    num_kv_heads: int,
+    kernel_block_size: int,
+    attention_block_size: int,
+    has_paged_kernel: bool,
+) -> tuple[int | None, list[str]]:
+    """Return the kernel blocks per 64-token prefix page, or why there are none.
+
+    The paged prefix path replaces the loop that gathers 32k context tokens
+    per iteration with one call to the aiter#4971 paged ASM kernel. It turns
+    itself on when the layers, the KV cache and the AITER build can all take
+    it, so it needs no flag. The first value is None when the path cannot
+    run, and the list then says why, so the builder keeps the gather loop
+    and can log the reasons.
+    """
+    reasons = []
+    # The paged kernel needs FP8 Q from the prequantized QKV path, and it
+    # reads the cache pages as FP8 with the static K and V scales. The direct
+    # FP8 context gather that it replaces has the same preconditions, an FP8
+    # KV cache in the unshuffled layout included.
+    if not direct_fp8_context_gather:
+        reasons.append(
+            "the layers do not take prequantized FP8 QKV, or the KV cache is "
+            "not FP8, or the KV cache uses the shuffled layout"
+        )
+    if num_kv_heads != 1:
+        reasons.append(
+            f"there are {num_kv_heads} KV heads per rank and the 64-token "
+            "page view needs 1"
+        )
+    if not has_paged_kernel:
+        reasons.append(
+            "AITER has no mha_batch_prefill_func with the aiter#4971 gfx950 "
+            "FP8 paged-varlen kernel"
+        )
+    if _PAGED_PREFIX_PAGE_SIZE % kernel_block_size != 0:
+        reasons.append(f"the kernel block size {kernel_block_size} does not divide 64")
+    # A 64-token page must not cross an attention block boundary. Otherwise
+    # its kernel blocks can sit anywhere in memory.
+    if attention_block_size % _PAGED_PREFIX_PAGE_SIZE != 0:
+        reasons.append(
+            f"the attention block size {attention_block_size} is not a "
+            "multiple of 64, start vLLM with --block-size 64 to turn it on"
+        )
+    if reasons:
+        return None, reasons
+    return _PAGED_PREFIX_PAGE_SIZE // kernel_block_size, []
+
+
+def paged_prefix_page_ids(
+    block_table_row: torch.Tensor, num_pages: int, blocks_per_page: int
+) -> torch.Tensor:
+    """Return the 64-token page ids that hold the first num_pages pages.
+
+    One 64-token page is blocks_per_page adjacent kernel blocks. vLLM numbers
+    kernel blocks as manager_block * ratio + j, and the builder only takes
+    this path when the ratio is a multiple of blocks_per_page. The first
+    kernel block of every page therefore has an id divisible by
+    blocks_per_page, and that id divided by blocks_per_page is the page id.
+    The slice bounds come from the CPU, so this does not wait for the GPU.
+    """
+    first_blocks = block_table_row[: num_pages * blocks_per_page : blocks_per_page]
+    return (first_blocks // blocks_per_page).to(torch.int32)
+
+
+def paged_prefix_cache_views(
+    key_cache: torch.Tensor, value_cache: torch.Tensor, blocks_per_page: int
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """View the split K and V caches as [pages, 64, 1, head_size].
+
+    key_cache and value_cache come from _split_kv_cache, so they have shape
+    [kernel_blocks, block_size, heads, head_size]. K and V share the content
+    dimension, so the token stride is twice the head size. When
+    blocks_per_page is 2, two adjacent 32-token kernel blocks must be back to
+    back in memory to form one 64-token page. In the LBHNC layout with more
+    than one KV head, the tokens of one head are not contiguous across a
+    block boundary. This path therefore only accepts one KV head per rank,
+    which is the Qwen3.8 case at TP8.
+
+    In the cache, the size-1 head dimension has the stride of a whole block.
+    AITER rejects a 4D K or V tensor whose token stride is smaller than
+    num_heads * head_stride, so the views use the head size as the head
+    stride. With one head, the head stride never changes an address.
+    """
+    num_blocks, block_size, num_heads, head_size = key_cache.shape
+    block_stride, token_stride, _, element_stride = key_cache.stride()
+    if (
+        num_heads != 1
+        or element_stride != 1
+        or value_cache.stride() != key_cache.stride()
+        or (blocks_per_page > 1 and block_stride != block_size * token_stride)
+    ):
+        raise ValueError(
+            "The paged prefix path needs one KV head per rank and kernel "
+            "blocks that are back to back in memory. Got K shape "
+            f"{tuple(key_cache.shape)}, K strides {key_cache.stride()}, "
+            f"V strides {value_cache.stride()}."
+        )
+    size = (
+        num_blocks // blocks_per_page,
+        block_size * blocks_per_page,
+        num_heads,
+        head_size,
+    )
+    stride = (block_stride * blocks_per_page, token_stride, head_size, 1)
+    return (
+        key_cache.as_strided(size, stride, key_cache.storage_offset()),
+        value_cache.as_strided(size, stride, value_cache.storage_offset()),
+    )
 
 
 if current_platform.is_rocm():
@@ -549,6 +690,43 @@ class AiterChunkContextMetadata:
 
 
 @dataclass
+class AiterPagedPrefixMetadata:
+    """Prefix page table for one extend request, in 64-token pages.
+
+    This is the SGLang 1D page table that the aiter#4971 ASM kernel reads.
+    """
+
+    kv_indptr: torch.Tensor  # int32 [2] on the GPU: [0, num_pages]
+    kv_page_indices: torch.Tensor  # int32 [num_pages] on the GPU
+    kv_last_page_lens: torch.Tensor  # int32 [1] on the GPU
+    max_seqlen_k: int  # prefix length in tokens
+    blocks_per_page: int  # kernel blocks per 64-token page
+
+
+def build_paged_prefix_metadata(
+    block_table_row: torch.Tensor,
+    context_len: int,
+    blocks_per_page: int,
+    device: torch.device,
+) -> AiterPagedPrefixMetadata:
+    """Build the 64-token page table for one extend request's prefix."""
+    num_pages = cdiv(context_len, _PAGED_PREFIX_PAGE_SIZE)
+    last_page_len = context_len - (num_pages - 1) * _PAGED_PREFIX_PAGE_SIZE
+    page_ids = paged_prefix_page_ids(block_table_row, num_pages, blocks_per_page)
+    # One host-to-device copy carries the page count and the last page length.
+    lengths = async_tensor_h2d(
+        [0, num_pages, last_page_len], device=device, dtype=torch.int32
+    )
+    return AiterPagedPrefixMetadata(
+        kv_indptr=lengths[:2],
+        kv_page_indices=page_ids,
+        kv_last_page_lens=lengths[2:],
+        max_seqlen_k=context_len,
+        blocks_per_page=blocks_per_page,
+    )
+
+
+@dataclass
 class AiterFlashAttentionChunkPrefillMetadata:
     max_query_len: int
     max_seq_len: int
@@ -556,6 +734,9 @@ class AiterFlashAttentionChunkPrefillMetadata:
     chunk_context_metadata: AiterChunkContextMetadata
     # Host copy of query_start_loc, for per-sequence FP8 attention calls.
     query_start_loc_host: list[int] | None = None
+    # Set when extend_forward reads the whole prefix with one paged call
+    # instead of the gather loop. The chunk tables above stay the fallback.
+    paged_prefix: AiterPagedPrefixMetadata | None = None
 
 
 @dataclass
@@ -703,6 +884,34 @@ class AiterFlashAttentionMetadataBuilder(
                 "Using an FP8 context workspace for ROCm AITER chunked prefill "
                 "(KV cache dtype: %s)",
                 kv_cache_spec.dtype,
+            )
+        self.paged_prefix_blocks_per_page, reasons = paged_prefix_blocks_per_page(
+            direct_fp8_context_gather=self.direct_fp8_context_gather,
+            num_kv_heads=self.num_heads_kv,
+            kernel_block_size=self.block_size,
+            attention_block_size=self.cache_config.block_size,
+            # Look for the AITER kernel only when the other preconditions can
+            # hold, so other models never import the AITER batch prefill op.
+            has_paged_kernel=(
+                self.direct_fp8_context_gather
+                and _get_mha_batch_prefill_func() is not None
+            ),
+        )
+        if self.paged_prefix_blocks_per_page is not None:
+            logger.info_once(
+                "Paged prefix attention is on. One 64-token page is %d kernel "
+                "blocks of %d tokens. The attention block is %d tokens.",
+                self.paged_prefix_blocks_per_page,
+                self.block_size,
+                self.cache_config.block_size,
+            )
+        elif self.direct_fp8_context_gather:
+            # Only explain why the path is off for layers that use the FP8
+            # context gather, because no other model could take it.
+            logger.info_once(
+                "Paged prefix attention is off because %s. Chunked prefill "
+                "gathers the context in 32k-token chunks.",
+                ", and ".join(reasons),
             )
         workspace_dtype = (
             current_platform.fp8_dtype()
@@ -963,6 +1172,26 @@ class AiterFlashAttentionMetadataBuilder(
                     swa_workspace=swa_workspace,
                 )
 
+            # The paged kernel takes one Q scale per call, and the
+            # prequantized Q scale is per sequence. Use the paged path only
+            # when the batch has one extend request. A long prompt that is
+            # prefilled in chunks fills the whole token budget, so it is the
+            # only extend request in those steps. The chunk tables below are
+            # still built, so extend_forward can fall back to the gather loop
+            # if a layer gets no prequantized QKV.
+            paged_prefix = None
+            if (
+                self.paged_prefix_blocks_per_page is not None
+                and num_extends == 1
+                and swa_metadata is None
+            ):
+                paged_prefix = build_paged_prefix_metadata(
+                    common_attn_metadata.block_table_tensor[num_decodes],
+                    int(computed_kv_lens[0]),
+                    self.paged_prefix_blocks_per_page,
+                    self.device,
+                )
+
             # allocate the equal amount of workspace for
             # each chunk prefill request
             max_context_chunk = _CP_TOKENS_PER_ITER_ROCM // num_extends
@@ -1028,6 +1257,7 @@ class AiterFlashAttentionMetadataBuilder(
                 query_start_loc_host=_rebased_starts(
                     query_start_loc_cpu[num_decodes : num_decodes + num_extends + 1]
                 ),
+                paged_prefix=paged_prefix,
             )
 
         attn_metadata = AiterFlashAttentionMetadata(
@@ -1300,6 +1530,65 @@ class AiterFlashAttentionImpl(AttentionImpl):
             sink_ptr=self.sinks,
         )
 
+    def _extend_paged_prefix(
+        self,
+        paged_prefix: AiterPagedPrefixMetadata,
+        prequantized_qkv: PrequantizedQKV,
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
+        output: torch.Tensor,
+        cu_seqlens_q: torch.Tensor,
+        max_seqlen_q: int,
+        k_scale: torch.Tensor,
+        v_scale: torch.Tensor,
+        new_token_output: torch.Tensor,
+        new_token_lse: torch.Tensor,
+    ) -> None:
+        """Attend the new tokens to the whole cached prefix in one call.
+
+        This replaces the loop that gathers 32k context tokens at a time,
+        runs grouped FP8 FMHA on each chunk, and merges every chunk output.
+        The aiter#4971 kernel reads the FP8 cache directly as 64-token pages.
+        Its result is merged once with the causal result on the new tokens.
+        """
+        mha_batch_prefill_func = _get_mha_batch_prefill_func()
+        assert mha_batch_prefill_func is not None
+        key_pages, value_pages = paged_prefix_cache_views(
+            key_cache, value_cache, paged_prefix.blocks_per_page
+        )
+        # The ASM kernel only runs in per-tensor scale mode, so it needs
+        # exactly one Q, K and V scale. The prequantized Q scale has one
+        # value per sequence and KV head. The builder only builds a paged
+        # prefix for one extend request with one KV head, so the extend
+        # slice holds one value. This is the same single-sequence,
+        # single-head case in which _grouped_fp8_varlen_attention makes one
+        # call. Do not pass block_table here. It selects the 2D vLLM page
+        # table, and AITER then falls back to CK without an error.
+        prefix_output, prefix_lse = mha_batch_prefill_func(
+            prequantized_qkv.query,
+            key_pages,
+            value_pages,
+            cu_seqlens_q,
+            paged_prefix.kv_indptr,
+            paged_prefix.kv_page_indices,
+            max_seqlen_q,
+            paged_prefix.max_seqlen_k,
+            softmax_scale=self.scale,
+            causal=False,
+            return_lse=True,
+            kv_last_page_lens=paged_prefix.kv_last_page_lens,
+            q_descale=prequantized_qkv.query_descale.reshape(1),
+            k_descale=k_scale.reshape(1),
+            v_descale=v_scale.reshape(1),
+        )
+        merge_attn_states(
+            output=output,
+            prefix_output=prefix_output,
+            prefix_lse=prefix_lse,
+            suffix_output=new_token_output,
+            suffix_lse=new_token_lse,
+        )
+
     def extend_forward(
         self,
         attn_metadata: AiterFlashAttentionMetadata,
@@ -1385,6 +1674,22 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 sink_ptr=self.sinks,
             )
         assert attn_metadata.extend_metadata is not None
+        paged_prefix = attn_metadata.extend_metadata.paged_prefix
+        if paged_prefix is not None and prequantized_qkv is not None:
+            self._extend_paged_prefix(
+                paged_prefix=paged_prefix,
+                prequantized_qkv=prequantized_qkv,
+                key_cache=key_cache,
+                value_cache=value_cache,
+                output=output,
+                cu_seqlens_q=cu_seqlens_q,
+                max_seqlen_q=max_seqlen_q,
+                k_scale=k_scale,
+                v_scale=v_scale,
+                new_token_output=out,
+                new_token_lse=lse,
+            )
+            return
         chunk_context_metadata = attn_metadata.extend_metadata.chunk_context_metadata
         num_chunks = chunk_context_metadata.num_chunks
         workspace = chunk_context_metadata.workspace
