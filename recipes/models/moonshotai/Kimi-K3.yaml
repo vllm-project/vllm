@@ -2163,11 +2163,11 @@ guide: |
   EOF
   ```
 
-  The ranks mount nothing (`global_segment_size` 0) and read and write the store processes' memory over RDMA, so keep those processes running as long as the prefill worker. If the wait does not end within a few minutes, check that the store processes are still running and look in `/tmp/mooncake-store-rdma*.log` for `Failed to`, `Check failed` or `numa_exec:`. `HIP_VISIBLE_DEVICES=-1` keeps them off the GPUs, and `MC_MAX_MR_SIZE` registers each 209 GiB as four regions. `device_name_per_gpu` (vllm-project/vllm#65076) lists the NIC next to each physical GPU, in GPU order. Set your site's NIC names here and in the loop, and `PREFILL_IP`, `MC_GID_INDEX` and `MC_IB_TC` in the loop as in the worker script.
+  The ranks mount nothing (`global_segment_size` 0) and read and write the store processes' memory over RDMA, so keep those processes running as long as the prefill worker. If the wait does not end within a few minutes, check that the store processes are still running and look in `/tmp/mooncake-store-rdma*.log` for `Failed to`, `Check failed` or `numa_exec:`. `HIP_VISIBLE_DEVICES=-1` keeps them off the GPUs, and `MC_MAX_MR_SIZE` registers each 209 GiB as four regions. `device_name_per_gpu` (vllm-project/vllm#65076) lists the NIC next to each physical GPU, in GPU order. Set your site's NIC names here and in the loop, `PREFILL_IP` to the prefill worker's `VLLM_HOST_IP`, and `MC_GID_INDEX` and `MC_IB_TC` to the worker script's values.
 
   ### Start the router
 
-  Mooncake mode takes static endpoints. The number after the prefill URL is its bootstrap port. `ROUTER_IMAGE` is as in the MoRIIO example.
+  Mooncake mode takes static endpoints; the number after the prefill URL is its bootstrap port. Set `PREFILL_IP` and `DECODE_IP` to your nodes' addresses. `ROUTER_IMAGE` is as in the MoRIIO example.
 
   ```bash
   PREFILL_IP=192.0.2.11 DECODE_IP=192.0.2.12
@@ -2274,7 +2274,7 @@ guide: |
     --kv-transfer-config "$KV_CONFIG"
   ```
 
-  `MooncakeConnector` advertises `VLLM_HOST_IP`, or the default-route address when it is unset, so set it to the address the router uses. On the prefill worker, after starting the Mooncake Store (Store configurations only):
+  `MooncakeConnector` advertises `VLLM_HOST_IP`, or the default-route address when it is unset, so set it to the node's `PREFILL_IP` or `DECODE_IP` from the router command, and replace the example interface and HCAs with your site's values. On the prefill worker, after starting the Mooncake Store (Store configurations only):
 
   ```bash
   export SOCKET_IFNAME=eth0 RDMA_DEVICES=rdma0,rdma1,rdma2,rdma3,rdma4,rdma5,rdma6,rdma7 VLLM_HOST_IP=192.0.2.11
