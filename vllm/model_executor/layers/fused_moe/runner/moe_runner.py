@@ -38,6 +38,9 @@ from vllm.model_executor.layers.fused_moe.router.base_router import (
 from vllm.model_executor.layers.fused_moe.router.fused_moe_router import (
     FusedMoERouter,
 )
+from vllm.model_executor.layers.fused_moe.router.routing_simulator_router import (
+    RoutingSimulatorRouter,
+)
 from vllm.model_executor.layers.fused_moe.router.zero_expert_router import (
     ZeroExpertRouter,
 )
@@ -628,6 +631,8 @@ class MoERunner(MoERunnerInterface):
             self.routed_experts.quant_method.is_monolithic
             and self.moe_config.dp_size > 1
             and self.routed_experts.supports_precomputed_routing
+            # The simulator feeds the kernel random logits to route itself.
+            and not isinstance(self.router, RoutingSimulatorRouter)
             and (is_padding := get_moe_padding_mask(hidden_states.shape[0])) is not None
         ):
             # The kernel's own routing would send padding rows to experts; use

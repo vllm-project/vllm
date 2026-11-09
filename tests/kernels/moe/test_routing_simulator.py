@@ -290,9 +290,13 @@ def test_simulation_preserves_model_routing_method(
     assert router.kernel_routing_method_type == expected_method
 
 
-def test_runner_prepares_monolithic_logits(monkeypatch, device):
-    """The shared runner must replace planted logits before calling any backend."""
+@pytest.mark.parametrize("dp_size", [1, 4])
+def test_runner_prepares_monolithic_logits(monkeypatch, device, dp_size):
+    """The shared runner must replace planted logits before calling any backend,
+    also under DP, where kernels that take precomputed routing are otherwise
+    given vLLM's top-k."""
     import vllm.envs as envs
+    from vllm.model_executor.layers.fused_moe.runner import moe_runner
     from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner
 
     monkeypatch.setitem(
@@ -302,14 +306,21 @@ def test_runner_prepares_monolithic_logits(monkeypatch, device):
     )
     router = RoutingSimulatorRouter(2, 32, RoutingMethodType.RenormalizeNaive)
     experts = SimpleNamespace(
-        quant_method=SimpleNamespace(is_monolithic=True), forward_monolithic=Mock()
+        quant_method=SimpleNamespace(is_monolithic=True),
+        supports_precomputed_routing=True,
+        forward_monolithic=Mock(),
     )
     runner = SimpleNamespace(
         router=router,
         routed_experts=experts,
         _maybe_apply_shared_experts=Mock(),
         _shared_experts=None,
-        moe_config=SimpleNamespace(dp_size=1),
+        moe_config=SimpleNamespace(dp_size=dp_size),
+    )
+    monkeypatch.setattr(
+        moe_runner,
+        "get_moe_padding_mask",
+        lambda n: torch.zeros(n, dtype=torch.bool, device=device),
     )
     logits = torch.full((16, 32), 7.0, device=device)
     hidden = torch.zeros((16, 64), device=device)
