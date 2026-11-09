@@ -267,6 +267,10 @@ class SchedulerOutput:
     # Set only in async scheduling case.
     has_structured_output_requests: bool = False
 
+    # Whether any scheduled request uses structured output with speculative
+    # decoding. Set only in async scheduling case.
+    has_structured_output_spec_decode: bool = False
+
     # Whether the scheduled requests have all the output tokens they
     # need to perform grammar bitmask computation.
     pending_structured_output_tokens: bool = False
