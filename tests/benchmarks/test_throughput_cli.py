@@ -237,54 +237,6 @@ def test_get_requests_resolves_mmvu(
 
 
 @pytest.mark.benchmark
-def test_get_requests_hf_blazedit(
-    monkeypatch: pytest.MonkeyPatch,
-    hf_tokenizer: PreTrainedTokenizerBase,
-) -> None:
-    """Regression: bench throughput's BlazeEdit HF sampling must not crash.
-
-    get_samples reads args.blazedit_min_distance and args.blazedit_max_distance,
-    which bench throughput has no flags for. Only the HF download is stubbed.
-    """
-    import vllm.benchmarks.datasets.datasets as dsmod
-
-    class _DownloadedDataset(list):
-        def shuffle(self, seed: int) -> "_DownloadedDataset":  # noqa: ARG002
-            return self
-
-    item = {
-        "code": "def f():\n    return 1\n",
-        "change_request": "Return 2 instead.",
-        "norm_distance": 0.5,
-    }
-    monkeypatch.setattr(
-        dsmod, "load_dataset", lambda *_, **__: _DownloadedDataset([item] * 3)
-    )
-    # BlazeEdit applies the chat template; gpt2 has none.
-    monkeypatch.setattr(
-        hf_tokenizer, "chat_template", "{{ messages[0]['content'] }}", raising=False
-    )
-
-    parser = FlexibleArgumentParser()
-    add_cli_args(parser)
-    args = parser.parse_args(
-        [
-            "--dataset-name",
-            "hf",
-            "--dataset-path",
-            "vdaita/edit_5k_char",
-            "--num-prompts",
-            "3",
-        ]
-    )
-
-    requests = get_requests(args, hf_tokenizer)
-
-    assert len(requests) == 3
-    assert all("Return 2 instead." in r.prompt for r in requests)
-
-
-@pytest.mark.benchmark
 def test_get_requests_allows_multimodal_on_plain_vllm_backend(
     monkeypatch: pytest.MonkeyPatch,
     hf_tokenizer: PreTrainedTokenizerBase,

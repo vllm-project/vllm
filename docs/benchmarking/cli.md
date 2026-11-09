@@ -680,8 +680,6 @@ vllm bench serve \
     --blazedit-max-distance 0.99
 ```
 
-`vllm bench throughput` takes the same `--dataset-path` but has no `--blazedit-*` flags, so it uses the full distance range (0.0 to 1.0).
-
 `openslr/librispeech_asr`, `facebook/voxpopuli`, `LIUM/tedlium`, `edinburghcstr/ami`, `speechcolab/gigaspeech`, `kensho/spgispeech`, `ArtificialAnalysis/Earnings22-Cleaned-AA`, `D4nt3/esb-datasets-earnings22-validation-tiny-filtered`
 
 ```bash
