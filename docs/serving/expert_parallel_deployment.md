@@ -407,7 +407,8 @@ every surviving engine first, then wait for all of them to report `unhealthy`
 before sending `retry` or `scale_down`. Pause stops request admission and enters
 recovery after the current step and outstanding device work finish. It does not
 interrupt an in-flight collective; a failed peer may still require the backend's
-fault timeout. Pausing an already unhealthy engine is a no-op.
+fault timeout. Pause is accepted only while the engine is healthy; other states
+are rejected without changing the last recovery result.
 
 Scale-down restores service with fewer ranks; it does not restart the removed
 engines or restore their capacity. The previous `/fault_tolerance/apply`

@@ -412,13 +412,19 @@ def test_pause_retry_recovers_healthy_engines(busy):
                 engines, match_key="status", match_values={"unhealthy"}
             )
             assert all(paused), paused
+            if not busy:
+                # A rejected pause must preserve a failed recovery's details.
+                for server in engines:
+                    _apply_ft(server, "scale_down", params={"removed_dp_ranks": []})
+                failed = _wait_for_engines(
+                    engines, match_key="ft_state", match_values={"failed"}
+                )
+                assert all(s and s.get("ft_error") for s in failed), failed
+                paused = failed
             pause_id = str(uuid.uuid4())
-            for server in engines:
+            for server, status in zip(engines, paused):
                 _apply_ft(server, "pause", request_id=pause_id)
-            duplicates = _wait_for_engines(
-                engines, match_key="last_ft_request_id", match_values={pause_id}
-            )
-            assert all(s and s.get("ft_state") != "recovering" for s in duplicates)
+                assert _get_ft_status(server)["engines"] == [status]
             round_id = str(uuid.uuid4())
             for server in engines:
                 _apply_ft(server, "retry", request_id=round_id)

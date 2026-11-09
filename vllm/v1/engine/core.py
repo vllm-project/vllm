@@ -105,6 +105,7 @@ from vllm.v1.fault_tolerance.engine_core_sentinel import (
     FaultTolerancePause,
     fault_tolerant_wrapper,
 )
+from vllm.v1.fault_tolerance.utils import FaultToleranceRequest
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     get_kv_cache_spec_kind,
@@ -1898,7 +1899,8 @@ class EngineCoreProc(EngineCore):
         elif request_type == EngineCoreRequestType.FT_PAUSE:
             if self.ft_sentinel.pause_requested:
                 self.model_executor.collective_rpc(
-                    "synchronize_device",
+                    "handle_ft_command",
+                    args=(FaultToleranceRequest(instruction="pause", params={}),),
                     timeout=self.ft_sentinel.engine_recovery_timeout_sec,
                 )
                 raise FaultTolerancePause

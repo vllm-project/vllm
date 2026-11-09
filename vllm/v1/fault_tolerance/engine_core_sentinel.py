@@ -68,6 +68,7 @@ class EngineCoreSentinel:
 
         self.resumed = threading.Event()
         self.resumed.set()
+        self._status_lock = threading.Lock()
         self.status_type = EngineStatusType.HEALTHY
         self.fault_info: str | None = None
         self.pause_requested = False
@@ -157,33 +158,35 @@ class EngineCoreSentinel:
         aborted = engine.scheduler.finish_requests(None, RequestStatus.FINISHED_ABORTED)
         engine._send_abort_outputs(aborted)
 
-        if (
-            hasattr(engine.model_executor, "is_failed")
-            and engine.model_executor.is_failed
-        ):
-            self.status_type = EngineStatusType.DEAD
-            mask = None
-        else:
-            # Push DIAGNOSING first. Commands are rejected until UNHEALTHY.
-            self.status_type = EngineStatusType.DIAGNOSING
-            self._push_status()
+        with self._status_lock:
+            if self.status_type == EngineStatusType.DEAD or getattr(
+                engine.model_executor, "is_failed", False
+            ):
+                self.status_type = EngineStatusType.DEAD
+            else:
+                # Push DIAGNOSING first. Commands are rejected until UNHEALTHY.
+                self.status_type = EngineStatusType.DIAGNOSING
+                self._push_status()
+        mask = None
+        if self.status_type == EngineStatusType.DIAGNOSING:
             try:
                 mask = self._query_mask()
             except Exception:
                 logger.warning("[FT] Failed to query mask for status push")
                 mask = None
+        with self._status_lock:
             # on_executor_failed may have set DEAD concurrently.
             if self.status_type == EngineStatusType.DIAGNOSING:
                 self.status_type = EngineStatusType.UNHEALTHY
-        self.pause_requested = False
-        self.fault_info = f"{type(exc).__name__}"
-        logger.info(
-            "[FT] Engine %d status -> %s:",
-            self.engine_index,
-            self.status_type.name,
-            exc_info=exc,
-        )
-        self._push_status(mask)
+            self.pause_requested = False
+            self.fault_info = f"{type(exc).__name__}"
+            logger.info(
+                "[FT] Engine %d status -> %s:",
+                self.engine_index,
+                self.status_type.name,
+                exc_info=exc,
+            )
+            self._push_status(mask)
 
     def _drain_batch_queue(self) -> None:
         """Drain the batch queue, feeding leftover kv_connector_outputs to
@@ -237,9 +240,10 @@ class EngineCoreSentinel:
 
     def on_executor_failed(self):
         """Notify the client about the executor failure"""
-        if self.status_type != EngineStatusType.HEALTHY:
-            self.status_type = EngineStatusType.DEAD
-            self._push_status()
+        with self._status_lock:
+            if self.status_type != EngineStatusType.HEALTHY:
+                self.status_type = EngineStatusType.DEAD
+                self._push_status()
 
     def _push_status(self, mask: list[int] | None = None):
         """Push current health to the client so it can refresh its cache."""
@@ -271,7 +275,13 @@ class EngineCoreSentinel:
         return [max(bits) for bits in zip(*(r["mask"] for r in results))]
 
     def pause(self, ft_request: FaultToleranceRequest) -> FaultToleranceResult:
-        if self.status_type == EngineStatusType.HEALTHY:
+        with self._status_lock:
+            if self.status_type != EngineStatusType.HEALTHY:
+                return FaultToleranceResult(
+                    request_id=ft_request.request_id,
+                    success=False,
+                    reason=f"cannot pause: status is {self.status_type.name}",
+                )
             self.pause_requested = True
             # Close admission before waiting for the busy loop or device.
             self.status_type = EngineStatusType.DIAGNOSING
@@ -279,7 +289,7 @@ class EngineCoreSentinel:
             self.engine.input_queue.put_nowait((EngineCoreRequestType.FT_PAUSE, None))
         return FaultToleranceResult(
             request_id=ft_request.request_id,
-            success=self.status_type != EngineStatusType.DEAD,
+            success=True,
         )
 
     def retry(self, ft_request: FaultToleranceRequest) -> FaultToleranceResult:
@@ -474,18 +484,20 @@ class EngineCoreSentinel:
             return
 
         if terminal:
-            self.status_type = EngineStatusType.DEAD
-            self.fault_info = "Recovery failed; full restart required"
-            self._push_status()
+            with self._status_lock:
+                self.status_type = EngineStatusType.DEAD
+                self.fault_info = "Recovery failed; full restart required"
+                self._push_status()
         if local_error is not None:
             raise local_error
         raise RuntimeError("[FT] Recovery vote failed")
 
     def _mark_healthy(self, ft_request: FaultToleranceRequest) -> FaultToleranceResult:
-        self.status_type = EngineStatusType.HEALTHY
-        logger.info("[FT] Engine %d status -> HEALTHY", self.engine_index)
-        self.resumed.set()
-        self._push_status()
+        with self._status_lock:
+            self.status_type = EngineStatusType.HEALTHY
+            logger.info("[FT] Engine %d status -> HEALTHY", self.engine_index)
+            self.resumed.set()
+            self._push_status()
         return FaultToleranceResult(request_id=ft_request.request_id, success=True)
 
     def _reinit_engine_groups(
