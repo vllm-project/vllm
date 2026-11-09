@@ -32,6 +32,7 @@ from torch import nn
 from transformers import AutoModel, PreTrainedConfig
 from transformers.conversion_mapping import (
     WeightRenaming,
+    WeightTransform,
     get_checkpoint_conversion_mapping,
     get_model_conversion_mapping,
 )
@@ -116,9 +117,6 @@ class Base(
 ):
     hf_to_vllm_mapper: WeightsMapper
 
-    # TODO transformers will have a util to get these
-    embedding_modules = {"embed_tokens": "input_embeddings"}
-
     def __init__(self, *, vllm_config: "VllmConfig", prefix: str = ""):
         nn.Module.__init__(self)
         logger.info("Using Transformers modeling backend.")
@@ -176,8 +174,16 @@ class Base(
             self._mark_model_components(vllm_config),
             init_on_device_without_buffers("meta"),
         ):
-            from_config_kwargs = self._from_config_kwargs
-            self.model: PreTrainedModel = AutoModel.from_config(**from_config_kwargs)
+            self.model: PreTrainedModel = self._create_model()
+
+        # LoRA matches embeddings by the last part of their name, which varies by model
+        input_embeddings = set(self.model.get_input_embeddings().modules())
+        embedding_modules = {
+            name.rpartition(".")[2]: "input_embeddings"
+            for name, module in self.model.named_modules()
+            if module in input_embeddings and isinstance(module, nn.Embedding)
+        }
+        self.embedding_modules = self.embedding_modules | embedding_modules
 
         # Create weight name to module qualname mapper
         self._create_hf_to_vllm_mapper()
@@ -227,6 +233,10 @@ class Base(
             dtype=self.model_config.dtype,
             trust_remote_code=self.model_config.trust_remote_code,
         )
+
+    def _create_model(self) -> "PreTrainedModel":
+        """Create the Transformers model that `self.model` wraps."""
+        return AutoModel.from_config(**self._from_config_kwargs)
 
     def _find_encoder_classes(
         self, model: "PreTrainedModel"
@@ -316,14 +326,7 @@ class Base(
         orig_to_new_renaming: list[WeightRenaming] = []
         orig_to_new_regex: dict[re.Pattern, str | None] = {}
 
-        mappings = get_model_conversion_mapping(self.model)
-        # Ensure layers that are part of the model, but not AutoModel, get their mapping
-        instantiated = {type(m).__name__ for m in self.model.modules()}
-        for arch in self.config.architectures or []:
-            if arch not in instantiated:
-                mappings.extend(get_checkpoint_conversion_mapping(arch) or [])
-
-        for mapping in mappings:
+        for mapping in self._weight_conversions():
             # Handle weights which have been renamed in Transformers
             if isinstance(mapping, WeightRenaming):
                 orig_to_new_renaming.append(mapping)
@@ -364,6 +367,20 @@ class Base(
 
         # Apply mapping to quantization config if needed
         self._maybe_apply_model_mapping()
+
+    def _weight_conversions(self) -> list[WeightTransform]:
+        """The Transformers weight conversions that apply to `self.model`."""
+        mappings = get_model_conversion_mapping(self.model)
+        # Ensure layers that are part of the model, but not AutoModel, get their mapping
+        instantiated = {type(m).__name__ for m in self.model.modules()}
+        for arch in self.config.architectures or []:
+            if arch not in instantiated:
+                mappings.extend(get_checkpoint_conversion_mapping(arch) or [])
+        return mappings
+
+    def _tp_plan(self) -> dict:
+        """The tensor parallel plan of `self.model`, relative to `self.model`."""
+        return self.model.tp_plan or {}
 
     def _get_tie_word_embeddings(self):
         """Check if the model has tied word embeddings."""
@@ -423,11 +440,7 @@ class Base(
             attrsetter(name)(module, PPMissingLayer())
 
         # Module list
-        start_layer, end_layer = get_pp_indices(
-            self.text_config.num_hidden_layers,
-            self.pp_group.rank_in_group,
-            self.pp_group.world_size,
-        )
+        start_layer, end_layer = self._pp_indices()
         layers_name = names[module_list_idx]
         # attrgetter in case the module is nested (e.g. "text_model.layers")
         layers = attrgetter(layers_name)(module)
@@ -481,7 +494,7 @@ class Base(
         - RMSNorm (detected from their dataflow) with vLLM's `RMSNorm`or `GemmaRMSNorm`
         - `nn.LayerNorm` with vLLM's `LayerNorm`
         """
-        tp_plan = self.model.tp_plan or {}
+        tp_plan = self._tp_plan()
 
         if not tp_plan and self.tp_group.world_size > 1:
             tip = get_feature_request_tip(
@@ -591,6 +604,14 @@ class Base(
 
         self.hf_to_vllm_mapper |= WeightsMapper(orig_to_new_stacked=orig_to_new_stacked)
 
+    def _pp_indices(self) -> tuple[int, int]:
+        """The range of decoder layers on this pipeline parallel rank."""
+        return get_pp_indices(
+            self.text_config.num_hidden_layers,
+            self.pp_group.rank_in_group,
+            self.pp_group.world_size,
+        )
+
     def _create_attention_instances(self, prefix: str = ""):
         """Create `Attention` instances to inform KV cache allocation."""
         text_config = self.text_config
@@ -610,9 +631,7 @@ class Base(
         logits_soft_cap = getattr(text_config, "attn_logit_softcapping", None)
         layer_types = getattr(text_config, "layer_types", None)
 
-        pp_rank = self.pp_group.rank_in_group
-        pp_size = self.pp_group.world_size
-        start, end = get_pp_indices(text_config.num_hidden_layers, pp_rank, pp_size)
+        start, end = self._pp_indices()
 
         for i in range(start, end):
             if i not in self.attention_fusers:
@@ -699,10 +718,8 @@ class Base(
         # In encoder models, the attention layers will have `is_causal=False`
         is_encoder = lambda module: not getattr(module, "is_causal", True)
         has_encoder = lambda model: any(is_encoder(m) for m in model.modules())
-        is_multimodal = lambda config: config != config.get_text_config()
-        # vLLM does not support encoder-decoder models, so if any encoder layer is
-        # found in a text only model, we assume the whole model is an encoder model
-        if has_encoder(self.model) and not is_multimodal(self.config):
+        # A VLM's text model may be bidirectional over the multimodal prefix
+        if has_encoder(self.model) and not self.model_config.is_multimodal_model:
             return EncoderOnlyAttention
         if self.model_config.use_mla:
             if any(

@@ -148,7 +148,7 @@ def _write_consumer_scheduler_for_finished_request(tp_size: int = 2):
     scheduler.tp_size = tp_size
     scheduler._has_mamba = False
     scheduler._reqs_need_recv = {}
-    scheduler.unmap_request_id = MagicMock()
+    scheduler.unmap_request_id = MagicMock()  # type: ignore[method-assign]
     return scheduler
 
 
@@ -447,11 +447,13 @@ def test_write_mode_with_chunked_prefill_saves_local_block_ids():
     for _, (expected_save, expected_recv, expected_send) in enumerate(expected_counts):
         scheduler_output = scheduler.schedule()
         kv_connector_metadata = scheduler_output.kv_connector_metadata
+        assert isinstance(kv_connector_metadata, MoRIIOConnectorMetadata)
 
         assert len(kv_connector_metadata.reqs_to_save) == expected_save
         assert len(kv_connector_metadata.reqs_to_recv) == expected_recv
         assert len(kv_connector_metadata.reqs_to_send) == expected_send
     assert kv_connector_metadata is not None, "kv_connector_metadata is None"
+    assert isinstance(kv_connector_metadata, MoRIIOConnectorMetadata)
     assert request_id in kv_connector_metadata.reqs_to_save, (
         "Request ID not in reqs_to_save"
     )
@@ -624,6 +626,7 @@ def test_register_kv_caches(mock_parallel_groups):
         ),
     ):
         # Create connector
+        assert vllm_config.kv_transfer_config is not None
         vllm_config.kv_transfer_config.kv_connector_extra_config.update(
             {
                 "proxy_ip": "127.0.0.1",
@@ -717,6 +720,7 @@ def test_moriio_handshake_returns_metadata(mock_parallel_groups):
     ):
         handshake_port = _find_free_port()
         # Create connector
+        assert vllm_config.kv_transfer_config is not None
         vllm_config.kv_transfer_config.kv_connector_extra_config.update(
             {
                 "proxy_ip": "127.0.0.1",
@@ -753,7 +757,7 @@ def test_moriio_handshake_returns_metadata(mock_parallel_groups):
 
 
 def test_resolve_host_ip_prefers_extra_config():
-    """An explicit ``host_ip`` in kv_connector_extra_config overrides get_ip()
+    """An explicit `host_ip` in kv_connector_extra_config overrides get_ip()
     (so an external router can advertise a routable/internal address); an
     absent or empty value falls back to get_ip()."""
     assert resolve_host_ip({"host_ip": "10.0.0.7"}) == "10.0.0.7"
@@ -1178,19 +1182,13 @@ def test_single_group_path_unchanged():
     assert scheduler.get_exchange_clipped_blocks(blocks) == blocks
 
 
-class _FakeSpecConfig(SimpleNamespace):
-    """Minimal speculative_config stand-in. Any drafter-capability probe
-    (use_dflash/use_eagle/use_dspark/uses_draft_model/...) defaults to False so
-    VllmConfig.num_lookahead_tokens resolves cleanly as upstream adds methods."""
-
-    def __getattr__(self, name: str):
-        if name.startswith(("use_", "uses_")):
-            return lambda *a, **k: False
-        raise AttributeError(name)
-
-
 def _fake_speculative_config(num_speculative_tokens: int = 1) -> SimpleNamespace:
-    return _FakeSpecConfig(num_speculative_tokens=num_speculative_tokens)
+    """Minimal speculative_config stand-in, enough for
+    VllmConfig.num_lookahead_tokens."""
+    return SimpleNamespace(
+        num_speculative_tokens=num_speculative_tokens,
+        speculator_config=SimpleNamespace(num_lookahead_tokens=num_speculative_tokens),
+    )
 
 
 def _spec_vllm_config() -> VllmConfig:
@@ -1262,6 +1260,7 @@ def test_worker_layer_to_group_routing(mock_parallel_groups):
     vllm_config = create_vllm_config(role="kv_consumer", read_mode=True)
     # Building the worker directly bypasses MoRIIOConnector._set_port_defaults,
     # so provide the ports manually.
+    assert vllm_config.kv_transfer_config is not None
     vllm_config.kv_transfer_config.kv_connector_extra_config.update(
         {
             "http_port": 12346,
@@ -1277,3 +1276,80 @@ def test_worker_layer_to_group_routing(mock_parallel_groups):
             kv_cache_config=_make_hybrid_kv_cache_config(),
         )
     assert worker.layer_to_group == {"full0": 0, "sw0": 1}
+
+
+def _pp_producer_config(pp_size: int, kv_cache_layout: str = "LBNHC") -> VllmConfig:
+    vllm_config = create_vllm_config(role="kv_producer")
+    vllm_config.parallel_config.pipeline_parallel_size = pp_size
+    vllm_config.cache_config.kv_cache_layout = kv_cache_layout
+    assert vllm_config.kv_transfer_config is not None
+    vllm_config.kv_transfer_config.kv_connector_extra_config.update(
+        {"http_port": 12346, "handshake_port": 12347, "notify_port": 12348}
+    )
+    return vllm_config
+
+
+@pytest.mark.parametrize("pp_rank", [0, 2])
+def test_pipeline_stage_has_its_own_engine_and_ports(mock_parallel_groups, pp_rank):
+    """Stages of a PP producer must not share ports or a MoRI engine name."""
+    vllm_config = _pp_producer_config(pp_size=4)
+    with (
+        set_current_vllm_config(vllm_config),
+        patch.multiple(
+            "vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common",
+            get_pipeline_model_parallel_rank=MagicMock(return_value=pp_rank),
+            # mock_parallel_groups reports a TP size of 0; each stage here is TP1.
+            get_tensor_model_parallel_world_size=MagicMock(return_value=1),
+        ),
+    ):
+        worker = FakeMoRIIOConnectorWorker(vllm_config, "engine0", hand_shake_latency=0)
+
+    # One TP rank per stage, so stage s sits at offset s.
+    assert worker.side_channel_port == 12347 + pp_rank
+    assert worker.notify_port == 12348 + pp_rank
+    assert worker.moriio_engine.get_engine_desc().key.endswith(f":tp0:dp0:pp{pp_rank}")
+
+
+@pytest.mark.parametrize(
+    ("role", "read_mode"),
+    [("kv_consumer", False), ("kv_producer", True), ("kv_both", False)],
+)
+def test_pipeline_parallel_only_on_a_write_producer(role, read_mode):
+    vllm_config = create_vllm_config(role=role, read_mode=read_mode)
+    vllm_config.parallel_config.pipeline_parallel_size = 2
+    with (
+        set_current_vllm_config(vllm_config),
+        pytest.raises(NotImplementedError, match="pipeline_parallel_size > 1"),
+    ):
+        MoRIIOConnector(
+            vllm_config, KVConnectorRole.SCHEDULER, _make_test_kv_cache_config()
+        )
+
+
+def test_pipeline_parallel_producer_runs_on_one_node():
+    """The decode reaches every stage at the one host the instance advertises."""
+    vllm_config = create_vllm_config(role="kv_producer")
+    vllm_config.parallel_config.pipeline_parallel_size = 2
+    vllm_config.parallel_config.nnodes = 2
+    with (
+        set_current_vllm_config(vllm_config),
+        pytest.raises(NotImplementedError, match="one node"),
+    ):
+        MoRIIOConnector(
+            vllm_config, KVConnectorRole.SCHEDULER, _make_test_kv_cache_config()
+        )
+
+
+def test_pipeline_stage_rejects_block_outermost_kv_cache_layout(mock_parallel_groups):
+    """A stage's packed block is smaller than the decode's: offsets would drift."""
+    vllm_config = _pp_producer_config(pp_size=2, kv_cache_layout="BLHNC")
+    with (
+        set_current_vllm_config(vllm_config),
+        patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common."
+            "get_pipeline_model_parallel_rank",
+            return_value=1,
+        ),
+        pytest.raises(NotImplementedError, match="layer-outermost"),
+    ):
+        FakeMoRIIOConnectorWorker(vllm_config, "engine0", hand_shake_latency=0)

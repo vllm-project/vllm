@@ -240,6 +240,7 @@ class MatcherRMSNormGated(MatcherCustomOp):
         enabled: bool | None = None,
         norm_before_gate: bool = True,
         group_size: int | None = None,
+        activation: str = "swish",
     ) -> None:
         if enabled is None:
             enabled = RMSNormGated.enabled()
@@ -248,6 +249,7 @@ class MatcherRMSNormGated(MatcherCustomOp):
         self.epsilon = epsilon
         self.norm_before_gate = norm_before_gate
         self.group_size = group_size
+        self.activation = activation
 
     def inputs(self) -> list[torch.Tensor]:
         x = self.empty(5, 16)
@@ -261,18 +263,14 @@ class MatcherRMSNormGated(MatcherCustomOp):
         z: torch.Tensor,
         weight: torch.Tensor,
     ) -> torch.Tensor:
-        from vllm.third_party.flash_linear_attention.ops.layernorm_guard import (
-            rmsnorm_fn,
-        )
-
-        return rmsnorm_fn(
+        return torch.ops.vllm.fla_rms_norm_gated(
             x,
+            z,
             weight,
-            bias=None,
-            z=z,
-            eps=self.epsilon,
-            group_size=self.group_size,
-            norm_before_gate=self.norm_before_gate,
+            self.epsilon,
+            self.group_size,
+            self.norm_before_gate,
+            self.activation,
         )
 
     def forward_native(

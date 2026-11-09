@@ -3,16 +3,22 @@
 
 import jinja2
 import pytest
+import torch
 
-from vllm.config import ModelConfig
+from vllm.config import ModelConfig, VllmConfig
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.exceptions import VLLMValidationError
+from vllm.inputs.engine import MultiModalInput
+from vllm.multimodal.inputs import MultiModalKwargsItems, PlaceholderRange
 from vllm.renderers.chat_utils import ConversationMessage, load_chat_template
 from vllm.renderers.hf import (
+    HfRenderer,
+    _build_prompt_embeds_updates,
     _consolidate_system_messages,
     _convert_developer_to_system,
     _detect_content_format,
     _detect_developer_role_support,
+    _ensure_prompt_embeds_placeholder_token,
     _get_hf_base_chat_template_params,
     _template_error_reason,
     _try_extract_ast,
@@ -81,6 +87,43 @@ TEST_MESSAGES = [
     {"role": "user", "content": "What is the capital of"},
 ]
 ASSISTANT_MESSAGE_TO_CONTINUE = {"role": "assistant", "content": "The capital of"}
+
+
+def test_apply_prompt_embeds_keeps_engine_token_ids_in_vocabulary() -> None:
+    """Consume OOV sentinels without changing text IDs or embedding offsets."""
+    model = "HuggingFaceTB/SmolVLM-256M-Instruct"
+    model_config = ModelConfig(model, enable_prompt_embeds=True)
+    renderer = HfRenderer(VllmConfig(model_config=model_config), get_tokenizer(model))
+    try:
+        assert renderer.tokenizer is not None
+        sentinel = _ensure_prompt_embeds_placeholder_token(renderer.tokenizer)
+        vocab_size = model_config.get_vocab_size()
+        assert sentinel >= vocab_size
+        tensors = [
+            torch.zeros(length, model_config.get_hidden_size()) for length in (2, 1)
+        ]
+        engine_input: MultiModalInput = {
+            "type": "multimodal",
+            "prompt_token_ids": [1, sentinel, sentinel, 2, sentinel, 3],
+            "mm_kwargs": MultiModalKwargsItems(),
+            "mm_hashes": {},
+            "mm_placeholders": {},
+        }
+
+        renderer._apply_prompt_embeds_to_engine_input(
+            engine_input, tensors, _build_prompt_embeds_updates(tensors, sentinel)
+        )
+
+        assert all(
+            0 <= token_id < vocab_size for token_id in engine_input["prompt_token_ids"]
+        )
+        assert engine_input["prompt_token_ids"] == [1, 0, 0, 2, 0, 3]
+        assert engine_input["mm_placeholders"]["prompt_embeds"] == [
+            PlaceholderRange(offset=1, length=2),
+            PlaceholderRange(offset=4, length=1),
+        ]
+    finally:
+        renderer.shutdown()
 
 
 def test_load_chat_template():
@@ -170,6 +213,24 @@ def test_resolve_chat_template(sample_json_schema, model, use_tools):
         model_config=model_config,
     )
     assert isinstance(chat_template, str)
+
+
+def test_processor_multiple_chat_templates_uses_default():
+    """Render with the "default" template of a processor that has several."""
+    # Ships chat_template.jinja and additional_chat_templates/reranker.jinja
+    model = "Qwen/Qwen3-VL-Reranker-2B"
+    model_config = ModelConfig(model)
+    tokenizer = get_tokenizer(model)
+
+    prompt = safe_apply_chat_template(
+        model_config,
+        tokenizer,
+        [{"role": "user", "content": "Hello"}],
+        tokenize=False,
+        add_generation_prompt=True,
+    )
+
+    assert prompt == "<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n"
 
 
 @pytest.mark.parametrize(
@@ -414,6 +475,25 @@ def test_resolve_chat_template_kwargs_with_template_name():
             {% for message in messages %}{{ message['content'] }}{% endfor %}
             """,
             "string",
+        ),
+        (
+            """
+            {% set ns = namespace(rest=messages) %}
+            {% for message in ns.rest %}
+              {% for item in message['content'] %}{{ item['type'] }}{% endfor %}
+            {% endfor %}
+            """,
+            "openai",
+        ),
+        (
+            """
+            {% set ns = namespace(rest=[]) %}
+            {% set ns.rest = messages %}
+            {% for message in ns.rest %}
+              {% for item in message['content'] %}{{ item['type'] }}{% endfor %}
+            {% endfor %}
+            """,
+            "openai",
         ),
     ],
 )

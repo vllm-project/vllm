@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """DeepGEMM MegaMoE experts: fused EP dispatch, expert GEMMs and combine.
 
-Each ``MEGA_MOE_*`` format is one row of the SM100 feature matrix. MX weights
+Each `MEGA_MOE_*` format is one row of the SM100 feature matrix. MX weights
 and activations carry one UE8M0 scale per 1x32 block. NVFP4 weights carry one
 E4M3 scale per 1x16 block plus a per-expert FP32 global scale; NVFP4 dispatch
 scales each token by its own FP32 scale.
@@ -27,9 +27,6 @@ from vllm.model_executor.layers.fused_moe.prepare_megamoe import (
     prepare_megamoe_inputs,
     prepare_megamoe_nvfp4_inputs,
 )
-from vllm.model_executor.layers.fused_moe.router.base_router import (
-    eplb_map_to_physical_and_record,
-)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kMxfp8Dynamic,
@@ -38,7 +35,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
-from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
 logger = init_logger(__name__)
 
@@ -47,11 +43,11 @@ logger = init_logger(__name__)
 class MegaMoEActivation:
     """Gated activation fused into the MegaMoE L1 epilogue.
 
-    ``swiglu`` computes ``gate * sigmoid(alpha * gate) * (up + beta)`` after
-    clamping gate from above and up symmetrically to ``clamp``; this covers
-    plain, DeepSeek-V4 (``clamp``) and GPT-OSS style (``alpha``/``beta``)
-    experts. ``situ`` is Kimi K3's SiTU with gate tanh scale ``alpha`` and
-    linear tanh scale ``beta``; ``beta=0`` leaves the linear branch unscaled.
+    `swiglu` computes `gate * sigmoid(alpha * gate) * (up + beta)` after
+    clamping gate from above and up symmetrically to `clamp`; this covers
+    plain, DeepSeek-V4 (`clamp`) and GPT-OSS style (`alpha`/`beta`)
+    experts. `situ` is Kimi K3's SiTU with gate tanh scale `alpha` and
+    linear tanh scale `beta`; `beta=0` leaves the linear branch unscaled.
     """
 
     name: Literal["swiglu", "situ"] = "swiglu"
@@ -139,7 +135,7 @@ class MegaMoEWeightFormat:
 
     @property
     def uses_nvfp4_api(self) -> bool:
-        """``nvfp4_mega_moe`` has its own symmetric buffer, BLOCK_M and scales."""
+        """`nvfp4_mega_moe` has its own symmetric buffer, BLOCK_M and scales."""
         return self.kernel == "nvfp4_mega_moe"
 
 
@@ -188,7 +184,7 @@ MEGA_MOE_WEIGHT_FORMATS = {
 def check_deep_gemm_mega_moe_supported(
     device: torch.device, hidden_size: int, intermediate_size: int
 ) -> None:
-    """Raise unless DeepGEMM MegaMoE can run on ``device`` with these shapes.
+    """Raise unless DeepGEMM MegaMoE can run on `device` with these shapes.
 
     Raises:
         NotImplementedError: If the device architecture is unsupported.
@@ -212,7 +208,7 @@ def _linear_weight_scale(linear: nn.Module) -> torch.Tensor | None:
 
 
 def _matches_weight_spec(linear: nn.Module, spec: MegaMoEWeightSpec) -> bool:
-    """Whether a checkpoint linear can be written into a ``spec`` weight."""
+    """Whether a checkpoint linear can be written into a `spec` weight."""
     weight, scale = linear.weight, _linear_weight_scale(linear)
     if weight.dtype != spec.dtype or weight.dim() != 2:
         return False
@@ -241,10 +237,10 @@ class DeepGemmMegaMoEExperts(nn.Module):
     before any weight loads; a fused layer owns the shared-expert weights and
     the caller drops its shared MLP.
 
-    NVFP4 experts also take per-expert ``weight_scale_2`` (``w1`` and ``w3``
-    must match: one L1 scale per expert) and ``w2`` ``input_scale``; the kernel
+    NVFP4 experts also take per-expert `weight_scale_2` (`w1` and `w3`
+    must match: one L1 scale per expert) and `w2` `input_scale`; the kernel
     quantizes every L2 input with the max of the latter over all loaded
-    experts. Dispatch uses per-token scales, so ``w1``/``w3`` ``input_scale``
+    experts. Dispatch uses per-token scales, so `w1`/`w3` `input_scale`
     are not loaded.
 
     Args:
@@ -252,7 +248,11 @@ class DeepGemmMegaMoEExperts(nn.Module):
         activation: Activation fused into the L1 epilogue.
         weight_format: Routed-expert precision, a row of the feature matrix.
         shared_experts: Shared MLP to fuse if it is unsharded and in one of
-            the ``weight_format.shared`` precisions; ``None`` never fuses.
+            the `weight_format.shared` precisions; `None` never fuses.
+        max_num_tokens: Most tokens one rank passes to `forward`; the
+            symmetric buffer is sized for it. Defaults to
+            `max_num_batched_tokens`. A caller that hands this layer only its
+            sequence-parallel shard of the batch can pass the shard size.
 
     """
 
@@ -274,6 +274,7 @@ class DeepGemmMegaMoEExperts(nn.Module):
         shared_experts: nn.Module | None = None,
         num_logical_experts: int | None = None,
         fast_math: bool = True,
+        max_num_tokens: int | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -301,7 +302,11 @@ class DeepGemmMegaMoEExperts(nn.Module):
         self.top_k = top_k
         self.hidden_size = hidden_size
         self.intermediate_size = intermediate_size
-        self.max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+        self.max_num_tokens = (
+            max_num_tokens
+            if max_num_tokens is not None
+            else vllm_config.scheduler_config.max_num_batched_tokens
+        )
         self.weight_format = weight_format
         self.activation = activation
         self.fast_math = fast_math
@@ -463,7 +468,7 @@ class DeepGemmMegaMoEExperts(nn.Module):
         return self._kernel_weights("w2")
 
     def _map_global_expert_id(self, expert_id: int) -> list[int]:
-        """Local slots that logical expert ``expert_id`` occupies on this rank."""
+        """Local slots that logical expert `expert_id` occupies on this rank."""
         physical_ids: list[int] = []
         for p in range(self.experts_start_idx, self.experts_end_idx):
             if p % self.num_logical_experts == expert_id:
@@ -550,9 +555,9 @@ class DeepGemmMegaMoEExperts(nn.Module):
         shard_id: str,
         is_scale: bool,
     ) -> None:
-        """Write checkpoint shard ``src`` into ``dst`` in the kernel layout.
+        """Write checkpoint shard `src` into `dst` in the kernel layout.
 
-        ``dst`` is one routed expert's slice or a shared-expert parameter.
+        `dst` is one routed expert's slice or a shared-expert parameter.
         """
         if shard_id not in ("w1", "w2", "w3"):
             raise ValueError(f"Unsupported expert shard id: {shard_id}")
@@ -647,10 +652,15 @@ class DeepGemmMegaMoEExperts(nn.Module):
                     activation=self.activation.name,
                 )
             self._symm_buffers[key] = symm_buffer
+            # DeepGEMM measures the SM locality-domain map that MegaMoE reads through
+            # an MPS helper process, which stays alive until released. vLLM
+            # localizes no weights, so cache the map and stop the helper now.
+            if hasattr(deep_gemm, "destroy_localizer"):
+                deep_gemm.destroy_localizer()
         return symm_buffer
 
     def get_block_m(self, num_tokens: int) -> int:
-        """BLOCK_M the MegaMoE scheduler runs ``num_tokens`` local tokens with."""
+        """BLOCK_M the MegaMoE scheduler runs `num_tokens` local tokens with."""
         from vllm.utils.deep_gemm import _import_deep_gemm
 
         deep_gemm = _import_deep_gemm()
@@ -729,15 +739,15 @@ class DeepGemmMegaMoEExperts(nn.Module):
         """Run the routed and shared experts on this rank's tokens.
 
         Args:
-            hidden_states: BF16 ``[num_tokens, hidden_size]`` activations.
-            topk_weights: ``[num_tokens, top_k]`` routing weights.
-            topk_ids: ``[num_tokens, top_k]`` logical expert ids.
-            shared_experts: Unfused shared MLP, run on ``hidden_states`` and
-                added to the output. Must be ``None`` when this layer fused the
+            hidden_states: BF16 `[num_tokens, hidden_size]` activations.
+            topk_weights: `[num_tokens, top_k]` routing weights.
+            topk_ids: `[num_tokens, top_k]` logical expert ids.
+            shared_experts: Unfused shared MLP, run on `hidden_states` and
+                added to the output. Must be `None` when this layer fused the
                 shared expert at construction.
 
         Returns:
-            BF16 ``[num_tokens, hidden_size]`` routed plus shared expert output.
+            BF16 `[num_tokens, hidden_size]` routed plus shared expert output.
 
         """
         if shared_experts is not None and self.has_fused_shared_experts:
@@ -759,29 +769,9 @@ class DeepGemmMegaMoEExperts(nn.Module):
             if is_padding is not None:
                 is_padding = is_padding[:num_tokens]
 
+        # Capture logical ids; staging maps them to EPLB physical replicas.
         if self.capture_fn is not None:
             self.capture_fn(topk_ids)
-
-        # EPLB: map logical expert IDs to physical replicas and record load.
-        eplb_state = self.eplb_state
-        if eplb_state.logical_to_physical_map is not None:
-            assert eplb_state.expert_load_view is not None
-            assert eplb_state.logical_replica_count is not None
-            assert eplb_state.should_record_tensor is not None
-            if is_padding is not None:
-                topk_ids = torch.where(is_padding.unsqueeze(1), -1, topk_ids)
-            topk_ids = eplb_map_to_physical_and_record(
-                topk_ids=topk_ids,
-                expert_load_view=eplb_state.expert_load_view,
-                logical_to_physical_map=eplb_state.logical_to_physical_map,
-                logical_replica_count=eplb_state.logical_replica_count,
-                record_enabled=eplb_state.should_record_tensor,
-                num_unpadded_tokens=eplb_state.num_unpadded_tokens_tensors[
-                    dbo_current_ubatch_id()
-                ]
-                if eplb_state.num_unpadded_tokens_tensors is not None
-                else None,
-            )
 
         from vllm.utils.deep_gemm import _import_deep_gemm
 
@@ -814,6 +804,7 @@ class DeepGemmMegaMoEExperts(nn.Module):
                 w2_global_scale=self.w2_weight_scale_2,
                 l2_alpha=self._l2_alpha,
                 l2_activation_scale=l2_activation_scale,
+                eplb_state=self.eplb_state,
             )
             kwargs.update(
                 l1_alpha=self.w13_weight_scale_2,
@@ -835,6 +826,7 @@ class DeepGemmMegaMoEExperts(nn.Module):
                 shared_x_sf=shared_x_sf,
                 shared_block_m=shared_block_m,
                 hidden_quant=fmt.hidden_quant,
+                eplb_state=self.eplb_state,
             )
 
         if self.has_fused_shared_experts:
