@@ -182,8 +182,6 @@ def graph_allreduce_expandable_segments(
         assert get_tp_group().device_communicator.aiter_ar_comm.registers_graph_buffers
 
         def capture_allreduce(capture_ctx) -> int:
-            # 4 MiB: AITER's lamport kernels (v0.1.29+) skip the copy-in for
-            # 2-byte messages up to 2 MiB, so a smaller one never stages.
             shape, dtype = (256, 8192), torch.bfloat16
             with capture_ctx as graph_capture_context:
                 inp = torch.ones(shape, dtype=dtype, device=device)
