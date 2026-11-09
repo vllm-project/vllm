@@ -2781,6 +2781,7 @@ class Scheduler(SchedulerInterface):
         elif (
             self.connector is not None
             and self.scheduler_config.max_num_inflight_kv_loads
+            and not request.skip_reading_external_kv
             and self.connector.may_load_async(request)
         ):
             self.async_kv_waiting.add_request(request)

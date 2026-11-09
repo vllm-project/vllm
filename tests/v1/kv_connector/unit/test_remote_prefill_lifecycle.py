@@ -6,6 +6,9 @@ from unittest.mock import patch
 
 import pytest
 
+from vllm import SamplingParams
+from vllm.utils.hashing import sha256
+from vllm.v1.core.kv_cache_utils import get_request_block_hasher
 from vllm.v1.kv_cache_interface import MambaSpec, SlidingWindowSpec
 from vllm.v1.metrics.stats import KV_FETCH_STAGES
 from vllm.v1.outputs import (
@@ -13,7 +16,7 @@ from vllm.v1.outputs import (
     KVConnectorOutput,
     ModelRunnerOutput,
 )
-from vllm.v1.request import FinishReason, RequestStatus
+from vllm.v1.request import FinishReason, Request, RequestStatus
 
 from .utils import (
     assert_scheduler_empty,
@@ -177,6 +180,60 @@ def test_inflight_kv_load_cap_does_not_block_local_requests():
     assert remote[0].status == RequestStatus.WAITING_FOR_REMOTE_KVS
     assert remote[1].status == RequestStatus.WAITING
     assert scheduler.running == [local]
+
+
+@pytest.mark.parametrize(
+    "sampling_kwargs",
+    [
+        {"skip_reading_prefix_cache": True},
+        {"prompt_logprobs": 1},
+        {"prompt_logprob_token_ids": [7]},
+    ],
+)
+def test_cache_bypass_does_not_block_async_prefill_loads(sampling_kwargs):
+    """Requests that cannot read external KV must not occupy the load queue."""
+    scheduler, block_size = _remote_scheduler(
+        max_num_seqs=1, max_num_inflight_kv_loads=1
+    )
+    local = create_request(block_size=block_size, num_tokens=block_size)
+    scheduler.add_request(local)
+    output = scheduler.schedule()
+    bypass = Request(
+        request_id="bypass",
+        prompt_token_ids=list(range(block_size * 3)),
+        sampling_params=SamplingParams(
+            max_tokens=1,
+            extra_args={"kv_transfer_params": {"do_remote_prefill": True}},
+            **sampling_kwargs,
+        ),
+        pooling_params=None,
+        block_hasher=get_request_block_hasher(block_size, sha256),
+    )
+    hit = create_request(
+        block_size=block_size, num_tokens=block_size * 3, do_remote_prefill=True
+    )
+    scheduler.add_request(bypass)
+    scheduler.add_request(hit)
+    scheduler.update_from_output(output, create_model_runner_output([local]))
+    output = scheduler.schedule()
+
+    assert scheduler.running == [local]
+    assert bypass.status == RequestStatus.WAITING
+    assert hit.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+    assert list(scheduler.waiting) == [bypass]
+
+    scheduler.update_from_output(
+        output,
+        create_model_runner_output([local], finished_recving={hit.request_id}),
+    )
+    scheduler.finish_requests(local.request_id, RequestStatus.FINISHED_ABORTED)
+    output = scheduler.schedule()
+    assert scheduler.running == [hit]
+    scheduler.update_from_output(output, create_model_runner_output([hit]))
+    scheduler.finish_requests(hit.request_id, RequestStatus.FINISHED_ABORTED)
+    output = scheduler.schedule()
+    assert scheduler.running == [bypass]
+    assert bypass.request_id in output.num_scheduled_tokens
 
 
 def test_inflight_kv_loads_follow_connector_may_load_async(monkeypatch):
