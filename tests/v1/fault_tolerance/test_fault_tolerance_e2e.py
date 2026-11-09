@@ -545,6 +545,9 @@ def _drive_until_rearranged(servers, min_applied: int) -> list[dict[str, int]]:
             time.sleep(1.0)
 
 
+# TODO: also cover a failure on one rank only, once FT recovery stops the async
+# worker. Today the peers' workers stay blocked in a collective across the
+# reset (the race noted in async_worker.py), so that test would be flaky.
 @pytest.mark.skipif(not has_nixl_ep(), reason="Requires nixl_ep all2all backend")
 @multi_gpu_test(num_gpus=2)
 def test_async_eplb_worker_fault_retry_resumes_rebalancing(monkeypatch, tmp_path):
@@ -552,8 +555,6 @@ def test_async_eplb_worker_fault_retry_resumes_rebalancing(monkeypatch, tmp_path
 
     The second rebalance raises on every rank before the worker enters a
     collective, so all ranks fail the same cycle without a collective timeout.
-    A failure on one rank only would leave its peers' workers blocked in a
-    collective across the reset, the known race noted in async_worker.py.
     """
     _install_sitecustomize(
         monkeypatch,

@@ -222,7 +222,8 @@ def eplb_dist_init(tmp_path):
 
 class _WorkerProbe:
     """Reports each point where the async worker blocks, so a test can advance
-    in lockstep with it instead of sleeping or polling.
+    in lockstep with it instead of sleeping or polling. The tests then do not
+    depend on thread timing, which keeps them from being flaky.
 
     The worker reports "idle" before waiting for a rearrange signal and
     "published" before waiting for the main thread to consume a layer result.
@@ -331,32 +332,20 @@ def _signal_rearrangement(state: EplbState) -> None:
     assert state.model_states["m"].rebalanced
 
 
-def test_async_worker_failure_raises_under_fault_tolerance(eplb_dist_init, monkeypatch):
-    """Under fault tolerance the async worker survives an exception, but the
-    failure must still reach step() so that FT can recover. Otherwise EPLB
-    stalls silently with every rank waiting for the failed layer.
+def test_fault_tolerance_recovers_async_eplb_after_worker_failure(
+    eplb_dist_init, monkeypatch
+):
+    """Under fault tolerance a worker failure must reach step(), or EPLB stalls
+    silently with every rank waiting for the failed layer. The worker thread
+    survives, so after the FT reset the next rearrangement runs to completion.
     """
     run = _start_ft_async_eplb(monkeypatch, num_failures=1)
-
     _signal_rearrangement(run.state)
     run.probe.expect("idle")
     with pytest.raises(RuntimeError) as exc_info:
         run.state.step()
-
     assert exc_info.value.__cause__ is run.failures[0]
     assert run.state.async_worker.is_alive()
-
-
-def test_fault_tolerance_reset_recovers_async_eplb(eplb_dist_init, monkeypatch):
-    """After a one-time worker failure and an FT reset, the next rearrangement
-    runs to completion: every layer is transferred and applied, and step()
-    no longer raises.
-    """
-    run = _start_ft_async_eplb(monkeypatch, num_failures=1)
-    _signal_rearrangement(run.state)
-    run.probe.expect("idle")
-    with pytest.raises(RuntimeError):
-        run.state.step()
 
     reset_eplb_async_state(SimpleNamespace(eplb_state=run.state))
     assert run.state.async_worker_error is None
