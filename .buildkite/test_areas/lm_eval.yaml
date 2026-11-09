@@ -909,6 +909,7 @@ steps:
 
 - label: ":nvidia: (B200) MoE Refactor DP Integration (DeepEP v2)"
   key: moe-refactor-dp-ep-test-b200-deepep-v2
+  automatic_shard: true
   device: b200-k8s
   # DeepEP v2 needs every rank on one NVLink node, and EP_DISABLE_GIN drops its
   # NCCL GIN/RDMA requirement at num_ranks > 1.

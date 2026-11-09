@@ -872,6 +872,7 @@ steps:
 
 - label: ":nvidia: (B200) Distributed Preload with Mooncake Store"
   key: preload-mooncake-store-2xb200
+  automatic_shard: true
   timeout_in_minutes: 20
   working_dir: "/vllm-workspace/tests"
   device: b200-k8s
