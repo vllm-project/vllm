@@ -84,7 +84,6 @@ class DefaultModelState(ModelState):
                 span_pad=getattr(self.model, "mm_prefix_span_leading_pad_modulus", 0),
             )[0]
         if self.rope_state is not None:
-            assert new_req_data.prefill_token_ids is not None
             # `prompt_embeds` is a passthrough modality with no grid info, but
             # M-RoPE assumes per-feature grids. Filter it out.
             mm_features = [

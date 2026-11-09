@@ -18,7 +18,7 @@ from .activation import beam_silu_mul
 
 
 class BeamMLP(nn.Module):
-    """Dense SwiGLU MLP for the ``dense`` entries of ``mlp_layer_types``."""
+    """Dense SwiGLU MLP for the `dense` entries of `mlp_layer_types`."""
 
     def __init__(
         self,
@@ -58,7 +58,7 @@ class BeamMLP(nn.Module):
 
 
 class BeamSparseMoeBlock(nn.Module):
-    """Grouped sigmoid ``noaux_tc`` MoE with normal finalized output."""
+    """Grouped sigmoid `noaux_tc` MoE with normal finalized output."""
 
     def __init__(
         self, vllm_config: VllmConfig, prefix: str = "", reduce_results: bool = True
