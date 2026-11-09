@@ -301,17 +301,19 @@ The object-store tier (`type: "obj"`) offloads blocks to an S3-compatible object
 | `access_key`, `secret_key`, `session_token` | no | `""` | Explicit credentials. When left empty, the NIXL OBJ plugin falls back to the AWS SDK default credential provider chain (IAM roles, environment variables, credential files), which enables workload-identity auth on Kubernetes. |
 | `region` | no | `""` | Bucket region, if the endpoint requires one. |
 | `ca_bundle` | no | `""` | CA bundle path for TLS verification. |
-| `use_virtual_addressing` | no | unset | Passed to NIXL OBJ as `true` or `false` when set. |
-| `req_checksum` | no | unset | Request checksum policy passed to NIXL OBJ. |
-| `resp_checksum` | no | unset | Response checksum policy passed to NIXL OBJ. |
-| `accelerated` | no | unset | Enables an accelerated NIXL OBJ engine when set. |
-| `type` | no | unset | Accelerated engine selector passed to NIXL OBJ. |
-| `backend_params` | no | `{}` | Additional NIXL OBJ backend parameters. Reserved object-store fields and `num_threads` cannot be overridden here. |
+| `backend_params` | no | `{}` | Additional NIXL OBJ backend parameters, passed through as strings (booleans become `true`/`false`). Use it for options such as `use_virtual_addressing`, `req_checksum`, `resp_checksum`, `accelerated` and `type`; see the [NIXL OBJ plugin README](https://github.com/ai-dynamo/nixl/blob/main/src/plugins/obj/README.md). The connection fields above and `num_threads` cannot be overridden here. |
 
-For accelerated object-store transfers, set the NIXL OBJ parameters required by
-the selected engine through `store_config`. Unknown generic NIXL parameters can
-be passed through `backend_params`; known object-store connection fields should
-use the explicit keys above.
+For example, to enable the accelerated (S3-over-RDMA) object-store engine of a specific vendor:
+
+```json
+{
+  "bucket": "kv",
+  "endpoint_override": "s3.example:9000",
+  "backend_params": {"accelerated": true, "type": "dell"}
+}
+```
+
+`type` selects the vendor-specific accelerated engine registered in the NIXL OBJ plugin; which values are available depends on the installed NIXL release (`dell` is the engine shipped in NIXL 1.5.2). `accelerated` without a `type` initializes an accelerated client that still transfers over plain S3 on that release.
 
 Object keys follow the same run-configuration digest scheme as the filesystem tier (see [On-Disk Layout](#on-disk-layout)) and are stored under the optional `prefix`. The [Cross-Process Sharing](#cross-process-sharing) behavior applies to shared buckets as well, so instances sharing a bucket produce identical keys for identical content; set a shared `PYTHONHASHSEED` if you want a custom seed. At startup the tier probes object store connectivity and fails fast with a configuration error if the bucket is unreachable.
 

@@ -827,15 +827,17 @@ class TestObjStoreConfig:
         assert params["ca_bundle"] == "/path/to/ca.pem"
         assert "access_key" not in params
 
-    def test_accelerated_obj_params_included(self):
+    def test_accelerated_obj_params_via_backend_params(self):
         cfg = ObjStoreConfig(
             bucket="b",
             endpoint_override="ep",
-            use_virtual_addressing=False,
-            req_checksum="required",
-            resp_checksum="supported",
-            accelerated=True,
-            type="custom",
+            backend_params={
+                "use_virtual_addressing": False,
+                "req_checksum": "required",
+                "resp_checksum": "supported",
+                "accelerated": True,
+                "type": "custom",
+            },
         )
         params = cfg.to_nixl_params()
         assert params["use_virtual_addressing"] == "false"
@@ -844,12 +846,11 @@ class TestObjStoreConfig:
         assert params["accelerated"] == "true"
         assert params["type"] == "custom"
 
-    def test_accelerated_obj_bool_strings_normalized(self):
+    def test_backend_params_bool_strings_normalized(self):
         cfg = ObjStoreConfig(
             bucket="b",
             endpoint_override="ep",
-            use_virtual_addressing="False",
-            accelerated="True",
+            backend_params={"use_virtual_addressing": "False", "accelerated": "True"},
         )
         params = cfg.to_nixl_params()
         assert params["use_virtual_addressing"] == "false"
@@ -883,10 +884,12 @@ class TestObjStoreConfig:
 def test_obj_tier_passes_accelerated_params_to_nixl_backend():
     store_config = {
         **_STORE_CONFIG,
-        "accelerated": True,
-        "type": "custom",
-        "use_virtual_addressing": False,
-        "backend_params": {"custom_param": "custom-value"},
+        "backend_params": {
+            "accelerated": True,
+            "type": "custom",
+            "use_virtual_addressing": False,
+            "custom_param": "custom-value",
+        },
     }
     tier, agent = _make_tier(store_config=store_config, io_threads=3)
 

@@ -17,11 +17,6 @@ _RESERVED_BACKEND_PARAM_KEYS = frozenset(
         "scheme",
         "ca_bundle",
         "num_threads",
-        "use_virtual_addressing",
-        "req_checksum",
-        "resp_checksum",
-        "accelerated",
-        "type",
     }
 )
 
@@ -52,11 +47,6 @@ class ObjStoreConfig:
     region: str = ""
     scheme: str = "http"
     ca_bundle: str = ""
-    use_virtual_addressing: bool | str | None = None
-    req_checksum: str | None = None
-    resp_checksum: str | None = None
-    accelerated: bool | str | None = None
-    type: str | None = None
     backend_params: Mapping[str, Any] = field(default_factory=dict, repr=False)
 
     def to_nixl_params(self) -> dict[str, str]:
@@ -89,14 +79,4 @@ class ObjStoreConfig:
         params.update(
             {key: _to_nixl_param(value) for key, value in self.backend_params.items()}
         )
-        for key in (
-            "use_virtual_addressing",
-            "req_checksum",
-            "resp_checksum",
-            "accelerated",
-            "type",
-        ):
-            value = getattr(self, key)
-            if value is not None and value != "":
-                params[key] = _to_nixl_param(value)
         return params
