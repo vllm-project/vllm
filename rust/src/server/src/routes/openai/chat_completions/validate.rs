@@ -81,12 +81,6 @@ pub(super) fn validate_request_compat(
         "length_penalty",
         "length_penalty is not supported.",
     )?;
-    if !request.spaces_between_special_tokens {
-        bail_invalid_request!(
-            param = "spaces_between_special_tokens",
-            "spaces_between_special_tokens is not supported."
-        );
-    }
     validate_generation_prompt_truncation(request.truncate_prompt_tokens)?;
     reject_non_default(
         request.media_io_kwargs.as_ref(),
@@ -327,6 +321,17 @@ mod tests {
 
         validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"]))
             .expect("reasoning_effort should be accepted");
+    }
+
+    #[test]
+    fn validate_request_compat_accepts_spaces_between_special_tokens_false() {
+        let request = ChatCompletionRequest {
+            spaces_between_special_tokens: false,
+            ..base_request()
+        };
+
+        validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"]))
+            .expect("spaces_between_special_tokens=false should be accepted");
     }
 
     #[test]
