@@ -880,8 +880,7 @@ def test_deep_gemm_mega_mhc_correctness(num_tokens, hidden_size):
 @pytest.mark.skipif(not HAS_TILELANG_MHC, reason="TileLang MHC support required")
 @pytest.mark.parametrize("num_tokens", [1, 17, 128, 196])
 def test_mhc_boundary_correctness(num_tokens):
-    weight = mhc_boundary_weight(5120, 4, torch.device(DEVICE))
-    if weight is None:
+    if mhc_boundary_weight(5120, 4, torch.device(DEVICE)) is None:
         pytest.skip("The CuTe DSL mHC boundary needs SM100 and CuTe DSL")
     set_random_seed(0)
     from vllm.models.deepseek_v41.nvidia.ops.mhc_boundary import (
@@ -890,8 +889,9 @@ def test_mhc_boundary_correctness(num_tokens):
     )
 
     args, expected = _shifted_post_pre_case(num_tokens, 5120)
-    weight.copy_(prepare_boundary_weight(args[5]))
-    actual = mhc_shifted_post_pre_boundary(*args[:5], weight, *args[6:])
+    boundary_args = list(args)
+    boundary_args[5] = prepare_boundary_weight(args[5])
+    actual = mhc_shifted_post_pre_boundary(*boundary_args)
     assert actual is not None
     for i, (result, ref) in enumerate(zip(actual, expected, strict=True)):
         atol, rtol = (1.6e-2, 1e-2) if i in (0, 3) else (1e-6, 1e-3)
