@@ -2,12 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pytest
-import torch
 
 import vllm
 from vllm.lora.request import LoRARequest
 from vllm.platforms import current_platform
 
+from ..models.utils import check_logprobs_close
 from ..utils import create_new_process_for_each_test, multi_gpu_test
 
 MODEL_PATH = "vllm-project/Ilama-3.2-1B"
@@ -118,34 +118,42 @@ def test_ilama_lora_tp4_fully_sharded_loras(ilama_lora_files):
 
 
 @create_new_process_for_each_test()
-def test_lora_on_input_embeddings_not_named_embed_tokens(tmp_path):
+def test_lora_on_input_embeddings_not_named_embed_tokens(
+    tmp_path, hf_runner, vllm_runner
+):
     """GPT-NeoX's input embedding is `embed_in`, not `embed_tokens`."""
     from peft import LoraConfig, get_peft_model
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
     model_path = "EleutherAI/pythia-70m"
-    prompts = ["The capital of France is", "def fibonacci(n):"]
-    tokenizer = AutoTokenizer.from_pretrained(model_path)
-    hf_model = AutoModelForCausalLM.from_pretrained(model_path, dtype=torch.float32)
+    lora_path = str(tmp_path / "lora")
+    merged_path = str(tmp_path / "merged")
     lora_config = LoraConfig(r=8, target_modules=["embed_in"], init_lora_weights=False)
-    hf_model = get_peft_model(hf_model, lora_config)
-    hf_model.save_pretrained(tmp_path)
-    expected = []
-    for prompt in prompts:
-        input_ids = tokenizer(prompt, return_tensors="pt").input_ids
-        output = hf_model.generate(input_ids, max_new_tokens=16, do_sample=False)
-        expected.append(output[0, input_ids.shape[1] :].tolist())
-    del hf_model
+    peft_model = get_peft_model(
+        AutoModelForCausalLM.from_pretrained(model_path), lora_config
+    )
+    peft_model.save_pretrained(lora_path)
+    peft_model.merge_and_unload().save_pretrained(merged_path)
+    AutoTokenizer.from_pretrained(model_path).save_pretrained(merged_path)
 
-    llm = vllm.LLM(
+    prompts = ["The capital of France is", "def fibonacci(n):"]
+    with hf_runner(merged_path, dtype="half") as hf_model:
+        hf_outputs = hf_model.generate_greedy_logprobs_limit(prompts, 16, 5)
+    with vllm_runner(
         model_path,
-        dtype="float32",
+        dtype="half",
         enable_lora=True,
         max_lora_rank=8,
         max_model_len=256,
         gpu_memory_utilization=0.3,
+    ) as vllm_model:
+        lora_request = LoRARequest("embed_in", 1, lora_path)
+        vllm_outputs = vllm_model.generate_greedy_logprobs(
+            prompts, 16, 5, lora_request=lora_request
+        )
+    check_logprobs_close(
+        outputs_0_lst=hf_outputs,
+        outputs_1_lst=vllm_outputs,
+        name_0="hf",
+        name_1="vllm",
     )
-    sampling_params = vllm.SamplingParams(temperature=0, max_tokens=16)
-    lora_request = LoRARequest("embed_in", 1, str(tmp_path))
-    outputs = llm.generate(prompts, sampling_params, lora_request=lora_request)
-    assert [list(output.outputs[0].token_ids) for output in outputs] == expected
