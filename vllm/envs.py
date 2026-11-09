@@ -228,6 +228,7 @@ if TYPE_CHECKING:
     VLLM_FLASHINFER_CUTEDSL_MOE_LOCALIZE_FREE_FULL_WEIGHTS: bool = False
     VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR: str | None = None
     VLLM_FLASHINFER_AUTOTUNE_SKIP_OPS: list[str] | None = None
+    VLLM_CUTE_DSL_COMPILE_CACHE: bool = False
     VLLM_FLASHINFER_ALLREDUCE_BACKEND: Literal["auto", "trtllm", "mnnvl"] = "auto"
     VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE: int = 394 * 1024 * 1024
     VLLM_FLASHINFER_MOE_A2A_LOW_PRECISION_COMBINE: bool = False
@@ -1900,6 +1901,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
             if v.strip()
         ]
     ),
+    # Let `cute.compile` use CuTe DSL's in-memory and file caches
+    # (CUTE_DSL_CACHE_DIR, default <VLLM_CACHE_ROOT>/cute_dsl), so a
+    # restarted engine skips compiling its CuTe DSL kernels. Tracing still runs.
+    "VLLM_CUTE_DSL_COMPILE_CACHE": lambda: bool(
+        int(os.getenv("VLLM_CUTE_DSL_COMPILE_CACHE", "0"))
+    ),
     # Flashinfer fused allreduce backend.
     "VLLM_FLASHINFER_ALLREDUCE_BACKEND": env_with_choices(
         "VLLM_FLASHINFER_ALLREDUCE_BACKEND",
@@ -2520,6 +2527,8 @@ def compile_factors() -> dict[str, object]:
         "VLLM_TUNED_CONFIG_FOLDER",
         "VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR",
         "VLLM_FLASHINFER_AUTOTUNE_SKIP_OPS",
+        # Whether to cache CuTe DSL results; not a kernel compile option.
+        "VLLM_CUTE_DSL_COMPILE_CACHE",
         "VLLM_HTTP_TIMEOUT_KEEP_ALIVE",
         "VLLM_HTTP_MAX_REQUEST_BODY_SIZE",
         "VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS",

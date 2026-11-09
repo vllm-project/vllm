@@ -369,3 +369,29 @@ threat model.
   after acquiring the per-GPU lock.
 
 See [vllm preload](../cli/preload.md) for the full CLI reference.
+
+## Caching CuTe DSL kernels
+
+This cache is independent of `vllm preload` and does not need a daemon.
+
+Direct `cute.compile` calls bypass CuTe DSL's caches; libraries may already
+cache results above that path. Set `VLLM_CUTE_DSL_COMPILE_CACHE=1` to turn on
+CuTe DSL's own in-memory and file caches on each GPU worker before its first
+compile. The file cache uses `CUTE_DSL_CACHE_DIR`, defaulting to
+`<VLLM_CACHE_ROOT>/cute_dsl`. This feature is off by default.
+
+Kernels are still traced to compute the key; only compilation is skipped.
+The key does not cover the TVM-FFI argument spec attached after compilation;
+calls with identical IR but different specs could reuse the first call's
+wrapper. The key includes the paths of the CuTe DSL runtime libraries, so
+entries only hit for the same installation location. `CUTE_DSL_NO_CACHE`,
+`CUTE_DSL_KEEP*` and `CUTE_DSL_DISABLE_FILE_CACHING` keep their meaning.
+
+To see file-cache hits and misses, enable CuTe DSL's own logging with
+`CUTE_DSL_LOG_TO_CONSOLE=1` and `CUTE_DSL_LOG_LEVEL=20`. It logs
+`JIT cache hit IN-FILE` when loading a saved module and `JIT cache miss` when
+compilation is needed.
+
+!!! warning
+    Cache entries contain executable code. Only processes trusted to run code
+    in the deployment may write `CUTE_DSL_CACHE_DIR`.
