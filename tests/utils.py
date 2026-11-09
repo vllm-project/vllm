@@ -1506,9 +1506,15 @@ def assert_rocm_custom_allreduce_backend_state(
     if use_aiter_custom_ar:
         assert aiter_ar_comm is not None, "AITER CustomAllreduce was not initialized."
         assert not aiter_ar_comm.disabled, "AITER CustomAllreduce is disabled."
-        assert device_communicator.ca_comm is None, (
-            "vLLM CustomAllreduce should not be initialized when AITER CA is used."
-        )
+        if device_communicator.ca_comm_ar_bytes is None:
+            assert device_communicator.ca_comm is None, (
+                "vLLM CustomAllreduce should not be initialized when AITER CA "
+                "serves every size."
+            )
+        else:
+            assert device_communicator.ca_comm is not None, (
+                "vLLM CustomAllreduce should serve its range alongside AITER CA."
+            )
     else:
         assert aiter_ar_comm is None, (
             "AITER CustomAllreduce should not be initialized when disabled."

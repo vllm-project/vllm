@@ -143,6 +143,101 @@ def test_rocm_aiter_custom_allreduce(
     multi_process_parallel(monkeypatch, tp_size, pipeline_parallel_size, test_target)
 
 
+@ray.remote(num_gpus=1, max_calls=1)
+def allreduce_size_routing(
+    monkeypatch: pytest.MonkeyPatch,
+    tp_size,
+    pp_size,
+    rank,
+    distributed_init_port,
+) -> None:
+    from vllm.distributed.device_communicators.all_reduce_utils import (
+        ROCM_GFX950_CUSTOM_AR_OVER_AITER_RANGES,
+    )
+    from vllm.platforms.rocm import on_gfx950
+
+    with monkeypatch.context() as m:
+        _configure_aiter_custom_ar_env(m)
+
+        device = torch.device(f"cuda:{rank}")
+        torch.accelerator.set_device_index(device)
+        init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
+        ensure_model_parallel_initialized(tp_size, pp_size)
+        assert_rocm_custom_allreduce_backend_state(True, "NONE")
+
+        comm = get_tp_group().device_communicator
+        if not on_gfx950():
+            assert comm.ca_comm is None
+            assert comm.ca_comm_ar_bytes is None
+            return
+        lower, upper = ROCM_GFX950_CUSTOM_AR_OVER_AITER_RANGES[tp_size]
+        assert comm.ca_comm_ar_bytes == (lower, upper)
+        assert comm.ca_comm is not None and not comm.ca_comm.disabled
+
+        routed: list[str] = []
+
+        def record(name, fn):
+            def wrapper(inp):
+                routed.append(name)
+                return fn(inp)
+
+            return wrapper
+
+        for name, backend in (("vllm", comm.ca_comm), ("aiter", comm.aiter_ar_comm)):
+            m.setattr(
+                backend, "custom_all_reduce", record(name, backend.custom_all_reduce)
+            )
+
+        # AITER's one-stage kernel is the faster one for the smallest inputs.
+        cases = [
+            (16 * 1024, "aiter"),
+            (lower - 16, "aiter"),
+            (lower, "vllm"),
+            (upper - 16, "vllm"),
+            (upper, "aiter"),
+        ]
+        expected_sum = tp_size * (tp_size + 1) // 2
+        # The range is in bytes, so check each edge in both dtype widths.
+        for dtype in (torch.bfloat16, torch.float32):
+            for nbytes, expected_backend in cases:
+                inp = torch.full(
+                    (nbytes // dtype.itemsize,), rank + 1, dtype=dtype, device=device
+                )
+                routed.clear()
+                out = tensor_model_parallel_all_reduce(inp)
+                assert routed == [expected_backend], (nbytes, dtype, routed)
+                torch.testing.assert_close(out, torch.full_like(inp, expected_sum))
+
+        # Both communicators' graph buffers are registered under one capture.
+        inps = [
+            torch.full((nbytes // 2,), rank + 1, dtype=torch.bfloat16, device=device)
+            for nbytes, _ in cases
+        ]
+        with graph_capture(device=device) as graph_capture_context:
+            torch.accelerator.synchronize()
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph, stream=graph_capture_context.stream):
+                outs = [tensor_model_parallel_all_reduce(inp) for inp in inps]
+        for inp in inps:
+            inp.add_(1)
+        graph.replay()
+        for out, inp in zip(outs, inps):
+            torch.testing.assert_close(
+                out, torch.full_like(inp, expected_sum + tp_size)
+            )
+
+        # Sequence-parallel all-gather/reduce-scatter do not use this `ca_comm`.
+        inp = torch.ones((tp_size * 8, 1024), dtype=torch.bfloat16, device=device)
+        assert comm.custom_all_gather(inp) is None
+        assert comm.custom_reduce_scatter(inp) is None
+
+
+@pytest.mark.skipif(not is_aiter_found(), reason="AITER is not installed")
+@multi_gpu_test(num_gpus=2)
+def test_rocm_aiter_custom_allreduce_size_routing(monkeypatch: pytest.MonkeyPatch):
+    multi_process_parallel(monkeypatch, 2, 1, allreduce_size_routing)
+
+
 def _num_memcpy_nodes(graph: torch.cuda.CUDAGraph) -> int:
     hip = ctypes.CDLL(find_loaded_library("libamdhip64"))
     handle = ctypes.c_void_p(graph.raw_cuda_graph())

@@ -119,6 +119,21 @@ NCCL_SYMM_MEM_ALL_REDUCE_CONFIG: dict[str, Any] = {
     "always_use_above_world_size": 8,  # Always use symm mem for world_size > 8
 }
 
+# On gfx950, AITER's custom all-reduce runs its one-stage kernel for inputs below
+# 160 KiB at world size 4, and for every size at world size 2 (`select_ar_stage`
+# in AITER's csrc/include/custom_all_reduce.cuh). Over part of that range vLLM's
+# custom all-reduce is faster (MI355X, bf16, CUDA graphs):
+#   world size 4: custom_AR wins 64K - 152K (1.13x - 1.36x); AITER wins up to 32K
+#                 and, with its two-stage kernel, from 160K
+#   world size 2: custom_AR wins 64K - 1M (1.07x - 1.14x); AITER wins up to 32K,
+#                 and the two converge by 4M
+# The bytes in [lower_bound, upper_bound) go to vLLM's custom all-reduce, which is
+# then built alongside AITER's; every other size stays on AITER.
+ROCM_GFX950_CUSTOM_AR_OVER_AITER_RANGES: dict[int, tuple[int, int]] = {
+    2: (64 * KiB, 1 * MiB),
+    4: (64 * KiB, 160 * KiB),
+}
+
 
 def should_nccl_symm_mem_allreduce(world_size: int, input_tensor: torch.Tensor) -> bool:
     """Determine if NCCL symmetric memory allreduce should be used.

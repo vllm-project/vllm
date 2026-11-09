@@ -10,6 +10,7 @@ from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import get_current_vllm_config_or_none
 from vllm.distributed.device_communicators.all_reduce_utils import (
     NCCL_SYMM_MEM_ALL_REDUCE_CONFIG,
+    ROCM_GFX950_CUSTOM_AR_OVER_AITER_RANGES,
     should_nccl_symm_mem_ag_rs,
     should_nccl_symm_mem_allreduce,
 )
@@ -120,6 +121,10 @@ class CudaCommunicator(DeviceCommunicatorBase):
         self.aiter_ar_comm: AiterCustomAllreduce | None = None
         self.use_aiter_ag_rs: bool = False
         self.use_aiter_tp_all_gather: bool = False
+        # Input bytes [lower, upper) that `ca_comm` serves when it is built
+        # alongside `aiter_ar_comm`; None when `ca_comm` is the only custom
+        # all-reduce.
+        self.ca_comm_ar_bytes: tuple[int, int] | None = None
 
         # cuMem graph buffers cannot be IPC-registered; capture copies them instead.
         config = get_current_vllm_config_or_none()
@@ -155,7 +160,23 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 register_graph_buffers=register,
             )
 
-        if use_custom_allreduce and self.aiter_ar_comm is None and self.world_size > 1:
+        if (
+            self.aiter_ar_comm is not None
+            and not self.aiter_ar_comm.disabled
+            and current_platform.is_rocm()
+        ):
+            from vllm.platforms.rocm import on_gfx950
+
+            if on_gfx950():
+                self.ca_comm_ar_bytes = ROCM_GFX950_CUSTOM_AR_OVER_AITER_RANGES.get(
+                    self.world_size
+                )
+
+        if (
+            use_custom_allreduce
+            and self.world_size > 1
+            and (self.aiter_ar_comm is None or self.ca_comm_ar_bytes is not None)
+        ):
             # Initialize a custom fast all-reduce implementation.
             self.ca_comm = CustomAllreduce(
                 group=self.cpu_group,
@@ -165,6 +186,10 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 ),
                 register_graph_buffers=register,
             )
+            if self.ca_comm_ar_bytes is not None and self.ca_comm.disabled:
+                # Leave every size to AITER, as without the range.
+                self.ca_comm = None
+                self.ca_comm_ar_bytes = None
 
         # AITER custom all-gather/reduce-scatter DP-attention dispatch/combine.
         # AITER requires a torch.distributed-registered group and exchanges IPC
@@ -364,13 +389,17 @@ class CudaCommunicator(DeviceCommunicatorBase):
             enabled_ar_backends.append("NCCL_SYMM_MEM")
         if self.qr_comm is not None and not self.qr_comm.disabled:
             enabled_ar_backends.append("QUICK_REDUCE")
+        ca_enabled = self.ca_comm is not None and not self.ca_comm.disabled
+        if ca_enabled and self.ca_comm_ar_bytes is not None:
+            lower, upper = self.ca_comm_ar_bytes
+            enabled_ar_backends.append(f"CUSTOM ({lower // 1024}-{upper // 1024}KiB)")
         if (
             self.use_aiter_allreduce
             and self.aiter_ar_comm is not None
             and not self.aiter_ar_comm.disabled
         ):
             enabled_ar_backends.append("AITER_CUSTOM")
-        if self.ca_comm is not None and not self.ca_comm.disabled:
+        if ca_enabled and self.ca_comm_ar_bytes is None:
             enabled_ar_backends.append("CUSTOM")
         if self.symm_mem_comm is not None and not self.symm_mem_comm.disabled:
             enabled_ar_backends.append("SYMM_MEM")
@@ -421,6 +450,22 @@ class CudaCommunicator(DeviceCommunicatorBase):
             out = fi_ar_comm.all_reduce(input_)
             assert out is not None
             return out
+        # `ca_comm` and `aiter_ar_comm` coexist only when `ca_comm_ar_bytes` is
+        # set, so the order of these two legs matters only inside that range.
+        ca_comm = self.ca_comm
+        ca_comm_ar_bytes = self.ca_comm_ar_bytes
+        if (
+            ca_comm is not None
+            and not ca_comm.disabled
+            and (
+                ca_comm_ar_bytes is None
+                or ca_comm_ar_bytes[0] <= input_.nbytes < ca_comm_ar_bytes[1]
+            )
+            and ca_comm.should_custom_ar(input_)
+        ):
+            out = ca_comm.custom_all_reduce(input_)
+            assert out is not None
+            return out
         aiter_ar_comm = self.aiter_ar_comm
         if (
             self.use_aiter_allreduce
@@ -429,15 +474,6 @@ class CudaCommunicator(DeviceCommunicatorBase):
             and aiter_ar_comm.should_custom_ar(input_)
         ):
             out = aiter_ar_comm.custom_all_reduce(input_)
-            assert out is not None
-            return out
-        ca_comm = self.ca_comm
-        if (
-            ca_comm is not None
-            and not ca_comm.disabled
-            and ca_comm.should_custom_ar(input_)
-        ):
-            out = ca_comm.custom_all_reduce(input_)
             assert out is not None
             return out
         if (
@@ -474,13 +510,14 @@ class CudaCommunicator(DeviceCommunicatorBase):
 
     def custom_all_gather(self, input_: torch.Tensor) -> torch.Tensor | None:
         ca_comm = self.ca_comm
-        if ca_comm is None:
+        # A `ca_comm` built alongside AITER's serves only its all-reduce range.
+        if ca_comm is None or self.ca_comm_ar_bytes is not None:
             return None
         return ca_comm.custom_all_gather(input_.contiguous())
 
     def custom_reduce_scatter(self, input_: torch.Tensor) -> torch.Tensor | None:
         ca_comm = self.ca_comm
-        if ca_comm is None:
+        if ca_comm is None or self.ca_comm_ar_bytes is not None:
             return None
         return ca_comm.custom_reduce_scatter(input_.contiguous())
 
