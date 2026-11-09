@@ -254,9 +254,9 @@ class P2PSecondaryTierManager(SecondaryTierManager):
     ) -> None:
         """Initialize the P2P secondary tier manager.
 
-        All keyword arguments after ``parent_ctx`` come from the
-        ``secondary_tiers`` entry in ``kv_connector_extra_config``. See
-        ``docs/features/kv_offloading_usage.md`` for the user-facing
+        All keyword arguments after `parent_ctx` come from the
+        `secondary_tiers` entry in `kv_connector_extra_config`. See
+        `docs/features/kv_offloading_usage.md` for the user-facing
         configuration reference.
 
         Args:
@@ -264,7 +264,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
                 model, parallel, and cache layout configuration).
             parent_ctx: Handles into the composing tiering manager; the NIXL
                 agent registers the primary tier's KV buffer for RDMA.
-            tier_type: Tier identifier (defaults to ``"p2p"``).
+            tier_type: Tier identifier (defaults to `"p2p"`).
             host: Address the ZMQ control socket binds to, used verbatim
                 as both the bind address and the identity peers dial back
                 (mirrors the NIXL connector's `VLLM_NIXL_SIDE_CHANNEL_HOST`;

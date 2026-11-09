@@ -189,7 +189,6 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         # during drain_jobs().
         self._pending_results: list[JobResult] = []
         self._primary_reg = None
-        self._block_size_bytes: int = 0
         root_dir = f"{prefix}/" if prefix else ""
         # Opt in; FileMapper enables it only for a parallelism-invariant block.
         self._file_mapper = FileMapper.from_offloading_spec(

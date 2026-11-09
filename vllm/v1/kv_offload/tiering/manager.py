@@ -133,12 +133,12 @@ PrimaryAllocFn = Callable[
 
 
 class TieringTransferJob(TransferJob):
-    """TransferJob whose keys/chunk_ids are memoized in ``_keys_chunks``.
+    """TransferJob whose keys/chunk_ids are memoized in `_keys_chunks`.
 
-    A promotion job passes ``alloc_fn`` and materializes lazily, on the
+    A promotion job passes `alloc_fn` and materializes lazily, on the
     tier's first access, by claiming primary slots through it. A cascade
-    job passes ``chunk_ids`` instead and is materialized at construction.
-    ``_keys_chunks is None`` means the claim has not been materialized yet.
+    job passes `chunk_ids` instead and is materialized at construction.
+    `_keys_chunks is None` means the claim has not been materialized yet.
     """
 
     def __init__(
@@ -1469,7 +1469,7 @@ class TieringOffloadingManager(OffloadingManager):
 
         # _inflight_promotion_keys are updated as soon as promotions are initiated.
         # Work in _pending_load_submissions are never submitted (cleared below).
-        for tier_idx, pending_by_ctx in self._pending_load_submissions.items():
+        for _, pending_by_ctx in self._pending_load_submissions.items():
             for entry in pending_by_ctx.values():
                 self._inflight_promotion_keys.difference_update(entry.keys)
         assert not self._inflight_promotion_keys, (

@@ -284,7 +284,7 @@ class SecondaryTierManager(ABC):
         calling thread.
 
         Preconditions (guaranteed by the framework):
-          - the job's chunk_ids (see ``TransferJob.materialize()``) are valid
+          - the job's chunk_ids (see `TransferJob.materialize()`) are valid
             primary-tier slots, pinned (ref-counted) for the duration of the
             transfer.
 

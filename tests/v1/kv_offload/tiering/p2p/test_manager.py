@@ -3014,7 +3014,7 @@ class TestRetainedTransfers:
         assert JobResult(job_id=1, success=False) in mgr._finished_jobs
 
 
-def test_reset_cache_aborts_load_from_silent_peer(monkeypatch):
+def test_reset_cache_aborts_load_from_silent_peer(monkeypatch, manager_lock):
     """A decoder's reset must not wait out the load timeout of a fetch its
     prefiller never serves: the drain aborts the load, fails it at once, and
     returns as soon as the AbortAck releases the chunk."""
@@ -3040,6 +3040,7 @@ def test_reset_cache_aborts_load_from_silent_peer(monkeypatch):
         primary_tier=primary,
         secondary_tiers=[p2p_tier],
         tier_poll_interval_s=0.0,
+        lock=manager_lock,
     )
     conn = FakeConnection(peer_id=peer)
     session = P2PSession(
@@ -3058,13 +3059,20 @@ def test_reset_cache_aborts_load_from_silent_peer(monkeypatch):
     prepared = primary.prepare_write([key], ctx)
     assert prepared is not None
     assert isinstance(prepared.store_spec, CPULoadStoreSpec)
-    job = TransferJob(
+
+    def alloc_fn(keys, _ctx):
+        chunk_ids = prepared.store_spec.chunk_ids  # type: ignore[attr-defined]
+        tiering._metrics.on_promotion_allocated(0, len(chunk_ids))
+        return (list(keys), chunk_ids)
+
+    job = TieringTransferJob(
         job_id=7,
         keys=[key],
-        chunk_ids=prepared.store_spec.chunk_ids,
         is_promotion=True,
         req_context=ctx,
+        alloc_fn=alloc_fn,
     )
+    tiering.on_new_request(ctx)
     tiering._register_job(job, tier_idx=0)
     p2p_tier.submit_load(job)
 
