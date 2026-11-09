@@ -806,6 +806,14 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         self.kv_cache = kv_cache.squeeze(1)
         if (
             self._vllm_config.kernel_config.enable_jit_warmup
+            and self.kv_cache.numel() > 0
+        ):
+            from vllm.v1.attention.backends.mla.triton_mla import TritonMLAImpl
+
+            if isinstance(self.impl, TritonMLAImpl):
+                self.impl.register_decode_warmup(self.kv_cache, self.kv_cache_dtype)
+        if (
+            self._vllm_config.kernel_config.enable_jit_warmup
             and self._uses_flat_kv_cache()
         ):
             from vllm.v1.attention.backends.mla.sparse_utils import (
