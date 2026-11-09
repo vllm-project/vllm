@@ -109,8 +109,6 @@ def unsupported(vllm_config) -> list[str]:
         (parallel.prefill_context_parallel_size != 1, "prefill context parallel"),
         (vllm_config.model_config.enable_sleep_mode, "sleep mode"),
         (vllm_config.lora_config is not None, "LoRA"),
-        # The runner's ModelState hooks build the executor and prepare the KV layouts.
-        (not vllm_config.use_v2_model_runner, "the V1 model runner"),
         # The decode loop runs in forward; a compiled forward would trace it.
         (compilation.mode == CompilationMode.STOCK_TORCH_COMPILE, "torch.compile"),
         # The loop runs only in FULL decode graphs; eager and PIECEWISE steps run stock.

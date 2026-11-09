@@ -229,9 +229,9 @@ guide: |
   ([vLLM #63102](https://github.com/vllm-project/vllm/pull/63102)) runs decode and uniform MTP
   verify steps of up to 64 tokens on fused CuTe DSL kernels; prefill, mixed and larger steps keep
   the stock path. It is opt-in and refuses at startup with the list of unmet requirements: a GB300
-  (SM100 family) GPU, TP4 without pipeline, data, expert or context parallelism, Model Runner V2
-  with FULL decode CUDA graphs (the default `FULL_AND_PIECEWISE`), FP8 KV cache, no LoRA or sleep
-  mode, and either no speculation or MTP with at most 7 draft tokens.
+  (SM100 family) GPU, TP4 without pipeline, data, expert or context parallelism, FULL decode
+  CUDA graphs (the default `FULL_AND_PIECEWISE`), FP8 KV cache, no LoRA or sleep mode, and
+  either no speculation or MTP with at most 7 draft tokens.
 
   ```bash
   vllm serve zai-org/GLM-5.3-Flash \
