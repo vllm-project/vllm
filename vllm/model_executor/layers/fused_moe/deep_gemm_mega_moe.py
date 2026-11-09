@@ -258,6 +258,7 @@ class DeepGemmMegaMoEExperts(nn.Module):
 
     _symm_buffers: ClassVar[dict[tuple, Any]] = {}
     _synchronized_ep_groups: ClassVar[set[tuple[int, int]]] = set()
+    check_supported = staticmethod(check_deep_gemm_mega_moe_supported)
 
     def __init__(
         self,
@@ -288,7 +289,7 @@ class DeepGemmMegaMoEExperts(nn.Module):
             device = torch.device(
                 current_platform.device_type, torch.accelerator.current_device_index()
             )
-        check_deep_gemm_mega_moe_supported(device, hidden_size, intermediate_size)
+        self.check_supported(device, hidden_size, intermediate_size)
 
         self.prefix = prefix
         self.capture_fn: Callable[[torch.Tensor], None] | None = None
