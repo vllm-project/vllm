@@ -4,6 +4,7 @@
 from typing import Any
 
 import torch
+import torch.nn.functional as F
 
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
@@ -26,6 +27,7 @@ def _selector_walk_kernel(
     seeds_ptr,
     tokens_ptr,
     realized_scores_ptr,
+    tokens_stride,
     num_steps: tl.constexpr,
     top_k: tl.constexpr,
     BLOCK_K: tl.constexpr,
@@ -75,7 +77,7 @@ def _selector_walk_kernel(
             mask=mask & valid,
         )
         token = tl.load(candidate_ptr + candidate_base + index, mask=valid, other=0)
-        tl.store(tokens_ptr + flat, token, mask=valid)
+        tl.store(tokens_ptr + row * tokens_stride + step, token, mask=valid)
         previous = index
 
 
@@ -90,6 +92,7 @@ def _cache_draft_logits_kernel(
     draft_logits_stride_0,
     draft_logits_stride_1,
     num_steps: tl.constexpr,
+    cache_steps: tl.constexpr,
     top_k: tl.constexpr,
     BLOCK_K: tl.constexpr,
 ):
@@ -100,7 +103,9 @@ def _cache_draft_logits_kernel(
     row = draft_logits_row(req_state, draft_logits_row_mapping_ptr)
     mask = (row >= 0) & (offsets < top_k)
     candidate_base = flat * top_k
-    cache_base = (row * num_steps + step) * top_k
+    # The cache keeps one row of cache_steps steps per request, whatever the
+    # width of this draft pass, so later passes reset the right entries.
+    cache_base = (row * cache_steps + step) * top_k
     old_token_ids = tl.load(cached_candidate_ptr + cache_base + offsets, mask=mask)
     logits_base = (
         draft_logits_ptr + row * draft_logits_stride_0 + step * draft_logits_stride_1
@@ -139,7 +144,10 @@ class CandidateSampler:
         draft_tokens: torch.Tensor,
         draft_logits: DraftLogitsCache | None,
         use_fp64: bool,
+        num_steps: int | None = None,
     ) -> None:
+        """Walk the first `num_steps` steps (default: all) of each request."""
+        num_steps = self.num_steps if num_steps is None else num_steps
         candidate_ids = candidate_ids.contiguous()
         sample_pos = sample_pos.contiguous()
         idx_mapping = idx_mapping.contiguous()
@@ -153,7 +161,8 @@ class CandidateSampler:
             seeds,
             draft_tokens,
             self.scores,
-            num_steps=self.num_steps,
+            draft_tokens.stride(0),
+            num_steps=num_steps,
             top_k=self.top_k,
             BLOCK_K=block_k,
             SAMPLE_PROBABILISTIC=draft_logits is not None,
@@ -164,9 +173,10 @@ class CandidateSampler:
         if draft_logits is not None:
             self._cache_draft_logits(
                 candidate_ids,
-                num_reqs * self.num_steps,
+                num_reqs * num_steps,
                 idx_mapping,
                 draft_logits,
+                num_steps,
             )
 
     def _cache_draft_logits(
@@ -175,6 +185,7 @@ class CandidateSampler:
         num_sample: int,
         idx_mapping: torch.Tensor,
         draft_logits: DraftLogitsCache,
+        num_steps: int,
     ) -> None:
         block_k = triton.next_power_of_2(self.top_k)
         _cache_draft_logits_kernel[(num_sample,)](
@@ -186,7 +197,8 @@ class CandidateSampler:
             draft_logits.row_mapping,
             draft_logits.values.stride(0),
             draft_logits.values.stride(1),
-            num_steps=self.num_steps,
+            num_steps=num_steps,
+            cache_steps=self.num_steps,
             top_k=self.top_k,
             BLOCK_K=block_k,
             num_warps=1,
@@ -195,7 +207,6 @@ class CandidateSampler:
 
 class DFlash2Speculator(DFlashSpeculator):
     _speculator_name = "DFlash2"
-    _supports_narrow_draft_block = False
     _candidate_top_k_key = "selector_top_k"
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
@@ -221,6 +232,10 @@ class DFlash2Speculator(DFlashSpeculator):
         num_tokens_across_dp: torch.Tensor | None,
         cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
     ) -> None:
+        num_steps = self.num_draft_steps
+        if len(self.draft_block_steps) > 1:
+            # Inside the FULL graph, so each width's graph sets its own.
+            self.model.model.set_draft_block_size(1 + num_steps)
         last_hidden_states = self._run_model(
             num_tokens_padded,
             attn_metadata,
@@ -228,16 +243,14 @@ class DFlash2Speculator(DFlashSpeculator):
             num_tokens_across_dp,
             cudagraph_runtime_mode,
         )
-        num_sample = num_reqs * self.num_speculative_steps
+        num_sample = num_reqs * num_steps
         hidden_states = last_hidden_states[self.sample_indices[:num_sample]].view(
-            num_reqs, self.num_speculative_steps, -1
+            num_reqs, num_steps, -1
         )
         candidate_ids, unary_logits = self.model.compute_candidates(
             hidden_states.flatten(0, 1)
         )
-        candidate_ids = candidate_ids.view(
-            num_reqs, self.num_speculative_steps, self.top_k
-        )
+        candidate_ids = candidate_ids.view(num_reqs, num_steps, self.top_k)
         unary_logits = unary_logits.view_as(candidate_ids)
         scores = self._score_candidates(candidate_ids, unary_logits, hidden_states)
         self.candidate_sampler.sample(
@@ -251,10 +264,11 @@ class DFlash2Speculator(DFlashSpeculator):
             self.draft_tokens,
             self.draft_logits,
             self.use_fp64_gumbel,
+            num_steps,
         )
         if self.enable_adaptive_verification:
             self._maybe_predict_acceptance(
-                self.candidate_sampler.scores[:num_reqs].flatten(0, 1),
+                self.candidate_sampler.scores.view(-1, self.top_k)[:num_sample],
                 self.sample_idx_mapping[:num_sample],
                 self.sample_col[:num_sample],
             )
@@ -265,10 +279,23 @@ class DFlash2Speculator(DFlashSpeculator):
         unary_logits: torch.Tensor,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
-        num_reqs = candidate_ids.shape[0]
+        num_reqs, num_steps = candidate_ids.shape[:2]
+        num_query_per_req = 1 + num_steps
         anchor_token_ids = self.input_buffers.input_ids[
-            : num_reqs * self.num_query_per_req : self.num_query_per_req
+            : num_reqs * num_query_per_req : num_query_per_req
         ]
-        return self.model.model.candidate_selector(
-            candidate_ids, unary_logits, hidden_states, anchor_token_ids
+        num_pad = self.num_speculative_steps - num_steps
+        if num_pad == 0:
+            return self.model.model.candidate_selector(
+                candidate_ids, unary_logits, hidden_states, anchor_token_ids
+            )
+        # The selector is compiled for num_speculative_steps steps. A step's
+        # scores depend only on it and the step before, so padded trailing
+        # steps leave the first num_steps unchanged.
+        scores = self.model.model.candidate_selector(
+            F.pad(candidate_ids, (0, 0, 0, num_pad)),
+            F.pad(unary_logits, (0, 0, 0, num_pad)),
+            F.pad(hidden_states, (0, 0, 0, num_pad)),
+            anchor_token_ids,
         )
+        return scores[:, :num_steps]

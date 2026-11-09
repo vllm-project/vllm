@@ -16,7 +16,11 @@ from vllm.model_executor.models.qwen3_dflash2 import (
 )
 from vllm.platforms import current_platform
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
-from vllm.v1.worker.gpu.spec_decode.dflash2.speculator import DFlash2Speculator
+from vllm.v1.worker.gpu.spec_decode.dflash2.speculator import (
+    CandidateSampler,
+    DFlash2Speculator,
+)
+from vllm.v1.worker.gpu.spec_decode.draft_logits import DraftLogitsCache
 from vllm.v1.worker.gpu.spec_decode.lilicorr.speculator import LiLiCorrSpeculator
 
 
@@ -947,7 +951,7 @@ def test_draft_block_steps_follow_the_schedule(narrow, schedule, expected):
 
 
 def test_narrow_draft_block_rejects_unsupported_speculators():
-    assert not DFlash2Speculator._supports_narrow_draft_block
+    assert DFlash2Speculator._supports_narrow_draft_block
     assert not LiLiCorrSpeculator._supports_narrow_draft_block
     spec = SimpleNamespace(
         num_speculative_steps=7,
@@ -959,3 +963,117 @@ def test_narrow_draft_block_rejects_unsupported_speculators():
         DFlashSpeculator._get_draft_block_steps(
             spec, _block_steps_config(True, [(1, 8, 3)])
         )
+
+
+def test_padded_selector_steps_leave_leading_scores_unchanged():
+    """Narrowed DFlash2 pads the selector input to its compiled step count."""
+    torch.manual_seed(0)
+    batch, steps, num_steps, top_k, vocab, rank = 3, 5, 2, 4, 32, 6
+    predecessor = torch.randn(vocab, rank)
+    successor = torch.randn(vocab, rank)
+    candidates = torch.randint(0, vocab, (batch, num_steps, top_k))
+    unary = torch.randn(batch, num_steps, top_k)
+    hidden = torch.randn(batch, num_steps, rank)
+    anchors = torch.randint(0, vocab, (batch,))
+    pad = (0, 0, 0, steps - num_steps)
+
+    expected = _score_edges(
+        predecessor, successor, candidates, unary, hidden, anchors, top_k
+    )
+    padded = _score_edges(
+        predecessor,
+        successor,
+        torch.nn.functional.pad(candidates, pad),
+        torch.nn.functional.pad(unary, pad),
+        torch.nn.functional.pad(hidden, pad),
+        anchors,
+        top_k,
+    )
+    torch.testing.assert_close(padded[:, :num_steps], expected)
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
+def test_grouped_conv_reads_block_size_at_run_time():
+    """One captured graph can serve a new block width set in place."""
+    torch.manual_seed(0)
+    taps, num_groups, group_size = 3, 4, 8
+    rows = 24
+    hidden = torch.randn(rows, num_groups * group_size, device="cuda")
+    delta = torch.randn(rows, taps, num_groups, device="cuda")
+    base = torch.randn(taps, num_groups * group_size, device="cuda")
+    block_size = torch.tensor([8], dtype=torch.int32, device="cuda")
+    output = torch.empty_like(hidden)
+
+    def run():
+        output.copy_(
+            _grouped_conv(hidden, delta, base, block_size, num_groups, group_size, taps)
+        )
+
+    run()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        run()
+    for width in (8, 3, 4):
+        block_size.fill_(width)
+        graph.replay()
+        expected = _grouped_conv(
+            hidden.cpu(), delta.cpu(), base.cpu(), width, num_groups, group_size, taps
+        )
+        torch.testing.assert_close(output.cpu(), expected, rtol=1e-5, atol=1e-5)
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
+def test_narrowed_candidate_walk_keeps_full_width_cache_rows():
+    """A narrow pass writes tokens and cached logits at full-width offsets, so a
+    later full pass resets every entry the narrow pass cached."""
+    device = torch.device("cuda")
+    batch, steps, num_steps, top_k, vocab = 2, 4, 2, 4, 64
+    candidates = torch.arange(batch * steps * top_k, device=device).view(
+        batch, steps, top_k
+    )
+    scores = torch.randn(batch, steps, top_k, top_k, device=device)
+    temperature = torch.zeros(batch, device=device)
+    seeds = torch.zeros(batch, dtype=torch.int64, device=device)
+
+    def walk(sampler, cache, cand, width):
+        tokens = torch.full((batch, steps), -1, dtype=torch.long, device=device)
+        sampler.sample(
+            cand[:, :width].contiguous(),
+            scores[:, :width].contiguous(),
+            batch,
+            torch.arange(batch * width, device=device),
+            torch.arange(batch, device=device).repeat_interleave(width),
+            temperature,
+            seeds,
+            tokens,
+            cache,
+            False,
+            width,
+        )
+        return tokens
+
+    def new_cache():
+        return DraftLogitsCache(
+            batch, steps, vocab, dtype=torch.float32, fill=-float("inf"), device=device
+        )
+
+    full = walk(
+        CandidateSampler(batch, steps, top_k, device), new_cache(), candidates, steps
+    )
+
+    sampler, cache = CandidateSampler(batch, steps, top_k, device), new_cache()
+    narrow = walk(sampler, cache, candidates, num_steps)
+    torch.testing.assert_close(narrow[:, :num_steps], full[:, :num_steps])
+    assert (narrow[:, num_steps:] == -1).all()
+    for row in range(batch):
+        for step in range(num_steps):
+            assert cache.values[row, step, candidates[row, step]].isfinite().all()
+
+    # Disjoint candidates: the full pass must clear everything cached before.
+    shifted = candidates + batch * steps * top_k
+    walk(sampler, cache, shifted, steps)
+    finite = cache.values.isfinite()
+    assert finite.sum().item() == batch * steps * top_k
+    for row in range(batch):
+        for step in range(steps):
+            assert finite[row, step, shifted[row, step]].all()

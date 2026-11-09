@@ -29,13 +29,13 @@ def _dflash2_grouped_conv_kernel(
     delta_ptr,
     base_ptr,
     output_ptr,
+    block_size_ptr,
     x_stride_row,
     delta_stride_row,
     delta_stride_tap,
     base_stride_tap,
     output_stride_row,
     NUM_CHANNELS: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr,
     GROUP_SIZE: tl.constexpr,
     TAPS: tl.constexpr,
     ELEMENT_BLOCK: tl.constexpr,
@@ -45,7 +45,7 @@ def _dflash2_grouped_conv_kernel(
     channels = col_block * ELEMENT_BLOCK + tl.arange(0, ELEMENT_BLOCK)
     mask = channels < NUM_CHANNELS
     groups = channels // GROUP_SIZE
-    position = row % BLOCK_SIZE
+    position = row % tl.load(block_size_ptr)
 
     delta_row = delta_ptr + row * delta_stride_row
     x_row = x_ptr + row * x_stride_row
@@ -83,10 +83,14 @@ def dflash2_grouped_conv_impl(
     x: torch.Tensor,
     delta: torch.Tensor,
     base: torch.Tensor,
-    block_size: int,
+    block_size: torch.Tensor,
     group_size: int,
 ) -> torch.Tensor:
-    """DFlash2 grouped convolution adapted from LightSeek TokenSpeed PR #1399."""
+    """DFlash2 grouped convolution adapted from LightSeek TokenSpeed PR #1399.
+
+    `block_size` is a one-element int32 tensor holding the query tokens per
+    request, read at run time so one compiled graph serves every block width.
+    """
     num_rows, num_channels = x.shape
     output = torch.empty_like(x)
     if num_rows == 0:
@@ -99,13 +103,13 @@ def dflash2_grouped_conv_impl(
         delta,
         base,
         output,
+        block_size,
         x.stride(0),
         delta.stride(0),
         delta.stride(1),
         base.stride(0),
         output.stride(0),
         NUM_CHANNELS=num_channels,
-        BLOCK_SIZE=block_size,
         GROUP_SIZE=group_size,
         TAPS=base.shape[0],
         ELEMENT_BLOCK=element_block,
@@ -118,7 +122,7 @@ def dflash2_grouped_conv_fake(
     x: torch.Tensor,
     delta: torch.Tensor,
     base: torch.Tensor,
-    block_size: int,
+    block_size: torch.Tensor,
     group_size: int,
 ) -> torch.Tensor:
     return torch.empty_like(x)
@@ -136,7 +140,7 @@ def dflash2_grouped_conv(
     x: torch.Tensor,
     delta: torch.Tensor,
     base: torch.Tensor,
-    block_size: int,
+    block_size: torch.Tensor,
     group_size: int,
 ) -> torch.Tensor:
     return torch.ops.vllm.dflash2_grouped_conv(x, delta, base, block_size, group_size)
@@ -146,14 +150,20 @@ def _grouped_conv(
     hidden_states: torch.Tensor,
     delta: torch.Tensor,
     base: torch.Tensor,
-    block_size: int,
+    block_size: int | torch.Tensor,
     num_groups: int,
     group_size: int,
     taps: int,
 ) -> torch.Tensor:
     if hidden_states.is_cuda:
+        if isinstance(block_size, int):
+            block_size = torch.tensor(
+                [block_size], dtype=torch.int32, device=hidden_states.device
+            )
         return dflash2_grouped_conv(hidden_states, delta, base, block_size, group_size)
 
+    if isinstance(block_size, torch.Tensor):
+        block_size = int(block_size.item())
     blocks = hidden_states.unflatten(-1, (num_groups, group_size))
     coefficients = base.view(1, taps, num_groups, group_size) + delta.unsqueeze(-1)
     output = coefficients[:, 0] * blocks
@@ -185,6 +195,13 @@ class DFlashGroupedConv(nn.Module):
                 f"conv_group_size={group_size} must divide hidden_size={hidden_size}."
             )
         self.block_size = block_size
+        # The block width the forward reads; set_draft_block_size updates it in
+        # place, so one compiled graph serves every width.
+        self.register_buffer(
+            "runtime_block_size",
+            torch.tensor([block_size], dtype=torch.int32),
+            persistent=False,
+        )
         self.taps = taps
         self.group_size = group_size
         self.num_groups = hidden_size // group_size
@@ -209,7 +226,7 @@ class DFlashGroupedConv(nn.Module):
             hidden_states,
             delta,
             self.base_kernel[side],
-            self.block_size,
+            self.runtime_block_size,
             self.num_groups,
             self.group_size,
             self.taps,
@@ -510,6 +527,11 @@ class CandidateSelector(nn.Module):
 class DFlash2Qwen3Model(DFlashQwen3Model):
     decoder_layer_cls = DFlash2Qwen3DecoderLayer
 
+    def set_draft_block_size(self, block_size: int) -> None:
+        """Set the query tokens per request of the next forward."""
+        for conv in self._grouped_convs:
+            conv.runtime_block_size.fill_(block_size)
+
     def __init__(
         self,
         *,
@@ -526,6 +548,9 @@ class DFlash2Qwen3Model(DFlashQwen3Model):
         self.input_embedding_scale = float(
             draft_config.get("input_embedding_scale", 1.0)
         )
+        self._grouped_convs = [
+            m for m in self.modules() if isinstance(m, DFlashGroupedConv)
+        ]
         # Without its own tag the selector shares the draft head's compile cache.
         with set_model_tag("dflash2_candidate_selector"):
             self.candidate_selector = CandidateSelector(

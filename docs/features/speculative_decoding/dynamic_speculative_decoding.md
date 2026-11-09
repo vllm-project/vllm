@@ -34,7 +34,7 @@ implies that:
 
 ### Narrowing the DFlash draft block
 
-DFlash drafts every token in one forward pass over `1 + num_speculative_tokens` query positions per request, and by default it keeps that width when the schedule picks a smaller K, so drafting costs the same at K=1 as at the maximum. Set `narrow_dflash_draft_block` to `true` to run the pass over `1 + K` positions instead. It is off by default.
+DFlash and DFlash2 draft every token in one forward pass over `1 + num_speculative_tokens` query positions per request, and by default they keep that width when the schedule picks a smaller K, so drafting costs the same at K=1 as at the maximum. Set `narrow_dflash_draft_block` to `true` to run the pass over `1 + K` positions instead. It is off by default.
 
 ```bash
 --speculative-config '{
@@ -50,7 +50,7 @@ DFlash drafts every token in one forward pass over `1 + num_speculative_tokens` 
   }'
 ```
 
-* Supported for DFlash drafters. DSpark, XPress, LiLiCorr and DFlash2 drafters reject it.
+* Supported for DFlash and DFlash2 drafters. DSpark, XPress and LiLiCorr drafters reject it.
 * It has no effect without `num_speculative_tokens_per_batch_size`.
 * The drafter captures FULL CUDA graphs for each K in the schedule, each up to the largest batch size that uses it.
 * The mask positions of a block attend to each other, so a shorter block can change the drafts. The target still verifies every draft token.

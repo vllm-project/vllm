@@ -354,6 +354,8 @@ def test_candidate_generation_routes_scores_and_adaptive_inputs(monkeypatch, lil
         self.max_num_reqs = 3
         self.num_speculative_steps = 2
         self.num_query_per_req = 3
+        self.num_draft_steps = 2
+        self.draft_block_steps = [2]
         self.dtype = torch.float32
 
     monkeypatch.setattr(DFlashSpeculator, "__init__", init_base)
