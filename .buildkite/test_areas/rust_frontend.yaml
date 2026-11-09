@@ -207,8 +207,7 @@ steps:
     --ignore=tool_use/mistral
     --models llama3.2
   # The Rust renderer rejects empty tool-call arguments in the history (Python treats them as {}).
-  # Under an answer constraint the Rust grammar keeps tool calls optional, so the regex does not force text after a call.
-  - pytest -v -s entrypoints/openai/chat_completion/test_completion_with_function_calling.py -k "not test_no_args_tool_call and not test_non_streaming_preserves_text_after_tool_call"
+  - pytest -v -s entrypoints/openai/chat_completion/test_completion_with_function_calling.py -k "not test_no_args_tool_call"
   - pytest -v -s entrypoints/tool_parsers/test_granite4_tool_parser.py
   # The llama cases use --lora-modules, which fails at startup until the Rust LoRA request drops tensorizer_config_dict.
   - pytest -v -s entrypoints/tool_parsers/test_hermes_tool_parser.py -k granite4

@@ -488,11 +488,13 @@ class ParserEngine(Parser):
             if tool_choice == "none" and tools:
                 self._suppress_tool_calls = True
 
-    def _strip_content_whitespace(
+    def _normalize_content(
         self,
-        content: str,
+        content: str | None,
+        trailing_content: str | None,
         tools_called: bool,
     ) -> str | None:
+        content = (content or "") + (trailing_content or "")
         if tools_called:
             if self._strip_content_ws_with_tools:
                 content = content.strip()
@@ -649,17 +651,11 @@ class ParserEngine(Parser):
         so it can parse content that has already had reasoning stripped.
         """
         self._check_skip_tool_parsing(request)
-        _, parsed_content, tool_call_info = self._single_pass_parse(
+        _, tool_call_info = self._single_pass_parse(
             content,
             [],
             initial_state=ParserState.CONTENT,
         )
-        if parsed_content is not None and tool_call_info.content is None:
-            tool_call_info = ExtractedToolCallInformation(
-                tools_called=tool_call_info.tools_called,
-                tool_calls=tool_call_info.tool_calls,
-                content=parsed_content,
-            )
         return tool_call_info
 
     def extract_tool_calls_streaming(
@@ -790,7 +786,7 @@ class ParserEngine(Parser):
         text: str,
         token_ids: Sequence[int],
         initial_state: ParserState | None = None,
-    ) -> tuple[str | None, str | None, ExtractedToolCallInformation]:
+    ) -> tuple[str | None, ExtractedToolCallInformation]:
         """Reset, feed, finish, and extract results in one pass.
 
         Must be called as a unit — ``_events_to_delta`` populates tool
@@ -800,38 +796,25 @@ class ParserEngine(Parser):
             self._complete_tool_call_validator is not None
             and self._complete_tool_call_validator(text) is False
         ):
-            return (
-                None,
-                text or None,
-                ExtractedToolCallInformation(
-                    tools_called=False,
-                    tool_calls=[],
-                    content=text,
-                ),
+            return None, ExtractedToolCallInformation(
+                tools_called=False,
+                tool_calls=[],
+                content=text,
             )
         self._reset(initial_state=initial_state)
         events = self._feed(text, token_ids)
         events.extend(self._engine.finish())
 
         delta = self._events_to_delta(events, finished=True)
-        tool_call_info = self._build_extracted_result()
+        deferred_delta = (
+            self._events_to_delta([], finished=True) if self._deferred_content else None
+        )
 
         reasoning = delta.reasoning if delta else None
         if reasoning and self._strip_trailing_reasoning_ws:
             reasoning = reasoning.rstrip() or None
 
-        content = delta.content if delta else None
-        # A complete parse must include text deferred for streaming ordering.
-        if self._deferred_content:
-            deferred_delta = self._events_to_delta([], finished=True)
-            if deferred_delta and deferred_delta.content:
-                content = (content or "") + deferred_delta.content
-        if content:
-            content = self._strip_content_whitespace(
-                content, tool_call_info.tools_called
-            )
-
-        return reasoning, content, tool_call_info
+        return reasoning, self._build_extracted_result(delta, deferred_delta)
 
     # ── Non-streaming: parse ───────────────────────────────────────────
 
@@ -844,7 +827,7 @@ class ParserEngine(Parser):
     ) -> tuple[str | None, str | None, list[FunctionCall] | None]:
         self._initialize_history_tool_call_cnt(request)
         self._check_skip_tool_parsing(request)
-        reasoning, content, tool_call_info = self._single_pass_parse(
+        reasoning, tool_call_info = self._single_pass_parse(
             model_output,
             model_output_token_ids,
         )
@@ -860,7 +843,7 @@ class ParserEngine(Parser):
                 for tc in tool_call_info.tool_calls
             ]
 
-        return reasoning, content, tool_calls
+        return reasoning, tool_call_info.content or None, tool_calls
 
     # ── Event-to-delta conversion ─────────────────────────────────────
 
@@ -1189,13 +1172,9 @@ class ParserEngine(Parser):
 
     def _build_extracted_result(
         self,
-        *deltas: DeltaMessage | None,
+        delta: DeltaMessage | None = None,
+        finish_delta: DeltaMessage | None = None,
     ) -> ExtractedToolCallInformation:
-        content_parts: list[str] = []
-        for delta in deltas:
-            if delta is not None and delta.content:
-                content_parts.append(delta.content)
-
         tool_calls: list[ToolCall] = []
         for idx, slot in enumerate(self._tool_slots):
             if not slot.name and not slot.args:
@@ -1231,13 +1210,14 @@ class ParserEngine(Parser):
                     )
                 )
 
-        content_str = "".join(content_parts)
-        content = self._strip_content_whitespace(content_str, len(tool_calls) > 0)
-
         return ExtractedToolCallInformation(
-            tools_called=len(tool_calls) > 0,
+            tools_called=bool(tool_calls),
             tool_calls=tool_calls,
-            content=content,
+            content=self._normalize_content(
+                delta.content if delta else None,
+                finish_delta.content if finish_delta else None,
+                bool(tool_calls),
+            ),
         )
 
     @staticmethod

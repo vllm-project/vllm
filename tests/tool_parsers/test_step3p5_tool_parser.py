@@ -981,13 +981,7 @@ rectangle
 def test_extract_tool_calls_non_streaming_mixed_content_and_multiple_tool_calls(
     step3p5_tool_parser, sample_tools
 ):
-    """Test non-streaming extraction with mixed content and multiple tool calls.
-
-    Scenario: Model outputs "hello" + complete tool call + "hi" + complete tool call.
-    Expected: "hello" as content, first tool call parsed (index=0), second tool call
-    parsed (index=1). Non-streaming content stops at the first tool call.
-    """
-    # Model output: hello + complete tool call + hi + complete tool call
+    """A complete response keeps the text before and between its two tool calls."""
     model_output = """hello<tool_call>
 <function=get_current_weather>
 <parameter=city>

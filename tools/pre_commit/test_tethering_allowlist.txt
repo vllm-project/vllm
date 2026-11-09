@@ -123,8 +123,6 @@ tests/parser/engine/test_engine.py  # CI jobs disabled pending locked cmake inst
 tests/parser/engine/test_gemma4_streaming_reasoning.py  # CI jobs disabled pending locked cmake installation
 tests/parser/engine/test_glm47_moe.py  # CI jobs disabled pending locked cmake installation
 tests/parser/engine/test_granite.py  # CI jobs disabled pending locked cmake installation
-tests/parser/engine/test_inkling.py  # CI jobs disabled pending locked cmake installation
-tests/parser/engine/test_llama_json.py  # CI jobs disabled pending locked cmake installation
 tests/parser/engine/test_ling3.py  # CI jobs disabled pending locked cmake installation
 tests/parser/engine/test_minicpmv_reasoning.py  # CI jobs disabled pending locked cmake installation
 tests/parser/engine/test_minimax_m2.py  # CI jobs disabled pending locked cmake installation
@@ -147,7 +145,6 @@ tests/parser/test_chat_parsing.py  # CI jobs disabled pending locked cmake insta
 tests/parser/test_harmony.py  # CI jobs disabled pending locked cmake installation
 tests/parser/test_include_reasoning.py  # CI jobs disabled pending locked cmake installation
 tests/parser/test_parse.py  # CI jobs disabled pending locked cmake installation
-tests/parser/test_response_template.py  # CI jobs disabled pending locked cmake installation
 tests/parser/test_response_template_grammar.py  # CI jobs disabled pending locked cmake installation
 tests/parser/test_streaming.py  # CI jobs disabled pending locked cmake installation
 tests/plugins_tests/bitsandbytes/test_bitsandbytes.py  # CI jobs disabled pending locked BitsAndBytes plugin installation

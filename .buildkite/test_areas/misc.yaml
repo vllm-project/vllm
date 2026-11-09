@@ -879,7 +879,12 @@ steps:
   source_file_dependencies: *cpu-async-engine-deps
   device: cpu-small
   commands:
-  - pytest -v -s tool_parsers
+  - >-
+    pytest -v -s
+    tool_parsers
+    parser/engine/test_inkling.py
+    parser/engine/test_llama_json.py
+    parser/test_response_template.py
 
 # Key kept from the former A100 step's mirror for job history and retries.
 - label: ":amd: (MI250) Batch Invariance"

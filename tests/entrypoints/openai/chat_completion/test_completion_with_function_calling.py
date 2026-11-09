@@ -8,7 +8,6 @@ import jsonschema
 import openai  # use the official client for correctness check
 import pytest
 import pytest_asyncio
-import regex as re
 
 # downloading lora to test lora requests
 from tests.utils import ROCM_EXTRA_ARGS, RemoteOpenAIServer
@@ -207,7 +206,7 @@ async def test_non_streaming_preserves_text_after_tool_call(client: openai.Async
         max_completion_tokens=128,
         extra_body={
             "chat_template_kwargs": {"enable_thinking": False},
-            "structured_outputs": {"regex": re.escape(text)},
+            "structured_outputs": {"grammar": f"start: {json.dumps(text)}"},
         },
     )
 
