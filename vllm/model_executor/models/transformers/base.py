@@ -183,7 +183,7 @@ class Base(
             for name, module in self.model.named_modules()
             if module in input_embeddings and isinstance(module, nn.Embedding)
         }
-        self.embedding_modules = self.embedding_modules | input_embedding_modules  # type: ignore[misc]
+        self.embedding_modules = self.embedding_modules | input_embedding_modules
 
         # Create weight name to module qualname mapper
         self._create_hf_to_vllm_mapper()
