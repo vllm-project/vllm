@@ -600,10 +600,9 @@ def _model_options(tp_size, mode):
 @pytest.mark.skipif(
     not current_platform.is_device_capability_family(100), reason="SM100 required"
 )
-@pytest.mark.parametrize("runner_version", [1, 2], ids=["mrv1", "mrv2"])
 @pytest.mark.parametrize("tp_size", [2, 4])
 def test_sharded_model_matches_replicated(
-    vllm_runner, tiny_m3_checkpoint, monkeypatch, tp_size, runner_version, cake_indexer
+    vllm_runner, tiny_m3_checkpoint, monkeypatch, tp_size, cake_indexer
 ):
     """The same checkpoint must produce the same greedy tokens with CP on/off."""
     from vllm import SamplingParams
@@ -611,7 +610,6 @@ def test_sharded_model_matches_replicated(
     if torch.accelerator.device_count() < tp_size:
         pytest.skip(f"Requires {tp_size} GPUs")
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", str(runner_version - 1))
     prompts = [
         {"prompt_token_ids": [i % 251 for i in range(length)]} for length in (129, 2305)
     ]
@@ -659,9 +657,8 @@ def _dummy_preserves_caches(worker):
     not current_platform.is_device_capability_family(100), reason="SM100 required"
 )
 @pytest.mark.parametrize("eager", [False, True], ids=["piecewise", "eager"])
-@pytest.mark.parametrize("runner_version", [1, 2], ids=["mrv1", "mrv2"])
 def test_dummy_batch_preserves_index_cache(
-    vllm_runner, tiny_m3_checkpoint, monkeypatch, eager, runner_version, cake_indexer
+    vllm_runner, tiny_m3_checkpoint, monkeypatch, eager, cake_indexer
 ):
     """An idle worker's dummy batch must not overwrite cached prefix pages."""
     from vllm import SamplingParams
@@ -669,7 +666,6 @@ def test_dummy_batch_preserves_index_cache(
     if torch.accelerator.device_count() < 2:
         pytest.skip("Requires 2 GPUs")
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", str(runner_version - 1))
     with vllm_runner(
         tiny_m3_checkpoint, **_model_options(2, "on"), enforce_eager=eager
     ) as runner:
