@@ -1645,15 +1645,11 @@ def get_dcp_world_size_and_rank(enabled: bool = True) -> tuple[int, int]:
 _PP: GroupCoordinator | None = None
 # This rank alone as a PP group, created when PP > 1 for `single_pp_stage()`.
 _PP_SINGLE_STAGE: GroupCoordinator | None = None
-# Whether `get_pp_group()` returns `_PP_SINGLE_STAGE`. A module global, like the
-# forward context, so that torch.compile traces `get_pp_group()`.
-_IN_SINGLE_PP_STAGE = False
 
 
 def get_pp_group() -> GroupCoordinator:
-    group = _PP_SINGLE_STAGE if _IN_SINGLE_PP_STAGE else _PP
-    assert group is not None, "pipeline model parallel group is not initialized"
-    return group
+    assert _PP is not None, "pipeline model parallel group is not initialized"
+    return _PP
 
 
 @contextmanager
@@ -1666,21 +1662,21 @@ def single_pp_stage() -> Iterator[None]:
     the PP group, or communicates over it, behaves as at PP=1. Without a PP
     group of more than one rank (PP=1, unit tests), the context does nothing.
     """
-    global _IN_SINGLE_PP_STAGE
-    if _PP_SINGLE_STAGE is None or _IN_SINGLE_PP_STAGE:
+    global _PP
+    if _PP_SINGLE_STAGE is None or _PP is _PP_SINGLE_STAGE:
         yield
         return
-    _IN_SINGLE_PP_STAGE = True
+    pp_group, _PP = _PP, _PP_SINGLE_STAGE
     try:
         yield
     finally:
-        _IN_SINGLE_PP_STAGE = False
+        _PP = pp_group
 
 
 def in_single_pp_stage() -> bool:
     """Whether `single_pp_stage()` is active on a PP group of more than one
     rank, i.e. the other pipeline stages do not run the current model."""
-    return _IN_SINGLE_PP_STAGE
+    return _PP_SINGLE_STAGE is not None and _PP is _PP_SINGLE_STAGE
 
 
 _DP: GroupCoordinator | None = None
