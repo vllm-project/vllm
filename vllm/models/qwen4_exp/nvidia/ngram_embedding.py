@@ -4,15 +4,14 @@
 
 import mmap
 import os
-from collections.abc import Callable, Iterable
-from functools import partial
+from collections.abc import Iterable
 
 import torch
 from torch import nn
 from transformers import Qwen4ExpTextConfig
 
 from vllm.config import get_current_vllm_config
-from vllm.distributed import get_etp_group, get_tp_group
+from vllm.distributed import get_engram_dp_group, get_etp_group, get_tp_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
@@ -27,14 +26,11 @@ from ..common.ngram_embedding import (
     Qwen4ExpPLEDeviceEmbedding,
     Qwen4ExpPLEEmbedding,
     Qwen4ExpPLEEmbeddingMethod,
-    Qwen4ExpPLEFileSharedHostEmbedding,
     Qwen4ExpPLEFp8EmbeddingMethod,
     Qwen4ExpPLENvFp4EmbeddingMethod,
     Qwen4ExpPLEPinnedHostEmbedding,
     Qwen4ExpPLESharedHostEmbedding,
     Qwen4ExpPLEUnquantizedEmbeddingMethod,
-    SharedPLETable,
-    can_share_ple_table,
 )
 from ..common.ops.ple import ple_ngram_ids
 
@@ -48,9 +44,7 @@ __all__ = [
     "Qwen4ExpPLEFp8EmbeddingMethod",
     "Qwen4ExpPLENvFp4EmbeddingMethod",
     "Qwen4ExpPLEPinnedHostEmbedding",
-    "Qwen4ExpPLEFileSharedHostEmbedding",
     "Qwen4ExpPLESharedHostEmbedding",
-    "select_ple_embedding_cls",
     "Qwen4ExpPLEUnquantizedEmbeddingMethod",
     "Qwen4ExpNGramEmbedding",
 ]
@@ -269,32 +263,6 @@ class Qwen4ExpPLEDiskOffloadEmbedding(Qwen4ExpPLEEmbedding):
         raise RuntimeError("PLE disk offload does not support prefetch")
 
 
-def select_ple_embedding_cls(
-    engram_config,
-    *,
-    table_bytes: int,
-    shared_table: SharedPLETable | None = None,
-) -> Callable[..., Qwen4ExpPLEEmbedding]:
-    """Device-resident, disk-offloaded, pinned per rank, one table shared by
-    the node-local Engram DP group, or one table shared through host files by
-    independent processes (`EngramConfig.shared_host_table_dir`, named by
-    `shared_table` and each process's ETP shard). `table_bytes` is one ETP
-    shard. DP sharing is taken only when the group exists and /dev/shm can
-    hold the table (`can_share_ple_table`), so a request to share falls back
-    to per-rank tables with a logged reason rather than an OOM-killed boot."""
-    if engram_config is None:
-        return Qwen4ExpPLEDeviceEmbedding
-    if engram_config.disk_offload:
-        return Qwen4ExpPLEDiskOffloadEmbedding
-    if not engram_config.cpu_offload:
-        return Qwen4ExpPLEDeviceEmbedding
-    if shared_table is not None:
-        return partial(Qwen4ExpPLEFileSharedHostEmbedding, shared_table=shared_table)
-    if engram_config.dp_shared_memory and can_share_ple_table(table_bytes):
-        return Qwen4ExpPLESharedHostEmbedding
-    return Qwen4ExpPLEPinnedHostEmbedding
-
-
 class Qwen4ExpNGramEmbedding(nn.Module):
     _MASK64 = (1 << 64) - 1
     _SPLITMIX_GAMMA = 0x9E3779B97F4A7C15
@@ -464,28 +432,17 @@ class Qwen4ExpNGramEmbedding(nn.Module):
         )
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
-        vllm_config = get_current_vllm_config()
-        engram_config = vllm_config.engram_config
-        # The shared table holds the rows as stored: NVFP4 packs two values
-        # per byte (its block scales are allocated per process).
-        if isinstance(embedding_quant_method, Qwen4ExpPLENvFp4EmbeddingMethod):
-            table_width, storage_dtype = self.head_dim // 2, torch.uint8
-        elif isinstance(embedding_quant_method, Qwen4ExpPLEFp8EmbeddingMethod):
-            table_width, storage_dtype = self.head_dim, torch.float8_e4m3fn
-        else:
-            table_width, storage_dtype = self.head_dim, params_dtype
-        shared_table = None
-        if engram_config is not None and engram_config.shared_host_table_dir:
-            model_config = vllm_config.model_config
-            shared_table = SharedPLETable(
-                engram_config.shared_host_table_dir,
-                f"{model_config.model}|{model_config.revision}|{embedding_prefix}",
-            )
-        shard_rows = padded_vocab_size // get_etp_group().world_size
-        embedding_cls = select_ple_embedding_cls(
-            engram_config,
-            table_bytes=shard_rows * table_width * storage_dtype.itemsize,
-            shared_table=shared_table,
+        engram_config = get_current_vllm_config().engram_config
+        embedding_cls = (
+            Qwen4ExpPLEDiskOffloadEmbedding
+            if engram_config is not None and engram_config.disk_offload
+            else Qwen4ExpPLESharedHostEmbedding
+            if engram_config is not None
+            and engram_config.dp_shared_memory
+            and get_engram_dp_group() is not None
+            else Qwen4ExpPLEPinnedHostEmbedding
+            if engram_config is not None and engram_config.cpu_offload
+            else Qwen4ExpPLEDeviceEmbedding
         )
         # A TP reduce-scatter covers all vocabulary owners only when ETP=TP.
         # Disk-offload ranks hold full rows, so they only shard tokens.
