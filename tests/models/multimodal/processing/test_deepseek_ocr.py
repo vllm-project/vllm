@@ -46,7 +46,7 @@ class TestDeepseekOCREmptyImagesCrop:
         """A small image (<=640px) produces empty images_crop and should
         not crash the TensorSchema validation.
 
-        Previously, the code used ``numel() > 0`` to decide whether to read
+        Previously, the code used `numel() > 0` to decide whether to read
         image_size from the tensor shape. When numel()==0, it fell back to
         base_size=1024, mismatching the actual tensor dim of 640.
         """
@@ -144,14 +144,14 @@ class TestDeepseekOCREmptyImagesCrop:
 
 
 class TestDeepseekOCRInputValidation:
-    """Bare ``assert`` used to validate user input here returned HTTP 500
+    """Bare `assert` used to validate user input here returned HTTP 500
     (AssertionError) instead of HTTP 400 (ValueError) and disappeared under
-    ``python -O``, silently corrupting the tokenized sequence. See #53850.
+    `python -O`, silently corrupting the tokenized sequence. See #53850.
     """
 
     def test_mismatched_image_count_raises_value_error(self, processor):
-        """Two ``<image>`` tokens with one image must raise ValueError, not
-        AssertionError (which would yield HTTP 500 and, under ``-O``, silently
+        """Two `<image>` tokens with one image must raise ValueError, not
+        AssertionError (which would yield HTTP 500 and, under `-O`, silently
         drop the middle text segment)."""
         image = Image.new("RGB", (100, 100), color="red")
         with pytest.raises(ValueError, match="does not match number of images"):
@@ -185,8 +185,8 @@ def _balanced_normalized_pixels(
 class TestDeepseekOCRZeroSumPixelsAccepted:
     """Zero-sum normalized pixels must still produce validated image inputs.
 
-    Returning None from ``_parse_and_validate_image_input`` makes
-    ``embed_multimodal`` return None and trips the worker encoder-output
+    Returning None from `_parse_and_validate_image_input` makes
+    `embed_multimodal` return None and trips the worker encoder-output
     sanity check, killing EngineCore. The zero-sum shortcut is therefore
     removed; balanced images must parse like any other valid tensor.
     """

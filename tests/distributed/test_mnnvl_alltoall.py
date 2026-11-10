@@ -181,7 +181,7 @@ def _make_forward_context(
 ):
     """Keep the vLLM config and mock-DP forward context active together.
 
-    Returns a context manager suitable for ``with`` statements.
+    Returns a context manager suitable for `with` statements.
     The real DPMetadata (with sp_local_sizes etc.) is created internally
     by set_forward_context from num_tokens_across_dp; the attn_metadata
     placeholder just satisfies the "attn_metadata is not None" guard.
@@ -192,7 +192,7 @@ def _make_forward_context(
 
     class _AttnMeta:
         """Minimal placeholder so set_forward_context's
-        ``attn_metadata is not None`` guard (forward_context.py:334)
+        `attn_metadata is not None` guard (forward_context.py:334)
         is satisfied. The real DPMetadata is built from num_tokens_across_dp."""
 
         dp_metadata = None

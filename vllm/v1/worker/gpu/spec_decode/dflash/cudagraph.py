@@ -37,7 +37,7 @@ def _prepare_dflash_inputs_to_capture(
     input_block_tables = block_tables.get_dummy_block_tables(num_reqs)
     slot_mappings = block_tables.get_dummy_slot_mappings(num_tokens)
     slot_mappings_by_layer = build_slot_mappings_by_layer(
-        slot_mappings, kv_cache_config
+        slot_mappings, kv_cache_config, attn_groups
     )
 
     attn_metadata = None
@@ -88,7 +88,7 @@ class DFlashCudaGraphManager(CudaGraphManager):
         prepare_forward: Callable[[int, dict[str, Any] | None], None],
         progress_bar_desc: str = "Capturing CUDA graphs",
     ) -> None:
-        """``prepare_forward(num_reqs, attn_metadata)`` is captured ahead of the
+        """`prepare_forward(num_reqs, attn_metadata)` is captured ahead of the
         query forward."""
 
         def create_forward_fn(

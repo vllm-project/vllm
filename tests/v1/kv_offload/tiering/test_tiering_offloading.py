@@ -660,7 +660,7 @@ class TestTieringOffloadingManager:
     def _promote_with_deferred_release(
         self, monkeypatch, chunks, successful_indices=(), preset=False
     ) -> list[threading.Event]:
-        """Promote ``chunks`` from tier1 into a failure with a deferred release.
+        """Promote `chunks` from tier1 into a failure with a deferred release.
 
         Returns the events the tier reported; setting one releases its job.
         """
@@ -1371,8 +1371,8 @@ class TestTieringOffloadingManager:
         monkeypatch.setattr(
             self.secondary_tier1,
             "on_new_request",
-            lambda req_context: (
-                RequestOffloadingContext(policy=OffloadPolicy.REQUEST_LEVEL)
+            lambda req_context: RequestOffloadingContext(
+                policy=OffloadPolicy.REQUEST_LEVEL
             ),
         )
 
@@ -1409,8 +1409,8 @@ class TestTieringOffloadingManager:
         monkeypatch.setattr(
             self.secondary_tier1,
             "on_new_request",
-            lambda req_context: (
-                RequestOffloadingContext(policy=OffloadPolicy.REQUEST_LEVEL)
+            lambda req_context: RequestOffloadingContext(
+                policy=OffloadPolicy.REQUEST_LEVEL
             ),
         )
 
@@ -1447,8 +1447,8 @@ class TestTieringOffloadingManager:
         monkeypatch.setattr(
             self.secondary_tier1,
             "on_new_request",
-            lambda req_context: (
-                RequestOffloadingContext(policy=OffloadPolicy.REQUEST_LEVEL)
+            lambda req_context: RequestOffloadingContext(
+                policy=OffloadPolicy.REQUEST_LEVEL
             ),
         )
         ctx = ReqContext(req_id=req_id)
@@ -1485,7 +1485,7 @@ class TestTieringOffloadingManager:
         monkeypatch.setattr(
             self.manager.primary_tier,
             "lookup",
-            lambda key, req_context: (LookupResult.RETRY),
+            lambda key, req_context: LookupResult.RETRY,
         )
 
         with pytest.raises(AssertionError):
@@ -1590,8 +1590,8 @@ class TestTieringOffloadingManager:
         monkeypatch.setattr(
             self.secondary_tier1,
             "on_new_request",
-            lambda req_context: (
-                RequestOffloadingContext(policy=OffloadPolicy.REQUEST_LEVEL)
+            lambda req_context: RequestOffloadingContext(
+                policy=OffloadPolicy.REQUEST_LEVEL
             ),
         )
         rl_ctx = ReqContext(req_id="rl")

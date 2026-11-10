@@ -2,11 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Correctness of the sparse-MLA CP indexer.
 
-``rocm_aiter_sparse_attn_indexer`` normally has every TP rank score every
-prefill query row and reach the same Top-K. When ``use_cp_indexer`` says so,
-the rows are dealt across the ranks as mirrored stripes -- rank ``r`` takes
-stripe ``r`` of the first half and stripe ``tp - 1 - r`` of the second -- and
-the batch is rebuilt with an ``all_reduce(MAX)`` over a ``-1``-filled Top-K
+`rocm_aiter_sparse_attn_indexer` normally has every TP rank score every
+prefill query row and reach the same Top-K. When `use_cp_indexer` says so,
+the rows are dealt across the ranks as mirrored stripes -- rank `r` takes
+stripe `r` of the first half and stripe `tp - 1 - r` of the second -- and
+the batch is rebuilt with an `all_reduce(MAX)` over a `-1`-filled Top-K
 buffer.
 
 Run `pytest tests/distributed/test_rocm_aiter_indexer_m_split.py`.
@@ -179,7 +179,7 @@ def _assert_topk_equivalent(cp_topk, non_cp_topk, logits, row_starts, row_ends):
     The operator's contract is the selected *set*, not its position in the
     buffer: equal scores may be broken either way, and because indices are
     stored sorted, one differing pick shifts the rest of the row. This mirrors
-    ``compare_top_k_results`` in tests/kernels/test_top_k_per_row.py -- sets
+    `compare_top_k_results` in tests/kernels/test_top_k_per_row.py -- sets
     first, then the values behind any disagreement.
     """
     expected_count = (row_ends - row_starts).clamp(max=cp_topk.shape[1])
@@ -320,7 +320,7 @@ def _worker(local_rank, world_size, q, shape, port):
     """Join the TP group on one GPU and compare the two paths on one shape.
 
     A failed assertion in a spawned process would surface only as a non-zero
-    exit code, so it is reported through ``q``.
+    exit code, so it is reported through `q`.
     """
     monkeypatch = pytest.MonkeyPatch()
     config = VllmConfig(parallel_config=ParallelConfig(tensor_parallel_size=world_size))

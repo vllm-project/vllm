@@ -79,6 +79,9 @@ def dsa_indexer_uses_fp4(vllm_config: VllmConfig) -> bool:
 
         # Only DeepSeek-V4 and V4.1 are wired to the ROCm MXFP4 cache; other
         # DSA models would silently keep their FP8 one.
+        # TODO: allow Kimi-K3.1 once AITER's row-group FP4 MQA logits kernel
+        # accepts physical page strides; its decode scorer reads the merged
+        # index cache in place.
         model_config = vllm_config.model_config
         if model_config is None or model_config.hf_config.model_type not in (
             "deepseek_v4",
@@ -350,7 +353,7 @@ def build_pcp_global_chunk_plan(
 ) -> PCPGlobalChunkPlan:
     """Plan the PCP packing for one chunk from its requests' KV shard rows.
 
-    The global layout is padded to ``shard rows x W`` per request. Positions
+    The global layout is padded to `shard rows x W` per request. Positions
     past a request's true extent lie beyond every token's causal bound, so
     the kernel never reads them.
     """
@@ -705,6 +708,7 @@ class DeepSeekV32IndexerDecodeMetadata:
     decode_is_uniform: bool = True
     write_max_decode_len: int = 0
     indices: torch.Tensor | None = None
+    query_start_loc: torch.Tensor | None = None
 
 
 @dataclass
@@ -1349,7 +1353,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         """Chunk by request rather than by row, so a split prefill's two rows
         charge their shared context once, then widen each chunk back to rows.
 
-        ``row_shard_rows`` holds the whole request's largest DCP shard on
+        `row_shard_rows` holds the whole request's largest DCP shard on
         every row, so the plan is identical on every PCP rank.
         """
         row_bounds = request_row_bounds(row_req_idx)
@@ -1399,14 +1403,14 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         - N constraint: total_seq_lens <= workspace_size (existing O(N)
           workspace)
         - Logits constraint: M * N * 4 <= max_logits_bytes. The CP indexer
-          stripes prefill rows across ``m_split_tp_size`` TP ranks and each
+          stripes prefill rows across `m_split_tp_size` TP ranks and each
           rank materialises only its own stripe, so the bound applies per rank
           and M may be that many times larger.
 
         When a single request-level chunk still exceeds the logits budget,
         sub-chunks on the query dimension (M) to bound peak memory.
 
-        With ``fused_mqa_topk_eligible`` (chunks for the fused MQA+top-k kernel,
+        With `fused_mqa_topk_eligible` (chunks for the fused MQA+top-k kernel,
         which needs no logits buffer) chunks whose gathered keys fit
         FUSED_MQA_TOPK_MAX_KEYS are bounded by FUSED_MQA_TOPK_MAX_ROWS rows
         instead of the logits budget. Requests are never packed past that key
@@ -1877,6 +1881,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 per_req_decode_lens=self.per_req_decode_lens_buffer[:num_decodes],
                 decode_is_uniform=write_is_uniform,
                 write_max_decode_len=max_decode_len,
+                query_start_loc=common_attn_metadata.query_start_loc[: num_decodes + 1],
             )
 
         attn_metadata = DeepseekV32IndexerMetadata(

@@ -4,7 +4,7 @@ from abc import ABC, abstractmethod
 from collections import defaultdict, deque
 from collections.abc import Callable, Generator, ItemsView, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from enum import Enum
+from enum import StrEnum
 from functools import lru_cache
 from typing import (
     TYPE_CHECKING,
@@ -238,7 +238,7 @@ instead of a function if it does not depend on the input.
 """
 
 
-class UpdateMode(str, Enum):
+class UpdateMode(StrEnum):
     INSERT = "insert"
     REPLACE = "replace"
 
