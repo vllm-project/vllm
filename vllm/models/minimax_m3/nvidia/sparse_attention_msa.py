@@ -20,7 +20,6 @@ from typing import TYPE_CHECKING, ClassVar
 
 import torch
 
-import vllm.envs as envs
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.config.attention import MiniMaxM3MSADecodeBackend
 from vllm.config.cache import CacheDType
@@ -30,6 +29,7 @@ from vllm.models.minimax_m3.common.ops.sparse_attn import (
     SPARSE_BLOCK_SIZE,
     minimax_m3_sparse_attn_decode,
 )
+from vllm.models.minimax_m3.common.replicate import attention_tp_size
 from vllm.models.minimax_m3.common.sparse_attention import (
     MiniMaxM3SparseBackend,
     MiniMaxM3SparseDecodeMetadata,
@@ -188,10 +188,8 @@ class MiniMaxM3SparseMSAMetadataBuilder(MiniMaxM3SparseMetadataBuilder):
     ) -> None:
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
         config = vllm_config.model_config.hf_text_config
-        tp_size = vllm_config.parallel_config.tensor_parallel_size
         # Replicated attention keeps all query heads on every rank.
-        if envs.VLLM_MINIMAX_M3_REPLICATE_ATTN:
-            tp_size = 1
+        tp_size = attention_tp_size(vllm_config.parallel_config.tensor_parallel_size)
         self.num_q_heads = config.num_attention_heads // tp_size
         self.num_kv_heads = kv_cache_spec.num_kv_heads
         self.topk_blocks = config.index_topk_blocks

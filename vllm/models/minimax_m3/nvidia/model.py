@@ -120,6 +120,7 @@ from vllm.models.minimax_m3.common.mm_preprocess import (
     MiniMaxM3VLMultiModalProcessor,
     MiniMaxM3VLProcessingInfo,
 )
+from vllm.models.minimax_m3.common.replicate import unsupported_layout
 from vllm.models.minimax_m3.common.sparse_attention import (
     MiniMaxM3SparseBackend,
     MiniMaxM3SparseImpl,
@@ -1251,17 +1252,14 @@ class MiniMaxM3DecoderLayer(nn.Module):
             from vllm.triton_utils.tp_synced_autotune import install
 
             install()
-        parallel_config = vllm_config.parallel_config
-        if self.replicate_attn and (
-            parallel_config.enable_expert_parallel
-            or parallel_config.decode_context_parallel_size > 1
-            or parallel_config.prefill_context_parallel_size > 1
-        ):
-            # These layouts turn the TP-synced autotune off, and replicated
-            # attention would then drift across ranks.
+        unsupported = (
+            unsupported_layout(vllm_config.parallel_config)
+            if self.replicate_attn
+            else None
+        )
+        if unsupported:
             raise NotImplementedError(
-                "VLLM_MINIMAX_M3_REPLICATE_ATTN is not supported with expert "
-                "parallelism or decode/prefill context parallelism."
+                f"VLLM_MINIMAX_M3_REPLICATE_ATTN is not supported with {unsupported}."
             )
         if is_mtp_block:
             assert vllm_config.speculative_config is not None
