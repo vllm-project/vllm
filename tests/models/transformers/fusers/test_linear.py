@@ -805,6 +805,8 @@ def test_detects_and_rewrites_glu(mlp_cls, bias):
     names = fuser.fused_forward.__code__.co_names
     assert "gate_up_proj" in names and "act_fn" in names and "down_proj" in names
     assert not {"gate_proj", "up_proj"} & set(names)
+    # The activation can fuse with the down projection's input quantization
+    assert "maybe_fused_act_quant" in names
 
     # Numerics: the fused forward must match the original on a real instance.
     real = mlp_cls(bias=bias)

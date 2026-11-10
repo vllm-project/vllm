@@ -3,6 +3,7 @@
 """GLU projection fuser: `act(gate(x)) * up(x)` -> a fused gate/up linear."""
 
 import ast
+import copy
 import operator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, ClassVar
@@ -12,6 +13,7 @@ from transformers.activations import ACT2CLS
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import _ACTIVATION_AND_MUL_REGISTRY
+from vllm.model_executor.layers.fusion.fused_act_quant import maybe_fused_act_quant
 from vllm.model_executor.models.transformers.fusers.merged_column import (
     MergedColumnParallelFuser,
 )
@@ -157,7 +159,20 @@ class GLUFuser(MergedColumnParallelFuser):
         assert isinstance(gate_call.func, ast.Attribute)
         gate_call.func.attr = self.merged_name
         replace_expr(funcdef, muls[0], act_call)
-        self.fused_forward = compile_forward(funcdef, fn)
+        # down(act(y)) -> down(maybe_fused_act_quant(act, y, down))
+        for node in ast.walk(funcdef):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == self.down_name
+                and node.args == [act_call]
+            ):
+                fused_args = [act_call.func, *act_call.args, copy.deepcopy(node.func)]
+                fused_fn = ast.Name(maybe_fused_act_quant.__name__, ast.Load())
+                node.args = [ast.Call(fused_fn, fused_args, [])]
+                break
+        extra_globals = {maybe_fused_act_quant.__name__: maybe_fused_act_quant}
+        self.fused_forward = compile_forward(funcdef, fn, extra_globals)
 
     def validate(self, module: nn.Module, vllm_config: "VllmConfig") -> bool:
         if not super().validate(module, vllm_config):
