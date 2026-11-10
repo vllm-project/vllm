@@ -1853,6 +1853,12 @@ def test_sparse_backend_prefill_correctness(
         batch_name.startswith("masked_mha") or qk_nope_head_dim != 128
     ):
         pytest.skip("ROCm dense prefill requires the DeepSeek MLA layout")
+    if (
+        current_platform.is_cuda()
+        and batch_name.startswith("masked_mha")
+        and not current_platform.is_device_capability_family(100)
+    ):
+        pytest.skip("Masked MHA prefill runs on SM100-family GPUs only")
     batch_spec = PREFILL_BATCH_SPECS[batch_name]
 
     device = torch.device(DEVICE_TYPE)
