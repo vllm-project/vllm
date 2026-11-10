@@ -316,7 +316,9 @@ def dbo_comm_stream_priority() -> int:
     return -1 if current_platform.is_rocm() else 0
 
 
-def dbo_tp_all_reduce(device_communicator, input_: torch.Tensor) -> torch.Tensor:
+def dbo_tp_all_reduce(
+    device_communicator, input_: torch.Tensor, out: torch.Tensor
+) -> torch.Tensor:
     """The TP all-reduce of a microbatch, issued on the comm stream.
 
     With VLLM_DBO_TP_DMA_AR set (TP2, ROCm) and ``input_`` small enough, it runs
@@ -335,5 +337,5 @@ def dbo_tp_all_reduce(device_communicator, input_: torch.Tensor) -> torch.Tensor
         and not torch.cuda.is_current_stream_capturing()
     ):
         logger.info_once("DBO: microbatch all-reduces run over SDMA (one-shot INT4)")
-        return dma.all_reduce(input_, out=torch.empty_like(input_))
+        return dma.all_reduce(input_, out=out)
     return device_communicator.all_reduce(input_)

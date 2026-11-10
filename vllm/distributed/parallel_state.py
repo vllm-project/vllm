@@ -765,8 +765,12 @@ class GroupCoordinator:
             dbo_yield_and_switch_from_compute_to_comm,
         )
 
+        # Allocate the output on the compute stream, before the hand-off: a block
+        # freed and reused on the comm stream could still be read by the other
+        # microbatch's compute.
+        out = torch.empty_like(input_)
         dbo_yield_and_switch_from_compute_to_comm()
-        out = dbo_tp_all_reduce(self.device_communicator, input_)
+        out = dbo_tp_all_reduce(self.device_communicator, input_, out)
         dbo_switch_to_compute_sync()
         return out
 

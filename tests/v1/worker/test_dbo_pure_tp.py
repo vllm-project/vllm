@@ -193,7 +193,7 @@ def test_tp_all_reduce_outside_a_microbatch_takes_the_regular_path(monkeypatch):
     # The SDMA path must not run for steps that are not split.
     calls = []
     monkeypatch.setattr(ubatching, "_THREAD_ID_TO_CONTEXT", {})
-    ubatching.dbo_tp_all_reduce(_comm_with_dma(calls), torch.ones(4))
+    ubatching.dbo_tp_all_reduce(_comm_with_dma(calls), torch.ones(4), torch.empty(4))
     assert calls == ["regular"]
 
 
@@ -203,12 +203,12 @@ def test_tp_all_reduce_inside_a_microbatch_takes_the_sdma_path(monkeypatch):
         ubatching, "_THREAD_ID_TO_CONTEXT", {threading.get_ident(): object()}
     )
     monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: False)
-    ubatching.dbo_tp_all_reduce(_comm_with_dma(calls), torch.ones(4))
+    ubatching.dbo_tp_all_reduce(_comm_with_dma(calls), torch.ones(4), torch.empty(4))
     assert calls == ["dma"]
     # Graph capture cannot hold stream write/wait operations.
     calls.clear()
     monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: True)
-    ubatching.dbo_tp_all_reduce(_comm_with_dma(calls), torch.ones(4))
+    ubatching.dbo_tp_all_reduce(_comm_with_dma(calls), torch.ones(4), torch.empty(4))
     assert calls == ["regular"]
 
 
