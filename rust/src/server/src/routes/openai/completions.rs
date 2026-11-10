@@ -5,7 +5,6 @@ mod convert;
 mod types;
 mod validate;
 
-use std::convert::Infallible;
 use std::result::Result;
 use std::sync::Arc;
 
@@ -13,12 +12,11 @@ use asynk_strim_attr::{TryYielder, try_stream};
 use axum::Json;
 use axum::extract::State;
 use axum::http::HeaderMap;
-use axum::response::sse::Event;
 use axum::response::{IntoResponse, Response};
-use futures::{Stream, StreamExt as _, future, pin_mut};
+use futures::{StreamExt as _, future, pin_mut};
 use serde_json::Value;
 use thiserror_ext::AsReport as _;
-use tracing::{debug, error, info, trace};
+use tracing::{debug, error, info};
 use tracing_futures::Instrument as _;
 use vllm_engine_core_client::protocol::output::StopReason;
 use vllm_llm::WeightVersionSpan;
@@ -50,7 +48,10 @@ use crate::routes::openai::utils::{validate_max_output_tokens, validate_n_limit}
 use crate::routes::output_log::LoggedOutput;
 use crate::state::AppState;
 use crate::utils::npy_base64;
-use crate::utils::{ResolvedRequestContext, resolve_request_context, sse_response, unix_timestamp};
+use crate::utils::{
+    ResolvedRequestContext, openai_sse_stream, resolve_request_context, sse_response,
+    unix_timestamp,
+};
 
 pub(crate) fn lower_completion_request(
     request: CompletionRequest,
@@ -145,8 +146,8 @@ pub async fn completions(
                 )
             })
             .collect();
-        let sse_stream = completion_sse_stream(merge_choice_chunk_streams(chunk_streams))
-            .instrument(request_span);
+        let sse_stream =
+            openai_sse_stream(merge_choice_chunk_streams(chunk_streams)).instrument(request_span);
 
         sse_response(sse_stream, api_server_options.sse_keep_alive_interval)
     } else {
@@ -726,55 +727,6 @@ fn usage_chunk(
     chunk.metrics = metrics.map(Into::into);
     chunk.system_fingerprint = system_fingerprint;
     chunk
-}
-
-/// Convert one chunk stream into OpenAI-style SSE events.
-///
-/// OpenAI-style streaming errors are encoded as ordinary `data: {"error": ...}`
-/// events followed by `data: [DONE]`, so the transport stream itself stays
-/// infallible even when generation fails after the HTTP response has started.
-#[try_stream]
-async fn completion_sse_stream(
-    stream: impl Stream<Item = Result<CompletionSseChunk, ApiError>>,
-    mut y: TryYielder<Event, Infallible>,
-) -> Result<(), Infallible> {
-    pin_mut!(stream);
-
-    while let Some(next) = stream.next().await {
-        match next {
-            Ok(chunk) => y.yield_ok(to_sse_event(&chunk)).await,
-            Err(error) => {
-                y.yield_ok(to_error_sse_event(&error)).await;
-                break;
-            }
-        }
-    }
-
-    y.yield_ok(done_sse_event()).await;
-    Ok(())
-}
-
-/// Serialize one OpenAI chunk payload into one SSE `data:` event.
-fn to_sse_event(chunk: &CompletionSseChunk) -> Event {
-    trace!(?chunk, "completion emitting chunk");
-    Event::default()
-        .json_data(chunk)
-        .expect("completion chunk must serialize to JSON")
-}
-
-/// Serialize one OpenAI error payload into one SSE `data:` event.
-fn to_error_sse_event(error: &ApiError) -> Event {
-    let response = error.to_error_response();
-    trace!(?response, "completion emitting error");
-    Event::default()
-        .json_data(response)
-        .expect("ErrorResponse must serialize to JSON")
-}
-
-/// Build the terminal OpenAI SSE sentinel event.
-fn done_sse_event() -> Event {
-    trace!("completion emitting done");
-    Event::default().data("[DONE]")
 }
 
 #[cfg(test)]
