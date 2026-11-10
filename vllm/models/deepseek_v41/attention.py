@@ -368,6 +368,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         cache_config = vllm_config.cache_config
         # replicate: every rank holds all heads, wo_b output is complete.
         tp_size = 1 if replicate else get_tensor_model_parallel_world_size()
+        self.replicate = replicate
         layer_id = extract_layer_index(prefix)
         self.layer_id = layer_id
 
@@ -1088,6 +1089,14 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
 
         return qr_kv, kv_score, indexer_weights
 
+    def _sort_topk_indices(self, num_tokens: int) -> None:
+        """Sort each token's selected indices ascending, invalid (-1) entries last."""
+        assert self.topk_indices_buffer is not None
+        view = self.topk_indices_buffer[:num_tokens]
+        top = torch.iinfo(view.dtype).max
+        ordered = torch.where(view < 0, top, view).sort(dim=-1).values
+        view.copy_(torch.where(ordered == top, -1, ordered))
+
     @eager_break_during_capture
     def _sparse_indexer_and_attn(
         self,
@@ -1109,6 +1118,10 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
                 None,
                 index_weights,
             )
+            if self.replicate:
+                # No all-reduce resyncs ranks after a replicated layer, and the
+                # top-k kernel returns the same set in a rank-dependent order.
+                self._sort_topk_indices(hidden_states.shape[0])
 
         # MLA attention writes into the pre-allocated `out` buffer
         # ([num_tokens, padded_heads, head_dim]).
