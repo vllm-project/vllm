@@ -4,7 +4,7 @@ meta:
   provider: "GLM (Z-AI)"
   description: "GLM-5.1 refreshed version of GLM-5 — frontier-scale MoE language model (~744B total parameters) with MTP speculative decoding and thinking mode"
   date_added: 2026-03-28
-  date_updated: 2026-10-05
+  date_updated: 2026-11-04
   tasks:
     - text
   performance_headline: "Refreshed GLM-5 series MoE with improved reasoning, coding, and agentic performance"
@@ -68,11 +68,6 @@ variants:
     precision: fp8
     vram_minimum_gb: 893
     description: "Native FP8 checkpoint — 8xH200/H20 (141GB × 8) single-node serving"
-    hardware_overrides:
-      mi325x:
-        docker_image: "vllm/vllm-openai-rocm:nightly-92044241a02f05de51420d654daf669de20b4691"
-      mi350x:
-        docker_image: "vllm/vllm-openai-rocm:nightly-92044241a02f05de51420d654daf669de20b4691"
   nvfp4:
     model_id: "nvidia/GLM-5.1-NVFP4"
     precision: nvfp4
@@ -158,7 +153,7 @@ guide: |
     Use the latest main branch if you need tool calling + MTP simultaneously.
   - **Hardware (FP8):** 8xH200 or 8xH20 (141GB × 8)
   - **DeepGEMM (FP8, NVIDIA):** install via `install_deepgemm.sh` from vLLM repo
-  - **Hardware (FP8, AMD):** 8x MI325X (256GB × 8) or 8x MI350X (288GB × 8), `vllm/vllm-openai-rocm:nightly-92044241a02f05de51420d654daf669de20b4691`; uses AITER, not DeepGEMM
+  - **Hardware (FP8, AMD):** 8x MI325X (256GB × 8) or 8x MI350X (288GB × 8), vLLM >= 0.32.0, `vllm/vllm-openai-rocm:latest`; uses AITER, not DeepGEMM
   - **Hardware (MXFP4):** 8x MI355X (gfx950), vLLM >= 0.24.0, `vllm/vllm-openai-rocm:latest`
 
   ### Using Docker
@@ -210,8 +205,8 @@ guide: |
   generated command adds `VLLM_ROCM_USE_AITER=1`, `VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=1`,
   `--linear-backend aiter` and `--moe-backend aiter`, and raises `VLLM_ENGINE_READY_TIMEOUT_S`
   because loading the weights can take longer than the Rust frontend's 600 s default. The
-  Docker command uses the nightly build
-  `vllm/vllm-openai-rocm:nightly-92044241a02f05de51420d654daf669de20b4691`.
+  Docker command uses `vllm/vllm-openai-rocm:latest`; images before v0.32.0 fail to load the
+  shared experts.
 
   On 8x MI325X that command, with MTP enabled, serves the full 202,752-token context with a
   1,292,544-token KV cache (6.38x maximum concurrency) and an MTP mean acceptance length of

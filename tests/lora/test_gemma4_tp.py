@@ -24,8 +24,10 @@ TEST_IMAGES = [
 
 EXPECTED_OUTPUTS_VISION = [
     "A red stop sign stands prominently in the foreground.",
-    "A majestic skyscraper stands tall, partially obscured by a vibrant "
-    "canopy of cherry blossoms, against a clear blue sky.",
+    (
+        "A majestic skyscraper stands tall, partially obscured by a vibrant "
+        "canopy of cherry blossoms, against a clear blue sky."
+    ),
 ]
 
 
