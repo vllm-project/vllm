@@ -151,9 +151,6 @@ def _ngram_finalize_kernel(
 class NgramGPUSpeculator(BaseSpeculator):
     """V2-compatible GPU n-gram speculator."""
 
-    supports_mm_inputs = False
-    draft_logits = None
-
     def __init__(
         self,
         vllm_config: VllmConfig,

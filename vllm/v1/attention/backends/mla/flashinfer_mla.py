@@ -41,11 +41,11 @@ logger = init_logger(__name__)
 def _trtllm_gen_mla_decode_supports_num_heads(num_heads: int) -> bool:
     """True if trtllm-gen's MLA decode kernel supports this query head count.
 
-    The kernel groups Q heads into CTAs of ``min(num_heads, tileSizeQ)`` and
-    requires ``num_heads`` divisible by that, else raises "The
+    The kernel groups Q heads into CTAs of `min(num_heads, tileSizeQ)` and
+    requires `num_heads` divisible by that, else raises "The
     numHeadsQ/numHeadsKv is not supported" (flashinfer fmhaKernels.cuh).
-    ``tileSizeQ`` is 8/16 for ``num_heads <= 8``/``<= 32`` (SwapsMmaAb) else 64;
-    treat ``> 32`` as tile 64 (safe bound). E.g. 96/24 -> False, 48/64/128 -> True.
+    `tileSizeQ` is 8/16 for `num_heads <= 8`/`<= 32` (SwapsMmaAb) else 64;
+    treat `> 32` as tile 64 (safe bound). E.g. 96/24 -> False, 48/64/128 -> True.
     """
     if num_heads <= 8:
         tile = 8
@@ -99,11 +99,11 @@ def _get_multi_ctas_kv_counter_buffer(
 
     trtllm-gen's multi-CTA-KV MLA decode kernel resets these semaphores to zero
     at the end of every launch, so the buffer only needs zeroing once. The
-    public ``trtllm_batch_decode_with_kv_cache_mla`` entry point builds a fresh
+    public `trtllm_batch_decode_with_kv_cache_mla` entry point builds a fresh
     runner per call, so without a caller-owned buffer it re-allocates and
-    re-zeros this counter on every decode step (a tiny ``FillFunctor<uint8>``
+    re-zeros this counter on every decode step (a tiny `FillFunctor<uint8>`
     launch right before the FMHA). Owning it here and passing it in removes that
-    per-step launch. ``min_bytes`` is sized to the worst-case batch so the
+    per-step launch. `min_bytes` is sized to the worst-case batch so the
     buffer is allocated once and never reallocated after CUDA-graph capture.
     """
     global _fi_multi_ctas_kv_counter
@@ -341,6 +341,8 @@ class FlashInferMLAImpl(MLACommonImpl[FlashInferMLAMetadata]):
         cum_seq_lens_q: torch.Tensor | None = None
         max_q_len: int | None = None
         row_req: torch.Tensor | None = None
+        # Per split row: query tokens of its request after it.
+        causal_rows_after: torch.Tensor | None = None
 
         if not attn_metadata.causal:
             # FlashInfer decode has no causal flag. Flatten each non-causal
@@ -357,15 +359,23 @@ class FlashInferMLAImpl(MLACommonImpl[FlashInferMLAMetadata]):
             # do not return on the ragged path (flashinfer #3238).
             cum_seq_lens_q = attn_metadata.decode.query_start_loc
             max_q_len = attn_metadata.decode.max_query_len
-        # trtllm API requires extra dimension q_len_per_request for MTP
-        elif attn_metadata.num_decode_tokens % attn_metadata.num_decodes != 0:
-            logger.warning_once(
-                """FlashInferMLAImpl got a query of uneven length.
-                This usually indicates an issue in batch reordering
-                or incorrect setup in dummy_run."""
-            )
+        elif (
+            attn_metadata.num_decode_tokens
+            != attn_metadata.num_decodes * attn_metadata.decode.max_query_len
+        ):
+            # Ragged causal DCP decode, e.g. requests with fewer drafts: split
+            # into single-token rows, each bounded at its own causal position.
             q = q.unsqueeze(1)
+            block_table, seq_lens, row_req = self._flattened_decode_metadata(
+                attn_metadata, q.shape[0]
+            )
+            query_start_loc = attn_metadata.decode.query_start_loc
+            assert query_start_loc is not None
+            query_end = query_start_loc[1:]
+            rows = torch.arange(q.shape[0], device=q.device, dtype=query_end.dtype)
+            causal_rows_after = query_end[row_req] - 1 - rows
         else:
+            # trtllm API requires extra dimension q_len_per_request for MTP
             q = q.view(attn_metadata.num_decodes, -1, q.shape[-2], q.shape[-1])
 
         if self.bmm1_scale is None:
@@ -389,6 +399,8 @@ class FlashInferMLAImpl(MLACommonImpl[FlashInferMLAMetadata]):
             assert causal_seqlens_kv_global is not None
             if row_req is not None:
                 causal_seqlens_kv_global = causal_seqlens_kv_global[row_req]
+            if causal_rows_after is not None:
+                causal_seqlens_kv_global = causal_seqlens_kv_global - causal_rows_after
             extra_kwargs.update(
                 enable_dcp=True,
                 cp_world=self.dcp_world_size,

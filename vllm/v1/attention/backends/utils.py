@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import functools
 import math
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Sequence
@@ -20,18 +21,18 @@ from vllm.config import CacheConfig, VllmConfig, get_layers_from_vllm_config
 from vllm.config.cache import _layout_from_name
 from vllm.triton_utils import tl, triton
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
-from vllm.utils.math_utils import cdiv
+from vllm.utils.math_utils import cdiv, round_down
 from vllm.utils.torch_utils import PIN_MEMORY, async_tensor_h2d, np_to_pinned_tensor
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheLayout,
     KVCacheSpec,
     MambaSpec,
+    get_kv_quant_mode,
 )
 
 if TYPE_CHECKING:
-    from vllm.v1.core.sched.output import SchedulerOutput
-    from vllm.v1.worker.gpu_input_batch import InputBatch
+    pass
 
 import vllm.envs as envs
 from vllm.distributed.kv_transfer.kv_connector.utils import (
@@ -39,6 +40,7 @@ from vllm.distributed.kv_transfer.kv_connector.utils import (
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionImpl,
@@ -71,6 +73,37 @@ _LN_2 = math.log(2.0)
 def log2_lse_to_ln(lse: torch.Tensor) -> torch.Tensor:
     """Convert a base-2 log-sum-exp tensor to natural-log units."""
     return lse * _LN_2
+
+
+def compute_mm_prefix_ranges(
+    mm_features_per_req: Sequence[Sequence[MultiModalFeatureSpec]],
+    sliding_window: int | None = None,
+    clamp_sliding_window: bool = False,
+    span_pad: int = 0,
+) -> dict[int, list[tuple[int, int]]]:
+    """Per-request PrefixLM bidirectional ranges for image/video tokens."""
+    req_doc_ranges: dict[int, list[tuple[int, int]]] = {}
+    for req_idx, mm_features in enumerate(mm_features_per_req):
+        image_doc_ranges = []
+        for mm_feature in mm_features:
+            if mm_feature.modality not in ("image", "video"):
+                continue
+            pos_info = mm_feature.mm_position
+            if span_pad:
+                start = round_down(pos_info.offset, span_pad) + span_pad - 1
+                feature_ranges = [(start, pos_info.offset + pos_info.length - 1)]
+            else:
+                feature_ranges = pos_info.extract_embeds_range()
+            for r in feature_ranges:
+                if (
+                    not clamp_sliding_window
+                    and sliding_window is not None
+                    and (r[1] - r[0] + 1) > sliding_window
+                ):
+                    continue
+                image_doc_ranges.append(r)
+        req_doc_ranges[req_idx] = image_doc_ranges
+    return req_doc_ranges
 
 
 def compute_mm_prefix_range_tensor(
@@ -110,25 +143,25 @@ def fill_mm_prefix_query_ranges(
 ) -> int:
     """Map each scheduled query token to the mm_prefix range containing it.
 
-    Writes into ``out``, a caller-owned ``(max_num_batched_tokens, 2)`` int32
+    Writes into `out`, a caller-owned `(max_num_batched_tokens, 2)` int32
     staging buffer, and returns the number of rows written (0 if no range
-    covers any scheduled query token, in which case ``out`` is untouched and
-    the caller should skip the mask_mod entirely). Row ``i`` holds the absolute
-    ``[start, end]`` bounds of the bidirectional range that query token ``i``
-    belongs to, or ``(-1, -1)`` when it is outside every range.
+    covers any scheduled query token, in which case `out` is untouched and
+    the caller should skip the mask_mod entirely). Row `i` holds the absolute
+    `[start, end]` bounds of the bidirectional range that query token `i`
+    belongs to, or `(-1, -1)` when it is outside every range.
 
     mm_prefix ranges never overlap, so "query and key share a range" is
     equivalent to "the key lies inside the query's own range". The kernel
     therefore needs no key-side lookup, and this metadata is sized by scheduled
     query tokens rather than by context length -- bounded by
-    ``max_num_batched_tokens`` instead of ``num_seqs * max_seq_len``.
+    `max_num_batched_tokens` instead of `num_seqs * max_seq_len`.
 
     Ranges are absolute prompt positions and may extend past the tokens
     scheduled so far under chunked prefill; the portion outside the current
-    chunk is simply not recorded. Degenerate ranges (``start >= end``) are
-    skipped to match the Triton path's ``start < end`` validity check.
+    chunk is simply not recorded. Degenerate ranges (`start >= end`) are
+    skipped to match the Triton path's `start < end` validity check.
 
-    ``seq_lens_cpu`` only needs to be exact for prefill rows, since mm_prefix
+    `seq_lens_cpu` only needs to be exact for prefill rows, since mm_prefix
     ranges cover prompt tokens: an over-estimate on a decode row shifts that
     row's query position further past every range, which still matches nothing.
     """
@@ -203,6 +236,15 @@ _DEFAULT_LAYOUT_PREFERENCE = (
 )
 
 
+def get_flashinfer_kv_cache_layouts() -> tuple[KVCacheLayout, ...]:
+    """The default preference, minus layouts FlashInfer has no name for."""
+    return tuple(
+        layout
+        for layout in _DEFAULT_LAYOUT_PREFERENCE
+        if layout.name in _FLASHINFER_LAYOUT_NAMES
+    )
+
+
 def _layout_names(layouts: Iterable[KVCacheLayout]) -> list[str]:
     return [layout.name for layout in layouts]
 
@@ -213,17 +255,26 @@ def get_supported_kv_cache_layouts(
     """Layouts every one of the worker's backends supports, most preferred first.
 
     Every backend declares the layouts its kernels support, most preferred first
-    (``supported_kv_cache_layouts``), or None when any layout works; workers where
+    (`supported_kv_cache_layouts`), or None when any layout works; workers where
     nothing declares follow the default preference. Identical declarations keep
     their order; otherwise the layout the most backends put first wins, ties
     keeping the enum order. An empty intersection is a hard error.
     """
-    supported_layouts_lists: list[Sequence[KVCacheLayout]] = [
-        layouts
-        for backend in backends
-        if (layouts := backend.supported_kv_cache_layouts()) is not None
-    ] or [_DEFAULT_LAYOUT_PREFERENCE]
+    return _merge_supported_layouts(
+        [
+            layouts
+            for backend in backends
+            if (layouts := backend.supported_kv_cache_layouts()) is not None
+        ]
+        or [_DEFAULT_LAYOUT_PREFERENCE]
+    )
 
+
+def _merge_supported_layouts(
+    supported_layouts_lists: Sequence[Sequence[KVCacheLayout]],
+) -> list[KVCacheLayout]:
+    """Layouts in every supported set, merged as in
+    `get_supported_kv_cache_layouts`."""
     first = supported_layouts_lists[0]
     if all(layouts == first for layouts in supported_layouts_lists[1:]):
         return list(first)
@@ -265,16 +316,18 @@ def resolve_kv_cache_layout(
     """Resolve one KV cache layout for the whole model.
 
     Runs once in the engine core. Every worker reports the layouts its backends
-    support, most preferred first (``get_supported_kv_cache_layouts``); all
-    ranks run the same backends, so their lists must agree. Specs mixing HNC
+    support, most preferred first (`get_supported_kv_cache_layouts`). Pipeline
+    stages hold different layers, so their lists may differ; the candidates are
+    the layouts every worker supports, and the layout the most workers put first
+    wins. Workers whose backends declare nothing do not vote. Specs mixing HNC
     shapes narrow the candidates to block-compact layouts. An explicit
-    ``VLLM_KV_CACHE_LAYOUT`` must be one of the candidates or resolution fails,
-    with the legacy ``NHD``/``HND`` names as aliases for ``LBNHC``/``LBHNC``; the
+    `VLLM_KV_CACHE_LAYOUT` must be one of the candidates or resolution fails,
+    with the legacy `NHD`/`HND` names as aliases for `LBNHC`/`LBHNC`; the
     connector's preference is used when compatible and dropped with a warning
-    otherwise. A layout already present on ``cache_config`` wins outright, and
-    the result is recorded there (see ``CacheConfig.kv_cache_layout``); it
-    reaches workers through the ``set_kv_cache_layout`` RPC and
-    ``KVCacheConfig.kv_cache_layout``.
+    otherwise. A layout already present on `cache_config` wins outright, and
+    the result is recorded there (see `CacheConfig.kv_cache_layout`); it
+    reaches workers through the `set_kv_cache_layout` RPC and
+    `KVCacheConfig.kv_cache_layout`.
     """
     cache_config = vllm_config.cache_config
     if cache_config.kv_cache_layout is not None:
@@ -283,10 +336,15 @@ def resolve_kv_cache_layout(
     assert supported_layouts and all(supported_layouts), (
         "No worker reported supported KV cache layouts."
     )
-    assert all(names == supported_layouts[0] for names in supported_layouts[1:]), (
-        f"Workers disagree on supported KV cache layouts: {supported_layouts}."
+    reported = [
+        tuple(_layout_from_name(name) for name in names) for names in supported_layouts
+    ]
+    # Workers where no backend declares a set report the default preference;
+    # like undeclared backends of one worker, they don't vote.
+    candidates = _merge_supported_layouts(
+        [layouts for layouts in reported if layouts != _DEFAULT_LAYOUT_PREFERENCE]
+        or reported
     )
-    candidates = [_layout_from_name(name) for name in supported_layouts[0]]
 
     # A block-compact layout means the block is densely packed in memory, so any mix of
     # specs can re-interpret HNC with different sizes as long as the total number of
@@ -316,14 +374,34 @@ def resolve_kv_cache_layout(
         if isinstance(spec, AttentionSpec) and spec.uses_slot_mapping
     }
     page_sizes = {spec.page_size_bytes for spec in kv_cache_specs}
-    if len(dcp_sharding) > 1 and len(page_sizes) > 1:
+    is_hybrid = any(isinstance(spec, MambaSpec) for spec in kv_cache_specs)
+    if len(dcp_sharding) > 1 and len(page_sizes) > 1 and not is_hybrid:
         # Sharded target and replicated draft caches need independent groups.
         # Block-outer layouts can pack those groups without equalizing pages.
+        # Targets with linear-attention layers (MambaSpec: Mamba, KDA, GDN) are
+        # not narrowed to block-outer layouts: they keep a layer-compact layout,
+        # and page unification pads the draft's smaller pages up to the target's.
+        # Their state pages force large blocks (1536 tokens for Kimi-K3 at TP8)
+        # that packed attention caches cannot split into kernel blocks, and NIXL
+        # cannot transfer packed rows that hold the state.
         candidates = [layout for layout in candidates if layout.is_block_outermost]
         if not candidates:
             raise ValueError(
                 "DCP with a replicated draft and mixed KV page sizes requires "
                 f"a block-outer KV cache layout; supported sets: {supported_layouts}."
+            )
+
+    # An extensible KV cache commits one contiguous run per layer only under a
+    # block-compact layout, which KV connectors need to register its memory.
+    if (
+        cache_config.enable_extensible_kv_cache
+        and vllm_config.kv_transfer_config is not None
+    ):
+        candidates = [m for m in candidates if m.is_block_compact]
+        if not candidates:
+            raise ValueError(
+                "KV connectors with the extensible KV cache need a block-compact "
+                f"layout, but none is in every supported set: {supported_layouts}."
             )
 
     if (requested := envs.VLLM_KV_CACHE_LAYOUT) is not None:
@@ -398,16 +476,53 @@ def get_per_layer_parameters(
     return per_layer_params
 
 
+def _kv_cache_read_encoding(cache_dtype: str | None) -> str | None:
+    # NVFP4 scale-search variants only differ in the store kernel.
+    if cache_dtype == "fp8":
+        return "fp8_e4m3"
+    if cache_dtype is not None and get_kv_quant_mode(cache_dtype).is_nvfp4:
+        return "nvfp4"
+    return cache_dtype
+
+
+def get_kv_cache_dtype_from_layers(
+    vllm_config: VllmConfig, layer_names: list[str]
+) -> str | None:
+    """Resolve the KV read encoding shared by an attention group.
+
+    Attention groups are split by spec, which separates quantization modes but
+    not encodings that share a storage layout (e.g. fp8_e4m3 vs fp8_e5m2).
+    Those must not be mixed within one group.
+    """
+    layers = get_layers_from_vllm_config(
+        vllm_config,
+        AttentionLayerBase,  # type: ignore[type-abstract]
+        layer_names,
+    )
+    cache_dtypes = {
+        _kv_cache_read_encoding(getattr(layer, "kv_cache_dtype", None))
+        for layer in layers.values()
+    }
+    if not cache_dtypes:
+        return None
+    if len(cache_dtypes) != 1:
+        raise ValueError(
+            "All layers in one attention group must share the same KV cache "
+            f"dtype; got {cache_dtypes} for {layer_names}."
+        )
+    return cache_dtypes.pop()
+
+
 def get_num_attention_heads_from_layers(
     vllm_config: VllmConfig, layer_names: list[str]
 ) -> int | None:
-    """Per-TP-rank ``num_heads`` shared by the named Attention layers.
+    """Per-TP-rank `num_heads` shared by the named Attention layers.
 
     Use in metadata builders whose plan-time allocations depend on the
-    head count: the model-wide ``get_num_attention_heads()`` is wrong
+    head count: the model-wide `get_num_attention_heads()` is wrong
     for models with non-uniform per-layer head counts. All layers in
-    one attention group must agree on ``num_heads``; this is asserted.
-    Returns ``None`` when no matching Attention layer is found.
+    one attention group must agree on `num_heads`; this is asserted.
+    Returns `None` when no matching Attention layer is found.
     """
     attn_layers = get_layers_from_vllm_config(
         vllm_config,
@@ -713,9 +828,19 @@ def make_kv_sharing_fast_prefill_common_attn_metadata(
     decode_max_query_len = common_attn_metadata.max_logits_per_req
     assert decode_max_query_len is not None
 
+    if decode_max_query_len == 1 and total_num_decode_tokens == num_reqs:
+        # One logit per request: the offsets are [0, 1, ..., num_reqs].
+        decode_query_start_loc_cpu = torch.arange(
+            num_reqs + 1, dtype=decode_query_start_loc.dtype, device="cpu"
+        )
+    else:
+        # TODO fix this sync
+        with gpu_sync_allowed():
+            decode_query_start_loc_cpu = decode_query_start_loc.cpu()
+
     common_attn_metadata = CommonAttentionMetadata(
         query_start_loc=decode_query_start_loc,
-        query_start_loc_cpu=decode_query_start_loc.to("cpu", non_blocking=True),
+        query_start_loc_cpu=decode_query_start_loc_cpu,
         seq_lens=common_attn_metadata.seq_lens,
         num_reqs=num_reqs,
         num_actual_tokens=total_num_decode_tokens,
@@ -903,84 +1028,21 @@ def split_prefill_chunks(
     return chunk_bounds
 
 
-def reorder_batch_to_split_decodes_and_prefills(
-    input_batch: "InputBatch",
-    scheduler_output: "SchedulerOutput",
-    decode_threshold: int = 1,
-) -> bool:
-    """Reorders the batch to split into prefill and decode requests; places all
-    requests with <= decode_threshold tokens at the front of the batch.
+def set_triton_ptr_range(region: torch.Tensor, *views: torch.Tensor) -> None:
+    """Bound the bytes Triton kernels may access through `views`.
 
-    The batch is reordered into 4 regions:
-        decode:        (num_scheduled <= threshold AND is not prefilling)
-        short_extend:  (num_scheduled <= threshold AND is chunked prefilling)
-        long_extend:   (num_scheduled > threshold AND is chunked prefilling)
-        prefill:       (num_computed == 0)   # First chunks
-
-    Returns:
-        True if the batch was modified, False otherwise.
-
+    Triton's AMD backend uses 32-bit buffer addressing only for pointer
+    arguments within 2 GiB. It checks `ptr_range()` first and otherwise the
+    size of the whole storage, so views into one large allocation (such as a
+    layer of the KV cache) lose it. Each view gets the distance from its
+    `data_ptr()` to the end of `region`; kernels must not access past it.
     """
-    num_reqs = len(input_batch.req_ids)
-    num_scheduled_tokens = [
-        scheduler_output.num_scheduled_tokens[id] for id in input_batch.req_ids
-    ]
-    num_scheduled_tokens_np = np.array(num_scheduled_tokens)
-    num_computed_tokens_np = input_batch.num_computed_tokens_cpu[:num_reqs]
-    num_prompt_tokens_np = input_batch.num_prompt_tokens[:num_reqs]
-
-    has_context = num_computed_tokens_np > 0
-    is_below_threshold = num_scheduled_tokens_np <= decode_threshold
-    done_prefilling = num_computed_tokens_np >= num_prompt_tokens_np
-
-    # Mutually exclusive categories (exactly one True per request):
-    # 1. No context yet -> prefill
-    # 2. Has context, above threshold -> long_extend
-    # 3. Has context, below threshold, still prefilling -> short_extend
-    # 4. Has context, below threshold, done prefilling -> decode
-    is_pure_prefill = ~has_context
-    is_long_extend = has_context & ~is_below_threshold
-    is_short_extend = has_context & is_below_threshold & ~done_prefilling
-    is_decode = has_context & is_below_threshold & done_prefilling
-
-    # Desired order: decode → short_extend → long_extend → prefill
-    req_regions = np.zeros(num_reqs, dtype=np.int32)  # 0 = decode by default
-    req_regions[is_short_extend] = 1
-    req_regions[is_long_extend] = 2
-    req_regions[is_pure_prefill] = 3
-
-    num_decodes = int(is_decode.sum())
-    num_short_extends = int(is_short_extend.sum())
-    num_long_extends = int(is_long_extend.sum())
-    num_prefills = int(is_pure_prefill.sum())
-
-    target_regions = np.repeat(
-        [0, 1, 2, 3],
-        [num_decodes, num_short_extends, num_long_extends, num_prefills],
-    ).astype(np.int32)
-
-    needs_swap = req_regions != target_regions
-
-    if not needs_swap.any():
-        return False
-
-    # Extract indices that need swapping and sort by target region
-    orig_indices = np.where(needs_swap)[0]
-    sorted_order = np.argsort(req_regions[needs_swap], kind="stable")
-    src_indices = orig_indices[sorted_order]
-
-    src_dest_map = {int(src): int(dst) for src, dst in zip(src_indices, orig_indices)}
-
-    for src in src_dest_map:
-        dst = src_dest_map[src]
-        while src != dst:
-            input_batch.swap_states(src, dst)
-            # Mark dst as done by updating its destination to itself
-            next_dst = src_dest_map.get(dst, dst)
-            src_dest_map[dst] = dst
-            dst = next_dst
-
-    return True
+    if region.numel() == 0:
+        return
+    last = sum((n - 1) * stride for n, stride in zip(region.shape, region.stride()))
+    region_end = region.data_ptr() + (last + 1) * region.element_size()
+    for view in views:
+        view.ptr_range = functools.partial(int, region_end - view.data_ptr())
 
 
 def reshape_query_for_spec_decode(query: torch.Tensor, batch_size: int) -> torch.Tensor:
@@ -1084,7 +1146,7 @@ def compute_causal_conv1d_metadata(
         nums_dict[BLOCK_M]["mlist_len"] = mlist_len
         MAX_NUM_PROGRAMS = max(1024, mlist_len) * 2
         offsetlist = []  # type: ignore
-        for idx, num in enumerate(nums):
+        for num in nums:
             offsetlist.extend(range(num))
         offsetlist = torch.tensor(offsetlist, dtype=torch.int32, pin_memory=PIN_MEMORY)
         nums_dict[BLOCK_M]["offsetlist"] = offsetlist
@@ -1175,39 +1237,37 @@ def _mamba_align_block_table_kernel(
     n_out,
     BLOCK: tl.constexpr,
 ):
-    """Gather the last ``n_out`` block-table entries of each request.
+    """Gather the last `n_out` block-table entries of each request.
 
     One program per request. This replaces a five-statement PyTorch expression
-    that expanded to seven kernels over a ``(num_reqs,)`` tensor -- one element
+    that expanded to seven kernels over a `(num_reqs,)` tensor -- one element
     in a single-request decode -- so almost all of its cost was launch
     overhead rather than work.
 
     Both block-table strides are passed explicitly. The expression this replaces
-    was ``torch.gather(block_table, 1, ...)``, which honours any layout, and
-    this is a shared utility -- ``gdn_attn``, ``mamba_attn``, ``short_conv_attn``
-    and ``linear_attn`` all call it -- so assuming a column stride of 1 would
+    was `torch.gather(block_table, 1, ...)`, which honours any layout, and
+    this is a shared utility -- `gdn_attn`, `mamba_attn`, `short_conv_attn`
+    and `linear_attn` all call it -- so assuming a column stride of 1 would
     silently read the wrong slots for a caller holding a non-contiguous view.
-    ``kimi_k3/nvidia/kda_metadata.py`` passes both strides for the same reason.
+    `kimi_k3/nvidia/kda_metadata.py` passes both strides for the same reason.
 
     Two annotations above are load-bearing and easy to drop by accident:
 
-    ``block_table_stride_0: tl.int64``
-        Without it ``req_idx * block_table_stride_0`` is computed in i32 --
-        ``program_id`` is i32 and Triton specializes a stride below 2^31 to
+    `block_table_stride_0: tl.int64`
+        Without it `req_idx * block_table_stride_0` is computed in i32 --
+        `program_id` is i32 and Triton specializes a stride below 2^31 to
         i32 -- so the product wraps once a row offset reaches 2^31 elements
         (a 4096 x 625000 table faults from row 3436 on MI355X).
-        ``torch.gather``, which this replaces, indexes in 64-bit and has no
+        `torch.gather`, which this replaces, indexes in 64-bit and has no
         such limit, so narrowing it would be a regression.
-        ``mamba_utils.py:43`` annotates its row stride the same way.
+        `mamba_utils.py:43` annotates its row stride the same way.
 
-    ``do_not_specialize_on_alignment`` on the three pointers
-        Triton puts pointer alignment in the specialization key, and the MRV1
-        DBO path hands this kernel ``seq_lens[request_slice]`` /
-        ``block_table_tensor[request_slice]`` VIEWS (ubatch_utils.py:278/316).
-        When a ubatch starts at a request index that is not a multiple of 4
-        the view is differently aligned and a fresh variant JIT-compiles
-        mid-step -- 25-28 ms cold, ~1.5 ms warm, and an error under
-        ``jit_monitor_mode=error``. The torch expression this replaced never
+    `do_not_specialize_on_alignment` on the three pointers
+        Triton puts pointer alignment in the specialization key. A view of
+        `seq_lens` or `block_table_tensor` starting at a request index that
+        is not a multiple of 4 is differently aligned, so a fresh variant
+        JIT-compiles mid-step -- 25-28 ms cold, ~1.5 ms warm, and an error under
+        `jit_monitor_mode=error`. The torch expression this replaced never
         compiled anything, so that recompile would be a regression introduced
         by this change.
     """

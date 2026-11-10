@@ -17,13 +17,13 @@ from .mk_objects import (
 
 
 def make_config_arg_parser(description: str):
-    def to_pf_class_type(s: str) -> mk.FusedMoEPrepareAndFinalizeModular:
+    def to_pf_class_type(s: str) -> type[mk.FusedMoEPrepareAndFinalizeModular]:
         for pf in MK_ALL_PREPARE_FINALIZE_TYPES:
             if pf.__name__ == s:
                 return pf
         raise ValueError(f"Cannot find a PrepareFinalize type that matches {s}")
 
-    def to_experts_class_type(s: str) -> mk.FusedMoEExpertsModular:
+    def to_experts_class_type(s: str) -> type[mk.FusedMoEExpertsModular]:
         for fe in MK_FUSED_EXPERT_TYPES:
             if fe.__name__ == s:
                 return fe
