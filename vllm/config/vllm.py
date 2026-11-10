@@ -3160,8 +3160,6 @@ class VllmConfig:
             unsupported.append("speculative decoding")
 
         if self.model_config is not None:
-            if self.model_config.enable_prompt_embeds:
-                unsupported.append("prompt embeddings")
             if self.model_config.is_diffusion:
                 unsupported.append("diffusion models")
             if self.model_config.logits_processors:

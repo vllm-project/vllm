@@ -70,7 +70,8 @@ model_tests() {
     set -e
     pytest -x -v -s tests/models/multimodal/generation/test_whisper.py -m cpu_model
     pytest -x -v -s tests/v1/e2e/test_cpu_linear_attn_chunked_prefix.py
-    pytest -x -v -s 'tests/models/language/pooling/test_embedding.py::test_models[sentence-transformers/all-MiniLM-L12-v2]'"
+    pytest -x -v -s 'tests/models/language/pooling/test_embedding.py::test_models[sentence-transformers/all-MiniLM-L12-v2]'
+    pytest -x -v -s 'tests/models/language/generation/test_common.py::test_models[True-False-5-32-facebook/opt-125m]'"
 
   docker exec "$CONTAINER_NAME" bash -c "
     set -e

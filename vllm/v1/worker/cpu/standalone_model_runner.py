@@ -165,7 +165,9 @@ class StandaloneCPUModelRunner(LoRAModelRunnerMixin):
         # Multimodal
         self.mm_registry = MULTIMODAL_REGISTRY
         self.supports_mm_inputs = self.model_config.supports_multimodal_inputs
-        self.uses_inputs_embeds = self.supports_mm_inputs
+        self.uses_inputs_embeds = (
+            self.supports_mm_inputs or self.model_config.enable_prompt_embeds
+        )
         self.encoder_cache: EncoderCache | None = None
         if self.supports_mm_inputs and self.is_first_pp_rank:
             self.encoder_cache = EncoderCache()
