@@ -52,7 +52,7 @@ def compute_log_scaling_tau(
 
 
 class RelLogitsProj(nn.Module):
-    """Project the per-head relative branch ``r`` to per-distance logits."""
+    """Project the per-head relative branch `r` to per-distance logits."""
 
     def __init__(self, d_rel: int, rel_extent: int) -> None:
         super().__init__()
@@ -260,7 +260,7 @@ class InklingAttention(nn.Module, AttentionLayerBase):
                 fa_md.slot_mapping,
                 off_k,
                 off_v,
-                self.conv_owner.block_size,
+                self.conv_owner.cache_block_size,
                 log_scaling if not self.is_local else None,
             )
             q = q.view(num_tokens, self.num_heads, self.head_dim)

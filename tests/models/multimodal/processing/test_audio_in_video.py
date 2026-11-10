@@ -178,9 +178,11 @@ def test_audio_in_video_metadata_only(
     mm_config.enable_mm_embeds = True
     mm_config.allow_missing_mm_embeddings = True
     processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
-    prompt = "".join(
+    video_placeholders = [
         model_cls.get_placeholder_str("video", i) for i in range(num_videos)
-    )
+    ]
+    assert all(isinstance(token, str) for token in video_placeholders)
+    prompt = "".join(token for token in video_placeholders if token is not None)
     kwargs = {"use_audio_in_video": True}
     uuids = {
         modality: [f"source-{i}" for i in range(num_videos)]
@@ -192,7 +194,9 @@ def test_audio_in_video_metadata_only(
 
         mm_data["image"] = [Image.new("RGB", (64, 64), "green")]
         uuids["image"] = ["image-source"]
-        prompt = model_cls.get_placeholder_str("image", 0) + prompt
+        image_placeholder = model_cls.get_placeholder_str("image", 0)
+        assert image_placeholder is not None
+        prompt = image_placeholder + prompt
     raw = processor(
         prompt,
         mm_items=processor.info.parse_mm_data(mm_data),
@@ -237,9 +241,16 @@ def test_audio_in_video_metadata_only(
                 "uuid": "image-source",
             },
         )
-    parse = parse_chat_messages_async if is_async else parse_chat_messages
-    parsed = parse(messages, ctx.model_config, "openai", mm_processor_kwargs=kwargs)
-    conversation, metadata, remote_uuids = asyncio.run(parsed) if is_async else parsed
+    if is_async:
+        conversation, metadata, remote_uuids = asyncio.run(
+            parse_chat_messages_async(
+                messages, ctx.model_config, "openai", mm_processor_kwargs=kwargs
+            )
+        )
+    else:
+        conversation, metadata, remote_uuids = parse_chat_messages(
+            messages, ctx.model_config, "openai", mm_processor_kwargs=kwargs
+        )
     assert conversation[0]["content"] == (
         ([{"type": "image"}] if has_image else []) + [{"type": "video"}] * num_videos
     )
@@ -271,7 +282,7 @@ def test_audio_in_video_metadata_only(
         )
 
     model = model_cls.__new__(model_cls)
-    model.config = processor.info.get_hf_config()
+    setattr(model, "config", processor.info.get_hf_config())  # noqa: B010
     remote_features = [
         MultiModalFeatureSpec(
             data=remote["mm_kwargs"][f.modality][int(f.identifier.split("-")[-1])],
@@ -281,10 +292,9 @@ def test_audio_in_video_metadata_only(
         )
         for f in features
     ]
-    raw_positions, raw_delta = model.get_mrope_input_positions(
-        raw["prompt_token_ids"], features
-    )
-    remote_positions, remote_delta = model.get_mrope_input_positions(
+    get_positions = getattr(model, "get_mrope_input_positions")  # noqa: B009
+    raw_positions, raw_delta = get_positions(raw["prompt_token_ids"], features)
+    remote_positions, remote_delta = get_positions(
         remote["prompt_token_ids"], remote_features
     )
     assert raw_delta == remote_delta

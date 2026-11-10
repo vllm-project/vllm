@@ -51,6 +51,10 @@ from vllm.models.kimi_k3.nvidia.kda_metadata import (
     KimiK3KDAAttentionBackend,
     KimiK3KDAMetadata,
 )
+from vllm.models.kimi_k3.nvidia.ops.kda_conv import (
+    packed_causal_conv1d_fn,
+    packed_causal_conv1d_supported,
+)
 from vllm.models.kimi_k3.nvidia.ops.recoverssm import (
     KDARecoverSSMRecords,
     kda_recoverssm_verify,
@@ -73,7 +77,10 @@ from vllm.utils.flashinfer import (
 )
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.kv_cache_interface import MambaSpec
-from vllm.v1.worker.workspace import current_workspace_manager
+from vllm.v1.worker.workspace import (
+    current_workspace_manager,
+    is_workspace_manager_initialized,
+)
 
 logger = init_logger(__name__)
 
@@ -857,6 +864,18 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                 self.model_config.dtype,
             )
 
+        # Profiling skips attention, so reserve its runtime layout before the
+        # KV cache is sized. Layers share the manager's grow-only allocation.
+        if is_workspace_manager_initialized():
+            if self._flashkda_buffer_specs is not None:
+                current_workspace_manager().get_simultaneous(
+                    *self._flashkda_buffer_specs
+                )
+            elif self._flashinfer_kda_output_spec is not None:
+                current_workspace_manager().get_simultaneous(
+                    self._flashinfer_kda_output_spec
+                )
+
         self.o_norm = FusedRMSNormGated(self.head_dim, activation="sigmoid")
         decode_norm_weight = None
         if decode_conv1d_weight is not None:
@@ -1319,9 +1338,33 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                         metadata=m,
                     ).transpose(0, 1)
 
-                q_ns = _prefill_conv(q_ns, q_conv_state, q_conv_weight)
-                k_ns = _prefill_conv(k_ns, k_conv_state, k_conv_weight)
-                v_ns = _prefill_conv(v_ns, v_conv_state, v_conv_weight)
+                if (
+                    has_initial_state is not None
+                    and non_spec_query_start_loc is not None
+                    and non_spec_state_indices_tensor is not None
+                    and packed_causal_conv1d_supported(
+                        mixed_qkv_ns,
+                        conv_weights,
+                        conv_state,
+                        self.local_projection_size,
+                    )
+                ):
+                    # One launch over the packed Q|K|V columns: no FP32 copies of
+                    # the inputs, same FP32 math and conv state as the stock calls.
+                    q_ns, k_ns, v_ns = packed_causal_conv1d_fn(
+                        mixed_qkv_ns,
+                        conv_weights,
+                        None,
+                        conv_state,
+                        non_spec_query_start_loc,
+                        non_spec_state_indices_tensor,
+                        has_initial_state,
+                        self.local_projection_size,
+                    ).unbind(0)
+                else:
+                    q_ns = _prefill_conv(q_ns, q_conv_state, q_conv_weight)
+                    k_ns = _prefill_conv(k_ns, k_conv_state, k_conv_weight)
+                    v_ns = _prefill_conv(v_ns, v_conv_state, v_conv_weight)
                 q_ns, k_ns, v_ns = (
                     rearrange(x, "n (h d) -> 1 n h d", d=self.head_dim)
                     for x in (q_ns, k_ns, v_ns)

@@ -95,7 +95,7 @@ async def _release_reloadable_state(engine: Any) -> None:
 
 
 async def _restore_reloadable_state(engine: Any) -> None:
-    """Rebuild state discarded by ``_release_reloadable_state``."""
+    """Rebuild state discarded by `_release_reloadable_state`."""
     await engine.wake_up(tags=["weights"])
     await engine.collective_rpc("reload_weights")
     await engine.wake_up(tags=["kv_cache"])

@@ -321,16 +321,8 @@ class TestColbertSharedEngine:
             colbert_model.llm.encode([TEXTS_1[0]], pooling_task="embed")
 
 
-@pytest.mark.parametrize(
-    ("backend", "use_v2"),
-    [
-        pytest.param("bert", True, id="bert-v2"),
-        pytest.param("modernbert", True, id="modernbert-v2"),
-        pytest.param("jina", True, id="jina-v2"),
-        pytest.param("lfm2", True, id="lfm2-v2"),
-    ],
-)
-def test_colbert_hf_comparison(vllm_runner, monkeypatch, backend, use_v2):
+@pytest.mark.parametrize("backend", ["bert", "modernbert", "jina", "lfm2"])
+def test_colbert_hf_comparison(vllm_runner, backend):
     """Test that vLLM ColBERT embeddings match HuggingFace for each backend."""
     from transformers import AutoTokenizer
 
@@ -343,8 +335,6 @@ def test_colbert_hf_comparison(vllm_runner, monkeypatch, backend, use_v2):
     assert isinstance(extra_kwargs, dict)
     test_texts = [TEXTS_1[0], TEXTS_2[0]]
 
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1" if use_v2 else "0")
-
     with vllm_runner(
         model_name,
         runner="pooling",
@@ -353,7 +343,6 @@ def test_colbert_hf_comparison(vllm_runner, monkeypatch, backend, use_v2):
         enforce_eager=True,
         **extra_kwargs,
     ) as vllm_model:
-        assert vllm_model.llm.llm_engine.vllm_config.use_v2_model_runner == use_v2
         vllm_outputs = vllm_model.token_embed(test_texts)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

@@ -51,7 +51,7 @@ def _kpool_storage_spec(manager_block: int) -> MLAAttentionSpec:
 
 
 class _KernelBlockSizeBackend(Protocol):
-    """The backend hooks ``prepare_kernel_block_sizes`` reads off each group."""
+    """The backend hooks `prepare_kernel_block_sizes` reads off each group."""
 
     @staticmethod
     def get_supported_kernel_block_sizes(
