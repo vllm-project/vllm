@@ -134,6 +134,10 @@ class NameSeededWeightLoader(DummyModelLoader):
             if name.endswith(".A"):
                 # Mamba layers hold A = -exp(A_log), which must be negative.
                 values = -torch.exp(0.5 * values)
+            elif name.endswith("global_scale"):
+                # NVFP4 global scales are positive. Marlin, the NVFP4 kernel on
+                # GPUs without native FP4, produces NaN with signed draws.
+                values = 1.0 + 0.1 * values
             elif param.dim() >= 2:
                 values /= math.sqrt(param.shape[-1])
             else:
