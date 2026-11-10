@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Single-GPU kernels of the DeepSeek-V4.1 specialized decode
-(``vllm/models/deepseek_v41/nvidia/specialized_decode``), each against the stock path
+(`vllm/models/deepseek_v41/nvidia/specialized_decode`), each against the stock path
 it replaces, eagerly and replayed from a CUDA graph where the decode captures
 it. Needs one SM100-family GPU; about 5 minutes, mostly kernel compilation.
 
@@ -61,9 +61,11 @@ from vllm.models.deepseek_v41.nvidia.specialized_decode.moe.routed_expert_gemm i
     HIDDEN,
     PADDED,
     SLICE,
+    TILE,
     TOP_K,
     FrontConfig,
     RoutedExpertGemm,
+    cta_words,
 )
 from vllm.models.deepseek_v41.nvidia.specialized_decode.runtime.metadata_graphs import (
     AttnMetadataCudaGraphs,
@@ -81,7 +83,7 @@ DEVICE = torch.device("cuda")
 
 
 def _capture(fn):
-    """``fn`` run once eagerly (compiling its kernels), then captured into a
+    """`fn` run once eagerly (compiling its kernels), then captured into a
     CUDA graph; returns the graph and the captured outputs."""
     fn()
     torch.accelerator.synchronize()
@@ -91,24 +93,26 @@ def _capture(fn):
     return graph, out
 
 
-def _bf16_ulps(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-    """Distance in BF16 ulps between two BF16 tensors."""
-
-    def ordered(x):
-        bits = x.contiguous().view(torch.int16).to(torch.int32)
-        return torch.where(bits < 0, -32768 - bits, bits)
-
-    return (ordered(a) - ordered(b)).abs()
+def _bf16_ulp(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    """One BF16 ulp at the larger magnitude of two BF16 tensors, in FP64."""
+    _, exponent = torch.frexp(torch.maximum(a.abs(), b.abs()).double())
+    return torch.ldexp(torch.ones_like(exponent, dtype=torch.float64), exponent - 8)
 
 
 # --------------------------------------------------------- routed experts
 
 
-def _routing(rows: int, generator: torch.Generator) -> torch.Tensor:
-    """Top-k ids of ``rows`` rows drawn from about 22 experts, as a decode
-    step of six rows routes."""
-    pool = torch.randperm(EXPERTS, generator=generator)[:22]
-    ids = [pool[torch.randperm(22, generator=generator)[:TOP_K]] for _ in range(rows)]
+def _routing(
+    rows: int, generator: torch.Generator, pool_size: int = 22
+) -> torch.Tensor:
+    """Top-k ids of `rows` rows drawn from `pool_size` experts (22, as a
+    decode step of six rows routes); above eight rows experts own several
+    tiles, and with a pool of six every expert takes every row."""
+    pool = torch.randperm(EXPERTS, generator=generator)[:pool_size]
+    ids = [
+        pool[torch.randperm(pool_size, generator=generator)[:TOP_K]]
+        for _ in range(rows)
+    ]
     return torch.stack(ids).to(torch.int32).to(DEVICE)
 
 
@@ -175,8 +179,8 @@ def _gemm(experts) -> RoutedExpertGemm:
 
 
 def _flashinfer_experts(experts, routing, output=None):
-    """``TrtLlmMxfp4ExpertsModular``'s FlashInfer call on the same quantized
-    input: GEMM2 rows and their permutation, or the finalized ``output``."""
+    """`TrtLlmMxfp4ExpertsModular`'s FlashInfer call on the same quantized
+    input: GEMM2 rows and their permutation, or the finalized `output`."""
     from flashinfer import trtllm_fp4_block_scale_routed_moe
 
     from vllm.model_executor.layers.fused_moe.activation import MoEActivation
@@ -216,7 +220,7 @@ def _flashinfer_experts(experts, routing, output=None):
         enable_pdl=True,
         activation_type=activation_to_flashinfer_int(MoEActivation.SILU),
         output=output,
-        tune_max_num_tokens=8,
+        tune_max_num_tokens=max(routing.topk_ids.size(0), 8),
     )
     if output is not None:
         return output
@@ -241,18 +245,25 @@ def _fma_finalize(rows: torch.Tensor, permuted: torch.Tensor, weights: torch.Ten
 
 
 @pytest.mark.parametrize("graph", [False, True], ids=["eager", "graph"])
-@pytest.mark.parametrize("rows", [1, 5, 6, 8])
-def test_routed_experts_match_flashinfer(experts, rows, graph):
+@pytest.mark.parametrize(
+    ("rows", "pool_size"),
+    # Both sides of every GEMM width (8, 16, 32, 64, 128, 192 rows), one DSpark
+    # request (6 rows), and crowded routing (6 experts) at the larger widths.
+    [(r, 22) for r in (1, 6, 8, 9, 16, 17, 32, 33, 64, 65, 128, 129, 171, 192)]
+    + [(64, 6), (128, 6), (192, 6)],
+)
+def test_routed_experts_match_flashinfer(experts, rows, pool_size, graph):
     """Route + GEMM pair: the routed rows bitwise those of FlashInfer's
-    TRT-LLM-gen MoE, and their top-k reduction within one BF16 ulp of its
-    finalized output."""
+    TRT-LLM-gen MoE, and their top-k reduction within one BF16 ulp (plus FP32
+    summation-order error) of its finalized output."""
     generator = torch.Generator().manual_seed(rows)
     gemm = _gemm(experts)
 
     def inputs():
         x = torch.randn(rows, HIDDEN, generator=generator).to(torch.bfloat16)
         weights = torch.softmax(torch.randn(rows, TOP_K, generator=generator), -1)
-        return x.to(DEVICE), _routing(rows, generator), weights.to(DEVICE)
+        ids = _routing(rows, generator, pool_size)
+        return x.to(DEVICE), ids, weights.to(DEVICE)
 
     x, ids, weights = inputs()
 
@@ -275,7 +286,59 @@ def test_routed_experts_match_flashinfer(experts, rows, graph):
     ours = _fma_finalize(
         out.gemm2_permuted, out.expanded_idx_to_permuted_idx, out.expert_weights
     )
-    assert _bf16_ulps(ours, finalized.cpu()).max() <= 1
+    # FlashInfer may add the k products in another order (newer releases split
+    # them into groups), so allow FP32's reordering error on top of the ulp.
+    magnitude = (out.expert_weights.cpu().double()[..., None] * routed.cpu()).abs()
+    slack = 2 * (TOP_K + 1) * 2**-24 * magnitude.sum(1)
+    distance = (ours.double() - finalized.cpu().double()).abs()
+    assert (distance <= _bf16_ulp(ours, finalized.cpu()) + slack).all()
+
+
+@pytest.mark.parametrize("rows", [6, 12, 48, 192])
+def test_routed_experts_replays_agree(experts, rows):
+    """GEMM2 waits for each token tile's GEMM1 items (the record's ready
+    words), not for the GEMM1 grid. One captured route + GEMM pair is
+    replayed 500 times on two alternating input sets (different rows and
+    experts), and each replay's routed rows must be bitwise
+    FlashInfer's for its set: a tile read before its H is complete would
+    hold the other set's H. The used tiles' ready words must count GEMM1's
+    m tiles. Six and twelve rows leave GEMM1 a partial last wave, as a
+    decode step does."""
+    generator = torch.Generator().manual_seed(1000 + rows)
+    gemm = _gemm(experts)
+
+    def inputs():
+        x = torch.randn(rows, HIDDEN, generator=generator).to(torch.bfloat16)
+        weights = torch.softmax(torch.randn(rows, TOP_K, generator=generator), -1)
+        ids = _routing(rows, generator, min(EXPERTS, TOP_K * rows))
+        return x.to(DEVICE), ids, weights.to(DEVICE)
+
+    sets = [inputs(), inputs()]
+    x, ids, weights = (t.clone() for t in sets[0])
+
+    def load(index):
+        for tensor, value in zip((x, ids, weights), sets[index]):
+            tensor.copy_(value)
+
+    def run():
+        routing = gemm.route(x, ids, weights)
+        return routing, gemm.gemms(routing)
+
+    graph, (routing, out) = _capture(run)
+    wants = []
+    for index in range(2):
+        load(index)
+        graph.replay()
+        wants.append(_flashinfer_experts(experts, routing))
+    for replay in range(500):
+        load(replay % 2)
+        graph.replay()
+        routed = out.gemm2_permuted[out.expanded_idx_to_permuted_idx.long()]
+        assert torch.equal(routed, wants[replay % 2]), replay
+    ready = 4 + 2 * cta_words(routing.ctas) + TILE * routing.ctas
+    tiles = int(routing.record[1])
+    counts = routing.record[ready : ready + tiles]
+    assert torch.all(counts == 2 * SLICE // 128), counts
 
 
 SENTINEL = 128815  # First of five image sentinel token ids.
@@ -299,16 +362,19 @@ def _front_inputs(rows: int, generator: torch.Generator, image_rows: int):
     return logits.to(DEVICE), x.to(torch.bfloat16).to(DEVICE), ids.to(DEVICE)
 
 
-def _chain(gemm: RoutedExpertGemm, x, logits, ids):
-    """What the front replaces: the DSv4 top-k, then quantization and route."""
+def _chain(gemm: RoutedExpertGemm, x, logits, ids, is_padding=None):
+    """What the front replaces: the DSv4 top-k (with the router's padding
+    mask), then quantization and route."""
     from vllm.model_executor.layers.fused_moe.router.dsv4_topk import dsv4_topk
 
     config = gemm.front_config
+    assert config is not None
     weights, topk_ids = dsv4_topk(
         logits,
         config.bias,
         torch.int32,
         config.scale,
+        is_padding=is_padding,
         input_ids=ids,
         bias_vl=config.bias_vl,
         image_sentinel_lo=config.image_sentinel_lo,
@@ -333,12 +399,18 @@ def _assert_same_routing(got, want):
     assert got.ctas == want.ctas
 
 
-@pytest.mark.parametrize("scale", [1.0, 1.5])
-@pytest.mark.parametrize("image", [None, torch.int32, torch.int64])
-@pytest.mark.parametrize("rows", [1, 5, 6, 8])
+@pytest.mark.parametrize(
+    ("image", "scale"), [(None, 1.0), (torch.int32, 1.5), (torch.int64, 1.0)]
+)
+# Both sides of each build width (8, 16, 32, 64, 128, 192 rows), which also
+# changes the rows a selecting CTA holds, and one DSpark request (6 rows).
+@pytest.mark.parametrize(
+    "rows", [1, 6, 8, 9, 16, 17, 32, 33, 64, 65, 128, 129, 171, 192]
+)
 def test_front_matches_the_chain(experts, rows, image, scale):
     """The fused front: ids (in tie order), FP32 weights, MXFP8 bytes and
-    scales, permutation and routing record bitwise those of the chain."""
+    scales, permutation and routing record bitwise those of the chain, with
+    and without CUDA graph padding rows."""
     generator = torch.Generator().manual_seed(rows)
     gemm = _gemm(experts)
     bias = 0.05 * torch.randn(EXPERTS, generator=generator)
@@ -351,19 +423,29 @@ def test_front_matches_the_chain(experts, rows, image, scale):
         image_sentinel_lo=SENTINEL if image else 0,
         scale=scale,
     )
-    for trial in range(4):
+
+    def padding(count):
+        return torch.arange(rows, device=DEVICE) >= rows - count
+
+    for trial in range(6):
         logits, x, ids = _front_inputs(rows, generator, image_rows=trial % (rows + 1))
         if image is not None:
             ids = ids.to(image)
-        _assert_same_routing(gemm.front(x, logits, ids), _chain(gemm, x, logits, ids))
+        # Trials 4 and 5: the last row, then the last half of the rows, padding.
+        mask = None if trial < 4 else padding(1 if trial == 4 else rows // 2)
+        _assert_same_routing(
+            gemm.front(x, logits, ids, mask), _chain(gemm, x, logits, ids, mask)
+        )
 
-    # Replayed from a CUDA graph on fresh logits and rows.
-    graph, routing = _capture(lambda: gemm.front(x, logits, ids))
+    # Replayed from a CUDA graph on fresh logits, rows and padding.
+    mask = padding(0)
+    graph, routing = _capture(lambda: gemm.front(x, logits, ids, mask))
     fresh_logits, fresh_x, _ = _front_inputs(rows, generator, image_rows=0)
     logits.copy_(fresh_logits)
     x.copy_(fresh_x)
+    mask.copy_(padding(rows // 3))
     graph.replay()
-    _assert_same_routing(routing, _chain(gemm, x, logits, ids))
+    _assert_same_routing(routing, _chain(gemm, x, logits, ids, mask))
 
 
 # ------------------------------------------------- candidate selection
@@ -379,7 +461,7 @@ def test_front_matches_the_chain(experts, rows, image, scale):
     ],
 )
 def test_cooperative_candidates_match_stock(workspace_init, ends, k):
-    """Each row's candidate set equals the stock ``torch.topk`` selection,
+    """Each row's candidate set equals the stock `torch.topk` selection,
     including the pinned newest block and -inf blocks left as -1."""
     from vllm.model_executor.kernels.attention.dsa.candidate_blocks import (
         select_candidate_blocks,
@@ -491,16 +573,19 @@ def test_sparse_mla_persistent_kv_counters(dtype, query_lens):
 
 
 class _Mxfp8Linear(nn.Module):
-    """An MXFP8 linear with weights processed for the ``cute-dsl`` kernel."""
+    """An MXFP8 linear with weights processed for the `cute-dsl` kernel."""
 
     def __init__(self, n: int, k: int):
         super().__init__()
+        self.params_dtype = torch.bfloat16
         w = torch.randn(n, k, device=DEVICE) / k**0.5
         w_q, w_s = mxfp8_e4m3_quantize(
             w.to(torch.bfloat16), is_sf_swizzled_layout=False
         )
         self.weight = nn.Parameter(w_q, requires_grad=False)
         self.weight_scale = nn.Parameter(w_s.view(n, k // 32), requires_grad=False)
+        # The kernel takes a BF16 input's output dtype from the layer.
+        self.params_dtype = torch.bfloat16
         kernel = FlashInferCutedslMxfp8LinearKernel(Mxfp8LinearLayerConfig((n, k)))
         kernel.process_weights_after_loading(self)
         self.quant_method = SimpleNamespace(kernel=kernel)
@@ -521,9 +606,9 @@ def _quantized(rows: int, k: int) -> QuantizedActivation:
 @pytest.mark.parametrize("rows", [1, 5, 6, 8])
 @pytest.mark.parametrize("shape", list(mxfp8_linear.PINNED_TACTICS), ids=str)
 def test_low_latency_mxfp8_mm(shape, rows):
-    """``fused_wqa_wkv``/``wq_b``/``wo_b`` at their TP4 shapes on
-    ``cutedsl_low_latency``, eagerly and replayed, within BF16 tolerance of the
-    stock ``cute-dsl`` layer; a BF16 input is left to the stock layer."""
+    """`fused_wqa_wkv`/`wq_b`/`wo_b` at their TP4 shapes on
+    `cutedsl_low_latency`, eagerly and replayed, within BF16 tolerance of the
+    stock `cute-dsl` layer; a BF16 input is left to the stock layer."""
     if not mxfp8_linear._backend_supported():
         pytest.skip("FlashInfer mm_mxfp8 has no cutedsl_low_latency backend")
     n, k = shape
@@ -544,9 +629,72 @@ def test_low_latency_mxfp8_mm(shape, rows):
     assert mxfp8_linear.low_latency_mm(linear, x) is None
 
 
+@pytest.mark.parametrize("rows", [9, 12, 18, 30, 48, 72, 192, 288, 384])
+@pytest.mark.parametrize("shape", list(mxfp8_linear.CUTE_DSL_TACTICS), ids=str)
+def test_pinned_mxfp8_mm(shape, rows):
+    """`fused_wqa_wkv`/`wq_b`/`wo_b` at their TP4 shapes on `cute-dsl`
+    with the pinned tactic of the row count, eagerly and replayed, within BF16
+    tolerance of the stock layer, for MXFP8 and BF16 inputs."""
+    if not current_platform.is_device_capability(103):
+        pytest.skip("the tactics are pinned on GB300")
+    n, k = shape
+    linear = _Mxfp8Linear(n, k)
+    qa = _quantized(rows, k)
+    out = mxfp8_linear.pinned_mm(linear, qa)
+    assert out is not None
+    torch.testing.assert_close(out, linear(qa), atol=2e-2, rtol=1.6e-2)
+
+    graph, out = _capture(lambda: mxfp8_linear.pinned_mm(linear, qa))
+    qa.data.copy_(_quantized(rows, k).data)
+    graph.replay()
+    torch.testing.assert_close(out, linear(qa), atol=2e-2, rtol=1.6e-2)
+
+    x = torch.randn(rows, k, device=DEVICE).to(torch.bfloat16)
+    out = mxfp8_linear.pinned_mm(linear, x)
+    assert out is not None
+    torch.testing.assert_close(out, linear(x), atol=2e-2, rtol=1.6e-2)
+
+
+@pytest.mark.parametrize("rows", [9, 12, 16, 17, 24, 32, 33, 48])
+@pytest.mark.parametrize("shape", list(mxfp8_linear.WIDE_TACTICS), ids=str)
+def test_wide_low_latency_mxfp8_mm(shape, rows):
+    """`fused_wqa_wkv`/`wq_b`/`wo_b` at their TP4 shapes on the
+    low-latency kernel with a 16-, 32- or 48-row activation tile, eagerly and
+    replayed, within BF16 tolerance of the stock layer, for MXFP8 and BF16
+    inputs; above `WIDE_LOW_LATENCY_MAX_ROWS` rows it does not run."""
+    if not mxfp8_linear._wide_supported():
+        pytest.skip("the wide tactics are pinned on GB300, FlashInfer >= 0.7.2")
+    n, k = shape
+    linear = _Mxfp8Linear(n, k)
+    qa = _quantized(rows, k)
+    out = mxfp8_linear.wide_mm(linear, qa)
+    assert out is not None
+    torch.testing.assert_close(out, linear(qa), atol=2e-2, rtol=1.6e-2)
+
+    graph, out = _capture(lambda: mxfp8_linear.wide_mm(linear, qa))
+    qa.data.copy_(_quantized(rows, k).data)
+    graph.replay()
+    assert torch.equal(out, mxfp8_linear.wide_mm(linear, qa))
+    torch.testing.assert_close(out, linear(qa), atol=2e-2, rtol=1.6e-2)
+
+    x = torch.randn(rows, k, device=DEVICE).to(torch.bfloat16)
+    out = mxfp8_linear.wide_mm(linear, x)
+    assert out is not None
+    torch.testing.assert_close(out, linear(x), atol=2e-2, rtol=1.6e-2)
+    assert mxfp8_linear.wide_mm(linear, _quantized(49, k)) is None
+
+
+def test_pinned_mxfp8_mm_rows():
+    """Up to `LOW_BATCH_MAX_ROWS` rows, and for an unpinned shape, the
+    stock layer runs."""
+    n, k = next(iter(mxfp8_linear.CUTE_DSL_TACTICS))
+    assert mxfp8_linear.pinned_mm(_Mxfp8Linear(n, k), _quantized(8, k)) is None
+    assert mxfp8_linear.pinned_mm(_Mxfp8Linear(1024, k), _quantized(48, k)) is None
+
+
 @pytest.mark.parametrize("rows", [1, 5, 6, 8, 16, 17])
 def test_low_batch_lm_head(dist_init, default_vllm_config, rows):
-    """The logits processor's LM head on CuTe DSL ``mm_bf16`` for 1-16 rows,
+    """The logits processor's LM head on CuTe DSL `mm_bf16` for 1-16 rows,
     within BF16 rounding of the FP32 product; 17 rows keep the default GEMM."""
     from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
     from vllm.models.deepseek_v41.nvidia.specialized_decode.logits.lm_head import (
@@ -576,7 +724,7 @@ def test_low_batch_lm_head(dist_init, default_vllm_config, rows):
     [(1024, 5120), (512, 5120), (64, 5120), (128, 512)],
 )
 def test_aux_projection_gemm(n, k, rows):
-    """FP32 ``x @ W.T`` that differs from the exact product by no more than
+    """FP32 `x @ W.T` that differs from the exact product by no more than
     any K-term summation order can."""
     if not ll_bf16.is_available():
         pytest.skip("CuTe DSL ll_bf16 is unavailable")
@@ -592,7 +740,7 @@ def test_aux_projection_gemm(n, k, rows):
 
 @pytest.mark.parametrize("ratio", [1, 2])
 def test_fp32_index_key_store(ratio):
-    """The index key store fed by ``wk``'s FP32 output writes the MXFP4 cache
+    """The index key store fed by `wk`'s FP32 output writes the MXFP4 cache
     bytes the shared store writes for its BF16 output."""
     if not ll_bf16.is_available():
         pytest.skip("CuTe DSL ll_bf16 is unavailable")
@@ -715,7 +863,7 @@ def _swa_prefix(layer_id: int) -> str:
 
 
 class SideBuildStep:
-    """One pure-decode step through the sparse-index lookups of ``LAYOUT``,
+    """One pure-decode step through the sparse-index lookups of `LAYOUT`,
     with real table builds and inputs refreshed in place."""
 
     def __init__(self, seed: int):
@@ -806,7 +954,7 @@ class SideBuildStep:
             group.flashinfer_sparse_index_cache.clear()
 
     def lookup_args(self, layer):
-        """The arguments of ``layer``'s sparse-index build."""
+        """The arguments of `layer`'s sparse-index build."""
         swa_only = layer.compress_ratio == 0
         return (
             None if swa_only else self.compressed_cache,
@@ -817,7 +965,7 @@ class SideBuildStep:
         )
 
     def forward(self, layers, tables, mode, stop=None, join_at_end=True):
-        """The layers' table lookups in model order, on ``tables`` (None: the
+        """The layers' table lookups in model order, on `tables` (None: the
         stock build of each layer): each index source joins the side builds,
         then its indexer writes the top-k indices; the executor joins after
         its layers. Returns copies of each layer's table."""
@@ -959,8 +1107,8 @@ def _same_bytes(a: torch.Tensor, b: torch.Tensor) -> bool:
 def test_sparse_mla_decode_launches_the_stock_decode(
     monkeypatch, dtype, layer_id, wide
 ):
-    """``SparseMlaDecode.run`` launches the sparse-MLA decode with the
-    arguments the stock ``_forward`` passes for a pure-decode step (padded
+    """`SparseMlaDecode.run` launches the sparse-MLA decode with the
+    arguments the stock `_forward` passes for a pure-decode step (padded
     query heads, padded output rows, DSpark's wide window), plus the KV
     counters."""
     step = SideBuildStep(seed=1)
@@ -1033,14 +1181,19 @@ class _ChainBuilder:
 
     supports_update_block_table = False
 
-    def __init__(self, offset: int, max_tokens: int):
+    def __init__(self, offset: int, max_tokens: int, delay: int = 0):
         self.offset = offset
+        # GPU cycles to wait before the clamp, so that a build that does not
+        # wait for it reads the table first.
+        self.delay = delay
         self.token_to_req = torch.zeros(max_tokens, dtype=torch.int32, device=DEVICE)
         self.out = torch.zeros(max_tokens, dtype=torch.int64, device=DEVICE)
 
     def build(self, common_prefix_len, common_attn_metadata):
         cm = common_attn_metadata
         token_to_req = cm.token_to_req_indices(self.token_to_req)
+        if self.delay:
+            torch.cuda._sleep(self.delay)
         block_table = cm.block_table_tensor.clamp_(min=0)
         req = token_to_req.long()
         value = block_table[:, 0].index_select(0, req) * 1000
@@ -1052,11 +1205,33 @@ class _ChainBuilder:
         return {"out": out, "token_to_req": token_to_req, "block_table": block_table}
 
 
-def test_metadata_graph_replay_matches_eager_build():
+class _ReaderBuilder(_ChainBuilder):
+    """A builder that, like the indexer's, only reads its block table: it
+    must see the table its group's writers clamped."""
+
+    def build(self, common_prefix_len, common_attn_metadata):
+        cm = common_attn_metadata
+        token_to_req = cm.token_to_req_indices(self.token_to_req)
+        req = token_to_req.long()
+        value = cm.block_table_tensor[:, 0].index_select(0, req).long()
+        for _ in range(4):
+            value = value * 3 + cm.positions + self.offset
+        out = self.out[: cm.num_actual_tokens]
+        torch.add(value, cm.slot_mapping, out=out)
+        return {"out": out, "token_to_req": token_to_req}
+
+
+@pytest.mark.parametrize("readers", [False, True])
+def test_metadata_graph_replay_matches_eager_build(monkeypatch, readers):
     """A recorded metadata build of five KV-cache groups (two sharing a block
     table, so the build forks into four branches) refreshes, on replay, every
     buffer the FULL forward graphs read to the eager build's values, also
-    after an eager build of another batch left other values there."""
+    after an eager build of another batch left other values there. With
+    readers, the two groups sharing a table each add a builder that only reads
+    it, which builds on a branch of its own after the table's clamps."""
+    from vllm.models.deepseek_v41.nvidia.specialized_decode.runtime import (
+        metadata_graphs,
+    )
     from vllm.v1.worker.gpu.attn_utils import build_attn_metadata
     from vllm.v1.worker.utils import AttentionGroup
 
@@ -1072,7 +1247,9 @@ def test_metadata_graph_replay_matches_eager_build():
         torch.zeros(num_reqs, 8, dtype=torch.int32, device=DEVICE) for _ in range(4)
     ]
     block_tables = [tables[0], tables[1], tables[2], tables[3], tables[1]]
-    builders = [_ChainBuilder(i, 64) for i in range(groups)]
+    builders = [
+        _ChainBuilder(i, 64, delay=1_000_000 if readers else 0) for i in range(groups)
+    ]
     attn_groups = [
         [
             AttentionGroup(
@@ -1080,11 +1257,25 @@ def test_metadata_graph_replay_matches_eager_build():
                 layer_names=[f"g{i}.l{j}" for j in range(2)],
                 kv_cache_spec=None,
                 kv_cache_group_id=i,
-                metadata_builders=[builder],
+                metadata_builders=[builder],  # type: ignore[list-item]
             )
         ]
         for i, builder in enumerate(builders)
     ]
+    if readers:
+        monkeypatch.setattr(
+            metadata_graphs, "_BLOCK_TABLE_READERS", frozenset({_ReaderBuilder})
+        )
+        for i in (1, 4):
+            attn_groups[i].append(
+                AttentionGroup(
+                    backend=None,
+                    layer_names=[f"g{i}.r{j}" for j in range(2)],
+                    kv_cache_spec=None,
+                    kv_cache_group_id=i,
+                    metadata_builders=[_ReaderBuilder(10 + i, 64)],  # type: ignore[list-item]
+                )
+            )
 
     # The runner's persistent query-start buffer, which the recorded build reads.
     persistent_query_start = query_start.to(DEVICE)
@@ -1123,6 +1314,7 @@ def test_metadata_graph_replay_matches_eager_build():
         slot_mappings.copy_(torch.randint(-1, 100, slot_mappings.shape))
         for table in tables:
             table.copy_(torch.randint(-1, 50, table.shape))
+            table[0, 0] = -1  # The clamp changes what the readers see.
         inputs = [t.clone() for t in tables]
         # An eager step of another batch leaves its values in the buffers.
         build(attn_groups, other_query_start, other_query_start.to(DEVICE))
@@ -1135,3 +1327,35 @@ def test_metadata_graph_replay_matches_eager_build():
         for k, want in expected.items():
             assert torch.equal(seen[k], want), (step, k)
             assert torch.equal(replayed[k], want), (step, k)
+
+
+@pytest.mark.parametrize("rows", [1, 12, 48, 192])
+@torch.inference_mode()
+def test_stream_embedding_matches_the_lookup(rows):
+    """The replicated table's lookup: each row of the embedding and of its
+    four hc streams is bitwise the table's row of its token, and zeros for a
+    token outside the table (as the sharded lookup's sum gives it); the
+    outputs are written in full and nothing past them."""
+    from vllm.models.deepseek_v41.nvidia.specialized_decode.embedding.replicated import (  # noqa: E501
+        embed_streams,
+    )
+
+    torch.manual_seed(0)
+    vocab, hidden, hc_mult = 1000, 5120, 4
+    table = torch.randn(vocab, hidden, device="cuda").bfloat16()
+    ids = torch.randint(0, vocab, (rows,), dtype=torch.int32, device="cuda")
+    outside = torch.tensor([-1, vocab, vocab + 4096, vocab - 1], dtype=torch.int32)
+    ids[: min(rows, 4)] = outside[: min(rows, 4)].cuda()
+    want = torch.zeros(rows, hidden, device="cuda").bfloat16()
+    inside = (ids >= 0) & (ids < vocab)
+    want[inside] = table[ids[inside].long()]
+
+    streams = torch.full((rows + 1, hc_mult, hidden), float("nan"), device="cuda")
+    streams = streams.bfloat16()
+    embedding = torch.full((rows + 1, hidden), float("nan"), device="cuda").bfloat16()
+    embed_streams(ids, table, embedding[:rows], streams[:rows])
+    for c in range(hc_mult):
+        assert torch.equal(streams[:rows, c], want)
+    assert streams[rows:].isnan().all()
+    assert torch.equal(embedding[:rows], want)
+    assert embedding[rows:].isnan().all()
