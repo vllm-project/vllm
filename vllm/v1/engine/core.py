@@ -832,10 +832,13 @@ class EngineCore:
         ):
             model_output = self._wait_for_output(future)
             if model_output is None:
-                # None from sample_tokens() implies that the original execute_model()
-                # call failed - raise that exception.
-                exec_model_fut.result()
-                raise RuntimeError("unexpected error")
+                # None from sample_tokens() means execute_model() either
+                # failed -- exec_model_fut.result() re-raises it -- or
+                # already returned the complete output for a step that
+                # requires no sampling.
+                model_output = exec_model_fut.result()
+                if model_output is None:
+                    raise RuntimeError("unexpected error")
 
         # Before processing the model output, process any aborts that happened
         # during the model execution.
