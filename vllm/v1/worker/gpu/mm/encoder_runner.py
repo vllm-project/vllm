@@ -3,8 +3,8 @@
 import threading
 import time
 from collections.abc import Collection
-from contextlib import AbstractContextManager, contextmanager, nullcontext
-from typing import TYPE_CHECKING, Any
+from contextlib import contextmanager
+from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
@@ -22,7 +22,6 @@ from vllm.utils.torch_utils import PIN_MEMORY, async_tensor_h2d
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.utils import (
     EncoderTimingStats,
-    profile_mm_embed_input_ids,
     sanity_check_mm_encoder_outputs,
 )
 
@@ -113,22 +112,21 @@ class EncoderRunner:
         self,
         dummy_mm_inputs: list[tuple[str, MultiModalKwargsItem]],
         budget: MultiModalBudget,
-        merge_context: AbstractContextManager[Any] | None = None,
-    ) -> None:
+    ) -> list[torch.Tensor]:
         """Profile multimodal encoder and temporary encoder cache memory.
 
-        `merge_context` wraps only the embedding merge, which, unlike the
-        encoder, runs through the language model's LoRA embedding layer.
+        Returns the dummy encoder outputs, which stay in the encoder cache
+        until `reset_encoder_cache()`.
         """
         if (encoder_budget := budget.get_encoder_budget()) <= 0:
-            return
+            return []
 
         if not budget.mm_max_toks_per_item:
             logger.info(
                 "Skipping encoder profiling for embedding-only mode "
                 "(all modality limits=0 with enable_mm_embeds=True).",
             )
-            return
+            return []
 
         assert dummy_mm_inputs, "Dummy inputs should be generated for encoder profiling"
         dummy_modality = dummy_mm_inputs[0][0]
@@ -151,21 +149,7 @@ class EncoderRunner:
         self.encoder_cache.encoder_outputs.update(
             (f"tmp_{i}", output) for i, output in enumerate(dummy_encoder_outputs)
         )
-
-        if not budget.model_config.is_encoder_decoder:
-            # Encoder-decoder models feed encoder outputs to cross-attention
-            # instead of merging them into `inputs_embeds`.
-            if merge_context is None:
-                merge_context = nullcontext()
-            with merge_context:
-                profile_mm_embed_input_ids(
-                    self.model,
-                    dummy_encoder_outputs,
-                    self.max_num_tokens,
-                    self.device,
-                    dummy_modality,
-                    budget.model_config,
-                )
+        return dummy_encoder_outputs
 
     @torch.inference_mode()
     def execute_mm_encoder(

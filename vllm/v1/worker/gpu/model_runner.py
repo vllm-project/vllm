@@ -192,6 +192,7 @@ from vllm.v1.worker.utils import (
     clear_layer_kv_caches,
     copy_kv_cache_blocks_inplace,
     get_uniform_decode_token_count,
+    profile_mm_embed_input_ids,
 )
 from vllm.v1.worker.workspace import lock_workspace, use_workspace_lane
 
@@ -1071,21 +1072,35 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     self.vllm_config, self.mm_registry, enable_cache=False
                 )
                 dummy_mm_inputs = mm_budget.get_dummy_encoder_profile_inputs()
-                max_loras = (
-                    self.lora_config.max_loras if self.lora_config is not None else 0
+                dummy_encoder_outputs = (
+                    self.model_state.encoder_runner.profile_encoder_cache(
+                        dummy_mm_inputs, mm_budget
+                    )
                 )
-                self.model_state.encoder_runner.profile_encoder_cache(
-                    dummy_mm_inputs,
-                    mm_budget,
-                    merge_context=self.maybe_dummy_run_with_lora(
+                # Encoder-decoder models feed encoder outputs to cross-attention
+                # instead of merging them into `inputs_embeds`.
+                if dummy_encoder_outputs and not self.model_config.is_encoder_decoder:
+                    max_loras = (
+                        self.lora_config.max_loras
+                        if self.lora_config is not None
+                        else 0
+                    )
+                    with self.maybe_dummy_run_with_lora(
                         self.lora_config,
                         num_scheduled_tokens=np.array(
                             [self.max_num_tokens], dtype=np.int32
                         ),
-                        num_sampled_tokens=np.ones(1, dtype=np.int32),
+                        num_sampled_tokens=None,
                         num_active_loras=max_loras,
-                    ),
-                )
+                    ):
+                        profile_mm_embed_input_ids(
+                            self.model,
+                            dummy_encoder_outputs,
+                            self.max_num_tokens,
+                            self.device,
+                            dummy_mm_inputs[0][0],
+                            self.model_config,
+                        )
 
         hidden_states, sample_hidden_states = self._dummy_run(
             self.max_num_tokens,
