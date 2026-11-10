@@ -220,14 +220,23 @@ def test_completion_top_logprobs_keeps_sampled_entry_on_string_collision(
 ):
     """`/v1/completions` keys `top_logprobs` by token string, and byte-fragment
     candidates all decode to "". A later candidate must not overwrite the
-    sampled token's entry, or that of a more likely candidate."""
+    sampled token's entry, or that of a more likely candidate. The entry kept
+    is the first one, which is the sampled token's even when another candidate
+    is more likely."""
     tokenizer = get_tokenizer("Qwen/Qwen3-0.6B")
     k = 3
     # Generating a space and Thai digit U+0E58: " " (220), then 8158, the first
     # two of its three bytes. 3023 and 378 are other two-byte leading fragments.
-    rows = np.array([[220, 220, 3023, 378], [8158, 8158, 3023, 378]])
+    # At the last position the sampled 3023 has rank 2, behind 8158.
+    rows = np.array(
+        [[220, 220, 3023, 378], [8158, 8158, 3023, 378], [3023, 8158, 3023, 378]]
+    )
     logprobs = np.array(
-        [[-0.25, -0.25, -12.25, -14.0], [-0.5, -0.5, -12.25, -14.0]],
+        [
+            [-0.25, -0.25, -12.25, -14.0],
+            [-0.5, -0.5, -12.25, -14.0],
+            [-1.5, -0.5, -1.5, -14.0],
+        ],
         dtype=np.float32,
     )
     processor = LogprobsProcessor(
@@ -242,7 +251,7 @@ def test_completion_top_logprobs_keeps_sampled_entry_on_string_collision(
         LogprobsLists(
             logprob_token_ids=rows,
             logprobs=logprobs,
-            sampled_token_ranks=np.array([1, 1]),
+            sampled_token_ranks=np.array([1, 1, 2]),
         )
     )
     token_ids = rows[:, 0].tolist()
@@ -253,8 +262,8 @@ def test_completion_top_logprobs_keeps_sampled_entry_on_string_collision(
         num_output_top_logprobs=k,
         tokenizer=tokenizer,
     )
-    assert coupled.tokens == [" ", ""]
-    assert coupled.top_logprobs == [{" ": -0.25, "": -12.25}, {"": -0.5}]
+    assert coupled.tokens == [" ", "", ""]
+    assert coupled.top_logprobs == [{" ": -0.25, "": -12.25}, {"": -0.5}, {"": -1.5}]
 
     request = CompletionRequest(model=MODEL_NAME, prompt="hi", logprobs=k)
     generated = _generate(token_ids, processor.logprobs)
