@@ -396,7 +396,7 @@ def test_update_state_after_alloc_tracks_cached_blocks_per_group(
     )
 
     def cached(block_id):
-        return KVCacheBlock(block_id=block_id, _block_hash=object())
+        return KVCacheBlock(block_id=block_id, block_hash=object())
 
     def uncached(block_id):
         return KVCacheBlock(block_id=block_id)
