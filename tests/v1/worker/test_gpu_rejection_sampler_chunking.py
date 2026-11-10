@@ -433,7 +433,14 @@ def test_replay_on_off_preserves_rejection_sampling_and_rng(monkeypatch):
         apply_sampling_params=lambda logits, *_: logits,
         trace_replay_state=None,
         may_mask_logits=np.zeros(num_reqs, dtype=bool),
+        return_sampling_mask_logprobs=False,
+        returns_sampling_mask=SimpleNamespace(
+            np=np.ones(num_reqs, dtype=bool),
+            gpu=torch.ones(num_reqs, dtype=torch.bool, device=device),
+        ),
     )
+    sampler.max_num_kept = MethodType(Sampler.max_num_kept, sampler)
+    sampler.capture_sampling_mask = MethodType(Sampler.capture_sampling_mask, sampler)
     rejection_sampler = _make_rejection_sampler(sampler, num_speculative_steps)
     pos = torch.arange(12, dtype=torch.int32, device=device)
 

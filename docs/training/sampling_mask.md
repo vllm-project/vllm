@@ -61,8 +61,7 @@ With `stream=true`, each chunk carries the masks of the tokens it emits.
 | --- | --- |
 | `--return-sampling-mask` | Engine-level opt-in (disables FlashInfer sampler) |
 | `--logprobs-mode processed_logprobs` | Returned logprobs are normalized over the nucleus, not full vocab |
-| `temperature > 0` | Greedy has no truncated distribution |
-| `top_k > 0` | Bounds mask size; pure top-p can produce vocab-sized masks |
+| `temperature > 0` | Greedy has no truncated distribution. Not required of requests that set `return_aux_outputs=False` |
 
 Speculative decoding is supported; each emitted token gets the support of the
 target distribution at its position.
@@ -150,9 +149,10 @@ choices also expose `sampling_mask_logprobs`, aligned element-for-element with
 post-processing support. This includes accepted speculative positions and
 streaming responses. Ordinary mask-only behavior remains unchanged.
 
-Pure top-p (`top_k=-1`) and support beyond the compact ID buffer are supported
-without truncation. Enabling scores allocates vocabulary-width ID/score buffers,
-so memory and transport costs grow with vocabulary size and active output rows.
+Pure top-p (`top_k=-1`) and top-k boundary ties are returned without
+truncation. Supports are packed on the GPU and only the kept entries are copied
+to the host, so the transport cost follows the support sizes. The device buffers
+are sized for the step's logits (`num_logits * vocab_size` IDs and scores).
 This optional exact-support feature is not required for ordinary top-k score
 centering.
 
@@ -162,4 +162,5 @@ centering.
   FlashInfer fused sampler. All requests pay the cost of the PyTorch sampling
   path, even if they don't need the mask.
 - **Per-request opt-out:** a request with `return_aux_outputs=False` gets no
-  mask; see [Routed Experts](routed_experts.md#return_aux_outputs).
+  mask, and its support is not captured; see
+  [Routed Experts](routed_experts.md#return_aux_outputs).

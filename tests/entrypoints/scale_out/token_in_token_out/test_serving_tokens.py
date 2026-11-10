@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import asyncio
 import io
 import json
 
@@ -284,6 +285,62 @@ async def test_generate_sampling_mask_logprobs_preserves_unbounded_support(
     ):
         assert token_id in mask and len(mask) == len(scores)
         assert np.exp(scores).sum() == pytest.approx(1.0)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "server",
+    [
+        [
+            "--return-sampling-mask",
+            "--return-sampling-mask-logprobs",
+            "--logprobs-mode",
+            "processed_logprobs",
+        ]
+    ],
+    indirect=True,
+)
+async def test_generate_sampling_mask_skips_opted_out_requests(client):
+    """Requests that opt out share steps with requests that return masks: they
+    get none, and may decode greedily."""
+
+    def payload(**sampling_params):
+        return {
+            "model": MODEL_NAME,
+            "token_ids": [1, 2, 3],
+            "sampling_params": {
+                "max_tokens": 8,
+                "ignore_eos": True,
+                **sampling_params,
+            },
+        }
+
+    recorded = payload(temperature=1.0, top_p=0.9, top_k=20)
+    opted_out = payload(temperature=0.0, return_aux_outputs=False)
+    responses = await asyncio.gather(
+        *(client.post(GEN_ENDPOINT, json=body) for body in [recorded, opted_out] * 4)
+    )
+    for resp in responses:
+        resp.raise_for_status()
+    choices = [resp.json()["choices"][0] for resp in responses]
+
+    for choice in choices[1::2]:
+        assert len(choice["token_ids"]) == 8
+        assert choice["sampling_mask"] is None
+        assert choice["sampling_mask_logprobs"] is None
+    for choice in choices[::2]:
+        masks = choice["sampling_mask"]
+        scores = choice["sampling_mask_logprobs"]
+        assert len(choice["token_ids"]) == len(masks) == len(scores) == 8
+        for token_id, mask, logprobs in zip(
+            choice["token_ids"], masks, scores, strict=True
+        ):
+            assert token_id in mask and len(mask) == len(logprobs)
+            assert np.exp(logprobs).sum() == pytest.approx(1.0, abs=1e-5)
+
+    # Greedy decoding still has no mask to return.
+    resp = await client.post(GEN_ENDPOINT, json=payload(temperature=0.0))
+    assert resp.is_error
 
 
 @pytest.mark.asyncio

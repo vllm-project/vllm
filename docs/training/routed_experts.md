@@ -68,6 +68,6 @@ Per-request, default `true`. Set it to `false` for requests that don't need RL a
 
 Requests that opt out get their own prefix-cache namespace, because their KV blocks have no stored routing. They share cached prefixes with each other but not with requests that record routing.
 
-Routing capture and mask computation run for the whole batch, so an opted-out request still pays that part of the cost while the server flags are on.
+Routing capture runs for the whole batch, so an opted-out request still pays that part of the cost while the server flag is on. Sampling masks are captured only for the requests that return them.
 
 Example: [examples/rl/routed_experts_e2e.py](../../examples/rl/routed_experts_e2e.py).

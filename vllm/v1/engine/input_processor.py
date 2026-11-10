@@ -177,7 +177,11 @@ class InputProcessor:
                     vocab_size=self.model_config.get_vocab_size(),
                 )
 
-            if self.model_config.return_sampling_mask and params.temperature <= 0:
+            if (
+                self.model_config.return_sampling_mask
+                and params.return_aux_outputs
+                and params.temperature <= 0
+            ):
                 raise ValueError(
                     "sampling distribution replay requires temperature > 0"
                 )
