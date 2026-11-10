@@ -240,7 +240,9 @@ def _triton_kernel_available() -> bool:
 TRITON_KERNEL_AVAILABLE = _triton_kernel_available()
 
 
-@pytest.mark.skipif(not TRITON_KERNEL_AVAILABLE, reason="requires CUDA SM80+")
+@pytest.mark.skipif(
+    not TRITON_KERNEL_AVAILABLE, reason="requires CUDA SM80+ or ROCm gfx950"
+)
 class TestTritonTopkTopp:
     """Tests for the Triton top-k/top-p kernel."""
 
@@ -932,7 +934,9 @@ class TestTritonTopkTopp:
         assert torch.equal(kept_ties, torch.arange(num_ties) < num_kept_ties)
 
 
-@pytest.mark.skipif(not TRITON_KERNEL_AVAILABLE, reason="requires CUDA SM80+")
+@pytest.mark.skipif(
+    not TRITON_KERNEL_AVAILABLE, reason="requires CUDA SM80+ or ROCm gfx950"
+)
 class TestTritonTopkToppExact:
     """Exact selection on every kernel path: the 32 to 256 logit tiers, the
     histogram path with a shared gather or refinement (large k, huge nuclei,

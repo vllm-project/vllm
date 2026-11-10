@@ -10,13 +10,16 @@
       128 or 256 logits (top-p only: 128). At each level a histogram of the maxima
       picks the best bins that hold enough items, at most the tier's: they hold the
       best items of the next level. Only the tier's logits are sorted.
-   b. Only if a row missed its tier (k > 256, a larger nucleus, crowded ties): an
-      8192-bin histogram of (row max - logit) in 1/512 nat bins by all programs, a
-      plan per row (the bins that can hold the k and p cuts, from counts and mass
-      bounds), one pass that masks the bins below and gathers the cut bins (at most
-      4096 logits), and an exact cut on the sorted window. A row with a larger
-      window is cut by one program, by refinement or an exact radix select.
-   c. Fill (rows x splits): -inf, then the kept logits (or every logit up to the cut).
+   b. Only if a row missed its tier (k > 256, a larger nucleus, crowded ties): rounds
+      over each row's span of logits (at first all of them, below the row max). All
+      programs histogram the spans (CUDA: 8192 bins of 1/512 nat at first), with the
+      exact count and mass above them, then a plan per row finds the bins that can
+      hold the k and p cuts (from counts and mass bounds). If they hold at most 4096
+      logits, one pass masks the bins below and gathers the cut bins, and an exact cut
+      on the sorted window masks the row. Else the row narrows its span to those bins
+      for the next round (to the k cut first if the cuts lie apart). A row left after
+      the last round is cut by one program, by an exact radix select.
+   c. Fill (rows x splits): -inf, then the kept logits of the rows cut by a tier.
 Exactly k logits are kept, ties broken by the lowest index, then the smallest prefix
 whose mass reaches p. Runtime ints are not specialized, so one compiled variant serves
 every batch size and k/p mix, and the launches are cached per shape.
@@ -39,18 +42,28 @@ BLOCK = 4096  # elements per streaming step, a multiple of 256
 MAX_SPLITS = 32
 HIST_ITEMS = 4  # items per program of the histogram passes (each adds BINS atomics)
 FILL_SPLITS = 8  # at least this many splits per row for the fill (balances cut rows)
-BINS = 8192
-BIN_SCALE = 512.0  # bins per nat below the row max (16 nats)
+# Per arch: histogram bins over the 16 nats below the row max, rounds of the histogram
+# path (each bins the rows' remaining spans anew), and warps of the persistent kernel
+# (more hide the latency of its block syncs). ROCm lowers tl.histogram through wave
+# ballots, whose cost grows with the bins, so it refines coarse bins, and its waves of
+# 64 have twice the threads.
+BINS, ROUNDS, WARPS = (128, 3, 8) if current_platform.is_rocm() else (8192, 2, 16)
+assert ROUNDS <= 5  # the barrier keeps two row counts per round
+BIN_SCALE = BINS / 16.0  # bins per nat below the row max
 WINDOW = 4096  # logits gathered to resolve a histogram cut
 KEPT = 256  # kept logits stored per row by the tiers, also the largest tier
-WARPS = 16  # of the persistent kernel: more warps hide the latency of its block syncs
 # Keys hold the index in 32 bits.
-_MAX_VOCAB_SIZE = 1 << 20
+_MAX_VOCAB_SIZE = 1 << 20  # 1M tokens (1,048,576)
 NOOP_C = tl.constexpr(-1)
 HIST_C = tl.constexpr(-2)  # row waits for the histogram path
-CUT_C = tl.constexpr(-3)  # row keeps every logit whose key is at most cut[row]
 SELF_C = tl.constexpr(-4)  # row already masked by its cut
 GATHER_C = tl.constexpr(-5)  # row's cut bins are gathered by every program
+ALONE_C = tl.constexpr(-6)  # row is cut by one program
+# ROCm serializes atomics to one address: the gather takes one slot range per block.
+GATHER_SCAN = tl.constexpr(current_platform.is_rocm())
+# Span flags: the row's top-k is cut first (its p waits), then its top-p alone.
+K_FIRST = tl.constexpr(1)
+P_AFTER_K = tl.constexpr(2)
 # stride and vocab stay specialized (aligned rows load vectorized), so a vocab that is
 # not a multiple of 16 compiles a second variant. Chunks are multiples of BLOCK.
 LEVELS_INTS = ["groups", "supergroups", "has_k", "has_p", "splits"]
@@ -126,7 +139,11 @@ def reset_buffer_cache() -> None:
 
 @functools.cache
 def _supported_device() -> bool:
-    """Tested on SM80, SM90 and SM100, and needs cooperative launches."""
+    """Tested on SM80, SM90, SM100 and MI355X, and needs cooperative launches."""
+    if current_platform.is_rocm():
+        from vllm.platforms.rocm import on_gfx950
+
+        return on_gfx950()
     if not current_platform.is_cuda():
         return False
     capability = current_platform.get_device_capability()
@@ -163,13 +180,14 @@ FILTER_OPTS = dict(num_warps=WARPS, launch_cooperative_grid=True)
 WORKSPACE = [
     "row_stats",
     "state",
-    "cut",
     "kept",
     "hist",
     "scratch",
     "window",
     "found",
     "more",
+    "span",
+    "above",
     "sync",
 ]
 
@@ -216,6 +234,7 @@ def kernel_args(
         SUPERGROUPS_P2=max(1024, triton.next_power_of_2(supergroups)),
         BINS=BINS,
         BIN_SCALE=BIN_SCALE,
+        ROUNDS=ROUNDS,
         WINDOW=WINDOW,
         KEPT=KEPT,
     )
@@ -232,7 +251,7 @@ def capacity(key: tuple, args: dict) -> int:
         kernel = _filter_kernel.warmup(**args, **FILTER_OPTS, grid=(1,))
         kernel._init_handles()
         props = torch.cuda.get_device_properties(key[0])
-        threads = 32 * WARPS
+        threads = getattr(props, "warp_size", 32) * WARPS
         regs = getattr(props, "regs_per_multiprocessor", 65536)
         smem = getattr(props, "shared_memory_per_multiprocessor", 228 * 1024)
         by_regs = regs // (max(kernel.n_regs, 1) * threads)
@@ -258,26 +277,28 @@ def buffers(device: torch.device, rows: int, vocab: int) -> dict[str, torch.Tens
 
 
 def allocate(device: torch.device, rows: int, vocab: int) -> dict[str, torch.Tensor]:
-    """Level 1 and 2 maxima, (max, sum of exp) per split and per row, row states, cut
-    keys, kept keys, histograms, per-row gather scratch, windows, gather counts and
-    masses, and the grid barrier (barrier count, exit count, histogram rows), which
-    is zeroed once and reset by each call."""
+    """Level 1 and 2 maxima, (max, sum of exp) per split and per row, row states, kept
+    keys, histograms, per-row gather scratch, windows, gather counts and masses, spans
+    (top, floor, scale, flag) with the count and mass above (and mass below) them, and
+    the grid barrier (barrier count, exit count, histogram rows per round from 2, rows
+    to cut per round from 8), which is zeroed once and reset by each call."""
     empty = functools.partial(torch.empty, device=device)
     if device not in _SYNC:
-        _SYNC[device] = torch.zeros(4, dtype=torch.int32, device=device)
+        _SYNC[device] = torch.zeros(16, dtype=torch.int32, device=device)
     return dict(
         level1=empty(rows * triton.cdiv(vocab, 16), dtype=torch.float32),
         level2=empty(rows * triton.cdiv(vocab, 256), dtype=torch.float32),
         stats=empty(rows * MAX_SPLITS * 2, dtype=torch.float64),
         row_stats=empty(rows * 2, dtype=torch.float64),
         state=empty(rows, dtype=torch.int32),
-        cut=empty(rows, dtype=torch.int64),
         kept=empty(rows * KEPT, dtype=torch.int64),
         hist=empty(rows * BINS, dtype=torch.int32),
         scratch=empty(rows * WINDOW, dtype=torch.int64),
         window=empty(rows * 4, dtype=torch.int32),
         found=empty(rows, dtype=torch.int32),
         more=empty(rows * 2, dtype=torch.float64),
+        span=empty(rows * 4, dtype=torch.float32),
+        above=empty(rows * 4, dtype=torch.float64),
         sync=_SYNC[device],
     )
 
@@ -366,13 +387,14 @@ def _filter_kernel(
     stats_ptr,
     row_stats_ptr,
     state_ptr,
-    cut_ptr,
     kept_ptr,
     hist_ptr,
     scratch_ptr,
     window_ptr,
     found_ptr,
     more_ptr,
+    span_ptr,
+    above_ptr,
     sync_ptr,
     rows,
     vocab,
@@ -392,6 +414,7 @@ def _filter_kernel(
     BLOCK: tl.constexpr,
     BINS: tl.constexpr,
     BIN_SCALE: tl.constexpr,
+    ROUNDS: tl.constexpr,
     WINDOW: tl.constexpr,
     KEPT: tl.constexpr,
 ):
@@ -409,6 +432,8 @@ def _filter_kernel(
             kept_ptr,
             hist_ptr,
             scratch_ptr,
+            span_ptr,
+            above_ptr,
             sync_ptr,
             row,
             vocab,
@@ -422,12 +447,18 @@ def _filter_kernel(
             MAX_SPLITS,
             SUPERGROUPS_P2,
             BINS,
+            BIN_SCALE,
             KEPT,
             WINDOW,
         )
     _grid_sync(sync_ptr, programs)
+    # Rounds of the histogram path: rows whose cut bins hold at most WINDOW logits are
+    # masked and gathered by all programs, then one program per row sorts and cuts.
+    # Others narrow their span for the next round, or are cut by one program.
+    r = 0
+    syncs = 1  # barriers so far
     hist_rows = tl.load(sync_ptr + 2, volatile=True)  # rows on the histogram path
-    if hist_rows != 0:
+    while hist_rows != 0:
         # Split those rows until there are about HIST_ITEMS items per program.
         hsplits = tl.minimum(MAX_SPLITS, tl.cdiv(HIST_ITEMS * programs, hist_rows))
         hchunk = tl.cdiv(tl.cdiv(vocab, hsplits), BLOCK) * BLOCK
@@ -437,7 +468,10 @@ def _filter_kernel(
                 _histogram(
                     logits_ptr + row.to(tl.int64) * stride,
                     hist_ptr + row.to(tl.int64) * BINS,
+                    span_ptr + 4 * row,
+                    above_ptr + 4 * row,
                     tl.load(row_stats_ptr + 2 * row, volatile=True).to(tl.float32),
+                    r == 0,
                     item % hsplits * hchunk,
                     vocab,
                     hchunk,
@@ -445,9 +479,10 @@ def _filter_kernel(
                     BIN_SCALE,
                     BLOCK,
                 )
-        _grid_sync(sync_ptr, 2 * programs)
-        # Rows whose cut bins hold at most WINDOW logits: all programs mask and gather
-        # them, then one program per row sorts and cuts. Others: one program per row.
+        syncs += 1
+        _grid_sync(sync_ptr, syncs * programs)
+        next_rows = sync_ptr + 3 + r
+        last = r + 1 == ROUNDS
         for row in range(pid, rows, programs):
             if tl.load(state_ptr + row, volatile=True) == HIST_C:
                 k, p = _row_params(k_ptr, p_ptr, row, vocab, has_k, has_p)
@@ -457,20 +492,29 @@ def _filter_kernel(
                     window_ptr + 4 * row,
                     found_ptr + row,
                     more_ptr + 2 * row,
+                    span_ptr + 4 * row,
+                    above_ptr + 4 * row,
+                    next_rows,
+                    sync_ptr + 8 + r,
                     k,
                     p,
                     tl.load(row_stats_ptr + 2 * row, volatile=True).to(tl.float32),
                     tl.load(row_stats_ptr + 2 * row + 1, volatile=True),
                     vocab,
+                    r == 0,
+                    last,
                     BINS,
                     BIN_SCALE,
                     WINDOW,
                 )
-        _grid_sync(sync_ptr, 3 * programs)
-        for item in range(pid, rows * hsplits, programs):
+        syncs += 1
+        _grid_sync(sync_ptr, syncs * programs)
+        # Rows to gather or cut (else the round skips these phases), and for next round.
+        cut_rows = tl.load(sync_ptr + 8 + r, volatile=True)
+        next_hist_rows = tl.load(next_rows, volatile=True)
+        for item in range(pid, tl.where(cut_rows != 0, rows * hsplits, 0), programs):
             row = item // hsplits
             if tl.load(state_ptr + row, volatile=True) == GATHER_C:
-                k, p = _row_params(k_ptr, p_ptr, row, vocab, has_k, has_p)
                 _gather_part(
                     logits_ptr + row.to(tl.int64) * stride,
                     scratch_ptr + row.to(tl.int64) * WINDOW,
@@ -478,6 +522,8 @@ def _filter_kernel(
                     more_ptr + 2 * row,
                     tl.load(row_stats_ptr + 2 * row, volatile=True).to(tl.float32),
                     window_ptr + 4 * row,
+                    span_ptr + 4 * row,
+                    r == 0,
                     item % hsplits * hchunk,
                     vocab,
                     hchunk,
@@ -486,22 +532,25 @@ def _filter_kernel(
                     WINDOW,
                     BLOCK,
                 )
-        _grid_sync(sync_ptr, 4 * programs)
-        for row in range(pid, rows, programs):
+        if cut_rows != 0:
+            syncs += 1
+            _grid_sync(sync_ptr, syncs * programs)
+        for row in range(pid, tl.where(cut_rows != 0, rows, 0), programs):
             state = tl.load(state_ptr + row, volatile=True)
-            if (state == HIST_C) | (state == GATHER_C):
+            if (state == ALONE_C) | (state == GATHER_C):
                 k, p = _row_params(k_ptr, p_ptr, row, vocab, has_k, has_p)
                 _resolve_row(
                     logits_ptr + tl.cast(row, tl.int64) * stride,
                     hist_ptr + tl.cast(row, tl.int64) * BINS,
                     scratch_ptr + tl.cast(row, tl.int64) * WINDOW,
                     state_ptr + row,
-                    cut_ptr + row,
+                    span_ptr + 4 * row,
+                    above_ptr + 4 * row,
+                    row_stats_ptr + 2 * row,
                     k,
                     p,
-                    tl.load(row_stats_ptr + 2 * row, volatile=True).to(tl.float32),
-                    tl.load(row_stats_ptr + 2 * row + 1, volatile=True),
                     vocab,
+                    last,
                     state == GATHER_C,
                     tl.load(found_ptr + row, volatile=True),
                     more_ptr + 2 * row,
@@ -511,13 +560,16 @@ def _filter_kernel(
                     WINDOW,
                     BLOCK,
                 )
-        _grid_sync(sync_ptr, 5 * programs)
+        if cut_rows != 0:
+            syncs += 1
+            _grid_sync(sync_ptr, syncs * programs)
+        r += 1
+        hist_rows = next_hist_rows
     for item in range(pid, rows * fsplits, programs):
         row = item // fsplits
         _fill(
             logits_ptr + row.to(tl.int64) * stride,
             tl.load(state_ptr + row, volatile=True),
-            tl.load(cut_ptr + row, volatile=True),
             kept_ptr + row.to(tl.int64) * KEPT,
             item % fsplits * fchunk,
             vocab,
@@ -539,6 +591,8 @@ def _select_row(
     kept_ptr,
     hist_ptr,
     scratch_ptr,
+    span_ptr,
+    above_ptr,
     sync_ptr,
     row,
     vocab,
@@ -552,6 +606,7 @@ def _select_row(
     MAX_SPLITS: tl.constexpr,
     SUPERGROUPS_P2: tl.constexpr,
     BINS: tl.constexpr,
+    BIN_SCALE: tl.constexpr,
     KEPT: tl.constexpr,
     WINDOW: tl.constexpr,
 ):
@@ -588,13 +643,35 @@ def _select_row(
         if (not done) & (k <= 256):
             done, kept = _tier(*args, 256, SUPERGROUPS_P2)
         if not done:
-            zeros = tl.zeros([BINS], tl.int32)
-            tl.store(hist_ptr + row.to(tl.int64) * BINS + tl.arange(0, BINS), zeros)
+            _start_span(
+                hist_ptr + row.to(tl.int64) * BINS,
+                span_ptr + 4 * row,
+                above_ptr + 4 * row,
+                row_max,
+                -float("inf"),
+                BIN_SCALE,
+                0.0,
+                BINS,
+            )
             tl.atomic_add(sync_ptr + 2, 1, sem="relaxed", scope="gpu")
     tl.store(
         state_ptr + row,
         tl.where(done, kept, tl.where(no_k & (p >= 1.0), NOOP_C, HIST_C)),
     )
+
+
+@triton.jit
+def _start_span(
+    hist_row, span_row, above_row, top, floor, scale, flag, BINS: tl.constexpr
+):
+    """Queue the row for a histogram round over its logits from top down to floor."""
+    tl.store(span_row, top)
+    tl.store(span_row + 1, floor)
+    tl.store(span_row + 2, scale)
+    tl.store(span_row + 3, flag)
+    tl.store(above_row + tl.arange(0, 4), tl.zeros([4], tl.float64))
+    tl.debug_barrier()  # this program may just have read the old histogram
+    tl.store(hist_row + tl.arange(0, BINS), tl.zeros([BINS], tl.int32))
 
 
 @triton.jit(noinline=True)  # a call instead of 4 inlined copies: compiles much faster
@@ -705,7 +782,10 @@ def _bin(x, top, scale, BINS: tl.constexpr):
 def _histogram(
     row_ptr,
     hist_row,
+    span_row,
+    above_row,
     row_max,
+    first,
     lo,
     vocab,
     chunk,
@@ -713,17 +793,44 @@ def _histogram(
     BIN_SCALE: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
+    """Add the chunk's logits in the row's span to its histogram. A narrowed span
+    (finite floor) also adds the exact count and mass of the logits above it, and the
+    mass below it."""
+    top, floor, scale, _ = _span(span_row, row_max, first, BIN_SCALE)
     offs = tl.arange(0, BLOCK)
     hi = tl.minimum(lo + chunk, vocab)
     counts = tl.zeros([BINS], tl.int32)
     x_next = tl.load(row_ptr + lo + offs, mask=lo + offs < hi, other=-float("inf"))
-    for start in range(lo, hi, BLOCK):
-        idx = start + offs
-        x = x_next
-        x_next = tl.load(
-            row_ptr + idx + BLOCK, mask=idx + BLOCK < hi, other=-float("inf")
-        )
-        counts += tl.histogram(_bin(x, row_max, BIN_SCALE, BINS), BINS, mask=idx < hi)
+    if floor == -float("inf"):  # the first span: every logit is in it
+        for start in range(lo, hi, BLOCK):
+            idx = start + offs
+            x = x_next
+            x_next = tl.load(
+                row_ptr + idx + BLOCK, mask=idx + BLOCK < hi, other=-float("inf")
+            )
+            counts += tl.histogram(_bin(x, top, scale, BINS), BINS, mask=idx < hi)
+    else:
+        n_above = tl.zeros([BLOCK], tl.int32)
+        m_above = tl.zeros([BLOCK], tl.float32)
+        m_below = tl.zeros([BLOCK], tl.float32)
+        for start in range(lo, hi, BLOCK):
+            idx = start + offs
+            x = x_next
+            x_next = tl.load(
+                row_ptr + idx + BLOCK, mask=idx + BLOCK < hi, other=-float("inf")
+            )
+            b = _span_bin(x, top, floor, scale, BINS)
+            counts += tl.histogram(b, BINS, mask=(idx < hi) & (b >= 0) & (b < BINS))
+            up = (idx < hi) & (b < 0)
+            n_above += up.to(tl.int32)
+            m_above += tl.where(up, tl.exp(x - row_max), 0.0)
+            m_below += tl.where((idx < hi) & (b > BINS), tl.exp(x - row_max), 0.0)
+        n = tl.sum(n_above).to(tl.float64)
+        tl.atomic_add(above_row, n, sem="relaxed", scope="gpu")
+        m = tl.sum(m_above).to(tl.float64)
+        tl.atomic_add(above_row + 1, m, sem="relaxed", scope="gpu")
+        m = tl.sum(m_below).to(tl.float64)
+        tl.atomic_add(above_row + 2, m, sem="relaxed", scope="gpu")
     tl.atomic_add(
         hist_row + tl.arange(0, BINS),
         counts,
@@ -733,6 +840,29 @@ def _histogram(
     )
 
 
+@triton.jit
+def _span(span_row, row_max, first, BIN_SCALE: tl.constexpr):
+    """The row's span (top, floor, scale, flag): every logit below the row max in the
+    first round."""
+    top = row_max
+    floor = row_max * 0.0 - float("inf")
+    scale = row_max * 0.0 + BIN_SCALE
+    flag = row_max * 0.0
+    if not first:
+        top = tl.load(span_row, volatile=True)
+        floor = tl.load(span_row + 1, volatile=True)
+        scale = tl.load(span_row + 2, volatile=True)
+        flag = tl.load(span_row + 3, volatile=True)
+    return top, floor, scale, flag
+
+
+@triton.jit
+def _span_bin(x, top, floor, scale, BINS: tl.constexpr):
+    """Bin of a logit in a span: -1 above it, BINS + 1 below it (BINS is no bin)."""
+    b = _bin(x, top, scale, BINS)
+    return tl.where(x > top, -1, tl.where(x < floor, BINS + 1, b))
+
+
 @triton.jit(noinline=True)
 def _plan_row(
     hist_row,
@@ -740,24 +870,45 @@ def _plan_row(
     window_row,
     found_row,
     more_row,
+    span_row,
+    above_row,
+    next_rows,
+    cut_rows,
     k,
     p,
     row_max,
     row_sum,
     vocab,
+    first,
+    last,
     BINS: tl.constexpr,
     BIN_SCALE: tl.constexpr,
     WINDOW: tl.constexpr,
 ):
-    """From the histogram: bin kb holds the k-th logit, bins lo to hi the top-p cut
-    (mass bounds from the bin edges, the top-k mass bounded through bin kb). If the
-    window and bin kb hold at most WINDOW logits, the row is gathered by every program.
+    """From the histogram of the row's span: bin kb holds the k-th logit, bins lo to hi
+    the top-p cut (mass bounds from the bin edges, the top-k mass bounded through bin
+    kb). If the window and bin kb hold at most WINDOW logits, the row is gathered by
+    every program. Else the row narrows its span to them for the next round (to bin kb
+    first if it lies apart), or one program cuts it.
     Two levels: sums over blocks of F bins, then the bins of the one block that holds
     each cut."""
-    F: tl.constexpr = 128
+    F: tl.constexpr = 128 if BINS >= 128 else BINS
     NC: tl.constexpr = BINS // F
+    top, floor, scale, flag = _span(span_row, row_max, first, BIN_SCALE)
+    p_row = p
+    k, p = _flagged(k, p, vocab, flag)
     use_k = k < vocab
     use_p = p < 1.0
+    # Exact count and mass above the span (and mass below), in the first round none.
+    # Masses are in units of exp(top - row max).
+    unit = tl.exp(row_max - top)
+    mass_up = unit * 0.0
+    mass_down = mass_up
+    if not first:
+        k -= tl.load(above_row, volatile=True).to(tl.int32)
+        mass_up = tl.load(above_row + 1, volatile=True).to(tl.float32) * unit
+        mass_down = tl.load(above_row + 2, volatile=True).to(tl.float32) * unit
+    floor_w = tl.exp(floor - top)
     c = tl.arange(0, NC)
     j = c[:, None] * F + tl.arange(0, F)[None, :]
     counts = tl.load(hist_row + j, volatile=True)
@@ -775,31 +926,53 @@ def _plan_row(
             0,
             F,
             BINS,
-            BIN_SCALE,
+            scale,
+            floor_w,
         )
     lo = tl.minimum(kb, BINS - 1)
     hi = lo
+    upper = tl.zeros([NC], tl.float32)
+    lower = upper
+    total_lo = row_sum.to(tl.float32) * unit
+    total_hi = total_lo
     if use_p:
-        upper = tl.sum(_weights(counts, j, 1, BINS, BIN_SCALE), 1)
-        lower = tl.sum(_weights(counts, j, 2, BINS, BIN_SCALE), 1)
-        total_lo = row_sum.to(tl.float32)
-        total_hi = total_lo
+        upper = tl.sum(_weights(counts, j, 1, BINS, scale, floor_w), 1)
+        lower = tl.sum(_weights(counts, j, 2, BINS, scale, floor_w), 1)
         if use_k:  # the top-k mass: bins above kb, and the best of bin kb
             need = (k - _above(hist_row, before, total, kb, F, NC, BINS)).to(tl.float32)
-            least = tl.where(kb == BINS - 1, 0.0, tl.exp(-(kb + 1.0) / BIN_SCALE))
+            least = tl.where(kb == BINS - 1, floor_w, tl.exp(-(kb + 1.0) / scale))
             total_lo = (
-                _mass_above(hist_row, lower, kb, 2, F, NC, BINS, BIN_SCALE)
+                mass_up
+                + _mass_above(hist_row, lower, kb, 2, F, NC, BINS, scale, floor_w)
                 + need * least
             )
-            total_hi = _mass_above(
-                hist_row, upper, kb, 1, F, NC, BINS, BIN_SCALE
-            ) + need * tl.exp(-kb / BIN_SCALE)
+            total_hi = (
+                mass_up
+                + _mass_above(hist_row, upper, kb, 1, F, NC, BINS, scale, floor_w)
+                + need * tl.exp(-kb / scale)
+            )
         lo = _reach(
-            hist_row, upper, p * total_lo * (1 - 1e-4), 1, F, NC, BINS, BIN_SCALE
+            hist_row,
+            upper,
+            p * total_lo * (1 - 1e-4) - mass_up,
+            1,
+            F,
+            NC,
+            BINS,
+            scale,
+            floor_w,
         )
         hi = tl.minimum(
             _reach(
-                hist_row, lower, p * total_hi * (1 + 1e-4), 2, F, NC, BINS, BIN_SCALE
+                hist_row,
+                lower,
+                p * total_hi * (1 + 1e-4) - mass_up,
+                2,
+                F,
+                NC,
+                BINS,
+                scale,
+                floor_w,
             ),
             kb,
         )
@@ -811,29 +984,92 @@ def _plan_row(
     in_kb = _above(hist_row, before, total, kb + 1, F, NC, BINS) - at_kb
     n = after_hi - above_lo + tl.where(apart, in_kb, 0)
     between = tl.where(apart, at_kb - after_hi, 0)
+    if (n > WINDOW) & use_p & (use_k == 0):
+        # A top-p row's exact mass in the span also bounds the mass below each bin.
+        inside = total_lo - mass_up - mass_down
+        up_all = tl.sum(upper)
+        slack = 1e-4 * up_all
+        target = p * total_hi * (1 + 1e-4) - mass_up - inside + up_all + slack
+        hi = tl.minimum(
+            hi, _reach(hist_row, upper, target, 1, F, NC, BINS, scale, floor_w)
+        )
+        target = p * total_lo * (1 - 1e-4) - mass_up - inside + tl.sum(lower) - slack
+        lo = tl.maximum(
+            lo, _reach(hist_row, lower, target, 2, F, NC, BINS, scale, floor_w)
+        )
+        lo = tl.minimum(lo, hi)
+        above_lo = _above(hist_row, before, total, lo, F, NC, BINS)
+        after_hi = _above(hist_row, before, total, hi + 1, F, NC, BINS)
+        n = after_hi - above_lo
+    # The bins to narrow to: bin kb alone if it lies apart (its top-k is cut first).
+    first = tl.where(apart, kb, lo)
+    final = tl.where(apart, kb, hi)
     if n <= WINDOW:
-        tl.store(window_row, lo)
-        tl.store(window_row + 1, hi)
-        tl.store(window_row + 2, kb)
         # Position of the k-th logit among the gathered ones, in key order.
-        tl.store(window_row + 3, tl.minimum(k - 1 - above_lo - between, WINDOW))
-        tl.store(found_row, 0)
-        tl.store(more_row, row_sum * 0.0)
-        tl.store(more_row + 1, row_sum * 0.0)
-        tl.store(state_row, GATHER_C)
+        k_at = k - 1 - above_lo - between
+        _gather_window(
+            window_row, found_row, more_row, state_row, lo, hi, kb, k_at, WINDOW
+        )
+        tl.atomic_add(cut_rows, 1, sem="relaxed", scope="gpu")
+        if (flag == K_FIRST) & (p_row < 1.0) & (last == 0):  # its top-p: next round
+            tl.atomic_add(next_rows, 1, sem="relaxed", scope="gpu")
+    elif last | ((final == BINS - 1) & (floor == -float("inf"))):
+        tl.store(state_row, ALONE_C)  # last round, or the open last bin
+        tl.atomic_add(cut_rows, 1, sem="relaxed", scope="gpu")
+    elif apart & (in_kb <= WINDOW):
+        tl.store(span_row + 3, K_FIRST * 1.0)
+        k_at = k - 1 - at_kb
+        _gather_window(
+            window_row, found_row, more_row, state_row, kb, kb, kb, k_at, WINDOW
+        )
+        tl.atomic_add(cut_rows, 1, sem="relaxed", scope="gpu")
+        tl.atomic_add(next_rows, 1, sem="relaxed", scope="gpu")  # its top-p
+    else:
+        new_top = top - (first - 0.5) / scale  # half a bin wider on each side
+        new_floor = top - (final + 1.5) / scale
+        tl.atomic_add(next_rows, 1, sem="relaxed", scope="gpu")
+        _start_span(
+            hist_row,
+            span_row,
+            above_row,
+            new_top,
+            new_floor,
+            BINS / (new_top - new_floor),
+            tl.where(apart, K_FIRST * 1.0, flag),
+            BINS,
+        )
 
 
 @triton.jit
-def _weights(
-    counts, j, KIND: tl.constexpr, BINS: tl.constexpr, BIN_SCALE: tl.constexpr
+def _flagged(k, p, vocab, flag):
+    """The k and p of a row's current cut."""
+    return tl.where(flag == P_AFTER_K, vocab, k), tl.where(flag == K_FIRST, 1.0, p)
+
+
+@triton.jit
+def _gather_window(
+    window_row, found_row, more_row, state_row, lo, hi, kb, k_at, WINDOW: tl.constexpr
 ):
-    """Per bin: the count (KIND 0), or bounds of its mass relative to the row max, from
-    above (1) or below (2, the open last bin unbounded below)."""
+    """Queue the row's window (bins lo to hi, and bin kb) for the gather pass."""
+    tl.store(window_row, lo)
+    tl.store(window_row + 1, hi)
+    tl.store(window_row + 2, kb)
+    tl.store(window_row + 3, tl.minimum(k_at, WINDOW))
+    tl.store(found_row, 0)
+    tl.store(more_row, 0.0)
+    tl.store(more_row + 1, 0.0)
+    tl.store(state_row, GATHER_C)
+
+
+@triton.jit
+def _weights(counts, j, KIND: tl.constexpr, BINS: tl.constexpr, scale, floor_w):
+    """Per bin: the count (KIND 0), or bounds of its mass relative to the span's top,
+    from above (1) or below (2, the last bin bounded by the span's floor)."""
     c = counts.to(tl.float32)
     if KIND == 1:
-        c = c * tl.exp(-j / BIN_SCALE)
+        c = c * tl.exp(-j / scale)
     if KIND == 2:
-        c = tl.where(j == BINS - 1, 0.0, c * tl.exp(-(j + 1.0) / BIN_SCALE))
+        c = tl.where(j == BINS - 1, c * floor_w, c * tl.exp(-(j + 1.0) / scale))
     return c
 
 
@@ -846,12 +1082,13 @@ def _find(
     KIND: tl.constexpr,
     F: tl.constexpr,
     BINS: tl.constexpr,
-    BIN_SCALE: tl.constexpr,
+    scale,
+    floor_w,
 ):
     """The first bin of the block where the running weight, from before, reaches target
     (else the block's last bin)."""
     j = block * F + tl.arange(0, F)
-    w = _weights(tl.load(hist_row + j, volatile=True), j, KIND, BINS, BIN_SCALE)
+    w = _weights(tl.load(hist_row + j, volatile=True), j, KIND, BINS, scale, floor_w)
     return tl.min(tl.where(before + tl.cumsum(w, 0) >= target, j, block * F + F - 1))
 
 
@@ -864,7 +1101,8 @@ def _reach(
     F: tl.constexpr,
     NC: tl.constexpr,
     BINS: tl.constexpr,
-    BIN_SCALE: tl.constexpr,
+    scale,
+    floor_w,
 ):
     """The first bin where the running weight reaches target (else the last bin)."""
     c = tl.arange(0, NC)
@@ -878,7 +1116,8 @@ def _reach(
         KIND,
         F,
         BINS,
-        BIN_SCALE,
+        scale,
+        floor_w,
     )
 
 
@@ -905,12 +1144,13 @@ def _mass_above(
     F: tl.constexpr,
     NC: tl.constexpr,
     BINS: tl.constexpr,
-    BIN_SCALE: tl.constexpr,
+    scale,
+    floor_w,
 ):
     """Bound of the mass in the bins before bin at."""
     block = tl.minimum(at, BINS - 1) // F
     j = block * F + tl.arange(0, F)
-    w = _weights(tl.load(hist_row + j, volatile=True), j, KIND, BINS, BIN_SCALE)
+    w = _weights(tl.load(hist_row + j, volatile=True), j, KIND, BINS, scale, floor_w)
     inside = tl.sum(tl.where(tl.arange(0, NC) < block, per_block, 0.0)) + tl.sum(
         tl.where(j < at, w, 0.0)
     )
@@ -925,6 +1165,8 @@ def _gather_part(
     more_row,
     row_max,
     window_row,
+    span_row,
+    first,
     start_at,
     vocab,
     chunk,
@@ -933,12 +1175,13 @@ def _gather_part(
     WINDOW: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
-    """One split's share of the window pass: -inf over the bins below the window, the
-    keys of the window and of bin kb gathered, and the mass of the bins above the window
-    and of those between it and bin kb."""
+    """One split's share of the window pass: -inf over the bins below the window (but
+    bin kb), the indices of the window and of bin kb gathered, and the mass of the bins
+    above the window and of those between it and bin kb."""
     lo = tl.load(window_row, volatile=True)
     hi = tl.load(window_row + 1, volatile=True)
     kb = tl.load(window_row + 2, volatile=True)
+    top, floor, scale, _ = _span(span_row, row_max, first, BIN_SCALE)
     offs = tl.arange(0, BLOCK)
     end = tl.minimum(start_at + chunk, vocab)
     above = tl.zeros([BLOCK], tl.float32)
@@ -955,27 +1198,28 @@ def _gather_part(
         x_next = tl.load(
             row_ptr + idx + BLOCK, mask=idx + BLOCK < end, other=-float("inf")
         )
-        b = _bin(x, row_max, BIN_SCALE, BINS)
+        b = _span_bin(x, top, floor, scale, BINS)
         weight = tl.exp(x - row_max)
         above += tl.where(valid & (b < lo), weight, 0.0)
         between += tl.where(valid & (b > hi) & (b < kb), weight, 0.0)
         hit = valid & (((b >= lo) & (b <= hi)) | (b == kb))
-        # One slot per hit: no block-wide scan, so warps never wait on each other.
-        pos = tl.atomic_add(
-            found_row + offs * 0, 1, mask=hit, sem="relaxed", scope="gpu"
-        )
-        # 32-bit logit and index: the layout conversions of a 64-bit key sync the warps.
-        tl.store(
-            scratch.to(tl.pointer_type(tl.float32)) + pos, x, mask=hit & (pos < WINDOW)
-        )
-        tl.store(
-            scratch.to(tl.pointer_type(tl.int32)) + WINDOW + pos,
-            idx,
-            mask=hit & (pos < WINDOW),
-        )
-        tl.store(
-            row_ptr + idx, -float("inf"), mask=valid & (b > hi) & (x > -float("inf"))
-        )
+        if GATHER_SCAN:  # one atomic per block (ROCm serializes them per address)
+            hits = hit.to(tl.int32)
+            pos = tl.cumsum(hits, 0) - 1
+            if tl.sum(hits) > 0:
+                pos += tl.atomic_add(
+                    found_row, tl.sum(hits), sem="relaxed", scope="gpu"
+                )
+        else:  # one slot per hit: no block-wide scan, so warps never wait on each other
+            pos = tl.atomic_add(
+                found_row + offs * 0, 1, mask=hit, sem="relaxed", scope="gpu"
+            )
+        # The index alone: each scattered tensor costs layout conversions. The gathered
+        # logits keep their values (bin kb's are masked by the cut).
+        index_slot = scratch.to(tl.pointer_type(tl.int32)) + pos
+        tl.store(index_slot, idx, mask=hit & (pos < WINDOW))
+        below = valid & (b > hi) & (b != kb) & (x > -float("inf"))
+        tl.store(row_ptr + idx, -float("inf"), mask=below)
     tl.atomic_add(more_row, tl.sum(above).to(tl.float64), sem="relaxed", scope="gpu")
     tl.atomic_add(
         more_row + 1, tl.sum(between).to(tl.float64), sem="relaxed", scope="gpu"
@@ -988,12 +1232,13 @@ def _resolve_row(
     hist_row,
     scratch,
     state_row,
-    cut_row,
+    span_row,
+    above_row,
+    stats_row,
     k,
     p,
-    row_max,
-    row_sum,
     vocab,
+    last,
     gathered,
     found,
     more_row,
@@ -1003,9 +1248,14 @@ def _resolve_row(
     WINDOW: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
-    """A gathered row: the exact cut among its window, which masks the row. Else one
-    program cuts the row from the histogram."""
+    """A gathered row: the exact cut among its window, which masks the row (after a
+    top-k cut, the top-p cut is queued over the kept mass). Else one program cuts the
+    row by radix select."""
+    row_max = tl.load(stats_row, volatile=True).to(tl.float32)
+    row_sum = tl.load(stats_row + 1, volatile=True)
+    flag = tl.load(span_row + 3, volatile=True)
     if gathered:
+        k_cut, p_cut = _flagged(k, p, vocab, flag)
         args = (
             row_ptr,
             scratch,
@@ -1013,38 +1263,42 @@ def _resolve_row(
             tl.load(more_row, volatile=True),
             tl.load(more_row + 1, volatile=True),
             tl.load(window_row + 3, volatile=True),
-            k,
-            p,
+            k_cut,
+            p_cut,
             row_max,
             row_sum,
             vocab,
+            flag == K_FIRST,
         )
         if found <= 512:
-            _cut_window(*args, 512, WINDOW)
+            kept = _cut_window(*args, 512, WINDOW)
         elif found <= 1024:
-            _cut_window(*args, 1024, WINDOW)
+            kept = _cut_window(*args, 1024, WINDOW)
         elif found <= 2048:
-            _cut_window(*args, 2048, WINDOW)
+            kept = _cut_window(*args, 2048, WINDOW)
         else:
-            _cut_window(*args, WINDOW, WINDOW)
+            kept = _cut_window(*args, WINDOW, WINDOW)
         tl.store(state_row, SELF_C)
+        if (flag == K_FIRST) & (p < 1.0):
+            if last:
+                _radix_row(row_ptr, vocab, vocab, p, False, True, BLOCK // 4)
+            else:
+                tl.store(stats_row + 1, kept)
+                _start_span(
+                    hist_row,
+                    span_row,
+                    above_row,
+                    row_max,
+                    -float("inf"),
+                    BIN_SCALE,
+                    P_AFTER_K * 1.0,
+                    BINS,
+                )
+                tl.store(state_row, HIST_C)
     else:
-        _resolve_alone(
-            row_ptr,
-            hist_row,
-            scratch,
-            state_row,
-            cut_row,
-            k,
-            p,
-            row_max,
-            row_sum,
-            vocab,
-            BINS,
-            BIN_SCALE,
-            WINDOW,
-            BLOCK,
-        )
+        k = tl.where(flag == P_AFTER_K, vocab, k)
+        _radix_row(row_ptr, vocab, k, p, k < vocab, p < 1.0, BLOCK // 4)
+        tl.store(state_row, SELF_C)
 
 
 @triton.jit(noinline=True)  # one sort per size
@@ -1060,29 +1314,23 @@ def _cut_window(
     row_max,
     row_sum,
     vocab,
+    want_kept,
     N: tl.constexpr,
     WINDOW: tl.constexpr,
 ):
     """Sort the gathered keys (the window, then bin kb), keep those up to the k-th and
-    up to where the mass from the top reaches p of the kept mass, -inf over the rest."""
+    up to where the mass from the top reaches p of the kept mass, -inf over the rest.
+    Returns the kept mass, if wanted."""
     use_k = k < vocab
     use_p = p < 1.0
     rank = tl.arange(0, N)
     valid = rank < found
     # Volatile: other programs gathered these, and this program's L1 may hold stale
     # lines of the same scratch (its tier's slots).
-    x = tl.load(
-        scratch.to(tl.pointer_type(tl.float32)) + rank,
-        mask=valid,
-        other=0.0,
-        volatile=True,
-    )
     idx = tl.load(
-        scratch.to(tl.pointer_type(tl.int32)) + WINDOW + rank,
-        mask=valid,
-        other=0,
-        volatile=True,
+        scratch.to(tl.pointer_type(tl.int32)) + rank, mask=valid, other=0, volatile=True
     )
+    x = tl.load(row_ptr + idx, mask=valid, other=0.0)
     key = tl.sort(tl.where(valid, _key(x, idx), 0x7FFFFFFFFFFFFFFF))
     last = tl.where(use_k, k_at, N)
     if use_p:
@@ -1094,344 +1342,15 @@ def _cut_window(
         last = tl.minimum(last, tl.min(tl.where(reached, rank, N)))
     index = (key & 0xFFFFFFFF).to(tl.int32)
     tl.store(row_ptr + index, -float("inf"), mask=valid & (rank > last))
+    kept = above * 0.0
+    if want_kept:
+        weight = tl.exp(_key_value(key) - row_max)
+        kept = above + between + tl.sum(tl.where(valid & (rank <= last), weight, 0.0))
+    return kept
 
 
-@triton.jit
-def _resolve_alone(
-    row_ptr,
-    hist_row,
-    scratch,
-    state_row,
-    cut_row,
-    k,
-    p,
-    row_max,
-    row_sum,
-    vocab,
-    BINS: tl.constexpr,
-    BIN_SCALE: tl.constexpr,
-    WINDOW: tl.constexpr,
-    BLOCK: tl.constexpr,
-):
-    """One program cuts the row (two cuts, refinement, ties)."""
-    use_k = k < vocab
-    use_p = p < 1.0
-    j = tl.arange(0, BINS)
-    counts = tl.load(hist_row + j, volatile=True)
-    ok = vocab > 0
-    cut = vocab.to(tl.int64) * 0 + 0x7FFFFFFFFFFFFFFF  # keeps every key
-    if use_k:
-        ok, cut = _cut(
-            row_ptr,
-            scratch,
-            counts,
-            k.to(tl.float64),
-            cut,
-            row_max,
-            vocab,
-            False,
-            BINS,
-            BIN_SCALE,
-            WINDOW,
-            BLOCK,
-        )
-        # Only the top-k logits count toward top-p.
-        b = tl.min(tl.where(tl.cumsum(counts, 0) >= k, j, BINS))
-        counts = tl.where(
-            j < b, counts, tl.where(j == b, k - tl.sum(tl.where(j < b, counts, 0)), 0)
-        )
-    if use_p & ok:
-        total = row_sum
-        if use_k:
-            total = _mass_upto(row_ptr, row_max, cut, vocab, BLOCK)
-        ok, cut = _cut(
-            row_ptr,
-            scratch,
-            counts,
-            p.to(tl.float64) * total,
-            cut,
-            row_max,
-            vocab,
-            True,
-            BINS,
-            BIN_SCALE,
-            WINDOW,
-            BLOCK,
-        )
-    if ok:
-        tl.store(cut_row, cut)
-        tl.store(state_row, CUT_C)
-    else:
-        _radix_row(row_ptr, vocab, k, p, use_k, use_p, BLOCK // 4)
-        tl.store(state_row, SELF_C)
-
-
-@triton.jit
-def _cut(
-    row_ptr,
-    scratch,
-    counts,
-    target,
-    limit,
-    row_max,
-    vocab,
-    MASS: tl.constexpr,
-    BINS: tl.constexpr,
-    BIN_SCALE: tl.constexpr,
-    WINDOW: tl.constexpr,
-    BLOCK: tl.constexpr,
-):
-    """Among the keys at most limit, the key of the target-th logit (or of the first
-    whose running mass reaches target). The bins that can hold it are gathered and
-    sorted once they hold at most WINDOW logits, else the histogram is refined over
-    their value range, and a range of one value is cut by index."""
-    top = row_max
-    floor = row_max * 0.0 - float("inf")
-    scale = row_max * 0.0 + BIN_SCALE
-    above = target * 0.0  # count (or mass) of the kept logits above the range
-    ok = vocab < 0
-    cut = limit
-    rounds = 0
-    done = 0
-    while (done == 0) & (rounds < 4):
-        lo, hi, n = _window(
-            counts, target - above, top, floor, scale, row_max, MASS, BINS
-        )
-        if n <= WINDOW:
-            found, more = _gather(
-                row_ptr,
-                scratch,
-                top,
-                floor,
-                scale,
-                lo,
-                hi,
-                limit,
-                row_max,
-                vocab,
-                MASS,
-                BINS,
-                WINDOW,
-                BLOCK,
-            )
-            ok, cut = _finish(
-                scratch,
-                found,
-                target,
-                above + more,
-                row_max,
-                (vocab * 0 + MASS) > 0,
-                WINDOW,
-            )
-            done = 1
-        else:
-            low_v, high_v, more = _window_range(
-                row_ptr,
-                top,
-                floor,
-                scale,
-                lo,
-                hi,
-                limit,
-                row_max,
-                vocab,
-                MASS,
-                BINS,
-                BLOCK,
-            )
-            above += more
-            if low_v >= high_v:
-                # One value left (-inf if the window holds no finite logit): by index.
-                value = tl.where(low_v > high_v, -float("inf"), low_v)
-                ok, cut = _tie_cut(
-                    row_ptr, value, target, above, limit, row_max, vocab, MASS, BLOCK
-                )
-                done = 1
-            else:
-                top = high_v
-                floor = low_v
-                scale = (BINS - 0.01) / (high_v - low_v)
-                counts = _range_histogram(
-                    row_ptr, top, floor, scale, limit, vocab, BINS, BLOCK
-                )
-        rounds += 1
-    return ok & (done == 1), cut
-
-
-@triton.jit
-def _window(
-    counts, need, top, floor, scale, row_max, MASS: tl.constexpr, BINS: tl.constexpr
-):
-    """The bins lo to hi that can hold the need-th logit (or the logit where the running
-    mass reaches need), and how many logits they hold."""
-    j = tl.arange(0, BINS)
-    c = counts.to(tl.float32)
-    if MASS:
-        lower = tl.where(j == BINS - 1, floor, top - (j + 1.0) / scale)
-        low = tl.cumsum(c * tl.exp(lower - row_max), 0)
-        high = tl.cumsum(c * tl.exp(top - j / scale - row_max), 0)
-        lo = tl.min(tl.where(high >= need * (1 - 1e-4), j, BINS - 1))
-        hi = tl.min(tl.where(low >= need * (1 + 1e-4), j, BINS - 1))
-    else:
-        lo = tl.min(tl.where(tl.cumsum(c, 0) >= need, j, BINS - 1))
-        hi = lo
-    return lo, hi, tl.sum(tl.where((j >= lo) & (j <= hi), counts, 0))
-
-
-@triton.jit
-def _gather(
-    row_ptr,
-    scratch,
-    top,
-    floor,
-    scale,
-    lo,
-    hi,
-    limit,
-    row_max,
-    vocab,
-    MASS: tl.constexpr,
-    BINS: tl.constexpr,
-    WINDOW: tl.constexpr,
-    BLOCK: tl.constexpr,
-):
-    """Store the keys of the range's logits in bins lo to hi (keys at most limit),
-    return how many there are and the count (or mass) of the range's logits in bins
-    above lo."""
-    offs = tl.arange(0, BLOCK)
-    found = 0
-    more = (vocab * 0).to(tl.float64)
-    for start in range(0, vocab, BLOCK):
-        idx = start + offs
-        x = tl.load(row_ptr + idx, mask=idx < vocab, other=-float("inf"))
-        key = _key(x, idx)
-        in_range = (idx < vocab) & (x >= floor) & (x <= top) & (key <= limit)
-        b = _bin(x, top, scale, BINS)
-        weight = tl.exp(x - row_max) if MASS else 1.0
-        more += tl.sum(tl.where(in_range & (b < lo), weight, 0.0)).to(tl.float64)
-        hit = (in_range & (b >= lo) & (b <= hi)).to(tl.int32)
-        hits = tl.sum(hit)
-        if hits > 0:
-            pos = found + tl.cumsum(hit, 0) - 1
-            tl.store(scratch + pos, key, mask=(hit > 0) & (pos < WINDOW))
-        found += hits
-    tl.debug_barrier()
-    return found, more
-
-
-@triton.jit(noinline=True)  # a call: one copy of the sort (slow path only)
-def _finish(scratch, found, target, above, row_max, mass, N: tl.constexpr):
-    """Sort the gathered keys, return the key where the running count (or mass) from
-    above reaches target."""
-    rank = tl.arange(0, N)
-    key = tl.sort(tl.load(scratch + rank, mask=rank < found, other=0x7FFFFFFFFFFFFFFF))
-    weight = tl.where(
-        rank < found, tl.where(mass, tl.exp(_key_value(key) - row_max), 1.0), 0.0
-    )
-    reached = above + tl.cumsum(weight.to(tl.float64), 0) >= target
-    last = tl.min(tl.where(reached & (rank < found), rank, N))
-    return last < found, tl.sum(tl.where(rank == last, key, 0))
-
-
-@triton.jit
-def _window_range(
-    row_ptr,
-    top,
-    floor,
-    scale,
-    lo,
-    hi,
-    limit,
-    row_max,
-    vocab,
-    MASS: tl.constexpr,
-    BINS: tl.constexpr,
-    BLOCK: tl.constexpr,
-):
-    """Smallest and largest finite logit in bins lo to hi of the range, and the count
-    (or mass) of the range's logits in bins above lo."""
-    offs = tl.arange(0, BLOCK)
-    low_v = tl.full([BLOCK], float("inf"), tl.float32)
-    high_v = tl.full([BLOCK], -float("inf"), tl.float32)
-    more = (vocab * 0).to(tl.float64)
-    for start in range(0, vocab, BLOCK):
-        idx = start + offs
-        x = tl.load(row_ptr + idx, mask=idx < vocab, other=-float("inf"))
-        in_range = (idx < vocab) & (x >= floor) & (x <= top) & (_key(x, idx) <= limit)
-        b = _bin(x, top, scale, BINS)
-        window = in_range & (b >= lo) & (b <= hi) & (x > -float("inf"))
-        low_v = tl.minimum(low_v, tl.where(window, x, float("inf")))
-        high_v = tl.maximum(high_v, tl.where(window, x, -float("inf")))
-        weight = tl.exp(x - row_max) if MASS else 1.0
-        more += tl.sum(tl.where(in_range & (b < lo), weight, 0.0)).to(tl.float64)
-    return tl.min(low_v), tl.max(high_v), more
-
-
-@triton.jit
-def _range_histogram(
-    row_ptr, top, floor, scale, limit, vocab, BINS: tl.constexpr, BLOCK: tl.constexpr
-):
-    offs = tl.arange(0, BLOCK)
-    counts = tl.zeros([BINS], tl.int32)
-    for start in range(0, vocab, BLOCK):
-        idx = start + offs
-        x = tl.load(row_ptr + idx, mask=idx < vocab, other=-float("inf"))
-        in_range = (idx < vocab) & (x >= floor) & (x <= top) & (_key(x, idx) <= limit)
-        counts += tl.histogram(_bin(x, top, scale, BINS), BINS, mask=in_range)
-    return counts
-
-
-@triton.jit
-def _tie_cut(
-    row_ptr,
-    value,
-    target,
-    above,
-    limit,
-    row_max,
-    vocab,
-    MASS: tl.constexpr,
-    BLOCK: tl.constexpr,
-):
-    """The key of the tie (logit equal to value, key at most limit) that reaches target,
-    ties in index order."""
-    if MASS:
-        weight = tl.exp(value - row_max).to(tl.float64)
-        needed = tl.where(weight > 0, tl.ceil((target - above) / weight), 3.0e38)
-    else:
-        needed = target - above
-    needed = tl.maximum(needed, 1.0)
-    offs = tl.arange(0, BLOCK)
-    seen = 0.0
-    cut = vocab.to(tl.int64) * 0
-    hits = 0
-    for start in range(0, vocab, BLOCK):
-        idx = start + offs
-        x = tl.load(row_ptr + idx, mask=idx < vocab, other=float("nan"))
-        key = _key(x, idx)
-        tie = (idx < vocab) & (x == value) & (key <= limit)
-        ties = tl.sum(tie.to(tl.float32))
-        if (seen < needed) & (seen + ties >= needed):
-            chosen = tie & (seen + tl.cumsum(tie.to(tl.float32), 0) == needed)
-            cut += tl.sum(tl.where(chosen, key, 0))
-            hits += tl.sum(chosen.to(tl.int32))
-        seen += ties
-    return hits == 1, cut
-
-
-@triton.jit
-def _mass_upto(row_ptr, row_max, cut, vocab, BLOCK: tl.constexpr):
-    offs = tl.arange(0, BLOCK)
-    total = (vocab * 0).to(tl.float64)
-    for start in range(0, vocab, BLOCK):
-        idx = start + offs
-        x = tl.load(row_ptr + idx, mask=idx < vocab, other=-float("inf"))
-        keep = (_key(x, idx) <= cut) & (idx < vocab)
-        total += tl.sum(tl.where(keep, tl.exp(x - row_max), 0.0)).to(tl.float64)
-    return total
-
-
-# Last resort (cut bins with more than WINDOW logits, e.g. huge exact ties): radix
+# Last resort (cut bins that still hold more than WINDOW logits after the last round,
+# e.g. huge exact ties): radix
 # select over the 64-bit key (ordered logit, inverted index), 4 bits per pass, by one
 # program over the row. Slow, but exact.
 
@@ -1599,16 +1518,10 @@ def _bounded_mass(row_ptr, vocab, bound_hi, bound_lo, row_max, BLOCK: tl.constex
 
 
 @triton.jit(noinline=True)
-def _fill(row_ptr, state, cut, kept_row, lo, vocab, chunk, BLOCK: tl.constexpr):
-    """Mask the split's chunk: from the kept keys (state >= 0) or from the cut key."""
+def _fill(row_ptr, state, kept_row, lo, vocab, chunk, BLOCK: tl.constexpr):
+    """Mask the split's chunk from the kept keys (state >= 0)."""
     hi = tl.minimum(lo + chunk, vocab)
     offs = tl.arange(0, BLOCK)
-    if state == CUT_C:
-        for start in range(lo, hi, BLOCK):
-            idx = start + offs
-            x = tl.load(row_ptr + idx, mask=idx < hi)
-            keep = _key(x, idx) <= cut
-            tl.store(row_ptr + idx, tl.where(keep, x, -float("inf")), mask=idx < hi)
     if state >= 0:
         for start in range(lo, hi, BLOCK):
             tl.store(row_ptr + start + offs, -float("inf"), mask=start + offs < hi)
@@ -1632,12 +1545,10 @@ def _grid_sync(sync_ptr, target):
 
 @triton.jit
 def _grid_exit(sync_ptr, programs):
-    """The last program to leave resets the barrier, the exit count and the flag."""
+    """The last program to leave resets the barrier, the exit and the row counts."""
     tl.debug_barrier()
     if tl.atomic_add(sync_ptr + 1, 1, sem="acq_rel", scope="gpu") == programs - 1:
-        tl.store(sync_ptr, 0)
-        tl.store(sync_ptr + 1, 0)
-        tl.store(sync_ptr + 2, 0)
+        tl.store(sync_ptr + tl.arange(0, 16), tl.zeros([16], tl.int32))
 
 
 @triton.jit
