@@ -10,9 +10,11 @@ use xgrammar_structural_tag::{
     FunctionDefinition, FunctionToolParam, ToolChoice, ToolParam, build_structural_tag,
 };
 
-use super::super::test_utils::{collect_stream, tokenizer};
+use super::super::test_utils::{
+    DsmlParserTestExt as _, collect_stream, decode, dedicated, tokenizer,
+};
 use super::DeepSeekV41ToolParser;
-use crate::tool::{Tool, ToolParser};
+use crate::tool::{Tool, ToolParser, ToolParserError, ToolParserOutput};
 
 fn tools() -> Vec<Tool> {
     vec![Tool {
@@ -72,6 +74,86 @@ fn spaced_dsml_streaming_preserves_shared_schema_coercion() {
             );
         }
     }
+}
+
+#[test]
+fn streams_name_and_arguments_as_parameters_arrive() {
+    let mut parser = DeepSeekV41ToolParser::create(&tools(), Arc::new(tokenizer())).unwrap();
+    let chunks = [
+        "<｜DSML｜ calls>\n<｜DSML｜ invoke name=\"lookup\">\n",
+        "<｜DSML｜ parameter name=\"query\" string=\"true\">two ",
+        "lines\n\"quoted\"</｜DSML｜ para",
+        "meter>\n<｜DSML｜ parameter name=\"limit\" string=\"false\">",
+        "2",
+        "</｜DSML｜ parameter>\n",
+        "</｜DSML｜ invoke>\n</｜DSML｜ calls>",
+    ];
+    let events = chunks
+        .iter()
+        .map(|chunk| parser.parse_chunk(chunk).unwrap().events)
+        .collect::<Vec<_>>();
+    expect![[r#"
+        [
+            [
+                ToolCall(
+                    ToolCallDelta {
+                        tool_index: 0,
+                        name: Some(
+                            "lookup",
+                        ),
+                        arguments: "",
+                    },
+                ),
+            ],
+            [
+                ToolCall(
+                    ToolCallDelta {
+                        tool_index: 0,
+                        name: None,
+                        arguments: "{\"query\":\"two ",
+                    },
+                ),
+            ],
+            [
+                ToolCall(
+                    ToolCallDelta {
+                        tool_index: 0,
+                        name: None,
+                        arguments: "lines\\n\\\"quoted\\\"",
+                    },
+                ),
+            ],
+            [
+                ToolCall(
+                    ToolCallDelta {
+                        tool_index: 0,
+                        name: None,
+                        arguments: "\",\"limit\":",
+                    },
+                ),
+            ],
+            [],
+            [
+                ToolCall(
+                    ToolCallDelta {
+                        tool_index: 0,
+                        name: None,
+                        arguments: "2",
+                    },
+                ),
+            ],
+            [
+                ToolCall(
+                    ToolCallDelta {
+                        tool_index: 0,
+                        name: None,
+                        arguments: "}",
+                    },
+                ),
+            ],
+        ]
+    "#]]
+    .assert_debug_eq(&events);
 }
 
 #[test]
@@ -141,4 +223,90 @@ fn structural_tag_respects_parameter_schemas_and_strict() {
             }
         }
     }
+}
+
+#[test]
+fn repeated_parameter_streams_a_repeated_key() {
+    let mut parser = DeepSeekV41ToolParser::create(&tools(), Arc::new(tokenizer())).unwrap();
+    let output = parser
+        .parse_complete(concat!(
+            "<｜DSML｜ calls>\n<｜DSML｜ invoke name=\"lookup\">\n",
+            "<｜DSML｜ parameter name=\"query\" string=\"true\">a</｜DSML｜ parameter>\n",
+            "<｜DSML｜ parameter name=\"query\" string=\"true\">b</｜DSML｜ parameter>\n",
+            "</｜DSML｜ invoke>\n</｜DSML｜ calls>",
+        ))
+        .unwrap();
+    expect![[r#"
+        [
+            ToolCall(
+                ToolCallDelta {
+                    tool_index: 0,
+                    name: Some(
+                        "lookup",
+                    ),
+                    arguments: "{\"query\":\"a\",\"query\":\"b\"}",
+                },
+            ),
+        ]
+    "#]]
+    .assert_debug_eq(&output.events);
+}
+
+#[test]
+fn malformed_markup_between_parameters_closes_the_call_and_fails() {
+    let mut parser = DeepSeekV41ToolParser::create(&tools(), Arc::new(tokenizer())).unwrap();
+    let mut output = ToolParserOutput::default();
+    let wire = concat!(
+        "<｜DSML｜ calls>\n<｜DSML｜ invoke name=\"lookup\">\n",
+        "<｜DSML｜ parameter name=\"query\" string=\"true\">a</｜DSML｜ parameter>\n",
+        "garbage\n</｜DSML｜ invoke>\n</｜DSML｜ calls>",
+    );
+    let error = parser.parse_into(decode(&dedicated(wire)), &mut output).unwrap_err();
+    assert!(
+        matches!(error, ToolParserError::ParsingFailed { .. }),
+        "{error:?}"
+    );
+    expect![[r#"
+        (
+            [
+                ToolCall(
+                    ToolCallDelta {
+                        tool_index: 0,
+                        name: Some(
+                            "lookup",
+                        ),
+                        arguments: "{\"query\":\"a\"}",
+                    },
+                ),
+            ],
+            "\ngarbage\n</｜DSML｜ invoke>\n</｜DSML｜ calls>",
+        )
+    "#]]
+    .assert_debug_eq(&(output.coalesce().events, parser.reset()));
+}
+
+#[test]
+fn calls_end_closes_an_invoke_missing_its_end_marker() {
+    let mut parser = DeepSeekV41ToolParser::create(&tools(), Arc::new(tokenizer())).unwrap();
+    let output = parser
+        .parse_complete(concat!(
+            "<｜DSML｜ calls>\n<｜DSML｜ invoke name=\"lookup\">\n",
+            "<｜DSML｜ parameter name=\"query\" string=\"true\">a</｜DSML｜ parameter>\n",
+            "</｜DSML｜ calls>",
+        ))
+        .unwrap();
+    expect![[r#"
+        [
+            ToolCall(
+                ToolCallDelta {
+                    tool_index: 0,
+                    name: Some(
+                        "lookup",
+                    ),
+                    arguments: "{\"query\":\"a\"}",
+                },
+            ),
+        ]
+    "#]]
+    .assert_debug_eq(&output.events);
 }

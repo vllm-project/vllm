@@ -23,7 +23,8 @@ use crate::tool::{Result, StructuralTagBuilder, Tool, ToolParser, ToolParserOutp
 /// </｜DSML｜tool_calls>
 /// ```
 ///
-/// Arguments are emitted only after a full `invoke` block is parsed.
+/// The function name is emitted when an `invoke` opens. A string value streams as it decodes;
+/// any other value is emitted when its parameter closes.
 ///
 /// V4 reuses the V3.2 DSML invoke/parameter grammar but wraps calls in
 /// `<｜DSML｜tool_calls>` instead of `<｜DSML｜function_calls>`.
@@ -294,7 +295,8 @@ mod tests {
         let mut output = ToolParserOutput::default();
         parser.parse_into(decode_ids(&tokenizer, &ids), &mut output).unwrap();
         output.append(parser.finish().unwrap());
+        let output = output.coalesce();
         assert_eq!(output.calls().len(), 1);
-        assert_eq!(location(&output.coalesce()), json!("SF"));
+        assert_eq!(location(&output), json!("SF"));
     }
 }
