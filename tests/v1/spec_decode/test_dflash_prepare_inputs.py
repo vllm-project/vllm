@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
@@ -11,6 +11,7 @@ import torch
 from vllm.config import VllmConfig
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
+from vllm.v1.worker.gpu.buffer_utils import UvaBufferPool
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import (
     DFlashSpeculator,
     _prepare_dflash_inputs_kernel,
@@ -31,6 +32,7 @@ def _run_prepare(
     cp_interleave: int = 1,
     draft_dcp_size: int | None = None,
     num_scheduled_tokens: int = 4,
+    kept_context_len: int | None = None,
 ):
     device = torch.device(current_platform.device_type)
     max_num_reqs = 4
@@ -122,11 +124,22 @@ def _run_prepare(
         max_num_tokens=max_num_tokens,
         max_model_len=128,
         sample_from_anchor=True,
+        device=device,
+        _kept_context_len=kept_context_len,
+        _kept_lens=UvaBufferPool(max_num_reqs, torch.int64),
+        _kept_rows=None,
+    )
+    draft._select_context_rows = MethodType(
+        DFlashSpeculator._select_context_rows, draft
     )
     with (
         patch(
             "vllm.v1.worker.gpu.spec_decode.dflash.speculator.dispatch_cg_and_sync_dp",
             side_effect=InputsPrepared,
+        ),
+        patch(
+            "vllm.v1.worker.gpu.spec_decode.dflash.speculator.MIN_TRIMMED_CONTEXT_ROWS",
+            1,
         ),
         pytest.raises(InputsPrepared),
     ):
@@ -239,3 +252,24 @@ def test_prepare_dflash_inputs_compiles_once_for_all_query_lengths():
     warmed = compiled_variants()
     _run_prepare(**kwargs, num_scheduled_tokens=300)
     assert compiled_variants() == warmed
+
+
+def test_prepare_dflash_inputs_trims_context_to_window():
+    """A windowed drafter keeps only each request's trailing context rows,
+    compacted at the front, with the positions and slots they had untrimmed."""
+    kwargs = dict(
+        target_positions=[10, 11, 12, 13],
+        block_table_values=[0, 0, 7, 8, 9, 10, 11, 12],
+    )
+    full = _run_prepare(**kwargs)
+    trimmed = _run_prepare(**kwargs, kept_context_len=3)
+
+    kept = full.context_positions[1:4].tolist()
+    assert trimmed.context_positions[:3].tolist() == kept
+    assert (
+        trimmed.context_slot_mapping[:3].tolist()
+        == full.context_slot_mapping[1:4].tolist()
+    )
+    # The query inputs do not depend on the context rows.
+    assert trimmed.query_slot_mapping.tolist() == full.query_slot_mapping.tolist()
+    assert trimmed.sample_indices.tolist() == full.sample_indices.tolist()
