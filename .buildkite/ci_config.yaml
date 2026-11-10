@@ -14,11 +14,30 @@ run_all_patterns:
   - "setup.py"
   - "cmake/"
   - ".buildkite/check-torch-abi.py"
-# csrc/ is decided by ci-selector on CUDA, from the kernel recordings. AMD is
-# not selected yet, so a csrc/ change still runs every AMD step (ROCm compiles
-# these sources through HIPify). Uses run_all_exclude_patterns below.
+# Every AMD step runs on these. AMD is not selected by ci-selector yet, so
+# csrc/ still runs all of AMD (ROCm compiles it through HIPify) while
+# ci-selector decides it on CUDA. The rest build the ROCm test image or run
+# every AMD test; run_all_patterns does not cover them, as they cannot affect
+# CUDA.
 amd_run_all_patterns:
   - "csrc/"
+  - "cmake/hipify.py"
+  - "docker/Dockerfile.rocm$"
+  - "docker/Dockerfile.rocm_base$"
+  - "docker/docker-bake-rocm.hcl"
+  - ".buildkite/hardware_tests/amd.yaml"
+  - ".buildkite/scripts/rocm/build.sh"
+  - ".buildkite/scripts/hardware_ci/run-amd-test.sh"
+  - ".buildkite/scripts/hardware_ci/amd_ci_"
+  - "requirements/rocm.txt"
+  - "requirements/test/rocm.txt"
+  - "tools/install_torchcodec_rocm.sh"
+  - "tools/vllm-rocm/therock_wheels.py"
+  - "tools/ci/rocm_kernel_symbol_map.py"
+# amd_run_all_patterns has its own excludes: the list below names files that
+# do not affect CUDA, csrc/rocm/ among them.
+amd_run_all_exclude_patterns:
+  - "csrc/cpu/"
 run_all_exclude_patterns:
   - "docker/Dockerfile."
   - "csrc/cpu/"
