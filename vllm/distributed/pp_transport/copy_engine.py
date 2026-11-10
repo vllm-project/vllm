@@ -24,6 +24,7 @@ hooks at the end of `CopyEngineTransport` (the peer copy, the flag operations).
 """
 
 import contextlib
+import ctypes
 from collections import deque
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, NamedTuple, Protocol
@@ -131,9 +132,10 @@ class CopyEngineUnavailable(RuntimeError):
 
 
 def _close_peer(ptr: int) -> None:
-    from cuda.bindings import runtime as cudart
+    # CudaRTLibrary calls HIP's IPC close on ROCm.
+    from vllm.distributed.device_communicators.cuda_wrapper import CudaRTLibrary
 
-    _check(cudart.cudaIpcCloseMemHandle(ptr))
+    CudaRTLibrary().cudaIpcCloseMemHandle(ctypes.c_void_p(ptr))
 
 
 class CopyEngineTransport(PPTransport):
@@ -183,7 +185,7 @@ class CopyEngineTransport(PPTransport):
                 # Best effort: every rank must still raise the same error.
                 with contextlib.suppress(Exception):
                     for p in opened:
-                        self._close_peer(p)
+                        _close_peer(p)
                     for p in owned:
                         ops.free_shared_buffer(p)
                 raise CopyEngineUnavailable(
@@ -306,7 +308,6 @@ class CopyEngineTransport(PPTransport):
     _LINK = "NVLink"
     _wait_flag = staticmethod(_wait_flag)
     _write_flag = staticmethod(_write_flag)
-    _close_peer = staticmethod(_close_peer)
 
     @classmethod
     def _platform_unavailable(cls) -> str | None:

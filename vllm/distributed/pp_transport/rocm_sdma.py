@@ -181,7 +181,7 @@ class _Hsa:
 
 
 class _Hip:
-    """HIP's stream memory operations and IPC close, over ctypes."""
+    """HIP's stream memory operations, over ctypes."""
 
     def __init__(self) -> None:
         lib = ctypes.CDLL("libamdhip64.so")
@@ -198,7 +198,6 @@ class _Hip:
             ctypes.c_uint64,
             ctypes.c_uint,
         ]
-        lib.hipIpcCloseMemHandle.argtypes = [ctypes.c_void_p]
         self.lib = lib
 
     @staticmethod
@@ -223,9 +222,6 @@ class _Hip:
             self.lib.hipStreamWriteValue64(stream.cuda_stream, addr, value, 0),
             "hipStreamWriteValue64",
         )
-
-    def close_peer(self, ptr: int) -> None:
-        self._check(self.lib.hipIpcCloseMemHandle(ptr), "hipIpcCloseMemHandle")
 
 
 @functools.cache
@@ -277,10 +273,6 @@ class SdmaTransport(CopyEngineTransport):
     @staticmethod
     def _write_flag(stream: torch.cuda.Stream, addr: int, value: int) -> None:
         _hip().write_flag(stream, addr, value)
-
-    @staticmethod
-    def _close_peer(ptr: int) -> None:
-        _hip().close_peer(ptr)
 
     @classmethod
     def _platform_unavailable(cls) -> str | None:
