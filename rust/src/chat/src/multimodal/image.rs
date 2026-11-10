@@ -9,8 +9,11 @@ use std::sync::Arc;
 use llm_multimodal::{ImageFrame, Modality, PreprocessedEncoderInputs, VisionPreprocessingContext};
 use vllm_engine_core_client::protocol::dtype::ModelDtype;
 
+use super::image_cache_key;
 use super::timing::MM_STAGE_TARGET;
-use super::{MultimodalModelInfo, PreparedMedia, VisionModalitySupport, item};
+use super::{
+    MmProcessorOverrides, MultimodalModelInfo, PreparedMedia, VisionModalitySupport, item,
+};
 use crate::error::{Error, Result, bail_multimodal, multimodal};
 
 /// Forward-kwargs name of the primary image encoder input.
@@ -31,10 +34,17 @@ impl MultimodalModelInfo {
         uuids: Vec<Option<String>>,
         model_dtype: ModelDtype,
         preprocessing_context: VisionPreprocessingContext,
+        mm_overrides: Option<&MmProcessorOverrides>,
     ) -> Result<PreparedMedia> {
-        let support = self.image.as_ref().ok_or_else(|| Error::UnsupportedModality {
-            modality: Modality::Image.to_string(),
-        })?;
+        let request_support = mm_overrides
+            .map(|overrides| self.image_support_with_overrides(overrides))
+            .transpose()?;
+        let support = match request_support.as_ref() {
+            Some(support) => support,
+            None => self.image.as_ref().ok_or_else(|| Error::UnsupportedModality {
+                modality: Modality::Image.to_string(),
+            })?,
+        };
         let preprocessed = self.preprocess_images(support, &frames, preprocessing_context).await?;
         let replacements = support.spec.prompt_replacements_for(&self.context, &preprocessed)?;
         if replacements.len() != frames.len() {
@@ -44,7 +54,12 @@ impl MultimodalModelInfo {
                 frames.len()
             );
         }
-        let hashes = frames.iter().map(|frame| frame.hash.clone()).collect();
+        let hashes =
+            frames.iter().map(|frame| image_cache_key(&frame.hash, mm_overrides)).collect();
+        let uuids = uuids
+            .into_iter()
+            .map(|uuid| uuid.map(|uuid| image_cache_key(&uuid, mm_overrides)))
+            .collect();
         let items =
             item::build_batched_items(&support.spec, preprocessed, hashes, uuids, model_dtype)?;
 

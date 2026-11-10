@@ -85,6 +85,9 @@ pub struct ApiServerOptions {
     pub force_include_usage: bool,
     /// When `true`, set `X-Request-Id` on every HTTP response.
     pub enable_request_id_headers: bool,
+    /// Permit non-empty `mm_processor_kwargs` and `media_io_kwargs` on gRPC
+    /// requests. Must be enabled explicitly by a trusted server operator.
+    pub trust_request_mm_kwargs: bool,
     /// When `true`, log every error response at ERROR (`--log-error-stack`).
     pub log_error_stack: bool,
     /// When `true`, register the scale-out `/inference/v1/generate` route.

@@ -19,6 +19,7 @@ use vllm_engine_core_client::protocol::multimodal::{
 };
 
 use super::timing::MM_STAGE_TARGET;
+use super::video_cache_key;
 use super::{MultimodalModelInfo, PreparedItem, PreparedMedia, VisionModalitySupport, tensor};
 use crate::error::{Error, Result, bail_multimodal, multimodal};
 
@@ -35,17 +36,29 @@ impl MultimodalModelInfo {
     /// Unlike images, each clip runs through the preprocessor independently
     /// (a batch of one), so its tensors are complete per item and need no
     /// cross-item slicing.
+    #[cfg(test)]
+    pub(super) async fn prepare_videos(
+        &self,
+        clips: Vec<Arc<VideoClip>>,
+        uuids: Vec<Option<String>>,
+        model_dtype: ModelDtype,
+    ) -> Result<PreparedMedia> {
+        self.prepare_videos_with_fps(clips, uuids, model_dtype, None).await
+    }
+
+    /// Scope cache keys when request video sampling settings change.
     #[tracing::instrument(
         name = "mm_stage",
         target = MM_STAGE_TARGET,
         skip_all,
         fields(stage = "preprocess_video")
     )]
-    pub(super) async fn prepare_videos(
+    pub(super) async fn prepare_videos_with_fps(
         &self,
         clips: Vec<Arc<VideoClip>>,
         uuids: Vec<Option<String>>,
         model_dtype: ModelDtype,
+        video_fps: Option<f64>,
     ) -> Result<PreparedMedia> {
         let support = self.video.as_ref().ok_or_else(|| Error::UnsupportedModality {
             modality: Modality::Video.to_string(),
@@ -79,8 +92,8 @@ impl MultimodalModelInfo {
             items.push(build_video_item(
                 support,
                 preprocessed,
-                clip.hash.clone(),
-                uuid,
+                video_cache_key(&clip.hash, video_fps),
+                uuid.map(|uuid| video_cache_key(&uuid, video_fps)),
                 model_dtype,
             )?);
         }
