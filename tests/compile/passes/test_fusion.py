@@ -48,7 +48,7 @@ from vllm.model_executor.kernels.linear import (
     XPUW8A8FP8LinearKernel,
     _KernelT,
 )
-from vllm.model_executor.layers.layernorm import RMSNorm, RMSNormGated
+from vllm.model_executor.layers.layernorm import GemmaRMSNorm, RMSNorm, RMSNormGated
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     create_fp8_quant_key,
@@ -142,6 +142,7 @@ class TestModel(torch.nn.Module):
         dtype: torch.dtype,
         use_aiter_fusion: bool = False,
         use_aiter_quant: bool = False,
+        norm_cls: type[RMSNorm | GemmaRMSNorm] = RMSNorm,
         *args,
         **kwargs,
     ):
@@ -150,7 +151,7 @@ class TestModel(torch.nn.Module):
         self.group_shape = group_shape
         self.use_aiter_quant_op = use_aiter_quant
         self.use_aiter_fusion = use_aiter_fusion
-        self.norm = [RMSNorm(hidden_size, eps) for _ in range(4)]
+        self.norm = [norm_cls(hidden_size, eps) for _ in range(4)]
         self.enable_rms_norm_custom_op = self.norm[0].enabled()
 
         # Determine if blockwise based on group_shape
@@ -575,6 +576,67 @@ def test_aiter_fusion_rmsnorm_quant(
         _run_fusion_test(
             model, fusion_pass, vllm_config, dtype, hidden_size, num_tokens
         )
+
+
+@pytest.mark.parametrize("use_aiter_quant_op", [True, False])
+@pytest.mark.skipif(
+    (not current_platform.is_rocm() or not IS_AITER_FOUND),
+    reason="Only test on ROCm with aiter package installed",
+)
+def test_aiter_fusion_rmsnorm_dynamic_quant_skips_fp32_weight(
+    use_aiter_quant_op: bool, monkeypatch: pytest.MonkeyPatch
+):
+    """The AITER per-token norm+quant kernels read the weight in the input
+    dtype, so GemmaRMSNorm's fp32 `1 + w` weight must not be fused."""
+    dtype = torch.bfloat16
+    hidden_size, num_tokens = 256, 257
+    vllm_config = VllmConfig(
+        model_config=ModelConfig(dtype=dtype),
+        compilation_config=CompilationConfig(
+            mode=CompilationMode.VLLM_COMPILE,
+            custom_ops=["+rms_norm", "+quant_fp8"],
+            pass_config=PassConfig(fuse_norm_quant=True, eliminate_noops=True),
+        ),
+    )
+
+    with vllm.config.set_current_vllm_config(vllm_config), monkeypatch.context() as m:
+        from vllm.compilation.passes.fusion.rocm_aiter_fusion import (
+            RocmAiterRMSNormQuantFusionPass,
+        )
+
+        m.setenv("VLLM_ROCM_USE_AITER", "1")
+        rocm_aiter_ops.refresh_env_variables()
+
+        torch.set_default_device("cuda")
+        torch.set_default_dtype(dtype)
+        torch.manual_seed(1)
+
+        fusion_pass = RocmAiterRMSNormQuantFusionPass(vllm_config)
+        model = TestModel(
+            hidden_size=hidden_size,
+            eps=1e-6,
+            force_kernel=RowWiseTorchFP8ScaledMMLinearKernel,
+            group_shape=GroupShape.PER_TOKEN,
+            dtype=dtype,
+            use_aiter_fusion=True,
+            use_aiter_quant=use_aiter_quant_op,
+            norm_cls=GemmaRMSNorm,
+        )
+        for norm in model.norm:
+            norm.weight.requires_grad_(False).normal_(std=0.1)
+
+        noop_pass = NoOpEliminationPass(vllm_config)
+        cleanup_pass = PostCleanupPass(vllm_config)
+        backend = TestBackend(noop_pass, fusion_pass, cleanup_pass)
+        backend_unfused = TestBackend(noop_pass, cleanup_pass)
+
+        x = torch.rand(num_tokens, hidden_size)
+        torch._dynamo.mark_dynamic(x, 0)
+        result = torch.compile(model, backend=backend)(x)
+        result_unfused = torch.compile(model, backend=backend_unfused)(x)
+
+        torch.testing.assert_close(result, result_unfused, atol=0, rtol=0)
+        assert fusion_pass.matched_count == 0
 
 
 class TestGatedModel(torch.nn.Module):
