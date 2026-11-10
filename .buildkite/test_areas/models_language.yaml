@@ -141,7 +141,8 @@ steps:
   commands:
     # docker/Dockerfile prebuilds these exact CUDA extensions in the test image.
     - python3 ../.buildkite/scripts/check-hybrid-test-deps.py
-    - pytest -v -s models/language/generation -m '(not core_model) and (not hybrid_model)'
+    # Every test in the ignored files is hybrid_model; without --ignore the shard planner counts them as untimed work.
+    - pytest -v -s models/language/generation -m '(not core_model) and (not hybrid_model)' --ignore models/language/generation/test_hybrid.py --ignore models/language/generation/test_gdn_sleep_wake.py
   mirror:
     amd:
       automatic_shard: true
@@ -152,7 +153,7 @@ steps:
       depends_on:
       - image-build-amd
       commands:
-      - pytest -v -s models/language/generation -m '(not core_model) and (not hybrid_model)'
+      - pytest -v -s models/language/generation -m '(not core_model) and (not hybrid_model)' --ignore models/language/generation/test_hybrid.py --ignore models/language/generation/test_gdn_sleep_wake.py
 
 - label: ":nvidia: (H200 MIG 18GB) [Nightly] Language Models (PPL)"
   key: language-models-test-ppl
