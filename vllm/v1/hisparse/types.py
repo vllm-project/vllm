@@ -15,7 +15,6 @@ class SparseKVPageTransfer:
     transfer_id: int
     host_block_id: int
     resident_block_ids: tuple[int, ...]
-    after_forward: bool
     restore: bool = False
 
 
