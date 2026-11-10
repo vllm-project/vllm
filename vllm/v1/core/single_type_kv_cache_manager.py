@@ -204,10 +204,9 @@ class SingleTypeKVCacheManager(ABC):
             num_tokens_main_model: The number of tokens for the main model (aka target
                 model in spec decode). w/o spec decode, it is num_tokens;
                 with spec decode, it is num_tokens - num_lookahead_tokens.
-            apply_admission_cap: If True, bound the result by
-                `max_admission_blocks_per_request` minus the recyclable blocks
-                the request already holds, for recycling-aware specs (SWA,
-                chunked-local).
+            apply_admission_cap: If True, clamp by `num_required_blocks` by
+                `max_admission_blocks_per_request`for recycling-aware specs
+                (SWA, chunked-local).
             prefill_end: The token index the request's prefill ends at, the
                 same value the scheduler splits chunks against. Mamba reserves
                 a prefill checkpoint only on the chunk reaching it; 0 (dense
@@ -218,39 +217,29 @@ class SingleTypeKVCacheManager(ABC):
 
         """
         num_required_blocks = cdiv(num_tokens, self.block_size)
-        req_blocks = self.req_to_blocks.get(request_id, ())
-        num_req_blocks = len(req_blocks)
-        # Admission budget left to a request that already holds blocks, or
-        # None if the admission cap does not apply.
-        admission_budget: int | None = None
+        # req_to_blocks is positional: a skipped external-load prefix is null
+        # padding, so len() is not the number of blocks this request can recycle.
+        blocks = self.req_to_blocks.get(request_id)
+        if (
+            apply_admission_cap
+            and self.max_admission_blocks_per_request is not None
+            and blocks
+        ):
+            held = sum(not b.is_null and b.ref_cnt == 1 for b in blocks)
+            uncapped = self.get_num_blocks_to_allocate(
+                request_id, num_tokens, new_computed_blocks,
+                total_computed_tokens, num_local_computed_tokens,
+                num_tokens_main_model, apply_admission_cap=False,
+                prefill_end=prefill_end,
+            )
+            return min(
+                uncapped, max(0, self.max_admission_blocks_per_request - held)
+            )
         if apply_admission_cap and self.max_admission_blocks_per_request is not None:
-            # Recycling-aware specs (SWA, chunked-local) cap the per-request
-            # reservation here so admission matches the startup pool sizer
-            # (`SlidingWindowSpec.max_admission_blocks_per_request` / its
-            # chunked-local counterpart). `remove_skipped_blocks` runs from
-            # `allocate_slots` before each chunk's `get_num_blocks_to_allocate`,
-            # so per-request peak real-held blocks <= this cap, which keeps
-            # `sum(reservations) <= pool` <=> `sum(peak_real_held) <= pool`.
-            # Drift between the two would re-introduce the deadlock from
-            # issue #39734 or, worse, mid-prefill OOM.
-            if num_req_blocks == 0:
-                num_required_blocks = min(
-                    num_required_blocks, self.max_admission_blocks_per_request
-                )
-            else:
-                # `req_to_blocks` is positional: skipped blocks (and the
-                # skipped prefix of an external load) are null placeholders,
-                # so its length is not what the request holds. Only subtract
-                # the real blocks that window recycling returns to the pool;
-                # a block shared with another request stays allocated.
-                num_recyclable_blocks = 0
-                for block in reversed(req_blocks):
-                    if block.is_null:
-                        break
-                    num_recyclable_blocks += block.ref_cnt == 1
-                admission_budget = max(
-                    self.max_admission_blocks_per_request - num_recyclable_blocks, 0
-                )
+            num_required_blocks = min(
+                num_required_blocks, self.max_admission_blocks_per_request
+            )
+        num_req_blocks = len(self.req_to_blocks.get(request_id, ()))
 
         if request_id in self.num_cached_block:
             # Fast-path: a running request won't have any new prefix-cache hits.
@@ -258,10 +247,7 @@ class SingleTypeKVCacheManager(ABC):
             # NOTE: With speculative decoding, request's blocks may be allocated
             # for draft tokens which are later rejected. In this case,
             # num_required_blocks may be smaller than num_req_blocks.
-            num_new_blocks = max(num_required_blocks - num_req_blocks, 0)
-            if admission_budget is not None:
-                num_new_blocks = min(num_new_blocks, admission_budget)
-            return num_new_blocks
+            return max(num_required_blocks - num_req_blocks, 0)
 
         num_skipped_tokens = self.get_num_skipped_tokens(total_computed_tokens)
         num_local_computed_blocks = len(new_computed_blocks) + num_req_blocks
@@ -291,10 +277,7 @@ class SingleTypeKVCacheManager(ABC):
             # Reserve the extra block that allocate_new_blocks pulls for the
             # partial-hit CoW redirect.
             num_new_blocks += 1
-        num_new_blocks += num_evictable_blocks
-        if admission_budget is not None:
-            num_new_blocks = min(num_new_blocks, admission_budget)
-        return num_new_blocks
+        return num_new_blocks + num_evictable_blocks
 
     def add_local_computed_blocks(
         self,
