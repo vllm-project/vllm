@@ -20,7 +20,6 @@ import torch.nn as nn
 import vllm.envs as envs
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.config.kernel import NATIVE_MEGA_MOE_BACKENDS
-from vllm.distributed import get_tp_group
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.mhc.tilelang import (
@@ -334,11 +333,11 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
         self.logits_processor = LogitsProcessor(self.config.vocab_size)
         # decode_backend=latency_specialized: a decode executor over self.model, built
         # by the target model's state on the target's executor.
-        self.specialized_decode_requested = (
+        specialized_decode_requested = (
             decode_backend(vllm_config) == "latency_specialized"
         )
         self.specialized_decode: DraftDecode | None = None
-        if self.specialized_decode_requested:
+        if specialized_decode_requested:
             register_draft(self)
         # additional_config={"dspark_fused_markov": true}, implied by the
         # specialized decode, replaces the speculator's loop when it would
@@ -347,7 +346,7 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
         extra = vllm_config.additional_config
         if (
             (
-                self.specialized_decode_requested
+                specialized_decode_requested
                 or (isinstance(extra, dict) and extra.get("dspark_fused_markov", False))
             )
             and spec_config.draft_sample_method == "probabilistic"
@@ -379,33 +378,12 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
         self.logits_processor = SpecializedDecodeLogitsProcessor(self.config.vocab_size)
         fused = getattr(self, "sample_sequential", None)
         if isinstance(fused, FusedMarkovSampler):
-            self.sample_sequential = self._with_sharded_markov(fused)
+            from .specialized_decode.sampling.sharded_markov import (
+                build_sharded_markov_sampling,
+            )
+
+            self.sample_sequential = build_sharded_markov_sampling(self, fused)
         return self.specialized_decode
-
-    def _with_sharded_markov(
-        self, fused: FusedMarkovSampler
-    ) -> "FusedMarkovSampler | ShardedMarkovSampling":
-        """`fused` behind the sharded Markov chain for the batches the chain
-        takes, or `fused` alone where it cannot run (agreed by all ranks)."""
-        from .specialized_decode.sampling.sharded_markov import (
-            ShardedMarkovSampling,
-            make_sharded_sampler,
-        )
-
-        tp_group = get_tp_group()
-        sharded = make_sharded_sampler(
-            self.model.markov_head.markov_w1.weight,
-            self.markov_bias_weight(),
-            self.config.vocab_size,
-            self.num_speculative_steps,
-            self.markov_cache_dtype,
-            tp_group.cpu_group if tp_group.world_size > 1 else None,
-            self.max_num_reqs,
-        )
-        if sharded is None:
-            return fused
-        local_logits = sharded.accepts_shard(self.draft_logits_shard())
-        return ShardedMarkovSampling(sharded, fused, local_logits)
 
     # --- Hooks used by the speculator -------------------------------------
 

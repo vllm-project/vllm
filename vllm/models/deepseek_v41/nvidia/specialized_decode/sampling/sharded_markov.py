@@ -55,10 +55,14 @@ import torch
 import torch.distributed as dist
 from torch.distributed import ProcessGroup
 
+from vllm.distributed import get_tp_group
 from vllm.logger import init_logger
 
 if TYPE_CHECKING:
     from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
+
+    from ...dspark import DSparkDeepseekV4ForCausalLM
+    from ...ops.fused_markov import FusedMarkovSampler
 from vllm.triton_utils import tl, triton
 from vllm.v1.worker.gpu.sample.gumbel import (
     _DRAFT_NOISE_SALT,
@@ -515,3 +519,23 @@ class ShardedMarkovSampling:
             spec.draft_tokens,
         )
         return True
+
+
+def build_sharded_markov_sampling(
+    model: "DSparkDeepseekV4ForCausalLM", fused: "FusedMarkovSampler"
+) -> "FusedMarkovSampler | ShardedMarkovSampling":
+    """Wrap `fused` with the sharded chain where supported, agreed by all ranks."""
+    tp_group = get_tp_group()
+    sharded = make_sharded_sampler(
+        model.model.markov_head.markov_w1.weight,
+        model.markov_bias_weight(),
+        model.config.vocab_size,
+        model.num_speculative_steps,
+        model.markov_cache_dtype,
+        tp_group.cpu_group if tp_group.world_size > 1 else None,
+        model.max_num_reqs,
+    )
+    if sharded is None:
+        return fused
+    local_logits = sharded.accepts_shard(model.draft_logits_shard())
+    return ShardedMarkovSampling(sharded, fused, local_logits)
