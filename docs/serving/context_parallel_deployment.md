@@ -51,6 +51,11 @@ In short, for decode context parallel, try to increase `-tp` size until you get 
 
 Decode context parallel is supported in vLLM, for both MLA and GQA models. Some attention backends also support the combination of decode context parallel and MTP (multi-token prediction) to further accelerate the decoding phase.
 
+With the FlashInfer backend (`--attention-config.backend FLASHINFER`),
+DCP prefill queries remain in the model dtype (BF16 or FP16), including when
+`--kv-cache-dtype fp8` is enabled. The cached keys and values still use FP8.
+When output quantization is needed, DCP runs it separately from attention.
+
 ## Technical Discussions
 
 The main discussions happen in the `#sig-context-parallel` channel of [vLLM Slack](https://slack.vllm.ai/).

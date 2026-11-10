@@ -1161,6 +1161,11 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         if self.vllm_config.attention_config.disable_flashinfer_q_quantization:
             return self.model_config.dtype
 
+        # DCP prefill also attends to unquantized new K/V, which require
+        # a query in the model dtype even when the cached K/V are FP8.
+        if is_prefill and self.use_dcp:
+            return self.model_config.dtype
+
         # self.cache_dtype is resolved per KV-cache group: it is "auto" when
         # this group is unquantized (e.g. --kv-cache-dtype-skip-layers), even
         # if cache_config requests a quantized dtype globally.
@@ -2104,11 +2109,11 @@ class FlashInferImpl(AttentionImpl):
             num_heads, num_kv_heads, is_prefill=False
         )
         vllm_config = get_current_vllm_config_or_none()
-        # Query pre-quantization needs a single dtype for the whole query tensor.
-        # SM90 XQA needs BF16/FP16-Q for decode and FP8 for prefill,
-        # so only enable this for SM100 trtllm-gen where both use FP8-Q.
+        # Pre-quantization requires both phases to consume FP8 queries.
+        # SM90 XQA decode and DCP prefill need queries in the model dtype.
         self.supports_quant_query_input = (
             self.supports_xqa_or_trtllm_gen_decode
+            and self.dcp_world_size == 1
             and is_quantized_kv_cache(self.kv_cache_dtype)
             and current_platform.is_device_capability_family(100)
             and vllm_config is not None
@@ -2163,9 +2168,10 @@ class FlashInferImpl(AttentionImpl):
             )
             return False
         # XQA does not support FP8/NVFP4 output, so require trtllm-gen
-        # (SM100+) here.  Without that we cannot fuse the output quant.
+        # (SM100+) here. DCP prefill also cannot fuse output quantization.
         return (
             self.supports_xqa_or_trtllm_gen_decode
+            and self.dcp_world_size == 1
             and is_quantized_kv_cache(self.kv_cache_dtype)
             and current_platform.is_device_capability_family(100)
             and quant_key in (kFp8StaticTensorSym, kNvfp4Dynamic)
@@ -2639,7 +2645,7 @@ class FlashInferImpl(AttentionImpl):
                     decode_query = get_dcp_group().all_gather(
                         decode_query.contiguous(), dim=-2
                     )
-                    output_tmp = torch.empty_like(decode_query)
+                    output_tmp = torch.empty_like(decode_query, dtype=output.dtype)
                     lse = torch.empty(
                         (decode_query.size(0), decode_query.size(1)),
                         dtype=torch.float32,
