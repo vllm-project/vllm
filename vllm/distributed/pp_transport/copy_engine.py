@@ -19,7 +19,7 @@ The waits omit CU_STREAM_WAIT_VALUE_FLUSH, which x86 hosts do not support. As
 in NCCL's zero-SM copy-engine path, this relies on NVLink delivering the peer
 copy before the flag write that follows it, so all PP GPUs must be NVLink peers.
 
-On ROCm, `sdma.SdmaTransport` keeps this protocol and replaces the platform
+On ROCm, `rocm_sdma.SdmaTransport` keeps this protocol and replaces the platform
 hooks at the end of `CopyEngineTransport` (the peer copy, the flag operations).
 """
 
@@ -301,7 +301,7 @@ class CopyEngineTransport(PPTransport):
         while len(self.pending) > 1 and self.pending[1][1].query():
             self.pending.popleft()[0].wait()
 
-    # Platform hooks; `sdma.SdmaTransport` (ROCm) overrides them.
+    # Platform hooks; `rocm_sdma.SdmaTransport` (ROCm) overrides them.
 
     _LINK = "NVLink"
     _wait_flag = staticmethod(_wait_flag)

@@ -37,7 +37,7 @@ def copy_engine_transport_class() -> "type[CopyEngineTransport]":
     from vllm.platforms import current_platform
 
     if current_platform.is_rocm():
-        from vllm.distributed.pp_transport.sdma import SdmaTransport
+        from vllm.distributed.pp_transport.rocm_sdma import SdmaTransport
 
         return SdmaTransport
     from vllm.distributed.pp_transport.copy_engine import CopyEngineTransport
