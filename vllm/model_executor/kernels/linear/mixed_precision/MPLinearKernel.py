@@ -13,7 +13,7 @@ from vllm.scalar_type import ScalarType
 
 
 def _shallow_copy(param: torch.Tensor) -> torch.Tensor:
-    """A new object of ``param``'s class sharing its data, with its own copy of
+    """A new object of `param`'s class sharing its data, with its own copy of
     the attributes (e.g. dim tags) for a transform to retag."""
     copy = torch.Tensor._make_subclass(type(param), param.data, param.requires_grad)
     copy.__dict__.update(param.__dict__)

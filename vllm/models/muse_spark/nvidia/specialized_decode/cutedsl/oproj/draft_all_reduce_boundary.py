@@ -16,16 +16,16 @@ CuTe kernel on the thread mapping of the target's attention boundary
 
 Each thread multicasts its fragment of this rank's branch partial (the draft
 o_proj or down_proj output; -0.0 stored as +0.0) into every rank's Lamport
-mailbox, polls the ``tp`` slots of that fragment until none holds the sentinel,
+mailbox, polls the `tp` slots of that fragment until none holds the sentinel,
 re-arms them and sums them in the order of the group's stock all-reduce
-(``rank_order_sum``). The stage is a ticket word: every CTA takes one, the last
+(`rank_order_sum`). The stage is a ticket word: every CTA takes one, the last
 advances the stage.
 
 The boundary then runs on the BF16 sum with the draft boundary's arithmetic and
-row-sum order (``boundary_fragments`` of cutedsl/common/draft_boundary.py), bit
+row-sum order (`boundary_fragments` of cutedsl/common/draft_boundary.py), bit
 for bit, one fragment per thread.
 
-With ``published`` the branch's GEMM has already multicast this rank's partial
+With `published` the branch's GEMM has already multicast this rank's partial
 (the package GEMM's zero-copy epilogue on the same ticket): the kernel neither
 reads the partial nor publishes it.
 
@@ -33,7 +33,7 @@ Every CTA releases its dependents right after its PDL wait; the next kernel
 waits for this grid's end before it reads the output.
 
 Every rank must call with the same row count, one call at a time; a poll that
-sees no data for ``timeout_ns`` traps instead of hanging the group.
+sees no data for `timeout_ns` traps instead of hanging the group.
 """
 
 import functools
@@ -97,7 +97,7 @@ assert CLUSTER_N * THREADS * VEC_BF16 == H
 
 
 def boundary_unsupported(constants: DraftBoundaryConstants) -> str | None:
-    """Why this kernel does not take a boundary that ``DraftBoundary`` takes,
+    """Why this kernel does not take a boundary that `DraftBoundary` takes,
     or None. It takes BF16 or FP32 norm weights, with the pre-norm's applied
     after the norm."""
     if constants.pre_input_scale:
@@ -109,8 +109,8 @@ def boundary_unsupported(constants: DraftBoundaryConstants) -> str | None:
 
 @cute.jit
 def _send_sum(slot: cute.Pointer, mbar: cute.Pointer, peer: Int32, value: Float32):
-    """Store ``value`` into ``slot`` of CTA ``peer``'s shared memory, counted
-    as 4 bytes on that CTA's ``mbar``."""
+    """Store `value` into `slot` of CTA `peer`'s shared memory, counted
+    as 4 bytes on that CTA's `mbar`."""
     remote_slot = cute.arch.map_dsmem_ptr(slot, peer)
     remote_bar = cute.arch.map_dsmem_ptr(mbar, peer)
     cute.arch.inline_ptx(
@@ -134,8 +134,8 @@ def _row_sum(
 ) -> Float32:
     """The row's sum of squares in the single-tile norm's order
     (cutedsl/common/row_norm.py) from each thread's (even, odd) fragment pair
-    (``chunk_pair``); every thread gets it. ``pairs``:
-    2 * THREADS FP32 of shared memory, ``sums``: CLUSTER_N FP32 and ``mbar``
+    (`chunk_pair`); every thread gets it. `pairs`:
+    2 * THREADS FP32 of shared memory, `sums`: CLUSTER_N FP32 and `mbar`
     an mbarrier (initialized for one arrival), each used by one call. The
     cluster must have passed one barrier since every CTA initialized its
     mbarriers."""
@@ -166,9 +166,9 @@ def _row_sum(
 
 @dataclass(frozen=True)
 class _ClusterRowSum:
-    """``RowSum`` of a cluster that holds the row, one fragment per thread:
-    each round its own ``pairs`` (2 * THREADS FP32), ``sums`` (CLUSTER_N FP32)
-    and ``mbar``. Round 0 first waits for the cluster barrier after the
+    """`RowSum` of a cluster that holds the row, one fragment per thread:
+    each round its own `pairs` (2 * THREADS FP32), `sums` (CLUSTER_N FP32)
+    and `mbar`. Round 0 first waits for the cluster barrier after the
     mbarriers' initialization."""
 
     pairs: cute.Pointer
@@ -199,7 +199,7 @@ class _ClusterRowSum:
 
 @dataclass(frozen=True)
 class _StreamStore:
-    """Stores the thread's fragment of the new stream at ``row_element``."""
+    """Stores the thread's fragment of the new stream at `row_element`."""
 
     stream_out: cute.Tensor
     row_element: Int64
@@ -429,8 +429,8 @@ def compile_draft_all_reduce_boundary(
     published: bool = False,
 ):
     """cute.compile one kernel; the rank and the row count are runtime
-    arguments (a weight None where its norm has none, ``stream_out`` None
-    without ``store_stream``). Call before CUDA graph capture."""
+    arguments (a weight None where its norm has none, `stream_out` None
+    without `store_stream`). Call before CUDA graph capture."""
     assert_not_capturing("the draft all-reduce boundary")
     gate = make_fake_compact_tensor(Float32, (H,), assumed_align=32)
     rows_f32 = make_fake_dynamic_compact_tensor(Float32, alignment=32, divisibility=H)
@@ -466,14 +466,14 @@ def compile_draft_all_reduce_boundary(
 
 class DraftAllReduceBoundary:
     """One TP group's draft boundaries with the branch all-reduce fused in:
-    ``mailbox`` ([generations, tp, capacity, 8192] BF16, sentinel-filled, the
+    `mailbox` ([generations, tp, capacity, 8192] BF16, sentinel-filled, the
     rank's copy of a LamportMailbox), its multicast address (None: publish into
     this device's copy only, a single-device check), the stage ticket (int32
     [1], stage << 16, zero before the first call) and the sum order of the
-    group's stock all-reduce (``one_shot_rows``: the rows above which it
+    group's stock all-reduce (`one_shot_rows`: the rows above which it
     runs its two-shot form). Kernels compile per boundary constant set,
     stream dtype, whether the stream is stored and whether the branch's GEMM
-    publishes the partial (``prepare``, before CUDA graph capture)."""
+    publishes the partial (`prepare`, before CUDA graph capture)."""
 
     def __init__(
         self,
@@ -541,7 +541,7 @@ class DraftAllReduceBoundary:
         pre_weight: torch.Tensor | None,
     ) -> "BoundDraftBoundary":
         """One boundary with its constant operands checked and viewed once
-        (before CUDA graph capture): ``run`` on it launches without
+        (before CUDA graph capture): `run` on it launches without
         rebuilding them."""
         return BoundDraftBoundary(self, constants, alpha, beta, post_weight, pre_weight)
 
@@ -557,13 +557,13 @@ class DraftAllReduceBoundary:
         store_stream: bool,
         published: bool = False,
     ) -> tuple[torch.Tensor | None, torch.Tensor]:
-        """``(new_stream or None, out)`` of the boundary of the all-reduce of
-        every rank's ``partial`` (this rank's BF16 [m, 8192] branch partial),
-        ``stream`` FP32 or BF16 [m, 8192]. With ``published`` the partial's
+        """`(new_stream or None, out)` of the boundary of the all-reduce of
+        every rank's `partial` (this rank's BF16 [m, 8192] branch partial),
+        `stream` FP32 or BF16 [m, 8192]. With `published` the partial's
         GEMM has multicast it into this call's slot (the package GEMM on the
         ticket); the kernel does not read it. Graph-capturable once
         prepared. Binds the boundary on every call: a caller that runs one
-        boundary repeatedly binds it once (``bind``)."""
+        boundary repeatedly binds it once (`bind`)."""
         bound = self.bind(constants, alpha, beta, post_weight, pre_weight)
         return bound.run(partial, stream, store_stream, published)
 
@@ -592,8 +592,8 @@ class DraftAllReduceBoundary:
         operands: tuple[cute.Tensor, ...],
         store_stream: bool,
     ) -> tuple[torch.Tensor | None, torch.Tensor]:
-        """Launch a prepared ``kernel`` on rows ``check_rows`` took and a
-        bound boundary's ``operands`` (alpha, beta, post and pre weight
+        """Launch a prepared `kernel` on rows `check_rows` took and a
+        bound boundary's `operands` (alpha, beta, post and pre weight
         views)."""
         m = partial.shape[0]
         out = torch.empty((m, H), dtype=torch.bfloat16, device=partial.device)
@@ -628,10 +628,10 @@ class DraftAllReduceBoundary:
 
 
 class BoundDraftBoundary:
-    """One draft boundary of a ``DraftAllReduceBoundary``, bound at build:
-    its constants and its constant operands (``BoundaryOperands``); its
+    """One draft boundary of a `DraftAllReduceBoundary`, bound at build:
+    its constants and its constant operands (`BoundaryOperands`); its
     kernels by (stream BF16, store stream, published) come from the
-    process-wide compile cache (``prepare`` them before CUDA graph
+    process-wide compile cache (`prepare` them before CUDA graph
     capture)."""
 
     def __init__(
@@ -652,7 +652,7 @@ class BoundDraftBoundary:
         )
 
     def prepare(self, stream_bf16: bool, store_stream: bool, published: bool = False):
-        """The kernel of one variant (``DraftAllReduceBoundary.prepare``)."""
+        """The kernel of one variant (`DraftAllReduceBoundary.prepare`)."""
         return self.op.prepare(self.constants, stream_bf16, store_stream, published)
 
     def run(
@@ -662,7 +662,7 @@ class BoundDraftBoundary:
         store_stream: bool,
         published: bool = False,
     ) -> tuple[torch.Tensor | None, torch.Tensor]:
-        """``DraftAllReduceBoundary.run`` of this boundary."""
+        """`DraftAllReduceBoundary.run` of this boundary."""
         self.op.check_rows(partial, stream)
         kernel = self.prepare(stream.dtype == torch.bfloat16, store_stream, published)
         return self.op.launch(

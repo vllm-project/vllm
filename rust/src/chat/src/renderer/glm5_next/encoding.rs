@@ -414,7 +414,7 @@ fn render_inner(
     Ok(())
 }
 
-// TODO: Expose tool_reference and bundled outputs in ChatContentPart.
+// TODO: Expose bundled outputs in ChatContentPart.
 
 fn content(value: &ChatContent, message_index: usize) -> Value {
     match value {
@@ -430,6 +430,7 @@ fn content(value: &ChatContent, message_index: usize) -> Value {
                     ChatContentPart::InputAudio { .. } | ChatContentPart::AudioUrl { .. } => {
                         json!({"type": "audio", "message_index": message_index, "content_part_index": content_part_index})
                     }
+                    ChatContentPart::ToolReference { name } => json!({"type": "tool_reference", "name": name}),
                 })
                 .collect(),
         ),

@@ -3,7 +3,7 @@
 """The DSpark drafter's 5 layers and final norm as one persistent launch.
 
 For a draft step of up to 2 requests (14 query rows) on one TP4 rank. A layer
-(tag ``step * 8 + layer + 1``), by CTA role (``layout``):
+(tag `step * 8 + layer + 1`), by CTA role (`layout`):
 
 - N: the input row (the embeddings, or the sum of the 4 ranks' down partials) plus
   the residual, input norm -> MXFP8 x8 + flag;
@@ -17,7 +17,7 @@ For a draft step of up to 2 requests (14 query rows) on one TP4 rank. A layer
 - G: gate / up -> SwiGLU-OAI -> act + flag; down (act quantized in registers) ->
   partials pushed to every rank.
 
-After the last layer, N runs the final norm into ``h_out`` (bf16).
+After the last layer, N runs the final norm into `h_out` (bf16).
 """
 
 import flydsl.compiler as flyc
@@ -42,7 +42,7 @@ _STREAM = fx.Stream(None)
 
 
 def build_drafter(wait_ticks=1_000_000_000):
-    """The ``@flyc.jit`` launcher of the drafter kernel for one TP4 rank."""
+    """The `@flyc.jit` launcher of the drafter kernel for one TP4 rank."""
 
     @fx.struct
     class Smem:
@@ -93,7 +93,7 @@ def build_drafter(wait_ticks=1_000_000_000):
         dl = memrealtime() + wait_ticks
 
         def tptr(layer, i):
-            """Entry i of layer ``layer``'s pointer table row (uniform)."""
+            """Entry i of layer `layer`'s pointer table row (uniform)."""
             v = dev.ld(tab, (layer * 16 + i) * 2, 2)
             return (I64(uniform(v[1])) << 32) | I64(fx.Uint32(uniform(v[0])))
 
