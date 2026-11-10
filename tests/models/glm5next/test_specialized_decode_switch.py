@@ -48,3 +48,25 @@ def test_decode_backend_off_rocm_is_left_to_nvidia(not_rocm):
 def test_unknown_decode_backend_raises(not_rocm):
     with pytest.raises(ValueError, match="decode_backend must be"):
         glm_model._specialized_decode_config(_config(backend="fast"))
+
+
+def test_rocm_never_asks_the_nvidia_executor(monkeypatch):
+    def nvidia(_):
+        raise AssertionError("the NVIDIA executor's config was read on ROCm")
+
+    monkeypatch.setattr(glm_model.current_platform, "is_rocm", lambda: True)
+    monkeypatch.setattr(glm_model, "specialized_decode_config", nvidia)
+    assert glm_model._executor_config(_config(backend="latency_specialized")) is None
+
+
+@pytest.mark.parametrize(
+    "backbone_config, vendor", [(object(), "amd"), (None, "nvidia")]
+)
+def test_model_state_follows_the_backbone_config(backbone_config, vendor):
+    """A set backbone config must get the AMD model state, which builds its decode;
+    the NVIDIA one would leave it unbuilt and serve stock decode silently."""
+    lm = SimpleNamespace(
+        model=SimpleNamespace(specialized_decode_config=backbone_config)
+    )
+    cls = glm_model.Glm5NextForCausalLM.get_model_state_cls(lm)
+    assert cls.__module__ == f"vllm.models.glm5next.{vendor}.model_state"

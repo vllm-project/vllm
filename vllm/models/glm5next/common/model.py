@@ -147,6 +147,14 @@ def _specialized_decode_config(vllm_config: VllmConfig):
     return specialized_decode_config(vllm_config)
 
 
+def _executor_config(vllm_config: VllmConfig):
+    """The NVIDIA specialized decode executor's config, None on ROCm, where the
+    backbone serves the same switch with its own kernels."""
+    if current_platform.is_rocm():
+        return None
+    return specialized_decode_config(vllm_config)
+
+
 _MHC_TAU = 0.05
 """mHC routing temperature. A GLM-5.3-Flash trained value that neither the
 checkpoint nor `Glm5NextTextConfig` carries."""
@@ -1235,13 +1243,8 @@ class Glm5NextForCausalLM(
             self.config.vocab_size, scale=_LOGIT_SCALE
         )
         # decode_backend=latency_specialized: a specialized decode executor over
-        # self.model, built by the model state once the weights are loaded. On ROCm
-        # the backbone runs its own per-layer kernels instead (self.model).
-        self.specialized_decode_config = (
-            None
-            if current_platform.is_rocm()
-            else specialized_decode_config(vllm_config)
-        )
+        # self.model, built by the model state once the weights are loaded.
+        self.specialized_decode_config = _executor_config(vllm_config)
         self.specialized_decode: SpecializedDecode | None = None
 
     def build_specialized_decode(self) -> None:
