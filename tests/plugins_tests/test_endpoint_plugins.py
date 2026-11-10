@@ -12,8 +12,11 @@ request through the plugin's route, and lifecycle tests that run the optional
 
 import asyncio
 import contextlib
+import json
 import os
 import signal
+import subprocess
+import sys
 from argparse import Namespace
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -574,6 +577,37 @@ def test_start_and_stop_capabilities_are_independently_optional():
     assert isinstance(dummy, SupportsStop)
 
 
+@pytest.mark.parametrize("hook", ["start", "stop"])
+@pytest.mark.parametrize("entrypoint", ["load", "attach"])
+def test_sync_lifecycle_hook_is_rejected_before_invocation(
+    monkeypatch: pytest.MonkeyPatch, hook: str, entrypoint: str
+):
+    """Malformed lifecycle hooks fail during discovery, before plugin effects."""
+    events: list[str] = []
+
+    class _SyncHook(_LegacyEndpointPlugin):
+        name = "sync_hook_plugin"
+
+        def attach_router(self, app: FastAPI) -> None:
+            events.append("attach")
+
+    def sync_hook(self, state: State) -> None:
+        events.append(hook)
+
+    setattr(_SyncHook, hook, sync_hook)
+    monkeypatch.setenv("VLLM_PLUGINS", _SyncHook.name)
+    monkeypatch.setattr(
+        "vllm.plugins.load_plugins_by_group",
+        _fake_loader({_SyncHook.name: _SyncHook}),
+    )
+    with pytest.raises(TypeError, match=rf"{_SyncHook.name}.*{hook}.*async"):
+        if entrypoint == "load":
+            load_endpoint_plugins(())
+        else:
+            attach_endpoint_plugins(FastAPI(), ())
+    assert events == []
+
+
 @pytest.mark.asyncio
 async def test_legacy_plugin_serves_and_shuts_down_unchanged(
     monkeypatch: pytest.MonkeyPatch,
@@ -659,35 +693,152 @@ async def test_sigterm_shares_the_request_shutdown_event(
     assert events == ["start:plugin", "engine_shutdown", "stop:plugin"]
 
 
-@pytest.mark.asyncio
-async def test_request_shutdown_during_start_stops_exactly_once(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    """A `start` that requests shutdown (and keeps running until the engine
-    has stopped) still completes; the server never serves, and `stop` runs
-    once."""
+async def _serve_pending_start(shutdown: str) -> None:
+    """Child-process scenario: never release startup to make shutdown finish."""
     events: list[str] = []
     engine = _ServingEngineClient(events)
+    entered = asyncio.Event()
 
-    class _Aborting(DummyAdminEndpointPlugin):
-        name = "aborting"
+    class _Pending(DummyAdminEndpointPlugin):
+        name = "B"
 
         async def start(self, state: State) -> None:
             await super().start(state)
-            state.request_shutdown()
-            async with asyncio.timeout(_TIMEOUT_S):
-                await engine.stopped.wait()
+            assert not state.server.started
+            entered.set()
+            if shutdown == "failure":
+                raise RuntimeError("bind failed")
+            if shutdown in ("callback", "callback_return", "callback_failure"):
+                state.request_shutdown()
+                state.request_shutdown()
+                if shutdown == "callback_return":
+                    return
+                if shutdown == "callback_failure":
+                    raise RuntimeError("startup failed after shutdown request")
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cleanup_ready = asyncio.Event()
 
-    async with _serving(monkeypatch, [_Aborting(events)], engine) as (
-        _,
-        serve_task,
-        url,
-    ):
-        await _wait_closed(serve_task)
+                def request_again() -> None:
+                    if shutdown == "watchdog":
+                        terminate_if_errored(state.server, engine)
+                    else:
+                        state.request_shutdown()
+                    cleanup_ready.set()
+
+                asyncio.get_running_loop().call_soon(request_again)
+                await cleanup_ready.wait()
+                events.append("partial_cleanup:B")
+                raise
+
+    # Match the external engine context surrounding the real launcher. Its
+    # finally must run even when Uvicorn raises SystemExit on startup failure.
+    @asynccontextmanager
+    async def engine_context():
+        try:
+            yield engine
+        finally:
+            events.append("external_engine_context_exit")
+            print("STARTUP_EVENTS=" + json.dumps(events), flush=True)
+
+    async with engine_context(), contextlib.AsyncExitStack() as stack:
+        monkeypatch = stack.enter_context(pytest.MonkeyPatch.context())
+        plugins = [_dummy("A", events), _Pending(events)]
+        if shutdown != "callback_return":
+            plugins.append(_dummy("never", events))
+        app = await _build_plugin_app(
+            monkeypatch,
+            plugins,
+            engine,
+            _NativeServing(events),
+        )
+        state = app.state
+        sock = create_server_socket(("127.0.0.1", 0), reuse_port=False)
+        port = sock.getsockname()[1]
+
+        async def serve() -> None:
+            try:
+                await (
+                    await serve_http(
+                        app, sock, host="127.0.0.1", port=port, log_level="warning"
+                    )
+                )
+            finally:
+                sock.close()
+
+        task = asyncio.create_task(serve())
+        async with asyncio.timeout(_TIMEOUT_S):
+            await entered.wait()
+        if shutdown in ("callback", "sigterm", "watchdog"):
+            assert not state.server.started
+            if shutdown == "sigterm":
+                os.kill(os.getpid(), signal.SIGTERM)
+            elif shutdown == "watchdog":
+                engine.errored = True
+                engine.is_running = False
+                terminate_if_errored(state.server, engine)
+                terminate_if_errored(state.server, engine)
+        done, _ = await asyncio.wait({task}, timeout=_TIMEOUT_S)
+        if not done:
+            # Do not let asyncio.run teardown cancel startup and earn a pass.
+            print("STARTUP_EVENTS=" + json.dumps(events), flush=True)
+            os._exit(4)
+        await task
+        if shutdown != "callback_return":
+            assert not state.server.started
         with pytest.raises(httpx.ConnectError):
-            await _health(url)
+            await _health(f"http://127.0.0.1:{port}")
 
-    assert events == ["start:aborting", "engine_shutdown", "stop:aborting"]
+
+def _check_pending_start(shutdown: str) -> None:
+    code = (
+        "import runpy, uvloop; "
+        f"scope = runpy.run_path({__file__!r}); "
+        f"uvloop.run(scope['_serve_pending_start']({shutdown!r}))"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        timeout=6 * _TIMEOUT_S,
+    )
+    output = result.stdout + result.stderr
+    # Uvicorn versions either return or raise SystemExit(3) on startup failure.
+    assert result.returncode in (0, 3), output
+    recorded = [
+        json.loads(line.removeprefix("STARTUP_EVENTS="))
+        for line in result.stdout.splitlines()
+        if line.startswith("STARTUP_EVENTS=")
+    ]
+    assert len(recorded) == 1, output
+    expected = ["start:A", "start:B"]
+    if shutdown == "callback_failure":
+        assert [
+            event for event in recorded[0] if event != "engine_shutdown"
+        ] == expected + [
+            "stop:A",
+            "native_shutdown",
+            "external_engine_context_exit",
+        ], output
+        return
+    if shutdown in ("callback", "sigterm", "callback_return"):
+        expected.append("engine_shutdown")
+    if shutdown in ("callback", "sigterm", "watchdog"):
+        expected.append("partial_cleanup:B")
+    if shutdown == "callback_return":
+        expected.append("stop:B")
+    expected += ["stop:A", "native_shutdown", "external_engine_context_exit"]
+    assert recorded[0] == expected, output
+
+
+@pytest.mark.parametrize(
+    "shutdown",
+    ["callback", "sigterm", "failure", "callback_return", "callback_failure"],
+)
+def test_request_shutdown_during_start_stops_exactly_once(shutdown: str):
+    """Real serve_http cancels pending startup and rolls back before exiting."""
+    _check_pending_start(shutdown)
 
 
 @pytest.mark.asyncio
@@ -767,46 +918,9 @@ async def test_watchdog_exit_stops_plugins_without_engine_shutdown(
     assert events == ["start:plugin", "stop:plugin"]
 
 
-@pytest.mark.asyncio
-async def test_watchdog_during_start_stops_plugins_and_closes_listener(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    """Engine death during startup still reaches HTTP and plugin cleanup."""
-    events: list[str] = []
-    engine = _ServingEngineClient(events)
-    entered = asyncio.Event()
-    release = asyncio.Event()
-
-    class _Starting(DummyAdminEndpointPlugin):
-        name = "plugin"
-
-        async def start(self, state: State) -> None:
-            await super().start(state)
-            entered.set()
-            await release.wait()
-
-    async with _serving(monkeypatch, [_Starting(events)], engine) as (
-        state,
-        serve_task,
-        url,
-    ):
-        try:
-            async with asyncio.timeout(_TIMEOUT_S):
-                await entered.wait()
-            engine.errored = True
-            engine.is_running = False
-            # Repeated watchdog observations must remain one exit request.
-            terminate_if_errored(state.server, engine)
-            terminate_if_errored(state.server, engine)
-            release.set()
-            await _wait_closed(serve_task)
-            with pytest.raises(httpx.ConnectError):
-                await _health(url)
-            assert events == ["start:plugin", "stop:plugin"]
-        finally:
-            release.set()
-            if state.server.started and "stop:plugin" not in events:
-                await state.server.shutdown()
+def test_watchdog_during_start_stops_plugins_and_closes_listener():
+    """Watchdog cancellation settles pending startup and closes the socket."""
+    _check_pending_start("watchdog")
 
 
 @pytest.mark.asyncio

@@ -24,6 +24,7 @@ from vllm.entrypoints.common.startup import (
 )
 from vllm.entrypoints.launchers.utils.ssl import SSLCertRefresher
 from vllm.logger import init_logger
+from vllm.plugins.endpoint_plugins.interface import cancel_endpoint_plugin_startup
 from vllm.tracing import instrument
 from vllm.utils.network_utils import find_process_using_port, is_valid_ipv6_address
 from vllm.utils.system_utils import set_ulimit
@@ -76,6 +77,8 @@ class NoSignalServer(uvicorn.Server):
             self.should_exit = True
         else:
             self._exit_after_startup = True
+            if (state := getattr(self.config.app, "state", None)) is not None:
+                cancel_endpoint_plugin_startup(state)
 
     @contextlib.contextmanager
     def capture_signals(self) -> Generator[None, None, None]:
@@ -251,6 +254,7 @@ async def serve_http(
     config.load()
     server = NoSignalServer(config, peer_loads=peer_loads)
     app.state.server = server
+    app_state = app.state
 
     loop = asyncio.get_running_loop()
 
@@ -304,6 +308,7 @@ async def serve_http(
             )
             logger.info_once("[shutdown] API server: engine client stopped")
 
+        cancel_endpoint_plugin_startup(app_state)
         # Finish binding before requesting exit: older Uvicorn otherwise skips
         # shutdown, and cancelling create_server can orphan its listener.
         await server.startup_complete.wait()
