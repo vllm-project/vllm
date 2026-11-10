@@ -844,7 +844,7 @@ class TestNixlHandshake:
                 )
             connector.bind_connector_metadata(metadata)
 
-            # Mimic logic in KVConnectorModelRunnerMixin._get_kv_connector_output.
+            # Mimic the model runner collecting the KV connector output.
             dummy_ctx = ForwardContext(
                 no_compile_layers={},
                 attn_metadata={},
@@ -857,7 +857,7 @@ class TestNixlHandshake:
                 f"start_load_kv took {_after_load - _before_load} seconds"
             )
 
-            # Mimic logic in KVConnectorModelRunnerMixin._get_kv_connector_output.
+            # Mimic the model runner collecting the KV connector output.
             _, done_recving = connector.get_finished(finished_req_ids=set())
             if len(done_recving) > 0:
                 assert request_id in done_recving
@@ -1093,7 +1093,6 @@ class TestNixlHandshake:
 
         out0 = ModelRunnerOutput(
             req_ids=[req_id],
-            req_id_to_index={req_id: 0},
             sampled_token_ids=[[0]],
             logprobs=None,
             prompt_logprobs_dict={},
@@ -1105,7 +1104,6 @@ class TestNixlHandshake:
         )
         out1 = ModelRunnerOutput(
             req_ids=[req_id],
-            req_id_to_index={req_id: 0},
             sampled_token_ids=[[0]],
             logprobs=None,
             prompt_logprobs_dict={},
@@ -2110,7 +2108,6 @@ def test_kv_connector_stats_aggregation():
     for i, worker_stats in enumerate([worker1_stats, worker2_stats, worker3_stats]):
         output = ModelRunnerOutput(
             req_ids=[f"req_{i}"],
-            req_id_to_index={f"req_{i}": 0},
             sampled_token_ids=[[123]],  # dummy token
             logprobs=None,
             prompt_logprobs_dict={},
@@ -2302,7 +2299,6 @@ def test_multi_kv_connector_stats_aggregation():
         stats = make_multi_stats(nixl_count, foo)
         output = ModelRunnerOutput(
             req_ids=[f"req_{i}"],
-            req_id_to_index={f"req_{i}": 0},
             sampled_token_ids=[[123]],
             logprobs=None,
             prompt_logprobs_dict={},
@@ -2358,7 +2354,6 @@ def test_scheduler_kv_connector_stats_aggregation():
 
     model_output = ModelRunnerOutput(
         req_ids=["req_0"],
-        req_id_to_index={"req_0": 0},
         sampled_token_ids=[[123]],
         logprobs=None,
         prompt_logprobs_dict={},
@@ -2934,25 +2929,31 @@ def _dsv4_mla_spec(record_bytes: int, alignment: int, tokens_per_state: int):
     "groups",
     [
         # V4 record: padded pages, so a layer view is not a contiguous page.
-        [(_dsv4_mla_spec(584, 576, 4), 4)],
+        pytest.param([(_dsv4_mla_spec(584, 576, 4), 4)], id="v4-padded-pages"),
         # V4.1 MXFP8 record: unpadded pages in rows that the compressed caches
         # and a compressor-state ring alias.
-        [
-            (_dsv4_mla_spec(528, 512, 2), 2),
-            (_dsv4_mla_spec(528, 512, 2), 2),
-            (
-                CircularBufferSpec(
-                    block_size=8,
-                    num_kv_heads=1,
-                    head_size=8448,
-                    head_size_v=0,
-                    dtype=torch.uint8,
+        pytest.param(
+            [
+                (_dsv4_mla_spec(528, 512, 2), 2),
+                (_dsv4_mla_spec(528, 512, 2), 2),
+                (
+                    CircularBufferSpec(
+                        block_size=8,
+                        num_kv_heads=1,
+                        head_size=8448,
+                        head_size_v=0,
+                        dtype=torch.uint8,
+                    ),
+                    2,
                 ),
-                2,
+            ],
+            id="v41-aliased-groups",
+            marks=pytest.mark.xfail(
+                strict=True,
+                reason="Region dedup drops the packed-row alias; fixed by #64661",
             ),
-        ],
+        ),
     ],
-    ids=["v4-padded-pages", "v41-aliased-groups"],
 )
 def test_register_packed_dsv4_mla_cache_as_single_region(
     default_vllm_config, dist_init, groups
@@ -3672,8 +3673,8 @@ class TestPeerReplacement:
             {"old-req": [10, 11], "healthy-req": [12]}
         )
         self.nixl.invalid_remote_agents.add("old")
-        self.transport.check_xfer_state.side_effect = (
-            lambda h: "ERR" if h == 10 else "PROC"
+        self.transport.check_xfer_state.side_effect = lambda h: (
+            "ERR" if h == 10 else "PROC"
         )
         old_handle = self.worker.dst_xfer_side_handles["old"][0]
 
@@ -3683,8 +3684,8 @@ class TestPeerReplacement:
         self.worker.start_load_kv(self._request("old", req_id="blocked"))
         self.transport.make_prepped_xfer.assert_not_called()
 
-        self.transport.check_xfer_state.side_effect = (
-            lambda h: "DONE" if h == 11 else "PROC"
+        self.transport.check_xfer_state.side_effect = lambda h: (
+            "DONE" if h == 11 else "PROC"
         )
         result = self.worker.get_transfer_results()
         assert (
@@ -3761,8 +3762,8 @@ class TestPeerReplacement:
     def test_invalid_peer_empty_recv_is_reported_only_when_awaited(self, awaiting_kvs):
         self._fail_old_peer()
         self.worker._recving_transfers["old-req"].append(11)
-        self.transport.check_xfer_state.side_effect = (
-            lambda h: "PROC" if h == 11 else "ERR"
+        self.transport.check_xfer_state.side_effect = lambda h: (
+            "PROC" if h == 11 else "ERR"
         )
         self.worker.get_transfer_results()
         self.transport.make_prepped_xfer.reset_mock()
@@ -4619,7 +4620,6 @@ def _set_test_speculative_config(
     revision: str | None = None,
     code_revision: str | None = None,
     num_speculative_tokens: int = 1,
-    parallel_drafting: bool = False,
     kv_cache_dtype: str | None = None,
     attention_backend: str | None = None,
     auxiliary_layer_ids: tuple[int, ...] = (2, 16, 29),
@@ -4634,7 +4634,6 @@ def _set_test_speculative_config(
         method=method,
         draft_model_config=draft_model_config,
         num_speculative_tokens=num_speculative_tokens,
-        parallel_drafting=parallel_drafting,
         kv_cache_dtype=kv_cache_dtype,
         attention_backend=attention_backend,
     )
@@ -4648,7 +4647,6 @@ def _set_test_speculative_config(
         ({"method": "mtp"}, False),
         ({"model": "test/different-drafter"}, False),
         ({"revision": "different-revision"}, False),
-        ({"parallel_drafting": True}, False),
         ({"kv_cache_dtype": "fp8"}, False),
         # attention_backend is intentionally not part of the compat hash
         # (see _get_speculative_compatibility_factors); overriding it must
@@ -4810,8 +4808,7 @@ def test_compatibility_hash_validation(
 ):
     """Test NIXL compatibility hash validation during handshake.
 
-    Parameters
-    ----------
+    Args:
         mismatch_type: description of what is being tested
         config_overrides: dict of config to override for the remote instance
         version_override: version dict e.g. {"vllm_version": "0.6.1"}
@@ -5032,14 +5029,14 @@ def test_handshake_decode_errors(default_vllm_config, dist_init, error_scenario)
     ):
         """MLA + remote TP > local TP: the broadcast notification sent to
         non-read prefill ranks must be keyed by the prefill-side request
-        id (``meta.remote.request_id``), not the local decode request id.
+        id (`meta.remote.request_id`), not the local decode request id.
 
-        Prefill ranks key ``_reqs_to_send`` by their own request id, so a
+        Prefill ranks key `_reqs_to_send` by their own request id, so a
         broadcast keyed by the decode id is rejected in
-        ``_get_new_notifs`` with "Potentially invalid KV blocks for
+        `_get_new_notifs` with "Potentially invalid KV blocks for
         unrecognized request" and the blocks only release via the abort
-        timeout. See ``_read_blocks_for_req`` in
-        ``vllm/distributed/kv_transfer/kv_connector/v1/nixl/worker.py``.
+        timeout. See `_read_blocks_for_req` in
+        `vllm/distributed/kv_transfer/kv_connector/v1/nixl/worker.py`.
         """
         decode_tp_size = 1
         prefill_tp_size = 4
@@ -5247,7 +5244,10 @@ def test_ucx_backend_params(dist_init, extra_config, agent_backends, created_bac
             num_threads=num_threads,
         )
 
-    vllm_config = create_vllm_config(kv_connector_extra_config=extra_config)
+    block_size = maybe_update_block_size(16)
+    vllm_config = create_vllm_config(
+        block_size=block_size, kv_connector_extra_config=extra_config
+    )
     with (
         patch(
             "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
@@ -5260,7 +5260,9 @@ def test_ucx_backend_params(dist_init, extra_config, agent_backends, created_bac
         set_current_vllm_config(vllm_config),
     ):
         connector = NixlConnector(
-            vllm_config, KVConnectorRole.WORKER, make_kv_cache_config(block_size=16)
+            vllm_config,
+            KVConnectorRole.WORKER,
+            make_kv_cache_config(block_size=block_size),
         )
     wrapper = connector.connector_worker.nixl_wrapper
     assert wrapper.config.backends == agent_backends

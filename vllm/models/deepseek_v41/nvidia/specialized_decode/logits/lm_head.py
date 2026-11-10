@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Low-batch LM head: FlashInfer's CuTe DSL ``mm_bf16`` (split-K) for up to
-``LM_HEAD_MAX_ROWS`` rows.
+"""Low-batch LM head: FlashInfer's CuTe DSL `mm_bf16` (split-K) for up to
+`LM_HEAD_MAX_ROWS` rows.
 
-``SpecializedDecodeLogitsProcessor`` projects through it, so a model that shares the
+`SpecializedDecodeLogitsProcessor` projects through it, so a model that shares the
 head module but not the processor keeps the default GEMM. The runner computes
 logits outside the CUDA graph, and the GEMM has no cross-rank state, so the
 gate is the row count alone.
@@ -30,8 +30,8 @@ LM_HEAD_MAX_ROWS = 16
 
 
 def low_batch_lm_head_applies(lm_head: nn.Module, x: torch.Tensor) -> bool:
-    """Whether ``low_batch_lm_head`` takes ``x``: an unquantized BF16 head
-    and 1 to ``LM_HEAD_MAX_ROWS`` rows."""
+    """Whether `low_batch_lm_head` takes `x`: an unquantized BF16 head
+    and 1 to `LM_HEAD_MAX_ROWS` rows."""
     return (
         isinstance(lm_head, ParallelLMHead)
         and type(lm_head.quant_method) is UnquantizedEmbeddingMethod
@@ -54,7 +54,7 @@ def _zeros(head: ParallelLMHead, rows: int) -> torch.Tensor:
 
 
 def _heads(model: nn.Module) -> list[ParallelLMHead]:
-    """The LM heads of ``model`` that the GEMM takes."""
+    """The LM heads of `model` that the GEMM takes."""
     heads = []
     for head in model.modules():
         if not isinstance(head, ParallelLMHead):

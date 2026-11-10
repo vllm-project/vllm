@@ -2,14 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """BF16 x MXFP4 (A16W4) MFMA operands over AITER's post-load layouts.
 
-Weights are ``shuffle_weight(layout=(16, 16))`` fp4x2 ``[E, N, K / 2]``: a
-16-row group's 128-wide K step is 1 KiB, and lane ``l``'s 16 bytes hold row
-``l % 16``, K ``32 (l / 16) ..`` -- one E8M0 group. Scales are
-``e8m0_shuffle`` ``[E N, K / 32]``; lane ``l``'s dword at
-``(r32 C8 + st / 2) 64 + l`` holds its row's codes of steps ``st`` (even, odd)
+Weights are `shuffle_weight(layout=(16, 16))` fp4x2 `[E, N, K / 2]`: a
+16-row group's 128-wide K step is 1 KiB, and lane `l`'s 16 bytes hold row
+`l % 16`, K `32 (l / 16) ..` -- one E8M0 group. Scales are
+`e8m0_shuffle` `[E N, K / 32]`; lane `l`'s dword at
+`(r32 C8 + st / 2) 64 + l` holds its row's codes of steps `st` (even, odd)
 for both 16-row halves of the 32-row block. A dequantized dword is one
-``16x16x32`` BF16 MFMA A operand; the B operand is the same 8 K values of the
-lane's token (column ``l % 16``).
+`16x16x32` BF16 MFMA A operand; the B operand is the same 8 K values of the
+lane's token (column `l % 16`).
 """
 
 import flydsl.expr as fx
@@ -24,8 +24,8 @@ STEP_DWORDS = 256  # a 16-row group's dwords per step
 
 
 def weight_loads(w, row_group, k, st0, steps, cm=CM_NT):
-    """Lane's 16-byte weight words of 16-row group ``row_group`` (counted over
-    the flattened ``[E N]`` rows) for steps ``st0 ..``; loads only."""
+    """Lane's 16-byte weight words of 16-row group `row_group` (counted over
+    the flattened `[E N]` rows) for steps `st0 ..`; loads only."""
     lane = fx.thread_idx.x % 64
     base = row_group * (2 * k) + lane * 4
     return [
@@ -43,7 +43,7 @@ def weight_loads(w, row_group, k, st0, steps, cm=CM_NT):
 
 
 def scale_loads(ws, row_group, k, st0, steps, cm=CM_NT):
-    """Lane's scale dwords for steps ``st0 .. st0 + steps`` (st0, steps even)."""
+    """Lane's scale dwords for steps `st0 .. st0 + steps` (st0, steps even)."""
     lane = fx.thread_idx.x % 64
     c8 = k // 256
     base = row_group // 2 * c8 * 64 + lane
@@ -62,7 +62,7 @@ def scale_loads(ws, row_group, k, st0, steps, cm=CM_NT):
 
 
 def scale_f32(words, row_group, st):
-    """The lane's E8M0 scale of step ``st`` (relative to the first loaded
+    """The lane's E8M0 scale of step `st` (relative to the first loaded
     word) as an f32 power of two."""
     byte = (st % 2) * 2 + row_group % 2
     word = words[st // 2]
@@ -83,8 +83,8 @@ def dequant(word, scale):
 
 
 def step_mfma(acc, wv, scale, xs):
-    """``acc`` += one step: weight words ``wv`` (scale ``scale``) times the
-    lane's four B operands ``xs`` (vector<4xi32> each)."""
+    """`acc` += one step: weight words `wv` (scale `scale`) times the
+    lane's four B operands `xs` (vector<4xi32> each)."""
     for d in range_constexpr(4):
         a = dequant(fx.Int32(wv[d]), scale).bitcast(fx.BFloat16)
         acc = mfma_bf16(a, xs[d].bitcast(fx.BFloat16), acc)
