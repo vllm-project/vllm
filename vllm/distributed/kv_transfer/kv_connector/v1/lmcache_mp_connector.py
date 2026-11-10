@@ -11,7 +11,8 @@ import zmq
 from lmcache.integration.vllm.utils import mla_enabled
 from lmcache.utils import init_logger as lmcache_init_logger
 
-from vllm.config import VllmConfig
+from vllm.config import KVTransferConfig, VllmConfig
+from vllm.config.kv_transfer import KVCacheAccess
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorMetadata,
@@ -468,6 +469,11 @@ class LMCacheMPConnectorUpstream(KVConnectorBase_V1):
     - lmcache.mp.heartbeat_interval: interval (seconds) between server
       heartbeat pings.
     """
+
+    @classmethod
+    def kv_cache_access(cls, kv_transfer_config: KVTransferConfig) -> KVCacheAccess:
+        # Shares the KV cache with the LMCache server via cudaIpcGetMemHandle.
+        return KVCacheAccess.LEGACY_IPC
 
     def __init__(
         self,

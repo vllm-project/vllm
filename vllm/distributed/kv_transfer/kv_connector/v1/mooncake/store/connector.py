@@ -20,6 +20,7 @@ from typing import Any
 import torch
 
 from vllm.config import KVTransferConfig, VllmConfig
+from vllm.config.kv_transfer import KVCacheAccess
 from vllm.distributed.kv_events import (
     BlockStored,
     KVCacheEvent,
@@ -128,6 +129,11 @@ class MooncakeStoreKVEvents(KVConnectorKVEvents):
 
 class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
     """KV connector using MooncakeDistributedStore as shared KV pool."""
+
+    @classmethod
+    def kv_cache_access(cls, kv_transfer_config: KVTransferConfig) -> KVCacheAccess:
+        # Registers the device KV cache with an RDMA engine.
+        return KVCacheAccess.REGISTERS
 
     @classmethod
     def supports_lookahead_block_hashes(
