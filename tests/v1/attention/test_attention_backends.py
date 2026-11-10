@@ -26,6 +26,7 @@ from vllm.config import (
     set_current_vllm_config,
 )
 from vllm.platforms import current_platform
+from vllm.platforms.interface import DeviceCapability
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import (
     STR_DTYPE_TO_TORCH_DTYPE,
@@ -346,9 +347,14 @@ def run_attention_backend(
                 for layer_name in layer_names
             }
 
-        with unittest.mock.patch(
-            "vllm.v1.attention.backends.flashinfer.get_per_layer_parameters",
-            mock_get_per_layer_parameters,
+        # Builder init reads the active config (e.g. trtllm attention
+        # resolution for FP8 KV decode), so set it before constructing.
+        with (
+            unittest.mock.patch(
+                "vllm.v1.attention.backends.flashinfer.get_per_layer_parameters",
+                mock_get_per_layer_parameters,
+            ),
+            set_current_vllm_config(vllm_config),
         ):
             builder = builder_cls(kv_cache_spec, layer_names, vllm_config, device)
             attn_metadata = builder.build(
@@ -1059,6 +1065,7 @@ def test_flashinfer_xqa_single_token_decode_preserves_cudagraph_padding(monkeypa
     impl.bmm2_scale = None
     impl.kv_cache_dtype = "auto"
     impl.is_kvcache_nvfp4 = False
+    impl.uses_separate_kv_planes = False
     impl.head_size = 16
     impl.dcp_world_size = 1
     impl.o_sf_scale = None
@@ -2303,3 +2310,386 @@ def test_non_causal_backend_correctness(
             causal=False,
             block_size=128,
         )
+
+
+# ---------------------------------------------------------------------------
+# SM120 PRIMS FP8 prefill (FlashInfer PR #4714) sub-backend contract tests.
+# ---------------------------------------------------------------------------
+
+_PRIMS_ENV = "VLLM_FLASHINFER_PREFILL_BACKEND"
+
+
+def _prims_platform_stub(capability: tuple[int, int]):
+    class _FakePlatform:
+        @staticmethod
+        def get_device_capability():
+            return DeviceCapability(*capability)
+
+        @staticmethod
+        def is_device_capability(value: int):
+            return value == capability[0] * 10 + capability[1]
+
+        @staticmethod
+        def is_device_capability_family(value: int):
+            return capability[0] * 100 == value
+
+    return _FakePlatform()
+
+
+def _prims_metadata_builder(**overrides):
+    """Builder stub exposing only what PRIMS contract checks read."""
+    from vllm.v1.attention.backends import flashinfer as flashinfer_backend
+
+    builder = object.__new__(flashinfer_backend.FlashInferMetadataBuilder)
+    attention_config = SimpleNamespace(disable_flashinfer_q_quantization=False)
+    defaults = dict(
+        flashinfer_prefill_backend="cute-dsl-prims",
+        cache_dtype="fp8_e4m3",
+        vllm_config=SimpleNamespace(attention_config=attention_config),
+        attention_config=attention_config,
+        model_config=SimpleNamespace(dtype=torch.bfloat16),
+        head_dim=256,
+        num_kv_heads=4,
+        num_qo_heads=24,
+        use_dcp=False,
+        has_sinks=False,
+        window_left=-1,
+        logits_soft_cap=None,
+    )
+    for name, value in {**defaults, **overrides}.items():
+        setattr(builder, name, value)
+    return builder
+
+
+def _flashinfer_prims_hardware_ready() -> bool:
+    if not current_platform.is_cuda():
+        return False
+    capability = current_platform.get_device_capability()
+    if capability is None or (capability.major, capability.minor) != (12, 0):
+        return False
+    try:
+        from flashinfer.attention.cute_dsl.sm120_fmha import (  # noqa: F401
+            SM120PrimsBatchPrefillBackend,
+        )
+    except Exception:
+        return False
+    return True
+
+
+def test_flashinfer_prims_env_defaults_and_choices(monkeypatch):
+    import vllm.envs as envs
+
+    monkeypatch.delenv(_PRIMS_ENV, raising=False)
+    assert envs.VLLM_FLASHINFER_PREFILL_BACKEND == "auto"
+    monkeypatch.setenv(_PRIMS_ENV, "cute-dsl-prims")
+    assert envs.VLLM_FLASHINFER_PREFILL_BACKEND == "cute-dsl-prims"
+    monkeypatch.setenv(_PRIMS_ENV, "fa3")
+    with pytest.raises(ValueError):
+        _ = envs.VLLM_FLASHINFER_PREFILL_BACKEND
+
+
+@pytest.mark.skipif(
+    AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST,
+    reason="FlashInfer is not available.",
+)
+@pytest.mark.parametrize(
+    ("backend", "expected_prefill_q"),
+    [
+        pytest.param("cute-dsl-prims", torch.float8_e4m3fn, id="prims-prefill-fp8"),
+        pytest.param("auto", torch.bfloat16, id="auto-keeps-model-dtype"),
+    ],
+)
+def test_flashinfer_prims_q_dtype_is_prefill_only(
+    monkeypatch, backend, expected_prefill_q
+):
+    """PRIMS promotes only prefill Q to FP8; decode keeps the model dtype."""
+    from vllm.v1.attention.backends import flashinfer as flashinfer_backend
+
+    platform = _prims_platform_stub((12, 0))
+    monkeypatch.setattr(flashinfer_backend, "current_platform", platform)
+    monkeypatch.setattr(flashinfer_backend, "force_use_trtllm_attention", lambda: None)
+    builder = _prims_metadata_builder(flashinfer_prefill_backend=backend)
+    assert builder.get_q_data_type(is_prefill=True) == expected_prefill_q
+    assert builder.get_q_data_type(is_prefill=False) == torch.bfloat16
+
+
+@pytest.mark.skipif(
+    AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST,
+    reason="FlashInfer is not available.",
+)
+def test_flashinfer_prims_validation_passes_on_supported_contract(monkeypatch):
+    from vllm.v1.attention.backends import flashinfer as flashinfer_backend
+
+    platform = _prims_platform_stub((12, 0))
+    monkeypatch.setattr(flashinfer_backend, "current_platform", platform)
+    _prims_metadata_builder()._validate_flashinfer_prefill_backend()
+
+
+@pytest.mark.skipif(
+    AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST,
+    reason="FlashInfer is not available.",
+)
+def test_flashinfer_prims_validation_is_noop_in_auto(monkeypatch):
+    """Default auto must not validate (or reject) anything."""
+    from vllm.v1.attention.backends import flashinfer as flashinfer_backend
+
+    platform = _prims_platform_stub((9, 0))
+    monkeypatch.setattr(flashinfer_backend, "current_platform", platform)
+    builder = _prims_metadata_builder(
+        flashinfer_prefill_backend="auto", cache_dtype="auto", head_dim=1
+    )
+    builder._validate_flashinfer_prefill_backend()
+
+
+@pytest.mark.skipif(
+    AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST,
+    reason="FlashInfer is not available.",
+)
+@pytest.mark.parametrize(
+    ("overrides", "match"),
+    [
+        pytest.param(dict(arch=(10, 0)), "requires an SM120 GPU", id="arch"),
+        pytest.param(dict(cache_dtype="auto"), "kv-cache-dtype fp8", id="kv-dtype"),
+        pytest.param(
+            dict(
+                attention_config=SimpleNamespace(disable_flashinfer_q_quantization=True),
+                vllm_config=SimpleNamespace(
+                    attention_config=SimpleNamespace(disable_flashinfer_q_quantization=True)
+                ),
+            ),
+            "requires FP8",
+            id="q-quant-disabled",
+        ),
+        pytest.param(
+            dict(model_config=SimpleNamespace(dtype=torch.float32)),
+            "float16 or bfloat16",
+            id="model-dtype",
+        ),
+        pytest.param(dict(head_dim=96), "head size in", id="head-dim"),
+        pytest.param(dict(num_qo_heads=23), "divisible", id="gqa"),
+        pytest.param(dict(use_dcp=True), "decode-context parallel", id="dcp"),
+        pytest.param(dict(has_sinks=True), "attention sinks", id="sinks"),
+        pytest.param(dict(window_left=0), "sliding-window", id="sliding-window"),
+        pytest.param(dict(logits_soft_cap=50.0), "soft cap", id="soft-cap"),
+    ],
+)
+def test_flashinfer_prims_validation_fails_closed(monkeypatch, overrides, match):
+    from vllm.v1.attention.backends import flashinfer as flashinfer_backend
+
+    arch = overrides.pop("arch", (12, 0))
+    platform = _prims_platform_stub(arch)
+    monkeypatch.setattr(flashinfer_backend, "current_platform", platform)
+    builder = _prims_metadata_builder(**overrides)
+    with pytest.raises((ValueError, NotImplementedError), match=match):
+        builder._validate_flashinfer_prefill_backend()
+
+
+def test_flashinfer_prims_validation_rejects_batch_invariant(monkeypatch):
+    from vllm.v1.attention.backends import flashinfer as flashinfer_backend
+
+    platform = _prims_platform_stub((12, 0))
+    monkeypatch.setattr(flashinfer_backend, "current_platform", platform)
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    with pytest.raises(NotImplementedError, match="VLLM_BATCH_INVARIANT"):
+        _prims_metadata_builder()._validate_flashinfer_prefill_backend()
+
+
+@pytest.mark.skipif(
+    AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST,
+    reason="FlashInfer is not available.",
+)
+@pytest.mark.parametrize(
+    ("kv_quant_mode", "env", "arch", "splits"),
+    [
+        pytest.param(KVQuantMode.FP8_PER_TENSOR, "cute-dsl-prims", (12, 0), True, id="prims"),
+        pytest.param(KVQuantMode.FP8_PER_TENSOR, "auto", (12, 0), False, id="auto"),
+        pytest.param(KVQuantMode.NONE, "cute-dsl-prims", (12, 0), False, id="unquantized"),
+        pytest.param(KVQuantMode.FP8_PER_TENSOR, "cute-dsl-prims", (10, 0), False, id="sm100"),
+    ],
+)
+def test_flashinfer_prims_customize_spec_splits_fp8_planes(
+    monkeypatch, kv_quant_mode, env, arch, splits
+):
+    from vllm.utils.torch_utils import get_dtype_size
+    from vllm.v1.attention.backends import flashinfer as flashinfer_backend
+
+    platform = _prims_platform_stub(arch)
+    monkeypatch.setenv(_PRIMS_ENV, env)
+    monkeypatch.setattr(flashinfer_backend, "current_platform", platform)
+    spec = FullAttentionSpec(
+        block_size=1600,
+        num_kv_heads=4,
+        head_size=256,
+        dtype=torch.float8_e4m3fn,
+        kv_quant_mode=kv_quant_mode,
+    )
+    out = flashinfer_backend.FlashInferBackend.customize_spec(spec)
+    if splits:
+        assert out.num_head_slots == 2 * spec.num_kv_heads
+        assert out.state_content_bytes == 256 * get_dtype_size(torch.float8_e4m3fn)
+    else:
+        assert out is spec
+
+
+@pytest.mark.skipif(
+    AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST,
+    reason="FlashInfer is not available.",
+)
+@pytest.mark.parametrize(
+    ("env", "expected"),
+    [
+        pytest.param("cute-dsl-prims", (KVCacheLayout.LBHNC, KVCacheLayout.BLHNC), id="prims"),
+        pytest.param("auto", None, id="auto"),
+    ],
+)
+def test_flashinfer_prims_supported_kv_cache_layouts(monkeypatch, env, expected):
+    from vllm.v1.attention.backends import flashinfer as flashinfer_backend
+
+    platform = _prims_platform_stub((12, 0))
+    monkeypatch.setenv(_PRIMS_ENV, env)
+    monkeypatch.setattr(flashinfer_backend, "current_platform", platform)
+    assert flashinfer_backend.FlashInferBackend.supported_kv_cache_layouts() == expected
+
+
+def test_flashinfer_prims_prefill_correctness():
+    """PRIMS full prefill over its split FP8 planes matches SDPA on the
+    exact FP8 values it stored, isolating kernel error from quantization.
+
+    Opt-in: requires an SM120 GPU, FlashInfer PR #4714, and
+    VLLM_FLASHINFER_PREFILL_BACKEND=cute-dsl-prims in the environment.
+    """
+    import os
+    import unittest.mock
+
+    if AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST:
+        pytest.skip("FlashInfer is not installed")
+    if os.environ.get(_PRIMS_ENV) != "cute-dsl-prims":
+        pytest.skip(f"Set {_PRIMS_ENV}=cute-dsl-prims to exercise PRIMS")
+    if not _flashinfer_prims_hardware_ready():
+        pytest.skip("PRIMS prefill requires SM120 with FlashInfer PR #4714")
+
+    from vllm.v1.attention.backends import flashinfer as fi
+
+    seq_lens = [40, 300, 1027]
+    bs, d, num_qo_heads, num_kv_heads = 32, 256, 24, 4
+    config = create_vllm_config(
+        model_name="Qwen/Qwen3-0.6B",
+        max_model_len=max(seq_lens),
+        block_size=bs,
+    )
+    # GQA 24/4 at head_dim 256, as Qwen3.8-27B; PRIMS contract shape.
+    config.model_config.model_arch_config = replace(
+        config.model_config.model_arch_config,
+        total_num_attention_heads=num_qo_heads,
+        total_num_kv_heads=num_kv_heads,
+        head_size=d,
+    )
+    config.cache_config.cache_dtype = "fp8_e4m3"
+    # The planes cache above is physically head-major, as PRIMS requires.
+    config.cache_config.kv_cache_layout = KVCacheLayout.LBHNC.name
+    device = torch.device(f"{DEVICE_TYPE}:0")
+
+    # Request i owns consecutive pages from starts[i]; page 0 stays null.
+    pages = [0] + [cdiv(s, bs) for s in seq_lens[:-1]]
+    starts = 1 + torch.tensor(pages).cumsum(0)
+    max_pages = cdiv(max(seq_lens), bs)
+    block_table = (starts[:, None] + torch.arange(max_pages)).int().to(device)
+
+    spec = fi.FlashInferBackend.customize_spec(
+        FullAttentionSpec(
+            block_size=bs,
+            num_kv_heads=num_kv_heads,
+            head_size=d,
+            dtype=torch.float8_e4m3fn,
+            kv_quant_mode=KVQuantMode.FP8_PER_TENSOR,
+        )
+    )
+    assert spec.num_head_slots == 2 * num_kv_heads
+    assert spec.state_content_bytes == d
+
+    # Physical HND: per block, compact [2H, page, D] planes.
+    kv_cache = torch.zeros(
+        int(starts[-1]) + max_pages,
+        2 * num_kv_heads,
+        bs,
+        d,
+        dtype=torch.float8_e4m3fn,
+        device=device,
+    )
+
+    torch.manual_seed(0)
+    total = sum(seq_lens)
+    q, k, v = (
+        torch.randn(total, h, d).bfloat16().to(device)
+        for h in (num_qo_heads, num_kv_heads, num_kv_heads)
+    )
+
+    req = torch.repeat_interleave(
+        torch.arange(len(seq_lens)), torch.tensor(seq_lens)
+    )
+    pos = torch.cat([torch.arange(s) for s in seq_lens])
+    metadata = replace(
+        create_common_attn_metadata(BatchSpec(seq_lens, seq_lens), bs, device),
+        block_table_tensor=block_table,
+        slot_mapping=(starts[req] * bs + pos).to(device),
+    )
+
+    class _WrapperSpy(fi.BatchPrefillWithPagedKVCacheWrapper):
+        seen_backends: list[str | None] = []
+
+        def __init__(self, *args, **kwargs):
+            _WrapperSpy.seen_backends.append(kwargs.get("backend"))
+            super().__init__(*args, **kwargs)
+
+    with unittest.mock.patch.object(
+        fi, "BatchPrefillWithPagedKVCacheWrapper", _WrapperSpy
+    ):
+        with set_current_vllm_config(config):
+            output = run_attention_backend(
+                AttentionBackendEnum.FLASHINFER,
+                spec,
+                ["placeholder"],
+                config,
+                device,
+                metadata,
+                q,
+                k,
+                v,
+                kv_cache,
+                kv_cache_dtype="fp8_e4m3",
+            )
+    assert _WrapperSpy.seen_backends
+    assert all(b == "cute-dsl-prims" for b in _WrapperSpy.seen_backends)
+
+    # Reference over the exact FP8 values stored, in fp32. FP8 FMHA
+    # quantizes attention probabilities for the PV matmul; atol/rtol 0.2
+    # is the accuracy bar flashinfer's own PRIMS prefill test upholds.
+    q_all = q.to(torch.float8_e4m3fn).to(torch.float32)
+    token_planes = kv_cache[
+        block_table[req.to(device), (pos // bs).to(device)]
+    ]
+    flat = token_planes[
+        torch.arange(total, device=device), :, (pos % bs).to(device)
+    ].to(torch.float32)
+    kv_of_q = torch.arange(num_qo_heads, device=device) // (
+        num_qo_heads // num_kv_heads
+    )
+    bounds = [0, *torch.tensor(seq_lens).cumsum(0).tolist()]
+    outs = []
+    for i, seq_len in enumerate(seq_lens):
+        a, bnd = bounds[i], bounds[i + 1]
+        q_i = q_all[a:bnd].transpose(0, 1)
+        k_i = flat[a:bnd, :num_kv_heads][:, kv_of_q].transpose(0, 1)
+        v_i = flat[a:bnd, num_kv_heads:][:, kv_of_q].transpose(0, 1)
+        scores = torch.matmul(q_i, k_i.transpose(1, 2)) / (d**0.5)
+        scores = scores.masked_fill(
+            ~torch.ones(seq_len, seq_len, device=device).tril().bool()[None],
+            float("-inf"),
+        )
+        outs.append(
+            torch.matmul(scores.softmax(-1), v_i).transpose(0, 1)
+        )
+    reference = torch.cat(outs)
+    torch.testing.assert_close(
+        output.float(), reference, atol=2e-1, rtol=2e-1
+    )

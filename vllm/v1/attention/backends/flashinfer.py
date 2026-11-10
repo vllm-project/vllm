@@ -559,17 +559,36 @@ class FlashInferBackend(AttentionBackend):
     @classmethod
     def customize_spec(cls, spec: "AttentionSpec") -> "AttentionSpec":
         """NVFP4 stores K and V as separate per-head slots of packed fp4 data
-        plus fp8 block scales."""
-        if spec.state_content_bytes is not None or not spec.kv_quant_mode.is_nvfp4:
+        plus fp8 block scales. PRIMS on SM120 splits an FP8 cache into
+        separate K/V head planes as well."""
+        if spec.state_content_bytes is not None:
             return spec
-        hs_k = nvfp4_kv_cache_full_dim(spec.head_size)
-        hs_v = nvfp4_kv_cache_full_dim(spec.head_size_v)
-        assert hs_k == hs_v, "nvfp4 with asymmetric K/V head sizes not yet supported"
-        return replace(
-            spec,
-            num_head_slots=2 * spec.num_kv_heads,
-            state_content_bytes=hs_k * get_dtype_size(spec.dtype),
-        )
+        if spec.kv_quant_mode.is_nvfp4:
+            hs_k = nvfp4_kv_cache_full_dim(spec.head_size)
+            hs_v = nvfp4_kv_cache_full_dim(spec.head_size_v)
+            assert (
+                hs_k == hs_v
+            ), "nvfp4 with asymmetric K/V head sizes not yet supported"
+            return replace(
+                spec,
+                num_head_slots=2 * spec.num_kv_heads,
+                state_content_bytes=hs_k * get_dtype_size(spec.dtype),
+            )
+        if (
+            envs.VLLM_FLASHINFER_PREFILL_BACKEND == "cute-dsl-prims"
+            and spec.kv_quant_mode == KVQuantMode.FP8_PER_TENSOR
+            and spec.head_size == spec.head_size_v
+            and current_platform.is_device_capability(120)
+        ):
+            # PRIMS requires compact head-major K/V planes: one slot per KV
+            # head holding a single plane, so slicing either plane preserves
+            # the token stride D.
+            return replace(
+                spec,
+                num_head_slots=2 * spec.num_kv_heads,
+                state_content_bytes=spec.head_size * get_dtype_size(spec.dtype),
+            )
+        return spec
 
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
@@ -733,6 +752,14 @@ class FlashInferBackend(AttentionBackend):
         if capability is not None and capability.major == 10:
             # The trtllm-gen kernels consume head-major block interiors; the L/B
             # nesting outside the block is immaterial to them.
+            return (KVCacheLayout.LBHNC, KVCacheLayout.BLHNC)
+        if (
+            capability is not None
+            and capability.major == 12
+            and capability.minor == 0
+            and envs.VLLM_FLASHINFER_PREFILL_BACKEND == "cute-dsl-prims"
+        ):
+            # PRIMS reads compact head-major K/V planes on SM120.
             return (KVCacheLayout.LBHNC, KVCacheLayout.BLHNC)
         # FlashInfer addresses a layer's cache as NHD or HND pages, so it cannot
         # consume LHBNC, which puts the head dim outside the block dim.
@@ -947,6 +974,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self.num_kv_heads = self.kv_cache_spec.num_kv_heads
         self.head_dim = self.kv_cache_spec.head_size
         self.page_size = self.kv_cache_spec.block_size
+        self.flashinfer_prefill_backend = envs.VLLM_FLASHINFER_PREFILL_BACKEND
 
         if self.kv_cache_spec.kv_quant_mode != KVQuantMode.NONE:
             self.cache_dtype = self._resolve_cache_dtype()
@@ -1094,6 +1122,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         if self.use_trtllm_dcp_prefill:
             logger.info_once("Using the trtllm-gen context kernel for DCP prefill.")
         self.has_sinks = self.global_hyperparameters.has_sinks
+        self._validate_flashinfer_prefill_backend()
         if self.has_sinks and (self.nvfp4_fa2 or not FlashInferBackend.supports_sink()):
             raise NotImplementedError(
                 "FlashInfer backend currently does not support attention "
@@ -1109,9 +1138,10 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         )
         logger.info_once(
             "FlashInfer resolved query dtypes: prefill=%s, decode=%s, "
-            "decode_backend=%s, kv_cache_dtype=%s, arch=%s",
+            "prefill_backend=%s, decode_backend=%s, kv_cache_dtype=%s, arch=%s",
             self.q_data_type_prefill,
             self.q_data_type_decode,
+            self.flashinfer_prefill_backend,
             decode_backend,
             self.kv_cache_dtype,
             arch,
@@ -1154,6 +1184,72 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
     def kv_cache_layout(self) -> KVCacheLayout:
         return self.cache_config.get_resolved_kv_cache_layout()
 
+    def _validate_flashinfer_prefill_backend(self) -> None:
+        """Validate the explicit FlashInfer prefill sub-backend contract."""
+        if self.flashinfer_prefill_backend == "auto":
+            return
+
+        assert self.flashinfer_prefill_backend == "cute-dsl-prims"
+        capability = current_platform.get_device_capability()
+        if capability is None or (capability.major, capability.minor) != (12, 0):
+            raise ValueError(
+                "VLLM_FLASHINFER_PREFILL_BACKEND=cute-dsl-prims requires an "
+                "SM120 GPU (compute capability 12.0)."
+            )
+        if self.cache_dtype not in ("fp8", "fp8_e4m3"):
+            raise ValueError(
+                "VLLM_FLASHINFER_PREFILL_BACKEND=cute-dsl-prims requires "
+                "--kv-cache-dtype fp8 (E4M3)."
+            )
+        if self.attention_config.disable_flashinfer_q_quantization:
+            raise ValueError(
+                "VLLM_FLASHINFER_PREFILL_BACKEND=cute-dsl-prims requires FP8 "
+                "query quantization; remove "
+                "--attention-config.disable_flashinfer_q_quantization."
+            )
+        if self.model_config.dtype not in (torch.float16, torch.bfloat16):
+            raise ValueError(
+                "VLLM_FLASHINFER_PREFILL_BACKEND=cute-dsl-prims requires "
+                f"float16 or bfloat16 output; got {self.model_config.dtype}."
+            )
+        if self.head_dim not in (32, 64, 128, 256):
+            raise ValueError(
+                "VLLM_FLASHINFER_PREFILL_BACKEND=cute-dsl-prims requires "
+                f"head size in {{32, 64, 128, 256}}; got {self.head_dim}."
+            )
+        if self.num_kv_heads <= 0 or self.num_qo_heads % self.num_kv_heads != 0:
+            raise ValueError(
+                "VLLM_FLASHINFER_PREFILL_BACKEND=cute-dsl-prims requires the "
+                "number of query heads to be divisible by the number of KV "
+                f"heads; got {self.num_qo_heads}/{self.num_kv_heads}."
+            )
+        if self.use_dcp:
+            raise NotImplementedError(
+                "VLLM_FLASHINFER_PREFILL_BACKEND=cute-dsl-prims is not yet "
+                "wired for decode-context parallel prefill in vLLM."
+            )
+        if envs.VLLM_BATCH_INVARIANT:
+            raise NotImplementedError(
+                "VLLM_FLASHINFER_PREFILL_BACKEND=cute-dsl-prims does not "
+                "support VLLM_BATCH_INVARIANT because fixed split-K planning "
+                "is outside the PR #4714 kernel contract."
+            )
+        if self.has_sinks:
+            raise NotImplementedError(
+                "VLLM_FLASHINFER_PREFILL_BACKEND=cute-dsl-prims does not "
+                "support attention sinks."
+            )
+        if self.window_left != -1:
+            raise NotImplementedError(
+                "VLLM_FLASHINFER_PREFILL_BACKEND=cute-dsl-prims does not "
+                "support sliding-window attention."
+            )
+        if self.logits_soft_cap not in (None, 0.0):
+            raise NotImplementedError(
+                "VLLM_FLASHINFER_PREFILL_BACKEND=cute-dsl-prims does not "
+                "support logits soft cap."
+            )
+
     # Keep SM90 prefill/decode Q dtype selection in one place.
     def get_q_data_type(self, is_prefill: bool) -> torch.dtype:
         # The user sets --attention-config.disable_flashinfer_q_quantization
@@ -1185,11 +1281,18 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             # FP8-Q requires an fp8 tensor-core attention path. SM90 uses
             # native FA3 for prefill; XQA decode on SM90/SM12x is handled
             # above with model-dtype Q, while SM100 uses trtllm-gen.
-            # Architectures with only fa2 (e.g. SM89, SM120) cannot
-            # consume FP8 queries, so keep the model dtype for Q there.
-            if current_platform.is_device_capability(
-                90
-            ) or current_platform.is_device_capability_family(100):
+            # Architectures with only fa2 (e.g. SM89 and stock SM120) cannot
+            # consume FP8 queries. PR #4714 adds an explicit SM120 prefill
+            # exception; decode remains on the model dtype for XQA.
+            if (
+                current_platform.is_device_capability(90)
+                or current_platform.is_device_capability_family(100)
+                or (
+                    is_prefill
+                    and self.flashinfer_prefill_backend == "cute-dsl-prims"
+                    and current_platform.is_device_capability(120)
+                )
+            ):
                 return FlashInferBackend.get_dtype_for_flashinfer(cache_dtype)
             return self.model_config.dtype
         if cache_dtype.startswith("nvfp4"):
@@ -1442,7 +1545,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                         BatchPrefillWithPagedKVCacheWrapper(
                             self._get_workspace_buffer(),
                             get_flashinfer_layout_string(self.kv_cache_layout),
-                            backend="auto",
+                            backend=self.flashinfer_prefill_backend,
                         )
                     )
             return self._noncausal_prefill_wrapper
@@ -1478,7 +1581,11 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                     self._prefill_wrapper = BatchPrefillWithPagedKVCacheWrapper(
                         self._get_workspace_buffer(),
                         get_flashinfer_layout_string(self.kv_cache_layout),
-                        backend=backend,
+                        backend=(
+                            self.flashinfer_prefill_backend
+                            if not self.is_kvcache_nvfp4
+                            else backend
+                        ),
                     )
         assert self._prefill_wrapper is not None
         return self._prefill_wrapper
@@ -1899,6 +2006,11 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                     o_dtype = (
                         FP8_DTYPE if self.nvfp4_trtllm else self.model_config.dtype
                     )
+                    prims_plan_kwargs = (
+                        {"block_tables": block_table_tensor[prefill_start:]}
+                        if self.flashinfer_prefill_backend == "cute-dsl-prims"
+                        else {}
+                    )
                     prefill_wrapper.plan(
                         qo_indptr=qo_indptr_prefill_cpu,
                         paged_kv_indptr=paged_kv_indptr_prefill_cpu,
@@ -1918,7 +2030,17 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                         o_data_type=o_dtype,
                         fixed_split_size=self.prefill_fixed_split_size,
                         disable_split_kv=self.disable_split_kv,
+                        **prims_plan_kwargs,
                     )
+                    if self.flashinfer_prefill_backend == "cute-dsl-prims":
+                        logger.info_once(
+                            "Planned FlashInfer prefill with "
+                            "backend=cute-dsl-prims, q_dtype=%s, "
+                            "kv_dtype=%s, layout=%s",
+                            self.q_data_type_prefill,
+                            self.kv_cache_dtype,
+                            get_flashinfer_layout_string(self.kv_cache_layout),
+                        )
                 attn_metadata.prefill = FIPrefill(wrapper=prefill_wrapper)
 
         ## DECODE PATHWAY
@@ -2075,6 +2197,10 @@ class FlashInferImpl(AttentionImpl):
         self.nvfp4_fa2 = self.is_kvcache_nvfp4 and _nvfp4_kv_on_fa2()
         self.nvfp4_trtllm = self.is_kvcache_nvfp4 and not self.nvfp4_fa2
         self.kv_cache_dtype = "nvfp4" if self.is_kvcache_nvfp4 else kv_cache_dtype
+        self.uses_separate_kv_planes = (
+            self.is_kvcache_nvfp4
+            or envs.VLLM_FLASHINFER_PREFILL_BACKEND == "cute-dsl-prims"
+        )
         self.logits_soft_cap = logits_soft_cap
         self.kv_sharing_target_layer_name = kv_sharing_target_layer_name
 
@@ -2235,7 +2361,10 @@ class FlashInferImpl(AttentionImpl):
                 KV-sharing decoder layer.
             value: shape = [num_tokens, num_kv_heads, head_size], or None for a
                 KV-sharing decoder layer.
-            kv_cache: [num_blocks, num_kv_heads, block_size, 2*head_size]
+            kv_cache: KV cache tensor with different possible shapes:
+                - packed K/V: [num_blocks, num_kv_heads, block_size, 2 * head_size]
+                - separate K/V planes used by PRIMS/NVFP4:
+                  [num_blocks, 2 * num_kv_heads, block_size, head_size]
             attn_metadata: Metadata for attention.
             output: Tensor that the attention result is written into.
             output_scale: Scale for fused output quantization. Enables the
@@ -2362,20 +2491,21 @@ class FlashInferImpl(AttentionImpl):
             )
         kv_cache_permute = fixed
 
-        # Split K/V — zero-copy views. NVFP4 stores K/V as separate head
-        # groups; other dtypes pack K/V in the content dim.
+        # Split K/V into zero-copy views. NVFP4 and PRIMS store K/V as
+        # separate head groups; other paths pack K/V in the content dim.
         hs = self.head_size
         nvfp4_kv_data = None
         nvfp4_kv_block_scales = None
-        if self.is_kvcache_nvfp4:
+        if self.uses_separate_kv_planes:
             k_cache, v_cache = kv_cache.split(self.num_kv_heads, dim=1)
             kv_cache_tuple = (
                 canonicalize_singleton_dim_strides(k_cache.permute(*stride_order)),
                 canonicalize_singleton_dim_strides(v_cache.permute(*stride_order)),
             )
-            nvfp4_kv_data, nvfp4_kv_block_scales, _ = _nvfp4_kv_views(
-                kv_cache, self.num_kv_heads
-            )
+            if self.is_kvcache_nvfp4:
+                nvfp4_kv_data, nvfp4_kv_block_scales, _ = _nvfp4_kv_views(
+                    kv_cache, self.num_kv_heads
+                )
         else:
             kv_cache_tuple = kv_cache_permute.split(hs, dim=-1)
 
@@ -2863,9 +2993,9 @@ class FlashInferImpl(AttentionImpl):
                     kv_layout=kv_layout,
                 )
                 return
-            if self.is_kvcache_nvfp4:
-                # (B, 2*H, N, full_dim) -> ((B, N, H, full_dim),
-                #                            (B, N, H, full_dim));
+            if self.uses_separate_kv_planes:
+                # (B, 2*H, N, plane_dim) -> ((B, N, H, plane_dim),
+                #                             (B, N, H, plane_dim));
                 # K heads first, then V heads.
                 k_cache, v_cache = kv_cache.transpose(1, 2).split(
                     self.num_kv_heads, dim=-2

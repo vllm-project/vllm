@@ -229,6 +229,7 @@ if TYPE_CHECKING:
     VLLM_FLASHINFER_CUTEDSL_MOE_LOCALIZE_FREE_FULL_WEIGHTS: bool = False
     VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR: str | None = None
     VLLM_FLASHINFER_AUTOTUNE_SKIP_OPS: list[str] | None = None
+    VLLM_FLASHINFER_PREFILL_BACKEND: Literal["auto", "cute-dsl-prims"] = "auto"
     VLLM_FLASHINFER_ALLREDUCE_BACKEND: Literal["auto", "trtllm", "mnnvl"] = "auto"
     VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE: int = 394 * 1024 * 1024
     VLLM_FLASHINFER_MOE_A2A_LOW_PRECISION_COMBINE: bool = False
@@ -1910,6 +1911,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
             for v in os.environ["VLLM_FLASHINFER_AUTOTUNE_SKIP_OPS"].split(",")
             if v.strip()
         ]
+    ),
+    # Select the kernel used by FlashInfer's paged prefill wrapper. The
+    # cute-dsl-prims option is an opt-in SM120 FP8 path provided by
+    # FlashInfer PR #4714; vLLM validates its narrower feature contract at
+    # startup instead of silently falling back to another kernel.
+    "VLLM_FLASHINFER_PREFILL_BACKEND": env_with_choices(
+        "VLLM_FLASHINFER_PREFILL_BACKEND",
+        "auto",
+        ["auto", "cute-dsl-prims"],
     ),
     # Flashinfer fused allreduce backend.
     "VLLM_FLASHINFER_ALLREDUCE_BACKEND": env_with_choices(
