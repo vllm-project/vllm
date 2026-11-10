@@ -20,17 +20,25 @@ covered by the GPU tests in `test_sharded_rdt_trainer.py`.
 
 import contextlib
 import gc
+import os
+import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeout
+from functools import cached_property
+from types import ModuleType, SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 import torch
 
 import vllm.distributed.weight_transfer.sharded_rdt_trainer as trainer_mod
+from vllm.distributed.nixl_utils import alias_nixl_for_ray
+from vllm.distributed.weight_transfer import ParamMeta, WeightSource
 from vllm.distributed.weight_transfer.sharded_rdt_common import (
     buffer_alloc_bytes,
+    register_nixl_memory,
 )
 from vllm.distributed.weight_transfer.sharded_rdt_trainer import (
     DEFAULT_GATHER_LOOKAHEAD,
@@ -43,6 +51,114 @@ from vllm.distributed.weight_transfer.sharded_rdt_trainer import (
 GI_A, GI_B = 0, 1
 GROUP_A = ("model.layers.0.w", "model.layers.0.b")
 GROUP_B = ("model.layers.1.w",)
+
+
+@pytest.fixture
+def ray_nixl_transport(monkeypatch):
+    import ray
+    from ray.experimental.rdt import util
+    from ray.experimental.rdt.nixl_tensor_transport import NixlTensorTransport
+
+    from vllm.distributed import nixl_utils
+    from vllm.platforms import current_platform
+
+    transport = NixlTensorTransport()
+    package = ModuleType("nixl_rocm")
+    api = ModuleType("nixl_rocm._api")
+    api.__dict__.update(nixl_agent=Mock(), nixl_agent_config=Mock())
+    package.__dict__["_api"] = api
+    modules = {package.__name__: package, api.__name__: api}
+    imported_rcache_limits = []
+
+    def import_nixl(name):
+        imported_rcache_limits.append(os.environ.get("UCX_RCACHE_MAX_UNRELEASED"))
+        monkeypatch.setitem(sys.modules, name, modules[name])
+        return modules[name]
+
+    nixl_names = ("nixl", "nixl._api", *modules)
+    for name in nixl_names:
+        monkeypatch.delitem(sys.modules, name, raising=False)
+    monkeypatch.delenv("UCX_RCACHE_MAX_UNRELEASED", raising=False)
+    importer = Mock(side_effect=import_nixl)
+    monkeypatch.setattr(
+        nixl_utils, "importlib", SimpleNamespace(import_module=importer)
+    )
+    monkeypatch.setattr(nixl_utils, "is_nixl_available", lambda: True)
+    monkeypatch.setattr(util, "transport_managers", {"NIXL": transport})
+    monkeypatch.setattr(current_platform, "is_rocm", lambda: True)
+    monkeypatch.setattr(
+        ray,
+        "get_runtime_context",
+        lambda: SimpleNamespace(get_actor_id=lambda: "rdt-actor"),
+    )
+    try:
+        yield transport, api, importer, imported_rcache_limits
+    finally:
+        # The helper inserts aliases directly; remove them before monkeypatch
+        # restores any modules and environment values present before this test.
+        for name in nixl_names:
+            sys.modules.pop(name, None)
+        os.environ.pop("UCX_RCACHE_MAX_UNRELEASED", None)
+
+
+def test_ray_registers_memory_through_rocm_alias(ray_nixl_transport):
+    """Ray's registration must reach the ROCm agent through the alias."""
+    _, api, importer, _ = ray_nixl_transport
+    register_nixl_memory(torch.empty(4, dtype=torch.uint8))
+    api.nixl_agent.return_value.register_memory.assert_called()
+    assert sys.modules["nixl"] is sys.modules["nixl_rocm"]
+    assert sys.modules["nixl._api"] is api
+
+    importer.reset_mock()
+    alias_nixl_for_ray()
+    importer.assert_not_called()
+
+
+@pytest.mark.parametrize("rcache_limit", [None, "4096"])
+def test_ray_nixl_sets_ucx_limit_before_import(
+    monkeypatch, ray_nixl_transport, rcache_limit
+):
+    """UCX must see the default or the user's override during the first import."""
+    _, _, _, imported_rcache_limits = ray_nixl_transport
+    if rcache_limit is not None:
+        monkeypatch.setenv("UCX_RCACHE_MAX_UNRELEASED", rcache_limit)
+    alias_nixl_for_ray()
+    assert imported_rcache_limits == [rcache_limit or "1024"] * 2
+
+
+@pytest.mark.parametrize("existing_api", [False, True])
+def test_ray_nixl_preserves_non_rocm_or_existing_imports(
+    monkeypatch, ray_nixl_transport, existing_api
+):
+    from vllm.platforms import current_platform
+
+    _, _, importer, _ = ray_nixl_transport
+    if existing_api:
+        api = ModuleType("nixl._api")
+        monkeypatch.setitem(sys.modules, "nixl._api", api)
+    else:
+        monkeypatch.setattr(current_platform, "is_rocm", lambda: False)
+    alias_nixl_for_ray()
+    importer.assert_not_called()
+    assert "UCX_RCACHE_MAX_UNRELEASED" not in os.environ
+    if existing_api:
+        assert sys.modules["nixl._api"] is api
+    else:
+        assert "nixl._api" not in sys.modules
+
+
+def test_ray_nixl_alias_reports_missing_rocm_package(monkeypatch, ray_nixl_transport):
+    from vllm.distributed import nixl_utils
+
+    transport, api, importer, _ = ray_nixl_transport
+    monkeypatch.setattr(nixl_utils, "is_nixl_available", lambda: False)
+    with pytest.raises(ImportError, match="nixl_rocm"):
+        register_nixl_memory(torch.empty(1))
+    assert transport._nixl_agent is None
+    api.nixl_agent.assert_not_called()
+    importer.assert_not_called()
+    assert "nixl" not in sys.modules
+    assert "nixl._api" not in sys.modules
 
 
 @pytest.fixture
@@ -208,9 +324,9 @@ class TestFreeBarrier:
     def test_freed_groups_are_reported_back_to_the_engine(self, server_factory):
         """The engine holds the CUDA-IPC export refs and may only drop them once
         the server says the group is gone — and it hears that ONLY through
-        ``wait_freed`` / ``end_sync``, never a publish return (a freed notice
+        `wait_freed` / `end_sync`, never a publish return (a freed notice
         riding an unharvested async publish while the engine blocks in
-        ``wait_freed`` would wedge the loop)."""
+        `wait_freed` would wedge the loop)."""
         server = server_factory()
         server.begin_sync(1)
         _publish(server, GI_A, GROUP_A)
@@ -237,16 +353,23 @@ class TestFreeBarrier:
         assert server._group_names.get(GI_A) is None
 
 
-class _CountingSource:
-    """`iter_groups` yielding one CPU-tensor group per call, built lazily so a
-    group's tensors exist only once the engine's credit gate lets it gather."""
+class _CountingSource(WeightSource):
+    """`iter_full` yielding CPU tensors built lazily, so a group's tensors exist
+    only once the engine's credit gate lets it gather."""
 
     def __init__(self, groups):
         self._groups = groups
 
-    def iter_groups(self):
+    @cached_property
+    def metadata(self):
+        return [
+            ParamMeta(n, torch.float32, (16,)) for names in self._groups for n in names
+        ]
+
+    def iter_full(self):
         for names in self._groups:
-            yield list(names), [torch.zeros(16, dtype=torch.float32) for _ in names]
+            for n in names:
+                yield n, torch.zeros(16, dtype=torch.float32)
 
 
 class _ResidencyDict(dict):
@@ -277,9 +400,10 @@ def _loop_engine(server, n_groups, *, lookahead):
     e.source = _CountingSource(groups)
     e._server = server
     e._rpc = lambda method, *a: getattr(server, method)(*a)
+    e._meta = e.source.metadata
     e._groups = [list(g) for g in groups]
     e._owned_idx = list(range(n_groups))
-    e._held_names = None
+    e._owned_names = {m.name for m in e._meta}
     e._inflight = _ResidencyDict()
     return e
 
@@ -389,7 +513,7 @@ class TestGatherCredit:
     def test_the_residency_bound_scales_with_the_lookahead(
         self, server_factory, gather_engine
     ):
-        """lookahead + 1, not a hardcoded 2: at lookahead=2 a free-nothing
+        """Lookahead + 1, not a hardcoded 2: at lookahead=2 a free-nothing
         consumer sees exactly 3 groups gathered before the loop parks."""
         server = server_factory(gather_lookahead=2)
         engine = gather_engine(server, 8, lookahead=2)
@@ -808,7 +932,7 @@ class TestFakeServerAgreesWithTheRealOne:
 
 class TestExportRing:
     """The packed export path. Its one hard invariant is that the trainer packs
-    a group exactly the way ``publish_group`` rebuilds it — a layout
+    a group exactly the way `publish_group` rebuilds it — a layout
     disagreement would serve the wrong bytes with nothing downstream to catch
     it."""
 
@@ -985,8 +1109,8 @@ def sharing_server(server_factory):
     """A producer whose serve slots are plain CPU tensors.
 
     The pack is the only part of the serve path that touches a buffer, so
-    replacing the one allocation seam (``_new_serve_buffer``, which would
-    ``torch.empty(..., device="cuda")`` and register the result with NIXL) puts
+    replacing the one allocation seam (`_new_serve_buffer`, which would
+    `torch.empty(..., device="cuda")` and register the result with NIXL) puts
     the whole shared-pack path within reach of a CPU test.
     """
 
@@ -1017,7 +1141,7 @@ def _blob_bytes(server, name):
 class TestSharedServeSlots:
     """One registered slot serving several inference deployments.
 
-    Consumers whose ids differ by a multiple of ``workers_per_replica`` are the
+    Consumers whose ids differ by a multiple of `workers_per_replica` are the
     same worker of different deployments: same parallel config, same baked plan,
     same chunk sequence, byte-identical pack layout. They rendezvous per chunk,
     the last arrival packs, and every one of them returns that blob, so R
@@ -1075,7 +1199,7 @@ class TestSharedServeSlots:
 
     def test_the_slot_follows_the_consumers_issue_order(self, sharing_server):
         """The invariant slot safety rests on. The consumer drains pull i before
-        issuing i+K, so choosing the slot as ``seq % K`` means a slot is only
+        issuing i+K, so choosing the slot as `seq % K` means a slot is only
         repacked once the read of its previous contents is over. Deriving it from
         a per-call counter on the producer instead (execution order) can hand a
         slot to a pull whose predecessor is still being read, because Ray may
@@ -1105,7 +1229,7 @@ class TestSharedServeSlots:
         assert slots == {0: 0, 1: 1, 2: 0}, slots
 
     def test_a_seqless_call_is_refused(self, sharing_server):
-        """The slot comes from ``seq``, so a caller that sends none cannot be
+        """The slot comes from `seq`, so a caller that sends none cannot be
         served safely."""
         server = sharing_server(workers_per_replica=2)
         server.begin_sync(1, [0])
@@ -1165,7 +1289,7 @@ class TestSharedServeSlots:
 
 
 class TestSharedReservation:
-    """``reserve_serve_buffer`` under sharing: one ring per GROUP, and the
+    """`reserve_serve_buffer` under sharing: one ring per GROUP, and the
     init-time check that the group's members pull the same chunks."""
 
     def test_matching_plans_reserve_one_ring_between_them(self, sharing_server):

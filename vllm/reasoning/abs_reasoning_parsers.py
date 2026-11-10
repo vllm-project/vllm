@@ -7,7 +7,6 @@ from collections.abc import Callable, Iterable, Sequence
 from functools import cached_property
 from typing import TYPE_CHECKING, cast
 
-from vllm.entrypoints.mcp.tool_server import ToolServer
 from vllm.logger import init_logger
 from vllm.utils.collection_utils import is_list_of
 from vllm.utils.import_utils import import_plugin
@@ -15,16 +14,17 @@ from vllm.utils.import_utils import import_plugin
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
     from vllm.entrypoints.generate.base.protocol import DeltaMessage
+    from vllm.entrypoints.mcp.tool_server import ToolServer
     from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
     from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+    from vllm.parser.engine.parser_engine import ReasoningEnd
     from vllm.tokenizers import TokenizerLike
 
 logger = init_logger(__name__)
 
 
 class ReasoningParser:
-    """
-    Abstract reasoning parser class that should not be used directly.
+    """Abstract reasoning parser class that should not be used directly.
     Provided and methods should be used in derived classes.
 
     It is used to extract reasoning content from the model output.
@@ -58,6 +58,28 @@ class ReasoningParser:
         """
         return None
 
+    @property
+    def reasoning_end_token_ids(self) -> frozenset[int]:
+        """Every token id that alone ends reasoning.
+
+        Empty if reasoning can also end in a way that is not a single token.
+        """
+        return frozenset()
+
+    @property
+    def implicit_reasoning_end_token_ids(self) -> frozenset[int]:
+        """Reasoning-end tokens that are also content, e.g. a tool-call start."""
+        return frozenset()
+
+    def find_reasoning_end(self, token_ids: Sequence[int]) -> "ReasoningEnd | None":
+        """Find the first reasoning end in `token_ids`.
+
+        Returns its offset and whether its token is content, or
+        `ReasoningEnd(len(token_ids), False)` if there is none. Returns `None`
+        if the parser cannot locate reasoning ends by token id.
+        """
+        return None
+
     def has_engine_confirmed_reasoning_end(self) -> bool:
         """Whether the engine has confirmed the reasoning end transition.
 
@@ -65,32 +87,29 @@ class ReasoningParser:
         detokenizer holds back text.  This method returns the engine's
         *processed* state, not a raw token-ID check.
 
-        Only called for parsers with ``engine_based_streaming = True``.
+        Only called for parsers with `engine_based_streaming = True`.
         """
         return False
 
     @abstractmethod
     def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
-        """
-        Check if the reasoning content ends in the input_ids.
+        """Check if the reasoning content ends in the input_ids.
 
         It is used in structured engines like `xgrammar` to check if the
         reasoning content ends in the model output.
 
-        Parameters:
-        input_ids: list[int]
-            The input_ids of the model output.
+        Args:
+            input_ids: The input_ids of the model output.
 
         Returns:
-        bool
             True if the reasoning content ends in the input_ids.
+
         """
 
     def is_reasoning_end_streaming(
         self, input_ids: Sequence[int], delta_ids: Iterable[int]
     ) -> bool:
-        """
-        Check if the reasoning content ends in the input_ids on a
+        """Check if the reasoning content ends in the input_ids on a
         decode step.
 
         It is used in structured engines like `xgrammar` to check if the
@@ -98,38 +117,37 @@ class ReasoningParser:
         `input_ids` the entire model output and `delta_ids` are the last few
         computed tokens of the model output (like during a decode step).
 
-        Parameters:
-        input_ids: list[int]
-            The entire model output.
-        delta_ids: list[int]
-            The last few computed tokens of the model output at the current decode step.
+        Args:
+            input_ids: The entire model output.
+            delta_ids: The last few computed tokens of the model output at the
+                current decode step.
 
         Returns:
-        bool
             True if the reasoning content ends in the `delta_ids` on a
             decode step.
+
         """
         return self.is_reasoning_end(input_ids)
 
     @abstractmethod
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
-        """
-        Extract content token ids from the input_ids.
-        Parameters:
-        input_ids: list[int]
-            The input_ids of the model output.
+        """Extract content token ids from the input_ids.
+
+        Args:
+            input_ids: The input_ids of the model output.
+
         Returns:
-        list[int]
             The extracted content from the input_ids.
+
         """
 
     def count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:
         """Count the number of reasoning tokens in a sequence.
 
         Text-based reasoning models typically wrap their chain-of-thought
-        between special start/end tokens (e.g., ``<think> ... </think>``).
+        between special start/end tokens (e.g., `<think> ... </think>`).
         Implementations that support reasoning token counting should override
-        this method. The default implementation returns ``0`` so existing
+        this method. The default implementation returns `0` so existing
         parsers remain unchanged unless they explicitly opt in.
 
         Args:
@@ -137,8 +155,8 @@ class ReasoningParser:
 
         Returns:
             int: Number of tokens that belong to reasoning content.
-        """
 
+        """
         # By default, assume the parser cannot detect reasoning spans.
         return 0
 
@@ -148,18 +166,18 @@ class ReasoningParser:
         model_output: str,
         request: "ChatCompletionRequest | ResponsesRequest",
     ) -> tuple[str | None, str | None]:
-        """
-        Extract reasoning content from a complete model-generated string.
+        """Extract reasoning content from a complete model-generated string.
 
         Used for non-streaming responses where we have the entire model response
         available before sending to the client.
 
-        Parameters:
+        Args:
             model_output: The model-generated string to extract reasoning content from.
             request: The request object that was used to generate the model_output.
 
         Returns:
             A tuple containing the reasoning content and the content.
+
         """
 
     @abstractmethod
@@ -172,8 +190,7 @@ class ReasoningParser:
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
     ) -> "DeltaMessage | None":
-        """
-        Instance method that should be implemented for extracting reasoning
+        """Instance method that should be implemented for extracting reasoning
         from an incomplete response; for use when handling reasoning calls and
         streaming. Has to be an instance method because  it requires state -
         the current tokens/diffs, but also the information about what has
@@ -185,6 +202,15 @@ class ReasoningParser:
     ) -> "ChatCompletionRequest | ResponsesRequest":
         """Adjust request parameters; override in subclasses as needed."""
         return request
+
+    def set_prompt_token_ids(self, prompt_token_ids: Sequence[int]) -> None:
+        """Provide the rendered prompt before the output is parsed.
+
+        Parsers that can tell whether the prompt already closes reasoning
+        (e.g. continue_final_message) use it to classify the output.
+        Default is a no-op; override in subclasses as needed.
+        """
+        return
 
     def adjust_initial_state_from_prompt(self, prompt_token_ids: Sequence[int]) -> None:
         """Hook called once at the start of streaming with the prompt tokens.
@@ -201,17 +227,14 @@ class ReasoningParser:
     def prepare_structured_tag(
         self,
         original_tag: str | None,
-        tool_server: ToolServer | None,
+        tool_server: "ToolServer | None",
     ) -> str | None:
-        """
-        Instance method that is implemented for preparing the structured tag
-        """
+        """Instance method that is implemented for preparing the structured tag"""
         return original_tag
 
 
 class ReasoningParserManager:
-    """
-    Central registry for ReasoningParser implementations.
+    """Central registry for ReasoningParser implementations.
 
     Supports two registration modes:
       - Eager registration via `register_module`
@@ -225,14 +248,14 @@ class ReasoningParserManager:
 
     @classmethod
     def get_reasoning_parser(cls, name: str) -> type[ReasoningParser]:
-        """
-        Retrieve a registered or lazily registered ReasoningParser class.
+        """Retrieve a registered or lazily registered ReasoningParser class.
 
         If the parser is lazily registered, it will be imported and cached
         on first access.
 
         Raises:
             KeyError: if no parser is found under the given name.
+
         """
         if name in cls.reasoning_parsers:
             return cls.reasoning_parsers[name]
@@ -303,8 +326,7 @@ class ReasoningParserManager:
 
     @classmethod
     def register_lazy_module(cls, name: str, module_path: str, class_name: str) -> None:
-        """
-        Register a lazy module mapping for delayed import.
+        """Register a lazy module mapping for delayed import.
 
         Example:
             ReasoningParserManager.register_lazy_module(
@@ -312,6 +334,7 @@ class ReasoningParserManager:
                 module_path="vllm.reasoning.qwen3_engine_reasoning_parser",
                 class_name="Qwen3ParserReasoningAdapter",
             )
+
         """
         cls.lazy_parsers[name] = (module_path, class_name)
 
@@ -324,8 +347,7 @@ class ReasoningParserManager:
     ) -> (
         type[ReasoningParser] | Callable[[type[ReasoningParser]], type[ReasoningParser]]
     ):
-        """
-        Register module with the given name or name list. it can be used as a
+        """Register module with the given name or name list. it can be used as a
         decoder(with module as None) or normal function(with module as not
         None).
         """

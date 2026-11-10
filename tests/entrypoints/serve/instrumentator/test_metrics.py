@@ -188,6 +188,7 @@ EXPECTED_METRICS_V1 = [
     "vllm:prefix_cache_queries",
     "vllm:prefix_cache_hits",
     "vllm:num_preemptions_total",
+    "vllm:admission_rejections_total",
     "vllm:prompt_tokens_total",
     "vllm:generation_tokens_total",
     "vllm:iteration_tokens_total",
@@ -403,8 +404,7 @@ async def _poll_until(
 
 
 def _get_running_metrics_from_api(server: RemoteOpenAIServer):
-    """Return (running_count, waiting_count, kv_cache_usage)"""
-
+    """Return (running_count, waiting_count, kv_cache_usage)."""
     response = requests.get(server.url_for("metrics"))
     assert response.status_code == HTTPStatus.OK
 
@@ -438,7 +438,7 @@ def _get_running_metrics_from_api(server: RemoteOpenAIServer):
 
 
 def test_metrics_exist_run_batch():
-    input_batch = """{"custom_id": "request-0", "method": "POST", "url": "/v1/embeddings", "body": {"model": "intfloat/multilingual-e5-small", "input": "You are a helpful assistant."}}"""  # noqa: E501
+    input_batch = """{"custom_id": "request-0", "method": "POST", "url": "/v1/embeddings", "body": {"model": "vllm-project/multilingual-e5-small", "input": "You are a helpful assistant."}}"""  # noqa: E501
 
     base_url = "0.0.0.0"
     port = str(get_open_port())
@@ -460,7 +460,7 @@ def test_metrics_exist_run_batch():
                 "-o",
                 output_file.name,
                 "--model",
-                "intfloat/multilingual-e5-small",
+                "vllm-project/multilingual-e5-small",
                 "--enable-metrics",
                 "--host",
                 base_url,

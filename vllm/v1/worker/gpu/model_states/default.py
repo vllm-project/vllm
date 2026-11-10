@@ -7,16 +7,17 @@ import torch.nn as nn
 
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
+from vllm.v1.attention.backends.utils import compute_mm_prefix_ranges
 from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.kv_cache_interface import KVCacheConfig
-from vllm.v1.worker.gpu.attn_utils import (
-    build_attn_metadata,
-    compute_mm_prefix_ranges,
-)
+from vllm.v1.worker.gpu.attn_utils import build_attn_metadata
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.mm.rope import get_rope_state
-from vllm.v1.worker.gpu.model_states.interface import ModelState
+from vllm.v1.worker.gpu.model_states.interface import (
+    ModelSpecificAttnMetadata,
+    ModelState,
+)
 from vllm.v1.worker.gpu.model_states.mm_pruning import maybe_create_mm_pruner
 from vllm.v1.worker.gpu.model_states.prompt_embeds import PromptEmbedsState
 from vllm.v1.worker.gpu.states import RequestState
@@ -61,9 +62,28 @@ class DefaultModelState(ModelState):
             self.model_config, model, self.rope_state, encoder_cache
         )
 
+        # Per-request bidirectional MM ranges. Not kept in the encoder cache:
+        # only the first PP rank has one, but every rank builds attn metadata.
+        self.mm_prefix_ranges: dict[str, list[tuple[int, int]]] | None = None
+        if (
+            self.model_config.supports_multimodal_inputs
+            and self.model_config.is_mm_prefix_lm
+        ):
+            self.mm_prefix_ranges = {}
+
     def add_request(self, req_index: int, new_req_data: NewRequestData) -> None:
+        if self.mm_prefix_ranges is not None:
+            hf_text_config = self.model_config.hf_text_config
+            self.mm_prefix_ranges[new_req_data.req_id] = compute_mm_prefix_ranges(
+                [new_req_data.mm_features],
+                sliding_window=self.model_config.get_sliding_window(),
+                clamp_sliding_window=getattr(
+                    self.model, "mm_prefix_clamp_sliding_window", False
+                )
+                or getattr(hf_text_config, "mm_prefix_clamp_sliding_window", False),
+                span_pad=getattr(self.model, "mm_prefix_span_leading_pad_modulus", 0),
+            )[0]
         if self.rope_state is not None:
-            assert new_req_data.prefill_token_ids is not None
             # `prompt_embeds` is a passthrough modality with no grid info, but
             # M-RoPE assumes per-feature grids. Filter it out.
             mm_features = [
@@ -79,6 +99,8 @@ class DefaultModelState(ModelState):
             self.prompt_embeds_state.add_request(req_index, new_req_data)
 
     def remove_request(self, req_id: str) -> None:
+        if self.mm_prefix_ranges is not None:
+            self.mm_prefix_ranges.pop(req_id, None)
         if self.prompt_embeds_state is not None:
             self.prompt_embeds_state.remove_request(req_id)
 
@@ -172,6 +194,8 @@ class DefaultModelState(ModelState):
         attn_groups: list[list[AttentionGroup]],
         kv_cache_config: KVCacheConfig,
         for_capture: bool = False,
+        ubatch_idx: int = 0,
+        model_specific_attn_metadata: ModelSpecificAttnMetadata | None = None,
     ) -> dict[str, Any]:
         if cudagraph_mode == CUDAGraphMode.FULL:
             # Use padded sizes - padding is handled by model_runner.prepare_attn.
@@ -195,15 +219,15 @@ class DefaultModelState(ModelState):
         else:
             max_seq_len = seq_lens_cpu_upper_bound[:num_reqs].max().item()
         req_doc_ranges: dict[int, list[tuple[int, int]]] | None = None
-        if (
-            self.supports_mm_inputs
-            and self.encoder_cache is not None
-            and self.model_config.is_mm_prefix_lm
-        ):
-            req_doc_ranges = compute_mm_prefix_ranges(
-                req_ids=input_batch.req_ids,
-                mm_features=self.encoder_cache.mm_features,
-                sliding_window=self.model_config.get_sliding_window(),
+        if self.mm_prefix_ranges is not None:
+            req_doc_ranges = {
+                i: self.mm_prefix_ranges.get(req_id, [])
+                for i, req_id in enumerate(input_batch.req_ids)
+            }
+        dcp_local_seq_lens_cpu_upper_bound = None
+        if input_batch.pcp is not None:
+            dcp_local_seq_lens_cpu_upper_bound = (
+                input_batch.pcp.dcp_local_seq_lens_cpu_upper_bound
             )
         attn_metadata = build_attn_metadata(
             attn_groups=attn_groups,
@@ -219,10 +243,15 @@ class DefaultModelState(ModelState):
             kv_cache_config=kv_cache_config,
             seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
             dcp_local_seq_lens=input_batch.dcp_local_seq_lens,
+            dcp_local_seq_lens_cpu_upper_bound=dcp_local_seq_lens_cpu_upper_bound,
             positions=input_batch.positions,
             is_prefilling=torch.from_numpy(input_batch.is_prefilling_np),
             mm_req_doc_ranges=req_doc_ranges,
             for_cudagraph_capture=for_capture,
             rswa_prefix_lens=input_batch.prompt_lens,
+            req_idx=input_batch.idx_mapping_np,
+            ubatch_idx=ubatch_idx,
+            fast_prefill=input_batch.fast_prefill,
+            model_specific_attn_metadata=model_specific_attn_metadata,
         )
         return attn_metadata

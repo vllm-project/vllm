@@ -2,11 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests quantization configuration matching utilities."""
 
-from unittest.mock import Mock
-
 import pytest
 
+from tests.quantization.utils import quant_config_args
 from vllm.config.quantization import QuantizationConfigArgs
+from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     should_ignore_layer,
 )
@@ -58,7 +58,7 @@ def test_online_ignore_supports_fnmatch_patterns():
     )
 
     with pytest.raises(ValueError, match="matches both quantization_config.ignore"):
-        config._dispatch_target(layer_name, Mock())
+        config.resolve_quant_method_cls(LinearBase, layer_name)
 
 
 @pytest.mark.parametrize(
@@ -160,6 +160,31 @@ def test_ignore_and_targets_match_fused_regexes_identically(patterns):
     matches = _find_matching_targets(layer_name, targets, fused_mapping)
     assert len(matches) == 1
     assert targets[matches[0]] == "fp8_per_block"
+
+
+@pytest.mark.parametrize(
+    ("q_target", "kv_target", "consistent"),
+    [
+        ("mxfp4", "mxfp4", True),
+        ("mxfp4", {"weight": "mxfp4"}, True),
+        ({"weight": "mxfp4"}, {"weight": "mxfp4", "activation": None}, False),
+        ("mxfp4", "fp8_per_block", False),
+    ],
+)
+def test_fused_shard_targets_compare_resolved_specs(q_target, kv_target, consistent):
+    """An omitted activation (method default) differs from an explicit `null`."""
+    layer_name = "model.layers.0.self_attn.qkv_proj"
+    fused_mapping = {"qkv_proj": ["q_proj", "k_proj", "v_proj"]}
+    targets = quant_config_args(
+        targets={"*q_proj": q_target, r"re:.*\.[kv]_proj": kv_target}
+    ).targets
+    assert targets is not None
+
+    if consistent:
+        assert _find_matching_targets(layer_name, targets, fused_mapping) == ["*q_proj"]
+    else:
+        with pytest.raises(ValueError, match="different quantization_config.targets"):
+            _find_matching_targets(layer_name, targets, fused_mapping)
 
 
 def test_ignore_allows_individually_matched_fused_shards():

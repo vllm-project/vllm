@@ -118,7 +118,6 @@ def pick_config(args: tuple[Any, ...], config_keys: list[CaseKey]) -> CaseKey | 
          the smallest num_tokens >= the input's num_tokens. If the input is
          larger than all available num_tokens, fall back to the largest.
     """
-
     if not config_keys:
         return None
 
@@ -157,23 +156,6 @@ def pick_config(args: tuple[Any, ...], config_keys: list[CaseKey]) -> CaseKey | 
     )
     _pick_cache[cache_key] = result
     return result
-
-
-def fake_impl(
-    qkv: torch.Tensor,  # [num_tokens, (num_heads_q+num_heads_k+num_heads_v)*head_dim]
-    num_heads_q: int,
-    num_heads_k: int,
-    num_heads_v: int,
-    head_dim: int,
-    eps: float,
-    q_weight: torch.Tensor,
-    k_weight: torch.Tensor,
-    cos_sin_cache: torch.Tensor,  # [max_position, rotary_dim]
-    is_neox: bool,
-    position_ids: torch.Tensor,  # [num_tokens],
-    forced_token_heads_per_warp: int = -1,  # dummy
-) -> None:
-    return
 
 
 def baseline(
@@ -216,7 +198,6 @@ def baseline(
     mutates_args=["qkv"],
     config_picker=pick_config,
     input_generator=generate_inputs,
-    fake_impl=fake_impl,
     helion_settings=helion.Settings(
         autotune_baseline_fn=baseline,
         autotune_baseline_atol=5e-2,

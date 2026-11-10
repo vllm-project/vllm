@@ -6,17 +6,24 @@ from typing import Any
 
 import torch
 from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 import vllm.model_executor.layers.fused_moe  # noqa
+from vllm import envs
 from vllm.logger import init_logger
+from vllm.model_executor.determinism.batch_invariant import (
+    gptq_linear_batch_invariant,
+)
 from vllm.model_executor.kernels.linear import (
+    MPLinearKernel,
     MPLinearLayerConfig,
     choose_mp_linear_kernel,
 )
+from vllm.model_executor.kernels.linear.mixed_precision.marlin import (
+    MarlinLinearKernel,
+)
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEConfig,
-    FusedMoEExpertsModular,
     FusedMoEMethodBase,
     FusedMoEQuantConfig,
     FusedMoeWeightScaleSupported,
@@ -40,12 +47,11 @@ from vllm.model_executor.layers.quantization.utils import replace_parameter
 from vllm.model_executor.layers.quantization.utils.gptq_utils import (
     get_dynamic_override,
     get_linear_quant_method,
+    normalize_and_validate_gptq_desc_act,
     override_config,
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     check_moe_marlin_supports_layer,
-    get_marlin_input_dtype,
-    marlin_make_workspace_new,
     marlin_repeat_scales_on_all_ranks,
     verify_marlin_supported,
 )
@@ -59,8 +65,8 @@ from vllm.model_executor.parameter import (
     GroupQuantScaleParameter,
     PackedColumnParameter,
     PackedvLLMParameter,
-    RowvLLMParameter,
 )
+from vllm.model_executor.utils import is_weights_pre_processed, retire_parameter
 from vllm.scalar_type import scalar_types
 from vllm.transformers_utils.config import get_safetensors_params_metadata
 from vllm.utils.collection_utils import is_list_of
@@ -115,10 +121,7 @@ class AutoGPTQConfig(QuantizationConfig):
         modules_in_block_to_quantize: list[str] | None = None,
     ) -> None:
         super().__init__()
-        if desc_act and group_size == -1:
-            # In this case, act_order == True is the same as act_order == False
-            # (since we have only one group per output channel)
-            desc_act = False
+        desc_act = normalize_and_validate_gptq_desc_act(desc_act, group_size, dynamic)
 
         # GPTQModel use `dynamic` config property to allow per module
         # quantization config so each module can be individually optimized.
@@ -150,7 +153,7 @@ class AutoGPTQConfig(QuantizationConfig):
 
         self.pack_factor = 32 // weight_bits  # packed into int32
         self.group_size = group_size
-        self.desc_act = desc_act
+        self.desc_act: bool = desc_act
         self.lm_head_quantized = lm_head_quantized
         self.full_config = full_config
 
@@ -244,7 +247,7 @@ class AutoGPTQConfig(QuantizationConfig):
             from vllm.model_executor.layers.quantization.moe_wna16 import MoeWNA16Config
 
             if not check_moe_marlin_supports_layer(
-                layer, self.group_size, allow_tile_padding=not self.desc_act
+                layer, self.group_size, allow_tile_padding=True
             ):
                 logger.warning_once(
                     f"Layer '{prefix}' is not supported by GPTQMoeMarlin. "
@@ -258,7 +261,6 @@ class AutoGPTQConfig(QuantizationConfig):
             )
             if moe_quant_method is None:
                 return None
-            moe_quant_method.input_dtype = get_marlin_input_dtype(prefix)
             return moe_quant_method
 
         quant_method = get_linear_quant_method(
@@ -266,7 +268,6 @@ class AutoGPTQConfig(QuantizationConfig):
         )
         if quant_method is None:
             return None
-        quant_method.input_dtype = get_marlin_input_dtype(prefix)
         return quant_method
 
     def apply_vllm_mapper(self, hf_to_vllm_mapper):
@@ -278,7 +279,7 @@ class AutoGPTQConfig(QuantizationConfig):
     def maybe_update_config(
         self,
         model_name: str,
-        hf_config: PretrainedConfig | None = None,
+        hf_config: PreTrainedConfig | None = None,
         revision: str | None = None,
     ):
         if self.modules_in_block_to_quantize:
@@ -308,19 +309,31 @@ class AutoGPTQLinearMethod(LinearMethodBase):
 
     Args:
         quant_config: The AutoGPTQ quantization config.
+
     """
 
     _kernel_backends_being_used: set[str] = set()
 
     def __init__(self, quant_config: AutoGPTQConfig) -> None:
         self.quant_config = quant_config
-        self.input_dtype = None
         self.quant_type = self.quant_config.quant_type
+        # The Marlin GEMM picks its tiling and K-split from the number of
+        # tokens, so its results depend on the batch size. In batch-invariant
+        # mode, dequantize the weight and use the batch-invariant matmul.
+        self.use_batch_invariant = envs.VLLM_BATCH_INVARIANT
+        self.kernel: MPLinearKernel | None = None
 
         # Verify supported on platform.
-        verify_marlin_supported(
-            quant_type=self.quant_config.quant_type,
-            group_size=self.quant_config.group_size,
+        if not self.use_batch_invariant:
+            verify_marlin_supported(
+                quant_type=self.quant_config.quant_type,
+                group_size=self.quant_config.group_size,
+            )
+
+    @property
+    def supports_pre_processed_weights(self) -> bool:  # type: ignore[override]
+        return isinstance(self.kernel, MarlinLinearKernel) and (
+            self.kernel.config.act_type in (torch.float16, torch.bfloat16)
         )
 
     def create_weights(
@@ -336,7 +349,6 @@ class AutoGPTQLinearMethod(LinearMethodBase):
         output_size_per_partition = sum(output_partition_sizes)
         is_row_parallel = input_size != input_size_per_partition
         weight_loader = extra_weight_attrs.get("weight_loader")
-        input_dtype = self.input_dtype
 
         mp_linear_kernel_config = MPLinearLayerConfig(
             full_weight_shape=(input_size, output_size),
@@ -345,17 +357,21 @@ class AutoGPTQLinearMethod(LinearMethodBase):
                 output_size_per_partition,
             ),
             weight_type=self.quant_config.quant_type,
-            act_type=params_dtype if input_dtype is None else input_dtype,
+            act_type=params_dtype,
             group_size=self.quant_config.group_size,
             zero_points=False,
-            has_g_idx=self.quant_config.desc_act,
         )
 
-        kernel_type = choose_mp_linear_kernel(mp_linear_kernel_config)
+        if self.use_batch_invariant:
+            kernel_type = None
+            backend_name = "dequantize + batch-invariant matmul"
+        else:
+            kernel_type = choose_mp_linear_kernel(mp_linear_kernel_config)
+            backend_name = kernel_type.__name__
 
-        if kernel_type.__name__ not in self._kernel_backends_being_used:
-            logger.info("Using %s for AutoGPTQLinearMethod", kernel_type.__name__)
-            self._kernel_backends_being_used.add(kernel_type.__name__)
+        if backend_name not in self._kernel_backends_being_used:
+            logger.info("Using %s for AutoGPTQLinearMethod", backend_name)
+            self._kernel_backends_being_used.add(backend_name)
 
         # Normalize group_size
         if self.quant_config.group_size != -1:
@@ -365,7 +381,7 @@ class AutoGPTQLinearMethod(LinearMethodBase):
 
         # Determine sharding
         if marlin_repeat_scales_on_all_ranks(
-            self.quant_config.desc_act, self.quant_config.group_size, is_row_parallel
+            self.quant_config.group_size, is_row_parallel
         ):
             # By setting scale_dim == None, weight_loader will
             # repeat the scales on each GPU in TP>1 case.
@@ -388,16 +404,6 @@ class AutoGPTQLinearMethod(LinearMethodBase):
             output_dim=1,
             packed_dim=0,
             packed_factor=self.quant_config.pack_factor,
-            weight_loader=weight_loader,
-        )
-
-        # Activation order
-        g_idx = RowvLLMParameter(
-            data=torch.empty(
-                input_size_per_partition,
-                dtype=torch.int32,
-            ),
-            input_dim=0,
             weight_loader=weight_loader,
         )
 
@@ -440,19 +446,37 @@ class AutoGPTQLinearMethod(LinearMethodBase):
             )
 
         layer.register_parameter("qweight", qweight)
-        layer.register_parameter("g_idx", g_idx)
         layer.register_parameter("scales", scales)
         layer.register_parameter("qzeros", qzeros)
 
-        self.kernel = kernel_type(
-            mp_linear_kernel_config,
-            w_q_param_name="qweight",
-            w_s_param_name="scales",
-            w_zp_param_name="qzeros",
-            w_gidx_param_name="g_idx",
-        )
+        if kernel_type is not None:
+            self.kernel = kernel_type(
+                mp_linear_kernel_config,
+                w_q_param_name="qweight",
+                w_s_param_name="scales",
+                w_zp_param_name="qzeros",
+            )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        if is_weights_pre_processed():
+            if not self.supports_pre_processed_weights:
+                raise RuntimeError(
+                    "Pre-processed AWQ/GPTQ weights require Marlin with "
+                    "FP16 or BF16 activations"
+                )
+            # Symmetric GPTQ retains checkpoint qzeros but reads the empty w_zp.
+            retire_parameter(layer, "qzeros")
+            assert self.kernel is not None
+            self.kernel.w_zp_name = "w_zp"
+            return
+
+        if self.use_batch_invariant:
+            # No Marlin repacking: apply() unpacks the checkpoint layout.
+            for name in ("qweight", "scales", "qzeros"):
+                replace_parameter(layer, name, getattr(layer, name).data)
+            return
+
+        assert self.kernel is not None
         self.kernel.process_weights_after_loading(layer)
 
     def apply(
@@ -461,6 +485,18 @@ class AutoGPTQLinearMethod(LinearMethodBase):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        if self.use_batch_invariant:
+            return gptq_linear_batch_invariant(
+                x,
+                layer.qweight,
+                layer.scales,
+                num_bits=self.quant_type.size_bits,
+                group_size=self.quant_config.group_size,
+                zero_bias=self.quant_type.bias,
+                bias=bias,
+            )
+
+        assert self.kernel is not None
         return self.kernel.apply_weights(layer, x, bias)
 
 
@@ -482,7 +518,6 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
             scale = kInt8StaticGroupScale
         else:
             raise ValueError("AutoGPTQMoEMethod only supports int4 and int8 now.")
-        self.input_dtype = None
         self.use_marlin = True
         weight_key = QuantKey(quant_type, scale)
 
@@ -492,7 +527,7 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
             quant_config=self.quant_config,
             may_have_zp=not self.quant_config.is_sym,
             may_have_bias=True,
-            allow_tile_padding=not self.quant_config.desc_act,
+            allow_tile_padding=True,
         )
 
     def create_weights(
@@ -504,27 +539,9 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
         params_dtype: torch.dtype,
         **extra_weight_attrs,
     ):
-        layer.input_dtype = self.input_dtype
-        is_a_8bit = self.input_dtype is not None and self.input_dtype.itemsize == 1
-
-        if is_a_8bit:
-            assert self.quant_config.quant_type.size_bits == 8, (
-                "W8A8-INT8 is not supported by marlin kernel."
-            )
-
-        intermediate_size_full = extra_weight_attrs.pop("intermediate_size_full")
-
-        self.is_k_full = (not self.quant_config.desc_act) or (
-            intermediate_size_per_partition == intermediate_size_full
-        )
-
         if self.quant_config.group_size != -1:
             scales_size13 = hidden_size // self.quant_config.group_size
-            w2_scales_size = (
-                intermediate_size_full
-                if self.quant_config.desc_act
-                else intermediate_size_per_partition
-            )
+            w2_scales_size = intermediate_size_per_partition
             scales_size2 = w2_scales_size // self.quant_config.group_size
             strategy = FusedMoeWeightScaleSupported.GROUP.value
         else:
@@ -579,8 +596,6 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
         )
         layer.register_parameter("w2_scales", w2_scales)
         set_weight_attrs(w2_scales, extra_weight_attrs)
-        # don't shard the w2 scales when running act order
-        set_weight_attrs(w2_scales, {"load_full_w2": self.quant_config.desc_act})
         # up_proj zero points
         w13_qzeros = torch.nn.Parameter(
             torch.empty(
@@ -607,48 +622,6 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
         )
         layer.register_parameter("w2_qzeros", w2_qzeros)
         set_weight_attrs(w2_qzeros, extra_weight_attrs)
-        # don't shard the w2 scales when running act order
-        set_weight_attrs(w2_qzeros, {"load_full_w2": self.quant_config.desc_act})
-        w13_g_idx = torch.nn.Parameter(
-            torch.empty(
-                num_experts,
-                hidden_size,
-                dtype=torch.int32,
-            ),
-            requires_grad=False,
-        )
-        layer.register_parameter("w13_g_idx", w13_g_idx)
-        set_weight_attrs(w13_g_idx, extra_weight_attrs)
-        w2_g_idx = torch.nn.Parameter(
-            torch.empty(
-                num_experts,
-                intermediate_size_per_partition,
-                dtype=torch.int32,
-            ),
-            requires_grad=False,
-        )
-        layer.register_parameter("w2_g_idx", w2_g_idx)
-        set_weight_attrs(w2_g_idx, extra_weight_attrs)
-        w13_g_idx_sort_indices = torch.nn.Parameter(
-            torch.empty(
-                num_experts,
-                hidden_size,
-                dtype=torch.int32,
-            ),
-            requires_grad=False,
-        )
-        layer.register_parameter("w13_g_idx_sort_indices", w13_g_idx_sort_indices)
-        set_weight_attrs(w13_g_idx_sort_indices, extra_weight_attrs)
-        w2_g_idx_sort_indices = torch.nn.Parameter(
-            torch.empty(
-                num_experts,
-                intermediate_size_per_partition,
-                dtype=torch.int32,
-            ),
-            requires_grad=False,
-        )
-        layer.register_parameter("w2_g_idx_sort_indices", w2_g_idx_sort_indices)
-        set_weight_attrs(w2_g_idx_sort_indices, extra_weight_attrs)
 
         # Some GPTQ checkpoints contain expert biases even when the model
         # architecture does not declare them. Zero initialization keeps
@@ -670,12 +643,6 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
         layer.register_parameter("w2_bias", w2_bias)
         set_weight_attrs(w2_bias, extra_weight_attrs)
 
-        if self.experts_cls is not None and issubclass(
-            self.experts_cls, FusedMoEExpertsModular
-        ):
-            device = layer.w13_qweight.device
-            layer.workspace = marlin_make_workspace_new(device, 4)
-
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
         def replace_or_register(name: str, val: torch.Tensor | None):
             if val is None:
@@ -688,12 +655,6 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
                     name, torch.nn.Parameter(val, requires_grad=False)
                 )
 
-        is_a_8bit = self.input_dtype is not None and self.input_dtype.itemsize == 1
-
-        assert not is_a_8bit or self.quant_config.quant_type.size_bits == 8, (
-            "W8A8-INT8 is not supported by marlin kernel."
-        )
-
         w13_bias = getattr(layer, "w13_bias", None)
         if "w13_bias" not in layer._loaded_expert_biases:
             layer.register_parameter("w13_bias", None)
@@ -703,21 +664,30 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
             layer.register_parameter("w2_bias", None)
             w2_bias = None
 
+        # Normalize GPTQ K-first layout to canonical N-first format.
+        w13 = layer.w13_qweight.data.transpose(1, 2).contiguous()
+        w2 = layer.w2_qweight.data.transpose(1, 2).contiguous()
+        w13_scale = layer.w13_scales.data.transpose(1, 2).contiguous()
+        w2_scale = layer.w2_scales.data.transpose(1, 2).contiguous()
+        w13_qzeros = getattr(layer, "w13_qzeros", None)
+        w2_qzeros = getattr(layer, "w2_qzeros", None)
+        if w13_qzeros is not None:
+            w13_qzeros = w13_qzeros.data.transpose(1, 2).contiguous()
+        if w2_qzeros is not None:
+            w2_qzeros = w2_qzeros.data.transpose(1, 2).contiguous()
+
         converted = convert_to_wna16_moe_kernel_format(
             backend=self.wna16_moe_backend,
             layer=layer,
             quant_config=self.quant_config,
-            input_dtype=self.input_dtype,
-            w13=layer.w13_qweight,
-            w2=layer.w2_qweight,
-            w13_scale=layer.w13_scales,
-            w2_scale=layer.w2_scales,
-            w13_g_idx=layer.w13_g_idx,
-            w2_g_idx=layer.w2_g_idx,
+            w13=w13,
+            w2=w2,
+            w13_scale=w13_scale,
+            w2_scale=w2_scale,
             w13_bias=w13_bias,
             w2_bias=w2_bias,
-            w13_qzeros=getattr(layer, "w13_qzeros", None),
-            w2_qzeros=getattr(layer, "w2_qzeros", None),
+            w13_qzeros=w13_qzeros,
+            w2_qzeros=w2_qzeros,
         )
 
         if converted is None:
@@ -730,14 +700,8 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
             w2,
             w13_scale,
             w2_scale,
-            w13_g_idx,
-            w2_g_idx,
-            w13_g_idx_sort_indices,
-            w2_g_idx_sort_indices,
             w13_qzeros,
             w2_qzeros,
-            w13_input_global_scale,
-            w2_input_global_scale,
             w13_bias,
             w2_bias,
         ) = converted
@@ -746,12 +710,6 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
         replace_parameter(layer, "w2_qweight", w2)
         replace_parameter(layer, "w13_scales", w13_scale)
         replace_parameter(layer, "w2_scales", w2_scale)
-        replace_parameter(layer, "w13_g_idx", w13_g_idx)
-        replace_parameter(layer, "w2_g_idx", w2_g_idx)
-        replace_parameter(layer, "w13_g_idx_sort_indices", w13_g_idx_sort_indices)
-        replace_parameter(layer, "w2_g_idx_sort_indices", w2_g_idx_sort_indices)
-        replace_or_register("w13_input_global_scale", w13_input_global_scale)
-        replace_or_register("w2_input_global_scale", w2_input_global_scale)
         replace_or_register("w13_bias", w13_bias)
         replace_or_register("w2_bias", w2_bias)
         replace_or_register("w13_qzeros", w13_qzeros)
@@ -765,24 +723,18 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
 
     def _setup_kernel(self, layer: RoutedExperts) -> None:
         """Build the FusedMoEKernel for this layer."""
-
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
         self.moe_kernel = make_wna16_moe_kernel(
             moe_quant_config=self.moe_quant_config,
             moe_config=self.moe,
             experts_cls=self.experts_cls,
             backend=self.wna16_moe_backend,
-            is_k_full=self.is_k_full,
-            w13_g_idx=getattr(layer, "w13_g_idx", None),
-            w2_g_idx=getattr(layer, "w2_g_idx", None),
-            w13_g_idx_sort_indices=getattr(layer, "w13_g_idx_sort_indices", None),
-            w2_g_idx_sort_indices=getattr(layer, "w2_g_idx_sort_indices", None),
             routing_tables=layer._expert_routing_tables(),
         )
 
     def get_fused_moe_quant_config(self, layer: RoutedExperts) -> FusedMoEQuantConfig:
         if self.wna16_moe_backend == WNA16MoEBackend.HUMMING:
-            from vllm.model_executor.layers.quantization.utils.humming_utils import (
+            from vllm.model_executor.layers.quantization.utils.humming import (
                 get_humming_moe_quant_config,
             )
 
@@ -860,4 +812,5 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
             topk_group=layer.topk_group,
             e_score_correction_bias=layer.e_score_correction_bias,
             routed_scaling_factor=layer.routed_scaling_factor,
+            routing_sink=layer.routing_sink,
         )

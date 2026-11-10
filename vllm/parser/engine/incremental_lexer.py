@@ -5,6 +5,7 @@ tokens, with prefix-match buffering for ambiguous boundaries."""
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 import regex as re
@@ -30,8 +31,8 @@ class LexToken:
 class LexerShape:
     """Immutable pre-computed data derived from terminal definitions.
 
-    Created once per :class:`ParserEngineConfig` and shared across all
-    :class:`IncrementalLexer` instances that use the same config.
+    Created once per `ParserEngineConfig` and shared across all
+    `IncrementalLexer` instances that use the same config.
     """
 
     __slots__ = (
@@ -83,7 +84,7 @@ class IncrementalLexer:
 
     The key feature is **prefix-match buffering**: when the text in the
     buffer could be the start of a multi-character terminal (e.g.
-    ``"<tool_"`` that could become ``"<tool_call>"``), the lexer holds
+    `"<tool_"` that could become `"<tool_call>"`), the lexer holds
     the text rather than emitting it.  When the next chunk arrives, it
     either completes the terminal or flushes the buffered text as
     content.
@@ -284,7 +285,9 @@ class IncrementalLexer:
         return n
 
 
-def terminals_from_literals(literals: dict[str, str]) -> list[TerminalDef]:
+def terminals_from_literals(
+    literals: Mapping[str, str | tuple[str, ...]],
+) -> list[TerminalDef]:
     return [
         TerminalDef(
             name=name,
@@ -292,5 +295,6 @@ def terminals_from_literals(literals: dict[str, str]) -> list[TerminalDef]:
             is_literal=True,
             literal=lit,
         )
-        for name, lit in literals.items()
+        for name, value in literals.items()
+        for lit in ((value,) if isinstance(value, str) else value)
     ]

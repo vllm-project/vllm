@@ -148,7 +148,9 @@ def test_extract_tool_calls():
     }
 
 
-def test_function_calls_block_is_not_accepted():
+def test_function_calls_wrapper_is_not_recognized():
+    # The V3.2 wrapper is not a V4 terminal, so it passes through as content,
+    # but the invoke inside it is still parsed (tool calls anchor on the invoke).
     parser = make_parser()
     model_output = build_tool_call("search", {"query": "vllm"}).replace(
         "tool_calls", "function_calls"
@@ -156,8 +158,38 @@ def test_function_calls_block_is_not_accepted():
 
     result = parser.extract_tool_calls(model_output, make_request())
 
-    assert not result.tools_called
-    assert result.content == model_output
+    assert result.tools_called
+    assert result.tool_calls[0].function.name == "search"
+    assert result.content == "<｜DSML｜function_calls>\n"
+
+
+def test_missing_tool_calls_wrapper_is_recovered():
+    # Regression for #48931: at long context the model omits the
+    # <｜DSML｜tool_calls> START token but still emits a complete invoke.
+    parser = make_parser()
+    model_output = build_tool_call("search", {"query": "vllm"}).replace(
+        TC_START + "\n", ""
+    )
+    assert TC_START not in model_output
+
+    result = parser.extract_tool_calls(model_output, make_request())
+
+    assert result.tools_called
+    assert result.tool_calls[0].function.name == "search"
+    assert json.loads(result.tool_calls[0].function.arguments) == {"query": "vllm"}
+    assert result.content is None
+
+    deltas = stream(make_parser(), model_output, chunk_size=3)
+    names = [
+        tc.function.name
+        for d in deltas
+        if d.tool_calls
+        for tc in d.tool_calls
+        if tc.function.name
+    ]
+    assert names == ["search"]
+    assert json.loads(reconstruct_args(deltas)) == {"query": "vllm"}
+    assert not any(d.content and "DSML" in d.content for d in deltas)
 
 
 def test_streaming_extracts_complete_invokes():
@@ -220,6 +252,84 @@ def test_streaming_emits_incremental_argument_chunks():
         "cities": ["Beijing", "Shanghai", "Tokyo", "New York"],
         "notes": "靠窗座位",
     }
+
+
+def _stream_param_body(properties: dict, param_open: str, body: str) -> list[str]:
+    """Stream one parameter body in 32-char chunks, one argument list per chunk."""
+    tool = ChatCompletionToolsParam(
+        function=FunctionDefinition(
+            name="emit",
+            parameters={"type": "object", "properties": properties},
+        ),
+    )
+    parser = make_parser(tools=[tool])
+    chunks = [
+        f'{TC_START}\n{INV_START}emit">\n{param_open}',
+        *(body[i : i + 32] for i in range(0, len(body), 32)),
+        f"{PARAM_END}\n{INV_END}\n{TC_END}",
+    ]
+    per_chunk_args = []
+    previous_text = ""
+    for delta_text in chunks:
+        current_text = previous_text + delta_text
+        delta = parser.extract_tool_calls_streaming(
+            previous_text=previous_text,
+            current_text=current_text,
+            delta_text=delta_text,
+            previous_token_ids=[],
+            current_token_ids=[],
+            delta_token_ids=[1],
+            request=make_request(),
+        )
+        previous_text = current_text
+        per_chunk_args.append(
+            "".join(
+                tool_call.function.arguments
+                for tool_call in (delta.tool_calls if delta else [])
+                if tool_call.function and tool_call.function.arguments
+            )
+        )
+    return per_chunk_args
+
+
+def test_streaming_long_string_argument_is_incremental():
+    # Regression for #52846: a string body has no ">" so it used to be
+    # buffered until </parameter> arrived.
+    body = "A" * 4096
+    per_chunk_args = _stream_param_body(
+        {"text": {"type": "string"}},
+        f'{PARAM_START}text" string="true">',
+        body,
+    )
+
+    body_chunks = per_chunk_args[1:-1]
+    assert sum(1 for args in body_chunks if args) > 1
+    assert json.loads("".join(per_chunk_args)) == {"text": body}
+
+
+def test_streaming_non_string_argument_is_withheld_until_close():
+    body = "1" * 128
+    per_chunk_args = _stream_param_body(
+        {"count": {"type": "integer"}},
+        f'{PARAM_START}count" string="false">',
+        body,
+    )
+
+    assert not any(per_chunk_args[1:-1])
+    assert json.loads("".join(per_chunk_args)) == {"count": int(body)}
+
+
+def test_streaming_string_argument_with_markup_is_incremental():
+    body = '<div class="a">x > y</div>\n' * 64
+    per_chunk_args = _stream_param_body(
+        {"html": {"type": "string"}},
+        f'{PARAM_START}html" string="true">',
+        body,
+    )
+
+    body_chunks = per_chunk_args[1:-1]
+    assert sum(1 for args in body_chunks if args) > 1
+    assert json.loads("".join(per_chunk_args)) == {"html": body}
 
 
 def _with_strict(

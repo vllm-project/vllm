@@ -26,7 +26,6 @@ NUM_BLOCKS = 4321  # Arbitrary values for testing
 PARTITION_SIZE_ROCM = 256
 DTYPES = [torch.bfloat16, torch.float16]
 NUM_GEN_SEQS = [7]  # Arbitrary values for testing
-NUM_PREFILL_SEQS = [3]  # Arbitrary values for testing
 NUM_HEADS = [(32, 8), (40, 40), (64, 8)]  # Arbitrary values for testing
 
 # Head sizes supported by the ROCm paged attention kernel.
@@ -123,6 +122,7 @@ def ref_single_query_cached_kv_attention(
 @pytest.mark.parametrize("kv_cache_dtype", KV_CACHE_DTYPE)
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("use_interleaved_v_cache", [False, True])
 def test_paged_attention(
     kv_cache_factory,
     num_seqs: int,
@@ -134,9 +134,14 @@ def test_paged_attention(
     kv_cache_dtype: str,
     seed: int,
     device: str,
+    use_interleaved_v_cache: bool,
 ) -> None:
     if current_platform.is_navi() and (
-        kv_cache_dtype == "fp8" or head_size != 128 or block_size != 16 or use_alibi
+        kv_cache_dtype == "fp8"
+        or head_size != 128
+        or block_size != 16
+        or use_alibi
+        or use_interleaved_v_cache
     ):
         pytest.skip()
 
@@ -153,18 +158,22 @@ def test_paged_attention(
     if use_alibi:
         alibi_slopes = torch.randn(num_query_heads, dtype=torch.float)
 
-    seq_lens = [random.randint(1, MAX_SEQ_LEN) for _ in range(num_seqs)]
-    seq_lens[-1] = MAX_SEQ_LEN
-    max_seq_len = max(seq_lens)
-    seq_lens = torch.tensor(seq_lens, dtype=torch.int)
+    seq_lens_lst = [random.randint(1, MAX_SEQ_LEN) for _ in range(num_seqs)]
+    seq_lens_lst[-1] = MAX_SEQ_LEN
+    max_seq_len = max(seq_lens_lst)
+    seq_lens = torch.tensor(seq_lens_lst, dtype=torch.int)
 
     # Create the block tables.
     max_num_blocks_per_seq = (max_seq_len + block_size - 1) // block_size
     block_tables_lst: list[list[int]] = []
-    for _ in range(num_seqs):
+    for seq_idx, seq_len in enumerate(seq_lens_lst):
         block_table = [
-            random.randint(0, NUM_BLOCKS - 1) for _ in range(max_num_blocks_per_seq)
+            random.randint(num_seqs, NUM_BLOCKS - 1)
+            for _ in range(max_num_blocks_per_seq)
         ]
+        # Keep the last block private to this sequence so its padding can be
+        # poisoned without corrupting valid tokens from another sequence.
+        block_table[(seq_len - 1) // block_size] = seq_idx
         block_tables_lst.append(block_table)
 
     block_tables = torch.tensor(block_tables_lst, dtype=torch.int)
@@ -183,8 +192,34 @@ def test_paged_attention(
     )
     key_cache, value_cache = key_caches[0], value_caches[0]
 
-    # Using default kv_scale
-    k_scale = v_scale = torch.tensor(1.0, dtype=torch.float32, device=device)
+    k_scale_value = 0.5 if kv_cache_dtype == "fp8" else 1.0
+    v_scale_value = 0.25 if kv_cache_dtype == "fp8" else 1.0
+    k_scale = torch.tensor(k_scale_value, dtype=torch.float32, device=device)
+    v_scale = torch.tensor(v_scale_value, dtype=torch.float32, device=device)
+
+    if kv_cache_dtype == "fp8":
+        padding_nan = 0x80 if current_platform.is_fp8_fnuz() else 0x7F
+    else:
+        padding_nan = torch.nan
+    for seq_idx, seq_len in enumerate(seq_lens_lst):
+        padding_start = seq_len % block_size
+        if padding_start:
+            last_block_idx = block_tables_lst[seq_idx][seq_len // block_size]
+            value_cache[last_block_idx, :, :, padding_start:] = padding_nan
+
+    standard_value_cache = value_cache
+    if use_interleaved_v_cache:
+        # Hand the kernel V in the interleaved layout (same 4D shape); the
+        # reference below gets the standard layout back.
+        x_v = 16 // value_cache.element_size()
+        value_cache = (
+            value_cache.view(
+                NUM_BLOCKS, num_kv_heads, head_size, block_size // x_v, x_v
+            )
+            .permute(0, 1, 3, 2, 4)
+            .contiguous()
+            .view(NUM_BLOCKS, num_kv_heads, head_size, block_size)
+        )
 
     # Call the paged attention kernel.
     output = torch.empty_like(query)
@@ -219,6 +254,7 @@ def test_paged_attention(
         kv_cache_dtype,
         k_scale,
         v_scale,
+        use_interleaved_v_cache=use_interleaved_v_cache,
     )
 
     opcheck(
@@ -244,9 +280,12 @@ def test_paged_attention(
             v_scale,
             None,
             "f16",
+            use_interleaved_v_cache,
         ),
         cond=(head_size == 64 and block_size == BLOCK_SIZES[0]),
     )
+
+    value_cache = standard_value_cache
 
     # Run the reference implementation.
     if kv_cache_dtype == "fp8":
@@ -256,14 +295,14 @@ def test_paged_attention(
         dequantized_key_cache = torch.empty(
             size=key_cache_shape, dtype=dtype, device=device
         )
-        ops.convert_fp8(dequantized_key_cache, key_cache)
+        ops.convert_fp8(dequantized_key_cache, key_cache, k_scale_value)
         key_cache = dequantized_key_cache
 
         value_cache_shape = value_cache.shape
         dequantized_value_cache = torch.empty(
             size=value_cache_shape, dtype=dtype, device=device
         )
-        ops.convert_fp8(dequantized_value_cache, value_cache)
+        ops.convert_fp8(dequantized_value_cache, value_cache, v_scale_value)
         value_cache = dequantized_value_cache
 
     ref_output = torch.empty_like(query)
@@ -291,46 +330,6 @@ def test_paged_attention(
     if kv_cache_dtype == "fp8":
         atol, rtol = 1e-2, 1e-5
     torch.testing.assert_close(output, ref_output, atol=atol, rtol=rtol)
-
-
-def ref_multi_query_kv_attention(
-    cu_seq_lens: list[int],
-    query: torch.Tensor,
-    key: torch.Tensor,
-    value: torch.Tensor,
-    scale: float,
-    alibi_bias: list[torch.Tensor] | None,
-    dtype: torch.dtype,
-) -> torch.Tensor:
-    num_seqs = len(cu_seq_lens) - 1
-    ref_outputs: list[torch.Tensor] = []
-    if alibi_bias:
-        assert len(alibi_bias) == num_seqs
-    for i in range(num_seqs):
-        start_idx = cu_seq_lens[i]
-        end_idx = cu_seq_lens[i + 1]
-        seq_len = end_idx - start_idx
-
-        # Create attention mask. ALiBi already includes a tril causal mask.
-        if alibi_bias:
-            attn_mask = alibi_bias[i]
-        else:
-            attn_mask = torch.triu(
-                torch.ones(seq_len, seq_len, dtype=dtype), diagonal=1
-            )
-            attn_mask = attn_mask * torch.finfo(dtype).min
-            attn_mask = attn_mask.to(dtype=dtype)
-
-        ref_output = ref_masked_attention(
-            query[start_idx:end_idx],
-            key[start_idx:end_idx],
-            value[start_idx:end_idx],
-            scale,
-            attn_mask=attn_mask,
-        )
-        ref_outputs.append(ref_output)
-
-    return torch.cat(ref_outputs, dim=0)
 
 
 @pytest.mark.parametrize("attention_cls", [Attention, MMEncoderAttention])

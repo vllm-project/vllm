@@ -2,15 +2,15 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Manual fusion of tensor-parallel all-reduce with the following GemmaRMSNorm.
 
-Under tensor parallelism a ``RowParallelLinear`` (e.g. attention ``o_proj``)
+Under tensor parallelism a `RowParallelLinear` (e.g. attention `o_proj`)
 produces a per-rank partial sum that is all-reduced, and the result is then fed
-into a ``GemmaRMSNorm`` that adds the residual and normalizes. flashinfer ships a
+into a `GemmaRMSNorm` that adds the residual and normalizes. flashinfer ships a
 kernel that fuses all-reduce + residual-add + RMSNorm into a single launch; this
 helper drives it directly (no torch.compile pass) for models that run eager.
 
 Scope: attention output only, no quantization. When the flashinfer fast path is
 not applicable (TP==1, flashinfer/NVSwitch unavailable, unsupported dtype, or an
-oversize batch) it falls back to ``all_reduce`` + ``GemmaRMSNorm``, which is
+oversize batch) it falls back to `all_reduce` + `GemmaRMSNorm`, which is
 numerically identical to the unfused model path.
 """
 
@@ -23,6 +23,7 @@ from vllm.distributed.parallel_state import (
     get_tp_group,
 )
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm
+from vllm.platforms import current_platform
 
 MiB = 1024 * 1024
 
@@ -54,7 +55,7 @@ _FI_SUPPORTED_DTYPES = (torch.bfloat16, torch.float16)
 
 def _max_token_num(tp_size: int, hidden_size: int, dtype: torch.dtype) -> int | None:
     """Workspace token budget for flashinfer fused all-reduce, or None if the
-    current world size / device is unsupported. Mirrors ``FlashInferAllReduce``."""
+    current world size / device is unsupported. Mirrors `FlashInferAllReduce`."""
     from vllm.config.compilation import PassConfig
 
     max_size_mb = PassConfig.default_fi_allreduce_fusion_max_size_mb().get(tp_size)
@@ -111,17 +112,41 @@ def _can_use_flashinfer(hidden_states: torch.Tensor, tp_size: int) -> tuple[bool
     return True, max_token_num
 
 
+def _can_use_aiter_fused_ar_rms(hidden_states: torch.Tensor) -> bool:
+    if not current_platform.is_rocm():
+        return False
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    if not rocm_aiter_ops.is_custom_all_reduce_enabled():
+        return False
+    if (
+        hidden_states.dim() != 2
+        or not hidden_states.is_contiguous()
+        or hidden_states.dtype not in _FI_SUPPORTED_DTYPES
+    ):
+        return False
+    aiter_ar = rocm_aiter_ops.get_aiter_allreduce()
+    if aiter_ar is None or aiter_ar.disabled:
+        return False
+    total_bytes = hidden_states.numel() * hidden_states.element_size()
+    if total_bytes > aiter_ar.effective_max_size():
+        return False
+    if not aiter_ar.should_custom_ar(hidden_states):
+        return False
+    return aiter_ar.use_1stage_fused_ar_rms(hidden_states)
+
+
 def fused_allreduce_gemma_rms_norm(
     hidden_states: torch.Tensor,
     residual: torch.Tensor,
     norm: GemmaRMSNorm,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """All-reduce ``hidden_states`` + add ``residual`` + GemmaRMSNorm, fused.
+    """All-reduce `hidden_states` + add `residual` + GemmaRMSNorm, fused.
 
-    ``hidden_states`` is the per-rank *partial* (un-reduced) output of a
-    row-parallel linear; ``norm`` is the GemmaRMSNorm applied right after.
-    Returns ``(normed_output, new_residual)``, equivalent to
-    ``norm(all_reduce(hidden_states), residual)``.
+    `hidden_states` is the per-rank *partial* (un-reduced) output of a
+    row-parallel linear; `norm` is the GemmaRMSNorm applied right after.
+    Returns `(normed_output, new_residual)`, equivalent to
+    `norm(all_reduce(hidden_states), residual)`.
     """
     tp_size = get_tensor_model_parallel_world_size()
     if tp_size == 1:
@@ -149,6 +174,57 @@ def fused_allreduce_gemma_rms_norm(
         )
         return norm_out, hidden_states
 
+    if _can_use_aiter_fused_ar_rms(hidden_states):
+        from vllm._aiter_ops import rocm_aiter_ops
+
+        return rocm_aiter_ops.get_fused_allreduce_rmsnorm_op()(
+            input_=hidden_states,
+            residual=residual,
+            weight=norm.weight,
+            epsilon=norm.variance_epsilon,
+            gemma_norm=True,
+        )
+
     # Fallback: explicit all-reduce + GemmaRMSNorm (matches the unfused model).
     reduced = tensor_model_parallel_all_reduce(hidden_states)
     return norm(reduced, residual)
+
+
+def allreduce_gemma_rms_norm_mxfp8(
+    hidden_states: torch.Tensor,
+    residual: torch.Tensor,
+    norm: GemmaRMSNorm,
+    return_normed: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor] | None:
+    """All-reduce + residual add + GemmaRMSNorm with MXFP8-quantized output.
+
+    `fused_allreduce_gemma_rms_norm` followed by an MXFP8 activation quant,
+    with the quant as an epilogue of the Triton norm instead of its own launch.
+    The fused all-reduce + norm kernels have no quantized output, so this only
+    covers the plain collective + Triton norm; when one of them would run it
+    returns `None` and the caller keeps the unfused path.
+
+    Returns `(x_q, x_scale, normed, residual_out)`: float8_e4m3fn values
+    `[M, N]`, row-major E8M0 scales `[M, N // 32]`, the bf16 normed rows
+    (only if `return_normed`, else `None`) and the new residual.
+    """
+    from vllm.models.minimax_m3.amd.ops import (
+        gemma_fused_add_rmsnorm_mxfp8,
+        gemma_fused_add_rmsnorm_mxfp8_and_bf16,
+    )
+
+    tp_size = get_tensor_model_parallel_world_size()
+    if tp_size > 1:
+        if _can_use_flashinfer(hidden_states, tp_size)[0]:
+            return None
+        if _can_use_aiter_fused_ar_rms(hidden_states):
+            return None
+        hidden_states = tensor_model_parallel_all_reduce(hidden_states)
+    if return_normed:
+        return gemma_fused_add_rmsnorm_mxfp8_and_bf16(
+            hidden_states, residual, norm.weight, norm.variance_epsilon
+        )
+    x_q, x_scale, res_out = gemma_fused_add_rmsnorm_mxfp8(
+        hidden_states, residual, norm.weight, norm.variance_epsilon
+    )
+    return x_q, x_scale, None, res_out

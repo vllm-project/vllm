@@ -3,8 +3,6 @@
 
 import pytest
 import torch
-from packaging.version import Version
-from transformers import __version__ as TRANSFORMERS_VERSION
 
 from vllm.platforms import current_platform
 
@@ -26,9 +24,56 @@ AITER_MODEL_LIST = [
     "meta-llama/Llama-3.2-1B-Instruct",
     "openbmb/MiniCPM3-4B",
     "Qwen/Qwen2.5-0.5B-Instruct",
-    "TitanML/tiny-mixtral",
+    "axolotl-ai-co/tiny-mixtral-30m",
     "Qwen/Qwen3-8B",
 ]
+
+
+def _input_embeds(hf_model, model: str, prompts: list[str]) -> list[torch.Tensor]:
+    """Prompt embeddings for the vLLM inputs_embeds path, off the HF model."""
+    embeds = []
+    for prompt in prompts:
+        token_ids = hf_model.tokenizer(prompt, return_tensors="pt").input_ids.to(
+            hf_model.model.device
+        )
+        # Retained prompt values must not keep reference weights alive.
+        with torch.no_grad():
+            embed = hf_model.model.get_input_embeddings()(token_ids)
+
+        # MiniCPM models apply scale_emb to embeddings internally.
+        # vLLM expects pre-scaled embeddings when using inputs_embeds.
+        if model in EMBED_SCALING_MODELS:
+            embed = embed * hf_model.model.config.scale_emb
+
+        embeds.append(embed.squeeze(0))
+    return embeds
+
+
+@pytest.fixture
+def hf_reference_key(request):
+    """Cache key: every parametrized value except the one the reference ignores.
+
+    Read off the parametrization so a parameter added later joins the key on
+    its own; if the reference does not depend on it, the cost is a missed hit.
+    """
+    params = dict(request.node.callspec.params)
+    params.pop("use_prompt_embeds")
+    return tuple(sorted(params.items()))
+
+
+@pytest.fixture(scope="module")
+def hf_reference_cache():
+    """Greedy HF logprobs, so one reference serves both use_prompt_embeds arms.
+
+    Without this, every model loads the HF checkpoint and decodes it once per
+    value of a parameter the reference does not depend on. The prompts are a
+    fixture constant and the only per-model edit to them is keyed on the model,
+    so hf_reference_key covers everything the reference varies with. Entries
+    hold no tensors; one is ~130 KiB.
+    """
+    cache: dict[tuple[tuple[str, object], ...], list] = {}
+    yield cache
+    cache.clear()
 
 
 # @maybe_test_rocm_aiter
@@ -45,9 +90,10 @@ AITER_MODEL_LIST = [
         ),
         pytest.param(
             "openai-community/gpt2",  # gpt2
-            marks=[pytest.mark.core_model],
+            marks=[pytest.mark.core_model]
+            + ([pytest.mark.flaky(reruns=2)] if current_platform.is_xpu() else []),
         ),
-        pytest.param("Milos/slovak-gpt-j-405M"),  # gptj
+        pytest.param("vllm-project/slovak-gpt-j-405M"),  # gptj
         pytest.param("bigcode/tiny_starcoder_py"),  # gpt_bigcode
         pytest.param("EleutherAI/pythia-70m"),  # gpt_neox
         pytest.param(
@@ -78,6 +124,9 @@ AITER_MODEL_LIST = [
             marks=[pytest.mark.core_model, pytest.mark.cpu_model],
         ),
         pytest.param(
+            "facebook/opt-350m",  # opt with projected token embeddings
+        ),
+        pytest.param(
             "microsoft/phi-2",  # phi
             marks=[pytest.mark.core_model, pytest.mark.slow_test],
         ),
@@ -95,10 +144,11 @@ AITER_MODEL_LIST = [
         pytest.param("stabilityai/stablelm-3b-4e1t"),  # stablelm
         pytest.param("bigcode/starcoder2-3b"),  # starcoder2
         pytest.param(
-            "TitanML/tiny-mixtral",  # mixtral
+            "axolotl-ai-co/tiny-mixtral-30m",  # mixtral
             marks=[pytest.mark.core_model],
         ),
         pytest.param("swiss-ai/Apertus-8B-Instruct-2509"),  # apertus
+        pytest.param("domyn/Domyn-Edge-Base"),  # domyn_edge
         pytest.param(
             "naver-hyperclovax/HyperCLOVAX-SEED-Think-14B",  # hyperclovax
             marks=[large_gpu_mark(min_gb=32)],
@@ -115,6 +165,8 @@ def test_models(
     hf_runner,
     vllm_runner,
     example_prompts,
+    hf_reference_cache,
+    hf_reference_key,
     model: str,
     max_tokens: int,
     num_logprobs: int,
@@ -125,12 +177,6 @@ def test_models(
     model_info = HF_EXAMPLE_MODELS.find_hf_info(model)
     model_info.check_available_online(on_fail="skip")
     model_info.check_transformers_version(on_fail="skip")
-
-    if current_platform.is_rocm() and model == "TitanML/tiny-mixtral":
-        # Its single-token router selects LLMM1, whose low-precision
-        # accumulation can change the top-2 experts. Keep the optimized kernel
-        # enabled generally, but use the reference GEMM for this accuracy test.
-        monkeypatch.setenv("VLLM_ROCM_USE_SKINNY_GEMM", "0")
 
     if use_rocm_aiter and (model in AITER_MODEL_LIST):
         monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
@@ -150,41 +196,33 @@ def test_models(
             "def add(a, b):\n    return a + b\n\ndef sub(a, b):\n    return a - "
         )
 
-    with hf_runner(
-        model,
-        revision=model_info.revision,
-        trust_remote_code=model_info.trust_remote_code,
-    ) as hf_model:
-        hf_outputs = hf_model.generate_greedy_logprobs_limit(
-            example_prompts, max_tokens, num_logprobs
-        )
+    prompt_embeds: list[torch.Tensor] | None = [] if use_prompt_embeds else None
+    hf_outputs = hf_reference_cache.get(hf_reference_key)
 
-        prompt_embeds: list[torch.Tensor] | None = [] if use_prompt_embeds else None
+    # Embeddings have to come off a live reference model, so the checkpoint is
+    # still loaded for the inputs_embeds runs even on a cache hit.
+    if hf_outputs is None or prompt_embeds is not None:
+        with hf_runner(
+            model,
+            revision=model_info.revision,
+            trust_remote_code=model_info.trust_remote_code,
+        ) as hf_model:
+            if hf_outputs is None:
+                hf_outputs = hf_model.generate_greedy_logprobs_limit(
+                    example_prompts,
+                    max_tokens,
+                    num_logprobs,
+                    # Domyn's remote code decodes with torch varlen_attn, whose
+                    # ROCm causal mask is top-left aligned when max_q < max_k:
+                    # https://github.com/pytorch/pytorch/pull/201930
+                    use_cache=not (
+                        current_platform.is_rocm() and model == "domyn/Domyn-Edge-Base"
+                    ),
+                )
+                hf_reference_cache[hf_reference_key] = hf_outputs
 
-        for prompt in example_prompts:
-            token_ids = hf_model.tokenizer(prompt, return_tensors="pt").input_ids.to(
-                hf_model.model.device
-            )
             if prompt_embeds is not None:
-                embed = hf_model.model.get_input_embeddings()(token_ids)
-
-                if "gemma" in model.lower() and (
-                    Version(TRANSFORMERS_VERSION) < Version("5.3.0.dev0")
-                ):
-                    # For Gemma 1/2 models with Transformers 5.4.0+, the prompt
-                    # embeddings are normalised in `get_prompt_embeddings`,
-                    # like Gemma 3. For older versions, we need to manually normalise.
-                    embed_scale = hf_model.config.hidden_size**0.5
-                    normalizer = torch.tensor(embed_scale, dtype=embed.dtype)
-                    embed *= normalizer
-
-                # MiniCPM models apply scale_emb to embeddings internally.
-                # vLLM expects pre-scaled embeddings when using inputs_embeds.
-                if model in EMBED_SCALING_MODELS:
-                    config = hf_model.model.config
-                    embed = embed * config.scale_emb
-
-                prompt_embeds.append(embed.squeeze(0))
+                prompt_embeds.extend(_input_embeds(hf_model, model, example_prompts))
 
     vllm_kwargs = {}
     if (
@@ -218,12 +256,19 @@ def test_models(
                 prompt_embeds, max_tokens, num_logprobs
             )
 
-    check_logprobs_close(
-        outputs_0_lst=hf_outputs,
-        outputs_1_lst=vllm_outputs,
-        name_0="hf",
-        name_1="vllm",
-    )
+    try:
+        check_logprobs_close(
+            outputs_0_lst=hf_outputs,
+            outputs_1_lst=vllm_outputs,
+            name_0="hf",
+            name_1="vllm",
+        )
+    except AssertionError:
+        # A rerun has to redraw the reference: HF decoding is nondeterministic
+        # on XPU, which is why gpt2 carries flaky(reruns=2) there (#57862).
+        hf_reference_cache.pop(hf_reference_key, None)
+        raise
+
     if prompt_embeds is not None:
         check_logprobs_close(
             outputs_0_lst=vllm_outputs,

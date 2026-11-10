@@ -2,23 +2,25 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import cast
 
+import torch
 import torch.nn as nn
 
 from vllm.config import SpeculativeConfig
 from vllm.logger import init_logger
-from vllm.model_executor.models.interfaces import SupportsEagle3, supports_eagle3
+from vllm.model_executor.models.interfaces import (
+    SupportsEagle3,
+    get_eagle_decoder,
+    supports_eagle3,
+)
 
 logger = init_logger(__name__)
 
 
 def set_eagle3_aux_hidden_state_layers(
-    model: nn.Module,
-    spec_config: SpeculativeConfig,
+    model: nn.Module, spec_config: SpeculativeConfig, use_pp: bool = False
 ) -> None:
     if not supports_eagle3(model):
         raise RuntimeError("Model does not support EAGLE3 interface")
-    # mypy may infer the class-level overload for supports_eagle3.
-    # Narrow explicitly to the runtime protocol instance.
     if isinstance(model, type):
         raise RuntimeError("Expected model instance for EAGLE3 configuration")
     eagle3_model = cast(SupportsEagle3, model)
@@ -30,6 +32,46 @@ def set_eagle3_aux_hidden_state_layers(
         aux_layers = eagle3_model.get_eagle3_default_aux_hidden_state_layers()
         logger.info("Using Eagle3 auxiliary layers from model: %s", aux_layers)
     eagle3_model.set_aux_hidden_state_layers(aux_layers)
+    reserve_aux_intermediate_tensor_slots(model)
+
+    if use_pp:
+        assert spec_config.method is not None
+        verify_supports_aux_hidden_states_over_pp(model, spec_config.method)
+
+
+def verify_supports_aux_hidden_states_over_pp(model: nn.Module, method: str) -> None:
+    decoder = get_eagle_decoder(model)
+    if decoder is None or not decoder.supports_aux_hidden_states_over_pp:
+        raise ValueError(
+            f"{type(model).__name__} does not support {method} with "
+            "pipeline parallelism"
+        )
+
+
+def reserve_aux_intermediate_tensor_slots(model: nn.Module) -> None:
+    from vllm.distributed.parallel_state import model_parallel_is_initialized
+
+    if not model_parallel_is_initialized():
+        return
+    decoder = get_eagle_decoder(model)
+    if decoder is None or not decoder.supports_aux_hidden_states_over_pp:
+        return
+    upstream_keys, _ = decoder.aux_hidden_state_slot_keys()
+    if not upstream_keys:
+        return
+
+    hidden_size = cast(nn.Module, decoder).config.hidden_size
+    make_empty = model.make_empty_intermediate_tensors
+
+    def make_empty_with_aux(batch_size, dtype, device):
+        tensors = make_empty(batch_size, dtype, device)
+        for key in upstream_keys:
+            tensors[key] = torch.zeros(
+                (batch_size, hidden_size), dtype=dtype, device=device
+            )
+        return tensors
+
+    model.make_empty_intermediate_tensors = make_empty_with_aux
 
 
 def get_eagle3_aux_layers_from_config(
@@ -47,7 +89,14 @@ def get_eagle3_aux_layers_from_config(
     if not layer_ids:
         dspark_layer_ids = getattr(hf_config, "dspark_target_layer_ids", None)
         if dspark_layer_ids:
-            layer_ids = [i + 1 for i in dspark_layer_ids]
+            if getattr(hf_config, "model_type", None) == "deepseek_v41":
+                # v4.1 reads the attention *inputs* of its target layers, and
+                # the target model captures the entry stream of layer L when
+                # idx+1 == L, so the ids are used as-is. (v4's ids are in
+                # capture-after semantics and keep the +1.)
+                layer_ids = list(dspark_layer_ids)
+            else:
+                layer_ids = [i + 1 for i in dspark_layer_ids]
     if not layer_ids:
         # Dense DSpark (e.g. Qwen3) also uses different aux layer semantics.
         target_layer_ids = getattr(hf_config, "target_layer_ids", None)

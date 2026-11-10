@@ -29,7 +29,7 @@ from typing import Any
 
 import torch
 from torch import nn
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 # from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
@@ -192,7 +192,7 @@ class Ernie4_5_VLMoeAttention(nn.Module):
 class Ernie4_5_VLMoeMoE(nn.Module):
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
@@ -385,7 +385,7 @@ class Ernie4_5_VLMoeMoE(nn.Module):
 class Ernie4_5_VLMoeDecoderLayer(nn.Module):
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",

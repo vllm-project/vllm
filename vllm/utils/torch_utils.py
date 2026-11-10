@@ -1,24 +1,28 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import array
 import contextlib
-import importlib.metadata
 import os
 import random
 import sys
 import threading
-from collections.abc import Callable, Collection
+from collections.abc import Callable, Collection, Sequence
 from typing import TYPE_CHECKING, Any, TypeVar
 
 import numpy as np
 import numpy.typing as npt
 import torch
-from packaging import version
-from packaging.version import Version
 from torch.library import Library, infer_schema
 
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.utils.platform_utils import is_pin_memory_available
+from vllm.utils.torch_version import (  # noqa: F401
+    _is_torch_equal,
+    _is_torch_equal_or_newer,
+    is_torch_equal,
+    is_torch_equal_or_newer,
+)
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
@@ -30,6 +34,10 @@ else:
 logger = init_logger(__name__)
 
 
+# NOTE: registration-time-mutable. Platform backends inject custom
+# --kv-cache-dtype entries here via register_kv_cache_dtype(). Never snapshot
+# this dict (no dict(...), .copy(), list(.keys()), etc.) — every consumer must
+# hold a reference to this live object to see later-registered entries.
 STR_DTYPE_TO_TORCH_DTYPE = {
     "float32": torch.float32,
     "half": torch.half,
@@ -50,6 +58,10 @@ STR_DTYPE_TO_TORCH_DTYPE = {
     "turboquant_4bit_nc": torch.uint8,
     "turboquant_k3v4_nc": torch.uint8,
     "turboquant_3bit_nc": torch.uint8,
+    "octave_k3v4": torch.uint8,
+    "octave_k3v3": torch.uint8,
+    "octave_k3v3_compact": torch.uint8,
+    "ultraquant_4bit": torch.uint8,
     "nvfp4": torch.uint8,
     "nvfp4_4over6": torch.uint8,
 }
@@ -59,9 +71,20 @@ TORCH_DTYPE_TO_NUMPY_DTYPE = {
     torch.float32: np.float32,
     torch.float64: np.float64,
     torch.uint8: np.uint8,
+    torch.uint16: np.uint16,
+    torch.uint32: np.uint32,
+    torch.uint64: np.uint64,
+    torch.int8: np.int8,
+    torch.int16: np.int16,
     torch.int32: np.int32,
     torch.int64: np.int64,
+    torch.bool: np.bool_,
 }
+
+# array.array typecodes with the same item layout as the torch dtype.
+TORCH_DTYPE_TO_ARRAY_TYPECODE = {torch.int32: "i", torch.int64: "q", torch.float32: "f"}
+for _dtype, _typecode in TORCH_DTYPE_TO_ARRAY_TYPECODE.items():
+    assert array.array(_typecode).itemsize == _dtype.itemsize
 
 
 MODELOPT_TO_VLLM_KV_CACHE_DTYPE_MAP = {
@@ -72,25 +95,23 @@ MODELOPT_TO_VLLM_KV_CACHE_DTYPE_MAP = {
 T = TypeVar("T")
 
 
-PIN_MEMORY = is_pin_memory_available()
+def token_ids_to_tensor(
+    token_ids: Sequence[int], dtype: torch.dtype = torch.int64
+) -> torch.Tensor:
+    """CPU tensor of token ids. A TokenBuffer is copied as one block rather than
+    read token by token; the copy keeps the buffer resizable."""
+    return torch.tensor(np.asarray(token_ids), dtype=dtype)
 
 
-def is_quantized_kv_cache(kv_cache_dtype: str) -> bool:
-    return (
-        kv_cache_dtype.startswith("fp8")
-        or kv_cache_dtype.endswith("per_token_head")
-        or kv_cache_dtype.startswith("nvfp4")
+def is_meta_module(module: torch.nn.Module) -> bool:
+    """Return True if module contains any meta parameters or buffers."""
+    return any(p.is_meta for p in module.parameters()) or any(
+        b.is_meta for b in module.buffers()
     )
 
 
-def kv_cache_uses_per_token_head_scales(kv_cache_dtype: str) -> bool:
-    """Return True if *kv_cache_dtype* needs per-token-head scales."""
-    return kv_cache_dtype.endswith("per_token_head")
-
-
 def is_strictly_contiguous(t: torch.Tensor) -> bool:
-    """
-    Check if tensor is contiguous AND has no degenerate strides.
+    """Check if tensor is contiguous AND has no degenerate strides.
 
     A degenerate stride occurs when a dimension has size 1 but the stride
     doesn't match the canonical contiguous layout. This can cause issues
@@ -121,7 +142,7 @@ def is_strictly_contiguous(t: torch.Tensor) -> bool:
 def is_non_overlapping_and_dense(t: torch.Tensor) -> bool:
     """Check if the tensor's elements cover one gapless, non-overlapping byte
     range, in any dimension order (i.e. a permuted view of a contiguous
-    tensor); ``is_contiguous()`` additionally requires row-major order.
+    tensor); `is_contiguous()` additionally requires row-major order.
     """
     expected_stride = 1
     for size, stride in sorted(zip(t.shape, t.stride()), key=lambda p: p[1]):
@@ -287,8 +308,7 @@ def set_torch_threads_for_runtime() -> None:
 
 @contextlib.contextmanager
 def set_default_torch_num_threads(num_threads: int | None = None):
-    """
-    Sets the default number of threads for PyTorch to the given value.
+    """Sets the default number of threads for PyTorch to the given value.
 
     `None` means using the value of the environment variable `OMP_NUM_THREADS`
     (or `1` if that is not available).
@@ -356,8 +376,7 @@ def _get_precision_level(dtype: torch.dtype) -> int:
 
 
 def is_lossless_cast(src_dtype: torch.dtype, tgt_dtype: torch.dtype):
-    """
-    Test whether it is lossless to cast a tensor from
+    """Test whether it is lossless to cast a tensor from
     `src_dtype` to `tgt_dtype`.
     """
     if src_dtype == tgt_dtype:
@@ -388,8 +407,7 @@ def is_lossless_cast(src_dtype: torch.dtype, tgt_dtype: torch.dtype):
 
 
 def common_broadcastable_dtype(dtypes: Collection[torch.dtype]):
-    """
-    Get the common `dtype` where all of the other `dtypes` can be
+    """Get the common `dtype` where all of the other `dtypes` can be
     cast to it without losing any information.
     """
     return max(
@@ -497,15 +515,6 @@ def get_kv_cache_quant_algo_string(quant_cfg: dict[str, Any]) -> str | None:
     return None
 
 
-def get_kv_cache_quant_algo_dtype(quant_cfg: dict[str, Any]) -> torch.dtype | None:
-    """Get the KV cache quantization algorithm dtype from the quantization config."""
-    kv_algo_str = get_kv_cache_quant_algo_string(quant_cfg)
-    if kv_algo_str is not None and kv_algo_str != "auto":
-        # Only convert if we have a valid dtype string (not "auto" fallback)
-        return STR_DTYPE_TO_TORCH_DTYPE[kv_algo_str]
-    return None
-
-
 def resolve_kv_cache_dtype_string(
     kv_cache_dtype: str, model_config: ModelConfig
 ) -> str:
@@ -536,8 +545,12 @@ def kv_cache_dtype_str_to_dtype(
     return STR_DTYPE_TO_TORCH_DTYPE[kv_cache_dtype]
 
 
-def set_random_seed(seed: int | None) -> None:
+def set_random_seed(seed: int | None, data_parallel_index: int = 0) -> None:
     if seed is not None:
+        if data_parallel_index:
+            # DP engines share the seed but must not sample unseeded requests alike.
+            ss = np.random.SeedSequence((seed, data_parallel_index))
+            seed = int(ss.generate_state(1)[0])
         random.seed(seed)
         np.random.seed(seed)
         torch.manual_seed(seed)
@@ -557,18 +570,19 @@ def nvfp4_split_data_scale(
     """Split one side (K or V) of an NVFP4 KV cache into data and scale.
 
     The input is a 4D uint8 tensor whose last dimension is
-    ``full_dim = data_dim + scale_dim``.  The physical layout within each
-    side is ``[data | scale]``, both packed contiguously.
+    `full_dim = data_dim + scale_dim`.  The physical layout within each
+    side is `[data | scale]`, both packed contiguously.
 
     The caller is responsible for slicing K and V from the combined cache
-    first (e.g. ``kv_cache.split(num_kv_heads, dim=1)``).
+    first (e.g. `kv_cache.split(num_kv_heads, dim=1)`).
 
     Args:
-        kv_side: 4D uint8 tensor ``(B, H, N, full_dim)``.
+        kv_side: 4D uint8 tensor `(B, H, N, full_dim)`.
 
     Returns:
-        ``(data, scale)`` where *data* is uint8 and *scale* is
+        `(data, scale)` where *data* is uint8 and *scale* is
         float8_e4m3fn, both views of the same storage.
+
     """
     num_pages = kv_side.shape[0]
     dim_1, dim_2 = kv_side.shape[1], kv_side.shape[2]
@@ -707,17 +721,30 @@ def create_kv_caches_with_random(
 
 def async_tensor_h2d(
     data: list | np.ndarray | torch.Tensor,
-    device: str | torch.device,
+    device: str | torch.device | None = None,
     dtype: torch.dtype | None = None,
+    out: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Copy list/numpy array/tensor async from host to device."""
+    if dtype is None and out is not None:
+        dtype = out.dtype
     if isinstance(data, np.ndarray):
         data = torch.from_numpy(data)
     if isinstance(data, torch.Tensor):
-        t = data.pin_memory() if PIN_MEMORY else data
+        t = data
+        if PIN_MEMORY and not t.is_pinned():
+            # Stage in pinned, contiguous buffer to ensure fully async copy.
+            t = torch.empty(
+                t.shape, dtype=dtype or t.dtype, device="cpu", pin_memory=True
+            ).copy_(t)
     else:
         t = torch.tensor(data, dtype=dtype, pin_memory=PIN_MEMORY, device="cpu")
     assert t.is_cpu
+
+    if out is not None:
+        assert out.dtype == dtype
+        return out.copy_(t, non_blocking=True)
+    assert device is not None, "must provide destination tensor or device"
     return t.to(device=device, dtype=dtype, non_blocking=True)
 
 
@@ -733,8 +760,7 @@ def make_ndarray_with_pad(
     *,
     max_len: int | None = None,
 ) -> npt.NDArray:
-    """
-    Make a padded array from 2D inputs.
+    """Make a padded array from 2D inputs.
 
     The padding is applied to the end of each inner list until it reaches
     `max_len`.
@@ -749,31 +775,6 @@ def make_ndarray_with_pad(
         padded_x[ind, : len(blocktb)] = blocktb
 
     return padded_x
-
-
-def make_tensor_with_pad(
-    x: list[list[T]],
-    pad: T,
-    dtype: torch.dtype,
-    *,
-    max_len: int | None = None,
-    device: str | torch.device | None = None,
-    pin_memory: bool = False,
-) -> torch.Tensor:
-    """
-    Make a padded tensor from 2D inputs.
-
-    The padding is applied to the end of each inner list until it reaches
-    `max_len`.
-    """
-    np_dtype = TORCH_DTYPE_TO_NUMPY_DTYPE[dtype]
-    padded_x = make_ndarray_with_pad(x, pad, np_dtype, max_len=max_len)
-
-    tensor = torch.from_numpy(padded_x).to(device)
-    if pin_memory:
-        tensor = tensor.pin_memory()
-
-    return tensor
 
 
 prev_set_stream = torch.cuda.set_stream
@@ -795,8 +796,7 @@ class _StreamPlaceholder:
 
 
 def current_stream() -> torch.cuda.Stream:
-    """
-    replace `torch.cuda.current_stream()` with `vllm.utils.current_stream()`.
+    """Replace `torch.cuda.current_stream()` with `vllm.utils.current_stream()`.
     it turns out that `torch.cuda.current_stream()` is quite expensive,
     as it will construct a new stream object at each call.
     here we patch `torch.cuda.set_stream` to keep track of the current stream
@@ -818,8 +818,11 @@ def current_stream() -> torch.cuda.Stream:
         # https://github.com/pytorch/pytorch/blob/42ad9edfb754743fdae3276ade43de000beb4f60/aten/src/ATen/cuda/CUDAGraph.cpp#L77
         # for more details. Therefore, we create a dedicated stream per process.
         if current_platform.is_rocm() or current_platform.is_cuda():
+            # Ensure new stream is ordered w.r.t. replaced stream's work.
+            new_stream = torch.cuda.Stream()
+            new_stream.wait_stream(torch.cuda.current_stream())
             # torch.cuda.set_stream here is the alias of _pathed_set_stream
-            torch.cuda.set_stream(torch.cuda.Stream())
+            torch.cuda.set_stream(new_stream)
         elif current_platform.is_cpu():
             _current_stream_tls.value = _StreamPlaceholder()
         else:
@@ -844,9 +847,7 @@ _aux_stream: torch.cuda.Stream | None = None
 
 
 def aux_stream() -> torch.cuda.Stream | None:
-    """
-    Ensures aux_stream is initialized only once
-    """
+    """Ensures aux_stream is initialized only once."""
     global _aux_stream
 
     from vllm.platforms import current_platform
@@ -858,8 +859,7 @@ def aux_stream() -> torch.cuda.Stream | None:
 
 
 def weak_ref_tensor(tensor: Any) -> Any:
-    """
-    Create a weak reference to a tensor.
+    """Create a weak reference to a tensor.
     The new tensor will share the same data as the original tensor,
     but will not keep the original tensor alive.
     This ignores 0-size tensors as those don't allocate any memory.
@@ -876,16 +876,18 @@ def weak_ref_tensors(
     | tuple[torch.Tensor]
     | IntermediateTensors,
 ) -> torch.Tensor | list[Any] | tuple[Any] | Any:
-    """
-    Convenience function to create weak references to tensors,
-    for single tensor, list of tensors or tuple of tensors.
+    """Convenience function to create weak references to tensors,
+    for single tensor, possibly nested list/tuple of tensors, or
+    IntermediateTensors. Ints and LayerNames are returned as is.
     """
     if isinstance(tensors, torch.Tensor):
         return weak_ref_tensor(tensors)
     if isinstance(tensors, list):
-        return [weak_ref_tensor(t) for t in tensors]
+        return [weak_ref_tensors(t) for t in tensors]
     if isinstance(tensors, tuple):
-        return tuple(weak_ref_tensor(t) for t in tensors)
+        return tuple(weak_ref_tensors(t) for t in tensors)
+    if isinstance(tensors, (int, LayerName)):
+        return tensors
 
     # For IntermediateTensors used in pipeline parallelism
     from vllm.sequence import IntermediateTensors
@@ -895,13 +897,11 @@ def weak_ref_tensors(
             {key: weak_ref_tensor(val) for key, val in tensors.tensors.items()}
         )
         return ret
-    raise ValueError("Invalid type for tensors")
+    raise ValueError(f"Invalid type for tensors: {type(tensors)}")
 
 
 def get_accelerator_view_from_cpu_tensor(cpu_tensor: torch.Tensor) -> torch.Tensor:
-    """
-    Get an accelerator view of a CPU tensor using Unified Virtual Addressing (UVA).
-    """
+    """Get an accelerator view of a CPU tensor via Unified Virtual Addressing."""
     from vllm.platforms import current_platform
 
     if current_platform.is_xpu():
@@ -910,10 +910,15 @@ def get_accelerator_view_from_cpu_tensor(cpu_tensor: torch.Tensor) -> torch.Tens
         if cpu_tensor.numel() == 0:
             return torch.empty(cpu_tensor.shape, dtype=cpu_tensor.dtype, device="xpu")
         if not cpu_tensor.is_pinned():
-            contiguous_cpu = cpu_tensor.contiguous()
-            pinned = torch.empty_like(contiguous_cpu, pin_memory=True)
-            pinned.copy_(contiguous_cpu)
-            cpu_tensor = pinned
+            pinned = torch.empty_strided(
+                cpu_tensor.size(),
+                cpu_tensor.stride(),
+                dtype=cpu_tensor.dtype,
+                device="cpu",
+                pin_memory=True,
+            )
+            pinned.copy_(cpu_tensor)
+            return torch.ops._C.get_xpu_view_from_cpu_tensor(pinned)
         return torch.ops._C.get_xpu_view_from_cpu_tensor(cpu_tensor)
     elif current_platform.is_cuda_alike():
         return torch.ops._C.get_cuda_view_from_cpu_tensor(cpu_tensor)
@@ -922,54 +927,6 @@ def get_accelerator_view_from_cpu_tensor(cpu_tensor: torch.Tensor) -> torch.Tens
             f"`get_accelerator_view_from_cpu_tensor` is currently "
             f"not supported in: {current_platform.device_name}"
         )
-
-
-# Helper function used in testing.
-def _is_torch_equal_or_newer(torch_version: str, target: str) -> bool:
-    return version.parse(torch_version) >= version.parse(target)
-
-
-def is_torch_equal_or_newer(target: str) -> bool:
-    """Check if the installed torch version is >= the target version.
-
-    Args:
-        target: a version string, like "2.6.0".
-
-    Returns:
-        Whether the condition meets.
-    """
-    try:
-        return _is_torch_equal_or_newer(str(torch.__version__), target)
-    except Exception:
-        # Fallback to PKG-INFO to load the package info, needed by the doc gen.
-        return Version(importlib.metadata.version("torch")) >= Version(target)
-
-
-def _is_torch_equal(target: str) -> bool:
-    assert target.count(".") == 2
-    torch_version = str(torch.__version__)
-    torch_version = version.parse(torch_version)
-    # torch version is like "2.6.0.dev20240101" or "2.6.0.dev20240101+cpu"
-    # or "2.6.0+cu128" but never "2.6.0.1"
-    return (
-        torch_version >= version.parse(target)
-        and version.parse(target + ".1") > torch_version
-    )
-
-
-def is_torch_equal(target: str) -> bool:
-    """Check if the installed torch version is == the target version.
-
-    Args:
-        target: a version string, like "2.6.0".
-
-    Returns:
-        Whether the condition meets.
-    """
-    try:
-        return _is_torch_equal(target)
-    except Exception:
-        return Version(importlib.metadata.version("torch")) == Version(target)
 
 
 HAS_OPAQUE_TYPE = is_torch_equal_or_newer("2.11.0.dev")
@@ -1050,8 +1007,7 @@ def direct_register_custom_op(
     dispatch_key: str | None = None,
     tags: tuple[torch.Tag, ...] = (),
 ):
-    """
-    `torch.library.custom_op` can have significant overhead because it
+    """`torch.library.custom_op` can have significant overhead because it
     needs to consider complicated dispatching logic. This function
     directly registers a custom op and dispatches it to the CUDA backend.
     See https://gist.github.com/youkaichao/ecbea9ec9fc79a45d2adce1784d7a9a5
@@ -1080,3 +1036,28 @@ def direct_register_custom_op(
     my_lib.impl(op_name, op_func, dispatch_key=dispatch_key)
     if fake_impl is not None:
         my_lib._register_fake(op_name, fake_impl)
+
+
+def eager_bypass_custom_op(
+    op_name: str,
+    op_func: Callable,
+    target_lib: Library | None = None,
+) -> Callable:
+    """Wrap a registered custom op so that only Dynamo tracing goes through
+    the dispatcher, where the op is needed as a graph boundary; eager calls
+    go straight to `op_func`. Use it on host-bound hot paths such as
+    per-linear GEMM calls, where dispatch costs several µs per call."""
+    op = getattr(getattr(torch.ops, (target_lib or vllm_lib).ns), op_name)
+
+    def wrapper(*args, **kwargs):
+        if torch.compiler.is_compiling():
+            return op(*args, **kwargs)
+        return op_func(*args, **kwargs)
+
+    return wrapper
+
+
+# Keep this at the end of the module: it resolves current_platform, which can
+# load platform plugins that import from this (then partially initialized)
+# module, so everything else here must already be defined.
+PIN_MEMORY = is_pin_memory_available()
