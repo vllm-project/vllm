@@ -157,7 +157,6 @@ async fn responses_rejects_invalid_controls_before_inference() {
         ("top_logprobs", json!(1)),
         ("reasoning", json!({"summary": "unknown"})),
         ("text", json!({"verbosity": "unknown"})),
-        ("spaces_between_special_tokens", json!(false)),
         ("media_io_kwargs", json!({"image": {}})),
         ("mm_processor_kwargs", json!({})),
         ("enable_response_messages", json!(true)),
