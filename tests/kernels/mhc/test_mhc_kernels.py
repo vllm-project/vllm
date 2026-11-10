@@ -1509,20 +1509,17 @@ def test_mhc_pre_delayed_rocm_aiter_fused_rms_norm(num_tokens, seam):
     torch.testing.assert_close(actual[2], expected_layer_input, atol=2e-2, rtol=1e-2)
 
 
-def _has_aiter_mega_mhc() -> bool:
-    # Not rocm_aiter_ops.is_mega_mhc_available(): the kernel is tested without
-    # VLLM_ROCM_USE_AITER, which gates it in the model.
-    if not (
-        current_platform.is_rocm() and HAS_AITER_MHC_FUSED_POST_PRE_DELAYED_RMS_NORM
-    ):
+def _on_cdna4() -> bool:
+    if not current_platform.is_rocm():
         return False
-    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.platforms.rocm import get_cdna_version
 
-    return rocm_aiter_ops._mega_mhc_importable()
+    return get_cdna_version() == 4
 
 
-requires_rocm_mega_mhc = pytest.mark.skipif(
-    not _has_aiter_mega_mhc(), reason="gfx950 with AITER Mega-MHC required"
+requires_rocm_mhc_overlap = pytest.mark.skipif(
+    not (_on_cdna4() and HAS_AITER_MHC_FUSED_POST_PRE_DELAYED_RMS_NORM),
+    reason="gfx950 with AITER's fused delayed-seam kernel required",
 )
 
 
@@ -1590,11 +1587,7 @@ def _mhc_fused_seam_fp64(
         * hc_post_mult_value
     )
     comb = mixes[:, 2 * n :] * scale[2] + base[2 * n :]
-    comb = torch.softmax(comb.view(-1, n, n), -1) + hc_sinkhorn_eps
-    comb = comb / (comb.sum(-2, True) + hc_sinkhorn_eps)
-    for _ in range(sinkhorn_repeat - 1):
-        comb = comb / (comb.sum(-1, True) + hc_sinkhorn_eps)
-        comb = comb / (comb.sum(-2, True) + hc_sinkhorn_eps)
+    comb = sinkhorn_normalize_ref(comb.view(-1, n, n), sinkhorn_repeat, hc_sinkhorn_eps)
     collapse = (
         residual[:, 0]
         if pre_mix is None
@@ -1622,7 +1615,7 @@ def _check_mhc_seam_gates_and_input(actual, expected):
     torch.testing.assert_close(actual[3], expected[3], atol=2e-2, rtol=1e-2)
 
 
-@requires_rocm_mega_mhc
+@requires_rocm_mhc_overlap
 @pytest.mark.parametrize("num_tokens", [1, 2, 7, 48, 128, 129, 1024, 4096])
 @pytest.mark.parametrize("seam", ["post", "no_post", "identity_pre"])
 def test_mhc_pre_delayed_rocm_aiter_mega(num_tokens, seam):
@@ -1665,7 +1658,7 @@ def test_mhc_pre_delayed_rocm_aiter_mega(num_tokens, seam):
         ), f"output {i}"
 
 
-@requires_rocm_mega_mhc
+@requires_rocm_mhc_overlap
 def test_deepseek_v41_rocm_mega_mhc_refit_reaches_captured_graph():
     """Rerunning `process_weights_after_loading` after an in-place weight
     refit, as every reload path does, repacks fn into the same tensor, so a
@@ -1712,7 +1705,7 @@ def test_deepseek_v41_rocm_mega_mhc_refit_reaches_captured_graph():
     _check_mhc_seam_gates_and_input(captured, expected)
 
 
-@requires_rocm_mega_mhc
+@requires_rocm_mhc_overlap
 def test_deepseek_v41_rocm_mega_mhc_loads_under_bf16_default_dtype():
     """The loader post-processes weights with the model's dtype, bf16, as the
     default dtype. Packing fn and preparing the side stream's Mega-MHC scratch
@@ -1772,20 +1765,6 @@ def test_mhc_post_collapse_rms_norm_warmup_covers_runtime(num_tokens):
         1e-6,
     )
     assert len(kernel_cache) == 1
-
-
-def _on_cdna4() -> bool:
-    if not current_platform.is_rocm():
-        return False
-    from vllm.platforms.rocm import get_cdna_version
-
-    return get_cdna_version() == 4
-
-
-requires_rocm_mhc_overlap = pytest.mark.skipif(
-    not (_on_cdna4() and HAS_AITER_MHC_FUSED_POST_PRE_DELAYED_RMS_NORM),
-    reason="gfx950 with AITER's fused delayed-seam kernel required",
-)
 
 
 @requires_rocm_mhc_overlap
@@ -1872,8 +1851,6 @@ def test_deepseek_v41_rocm_decoder_overlap_matches_serial(
     0, a pipeline entry and Engram fold none into the attention seam, and the
     FFN seam always has one. With packed weights every fused seam, the
     side-stream gates included, runs as Mega-MHC."""
-    if seam_kernel == "mega" and not _has_aiter_mega_mhc():
-        pytest.skip("AITER Mega-MHC required")
     from vllm.config import CUDAGraphMode
     from vllm.forward_context import set_forward_context
     from vllm.model_executor.kernels.mhc.triton import (

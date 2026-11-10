@@ -2779,18 +2779,6 @@ class rocm_aiter_ops:
             and cls._kda_gluon_decode_importable()
         )
 
-    @staticmethod
-    def _mega_mhc_importable() -> bool:
-        try:
-            from aiter.ops.mega_mhc import (  # noqa: F401
-                mega_mhc,
-                mega_mhc_shuffle_fn,
-            )
-
-            return True
-        except (ImportError, ModuleNotFoundError):
-            return False
-
     @classmethod
     @if_aiter_supported
     def is_mega_mhc_available(cls) -> bool:
@@ -2798,11 +2786,11 @@ class rocm_aiter_ops:
         delayed mHC seam.
 
         It ships tuned kernels for gfx950 only (gfx942 has a generic one that
-        vLLM does not use), and needs AITER v0.1.27 or later.
+        vLLM does not use).
         """
-        from vllm.platforms.rocm import on_gfx950
+        from vllm.platforms.rocm import get_cdna_version
 
-        return cls._AITER_ENABLED and on_gfx950() and cls._mega_mhc_importable()
+        return cls._AITER_ENABLED and get_cdna_version() == 4
 
     @classmethod
     @functools.cache
@@ -5331,6 +5319,8 @@ class rocm_aiter_ops:
         fn = torch.zeros(
             hc_mult3, hc_mult * hidden_size, dtype=torch.float32, device=device
         )
+        # AITER sizes the scratch by device, stream, num_tokens and hidden_size only,
+        # so the eps, post-multiplier and Sinkhorn values below are arbitrary.
         mega_mhc(
             torch.zeros(
                 num_tokens, hc_mult, hidden_size, dtype=torch.bfloat16, device=device
@@ -5338,12 +5328,12 @@ class rocm_aiter_ops:
             mega_mhc_shuffle_fn(fn),
             torch.zeros(3, dtype=torch.float32, device=device),
             torch.zeros(hc_mult3, dtype=torch.float32, device=device),
-            1e-6,
-            1e-6,
-            1e-6,
-            1.0,
-            20,
-            None,
+            rms_eps=1e-6,
+            hc_pre_eps=1e-6,
+            hc_sinkhorn_eps=1e-6,
+            hc_post_mult_value=1.0,
+            sinkhorn_repeat=20,
+            pre_mix=None,
             norm_weight=torch.ones(hidden_size, dtype=torch.bfloat16, device=device),
             w_preshuffle_bf16=True,
         )
