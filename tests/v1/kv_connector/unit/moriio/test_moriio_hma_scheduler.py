@@ -20,7 +20,9 @@ import pytest
 import torch
 
 from vllm.v1.core.block_pool import BlockPool
+from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.kv_cache_planning import get_kv_cache_groups
+from vllm.v1.core.kv_cache_utils import BlockHashWithGroupId, KVCacheBlock
 from vllm.v1.core.sched.output import KVConnectorBlockState, SchedulerOutput
 from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
 from vllm.v1.kv_cache_interface import (
@@ -171,6 +173,7 @@ def _gate_vllm_config(
         num_speculative_tokens=num_speculative_tokens,
         parallel_config=SimpleNamespace(
             tensor_parallel_size=1,
+            pipeline_parallel_size=1,
             decode_context_parallel_size=dcp_size,
             data_parallel_rank=0,
             data_parallel_size_local=1,
@@ -657,12 +660,61 @@ def test_hybrid_write_notifies_grouped_slots_or_releases_a_complete_local_hit(
             block_notify_list=[[10], [1, 2, 3]],
             host="127.0.0.2",
             port=7000,
+            num_skip_blocks=0,
         )
         sched._send_transfer_release.assert_not_called()
     else:
         sched.send_notify_block.assert_not_called()
         sched._send_transfer_release.assert_called_once_with("tx", "127.0.0.2", 7000)
     assert not req.kv_transfer_params["do_remote_prefill"]
+
+
+@pytest.mark.parametrize(
+    "num_cached,external_tokens",
+    [
+        (0, 40),
+        (1, 24),
+        # A load trimmed by whole blocks still skips only the cached blocks.
+        (1, 8),
+    ],
+)
+def test_plain_write_notify_skips_blocks_of_the_local_prefix_hit(
+    num_cached, external_tokens
+):
+    sched = _FakeScheduler(
+        mode=MoRIIOMode.WRITE,
+        _has_mamba=False,
+        block_size=16,
+        tp_size=1,
+        _is_kv_master=True,
+        request_id_to_transfer_id={},
+        transfer_id_to_request_id={},
+    )
+    sched.send_notify_block = Mock()
+    req = _mk_request(
+        list(range(40)),
+        params={
+            "do_remote_prefill": True,
+            "transfer_id": "tx",
+            "remote_host": "127.0.0.2",
+            "remote_notify_port": 7000,
+        },
+    )
+    req.request_id = "req"
+    table = [KVCacheBlock(block_id) for block_id in (10, 11, 12)]
+    for block in table[:num_cached]:
+        block.set_block_hash(BlockHashWithGroupId(b"cached"))
+
+    sched.update_state_after_alloc(req, KVCacheBlocks((table,)), external_tokens)
+
+    sched.send_notify_block.assert_called_once_with(
+        req_id="req",
+        transfer_id="tx",
+        block_notify_list=[10, 11, 12],
+        host="127.0.0.2",
+        port=7000,
+        num_skip_blocks=num_cached,
+    )
 
 
 @pytest.mark.usefixtures("restore_moriio_role")
@@ -1298,6 +1350,33 @@ def test_register_kv_caches_allows_hybrid_divergent_block_len():
 
     assert worker.block_lens == {"layer0": 2112, "layer1": 9216}
     assert worker.block_len == 9216
+
+
+def test_register_kv_caches_advertises_where_each_layer_starts():
+    """Peers holding other layers (pipeline stages) find a layer by name."""
+    Geom = moriio_layout.LayerTransferGeometry
+    caches = {
+        "layer0": torch.zeros(2, 4, 16, 1, 8, dtype=torch.float16),
+        "layer1": torch.zeros(2, 4, 16, 1, 8, dtype=torch.float16),
+    }
+    geoms = {
+        name: Geom(4, 16, 2112, 132, 2112, None, None, 1, 1, False) for name in caches
+    }
+    worker = _make_register_worker(caches, geoms)
+    advertised = []
+
+    def _listener(metadata, ready_event, *_args, **_kwargs):
+        advertised.append(metadata)
+        ready_event.set()
+
+    worker._moriio_handshake_listener = _listener
+    worker.register_kv_caches(caches)
+
+    assert advertised[0].layer_base_addr_index == {"layer0": 0, "layer1": 1}
+    assert advertised[0].kv_caches_base_addr == [
+        caches["layer0"].data_ptr(),
+        caches["layer1"].data_ptr(),
+    ]
 
 
 def test_register_kv_caches_rejects_divergent_block_size():
