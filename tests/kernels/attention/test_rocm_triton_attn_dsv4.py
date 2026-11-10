@@ -1002,7 +1002,7 @@ NOPE_ONLY_HEAD_DIM = 512
 
 def _nope_only_ragged_inputs(
     kv_lens: list[int], num_heads: int, device: torch.device
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Build a GLM-like 512+0 NoPE decode batch with ragged KV segments."""
     num_kv = 4096
     kv = (
