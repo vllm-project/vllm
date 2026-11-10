@@ -449,13 +449,7 @@ def test_rocm_swmmac_gemm_kernel(n, k, m, bias_mode, dtype, seed):
         BIAS = torch.rand(n, m, dtype=dtype, device="cuda") * 2 - 1
 
     ref_out = torch.nn.functional.linear(A, B, BIAS)
-    out = ops.swmmac_gemm(
-        A.view(-1, A.size(-1)),
-        B,
-        B.shape[0],
-        cu_count,
-        BIAS,
-    )
+    out = ops.swmmac_gemm(A.view(-1, A.size(-1)), B, B.shape[0], cu_count, BIAS)
 
     torch.testing.assert_close(out, ref_out, atol=2e-2, rtol=2e-2)
 

@@ -101,7 +101,8 @@ inline bool on_gfx120x() {
   static const bool result = [] {
     const auto* dprops = at::cuda::getCurrentDeviceProperties();
     const std::string device_arch = dprops->gcnArchName;
-    return device_arch.find("gfx120") != std::string::npos;
+    return device_arch.find("gfx1200") != std::string::npos ||
+           device_arch.find("gfx1201") != std::string::npos;
   }();
   return result;
 }
@@ -982,6 +983,8 @@ torch::Tensor swmmacGEMM(const at::Tensor& in_a, const at::Tensor& in_b,
                          const std::optional<at::Tensor>& in_bias,
                          const int64_t logical_M, const int64_t CuCount) {
   TORCH_CHECK(on_gfx120x(), "swmmacGEMM is only supported on GFX120x");
+  TORCH_CHECK(in_a.is_cuda() && in_b.is_cuda(),
+              "swmmacGEMM inputs must be CUDA tensors");
   TORCH_CHECK(in_b.scalar_type() == torch::kFloat16 ||
                   in_b.scalar_type() == torch::kBFloat16,
               "B must be FP16 or BF16");
@@ -989,6 +992,10 @@ torch::Tensor swmmacGEMM(const at::Tensor& in_a, const at::Tensor& in_b,
               "A and B must use the same dtype");
   TORCH_CHECK(in_b.dim() == 2, "B must be a 2D tensor");
   TORCH_CHECK(in_a.dim() == 2, "A must be a 2D tensor");
+  TORCH_CHECK(in_a.device() == in_b.device(),
+              "A and B must be on the same device");
+  TORCH_CHECK(in_a.is_contiguous(), "A must be contiguous");
+  TORCH_CHECK(in_b.is_contiguous(), "B must be contiguous");
 
   constexpr int tile_columns = 16;
   constexpr int m_tiles_per_wave = 1;
@@ -1013,8 +1020,12 @@ torch::Tensor swmmacGEMM(const at::Tensor& in_a, const at::Tensor& in_b,
   const bool has_bias = in_bias.has_value() && in_bias->numel() > 0;
 
   if (has_bias) {
+    TORCH_CHECK(in_bias->is_cuda(), "bias must be a CUDA tensor");
+    TORCH_CHECK(in_bias->device() == in_a.device(),
+                "bias and A must be on the same device");
     TORCH_CHECK(in_bias->scalar_type() == in_a.scalar_type(),
                 "bias and A must use the same dtype");
+    TORCH_CHECK(in_bias->is_contiguous(), "bias must be contiguous");
     TORCH_CHECK(in_bias->dim() == 1 || in_bias->dim() == 2,
                 "bias must be a 1D or 2D tensor");
   }
@@ -1029,6 +1040,9 @@ torch::Tensor swmmacGEMM(const at::Tensor& in_a, const at::Tensor& in_b,
   // By is the logical bias height. A 1D bias is treated as [1, M].
   const int By =
       !has_bias || in_bias->dim() == 1 ? 1 : static_cast<int>(in_bias->size(0));
+
+  TORCH_CHECK((Bx == 1 || Bx == M) && (By == 1 || By == N),
+              "bias must be broadcastable to the [N, M] output");
 
   auto out_c = torch::empty(
       {N, M}, torch::TensorOptions().dtype(in_a.dtype()).device(in_a.device()));
@@ -1219,7 +1233,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
   // Goal is to bring the activation matrix A to the LDS
   // and use it across the lifetime of the work group
   // TODO: When activation matrix is larger than 64 KB
-  //     then this is not going to work!
+  //	     then this is not going to work!
   //----------------------------------------------------
   __shared__ scalar_t s[max_lds_len];
 
@@ -1690,7 +1704,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
   // Goal is to bring the activation matrix A to the LDS
   // and use it across the lifetime of the work group
   // TODO: When activation matrix is larger than 64 KB
-  //     then this is not going to work!
+  //	     then this is not going to work!
   //----------------------------------------------------
   __shared__ scalar_t s[max_lds_len];
 

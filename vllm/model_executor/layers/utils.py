@@ -480,13 +480,7 @@ def rocm_unquantized_gemm_impl(
 
         return linear_batch_invariant(x, weight, bias)
 
-    from vllm.platforms.rocm import (
-        on_gfx1x,
-        on_gfx9,
-        on_gfx11,
-        on_gfx950,
-        on_rdna4,
-    )
+    from vllm.platforms.rocm import on_gfx1x, on_gfx9, on_gfx11, on_gfx950, on_rdna4
 
     n = x.numel() // x.size(-1)
     m = weight.shape[0]
@@ -498,6 +492,17 @@ def rocm_unquantized_gemm_impl(
 
     skinny_operands_compatible = weight.is_contiguous() and (
         bias is None or bias.is_contiguous()
+    )
+    swmmac_bias_compatible = bias is None or (
+        bias.dtype == x.dtype
+        and (
+            (bias.dim() == 1 and bias.shape[0] in (1, m))
+            or (
+                bias.dim() == 2
+                and bias.shape[0] in (1, n)
+                and bias.shape[1] in (1, m)
+            )
+        )
     )
 
     use_skinny_reduce_counting = (
@@ -528,11 +533,12 @@ def rocm_unquantized_gemm_impl(
         envs.VLLM_ROCM_USE_SKINNY_GEMM
         and on_rdna4()
         and x.dtype in [torch.float16, torch.bfloat16]
-        and weight.dtype in [torch.float16, torch.bfloat16]
+        and x.dtype == weight.dtype
         and x.dim() == 2
         and 5 <= n <= 8
         and k % 32 == 0
         and skinny_operands_compatible
+        and swmmac_bias_compatible
     )
 
     if use_skinny_n5to8:
