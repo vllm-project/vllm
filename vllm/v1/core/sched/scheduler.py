@@ -7,6 +7,8 @@ from collections.abc import Iterable
 from dataclasses import replace
 from typing import Any
 
+from msgspec.structs import replace as replace_event
+
 from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.config import KVEventsConfig, VllmConfig
 from vllm.distributed.aux_output_connector.connector import AuxOutputSchedulerConnector
@@ -17,7 +19,11 @@ from vllm.distributed.ec_transfer.ec_connector.base import (
 )
 from vllm.distributed.ec_transfer.ec_connector.factory import ECConnectorFactory
 from vllm.distributed.ec_transfer.ec_connector.metrics import ECConnectorStats
-from vllm.distributed.kv_events import EventPublisherFactory, KVEventBatch
+from vllm.distributed.kv_events import (
+    EventPublisherFactory,
+    KVEventBatch,
+    KVEventSource,
+)
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.distributed.kv_transfer.kv_connector.v1 import (
     KVConnectorBase_V1,
@@ -147,6 +153,7 @@ class Scheduler(SchedulerInterface):
             self.kv_events_config is not None
             and self.kv_events_config.enable_kv_cache_events
         )
+        self._kv_event_source = KVEventSource(source_id="cache_manager")
         # Pooling and diffusion models do not append a sampled token after
         # prefill, so they should not reserve one context slot while scheduling.
         self.num_sampled_tokens_per_step = (
@@ -2632,10 +2639,18 @@ class Scheduler(SchedulerInterface):
 
         # collect KV cache events from KV cache manager
         events = self.kv_cache_manager.take_events()
+        if events and self.enable_kv_cache_events:
+            events = [
+                replace_event(event, source=self._kv_event_source) for event in events
+            ]
 
         # collect KV cache events from connector
         if self.connector is not None:
-            connector_events = self.connector.take_events()
+            connector_events = (
+                self.connector.take_events_with_metadata()
+                if self.enable_kv_cache_events
+                else self.connector.take_events()
+            )
             if connector_events:
                 if events is None:
                     events = list(connector_events)

@@ -1358,9 +1358,11 @@ def test_hisparse_events_report_host_and_device_placement():
     stored = [
         event for event in manager.take_events() if isinstance(event, BlockStored)
     ]
-    assert {(event.group_idx, event.medium) for event in stored} == {
-        (0, MEDIUM_CPU),
-        (1, MEDIUM_GPU),
+    assert {
+        (event.group_idx, event.medium, event.sharing_scope) for event in stored
+    } == {
+        (0, MEDIUM_CPU, None),
+        (1, MEDIUM_GPU, "instance"),
     }
 
     host_block = manager.get_blocks(request.request_id).blocks[0][0]
@@ -1370,6 +1372,7 @@ def test_hisparse_events_report_host_and_device_placement():
     [removed] = manager.take_events()
     assert isinstance(removed, BlockRemoved)
     assert removed.medium == MEDIUM_CPU
+    assert removed.sharing_scope is None
     assert removed.group_idx == 0
 
 
@@ -3865,6 +3868,7 @@ def test_kv_cache_events(blocks_to_cache: int):
     )
     assert len(block.token_ids) == block.block_size * len(block.block_hashes)
     assert block.kv_cache_spec_kind == KVCacheSpecKind.FULL_ATTENTION.value
+    assert block.sharing_scope == "instance"
     assert len(manager.block_pool.kv_event_queue) == 0
 
     stored_block_hash = block.block_hashes
@@ -3880,6 +3884,7 @@ def test_kv_cache_events(blocks_to_cache: int):
     for blocks in events[:-1]:
         assert isinstance(blocks, BlockRemoved)
         assert blocks.block_hashes[0] in stored_block_hash
+        assert blocks.sharing_scope == "instance"
     assert len(events) == blocks_to_cache + 1
     assert isinstance(events[-2], BlockRemoved)
     assert (
@@ -3895,6 +3900,7 @@ def test_kv_cache_events(blocks_to_cache: int):
     events = manager.take_events()
 
     assert isinstance(events[-1], AllBlocksCleared)
+    assert "sharing_scope" not in events[-1].__struct_fields__
     assert len(manager.block_pool.cached_block_hash_to_block) == 0
 
 
@@ -3957,6 +3963,7 @@ def test_null_parent_block_hash():
     assert event.group_idx == kv_cache_group_id
     assert event.kv_cache_spec_kind is None
     assert event.kv_cache_spec_sliding_window is None
+    assert event.sharing_scope is None
 
     # Ensure we didn't accidentally assign a hash to the null block.
     assert pool.null_block.block_hash is None

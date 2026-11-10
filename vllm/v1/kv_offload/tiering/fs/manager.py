@@ -57,6 +57,7 @@ from vllm.v1.kv_offload.tiering.fs.io import (
 from vllm.v1.kv_offload.tiering.fs.thread_pool import DualQueueThreadPool
 
 if TYPE_CHECKING:
+    from vllm.distributed.kv_events import SharingScope
     from vllm.v1.kv_offload.base import OffloadingSpec
 
 logger = init_logger(__name__)
@@ -117,6 +118,7 @@ class FileSystemTierManager(SecondaryTierManager):
         enable_kv_events: bool = False,
         locality: str | None = None,
         backpressure_detector: BackpressureDetector | None = None,
+        sharing_scope: "SharingScope | None" = None,
     ):
         """Args:
         offloading_spec: Contains normalized offloading configuration and
@@ -132,12 +134,16 @@ class FileSystemTierManager(SecondaryTierManager):
         locality: Whether this tier's storage is LOCAL or REMOTE relative
             to the publishing vLLM instance.
         backpressure_detector: Optional backpressure detector.
+        sharing_scope: Resource sharing contract: instance, shared, or unknown.
 
         """
         super().__init__(
             offloading_spec, primary_kv_view, tier_type, backpressure_detector
         )
         self.locality = Locality(locality) if locality is not None else None
+        if sharing_scope is not None and sharing_scope not in ("instance", "shared"):
+            raise ValueError("sharing_scope must be instance, shared, or None")
+        self.sharing_scope = sharing_scope
 
         self.events: list[OffloadingEvent] | None = None
         if enable_kv_events:
@@ -293,6 +299,7 @@ class FileSystemTierManager(SecondaryTierManager):
                             medium=self.medium,
                             removed=False,
                             locality=self.locality,
+                            sharing_scope=self.sharing_scope,
                             req_context=job.req_context,
                         )
                     )

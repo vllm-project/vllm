@@ -1056,3 +1056,188 @@ def test_fs_tier_cross_tp_round_trip(tmp_path):
         assert torch.allclose(reader_tensor[1], expected)
     finally:
         reader.shutdown()
+
+
+@pytest.mark.parametrize(
+    "scope_config",
+    [
+        {},
+        {"sharing_scope": None},
+        {"sharing_scope": "instance"},
+        {"sharing_scope": "shared"},
+    ],
+)
+@pytest.mark.parametrize(
+    "global_events,tier_events", [(True, True), (False, True), (True, False)]
+)
+def test_fs_factory_scope_reaches_successful_store(
+    tmp_path, scope_config, global_events, tier_events
+):
+    from dataclasses import replace
+
+    from tests.v1.kv_offload.conftest import make_offloading_config
+    from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
+
+    spec = CPUOffloadingSpec(
+        replace(make_offloading_config(), enable_kv_cache_events=global_events)
+    )
+    tensor = _page_aligned_zero_tensor(2, mmap.PAGESIZE)
+    tier = SecondaryTierFactory.create_secondary_tier(
+        {
+            "type": "fs",
+            "root_dir": str(tmp_path),
+            "locality": "LOCAL",
+            "enable_kv_events": tier_events,
+            **scope_config,
+        },
+        memoryview(tensor.numpy()),
+        spec,
+    )
+    try:
+        tier.submit_store(make_job(1, [key(1)], [0]))
+        results = drain(tier)
+        assert len(results) == 1 and results[0].success
+        events = list(tier.take_events())
+        if global_events and tier_events:
+            [event] = events
+            assert event.sharing_scope == scope_config.get("sharing_scope")
+            assert event.locality is Locality.LOCAL
+            assert event.medium is Medium.STORAGE
+            assert event.keys == [key(1)]
+        else:
+            assert events == []
+    finally:
+        tier.shutdown()
+
+
+@pytest.mark.parametrize("scope", ["local", "", "SHARED", True, 1, [], {}])
+def test_fs_factory_rejects_invalid_scope_before_io(tmp_path, scope):
+    from tests.v1.kv_offload.conftest import make_offloading_config
+    from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
+
+    root = tmp_path / "uncreated"
+    with pytest.raises(ValueError, match="sharing_scope"):
+        SecondaryTierFactory.create_secondary_tier(
+            {"type": "fs", "root_dir": str(root), "sharing_scope": scope},
+            memoryview(np.zeros((1, mmap.PAGESIZE), dtype=np.uint8)),
+            CPUOffloadingSpec(make_offloading_config()),
+        )
+    assert not root.exists()
+
+
+@pytest.mark.parametrize("tier_type", ["fs", "obj"])
+@pytest.mark.parametrize("self_describing", [False, True])
+def test_private_cpu_and_shared_tier_keep_scope_through_translation(
+    tmp_path, monkeypatch, tier_type, self_describing
+):
+    """A real cascade preserves each resource's scope in one logical drain."""
+    from dataclasses import replace
+
+    from tests.v1.kv_connector.unit.offloading_connector.test_events import (
+        _group_config,
+    )
+    from tests.v1.kv_offload.conftest import make_offloading_config
+    from tests.v1.kv_offload.tiering.test_obj_tier import _make_tier
+    from vllm import SamplingParams
+    from vllm.distributed.kv_events import KVCacheEvent
+    from vllm.distributed.kv_transfer.kv_connector.v1.offloading.events import (
+        OffloadingEventsTracker,
+    )
+    from vllm.v1.core.kv_cache_utils import BlockHash
+    from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
+    from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
+    from vllm.v1.kv_offload.tiering.manager import (
+        CPUPrimaryTierOffloadingManager,
+        TieringOffloadingManager,
+    )
+    from vllm.v1.request import Request
+
+    # Back the OS shared-memory service with temporary files on every platform.
+    def backing_path(path):
+        if isinstance(path, str) and path.startswith("/dev/shm"):
+            return str(tmp_path / os.path.basename(path))
+        return path
+
+    real_open, real_unlink, real_statvfs = os.open, os.unlink, os.statvfs
+    monkeypatch.setattr(
+        os,
+        "open",
+        lambda path, *args, **kwargs: real_open(backing_path(path), *args, **kwargs),
+    )
+    monkeypatch.setattr(
+        os,
+        "unlink",
+        lambda path, *args, **kwargs: real_unlink(backing_path(path), *args, **kwargs),
+    )
+    monkeypatch.setattr(
+        os,
+        "statvfs",
+        lambda path: real_statvfs(tmp_path if path == "/dev/shm" else path),
+    )
+    region = SharedOffloadRegion("scope-cascade", 2, 0, mmap.PAGESIZE, mmap.PAGESIZE)
+    primary = CPUPrimaryTierOffloadingManager(2, region, enable_events=True)
+    spec = CPUOffloadingSpec(
+        replace(make_offloading_config(), enable_kv_cache_events=True)
+    )
+    view = primary.get_kv_memoryview()
+    if tier_type == "fs":
+        tier = SecondaryTierFactory.create_secondary_tier(
+            {
+                "type": "fs",
+                "root_dir": str(tmp_path / "fs"),
+                "enable_kv_events": True,
+                "locality": "LOCAL",
+                "sharing_scope": "shared",
+            },
+            view,
+            spec,
+        )
+    else:
+        tier, _ = _make_tier(
+            offloading_spec=spec,
+            primary_kv_view=view,
+            enable_kv_events=True,
+            locality="LOCAL",
+            sharing_scope="shared",
+        )
+    manager = TieringOffloadingManager(primary, [tier])
+    hashes = [BlockHash(b"a"), BlockHash(b"b")]
+    request = Request(
+        request_id="scope",
+        prompt_token_ids=list(range(8)),
+        sampling_params=SamplingParams(max_tokens=1),
+        pooling_params=None,
+        block_hashes=hashes,
+    )
+    context = ReqContext(req_id="scope")
+    offload_key = make_offload_key(hashes[-1], 0)
+    context.set_offload_key_position(offload_key, 8)
+    tracker = OffloadingEventsTracker(OffloadingKVEventsConfig(True, self_describing))
+    tracker.on_new_request(context, request, (_group_config(blocks_per_chunk=2),))
+    try:
+        manager.on_new_request(context)
+        assert manager.prepare_store([offload_key], context) is not None
+        manager.complete_store([offload_key], context)
+        events: list[KVCacheEvent] = []
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            manager.on_schedule_end(ScheduleEndContext([], ()))
+            events.extend(tracker.take_events(manager.take_events()))
+            if any(event.medium == "STORAGE" for event in events):
+                break
+            threading.Event().wait(0.001)
+        assert [(event.medium, event.sharing_scope) for event in events] == [
+            ("CPU", "instance"),
+            ("STORAGE", "shared"),
+        ]
+        assert events[1].locality == "LOCAL"
+        assert events[1].ownership is None
+        assert events[0].block_hashes == events[1].block_hashes
+        assert len(events[0].block_hashes) == (2 if self_describing else 1)
+        assert (
+            events[0].token_ids
+            == events[1].token_ids
+            == (list(range(8)) if self_describing else [])
+        )
+    finally:
+        manager.shutdown()

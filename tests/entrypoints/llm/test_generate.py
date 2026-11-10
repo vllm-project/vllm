@@ -131,3 +131,114 @@ def test_log_stats(vllm_runner):
 
         # disable_log_stats is False, every output should have metrics
         assert all(output.metrics is not None for output in outputs)
+
+
+def test_kv_event_metadata_live_and_replay(vllm_runner):
+    """Real generation publishes native metadata automatically and replays its bytes."""
+    import time
+
+    import msgspec
+    import zmq
+
+    from vllm.distributed.kv_events import (
+        BlockStored,
+        KVEventBatch,
+        KVEventSource,
+        ZmqEventPublisher,
+    )
+    from vllm.utils.network_utils import get_open_ports_list
+
+    pub_port, replay_port = get_open_ports_list(2)
+    endpoint = f"tcp://127.0.0.1:{pub_port}"
+    replay_endpoint = f"tcp://127.0.0.1:{replay_port}"
+    context = zmq.Context()
+    subscriber = context.socket(zmq.SUB)
+    subscriber.setsockopt(zmq.SUBSCRIBE, b"metadata")
+    subscriber.setsockopt(zmq.LINGER, 0)
+    subscriber.connect(endpoint)
+    replay = context.socket(zmq.DEALER)
+    replay.setsockopt(zmq.LINGER, 0)
+    replay.connect(replay_endpoint)
+    try:
+        with vllm_runner(
+            MODEL_NAME,
+            max_model_len=256,
+            block_size=16,
+            enable_prefix_caching=True,
+            gpu_memory_utilization=0.10,
+            enforce_eager=True,
+            kv_events_config={
+                "enable_kv_cache_events": True,
+                "publisher": "zmq",
+                "endpoint": f"tcp://*:{pub_port}",
+                "replay_endpoint": f"tcp://*:{replay_port}",
+                "topic": "metadata",
+            },
+        ) as runner:
+            # A received warm-up event proves the PUB subscription is active.
+            # The target generation below runs exactly once after this exchange.
+            deadline = time.monotonic() + 30
+            warmup_token = 100
+            while time.monotonic() < deadline:
+                runner.llm.generate(
+                    {"prompt_token_ids": [warmup_token] * 32},
+                    SamplingParams(temperature=0, max_tokens=1),
+                )
+                warmup_token += 1
+                if subscriber.poll(100):
+                    subscriber.recv_multipart()
+                    break
+            else:
+                pytest.fail("KV event subscription did not become ready")
+            outputs = runner.llm.generate(
+                {"prompt_token_ids": list(range(64))},
+                SamplingParams(temperature=0, max_tokens=2),
+            )
+            assert len(outputs) == 1 and outputs[0].outputs[0].token_ids
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                if not subscriber.poll(100):
+                    continue
+                topic, sequence, payload = subscriber.recv_multipart()
+                batch = msgspec.msgpack.decode(payload, type=KVEventBatch)
+                stored = [
+                    event
+                    for event in batch.events
+                    if isinstance(event, BlockStored)
+                    and event.token_ids[:16] == list(range(16))
+                ]
+                if stored:
+                    break
+            else:
+                pytest.fail("Target generation did not emit a live prefix-cache store")
+            assert topic == b"metadata"
+            assert batch.data_parallel_rank == 0
+            assert all(
+                event.source == KVEventSource("cache_manager") for event in batch.events
+            )
+            assert all(
+                event.medium == "GPU" and event.sharing_scope == "instance"
+                for event in stored
+            )
+
+            replay.send_multipart([b"", sequence])
+            replayed = {}
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                assert replay.poll(1000), "KV replay stalled"
+                delimiter, replay_topic, replay_sequence, replay_payload = (
+                    replay.recv_multipart()
+                )
+                assert delimiter == b""
+                if replay_sequence == ZmqEventPublisher.END_SEQ:
+                    break
+                assert replay_sequence not in replayed
+                assert replay_topic == topic
+                replayed[replay_sequence] = replay_payload
+            else:
+                pytest.fail("KV replay did not finish")
+            assert replayed[sequence] == payload
+    finally:
+        subscriber.close(linger=0)
+        replay.close(linger=0)
+        context.term()

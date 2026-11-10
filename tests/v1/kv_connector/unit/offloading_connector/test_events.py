@@ -1194,3 +1194,61 @@ def test_events_preserve_lookahead_tokens(partial):
     assert event.lookahead_token_ids == [
         list(range(i, i + 5)) for i in range(step, end + 1, step)
     ]
+
+
+@pytest.mark.parametrize("scope", [None, "instance", "shared"])
+@pytest.mark.parametrize("self_describing", [False, True])
+def test_resource_scope_survives_store_and_remove_translation(scope, self_describing):
+    """Metadata preserves full-chunk versus hash-only payload and removal hashes."""
+    hashes = [_hash(0), _hash(1)]
+    request = Request(
+        request_id="scope",
+        prompt_token_ids=list(range(1, 9)),
+        sampling_params=SamplingParams(max_tokens=1),
+        pooling_params=None,
+        block_hashes=hashes,
+    )
+    group = _group_config(group_idx=2, block_size=4, blocks_per_chunk=2)
+    context = ReqContext(req_id=request.request_id)
+    key = make_offload_key(hashes[-1], 2)
+    context.set_offload_key_position(key, 8)
+    tracker = _tracker(self_describing_kv_events=self_describing)
+    tracker.on_new_request(context, request, (group,))
+    [stored] = tracker.take_events(
+        [
+            OffloadingEvent(
+                keys=[key],
+                medium=Medium.STORAGE,
+                removed=False,
+                locality=Locality.LOCAL,
+                ownership="shared-fs",
+                removal_expected=True,
+                req_context=context,
+                sharing_scope=scope,
+            )
+        ]
+    )
+    [removed] = tracker.take_events(
+        [
+            OffloadingEvent(
+                keys=[key],
+                medium=Medium.STORAGE,
+                removed=True,
+                locality=Locality.LOCAL,
+                ownership="shared-fs",
+                sharing_scope=scope,
+            )
+        ]
+    )
+    expected_hashes = [
+        _wire_hash(h) for h in (hashes if self_describing else hashes[-1:])
+    ]
+    assert stored.block_hashes == removed.block_hashes == expected_hashes
+    assert stored.token_ids == (list(range(1, 9)) if self_describing else [])
+    assert stored.block_size == (4 if self_describing else 0)
+    for event in (stored, removed):
+        assert event.sharing_scope == scope
+        assert event.group_idx == 2
+        assert event.medium == "STORAGE"
+        assert event.locality == "LOCAL"
+        assert event.ownership == "shared-fs"

@@ -187,6 +187,9 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
             self._connectors.append(connector_cls(temp_config, role, kv_cache_config))
             self._ktc_kv_transfer_config.append(temp_config.kv_transfer_config)
 
+        if self._enable_kv_cache_events:
+            self._set_event_source_id("connector")
+
         assert vllm_config.kv_transfer_config is not None
         self._all_support_hma = MultiConnector.all_children_support_hma(
             vllm_config.kv_transfer_config
@@ -675,6 +678,14 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
     def take_events(self) -> Iterable["KVCacheEvent"]:
         for c in self._connectors:
             yield from c.take_events()
+
+    def _set_event_source_id(self, source_id: str) -> None:
+        for index, connector in enumerate(self._connectors):
+            connector._set_event_source_id(f"{source_id}/{index}")
+
+    def take_events_with_metadata(self) -> Iterable["KVCacheEvent"]:
+        for connector in self._connectors:
+            yield from connector.take_events_with_metadata()
 
     def has_pending_block_frees(self) -> bool:
         return any(c.has_pending_block_frees() for c in self._connectors)

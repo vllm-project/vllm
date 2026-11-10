@@ -137,6 +137,7 @@ def verify_events(
     evictions: list[set[OffloadKey]] = []
     for event in events:
         assert event.medium == Medium.CPU
+        assert event.sharing_scope == (None if event.metadata_only else "instance")
         if event.removed:
             evictions.append(set(event.keys))
         else:
@@ -163,6 +164,7 @@ def test_cpu_stored_event_carries_request_context():
 
     [event] = manager.take_events()
     assert event.req_context is req_context
+    assert event.sharing_scope == "instance"
 
 
 def test_cpu_eviction_removed_precedes_stored():
@@ -182,6 +184,7 @@ def test_cpu_eviction_removed_precedes_stored():
     assert removed_idx and stored_idx, events
     assert max(removed_idx) < min(stored_idx)
     assert all(event.medium == manager.medium for event in events)
+    assert all(event.sharing_scope == "instance" for event in events)
 
 
 @pytest.mark.parametrize("eviction_policy", ["lru", "arc"])
@@ -1073,6 +1076,7 @@ def test_take_events_prunes_retried_cleanup_and_drains_once():
     drain = iter(manager.take_events())
     cleanup = next(drain)
     assert cleanup.removed and cleanup.metadata_only
+    assert cleanup.sharing_scope is None
     assert cleanup.keys == to_keys([2])
     # Stopping early must not leave the batch queued for the next drain.
     assert list(manager.take_events()) == []

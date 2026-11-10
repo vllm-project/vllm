@@ -70,7 +70,6 @@ steps:
   source_file_dependencies: &v1-core-kv-metrics-deps
     - vllm/config/
     - vllm/distributed/
-    - "!vllm/distributed/kv_transfer/"
     - vllm/engine/
     - vllm/entrypoints/pooling/
     - vllm/inputs/
@@ -367,7 +366,6 @@ steps:
   source_file_dependencies:
     - vllm/config/
     - vllm/distributed/
-    - "!vllm/distributed/kv_transfer/"
     - vllm/engine/
     - vllm/inputs/
     - vllm/lora/

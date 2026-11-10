@@ -448,3 +448,90 @@ def test_ephemeral_bind_needs_a_node_ip(monkeypatch, node_ip):
     )
     with pytest.raises(ValueError, match="VLLM_HOST_IP"):
         EventPublisherFactory.create(config, DP_RANK)
+
+
+def test_metadata_keeps_distinct_sources_and_original_replay_bytes(
+    publisher, subscriber
+):
+    from vllm.distributed.kv_events import BlockStored, KVEventBatch, KVEventSource
+
+    events = [
+        BlockStored(
+            block_hashes=[b"block"],
+            parent_block_hash=None,
+            token_ids=[1, 2],
+            block_size=2,
+            lora_id=None,
+            medium="CPU",
+            lora_name=None,
+            source=KVEventSource(f"connector/{index}", "OffloadingConnector"),
+            sharing_scope="instance",
+        )
+        for index in range(2)
+    ]
+    publisher.publish(KVEventBatch(ts=1.0, events=events))
+    assert subscriber.sub.poll(5000), "No live metadata batch"
+    live = subscriber.sub.recv_multipart()
+    topic, seq, payload = live
+    decoded = msgspec.msgpack.decode(payload, type=KVEventBatch)
+    assert decoded.events == events
+    assert decoded.data_parallel_rank == DP_RANK
+    assert topic == subscriber.topic_bytes
+    assert int.from_bytes(seq, "big") == 0
+
+    subscriber.request_replay(0)
+    replay = subscriber.replay_sockets[0]
+    assert replay.poll(5000), "No replay metadata batch"
+    assert replay.recv_multipart() == [b"", *live]
+    assert replay.poll(5000), "Missing replay end marker"
+    assert replay.recv_multipart() == [b"", b"", ZmqEventPublisher.END_SEQ, b""]
+
+
+def test_metadata_preserves_custom_publisher_constructor_and_discovery(
+    publisher_config,
+):
+    from dataclasses import asdict
+    from uuid import uuid4
+
+    def constructor(
+        *,
+        data_parallel_rank,
+        endpoint,
+        replay_endpoint,
+        buffer_steps,
+        hwm,
+        max_queue_size,
+        topic,
+    ):
+        return ZmqEventPublisher(
+            data_parallel_rank=data_parallel_rank,
+            endpoint=endpoint,
+            replay_endpoint=replay_endpoint,
+            buffer_steps=buffer_steps,
+            hwm=hwm,
+            max_queue_size=max_queue_size,
+            topic=topic,
+        )
+
+    name = f"metadata-contract-{uuid4().hex}"
+    EventPublisherFactory.register_publisher(name, constructor)
+    # Plugin publishers register at runtime; this retains the existing factory API.
+    publisher_config.publisher = name
+    publisher = EventPublisherFactory.create(publisher_config, DP_RANK)
+    try:
+        discovery = asdict(publisher.get_publisher_config())
+        assert set(discovery) == {
+            "enable_kv_cache_events",
+            "publisher",
+            "endpoint",
+            "replay_endpoint",
+            "buffer_steps",
+            "hwm",
+            "max_queue_size",
+            "topic",
+        }
+        expected = asdict(publisher_config)
+        expected["publisher"] = "zmq"
+        assert discovery == expected
+    finally:
+        publisher.shutdown()

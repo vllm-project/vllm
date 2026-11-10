@@ -47,8 +47,10 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
 import torch
+from msgspec.structs import replace
 
 from vllm.config.kv_transfer import KVCacheAccess
+from vllm.distributed.kv_events import KVEventSource
 from vllm.logger import init_logger
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -258,6 +260,14 @@ class KVConnectorBase_V1(ABC):
         self._kv_cache_config = kv_cache_config
         self._kv_cache_manager: KVCacheManager | None = None
         self._role = role
+        self._kv_event_source = KVEventSource(
+            source_id="connector/0",
+            connector_name=self._kv_transfer_config.kv_connector,
+        )
+        self._enable_kv_cache_events = (
+            vllm_config.kv_events_config is not None
+            and vllm_config.kv_events_config.enable_kv_cache_events
+        )
 
     @property
     def role(self) -> KVConnectorRole:
@@ -710,6 +720,24 @@ class KVConnectorBase_V1(ABC):
 
         """
         return ()
+
+    def _set_event_source_id(self, source_id: str) -> None:
+        self._kv_event_source = KVEventSource(
+            source_id=source_id,
+            connector_name=self._kv_transfer_config.kv_connector,
+        )
+
+    def take_events_with_metadata(self) -> Iterable["KVCacheEvent"]:
+        """Drain aggregated events with this configured connector's source.
+
+        Shallow copies preserve producer-owned events and payload lists.
+        """
+        for event in self.take_events():
+            yield (
+                replace(event, source=self._kv_event_source)
+                if self._enable_kv_cache_events
+                else event
+            )
 
     def has_pending_block_frees(self) -> bool:
         """Whether pending transfers can release blocks instead of preemption."""
