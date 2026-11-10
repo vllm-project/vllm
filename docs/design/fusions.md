@@ -92,14 +92,15 @@ Fields set explicitly by the user always take precedence over optimization-level
 
 ### Manual GELU-tanh+Mul + per-token FP8 quantization
 
-When GELU-tanh runs as the CUDA `gelu_and_mul` op (`--enforce-eager`, or
-`gelu_and_mul` in `custom_ops`), Gemma3 and Gemma 4 MLPs fuse
-`gelu_tanh(gate) * up` with the dynamic per-token FP8 quantization of the down
-projection's input, for linears that consume per-token FP8 (for example
-`RedHatAI/gemma-4-31B-it-FP8-dynamic` with
+When GELU-tanh and the per-token FP8 quantizer both run as CUDA ops
+(`--enforce-eager`, or `custom_ops=["none", "+gelu_and_mul", "+quant_fp8"]`),
+Gemma3 and Gemma 4 MLPs fuse `gelu_tanh(gate) * up` with the dynamic per-token
+FP8 quantization of the down projection's input, for linears that consume
+per-token FP8 (for example `RedHatAI/gemma-4-31B-it-FP8-dynamic` with
 `--kernel-config.linear_backend=cutlass`). The producer returns a
 `QuantizedActivation`, so the linear uses its FP8 values and per-token scales
-without quantizing again. This is a manual model fusion through
+without quantizing again. If the quantizer stays native, the linear quantizes
+its own input and nothing is fused. This is a manual model fusion through
 `maybe_fused_act_quant`, independent of the `fuse_act_quant` compiler pass. With
 the native GELU under `torch.compile` (the default), Inductor already fuses the
 activation with the quantization, and that path is unchanged.

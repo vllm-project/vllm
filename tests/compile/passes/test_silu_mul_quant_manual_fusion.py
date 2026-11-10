@@ -128,6 +128,23 @@ def test_gelu_per_token_fp8_cutlass(dtype, compile_model, scale_ub):
             native_gelu = GeluAndMul(approximate="tanh")
         assert isinstance(maybe_fused_act_quant(native_gelu, x, linear), torch.Tensor)
 
+        # A consumer that quantizes with the native op keeps its path.
+        native_quant = CompilationConfig(custom_ops=["none", "+gelu_and_mul"])
+        with set_current_vllm_config(VllmConfig(compilation_config=native_quant)):
+            native_linear = TestFP8Layer(
+                weight_shape=(128, 256),
+                activation_quant_key=kFp8DynamicTokenSym,
+                weight_quant_key=kFp8StaticTensorSym,
+                force_kernel=CutlassFP8ScaledMMLinearKernel,
+                input_dtype=dtype,
+                out_dtype=dtype,
+                device=torch.device("cuda"),
+            )
+        expose_input_quant_key(native_linear, native_linear.kernel)
+        assert get_input_quant_key(native_linear) is None
+        assert isinstance(maybe_fused_act_quant(act, x, native_linear), torch.Tensor)
+        torch.compile(native_linear, fullgraph=True, dynamic=True)(act(x))
+
         # The tanh kernel must never replace exact (erf) GELU.
         exact_gelu = GeluAndMul(approximate="none")
         fallback = maybe_fused_act_quant(exact_gelu, x, linear)

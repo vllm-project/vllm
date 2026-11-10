@@ -156,6 +156,17 @@ class CutlassFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
     ) -> None:
         self.logical_output_size = c.weight_shape[0]
         super().__init__(c, layer_param_names)
+        key = c.activation_quant_key
+        quantizes_with_cuda_op = (
+            getattr(self.quant_fp8._forward_method, "__func__", None)
+            is type(self.quant_fp8).forward_cuda
+        )
+        self._accepted_input_quant_key = (
+            key
+            if key == kFp8StaticTensorSym
+            or (key == kFp8DynamicTokenSym and quantizes_with_cuda_op)
+            else None
+        )
 
     @classmethod
     def is_supported(
@@ -170,13 +181,8 @@ class CutlassFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         return True, None
 
     def input_quant_key(self) -> QuantKey | None:
-        """Accept tensor scales or contiguous per-token scales without padding."""
-        if self.config.activation_quant_key in (
-            kFp8StaticTensorSym,
-            kFp8DynamicTokenSym,
-        ):
-            return self.config.activation_quant_key
-        return None
+        """Accept tensor scales, or per-token scales when the CUDA op quantizes."""
+        return self._accepted_input_quant_key
 
     @staticmethod
     def _pad_to_alignment(
