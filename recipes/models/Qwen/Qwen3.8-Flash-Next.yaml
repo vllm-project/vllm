@@ -4,7 +4,7 @@ meta:
   provider: "Qwen"
   description: "Qwen4 architecture preview with a 125B-parameter main model, supplemented by an additional 51B N-gram embeddings, with 6B parameters activated per token."
   date_added: 2026-08-26
-  date_updated: 2026-10-27
+  date_updated: 2026-11-10
   tasks:
     - multimodal
     - text
@@ -13,12 +13,14 @@ meta:
     - "Qwen/Qwen3-Next-80B-A3B-Instruct"
   default_variant:
     mi355x: mxfp4
+    mi325x: bf16
   hardware:
     h200: verified
     h100: verified
     gb200: verified
     gb300: verified
     mi355x: verified
+    mi325x: verified
     rtx_pro_6000_4x: verified
     dgx_station_gb300: verified
 
@@ -158,6 +160,10 @@ variants:
     precision: bf16
     vram_minimum_gb: 423
     description: "Official BF16 checkpoint"
+    hardware_overrides:
+      mi325x:
+        extra_env:
+          VLLM_ROCM_USE_AITER: "1"
   mxfp4:
     model_id: "amd/Qwen3.8-Flash-Next-Quark-MXFP4"
     precision: mxfp4
