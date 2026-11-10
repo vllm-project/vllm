@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from types import TypeAlias
+from typing import TypeAlias
 
 from vllm.entrypoints.openai.chat_completion.protocol import (
     BatchChatCompletionRequest,

@@ -3,7 +3,7 @@
 import time
 from collections.abc import AsyncGenerator, Callable, Generator, Sequence
 from dataclasses import dataclass, field
-from types import Any, Generic, NotRequired, TypeAlias, TypedDict, TypeVar
+from typing import Any, Generic, NotRequired, TypeAlias, TypedDict, TypeVar
 
 from fastapi import Request
 from pydantic import ConfigDict
@@ -15,8 +15,8 @@ from vllm.outputs import LateChunkingMetadata
 from vllm.renderers import ChatParams, TokenizeParams
 from vllm.renderers.chat_utils import ChatCompletionMessageParam
 from vllm.renderers.inputs import DictPrompt
+from vllm.tasks import PoolingTask
 
-from ...tasks import PoolingTask
 from .classify.protocol import (
     ClassificationChatRequest,
     ClassificationCompletionRequest,
