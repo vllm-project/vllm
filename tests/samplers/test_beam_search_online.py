@@ -301,6 +301,42 @@ async def test_beam_search_preserves_priority_for_every_step(monkeypatch, priori
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("data_parallel_rank", [None, 0, 3])
+async def test_beam_search_preserves_data_parallel_rank_for_every_step(
+    monkeypatch, data_parallel_rank
+):
+    """All beam expansion requests target the caller's data parallel rank."""
+    ranks = []
+    original_generate = _EngineClient().generate
+
+    async def generate(prompt, *args, data_parallel_rank=None, **kwargs):
+        ranks.append(data_parallel_rank)
+        async for output in original_generate(prompt, *args, **kwargs):
+            yield output
+
+    serving = _AsyncServing()
+    monkeypatch.setattr(serving.engine_client, "generate", generate)
+    prompt: TokensInput = {
+        "type": "token",
+        "prompt": "prompt",
+        "prompt_token_ids": [1],
+    }
+    params = BeamSearchParams(
+        beam_width=2, max_tokens=2, ignore_eos=True, watermarking=False
+    )
+    kwargs = (
+        {} if data_parallel_rank is None else {"data_parallel_rank": data_parallel_rank}
+    )
+    outputs = [
+        output
+        async for output in serving.beam_search(prompt, "request", params, **kwargs)
+    ]
+
+    assert len(outputs) == 1
+    assert ranks == [data_parallel_rank] * 3
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("concurrency_limit", [None, 1])
 @pytest.mark.parametrize("structured", [False, True])
 @pytest.mark.parametrize(

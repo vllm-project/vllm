@@ -394,6 +394,7 @@ class OpenAIServingChat(GenerateBaseServing):
                     trace_headers=trace_headers,
                     session_id=session_id,
                     priority=self._get_priority(request, raw_request),
+                    data_parallel_rank=data_parallel_rank,
                 )
             else:
                 generator = self.engine_client.generate(
