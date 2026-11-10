@@ -233,7 +233,7 @@ def _build_mlp(
     """A small dense KimiMLP or latent KimiMoE with the same weights on every
     rank's view of the full layer.
 
-    ``kind`` is "dense", "moe" (token-shardable tail) or "moe_no_shared"
+    `kind` is "dense", "moe" (token-shardable tail) or "moe_no_shared"
     (without shared experts the tail is not token-shardable, so the layer
     takes the all-gather fallback).
     """
@@ -291,7 +291,7 @@ def _check_mlp_rows(
     kind: str,
     run_sharded: Callable[[SimpleNamespace, torch.Tensor], torch.Tensor],
 ) -> None:
-    """``run_sharded`` on this rank's token shard returns this rank's rows of
+    """`run_sharded` on this rank's token shard returns this rank's rows of
     the unsharded layer. The token count does not divide TP, so the last
     rank's shard ends in zero padding rows."""
     mlp, vllm_config = _build_mlp(device, tp_world, kind)

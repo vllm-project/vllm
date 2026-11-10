@@ -16,7 +16,7 @@ its output instead of all-reducing it. The extra all-gathers of the latent and
 the top-k add about 17% bytes per MoE layer at K3's sizes. An MoE whose tail is
 not token-shardable all-gathers its input and all-reduces its output in full.
 
-Enabled by ``VLLM_KIMI_K3_AMD_PREFILL_SP_MIN_TOKENS``; see :mod:`vllm.envs`.
+Enabled by `VLLM_KIMI_K3_AMD_PREFILL_SP_MIN_TOKENS`; see `vllm.envs`.
 """
 
 import contextlib
@@ -53,7 +53,7 @@ def should_shard(
     specialized-decode steps (checked by the caller) never shard; both are far
     smaller than the profile run.
 
-    ``routing_observed`` (routed-experts capture or EPLB load recording) keeps
+    `routing_observed` (routed-experts capture or EPLB load recording) keeps
     it off: routing runs on each rank's token shard only, so those would see
     just this rank's tokens.
     """
@@ -73,7 +73,7 @@ def should_shard(
 
 def gather_tokens(shard: torch.Tensor, num_tokens: int | None = None) -> torch.Tensor:
     """All-gather the token shards, dropping the TP padding rows if
-    ``num_tokens`` is given."""
+    `num_tokens` is given."""
     out = tensor_model_parallel_all_gather(shard, dim=0)
     return out if num_tokens is None else out[:num_tokens]
 
@@ -81,7 +81,7 @@ def gather_tokens(shard: torch.Tensor, num_tokens: int | None = None) -> torch.T
 def gather_activation(
     shard: torch.Tensor | QuantizedActivation, num_tokens: int | None = None
 ) -> torch.Tensor | QuantizedActivation:
-    """:func:`gather_tokens` that also accepts a per-token quantized
+    """`gather_tokens` that also accepts a per-token quantized
     activation, gathering its data and scale and rebuilding it."""
     if isinstance(shard, torch.Tensor):
         return gather_tokens(shard, num_tokens)
@@ -120,7 +120,7 @@ def all_gather_routing(
 
 @contextlib.contextmanager
 def pre_routed(router: Any, topk: tuple[torch.Tensor, torch.Tensor]) -> Iterator[None]:
-    """Make ``router.select_experts`` return ``topk`` for the duration. The
+    """Make `router.select_experts` return `topk` for the duration. The
     body must route exactly once, so the caller's placeholder router logits
     are never read."""
     calls = 0
