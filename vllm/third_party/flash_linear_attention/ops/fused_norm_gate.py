@@ -8,12 +8,13 @@
 # ruff: noqa: E501
 
 import torch
-import torch.nn as nn
 
-from vllm.model_executor.custom_op import CustomOp
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv, next_power_of_2
+
+from .kda import FusedRMSNormGated as FusedRMSNormGated
+
 
 @triton.heuristics(
     {
@@ -49,31 +50,30 @@ def layer_norm_gated_fwd_kernel(
     HAS_BIAS: tl.constexpr,
     launch_pdl: tl.constexpr,
 ):
-    i_t = tl.program_id(0)
+    i_t = tl.program_id(0).to(tl.int64)
 
+    o_t = i_t * BT + tl.arange(0, BT)
     o_d = tl.arange(0, BD)
     m_d = o_d < D
+    m_t = o_t < T
+    m_x = m_t[:, None] & m_d[None, :]
 
     if launch_pdl:
         tl.extra.cuda.gdc_wait()
         tl.extra.cuda.gdc_launch_dependents()
 
-    p_x = tl.make_block_ptr(x, (T, D), (D, 1), (i_t * BT, 0), (BT, BD), (1, 0))
-    b_x = tl.load(p_x, boundary_check=(0, 1)).to(tl.float32)
+    p_x = x + o_t[:, None] * D + o_d[None, :]
+    b_x = tl.load(p_x, mask=m_x, other=0.0).to(tl.float32)
     if HAS_RESIDUAL:
-        p_res = tl.make_block_ptr(
-            residual, (T, D), (D, 1), (i_t * BT, 0), (BT, BD), (1, 0)
-        )
-        b_x += tl.load(p_res, boundary_check=(0, 1)).to(tl.float32)
+        p_res = residual + o_t[:, None] * D + o_d[None, :]
+        b_x += tl.load(p_res, mask=m_x, other=0.0).to(tl.float32)
     if STORE_RESIDUAL_OUT:
-        p_res_out = tl.make_block_ptr(
-            residual_out, (T, D), (D, 1), (i_t * BT, 0), (BT, BD), (1, 0)
-        )
-        tl.store(p_res_out, b_x.to(p_res_out.dtype.element_ty), boundary_check=(0, 1))
+        p_res_out = residual_out + o_t[:, None] * D + o_d[None, :]
+        tl.store(p_res_out, b_x.to(p_res_out.dtype.element_ty), mask=m_x)
     if not IS_RMS_NORM:
         b_mean = tl.sum(b_x, axis=1) / D
-        p_mean = tl.make_block_ptr(mean, (T,), (1,), (i_t * BT,), (BT,), (0,))
-        tl.store(p_mean, b_mean.to(p_mean.dtype.element_ty), boundary_check=(0,))
+        p_mean = mean + o_t
+        tl.store(p_mean, b_mean.to(p_mean.dtype.element_ty), mask=m_t)
         b_xbar = tl.where(m_d[None, :], b_x - b_mean[:, None], 0.0)
         b_var = tl.sum(b_xbar * b_xbar, axis=1) / D
     else:
@@ -81,8 +81,8 @@ def layer_norm_gated_fwd_kernel(
         b_var = tl.sum(b_xbar * b_xbar, axis=1) / D
     b_rstd = 1 / tl.sqrt(b_var + eps)
 
-    p_rstd = tl.make_block_ptr(rstd, (T,), (1,), (i_t * BT,), (BT,), (0,))
-    tl.store(p_rstd, b_rstd.to(p_rstd.dtype.element_ty), boundary_check=(0,))
+    p_rstd = rstd + o_t
+    tl.store(p_rstd, b_rstd.to(p_rstd.dtype.element_ty), mask=m_t)
 
     if HAS_WEIGHT:
         b_w = tl.load(w + o_d, mask=m_d).to(tl.float32)
@@ -98,7 +98,6 @@ def layer_norm_gated_fwd_kernel(
         b_y = b_y + b_b[None, :]
 
     # swish/sigmoid output gate
-    o_t = i_t * BT + tl.arange(0, BT)
     o_g = (o_t // H) * g_stride_n + (o_t % H) * D
     b_g = tl.load(
         g + o_g[:, None] + o_d[None, :],
@@ -111,8 +110,8 @@ def layer_norm_gated_fwd_kernel(
         b_y = b_y * tl.sigmoid(b_g)
 
     # Write output
-    p_y = tl.make_block_ptr(y, (T, D), (D, 1), (i_t * BT, 0), (BT, BD), (1, 0))
-    tl.store(p_y, b_y.to(p_y.dtype.element_ty), boundary_check=(0, 1))
+    p_y = y + o_t[:, None] * D + o_d[None, :]
+    tl.store(p_y, b_y.to(p_y.dtype.element_ty), mask=m_x)
 
 
 @triton.heuristics(
@@ -335,78 +334,3 @@ def rms_norm_gated(
     )
     y = y.reshape(x_shape_og)
     return y if not prenorm else (y, residual_out.reshape(x_shape_og))
-
-
-@CustomOp.register("fused_rms_norm_gated")
-class FusedRMSNormGated(CustomOp):
-    def __init__(
-        self,
-        hidden_size: int,
-        elementwise_affine: bool = True,
-        eps: float = 1e-5,
-        activation: str = "swish",
-        device: torch.device | None = None,
-        dtype: torch.dtype | None = None,
-    ) -> None:
-        factory_kwargs = {"device": device, "dtype": dtype}
-        super().__init__()
-
-        self.hidden_size = hidden_size
-        self.elementwise_affine = elementwise_affine
-        self.eps = eps
-        self.activation = activation
-
-        if self.activation not in ["swish", "silu", "sigmoid"]:
-            raise ValueError(f"Unsupported activation: {self.activation}")
-
-        if elementwise_affine:
-            self.weight = nn.Parameter(torch.empty(hidden_size, **factory_kwargs))
-        else:
-            self.register_parameter("weight", None)
-        self.register_parameter("bias", None)
-
-    def forward_native(
-        self,
-        x: torch.Tensor,
-        g: torch.Tensor,
-        residual: torch.Tensor | None = None,
-        prenorm: bool = False,
-        residual_in_fp32: bool = False,
-    ) -> torch.Tensor:
-        """Decomposed PyTorch ops for torch.compile/inductor fusion."""
-        # TODO(https://github.com/vllm-project/vllm/issues/36175): implement
-        # native residual/prenorm path and unify with RMSNormGated.
-        # For now, fall back to the triton kernel.
-        if residual is not None or prenorm:
-            return self.forward_cuda(x, g, residual, prenorm, residual_in_fp32)
-        x_float = x.float()
-        variance = x_float.pow(2).mean(dim=-1, keepdim=True)
-        x_normed = x_float * torch.rsqrt(variance + self.eps)
-        if self.weight is not None:
-            x_normed = x_normed * self.weight.float()
-        g_float = g.float()
-        if self.activation in ("swish", "silu"):
-            out = x_normed * g_float * torch.sigmoid(g_float)
-        else:  # sigmoid
-            out = x_normed * torch.sigmoid(g_float)
-        return out.to(x.dtype)
-
-    def forward_cuda(
-        self,
-        x: torch.Tensor,
-        g: torch.Tensor,
-        residual: torch.Tensor | None = None,
-        prenorm: bool = False,
-        residual_in_fp32: bool = False,
-    ) -> torch.Tensor:
-        return rms_norm_gated(
-            x,
-            g,
-            self.weight,
-            self.bias,
-            self.activation,
-            residual=residual,
-            eps=self.eps,
-            prenorm=prenorm,
-            residual_in_fp32=residual_in_fp32,
-        )

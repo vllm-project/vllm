@@ -7,7 +7,8 @@ use std::sync::{Arc, LazyLock};
 
 pub use vllm_parser::reasoning::{
     CohereCmdReasoningParser, DeepSeekR1ReasoningParser, DeepSeekV3ReasoningParser,
-    DeepSeekV4ReasoningParser, Glm45ReasoningParser, KimiK2ReasoningParser, KimiReasoningParser,
+    DeepSeekV4ReasoningParser, DeepSeekV41ReasoningParser, Glm45ReasoningParser,
+    Glm47ReasoningParser, KimiK2ReasoningParser, KimiReasoningParser, MiMoReasoningParser,
     MiniMaxM2ReasoningParser, MiniMaxM3ReasoningParser, NemotronV3ReasoningParser,
     Qwen3ReasoningParser, ReasoningDelta, ReasoningError, ReasoningParser, SeedOssReasoningParser,
     Step3ReasoningParser, Step3p5ReasoningParser,
@@ -22,13 +23,12 @@ pub mod names {
     pub const DEEPSEEK_R1: &str = "deepseek_r1";
     pub const DEEPSEEK_V3: &str = "deepseek_v3";
     pub const DEEPSEEK_V4: &str = "deepseek_v4";
-    pub const GEMMA4: &str = "gemma4";
-    pub const INKLING: &str = "inkling";
+    pub const DEEPSEEK_V41: &str = "deepseek_v41";
     pub const GLM45: &str = "glm45";
-    pub const HY_V3: &str = "hy_v3";
+    pub const GLM47: &str = "glm47";
     pub const KIMI: &str = "kimi";
     pub const KIMI_K2: &str = "kimi_k2";
-    pub const KIMI_K3: &str = "kimi_k3";
+    pub const MIMO: &str = "mimo";
     pub const MINIMAX_M2: &str = "minimax_m2";
     pub const MINIMAX_M3: &str = "minimax_m3";
     pub const NEMOTRON_V3: &str = "nemotron_v3";
@@ -36,6 +36,7 @@ pub mod names {
     pub const SEED_OSS: &str = "seed_oss";
     pub const STEP3: &str = "step3";
     pub const STEP3P5: &str = "step3p5";
+    pub const STEP5: &str = "step5";
 }
 
 /// Constructor signature for one registered reasoning parser implementation.
@@ -65,35 +66,34 @@ impl ReasoningParserFactory {
             .register_parser::<DeepSeekR1ReasoningParser>(names::DEEPSEEK_R1)
             .register_parser::<DeepSeekV3ReasoningParser>(names::DEEPSEEK_V3)
             .register_parser::<DeepSeekV4ReasoningParser>(names::DEEPSEEK_V4)
-            .register_unified_dummy(names::GEMMA4)
-            .register_unified_dummy(names::INKLING)
+            .register_parser::<DeepSeekV41ReasoningParser>(names::DEEPSEEK_V41)
             .register_parser::<Glm45ReasoningParser>(names::GLM45)
-            .register_unified_dummy(names::HY_V3)
+            .register_parser::<Glm47ReasoningParser>(names::GLM47)
             .register_parser::<KimiReasoningParser>(names::KIMI)
             .register_parser::<KimiK2ReasoningParser>(names::KIMI_K2)
-            .register_unified_dummy(names::KIMI_K3)
+            .register_parser::<MiMoReasoningParser>(names::MIMO)
             .register_parser::<MiniMaxM2ReasoningParser>(names::MINIMAX_M2)
             .register_parser::<MiniMaxM3ReasoningParser>(names::MINIMAX_M3)
             .register_parser::<NemotronV3ReasoningParser>(names::NEMOTRON_V3)
             .register_parser::<Qwen3ReasoningParser>(names::QWEN3)
             .register_parser::<SeedOssReasoningParser>(names::SEED_OSS)
             .register_parser::<Step3ReasoningParser>(names::STEP3)
-            .register_parser::<Step3p5ReasoningParser>(names::STEP3P5);
+            .register_parser::<Step3p5ReasoningParser>(names::STEP3P5)
+            .register_parser::<DeepSeekV3ReasoningParser>(names::STEP5);
 
         factory
             .register_pattern("deepseek-r1", names::DEEPSEEK_R1)
+            .register_pattern("deepseek-v4.1", names::DEEPSEEK_V41)
             .register_pattern("deepseek-v4", names::DEEPSEEK_V4)
             .register_pattern("deepseek_v4", names::DEEPSEEK_V4)
             .register_pattern("deepseek-v3", names::DEEPSEEK_V3)
-            .register_pattern("gemma-4", names::GEMMA4)
-            .register_pattern("gemma4", names::GEMMA4)
             .register_pattern("qwq", names::DEEPSEEK_R1)
+            .register_pattern("mimo-v2", names::MIMO)
             .register_pattern("qwen3", names::QWEN3)
-            .register_pattern("glm-5", names::GLM45)
-            .register_pattern("glm-4.7", names::GLM45)
+            .register_pattern("glm-5", names::GLM47)
+            .register_pattern("glm-4.7", names::GLM47)
             .register_pattern("glm-4.6", names::GLM45)
             .register_pattern("glm-4.5", names::GLM45)
-            .register_pattern("hy3", names::HY_V3)
             .register_pattern("kimi-k2", names::KIMI_K2)
             .register_pattern("kimi", names::KIMI)
             // step3p5 patterns must precede `step3`: substring matching would
@@ -102,6 +102,8 @@ impl ReasoningParserFactory {
             .register_pattern("step3p5", names::STEP3P5)
             .register_pattern("step-3.5", names::STEP3P5)
             .register_pattern("step3", names::STEP3)
+            .register_pattern("step-5", names::STEP5)
+            .register_pattern("step5", names::STEP5)
             .register_pattern("seed-oss", names::SEED_OSS)
             .register_pattern("seedoss", names::SEED_OSS)
             .register_pattern("minimax-m3", names::MINIMAX_M3)
@@ -122,16 +124,6 @@ impl ReasoningParserFactory {
         T: ReasoningParser + 'static,
     {
         self.register_creator(name, Arc::new(T::create))
-    }
-
-    /// Register one unified-only parser name in the split reasoning registry.
-    pub fn register_unified_dummy(&mut self, name: &str) -> &mut Self {
-        let name = name.to_string();
-        let registered_name = name.clone();
-        self.register_creator(
-            &registered_name,
-            Arc::new(move |_| Err(ReasoningError::DummyUnifiedParser { name: name.clone() })),
-        )
     }
 
     /// Construct a parser from an exact name.

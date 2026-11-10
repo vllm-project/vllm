@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Shared pieces of the sharded-RDT backend: the op-chain allowlist, buffer
-sizing and the minimum Ray version, plus ``RdtRouter`` — consumer-only, since
+sizing and the minimum Ray version, plus `RdtRouter` — consumer-only, since
 routing is a consumer decision.
 
-The gather-group partition itself is ``base.layerwise_groups``: it defines what a
-group index means for any ``WeightSource``, not just this transport.
+The gather-group partition itself is `base.layerwise_groups`: it defines what a
+group index means for any `WeightSource`, not just this transport.
 """
 
 from collections.abc import Callable
@@ -55,11 +55,12 @@ def check_ray_rdt_version() -> None:
 
     vLLM does not depend on Ray, so there is no pin to carry this. Without the
     check the failure is an opaque option-validation error out of
-    ``.options(enable_tensor_transport=True)`` (below 2.49) or an ImportError
+    `.options(enable_tensor_transport=True)` (below 2.49) or an ImportError
     raised deep in the first pull, long after init reported success (below 2.55).
 
     Raises:
-        ValueError: the installed Ray predates ``RDT_MIN_RAY_VERSION``.
+        ValueError: the installed Ray predates `RDT_MIN_RAY_VERSION`.
+
     """
     import importlib.metadata
 
@@ -77,10 +78,20 @@ def check_ray_rdt_version() -> None:
         )
 
 
+def register_nixl_memory(tensor: torch.Tensor) -> None:
+    """Register a tensor with Ray using the platform's NIXL package."""
+    from vllm.distributed.nixl_utils import alias_nixl_for_ray
+
+    alias_nixl_for_ray()
+    from ray.experimental import register_nixl_memory as ray_register_nixl_memory
+
+    ray_register_nixl_memory(tensor)
+
+
 def assign_producer_indices(
     num_producers: int, num_consumers: int, consumer_idx: int
 ) -> list[int]:
-    """Producers (global indices) that consumer ``consumer_idx`` binds."""
+    """Producers (global indices) that consumer `consumer_idx` binds."""
     p = max(1, num_producers)
     c = max(1, num_consumers)
     if p >= c:
@@ -91,8 +102,8 @@ def assign_producer_indices(
 class RdtRouter:
     """Decides which producer serves each weight name, and — once bound — sends.
 
-    Ownership is per NAME. ``owner_sets`` holds the few distinct producer sets
-    that occur, and ``name_owner_class[i]`` indexes it for ``names[i]``; a name
+    Ownership is per NAME. `owner_sets` holds the few distinct producer sets
+    that occur, and `name_owner_class[i]` indexes it for `names[i]`; a name
     determines both its owner set and its gather group, so neither appears in the
     routing API. Empty tables mean every producer holds everything.
 
@@ -126,32 +137,33 @@ class RdtRouter:
 
         Args:
             num_producers: Trainer ranks. Owner indices are positions in this
-                range, and ``validate`` rejects any that fall outside it.
+                range, and `validate` rejects any that fall outside it.
             num_consumers: Inference workers across the whole fleet. Fixes
-                the id space; the block carve uses ``workers_per_replica``
+                the id space; the block carve uses `workers_per_replica`
                 of it.
             owner_sets: The distinct producer sets that occur, one row per
                 owner class; each row is deduplicated and sorted here. Empty
                 means a single class owning every producer.
-            name_owner_class: Parallel to ``names`` — ``name_owner_class[i]``
-                indexes ``owner_sets`` for ``names[i]``. A name with no entry
+            name_owner_class: Parallel to `names` — `name_owner_class[i]`
+                indexes `owner_sets` for `names[i]`. A name with no entry
                 falls back to class 0.
             names: Every parameter name, in group-major order: concatenating
                 the gather groups reproduces this list exactly. The other two
                 tables are keyed by this order.
             group_lens: Length of each gather group, consecutive over
-                ``names``, so they sum to ``len(names)``. Fixes name -> group
+                `names`, so they sum to `len(names)`. Fixes name -> group
                 and the per-group owner union the free barrier fans out to.
             workers_per_replica: Consumers per inference DEPLOYMENT. The block
                 carve spreads this many consumers over an owner set and every
                 deployment reuses that carve, so the same worker of each
-                deployment resolves one producer (see ``producer_for``). 0
+                deployment resolves one producer (see `producer_for`). 0
                 means one deployment: carve over the whole fleet.
 
         Raises:
-            ValueError: ``workers_per_replica`` does not divide
-                ``num_consumers``, so the deployments are not uniform and two
+            ValueError: `workers_per_replica` does not divide
+                `num_consumers`, so the deployments are not uniform and two
                 workers of one deployment would share a block index.
+
         """
         self.num_producers = max(1, num_producers)
         self.num_consumers = max(1, num_consumers)
@@ -206,14 +218,14 @@ class RdtRouter:
         return self._class_of.get(name, 0)
 
     def owners(self, name: str) -> list[int]:
-        """Every producer holding ``name``."""
+        """Every producer holding `name`."""
         return list(self._owner_sets[self.class_of(name)])
 
     def group_owners(self, group_idx: int) -> list[int]:
-        """Every producer holding any name of ``group_idx``.
+        """Every producer holding any name of `group_idx`.
 
         The one group-keyed rule, because the free barrier is per group: a
-        consumer signals ``free_group(gi)`` at each of these and the producer
+        consumer signals `free_group(gi)` at each of these and the producer
         counts signals against its live-consumer total. Names route; groups free.
         """
         if not self._group_owners:
@@ -221,7 +233,7 @@ class RdtRouter:
         return list(self._group_owners[group_idx])
 
     def producer_for(self, consumer_id: int, name: str) -> int:
-        """The single producer ``consumer_id`` pulls ``name`` from.
+        """The single producer `consumer_id` pulls `name` from.
 
         Blocks consumers across the name's owner set with the same rule that
         binds producers globally, then rotates by the name's GROUP index so a
@@ -230,7 +242,7 @@ class RdtRouter:
         producer, which is what lets a chunk be a single pull.
 
         The carve is over ONE DEPLOYMENT (this consumer's index within its own
-        deployment, over ``workers_per_replica`` of them), so the same worker of
+        deployment, over `workers_per_replica` of them), so the same worker of
         every deployment resolves the same producer for every name. Carving over
         the whole fleet instead spreads the multi-owner names of different
         deployments onto different producers while single-owner names still
@@ -253,6 +265,7 @@ class RdtRouter:
         Raises:
             ValueError: an owner set is empty or out of range, or a class index
                 does not resolve.
+
         """
         for c, row in enumerate(self._owner_sets):
             if not row:
@@ -284,11 +297,11 @@ class RdtRouter:
             raise RuntimeError("RdtRouter has no producers bound; call bind() first.")
 
     def pull(self, owner: int, keys: list, seq: int) -> Any:
-        """Issue one packed pull to ``owner``.
+        """Issue one packed pull to `owner`.
 
         The consumer id keys the producer's serve ring; without it every worker
         is served out of ring 0 and concurrent pulls overwrite each other's blob.
-        ``seq`` is this call's index in the stream to ``owner`` (see ``_Chunk``):
+        `seq` is this call's index in the stream to `owner` (see `_Chunk`):
         it selects the serve slot in ISSUE order, so a slot is never repacked
         while the read of its previous contents is still in flight.
         """
@@ -311,8 +324,8 @@ class RdtRouter:
         """Ask each producer to pre-register a serve ring sized to the most this
         consumer will pull from it.
 
-        ``plan_digests[p]`` describes the chunks this consumer pulls from
-        producer ``p``, in pull order. A producer that shares one serve ring
+        `plan_digests[p]` describes the chunks this consumer pulls from
+        producer `p`, in pull order. A producer that shares one serve ring
         across the consumers of several deployments compares it across them, so
         a fleet whose deployments are not identical fails at init instead of
         stalling mid-sync. A producer that shares nothing ignores it.
@@ -331,9 +344,9 @@ class RdtRouter:
 
 
 def buffer_alloc_bytes(nbytes: int, presize: int = 0) -> int:
-    """Size a NIXL buffer / ring slot for ``nbytes``: the max of the request, an
-    optional ``presize`` floor, and a coarse 256MB round-up, so the buffer is
+    """Size a NIXL buffer / ring slot for `nbytes`: the max of the request, an
+    optional `presize` floor, and a coarse 256MB round-up, so the buffer is
     allocated ONCE and never regrows. Regrowth is a correctness hazard, not just a
-    perf one -- see ``buffer_presize_gb``. Shared by the consumer's receive buffers
+    perf one -- see `buffer_presize_gb`. Shared by the consumer's receive buffers
     and the producer's serve rings."""
     return max(nbytes, presize, -(-nbytes // (256 << 20)) * (256 << 20))

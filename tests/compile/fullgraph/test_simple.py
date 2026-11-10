@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Test the piecewise compilation with a simple model so that we
+"""Test the piecewise compilation with a simple model so that we
 can exactly calculate the expected output and side effects.
 """
 
@@ -52,8 +51,7 @@ class SillyModel(nn.Module):
         self.intermediate_unbacked = intermediate_unbacked
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Overall effect:
+        """Overall effect:
         x = 3 * x + 19
         global_counter += 2
         """

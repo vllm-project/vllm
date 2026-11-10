@@ -16,6 +16,7 @@ from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -80,7 +81,14 @@ class KimiK3MultiTokenPredictorLayer(nn.Module):
 
         self.enorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.hnorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.eh_proj = nn.Linear(config.hidden_size * 2, config.hidden_size, bias=False)
+        self.eh_proj = ReplicatedLinear(
+            config.hidden_size * 2,
+            config.hidden_size,
+            bias=False,
+            quant_config=None,
+            prefix=maybe_prefix(prefix, "eh_proj"),
+            return_bias=False,
+        )
 
         self.shared_head = SharedHead(
             config=config, prefix=prefix, quant_config=quant_config
@@ -264,10 +272,17 @@ class KimiK3MTP(nn.Module):
         if use_full_rank_gate:
             stacked_params_mapping.append((".in_proj_qkvgfab", ".g_proj", 3))
         if getattr(self.config, "q_lora_rank", None) is not None:
-            stacked_params_mapping += [
-                (".fused_qkv_a_proj", ".q_a_proj", 0),
-                (".fused_qkv_a_proj", ".kv_a_proj_with_mqa", 1),
-            ]
+            if self.config.mla_use_output_gate:
+                stacked_params_mapping += [
+                    (".fused_qkv_a_g_proj", ".q_a_proj", 0),
+                    (".fused_qkv_a_g_proj", ".kv_a_proj_with_mqa", 1),
+                    (".fused_qkv_a_g_proj", ".g_proj", 2),
+                ]
+            else:
+                stacked_params_mapping += [
+                    (".fused_qkv_a_proj", ".q_a_proj", 0),
+                    (".fused_qkv_a_proj", ".kv_a_proj_with_mqa", 1),
+                ]
 
         use_mega_moe = any(
             module.use_mega_moe
@@ -388,38 +403,15 @@ class KimiK3MTP(nn.Module):
                     weight_loader(param, loaded_weight)
             loaded_params.add(name)
 
-        # Validate that weights were loaded for each expected MTP layer.
-        loaded_layers: set[int] = set()
-        for param_name in loaded_params:
-            spec_layer = get_spec_layer_idx_from_weight_name(self.config, param_name)
-            if spec_layer is not None:
-                loaded_layers.add(spec_layer)
-        for layer_idx in range(
-            self.model.mtp_start_layer_idx,
-            self.model.mtp_start_layer_idx + self.model.num_mtp_layers,
-        ):
-            if layer_idx not in loaded_layers:
-                raise ValueError(
-                    f"MTP speculative decoding layer {layer_idx} weights "
-                    f"missing from checkpoint. The checkpoint may not include "
-                    f"the MTP layer weights. Use a checkpoint that includes "
-                    f"MTP layer weights, or disable speculative decoding."
-                )
-
-        if use_mega_moe:
-            for module in self.modules():
-                if isinstance(module, KimiMoE) and module.use_mega_moe:
-                    module.experts.finalize_weights()
-
         return loaded_params
 
     def _rewrite_spec_layer_name(self, spec_layer: int, name: str) -> str:
         """Rewrite a checkpoint weight name to this module's parameter path.
 
         Top-level MTP submodules (enorm/hnorm/eh_proj/shared_head) stay under
-        ``model.layers.{spec_layer}.*``; the shared ``embed_tokens`` is hoisted
-        to ``model.*``; everything else is a transformer-block weight and gets
-        ``.mtp_block`` inserted.
+        `model.layers.{spec_layer}.*`; the shared `embed_tokens` is hoisted
+        to `model.*`; everything else is a transformer-block weight and gets
+        `.mtp_block` inserted.
         """
         spec_layer_weight_names = [
             "embed_tokens",

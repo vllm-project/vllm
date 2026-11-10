@@ -34,6 +34,17 @@ def test_concat_mla_q_contiguous(num_tokens, num_heads, nope_dim, rope_dim, dtyp
     torch.testing.assert_close(q_out, ref, atol=0, rtol=0)
 
 
+def test_concat_mla_q_padded_output_heads():
+    """The fused concat can write directly into a head-padded workspace."""
+    ql_nope = torch.randn(4, 8, 512, dtype=torch.bfloat16, device="cuda")
+    q_pe = torch.randn(4, 8, 64, dtype=torch.bfloat16, device="cuda")
+    q_out = torch.empty(4, 64, 576, dtype=torch.bfloat16, device="cuda")
+
+    ops.concat_mla_q(ql_nope, q_pe, q_out)
+
+    torch.testing.assert_close(q_out[:, :8], torch.cat((ql_nope, q_pe), dim=-1))
+
+
 @pytest.mark.parametrize("num_tokens", [t for t in NUM_TOKENS if t > 1])
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("nope_dim", NOPE_DIM)
@@ -137,3 +148,38 @@ def test_concat_mla_q_values_preserved(num_tokens):
     assert torch.equal(out_bits[..., :nope_dim], ql_nope_bits)
 
     assert torch.equal(out_bits[..., nope_dim:], q_pe_bits)
+
+
+@pytest.mark.parametrize("rope_dim,transposed", [(0, False), (0, True), (64, False)])
+@pytest.mark.parametrize("enabled", [False, True])
+def test_concat_mla_q_fp8_nope_and_rope(rope_dim, transposed, enabled):
+    """FP8 query packing preserves values with empty RoPE and strided BMM output."""
+    from vllm.config import CompilationConfig, VllmConfig, set_current_vllm_config
+    from vllm.model_executor.layers.attention.mla_attention import _DecodeConcatQuantFP8
+    from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        GroupShape,
+        get_fp8_min_max,
+    )
+    from vllm.platforms import current_platform
+
+    torch.manual_seed(42)
+    shape = (8, 17, 512) if transposed else (17, 8, 512)
+    ql = torch.randn(shape, dtype=torch.bfloat16, device="cuda") * 128
+    if transposed:
+        ql = ql.transpose(0, 1)
+    qp = torch.randn(17, 8, rope_dim, dtype=torch.bfloat16, device="cuda") * 128
+    scale = torch.tensor(0.3, device="cuda", dtype=torch.float32)
+    joined = torch.cat((ql, qp), dim=-1)
+    fp8_min, fp8_max = get_fp8_min_max()
+    expected = (joined.float() * scale.reciprocal()).clamp(fp8_min, fp8_max)
+    expected = expected.to(current_platform.fp8_dtype())
+    custom_ops = ["none"] + (["+mla_decode_concat_quant_fp8"] if enabled else [])
+    config = VllmConfig(
+        compilation_config=CompilationConfig(mode=0, custom_ops=custom_ops)
+    )
+    with set_current_vllm_config(config):
+        quant = _DecodeConcatQuantFP8(static=True, group_shape=GroupShape.PER_TENSOR)
+        actual = quant(ql, qp, scale)
+    assert actual.dtype == current_platform.fp8_dtype()
+    torch.testing.assert_close(actual.float(), expected.float(), atol=0, rtol=0)
+    assert actual.is_contiguous()

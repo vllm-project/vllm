@@ -1,11 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import ctypes
 import gc
 import json
 import time
 from collections import Counter
-from contextlib import suppress
-from typing import Any
+from collections.abc import Iterable
+from contextlib import contextmanager, suppress
+from typing import Any, TypeVar
 
 import vllm.envs as envs
 from vllm.logger import init_logger
@@ -14,8 +16,7 @@ logger = init_logger(__name__)
 
 
 class GCDebugConfig:
-    """
-    Config for GC Debugger.
+    """Config for GC Debugger.
     - 0: disable GC debugger
     - 1: enable GC debugger with gc.collect elapsed times
     - '{"top_objects":5}': enable GC debugger with top 5 collected objects
@@ -44,8 +45,7 @@ class GCDebugConfig:
 
 
 class GCDebugger:
-    """
-    Debugger for GC which logs helpful information for GC understanding.
+    """Debugger for GC which logs helpful information for GC understanding.
     To enable, you should call maybe_attach_gc_debug_callback in the process.
     """
 
@@ -59,9 +59,7 @@ class GCDebugger:
         self.gc_top_collected_objects: str = ""
 
     def handle(self, phase: str, info: dict[str, int]) -> None:
-        """
-        Handles a GC event (e.g. GC start or GC finish)
-        """
+        """Handles a GC event (e.g. GC start or GC finish)."""
         generation = info.get("generation")
         if generation is None:
             return
@@ -77,11 +75,11 @@ class GCDebugger:
         elif phase == "stop":
             # After GC finished, Record GC elapsed time and
             # optionally top collected objects
-            elpased_ms = (time.monotonic_ns() - self.start_time_ns) / 1e6
+            elapsed_ms = (time.monotonic_ns() - self.start_time_ns) / 1e6
             logger.info(
                 "GC took %.3fms to complete. "
                 "Collected %s objects (out of %d) in GC generation %d.%s",
-                elpased_ms,
+                elapsed_ms,
                 str(info.get("collected", "?")),
                 self.num_objects,
                 generation,
@@ -93,9 +91,36 @@ class GCDebugger:
             )
 
 
-def freeze_gc_heap() -> None:
+@contextmanager
+def freeze_gc_for_cudagraph_capture():
+    """Freeze and disable gc for the duration of bulk CUDA graph capture.
+
+    A gc cycle during stream capture can invalidate the captured graph, e.g.
+    a finalized Triton kernel unloads its module. Opt out with
+    VLLM_ENABLE_CUDAGRAPH_GC=1.
     """
-    Freeze all objects tracked by the garbage collector. It should be invoked
+    gc_was_enabled = gc.isenabled()
+    gc.collect()
+    should_freeze = not envs.VLLM_ENABLE_CUDAGRAPH_GC
+    if should_freeze:
+        gc.freeze()
+        gc.disable()
+    try:
+        yield
+    finally:
+        if should_freeze:
+            try:
+                gc.unfreeze()
+                gc.collect()
+            finally:
+                if gc_was_enabled:
+                    gc.enable()
+                else:
+                    gc.disable()
+
+
+def freeze_gc_heap() -> None:
+    """Freeze all objects tracked by the garbage collector. It should be invoked
     after server init / warmup, to reduce GC overhead from static objects
     during serving time.
     """
@@ -108,10 +133,48 @@ def freeze_gc_heap() -> None:
     gc.freeze()
 
 
+_T = TypeVar("_T")
+
+# PyDLL call: holds the GIL. CPython never re-tracks an untracked list.
+_PyObject_GC_UnTrack = ctypes.pythonapi.PyObject_GC_UnTrack
+_PyObject_GC_UnTrack.argtypes = [ctypes.py_object]
+_PyObject_GC_UnTrack.restype = None
+
+
+def gc_untrack(obj: _T) -> _T:
+    """Hide a container from the cyclic GC, so that collections skip its
+    elements. Reference counting still frees it.
+
+    Only for containers that can never be part of a reference cycle (e.g. a
+    list of atomic values, or of objects that never refer back to it): a cycle
+    through an untracked container is never collected. Dicts re-track
+    themselves when a tracked value is inserted, so this suits lists.
+    A no-op for objects the GC does not track (e.g. arrays, empty tuples).
+    """
+    if gc.is_tracked(obj):
+        _PyObject_GC_UnTrack(obj)
+    return obj
+
+
+def untracked_list() -> list:
+    """An empty list that the cyclic GC never traverses (see `gc_untrack`)."""
+    return gc_untrack([])
+
+
+def untrack_long_lists(lists: Iterable[list | None], min_len: int = 256) -> None:
+    """`gc_untrack` the lists with at least `min_len` elements, skipping None.
+
+    For short-lived lists, which a young GC pass would scan at most once or
+    twice: untracking costs ~0.2us per call against ~20ns per element scanned,
+    so it only pays off for long ones.
+    """
+    for lst in lists:
+        if lst is not None and len(lst) >= min_len:
+            gc_untrack(lst)
+
+
 def maybe_attach_gc_debug_callback() -> None:
-    """
-    Attached a callback for GC debug when VLLM_GC_DEBUG is enabled.
-    """
+    """Attached a callback for GC debug when VLLM_GC_DEBUG is enabled."""
     config = GCDebugConfig(envs.VLLM_GC_DEBUG)
     if config.enabled:
         debugger: GCDebugger = GCDebugger(config)
@@ -123,8 +186,7 @@ def maybe_attach_gc_debug_callback() -> None:
 
 
 def _compute_detailed_type(o: Any) -> str:
-    """
-    Detailed object type.
+    """Detailed object type.
 
     TODO(Jialin): Further enhance the detailed type with element types for
     easier debugging. We tried but occasionally it would run into signals
@@ -139,9 +201,7 @@ def _compute_detailed_type(o: Any) -> str:
 
 
 def _compute_top_gc_collected_objects(objects: list[Any], top: int) -> str:
-    """
-    Group collected objects by types.
-    """
+    """Group collected objects by types."""
     if top <= 0:
         return ""
     object_types = [_compute_detailed_type(o) for o in objects]

@@ -3,11 +3,11 @@
 
 from collections.abc import Iterable
 
-import regex as re
 import torch
 import torch.nn as nn
 
 from vllm.config import VllmConfig
+from vllm.distributed import get_pp_group
 from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
@@ -19,9 +19,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.model_loader.mtp_validation import (
-    is_mtp_completeness_check_enabled,
-)
+from vllm.model_executor.model_loader.reload import weight_update_active
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
@@ -143,8 +141,17 @@ class MiniMaxM3MultiTokenPredictor(nn.Module):
 
 
 class MiniMaxM3MTP(nn.Module):
+    # Shares the target's input embedding unless loading finds its own (only
+    # tracked under V2 PP, where the target's may not be available).
+    has_own_embed_tokens = False
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+
+        self._tracks_own_embed = get_pp_group().world_size > 1
+        if self._tracks_own_embed:
+            # Preserve embeddings from loaders that bypass load_weights.
+            self.has_own_embed_tokens = vllm_config.load_config.load_format != "dummy"
 
         assert vllm_config.speculative_config is not None
         self.config = vllm_config.speculative_config.draft_model_config.hf_config
@@ -186,11 +193,6 @@ class MiniMaxM3MTP(nn.Module):
         return self.logits_processor(
             self.lm_head, mtp_layer.final_layernorm(hidden_states)
         )
-
-    def _get_mtp_layer_idx_from_weight_name(self, name: str) -> int | None:
-        """Return the MTP layer index in *.mtp.layers.{idx}.*, else None."""
-        match = re.search(r"\.mtp\.layers\.(\d+)\.", name)
-        return int(match.group(1)) if match else None
 
     def _map_checkpoint_name(self, name: str) -> str | None:
         """Map a full checkpoint key to this MTP module's parameter name.
@@ -243,9 +245,7 @@ class MiniMaxM3MTP(nn.Module):
 
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
-        loaded_mtp_layers: set[int] = set()
         for name, loaded_weight in weights:
-            mtp_layer = self._get_mtp_layer_idx_from_weight_name(name)
             mapped_name = self._map_checkpoint_name(name)
             if mapped_name is None:
                 # This weight does not belong to the MTP module, so skip it.
@@ -302,17 +302,11 @@ class MiniMaxM3MTP(nn.Module):
                     weight_loader(param, loaded_weight)
 
             loaded_params.add(name)
-            if mtp_layer is not None:
-                loaded_mtp_layers.add(mtp_layer)
 
-        # Validate that weights were loaded for each MTP layer.
-        for layer_idx in range(self.model.num_mtp_layers):
-            if (
-                layer_idx not in loaded_mtp_layers
-                and is_mtp_completeness_check_enabled()
-            ):
-                raise ValueError(
-                    f"Failed to load MTP layer {layer_idx} weights from checkpoint."
-                )
-
+        if self._tracks_own_embed:
+            if "model.embed_tokens.weight" in loaded_params:
+                self.has_own_embed_tokens = True
+            elif not weight_update_active():
+                # A complete checkpoint without embeddings borrows the target's.
+                self.has_own_embed_tokens = False
         return loaded_params

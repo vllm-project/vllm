@@ -9,12 +9,13 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 from torch.nn import LayerNorm
-from transformers.configuration_utils import PretrainedConfig
+from transformers.configuration_utils import PreTrainedConfig
 from transformers.modeling_utils import PreTrainedModel
 
 from vllm.third_party.deep_gemm import per_block_cast_to_fp8
 
 from .vision_attention import (
+    VisionRMSNorm,
     VisionRotaryEmbedding,
     VisionRotaryPositionEmbedding,
     apply_vision_attention_residual,
@@ -26,7 +27,7 @@ from .vision_attention import (
 from .vision_moe import note_vision_fused_moe_fp8
 
 
-class DotsMoEVitConfig(PretrainedConfig):
+class DotsMoEVitConfig(PreTrainedConfig):
     model_type: str = "dots_moe_vit"
 
     def __init__(
@@ -105,23 +106,6 @@ class DotsMoEVitConfig(PretrainedConfig):
         self.pre_pixel_shuffle = pre_pixel_shuffle
         self.enable_torch_compile = enable_torch_compile
         self.enable_fp8_moe = enable_fp8_moe
-
-
-class RMSNorm(nn.Module):
-    def __init__(self, dim: int, eps: float = 1e-6):
-        super().__init__()
-        self.weight = nn.Parameter(torch.ones(dim))
-        self.eps = eps
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        output = self._norm(x.float()).type_as(x)
-        return output * self.weight
-
-    def extra_repr(self) -> str:
-        return f"{tuple(self.weight.shape)}, eps={self.eps}"
-
-    def _norm(self, x: torch.Tensor) -> torch.Tensor:
-        return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
 
 
 # ---- FFN modules ----
@@ -246,9 +230,8 @@ class MoESwiGLUFFNFP8(MoESwiGLUFFN):
 
     @torch.no_grad()
     def process_weights_after_loading(self) -> None:
-        if hasattr(self, "_fused_w13_fp8"):
-            return
-
+        # Reruns after every reload: rebuild the fused FP8 experts from the
+        # checkpoint experts, refilling the fused buffers in place.
         w13_weights = []
         w13_scales = []
         w2_weights = []
@@ -262,27 +245,18 @@ class MoESwiGLUFFNFP8(MoESwiGLUFFN):
             w2_weights.append(w2)
             w2_scales.append(s2)
 
-        self.register_buffer(
-            "_fused_w13_fp8",
-            torch.stack(w13_weights).contiguous(),
-            persistent=False,
-        )
-        self.register_buffer(
-            "_fused_w13_scale",
-            torch.stack(w13_scales).contiguous(),
-            persistent=False,
-        )
-        self.register_buffer(
-            "_fused_w2_fp8",
-            torch.stack(w2_weights).contiguous(),
-            persistent=False,
-        )
-        self.register_buffer(
-            "_fused_w2_scale",
-            torch.stack(w2_scales).contiguous(),
-            persistent=False,
-        )
-        del self.experts
+        # The checkpoint experts stay registered: a reload writes into them.
+        for name, parts in (
+            ("_fused_w13_fp8", w13_weights),
+            ("_fused_w13_scale", w13_scales),
+            ("_fused_w2_fp8", w2_weights),
+            ("_fused_w2_scale", w2_scales),
+        ):
+            fused = torch.stack(parts).contiguous()
+            if name in self._buffers:
+                self._buffers[name].copy_(fused)
+            else:
+                self.register_buffer(name, fused, persistent=False)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if not hasattr(self, "_fused_w13_fp8"):
@@ -333,7 +307,7 @@ class DotsPatchEmbed(nn.Module):
             kernel_size=(config.patch_size, config.patch_size),
             stride=(config.patch_size, config.patch_size),
         )
-        self.norm = RMSNorm(config.embed_dim, eps=config.rms_norm_eps)
+        self.norm = VisionRMSNorm(config.embed_dim, eps=config.rms_norm_eps)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = x.view(
@@ -359,8 +333,8 @@ class MoEVisionBlock(nn.Module):
         )
         self.attn = build_vision_attention(attn_impl, config, eager_fallback="eager_v2")
         self._attn_uses_seqlens = attn_uses_seqlens(attn_impl)
-        self.norm_1 = RMSNorm(config.embed_dim, eps=config.rms_norm_eps)
-        self.norm_2 = RMSNorm(config.embed_dim, eps=config.rms_norm_eps)
+        self.norm_1 = VisionRMSNorm(config.embed_dim, eps=config.rms_norm_eps)
+        self.norm_2 = VisionRMSNorm(config.embed_dim, eps=config.rms_norm_eps)
 
         is_moe = (
             config.pyramid_num_routed
@@ -421,8 +395,8 @@ def _pixel_shuffle(x, scale_factor=0.5):
 class PixelShuffleAdapter(nn.Module):
     """Legacy adapter: NHWC pixel-shuffle spatial merge + LayerNorm + 2-layer MLP.
 
-    Mirrors ``cybertron`` ``FCAdapter(pool_kind='pixel_shuffle', proj_kind='mlp2x_ln_gelu')``.
-    State-dict keys: ``proj.0`` (LayerNorm of in_dim*merge**2), ``proj.1`` / ``proj.3`` (Linear).
+    Mirrors `cybertron` `FCAdapter(pool_kind='pixel_shuffle', proj_kind='mlp2x_ln_gelu')`.
+    State-dict keys: `proj.0` (LayerNorm of in_dim*merge**2), `proj.1` / `proj.3` (Linear).
     """
 
     def __init__(self, config: DotsMoEVitConfig):
@@ -464,12 +438,12 @@ class PixelShuffleAdapter(nn.Module):
 
 
 class PatchMergerAdapter(nn.Module):
-    """Cybertron ``PatchMerger`` (``pool_kind='patch_merger', proj_kind='identity'``).
+    """Cybertron `PatchMerger` (`pool_kind='patch_merger', proj_kind='identity'`).
 
-    Assumes the encoder output is already laid out in ``merge_size``x``merge_size`` groups
-    (qwen ``pre_pixel_shuffle`` preprocessor + RoPE grouped accordingly), so merging is a
-    simple ``view(-1, merge**2 * in_dim)`` of consecutive tokens. State-dict layout matches
-    cybertron's ``PatchMerger`` (``ln_q`` over the per-token dim, ``mlp.0`` / ``mlp.2`` Linear).
+    Assumes the encoder output is already laid out in `merge_size`x`merge_size` groups
+    (qwen `pre_pixel_shuffle` preprocessor + RoPE grouped accordingly), so merging is a
+    simple `view(-1, merge**2 * in_dim)` of consecutive tokens. State-dict layout matches
+    cybertron's `PatchMerger` (`ln_q` over the per-token dim, `mlp.0` / `mlp.2` Linear).
     """
 
     def __init__(self, config: DotsMoEVitConfig):
@@ -534,7 +508,9 @@ class DotsMoEVitModel(PreTrainedModel):
         )
 
         if config.post_norm:
-            self.post_trunk_norm = RMSNorm(config.embed_dim, eps=config.rms_norm_eps)
+            self.post_trunk_norm = VisionRMSNorm(
+                config.embed_dim, eps=config.rms_norm_eps
+            )
 
         adapter_cls = _ADAPTER_CLASSES.get(config.adapter_type)
         if adapter_cls is None:
@@ -561,17 +537,18 @@ class DotsMoEVitModel(PreTrainedModel):
         return self.patch_embed.proj.weight.device
 
     def process_weights_after_loading(self) -> None:
-        for block in self.blocks:
-            if isinstance(block.mlp, MoESwiGLUFFNFP8):
-                block.mlp.process_weights_after_loading()
         if self.config.enable_torch_compile:
             self.compile_block_modules()
 
     def compile_block_modules(self, **compile_kwargs: Any) -> None:
+        # In-place compile keeps checkpoint parameter names (no ``_orig_mod``);
+        # post-load processing reruns on every reload, so compile once.
+        if getattr(self, "_blocks_compiled", False):
+            return
         for block in self.blocks:
-            block.attn = torch.compile(block.attn, **compile_kwargs)
-            block.norm_1 = torch.compile(block.norm_1, **compile_kwargs)
-            block.norm_2 = torch.compile(block.norm_2, **compile_kwargs)
+            for module in (block.attn, block.norm_1, block.norm_2):
+                module.compile(**compile_kwargs)
+        self._blocks_compiled = True
 
     def get_pos_ids_by_grid(self, grid_thw_cpu: torch.Tensor):
         # Mirrors ``cybertron`` ``AIMv2NativeModel.rot_pos_emb``: when ``pre_pixel_shuffle``

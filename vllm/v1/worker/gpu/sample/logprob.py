@@ -19,6 +19,7 @@ def _topk_log_softmax_kernel(
     logits_ptr,
     logits_stride,
     topk_ids_ptr,
+    topk_ids_stride,
     topk,
     vocab_size,
     BLOCK_SIZE: tl.constexpr,
@@ -49,7 +50,7 @@ def _topk_log_softmax_kernel(
         k_offset = j + tl.arange(0, TOPK_BLOCK_SIZE)
         k_mask = k_offset < topk
         topk_ids = tl.load(
-            topk_ids_ptr + req_idx * topk + k_offset, mask=k_mask, other=0
+            topk_ids_ptr + req_idx * topk_ids_stride + k_offset, mask=k_mask, other=0
         )
         logits = tl.load(row_ptr + topk_ids, mask=k_mask)
         logits = logits.to(tl.float32)
@@ -98,6 +99,7 @@ def compute_token_logprobs(
         logits,
         logits.stride(0),
         token_ids,
+        token_ids.stride(0),
         num_logprobs,
         vocab_size,
         BLOCK_SIZE=1024,  # type: ignore
@@ -110,7 +112,7 @@ def compute_topk_scores(
     logits: torch.Tensor,
     num_logprobs: int,
     sampled_token_ids: torch.Tensor,
-    cu_num_logits: list[int] | None = None,
+    cu_num_logits: list[int] | torch.Tensor | None = None,
     logprob_token_ids_state: "LogprobTokenIdsState | None" = None,
     expanded_idx_mapping: torch.Tensor | None = None,
     max_per_req_token_ids: int = 0,
@@ -177,11 +179,13 @@ def compute_topk_scores(
         vocab_size,
         BLOCK_SIZE=8192,  # type: ignore
     )
+    is_tensor = isinstance(cu_num_logits, torch.Tensor)
     return LogprobsTensors(
         logprob_token_ids=logprob_token_ids,
         logprobs=scores,
         selected_token_ranks=token_ranks,
-        cu_num_generated_tokens=cu_num_logits,
+        cu_num_generated_tokens=None if is_tensor else cu_num_logits,
+        cu_num_generated_tokens_tensor=cu_num_logits if is_tensor else None,
     )
 
 

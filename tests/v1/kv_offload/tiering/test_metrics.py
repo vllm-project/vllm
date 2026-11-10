@@ -2,11 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Iterable
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
 from vllm.v1.kv_offload.base import LookupResult, ReqContext, make_offload_key
+from vllm.v1.kv_offload.tiering import metrics as tiering_metrics
 from vllm.v1.kv_offload.tiering.base import (
     JobResult,
     TieringOffloadingMetrics,
@@ -25,8 +27,8 @@ def to_keys(int_ids: Iterable[int]):
 def test_tiering_metrics_tracker_records_lookup_metrics():
     tracker = TieringMetricsTracker(
         tier_types=["fs", "p2p"],
-        num_primary_blocks=5,
-        primary_block_size=16,
+        num_primary_chunks=5,
+        primary_chunk_size=16,
     )
     tracker.on_new_request(_CTX)
 
@@ -45,18 +47,18 @@ def test_tiering_metrics_tracker_records_lookup_metrics():
     stats = tracker.take_stats()
     assert stats is not None
     values = stats.data["data"]
-    assert values[TieringOffloadingMetrics.BLOCK_QUERIES][("0:primary",)] == 1
-    assert values[TieringOffloadingMetrics.BLOCK_QUERIES][("1:fs",)] == 1
-    assert values[TieringOffloadingMetrics.BLOCK_QUERIES][("2:p2p",)] == 1
-    assert values[TieringOffloadingMetrics.BLOCK_HITS][("2:p2p",)] == 1
-    assert ("1:fs",) not in values[TieringOffloadingMetrics.BLOCK_HITS]
+    assert values[TieringOffloadingMetrics.CHUNK_QUERIES][("0:primary",)] == 1
+    assert values[TieringOffloadingMetrics.CHUNK_QUERIES][("1:fs",)] == 1
+    assert values[TieringOffloadingMetrics.CHUNK_QUERIES][("2:p2p",)] == 1
+    assert values[TieringOffloadingMetrics.CHUNK_HITS][("2:p2p",)] == 1
+    assert ("1:fs",) not in values[TieringOffloadingMetrics.CHUNK_HITS]
 
 
 def test_tiering_metrics_tracker_stops_lookup_metrics_after_allocation():
     tracker = TieringMetricsTracker(
         tier_types=["fs"],
-        num_primary_blocks=5,
-        primary_block_size=16,
+        num_primary_chunks=5,
+        primary_chunk_size=16,
     )
     tracker.on_new_request(_CTX)
     key = to_keys([1])[0]
@@ -73,9 +75,9 @@ def test_tiering_metrics_tracker_stops_lookup_metrics_after_allocation():
     stats = tracker.take_stats()
     assert stats is not None
     values = stats.data["data"]
-    assert values[TieringOffloadingMetrics.BLOCK_QUERIES][("0:primary",)] == 1
-    assert values[TieringOffloadingMetrics.BLOCK_QUERIES][("1:fs",)] == 1
-    assert values[TieringOffloadingMetrics.BLOCK_HITS][("1:fs",)] == 1
+    assert values[TieringOffloadingMetrics.CHUNK_QUERIES][("0:primary",)] == 1
+    assert values[TieringOffloadingMetrics.CHUNK_QUERIES][("1:fs",)] == 1
+    assert values[TieringOffloadingMetrics.CHUNK_HITS][("1:fs",)] == 1
 
     tracker.on_request_allocated(_CTX)
     tracker.on_lookup(
@@ -90,15 +92,15 @@ def test_tiering_metrics_tracker_stops_lookup_metrics_after_allocation():
     stats = tracker.take_stats()
     assert stats is not None
     values = stats.data["data"]
-    assert TieringOffloadingMetrics.BLOCK_QUERIES not in values
-    assert TieringOffloadingMetrics.BLOCK_HITS not in values
+    assert TieringOffloadingMetrics.CHUNK_QUERIES not in values
+    assert TieringOffloadingMetrics.CHUNK_HITS not in values
 
 
 def test_tiering_metrics_tracker_records_finished_job_metrics():
     tracker = TieringMetricsTracker(
         tier_types=["fs"],
-        num_primary_blocks=5,
-        primary_block_size=16,
+        num_primary_chunks=5,
+        primary_chunk_size=16,
     )
     cascade_key, promotion_key, failed_cascade_key, failed_promotion_key = to_keys(
         range(4)
@@ -149,8 +151,8 @@ def test_tiering_metrics_tracker_records_finished_job_metrics():
 def test_tiering_metrics_tracker_records_partial_promotion_success_bytes():
     tracker = TieringMetricsTracker(
         tier_types=["fs"],
-        num_primary_blocks=5,
-        primary_block_size=16,
+        num_primary_chunks=5,
+        primary_chunk_size=16,
     )
     keys = to_keys(range(3))
     job = JobMetadata(
@@ -182,8 +184,8 @@ def test_tiering_metrics_tracker_records_partial_promotion_success_bytes():
 def test_tiering_metrics_tracker_reports_active_job_and_primary_usage_gauges():
     tracker = TieringMetricsTracker(
         tier_types=["fs", "p2p"],
-        num_primary_blocks=6,
-        primary_block_size=16,
+        num_primary_chunks=6,
+        primary_chunk_size=16,
     )
     fs_job = JobMetadata(
         TransferJob(0, to_keys([0, 1]), np.array([0, 1]), False, _CTX),
@@ -211,11 +213,100 @@ def test_tiering_metrics_tracker_reports_active_job_and_primary_usage_gauges():
     assert values[TieringOffloadingMetrics.ACTIVE_PROMOTION_JOBS][p2p_label] == 1
 
 
+def test_tiering_metrics_tracker_records_promotion_latency_histogram(monkeypatch):
+    """Tracker measures job-creation-to-completion, not transfer_time.
+
+    Includes failed promotions.
+    """
+    clock = 100.0
+    monkeypatch.setattr(
+        tiering_metrics, "time", SimpleNamespace(monotonic=lambda: clock)
+    )
+
+    tracker = TieringMetricsTracker(
+        tier_types=["fs", "p2p"],
+        num_primary_chunks=5,
+        primary_chunk_size=16,
+    )
+
+    promotion_job = JobMetadata(
+        TransferJob(0, to_keys([0, 1]), np.array([0, 1]), True, _CTX),
+        1,
+    )
+    promotion_job.transfer_job.submit_time = clock
+    tracker.on_job_registered(promotion_job)
+    clock += 1.5
+    tracker.on_job_finished(
+        promotion_job, JobResult(job_id=0, success=True, transfer_time=0.42)
+    )
+
+    stats = tracker.take_stats()
+    assert stats is not None
+    observations = stats.data["data"][TieringOffloadingMetrics.PROMOTION_LATENCY]
+    assert observations == {("2:p2p", "success"): [1.5]}
+
+    cascade_job = JobMetadata(
+        TransferJob(1, to_keys([2]), np.array([2]), False, _CTX),
+        1,
+    )
+    tracker.on_job_registered(cascade_job)
+    clock += 0.1
+    tracker.on_job_finished(
+        cascade_job, JobResult(job_id=1, success=True, transfer_time=0.10)
+    )
+
+    stats = tracker.take_stats()
+    assert stats is not None
+    values = stats.data["data"]
+    assert TieringOffloadingMetrics.PROMOTION_LATENCY not in values
+
+    failed_promotion_job = JobMetadata(
+        TransferJob(2, to_keys([3]), np.array([3]), True, _CTX),
+        0,
+    )
+    failed_promotion_job.transfer_job.submit_time = clock
+    tracker.on_job_registered(failed_promotion_job)
+    clock += 0.2
+    tracker.on_job_finished(
+        failed_promotion_job,
+        JobResult(job_id=2, success=False, transfer_time=0.42),
+    )
+
+    stats = tracker.take_stats()
+    assert stats is not None
+    values = stats.data["data"]
+    observations = values[TieringOffloadingMetrics.PROMOTION_LATENCY]
+    assert observations == {("1:fs", "failure"): pytest.approx([0.2])}
+    tracker.assert_idle()
+
+
+def test_tiering_metrics_tracker_records_promotion_latency_without_transfer_time():
+    """A completion carrying no transfer_time still records a latency sample."""
+    tracker = TieringMetricsTracker(
+        tier_types=["p2p"],
+        num_primary_chunks=5,
+        primary_chunk_size=16,
+    )
+
+    promotion_job = JobMetadata(
+        TransferJob(0, to_keys([0]), np.array([0]), True, _CTX),
+        0,
+    )
+    tracker.on_job_registered(promotion_job)
+    tracker.on_job_finished(promotion_job, JobResult(job_id=0, success=True))
+    tracker.assert_idle()
+
+    stats = tracker.take_stats()
+    assert stats is not None
+    observations = stats.data["data"][TieringOffloadingMetrics.PROMOTION_LATENCY]
+    assert len(observations[("1:p2p", "success")]) == 1
+
+
 def test_tiering_metrics_tracker_records_promotion_allocation_failures():
     tracker = TieringMetricsTracker(
         tier_types=["fs"],
-        num_primary_blocks=1,
-        primary_block_size=16,
+        num_primary_chunks=1,
+        primary_chunk_size=16,
     )
 
     tracker.on_promotion_allocation_failure()

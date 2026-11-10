@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Trace-replay with vLLM offline inference.
+"""Trace-replay with vLLM offline inference.
 
 Trace-replay lets you supply a known sequence of decode token IDs alongside
 the prompt.  Instead of sampling from the model distribution, the engine
@@ -10,16 +9,16 @@ outputs — logprobs, token ranks, text decoding — are computed faithfully
 from the real logit distribution for that token.
 
 How it works:
-  1. Start the engine with ``--enable-trace-replay`` (or
-     ``LLM(..., enable_trace_replay=True)``).
-  2. Set ``SamplingParams.trace_decode_token_ids`` to the list of decode
+  1. Start the engine with `--enable-trace-replay` (or
+     `LLM(..., enable_trace_replay=True)`).
+  2. Set `SamplingParams.trace_decode_token_ids` to the list of decode
      token IDs you want to force.
-  3. The engine will output exactly those tokens and stop.  ``max_tokens``
+  3. The engine will output exactly those tokens and stop.  `max_tokens`
      is overwritten with the trace length, and the trace is truncated if it
-     does not fit within ``max_model_len``.  EOS tokens inside the trace
+     does not fit within `max_model_len`.  EOS tokens inside the trace
      sequence do **not** halt generation early.
 
-Requires model runner V2.  Requests are rejected with ``ValueError`` when
+Requires model runner V2.  Requests are rejected with `ValueError` when
 combined with any of:
   * n > 1                     * Speculative decoding
   * prompt_logprobs           * Structured outputs

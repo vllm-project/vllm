@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use thiserror_ext::AsReport as _;
 
 use crate::error::{Error, Result};
+use crate::normalize_top_k;
 
 /// Minimal subset of `tokenizer_config.json` needed by chat/EOS handling.
 #[derive(Debug, Default, Deserialize)]
@@ -16,12 +17,62 @@ use crate::error::{Error, Result};
 pub struct HfTokenizerConfig {
     #[serde(flatten)]
     pub special_tokens: HfSpecialTokens,
-    pub chat_template: Option<String>,
+    pub chat_template: Option<HfChatTemplate>,
     /// The `tokenizer_class` field from HuggingFace tokenizer configs. Some
     /// tiktoken-based models (e.g. DeepSeek, Kimi K2) set this to a value
     /// containing "Tiktoken" which can be used as a hint for backend
     /// selection.
     pub tokenizer_class: Option<String>,
+    /// The Hugging Face `response_template`: a declarative description of the
+    /// model's output protocol, executed by the `hf` unified parser.
+    pub response_template: Option<serde_json::Value>,
+}
+
+/// The `chat_template` field of `tokenizer_config.json`: one template, or the
+/// named templates Transformers serializes as a list of `{name, template}`
+/// (e.g. `default` and `tool_use`).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum HfChatTemplate {
+    Single(String),
+    Named(Vec<HfNamedChatTemplate>),
+}
+
+/// One entry of a list-form `chat_template`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct HfNamedChatTemplate {
+    pub name: String,
+    pub template: String,
+}
+
+impl HfChatTemplate {
+    /// The template Transformers uses when no tools are passed: the single
+    /// template, or the one named `default`.
+    pub fn default_template(&self) -> Option<&str> {
+        match self {
+            Self::Single(template) => Some(template),
+            Self::Named(_) => self.named("default"),
+        }
+    }
+
+    /// The template Transformers prefers when tools are passed: the one named
+    /// `tool_use`, if any.
+    pub fn tool_use_template(&self) -> Option<&str> {
+        self.named("tool_use")
+    }
+
+    /// Look up a named template. Transformers collects the list into a dict,
+    /// so a later entry wins over an earlier one with the same name.
+    fn named(&self, name: &str) -> Option<&str> {
+        match self {
+            Self::Single(_) => None,
+            Self::Named(templates) => templates
+                .iter()
+                .rev()
+                .find(|template| template.name == name)
+                .map(|template| template.template.as_str()),
+        }
+    }
 }
 
 /// Hugging Face named special tokens may be serialized as a string or an
@@ -83,10 +134,13 @@ impl HfSpecialTokens {
 
 /// Minimal subset of `config.json` (the model's main HF config).
 ///
-/// This intentionally supports only the two layouts we currently care about in
+/// This intentionally supports only the layouts we currently care about in
 /// the Rust frontend:
 /// - pure text models that keep text metadata at the top level
-/// - composite models that expose a single nested `text_config`
+/// - composite models that expose a nested `text_config`, its `llm_config`
+///   alias (used by Nemotron), or a `thinker_config` whose own `text_config`
+///   holds the text config (Qwen2.5-Omni, Qwen3-Omni, Qwen3-ASR, matching
+///   their Python `get_text_config()` overrides)
 ///
 /// We do not support additional entry points such as `decoder`, `generator`, or
 /// `text_encoder`.
@@ -101,6 +155,7 @@ pub struct ModelConfig {
     n_routed_experts: Option<OneOrManyExpertCount>,
     num_local_experts: Option<OneOrManyExpertCount>,
     block_configs: Vec<BlockConfig>,
+    #[serde(alias = "llm_config", alias = "thinker_config")]
     text_config: Option<Box<ModelConfig>>,
 }
 
@@ -115,26 +170,24 @@ pub(super) struct GenerationConfig {
     pub top_k: Option<u32>,
     pub min_p: Option<f32>,
     pub repetition_penalty: Option<f32>,
+    pub presence_penalty: Option<f32>,
+    pub frequency_penalty: Option<f32>,
     pub max_new_tokens: Option<u32>,
 }
 
-/// Deserialize vLLM-compatible `top_k` values from generation configs.
+/// Deserialize a generation-config `top_k` into the text sampling model.
 ///
-/// Both `-1` and `0` disable top-k sampling and become `None`; positive values
-/// are preserved.
+/// Null, `-1`, and `0` all disable top-k sampling; positive limits are
+/// preserved.
 fn deserialize_top_k<'de, D>(deserializer: D) -> std::result::Result<Option<u32>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    match Option::<i64>::deserialize(deserializer)? {
-        None | Some(-1) | Some(0) => Ok(None),
-        Some(value) if value > 0 => {
-            u32::try_from(value).map(Some).map_err(serde::de::Error::custom)
-        }
-        Some(value) => Err(serde::de::Error::custom(format!(
-            "top_k must be -1, 0, or a positive integer, got {value}"
-        ))),
-    }
+    Option::<i64>::deserialize(deserializer)?
+        .map(normalize_top_k)
+        .transpose()
+        .map(Option::flatten)
+        .map_err(serde::de::Error::custom)
 }
 
 /// HF generation configs allow either one EOS id or a list of EOS ids.
@@ -191,17 +244,17 @@ impl ModelConfig {
     /// Return the config that the Rust frontend treats as the text/LLM config.
     ///
     /// This is deliberately narrower than Python/transformers: we only support
-    /// either the top-level config itself or a single nested `text_config`.
+    /// the top-level config itself or the innermost of nested text configs.
     fn effective_text_config(&self) -> &Self {
-        self.text_config.as_deref().unwrap_or(self)
+        self.text_config.as_deref().map_or(self, Self::effective_text_config)
     }
 
     /// Return the effective Hugging Face `model_type` used by the Rust
     /// frontend.
     ///
     /// This follows the same simplified text-config selection as the rest of
-    /// this type: the top-level config wins, otherwise a single nested
-    /// `text_config` may provide the value.
+    /// this type: the top-level config wins, otherwise a nested `text_config`
+    /// may provide the value.
     pub fn model_type(&self) -> Option<&str> {
         self.model_type.as_deref().or_else(|| self.text_config.as_deref()?.model_type())
     }
@@ -236,7 +289,8 @@ impl ModelConfig {
     /// config.
     ///
     /// The only intentional simplification here is how we pick the text config:
-    /// Rust only looks at the top level or `text_config`, not the broader
+    /// Rust only looks at the top level or nested `text_config`s (including
+    /// the `llm_config` and `thinker_config` aliases), not the broader
     /// transformers composite-config surface.
     fn num_experts_from_block_configs(&self) -> u32 {
         self.effective_text_config()
@@ -314,7 +368,39 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{GenerationConfig, ModelConfig};
+    use super::{GenerationConfig, HfTokenizerConfig, ModelConfig};
+
+    #[test]
+    fn tokenizer_config_reads_single_and_named_chat_templates() {
+        let single: HfTokenizerConfig =
+            serde_json::from_str(r#"{"chat_template":"single"}"#).unwrap();
+        let named: HfTokenizerConfig = serde_json::from_str(
+            r#"{"chat_template":[
+                {"name":"default","template":"old default"},
+                {"name":"tool_use","template":"tool use"},
+                {"name":"default","template":"default"}
+            ]}"#,
+        )
+        .unwrap();
+        let without_default: HfTokenizerConfig =
+            serde_json::from_str(r#"{"chat_template":[{"name":"rag","template":"rag"}]}"#).unwrap();
+
+        let selected = [single, named, without_default].map(|config| {
+            let template = config.chat_template.unwrap();
+            (
+                template.default_template().map(str::to_owned),
+                template.tool_use_template().map(str::to_owned),
+            )
+        });
+        assert_eq!(
+            selected,
+            [
+                (Some("single".to_string()), None),
+                (Some("default".to_string()), Some("tool use".to_string())),
+                (None, None),
+            ]
+        );
+    }
 
     #[test]
     fn generation_config_normalizes_vllm_top_k_values() {
@@ -406,6 +492,95 @@ mod tests {
         .unwrap();
 
         assert_eq!(config.vocab_size().unwrap(), 151936);
+    }
+
+    #[test]
+    fn model_config_uses_llm_config_for_nemotron_composite_models() {
+        let config: ModelConfig = serde_json::from_str(
+            r#"{
+                "model_type": "nemotron_h_omni",
+                "llm_config": {
+                    "model_type": "nemotron_h",
+                    "vocab_size": 131072,
+                    "n_routed_experts": 256,
+                    "eos_token_id": 2
+                }
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(config.model_type(), Some("nemotron_h_omni"));
+        assert_eq!(config.vocab_size().unwrap(), 131072);
+        assert_eq!(config.eos_token_ids(), &[2]);
+        assert_eq!(config.num_experts(), 256);
+    }
+
+    #[test]
+    fn model_config_uses_thinker_text_config_for_qwen3_asr() {
+        let config: ModelConfig = serde_json::from_str(
+            r#"{
+                "model_type": "qwen3_asr",
+                "thinker_config": {
+                    "model_type": "qwen3_asr_thinker",
+                    "audio_config": {"model_type": "qwen3_asr_audio_encoder"},
+                    "text_config": {
+                        "model_type": "qwen3",
+                        "vocab_size": 151936
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(config.model_type(), Some("qwen3_asr"));
+        assert_eq!(config.vocab_size().unwrap(), 151936);
+        assert!(config.eos_token_ids().is_empty());
+        assert!(!config.is_moe());
+    }
+
+    #[test]
+    fn model_config_uses_thinker_text_config_and_ignores_talker_for_qwen3_omni() {
+        let config: ModelConfig = serde_json::from_str(
+            r#"{
+                "model_type": "qwen3_omni_moe",
+                "talker_config": {
+                    "model_type": "qwen3_omni_moe_talker",
+                    "text_config": {"vocab_size": 3072, "num_experts": 128}
+                },
+                "thinker_config": {
+                    "model_type": "qwen3_omni_moe_thinker",
+                    "text_config": {
+                        "model_type": "qwen3_omni_moe_text",
+                        "vocab_size": 152064,
+                        "num_experts": 128
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(config.model_type(), Some("qwen3_omni_moe"));
+        assert_eq!(config.vocab_size().unwrap(), 152064);
+        assert_eq!(config.num_experts(), 128);
+        assert!(config.is_moe());
+    }
+
+    #[test]
+    fn model_config_prefers_top_level_values_over_thinker_text_config() {
+        // `--hf-overrides` patches the top level, so it must keep winning.
+        let config: ModelConfig = serde_json::from_str(
+            r#"{
+                "vocab_size": 151936,
+                "eos_token_id": 151645,
+                "thinker_config": {
+                    "text_config": {"vocab_size": 152064, "eos_token_id": 151643}
+                }
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(config.vocab_size().unwrap(), 151936);
+        assert_eq!(config.eos_token_ids(), &[151645]);
     }
 
     #[test]

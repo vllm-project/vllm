@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, overload
 
 import torch
 import torch.nn as nn
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 from vllm.config.lora import LoRAConfig
 
@@ -15,6 +15,24 @@ if TYPE_CHECKING:
 
 
 class BaseLayerWithLoRA(nn.Module):
+    def __getattr__(self, name):
+        d = self.__dict__
+        if name in d.get("_parameters", ()):
+            return d["_parameters"][name]
+        if name in d.get("_buffers", ()):
+            return d["_buffers"][name]
+        if name in d.get("_modules", ()):
+            return d["_modules"][name]
+        # Forward public misses to ``base_layer``; private names are framework
+        # bookkeeping and must stay local.
+        if not name.startswith("_"):
+            base_layer = d.get("_modules", {}).get("base_layer")
+            if base_layer is not None:
+                return getattr(base_layer, name)
+        raise AttributeError(
+            f"{type(self).__name__!r} object has no attribute {name!r}"
+        )
+
     def load_weights(
         self, weights: Iterable[tuple[str, torch.Tensor]]
     ) -> Iterable[str]:
@@ -55,7 +73,7 @@ class BaseLayerWithLoRA(nn.Module):
         self,
         max_loras: int,
         lora_config: LoRAConfig,
-        model_config: PretrainedConfig | None = None,
+        model_config: PreTrainedConfig | None = None,
     ) -> None:
         """Initializes lora matrices."""
         ...
@@ -85,7 +103,7 @@ class BaseLayerWithLoRA(nn.Module):
         source_layer: nn.Module,
         lora_config: LoRAConfig,
         packed_modules_list: list,
-        model_config: PretrainedConfig | None = None,
+        model_config: PreTrainedConfig | None = None,
     ) -> bool:
         """Returns True if the layer can be replaced by this LoRA layer."""
         raise NotImplementedError

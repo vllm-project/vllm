@@ -114,7 +114,8 @@ async def test_bge_m3_sparse_plugin_online(
     response = ret.json()
 
     # Verify the request response is in the correct format
-    assert (parsed_response := IOProcessorResponse(**response).data)
+    parsed_response: object = IOProcessorResponse(**response).data
+    assert parsed_response
 
     # Verify the output is formatted as expected for this plugin
     assert _get_attr_or_val(parsed_response, "data")
@@ -176,7 +177,7 @@ def test_bge_m3_sparse_plugin_offline(vllm_runner, return_tokens: bool):
     assert hasattr(response, "data")
     assert len(response.data) == 1
     # Verify response data
-    for i, output in enumerate(response.data):
+    for output in response.data:
         # Each output should have sparse embeddings
         sparse_embedding = output.sparse_embedding
         assert isinstance(sparse_embedding, list)

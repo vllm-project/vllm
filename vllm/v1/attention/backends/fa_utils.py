@@ -168,26 +168,16 @@ def get_flash_attn_version(
             )
             fa_version = 2
 
-        # TODO: Restore the `requires_local_attention` restriction when FA4
-        # head-dim 256 is re-enabled.
-        if fa_version == 4 and device_capability.major >= 10 and head_size == 256:
-            logger.warning_once(
-                "FA4 on Blackwell is temporarily disabled for head_size=256, "
-                "defaulting to FA version 2."
-            )
-            fa_version = 2
-
-        # FA4 on SM100 (Blackwell) has TMEM capacity limits that restrict
-        # supported head dimensions to ≤128. The 192/128 MLA prefill case is
-        # supported; 256 is temporarily disabled until upstream supports the
-        # required features. Development of symmetric 192, 384, and 512 support
-        # is tracked in https://github.com/Dao-AILab/flash-attention/issues/2456
+        # FA4 head dimensions on Blackwell are limited by TMEM capacity.
         if (
             fa_version == 4
             and device_capability.major >= 10
             and head_size is not None
             and head_size > 128
-            and not (head_size == 192 and head_size_v == 128)
+            and not (
+                (head_size == 256 and head_size_v in (None, 256))
+                or (head_size == 192 and head_size_v == 128)
+            )
         ):
             logger.warning_once(
                 "FA4 on Blackwell does not support head_size=%d due to TMEM "
@@ -238,7 +228,11 @@ def flash_attn_supports_kv_cache_dtype(
         head_size_v=head_size_v,
         has_sinks=has_sinks,
     )
-    return (fa_version == 3 and current_platform.is_device_capability_family(90)) or (
+    is_sm90 = current_platform.is_device_capability_family(90)
+    sm90_fp8_kv_supported = fa_version == 3 or (
+        fa_version == 4 and head_size in (None, 512) and head_size_v in (None, 512)
+    )
+    return (sm90_fp8_kv_supported and is_sm90) or (
         fa_version == 4 and current_platform.is_device_capability_family(100)
     )
 
@@ -271,6 +265,8 @@ def flash_attn_supports_mla():
 
         except (ImportError, AssertionError):
             pass
+    elif current_platform.is_xpu():
+        return True
     return False
 
 
@@ -292,6 +288,7 @@ def is_flash_attn_varlen_func_available() -> bool:
 
     Returns:
         bool: True if a working flash_attn_varlen_func implementation is available.
+
     """
     if current_platform.is_cuda() or current_platform.is_xpu():
         # CUDA and XPU always have flash_attn_varlen_func available

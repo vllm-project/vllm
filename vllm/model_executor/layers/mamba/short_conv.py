@@ -4,6 +4,7 @@
 
 import torch
 
+from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import CacheConfig, ModelConfig, get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import ForwardContext, get_forward_context
@@ -113,8 +114,10 @@ class ShortConv(MambaBase, PluggableLayer):
         attn_metadata: AttentionMetadata | None = None
         if attn_metadata_raw is not None:
             assert isinstance(attn_metadata_raw, dict)
-            attn_metadata = attn_metadata_raw[self.prefix]
-            assert isinstance(attn_metadata, ShortConvAttentionMetadata)
+            attn_metadata = attn_metadata_raw.get(self.prefix)
+            assert attn_metadata is None or isinstance(
+                attn_metadata, ShortConvAttentionMetadata
+            )
 
         BCx, _ = self.in_proj(hidden_states)
         B, C, x = BCx.chunk(3, dim=-1)
@@ -225,7 +228,8 @@ class ShortConv(MambaBase, PluggableLayer):
         attn_metadata: AttentionMetadata | None = None
         if attn_metadata_raw is not None:
             assert isinstance(attn_metadata_raw, dict)
-            attn_metadata = attn_metadata_raw[self.prefix]
+            attn_metadata = attn_metadata_raw.get(self.prefix)
+        if attn_metadata is not None:
             assert isinstance(attn_metadata, ShortConvAttentionMetadata)
             conv_state = (
                 self.kv_cache[0]
@@ -357,6 +361,7 @@ class ShortConv(MambaBase, PluggableLayer):
         return MambaAttentionBackendEnum.SHORT_CONV
 
 
+@eager_break_during_capture
 def short_conv(
     hidden_states: torch.Tensor,
     output: torch.Tensor,
@@ -370,17 +375,8 @@ def short_conv(
         self.forward_native(hidden_states=hidden_states, output=output)
 
 
-def short_conv_fake(
-    hidden_states: torch.Tensor,
-    output: torch.Tensor,
-    layer_name: str,
-) -> None:
-    return
-
-
 direct_register_custom_op(
     op_name="short_conv",
     op_func=short_conv,
     mutates_args=["output"],
-    fake_impl=short_conv_fake,
 )

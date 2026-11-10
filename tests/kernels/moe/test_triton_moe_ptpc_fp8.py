@@ -14,16 +14,11 @@ from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe.config import fp8_w8a8_moe_quant_config
 from vllm.platforms import current_platform
 
-if current_platform.get_device_capability() < (9, 0):
+device_capability = current_platform.get_device_capability()
+if device_capability is None or device_capability < (9, 0):
     pytest.skip("FP8 Triton requires CUDA 9.0 or higher", allow_module_level=True)
 
 vllm_config = VllmConfig()
-
-if current_platform.is_fp8_fnuz():
-    pytest.skip(
-        "Tests in this file require float8_e4m3fn and platform does not support",
-        allow_module_level=True,
-    )
 
 
 def native_w8a8_per_token_matmul(A, B, As, Bs, output_dtype=torch.float16):
@@ -57,7 +52,6 @@ def fp8_mask(a, mask):
 def torch_w8a8_per_column_moe(a, w1, w2, w1_s, w2_s, score, topk):
     """This function performs fused moe with per-column int8
     quantization using native torch."""
-
     B, D = a.shape
     # Perform per-token quantization
     a_q, a_s = ops.scaled_fp8_quant(a, use_per_token_if_dynamic=True)
@@ -126,7 +120,8 @@ def test_w8a8_fp8_fused_moe(M, N, K, E, topk, dtype, seed):
     torch.manual_seed(seed)
     # Initialize int8 quantization parameters
     factor_for_scale = 1e-2
-    finfo = torch.finfo(torch.float8_e4m3fn)
+    fp8_dtype = current_platform.fp8_dtype()
+    finfo = torch.finfo(fp8_dtype)
     fp8_max = finfo.max
     fp8_min = finfo.min
 
@@ -136,10 +131,10 @@ def test_w8a8_fp8_fused_moe(M, N, K, E, topk, dtype, seed):
 
     # Generate int8 weights
     w1_fp32 = (torch.rand((E, 2 * N, K), dtype=torch.float32) - 0.5) * 2
-    w1 = (w1_fp32 * fp8_max).clamp(min=fp8_min, max=fp8_max).to(torch.float8_e4m3fn)
+    w1 = (w1_fp32 * fp8_max).clamp(min=fp8_min, max=fp8_max).to(fp8_dtype)
 
     w2_fp32 = (torch.rand((E, K, N), dtype=torch.float32) - 0.5) * 2
-    w2 = (w2_fp32 * fp8_max).clamp(min=fp8_min, max=fp8_max).to(torch.float8_e4m3fn)
+    w2 = (w2_fp32 * fp8_max).clamp(min=fp8_min, max=fp8_max).to(fp8_dtype)
 
     # Generate scale for each column (per-column quantization)
     w1_s = torch.rand(E, 2 * N, device=w1_fp32.device) * factor_for_scale

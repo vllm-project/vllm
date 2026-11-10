@@ -34,6 +34,7 @@ else:
 
 ConfigType = type[DataclassInstance]
 ConfigT = TypeVar("ConfigT", bound=DataclassInstance)
+CompileFactors = dict[str, object]
 
 
 @overload
@@ -64,7 +65,9 @@ def config(
         cls: The class to decorate
         config: The pydantic ConfigDict to use. If provided, it will be merged with
             the default config.
-        **kwargs: Additional arguments to pass to pydantic.dataclass."""
+        **kwargs: Additional arguments to pass to pydantic.dataclass.
+
+    """
     # Extra fields are forbidden by default
     merged_config = ConfigDict(extra="forbid")
     if config is not None:
@@ -134,10 +137,9 @@ def getattr_iter(
     default_factory: Callable[[], Any] | None = None,
     warn: bool = False,
 ) -> Any:
-    """
-    A helper function that retrieves an attribute from an object which may
+    """A helper function that retrieves an attribute from an object which may
     have multiple possible names. This is useful when fetching attributes from
-    arbitrary `transformers.PretrainedConfig` instances.
+    arbitrary `transformers.PreTrainedConfig` instances.
 
     In the case where the first name in `names` is the preferred name, and
     any other names are deprecated aliases, setting `warn=True` will log a
@@ -157,19 +159,20 @@ def getattr_iter(
     return default_factory() if default_factory is not None else default
 
 
-def get_attr_docs(cls: type[Any]) -> dict[str, str]:
-    """
-    Get any docstrings placed after attribute assignments in a class body.
+def _get_own_attr_docs(cls: type[Any], out: dict[str, str]) -> None:
+    """Get any docstrings placed after attribute assignments in a class body.
 
     https://davidism.com/mit-license/
     """
+    try:
+        source = inspect.getsource(cls)
+    except (OSError, TypeError):
+        # ``object`` and classes without retrievable source (e.g. builtins).
+        return
 
-    cls_node = ast.parse(textwrap.dedent(inspect.getsource(cls))).body[0]
-
+    cls_node = ast.parse(textwrap.dedent(source)).body[0]
     if not isinstance(cls_node, ast.ClassDef):
-        raise TypeError("Given object was not a class.")
-
-    out = {}
+        return
 
     # Consider each pair of nodes.
     for a, b in pairwise(cls_node.body):
@@ -195,22 +198,41 @@ def get_attr_docs(cls: type[Any]) -> dict[str, str]:
 
             out[target.id] = doc
 
+
+def get_attr_docs(cls: type[Any]) -> dict[str, str]:
+    """Get any docstrings placed after attribute assignments in a class body or
+    its bases."""
+    if not isinstance(cls, type):
+        raise TypeError("Given object was not a class.")
+
+    out: dict[str, str] = {}
+
+    # Walk the MRO from the most-base class to ``cls`` so that a docstring
+    # redefined on a subclass overrides the one inherited from a base class.
+    for base in reversed(cls.__mro__):
+        _get_own_attr_docs(base, out)
+
     return out
 
 
 @runtime_checkable
-class SupportsHash(Protocol):
-    def compute_hash(self) -> str: ...
+class SupportsCompileFactors(Protocol):
+    def compile_factors(self) -> CompileFactors: ...
 
 
 _config_hash_cache: dict[int, str] = {}
 
 
-def compute_hash_cached(config: SupportsHash) -> str:
-    """Cache config.compute_hash() by object identity.
+def hash_config(config: SupportsCompileFactors) -> str:
+    """Hash the compile factors of a config."""
+    return hash_factors(config.compile_factors())
+
+
+def hash_config_cached(config: SupportsCompileFactors) -> str:
+    """Cache `hash_config(config)` by object identity.
 
     Config objects (ModelConfig, etc.) are long-lived singletons that never
-    mutate after construction, but compute_hash() is expensive (JSON
+    mutate after construction, but hashing them is expensive (JSON
     serialization + SHA-256).  This utility avoids recomputing the hash on
     every forward pass while keeping a single consistent key type for all
     lookup paths.
@@ -218,7 +240,7 @@ def compute_hash_cached(config: SupportsHash) -> str:
     key = id(config)
     result = _config_hash_cache.get(key)
     if result is None:
-        result = config.compute_hash()
+        result = hash_config(config)
         _config_hash_cache[key] = result
     return result
 
@@ -290,6 +312,10 @@ def normalize_value(x):
         qual = getattr(x, "__qualname__", getattr(x, "__name__", ""))
         return ".".join([p for p in (module, qual) if p]) or repr(x)
 
+    # Nested configs define which of their fields affect compilation.
+    if isinstance(x, SupportsCompileFactors):
+        return x.compile_factors()
+
     # Prefer stable uuid identifiers for objects that provide them, even if
     # they are callable instances (e.g., InductorPass wrappers).
     if hasattr(x, "uuid") and callable(getattr(x, "uuid", None)):
@@ -315,7 +341,7 @@ def normalize_value(x):
         except Exception:
             return str(x)
 
-    # PretrainedConfig (must be before dataclass branch as these are now dataclasses)
+    # PreTrainedConfig (must be before dataclass branch as these are now dataclasses)
     if hasattr(x, "to_json_string") and callable(x.to_json_string):
         try:
             return x.to_json_string()
@@ -357,11 +383,20 @@ def normalize_value(x):
     )
 
 
-def get_hash_factors(config: ConfigT, ignored_factors: set[str]) -> dict[str, object]:
+def get_compile_factors(config: ConfigT, ignored_factors: set[str]) -> CompileFactors:
     """Gets the factors used for hashing a config class.
     - Includes all dataclass fields not in `ignored_factors`.
-    - Errors on non-normalizable values.
+    - Uses `compile_factors()` for nested configs that define it.
+    - Errors on unknown `ignored_factors` and non-normalizable values.
     """
+    dataclass_fields = getattr(config, "__dataclass_fields__", {})
+    field_names = {f.name for f in fields(config)} | set(dataclass_fields)
+    unknown_ignored = ignored_factors - field_names
+    if unknown_ignored:
+        raise ValueError(
+            f"get_compile_factors: ignored_factors contain unknown fields "
+            f"{sorted(unknown_ignored)} for {type(config).__name__}"
+        )
     factors: dict[str, object] = {}
     for dc_field in fields(config):
         factor = dc_field.name
@@ -372,7 +407,7 @@ def get_hash_factors(config: ConfigT, ignored_factors: set[str]) -> dict[str, ob
             factors[factor] = normalize_value(value)
         except TypeError as e:
             raise TypeError(
-                f"get_hash_factors: unsupported type for key '{factor}' "
+                f"get_compile_factors: unsupported type for key '{factor}' "
                 f"({type(value).__name__})"
             ) from e
     return factors
@@ -385,8 +420,7 @@ def hash_factors(items: dict[str, object]) -> str:
 
 @dataclass
 class Range:
-    """
-    A range of numbers.
+    """A range of numbers.
     Inclusive of start, inclusive of end.
     """
 
@@ -445,8 +479,7 @@ def get_from_deprecated_env_if_set(
     removal_version: str,
     field_name: str | None = None,
 ) -> str | None:
-    """
-    Get value from deprecated environment variable with warning.
+    """Get value from deprecated environment variable with warning.
 
     Args:
         env_name: Name of the deprecated environment variable
@@ -455,6 +488,7 @@ def get_from_deprecated_env_if_set(
 
     Returns:
         The environment variable value if set, None otherwise
+
     """
     if envs.is_set(env_name):
         value = os.environ.get(env_name)
@@ -477,8 +511,7 @@ def set_from_deprecated_env_if_set(
     to_bool: bool = False,
     to_int: bool = False,
 ) -> None:
-    """
-    Set object field from deprecated environment variable with warning.
+    """Set object field from deprecated environment variable with warning.
 
     Args:
         config: Config object to set the field on
@@ -489,6 +522,7 @@ def set_from_deprecated_env_if_set(
         to_int: Whether to convert the environment variable value to integer
     Returns:
         None
+
     """
     if to_bool and to_int:
         raise ValueError("Cannot convert to both boolean and integer.")
