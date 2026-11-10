@@ -33,7 +33,7 @@ from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.kv_cache_utils import (
     resolve_kv_cache_block_sizes,
 )
-from vllm.v1.core.sched.output import NewRequestData, SchedulerOutput
+from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     MambaSpec,
@@ -45,20 +45,6 @@ from vllm.v1.request import Request
 logger = init_logger(__name__)
 
 
-def _new_req_prefill_tokens(request: NewRequestData) -> list[int]:
-    """Tokens this prefill will compute KV for.
-
-    Under the v2 model runner, resumed-from-preemption requests appear in
-    ``scheduled_new_reqs`` with ``prefill_token_ids`` set to the request's full
-    token list (prompt + previously-generated). For all other cases this falls
-    back to the original prompt.
-    """
-    if request.prefill_token_ids is not None:
-        return request.prefill_token_ids
-    assert request.prompt_token_ids is not None
-    return request.prompt_token_ids
-
-
 def _partial_tail_non_mamba_puts(
     coord: MooncakeStoreCoordinator,
     req_meta: ReqMeta,
@@ -66,24 +52,24 @@ def _partial_tail_non_mamba_puts(
 ) -> list[BoundaryPut]:
     """Locate the non-Mamba blocks a partial-tail save publishes.
 
-    A later request resumes at the prompt's Mamba checkpoint (``boundary``) only
+    A later request resumes at the prompt's Mamba checkpoint (`boundary`) only
     if both pieces of KV are stored:
 
-    - Mamba groups: the state at ``boundary``, handed off by the core as a
+    - Mamba groups: the state at `boundary`, handed off by the core as a
       boundary put of its own, so Mamba groups are not listed here.
     - Other groups: the KV from the last LCM-aligned normal save up to
-      ``boundary`` plus the group's EAGLE proof margin (``proof_end``). Each
-      block is keyed by the hash at its end, clipped to ``proof_end``.
+      `boundary` plus the group's EAGLE proof margin (`proof_end`). Each
+      block is keyed by the hash at its end, clipped to `proof_end`.
 
     Groups whose proof is not computed yet are omitted. For example, with LCM
     16, blocks of 4 tokens, and a checkpoint at 44, the full-attention blocks
     are 8-10, keyed at 36, 40 and 44.
 
     A Mamba state handed off at any other position, i.e. a shared-prefix
-    junction (``--enable-mamba-shared-prefix-checkpoint``), adds no puts here.
+    junction (`--enable-mamba-shared-prefix-checkpoint`), adds no puts here.
 
-    ``block_sizes`` are the per-group block sizes, indexed like
-    ``req_meta.block_ids``.
+    `block_sizes` are the per-group block sizes, indexed like
+    `req_meta.block_ids`.
     """
     mamba_tails = [
         put.num_tokens
@@ -248,7 +234,7 @@ class MooncakeStoreScheduler:
     ) -> tuple[int | None, bool]:
         """Check for external KV cache hit.
 
-        Returns ``(None, False)`` when an async lookup is still in flight,
+        Returns `(None, False)` when an async lookup is still in flight,
         signaling the scheduler to retry this request on a later step.
         """
         if not self.enable_lookup:
@@ -373,7 +359,7 @@ class MooncakeStoreScheduler:
                 request.block_ids[group_id].copy() for group_id in self._store_group_ids
             )
 
-            prefill_tokens = _new_req_prefill_tokens(request)
+            prefill_tokens = request.prefill_token_ids
             request_tracker = RequestTracker(
                 req_id=request.req_id,
                 token_len=num_tokens_to_compute,
@@ -403,7 +389,7 @@ class MooncakeStoreScheduler:
             if req_meta is not None:
                 meta.add_request(req_meta)
 
-        # Handle cached (running, or MRV1 resumed-from-preemption) requests
+        # Handle cached (running) requests
         cached_reqs = scheduler_output.scheduled_cached_reqs
         if can_process_cached:
             for i, req_id in enumerate(cached_reqs.req_ids):
@@ -413,90 +399,47 @@ class MooncakeStoreScheduler:
                         new_block_ids[group_id] for group_id in self._store_group_ids
                     )
 
-                req_meta = None
-                if req_id in cached_reqs.resumed_req_ids:
-                    # Resumed after preemption
-                    if not new_block_ids:
-                        continue
-                    new_block_ids = tuple(b.copy() for b in new_block_ids)
-                    load_spec = self.load_specs.pop(req_id, None)
-                    request_tuple = self._unfinished_requests.get(req_id)
-                    request_real = request_tuple[0]  # type: ignore[index]
-                    num_tokens_to_compute = (
-                        request_real.num_computed_tokens
-                        + scheduler_output.num_scheduled_tokens[req_id]
-                    )
-                    # On resume, the request re-prefills prompt + previously
-                    # generated tokens (all_token_ids).
-                    prefill_tokens = list(request_real.all_token_ids)
-                    request_tracker = RequestTracker(
-                        req_id=req_id,
-                        token_len=num_tokens_to_compute,
-                        allocated_block_ids=new_block_ids,
-                        num_saved_tokens=0,
-                        token_ids=(
-                            prefill_tokens[:num_tokens_to_compute]
-                            if self.enable_kv_events
-                            else None
-                        ),
-                        prefill_end_tokens=len(prefill_tokens),
-                    )
-                    self._request_trackers[req_id] = request_tracker
+                # Decode/chunked request
+                request_tracker = self._request_trackers[req_id]
+                num_computed_token = cached_reqs.num_computed_tokens[i]
+                # Use the tracker's snapshot of the prefill range so resumed
+                # requests keep saving past the original prompt boundary.
+                prefill_end = request_tracker.prefill_end_tokens
+                is_decode = num_computed_token >= prefill_end
+                if is_decode and not self.save_decode_cache:
+                    continue
 
-                    req_meta = ReqMeta.from_request_tracker(
-                        request_tracker,
-                        self._block_size,
-                        self._hash_block_size,
-                        load_spec=load_spec,
-                        skip_save=is_consumer,
-                        block_hashes=request_real.block_hashes,
-                        num_prompt_tokens=request_real.num_prompt_tokens,
-                        save_partial_tail=self.enable_partial_hash_hits,
-                    )
+                num_new_tokens = scheduler_output.num_scheduled_tokens[req_id]
+                req_tuple = self._unfinished_requests.get(req_id)
+                if req_tuple:
+                    unfinished_req = req_tuple[0]
+                    num_current_tokens = request_tracker.token_len
+                    new_token_ids = unfinished_req.all_token_ids[
+                        num_current_tokens : num_current_tokens + num_new_tokens
+                    ]
+                    request_tracker.token_len += len(new_token_ids)
+                    if request_tracker.token_ids is not None:
+                        request_tracker.token_ids.extend(new_token_ids)
                 else:
-                    # Decode/chunked request
-                    request_tracker = self._request_trackers[req_id]
-                    num_computed_token = cached_reqs.num_computed_tokens[i]
-                    # Use the tracker's snapshot of the prefill range so resumed
-                    # requests keep saving past the original prompt boundary.
-                    prefill_end = request_tracker.prefill_end_tokens
-                    is_decode = num_computed_token >= prefill_end
-                    if is_decode and not self.save_decode_cache:
-                        continue
+                    raise ValueError(f"Request {req_id} is not in _unfinished_requests")
+                # A block is usually allocated before the step that fills
+                # it, so reaching a save boundary does not imply that this
+                # step has new block ids.
+                if new_block_ids:
+                    request_tracker.update(new_block_ids)
+                if is_consumer and not is_decode:
+                    continue
 
-                    num_new_tokens = scheduler_output.num_scheduled_tokens[req_id]
-                    req_tuple = self._unfinished_requests.get(req_id)
-                    if req_tuple:
-                        unfinished_req = req_tuple[0]
-                        num_current_tokens = request_tracker.token_len
-                        new_token_ids = unfinished_req.all_token_ids[
-                            num_current_tokens : num_current_tokens + num_new_tokens
-                        ]
-                        request_tracker.token_len += len(new_token_ids)
-                        if request_tracker.token_ids is not None:
-                            request_tracker.token_ids.extend(new_token_ids)
-                    else:
-                        raise ValueError(
-                            f"Request {req_id} is not in _unfinished_requests"
-                        )
-                    # A block is usually allocated before the step that fills
-                    # it, so reaching a save boundary does not imply that this
-                    # step has new block ids.
-                    if new_block_ids:
-                        request_tracker.update(new_block_ids)
-                    if is_consumer and not is_decode:
-                        continue
-
-                    req_meta = ReqMeta.from_request_tracker(
-                        request_tracker,
-                        self._block_size,
-                        self._hash_block_size,
-                        load_spec=None,
-                        skip_save=False,
-                        block_hashes=unfinished_req.block_hashes,
-                        num_prompt_tokens=unfinished_req.num_prompt_tokens,
-                        save_partial_tail=self.enable_partial_hash_hits,
-                    )
+                req_meta = ReqMeta.from_request_tracker(
+                    request_tracker,
+                    self._block_size,
+                    self._hash_block_size,
+                    load_spec=None,
+                    skip_save=False,
+                    block_hashes=unfinished_req.block_hashes,
+                    num_prompt_tokens=unfinished_req.num_prompt_tokens,
+                    save_partial_tail=self.enable_partial_hash_hits,
+                )
 
                 if req_meta is not None:
                     meta.add_request(req_meta)
@@ -763,8 +706,8 @@ class MooncakeStoreScheduler:
         Flushed in the step they arrive: the CoW copy is enqueued before the
         connector event records, so this step's event fences the exact block.
         Entries ride the request's save meta when present, else an
-        offload-only ReqMeta (``token_len_chunk=0`` skips the normal save,
-        ``can_save=True`` takes the normal enqueue and store-job pinning path).
+        offload-only ReqMeta (`token_len_chunk=0` skips the normal save,
+        `can_save=True` takes the normal enqueue and store-job pinning path).
         """
         save_metas = {m.req_id: m for m in meta.requests if m.can_save}
         for req_id, entries in offloads.items():
@@ -843,14 +786,14 @@ class MooncakeStoreScheduler:
         return bool(self._pinned_saves)
 
     def reset_store(self) -> bool:
-        """Trigger a global ``remove_all(force=True)`` on the Mooncake master.
+        """Trigger a global `remove_all(force=True)` on the Mooncake master.
 
         Routes through the existing LookupKey ZMQ admin channel to worker
-        rank 0, which owns the ``MooncakeDistributedStore`` handle.
+        rank 0, which owns the `MooncakeDistributedStore` handle.
 
         Ordering assumption: caller (typically
-        ``Scheduler.reset_connector_cache``, invoked via
-        ``reset_prefix_cache(reset_connector=True)``) MUST ensure no
+        `Scheduler.reset_connector_cache`, invoked via
+        `reset_prefix_cache(reset_connector=True)`) MUST ensure no
         in-flight Mooncake lookups or transfers. For RL workflows this is
         satisfied at the step boundary after weight updates and rollout
         drain. Violating this can allow stale KV to be served on the next

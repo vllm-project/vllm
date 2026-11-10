@@ -3,7 +3,7 @@
 """Weight N-bit INT scheme with static INT8 input/output activation quant.
 
 Handles compressed-tensors INT weight checkpoints that carry static per-tensor
-INT8 ``input_activations`` and/or ``output_activations``. The activation quant is
+INT8 `input_activations` and/or `output_activations`. The activation quant is
 reproduced as a float fake-quant on the layer input and output, around a
 weight-only matmul, rather than a fused int8 GEMM.
 """
@@ -208,7 +208,7 @@ class CompressedTensorsWNA8O8Int(CompressedTensorsScheme):
 
     def _pack_int_quantized_weight(self, layer: torch.nn.Module) -> None:
         """Normalize an int-quantized (plain int8) weight to the canonical
-        ``weight_packed`` int32 + ``weight_shape`` layout the MP kernels expect."""
+        `weight_packed` int32 + `weight_shape` layout the MP kernels expect."""
         weight = layer.weight
         out_features, in_features = weight.shape
         packed = pack_to_int32(weight.data.contiguous(), self.num_bits)

@@ -49,6 +49,7 @@ use crate::routes::openai::utils::validated_json::ValidatedJson;
 use crate::routes::openai::utils::{validate_max_output_tokens, validate_n_limit};
 use crate::routes::output_log::LoggedOutput;
 use crate::state::AppState;
+use crate::utils::npy_base64;
 use crate::utils::{ResolvedRequestContext, resolve_request_context, sse_response, unix_timestamp};
 
 pub(crate) fn lower_completion_request(
@@ -138,6 +139,7 @@ pub async fn completions(
                     prepared.request_id.clone(),
                     prepared.response_model.clone(),
                     created,
+                    state.system_fingerprint.clone(),
                     api_server_options,
                     prepared.options.clone(),
                 )
@@ -154,6 +156,7 @@ pub async fn completions(
                 prepared.request_id.clone(),
                 prepared.response_model.clone(),
                 created,
+                state.system_fingerprint.clone(),
                 api_server_options,
                 prepared.options.clone(),
             )
@@ -213,6 +216,7 @@ async fn collect_completion(
     request_id: String,
     response_model: String,
     created: u64,
+    system_fingerprint: Option<String>,
     ApiServerOptions {
         enable_log_requests,
         log_outputs,
@@ -326,13 +330,13 @@ async fn collect_completion(
             prompt_logprobs,
             token_ids: return_token_ids.then(|| collected.token_ids.clone()),
             prompt_token_ids: return_token_ids.then(|| collected.prompt_token_ids.to_vec()),
-            routed_experts: None,
+            routed_experts: collected.routed_experts.as_ref().map(npy_base64).transpose()?,
             weight_versions: collected.weight_versions.filter(|_| return_weight_versions),
         }],
         service_tier: None,
         usage: Some(usage),
         metrics,
-        system_fingerprint: None,
+        system_fingerprint,
         kv_transfer_params: collected.kv_transfer_params,
         ec_transfer_params: collected.ec_transfer_params,
     })
@@ -345,12 +349,14 @@ async fn completion_chunk_stream(
     request_id: String,
     response_model: String,
     created: u64,
+    system_fingerprint: Option<String>,
     ApiServerOptions {
         enable_log_requests,
         log_outputs,
         enable_prompt_tokens_details,
         default_return_tokens_as_token_ids,
         enable_per_request_metrics,
+        force_include_usage,
         ..
     }: ApiServerOptions,
     ResponseOptions {
@@ -369,6 +375,8 @@ async fn completion_chunk_stream(
 ) -> Result<(), ApiError> {
     let return_tokens_as_token_ids =
         return_tokens_as_token_ids.unwrap_or(default_return_tokens_as_token_ids);
+    let include_usage = include_usage || force_include_usage;
+    let include_continuous_usage = include_continuous_usage || force_include_usage;
     pin_mut!(stream);
     let envelope = Arc::new(StreamResponseEnvelope::new(
         request_id,
@@ -476,12 +484,15 @@ async fn completion_chunk_stream(
                             finished.usage.prompt_token_count,
                             finished.usage.output_token_count,
                         );
-                        let final_chunk = final_chunk(
+                        let mut final_chunk = final_chunk(
                             &envelope,
                             finished.finish_reason,
                             finished.kv_transfer_params.map(|value| *value),
                             finished.weight_versions.filter(|_| return_weight_versions),
                         )?;
+                        if !include_usage {
+                            final_chunk.system_fingerprint = system_fingerprint.clone();
+                        }
                         if let Some(output_log) = output_log.take() {
                             log_outputs.log(
                                 LoggedOutput::StreamComplete,
@@ -507,6 +518,7 @@ async fn completion_chunk_stream(
                                     None,
                                 ),
                                 metrics,
+                                system_fingerprint.clone(),
                             )))
                             .await;
                         }
@@ -567,12 +579,17 @@ async fn completion_chunk_stream(
                         finished.usage.prompt_token_count,
                         finished.usage.output_token_count,
                     );
-                    let final_chunk = final_chunk(
+                    let mut final_chunk = final_chunk(
                         &envelope,
                         finished.finish_reason,
                         finished.kv_transfer_params.map(|value| *value),
                         finished.weight_versions.filter(|_| return_weight_versions),
                     )?;
+                    // Like Python, the last chunk carries the fingerprint:
+                    // this one, or the usage chunk that follows.
+                    if !include_usage {
+                        final_chunk.system_fingerprint = system_fingerprint.clone();
+                    }
                     if let Some(output_log) = output_log.take() {
                         log_outputs.log(
                             LoggedOutput::StreamComplete,
@@ -598,6 +615,7 @@ async fn completion_chunk_stream(
                                 None,
                             ),
                             metrics,
+                            system_fingerprint.clone(),
                         )))
                         .await;
                     }
@@ -701,10 +719,12 @@ fn usage_chunk(
     envelope: &Arc<StreamResponseEnvelope>,
     usage: Usage,
     metrics: Option<PerRequestMetrics>,
+    system_fingerprint: Option<String>,
 ) -> CompletionStreamResponse {
     let mut chunk = CompletionStreamResponse::new(envelope);
     chunk.usage = Some(usage);
     chunk.metrics = metrics.map(Into::into);
+    chunk.system_fingerprint = system_fingerprint;
     chunk
 }
 
@@ -862,6 +882,7 @@ mod tests {
                             last_token_ts: 10.5,
                         },
                         weight_versions: None,
+                        routed_experts: None,
                     }),
                 )),
             ])
@@ -873,6 +894,7 @@ mod tests {
                 "cmpl-1".into(),
                 "model".into(),
                 1,
+                None,
                 ApiServerOptions {
                     enable_per_request_metrics: enabled,
                     ..Default::default()
@@ -903,6 +925,7 @@ mod tests {
             "cmpl-1".into(),
             "model".into(),
             1,
+            None,
             ApiServerOptions::default(),
             ResponseOptions::default(),
         )
@@ -998,6 +1021,7 @@ mod tests {
                         last_token_ts: 11.0,
                     },
                     weight_versions: None,
+                    routed_experts: None,
                 }),
             )),
         ]);
@@ -1007,6 +1031,7 @@ mod tests {
             "cmpl-1".to_string(),
             "model".to_string(),
             1,
+            None,
             ApiServerOptions {
                 enable_prompt_tokens_details: true,
                 enable_per_request_metrics: true,
@@ -1153,6 +1178,7 @@ mod tests {
                         sampling_mask: None,
                         spec_decode_metrics: None,
                         weight_versions: None,
+                        routed_experts: None,
                         timestamps: vllm_llm::RequestTimestamps::default(),
                     }),
                 ))
@@ -1164,6 +1190,7 @@ mod tests {
                 "cmpl-1".to_string(),
                 "model".to_string(),
                 1,
+                None,
                 ApiServerOptions::default(),
                 ResponseOptions {
                     requested_logprobs: Some(0),
@@ -1209,6 +1236,7 @@ mod tests {
                     sampling_mask: None,
                     spec_decode_metrics: None,
                     weight_versions: None,
+                    routed_experts: None,
                     timestamps: Default::default(),
                 }),
             )),
@@ -1219,6 +1247,7 @@ mod tests {
             "cmpl-1".to_string(),
             "model".to_string(),
             1,
+            None,
             ApiServerOptions::default(),
             ResponseOptions {
                 include_usage: true,
@@ -1272,6 +1301,7 @@ mod tests {
                     sampling_mask: None,
                     spec_decode_metrics: None,
                     weight_versions: None,
+                    routed_experts: None,
                     timestamps: Default::default(),
                 }),
             )),
@@ -1282,6 +1312,7 @@ mod tests {
             "cmpl-1".to_string(),
             "model".to_string(),
             1,
+            None,
             ApiServerOptions::default(),
             ResponseOptions {
                 return_token_ids: true,
@@ -1339,6 +1370,7 @@ mod tests {
                     sampling_mask: None,
                     spec_decode_metrics: None,
                     weight_versions: None,
+                    routed_experts: None,
                     timestamps: Default::default(),
                 }),
             )),
@@ -1349,6 +1381,7 @@ mod tests {
             "cmpl-1".to_string(),
             "model".to_string(),
             1,
+            None,
             ApiServerOptions::default(),
             ResponseOptions {
                 prompt_only: true,
@@ -1395,6 +1428,7 @@ mod tests {
                     sampling_mask: None,
                     spec_decode_metrics: None,
                     weight_versions: None,
+                    routed_experts: None,
                     timestamps: Default::default(),
                 }),
             )),
@@ -1405,6 +1439,7 @@ mod tests {
             "cmpl-1".to_string(),
             "model".to_string(),
             1,
+            None,
             ApiServerOptions::default(),
             ResponseOptions {
                 prompt_only: true,
@@ -1456,6 +1491,7 @@ mod tests {
                     sampling_mask: None,
                     spec_decode_metrics: None,
                     weight_versions: None,
+                    routed_experts: None,
                     timestamps: Default::default(),
                 }),
             )),
@@ -1466,6 +1502,7 @@ mod tests {
             "cmpl-1".to_string(),
             "model".to_string(),
             1,
+            None,
             ApiServerOptions::default(),
             ResponseOptions {
                 include_usage: true,
@@ -1536,6 +1573,7 @@ mod tests {
                     sampling_mask: None,
                     spec_decode_metrics: None,
                     weight_versions: None,
+                    routed_experts: None,
                     timestamps: Default::default(),
                 }),
             )),
@@ -1546,6 +1584,7 @@ mod tests {
             "cmpl-1".to_string(),
             "model".to_string(),
             1,
+            None,
             ApiServerOptions::default(),
             ResponseOptions {
                 prompt_only: true,
@@ -1614,6 +1653,7 @@ mod tests {
                     sampling_mask: None,
                     spec_decode_metrics: None,
                     weight_versions: None,
+                    routed_experts: None,
                     timestamps: Default::default(),
                 }),
             )),
@@ -1624,6 +1664,7 @@ mod tests {
             "cmpl-1".to_string(),
             "model".to_string(),
             1,
+            None,
             ApiServerOptions::default(),
             ResponseOptions {
                 prompt_only: true,
