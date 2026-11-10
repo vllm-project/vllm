@@ -559,6 +559,47 @@ class TestRenderEndpoint:
         assert r.status_code == HTTPStatus.OK
         assert "citation_sources" not in r.json()["parse_context"]
 
+    def test_grounded_render_sanitizes_nonfinite_tool_json(self):
+        """Tool text with NaN must not 500 JSONResponse(allow_nan=False)."""
+        render_handler = _RenderHandler(_generate_request())
+        app = _build_render_app(_RenderChatHandler(), render_handler)
+        # Literal NaN inside the tool text string: json.loads accepts it
+        # into a non-finite float that Starlette would refuse to encode.
+        body = {
+            **_minimal_request_body(),
+            "messages": [
+                {"role": "user", "content": "score?"},
+                {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {
+                            "id": "c1",
+                            "type": "function",
+                            "function": {"name": "score", "arguments": "{}"},
+                        }
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "c1",
+                    "content": [{"type": "text", "text": '{"score": NaN}'}],
+                },
+            ],
+        }
+        with TestClient(app) as client:
+            r = client.post("/cohere/v2/chat/render", json=body)
+        assert r.status_code == HTTPStatus.OK
+        sources = r.json()["parse_context"]["citation_sources"]
+        assert sources
+        json.dumps(sources, allow_nan=False)
+        tool_outputs = [
+            entry["source"].get("tool_output")
+            for entry in sources
+            if entry["source"].get("type") == "tool"
+        ]
+        assert tool_outputs
+        assert tool_outputs[0].get("score") is None
+
     def test_501_when_chat_handler_missing(self):
         app = _build_render_app(None, _RenderHandler(_generate_request()))
         with TestClient(app) as client:
