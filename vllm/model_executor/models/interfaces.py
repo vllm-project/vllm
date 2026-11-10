@@ -934,15 +934,6 @@ def supports_hc_sp(
     return getattr(model, "supports_hc_sp", False)
 
 
-def supports_hc_sp_with_pp(model: type[object] | object) -> bool:
-    """Whether a model supports HC SP and PP together.
-
-    Support for each mode independently does not guarantee that their
-    combination is supported.
-    """
-    return bool(getattr(model, "supports_hc_sp_with_pp", False))
-
-
 @runtime_checkable
 class HasInnerState(Protocol):
     """The interface required for all models that has inner state."""

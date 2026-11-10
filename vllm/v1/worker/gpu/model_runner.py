@@ -69,7 +69,6 @@ from vllm.sampling_params import SamplingParams
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
 from vllm.utils.gc_utils import freeze_gc_for_cudagraph_capture
-from vllm.utils.math_utils import round_up
 from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, async_tensor_h2d
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
@@ -215,21 +214,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         self.device = device
         self.dtype = self.model_config.dtype
-        self._pp_sp_token_padding_multiple = 1
-        if (
-            self.parallel_config.pipeline_parallel_size > 1
-            and self.parallel_config.tensor_parallel_size > 1
-            and (
-                self.parallel_config.enable_hc_sp
-                or self.parallel_config.use_sequence_parallel_moe
-            )
-            and self.model_config.registry.is_hc_sp_with_pp_supported_model(
-                self.model_config.architectures, self.model_config
-            )
-        ):
-            self._pp_sp_token_padding_multiple = (
-                self.parallel_config.tensor_parallel_size
-            )
         self.kv_cache_dtype = self.dtype
         if self.cache_config.cache_dtype != "auto":
             # Quantized KV cache.
@@ -1858,12 +1842,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     batch_req_state.is_prefilling_np,
                 )
 
-        num_toks_for_dispatch = num_toks
-        if self._pp_sp_token_padding_multiple > 1:
-            num_toks_for_dispatch = round_up(
-                num_toks, self._pp_sp_token_padding_multiple
-            )
-
         num_active_loras = 0
         if self.lora_config:
             req_ids = list(scheduler_output.num_scheduled_tokens.keys())
@@ -1881,7 +1859,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         batch_desc, dp_sync_state = dispatch_cg_and_sync_dp(
             self.cudagraph_manager,
             num_reqs,
-            num_toks_for_dispatch,
+            num_toks,
             uniform_tok_count,
             self.dp_size,
             self.dp_rank,

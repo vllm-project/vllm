@@ -1094,26 +1094,14 @@ class Qwen4ExpForConditionalGenerationConfig(Qwen3_5ForConditionalGenerationConf
         if text_config.hc_count <= 1:
             raise ValueError("Qwen4Exp requires hc_count > 1")
         parallel_config = vllm_config.parallel_config
+        # MoE SP also enables HC SP without the explicit HC flag.
         if (
-            current_platform.is_rocm()
+            current_platform.is_cuda_alike()
             and parallel_config.use_sequence_parallel_moe
             and parallel_config.pipeline_parallel_size != 1
         ):
-            raise ValueError("Qwen4Exp MoE SP with PP is not supported on ROCm")
-        if (
-            parallel_config.pipeline_parallel_size > 1
-            and parallel_config.tensor_parallel_size > 1
-            and (
-                parallel_config.enable_hc_sp
-                or parallel_config.use_sequence_parallel_moe
-            )
-        ):
-            scheduler_config = getattr(vllm_config, "scheduler_config", None)
-            if scheduler_config is not None:
-                scheduler_config.max_num_batched_tokens = round_up(
-                    scheduler_config.max_num_batched_tokens,
-                    parallel_config.tensor_parallel_size,
-                )
+            raise ValueError("Qwen4Exp MoE SP requires PP=1")
+
         uses_ple_or_qsa = bool(text_config.ple_layer_ids) or (
             getattr(text_config, "indexer_n_heads", None) is not None
         )

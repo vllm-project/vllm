@@ -520,37 +520,32 @@ class Qwen4ExpModel(nn.Module):
         ngram_context: torch.Tensor | None = None,
         deepstack_input_embeds: IntermediateTensors | None = None,
     ) -> torch.Tensor | IntermediateTensors:
-        pp_group = get_pp_group()
-        if pp_group.is_first_rank:
+        if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
             else:
                 if input_ids is None:
                     raise ValueError("input_ids or inputs_embeds is required")
                 hidden_states = self.embed_input_ids(input_ids)
+            if self.use_hc_sequence_parallel:
+                if (
+                    self.use_sequence_parallel
+                    and envs.VLLM_MOE_SKIP_PADDING
+                    and is_forward_context_available()
+                ):
+                    forward_context = get_forward_context()
+                    forward_context.is_padding = sp_padding_mask(
+                        forward_context.is_padding, hidden_states
+                    )
+                hidden_states = sp_shard(hidden_states)
+            # Expand only the local token rows when SP is enabled.
+            hidden_states = hidden_states.repeat(1, self.config.hc_count)
         else:
             if intermediate_tensors is None:
                 raise ValueError("pipeline stage requires intermediate tensors")
             hidden_states = intermediate_tensors["hidden_states"]
 
         full_num_tokens = positions.shape[-1]
-        if self.use_hc_sequence_parallel:
-            if (
-                self.use_sequence_parallel
-                and envs.VLLM_MOE_SKIP_PADDING
-                and is_forward_context_available()
-            ):
-                forward_context = get_forward_context()
-                forward_context.is_padding = sp_padding_mask(
-                    forward_context.is_padding, hidden_states
-                )
-            # PP intermediates are full-token tensors. Shard at every stage
-            # boundary so each stage runs HC and MoE on the same local rows.
-            hidden_states = sp_shard(hidden_states)
-        if pp_group.is_first_rank:
-            # Expand only the local token rows when SP is enabled.
-            hidden_states = hidden_states.repeat(1, self.config.hc_count)
-
         block_output = None
         injection = None
         last_layer = None
@@ -607,17 +602,13 @@ class Qwen4ExpModel(nn.Module):
                 injection = None
                 hidden_states = hidden_states + deepstack_embed
 
-        if not pp_group.is_last_rank:
+        if not get_pp_group().is_last_rank:
             # PP transports one tensor, not the delayed HC tuple. Materialize
             # with the HC module that produced the pending injection.
             if last_layer is not None and block_output is not None:
                 hidden_states = last_layer.mlp_hyper_connection.combine(
                     hidden_states, block_output, injection
                 )
-            if self.use_hc_sequence_parallel:
-                hidden_states = sp_all_gather(hidden_states.contiguous())[
-                    :full_num_tokens
-                ]
             return IntermediateTensors({"hidden_states": hidden_states})
 
         # The final mixer consumes the last pending combine and returns both
@@ -707,8 +698,6 @@ class Qwen4ExpForCausalLM(
     Qwen4ExpMixtureOfExperts,
     IsHybrid,
 ):
-    supports_hc_sp_with_pp = True
-
     # The QSA indexer is not listed: quant configs read this mapping before the
     # model is built, and `Qwen4ExpQSAAttention` fuses `indexer.index_qk_proj`
     # into `qkv_proj` only when it is quantized like q/k/v.
@@ -959,7 +948,6 @@ class Qwen4ExpForConditionalGeneration(
 ):
     """Qwen3-VL vision tower backed by the Qwen4Exp language model."""
 
-    supports_hc_sp_with_pp = True
     requires_raw_input_tokens = True
 
     packed_modules_mapping = Qwen3_5ForConditionalGeneration.packed_modules_mapping | {
