@@ -9,6 +9,12 @@ import pytest
 import torch
 
 import vllm.models.muse_spark.amd.model as amd_model
+from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
+from vllm.config.quantization import QuantizationConfigArgs
+from vllm.model_executor.layers.linear import ReplicatedLinear
+from vllm.model_executor.layers.quantization.online.base import (
+    OnlineQuantizationConfig,
+)
 from vllm.models.muse_spark.amd.model import (
     MuseSparkForCausalLM,
     MuseSparkModel,
@@ -309,3 +315,34 @@ def test_token_sharded_stream_needs_ep_or_a_bf16_tp_reduction(
         ),
     )
     assert amd_model.token_sharded_stream_supported(vllm_config) is supported
+
+
+@pytest.mark.parametrize(
+    "online, rejected",
+    [
+        ({"targets": {"*layers.0.feed_forward.experts*": "mxfp4"}}, False),
+        ({"targets": {"*o_proj": "fp8_per_tensor"}}, True),
+        ({"linear": "fp8_per_tensor", "moe": "mxfp4"}, True),
+    ],
+)
+def test_online_quantization_of_bf16_checkpoints_only_targets_experts(
+    dist_init, online, rejected
+) -> None:
+    config = OnlineQuantizationConfig(QuantizationConfigArgs(**online))
+    model = torch.nn.Module()
+    with set_current_vllm_config(
+        VllmConfig(model_config=ModelConfig(dtype=torch.bfloat16))
+    ):
+        model.o_proj = ReplicatedLinear(
+            64,
+            64,
+            bias=False,
+            params_dtype=torch.bfloat16,
+            quant_config=config,
+            prefix="model.layers.0.self_attn.o_proj",
+        )
+    if rejected:
+        with pytest.raises(NotImplementedError, match="only on the routed experts"):
+            amd_model._reject_online_quantized_linears(model)
+    else:
+        amd_model._reject_online_quantized_linears(model)
