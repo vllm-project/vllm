@@ -555,8 +555,13 @@ endif()
 
 if (CMAKE_SYSTEM_PROCESSOR MATCHES "riscv64")
     set(VLLM_EXT_SRC
+        "csrc/cpu/ime2_hp_gemm.cpp"
         "csrc/cpu/sgl-kernels/gemm_int4.cpp"
         ${VLLM_EXT_SRC})
+    # A100 only. vmadot.hp is a 1024-bit instruction; zvl256b miscompiles the
+    # vector spills (vs1r stores the hardware register, 128 bytes).
+    set_source_files_properties(csrc/cpu/ime2_hp_gemm.cpp PROPERTIES
+        COMPILE_OPTIONS "-march=rv64gcv_zvfh_zfbfmin_zvfbfmin_zvl1024b;-mrvv-vector-bits=zvl")
 endif()
 
 if (ENABLE_X86_ISA)
