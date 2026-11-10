@@ -1307,7 +1307,7 @@ class D3Strategy(ReadStrategy):
         return self.tokenizer.encode(text, add_special_tokens=False)
 
     def _encode(self, text: str, state: str) -> tuple[list[int], int]:
-        """``text``'s tokens and, for prefix_bidir checkpoints, how many lead
+        """`text`'s tokens and, for prefix_bidir checkpoints, how many lead
         tokens are its state block: those that end by the end of the state text,
         so a token straddling it belongs to the question block."""
         if not self.state_blocks:

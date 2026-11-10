@@ -27,7 +27,6 @@ from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
 from vllm.v1.core.sched.output import NewRequestData
-from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.model_states.default import DefaultModelState
 
 from .adapters import as_seq_cls_model
@@ -69,16 +68,13 @@ class D3ProcessingInfo(Qwen3_5ProcessingInfo):
 
 
 class D3PrefixBidirModelState(DefaultModelState):
-    """Model Runner V2 state of a `prefix_bidir` checkpoint: a request's state
-    block and question block are the PrefixLM ranges of its attention, so the
+    """The model state of a `prefix_bidir` checkpoint: a request's state block
+    and question block are the PrefixLM ranges of its attention, so the
     attention is causal across them and bidirectional within each."""
-
-    def __init__(self, *args, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
-        self.blocks: dict[str, list[tuple[int, int]]] = {}
 
     def add_request(self, req_index: int, new_req_data: NewRequestData) -> None:
         super().add_request(req_index, new_req_data)
+        assert self.mm_prefix_ranges is not None
         params = new_req_data.pooling_params
         state = (params.extra_kwargs or {}).get(STATE_TOKENS) if params else None
         length = len(new_req_data.prompt_token_ids or ())
@@ -89,21 +85,7 @@ class D3PrefixBidirModelState(DefaultModelState):
             # not go through /v1/systemone) the whole prompt is one block.
             logger.debug_once("A prefix_bidir request has no state block size")
             blocks = [(0, length - 1)]
-        self.blocks[new_req_data.req_id] = blocks
-
-    def remove_request(self, req_id: str) -> None:
-        super().remove_request(req_id)
-        self.blocks.pop(req_id, None)
-
-    def get_mm_prefix_ranges(
-        self, input_batch: InputBatch
-    ) -> dict[int, list[tuple[int, int]]] | None:
-        ranges = {
-            i: self.blocks[req_id]
-            for i, req_id in enumerate(input_batch.req_ids)
-            if req_id in self.blocks
-        }
-        return ranges or None
+        self.mm_prefix_ranges[new_req_data.req_id] = blocks
 
 
 if TYPE_CHECKING:
@@ -140,17 +122,13 @@ class D3ForSequenceClassification(_D3ForSequenceClassificationBase):
         if model_config.hf_config.decision_config.get("attention_mode") == (
             "prefix_bidir"
         ):
-            # The blocks reach the attention only through Model Runner V2 and
-            # backends that read PrefixLM ranges, which multimodal checkpoints
-            # select while their multimodal inputs are enabled.
-            if not (
-                current_platform.is_cuda_alike()
-                and vllm_config.use_v2_model_runner
-                and model_config.is_mm_prefix_lm
-            ):
+            # The blocks reach the attention only through backends that read
+            # PrefixLM ranges, which multimodal checkpoints select while their
+            # multimodal inputs are enabled.
+            if not (current_platform.is_cuda_alike() and model_config.is_mm_prefix_lm):
                 raise ValueError(
                     "Decision 3.0 prefix_bidir checkpoints need a CUDA or ROCm "
-                    "GPU, Model Runner V2 and multimodal inputs enabled"
+                    "GPU and multimodal inputs enabled"
                 )
             # The other attention modes keep the runner's default state.
             self.get_model_state_cls = lambda: D3PrefixBidirModelState
