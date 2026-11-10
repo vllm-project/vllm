@@ -155,10 +155,10 @@ def get_engine_client_zmq_addr(
     host: str,
     port: int = 0,
 ) -> str:
-    """Return an IPC path (``local_only=True``) or ``tcp://host:port``.
+    """Return an IPC path (`local_only=True`) or `tcp://host:port`.
 
-    ``port=0`` lets the kernel assign the port at ``bind()`` time; the
-    caller must recover it via ``getsockopt(zmq.LAST_ENDPOINT)``."""
+    `port=0` lets the kernel assign the port at `bind()` time; the
+    caller must recover it via `getsockopt(zmq.LAST_ENDPOINT)`."""
     if local_only:
         return get_open_zmq_ipc_path()
     return get_tcp_uri(host, port)

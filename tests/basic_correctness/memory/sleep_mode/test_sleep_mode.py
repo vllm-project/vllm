@@ -209,7 +209,7 @@ def test_deep_sleep_lora_tp2(monkeypatch):
     """Level-2 sleep/wake/reload with enable_lora=True and TP=2.
 
     With TP > 1 the LoRA logits processor carries
-    ``sharded_to_full_mapping_gpu``, a permanent index mapping used to
+    `sharded_to_full_mapping_gpu`, a permanent index mapping used to
     reorder gathered logits. Level-2 sleep must preserve it, like the rest
     of the LoRA state.
     """

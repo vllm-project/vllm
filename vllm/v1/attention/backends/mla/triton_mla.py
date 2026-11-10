@@ -64,9 +64,9 @@ def _reserve_attn_logits_workspace(
 
     Reserving at the worst case (max KV length -> max num_kv_splits,
     max_decode_rows) before warmup/cudagraph capture means the per-call
-    ``get_simultaneous`` in ``forward_mqa`` never has to grow the buffer at
+    `get_simultaneous` in `forward_mqa` never has to grow the buffer at
     runtime (which would raise once the workspace is locked). Like
-    ``forward_mqa``, the KV length is clamped to the layer's sliding window.
+    `forward_mqa`, the KV length is clamped to the layer's sliding window.
     """
     if not is_workspace_manager_initialized():
         return

@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Entropy-gated deferred verification for FLy speculative decoding.
 
-FLy defers a high-entropy rejection when the next ``W`` draft tokens would be
+FLy defers a high-entropy rejection when the next `W` draft tokens would be
 accepted natively. The rejection kernel applies these decisions.
 """
 

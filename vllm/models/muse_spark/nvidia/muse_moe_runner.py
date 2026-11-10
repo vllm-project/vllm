@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""MuseSpark1x MoE: routing, experts and the post-expert-norm finalize.
+"""Muse Spark MoE: routing, experts and the post-expert-norm finalize.
 
 Every expert backend stops after GEMM2 and hands its rows to the finalizer.
 """
@@ -60,8 +60,8 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
 )
 from vllm.model_executor.utils import refill_derived, replace_parameter
 from vllm.models.muse_spark.common.moe import (  # noqa: F401 re-exported
-    MuseSpark1xRouter,
     MuseSparkConsolidatedRoutedExperts,
+    MuseSparkRouter,
     needs_pre_norm_all_reduce,
 )
 from vllm.models.muse_spark.common.moe import (
@@ -110,7 +110,7 @@ def validate_deployment(moe_config: FusedMoEConfig, *, kernel_routes: bool) -> N
     routing_method = moe_config.routing_method
     if kernel_routes and routing_method != RoutingMethodType.MiniMax2:
         raise NotImplementedError(
-            "MuseSpark1x on the monolithic TRT-LLM kernel needs it to run the "
+            "Muse Spark on the monolithic TRT-LLM kernel needs it to run the "
             "router, which requires the routing to classify as MiniMax2 "
             "(sigmoid + expert bias + sum-renormalize, no expert groups, "
             f"route_scale == 1.0); this checkpoint classifies as "
@@ -118,20 +118,20 @@ def validate_deployment(moe_config: FusedMoEConfig, *, kernel_routes: bool) -> N
         )
     if moe_config.is_lora_enabled:
         raise NotImplementedError(
-            "MuseSpark1x post-expert norm does not support MoE LoRA: the LoRA "
+            "Muse Spark post-expert norm does not support MoE LoRA: the LoRA "
             "path applies the top-k weights alongside GEMM2."
         )
     if parallel_config.enable_eplb:
-        raise NotImplementedError("MuseSpark1x post-expert norm does not support EPLB.")
+        raise NotImplementedError("Muse Spark post-expert norm does not support EPLB.")
     if parallel_config.is_sequence_parallel and not parallel_config.use_all2all_kernels:
         # Without an all2all combine the pre-norm all-reduce would mix tokens.
         raise NotImplementedError(
-            "MuseSpark1x post-expert norm does not support sequence-parallel "
+            "Muse Spark post-expert norm does not support sequence-parallel "
             "MoE without an all2all combine."
         )
     if moe_config.skip_final_all_reduce:
         raise NotImplementedError(
-            "MuseSpark1x post-expert norm all-reduces TP partials before the "
+            "Muse Spark post-expert norm all-reduces TP partials before the "
             "norm, so it cannot hand back an un-reduced output for a fused "
             "downstream all-reduce."
         )
@@ -142,7 +142,7 @@ def _validate_route_major_deployment(moe_config: FusedMoEConfig) -> None:
     parallel_config = moe_config.moe_parallel_config
     if parallel_config.dp_size != 1 or parallel_config.pcp_size != 1:
         raise NotImplementedError(
-            "MuseSpark1x Triton/Marlin currently requires DP1 and PCP1."
+            "Muse Spark Triton/Marlin currently requires DP1 and PCP1."
         )
 
 
@@ -241,7 +241,7 @@ class MusePostExpertFinalize:
         return workspace
 
     def __call__(self, unfinalized: UnfinalizedMoEOutput, out: torch.Tensor) -> None:
-        """Finalize permuted GEMM2 rows into ``out``."""
+        """Finalize permuted GEMM2 rows into `out`."""
         permuted_idx = unfinalized.expanded_idx_to_permuted_idx
         num_tokens, top_k = permuted_idx.shape
         rows_all = unfinalized.gemm2_permuted
@@ -467,13 +467,13 @@ def _attach_post_expert_finalize(
 
 @dataclass
 class MuseSparkNvFp4MoEQuantConfig(FusedMoEQuantConfig):
-    """``FusedMoEQuantConfig`` that also carries the w3-side GEMM1 scale."""
+    """`FusedMoEQuantConfig` that also carries the w3-side GEMM1 scale."""
 
     g1_scale_c: torch.Tensor | None = None
 
 
 class _MuseSparkNvFp4Scales:
-    """Split w1/w3 GEMM1 global scales (``w13_weight_scale_2`` is [E, 2])."""
+    """Split w1/w3 GEMM1 global scales (`w13_weight_scale_2` is [E, 2])."""
 
     quant_config: FusedMoEQuantConfig
     gemm1_clamp_limit: torch.Tensor | None
@@ -574,7 +574,7 @@ class MuseSparkTrtLlmNvFp4ExpertsModular(
 class MuseSparkModelOptNvFp4FusedMoE(ModelOptNvFp4FusedMoE):
     """ModelOpt NVFP4 MoE preserving separate w1/w3 global weight scales.
 
-    The name must contain "ModelOpt": ``RoutedExperts.weight_loader`` matches it.
+    The name must contain "ModelOpt": `RoutedExperts.weight_loader` matches it.
     """
 
     muse_post_expert_finalize: MusePostExpertFinalize
@@ -809,7 +809,7 @@ class MuseSparkRoutedExperts(MuseSparkConsolidatedRoutedExperts):
 
 
 class MuseMoERunner(MoERunner):
-    """MoE runner that splices MuseSpark1x's post-expert norm into the experts."""
+    """MoE runner that splices Muse Spark's post-expert norm into the experts."""
 
     def __init__(
         self,
@@ -866,10 +866,10 @@ class MuseMoERunner(MoERunner):
         a1q_scale: torch.Tensor,
         routing: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
     ) -> torch.Tensor:
-        """MoE output from NVFP4 input quantized with ``nvfp4_input_global_scale``.
+        """MoE output from NVFP4 input quantized with `nvfp4_input_global_scale`.
 
-        ``routing`` is either router logits (the kernel routes) or prepared
-        ``(topk_ids, topk_weights)``.
+        `routing` is either router logits (the kernel routes) or prepared
+        `(topk_ids, topk_weights)`.
         """
         layer = self.routed_experts
         experts = self._prepared_nvfp4_experts

@@ -455,26 +455,21 @@ def test_kv_transfer_registers_kv_cache_memory(
     assert transfer.registers_kv_cache_memory() is registers
 
 
-@pytest.mark.parametrize("rocm", [False, True])
-@pytest.mark.parametrize("requested", [None, True])
-def test_extensible_kv_cache_off_for_rocm_registering_connector(
-    monkeypatch, rocm, requested
-):
-    """UCX and RDMA cannot yet register driver-mapped memory on ROCm, so a
-    connector that registers the KV cache keeps the extensible cache off there
-    by default and an explicit request is an error; CUDA is unaffected."""
+def _nixl_config_for_extensible_kv_cache(monkeypatch, *, rocm, requested, imex_channel):
     from types import SimpleNamespace
 
     import vllm.platforms
     from vllm.config.kv_transfer import KVTransferConfig
-    from vllm.config.vllm import VllmConfig
 
     monkeypatch.setattr(
         vllm.platforms,
         "current_platform",
         SimpleNamespace(is_cuda_alike=lambda: True, is_rocm=lambda: rocm),
     )
-    config = SimpleNamespace(
+    monkeypatch.setattr(
+        "vllm.utils.vmm_driver.imex_channel_available", lambda: imex_channel
+    )
+    return SimpleNamespace(
         cache_config=SimpleNamespace(
             _extensible_kv_cache_resolved=False,
             enable_extensible_kv_cache=requested,
@@ -487,12 +482,47 @@ def test_extensible_kv_cache_off_for_rocm_registering_connector(
             kv_connector="NixlConnector", kv_role="kv_both", kv_buffer_device="cuda"
         ),
     )
+
+
+@pytest.mark.parametrize("rocm", [False, True])
+@pytest.mark.parametrize("requested", [None, True])
+def test_extensible_kv_cache_off_for_rocm_registering_connector(
+    monkeypatch, rocm, requested
+):
+    """UCX and RDMA cannot yet register driver-mapped memory on ROCm, so a
+    connector that registers the KV cache keeps the extensible cache off there
+    by default and an explicit request is an error; CUDA is unaffected."""
+    from vllm.config.vllm import VllmConfig
+
+    config = _nixl_config_for_extensible_kv_cache(
+        monkeypatch, rocm=rocm, requested=requested, imex_channel=True
+    )
     if rocm and requested:
         with pytest.raises(ValueError, match="ROCm"):
             VllmConfig._resolve_extensible_kv_cache(config)
         return
     VllmConfig._resolve_extensible_kv_cache(config)
     assert config.cache_config.enable_extensible_kv_cache is not rocm
+
+
+@pytest.mark.parametrize(
+    "requested, imex_channel, enabled",
+    [(None, False, False), (True, False, True), (None, True, True)],
+)
+def test_extensible_kv_cache_with_nixl_needs_an_imex_channel_by_default(
+    monkeypatch, caplog_vllm, requested, imex_channel, enabled
+):
+    """Without a channel NIXL within a host would fall back to TCP. An explicit
+    request, for transfers across hosts, is honored. Turning the cache off by
+    default says how to get it back."""
+    from vllm.config.vllm import VllmConfig
+
+    config = _nixl_config_for_extensible_kv_cache(
+        monkeypatch, rocm=False, requested=requested, imex_channel=imex_channel
+    )
+    VllmConfig._resolve_extensible_kv_cache(config)
+    assert config.cache_config.enable_extensible_kv_cache is enabled
+    assert ("--enable-extensible-kv-cache" in caplog_vllm.text) is (not enabled)
 
 
 @pytest.mark.parametrize("multi", [False, True])

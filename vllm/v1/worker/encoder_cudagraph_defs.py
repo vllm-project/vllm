@@ -20,7 +20,7 @@ ENCODER_CUDAGRAPH_AXIS_KEYS_KWARG = "encoder_cudagraph_axis_keys"
 class EncoderItemSpec:
     """Description of a single encoder input item.
 
-    Returned by ``get_encoder_cudagraph_item_specs()`` to describe each
+    Returned by `get_encoder_cudagraph_item_specs()` to describe each
     image or video in a batch without the manager needing to understand
     model-specific input formats.
     """
@@ -35,7 +35,7 @@ class EncoderItemSpec:
     path_output_tokens: dict[str, int] = field(default_factory=dict)
     """Per-path output token counts for multi-path encoders.
 
-    Single-path encoders leave this empty and use ``output_tokens`` for the
+    Single-path encoders leave this empty and use `output_tokens` for the
     default path.
     """
 
@@ -63,7 +63,7 @@ class EncoderCudaGraphConfig:
     """Configuration for encoder CUDA graph management.
 
     Provided by the model at init time via
-    ``get_encoder_cudagraph_config()``. Values are fixed for the
+    `get_encoder_cudagraph_config()`. Values are fixed for the
     lifetime of the manager.
     """
 
@@ -84,11 +84,13 @@ class EncoderCudaGraphConfig:
     )
     """Optional per-buffer replay padding/copy logic.
     If absent for a key, the manager zeros the capture buffer and slice-copies
-    the replay buffer into it."""
+    the replay buffer into it. A padding logic must write the whole capture
+    buffer: budgets share buffers, so rows it leaves untouched may hold another
+    budget's data."""
 
     max_frames_per_video: int = 1
     """Maximum number of frames per video.
-    Only relevant when "video" is in ``modalities``.
+    Only relevant when "video" is in `modalities`.
     Image-only models can use the default of 1."""
 
     paths: dict[str, EncoderCudaGraphPathConfig] = field(
@@ -102,21 +104,21 @@ class EncoderCudaGraphConfig:
     Each entry is the ordered key set of one axis. When non-empty, one graph
     is captured per token budget per combination of axis keys (cartesian
     product), so the total number of captured graphs is
-    ``num_budgets * prod(len(axis) for axis in capture_axes)``."""
+    `num_budgets * prod(len(axis) for axis in capture_axes)`."""
 
 
 @dataclass
 class EncoderCudaGraphCaptureInputs:
     """Everything needed for one CUDA graph capture.
 
-    Returned by ``prepare_encoder_cudagraph_capture_inputs()``.
+    Returned by `prepare_encoder_cudagraph_capture_inputs()`.
     """
 
     values: dict[str, torch.Tensor]
     """Precomputed tensor buffers that will be recorded into the
     CUDA graph.  The manager stores references to these exact
     tensor objects and copies new data into them before each
-    ``graph.replay()`` call (buffer identity invariant)."""
+    `graph.replay()` call (buffer identity invariant)."""
 
 
 @dataclass
@@ -124,11 +126,11 @@ class EncoderCudaGraphReplayBuffers:
     """New buffer values for graph replay, computed by the model from
     actual batch inputs.
 
-    Returned by ``prepare_encoder_cudagraph_replay_buffers()``.
-    Keys match ``EncoderCudaGraphConfig.buffer_keys``.
+    Returned by `prepare_encoder_cudagraph_replay_buffers()`.
+    Keys match `EncoderCudaGraphConfig.buffer_keys`.
     """
 
     values: dict[str, torch.Tensor | None]
     """Data to copy into the captured buffers before replay.
-    ``None`` values leave the corresponding captured buffer
+    `None` values leave the corresponding captured buffer
     unchanged."""

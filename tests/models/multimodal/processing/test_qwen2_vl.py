@@ -443,7 +443,7 @@ def test_mm_device_do_normalize(
 ) -> None:
     """Device-side normalisation must reproduce the on-CPU processor result.
 
-    Runs on any platform: the CPU platform exercises the ``forward_native``
+    Runs on any platform: the CPU platform exercises the `forward_native`
     fallback, accelerators exercise the fused kernel.
     """
     device = current_platform.device_type

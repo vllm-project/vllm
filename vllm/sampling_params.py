@@ -63,7 +63,7 @@ def _verify_num_sequences(value: int, parameter_name: str) -> None:
 
 
 def validate_thinking_token_budget(value: int | float | bool | None) -> int | None:
-    """Validate ``thinking_token_budget``; return ``None`` if unset."""
+    """Validate `thinking_token_budget`; return `None` if unset."""
     if value is None:
         return None
     if isinstance(value, (bool, float)) or not isinstance(value, int):
@@ -285,7 +285,7 @@ class SamplingParams(
     n: int = 1
     """Number of outputs to return for the given prompt request.
 
-    The maximum allowed value is controlled by the ``VLLM_MAX_N_SEQUENCES``
+    The maximum allowed value is controlled by the `VLLM_MAX_N_SEQUENCES`
     environment variable (default: 16384).
 
     NOTE:
@@ -311,7 +311,7 @@ class SamplingParams(
     means greedy sampling."""
     watermarking: bool | None = None
     """Whether to apply the engine's configured watermark to this request.
-    ``None`` defaults to enabled."""
+    `None` defaults to enabled."""
     top_p: float = 1.0
     """Controls the cumulative probability of the top tokens to consider. Must
     be in (0, 1]. Set to 1 to consider all tokens."""

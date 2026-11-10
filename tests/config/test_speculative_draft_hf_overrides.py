@@ -2,12 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for draft config overrides used by SpeculativeConfig.
 
-Callable ``hf_overrides`` on the target model config (e.g. the
-``dummy_hf_overrides`` shrink used by ``tests/models/test_initialization.py``)
-must also be applied when building the draft ``ModelConfig``. Otherwise a
+Callable `hf_overrides` on the target model config (e.g. the
+`dummy_hf_overrides` shrink used by `tests/models/test_initialization.py`)
+must also be applied when building the draft `ModelConfig`. Otherwise a
 draft belonging to a large target model is instantiated at full size even
 when the target itself is shrunk — which is what kept spec-decode archs like
-``EagleMistralLarge3ForCausalLM`` stuck at ``is_available_online=False``
+`EagleMistralLarge3ForCausalLM` stuck at `is_available_online=False`
 ("TODO: revert once figuring out OOM in CI").
 """
 
@@ -301,10 +301,10 @@ def _module_level_shrink(hf_config: PreTrainedConfig) -> PreTrainedConfig:
 
 @pytest.mark.cpu_test
 def test_composed_override_is_picklable():
-    """The draft ``ModelConfig`` is sent to spawned engine-core processes, so
+    """The draft `ModelConfig` is sent to spawned engine-core processes, so
     the composed override must be picklable. A nested local closure is not
-    (it raised ``Can't get local object`` on DFlashDraftModel); a
-    ``functools.partial`` over a module-referenceable static method is.
+    (it raised `Can't get local object` on DFlashDraftModel); a
+    `functools.partial` over a module-referenceable static method is.
     Guard against regressing to a closure."""
     composed = SpeculativeConfig.compose_draft_hf_overrides(_module_level_shrink)
 

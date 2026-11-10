@@ -70,16 +70,16 @@ def _flashinfer_jit_unsupported_reason(capability: DeviceCapability) -> str | No
 def flashinfer_sampler_supported() -> bool:
     """Decide whether FlashInfer's top-p/top-k sampler can be used.
 
-    Returns False (with appropriate logging) when ``VLLM_USE_FLASHINFER_SAMPLER``
+    Returns False (with appropriate logging) when `VLLM_USE_FLASHINFER_SAMPLER`
     is 0, when the platform isn't CUDA, when the GPU's compute capability is
     unsupported, when the GPU has 16 or fewer SMs, or when FlashInfer cannot
-    JIT-compile for the current GPU/CUDA toolchain. Raises ``RuntimeError`` if
+    JIT-compile for the current GPU/CUDA toolchain. Raises `RuntimeError` if
     the user explicitly opted in via the env var but FlashInfer is unavailable.
 
-    Assumes flashinfer is installed, as guaranteed by ``requirements/cuda.txt``;
-    otherwise importing the FlashInfer backend below raises ``ImportError``.
+    Assumes flashinfer is installed, as guaranteed by `requirements/cuda.txt`;
+    otherwise importing the FlashInfer backend below raises `ImportError`.
 
-    Note: callers must additionally ensure ``logprobs_mode`` doesn't require
+    Note: callers must additionally ensure `logprobs_mode` doesn't require
     post-top-k/top-p logits/logprobs for any request whose logprobs will be
     returned in this step, since FlashInfer doesn't expose those.
     """
@@ -135,7 +135,7 @@ def xpu_sampler_supported() -> bool:
     """Decide whether the fused XPU top-k/top-p sampler kernel can be used.
 
     Returns False (with appropriate logging) when the platform isn't XPU, when
-    ``VLLM_XPU_USE_SAMPLER_KERNEL`` is 0.
+    `VLLM_XPU_USE_SAMPLER_KERNEL` is 0.
 
     Note: callers must additionally ensure no request needs a per-request seed
     or greedy sampling, since the kernel draws from the device's default

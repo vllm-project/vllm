@@ -466,10 +466,10 @@ class MoERunner(MoERunnerInterface):
         transforms are applied.
 
         A transform that commutes with the TP sum is exempt: if
-        ``sum_r T(x_r) == T(sum_r x_r)``, applying the transform to the local
+        `sum_r T(x_r) == T(sum_r x_r)`, applying the transform to the local
         partial output and letting the existing late all-reduce sum the
         combined result is equivalent, and costs one collective instead of two.
-        Such a transform opts out by setting ``reduce_commutative = True``.
+        Such a transform opts out by setting `reduce_commutative = True`.
         The default is False, so transforms that do not declare themselves
         keep being reduced early.
         """

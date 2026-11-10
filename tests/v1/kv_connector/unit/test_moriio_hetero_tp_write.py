@@ -148,7 +148,7 @@ def _global_state(layers: list[Layer], heads: int) -> dict[str, torch.Tensor]:
 
 
 def _mamba_shard(slot: torch.Tensor, tp_rank: int, tp_size: int) -> tuple:
-    """(conv, ssm) bytes of ``tp_rank`` for one unsharded GDN state slot."""
+    """(conv, ssm) bytes of `tp_rank` for one unsharded GDN state slot."""
     parts, offset = [], 0
     for channels in (KEY_DIM, KEY_DIM, V_HEADS * V_DIM):
         size = channels * CONV_ROWS
