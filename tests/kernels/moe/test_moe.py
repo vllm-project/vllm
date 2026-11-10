@@ -1282,6 +1282,73 @@ def test_fused_marlin_moe_non_gated(
     torch.testing.assert_close(marlin_output, torch_output, atol=1e-1, rtol=0)
 
 
+@torch.inference_mode()
+def test_humming_packed_experts_avoid_integer_expansion(dist_init, workspace_init):
+    """Opting out bounds loading memory and preserves the default kernel output."""
+    from vllm.forward_context import set_forward_context
+    from vllm.model_executor.layers.fused_moe import FusedMoEFactory
+    from vllm.model_executor.layers.quantization.humming import HummingConfig
+    from vllm.utils.humming import HummingWeightSchema
+
+    torch.manual_seed(29)
+    experts, hidden, intermediate = 8, 512, 256
+    schema = HummingWeightSchema(b_dtype="int3", weight_scale_group_size=128)
+    checkpoint = {}
+    for name, shape in (
+        ("w13", (experts, 2 * intermediate, hidden)),
+        ("w2", (experts, hidden, intermediate)),
+    ):
+        weights = torch.randn(shape, dtype=torch.bfloat16, device="cuda") / 10
+        tensors = schema.quant_tensor(weights, schema, torch.bfloat16)
+        # A zero code makes the default retain the original format, but only
+        # after allocating the full INT32 projection to check its codes.
+        tensors["weight"].view(-1)[0] = 0
+        checkpoint.update({f"{name}_{key}": value for key, value in tensors.items()})
+    checkpoint_bytes = sum(tensor.nbytes for tensor in checkpoint.values())
+    x = torch.randn(17, hidden, dtype=torch.bfloat16, device="cuda") / 10
+    logits = torch.randn(17, experts, device="cuda")
+    outputs = []
+    for overrides in ({}, {"moe_convert_symmetric_integer": False}):
+        config = VllmConfig()
+        quant = HummingConfig.from_config(
+            {
+                "quant_method": "humming",
+                "weight_dtype": "int3",
+                "input_dtype": "bfloat16",
+                "weight_scale_group_size": 128,
+                **overrides,
+            }
+        )
+        torch.accelerator.synchronize()
+        before = torch.accelerator.memory_allocated()
+        torch.accelerator.reset_peak_memory_stats()
+        with set_current_vllm_config(config), torch.device("cuda"):
+            runner = FusedMoEFactory(
+                num_experts=experts,
+                top_k=2,
+                hidden_size=hidden,
+                intermediate_size=intermediate,
+                params_dtype=torch.bfloat16,
+                quant_config=quant,
+                prefix="model.layers.0.mlp.experts",
+            )
+            layer = runner.routed_experts
+            loaded = list(layer.load_weights(list(checkpoint.items())))
+            assert len(loaded) == len(checkpoint)
+            layer.quant_method.process_weights_after_loading(layer)
+        torch.accelerator.synchronize()
+        if overrides:
+            # Permit packed copies and repacking, but not an INT32 projection.
+            assert (
+                torch.accelerator.max_memory_allocated() - before < 4 * checkpoint_bytes
+            )
+        with set_current_vllm_config(config), set_forward_context(None, config):
+            outputs.append(runner(hidden_states=x, router_logits=logits).clone())
+        del layer, runner
+    assert torch.isfinite(outputs[1]).all()
+    torch.testing.assert_close(outputs[1], outputs[0], rtol=0, atol=0)
+
+
 def _make_humming_indexed_experts(activation: MoEActivation):
     pytest.importorskip("humming")
     from vllm.model_executor.layers.fused_moe.experts.fused_humming_moe import (
