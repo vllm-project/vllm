@@ -10,7 +10,10 @@ import torch.distributed as dist
 
 from vllm._aiter_ops import is_aiter_found, rocm_aiter_ops
 from vllm.device_allocator import alloc_conf
-from vllm.distributed.communication_op import tensor_model_parallel_all_reduce  # noqa
+from vllm.distributed.communication_op import (
+    tensor_model_parallel_all_reduce,
+    tensor_model_parallel_reduce_scatter,
+)
 from vllm.distributed.device_communicators.cuda_wrapper import find_loaded_library
 from vllm.distributed.parallel_state import (
     GraphCaptureContext,
@@ -395,3 +398,147 @@ def test_rocm_aiter_custom_ag_rs(
         test_target,
         data_parallel_size=data_parallel_size,
     )
+
+
+tp_reduce_scatter_cases = [
+    ((64, 2560), torch.bfloat16),
+    ((64, 2560), torch.float16),
+    ((128, 8192), torch.bfloat16),
+]
+
+
+def _tp_reduce_scatter_inputs(shape, dtype, tp_size, device) -> list[torch.Tensor]:
+    """Every rank's input. Small integers keep each sum exact in bf16/fp16, so
+    the comparison needs no tolerance."""
+    values = torch.arange(shape[0] * shape[1], device=device)
+    return [
+        (values * (rank + 1) % 13 + rank).reshape(shape).to(dtype)
+        for rank in range(tp_size)
+    ]
+
+
+def _scatter_chunk(inputs: list[torch.Tensor], rank: int) -> torch.Tensor:
+    total = sum(inp.float() for inp in inputs)
+    return total.to(inputs[0].dtype).chunk(len(inputs))[rank]
+
+
+def _count_tp_reduce_scatters(comm) -> dict[str, int]:
+    """Count the AITER and pynccl reduce-scatter launches of a TP communicator
+    while calling through, so a test sees which kernel produced the result."""
+    calls = {"aiter": 0, "pynccl": 0}
+
+    def count(owner, name: str, key: str) -> None:
+        real = getattr(owner, name)
+
+        def counted(*args, **kwargs):
+            calls[key] += 1
+            return real(*args, **kwargs)
+
+        setattr(owner, name, counted)
+
+    count(comm.aiter_ar_comm, "reduce_scatter_unreg", "aiter")
+    count(comm.pynccl_comm, "reduce_scatter", "pynccl")
+    return calls
+
+
+def _get_tp_reduce_scatter_comm():
+    comm = get_tp_group().device_communicator
+    assert comm.use_aiter_tp_reduce_scatter, (
+        "AITER TP reduce-scatter was not enabled on the TP group."
+    )
+    assert comm.aiter_ar_comm is not None and not comm.aiter_ar_comm.disabled
+    return comm
+
+
+@ray.remote(num_gpus=1, max_calls=1)
+def eager_tp_reduce_scatter(
+    monkeypatch: pytest.MonkeyPatch,
+    tp_size,
+    pp_size,
+    rank,
+    distributed_init_port,
+) -> None:
+    with monkeypatch.context() as m:
+        _configure_aiter_custom_ar_env(m)
+
+        device = torch.device(f"cuda:{rank}")
+        torch.accelerator.set_device_index(device)
+        init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
+        ensure_model_parallel_initialized(tp_size, pp_size)
+        comm = _get_tp_reduce_scatter_comm()
+        calls = _count_tp_reduce_scatters(comm)
+
+        for shape, dtype in tp_reduce_scatter_cases:
+            inputs = _tp_reduce_scatter_inputs(shape, dtype, tp_size, device)
+            assert comm.aiter_ar_comm.should_custom_rs(inputs[rank], 0)
+            calls.update(aiter=0, pynccl=0)
+            out = tensor_model_parallel_reduce_scatter(inputs[rank], 0)
+            torch.testing.assert_close(
+                out, _scatter_chunk(inputs, rank), rtol=0, atol=0
+            )
+            assert calls == {"aiter": 1, "pynccl": 0}, (calls, shape, dtype)
+
+
+@ray.remote(num_gpus=1, max_calls=1)
+def graph_tp_reduce_scatter(
+    monkeypatch: pytest.MonkeyPatch,
+    tp_size,
+    pp_size,
+    rank,
+    distributed_init_port,
+) -> None:
+    with monkeypatch.context() as m:
+        _configure_aiter_custom_ar_env(m)
+
+        device = torch.device(f"cuda:{rank}")
+        torch.accelerator.set_device_index(device)
+        conf = alloc_conf.with_conf_flag(
+            alloc_conf.current_alloc_conf(), alloc_conf.EXPANDABLE_SEGMENTS, True
+        )
+        alloc_conf.set_alloc_conf(conf)
+        init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
+        ensure_model_parallel_initialized(tp_size, pp_size)
+        comm = _get_tp_reduce_scatter_comm()
+        calls = _count_tp_reduce_scatters(comm)
+
+        for shape, dtype in tp_reduce_scatter_cases:
+            inputs = _tp_reduce_scatter_inputs(shape, dtype, tp_size, device)
+            inp = inputs[rank].clone()
+            # Warmup, so the lazily created communicators exist before capture.
+            tensor_model_parallel_reduce_scatter(inp, 0)
+            calls.update(aiter=0, pynccl=0)
+            with graph_capture(device=device) as graph_capture_context:
+                torch.accelerator.synchronize()
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph, stream=graph_capture_context.stream):
+                    out = tensor_model_parallel_reduce_scatter(inp, 0)
+            assert calls == {"aiter": 1, "pynccl": 0}, (calls, shape, dtype)
+            graph.replay()
+            torch.testing.assert_close(
+                out, _scatter_chunk(inputs, rank), rtol=0, atol=0
+            )
+
+            # A replay stages the input again: new contents in the same buffer.
+            flipped = [x.flip(0) for x in inputs]
+            inp.copy_(flipped[rank])
+            graph.replay()
+            torch.testing.assert_close(
+                out, _scatter_chunk(flipped, rank), rtol=0, atol=0
+            )
+            assert not torch.equal(_scatter_chunk(inputs, rank), out)
+
+
+@pytest.mark.skipif(not is_aiter_found(), reason="AITER is not installed")
+@multi_gpu_test(num_gpus=2)
+@pytest.mark.parametrize("tp_size", [2])
+@pytest.mark.parametrize("pipeline_parallel_size", [1])
+@pytest.mark.parametrize(
+    "test_target", [eager_tp_reduce_scatter, graph_tp_reduce_scatter]
+)
+def test_rocm_aiter_tp_reduce_scatter(
+    monkeypatch: pytest.MonkeyPatch,
+    tp_size,
+    pipeline_parallel_size,
+    test_target,
+):
+    multi_process_parallel(monkeypatch, tp_size, pipeline_parallel_size, test_target)

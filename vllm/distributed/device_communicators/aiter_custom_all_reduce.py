@@ -90,6 +90,14 @@ class AiterCustomAllreduce:
     ) -> torch.Tensor | None:
         return self._impl.custom_reduce_scatter(inp, out, dim=dim)
 
+    def reduce_scatter_unreg(self, inp: torch.Tensor, out: torch.Tensor) -> None:
+        """Reduce-scatter dim 0 through the copy-in pool, writing `out`.
+
+        AITER's reduce-scatter returns None whether or not it ran, so callers
+        gate with `should_custom_rs` and read `out`, never the return value.
+        """
+        self._impl.reduce_scatter(inp, out, 0, registered=False)
+
     def use_1stage_fused_ar_rms(self, inp: torch.Tensor) -> bool:
         """Whether AITER's fused allreduce+RMSNorm runs as its one-stage kernel.
 

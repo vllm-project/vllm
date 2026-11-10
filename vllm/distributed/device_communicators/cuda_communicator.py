@@ -120,6 +120,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
         self.aiter_ar_comm: AiterCustomAllreduce | None = None
         self.use_aiter_ag_rs: bool = False
         self.use_aiter_tp_all_gather: bool = False
+        self.use_aiter_tp_reduce_scatter: bool = False
 
         # cuMem graph buffers cannot be IPC-registered; capture copies them instead.
         config = get_current_vllm_config_or_none()
@@ -192,6 +193,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
             from vllm.platforms.rocm import get_cdna_version
 
             self.use_aiter_tp_all_gather = get_cdna_version() in (3, 4)
+            self.use_aiter_tp_reduce_scatter = self.use_aiter_tp_all_gather
 
         if (
             use_custom_allreduce
@@ -581,10 +583,31 @@ class CudaCommunicator(DeviceCommunicatorBase):
             output = torch.empty(
                 output_shape, dtype=input_tensor.dtype, device=input_tensor.device
             )
-            pynccl_comm.reduce_scatter(output, input_tensor)
+            if not self._maybe_aiter_reduce_scatter(input_tensor, output, dim):
+                pynccl_comm.reduce_scatter(output, input_tensor)
 
         # Reshape before returning
         return output.movedim(0, dim).contiguous()
+
+    def _maybe_aiter_reduce_scatter(
+        self, input_tensor: torch.Tensor, output: torch.Tensor, dim: int
+    ) -> bool:
+        """Reduce-scatter dim 0 of a 2-D bf16/fp16 tensor through AITER's IPC
+        kernel, writing `output`. Returns False, leaving `output` untouched,
+        when the call is not eligible. The decision depends only on shape, dtype
+        and layout."""
+        aiter_comm = self.aiter_ar_comm
+        if (
+            not self.use_aiter_tp_reduce_scatter
+            or aiter_comm is None
+            or dim != 0
+            or input_tensor.dim() != 2
+            or input_tensor.dtype not in (torch.bfloat16, torch.float16)
+            or not aiter_comm.should_custom_rs(input_tensor, 0)
+        ):
+            return False
+        aiter_comm.reduce_scatter_unreg(input_tensor, output)
+        return True
 
     def reduce_scatterv(
         self, input_: torch.Tensor, dim: int = -1, sizes: list[int] | None = None

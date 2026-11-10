@@ -86,6 +86,8 @@ COMM_COLLECTIVE = {
     "rccl_ag_last": "all-gather-last-dim",
     "aiter_rs": "reduce-scatter",
     "pynccl_rs": "reduce-scatter",
+    "tp_rs": "reduce-scatter",
+    "rccl_rs": "reduce-scatter",
 }
 COLLECTIVE_ORDER = [
     "all-reduce",
@@ -540,6 +542,17 @@ class CommunicatorBenchmark:
         tp = self.tp_comm
         tp_aiter = tp.aiter_ar_comm if tp is not None else None
         if tp is not None and tp_aiter is not None:
+            if sequence_length % self.world_size == 0:
+                self._check_tp_reduce_scatter(sequence_length, tp, tp_aiter)
+                for name, use_aiter in (("tp_rs", True), ("rccl_rs", False)):
+                    entries.append(
+                        (
+                            name,
+                            lambda t, tp=tp, u=use_aiter: _tp_reduce_scatter(tp, t, u),
+                            lambda t: True,
+                            tp_aiter.capture(),
+                        )
+                    )
             self._check_tp_all_gather(sequence_length, tp, tp_aiter)
             for suffix, dim in (("", 0), ("_last", -1)):
                 entries.append(
@@ -569,6 +582,84 @@ class CommunicatorBenchmark:
                 results[name] = latency
 
         return results
+
+    def _check_tp_reduce_scatter(
+        self,
+        sequence_length: int,
+        tp: CudaCommunicator,
+        aiter: AiterCustomAllreduce,
+    ) -> None:
+        """Check that `tp.reduce_scatter` runs AITER exactly when it should
+        (eager and graph replay) and matches the RCCL result. TP2 sums two
+        values, so it must match bitwise; more ranks reorder the sum, so they
+        get a few-ulp bound. Bitwise agreement is printed either way."""
+        from vllm.platforms.rocm import get_cdna_version
+
+        ws = self.world_size
+        x = torch.randn(
+            sequence_length, HIDDEN_SIZE, dtype=BENCHMARK_DTYPE, device=self.device
+        )
+        want_aiter = (
+            get_cdna_version() in (3, 4)
+            and ws in (2, 4, 8)
+            and aiter.should_custom_rs(x, 0)
+        )
+        failures: list[str] = []
+        bitwise = True
+
+        def check(tag: str, out: torch.Tensor, inp: torch.Tensor) -> None:
+            nonlocal bitwise
+            expected = _tp_reduce_scatter(tp, inp, False)
+            exact = torch.equal(out, expected)
+            bitwise &= exact
+            diff = (out.float() - expected.float()).abs().max()
+            bound = 2**-6 * expected.float().abs().max()
+            if (ws == 2 and not exact) or diff > bound:
+                failures.append(f"{tag} != rccl (max abs diff {diff.item()})")
+
+        with patch.object(
+            aiter, "reduce_scatter_unreg", wraps=aiter.reduce_scatter_unreg
+        ) as spy:
+            inp = x + self.rank
+            calls = spy.call_count
+            out = _tp_reduce_scatter(tp, inp, True)
+            if (spy.call_count > calls) != want_aiter:
+                failures.append(f"eager: AITER ran={spy.call_count > calls}")
+            check("eager", out, inp)
+
+            g_inp = inp.clone()
+            graph = torch.cuda.CUDAGraph()
+            stream = torch.cuda.Stream()
+            stream.wait_stream(torch.cuda.current_stream())
+            calls = spy.call_count
+            with (
+                torch.cuda.stream(stream),
+                aiter.capture(),
+                torch.cuda.graph(graph, stream=stream),
+            ):
+                g_out = _tp_reduce_scatter(tp, g_inp, True)
+            if (spy.call_count > calls) != want_aiter:
+                failures.append(f"graph: AITER ran={spy.call_count > calls}")
+            g_inp.add_(1)
+            graph.replay()
+            check("graph replay", g_out, g_inp)
+
+        gathered: list[tuple[list[str], bool]] = [([], True)] * ws
+        dist.all_gather_object(gathered, (failures, bitwise), group=self.cpu_group)
+        bad = {rank: names for rank, (names, _) in enumerate(gathered) if names}
+        if self.rank == 0:
+            # print, not logger.info: run as a script, this logger has no handler
+            print(
+                f"TP reduce-scatter at sequence length {sequence_length}: AITER "
+                f"{'expected' if want_aiter else 'not expected'}, bitwise equal to "
+                f"RCCL on every rank: {all(exact for _, exact in gathered)}",
+                flush=True,
+            )
+        if bad:
+            raise RuntimeError(
+                f"TP reduce-scatter mismatch at sequence length {sequence_length}: "
+                f"{bad}"
+            )
 
     def _check_tp_all_gather(
         self,
@@ -646,6 +737,19 @@ class CommunicatorBenchmark:
             raise RuntimeError(
                 f"TP all-gather mismatch at sequence length {sequence_length}: {bad}"
             )
+
+
+def _tp_reduce_scatter(
+    tp: CudaCommunicator, t: torch.Tensor, use_aiter: bool
+) -> torch.Tensor:
+    """`tp.reduce_scatter` with the AITER branch allowed or not: the RCCL
+    baseline runs the same code path, so only the kernel differs."""
+    enabled = tp.use_aiter_tp_reduce_scatter
+    tp.use_aiter_tp_reduce_scatter = enabled and use_aiter
+    try:
+        return tp.reduce_scatter(t, 0)
+    finally:
+        tp.use_aiter_tp_reduce_scatter = enabled
 
 
 def _calculate_speedup_info(comm_results: dict[str, float], baseline: str) -> str:

@@ -622,6 +622,70 @@ def test_rocm_tp_all_gather_uses_aiter(
         assert (aiter_inp.shape, kwargs["dim"]) == aiter_args
 
 
+@pytest.mark.parametrize(
+    ("enabled", "has_comm", "world_size", "shape", "dim", "dtype", "routed"),
+    [
+        (True, True, 2, (8, 1296), 0, torch.bfloat16, True),
+        (True, True, 4, (16, 2560), 0, torch.float16, True),
+        (True, True, 2, (8, 1296), -2, torch.bfloat16, True),
+        (False, True, 2, (8, 1296), 0, torch.bfloat16, False),
+        (True, False, 2, (8, 1296), 0, torch.bfloat16, False),
+        (True, True, 2, (8, 1296), 0, torch.float32, False),
+        (True, True, 2, (4, 6, 256), 0, torch.bfloat16, False),
+        (True, True, 2, (8, 1296), 1, torch.bfloat16, False),
+        (True, True, 2, (8, 1296), -1, torch.bfloat16, False),
+        (True, True, 2, (2, 400000), 0, torch.bfloat16, False),
+    ],
+)
+def test_rocm_tp_reduce_scatter_uses_aiter(
+    monkeypatch: pytest.MonkeyPatch,
+    enabled,
+    has_comm,
+    world_size,
+    shape,
+    dim,
+    dtype,
+    routed,
+) -> None:
+    def scatter(inp: torch.Tensor, dim: int) -> torch.Tensor:
+        total = sum(inp.float() + rank for rank in range(world_size))
+        return total.to(inp.dtype).chunk(world_size, dim)[0]
+
+    # AITER's reduce-scatter writes `out` and returns None, ran or not.
+    def aiter_scatter(inp: torch.Tensor, out: torch.Tensor, dim: int = 0) -> None:
+        out.copy_(scatter(inp, 0))
+
+    def nccl_scatter(out: torch.Tensor, inp: torch.Tensor) -> None:
+        out.copy_(scatter(inp, 0))
+
+    aiter_comm = Mock()
+    aiter_comm.should_custom_rs.side_effect = lambda inp, dim: inp.nbytes <= 1 << 20
+    aiter_comm.reduce_scatter_unreg.side_effect = aiter_scatter
+    pynccl_comm = Mock(disabled=False)
+    pynccl_comm.reduce_scatter.side_effect = nccl_scatter
+    communicator = CudaCommunicator.__new__(CudaCommunicator)
+    communicator.world_size = world_size
+    communicator.use_aiter_tp_reduce_scatter = enabled
+    communicator.aiter_ar_comm = aiter_comm if has_comm else None
+    communicator.pynccl_comm = pynccl_comm
+
+    inp = (torch.randn(shape) * 100).to(dtype)
+    out = communicator.reduce_scatter(inp, dim)
+
+    assert torch.equal(out, scatter(inp, dim))
+    if routed:
+        (aiter_inp, aiter_out), kwargs = aiter_comm.reduce_scatter_unreg.call_args
+        assert (aiter_inp.shape, aiter_out.shape, kwargs) == (
+            inp.shape,
+            (shape[0] // world_size, shape[1]),
+            {},
+        )
+        pynccl_comm.reduce_scatter.assert_not_called()
+    else:
+        aiter_comm.reduce_scatter_unreg.assert_not_called()
+        pynccl_comm.reduce_scatter.assert_called_once()
+
+
 def test_isend_object_posts_size_then_object_and_releases_on_wait(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
