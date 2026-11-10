@@ -318,9 +318,8 @@ def memory_profiling(
 
     result.after_profile.measure()
 
-    # On a cold start the model compiles inside this window. Compilation's own
-    # high-water mark was dropped when it finished; fold back the peak that
-    # predates it so a pre-compilation spike is still accounted for.
+    # The compile peak was reset when compilation finished. Add back the peak
+    # from before compilation, such as a multimodal encoder pass.
     result.after_profile.torch_peak = max(
         result.after_profile.torch_peak,
         compilation_monitor.peak_memory_before_compile,

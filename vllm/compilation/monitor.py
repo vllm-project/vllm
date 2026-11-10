@@ -15,15 +15,8 @@ logger = init_logger(__name__)
 # Shared global so backends.py can read the start time for Dynamo timing.
 torch_compile_start_time: float = 0.0
 
-# Peak torch-allocated bytes recorded before compilation started. Compilation
-# and Inductor autotuning allocate large temporaries inside profile_run(),
-# which runs inside the memory-profiling window. They are freed before the
-# first real forward, so leaving them in the allocator high-water mark charges
-# them as activation headroom and shrinks the KV cache on a cold start.
-# Clearing the counter alone would also drop a peak legitimately recorded
-# earlier in the same window, because a multimodal encoder pass runs before the
-# backbone compiles, so that value is kept here for memory_profiling() to fold
-# back in.
+# Allocator peak from before compilation. memory_profiling() adds it back
+# after the compile peak is reset, so the KV cache size ignores the compile.
 peak_memory_before_compile: int = 0
 
 
