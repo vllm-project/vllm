@@ -736,6 +736,7 @@ steps:
       depends_on:
       - image-build-amd
       source_file_dependencies:
+      - vllm/v1/attention/backend.py
       - vllm/_aiter_ops.py
       - vllm/platforms/rocm.py
       - vllm/envs.py
@@ -762,6 +763,7 @@ steps:
         kernels/quantization/test_w4a16_kernel_selection.py
         kernels/quantization/test_triton_w4a16.py
         kernels/quantization/test_rocm_compressed_tensors_w4a16.py
+      - pytest -v -s tests/kernels/attention/test_rocm_triton_attn_dsv4.py::test_dsv4_adaptive_mla_swa_metadata_graph_replay
 
 - label: ":nvidia: (B200) MiniMax-M3 Attention Kernels"
   key: kernels-minimax-m3-attention-b200
