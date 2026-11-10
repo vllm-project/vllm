@@ -4,6 +4,7 @@ import weakref
 from collections.abc import Callable, Iterable, Sequence
 from typing import Any
 
+from vllm import envs
 from vllm.distributed.kv_events import (
     MEDIUM_GPU,
     AllBlocksCleared,
@@ -33,6 +34,9 @@ from vllm.v1.core.kv_cache_utils import (
 from vllm.v1.request import Request
 
 logger = init_logger(__name__)
+
+_CONTIGUOUS_ALLOC_MIN_BLOCKS = 8
+_CONTIGUOUS_ALLOC_WINDOW_FACTOR = 4
 
 
 class BlockHashToBlockMap:
@@ -143,6 +147,7 @@ class BlockPool:
         self.hash_block_size = hash_block_size
         self.num_hash_lookahead_tokens = num_hash_lookahead_tokens
         self._weak_self = weakref.ref(self)
+        self.use_contiguous_allocation = envs.VLLM_KV_CONTIG_ALLOC
         # All kv-cache blocks.
         self.blocks: list[KVCacheBlock] = [
             KVCacheBlock(idx, pool=self._weak_self) for idx in range(num_gpu_blocks)
@@ -693,7 +698,13 @@ class BlockPool:
         if num_blocks > self.get_num_free_blocks():
             raise ValueError(f"Cannot get {num_blocks} free blocks from the pool")
 
-        ret: list[KVCacheBlock] = self.free_block_queue.popleft_n(num_blocks)
+        if (
+            not self.use_contiguous_allocation
+            or num_blocks < _CONTIGUOUS_ALLOC_MIN_BLOCKS
+        ):
+            ret: list[KVCacheBlock] = self.free_block_queue.popleft_n(num_blocks)
+        else:
+            ret = self._get_contiguous_free_blocks(num_blocks)
 
         if self._reuse_watchers:
             self._notify_reuse(ret)
@@ -761,6 +772,45 @@ class BlockPool:
                 self.free_block_queue.remove(block)
                 moved.append(block)
         self.free_block_queue.insert_before_cached(moved)
+
+    def _get_contiguous_free_blocks(self, num_blocks: int) -> list[KVCacheBlock]:
+        window_size = min(
+            self.get_num_free_blocks(),
+            _CONTIGUOUS_ALLOC_WINDOW_FACTOR * num_blocks,
+        )
+        window_blocks: list[KVCacheBlock] = []
+        if window_size:
+            for index, block in enumerate(
+                self.free_block_queue.iter_blocks_after(None), start=1
+            ):
+                if block.block_id not in self._reuse_watchers:
+                    window_blocks.append(block)
+                if index == window_size:
+                    break
+
+        runs: list[list[KVCacheBlock]] = []
+        for block in window_blocks:
+            if not runs or abs(block.block_id - runs[-1][-1].block_id) != 1:
+                runs.append([])
+            runs[-1].append(block)
+
+        for run in runs:
+            if run[0].block_id > run[-1].block_id:
+                run.reverse()
+        runs.sort(key=len, reverse=True)
+
+        ret: list[KVCacheBlock] = []
+        for run in runs:
+            if len(run) == 1:
+                break
+            for block in run:
+                if len(ret) == num_blocks:
+                    return ret
+                self.free_block_queue.remove(block)
+                ret.append(block)
+
+        ret.extend(self.free_block_queue.popleft_n(num_blocks - len(ret)))
+        return ret
 
     def _maybe_evict_cached_block(self, block: KVCacheBlock) -> bool:
         """If a block is cached in `cached_block_hash_to_block`, we reset its hash
