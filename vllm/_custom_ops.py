@@ -527,9 +527,9 @@ def gelu_tanh_and_mul_per_token_quant(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Fused gelu_tanh(gate) * up + dynamic per-token FP8 quantization.
 
-    ``input`` is ``[..., 2 * d]`` (gate || up), FP16/BF16. Returns FP8 values
-    ``[..., d]`` and FP32 scales ``[num_tokens, 1]``, bit-identical to
-    ``gelu_tanh_and_mul`` followed by ``scaled_fp8_quant`` per token.
+    `input` is `[..., 2 * d]` (gate || up), FP16/BF16. Returns FP8 values
+    `[..., d]` and FP32 scales `[num_tokens, 1]`, bit-identical to
+    `gelu_tanh_and_mul` followed by `scaled_fp8_quant` per token.
     """
     d = input.shape[-1] // 2
     output = torch.empty(
