@@ -869,7 +869,6 @@ class AiterFlashAttentionMetadataBuilder(
         return attn_metadata
 
 
-
 class AiterFlashAttentionBackend(AttentionBackend):
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
 
