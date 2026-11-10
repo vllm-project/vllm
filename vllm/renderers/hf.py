@@ -48,7 +48,7 @@ from vllm.renderers.chat_utils import (
 from vllm.renderers.chat_utils.content_parser import (
     PROMPT_EMBEDS_PLACEHOLDER_ID_PREFIX,
 )
-from vllm.tokenizers.hf import HfTokenizer, maybe_make_thread_pool
+from vllm.tokenizers.hf import HfTokenizer
 from vllm.transformers_utils.chat_templates import get_chat_template_fallback_path
 from vllm.transformers_utils.processor import cached_get_processor
 from vllm.utils.async_utils import make_async
@@ -1043,20 +1043,6 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
         config: VllmConfig,
         tokenizer: HfTokenizer | None,
     ) -> None:
-        # Add the placeholder token to a copy so the cached tokenizer is unchanged
-        tokenizer = copy.copy(tokenizer)
-        if (
-            # Skip for mock configs and tokenizers
-            getattr(config.model_config, "enable_prompt_embeds", False)
-            and isinstance(tokenizer, HfTokenizer)
-        ):
-            _ensure_prompt_embeds_placeholder_token(tokenizer)
-        # Pool this copy in place. Another copy would rebuild the cached vocab
-        # with the placeholder in it and miss the placeholder id cache.
-        if tokenizer is not None:
-            tokenizer = maybe_make_thread_pool(
-                tokenizer, config.model_config.renderer_num_workers + 1
-            )
         super().__init__(config, tokenizer)
 
         self.use_unified_vision_chunk = getattr(
@@ -1066,6 +1052,11 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
         self._apply_chat_template_async = make_async(
             safe_apply_chat_template, executor=self._executor
         )
+
+    def _prepare_tokenizer(self, tokenizer: HfTokenizer) -> None:
+        # Skip for mock configs
+        if getattr(self.model_config, "enable_prompt_embeds", False):
+            _ensure_prompt_embeds_placeholder_token(tokenizer)
 
     def _replace_executor(self) -> None:
         """Replace the inner render pool after a stuck worker.
