@@ -2026,7 +2026,7 @@ class MooncakeConnectorWorker:
         local_regions: list[TransferRegion],
         remote_regions: list[TransferRegion],
     ) -> tuple[list[int], list[int], list[int], list[ReqId], str | None]:
-        src_ptrs = []
+        src_ptrs: list[int] = []
         dst_ptrs = []
         lengths = []
         err_reqs: list[ReqId] = []
@@ -2043,7 +2043,25 @@ class MooncakeConnectorWorker:
                     d_req_id, send_meta, agent_meta, local_regions, remote_regions
                 )
             except (ValueError, IndexError, KeyError) as error:
-                logger.error("req %s: %s", d_req_id, error)
+                logger.exception(
+                    "Failed to plan Mooncake transfer for request %s "
+                    "(transfer_id=%s) to %s: local TP rank=%d/%d, "
+                    "remote TP rank=%d/%d, local blocks per group=%s, "
+                    "remote blocks per group=%s: %s",
+                    d_req_id,
+                    send_meta.transfer_id,
+                    remote_session,
+                    self.tp_rank,
+                    self.tp_size,
+                    agent_meta.remote_tp_rank,
+                    agent_meta.remote_tp_size,
+                    [len(group) for group in send_meta.local_block_ids],
+                    [
+                        len(group)
+                        for group in agent_meta.req_blocks.get(d_req_id, ("", []))[1]
+                    ],
+                    error,
+                )
                 err_reqs.append(d_req_id)
                 if err_msg is None:
                     err_msg = str(error)
@@ -2204,10 +2222,6 @@ class MooncakeConnectorWorker:
         ] = {}
         region_runs: list[tuple[np.ndarray, ...]] = []
         for local_region, remote_region in zip(local_regions, remote_regions):
-            if not groups_match and (
-                local_region.kv_block_len != remote_region.kv_block_len
-            ):
-                raise ValueError("Region-mapped source and destination payloads differ")
             group_key = (
                 local_region.group_index,
                 local_region.shared_group_ids,
@@ -2285,6 +2299,13 @@ class MooncakeConnectorWorker:
             source = local_by_name.get(destination.layer_name)
             if source is None:
                 return "Destination has no matching producer layer"
+            if source.kv_block_len != destination.kv_block_len:
+                return (
+                    "Region-mapped source and destination payloads differ "
+                    f"for layer {destination.layer_name}: "
+                    f"source={source.kv_block_len}, "
+                    f"destination={destination.kv_block_len}"
+                )
             spec = self._layer_specs[source.layer_name]
             if not isinstance(spec, MLAAttentionSpec):
                 return "Region-mapped imports require MLA layers"

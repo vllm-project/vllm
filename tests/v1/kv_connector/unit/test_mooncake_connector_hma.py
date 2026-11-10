@@ -679,8 +679,8 @@ def test_hisparse_import_copies_uncached_pages(hisparse_producer, decoder_tp, sh
 
 
 @pytest.mark.cpu_test
-def test_hisparse_import_rejects_partial_plan(hisparse_producer):
-    """An incompatible indexer payload must discard the valid host page plan too."""
+def test_hisparse_import_rejects_incompatible_layout(hisparse_producer):
+    """An incompatible indexer payload must reject the entire peer layout."""
     producer, caches, page = hisparse_producer
     targets = torch.zeros((2, 8, page + 1), dtype=torch.uint8)
     regions = [
@@ -689,10 +689,8 @@ def test_hisparse_import_rejects_partial_plan(hisparse_producer):
     ]
     meta = _xfer_meta(regions, {"d": ("x", [[5, 6], [7]])}, remote_tp_size=2)
     local, remote, error = producer._prepare_transfer_regions(meta)
-    assert error is None
-    send = SendBlockMeta("p", "x", [[1, 2, 3, 4]], asyncio.Event())
-    sources, destinations, lengths, errors, message = asyncio.run(
-        producer._build_transfer_params([("d", send)], meta, local, remote)
+    assert local == remote == []
+    assert error == (
+        "Region-mapped source and destination payloads differ "
+        f"for layer {regions[1].layer_name}: source={page}, destination={page + 1}"
     )
-    assert sources == destinations == lengths == []
-    assert errors == ["d"] and message
