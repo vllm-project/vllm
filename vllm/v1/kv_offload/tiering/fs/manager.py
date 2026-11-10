@@ -62,6 +62,9 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+# How long a load worker waits on the manager lock between drain checks.
+_MANAGER_LOCK_POLL_S: float = 0.5
+
 
 class FsAsyncLookupManager(AsyncLookupManager):
     """Async lookup manager for FileSystemTierManager."""
@@ -204,6 +207,8 @@ class FileSystemTierManager(SecondaryTierManager):
         )
 
         self._lookup_manager = FsAsyncLookupManager(tier=self, tier_type=self.tier_type)
+        # Set while drain_jobs() waits on the pool
+        self._draining = False
 
     @override
     def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:
@@ -237,16 +242,15 @@ class FileSystemTierManager(SecondaryTierManager):
 
         def load_task() -> None:
             try:
-                with self.manager_lock:
-                    materialized = job_metadata.materialize()
+                materialized = self._materialize_under_lock(job_metadata)
             except Exception as exc:
                 # Allocation raised an error that must be propagated
                 # to the scheduler thread.
                 self._job_errors[job_id] = exc
                 raise
             if not materialized:
-                # Job materialization failed; Setup state such that Job reaping
-                # doesn't blow up.
+                # Job materialization failed / could not acquire lock;
+                # Setup state for safe job reaping.
                 self._job_block_counts[job_id] = 0
                 self._load_job_keys[job_id] = []
                 return
@@ -349,10 +353,28 @@ class FileSystemTierManager(SecondaryTierManager):
             yield from self.events
             self.events.clear()
 
+    def _materialize_under_lock(self, transfer_job: TransferJob) -> bool:
+        """Determine if the manager_lock can be acquired and materialize
+        job under the lock.
+        Returns True, if lock acquired and materialization successful.
+        Returns False, if lock can't be acquired or materialization failed.
+        Raise if materialize() raises.
+        """
+        while True:
+            if self.manager_lock.acquire(timeout=_MANAGER_LOCK_POLL_S):
+                try:
+                    return transfer_job.materialize()
+                finally:
+                    self.manager_lock.release()
+            if self._draining:
+                return False
+
     @override
     def drain_jobs(self) -> None:
         """Block until all in-flight transfers in the threadpool finish."""
+        self._draining = True
         self._pool.wait_idle()
+        self._draining = False
 
     def on_request_finished(self, req_context: ReqContext) -> None:
         self._lookup_manager.cleanup(req_context.req_id)

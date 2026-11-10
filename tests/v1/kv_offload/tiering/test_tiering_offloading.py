@@ -2511,6 +2511,21 @@ class TestTieringOffloadingManagerWithFsTier:
             with open(path, "wb") as f:
                 f.write(bytes(64))
 
+    @staticmethod
+    def _gate_fs_load_materialization(fs_tier, monkeypatch) -> threading.Event:
+        """Park the fs tier's next load before load_task runs: a gate task is
+        prepended in the thread pool so the job is in flight (wait_idle()
+        blocks on it) while materialize() has not happened yet. Release by
+        setting the returned event."""
+        load_gate = threading.Event()
+        real_enqueue_load = fs_tier._pool.enqueue_load
+
+        def gated_enqueue_load(job_id, n_tasks, tasks):
+            real_enqueue_load(job_id, n_tasks + 1, [load_gate.wait] + list(tasks))
+
+        monkeypatch.setattr(fs_tier._pool, "enqueue_load", gated_enqueue_load)
+        return load_gate
+
     def test_one_fs_tier_promotion(self, fs_manager_setup):
         """Store keys in FS, verify all lookups return HIT_PENDING, wait for
         promotion to finish (with a timeout), then verify all keys are loaded."""
@@ -2610,15 +2625,7 @@ class TestTieringOffloadingManagerWithFsTier:
         )
         self._wait_lookup_workers(fs_tier)
 
-        # Gate fs tier threadpool's enqueue_load so we control when materialization
-        # happens.
-        load_gate = threading.Event()
-        real_enqueue_load = fs_tier._pool.enqueue_load
-
-        def gated_enqueue_load(job_id, n_tasks, tasks):
-            real_enqueue_load(job_id, n_tasks + 1, [load_gate.wait] + list(tasks))
-
-        monkeypatch.setattr(fs_tier._pool, "enqueue_load", gated_enqueue_load)
+        load_gate = self._gate_fs_load_materialization(fs_tier, monkeypatch)
 
         # req1's chunk is submitted for promotion below.
         assert manager.lookup(req1_chunk, req1_ctx) is LookupResult.HIT_PENDING
@@ -2648,6 +2655,47 @@ class TestTieringOffloadingManagerWithFsTier:
         assert not manager._jobs
         assert not manager.has_pending_work()
         manager._metrics.assert_idle()
+
+    def test_reset_cache_with_unmaterialized_fs_promotion(
+        self, fs_manager_setup, monkeypatch
+    ):
+        """A reset arriving while an FS promotion is queued but not yet
+        materialized must complete.
+        """
+        manager, _, fs_tier = fs_manager_setup
+        keys = to_keys(range(2))
+        self._write_keys_to_fs(fs_tier, keys)
+
+        req_ctx = ReqContext(req_id="r1")
+        manager.on_new_request(req_ctx)
+        for k in keys:
+            assert manager.lookup(k, req_ctx) is LookupResult.RETRY
+        manager.on_schedule_end(
+            ScheduleEndContext(new_req_ids=["r1"], preempted_req_ids=[])
+        )
+        self._wait_lookup_workers(fs_tier)
+
+        load_gate = self._gate_fs_load_materialization(fs_tier, monkeypatch)
+
+        for k in keys:
+            assert manager.lookup(k, req_ctx) is LookupResult.HIT_PENDING
+        # Flush the pending promotion into the fs tier's thread pool.
+        manager.on_schedule_end(
+            ScheduleEndContext(new_req_ids=[], preempted_req_ids=[])
+        )
+
+        # The connector scheduler holds the manager lock across reset_cache().
+        reset_thread = threading.Thread(target=manager.reset_cache)
+        with fs_tier.manager_lock:
+            reset_thread.start()
+            # Release the gate: the promotion should complete and let
+            # the reset_cache finish.
+            load_gate.set()
+            reset_thread.join(timeout=5)
+            assert not reset_thread.is_alive(), (
+                "reset_cache() deadlocked: drain_jobs() waits for an FS load "
+                "whose materialize() needs the manager lock the reset holds"
+            )
 
 
 if __name__ == "__main__":
