@@ -45,6 +45,7 @@ def _make_metadata(
     num_prefills: int = 0,
     num_decodes: int = 2,
     spec_sequence_masks: torch.Tensor | None = None,
+    **fields,
 ):
     """Only the fields the dispatch condition reads carry meaningful values."""
     return GDNAttentionMetadata(
@@ -56,6 +57,7 @@ def _make_metadata(
         num_spec_decode_tokens=0,
         num_actual_tokens=num_prefills + num_decodes,
         spec_sequence_masks=spec_sequence_masks,
+        **fields,
     )
 
 
@@ -343,3 +345,97 @@ def test_hip_prefill_backend_without_kernel():
     )
     with pytest.raises(RuntimeError, match="'hip'"):
         _resolve_prefill_backend(_make_backend_config("hip"), available=False)
+
+
+@pytest.mark.parametrize(
+    ("ratio", "qkvz_layout", "state_dtype"),
+    [
+        (3, "flat", torch.float32),
+        (3, "flat", torch.bfloat16),
+        (2, "interleaved", torch.float32),
+    ],
+)
+@torch.inference_mode()
+def test_fused_decode_matches_unfused(
+    ratio, qkvz_layout, state_dtype, default_vllm_config
+):
+    """The fused AITER decode (conv1d + recurrence + gated RMSNorm) matches the
+    unfused AITER decode followed by `RMSNormGated`, output and both states."""
+    from vllm.model_executor.layers.layernorm import RMSNormGated
+    from vllm.model_executor.layers.mamba.mamba_utils import (
+        MambaStateShapeCalculator,
+    )
+
+    if not qwen_gdn_linear_attn.GDN_AITER_FUSED_DECODE_AVAILABLE:
+        pytest.skip("needs AITER's fused GDN decode kernel (gfx950)")
+    torch.manual_seed(0)
+    heads, dim, decodes = 4, 128, 6
+    v_heads = heads * ratio
+    qkv_dim = (2 * heads + v_heads) * dim
+    conv_shape, ssm_shape = MambaStateShapeCalculator.gated_delta_net_state_shape(
+        1, heads, v_heads, dim, dim, 4
+    )
+    pool = 2 * decodes + 1
+    conv_state = 0.05 * torch.randn(pool, *conv_shape, device="cuda").bfloat16()
+    ssm_state = (0.05 * torch.randn(pool, *ssm_shape, device="cuda")).to(state_dtype)
+    qkvz = (0.1 * torch.randn(decodes, qkv_dim + v_heads * dim)).bfloat16().cuda()
+    ba = (0.1 * torch.randn(decodes, 2 * v_heads)).bfloat16().cuda()
+    norm = RMSNormGated(
+        dim, eps=1e-6, norm_before_gate=True, activation="silu", device="cuda"
+    ).bfloat16()
+    norm.weight.uniform_(0.5, 1.5)
+    layer = types.SimpleNamespace(
+        prefix=PREFIX,
+        qkvz_layout=qkvz_layout,
+        tp_size=1,
+        num_k_heads=heads,
+        num_v_heads=v_heads,
+        head_k_dim=dim,
+        head_v_dim=dim,
+        key_dim=heads * dim,
+        value_dim=v_heads * dim,
+        activation="silu",
+        A_log=0.1 * torch.randn(v_heads, device="cuda"),
+        dt_bias=0.1 * torch.randn(v_heads, device="cuda").bfloat16(),
+        conv1d=types.SimpleNamespace(
+            weight=(0.1 * torch.randn(qkv_dim, 1, 4)).bfloat16().cuda(), bias=None
+        ),
+        norm=norm,
+        _aiter_fused_conv_bias=None,
+    )
+    for name in (
+        "_forward_core_rocm",
+        "_forward_core_decode_aiter",
+        "_forward_core_decode_aiter_fused",
+    ):
+        method = getattr(QwenGatedDeltaNetAttention, name)
+        setattr(layer, name, types.MethodType(method, layer))
+    meta = _make_metadata(
+        num_decodes=decodes,
+        non_spec_query_start_loc=torch.arange(
+            decodes + 1, device="cuda", dtype=torch.int32
+        ),
+        non_spec_state_indices_tensor=torch.randperm(pool - 1, device="cuda")[
+            :decodes
+        ].int()
+        + 1,
+    )
+    ctx = types.SimpleNamespace(attn_metadata={PREFIX: meta})
+
+    results = []
+    for fused in (True, False):
+        layer.use_aiter_fused_gdn_decode = fused
+        layer.kv_cache = (conv_state.clone(), ssm_state.clone())
+        out = torch.empty(decodes, v_heads, dim, device="cuda", dtype=torch.bfloat16)
+        z = None if fused else torch.empty_like(out)
+        with patch.object(
+            qwen_gdn_linear_attn, "get_forward_context", return_value=ctx
+        ):
+            layer._forward_core_rocm(qkvz=qkvz, ba=ba, z_out=z, core_attn_out=out)
+        # forward_cuda: the Triton kernel ROCm enables for unquantized models.
+        results.append((out if fused else norm.forward_cuda(out, z), *layer.kv_cache))
+
+    # The fused kernel rounds a few steps differently from the unfused kernels:
+    # about 1 bf16 ULP on the output and 1e-4 on the state.
+    for actual, expected, atol in zip(*results, (4e-3, 0.0, 1e-3)):
+        torch.testing.assert_close(actual, expected, atol=atol, rtol=1.6e-2)
