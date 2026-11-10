@@ -464,7 +464,11 @@ class VllmConfig:
     - ``audio_bucket_seconds`` (``list[float]``): enable encoder length
       bucketing for padded audio encoders by bucketing items into these
       second-length rungs (e.g. ``[2, 4, 8, 16, 30]``). Off by default, and
-      only applied to adapted models (currently ``qwen2_audio``).
+      only applied to adapted models (currently ``qwen2_audio``, ``canary``,
+      ``fireredasr2``, ``cohere_asr``, ``funasr``).
+    - ``audio_bucket_min_size`` (``int``): fold under-filled adjacent rungs
+      into the larger neighbor, so the encoder keeps a larger batch when
+      bucketing splits a small batch. Off by default (unset = no merging).
     """
     instance_id: str = ""
     """The ID of the vLLM instance."""

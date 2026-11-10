@@ -405,6 +405,26 @@ def test_cohere_spec_buckets_on_dim2_time_axis():
         assert kw["length"].shape == (len(indices),)
 
 
+def test_merge_rungs_folds_underfilled_buckets():
+    # With min_bucket_size configured, under-filled adjacent rungs are folded
+    # into the larger neighbor. Three items land in three rungs (8/16/32),
+    # each below the min size, so they collapse into a single rung-32 batch.
+    batch = _batch([5, 30, 12], time_extent=32)
+    bucketer = EncoderBucketing(
+        _Spec(), LengthBucketingConfig((8, 16, 32)), min_bucket_size=4
+    )
+    rungs = bucketer.bucket(batch, 3)
+    assert len(rungs) == 1
+    indices, kw = rungs[0]
+    assert sorted(indices) == [0, 1, 2]
+    assert kw["input_features"].shape[-1] == 32  # merged to the largest rung
+
+    # Without min_bucket_size, the same batch stays split into three rungs.
+    bucketer_no_merge = EncoderBucketing(_Spec(), LengthBucketingConfig((8, 16, 32)))
+    rungs_no_merge = bucketer_no_merge.bucket(batch, 3)
+    assert len(rungs_no_merge) == 3
+
+
 def test_funasr_spec_buckets_tensor_features():
     from vllm.model_executor.models.funasr import FunASRBucketingSpec
 

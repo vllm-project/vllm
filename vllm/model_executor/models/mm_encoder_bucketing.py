@@ -63,6 +63,7 @@ logger = init_logger(__name__)
 
 _CONFIG_KEY = "audio_bucket_seconds"
 _CONFIG_PATH = f"additional_config.{_CONFIG_KEY}"
+_CONFIG_KEY_MIN_SIZE = "audio_bucket_min_size"
 
 # Losslessness levels a whitelisted model may guarantee for its crop (see the
 # module docstring): bit-exact for mask-aware encoders, output-lossless-within-
@@ -182,6 +183,41 @@ def _ladder_seconds(
     return tuple(seconds) if seconds else None
 
 
+def _min_bucket_size(
+    additional_config: Mapping[str, object] | None,
+) -> int | None:
+    """Read `additional_config.audio_bucket_min_size`, or `None` to disable
+    adjacent-rung merging.
+
+    Args:
+        additional_config: The `VllmConfig.additional_config` mapping in effect.
+
+    Returns:
+        The min items a rung must hold before it is split out on its own, or
+        `None` when adjacent-rung merging is not requested.
+
+    Raises:
+        ValueError: If the config value is not a positive integer.
+    """
+    raw = (
+        additional_config.get(_CONFIG_KEY_MIN_SIZE)
+        if isinstance(additional_config, Mapping)
+        else None
+    )
+    if raw is None:
+        return None
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        raise ValueError(
+            f"additional_config.{_CONFIG_KEY_MIN_SIZE} must be a positive int, "
+            f"got {raw!r}"
+        )
+    if raw <= 0:
+        raise ValueError(
+            f"additional_config.{_CONFIG_KEY_MIN_SIZE} must be > 0, got {raw!r}"
+        )
+    return raw
+
+
 def _rungs_from_seconds(
     seconds: tuple[float, ...], frames_per_second: int, align_to: int = 1
 ) -> tuple[int, ...]:
@@ -288,9 +324,11 @@ class EncoderBucketing:
         self,
         spec: EncoderBucketingSpec,
         ladder: LengthBucketingConfig | None,
+        min_bucket_size: int | None = None,
     ):
         self.spec = spec
         self.ladder = ladder
+        self.min_bucket_size = min_bucket_size
 
     @property
     def active(self) -> bool:
@@ -343,10 +381,37 @@ class EncoderBucketing:
         groups: dict[int, list[int]] = {}
         for index, window in enumerate(windows):
             groups.setdefault(window, []).append(index)
+        if self.min_bucket_size is not None:
+            groups = self._merge_rungs(groups)
         return [
             (indices, self.spec.crop(mm_kwargs_batch, indices, rung))
             for rung, indices in groups.items()
         ]
+
+    def _merge_rungs(
+        self, groups: dict[int, list[int]]
+    ) -> dict[int, list[int]]:
+        """Merge under-filled adjacent rungs into the larger neighbor.
+
+        A rung holding fewer than `min_bucket_size` items is folded into the
+        next (larger) rung, so the encoder keeps a larger batch instead of
+        running many tiny ones. Short items then pad to the larger rung,
+        trading a little padding for batch parallelism.
+        """
+        rungs = sorted(groups)
+        merged: dict[int, list[int]] = {}
+        i = 0
+        while i < len(rungs):
+            rung = rungs[i]
+            indices = list(groups[rung])
+            j = i + 1
+            while j < len(rungs) and len(indices) < self.min_bucket_size:
+                rung = rungs[j]
+                indices.extend(groups[rungs[j]])
+                j += 1
+            merged[rung] = indices
+            i = j
+        return merged
 
 
 # -------------------------------------------------------------- install
@@ -402,6 +467,7 @@ def install_encoder_bucketing(
 
     ladder = None
     lossless = None
+    min_bucket_size = _min_bucket_size(additional_config)
     seconds = _ladder_seconds(additional_config)
     if seconds is not None:
         lossless = _VERIFIED_FOR_BUCKETING.get(model_type)
@@ -436,7 +502,7 @@ def install_encoder_bucketing(
                     label,
                 )
 
-    model._encoder_bucketing = EncoderBucketing(spec, ladder)
+    model._encoder_bucketing = EncoderBucketing(spec, ladder, min_bucket_size)
     model._encoder_bucketing_manifest = manifest
     model._encoder_bucketing_installed = True
     if ladder is not None:
