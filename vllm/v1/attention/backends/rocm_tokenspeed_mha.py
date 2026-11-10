@@ -429,15 +429,6 @@ class RocmTokenspeedMHAImpl(AttentionImpl[RocmTokenspeedMHAMetadata]):
         self.kv_sharing_target_layer_name = kv_sharing_target_layer_name
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
         self.sinks = sinks
-        self.direct_output_prefill = _env_flag_enabled(
-            "VLLM_ROCM_TOKENSPEED_MHA_DIRECT_OUTPUT_PREFILL"
-        )
-        self.direct_output_decode = _env_flag_enabled(
-            "VLLM_ROCM_TOKENSPEED_MHA_DIRECT_OUTPUT_DECODE"
-        )
-        self.direct_output_extend = _env_flag_enabled(
-            "VLLM_ROCM_TOKENSPEED_MHA_DIRECT_OUTPUT_EXTEND"
-        )
         self.extend_kernel_mode = _env_extend_kernel_mode()
         self.block_table_expansion_mode = _env_block_table_expansion_mode()
         self.combine_mixed_decode = _env_flag_enabled(
@@ -489,10 +480,9 @@ class RocmTokenspeedMHAImpl(AttentionImpl[RocmTokenspeedMHAMetadata]):
         sliding_window: int,
         output: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        call_output = output if self.direct_output_prefill else None
         total_tokens = query.shape[0]
         if total_tokens <= _MAX_PREFILL_TOKENS_PER_CALL:
-            result = rocm_tokenspeed_mha_prefill(
+            return rocm_tokenspeed_mha_prefill(
                 query=query,
                 key=key,
                 value=value,
@@ -501,12 +491,8 @@ class RocmTokenspeedMHAImpl(AttentionImpl[RocmTokenspeedMHAMetadata]):
                 max_query_len=max_query_len,
                 sliding_window=sliding_window,
                 sinks=self.sinks,
-                output=call_output,
+                output=output,
             )
-            if call_output is None and output is not None:
-                output.copy_(result)
-                return output
-            return result
 
         if output is None:
             output = torch.empty_like(query)
@@ -526,7 +512,7 @@ class RocmTokenspeedMHAImpl(AttentionImpl[RocmTokenspeedMHAMetadata]):
             cu_cpu = query_start_loc_cpu[seq_start : seq_end + 1] - token_start
             cu = query_start_loc[seq_start : seq_end + 1] - token_start
             query_lens = cu_cpu[1:] - cu_cpu[:-1]
-            result = rocm_tokenspeed_mha_prefill(
+            rocm_tokenspeed_mha_prefill(
                 query=query[token_start:token_end],
                 key=key[token_start:token_end],
                 value=value[token_start:token_end],
@@ -535,12 +521,8 @@ class RocmTokenspeedMHAImpl(AttentionImpl[RocmTokenspeedMHAMetadata]):
                 max_query_len=query_lens.max().item(),
                 sliding_window=sliding_window,
                 sinks=self.sinks,
-                output=output[token_start:token_end]
-                if self.direct_output_prefill
-                else None,
+                output=output[token_start:token_end],
             )
-            if not self.direct_output_prefill:
-                output[token_start:token_end].copy_(result)
             seq_start = seq_end
         return output
 
@@ -556,7 +538,6 @@ class RocmTokenspeedMHAImpl(AttentionImpl[RocmTokenspeedMHAMetadata]):
         sliding_window: int,
         output: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        call_output = output if self.direct_output_decode else None
         total_tokens = query.shape[0]
         max_tokens_per_call = (
             self.sliding_decode_tokens_per_call
@@ -564,7 +545,7 @@ class RocmTokenspeedMHAImpl(AttentionImpl[RocmTokenspeedMHAMetadata]):
             else self.full_decode_tokens_per_call
         )
         if total_tokens <= max_tokens_per_call:
-            result = rocm_tokenspeed_mha_decode(
+            return rocm_tokenspeed_mha_decode(
                 query=query,
                 key_cache=key_cache,
                 value_cache=value_cache,
@@ -574,18 +555,14 @@ class RocmTokenspeedMHAImpl(AttentionImpl[RocmTokenspeedMHAMetadata]):
                 max_query_len=max_query_len,
                 sliding_window=sliding_window,
                 sinks=self.sinks,
-                output=call_output,
+                output=output,
             )
-            if call_output is None and output is not None:
-                output.copy_(result)
-                return output
-            return result
 
         if output is None:
             output = torch.empty_like(query)
         for start in range(0, total_tokens, max_tokens_per_call):
             end = min(start + max_tokens_per_call, total_tokens)
-            result = rocm_tokenspeed_mha_decode(
+            rocm_tokenspeed_mha_decode(
                 query=query[start:end],
                 key_cache=key_cache,
                 value_cache=value_cache,
@@ -595,10 +572,8 @@ class RocmTokenspeedMHAImpl(AttentionImpl[RocmTokenspeedMHAMetadata]):
                 max_query_len=max_query_len,
                 sliding_window=sliding_window,
                 sinks=self.sinks,
-                output=output[start:end] if self.direct_output_decode else None,
+                output=output[start:end],
             )
-            if not self.direct_output_decode:
-                output[start:end].copy_(result)
         return output
 
     def _extend(
@@ -614,8 +589,7 @@ class RocmTokenspeedMHAImpl(AttentionImpl[RocmTokenspeedMHAMetadata]):
         sliding_window: int,
         output: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        call_output = output if self.direct_output_extend else None
-        result = rocm_tokenspeed_mha_extend(
+        return rocm_tokenspeed_mha_extend(
             query=query,
             query_start_loc=query_start_loc,
             key_cache=key_cache,
@@ -626,12 +600,8 @@ class RocmTokenspeedMHAImpl(AttentionImpl[RocmTokenspeedMHAMetadata]):
             max_query_len=max_query_len,
             sliding_window=sliding_window,
             sinks=self.sinks,
-            output=call_output,
+            output=output,
         )
-        if call_output is None and output is not None:
-            output.copy_(result)
-            return output
-        return result
 
     def _expand_block_table(
         self, req_block_table: torch.Tensor, token_to_req: torch.Tensor
