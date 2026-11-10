@@ -340,8 +340,9 @@ class FlashInferMoeEp:
             w2_scale=weights.w2_scale,
         )
         sm107 = is_sm107_device()
-        if sm107:
-            # FlashInfer 0.7.3 asserts on an invalid SM107 route, killing the worker.
+        if sm107 and moe.routing_method is RoutingMethodType.DeepseekV4:
+            # The DeepSeek-V4 router can return non-finite scores on valid routes,
+            # which FlashInfer 0.7.3's SM107 route check turns into a device assert.
             os.environ.setdefault(_SM107_ROUTE_CHECK_ENV, "0")
         if spec.kernel == "cutedsl":
             config_cls = (

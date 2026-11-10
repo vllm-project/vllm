@@ -149,7 +149,7 @@ Requirements:
 Behavior:
 
 - The checkpoint's activation input scales (the layer maximum over the EP group) set the activation and FC1-output quantization. A non-finite scale, or a layer whose scales are all zero, fails at load.
-- vLLM sets `FLASHINFER_SM107_MEGA_CHECK_ROUTES=0` unless it is already set. This disables all of FlashInfer's SM107 route checks (non-finite scores, expert ids out of range, duplicate ids), so a router bug is not caught on the device. Export `FLASHINFER_SM107_MEGA_CHECK_ROUTES=1` to enable them; a failed check stops the worker.
+- For DeepSeek-V4 routing (DeepSeek-V4 and V4.1 checkpoints), vLLM sets `FLASHINFER_SM107_MEGA_CHECK_ROUTES=0` unless it is already set, because that router can return non-finite scores on valid routes and a failed check stops the worker. This disables all of FlashInfer's SM107 route checks in the process (non-finite scores, expert ids out of range, duplicate ids), so a router bug is not caught on the device. Export `FLASHINFER_SM107_MEGA_CHECK_ROUTES=1` to enable them. Other models keep FlashInfer's default.
 - Not supported on SM107 with this backend: MXFP4 expert layers, including MXFP4 draft or MTP experts under speculative decoding; EPLB; and reloading weights (`reload_weights`). The `flashinfer_moe_ep_mega_deep_gemm` backend does not support SM107.
 
 ## Multi-Node Deployment

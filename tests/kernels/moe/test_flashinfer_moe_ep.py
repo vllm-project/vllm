@@ -622,7 +622,9 @@ def test_adapter_kwargs_match_installed_flashinfer(
             routing is RoutingMethodType.DeepseekV4
         )
         assert adapter._return_workspace_view is False
-        assert os.environ[SM107_ROUTE_CHECK_ENV] == "0"
+        assert os.environ.get(SM107_ROUTE_CHECK_ENV) == (
+            "0" if routing is RoutingMethodType.DeepseekV4 else None
+        )
     else:
         expected = (
             moe_ep.Nvfp4CutedslMegaMoeConfig
