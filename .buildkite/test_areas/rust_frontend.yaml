@@ -117,6 +117,7 @@ steps:
   - tests/entrypoints/serve/tokenize/test_tokenization.py
   - tests/entrypoints/serve/middleware/test_optional_middleware.py
   - tests/entrypoints/launchers/api_server/test_multi_api_servers.py
+  - tests/entrypoints/rl/return_routed_experts/test_openai_api.py
   - tests/entrypoints/rl/return_routed_experts/test_scale_out_api.py
   - tests/entrypoints/rl/state_transitions/test_sleep.py
   - tests/entrypoints/rl/state_transitions/test_pause_resume.py
@@ -140,6 +141,7 @@ steps:
   - pytest -v -s entrypoints/serve/middleware/test_optional_middleware.py -k "not test_v2_endpoint_accepts_valid_api_token"
   # The Rust frontend ignores --api-server-count and runs one server, so this only checks the flag is accepted.
   - pytest -v -s entrypoints/launchers/api_server/test_multi_api_servers.py
+  - pytest -v -s entrypoints/rl/return_routed_experts/test_openai_api.py
   - pytest -v -s entrypoints/rl/return_routed_experts/test_scale_out_api.py
   # The other tests in this file drive the Python sleep routes in-process.
   - pytest -v -s entrypoints/rl/state_transitions/test_sleep.py::test_sleep_mode
@@ -167,6 +169,7 @@ steps:
       - tests/entrypoints/serve/tokenize/test_tokenization.py
       - tests/entrypoints/serve/middleware/test_optional_middleware.py
       - tests/entrypoints/launchers/api_server/test_multi_api_servers.py
+      - tests/entrypoints/rl/return_routed_experts/test_openai_api.py
       - tests/entrypoints/rl/return_routed_experts/test_scale_out_api.py
       - tests/entrypoints/rl/state_transitions/test_sleep.py
       - tests/entrypoints/rl/state_transitions/test_pause_resume.py
