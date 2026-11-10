@@ -182,6 +182,10 @@ class KVCacheCoordinator(ABC):
         self.group_block_sizes = tuple(
             manager.block_size for manager in self.single_type_managers
         )
+        self.is_cross_attention_group = tuple(
+            isinstance(manager, CrossAttentionManager)
+            for manager in self.single_type_managers
+        )
 
         # A positive retention interval must be a multiple of the base hit granularity
         # (``scheduler_block_size``) to land on real cache-hit boundaries.
@@ -237,7 +241,7 @@ class KVCacheCoordinator(ABC):
         if self.retention_interval != 0:
             prefill_end = 0
         for i, manager in enumerate(self.single_type_managers):
-            if isinstance(manager, CrossAttentionManager):
+            if self.is_cross_attention_group[i]:
                 # For cross-attention, we issue a single static allocation
                 # of blocks based on the number of encoder input tokens.
                 num_blocks_to_allocate += manager.get_num_blocks_to_allocate(
@@ -249,7 +253,9 @@ class KVCacheCoordinator(ABC):
                     num_encoder_tokens,
                     apply_admission_cap=apply_admission_cap,
                 )
-            else:
+            elif apply_admission_cap or num_tokens >= manager.num_idle_tokens.get(
+                request_id, 0
+            ):
                 num_blocks_to_allocate += manager.get_num_blocks_to_allocate(
                     request_id,
                     num_tokens,
@@ -337,14 +343,16 @@ class KVCacheCoordinator(ABC):
 
         """
         return tuple(
-            manager.allocate_new_blocks(
+            []
+            if num_tokens < manager.num_idle_tokens.get(request_id, 0)
+            else manager.allocate_new_blocks(
                 request_id,
-                num_encoder_tokens
-                if isinstance(manager, CrossAttentionManager)
-                else num_tokens,
+                num_encoder_tokens if is_cross_attention else num_tokens,
                 num_tokens_main_model,
             )
-            for manager in self.single_type_managers
+            for manager, is_cross_attention in zip(
+                self.single_type_managers, self.is_cross_attention_group
+            )
         )
 
     def get_num_cacheable_tokens(
@@ -354,6 +362,11 @@ class KVCacheCoordinator(ABC):
         # Only cache tokens with finalized KV. The last num_reprefillable_tokens
         # tokens can be re-prefilled during multi-module MTP.
         return max(0, num_computed_tokens - self.num_reprefillable_tokens)
+
+    def get_cache_alignment(self, kv_cache_group_id: int) -> int:
+        """`get_num_cacheable_tokens` never exceeds its input rounded down to
+        a multiple of this."""
+        return 1
 
     def cache_blocks(self, request: Request, num_computed_tokens: int) -> None:
         """Cache the blocks for the request.
@@ -371,7 +384,9 @@ class KVCacheCoordinator(ABC):
             use_eagle=bool(self.drop_eagle_group_ids),
         )
         for group_id, manager in enumerate(self.single_type_managers):
-            if not manager.enable_caching:
+            if not manager.enable_caching or num_computed_tokens < (
+                manager.num_idle_tokens.get(request.request_id, 0)
+            ):
                 continue
             manager.cache_blocks(
                 request,
@@ -449,9 +464,24 @@ class KVCacheCoordinator(ABC):
 
         """
         for manager in self.single_type_managers:
+            if processed_computed_tokens < manager.num_idle_tokens.get(request_id, 0):
+                continue
             manager.remove_skipped_blocks(
                 request_id, processed_computed_tokens, num_prompt_tokens
             )
+
+    def update_idle_tokens(self, request: Request, num_tokens: int) -> None:
+        """Refresh the idle bound of each group that was not idle at
+        `num_tokens` (see `SingleTypeKVCacheManager.get_num_idle_tokens`)."""
+        request_id = request.request_id
+        for manager in self.single_type_managers:
+            if num_tokens < manager.num_idle_tokens.get(request_id, 0):
+                continue
+            num_idle_tokens = manager.get_num_idle_tokens(
+                request, self.get_cache_alignment(manager.kv_cache_group_id)
+            )
+            if num_idle_tokens > 0:
+                manager.num_idle_tokens[request_id] = num_idle_tokens
 
     def get_blocks(self, request_id: str) -> tuple[list[KVCacheBlock], ...]:
         """Get the blocks for the request."""
@@ -785,6 +815,14 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         if self.enable_partial_hash_hits:
             return num_tokens
         return round_down(num_tokens, self.scheduler_block_size)
+
+    def get_cache_alignment(self, kv_cache_group_id: int) -> int:
+        if (
+            self.enable_partial_hash_hits
+            or self.single_type_managers[kv_cache_group_id].use_eagle
+        ):
+            return 1
+        return self.scheduler_block_size
 
     def get_num_cacheable_tokens(
         self, num_computed_tokens: int, kv_cache_group_id: int

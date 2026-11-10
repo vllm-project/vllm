@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import itertools
+import sys
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from collections.abc import Sequence
@@ -8,7 +9,7 @@ from typing import TYPE_CHECKING, ClassVar
 
 from vllm.distributed.kv_events import MEDIUM_CPU
 from vllm.utils.gc_utils import untracked_list
-from vllm.utils.math_utils import cdiv
+from vllm.utils.math_utils import cdiv, round_up
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import (
@@ -135,6 +136,7 @@ class SingleTypeKVCacheManager(ABC):
         # This is only used to track the RUNNING requests, we do not track the
         # data for preempted ones.
         self.num_cached_block: dict[str, int] = {}
+        self.num_idle_tokens: dict[str, int] = {}
 
         self.kv_cache_group_id = kv_cache_group_id
         self._null_block = block_pool.null_block
@@ -590,6 +592,7 @@ class SingleTypeKVCacheManager(ABC):
         # Default to [] in case a request is freed (aborted) before alloc.
         req_blocks = self.req_to_blocks.pop(request_id, [])
         self.num_cached_block.pop(request_id, None)
+        self.num_idle_tokens.pop(request_id, None)
         self._partial_hit_reqs.pop(request_id, None)
         return trim_null_head(req_blocks)
 
@@ -740,6 +743,27 @@ class SingleTypeKVCacheManager(ABC):
     def new_step_starts(self) -> None:
         return None
 
+    def get_num_idle_tokens(self, request: Request, cache_alignment: int) -> int:
+        """Token count below which `remove_skipped_blocks`,
+        `get_num_blocks_to_allocate`, `allocate_new_blocks` and `cache_blocks`
+        are no-ops for the running request until its state here changes.
+        `cache_blocks` receives token counts rounded down to `cache_alignment`.
+        0 disables skipping.
+        """
+        return 0
+
+    def _get_num_tokens_until_new_block(
+        self, request_id: str, cache_alignment: int
+    ) -> int:
+        num_tokens = len(self.req_to_blocks[request_id]) * self.block_size + 1
+        if self.enable_caching and self.kv_cache_spec.prefix_cacheable:
+            num_cached_blocks = self.num_cached_block.get(request_id, 0)
+            num_tokens = min(
+                num_tokens,
+                round_up((num_cached_blocks + 1) * self.block_size, cache_alignment),
+            )
+        return num_tokens
+
 
 class FullAttentionManager(SingleTypeKVCacheManager):
     supports_fine_grained_hash_lookup: ClassVar[bool] = True
@@ -872,18 +896,7 @@ class FullAttentionManager(SingleTypeKVCacheManager):
         prefix-cache entry; intermediate hash boundaries inside the same cache
         block are intentionally skipped.
         """
-        hash_block_size = self.block_pool.hash_block_size
-        # A resend matches at most `prompt_len - 1` tokens, but EAGLE lookups
-        # read the whole prompt before dropping a hash unit.
-        token_limit = (
-            request.num_prompt_tokens
-            if self.use_eagle
-            else request.num_prompt_tokens - 1
-        )
-        boundary_tokens = (
-            min(token_limit // hash_block_size, len(request.block_hashes))
-            * hash_block_size
-        )
+        boundary_tokens = self._get_partial_tail_boundary(request)
         if boundary_tokens == 0 or boundary_tokens > num_tokens:
             return
         if boundary_tokens % self.block_size == 0:
@@ -891,7 +904,10 @@ class FullAttentionManager(SingleTypeKVCacheManager):
 
         blocks = self.req_to_blocks[request.request_id]
         block_idx = boundary_tokens // self.block_size
-        if block_idx >= len(blocks):
+        if (
+            block_idx >= len(blocks)
+            or blocks[block_idx].block_hash_num_tokens == boundary_tokens
+        ):
             return
         self.block_pool.cache_partial_block(
             request=request,
@@ -900,6 +916,40 @@ class FullAttentionManager(SingleTypeKVCacheManager):
             kv_cache_group_id=self.kv_cache_group_id,
             block_size=self.block_size,
         )
+
+    def _get_partial_tail_boundary(self, request: Request) -> int:
+        hash_block_size = self.block_pool.hash_block_size
+        # A resend matches at most `prompt_len - 1` tokens, but EAGLE lookups
+        # read the whole prompt before dropping a hash unit.
+        token_limit = (
+            request.num_prompt_tokens
+            if self.use_eagle
+            else request.num_prompt_tokens - 1
+        )
+        return (
+            min(token_limit // hash_block_size, len(request.block_hashes))
+            * hash_block_size
+        )
+
+    def get_num_idle_tokens(self, request: Request, cache_alignment: int) -> int:
+        request_id = request.request_id
+        num_tokens = self._get_num_tokens_until_new_block(request_id, cache_alignment)
+        if (
+            not self.enable_caching
+            or not self.kv_cache_spec.prefix_cacheable
+            or self.block_size == self.block_pool.hash_block_size
+        ):
+            return num_tokens
+        boundary_tokens = self._get_partial_tail_boundary(request)
+        block_idx = boundary_tokens // self.block_size
+        blocks = self.req_to_blocks[request_id]
+        if (
+            boundary_tokens % self.block_size != 0
+            and self.num_cached_block.get(request_id, 0) <= block_idx < len(blocks)
+            and blocks[block_idx].block_hash_num_tokens != boundary_tokens
+        ):
+            num_tokens = min(num_tokens, round_up(boundary_tokens, cache_alignment))
+        return num_tokens
 
 
 class RSWAManager(FullAttentionManager):
@@ -946,6 +996,9 @@ class RSWAManager(FullAttentionManager):
         )
         last_gap_block = window_start // bs  # exclusive upper bound
         self._remove_blocks_in_range(request_id, first_gap_block, last_gap_block)
+
+    def get_num_idle_tokens(self, request: Request, cache_alignment: int) -> int:
+        return 0
 
 
 class SlidingWindowManager(SingleTypeKVCacheManager):
@@ -1187,6 +1240,18 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
             num_computed_tokens - self.sliding_window + 1 - self.extra_retained_tokens,
         )
 
+    def get_num_idle_tokens(self, request: Request, cache_alignment: int) -> int:
+        num_processed_tokens = max(
+            0, request.num_computed_tokens - request.num_in_flight_tokens
+        )
+        num_skipped_tokens = self.get_num_skipped_tokens(num_processed_tokens)
+        return min(
+            self._get_num_tokens_until_new_block(request.request_id, cache_alignment),
+            num_processed_tokens
+            + self.block_size
+            - num_skipped_tokens % self.block_size,
+        )
+
 
 class CircularBufferManager(FullAttentionManager):
     """Claims the ring's single block per request; prefix caching disabled."""
@@ -1276,6 +1341,9 @@ class CircularBufferManager(FullAttentionManager):
 
     def get_num_skipped_tokens(self, num_computed_tokens: int) -> int:
         return 0
+
+    def get_num_idle_tokens(self, request: Request, cache_alignment: int) -> int:
+        return sys.maxsize if self.req_to_blocks.get(request.request_id) else 0
 
 
 class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
@@ -2420,6 +2488,7 @@ class HiSparseHotManager(_HiSparseAuxiliaryManager):
 
     def require_hot(self, request_id: str) -> None:
         self.hot_required.add(request_id)
+        self.num_idle_tokens.pop(request_id, None)
 
     def has_hot(self, request_id: str) -> bool:
         return len(self.req_to_blocks.get(request_id, ())) == self.blocks_per_request
@@ -2446,6 +2515,12 @@ class HiSparseHotManager(_HiSparseAuxiliaryManager):
         if host_import or resumes_host_prefix or request_id in self.hot_required:
             return self.get_num_required_blocks(request_id)
         return 0
+
+    def get_num_idle_tokens(self, request: Request, cache_alignment: int) -> int:
+        request_id = request.request_id
+        if request_id in self.hot_required and not self.has_hot(request_id):
+            return 0
+        return sys.maxsize
 
     def get_num_required_blocks(self, request_id: str) -> int:
         return max(
@@ -2585,6 +2660,9 @@ class HiSparseResidentManager(_HiSparseAuxiliaryManager):
         self.residency_changes.pop(request_id, None)
         super().pop_blocks_for_free(request_id)
         return trim_null_head(blocks)
+
+    def get_num_idle_tokens(self, request: Request, cache_alignment: int) -> int:
+        return len(self.req_to_blocks[request.request_id]) * self.block_size + 1
 
     def adopt_resident_page(
         self, request_id: str, block_idx: int, block: KVCacheBlock
