@@ -17,6 +17,7 @@ from vllm.models.qwen3_5.amd.specialized_decode.wide.common.ops import (
     CM_DEV,
     pack_bf16,
     st,
+    traced,
 )
 from vllm.models.qwen3_5.amd.specialized_decode.wide.layout import (
     BLOCKS,
@@ -40,6 +41,7 @@ def qkv_proj(g, gemm, w, x, qkv_out, part, rows: int, fold0: int, pending=None):
     """``qkv_out`` ([rows, QKV] bf16) of ``x`` ([rows, HIDDEN] bf16)."""
     plan = qkv_plan()
 
+    @traced
     def finish(group, first, lane, acc):
         row = first + lane // 16 * 4
         for t in range_constexpr(gemm.tiles):

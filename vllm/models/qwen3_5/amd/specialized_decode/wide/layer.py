@@ -163,14 +163,15 @@ def phase_names(key) -> list[str]:
     out = ["start"] + (["first_combine"] if key.first else [])
     if key.kind == "gdn":
         if fused_gdn(key):
-            out += ["gdn+out+allreduce+combine"]
+            out += ["gdn+out"]
         elif tiled.resident(key.tokens):
-            out += ["gdn_proj+recur", "out+allreduce+combine"]
+            out += ["gdn_proj+recur", "out"]
         else:
-            out += ["gdn_proj+conv", "gdn_recur", "out+allreduce+combine"]
+            out += ["gdn_proj+conv", "gdn_recur", "out"]
     else:
-        out += ["o_proj+allreduce+combine"]
-    out += moe.phase_names(key.tokens)[:-1] + ["experts_down+allreduce+combine"]
+        out += ["o_proj"]
+    out += ["allreduce+combine"]
+    out += moe.phase_names(key.tokens) + ["allreduce+combine"]
     if key.qkv_tail:
         out += ["qkv_proj"]
     return out
@@ -404,24 +405,21 @@ def build(key: LayerBuild):
             mw = moe.Weights(w_gate, w13, w13s, w2, w2s)
             b = moe.Bufs(
                 part=scr.part,
-                logits=scr.logits,
-                route=scr.route,
                 x4=scr.x4,
                 x4s=scr.x4s,
-                act4=scr.act4,
-                act4s=scr.act4s,
-                upart=scr.upart,
-                y=scr.y,
+                **{k: getattr(scr, k) for k in moe.scratch_words(shape)},
             )
             push, read = all_reduce(MLP)
             moe.mlp(
                 g, shape, gemm, ml, scr.x, mw, b, push, end_phase,
                 (FOLD_PROJ, FOLD_PIECES),
             )
+            if const_expr(key.trace):
+                end_phase(moe.phase_names(S)[-1])
             reduce(push)
             combine(read, n_next, _q4(key.next_q4))
             if const_expr(key.trace or key.qkv_tail):
-                end_phase("experts_down+allreduce+combine")
+                end_phase("allreduce+combine" if key.trace else "mlp+allreduce+combine")
             if const_expr(key.qkv_tail):
                 attn_.qkv_proj(
                     g, gemm, w_qkv, scr.x, scr.qkv_out, scr.part, S, FOLD_PROJ
@@ -433,9 +431,11 @@ def build(key: LayerBuild):
             push, read = all_reduce(ATTN)
             tile = ex_.GroupTile(gl.aux.ptr, S)
             gdn.out(g, gemm, weights, source, scr.part, tile, push, k, FOLD_OUT, pending)
+            if const_expr(key.trace):
+                end_phase(name.removesuffix("+allreduce+combine"))
             reduce(push)
             combine(read, n_post, "plain")
-            end_phase(name)
+            end_phase("allreduce+combine" if key.trace else name)
 
         if const_expr(key.kind == "gdn"):
             w = gdn.Bufs(

@@ -304,7 +304,6 @@ class Gemm(TraceInvariant):
         rows: int,
         tid,
         k_total=None,
-        mtiles: int = 1,
         depth: int = DEPTH,
         chunks: int = 1,
     ):
@@ -314,7 +313,6 @@ class Gemm(TraceInvariant):
         self.tid = i32(tid)
         self.lane = self.tid % i32(LANES)
         self.group = self.lane // i32(TILE)
-        self.mtiles = mtiles
         self.depth = depth
         self.k_total = k_total if k_total is not None and k_total % CHUNK else None
         self.resident = resident(rows)
@@ -367,8 +365,8 @@ class Gemm(TraceInvariant):
         ``w count / 4 ..`` of them; the waves' accumulators are then added in
         wave order through the stage. Returns the sums, one a token tile, the
         same in every wave. ``pending``: the wave's weights (``issue_unit``)."""
-        if not self.resident or self.mtiles != 1:
-            raise ValueError("K waves need a resident stage of one weight tile")
+        if not self.resident:
+            raise ValueError("K waves need a resident stage")
         if count > self.chunks:
             raise ValueError(f"{count} K chunks past the stage's {self.chunks}")
         per = count // WAVES
@@ -464,7 +462,7 @@ class Gemm(TraceInvariant):
             loaded = list(pending[:win])
         self.put_resident(items, source, count)
         fx.barrier()
-        acc = [[zeros(4) for _ in range(self.tiles)] for _ in range(self.mtiles)]
+        acc = [[zeros(4) for _ in range(self.tiles)] for _ in rows]
         for c in range(count):
             if c + win < count:
                 loaded.append(
@@ -542,14 +540,14 @@ class Gemm(TraceInvariant):
         for t in range(self.tiles):
             ahead = operands(t + 1) if t + 1 < self.tiles else None
             for m in range(SLICES):
-                for mt in range(self.mtiles):
+                for mt in range(len(acc)):
                     acc[mt][t] = mfma_bf16(a[mt][m], ops[m], acc[mt][t])
             ops = ahead
         return acc
 
     def _unrolled(self, source, weights, rows, first, count: int, pre):
         depth = min(self.depth, count)
-        acc = [[zeros(4) for _ in range(self.tiles)] for _ in range(self.mtiles)]
+        acc = [[zeros(4) for _ in range(self.tiles)] for _ in rows]
         staged = [
             self.stage(source, weights, rows, first, count, i32(i), pre[i])
             for i in range(depth)
@@ -575,7 +573,7 @@ def _gemm_loop(gemm, source, weights, rows, first, count, pre):
     """``Gemm.run`` for a long K: chunk ``c + depth`` issued while chunk ``c``
     multiplies; the last ``depth`` iterations re-issue the last chunk."""
     depth = gemm.depth
-    acc = [[zeros(4) for _ in range(gemm.tiles)] for _ in range(gemm.mtiles)]
+    acc = [[zeros(4) for _ in range(gemm.tiles)] for _ in rows]
     staged = [
         gemm.stage(source, weights, rows, first, count, i32(i), pre[i])
         for i in range(depth)
@@ -703,10 +701,14 @@ def _gemm_unit(gemm, source, weights, plan, epilogue, after, unit, pending):
     group, split, firsts, rows = unit_rows(plan, unit, gemm.tid)
     first = plan.first_chunk(split)
 
+    # ``after`` in each branch: an epilogue's loads may feed it (``fold``'s
+    # ``begin`` / ``finish``), and they do not dominate a use past the branch
     def body(count, pre):
         acc = gemm.run(source, weights, rows, first, count, pre)
         for mt in range_constexpr(plan.mtiles):
             epilogue(unit, split, firsts[mt], gemm.lane, acc[mt])
+        if const_expr(after is not None):
+            after(group, split)
 
     if const_expr(plan.long == 0):
         body(plan.per, pending)
@@ -717,8 +719,6 @@ def _gemm_unit(gemm, source, weights, plan, epilogue, after, unit, pending):
             body(plan.per + 1, pending)
         else:
             body(plan.per, None if pending is None else pending[: plan.per])
-    if const_expr(after is not None):
-        after(group, split)
 
 
 @traced

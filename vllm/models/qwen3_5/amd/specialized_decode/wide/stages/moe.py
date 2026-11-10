@@ -49,6 +49,7 @@ from vllm.models.qwen3_5.amd.specialized_decode.wide.common.ops import (
     drain_stores,
     exp,
     ld,
+    ld_i32x4,
     lds_ld,
     lds_st,
     mfma_f4,
@@ -180,6 +181,13 @@ class Bufs(TraceInvariant):
 def scratch_words(s: Shape) -> dict[str, int]:
     """i32 words of each MoE scratch buffer at ``s``'s width."""
     plan = router_plan()
+    if major(s.rows):
+        return {
+            "route": 2 * s.assignments,
+            "mpart": s.assignments * HIDDEN,
+            "mpart2": s.assignments * HIDDEN,
+            "split": s.assignments,
+        }
     return {
         "logits": s.rows * plan.padded,
         "route": 2 * s.assignments,
@@ -195,6 +203,8 @@ def phase_names(rows: int) -> list[str]:
     is the caller's (the MLP exchange's readers follow it)."""
     if local_route(rows):
         return ["router", "route+experts_up", "experts_down"]
+    if major(rows):
+        return ["router", "route", "experts", "moe_combine"]
     return ["router", "route", "experts_up", "experts_down"]
 
 
@@ -206,6 +216,17 @@ def _lds_struct(name: str, words: dict[str, int]):
 
 
 def lds_words(s: Shape) -> dict[str, int]:
+    if major(s.rows):
+        return dict(
+            index=s.index_words,
+            units=3 * s.max_units,
+            scan=8,
+            x=TILE * XROW,
+            xs=TILE * XGROUPS,
+            act=TILE * RI // 8,
+            acts=TILE * AGROUPS,
+            stage=WAVES * TILE * STAGE_STRIDE,
+        )
     return dict(
         ids=s.assignments if local_route(s.rows) else 0,
         wts=s.assignments if local_route(s.rows) else 0,
@@ -225,8 +246,8 @@ def lds_struct(s: Shape):
 class Lds(TraceInvariant):
     """The MoE's LDS regions (i32 pointers)."""
 
-    def __init__(self, ml):
-        for k in ("ids", "wts", "index", "units", "scan", "panel", "contrib"):
+    def __init__(self, ml, names):
+        for k in names:
             setattr(self, k, getattr(ml, k).ptr)
 
 
@@ -247,6 +268,7 @@ def router(g, gemm, w_gate, x, b, rows: int, fold0: int, pending=None):
     plan = router_plan()
     if const_expr(local_route(rows)):
 
+        @traced
         def finish(group, first, lane, acc):
             row = first + lane // TILE * 4
             for t in range_constexpr(gemm.tiles):
@@ -706,19 +728,19 @@ def up(g, s, lds, w, b, fold0: int):
 def _up_epilogue(g, s, lds, b, pc, acc, fold0: int):
     """A piece's wave results to the f32 panel ([16 tokens][gate 32 | up 32]),
     or for a K slice to its partials, the piece's last slice summing them in
-    slice order; then wave 0 requantizes ``silu(gate) * up``: lane (token
-    ``l % 16``, quarter ``l / 16``) 8 of the token's 32 products, the scale
-    from the four quarters' amax."""
+    slice order; then wave 0 requantizes ``silu(gate) * up`` rounded to bf16
+    (stage 1's output dtype): lane (token ``l % 16``, quarter ``l / 16``) 8 of
+    the token's 32 products, the scale from the four quarters' amax."""
     lane, wave = g.lane, g.wave
     row, group = lane % TILE, lane // TILE
     proj, half = wave // 2, wave % 2
     col = proj * 32 + half * 16 + group * 4
+    piece = pc.u * PIECES + pc.blk
     if const_expr(s.ks == 1):
         lds_st(lds.panel + row * 64 + col, acc.bitcast(fx.Int32))
         fx.barrier()
         last = True
     else:
-        piece = pc.u * PIECES + pc.blk
         st(b.upart, ((piece * s.ks + pc.ks) * TILE + row) * 64 + col, acc, CM_DEV)
         last = fold_arrive(g, i32(fold0) + piece, s.ks)
     if last:
@@ -730,7 +752,6 @@ def _up_epilogue(g, s, lds, b, pc, acc, fold0: int):
                 gs = [gv[e // 4][e % 4] for e in range(8)]
                 us = [uv[e // 4][e % 4] for e in range(8)]
             else:
-                piece = pc.u * PIECES + pc.blk
                 gs = [fx.Float32(0.0)] * 8
                 us = [fx.Float32(0.0)] * 8
                 for k in range_constexpr(s.ks):
@@ -742,7 +763,8 @@ def _up_epilogue(g, s, lds, b, pc, acc, fold0: int):
                     ]
                     gs = [gs[e] + gk[e // 4][e % 4] for e in range(8)]
                     us = [us[e] + uk[e // 4][e % 4] for e in range(8)]
-            vals = [silu(gs[e]) * us[e] for e in range(8)]
+            # stage 1's bf16 output, as AITER's inter-stage quantization reads it
+            vals = [bf16_round(silu(gs[e]) * us[e]) for e in range(8)]
             code = mx.scale_code(butterfly(mx.amax(vals), (32, 16), fx.max))
             word = mx.quant_f32_word(vals, mx.scale_value(code))
             if row < pc.count:
@@ -911,10 +933,360 @@ def push_group(g, xch, y, grp, rows: int):
 
 
 # --------------------------------------------------------------------------
+# the expert-major path (rows >= MAJOR_MIN)
+# --------------------------------------------------------------------------
+#
+# Once the units outnumber about half the CTAs, a CTA runs whole units (the
+# Qwen3.8-Flash-Next decode's expert-major MoE): the unit's token rows of
+# ``x4`` gathered into LDS once, gate/up streaming the expert's codes with
+# the activations read from LDS, ``silu(gate) * up`` requantized in LDS, then
+# the down projection streaming the rest of the expert, every (row, slot)'s
+# f32 result to ``mpart``; ``major_combine`` sums them with the routing
+# weights in slot order into the exchange. A wave's registers in flight are
+# then all weights: the pieces' and owners' activation loads took as many
+# as their weight loads.
+
+MAJOR_MIN = 17  # narrowest step on the expert-major path
+UP_TILES = RI // (WAVES * TILE)  # a wave's 16-row tiles of each of gate and up
+DOWN_TILES = HIDDEN // (WAVES * TILE)  # a wave's 16-row output tiles
+DOWN_BLOCK = 4  # output tiles a block of the down stream
+STAGE_STRIDE = 4 * TILE + 4  # f32 words a staged output row: 64 columns, 4 pad
+XROW = HIDDEN // 8 + 4  # i32 words a gathered row: 16 pad bytes stagger banks
+MAJOR_DEPTH = 3  # gate/up K steps of loads in flight at the MFMAs
+DOWN_DEPTH = 6  # down (block, K step)s of loads in flight
+XCDS = 8  # CTAs are dispatched round-robin over the XCDs (L2 domains)
+XCD_RUN = 8  # consecutive units placed on one XCD
+# a half piece: half the intermediate rows (gate, up and the down K)
+HALF_TILES = UP_TILES * WAVES // 2
+HALF_GROUPS = AGROUPS // 2
+assert MAJOR_MIN > LOCAL_ROUTE_MAX and UP_TILES % 2 == 0
+
+
+def major(rows: int) -> bool:
+    return rows >= MAJOR_MIN
+
+
+def unit_slot(bid):
+    """CTA ``bid``'s place in unit order: runs of ``XCD_RUN`` consecutive
+    units on one XCD (an expert's units are consecutive, so a hot expert's
+    weights come through one L2), the runs rotating over the XCDs."""
+    i = bid // XCDS
+    return (i // XCD_RUN) * (XCDS * XCD_RUN) + (bid % XCDS) * XCD_RUN + i % XCD_RUN
+
+
+def pieces(n):
+    """``(whole, split)`` units of the step's ``n``: a last round at most half
+    full runs as two half pieces a unit, ending after about half a unit's
+    time (a unit's time is one CU's weight stream, whatever its rows)."""
+    r = n % i32(BLOCKS)
+    split = ((r > 0) & (r <= BLOCKS // 2)).select(r, i32(0))
+    return n - split, split
+
+
+@traced
+def gather_rows(g, s, lds, b, start, count):
+    """The unit's 16 token rows of ``x4`` and their scale codes into LDS,
+    every load issued before the first store; a padding token repeats the
+    unit's last."""
+    row_words = HIDDEN // 8
+    rounds = TILE * row_words // 4 // THREADS
+    srounds = -(-(TILE * XGROUPS) // THREADS)
+    vecs, codes = [], []
+    for r in range_constexpr(rounds):
+        piece = g.tid + i32(r * THREADS)
+        token, p = piece // (row_words // 4), piece % (row_words // 4)
+        src = _assignment(lds, s, start, count, token) // SLOTS
+        vecs.append(ld_i32x4(b.x4, src * row_words + p * 4, CM_DEV))
+    for r in range_constexpr(srounds):
+        at = g.tid + i32(r * THREADS)
+        tk = fx.min(at // XGROUPS, i32(TILE - 1))
+        src = _assignment(lds, s, start, count, tk) // SLOTS
+        codes.append(ld(b.x4s, src * XGROUPS + at % XGROUPS, fx.Int32, cm=CM_DEV))
+    for r in range_constexpr(rounds):
+        piece = g.tid + i32(r * THREADS)
+        token, p = piece // (row_words // 4), piece % (row_words // 4)
+        lds_st(lds.x + token * XROW + p * 4, vecs[r])
+    for r in range_constexpr(srounds):
+        at = g.tid + i32(r * THREADS)
+        if at < TILE * XGROUPS:
+            lds_st(lds.xs + at, codes[r])
+
+
+def pipelined(steps: int, depth: int, issue, compute):
+    """Unrolled software pipeline: step ``k + depth - 1``'s loads are issued
+    before step ``k`` computes."""
+    ring = [issue(k) for k in range(min(depth - 1, steps))]
+    for k in range(steps):
+        if k + depth - 1 < steps:
+            ring.append(issue(k + depth - 1))
+            sched_barrier()
+        compute(k, ring.pop(0))
+
+
+@traced
+def experts(g, s, lds, w, b, tag):
+    """Every piece of the schedule in LDS (CTA ``bid``: pieces ``p, p +
+    BLOCKS, ..`` from its slot ``p``): the whole units, then the split units'
+    halves. A second half writes ``mpart2`` and marks its (row, slot) with
+    ``tag`` in ``split``."""
+    whole, split = pieces(unit_count(lds))
+    for p in range(unit_slot(g.bid), whole + 2 * split, BLOCKS):
+        late = p >= whole
+        u = late.select(whole + (p - whole) // 2, p)
+        half = late.select(1 + (p - whole) % 2, i32(0))
+        expert, start, count = _unit(lds, u)
+        e = fx.Int64(expert)
+        _expert_unit(
+            g,
+            s,
+            lds,
+            b,
+            w.w13 + e * fx.Int64(s.w13_bytes),
+            w.w13s + e * fx.Int64(s.w13_scale_bytes),
+            w.w2 + e * fx.Int64(s.w2_bytes),
+            w.w2s + e * fx.Int64(s.w2_scale_bytes),
+            start,
+            count,
+            tag,
+            uniform(half),
+        )
+
+
+@traced
+def _expert_unit(g, s, lds, b, ub, us, db, ds, start, count, tag, half):
+    """One (expert, <= 16 tokens) unit, or one half of it (``half`` 1, 2; 0 the
+    whole unit): gate/up -> silu * up rounded to bf16 -> MXFP4 -> down -> f32
+    results of each (row, slot), a second half's into ``mpart2``."""
+    lane, wave = g.lane, g.wave
+    whole = half == 0
+    hh = half - 1
+    tiles = whole.select(i32(UP_TILES), i32(UP_TILES // 2))
+
+    def group_live(q):
+        return whole | (q // HALF_GROUPS == hh)
+
+    row, group = lane % TILE, lane // TILE
+    gather_rows(g, s, lds, b, start, count)
+    fx.barrier()
+    rip_tiles = s.rip // TILE
+    scale_tiles = s.w13_scale_cols // 8
+    # even: a tile pair shares a scale word, its odd tile the high bytes
+    base_tile = whole.select(wave * UP_TILES, hh * HALF_TILES + wave * (UP_TILES // 2))
+    accs = [zeros(4) for _ in range(2 * UP_TILES)]
+    scales = {}
+
+    def tile_of(t):
+        return base_tile + (t % UP_TILES) + (t // UP_TILES) * rip_tiles
+
+    def issue(k):
+        weights = []
+        for t in range_constexpr(2 * UP_TILES):
+            at = (tile_of(t) * (TILE * s.w13_row_bytes) + 1024 * k + 16 * lane) // 4
+            on = i32(t % UP_TILES) < tiles
+            weights.append(
+                ld(ub, at, fx.Int32, 4, cm=CM_NT, nbytes=s.w13_bytes, mask=on)
+            )
+        if const_expr(k % 2 == 0):
+            for proj in range_constexpr(2):
+                for pair in range_constexpr(UP_TILES // 2):
+                    tp = base_tile // 2 + proj * (rip_tiles // 2) + pair
+                    scales[proj, pair, k // 2] = ld(
+                        us,
+                        (tp * scale_tiles + k // 2) * 64 + lane,
+                        fx.Int32,
+                        cm=CM_NT,
+                        nbytes=s.w13_scale_bytes,
+                        mask=i32(2 * pair) < tiles,
+                    )
+        q = 4 * k + group
+        xb = lds_ld(lds.x + row * XROW + q * 4, 4)
+        xc = lds_ld(lds.xs + row * XGROUPS + q) & 0xFF
+        return weights, xb, xc
+
+    def compute(k, loaded):
+        weights, xb, xc = loaded
+        for t in range_constexpr(2 * UP_TILES):
+            local = t % UP_TILES
+            code = scales[t // UP_TILES, local // 2, k // 2]
+            sa = (code >> ((local % 2) * 8)) & 0x00FF00FF
+            accs[t] = mfma_f4(weights[t], xb, accs[t], sa, xc, opsel_a=2 * (k % 2))
+
+    pipelined(UP_STEPS, MAJOR_DEPTH, issue, compute)
+    fx.barrier()
+    _bridge(g, lds, accs, base_tile, tiles, group_live)
+    xb, xc = [], []
+    for k in range_constexpr(s.down_steps):
+        q = 4 * k + group
+        live = (q < AGROUPS) & group_live(q)
+        qq = live.select(q, i32(0))
+        raw = lds_ld(lds.act + row * (RI // 8) + qq * 4, 4)
+        xb.append(live.select(raw, zeros(4, fx.Int32)))
+        xc.append(live.select(lds_ld(lds.acts + row * AGROUPS + qq) & 0xFF, i32(127)))
+    dest = []
+    for qd in range_constexpr(4):
+        r = i32(4 * qd) + group
+        dest.append((r < count, _assignment(lds, s, start, count, r)))
+    out = (half == 2).select(b.mpart2, b.mpart)
+    _down_stream(g, s, lds, db, ds, out, dest, xb, xc, group_live)
+    fx.barrier()
+    if (half == 2) & (g.tid < count):
+        st(b.split, _assignment(lds, s, start, count, g.tid), tag, CM_DEV)
+
+
+@traced
+def _bridge(g, lds, accs, base_tile, tiles, group_live):
+    """``bf16(silu(gate) * up)`` of the wave's tiles to the f32 panel [16
+    tokens][RI] (aliasing the gathered rows), then a thread a (token, scale
+    group) requantizes it to the MXFP4 rows ``act`` / ``acts``."""
+    row, group = g.lane % TILE, g.lane // TILE
+    for t in range_constexpr(UP_TILES):
+        if i32(t) < tiles:
+            col = (base_tile + t) * TILE + group * 4
+            vals = [
+                bf16_round(silu(accs[t][e]) * accs[UP_TILES + t][e]) for e in range(4)
+            ]
+            lds_st(
+                lds.x + row * RI + col,
+                fx.Vector.from_elements(vals, fx.Float32).bitcast(fx.Int32),
+            )
+    fx.barrier()
+    for r in range_constexpr(-(-(TILE * AGROUPS) // THREADS)):
+        at = g.tid + i32(r * THREADS)
+        if (at < TILE * AGROUPS) & group_live(at % AGROUPS):
+            token, q = at // AGROUPS, at % AGROUPS
+            vals = []
+            for m in range_constexpr(8):
+                v4 = lds_ld(lds.x + token * RI + q * 32 + 4 * m, 4).bitcast(fx.Float32)
+                vals += [v4[e] for e in range(4)]
+            code = mx.scale_code(mx.amax(vals))
+            lds_st(
+                lds.act + token * (RI // 8) + q * 4,
+                fx.Vector.from_elements(mx.quant_f32_group(vals, code), fx.Int32),
+            )
+            lds_st(lds.acts + token * AGROUPS + q, code)
+    fx.barrier()
+
+
+@traced
+def _down_stream(g, s, lds, db, ds, out, dest, xb, xc, group_live):
+    """The wave's ``DOWN_TILES`` output tiles in blocks of ``DOWN_BLOCK``, one
+    pipeline over every (block, K step); a block's 16 tokens x 64 columns go
+    through the wave's stage slot to ``out``'s (row, slot) rows."""
+    lane, wave = g.lane, g.wave
+    steps = s.down_steps
+    scale_tiles = s.w2_scale_cols // 8
+    q = [4 * k + lane // TILE for k in range(steps)]
+    live = [(q[k] < AGROUPS) & group_live(q[k]) for k in range(steps)]
+    acc = [None] * DOWN_BLOCK
+
+    def first_tile(blk):
+        return wave * DOWN_TILES + blk * DOWN_BLOCK
+
+    def issue(i):
+        blk, k = divmod(i, steps)
+        first = first_tile(blk)
+        weights = [
+            ld(
+                db,
+                ((first + t) * (TILE * s.w2_row_bytes) + 1024 * k + 16 * lane) // 4,
+                fx.Int32,
+                4,
+                cm=CM_NT,
+                nbytes=s.w2_bytes,
+                mask=live[k],
+            )
+            for t in range(DOWN_BLOCK)
+        ]
+        codes = [
+            ld(
+                ds,
+                ((first // 2 + p) * scale_tiles + k // 2) * 64 + lane,
+                fx.Int32,
+                cm=CM_NT,
+            )
+            for p in range(DOWN_BLOCK // 2)
+        ]
+        return weights, codes
+
+    def compute(i, loaded):
+        blk, k = divmod(i, steps)
+        weights, codes = loaded
+        for t in range_constexpr(DOWN_BLOCK):
+            acc[t] = mfma_f4(
+                weights[t], xb[k], zeros(4) if k == 0 else acc[t], codes[t // 2], xc[k], opsel_a=2 * (k % 2) + t % 2
+            )
+        if const_expr(k == steps - 1):
+            _down_store(g, lds, out, dest, first_tile(blk), acc)
+
+    pipelined(DOWN_TILES // DOWN_BLOCK * steps, DOWN_DEPTH, issue, compute)
+
+
+@traced
+def _down_store(g, lds, out, dest, first, acc):
+    row, group = g.lane % TILE, g.lane // TILE
+    base = lds.stage + g.wave * (TILE * STAGE_STRIDE)
+    for t in range_constexpr(DOWN_BLOCK):
+        lds_st(base + row * STAGE_STRIDE + (4 * t + group) * 4, acc[t].bitcast(fx.Int32))
+    column = first * TILE + row * 4
+    for qd in range_constexpr(4):
+        valid, a = dest[qd]
+        v = lds_ld(base + (4 * qd + group) * STAGE_STRIDE + row * 4, 4)
+        if valid:
+            st(out, a * HIDDEN + column, v, CM_DEV)
+
+
+@traced
+def major_combine(g, xch, b, rows: int):
+    """``y[r] = sum_j w[r, j] part[r, j]`` in slot order (a split unit's two
+    halves added first), a wave an exchange line: lane ``l`` sums 8 columns
+    of token ``l // 8`` and pushes them, then lane 0 the line's flag."""
+    lpg = ex_.lines_per_group(rows)
+    for line in range(g.spread, ex_.GROUPS * lpg, BLOCKS * WAVES):
+        grp, blk = line // lpg, line % lpg
+        token = blk * ex_.TOKENS + g.lane // 8
+        tk = (token < rows).select(token, i32(rows - 1))
+        col = grp * ex_.COLS + (g.lane % 8) * 8
+        ws = [
+            ld(b.route, rows * SLOTS + tk * SLOTS + j, fx.Float32, cm=CM_DEV)
+            for j in range(SLOTS)
+        ]
+        halves = [ld(b.split, tk * SLOTS + j, fx.Int32, cm=CM_DEV) == xch.tag for j in range(SLOTS)]
+        ps, ps2 = [], []
+        for j in range_constexpr(SLOTS):
+            at = (tk * SLOTS + j) * HIDDEN + col
+            ps.append([ld(b.mpart, at + 4 * h, fx.Float32, 4, cm=CM_DEV) for h in range(2)])
+            ps2.append(
+                [
+                    ld(
+                        b.mpart2,
+                        at + 4 * h,
+                        fx.Float32,
+                        4,
+                        cm=CM_DEV,
+                        nbytes=rows * SLOTS * HIDDEN * 4,
+                        mask=halves[j],
+                    )
+                    for h in range(2)
+                ]
+            )
+        sums = [fx.Float32(0.0)] * 8
+        for j in range_constexpr(SLOTS):
+            sums = [
+                sums[e] + ws[j] * (ps[j][e // 4][e % 4] + ps2[j][e // 4][e % 4])
+                for e in range(8)
+            ]
+        xch.put(grp, token, g.lane % 8, sums)
+        drain_stores()
+        if g.lane == 0:
+            xch.flag(grp, blk)
+
+
+# --------------------------------------------------------------------------
 # the MLP half
 # --------------------------------------------------------------------------
 
 
+@traced
 def mlp(g, s: Shape, gemm, ml, x, w: Weights, b: Bufs, xch, end_phase, folds, pre=None):
     """The MoE of ``x`` ([rows, HIDDEN] bf16, its MXFP4 rows in ``b.x4`` /
     ``b.x4s``) into exchange ``xch``: every phase of ``phase_names``,
@@ -922,9 +1294,17 @@ def mlp(g, s: Shape, gemm, ml, x, w: Weights, b: Bufs, xch, end_phase, folds, pr
     ``lds_struct`` view; ``folds``: two fold counter bases (router, pieces);
     ``pre``: the router's first weights in flight, or None."""
     names = phase_names(s.rows)
-    lds = Lds(ml)
+    lds = Lds(ml, lds_words(s))
     router(g, gemm, w.w_gate, x, b, s.rows, folds[0], pre)
     end_phase(names[0])
+    if const_expr(major(s.rows)):
+        route(g, b.part, b.route, s.rows)
+        end_phase(names[1])
+        build_schedule(g.tid, s, lds, lambda a: ld(b.route, a, fx.Int32, cm=CM_DEV))
+        experts(g, s, lds, w, b, xch.tag)
+        end_phase(names[2])
+        major_combine(g, xch, b, s.rows)
+        return
     local = local_route(s.rows)
     if const_expr(local):
         assert s.assignments <= THREADS

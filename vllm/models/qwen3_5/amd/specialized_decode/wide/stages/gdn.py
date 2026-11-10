@@ -159,6 +159,7 @@ def ba_weights(w):
     return tiled.Bf16Weights(w.ba, BA, HIDDEN)
 
 
+@traced
 def proj(g, gemm, w, b, rows: int, fold0: int, pending=None, tag=None):
     """The input projection and its conv. ``w``: ``qkvz`` (and ``qkvz_s``),
     ``ba`` (bf16), ``conv`` ([CONV_DIM, 4] bf16); ``b``: ``x`` (and the MXFP4
@@ -206,7 +207,7 @@ def _ba_units(g, gemm, w, b, tag):
     """The [b | a] split-K units on CTAs ``BA_CTA0 ..``, their partials plain
     or (with ``tag``) tagged."""
     bplan = ba_plan()
-    if tag is None:
+    if const_expr(tag is None):
         epi = tiled.partial_epilogue(gemm, bplan, b.ba)
     else:
         epi = _tagged_partials(gemm, bplan, b.ba, tag)
