@@ -532,6 +532,7 @@ def rocm_unquantized_gemm_impl(
         and x.dim() == 2
         and 5 <= n <= 8
         and k % 32 == 0
+        and skinny_operands_compatible
     )
 
     if use_skinny_n5to8:

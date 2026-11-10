@@ -332,6 +332,49 @@ def test_rocm_unquantized_gemm_gfx120x_n_gt_8_falls_back(monkeypatch, m):
     _check_rocm_unquantized_gemm_falls_back(monkeypatch, is_rdna4=True, n=9, m=m)
 
 
+@pytest.mark.parametrize("noncontiguous_operand", ["weight", "bias"])
+def test_rocm_unquantized_gemm_gfx120x_swmmac_rejects_unsupported_layouts(
+    monkeypatch, noncontiguous_operand
+):
+    x = torch.randn(6, 64, dtype=torch.float16)
+    weight = torch.randn(128, 64, dtype=torch.float16)
+    bias = torch.randn(128, dtype=torch.float16)
+    if noncontiguous_operand == "weight":
+        weight = torch.randn(64, 128, dtype=torch.float16).t()
+        assert not weight.is_contiguous()
+    else:
+        bias = torch.randn(256, dtype=torch.float16)[::2]
+        assert not bias.is_contiguous()
+
+    monkeypatch.setattr(utils, "use_aiter_triton_gemm", lambda *args: False)
+    monkeypatch.setattr(utils.rocm_aiter_ops, "is_tgemm_enabled", lambda: False)
+    monkeypatch.setattr(utils.envs, "VLLM_ROCM_USE_SKINNY_GEMM", True)
+    monkeypatch.setattr("vllm.platforms.rocm.on_gfx1x", lambda: True)
+    monkeypatch.setattr("vllm.platforms.rocm.on_gfx9", lambda: False)
+    monkeypatch.setattr("vllm.platforms.rocm.on_rdna4", lambda: True)
+    monkeypatch.setattr("vllm.platforms.rocm.on_gfx11", lambda: False)
+    monkeypatch.setattr("vllm.platforms.rocm.on_gfx950", lambda: False)
+    monkeypatch.setattr("vllm.platforms.rocm.on_gfx1250", lambda: False)
+    monkeypatch.setattr(utils, "num_compute_units", lambda: 120)
+
+    swmmac_mock = MagicMock(
+        side_effect=lambda x_view, w, _m, _cu_count, _bias: x_view @ w.t()
+    )
+    monkeypatch.setattr(utils.ops, "swmmac_gemm", swmmac_mock)
+    wvsplitk_mock = MagicMock()
+    monkeypatch.setattr(utils.ops, "wvSplitK", wvsplitk_mock)
+    llmm1_mock = MagicMock()
+    monkeypatch.setattr(utils.ops, "LLMM1", llmm1_mock)
+
+    out = utils.rocm_unquantized_gemm_impl(x, weight, bias)
+    ref = torch.nn.functional.linear(x, weight, bias)
+
+    swmmac_mock.assert_not_called()
+    wvsplitk_mock.assert_not_called()
+    llmm1_mock.assert_not_called()
+    assert torch.allclose(out, ref, atol=1e-3, rtol=1e-3)
+
+
 def test_rocm_unquantized_gemm_gfx950_wvsplitkrc_path(monkeypatch):
     x = torch.randn(1024, 16, dtype=torch.float16).t()
     weight = torch.randn(256, 1024, dtype=torch.float16)
