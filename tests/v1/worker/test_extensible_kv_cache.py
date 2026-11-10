@@ -217,6 +217,7 @@ def test_measured_sizing_caps_torch_memory(monkeypatch):
     vllm_config = SimpleNamespace(
         model_config=SimpleNamespace(multimodal_config=None),
         parallel_config=SimpleNamespace(),
+        cache_config=SimpleNamespace(gpu_memory_utilization=None),
         kv_transfer_config=None,
     )
 
@@ -232,6 +233,58 @@ def test_measured_sizing_caps_torch_memory(monkeypatch):
     # 6 GiB free, of which extending to 4 blocks takes 3 and IPC keeps 1.
     left_free = 2 * gib - extensible_kv_cache.KV_CACHE_NON_TORCH_RESERVE_BYTES
     assert limits == [2 * gib + left_free]
+
+
+@pytest.mark.parametrize(
+    ("utilization", "init_free_gib", "warns"),
+    [(0.9, 80, True), (None, 80, False), (0.5, 80, False), (0.9, 50, False)],
+)
+def test_measured_sizing_warns_when_utilization_withholds_memory(
+    monkeypatch, caplog_vllm, utilization, init_free_gib, warns
+):
+    """An explicit gpu_memory_utilization just under 1.0 warns only when it
+    keeps free memory out of the KV cache: not when another process already
+    holds that memory (50 of the 80 GiB free at startup)."""
+    gib = 1 << 30
+    kv_cache = SimpleNamespace(
+        reserved_headroom_bytes=0,
+        physical_bytes=gib,
+        bytes_per_block=gib,
+        blocks_within=lambda num_bytes: num_bytes // gib,
+        physical_bytes_for=lambda num_blocks: num_blocks * gib,
+        set_torch_memory_limit=lambda limit: None,
+    )
+    accelerator = extensible_kv_cache.torch.accelerator
+    monkeypatch.setattr(accelerator, "synchronize", lambda *args: None)
+    monkeypatch.setattr(accelerator, "empty_cache", lambda: None)
+    monkeypatch.setattr(accelerator, "memory_reserved", lambda *args: 0)
+    # The model took 20 GiB since startup, 1 GiB of it the committed KV prefix.
+    monkeypatch.setattr(
+        extensible_kv_cache.current_platform,
+        "free_device_memory",
+        lambda device: (init_free_gib - 20) * gib,
+    )
+    monkeypatch.setattr(
+        extensible_kv_cache,
+        "reserve_mm_ipc_gpu_memory",
+        lambda available, *args: available,
+    )
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(multimodal_config=None),
+        parallel_config=SimpleNamespace(),
+        cache_config=SimpleNamespace(gpu_memory_utilization=utilization),
+        kv_transfer_config=None,
+    )
+
+    extensible_kv_cache.measure_kv_cache_blocks(
+        kv_cache,  # type: ignore[arg-type]
+        vllm_config,  # type: ignore[arg-type]
+        torch.device("cpu"),
+        init_free_memory=init_free_gib * gib,
+        requested_memory=int(80 * gib * (utilization or 1.0)),
+    )
+
+    assert ("keeping" in caplog_vllm.text) == warns
 
 
 def test_measured_sizing_counts_reclaimable_memory_on_integrated_gpu(monkeypatch):
@@ -279,6 +332,7 @@ def test_measured_sizing_counts_reclaimable_memory_on_integrated_gpu(monkeypatch
     vllm_config = SimpleNamespace(
         model_config=SimpleNamespace(multimodal_config=None),
         parallel_config=SimpleNamespace(),
+        cache_config=SimpleNamespace(gpu_memory_utilization=None),
         kv_transfer_config=None,
     )
     measure = functools.partial(
