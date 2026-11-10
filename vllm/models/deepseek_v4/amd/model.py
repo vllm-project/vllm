@@ -146,6 +146,24 @@ class DeepseekV4MLP(nn.Module):
 
         self._swiglu_limit = 0.0 if swiglu_limit is None else float(swiglu_limit)
         self._reduce_results = reduce_results
+        # Set once at weight prep by prepare_fused_quant_down().
+        self._fused_quant_down = False
+
+    def prepare_fused_quant_down(self) -> bool:
+        """Decide once whether forward fuses clamp + SiLU-mul + FP8 quant
+        ahead of down_proj: gfx1250 only, where down_proj runs the Gluon
+        preshuffled block-scale GEMM that reads the fused kernel's M-major
+        scales, and only without the all-reduce that GEMM skips."""
+        fp8_linear = getattr(
+            getattr(self.down_proj, "quant_method", None), "fp8_linear", None
+        )
+        self._fused_quant_down = bool(
+            on_gfx1250()
+            and not self._reduce_results
+            and fp8_linear is not None
+            and getattr(fp8_linear, "use_bpreshuffle", False)
+        )
+        return self._fused_quant_down
 
     def prepare_gateup_preshuffle(self) -> None:
         # B-preshuffle the gate_up_proj weight in place (single weight).
@@ -193,44 +211,29 @@ class DeepseekV4MLP(nn.Module):
             )
         else:
             gate_up, _ = self.gate_up_proj(x)
-        fused = self._fused_quant_down(gate_up)
+        fused = self._try_fused_quant_down(gate_up)
         if fused is not None:
             return fused
         x = self.act_fn(gate_up)
         x, _ = self.down_proj(x)
         return x
 
-    def _fused_quant_down(self, gate_up: torch.Tensor) -> torch.Tensor | None:
+    def _try_fused_quant_down(self, gate_up: torch.Tensor) -> torch.Tensor | None:
+        if not self._fused_quant_down:
+            return None
         if gate_up.dim() != 2 or not gate_up.is_contiguous():
             return None
         n_half = gate_up.shape[-1] // 2
         if n_half < 128 or n_half % 128 != 0:
             return None
-        if self._reduce_results:
-            return None
-        fp8_linear = getattr(
-            getattr(self.down_proj, "quant_method", None), "fp8_linear", None
-        )
-        if fp8_linear is None or not getattr(fp8_linear, "use_bpreshuffle", False):
-            return None
-
-        from aiter.ops.triton.fusions.fused_clamp_act_mul import fused_clamp_act_mul
 
         from vllm.models.deepseek_v4.amd.rocm import (
             apply_pre_quantized_block_scaled_mm,
         )
 
-        x_fp8, x_scale = fused_clamp_act_mul(
-            gate_up,
-            swiglu_limit=self._swiglu_limit,
-            activation="silu",
-            dtype_quant=current_platform.fp8_dtype(),
-            transpose_scale=True,
-            quant_block_size=128,
-            scale_dtype_fmt="fp32",
+        x_fp8, x_scale = rocm_aiter_ops.fused_clamp_silu_mul_group_fp8_quant(
+            gate_up, self._swiglu_limit
         )
-        x_scale = x_scale.view(n_half // 128, gate_up.shape[0]).t()
-
         return apply_pre_quantized_block_scaled_mm(self.down_proj, x_fp8, x_scale)
 
 
@@ -1630,16 +1633,24 @@ class DeepseekV4ForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
         finalize_mega_moe_weights(self)
         # After per-layer quant finalize, so we preshuffle the final fp8 weights.
         fused_compressor_layers = 0
+        fused_quant_down_layers = 0
         for module in self.modules():
             if isinstance(module, DeepseekV4ROCMAiterMLAAttention):
                 fused_compressor_layers += module.prepare_compressor_gemm_fusion()
                 module.prepare_attn_preshuffle()
             elif isinstance(module, DeepseekV4MLP):
                 module.prepare_gateup_preshuffle()
+                fused_quant_down_layers += module.prepare_fused_quant_down()
         if fused_compressor_layers:
             logger.info(
                 "Fused the C4 compressor GEMMs in %d DeepSeek V4 layers",
                 fused_compressor_layers,
+            )
+        if fused_quant_down_layers:
+            logger.info(
+                "Fused clamp + SiLU-mul + FP8 quant ahead of down_proj in %d "
+                "DeepSeek V4 MLPs",
+                fused_quant_down_layers,
             )
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:

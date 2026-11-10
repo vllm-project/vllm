@@ -66,6 +66,7 @@ from vllm.v1.attention.ops.rocm_paged_mxfp4_indexer import (
 from vllm.v1.kv_cache_interface import KVCacheSpec
 from vllm.v1.worker.workspace import current_workspace_manager
 
+# TODO: express the _ON_GFX950 checks in this file with get_cdna_version().
 logger = init_logger(__name__)
 
 
@@ -169,9 +170,11 @@ def apply_pre_quantized_block_scaled_mm(
 
     The fused q/kv norm kernel writes fp8 qr + per-1x128 scales; this
     drives the linear's block-scaled GEMM directly with them, bypassing
-    apply_weights which would re-quantize the fp8 input. Only valid for
-    the wq_b-style column/replicated linears: their output is the local
-    TP shard, so no all-reduce is needed.
+    apply_weights which would re-quantize the fp8 input. It does no
+    all-reduce, so it is only valid where the caller needs none: the
+    wq_b-style column/replicated linears (their output is the local TP
+    shard) and a row-parallel linear built with reduce_results=False (the
+    shared expert's down_proj).
     """
     from vllm.model_executor.kernels.linear.scaled_mm.BlockScaledMMLinearKernel import (
         FP8BlockParams,

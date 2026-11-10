@@ -1030,8 +1030,12 @@ def _rocm_aiter_triton_gemm_a8w8_blockscale_preshuffle_impl(
     from aiter.ops.triton.gemm_a8w8_blockscale import gemm_a8w8_blockscale_preshuffle
 
     n, k = B.shape
-    x_scale_transposed = As.stride(0) != 1
-    if x_scale_transposed:
+    # The Gluon kernel reads M-major activation scales. A column-major view
+    # (stride(0) == 1, as QuantFP8 emits on gfx1250) already is one and goes in
+    # as is, strides and all; a row-major one is copied into M-major storage
+    # and flagged as transposed.
+    copy_to_m_major = As.stride(0) != 1
+    if copy_to_m_major:
         As = As.transpose(0, 1).contiguous().view(*As.shape)
     return gemm_a8w8_blockscale_preshuffle(
         A,
@@ -1042,7 +1046,7 @@ def _rocm_aiter_triton_gemm_a8w8_blockscale_preshuffle_impl(
         None,  # y
         None,  # config
         False,  # skip_reduce
-        x_scale_transposed,  # is_x_scale_transposed (misspelled in aiter)
+        copy_to_m_major,  # is_x_scale_transposed (misspelled in aiter)
     )
 
 
@@ -1447,9 +1451,12 @@ def _rocm_aiter_rmsnorm_with_add_fp8_group_quant_impl(
     weight: torch.Tensor,
     variance_epsilon: float,
     group_size: int,
+    transpose_scale: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     from aiter.ops.triton.fused_fp8_quant import fused_rms_fp8_group_quant
 
+    # transpose_scale writes M-major scale bytes, presented (like
+    # rocm_aiter_group_fp8_quant's) as a contiguous (M, G) tensor.
     (x_quant, x_quant_scales), _, _, res = fused_rms_fp8_group_quant(
         x,
         weight,
@@ -1460,6 +1467,7 @@ def _rocm_aiter_rmsnorm_with_add_fp8_group_quant_impl(
         group_size=group_size,
         dtype_quant=FP8_DTYPE,
         res1=residual,
+        transpose_scale=transpose_scale,
     )
     return (
         x_quant,
@@ -1474,6 +1482,7 @@ def _rocm_aiter_rmsnorm_with_add_fp8_group_quant_fake(
     weight: torch.Tensor,
     variance_epsilon: float,
     group_size: int,
+    transpose_scale: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     M, N = x.shape
     scale_shape = (M, (N + group_size - 1) // group_size)
@@ -1489,9 +1498,12 @@ def _rocm_aiter_rmsnorm_fp8_group_quant_impl(
     weight: torch.Tensor,
     variance_epsilon: float,
     group_size: int,
+    transpose_scale: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     from aiter.ops.triton.fused_fp8_quant import fused_rms_fp8_group_quant
 
+    # transpose_scale writes M-major scale bytes, presented (like
+    # rocm_aiter_group_fp8_quant's) as a contiguous (M, G) tensor.
     (x_quant, x_quant_scales), _, _, res = fused_rms_fp8_group_quant(
         x,
         weight,
@@ -1502,6 +1514,7 @@ def _rocm_aiter_rmsnorm_fp8_group_quant_impl(
         group_size=group_size,
         dtype_quant=FP8_DTYPE,
         res1=None,
+        transpose_scale=transpose_scale,
     )
     return (x_quant, x_quant_scales)
 
@@ -1511,6 +1524,7 @@ def _rocm_aiter_rmsnorm_fp8_group_quant_fake(
     weight: torch.Tensor,
     variance_epsilon: float,
     group_size: int,
+    transpose_scale: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     M, N = x.shape
     scale_shape = (M, (N + group_size - 1) // group_size)
@@ -4399,6 +4413,33 @@ class rocm_aiter_ops:
         )
 
     @staticmethod
+    def fused_clamp_silu_mul_group_fp8_quant(
+        gate_up: torch.Tensor,
+        swiglu_limit: float,
+        group_size: int = 128,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Fuse clamp, silu(gate) * up and FP8 per-1x128 group quant.
+
+        Returns the FP8 activations and their scales as a column-major
+        [M, N // group_size] view (M-major storage), the layout the gfx1250
+        Gluon preshuffled block-scale GEMM reads.
+        """
+        from aiter.ops.triton.fusions.fused_clamp_act_mul import fused_clamp_act_mul
+
+        x_fp8, x_scale = fused_clamp_act_mul(
+            gate_up,
+            swiglu_limit=swiglu_limit,
+            activation="silu",
+            dtype_quant=current_platform.fp8_dtype(),
+            transpose_scale=True,
+            quant_block_size=group_size,
+            scale_dtype_fmt="fp32",
+        )
+        # aiter hands back an [M, G] view over [G, M] storage; re-view it.
+        num_groups = gate_up.shape[-1] // 2 // group_size
+        return x_fp8, x_scale.view(num_groups, gate_up.shape[0]).t()
+
+    @staticmethod
     def group_fp8_quant(
         input_2d: torch.Tensor,
         group_size: int = 128,
@@ -4429,10 +4470,13 @@ class rocm_aiter_ops:
         from vllm.platforms.rocm import on_gfx1250
 
         backend = "gluon" if on_gfx1250() else "triton"
-        # Fake M value for now
-        _, is_tuned = get_gemm_config(
-            "GEMM-A8W8_BLOCKSCALE_PRESHUFFLED", 1, n, k, backend=backend
-        )
+        try:
+            # Fake M value for now
+            _, is_tuned = get_gemm_config(
+                "GEMM-A8W8_BLOCKSCALE_PRESHUFFLED", 1, n, k, backend=backend
+            )
+        except (AssertionError, ImportError):
+            return False
         return is_tuned
 
     @staticmethod
