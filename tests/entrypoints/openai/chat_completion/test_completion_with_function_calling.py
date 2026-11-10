@@ -505,3 +505,36 @@ async def test_max_tokens_with_tool_choice_required(
     choice = chat_completion.choices[0]
     assert choice.finish_reason == "length"
     assert choice.message.tool_calls is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [True, False])
+async def test_choice_after_thinking(client: openai.AsyncOpenAI, stream: bool):
+    """With thinking on the model writes the chat template's blank line after
+    `</think>`. The choice starts after it, so it follows the reasoning."""
+    kwargs = dict(
+        model=MODEL_NAME,
+        messages=[
+            {
+                "role": "user",
+                "content": "Please answer with only Y or N: "
+                "Is Berlin the capital of Spain?",
+            }
+        ],
+        temperature=0.0,
+        max_completion_tokens=1024,
+        extra_body={"structured_outputs": {"choice": ["Y", "N"]}},
+    )
+    if stream:
+        chunks = await client.chat.completions.create(**kwargs, stream=True)
+        content = "".join(
+            [
+                chunk.choices[0].delta.content or ""
+                async for chunk in chunks
+                if chunk.choices
+            ]
+        )
+    else:
+        response = await client.chat.completions.create(**kwargs)
+        content = response.choices[0].message.content
+    assert content == "N"

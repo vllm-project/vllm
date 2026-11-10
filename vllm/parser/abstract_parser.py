@@ -83,6 +83,9 @@ class StreamState:
         default_factory=RequiredToolCallScanner
     )
     engine_based: bool = False
+    # Newlines the next content may still drop after reasoning (see
+    # `_reasoning_separator_newlines`); None until reasoning ends in the output.
+    reasoning_separator_newlines: int | None = None
 
     def advance(
         self,
@@ -335,6 +338,27 @@ def structured_outputs_to_format(params: StructuredOutputsParams) -> Format | No
         # StructuralTagResponseFormat
         return StructuralTag.model_validate(s_tag).format
     return None
+
+
+def _leading_newlines(content: str, newlines: int) -> int:
+    """How many of `content`'s leading newlines, up to `newlines`, to drop."""
+    return min(len(content) - len(content.lstrip("\n")), newlines)
+
+
+def _reasoning_separator_newlines(
+    request: ChatCompletionRequest | ResponsesRequest,
+) -> int:
+    """Newlines the engine let a constrained answer start with after a
+    generated reasoning end; see
+    `StructuredOutputsParams.reasoning_separator_newlines`."""
+    structured_outputs = request.extract_structured_outputs()
+    if (
+        not isinstance(structured_outputs, StructuredOutputsParams)
+        # The engine constrains a parser's own grammar from the first token.
+        or request._grammar_from_parser
+    ):
+        return 0
+    return structured_outputs.reasoning_separator_newlines()
 
 
 def _xgrammar_supports(structured_outputs: StructuredOutputsParams) -> bool:
@@ -796,6 +820,18 @@ class DelegatingParser(Parser):
             return False
         return self._reasoning_parser.is_reasoning_end_streaming(input_ids, delta_ids)
 
+    def _ends_reasoning_explicitly(self, token_ids: Sequence[int]) -> bool:
+        """Whether generated `token_ids` end reasoning with an end marker, found
+        as `StructuredOutputManager` finds it."""
+        parser = self._reasoning_parser
+        if parser is None or not token_ids:
+            return False
+        if parser.reasoning_end_token_ids:
+            end = parser.find_reasoning_end(token_ids)
+            if end is not None:
+                return end.offset < len(token_ids) and not end.implicit
+        return parser.is_reasoning_end_streaming(token_ids, token_ids)
+
     def _extract_content_ids(self, input_ids: list[int]) -> list[int]:
         if self._reasoning_parser is None:
             return input_ids
@@ -857,6 +893,12 @@ class DelegatingParser(Parser):
     ) -> tuple[str | None, str | None, list[FunctionCall] | None]:
         self._initialize_history_tool_call_cnt(request)
         reasoning, content = self.extract_reasoning(model_output, request)
+        if (
+            content
+            and (newlines := _reasoning_separator_newlines(request))
+            and self._ends_reasoning_explicitly(model_output_token_ids)
+        ):
+            content = content[_leading_newlines(content, newlines) :] or None
         tool_calls, content = self._extract_tool_calls(
             content=content,
             request=request,
@@ -913,6 +955,10 @@ class DelegatingParser(Parser):
             else:
                 should_transition = self._is_reasoning_end_streaming(
                     current_token_ids, delta_token_ids
+                )
+            if should_transition and state.reasoning_separator_newlines is None:
+                state.reasoning_separator_newlines = _reasoning_separator_newlines(
+                    request
                 )
             if should_transition and not self._reasoning_engine_streams_all:
                 state.reasoning_ended = True
@@ -1004,6 +1050,27 @@ class DelegatingParser(Parser):
         if finished:
             delta_message = self.finalize_generation(delta_message, request, state)
             delta_message = self._flush_engine_parsers(delta_message)
+
+        if (
+            state.reasoning_separator_newlines
+            and delta_message is not None
+            and delta_message.content
+        ):
+            content = delta_message.content
+            dropped = _leading_newlines(content, state.reasoning_separator_newlines)
+            delta_message.content = content[dropped:] or None
+            # Newlines may continue in the next delta until other text comes.
+            state.reasoning_separator_newlines = (
+                0
+                if delta_message.content
+                else state.reasoning_separator_newlines - dropped
+            )
+            if not (
+                delta_message.content
+                or delta_message.reasoning
+                or delta_message.tool_calls
+            ):
+                delta_message = None
 
         # Suppress reasoning deltas if not requested
         if delta_message and not request.include_reasoning:

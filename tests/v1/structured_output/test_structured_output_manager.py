@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
@@ -32,6 +33,8 @@ from vllm.v1.structured_output.request import get_structured_output_key
 TOKENIZER = "gpt2"
 THINK_END = "\n"  # reasoning-end marker (single GPT-2 token)
 IMPLICIT_THINK_END = "z"  # accepted in strings, rejected at the object start
+SEPARATED_THINK_END = "|"  # reasoning end that the separator follows
+SEPARATOR = "\n\n"  # what chat templates put between reasoning and answer
 EOS = "<|eos|>"  # resolved to tokenizer.eos_token_id
 JSON_SCHEMA = '{"type": "object"}'
 BACKENDS = ("xgrammar", "guidance")
@@ -564,6 +567,161 @@ def test_parallel_fill_masks_grammar_invalid_implicit_end(
         request.append_output_token_ids([end])
         assert manager.accept_tokens(request, [end])
         assert row_pattern() == "C"
+
+
+def _allows(row, token_id: int) -> bool:
+    return bool((row.view(np.uint32)[token_id >> 5] >> np.uint32(token_id & 31)) & 1)
+
+
+def _next_row(manager: StructuredOutputManager, request: Request):
+    """The request's next bitmask row, the same from the serial and the
+    large-batch parallel fill."""
+    serial_threshold = manager.fill_bitmask_parallel_threshold
+    rows = []
+    for threshold in (serial_threshold, 0):
+        manager.fill_bitmask_parallel_threshold = threshold
+        manager.fill_bitmask_parallel_batch_size = 16
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            manager.executor_for_fillmask = executor
+            bitmask = manager.grammar_bitmask(
+                requests={request.request_id: request},
+                structured_output_request_ids=[request.request_id],
+                scheduled_spec_decode_tokens={},
+            )
+        assert bitmask is not None
+        rows.append(bitmask[0].copy())
+    manager.fill_bitmask_parallel_threshold = serial_threshold
+    assert (rows[0] == rows[1]).all()
+    return rows[0]
+
+
+def _step(manager: StructuredOutputManager, request: Request, token_id: int) -> bool:
+    request.append_output_token_ids([token_id])
+    return manager.accept_tokens(request, [token_id])
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+@pytest.mark.parametrize("engine_reasoner", [False, True])
+# Some tokenizers have no `\n\n` token and write the separator as two `\n`.
+@pytest.mark.parametrize("separator", [(SEPARATOR,), ("\n", "\n")])
+def test_json_starts_after_reasoning_separator_in_drafts(
+    tokenizer,
+    backend: StructuredOutputsBackend,
+    engine_reasoner: bool,
+    separator: tuple[str, ...],
+):
+    end, double_newline, newline, brace, close = _to_token_ids(
+        tokenizer, (SEPARATED_THINK_END, SEPARATOR, "\n", "{", "}")
+    )
+    separator_ids = _to_token_ids(tokenizer, separator)
+    reasoner_kwargs = {"marker": end}
+    if engine_reasoner:
+        implicit_end = _single_token(tokenizer, IMPLICIT_THINK_END)
+        reasoner_kwargs = {"marker": implicit_end, "end_marker": end}
+    manager, request = _build_harness(
+        tokenizer,
+        backend,
+        reasoning_ended=False,
+        reasoning_parser_kwargs=reasoner_kwargs,
+    )
+    if engine_reasoner:
+        manager.reasoner_cls = MockEngineReasoner
+    drafts = [end, *separator_ids, brace, close]
+
+    bitmask = manager.grammar_bitmask(
+        requests={request.request_id: request},
+        structured_output_request_ids=[request.request_id],
+        scheduled_spec_decode_tokens={request.request_id: drafts},
+    )
+    assert bitmask is not None
+    # Up to two newlines may follow the reasoning end...
+    assert _allows(bitmask[1], double_newline)
+    assert _allows(bitmask[1], newline)
+    assert _allows(bitmask[1], brace)
+    if len(separator_ids) == 2:
+        assert _allows(bitmask[2], newline)
+        assert not _allows(bitmask[2], double_newline)
+    # ...which the grammar does not consume.
+    answer = 1 + len(separator_ids)
+    assert _allows(bitmask[answer], brace)
+    assert not _allows(bitmask[answer], newline)
+    assert _allows(bitmask[answer + 1], close)
+
+    request.append_output_token_ids(drafts)
+    assert manager.accept_tokens(request, drafts)
+    structured_req = request.structured_output_request
+    assert structured_req is not None
+    assert structured_req.reasoning_ended
+
+
+JSON_OUTPUTS = StructuredOutputsParams(json=JSON_SCHEMA)
+SEPARATOR_CASES = [
+    pytest.param(JSON_OUTPUTS, False, (SEPARATOR,), "{", id="json"),
+    pytest.param(JSON_OUTPUTS, False, ("\n", "\n"), "{", id="json-two-newlines"),
+    pytest.param(
+        StructuredOutputsParams(choice=["yes", "no"]),
+        False,
+        (SEPARATOR,),
+        "yes",
+        id="choice",
+    ),
+    # The prompt closed reasoning, separator included.
+    pytest.param(JSON_OUTPUTS, True, (), "{", id="prompt_closed_reasoning"),
+]
+STRUCTURAL_TAG = json.dumps(
+    {"type": "structural_tag", "format": {"type": "const_string", "value": "yes"}}
+)
+
+
+@pytest.mark.parametrize(
+    ("backend", "structured_outputs", "reasoning_ended", "separator", "answer"),
+    [
+        *(
+            pytest.param(backend, *case.values, id=f"{case.id}-{backend}")
+            for case in SEPARATOR_CASES
+            for backend in BACKENDS
+        ),
+        # A structural tag describes the separator itself.
+        pytest.param(
+            "xgrammar",
+            StructuredOutputsParams(structural_tag=STRUCTURAL_TAG),
+            False,
+            (),
+            "yes",
+            id="structural_tag-xgrammar",
+        ),
+    ],
+)
+def test_answer_starts_after_reasoning_separator_per_step(
+    tokenizer,
+    backend: StructuredOutputsBackend,
+    structured_outputs: StructuredOutputsParams,
+    reasoning_ended: bool,
+    separator: tuple[str, ...],
+    answer: str,
+):
+    end, newline, double_newline, first = _to_token_ids(
+        tokenizer, (SEPARATED_THINK_END, "\n", SEPARATOR, answer)
+    )
+    manager, request = _build_harness(
+        tokenizer,
+        backend,
+        reasoning_ended=reasoning_ended,
+        reasoning_parser_kwargs={"marker": end},
+        structured_outputs=structured_outputs,
+        num_spec_tokens=0,
+    )
+
+    if not reasoning_ended:
+        assert _step(manager, request, end)
+    for i, token in enumerate([*_to_token_ids(tokenizer, separator), first]):
+        # Newlines the separator still has to write are allowed.
+        newlines_left = len("".join(separator[i:]))
+        row = _next_row(manager, request)
+        assert _allows(row, first)
+        assert _allows(row, newline) is (newlines_left >= 1)
+        assert _allows(row, double_newline) is (newlines_left >= 2)
+        assert _step(manager, request, token)
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
