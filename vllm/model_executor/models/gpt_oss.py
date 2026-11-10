@@ -204,7 +204,7 @@ class GptOssRoutedExperts(RoutedExperts):
     """Load one GPT-OSS expert at a time without assembling the global stack."""
 
     def _narrow_for_rank(self, loaded_weight: torch.Tensor, dim: int) -> torch.Tensor:
-        """This rank's slice of dim ``dim``, as the full-checkpoint loader splits it."""
+        """This rank's slice of dim `dim`, as the full-checkpoint loader splits it."""
         length = loaded_weight.shape[dim]
         if length == 1:  # not partitioned (e.g. a channelwise w2 scale)
             return loaded_weight
