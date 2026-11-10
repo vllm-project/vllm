@@ -111,6 +111,8 @@ def test_load_model_preserves_compiled_graphs_at_runtime(monkeypatch):
     )
 
     monkeypatch.delenv("OMP_NUM_THREADS", raising=False)
+    # No PP group here; "auto" would set up a PP transport.
+    monkeypatch.setenv("VLLM_PP_TRANSPORT", "nccl")
     monkeypatch.setattr(gpu_worker, "has_ec_transfer", lambda: False)
     monkeypatch.setattr(
         gpu_worker, "set_current_vllm_config", lambda config: nullcontext()
@@ -380,6 +382,7 @@ def _plan_worker(config_hash="abc123", free_memory=78 * GiB_bytes, kv_bytes=None
         parallel_config=SimpleNamespace(world_size=1),
         init_snapshot=SimpleNamespace(free_memory=free_memory),
         cache_config=SimpleNamespace(kv_cache_memory_bytes=kv_bytes),
+        _pp_transport=None,
     )
 
 
@@ -408,6 +411,7 @@ def test_startup_plan_fingerprint_sensitivity(plan_env):
     assert base == fp(_plan_worker().vllm_config, 0, 1)
     assert base != fp(_plan_worker("other").vllm_config, 0, 1)
     assert base != fp(_plan_worker().vllm_config, 1, 2)
+    assert base != fp(_plan_worker().vllm_config, 0, 1, "copy_engine")
     with patch.object(startup_plan, "current_platform", _plan_platform("NVIDIA A100")):
         assert base != fp(_plan_worker().vllm_config, 0, 1)
     with patch("vllm.__version__", "0.0.0+plan-test"):
@@ -578,6 +582,7 @@ def test_execute_model_waits_previous_pp_send_before_forward(
         model_runner=SimpleNamespace(execute_model=run_model, is_pooling_model=False),
         annotate_profile=lambda scheduler_output: nullcontext(),
         _pp_send_work=[previous_tensor_send],
+        _pp_transport=None,
     )
     scheduler_output = SimpleNamespace(
         total_num_scheduled_tokens=4, num_scheduled_tokens={"r0": 4}
