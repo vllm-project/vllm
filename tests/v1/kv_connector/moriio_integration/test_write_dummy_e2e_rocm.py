@@ -986,7 +986,7 @@ def _check_corrupted_prefill_state_is_detected(arch_name: str, read_mode: bool) 
 
 
 def test_write_mismatched_prompt_fails_at_openai_endpoint():
-    """Neither a whole-page nor a partial-page shortfall may generate tokens."""
+    """Matched transfers succeed; incomplete prompt coverage fails closed."""
     arch = ARCHS["qwen3_dense"]
     overrides = _arch_overrides(arch)
     selector, devices = _visible_devices()
@@ -1032,8 +1032,8 @@ def test_write_mismatched_prompt_fails_at_openai_endpoint():
             }
 
         block_size = _block_size(decode)
-        # The first pair fits in one page; the second differs by whole pages.
-        for prefill_len, decode_len in [(3, 4), (4, 4 * block_size)]:
+        # Prove the transport works before checking partial/whole-page shortfalls.
+        for prefill_len, decode_len in [(4, 4), (3, 4), (4, 4 * block_size)]:
             transfer_id = f"tx-{uuid.uuid4()}"
             body = {"model": arch.model, "max_tokens": 1, "temperature": 0}
             response = requests.post(
@@ -1065,8 +1065,13 @@ def test_write_mismatched_prompt_fails_at_openai_endpoint():
                 },
                 timeout=120,
             )
-            assert response.status_code == 500, response.text
-            assert "error" in response.json()
+            if prefill_len == decode_len:
+                response.raise_for_status()
+                assert response.json()["choices"]
+            else:
+                assert response.status_code == 500, response.text
+                assert "error" in response.json()
             _wait_for_prefill_blocks_freed(prefill)
         # A rejected transfer must leave both servers usable.
+        assert _first_step(prefill.url_root, arch.model, [1100, 1101])
         assert _first_step(decode.url_root, arch.model, [1100, 1101])
