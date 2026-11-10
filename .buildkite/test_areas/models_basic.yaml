@@ -263,6 +263,8 @@ steps:
       depends_on:
       - image-build-amd
       source_file_dependencies:
+      - vllm/models/kimi_k3/
+      - tests/models/kimi_k3/
       - vllm/platforms/rocm.py
       commands:
       # The ROCm KDA/AttnRes kernels are gated on gfx950, so this has to be MI355.
@@ -410,7 +412,7 @@ steps:
       - pytest -v -s models/qwen4_exp/test_qsa_reference.py
 
 - label: ":nvidia: (B200) Qwen4 Exp Kernels"
-  key: qwen4-exp-hc-kernels-b200
+  key: qwen4-exp-kernels-b200
   automatic_shard: true
   timeout_in_minutes: 20
   device: b200-k8s
@@ -420,11 +422,29 @@ steps:
   - vllm/models/qwen4_exp/nvidia/mega_moe.py
   - vllm/models/qwen4_exp/nvidia/ops/hc.py
   - vllm/model_executor/layers/fused_moe/deep_gemm_mega_moe.py
+  - vllm/models/qwen4_exp/nvidia/ops/qsa.py
+  - vllm/models/qwen4_exp/nvidia/ops/qsa_fp8.py
   - tests/models/qwen4_exp/test_hc_ops.py
   - tests/models/qwen4_exp/test_mega_moe.py
+  - tests/models/qwen4_exp/test_qsa_reference.py
   commands:
     - pytest -v -s models/qwen4_exp/test_hc_ops.py
     - pytest -v -s models/qwen4_exp/test_mega_moe.py
+    - pytest -v -s models/qwen4_exp/test_qsa_reference.py
+  mirror:
+    amd:
+      label: ":amd: (MI355) Qwen4 Exp HC Kernels"
+      dind: false
+      device: mi355_1
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/platforms/rocm.py
+      - vllm/models/qwen4_exp/amd/hyperconnection.py
+      - vllm/models/qwen4_exp/amd/ops/hc.py
+      - tests/models/qwen4_exp/test_hc_ops_amd.py
+      commands:
+      - pytest -v -s models/qwen4_exp/test_hc_ops_amd.py
 
 - label: ":amd: (MI300) Qwen4 Exp"
   key: qwen4-exp-unit-tests-mi300
