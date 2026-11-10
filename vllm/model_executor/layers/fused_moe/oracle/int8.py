@@ -33,6 +33,8 @@ class Int8MoeBackend(Enum):
     TRITON = "TRITON"
     HUMMING = "HUMMING"
     CPU = "CPU"
+    # No compute backend: requantization sources only dequantize weights.
+    NONE = "NONE"
 
 
 def _get_priority_backends(
@@ -104,6 +106,7 @@ class Int8MoEKernelOracle(MoEKernelOracle[Int8MoeBackend]):
     """INT8 MoE backend selection for one deployment configuration."""
 
     name = "Int8"
+    placeholder_backend = Int8MoeBackend.NONE
 
     def backend_to_kernel_cls(
         self, backend: Int8MoeBackend
@@ -115,10 +118,16 @@ def select_int8_moe_backend(
     config: FusedMoEConfig,
     weight_key: QuantKey | None = kInt8StaticChannelSym,
     activation_key: QuantKey | None = kInt8DynamicTokenSym,
-) -> tuple[Int8MoeBackend, type[mk.FusedMoEExperts]]:
+) -> tuple[Int8MoeBackend, type[mk.FusedMoEExperts] | None]:
     """Select the primary Int8 MoE backend.
     Note: Shape-specific fallbacks may still occur at runtime.
+    Returns `(NONE, None)` for requantization sources, which have no kernel.
     """
+    # TODO: migrate to oracle base method.
+    source = Int8MoEKernelOracle.maybe_skip_for_requantization_source()
+    if source is not None:
+        return source
+
     AVAILABLE_BACKENDS = _get_priority_backends(config)
 
     oracle = Int8MoEKernelOracle(config, weight_key, activation_key)

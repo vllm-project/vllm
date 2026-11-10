@@ -586,6 +586,7 @@ class Mxfp4MoEKernelOracle(MoEKernelOracle[Mxfp4MoeBackend]):
     """MXFP4 MoE backend selection for one deployment configuration."""
 
     name = "Mxfp4"
+    placeholder_backend = Mxfp4MoeBackend.NONE
 
     def backend_to_kernel_cls(
         self, backend: Mxfp4MoeBackend
@@ -667,8 +668,14 @@ def select_mxfp4_moe_backend(
             Use kFp8StaticTensorSym for W4A8 scheme.
 
     Note: Shape-specific fallbacks may still occur at runtime.
+    Returns `(NONE, None)` for requantization sources, which have no kernel.
 
     """
+    # TODO: migrate to oracle base method.
+    source = Mxfp4MoEKernelOracle.maybe_skip_for_requantization_source()
+    if source is not None:
+        return source
+
     runner_backend = config.moe_backend
     requested_activation_key = _resolve_activation_key(activation_key)
 
@@ -758,7 +765,13 @@ def select_deepseek_v4_mxfp4_moe_backend(
 ) -> tuple[Mxfp4MoeBackend, type[mk.FusedMoEExperts] | None]:
     """Select the MXFP4 MoE backend with MXFP8 activation as top priority.
     Falls back through BF16 and other backends.
+    Returns `(NONE, None)` for requantization sources, which have no kernel.
     """
+    # TODO: migrate to oracle base method.
+    source = Mxfp4MoEKernelOracle.maybe_skip_for_requantization_source()
+    if source is not None:
+        return source
+
     activation_format = config.activation_format
 
     # Honor explicit moe_backend (e.g. "marlin", "triton_unfused") before

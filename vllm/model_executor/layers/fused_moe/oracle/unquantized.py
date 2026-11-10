@@ -45,6 +45,8 @@ class UnquantizedMoeBackend(Enum):
     XPU = "XPU"
     TPU = "TPU"
     OOT = "OOT"
+    # No compute backend: requantization sources only dequantize weights.
+    NONE = "NONE"
 
 
 def _get_priority_backends(moe_config: FusedMoEConfig) -> list[UnquantizedMoeBackend]:
@@ -518,6 +520,7 @@ class UnquantizedMoEKernelOracle(MoEKernelOracle[UnquantizedMoeBackend]):
     """
 
     name = "Unquantized"
+    placeholder_backend = UnquantizedMoeBackend.NONE
 
     def backend_enum_cls(self) -> type[UnquantizedMoeBackend]:
         return UnquantizedMoeBackend

@@ -67,6 +67,8 @@ class WNA16MoEBackend(Enum):
     XPU = "XPU"
     EMULATION = "EMULATION"
     RDNA3 = "RDNA3"
+    # No compute backend: requantization sources only dequantize weights.
+    NONE = "NONE"
 
 
 def backend_to_kernel_cls(
@@ -286,6 +288,7 @@ class WNA16MoEKernelOracle(MoEKernelOracle[WNA16MoEBackend]):
     """WNA16 MoE backend selection for one deployment configuration."""
 
     name = "WNA16"
+    placeholder_backend = WNA16MoEBackend.NONE
 
     def backend_to_kernel_cls(
         self, backend: WNA16MoEBackend
@@ -300,7 +303,7 @@ def select_wna16_moe_backend(
     may_have_zp: bool,
     may_have_bias: bool,
     allow_tile_padding: bool = False,
-) -> tuple[WNA16MoEBackend, type[mk.FusedMoEExperts]]:
+) -> tuple[WNA16MoEBackend, type[mk.FusedMoEExperts] | None]:
     """Select the WNA16 MoE backend.
 
     Args:
@@ -317,6 +320,11 @@ def select_wna16_moe_backend(
         A tuple of (`WNA16MoEBackend`, experts class or `None`).
 
     """
+    # TODO: migrate to oracle base method.
+    source = WNA16MoEKernelOracle.maybe_skip_for_requantization_source()
+    if source is not None:
+        return source
+
     # WNA16 MoE always runs BF16 activations.
     oracle = WNA16MoEKernelOracle(config, weight_key, None)
 

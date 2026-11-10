@@ -3062,3 +3062,175 @@ def test_online_quant_load_format_dummy(
     ) as llm:
         outputs = llm.generate_greedy(["The future of AI is"], max_tokens=4)
         print(outputs[0][1])
+
+
+_ORACLE_MODULE = "vllm.model_executor.layers.fused_moe.oracle"
+
+
+@pytest.mark.parametrize(
+    "module,select_fn,oracle_cls,backend_enum,num_extra_args",
+    [
+        pytest.param(
+            "fp8",
+            "select_fp8_moe_backend",
+            "Fp8MoEKernelOracle",
+            "Fp8MoeBackend",
+            2,
+            id="fp8",
+        ),
+        pytest.param(
+            "mxfp8",
+            "select_mxfp8_moe_backend",
+            "Mxfp8MoEKernelOracle",
+            "Fp8MoeBackend",
+            0,
+            id="mxfp8",
+        ),
+        pytest.param(
+            "mxfp4",
+            "select_mxfp4_moe_backend",
+            "Mxfp4MoEKernelOracle",
+            "Mxfp4MoeBackend",
+            0,
+            id="mxfp4",
+        ),
+        pytest.param(
+            "mxfp4",
+            "select_deepseek_v4_mxfp4_moe_backend",
+            "Mxfp4MoEKernelOracle",
+            "Mxfp4MoeBackend",
+            0,
+            id="mxfp4-deepseek-v4",
+        ),
+        pytest.param(
+            "nvfp4",
+            "select_nvfp4_moe_backend",
+            "NvFp4MoEKernelOracle",
+            "NvFp4MoeBackend",
+            2,
+            id="nvfp4",
+        ),
+        pytest.param(
+            "int8",
+            "select_int8_moe_backend",
+            "Int8MoEKernelOracle",
+            "Int8MoeBackend",
+            2,
+            id="int8",
+        ),
+        pytest.param(
+            "int_wna16",
+            "select_wna16_moe_backend",
+            "WNA16MoEKernelOracle",
+            "WNA16MoEBackend",
+            4,
+            id="wna16",
+        ),
+        pytest.param(
+            "w4a8_int8",
+            "select_w4a8_int8_moe_backend",
+            "W4A8Int8MoEKernelOracle",
+            "W4A8Int8MoeBackend",
+            2,
+            id="w4a8-int8",
+        ),
+    ],
+)
+def test_moe_oracles_skip_dispatch_for_requantization_source(
+    module: str,
+    select_fn: str,
+    oracle_cls: str,
+    backend_enum: str,
+    num_extra_args: int,
+) -> None:
+    """Requantization sources get `(XxBackend.NONE, None)` without dispatching."""
+    import importlib
+
+    from vllm.model_executor.layers.quantization.online.requantization import (
+        requantization_source_scope,
+    )
+
+    oracle_module = importlib.import_module(f"{_ORACLE_MODULE}.{module}")
+    select = getattr(oracle_module, select_fn)
+    oracle = getattr(oracle_module, oracle_cls)
+    none_backend = getattr(oracle_module, backend_enum).NONE
+
+    assert oracle.placeholder_backend is none_backend
+    # Outside of a requantization source, selection is not skipped.
+    assert oracle.maybe_skip_for_requantization_source() is None
+
+    # `object()` raises on any attribute access: dispatch must not read the config
+    # (e.g. `moe_backend`) nor any of the other arguments.
+    with requantization_source_scope():
+        assert select(object(), *[object()] * num_extra_args) == (none_backend, None)
+
+
+@pytest.mark.parametrize(
+    "init_kernel,kwargs",
+    [
+        pytest.param(
+            "init_mxfp8_linear_kernel", {"weight_shape": (32, 32)}, id="mxfp8"
+        ),
+        pytest.param("init_mxfp4_linear_kernel", {}, id="mxfp4"),
+        pytest.param(
+            "init_mxfp6_linear_kernel", {"weight_quant_key": object()}, id="mxfp6"
+        ),
+        pytest.param("init_nvfp4_linear_kernel", {}, id="nvfp4"),
+        pytest.param(
+            "init_fp8_linear_kernel",
+            {
+                "activation_quant_key": object(),
+                "weight_quant_key": object(),
+                "input_dtype": object(),
+                "out_dtype": object(),
+                "weight_shape": (32, 32),
+            },
+            id="fp8",
+        ),
+        pytest.param(
+            "init_wfp8_a16_linear_kernel",
+            {
+                "weight_quant_key": object(),
+                "activation_quant_key": object(),
+                "weight_shape": (32, 32),
+                "input_dtype": object(),
+                "out_dtype": object(),
+            },
+            id="wfp8-a16",
+        ),
+        pytest.param(
+            "init_int8_linear_kernel",
+            {
+                "is_channelwise": True,
+                "is_static_input_scheme": False,
+                "input_symmetric": True,
+                "module_name": "module",
+            },
+            id="int8",
+        ),
+    ],
+)
+def test_linear_dispatch_skipped_for_requantization_source(
+    monkeypatch, init_kernel: str, kwargs: dict[str, Any]
+) -> None:
+    """Requantization sources get no linear kernel and do not dispatch."""
+    from vllm.model_executor.kernels import linear as linear_kernels
+    from vllm.model_executor.kernels.linear import LinearKernelOracle
+    from vllm.model_executor.layers.quantization.online.requantization import (
+        requantization_source_scope,
+    )
+
+    def fail(*args, **kwargs):
+        raise AssertionError("Kernel dispatch must be skipped.")
+
+    for dispatch in (
+        "_resolve_backend_kernels",
+        "_get_linear_backend",
+        "choose_scaled_mm_linear_kernel",
+    ):
+        monkeypatch.setattr(linear_kernels, dispatch, fail)
+    assert not LinearKernelOracle.maybe_skip_for_requantization_source()
+
+    with requantization_source_scope():
+        assert LinearKernelOracle.maybe_skip_for_requantization_source()
+        assert getattr(linear_kernels, init_kernel)(**kwargs) is None

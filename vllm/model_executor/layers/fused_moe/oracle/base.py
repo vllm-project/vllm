@@ -45,6 +45,11 @@ class MoEKernelOracle(ABC, Generic[BackendT]):
     # Display name for the shared log helpers below; subclasses must set it.
     name: ClassVar[str]
 
+    # Backend returned (with no experts class) when selection is skipped for an
+    # online requantization source, which only dequantizes weights. Oracles that
+    # support requantization sources set it, e.g. to their enum's `NONE`.
+    placeholder_backend: BackendT
+
     def __init__(
         self,
         moe_config: FusedMoEConfig,
@@ -60,6 +65,19 @@ class MoEKernelOracle(ABC, Generic[BackendT]):
         """Return the concrete `Enum` class enumerating this oracle's
         backends (e.g. `UnquantizedMoeBackend`, `Fp8MoeBackend`)."""
         raise NotImplementedError
+
+    @classmethod
+    def maybe_skip_for_requantization_source(
+        cls,
+    ) -> tuple[BackendT, None] | None:
+        """Skip backend selection for online requantization sources."""
+        from vllm.model_executor.layers.quantization.online.requantization import (
+            is_requantization_source,
+        )
+
+        if not is_requantization_source():
+            return None
+        return cls.placeholder_backend, None
 
     def get_priority_backends(self, moe_config: FusedMoEConfig) -> list[BackendT]:
         """Return platform-appropriate backends in priority order for

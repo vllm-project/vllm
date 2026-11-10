@@ -51,12 +51,15 @@ def expose_input_quant_key(layer: torch.nn.Module, kernel) -> None:
 
     This is the bridge from a kernel's input_quant_key() to the layer capability
     that fusion call sites read through get_input_quant_key. The raw key is left
-    unset when the kernel quantizes its own input.
+    unset when the kernel quantizes its own input, or when there is no kernel
+    (requantization sources).
 
     TODO(mgoin): Producers also need the consumer's quantization scales (e.g.
     static input scale, global scale). Expose those here as well so producers
     do not reach into kernel-specific layer attributes.
     """
+    if kernel is None:
+        return
     key = kernel.input_quant_key()
     if key is not None:
         layer._input_quant_key = key

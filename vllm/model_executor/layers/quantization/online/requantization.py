@@ -77,9 +77,11 @@ class OnlineRequantizationMixin:
             return False
 
         existing_parameter_names = set(layer._parameters)
-        self.requantization_source.create_weights(
-            layer, *weight_args, **extra_weight_attrs
-        )
+        # Schemes may select kernels in `create_weights`: skip them for sources.
+        with requantization_source_scope():
+            self.requantization_source.create_weights(
+                layer, *weight_args, **extra_weight_attrs
+            )
         self.requantization_source_parameters = {
             name: parameter
             for name, parameter in layer._parameters.items()

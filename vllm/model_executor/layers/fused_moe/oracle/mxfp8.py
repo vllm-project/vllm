@@ -80,6 +80,7 @@ class Mxfp8MoEKernelOracle(MoEKernelOracle[Fp8MoeBackend]):
     """MXFP8 MoE backend selection for one deployment configuration."""
 
     name = "Mxfp8"
+    placeholder_backend = Fp8MoeBackend.NONE
 
     def backend_to_kernel_cls(
         self, backend: Fp8MoeBackend
@@ -100,13 +101,19 @@ def _select_kernel_cls(
 
 def select_mxfp8_moe_backend(
     config: FusedMoEConfig,
-) -> tuple[Fp8MoeBackend, type[mk.FusedMoEExperts]]:
+) -> tuple[Fp8MoeBackend, type[mk.FusedMoEExperts] | None]:
     """Select the MXFP8 MoE backend and the best expert class.
 
     Returns:
-        A tuple of (fp8_backend, experts_cls).
+        A tuple of (fp8_backend, experts_cls); `(NONE, None)` for
+        requantization sources, which have no kernel.
 
     """
+    # TODO: migrate to oracle base method.
+    source = Mxfp8MoEKernelOracle.maybe_skip_for_requantization_source()
+    if source is not None:
+        return source
+
     runner_backend = config.moe_backend
     if runner_backend != "auto":
         backend = _BACKEND_NAME_MAP.get(runner_backend)

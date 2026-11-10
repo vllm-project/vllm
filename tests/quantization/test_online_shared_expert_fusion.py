@@ -1430,7 +1430,7 @@ def test_nvfp4_oracle_only_skipped_for_requantized_layers(
             layers.append(runner.routed_experts)
 
     assert selected == [
-        ("skipped", NvFp4MoeBackend.EMULATION),
+        ("skipped", NvFp4MoeBackend.NONE),
         ("selected", NvFp4MoeBackend.VLLM_CUTLASS),
     ]
     assert isinstance(layers[0].quant_method, Mxfp4OnlineMoEMethod)
