@@ -358,6 +358,27 @@ class InputProcessor:
         else:
             request.request_id = f"{request.external_req_id}-{random_uuid():.8}"
 
+    def _validate_aux_outputs(
+        self, params: SamplingParams, prompt_len: int, resumable: bool
+    ) -> None:
+        if params.extra_args:
+            from vllm.distributed.aux_output_connector.hidden_states import (
+                validate_capture_request,
+            )
+
+            validate_capture_request(params, prompt_len, self.vllm_config, resumable)
+
+    def validate_engine_core_request(self, request: EngineCoreRequest) -> None:
+        """Validate a caller-built request that bypassed process_inputs."""
+        if isinstance(request.params, SamplingParams):
+            self._validate_aux_outputs(
+                request.params,
+                length_from_prompt_token_ids_or_embeds(
+                    request.prompt_token_ids, request.prompt_embeds
+                ),
+                request.resumable,
+            )
+
     def process_inputs(
         self,
         request_id: str,
@@ -529,6 +550,9 @@ class InputProcessor:
                         mm_hash=base_mm_hash,
                     )
                 )
+
+        if sampling_params is not None:
+            self._validate_aux_outputs(sampling_params, prompt_len, resumable)
 
         return EngineCoreRequest(
             request_id=request_id,

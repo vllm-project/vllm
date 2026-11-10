@@ -4,6 +4,11 @@
 
 - [UMBPStoreConnector](umbp_store_connector_usage.md)
 
+## Training Data Capture
+
+See [windowed hidden-state capture](windowed_hidden_states.md)
+for request-local training features returned through the Python and HTTP APIs.
+
 ## Compatibility Matrix
 
 The tables below show mutually exclusive features and the support on some hardware.

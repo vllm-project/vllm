@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, cast
 import numpy as np
 import torch
 
+from vllm.distributed.aux_output_connector.outputs import AuxOutputs
 from vllm.lora.request import LoRARequest
 from vllm.outputs import (
     STREAM_FINISHED,
@@ -235,6 +236,7 @@ class RequestState:
         # Per-sequence spec-decode accumulator; arrives once (on finish) via
         # EngineCoreOutput, then attached to this sequence's CompletionOutput.
         self.spec_decode_metrics: RequestSpecDecodeMetrics | None = None
+        self.aux_outputs: AuxOutputs | None = None
 
         self.stats = RequestStateStats(arrival_time=arrival_time) if log_stats else None
 
@@ -473,7 +475,14 @@ class RequestState:
             num_cached_tokens=self.num_cached_tokens,
             num_cache_creation_tokens=self.num_cache_creation_tokens,
             metrics=self.stats,
+            aux_outputs=self._take_aux_outputs(finished),
         )
+
+    def _take_aux_outputs(self, finished: bool) -> AuxOutputs | None:
+        if not finished and self.output_kind != RequestOutputKind.DELTA:
+            return None
+        aux_outputs, self.aux_outputs = self.aux_outputs, None
+        return aux_outputs
 
     def _new_completion_output(
         self,
@@ -804,6 +813,10 @@ class OutputProcessor:
 
             if engine_core_output.spec_decode_metrics is not None:
                 req_state.spec_decode_metrics = engine_core_output.spec_decode_metrics
+            if engine_core_output.aux_outputs is not None:
+                req_state.aux_outputs = engine_core_output.aux_outputs.combine(
+                    req_state.aux_outputs
+                )
 
             request_error = None
             if (
