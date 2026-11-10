@@ -305,6 +305,7 @@ def _unchanged(folder_a: str, folder_b: str) -> list[str]:
 
 
 KERNEL_CONFIG = {"enable_flashinfer_autotune": False}
+COMPILATION_CONFIG = {"inductor_compile_config": {"deterministic": True}}
 ENGINE_KWARGS = dict(
     enable_prefix_caching=False,
     max_model_len=256,
@@ -314,7 +315,7 @@ ENGINE_KWARGS = dict(
     # refit engines compile separately (their model paths differ), so
     # Inductor's reduction configs are fixed too
     kernel_config=KERNEL_CONFIG,
-    compilation_config={"inductor_compile_config": {"deterministic": True}},
+    compilation_config=COMPILATION_CONFIG,
     # the worker's weight-update session needs a transfer backend
     weight_transfer_config={"backend": "ipc"},
 )
@@ -443,7 +444,7 @@ TRTLLM_MOE = dict(kernel_config={**KERNEL_CONFIG, "moe_backend": "flashinfer_trt
 
 REFIT_CASES = [
     # one GPU
-    RefitCase("qwen3", "bf16", "Qwen/Qwen3-0.6B"),  # BF16, tied embeddings
+    RefitCase("qwen3", "bf16", "Qwen/Qwen3-0.6B", marks=NIGHTLY),
     RefitCase("qwen3", "fp8-block", "inference-optimization/Qwen3-0.6B-FP8_BLOCK"),
     RefitCase(
         "qwen3", "w4a16", "inference-optimization/Qwen3-0.6B-W4A16-G128", marks=NIGHTLY
@@ -453,11 +454,16 @@ REFIT_CASES = [
         "llama",
         "fp8-kv",
         "nm-testing/Llama-3.2-1B-Instruct-FP8-KV",
-        engine=dict(kv_cache_dtype="fp8"),
+        # FULL decode graphs keep the capture-time FlashInfer bmm scales
+        # (https://github.com/hao-aaron/vllm/issues/14)
+        engine=dict(
+            kv_cache_dtype="fp8",
+            compilation_config={**COMPILATION_CONFIG, "cudagraph_mode": "PIECEWISE"},
+        ),
+        # remove once vllm#65353 is merged
         known_bug=(".impl.bmm1_scale", ".impl.bmm2_scale"),
         known_bug_reason="FlashInfer keeps the bmm1/bmm2 scales of the first "
-        "forward after k/v scales change (vllm#65353 fixes eager and piecewise "
-        "decode; FULL-graph decode still captures them)",
+        "forward after k/v scales change (fixed by vllm#65353)",
     ),
     RefitCase("deepseek-v3", "bf16", DEEPSEEK_V3, marks=NIGHTLY),
     RefitCase("deepseek-v3", "fp8", DEEPSEEK_V3_FP8),

@@ -88,10 +88,15 @@ steps:
   device: b200-k8s
   key: weight-reload-refit
   timeout_in_minutes: 45
-  # the reload code and what the test drives directly; the nightly steps
-  # cover the quantization, MoE, attention and model files
+  # the reload code, what the test drives directly and the gpt-oss path; the
+  # nightly steps cover the other quantization, attention and model files
   source_file_dependencies:
   - vllm/device_allocator/
+  # the per-PR gpt-oss (TRT-LLM MXFP4) case
+  - vllm/model_executor/layers/fused_moe/
+  - vllm/model_executor/layers/quantization/mxfp4.py
+  - vllm/model_executor/layers/quantization/utils/mxfp4_utils.py
+  - vllm/model_executor/models/gpt_oss.py
   - vllm/model_executor/model_loader/reload/
   - vllm/model_executor/model_loader/mtp_validation.py
   - vllm/model_executor/model_loader/utils.py
