@@ -301,18 +301,21 @@ def test_k_store_stays_inside_its_pages(block):
 @pytest.mark.parametrize(
     "rows, width, k",
     # vLLM's kernel below 128 rows, aiter's from 128 rows and on every k=2048
-    [(8, 4096, 512), (128, 4096, 512), (8, 16384, 2048)],
+    [(8, 4096, 512), (128, 4096, 512), (8, 16384, 2048), (8, 131072, 2048)],
 )
 def test_topk_matches_torch_on_both_kernels(rows, width, k):
     set_random_seed(0)
     logits = torch.randn(rows, width, device=DEVICE)
     lengths = torch.randint(1, width + 1, (rows,), dtype=torch.int32, device=DEVICE)
     lengths[0] = k // 2  # shorter than k, so the rest of the row pads with -1
+    lengths[1] = 0
+    lengths[2] = -7
     out = torch.full((rows, k), 7, dtype=torch.int32, device=DEVICE)
     ops._topk(logits, lengths, out, k)
     for r in range(rows):
-        n = min(k, int(lengths[r]))
-        want = torch.topk(logits[r, : int(lengths[r])], n).indices.sort().values
+        length = max(int(lengths[r]), 0)
+        n = min(k, length)
+        want = torch.topk(logits[r, :length], n).indices.sort().values
         got = out[r]
         assert torch.equal(got[got >= 0].sort().values, want.int())
         assert int((got == -1).sum()) == k - n
@@ -397,6 +400,8 @@ def _run_layers(
         return build(*args, **kwargs)
 
     monkeypatch.setattr(pa, "build_candidate_gather", counting_build)
+    if k == 512:
+        monkeypatch.setattr(ops, "_remap_compact_topk", None)
     for gather in (True, False):
         consumer = metadata(1, gather)
         consumer.decode_use_gather = gather

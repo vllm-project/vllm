@@ -368,6 +368,23 @@ def _remap_compact_topk(
     )
 
 
+def _compact_topk(
+    compact: torch.Tensor,
+    slot_ends: torch.Tensor,
+    out: torch.Tensor,
+    positions: torch.Tensor,
+    block: int,
+) -> None:
+    rows, k = out.shape
+    if k == 512 and _vllm_topk(rows, k):
+        torch.ops._C.top_k_per_row_decode_remap(
+            compact, slot_ends, out, positions, block
+        )
+        return
+    _topk(compact, slot_ends, out, k)
+    _remap_compact_topk(out, positions, block)
+
+
 @dataclass
 class _Layer:
     """One indexer layer's inputs and outputs for this step."""
@@ -455,13 +472,7 @@ def _layer(
 
 def _fill_topk_rows(layer: _Layer, num_tokens: int) -> None:
     lengths = layer.metadata.decode_row_lens
-    start = 0
-    if (
-        layer.metadata.decode is not None
-        and lengths is not None
-        and _vllm_topk(lengths.shape[0], layer.topk_tokens)
-    ):
-        start = lengths.shape[0]
+    start = 0 if lengths is None else lengths.shape[0]
     if start < num_tokens:
         layer.topk_buffer[start:num_tokens] = -1
 
@@ -602,8 +613,7 @@ def _gather_prefill(
         candidates=gather,
     )
     out = layer.topk_buffer[t0:t1, : layer.topk_tokens]
-    _topk(compact, slot_ends, out, layer.topk_tokens)
-    _remap_compact_topk(out, gather["positions"], layer.block)
+    _compact_topk(compact, slot_ends, out, gather["positions"], layer.block)
 
 
 def _gather_decode(layer: _Layer, num_cols: int) -> None:
@@ -644,8 +654,7 @@ def _gather_decode(layer: _Layer, num_cols: int) -> None:
         candidates=gather,
     )
     out = layer.topk_buffer[:rows, : layer.topk_tokens]
-    _topk(compact, slot_ends, out, layer.topk_tokens)
-    _remap_compact_topk(out, gather["positions"], layer.block)
+    _compact_topk(compact, slot_ends, out, gather["positions"], layer.block)
 
 
 @eager_break_during_capture

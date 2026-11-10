@@ -170,9 +170,9 @@ def test_decode_launches_native_on_uniform_steps():
 
 @pytest.mark.parametrize(
     "decode_rows, k, first_filled",
-    [(7, 512, 7), (128, 512, 0), (7, 2048, 0), (None, 512, 0)],
+    [(7, 512, 7), (128, 512, 128), (7, 2048, 7), (None, 512, 0)],
 )
-def test_topk_fill_skips_the_rows_vllms_topk_writes(decode_rows, k, first_filled):
+def test_topk_fill_skips_the_decode_rows(decode_rows, k, first_filled):
     num_tokens = 130
     buffer = torch.full((num_tokens + 1, k), 7, dtype=torch.int32)
     metadata = types.SimpleNamespace(decode=None, decode_row_lens=None)
