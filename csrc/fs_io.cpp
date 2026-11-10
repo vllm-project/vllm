@@ -48,6 +48,8 @@ inline int write_fully(int fd, const char* src, size_t size,
       continue;
     }
     if (n == 0) {
+      // write(2) returning 0 is not an error, so errno is not set and may be
+      // stale or 0 (which callers read as success). Report it as EIO.
       return EIO;
     }
     const int err = errno;

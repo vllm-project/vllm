@@ -105,6 +105,7 @@ def _write_fully(fd: int, data: memoryview, use_o_direct: bool) -> None:
                 ) from exc
             raise
         if n == 0:
+            # write(2) returning 0 sets no errno; report it as EIO.
             raise OSError(
                 errno.EIO, f"Short write: expected {size} bytes, wrote {total}"
             )
