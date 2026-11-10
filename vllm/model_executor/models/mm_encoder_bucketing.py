@@ -83,6 +83,7 @@ _VERIFIED_FOR_BUCKETING: dict[str, str] = {
     "canary": LOSSLESS_BIT_EXACT,
     "fireredasr2": LOSSLESS_BIT_EXACT,
     "cohere_asr": LOSSLESS_BIT_EXACT,
+    "funasr": LOSSLESS_APPROX,
 }
 
 
