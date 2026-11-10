@@ -46,6 +46,11 @@ from vllm.model_executor.utils import (
     maybe_disable_graph_partition,
     set_weight_attrs,
 )
+from vllm.models.glm5next.nvidia.ops.kda_prefill_conv import (
+    causal_conv1d_planar,
+    planar_conv_pays_off,
+    planar_conv_warmup_plan,
+)
 from vllm.platforms import current_platform
 from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
 from vllm.third_party.flash_linear_attention.ops.l2norm import l2norm_fwd_block
@@ -164,6 +169,61 @@ def _resolve_kda_prefill_backend(
     return "flashkda" if supported and backend != "triton" else "triton"
 
 
+def _resolve_kda_prefill_conv(
+    conv: str,
+    conv_size: int,
+    dtype: torch.dtype,
+    conv_state_dtype: torch.dtype,
+    weight_dtype: torch.dtype = torch.float32,
+) -> str:
+    """The kernel of the q|k|v short conv in chunked prefill: "causal_conv1d"
+    (`causal_conv1d_fn`) or "planar" (`causal_conv1d_planar`: dense
+    q/k/v planes, width 4, CUDA only, bf16 activations with conv states in
+    bf16 or, under fp32 conv weights (`weight_dtype`, the layer's), in fp32:
+    the two pairings whose conv states match `causal_conv1d_fn` exactly and
+    whose outputs are within one bf16 ulp of it, see there;
+    the stock kernel casts its input to the conv-state dtype before
+    multiplying and the planar kernel does not, so other pairings can round
+    differently). "auto" (the
+    default) takes the planar kernel on SM10x devices, where its dispatch
+    guard was calibrated, when that pairing holds, and `causal_conv1d_fn`
+    otherwise; "planar" forces it on any CUDA device and raises if it cannot
+    run. `conv` comes from `additional_config.kda_prefill_conv`."""
+    if conv not in ("auto", "causal_conv1d", "planar"):
+        raise ValueError(
+            f"Unsupported KDA prefill conv {conv!r}: "
+            "'auto', 'causal_conv1d' or 'planar'"
+        )
+    if conv == "causal_conv1d":
+        return conv
+    # The wrapper's rule (see `causal_conv1d_planar`): states in the
+    # activation dtype, or fp32 states under fp32 weights.
+    pairing_ok = dtype == torch.bfloat16 and (
+        conv_state_dtype == dtype
+        or (conv_state_dtype == torch.float32 and weight_dtype == torch.float32)
+    )
+    if conv == "auto":
+        if (
+            current_platform.is_cuda()
+            and current_platform.is_device_capability_family(100)
+            and conv_size == 4
+            and pairing_ok
+        ):
+            return "planar"
+        return "causal_conv1d"
+    if not current_platform.is_cuda():
+        raise ValueError("kda_prefill_conv=planar is only available on CUDA")
+    if conv_size != 4:
+        raise ValueError(f"kda_prefill_conv=planar needs width 4, got {conv_size}")
+    if not pairing_ok:
+        raise ValueError(
+            "kda_prefill_conv=planar needs bfloat16 activations and conv states in "
+            "bfloat16, or float32 conv states under float32 conv weights; got "
+            f"{dtype} activations, {conv_state_dtype} states, {weight_dtype} weights"
+        )
+    return conv
+
+
 def _fused_qkv_conv1d(
     conv_size: int, projection_size: int, tp_size: int, tp_rank: int, prefix: str
 ) -> ColumnParallelLinear:
@@ -198,6 +258,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
     head_dim: int
     num_heads: int
     conv_size: int
+    kda_prefill_conv: str
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> MambaSpec:
         spec = super().get_kv_cache_spec(vllm_config)
@@ -364,6 +425,37 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
                 dtype=vllm_config.model_config.dtype,
                 dim=self.head_dim,
             )
+        self.kda_prefill_conv = _resolve_kda_prefill_conv(
+            additional_config.get("kda_prefill_conv", "auto")
+            if isinstance(additional_config, dict)
+            else "auto",
+            self.conv_size,
+            vllm_config.model_config.dtype,
+            self.get_state_dtype()[0],
+            self.conv1d.weight.dtype,
+        )
+        if self.kda_prefill_conv == "planar":
+            # Startup JIT warmup of the stencil kernel this shard's rows select,
+            # the fixup and the state update (docs/contributing/jit_kernel_warmup.md).
+            plan = planar_conv_warmup_plan(
+                dtype=vllm_config.model_config.dtype,
+                weight_dtype=self.conv1d.weight.dtype,
+                bias_dtype=None if self.conv1d.bias is None else self.conv1d.bias.dtype,
+                dim=3 * self.local_projection_size,
+                num_planes=3,
+                row_strides=(
+                    # q|k|v is the leading slice of the fused projection's row;
+                    # spec-decode steps gather the non-spec rows densely.
+                    self.in_proj_qkvbfg_a.output_size_per_partition,
+                    3 * self.local_projection_size,
+                ),
+                conv_state_dim_first=self._conv_state_dim_first,
+                conv_state_dtype=self.get_state_dtype()[0],
+                # width - 1 history positions plus the speculative tokens.
+                state_len=self.conv_size - 1 + self.num_spec,
+            )
+            for dispatcher, kwargs in plan:
+                dispatcher.register_warmup(**kwargs)
         self._flashkda_buffer_specs: (
             tuple[tuple[tuple[int, ...], torch.dtype], ...] | None
         ) = None
@@ -465,6 +557,70 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
                 cu_seqlens=cu_seqlens,
             )
         return out, final_state
+
+    def _prefill_conv(
+        self,
+        qkv: torch.Tensor,
+        conv_weights: torch.Tensor,
+        conv_bias: torch.Tensor | None,
+        conv_state: torch.Tensor,
+        cache_indices: torch.Tensor,
+        attn_metadata: GDNAttentionMetadata,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """The q|k|v short conv (+ SiLU) of a chunked-prefill step, with the
+        conv-state update, as (q, k, v).
+
+        Both kernels compute the same values and update `conv_state` in
+        place for every sequence with a real slot: `cache_indices` holds the
+        slot per sequence (the step's non-spec state indices; a caller that
+        has already advanced some rows' conv state passes those rows as null
+        slots, for which neither kernel reads or writes state), the sequence
+        bounds and the history flags come from the metadata. `causal_conv1d_fn`
+        works channel-major and, transposed back, yields the merged `[T, 3P]`
+        tensor, so q, k and v are column slices of it;
+        `causal_conv1d_planar` (`kda_prefill_conv` planar, the default on
+        SM10x) returns
+        `[3, T, P]`, so each is dense and a consumer that needs contiguous
+        inputs (the Triton chunk path) copies nothing.
+
+        The planar kernel runs only where it pays off (`planar_conv_pays_off`:
+        enough prefill tokens for the decode rows that share the step); the
+        stock kernel is the fallback. In steps with speculative rows the
+        metadata builder folds plain decode rows into the prefill counts, so
+        they weigh as one prefill token each here instead of six; such steps
+        carry few of them.
+        """
+        assert attn_metadata.non_spec_query_start_loc is not None
+        assert attn_metadata.has_initial_state is not None
+        if self.kda_prefill_conv == "planar" and planar_conv_pays_off(
+            attn_metadata.num_prefill_tokens,
+            attn_metadata.num_decodes,
+            self.local_num_heads,
+        ):
+            planes = causal_conv1d_planar(
+                qkv,
+                conv_weights,
+                conv_bias,
+                conv_state,
+                query_start_loc=attn_metadata.non_spec_query_start_loc,
+                cache_indices=cache_indices,
+                has_initial_state=attn_metadata.has_initial_state,
+                activation="silu",
+            )
+            return planes[0], planes[1], planes[2]
+        qkv = causal_conv1d_fn(
+            qkv.transpose(0, 1),
+            conv_weights,
+            conv_bias,
+            activation="silu",
+            conv_states=conv_state,
+            has_initial_state=attn_metadata.has_initial_state,
+            cache_indices=cache_indices,
+            query_start_loc=attn_metadata.non_spec_query_start_loc,
+            metadata=attn_metadata,
+        ).transpose(0, 1)
+        q, k, v = qkv.split(self.local_projection_size, dim=-1)
+        return q, k, v
 
     def forward(
         self,
@@ -629,18 +785,15 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         q_ns = k_ns = v_ns = None
         if attn_metadata_narrowed.num_prefills > 0:
             assert qkv_ns is not None
-            qkv_ns = causal_conv1d_fn(
-                qkv_ns.transpose(0, 1),
+            assert non_spec_state_indices_tensor is not None
+            q_ns, k_ns, v_ns = self._prefill_conv(
+                qkv_ns,
                 conv_weights,
                 conv_bias,
-                activation="silu",
-                conv_states=conv_state,
-                has_initial_state=has_initial_state,
-                cache_indices=non_spec_state_indices_tensor,
-                query_start_loc=non_spec_query_start_loc,
-                metadata=attn_metadata_narrowed,
-            ).transpose(0, 1)
-            q_ns, k_ns, v_ns = qkv_ns.split(self.local_projection_size, dim=-1)
+                conv_state,
+                non_spec_state_indices_tensor,
+                attn_metadata_narrowed,
+            )
         elif attn_metadata_narrowed.num_decodes > 0:
             assert non_spec_state_indices_tensor is not None
             decode_conv_indices = non_spec_state_indices_tensor[

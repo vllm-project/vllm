@@ -6,6 +6,8 @@ import sys
 import types
 from unittest import mock
 
+import torch
+
 from vllm.triton_utils import importing as triton_importing
 from vllm.triton_utils.importing import TritonLanguagePlaceholder, TritonPlaceholder
 
@@ -175,6 +177,57 @@ def test_no_triton_fallback():
         # alone, every subsequent import of vllm.triton_utils in this process
         # (including other test files, and other tests' cleanup fixtures that
         # need real triton) would get this fake, HAS_TRITON=False module.
+        for name, module in saved_modules.items():
+            if module is not None:
+                sys.modules[name] = module
+            else:
+                sys.modules.pop(name, None)
+
+
+def test_kda_prefill_conv_imports_without_triton():
+    # CPU builds import the GLM-5.3-Flash KDA layer, and with it the planar
+    # stencil module, without Triton (non-x86 CPUs have no triton); it must
+    # import under the placeholder, where tl.constexpr(x) is just x and kernels
+    # are plain functions, as the stock causal_conv1d module does. Same module
+    # dance as test_no_triton_fallback.
+    names = (
+        "triton",
+        "triton.language",
+        "vllm.triton_utils",
+        "vllm.triton_utils.importing",
+        "vllm.model_executor.warmup.jit_warmup_triton_helper",
+        "vllm.models.glm5next.nvidia.ops.kda_prefill_conv",
+        "vllm.model_executor.layers.mamba.ops.causal_conv1d",
+    )
+    saved_modules = {name: sys.modules.get(name) for name in names}
+    for name in saved_modules:
+        sys.modules.pop(name, None)
+    try:
+        with mock.patch.dict(sys.modules, {"triton": None}):
+            from vllm.triton_utils import HAS_TRITON
+
+            assert HAS_TRITON is False
+            planar = importlib.import_module(
+                "vllm.models.glm5next.nvidia.ops.kda_prefill_conv"
+            )
+            importlib.import_module(
+                "vllm.model_executor.layers.mamba.ops.causal_conv1d"
+            )
+            assert planar.CONV_WIDTH == 4 and planar.TILE_TOKENS == 16
+            # Host-side code works on the plain ints as well.
+            plan = planar.planar_conv_warmup_plan(
+                dtype=torch.bfloat16,
+                weight_dtype=torch.float32,
+                bias_dtype=None,
+                dim=768,
+                num_planes=3,
+                row_strides=(1026,),
+                conv_state_dim_first=True,
+            )
+            # One stencil launch for the single row stride, the fixup and the
+            # state update.
+            assert len(plan) == 3
+    finally:
         for name, module in saved_modules.items():
             if module is not None:
                 sys.modules[name] = module

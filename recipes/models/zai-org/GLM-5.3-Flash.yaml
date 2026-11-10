@@ -261,6 +261,16 @@ guide: |
   `{"decode_backend":"latency_specialized","policy":{"boundary":""}}` runs the fused all-reduce +
   mHC boundary stock.
 
+  ### Chunked-prefill KDA conv kernel (SM10x)
+
+  On compute-capability 10.x GPUs (B200, GB200, GB300) the KDA layers' q|k|v short convolution
+  in chunked prefill runs a planar Triton kernel by default
+  ([vLLM #66884](https://github.com/vllm-project/vllm/pull/66884)); a per-step guard keeps the
+  stock kernel for short prefill chunks and decode-heavy steps, and decode steps are unchanged.
+  `--additional-config '{"kda_prefill_conv":"causal_conv1d"}'` restores the stock kernel
+  everywhere; `"planar"` forces the new one on other CUDA GPUs (bf16 activations with bf16 conv
+  states, or fp32 states under fp32 conv weights).
+
   ### Prefill/Decode disaggregation (single node, TP4 + TP4)
 
   Split one 8-GPU node into a prefill pool (GPUs 0-3) and a decode pool (GPUs 4-7),
