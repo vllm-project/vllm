@@ -239,10 +239,6 @@ class ECConnectorBase(ABC):
     # Scheduler-side methods
     # ==============================
 
-    def on_new_request(self, request: "Request") -> None:
-        """Optionally start nonblocking prefetch after a request is enqueued."""
-        return
-
     @abstractmethod
     def has_cache_item(
         self,

@@ -17,6 +17,9 @@ from vllm.distributed.ec_transfer.ec_connector.base import (
 )
 from vllm.distributed.ec_transfer.ec_connector.factory import ECConnectorFactory
 from vllm.distributed.ec_transfer.ec_connector.metrics import ECConnectorStats
+from vllm.distributed.ec_transfer.ec_connector.tiering.connector import (
+    ECTieringConnector,
+)
 from vllm.distributed.kv_events import EventPublisherFactory, KVEventBatch
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.distributed.kv_transfer.kv_connector.v1 import (
@@ -294,15 +297,10 @@ class Scheduler(SchedulerInterface):
         self.encoder_cache_manager = manager_cls_obj.create_manager(
             cache_size=encoder_cache_size, vllm_config=vllm_config
         )
-        if self.ec_connector is not None:
-            from vllm.distributed.ec_transfer.ec_connector.tiering.connector import (
-                ECTieringConnector,
+        if isinstance(self.ec_connector, ECTieringConnector):
+            self.ec_connector.bind_gpu_cache_lookup(
+                self.encoder_cache_manager.get_cached_mm_hashes
             )
-
-            if isinstance(self.ec_connector, ECTieringConnector):
-                self.ec_connector.bind_gpu_cache_lookup(
-                    self.encoder_cache_manager.get_cached_mm_hashes
-                )
         speculative_config = vllm_config.speculative_config
         self.use_eagle = False
         self.use_eagle_block_drop = False
@@ -3127,7 +3125,7 @@ class Scheduler(SchedulerInterface):
             if self.log_stats:
                 request.record_event(EngineCoreEventType.QUEUED)
 
-            if self.ec_connector is not None:
+            if isinstance(self.ec_connector, ECTieringConnector):
                 self.ec_connector.on_new_request(request)
 
     def finish_requests(
