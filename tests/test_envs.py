@@ -75,6 +75,15 @@ def test_p2p_side_channel_defaults_and_override(monkeypatch: pytest.MonkeyPatch)
     assert envs.VLLM_P2P_SIDE_CHANNEL_PORT == 5799
 
 
+def test_flashinfer_moe_fused_finalize_tristate(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.delenv("VLLM_FLASHINFER_MOE_FUSED_FINALIZE", raising=False)
+    assert envs.VLLM_FLASHINFER_MOE_FUSED_FINALIZE is None
+    monkeypatch.setenv("VLLM_FLASHINFER_MOE_FUSED_FINALIZE", "0")
+    assert envs.VLLM_FLASHINFER_MOE_FUSED_FINALIZE is False
+    monkeypatch.setenv("VLLM_FLASHINFER_MOE_FUSED_FINALIZE", "1")
+    assert envs.VLLM_FLASHINFER_MOE_FUSED_FINALIZE is True
+
+
 def test_p2p_resource_limit_defaults_and_override(
     monkeypatch: pytest.MonkeyPatch,
 ):

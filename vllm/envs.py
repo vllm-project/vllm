@@ -229,6 +229,7 @@ if TYPE_CHECKING:
     VLLM_FLASHINFER_CUTEDSL_MOE_LOCALIZE_FREE_FULL_WEIGHTS: bool = False
     VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR: str | None = None
     VLLM_FLASHINFER_AUTOTUNE_SKIP_OPS: list[str] | None = None
+    VLLM_FLASHINFER_MOE_FUSED_FINALIZE: bool | None = None
     VLLM_FLASHINFER_ALLREDUCE_BACKEND: Literal["auto", "trtllm", "mnnvl"] = "auto"
     VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE: int = 394 * 1024 * 1024
     VLLM_FLASHINFER_MOE_A2A_LOW_PRECISION_COMBINE: bool = False
@@ -1910,6 +1911,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
             for v in os.environ["VLLM_FLASHINFER_AUTOTUNE_SKIP_OPS"].split(",")
             if v.strip()
         ]
+    ),
+    # FlashInfer CUTLASS MoE: whether GEMM2 may fuse the top-k reduction into
+    # its epilogue (atomics, not run-to-run deterministic). Unset: FlashInfer's
+    # default. 0: deterministic finalize path. 1: allow fused finalize.
+    "VLLM_FLASHINFER_MOE_FUSED_FINALIZE": lambda: (
+        None
+        if "VLLM_FLASHINFER_MOE_FUSED_FINALIZE" not in os.environ
+        else bool(int(os.environ["VLLM_FLASHINFER_MOE_FUSED_FINALIZE"]))
     ),
     # Flashinfer fused allreduce backend.
     "VLLM_FLASHINFER_ALLREDUCE_BACKEND": env_with_choices(
