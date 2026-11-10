@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The shared specialized-decode switch: off is a no-op on every platform, and a
-request off ROCm is refused without importing the AMD runtime."""
+"""The shared specialized-decode switch: off is a no-op on every platform. Off ROCm
+the AMD runtime is never imported: `--monokernel` is refused, and
+`decode_backend=latency_specialized` is left to the NVIDIA executor."""
 
 import sys
 from types import SimpleNamespace
@@ -32,12 +33,15 @@ def test_off_is_none_and_imports_no_amd_code(not_rocm, backend):
     assert AMD_RUNTIME not in sys.modules
 
 
-@pytest.mark.parametrize(
-    "cfg", [_config(monokernel=True), _config(backend="latency_specialized")]
-)
-def test_request_off_rocm_is_refused(not_rocm, cfg):
+def test_monokernel_off_rocm_is_refused(not_rocm):
     with pytest.raises(ValueError, match="only on ROCm"):
-        glm_model._specialized_decode_config(cfg)
+        glm_model._specialized_decode_config(_config(monokernel=True))
+    assert AMD_RUNTIME not in sys.modules
+
+
+def test_decode_backend_off_rocm_is_left_to_nvidia(not_rocm):
+    cfg = _config(backend="latency_specialized")
+    assert glm_model._specialized_decode_config(cfg) is None
     assert AMD_RUNTIME not in sys.modules
 
 

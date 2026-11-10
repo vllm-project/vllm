@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Iterable
-from typing import Any, ClassVar, Literal
+from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
 import torch
 from torch import nn
@@ -98,6 +98,7 @@ from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.math_utils import round_up
 
+from ..nvidia.specialized_decode.runtime import specialized_decode_config
 from .attention import Glm5NextMLAAttention
 from .kda import Glm5NextLinearAttention
 from .multimodal import (
@@ -106,6 +107,11 @@ from .multimodal import (
     Glm5NextVisionTransformer,
 )
 from .specialized_decode import requested
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.model_states.interface import ModelState
+
+    from ..nvidia.specialized_decode.runtime.decode import SpecializedDecode
 
 logger = init_logger(__name__)
 
@@ -120,18 +126,20 @@ def get_sparse_topk_buffer_width(config: Glm5NextTextConfig) -> int:
 
 
 def _specialized_decode_config(vllm_config: VllmConfig):
-    """The specialized decode's config, None unless it is requested. Only ROCm has
-    one today, so only ROCm imports a vendor runtime; elsewhere a request is refused
-    at startup and a stock deployment never reaches vendor code. A ROCm GPU other
-    than gfx950 is refused by the runtime's own checks (``spec.refusal_reasons``)."""
+    """The ROCm specialized decode's config (the backbone's per-layer kernels), None
+    unless it is requested on ROCm. Off ROCm, `decode_backend=latency_specialized`
+    is the NVIDIA executor's (`Glm5NextForCausalLM`) and `--monokernel` is refused,
+    so a stock deployment never reaches AMD code. A ROCm GPU other than gfx950 is
+    refused by the runtime's own checks (`spec.refusal_reasons`)."""
     if not requested(vllm_config):
         return None
     if not current_platform.is_rocm():
-        raise ValueError(
-            "GLM-5.3-Flash has a specialized decode only on ROCm CDNA4 (gfx950); drop "
-            "--monokernel / decode_backend=latency_specialized on "
-            f"{current_platform.device_name}"
-        )
+        if vllm_config.kernel_config.monokernel:
+            raise ValueError(
+                "--monokernel runs GLM-5.3-Flash's specialized decode only on ROCm "
+                f"CDNA4 (gfx950); drop it on {current_platform.device_name}"
+            )
+        return None
     from vllm.models.glm5next.amd.specialized_decode.runtime import (
         specialized_decode_config,
     )
@@ -1226,6 +1234,23 @@ class Glm5NextForCausalLM(
         self.logits_processor = LogitsProcessor(
             self.config.vocab_size, scale=_LOGIT_SCALE
         )
+        # decode_backend=latency_specialized: a specialized decode executor over
+        # self.model, built by the model state once the weights are loaded. On ROCm
+        # the backbone runs its own per-layer kernels instead (self.model).
+        self.specialized_decode_config = (
+            None
+            if current_platform.is_rocm()
+            else specialized_decode_config(vllm_config)
+        )
+        self.specialized_decode: SpecializedDecode | None = None
+
+    def build_specialized_decode(self) -> None:
+        from ..nvidia.specialized_decode.runtime.decode import SpecializedDecode
+
+        self.specialized_decode = SpecializedDecode(
+            self.model, self.specialized_decode_config
+        )
+        self.specialized_decode.build_logits(self.logits_processor, self.lm_head)
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
@@ -1238,6 +1263,11 @@ class Glm5NextForCausalLM(
         inputs_embeds: torch.Tensor | None = None,
         **kwargs,
     ) -> torch.Tensor | IntermediateTensors:
+        decode = self.specialized_decode
+        if decode is not None:
+            step = decode.plan(positions, intermediate_tensors)
+            if step is not None:
+                return decode.run(step, input_ids, inputs_embeds)
         hidden_states = self.model(
             input_ids, positions, intermediate_tensors, inputs_embeds, **kwargs
         )
@@ -1288,17 +1318,22 @@ class Glm5NextForCausalLM(
     ) -> torch.Tensor | None:
         if self.model.specialized_decode is not None:
             self.model.specialized_decode.after_step()
+        decode = self.specialized_decode
+        if decode is not None:
+            logits = decode.compute_logits(
+                self.logits_processor, self.lm_head, hidden_states
+            )
+            if logits is not None:
+                return logits
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 
-    def get_model_state_cls(self) -> type:
-        if self.model.specialized_decode_config is None:
-            from vllm.v1.worker.gpu.model_states.mamba_hybrid import (
-                MambaHybridModelState,
-            )
+    def get_model_state_cls(self) -> "type[ModelState]":
+        if self.model.specialized_decode_config is not None:
+            from ..amd.model_state import Glm5NextModelState as AmdModelState
 
-            return MambaHybridModelState
-        from vllm.models.glm5next.amd.model_state import Glm5NextModelState
+            return AmdModelState
+        from ..nvidia.model_state import Glm5NextModelState
 
         return Glm5NextModelState
 
@@ -1411,8 +1446,25 @@ class Glm5NextForConditionalGeneration(
         # so pipeline parallelism is gated off (consistent with the text-only
         # model) and we intentionally do not alias it here.
 
-    def get_model_state_cls(self) -> type:
+    def get_model_state_cls(self) -> "type[ModelState]":
         return self.language_model.get_model_state_cls()
+
+    def forward(
+        self,
+        input_ids: torch.Tensor | None,
+        positions: torch.Tensor,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+        **kwargs: object,
+    ) -> torch.Tensor | IntermediateTensors:
+        decode = self.language_model.specialized_decode
+        if decode is not None and intermediate_tensors is None:
+            step = decode.plan(positions, intermediate_tensors)
+            if step is not None:
+                return decode.run(step, input_ids, inputs_embeds)
+        return super().forward(
+            input_ids, positions, intermediate_tensors, inputs_embeds, **kwargs
+        )
 
     def set_moe_parameters(self) -> None:
         self.moe_mlp_layers = [

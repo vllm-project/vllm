@@ -29,8 +29,8 @@ jiwer # required for audio tests
 tblib # for pickling test exceptions
 timm >=1.0.30 # required for internvl and gemma3n-mm test
 torch==2.14.0
-torchaudio==2.11.0
-torchvision==0.29.0
+torchaudio==2.11.1
+torchvision==0.29.2
 transformers_stream_generator # required for qwen-vl test
 matplotlib # required for qwen-vl test
 mistral_common[image,audio] >= 1.13.0 # required for voxtral test
