@@ -205,6 +205,36 @@ steps:
       - tests/v1/core/prefix_cache/test_hybrid_prefix_cache_hit_rate.py
       - vllm/platforms/rocm.py
 
+- label: ":nvidia: (H200 MIG 35GB) Rust Frontend Chat Completions"
+  key: rust-frontend-chat-completions
+  timeout_in_minutes: 30
+  device: h200_35gb
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - rust/
+  - vllm/entrypoints/openai/
+  - tests/utils.py
+  - tests/entrypoints/openai/chat_completion/test_chat.py
+  commands:
+  - export VLLM_USE_RUST_FRONTEND=1
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  # test_invocations calls the SageMaker /invocations route, which the Rust frontend does not serve.
+  - pytest -v -s entrypoints/openai/chat_completion/test_chat.py -k "not test_invocations"
+  mirror:
+    amd:
+      label: ":amd: (MI355 DPX) Rust Frontend Chat Completions"
+      dind: false
+      device: mi355_dpx
+      timeout_in_minutes: 35
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - rust/
+      - vllm/entrypoints/openai/
+      - tests/utils.py
+      - tests/entrypoints/openai/chat_completion/test_chat.py
+      - vllm/platforms/rocm.py
+
 - label: ":nvidia: (H200 MIG 35GB) Rust Frontend Tool Use"
   key: rust-frontend-tool-use
   automatic_shard: true
