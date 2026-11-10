@@ -932,72 +932,6 @@ class TestTritonTopkTopp:
         assert torch.equal(kept_ties, torch.arange(num_ties) < num_kept_ties)
 
 
-def _assert_exact_filter(
-    source: torch.Tensor,
-    actual: torch.Tensor,
-    k: torch.Tensor | None,
-    p: torch.Tensor | None,
-):
-    """Kept tokens are exactly the prefix of the (logit desc, index asc) order
-    that top-k, then top-p on the renormalized top-k mass, selects."""
-    vocab = source.shape[1]
-    order = source.argsort(dim=-1, descending=True, stable=True)
-    kept = actual.isfinite().gather(-1, order)
-    count = kept.sum(-1)
-    ranks = torch.arange(vocab, device=source.device)
-    assert torch.equal(kept, ranks < count[:, None]), "kept set is not a prefix"
-    assert torch.equal(actual[actual.isfinite()], source[actual.isfinite()])
-    finite = source.isfinite().sum(-1)
-    budget = finite if k is None else torch.minimum(k.long(), finite)
-    assert ((count <= budget) & ((count >= 1) | (finite == 0))).all()
-    if p is None:
-        assert torch.equal(count, budget)
-        return
-    values = source.gather(-1, order).double()
-    prefix = values.masked_fill(ranks >= budget[:, None], -float("inf"))
-    prefix = prefix.softmax(-1).cumsum(-1)
-    mass = prefix.gather(-1, (count - 1).clamp_min(0)[:, None]).squeeze(-1)
-    previous = prefix.gather(-1, (count - 2).clamp_min(0)[:, None]).squeeze(-1)
-    previous = torch.where(count <= 1, 0, previous)
-    target = p.double()
-    ok = torch.where(
-        p >= 1, count == budget, (mass >= target - 1e-7) & (previous <= target + 1e-7)
-    )
-    assert (ok | (finite == 0)).all(), "top-p cutoff outside the FP64 mass bounds"
-
-
-def _make_logits(kind: str, batch: int, vocab: int, gen: Generator) -> torch.Tensor:
-    if kind == "zipf":
-        base = -1.1 * torch.arange(1, vocab + 1, dtype=torch.float32).log()
-        return base[torch.rand(batch, vocab, generator=gen).argsort(dim=-1)]
-    if kind == "zeros":
-        return torch.zeros(batch, vocab)
-    logits = torch.randn(batch, vocab, generator=gen)
-    if kind == "huge":  # thinking-budget forcing, at a sampled position
-        logits[:, 0] = 1e9
-    if kind == "neginf":
-        logits[:, 100:] = -float("inf")
-    return logits.bfloat16().float() if kind == "bf16" else logits
-
-
-def _num_compiled(kernel) -> int:
-    return sum(len(cache[0]) for cache in kernel.device_caches.values())
-
-
-def _make_param(kind, batch: int, vocab: int, gen: Generator, dtype: torch.dtype):
-    if kind is None:
-        return None
-    if kind != "mixed":
-        return torch.full((batch,), kind, dtype=dtype)
-    if dtype == torch.int32:
-        value = torch.randint(1, 300, (batch,), generator=gen, dtype=dtype)
-        value[::3] = vocab
-    else:
-        value = torch.rand(batch, generator=gen) * 0.9 + 0.1
-        value[1::3] = 1.0
-    return value
-
-
 @pytest.mark.skipif(not TRITON_KERNEL_AVAILABLE, reason="requires CUDA SM80+")
 class TestTritonTopkToppExact:
     """Exact selection on every kernel path: the 32 to 256 logit tiers, the
@@ -1105,6 +1039,72 @@ class TestTritonTopkToppExact:
         k = torch.full((8,), 50, dtype=torch.int32)
         apply_top_k_top_p(logits, k, None)
         assert calls == [logits.shape]
+
+
+def _make_logits(kind: str, batch: int, vocab: int, gen: Generator) -> torch.Tensor:
+    if kind == "zipf":
+        base = -1.1 * torch.arange(1, vocab + 1, dtype=torch.float32).log()
+        return base[torch.rand(batch, vocab, generator=gen).argsort(dim=-1)]
+    if kind == "zeros":
+        return torch.zeros(batch, vocab)
+    logits = torch.randn(batch, vocab, generator=gen)
+    if kind == "huge":  # thinking-budget forcing, at a sampled position
+        logits[:, 0] = 1e9
+    if kind == "neginf":
+        logits[:, 100:] = -float("inf")
+    return logits.bfloat16().float() if kind == "bf16" else logits
+
+
+def _make_param(kind, batch: int, vocab: int, gen: Generator, dtype: torch.dtype):
+    if kind is None:
+        return None
+    if kind != "mixed":
+        return torch.full((batch,), kind, dtype=dtype)
+    if dtype == torch.int32:
+        value = torch.randint(1, 300, (batch,), generator=gen, dtype=dtype)
+        value[::3] = vocab
+    else:
+        value = torch.rand(batch, generator=gen) * 0.9 + 0.1
+        value[1::3] = 1.0
+    return value
+
+
+def _assert_exact_filter(
+    source: torch.Tensor,
+    actual: torch.Tensor,
+    k: torch.Tensor | None,
+    p: torch.Tensor | None,
+):
+    """Kept tokens are exactly the prefix of the (logit desc, index asc) order
+    that top-k, then top-p on the renormalized top-k mass, selects."""
+    vocab = source.shape[1]
+    order = source.argsort(dim=-1, descending=True, stable=True)
+    kept = actual.isfinite().gather(-1, order)
+    count = kept.sum(-1)
+    ranks = torch.arange(vocab, device=source.device)
+    assert torch.equal(kept, ranks < count[:, None]), "kept set is not a prefix"
+    assert torch.equal(actual[actual.isfinite()], source[actual.isfinite()])
+    finite = source.isfinite().sum(-1)
+    budget = finite if k is None else torch.minimum(k.long(), finite)
+    assert ((count <= budget) & ((count >= 1) | (finite == 0))).all()
+    if p is None:
+        assert torch.equal(count, budget)
+        return
+    values = source.gather(-1, order).double()
+    prefix = values.masked_fill(ranks >= budget[:, None], -float("inf"))
+    prefix = prefix.softmax(-1).cumsum(-1)
+    mass = prefix.gather(-1, (count - 1).clamp_min(0)[:, None]).squeeze(-1)
+    previous = prefix.gather(-1, (count - 2).clamp_min(0)[:, None]).squeeze(-1)
+    previous = torch.where(count <= 1, 0, previous)
+    target = p.double()
+    ok = torch.where(
+        p >= 1, count == budget, (mass >= target - 1e-7) & (previous <= target + 1e-7)
+    )
+    assert (ok | (finite == 0)).all(), "top-p cutoff outside the FP64 mass bounds"
+
+
+def _num_compiled(kernel) -> int:
+    return sum(len(cache[0]) for cache in kernel.device_caches.values())
 
 
 # =============================================================================

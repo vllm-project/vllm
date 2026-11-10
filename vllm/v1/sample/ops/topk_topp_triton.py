@@ -67,15 +67,6 @@ def can_use_top_k_top_p_triton(logits: torch.Tensor) -> bool:
     )
 
 
-@functools.cache
-def _supported_device() -> bool:
-    """Tested on SM80, SM90 and SM100, and needs cooperative launches."""
-    if not current_platform.is_cuda():
-        return False
-    capability = current_platform.get_device_capability()
-    return capability is not None and capability.major >= 8
-
-
 def apply_top_k_top_p_triton(
     logits: torch.Tensor,
     k: torch.Tensor | None,
@@ -120,6 +111,26 @@ def apply_top_k_top_p_triton(
         )
         args[at_logits] = args[at_p] = None  # do not keep the caller's tensors alive
     return logits
+
+
+def register_warmups() -> None:
+    if _supported_device():
+        _levels_warmup.register_warmup()
+        _filter_warmup.register_warmup()
+
+
+def reset_buffer_cache() -> None:
+    _BUFFERS.clear()
+    _PLANS.clear()
+
+
+@functools.cache
+def _supported_device() -> bool:
+    """Tested on SM80, SM90 and SM100, and needs cooperative launches."""
+    if not current_platform.is_cuda():
+        return False
+    capability = current_platform.get_device_capability()
+    return capability is not None and capability.major >= 8
 
 
 # Launches cached per shape: Triton's launcher with ~40 keyword arguments costs tens
@@ -211,29 +222,6 @@ def kernel_args(
     return levels, filter_
 
 
-def plan_entry(compiled, jit, grid: tuple, kwargs: dict) -> tuple:
-    """A compiled kernel's launch: its arguments in order, and where logits, k and p
-    go."""
-    defaults = {param.name: param.default for param in jit.params}
-    values = [kwargs.get(name, defaults[name]) for name in jit.arg_names]
-    slots = [jit.arg_names.index(n) for n in ("logits_ptr", "k_ptr", "p_ptr")]
-    return compiled, grid, values, slots
-
-
-def split_chunk(vocab: int, splits: int) -> int:
-    return triton.cdiv(triton.cdiv(vocab, splits), BLOCK) * BLOCK
-
-
-def num_splits(rows: int, sms: int) -> int:
-    """Split rows for streaming until the grid has about 4 programs per SM."""
-    return min(MAX_SPLITS, triton.next_power_of_2(triton.cdiv(4 * sms, rows)))
-
-
-@functools.cache
-def num_sms(device: torch.device) -> int:
-    return torch.cuda.get_device_properties(device).multi_processor_count
-
-
 _CAPACITY: dict[tuple, int] = {}
 
 
@@ -294,9 +282,27 @@ def allocate(device: torch.device, rows: int, vocab: int) -> dict[str, torch.Ten
     )
 
 
-def reset_buffer_cache() -> None:
-    _BUFFERS.clear()
-    _PLANS.clear()
+def plan_entry(compiled, jit, grid: tuple, kwargs: dict) -> tuple:
+    """A compiled kernel's launch: its arguments in order, and where logits, k and p
+    go."""
+    defaults = {param.name: param.default for param in jit.params}
+    values = [kwargs.get(name, defaults[name]) for name in jit.arg_names]
+    slots = [jit.arg_names.index(n) for n in ("logits_ptr", "k_ptr", "p_ptr")]
+    return compiled, grid, values, slots
+
+
+def split_chunk(vocab: int, splits: int) -> int:
+    return triton.cdiv(triton.cdiv(vocab, splits), BLOCK) * BLOCK
+
+
+def num_splits(rows: int, sms: int) -> int:
+    """Split rows for streaming until the grid has about 4 programs per SM."""
+    return min(MAX_SPLITS, triton.next_power_of_2(triton.cdiv(4 * sms, rows)))
+
+
+@functools.cache
+def num_sms(device: torch.device) -> int:
+    return torch.cuda.get_device_properties(device).multi_processor_count
 
 
 @triton.jit(do_not_specialize=LEVELS_INTS)
@@ -522,26 +528,6 @@ def _filter_kernel(
 
 
 @triton.jit
-def _grid_sync(sync_ptr, target):
-    """Wait until target arrivals (every program, once per barrier so far)."""
-    tl.debug_barrier()
-    tl.atomic_add(sync_ptr, 1, sem="release", scope="gpu")
-    while tl.atomic_add(sync_ptr, 0, sem="acquire", scope="gpu") < target:
-        pass
-    tl.debug_barrier()
-
-
-@triton.jit
-def _grid_exit(sync_ptr, programs):
-    """The last program to leave resets the barrier, the exit count and the flag."""
-    tl.debug_barrier()
-    if tl.atomic_add(sync_ptr + 1, 1, sem="acq_rel", scope="gpu") == programs - 1:
-        tl.store(sync_ptr, 0)
-        tl.store(sync_ptr + 1, 0)
-        tl.store(sync_ptr + 2, 0)
-
-
-@triton.jit
 def _select_row(
     logits_ptr,
     stride,
@@ -745,71 +731,6 @@ def _histogram(
         sem="relaxed",
         scope="gpu",
     )
-
-
-@triton.jit(noinline=True)
-def _resolve_row(
-    row_ptr,
-    hist_row,
-    scratch,
-    state_row,
-    cut_row,
-    k,
-    p,
-    row_max,
-    row_sum,
-    vocab,
-    gathered,
-    found,
-    more_row,
-    window_row,
-    BINS: tl.constexpr,
-    BIN_SCALE: tl.constexpr,
-    WINDOW: tl.constexpr,
-    BLOCK: tl.constexpr,
-):
-    """A gathered row: the exact cut among its window, which masks the row. Else one
-    program cuts the row from the histogram."""
-    if gathered:
-        args = (
-            row_ptr,
-            scratch,
-            found,
-            tl.load(more_row, volatile=True),
-            tl.load(more_row + 1, volatile=True),
-            tl.load(window_row + 3, volatile=True),
-            k,
-            p,
-            row_max,
-            row_sum,
-            vocab,
-        )
-        if found <= 512:
-            _cut_window(*args, 512, WINDOW)
-        elif found <= 1024:
-            _cut_window(*args, 1024, WINDOW)
-        elif found <= 2048:
-            _cut_window(*args, 2048, WINDOW)
-        else:
-            _cut_window(*args, WINDOW, WINDOW)
-        tl.store(state_row, SELF_C)
-    else:
-        _resolve_alone(
-            row_ptr,
-            hist_row,
-            scratch,
-            state_row,
-            cut_row,
-            k,
-            p,
-            row_max,
-            row_sum,
-            vocab,
-            BINS,
-            BIN_SCALE,
-            WINDOW,
-            BLOCK,
-        )
 
 
 @triton.jit(noinline=True)
@@ -1061,6 +982,71 @@ def _gather_part(
     )
 
 
+@triton.jit(noinline=True)
+def _resolve_row(
+    row_ptr,
+    hist_row,
+    scratch,
+    state_row,
+    cut_row,
+    k,
+    p,
+    row_max,
+    row_sum,
+    vocab,
+    gathered,
+    found,
+    more_row,
+    window_row,
+    BINS: tl.constexpr,
+    BIN_SCALE: tl.constexpr,
+    WINDOW: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    """A gathered row: the exact cut among its window, which masks the row. Else one
+    program cuts the row from the histogram."""
+    if gathered:
+        args = (
+            row_ptr,
+            scratch,
+            found,
+            tl.load(more_row, volatile=True),
+            tl.load(more_row + 1, volatile=True),
+            tl.load(window_row + 3, volatile=True),
+            k,
+            p,
+            row_max,
+            row_sum,
+            vocab,
+        )
+        if found <= 512:
+            _cut_window(*args, 512, WINDOW)
+        elif found <= 1024:
+            _cut_window(*args, 1024, WINDOW)
+        elif found <= 2048:
+            _cut_window(*args, 2048, WINDOW)
+        else:
+            _cut_window(*args, WINDOW, WINDOW)
+        tl.store(state_row, SELF_C)
+    else:
+        _resolve_alone(
+            row_ptr,
+            hist_row,
+            scratch,
+            state_row,
+            cut_row,
+            k,
+            p,
+            row_max,
+            row_sum,
+            vocab,
+            BINS,
+            BIN_SCALE,
+            WINDOW,
+            BLOCK,
+        )
+
+
 @triton.jit(noinline=True)  # one sort per size
 def _cut_window(
     row_ptr,
@@ -1108,26 +1094,6 @@ def _cut_window(
         last = tl.minimum(last, tl.min(tl.where(reached, rank, N)))
     index = (key & 0xFFFFFFFF).to(tl.int32)
     tl.store(row_ptr + index, -float("inf"), mask=valid & (rank > last))
-
-
-@triton.jit
-def _window(
-    counts, need, top, floor, scale, row_max, MASS: tl.constexpr, BINS: tl.constexpr
-):
-    """The bins lo to hi that can hold the need-th logit (or the logit where the running
-    mass reaches need), and how many logits they hold."""
-    j = tl.arange(0, BINS)
-    c = counts.to(tl.float32)
-    if MASS:
-        lower = tl.where(j == BINS - 1, floor, top - (j + 1.0) / scale)
-        low = tl.cumsum(c * tl.exp(lower - row_max), 0)
-        high = tl.cumsum(c * tl.exp(top - j / scale - row_max), 0)
-        lo = tl.min(tl.where(high >= need * (1 - 1e-4), j, BINS - 1))
-        hi = tl.min(tl.where(low >= need * (1 + 1e-4), j, BINS - 1))
-    else:
-        lo = tl.min(tl.where(tl.cumsum(c, 0) >= need, j, BINS - 1))
-        hi = lo
-    return lo, hi, tl.sum(tl.where((j >= lo) & (j <= hi), counts, 0))
 
 
 @triton.jit
@@ -1292,18 +1258,24 @@ def _cut(
     return ok & (done == 1), cut
 
 
-@triton.jit(noinline=True)  # a call: one copy of the sort (slow path only)
-def _finish(scratch, found, target, above, row_max, mass, N: tl.constexpr):
-    """Sort the gathered keys, return the key where the running count (or mass) from
-    above reaches target."""
-    rank = tl.arange(0, N)
-    key = tl.sort(tl.load(scratch + rank, mask=rank < found, other=0x7FFFFFFFFFFFFFFF))
-    weight = tl.where(
-        rank < found, tl.where(mass, tl.exp(_key_value(key) - row_max), 1.0), 0.0
-    )
-    reached = above + tl.cumsum(weight.to(tl.float64), 0) >= target
-    last = tl.min(tl.where(reached & (rank < found), rank, N))
-    return last < found, tl.sum(tl.where(rank == last, key, 0))
+@triton.jit
+def _window(
+    counts, need, top, floor, scale, row_max, MASS: tl.constexpr, BINS: tl.constexpr
+):
+    """The bins lo to hi that can hold the need-th logit (or the logit where the running
+    mass reaches need), and how many logits they hold."""
+    j = tl.arange(0, BINS)
+    c = counts.to(tl.float32)
+    if MASS:
+        lower = tl.where(j == BINS - 1, floor, top - (j + 1.0) / scale)
+        low = tl.cumsum(c * tl.exp(lower - row_max), 0)
+        high = tl.cumsum(c * tl.exp(top - j / scale - row_max), 0)
+        lo = tl.min(tl.where(high >= need * (1 - 1e-4), j, BINS - 1))
+        hi = tl.min(tl.where(low >= need * (1 + 1e-4), j, BINS - 1))
+    else:
+        lo = tl.min(tl.where(tl.cumsum(c, 0) >= need, j, BINS - 1))
+        hi = lo
+    return lo, hi, tl.sum(tl.where((j >= lo) & (j <= hi), counts, 0))
 
 
 @triton.jit
@@ -1345,6 +1317,20 @@ def _gather(
         found += hits
     tl.debug_barrier()
     return found, more
+
+
+@triton.jit(noinline=True)  # a call: one copy of the sort (slow path only)
+def _finish(scratch, found, target, above, row_max, mass, N: tl.constexpr):
+    """Sort the gathered keys, return the key where the running count (or mass) from
+    above reaches target."""
+    rank = tl.arange(0, N)
+    key = tl.sort(tl.load(scratch + rank, mask=rank < found, other=0x7FFFFFFFFFFFFFFF))
+    weight = tl.where(
+        rank < found, tl.where(mass, tl.exp(_key_value(key) - row_max), 1.0), 0.0
+    )
+    reached = above + tl.cumsum(weight.to(tl.float64), 0) >= target
+    last = tl.min(tl.where(reached & (rank < found), rank, N))
+    return last < found, tl.sum(tl.where(rank == last, key, 0))
 
 
 @triton.jit
@@ -1443,28 +1429,6 @@ def _mass_upto(row_ptr, row_max, cut, vocab, BLOCK: tl.constexpr):
         keep = (_key(x, idx) <= cut) & (idx < vocab)
         total += tl.sum(tl.where(keep, tl.exp(x - row_max), 0.0)).to(tl.float64)
     return total
-
-
-@triton.jit(noinline=True)
-def _fill(row_ptr, state, cut, kept_row, lo, vocab, chunk, BLOCK: tl.constexpr):
-    """Mask the split's chunk: from the kept keys (state >= 0) or from the cut key."""
-    hi = tl.minimum(lo + chunk, vocab)
-    offs = tl.arange(0, BLOCK)
-    if state == CUT_C:
-        for start in range(lo, hi, BLOCK):
-            idx = start + offs
-            x = tl.load(row_ptr + idx, mask=idx < hi)
-            keep = _key(x, idx) <= cut
-            tl.store(row_ptr + idx, tl.where(keep, x, -float("inf")), mask=idx < hi)
-    if state >= 0:
-        for start in range(lo, hi, BLOCK):
-            tl.store(row_ptr + start + offs, -float("inf"), mask=start + offs < hi)
-        tl.debug_barrier()
-        slots = tl.arange(0, 256)
-        key = tl.load(kept_row + slots, mask=slots < state, other=0, volatile=True)
-        index = (key & 0xFFFFFFFF).to(tl.int32)
-        valid = (slots < state) & (index >= lo) & (index < hi)
-        tl.store(row_ptr + index, _key_value(key), mask=valid)
 
 
 # Last resort (cut bins with more than WINDOW logits, e.g. huge exact ties): radix
@@ -1634,6 +1598,48 @@ def _bounded_mass(row_ptr, vocab, bound_hi, bound_lo, row_max, BLOCK: tl.constex
     return tl.sum(total)
 
 
+@triton.jit(noinline=True)
+def _fill(row_ptr, state, cut, kept_row, lo, vocab, chunk, BLOCK: tl.constexpr):
+    """Mask the split's chunk: from the kept keys (state >= 0) or from the cut key."""
+    hi = tl.minimum(lo + chunk, vocab)
+    offs = tl.arange(0, BLOCK)
+    if state == CUT_C:
+        for start in range(lo, hi, BLOCK):
+            idx = start + offs
+            x = tl.load(row_ptr + idx, mask=idx < hi)
+            keep = _key(x, idx) <= cut
+            tl.store(row_ptr + idx, tl.where(keep, x, -float("inf")), mask=idx < hi)
+    if state >= 0:
+        for start in range(lo, hi, BLOCK):
+            tl.store(row_ptr + start + offs, -float("inf"), mask=start + offs < hi)
+        tl.debug_barrier()
+        slots = tl.arange(0, 256)
+        key = tl.load(kept_row + slots, mask=slots < state, other=0, volatile=True)
+        index = (key & 0xFFFFFFFF).to(tl.int32)
+        valid = (slots < state) & (index >= lo) & (index < hi)
+        tl.store(row_ptr + index, _key_value(key), mask=valid)
+
+
+@triton.jit
+def _grid_sync(sync_ptr, target):
+    """Wait until target arrivals (every program, once per barrier so far)."""
+    tl.debug_barrier()
+    tl.atomic_add(sync_ptr, 1, sem="release", scope="gpu")
+    while tl.atomic_add(sync_ptr, 0, sem="acquire", scope="gpu") < target:
+        pass
+    tl.debug_barrier()
+
+
+@triton.jit
+def _grid_exit(sync_ptr, programs):
+    """The last program to leave resets the barrier, the exit count and the flag."""
+    tl.debug_barrier()
+    if tl.atomic_add(sync_ptr + 1, 1, sem="acq_rel", scope="gpu") == programs - 1:
+        tl.store(sync_ptr, 0)
+        tl.store(sync_ptr + 1, 0)
+        tl.store(sync_ptr + 2, 0)
+
+
 @triton.jit
 def _row_params(k_ptr, p_ptr, row, vocab, has_k, has_p):
     k = vocab
@@ -1680,12 +1686,6 @@ def _key_value(key):
 
 # JIT warmup: compile both kernels at startup for the model's vocab (one variant
 # each, every batch size and k/p mix share it).
-
-
-def register_warmups() -> None:
-    if _supported_device():
-        _levels_warmup.register_warmup()
-        _filter_warmup.register_warmup()
 
 
 def _warmup_inputs(vllm_config: Any) -> dict[str, Any]:
