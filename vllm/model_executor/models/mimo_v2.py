@@ -70,6 +70,7 @@ from .utils import (
     make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_prefix,
+    spec_decode_needs_target_embed,
 )
 
 logger = init_logger(__name__)
@@ -779,6 +780,8 @@ def _shard_fp8_qkv_proj(
 
 @support_torch_compile
 class MiMoV2Model(nn.Module, EagleModelMixin):
+    supports_aux_hidden_states_over_pp = True
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
@@ -791,8 +794,10 @@ class MiMoV2Model(nn.Module, EagleModelMixin):
         self.vocab_size = config.vocab_size
         self.num_redundant_experts = eplb_config.num_redundant_experts
 
-        if get_pp_group().is_first_rank or (
-            config.tie_word_embeddings and get_pp_group().is_last_rank
+        if (
+            get_pp_group().is_first_rank
+            or (config.tie_word_embeddings and get_pp_group().is_last_rank)
+            or spec_decode_needs_target_embed(vllm_config)
         ):
             self.embed_tokens = VocabParallelEmbedding(
                 config.vocab_size,
@@ -845,7 +850,8 @@ class MiMoV2Model(nn.Module, EagleModelMixin):
             [], self.start_layer, hidden_states, residual
         )
         for idx, layer in enumerate(
-            islice(self.layers, self.start_layer, self.end_layer)
+            islice(self.layers, self.start_layer, self.end_layer),
+            start=self.start_layer,
         ):
             hidden_states, residual = layer(positions, hidden_states, residual)
             self._maybe_add_hidden_state(
@@ -854,7 +860,11 @@ class MiMoV2Model(nn.Module, EagleModelMixin):
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
-                {"hidden_states": hidden_states, "residual": residual}
+                {
+                    "hidden_states": hidden_states,
+                    "residual": residual,
+                    **self.pack_local_aux_hidden_states(aux_hidden_states),
+                }
             )
 
         hidden_states, _ = self.norm(hidden_states, residual)

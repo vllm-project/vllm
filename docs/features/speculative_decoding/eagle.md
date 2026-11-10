@@ -65,7 +65,8 @@ where the draft model runs.
 
 Supported targets include Llama, Qwen2, dense Qwen3, Qwen3-VL (dense and
 MoE), gpt-oss, Gemma 4, and MiniMax-M3. DeepSeek-V4 and Kimi-K3 are also
-supported on NVIDIA GPUs. Other targets are rejected at startup with
+supported on NVIDIA GPUs. MiMo-V2 supports DFlash on NVIDIA GPUs.
+Other targets are rejected at startup with
 `<architecture> does not support <method> with pipeline parallelism`.
 
 For example, to run gpt-oss with an EAGLE3 draft model across two pipeline
