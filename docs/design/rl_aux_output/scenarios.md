@@ -93,7 +93,7 @@ per-replica in-flight tokens × 2 × 23B active params / (4 GPUs × 5 PFLOPS FP8
 = 51 × 200K × 46 GFLOP / 8 PFLOPS ≈ 60 s
 ```
 
-That is ≈7.4% of each 807 s interval (MLP only; attention adds more). Frontier-scale runs therefore keep generating across weight versions rather than recomputing in-flight requests at every update, and prefix hits on blocks computed by an older version are normal. In vLLM an in-flight update does reset the GPU prefix cache (protocol §6.6), so after it the old KV survives only in a KV offload tier: the reset keeps the tier unless `reset_connector=True`, and the next turn loads its context from the tier if the tier still holds it, else recomputes it (experiments E0).
+That is ≈7.4% of each 807 s interval (MLP only; attention adds more). Frontier-scale runs therefore keep generating across weight versions rather than recomputing in-flight requests at every update, and prefix hits on blocks computed by an older version are normal. vLLM supports both ways to apply an update. `pause_generation(mode="keep", clear_cache=False)` keeps every cached block, so the next turn of a trajectory hits the KV its earlier turns computed; every run in the experiments applied updates this way. With `clear_cache=True` the update resets the GPU prefix cache (protocol §6.6): the old KV then survives only in a KV offload tier, which the reset keeps unless `reset_connector=True`, and the next turn loads its context from the tier if the tier still holds it, else recomputes it (experiments E0).
 
 ## 8. Constraints on the design
 
@@ -101,7 +101,7 @@ That is ≈7.4% of each 807 s interval (MLP only; attention adds more). Frontier
 - **The indexer needs compression or a tier.** Uncompressed it is 5–100× R3; compressed (20-bit + zstd) it is 5–7× R3 up to 128K context and about 12× at 512K (section 10), and fits the same store. A cache segment for it in host memory is unaffordable, which favors using the delivery pool as the session's cache.
 - **Deduplication is mandatory and must be scoped to the session.** Rewriting the full context every turn would write ~25× more R3. Sharing across sessions would need reference counting for little gain.
 - **Release is per session, not per generation.** A trajectory lives ~2,660 s and spans ~3 weight updates (and up to ~107 versions of staleness), so prefix hits on blocks computed by an older version are normal. Rows must therefore carry their weight version, and a computation at another version is never interchangeable with the stored one.
-- **Weight updates happen with requests in flight.** Recomputing in-flight work at every update costs ~7% of each interval (section 7), so the engine pauses, resets its prefix cache and resumes. The delivery path must survive that reset without losing or replacing rows.
+- **Weight updates happen with requests in flight.** Recomputing in-flight work at every update costs ~7% of each interval (section 7), so the engine pauses and resumes without recomputing: running requests continue on their KV, and cached prefixes stay cached. A deployment may still reset the prefix cache at an update; the delivery path must survive either without losing or replacing rows.
 
 ## 9. Scenario coverage vs. existing systems
 
