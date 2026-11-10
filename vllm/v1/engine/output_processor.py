@@ -807,7 +807,11 @@ class OutputProcessor:
                     )
                 if req_state.remote_prefill_cached_tokens is not None:
                     req_state.num_cached_tokens = req_state.remote_prefill_cached_tokens
-                if req_state.parent_req is not None:
+                # A child that fails before prefill has no prefill stats.
+                if (
+                    req_state.parent_req is not None
+                    and engine_core_output.prefill_stats is not None
+                ):
                     req_state.parent_req.observe_prefill(
                         req_state.num_cached_tokens, req_state.num_cache_creation_tokens
                     )
