@@ -23,6 +23,7 @@ from unittest.mock import MagicMock
 
 import pytest
 from openai.types.shared import Reasoning
+from prometheus_client import REGISTRY
 
 from vllm.config.multimodal import MultiModalConfig
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
@@ -266,6 +267,30 @@ def serving_responses(
         enable_auto_tools=True,
         tool_parser="openai",
     )
+
+
+def _render_duration_count() -> float:
+    return (
+        REGISTRY.get_sample_value(
+            "vllm:request_render_duration_seconds_count",
+            {"model_name": _MODEL, "request_type": "chat"},
+        )
+        or 0
+    )
+
+
+@pytest.mark.asyncio
+async def test_render_duration_metric(online_renderer, serving_responses, monkeypatch):
+    """Responses renders are observed like Chat Completions renders."""
+    before = _render_duration_count()
+
+    chat_req = ChatCompletionRequest(model=_MODEL, messages=_USER)
+    await _capture_chat(online_renderer, chat_req, monkeypatch)
+    assert _render_duration_count() == before + 1
+
+    responses_req = ResponsesRequest(model=_MODEL, input=_USER)
+    await _capture_responses(serving_responses, responses_req, monkeypatch)
+    assert _render_duration_count() == before + 2
 
 
 @pytest.mark.asyncio

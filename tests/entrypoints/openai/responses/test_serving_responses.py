@@ -90,6 +90,7 @@ def _new_online_renderer() -> OnlineRenderer:
     renderer.parser = None
     renderer.trust_request_chat_template = True
     renderer.reasoning_effort_map = {}
+    renderer.model_config = SimpleNamespace(served_model_name="test-model")
     return renderer
 
 
@@ -596,7 +597,7 @@ async def test_online_renderer_adjusts_harmony_tool_choice(
     renderer = _new_online_renderer()
     renderer.use_harmony = True
     renderer.parser = StubParser
-    renderer.model_config = SimpleNamespace(max_model_len=100)
+    renderer.model_config.max_model_len = 100
     tokenizer = SimpleNamespace(truncation_side="left")
     renderer.renderer = SimpleNamespace(
         tokenizer=tokenizer,
@@ -631,7 +632,7 @@ async def test_online_renderer_applies_responses_token_budget_to_harmony_prompt(
 ):
     renderer = _new_online_renderer()
     renderer.use_harmony = True
-    renderer.model_config = SimpleNamespace(max_model_len=5)
+    renderer.model_config.max_model_len = 5
     renderer.renderer = SimpleNamespace(
         tokenizer=SimpleNamespace(truncation_side="left")
     )
@@ -662,7 +663,7 @@ async def test_online_renderer_renders_harmony_continuation_with_call_linkage(
 ):
     renderer = _new_online_renderer()
     renderer.use_harmony = True
-    renderer.model_config = SimpleNamespace(max_model_len=100)
+    renderer.model_config.max_model_len = 100
     renderer.renderer = SimpleNamespace(
         tokenizer=SimpleNamespace(truncation_side="left")
     )
@@ -753,7 +754,7 @@ async def test_online_renderer_preserves_missing_harmony_builtin_tool_behavior(
 ):
     renderer = _new_online_renderer()
     renderer.use_harmony = True
-    renderer.model_config = SimpleNamespace(max_model_len=100)
+    renderer.model_config.max_model_len = 100
     renderer.renderer = SimpleNamespace(
         tokenizer=SimpleNamespace(truncation_side="left")
     )

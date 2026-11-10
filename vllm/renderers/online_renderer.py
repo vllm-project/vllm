@@ -333,12 +333,15 @@ class OnlineRenderer:
                 request, should_include_tools
             )
 
+        self._observe_chat_render_duration(render_start)
+        return conversation, engine_inputs
+
+    def _observe_chat_render_duration(self, render_start: float) -> None:
         observe_request_render_duration(
             cast(str, self.model_config.served_model_name),
             "chat",
             time.perf_counter() - render_start,
         )
-        return conversation, engine_inputs
 
     async def render_responses(
         self,
@@ -350,6 +353,7 @@ class OnlineRenderer:
         skip_mm_cache: bool = False,
     ) -> ResponsesRenderResult | ErrorResponse:
         """Render a Responses request using only explicitly supplied history."""
+        render_start = time.perf_counter()
         template_error = self.validate_chat_template(
             request_chat_template=None,
             chat_template_kwargs=request.chat_template_kwargs,
@@ -359,12 +363,15 @@ class OnlineRenderer:
             return template_error
 
         if self.use_harmony:
-            return self._render_responses_with_harmony(
+            render_result = self._render_responses_with_harmony(
                 request,
                 previous_messages=previous_messages,
                 previous_response_outputs=previous_response_outputs,
                 tool_server=tool_server,
             )
+            if not isinstance(render_result, ErrorResponse):
+                self._observe_chat_render_duration(render_start)
+            return render_result
 
         if previous_messages is not None and any(
             isinstance(message, OpenAIMessage) for message in previous_messages
@@ -403,6 +410,7 @@ class OnlineRenderer:
             parser=self.parser,
             skip_mm_cache=skip_mm_cache,
         )
+        self._observe_chat_render_duration(render_start)
         return self._responses_render_result(messages, engine_inputs)
 
     def _render_responses_with_harmony(
