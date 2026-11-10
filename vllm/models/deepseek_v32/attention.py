@@ -327,6 +327,14 @@ class DeepseekV32Attention(MLAAttention):
             is_neox_style=not getattr(config, "indexer_rope_interleave", False),
         )
 
+    def _sort_topk_indices(self, num_tokens: int) -> None:
+        """Sort each token's selected indices ascending, invalid (-1) entries last."""
+        assert self.topk_indices_buffer is not None
+        view = self.topk_indices_buffer[:num_tokens]
+        top = torch.iinfo(view.dtype).max
+        ordered = torch.where(view < 0, top, view).sort(dim=-1).values
+        view.copy_(torch.where(ordered == top, -1, ordered))
+
     def use_tp_path(self, num_tokens: int) -> bool:
         """Whether a replicated layer runs this step head-sharded (all-reduce after)."""
         return num_tokens < self.tp_min_tokens
@@ -600,6 +608,10 @@ class DeepseekV32Attention(MLAAttention):
                 topk_backend=self.indexer.indexer_op.topk_backend,
                 logits_dtype=self.indexer.indexer_op.logits_dtype,
             )
+            if self.replicate and num_heads == self.num_local_heads:
+                # Replicated step: no all-reduce resyncs ranks, and the top-k
+                # kernel returns the same set in a rank-dependent order.
+                self._sort_topk_indices(q_c.shape[0])
         self.impl.record_logical_topk_ready()  # type: ignore[attr-defined]
 
         attn_metadata, _, kv_cache, layer_slot_mapping = get_attention_context(
