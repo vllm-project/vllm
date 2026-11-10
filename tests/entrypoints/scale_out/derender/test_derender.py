@@ -2041,8 +2041,8 @@ def test_derender_chat_keeps_parser_tool_call_id():
 
 
 @pytest.mark.parametrize("use_stub_parser", [False, True])
-def test_derender_chat_drops_tool_calls_without_tool_choice(use_stub_parser):
-    """/derender drops parsed tool calls for `tool_choice=None` and for a
+def test_derender_chat_drops_tool_calls_with_none_tool_choice(use_stub_parser):
+    """/derender drops parsed tool calls for `tool_choice="none"` and for a
     parser that ignores `tool_choice="none"` (Harmony), like coupled chat."""
 
     class _IgnoresToolChoiceParser:
@@ -2057,7 +2057,7 @@ def test_derender_chat_drops_tool_calls_without_tool_choice(use_stub_parser):
 
     choice = _derender_hermes_chat(
         _HERMES_TOOL_CALL_TEXT,
-        tool_choice="none" if use_stub_parser else None,
+        tool_choice="none",
         parser_cls=_IgnoresToolChoiceParser if use_stub_parser else None,
     )
 
