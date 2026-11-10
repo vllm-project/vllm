@@ -15,7 +15,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
     KVConnectorWorkerMetadata,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.layout import (
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.layout import (
     KeyMetadata,
     RankLocalStoreLayout,
     StoreLayout,
