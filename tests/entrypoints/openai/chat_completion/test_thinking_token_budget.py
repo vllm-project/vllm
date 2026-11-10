@@ -14,7 +14,6 @@ import openai
 import pytest
 import pytest_asyncio
 
-import vllm.envs as envs
 from tests.utils import RemoteOpenAIServer, multi_gpu_only, requires_fp8
 from vllm.platforms import current_platform
 from vllm.tokenizers import get_tokenizer
@@ -214,10 +213,6 @@ async def test_thinking_token_budget_limits_reasoning(client: openai.AsyncOpenAI
 
 
 @pytest.mark.asyncio
-@pytest.mark.skipif(
-    envs.VLLM_USE_RUST_FRONTEND,
-    reason="the Rust frontend ignores thinking_token_budget on /v1/responses",
-)
 @pytest.mark.parametrize("client", ["default"], indirect=True)
 async def test_thinking_token_budget_responses_api(client: openai.AsyncOpenAI):
     """/v1/responses applies thinking_token_budget like /v1/chat/completions."""
