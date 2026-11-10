@@ -635,24 +635,41 @@ def test_ec_producer_only_enables_mm_encoder_only(
 
 
 @pytest.mark.parametrize(
-    ("role", "language_model_only", "enable_mm_embeds", "expected"),
+    (
+        "role",
+        "language_model_only",
+        "supports_mm_inputs",
+        "enable_mm_embeds",
+        "expected",
+    ),
     [
-        ("kv_consumer", False, False, True),
-        # Text-only P/D decode: no MM infrastructure.
-        ("kv_consumer", True, False, False),
-        # EPD decode that skips the encoder but still takes embeddings.
-        ("kv_consumer", True, True, True),
-        ("ec_consumer", True, False, True),
+        ("kv_consumer", False, True, False, True),
+        # Text-only P/D decode or KV offload (via --language-model-only or all
+        # modality limits set to 0): no MM infrastructure.
+        ("kv_consumer", True, False, False, False),
+        ("kv_consumer", False, False, False, False),
+        ("kv_both", False, False, False, False),
+        # EPD decode that skips the encoder (or disables raw media via limits=0)
+        # but still opts in to taking embeddings.
+        ("kv_consumer", True, True, True, True),
+        ("kv_consumer", False, True, True, True),
+        ("ec_consumer", True, False, False, True),
+        ("ec_consumer", False, False, False, True),
     ],
 )
 def test_consumer_resolves_mm_embedding_inputs(
-    role: str, language_model_only: bool, enable_mm_embeds: bool, expected: bool
+    role: str,
+    language_model_only: bool,
+    supports_mm_inputs: bool,
+    enable_mm_embeds: bool,
+    expected: bool,
 ):
     mm_config = MultiModalConfig(
         language_model_only=language_model_only, enable_mm_embeds=enable_mm_embeds
     )
     model_config = MagicMock(spec=ModelConfig)
     model_config.multimodal_config = mm_config
+    model_config.supports_multimodal_inputs = supports_mm_inputs
     vllm_config = MagicMock(spec=VllmConfig)
     vllm_config.model_config = model_config
     vllm_config.ec_transfer_config = (
@@ -662,7 +679,7 @@ def test_consumer_resolves_mm_embedding_inputs(
     )
     vllm_config.kv_transfer_config = (
         KVTransferConfig(kv_connector="ExampleConnector", kv_role=role)
-        if role == "kv_consumer"
+        if role in ("kv_consumer", "kv_both")
         else None
     )
 
@@ -670,6 +687,44 @@ def test_consumer_resolves_mm_embedding_inputs(
 
     assert mm_config.allow_missing_mm_embeddings is expected
     assert mm_config.enable_mm_embeds is expected
+
+
+@pytest.mark.parametrize(
+    ("limit_mm_per_prompt", "enable_mm_embeds", "expected"),
+    [
+        ({"image": 0, "video": 0}, False, False),
+        ({"image": 0, "video": 0}, True, True),
+        ({"image": 0}, False, True),
+    ],
+)
+def test_kv_consumer_respects_zero_mm_limits(
+    limit_mm_per_prompt: dict[str, int], enable_mm_embeds: bool, expected: bool
+):
+    mm_config = MultiModalConfig(
+        limit_per_prompt=limit_mm_per_prompt,
+        enable_mm_embeds=enable_mm_embeds,
+    )
+    model_config = object.__new__(ModelConfig)
+    model_config.multimodal_config = mm_config
+    model_config.runner_type = "generate"
+    model_config.model = "dummy-vl"
+    info = MagicMock(supported_mm_limits={"image": None, "video": None})
+    vllm_config = MagicMock(spec=VllmConfig)
+    vllm_config.model_config = model_config
+    vllm_config.ec_transfer_config = None
+    vllm_config.kv_transfer_config = KVTransferConfig(
+        kv_connector="ExampleConnector", kv_role="kv_both"
+    )
+
+    with patch(
+        "vllm.multimodal.MULTIMODAL_REGISTRY.get_processing_info", return_value=info
+    ):
+        VllmConfig._resolve_mm_embedding_inputs(vllm_config)
+        supports_mm = model_config.supports_multimodal_inputs
+
+    assert mm_config.allow_missing_mm_embeddings is expected
+    assert mm_config.enable_mm_embeds is expected
+    assert supports_mm is expected
 
 
 def test_vllm_config_runs_the_mm_processor_device_check():

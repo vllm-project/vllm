@@ -2941,11 +2941,18 @@ class VllmConfig:
         is_kv_consumer = kv_config is not None and kv_config.is_kv_consumer
         # Derived, so overwrite unconditionally rather than honouring a value
         # that was set by hand.
-        # A language-model-only KV consumer (text-only P/D) stays text-only
-        # unless the user opts in with --enable-mm-embeds.
+        # A text-only KV consumer (via --language-model-only or all modality
+        # limits set to 0) stays text-only unless the user opts in with
+        # --enable-mm-embeds.
         mm_config.allow_missing_mm_embeddings = is_ec_consumer or (
             is_kv_consumer
-            and (not mm_config.language_model_only or mm_config.enable_mm_embeds)
+            and (
+                mm_config.enable_mm_embeds
+                or (
+                    not mm_config.language_model_only
+                    and bool(model_config.supports_multimodal_inputs)
+                )
+            )
         )
         if not mm_config.allow_missing_mm_embeddings:
             return
