@@ -319,28 +319,15 @@ class FlashInferMLAImpl(MLACommonImpl[FlashInferMLAMetadata]):
         )
         self._mla_counter_bytes: int | None = None
 
-    def host_bmm_scales(self, layer: AttentionLayer) -> tuple[float, float]:
-        # V is the latent kv_c, quantized with k_scale.
-        bmm1_scale = self.scale
-        bmm2_scale = 1.0
-        if is_quantized_kv_cache(self.kv_cache_dtype):
-            bmm1_scale *= layer._q_scale_float * layer._k_scale_float
-            bmm2_scale *= layer._k_scale_float
-        return bmm1_scale, bmm2_scale
-
     def process_kv_scales_after_loading(self, layer: AttentionLayer) -> None:
         if not is_quantized_kv_cache(self.kv_cache_dtype):
             return
         device = layer._k_scale.device
         for name, value in zip(
-            ("_bmm1_scale_device", "_bmm2_scale_device"),
-            self.host_bmm_scales(layer),
+            ("_bmm1_scale_device", "_bmm2_scale_device"), self.host_bmm_scales(layer)
         ):
-            refill_derived(
-                self,
-                name,
-                torch.tensor([value], dtype=torch.float32, device=device),
-            )
+            new = torch.full((1,), value, dtype=torch.float32, device=device)
+            refill_derived(self, name, new)
 
     def forward_mqa(
         self,

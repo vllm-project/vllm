@@ -3062,6 +3062,16 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
         self.v_head_dim = v_head_dim
         self.kv_b_proj = kv_b_proj
 
+    def host_bmm_scales(self, layer: AttentionLayer) -> tuple[float, float]:
+        """Decode bmm1 (softmax) and bmm2 (output) scales from `layer`'s host
+        q/k scales. V is the latent kv_c, quantized with k_scale."""
+        bmm1_scale = self.scale
+        bmm2_scale = 1.0
+        if is_quantized_kv_cache(self.kv_cache_dtype):
+            bmm1_scale *= layer._q_scale_float * layer._k_scale_float
+            bmm2_scale *= layer._k_scale_float
+        return bmm1_scale, bmm2_scale
+
     def _concat_k_nope_k_pe(
         self, k_nope: torch.Tensor, k_pe: torch.Tensor
     ) -> torch.Tensor:

@@ -1803,7 +1803,10 @@ def maybe_remap_kv_scale_name(name: str, params_dict: dict) -> str | None:
         return name
     # The cache-scale mapper's `.attn.{q,k,v}_scale`, for an attention layer
     # that holds its scales itself (e.g. DeepSeek V3.2's MLA `self_attn`).
-    if (unnested := re.sub(r"\.attn(\.[qkv]_scale)$", r"\1", name)) in params_dict:
+    if (
+        name.endswith((".q_scale", ".k_scale", ".v_scale"))
+        and (unnested := re.sub(r"\.attn(\.[qkv]_scale)$", r"\1", name)) in params_dict
+    ):
         return unnested
     if name.endswith(".kv_scale"):
         logger.warning_once(

@@ -867,12 +867,7 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
         if self._workspace_buffer is None:
             self._workspace_buffer = _get_workspace_buffer(device)
 
-        # Rederived at every forward: a reload can change the q/k scales.
-        self.bmm1_scale = self.scale
-        self.bmm2_scale = 1.0
-        if is_quantized_kv_cache(self.kv_cache_dtype):
-            self.bmm1_scale *= layer._q_scale_float * layer._k_scale_float
-            self.bmm2_scale *= layer._k_scale_float
+        self.bmm1_scale, self.bmm2_scale = self.host_bmm_scales(layer)
 
     def _get_prims_ts_plans(self, device: torch.device, heads: int, max_topk: int):
         return _prims_ts_plans.get(

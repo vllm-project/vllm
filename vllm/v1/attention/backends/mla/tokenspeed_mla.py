@@ -306,13 +306,7 @@ class TokenspeedMLAImpl(MLACommonImpl[MLACommonMetadata]):
         else:
             q = q.view(num_decodes, -1, q.shape[-2], q.shape[-1])
 
-        # FP8 KV cache is mandatory for this backend, so q_scale/k_scale
-        # always apply. softmax_scale is bmm1; output_scale is bmm2 — both
-        # required to recover the correct attention output from the FP8
-        # KV cache (V is stored as V_real/k_scale). Read at every forward:
-        # a reload can change the q/k scales.
-        softmax_scale = self.scale * layer._q_scale_float * layer._k_scale_float
-        output_scale = layer._k_scale_float
+        softmax_scale, output_scale = self.host_bmm_scales(layer)
 
         workspace = _get_workspace(
             q.device,

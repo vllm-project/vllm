@@ -625,11 +625,6 @@ def draft_forward_mqa(
     )
 
 
-def _scales(impl, layer):
-    """The stock decode's bmm1 / bmm2 scales (`FlashInferMLAImpl.forward_mqa`)."""
-    return impl.host_bmm_scales(layer)
-
-
 LOG2E = 1.4426950408889634
 
 
@@ -781,7 +776,7 @@ class DraftDcp:
         )
         query = mailbox[:n].view(torch.float8_e4m3fn)
         impl, decode = attn.impl, metadata.decode
-        bmm1, bmm2 = _scales(impl, attn)
+        bmm1, bmm2 = impl.host_bmm_scales(attn)
         from vllm.v1.attention.backends.mla.flashinfer_mla import _get_workspace_buffer
 
         o, lse = folded_decode(
