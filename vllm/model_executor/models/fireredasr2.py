@@ -52,6 +52,7 @@ from .interfaces import (
     SupportsTranscription,
     _require_is_multimodal,
 )
+from .mm_encoder_bucketing import EncoderBucketingSpec, install_encoder_bucketing
 from .qwen2 import Qwen2ForCausalLM
 from .utils import (
     AutoWeightsLoader,
@@ -61,6 +62,68 @@ from .utils import (
 )
 
 logger = init_logger(__name__)
+
+
+class FireRedASR2BucketingSpec(EncoderBucketingSpec):
+    """Bucketing semantics for FireRed-ASR2's fixed-window Conformer encoder.
+
+    `input_features` is `[B][T][n_mel]` (time on dim 1), padded to a fixed
+    3000-frame window; `speech_lengths` carries the true mel-frame count.
+    Bucketing crops the time axis to a rung, so short clips stop paying for the
+    fixed window. The Conformer is mask-aware (`-inf` + conv mask from
+    `speech_lengths`), so the crop is bit-exact.
+    """
+
+    frames_per_second = 100  # frame_shift=10ms -> hop 160 @ 16 kHz
+    context_margin = 7  # Conv2dSubsampling context (left+1+right = 3+1+3)
+
+    def item_lengths(
+        self, mm_kwargs_batch: Mapping[str, object]
+    ) -> list[int] | None:
+        speech_lengths = mm_kwargs_batch.get("speech_lengths")
+        if speech_lengths is None:
+            return None
+        if isinstance(speech_lengths, torch.Tensor):
+            return speech_lengths.tolist()
+        return [int(s.item()) for s in speech_lengths]
+
+    def padded_time(self, mm_kwargs_batch: Mapping[str, object]) -> int:
+        input_features = mm_kwargs_batch.get("input_features")
+        if input_features is None:
+            return 0
+        if isinstance(input_features, list):
+            return max(int(f.shape[0]) for f in input_features)  # [T_i, n_mel]
+        return int(input_features.shape[1])  # [B, T, n_mel]
+
+    def crop(
+        self,
+        mm_kwargs_batch: Mapping[str, object],
+        indices: list[int],
+        rung: int,
+    ) -> dict[str, object]:
+        input_features = mm_kwargs_batch["input_features"]
+        speech_lengths = mm_kwargs_batch["speech_lengths"]
+        fake_token_lengths = mm_kwargs_batch.get("fake_token_lengths")
+
+        def select(seq):
+            if isinstance(seq, torch.Tensor):
+                return seq[torch.tensor(indices, dtype=torch.long, device=seq.device)]
+            return [seq[i] for i in indices]
+
+        if isinstance(input_features, list):
+            feats = [input_features[i][:rung] for i in indices]
+        else:
+            feats = input_features[
+                torch.tensor(indices, dtype=torch.long, device=input_features.device),
+                :rung,
+            ]
+        result = {
+            "input_features": feats,
+            "speech_lengths": select(speech_lengths),
+        }
+        if fake_token_lengths is not None:
+            result["fake_token_lengths"] = select(fake_token_lengths)
+        return result
 
 
 class FireRedASR2AudioInputs(TensorSchema):
@@ -414,6 +477,13 @@ class FireRedASR2ForConditionalGeneration(
                 vllm_config=vllm_config,
                 prefix=maybe_prefix(prefix, "model"),
             )
+        install_encoder_bucketing(
+            self,
+            {"audio": self.model.encoder.audio_encoder},
+            FireRedASR2BucketingSpec(),
+            model_type="fireredasr2",
+            additional_config=getattr(vllm_config, "additional_config", None),
+        )
 
         logit_scale = getattr(config, "logit_scale", 1.0)
         self.logits_processor = LogitsProcessor(config.vocab_size, scale=logit_scale)

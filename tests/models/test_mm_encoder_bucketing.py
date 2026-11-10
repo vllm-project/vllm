@@ -362,3 +362,27 @@ def test_canary_spec_buckets_list_shaped_features():
         all_lengths.append(kw["feature_lengths"].item())
     assert by_len == {0: 5, 1: 30, 2: 12}
     assert sorted(all_lengths) == [5, 12, 30]
+
+
+def test_firered_spec_buckets_tensor_shaped_features():
+    from vllm.model_executor.models.fireredasr2 import FireRedASR2BucketingSpec
+
+    feats = torch.randn(3, 3000, 80)  # [B, T, n_mel], time on dim 1
+    speech_lengths = torch.tensor([500, 2000, 1200])
+    fake_token_lengths = torch.tensor([124, 499, 299])
+    batch = {
+        "input_features": feats,
+        "speech_lengths": speech_lengths,
+        "fake_token_lengths": fake_token_lengths,
+    }
+    bucketer = EncoderBucketing(
+        FireRedASR2BucketingSpec(), LengthBucketingConfig((800, 1600, 3000))
+    )
+    rungs = bucketer.bucket(batch, 3)
+    # windows (margin 7): 500->800, 2000->3000, 1200->1600
+    got = {r[1]["input_features"].shape[1]: r[0] for r in rungs}
+    assert got == {800: [0], 3000: [1], 1600: [2]}
+    # crop selects rows and keeps the length tensors aligned
+    for indices, kw in rungs:
+        assert kw["speech_lengths"].shape == (len(indices),)
+        assert kw["fake_token_lengths"].shape == (len(indices),)

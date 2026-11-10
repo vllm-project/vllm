@@ -81,6 +81,7 @@ LOSSLESS_APPROX = "approx"
 _VERIFIED_FOR_BUCKETING: dict[str, str] = {
     "qwen2_audio": LOSSLESS_BIT_EXACT,
     "canary": LOSSLESS_BIT_EXACT,
+    "fireredasr2": LOSSLESS_BIT_EXACT,
 }
 
 
