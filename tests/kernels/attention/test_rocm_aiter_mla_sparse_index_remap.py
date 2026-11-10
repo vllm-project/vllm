@@ -164,7 +164,7 @@ def test_forward_mqa_remaps_once_per_metadata(monkeypatch):
     """Skip layers sharing a metadata share its remap; the first one pays.
 
     All layers read one top-k buffer, so the reuse has to key off the metadata
-    that owns ``paged_kv_indices``, not off the buffer being distinct.
+    that owns `paged_kv_indices`, not off the buffer being distinct.
     """
     _patch_init_deps(monkeypatch)
     buffer = _new_buffer()
@@ -188,8 +188,8 @@ def test_forward_mqa_remaps_once_per_metadata(monkeypatch):
 def test_forward_mqa_remaps_for_each_metadata(monkeypatch):
     """Skip layers on a second metadata must remap its own paged_kv_indices.
 
-    Regression: gating on ``indexer is not None`` skipped every layer in the
-    non-indexer metadata group, leaving its ``paged_kv_indices`` unwritten.
+    Regression: gating on `indexer is not None` skipped every layer in the
+    non-indexer metadata group, leaving its `paged_kv_indices` unwritten.
     """
     _patch_init_deps(monkeypatch)
     buffer = _new_buffer()
@@ -214,7 +214,7 @@ def test_forward_mqa_remaps_for_each_metadata(monkeypatch):
 def test_forward_mqa_remaps_after_a_later_indexer_write(monkeypatch):
     """A skip metadata must be refreshed once per indexer write, not once ever.
 
-    Regression for cross-layer index sharing (``index_topk_freq``). With
+    Regression for cross-layer index sharing (`index_topk_freq`). With
     freq=4 on a 78-layer model the 57 skip layers share one metadata while the
     21 indexer layers share another, so the skip metadata has to pick up every
     new selection. Recording only the buffer left layers 4 onwards attending

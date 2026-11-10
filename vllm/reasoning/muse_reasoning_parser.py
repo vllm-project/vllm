@@ -1,17 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Reasoning-content parser for Muse.
-Port of the ``reasoning_content`` rule from the HuggingFace Muse
-``MUSE_GLIMMER_RESPONSE_SCHEMA`` (synced with internal master). Muse emits
-chain-of-thought in ``to=self`` channels delimited by ``<|message|>`` ... ``<|eom|>``:
+Port of the `reasoning_content` rule from the HuggingFace Muse
+`MUSE_GLIMMER_RESPONSE_SCHEMA` (synced with internal master). Muse emits
+chain-of-thought in `to=self` channels delimited by `<|message|>` ... `<|eom|>`:
     to=self<|message|>...reasoning...<|eom|>
 Spark also routes recipient-less messages to reasoning, commentary to content,
 and drops developer messages. The Glimmer compatibility profile retains its
 original channel semantics.
-Because Muse's framing markers (``<|message|>``, ``<|eom|>``) are not guaranteed
+Because Muse's framing markers (`<|message|>`, `<|eom|>`) are not guaranteed
 to be single vocab tokens across every checkpoint's tokenizer, this parser works
 on the decoded text with regexes rather than the single start/end-token base class.
-Usage: ``--reasoning-parser muse``
+Usage: `--reasoning-parser muse`
 """
 
 from __future__ import annotations
@@ -112,9 +112,9 @@ def _muse_current_turn(text: str) -> str:
 
 def _current_assistant_turn(text: str) -> str:
     """Return only the text generated in the current assistant turn.
-    ``is_reasoning_end`` is evaluated on the PROMPT token-ids at stream start,
-    and an Muse prompt legitimately contains ATEM markers (``render_tool_defs``
-    writes a literal ``<atem:function_calls>`` example into the system message,
+    `is_reasoning_end` is evaluated on the PROMPT token-ids at stream start,
+    and an Muse prompt legitimately contains ATEM markers (`render_tool_defs`
+    writes a literal `<atem:function_calls>` example into the system message,
     and prior assistant turns may carry real tool calls). Anchoring on the last
     channel-open keeps prompt text from deciding the phase.
     """
@@ -125,7 +125,7 @@ def _current_assistant_turn(text: str) -> str:
 def _trim_open_body(body: str) -> str:
     """Hold back any tail of a still-growing body that could still be framing.
     Iterated to a fixpoint because the two cases compose: `" to=skill<"` needs
-    the partial-marker trim (``<``) before the partial-header trim can see
+    the partial-marker trim (`<`) before the partial-header trim can see
     `" to=skill"`. Trimming only once leaks the recipient name as reasoning.
     """
     while True:
@@ -164,22 +164,22 @@ class MuseReasoningParser(ReasoningParser):
         self, request: ChatCompletionRequest | ResponsesRequest
     ) -> ChatCompletionRequest | ResponsesRequest:
         """Preserve Muse's ATEM framing tokens in the decoded output.
-        vLLM's serving default is ``skip_special_tokens=True``, which strips
-        ``<|start|>`` / ``<|message|>`` / ``<|eom|>`` / ``<|eot|>`` before the
+        vLLM's serving default is `skip_special_tokens=True`, which strips
+        `<|start|>` / `<|message|>` / `<|eom|>` / `<|eot|>` before the
         parsers run, collapsing reasoning into content and breaking channel
         scoping. Unlike the base tool-parser hook we do NOT touch
-        ``structured_outputs`` -- Muse emits native ATEM, not JSON.
+        `structured_outputs` -- Muse emits native ATEM, not JSON.
         """
         request.skip_special_tokens = False
         return request
 
     def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
         """Whether the model has left reasoning and opened a TOOL channel.
-        A ``to=user`` answer is NOT a reason to leave the reasoning phase -- this
+        A `to=user` answer is NOT a reason to leave the reasoning phase -- this
         parser surfaces that content itself. Only a real tool channel switches
-        the ``DelegatingParser`` phase machine over to the tool parser.
+        the `DelegatingParser` phase machine over to the tool parser.
         Both closed and unterminated reasoning spans are stripped before the
-        check, so an ``<atem:invoke>`` the model merely echoes inside its CoT
+        check, so an `<atem:invoke>` the model merely echoes inside its CoT
         never flips the phase.
         """
         try:
@@ -236,11 +236,11 @@ class MuseReasoningParser(ReasoningParser):
     @classmethod
     def _tool_channel_remainder(cls, text: str) -> str:
         """Text from the first tool-channel header onward, framing INCLUDED.
-        ``DelegatingParser.parse_delta`` rebuilds ``current_text`` from whatever
-        this parser returns as ``.content`` on the transition delta and commits
+        `DelegatingParser.parse_delta` rebuilds `current_text` from whatever
+        this parser returns as `.content` on the transition delta and commits
         it; anything not returned is destroyed. It must start AT the
-        ``to=<name><|message|>`` header -- handing over the text after the header
-        loses the recipient, and the tool parser then sees a bare ``<|message|>``,
+        `to=<name><|message|>` header -- handing over the text after the header
+        loses the recipient, and the tool parser then sees a bare `<|message|>`,
         classifies it as the content channel, and leaks the ATEM markup.
         """
         if not cls._glimmer_compat:
@@ -260,9 +260,9 @@ class MuseReasoningParser(ReasoningParser):
 
     @classmethod
     def _classify_bodies(cls, text: str) -> tuple[str, str]:
-        """Split ``text`` into (reasoning_body, content_body), channel-aware.
+        """Split `text` into (reasoning_body, content_body), channel-aware.
         Framing markers and tool channels contribute nothing -- the tool parser
-        owns those. A body ends at ``<|eom|>`` / ``<|eot|>``, at the next channel
+        owns those. A body ends at `<|eom|>` / `<|eot|>`, at the next channel
         header, or at end-of-text (an OPEN body, which is held back).
         """
         reasoning_parts: list[str] = []
@@ -315,9 +315,9 @@ class MuseReasoningParser(ReasoningParser):
         request: ChatCompletionRequest | ResponsesRequest,
     ) -> str | None:
         """Promote un-surfaced content when the stream ends mid-reasoning.
-        ``DelegatingParser.finalize_generation`` calls this when
-        ``reasoning_ended`` is still False. Returns only the channel-classified
-        ``to=user`` body, and only the portion not already streamed.
+        `DelegatingParser.finalize_generation` calls this when
+        `reasoning_ended` is still False. Returns only the channel-classified
+        `to=user` body, and only the portion not already streamed.
         """
         _, content_body = self._classify_bodies(previous_text)
         remainder = content_body[len(self._emitted_content) :]
@@ -398,7 +398,7 @@ class MuseReasoningParser(ReasoningParser):
         delta_token_ids: Sequence[int],
     ) -> DeltaMessage | None:
         """Channel-aware streaming split of reasoning vs content.
-        Classifies the full ``current_text`` and emits only what has not been
+        Classifies the full `current_text` and emits only what has not been
         emitted yet, so no framing token is ever surfaced and a delta straddling
         a channel boundary only contributes the portion inside a real body.
         """

@@ -20,7 +20,7 @@ def free_hugepages():
 
 @pytest.fixture
 def hugepage_with_free():
-    """Return a HugeTLB page size with at least ``n`` free pages, else skip."""
+    """Return a HugeTLB page size with at least `n` free pages, else skip."""
 
     def pick(n: int) -> int:
         pages = [p for p in (2 << 20, 1 << 30) if _free_hugepages(p) >= n]

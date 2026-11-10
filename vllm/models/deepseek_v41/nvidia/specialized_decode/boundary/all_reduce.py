@@ -14,11 +14,11 @@ from .. import FUSED_MHC_MAX_ROWS
 
 
 class BoundaryAllReduce(AllReduceMHC):
-    """``AllReduceMHC`` sized for every FULL decode graph of the executor, with
+    """`AllReduceMHC` sized for every FULL decode graph of the executor, with
     the residual-only variant and, optionally, the MXFP8 layer input.
 
     A producer that stores its contribution into the mailbox itself (the
-    publishing ``wo_b`` GEMM) calls ``mark_published``; the next ``__call__``
+    publishing `wo_b` GEMM) calls `mark_published`; the next `__call__`
     with that tensor then launches only the consumer.
     """
 
@@ -39,15 +39,15 @@ class BoundaryAllReduce(AllReduceMHC):
 
     def publish_target(self) -> tuple[int, int]:
         """(multicast mailbox address, stage-state address) for a producer
-        that stores its contribution itself, as ``_SharedOnlyPublishDeviceKernel``
-        does: generation ``stage_state[0]``, slot ``[rank][token]``, BF16 with
-        negative zero cleared, then ``stage_state[1] = stage_state[0]``. Both
+        that stores its contribution itself, as `_SharedOnlyPublishDeviceKernel`
+        does: generation `stage_state[0]`, slot `[rank][token]`, BF16 with
+        negative zero cleared, then `stage_state[1] = stage_state[0]`. Both
         stay valid for this instance's lifetime. This is the LL mailbox, for
-        steps of fewer than ``bt_min_rows`` rows."""
+        steps of fewer than `bt_min_rows` rows."""
         return self._multicast, self._stage_state.data_ptr()
 
     def mark_published(self, x: torch.Tensor) -> None:
-        """Record that ``x``'s kernel published it; ``__call__(x, ...)``, which
+        """Record that `x`'s kernel published it; `__call__(x, ...)`, which
         must come next, then launches only the consumer."""
         if self._published is not None:
             raise RuntimeError("a published contribution is still unreduced")

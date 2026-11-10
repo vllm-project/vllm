@@ -9,18 +9,18 @@ Each check runs one rank late, so a missing wait reads a peer's stale data:
   residual-only, bitwise against the separate all-reduce and mHC kernels;
 * the executor's sublayer boundary on it, with the next mHC coefficients on
   the side stream, against the separate kernels and the stock mHC pre;
-* the ``wo_b`` GEMM that publishes into the fused kernel's mailbox, per
+* the `wo_b` GEMM that publishes into the fused kernel's mailbox, per
   split-K tactic, bitwise against FlashInfer's GEMM plus the separate publish;
-* logits gathered with the executor's all-gather (``LamportAllGather``),
+* logits gathered with the executor's all-gather (`LamportAllGather`),
   bitwise against NCCL, and NCCL above its capacity;
 * the row-sharded decode indexer, its slices gathered with it, against the
   replicated one (equal top-k sets up to exactly tied scores);
-* one CUDA graph of all of these, replayed ``REPLAYS`` times bitwise.
+* one CUDA graph of all of these, replayed `REPLAYS` times bitwise.
 
 Needs four SM100-family GPUs with NVLink multicast and flashinfer-python
 0.7.2 or newer; about 5 minutes. For a race stress run, run this file as a
-module (``python -m tests.models.deepseek_v41.nvidia.specialized_decode.test_numerics``)
-with ``--replays 100000``.
+module (`python -m tests.models.deepseek_v41.nvidia.specialized_decode.test_numerics`)
+with `--replays 100000`.
 """
 
 import argparse
@@ -186,7 +186,7 @@ def _check_all_reduce_mhc(arm, rank):
 
 
 def _check_boundaries(arm, rank):
-    """``Boundaries.sublayer`` on a partial sum and on a deferred MoE output,
+    """`Boundaries.sublayer` on a partial sum and on a deferred MoE output,
     with the next coefficients on the side stream: the streams
     bitwise against the separate all-reduce and mHC post, the mixes bitwise
     against the stock mHC pre on those streams, and the layer input within
@@ -290,7 +290,7 @@ WO_B_K = 2048  # o_lora_rank x local groups at TP4
 
 
 def _wo_b(rank: int, index: int):
-    """A ``wo_b`` linear with its weights processed for the low-latency
+    """A `wo_b` linear with its weights processed for the low-latency
     MXFP8 kernel, different on each rank."""
     from vllm.model_executor.kernels.linear.mxfp8.flashinfer import (
         FlashInferCutedslMxfp8LinearKernel,
@@ -319,7 +319,7 @@ def _wo_b(rank: int, index: int):
 
 
 def _attention_output(rows: int, rank: int):
-    """``wo_b``'s MXFP8 input as the fused WO-A kernel emits it, with a zero
+    """`wo_b`'s MXFP8 input as the fused WO-A kernel emits it, with a zero
     row (zero outputs, whose negative zeros the publish clears)."""
     from vllm.model_executor.layers.fusion.quant_activation import (
         QuantizedActivation,
@@ -340,7 +340,7 @@ def _attention_output(rows: int, rank: int):
 
 
 def _flashinfer_wo_b(linear, qa, tactic):
-    """FlashInfer's low-latency MXFP8 GEMM with ``tactic`` (None: the
+    """FlashInfer's low-latency MXFP8 GEMM with `tactic` (None: the
     default), and the valid tactics."""
     from flashinfer.gemm import gemm_base
 
@@ -476,7 +476,7 @@ def _index_keys(ratio: int, generator):
 
 
 def _decode_step(requests, padding, ratio, keys, generator):
-    """The indexer metadata and queries of a pure-decode step of ``NEXT_N``
+    """The indexer metadata and queries of a pure-decode step of `NEXT_N`
     rows per request; padding requests have rows of length 0."""
     from vllm.models.deepseek_v41.common.ops import fused_indexer_q_rope_quant
     from vllm.utils.deep_gemm import get_paged_mqa_logits_metadata
@@ -543,7 +543,7 @@ def _decode_step(requests, padding, ratio, keys, generator):
 
 
 def _indexer(keys, ratio, candidates):
-    """The decode indexer of a layer, writing ``topk`` (and ``candidates``)."""
+    """The decode indexer of a layer, writing `topk` (and `candidates`)."""
     from vllm.model_executor.layers.sparse_attn_indexer import SparseAttnIndexer
 
     rows = max(r for r, _ in INDEX_BATCHES) * NEXT_N
@@ -573,7 +573,7 @@ def _indexer(keys, ratio, candidates):
 
 def _run_indexer(indexer, step, stock=False, all_gather=None):
     """One decode forward, stock or the executor's (gathering its row slices
-    with ``all_gather``, else NCCL); returns the top-k and candidate rows it
+    with `all_gather`, else NCCL); returns the top-k and candidate rows it
     wrote."""
     from vllm.forward_context import ForwardContext, override_forward_context
     from vllm.models.deepseek_v41.nvidia.specialized_decode.attention.indexer import (
@@ -682,7 +682,7 @@ def _check_row_sharded_indexer(rank, all_gather):
 
 
 def _check_replays(arm, publisher, keys, rank, replays, all_gather):
-    """One CUDA graph of a decode step's collectives: a published ``wo_b``
+    """One CUDA graph of a decode step's collectives: a published `wo_b`
     boundary, a deferred finalize with the MXFP8 layer input, a residual-only
     boundary, a full-capacity boundary, the row-sharded indexer and two logits
     gathers of other sizes on the indexer's all-gather, with the ranks

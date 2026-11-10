@@ -48,7 +48,7 @@ def get_offloading_group_ids(kv_cache_config: "KVCacheConfig") -> tuple[int, ...
 def _group_kv_bytes_per_block(group: "KVCacheGroupSpec") -> int:
     """Return the physical bytes occupied by one block of a cache group.
 
-    Worker configs may retain ``UniformTypeKVCacheSpecs`` while scheduler
+    Worker configs may retain `UniformTypeKVCacheSpecs` while scheduler
     configs flatten that wrapper to one representative per-layer spec.  Keep
     the result invariant across those two representations.
     """
