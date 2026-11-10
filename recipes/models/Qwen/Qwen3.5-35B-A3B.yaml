@@ -4,7 +4,7 @@ meta:
   provider: "Qwen"
   description: "Compact Qwen3.5 multimodal MoE (35B total / 3B active) with gated delta networks, 256 experts, and 262K context"
   date_added: 2026-04-22
-  date_updated: 2026-10-27
+  date_updated: 2026-11-13
   tasks:
     - multimodal
     - text
@@ -42,10 +42,23 @@ features:
       - "--reasoning-parser"
       - "qwen3"
   spec_decoding:
-    description: "Multi-token prediction speculative decoding for lower latency"
-    args:
-      - "--speculative-config"
-      - '{"method":"mtp","num_speculative_tokens":1}'
+    description: "Speculative decoding for lower latency — the built-in MTP head or the DFlash draft model"
+    default_mode: mtp
+    modes:
+      mtp:
+        label: "MTP"
+        description: "Built-in multi-token prediction head — no extra checkpoint to download."
+        args:
+          - "--speculative-config"
+          - '{"method":"mtp","num_speculative_tokens":1}'
+      dflash:
+        label: "DFlash"
+        description: "Block-diffusion draft model that proposes 7 tokens in one pass; needs the separate z-lab/Qwen3.5-35B-A3B-DFlash draft checkpoint."
+        variants:
+          - default
+        args:
+          - "--speculative-config"
+          - '{"method":"dflash","model":"z-lab/Qwen3.5-35B-A3B-DFlash","num_speculative_tokens":7}'
   text_only:
     description: "Skip loading the vision encoder for text-only workloads — frees VRAM for KV cache. Mutually exclusive with encoder_parallel."
     args:
@@ -186,6 +199,7 @@ guide: |
   ## References
 
   - [Model card](https://huggingface.co/Qwen/Qwen3.5-35B-A3B)
+  - [DFlash draft model](https://huggingface.co/z-lab/Qwen3.5-35B-A3B-DFlash)
   - [FP8 checkpoint](https://huggingface.co/Qwen/Qwen3.5-35B-A3B-FP8)
   - [GPTQ-Int4 checkpoint](https://huggingface.co/Qwen/Qwen3.5-35B-A3B-GPTQ-Int4)
   - [Qwen3.5-397B-A17B recipe](../Qwen3.5-397B-A17B)
