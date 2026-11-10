@@ -54,6 +54,28 @@ H, E = 5120, 384
 MAX_M = 256
 # the mono decode layer's rows (below ours)
 MONO_ROWS = 16
+# The model shapes the kernels are written for (DeepSeek-V4.1-Flash's config):
+# a checkpoint that differs in any of them keeps vLLM's path. The MoE routing
+# settings are checked per layer (_k2_install).
+SHAPES = {
+    "hidden_size": H,
+    "n_routed_experts": E,
+    "moe_intermediate_size": 2304,
+    "n_shared_experts": 1,
+    "num_experts_per_tok": 6,
+    "num_attention_heads": 64,
+    "q_lora_rank": 1280,
+    "head_dim": 512,
+    "qk_rope_head_dim": 64,
+    "o_lora_rank": 1024,
+    "o_groups": 8,
+    "index_n_heads": 32,
+    "index_head_dim": 128,
+    "index_topk": 512,
+    "sliding_window": 128,
+    "hc_mult": 4,
+    "hc_sinkhorn_iters": 20,
+}
 # --kv-cache-dtype values DeepseekV4Attention turns into fp8_ds_mla (K1's cache)
 KV_DTYPES = ("auto", "fp8", "fp8_e4m3", "fp8_ds_mla")
 
@@ -66,12 +88,12 @@ def _log(msg: str) -> None:
 
 def enabled(vllm_config) -> bool:
     """Whether this process runs the asm decode layers: `--monokernel` on a
-    gfx950 GPU at TP4, DeepSeek-V4.1-Flash's shapes and an AMDGPU LLVM (clang,
-    ld.lld) to build the kernels. Decided once, when the first decoder layer is
-    built."""
+    gfx950 GPU at TP4, DeepSeek-V4.1-Flash's shapes (SHAPES) and an AMDGPU LLVM
+    (clang, ld.lld) to build the kernels. Decided once, when the first decoder
+    layer is built."""
     if "on" not in _cfg:
         why = None
-        config = vllm_config.model_config.hf_config
+        config = vllm_config.model_config.hf_text_config
         if not vllm_config.kernel_config.monokernel:
             why = "--monokernel is off"
         else:
@@ -93,8 +115,8 @@ def enabled(vllm_config) -> bool:
                 why = "no LoRA adapters"
             elif vllm_config.kv_transfer_config is not None:
                 why = "no KV transfer"
-            elif config.hidden_size != H or config.n_routed_experts != E:
-                why = "needs DeepSeek-V4.1-Flash's shapes"
+            elif shape := _shape_mismatch(config):
+                why = f"needs DeepSeek-V4.1-Flash's shapes ({shape})"
             elif (kv := vllm_config.cache_config.cache_dtype) not in KV_DTYPES:
                 why = f"needs the fp8_ds_mla KV cache (have {kv})"
             elif missing := toolchain_missing():
@@ -115,6 +137,16 @@ def enabled(vllm_config) -> bool:
             log = logger.warning_once if "needs gfx950" not in why else logger.info_once
             log("DeepSeek-V4.1 asm decode off: %s", why, scope="global")
     return _cfg["on"]
+
+
+def _shape_mismatch(config) -> str | None:
+    """The first config field that isn't the kernels' SHAPES, as "name: value
+    (needs value)", else None."""
+    for name, want in SHAPES.items():
+        have = getattr(config, name, None)
+        if have != want:
+            return f"{name}: {have} (needs {want})"
+    return None
 
 
 def mono_rows() -> int | None:
