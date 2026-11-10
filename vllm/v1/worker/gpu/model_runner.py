@@ -71,6 +71,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
 from vllm.utils.gc_utils import freeze_gc_for_cudagraph_capture
+from vllm.utils.math_utils import cdiv
 from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, async_tensor_h2d
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
@@ -1931,7 +1932,30 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self._set_active_loras(*lora_inputs)
         else:
             # No actual tokens to run. A dummy run for DP or memory profiling.
-            dummy_num_reqs = batch_desc.num_reqs or num_reqs
+            # Every DP rank must run the agreed batch_desc.num_tokens (MoE
+            # collectives, graph shape), so an idle rank padded to its peers'
+            # count cannot drop tokens. Spread them so no dummy request exceeds
+            # max_model_len, the most a block-table row backs.
+            dummy_num_reqs = max(
+                batch_desc.num_reqs or num_reqs,
+                cdiv(batch_desc.num_tokens, self.max_model_len),
+            )
+            if dummy_num_reqs > self.max_num_reqs:
+                # Only when max_num_batched_tokens > max_num_seqs *
+                # max_model_len, which SchedulerConfig allows with a warning.
+                # The profile run reaches here with max_num_batched_tokens, so
+                # raising would fail startup; stay within the request buffers.
+                logger.warning_once(
+                    "A dummy batch of %d tokens needs %d requests to keep each "
+                    "within max_model_len (%d), but max_num_seqs is %d; dummy "
+                    "requests will exceed max_model_len. Set "
+                    "max_num_batched_tokens <= max_num_seqs * max_model_len.",
+                    batch_desc.num_tokens,
+                    dummy_num_reqs,
+                    self.max_model_len,
+                    self.max_num_reqs,
+                )
+                dummy_num_reqs = self.max_num_reqs
             input_batch = InputBatch.make_dummy(
                 dummy_num_reqs,
                 batch_desc.num_tokens,
@@ -1940,9 +1964,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 # Profiling and warmup must route the dummy tokens to experts
                 # so MoE memory is measured and MoE kernels are exercised.
                 is_padding=not is_profile,
-                # An idle DP rank pads its one dummy request to the busiest
-                # rank's token count, which can exceed max_model_len.
-                max_model_len=self.max_model_len,
             )
             if randomize_inputs:
                 # All-zero input_ids route every token to the same experts.

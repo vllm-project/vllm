@@ -59,23 +59,6 @@ def test_make_dummy_distributes_remainder(num_reqs: int, num_tokens: int):
     )
 
 
-@pytest.mark.parametrize("num_tokens", [1536, 1537, 2046, 8190])
-def test_make_dummy_dp_padding_respects_max_model_len(num_tokens: int):
-    """An idle DP rank's single dummy request is padded to the busiest rank's
-    token count. Kept as one request past max_model_len, its prefill gathers
-    read past the block table: a BI DSv4.1 rank hung there while its peers
-    timed out in the MegaMoE barrier."""
-    max_model_len = 1536
-    buffers = InputBuffers(
-        max_num_reqs=32, max_num_tokens=num_tokens, device=torch.device(DEVICE)
-    )
-    batch = InputBatch.make_dummy(1, num_tokens, buffers, max_model_len=max_model_len)
-
-    assert batch.num_scheduled_tokens.sum() == num_tokens
-    assert batch.num_reqs == -(-num_tokens // max_model_len)
-    assert int(batch.seq_lens.max()) <= max_model_len
-
-
 @pytest.mark.skipif(
     not current_platform.is_cuda_alike(), reason="Requires CUDA/ROCm top-k."
 )

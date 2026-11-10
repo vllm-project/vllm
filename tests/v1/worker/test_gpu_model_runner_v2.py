@@ -22,6 +22,7 @@ from vllm.config import (
     ParallelConfig,
     SpeculativeConfig,
 )
+from vllm.config.compilation import CUDAGraphMode
 from vllm.model_executor.warmup.jit_warmup import JitWarmupRegistry
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -35,6 +36,8 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.worker.gpu.async_utils import async_copy_to_np
 from vllm.v1.worker.gpu.block_table import BlockTables
+from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
+from vllm.v1.worker.gpu.input_batch import InputBuffers
 from vllm.v1.worker.gpu.model_runner import ExecuteModelState, GPUModelRunner
 from vllm.v1.worker.gpu.spec_decode.standalone_ar import speculator as ar_module
 from vllm.v1.worker.gpu.spec_decode.utils import get_drafter_hidden_states
@@ -64,6 +67,71 @@ def test_prompt_tail_keeps_decode_graph_bound(monkeypatch, eligible, expected_bo
         GPUModelRunner.execute_model(runner, scheduler_output)
 
     assert dispatch.call_args.kwargs["max_query_len"] == expected_bound
+
+
+class _StopAfterDummyBatch(Exception):
+    pass
+
+
+@pytest.mark.parametrize(
+    "padded_tokens,max_model_len,max_num_reqs,expected_num_reqs",
+    [
+        (1024, 1024, 8, 1),
+        (1025, 1024, 8, 2),
+        (8190, 1536, 32, 6),
+        # max_num_batched_tokens > max_num_seqs * max_model_len, which
+        # SchedulerConfig only warns about: stay within the request buffers.
+        (16384, 2048, 4, 4),
+    ],
+)
+def test_idle_dp_dummy_batch_respects_max_model_len(
+    monkeypatch, padded_tokens, max_model_len, max_num_reqs, expected_num_reqs
+):
+    """An idle DP rank schedules one dummy request, which the DP sync pads to
+    the token count its peers agreed on. Kept as one request past
+    max_model_len, its attention reads past its block-table row."""
+    runner = Mock(
+        lora_config=None,
+        is_encoder_decoder=False,
+        pcp_manager=None,
+        max_model_len=max_model_len,
+        max_num_reqs=max_num_reqs,
+        input_buffers=InputBuffers(
+            max_num_reqs=max_num_reqs,
+            max_num_tokens=padded_tokens,
+            device=torch.device("cpu"),
+        ),
+    )
+    runner.gather_batch_req_state.return_value = (None, 1)
+    dummy_batches = []
+
+    def stop(input_batch, *args):
+        dummy_batches.append(input_batch)
+        raise _StopAfterDummyBatch
+
+    runner.prepare_dummy_attn.side_effect = stop
+    # A PIECEWISE descriptor leaves num_reqs to the caller.
+    padded_desc = BatchExecutionDescriptor(
+        cg_mode=CUDAGraphMode.PIECEWISE, num_tokens=padded_tokens, num_reqs=None
+    )
+    monkeypatch.setattr(
+        model_runner_module,
+        "dispatch_cg_and_sync_dp",
+        Mock(return_value=(padded_desc, None)),
+    )
+    # What GPUWorker.execute_dummy_batch schedules: one request, one token.
+    scheduler_output = SchedulerOutput.make_empty()
+    scheduler_output.num_scheduled_tokens = {"_dummy_req_0": 1}
+    scheduler_output.total_num_scheduled_tokens = 1
+
+    with pytest.raises(_StopAfterDummyBatch):
+        GPUModelRunner.execute_model(runner, scheduler_output, dummy_run=True)
+
+    (batch,) = dummy_batches
+    seq_lens = batch.seq_lens.tolist()
+    assert sum(seq_lens) == padded_tokens
+    assert max(seq_lens) <= max(max_model_len, -(-padded_tokens // max_num_reqs))
+    assert batch.num_reqs == len(seq_lens) == expected_num_reqs
 
 
 def test_non_last_pp_rank_uses_global_batch_for_sample_feedback(monkeypatch):
