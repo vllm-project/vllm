@@ -1619,8 +1619,8 @@ class MooncakeStoreWorker:
         # Validate and create the custom memory pool before initializing the
         # store so failures cannot leak a partially initialized store handle.
         self._mem_pool = self._create_mem_pool(extra_config, model_config)
-        self._reuse_pd_transfer_engine = extra_config.get(
-            "reuse_pd_transfer_engine", False
+        self._reuse_pd_transfer_engine = (
+            extra_config.get("reuse_pd_transfer_engine") is True
         )
         shared_engine: Any | None = None
         if self._reuse_pd_transfer_engine:

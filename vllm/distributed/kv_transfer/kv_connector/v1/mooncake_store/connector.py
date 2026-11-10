@@ -137,9 +137,8 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
 
     @classmethod
     def supports_sleep_mode(cls, kv_transfer_config: KVTransferConfig) -> bool:
-        if kv_transfer_config.kv_connector_extra_config.get(
-            "reuse_pd_transfer_engine", False
-        ):
+        extra_config = kv_transfer_config.kv_connector_extra_config
+        if extra_config.get("reuse_pd_transfer_engine") is True:
             # The store holds no device regions on a borrowed engine; whether the
             # engine itself can sleep is validated by MooncakeConnector.
             return True
