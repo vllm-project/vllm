@@ -18,6 +18,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     MambaSpec,
     MLAAttentionSpec,
+    SlidingWindowMLASpec,
     SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
     iter_layer_specs,
@@ -252,7 +253,7 @@ def build_offloading_config(
                 return False
             if spec.kv_quant_mode.is_per_token_head:
                 return False
-            if isinstance(spec, MLAAttentionSpec):
+            if type(spec) is MLAAttentionSpec:
                 tps = spec.tokens_per_state
                 if tps < 1 or spec.block_size % tps:
                     return False
@@ -261,8 +262,7 @@ def build_offloading_config(
                     spec.real_page_size_bytes % num_states == 0
                     and tp_size % dcp_size == 0
                 )
-            if isinstance(spec, MLAAttentionSpec):
-                # subclasses of MLAAttentionSpec not yet certified
+            if isinstance(spec, (SlidingWindowMLASpec, MLAAttentionSpec)):
                 return False
             if not isinstance(spec, (FullAttentionSpec, SlidingWindowSpec)):
                 return False
