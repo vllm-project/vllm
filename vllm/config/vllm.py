@@ -601,6 +601,14 @@ class VllmConfig:
         return 0
 
     @property
+    def num_scheduled_spec_tokens(self) -> int:
+        """See `SpeculatorConfig.num_scheduled_spec_tokens`."""
+        speculative_config = self.speculative_config
+        if speculative_config is None:
+            return self.num_speculative_tokens
+        return speculative_config.speculator_config.num_scheduled_spec_tokens
+
+    @property
     def num_lookahead_tokens(self) -> int:
         """KV slots to reserve past the tokens the target model is scheduled for.
 
@@ -2138,6 +2146,15 @@ class VllmConfig:
                 "HiSparse requires a KV transfer config with HiSparseConnector "
                 "and host_pool_gib; to combine it with another connector, nest "
                 "both in MultiConnector instead of using --kv-offloading-size."
+            )
+        if (
+            self.speculative_config is not None
+            and self.speculative_config.prefill_context_kv_only
+            and not (self.kv_transfer_config and self.kv_transfer_config.is_kv_producer)
+        ):
+            raise ValueError(
+                "prefill_context_kv_only is for a P/D prefill instance: it needs a "
+                "kv_transfer_config that produces KV (kv_producer or kv_both)."
             )
         self._verify_aux_output_compatibility()
 
