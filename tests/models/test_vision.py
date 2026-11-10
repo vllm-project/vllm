@@ -12,6 +12,7 @@ from vllm.distributed.parallel_state import (
     init_distributed_environment,
     initialize_model_parallel,
 )
+from vllm.model_executor.models.kimi_k25_vit import tpool_patch_merger
 from vllm.model_executor.models.vision import (
     get_load_balance_assignment,
     resolve_visual_encoder_outputs,
@@ -249,6 +250,42 @@ class SimpleMRopeVisionModel(torch.nn.Module):
                 device=pixel_values.device,
                 dtype=pixel_values.dtype,
             )
+
+
+class SimpleTemporalPoolVisionModel(torch.nn.Module):
+    """A rope_2d vision model that pools frames like Kimi-K2.5's MoonViT."""
+
+    def __init__(self, hidden_size: int = 16):
+        super().__init__()
+        self.merge_kernel_size = (2, 2)
+        self.linear = torch.nn.Linear(768, hidden_size)
+
+    def forward(self, pixel_values: torch.Tensor, grid_thws: torch.Tensor):
+        return tpool_patch_merger(
+            self.linear(pixel_values),
+            grid_thws.tolist(),
+            merge_kernel_size=self.merge_kernel_size,
+        )
+
+
+def test_run_dp_sharded_mrope_vision_model_rope_2d_temporal_pooling(dist_init):
+    """rope_2d towers pool the t frames of a video chunk, so each item yields
+    h * w // 4 embeddings, not t * h * w // 4."""
+    set_random_seed(0)
+    # An image followed by two video chunks (t > 1).
+    grid_thw_list = [[1, 4, 4], [4, 4, 6], [2, 6, 4]]
+    pixel_values = torch.randn(sum(math.prod(g) for g in grid_thw_list), 768)
+    vision_model = SimpleTemporalPoolVisionModel()
+
+    with torch.inference_mode():
+        direct_output = vision_model(pixel_values, torch.tensor(grid_thw_list))
+        sharded_output = run_dp_sharded_mrope_vision_model(
+            vision_model, pixel_values, grid_thw_list, rope_type="rope_2d"
+        )
+
+    assert [out.shape[0] for out in sharded_output] == [4, 6, 6]
+    for sharded, direct in zip(sharded_output, direct_output):
+        torch.testing.assert_close(sharded, direct, rtol=0, atol=0)
 
 
 @multi_gpu_test(num_gpus=2)
