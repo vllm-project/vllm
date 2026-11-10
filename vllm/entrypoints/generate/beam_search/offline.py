@@ -302,11 +302,7 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
         for idx, active_idx in enumerate(active_indices):
             output[active_idx] = active_output[idx]
 
-        # Logprobs are computed from raw logits before
-        # allowed_token_ids masking, so they may contain
-        # tokens outside the grammar's allowed set. This filtering is also
-        # the only grammar enforcement for beams whose allowed set exceeds
-        # the engine-side allowed_token_ids cap.
+        # The sampled token is always returned and may be outside the grammar.
         request_allowed = (
             set(base_sampling_params.logprob_token_ids)
             if base_sampling_params.logprob_token_ids is not None
@@ -341,7 +337,8 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
 
                 if result.outputs[0].logprobs is not None:
                     logprobs = result.outputs[0].logprobs[0]
-                    if request_allowed is not None:
+                    allowed = allowed_sets[i]
+                    if allowed is not None:
                         logprobs = {
                             token: score
                             for token, score in sorted(
@@ -349,14 +346,12 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
                                 key=lambda item: item[1].logprob,
                                 reverse=True,
                             )
-                            if token in request_allowed and math.isfinite(score.logprob)
+                            if token in allowed and math.isfinite(score.logprob)
                         }
+                        # Candidate order is not a rank in the full vocabulary.
                         for score in logprobs.values():
                             score.rank = None
-                    allowed = allowed_sets[i]
                     for token_id, logprob_obj in logprobs.items():
-                        if allowed is not None and token_id not in allowed:
-                            continue
                         new_beam = BeamSearchSequence(
                             current_beam.orig_prompt,
                             tokens=current_beam.tokens + [token_id],
@@ -493,10 +488,8 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
                 result.append(None)
                 continue
 
-            # The engine caps the size of allowed_token_ids. While the
-            # grammar still allows more tokens than the cap (e.g. inside
-            # free-form strings), skip the engine-side constraint and rely
-            # on the logprobs filtering in _beam_search_step instead.
+            # Preserve sampling constraints and processed-logprob normalization.
+            # The separate candidate mask also covers sets above the engine cap.
             beam_params = SamplingParams(
                 logprobs=base_params.logprobs,
                 max_tokens=1,
@@ -508,6 +501,7 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
                     if len(allowed_ids) <= _MAX_NUM_ALLOWED_TOKEN_IDS
                     else None
                 ),
+                _logprob_token_mask=bitmask[0].tolist(),
                 skip_clone=True,
             )
             result.append((beam_params, allowed_ids))

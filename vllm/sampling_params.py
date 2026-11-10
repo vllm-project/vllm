@@ -452,6 +452,10 @@ class SamplingParams(
     token IDs during decoding instead of sampling randomly. Real logprobs are
     still computed. Conflict checking is performed at the engine level."""
 
+    _logprob_token_mask: list[int] | None = None
+    """Internal packed int32 mask restricting beam-search top-k candidates.
+    It does not alter sampling or the distribution used to compute scores."""
+
     @staticmethod
     def from_optional(
         n: int | None = 1,
@@ -927,6 +931,26 @@ class SamplingParams(
         max_logprobs = model_config.max_logprobs
         if max_logprobs == -1:
             max_logprobs = model_config.get_vocab_size()
+
+        mask = self._logprob_token_mask
+        if mask is not None:
+            if self.logprobs is None or self.logprob_token_ids is not None:
+                raise VLLMValidationError(
+                    "A logprob token mask requires logprobs and cannot be "
+                    "combined with logprob_token_ids."
+                )
+            num_words = (model_config.get_vocab_size() + 31) // 32
+            if len(mask) != num_words or any(
+                not isinstance(word, int) or not -(1 << 31) <= word < (1 << 31)
+                for word in mask
+            ):
+                raise VLLMValidationError(
+                    f"A logprob token mask must contain {num_words} int32 words."
+                )
+            if model_config.is_diffusion:
+                raise VLLMValidationError(
+                    "Logprob token masks are not supported with diffusion models."
+                )
 
         # Validate sample logprobs.
         if num_logprobs := self.logprobs:

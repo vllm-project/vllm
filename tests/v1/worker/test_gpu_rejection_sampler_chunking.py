@@ -11,7 +11,10 @@ import torch
 from vllm.config.model import PROCESSED_LOGPROBS_MODES, LogprobsMode
 from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
-from vllm.v1.worker.gpu.sample.logprob import LogprobTokenIdsState
+from vllm.v1.worker.gpu.sample.logprob import (
+    LogprobTokenIdsState,
+    LogprobTokenMaskState,
+)
 from vllm.v1.worker.gpu.sample.output import SamplingMaskTensors
 from vllm.v1.worker.gpu.sample.sampler import Sampler
 from vllm.v1.worker.gpu.sample.states import NO_LOGPROBS
@@ -93,6 +96,7 @@ def test_chunked_scores_match_full_batch(
             logprobs_mode=logprobs_mode,
             return_sampling_mask=False,
             logprob_token_ids_state=None,
+            logprob_token_mask_state=LogprobTokenMaskState(10, 17, device),
         ),
         num_speculative_steps=3,
     )
@@ -138,6 +142,7 @@ def test_chunked_scores_match_full_batch(
         input_batch.cu_num_logits_np,
         input_batch.expanded_idx_mapping,
         logprobs_dims=(2, 0),
+        idx_mapping_np=idx_mapping_np,
     )
 
     assert sampled[:, 0].tolist() == idx_mapping_np.tolist()
@@ -182,6 +187,7 @@ def test_logprob_token_ids_without_topk_logprobs(logprobs_mode: str):
             logprobs_mode=logprobs_mode,
             return_sampling_mask=False,
             logprob_token_ids_state=token_ids_state,
+            logprob_token_mask_state=LogprobTokenMaskState(4, vocab_size, device),
         ),
         num_speculative_steps=3,
     )
@@ -231,6 +237,7 @@ def test_logprob_token_ids_without_topk_logprobs(logprobs_mode: str):
             input_batch.cu_num_logits_np[:5],
             input_batch.expanded_idx_mapping[:4],
             None,
+            idx_mapping_np,
         )
         is None
     )
@@ -253,6 +260,7 @@ def _make_sampler_with_token_ids(
         logprobs_mode=logprobs_mode,
         return_sampling_mask=False,
         logprob_token_ids_state=token_ids_state,
+        logprob_token_mask_state=LogprobTokenMaskState(4, 17, device),
         sampling_states=SimpleNamespace(max_num_logprobs=lambda _idx: num_logprobs),
     )
     sampler.get_logprobs_dims = MethodType(Sampler.get_logprobs_dims, sampler)
@@ -422,6 +430,7 @@ def test_replay_on_off_preserves_rejection_sampling_and_rng(monkeypatch):
         logprobs_mode="processed_logprobs",
         return_sampling_mask=False,
         logprob_token_ids_state=None,
+        logprob_token_mask_state=LogprobTokenMaskState(num_reqs, vocab_size, device),
         sampling_states=SimpleNamespace(
             top_k=SimpleNamespace(np=np.full(num_reqs, vocab_size)),
             temperature=SimpleNamespace(gpu=torch.ones(num_reqs, device=device)),

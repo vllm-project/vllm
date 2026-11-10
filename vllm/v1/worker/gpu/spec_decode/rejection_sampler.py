@@ -194,6 +194,7 @@ class RejectionSampler:
         cu_num_logits_np: np.ndarray,
         expanded_idx_mapping: torch.Tensor,
         logprobs_dims: tuple[int, int] | None,
+        idx_mapping_np: np.ndarray,
     ) -> LogprobsTensors | None:
         if logprobs_dims is None:
             return None
@@ -229,6 +230,9 @@ class RejectionSampler:
             logprob_token_ids_state=self.sampler.logprob_token_ids_state,
             expanded_idx_mapping=expanded_idx_mapping,
             max_per_req_token_ids=max_token_ids,
+            logits_for_topk=self.sampler.logprob_token_mask_state.apply(
+                logits, expanded_idx_mapping, idx_mapping_np
+            ),
             logits_mode=self.sampler.logprobs_mode
             in ("raw_logits", "processed_logits"),
         )
@@ -378,6 +382,7 @@ class RejectionSampler:
                 chunk_cu_num_logits_np,
                 input_batch.expanded_idx_mapping[lo:hi],
                 logprobs_dims,
+                input_batch.idx_mapping_np[start:end],
             )
             if chunk_logprobs is not None:
                 logprobs_chunks.append(chunk_logprobs)

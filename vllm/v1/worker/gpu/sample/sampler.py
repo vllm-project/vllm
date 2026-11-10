@@ -29,6 +29,7 @@ from vllm.v1.worker.gpu.sample.logits_processor.interface import (
 )
 from vllm.v1.worker.gpu.sample.logprob import (
     LogprobTokenIdsState,
+    LogprobTokenMaskState,
     compute_topk_scores,
 )
 from vllm.v1.worker.gpu.sample.output import SamplerOutput, SamplingMaskTensors
@@ -76,6 +77,9 @@ class Sampler:
         ]
 
         self.logprob_token_ids_state = LogprobTokenIdsState(max_num_reqs, device)
+        self.logprob_token_mask_state = LogprobTokenMaskState(
+            max_num_reqs, vocab_size, device
+        )
         self.thinking_budget_state = ThinkingBudgetState(
             req_states, vllm_config.reasoning_config
         )
@@ -106,6 +110,7 @@ class Sampler:
         self.may_mask_logits[req_idx] = may_mask
 
         self.logprob_token_ids_state.add_request(req_idx, sampling_params)
+        self.logprob_token_mask_state.add_request(req_idx, sampling_params)
         if self.trace_replay_state is not None:
             self.trace_replay_state.add_request(req_idx, sampling_params)
 
@@ -115,6 +120,7 @@ class Sampler:
             processor.apply_staged_writes()
         self.thinking_budget_state.apply_staged_writes()
         self.logprob_token_ids_state.apply_staged_writes()
+        self.logprob_token_mask_state.apply_staged_writes()
         if self.trace_replay_state is not None:
             self.trace_replay_state.apply_staged_writes()
 
@@ -179,6 +185,9 @@ class Sampler:
                 logprob_token_ids_state=self.logprob_token_ids_state,
                 expanded_idx_mapping=input_batch.expanded_idx_mapping,
                 max_per_req_token_ids=max_per_req_token_ids,
+                logits_for_topk=self.logprob_token_mask_state.apply(
+                    logits, input_batch.expanded_idx_mapping, idx_mapping_np
+                ),
                 logits_mode=self.logprobs_mode in ("raw_logits", "processed_logits"),
             )
         else:
