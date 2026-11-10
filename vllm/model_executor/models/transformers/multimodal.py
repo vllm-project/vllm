@@ -20,7 +20,7 @@ import math
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import ExitStack, contextmanager
-from functools import cached_property
+from functools import cached_property, partial
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -1038,20 +1038,26 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE, Base):
                 "Multimodal encoder compilation with the Transformers modeling backend "
                 "is an experimental feature. It relies on:\n"
                 "- The encoder being torch compilable.\n"
-                "- All encoder tensor inputs must be either unannotated or type hinted "
-                "as a `torch` tensor type.\n"
+                "- The encoder tensor inputs being type hinted as `torch.Tensor` or "
+                "`torch.FloatTensor`. If none are, unannotated inputs and those of "
+                "any `torch` tensor type are used.\n"
                 "- The 0-th dimension of all tensor inputs to the encoder being the "
                 "dynamic dimension (e.g. sequence length, number of patches).\n"
                 "Please report any issues you encounter to help us improve it."
             )
             # One encoder can serve several modalities, and must only be decorated once
             for encoder_cls in dict.fromkeys(encoder_classes.values()):
-                self._decorate_cls_for_torch_compile(
+                decorate = partial(
+                    self._decorate_cls_for_torch_compile,
                     cls=encoder_cls,
-                    dynamic_arg_dims=infer_dynamic_arg_dims(encoder_cls),
                     enable_if=should_torch_compile_mm_encoder,
                     is_encoder=True,
                 )
+                try:
+                    decorate(dynamic_arg_dims=None)
+                except ValueError:
+                    # No argument is annotated as a type `support_torch_compile` knows
+                    decorate(dynamic_arg_dims=infer_dynamic_arg_dims(encoder_cls))
 
     def forward(
         self,
