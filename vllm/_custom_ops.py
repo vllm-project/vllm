@@ -3256,7 +3256,7 @@ def topp_cutoffs_lse(
     """Exact top-p cutoffs and kept log-sum-exps of bf16 logits (SM90+).
 
     The kernel scales logits as x / T rounded to nearest; kernels that read the
-    logits later must scale the same way for ``lse`` to match them.
+    logits later must scale the same way for `lse` to match them.
 
     Args:
         logits: [num_rows, vocab_size] bf16 raw logits with unit vocab stride.
