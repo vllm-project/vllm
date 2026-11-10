@@ -86,7 +86,7 @@ def _sparse_wrapper(query, cache, table, offsets, group, topk, model_len, split_
         split_kv=split_kv,
         share_pattern_across_kv_heads=False,
         count_current_block_in_topk=False,
-        o_data_type=torch.bfloat16,
+        out_dtype=torch.bfloat16,
     )
     workspace = torch.empty(size, dtype=torch.uint8, device=query.device)
     wrapper = QTokenKvBlockSparsePagedTSWrapper()
@@ -102,12 +102,12 @@ def _sparse_wrapper(query, cache, table, offsets, group, topk, model_len, split_
         group_size=group,
         device=query.device,
         workspace_buffer=workspace,
-        use_packed_q=offsets is not None,
+        packed_query=offsets is not None,
         split_kv=split_kv,
         share_pattern_across_kv_heads=False,
         count_current_block_in_topk=False,
-        q_data_type=query.dtype,
-        o_data_type=torch.bfloat16,
+        q_dtype=query.dtype,
+        out_dtype=torch.bfloat16,
     )
     return wrapper
 
@@ -151,7 +151,7 @@ class Step5PrimsTSDecode:
             num_kv_heads=self.groups,
             multi_processor_count=num_sms,
             head_dim=self.head_dim,
-            q_data_type=query.dtype,
+            q_dtype=query.dtype,
             split_kv=True,
             kv_block_size=_SPARSE_BLOCK_SIZE,
         )
@@ -256,7 +256,7 @@ class Step5PrimsTSPrefill:
             num_kv_heads=groups,
             multi_processor_count=num_sms,
             head_dim=dim,
-            q_data_type=dtype,
+            q_dtype=dtype,
             split_kv=False,
             kv_block_size=_SPARSE_BLOCK_SIZE,
         )
@@ -385,8 +385,8 @@ class Step5PrimsTSSWA:
                     page_size=cache.shape[2],
                     max_kv_len=model_len,
                     max_q_len=qlen,
-                    q_data_type=query.dtype,
-                    o_data_type=torch.bfloat16,
+                    q_dtype=query.dtype,
+                    out_dtype=torch.bfloat16,
                     mask_type="causal",
                     # Step5's total window includes the current token.
                     window_left=self.window - 1,
@@ -409,7 +409,7 @@ class Step5PrimsTSSWA:
                     mask_type="causal",
                     # Step5's total window includes the current token.
                     window_left=self.window - 1,
-                    sm_scale=scale,
+                    softmax_scale=scale,
                     output_scale=v_scale,
                 )
             state = wrapper
@@ -429,8 +429,8 @@ class Step5PrimsTSSWA:
                 lengths,
                 table,
                 out=fixed_output,
-                bmm1_scale=scale,
-                bmm2_scale=v_scale,
+                softmax_scale=scale,
+                output_scale=v_scale,
                 validate=False,
             )
         else:
