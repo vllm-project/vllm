@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from enum import IntEnum
-from functools import lru_cache
-from typing import TYPE_CHECKING
+from enum import Enum, IntEnum
+from functools import cached_property, lru_cache
+from typing import TYPE_CHECKING, NamedTuple
 
 import torch
 
@@ -30,6 +30,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp4Dynamic,
     kMxfp4Static,
 )
+from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
     from aiter import ActivationType
@@ -355,6 +356,155 @@ def mxfp4_w4a16_extra_kwargs(
     }
 
 
+def _aiter_gate_mode(
+    activation: MoEActivation,
+    activation_interleave: bool | None,
+    gate_mode_override: str | None,
+) -> str:
+    """The gate_mode handed to AITER's fused MoE; "" leaves AITER's default."""
+    # AITER's stage1 GEMM needs gate_mode to match how weights were shuffled
+    # at load time (oracle/mxfp4.py).
+    from aiter.ops.flydsl.moe_common import GateMode
+
+    if activation == MoEActivation.SITU:
+        return (
+            GateMode.INTERLEAVE.value
+            if rocm_aiter_ops.is_fused_moe_situv2_gate_up_interleaved()
+            else GateMode.SEPARATED.value
+        )
+    if gate_mode_override is not None:
+        return gate_mode_override
+    if activation_interleave is not None:
+        return (
+            GateMode.INTERLEAVE.value
+            if activation_interleave
+            else GateMode.SEPARATED.value
+        )
+    return ""
+
+
+class AiterInputFormat(Enum):
+    """An activation format AITER's fused MoE consumes as it is, so an
+    all-to-all dispatch can carry it and the experts skip quantizing."""
+
+    # Also the answer when AITER's choice is unknown: it accepts BF16 everywhere.
+    BF16 = "bf16"
+    # FP8 with one FP32 scale per 128 elements (per_1x128).
+    FP8 = "fp8"
+    # FP8 with one e8m0 scale per 32 elements (per_1x32).
+    MXFP8 = "mxfp8"
+    # Packed FP4 (two per byte) with one e8m0 scale per 32 elements (per_1x32).
+    MXFP4 = "mxfp4"
+
+
+class AiterInputChoice(NamedTuple):
+    format: AiterInputFormat
+    reason: str
+    # A configuration change could lift a BF16 fallback, so it is worth a warning.
+    actionable: bool = False
+
+
+@lru_cache(maxsize=1)
+def _aiter_resolve_activation_dtype():
+    """AITER's `resolve_activation_dtype` (ROCm/aiter#5221), where it exists."""
+    try:
+        from aiter.fused_moe import resolve_activation_dtype
+    except ImportError:
+        return None
+    return resolve_activation_dtype
+
+
+def aiter_moe_input_format(
+    moe_config: FusedMoEConfig, quant_config: FusedMoEQuantConfig | None
+) -> AiterInputChoice:
+    """The activation format AITER's fused MoE consumes for this layer.
+
+    Asks AITER's `resolve_activation_dtype` with the quant type, weight dtype,
+    activation and gate mode `AiterExperts` hand to `fused_moe`. A dispatch
+    format is fixed before any batch exists, so the token count is not passed:
+    AITER then answers None wherever its choice depends on it, and the answer
+    is BF16, which every AITER path accepts.
+    """
+    if quant_config is None:
+        return AiterInputChoice(AiterInputFormat.BF16, "unquantized MoE")
+    quant_type = derive_aiter_quant_type(quant_config)
+    if quant_type == AiterQuantType.BLOCK_1X32:
+        weight_dtype = torch.float4_e2m1fn_x2
+    elif quant_type == AiterQuantType.BLOCK_128x128:
+        weight_dtype = current_platform.fp8_dtype()
+    elif quant_type == AiterQuantType.NO:
+        return AiterInputChoice(AiterInputFormat.BF16, "MoE takes bf16 activations")
+    else:
+        return AiterInputChoice(
+            AiterInputFormat.BF16,
+            f"no pre-quantized input format for AITER {quant_type.name} MoE",
+        )
+
+    resolve_activation_dtype = _aiter_resolve_activation_dtype()
+    if resolve_activation_dtype is None:
+        return AiterInputChoice(
+            AiterInputFormat.BF16,
+            "this AITER has no resolve_activation_dtype (ROCm/aiter#5221)",
+            actionable=True,
+        )
+
+    from aiter import dtypes
+    from aiter.ops.flydsl.moe_common import GateMode
+
+    activation = moe_config.activation
+    activation_method, activation_interleave = _resolve_aiter_activation(activation)
+    extra = mxfp4_w4a16_extra_kwargs(quant_config, moe_config)
+    gate_mode = _aiter_gate_mode(
+        activation, activation_interleave, extra.get("gate_mode_override")
+    )
+    # rocm_aiter_ops.fused_moe omits an empty or unsupported gate_mode.
+    if not gate_mode or not rocm_aiter_ops.fused_moe_supports_gate_mode():
+        gate_mode = GateMode.SEPARATED.value
+
+    q_dtype_a = extra.get("q_dtype_a")
+    if q_dtype_a is None:
+        q_dtype_a = resolve_activation_dtype(
+            int(quant_type),
+            weight_dtype,
+            activation=int(activation_method),
+            gate_mode=gate_mode,
+        )
+    if q_dtype_a is None:
+        bound = (
+            "GPTOSS_SWIGLU_MXFP4_BF16_BOUND"
+            if activation
+            in (MoEActivation.SWIGLUOAI, MoEActivation.SWIGLUOAI_UNINTERLEAVE)
+            and gate_mode == GateMode.SEPARATED.value
+            else "AITER_BF16_FP8_MOE_BOUND"
+        )
+        return AiterInputChoice(
+            AiterInputFormat.BF16,
+            "AITER picks the MoE activation dtype by batch size here, which a "
+            f"dispatch format cannot follow; set {bound}=0 to pin the quantized "
+            "dtype",
+            actionable=True,
+        )
+    if q_dtype_a == dtypes.bf16:
+        return AiterInputChoice(AiterInputFormat.BF16, "AITER fused MoE consumes bf16")
+    fmt = None
+    if q_dtype_a in (torch.float8_e4m3fn, torch.float8_e4m3fnuz):
+        # The two FP8 formats differ only in the scales, which the quant type sets.
+        fmt = {
+            AiterQuantType.BLOCK_128x128: AiterInputFormat.FP8,
+            AiterQuantType.BLOCK_1X32: AiterInputFormat.MXFP8,
+        }.get(quant_type)
+    elif q_dtype_a == dtypes.fp4x2 and quant_type == AiterQuantType.BLOCK_1X32:
+        fmt = AiterInputFormat.MXFP4
+    if fmt is None:
+        return AiterInputChoice(
+            AiterInputFormat.BF16,
+            f"no dispatch format carries {q_dtype_a} for AITER {quant_type.name}",
+        )
+    return AiterInputChoice(
+        fmt, f"AITER fused MoE consumes {fmt.value} ({quant_type.name})"
+    )
+
+
 def rocm_aiter_fused_experts(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
@@ -431,25 +581,7 @@ def rocm_aiter_fused_experts(
     ):
         intermediate_pad = 0
 
-    # AITER's stage1 GEMM needs gate_mode to match how weights were shuffled
-    # at load time (oracle/mxfp4.py).
-    from aiter.ops.flydsl.moe_common import GateMode
-
-    gate_mode = ""
-    if activation == MoEActivation.SITU:
-        gate_mode = (
-            GateMode.INTERLEAVE.value
-            if rocm_aiter_ops.is_fused_moe_situv2_gate_up_interleaved()
-            else GateMode.SEPARATED.value
-        )
-    elif gate_mode_override is not None:
-        gate_mode = gate_mode_override
-    elif activation_interleave is not None:
-        gate_mode = (
-            GateMode.INTERLEAVE.value
-            if activation_interleave
-            else GateMode.SEPARATED.value
-        )
+    gate_mode = _aiter_gate_mode(activation, activation_interleave, gate_mode_override)
 
     return rocm_aiter_ops.fused_moe(
         hidden_states,
@@ -497,14 +629,28 @@ class AiterExperts(mk.FusedMoEExpertsModular):
         """Leaf-specific extra kwargs for `rocm_aiter_fused_experts`."""
         return {}
 
+    @cached_property
+    def mori_epv2_dispatch_format(self) -> AiterInputFormat:
+        """What MORI EPv2 dispatches to these experts: BF16, or a format
+        quantized before dispatch that AITER consumes as it is."""
+        if not self.moe_config.use_mori_epv2_kernels:
+            return AiterInputFormat.BF16
+        from vllm.model_executor.layers.fused_moe.prepare_finalize.mori_epv2 import (
+            mori_epv2_dispatch_format,
+        )
+
+        return mori_epv2_dispatch_format(self.moe_config, self.quant_config).format
+
     @property
     def expects_unquantized_inputs(self) -> bool:
-        # When paired with MoRI, the prepare/finalize handles FP8 or MXFP4
-        # quantization during dispatch to reduce network traffic,
-        # so we should not defer input quantization.
-        # Otherwise, AITER fused MoE kernels handle input quantization
-        # internally via a single fused kernel.
-        return not self.moe_config.use_mori_epv1_kernels
+        # When paired with MoRI, the prepare/finalize quantizes during dispatch
+        # to reduce network traffic: MoRI EPv1 to FP8 or MXFP4, MoRI EPv2 to the
+        # format AITER consumes, when it has one. Otherwise, AITER fused MoE
+        # kernels handle input quantization internally via a single fused kernel.
+        return not (
+            self.moe_config.use_mori_epv1_kernels
+            or self.mori_epv2_dispatch_format != AiterInputFormat.BF16
+        )
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
@@ -571,7 +717,7 @@ class AiterExperts(mk.FusedMoEExpertsModular):
         # half the hidden size there.
         packed_fp4_input = (
             self.moe_config.use_mori_epv1_kernels and self.quant_config.use_mxfp4_w4a4
-        )
+        ) or self.mori_epv2_dispatch_format == AiterInputFormat.MXFP4
         output = (M, K * 2 if packed_fp4_input else K)
         return (workspace1, workspace2, output)
 
@@ -602,6 +748,12 @@ class AiterExperts(mk.FusedMoEExpertsModular):
 
         if expert_tokens_meta is not None:
             num_local_tokens = expert_tokens_meta.expert_num_tokens
+        elif self.mori_epv2_dispatch_format == AiterInputFormat.FP8:
+            # AITER transposes the scales of FP8 block input over a row count it
+            # requires; MORI EPv2 passes none, and the experts read every row.
+            num_local_tokens = hidden_states.new_full(
+                (1,), hidden_states.size(0), dtype=torch.int32
+            )
         else:
             num_local_tokens = None
 

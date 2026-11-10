@@ -5,6 +5,7 @@
 import sys
 from datetime import timedelta
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import Mock
 
 import pytest
@@ -55,8 +56,10 @@ class FakeOp:
         return torch.zeros(1, 4, dtype=torch.bfloat16), None
 
 
-def _make_pf(op, num_local_experts=2, rank_expert_offset=0):
-    return MoriEPv2PrepareAndFinalize(op, 16, 4, num_local_experts, rank_expert_offset)
+def _make_pf(op, num_local_experts=2, rank_expert_offset=0, **kwargs):
+    return MoriEPv2PrepareAndFinalize(
+        op, 16, 4, num_local_experts, rank_expert_offset, **kwargs
+    )
 
 
 def _run(monkeypatch, op, num_tokens_across_dp, topk_ids, **pf_kwargs):
@@ -133,6 +136,417 @@ def test_receive_rows_are_bounded_by_dp_tokens(
     # combine sees only the bounded expert output, under dispatch's routing.
     assert op.combine_input is not None and op.combine_input.shape[0] == rows
     assert op.combine_routing is op.routing
+
+
+def _fake_aiter(monkeypatch, resolve=None):
+    """AITER as `aiter_moe_input_format` sees it, answering with `resolve`."""
+    import enum
+
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.model_executor.layers.fused_moe.experts import rocm_aiter_moe
+
+    class GateMode(enum.StrEnum):
+        SEPARATED = "separated"
+        INTERLEAVE = "interleave"
+
+    dtypes = SimpleNamespace(
+        bf16=torch.bfloat16, fp8=torch.float8_e4m3fn, fp4x2=torch.float4_e2m1fn_x2
+    )
+    modules = {
+        "aiter": SimpleNamespace(dtypes=dtypes),
+        "aiter.ops": SimpleNamespace(),
+        "aiter.ops.flydsl": SimpleNamespace(),
+        "aiter.ops.flydsl.moe_common": SimpleNamespace(GateMode=GateMode),
+    }
+    for name, module in modules.items():
+        monkeypatch.setitem(sys.modules, name, module)
+    monkeypatch.setattr(
+        rocm_aiter_moe, "_aiter_resolve_activation_dtype", lambda: resolve
+    )
+    monkeypatch.setattr(
+        rocm_aiter_moe, "_resolve_aiter_activation", lambda act: (0, None)
+    )
+    monkeypatch.setattr(rocm_aiter_ops, "fused_moe_supports_gate_mode", lambda: True)
+    monkeypatch.setattr(
+        rocm_aiter_moe.current_platform, "fp8_dtype", lambda: torch.float8_e4m3fn
+    )
+    monkeypatch.setattr(
+        rocm_aiter_ops, "is_fused_moe_situv2_gate_up_interleaved", lambda: True
+    )
+    return rocm_aiter_moe
+
+
+def _moe_quant(kind):
+    """A quant config of `kind` with what the AITER format lookup reads."""
+    fields: dict[str, Any] = dict(
+        use_mxfp4_w4a4=False,
+        use_mxfp4_w4a16=False,
+        use_fp8_w8a8=False,
+        use_int8_w8a8=False,
+        block_shape=None,
+        per_out_ch_quant=False,
+        w1_bias=None,
+        w2_bias=None,
+    )
+    kinds: dict[str, dict[str, Any]] = {
+        "mxfp4": dict(use_mxfp4_w4a4=True),
+        "mxfp4_w4a16": dict(use_mxfp4_w4a16=True),
+        "fp8_block": dict(use_fp8_w8a8=True, block_shape=[128, 128]),
+        "fp8_channel": dict(use_fp8_w8a8=True, per_out_ch_quant=True),
+        "bf16": {},
+    }
+    fields.update(kinds[kind])
+    return SimpleNamespace(**fields)
+
+
+def _moe_cfg(activation="SILU", epv2=True, aiter=True, dsv4_a4w4=False):
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+
+    return SimpleNamespace(
+        activation=MoEActivation[activation],
+        use_mori_epv1_kernels=False,
+        use_mori_epv2_kernels=epv2,
+        rocm_aiter_fmoe_enabled=aiter,
+        moe_backend="auto",
+        use_mxfp4_w4a4_dsv4=dsv4_a4w4,
+        in_dtype=torch.bfloat16,
+    )
+
+
+@pytest.mark.parametrize(
+    "kind,activation,answer,fmt,bound",
+    [
+        # GLM / DeepSeek-R1 MXFP4 W4A4 with SiLU: AITER quantizes to MXFP4.
+        ("mxfp4", "SILU", torch.float4_e2m1fn_x2, "mxfp4", None),
+        # FP8 block-128: FP8 with one FP32 scale per 128 elements.
+        ("fp8_block", "SILU", torch.float8_e4m3fn, "fp8", None),
+        # MXFP4 W4A16 (interleaved gate/up) with AITER_BF16_FP8_MOE_BOUND=0.
+        ("mxfp4_w4a16", "SILU", torch.float8_e4m3fn, "mxfp8", None),
+        # The dtype depends on the batch size: BF16, with a hint how to pin it.
+        ("mxfp4_w4a16", "SILU", None, "bf16", "AITER_BF16_FP8_MOE_BOUND"),
+        ("mxfp4", "SWIGLUOAI", None, "bf16", "GPTOSS_SWIGLU_MXFP4_BF16_BOUND"),
+        # Kimi-K3's SiTU MoE by default consumes BF16.
+        ("mxfp4_w4a16", "SITU", torch.bfloat16, "bf16", None),
+    ],
+)
+def test_aiter_answer_picks_the_dispatch_format(
+    monkeypatch, kind, activation, answer, fmt, bound
+):
+    calls = []
+
+    def resolve(quant_type, weight_dtype, *, activation, gate_mode):
+        calls.append((quant_type, weight_dtype, gate_mode))
+        return answer
+
+    rocm_aiter_moe = _fake_aiter(monkeypatch, resolve)
+    choice = rocm_aiter_moe.aiter_moe_input_format(
+        _moe_cfg(activation), _moe_quant(kind)
+    )
+    assert choice.format.value == fmt
+    # Only a choice that a configuration change can lift is worth a warning.
+    assert choice.actionable == (bound is not None)
+    if bound is not None:
+        assert f"{bound}=0" in choice.reason
+    # AITER is asked with the quant type and gate mode AiterExperts hand it.
+    quant_type, weight_dtype, gate_mode = calls[0]
+    AiterQuantType = rocm_aiter_moe.AiterQuantType
+    if kind == "fp8_block":
+        assert (quant_type, weight_dtype) == (
+            AiterQuantType.BLOCK_128x128,
+            torch.float8_e4m3fn,
+        )
+    else:
+        assert (quant_type, weight_dtype) == (
+            AiterQuantType.BLOCK_1X32,
+            torch.float4_e2m1fn_x2,
+        )
+    interleaved = kind == "mxfp4_w4a16"
+    assert gate_mode == ("interleave" if interleaved else "separated")
+
+
+@pytest.mark.parametrize("kind", ["bf16", "fp8_channel"])
+def test_formats_aiter_has_no_dispatch_for_stay_bf16(monkeypatch, kind):
+    rocm_aiter_moe = _fake_aiter(monkeypatch, resolve=Mock())
+    choice = rocm_aiter_moe.aiter_moe_input_format(_moe_cfg(), _moe_quant(kind))
+    assert choice.format.value == "bf16" and not choice.actionable
+
+
+def test_forced_aiter_activation_dtype_wins(monkeypatch):
+    # DeepSeek V4.1 opt-in a4w4 hands AITER quant_dtype_a=fp4x2 regardless.
+    rocm_aiter_moe = _fake_aiter(monkeypatch, resolve=Mock(return_value=None))
+    moe = _moe_cfg(dsv4_a4w4=True)
+    choice = rocm_aiter_moe.aiter_moe_input_format(moe, _moe_quant("mxfp4_w4a16"))
+    assert choice.format.value == "mxfp4"
+
+
+def test_aiter_without_the_resolver_dispatches_bf16(monkeypatch):
+    rocm_aiter_moe = _fake_aiter(monkeypatch, resolve=None)
+    choice = rocm_aiter_moe.aiter_moe_input_format(_moe_cfg(), _moe_quant("mxfp4"))
+    assert choice.format.value == "bf16" and choice.actionable
+
+
+def _fake_mori_choice(monkeypatch, fmt, mxfp8_ok=True):
+    from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
+        AiterInputChoice,
+        AiterInputFormat,
+    )
+
+    answer = AiterInputChoice(AiterInputFormat(fmt), f"AITER consumes {fmt}")
+    monkeypatch.setattr(mori_epv2, "aiter_moe_input_format", lambda moe, qc: answer)
+    monkeypatch.setattr(mori_epv2, "_aiter_supports_mxfp8_dispatch", lambda: mxfp8_ok)
+    monkeypatch.delenv("MORI_ENABLE_SDMA", raising=False)
+
+
+@pytest.mark.parametrize(
+    "aiter_fmt,transport,mxfp8_ok,fmt",
+    [
+        ("mxfp4", "native", True, "mxfp4"),
+        ("fp8", "native", False, "fp8"),
+        ("bf16", "native", True, "bf16"),
+        ("mxfp8", "native", True, "mxfp8"),
+        # MXFP8 needs an AITER that both emits and consumes it.
+        ("mxfp8", "native", False, "bf16"),
+        # AsyncLL and the internode kernels carry no FP4.
+        ("mxfp4", "async_ll", True, "bf16"),
+        ("mxfp4", "internode", True, "bf16"),
+        ("fp8", "async_ll", True, "fp8"),
+        ("mxfp8", "internode", True, "mxfp8"),
+    ],
+)
+def test_mori_carries_what_it_can(monkeypatch, aiter_fmt, transport, mxfp8_ok, fmt):
+    _fake_mori_choice(monkeypatch, aiter_fmt, mxfp8_ok)
+    choice = mori_epv2.mori_epv2_dispatch_format(
+        _moe_cfg(),
+        None,
+        async_ll=transport == "async_ll",
+        internode=transport == "internode",
+    )
+    assert choice.format.value == fmt
+    # Only a missing AITER capability is worth a warning.
+    assert choice.actionable == (aiter_fmt == "mxfp8" and fmt == "bf16")
+
+
+def test_mori_enable_sdma_means_async_ll(monkeypatch):
+    _fake_mori_choice(monkeypatch, "mxfp4")
+    monkeypatch.setenv("MORI_ENABLE_SDMA", "1")
+    assert mori_epv2.mori_epv2_dispatch_format(_moe_cfg(), None).format.value == "bf16"
+
+
+@pytest.mark.parametrize("epv2,aiter", [(False, True), (True, False)])
+def test_only_epv2_with_aiter_experts_dispatches_quantized(monkeypatch, epv2, aiter):
+    _fake_mori_choice(monkeypatch, "mxfp4")
+    moe = _moe_cfg(epv2=epv2, aiter=aiter)
+    assert mori_epv2.mori_epv2_dispatch_format(moe, None).format.value == "bf16"
+
+
+@pytest.mark.parametrize(
+    "fmt,args",
+    [
+        ("bf16", {}),
+        ("fp8", (torch.float8_e4m3fn, 512 // 128, 4)),
+        ("mxfp8", (torch.float8_e4m3fn, 512 // 32, 1)),
+        ("mxfp4", (torch.float4_e2m1fn_x2, 512 // 32, 1)),
+    ],
+)
+def test_mori_op_is_sized_for_the_format(monkeypatch, fmt, args):
+    from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
+        AiterInputFormat,
+    )
+    from vllm.platforms import current_platform
+
+    monkeypatch.setattr(current_platform, "fp8_dtype", lambda: torch.float8_e4m3fn)
+    got = mori_epv2.mori_epv2_dispatch_args(AiterInputFormat(fmt), 512)
+    if not args:
+        # BF16 keeps the op config, and with it the cached op, as it was.
+        assert got == {}
+        return
+    dtype, scale_dim, scale_type_size = args
+    assert got == dict(
+        dispatch_data_type=dtype,
+        combine_data_type=torch.bfloat16,
+        scale_dim=scale_dim,
+        scale_type_size=scale_type_size,
+    )
+
+
+class FakeQuantOp(FakeOp):
+    """MORI EPv2 op dispatching a quantized format of hidden size 256.
+
+    Scale rows come back as int32 words, `scale_row_bytes` wide: MORI's HIP
+    backend pads them to 128 B, its FlyDSL backend does not.
+    """
+
+    def __init__(self, fmt, scale_row_bytes, capacity=256, recv=0):
+        super().__init__(capacity, recv)
+        cols = 128 if fmt == "mxfp4" else 256
+        dtype = torch.float4_e2m1fn_x2 if fmt == "mxfp4" else torch.float8_e4m3fn
+        self.recv_a1 = torch.full((capacity, cols), 0x38, dtype=torch.uint8).view(dtype)
+        self.recv_scales = torch.full(
+            (capacity, scale_row_bytes // 4), 0x7F7F7F7F, dtype=torch.int32
+        )
+        self.combine_in = torch.empty(capacity, 256, dtype=torch.bfloat16)
+        self.sent: tuple | None = None
+
+    def dispatch(self, input, weights, scales, indices, *, return_routing=True):
+        self.sent = (input, scales)
+        out = super().dispatch(input, weights, scales, indices)
+        # Two int32 words of scales a row (8 e8m0 or 2 FP32), in padded rows.
+        return out[:2] + (self.recv_scales[:, :2],) + out[3:]
+
+
+@pytest.mark.parametrize(
+    "fmt,scale_dtype,num_scales,row_bytes",
+    [
+        ("mxfp4", torch.float8_e8m0fnu, 8, 8),
+        ("mxfp4", torch.float8_e8m0fnu, 8, 128),
+        ("mxfp8", torch.float8_e8m0fnu, 8, 128),
+        ("fp8", torch.float32, 2, 8),
+        ("fp8", torch.float32, 2, 128),
+    ],
+)
+def test_quantized_dispatch(monkeypatch, fmt, scale_dtype, num_scales, row_bytes):
+    from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
+        AiterInputFormat,
+    )
+
+    quantized = (torch.empty(3, 128), torch.empty(3, num_scales))
+    seen = []
+
+    def quantize(x, f):
+        seen.append((x, f))
+        return quantized
+
+    monkeypatch.setattr(mori_epv2, "_quantize_for_dispatch", quantize)
+    op = FakeQuantOp(fmt, row_bytes, recv=7)
+    prepare_finalize = _make_pf(op, dispatch_format=AiterInputFormat(fmt))
+    monkeypatch.setattr(mori_epv2, "is_forward_context_available", lambda: True)
+    counts = SimpleNamespace(num_tokens_across_dp_cpu=torch.tensor([3, 3, 2, 0]))
+    ctx = SimpleNamespace(dp_metadata=counts)
+    monkeypatch.setattr(mori_epv2, "get_forward_context", lambda: ctx)
+    monkeypatch.setattr(
+        mori_epv2, "get_dp_group", lambda: SimpleNamespace(rank_in_group=0)
+    )
+    a1 = torch.ones(3, 256, dtype=torch.bfloat16)
+    dispatch_a1, scale, meta, ids, _ = prepare_finalize.prepare(
+        a1,
+        torch.ones(3, 2),
+        torch.zeros(3, 2, dtype=torch.int64),
+        num_experts=8,
+        expert_map=None,
+        apply_router_weight_on_input=False,
+        quant_config=SimpleNamespace(quant_dtype=None, is_per_tensor=False),
+    )
+    assert seen[0][0] is a1 and seen[0][1] == AiterInputFormat(fmt)
+    assert op.sent is not None
+    assert op.sent[0] is quantized[0] and op.sent[1] is quantized[1]
+    # The rows go to the experts as received, bounded to 32 rows; the scales
+    # are the leading columns of MORI's possibly padded rows, contiguous.
+    assert dispatch_a1.dtype == op.recv_a1.dtype
+    assert dispatch_a1.data_ptr() == op.recv_a1.data_ptr()
+    assert dispatch_a1.shape[0] == 32
+    assert scale.dtype == scale_dtype and scale.shape == (32, num_scales)
+    assert scale.is_contiguous()
+    # The experts read every bounded row: unused rows and scales are zeroed.
+    assert meta is None
+    assert (scale[:7].view(torch.uint8) == 0x7F).all()
+    assert (scale[7:].view(torch.uint8) == 0).all()
+    assert (dispatch_a1[:7].view(torch.uint8) == 0x38).all()
+    assert (dispatch_a1[7:].view(torch.uint8) == 0).all()
+    assert (ids[7:] == -1).all()
+
+
+def _aiter_experts(monkeypatch, aiter_fmt, kind="mxfp4"):
+    """Real AiterExperts around a fake AITER that answers `aiter_fmt`."""
+    from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
+        AiterMxfp4Experts,
+    )
+
+    _fake_mori_choice(monkeypatch, aiter_fmt)
+    experts = object.__new__(AiterMxfp4Experts)
+    experts.moe_config = _moe_cfg()
+    experts.quant_config = SimpleNamespace(
+        **vars(_moe_quant(kind)), quant_dtype="mxfp4", is_per_tensor=True
+    )
+    return experts
+
+
+@pytest.mark.parametrize("aiter_fmt", ["bf16", "fp8", "mxfp8", "mxfp4"])
+@pytest.mark.parametrize("transport", ["native", "async_ll"])
+def test_experts_and_dispatch_agree_on_the_format(monkeypatch, aiter_fmt, transport):
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+
+    experts = _aiter_experts(monkeypatch, aiter_fmt)
+    if transport == "async_ll":
+        monkeypatch.setenv("MORI_ENABLE_SDMA", "1")
+    # all2all_utils sizes the op from the same call.
+    fmt = mori_epv2.mori_epv2_dispatch_format(
+        experts.moe_config, experts.quant_config
+    ).format
+    assert experts.mori_epv2_dispatch_format == fmt
+    assert experts.expects_unquantized_inputs == (fmt.value == "bf16")
+    # Only packed FP4 arrives as half the hidden size.
+    _, _, out = experts.workspace_shapes(4, 8, 64, 2, 8, 2, None, MoEActivation.SILU)
+    assert out == (4, 128 if fmt.value == "mxfp4" else 64)
+    _make_pf(FakeOp(), dispatch_format=fmt).post_init_setup(experts)
+
+
+@pytest.mark.parametrize("aiter_fmt", ["bf16", "fp8", "mxfp8", "mxfp4"])
+def test_fp8_input_gets_every_row_as_the_count(monkeypatch, aiter_fmt):
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+    from vllm.model_executor.layers.fused_moe.experts import rocm_aiter_moe
+
+    experts = _aiter_experts(monkeypatch, aiter_fmt)
+    seen: dict[str, Any] = {}
+
+    def fake_fused_experts(**kwargs):
+        seen.update(kwargs)
+        return kwargs["hidden_states"]
+
+    monkeypatch.setattr(rocm_aiter_moe, "rocm_aiter_fused_experts", fake_fused_experts)
+    monkeypatch.setattr(rocm_aiter_moe, "_write_moe_output", lambda out, res: None)
+    monkeypatch.setattr(
+        rocm_aiter_moe.rocm_aiter_ops, "get_moe_dispatch_policy", lambda: 0
+    )
+    hidden = torch.zeros(5, 64, dtype=torch.uint8)
+    experts.apply(
+        output=hidden,
+        hidden_states=hidden,
+        w1=hidden,
+        w2=hidden,
+        topk_weights=torch.ones(5, 2),
+        topk_ids=torch.zeros(5, 2, dtype=torch.int32),
+        activation=MoEActivation.SILU,
+        global_num_experts=8,
+        expert_map=None,
+        a1q_scale=None,
+        a2_scale=None,
+        workspace13=hidden,
+        workspace2=hidden,
+        expert_tokens_meta=None,
+        apply_router_weight_on_input=False,
+    )
+    # AITER's FP8 block MoE needs a row count to transpose pre-quantized
+    # scales; without one from MORI it covers every row.
+    count = seen["num_local_tokens"]
+    if aiter_fmt == "fp8":
+        assert count.dtype == torch.int32 and count.tolist() == [5]
+    else:
+        assert count is None
+
+
+def test_quantized_dispatch_needs_aiter_experts():
+    from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
+        AiterInputFormat,
+    )
+
+    experts = SimpleNamespace(
+        moe_config=SimpleNamespace(in_dtype=torch.bfloat16),
+        quant_config=SimpleNamespace(quant_dtype="mxfp4", is_per_tensor=True),
+        expects_unquantized_inputs=False,
+    )
+    prepare_finalize = _make_pf(FakeOp(), dispatch_format=AiterInputFormat.MXFP4)
+    with pytest.raises(ValueError, match="VLLM_MORI_EP_V2=0"):
+        prepare_finalize.post_init_setup(experts)
 
 
 def test_padding_tokens_are_routed_to_local_experts(monkeypatch):
