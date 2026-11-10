@@ -315,23 +315,16 @@ class ZmqEventPublisher(EventPublisher):
 
     Spawns a separate thread to handle publishing from a queue.
 
-    Parameters
-    ----------
-    endpoint:
-        PUB address. Use `tcp://*:5557` to bind or `tcp://host:5557` to
-        connect.
-    replay_endpoint:
-        Optional ROUTER address for replay requests. When given, subscribers can
-        request missed batches by sending the starting sequence number as an
-        8-byte big-endian integer.
-    buffer_steps:
-        Number of past batches to keep for replay.
-    hwm:
-        ZeroMQ high-water-mark for PUB socket.
-    max_queue_size:
-        Maximum number of events to buffer in memory.
-    topic:
-        Topic to publish events to.
+    Args:
+        endpoint: PUB address. Use `tcp://*:5557` to bind or `tcp://host:5557` to
+            connect.
+        replay_endpoint: Optional ROUTER address for replay requests. When given,
+            subscribers can request missed batches by sending the starting sequence
+            number as an 8-byte big-endian integer.
+        buffer_steps: Number of past batches to keep for replay.
+        hwm: ZeroMQ high-water-mark for PUB socket.
+        max_queue_size: Maximum number of events to buffer in memory.
+        topic: Topic to publish events to.
 
     """
 

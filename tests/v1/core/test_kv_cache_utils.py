@@ -8,6 +8,7 @@ from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any
 
+import numpy as np
 import pytest
 import torch
 
@@ -40,6 +41,7 @@ from vllm.multimodal.inputs import (
 from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
 from vllm.utils.hashing import sha256, sha256_cbor, xxhash, xxhash_cbor
+from vllm.v1.attention.backends.utils import resolve_kv_cache_layout
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.kv_cache_planning import (
     get_kv_cache_groups,
@@ -184,8 +186,6 @@ def test_hisparse_host_pool_must_fit_max_model_len(monkeypatch, extra_blocks, ok
 def test_hisparse_derived_specs_do_not_affect_kv_cache_layout(monkeypatch):
     """Workers report HiSparse's resident/hot caches, which lay out their own raw
     backing; KV cache layout resolution must skip them."""
-    from vllm.v1.attention.backends.utils import resolve_kv_cache_layout
-
     monkeypatch.delenv("VLLM_KV_CACHE_LAYOUT", raising=False)
     specs: dict[str, KVCacheSpec] = {
         "model.layers.0.self_attn": MLAAttentionSpec(
@@ -1076,7 +1076,7 @@ def test_frontend_block_hashes_count_check():
     def frontend_hashes(config, num_hashes):
         request = EngineCoreRequest(
             request_id="0",
-            prompt_token_ids=list(range(10)),
+            prompt_token_ids=np.arange(10, dtype=np.int32),
             mm_features=None,
             sampling_params=SamplingParams(),
             pooling_params=None,
@@ -1199,14 +1199,10 @@ def test_lookahead_block_hash_keeps_mm_inputs_for_next_block(
         pytest.param({"method": None}, 0, id="no-speculation"),
     ],
 )
-def test_num_hash_lookahead_tokens(
-    overrides: dict[str, Any], expected: int, monkeypatch
-):
+def test_num_hash_lookahead_tokens(overrides: dict[str, Any], expected: int):
     """Resolve hash lookahead during config construction, without loading weights."""
     num_lookahead = overrides.get("num_prefill_lookahead_tokens", 1)
     method = overrides.get("method", "mtp")
-    if method == "dspark":
-        monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
     speculative_config = None
     if method is not None:
         speculative_config = SpeculativeConfig(
@@ -1371,8 +1367,6 @@ def test_dcp_target_allocates_replicated_draft_independently(
     monkeypatch, sliding_window, disable_hybrid, pcp_size
 ):
     """A draft must retain all positions even when the target shards them."""
-    from vllm.v1.attention.backends.utils import resolve_kv_cache_layout
-
     monkeypatch.delenv("VLLM_KV_CACHE_LAYOUT", raising=False)
     config = VllmConfig(model_config=ModelConfig(max_model_len=1024))
     config.parallel_config.decode_context_parallel_size = 4
@@ -1431,10 +1425,37 @@ def test_dcp_target_allocates_replicated_draft_independently(
     assert [len(group) for group in cached_blocks.blocks] == [1, 4]
 
 
+def test_dcp_hybrid_target_pads_replicated_draft_pages(monkeypatch):
+    """A hybrid target keeps a layer-compact layout next to a replicated draft:
+    the draft's pages are padded to the target's instead of packing blocks."""
+    monkeypatch.delenv("VLLM_KV_CACHE_LAYOUT", raising=False)
+    config = VllmConfig(model_config=ModelConfig(max_model_len=1024))
+    config.parallel_config.decode_context_parallel_size = 4
+    config.cache_config.block_size = 16
+    config.cache_config.kv_cache_layout = None
+    target = new_mla_spec()
+    mamba = MambaSpec(
+        block_size=16,
+        shapes=((target.page_size_bytes // 4,),),
+        dtypes=(torch.float32,),
+    )
+    draft = SlidingWindowSpec(
+        block_size=16,
+        num_kv_heads=8,
+        head_size=64,
+        dtype=torch.bfloat16,
+        dcp_sharded=False,
+        sliding_window=256,
+    )
+    specs = {"target": target, "mamba": mamba, "draft": draft}
+    layout = resolve_kv_cache_layout(config, [["LBHNC", "BLHNC"]], specs.values())
+    assert layout == KVCacheLayout.LBHNC
+    groups = get_kv_cache_groups(config, specs)
+    assert {g.kv_cache_spec.page_size_bytes for g in groups} == {target.page_size_bytes}
+
+
 def test_dcp_replicated_kpool_tail_keeps_block_interior_layout(monkeypatch):
     """A replicated kpool tail ring is per-request state, not a draft group."""
-    from vllm.v1.attention.backends.utils import resolve_kv_cache_layout
-
     monkeypatch.delenv("VLLM_KV_CACHE_LAYOUT", raising=False)
     config = VllmConfig(model_config=ModelConfig(max_model_len=1024))
     config.parallel_config.decode_context_parallel_size = 4
@@ -2384,7 +2405,7 @@ def test_resolve_block_hashes_rejects_mismatched_view():
 
 
 def test_is_full_attention_spec_unwraps_uniform_type_specs():
-    """``UniformTypeKVCacheSpecs`` is not a ``FullAttentionSpec``, so callers
+    """`UniformTypeKVCacheSpecs` is not a `FullAttentionSpec`, so callers
     scanning groups with a bare isinstance miss DeepSeek-V4-shaped configs."""
     common = dict(num_kv_heads=1, head_size=1, dtype=torch.float32)
     full = FullAttentionSpec(block_size=4, **common)
