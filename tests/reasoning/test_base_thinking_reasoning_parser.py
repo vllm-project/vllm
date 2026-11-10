@@ -367,6 +367,130 @@ class TestBaseThinkingReasoningParserStreaming:
         assert reasoning == "Reasoning content"
         assert content == "Final"
 
+    def test_streaming_end_marker_text_stripped(self, test_tokenizer, monkeypatch):
+        """End marker id present but its text absent from the delta.
+
+        The start-in-previous/end-in-delta branch must not slice with
+        find() == -1; the visible text is preserved as reasoning.
+        """
+        parser = TestThinkingReasoningParser(test_tokenizer)
+        start_token = parser.start_token
+        end_token = parser.end_token
+        orig_tokenize = test_tokenizer.tokenize
+
+        def fake_tokenize(text, *args, **kwargs):
+            # Marker-only delta arrives with fully stripped text; the
+            # reasoning delta carries the end marker id invisibly.
+            if text == "":
+                return [start_token]
+            if text == "Some reasoning":
+                return orig_tokenize(text, *args, **kwargs) + [end_token]
+            return orig_tokenize(text, *args, **kwargs)
+
+        monkeypatch.setattr(test_tokenizer, "tokenize", fake_tokenize)
+
+        deltas = ["", "Some reasoning", "Final answer"]
+        reasoning, content = run_reasoning_extraction(parser, deltas, streaming=True)
+
+        assert reasoning == "Some reasoning"
+        assert content == "Final answer"
+
+    def test_streaming_both_markers_text_stripped(self, test_tokenizer, monkeypatch):
+        """Both marker ids present but their texts absent in one delta.
+
+        The both-markers-in-delta branch must not slice with
+        find() == -1. The visible text is preserved as reasoning; that
+        conflation is intentional and lossless, not a clean split.
+        """
+        parser = TestThinkingReasoningParser(test_tokenizer)
+        start_token = parser.start_token
+        end_token = parser.end_token
+        orig_tokenize = test_tokenizer.tokenize
+        visible = "Some reasoningFinal answer"
+
+        def fake_tokenize(text, *args, **kwargs):
+            if text == visible:
+                tokens = orig_tokenize(text, *args, **kwargs)
+                return [start_token] + tokens + [end_token]
+            return orig_tokenize(text, *args, **kwargs)
+
+        monkeypatch.setattr(test_tokenizer, "tokenize", fake_tokenize)
+
+        reasoning, content = run_reasoning_extraction(parser, [visible], streaming=True)
+
+        assert reasoning == visible
+        assert content is None
+
+    def test_streaming_start_visible_end_stripped(self, test_tokenizer):
+        """Only the end marker text is absent: strip the visible start."""
+        parser = TestThinkingReasoningParser(test_tokenizer)
+        delta = parser.extract_reasoning_streaming(
+            previous_text="",
+            current_text="<test:think>tail",
+            delta_text="<test:think>tail",
+            previous_token_ids=[],
+            current_token_ids=[parser.start_token_id, 1, parser.end_token_id],
+            delta_token_ids=[parser.start_token_id, 1, parser.end_token_id],
+        )
+        assert delta is not None
+        assert delta.reasoning == "tail"
+        assert delta.content is None
+
+    def test_streaming_start_stripped_end_visible(self, test_tokenizer):
+        """Only the start marker text is absent: split at the end marker."""
+        parser = TestThinkingReasoningParser(test_tokenizer)
+        delta = parser.extract_reasoning_streaming(
+            previous_text="",
+            current_text="reasoning</test:think>content",
+            delta_text="reasoning</test:think>content",
+            previous_token_ids=[],
+            current_token_ids=[
+                parser.start_token_id,
+                1,
+                parser.end_token_id,
+                3,
+            ],
+            delta_token_ids=[
+                parser.start_token_id,
+                1,
+                parser.end_token_id,
+                3,
+            ],
+        )
+        assert delta is not None
+        assert delta.reasoning == "reasoning"
+        assert delta.content == "content"
+
+    def test_streaming_stripped_markers_empty_delta(self, test_tokenizer):
+        """Stripped markers with no visible text yield no reasoning."""
+        parser = TestThinkingReasoningParser(test_tokenizer)
+        delta = parser.extract_reasoning_streaming(
+            previous_text="",
+            current_text="",
+            delta_text="",
+            previous_token_ids=[],
+            current_token_ids=[parser.start_token_id, parser.end_token_id],
+            delta_token_ids=[parser.start_token_id, parser.end_token_id],
+        )
+        assert delta is not None
+        assert delta.reasoning is None
+        assert delta.content is None
+
+    def test_streaming_end_stripped_empty_delta(self, test_tokenizer):
+        """Start in previous, stripped end, empty delta: no reasoning."""
+        parser = TestThinkingReasoningParser(test_tokenizer)
+        delta = parser.extract_reasoning_streaming(
+            previous_text="<test:think>",
+            current_text="<test:think>",
+            delta_text="",
+            previous_token_ids=[parser.start_token_id],
+            current_token_ids=[parser.start_token_id, parser.end_token_id, 1],
+            delta_token_ids=[parser.end_token_id, 1],
+        )
+        assert delta is not None
+        assert delta.reasoning is None
+        assert delta.content is None
+
 
 class TestBaseThinkingReasoningParserMultipleImplementations:
     """Test that multiple implementations of

@@ -112,6 +112,13 @@ class BaseThinkingReasoningParser(ReasoningParser):
                 # start token in previous, end token in delta,
                 # extract reasoning content
                 end_index = delta_text.find(self.end_token)
+                if end_index == -1:
+                    # End marker id present but its text is absent from the
+                    # delta: the split point is unrecoverable, so preserve
+                    # the visible text as reasoning rather than slicing.
+                    # A content tail after the marker is conflated here;
+                    # exact attribution would need token-to-char mapping.
+                    return DeltaMessage(reasoning=delta_text or None)
                 reasoning = delta_text[:end_index]
                 content = delta_text[end_index + len(self.end_token) :]
                 return DeltaMessage(
@@ -131,6 +138,20 @@ class BaseThinkingReasoningParser(ReasoningParser):
                 # extract reasoning content
                 start_index = delta_text.find(self.start_token)
                 end_index = delta_text.find(self.end_token)
+                if end_index == -1:
+                    # End marker id present but its text is absent: cannot
+                    # split, so preserve the visible text as reasoning,
+                    # minus the start marker when its text survived.
+                    reasoning = (
+                        delta_text[start_index + len(self.start_token) :]
+                        if start_index >= 0
+                        else delta_text
+                    )
+                    return DeltaMessage(reasoning=reasoning or None)
+                if start_index == -1:
+                    # Start marker text absent: no visible prefix exists,
+                    # so reasoning starts at 0 and the split below is exact.
+                    start_index = -len(self.start_token)
                 reasoning = delta_text[start_index + len(self.start_token) : end_index]
                 content = delta_text[end_index + len(self.end_token) :]
                 return DeltaMessage(

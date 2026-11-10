@@ -127,6 +127,11 @@ class HYV3ReasoningParser(BaseThinkingReasoningParser):
                 # end token in delta with more tokens,
                 # extract reasoning content and content
                 end_index = delta_text.find(self.end_token)
+                if end_index == -1:
+                    # End marker id present but its text is absent from
+                    # the delta: cannot split, so preserve the visible
+                    # text as reasoning rather than slicing with -1.
+                    return DeltaMessage(reasoning=delta_text or None)
                 reasoning = delta_text[:end_index]
                 content = delta_text[end_index + len(self.end_token) :]
                 return DeltaMessage(

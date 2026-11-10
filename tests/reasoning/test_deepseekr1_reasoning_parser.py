@@ -286,3 +286,25 @@ def test_reasoning(
     else:
         content_ids = parser.extract_content_ids(output)
         assert content_ids == []
+
+
+def test_streaming_no_start_end_text_stripped(deepseek_r1_qwen_tokenizer):
+    """No start marker anywhere, end marker text absent from the delta.
+
+    The no-start-token path must not slice with find() == -1; the
+    visible text is preserved as reasoning.
+    """
+    parser: ReasoningParser = ReasoningParserManager.get_reasoning_parser(parser_name)(
+        deepseek_r1_qwen_tokenizer
+    )
+    delta = parser.extract_reasoning_streaming(
+        previous_text="",
+        current_text="abc",
+        delta_text="abc",
+        previous_token_ids=[],
+        current_token_ids=[1, parser.end_token_id, 2],
+        delta_token_ids=[1, parser.end_token_id, 2],
+    )
+    assert delta is not None
+    assert delta.reasoning == "abc"
+    assert delta.content is None
