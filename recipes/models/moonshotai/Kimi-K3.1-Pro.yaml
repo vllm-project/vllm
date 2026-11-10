@@ -469,7 +469,7 @@ presets:
     strategy: single_node_tp
     workload: "Agentic (InferenceX AgentX)"
     description: "Concurrency 1 and 6 on one B300 node: TP8 with DCP8, the low-latency decode backend on FULL decode CUDA graphs, the K3.1 DSpark draft with 4 tokens on TOKENSPEED_MLA, and host KV offload."
-    source: { label: "InferenceX #4871", href: "https://github.com/SemiAnalysisAI/InferenceX/pull/4871", key: "kimik3.1-fp4-b300-vllm-agentic-dspark", revision: "a1d04c28561d6794499164b6a9555dd3b071023d" }
+    source: { label: "InferenceX #4871", href: "https://github.com/SemiAnalysisAI/InferenceX/pull/4871", key: "kimik3.1-fp4-b300-vllm-agentic-dspark", revision: "84e41585561d6794499164b6a9555dd3b071023d" }
     image: "vllm/vllm-openai:kimi-k31-mc@sha256:f81998764e8594d71b40788c5285ae112acf9230129d5d0d238b5df83da5acf6"
     select:
       frontend: python
@@ -572,7 +572,7 @@ presets:
     strategy: single_node_tp
     workload: "Agentic (InferenceX AgentX)"
     description: "Concurrency 12 and 24 on one B300 node: TP8 with DCP8, CUDA graphs for decode and for prefill and mixed steps up to 4096 tokens, prefill admitted every 8 engine steps, the low-latency decode backend, the K3.1 DSpark draft with 3 tokens, and host KV offload."
-    source: { label: "InferenceX #4871", href: "https://github.com/SemiAnalysisAI/InferenceX/pull/4871", key: "kimik3.1-fp4-b300-vllm-agentic-dspark", revision: "a1d04c28561d6794499164b6a9555dd3b071023d" }
+    source: { label: "InferenceX #4871", href: "https://github.com/SemiAnalysisAI/InferenceX/pull/4871", key: "kimik3.1-fp4-b300-vllm-agentic-dspark", revision: "84e41585561d6794499164b6a9555dd3b071023d" }
     image: "vllm/vllm-openai:kimi-k31-mc@sha256:f81998764e8594d71b40788c5285ae112acf9230129d5d0d238b5df83da5acf6"
     select:
       frontend: python
@@ -657,7 +657,7 @@ presets:
     strategy: single_node_tep
     workload: "Agentic (InferenceX AgentX)"
     description: "Concurrency 48 to 72 on one B300 node: TP8 + DCP8 attention with routed experts EP8 on MegaMoE, the low-latency decode backend at every decode batch on FULL decode CUDA graphs, prefill admitted every 8 engine steps, the K3.1 DSpark draft with 4 tokens on TOKENSPEED_MLA, and host KV offload."
-    source: { label: "InferenceX #4871", href: "https://github.com/SemiAnalysisAI/InferenceX/pull/4871", key: "kimik3.1-fp4-b300-vllm-agentic-dspark", revision: "a1d04c28561d6794499164b6a9555dd3b071023d" }
+    source: { label: "InferenceX #4871", href: "https://github.com/SemiAnalysisAI/InferenceX/pull/4871", key: "kimik3.1-fp4-b300-vllm-agentic-dspark", revision: "84e41585561d6794499164b6a9555dd3b071023d" }
     image: "vllm/vllm-openai:kimi-k31-mc@sha256:f81998764e8594d71b40788c5285ae112acf9230129d5d0d238b5df83da5acf6"
     select:
       frontend: python
@@ -736,7 +736,7 @@ presets:
       c72:
         label: "72"
         concurrency: 72
-        args: ["--max-num-seqs", "72", "--gpu-memory-utilization", "0.98"]
+        args: ["--max-num-seqs", "72", "--gpu-memory-utilization", "0.97"]
         json_args:
           "--compilation-config":
             cudagraph_capture_sizes: [5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70, 75, 80, 85, 90, 95, 100,
@@ -749,7 +749,7 @@ presets:
       - **Routed experts EP8 on MegaMoE.** Attention stays TP8 + DCP8; the Tensor + Expert Parallel strategy adds `--enable-expert-parallel` and `--moe-backend deep_gemm_mega_moe`. The lane keeps the default all-to-all backend, so the preset drops the strategy's `--all2all-backend`.
       - **Low-latency decode at every decode batch.** The specialized decode also runs this hybrid layout (TP8 attention, routed experts EP over every rank) on MegaMoE, with `VLLM_ENABLE_GEMM_RS=0`. The Low-latency decode toggle is offered only without expert parallelism, so the preset sets `--additional-config '{"decode_backend":"latency_specialized"}'` itself.
       - **`--prefill-schedule-interval 8`.** Prefill is admitted once every 8 engine steps, so the specialized decode serves the pure decode steps in between.
-      - **Points.** `--max-num-seqs` equals the concurrency, and FULL_DECODE_ONLY graphs capture 5 rows (1 + 4 draft tokens) per request up to it. `--gpu-memory-utilization` is 0.98, or 0.97 at concurrency 48.
+      - **Points.** `--max-num-seqs` equals the concurrency, and FULL_DECODE_ONLY graphs capture 5 rows (1 + 4 draft tokens) per request up to it. `--gpu-memory-utilization` is 0.98 at concurrency 64 and 0.97 at 48 and 72.
       - `tokenspeed_mla_min_split_kv` (the minimum number of KV splits of the draft's TOKENSPEED_MLA decode attention) is 16. With `VLLM_KIMI_K3_SHARD_SP_SHARED_EXPERT=0`, sequence-parallel MoE replicates the shared expert on every rank, which costs weight memory on each GPU.
       - The **Simple** KV-offload option gets 374,875,000,000 bytes of host DRAM per rank. Size `cpu_bytes_to_use_per_rank` to your host.
 
