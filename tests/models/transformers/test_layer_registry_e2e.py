@@ -44,7 +44,7 @@ _COVERED_LAYERS = ("rms_norm", "silu_and_mul")
 
 def _layer_providers(model) -> dict[str, str]:
     """Map each covered layer type present in the model to the provider its
-    implementation came from (``hw_agnostic`` or ``vllm``).
+    implementation came from (`hw_agnostic` or `vllm`).
     """
 
     def provider_of(module) -> str | None:

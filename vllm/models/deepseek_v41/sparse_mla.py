@@ -98,9 +98,9 @@ class DeepseekV41SparseSWAMetadataBuilder(DeepseekSparseSWAMetadataBuilder):
 class DeepseekV4SparseMLABackend(AttentionBackend):
     """DeepSeek-V4.1 sparse-MLA backend base.
 
-    Subclasses ``AttentionBackend`` directly (not the V3.2
-    ``FlashMLASparseBackend``): DeepSeek-V4.1 runs its own attention layer
-    (``DeepseekV4Attention``), so it does not reuse the V3.2 builder or impl, and
+    Subclasses `AttentionBackend` directly (not the V3.2
+    `FlashMLASparseBackend`): DeepSeek-V4.1 runs its own attention layer
+    (`DeepseekV4Attention`), so it does not reuse the V3.2 builder or impl, and
     only needs to declare its own metadata builder, KV-cache layout, and the
     sparse-MLA capability flags.
     """
@@ -286,10 +286,10 @@ class FlashMLAMegaAttnBackend(DeepseekV4FlashMLABackend):
     """FlashMLA's mega-attention kernel: Q RoPE + sparse attention + inverse
     RoPE + FP8 cast of the output, in one launch.
 
-    Same metadata and KV-cache geometry as ``FLASHMLA_SPARSE_DSV41`` -- what
+    Same metadata and KV-cache geometry as `FLASHMLA_SPARSE_DSV41` -- what
     differs is the attention layer's interface contract (it takes an unnormed,
     unroped Q and returns an already-inverse-RoPE'd, quantized output) and the
-    extra ``nvfp4_ds_mla`` compressed-cache record only this kernel can read.
+    extra `nvfp4_ds_mla` compressed-cache record only this kernel can read.
     SM100 only; the kernel has no SM90 instantiation.
     """
 
