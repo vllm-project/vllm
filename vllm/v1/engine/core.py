@@ -142,6 +142,8 @@ class EngineCore:
         self._checkpoint_error: str | None = None
         # Whether the workers' extensible KV cache holds nothing to keep.
         self._kv_cache_reclaimable = False
+        # Outputs of requests finished outside step(), for an in-process caller.
+        self._pending_outputs: list[EngineCoreOutput] = []
 
         # plugins need to be loaded at the engine/scheduler level too
         from vllm.plugins import load_general_plugins
@@ -1058,7 +1060,10 @@ class EngineCore:
             raise ValueError("'wait' mode can't be used in inproc-engine mode")
 
         if mode == "abort":
-            self.scheduler.finish_requests(None, RequestStatus.FINISHED_ABORTED)
+            aborted_reqs = self.scheduler.finish_requests(
+                None, RequestStatus.FINISHED_ABORTED
+            )
+            self._send_abort_outputs(aborted_reqs)
 
         pause_state = PauseState.PAUSED_ALL if mode == "keep" else PauseState.PAUSED_NEW
         self.scheduler.set_pause_state(pause_state)
@@ -1074,6 +1079,20 @@ class EngineCore:
         self._finish_pause(clear_cache, reset_connector)
 
         return None
+
+    def _send_abort_outputs(self, aborted_reqs: list[Request]) -> None:
+        """Hold the abort outputs of requests finished outside `step()` until
+        `take_pending_outputs()`; in-process, the caller only receives outputs
+        it pulls. `EngineCoreProc` sends them on its output queue instead."""
+        self._pending_outputs.extend(
+            EngineCoreOutput(req.request_id, [], finish_reason=FinishReason.ABORT)
+            for req in aborted_reqs
+        )
+
+    def take_pending_outputs(self) -> list[EngineCoreOutput]:
+        """Outputs of requests finished outside `step()` since the last call."""
+        outputs, self._pending_outputs = self._pending_outputs, []
+        return outputs
 
     def resume_scheduler(self) -> None:
         """Resume the scheduler and flush any requests queued while paused."""

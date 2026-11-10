@@ -6,7 +6,9 @@ from unittest.mock import MagicMock, call
 
 import pytest
 
+from tests.utils import create_new_process_for_each_test
 from vllm import LLM
+from vllm.engine.arg_utils import EngineArgs
 from vllm.exceptions import ProfilerAlreadyActiveError
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.v1.engine.llm_engine import LLMEngine
@@ -342,3 +344,37 @@ def test_skip_tokenizer_initialization(model: str):
     assert len(completions) > 0
     assert completions[0].text == ""
     assert completions[0].token_ids
+
+
+@create_new_process_for_each_test()
+def test_inproc_sleep_delivers_abort_outputs(monkeypatch: pytest.MonkeyPatch):
+    """In-process, a sleep that aborts in-flight requests delivers their final
+    outputs, so a caller that steps until nothing is unfinished stops."""
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    engine = LLMEngine.from_engine_args(
+        EngineArgs(
+            model=MODEL,
+            dtype=DTYPE,
+            max_model_len=128,
+            enforce_eager=True,
+            enable_sleep_mode=True,
+            gpu_memory_utilization=0.5,
+        )
+    )
+    params = SamplingParams(max_tokens=64, ignore_eos=True)
+    for request_id in ("r0", "r1"):
+        engine.add_request(request_id, "Hello, my name is", params)
+    engine.step()
+
+    engine.sleep(level=1)
+    engine.wake_up()
+
+    finished = {}
+    for _ in range(10):
+        if not engine.has_unfinished_requests():
+            break
+        for output in engine.step():
+            if output.finished:
+                finished[output.request_id] = output.outputs[0].finish_reason
+    assert finished == {"r0": "abort", "r1": "abort"}
+    assert not engine.has_unfinished_requests()
