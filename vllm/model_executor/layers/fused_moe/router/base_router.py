@@ -133,12 +133,13 @@ def get_moe_padding_mask(num_tokens: int) -> torch.Tensor | None:
     """Rows of the current batch that are CUDA graph or DP padding.
 
     Routers set these rows' expert ids to -1 so the dispatch and experts skip
-    them; None when VLLM_MOE_SKIP_PADDING is off or the runner does not mark
-    padding.
+    them; None when VLLM_MOE_SKIP_PADDING is off, the runner does not mark
+    padding, or the rows were gathered from other ranks before routing.
     """
     if envs.VLLM_MOE_SKIP_PADDING and is_forward_context_available():
         is_padding = get_forward_context().is_padding
-        return is_padding[:num_tokens] if is_padding is not None else None
+        if is_padding is not None and is_padding.shape[0] >= num_tokens:
+            return is_padding[:num_tokens]
     return None
 
 
