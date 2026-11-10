@@ -207,7 +207,8 @@ pub(crate) fn full_format_from_builder_for_test(
     )
 }
 
-fn tool_params(tools: &[Tool], strict_level: ToolStrictLevel) -> Vec<ToolParam> {
+/// Tools as builder inputs, strict when the tool or the server floor asks for it.
+pub(crate) fn tool_params(tools: &[Tool], strict_level: ToolStrictLevel) -> Vec<ToolParam> {
     tools
         .iter()
         .map(|tool| {
@@ -240,7 +241,7 @@ pub(crate) fn normalize_tool_choice(
 }
 
 /// Whether the request asks for a tool grammar at all.
-fn tool_grammar_applies(ctx: &OutputGrammarContext<'_>) -> bool {
+pub(crate) fn tool_grammar_applies(ctx: &OutputGrammarContext<'_>) -> bool {
     if ctx.tools.is_empty() {
         return false;
     }

@@ -7,26 +7,11 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.utils.torch_utils import supports_xpu_graph
-from vllm.v1.worker.gpu.model_runner import (
-    GPUModelRunner as GPUModelRunnerV2,
-)
-from vllm.v1.worker.gpu_model_runner import GPUModelRunner
+from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 from vllm.v1.worker.mm_encoder_model_runner import MMEncoderModelRunner
 
 
 class XPUModelRunner(GPUModelRunner):
-    """A model runner for XPU devices."""
-
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-        device: torch.device,
-    ):
-        with _torch_cuda_wrapper():
-            super().__init__(vllm_config, device)
-
-
-class XPUModelRunnerV2(GPUModelRunnerV2):
     """A model runner for XPU devices."""
 
     def __init__(
@@ -61,9 +46,9 @@ def _torch_cuda_wrapper():
     torch.cuda.stream = partial(torch.xpu.stream)
     torch.cuda.set_stream = partial(torch.xpu.set_stream)
 
-    # torch.xpu.Event does not accept the ``blocking`` kwarg that
-    # torch.cuda.Event supports, so drop it here.
-    def _xpu_event(*args, blocking=None, **kwargs):
+    # torch.xpu.Event does not accept the ``blocking`` or ``external`` kwargs
+    # that torch.cuda.Event supports, so drop them here.
+    def _xpu_event(*args, blocking=None, external=None, **kwargs):
         return torch.xpu.Event(*args, **kwargs)
 
     torch.cuda.Event = _xpu_event

@@ -32,7 +32,7 @@ use super::template::{
     FieldName, Region, RegionKind, Repeat, ResponseTemplate, TextRegion, TextRole, ToolCallRegion,
     Watch, WatchKind, WatchSet,
 };
-use crate::tool::{Tool, ToolCallDelta, ToolSchemas};
+use crate::tool::{JsonStyle, Tool, ToolCallDelta, ToolSchemas};
 use crate::unified::{
     Result, UnifiedParser, UnifiedParserError, UnifiedParserOutput, parsing_failed,
 };
@@ -57,6 +57,20 @@ pub struct HfUnifiedParser {
     /// Strip state per region: per occurrence with `repeats`, per stream otherwise.
     strip: Vec<StripState>,
     emitted_tool_count: usize,
+}
+
+/// Where the parser is in the response; see [`HfUnifiedParser::position`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HfPosition {
+    /// Nothing parsed since the start anchor, or since the start of the stream
+    /// when there is none.
+    ResponseStart,
+    /// Inside an open reasoning field.
+    Reasoning,
+    /// Inside an open content field.
+    Content,
+    /// Anywhere else.
+    Other,
 }
 
 /// Parser mode: the region currently receiving text.
@@ -154,6 +168,36 @@ impl HfUnifiedParser {
         };
         parser.reset_to_implicit();
         parser
+    }
+
+    /// Where the parser is in the response. Between
+    /// [`UnifiedParser::initialize`] and the first generated text, this is where
+    /// the prompt leaves the response.
+    ///
+    /// Text outside every region, which a template without an implicit field
+    /// discards, leaves no state behind and so does not move the parser from
+    /// [`HfPosition::ResponseStart`].
+    pub fn position(&self) -> HfPosition {
+        if !self.buffer.text.is_empty() {
+            return HfPosition::Other;
+        }
+        match &self.mode {
+            HfMode::Implicit(occurrence) | HfMode::Explicit(occurrence) if occurrence.opened => {
+                match &self.template.regions[occurrence.region].kind {
+                    RegionKind::Text(TextRegion {
+                        role: TextRole::Reasoning,
+                        ..
+                    }) => HfPosition::Reasoning,
+                    RegionKind::Text(TextRegion {
+                        role: TextRole::Content,
+                        ..
+                    }) => HfPosition::Content,
+                    _ => HfPosition::Other,
+                }
+            }
+            _ if self.closed.contains(&true) || self.emitted_tool_count > 0 => HfPosition::Other,
+            _ => HfPosition::ResponseStart,
+        }
     }
 
     /// Clear all per-stream state.
@@ -581,9 +625,10 @@ fn convert_text_arguments(
     }
 }
 
-/// Serialize tool-call arguments to JSON text.
+/// Serialize tool-call arguments to JSON text with the separators of HF
+/// `tojson`, which chat templates render JSON values with.
 fn serialize_arguments(arguments: &impl serde::Serialize) -> Result<String> {
-    serde_json::to_string(arguments).map_err(|error| {
+    JsonStyle::Spaced.to_string(arguments).map_err(|error| {
         parsing_failed!("failed to serialize tool arguments: {}", error.as_report())
     })
 }

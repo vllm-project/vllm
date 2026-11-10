@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Abstract interfaces and data types for the secondary tiering layer."""
 
+import threading
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Collection, Iterable
@@ -65,6 +66,9 @@ class TieringOffloadingMetrics:
     )
     BACKPRESSURE_STORES_DROPPED = "vllm:kv_offload_tiering_backpressure_stores_dropped"
     BACKPRESSURE_BLOCKS_DROPPED = "vllm:kv_offload_tiering_backpressure_blocks_dropped"
+    PROMOTION_LATENCY = "vllm:kv_offload_tiering_promotion_latency_seconds"
+    DEFERRED_RELEASE_CHUNKS = "vllm:kv_offload_tiering_deferred_release_chunks"
+    DEFERRED_RELEASE_HOLD = "vllm:kv_offload_tiering_deferred_release_hold_seconds"
 
 
 @dataclass
@@ -92,6 +96,13 @@ class JobResult:
     successful_keys: Collection[OffloadKey] | None = None
     transfer_time: float | None = None
     transfer_bytes: int | None = None
+    # Only applicable to failed promotion jobs. Set when the tier's I/O may
+    # still write into the primary chunks of the failed keys: the manager fails
+    # those keys now but defers releasing their chunks to the free pool until
+    # the tier sets the event. The tier may set it from any thread, once its
+    # I/O can no longer touch those chunks; the manager applies the release on
+    # its own polling path.
+    deferred_release: threading.Event | None = None
 
 
 class ParentManager(ABC):
@@ -142,6 +153,12 @@ class SecondaryTierManager(ABC):
     IMPORTANT: All methods run in the Scheduler process and must be
     lightweight and non-blocking. submit_load() and submit_store() submit
     async jobs; get_finished_jobs() polls for completion.
+
+    Methods are called under the tiering manager's lock, so they are never
+    entered concurrently -- but not always from the same thread. A tier that
+    sets tolerates_off_thread_polling is also serviced from the manager's
+    tier-poll thread, and any tier can be reached from there via
+    ParentManager fan-out. Keep per-thread assumptions out of tier state.
     """
 
     medium: ClassVar[Medium | None] = None
@@ -156,6 +173,16 @@ class SecondaryTierManager(ABC):
                 Medium.CPU: CacheHitSource.HOST,
                 Medium.STORAGE: CacheHitSource.DISK,
             }[cls.medium]
+
+    # Whether the tiering manager may also service this tier from its
+    # tier-poll thread, between engine steps, rather than only from
+    # on_schedule_end(). That thread calls both get_finished_jobs() and
+    # serve_external_requests(); see poll_tiers(). Set it on a tier that
+    # answers a counterpart the engine does not drive -- a remote peer, say --
+    # whose requests would otherwise wait for a step boundary. Overriding
+    # serve_external_requests() alone does not opt in: setting this asserts
+    # the tier tolerates those calls off the scheduler thread.
+    tolerates_off_thread_polling: ClassVar[bool] = False
 
     def __init__(
         self,
@@ -216,7 +243,7 @@ class SecondaryTierManager(ABC):
         calling thread.
 
         Preconditions (guaranteed by the framework):
-          - ``job_metadata.chunk_ids`` are valid primary-tier slots, pinned
+          - `job_metadata.chunk_ids` are valid primary-tier slots, pinned
             (ref-counted) for the duration of the transfer.
 
         The implementation is responsible for:
@@ -225,7 +252,7 @@ class SecondaryTierManager(ABC):
           3. Allocating space in this tier
           4. Submitting the async transfer (read from primary via chunk_ids)
 
-        Report completion via ``get_finished_jobs()``.
+        Report completion via `get_finished_jobs()`.
 
         Args:
             job_metadata: Job metadata including job_id, keys, and chunk_ids
@@ -244,13 +271,13 @@ class SecondaryTierManager(ABC):
         on the calling thread.
 
         Preconditions (guaranteed by the framework):
-          - ``job_metadata.chunk_ids`` are allocated primary-tier slots
+          - `job_metadata.chunk_ids` are allocated primary-tier slots
             ready to receive data.
 
         The implementation must copy data from this tier into the
-        primary-tier slots identified by ``chunk_ids``.
+        primary-tier slots identified by `chunk_ids`.
 
-        Report completion via ``get_finished_jobs()``.
+        Report completion via `get_finished_jobs()`.
 
         Args:
             job_metadata: Job metadata including job_id, keys, and chunk_ids
@@ -285,16 +312,6 @@ class SecondaryTierManager(ABC):
         """Take KV events for storage state owned by this tier."""
         return ()
 
-    def touch(self, keys: Collection[OffloadKey], req_context: ReqContext):
-        """Mark chunks as recently used for eviction policy.
-
-        Args:
-            keys: Offload keys to mark as recently used.
-            req_context: Per-request context.
-
-        """
-        return
-
     @abstractmethod
     def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:
         """Called when a new request is first seen by the scheduler.
@@ -312,7 +329,7 @@ class SecondaryTierManager(ABC):
         """Called when a request has finished.
 
         By the time this is called, all per-request calls for this request
-        (submit_store, submit_load, touch) have already been issued, and none
+        (submit_store, submit_load) have already been issued, and none
         will follow. Note this does NOT imply the tier's transfers have
         completed: jobs already submitted may still be in flight and will
         report via get_finished_jobs(). This is the right place to release
@@ -327,9 +344,20 @@ class SecondaryTierManager(ABC):
     def serve_external_requests(self, parent: ParentManager) -> None:
         """Process remotely-originated requests using the parent manager.
 
-        Called once per scheduler step, BEFORE _flush_pending_promotions().
-        The parent handle is valid only for the duration of this call.
-        Tiers that don't serve external requests leave this as a no-op.
+        Called once per scheduler step, BEFORE _flush_pending_promotions(), and
+        additionally once per tier-poll round for tiers that set
+        tolerates_off_thread_polling. The _flush_pending_promotions() ordering
+        holds only for the per-step call: a promotion this method initiates from
+        a tier-poll round is submitted at the next on_schedule_end().
+
+        The parent handle is valid only for the duration of this call, and the
+        caller holds the manager lock throughout it -- so a lookup() HIT taken
+        here stays valid until this call pins it. An implementation must not
+        release that lock partway through.
+
+        Tiers that don't serve external requests leave this as a no-op. A tier
+        that overrides it without setting tolerates_off_thread_polling is served
+        once per step only.
         """
         return
 
@@ -356,6 +384,10 @@ class SecondaryTierManager(ABC):
         would corrupt either the primary memoryview or the secondary backing
         store. Queued (not-yet-started) transfers may be cancelled, but their
         failure result must still appear in `get_finished_jobs()`.
+
+        Likewise, every `JobResult.deferred_release` event must be set
+        before this returns, so the tier must bound how long it can defer a
+        release.
         """
         pass
 

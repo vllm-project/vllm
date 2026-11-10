@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use vllm_tokenizer::DecodedText;
 use winnow::ascii::multispace0 as ws0;
 use winnow::combinator::{alt, eof, repeat, seq, terminated};
 use winnow::prelude::*;
@@ -9,7 +10,7 @@ use winnow::token::{literal, rest, take_until, take_while};
 
 use super::parameters::ToolSchemas;
 use super::utils::{MarkerScanState, parse_buffered_event, safe_text_len_mul, take_until_marker};
-use super::{Result, ToolCallDelta, ToolParserOutput};
+use super::{JsonStyle, Result, ToolCallDelta, ToolParserError, ToolParserOutput};
 use crate::tool::Tool;
 
 mod glm45_moe;
@@ -93,7 +94,9 @@ impl GlmXmlToolParser {
             GlmEvent::ToolCall { name, raw_params } => {
                 self.mode = GlmMode::AfterToolCall;
                 let arguments = self.tool_parameters.convert_params_with_schema(&name, raw_params);
-                let arguments = serde_json::to_string(&arguments)
+                // The template renders JSON values with Python separators.
+                let arguments = JsonStyle::Spaced
+                    .to_string(&arguments)
                     .map_err(|error| parsing_failed!("failed to serialize arguments: {}", error))?;
 
                 output.push_call(ToolCallDelta {
@@ -114,8 +117,8 @@ impl GlmXmlToolParser {
         std::mem::take(&mut self.buffer)
     }
 
-    fn parse_into(&mut self, chunk: &str, output: &mut ToolParserOutput) -> Result<()> {
-        self.buffer.push_str(chunk);
+    fn parse_into(&mut self, chunk: DecodedText, output: &mut ToolParserOutput) -> Result<()> {
+        self.buffer.push_str(&chunk.text);
 
         while let Some((event, consumed_len)) = parse_buffered_event(&self.buffer, |input| {
             parse_next_glm_event(input, &mut self.mode, self.separator)
@@ -133,7 +136,7 @@ impl GlmXmlToolParser {
             match self.mode {
                 GlmMode::Text => output.push_text(&self.buffer),
                 GlmMode::ToolCall { .. } => {
-                    return Err(parsing_failed!("incomplete GLM MoE tool call"));
+                    return Err(ToolParserError::IncompleteToolCall { parser: "GLM MoE" });
                 }
                 GlmMode::AfterToolCall => {}
             }
@@ -275,7 +278,7 @@ mod tests {
     use thiserror_ext::AsReport;
 
     use super::{Glm45MoeToolParser, Glm47MoeToolParser};
-    use crate::tool::test_utils::{collect_stream, split_by_chars, test_tools};
+    use crate::tool::test_utils::{collect_stream, split_by_chars, test_tokenizer, test_tools};
     use crate::tool::{ToolParser, ToolParserTestExt as _};
 
     fn glm45_tool_call(function_name: &str, params: &[(&str, &str)]) -> String {
@@ -325,8 +328,8 @@ mod tests {
         let tools = test_tools();
         let text = glm45_tool_call("get_weather", &[("city", "  Paris \n"), ("days", " 2 ")]);
         for mut parser in [
-            Glm45MoeToolParser::create(&tools).unwrap(),
-            Glm47MoeToolParser::create(&tools).unwrap(),
+            Glm45MoeToolParser::create(&tools, test_tokenizer()).unwrap(),
+            Glm47MoeToolParser::create(&tools, test_tokenizer()).unwrap(),
         ] {
             let output = parser.parse_complete(&text).unwrap();
             assert_eq!(
@@ -341,8 +344,8 @@ mod tests {
         let tools = test_tools();
         let text = glm45_tool_call("get_weather", &[("city", "  Paris \n"), ("days", " 2 ")]);
         for mut parser in [
-            Glm45MoeToolParser::create(&tools).unwrap(),
-            Glm47MoeToolParser::create(&tools).unwrap(),
+            Glm45MoeToolParser::create(&tools, test_tokenizer()).unwrap(),
+            Glm47MoeToolParser::create(&tools, test_tokenizer()).unwrap(),
         ] {
             let output = collect_stream(&mut *parser, &split_by_chars(&text, 7));
             assert_eq!(

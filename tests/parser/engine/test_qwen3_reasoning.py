@@ -2,11 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for the engine-based Qwen3 reasoning parser.
 
-Validates that ``Qwen3Parser`` correctly handles
-``<think>``/``</think>`` reasoning with Qwen3-specific extensions:
-- ``<tool_call>`` as implicit reasoning end (terminal + token ID)
-- Stripping ``<think>`` from generated output (old template compat)
-- No terminal text (``</think>``, ``<tool_call>``) leaks into output
+Validates that `Qwen3Parser` correctly handles
+`<think>`/`</think>` reasoning with Qwen3-specific extensions:
+- `<tool_call>` as implicit reasoning end (terminal + token ID)
+- Stripping `<think>` from generated output (old template compat)
+- No terminal text (`</think>`, `<tool_call>`) leaks into output
 """
 
 import dataclasses
@@ -380,6 +380,40 @@ class TestDelegatingPromptDetection:
         assert delta.reasoning is None
         assert delta.content == "answer"
 
+    def test_prior_turn_think_end_keeps_non_streaming_reasoning(
+        self, mock_tokenizer, mock_request
+    ):
+        parser = _Qwen3DelegatingParser(mock_tokenizer)
+        parser.set_prompt_token_ids([_THINK_END_ID, _IM_END_ID, _IM_START_ID, _TEXT_ID])
+        output_ids = [ord("a"), _THINK_END_ID, ord("b")]
+
+        reasoning, content, _ = parser.parse(
+            mock_tokenizer.decode(output_ids),
+            mock_request,
+            model_output_token_ids=output_ids,
+        )
+
+        assert reasoning == "a"
+        assert content == "b"
+        assert parser.count_reasoning_tokens(output_ids) > 0
+
+    def test_think_end_in_current_turn_parses_output_as_content(
+        self, mock_tokenizer, mock_request
+    ):
+        parser = _Qwen3DelegatingParser(mock_tokenizer)
+        parser.set_prompt_token_ids([_IM_START_ID, _THINK_START_ID, _THINK_END_ID])
+        output_ids = [ord("a"), ord("b")]
+
+        reasoning, content, _ = parser.parse(
+            mock_tokenizer.decode(output_ids),
+            mock_request,
+            model_output_token_ids=output_ids,
+        )
+
+        assert reasoning is None
+        assert content == "ab"
+        assert parser.count_reasoning_tokens(output_ids) == 0
+
 
 class TestStreaming:
     def test_basic_streaming(self, parser):
@@ -700,8 +734,8 @@ class TestWhitespaceStrippingDisabled:
 
 
 class TestThinkingDisabled:
-    """When ``enable_thinking=False``, the chat template pre-fills a closed
-    ``<think>\\n\\n</think>\\n\\n`` block.  The model output starts in content
+    """When `enable_thinking=False`, the chat template pre-fills a closed
+    `<think>\\n\\n</think>\\n\\n` block.  The model output starts in content
     state, so the parser's initial state must be CONTENT — not REASONING.
     """
 

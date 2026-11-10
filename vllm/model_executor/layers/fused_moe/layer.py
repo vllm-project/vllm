@@ -40,6 +40,7 @@ from vllm.model_executor.layers.fused_moe.runner.moe_runner import (
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
 )
+from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 
 logger = init_logger(__name__)
 
@@ -114,6 +115,7 @@ def FusedMoEFactory(
     swiglu_beta: float | None = None,
     activation_situ_beta: float | None = None,
     activation_situ_linear_beta: float | None = None,
+    qat_activation_key: QuantKey | None = None,
     e_score_correction_bias: torch.Tensor | None = None,
     apply_router_weight_on_input: bool = False,
     activation: str = "silu",
@@ -134,6 +136,7 @@ def FusedMoEFactory(
     routed_input_transform: torch.nn.Module | None = None,
     routed_output_transform: torch.nn.Module | None = None,
     apply_routed_scale_to_output: bool = False,
+    divide_shared_output_in_fp16: bool = False,
     zero_expert_type: str | None = None,
     hash_indices_table: torch.Tensor | None = None,
     bias_vl: torch.Tensor | None = None,
@@ -141,6 +144,7 @@ def FusedMoEFactory(
     runner_cls: type[MoERunner] | None = None,
     runner_args: dict[str, Any] | None = None,
     routed_experts_cls: type[RoutedExperts] | None = None,
+    moe_config_cls: type[FusedMoEConfig] | None = None,
     routed_experts_args: dict[str, Any] | None = None,
     skip_padding: bool = False,
 ) -> MoERunner:
@@ -185,6 +189,8 @@ def FusedMoEFactory(
         swiglu_limit: SwiGLU activation limit
         activation_situ_beta: SituGLU activation beta
         activation_situ_linear_beta: SituGLU linear beta
+        qat_activation_key: Activation quantization scheme the experts were
+            trained against, for checkpoints that do not record it
         e_score_correction_bias: Expert score correction bias tensor
         apply_router_weight_on_input: Whether to apply router weights on input
         activation: Activation function name ("silu", "gelu", etc.)
@@ -211,6 +217,10 @@ def FusedMoEFactory(
         routed_output_transform: Output transformation module
         apply_routed_scale_to_output: Whether to apply routed_scaling_factor to
                                       output instead of topk_weights
+        divide_shared_output_in_fp16: With apply_routed_scale_to_output, divide
+            the shared expert output by routed_scaling_factor for FP16 instead
+            of scaling the routed output. Only set this if the model's decoder
+            layer compensates with matching divisions (see DeepseekV2).
         zero_expert_type: Type of zero expert handling
         hash_indices_table: Hash table for expert indices
         bias_vl: Vision routing bias for image tokens (Deepseek V4)
@@ -219,6 +229,7 @@ def FusedMoEFactory(
         runner_cls: Custom MoERunner class (None = use default MoERunner)
         runner_args: Additional arguments for runner constructor
         routed_experts_cls: Custom RoutedExperts class (None = use default)
+        moe_config_cls: Custom FusedMoEConfig class (None = use default)
         routed_experts_args: Additional arguments for routed_experts constructor
         skip_padding: Whether grouped routing should invalidate padding rows.
 
@@ -356,7 +367,7 @@ def FusedMoEFactory(
         # since model_config is not set in the pytest test.
         moe_in_dtype = params_dtype
 
-    moe_config = FusedMoEConfig(
+    moe_config = (moe_config_cls or FusedMoEConfig)(
         num_experts=global_num_experts,
         experts_per_token=top_k,
         hidden_dim=hidden_size,
@@ -375,14 +386,17 @@ def FusedMoEFactory(
         shared_expert_prefix=shared_expert_prefix,
         activation=moe_activation,
         device=vllm_config.device_config.device,
-        routing_method=router.routing_method_type,  # Not ideal
+        routing_method=router.kernel_routing_method_type,
         has_hash_routing=hash_indices_table is not None,
-        require_decomposed_backend=expert_substitution is not None,
+        require_decomposed_backend=(
+            expert_substitution is not None or not router.supports_monolithic_kernels
+        ),
         swiglu_limit=swiglu_limit,
         swiglu_alpha=swiglu_alpha,
         swiglu_beta=swiglu_beta,
         activation_situ_beta=activation_situ_beta,
         activation_situ_linear_beta=activation_situ_linear_beta,
+        qat_activation_key=qat_activation_key,
         max_capture_size=vllm_config.compilation_config.max_cudagraph_capture_size,
         skip_final_all_reduce=skip_final_all_reduce,
     )
@@ -433,9 +447,10 @@ def FusedMoEFactory(
         swiglu_limit=swiglu_limit,
         swiglu_alpha=swiglu_alpha,
         swiglu_beta=swiglu_beta,
-        # TODO get from router? needs to be truncated?
-        e_score_correction_bias=e_score_correction_bias,
+        # TODO needs to be truncated?
+        e_score_correction_bias=router.prepare_monolithic_bias(e_score_correction_bias),
         apply_router_weight_on_input=apply_router_weight_on_input,
+        hash_indices_table=hash_indices_table,
         **routed_experts_args if routed_experts_args is not None else {},
     )
 
@@ -459,6 +474,7 @@ def FusedMoEFactory(
         routed_scaling_factor=routed_scaling_factor
         if apply_routed_scale_to_output
         else 1.0,
+        divide_shared_output_in_fp16=divide_shared_output_in_fp16,
         **runner_args if runner_args is not None else {},
     )
 
