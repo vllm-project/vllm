@@ -379,7 +379,7 @@ _TOKEN = re.compile(r"\.([A-Za-z_][A-Za-z0-9_]*)|\[(\d+|'[^']*')\]")
 
 
 def _set_path(obj, path: str, value, create: bool = False) -> None:
-    """Set a value at an attribute/index path such as a.b[0]['k'].
+    """Set a value at an attribute/index path such as `a.b[0]['k']`.
 
     With create, missing attributes and list slots on the way are added."""
     steps = [(m[1], m[2]) for m in _TOKEN.finditer("." + path)]
