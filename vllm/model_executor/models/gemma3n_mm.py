@@ -635,16 +635,12 @@ class Gemma3nForConditionalGeneration(
 
             # NOTE (NickLucche) In order to be compatible with cudagraph, the
             # buffer needs to be consistent, so we pre-allocate here.
-            self.register_buffer(
-                "per_layer_embeddings",
-                torch.zeros(
-                    vllm_config.scheduler_config.max_num_batched_tokens,
-                    self.config.text_config.num_hidden_layers,
-                    self.config.text_config.hidden_size_per_layer_input,
-                    device=self.language_model.model.embed_tokens.weight.device,
-                    dtype=self.language_model.model.embed_tokens.weight.dtype,
-                ),
-                persistent=False,
+            self.per_layer_embeddings = torch.zeros(
+                vllm_config.scheduler_config.max_num_batched_tokens,
+                self.config.text_config.num_hidden_layers,
+                self.config.text_config.hidden_size_per_layer_input,
+                device=self.language_model.model.embed_tokens.weight.device,
+                dtype=self.language_model.model.embed_tokens.weight.dtype,
             )
 
     def _parse_and_validate_image_input(
@@ -797,6 +793,15 @@ class Gemma3nForConditionalGeneration(
                 multimodal_embeddings.extend(audio_embeddings)
         return multimodal_embeddings
 
+    def _per_layer_embeddings_on(self, device: torch.device) -> torch.Tensor:
+        # A plain attribute, not a buffer, so the IPC weight cache never shares
+        # this per-step scratch; reallocate if the model was moved after init.
+        if self.per_layer_embeddings.device != device:
+            self.per_layer_embeddings = torch.zeros_like(
+                self.per_layer_embeddings, device=device
+            )
+        return self.per_layer_embeddings
+
     def embed_input_ids(
         self,
         input_ids: torch.Tensor,
@@ -815,9 +820,9 @@ class Gemma3nForConditionalGeneration(
                 self.config.text_config.num_hidden_layers,
                 self.config.text_config.hidden_size_per_layer_input,
             )
-            self.per_layer_embeddings[: per_layer_inputs.shape[0]].copy_(
-                per_layer_inputs
-            )
+            self._per_layer_embeddings_on(per_layer_inputs.device)[
+                : per_layer_inputs.shape[0]
+            ].copy_(per_layer_inputs)
 
         # This is to satisfy the type checker for each overload
         if multimodal_embeddings is None or is_multimodal is None:
@@ -846,12 +851,14 @@ class Gemma3nForConditionalGeneration(
         # `embed_input_ids` is called before forward, hence this slice
         # will contain PLEs computed from the actual input_ids.
         if inputs_embeds is not None:
-            num_tokens = inputs_embeds.shape[0]
+            hidden_states = inputs_embeds
         elif intermediate_tensors is not None:
-            num_tokens = intermediate_tensors["hidden_states"].shape[0]
+            hidden_states = intermediate_tensors["hidden_states"]
         else:
             raise ValueError("inputs_embeds is required on the first PP rank")
-        per_layer_inputs = self.per_layer_embeddings[:num_tokens]
+        per_layer_inputs = self._per_layer_embeddings_on(hidden_states.device)[
+            : hidden_states.shape[0]
+        ]
 
         hidden_states = self.language_model.model(
             input_ids,
