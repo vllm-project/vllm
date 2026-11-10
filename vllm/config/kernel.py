@@ -345,7 +345,7 @@ class KernelConfig:
     - "aiter": Use AMD AITer kernels (ROCm only)
     - "aiter_mega_moe": Use the AITER MegaMoE fused dispatch/GEMM/combine
       kernel (ROCm gfx950, requires DP+EP with a MoRI all2all backend;
-      DeepSeek-V4 only)
+      DeepSeek-V4 and V4.1 only)
     - "aiter_triton_mxfp4_bf16": Use the AITER Triton MXFP4 W4A16
       (moe_gemm_a16w4) MoE kernel (ROCm gfx942/gfx950/gfx1250)
     - "aiter_triton_mxfp4_mxfp4": Use the AITER Triton/Gluon MXFP4 W4A4
