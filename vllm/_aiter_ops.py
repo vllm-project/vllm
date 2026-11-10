@@ -2488,6 +2488,19 @@ class rocm_aiter_ops:
             group=group, device=device, rank=rank, world_size=world_size
         )
 
+    @staticmethod
+    def create_sp_collectives(flydsl_int4: Any) -> Any:
+        """AITER's INT4 sequence-parallel collectives over `flydsl_int4`, or None
+        when this AITER has none or they cannot run on this platform. A collective:
+        every rank calls it, outside CUDA graph capture."""
+        try:
+            from aiter.dist.device_communicators.sp_collectives import (
+                create_sp_collectives,
+            )
+        except ImportError:
+            return None
+        return create_sp_collectives(flydsl_int4)
+
     @classmethod
     @if_aiter_supported
     def is_shuffle_kv_cache_enabled(cls) -> bool:

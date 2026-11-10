@@ -5,7 +5,6 @@ from functools import lru_cache
 
 import torch
 
-from vllm.config import VllmConfig
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
@@ -13,9 +12,6 @@ from vllm.distributed import (
     tensor_model_parallel_all_gather,
     tensor_model_parallel_reduce_scatter,
 )
-from vllm.logger import init_logger
-
-logger = init_logger(__name__)
 
 
 def _custom_collective(name: str, x: torch.Tensor) -> torch.Tensor | None:
@@ -24,23 +20,6 @@ def _custom_collective(name: str, x: torch.Tensor) -> torch.Tensor | None:
         return None
     collective = getattr(device_communicator, name, None)
     return None if collective is None else collective(x)
-
-
-def use_quick_sp(vllm_config: VllmConfig) -> bool:
-    """Whether the decoder-layer SP collectives go through INT4 QuickReduce:
-    `--enable-hc-sp-quick-reduce` is set and the TP communicator serves them.
-    Warns once when the flag is set but the communicator cannot."""
-    if not vllm_config.parallel_config.enable_hc_sp_quick_reduce:
-        return False
-    qr_comm = getattr(get_tp_group().device_communicator, "qr_comm", None)
-    if qr_comm is not None and qr_comm.sp_quick_reduce_enabled:
-        return True
-    logger.warning_once(
-        "--enable-hc-sp-quick-reduce needs gfx950, VLLM_ROCM_USE_AITER=1, custom "
-        "all-reduce and an AITER with QuickAllReduceInt4.reduce_scatter, "
-        "all_gather and compile_sp; the sequence-parallel collectives stay exact."
-    )
-    return False
 
 
 @lru_cache

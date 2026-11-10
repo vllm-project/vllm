@@ -196,11 +196,10 @@ class Qwen4ExpDecoderLayer(nn.Module):
         self.layer_type = layer_type
         # MoE SP also enables HC SP, while HC SP can be enabled independently.
         self.use_hc_sequence_parallel = is_hc_sequence_parallel_enabled(vllm_config)
-        # The four SP collectives of the decoder layer may use INT4 QuickReduce
-        # (opt-in, lossy, with AITER's exact IPC collectives below its size gate)
-        # or AITER's exact IPC collectives alone (opt-in). The other SP sites
-        # (embedding shard, LM-head gather, PLE) always stay on the common exact
-        # path.
+        # The four SP collectives of the decoder layer: AITER's lossy INT4 pair
+        # or the exact one, as `decoder_layer_sp_collectives` decides; the other
+        # SP sites (embedding shard, LM-head gather, PLE) always stay on the
+        # common exact path.
         self.sp_all_gather, self.sp_reduce_scatter = decoder_layer_sp_collectives(
             vllm_config, self.use_hc_sequence_parallel
         )
