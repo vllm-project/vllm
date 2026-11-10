@@ -2609,7 +2609,7 @@ def _make_hybrid_kv_cache_config(
             - "mamba": MambaSpec in prefix-caching ("align") mode
         block_sizes: Optional per-group physical block sizes (same length as
             spec_types). Sliding-window sizes scale with each group's own
-            block size. Defaults to ``block_size`` for every group.
+            block size. Defaults to `block_size` for every group.
         eagle_groups: Mark every group as an eagle (draft) group, which is what
             the coordinator's all-groups fallback used to do. Set it in tests
             that assert the drop rather than relying on that fallback.
@@ -2800,7 +2800,7 @@ def _allocate_in_chunks(
     chunks: tuple[int, ...],
     num_groups: int,
 ) -> None:
-    """Allocate ``req`` in the given chunk sizes, one scheduler step each."""
+    """Allocate `req` in the given chunk sizes, one scheduler step each."""
     for num_new_tokens in chunks:
         blocks = manager.allocate_slots(req, num_new_tokens, 0, None)
         assert blocks is not None
@@ -2932,7 +2932,7 @@ def test_prefill_hybrid_model_eagle_mixed_block_sizes():
     One full-attention group plus three sliding-window-family groups with
     distinct block sizes, so the scheduler block size (lcm = 16) differs from
     each sliding-window group's own block size and the alignment paths in
-    ``SlidingWindowManager`` actually execute. Hashes run at the finest block
+    `SlidingWindowManager` actually execute. Hashes run at the finest block
     size (4 tokens). See https://github.com/vllm-project/vllm/issues/51771.
     """
     hash_block_size = 4
@@ -3017,7 +3017,7 @@ def test_prefill_hybrid_model_eagle_mamba_fine_grained():
     block sizes [16, 16, 8] and an 8-token hash unit. The mamba block size being
     above the hash unit enables partial hash hits, so the coordinator aligns at
     the hash unit instead of the scheduler block size and the mamba group takes
-    the fine-grained branch of ``MambaManager.find_longest_cache_hit``. See
+    the fine-grained branch of `MambaManager.find_longest_cache_hit`. See
     https://github.com/vllm-project/vllm/issues/51771.
     """
     hash_block_size = 8
