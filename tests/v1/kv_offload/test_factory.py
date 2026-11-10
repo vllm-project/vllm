@@ -432,13 +432,14 @@ def test_tiering_spec_create_worker_uses_worker_rank_for_sharded_layout(monkeypa
 
 
 @pytest.mark.parametrize(
-    "secondary_tiers,canonical_layout,is_parallelism_agnostic,warns",
+    "secondary_tiers,canonical_layout,is_parallelism_agnostic,replicated_layout,warns",
     [
-        ([{"type": "example"}], False, True, True),
-        ([{"type": "example"}], False, False, True),
-        ([{"type": "example"}], True, False, True),
-        ([{"type": "example"}], True, True, False),
-        ([], False, False, False),
+        ([{"type": "example"}], False, True, False, True),
+        ([{"type": "example"}], False, False, False, True),
+        ([{"type": "example"}], True, False, False, True),
+        ([{"type": "example"}], True, True, False, False),
+        ([{"type": "example"}], False, False, True, False),
+        ([], False, False, False, False),
     ],
 )
 def test_tiering_spec_warns_when_secondary_tiers_are_topology_bound(
@@ -447,9 +448,11 @@ def test_tiering_spec_warns_when_secondary_tiers_are_topology_bound(
     secondary_tiers,
     canonical_layout,
     is_parallelism_agnostic,
+    replicated_layout,
     warns,
 ):
-    """Direct-layout KV warns even when it is flagged parallelism-agnostic."""
+    """Direct-layout KV warns even when it is flagged parallelism-agnostic,
+    unless it is replicated MLA, which FileMapper shares across TP sizes."""
     import vllm.v1.kv_offload.tiering.spec as tiering_spec_module
 
     for name in ("SharedOffloadRegion", "CPUPrimaryTierOffloadingManager"):
@@ -457,7 +460,9 @@ def test_tiering_spec_warns_when_secondary_tiers_are_topology_bound(
     spec = _create_spec(
         spec_name="TieringOffloadingSpec",
         worker_kv_bytes_per_block=4096,
+        world_size=2 if replicated_layout else 1,
         is_parallelism_agnostic=is_parallelism_agnostic,
+        replicated_layout=replicated_layout,
         canonical_layout=canonical_layout,
         extra_config={"secondary_tiers": secondary_tiers},
     )

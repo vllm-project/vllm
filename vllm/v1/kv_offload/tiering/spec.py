@@ -464,8 +464,11 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                 len(secondary_tiers),
             )
             if secondary_tiers and not (
-                self.config.canonical_layout
-                and self.config.parallel.is_parallelism_agnostic
+                self.config.replicated_layout
+                or (
+                    self.config.canonical_layout
+                    and self.config.parallel.is_parallelism_agnostic
+                )
             ):
                 logger.warning(
                     "Secondary-tier KV is only valid for engines with the same "
