@@ -22,10 +22,18 @@ def _has_device_capability(major: int) -> bool:
     return current_platform.is_cuda() and current_platform.has_device_capability(major)
 
 
-def _has_cooperative_topk() -> bool:
+def _can_launch_cooperative_topk() -> bool:
+    # Its cluster launch fails on SM110 (Thor).
     return _has_device_capability(
         90
-    ) and not current_platform.is_device_capability_family(120)
+    ) and not current_platform.is_device_capability_family(110)
+
+
+def _has_cooperative_topk() -> bool:
+    return (
+        _can_launch_cooperative_topk()
+        and not current_platform.is_device_capability_family(120)
+    )
 
 
 def _on_gfx950() -> bool:
@@ -64,8 +72,8 @@ requires_bf16_topk_smem = pytest.mark.skipif(
 COOPERATIVE_TOPK_BACKEND = pytest.param(
     "cooperative_topk",
     marks=pytest.mark.skipif(
-        not _has_device_capability(90),
-        reason="cooperative_topk requires SM90+",
+        not _can_launch_cooperative_topk(),
+        reason="cooperative_topk requires SM90+, not SM110",
     ),
 )
 PERSISTENT_TOPK_BACKEND = pytest.param(
@@ -1564,7 +1572,8 @@ def test_deepseek_topk_backends_no_error_and_reference(
 
 
 @pytest.mark.skipif(
-    not _has_cooperative_topk(), reason="cooperative_topk requires SM90+ (non-SM12x)"
+    not _has_cooperative_topk(),
+    reason="cooperative_topk requires SM90+, not SM110 or SM12x",
 )
 @pytest.mark.parametrize("top_k", [512, 2048])
 # 1-4 rows take the 16-CTA cluster on SM100 (8-CTA below), then 8, 4 and 2.
@@ -1605,7 +1614,10 @@ def test_cooperative_topk_rows_shorter_than_stride(
         )
 
 
-@pytest.mark.skipif(not _has_device_capability(90), reason="This test requires SM90+")
+@pytest.mark.skipif(
+    not _can_launch_cooperative_topk(),
+    reason="cooperative_topk requires SM90+, not SM110",
+)
 @torch.inference_mode()
 def test_cooperative_topk_512_tie_workspace_is_per_row() -> None:
     """Regression test for TopK=512 tie workspace row overlap."""
@@ -1649,7 +1661,10 @@ def _assert_cooperative_topk_exact(
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
-@pytest.mark.skipif(not _has_device_capability(90), reason="This test requires SM90+")
+@pytest.mark.skipif(
+    not _can_launch_cooperative_topk(),
+    reason="cooperative_topk requires SM90+, not SM110",
+)
 @pytest.mark.parametrize("top_k", [512, 1024, 2048])
 @pytest.mark.parametrize("seq_len", [8192, 32768, 131072, 262144, 524288])
 @torch.inference_mode()
@@ -1664,7 +1679,10 @@ def test_cooperative_topk_candidate_overflow(seq_len: int, top_k: int) -> None:
     _assert_cooperative_topk_exact(logits, indices, seq_len, top_k)
 
 
-@pytest.mark.skipif(not _has_device_capability(90), reason="This test requires SM90+")
+@pytest.mark.skipif(
+    not _can_launch_cooperative_topk(),
+    reason="cooperative_topk requires SM90+, not SM110",
+)
 @pytest.mark.parametrize("num_rows", [9, 34, 64])
 @pytest.mark.parametrize("seq_len", [65535, 65536, 65537])
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
@@ -1686,7 +1704,10 @@ def test_cooperative_topk_overflow_cluster_boundary(
     _assert_cooperative_topk_exact(logits, indices, seq_len, top_k)
 
 
-@pytest.mark.skipif(not _has_device_capability(90), reason="This test requires SM90+")
+@pytest.mark.skipif(
+    not _can_launch_cooperative_topk(),
+    reason="cooperative_topk requires SM90+, not SM110",
+)
 @pytest.mark.parametrize("num_rows", [1, 64])
 @pytest.mark.parametrize("top_k", [512, 2048])
 # 8192 takes the register path, 32768 the cluster path.
@@ -1726,7 +1747,10 @@ def _negative_halfway_threshold() -> tuple[float, torch.Tensor]:
     return float(values[top]), near
 
 
-@pytest.mark.skipif(not _has_device_capability(90), reason="This test requires SM90+")
+@pytest.mark.skipif(
+    not _can_launch_cooperative_topk(),
+    reason="cooperative_topk requires SM90+, not SM110",
+)
 @pytest.mark.parametrize("top_k", [512, 1024, 2048])
 @pytest.mark.parametrize(
     "num_rows,seq_len",
@@ -1783,7 +1807,10 @@ def test_cooperative_topk_negative_inf_ties(
     _assert_cooperative_topk_exact(logits, indices, seq_len, top_k)
 
 
-@pytest.mark.skipif(not _has_device_capability(90), reason="This test requires SM90+")
+@pytest.mark.skipif(
+    not _can_launch_cooperative_topk(),
+    reason="cooperative_topk requires SM90+, not SM110",
+)
 @pytest.mark.parametrize("top_k", [512, 2048])
 @pytest.mark.parametrize("num_rows,seq_len", [(9, 262144), (34, 131072), (64, 262144)])
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
@@ -2587,7 +2614,7 @@ SPARSE_INDEXER_EXPLICIT_BACKENDS = [
         "cooperative",
         marks=pytest.mark.skipif(
             not _has_cooperative_topk(),
-            reason="cooperative_topk requires SM90+ (non-SM12x)",
+            reason="cooperative_topk requires SM90+, not SM110 or SM12x",
         ),
     ),
     pytest.param(
