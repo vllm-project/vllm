@@ -21,7 +21,10 @@ from torch.nn import functional as F
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from tests.kernels.moe.utils import make_dummy_moe_config
 from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.fused_moe.config import FusedMoEParallelConfig
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEParallelConfig,
+    FusedMoEQuantConfig,
+)
 from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutedsl_batched_moe import (  # noqa: E501
     FlashInferCuteDSLBatchedExperts,
     flashinfer_cutedsl_moe_masked,
@@ -605,7 +608,6 @@ def test_flashinfer_cutedsl_mxfp8_moe_masked(
     "overrides, supported",
     [
         pytest.param({}, True, id="supported"),
-        pytest.param({"all2all_backend": "nixl_ep"}, False, id="nixl_ep"),
         pytest.param({"has_bias": True}, False, id="bias"),
         pytest.param({"swiglu_limit": 7.0}, False, id="swiglu_limit"),
         pytest.param({"swiglu_alpha": 1.702}, False, id="swiglu_alpha"),
@@ -617,8 +619,8 @@ def test_flashinfer_cutedsl_mxfp8_moe_masked(
 def test_flashinfer_cutedsl_batched_mxfp8_supported_config(
     overrides: dict, supported: bool
 ):
-    """MXFP8 needs the DeepEP low-latency dispatch, plain SiLU-and-mul without
-    expert biases, and 128-aligned hidden and intermediate sizes."""
+    """MXFP8 needs plain SiLU-and-mul without expert biases, and 128-aligned
+    hidden and intermediate sizes."""
     overrides = dict(overrides)
     moe_config = make_dummy_moe_config(
         hidden_dim=overrides.pop("hidden_dim", 256),
@@ -629,7 +631,7 @@ def test_flashinfer_cutedsl_batched_mxfp8_supported_config(
         dp_size=2,
         ep_size=2,
         use_ep=True,
-        all2all_backend=overrides.pop("all2all_backend", "deepep_low_latency"),
+        all2all_backend="deepep_low_latency",
     )
     for name, value in overrides.items():
         setattr(moe_config, name, value)
@@ -644,6 +646,55 @@ def test_flashinfer_cutedsl_batched_mxfp8_supported_config(
     assert result == supported
     if not supported:
         assert reason is not None and "mxfp8" in reason
+
+
+@pytest.mark.parametrize("all2all_backend", ["deepep_low_latency", "nixl_ep"])
+@torch.inference_mode()
+def test_batched_dispatch_keeps_mxfp8_activations_unquantized(all2all_backend: str):
+    """The DeepEP low-latency and NIXL EP dispatches hand MXFP8 activations to
+    the experts in bfloat16, without scales."""
+    num_experts, max_tokens, hidden_dim = 4, 16, 256
+    if all2all_backend == "deepep_low_latency":
+        pytest.importorskip("deep_ep")
+        from vllm.model_executor.layers.fused_moe.prepare_finalize.deepep_ll import (  # noqa: E501
+            DeepEPLLPrepareAndFinalize,
+        )
+
+        prepare_finalize = DeepEPLLPrepareAndFinalize(
+            buffer=None, max_tokens_per_rank=max_tokens, num_dispatchers=2
+        )
+    else:
+        pytest.importorskip("nixl_ep")
+        from vllm.model_executor.layers.fused_moe.prepare_finalize.nixl_ep import (
+            NixlEPPrepareAndFinalize,
+        )
+
+        prepare_finalize = NixlEPPrepareAndFinalize(
+            buffer=None,
+            max_tokens_per_rank=max_tokens,
+            num_dispatchers=2,
+            expert_capacity=num_experts,
+        )
+    quant_config = FusedMoEQuantConfig.make(
+        "mxfp8",
+        w1_scale=torch.ones(1, device="cuda"),
+        w2_scale=torch.ones(1, device="cuda"),
+        block_shape=[1, 32],
+        is_scale_swizzled=False,
+    )
+    x = torch.randn(
+        num_experts, max_tokens, hidden_dim, dtype=torch.bfloat16, device="cuda"
+    )
+    expert_num_tokens = torch.tensor(
+        [0, 3, max_tokens, 7], dtype=torch.int32, device="cuda"
+    )
+
+    out, scales = prepare_finalize._do_quant(
+        x, torch.bfloat16, quant_config, expert_num_tokens
+    )
+
+    assert scales is None
+    torch.testing.assert_close(out, x, atol=0, rtol=0)
 
 
 @pytest.mark.parametrize(
