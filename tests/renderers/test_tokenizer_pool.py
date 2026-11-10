@@ -12,7 +12,7 @@ from tokenizers import Tokenizer, models, pre_tokenizers
 from transformers import TokenizersBackend
 
 from vllm.exceptions import VLLMValidationError
-from vllm.renderers import TokenizeParams
+from vllm.renderers import TokenizeParams, base
 from vllm.renderers.chat_utils.content_parser import PROMPT_EMBEDS_PLACEHOLDER_TOKEN
 from vllm.renderers.cohere import CohereRenderer
 from vllm.renderers.deepseek_v4 import DeepseekV4Renderer, DeepseekV41Renderer
@@ -73,6 +73,7 @@ class MockParallelConfig:
 class MockVllmConfig:
     model_config: MockModelConfig
     parallel_config: MockParallelConfig = field(default_factory=MockParallelConfig)
+    observability_config: Any = None
 
 
 def _tokenizer():
@@ -149,6 +150,27 @@ def test_pooled_tokenizer_leaves_cached_tokenizer_unchanged(renderer_cls):
     assert pooled.decode(tokenizer.encode(PROMPT)) == tokenizer.decode(
         tokenizer.encode(PROMPT)
     )
+
+
+@pytest.mark.parametrize("renderer_cls", RENDERERS)
+def test_tokens_added_by_mm_processor_reach_pooled_tokenizer(renderer_cls, monkeypatch):
+    token = "<|AUDIO|>"
+
+    def create_processor(model_config, tokenizer):
+        tokenizer.add_tokens([token], special_tokens=True)
+        return object()
+
+    monkeypatch.setattr(base.mm_registry, "create_processor", create_processor)
+    monkeypatch.setattr(base, "processor_cache_from_config", lambda config: None)
+    monkeypatch.setattr(base, "processor_only_cache_from_config", lambda config: None)
+    monkeypatch.setattr(base, "MultiModalTimingRegistry", lambda config: None)
+    config = MockVllmConfig(MockModelConfig(supports_multimodal_inputs=True))
+    renderer = renderer_cls(config, _tokenizer())
+    pooled = renderer.get_tokenizer()
+
+    token_ids = pooled.encode(f"w0 {token} w1", add_special_tokens=False)
+    assert token_ids == [1, pooled.convert_tokens_to_ids(token), 2]
+    assert pooled.unk_token_id not in token_ids
 
 
 def test_prompt_embeds_placeholder_is_registered_on_pooled_tokenizer(monkeypatch):

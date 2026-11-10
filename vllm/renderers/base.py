@@ -121,12 +121,6 @@ class BaseRenderer(ABC, Generic[_T]):
         if isinstance(tokenizer, HfTokenizer):
             tokenizer = copy.copy(tokenizer)
             self._prepare_tokenizer(tokenizer)
-            # HF fast tokenizers apply per-call truncation and padding by
-            # mutating their shared Rust backend, so concurrent calls on the
-            # render pool can silently use another request's `max_length`.
-            tokenizer = maybe_make_thread_pool(
-                tokenizer, config.model_config.renderer_num_workers + 1
-            )
         self.tokenizer = tokenizer
 
         # Background multimodal warmup task (a future returned by
@@ -226,10 +220,21 @@ class BaseRenderer(ABC, Generic[_T]):
         if self._mm_processor_only_cache:
             self._resources.callback(self._mm_processor_only_cache.close)
 
+        # HF fast tokenizers apply per-call truncation and padding by
+        # mutating their shared Rust backend, so concurrent calls on the
+        # render pool can silently use another request's `max_length`.
+        # Pool last: multimodal processors may add tokens while they are
+        # created, and the pooled copies only see tokens added before this.
+        if isinstance(self.tokenizer, HfTokenizer):
+            maybe_make_thread_pool(
+                self.tokenizer, config.model_config.renderer_num_workers + 1
+            )
+
     def _prepare_tokenizer(self, tokenizer: HfTokenizer) -> None:
         """Modify the renderer's copy of an HF tokenizer before it is pooled.
 
-        Changes made after `__init__` do not reach the pooled copies.
+        Changes made after `BaseRenderer.__init__` do not reach the pooled
+        copies.
         """
         return
 
