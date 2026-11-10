@@ -110,6 +110,7 @@ steps:
   - tests/entrypoints/serve/middleware/test_optional_middleware.py
   - tests/entrypoints/launchers/api_server/test_multi_api_servers.py
   - tests/entrypoints/rl/return_routed_experts/test_scale_out_api.py
+  - tests/entrypoints/rl/state_transitions/test_sleep.py
   commands:
   - export VLLM_USE_RUST_FRONTEND=1
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
@@ -121,14 +122,16 @@ steps:
   - pytest -v -s entrypoints/serve/instrumentator/test_metrics.py -k "not run_batch and not test_metrics_exist"
   # /tokenizer_info returns 501 in the Rust frontend.
   - pytest -v -s entrypoints/serve/tokenize/test_tokenization.py -k "not tokenizer_info"
-  # The Rust frontend loads runtime LoRA paths only under VLLM_RUNTIME_LORA_ALLOWED_PATH_PREFIXES and answers
-  # a missing adapter path with 400 instead of 404; the concurrent tests send batched prompts, which it rejects.
-  - VLLM_RUNTIME_LORA_ALLOWED_PATH_PREFIXES=/ pytest -v -s entrypoints/serve/lora/test_lora_adapters.py -k "not test_dynamic_lora_not_found and not does_not_break_others and not test_multiple_lora_adapters and not test_beam_search_with_lora_adapters"
+  # The Rust frontend loads runtime LoRA paths only under VLLM_RUNTIME_LORA_ALLOWED_PATH_PREFIXES; the
+  # concurrent tests send batched prompts, which it rejects.
+  - VLLM_RUNTIME_LORA_ALLOWED_PATH_PREFIXES=/ pytest -v -s entrypoints/serve/lora/test_lora_adapters.py -k "not does_not_break_others and not test_multiple_lora_adapters and not test_beam_search_with_lora_adapters"
   # test_v2_endpoint_accepts_valid_api_token calls /v2/embed; the Rust frontend serves no pooling routes.
   - pytest -v -s entrypoints/serve/middleware/test_optional_middleware.py -k "not test_v2_endpoint_accepts_valid_api_token"
   # The Rust frontend ignores --api-server-count and runs one server, so this only checks the flag is accepted.
   - pytest -v -s entrypoints/launchers/api_server/test_multi_api_servers.py
   - pytest -v -s entrypoints/rl/return_routed_experts/test_scale_out_api.py
+  # The other tests in this file drive the Python sleep routes in-process.
+  - pytest -v -s entrypoints/rl/state_transitions/test_sleep.py::test_sleep_mode
   mirror:
     amd:
       label: ":amd: (MI355 DPX) Rust Frontend Serve/Admin Coverage"
@@ -152,6 +155,7 @@ steps:
       - tests/entrypoints/serve/middleware/test_optional_middleware.py
       - tests/entrypoints/launchers/api_server/test_multi_api_servers.py
       - tests/entrypoints/rl/return_routed_experts/test_scale_out_api.py
+      - tests/entrypoints/rl/state_transitions/test_sleep.py
       - vllm/platforms/rocm.py
 
 - label: ":nvidia: (H200 MIG 18GB) Rust Frontend Core Correctness"
