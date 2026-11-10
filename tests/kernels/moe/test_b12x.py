@@ -587,7 +587,9 @@ def test_explicit_b12x_nvfp4_selection(
     selected_activation_keys = []
 
     def is_supported_config(cls, config, weight_key, activation_key, activation_format):
-        selected_activation_keys.append(activation_key)
+        selected_activation_keys.append(
+            cls.executed_activation_key(weight_key, activation_key)
+        )
         return True, None
 
     monkeypatch.setattr(B12xExperts, "is_supported_config", is_supported_config)
@@ -608,6 +610,39 @@ def test_explicit_b12x_nvfp4_selection(
     assert backend == NvFp4MoeBackend.B12X
     assert experts_cls is B12xExperts
     assert selected_activation_keys == [expected_activation_key]
+
+
+@pytest.mark.parametrize("force_a16", [False, True])
+def test_b12x_nvfp4_uninterleave_support_follows_executed_activation(
+    monkeypatch: pytest.MonkeyPatch,
+    force_a16: bool,
+) -> None:
+    """Force-A16 runs W4A4 layers unquantized, so the W4A8-only uninterleave
+    rejection must not apply to them."""
+    monkeypatch.setattr(
+        nvfp4_oracle.envs,
+        "VLLM_B12X_MOE_FP4_FORCE_A16",
+        force_a16,
+    )
+    monkeypatch.setattr(
+        B12xExperts, "_supports_current_device", staticmethod(lambda: True)
+    )
+    config = make_dummy_moe_config(
+        hidden_dim=128,
+        intermediate_size=64,
+        activation=MoEActivation.SWIGLUOAI_UNINTERLEAVE,
+    )
+
+    supported, reason = B12xExperts.is_supported_config(
+        B12xExperts,
+        config,
+        kNvfp4Static,
+        kNvfp4Dynamic,
+        mk.FusedMoEActivationFormat.Standard,
+    )
+
+    assert force_a16 == (reason is None or "swigluoai" not in reason)
+    assert not force_a16 or supported
 
 
 @pytest.mark.parametrize(
