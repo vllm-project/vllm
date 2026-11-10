@@ -107,6 +107,12 @@ class PrefillDelayer:
         decided it."""
         if state.prefill_ran:
             self._protected_left = self.protected_steps
+        # A queue past `prefill_max_wait_ms` ends the protected steps too, so
+        # the wait limit bounds TTFT instead of only trimming the holds after
+        # them; otherwise prefill is capped at one token budget per interval.
+        if self._protected_left > 0 and state.queue_hot and state.prefillable:
+            self._protected_left = 0
+            return self._fire("max_wait")
         if self._protected_left > 0:
             self._protected_left -= 1
             if state.prefillable and state.decodes:

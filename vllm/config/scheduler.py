@@ -255,8 +255,9 @@ class SchedulerConfig:
 
     prefill_max_wait_ms: float | None = Field(default=None, gt=0)
     """With `prefill_schedule_policy="delayer"`, release held prefill once the
-    oldest waiting request has queued this long since arrival. None (the
-    default) leaves only the delayer's step-count bounds."""
+    oldest waiting request has queued this long since arrival, also during the
+    decode-only steps after a prefill. None (the default) leaves only the
+    delayer's step-count bounds."""
 
     cache_aware_admission_window: int = Field(default=0, ge=0)
     """Look-ahead window for cache-aware admission. Within the first N waiting

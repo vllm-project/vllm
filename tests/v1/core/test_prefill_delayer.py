@@ -60,6 +60,18 @@ def test_protected_steps_after_prefill(interval: int):
     )
 
 
+def test_max_wait_ends_protected_steps():
+    """A queue past the wait limit is released even inside the protected
+    steps, which would otherwise cap prefill at a budget per interval."""
+    delayer = PrefillDelayer(DP_SIZE, BUDGET, 4)
+    full = _state(pending_tokens=2 * BUDGET)
+    assert delayer.decide(full._replace(prefill_ran=1)) == (False, "hold_protected")
+    assert delayer.decide(full._replace(queue_hot=1)) == (True, "max_wait")
+    # The next prefill-carrying step starts a new protected stretch.
+    assert delayer.decide(full._replace(prefill_ran=1)) == (False, "hold_protected")
+    assert delayer.decide(full) == (False, "hold_protected")
+
+
 @pytest.mark.parametrize(
     "state, reason",
     [
