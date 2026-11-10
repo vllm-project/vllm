@@ -32,6 +32,9 @@ def fused_save_compress_norm(
     latent_out: torch.Tensor,
     prev_rows: torch.Tensor | None = None,
     prev_row_indices: torch.Tensor | None = None,
+    kv_cache: torch.Tensor | None = None,
+    kv_slot_mapping: torch.Tensor | None = None,
+    cos_sin_cache: torch.Tensor | None = None,
 ) -> None:
     """Pool each closed group into a normalized BF16 latent; save FP32 states.
 
@@ -65,6 +68,10 @@ def fused_save_compress_norm(
             and the ring is left to `save_ring_rows`.
         prev_row_indices: [num_reqs] row in `prev_rows` holding the token
             before each chunk's first token, or -1 to read the ring.
+        kv_cache: Paged fp8_ds_mla main cache (uint8 584 B records) to insert
+            the latent into, as `rope_quant_insert` does.
+        kv_slot_mapping: Main-cache slots; at most as many as `slot_mapping`.
+        cos_sin_cache: The RoPE [cos | sin] table `rope_quant_insert` reads.
 
     """
     assert compress_ratio in (1, 2)
@@ -104,6 +111,17 @@ def fused_save_compress_norm(
         return
     has_prev_rows = prev_rows is not None
     prev_row_stride = prev_rows.stride(0) if prev_rows is not None else 1
+    num_cache_tokens = None
+    cos_stride = cache_stride = cache_block = 1
+    if kv_cache is not None:
+        assert not has_prev_rows
+        assert kv_slot_mapping is not None and cos_sin_cache is not None
+        assert kv_cache.dtype == torch.uint8 and kv_cache.shape[-1] == 584
+        assert kv_slot_mapping.is_contiguous()
+        num_cache_tokens = kv_slot_mapping.numel()
+        assert num_cache_tokens <= num_tokens
+        cos_stride = cos_sin_cache.stride(0)
+        cache_stride, cache_block = kv_cache.stride(0), kv_cache.shape[1]
     grid = num_reqs + triton.cdiv(num_tokens, compress_ratio)
     _fused_save_compress_norm_kernel[(grid,)](
         kv_score,
@@ -116,6 +134,10 @@ def fused_save_compress_norm(
         latent_out,
         prev_rows if has_prev_rows else kv_score,
         prev_row_indices if has_prev_rows else slot_mapping,
+        cos_sin_cache,
+        kv_cache,
+        kv_slot_mapping,
+        num_cache_tokens,
         num_tokens,
         num_reqs,
         RAW_STRIDE=kv_score.stride(0),
@@ -127,12 +149,17 @@ def fused_save_compress_norm(
         EPS=rms_norm_eps,
         JOIN_ROW_PTRS=_JOIN_ROW_PTRS,
         HAS_PREV_ROWS=has_prev_rows,
+        COS_STRIDE=cos_stride,
+        CACHE_STRIDE=cache_stride,
+        CACHE_BLOCK=cache_block,
+        INSERT_CACHE=kv_cache is not None,
+        SANITIZE_CACHE_NANS=_ON_GFX950,
         num_warps=4,
         **({"launch_pdl": False} if current_platform.is_cuda() else {}),
     )
 
 
-@triton.jit(do_not_specialize=["num_tokens", "num_reqs"])
+@triton.jit(do_not_specialize=["num_cache_tokens", "num_tokens", "num_reqs"])
 def _fused_save_compress_norm_kernel(
     raw,
     positions,
@@ -144,6 +171,10 @@ def _fused_save_compress_norm_kernel(
     latent,
     prev_rows,
     prev_row_indices,
+    cos_sin,
+    cache,
+    cache_slots,
+    num_cache_tokens,
     num_tokens,
     num_reqs,
     RAW_STRIDE: tl.constexpr,
@@ -155,6 +186,11 @@ def _fused_save_compress_norm_kernel(
     EPS: tl.constexpr,
     JOIN_ROW_PTRS: tl.constexpr,
     HAS_PREV_ROWS: tl.constexpr,
+    COS_STRIDE: tl.constexpr,
+    CACHE_STRIDE: tl.constexpr,
+    CACHE_BLOCK: tl.constexpr,
+    INSERT_CACHE: tl.constexpr,
+    SANITIZE_CACHE_NANS: tl.constexpr,
 ):
     pid = tl.program_id(0)
     d = tl.arange(0, 512)
@@ -202,7 +238,22 @@ def _fused_save_compress_norm_kernel(
                     pooled = (kv_prev * weight_prev + kv_current * weight_current) / (
                         weight_prev + weight_current
                     )
-                _store_latent(pooled, start, norm_weight, latent, EPS)
+                row = _store_latent(pooled, start, norm_weight, latent, EPS)
+                if INSERT_CACHE:
+                    _insert_latent(
+                        row,
+                        start,
+                        position,
+                        cos_sin,
+                        cache,
+                        cache_slots,
+                        num_cache_tokens,
+                        COS_STRIDE,
+                        CACHE_STRIDE,
+                        CACHE_BLOCK,
+                        COMPRESS_RATIO,
+                        SANITIZE_CACHE_NANS,
+                    )
             if not HAS_PREV_ROWS:
                 num_rows = tl.minimum(end - start, STATE_BLOCK)
                 for k in tl.range(0, num_rows):
@@ -236,7 +287,22 @@ def _fused_save_compress_norm_kernel(
         kv = tl.load(rows + d[None, :])
         score = tl.load(rows + 512 + d[None, :])
         pooled = tl.sum(kv * tl.softmax(score, 0), 0)
-    _store_latent(pooled, t, norm_weight, latent, EPS)
+    row = _store_latent(pooled, t, norm_weight, latent, EPS)
+    if INSERT_CACHE:
+        _insert_latent(
+            row,
+            t,
+            tl.load(positions + t),
+            cos_sin,
+            cache,
+            cache_slots,
+            num_cache_tokens,
+            COS_STRIDE,
+            CACHE_STRIDE,
+            CACHE_BLOCK,
+            COMPRESS_RATIO,
+            SANITIZE_CACHE_NANS,
+        )
 
 
 def save_ring_rows(
@@ -289,7 +355,40 @@ def _store_latent(pooled, t, norm_weight, latent, EPS: tl.constexpr):
     weight = tl.load(norm_weight + d).to(tl.float32)
     variance = tl.sum(pooled * pooled, 0) / 512
     normed = pooled * tl.rsqrt(variance + EPS) * weight
-    tl.store(latent + t.to(tl.int64) * 512 + d, normed.to(tl.bfloat16))
+    row = normed.to(tl.bfloat16)
+    tl.store(latent + t.to(tl.int64) * 512 + d, row)
+    return row
+
+
+@triton.jit
+def _insert_latent(
+    row,
+    t,
+    position,
+    cos_sin,
+    cache,
+    cache_slots,
+    num_cache_tokens,
+    COS_STRIDE: tl.constexpr,
+    CACHE_STRIDE: tl.constexpr,
+    CACHE_BLOCK: tl.constexpr,
+    COMPRESS_RATIO: tl.constexpr,
+    SANITIZE_CACHE_NANS: tl.constexpr,
+):
+    slot = tl.load(cache_slots + t, t < num_cache_tokens, other=-1)
+    if (slot >= 0) & ((position + 1) % COMPRESS_RATIO == 0):
+        _store_v4_record(
+            row.to(tl.float32),
+            position,
+            slot,
+            cos_sin,
+            cache,
+            COS_STRIDE,
+            CACHE_STRIDE,
+            CACHE_BLOCK,
+            COMPRESS_RATIO,
+            SANITIZE_CACHE_NANS,
+        )
 
 
 def rope_quant_insert(
@@ -394,6 +493,34 @@ def _rope_quant_insert_kernel(
         return
     d = tl.arange(0, 512)
     normed = tl.load(latent + t.to(tl.int64) * 512 + d).to(tl.float32)
+    _store_v4_record(
+        normed,
+        position,
+        slot,
+        cos_sin,
+        cache,
+        COS_STRIDE,
+        CACHE_STRIDE,
+        CACHE_BLOCK,
+        COMPRESS_RATIO,
+        SANITIZE_CACHE_NANS,
+    )
+
+
+@triton.jit
+def _store_v4_record(
+    normed,
+    position,
+    slot,
+    cos_sin,
+    cache,
+    COS_STRIDE: tl.constexpr,
+    CACHE_STRIDE: tl.constexpr,
+    CACHE_BLOCK: tl.constexpr,
+    COMPRESS_RATIO: tl.constexpr,
+    SANITIZE_CACHE_NANS: tl.constexpr,
+):
+    d = tl.arange(0, 512)
     page = cache + (slot // CACHE_BLOCK).to(tl.int64) * CACHE_STRIDE
     values = page + (slot % CACHE_BLOCK) * 576
     scales = page + CACHE_BLOCK * 576 + (slot % CACHE_BLOCK) * 8
