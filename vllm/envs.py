@@ -143,6 +143,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_CUSTOM_AR: bool = True
     VLLM_ROCM_MUSE_MOE_REDUCE_DTYPE: str = "fp32"
     VLLM_ROCM_MUSE_MOE_ONLINE_QUANT: str = ""
+    VLLM_ROCM_MUSE_FUSED_AR_BOUNDARY: bool = False
     VLLM_ROCM_USE_AITER_LINEAR: bool = True
     VLLM_ROCM_USE_AITER_LINEAR_HIPBMM: bool = False
     VLLM_ROCM_USE_AITER_MOE: bool = True
@@ -1349,6 +1350,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ROCM_MUSE_MOE_ONLINE_QUANT": lambda: os.getenv(
         "VLLM_ROCM_MUSE_MOE_ONLINE_QUANT", ""
     ).lower(),
+    # Muse Spark on ROCm: sum o_proj partials inside the post-attention
+    # norm/residual/norm kernel instead of all-reducing first. Off by default:
+    # the kernel is a bf16 sum, not QuickReduce INT4, and it is unmeasured.
+    "VLLM_ROCM_MUSE_FUSED_AR_BOUNDARY": lambda: (
+        os.getenv("VLLM_ROCM_MUSE_FUSED_AR_BOUNDARY", "False").lower() in ("true", "1")
+    ),
     # use aiter linear op if aiter ops are enabled
     # The following list of related ops
     # - scaled_mm (per-tensor / rowwise)

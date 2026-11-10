@@ -10,6 +10,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+import vllm.envs as envs
 from vllm.compilation.decorators import ignore_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (
@@ -17,6 +18,7 @@ from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_gather,
+    tensor_model_parallel_all_reduce,
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
@@ -39,6 +41,9 @@ from vllm.model_executor.models.utils import (
     WeightsMapper,
     extract_layer_index,
     sequence_parallel_chunk,
+)
+from vllm.models.common.amd.ops.fused_allreduce_norm_residual_norm import (
+    fused_allreduce_norm_residual_then_norm,
 )
 from vllm.models.muse_spark.common.layers import (
     MulTanhSoftCap,
@@ -500,6 +505,13 @@ class MuseSparkAttention(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.o_proj",
         )
+        # The attention boundary sums these partials inside the norm kernel.
+        self.fuse_ar_boundary = (
+            envs.VLLM_ROCM_MUSE_FUSED_AR_BOUNDARY
+            and get_tensor_model_parallel_world_size() > 1
+        )
+        if self.fuse_ar_boundary:
+            self.o_proj.reduce_results = False
 
         # GPT-J style: rotates interleaved adjacent channel pairs.
         self.rotary_emb: RotaryEmbedding | None = None
@@ -852,16 +864,34 @@ class MuseSparkDecoderLayer(nn.Module):
         self, stream: torch.Tensor, attn_out: torch.Tensor
     ) -> MuseSparkResidualStream:
         """Attention boundary and FFN; the FFN boundary is returned unblended."""
-        ffn_in, stream = norm_residual_then_norm(
-            MuseSparkResidualStream(
-                stream=stream,
-                branch=attn_out,
-                post_norm=self.post_attn_norm,
-                connection=self.add_attn,
-            ),
-            self.pre_ffn_norm,
-            out_dtype=self.default_dtype,
-        )
+        branch = attn_out
+        fused = None
+        if self.self_attn.fuse_ar_boundary:
+            fused = fused_allreduce_norm_residual_then_norm(
+                MuseSparkResidualStream(
+                    stream=stream,
+                    branch=attn_out,
+                    post_norm=self.post_attn_norm,
+                    connection=self.add_attn,
+                ),
+                self.pre_ffn_norm,
+                out_dtype=self.default_dtype,
+            )
+            if fused is None:
+                branch = tensor_model_parallel_all_reduce(attn_out)
+        if fused is None:
+            ffn_in, stream = norm_residual_then_norm(
+                MuseSparkResidualStream(
+                    stream=stream,
+                    branch=branch,
+                    post_norm=self.post_attn_norm,
+                    connection=self.add_attn,
+                ),
+                self.pre_ffn_norm,
+                out_dtype=self.default_dtype,
+            )
+        else:
+            ffn_in, stream = fused
         branch = self.feed_forward(ffn_in)
         return MuseSparkResidualStream(
             stream=stream,
