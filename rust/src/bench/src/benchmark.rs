@@ -682,12 +682,15 @@ pub async fn run_benchmark(config: &BenchConfig) -> Result<serde_json::Value> {
     // Ready check
     if config.ready_check_timeout_sec > 0 {
         tracing::info!("starting initial single-prompt test run");
+        // Salted like the warmups so the check does not prime the prefix cache
+        // for request 0; unsalted if the server rejects cache_salt.
         let test_output = wait_for_endpoint(
             config.backend,
             &client,
-            &test_input,
+            &with_unique_cache_salt(&test_input),
             config.ready_check_timeout_sec,
             5,
+            Some(&test_input),
         )
         .await?;
         if !test_output.success {
@@ -2145,7 +2148,17 @@ mod tests {
             let mut rejected = 0;
             loop {
                 let (mut stream, _) = listener.accept().await.unwrap();
-                let (_, body) = read_request(&mut stream).await;
+                let (path, body) = read_request(&mut stream).await;
+                if path != "/v1/completions" {
+                    stream
+                        .write_all(
+                            b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\n\
+                              connection: close\r\n\r\n",
+                        )
+                        .await
+                        .unwrap();
+                    continue;
+                }
                 let body: serde_json::Value = serde_json::from_str(&body).unwrap();
                 let salted = body.get("cache_salt").is_some();
                 recorded.lock().unwrap().push(body);
@@ -2198,6 +2211,61 @@ mod tests {
         server.abort();
 
         bodies.lock().unwrap().clone()
+    }
+
+    /// Run a one-prompt benchmark with the ready check on; return every
+    /// completions request body in order (ready check first, then the run).
+    async fn ready_check_bodies(reject_salted: usize) -> Vec<serde_json::Value> {
+        let (api_url, bodies, server) = spawn_recording_server(reject_salted).await;
+        let base_url = api_url.trim_end_matches("/v1/completions").to_string();
+        let dataset_path = crate::datasets::test_support::write_temp_jsonl(
+            "ready-check-cache-salt",
+            r#"{"prompt":"hello","output_tokens":1}"#,
+        );
+        let cli = TestCli::parse_from([
+            "vllm-bench",
+            "--backend",
+            "openai",
+            "--base-url",
+            &base_url,
+            "--model",
+            "test-model",
+            "--tokenizer",
+            "gpt2",
+            "--dataset-name",
+            "custom",
+            "--dataset-path",
+            &dataset_path,
+            "--custom-output-len",
+            "-1",
+            "--num-prompts",
+            "1",
+            "--ready-check-timeout-sec",
+            "5",
+            "--disable-tqdm",
+        ]);
+        let config = BenchConfig::from_args(&cli.args).unwrap();
+
+        run_benchmark(&config).await.unwrap();
+        server.abort();
+
+        bodies.lock().unwrap().clone()
+    }
+
+    #[tokio::test]
+    async fn test_ready_check_uses_cache_salt() {
+        let bodies = ready_check_bodies(0).await;
+
+        let salted: Vec<_> = bodies.iter().map(|body| body.get("cache_salt").is_some()).collect();
+        assert_eq!(salted, [true, false]);
+    }
+
+    #[tokio::test]
+    async fn test_ready_check_retries_without_cache_salt_when_rejected() {
+        let bodies = ready_check_bodies(usize::MAX).await;
+
+        let salted: Vec<_> = bodies.iter().map(|body| body.get("cache_salt").is_some()).collect();
+        assert_eq!(salted, [true, false, false]);
     }
 
     fn count_salted(bodies: &[serde_json::Value]) -> (usize, usize) {
