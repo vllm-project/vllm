@@ -371,7 +371,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         local_block_ids: BlockIds,
         registration_data: dict[str, Any],
     ) -> None:
-        """``_do_start_push_kv``, recording an error as this request's send
+        """`_do_start_push_kv`, recording an error as this request's send
         failure so it cannot drop the rest of the writer pass."""
         try:
             self._do_start_push_kv(request_id, local_block_ids, registration_data)
@@ -391,7 +391,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         req_id: str,
         reg_data: dict[str, Any],
     ) -> None:
-        """``_send_registration_to_p``, failing the receive on an error. Errors
+        """`_send_registration_to_p`, failing the receive on an error. Errors
         escape before any PUSH_REG is sent, so P never WRITEs this request."""
         try:
             self._send_registration_to_p(req_id, reg_data)

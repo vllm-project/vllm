@@ -1204,7 +1204,7 @@ class TestPushSchedulerNegative:
 
 
 def _run_one_writer_pass(w: _StubWriterWorker, notifs: dict | None = None) -> None:
-    """Run ``_push_writer_loop`` on the test thread until a pass has polled
+    """Run `_push_writer_loop` on the test thread until a pass has polled
     NIXL notifs (returning *notifs*), then stop."""
 
     def _get_new_notifs():
@@ -1412,7 +1412,7 @@ class TestPushWriterNegative:
         assert "req-unknown" not in w._reqs_to_send
 
     def test_persistent_writer_error_backs_off(self, caplog):
-        """A pass that keeps failing (here ``get_new_notifs``) is retried with
+        """A pass that keeps failing (here `get_new_notifs`) is retried with
         exponential backoff, not at the poll interval that unmatched finished
         blocks keep the writer on."""
         caplog.set_level(
@@ -1502,7 +1502,7 @@ class TestPushWriterNegative:
 
     def test_dead_writer_fails_get_transfer_results(self):
         """The loop does not catch a BaseException, so one ends the writer.
-        Then ``get_transfer_results`` raises instead of leaving pushes in
+        Then `get_transfer_results` raises instead of leaving pushes in
         queues nobody drains."""
         w = _StubWriterWorker.fresh()
         w.nixl_wrapper = MagicMock()
