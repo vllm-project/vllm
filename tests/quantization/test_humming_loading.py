@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""CUDA Humming loading regressions, selected by the Humming loading CI job."""
+"""Humming MoE loading regressions."""
 
 import json
 import math
@@ -15,7 +15,7 @@ from vllm.config import VllmConfig, set_current_vllm_config
 def test_humming_packed_experts_avoid_integer_expansion(
     dist_init, workspace_init, record_property
 ):
-    """Opting out bounds loading memory and preserves the default kernel output."""
+    """Bound loading memory without changing layer output."""
     from vllm.forward_context import set_forward_context
     from vllm.model_executor.layers.fused_moe import FusedMoEFactory
     from vllm.model_executor.layers.quantization.humming import HummingConfig
@@ -31,8 +31,7 @@ def test_humming_packed_experts_avoid_integer_expansion(
     ):
         weights = torch.randn(shape, dtype=torch.bfloat16, device="cuda") / 10
         tensors = schema.quant_tensor(weights, schema, torch.bfloat16)
-        # A zero code makes the default retain the original format, but only
-        # after allocating the full INT32 projection to check its codes.
+        # Keep the original integer format in both modes.
         tensors["weight"].view(-1)[0] = 0
         projections = ("gate_proj", "up_proj") if name == "w13" else ("down_proj",)
         for key, value in tensors.items():
@@ -79,7 +78,7 @@ def test_humming_packed_experts_avoid_integer_expansion(
             loading_peak,
         )
         if overrides:
-            # Permit packed copies and repacking, but not an INT32 projection.
+            # Allow repacking, but not a full INT32 projection.
             assert loading_peak < 4 * checkpoint_bytes
         with set_current_vllm_config(config), set_forward_context(None, config):
             outputs.append(runner(hidden_states=x, router_logits=logits).clone())
@@ -91,7 +90,7 @@ def test_humming_packed_experts_avoid_integer_expansion(
 def test_humming_packed_experts_generate_with_real_weights(
     vllm_runner, record_property, enable_pickle
 ):
-    """The option reaches MoE experts and preserves top-five same-prefix choices."""
+    """Check both loading modes on a real MoE model."""
     model_name = "RedHatAI/Qwen3-30B-A3B-quantized.w4a16"
     revision = "1c842a5000febac4b335c94a04789a9d4756a18e"
     prompts = [
@@ -170,7 +169,7 @@ def test_humming_packed_experts_generate_with_real_weights(
     for reference, packed in zip(*outputs):
         assert len(reference[0]) == len(packed[0]) == 32
         for index, (expected, actual) in enumerate(zip(reference[0], packed[0])):
-            # The helper stops at its first comparison. Check each shared prefix.
+            # Compare one position: the helper stops after its first check.
             check_logprobs_close(
                 outputs_0_lst=[([expected], "", [reference[2][index]])],
                 outputs_1_lst=[([actual], "", [packed[2][index]])],
@@ -179,4 +178,4 @@ def test_humming_packed_experts_generate_with_real_weights(
                 always_check_logprobs=True,
             )
             if expected != actual:
-                break  # Later predictions have different input histories.
+                break
