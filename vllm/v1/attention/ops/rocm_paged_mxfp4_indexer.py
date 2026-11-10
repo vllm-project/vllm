@@ -15,7 +15,7 @@ them.
 import functools
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 import torch
 
@@ -26,7 +26,14 @@ from vllm.forward_context import get_forward_context
 from vllm.model_executor.kernels.attention.dsa.candidate_blocks import (
     apply_candidate_mask,
 )
+from vllm.model_executor.warmup.jit_warmup import kernel_launcher
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    LaunchSpec,
+    TritonWarmupTensor,
+    VllmTritonJitKernel,
+)
 from vllm.triton_utils import tl, triton
+from vllm.v1.attention.ops.metadata import _token_request
 from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
     _apply_candidate_mask_strided,
     _max_decode_logits_rows,
@@ -236,6 +243,155 @@ def build_rocm_mxfp4_decode_schedule(
         row_ends=row_lens,
         max_model_len=logits_width,
     )
+
+
+class RocmMxfp4DecodeRowsKernel(
+    VllmTritonJitKernel["RocmMxfp4DecodeRowsKernel.CompileKey"]
+):
+    """Build a ROCm MXFP4 indexer step's flattened decode metadata in one launch."""
+
+    TAIL_BLOCK = 256
+
+    @dataclass(frozen=True)
+    class CompileKey:
+        compress_ratio: int
+        block_cols: int
+
+    @staticmethod
+    @triton.jit(
+        do_not_specialize=[
+            "num_reqs",
+            "num_rows",
+            "capacity",
+            "num_ctx_reqs",
+            "candidate_block",
+            "block_table_stride",
+            "row_block_table_stride",
+        ]
+    )
+    def kernel(
+        query_start_loc_ptr,
+        seq_lens_ptr,
+        block_table_ptr,
+        row_lens_ptr,
+        row_block_table_ptr,
+        decode_lens_ptr,
+        per_req_lens_ptr,
+        context_lens_ptr,
+        block_ends_ptr,
+        num_reqs,
+        num_rows,
+        capacity,
+        num_ctx_reqs,
+        candidate_block,
+        block_table_stride,
+        row_block_table_stride,
+        COMPRESS_RATIO: tl.constexpr,
+        BLOCK_COLS: tl.constexpr,
+        TAIL_BLOCK: tl.constexpr,
+    ):
+        pid = tl.program_id(0)
+        if pid < num_rows:
+            req = _token_request(
+                query_start_loc_ptr, tl.full((1,), pid, tl.int32), num_reqs
+            )
+            req = tl.sum(req, 0)
+            valid = pid < tl.load(query_start_loc_ptr + num_reqs)
+            start = tl.load(query_start_loc_ptr + req)
+            end = tl.load(query_start_loc_ptr + req + 1)
+            seq_len = tl.load(seq_lens_ptr + req)
+            length = tl.maximum(seq_len - (end - start) + pid - start + 1, 0)
+            length = tl.where(valid, length, 0) // COMPRESS_RATIO
+            tl.store(row_lens_ptr + pid, length)
+            tl.store(decode_lens_ptr + pid, 1)
+            if candidate_block > 0:
+                ends = (length + candidate_block - 1) // candidate_block
+                tl.store(block_ends_ptr + pid, ends)
+            cols = tl.arange(0, triton.next_power_of_2(BLOCK_COLS))
+            blocks = tl.load(
+                block_table_ptr + req.to(tl.int64) * block_table_stride + cols,
+                valid & (cols < BLOCK_COLS),
+                other=0,
+            )
+            tl.store(
+                row_block_table_ptr + pid.to(tl.int64) * row_block_table_stride + cols,
+                blocks,
+                cols < BLOCK_COLS,
+            )
+        else:
+            tail = num_rows + (pid - num_rows) * TAIL_BLOCK + tl.arange(0, TAIL_BLOCK)
+            tl.store(row_lens_ptr + tail, 0, tail < capacity)
+        if pid < num_reqs:
+            query_len = tl.load(query_start_loc_ptr + pid + 1) - tl.load(
+                query_start_loc_ptr + pid
+            )
+            tl.store(per_req_lens_ptr + pid, query_len)
+        if pid < num_ctx_reqs:
+            context_len = tl.load(seq_lens_ptr + pid) // COMPRESS_RATIO
+            tl.store(context_lens_ptr + pid, context_len)
+
+    def dispatch(  # type: ignore[override]
+        self, *, compress_ratio: int, block_cols: int
+    ) -> CompileKey:
+        return self.CompileKey(compress_ratio=compress_ratio, block_cols=block_cols)
+
+    def get_warmup_keys(
+        self, *, compress_ratio: int, block_cols: int
+    ) -> list[CompileKey]:
+        return [self.dispatch(compress_ratio=compress_ratio, block_cols=block_cols)]
+
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
+        int32_ptr = TritonWarmupTensor(torch.int32)
+        block_table = TritonWarmupTensor(torch.int32, shape=(1, compile_key.block_cols))
+        return dict(
+            query_start_loc=int32_ptr,
+            seq_lens=int32_ptr,
+            block_table=block_table,
+            row_lens=int32_ptr,
+            row_block_table=block_table,
+            decode_lens=int32_ptr,
+            per_req_lens=int32_ptr,
+            context_lens=int32_ptr,
+            block_ends=int32_ptr,
+            num_reqs=1,
+            num_rows=1,
+            num_ctx_reqs=1,
+            candidate_block=0,
+            compress_ratio=compile_key.compress_ratio,
+        )
+
+    @kernel_launcher
+    def __call__(
+        self,
+        query_start_loc: torch.Tensor,
+        seq_lens: torch.Tensor,
+        block_table: torch.Tensor,
+        row_lens: torch.Tensor,
+        row_block_table: torch.Tensor,
+        decode_lens: torch.Tensor,
+        per_req_lens: torch.Tensor,
+        context_lens: torch.Tensor,
+        block_ends: torch.Tensor,
+        num_reqs: int,
+        num_rows: int,
+        num_ctx_reqs: int,
+        candidate_block: int,
+        compress_ratio: int,
+    ) -> LaunchSpec:
+        capacity = row_lens.shape[0]
+        tail = num_rows + triton.cdiv(capacity - num_rows, self.TAIL_BLOCK)
+        return (max(tail, num_ctx_reqs),), dict(
+            capacity=capacity,
+            block_table_stride=block_table.stride(0),
+            row_block_table_stride=row_block_table.stride(0),
+            COMPRESS_RATIO=compress_ratio,
+            BLOCK_COLS=block_table.shape[1],
+            TAIL_BLOCK=self.TAIL_BLOCK,
+            num_warps=4,
+        )
+
+
+_ROCM_MXFP4_DECODE_ROWS_KERNEL = RocmMxfp4DecodeRowsKernel()
 
 
 def _kv_view(kv_cache: torch.Tensor, head_dim: int) -> torch.Tensor:

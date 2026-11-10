@@ -32,6 +32,7 @@ from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV41IndexerBackend,
 )
 from vllm.v1.attention.ops.rocm_paged_mxfp4_indexer import (
+    _ROCM_MXFP4_DECODE_ROWS_KERNEL,
     build_rocm_mxfp4_decode_schedule,
     rocm_mxfp4_consumer_rows,
     rocm_mxfp4_decode_schedule_words,
@@ -321,6 +322,8 @@ class RocmMxfp4IndexerMetadataBuilder(DeepseekV32IndexerMetadataBuilder):
     Requirements are checked here, at engine start.
     """
 
+    fused_decode_metadata = True
+
     @classmethod
     def get_cudagraph_support(
         cls,
@@ -384,6 +387,11 @@ class RocmMxfp4IndexerMetadataBuilder(DeepseekV32IndexerMetadataBuilder):
             dtype=torch.int32,
             device=device,
         )
+        if vllm_config.kernel_config.enable_jit_warmup:
+            _ROCM_MXFP4_DECODE_ROWS_KERNEL.register_warmup(
+                compress_ratio=self.compress_ratio,
+                block_cols=self.expanded_block_table_buffer.shape[1],
+            )
 
     def _split_indexer_prefill_chunks(  # type: ignore[override]
         self,
@@ -401,6 +409,37 @@ class RocmMxfp4IndexerMetadataBuilder(DeepseekV32IndexerMetadataBuilder):
             request_offset,
         )
 
+    def _build_decode_rows(
+        self,
+        common_attn_metadata: CommonAttentionMetadata,
+        num_decodes: int,
+        num_decode_tokens: int,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        cm = common_attn_metadata
+        block_table = cm.block_table_tensor
+        assert block_table.shape[1] <= self.expanded_block_table_buffer.shape[1]
+        _ROCM_MXFP4_DECODE_ROWS_KERNEL(
+            cm.query_start_loc,
+            cm.seq_lens,
+            block_table,
+            self.decode_seq_lens_buffer,
+            self.expanded_block_table_buffer,
+            self.decode_lens_buffer,
+            self.per_req_decode_lens_buffer,
+            self.context_lens_buffer,
+            self.decode_block_ends_buffer,
+            num_decodes,
+            num_decode_tokens,
+            cm.num_reqs,
+            self.candidate_block_size,
+            self.compress_ratio,
+        )
+        return (
+            self.decode_seq_lens_buffer[:num_decode_tokens],
+            self.expanded_block_table_buffer[:num_decode_tokens],
+            self.decode_lens_buffer[:num_decode_tokens],
+        )
+
     def build(
         self,
         common_prefix_len: int,
@@ -412,18 +451,21 @@ class RocmMxfp4IndexerMetadataBuilder(DeepseekV32IndexerMetadataBuilder):
             **{f.name: getattr(base, f.name) for f in fields(base)}
         )
         cm = common_attn_metadata
+        fused = self.fused_decode_metadata and base.decode is not None
         context_lens = self.context_lens_buffer[: cm.num_reqs]
-        torch.floor_divide(
-            cm.seq_lens[: cm.num_reqs], self.compress_ratio, out=context_lens
-        )
+        if not fused:
+            torch.floor_divide(
+                cm.seq_lens[: cm.num_reqs], self.compress_ratio, out=context_lens
+            )
         if base.decode is not None:
             lengths = base.decode.seq_lens.view(-1)
             metadata.decode_row_lens = lengths
             block = self.candidate_block_size
             if block:
                 ends = self.decode_block_ends_buffer[: lengths.shape[0]]
-                torch.add(lengths, block - 1, out=ends)
-                ends.floor_divide_(block)
+                if not fused:
+                    torch.add(lengths, block - 1, out=ends)
+                    ends.floor_divide_(block)
                 metadata.decode_block_ends = ends
             query_start_loc = cm.query_start_loc_cpu[: base.num_decodes + 1]
             metadata.decode_native = native_decode(
