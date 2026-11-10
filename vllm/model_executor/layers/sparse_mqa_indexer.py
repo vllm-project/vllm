@@ -8,7 +8,7 @@ the top candidate blocks and later indexers pick their top-k inside them.
 context and masking; this layer instead calls DeepGEMM's sparse MQA-logits
 kernels on the candidate blocks only, so the work is O(candidate blocks)
 instead of O(context). It requires the `DeepseekV41SparseIndexerBackend`
-metadata (see ``AttentionConfig.indexer_sparse_logits``).
+metadata (see `AttentionConfig.indexer_sparse_logits`).
 """
 
 import torch
@@ -42,7 +42,7 @@ from vllm.v1.worker.workspace import current_workspace_manager
 def _prefill_k_workspaces(
     total_seq_lens: int, head_dim: int, use_fp4_cache: bool
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """The K-gather workspace ``(values, scales)`` of the indexer cache
+    """The K-gather workspace `(values, scales)` of the indexer cache
     format, shared with the dense indexer layers of the same model."""
     values_spec, scales_spec = _gather_workspace_shapes(
         total_seq_lens, head_dim, current_platform.fp8_dtype(), use_fp4_cache
@@ -79,14 +79,14 @@ class SparseMQAIndexer(nn.Module):
 
     Only valid for indexer layers that read candidate blocks on SM100, with
     the FP8 or the MXFP4 indexer cache. The K cache is written by the model
-    before this runs; ``forward`` takes the same arguments as
+    before this runs; `forward` takes the same arguments as
     `SparseAttnIndexer` so the attention layer can call either.
     """
 
     weights_dtype = torch.bfloat16
     """Per-head weights dtype the sparse kernels take. The fused Q RoPE-quant
     kernel writes it directly on the MXFP4 cache; on the FP8 cache it emits
-    fp32 (Q scale folded in) and ``forward`` casts."""
+    fp32 (Q scale folded in) and `forward` casts."""
 
     def __init__(
         self,

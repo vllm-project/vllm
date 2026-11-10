@@ -82,3 +82,21 @@ def test_poll_sets_exception_from_response():
     assert future.poll()
     with pytest.raises(ValueError, match="worker failed"):
         future.result()
+
+
+def test_wait_briefly_waits_for_oldest_response():
+    queue: deque[FutureWrapper] = deque()
+    waited: list[str] = []
+
+    def waiter(name: str):
+        return lambda pending, deadline: waited.append(name)
+
+    f1 = FutureWrapper(queue, lambda: "a", wait_for_response=waiter("first"))
+    f2 = FutureWrapper(queue, lambda: "b", wait_for_response=waiter("second"))
+
+    f2.wait_briefly([], 0.0)
+    assert waited == ["first"]
+
+    assert f1.poll()
+    f2.wait_briefly([], 0.0)
+    assert waited == ["first", "second"]

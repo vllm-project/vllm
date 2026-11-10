@@ -23,7 +23,7 @@ ComputeDSparkNoncausalSWAIndicesKernel in place of the window kernel. That
 is 3 more builds of 8 launches after every target step.
 
 On gfx942 and gfx950 with --monokernel
-(``ops.swa_decode_meta_enabled()``), decode batches of up to MAX_ROWS rows,
+(`ops.monokernel_cdna3_or_4()`), decode batches of up to MAX_ROWS rows,
 causal or the draft block, use it. Other batches take the rest of
 DeepseekV41ROCMAiterSparseSWAMetadataBuilder.build.
 tests/kernels/models/amd/test_dsv41_gfx942_decode_meta.py compares it with the vLLM ops
@@ -32,7 +32,7 @@ that it replaces.
 
 import torch
 
-from vllm.models.deepseek_v41.amd.ops import swa_decode_meta_enabled
+from vllm.models.deepseek_v41.amd.ops import monokernel_cdna3_or_4
 from vllm.triton_utils import tl, triton
 
 # One program holds all rows of the batch in registers, as a ROWS x WIDTH
@@ -183,7 +183,7 @@ def build(builder, common_prefix_len, cam, fast_build, replay_start, metadata_cl
     """Return the ROCm SWA metadata of a decode batch, causal or the DSpark
     draft block, built with one launch, or None when the batch needs the rest
     of DeepseekV41ROCMAiterSparseSWAMetadataBuilder.build."""
-    if not swa_decode_meta_enabled():
+    if not monokernel_cdna3_or_4():
         return None
     from vllm.v1.attention.backends.mla import sparse_swa
     from vllm.v1.attention.backends.utils import split_decodes_and_prefills
