@@ -60,7 +60,7 @@ A request's output can cross block boundaries, where `align` mode caches no stat
 
 ### Session leaves
 
-When a request finishes, the newest state it published becomes its session's leaf. The leaf it resumed from is released, unless that leaf is a branch point or a running request still holds its state. A frontier that differs from the request only in its last token, such as a stop token the client replaced, is released too. An aborted request publishes no frontier, because its last state may come from a step or a load that never completed.
+When a request finishes, the newest state it published becomes its session's leaf. The leaf it resumed from is released, unless that leaf is a branch point, a running request still holds its state, or a waiting request resumes there: its lookup did, or under GreedyDual-Size its hit pins it. A frontier that differs from the request only in its last token, such as a stop token the client replaced, is released too. An aborted request publishes no frontier, because its last state may come from a step or a load that never completed.
 
 ### Indexer rings
 
@@ -119,6 +119,7 @@ The scheduler shows a connector only the block-aligned part of a local hit that 
 - prefix caching with `mamba_cache_mode="align"` and Model Runner V2;
 - `prefix_cache_retention_interval=0`;
 - no `long_prefill_token_threshold` below the block size;
+- KV cache groups of full attention, Mamba and indexer rings only, at least one full-attention and one Mamba group, and every ring declaring `resume_catchup` (a sliding-window group, for example, is refused);
 - a KV connector, if any, with `kv_role="kv_both"` and `kv_load_failure_policy="recompute"`.
 
 It is refused with speculative decoding, ReplaySSM, KV cache events, and decode or prefill context parallelism.

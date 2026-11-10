@@ -200,6 +200,9 @@ class HybridCheckpointManager:
         self._resume: dict[str, BlockHash] = {}
         # Request -> units its admissions already counted as hits.
         self._touched: dict[str, set[BlockHash]] = {}
+        # Requests resumed at a frontier inside an open indexer group, until it
+        # closes.
+        self._catching_up: set[str] = set()
         self.num_scratch_skipped = 0
         self.num_scratch_dropped = 0
         self.pool.key_removal_listener = self.keys_removed
@@ -322,10 +325,28 @@ class HybridCheckpointManager:
             self._resume[request.request_id] = resume
         self.graph.admitted(request.request_id, resume)
 
+    def catching_up(self, request_id: str, start: int) -> bool:
+        """Whether the request resumed at a frontier inside an indexer group
+        that is still open at `start`: it then takes one token per step,
+        through the decode path, until the group closes."""
+        if not start % self.catchup_pool_size:
+            self._catching_up.discard(request_id)
+            return False
+        return request_id in self._catching_up or bool(
+            self.frontiers.hit_tokens(request_id, start)
+        )
+
     def allocated(self, request: "Request", num_hits: int) -> None:
         """The request got its blocks `num_hits` tokens in: each unit it
         resumes at counts one hit per request, however often a refused
         allocation repeats the lookup."""
+        if (
+            self.frontiers.hit_tokens(request.request_id, num_hits)
+            and num_hits % self.catchup_pool_size
+        ):
+            self._catching_up.add(request.request_id)
+        else:
+            self._catching_up.discard(request.request_id)
         self.frontiers.admitted(request, num_hits)
         resume = self._resume.pop(request.request_id, None)
         if resume is None:
@@ -342,10 +363,11 @@ class HybridCheckpointManager:
         leaf = self._publish_decode_boundary(request)
         self._resume.pop(request_id, None)
         self._touched.pop(request_id, None)
+        self._catching_up.discard(request_id)
         superseded = self.frontiers.superseded.pop(request_id, ())
-        if superseded and self._resume:
+        if superseded:
             waiting = set(self._resume.values())
-            superseded = tuple(k for k in superseded if k not in waiting)
+            superseded = tuple(k for k in superseded if not self._needed(k, waiting))
         for key in superseded:
             unit = self.graph.units.get(key)
             if (
@@ -377,20 +399,39 @@ class HybridCheckpointManager:
         graph.forget(request_id)
         self.frontiers.forget(request_id)
 
+    def _needed(self, key: BlockHash, waiting: set[BlockHash]) -> bool:
+        """Whether a waiting request resumes at the unit `key`: its lookup did
+        (`waiting`), or under GreedyDual-Size its hit pins the unit."""
+        if key in waiting:
+            return True
+        unit = self.graph.units.get(key)
+        return (
+            unit is not None
+            and self.eviction is not None
+            and self.eviction.pinned(unit)
+        )
+
     def _replace_leaf(
         self, request_id: str, key: BlockHash, boundary: bool = False
     ) -> None:
         """`key` becomes its session's leaf; release the leaf the request
-        resumed from unless it is a branch point or held. When that was a
-        frontier and `key` a later boundary state, the boundary state the
-        frontier extended goes too, unless another continuation reached it."""
+        resumed from unless it is a branch point, held, or where a waiting
+        request resumes (`_needed`). When that was a frontier and `key` a
+        later boundary state, the boundary state the frontier extended goes
+        too, unless another continuation reached it."""
         graph = self.graph
         graph.leaves.add(key)
         old = graph.resumed.get(request_id)
         if old is None or old == key or old not in graph.leaves:
             return
         unit = graph.units.get(old)
-        if unit is None or unit.is_branch_point or self.held(old):
+        waiting = set(self._resume.values())
+        if (
+            unit is None
+            or unit.is_branch_point
+            or self.held(old)
+            or self._needed(old, waiting)
+        ):
             return
         shadowed = None
         if boundary and unit.frontier and unit.parent is not None:
@@ -402,6 +443,7 @@ class HybridCheckpointManager:
                 and not parent.hits
                 and unit.parent in graph.leaves
                 and not self.held(unit.parent)
+                and not self._needed(unit.parent, waiting)
             ):
                 shadowed = unit.parent
         self.release(old)
@@ -413,6 +455,7 @@ class HybridCheckpointManager:
         self.graph.clear()
         self._resume.clear()
         self._touched.clear()
+        self._catching_up.clear()
         if self.eviction is not None:
             self.eviction.reset()
         self.frontiers.reset()

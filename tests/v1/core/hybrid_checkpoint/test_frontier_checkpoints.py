@@ -20,6 +20,7 @@ from .utils import (
     add_request,
     admitted_at,
     make_hybrid_scheduler,
+    make_request,
     mock_connector,
     prompt,
     run,
@@ -43,9 +44,12 @@ def make_scheduler(frontier: bool = True, **kwargs):
     )
 
 
+@pytest.mark.parametrize("async_scheduling", [False, True])
 @pytest.mark.parametrize("frontier", [False, True])
-def test_next_turn_resumes_at_the_previous_frontier(frontier: bool):
-    scheduler = make_scheduler(frontier=frontier)
+def test_next_turn_resumes_at_the_previous_frontier(
+    frontier: bool, async_scheduling: bool
+):
+    scheduler = make_scheduler(frontier=frontier, async_scheduling=async_scheduling)
     first = add_request(scheduler, "t0", prompt(1, 150), max_tokens=10)
     run(scheduler, first)
     frontier_tokens = first.num_computed_tokens
@@ -89,8 +93,21 @@ def test_resume_inside_an_indexer_group_takes_one_token_per_step():
     assert taken[catchup] > 1
 
 
-def test_decode_boundary_state_is_resumable():
-    scheduler = make_scheduler()
+def test_a_chunk_ending_inside_an_indexer_group_keeps_its_size():
+    """Only a resume at a frontier catches up one token per step. A budget
+    smaller than the block ends an ordinary chunk inside a group, and the next
+    chunk goes on as usual."""
+    scheduler = make_scheduler(max_num_batched_tokens=9 * RING + 1)
+    request = add_request(scheduler, "r", prompt(1, 150), max_tokens=2)
+    taken = [out.num_scheduled_tokens["r"] for out in run(scheduler, request)]
+    assert taken[0] % RING
+    # The last step decodes the second output token.
+    assert 1 not in taken[:-1]
+
+
+@pytest.mark.parametrize("async_scheduling", [False, True])
+def test_decode_boundary_state_is_resumable(async_scheduling: bool):
+    scheduler = make_scheduler(async_scheduling=async_scheduling)
     first = add_request(scheduler, "t0", prompt(1, 100), max_tokens=60)
     run(scheduler, first)
     assert first.num_computed_tokens > 2 * BLOCK
@@ -195,6 +212,32 @@ def test_session_leaf_is_replaced_unless_another_turn_needs_it():
     assert frontier_of(third) in entries
 
 
+def test_next_turn_keeps_the_frontier_a_waiting_request_resumes_at():
+    """A request whose lookup resumed it at a frontier and that still waits
+    for blocks, as a refused allocation leaves it, keeps that frontier when
+    the session's next turn moves its leaf on."""
+    scheduler = make_scheduler()
+    checkpoints = scheduler.mamba_checkpoints
+    assert checkpoints is not None
+    first = add_request(scheduler, "t0", prompt(1, 150), max_tokens=10)
+    run(scheduler, first)
+    frontier_tokens = first.num_computed_tokens
+    key = frontier_key(sha256, first, frontier_tokens, BLOCK)
+    tokens = list(first.all_token_ids)
+
+    second = add_request(scheduler, "t1", tokens + prompt(2, 20), max_tokens=3)
+    step(scheduler)
+    waiting = make_request(scheduler, "w", tokens + prompt(5, 20), max_tokens=1)
+    blocks, num_tokens, _ = scheduler.kv_cache_manager.get_computed_blocks(waiting)
+    assert num_tokens == frontier_tokens
+    checkpoints.admitted(waiting, num_tokens, blocks, 0)
+    run(scheduler, second)
+    assert key in checkpoints.frontiers.entries
+
+    scheduler.add_request(waiting)
+    assert admitted_at(scheduler, waiting) == frontier_tokens
+
+
 def test_longer_connector_hit_supersedes_the_frontier():
     """The KV connector sees the block-aligned part of a frontier hit and loads
     past the frontier: the request resumes where the load ends, without the
@@ -247,6 +290,10 @@ def test_a_load_resumes_at_the_state_of_its_hash_unit():
     "kwargs,needs",
     [
         ({"prefix_cache_retention_interval": BLOCK}, "retention_interval 0"),
+        (
+            {"long_prefill_token_threshold": BLOCK // 2},
+            "long_prefill_token_threshold below the block size",
+        ),
         ({"resume_catchup": None}, "resume_catchup"),
         (
             {"kv_transfer_config": mock_connector(0, kv_load_failure_policy="fail")},

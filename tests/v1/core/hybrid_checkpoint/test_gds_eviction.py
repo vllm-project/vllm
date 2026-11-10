@@ -131,6 +131,27 @@ def test_waiting_request_keeps_the_state_it_resumes_at(waiting: bool):
     assert resumed == (204 if waiting else 192)
 
 
+@pytest.mark.parametrize("pinned", [False, True])
+def test_next_turn_keeps_a_frontier_a_waiting_hit_pins(
+    monkeypatch: pytest.MonkeyPatch, pinned: bool
+):
+    """The session's next turn releases the frontier it resumed from, unless a
+    waiting request's hit pins it."""
+    scheduler = make_scheduler()
+    checkpoints = scheduler.mamba_checkpoints
+    assert checkpoints is not None and checkpoints.eviction is not None
+    first = add_request(scheduler, "t0", prompt(1, 150), max_tokens=10)
+    run(scheduler, first)
+    key = frontier_key(sha256, first, first.num_computed_tokens, BLOCK)
+    assert key in checkpoints.frontiers.entries
+    monkeypatch.setattr(
+        checkpoints.eviction, "pinned", lambda unit: pinned and unit.key == key
+    )
+    tokens = list(first.all_token_ids) + prompt(2, 20)
+    run(scheduler, add_request(scheduler, "t1", tokens, max_tokens=3))
+    assert (key in checkpoints.frontiers.entries) == pinned
+
+
 @pytest.mark.usefixtures("fast_clock")
 def test_pins_are_refreshed_within_a_lookup_budget(monkeypatch: pytest.MonkeyPatch):
     """The refresh looks up the waiting queue's front first, until the hash

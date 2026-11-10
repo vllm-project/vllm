@@ -176,7 +176,7 @@ def prompt(seed: int, num_tokens: int) -> list[int]:
     return [3 + (seed * 7919 + i * 104729) % 30000 for i in range(num_tokens)]
 
 
-def add_request(
+def make_request(
     scheduler: Scheduler,
     request_id: str,
     tokens: list[int],
@@ -184,13 +184,22 @@ def add_request(
 ) -> Request:
     params = SamplingParams(max_tokens=max_tokens, ignore_eos=True)
     params.update_from_generation_config({}, EOS)
-    request = Request(
+    return Request(
         request_id=request_id,
         prompt_token_ids=tokens,
         sampling_params=params,
         pooling_params=None,
         block_hasher=get_request_block_hasher(scheduler.hash_block_size, sha256),
     )
+
+
+def add_request(
+    scheduler: Scheduler,
+    request_id: str,
+    tokens: list[int],
+    max_tokens: int,
+) -> Request:
+    request = make_request(scheduler, request_id, tokens, max_tokens)
     scheduler.add_request(request)
     return request
 

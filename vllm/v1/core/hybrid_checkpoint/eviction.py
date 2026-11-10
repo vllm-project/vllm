@@ -591,7 +591,8 @@ class GreedyDualSizeEviction:
         blocks = self._state_blocks(unit)
         return bool(blocks) and all(b.ref_cnt == 0 for b in blocks)
 
-    def _pinned(self, unit: RecoveryUnit) -> bool:
+    def pinned(self, unit: RecoveryUnit) -> bool:
+        """Whether a waiting request's hit holds `unit`'s state blocks."""
         pinned = self._pinned_blocks
         return bool(pinned) and any(
             b.block_id in pinned for b in self._state_blocks(unit)
@@ -684,7 +685,7 @@ class GreedyDualSizeEviction:
                 heapq.heapreplace(heap, (now, unit.version, ref))
                 continue
             heapq.heappop(heap)
-            if not self._free(unit) or self._pinned(unit):
+            if not self._free(unit) or self.pinned(unit):
                 self._parked[ref] = unit
                 continue
             if not self.leaf_last or unit.tier == _LEAF:
@@ -789,7 +790,7 @@ class GreedyDualSizeEviction:
         for key, unit in list(self._parked.items()):
             if units.get(key) is not unit:
                 del self._parked[key]
-            elif self._free(unit) and not self._pinned(unit):
+            elif self._free(unit) and not self.pinned(unit):
                 del self._parked[key]
                 self._push(unit)
         for key in list(self._fresh):

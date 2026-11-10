@@ -584,9 +584,9 @@ class Scheduler(SchedulerInterface):
         if start >= prefill_end:
             return num_new_tokens
         checkpoints = self.mamba_checkpoints
-        if checkpoints is not None and start % checkpoints.catchup_pool_size:
-            # Resumed at a frontier inside an open indexer group: one token per
-            # step until the group closes, through the decode path.
+        if checkpoints is not None and checkpoints.catching_up(
+            request.request_id, start
+        ):
             return min(num_new_tokens, 1)
 
         block_size = self.cache_config.block_size
