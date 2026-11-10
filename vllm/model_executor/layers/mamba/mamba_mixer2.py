@@ -587,8 +587,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
         self.is_blackwell = current_platform.is_device_capability_family(100)
 
         if model_config is not None:
-            # Prefill final states go to a block-table column sliced at
-            # num_decodes.
+            # Prefill states are indexed by a block-table column.
             spec = self.get_kv_cache_spec(vllm_config)
             assert spec is not None and isinstance(spec, MambaSpec)
             self._state_indices_stride = 1 + spec.num_speculative_blocks
@@ -598,7 +597,6 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 indices_dtype=torch.int32,
                 max_num_tokens=vllm_config.scheduler_config.max_num_seqs,
                 indices_stride=self._state_indices_stride,
-                may_be_unaligned_indices=True,
             )
 
     def forward(
@@ -758,11 +756,13 @@ class MambaMixer2(MambaBase, PluggableLayer):
         state = torch.zeros(
             1, nheads, headdim, dstate, device=device, dtype=ssm_state_dtype
         )
-        stride = self._state_indices_stride
-        indices = torch.zeros(1 + stride, device=device, dtype=torch.int32)
+        indices = torch.zeros(
+            self._state_indices_stride, device=device, dtype=torch.int32
+        )
         has_initial_states = torch.ones(1, device=device, dtype=torch.bool)
-        for start in (0, 1):
-            gather_initial_states(state, indices[start::stride][:1], has_initial_states)
+        gather_initial_states(
+            state, indices[:: self._state_indices_stride], has_initial_states
+        )
 
         logger.debug("Mamba2 SSD kernel warmup completed for layer %s", self.prefix)
         torch.accelerator.empty_cache()
