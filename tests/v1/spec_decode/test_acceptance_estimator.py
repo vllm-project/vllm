@@ -225,6 +225,51 @@ def test_refit_recovers_a_shared_slope_and_per_position_intercepts():
     torch.testing.assert_close(bias, true_bias, atol=0.3, rtol=0)
 
 
+def test_refit_stays_bounded_under_sustained_separation():
+    """Separation (Albert & Anderson, 1984): once a position's predictions
+    saturate, the IRLS weight w = p(1-p) that should measure its own Fisher
+    information collapses toward zero regardless of whether the prediction
+    is right. Pin one position's feature to a constant so it saturates fast,
+    and accept it the overwhelming majority of the time so it does -- but
+    reject it a small minority of the time. Those rejections carry a real,
+    non-vanishing residual (label - p ≈ -1) against a weight that has
+    already collapsed to ~0, through the real accumulate/refit path (not
+    engineered raw statistics): textbook separation, driven honestly.
+
+    Before the circuit breaker, a sustained run of this sends the position's
+    intercept into the tens of thousands over a few dozen refits (observed:
+    -107,872 on a real production-shaped repro). This asserts it instead
+    stays near the healthy range every other position in this estimator
+    converges to.
+    """
+    device = current_platform.device_type
+    torch.manual_seed(0)
+    estimator = OnlineAcceptanceEstimator(REFIT_NUM_REQS, NUM_STEPS, device)
+    estimator.REFIT_INTERVAL = 5
+    slots = torch.arange(REFIT_NUM_REQS, device=device, dtype=torch.int32)
+    stuck = 1
+
+    for _ in range(40):
+        features = torch.rand(REFIT_NUM_REQS, NUM_STEPS, device=device) * 8.0
+        # `stuck`'s own feature is pinned to a maximally confident constant,
+        # so it saturates fast; a small minority of requests reject there
+        # anyway, each one a real, disagreeing sample.
+        features[:, stuck] = 40.0
+        rejected_at_stuck = torch.rand(REFIT_NUM_REQS, device=device) < 0.03
+        num_accepted = torch.where(
+            rejected_at_stuck,
+            torch.full((REFIT_NUM_REQS,), float(stuck), device=device),
+            torch.full((REFIT_NUM_REQS,), float(stuck + 1), device=device),
+        )
+        _drive_round(estimator, features, num_accepted, slots)
+
+    assert estimator.intercepts.isfinite().all()
+    assert estimator.intercepts[stuck].abs().item() < 200.0, (
+        f"intercept at the stuck position diverged to "
+        f"{estimator.intercepts[stuck].item()}"
+    )
+
+
 def test_refit_survives_a_position_with_no_observations():
     """A draft position nobody reached must not stall the shared slope.
 
@@ -329,7 +374,6 @@ def _force_refit(
         assert 0 <= stuck_position < num_steps
         estimator.info[stuck_position, 2] = 0.0
         estimator.grad[stuck_position, 1] = 5.0
-    estimator._steps_since_refit = estimator.REFIT_INTERVAL - 1
     empty = torch.zeros(0, dtype=torch.int32, device=device)
     estimator.step(empty, empty, empty)
 
@@ -408,7 +452,6 @@ def test_circuit_breaker_resets_the_shared_slope():
         estimator.grad[:, 0] = 1.0
         estimator.grad[:, 1] = 1.0
         estimator.counts[:] = 50.0
-        estimator._steps_since_refit = estimator.REFIT_INTERVAL - 1
         estimator.step(empty, empty, empty)
 
     for _ in range(int(_STUCK_LIMIT) - 1):
@@ -437,7 +480,6 @@ def test_step_clip_bounds_a_single_refit_at_near_zero_information():
     estimator.info[position, 2] = 0.0
     estimator.counts[:] = 50.0
     estimator.grad[:, 1] = 1e6
-    estimator._steps_since_refit = estimator.REFIT_INTERVAL - 1
     empty = torch.zeros(0, dtype=torch.int32, device=device)
     estimator.step(empty, empty, empty)
 

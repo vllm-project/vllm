@@ -33,13 +33,18 @@ _MAX_STEP_BIAS = 50.0
 # information collapses toward zero regardless of how many real samples
 # it saw, and nothing reads that as a reason to stop trusting the step.
 # Track, per position and separately for the shared slope, how many
-# *consecutive* refits its raw (pre-floor) Fisher information has sat
-# below STUCK_THRESHOLD. Once that streak reaches STUCK_LIMIT, discard the
-# computed step and reset that one coefficient to its own cold-start
-# default instead -- the same value (and justification) used at server
-# startup, just applied mid-stream once persistence is confirmed. A single
-# low-information refit does not trigger this: the counter clears the
-# moment the position sees real information again.
+# *consecutive* refits with real observations its raw (pre-floor) Fisher
+# information has sat below STUCK_THRESHOLD. Once that streak reaches
+# STUCK_LIMIT, discard the computed step and reset that one coefficient
+# to its own cold-start default instead -- the same value (and
+# justification) used at server startup, just applied mid-stream once
+# persistence is confirmed. A refit window with zero observations (no
+# requests reached that depth, or none were graded) holds the counter
+# steady rather than advancing it: it carries no evidence of separation
+# either way, and counting it would let an ordinary quiet stretch erase
+# a well-converged coefficient. A single low-information refit that did
+# see real observations clears the counter the moment the position
+# sees real information again.
 _STUCK_THRESHOLD = 0.1
 _STUCK_LIMIT = 3.0
 
@@ -181,11 +186,22 @@ def _refit_kernel(
     updated_w = w + step_w
 
     # Circuit breaker for the shared slope: if its raw aggregate
-    # information has sat near-zero for STUCK_LIMIT consecutive refits,
-    # reset it to the cold-start default instead of nudging it further.
+    # information has sat near-zero for STUCK_LIMIT consecutive refits
+    # *that actually carried observations*, reset it to the cold-start
+    # default instead of nudging it further. A window with no
+    # observations at all (total_n == 0, e.g. AV trimmed every position
+    # this deep, or every request rejected earlier) says nothing about
+    # separation either way, so it holds the counter steady rather than
+    # advancing it -- otherwise a run of ordinary quiet windows could
+    # erase a well-converged slope with no evidence of being stuck.
     prev_slope_stuck = tl.load(slope_stuck_ptr)
+    slope_has_observations = total_n > 0
     slope_is_stuck = raw_a < STUCK_THRESHOLD
-    new_slope_stuck = tl.where(slope_is_stuck, prev_slope_stuck + 1.0, 0.0)
+    new_slope_stuck = tl.where(
+        slope_has_observations,
+        tl.where(slope_is_stuck, prev_slope_stuck + 1.0, 0.0),
+        prev_slope_stuck,
+    )
     slope_should_reset = new_slope_stuck >= STUCK_LIMIT
     new_w = tl.where(slope_should_reset, INIT_SLOPE, updated_w)
     tl.store(slope_stuck_ptr, tl.where(slope_should_reset, 0.0, new_slope_stuck))
@@ -201,10 +217,18 @@ def _refit_kernel(
     updated_bias = bias + step_bias
 
     # Circuit breaker per position: same idea as the slope above, but
-    # keyed on this position's own raw (pre-floor) Fisher information.
+    # keyed on this position's own raw (pre-floor) Fisher information
+    # and its own observation count, so a position that simply went
+    # unobserved this round (n == 0) holds its counter steady instead of
+    # being mistaken for a position stuck by separation.
     prev_pos_stuck = tl.load(pos_stuck_ptr + k, mask=mask, other=0.0)
+    pos_has_observations = n > 0
     pos_is_stuck = raw_c_k < STUCK_THRESHOLD
-    new_pos_stuck = tl.where(pos_is_stuck, prev_pos_stuck + 1.0, 0.0)
+    new_pos_stuck = tl.where(
+        pos_has_observations,
+        tl.where(pos_is_stuck, prev_pos_stuck + 1.0, 0.0),
+        prev_pos_stuck,
+    )
     pos_should_reset = new_pos_stuck >= STUCK_LIMIT
     new_bias = tl.where(pos_should_reset, INIT_BIAS, updated_bias)
     tl.store(
