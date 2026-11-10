@@ -598,6 +598,23 @@ def test_plan_refuses_a_kv_cache_bound_behind_its_back(monkeypatch):
         decode.plan(torch.zeros(4), None)
 
 
+def test_plan_accepts_the_cache_rebound_at_another_block_count(monkeypatch):
+    """An extensible KV cache re-binds its views at the same addresses with the
+    final block count; any other change still needs prepare_kv."""
+    kv_key = SpecializedDecode._kv_key
+    decode = _decode(monkeypatch)
+    monkeypatch.setattr(SpecializedDecode, "_kv_key", kv_key)
+    pool = torch.zeros(8, 2, 3)
+    attn = SimpleNamespace(kv_cache=(None, pool))
+    decode.kda = [SimpleNamespace(layer=SimpleNamespace(self_attn=attn))]
+    decode._kv = decode._kv_key()
+    attn.kv_cache = (None, pool[:5])
+    assert decode.plan(torch.zeros(4), None) is not None
+    attn.kv_cache = (None, pool.view(8, 3, 2))
+    with pytest.raises(RuntimeError, match="without prepare_kv"):
+        decode.plan(torch.zeros(4), None)
+
+
 def test_weight_views_reject_every_mismatch():
     """weight_reasons names each layer whose weights the kernels cannot read as
     they are, and a MoE backend that lays them out otherwise."""
