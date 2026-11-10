@@ -112,6 +112,8 @@ class QSAIndexer(nn.Module):
             raise NotImplementedError("Qwen4Exp QSA currently requires BF16")
 
         self.layer_id = int(layer_id)
+        # Set by a replicated attention layer: sort the selected blocks per token.
+        self.canonical_topk_order = False
         self.index_n_heads = int(config.indexer_n_heads)
         self.index_kv_heads = int(config.indexer_kv_heads)
         self.index_head_dim = int(config.indexer_head_dim)
@@ -434,6 +436,12 @@ class QSAIndexer(nn.Module):
                 block_indices[prefill_slice],
                 compressed_metadata.max_seq_len,
             )
+        if self.canonical_topk_order:
+            # Replicated layer: the top-k kernel returns the same blocks in a
+            # rank-dependent order, and attention sums in index order.
+            top = torch.iinfo(block_indices.dtype).max
+            ordered = torch.where(block_indices < 0, top, block_indices).sort(-1)
+            block_indices = torch.where(ordered.values == top, -1, ordered.values)
         expand_qsa_block_indices(
             block_indices,
             compressed_metadata.logical_positions[:num_tokens],
