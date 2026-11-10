@@ -287,6 +287,34 @@ def test_hermes_streaming_multiple_tool_calls_with_stream_interval(
     args1 = "".join(tc.function.arguments or "" for tc in tool1)
     assert json.loads(args1) == {"q": "dogs"}
 
+@pytest.mark.parametrize("stream_interval", [1, 2, 4])
+def test_hermes_streaming_multiple_tool_calls_do_not_leak_into_content(
+    qwen_tokenizer: TokenizerLike,
+    any_chat_request: ChatCompletionRequest,
+    stream_interval: int,
+) -> None:
+    """Text between consecutive tool calls must stop at the next <tool_call>,
+    and trailing text after the final call must be preserved exactly once."""
+    text = (
+        '<tool_call>{"name": "search", "arguments": {"q": "cats"}}</tool_call>'
+        " and "
+        '<tool_call>{"name": "search", "arguments": {"q": "dogs"}}</tool_call>'
+        " done."
+    )
+    parser = Hermes2ProToolParser(qwen_tokenizer)
+    deltas = _simulate_streaming(
+        qwen_tokenizer, parser, any_chat_request, text, stream_interval
+    )
+
+    content = "".join(d.content for d in deltas if d.content)
+    assert content == " and  done."
+    assert "<tool_call>" not in content
+    assert "</tool_call>" not in content
+    assert "search" not in content
+    tool_calls = [tc for d in deltas if d.tool_calls for tc in d.tool_calls]
+    assert [tc.index for tc in tool_calls if tc.function.name] == [0, 1]
+
+
 
 @pytest.mark.parametrize("stream_interval", [2, 5])
 def test_hermes_streaming_boolean_args_with_stream_interval(

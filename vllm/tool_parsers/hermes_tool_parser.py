@@ -281,9 +281,16 @@ class Hermes2ProToolParser(ToolParser):
             # call, and trailing text as content).
             if last_complete_end is not None:
                 emit_from = max(last_complete_end, self._trailing_emitted_up_to)
-                if len(current_text) > emit_from:
-                    trailing = current_text[emit_from:]
-                    self._trailing_emitted_up_to = len(current_text)
+                # Stop at the next <tool_call> (or a partial one) so a
+                # following call's raw text isn't sent as content.
+                emit_to = current_text.find(self.tool_call_start_token, emit_from)
+                if emit_to == -1:
+                    emit_to = len(current_text) - partial_tag_overlap(
+                        current_text, self.tool_call_start_token
+                    )
+                if emit_to > emit_from:
+                    trailing = current_text[emit_from:emit_to]
+                    self._trailing_emitted_up_to = emit_to
                     content = content + trailing if content else trailing
 
             if content or tool_call_deltas:
