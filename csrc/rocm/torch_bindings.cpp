@@ -14,9 +14,10 @@
 TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
   // vLLM custom ops for rocm
 
-// skinny_gemms.cu (LLMM1/wvSplitK/wvSplitKrc/wvSplitKQ) is excluded on gfx1250
-// (gfx9/gfx11 ISA, unsupported there); skip these registrations to avoid
-// undefined symbols. vLLM uses default/Triton GEMM for these ops on gfx1250.
+// The skinny GEMM sources (LLMM1/wvSplitK/wvSplitKrc/wvSplitKQ,
+// csrc/rocm/skinny_gemms*.cu) are excluded on gfx1250 (gfx9/gfx11 ISA,
+// unsupported there); skip these registrations to avoid undefined symbols. vLLM
+// uses default/Triton GEMM for these ops on gfx1250.
 #ifndef VLLM_SKIP_SKINNY_GEMMS
   // Custom gemm op for matrix-vector multiplication
   rocm_ops.def(

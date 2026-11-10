@@ -52,7 +52,6 @@ from vllm.model_executor.layers.quantization.utils.gptq_utils import (
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     check_moe_marlin_supports_layer,
-    get_marlin_input_dtype,
     marlin_repeat_scales_on_all_ranks,
     verify_marlin_supported,
 )
@@ -262,7 +261,6 @@ class AutoGPTQConfig(QuantizationConfig):
             )
             if moe_quant_method is None:
                 return None
-            moe_quant_method.input_dtype = get_marlin_input_dtype(prefix)
             return moe_quant_method
 
         quant_method = get_linear_quant_method(
@@ -270,7 +268,6 @@ class AutoGPTQConfig(QuantizationConfig):
         )
         if quant_method is None:
             return None
-        quant_method.input_dtype = get_marlin_input_dtype(prefix)
         return quant_method
 
     def apply_vllm_mapper(self, hf_to_vllm_mapper):
@@ -319,7 +316,6 @@ class AutoGPTQLinearMethod(LinearMethodBase):
 
     def __init__(self, quant_config: AutoGPTQConfig) -> None:
         self.quant_config = quant_config
-        self.input_dtype = None
         self.quant_type = self.quant_config.quant_type
         # The Marlin GEMM picks its tiling and K-split from the number of
         # tokens, so its results depend on the batch size. In batch-invariant
@@ -353,7 +349,6 @@ class AutoGPTQLinearMethod(LinearMethodBase):
         output_size_per_partition = sum(output_partition_sizes)
         is_row_parallel = input_size != input_size_per_partition
         weight_loader = extra_weight_attrs.get("weight_loader")
-        input_dtype = self.input_dtype
 
         mp_linear_kernel_config = MPLinearLayerConfig(
             full_weight_shape=(input_size, output_size),
@@ -362,7 +357,7 @@ class AutoGPTQLinearMethod(LinearMethodBase):
                 output_size_per_partition,
             ),
             weight_type=self.quant_config.quant_type,
-            act_type=params_dtype if input_dtype is None else input_dtype,
+            act_type=params_dtype,
             group_size=self.quant_config.group_size,
             zero_points=False,
         )
@@ -523,7 +518,6 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
             scale = kInt8StaticGroupScale
         else:
             raise ValueError("AutoGPTQMoEMethod only supports int4 and int8 now.")
-        self.input_dtype = None
         self.use_marlin = True
         weight_key = QuantKey(quant_type, scale)
 
@@ -545,14 +539,6 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
         params_dtype: torch.dtype,
         **extra_weight_attrs,
     ):
-        layer.input_dtype = self.input_dtype
-        is_a_8bit = self.input_dtype is not None and self.input_dtype.itemsize == 1
-
-        if is_a_8bit:
-            assert self.quant_config.quant_type.size_bits == 8, (
-                "W8A8-INT8 is not supported by marlin kernel."
-            )
-
         if self.quant_config.group_size != -1:
             scales_size13 = hidden_size // self.quant_config.group_size
             w2_scales_size = intermediate_size_per_partition
@@ -669,12 +655,6 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
                     name, torch.nn.Parameter(val, requires_grad=False)
                 )
 
-        is_a_8bit = self.input_dtype is not None and self.input_dtype.itemsize == 1
-
-        assert not is_a_8bit or self.quant_config.quant_type.size_bits == 8, (
-            "W8A8-INT8 is not supported by marlin kernel."
-        )
-
         w13_bias = getattr(layer, "w13_bias", None)
         if "w13_bias" not in layer._loaded_expert_biases:
             layer.register_parameter("w13_bias", None)
@@ -700,7 +680,6 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
             backend=self.wna16_moe_backend,
             layer=layer,
             quant_config=self.quant_config,
-            input_dtype=self.input_dtype,
             w13=w13,
             w2=w2,
             w13_scale=w13_scale,
@@ -723,8 +702,6 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
             w2_scale,
             w13_qzeros,
             w2_qzeros,
-            w13_input_global_scale,
-            w2_input_global_scale,
             w13_bias,
             w2_bias,
         ) = converted
@@ -733,8 +710,6 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
         replace_parameter(layer, "w2_qweight", w2)
         replace_parameter(layer, "w13_scales", w13_scale)
         replace_parameter(layer, "w2_scales", w2_scale)
-        replace_or_register("w13_input_global_scale", w13_input_global_scale)
-        replace_or_register("w2_input_global_scale", w2_input_global_scale)
         replace_or_register("w13_bias", w13_bias)
         replace_or_register("w2_bias", w2_bias)
         replace_or_register("w13_qzeros", w13_qzeros)

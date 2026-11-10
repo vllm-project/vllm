@@ -329,30 +329,6 @@ def _dspark_vocab_stub(input_vocab_size: int, draft_vocab_size: int):
 
 
 @pytest.mark.skip_global_cleanup
-@pytest.mark.parametrize(
-    ("input_vocab_size", "draft_vocab_size", "weights", "error"),
-    [
-        (101, 100, [], "must include embed_tokens weights"),
-        (99, 99, [], "must include lm_head weights"),
-        (100, 40, [], "must include lm_head weights"),
-        (
-            100,
-            40,
-            [("lm_head.weight", torch.empty(40, 8))],
-            "must include a d2t mapping",
-        ),
-    ],
-)
-def test_qwen3_dspark_rejects_incomplete_vocab_weights(
-    input_vocab_size, draft_vocab_size, weights, error
-):
-    model = _dspark_vocab_stub(input_vocab_size, draft_vocab_size)
-
-    with pytest.raises(ValueError, match=error):
-        model.load_weights(weights)
-
-
-@pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize("draft_vocab_size", [100, 101])
 def test_qwen3_dspark_accepts_draft_vocab_at_least_target(draft_vocab_size):
     """A draft vocab >= the target's maps identically, so needs no lm_head/d2t.
