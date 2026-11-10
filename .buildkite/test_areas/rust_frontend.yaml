@@ -265,11 +265,12 @@ steps:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   # The Rust frontend serves the stateless Responses API only, so test_stateful.py (store,
   # background, previous_response_id) does not apply. It rejects output logprobs and
-  # enable_response_messages with a 400, and namespace tools at deserialization; the
-  # tool-server and gpt-oss Harmony tests (test_parsable_context.py, test_harmony.py,
-  # test_mcp_tools.py) need flags and models it does not support.
+  # enable_response_messages with a 400; the tool-server and gpt-oss Harmony tests
+  # (test_parsable_context.py, test_harmony.py, test_mcp_tools.py) need flags and models
+  # it does not support.
   - pytest -v -s entrypoints/openai/responses/test_basic.py -k "not test_logprobs"
   - pytest -v -s entrypoints/openai/responses/test_function_call.py
+  - pytest -v -s entrypoints/openai/responses/test_namespace_tool_separator.py
   - pytest -v -s entrypoints/openai/responses/test_structured_output.py
   - pytest -v -s entrypoints/openai/responses/test_simple.py -k "not enable_response_messages and not streaming_logprobs"
   mirror:
