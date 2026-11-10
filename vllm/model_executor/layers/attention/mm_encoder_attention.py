@@ -134,6 +134,7 @@ def _maybe_save_fp8_scales(
     _fp8_saved_scale_refs[layer_name] = (q_scale, k_scale, v_scale)
     # All layers record once per encoder forward, so they wrap in the same
     # forward; save once, at the last layer, when every window is complete.
+    # This assumes the last-registered layer is also the last one executed.
     if not buffer_wrapped or layer_name != next(reversed(_fp8_saved_scale_refs)):
         return
 
@@ -443,6 +444,8 @@ class MMEncoderAttention(CustomOp):
             # padded output columns are sliced off. Opt-in: it is validated
             # only on gfx950 with head_dim 80; gfx942 and other head_dims
             # (padding 64 or 72 to 128 nearly doubles the work) are not.
+            # It loses on small images (break-even about 5k patches per pass)
+            # and goes away once AITER has a native head_dim-80 asm kernel.
             if envs.VLLM_ROCM_VIT_FP8_PAD_HEAD_DIM == 128:
                 if self.head_size <= 128:
                     self._fp8_pad_to = 128
