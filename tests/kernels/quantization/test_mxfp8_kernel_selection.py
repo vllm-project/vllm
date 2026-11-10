@@ -186,7 +186,6 @@ def _patch_rocm_gfx950(linear_backend: str = "auto"):
 def test_rocm_mxfp8_aiter_flydsl_claims_only_tuned_shapes(monkeypatch, linear_backend):
     """AITER takes the tuned (N, K); an untuned one falls through to the
     Triton kernel, including under --linear-backend=aiter."""
-    monkeypatch.delenv("VLLM_ROCM_MINIMAX_M3_MONO", raising=False)
     with _patch_rocm_gfx950(linear_backend) as (aiter_cls, triton_cls):
         tuned = init_mxfp8_linear_kernel(weight_shape=_AITER_FLYDSL_TUNED_SHAPE)
         untuned = init_mxfp8_linear_kernel(weight_shape=_AITER_FLYDSL_UNTUNED_SHAPE)
@@ -194,18 +193,14 @@ def test_rocm_mxfp8_aiter_flydsl_claims_only_tuned_shapes(monkeypatch, linear_ba
     assert type(untuned) is triton_cls
 
 
-@pytest.mark.parametrize(
-    "env", ["VLLM_ROCM_MINIMAX_M3_MONO", "VLLM_BATCH_INVARIANT"], ids=str
-)
-def test_rocm_mxfp8_aiter_flydsl_steps_aside_under_env(monkeypatch, env):
-    monkeypatch.setenv(env, "1")
+def test_rocm_mxfp8_aiter_flydsl_off_under_batch_invariance(monkeypatch):
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
     with _patch_rocm_gfx950() as (_, triton_cls):
         kernel = init_mxfp8_linear_kernel(weight_shape=_AITER_FLYDSL_TUNED_SHAPE)
     assert type(kernel) is triton_cls
 
 
 def test_rocm_mxfp8_aiter_flydsl_rejects_non_bf16_and_bmm(monkeypatch):
-    monkeypatch.delenv("VLLM_ROCM_MINIMAX_M3_MONO", raising=False)
     with _patch_rocm_gfx950() as (aiter_cls, triton_cls):
         bmm = Mxfp8LinearLayerConfig(
             weight_shape=_AITER_FLYDSL_TUNED_SHAPE, bmm_batch_size=2

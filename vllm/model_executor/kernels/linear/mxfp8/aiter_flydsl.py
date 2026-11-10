@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import os
-
 import torch
 
 import vllm.envs as envs
@@ -48,11 +46,6 @@ class AiterFlyDSLMxfp8LinearKernel(Mxfp8LinearKernel):
             return False, "tuned buckets use split K; not batch invariant"
         if not rocm_aiter_ops.is_linear_enabled():
             return False, "AITER linear is disabled or not supported"
-        # MiniMax-M3 mono decode re-tiles the MXFP8 QKV, output and separate
-        # shared-expert weights from the row-major layout; only the shared
-        # experts check for preshuffled weights.
-        if os.getenv("VLLM_ROCM_MINIMAX_M3_MONO", "0") in ("1", "true", "True"):
-            return False, "VLLM_ROCM_MINIMAX_M3_MONO needs row-major MXFP8 weights"
         return True, None
 
     @classmethod
@@ -120,3 +113,20 @@ class AiterFlyDSLMxfp8LinearKernel(Mxfp8LinearKernel):
         if bias is not None:
             out = out + bias
         return out
+
+
+def row_major_weight(layer: torch.nn.Module) -> torch.Tensor:
+    """`layer`'s fp8 weight as row-major [N, K], for code that reads MXFP8
+    linear weights directly: a copy without the (16, 16) shuffle when
+    `AiterFlyDSLMxfp8LinearKernel` runs the layer, else the weight itself."""
+    # Quark keeps the kernel on the layer's scheme, ModelOpt on the method.
+    kernel = getattr(getattr(layer, "scheme", None), "ocp_mx_linear", None)
+    if kernel is None:
+        kernel = getattr(getattr(layer, "quant_method", None), "kernel", None)
+    w = layer.weight.data
+    if not isinstance(kernel, AiterFlyDSLMxfp8LinearKernel):
+        return w
+    # Inverse of aiter's shuffle_weight(layout=(16, 16)) on 1-byte elements:
+    # [N/16, 16, K/32, 2, 16] was stored as [N/16, K/32, 2, 16, 16].
+    n, k = w.shape
+    return w.view(n // 16, k // 32, 2, 16, 16).permute(0, 3, 1, 2, 4).reshape(n, k)

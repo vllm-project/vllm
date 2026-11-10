@@ -879,7 +879,6 @@ def aiter_flydsl_mxfp8_linear(monkeypatch):
     from vllm._aiter_ops import rocm_aiter_ops
 
     monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
-    monkeypatch.delenv("VLLM_ROCM_MINIMAX_M3_MONO", raising=False)
     rocm_aiter_ops.refresh_env_variables()
     monkeypatch.setattr(
         rocm_aiter_ops, "is_mxfp8_bpreshuffle_gemm_tuned", lambda n, k: True
@@ -936,6 +935,61 @@ def test_fused_mxfp8_inputs_on_aiter_flydsl_kernel(
     ref = scheme.apply_weights(layer, normed)
     assert got.shape == ref.shape == (m, n)
     assert torch.equal(got, ref)
+
+
+@requires_gfx950
+@pytest.mark.parametrize("n,k", [(2560, 6144), (6144, 2048), (1536, 6144), (6144, 768)])
+@torch.inference_mode()
+def test_mono_weights_same_on_aiter_flydsl_kernel(dist_init, monkeypatch, n, k):
+    """The mono kernels' weight copies are the same whether the linear runs on
+    the Triton kernel (row-major weight) or the AITER FlyDSL one (preshuffled)."""
+    pytest.importorskip("aiter.ops.flydsl.batched_gemm_a8w8")
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.model_executor.kernels.linear.mxfp8.aiter_flydsl import (
+        AiterFlyDSLMxfp8LinearKernel,
+    )
+    from vllm.model_executor.kernels.linear.mxfp8.rocm_native import (
+        RocmDotScaledMxfp8LinearKernel,
+    )
+    from vllm.models.minimax_m3.amd.mono.weights import (
+        _ptpc_fp8_from_mxfp8,
+        mxfp8_a_tiles,
+    )
+
+    def _processed(aiter: bool):
+        monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1" if aiter else "0")
+        rocm_aiter_ops.refresh_env_variables()
+        monkeypatch.setattr(
+            rocm_aiter_ops, "is_mxfp8_bpreshuffle_gemm_tuned", lambda n, k: aiter
+        )
+        prev_dtype = torch.get_default_dtype()
+        torch.set_default_dtype(torch.bfloat16)
+        try:
+            layer, scheme = _quark_mxfp8_linear(n, k)
+        finally:
+            torch.set_default_dtype(prev_dtype)
+        scheme.process_weights_after_loading(layer)
+        return layer, scheme.ocp_mx_linear
+
+    try:
+        aiter_layer, aiter_kernel = _processed(True)
+        triton_layer, triton_kernel = _processed(False)
+    finally:
+        monkeypatch.undo()
+        rocm_aiter_ops.refresh_env_variables()
+    assert isinstance(aiter_kernel, AiterFlyDSLMxfp8LinearKernel)
+    assert isinstance(triton_kernel, RocmDotScaledMxfp8LinearKernel)
+
+    def _bytes(ts):
+        return [t.contiguous().view(torch.uint8) for t in ts]
+
+    got = _ptpc_fp8_from_mxfp8(aiter_layer, n, k, "aiter")
+    ref = _ptpc_fp8_from_mxfp8(triton_layer, n, k, "triton")
+    assert all(torch.equal(a, b) for a, b in zip(_bytes(got), _bytes(ref)))
+    if k % 256 == 0:
+        got = mxfp8_a_tiles(aiter_layer, n, k, "aiter")
+        ref = mxfp8_a_tiles(triton_layer, n, k, "triton")
+        assert all(torch.equal(a, b) for a, b in zip(_bytes(got), _bytes(ref)))
 
 
 @requires_gfx950

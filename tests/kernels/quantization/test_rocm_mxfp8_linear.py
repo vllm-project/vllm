@@ -719,7 +719,6 @@ def aiter_flydsl_mxfp8_kernel(monkeypatch):
     )
 
     monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
-    monkeypatch.delenv("VLLM_ROCM_MINIMAX_M3_MONO", raising=False)
     rocm_aiter_ops.refresh_env_variables()
     monkeypatch.setattr(
         rocm_aiter_ops, "is_mxfp8_bpreshuffle_gemm_tuned", lambda n, k: True
@@ -786,3 +785,29 @@ def test_aiter_flydsl_mxfp8_linear_cuda_graph_replay(aiter_flydsl_mxfp8_kernel):
     graph.replay()
     assert torch.equal(captured, kernel.apply_weights(layer, x))
     assert not torch.equal(captured, eager)
+
+
+@torch.inference_mode()
+def test_aiter_flydsl_mxfp8_row_major_weight(aiter_flydsl_mxfp8_kernel):
+    """`row_major_weight` undoes the kernel's (16, 16) preshuffle, and returns
+    the weight as is for a layer the Triton kernel runs."""
+    from types import SimpleNamespace
+
+    from vllm.model_executor.kernels.linear.mxfp8.aiter_flydsl import (
+        row_major_weight,
+    )
+
+    n, k = 2560, 6144
+    layer = _make_layer(n, k, "cuda")
+    w = layer.weight.data.clone()
+    kernel = aiter_flydsl_mxfp8_kernel(Mxfp8LinearLayerConfig(weight_shape=(n, k)))
+    layer.quant_method = SimpleNamespace(kernel=kernel)
+    kernel.process_weights_after_loading(layer)
+    assert not torch.equal(layer.weight.view(torch.uint8), w.view(torch.uint8))
+    assert torch.equal(row_major_weight(layer).view(torch.uint8), w.view(torch.uint8))
+
+    triton_layer = _make_layer(n, k, "cuda")
+    triton = RocmDotScaledMxfp8LinearKernel(Mxfp8LinearLayerConfig(weight_shape=(n, k)))
+    triton_layer.quant_method = SimpleNamespace(kernel=triton)
+    triton.process_weights_after_loading(triton_layer)
+    assert row_major_weight(triton_layer).data_ptr() == triton_layer.weight.data_ptr()
