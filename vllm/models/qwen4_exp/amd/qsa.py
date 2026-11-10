@@ -117,7 +117,7 @@ _QSA_CACHE_DTYPES: tuple[CacheDType, ...] = (
 class Qwen4ExpQSABackend(AttentionBackend):
     """FullAttentionSpec backend used by the merged QSA owner.
 
-    With an Octave ``kv_cache_dtype`` the main K/V cache holds one packed
+    With an Octave `kv_cache_dtype` the main K/V cache holds one packed
     Octave slot per (token, KV head) and sparse attention runs the Octave
     sparse decode kernel over the selected positions.
     """
@@ -535,6 +535,10 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
         if self.layer_name in static_context:
             raise ValueError(f"Duplicate layer name: {self.layer_name}")
         static_context[self.layer_name] = self
+
+    def process_weights_after_loading(self) -> None:
+        self._k_scale_float = self._k_scale.item()
+        self._v_scale_float = self._v_scale.item()
 
     def get_attn_backend(self) -> type[AttentionBackend]:
         return self.attn_backend
