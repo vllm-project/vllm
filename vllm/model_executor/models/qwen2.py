@@ -244,6 +244,15 @@ class Qwen2DecoderLayer(nn.Module):
         prefix: str = "",
     ) -> None:
         super().__init__()
+        # Every layer gets the global sliding window, so it can't be per layer
+        if len(set(getattr(config, "layer_types", []))) > 1:
+            assert config.max_window_layers == config.num_hidden_layers, (
+                "Sliding window for some but all layers is not supported. "
+                "This model uses sliding window but `max_window_layers` = "
+                f"{config.max_window_layers} is less than `num_hidden_layers` = "
+                f"{config.num_hidden_layers}. Please open an issue "
+                "to discuss this feature."
+            )
         self.hidden_size = config.hidden_size
         set_default_rope_theta(config, default_theta=1000000)
         dual_chunk_attention_config = getattr(
@@ -333,11 +342,6 @@ class Qwen2Model(nn.Module, EagleModelMixin):
         }
     )
     supports_aux_hidden_states_over_pp = True
-    # Whether the decoder layers apply each layer's sliding window themselves
-    # (via `per_layer_sliding_window`). Qwen2DecoderLayer does not, so models
-    # mixing sliding and full attention layers are rejected unless a subclass
-    # sets this.
-    supports_per_layer_sliding_window = False
 
     def __init__(
         self,
@@ -351,19 +355,6 @@ class Qwen2Model(nn.Module, EagleModelMixin):
         config = vllm_config.model_config.hf_config.get_text_config()
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
-
-        # TODO (@robertgshaw2): see if this can be moved out
-        if (
-            not self.supports_per_layer_sliding_window
-            and len(set(getattr(config, "layer_types", []))) > 1
-        ):
-            assert config.max_window_layers == config.num_hidden_layers, (
-                "Sliding window for some but all layers is not supported. "
-                "This model uses sliding window but `max_window_layers` = "
-                f"{config.max_window_layers} is less than `num_hidden_layers` = "
-                f"{config.num_hidden_layers}. Please open an issue "
-                "to discuss this feature."
-            )
 
         self.config = config
         self.quant_config = quant_config

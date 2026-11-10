@@ -215,9 +215,6 @@ class DomynEdgeDecoderLayer(nn.Module):
     }
 )
 class DomynEdgeModel(Qwen2Model):
-    # DomynEdgeAttention takes its window from `config.window_sizes`.
-    supports_per_layer_sliding_window = True
-
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(
             vllm_config=vllm_config,
