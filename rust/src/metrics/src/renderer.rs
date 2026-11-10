@@ -23,6 +23,7 @@ fn request_render_duration_histogram() -> Histogram {
 pub enum RenderRequestType {
     Chat,
     Completion,
+    Responses,
 }
 
 impl EncodeLabelValue for RenderRequestType {
@@ -30,6 +31,7 @@ impl EncodeLabelValue for RenderRequestType {
         let value = match self {
             Self::Chat => "chat",
             Self::Completion => "completion",
+            Self::Responses => "responses",
         };
         EncodeLabelValue::encode(&value, encoder)
     }

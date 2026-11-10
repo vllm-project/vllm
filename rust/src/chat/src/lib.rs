@@ -490,7 +490,17 @@ impl ChatLlm {
 
     /// Render, tokenize, and submit one chat request.
     pub async fn chat(&self, request: ChatRequest) -> Result<ChatEventStream> {
-        let mut streams = self.chat_n(request, NonZeroU32::MIN).await?;
+        self.chat_as(request, RenderRequestType::Chat).await
+    }
+
+    /// Like [`Self::chat`], but records the render duration under
+    /// `request_type`.
+    pub async fn chat_as(
+        &self,
+        request: ChatRequest,
+        request_type: RenderRequestType,
+    ) -> Result<ChatEventStream> {
+        let mut streams = self.chat_n_as(request, NonZeroU32::MIN, request_type).await?;
         Ok(streams.pop().expect("one event stream per sample"))
     }
 
@@ -500,6 +510,15 @@ impl ChatLlm {
         &self,
         request: ChatRequest,
         n: NonZeroU32,
+    ) -> Result<Vec<ChatEventStream>> {
+        self.chat_n_as(request, n, RenderRequestType::Chat).await
+    }
+
+    async fn chat_n_as(
+        &self,
+        request: ChatRequest,
+        n: NonZeroU32,
+        request_type: RenderRequestType,
     ) -> Result<Vec<ChatEventStream>> {
         // Like Python's `render_chat`, record successful renders: templating,
         // multimodal preprocessing, and tokenization.
@@ -511,7 +530,7 @@ impl ChatLlm {
         } = self.processor.prepare(request, n, self.text.request_processor()).await?;
         METRICS.renderer.observe_request_render_duration(
             self.served_model_name(),
-            RenderRequestType::Chat,
+            request_type,
             render_start.elapsed(),
         );
         let request_id = text_request.request_id.clone();

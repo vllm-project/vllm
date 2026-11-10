@@ -3485,7 +3485,6 @@ async fn request_metrics_use_served_model_name_label() {
     assert_eq!(response.status(), StatusCode::OK);
     let _ = to_bytes(response.into_body(), usize::MAX).await.unwrap();
 
-    // Responses renders through the chat renderer, so it counts as `chat`.
     let response = app
         .call(
             Request::builder()
@@ -3517,7 +3516,7 @@ async fn request_metrics_use_served_model_name_label() {
         ),
         3.0
     );
-    for (request_type, count) in [("chat", 2.0), ("completion", 1.0)] {
+    for (request_type, count) in [("chat", 1.0), ("completion", 1.0), ("responses", 1.0)] {
         assert_eq!(
             metric_delta(
                 &before,
