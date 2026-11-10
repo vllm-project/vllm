@@ -1,6 +1,6 @@
 #pragma once
 
-#include "../../../../attention/attention_dtypes.h"
+#include "core/vec_dtypes/vec_dtypes.h"
 #include <torch/headeronly/core/ScalarType.h>
 #include <assert.h>
 #include <float.h>
@@ -243,7 +243,7 @@ __inline__ __device__ uint8_t scaled_vec_conversion<uint8_t, __nv_bfloat16>(
 }
 
 // torch stable-ABI (headeronly) scalar types delegate to the CUDA-native
-// conversions, so libtorch_stable kernels dispatched on c10::BFloat16 /
+// conversions, so stable-ABI kernels dispatched on c10::BFloat16 /
 // c10::Half quantize correctly without manual casts.
 template <>
 __inline__ __device__ uint8_t scaled_vec_conversion<uint8_t, c10::BFloat16>(
@@ -281,19 +281,6 @@ __inline__ __device__ float4 scaled_vec_conversion<float4, uint32_t>(
   return res;
 }
   #endif  // ENABLE_FP8
-
-template <typename Tout, typename Tin, Fp8KVCacheDataType kv_dt>
-__inline__ __device__ Tout convert(const Tin& x) {
-  #if 0  // Disable the following code to reduce the binary size.
-  if constexpr (kv_dt == Fp8KVCacheDataType::kFp8E4M3) {
-    return vec_conversion<Tout, Tin>(x, __NV_E4M3);
-  } else if constexpr (kv_dt == Fp8KVCacheDataType::kFp8E5M2) {
-    return vec_conversion<Tout, Tin>(x, __NV_E5M2);
-  }
-  #endif
-  assert(false);
-  __builtin_unreachable();  // Suppress missing return statement warning
-}
 
 template <typename Tout, typename Tin, Fp8KVCacheDataType kv_dt>
 __inline__ __device__ Tout scaled_convert(const Tin& x, const float scale) {

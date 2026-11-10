@@ -2,10 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Unit tests for renderer-level token-offset behavior.
 
-These exercise ``_tokenize_prompt`` (offset extraction + capability/MM
-gating) and the ``_tokenize_prompt -> _process_tokens -> TokensInput``
+These exercise `_tokenize_prompt` (offset extraction + capability/MM
+gating) and the `_tokenize_prompt -> _process_tokens -> TokensInput`
 forwarding chain. Endpoint-level coverage lives in
-``tests/entrypoints/scale_out/render/test_render.py``.
+`tests/entrypoints/scale_out/render/test_render.py`.
 """
 
 import asyncio
@@ -20,13 +20,13 @@ def fast_tokenizer():
     """gpt2 ships a Fast tokenizer; use it to test the offsets happy path."""
     from transformers import AutoTokenizer
 
-    return AutoTokenizer.from_pretrained("openai-community/gpt2", use_fast=True)
+    return AutoTokenizer.from_pretrained("openai-community/gpt2")
 
 
 def _make_base_renderer_with(tokenizer):
     """Build a minimal BaseRenderer subclass that exposes the tokenizer so we
-    can call ``_tokenize_prompt`` directly. BaseRenderer is abstract because of
-    ``render_messages``; we just need a stub."""
+    can call `_tokenize_prompt` directly. BaseRenderer is abstract because of
+    `render_messages`; we just need a stub."""
     from vllm.renderers.base import BaseRenderer
 
     class _StubRenderer(BaseRenderer):
@@ -89,7 +89,7 @@ class TestTokenizePromptOffsets:
             assert 0 <= s <= e <= text_len
 
     def test_base_renderer_without_override_yields_no_offsets(self, fast_tokenizer):
-        """A renderer that does not override ``_can_produce_offsets`` never
+        """A renderer that does not override `_can_produce_offsets` never
         emits offsets, even with a fast tokenizer and the flag set. This locks
         in the base-default-False / subclass-override design."""
         from vllm.renderers.base import BaseRenderer
@@ -170,9 +170,9 @@ class TestTokenizePromptOffsets:
 
 
 class TestProcessTokensForwardsOffsets:
-    """Tests that the ``_tokenize_prompt -> _process_tokens -> TokensInput``
-    chain carries ``prompt_token_offsets`` through to the engine input.
-    ``_process_tokens`` rebuilds the engine input from scratch, so it must
+    """Tests that the `_tokenize_prompt -> _process_tokens -> TokensInput`
+    chain carries `prompt_token_offsets` through to the engine input.
+    `_process_tokens` rebuilds the engine input from scratch, so it must
     copy the field explicitly. The sync and async variants are independent
     implementations, so both are checked.
     """
@@ -217,9 +217,9 @@ class TestProcessTokensForwardsOffsets:
 
 
 class TestTruncationKeepsOffsetsAligned:
-    """``prompt_token_offsets`` runs parallel to ``prompt_token_ids``, and both
-    ``TokensPrompt`` and the render API's ``GenerateRequest`` document that the
-    two have equal length. Only ``prompt_token_ids`` was being truncated.
+    """`prompt_token_offsets` runs parallel to `prompt_token_ids`, and both
+    `TokensPrompt` and the render API's `GenerateRequest` document that the
+    two have equal length. Only `prompt_token_ids` was being truncated.
     """
 
     @pytest.mark.parametrize("side", ["left", "right"])

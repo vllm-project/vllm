@@ -8,6 +8,7 @@ import errno
 import mmap
 import os
 import uuid
+from collections.abc import Iterator
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -30,7 +31,7 @@ def _make_region(num_blocks: int = 8, block_size_bytes: int = 64) -> ECSharedReg
 
 
 @pytest.fixture
-def region() -> ECSharedRegion:
+def region() -> Iterator[ECSharedRegion]:
     r = _make_region()
     yield r
     r.cleanup()
@@ -97,10 +98,9 @@ def test_second_instance_opens_existing_file_and_shares_memory():
         r1.cleanup()
 
 
-def test_dense_dp_engines_get_distinct_regions(monkeypatch):
+def test_dense_dp_engines_get_distinct_regions():
     """Dense DP engines reset data_parallel_rank to 0 but share instance_id,
     so the region must be keyed by data_parallel_index."""
-    monkeypatch.setattr(common, "_get_encoder_cache_hidden_dim", lambda cfg: 8)
     instance_id = str(uuid.uuid4())
     regions = []
     try:
@@ -113,6 +113,7 @@ def test_dense_dp_engines_get_distinct_regions(monkeypatch):
             cfg.instance_id = instance_id
             cfg.parallel_config = parallel_config
             cfg.model_config.dtype = torch.float16
+            cfg.model_config.get_inputs_embeds_size.return_value = 8
             cfg.ec_transfer_config.ec_connector_extra_config = {"ec_cpu_bytes": 64}
             regions.append(common.create_ec_shared_region(cfg))
 

@@ -10,16 +10,18 @@ from tests.tool_parsers.common_tests import (
     ToolParserTestConfig,
     ToolParserTests,
 )
+from tests.tool_parsers.utils import run_tool_extraction_streaming
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.internlm2_tool_parser import Internlm2ToolParser
 
 
 class TestInternLM2ToolParser(ToolParserTests):
     @pytest.fixture
-    def tokenizer(self, default_tokenizer: TokenizerLike) -> TokenizerLike:
+    def tokenizer(
+        self, default_tokenizer: TokenizerLike, monkeypatch: pytest.MonkeyPatch
+    ) -> TokenizerLike:
         """Add some internlm2 specific tokens to the default vocab."""
         tokenizer_vocab = default_tokenizer.get_vocab()
-        default_tokenizer.get_vocab = MagicMock()
         tokenizer_vocab.update(
             {
                 "<|action_start|>": 92540,
@@ -27,7 +29,9 @@ class TestInternLM2ToolParser(ToolParserTests):
                 "<|action_end|>": 92542,
             }
         )
-        default_tokenizer.get_vocab.return_value = tokenizer_vocab
+        monkeypatch.setattr(
+            default_tokenizer, "get_vocab", MagicMock(return_value=tokenizer_vocab)
+        )
         return default_tokenizer
 
     @pytest.fixture
@@ -123,10 +127,11 @@ class TestInternLM2ToolParser(ToolParserTests):
         )
 
 
-def test_streaming_arguments_in_single_delta(default_tokenizer: TokenizerLike) -> None:
+def test_streaming_arguments_in_single_delta(
+    default_tokenizer: TokenizerLike, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Arguments arriving whole in one delta must not be dropped."""
     tokenizer_vocab = default_tokenizer.get_vocab()
-    default_tokenizer.get_vocab = MagicMock()
     tokenizer_vocab.update(
         {
             "<|action_start|>": 92540,
@@ -134,7 +139,9 @@ def test_streaming_arguments_in_single_delta(default_tokenizer: TokenizerLike) -
             "<|action_end|>": 92542,
         }
     )
-    default_tokenizer.get_vocab.return_value = tokenizer_vocab
+    monkeypatch.setattr(
+        default_tokenizer, "get_vocab", MagicMock(return_value=tokenizer_vocab)
+    )
     parser = Internlm2ToolParser(default_tokenizer)
 
     deltas = [
@@ -157,8 +164,36 @@ def test_streaming_arguments_in_single_delta(default_tokenizer: TokenizerLike) -
             request=None,
         )
         if delta_message and delta_message.tool_calls:
+            assert delta_message.tool_calls[0].function is not None
             arguments = delta_message.tool_calls[0].function.arguments
             if arguments:
                 streamed += arguments
 
     assert json.loads(streamed) == {"city": "Dallas", "state": "TX"}
+
+
+@pytest.mark.parametrize(
+    "arguments_deltas",
+    [
+        ['{"location": "Beijing', '", "days": 3}}<|action_end|>'],
+        [*'{"location": "Beijing", "days": 3}}', "<|action_end|>"],
+    ],
+    ids=["split_inside_string", "char_by_char"],
+)
+def test_streaming_arguments_match_final_arguments(
+    default_tokenizer: TokenizerLike, arguments_deltas: list[str]
+) -> None:
+    """Streamed argument deltas must add up to the final arguments, wherever
+    the chunk boundaries fall."""
+    parser = Internlm2ToolParser(default_tokenizer)
+    deltas = [
+        '<|action_start|><|plugin|>{"name": "get_weather", "parameters": ',
+        *arguments_deltas,
+    ]
+
+    reconstructor = run_tool_extraction_streaming(parser, deltas)
+
+    assert len(reconstructor.tool_calls) == 1
+    streamed = reconstructor.tool_calls[0].function.arguments
+    streamed += parser.get_remaining_unstreamed_args()
+    assert streamed == '{"location": "Beijing", "days": 3}'

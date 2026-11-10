@@ -7,7 +7,6 @@ from typing import Any
 
 import regex as re
 
-from vllm.entrypoints.chat_utils import make_tool_call_id
 from vllm.entrypoints.generate.base.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
@@ -21,6 +20,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionToolsParam,
 )
 from vllm.logger import init_logger
+from vllm.renderers.chat_utils import make_tool_call_id
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import Tool, ToolParser
 from vllm.tool_parsers.utils import is_complete_json, partial_tag_overlap
@@ -31,7 +31,7 @@ logger = init_logger(__name__)
 class DotsToolParser(ToolParser):
     """Parse Dots tool calls in their XML wrapper format.
 
-    The canonical body contains one or more ``invoke`` elements::
+    The canonical body contains one or more `invoke` elements::
 
         <dots_function_call>
         <invoke name="search">
@@ -39,7 +39,7 @@ class DotsToolParser(ToolParser):
         </invoke>
         </dots_function_call>
 
-    A JSON object with ``name`` and ``arguments`` is also accepted as a
+    A JSON object with `name` and `arguments` is also accepted as a
     fallback. Multiple wrapper blocks and multiple invokes per block are
     supported.
     """

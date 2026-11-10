@@ -7,13 +7,13 @@ Architecture notes:
   * LLM backbone is plain Qwen3-8B with 1-D position_ids (no M-RoPE).
   * Vision tower removes the CLS token (no class_embedding/class_pos_emb).
   * Vision RoPE is 3-D (T:H:W) with a 4:6:6 head_dim split and uses
-    ``patch_positions`` instead of grid_thw to compute per-token freqs.
-  * ``rotate_half`` is *interleaved* (``(::2, 1::2)``) rather than
+    `patch_positions` instead of grid_thw to compute per-token freqs.
+  * `rotate_half` is *interleaved* (`(::2, 1::2)`) rather than
     split-half.
-  * Vision attention uses windowed ``cu_seqlens`` (``frame_windows_size``
+  * Vision attention uses windowed `cu_seqlens` (`frame_windows_size`
     in T-dim); two backends implemented (SDPA + flash_attn varlen).
-  * ``patch_positions: [total_patches, 3]`` is plumbed as a first-class
-    MM kwarg alongside ``pixel_values`` / ``image_grid_thw``.
+  * `patch_positions: [total_patches, 3]` is plumbed as a first-class
+    MM kwarg alongside `pixel_values` / `image_grid_thw`.
   * Video frame-backend and codec-backend both alias to the image path
     inside the HF processor, so the model implements a single visual
     code path.
@@ -207,21 +207,21 @@ def _pack_timestamps(per_video: list[list[float]]) -> torch.Tensor:
 
 
 def _validate_video_source(path: str, model_config) -> str:
-    """Confine a codec video path to ``--allowed-local-media-path``.
+    """Confine a codec video path to `--allowed-local-media-path`.
 
     The codec backend keeps the raw path string alive past vLLM's
-    ``MultiModalDataParser`` and hands it to the trust-remote-code codec
-    module, which opens it directly via ``cv2.VideoCapture`` / ffmpeg. That
-    bypasses both ``MediaConnector``'s access controls and its redirect
-    handling (``VLLM_MEDIA_URL_ALLOW_REDIRECTS``), so we restrict the codec
-    backend to **local files only**: remote ``http(s)`` / ``data`` URLs are
+    `MultiModalDataParser` and hands it to the trust-remote-code codec
+    module, which opens it directly via `cv2.VideoCapture` / ffmpeg. That
+    bypasses both `MediaConnector`'s access controls and its redirect
+    handling (`VLLM_MEDIA_URL_ALLOW_REDIRECTS`), so we restrict the codec
+    backend to **local files only**: remote `http(s)` / `data` URLs are
     rejected here and must instead go through the frame backend (a registered
-    ``VIDEO_LOADER_REGISTRY`` loader), which rides vLLM's connector and its
+    `VIDEO_LOADER_REGISTRY` loader), which rides vLLM's connector and its
     domain/redirect gates.
 
     Returns the *resolved* absolute path so the codec module opens exactly the
     file that was validated, closing the validate-vs-open (symlink-retarget)
-    window. Mirrors the confinement in ``MediaConnector._load_file_url``.
+    window. Mirrors the confinement in `MediaConnector._load_file_url`.
     """
     from pathlib import Path
     from urllib.request import url2pathname
@@ -304,13 +304,13 @@ _CODEC_VIDEO_MARKER = "ov2_codec_video"
 def prepare_codec_video_input(video_path: str) -> tuple:
     """Wrap a video path for vLLM's MultiModalDataParser + OV2 codec backend.
 
-    Returns ``(dummy_ndarray, metadata)`` where the ndarray satisfies the
+    Returns `(dummy_ndarray, metadata)` where the ndarray satisfies the
     parser's 4-D shape check and the metadata carries the actual path to
-    our ``_apply_hf_processor_main``. Use as::
+    our `_apply_hf_processor_main`. Use as::
 
         multi_modal_data = {"video": prepare_codec_video_input("foo.mp4")}
 
-    The dummy ndarray bytes encode a hash of ``video_path`` so distinct codec
+    The dummy ndarray bytes encode a hash of `video_path` so distinct codec
     videos get distinct mm_hashes: the parser drops the metadata dict before
     hashing (only the ndarray reaches MultiModalHasher), so without this
     variance every video after the first would collide and skip the encoder.
@@ -401,7 +401,7 @@ def _create_field_factory(
 ) -> Callable[[Mapping[str, torch.Tensor]], Mapping[str, MultiModalFieldConfig]]:
     """Build the per-batch field-config callback.
 
-    OV2-specific: also exposes ``patch_positions`` as a flat-from-sizes
+    OV2-specific: also exposes `patch_positions` as a flat-from-sizes
     field, sized by the total per-image patch count (T*H*W). The merger and
     the 3-D RoPE both consume it.
     """
@@ -498,17 +498,17 @@ _IMAGE_MARKER = "<|vision_start|><|image_pad|><|vision_end|>"
 def _frame_video_to_pil_and_timestamps(
     item: Any,
 ) -> tuple[list[Image.Image], list[float]]:
-    """Convert a ``(frames_ndarray, metadata)`` video item into
-    ``(pil_frames, timestamps_seconds)``.
+    """Convert a `(frames_ndarray, metadata)` video item into
+    `(pil_frames, timestamps_seconds)`.
 
-    Both real ``video_url`` inputs (decoded + sampled by the registered
-    ``LlavaOnevision2VideoBackend``) and dummy profiling videos arrive here as a
-    ``(frames, metadata)`` tuple because the data parser runs with
-    ``video_needs_metadata=True``. ``frames`` is a ``(T, H, W, C)`` uint8 array;
-    ``metadata`` carries ``frames_indices`` and the source ``fps``.
+    Both real `video_url` inputs (decoded + sampled by the registered
+    `LlavaOnevision2VideoBackend`) and dummy profiling videos arrive here as a
+    `(frames, metadata)` tuple because the data parser runs with
+    `video_needs_metadata=True`. `frames` is a `(T, H, W, C)` uint8 array;
+    `metadata` carries `frames_indices` and the source `fps`.
 
-    Timestamps follow the qwen_vl_utils policy: ``frame_index / original_fps``.
-    The frame count is padded up to ``_TEMPORAL_MERGE_SIZE`` (repeating the last
+    Timestamps follow the qwen_vl_utils policy: `frame_index / original_fps`.
+    The frame count is padded up to `_TEMPORAL_MERGE_SIZE` (repeating the last
     frame) because OV2's vision tower merges frames temporally in pairs.
     """
     if not (isinstance(item, (tuple, list)) and len(item) == 2):
@@ -562,12 +562,12 @@ def _expand_video_markers_in_prompt(
     *,
     timestamp_decimals: int,
 ) -> str:
-    """Replace each ``<|vision_start|><|video_pad|><|vision_end|>`` with a
-    sequence of ``<{t:.Nf} seconds><|vision_start|><|image_pad|><|vision_end|>``
-    blocks -- one per frame -- matching ``vllm_hf_chat._build_prompt``.
+    """Replace each `<|vision_start|><|video_pad|><|vision_end|>` with a
+    sequence of `<{t:.Nf} seconds><|vision_start|><|image_pad|><|vision_end|>`
+    blocks -- one per frame -- matching `vllm_hf_chat._build_prompt`.
 
     Replacement is positional: the *i*-th marker consumes
-    ``per_video_timestamps[i]``.
+    `per_video_timestamps[i]`.
     """
     parts: list[str] = []
     cursor = 0
@@ -635,9 +635,9 @@ def _ov2_smart_nframes(
     min_frames: int,
     max_frames: int,
 ) -> int:
-    """Replicate ``qwen_vl_utils.smart_nframes`` (fps branch).
+    """Replicate `qwen_vl_utils.smart_nframes` (fps branch).
 
-    Returns an even frame count in ``[min_frames, min(max_frames, total)]``.
+    Returns an even frame count in `[min_frames, min(max_frames, total)]`.
     """
     min_frames = _ceil_by_factor(min_frames, _OV2_FRAME_FACTOR)
     max_frames = _floor_by_factor(max_frames, _OV2_FRAME_FACTOR)
@@ -654,9 +654,9 @@ def _ov2_smart_nframes(
 class LlavaOnevision2VideoBackend(VideoBackend):
     """Frame-sampling backend for LLaVA-OneVision-2.
 
-    Selected automatically for OV2 via the ``video_processor`` binding
-    (``video_processor_type == "LlavaOnevision2VideoProcessor"`` in the model's
-    ``video_preprocessor_config.json``). Decoding uses the inherited OpenCV /
+    Selected automatically for OV2 via the `video_processor` binding
+    (`video_processor_type == "LlavaOnevision2VideoProcessor"` in the model's
+    `video_preprocessor_config.json`). Decoding uses the inherited OpenCV /
     PyAV codecs; only the sampling index policy is overridden to match qwen.
     """
 
@@ -741,13 +741,13 @@ class LlavaOnevision2InputsByModality(TypedDict, total=False):
 class LlavaOnevision2VisionRotaryEmbedding(nn.Module):
     """3-D rotary frequency constructor with 4:6:6 (T:H:W) split.
 
-    Mirrors ``VisionRotaryEmbedding`` in the HF reference
-    (``modeling_llava_onevision2.py`` L79-L210). The three ``inv_freq_*``
+    Mirrors `VisionRotaryEmbedding` in the HF reference
+    (`modeling_llava_onevision2.py` L79-L210). The three `inv_freq_*`
     buffers are non-persistent — they are *not* in the checkpoint and must
     be reconstructed at module init time (which we do here).
 
     Public entry points used by the vision tower:
-      * ``forward_from_positions(patch_positions)`` — per-patch (t,h,w)
+      * `forward_from_positions(patch_positions)` — per-patch (t,h,w)
         positions → per-token freqs [N, half].
     """
 
@@ -876,8 +876,8 @@ class LlavaOnevision2VisionMLP(nn.Module):
 class LlavaOnevision2VisionAttn(nn.Module):
     """Vision self-attention with windowed cu_seqlens.
 
-    The HF checkpoint ships a *fused* qkv linear (``self_attn.qkv``), so
-    we load directly into ``QKVParallelLinear`` with no stacked_params
+    The HF checkpoint ships a *fused* qkv linear (`self_attn.qkv`), so
+    we load directly into `QKVParallelLinear` with no stacked_params
     mapping. (Compare OV1.5, whose checkpoint had separate q/k/v.)
     """
 
@@ -1118,7 +1118,7 @@ class LlavaOnevision2VisionTower(nn.Module):
 
     Module attribute names mirror HF checkpoint names verbatim so the
     WeightsMapper only needs prefix rewrites (no substring rules, which would
-    otherwise collide with the Qwen3 text-path ``self_attn`` modules):
+    otherwise collide with the Qwen3 text-path `self_attn` modules):
       visual.embeddings.patch_embedding
       visual.layernorm_pre
       visual.encoder.layers.{i}.self_attn.{qkv,proj}
@@ -1216,11 +1216,11 @@ class LlavaOnevision2VisionTower(nn.Module):
 
     def _build_window_cu_seqlens(self, grid_thw: torch.Tensor) -> np.ndarray:
         """Build cu_seqlens that chunk each sample's T-axis into windows of
-        ``frame_windows_size`` frames.
+        `frame_windows_size` frames.
 
-        Returns an int32 ``np.ndarray`` of shape [num_windows+1] (the
+        Returns an int32 `np.ndarray` of shape [num_windows+1] (the
         canonical prefix-sum format). Backend-specific transforms are applied
-        afterwards via ``MMEncoderAttention.maybe_recompute_cu_seqlens``.
+        afterwards via `MMEncoderAttention.maybe_recompute_cu_seqlens`.
         """
         win = self.frame_windows_size
         chunk_lengths: list[int] = []
@@ -1307,7 +1307,6 @@ class LlavaOnevision2ProcessingInfo(BaseProcessingInfo):
         # ``_merge_mm_kwargs`` restricts caller ``mm_processor_kwargs`` to known
         # processor args and wraps values as hashable for the lru_cache.
         merged = _merge_mm_kwargs(model_config, AutoProcessor, **kwargs)
-        merged.setdefault("use_fast", True)
         return _load_ov2_processor(
             model_config.model,
             model_config.revision,
@@ -2018,12 +2017,12 @@ class LlavaOnevision2ForConditionalGeneration(
     Weight name rewriting (HF checkpoint → vLLM module tree):
       Prefix rewrites only (longest match wins). Vision tower attribute names
       mirror HF names verbatim, so no substring rules are needed. Substring
-      rules would otherwise collide with the Qwen3 text-path ``self_attn``
+      rules would otherwise collide with the Qwen3 text-path `self_attn`
       modules and break the language-model loader.
-        ``model.language_model.``        → ``language_model.model.``
-        ``model.visual.``                → ``visual.``
-        ``lm_head.``                     → ``language_model.lm_head.``
-        ``model.`` (fallback)            → ``language_model.model.``
+        `model.language_model.`        → `language_model.model.`
+        `model.visual.`                → `visual.`
+        `lm_head.`                     → `language_model.lm_head.`
+        `model.` (fallback)            → `language_model.model.`
     """
 
     hf_to_vllm_mapper = WeightsMapper(

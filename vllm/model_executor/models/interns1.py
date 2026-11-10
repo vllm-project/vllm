@@ -12,10 +12,10 @@ from typing import Annotated, Literal, TypeAlias, TypedDict
 import regex as re
 import torch
 import torch.nn as nn
-from transformers import BatchFeature, InternVLProcessor, PretrainedConfig
+from transformers import BatchFeature, InternVLProcessor, PreTrainedConfig
 from transformers.activations import ACT2FN
-from transformers.models.got_ocr2.image_processing_got_ocr2_fast import (
-    GotOcr2ImageProcessorFast,
+from transformers.models.got_ocr2.image_processing_got_ocr2 import (
+    GotOcr2ImageProcessor,
 )
 from transformers.models.internvl.video_processing_internvl import (
     InternVLVideoProcessor,
@@ -202,7 +202,7 @@ class InternS1ProcessingInfo(BaseProcessingInfo):
         processor: InternVLProcessor,
         mm_kwargs: Mapping[str, object],
     ) -> int:
-        image_processor: GotOcr2ImageProcessorFast = processor.image_processor
+        image_processor: GotOcr2ImageProcessor = processor.image_processor
 
         num_image_patches = image_processor.get_number_of_image_patches(
             image_height,
@@ -612,7 +612,7 @@ class InternS1ForConditionalGeneration(
 
     def _init_vision_model(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None,
         *,
         prefix: str,
@@ -625,7 +625,7 @@ class InternS1ForConditionalGeneration(
             prefix=prefix,
         )
 
-    def _init_mlp1(self, config: PretrainedConfig) -> nn.Module:
+    def _init_mlp1(self, config: PreTrainedConfig) -> nn.Module:
         return InternS1MultiModalProjector(config)
 
     def pixel_shuffle(self, x, scale_factor=0.5):

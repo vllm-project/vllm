@@ -36,7 +36,7 @@ import torch
 import torch.types
 from torch import nn
 from torch.nn.init import trunc_normal_
-from transformers import BatchFeature, PretrainedConfig
+from transformers import BatchFeature, PreTrainedConfig
 from transformers.dynamic_module_utils import (
     get_class_from_dynamic_module,
     resolve_trust_remote_code,
@@ -468,7 +468,7 @@ class Resampler4_5(Resampler2_5):
         return x
 
 
-def get_version_by_config(config: PretrainedConfig) -> tuple[int, ...]:
+def get_version_by_config(config: PreTrainedConfig) -> tuple[int, ...]:
     version_float = getattr(config, "version", None)
 
     # The old configs do not include version number
@@ -1235,7 +1235,7 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
         self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
         super().__init__()
         # All MiniCPM-V models disable `tie_word_embeddings` but
-        # `PretrainedConfig.tie_word_embeddings` defaults to True; we cannot
+        # `PreTrainedConfig.tie_word_embeddings` defaults to True; we cannot
         # check `tie_word_embeddings` until vLLM integrate MiniCPM-V model
         # and config class
         self.config = config
@@ -1425,7 +1425,7 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
 
     def init_vision_module(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None,
         prefix: str = "",
     ) -> nn.Module:
@@ -1483,7 +1483,7 @@ def _mcpmv_normalize_tgt_sizes(
     tgt_sizes: torch.Tensor | list[torch.Tensor],
     slice_counts: list[int],
 ) -> torch.Tensor:
-    """Normalize tgt_sizes to shape ``(total_slices, 2)``."""
+    """Normalize tgt_sizes to shape `(total_slices, 2)`."""
     if isinstance(tgt_sizes, list):
         if not tgt_sizes:
             tgt_sizes = torch.zeros((0, 2), dtype=torch.long)
@@ -1516,7 +1516,7 @@ def _mcpmv_pack_flat_pixels(
     patch_size: int,
     tgt_sizes: torch.Tensor,
 ) -> torch.Tensor:
-    """Pack slice tensors into a fixed ``(max_num_slices, 3*H*W)`` buffer."""
+    """Pack slice tensors into a fixed `(max_num_slices, 3*H*W)` buffer."""
     import torch.nn.functional as F
 
     flat_dim = 3 * pixel_height * pixel_width
@@ -1579,7 +1579,7 @@ class _MiniCPMVEncoderCudaGraphMixin(MiniCPMVBaseModel, SupportsEncoderCudaGraph
         return th * tw
 
     def _mcpmv_patch_grid_keys(self) -> tuple[tuple[int, int], ...]:
-        """Ordered patch-grid keys ``(nb_h, nb_w)`` for the capture axis."""
+        """Ordered patch-grid keys `(nb_h, nb_w)` for the capture axis."""
         max_side = int(self.vpm.embeddings.image_size) // int(
             self.vpm.embeddings.patch_size
         )
@@ -1911,8 +1911,8 @@ class _MiniCPMVEncoderCudaGraphMixin(MiniCPMVBaseModel, SupportsEncoderCudaGraph
         mm_kwargs: dict[str, Any],
         path: str = "default",
     ) -> torch.Tensor:
-        """Eager encoder path; returns ``(total_tokens, embed_dim)`` like
-        ``encoder_cudagraph_forward``.
+        """Eager encoder path; returns `(total_tokens, embed_dim)` like
+        `encoder_cudagraph_forward`.
         """
         mm_kwargs_no_flat = {
             k: v
@@ -1957,7 +1957,7 @@ class MiniCPMV2_0(MiniCPMVBaseModel):
 
     def init_vision_module(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None,
         prefix: str = "",
     ) -> nn.Module:
@@ -2058,7 +2058,7 @@ class MiniCPMV2_5(_MiniCPMVEncoderCudaGraphMixin, SupportsLoRA):
 
     def init_vision_module(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None,
         prefix: str = "",
     ) -> nn.Module:
@@ -2154,7 +2154,7 @@ class MiniCPMV2_6(_MiniCPMVEncoderCudaGraphMixin, SupportsLoRA):
 
     def init_vision_module(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> nn.Module:
@@ -2255,7 +2255,7 @@ class MiniCPMV4_0(_MiniCPMVEncoderCudaGraphMixin, SupportsLoRA):
 
     def init_vision_module(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> nn.Module:
@@ -2354,7 +2354,7 @@ class MiniCPMV4_5(MiniCPMVBaseModel, SupportsLoRA):
 
     def init_vision_module(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> nn.Module:

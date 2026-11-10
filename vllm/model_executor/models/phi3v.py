@@ -24,7 +24,7 @@ import torch.nn as nn
 from transformers import (
     BatchFeature,
     CLIPVisionConfig,
-    PretrainedConfig,
+    PreTrainedConfig,
     ProcessorMixin,
 )
 
@@ -95,7 +95,7 @@ CLIP_VIT_LARGE_PATCH14_336_CONFIG = CLIPVisionConfig(
 
 
 def _init_img_processor(
-    hf_config: PretrainedConfig,
+    hf_config: PreTrainedConfig,
     quant_config: QuantizationConfig | None,
     prefix: str = "",
 ) -> CLIPVisionModel:
@@ -165,7 +165,7 @@ class Phi3HDImageEmbedding(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None,
         prefix: str = "",
     ) -> None:
