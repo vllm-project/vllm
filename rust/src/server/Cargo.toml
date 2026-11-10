@@ -57,6 +57,7 @@ vllm-text.workspace = true
 
 [dev-dependencies]
 anyhow.workspace = true
+async-trait.workspace = true
 async-openai = { workspace = true, features = ["full"] }
 bytes.workspace = true
 clap.workspace = true

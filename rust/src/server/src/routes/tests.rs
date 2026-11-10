@@ -72,6 +72,7 @@ use crate::model_names::ServedModelNames;
 use crate::render::RenderState;
 use crate::state::AppState;
 
+mod custom_llm;
 mod responses;
 
 fn request_output(

@@ -5856,6 +5856,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-openai",
+ "async-trait",
  "asynk-strim-attr",
  "auto_enums",
  "axum",
