@@ -27,6 +27,7 @@ from vllm.utils.flashinfer import (
     has_flashinfer,
     has_flashinfer_b12x_gemm,
     has_flashinfer_bf16_fp4,
+    limit_flashinfer_jit_parallelism,
 )
 
 from .base import NvFp4LinearKernel, NvFp4LinearLayerConfig
@@ -187,6 +188,14 @@ class FlashInferCuteDslNvFp4LinearKernel(NvFp4LinearKernel):
 
 class FlashInferCutlassNvFp4LinearKernel(NvFp4LinearKernel):
     """NVFP4 GEMM via FlashInfer's CUTLASS wrapper."""
+
+    def __init__(self, config: NvFp4LinearLayerConfig) -> None:
+        super().__init__(config)
+        # The first FP4 GEMM compiles FlashInfer's CUTLASS kernels with a JIT
+        # job whose default parallelism is one process per CPU, and each of
+        # those processes holds several GiB of host memory. Keep the build
+        # within the host's memory budget before it can OOM the engine.
+        limit_flashinfer_jit_parallelism()
 
     def input_quant_key(self) -> QuantKey | None:
         """This kernel supports dynamic quantization of the input. By

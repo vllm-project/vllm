@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import importlib.util
+import os
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -58,3 +59,45 @@ def test_has_flashinfer_requires_ninja(
     _make_exe(tmp_path / "cuda" / "bin" / "nvcc")
     monkeypatch.setenv("PATH", str(tmp_path / "cuda" / "bin"))
     assert not fi.has_flashinfer()
+
+
+@pytest.fixture
+def no_max_jobs(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    monkeypatch.delenv("MAX_JOBS", raising=False)
+    yield
+
+
+def test_limit_jit_parallelism_keeps_explicit_max_jobs(monkeypatch: pytest.MonkeyPatch):
+    """A user-provided MAX_JOBS is never overridden."""
+    monkeypatch.setenv("MAX_JOBS", "8")
+    assert fi.limit_flashinfer_jit_parallelism() is None
+    assert os.environ["MAX_JOBS"] == "8"
+
+
+def test_limit_jit_parallelism_budgets_available_memory(
+    no_max_jobs: None, monkeypatch: pytest.MonkeyPatch
+):
+    """Half of 64 GiB, at 8 GiB per compiler process, is four jobs."""
+    monkeypatch.setattr(fi, "get_available_memory", lambda: 64 * 1024**3)
+    monkeypatch.setattr(fi.os, "cpu_count", lambda: 32)
+    assert fi.limit_flashinfer_jit_parallelism() == 4
+    assert os.environ["MAX_JOBS"] == "4"
+
+
+def test_limit_jit_parallelism_keeps_at_least_one_job(
+    no_max_jobs: None, monkeypatch: pytest.MonkeyPatch
+):
+    """A nearly-full host still gets one job instead of zero."""
+    monkeypatch.setattr(fi, "get_available_memory", lambda: 2 * 1024**3)
+    monkeypatch.setattr(fi.os, "cpu_count", lambda: 32)
+    assert fi.limit_flashinfer_jit_parallelism() == 1
+    assert os.environ["MAX_JOBS"] == "1"
+
+
+def test_limit_jit_parallelism_never_exceeds_cpu_count(
+    no_max_jobs: None, monkeypatch: pytest.MonkeyPatch
+):
+    """Plenty of memory does not mean more jobs than there are CPUs."""
+    monkeypatch.setattr(fi, "get_available_memory", lambda: 1024 * 1024**3)
+    monkeypatch.setattr(fi.os, "cpu_count", lambda: 4)
+    assert fi.limit_flashinfer_jit_parallelism() == 4
