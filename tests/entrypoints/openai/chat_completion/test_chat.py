@@ -163,7 +163,7 @@ async def test_too_many_chat_logprobs(client: openai.AsyncOpenAI, model_name: st
             top_logprobs=21,
             stream=True,
         )
-        async for chunk in stream:
+        async for _ in stream:
             ...
 
     with pytest.raises(openai.BadRequestError):
