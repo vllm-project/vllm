@@ -144,9 +144,7 @@ def _signal(
 
     _write_flag(stream, staging, value)
     kind = cudart.cudaMemcpyKind.cudaMemcpyDefault
-    _check(
-        cudart.cudaMemcpyAsync(addr, staging, 8, kind, stream.cuda_stream)
-    )
+    _check(cudart.cudaMemcpyAsync(addr, staging, 8, kind, stream.cuda_stream))
 
 
 class CopyEngineUnavailable(RuntimeError):
