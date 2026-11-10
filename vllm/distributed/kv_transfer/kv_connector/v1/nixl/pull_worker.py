@@ -622,7 +622,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 remote_rank=remote_rank,
             )
             if not self._handle_failed_transfer(
-                request_id, handle, self._recv_failures
+                request_id, handle, self._recv_failures, error=e
             ):
                 assert handle is not None
                 self._recving_transfers[request_id].append(handle)

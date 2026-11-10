@@ -2553,6 +2553,7 @@ def recv_worker():
     worker._remote_agents = {}
     worker._engine_by_address = {}
     worker._failed_remote_engines = set()
+    worker._disconnected_remote_engines = set()
     worker._invalid_remote_engines = set()
     worker._remote_registration_generations = {}
     worker._replicated_pcp_done_sending = set()
@@ -3601,6 +3602,28 @@ class TestPeerReplacement:
         assert self.worker.get_block_ids_with_load_errors() == {1}
         assert ("old" not in self.worker._remote_agents) is (missing is True)
         assert self.transport.release_dlist_handle.call_count == (missing is True)
+
+    @pytest.mark.parametrize("disconnected", [False, True])
+    def test_lost_connection_invalidates_peer_with_metadata(self, disconnected):
+        # NIXL keeps a peer's metadata after its connection is gone, so the
+        # metadata probe cannot see it; the transfer error has to.
+        class nixlRemoteDisconnectError(RuntimeError):  # noqa: N801
+            pass
+
+        error = (
+            nixlRemoteDisconnectError("NIXL_ERR_REMOTE_DISCONNECT")
+            if disconnected
+            else RuntimeError("transient")
+        )
+        self.worker.start_load_kv(self._request("old"))
+        self.transport.check_xfer_state.side_effect = error
+
+        result = self.worker.get_transfer_results()
+        assert result.finished_recving == result.failed_recving == {"old-req"}
+        assert ("old" not in self.worker._remote_agents) is disconnected
+        assert self.transport.release_dlist_handle.call_count == disconnected
+        if disconnected:
+            self.transport.remove_remote_agent.assert_called_once_with("old")
 
     @pytest.mark.parametrize("handshake_fails", [False, True])
     def test_recovery_rehandshakes_same_id_with_fresh_descriptors(
