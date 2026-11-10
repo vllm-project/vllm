@@ -600,14 +600,19 @@ def test_failed_receive_waits_for_every_peer(swa_enabled, outcomes):
         worker.shutdown()
 
 
-@pytest.fixture(
-    params=[
+_hisparse_producer_cases = pytest.mark.parametrize(
+    "hisparse_producer",
+    [
         (packed, tp, rank)
         for packed in (False, True)
         for tp in (1, 2, 4)
         for rank in range(tp)
-    ]
+    ],
+    indirect=True,
 )
+
+
+@pytest.fixture
 def hisparse_producer(request):
     packed, tp, rank = request.param
     cache_config = _make_packed_mla_kv_cache_config(8)
@@ -630,6 +635,7 @@ def hisparse_producer(request):
 
 
 @pytest.mark.cpu_test
+@_hisparse_producer_cases
 @pytest.mark.parametrize("decoder_tp", [1, 2, 4, 8])
 @pytest.mark.parametrize("shared", [False, True])
 def test_hisparse_import_copies_uncached_pages(hisparse_producer, decoder_tp, shared):
@@ -738,6 +744,7 @@ async def test_hisparse_full_prefix_hit_completes_without_writes(
 
 
 @pytest.mark.cpu_test
+@_hisparse_producer_cases
 def test_hisparse_import_rejects_incompatible_layout(hisparse_producer):
     """An incompatible indexer payload must reject the entire peer layout."""
     producer, caches, page = hisparse_producer
