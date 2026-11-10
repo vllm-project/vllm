@@ -117,6 +117,9 @@ steps:
   - tests/entrypoints/launchers/api_server/test_multi_api_servers.py
   - tests/entrypoints/rl/return_routed_experts/test_scale_out_api.py
   - tests/entrypoints/rl/state_transitions/test_sleep.py
+  - tests/entrypoints/rl/state_transitions/test_pause_resume.py
+  - tests/entrypoints/rl/state_transitions/test_weight_checker.py
+  - tests/entrypoints/rl/conftest.py
   commands:
   - export VLLM_USE_RUST_FRONTEND=1
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
@@ -138,6 +141,9 @@ steps:
   - pytest -v -s entrypoints/rl/return_routed_experts/test_scale_out_api.py
   # The other tests in this file drive the Python sleep routes in-process.
   - pytest -v -s entrypoints/rl/state_transitions/test_sleep.py::test_sleep_mode
+  # The Rust frontend reports an invalid query parameter as `mode`, not `query.mode`.
+  - pytest -v -s entrypoints/rl/state_transitions/test_pause_resume.py -k "not test_invalid_mode_preserves_state"
+  - pytest -v -s entrypoints/rl/state_transitions/test_weight_checker.py
   mirror:
     amd:
       label: ":amd: (MI355 DPX) Rust Frontend Serve/Admin Coverage"
@@ -162,6 +168,9 @@ steps:
       - tests/entrypoints/launchers/api_server/test_multi_api_servers.py
       - tests/entrypoints/rl/return_routed_experts/test_scale_out_api.py
       - tests/entrypoints/rl/state_transitions/test_sleep.py
+      - tests/entrypoints/rl/state_transitions/test_pause_resume.py
+      - tests/entrypoints/rl/state_transitions/test_weight_checker.py
+      - tests/entrypoints/rl/conftest.py
       - vllm/platforms/rocm.py
 
 - label: ":nvidia: (H200 MIG 18GB) Rust Frontend Core Correctness"
