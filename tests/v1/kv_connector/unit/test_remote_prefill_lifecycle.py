@@ -248,7 +248,8 @@ def test_inflight_kv_loads_follow_connector_may_load_async(monkeypatch):
 
 def test_max_loras_blocked_request_does_not_stop_kv_loads():
     """A waiting request blocked by max_loras does not end the scan before an
-    async KV load queued behind it starts."""
+    async KV load queued behind it starts: the lookahead is off while an async
+    KV head can be interleaved."""
     vllm_config = create_vllm_config(max_num_seqs=4)
     vllm_config.scheduler_config.max_num_inflight_kv_loads = 2
     vllm_config.lora_config = LoRAConfig(max_loras=1)
@@ -264,6 +265,8 @@ def test_max_loras_blocked_request_does_not_stop_kv_loads():
     blocked.lora_request = LoRARequest("lora-2", 2, "/p")
     scheduler.add_request(local)
     scheduler_output = scheduler.schedule()
+    # blocked comes first in scan order, ahead of the async KV load.
+    remote.arrival_time = blocked.arrival_time + 1
     for request in (blocked, remote):
         scheduler.add_request(request)
     assert list(scheduler.waiting) == [blocked]
@@ -277,7 +280,8 @@ def test_max_loras_blocked_request_does_not_stop_kv_loads():
 
 def test_max_loras_blocked_kv_holding_request_does_not_stop_others():
     """A request whose KV load finished but whose adapter max_loras blocks
-    does not end the scan of the other requests holding KV blocks."""
+    does not end the scan of the other requests holding KV blocks: the
+    lookahead runs only on self.waiting."""
     vllm_config = create_vllm_config()
     vllm_config.lora_config = LoRAConfig(max_loras=1)
     scheduler = create_scheduler(vllm_config)
