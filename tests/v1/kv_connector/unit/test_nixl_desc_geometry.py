@@ -33,6 +33,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.pull_worker import (
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.push_worker import (
     NixlPushConnectorWorker,
 )
+from vllm.models.kimi_k3.common.dsa_cache import KimiK3IndexerBackend
+from vllm.v1.attention.backends.mla.indexer import Glm5NextIndexerBackend
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
@@ -738,11 +740,19 @@ def test_mla_hybrid_groups_read_only_their_own_regions(kda_only_tensor):
 
 
 @pytest.mark.cpu_test
-def test_nixl_keeps_packed_sparse_mla_manager_block():
+@pytest.mark.parametrize(
+    ("indexer_backend", "tokens_per_state"),
+    [
+        # GLM-5.3-Flash: a compressed kpool indexer.
+        (Glm5NextIndexerBackend, 4),
+        # Kimi-K3.1: a token indexer, written at kernel slots.
+        (KimiK3IndexerBackend, 1),
+    ],
+)
+def test_nixl_keeps_packed_sparse_mla_manager_block(indexer_backend, tokens_per_state):
     """Like the worker, NIXL keeps packed sparse MLA + indexer manager blocks."""
     from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
     from vllm.v1.attention.backends.mla.flashmla_sparse import FlashMLASparseBackend
-    from vllm.v1.attention.backends.mla.indexer import Glm5NextIndexerBackend
     from vllm.v1.kv_cache_interface import UniformTypeKVCacheSpecs
 
     specs = {
@@ -750,10 +760,14 @@ def test_nixl_keeps_packed_sparse_mla_manager_block():
             1152, num_kv_heads=1, head_size=512, dtype=torch.bfloat16
         ),
         "indexer": MLAAttentionSpec(
-            1152, num_kv_heads=1, head_size=128, dtype=torch.uint8, tokens_per_state=4
+            1152,
+            num_kv_heads=1,
+            head_size=128,
+            dtype=torch.uint8,
+            tokens_per_state=tokens_per_state,
         ),
     }
-    backends = {"mla": FlashMLASparseBackend, "indexer": Glm5NextIndexerBackend}
+    backends = {"mla": FlashMLASparseBackend, "indexer": indexer_backend}
     layers = {
         name: MagicMock(spec=AttentionLayerBase, **{"get_attn_backend.return_value": b})
         for name, b in backends.items()
@@ -2070,6 +2084,41 @@ def test_shared_base_regions_with_distinct_block_lens_stay_separate():
     np.testing.assert_array_equal(
         descs[:, 0], [base[0], base[0] + 256, base[0], base[0] + 256]
     )
+
+
+@pytest.mark.parametrize(
+    ("layout", "transfer_block_size"),
+    [(KVCacheLayout.BLHNC, 1024), (KVCacheLayout.LBNHC, 64)],
+)
+def test_packed_blocks_transfer_whole_for_small_kernel_block_drafts(
+    monkeypatch, layout, transfer_block_size
+):
+    """A Kimi-K3.1 DSpark draft's FLASHINFER_MLA takes 32/64-token kernel
+    blocks. In a packed layout it views them inside each block, so transfers
+    keep whole blocks; otherwise its block size splits them."""
+    from vllm.distributed.kv_transfer.kv_connector import utils as kv_utils
+    from vllm.v1.attention.backends.mla.flashinfer_mla import FlashInferMLABackend
+    from vllm.v1.worker.utils import select_common_block_size
+
+    spec = MLAAttentionSpec(
+        block_size=1024, num_kv_heads=1, head_size=576, dtype=torch.uint8
+    )
+    layer = SimpleNamespace(get_attn_backend=lambda: FlashInferMLABackend)
+    monkeypatch.setattr(
+        kv_utils, "get_layers_from_vllm_config", lambda *_: {"draft": layer}
+    )
+    vllm_config = SimpleNamespace(
+        cache_config=SimpleNamespace(get_resolved_kv_cache_layout=lambda: layout)
+    )
+    kv_cache_config = SimpleNamespace(
+        transfer_groups=[KVCacheGroupSpec(["draft"], spec)]
+    )
+
+    backends, specs = kv_utils.get_current_attn_backends_and_specs(
+        vllm_config, kv_cache_config, [FlashInferMLABackend]
+    )
+
+    assert select_common_block_size(1024, backends, specs) == transfer_block_size
 
 
 # Real model KV layouts, end to end on CPU: vLLM's planner and allocator build

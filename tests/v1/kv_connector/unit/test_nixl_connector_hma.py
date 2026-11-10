@@ -2087,6 +2087,10 @@ def test_exchange_clipped_blocks_ssm_single_state():
     )
     sched.blocks_per_sw = [2, 0]
     assert sched.get_exchange_clipped_blocks(([1, 2, 3], [7, 8, 9])) == ([2, 3], [7])
+    # A lookahead block past the 40 computed tokens (block size 16) goes first.
+    assert sched.get_exchange_clipped_blocks(
+        ([1, 2, 3, 4], [7, 8, 9]), num_tokens=40
+    ) == ([2, 3], [7])
 
     # Non-mamba models pass through unchanged.
     fa_sched = make_nixl_scheduler(has_mamba=False)
