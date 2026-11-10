@@ -68,7 +68,7 @@ from vllm.utils.torch_utils import (
 )
 from vllm.utils.watch_dog import get_watch_dog, start_watch_dog
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
-from vllm.v1.executor.abstract import Executor, FailureCallback, IterationTimingPoll
+from vllm.v1.executor.abstract import Executor, FailureCallback
 from vllm.v1.executor.vllm_net_devices import set_worker_net_device
 from vllm.v1.outputs import (
     AsyncModelRunnerOutput,
@@ -591,30 +591,6 @@ class MultiprocExecutor(Executor):
         )
 
         return future if non_block else future.result()
-
-    def start_iteration_timing_poll(self) -> IterationTimingPoll | None:
-        # Timing queries must not wait for space behind inference RPCs.
-        assert self.rpc_broadcast_mq is not None
-        if self.futures_queue or not self.rpc_broadcast_mq.can_enqueue():
-            return None
-        future = self.collective_rpc(
-            "poll_iteration_timing",
-            non_block=True,
-            unique_reply_rank=self.output_rank,
-        )
-        response_mq = self.response_mqs[self.output_rank]
-
-        def poll() -> tuple[tuple[int, float], ...] | None:
-            if not future.done():
-                # A later model RPC may already have consumed this response.
-                # Otherwise, consume only at the head of the ordered queue.
-                if not self.futures_queue or self.futures_queue[-1] is not future:
-                    return None
-                if not response_mq.can_dequeue():
-                    return None
-            return future.result()
-
-        return poll
 
     @staticmethod
     def _ensure_worker_termination(worker_procs: list[BaseProcess]):

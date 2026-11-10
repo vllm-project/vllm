@@ -110,17 +110,12 @@ from vllm.v1.kv_cache_interface import (
     get_kv_cache_spec_kind,
     is_full_attention_spec,
 )
-from vllm.v1.metrics.iteration import (
-    ITERATION_TIMING_POLL_INTERVAL,
-    ITERATION_TIMING_SHUTDOWN_TIMEOUT,
-    IterationMetricsCollector,
-)
+from vllm.v1.metrics.iteration import IterationMetricsCollector
 from vllm.v1.metrics.stats import SchedulerIterationDetails, SchedulerStats
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder, bytestr
 from vllm.v1.structured_output import StructuredOutputManager
-from vllm.v1.utils import compute_iteration_details
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
@@ -134,12 +129,6 @@ _R = TypeVar("_R")  # Return type for collective_rpc
 class EngineCore:
     """Inner loop of vLLM's Engine."""
 
-    # Class-level defaults so tests can build an EngineCore with
-    # object.__new__.
-    _checkpoint_state = CheckpointState.RUNNING
-    _checkpoint_error: str | None = None
-    _kv_cache_reclaimable = False
-
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -148,6 +137,12 @@ class EngineCore:
         executor_fail_callback: Callable | None = None,
         include_finished_set: bool = False,
     ):
+        # Process checkpoint lifecycle (prepare/restore).
+        self._checkpoint_state = CheckpointState.RUNNING
+        self._checkpoint_error: str | None = None
+        # Whether the workers' extensible KV cache holds nothing to keep.
+        self._kv_cache_reclaimable = False
+
         # plugins need to be loaded at the engine/scheduler level too
         from vllm.plugins import load_general_plugins
 
@@ -267,7 +262,11 @@ class EngineCore:
         self.step_fn = (
             self.step if self.batch_queue is None else self.step_with_batch_queue
         )
-        self.async_scheduling = vllm_config.scheduler_config.async_scheduling
+        scheduler_config = vllm_config.scheduler_config
+        self.async_scheduling = scheduler_config.async_scheduling
+        self.prefill_schedule_interval = scheduler_config.prefill_schedule_interval
+        # Steps that scheduled tokens; empty schedule() calls don't count.
+        self.num_executed_steps = 0
 
         self.aborts_queue = queue.Queue[list[str]]()
 
@@ -678,7 +677,8 @@ class EngineCore:
                 is_dummy=True,
             )
         else:
-            details = compute_iteration_details(scheduler_output)
+            details = scheduler_output.iteration_details
+            assert details is not None
             iteration_details = SchedulerIterationDetails(
                 iteration_index=iteration_index,
                 num_ctx_requests=details.num_ctx_requests,
@@ -735,17 +735,11 @@ class EngineCore:
         owner.scheduler_stats = self.scheduler.make_stats() or SchedulerStats()
         owner.scheduler_stats.iteration_records.extend(records)
 
-    def _poll_iteration_metrics(self) -> dict[int, EngineCoreOutputs]:
-        outputs: dict[int, EngineCoreOutputs] = {}
-        if self.iteration_metrics is not None:
-            self.iteration_metrics.poll_timing(self.model_executor)
-            self._attach_iteration_records(outputs)
-        return outputs
-
     def _should_throttle_prefills(self) -> bool:
-        """Whether to defer new prefills this step (DP prefill balancing).
-        Overridden by the DP engine core; never throttles otherwise."""
-        return False
+        """Whether to defer prefills this step, to run them every Nth step.
+        Overridden by the DP engine core to align across ranks."""
+        interval = self.prefill_schedule_interval
+        return interval > 1 and self.num_executed_steps % interval != 0
 
     def step(self) -> tuple[dict[int, EngineCoreOutputs], bool]:
         """Schedule, execute, and make output.
@@ -758,6 +752,8 @@ class EngineCore:
         if not self.scheduler.has_requests():
             return {}, False
         scheduler_output = self.scheduler.schedule(self._should_throttle_prefills())
+        if scheduler_output.total_num_scheduled_tokens > 0:
+            self.num_executed_steps += 1
         if self.iteration_metrics is not None:
             self.iteration_metrics.begin_iteration(scheduler_output)
         future = self.model_executor.execute_model(scheduler_output, non_block=True)
@@ -833,12 +829,20 @@ class EngineCore:
                 )
             if not self.is_mm_encoder_only:
                 model_executed = scheduler_output.total_num_scheduled_tokens > 0
+            if model_executed:
+                self.num_executed_steps += 1
 
             if self.is_pooling_model or not model_executed:
                 # No sampling required (no requests scheduled).
                 future = cast(Future[ModelRunnerOutput], exec_future)
             else:
                 if not scheduler_output.pending_structured_output_tokens:
+                    if scheduler_output.has_structured_output_spec_decode:
+                        draft_token_ids = self.model_executor.take_draft_token_ids()
+                        if draft_token_ids is not None:
+                            self.scheduler.update_draft_token_ids_in_output(
+                                draft_token_ids, scheduler_output
+                            )
                     # We aren't waiting for any tokens, get any grammar output
                     # and sample immediately.
                     grammar_output = self.scheduler.get_grammar_bitmask(
@@ -899,7 +903,7 @@ class EngineCore:
         if deferred_scheduler_output:
             # Update the deferred scheduler output before computing its grammar
             # bitmask.
-            if self.check_for_draft_tokens:
+            if deferred_scheduler_output.has_structured_output_spec_decode:
                 draft_token_ids = self.model_executor.take_draft_token_ids()
                 if draft_token_ids is not None:
                     # Update the draft token ids in the scheduler output while
@@ -930,26 +934,6 @@ class EngineCore:
     def shutdown(self):
         logger.debug_once("[shutdown] EngineCore: tearing down local resources")
         self.structured_output_manager.clear_backend()
-        collector = self.iteration_metrics
-        if collector is not None:
-            deadline = time.monotonic() + ITERATION_TIMING_SHUTDOWN_TIMEOUT
-            while collector.has_pending_timing():
-                try:
-                    outputs = self._poll_iteration_metrics()
-                except Exception:
-                    logger.warning(
-                        "Could not collect final iteration timings", exc_info=True
-                    )
-                    break
-                if outputs and isinstance(self, EngineCoreProc):
-                    for client_index, output in outputs.items():
-                        self.output_queue.put_nowait((client_index, output))
-                if not collector.has_pending_timing():
-                    break
-                if time.monotonic() >= deadline:
-                    logger.warning("Dropping unfinished iteration timings at shutdown")
-                    break
-                time.sleep(ITERATION_TIMING_POLL_INTERVAL)
         if self.model_executor:
             self.model_executor.shutdown()
         if self.scheduler:
@@ -1901,8 +1885,7 @@ class EngineCoreProc(EngineCore):
         while not self.has_work() and self.is_running():
             collector = self.iteration_metrics
             if collector is not None and self.input_queue.empty():
-                for client_index, output in self._poll_iteration_metrics().items():
-                    self.output_queue.put_nowait((client_index, output))
+                collector.discard_pending()
             # Notify callbacks waiting for engine to become idle.
             self._notify_idle_state_callbacks()
             if self.input_queue.empty():
@@ -1913,19 +1896,11 @@ class EngineCoreProc(EngineCore):
                     logger.debug("EngineCore waiting for work.")
                     waited = True
             block = self.process_input_queue_block
-            pending_timing = collector is not None and collector.has_pending_timing()
             try:
                 with get_watch_dog().disable():
-                    if block and pending_timing:
-                        req = self.input_queue.get(
-                            timeout=ITERATION_TIMING_POLL_INTERVAL
-                        )
-                    else:
-                        req = self.input_queue.get(block=block)
+                    req = self.input_queue.get(block=block)
                 self._handle_client_request(*req)
             except queue.Empty:
-                if block and pending_timing:
-                    continue
                 break
             if not block:
                 break
@@ -2658,8 +2633,6 @@ class DPEngineCoreProc(EngineCoreProc):
             "DPEngineCoreProc should only be used for MoE models"
         )
 
-        scheduler_config = vllm_config.scheduler_config
-        self.prefill_schedule_interval = scheduler_config.prefill_schedule_interval
         self.dp_sync_interval = vllm_config.parallel_config.dp_sync_interval
 
         # Counts forward-passes of the model so that we can synchronize

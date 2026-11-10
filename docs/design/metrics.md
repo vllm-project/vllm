@@ -319,6 +319,13 @@ is not end-to-end request latency. With pipeline parallelism, only the output
 worker of the last stage is timed. Its interval may include waiting for input
 from earlier stages; it is not the duration of the whole pipeline.
 
+Timing collection is best-effort and never waits for the final GPU work before
+the engine becomes idle. Durations are returned with normal model outputs;
+records still missing a duration at idle are discarded. A short or isolated
+request can therefore have no timed record, and an attention-DP wave can lose
+multiple trailing dummy records. This does not change token delivery or imply
+that all GPU work has finished. Timings are not flushed during shutdown.
+
 ### Metrics Publishing - Prometheus
 
 The `PrometheusStatLogger` metrics publisher makes the metrics

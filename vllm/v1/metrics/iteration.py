@@ -5,26 +5,17 @@
 
 from __future__ import annotations
 
-import time
 from dataclasses import dataclass
 from itertools import count
 from typing import TYPE_CHECKING
 
 from vllm.v1.metrics.stats import SchedulerIterationDetails
-from vllm.v1.utils import compute_iteration_details
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
-    from vllm.v1.executor.abstract import Executor, IterationTimingPoll
     from vllm.v1.outputs import ModelRunnerOutput
 
 ITERATION_TIMING_SCOPE = "model_step_cuda"
-# Retry tail collection when no later model output can carry ready timings.
-# This is a CPU wakeup/RPC cadence, not a GPU sampling or measurement interval.
-ITERATION_TIMING_POLL_INTERVAL = 0.005
-# Best-effort budget for collecting pending timings before executor teardown;
-# it does not bound total engine shutdown or guarantee frontend delivery.
-ITERATION_TIMING_SHUTDOWN_TIMEOUT = 1.0
 
 
 @dataclass
@@ -36,17 +27,16 @@ class _PendingIteration:
 class IterationMetricsCollector:
     def __init__(self) -> None:
         self._iteration_ids = count()
-        # DP dummy steps can run ahead of the normal batch queue. Keep each
-        # association until both output processing and timing have completed.
+        # DP dummy steps can run ahead of the normal batch queue. Keep their
+        # associations until timings arrive or the engine enters idle.
         self._pending: dict[int, _PendingIteration] = {}
         self._ready: list[SchedulerIterationDetails] = []
-        self._timing_poll: IterationTimingPoll | None = None
-        self._next_timing_poll = 0.0
 
     def begin_iteration(self, output: SchedulerOutput) -> None:
         if output.total_num_scheduled_tokens == 0:
             return
-        counts = compute_iteration_details(output)
+        counts = output.iteration_details
+        assert counts is not None
         iteration_id = next(self._iteration_ids)
         output.iteration_metrics_id = iteration_id
         self._pending[iteration_id] = _PendingIteration(
@@ -64,7 +54,6 @@ class IterationMetricsCollector:
         )
 
     def begin_dummy_iteration(self) -> int:
-        self._receive_ready_timing()
         iteration_id = next(self._iteration_ids)
         self._pending[iteration_id] = _PendingIteration(
             SchedulerIterationDetails(
@@ -84,7 +73,6 @@ class IterationMetricsCollector:
     def complete_iteration(
         self, output: SchedulerOutput, model_output: ModelRunnerOutput
     ) -> None:
-        self._receive_ready_timing()
         iteration_id = output.iteration_metrics_id
         if iteration_id is not None:
             self._pending[iteration_id].output_processed = True
@@ -110,22 +98,12 @@ class IterationMetricsCollector:
         return ready
 
     def has_pending_timing(self) -> bool:
-        return bool(self._pending) or self._timing_poll is not None
+        return bool(self._pending)
 
-    def _receive_ready_timing(self) -> None:
-        if self._timing_poll is not None:
-            samples = self._timing_poll()
-            if samples is None:
-                return
-            self._timing_poll = None
-            self.complete_timing_samples(samples)
+    def discard_pending(self) -> None:
+        """Drop idle-tail records; late samples cannot attach to a new iteration.
 
-    def poll_timing(self, executor: Executor) -> None:
-        self._receive_ready_timing()
-        if self._timing_poll is not None:
-            return
-        now = time.monotonic()
-        if not self._pending or now < self._next_timing_poll:
-            return
-        self._next_timing_poll = now + ITERATION_TIMING_POLL_INTERVAL
-        self._timing_poll = executor.start_iteration_timing_poll()
+        Workers retain their CUDA events until ready for normal recycling.
+        Discarding records does not imply GPU completion.
+        """
+        self._pending.clear()

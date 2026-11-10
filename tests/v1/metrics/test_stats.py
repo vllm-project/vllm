@@ -6,8 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from vllm.v1.core.sched.output import (
-    CachedRequestData,
-    ScheduledEncoderInputStats,
+    IterationDetails,
     SchedulerOutput,
 )
 from vllm.v1.engine import EngineCoreOutput, EngineCoreOutputs, FinishReason
@@ -25,7 +24,6 @@ from vllm.v1.metrics.stats import (
 )
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
-from vllm.v1.utils import compute_iteration_details
 
 
 def test_iteration_stats_repr():
@@ -67,23 +65,22 @@ def test_iteration_timing_keeps_original_batch_when_results_arrive_late(timing_f
     output = SchedulerOutput.make_empty()
     output.num_scheduled_tokens = {"prefill": 8, "decode": 1}
     output.total_num_scheduled_tokens = 9
-    output.scheduled_cached_reqs = CachedRequestData(
-        req_ids=["prefill", "decode"],
-        new_token_ids=[],
-        new_block_ids=[None, None],
-        num_computed_tokens=[4, 8],
-        num_output_tokens=[0, 1],
-    )
-    output.scheduled_encoder_input_stats = ScheduledEncoderInputStats(
-        num_inputs=2, output_tokens=392
+    output.iteration_details = IterationDetails(
+        num_prefill_requests=1,
+        num_prefill_tokens=8,
+        num_decode_requests=1,
+        num_decode_tokens=1,
+        num_encoder_inputs=2,
+        num_encoder_output_tokens=392,
     )
     collector.begin_iteration(output)
     index = output.iteration_metrics_id
     assert index is not None
 
     output.num_scheduled_tokens.update(prefill=99, decode=7)
-    output.scheduled_encoder_input_stats.num_inputs = 9
-    output.scheduled_encoder_input_stats.output_tokens = 999
+    output.iteration_details.num_prefill_tokens = 99
+    output.iteration_details.num_encoder_inputs = 9
+    output.iteration_details.num_encoder_output_tokens = 999
     model_output = ModelRunnerOutput([])
     samples = ((index, 12.0),)
     if timing_first:
@@ -130,44 +127,35 @@ def test_dummy_tail_timings_survive_more_than_batch_queue_depth():
 
 
 @pytest.mark.parametrize("dummy", [False, True])
-def test_completed_idle_timing_poll_is_consumed_when_inference_resumes(dummy):
+def test_idle_tail_is_discarded_without_losing_ready_or_resumed_records(dummy):
     collector = IterationMetricsCollector()
-    old_id = collector.begin_dummy_iteration()
-    submitted = []
-
-    def start_poll():
-        submitted.append(True)
-        return lambda: ((old_id, 10.0),)
-
-    collector.poll_timing(SimpleNamespace(start_iteration_timing_poll=start_poll))
+    old_ids = [collector.begin_dummy_iteration() for _ in range(3)]
+    collector.complete_timing_samples(((old_ids[0], 10.0),))
+    collector.discard_pending()
+    assert not collector.has_pending_timing()
     if dummy:
         iteration_id = collector.begin_dummy_iteration()
-        collector.complete_timing_samples(((iteration_id, 20.0),))
     else:
         output = SchedulerOutput.make_empty()
         output.num_scheduled_tokens = {"request": 1}
         output.total_num_scheduled_tokens = 1
-        output.scheduled_cached_reqs = CachedRequestData(
-            req_ids=["request"],
-            new_token_ids=[],
-            new_block_ids=[None],
-            num_computed_tokens=[8],
-            num_output_tokens=[1],
+        output.iteration_details = IterationDetails(
+            num_decode_requests=1, num_decode_tokens=1
         )
         collector.begin_iteration(output)
         iteration_id = output.iteration_metrics_id
-        collector.complete_iteration(
-            output,
-            ModelRunnerOutput([], iteration_timing_samples=((iteration_id, 20.0),)),
-        )
+        collector.complete_iteration(output, ModelRunnerOutput([]))
+    assert iteration_id is not None and iteration_id > old_ids[-1]
+    collector.complete_timing_samples(
+        tuple((old_id, 12.0) for old_id in old_ids[1:]) + ((iteration_id, 20.0),)
+    )
     records = collector.take_ready()
     assert [record.iteration_index for record in records] == [
-        old_id,
+        old_ids[0],
         iteration_id,
     ]
     assert [record.elapsed_ms for record in records] == [10, 20]
     assert not collector.has_pending_timing()
-    assert submitted == [True]  # No new timing RPC on the active inference path.
 
 
 @pytest.mark.parametrize("stats_owner", [None, 0, 3])
@@ -296,19 +284,6 @@ def test_prefix_cache_stats_hits_by_source_serialization():
         CacheHitSource.P2P: 4,
         CacheHitSource.HOST: 4,
     }
-
-
-def test_compute_iteration_details_includes_encoder_stats():
-    scheduler_output = SchedulerOutput.make_empty()
-    scheduler_output.scheduled_encoder_input_stats = ScheduledEncoderInputStats(
-        num_inputs=2,
-        output_tokens=392,
-    )
-
-    iteration_details = compute_iteration_details(scheduler_output)
-
-    assert iteration_details.num_encoder_inputs == 2
-    assert iteration_details.num_encoder_output_tokens == 392
 
 
 def test_prefill_kv_computed_with_cache():
