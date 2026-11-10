@@ -1563,7 +1563,8 @@ where
     )
     .await
     .expect("connect client");
-    let chat = ChatLlm::from_shared_backend(Llm::new(client), Arc::new(FakeChatBackend::new()));
+    let chat =
+        ChatLlm::from_shared_backend(EngineCoreLlm::new(client), Arc::new(FakeChatBackend::new()));
     (
         build_router(Arc::new(AppState::new(
             vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
@@ -1583,10 +1584,9 @@ async fn test_app_with_batch_engine(
                 let mut requests = Vec::with_capacity(expected_prompts.len());
                 for expected_prompt in expected_prompts {
                     let add = recv_engine_message(dealer).await;
-                    let request: EngineCoreRequest =
-                        rmp_serde::from_slice(&add[1]).expect("decode request");
+                    let request = decode_add_request(&add);
                     assert_eq!(
-                        request.prompt_token_ids.as_deref(),
+                        decode_prompt_token_ids(&request).as_deref(),
                         Some(expected_prompt.as_slice())
                     );
                     requests.push(request);
@@ -1603,8 +1603,7 @@ async fn test_app_with_batch_engine(
                                     Some(EngineCoreFinishReason::Stop),
                                     None,
                                     Some(sample_logprobs_for_tokens(&bytes_to_token_ids(b"hi!"))),
-                                    request
-                                        .prompt_token_ids
+                                    decode_prompt_token_ids(request)
                                         .as_deref()
                                         .filter(|tokens| tokens.len() > 1)
                                         .map(prompt_logprobs_for_tokens),
@@ -6227,10 +6226,7 @@ async fn completions_batch_error_aborts_siblings_before_the_client_reads_done() 
                     let mut requests = Vec::new();
                     for _ in 0..2 {
                         let add = recv_engine_message(dealer).await;
-                        requests.push(
-                            rmp_serde::from_slice::<EngineCoreRequest>(&add[1])
-                                .expect("decode request"),
-                        );
+                        requests.push(decode_add_request(&add));
                     }
                     send_outputs(
                         push,
@@ -6315,8 +6311,7 @@ async fn completions_batch_late_lowering_error_aborts_submitted_prompt() {
             |dealer, _push| {
                 boxed_test_future(async move {
                     let add = recv_engine_message(dealer).await;
-                    let request: EngineCoreRequest =
-                        rmp_serde::from_slice(&add[1]).expect("decode submitted request");
+                    let request = decode_add_request(&add);
                     let abort =
                         tokio::time::timeout(Duration::from_secs(5), recv_engine_message(dealer))
                             .await
@@ -7843,50 +7838,55 @@ async fn completions_happy_path_returns_sse_stream() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn completions_batch_stream_uses_prompt_indices_and_one_total_usage() {
-    let (app, engine_task) = test_app_with_batch_engine(vec![
-        bytes_to_token_ids(b"hello"),
-        bytes_to_token_ids(b"world!"),
-    ])
-    .await;
-    let response = app
-        .clone()
-        .call(
-            Request::builder()
-                .method("POST")
-                .uri("/v1/completions")
-                .header("content-type", "application/json")
-                .body(Body::from(
-                    json!({
-                        "model": "Qwen/Qwen1.5-0.5B-Chat",
-                        "prompt": ["hello", "world!"],
-                        "stream": true,
-                        "stream_options": {"include_usage": true},
-                        "add_special_tokens": false
-                    })
-                    .to_string(),
-                ))
-                .expect("build request"),
-        )
-        .await
-        .expect("call app");
+    for n in [1, 2] {
+        let prompts = [bytes_to_token_ids(b"hello"), bytes_to_token_ids(b"world!")];
+        let expected =
+            prompts.into_iter().flat_map(|prompt| std::iter::repeat_n(prompt, n)).collect();
+        let (app, engine_task) = test_app_with_batch_engine(expected).await;
+        let response = app
+            .clone()
+            .call(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/completions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "model": "Qwen/Qwen1.5-0.5B-Chat",
+                            "prompt": ["hello", "world!"],
+                            "n": n,
+                            "stream": true,
+                            "stream_options": {"include_usage": true},
+                            "add_special_tokens": false
+                        })
+                        .to_string(),
+                    ))
+                    .expect("build request"),
+            )
+            .await
+            .expect("call app");
 
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
-    engine_task.await.expect("mock engine task");
-    let text = String::from_utf8(body.to_vec()).expect("utf8 body");
-    let payloads = sse_data_payloads(&text);
-    let json_payloads = sse_json_payloads(&text);
-    assert_eq!(
-        payloads.iter().filter(|payload| **payload == "[DONE]").count(),
-        1
-    );
-    assert!(json_payloads.iter().any(|payload| payload["choices"][0]["index"] == 0));
-    assert!(json_payloads.iter().any(|payload| payload["choices"][0]["index"] == 1));
-    let usage_chunks: Vec<_> =
-        json_payloads.iter().filter(|payload| payload["choices"] == json!([])).collect();
-    assert_eq!(usage_chunks.len(), 1, "{text}");
-    assert_eq!(usage_chunks[0]["usage"]["prompt_tokens"], 11);
-    assert_eq!(usage_chunks[0]["usage"]["completion_tokens"], 6);
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+        engine_task.await.expect("mock engine task");
+        let text = String::from_utf8(body.to_vec()).expect("utf8 body");
+        let payloads = sse_data_payloads(&text);
+        let json_payloads = sse_json_payloads(&text);
+        assert_eq!(
+            payloads.iter().filter(|payload| **payload == "[DONE]").count(),
+            1
+        );
+        let indices: BTreeSet<_> = json_payloads
+            .iter()
+            .filter_map(|payload| payload["choices"][0]["index"].as_u64())
+            .collect();
+        assert_eq!(indices, (0..(2 * n) as u64).collect());
+        let usage_chunks: Vec<_> =
+            json_payloads.iter().filter(|payload| payload["choices"] == json!([])).collect();
+        assert_eq!(usage_chunks.len(), 1, "{text}");
+        assert_eq!(usage_chunks[0]["usage"]["prompt_tokens"], 11);
+        assert_eq!(usage_chunks[0]["usage"]["completion_tokens"], 6 * n);
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -7900,9 +7900,7 @@ async fn dropping_completions_batch_stream_aborts_every_prompt() {
                 let mut request_ids = BTreeSet::new();
                 for _ in 0..BATCH_SIZE {
                     let add = recv_engine_message(dealer).await;
-                    let request: EngineCoreRequest =
-                        rmp_serde::from_slice(&add[1]).expect("decode request");
-                    request_ids.insert(request.request_id);
+                    request_ids.insert(decode_add_request(&add).request_id);
                 }
                 let mut aborted = BTreeSet::new();
                 while aborted.len() < request_ids.len() {

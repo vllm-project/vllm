@@ -32,8 +32,8 @@ use vllm_text::{
 use self::convert::{ResponseOptions, prepare_completion_request};
 pub(crate) use self::types::CompletionRequest;
 use super::utils::logprobs::{
-    append_openai_logprobs, collected_logprobs_to_openai, decoded_logprobs_to_openai, decoded_prompt_logprobs_to_openai,
-    prompt_logprobs_to_maps, text_end_offset, text_len,
+    append_openai_logprobs, collected_logprobs_to_openai, decoded_logprobs_to_openai,
+    decoded_prompt_logprobs_to_openai, prompt_logprobs_to_maps, text_end_offset, text_len,
 };
 use super::utils::metrics::PerRequestMetrics;
 use super::utils::types::{StreamResponseEnvelope, Usage};
@@ -86,7 +86,8 @@ pub async fn completions(
     let prompts = std::mem::replace(
         &mut body.prompt,
         types::CompletionPrompt::Text(String::new()),
-    ).into_prompts();
+    )
+    .into_prompts();
     if prompts.is_empty() {
         return ApiError::invalid_request("You must pass at least one prompt", Some("prompt"))
             .into_response();
@@ -98,7 +99,12 @@ pub async fn completions(
     for prompt in prompts {
         let mut item = body.clone();
         item.prompt = prompt.into();
-        let prepared = match prepare_completion_request(item, &lora, context.clone(), text.request_processor()) {
+        let prepared = match prepare_completion_request(
+            item,
+            &lora,
+            context.clone(),
+            text.request_processor(),
+        ) {
             Ok(prepared) => prepared,
             Err(error) => return error.into_response(),
         };
@@ -114,13 +120,23 @@ pub async fn completions(
         }
         if !text.has_tokenizer()
             && prepared.options.requested_logprobs.is_some()
-            && !prepared.options.return_tokens_as_token_ids.unwrap_or(options.default_return_tokens_as_token_ids)
+            && !prepared
+                .options
+                .return_tokens_as_token_ids
+                .unwrap_or(options.default_return_tokens_as_token_ids)
         {
-            return text_submit_error("invalid completion request", vllm_text::Error::TokenizerUnavailable)
-                .into_response();
+            return text_submit_error(
+                "invalid completion request",
+                vllm_text::Error::TokenizerUnavailable,
+            )
+            .into_response();
         }
         if is_batch && let Err(error) = prepared.text_request.validate() {
-            return completion_submission_error(text_submit_error("invalid completion request", error), streaming, options);
+            return completion_submission_error(
+                text_submit_error("invalid completion request", error),
+                streaming,
+                options,
+            );
         }
         prepared_requests.push(prepared);
     }
@@ -147,47 +163,77 @@ pub async fn completions(
                 );
             }
         };
-        submitted.push((streams, prepared.request_id, prepared.response_model, prepared.options));
+        submitted.push((
+            streams,
+            prepared.request_id,
+            prepared.response_model,
+            prepared.options,
+        ));
     }
 
     if streaming {
         let multiple_prompts = submitted.len() > 1;
         let mut offset = 0;
-        let groups: Vec<CompletionChunkStream> = submitted.into_iter().map(|(streams, id, model, response_options)| {
-            let start = offset;
-            offset += streams.len() as u32;
-            let chunks = streams.into_iter().map(|stream| {
-                completion_chunk_stream(
-                    stream, id.clone(), model.clone(), created, fingerprint.clone(),
-                    options, response_options.clone(),
-                )
-            }).collect();
-            Box::pin(merge_choice_chunk_streams(chunks).map(move |item| item.map(|mut chunk| {
-                if multiple_prompts {
-                    chunk.clear_metrics();
-                }
-                if let CompletionSseChunk::Chunk(response) = &mut chunk {
-                    for choice in &mut response.choices {
-                        choice.index += start;
-                    }
-                }
-                chunk
-            }))) as CompletionChunkStream
-        }).collect();
-        let stream = completion_sse_stream(merge_prompt_chunk_streams(groups)).instrument(request_span);
+        let groups: Vec<CompletionChunkStream> = submitted
+            .into_iter()
+            .map(|(streams, id, model, response_options)| {
+                let start = offset;
+                offset += streams.len() as u32;
+                let chunks = streams
+                    .into_iter()
+                    .map(|stream| {
+                        completion_chunk_stream(
+                            stream,
+                            id.clone(),
+                            model.clone(),
+                            created,
+                            fingerprint.clone(),
+                            options,
+                            response_options.clone(),
+                        )
+                    })
+                    .collect();
+                Box::pin(merge_choice_chunk_streams(chunks).map(move |item| {
+                    item.map(|mut chunk| {
+                        if multiple_prompts {
+                            chunk.clear_metrics();
+                        }
+                        if let CompletionSseChunk::Chunk(response) = &mut chunk {
+                            for choice in &mut response.choices {
+                                choice.index += start;
+                            }
+                        }
+                        chunk
+                    })
+                })) as CompletionChunkStream
+            })
+            .collect();
+        let stream =
+            completion_sse_stream(merge_prompt_chunk_streams(groups)).instrument(request_span);
         sse_response(stream, options.sse_keep_alive_interval)
     } else {
-        let responses = future::try_join_all(submitted.into_iter().map(|(streams, id, model, response_options)| {
-            let fingerprint = fingerprint.clone();
-            async move {
-                future::try_join_all(streams.into_iter().map(|stream| {
-                    collect_completion(
-                        stream, id.clone(), model.clone(), created, fingerprint.clone(),
-                        options, response_options.clone(),
-                    )
-                })).await.map(merge_choice_responses)
-            }
-        })).instrument(request_span).await;
+        let responses = future::try_join_all(submitted.into_iter().map(
+            |(streams, id, model, response_options)| {
+                let fingerprint = fingerprint.clone();
+                async move {
+                    future::try_join_all(streams.into_iter().map(|stream| {
+                        collect_completion(
+                            stream,
+                            id.clone(),
+                            model.clone(),
+                            created,
+                            fingerprint.clone(),
+                            options,
+                            response_options.clone(),
+                        )
+                    }))
+                    .await
+                    .map(merge_choice_responses)
+                }
+            },
+        ))
+        .instrument(request_span)
+        .await;
         match responses {
             Ok(responses) => Json(merge_prompt_responses(responses)).into_response(),
             Err(error) => error.into_response(),
@@ -195,10 +241,17 @@ pub async fn completions(
     }
 }
 
-fn completion_submission_error(error: ApiError, streaming: bool, options: ApiServerOptions) -> Response {
+fn completion_submission_error(
+    error: ApiError,
+    streaming: bool,
+    options: ApiServerOptions,
+) -> Response {
     if streaming {
         let chunks = futures::stream::once(async move { Err::<CompletionSseChunk, _>(error) });
-        sse_response(completion_sse_stream(chunks), options.sse_keep_alive_interval)
+        sse_response(
+            completion_sse_stream(chunks),
+            options.sse_keep_alive_interval,
+        )
     } else {
         error.into_response()
     }
@@ -208,7 +261,10 @@ fn completion_submission_error(error: ApiError, streaming: bool, options: ApiSer
 fn add_prompt_usage(usage: &mut Usage, other: &Usage) {
     usage.prompt_tokens += other.prompt_tokens;
     usage.add_choice(other);
-    if let (Some(details), Some(other)) = (&mut usage.prompt_tokens_details, &other.prompt_tokens_details) {
+    if let (Some(details), Some(other)) = (
+        &mut usage.prompt_tokens_details,
+        &other.prompt_tokens_details,
+    ) {
         details.cached_tokens += other.cached_tokens;
         details.created_cache_tokens += other.created_cache_tokens;
     }

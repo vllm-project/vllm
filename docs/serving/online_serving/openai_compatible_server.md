@@ -36,6 +36,12 @@ We currently support the following OpenAI APIs:
 
 ## Completions API
 
+`/v1/completions` accepts one prompt or a batch of prompts on both frontends.
+Pass a string or a flat token ID array for one prompt, or use
+`["Hello", "World"]` or `[[9707], [10134]]` for a batch. Batch inputs must be
+non-empty and homogeneous. Choice indices follow prompt order; streaming
+chunks can arrive interleaved. Usage counts input tokens once per prompt.
+
 In your terminal, you can [install](../../getting_started/installation/README.md) vLLM, then start the server with the [`vllm serve`](../../configuration/serve_args.md) command. (You can also use our [Docker](../../deployment/docker.md) image.)
 
 ```bash
