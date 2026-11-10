@@ -133,15 +133,6 @@ def test_dspark_loads_all_local_eplb_redundant_experts(monkeypatch, model_type):
     monkeypatch.setattr(
         dspark_module, "fused_moe_make_expert_params_mapping", capture_mapping
     )
-    monkeypatch.setattr(
-        dspark_module, "get_tensor_model_parallel_world_size", lambda: 1
-    )
-    monkeypatch.setattr(dspark_module, "get_tensor_model_parallel_rank", lambda: 0)
-    monkeypatch.setattr(
-        dspark_module.DSparkDeepseekV4ForCausalLM,
-        "process_weights_after_loading",
-        lambda self: None,
-    )
 
     draft = object.__new__(dspark_module.DSparkDeepseekV4ForCausalLM)
     nn.Module.__init__(draft)

@@ -1760,17 +1760,19 @@ class SpeculativeConfig:
                 and target_parallel_config.prefill_context_parallel_size == 1
                 and target_parallel_config.data_parallel_size == 1
             ):
-                redundant_override_hint = (
-                    " Remove eplb_config.draft_num_redundant_experts and"
+                remediation = (
+                    " If you want to disable draft EPLB, remove "
+                    "eplb_config.draft_num_redundant_experts and set "
+                    "speculative_config.draft_enable_eplb=false."
                     if requested_redundant_experts is not None
-                    else ""
+                    else " To disable draft EPLB, set "
+                    "speculative_config.draft_enable_eplb=false."
                 )
                 raise ValueError(
                     "EPLB for a DSpark draft requires its tensor parallel size, "
                     "prefill context parallel size, or data parallel size to "
                     "be greater than 1."
-                    f"{redundant_override_hint} To disable draft EPLB, set "
-                    "speculative_config.draft_enable_eplb=false."
+                    f"{remediation}"
                 )
             draft_parallel_config = target_parallel_config
             draft_num_experts = (
@@ -1838,24 +1840,28 @@ class SpeculativeConfig:
             minimum_counts = {(-count) % ep_size for count in draft_expert_counts}
             if len(minimum_counts) == 1:
                 self.resolved_draft_num_redundant_experts = next(iter(minimum_counts))
-                reason = (
-                    "not specified"
-                    if requested_redundant_experts is None
-                    else "not divisible by the EP size"
-                )
+            else:
+                self.resolved_draft_num_redundant_experts = (
+                    -default_num_experts
+                ) % ep_size
+            if requested_redundant_experts is None:
                 logger.info_once(
-                    "Draft EPLB redundant expert count %s, defaulting to "
-                    "minimum valid value: %d "
+                    "Draft EPLB redundant expert count not specified, "
+                    "defaulting to minimum valid value: %d "
                     "(routed_expert_counts=%s, ep_size=%d)",
-                    reason,
                     self.resolved_draft_num_redundant_experts,
                     tuple(sorted(draft_expert_counts)),
                     ep_size,
                 )
             else:
-                self.resolved_draft_num_redundant_experts = (
-                    -default_num_experts
-                ) % ep_size
+                logger.warning_once(
+                    "Ignoring invalid eplb_config.draft_num_redundant_experts=%d "
+                    "for routed_expert_counts=%s and ep_size=%d; using %d.",
+                    requested_redundant_experts,
+                    tuple(sorted(draft_expert_counts)),
+                    ep_size,
+                    self.resolved_draft_num_redundant_experts,
+                )
         draft_parallel_config = replace(
             draft_parallel_config,
             eplb_config=replace(

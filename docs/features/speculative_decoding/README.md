@@ -149,8 +149,10 @@ only apply to model-based methods such as `draft_model`, `mtp`, `eagle3`, and
 | `fly_entropy_threshold` | `float >= 0` | `0.3` | Minimum target top-k entropy required for FLy to defer a native rejection. |
 | `fly_entropy_top_k` | `integer >= 1` | `3` | Number of largest processed target probabilities used by FLy's entropy gate, capped at the vocabulary size. |
 
-Set a draft's redundant expert count with
-`eplb_config.draft_num_redundant_experts`; see the
+For an EPLB-backed MoE draft, set its redundant expert count with
+`eplb_config.draft_num_redundant_experts` in addition to configuring
+speculative decoding; the count setting is ignored without a speculative MoE
+draft. See the
 [EPLB deployment guide](../../serving/expert_parallel_deployment.md#multimodel-eplb-with-speculative-decoding).
 
 !!! note

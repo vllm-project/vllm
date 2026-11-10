@@ -2176,6 +2176,7 @@ def test_draft_eplb_defaults_from_draft_expert_count(
 def test_draft_eplb_defaults_to_minimum_for_unset_or_invalid_count(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
     draft_redundant: int | None,
 ):
     monkeypatch.setattr(current_platform, "is_cuda_alike", lambda: True)
@@ -2198,6 +2199,15 @@ def test_draft_eplb_defaults_to_minimum_for_unset_or_invalid_count(
     )
     draft_vllm_config = speculative_config.apply_draft_eplb_overrides(base_vllm_config)
     assert draft_vllm_config.parallel_config.eplb_config.num_redundant_experts == 2
+    if draft_redundant is not None:
+        warning = next(
+            record.getMessage()
+            for record in caplog.records
+            if record.levelname == "WARNING"
+            and "eplb_config.draft_num_redundant_experts" in record.getMessage()
+        )
+        assert "=1" in warning
+        assert "using 2" in warning
 
 
 @pytest.mark.skip_global_cleanup
@@ -2300,7 +2310,10 @@ def test_dspark_eplb_requires_draft_parallelism(
         ValueError,
         match=(
             "EPLB for a DSpark draft requires its tensor parallel size, "
-            "prefill context parallel size, or data parallel size"
+            "prefill context parallel size, or data parallel size to be "
+            "greater than 1. If you want to disable draft EPLB, remove "
+            "eplb_config.draft_num_redundant_experts and set "
+            "speculative_config.draft_enable_eplb=false."
         ),
     ):
         SpeculativeConfig(
