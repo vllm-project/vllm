@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, call
 
 import pytest
 
-from vllm import LLM
+from vllm import LLM, TokensPrompt
 from vllm.exceptions import ProfilerAlreadyActiveError
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.v1.engine.llm_engine import LLMEngine
@@ -254,6 +254,21 @@ def test_parallel_sampling(vllm_model, example_prompts) -> None:
                 f"{len(completion_counts)} unique completions; expected"
                 f" {n}. Repeats: {repeats}"
             )
+
+
+def test_parallel_sampling_num_cached_tokens(vllm_runner) -> None:
+    """Siblings share the prompt, so a later child hits the blocks an earlier
+    one just computed; that is not a prefix cache hit for the request."""
+    prompt = TokensPrompt(prompt_token_ids=list(range(100, 164)))
+    with _vllm_model(True, vllm_runner) as vllm_model:
+        llm: LLM = vllm_model.llm
+        params = SamplingParams(n=4, temperature=0.95, max_tokens=1)
+        [cold] = llm.generate(prompt, params)
+        [warm] = llm.generate(prompt, params)
+        [warm_n1] = llm.generate(prompt, SamplingParams(max_tokens=1))
+
+    assert cold.num_cached_tokens == 0
+    assert warm.num_cached_tokens == warm_n1.num_cached_tokens > 0
 
 
 def test_engine_metrics(vllm_runner, example_prompts):
