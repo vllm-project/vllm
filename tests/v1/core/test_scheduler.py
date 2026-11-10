@@ -1269,6 +1269,32 @@ def test_cache_aware_admission_prefers_cached_prefix():
     assert [r.req_id for r in output.scheduled_new_reqs] == ["warm", "cold"]
 
 
+def test_shortest_prefill_first_policy_admits_cached_request_first():
+    """Under the shortest_prefill_first policy, a later request whose prompt is
+    mostly cached is admitted ahead of an earlier one that must compute all of
+    its prompt."""
+    scheduler, warm, cold = _setup_cache_aware(
+        scheduling_policy="shortest_prefill_first"
+    )
+    assert scheduler.shortest_prefill_first is not None
+    scheduler.add_request(cold)
+    scheduler.add_request(warm)
+
+    output = scheduler.schedule()
+    assert [r.req_id for r in output.scheduled_new_reqs] == ["warm", "cold"]
+
+
+def test_fcfs_policy_admits_in_arrival_order():
+    """The same queue under the default fcfs policy keeps arrival order."""
+    scheduler, warm, cold = _setup_cache_aware()
+    assert scheduler.shortest_prefill_first is None
+    scheduler.add_request(cold)
+    scheduler.add_request(warm)
+
+    output = scheduler.schedule()
+    assert [r.req_id for r in output.scheduled_new_reqs] == ["cold", "warm"]
+
+
 @pytest.mark.parametrize("window", [0, 4])
 def test_cache_aware_admission_protects_resident_prefix_from_eviction(window: int):
     """The point of the reordering, not just its ordering.

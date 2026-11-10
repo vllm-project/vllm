@@ -50,10 +50,12 @@ from vllm.v1.core.sched.output import (
     SchedulerOutput,
 )
 from vllm.v1.core.sched.request_queue import (
+    FCFSRequestQueue,
     RequestQueue,
     SchedulingPolicy,
     create_request_queue,
 )
+from vllm.v1.core.sched.shortest_prefill_first import ShortestPrefillFirstAdmission
 from vllm.v1.core.sched.utils import check_stop, remove_all
 from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
 from vllm.v1.kv_cache_interface import (
@@ -405,6 +407,11 @@ class Scheduler(SchedulerInterface):
         self.cache_aware_threshold = (
             self.scheduler_config.cache_aware_admission_threshold
         )
+        self.shortest_prefill_first = (
+            ShortestPrefillFirstAdmission(self.kv_cache_manager)
+            if self.policy == SchedulingPolicy.SHORTEST_PREFILL_FIRST
+            else None
+        )
 
         self.has_mamba_layers = kv_cache_config.has_mamba_layers
         self.needs_kv_cache_zeroing = kv_cache_config.needs_kv_cache_zeroing
@@ -684,6 +691,10 @@ class Scheduler(SchedulerInterface):
 
     def schedule(self, throttle_prefills: bool = False) -> SchedulerOutput:
         self.current_step += 1
+        if self.shortest_prefill_first is not None:
+            queue = self.kv_holding_waiting or self.waiting
+            assert isinstance(queue, FCFSRequestQueue)
+            self.shortest_prefill_first.promote(queue)
         # NOTE(woosuk) on the scheduling algorithm:
         # There's no "decoding phase" nor "prefill phase" in the scheduler.
         # Each request just has the num_computed_tokens and
