@@ -104,6 +104,8 @@ def get_1d_sincos_pos_embed(embed_dim, t_size, cls_token=False):
 class Learnable2DInterpPosEmbDivided_fixed(nn.Module):
     """2D learnable position embedding with temporal extension."""
 
+    time_weight: torch.Tensor
+
     def __init__(
         self,
         height: int,
@@ -132,6 +134,19 @@ class Learnable2DInterpPosEmbDivided_fixed(nn.Module):
     def reset_parameters(self):
         nn.init.normal_(self.weight)
 
+    def _get_time_weight(self) -> torch.Tensor:
+        # `time_weight` is a non-persistent buffer: no checkpoint tensor fills
+        # it, so a tower built on the meta device (lazy weight loading) keeps
+        # a data-less buffer. Rebuild it on first use.
+        if self.time_weight.is_meta:
+            self.time_weight = (
+                torch.from_numpy(get_1d_sincos_pos_embed(self.dim, self.num_frames))
+                .float()
+                .unsqueeze(1)
+                .to(self.weight.device)
+            )
+        return self.time_weight
+
     def get_pos_embeds(self, grid_thws: torch.Tensor | list[list[int]]) -> torch.Tensor:
         pos_embs = []
         grid_thw_list = grid_thws if isinstance(grid_thws, list) else grid_thws.tolist()
@@ -149,8 +164,10 @@ class Learnable2DInterpPosEmbDivided_fixed(nn.Module):
             if t == 1:
                 pos_emb_3d = pos_emb_2d
             else:
-                pos_emb_3d = (
-                    pos_emb_2d.unsqueeze(0).repeat(t, 1, 1) + self.time_weight[0:t]
+                pos_emb_3d = pos_emb_2d.unsqueeze(0).repeat(
+                    t, 1, 1
+                ) + self._get_time_weight()[0:t].to(
+                    device=pos_emb_2d.device, dtype=pos_emb_2d.dtype
                 )
 
             pos_embs.append(pos_emb_3d.reshape(-1, pos_emb_3d.shape[-1]))

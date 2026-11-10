@@ -151,6 +151,11 @@ def _to_pil(data: Any) -> Image.Image:
         data = data.media
     if isinstance(data, Image.Image):
         return data if data.mode == "RGB" else data.convert("RGB")
+    if isinstance(data, torch.Tensor):
+        data = data.cpu().numpy()
+    if isinstance(data, np.ndarray):
+        # Decoded video frames arrive as HWC uint8 RGB arrays.
+        return Image.fromarray(data).convert("RGB")
     if isinstance(data, str):
         if data.startswith("data:"):
             raw_base64 = data.split(",", 1)[1]
@@ -211,6 +216,22 @@ class KimiK25FusedVisionProcessor(BaseImageProcessor):
             frame = media_input["video_chunk"][0]
             width, height = frame.size
             num_frames = len(media_input["video_chunk"])
+            frame_limit = media_input.get("in_patch_limit_each_frame")
+            if frame_limit is not None:
+                # The caller split the whole video's patch budget across all of
+                # its sampled frames already (Kimi-K3 video), so every frame of
+                # this chunk uses exactly that limit.
+                ret = navit_resize_image(
+                    width,
+                    height,
+                    self.media_proc_cfg["patch_size"],
+                    self.media_proc_cfg["merge_kernel_size"],
+                    int(frame_limit),
+                    self.media_proc_cfg["patch_limit_on_one_side"],
+                    self.media_proc_cfg["fixed_output_tokens"],
+                )
+                ret["sampled_nframes"] = num_frames
+                return ret
             in_patch_limit_each_frame = self.media_proc_cfg["in_patch_limit_each_frame"]
             if in_patch_limit_each_frame is None:
                 in_patch_limit_each_frame = self.media_proc_cfg["in_patch_limit"]
