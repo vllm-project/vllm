@@ -566,7 +566,7 @@ class EncoderCudaGraphManager:
     ) -> None:
         n = src.shape[0]
         dst[:n].copy_(src)
-        dst[n:] = src[-1] if n else 0
+        dst[n:] = src[-1]
 
     @classmethod
     def _get_padding_logic(
