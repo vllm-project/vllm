@@ -45,8 +45,8 @@ def bench_run(
     size_n: int,
 ):
     label = "Quant Matmul"
-    sub_label = "{}, q={}, g={}, MKN=({}x{}x{})".format(
-        model, str(quant_type), group_size, size_m, size_k, size_n
+    sub_label = (
+        f"{model}, q={quant_type}, g={group_size}, MKN=({size_m}x{size_k}x{size_n})"
     )
     print(f"Testing: {sub_label}")
 

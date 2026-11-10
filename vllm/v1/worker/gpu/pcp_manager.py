@@ -260,7 +260,7 @@ class PCPManager:
         num_scheduled_tokens: np.ndarray,
         is_prefilling: np.ndarray,
     ) -> Iterator[tuple[int, int, int]]:
-        """Yield ``(request index, query offset, length)`` for one PCP rank.
+        """Yield `(request index, query offset, length)` for one PCP rank.
 
         PCP=4 partitions each prefill into eight chunks:
 
