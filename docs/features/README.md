@@ -1,5 +1,7 @@
 # Features
 
+- [Nemotron Elastic serving](nemotron_elastic.md): select full, sliced, or automatic width per request.
+
 ## KV Cache Offloading
 
 - [UMBPStoreConnector](umbp_store_connector_usage.md)

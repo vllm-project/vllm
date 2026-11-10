@@ -189,6 +189,8 @@ class Request:
 
         self.spec_token_ids: list[int] = []
         self.num_computed_tokens = 0
+        # The current slice survives preemption, including a full cache rebuild.
+        self.elastic_transition_position: int | None = None
         self.cache_salt: str | None = cache_salt
 
         # Multi-modal related

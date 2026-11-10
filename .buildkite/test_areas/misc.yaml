@@ -366,6 +366,7 @@ steps:
     - image-build-cpu
   source_file_dependencies:
     - vllm/config/
+    - vllm/model_executor/models/nemotron_h_elastic.py
     - vllm/distributed/
     - "!vllm/distributed/kv_transfer/"
     - vllm/engine/

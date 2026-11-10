@@ -40,6 +40,9 @@ class BeamSearchOnlineMixin(ABC):
         session_id: str | None = None,
         priority: int = 0,
     ) -> AsyncGenerator[RequestOutput, None]:
+        config = self.engine_client.input_processor.model_config
+        if getattr(config.hf_config, "elastic_use_lazy_slicing", False):
+            raise ValueError("Beam search is not supported for Elastic models")
         beam_width = params.beam_width
         max_tokens = params.max_tokens
         ignore_eos = params.ignore_eos

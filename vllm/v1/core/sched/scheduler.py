@@ -9,6 +9,7 @@ from typing import Any
 
 from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.config import KVEventsConfig, VllmConfig
+from vllm.config.elastic import ElasticConfig
 from vllm.distributed.aux_output_connector.connector import AuxOutputSchedulerConnector
 from vllm.distributed.ec_transfer.ec_connector.base import (
     ECConnectorBase,
@@ -96,6 +97,8 @@ class Scheduler(SchedulerInterface):
         log_stats: bool = False,
     ) -> None:
         self.vllm_config = vllm_config
+        self.elastic = ElasticConfig.from_vllm_config(vllm_config)
+        self.elastic_phase: str | None = None
         self.scheduler_config = vllm_config.scheduler_config
         self.cache_config = vllm_config.cache_config
         self.lora_config = vllm_config.lora_config
@@ -684,6 +687,22 @@ class Scheduler(SchedulerInterface):
 
     def schedule(self, throttle_prefills: bool = False) -> SchedulerOutput:
         self.current_step += 1
+        if self.elastic is not None:
+            eligible: Iterable[Request] = self.running
+            if (
+                len(self.running) + self.num_waiting_for_streaming_input
+                < self.max_num_active_reqs
+            ):
+                eligible = itertools.chain(
+                    eligible, self.kv_holding_waiting, self.waiting
+                )
+            self.elastic_phase = self.elastic.select_phase(eligible, self.elastic_phase)
+        self.kv_cache_manager.new_step_starts()
+        return self._schedule(throttle_prefills)
+
+    def _schedule(
+        self, throttle_prefills: bool, *, allow_elastic_retry: bool = True
+    ) -> SchedulerOutput:
         # NOTE(woosuk) on the scheduling algorithm:
         # There's no "decoding phase" nor "prefill phase" in the scheduler.
         # Each request just has the num_computed_tokens and
@@ -733,8 +752,6 @@ class Scheduler(SchedulerInterface):
         # For logging.
         scheduled_timestamp = time.monotonic()
 
-        self.kv_cache_manager.new_step_starts()
-
         # DP prefill balancing: on a throttled (non-cadence-aligned) step, defer
         # all prefill compute unless saturated.
         defer_prefills = (
@@ -762,6 +779,12 @@ class Scheduler(SchedulerInterface):
         req_index = 0
         while req_index < len(self.running) and token_budget > 0:
             request = self.running[req_index]
+            if (
+                self.elastic is not None
+                and self.elastic.request_phase(request) != self.elastic_phase
+            ):
+                req_index += 1
+                continue
             if input_budget <= draft_slots:
                 break
 
@@ -1031,9 +1054,12 @@ class Scheduler(SchedulerInterface):
             # Async loads started this step: newer than any block-holder.
             step_started_kv_loads: list[Request] = []
 
-            def skip_request(from_queue: RequestQueue) -> None:
+            def skip_request(from_queue: RequestQueue, *, width_delayed=False) -> None:
                 request_to_skip = from_queue.pop_request()
-                self.deferred_waiting.add(request_to_skip)
+                if width_delayed:
+                    self.deferred_waiting.discard(request_to_skip)
+                else:
+                    self.deferred_waiting.add(request_to_skip)
                 holds_blocks = self._holds_kv_blocks(request_to_skip)
                 if holds_blocks and from_queue is not self.kv_holding_waiting:
                     step_started_kv_loads.append(request_to_skip)
@@ -1079,12 +1105,18 @@ class Scheduler(SchedulerInterface):
                     break
 
                 request = request_queue.peek_request()
-                request_id = request.request_id
-
                 ready_to_schedule = self._handle_blocked_waiting_request(request)
                 if not ready_to_schedule:
                     skip_request(request_queue)
                     continue
+
+                if (
+                    self.elastic is not None
+                    and self.elastic.request_phase(request) != self.elastic_phase
+                ):
+                    skip_request(request_queue, width_delayed=True)
+                    continue
+                request_id = request.request_id
 
                 if request.num_stale_output_tokens and not request.drop_stale_output:
                     # Deliverable stale output still in flight: resuming now
@@ -1646,6 +1678,20 @@ class Scheduler(SchedulerInterface):
                 _, num_waiting = self.get_request_counts()
                 self.prefill_capacity_bound = num_waiting > len(self.deferred_waiting)
 
+        # A waiting cohort may not fit in KV while the other width can decode.
+        if (
+            self.elastic is not None
+            and allow_elastic_retry
+            and not num_scheduled_tokens
+            and not preempted_reqs
+            and self._pause_state != PauseState.PAUSED_ALL
+        ):
+            for request in self.running:
+                phase = self.elastic.request_phase(request)
+                if phase != self.elastic_phase:
+                    self.elastic_phase = phase
+                    return self._schedule(throttle_prefills, allow_elastic_retry=False)
+
         # Check if the scheduling constraints are satisfied.
         total_num_scheduled_tokens = sum(num_scheduled_tokens.values())
         assert total_num_scheduled_tokens <= self.max_num_scheduled_tokens
@@ -1733,6 +1779,7 @@ class Scheduler(SchedulerInterface):
             ]
 
         scheduler_output = SchedulerOutput(
+            elastic_phase=self.elastic_phase,
             scheduled_new_reqs=new_reqs_data,
             scheduled_cached_reqs=cached_reqs_data,
             num_scheduled_tokens=num_scheduled_tokens,
@@ -2832,6 +2879,12 @@ class Scheduler(SchedulerInterface):
         # to return empty token ids for the request.
         stopped = False
         for num_new, output_token_id in enumerate(new_token_ids, 1):
+            if (
+                self.elastic is not None
+                and request.elastic_transition_position is None
+                and output_token_id == self.elastic.think_end_token_id
+            ):
+                request.elastic_transition_position = request.num_tokens
             request.append_output_token_ids(output_token_id)
 
             # Check for stop and update request state.

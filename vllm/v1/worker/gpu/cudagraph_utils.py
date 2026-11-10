@@ -30,6 +30,7 @@ from vllm.config.compilation import (
     decode_cudagraph_capture_max_tokens,
     decode_cudagraph_capture_shapes,
 )
+from vllm.config.elastic import ElasticConfig
 from vllm.distributed.parallel_state import (
     get_pp_group,
     graph_capture,
@@ -87,6 +88,7 @@ class BatchExecutionDescriptor:
     num_active_loras: int = 0
     # Number of microbatches the batch is split into (DBO). 1 means no splitting.
     num_ubatches: int = 1
+    elastic_phase: str | None = None
 
 
 def make_cudagraph_stats(
@@ -176,6 +178,9 @@ class CudaGraphManager:
     ):
         self.vllm_config = vllm_config
         self.decode_request_sizes = decode_request_sizes
+        elastic = ElasticConfig.from_vllm_config(vllm_config)
+        self.elastic_profiles = tuple(elastic.profiles) if elastic is not None else ()
+        self.elastic_phase = next(iter(self.elastic_profiles), None)
         self.device = device
         self.max_num_reqs = vllm_config.scheduler_config.max_num_seqs
         self.compilation_config = vllm_config.compilation_config
@@ -216,11 +221,11 @@ class CudaGraphManager:
 
         # (num_tokens, num_active_loras) -> token-keyed descriptors to try.
         self._candidates: dict[tuple[int, int], list[BatchExecutionDescriptor]] = {}
-        # (query_len, num_active_loras, num_ubatches) -> uniform decode
+        # (query_len, num_active_loras, num_ubatches, elastic_phase) -> uniform decode
         # descriptors indexed by request count: entry n is the smallest graph
         # that takes n requests.
         self._decode_descs: dict[
-            tuple[int, int, int], list[BatchExecutionDescriptor]
+            tuple[int, int, int, str | None], list[BatchExecutionDescriptor]
         ] = {}
         self._capture_descs: dict[CUDAGraphMode, list[BatchExecutionDescriptor]] = {}
 
@@ -382,6 +387,18 @@ class CudaGraphManager:
                 if ubatch_desc is not None:
                     token_keyed_descs.append(ubatch_desc)
 
+        if self.elastic_profiles:
+            decode_descs = [
+                replace(desc, elastic_phase=phase)
+                for desc in decode_descs
+                for phase in self.elastic_profiles
+            ]
+            token_keyed_descs = [
+                replace(desc, elastic_phase=phase)
+                for desc in token_keyed_descs
+                for phase in self.elastic_profiles
+            ]
+
         descs_by_mode: defaultdict[CUDAGraphMode, list[BatchExecutionDescriptor]] = (
             defaultdict(list)
         )
@@ -394,12 +411,17 @@ class CudaGraphManager:
         # A uniform decode batch looks up its request count among the graphs of
         # its own query length, so one query length never shadows another.
         decode_groups: defaultdict[
-            tuple[int, int, int], list[BatchExecutionDescriptor]
+            tuple[int, int, int, str | None], list[BatchExecutionDescriptor]
         ] = defaultdict(list)
         for desc in decode_descs:
             assert desc.uniform_token_count is not None
             decode_groups[
-                (desc.uniform_token_count, desc.num_active_loras, desc.num_ubatches)
+                (
+                    desc.uniform_token_count,
+                    desc.num_active_loras,
+                    desc.num_ubatches,
+                    desc.elastic_phase,
+                )
             ].append(desc)
         for decode_key, decode_group in decode_groups.items():
             table: list[BatchExecutionDescriptor] = []
@@ -577,12 +599,20 @@ class CudaGraphManager:
             candidates = self._candidates.get((num_tokens, effective_loras), [])
             if uniform_token_count is not None:
                 decode_descs = self._decode_descs.get(
-                    (uniform_token_count, effective_loras, num_ubatches), []
+                    (
+                        uniform_token_count,
+                        effective_loras,
+                        num_ubatches,
+                        self.elastic_phase,
+                    ),
+                    [],
                 )
                 n = cdiv(num_tokens, uniform_token_count)
                 if n < len(decode_descs):
                     candidates = [decode_descs[n], *candidates]
             for desc in candidates:
+                if desc.elastic_phase != self.elastic_phase:
+                    continue
                 if _is_compatible(
                     desc,
                     num_reqs,
@@ -737,6 +767,8 @@ class ModelCudaGraphManager(CudaGraphManager):
         def create_forward_fn(
             desc: BatchExecutionDescriptor, warmup: bool
         ) -> Callable[[CUDAGraphMode], None]:
+            if desc.elastic_phase is not None:
+                model.set_elastic_phase(desc.elastic_phase)
             num_tokens = desc.num_tokens
             num_reqs = desc.num_reqs or min(num_tokens, self.max_num_reqs)
 

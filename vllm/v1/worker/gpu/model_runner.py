@@ -1865,6 +1865,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     scheduler_output, empty_output
                 )
 
+        if scheduler_output.elastic_phase is not None:
+            assert self.cudagraph_manager is not None
+            self.model.set_elastic_phase(scheduler_output.elastic_phase)
+            self.cudagraph_manager.elastic_phase = scheduler_output.elastic_phase
+
         # Get batch descriptor and sync across DP ranks.
         num_reqs = len(scheduler_output.num_scheduled_tokens)
         num_toks = scheduler_output.total_num_scheduled_tokens

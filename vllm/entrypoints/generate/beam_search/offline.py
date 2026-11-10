@@ -82,6 +82,8 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
         """
         # TODO: how does beam search work together with length penalty,
         # frequency, penalty, and stopping criteria, etc.?
+        if getattr(self.model_config.hf_config, "elastic_use_lazy_slicing", False):
+            raise ValueError("Beam search is not supported for Elastic models")
         beam_width = params.beam_width
         max_tokens = params.max_tokens
         temperature = params.temperature
