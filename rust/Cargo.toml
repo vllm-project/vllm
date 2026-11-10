@@ -154,7 +154,7 @@ vllm-text = { path = "src/text" }
 vllm-tokenizer = { path = "src/tokenizer" }
 vllm-tracing = { path = "src/tracing" }
 winnow = { version = "1.0.2", features = ["simd"] }
-xgrammar-structural-tag = "0.4.1"
+xgrammar-structural-tag = "0.5.0"
 zeromq = { git = "https://github.com/zeromq/zmq.rs", rev = "67dcba97559ebe8e8206dab753710d8b9cb07591", default-features = false, features = [
     "tokio-runtime",
     "all-transport",
@@ -176,3 +176,8 @@ tokenizers = { opt-level = 3 }
 [profile.release]
 lto = "thin"
 panic = "abort"
+
+[patch.crates-io]
+# TODO: use the registry release once xgrammar-structural-tag 0.5.0 is published
+# (Inferact/xgrammar-structural-tag#1).
+xgrammar-structural-tag = { git = "https://github.com/Inferact/xgrammar-structural-tag", rev = "f884814a9f3f859f3444b0c6e301639bf52e2fc0" }
