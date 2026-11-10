@@ -410,10 +410,11 @@ The AOT key is computed before tracing from the content of the installed
 vLLM, FlashInfer, QuACK, CuTe DSL and TVM FFI code and binaries (and of the
 whole package for kernels defined elsewhere), the host, the GPU, the CUDA
 driver and runtime, the compile options, and the kernel and its arguments.
-It also includes every `CUTE_*`, `CUTLASS_*`, `FLASHINFER_*`, `NVIDIA_TF32*`,
-`FA_*`, `FLASH_ATTENTION_*` and `QUACK_*` variable except these cache, dump and
-library locations: `CUTE_DSL_CACHE_DIR`, `CUTE_DSL_DUMP_DIR`, `CUTE_DSL_LIBS`,
-`FLASH_ATTENTION_CUTE_DSL_CACHE_DIR` and `QUACK_CACHE_DIR`. Installation paths
+It also includes every `CUTE_*`, `CUTLASS_*`, `FLASHINFER_*`, `MEGA_*`,
+`NVIDIA_TF32*`, `FA_*`, `FLASH_ATTENTION_*` and `QUACK_*` variable except
+these cache, dump and library locations: `CUTE_DSL_CACHE_DIR`,
+`CUTE_DSL_DUMP_DIR`, `CUTE_DSL_LIBS`, `FLASH_ATTENTION_CUTE_DSL_CACHE_DIR`
+and `QUACK_CACHE_DIR`. Installation paths
 and file timestamps are not part of the key, so nodes with identical
 software, GPUs and settings can share the directory. FlashInfer's workspace
 and cubin directory variables are part of the key, so set them to the same
@@ -428,8 +429,14 @@ processes without a CUDA device and results that cannot be exported. A
 missing, damaged, older-format or unloadable entry is a miss and is replaced
 by the recompiled kernel. A read-only cache directory still serves hits; one
 that cannot be created disables the cache. A kernel loaded from the cache is
-called like the compiled one, but using another attribute of it (such as
-`export_to_c`) compiles the kernel first.
+called like the compiled one, and its `to()` and `library` refer to the loaded
+kernel. Using another attribute of it (such as `export_to_c`) compiles the
+kernel first, and later calls run that compiled kernel.
+
+Nothing removes old entries, and any change to what the key covers writes a
+new set, so the directory grows with each upgrade. It can be deleted at any
+time: running workers keep the kernels they loaded, and the next start
+compiles and saves the missing ones.
 
 Each GPU worker logs the AOT hits, misses, fallbacks and timings after
 warmup (`CuTe DSL AOT cache: ...`). `--jit-monitor-mode=error` still rejects

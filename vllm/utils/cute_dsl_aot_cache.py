@@ -18,9 +18,9 @@ binary depend on:
 - the host (CPU architecture, OS, libc, Python), the GPU (name, compute
   capability, SM count), the CUDA runtime and driver versions and the torch,
   CuTe DSL, FlashInfer, QuACK and TVM FFI distribution versions;
-- every `CUTE_*`, `CUTLASS_*`, `FLASHINFER_*`, `NVIDIA_TF32*`, `FA_*`,
-  `FLASH_ATTENTION_*` and `QUACK_*` variable except the cache and dump
-  locations in `_LOCATION_ENVS`;
+- every `CUTE_*`, `CUTLASS_*`, `FLASHINFER_*`, `MEGA_*`, `NVIDIA_TF32*`,
+  `FA_*`, `FLASH_ATTENTION_*` and `QUACK_*` variable except the cache and
+  dump locations in `_LOCATION_ENVS`;
 - the compile options, the callable (function, closure, defaults and, for
   methods and kernel objects, the instance state; every function, class and
   enum by its full module name, and for code outside the hashed packages, the
@@ -31,9 +31,12 @@ A miss compiles and exports the result as an object file, bypassing the compile
 cache so the saved object has this call's TVM-FFI wrapper. Uncacheable calls
 and deferred compiles can still use the compile cache when both flags are set.
 A hit loads the object with `cute.runtime.load_module` and behaves like the
-compiled function when called; using any other attribute (`export_to_c`, ...)
-compiles the kernel for real first, reported to the JIT monitor like a `cute.compile`
-call, so callers that export or inspect the result keep working. An entry that
+compiled function when called, and `to()` and `library` come from the loaded
+function, so settings made through them apply to the kernel that runs. Using
+any other attribute (`export_to_c`, ...) compiles the kernel for real first,
+reported to the JIT monitor like a `cute.compile` call, so callers that export
+or inspect the result keep working; from then on calls, `to()` and `library`
+use the compiled kernel too. An entry that
 passes its checksum but fails to load is replaced by the recompiled result,
 unless another process has already replaced it.
 
@@ -117,11 +120,13 @@ _KEY_DISTRIBUTIONS = (
     "quack-kernels",
     "apache-tvm-ffi",
 )
-# What the DSL, FlashInfer, FA4 and QuACK read while tracing.
+# What the DSL, FlashInfer, FA4 and QuACK read while tracing. FlashInfer's
+# MegaMoE kernels read `MEGA_*` (e.g. MEGA_USE_NCU) in traced code.
 _KEY_ENV_PREFIXES = (
     "CUTE_",
     "CUTLASS_",
     "FLASHINFER_",
+    "MEGA_",
     "NVIDIA_TF32",
     "FA_",
     "FLASH_ATTENTION_",
@@ -943,14 +948,23 @@ def _export(
     return True
 
 
+# What a loaded function provides itself, on the same CUDA library its calls
+# use: callers set driver attributes (such as the shared-memory carveout) on the
+# kernel they get from `library`.
+_LOADED_ATTRIBUTES = frozenset({"to", "library"})
+
+
 class _LoadedKernel:
     """A kernel loaded from the cache.
 
-    Calls go straight to the loaded function. Any other attribute (for
-    example `export_to_c`) comes from the kernel compiled as usual, on first
-    use, so code written against a compiled function keeps working on a hit.
-    That compile does not pass through `cute.compile`, so it is reported to
-    the JIT monitor itself.
+    Calls go straight to the loaded function, and so do `_LOADED_ATTRIBUTES`
+    when it has them. Any other attribute (for example `export_to_c`) comes
+    from the kernel compiled as usual, on first use, so code written against a
+    compiled function keeps working on a hit. Once compiled, that kernel also
+    serves calls and `_LOADED_ATTRIBUTES`, so whatever a caller configures
+    through an attribute applies to the kernel that runs; settings made on the
+    loaded function before that do not carry over. That compile does not pass
+    through `cute.compile`, so it is reported to the JIT monitor itself.
     """
 
     __slots__ = ("_name", "_fn", "_module", "_compile_fn", "_compiled", "_lock")
@@ -966,7 +980,8 @@ class _LoadedKernel:
         self._lock = threading.Lock()
 
     def __call__(self, *args, **kwargs):
-        return self._fn(*args, **kwargs)
+        compiled = self._compiled
+        return (self._fn if compiled is None else compiled)(*args, **kwargs)
 
     def _compile(self) -> Any:
         from vllm.utils import jit_monitor
@@ -984,6 +999,12 @@ class _LoadedKernel:
             name.startswith("__") and name.endswith("__")
         ):
             raise AttributeError(name)
+        if (
+            self._compiled is None
+            and name in _LOADED_ATTRIBUTES
+            and hasattr(type(self._fn), name)
+        ):
+            return getattr(self._fn, name)
         return getattr(self._compile(), name)
 
 

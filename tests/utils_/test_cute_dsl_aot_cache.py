@@ -127,6 +127,8 @@ def test_env_identity_ignores_only_cache_locations():
         ("FA_DISABLE_2CTA", "1"),
         ("FLASH_ATTENTION_NUM_SMS", "148"),
         ("FLASHINFER_ANY_SETTING", "1"),
+        # FlashInfer's MegaMoE selects its replay protocol at trace time.
+        ("MEGA_USE_NCU", "1"),
         ("NVIDIA_TF32_OVERRIDE", "0"),
         ("QUACK_ARCH", "100"),
     ]:
@@ -832,6 +834,79 @@ def test_restored_attributes_preserve_kernel_name(aot_runtime):
     assert loaded._name == aot._name(warm)
     assert warm.tile == 128
     assert isinstance(warm.layout, aot._TraceOnly)
+
+
+@pytest.fixture
+def loaded_functions(aot_runtime, monkeypatch):
+    """Compiled and loaded functions whose calls, `to()` and `library` share
+    one CUDA library, as CuTe DSL's do."""
+    CompileCallable, _ = aot_runtime
+    compiles: list[None] = []
+
+    class Library:
+        carveout = None
+
+    class Function:
+        def __init__(self, origin):
+            self.origin, self._library = origin, Library()
+
+        def __call__(self):
+            return self.origin, self._library.carveout
+
+        def dump_to_object(self, prefix):
+            return b"object"
+
+        def to(self, device=None):
+            return self
+
+        @property
+        def library(self):
+            return self._library
+
+    class Kernel:
+        def __call__(self):
+            compiles.append(None)
+            return Function("compiled")
+
+    monkeypatch.setattr(
+        sys.modules["cutlass.base_dsl.jit_executor"], "JitCompiledFunction", Function
+    )
+    monkeypatch.setattr(
+        sys.modules["cutlass.cute"],
+        "runtime",
+        SimpleNamespace(
+            load_module=lambda *args, **kwargs: {
+                f"vllm_aot_{_KEY[:24]}": Function("loaded")
+            }
+        ),
+    )
+    assert aot.maybe_enable_cute_dsl_aot_cache()
+    CompileCallable()._compile(Kernel())
+    loaded = CompileCallable()._compile(Kernel())
+    assert isinstance(loaded, aot._LoadedKernel)
+    compiles.clear()
+    return loaded, compiles
+
+
+def test_a_hit_configures_the_kernel_it_runs(loaded_functions):
+    """Kimi K3's prepare_shared_carveout sets a driver attribute on the kernel
+    in `compiled.library`, then launches through `compiled(...)`."""
+    loaded, compiles = loaded_functions
+    deferred = aot.get_aot_cache_stats().get("deferred_compiles", 0)
+    executor = loaded.to(0)
+    loaded.library.carveout = 100
+    assert loaded() == executor() == ("loaded", 100)
+    assert compiles == []
+    assert aot.get_aot_cache_stats().get("deferred_compiles", 0) == deferred
+
+
+def test_after_a_deferred_compile_calls_run_the_compiled_kernel(loaded_functions):
+    loaded, compiles = loaded_functions
+    loaded.dump_to_object("export")
+    assert len(compiles) == 1
+    loaded.library.carveout = 100
+    assert loaded() == loaded.to(0)() == ("compiled", 100)
+    assert len(compiles) == 1
 
 
 def test_aot_export_compiles_bypass_only_the_compile_cache_miss(
