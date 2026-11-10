@@ -242,17 +242,6 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     sweep.add_argument(
-        "--tp-dp-numa-bind-workaround",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help=(
-            "Temporary Xeon TP/DP NUMA-binding workaround. For parallel-layout "
-            "and full sweeps, generate an explicit VLLM_CPU_OMP_THREADS_BIND "
-            "from detected NUMA topology. Enabled by default; disable with "
-            "--no-tp-dp-numa-bind-workaround after the vLLM DP binding fix."
-        ),
-    )
-    sweep.add_argument(
         "--sweep-out-dir",
         default="sweep",
         help="Output directory for optional sweep files (default: sweep).",
@@ -967,37 +956,9 @@ def main() -> int:
             )
 
             if args.detect_hardware:
-                from hardware_detection import (
-                    build_numa_omp_threads_bind,
-                    detect_hardware,
-                )
+                from hardware_detection import detect_hardware
 
                 hardware = detect_hardware()
-
-                if (
-                    args.tp_dp_numa_bind_workaround
-                    and str(recipe_hardware).lower() == "xeon6"
-                    and (
-                        args.generate_parallel_layout_sweep or args.generate_full_sweep
-                    )
-                ):
-                    recipe_env = recipe.get("env") or {}
-                    current_binding = (
-                        recipe_env.get("VLLM_CPU_OMP_THREADS_BIND")
-                        if isinstance(recipe_env, dict)
-                        else None
-                    )
-
-                    # Preserve an explicit recipe-provided manual binding.
-                    # Replace an unset or "auto" value with the temporary
-                    # topology-derived binding.
-                    if current_binding in (None, "auto"):
-                        env_overrides["VLLM_CPU_OMP_THREADS_BIND"] = (
-                            build_numa_omp_threads_bind(
-                                hardware,
-                                reserved_cores_per_numa=1,
-                            )
-                        )
 
             tuning = finetune_runtime_config(
                 config,

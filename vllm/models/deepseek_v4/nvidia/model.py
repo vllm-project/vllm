@@ -572,15 +572,16 @@ def _select_dsv4_attn_cls(vllm_config: VllmConfig) -> type[DeepseekV4Attention]:
 
 def _use_sequence_parallel(vllm_config: VllmConfig) -> bool:
     parallel_config = vllm_config.parallel_config
-    moe_backend = vllm_config.kernel_config.moe_backend
-    moe_needs_token_sharded_input = (
-        moe_backend in MEGA_MOE_BACKENDS or parallel_config.data_parallel_size > 1
+    use_mega_moe = vllm_config.kernel_config.moe_backend in MEGA_MOE_BACKENDS
+    # SP from DP alone is not validated with PP.
+    dp_sp = (
+        parallel_config.data_parallel_size > 1
+        and parallel_config.pipeline_parallel_size == 1
     )
     return (
-        parallel_config.pipeline_parallel_size == 1
-        and parallel_config.enable_expert_parallel
+        parallel_config.enable_expert_parallel
         and parallel_config.tensor_parallel_size > 1
-        and moe_needs_token_sharded_input
+        and (use_mega_moe or dp_sp)
     )
 
 
@@ -724,9 +725,9 @@ class DeepseekV4DecoderLayer(nn.Module):
         mega_gate_metadata: MegaGateRoutingMetadata | None = None,
         reuse_residual: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """With ``reuse_residual``, the caller hands ``residual`` over and the
+        """With `reuse_residual`, the caller hands `residual` over and the
         unfused mHC post/pre writes the next residual into its storage. A first
-        layer that starts from ``residual = x`` never overwrites ``x``."""
+        layer that starts from `residual = x` never overwrites `x`."""
         fused_post_pre = (
             mhc_fused_post_pre_tilelang_reuse_residual
             if reuse_residual
@@ -996,7 +997,6 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             )
 
         residual, post_mix, res_mix = None, None, None
-        remote_aux = self.collect_remote_aux_hidden_states(intermediate_tensors)
         aux_hidden_states: list[torch.Tensor] = []
         final_aux_recon: torch.Tensor | None = None  # avoid duplicate mhc_post call
         for idx, layer in enumerate(
@@ -1032,6 +1032,9 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                     hidden_states, residual, post_mix, res_mix
                 )
 
+        if self.use_sequence_parallel:
+            hidden_states = sp_all_gather(hidden_states)[:full_num_tokens]
+
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
                 {
@@ -1039,9 +1042,6 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                     **self.pack_local_aux_hidden_states(aux_hidden_states),
                 }
             )
-
-        if self.use_sequence_parallel:
-            hidden_states = sp_all_gather(hidden_states)[:full_num_tokens]
 
         if self._mtp_hidden_buffer is not None:
             num_tokens = hidden_states.shape[0]
@@ -1056,7 +1056,6 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             self.hc_eps,
         )
         hidden_states = self.norm(hidden_states)
-        aux_hidden_states = remote_aux + aux_hidden_states
         if len(aux_hidden_states) > 0:
             return hidden_states, aux_hidden_states
         return hidden_states
@@ -1323,7 +1322,6 @@ class DeepseekV4ForCausalLM(
     SupportsLoRA,
     DeepseekV4MixtureOfExperts,
 ):
-    finalizes_weights_during_load = True
     model_cls = DeepseekV4Model
 
     # Default mapper assumes the original FP4-expert checkpoint layout.
@@ -1411,9 +1409,7 @@ class DeepseekV4ForCausalLM(
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
-        loaded_params = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
-        self.process_weights_after_loading()
-        return loaded_params
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def process_weights_after_loading(self) -> None:
         self.model.finalize_mhc_broadcast_weights()

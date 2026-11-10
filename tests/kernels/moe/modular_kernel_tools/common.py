@@ -247,13 +247,16 @@ class Config:
             env_dict["VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4"] = "1"
 
         vllm_config.parallel_config.all2all_backend = self.all2all_backend()
+        # "mori" labels the MORI EPv2 prepare/finalize here.
+        if self.all2all_backend() == "mori":
+            vllm_config.parallel_config.mori_ep_v2 = True
 
         return vllm_config, env_dict
 
     def fp8_quant_key_pair(self) -> tuple[QuantKey, QuantKey]:
         """Derive the (weight_quant_key, activation_quant_key) pair an FP8
         quant config of this shape corresponds to (either OCP or FNUZ FP8,
-        see ``current_platform.fp8_dtype()``)."""
+        see `current_platform.fp8_dtype()`)."""
         if self.quant_block_shape is not None:
             return kFp8Static128BlockSym, kFp8Dynamic128Sym
         if self.is_per_out_ch_quant:
@@ -317,17 +320,13 @@ class Config:
     def is_fp8_block_quantized(self):
         return is_fp8(self.quant_dtype) and self.quant_block_shape is not None
 
-    def is_batched_prepare_finalize(self):
+    def prepare_finalize_format(self):
         info = prepare_finalize_info(self.prepare_finalize_type)
-        return mk.FusedMoEActivationFormat.BatchedExperts == info.activation_format
+        return info.activation_format
 
-    def is_batched_fused_experts(self):
+    def fused_experts_format(self):
         info = expert_info(self.fused_experts_type)
-        return mk.FusedMoEActivationFormat.BatchedExperts == info.activation_format
-
-    def is_standard_fused_experts(self):
-        info = expert_info(self.fused_experts_type)
-        return mk.FusedMoEActivationFormat.Standard == info.activation_format
+        return info.activation_format
 
     def fe_supported_types(self):
         info = expert_info(self.fused_experts_type)
@@ -366,7 +365,11 @@ class Config:
 
     def needs_mori(self):
         info = prepare_finalize_info(self.prepare_finalize_type)
-        return info.backend in ("mori_high_throughput", "mori_low_latency")
+        return info.backend in (
+            "mori_high_throughput",
+            "mori_low_latency",
+            "mori",
+        )
 
     def all2all_backend(self):
         info = prepare_finalize_info(self.prepare_finalize_type)
@@ -374,12 +377,14 @@ class Config:
 
     def is_valid(self) -> tuple[bool, str | None]:
         # Check prepare-finalize and fused-experts compatibility
-        if self.is_batched_prepare_finalize():
-            if not self.is_batched_fused_experts():
-                return False, "Mismatched format."
-        else:
-            if not self.is_standard_fused_experts():
-                return False, "Mismatched format."
+        if not self.fused_experts_format().is_superset(self.prepare_finalize_format()):
+            return (
+                False,
+                (
+                    f"Mismatched format {self.prepare_finalize_format()}"
+                    f" -> {self.fused_experts_format()}."
+                ),
+            )
 
         # Check quantization sanity
         if (

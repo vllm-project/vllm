@@ -26,6 +26,7 @@ from vllm.distributed.ec_transfer.ec_connector.utils import (
 from vllm.inputs import MultiModalDataDict, MultiModalInput
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.cache import MultiModalProcessorOnlyCache
+from vllm.multimodal.cache.base import MultiModalCache
 from vllm.multimodal.inputs import MultiModalFeatureSpec, batched_tensors_equal
 from vllm.multimodal.processing import BaseMultiModalProcessor, InputProcessingContext
 from vllm.platforms import current_platform
@@ -296,6 +297,38 @@ def random_vision_chunk(
         frames.append(frame)
     video_array = np.stack(frames, axis=0)
     return {"type": "video_chunk", "video_chunk": video_array}
+
+
+@pytest.mark.parametrize("order", [(2, 0, 1), (2, 0, 1, 0), (0, 2, 1)])
+def test_processor_cache_preserves_hits_when_request_exceeds_capacity(order):
+    """Within-request eviction must preserve tensors, tokens and placeholders."""
+    model = "llava-hf/llava-1.5-7b-hf"
+    config = ModelConfig(model, limit_mm_per_prompt={"image": 4})
+    processor = MULTIMODAL_REGISTRY.create_processor(config)
+    images = [Image.new("RGB", (112, 112), c) for c in ("red", "green", "blue")]
+
+    def process(selected, cache=None):
+        data = {"image": selected}
+        return processor(
+            get_token_prompt(processor, data),
+            mm_items=processor.info.parse_mm_data(data),
+            cache=cache,
+        )
+
+    reference = process(images)
+    capacity = sum(
+        MultiModalCache.get_item_size(item)
+        for item in reference["mm_kwargs"]["image"][:2]
+    )
+    cache = MultiModalProcessorOnlyCache(
+        ModelConfig(model, mm_processor_cache_gb=capacity / (1 << 30))
+    )
+    for _ in range(2):
+        process(images[:2], cache)
+        selected = [images[idx] for idx in order]
+        actual = process(selected, cache)
+        expected = process(selected)
+        _assert_inputs_equal(actual, expected)
 
 
 def _test_processing_correctness(
