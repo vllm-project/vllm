@@ -4,7 +4,6 @@
 all-gather and the stock PyTorch reference of mHC post, pre and RMSNorm."""
 
 import pytest
-import ray
 import torch
 
 from vllm.distributed.parallel_state import get_tp_group
@@ -15,11 +14,7 @@ from vllm.model_executor.layers.fused_moe.moe_output import (
 )
 from vllm.platforms import current_platform
 
-from ...utils import (
-    ensure_model_parallel_initialized,
-    init_test_distributed_environment,
-    multi_process_parallel,
-)
+from .tp4 import TP, run_tp4
 
 HIDDEN, HC, SINKHORN, EPS, TOP_K = 4096, 4, 20, 1e-6, 8
 
@@ -62,92 +57,84 @@ def _inputs(tokens, rank, device):
     )
 
 
-@ray.remote(num_gpus=1, max_calls=1)
-def _boundary(monkeypatch, tp_size, pp_size, rank, distributed_init_port):
+def _boundary(rank, device):
     from vllm.models.glm5next.nvidia.specialized_decode.all_reduce_mhc import (
         AllReduceMhcBoundary,
     )
 
-    with monkeypatch.context() as m:
-        m.delenv("CUDA_VISIBLE_DEVICES", raising=False)
-        device = torch.device(f"cuda:{rank}")
-        torch.accelerator.set_device_index(device)
-        init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
-        ensure_model_parallel_initialized(tp_size, pp_size)
-        # Larger batches share each cluster between tokens; 37 and 64 end on a
-        # short group.
-        op = AllReduceMhcBoundary(
-            hidden_size=HIDDEN, max_num_tokens=64, top_k=TOP_K, rms_eps=EPS,
-            hc_eps=EPS, post_mult=2.0, sinkhorn_repeat=SINKHORN, norm_eps=EPS,
-            device=device, cluster_tokens={6: 2, 16: 2, 37: 3, 48: 4, 64: 5},
-        )  # fmt: skip
+    # Larger batches share each cluster between tokens; 37 and 64 end on a
+    # short group.
+    op = AllReduceMhcBoundary(
+        hidden_size=HIDDEN, max_num_tokens=64, top_k=TOP_K, rms_eps=EPS,
+        hc_eps=EPS, post_mult=2.0, sinkhorn_repeat=SINKHORN, norm_eps=EPS,
+        device=device, cluster_tokens={6: 2, 16: 2, 37: 3, 48: 4, 64: 5},
+    )  # fmt: skip
 
-        def check(outputs, i):
-            peers = get_tp_group().all_gather(i["x"], dim=0).view(tp_size, -1, HIDDEN)
-            ref = _reference(peers, i)
-            # BF16 outputs are one rounding apart at most; the mixes are FP32
-            # and differ only in summation order.
-            torch.testing.assert_close(outputs[0], ref[0], atol=2**-6, rtol=2**-7)
-            torch.testing.assert_close(outputs[1], ref[1], atol=1e-4, rtol=1e-4)
-            torch.testing.assert_close(outputs[2], ref[2], atol=1e-4, rtol=1e-4)
-            torch.testing.assert_close(outputs[3], ref[3], atol=2**-5, rtol=2**-7)
+    def check(outputs, i):
+        peers = get_tp_group().all_gather(i["x"], dim=0).view(TP, -1, HIDDEN)
+        ref = _reference(peers, i)
+        # BF16 outputs are one rounding apart at most; the mixes are FP32
+        # and differ only in summation order.
+        torch.testing.assert_close(outputs[0], ref[0], atol=2**-6, rtol=2**-7)
+        torch.testing.assert_close(outputs[1], ref[1], atol=1e-4, rtol=1e-4)
+        torch.testing.assert_close(outputs[2], ref[2], atol=1e-4, rtol=1e-4)
+        torch.testing.assert_close(outputs[3], ref[3], atol=2**-5, rtol=2**-7)
 
-        # Changing shapes cover shrinking and growing batches in one mailbox.
-        for tokens in (1, 6, 16, 3, 2, 64, 37, 48, 8):
-            i = _inputs(tokens, rank, device)
-            args = [i[k] for k in ("x", "residual", "post", "comb", "fn")]
-            args += [i[k] for k in ("scale", "base", "norm")]
-            eager = op(*args)
+    # Changing shapes cover shrinking and growing batches in one mailbox.
+    for tokens in (1, 6, 16, 3, 2, 64, 37, 48, 8):
+        i = _inputs(tokens, rank, device)
+        args = [i[k] for k in ("x", "residual", "post", "comb", "fn")]
+        args += [i[k] for k in ("scale", "base", "norm")]
+        eager = op(*args)
+        op.join()
+        check(eager, i)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            for _ in range(4):
+                op(*args)
+            captured = op(*args)
             op.join()
-            check(eager, i)
-            graph = torch.cuda.CUDAGraph()
-            with torch.cuda.graph(graph):
-                for _ in range(4):
-                    op(*args)
-                captured = op(*args)
-                op.join()
-            for _ in range(10):
-                graph.replay()
-            check(captured, i)
-            # Replays pick up in-place input changes.
-            i["x"].mul_(0.5)
-            i["residual"].mul_(2)
+        for _ in range(10):
             graph.replay()
-            check(captured, i)
+        check(captured, i)
+        # Replays pick up in-place input changes.
+        i["x"].mul_(0.5)
+        i["residual"].mul_(2)
+        graph.replay()
+        check(captured, i)
 
-            # A MoE output with its top-k reduction open: the fused finalize
-            # must match finalizing first (one FP32 FMA per route in route
-            # order, the shared add, one BF16 rounding).
-            rows = tokens * TOP_K + 5
-            gemm2 = torch.randn(rows, HIDDEN, device=device).bfloat16()
-            permuted = torch.randperm(rows, device=device)[: tokens * TOP_K]
-            permuted = permuted.view(tokens, TOP_K).int()
-            permuted[0, -1] = -1  # an expert this rank does not hold
-            weights = torch.rand(tokens, TOP_K, device=device)
-            routed = UnfinalizedMoEOutput(gemm2, weights, permuted)
-            shared = i["x"]
-            moe = MoEOutput(routed=routed, shared_output=shared)
-            fused = op(moe, *args[1:])
-            acc = torch.zeros(tokens, HIDDEN, device=device)
-            for k in range(TOP_K):
-                valid = (permuted[:, k] >= 0).unsqueeze(-1)
-                rows_k = gemm2[permuted[:, k].clamp_min(0).long()].float()
-                torch.addcmul(
-                    acc,
-                    torch.where(valid, rows_k, 0.0),
-                    torch.where(valid, weights[:, k : k + 1], 0.0),
-                    out=acc,
-                )
-            plain = op((acc + shared.float()).bfloat16(), *args[1:])
-            op.join()
-            for a, b in zip(fused, plain):
-                assert torch.equal(a, b)
+        # A MoE output with its top-k reduction open: the fused finalize
+        # must match finalizing first (one FP32 FMA per route in route
+        # order, the shared add, one BF16 rounding).
+        rows = tokens * TOP_K + 5
+        gemm2 = torch.randn(rows, HIDDEN, device=device).bfloat16()
+        permuted = torch.randperm(rows, device=device)[: tokens * TOP_K]
+        permuted = permuted.view(tokens, TOP_K).int()
+        permuted[0, -1] = -1  # an expert this rank does not hold
+        weights = torch.rand(tokens, TOP_K, device=device)
+        routed = UnfinalizedMoEOutput(gemm2, weights, permuted)
+        shared = i["x"]
+        moe = MoEOutput(routed=routed, shared_output=shared)
+        fused = op(moe, *args[1:])
+        acc = torch.zeros(tokens, HIDDEN, device=device)
+        for k in range(TOP_K):
+            valid = (permuted[:, k] >= 0).unsqueeze(-1)
+            rows_k = gemm2[permuted[:, k].clamp_min(0).long()].float()
+            torch.addcmul(
+                acc,
+                torch.where(valid, rows_k, 0.0),
+                torch.where(valid, weights[:, k : k + 1], 0.0),
+                out=acc,
+            )
+        plain = op((acc + shared.float()).bfloat16(), *args[1:])
+        op.join()
+        for a, b in zip(fused, plain):
+            assert torch.equal(a, b)
 
 
+@pytest.mark.distributed(num_gpus=4)
 @pytest.mark.skipif(
     not current_platform.is_device_capability_family(100), reason="Requires SM100"
 )
-def test_all_reduce_mhc_boundary_matches_reference(monkeypatch):
-    if torch.accelerator.device_count() < 4:
-        pytest.skip("Requires four GPUs with NVLink multicast")
-    multi_process_parallel(monkeypatch, 4, 1, _boundary)
+def test_all_reduce_mhc_boundary_matches_reference():
+    run_tp4(_boundary)
