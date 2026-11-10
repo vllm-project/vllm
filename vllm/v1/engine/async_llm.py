@@ -195,9 +195,7 @@ class AsyncLLM(EngineClient):
             client_index=client_index,
             renderer=renderer,
         )
-        self._health_probe_tasks: dict[
-            int, asyncio.Task[tuple[EngineHealthState, float]]
-        ] = {}
+        self._health_probe_tasks: dict[int, asyncio.Task[EngineHealthState]] = {}
 
         # Loggers.
         self.logger_manager: StatLoggerManager | None = None
@@ -1093,16 +1091,15 @@ class AsyncLLM(EngineClient):
             raise self.dead_error
 
     async def check_health_gpu(self) -> None:
-        """Check that every EngineCore can make progress.
+        """Check that every EngineCore can run the model.
 
-        Each EngineCore reports whether it is sleeping, busy and making
-        progress, or stalled; an idle one runs a GPU probe.
+        Each EngineCore reports whether it is sleeping or busy; an idle one
+        runs a GPU probe.
 
         Raises:
             EngineDeadError: If the EngineCore is dead.
             EngineUnhealthyError: If the engine is not ready. ``reason`` and
-                ``details`` describe why, including the utility calls (e.g.
-                ``collective_rpc``) the EngineCores are executing.
+                ``details`` describe why.
 
         """
         await self.check_health()
@@ -1112,26 +1109,16 @@ class AsyncLLM(EngineClient):
         # asyncio.wait never cancels the probes, so a caller timing out or
         # disconnecting leaves them running for the next caller.
         await asyncio.wait(tasks.values(), timeout=timeout)
-        try:
-            self._raise_if_unhealthy(tasks, timeout)
-        except EngineUnhealthyError as exc:
-            exc.details["in_progress"] = await self._get_in_progress_operations(
-                engine_ranks
-            )
-            raise
+        self._raise_if_unhealthy(tasks, timeout)
 
-    def _health_probe_task(
-        self, engine_rank: int
-    ) -> asyncio.Task[tuple[EngineHealthState, float]]:
+    def _health_probe_task(self, engine_rank: int) -> asyncio.Task[EngineHealthState]:
         """Concurrent `/health_generate` callers share one in-flight probe per
         engine."""
         task = self._health_probe_tasks.get(engine_rank)
         if task is None or task.done():
             task = asyncio.create_task(
                 self.engine_core.check_health_gpu_async(
-                    engine_rank,
-                    envs.VLLM_READY_IDLE_PROBE_CACHE_TTL_S,
-                    envs.VLLM_READY_STALL_TIMEOUT_S,
+                    engine_rank, envs.VLLM_READY_IDLE_PROBE_CACHE_TTL_S
                 )
             )
             task.add_done_callback(
@@ -1142,7 +1129,7 @@ class AsyncLLM(EngineClient):
 
     def _raise_if_unhealthy(
         self,
-        tasks: dict[int, asyncio.Task[tuple[EngineHealthState, float]]],
+        tasks: dict[int, asyncio.Task[EngineHealthState]],
         timeout: float,
     ) -> None:
         states: dict[int, EngineHealthState] = {}
@@ -1160,7 +1147,7 @@ class AsyncLLM(EngineClient):
             if exc is not None:
                 failed[rank] = exc
             else:
-                states[rank] = task.result()[0]
+                states[rank] = task.result()
 
         def ranks_in(state: EngineHealthState) -> list[int]:
             return [rank for rank, s in states.items() if s == state]
@@ -1169,15 +1156,6 @@ class AsyncLLM(EngineClient):
             raise EngineSleepingError(
                 f"Engine is sleeping or paused (engine ranks: {sleeping})",
                 engine_ranks=sleeping,
-            )
-        if stalled := ranks_in(EngineHealthState.STALLED):
-            stall_timeout = envs.VLLM_READY_STALL_TIMEOUT_S
-            raise EngineUnhealthyError(
-                "EngineCore made no model-step progress for "
-                f"{stall_timeout:g}s (engine ranks: {stalled})",
-                reason="stalled",
-                engine_ranks=stalled,
-                stall_timeout_s=stall_timeout,
             )
         if timed_out:
             raise EngineUnhealthyError(
@@ -1194,27 +1172,6 @@ class AsyncLLM(EngineClient):
                 engine_ranks=list(failed),
                 error=repr(next(iter(failed.values()))),
             )
-
-    async def _get_in_progress_operations(
-        self, engine_ranks: list[int]
-    ) -> list[dict[str, Any]]:
-        """Utility calls the EngineCores are executing; answered by each
-        EngineCore's input thread, so blocked busy loops still reply."""
-        operations = await asyncio.wait_for(
-            asyncio.gather(
-                *(
-                    self.engine_core.get_current_operation_async(rank)
-                    for rank in engine_ranks
-                ),
-                return_exceptions=True,
-            ),
-            timeout=envs.VLLM_HEALTH_CHECK_GPU_TIMEOUT,
-        )
-        return [
-            {"operation": op[0], "engine_rank": rank, "elapsed_s": round(op[1], 1)}
-            for rank, op in zip(engine_ranks, operations)
-            if isinstance(op, tuple)
-        ]
 
     async def start_profile(
         self,

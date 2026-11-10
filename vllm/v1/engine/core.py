@@ -109,16 +109,6 @@ HANDSHAKE_TIMEOUT_MINS = 5
 
 _R = TypeVar("_R")  # Return type for collective_rpc
 
-# Utility answered by the input thread, so it works while the busy loop is
-# blocked.
-CURRENT_OPERATION_UTILITY_METHOD = "get_current_operation"
-
-
-def _operation_name(method_name: str, args: tuple) -> str:
-    if method_name == "collective_rpc" and args and isinstance(args[0], str):
-        return f"collective_rpc:{args[0]}"
-    return method_name
-
 
 class EngineCore:
     """Inner loop of vLLM's Engine."""
@@ -252,12 +242,8 @@ class EngineCore:
 
         self.aborts_queue = queue.Queue[list[str]]()
 
-        # /health_generate state: the busy-stall clock, the last passing GPU
-        # probe, and the utility call being executed (read by the input thread).
-        self._was_busy = False
-        self._last_progress_at = time.monotonic()
+        # /health_generate state: when the last GPU probe passed.
         self._last_gpu_probe_at = 0.0
-        self._current_operation: tuple[str, float] | None = None
 
         self._idle_state_callbacks: list[Callable] = []
 
@@ -1055,70 +1041,37 @@ class EngineCore:
         """Check if engine is sleeping at any level."""
         return self.is_scheduler_paused() or self.model_executor.is_sleeping
 
-    def _mark_progress(self) -> None:
-        self._last_progress_at = time.monotonic()
-        # Re-probe the GPU once the engine is idle again.
-        self._last_gpu_probe_at = 0.0
-
-    def _update_progress_clock(self) -> bool:
-        """Return whether the engine is awake and busy.
-
-        The stall clock restarts whenever the engine becomes busy, so time
-        spent idle or paused never counts as a stall.
-        """
-        busy = not self.is_sleeping() and (
+    def _is_busy(self) -> bool:
+        """Whether the engine is awake and has work to step."""
+        return not self.is_sleeping() and (
             getattr(self, "engines_running", False)
             or self.scheduler.has_requests()
             or bool(self.batch_queue)
         )
-        if busy and not self._was_busy:
-            self._mark_progress()
-        self._was_busy = busy
-        return busy
 
-    def check_health_gpu(
-        self, cache_ttl_s: float, stall_timeout_s: float
-    ) -> tuple[EngineHealthState, float]:
+    def check_health_gpu(self, cache_ttl_s: float) -> EngineHealthState:
         """Health check served by the busy loop between steps.
 
-        Returns:
-            The health state, and the seconds since the last model-step
-            progress (0 unless busy).
-
+        A busy engine adds no GPU work; an idle one runs the GPU probe, or
+        reuses a probe that passed within ``cache_ttl_s``.
         """
-        busy = self._update_progress_clock()
         if self.is_sleeping():
-            return EngineHealthState.SLEEPING, 0.0
-        if busy:
-            since_progress = time.monotonic() - self._last_progress_at
-            if 0 < stall_timeout_s < since_progress:
-                return EngineHealthState.STALLED, since_progress
-            return EngineHealthState.BUSY, since_progress
+            return EngineHealthState.SLEEPING
+        if self._is_busy():
+            return EngineHealthState.BUSY
 
         if (
             cache_ttl_s > 0
             and self._last_gpu_probe_at > 0
             and time.monotonic() - self._last_gpu_probe_at < cache_ttl_s
         ):
-            return EngineHealthState.OK, 0.0
+            return EngineHealthState.OK
         self._probe_gpu()
         self._last_gpu_probe_at = time.monotonic()
-        return EngineHealthState.OK, 0.0
+        return EngineHealthState.OK
 
     def _probe_gpu(self) -> None:
         self.model_executor.check_health_gpu()
-
-    def get_current_operation(self) -> tuple[str, float] | None:
-        """The utility call being executed and for how long, if any.
-
-        EngineCoreProc answers this from the input thread, so it gets a reply
-        while the busy loop is blocked inside the call.
-        """
-        operation = self._current_operation
-        if operation is None:
-            return None
-        name, started_at = operation
-        return name, time.monotonic() - started_at
 
     def execute_dummy_batch(self):
         self.model_executor.execute_dummy_batch()
@@ -1650,7 +1603,6 @@ class EngineCoreProc(EngineCore):
 
     def _process_input_queue(self):
         """Exits when an engine step needs to be performed."""
-        self._update_progress_clock()
         waited = False
         while not self.has_work() and self.is_running():
             # Notify callbacks waiting for engine to become idle.
@@ -1681,12 +1633,11 @@ class EngineCoreProc(EngineCore):
 
     def _process_engine_step(self) -> bool:
         """Called only when there are unfinished local requests."""
-        self._update_progress_clock()
         # Step the engine core.
         outputs, model_executed = self.step_fn()
-        # Steps that only run connector cleanup or KV pushes are not stalled.
-        if model_executed or not self.scheduler.has_unfinished_requests():
-            self._mark_progress()
+        if model_executed:
+            # Re-probe the GPU once the engine is idle again.
+            self._last_gpu_probe_at = 0.0
         # Put EngineCoreOutputs into the output queue.
         for output in outputs.items() if outputs else ():
             self.output_queue.put_nowait(output)
@@ -1772,22 +1723,11 @@ class EngineCoreProc(EngineCore):
             if self._reject_utility_in_shutdown(client_idx, call_id, method_name):
                 return
             output = UtilityOutput(call_id)
-
             # Lazily look-up utility method so that failure will be handled/returned.
-            def get_result():
-                method = getattr(self, method_name)
-                converted_args = self._convert_msgspec_args(method, args)
-                if method_name == "check_health_gpu":
-                    return method(*converted_args)
-                self._current_operation = (
-                    _operation_name(method_name, args),
-                    time.monotonic(),
-                )
-                try:
-                    return method(*converted_args)
-                finally:
-                    self._current_operation = None
-
+            get_result = lambda: (
+                (method := getattr(self, method_name))
+                and method(*self._convert_msgspec_args(method, args))
+            )
             enqueue_output = lambda out: self.output_queue.put_nowait(
                 (client_idx, EngineCoreOutputs(utility_output=out))
             )
@@ -2009,15 +1949,6 @@ class EngineCoreProc(EngineCore):
                         if method == FT_UTILITY_METHOD:
                             self.ft_sentinel.handle_command(
                                 client_idx, call_id, args[0]
-                            )
-                            continue
-                        if method == CURRENT_OPERATION_UTILITY_METHOD:
-                            output = UtilityOutput(
-                                call_id,
-                                result=UtilityResult(self.get_current_operation()),
-                            )
-                            self.output_queue.put_nowait(
-                                (client_idx, EngineCoreOutputs(utility_output=output))
                             )
                             continue
                     else:
@@ -2471,10 +2402,6 @@ class DPEngineCoreProc(EngineCoreProc):
                 elif not self.model_executor.is_sleeping:
                     with self.capture_iteration_details(None) as iteration_details:
                         self.execute_dummy_batch()
-                    # A rank that holds requests but scheduled none is stalled,
-                    # even though it keeps the wave alive with dummy batches.
-                    if not local_unfinished_reqs:
-                        self._mark_progress()
                     if iteration_details is not None and not self.has_coordinator:
                         stats = self._make_iteration_details_stats(iteration_details)
                         self.output_queue.put_nowait(

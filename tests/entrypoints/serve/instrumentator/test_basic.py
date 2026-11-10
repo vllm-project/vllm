@@ -238,26 +238,24 @@ async def test_health_check_engine_dead_error():
         (None, None),
         (EngineDeadError(), {"status": "not_ready", "reason": "engine_dead"}),
         (
-            EngineSleepingError("paused", engine_ranks=[0], in_progress=[]),
+            EngineSleepingError("paused", engine_ranks=[0]),
             {
                 "status": "not_ready",
                 "reason": "sleeping",
                 "message": "paused",
                 "engine_ranks": [0],
-                "in_progress": [],
             },
         ),
         (
             EngineUnhealthyError(
-                "timed out",
-                reason="probe_timeout",
-                in_progress=[{"operation": "collective_rpc:update_weights"}],
+                "timed out", reason="probe_timeout", engine_ranks=[1], timeout_s=20.0
             ),
             {
                 "status": "not_ready",
                 "reason": "probe_timeout",
                 "message": "timed out",
-                "in_progress": [{"operation": "collective_rpc:update_weights"}],
+                "engine_ranks": [1],
+                "timeout_s": 20.0,
             },
         ),
     ],

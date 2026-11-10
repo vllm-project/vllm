@@ -50,7 +50,6 @@ class EngineHealthState(str, enum.Enum):
 
     OK = "ok"
     BUSY = "busy"
-    STALLED = "stalled"
     SLEEPING = "sleeping"
 
 

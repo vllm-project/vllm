@@ -10,22 +10,18 @@ import requests
 
 from tests.utils import RemoteOpenAIServer
 
-from .fault_injection import FAULT_DIR_ENV
-
 REPO_ROOT = Path(__file__).resolve().parents[4]
 
-STALL_TIMEOUT_S = 5.0
 PROBE_TIMEOUT_S = 5.0
-DETECT_DEADLINE_S = STALL_TIMEOUT_S + PROBE_TIMEOUT_S + 15.0
+DETECT_DEADLINE_S = PROBE_TIMEOUT_S + 15.0
 
 
 class ReadyProbeServer:
     """A vLLM server with fault injection hooks and readiness helpers."""
 
-    def __init__(self, server: RemoteOpenAIServer, model: str, fault_dir: Path):
+    def __init__(self, server: RemoteOpenAIServer, model: str):
         self.server = server
         self.model = model
-        self.fault_dir = fault_dir
 
     def status(self, path: str = "/health_generate") -> int | None:
         """Return the HTTP status, or None if the server is unreachable."""
@@ -128,22 +124,13 @@ class ReadyProbeServer:
         else:
             call()
 
-    def set_fault(self, name: str) -> None:
-        (self.fault_dir / name).touch()
-
-    def clear_fault(self, name: str) -> None:
-        (self.fault_dir / name).unlink(missing_ok=True)
-
 
 @contextmanager
-def ready_probe_server(model: str, extra_args: list[str], fault_dir: Path):
-    fault_dir.mkdir(parents=True, exist_ok=True)
+def ready_probe_server(model: str, extra_args: list[str]):
     env = {
         "VLLM_SERVER_DEV_MODE": "1",
-        "VLLM_READY_STALL_TIMEOUT_S": str(STALL_TIMEOUT_S),
         "VLLM_HEALTH_CHECK_GPU_TIMEOUT": str(PROBE_TIMEOUT_S),
         "VLLM_READY_IDLE_PROBE_CACHE_TTL_S": "0",
-        FAULT_DIR_ENV: str(fault_dir),
         # The engine processes import the fault injection classes by name.
         "PYTHONPATH": os.pathsep.join(
             p for p in (str(REPO_ROOT), os.environ.get("PYTHONPATH")) if p
@@ -164,11 +151,9 @@ def ready_probe_server(model: str, extra_args: list[str], fault_dir: Path):
         # A module-scoped server and a per-test server can share a GPU.
         "--gpu-memory-utilization",
         "0.2",
-        "--scheduler-cls",
-        "tests.v1.engine.readiness.fault_injection.FaultInjectionScheduler",
         "--worker-extension-cls",
         "tests.v1.engine.readiness.fault_injection.FaultInjectionWorkerExtension",
         *extra_args,
     ]
     with RemoteOpenAIServer(model, args, env_dict=env) as server:
-        yield ReadyProbeServer(server, model, fault_dir)
+        yield ReadyProbeServer(server, model)

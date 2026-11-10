@@ -2,24 +2,16 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Runtime fault injection for `/health_generate` end-to-end tests.
 
-Loaded into the server via ``--scheduler-cls`` / ``--worker-extension-cls``.
-Scheduler faults are toggled with flag files under ``$VLLM_READY_FAULT_DIR``
-(the scheduler lives in the EngineCore process). Worker faults are triggered
-through the dev ``/collective_rpc`` endpoint, which only forwards strings.
+Loaded into the server via ``--worker-extension-cls``. Worker faults are
+triggered through the dev ``/collective_rpc`` endpoint, which only forwards
+strings.
 """
 
-import os
-import time
 from typing import Any
 
 import torch
 
 from vllm.config import VllmConfig
-from vllm.v1.core.sched.async_scheduler import AsyncScheduler
-
-FAULT_DIR_ENV = "VLLM_READY_FAULT_DIR"
-SCHEDULER_STALL = "scheduler_stall"
-UTILITY_HANG = "utility_hang"
 
 
 def _launch_illegal_memory_access() -> None:
@@ -34,29 +26,6 @@ def _launch_illegal_memory_access() -> None:
     _oob_store[(1,)](buf, 1 << 42)
 
 
-class FaultInjectionScheduler(AsyncScheduler):
-    """While the ``scheduler_stall`` flag exists, schedule zero tokens.
-
-    Mimics #45388: requests stay waiting but no tokens are ever scheduled,
-    while the EngineCore busy loop keeps spinning.
-    """
-
-    max_num_scheduled_tokens: int
-
-    def schedule(self, *args, **kwargs):
-        fault_dir = os.environ.get(FAULT_DIR_ENV)
-        if fault_dir is None or not os.path.exists(
-            os.path.join(fault_dir, SCHEDULER_STALL)
-        ):
-            return super().schedule(*args, **kwargs)
-        saved = self.max_num_scheduled_tokens
-        self.max_num_scheduled_tokens = 0
-        try:
-            return super().schedule(*args, **kwargs)
-        finally:
-            self.max_num_scheduled_tokens = saved
-
-
 class FaultInjectionWorkerExtension:
     vllm_config: VllmConfig
     model_runner: Any
@@ -66,13 +35,6 @@ class FaultInjectionWorkerExtension:
         # Dense DP engines keep data_parallel_rank=0; the index is the DP rank.
         rank = self.vllm_config.parallel_config.data_parallel_index
         return rank in {int(r) for r in dp_ranks.split(",")}
-
-    def fault_hang_while_flag_set(self, flag: str) -> None:
-        """Block this control call while the flag exists, like a weight
-        sync stuck waiting on its peers."""
-        path = os.path.join(os.environ[FAULT_DIR_ENV], flag)
-        while os.path.exists(path):
-            time.sleep(0.1)
 
     def fault_ima_now(self, dp_ranks: str) -> None:
         """Launch an illegal memory access without synchronizing.

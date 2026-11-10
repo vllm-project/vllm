@@ -230,13 +230,8 @@ class EngineCoreClient(ABC):
         raise NotImplementedError
 
     async def check_health_gpu_async(
-        self, engine_rank: int, cache_ttl_s: float, stall_timeout_s: float
-    ) -> tuple[EngineHealthState, float]:
-        raise NotImplementedError
-
-    async def get_current_operation_async(
-        self, engine_rank: int
-    ) -> tuple[str, float] | None:
+        self, engine_rank: int, cache_ttl_s: float
+    ) -> EngineHealthState:
         raise NotImplementedError
 
     async def set_weight_version_async(self, weight_version: str) -> None:
@@ -1376,23 +1371,12 @@ class AsyncMPClient(MPClient):
         return [int.from_bytes(engine, "little") for engine in self.core_engines]
 
     async def check_health_gpu_async(
-        self, engine_rank: int, cache_ttl_s: float, stall_timeout_s: float
-    ) -> tuple[EngineHealthState, float]:
-        state, since_progress = await self._call_utility_async(
-            "check_health_gpu",
-            cache_ttl_s,
-            stall_timeout_s,
-            engine=engine_rank.to_bytes(2, "little"),
+        self, engine_rank: int, cache_ttl_s: float
+    ) -> EngineHealthState:
+        state = await self._call_utility_async(
+            "check_health_gpu", cache_ttl_s, engine=engine_rank.to_bytes(2, "little")
         )
-        return EngineHealthState(state), since_progress
-
-    async def get_current_operation_async(
-        self, engine_rank: int
-    ) -> tuple[str, float] | None:
-        operation = await self._call_utility_async(
-            "get_current_operation", engine=engine_rank.to_bytes(2, "little")
-        )
-        return None if operation is None else tuple(operation)
+        return EngineHealthState(state)
 
     async def set_weight_version_async(self, weight_version: str) -> None:
         await self.call_utility_async("set_weight_version", weight_version)
