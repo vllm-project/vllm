@@ -542,12 +542,18 @@ class ServingTokens(GenerateBaseServing):
                 if request.parse_context is not None
                 else 0
             )
+            citation_sources = (
+                request.parse_context.citation_sources
+                if request.parse_context is not None
+                else None
+            )
             try:
                 parsed = await self.online_derenderer.derender_text_choices(
                     final_res.outputs,
                     derender_request,
                     history_tool_call_cnt,
                     final_res.prompt_token_ids,
+                    citation_sources=citation_sources,
                 )
             except (ValueError, VLLMValidationError) as e:
                 return self.create_error_response(e)

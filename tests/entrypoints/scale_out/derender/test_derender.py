@@ -1957,6 +1957,7 @@ def _derender_hermes_chat(
     tokenizer = get_tokenizer(MODEL_NAME)
     renderer = MagicMock()
     renderer.get_tokenizer.return_value = tokenizer
+    renderer.finalize_message.side_effect = lambda p, m: m
     model_config = MagicMock()
     model_config.model = MODEL_NAME
     model_config.hf_config.model_type = "llama"
@@ -2070,6 +2071,7 @@ def _make_derenderer(tokenizer, generation_config: dict | None = None):
     renderer.get_tokenizer.return_value = tokenizer
     renderer.get_eos_token_id.return_value = tokenizer.eos_token_id
     renderer._executor = None
+    renderer.finalize_message.side_effect = lambda p, m: m
     model_config = MagicMock()
     model_config.model = MODEL_NAME
     model_config.hf_config.model_type = "llama"

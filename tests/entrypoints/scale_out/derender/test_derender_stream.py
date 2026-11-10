@@ -42,6 +42,7 @@ from vllm.entrypoints.generate.base.protocol import (
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
     ChatCompletionStreamResponse,
+    ChatMessage,
 )
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
 from vllm.entrypoints.scale_out.derender.serving import ServingDerender
@@ -269,15 +270,20 @@ def tokenizer():
     return get_tokenizer(MODEL_NAME)
 
 
+def _stub_renderer(tokenizer, *, max_workers: int = 1) -> MagicMock:
+    """MagicMock renderer that keeps ``finalize_message`` a no-op passthrough."""
+    renderer = MagicMock()
+    renderer.get_tokenizer.return_value = tokenizer
+    renderer._executor = ThreadPoolExecutor(max_workers=max_workers)
+    renderer.finalize_message.side_effect = lambda parser, message: message
+    return renderer
+
+
 @pytest.fixture(scope="module")
 def derenderer(tokenizer, request):
     """Construct a minimal OnlineDerenderer backed by a stub renderer."""
-    renderer = MagicMock()
-    renderer.get_tokenizer.return_value = tokenizer
-
-    executor = ThreadPoolExecutor(max_workers=1)
-    request.addfinalizer(executor.shutdown)
-    renderer._executor = executor
+    renderer = _stub_renderer(tokenizer)
+    request.addfinalizer(renderer._executor.shutdown)
 
     model_config = MagicMock()
     model_config.hf_config.model_type = "llama"
@@ -305,9 +311,7 @@ def parsed_derenderer(tokenizer):
     `renderer._executor` must be a real `ThreadPoolExecutor`.
     `loop.run_in_executor` cannot submit work to a `MagicMock`.
     """
-    renderer = MagicMock()
-    renderer.get_tokenizer.return_value = tokenizer
-    renderer._executor = ThreadPoolExecutor(max_workers=2)
+    renderer = _stub_renderer(tokenizer, max_workers=2)
 
     model_config = MagicMock()
     model_config.hf_config.model_type = "llama"
@@ -400,6 +404,7 @@ async def test_parsed_derender_leaves_out_stop_token_like_engine(
         renderer.get_tokenizer.return_value = tokenizer
         renderer.get_eos_token_id.return_value = eos
         renderer._executor = executor
+        renderer.finalize_message.side_effect = lambda p, m: m
         model_config = MagicMock()
         model_config.hf_config.model_type = "llama"
         model_config.model = MODEL_NAME
@@ -519,6 +524,97 @@ def test_derender_text_choices_drops_tool_calls_without_tool_choice(
 
     assert not message.tool_calls
     assert finish_reason == "stop"
+
+
+def _derenderer_without_hf_tokenizer():
+    """OnlineDerenderer stub that never downloads a HuggingFace tokenizer."""
+    renderer = MagicMock()
+    renderer.get_tokenizer.return_value = MagicMock()
+    renderer._executor = ThreadPoolExecutor(max_workers=1)
+    renderer.finalize_message.side_effect = lambda parser, message: message
+    model_config = MagicMock()
+    model_config.hf_config.model_type = "llama"
+    model_config.model = "stub"
+    model_config.try_get_generation_config.return_value = {}
+    return OnlineDerenderer(
+        model_config=model_config,
+        renderer=renderer,
+        request_logger=None,
+        chat_template=None,
+        chat_template_content_format="string",
+    )
+
+
+def test_derender_text_choices_installs_citation_sources_and_finalizes(monkeypatch):
+    """citation_sources reach the parser before parse; real finalize runs."""
+    from vllm.entrypoints.cohere.cohere_chat_message import (
+        Citation,
+        CitationSource,
+        CohereChatMessage,
+    )
+    from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
+        CitationSourceEntry,
+    )
+    from vllm.renderers.cohere import CohereRenderer
+
+    derenderer = _derenderer_without_hf_tokenizer()
+    parser = MagicMock()
+    parser.parse.return_value = (None, "The capital is Paris.", None)
+    parser.last_unary_citations = [
+        Citation(
+            start=15,
+            end=20,
+            text="Paris",
+            sources=[CitationSource(type="document", id="doc-paris")],
+        )
+    ]
+    monkeypatch.setattr(derenderer, "parser", MagicMock(return_value=parser))
+    # Call the real Cohere override so deleting it fails this test.
+    derenderer.renderer.finalize_message.side_effect = lambda p, message: (
+        CohereRenderer.finalize_message(derenderer.renderer, p, message)
+    )
+    sources = [
+        CitationSourceEntry(
+            bucket=0,
+            idx=1,
+            source={"type": "document", "id": "doc-paris"},
+        )
+    ]
+    output = MagicMock(text="raw", token_ids=[1, 2], finish_reason="stop")
+
+    ((message, finish_reason),) = derenderer._derender_text_choices(
+        [output],
+        ParseContext().to_chat_request(),
+        0,
+        None,
+        citation_sources=sources,
+    )
+
+    parser.set_citation_sources.assert_called_once_with(sources)
+    assert isinstance(message, CohereChatMessage)
+    assert message.citations is not None
+    assert message.citations[0].sources[0].id == "doc-paris"
+    assert finish_reason == "stop"
+    derenderer.renderer._executor.shutdown(wait=False)
+
+
+def test_derender_text_choices_finalize_noop_without_citations(monkeypatch):
+    """A non-Cohere finalize_message leaves the plain ChatMessage unchanged."""
+    derenderer = _derenderer_without_hf_tokenizer()
+    parser = MagicMock()
+    parser.parse.return_value = (None, "hello", None)
+    parser.last_unary_citations = None
+    monkeypatch.setattr(derenderer, "parser", MagicMock(return_value=parser))
+    output = MagicMock(text="raw", token_ids=[1], finish_reason="stop")
+
+    ((message, _),) = derenderer._derender_text_choices(
+        [output], ParseContext().to_chat_request(), 0, None
+    )
+
+    assert type(message) is ChatMessage
+    assert message.content == "hello"
+    parser.set_citation_sources.assert_not_called()
+    derenderer.renderer._executor.shutdown(wait=False)
 
 
 class TestDetokenizeDelta:
@@ -1845,6 +1941,7 @@ def harmony_derenderer(harmony_tokenizer):
     renderer = MagicMock()
     renderer.get_tokenizer.return_value = harmony_tokenizer
     renderer._executor = ThreadPoolExecutor(max_workers=2)
+    renderer.finalize_message.side_effect = lambda p, m: m
 
     model_config = MagicMock()
     model_config.model = HARMONY_MODEL
