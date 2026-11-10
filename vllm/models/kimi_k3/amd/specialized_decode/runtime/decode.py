@@ -3,11 +3,11 @@
 """The Kimi-K3 specialized decode executor (layer mode): one routing decision per
 step, then the layer kernels inside the stock layer loop.
 
-Built by the model state once the weights are loaded (``KimiK3ModelState``): checks
-the loaded weights, builds the per-rank launch state (``runner``) and the layer
+Built by the model state once the weights are loaded (`KimiK3ModelState`): checks
+the loaded weights, builds the per-rank launch state (`runner`) and the layer
 kernels of every width, and compiles every build, before memory profiling and graph
-capture. ``prepare_kv`` binds it to every KV cache vLLM allocates. Each step
-``plan`` returns a ``Step`` or None; ``Step.layer(i)`` is the kernel replacing
+capture. `prepare_kv` binds it to every KV cache vLLM allocates. Each step
+`plan` returns a `Step` or None; `Step.layer(i)` is the kernel replacing
 decoder layer i (None for vLLM's layers). Weight reloads are not supported."""
 
 from collections.abc import Callable, Mapping
@@ -50,7 +50,7 @@ Kernel = WholeLayer | FfnLayer | MlaOpsLayer
 
 
 class Step(NamedTuple):
-    """A planned step: ``width`` rows of whole uniform spec-verify requests."""
+    """A planned step: `width` rows of whole uniform spec-verify requests."""
 
     width: int
     attn_metadata: Mapping[str, Any]  # by layer name
@@ -66,7 +66,7 @@ def step_reason(
     attn_metadata, kda_prefix: str, width: int, mla_prefix: str = ""
 ) -> str | None:
     """None if a step's KDA and MLA metadata (identical on every TP rank) are a
-    pure spec-verify step of whole uniform requests filling ``width`` rows, else
+    pure spec-verify step of whole uniform requests filling `width` rows, else
     why not."""
     if not isinstance(attn_metadata, dict):
         return "no metadata"
@@ -95,7 +95,7 @@ def step_reason(
 
 
 def agree(reasons: list[str], group, what: str) -> None:
-    """Raises on every TP rank if any rank has ``reasons``: a rank that refused
+    """Raises on every TP rank if any rank has `reasons`: a rank that refused
     alone would leave the others spinning in-kernel."""
     if not tp_agree(not reasons, group):
         why = "; ".join(reasons) if reasons else "another TP rank refused"
@@ -177,8 +177,8 @@ class SpecializedDecode:
         self.failstop = FailStop(
             runner.health[FAILED : FAILED + 1], runner.rank, tp.world_size, tp.cpu_group
         )
-        # (data_ptr, numel) of the first KDA layer's state prepare_kv bound
-        self._kv: tuple[int, int] | None = None
+        # `_kv_key` of the KV cache prepare_kv bound
+        self._kv: tuple | None = None
         m1c = [w for w in config.widths if m1c_at(runner, w)]
         mla = f"M1 (M1c in K2 at widths {m1c})" if m1c else "M1"
         logger.info(
@@ -190,13 +190,17 @@ class SpecializedDecode:
             len(builds),
         )
 
-    def _kv_key(self) -> tuple[int, int] | None:
+    def _kv_key(self) -> tuple | None:
+        """The first KDA layer's recurrent state by all but its number of slots:
+        an extensible KV cache re-binds its views at the same addresses with the
+        final block count, which `cache_reasons` does not depend on."""
         state = self.kda[0].layer.self_attn.kv_cache
         if not isinstance(state, (list, tuple)) or len(state) != 2:
             return None
-        if state[1].numel() == 0:
+        s = state[1]
+        if s.numel() == 0:
             return None
-        return state[1].data_ptr(), state[1].numel()
+        return s.data_ptr(), s.dtype, s.shape[1:], s.stride()
 
     def prepare_kv(self) -> None:
         """Checks and binds the KDA states and MLA caches vLLM just bound (the
@@ -218,7 +222,7 @@ class SpecializedDecode:
         - PIECEWISE steps (captured without attention metadata);
         - widths without kernels (more than max_num_seqs requests);
         - steps that are not pure spec-verify steps of whole uniform requests
-          (``step_reason``).
+          (`step_reason`).
 
         Eager steps run the kernels too. Every predicate is the same on all TP
         ranks: the kernels' mailboxes need every rank on one path. Under FULL
