@@ -2195,8 +2195,8 @@ def test_derender_chat_role_and_echo_match_chat_completion(
         )
     )
 
-    (choice,) = derenderer._derender_chat(response, request)
-    (plain,) = derenderer._derender_chat(
+    (choice,), _, _ = derenderer._derender_chat(response, request)
+    (plain,), _, _ = derenderer._derender_chat(
         response, request.model_copy(update={"echo": False})
     )
 
@@ -2215,7 +2215,7 @@ def test_derender_chat_empty_messages_uses_response_role(tokenizer):
         _make_generate_response(tokenizer.encode("Hi", add_special_tokens=False))
     )
 
-    (choice,) = derenderer._derender_chat(response, request)
+    (choice,), _, _ = derenderer._derender_chat(response, request)
 
     assert choice.message.role == "bot"
 
@@ -2247,7 +2247,7 @@ def test_derender_chat_echo_includes_refusal_parts(tokenizer):
         )
     )
 
-    (choice,) = derenderer._derender_chat(response, request)
+    (choice,), _, _ = derenderer._derender_chat(response, request)
 
     assert choice.message.content.startswith("No.\n1, 2,")
 
