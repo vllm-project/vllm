@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+import math
+
 import numpy as np
 import pytest
 import torch
@@ -1984,9 +1986,15 @@ NAN_ORDERING_CASES = [
 @pytest.mark.parametrize("backend,num_rows,dtype", NAN_ORDERING_CASES)
 @pytest.mark.parametrize("seq_len", [65536, 262144])
 @pytest.mark.parametrize("top_k", [512, 2048])
+@pytest.mark.parametrize("nan", [math.nan, -math.nan])
 @torch.inference_mode()
 def test_topk_nan_ordering_matches_torch(
-    backend: str, num_rows: int, seq_len: int, top_k: int, dtype: torch.dtype
+    backend: str,
+    num_rows: int,
+    seq_len: int,
+    top_k: int,
+    dtype: torch.dtype,
+    nan: float,
 ) -> None:
     # Fewer NaNs than top_k, mixed with +inf and the largest finite values:
     # every kernel's ordered key must rank NaN above +inf, as torch.topk does.
@@ -1996,7 +2004,7 @@ def test_topk_nan_ordering_matches_torch(
     pos = pos.topk(top_k // 4 + 3 * (top_k // 8), dim=1).indices
     n_nan, n_big = top_k // 4, top_k // 8
     fmax = torch.finfo(dtype).max
-    logits.scatter_(1, pos[:, :n_nan], float("nan"))
+    logits.scatter_(1, pos[:, :n_nan], nan)
     logits.scatter_(1, pos[:, n_nan : n_nan + n_big], float("inf"))
     logits.scatter_(1, pos[:, n_nan + n_big : n_nan + 2 * n_big], fmax)
     logits.scatter_(1, pos[:, n_nan + 2 * n_big :], 1e30)
