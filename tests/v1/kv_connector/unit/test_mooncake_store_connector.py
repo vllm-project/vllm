@@ -18,24 +18,24 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorRole,
     KVConnectorTransferResults,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store import (
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store import (
     connector as mooncake_store_connector,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store import (
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store import (
     protocol,
     scheduler,
     worker,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.coordinator import (
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.coordinator import (
     ExternalCachedBlockPool,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.data import (
     MooncakeLookupResult,
     MooncakeStoreConnectorMetadata,
     MooncakeStoreWorkerMetadata,
     TailKeyBoundary,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.metrics import (
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.metrics import (
     MooncakeStoreConnectorStats,
 )
 from vllm.utils.hashing import sha256
@@ -231,7 +231,7 @@ def test_scheduler_requires_align_mode_for_mamba_kv_transfer(
 
     with (
         patch(
-            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store."
             "scheduler.LookupKeyClient"
         ),
         pytest.raises(AssertionError, match="requires mamba_cache_mode='align'"),
@@ -252,7 +252,7 @@ def test_capacity_only_scheduler_allows_mamba_none_mode(
     )
 
     with patch(
-        "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+        "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store."
         "scheduler.LookupKeyClient"
     ) as mock_client:
         connector = KVConnectorFactory.create_connector(
@@ -290,11 +290,11 @@ def test_scheduler_role_initializes_store_scheduler_only():
     with (
         set_current_vllm_config(vllm_config),
         patch(
-            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store."
             "connector.MooncakeStoreScheduler"
         ) as mock_scheduler,
         patch(
-            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store."
             "connector.MooncakeStoreWorker"
         ) as mock_worker,
     ):
@@ -319,7 +319,7 @@ def test_scheduler_reports_mooncake_cache_source():
     with (
         set_current_vllm_config(vllm_config),
         patch(
-            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store."
             "connector.MooncakeStoreScheduler"
         ),
     ):
@@ -345,7 +345,7 @@ def test_worker_methods_delegate_to_store_worker():
     with (
         set_current_vllm_config(vllm_config),
         patch(
-            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store."
             "connector.MooncakeStoreWorker"
         ) as mock_worker_cls,
     ):
@@ -382,7 +382,7 @@ def test_get_transfer_results_delegates_to_store_worker():
     with (
         set_current_vllm_config(vllm_config),
         patch(
-            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store."
             "connector.MooncakeStoreWorker"
         ) as mock_worker_cls,
     ):
@@ -412,7 +412,7 @@ def test_get_kv_connector_kv_cache_events_returns_none_when_disabled():
     with (
         set_current_vllm_config(vllm_config),
         patch(
-            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store."
             "connector.MooncakeStoreWorker"
         ) as mock_worker_cls,
     ):
@@ -433,7 +433,7 @@ def test_get_kv_connector_stats_delegates_to_worker():
     with (
         set_current_vllm_config(vllm_config),
         patch(
-            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store."
             "connector.MooncakeStoreWorker"
         ) as mock_worker_cls,
     ):
@@ -475,7 +475,7 @@ def test_get_kv_connector_kv_cache_events_wraps_worker_events():
     with (
         set_current_vllm_config(vllm_config),
         patch(
-            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store."
             "connector.MooncakeStoreWorker"
         ) as mock_worker_cls,
     ):
@@ -501,7 +501,7 @@ def test_get_kv_connector_kv_cache_events_keeps_empty_worker_contribution():
     with (
         set_current_vllm_config(vllm_config),
         patch(
-            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store."
             "connector.MooncakeStoreWorker"
         ) as mock_worker_cls,
     ):
@@ -615,7 +615,7 @@ def test_update_connector_output_and_take_events():
     with (
         set_current_vllm_config(vllm_config),
         patch(
-            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store."
             "connector.MooncakeStoreScheduler"
         ),
     ):
@@ -671,7 +671,7 @@ def test_reset_cache_scheduler_role_delegates_to_reset_store():
     with (
         set_current_vllm_config(vllm_config),
         patch(
-            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store."
             "connector.MooncakeStoreScheduler"
         ) as mock_scheduler_cls,
     ):
@@ -692,7 +692,7 @@ def test_reset_cache_scheduler_role_propagates_failure():
     with (
         set_current_vllm_config(vllm_config),
         patch(
-            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store."
             "connector.MooncakeStoreScheduler"
         ) as mock_scheduler_cls,
     ):
@@ -712,7 +712,7 @@ def test_reset_cache_worker_role_returns_none():
     with (
         set_current_vllm_config(vllm_config),
         patch(
-            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store."
             "connector.MooncakeStoreWorker"
         ),
     ):
@@ -731,7 +731,7 @@ def test_scheduler_reset_store_returns_client_reset_result():
     with (
         set_current_vllm_config(vllm_config),
         patch(
-            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store."
             "scheduler.LookupKeyClient"
         ) as mock_client_cls,
     ):
@@ -750,7 +750,7 @@ def test_scheduler_reset_store_handles_rpc_exception():
     with (
         set_current_vllm_config(vllm_config),
         patch(
-            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store."
             "scheduler.LookupKeyClient"
         ) as mock_client_cls,
     ):
@@ -765,7 +765,7 @@ def test_lookup_key_client_lookup_prepends_typed_tag():
     vllm_config = _make_vllm_config()
 
     with patch(
-        "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+        "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store."
         "worker.make_zmq_socket"
     ) as mock_make_socket:
         client = worker.LookupKeyClient(vllm_config)
@@ -789,7 +789,7 @@ def test_lookup_key_client_reset_uses_typed_protocol():
     vllm_config = _make_vllm_config()
 
     with patch(
-        "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+        "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store."
         "worker.make_zmq_socket"
     ) as mock_make_socket:
         client = worker.LookupKeyClient(vllm_config)
@@ -799,7 +799,7 @@ def test_lookup_key_client_reset_uses_typed_protocol():
     # ACK path: server returns RESP_OK -> client returns True.
     fake_socket.recv.return_value = protocol.RESP_OK
     assert client.reset() is True
-    assert fake_socket.send.call_args[0][0] == protocol.RESET_MSG
+    assert fake_socket.send_multipart.call_args[0][0] == (protocol.RESET_MSG,)
 
     # NACK path: server returns RESP_ERR -> client returns False.
     fake_socket.recv.return_value = protocol.RESP_ERR
@@ -818,10 +818,10 @@ def _poll_lookup(client, req_id, num_tokens=128, block_hashes=(), timeout=5.0):
 
 
 def _gated_recv(gate: threading.Event, value: int):
-    """Mock recv side-effect that blocks until ``gate`` is set, so the
+    """Mock recv side-effect that blocks until `gate` is set, so the
     executor's lookup can be held pending deterministically."""
 
-    def recv():
+    def recv(flags: int = 0) -> bytes:
         gate.wait()
         return value.to_bytes(4, "big")
 
@@ -839,7 +839,7 @@ def test_admission_lookup_retains_completed_result_until_scheduled():
     with (
         set_current_vllm_config(vllm_config),
         patch(
-            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store."
             "worker.make_zmq_socket"
         ) as mock_make_socket,
     ):
@@ -924,7 +924,7 @@ def _make_lookup_client(extra_config=None):
         kv_connector_extra_config=extra_config,
     )
     with patch(
-        "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+        "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store."
         "worker.make_zmq_socket"
     ) as make_socket:
         client = worker.LookupKeyClient(vllm_config)
@@ -1007,7 +1007,10 @@ def test_lookup_client_refreshes_changed_or_expired_query(monkeypatch, change):
 def test_pending_lookup_is_not_restarted_by_ttl(monkeypatch, prefetched):
     """A lookup still queued past the TTL is kept, not resubmitted behind
     the backlog it is waiting on."""
-    client, sock = _make_lookup_client({"lookup_prefetch_limit": 1})
+    # Keep the RPC deadline beyond the clock advance that expires the result TTL.
+    client, sock = _make_lookup_client(
+        {"lookup_prefetch_limit": 1, "lookup_timeout_s": 5.0}
+    )
     gate = threading.Event()
     sock.recv.side_effect = _gated_recv(gate, 32)
     clock = [0.0]
@@ -1057,7 +1060,7 @@ def test_lookup_key_client_non_block_lookup_async():
     vllm_config = _make_vllm_config()
 
     with patch(
-        "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+        "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store."
         "worker.make_zmq_socket"
     ) as mock_make_socket:
         client = worker.LookupKeyClient(vllm_config)
@@ -1083,7 +1086,7 @@ def test_lookup_key_client_discard_clears_state():
     vllm_config = _make_vllm_config()
 
     with patch(
-        "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+        "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store."
         "worker.make_zmq_socket"
     ) as mock_make_socket:
         client = worker.LookupKeyClient(vllm_config)
@@ -1123,7 +1126,7 @@ def test_get_num_new_matched_tokens_async_defers_then_reports():
     with (
         set_current_vllm_config(vllm_config),
         patch(
-            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store."
             "scheduler.LookupKeyClient"
         ) as mock_client_cls,
     ):
@@ -1189,7 +1192,7 @@ def test_scheduler_reset_connector_cache_invokes_connector_reset():
     with (
         set_current_vllm_config(vllm_config),
         patch(
-            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store."
             "connector.MooncakeStoreScheduler"
         ) as mock_scheduler_cls,
     ):
@@ -1222,7 +1225,7 @@ def test_reset_cache_scheduler_role_clears_local_state():
     about to be remove_all'd, so reading them after reset would surface
     stale references to wiped keys.
     """
-    from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (  # noqa: E501
+    from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.data import (  # noqa: E501
         LoadSpec,
     )
 
@@ -1232,7 +1235,7 @@ def test_reset_cache_scheduler_role_clears_local_state():
     with (
         set_current_vllm_config(vllm_config),
         patch(
-            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store."
             "connector.MooncakeStoreScheduler"
         ) as mock_scheduler_cls,
     ):
@@ -1270,7 +1273,7 @@ def test_lookup_key_server_reset_drains_send_queue_before_remove_all():
     # and (c) join() comes BEFORE remove_all in the call order. The full
     # LookupKeyServer is heavy (binds a real ZMQ REP socket), so we drive
     # just the dispatch branch here via a stub equivalent.
-    from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store import (
+    from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store import (
         protocol,
     )
 
@@ -1319,7 +1322,7 @@ def test_lookup_key_server_reset_skips_drain_when_no_send_thread():
     configurations), the RESET handler must still call remove_all
     instead of dereferencing a None send thread.
     """
-    from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store import (
+    from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store import (
         protocol,
     )
 
@@ -1356,7 +1359,7 @@ def test_shutdown_closes_worker_store():
     with (
         set_current_vllm_config(vllm_config),
         patch(
-            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store."
             "connector.MooncakeStoreWorker"
         ) as mock_worker_cls,
     ):
@@ -1377,7 +1380,7 @@ def test_del_invokes_shutdown_and_closes_store():
     with (
         set_current_vllm_config(vllm_config),
         patch(
-            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store."
             "connector.MooncakeStoreWorker"
         ) as mock_worker_cls,
     ):
@@ -1399,7 +1402,7 @@ def test_shutdown_scheduler_role_is_noop():
     with (
         set_current_vllm_config(vllm_config),
         patch(
-            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store."
             "connector.MooncakeStoreScheduler"
         ),
     ):
@@ -1446,7 +1449,9 @@ def test_finish_during_prefill_saves_only_completed_kv(
     )
     connector.update_state_after_alloc(request, KVCacheBlocks((owned,)), 0)
     out = SchedulerOutput.make_empty()
-    out.scheduled_new_reqs = [NewRequestData.from_request(request, block_ids)]
+    out.scheduled_new_reqs = [
+        NewRequestData.from_request(request, block_ids, request.prefill_token_ids)
+    ]
     out.num_scheduled_tokens = {request.request_id: 20}
     out.total_num_scheduled_tokens = 20
     out.kv_connector_block_state = KVConnectorBlockState(
@@ -1556,7 +1561,9 @@ def test_finish_preserves_both_store_jobs_and_releases_their_own_blocks(
         0,
     )
     out = SchedulerOutput.make_empty()
-    out.scheduled_new_reqs = [NewRequestData.from_request(request, block_ids)]
+    out.scheduled_new_reqs = [
+        NewRequestData.from_request(request, block_ids, request.prefill_token_ids)
+    ]
     out.num_scheduled_tokens = {request.request_id: 32}
     out.total_num_scheduled_tokens = 32
     out.kv_connector_block_state = KVConnectorBlockState(
@@ -1694,7 +1701,6 @@ def test_lookahead_hashed_prefix_is_retried_without_new_blocks():
         first,
         ModelRunnerOutput(
             req_ids=[request.request_id],
-            req_id_to_index={request.request_id: 0},
             sampled_token_ids=[[32]],
         ),
     )
