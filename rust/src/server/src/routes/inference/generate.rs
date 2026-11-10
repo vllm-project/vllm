@@ -6,7 +6,6 @@ mod types;
 mod validate;
 
 use std::collections::HashMap;
-use std::convert::Infallible;
 use std::result::Result;
 use std::sync::Arc;
 
@@ -14,11 +13,10 @@ use asynk_strim_attr::{TryYielder, try_stream};
 use axum::Json;
 use axum::extract::State;
 use axum::http::HeaderMap;
-use axum::response::sse::Event;
 use axum::response::{IntoResponse, Response};
 use futures::{Stream, StreamExt as _, pin_mut};
 use thiserror_ext::AsReport as _;
-use tracing::{error, info, trace};
+use tracing::{error, info};
 use tracing_futures::Instrument as _;
 use vllm_engine_core_client::protocol::logprobs::{Logprobs, PositionLogprobs};
 use vllm_engine_core_client::protocol::multimodal::MmFeatureSpec;
@@ -46,7 +44,7 @@ use crate::routes::openai::utils::validated_json::ValidatedJson;
 use crate::routes::output_log::LoggedOutput;
 use crate::state::AppState;
 use crate::utils::npy_base64;
-use crate::utils::{resolve_request_context, sse_response, unix_timestamp};
+use crate::utils::{openai_sse_stream, resolve_request_context, sse_response, unix_timestamp};
 
 /// Validate one token-in/token-out request and proxy it into the shared
 /// `vllm-text` stack.
@@ -119,7 +117,7 @@ pub async fn generate(
             prepared.options,
             mm_placeholders,
         );
-        let sse_stream = generate_sse_stream(chunk_stream).instrument(request_span);
+        let sse_stream = openai_sse_stream(chunk_stream).instrument(request_span);
 
         return sse_response(sse_stream, api_server_options.sse_keep_alive_interval);
     }
@@ -525,46 +523,6 @@ fn position_to_logprob_map(position: &PositionLogprobs) -> HashMap<u32, Generate
 
 fn format_token_id(token_id: u32) -> String {
     format!("token_id:{token_id}")
-}
-
-/// Convert one raw-generate chunk stream into SSE events.
-#[try_stream]
-async fn generate_sse_stream(
-    stream: impl Stream<Item = Result<GenerateStreamResponse, ApiError>>,
-    mut y: TryYielder<Event, Infallible>,
-) -> Result<(), Infallible> {
-    pin_mut!(stream);
-
-    while let Some(next) = stream.next().await {
-        match next {
-            Ok(chunk) => y.yield_ok(to_sse_event(&chunk)).await,
-            Err(error) => {
-                y.yield_ok(to_error_sse_event(&error)).await;
-                break;
-            }
-        }
-    }
-
-    y.yield_ok(done_sse_event()).await;
-    Ok(())
-}
-
-fn to_sse_event(chunk: &GenerateStreamResponse) -> Event {
-    trace!(?chunk, "generate emitting chunk");
-    Event::default()
-        .data(serde_json::to_string(chunk).expect("generate chunk must serialize to JSON"))
-}
-
-fn to_error_sse_event(error: &ApiError) -> Event {
-    let response = error.to_error_response();
-    trace!(?response, "generate emitting error");
-    Event::default()
-        .data(serde_json::to_string(&response).expect("ErrorResponse must serialize to JSON"))
-}
-
-fn done_sse_event() -> Event {
-    trace!("generate emitting done");
-    Event::default().data("[DONE]")
 }
 
 #[cfg(test)]
