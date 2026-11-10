@@ -8,6 +8,7 @@ import torch
 from torch import nn
 from transformers import Glm5NextTextConfig
 
+import vllm.envs as envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import ParallelConfig, VllmConfig, get_current_vllm_config
 from vllm.config.kernel import NATIVE_MEGA_MOE_BACKENDS
@@ -479,6 +480,19 @@ class Glm5NextDecoderLayer(nn.Module):
         self.layer_kind = "kda" if is_kda_layer else "mla"
         self.is_sequence_parallel = parallel_config.use_sequence_parallel_moe
 
+        self.sequence_parallel_attention = (
+            self.is_sequence_parallel
+            and self.mhc
+            and not is_mtp_layer
+            and not is_kda_layer
+            and config.q_lora_rank is not None
+            and config.index_topk is not None
+            and current_platform.is_cuda()
+            and vllm_config.model_config.dtype == torch.bfloat16
+            and vllm_config.lora_config is None
+            and not parallel_config.use_ubatching
+            and not envs.VLLM_BATCH_INVARIANT
+        )
         if is_kda_layer:
             self.self_attn = Glm5NextLinearAttention(
                 config=config,
@@ -509,6 +523,7 @@ class Glm5NextDecoderLayer(nn.Module):
                 # MTP draft steps reuse each token slot's top-k, which
                 # ShardQ's compact per-rank layout would break.
                 shardq_eligible=not is_mtp_layer,
+                sequence_parallel_input=self.sequence_parallel_attention,
             )
 
         # MTP layers sit past the base model's hidden layers (layer_idx >=
@@ -691,9 +706,8 @@ class Glm5NextDecoderLayer(nn.Module):
                 norm_eps=self.input_layernorm.variance_epsilon,
             )
 
-        # Attention needs the full token sequence; mHC above ran on the SP
-        # shard. Gather for attention, scatter back afterward (DSv4 pattern).
-        if self.is_sequence_parallel:
+        # MLA can gather its narrower input projections; KDA needs full tokens.
+        if self.is_sequence_parallel and not self.sequence_parallel_attention:
             x = sp_all_gather(x)[: positions.shape[0]]
 
         x = self.self_attn(

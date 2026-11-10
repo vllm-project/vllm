@@ -30,6 +30,8 @@ from vllm.model_executor.models.deepseek_v2 import (
     yarn_get_mscale,
 )
 from vllm.model_executor.utils import maybe_disable_graph_partition, refill_derived
+from vllm.models.common.ops import fused_q_kv_rmsnorm
+from vllm.models.common.ops.sequence_parallel import sp_all_gather
 from vllm.models.glm5next.nvidia.ops.kpool_compress import fwht128_quant_fp8
 from vllm.models.glm5next.sparse_indexer import SparseAttnIndexerKpool
 from vllm.platforms import current_platform
@@ -305,17 +307,32 @@ class Indexer(nn.Module):
         )
         refill_derived(self, "_wp_fp32", wp)
 
-    def forward(
-        self, hidden_states: torch.Tensor, qr: torch.Tensor, positions, rotary_emb
-    ) -> torch.Tensor:
-        q, _ = self.wq_b(qr)
-        q = q.view(-1, self.n_head, self.head_dim)
-
+    def project_inputs(
+        self, hidden_states: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         # Compute the head gate in fp32; bf16 error can change near-tie pool
         # rankings on long-context tasks. Built after weights are loaded.
         kw, _ = self.wk_weights_proj(hidden_states)
         k = kw[:, : self.head_dim]
         weights = torch.mm(hidden_states.float(), self._wp_fp32)
+        gate_score = F.linear(hidden_states, self.index_kpool_compress_gate)
+        return k, weights, gate_score
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        qr: torch.Tensor,
+        positions,
+        rotary_emb,
+        projected_inputs: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
+    ) -> torch.Tensor:
+        q, _ = self.wq_b(qr)
+        q = q.view(-1, self.n_head, self.head_dim)
+        k, weights, gate_score = (
+            self.project_inputs(hidden_states)
+            if projected_inputs is None
+            else projected_inputs
+        )
 
         k = _fused_indexer_k_norm(
             k, self.k_norm.weight, self.k_norm.bias, self.head_dim, self.k_norm.eps
@@ -359,11 +376,6 @@ class Indexer(nn.Module):
             weights, q_scale, self.softmax_scale * self.n_head**-0.5
         )
 
-        # kpool: per-token gate score driving the softmax-weighted pool. Computed
-        # from the same hidden_states that produced `k`, so it stays token-aligned.
-        # F.linear(x, gate) = x @ gate.T  with gate [head_dim, hidden_size].
-        gate_score = F.linear(hidden_states, self.index_kpool_compress_gate)
-
         # DeepGEMM's MQA-logits kernels (fp8_mqa_logits /
         # fp8_fp4_paged_mqa_logits) require num_heads in {32, 64}; this
         # checkpoint uses index_n_heads=16. Zero-pad q and the per-head
@@ -406,6 +418,7 @@ class Glm5NextMLAAttention(nn.Module):
         input_size: int | None = None,
         skip_rope: bool | None = False,
         shardq_eligible: bool = False,
+        sequence_parallel_input: bool = False,
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -413,6 +426,7 @@ class Glm5NextMLAAttention(nn.Module):
         self.qk_rope_head_dim = qk_rope_head_dim
         self.qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
         self.v_head_dim = v_head_dim
+        self.sequence_parallel_input = sequence_parallel_input
 
         self.q_lora_rank = q_lora_rank
         self.kv_lora_rank = kv_lora_rank
@@ -577,5 +591,53 @@ class Glm5NextMLAAttention(nn.Module):
     def forward(
         self, hidden_states: torch.Tensor, positions: torch.Tensor
     ) -> torch.Tensor:
+        if self.sequence_parallel_input:
+            return self.forward_sequence_parallel(hidden_states, positions)
         # The wrapper also runs the sparse indexer before MLA attention.
         return self.mla_attn(positions, hidden_states)
+
+    def forward_sequence_parallel(
+        self, hidden_states: torch.Tensor, positions: torch.Tensor
+    ) -> torch.Tensor:
+        assert self.q_lora_rank is not None and self.indexer is not None
+        qkv, _ = self.fused_qkv_a_proj(hidden_states)
+        k, weights, gate_score = self.indexer.project_inputs(hidden_states)
+        # Reinterpret the FP32 head gates to preserve their precision in BF16 storage.
+        projections = (qkv, k, gate_score, weights.view(torch.bfloat16))
+        gathered = sp_all_gather(torch.cat(projections, dim=-1))[: positions.shape[0]]
+        qkv, k, gate_score, weights_bits = gathered.split(
+            [x.shape[-1] for x in projections], dim=-1
+        )
+        q_c, kv_c, k_pe = qkv.split(
+            [self.q_lora_rank, self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
+        )
+        q_c, kv_c = fused_q_kv_rmsnorm(
+            q_c,
+            kv_c,
+            self.q_a_layernorm.weight.data,
+            self.kv_a_layernorm.weight.data,
+            self.q_a_layernorm.variance_epsilon,
+        )
+        q = self.q_b_proj(q_c)[0].view(-1, self.num_local_heads, self.qk_head_dim)
+        k_pe = k_pe.unsqueeze(1)
+        if self.rotary_emb is not None:
+            q[..., self.qk_nope_head_dim :], k_pe = self.rotary_emb(
+                positions, q[..., self.qk_nope_head_dim :], k_pe
+            )
+        # The indexer op only needs a full-length tensor for its shape/device.
+        self.indexer(
+            qkv,
+            q_c,
+            positions,
+            self.indexer_rope_emb,
+            projected_inputs=(k, weights_bits.view(torch.float32), gate_score),
+        )
+        attn = self.mla_attn.mla_attn
+        attn.impl.record_logical_topk_ready()  # type: ignore[attr-defined]
+        attn_out = attn(
+            q,
+            kv_c,
+            k_pe,
+            output_shape=(positions.shape[0], self.num_local_heads * self.v_head_dim),
+        )
+        return self.o_proj(attn_out)[0]
