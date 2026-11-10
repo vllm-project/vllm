@@ -14,7 +14,7 @@ import pytest
 import torch
 from PIL import Image
 
-from vllm.entrypoints.pooling.scoring.typing import ScoreMultiModalParam
+from vllm.entrypoints.pooling.scoring.types import ScoreMultiModalParam
 from vllm.platforms import current_platform
 from vllm.renderers.chat_utils import (
     ChatCompletionContentPartImageParam,
@@ -224,11 +224,9 @@ def test_colpali_default_runner(
 @pytest.mark.parametrize("dtype", [DTYPE])
 def test_colpali_v2_multimodal_text_query_image_docs(
     vllm_runner,
-    monkeypatch: pytest.MonkeyPatch,
     model: str,
     dtype: str,
 ) -> None:
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
     attention_backend = "FLASH_ATTN" if current_platform.is_cuda() else None
     with vllm_runner(
         model,
@@ -240,5 +238,4 @@ def test_colpali_v2_multimodal_text_query_image_docs(
         attention_backend=attention_backend,
         kernel_config={"enable_flashinfer_autotune": False},
     ) as vllm_model:
-        assert vllm_model.llm.llm_engine.vllm_config.use_v2_model_runner
         _run_multimodal_text_query_image_docs_test(vllm_model)
