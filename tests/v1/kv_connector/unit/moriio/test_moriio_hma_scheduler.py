@@ -1763,7 +1763,9 @@ def test_packed_kda_rdma_uses_each_peers_region_offsets(mode):
         _region_session_indices=lambda _: [0, 1],
         _mamba_blocks_for_layer=lambda name, groups: groups[1],
     )
-    metadata = SimpleNamespace(kv_caches_base_addr=[10000, 12048, 14096])
+    metadata = SimpleNamespace(
+        kv_caches_base_addr=[10000, 12048, 14096], layer_base_addr_index={"kda": 1}
+    )
     if mode == "read":
         worker._post_read_with_backoff = Mock(return_value="done")
         worker._post_mamba_reads(
