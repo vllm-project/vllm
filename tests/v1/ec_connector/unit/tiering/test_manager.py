@@ -228,12 +228,16 @@ def test_prefetch_deduplicates_waiters_and_holds_until_last_release():
     assert primary.alloc("other", 2) is not None
 
 
-def test_cpu_save_during_lookup_keeps_shared_prefetch_protection():
+@pytest.mark.parametrize("save_started_first", [False, True])
+def test_cpu_save_during_lookup_keeps_shared_prefetch_protection(save_started_first):
     primary, secondary, manager = _bounded_promotion_manager()
     secondary.lookup_pending = True
+    if save_started_first:
+        primary.alloc("loaded", 2, (2, 1))
     for request_id in ("first", "second"):
         manager.prefetch_entry(request_id, "loaded", "image", 2, (2, 1), 4)
-    primary.alloc("loaded", 2, (2, 1))
+    if not save_started_first:
+        primary.alloc("loaded", 2, (2, 1))
     manager.poll()
     primary.mark_ready("loaded")
     manager.poll()
@@ -370,16 +374,16 @@ def image_request(*identifiers, request_id="gpu-hint"):
     )
 
 
-def test_mixed_images_prefetch_both_and_gpu_hits_bypass_pending_reads(
+def test_mixed_images_prefetch_both_and_gpu_hits_bypass_file_waits(
     indexed_scheduler,
 ):
     scheduler = indexed_scheduler
     request = image_request("A", "B")
     scheduler.on_new_request(request, local_cache_hashes={"A"})
-    assert len(scheduler._tiering_manager._pending_reads) == 2
     # A concurrent request may have populated B on GPU while its prefetch runs.
     assert scheduler.ensure_cache_available(request, 0, {"A", "B"})
     assert scheduler._primary.get("A") is not None
+    assert scheduler._primary.get("B") is not None
 
 
 def test_gpu_cache_snapshot_is_read_only_and_expires_after_eviction():
@@ -473,6 +477,37 @@ def test_arrival_holds_ready_cpu_copy_even_with_gpu_hit(indexed_scheduler, copie
     assert primary.alloc("B", 2) is not None
 
 
+@pytest.mark.parametrize("at_admission", ["gpu_hit", "space_freed", "still_full"])
+def test_failed_arrival_prefetch_is_retried_on_gpu_miss(
+    indexed_scheduler, at_admission
+):
+    scheduler = indexed_scheduler
+    primary = scheduler._primary
+    request = image_request("A")
+    primary.alloc("busy", primary._region.num_blocks)
+    primary.mark_ready("busy")
+    primary.pin("busy")
+    scheduler.on_new_request(request)
+    assert primary.get("A") is None
+    assert not scheduler._tiering_manager._pending_reads
+
+    if at_admission != "still_full":
+        primary.unpin("busy")
+    if at_admission == "space_freed":
+        scheduler.ensure_cache_available(request, 0, set())
+        scheduler._filesystem.drain()
+        scheduler._tiering_manager.poll()
+        assert scheduler.ensure_cache_available(request, 0, set())
+        scheduler.update_state_after_alloc(request, 0)
+        assert "A" in scheduler._pending_loads
+    else:
+        gpu_hits = {"A"} if at_admission == "gpu_hit" else set()
+        assert scheduler.ensure_cache_available(request, 0, gpu_hits)
+        assert not scheduler.has_cache_item("A")
+        assert not scheduler._tiering_manager._pending_reads
+        assert primary.get("busy").evictable == (at_admission == "gpu_hit")
+
+
 def test_cpu_full_is_feature_miss_but_submitted_read_stays_pending(
     indexed_scheduler, monkeypatch
 ):
@@ -494,6 +529,7 @@ def test_cpu_full_is_feature_miss_but_submitted_read_stays_pending(
         scheduler.on_new_request(image_request("A"))
         primary.alloc("busy", primary._region.num_blocks - 2)
         assert not scheduler.ensure_cache_available(image_request("A"), 0, set())
+        scheduler.on_new_request(image_request("B"))
         assert scheduler.ensure_cache_available(image_request("B"), 0, set())
         assert not scheduler.has_cache_item("B")
         assert primary.get("A") is not None

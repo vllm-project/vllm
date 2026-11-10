@@ -183,22 +183,31 @@ class ECFileSystemTierManager:
     def lookup(
         self, cache_key: str, file_size_bytes: int, request_id: str
     ) -> bool | None:
-        """Resolve unknown files in the background; None means retry later."""
+        """Use indexed entries immediately; probe unknown files asynchronously."""
         if file_size_bytes <= 0:
             raise ValueError("file_size_bytes must be positive")
         if not self._accepting or file_size_bytes > self._capacity_bytes:
             return False
         if cache_key in self._deleting_keys:
             return False
-        if self.contains(cache_key):
-            return self._entries[cache_key].file_size_bytes == file_size_bytes
         if cache_key in self._pending_write_keys:
             return None
+        entry = self._entries.get(cache_key)
+        if entry is not None and entry.file_size_bytes != file_size_bytes:
+            del self._entries[cache_key]
+            self._used_bytes -= entry.file_size_bytes
+            entry = None
         key = self._lookup.key(cache_key, file_size_bytes)
         result = self._lookup.lookup(key, ReqContext(req_id=request_id))
+        if entry is not None:
+            # Register the owner so a failed indexed read can be marked MISS.
+            # Supersede the pending probe before flush; no file check is queued.
+            self._lookup.mark_present([key])
+            self._entries.move_to_end(cache_key)
+            result = True
         # EC has no schedule-end callback; flush this non-blocking probe here.
         self._lookup.flush()
-        if result:
+        if result and entry is None:
             self._entries[cache_key] = ECFileEntry(
                 cache_key,
                 get_ec_entry_path(self._root_dir, self._namespace_digest, cache_key),

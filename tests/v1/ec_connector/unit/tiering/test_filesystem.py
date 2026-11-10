@@ -4,6 +4,8 @@
 import os
 from collections.abc import Sequence
 from pathlib import Path
+from threading import Event
+from time import monotonic
 from types import SimpleNamespace
 
 import pytest
@@ -13,7 +15,6 @@ from vllm.distributed.ec_transfer.ec_connector.tiering.config import (
 )
 from vllm.distributed.ec_transfer.ec_connector.tiering.filesystem import (
     ECFileSystemTierManager,
-    ECReadResult,
     ECWriteResult,
 )
 from vllm.distributed.ec_transfer.ec_connector.tiering.layout import (
@@ -162,37 +163,6 @@ def test_manager_publishes_only_completed_writes_and_routes_completions(
         ECWriteResult(cache_key=_CACHE_KEY, success=True, file_size_bytes=4)
     ]
     assert manager.poll_completed_writes() == []
-
-
-def test_manager_read_failure_invalidates_indexed_entry(
-    tmp_path: Path,
-) -> None:
-    executor = _FakeExecutor()
-    manager = ECFileSystemTierManager(
-        root_dir=tmp_path,
-        namespace_digest=_NAMESPACE_DIGEST,
-        capacity_bytes=_CAPACITY_BYTES,
-        n_read_threads=1,
-        n_write_threads=1,
-        executor=executor,
-    )
-    assert manager.submit_write(_CACHE_KEY, [memoryview(b"data")], 4)
-    executor.finish(0, success=True)
-    manager.poll_completed_writes()
-
-    assert manager.submit_read(_CACHE_KEY, [memoryview(bytearray(4))])
-    executor.finish(1, success=False, error="missing")
-
-    assert manager.poll_completed_writes() == []
-    assert manager.poll_completed_reads() == [
-        ECReadResult(
-            cache_key=_CACHE_KEY,
-            success=False,
-            file_size_bytes=4,
-            error="missing",
-        )
-    ]
-    assert not manager.contains(_CACHE_KEY)
 
 
 def test_existing_or_pending_key_is_not_rewritten(tmp_path: Path) -> None:
@@ -444,9 +414,6 @@ def test_manager_shutdown_drains_completions_and_rejects_submission(
 
 
 def test_async_lookup_discovers_late_file_and_releases_request(tmp_path: Path) -> None:
-    from threading import Event
-    from time import monotonic
-
     from vllm.distributed.ec_transfer.ec_connector.tiering.io import store_entry
 
     manager = ECFileSystemTierManager(
@@ -457,21 +424,13 @@ def test_async_lookup_discovers_late_file_and_releases_request(tmp_path: Path) -
         n_write_threads=1,
     )
 
-    def resolved(key, request_id):
-        deadline = monotonic() + 5
-        pause = Event()
-        while (result := manager.lookup(key, 4, request_id)) is None:
-            assert monotonic() < deadline
-            pause.wait(0.001)
-        return result
-
     path = get_ec_entry_path(tmp_path, _NAMESPACE_DIGEST, _CACHE_KEY)
     path.parent.mkdir(parents=True, exist_ok=True)
     store_entry(path, get_ec_temporary_path(path, "late"), [memoryview(b"data")], 4)
     try:
         assert not manager.contains(_CACHE_KEY)
         assert manager.lookup(_CACHE_KEY, 4, "request") is None
-        assert resolved(_CACHE_KEY, "request")
+        assert _resolved(manager, _CACHE_KEY, "request")
         assert manager.contains(_CACHE_KEY)
         destination = bytearray(4)
         assert manager.submit_read(_CACHE_KEY, [memoryview(destination)])
@@ -482,7 +441,7 @@ def test_async_lookup_discovers_late_file_and_releases_request(tmp_path: Path) -
 
         missing = "c" * 64
         assert manager.lookup(missing, 4, "request2") is None
-        assert resolved(missing, "request2") is False
+        assert _resolved(manager, missing, "request2") is False
         missing_path = get_ec_entry_path(tmp_path, _NAMESPACE_DIGEST, missing)
         missing_path.parent.mkdir(parents=True, exist_ok=True)
         store_entry(
@@ -494,7 +453,104 @@ def test_async_lookup_discovers_late_file_and_releases_request(tmp_path: Path) -
         assert manager.lookup(missing, 4, "request2") is False
         manager.release_request("request2")
         assert manager.lookup(missing, 4, "request3") is None
-        assert resolved(missing, "request3")
+        assert _resolved(manager, missing, "request3")
         manager.release_request("request3")
     finally:
         manager.shutdown()
+
+
+def _resolved(manager, key, request_id):
+    deadline = monotonic() + 5
+    pause = Event()
+    while (result := manager.lookup(key, 4, request_id)) is None:
+        assert monotonic() < deadline
+        pause.wait(0.001)
+    return result
+
+
+@pytest.mark.parametrize("indexed_at_startup", [True, False])
+def test_external_deletion_invalidates_index_without_repeated_reads(
+    tmp_path, indexed_at_startup
+):
+    from vllm.distributed.ec_transfer.ec_connector.tiering.io import store_entry
+
+    path = get_ec_entry_path(tmp_path, _NAMESPACE_DIGEST, _CACHE_KEY)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if indexed_at_startup:
+        store_entry(path, get_ec_temporary_path(path, "seed"), [memoryview(b"data")], 4)
+    manager = ECFileSystemTierManager(
+        root_dir=tmp_path,
+        namespace_digest=_NAMESPACE_DIGEST,
+        capacity_bytes=_CAPACITY_BYTES,
+        n_read_threads=1,
+        n_write_threads=1,
+    )
+    try:
+        if not indexed_at_startup:
+            store_entry(
+                path, get_ec_temporary_path(path, "late"), [memoryview(b"data")], 4
+            )
+            assert manager.lookup(_CACHE_KEY, 4, "request") is None
+            assert _resolved(manager, _CACHE_KEY, "request")
+        assert manager.lookup(_CACHE_KEY, 4, "request") is True
+        path.unlink()
+        destination = bytearray(b"keep")
+        assert manager.submit_read(_CACHE_KEY, [memoryview(destination)])
+        manager.drain()
+        assert not manager.poll_completed_reads()[0].success
+        assert destination == b"keep"
+        assert not manager.contains(_CACHE_KEY)
+        assert manager.used_bytes == 0
+        assert manager.lookup(_CACHE_KEY, 4, "request") is False
+        assert manager.lookup(_CACHE_KEY, 4, "request") is False
+        manager.release_request("request")
+    finally:
+        manager.shutdown()
+
+
+@pytest.mark.parametrize("stale_size", [False, True])
+def test_index_hit_skips_probe_unless_recorded_size_is_stale(
+    tmp_path, monkeypatch, stale_size
+):
+    from vllm.distributed.ec_transfer.ec_connector.tiering.io import store_entry
+
+    path = get_ec_entry_path(tmp_path, _NAMESPACE_DIGEST, _CACHE_KEY)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = b"old-data" if stale_size else b"data"
+    store_entry(
+        path, get_ec_temporary_path(path, "seed"), [memoryview(data)], len(data)
+    )
+    manager = ECFileSystemTierManager(
+        root_dir=tmp_path,
+        namespace_digest=_NAMESPACE_DIGEST,
+        capacity_bytes=_CAPACITY_BYTES,
+        n_read_threads=1,
+        n_write_threads=1,
+    )
+    if stale_size:
+        store_entry(
+            path, get_ec_temporary_path(path, "fixed"), [memoryview(b"data")], 4
+        )
+    probes = []
+    original = Path.lstat
+
+    def record_probe(file_path, *args, **kwargs):
+        if file_path == path:
+            probes.append(file_path)
+        return original(file_path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "lstat", record_probe)
+    try:
+        if stale_size:
+            assert manager.lookup(_CACHE_KEY, 4, "first") is None
+            assert _resolved(manager, _CACHE_KEY, "first")
+        else:
+            assert manager.lookup(_CACHE_KEY, 4, "first") is True
+        assert manager.used_bytes == 4
+        assert manager.lookup(_CACHE_KEY, 4, "second") is True
+        manager.release_request("first")
+        assert manager.lookup(_CACHE_KEY, 4, "second") is True
+        manager.release_request("second")
+    finally:
+        manager.shutdown()
+    assert probes == ([path] if stale_size else [])

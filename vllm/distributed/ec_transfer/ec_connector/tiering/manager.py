@@ -116,6 +116,7 @@ class ECTieringManager:
     ) -> None:
         """Try one early read without waiting or displacing pinned entries."""
         self.poll()
+        available = True
         if (
             identifier not in self._pending_read_identifiers
             and identifier not in self._prefetch_holds
@@ -128,14 +129,16 @@ class ECTieringManager:
                 element_size,
                 request_id=request_id,
             )
-            if not available and identifier not in self._pending_read_identifiers:
-                self._prefetch_probes[identifier] = (
-                    modality,
-                    num_tokens,
-                    shape,
-                    element_size,
-                )
         entry = self._primary.get(identifier)
+        if identifier not in self._pending_read_identifiers and (
+            not available or (entry is not None and not entry.ready)
+        ):
+            self._prefetch_probes[identifier] = (
+                modality,
+                num_tokens,
+                shape,
+                element_size,
+            )
         if entry is not None and entry.ready and identifier not in self._prefetch_holds:
             self._primary.pin(identifier)
             self._prefetch_holds.add(identifier)
