@@ -1088,10 +1088,12 @@ class Worker(WorkerBase):
                 stats.get("allocated_bytes.all.peak", 0)
                 - stats.get("allocated_bytes.all.current", 0),
             )
-            # Warmup's blocks hold garbage and capture addresses only the null
-            # block: release them so the graphs fit (encoder graphs can take
-            # GiBs). extend_kv_cache commits the size measured after capture.
-            kv_cache.commit(kv_cache.min_committed_blocks, shrink=True)
+            if not self.model_config.enforce_eager:
+                # Warmup's blocks hold garbage and capture addresses only the
+                # null block: release them so the graphs fit (encoder graphs
+                # can take GiBs). extend_kv_cache commits the size measured
+                # after capture.
+                kv_cache.commit(kv_cache.min_committed_blocks, shrink=True)
 
         cuda_graph_memory_bytes = 0
         if not self.model_config.enforce_eager:
