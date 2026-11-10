@@ -333,6 +333,11 @@ class Qwen2Model(nn.Module, EagleModelMixin):
         }
     )
     supports_aux_hidden_states_over_pp = True
+    # Whether the decoder layers apply each layer's sliding window themselves
+    # (via `per_layer_sliding_window`). Qwen2DecoderLayer does not, so models
+    # mixing sliding and full attention layers are rejected unless a subclass
+    # sets this.
+    supports_per_layer_sliding_window = False
 
     def __init__(
         self,
@@ -348,7 +353,10 @@ class Qwen2Model(nn.Module, EagleModelMixin):
         quant_config = vllm_config.quant_config
 
         # TODO (@robertgshaw2): see if this can be moved out
-        if len(set(getattr(config, "layer_types", []))) > 1:
+        if (
+            not self.supports_per_layer_sliding_window
+            and len(set(getattr(config, "layer_types", []))) > 1
+        ):
             assert config.max_window_layers == config.num_hidden_layers, (
                 "Sliding window for some but all layers is not supported. "
                 "This model uses sliding window but `max_window_layers` = "
