@@ -401,19 +401,25 @@ class HpcAttentionImpl(AttentionImpl[HpcAttnMetadata]):
         else:
             self._quant_type = None
 
-        self._kv_view_cache: (
-            tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None
-        ) = None
+        # (kv_cache, key_cache, value_cache), filled lazily by _get_kv_views.
+        self._kv_view_cache: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = (
+            None
+        )
 
     def _get_kv_views(
         self, kv_cache: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        # The K/V views only depend on kv_cache's storage and layout, so build
+        # them once instead of on every call. Keyed on identity because the
+        # profiling KV cache gets replaced by the real one after startup.
         cache = self._kv_view_cache
         if cache is None or cache[0] is not kv_cache:
             # Logical (B, H, N, 2*head_size) -> (B, N, H, head_size) K/V views.
             key_cache, value_cache = kv_cache.transpose(1, 2).split(
                 self.head_size, dim=-1
             )
+            # use_fp8 never changes for an impl, and the FP8 path never writes
+            # through the raw views, so caching the retyped pair is enough.
             if self.use_fp8:
                 torch_dtype = _get_fp8_dtype_for_kv_cache(self.kv_cache_dtype)
                 key_cache = key_cache.view(torch_dtype)

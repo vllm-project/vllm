@@ -25,7 +25,7 @@ BLOCK_SIZE = 4
 def _fake_hpc(monkeypatch: pytest.MonkeyPatch) -> None:
     module = types.ModuleType("hpc")
     module.__spec__ = importlib.machinery.ModuleSpec("hpc", loader=None)
-    module.QuantType = types.SimpleNamespace(
+    module.QuantType = types.SimpleNamespace(  # type: ignore[attr-defined]
         QPERTOKEN_PERHEAD_KPERTENSOR_VPERTENSOR=object()
     )
     monkeypatch.setitem(sys.modules, "hpc", module)
