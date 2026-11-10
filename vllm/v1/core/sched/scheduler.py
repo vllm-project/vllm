@@ -2776,8 +2776,7 @@ class Scheduler(SchedulerInterface):
             self.ec_connector is not None
             and bool(request.mm_features)
             and not self.ec_connector.ensure_cache_available(
-                request,
-                num_computed_tokens,
+                request, num_computed_tokens
             )
         )
 
