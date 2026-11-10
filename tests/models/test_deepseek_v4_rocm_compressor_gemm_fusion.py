@@ -208,6 +208,7 @@ def test_rocm_inv_rope_einsum_bmm_matches_einsum(monkeypatch, num_tokens):
     from vllm._aiter_ops import rocm_aiter_ops
 
     monkeypatch.setattr(rocm_aiter_ops, "_AITER_ENABLED", True)
+    monkeypatch.setattr(rocm_aiter_ops, "_LINEAR_ENABLED", True)
     if not torch.cuda.is_available() or not rocm_aiter_ops.is_triton_bf16_bmm_enabled():
         pytest.skip("needs aiter's Triton BF16 BMM (CDNA4+ with aiter)")
     from vllm.v1.attention.ops.rocm_aiter_mla_sparse import rocm_inv_rope_einsum

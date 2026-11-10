@@ -2599,6 +2599,8 @@ class rocm_aiter_ops:
     @classmethod
     @if_aiter_supported
     def is_tgemm_enabled(cls) -> bool:
+        # Gates every unquantized GEMM (rocm_unquantized_gemm), so it stays
+        # gfx950-only; narrower tgemm uses get their own predicates below.
         from vllm.platforms.rocm import on_gfx950
 
         return cls.is_linear_enabled() and on_gfx950()
@@ -2616,10 +2618,11 @@ class rocm_aiter_ops:
     @if_aiter_supported
     def is_triton_bf16_bmm_enabled(cls) -> bool:
         """Use aiter's Triton BF16 batched GEMM on CDNA4+ (tuned for gfx950 and
-        gfx1250); older archs keep torch.einsum."""
+        gfx1250); older archs keep torch.einsum. Follows the aiter linear
+        switch like the other dense GEMMs."""
         from vllm.platforms.rocm import get_cdna_version
 
-        return cls._AITER_ENABLED and get_cdna_version() >= 4
+        return cls.is_linear_enabled() and get_cdna_version() >= 4
 
     @staticmethod
     @functools.cache
