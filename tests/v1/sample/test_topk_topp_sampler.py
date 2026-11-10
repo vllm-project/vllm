@@ -241,7 +241,7 @@ TRITON_KERNEL_AVAILABLE = _triton_kernel_available()
 
 
 @pytest.mark.skipif(
-    not TRITON_KERNEL_AVAILABLE, reason="requires CUDA SM80+ or ROCm gfx950"
+    not TRITON_KERNEL_AVAILABLE, reason="requires CUDA SM80+ or ROCm gfx942/gfx950"
 )
 class TestTritonTopkTopp:
     """Tests for the Triton top-k/top-p kernel."""
@@ -935,7 +935,7 @@ class TestTritonTopkTopp:
 
 
 @pytest.mark.skipif(
-    not TRITON_KERNEL_AVAILABLE, reason="requires CUDA SM80+ or ROCm gfx950"
+    not TRITON_KERNEL_AVAILABLE, reason="requires CUDA SM80+ or ROCm gfx942/gfx950"
 )
 class TestTritonTopkToppExact:
     """Exact selection on every kernel path: the 32 to 256 logit tiers, the

@@ -146,11 +146,12 @@ def reset_buffer_cache() -> None:
 
 @functools.cache
 def _supported_device() -> bool:
-    """Tested on SM80, SM90, SM100 and MI355X, and needs cooperative launches."""
+    """Tested on SM80, SM90, SM100, SM120, gfx942 (MI325X) and gfx950 (MI355X), and
+    needs cooperative launches."""
     if current_platform.is_rocm():
-        from vllm.platforms.rocm import on_gfx950
+        from vllm.platforms.rocm import on_gfx942, on_gfx950
 
-        return on_gfx950()
+        return on_gfx942() or on_gfx950()
     if not current_platform.is_cuda():
         return False
     capability = current_platform.get_device_capability()
