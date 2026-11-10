@@ -122,12 +122,12 @@ def scatter_kv_caches(
     Args:
         kv_caches_ptrs: Tensor of KV cache pointers (one per layer)
         total_token_in_kvcache: Total number of tokens in KV cache
-        src_tensor: Source ``[L, H, N, C]`` tensor containing data to scatter
+        src_tensor: Source `[L, H, N, C]` tensor containing data to scatter
         token_indices: List of token positions to update
         tokens_per_block: Number of stored states in each cache block
         num_heads: Size of the H axis
         content_size: Size of the C axis
-        kv_cache_strides: Element strides of each ``[B, H, N, C]`` layer view
+        kv_cache_strides: Element strides of each `[B, H, N, C]` layer view
 
     """
     num_layers = len(kv_caches_ptrs)
@@ -179,12 +179,12 @@ def gather_kv_caches(
     Args:
         kv_caches_ptrs: Tensor of KV cache pointers (one per layer)
         total_token_in_kvcache: Total number of tokens in KV cache
-        dst_tensor: Destination ``[L, H, N, C]`` tensor
+        dst_tensor: Destination `[L, H, N, C]` tensor
         token_indices: List of token positions to gather
         tokens_per_block: Number of stored states in each cache block
         num_heads: Size of the H axis
         content_size: Size of the C axis
-        kv_cache_strides: Element strides of each ``[B, H, N, C]`` layer view
+        kv_cache_strides: Element strides of each `[B, H, N, C]` layer view
 
     """
     num_layers = kv_caches_ptrs.shape[0]
