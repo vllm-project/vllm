@@ -370,6 +370,7 @@ def test_gpu_sampler_respects_mixed_request_watermarking(
         None,
         None,
         False,
+        None,
         False,
     )
 
@@ -409,6 +410,7 @@ def test_gpu_sampler_uses_argmax_only_for_greedy_rows(
         None,
         None,
         False,
+        None,
         False,
     )
 
@@ -456,6 +458,7 @@ def test_gpu_sampler_filters_top_k_top_p_before_watermarking(
         torch.tensor([2]),
         torch.tensor([0.8]),
         False,
+        None,
         False,
     )
 
@@ -525,6 +528,7 @@ def test_gpu_sampler_skips_watermarking_for_repeated_contexts(monkeypatch):
         None,
         None,
         False,
+        None,
         False,
     )
 
@@ -572,6 +576,7 @@ def test_gpu_sampler_skips_partial_contexts_independently_of_deduplication(
         None,
         None,
         False,
+        None,
         False,
     )
 
@@ -1014,6 +1019,7 @@ def test_gpu_sampler_uses_fused_gumbel_for_repeated_contexts():
         None,
         None,
         False,
+        None,
         False,
     )
 
@@ -1051,6 +1057,7 @@ def test_gpu_sampler_skips_watermarking_for_greedy_batch(monkeypatch):
         None,
         None,
         False,
+        None,
         False,
     )
 
