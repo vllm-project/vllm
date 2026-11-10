@@ -95,12 +95,16 @@ pub(crate) async fn get_first_model(
 ///
 /// Sends test requests with retry until success or timeout.
 /// Mirrors Python's `wait_for_endpoint` in ready_checker.py.
+///
+/// If the server answers `test_input` with a failure, `fallback_input`, when
+/// given, is sent right after in the same attempt.
 pub async fn wait_for_endpoint(
     backend: BackendKind,
     client: &reqwest::Client,
     test_input: &RequestFuncInput,
     timeout_seconds: u64,
     retry_interval: u64,
+    fallback_input: Option<&RequestFuncInput>,
 ) -> Result<RequestFuncOutput> {
     let backend = get_backend(backend)?;
     let deadline = Instant::now() + std::time::Duration::from_secs(timeout_seconds);
@@ -131,7 +135,19 @@ pub async fn wait_for_endpoint(
         }
 
         // Ping the endpoint
-        match backend.send_request(test_input, client).await {
+        let mut result = backend.send_request(test_input, client).await;
+        if let (Ok(output), Some(fallback)) = (&result, fallback_input)
+            && !output.success
+        {
+            let fallback_result = backend.send_request(fallback, client).await;
+            if matches!(&fallback_result, Ok(output) if output.success) {
+                pb.suspend(|| {
+                    tracing::warn!("endpoint accepted only the fallback ready-check request");
+                });
+                result = fallback_result;
+            }
+        }
+        match result {
             Ok(output) if output.success => {
                 pb.finish_and_clear();
                 return Ok(output);
