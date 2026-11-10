@@ -26,7 +26,6 @@ import torch
 from torch import nn
 
 from vllm.model_executor.layers.linear import (
-    MergedColumnParallelLinear,
     ReplicatedLinear,
 )
 from vllm.model_executor.models.utils import maybe_prefix
@@ -34,6 +33,7 @@ from vllm.model_executor.models.utils import maybe_prefix
 from ..common.hyperconnection import (
     GroupedGemmaRMSNorm,
     HyperConnectionConfig,
+    PaddedMergedColumnParallelLinear,
 )
 from .ops.hc import (
     grouped_gemma_rmsnorm,
@@ -93,7 +93,7 @@ class GatedResidual(nn.Module):
         # alignment and efficient backend dispatch.
         self.pad_size = (-(self.hc_lowrank + self.hc_count)) % 16 if use_combine else 0
         if use_combine:
-            self.input_mix_weight_down_block_inject = MergedColumnParallelLinear(
+            self.input_mix_weight_down_block_inject = PaddedMergedColumnParallelLinear(
                 self.hyper_hidden_size,
                 [self.hc_lowrank, self.hc_count]
                 + ([self.pad_size] if self.pad_size else []),
@@ -104,6 +104,13 @@ class GatedResidual(nn.Module):
                 return_bias=False,
                 disable_tp=True,
             )
+            # Checkpoints carry no padding rows and their output is discarded,
+            # so keep those rows deterministic instead of uninitialized.
+            if self.pad_size:
+                start = self.hc_lowrank + self.hc_count
+                self.input_mix_weight_down_block_inject.set_padding_rows(
+                    start, start + self.pad_size
+                )
         else:
             self.input_mix_weight_down = ReplicatedLinear(
                 self.hyper_hidden_size,

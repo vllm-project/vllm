@@ -30,12 +30,14 @@ Typical usage inside a transformer decoder layer::
 """
 
 from dataclasses import dataclass
+from typing import Any
 
 import torch
 import torch.nn.functional as F
 from torch import nn
 
 from vllm.config import VllmConfig
+from vllm.model_executor.layers.linear import MergedColumnParallelLinear
 
 
 def is_hc_sequence_parallel_enabled(vllm_config: VllmConfig) -> bool:
@@ -252,9 +254,34 @@ class GatedResidual(HyperConnectionBase):
         return output.flatten(-2).to(hyper_input.dtype)
 
 
+class PaddedMergedColumnParallelLinear(MergedColumnParallelLinear):
+    """A merged linear whose last shard is alignment padding.
+
+    No checkpoint tensor carries the padding shard, and its output is
+    discarded, so its bytes only have to be *deterministic*: a weight update
+    is compared against a cold start bit for bit. They are zeroed at
+    construction, and `padding_fill_params` makes a direct reload zero-fill the
+    parameter at `begin` as well -- a dummy-started lane otherwise keeps its
+    dummy values in those rows and never matches a cold start.
+    """
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.padding_rows: tuple[int, int] | None = None
+
+    def set_padding_rows(self, start: int, end: int) -> None:
+        self.padding_rows = (start, end)
+        with torch.no_grad():
+            self.weight[start:end].zero_()
+
+    def padding_fill_params(self) -> list[str]:
+        return ["weight"] if self.padding_rows is not None else []
+
+
 __all__ = [
     "GatedResidual",
     "GroupedGemmaRMSNorm",
     "HyperConnectionBase",
     "HyperConnectionConfig",
+    "PaddedMergedColumnParallelLinear",
 ]

@@ -190,8 +190,25 @@ def test_hc_padding_shard_is_not_expected_from_checkpoints(dist_init) -> None:
     hc = GatedResidual(HyperConnectionConfig())
     assert hc.pad_size > 0
     linear = hc.input_mix_weight_down_block_inject
+
+    def padding_rows() -> torch.Tensor:
+        return linear.weight[hc.hc_lowrank + hc.hc_count :]
+
+    # The padding rows must be deterministic: a weight update is compared
+    # against a cold start bit for bit, and nothing ever loads these rows.
+    assert not padding_rows().any()
+    # A direct reload zero-fills the parameter at `begin` through this
+    # declaration, so a dummy-started lane cannot keep its dummy values here.
+    assert linear.padding_fill_params() == ["weight"]
+
+    # Dummy start, then `begin`, then the update's two real shards.
+    with torch.no_grad():
+        linear.weight.fill_(1.0)
+    with torch.no_grad():
+        linear.weight.zero_()
     for shard_id, rows in ((0, hc.hc_lowrank), (1, hc.hc_count)):
         weight = torch.ones(rows, hc.hyper_hidden_size)
         weight.shard_id = shard_id
         set(linear.load_weights([("weight", weight)]))
     assert linear.pop_missing_shards() == []
+    assert not padding_rows().any()
