@@ -283,6 +283,27 @@ class Lfm3OmniMultiModalProcessor(Qwen3VLMultiModalProcessor):
             PromptReplacement("audio", [processor.audio_token_id], audio_replacement),
         ]
 
+    def _with_soundtrack_placeholders(
+        self, prompt: list[int], num_audios: int
+    ) -> list[int]:
+        """The chat parser adds each video's decoded soundtrack as the audio
+        item right after it; the openai content format puts no placeholder for
+        it in the prompt. When the audio items outnumber the placeholders by
+        exactly one per video, put that placeholder right after every video,
+        as HF's `load_audio_from_video` does; otherwise the prompt is kept."""
+        processor = self.info.get_hf_processor()
+        video_token_id = processor.video_token_id
+        audio_token_id = processor.audio_token_id
+        num_videos = prompt.count(video_token_id)
+        if num_audios != prompt.count(audio_token_id) + num_videos:
+            return prompt
+        with_tracks: list[int] = []
+        for token in prompt:
+            with_tracks.append(token)
+            if token == video_token_id:
+                with_tracks.append(audio_token_id)
+        return with_tracks
+
     def _soundtracks(self, prompt: list[int]) -> dict[int, int]:
         """The audio item each video takes as its soundtrack: the first clip
         after the video that no earlier video took."""
@@ -316,10 +337,13 @@ class Lfm3OmniMultiModalProcessor(Qwen3VLMultiModalProcessor):
         mm_item_counts = mm_items.get_all_counts()
         self._validate_mm_kwargs(mm_res.kwargs, mm_item_counts)
         self._validate_mm_updates(mm_res.prompt_updates, mm_item_counts)
+        prompt = self._with_soundtrack_placeholders(
+            mm_res.prompt_ids, mm_item_counts.get("audio", 0)
+        )
 
         # A soundtrack's own placeholder expands to nothing; its tokens follow
         # its video's frame groups instead.
-        soundtracks = self._soundtracks(mm_res.prompt_ids)
+        soundtracks = self._soundtracks(prompt)
         updates: dict[str, list[list[ResolvedPromptUpdate]]] = {
             modality: [list(item) for item in items]
             for modality, items in mm_res.prompt_updates.items()
@@ -337,9 +361,7 @@ class Lfm3OmniMultiModalProcessor(Qwen3VLMultiModalProcessor):
                 replace(audio, content=PromptUpdateDetails.from_seq([]))
             ]
 
-        prompt_ids, placeholders = self._apply_prompt_updates(
-            mm_res.prompt_ids, updates
-        )
+        prompt_ids, placeholders = self._apply_prompt_updates(prompt, updates)
         audio_placeholders = list(placeholders.get("audio", []))
         for video_placeholder in placeholders["video"]:
             audio_idx = soundtracks[video_placeholder.item_idx]
