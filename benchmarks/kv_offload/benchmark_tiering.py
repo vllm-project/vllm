@@ -224,9 +224,11 @@ class GuideLLM:
             "guidellm",
             "run",
             "--backend",
-            "kind=openai_http,"
-            f"target=http://127.0.0.1:{self.port},"
-            "request_format=/v1/completions",
+            (
+                "kind=openai_http,"
+                f"target=http://127.0.0.1:{self.port},"
+                "request_format=/v1/completions"
+            ),
             "--profile",
             f"kind=concurrent,streams={spec.concurrency}",
             "--constraint",
@@ -320,6 +322,8 @@ class BenchmarkRun:
         return result
 
     def _cleanup(self) -> None:
+        for shm in Path("/dev/shm").glob("vllm_offload*"):
+            shm.unlink()
         for entry in self.fs_dir.iterdir():
             if entry.is_dir():
                 shutil.rmtree(entry)
