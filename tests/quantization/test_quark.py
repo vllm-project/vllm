@@ -1147,10 +1147,10 @@ def _patch_mxfp8_moe_backend(monkeypatch) -> None:
 def test_quant_method_dispatch_mixed_mxfp4_mxfp8_experts(
     monkeypatch, default_vllm_config
 ):
-    """A per-layer ``<experts prefix>*`` entry selects MXFP8 for that layer's routed
+    """A per-layer `<experts prefix>*` entry selects MXFP8 for that layer's routed
     experts only; other layers keep the global MXFP4, and the glob does not reach
-    the layer's shared experts (``shared_experts`` does not start with
-    ``experts``)."""
+    the layer's shared experts (`shared_experts` does not start with
+    `experts`)."""
     config = QuarkConfig(
         {
             "global_quant_config": _MXFP4_MOE_SPEC,
@@ -1182,8 +1182,8 @@ def test_quant_method_dispatch_mixed_mxfp4_mxfp8_experts(
 
 
 def test_quark_w8a8_mxfp8_moe_weight_shapes(monkeypatch):
-    """The parameters match the checkpoint layout: E4M3 ``[E, rows, cols]`` and
-    uint8 E8M0 ``[E, rows, cols / 32]``, sharded as block scales."""
+    """The parameters match the checkpoint layout: E4M3 `[E, rows, cols]` and
+    uint8 E8M0 `[E, rows, cols / 32]`, sharded as block scales."""
     _patch_mxfp8_moe_backend(monkeypatch)
     method = QuarkW8A8Mxfp8MoEMethod(
         _make_test_moe_config(), kMxfp8Static, kMxfp8Dynamic
@@ -1621,7 +1621,7 @@ def test_quark_int8_w8a8_moe(vllm_runner, tp):
 @pytest.mark.parametrize("tp", [1])
 def test_quark_fp8_w8a8_per_block_moe(vllm_runner, tp):
     """Test per-block (128x128) FP8 MoE quantization with a tiny Qwen3 MoE model."""
-    model_path = "Adamji/tiny-qwen3-moe-fp8-per-block"
+    model_path = "vllm-project/tiny-qwen3-moe-fp8-per-block"
     with vllm_runner(
         model_path,
         enforce_eager=True,
@@ -1733,11 +1733,11 @@ class AccuracyTestConfig:
 
 WIKITEXT_ACCURACY_CONFIGS = [
     AccuracyTestConfig(
-        model_name="fxmarty/qwen1.5_moe_a2.7b_chat_w_fp4_a_fp6_e2m3",
+        model_name="vllm-project/qwen1.5_moe_a2.7b_chat_w_fp4_a_fp6_e2m3",
         excepted_value=11.3,
     ),
     AccuracyTestConfig(
-        model_name="fxmarty/qwen1.5_moe_a2.7b_chat_w_fp6_e3m2_a_fp6_e3m2",
+        model_name="vllm-project/qwen1.5_moe_a2.7b_chat_w_fp6_e3m2_a_fp6_e3m2",
         excepted_value=10.6,
     ),
 ]
@@ -2527,13 +2527,17 @@ class TestQuarkInt4Format:
                         torch.zeros(1),
                     ),
                     (
-                        "model.language_model.layers.0.mlp.shared_expert_gate"
-                        ".weight_scale",
+                        (
+                            "model.language_model.layers.0.mlp.shared_expert_gate"
+                            ".weight_scale"
+                        ),
                         torch.zeros(1),
                     ),
                     (
-                        "model.language_model.layers.0.mlp.shared_expert_gate"
-                        ".weight_zero_point",
+                        (
+                            "model.language_model.layers.0.mlp.shared_expert_gate"
+                            ".weight_zero_point"
+                        ),
                         torch.zeros(1),
                     ),
                 ]

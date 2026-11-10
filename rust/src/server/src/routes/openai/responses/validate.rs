@@ -44,7 +44,7 @@ pub(super) fn validate_request_compat(request: &ResponsesRequest) -> Result<(), 
         bail_invalid_request!(param = "prompt", "prompt template is not supported");
     }
 
-    if let Some(metadata) = &request.metadata
+    if let Some(metadata) = &request.echo.metadata
         && (metadata.len() > 16
             || metadata
                 .iter()
@@ -71,13 +71,6 @@ pub(super) fn validate_request_compat(request: &ResponsesRequest) -> Result<(), 
         bail_invalid_request!(
             param = "top_logprobs",
             "output logprobs are not supported by this frontend"
-        );
-    }
-
-    if !request.spaces_between_special_tokens {
-        bail_invalid_request!(
-            param = "spaces_between_special_tokens",
-            "spaces_between_special_tokens is not supported."
         );
     }
 
@@ -159,9 +152,16 @@ mod tests {
     }
 
     #[test]
+    fn spaces_between_special_tokens_false_is_accepted() {
+        let mut request = base_request();
+        request.spaces_between_special_tokens = false;
+        assert!(validate_request_compat(&request).is_ok());
+    }
+
+    #[test]
     fn max_tool_calls_is_accepted_without_builtin_tools() {
         let mut request = base_request();
-        request.max_tool_calls = Some(1);
+        request.echo.max_tool_calls = Some(1);
         assert!(validate_request_compat(&request).is_ok());
     }
 

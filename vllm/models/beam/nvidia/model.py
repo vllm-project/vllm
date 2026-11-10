@@ -5,7 +5,7 @@
 Beam is a decoder-only sparse MoE causal LM. Its config-gated features
 are NoPE layers with SSMax query scaling, hybrid sliding-window attention,
 per-head Q/K RMSNorm, sandwich norm, depth-scaled residuals, and sigmoid
-attention output gating. The MoE router uses grouped sigmoid ``noaux_tc``
+attention output gating. The MoE router uses grouped sigmoid `noaux_tc`
 selection.
 """
 
@@ -61,11 +61,11 @@ from .moe import BeamMLP, BeamSparseMoeBlock
 
 
 def _depth_scaled_coeffs(layer_id: int, is_attention: bool) -> tuple[float, float]:
-    """Depth-scaled residual coefficients ``(x_scale, r_scale)`` for one sublayer.
+    """Depth-scaled residual coefficients `(x_scale, r_scale)` for one sublayer.
 
-    ``num_adds`` counts residual adds up to and including this one, with a
-    1-based layer index ``L = layer_id + 1``: ``2L`` for the attention add,
-    ``2L + 1`` for the MLP add.
+    `num_adds` counts residual adds up to and including this one, with a
+    1-based layer index `L = layer_id + 1`: `2L` for the attention add,
+    `2L + 1` for the MLP add.
     """
     one_based = layer_id + 1
     num_adds = 2 * one_based if is_attention else 2 * one_based + 1

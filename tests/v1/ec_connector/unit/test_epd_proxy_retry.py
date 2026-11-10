@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Body handling across the EPD proxy's decode retries.
 
-Exercises the REAL helpers loaded from the ``examples/`` proxy, so a future
+Exercises the REAL helpers loaded from the `examples/` proxy, so a future
 change to them is what these tests catch.
 """
 

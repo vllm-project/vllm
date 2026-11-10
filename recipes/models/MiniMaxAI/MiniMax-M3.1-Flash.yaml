@@ -4,7 +4,7 @@ meta:
   provider: "MiniMax"
   description: "MiniMax M3.1-Flash vision-language MoE (~428B total / 23B active) with MSA sparse attention throughout and a built-in DSpark draft; quantization-aware trained, MXFP8 dense layers and NVFP4 experts. Served TP4 on NVIDIA Blackwell or AMD MI355X, prefill/decode disaggregated as TP4 + TP4 on MI355X or DEP2 + DEP4 on GB200/GB300, and TP8 on NVIDIA Hopper."
   date_added: 2026-10-23
-  date_updated: 2026-10-30
+  date_updated: 2026-11-02
   tasks:
     - text
     - multimodal
@@ -122,6 +122,24 @@ features:
         hardware:
           hopper: unsupported
           blackwell: unsupported
+  parallel_topk:
+    label: "Parallel index top-k"
+    description: "AMD MI355X: parallel decode top-16 selection for the NVFP4 indexer. Disabled by default; requires an image containing VLLM_ROCM_PARALLEL_INDEX_TOPK. FP8 indexers, including mono decode, bypass this path. Benchmark/CI jobs must explicitly enable this feature or set the environment variable to 1."
+    strategies: [single_node_tp]
+    modes:
+      nvfp4:
+        variants: [default, mxfp4]
+        args: []
+        env:
+          VLLM_ROCM_PARALLEL_INDEX_TOPK: "1"
+        hardware:
+          hopper: unsupported
+          blackwell: unsupported
+          mi300x: unsupported
+          mi325x: unsupported
+      none:
+        variants: [fp8]
+        args: []
   mono_decode:
     label: "Mono decode"
     description: "AMD MI355X single node, MXFP4 (Quark) checkpoint, low concurrency: a decode step of up to 16 tokens (4 requests with DSpark 3) runs each layer as one fused kernel; larger steps and steps with prefill run on the normal path. Uses FP8 KV and indexer K caches (fewer KV tokens than NVFP4) and FULL_DECODE_ONLY graphs, so prefill and mixed steps run eager."
@@ -163,6 +181,7 @@ opt_in_features:
   - text_only
   - prefill_dbo_sp
   - mono_decode
+  - parallel_topk
 
 variants:
   default:
@@ -1385,9 +1404,9 @@ presets:
     strategy: single_node_tp
     variants: [mxfp4]
     workload: "Agentic (InferenceX AgentX)"
-    description: "One TP4 engine on four of the node's eight MI355X GPUs, serving the Quark MXFP4 checkpoint: seven-token DSpark with mono decode and an FP8 KV cache up to concurrency 8, seven-token DSpark with DBO and an NVFP4 KV cache at 16 and 32, and three-token DSpark with DBO and a host-DRAM KV tier at 64."
-    source: { label: "InferenceX #4671", href: "https://github.com/SemiAnalysisAI/InferenceX/pull/4671", key: "minimaxm31flash-fp4-mi355x-vllm-agentic-dspark", revision: a328b443582c45e45eef7f0c4f133f3e173f0211 }
-    image: "vllm/vllm-openai-rocm:minimax-m31-flash@sha256:ae8681212aa5291d8c27f06e90016435e3fca144a68fd5c439231f6475f74569"
+    description: "One TP4 engine on four of the node's eight MI355X GPUs, serving the Quark MXFP4 checkpoint: seven-token DSpark with mono decode and an FP8 KV cache up to concurrency 8, seven-token DSpark with an NVFP4 KV cache and breakable CUDA graphs at 16 and 32, and three-token DSpark with a host-DRAM KV tier at 64, on a nightly image with the MiniMax-M3.1 ROCm optimizations that need an opt-in switch enabled."
+    source: { label: "InferenceX #4866", href: "https://github.com/SemiAnalysisAI/InferenceX/pull/4866", key: "minimaxm31flash-fp4-mi355x-vllm-agentic-dspark", revision: ce4079c48b85472cc4be60f40c0fa1f7f067e8e9 }
+    image: "vllm/vllm-openai-rocm:nightly-4fab5a07475822c6eaa971dceb2e2220d0446808@sha256:6f126f27a3b58959da3c16076248fc99eb31e26d0a3ae9f8563bda7317d6a7e6"
     tp: 4
     select:
       features: { text_only: true, spec_decoding: true }
@@ -1395,11 +1414,18 @@ presets:
       - "--enable-prefix-caching"
     env:
       VLLM_HTTP_TIMEOUT_KEEP_ALIVE: "900"
+      # the DSpark drafter kernels (seven-token drafts; c64's three-token draft keeps
+      # the stock draft layers)
+      VLLM_ROCM_MINIMAX_M3_MONO_DRAFTER: "1"
+      # the FP8 indexer of the mono points bypasses it
+      VLLM_ROCM_PARALLEL_INDEX_TOPK: "1"
+      VLLM_USE_RUST_FRONTEND: "1"
+      # the draft LM head's skinny GEMM is 5x slower at exactly 5 requests
+      VLLM_ROCM_USE_SKINNY_GEMM: "0"
     json_args:
       "--speculative-config": { num_speculative_tokens: 7, rejection_sample_method: block }
-    # The DBO points pass the DBO flags directly: the DBO / SP prefill feature's
-    # modes set their own thresholds (8192, or 16384 with SP on the default
-    # checkpoint only), and this lane runs the 16384-token threshold without SP.
+    # json_args cannot add --compilation-config (mono_decode owns it). The capture list is
+    # the V2 runner's deprecated alias for the prefill and decode graph sizes.
     points:
       c1:
         label: "1 (mono)"
@@ -1422,20 +1448,20 @@ presets:
         select: { features: { mono_decode: mono } }
         args: ["--max-num-seqs", "16", "--max-num-batched-tokens", "8192"]
       c16:
-        label: "16 (DBO)"
+        label: "16 (graphs)"
         concurrency: 16
-        args: ["--max-num-seqs", "32", "--max-num-batched-tokens", "32768", "--gpu-memory-utilization", "0.85", "--enable-dbo", "--dbo-prefill-token-threshold", "16384", "--dbo-decode-token-threshold", "32768"]
-        env: { VLLM_USE_V2_MODEL_RUNNER: "1", DEBUG_HIP_DYNAMIC_QUEUES: "0" }
+        args: ["--max-num-seqs", "32", "--max-num-batched-tokens", "32768", "--gpu-memory-utilization", "0.85", "--compilation-config", '{"cudagraph_mode": "FULL_AND_PIECEWISE", "cudagraph_capture_sizes": [1, 2, 4, 8, 16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120, 128, 136, 144, 152, 160, 168, 176, 184, 192, 200, 208, 216, 224, 232, 240, 248, 256, 384, 512, 768, 1024, 1536, 2048, 3072, 4096, 6144, 8192]}']
+        env: { VLLM_USE_V2_MODEL_RUNNER: "1", DEBUG_HIP_DYNAMIC_QUEUES: "0", VLLM_USE_BREAKABLE_CUDAGRAPH: "1" }
       c32:
-        label: "32 (DBO)"
+        label: "32 (graphs)"
         concurrency: 32
-        args: ["--max-num-seqs", "64", "--max-num-batched-tokens", "32768", "--gpu-memory-utilization", "0.85", "--enable-dbo", "--dbo-prefill-token-threshold", "16384", "--dbo-decode-token-threshold", "32768"]
-        env: { VLLM_USE_V2_MODEL_RUNNER: "1", DEBUG_HIP_DYNAMIC_QUEUES: "0" }
+        args: ["--max-num-seqs", "64", "--max-num-batched-tokens", "32768", "--gpu-memory-utilization", "0.85", "--compilation-config", '{"cudagraph_mode": "FULL_AND_PIECEWISE", "cudagraph_capture_sizes": [1, 2, 4, 8, 16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120, 128, 136, 144, 152, 160, 168, 176, 184, 192, 200, 208, 216, 224, 232, 240, 248, 256, 384, 512, 768, 1024, 1536, 2048, 3072, 4096, 6144, 8192]}']
+        env: { VLLM_USE_V2_MODEL_RUNNER: "1", DEBUG_HIP_DYNAMIC_QUEUES: "0", VLLM_USE_BREAKABLE_CUDAGRAPH: "1" }
       c64:
-        label: "64 (DBO, KV offload)"
+        label: "64 (KV offload)"
         concurrency: 64
         select: { kv_offload: simple }
-        args: ["--max-num-seqs", "128", "--max-num-batched-tokens", "32768", "--gpu-memory-utilization", "0.9", "--enable-dbo", "--dbo-prefill-token-threshold", "16384", "--dbo-decode-token-threshold", "32768"]
+        args: ["--max-num-seqs", "128", "--max-num-batched-tokens", "32768", "--gpu-memory-utilization", "0.9"]
         env: { VLLM_USE_V2_MODEL_RUNNER: "1", DEBUG_HIP_DYNAMIC_QUEUES: "0", PYTHONHASHSEED: "42" }
         json_args:
           "--speculative-config": { num_speculative_tokens: 3 }
@@ -1443,47 +1469,266 @@ presets:
     runbook: |
       The MI355X AgentX lane in [SemiAnalysis InferenceX](https://inferencex.semianalysis.com/)
       (`minimaxm31flash-fp4-mi355x-vllm-agentic-dspark`,
-      [SemiAnalysisAI/InferenceX#4671](https://github.com/SemiAnalysisAI/InferenceX/pull/4671)),
+      [SemiAnalysisAI/InferenceX#4866](https://github.com/SemiAnalysisAI/InferenceX/pull/4866)),
       on the Quark MXFP4 checkpoint with `--max-num-seqs` at twice the concurrency
       (c64 admits 128). Throughput runs replaced block verification with synthetic
       rejection at the committed golden DSpark acceptance length (4.04 for seven
       tokens, 2.88 for three); the commands above keep block verification.
 
-      - **Concurrency 1-8** run mono decode with an FP8 KV cache and no DBO: a decode
-        step of up to 16 tokens runs each layer as one fused kernel, and prefill steps
-        stay at 8192 tokens.
-      - **Concurrency 16 and 32** run seven-token DSpark with DBO and an NVFP4 KV cache
-        at 0.85 memory utilization, leaving headroom for DBO prefill.
-      - **Concurrency 64** runs three-token DSpark with DBO at 0.90 and adds a host-DRAM
-        KV tier through `SimpleCPUOffloadConnector`, so cached prefixes are not lost
-        once the working set outgrows the GPU KV cache (14.6M tokens at 0.90).
-        `cpu_bytes_to_use` (1,349 GB) is the budget for the whole engine.
+      The image is a vLLM nightly (`4fab5a074`, 2026-11-05). Besides the kernels it
+      carries by default (decode CP, the qkv and FFN norm + MXFP8 quant fusions, four-wave
+      decode top-k, per-XCD sparse-decode splits, the MXFP8 GEMM tile retune for
+      M=17-256), the lane turns on the switches that default off:
 
-      [InferenceX run 41003224750](https://github.com/SemiAnalysisAI/InferenceX/actions/runs/41003224750)
+      - `VLLM_ROCM_MINIMAX_M3_MONO_DRAFTER=1` runs seven-token DSpark draft steps of up
+        to 10 requests as fused FlyDSL kernels (the three-token draft at c64 keeps the
+        stock layers).
+      - `VLLM_ROCM_PARALLEL_INDEX_TOPK=1` selects the top-16 blocks of the NVFP4 indexer
+        in parallel; the FP8 indexer of the mono points bypasses it.
+      - `VLLM_USE_RUST_FRONTEND=1` serves the API with the Rust frontend.
+      - `VLLM_ROCM_USE_SKINNY_GEMM=0` removes the draft LM head's skinny-GEMM cliff at
+        exactly 5 requests.
+
+      - **Concurrency 1-8** run mono decode with an FP8 KV cache: a decode step of up to
+        16 tokens runs each layer as one fused kernel, and prefill steps stay at 8192
+        tokens.
+      - **Concurrency 16 and 32** run seven-token DSpark with an NVFP4 KV cache at 0.85
+        memory utilization and breakable CUDA graphs (`VLLM_USE_BREAKABLE_CUDAGRAPH=1`,
+        `FULL_AND_PIECEWISE`), so prefill and mixed steps are captured as well as decode.
+      - **Concurrency 64** runs three-token DSpark at 0.90 and adds a host-DRAM KV tier
+        through `SimpleCPUOffloadConnector`, so cached prefixes are not lost once the
+        working set outgrows the GPU KV cache. `cpu_bytes_to_use` (1,349 GB) is the
+        budget for the whole engine.
+
+      Dual-batch overlap is not used on this lane: it was on at concurrency 16-64 in the
+      previous revision and is off here together with the breakable graphs, so the
+      change in those three points is the combined effect, not DBO alone.
+      INT4 quick all-reduce (`VLLM_ROCM_QUICK_REDUCE_QUANTIZATION=INT4`) is not enabled:
+      the AITER in this image has no `QuickAllReduceInt4.compile`, which the nightly's
+      FlyDSL INT4 path calls, and workers fail at startup with it.
+
+      [InferenceX run 42224368840](https://github.com/SemiAnalysisAI/InferenceX/actions/runs/42224368840)
       passed all seven performance points and GSM8K at concurrency 8, 32 and 64 at
-      `a328b4435` (single run):
+      `ce4079c48` (single run, second attempt of the concurrency 16 job):
 
       | Concurrency | Interactivity p50 / p90 (tokens/s/user) | Total tokens/s per GPU |
       | --- | ---: | ---: |
-      | 1 | 551.0 / 515.7 | 6,766 |
-      | 2 | 548.9 / 410.4 | 6,918 |
-      | 4 | 546.3 / 395.6 | 9,494 |
-      | 8 | 407.4 / 240.0 | 15,411 |
-      | 16 | 228.6 / 168.3 | 27,275 |
-      | 32 | 172.3 / 115.1 | 54,158 |
-      | 64 | 71.4 / 47.3 | 75,434 |
+      | 1 | 604.4 / 590.1 | 7,617 |
+      | 2 | 608.4 / 446.2 | 7,588 |
+      | 4 | 610.2 / 428.3 | 9,698 |
+      | 8 | 450.2 / 292.2 | 16,104 |
+      | 16 | 313.5 / 204.6 | 28,686 |
+      | 32 | 220.9 / 133.7 | 58,024 |
+      | 64 | 95.1 / 59.7 | 90,495 |
 
-      GSM8K exact match (strict) over 1319 questions was 0.964 at concurrency 8, 0.959 at
-      32 and 0.957 at 64.
+      Against the previous revision's run 41003224750 (day-zero image, DBO at 16-64), p90
+      interactivity is 8-22% higher at concurrency 1-8, 22% at 16, 16% at 32 and 26% at
+      64, and total throughput per GPU is 2-20% higher at every point (20% at 64).
 
-      - **Concurrency 64 needed a rerun.** The first attempt hung at its first load from
-        the host KV tier (23 fetches in progress, none completing; `sample_tokens` RPC
-        timeout) and was rerun once, which passed. Treat the offload point as less
-        proven than the others.
+      GSM8K exact match (strict) over 1319 questions was 0.961 at concurrency 8, 0.963 at
+      32 and 0.960 at 64.
+
+      - **Concurrency 64 uses a host KV tier.** It passed on its first attempt here; the
+        previous revision's first attempt hung at its first load from the host tier (23
+        fetches in progress, none completing) and passed on a rerun, so treat the
+        offload point as less proven than the others.
       - **Sequence-parallel prefill does not apply to this checkpoint.** InferenceX also
         set `VLLM_ROCM_MINIMAX_M3_SP_PREFILL=1` at concurrency 64, and the server logged
         sequence-parallel prefill as off; it is omitted here. SP prefill is available on
         the default checkpoint through the DBO / SP prefill feature.
+
+  # MI355X AgentX 1P2D: one TP4 prefill engine feeds two TP4 decode engines over MoRI-IO
+  # RDMA WRITE, on the image and opt-in switches of mi355x_agentx above.
+  mi355x_agentx_pd:
+    label: "AgentX 1P2D (MoRI-IO)"
+    hardware: mi355x
+    strategy: pd_cluster
+    variants: [mxfp4]
+    workload: "Agentic (InferenceX AgentX)"
+    description: "One TP4 prefill engine with a host-DRAM KV tier feeds two TP4 decode engines on one node over MoRI-IO RDMA WRITE, behind vllm-router with consistent-hash routing (12 GPUs). Seven-token DSpark, NVFP4 KV and indexer K caches, and the nightly's opt-in MiniMax-M3.1 ROCm switches on both roles."
+    source: { label: "ROCm/ATOM MoRI-IO 1P2D", href: "https://github.com/ROCm/ATOM/blob/7e0e199ffd45e2c5cb451e171ac2a05a1e973420/.github/benchmark/models_atomesh.yaml", key: "m31-flash-vllm-moriio-rdma-1p2d-s65822", revision: 7e0e199ffd45e2c5cb451e171ac2a05a1e973420 }
+    image: "vllm/vllm-openai-rocm:nightly-4fab5a07475822c6eaa971dceb2e2220d0446808@sha256:6f126f27a3b58959da3c16076248fc99eb31e26d0a3ae9f8563bda7317d6a7e6"
+    select:
+      pd_connector: moriio
+      kv_offload: simple
+      features: { text_only: true, spec_decoding: true }
+    args:
+      - "--enable-prefix-caching"
+      - "--max-model-len"
+      - "1048576"
+      - "--gpu-memory-utilization"
+      - "0.85"
+    env:
+      VLLM_USE_V2_MODEL_RUNNER: "1"
+      DEBUG_HIP_DYNAMIC_QUEUES: "0"
+      # Prefill and decode hash prefix blocks alike.
+      PYTHONHASHSEED: "42"
+      VLLM_ENGINE_READY_TIMEOUT_S: "7200"
+      VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "1200"
+      VLLM_HTTP_TIMEOUT_KEEP_ALIVE: "3600"
+      HIP_FORCE_DEV_KERNARG: "1"
+      NCCL_DMABUF_ENABLE: "0"
+      HSA_ENABLE_IPC_MODE_LEGACY: "1"
+      VLLM_ROCM_MINIMAX_M3_MONO_DRAFTER: "1"
+      VLLM_ROCM_PARALLEL_INDEX_TOPK: "1"
+      VLLM_USE_RUST_FRONTEND: "1"
+      VLLM_ROCM_USE_SKINNY_GEMM: "0"
+    json_args:
+      "--speculative-config": { num_speculative_tokens: 7, rejection_sample_method: block }
+      # Four QPs per transfer: one overflows its 16384-WR send queue on a ~230K-token prompt.
+      "--kv-transfer-config": { MoRIIOConnector: { kv_connector_extra_config: { backend: rdma, num_workers: 4, qp_per_transfer: 4, read_mode: false } } }
+    # MoRI-IO ran on the default KV cache layout; the pd_cluster block's BLHNC is for NIXL.
+    roles:
+      prefill:
+        env: { VLLM_KV_CACHE_LAYOUT: "LBHNC" }
+        json_args:
+          "--attention-config": { indexer_decode_cp: true }
+      decode:
+        env: { VLLM_KV_CACHE_LAYOUT: "LBHNC" }
+        # Replaces the NIXL config the pd_cluster block writes for MI355X decode.
+        args:
+          - "--max-num-batched-tokens"
+          - "8192"
+          - "--kv-transfer-config"
+          - '{"kv_connector":"MoRIIOConnector","kv_role":"kv_consumer","kv_load_failure_policy":"fail","kv_connector_extra_config":{"proxy_ip":"$ROUTER_HOST","proxy_ping_port":"36367","http_port":"{port}","handshake_port":"7301","notify_port":"62005"}}'
+    # Prefill admits twice the sessions; each decode engine caps its batch, and its graphs
+    # cover that batch x (1 + 7 draft tokens).
+    points:
+      c40:
+        label: "40"
+        concurrency: 40
+        roles:
+          prefill:
+            args: ["--max-num-seqs", "80"]
+            json_args:
+              "--kv-transfer-config": { SimpleCPUOffloadConnector: { kv_connector_extra_config: { cpu_bytes_to_use_per_rank: null, cpu_hugepage_block_size: null, cpu_bytes_to_use: 1349000000000, lazy_offload: false } } }
+          decode:
+            args: ["--max-num-seqs", "10"]
+            json_args:
+              "--compilation-config": { cudagraph_capture_sizes: [8, 16, 24, 32, 40, 48, 56, 64, 72, 80], max_cudagraph_capture_size: 80 }
+      c48:
+        label: "48"
+        concurrency: 48
+        roles:
+          prefill:
+            args: ["--max-num-seqs", "96"]
+            json_args:
+              "--kv-transfer-config": { SimpleCPUOffloadConnector: { kv_connector_extra_config: { cpu_bytes_to_use_per_rank: null, cpu_hugepage_block_size: null, cpu_bytes_to_use: 1349000000000, lazy_offload: false } } }
+          decode:
+            args: ["--max-num-seqs", "12"]
+            json_args:
+              "--compilation-config": { cudagraph_capture_sizes: [8, 16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96], max_cudagraph_capture_size: 96 }
+      c64:
+        label: "64"
+        concurrency: 64
+        roles:
+          prefill:
+            args: ["--max-num-seqs", "128"]
+            json_args:
+              "--kv-transfer-config": { SimpleCPUOffloadConnector: { kv_connector_extra_config: { cpu_bytes_to_use_per_rank: null, cpu_hugepage_block_size: null, cpu_bytes_to_use: 1349000000000, lazy_offload: false } } }
+          decode:
+            args: ["--max-num-seqs", "16"]
+            json_args:
+              "--compilation-config": { cudagraph_capture_sizes: [8, 16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120, 128], max_cudagraph_capture_size: 128 }
+      c96:
+        label: "96"
+        concurrency: 96
+        default: true
+        roles:
+          prefill:
+            args: ["--max-num-seqs", "192"]
+            json_args:
+              "--kv-transfer-config": { SimpleCPUOffloadConnector: { kv_connector_extra_config: { cpu_bytes_to_use_per_rank: null, cpu_hugepage_block_size: null, cpu_bytes_to_use: 1900000000000, lazy_offload: false } } }
+          decode:
+            args: ["--max-num-seqs", "16"]
+            json_args:
+              "--compilation-config": { cudagraph_capture_sizes: [8, 16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120, 128], max_cudagraph_capture_size: 128 }
+      c112:
+        label: "112"
+        concurrency: 112
+        roles:
+          prefill:
+            args: ["--max-num-seqs", "224"]
+            json_args:
+              "--kv-transfer-config": { SimpleCPUOffloadConnector: { kv_connector_extra_config: { cpu_bytes_to_use_per_rank: null, cpu_hugepage_block_size: null, cpu_bytes_to_use: 1900000000000, lazy_offload: false } } }
+          decode:
+            args: ["--max-num-seqs", "20"]
+            json_args:
+              "--compilation-config": { cudagraph_capture_sizes: [8, 16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120, 128, 136, 144, 152, 160], max_cudagraph_capture_size: 160 }
+      c128:
+        label: "128"
+        concurrency: 128
+        roles:
+          prefill:
+            args: ["--max-num-seqs", "256"]
+            json_args:
+              "--kv-transfer-config": { SimpleCPUOffloadConnector: { kv_connector_extra_config: { cpu_bytes_to_use_per_rank: null, cpu_hugepage_block_size: null, cpu_bytes_to_use: 2200000000000, lazy_offload: false } } }
+          decode:
+            args: ["--max-num-seqs", "24"]
+            json_args:
+              "--compilation-config": { cudagraph_capture_sizes: [8, 16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120, 128, 136, 144, 152, 160, 168, 176, 184, 192], max_cudagraph_capture_size: 192 }
+    runbook: |
+      A 1P2D AgentX lane on 12 MI355X GPUs, on the Quark MXFP4 checkpoint: one TP4 prefill
+      engine (GPUs 0-3 of its node) and two TP4 decode engines (GPUs 0-3 and 4-7 of a second
+      node), with KV moved from prefill to decode by MoRI-IO RDMA WRITE. Measured in
+      [ROCm/ATOM](https://github.com/ROCm/ATOM/blob/7e0e199ffd45e2c5cb451e171ac2a05a1e973420/.github/benchmark/models_atomesh.yaml)
+      (`m31-flash-vllm-moriio-rdma-1p2d-s65822-*`, and `-n4fab-c96-dcap16-cpu19-nodbo` for
+      concurrency 96) with agentx-harness 1.0.12 on the
+      `semianalysis_cc_traces_weka_062126` traces, 3600 s per point. Throughput runs replaced
+      block verification with synthetic rejection at the golden DSpark acceptance length
+      (4.04); the commands above keep block verification.
+
+      **Image and vLLM.** The image and opt-in switches of the MI355X AgentX TP4 lane
+      (`4fab5a074`), plus
+      [vllm-project/vllm#65822](https://github.com/vllm-project/vllm/pull/65822): with
+      prefix caching on the decode engine, MoRI-IO WRITE skips the blocks the decoder already
+      holds instead of rewriting them. The lane overlaid that PR's Python files on the image;
+      use a nightly that contains it.
+
+      **Running it.** The preset renders the prefill engine and one decode engine. Start the
+      second decode engine on the same node with the same command and environment, with
+      `CUDA_VISIBLE_DEVICES=4,5,6,7`, `--port 8003`, and `handshake_port` 7401 and
+      `notify_port` 62105 in its `--kv-transfer-config` (each TP rank listens on base + rank).
+      Pin each engine to its GPUs' NUMA node (GPUs 0-3 on node 0, 4-7 on node 1). Run
+      vllm-router 0.1.16 (MoRI-IO WRITE needs 0.1.15 or later) with
+      `--policy consistent_hash --prefill-policy consistent_hash --decode-policy consistent_hash`
+      in place of `round_robin`, so every turn of a conversation reaches the engines that
+      cache its prefix.
+
+      Engines find the router through `proxy_ip`, not a list of endpoints: set `ROUTER_HOST`
+      to an address of the router's node that both nodes can reach; the default `localhost`
+      only reaches engines on the router's node. Each engine registers the address
+      `get_ip()` returns; on hosts with several NICs, set `VLLM_HOST_IP` to the node's
+      routable address.
+
+      **Tuning rules.**
+
+      - Prefill `--max-num-seqs` is twice the concurrency. Each decode engine caps its batch
+        (`--max-num-seqs` 10-24), and its CUDA graphs cover that batch x (1 + 7 draft tokens).
+        A capped engine queues extra requests instead of running a larger, slower batch.
+      - The prefill host-DRAM KV tier keeps the conversations' prefixes once they outgrow HBM
+        (about 53 KB per token): 1.349 TB up to concurrency 64, 1.9 TB (about 36M tokens) at
+        96 and 112, 2.2 TB at 128. The prefill prefix hit rate stayed at 95-97%.
+      - Decode engines run vLLM's default `FULL_AND_PIECEWISE` graphs.
+
+      | Concurrency | Decode cap | Total tokens/s per GPU | Interactivity p50 / p90 (tokens/s/user) | TTFT p90 | E2E latency p90 |
+      | ---: | ---: | ---: | ---: | ---: | ---: |
+      | 40 | 10 | 24,884 | 312.7 / 241.0 | 0.8 s | 9.8 s |
+      | 48 | 12 | 29,553 | 277.3 / 229.9 | 1.1 s | 9.8 s |
+      | 64 | 16 | 39,616 | 231.5 / 200.4 | 2.4 s | 11.6 s |
+      | 96 | 16 | 46,295 | 200.7 / 189.0 | 7.1 s | 16.4 s |
+      | 112 | 20 | 50,561 | 187.0 / 168.4 | 9.6 s | 18.4 s |
+      | 128 | 24 | 52,889 | 178.4 / 159.7 | 11.3 s | 21.5 s |
+
+      Single runs of the rendered commands. Dual-batch overlap on prefill
+      (`--enable-dbo --dbo-prefill-token-threshold 16384 --dbo-decode-token-threshold 32768`,
+      [vllm-project/vllm#63483](https://github.com/vllm-project/vllm/pull/63483)) gave the
+      same throughput and interactivity at every point and lowered TTFT p90 by 1-2 s at 112
+      and 128, so the preset leaves it off.
+
+      A worker can fail at startup with mori's `tcp.cpp` "Address already in use": MoRI-IO
+      picks its RDMA port with a probe-and-release, and another process on a busy node can
+      take it first. Restart the engine.
 
 guide: |
   ## Overview
@@ -1532,6 +1777,18 @@ guide: |
     by context instead of by index head.
   - `--quantization-config.moe mxfp8` re-quantizes the NVFP4 experts to MXFP8 at
     load for the AITER MoE.
+  - With a seven-token DSpark draft (`num_speculative_tokens: 7`),
+    `VLLM_ROCM_MINIMAX_M3_MONO_DRAFTER=1` runs draft steps of up to 10 requests
+    as fused FlyDSL kernels.
+
+  ### Parallel index top-k (AMD MI355X)
+
+  `parallel_topk` enables parallel decode top-16 selection for the NVFP4
+  indexer. It is disabled by default. Use a build containing the selector and
+  set `VLLM_ROCM_PARALLEL_INDEX_TOPK=1`, or enable the recipe feature.
+  FP8 indexers, including mono decode, bypass this path. Benchmark and CI
+  lanes must explicitly enable it in an image containing the patch; adding
+  the kernel or running correctness CI alone does not enable it for serving.
 
   ### DBO and SP prefill (TP4, AMD MI355X)
 
