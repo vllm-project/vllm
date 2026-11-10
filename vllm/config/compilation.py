@@ -876,6 +876,9 @@ class CompilationConfig:
     local_cache_dir: str = field(default=None, init=False)  # type: ignore
     """local cache dir for each rank"""
 
+    graph_extension_config_path: str | None = None
+    """Optional Foundry CUDA Graph persistence configuration."""
+
     fast_moe_cold_start: bool | None = None
     """Optimization for fast MOE cold start.
 
@@ -1239,6 +1242,11 @@ class CompilationConfig:
 
         if self.backend == "":
             self.backend = current_platform.get_compile_backend()
+
+        if self.graph_extension_config_path:
+            from vllm.compilation.foundry_adapter import install_hooks
+
+            install_hooks(self)
 
     def init_backend(
         self,
