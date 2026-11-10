@@ -285,9 +285,8 @@ def _select(
         )
         latent = comp(kv_score, positions, attn.rotary_emb)
         indexer._produce_k(latent, positions, attn.indexer_rotary_emb)
-    weights, _ = indexer.weights_proj(normed)
     q, q_scale, weights = indexer.forward_q(
-        qr, None, weights, positions, attn.indexer_rotary_emb
+        qr, None, None, positions, attn.indexer_rotary_emb, normed
     )
     assert weights is not None
     indexer.indexer_op(

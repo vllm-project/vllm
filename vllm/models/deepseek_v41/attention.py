@@ -1565,19 +1565,27 @@ class DeepseekV4Indexer(nn.Module):
             self.use_fp4_kv,
         )
 
+    def projects_weights(self, hidden_states: torch.Tensor) -> bool:
+        """Whether `forward_q` projects the per-head weights from `hidden_states`."""
+        return False
+
     def forward_q(
         self,
         qr: torch.Tensor | QuantizedActivation,
         qr_scale: torch.Tensor | None,
-        indexer_weights: torch.Tensor,
+        indexer_weights: torch.Tensor | None,
         positions: torch.Tensor,
         rotary_emb: nn.Module,
+        hidden_states: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
         """Build the indexer queries: wq_b over qr plus fused RoPE/quant.
 
         Split out so the ROCm layer can schedule it apart from
         `_produce_k` (e.g. on an aux stream once `qr` is ready).
         """
+        if indexer_weights is None:
+            assert hidden_states is not None
+            indexer_weights, _ = self.weights_proj(hidden_states)
         q = self._wq_b_proj(qr, qr_scale)
         q = q.view(-1, self.n_head, self.head_dim)
         q_quant, weights = fused_indexer_q_rope_quant(

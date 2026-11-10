@@ -9,7 +9,7 @@ unreduced output."""
 
 import sys
 from collections import defaultdict
-from types import ModuleType, SimpleNamespace
+from types import MethodType, ModuleType, SimpleNamespace
 
 import pytest
 import torch
@@ -886,3 +886,67 @@ def test_dspark_draft_model_samples_with_fused_markov(
         ops.record_monokernel(_config(monokernel=False))
     assert got is taken
     assert launches == ([fused_markov.NUM_WARPS] * n_spec + [None] if taken else [])
+
+
+@pytest.mark.parametrize("gate, lora", [(False, False), (True, False), (True, True)])
+def test_select_skips_weights_proj_when_the_quant_projects(monkeypatch, gate, lora):
+    """_select runs weights_proj only when the indexer's Q quant cannot project."""
+    from vllm.lora.layers.base import BaseLayerWithLoRA
+    from vllm.models.deepseek_v41.amd import rocm
+
+    rows, n_head, head_dim = 7, 32, 128
+    normed, qr = torch.randn(rows, 64), torch.randn(rows, 16)
+    weights = torch.randn(rows, n_head)
+    q = torch.randn(rows, n_head * head_dim)
+    out = ((q, torch.zeros(rows, n_head, dtype=torch.int32)), torch.randn(rows, n_head))
+    calls: list[tuple] = []
+
+    def forward(self, hidden):
+        calls.append(("weights_proj", hidden))
+        return weights, None
+
+    base = BaseLayerWithLoRA if lora else torch.nn.Module
+    weights_proj = type("WeightsProj", (base,), {"forward": forward})()
+    weights_proj.weight = torch.randn(n_head, 64)
+
+    def projects(hidden, weight):
+        assert hidden is normed and weight is weights_proj.weight
+        return gate
+
+    def quant(*args, **kwargs):
+        calls.append(("quant", args, kwargs))
+        return out
+
+    monkeypatch.setattr(rocm, "rocm_mxfp4_indexer_q_projects_weights", projects)
+    monkeypatch.setattr(rocm, "rocm_mxfp4_indexer_q_quant", quant)
+    indexer = SimpleNamespace(
+        n_head=n_head,
+        head_dim=head_dim,
+        softmax_scale=head_dim**-0.5,
+        use_fp4_kv=True,
+        indexer_weights_dtype=torch.float32,
+        weights_proj=weights_proj,
+        _wq_b_proj=lambda qr_, qr_scale: q,
+        indexer_op=lambda *args: calls.append(("indexer_op", *args)),
+    )
+    cls = rocm.DeepseekV41RocmMxfp4Indexer
+    indexer.projects_weights = MethodType(cls.projects_weights, indexer)
+    indexer.forward_q = MethodType(cls.forward_q, indexer)
+    attn = SimpleNamespace(
+        compressor=None,
+        indexer=indexer,
+        indexer_rotary_emb=SimpleNamespace(cos_sin_cache=torch.randn(32, 64)),
+    )
+    md._select(SimpleNamespace(attn=attn), torch.arange(rows), normed, qr)
+
+    projected = gate and not lora
+    assert [c[0] for c in calls] == [
+        *([] if projected else ["weights_proj"]),
+        "quant",
+        "indexer_op",
+    ]
+    _, args, kwargs = calls[-2]
+    assert args[3] is (None if projected else weights)
+    assert kwargs["hidden_states"] is normed
+    assert kwargs["weights_proj"] is weights_proj.weight
+    assert calls[-1][4] is out[1]
