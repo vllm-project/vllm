@@ -51,9 +51,9 @@ class _HiSparseRequestState:
     """Residency bookkeeping for one request.
 
     A resident page moves through three states: dirty (only the GPU copy
-    exists), clean (``valid_pages``: the host copy is complete) and unpinned
-    (``unpinned_pages``: clean, and its allocation reference was released so
-    the pool may reuse it). ``pinned_clean`` tracks clean pages still holding
+    exists), clean (`valid_pages`: the host copy is complete) and unpinned
+    (`unpinned_pages`: clean, and its allocation reference was released so
+    the pool may reuse it). `pinned_clean` tracks clean pages still holding
     their reference, which only happens before the request can read from host.
     """
 
@@ -91,9 +91,9 @@ class HiSparseCoordinator:
     GPU-resident pages are a write-back cache of the host tier. Once a page's
     host copy is durable and its owner can read from host (it has, or has
     asked for, a hot region), the page's allocation reference is released with
-    ``BlockPool.unpin_blocks``: the block keeps being read, but the pool counts
+    `BlockPool.unpin_blocks`: the block keeps being read, but the pool counts
     it as free and may hand it out, at which point the owner stops reading it.
-    Residency changes reach the worker through ``take_residency_updates``, not
+    Residency changes reach the worker through `take_residency_updates`, not
     the block table, which stays append-only.
     """
 
@@ -285,6 +285,15 @@ class HiSparseCoordinator:
                     if host_idx < state.synced_pages:
                         state.stale_pages.add(host_idx)
 
+    def _adopt_pending_copies(
+        self, request_id: str, state: _HiSparseRequestState
+    ) -> None:
+        if state.pages_to_adopt:
+            assert self.host_manager is not None
+            host_blocks = self.host_manager.req_to_blocks.get(request_id, ())
+            self._adopt_copies(request_id, state, host_blocks[: state.pages_to_adopt])
+            state.pages_to_adopt = 0
+
     def _record_copies(self, request_id: str, num_computed_tokens: int) -> None:
         """Index the GPU copies of just-published host blocks for later hits."""
         if not self.resident_managers:
@@ -427,11 +436,7 @@ class HiSparseCoordinator:
         if not self.resident_managers:
             return
         state = self._get_request_state(request_id)
-        if state.pages_to_adopt:
-            assert self.host_manager is not None
-            host_blocks = self.host_manager.req_to_blocks.get(request_id, ())
-            self._adopt_copies(request_id, state, host_blocks[: state.pages_to_adopt])
-            state.pages_to_adopt = 0
+        self._adopt_pending_copies(request_id, state)
         if not self._can_read_from_host(request_id):
             assert self.gpu_pool is not None
             if (
@@ -451,9 +456,9 @@ class HiSparseCoordinator:
     def advance_scheduled(self, requests: Iterable[tuple[str, int]]) -> None:
         """Run the per-step residency work for each scheduled request.
 
-        ``requests`` pairs a request id with the number of tokens computed
-        once the step completes. As in ``KVCacheCoordinator.cache_blocks``, the
-        last ``num_reprefillable_tokens`` are not final yet and are not written
+        `requests` pairs a request id with the number of tokens computed
+        once the step completes. As in `KVCacheCoordinator.cache_blocks`, the
+        last `num_reprefillable_tokens` are not final yet and are not written
         back.
         """
         if not self.resident_managers:
@@ -555,8 +560,8 @@ class HiSparseCoordinator:
     def size_import(self, request_id: str, num_pages: int) -> None:
         """Note the full-sequence host pages of an import being admitted.
 
-        The admission gate runs in the same ``allocate_slots`` call as the
-        allocation, so the next ``record_pending_host_import`` is this
+        The admission gate runs in the same `allocate_slots` call as the
+        allocation, so the next `record_pending_host_import` is this
         request's if it is admitted; a size left by a rejected admission is
         discarded.
         """
@@ -597,12 +602,61 @@ class HiSparseCoordinator:
         state.valid_pages = set(range(num_pages))
         state.ready_prefix_pages = num_pages
         if num_computed_tokens:
-            self._plan_page_transfer(
-                request_id,
-                (num_computed_tokens - 1) // block_size,
-                restore=True,
-            )
+            # A local prefix hit's surviving GPU copies cost no copy, so adopt
+            # them before promoting the rest.
+            self._adopt_pending_copies(request_id, state)
+            tail_page = (num_computed_tokens - 1) // block_size
+            for page_idx in (
+                tail_page,
+                *self._promote_imported_pages(request_id, tail_page),
+            ):
+                self._plan_page_transfer(request_id, page_idx, restore=True)
         self._publish_host_blocks_if_ready(request_id)
+
+    def _promote_imported_pages(self, request_id: str, num_pages: int) -> list[int]:
+        """Back an import's first `num_pages` host pages with new GPU pages.
+
+        Imports land in the host tier. While the GPU pool has room above the
+        transition watermark, the imported pages are restored into resident
+        pages too, so decode reads them like a locally computed prefix. They are
+        clean copies of durable host pages: the residency policy unpins them,
+        and the pool reclaims them only after every other free block.
+        """
+        assert self.gpu_pool is not None and self.host_manager is not None
+        num_managers = len(self.resident_managers)
+        spare = self.gpu_pool.get_num_free_blocks() - self.transition_watermark
+        host_blocks = self.host_manager.req_to_blocks[request_id]
+        num_pages = min(
+            num_pages,
+            len(host_blocks),
+            *(
+                len(manager.req_to_blocks.get(request_id, ()))
+                for manager in self.resident_managers
+            ),
+        )
+        state = self._get_request_state(request_id)
+        pages = [
+            page_idx
+            for page_idx in range(num_pages)
+            if not host_blocks[page_idx].is_null
+            and page_idx not in state.pending_pages
+            and all(
+                manager.get_resident_page(request_id, page_idx) is None
+                for manager in self.resident_managers
+            )
+        ][: max(spare, 0) // num_managers]
+        if not pages:
+            return []
+        blocks = self.gpu_pool.get_new_blocks(len(pages) * num_managers)
+        for i, page_idx in enumerate(pages):
+            for slot, manager in enumerate(self.resident_managers):
+                adopted = manager.adopt_resident_page(
+                    request_id, page_idx, blocks[i * num_managers + slot]
+                )
+                assert adopted, f"Cannot promote page {page_idx} of {request_id}"
+            if page_idx < state.synced_pages:
+                state.stale_pages.add(page_idx)
+        return pages
 
     def _plan_page_transfer(
         self,

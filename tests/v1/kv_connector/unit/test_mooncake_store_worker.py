@@ -20,16 +20,14 @@ import torch
 from tests.v1.attention.utils import dense_kv_cache_views
 from vllm.distributed import mooncake_store
 from vllm.distributed.kv_events import KVEventAggregator
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake import (
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store import (
     rdma_utils,
-)
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store import (
     worker,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store import (
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store import (
     worker as mooncake_store_worker,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (  # noqa: E501
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.data import (  # noqa: E501
     BlobBlockHashes,
     BoundaryPut,
     ChunkedTokenDatabase,
@@ -39,7 +37,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (  
     RequestTracker,
     TailKeyBoundary,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.layout import (  # noqa: E501
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.layout import (  # noqa: E501
     HeadMajorStoreLayout,
     KeyMetadata,
     MambaStoreLayout,
@@ -47,10 +45,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.layout import (
     RankLocalStoreLayout,
     TokenMajorStoreLayout,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.metrics import (
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.metrics import (
     MooncakeStoreConnectorStats,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.scheduler import (  # noqa: E501
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.scheduler import (  # noqa: E501
     _partial_tail_non_mamba_puts,
 )
 from vllm.model_executor.layers.mamba.mamba_utils import get_conv_state_layout
@@ -1699,7 +1697,7 @@ def test_partial_tail_with_smaller_mamba_blocks_writes_one_mamba_key(tp_rank):
 
 
 def test_shared_prefix_junction_handoff_writes_only_its_mamba_key():
-    """A junction hand-off (``--enable-mamba-shared-prefix-checkpoint``) below
+    """A junction hand-off (`--enable-mamba-shared-prefix-checkpoint`) below
     the prompt checkpoint stores its Mamba state under the junction hash and
     no attention tail."""
     store = MagicMock()
@@ -3556,7 +3554,7 @@ def test_worker_put_striding_covers_every_rank_get_namespace(
     When num_kv_head < tp_size, ranks holding the same KV heads stripe
     their PUTs across one shared key namespace. That dedup is only valid
     when those ranks really share a namespace: with DCP > 1 each rank GETs
-    every key from its own ``@dcpN`` namespace, so striding must be
+    every key from its own `@dcpN` namespace, so striding must be
     disabled.
     """
     tp_size = 4
@@ -4024,7 +4022,7 @@ def test_store_sending_thread_skips_when_token_len_below_lcm():
 
 
 def test_store_sending_thread_only_stores_swa_blocks_in_window():
-    """For SWA groups, only blocks within ``sliding_window`` of an
+    """For SWA groups, only blocks within `sliding_window` of an
     lcm-aligned boundary are stored — a block outside every such window
     can never participate in any future hit (mirrors recv-side masking).
 
@@ -4367,7 +4365,7 @@ def _register_with_mocked_threads(
     kv_caches: dict[str, torch.Tensor],
 ) -> None:
     """Call register_kv_caches with the I/O transfer threads mocked out."""
-    prefix = "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.worker."
+    prefix = "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.worker."
     with (
         patch(prefix + "KVCacheStoreSendingThread", side_effect=_auto_set_ready_event),
         patch(prefix + "KVCacheStoreRecvingThread", side_effect=_auto_set_ready_event),
@@ -4485,10 +4483,10 @@ def _make_bare_worker(
 def test_mooncake_lookup_reuses_resolved_hash_checkpoint(
     use_eagle, prefix_match_unit, dcp_world_size, mamba_block_size
 ):
-    from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store import (
+    from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store import (
         coordinator as mooncake_coordinator,
     )
-    from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.scheduler import (
+    from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.scheduler import (
         MooncakeStoreScheduler,
     )
 
@@ -4527,7 +4525,7 @@ def test_mooncake_lookup_reuses_resolved_hash_checkpoint(
         ),
     )
     with patch(
-        "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+        "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store."
         "scheduler.LookupKeyClient"
     ):
         scheduler = MooncakeStoreScheduler(
@@ -4563,7 +4561,7 @@ def test_scheduler_follows_core_hit_alignment(alignment, expected):
     """The store takes partial hits from core's resolved alignment, not from its
     own groups: these Mamba specs alone would allow them, but core may still
     keep hits on the block (e.g. for a sliding-window group it never sees)."""
-    from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.scheduler import (
+    from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.scheduler import (
         MooncakeStoreScheduler,
     )
 
@@ -4597,7 +4595,7 @@ def test_scheduler_follows_core_hit_alignment(alignment, expected):
         parallel_config=SimpleNamespace(decode_context_parallel_size=1, world_size=1),
     )
     with patch(
-        "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+        "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store."
         "scheduler.LookupKeyClient"
     ):
         scheduler = MooncakeStoreScheduler(
@@ -6244,9 +6242,9 @@ def test_store_worker_close_swallows_store_errors():
 
 
 def test_blob_block_hashes_wire_roundtrip():
-    """The lookup wire format sends a ``hash_len`` frame plus the raw hashes
+    """The lookup wire format sends a `hash_len` frame plus the raw hashes
     concatenated back-to-back; the server rebuilds them through a zero-copy
-    ``BlobBlockHashes`` view over the frame buffer."""
+    `BlobBlockHashes` view over the frame buffer."""
     hashes = [BlockHash(bytes([i]) * 16) for i in range(5)]
     hash_len = len(hashes[0])
 
