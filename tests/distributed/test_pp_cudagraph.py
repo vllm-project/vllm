@@ -59,14 +59,18 @@ def test_pp_cudagraph(
     reason="Below SM90, FlashInfer supports full CUDA graphs for spec-decode batches",
 )
 @create_new_process_for_each_test()
-def test_pp_cudagraph_mode_differs_across_stages(vllm_runner, example_prompts):
+def test_pp_cudagraph_mode_differs_across_stages(
+    vllm_runner, example_prompts, monkeypatch
+):
     """Pipeline stages with different CUDA graph modes match eager outputs.
 
     The draft model's attention layers are on the last stage only. FlashInfer
     without TRT-LLM does not support full CUDA graphs for spec-decode batches, so
     the last stage uses PIECEWISE and the first stage uses FULL decode graphs,
-    which pad decode batches to different sizes.
+    which pad decode batches to different sizes. NCCL is forced because the
+    copy-engine transport receives directly into the persistent tensors.
     """
+    monkeypatch.setenv("VLLM_PP_TRANSPORT", "nccl")
     outputs = {}
     for enforce_eager in (True, False):
         with vllm_runner(
