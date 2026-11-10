@@ -46,8 +46,8 @@ BENCH_RANDOM_SEED = 889
 BENCH_TURNS = 5
 BENCH_PROMPT_TOKENS = 4096
 
-# FS-file granularity: KV block_size 16 -> small files, 1024 -> large files.
-FILE_SIZES = {"block16": 16, "block1024": 1024}
+# FS-file granularity: KV block_size 64 -> small files, 1024 -> large files.
+FILE_SIZES = {"block64": 64, "block1024": 1024}
 # Shared prefix length (tokens) driven into the FS tier.
 PROMPT_SIZES = {"5k": 5_000, "20k": 20_000, "100k": 100_000}
 # CPU tier budget in bytes.
