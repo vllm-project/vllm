@@ -26,6 +26,12 @@ pytestmark = pytest.mark.skipif(
 
 FP8 = torch.finfo(current_platform.fp8_dtype())
 
+# `TritonExperts` takes the fused kernel on ROCm only. On sm_89, Triton casts fp32 to
+# FP8 through fp16, which rounds twice and cannot match `scaled_fp8_quant` bit for bit.
+rocm_only = pytest.mark.skipif(
+    not current_platform.is_rocm(), reason="the fused kernel runs on ROCm only"
+)
+
 
 def _reference(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     act = torch.empty((x.size(0), x.size(1) // 2), dtype=x.dtype, device=x.device)
@@ -71,6 +77,7 @@ CASES = {
 }
 
 
+@rocm_only
 @pytest.mark.parametrize("overrides", CASES.values(), ids=CASES.keys())
 def test_silu_mul_token_quant(overrides):
     tokens, hidden, num_experts, top_k, ep_size, dtype = {**BASE, **overrides}.values()
@@ -104,6 +111,7 @@ def test_silu_mul_token_quant(overrides):
     _assert_matches(q[keep], s[keep], ref_q[keep], ref_s[keep])
 
 
+@rocm_only
 def test_silu_mul_token_quant_skips_out_of_range_ids():
     """Ids outside [0, num_experts) are dropped like `moe_align_block_size` does,
     without reading `expert_map` past `num_experts` (for example fused shared-expert
