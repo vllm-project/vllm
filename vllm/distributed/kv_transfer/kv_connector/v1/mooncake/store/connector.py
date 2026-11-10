@@ -224,7 +224,7 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
 
         Closes the worker's MooncakeDistributedStore handle so its
         TransferEngine and RDMA registrations are released. Invoked from the
-        engine's explicit shutdown path and as a backstop from ``__del__``;
+        engine's explicit shutdown path and as a backstop from `__del__`;
         a no-op on the scheduler role, which holds no store handle.
         """
         worker = getattr(self, "connector_worker", None)
@@ -237,6 +237,10 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
     # ============================================================
     # Scheduler-side methods
     # ============================================================
+
+    def on_new_request(self, request: Request) -> None:
+        assert self.connector_scheduler is not None
+        self.connector_scheduler.start_lookup_prefetch(request)
 
     def get_num_new_matched_tokens(
         self,
@@ -290,6 +294,8 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
         request: Request,
         block_ids: tuple[list[int], ...],
     ) -> tuple[bool, dict[str, Any] | None]:
+        if self.connector_scheduler is not None:
+            self.connector_scheduler.client.discard(request.request_id)
         # An in-flight store job holds its own reference on the blocks it reads,
         # so a finishing request never has to defer freeing them.
         assert self.connector_scheduler is not None
@@ -310,9 +316,9 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
     def reset_cache(self) -> bool | None:
         """Reset the external Mooncake store on prefix-cache reset.
 
-        Drains the worker send queue, then runs ``remove_all`` on the
+        Drains the worker send queue, then runs `remove_all` on the
         Mooncake master. Caller must first pause generation (e.g.
-        ``pause_generation``) so no new puts are enqueued during drain.
+        `pause_generation`) so no new puts are enqueued during drain.
 
         Returns True on ack, False on failure, None for the worker role.
         """
@@ -353,9 +359,9 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
     def get_mem_pool_context(self) -> AbstractContextManager | None:
         """Return a context manager for the custom MemPool, or None.
 
-        Called by the Worker before ``initialize_kv_cache`` so that KV
+        Called by the Worker before `initialize_kv_cache` so that KV
         cache is allocated from the Mooncake-managed pool when
-        ``custom_mem_pool`` is set in ``kv_connector_extra_config``.
+        `custom_mem_pool` is set in `kv_connector_extra_config`.
         """
         if self.connector_worker is None:
             return None

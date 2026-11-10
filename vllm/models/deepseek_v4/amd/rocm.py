@@ -17,7 +17,16 @@ from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.rocm_paged_mxfp4_indexer import RocmSparseAttnIndexer
 from vllm.model_executor.layers.sparse_attn_indexer import SparseAttnIndexer
-from vllm.model_executor.utils import refill_derived, replace_parameter
+from vllm.model_executor.utils import (
+    is_weights_pre_processed,
+    refill_derived,
+    replace_parameter,
+)
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    DispatchSpec,
+    TritonWarmupTensor,
+    triton_kernel_dispatcher_with_warmup,
+)
 from vllm.models.deepseek_v4.attention import (
     DeepseekV4Attention,
     DeepseekV4Indexer,
@@ -72,13 +81,13 @@ def _wo_a_block_scale_to_e8m0(scale: torch.Tensor) -> torch.Tensor | None:
     """Normalize checkpoint WO_A scales to raw OCP MX E8M0 bytes.
 
     E8M0 is an unsigned exponent-only scale format with bias 127. A finite
-    encoded byte ``b`` in ``[0, 254]`` represents ``2 ** (b - 127)``;
-    ``0xFF`` is reserved for NaN. This is the vendor-neutral OCP encoding used
+    encoded byte `b` in `[0, 254]` represents `2 ** (b - 127)`;
+    `0xFF` is reserved for NaN. This is the vendor-neutral OCP encoding used
     by AMD AITER/OPUS, not an NVIDIA-specific convention. Reference: OCP
     Microscaling Formats (MX) Specification, section 5.4.1:
     https://www.opencompute.org/documents/ocp-microscaling-formats-mx-v1-0-spec-final-pdf
 
-    Loaders may preserve the encoded byte as ``float8_e8m0fnu``/``uint8``,
+    Loaders may preserve the encoded byte as `float8_e8m0fnu`/`uint8`,
     or decode it to a floating-point power of two. Floating-point inputs are
     accepted only when the original E8M0 byte can be recovered losslessly.
     This function does not quantize or round arbitrary scales.
@@ -418,6 +427,137 @@ def _pack_global_topk_ragged_kernel(
     block_offsets = local_idx % block_size
     slot_ids = tl.where(valid, block_numbers * block_size + block_offsets, -1)
     tl.store(global_topk_ragged_ptr + out_start + offset, slot_ids, mask=mask)
+
+
+# The strides and the state block size depend on the KV cache layout; keeping
+# them out of the compile key lets one warmup variant serve every deployment.
+@triton.jit(
+    do_not_specialize=[
+        "state_cache_stride0",
+        "state_cache_stride1",
+        "block_table_stride",
+        "block_size",
+        "pooled_k_stride",
+    ]
+)
+def _compress_pool_kernel(
+    state_cache_ptr,
+    state_cache_stride0,
+    state_cache_stride1,
+    token_to_req_indices_ptr,
+    positions_ptr,
+    kv_slot_mapping_ptr,
+    block_table_ptr,
+    block_table_stride,
+    block_size,
+    pooled_k_ptr,
+    pooled_k_stride,
+    HEAD_SIZE: tl.constexpr,
+    STATE_WIDTH: tl.constexpr,
+    COMPRESS_RATIO: tl.constexpr,
+    OVERLAP: tl.constexpr,
+):
+    """The softmax-gated pooling of `_fused_kv_compress_norm_rope_insert_*`,
+    stopping before the norm: one bf16 row per boundary token."""
+    token_idx = tl.program_id(0)
+    # Pool exactly the rows aiter's writer stores; it skips the same tokens.
+    if tl.load(kv_slot_mapping_ptr + token_idx) < 0:
+        return
+    position = tl.load(positions_ptr + token_idx)
+    if (position + 1) % COMPRESS_RATIO != 0:
+        return
+    req_idx = tl.load(token_to_req_indices_ptr + token_idx)
+
+    start = position - (1 + OVERLAP) * COMPRESS_RATIO + 1
+    tokens = tl.arange(0, (1 + OVERLAP) * COMPRESS_RATIO)
+    pos = start + tokens
+    mask_pos = pos >= 0
+    block_numbers = tl.load(
+        block_table_ptr + req_idx * block_table_stride + pos // block_size,
+        mask=mask_pos,
+        other=0,
+    )
+    head_offset = (tokens >= COMPRESS_RATIO).to(tl.int32) * HEAD_SIZE
+    row_base = (
+        state_cache_ptr
+        + block_numbers.to(tl.int64) * state_cache_stride0
+        + (pos % block_size) * state_cache_stride1
+        + head_offset
+    )
+
+    block = tl.arange(0, HEAD_SIZE)
+    score = tl.load(
+        row_base[:, None] + STATE_WIDTH + block[None, :],
+        mask=mask_pos[:, None],
+        other=float("-inf"),
+    )
+    score = tl.softmax(score, dim=0)
+    kv = tl.load(row_base[:, None] + block[None, :], mask=mask_pos[:, None], other=0.0)
+    compressed_kv = tl.sum(kv * score, axis=0)
+    tl.store(
+        pooled_k_ptr + token_idx.to(tl.int64) * pooled_k_stride + block,
+        compressed_kv.to(tl.bfloat16),
+    )
+
+
+def _compress_pool_warmup_inputs(
+    *, head_dim: int, state_width: int, compress_ratio: int, overlap: bool
+) -> list[dict[str, object]]:
+    # ROCm specializes a pointer on whether its storage is at most 2 GB (see
+    # TritonWarmupTensor.ptr_range_bytes). The state cache is a view of the KV
+    # pool, whose size depends on the deployment and is usually far above
+    # 2 GB, so warm up both variants; the other inputs are small buffers.
+    return [
+        dict(
+            state_cache=TritonWarmupTensor(
+                torch.float32,
+                shape=(1, 1, 2 * state_width),
+                ptr_range_bytes=pool_bytes,
+            ),
+            token_to_req_indices=TritonWarmupTensor(torch.int32),
+            positions=TritonWarmupTensor(torch.int64),
+            kv_slot_mapping=TritonWarmupTensor(torch.int64),
+            block_table=TritonWarmupTensor(torch.int32, shape=(1, 1)),
+            block_size=compress_ratio,
+            pooled_k=TritonWarmupTensor(torch.bfloat16, shape=(1, head_dim)),
+            state_width=state_width,
+            compress_ratio=compress_ratio,
+            overlap=overlap,
+        )
+        for pool_bytes in (0, 1 << 32)
+    ]
+
+
+@triton_kernel_dispatcher_with_warmup(
+    kernel=_compress_pool_kernel,
+    warmup_inputs=_compress_pool_warmup_inputs,
+)
+def compress_pool(
+    state_cache: torch.Tensor,
+    token_to_req_indices: torch.Tensor,
+    positions: torch.Tensor,
+    kv_slot_mapping: torch.Tensor,
+    block_table: torch.Tensor,
+    block_size: int,
+    pooled_k: torch.Tensor,
+    state_width: int,
+    compress_ratio: int,
+    overlap: bool,
+) -> DispatchSpec:
+    """Pool each boundary token's compressor states into a bf16 row of
+    `pooled_k`, one program per token. Tensor inputs bind to the kernel's
+    `<name>_ptr` arguments; the same launch spec drives the JIT warmup."""
+    return (pooled_k.shape[0],), dict(
+        state_cache_stride0=state_cache.stride(0),
+        state_cache_stride1=state_cache.stride(1),
+        block_table_stride=block_table.stride(0),
+        pooled_k_stride=pooled_k.stride(0),
+        HEAD_SIZE=pooled_k.shape[1],
+        STATE_WIDTH=state_width,
+        COMPRESS_RATIO=compress_ratio,
+        OVERLAP=overlap,
+        num_warps=1,
+    )
 
 
 def compute_global_topk_ragged_indices_and_indptr(
@@ -764,7 +904,7 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
                 self._run_parallel_input_projections(hidden_states)
             )
             qr, qr_scale, kv = self._split_qkv_and_norm(qr_kv)
-            self._prepare_and_attn_fn(
+            self._prepare_and_attn(
                 hidden_states,
                 qr,
                 kv,
@@ -798,7 +938,7 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         ):
             # The ROCm override consumes these sentinels inside the capture
             # boundary, moving the stream fan-out ahead of the projections.
-            self._prepare_and_attn_fn(
+            self._prepare_and_attn(
                 hidden_states,
                 None,
                 None,
@@ -851,14 +991,6 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
                 )
             finally:
                 self.aux_stream_list = saved_streams
-            return
-
-        # Re-check: forward's gate ran inside a captured segment that
-        # _prepare_and_attn_eager (MRV1) then broke, making this region eager.
-        if not current_platform.enable_multi_stream_overlap(
-            self.aux_stream_list, get_forward_context().attn_metadata
-        ):
-            self._run_sequential_pipeline(hidden_states, positions, o_padded)
             return
 
         indexer = self.indexer
@@ -983,7 +1115,10 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
                 ws = _upcast_e8m0_to_fp32(ws).contiguous()
             # Shuffle the weight in place (single weight, no unshuffled copy),
             # unless the linear kernel already B-preshuffled it at load time.
-            if not getattr(linear, "aiter_bpreshuffled", False):
+            if not (
+                getattr(linear, "aiter_bpreshuffled", False)
+                or is_weights_pre_processed()
+            ):
                 replace_parameter(
                     linear,
                     "weight",

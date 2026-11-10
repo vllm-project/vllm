@@ -22,10 +22,10 @@ os.environ["TOKENIZERS_PARALLELISM"] = "true"
 MAX_MODEL_LEN = 1024
 
 MODELS = [
-    ("LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit", "main"),
+    "LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit",
     # desc_act=True is a no-op for channelwise quantization.
-    ("TheBloke/TinyLlama-1.1B-Chat-v1.0-GPTQ", "gptq-8bit--1g-actorder_True"),
-    ("TechxGenus/gemma-2b-it-GPTQ", "main"),
+    "vllm-project/TinyLlama-1.1B-Chat-v1.0-GPTQ",
+    "vllm-project/gemma-2b-it-GPTQ",
 ]
 
 
@@ -43,17 +43,14 @@ MODELS = [
 def test_models(
     vllm_runner,
     example_prompts,
-    model,
+    model: str,
     dtype: str,
     max_tokens: int,
     num_logprobs: int,
 ) -> None:
-    model_name, revision = model
-
     # Run marlin.
     with vllm_runner(
-        model_name=model_name,
-        revision=revision,
+        model_name=model,
         dtype=dtype,
         quantization="marlin",
         max_model_len=MAX_MODEL_LEN,
@@ -69,8 +66,7 @@ def test_models(
     # Here we always compare fp16/bf16 gpt marlin kernel
     # to fp16 gptq kernel.
     with vllm_runner(
-        model_name=model_name,
-        revision=revision,
+        model_name=model,
         dtype="half",
         quantization="gptq",
         max_model_len=MAX_MODEL_LEN,

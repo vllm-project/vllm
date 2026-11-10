@@ -1045,7 +1045,7 @@ class ConformerEncoder(TransformerEncoderBase):
         if _simplified_path:
             input_tensor, *_ = self.encoders(input_tensor, pos_k, pos_v, hs_mask)
         else:
-            for i, layer in enumerate(self.encoders):
+            for layer in self.encoders:
                 input_tensor, _, _, _ = layer(
                     input_tensor,
                     pos_k,
