@@ -5431,6 +5431,8 @@ def test_lookup_applies_swa_mask_before_accessing_hashes():
         retention_interval=0,
     )
     _refresh_group_tp_replication_factors(worker)
+    # The Rust lookup reads every hash in one copy; this pins the Python one.
+    worker._rust_lookup = None
 
     block_hashes = _RecordingBlockHashes([f"h{i}".encode() for i in range(12)])
     accessed_before_rpc: list[int] = []
