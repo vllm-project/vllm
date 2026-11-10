@@ -41,9 +41,6 @@ _KERNEL_ACTIVATION: dict[MoEActivation, str] = {
     MoEActivation.RELU2_NO_MUL: "Relu2",
 }
 
-# Up/gate interleave width of the gated GEMM1 epilogue.
-FLASHINFER_CUTEDSL_SM90_INTERMEDIATE_ALIGNMENT = 32
-
 
 def flashinfer_cutedsl_sm90_local_expert_offset(
     moe_parallel_config: FusedMoEParallelConfig, num_experts: int

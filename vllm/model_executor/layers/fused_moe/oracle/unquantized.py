@@ -378,13 +378,7 @@ def unquantized_round_up_hidden_size_and_intermediate_size(
     if backend == UnquantizedMoeBackend.FLASHINFER_TRTLLM:
         intermediate_size = round_up(intermediate_size, 128)
     elif backend == UnquantizedMoeBackend.FLASHINFER_CUTEDSL:
-        from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutedsl_sm90_moe import (  # noqa: E501
-            FLASHINFER_CUTEDSL_SM90_INTERMEDIATE_ALIGNMENT,
-        )
-
-        intermediate_size = round_up(
-            intermediate_size, FLASHINFER_CUTEDSL_SM90_INTERMEDIATE_ALIGNMENT
-        )
+        intermediate_size = round_up(intermediate_size, 32)
     elif backend == UnquantizedMoeBackend.AITER:
         intermediate_size = round_up(
             intermediate_size, aiter_moe_intermediate_alignment(intermediate_size)
