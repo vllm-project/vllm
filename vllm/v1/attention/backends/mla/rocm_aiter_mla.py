@@ -45,6 +45,7 @@ from vllm.v1.attention.backends.mla.triton_mla import _compute_num_kv_splits
 from vllm.v1.attention.backends.utils import (
     get_dcp_local_seq_lens,
 )
+from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
 from vllm.v1.attention.ops.rocm_aiter_mla_merge import (
     merge_mla_segments_triton,
 )
@@ -936,6 +937,15 @@ class AiterMLAMetadata(MLACommonMetadata[AiterMLADecodeMetadata]):
 # Tile size used by the mla_prefill_ps_asm_fwd assembly kernel.
 _FP8_PREFILL_TILE_Q = 256
 
+# Longest query of a prefill batch with chunked context from which the assembly
+# prefill computes the new tokens' partial. Below it, the FP8 cast of q/k/v and
+# the reduce pass that `need_lse` adds over every query tile can cost more than
+# the kernel saves over flash_attn_varlen_func. Measured on gfx950 with
+# DeepSeek-V3 MLA dims and a 16K context, the crossover is near 2K query tokens
+# at 128 heads per rank, 4K at 32, 6K at 16 and 7K at 12 (Kimi-K3 at TP8).
+# Batches of several short requests lose at 12-16 heads: 4 x 2K and 8 x 1K.
+_FP8_PREFILL_CHUNKED_CONTEXT_MIN_QLEN = 8192
+
 
 class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
     # TODO(luka, lucas): audit this as part of:
@@ -1551,6 +1561,10 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         # on an event that has not been recorded yet returns immediately.
         self._fp8_ps_staging_free = [torch.cuda.Event(), torch.cuda.Event()]
         self._fp8_ps_slot = 0
+        # get_ps_metadata_v1 also synchronizes the current stream, even though
+        # every buffer it copies here is on the host. Plan on an idle stream so
+        # the build does not wait for the forward passes queued on the current one.
+        self._fp8_ps_plan_stream = torch.cuda.Stream(device=device)
 
         from vllm.platforms import current_platform
         from vllm.v1.worker.workspace import current_workspace_manager
@@ -1596,12 +1610,19 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         self,
         metadata: AiterMLAMetadata,
         common_attn_metadata: CommonAttentionMetadata,
+        need_lse: bool = False,
     ) -> None:
         """Build per-batch FP8 MLA prefill PS metadata and attach to *metadata*.
 
         Called from `build()` when prefill tokens are present and
         FP8 MLA prefill is enabled (auto-detected via
         `_fp8_mla_prefill_supported()`).
+
+        `need_lse` puts every query tile in a reduce group, so `mla_reduce_v1`
+        writes `final_lse` for every token. By default the planner reduces only
+        the tiles it splits along KV and the assembly kernel finalizes the rest
+        in place, leaving their lse unwritten. Only a prefill with chunked
+        context needs the lse, to merge against the context partial.
         """
         from aiter import get_ps_metadata_v1
 
@@ -1661,24 +1682,26 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         ) = self._fp8_ps_staging[slot]
 
         # work_metadata is not written by the host planner; it stays on device.
-        get_ps_metadata_v1(
-            qo_indptr_cpu,
-            kv_indptr_cpu,
-            seq_lens_cpu,
-            gqa_ratio,
-            num_head_k,
-            self.fp8_ps_work_metadata,
-            work_indptr_host,
-            work_info_host,
-            reduce_indptr_host,
-            reduce_final_map_host,
-            reduce_partial_map_host,
-            qhead_granularity=qhead_granularity,
-            qlen_granularity=qlen_granularity,
-            kvlen_granularity=kvlen_granularity,
-            block_size=block_size,
-            is_causal=True,
-        )
+        with torch.cuda.stream(self._fp8_ps_plan_stream):
+            get_ps_metadata_v1(
+                qo_indptr_cpu,
+                kv_indptr_cpu,
+                seq_lens_cpu,
+                gqa_ratio,
+                num_head_k,
+                self.fp8_ps_work_metadata,
+                work_indptr_host,
+                work_info_host,
+                reduce_indptr_host,
+                reduce_final_map_host,
+                reduce_partial_map_host,
+                qhead_granularity=qhead_granularity,
+                qlen_granularity=qlen_granularity,
+                kvlen_granularity=kvlen_granularity,
+                block_size=block_size,
+                is_causal=True,
+                need_lse=need_lse,
+            )
         for dst, src in zip(self._fp8_ps_device_outputs, self._fp8_ps_staging[slot]):
             dst.copy_(src, non_blocking=True)
         staging_free.record()
@@ -2300,12 +2323,19 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             attn_metadata.reduce_indptr = self._mla_reduce_indptr
             attn_metadata.reduce_final_map = self._mla_reduce_final_map
             attn_metadata.reduce_partial_map = self._mla_reduce_partial_map
-        if (
-            self._fp8_prefill_enabled
-            and attn_metadata.prefill is not None
-            and attn_metadata.prefill.chunked_context is None
-        ):
-            self._build_fp8_prefill_ps_metadata(attn_metadata, common_attn_metadata)
+        prefill = attn_metadata.prefill
+        if self._fp8_prefill_enabled and prefill is not None:
+            # The PS plan covers the new tokens only (kv_indptr == qo_indptr),
+            # so with chunked context it yields the suffix partial and its lse.
+            # Under DCP the parent computes the context and merges across ranks.
+            has_context = prefill.chunked_context is not None
+            if not has_context or (
+                self.dcp_world_size == 1
+                and prefill.max_query_len >= _FP8_PREFILL_CHUNKED_CONTEXT_MIN_QLEN
+            ):
+                self._build_fp8_prefill_ps_metadata(
+                    attn_metadata, common_attn_metadata, need_lse=has_context
+                )
         return attn_metadata
 
 
@@ -3001,6 +3031,7 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         v: torch.Tensor,
         attn_metadata: AiterMLAMetadata,
         out: torch.Tensor,
+        out_lse: torch.Tensor | None = None,
     ) -> None:
         """Run FP8 MLA prefill via mla_prefill_ps_asm_fwd + mla_reduce_v1.
 
@@ -3009,6 +3040,10 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         result in-place to `out`, which is the [total_q, nhead * v_head_dim]
         output buffer supplied by `forward_mha`; no extra allocation or
         copy is required.
+
+        `out_lse`, if given, is a [num_heads, total_q] fp32 tensor that
+        receives the log-sum-exp in the convention `merge_attn_states` takes.
+        It is only valid when the PS metadata was built with `need_lse=True`.
         """
         from vllm.platforms import current_platform
         from vllm.v1.worker.workspace import current_workspace_manager
@@ -3130,13 +3165,19 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
             final_lse,
         )
 
+        # Real heads sit at stride nhead // _real_nhead after
+        # repeat_interleave padding and at [0:_real_nhead] after tiling.
+        real_heads = (
+            slice(None, None, nhead // _real_nhead)
+            if nhead % _real_nhead == 0
+            else slice(None, _real_nhead)
+        )
         if _pad:
-            real_out = (
-                out_3d[:, :: nhead // _real_nhead, :]
-                if nhead % _real_nhead == 0
-                else out_3d[:, :_real_nhead, :]
-            )
-            out.view(total_q, _real_nhead, v_head_dim).copy_(real_out)
+            out.view(total_q, _real_nhead, v_head_dim).copy_(out_3d[:, real_heads, :])
+        if out_lse is not None:
+            # final_lse is [total_q, nhead] workspace scratch that the next call
+            # reuses, so copy it out.
+            out_lse.copy_(final_lse[:, real_heads].transpose(0, 1))
 
     def forward_mha(
         self,
@@ -3153,8 +3194,10 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
 
         Falls back to the parent (`flash_attn_varlen_func`) when FP8
         MLA prefill is disabled, the selected prefill backend supersedes
-        it, PS metadata is missing, or chunked context requires two-pass
-        merge.
+        it, PS metadata is missing, or decode context parallelism computes
+        the chunked context. Otherwise, with chunked context, the ASM kernel
+        computes the new tokens' partial and it is merged with the context
+        partial as in the parent.
 
         The annotation uses the base `MLACommonMetadata` to honour LSP
         with `MLACommonImpl.forward_mha`; the AITER builder always
@@ -3182,7 +3225,7 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
 
         has_context = prefill_metadata.chunked_context is not None
 
-        if has_context:
+        if has_context and self.dcp_world_size > 1:
             return super().forward_mha(
                 q,
                 kv_c_normed,
@@ -3207,10 +3250,8 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
                 fused_mla_prefill_qkv_fp8,
             )
 
-            from vllm.platforms import current_platform
-
             # The k_pe concat, the head padding and the FP8 cast in one launch.
-            q, k, v = fused_mla_prefill_qkv_fp8(
+            q_asm, k, v = fused_mla_prefill_qkv_fp8(
                 q,
                 k_nope,
                 v,
@@ -3219,9 +3260,48 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
                 current_platform.fp8_dtype(),
             )
         else:
+            q_asm = q
             k = self._concat_k_nope_k_pe(k_nope, k_pe)
 
-        self._mla_fp8_prefill_attn(q, k, v, attn_metadata, output)
+        if not has_context:
+            self._mla_fp8_prefill_attn(q_asm, k, v, attn_metadata, output)
+            return
+
+        num_tokens = q.shape[0]
+        suffix_output = torch.empty(
+            (num_tokens, self.num_heads, self.v_head_dim),
+            dtype=output.dtype,
+            device=output.device,
+        )
+        suffix_lse = torch.empty(
+            (self.num_heads, num_tokens), dtype=torch.float32, device=output.device
+        )
+        self._mla_fp8_prefill_attn(
+            q_asm,
+            k,
+            v,
+            attn_metadata,
+            suffix_output.view(num_tokens, -1),
+            out_lse=suffix_lse,
+        )
+
+        if prefill_metadata.q_data_type == current_platform.fp8_dtype():
+            q = q.to(prefill_metadata.q_data_type)
+        context_output, context_lse = self._compute_prefill_context(
+            q, kv_c_and_k_pe_cache, attn_metadata, k_scale
+        )
+        # The context partial can be a [..., :v_head_dim] view of a wider
+        # buffer, and merge_attn_states needs matching head strides.
+        context_output = context_output[..., : self.v_head_dim]
+        if context_output.stride(1) != suffix_output.stride(1):
+            context_output = context_output.contiguous()
+        merge_attn_states(
+            output=output.view(num_tokens, self.num_heads, self.v_head_dim),
+            prefix_output=context_output,
+            prefix_lse=context_lse,
+            suffix_output=suffix_output,
+            suffix_lse=suffix_lse,
+        )
 
     def _forward_segmented_dcp_verify(
         self,

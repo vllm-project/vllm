@@ -113,6 +113,7 @@ def _build_prefill_metadata(
     device: torch.device,
     num_heads: int,
     attn_out_dtype: torch.dtype = ATTN_OUT_DTYPE,
+    need_lse: bool = False,
 ):
     """Build metadata with the production builder and output dtype."""
     from vllm.v1.attention.backends.mla.rocm_aiter_mla import AiterMLAMetadataBuilder
@@ -140,7 +141,7 @@ def _build_prefill_metadata(
     prefill = SimpleNamespace(query_start_loc=qo_indptr, max_query_len=max_q)
     metadata = SimpleNamespace(prefill=prefill, num_decodes=0)
     common = SimpleNamespace(query_start_loc_cpu=qo_indptr_cpu)
-    builder._build_fp8_prefill_ps_metadata(metadata, common)
+    builder._build_fp8_prefill_ps_metadata(metadata, common, need_lse=need_lse)
     return metadata, total_q, builder
 
 
@@ -246,3 +247,56 @@ def test_fp8_prefill_metadata_width_matches_forward(num_heads: int) -> None:
 
     _, _, builder = _build_prefill_metadata([512], torch.device("cuda"), num_heads)
     assert builder.fp8_ps_reduce_partial_map.numel() == _tiles(width)
+
+
+@pytest.mark.parametrize("num_heads", HEAD_COUNTS)
+@pytest.mark.parametrize("seq_lens", [[128], [300, 700]])
+@torch.inference_mode()
+def test_fp8_prefill_lse_matches_reference(seq_lens: list[int], num_heads: int) -> None:
+    """`out_lse` is the natural-log lse of every token and real head.
+
+    forward_mha merges this partial with the chunked-context partial, so an lse
+    that is unwritten, unpadded with the wrong head selection or in the wrong
+    base weights the merge wrongly and silently. Without `need_lse` the planner
+    leaves unsplit query tiles out of the reduce and never writes their lse.
+    """
+    device = torch.device("cuda")
+    torch.manual_seed(0)
+
+    metadata, total_q, _ = _build_prefill_metadata(
+        seq_lens, device, num_heads, need_lse=True
+    )
+
+    from vllm.v1.worker.workspace import lock_workspace
+
+    lock_workspace()
+
+    qkv_kwargs = dict(dtype=ATTN_OUT_DTYPE, device=device)
+    q = torch.randn(total_q, num_heads, QK_HEAD_DIM, **qkv_kwargs)
+    k = torch.randn(total_q, num_heads, QK_HEAD_DIM, **qkv_kwargs)
+    v = torch.randn(total_q, num_heads, V_HEAD_DIM, **qkv_kwargs)
+    out = torch.empty(
+        total_q, num_heads * V_HEAD_DIM, dtype=ATTN_OUT_DTYPE, device=device
+    )
+    # NaN marks any entry the kernels leave unwritten.
+    out_lse = torch.full(
+        (num_heads, total_q), float("nan"), dtype=torch.float32, device=device
+    )
+
+    impl = _make_impl(num_heads)
+    impl._mla_fp8_prefill_attn(q, k, v, metadata, out, out_lse=out_lse)
+
+    fp8 = current_platform.fp8_dtype()
+    expected = []
+    start = 0
+    for seq_len in seq_lens:
+        end = start + seq_len
+        qf = q[start:end].to(fp8).float().transpose(0, 1)  # [H, S, Dqk]
+        kf = k[start:end].to(fp8).float().transpose(0, 1)
+        scores = torch.einsum("hqd,hkd->hqk", qf, kf) * SCALE
+        causal = torch.ones(seq_len, seq_len, dtype=torch.bool, device=device)
+        scores = scores.masked_fill(~causal.tril(), float("-inf"))
+        expected.append(torch.logsumexp(scores, dim=-1))
+        start = end
+
+    torch.testing.assert_close(out_lse, torch.cat(expected, dim=1), atol=2e-2, rtol=0)

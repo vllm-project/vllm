@@ -662,6 +662,15 @@ def _create_backend_impl(
 
     # Create mock layer
     layer = MockLayer(device, impl=impl, kv_cache_spec=kv_cache_spec)
+    # MLACommonMetadataBuilder reads the latent dims off the layer (MLADims).
+    for name in (
+        "q_lora_rank",
+        "kv_lora_rank",
+        "qk_nope_head_dim",
+        "qk_rope_head_dim",
+        "v_head_dim",
+    ):
+        setattr(layer, name, impl_kwargs[name])
 
     # Attach a prefill backend (MLAAttention does this in __init__; the metadata
     # builder reads layer.prefill_backend from static_forward_context).

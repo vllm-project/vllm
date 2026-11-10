@@ -65,6 +65,9 @@ SINGLE_CHUNK_CONTEXTS = [200, 64, 333]
 # k/v come out of a different GEMM than torch's and can differ by one bf16 ulp;
 # measured output error on MI355 is 2e-3.
 ATOL, RTOL = 2e-2, 2e-2
+# FP8 prefill with context against the parent on the same FP8-rounded inputs:
+# measured 4e-5 on MI355, and 3e-2 with the suffix lse left unwritten.
+FP8_SUFFIX_REL_ERROR = 1e-3
 
 
 @pytest.fixture(autouse=True)
@@ -116,7 +119,9 @@ def _make_impl(device: torch.device):
     return impl
 
 
-def _build_metadata(context_lens: list[int], device: torch.device):
+def _build_metadata(
+    context_lens: list[int], device: torch.device, kv_cache_dtype: str = "auto"
+):
     """Run the production builder; returns (metadata, num_blocks)."""
     from tests.v1.attention.utils import (
         BatchSpec,
@@ -140,12 +145,16 @@ def _build_metadata(context_lens: list[int], device: torch.device):
         max_num_seqs=len(seq_lens),
         hf_config_override={"num_attention_heads": NUM_HEADS},
     )
+    # The override lands after ModelConfig derived its architecture config, so
+    # rederive it; the builder sizes its FP8 prefill plan from the head count.
+    model_config = vllm_config.model_config
+    model_config.model_arch_config = model_config.get_model_arch_config()
     spec = MLAAttentionSpec(
         block_size=BLOCK_SIZE,
         num_kv_heads=1,
         head_size=HEAD_SIZE,
-        dtype=DTYPE,
-        cache_dtype_str=vllm_config.cache_config.cache_dtype,
+        dtype=torch.uint8 if kv_cache_dtype == "fp8" else DTYPE,
+        cache_dtype_str=kv_cache_dtype,
     )
     prefill_backend = get_mla_prefill_backend(vllm_config)(
         num_heads=NUM_HEADS,
@@ -310,3 +319,83 @@ def test_k_concat_matches_torch_cat(dtype):
 
     expected = torch.cat([k_nope, k_pe.expand(-1, NUM_HEADS, -1)], dim=-1)
     assert torch.equal(k, expected)
+
+
+@requires_gfx950
+@pytest.mark.parametrize("fused_qkv", [False, True])
+@pytest.mark.parametrize("context_lens", [SINGLE_CHUNK_CONTEXTS, MULTI_CHUNK_CONTEXTS])
+def test_fp8_prefill_with_context_matches_two_pass(
+    context_lens, fused_qkv, monkeypatch
+):
+    """The FP8 assembly prefill of the new tokens merges like the parent's.
+
+    The two paths differ only in the new tokens' partial: FP8 q/k/v through
+    `mla_prefill_ps_asm_fwd` here, the prefill backend in the parent. The
+    reference gets the same FP8-rounded q/k/v, so what is left is kernel
+    arithmetic. A missing or misindexed suffix lse weights the partial wrongly
+    against the context partial and misses by much more.
+    """
+    from vllm.model_executor.layers.attention.mla_attention import MLACommonImpl
+    from vllm.v1.attention.backends.mla import rocm_aiter_mla
+    from vllm.v1.attention.backends.mla.rocm_aiter_mla import (
+        _fp8_mla_prefill_supported,
+    )
+
+    if not _fp8_mla_prefill_supported():
+        pytest.skip("AITER build lacks mla_prefill_ps_asm_fwd / mla_reduce_v1")
+
+    torch.manual_seed(0)
+    device = torch.device("cuda")
+    metadata, num_blocks = _build_metadata(context_lens, device, "fp8")
+    # Below the query-length gate the batch keeps the parent's path.
+    assert metadata.prefill.chunked_context is not None
+    assert metadata.fp8_prefill_qo_indptr is None
+
+    monkeypatch.setattr(
+        rocm_aiter_mla, "_FP8_PREFILL_CHUNKED_CONTEXT_MIN_QLEN", QUERY_LEN
+    )
+    metadata, num_blocks = _build_metadata(context_lens, device, "fp8")
+    assert metadata.fp8_prefill_qo_indptr is not None
+
+    from aiter import mla_prefill_ps_asm_fwd, mla_reduce_v1
+
+    impl = _make_impl(device)
+    impl.kv_cache_dtype = "fp8"
+    impl.scale = SCALE
+    impl.dcp_world_size = 1
+    impl._fp8_prefill_enabled = True
+    impl._fused_prefill_qkv = fused_qkv
+    impl._mla_prefill_ps_asm_fwd = mla_prefill_ps_asm_fwd
+    impl._mla_reduce_v1 = mla_reduce_v1
+    impl._fp8_prefill_one_scale = None
+
+    kv_cache = torch.randn(
+        num_blocks, BLOCK_SIZE, HEAD_SIZE, dtype=DTYPE, device=device
+    )
+    kv_cache = kv_cache.to(current_platform.fp8_dtype()).view(torch.uint8)
+    num_tokens = metadata.num_actual_tokens
+    q = torch.randn(num_tokens, NUM_HEADS, QK_HEAD_DIM, dtype=DTYPE, device=device)
+    kv_c_normed = torch.randn(num_tokens, KV_LORA_RANK, dtype=DTYPE, device=device)
+    k_pe = torch.randn(num_tokens, 1, QK_ROPE_HEAD_DIM, dtype=DTYPE, device=device)
+    k_scale = torch.ones(1, dtype=torch.float32, device=device)
+    output = torch.empty(num_tokens, NUM_HEADS * V_HEAD_DIM, dtype=DTYPE, device=device)
+    expected = torch.empty_like(output)
+
+    prefill_backend = metadata.prefill.prefill_backend
+    run_prefill_new_tokens = prefill_backend.run_prefill_new_tokens
+
+    def run_on_fp8_inputs(q, k, v, **kwargs):
+        fp8 = current_platform.fp8_dtype()
+        q, k, v = (x.to(fp8).to(x.dtype) for x in (q, k, v))
+        return run_prefill_new_tokens(q=q, k=k, v=v, **kwargs)
+
+    monkeypatch.setattr(prefill_backend, "run_prefill_new_tokens", run_on_fp8_inputs)
+
+    with torch.inference_mode():
+        impl.forward_mha(q, kv_c_normed, k_pe, kv_cache, metadata, k_scale, output)
+        MLACommonImpl.forward_mha(
+            impl, q, kv_c_normed, k_pe, kv_cache, metadata, k_scale, expected
+        )
+
+    error = (output.float() - expected.float()).norm() / expected.float().norm()
+    assert error < FP8_SUFFIX_REL_ERROR, error
