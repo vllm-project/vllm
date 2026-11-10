@@ -1853,7 +1853,7 @@ class EngineCoreProc(EngineCore):
                 # Drain aborts queue; all aborts are also processed via input_queue.
                 with self.aborts_queue.mutex:
                     self.aborts_queue.queue.clear()
-                if logger.isEnabledFor(DEBUG):
+                if not waited and logger.isEnabledFor(DEBUG):
                     logger.debug("EngineCore waiting for work.")
                     waited = True
             block = self.process_input_queue_block
@@ -2812,9 +2812,14 @@ class DPEngineCoreProc(EngineCoreProc):
                     # All engines are idle.
                     continue
 
+                # With no local requests step() returned before
+                # update_from_output(), so publish this rank's KV events here.
+                if not self.scheduler.has_requests():
+                    self.scheduler.publish_kv_events()
+
                 # Execute a dummy pass when no ready requests ran, unless the
                 # engine is sleeping.
-                elif not self.model_executor.is_sleeping:
+                if not self.model_executor.is_sleeping:
                     with self.capture_iteration_details(None) as iteration_details:
                         self.execute_dummy_batch()
                     if iteration_details is not None and not self.has_coordinator:
