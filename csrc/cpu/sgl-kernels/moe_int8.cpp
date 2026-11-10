@@ -6,8 +6,16 @@
 #include "common.h"
 #include "gemm.h"
 #include "moe.h"
+#include "moe_scheduler.h"
+
+#include <atomic>
+#include <thread>
 
 namespace {
+
+// Scheduling costs in rows: per tile and amortized weight fetch.
+constexpr int64_t INT8_MOE_TILE_COST = 16;
+constexpr int64_t INT8_MOE_FETCH_COST = 64;
 
 template <typename scalar_t, int BLOCK_N, CPUActMethod ACT = CPUActMethod::silu_and_mul>
 inline void silu_and_mul(
@@ -500,18 +508,67 @@ void fused_experts_int8_kernel_impl(
   const int64_t stride_e = 2 * N * packed_K;
   const int64_t stride_n = packed_K;
 
+  // Tune strips for the requested count; ownership uses the actual OpenMP team.
+  // Reduced teams remain correct but may use suboptimal strips.
+  const int nth = at::get_num_threads();
+  const auto grid = cpu_sgl::moe::make_grid(MB, expert_ids, offsets, INT8_MOE_TILE_COST, INT8_MOE_FETCH_COST);
+  const auto [W, S] =
+      cpu_sgl::moe::select_strips(grid, NB, 2 * BLOCK_N, get_cache_blocks<int8_t>(BLOCK_N * K * 2), nth);
+
+  // Quantized rows overwrite ic1 at its original row stride.
+  uint8_t* Aq1 = reinterpret_cast<uint8_t*>(ic1);
+  const int64_t lda1 = N * int64_t(sizeof(scalar_t));
+  float* __restrict__ As1 = As_tmp + M;
+  std::vector<uint8_t> quant_rows(nth * N);
+  const int64_t strips = div_up(NB, W);
+  struct alignas(64) MBCount {
+    std::atomic<int64_t> n{0};
+  };
+  std::vector<MBCount> ready(MB);
+  auto wait_for = [](const MBCount& c, int64_t n) {
+    for (int spins = 0; c.n.load(std::memory_order_acquire) < n; ++spins) {
+      if (spins < 1024) {
+        _mm_pause();
+      } else {
+        std::this_thread::yield();
+      }
+    }
+  };
+  auto quantize_rows = [&](int ith, int64_t m_begin, int64_t m_end) {
+    uint8_t* row = quant_rows.data() + ith * N;
+    for (int64_t m = m_begin; m < m_end; ++m) {
+      quantize_row_int8<scalar_t>(row, As1[m], ic1 + m * N, N);
+      std::memcpy(Aq1 + m * lda1, row, N);
+    }
+  };
+  // Quantize short blocks on completion; split larger blocks among strip owners.
+  auto small_mb = [&](int64_t mb) { return offsets[mb + 1] - offsets[mb] < strips; };
+  auto quantize_shares = [&](int ith, int team) {
+    cpu_sgl::moe::for_each_tile(grid, NB, W, S, ith, team, [&](int64_t mb, int64_t nb) {
+      if (nb % W == 0 && !small_mb(mb)) {
+        const int64_t m_size = offsets[mb + 1] - offsets[mb];
+        const int64_t m_begin = offsets[mb] + m_size * (nb / W) / strips;
+        const int64_t m_end = offsets[mb] + m_size * (nb / W + 1) / strips;
+        wait_for(ready[mb], NB);
+        quantize_rows(ith, m_begin, m_end);
+        ready[mb].n.fetch_add(1, std::memory_order_release);
+      }
+    });
+  };
+
   // here we only parallel on half of 2N to fuse silu_and_mul with gemm
-  parallel_2d(MB, NB, [&](int64_t mb0, int64_t mb1, int64_t nb0, int64_t nb1) {
+  auto gemm1 = [&](int ith, int team) {
     // get local pointers
-    int tid = get_thread_num();
-    uint8_t* __restrict__ A = A_tmp + tid * BLOCK_M * K;
-    int32_t* __restrict__ C0 = reinterpret_cast<int32_t*>(C_tmp) + tid * 2 * BLOCK_M * BLOCK_N;
+    uint8_t* __restrict__ A = A_tmp + ith * BLOCK_M * K;
+    int32_t* __restrict__ C0 = reinterpret_cast<int32_t*>(C_tmp) + ith * 2 * BLOCK_M * BLOCK_N;
     int32_t* __restrict__ C1 = C0 + BLOCK_M * BLOCK_N;
     bool use_brgemm = false;
 
     alignas(64) float As[BLOCK_M];
+    int64_t loaded_mb = -1;
 
-    loop_2d<int8_t>(mb0, mb1, nb0, nb1, BLOCK_N * K * 2, [&](int64_t mb, int64_t nb, int64_t nb_offset) {
+    // Stagger column starts to avoid simultaneous weight fetches.
+    cpu_sgl::moe::for_each_tile(grid, NB, W, S, ith, team, [&](int64_t mb, int64_t nb) {
       // nb_upper from top half and nb_lower from bottom half
       int64_t nb_upper = nb, nb_lower = nb + NB;
       int64_t n_size = std::min(N - nb * BLOCK_N, BLOCK_N);
@@ -524,13 +581,11 @@ void fused_experts_int8_kernel_impl(
       const float* __restrict__ Bs1 = w1s + expert_id * 2 * N + nb_lower * BLOCK_N;
 
       int64_t m_size = offsets[mb + 1] - offsets[mb];
-      if (m_size == 0) {
-        return;
-      }
       const bool brg = can_use_brgemm<int8_t>(m_size, n_size);
       use_brgemm |= brg;
 
-      if (nb_offset == 0) {
+      if (mb != loaded_mb) {
+        loaded_mb = mb;
         // 1.a load A
         const int32_t* A_ids = sorted_ids + mb * BLOCK_M;
         for (int64_t m = 0; m < m_size; ++m) {
@@ -614,50 +669,45 @@ void fused_experts_int8_kernel_impl(
               /* ldc   */ N);
         }
       }
-    });
+      if (ready[mb].n.fetch_add(1, std::memory_order_acq_rel) == NB - 1 && small_mb(mb)) {
+        quantize_rows(ith, offsets[mb], offsets[mb + 1]);
+        ready[mb].n.store(NB + strips, std::memory_order_release);
+      }
+    }, ith);
 
     if (use_brgemm) {
       at::native::cpublas::brgemm_release();
     }
-  });
-
-  // stage 1.5: quantize ic1 to uint8, [M * topk, N]
-  at::parallel_for(0, M * topk, 0, [&](int64_t begin, int64_t end) {
-    for (int64_t m = begin; m < end; ++m) {
-      quantize_row_int8<scalar_t>(Aq_tmp + m * N, As_tmp[m], ic1 + m * N, N);
-    }
-  });
+  };
 
   // stage 2: intermediate_cache2 = intermediate_cache1 @ w2
   //   w2 : [E, K, N] as [E, OC, IC]
   const int64_t OC = K;  // rename K as OC
   const int64_t IC = N;  // rename N as IC
-  const int64_t MB2 = MB;
   const int64_t NB2 = div_up(OC, BLOCK_N);
+  const auto [W2, S2] =
+      cpu_sgl::moe::select_strips(grid, NB2, BLOCK_N, get_cache_blocks<int8_t>(BLOCK_N * IC), nth);
   const int64_t stride_e2 = OC * packed_N;
   const int64_t stride_oc = packed_N;
 
-  // parallel on [MB2, NB2]
-  parallel_2d(MB2, NB2, [&](int64_t mb0, int64_t mb1, int64_t nb0, int64_t nb1) {
+  // parallel on [MB, NB2]
+  auto gemm2 = [&](int ith, int team) {
     // get local pointers
-    int tid = get_thread_num();
-    float* __restrict__ C = C_tmp + tid * 2 * BLOCK_M * BLOCK_N;
+    float* __restrict__ C = C_tmp + ith * 2 * BLOCK_M * BLOCK_N;
     int32_t* __restrict__ C32 = reinterpret_cast<int32_t*>(C + BLOCK_M * BLOCK_N);
     bool use_brgemm = false;
 
-    loop_2d<int8_t>(mb0, mb1, nb0, nb1, BLOCK_N * IC, [&](int64_t mb, int64_t nb, int64_t nb_offset) {
+    cpu_sgl::moe::for_each_tile(grid, NB2, W2, S2, ith, team, [&](int64_t mb, int64_t nb) {
       int64_t m_size = offsets[mb + 1] - offsets[mb];
-      if (m_size == 0) {
-        return;
-      }
       int64_t n_size = std::min(OC - nb * BLOCK_N, BLOCK_N);
       const bool brg = can_use_brgemm<int8_t>(m_size, n_size);
       use_brgemm |= brg;
 
-      // A ptr from ic1 of [M * topk, N] in sorted order
+      // A ptr from quantized ic1 rows in sorted order
       // so as to avoid copy A to tmp buffer again
-      const uint8_t* __restrict__ A = Aq_tmp + offsets[mb] * N;
-      const float* __restrict__ As = As_tmp + offsets[mb];
+      wait_for(ready[mb], NB + strips);
+      const uint8_t* __restrict__ A = Aq1 + offsets[mb] * lda1;
+      const float* __restrict__ As = As1 + offsets[mb];
       const int32_t* A_ids = sorted_ids + mb * BLOCK_M;
 
       // B shape [IC, n_size] in vnni format
@@ -671,7 +721,7 @@ void fused_experts_int8_kernel_impl(
             /* M     */ m_size,
             /* N     */ n_size,
             /* K     */ IC,
-            /* lda   */ IC,
+            /* lda   */ lda1,
             /* ldb   */ n_size,
             /* ldc   */ BLOCK_N,
             /* add_C */ false,
@@ -692,7 +742,7 @@ void fused_experts_int8_kernel_impl(
             /* M     */ m_size,
             /* N     */ n_size,
             /* K     */ IC,
-            /* lda   */ IC,
+            /* lda   */ lda1,
             /* ldb   */ n_size,
             /* ldc   */ BLOCK_N);
       }
@@ -709,7 +759,22 @@ void fused_experts_int8_kernel_impl(
     if (use_brgemm) {
       at::native::cpublas::brgemm_release();
     }
-  });
+  };
+
+  // one team runs stage 1, stage 1.5 and stage 2
+#if defined(_OPENMP)
+#pragma omp parallel num_threads(nth)
+#endif
+  {
+    int ith = 0, team = 1;
+#if defined(_OPENMP)
+    ith = omp_get_thread_num();
+    team = omp_get_num_threads();
+#endif
+    gemm1(ith, team);
+    quantize_shares(ith, team);
+    gemm2(ith, team);
+  }
 
   // stage 3: out = intermediate_cache2.sum(dim=1)
   //   from [M, topk, K] to [M, K]
