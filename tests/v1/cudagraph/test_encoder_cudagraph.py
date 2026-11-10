@@ -1736,8 +1736,19 @@ class TestFlashInferCuSeqlensPadding:
         )
 
     @staticmethod
-    def _padding_fn(flashinfer: bool):
-        from vllm.model_executor.layers.attention import MMEncoderAttention
+    def _padding_fn(model: str, flashinfer: bool):
+        from vllm.model_executor.models.glm4_1v import (
+            Glm4vForConditionalGeneration,
+        )
+        from vllm.model_executor.models.kimi_k25 import (
+            KimiK25ForConditionalGeneration,
+        )
+        from vllm.model_executor.models.qwen2_vl import (
+            Qwen2VLForConditionalGeneration,
+        )
+        from vllm.model_executor.models.qwen3_vl import (
+            Qwen3VLForConditionalGeneration,
+        )
         from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
         backend = (
@@ -1745,14 +1756,26 @@ class TestFlashInferCuSeqlensPadding:
             if flashinfer
             else AttentionBackendEnum.FLASH_ATTN
         )
-        config = EncoderCudaGraphConfig(
-            modalities=["image"],
-            buffer_keys=["cu_seqlens"],
-            out_hidden_size=8,
-            padding_logics=MMEncoderAttention.get_cu_seqlens_padding_logics(
-                backend, "cu_seqlens"
-            ),
-        )
+        if model == "kimi_k25":
+            cls = KimiK25ForConditionalGeneration
+            attn = SimpleNamespace(attn_backend=backend)
+            encoder = SimpleNamespace(blocks=[SimpleNamespace(attn=attn)])
+            stub = SimpleNamespace(
+                vision_tower=SimpleNamespace(encoder=encoder),
+                config=SimpleNamespace(text_config=SimpleNamespace(hidden_size=8)),
+            )
+        else:
+            cls = {
+                "qwen2_vl": Qwen2VLForConditionalGeneration,
+                "qwen3_vl": Qwen3VLForConditionalGeneration,
+                "glm4v": Glm4vForConditionalGeneration,
+            }[model]
+            stub = SimpleNamespace(
+                is_multimodal_pruning_enabled=False,
+                get_max_frames_per_video=lambda: 16,
+                visual=SimpleNamespace(attn_backend=backend, out_hidden_size=8),
+            )
+        config = cls.get_encoder_cudagraph_config(cast(Any, stub))
         # Same lookup as EncoderCudaGraphManager replay.
         return EncoderCudaGraphManager._get_padding_logic(config, "cu_seqlens")
 
@@ -1766,10 +1789,21 @@ class TestFlashInferCuSeqlensPadding:
         ([49], 1, 9),  # Kimi-K2.5: unpadded replay into max_batch_size + 1
     ]
 
-    @pytest.mark.parametrize("flashinfer", [True, False])
+    @pytest.mark.parametrize(
+        ("model", "flashinfer"),
+        [
+            *(
+                (m, fi)
+                for m in ("qwen3_vl", "glm4v", "kimi_k25")
+                for fi in (True, False)
+            ),
+            ("qwen2_vl", False),  # no FlashInfer ViT path
+        ],
+    )
     @pytest.mark.parametrize(("seq_lens", "replay_batch", "capture_batch"), CASES)
     def test_replay_padding_matches_capture_size_metadata(
         self,
+        model: str,
         flashinfer: bool,
         seq_lens: list[int],
         replay_batch: int,
@@ -1781,7 +1815,7 @@ class TestFlashInferCuSeqlensPadding:
         assert want.shape == capture.shape
 
         buf = torch.full_like(capture, -1)
-        self._padding_fn(flashinfer)(buf, replay)
+        self._padding_fn(model, flashinfer)(buf, replay)
         assert torch.equal(buf, want)
 
     def test_oot_attention_owns_padding(self, monkeypatch):
@@ -1799,7 +1833,7 @@ class TestFlashInferCuSeqlensPadding:
         monkeypatch.setitem(
             op_registry_oot, MMEncoderAttention.__name__, OOTMMEncoderAttention
         )
-        assert self._padding_fn(flashinfer=False) is oot_padding
+        assert self._padding_fn("qwen3_vl", flashinfer=False) is oot_padding
 
 
 # ---------------------------------------------------------------------------
