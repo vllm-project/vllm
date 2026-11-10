@@ -89,7 +89,7 @@ def test_humming_packed_experts_avoid_integer_expansion(
 
 
 def test_humming_packed_experts_generate_with_real_weights(
-    vllm_runner, record_property
+    vllm_runner, record_property, enable_pickle
 ):
     """The public loading option reaches MoE experts and preserves generation."""
     model_name = "RedHatAI/Qwen3-30B-A3B-quantized.w4a16"
