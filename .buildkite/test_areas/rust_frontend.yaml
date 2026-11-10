@@ -29,6 +29,7 @@ steps:
   # - tests/entrypoints/openai/completion/test_prompt_validation.py
   - tests/entrypoints/launchers/test_shutdown.py
   - tests/entrypoints/openai/test_return_token_ids.py
+  - tests/entrypoints/openai/test_return_tokens_as_ids.py
   - tests/entrypoints/serve/instrumentator/test_uds.py
   - tests/v1/sample/test_logprobs_e2e.py
   commands:
@@ -53,6 +54,9 @@ steps:
   # test_shutdown_on_engine_failure launches the Python API server directly, not the Rust frontend.
   - pytest -v -s entrypoints/launchers/test_shutdown.py -k "not engine_failure"
   - pytest -v -s entrypoints/openai/test_return_token_ids.py
+  # The Rust frontend lists legacy completions top_logprobs in no fixed order, and the completions
+  # cases read the first key as the sampled token.
+  - pytest -v -s entrypoints/openai/test_return_tokens_as_ids.py -k "not test_completion_return_tokens_as_token_ids_completion"
   - pytest -v -s entrypoints/serve/instrumentator/test_uds.py
   - pytest -v -s v1/sample/test_logprobs_e2e.py -k "test_prompt_logprobs_e2e_server"
   mirror:
@@ -83,6 +87,7 @@ steps:
       - tests/entrypoints/openai/test_chunked_prompt.py
       - tests/entrypoints/launchers/test_shutdown.py
       - tests/entrypoints/openai/test_return_token_ids.py
+      - tests/entrypoints/openai/test_return_tokens_as_ids.py
       - tests/entrypoints/serve/instrumentator/test_uds.py
       - tests/v1/sample/test_logprobs_e2e.py
       - vllm/platforms/rocm.py
@@ -102,6 +107,7 @@ steps:
   - tests/entrypoints/scale_out/token_in_token_out/test_serving_tokens.py
   - tests/entrypoints/serve/instrumentator/test_basic.py
   - tests/entrypoints/serve/instrumentator/test_metrics.py
+  - tests/entrypoints/serve/lora/test_lora_adapters.py
   - tests/entrypoints/serve/tokenize/test_tokenization.py
   - tests/entrypoints/serve/middleware/test_optional_middleware.py
   - tests/entrypoints/launchers/api_server/test_multi_api_servers.py
@@ -111,13 +117,15 @@ steps:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - PYTHONPATH=/vllm-workspace pytest -v -s entrypoints/serve/dev/rpc/test_collective_rpc.py
   - pytest -v -s entrypoints/serve/instrumentator/test_basic.py
-  # The Rust LoRA request still carries the removed tensorizer_config_dict field, so --lora-modules fails at startup.
-  - pytest -v -s entrypoints/scale_out/token_in_token_out/test_serving_tokens.py -k "not lora"
+  - pytest -v -s entrypoints/scale_out/token_in_token_out/test_serving_tokens.py
   # run_batch drives the Python batch runner, not a server. test_metrics_exist needs
   # vllm:admission_rejections (text) and image inputs (multimodal), which the Rust frontend lacks.
   - pytest -v -s entrypoints/serve/instrumentator/test_metrics.py -k "not run_batch and not test_metrics_exist"
   # /tokenizer_info returns 501 in the Rust frontend.
   - pytest -v -s entrypoints/serve/tokenize/test_tokenization.py -k "not tokenizer_info"
+  # The Rust frontend loads runtime LoRA paths only under VLLM_RUNTIME_LORA_ALLOWED_PATH_PREFIXES and answers
+  # a missing adapter path with 400 instead of 404; the concurrent tests send batched prompts, which it rejects.
+  - VLLM_RUNTIME_LORA_ALLOWED_PATH_PREFIXES=/ pytest -v -s entrypoints/serve/lora/test_lora_adapters.py -k "not test_dynamic_lora_not_found and not does_not_break_others and not test_multiple_lora_adapters and not test_beam_search_with_lora_adapters"
   # test_v2_endpoint_accepts_valid_api_token calls /v2/embed; the Rust frontend serves no pooling routes.
   - pytest -v -s entrypoints/serve/middleware/test_optional_middleware.py -k "not test_v2_endpoint_accepts_valid_api_token"
   # The Rust frontend ignores --api-server-count and runs one server, so this only checks the flag is accepted.
@@ -141,6 +149,7 @@ steps:
       - tests/entrypoints/scale_out/token_in_token_out/test_serving_tokens.py
       - tests/entrypoints/serve/instrumentator/test_basic.py
       - tests/entrypoints/serve/instrumentator/test_metrics.py
+      - tests/entrypoints/serve/lora/test_lora_adapters.py
       - tests/entrypoints/serve/tokenize/test_tokenization.py
       - tests/entrypoints/serve/middleware/test_optional_middleware.py
       - tests/entrypoints/launchers/api_server/test_multi_api_servers.py
@@ -202,11 +211,9 @@ steps:
     tool_use
     --ignore=tool_use/mistral
     --models=llama3.2
-  # The Rust renderer rejects empty tool-call arguments in the history (Python treats them as {}).
-  - pytest -v -s entrypoints/openai/chat_completion/test_completion_with_function_calling.py -k "not test_no_args_tool_call"
+  - pytest -v -s entrypoints/openai/chat_completion/test_completion_with_function_calling.py
   - pytest -v -s entrypoints/tool_parsers/test_granite4_tool_parser.py
-  # The llama cases use --lora-modules, which fails at startup until the Rust LoRA request drops tensorizer_config_dict.
-  - pytest -v -s entrypoints/tool_parsers/test_hermes_tool_parser.py -k granite4
+  - pytest -v -s entrypoints/tool_parsers/test_hermes_tool_parser.py
   mirror:
     amd:
       automatic_shard: true

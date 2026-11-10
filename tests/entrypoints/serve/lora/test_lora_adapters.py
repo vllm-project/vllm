@@ -9,6 +9,7 @@ from contextlib import suppress
 import openai  # use the official client for correctness check
 import pytest
 import pytest_asyncio
+import regex as re
 
 from tests.utils import RemoteOpenAIServer
 
@@ -177,8 +178,8 @@ async def test_load_lora_adapter_with_load_inplace_false_errors(
             },
         )
 
-    # Verify the error message
-    assert "already been loaded" in str(exc_info.value)
+    # Verify the error message; the Rust frontend words it "is already loaded".
+    assert re.search(r"already (been )?loaded", str(exc_info.value))
 
 
 @pytest.mark.asyncio
