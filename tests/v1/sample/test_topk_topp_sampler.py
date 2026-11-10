@@ -1013,6 +1013,12 @@ class TestTritonTopkTopp:
         "rows,max_top_k,vocab_size,taken",
         [
             (1, 20, 151936, True),
+            (128, 20, 151936, True),
+            (129, 20, 151936, False),
+            (96, 24, 151936, True),
+            (97, 24, 151936, False),
+            (64, 32, 151936, True),
+            (65, 32, 151936, False),
             (32, 64, 151936, True),
             (33, 64, 151936, False),
             (2, None, 151936, False),
