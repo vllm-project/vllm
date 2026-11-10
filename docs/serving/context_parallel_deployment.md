@@ -51,6 +51,22 @@ In short, for decode context parallel, try to increase `-tp` size until you get 
 
 Decode context parallel is supported in vLLM, for both MLA and GQA models. Some attention backends also support the combination of decode context parallel and MTP (multi-token prediction) to further accelerate the decoding phase.
 
+### Sparse MLA on SM120 and SM121
+
+`FLASHINFER_MLA_SPARSE_SM120` supports decode context parallelism on NVIDIA
+SM120 and SM121 GPUs, including DGX Spark, with BF16 queries and packed
+`fp8_ds_mla` KV cache. Enable it for a supported sparse MLA model by adding:
+
+```bash
+--tensor-parallel-size 2 --decode-context-parallel-size 2 \
+--attention-backend FLASHINFER_MLA_SPARSE_SM120 --kv-cache-dtype fp8
+```
+
+DCP defaults to 1 (disabled); its size must divide the tensor-parallel size.
+The backend uses sparse MQA for prefill as well as decode, including chunked
+prefill. RoPE and native NoPE packed cache layouts use the same DCP path.
+HiSparse host-backed KV cache does not support DCP.
+
 ## Technical Discussions
 
 The main discussions happen in the `#sig-context-parallel` channel of [vLLM Slack](https://slack.vllm.ai/).
