@@ -43,7 +43,11 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
     prepare_moe_fp4_layer_for_marlin,
 )
-from vllm.model_executor.utils import replace_parameter, set_weight_attrs
+from vllm.model_executor.utils import (
+    move_parameter,
+    replace_parameter,
+    set_weight_attrs,
+)
 from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
@@ -57,11 +61,15 @@ class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
         self.experts_cls: type[mk.FusedMoEExperts] | None = None
 
         # Backend selection must match the weight preparation below: CUTLASS
-        # swizzles scales, b12x and XPU consume checkpoint packing, Marlin
-        # repacks weights and scales, and the megakernels take the checkpoint
-        # tensors as they are.
+        # swizzles scales, DeepGEMM packs scales, b12x and XPU consume checkpoint
+        # packing, Marlin repacks weights and scales, and the megakernels take
+        # the checkpoint tensors as they are.
         self.use_cutlass_mxfp4 = CutlassExpertsMxfp4._supports_current_device()
-        if moe.moe_backend == "b12x" or is_flashinfer_moe_ep_backend(moe.moe_backend):
+        if (
+            moe.moe_backend == "b12x"
+            or moe.moe_backend == "deep_gemm"
+            or is_flashinfer_moe_ep_backend(moe.moe_backend)
+        ):
             self.mxfp4_backend, experts_cls = select_mxfp4_moe_backend(moe)
             assert experts_cls is not None
             self.experts_cls = experts_cls
@@ -168,15 +176,8 @@ class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
             )
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
-        layer.w13_weight = torch.nn.Parameter(
-            layer.w13_weight_packed.data, requires_grad=False
-        )
-        delattr(layer, "w13_weight_packed")
-
-        layer.w2_weight = torch.nn.Parameter(
-            layer.w2_weight_packed.data, requires_grad=False
-        )
-        delattr(layer, "w2_weight_packed")
+        move_parameter(layer, "w13_weight_packed", "w13_weight")
+        move_parameter(layer, "w2_weight_packed", "w2_weight")
 
         if self.use_cutlass_mxfp4:
             # Swizzle weight scales from flat checkpoint layout [E, N, K//32]
@@ -205,7 +206,10 @@ class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
                 swizzled_w2.append(sw2.reshape(w2_M, w2_scale_N))
             replace_parameter(layer, "w13_weight_scale", torch.stack(swizzled_w13))
             replace_parameter(layer, "w2_weight_scale", torch.stack(swizzled_w2))
-        elif self.mxfp4_backend in FLASHINFER_MOE_EP_MXFP4_BACKENDS:
+        elif (
+            self.mxfp4_backend == Mxfp4MoeBackend.DEEPGEMM_MXFP4
+            or self.mxfp4_backend in FLASHINFER_MOE_EP_MXFP4_BACKENDS
+        ):
             w13, w2, w13_scale, w2_scale, _, _ = (
                 convert_weight_to_mxfp4_moe_kernel_format(
                     mxfp4_backend=self.mxfp4_backend,
@@ -241,6 +245,7 @@ class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
                 mxfp4_backend=self.mxfp4_backend,
                 routing_tables=layer._expert_routing_tables(),
             )
+            self.moe_kernel.fused_experts.keep_constants(layer)
             self.moe_kernel.fused_experts.process_weights_after_loading(layer)
 
     def apply(

@@ -87,15 +87,10 @@ class GPUWatermarkSampler(Sampler):
             )
 
         temperatures = self.sampling_states.temperature.gpu[expanded_idx_mapping]
-        needs_mixed_sampling = repeated_contexts is not None or not np.all(enabled)
-        skip_mask = None
-        if needs_mixed_sampling:
-            watermarking = self.watermarking.gpu[expanded_idx_mapping] & (
-                temperatures != 0
-            )
-            if repeated_contexts is not None:
-                watermarking &= ~repeated_contexts
-            skip_mask = ~watermarking
+        watermarking = self.watermarking.gpu[expanded_idx_mapping] & (temperatures != 0)
+        skip_mask = ~watermarking | (contexts < 0).any(dim=-1)
+        if repeated_contexts is not None:
+            skip_mask |= repeated_contexts
 
         random_sampler = RandomSampler(
             expanded_idx_mapping=expanded_idx_mapping,
@@ -155,9 +150,9 @@ class GPUWatermarkSampler(Sampler):
     ) -> torch.Tensor:
         """Build contexts for flattened verification rows.
 
-        With committed tokens ``[10, 11]``, drafts ``[20, 21]``, and width 2,
-        local positions ``[0, 1, 2]`` use contexts ``[10, 11]``, ``[11, 20]``,
-        and ``[20, 21]``. The first verification row precedes the first draft.
+        With committed tokens `[10, 11]`, drafts `[20, 21]`, and width 2,
+        local positions `[0, 1, 2]` use contexts `[10, 11]`, `[11, 20]`,
+        and `[20, 21]`. The first verification row precedes the first draft.
         """
         context_width = self.watermarker.context_width
         req_indices = expanded_idx_mapping.to(torch.int64)
