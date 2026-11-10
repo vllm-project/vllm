@@ -1,0 +1,18 @@
+{
+  "problemMatcher": [
+    {
+      "owner": "shellcheck",
+      "pattern": [
+        {
+          "regexp": "^(.+):(\\d+):(\\d+): (error|warning|note|info): (.+) \\[(SC\\d+)\\]$",
+          "file": 1,
+          "line": 2,
+          "column": 3,
+          "severity": 4,
+          "message": 5,
+          "code": 6
+        }
+      ]
+    }
+  ]
+}

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use criterion::{Criterion, Throughput, black_box, criterion_group, criterion_main};
 use hf_hub::api::tokio::ApiBuilder;
 use tokio::runtime::Runtime;

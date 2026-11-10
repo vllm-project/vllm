@@ -15,6 +15,7 @@ from openai.types.responses.response_reasoning_item import (
 from openai_harmony import DeveloperContent, Role
 
 from vllm.entrypoints.openai.responses.harmony import response_input_to_harmony
+from vllm.exceptions import VLLMValidationError
 
 # ---------------------------------------------------------------------------
 # Shared fixtures
@@ -49,6 +50,7 @@ class TestResponseInputToHarmonyMessage:
             {"type": "message", "role": "user", "content": "Hello"},
             prev_responses=[],
         )
+        assert msg is not None
 
         assert msg.author.role == Role.USER
         assert msg.content[0].text == "Hello"
@@ -60,6 +62,7 @@ class TestResponseInputToHarmonyMessage:
             {"role": "user", "content": "Hello"},
             prev_responses=[],
         )
+        assert msg is not None
 
         assert msg.author.role == Role.USER
         assert msg.content[0].text == "Hello"
@@ -71,6 +74,7 @@ class TestResponseInputToHarmonyMessage:
             {"type": "message", "role": "system", "content": "Be helpful."},
             prev_responses=[],
         )
+        assert msg is not None
 
         assert msg.author.role == Role.DEVELOPER
         assert isinstance(msg.content[0], DeveloperContent)
@@ -81,6 +85,7 @@ class TestResponseInputToHarmonyMessage:
             {"type": "message", "role": "assistant", "content": "The answer is 42."},
             prev_responses=[],
         )
+        assert msg is not None
 
         assert msg.author.role == Role.ASSISTANT
         assert msg.channel == "final"
@@ -93,6 +98,7 @@ class TestResponseInputToHarmonyMessage:
             {"type": "message", "role": "developer", "content": "Be concise."},
             prev_responses=[],
         )
+        assert msg is not None
 
         assert msg.author.role == Role.DEVELOPER
         assert isinstance(msg.content[0], DeveloperContent)
@@ -110,6 +116,7 @@ class TestResponseInputToHarmonyMessage:
             },
             prev_responses=[],
         )
+        assert msg is not None
 
         assert msg.author.role == Role.USER
         assert len(msg.content) == 2
@@ -130,6 +137,7 @@ class TestResponseInputToHarmonyMessage:
             },
             prev_responses=[],
         )
+        assert msg is not None
 
         assert msg.author.role == Role.DEVELOPER
         assert isinstance(msg.content[0], DeveloperContent)
@@ -149,6 +157,7 @@ class TestResponseInputToHarmonyMessage:
             },
             prev_responses=[],
         )
+        assert msg is not None
 
         assert msg.author.role == Role.ASSISTANT
         assert msg.channel == "analysis"
@@ -157,6 +166,7 @@ class TestResponseInputToHarmonyMessage:
     def test_reasoning_pydantic_model_input(self):
         """A Pydantic ResponseReasoningItem should be model_dump()'d before parsing."""
         msg = response_input_to_harmony(_REASONING_ITEM, prev_responses=[])
+        assert msg is not None
 
         assert msg.author.role == Role.ASSISTANT
         assert msg.channel == "analysis"
@@ -175,6 +185,7 @@ class TestResponseInputToHarmonyMessage:
             },
             prev_responses=[],
         )
+        assert msg is not None
 
         assert msg.author.role == Role.ASSISTANT
         assert msg.channel == "commentary"
@@ -187,6 +198,7 @@ class TestResponseInputToHarmonyMessage:
             {"type": "function_call", "name": "ping", "arguments": ""},
             prev_responses=[],
         )
+        assert msg is not None
 
         assert msg.recipient == "functions.ping"
         assert msg.content[0].text == ""
@@ -200,6 +212,7 @@ class TestResponseInputToHarmonyMessage:
             {"type": "function_call_output", "call_id": "call_test", "output": "18°C"},
             prev_responses=[_PREV_CALL],
         )
+        assert msg is not None
 
         assert msg.author.role == Role.TOOL
         assert msg.author.name == "functions.get_weather"
@@ -233,6 +246,7 @@ class TestResponseInputToHarmonyMessage:
             },
             prev_responses=[earlier, later],
         )
+        assert msg is not None
 
         assert msg.author.name == "functions.get_weather"
 
@@ -248,11 +262,14 @@ class TestResponseInputToHarmonyMessage:
             },
             prev_responses=[_REASONING_ITEM, _PREV_CALL],
         )
+        assert msg is not None
 
         assert msg.author.name == "functions.get_weather"
 
     def test_function_call_output_raises_if_no_matching_call(self):
-        with pytest.raises(ValueError, match="No call message found for"):
+        with pytest.raises(
+            VLLMValidationError, match="No call message found for"
+        ) as exc_info:
             response_input_to_harmony(
                 {
                     "type": "function_call_output",
@@ -261,21 +278,26 @@ class TestResponseInputToHarmonyMessage:
                 },
                 prev_responses=[_PREV_CALL],
             )
+        assert exc_info.value.parameter == "input"
 
     def test_function_call_output_raises_on_empty_prev_responses(self):
-        with pytest.raises(ValueError, match="No call message found for"):
+        with pytest.raises(
+            VLLMValidationError, match="No call message found for"
+        ) as exc_info:
             response_input_to_harmony(
                 {"type": "function_call_output", "call_id": "call_test", "output": "x"},
                 prev_responses=[],
             )
+        assert exc_info.value.parameter == "input"
 
     # -----------------------------------------------------------------------
     # Error cases
     # -----------------------------------------------------------------------
 
-    def test_unknown_type_raises_value_error(self):
-        with pytest.raises(ValueError, match="Unknown input type"):
+    def test_unknown_type_raises_validation_error(self):
+        with pytest.raises(VLLMValidationError, match="Unknown input type") as exc_info:
             response_input_to_harmony(
                 {"type": "image_url", "url": "https://example.com/img.png"},
                 prev_responses=[],
             )
+        assert exc_info.value.parameter == "input"

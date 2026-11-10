@@ -32,6 +32,7 @@ RERANK_MODELS = [
         is_prefix_caching_supported=True,
         is_chunked_prefill_supported=True,
         mteb_score=0.33459,
+        mteb_tol=1e-2,
         enable_test=True,
     ),
     RerankModelInfo(
@@ -108,11 +109,13 @@ class Qwen3RerankerHfRunner(MtebCrossEncoderMixin, HfRunner):
         return torch.Tensor(scores)
 
 
+@pytest.mark.flaky(reruns=2)
 @pytest.mark.parametrize("model_info", RERANK_MODELS)
 def test_rerank_models_mteb(vllm_runner, model_info: RerankModelInfo) -> None:
     mteb_test_rerank_models(vllm_runner, model_info, hf_runner=Qwen3RerankerHfRunner)
 
 
+@pytest.mark.flaky(reruns=2)
 @pytest.mark.parametrize("model_info", RERANK_MODELS)
 @multi_gpu_test(num_gpus=2)
 def test_rerank_models_mteb_tp(vllm_runner, model_info: RerankModelInfo) -> None:

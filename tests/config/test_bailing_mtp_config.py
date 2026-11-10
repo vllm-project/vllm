@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from transformers import PretrainedConfig
+from typing import get_args
+
+from transformers import PreTrainedConfig
 
 from vllm.config.speculative import MTPModelTypes, SpeculativeConfig
 from vllm.transformers_utils.model_arch_config_convertor import (
@@ -9,8 +11,8 @@ from vllm.transformers_utils.model_arch_config_convertor import (
 )
 
 
-def _bailing_config() -> PretrainedConfig:
-    config = PretrainedConfig(
+def _bailing_config() -> PreTrainedConfig:
+    config = PreTrainedConfig(
         architectures=["BailingMoeV2_5ForCausalLM"],
         hidden_size=4096,
         kv_lora_rank=512,
@@ -34,7 +36,7 @@ def test_bailing_hybrid_mtp_hf_config_override():
     assert overridden.model_type == "bailing_hybrid_mtp"
     assert overridden.architectures == ["BailingMoeV25MTPModel"]
     assert overridden.n_predict == 1
-    assert "bailing_hybrid_mtp" in MTPModelTypes.__args__
+    assert "bailing_hybrid_mtp" in get_args(MTPModelTypes)
 
 
 def test_bailing_hybrid_mtp_model_arch_config():

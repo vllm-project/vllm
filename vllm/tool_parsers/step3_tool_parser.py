@@ -1,23 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import contextlib
 import json
 from collections.abc import Sequence
 from typing import Any
 
 import regex as re
 
-from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionRequest,
-)
-from vllm.entrypoints.openai.engine.protocol import (
+from vllm.entrypoints.generate.base.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
     DeltaToolCall,
     ExtractedToolCallInformation,
     FunctionCall,
     ToolCall,
+)
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionRequest,
 )
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.logger import init_logger
@@ -26,14 +25,17 @@ from vllm.tool_parsers.abstract_tool_parser import (
     Tool,
     ToolParser,
 )
+from vllm.tool_parsers.utils import (
+    coerce_to_schema_type,
+    extract_types_from_schema,
+)
 from vllm.utils import random_uuid
 
 logger = init_logger(__name__)
 
 
 class Step3ToolParser(ToolParser):
-    """
-    Tool parser for a model that uses a specific XML-like format for tool calls.
+    """Tool parser for a model that uses a specific XML-like format for tool calls.
     This version uses a robust, stateful, cursor-based streaming parser and
     consolidates tool arguments into a single message.
     """
@@ -71,8 +73,9 @@ class Step3ToolParser(ToolParser):
 
         params: dict[str, str] = {}
         param_matches = re.findall(
-            r'<steptml:parameter name="([^"]+)">([^<]*)</steptml:parameter>',
+            r'<steptml:parameter name="([^"]+)">(.*?)</steptml:parameter>',
             action_text,
+            re.DOTALL,
         )
         for name, value in param_matches:
             params[name] = value.strip()
@@ -90,25 +93,12 @@ class Step3ToolParser(ToolParser):
                 for key, value in params.items():
                     if not isinstance(value, str):
                         continue
-                    prop = properties.get(key, {})
-                    typ = prop.get("type")
-                    if typ == "string":
-                        params[key] = value.strip()
-                    elif typ == "integer":
-                        with contextlib.suppress(ValueError):
-                            params[key] = int(value)
-                    elif typ == "number":
-                        with contextlib.suppress(ValueError):
-                            params[key] = float(value)
-                    elif typ == "boolean":
-                        lower_val = value.lower()
-                        params[key] = (
-                            lower_val == "true"
-                            if lower_val in ("true", "false")
-                            else value
-                        )
-                    elif typ == "null":
-                        params[key] = None if value.lower() == "null" else value
+                    # Resolve `type` lists and anyOf/oneOf/allOf, so nullable
+                    # params such as Optional[int] are coerced like plain ones.
+                    params[key] = coerce_to_schema_type(
+                        value.strip(),
+                        extract_types_from_schema(properties.get(key)),
+                    )
                 break
         return params
 

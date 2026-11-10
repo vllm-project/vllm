@@ -10,7 +10,7 @@ from ..op import register_op
 def rms_norm(
     x: Tensor, weight: Tensor | None, epsilon: float, variance_size: int | None = None
 ) -> Tensor:
-    """Weighted root-mean-square layer normalization"""
+    """Weighted root-mean-square layer normalization."""
     orig_dtype = x.dtype
     x = x.to(torch.float32)
     x_var = x if variance_size is None else x[..., :variance_size]
@@ -23,10 +23,14 @@ def rms_norm(
 
 @rms_norm.register_input_generator
 def _rms_norm_input_generator(
-    num_tokens: int, hidden_size: int, dtype: torch.dtype, epsilon: float = 1e-5
+    num_tokens: int,
+    hidden_size: int,
+    dtype: torch.dtype,
+    epsilon: float = 1e-5,
+    device: torch.device | str | None = None,
 ) -> tuple:
-    x = torch.randn(num_tokens, hidden_size, dtype=dtype)
-    weight = torch.randn(hidden_size, dtype=dtype)
+    x = torch.randn(num_tokens, hidden_size, dtype=dtype, device=device)
+    weight = torch.randn(hidden_size, dtype=dtype, device=device)
     return x, weight, epsilon
 
 
@@ -44,7 +48,7 @@ def fused_add_rms_norm(
     epsilon: float,
     variance_size: int | None = None,
 ) -> tuple[Tensor, Tensor]:
-    """Fused add and weighted root-mean-square layer normalization"""
+    """Fused add and weighted root-mean-square layer normalization."""
     orig_dtype = x.dtype
     x = x.to(torch.float32)
     x = x + x_residual.to(torch.float32)
@@ -64,9 +68,13 @@ fused_add_rms_norm.override_tolerance(torch.float16, atol=1e-2, rtol=2e-3)
 
 @fused_add_rms_norm.register_input_generator
 def _fused_add_rms_norm_input_generator(
-    num_tokens: int, hidden_size: int, dtype: torch.dtype, epsilon: float = 1e-5
+    num_tokens: int,
+    hidden_size: int,
+    dtype: torch.dtype,
+    epsilon: float = 1e-5,
+    device: torch.device | str | None = None,
 ) -> tuple:
-    x = torch.randn(num_tokens, hidden_size, dtype=dtype)
-    x_residual = torch.randn(num_tokens, hidden_size, dtype=dtype)
-    weight = torch.randn(hidden_size, dtype=dtype)
+    x = torch.randn(num_tokens, hidden_size, dtype=dtype, device=device)
+    x_residual = torch.randn(num_tokens, hidden_size, dtype=dtype, device=device)
+    weight = torch.randn(hidden_size, dtype=dtype, device=device)
     return x, x_residual, weight, epsilon

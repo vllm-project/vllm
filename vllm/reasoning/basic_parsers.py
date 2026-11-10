@@ -6,9 +6,10 @@ from collections.abc import Iterable, Sequence
 from itertools import islice
 from typing import TYPE_CHECKING
 
-from vllm.entrypoints.openai.engine.protocol import DeltaMessage
+from vllm.entrypoints.generate.base.protocol import DeltaMessage
 from vllm.reasoning.abs_reasoning_parsers import ReasoningParser
 from vllm.tokenizers import TokenizerLike
+from vllm.v1.token_buffer import rfind_tokens
 
 if TYPE_CHECKING:
     from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
@@ -16,8 +17,7 @@ if TYPE_CHECKING:
 
 
 class BaseThinkingReasoningParser(ReasoningParser):
-    """
-    Base class for reasoning parsers that use thinking tokens.
+    """Base class for reasoning parsers that use thinking tokens.
 
     This class provides common functionality for parsers that use start and end
     tokens to delimit reasoning content (
@@ -70,15 +70,8 @@ class BaseThinkingReasoningParser(ReasoningParser):
         self.end_token_id: int = end_token_id
 
     def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
-        start_token_id = self.start_token_id
-        end_token_id = self.end_token_id
-
-        for i in range(len(input_ids) - 1, -1, -1):
-            if input_ids[i] == start_token_id:
-                return False
-            if input_ids[i] == end_token_id:
-                return True
-        return False
+        i = rfind_tokens(input_ids, (self.start_token_id, self.end_token_id))
+        return i >= 0 and input_ids[i] == self.end_token_id
 
     def is_reasoning_end_streaming(
         self, input_ids: Sequence[int], delta_ids: Iterable[int]
@@ -87,9 +80,7 @@ class BaseThinkingReasoningParser(ReasoningParser):
         return end_token_id in delta_ids
 
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
-        """
-        Extract the content after the end tokens
-        """
+        """Extract the content after the end tokens."""
         if self.end_token_id not in islice(input_ids, 0, max(0, len(input_ids) - 1)):
             return []
         else:
@@ -104,8 +95,7 @@ class BaseThinkingReasoningParser(ReasoningParser):
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
     ) -> DeltaMessage | None:
-        """
-        Extract reasoning content from a delta message.
+        """Extract reasoning content from a delta message.
         Handles streaming output where previous + delta = current.
         Uses token IDs for faster processing.
         """
@@ -157,8 +147,7 @@ class BaseThinkingReasoningParser(ReasoningParser):
     def extract_reasoning(
         self, model_output: str, request: "ChatCompletionRequest | ResponsesRequest"
     ) -> tuple[str | None, str | None]:
-        """
-        Extract reasoning content from the model output.
+        """Extract reasoning content from the model output.
 
         This is the base implementation that works for most models.
         Subclasses can override this method for specific behavior.

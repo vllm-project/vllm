@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 //! CORS support mirroring Python's Starlette `CORSMiddleware`.
 //!
 //! Built on `tower_http::cors::CorsLayer`, configured to reproduce Starlette's
@@ -102,7 +105,7 @@ pub fn cors_layer(cfg: &CorsConfig) -> CorsLayer {
 
     // Emit `Vary: Origin` only when the allow-origin is dynamic (explicit
     // origins, or credentials); the wildcard + no-credentials case emits no
-    // `Vary` at all, and an empty list disables the header here.
+    // `Vary` at all. An empty origin list never permits an origin.
     let vary: Vec<HeaderName> = if !wildcard_origins || cfg.allow_credentials {
         vec![header::ORIGIN]
     } else {

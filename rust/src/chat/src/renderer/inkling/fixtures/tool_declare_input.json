@@ -1,0 +1,46 @@
+{
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "get_weather",
+        "description": "Get weather information",
+        "parameters": {
+          "type": "object",
+          "required": [
+            "city"
+          ],
+          "properties": {
+            "city": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    }
+  ],
+  "messages": [
+    {
+      "role": "developer",
+      "content": "rules",
+      "tools": [
+        {
+          "type": "function",
+          "function": {
+            "name": "local_tool",
+            "parameters": {
+              "z": 1,
+              "a": {
+                "b": 2
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": "hi"
+    }
+  ]
+}

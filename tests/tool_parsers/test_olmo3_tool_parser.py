@@ -9,7 +9,7 @@ from tests.tool_parsers.utils import (
     run_tool_extraction,
     run_tool_extraction_streaming,
 )
-from vllm.entrypoints.openai.engine.protocol import FunctionCall
+from vllm.entrypoints.generate.base.protocol import FunctionCall
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers import ToolParser, ToolParserManager
 
@@ -211,9 +211,11 @@ def test_streaming_tool_call_with_large_steps(default_tokenizer: TokenizerLike):
     )
     model_output_deltas = [
         "<function_calls>get_weather(city='San",
-        " Francisco', metric='celsius')\n"
-        f"{PARAMETERLESS_FUNCTION_OUTPUT}\n"
-        f"{EMPTY_LIST_FUNCTION_OUTPUT}</function_calls>",
+        (
+            " Francisco', metric='celsius')\n"
+            f"{PARAMETERLESS_FUNCTION_OUTPUT}\n"
+            f"{EMPTY_LIST_FUNCTION_OUTPUT}</function_calls>"
+        ),
     ]
 
     reconstructor = run_tool_extraction_streaming(
@@ -229,7 +231,7 @@ def test_streaming_tool_call_with_large_steps(default_tokenizer: TokenizerLike):
 
 @pytest.mark.parametrize("streaming", [False])
 def test_regex_timeout_handling(streaming: bool, default_tokenizer: TokenizerLike):
-    """test regex timeout is handled gracefully"""
+    """Test regex timeout is handled gracefully."""
     tool_parser: ToolParser = ToolParserManager.get_tool_parser("olmo3")(
         default_tokenizer
     )

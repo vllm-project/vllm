@@ -101,7 +101,7 @@ The heartbeat is deferred to the next step once the handshake completes --- the 
 
 ## Bidirectional KV Transfer
 
-For multi-turn conversations, [bidirectional KV transfer](../features/disagg_prefill.md) allows D to cache KV blocks that P can pull from on subsequent turns. Since the timing of the next conversational turn is **client-dependent** (not controlled by the system), the heartbeat-based lease mechanism does not apply here. Instead, a separate `decoder_kv_blocks_ttl` (default 480s) provides a simple fixed timeout for blocks cached on D. If the client takes too long to continue the conversation, the blocks expire and P recomputes. Future work may extend a symmetric heartbeat mechanism to this case.
+For multi-turn conversations, [bidirectional KV transfer](../features/disagg_prefill.md) allows D to cache KV blocks that P can pull from on subsequent turns. Since the timing of the next conversational turn is **client-dependent** (not controlled by the system), the heartbeat-based lease mechanism does not apply here. Instead, a separate `decoder_kv_blocks_ttl` (default 480s) provides a simple fixed timeout for blocks cached on D. If the client takes too long to continue the conversation, the blocks expire. D communicates back the expiry time so P can know when blocks are expired and recompute. Because the deadline is a `perf_counter` value produced on D and the two engines run in separate processes (with unrelated clocks), P estimates the clock offset to D from the handshake round-trip and applies it before comparing the deadline against its own `perf_counter`. Future work may extend a symmetric heartbeat mechanism to this case.
 
 ## Key Design Decisions
 

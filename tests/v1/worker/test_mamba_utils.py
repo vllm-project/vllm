@@ -1,35 +1,187 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from types import SimpleNamespace
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
 import torch
 
+from tests.v1.worker.test_utils import _TestReplaySSMMixer
+from vllm.config import CacheConfig
+from vllm.config.mamba import MambaConfig
 from vllm.model_executor.layers.mamba.mamba_utils import (
+    MambaStateCopyFunc,
+    MambaStateCopyFuncsByType,
     get_conv_copy_spec,
     get_temporal_copy_spec,
+    is_conv_state_dim_first,
 )
+from vllm.triton_utils import tl, triton
+from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
+from vllm.v1.core.kv_cache_planning import get_kv_cache_config_from_groups
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
-from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheGroupSpec, MambaSpec
-from vllm.v1.worker.mamba_utils import (
-    MambaCopyBuffers,
-    MambaSpecDecodeGPUContext,
-    collect_mamba_copy_meta,
-    do_mamba_copy_block,
-    preprocess_mamba,
+from vllm.v1.kv_cache_interface import (
+    KVCacheConfig,
+    KVCacheGroupSpec,
+    KVCacheLayout,
+    MambaSpec,
+    UniformTypeKVCacheSpecs,
 )
-
-MambaStateCopyFunc = Callable[..., Any]
+from vllm.v1.utils import CpuGpuBuffer
+from vllm.v1.worker.gpu.block_table import BlockTables
+from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
+from vllm.v1.worker.mamba_utils import (
+    _TEMPORAL_TILES,
+    MambaSpecDecodeGPUContext,
+    _get_mamba_spec_for_layer,
+    _reinterpret_u64_as_i64,
+    get_mamba_group_ids,
+    get_mamba_groups,
+    postprocess_mamba_fused_kernel,
+)
+from vllm.v1.worker.replayssm_utils import (
+    ReplaySSMModelContext,
+    initialize_replayssm_ring_trackers,
+)
+from vllm.v1.worker.utils import (
+    allocate_kv_cache,
+    bind_kv_cache_to_layers,
+)
 
 # Conv + temporal copy specs, in the order the tests' MambaSpec shapes expect.
-_COPY_FUNCS: tuple[MambaStateCopyFunc, ...] = (
+_DEFAULT_COPY_FUNCS: tuple[MambaStateCopyFunc, ...] = (
     get_conv_copy_spec,
     get_temporal_copy_spec,
 )
+_COPY_FUNCS: MambaStateCopyFuncsByType = {
+    MambaAttentionBackendEnum.MAMBA2: _DEFAULT_COPY_FUNCS,
+    MambaAttentionBackendEnum.GDN_ATTN: _DEFAULT_COPY_FUNCS,
+    MambaAttentionBackendEnum.SHORT_CONV: (get_conv_copy_spec,),
+}
+
+
+@dataclass
+class MambaCopyBuffers:
+    """Staging buffers for the CPU reference copy path below."""
+
+    src_ptrs: CpuGpuBuffer
+    dst_ptrs: CpuGpuBuffer
+    sizes: CpuGpuBuffer
+    mamba_group_ids: list[int]
+    mamba_spec: MambaSpec
+    offset: int = 0
+
+    @classmethod
+    def create(
+        cls,
+        max_num_reqs: int,
+        kv_cache_config: KVCacheConfig,
+        copy_funcs: MambaStateCopyFuncsByType,
+        make_buffer: Callable[..., Any],
+    ) -> "MambaCopyBuffers":
+        mamba_groups = get_mamba_groups(kv_cache_config)
+        mamba_spec = next(iter(mamba_groups))
+        mamba_group_ids = get_mamba_group_ids(mamba_groups)
+        entries_per_req = sum(
+            len(
+                copy_funcs[
+                    _get_mamba_spec_for_layer(
+                        kv_cache_config.kv_cache_groups[gid], layer_name
+                    ).mamba_type
+                ]
+            )
+            for gid in mamba_group_ids
+            for layer_name in kv_cache_config.kv_cache_groups[gid].layer_names
+        )
+        n = max_num_reqs * entries_per_req
+        return cls(
+            src_ptrs=make_buffer(n, dtype=torch.uint64),
+            dst_ptrs=make_buffer(n, dtype=torch.uint64),
+            sizes=make_buffer(n, dtype=torch.int32),
+            mamba_group_ids=mamba_group_ids,
+            mamba_spec=mamba_spec,
+        )
+
+
+def collect_mamba_copy_meta(
+    copy_bufs: MambaCopyBuffers,
+    kv_cache_config: KVCacheConfig,
+    mamba_state_copy_funcs: MambaStateCopyFuncsByType,
+    mamba_group_ids: list[int],
+    src_block_idx: int,
+    dest_block_idx: int,
+    accept_token_bias: int,
+    req_state: Any,
+    forward_context: dict[str, Any],
+) -> None:
+    """CPU reference: queue the state copies for one request."""
+    if src_block_idx == dest_block_idx and accept_token_bias == 0:
+        return
+
+    src_ptrs_np = copy_bufs.src_ptrs.np
+    dst_ptrs_np = copy_bufs.dst_ptrs.np
+    sizes_np = copy_bufs.sizes.np
+    offset = copy_bufs.offset
+
+    for mamba_group_id in mamba_group_ids:
+        block_ids = req_state.block_ids[mamba_group_id]
+        dest_block_id = block_ids[dest_block_idx]
+        kv_cache_group = kv_cache_config.kv_cache_groups[mamba_group_id]
+        for layer_name in kv_cache_group.layer_names:
+            mamba_spec = _get_mamba_spec_for_layer(kv_cache_group, layer_name)
+            state_copy_funcs = mamba_state_copy_funcs[mamba_spec.mamba_type]
+            kv_caches: list[torch.Tensor] = forward_context[layer_name].kv_cache
+            for state, state_copy_func in zip(kv_caches, state_copy_funcs):
+                copy_spec = state_copy_func(
+                    state, block_ids, src_block_idx, accept_token_bias + 1
+                )
+                src_ptrs_np[offset] = copy_spec.start_addr
+                dst_ptrs_np[offset] = state[dest_block_id].data_ptr()
+                sizes_np[offset] = copy_spec.num_elements * state.element_size()
+                offset += 1
+
+    copy_bufs.offset = offset
+
+
+@triton.jit
+def _batch_memcpy_kernel(src_ptrs, dst_ptrs, sizes, BLOCK_SIZE: tl.constexpr):
+    pid = tl.program_id(0)
+
+    src_ptr = tl.load(src_ptrs + pid)
+    dst_ptr = tl.load(dst_ptrs + pid)
+    size = tl.load(sizes + pid)
+    is_left_overlap = dst_ptr < src_ptr and dst_ptr + size > src_ptr
+
+    offsets = tl.arange(0, BLOCK_SIZE)
+    for i in range(0, size, BLOCK_SIZE):
+        mask = (i + offsets) < size
+
+        curr_src_ptr = (src_ptr + i + offsets).to(tl.pointer_type(tl.uint8))
+        curr_dst_ptr = (dst_ptr + i + offsets).to(tl.pointer_type(tl.uint8))
+
+        data = tl.load(curr_src_ptr, mask=mask)
+        if is_left_overlap:
+            # Preserve each lane's source before a lower-address lane stores
+            # over it. The condition is uniform within the program.
+            tl.debug_barrier()
+        tl.store(curr_dst_ptr, data, mask=mask)
+
+
+def do_mamba_copy_block(copy_bufs: MambaCopyBuffers) -> None:
+    """CPU reference: run the queued state copies."""
+    n = copy_bufs.offset
+    if n == 0:
+        return
+    _batch_memcpy_kernel[(n,)](
+        copy_bufs.src_ptrs.copy_to_gpu(n),
+        copy_bufs.dst_ptrs.copy_to_gpu(n),
+        copy_bufs.sizes.copy_to_gpu(n),
+        BLOCK_SIZE=1024,
+    )
 
 
 def postprocess_mamba(
@@ -38,12 +190,12 @@ def postprocess_mamba(
     input_batch: Any,
     requests: dict[str, Any],
     forward_context: dict[str, Any],
-    mamba_state_copy_funcs: tuple[MambaStateCopyFunc, ...],
+    mamba_state_copy_funcs: MambaStateCopyFuncsByType,
     copy_bufs: "MambaCopyBuffers",
 ):
     """CPU reference for the align-mode postprocess.
 
-    Used as a golden against the GPU fused kernel (``postprocess_mamba_align_gpu``).
+    Used as a golden against the GPU fused kernel (`postprocess_mamba_gpu`).
     Mirrors what the production code did before the fused kernel replaced it;
     kept here because production no longer has a CPU implementation.
     """
@@ -88,69 +240,6 @@ def postprocess_mamba(
     do_mamba_copy_block(copy_bufs)
 
 
-def _make_scheduler_output(
-    finished_req_ids: set[str],
-    preempted_req_ids: set[str] | None,
-    resumed_req_ids: set[str],
-) -> SchedulerOutput:
-    cached = CachedRequestData.make_empty()
-    cached.resumed_req_ids = resumed_req_ids
-    return SchedulerOutput(
-        scheduled_new_reqs=[],
-        scheduled_cached_reqs=cached,
-        num_scheduled_tokens={},
-        total_num_scheduled_tokens=0,
-        scheduled_spec_decode_tokens={},
-        scheduled_encoder_inputs={},
-        num_common_prefix_blocks=[],
-        finished_req_ids=finished_req_ids,
-        free_encoder_mm_hashes=[],
-        preempted_req_ids=preempted_req_ids,
-    )
-
-
-def test_resumed_req_ids_cleared_from_mamba_state_idx():
-    """When a request is force-preempted (e.g. reset_prefix_cache),
-    it appears in resumed_req_ids but NOT in preempted_req_ids.
-    preprocess_mamba must still clear its mamba_state_idx entry,
-    otherwise stale indices can point beyond the new block allocation.
-    """
-    spec = MagicMock(block_size=64, num_speculative_blocks=0)
-    cache_config = MagicMock(enable_prefix_caching=True)
-    input_batch = MagicMock(req_ids=[])
-    copy_bufs = MagicMock(mamba_group_ids=[0], mamba_spec=spec)
-
-    mamba_state_idx: dict[str, int] = {
-        "finished": 1,
-        "preempted": 2,
-        "resumed": 3,  # only in resumed_req_ids, NOT in preempted
-        "keep": 99,
-    }
-    sched = _make_scheduler_output(
-        finished_req_ids={"finished"},
-        preempted_req_ids={"preempted"},
-        resumed_req_ids={"resumed"},
-    )
-
-    with patch(
-        "vllm.v1.worker.mamba_utils.get_mamba_groups",
-        return_value=([0], spec),
-    ):
-        preprocess_mamba(
-            sched,
-            MagicMock(),  # kv_cache_config
-            cache_config,
-            mamba_state_idx,
-            input_batch,
-            {},  # requests
-            {},  # forward_context
-            (),  # mamba_state_copy_funcs
-            copy_bufs,
-        )
-
-    assert mamba_state_idx == {"keep": 99}
-
-
 # -----------------------------------------------------------------------------
 # Golden tests for postprocess_mamba_fused_kernel
 # -----------------------------------------------------------------------------
@@ -187,6 +276,94 @@ class _MockCpuGpuBuffer:
         return self.gpu[:n].copy_(self.cpu[:n], non_blocking=True)
 
 
+class _FakeDataPtrTensor:
+    """Tensor wrapper that exposes a controlled data_ptr for metadata tests."""
+
+    def __init__(self, tensor: torch.Tensor, data_ptr: int):
+        self._tensor = tensor
+        self._data_ptr = data_ptr
+        self.shape = tensor.shape
+
+    def data_ptr(self) -> int:
+        return self._data_ptr
+
+    def dim(self) -> int:
+        return self._tensor.dim()
+
+    def stride(self, *args):
+        return self._tensor.stride(*args)
+
+    def numel(self) -> int:
+        return self._tensor.numel()
+
+    def element_size(self) -> int:
+        return self._tensor.element_size()
+
+    def size(self, *args):
+        return self._tensor.size(*args)
+
+    def __getitem__(self, item):
+        return self._tensor[item]
+
+
+def test_reinterpret_u64_as_i64_preserves_pointer_bits():
+    ptrs = [
+        0,
+        1,
+        (1 << 63) - 1,
+        1 << 63,
+        (1 << 63) + 1234,
+        (1 << 64) - 1,
+    ]
+    ptr_tensor = torch.zeros(len(ptrs), dtype=torch.int64)
+
+    for idx, ptr in enumerate(ptrs):
+        ptr_tensor[idx] = _reinterpret_u64_as_i64(ptr)
+
+    assert ptr_tensor.numpy().view(np.uint64).tolist() == ptrs
+
+
+def test_gpu_context_reinterprets_high_data_ptrs_for_int64_metadata():
+    cfg = _TestConfig(num_layers=1)
+    device = torch.device("cpu")
+    kv_cache_config = _make_kv_cache_config(cfg, ["layer_0"])
+    conv_ptr = 1 << 63
+    temporal_ptr = (1 << 64) - 8
+    block_table_ptr = (1 << 63) + 42
+
+    conv_state = _FakeDataPtrTensor(
+        torch.empty(
+            cfg.num_blocks,
+            cfg.conv_width,
+            cfg.conv_inner_dim,
+            dtype=cfg.dtype,
+        ),
+        conv_ptr,
+    )
+    temporal_state = _FakeDataPtrTensor(
+        torch.empty(cfg.num_blocks, cfg.temporal_state_dim, dtype=cfg.dtype),
+        temporal_ptr,
+    )
+    block_table = _FakeDataPtrTensor(
+        torch.empty(1, 4, dtype=torch.int32),
+        block_table_ptr,
+    )
+    forward_context = {"layer_0": _make_mock_attention(conv_state, temporal_state)}
+    gpu_ctx = _make_gpu_ctx(cfg, kv_cache_config, device, forward_context)
+
+    gpu_ctx.initialize_from_forward_context(
+        kv_cache_config, forward_context, _COPY_FUNCS, [block_table]
+    )
+
+    assert gpu_ctx.state_base_addrs.tolist() == [
+        _reinterpret_u64_as_i64(conv_ptr),
+        _reinterpret_u64_as_i64(temporal_ptr),
+    ]
+    assert gpu_ctx.block_table_ptrs.tolist() == [
+        _reinterpret_u64_as_i64(block_table_ptr)
+    ]
+
+
 def _make_postprocess_scheduler_output(
     req_ids: list[str],
     num_scheduled_tokens: dict[str, int],
@@ -201,7 +378,6 @@ def _make_postprocess_scheduler_output(
         total_num_scheduled_tokens=sum(num_scheduled_tokens.values()),
         scheduled_spec_decode_tokens=scheduled_spec_decode_tokens or {},
         scheduled_encoder_inputs={},
-        num_common_prefix_blocks=[],
         finished_req_ids=set(),
         free_encoder_mm_hashes=[],
         preempted_req_ids=set(),
@@ -212,7 +388,7 @@ def _make_mock_attention(
     conv_state: torch.Tensor, temporal_state: torch.Tensor
 ) -> MagicMock:
     """Create a mock attention object with kv_cache."""
-    attention = MagicMock()
+    attention = MagicMock(use_flashinfer_replayssm=False)
     attention.kv_cache = [conv_state, temporal_state]
     return attention
 
@@ -232,10 +408,10 @@ def _make_dual_states(
     dict[str, MagicMock],
 ]:
     """Allocate conv+temporal state tensors for the Python path, clone them for
-    the GPU path, and build matching ``forward_context`` dicts for both.
+    the GPU path, and build matching `forward_context` dicts for both.
 
-    Returns ``(conv_py, temporal_py, conv_gpu, temporal_gpu, fwd_py, fwd_gpu)``
-    where the four state lists are parallel to ``layer_names``.
+    Returns `(conv_py, temporal_py, conv_gpu, temporal_gpu, fwd_py, fwd_gpu)`
+    where the four state lists are parallel to `layer_names`.
     """
     n_blocks = num_blocks if num_blocks is not None else cfg.num_blocks
     conv_py = [
@@ -279,7 +455,7 @@ def _make_dual_layer_state(
     dict[str, MagicMock],
     dict[str, MagicMock],
 ]:
-    """Single-layer convenience form of ``_make_dual_states``."""
+    """Single-layer convenience form of `_make_dual_states`."""
     conv_py, temporal_py, conv_gpu, temporal_gpu, fwd_py, fwd_gpu = _make_dual_states(
         cfg, [layer_name], device, num_blocks=num_blocks
     )
@@ -295,7 +471,7 @@ def _make_kv_cache_config(cfg: _TestConfig, layer_names: list[str]) -> KVCacheCo
             (cfg.temporal_state_dim,),
         ),
         dtypes=(cfg.dtype, cfg.dtype),
-        mamba_cache_mode="all",
+        mamba_cache_mode="align",
     )
     group = KVCacheGroupSpec(
         layer_names=layer_names,
@@ -327,19 +503,28 @@ def _make_requests(
     req_ids: list[str],
     num_computed_tokens: list[int],
     block_ids_per_req: list[list[int]],
+    num_prompt_tokens: list[int] | None = None,
 ) -> dict[str, MagicMock]:
-    """Create mock CachedRequestState objects."""
+    """Create mock request state objects."""
     requests = {}
     for i, req_id in enumerate(req_ids):
         req = MagicMock()
         req.num_computed_tokens = num_computed_tokens[i]
+        req.num_prompt_tokens = (
+            num_computed_tokens[i]
+            if num_prompt_tokens is None
+            else num_prompt_tokens[i]
+        )
         req.block_ids = {0: block_ids_per_req[i]}  # group_id=0
         requests[req_id] = req
     return requests
 
 
 def _make_copy_bufs(
-    cfg: _TestConfig, kv_cache_config: KVCacheConfig, device: torch.device
+    cfg: _TestConfig,
+    kv_cache_config: KVCacheConfig,
+    device: torch.device,
+    copy_funcs: MambaStateCopyFuncsByType = _COPY_FUNCS,
 ) -> MambaCopyBuffers:
     """Create MambaCopyBuffers for the Python path."""
 
@@ -349,26 +534,560 @@ def _make_copy_bufs(
     return MambaCopyBuffers.create(
         max_num_reqs=cfg.max_num_reqs,
         kv_cache_config=kv_cache_config,
-        copy_funcs=(get_conv_copy_spec, get_temporal_copy_spec),
+        copy_funcs=copy_funcs,
         make_buffer=make_buffer,
     )
 
 
 def _make_gpu_ctx(
-    cfg: _TestConfig, kv_cache_config: KVCacheConfig, device: torch.device
+    cfg: _TestConfig,
+    kv_cache_config: KVCacheConfig,
+    device: torch.device,
+    forward_context: dict[str, Any],
+    copy_funcs: MambaStateCopyFuncsByType = _COPY_FUNCS,
 ) -> MambaSpecDecodeGPUContext:
     """Create MambaSpecDecodeGPUContext for the GPU path."""
-
-    def make_buffer(n, dtype):
-        return _MockCpuGpuBuffer(n, dtype, device)
-
     return MambaSpecDecodeGPUContext.create(
         max_num_reqs=cfg.max_num_reqs,
         kv_cache_config=kv_cache_config,
-        num_state_types=2,
+        copy_funcs=copy_funcs,
+        forward_context=forward_context,
         device=device,
-        make_buffer=make_buffer,
     )
+
+
+def test_replayssm_gpu_copy_layout_preserves_canonical_cpu_copies():
+    mixer = _TestReplaySSMMixer()
+    spec = MambaSpec(
+        block_size=16,
+        shapes=mixer.get_state_shape(),
+        dtypes=mixer.get_state_dtype(),
+    )
+    kv_config = KVCacheConfig(
+        num_blocks=3,
+        kv_cache_tensors=[],
+        kv_cache_groups=[KVCacheGroupSpec(["mixer"], spec)],
+    )
+    cfg = _TestConfig(num_layers=1, max_num_reqs=2)
+    device = torch.device("cpu")
+    canonical = _make_copy_bufs(cfg, kv_config, device)
+    replay = _make_gpu_ctx(cfg, kv_config, device, {"mixer": mixer})
+
+    assert canonical.src_ptrs.cpu.numel() == cfg.max_num_reqs * 2
+    assert replay.num_states == 5
+    assert replay.state_base_addrs.numel() == 5
+    assert _COPY_FUNCS[MambaAttentionBackendEnum.MAMBA2] == _DEFAULT_COPY_FUNCS
+
+
+def test_replayssm_rejects_incompatible_ring_geometry_before_materialization():
+    class DifferentRingMixer(_TestReplaySSMMixer):
+        def get_state_shape(self) -> tuple[tuple[int, ...], ...]:
+            shapes = super().get_state_shape()
+            return (*shapes[:2], (1, 4), *shapes[3:])
+
+    mixers = [_TestReplaySSMMixer(), DifferentRingMixer()]
+    specs = [
+        MambaSpec(
+            block_size=16,
+            shapes=mixer.get_state_shape(),
+            dtypes=mixer.get_state_dtype(),
+            state_alignment=16,
+            page_size_padded=128,
+        )
+        for mixer in mixers
+    ]
+    assert specs[0].is_uniform_with_collection({"first": specs[0], "second": specs[1]})
+    for mixer in mixers:
+        mixer.bind_kv_cache(torch.zeros((3, 1, 1, 128), dtype=torch.int8))
+        mixer.A = -torch.ones(1)
+        mixer.replayssm_buffer_len = 16
+
+    with pytest.raises(AssertionError, match="equal materialization geometry"):
+        ReplaySSMModelContext.create(
+            [(mixers, specs[0], torch.zeros((1, 1), dtype=torch.int32))],
+            max_num_reqs=1,
+        )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
+@pytest.mark.parametrize(
+    (
+        "layout",
+        "previous_column",
+        "computed",
+        "scheduled",
+        "destination_column",
+    ),
+    [
+        (KVCacheLayout.LBNHC, 0, 15, 4, 1),
+        (KVCacheLayout.BLHNC, 1, 14, 1, 0),
+        (KVCacheLayout.BLHNC, 0, 11, 4, 0),
+        (KVCacheLayout.LBNHC, -1, 0, 4, 0),
+    ],
+    ids=[
+        "forward_after_rejection",
+        "backward_after_fewer_drafts",
+        "same_column",
+        "fresh_slot",
+    ],
+)
+def test_replayssm_precopy_moves_packed_state_and_trackers(
+    monkeypatch,
+    layout,
+    previous_column,
+    computed,
+    scheduled,
+    destination_column,
+):
+    device = torch.device("cuda")
+    conv_shape = (8, 6) if is_conv_state_dim_first() else (6, 8)
+    spec = MambaSpec(
+        block_size=16,
+        shapes=(conv_shape, (1, 4, 4), (1, 20, 4), (1, 20), (1, 20, 4)),
+        dtypes=(
+            torch.bfloat16,
+            torch.float32,
+            torch.bfloat16,
+            torch.float32,
+            torch.bfloat16,
+        ),
+        mamba_cache_mode="align",
+        state_alignment=16,
+        block_stride_alignment=16,
+    )
+    spec = replace(spec, page_size_padded=spec.page_size_bytes + 128)
+    config = SimpleNamespace(
+        cache_config=CacheConfig(),
+        attention_config=SimpleNamespace(hisparse_config=None),
+    )
+    config.cache_config.kv_cache_layout = layout.name
+    layer_names = ["layers.0.mixer", "layers.1.mixer"]
+    kv_config = get_kv_cache_config_from_groups(
+        config,
+        [KVCacheGroupSpec(layer_names, spec)],
+        5 * (2 * spec.page_size_bytes + 8),
+    )
+    pages = allocate_kv_cache(kv_config, device, layout)
+
+    class PackedReplaySSMMixer(_TestReplaySSMMixer):
+        def get_state_shape(self) -> tuple[tuple[int, ...], ...]:
+            return spec.shapes
+
+        def get_state_dtype(self) -> tuple[torch.dtype, ...]:
+            return spec.dtypes
+
+    forward_context = {}
+    for name in layer_names:
+        mixer = PackedReplaySSMMixer()
+        mixer.replayssm_buffer_len = 16
+        mixer.A = -torch.ones(1, device=device)
+        forward_context[name] = mixer
+    bind_kv_cache_to_layers(pages, forward_context)
+    initialize_replayssm_ring_trackers(kv_config, forward_context)
+    source_slot, destination_slot = previous_column + 1, destination_column + 1
+    original = {}
+    for name, mixer in forward_context.items():
+        for state_index, tensor in enumerate(mixer.kv_cache):
+            tensor.fill_(-7)
+            tensor[source_slot].copy_(
+                torch.arange(tensor[source_slot].numel(), device=device)
+                .reshape(tensor[source_slot].shape)
+                .add_(100 * state_index)
+            )
+        original[name] = [tensor.clone() for tensor in mixer.kv_cache]
+        mixer._replayssm_ring_start.fill_(2)
+        mixer._replayssm_prev_num_accepted.fill_(3)
+        mixer._replayssm_ring_start[source_slot] = 7
+        mixer._replayssm_prev_num_accepted[source_slot] = 9
+    cfg = _TestConfig(num_layers=2, max_num_reqs=2)
+    ctx = _make_gpu_ctx(cfg, kv_config, device, forward_context)
+    batch_table = torch.tensor([[1, 2]], dtype=torch.int32, device=device)
+    persistent_table = torch.tensor([[0, 0], [1, 2]], dtype=torch.int32, device=device)
+    ctx.initialize_from_forward_context(
+        kv_config,
+        forward_context,
+        _COPY_FUNCS,
+        [persistent_table],
+        [batch_table],
+    )
+    initial_accepted = 1 if previous_column < 0 else 3
+    accepted = torch.tensor([1, initial_accepted], dtype=torch.int32, device=device)
+    computed_gpu = torch.tensor([0, computed], dtype=torch.int32, device=device)
+    query_start = torch.tensor([0, scheduled], dtype=torch.int32, device=device)
+    model_state = object.__new__(MambaHybridModelState)
+    model_state._align_mode = True
+    model_state._mamba_ctx = ctx
+    monkeypatch.setattr(model_state, "_get_mamba_group_info", lambda _: ([0], spec))
+    model_state._mamba_state_idx_gpu = torch.tensor(
+        [-1, previous_column], dtype=torch.int32, device=device
+    )
+    model_state._mamba_src_col_gpu = torch.empty(2, dtype=torch.int32, device=device)
+    model_state._mamba_src_off_gpu = torch.empty(2, dtype=torch.int32, device=device)
+    model_state.num_accepted_tokens_gpu = accepted
+    batch = SimpleNamespace(
+        num_reqs=1,
+        idx_mapping=torch.tensor([1], dtype=torch.int32, device=device),
+        query_start_loc=query_start,
+    )
+    model_state.preprocess_state(batch, (batch_table,), kv_config, computed_gpu)
+    moved = previous_column >= 0 and previous_column != destination_column
+    assert accepted[-1].item() == (1 if moved else initial_accepted)
+    for name, mixer in forward_context.items():
+        source = original[name]
+        if not moved:
+            for actual, before in zip(mixer.kv_cache, source):
+                torch.testing.assert_close(actual, before, rtol=0, atol=0)
+            expected_start, expected_committed = (
+                (0, 0) if previous_column < 0 else (7, 9)
+            )
+            assert (
+                mixer._replayssm_ring_start[destination_slot].item() == expected_start
+            )
+            assert (
+                mixer._replayssm_prev_num_accepted[destination_slot].item()
+                == expected_committed
+            )
+            continue
+        conv = mixer.kv_cache[0][destination_slot]
+        if is_conv_state_dim_first():
+            torch.testing.assert_close(
+                conv[:, :4], source[0][source_slot, :, 2:], rtol=0, atol=0
+            )
+        else:
+            torch.testing.assert_close(
+                conv[:4], source[0][source_slot, 2:], rtol=0, atol=0
+            )
+        for index, tensor in enumerate(mixer.kv_cache):
+            torch.testing.assert_close(
+                tensor[source_slot], source[index][source_slot], rtol=0, atol=0
+            )
+            torch.testing.assert_close(tensor[4], source[index][4], rtol=0, atol=0)
+            if index > 0:
+                torch.testing.assert_close(
+                    tensor[destination_slot], source[index][source_slot], rtol=0, atol=0
+                )
+        assert mixer._replayssm_ring_start[destination_slot].item() == 7
+        assert mixer._replayssm_prev_num_accepted[destination_slot].item() == 9
+
+
+def test_mamba_groups_support_different_state_specs():
+    gdn_spec = MambaSpec(
+        block_size=16,
+        shapes=((4, 4), (2, 4, 4)),
+        dtypes=(torch.float16, torch.float32),
+        mamba_type=MambaAttentionBackendEnum.GDN_ATTN,
+        mamba_cache_mode="align",
+        num_speculative_blocks=3,
+    )
+    short_conv_spec = MambaSpec(
+        block_size=16,
+        shapes=((12, 8),),
+        dtypes=(torch.float16,),
+        mamba_type=MambaAttentionBackendEnum.SHORT_CONV,
+        mamba_cache_mode="align",
+        num_speculative_blocks=3,
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=8,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["gdn.0", "gdn.1"], gdn_spec),
+            KVCacheGroupSpec(["ple.0"], short_conv_spec),
+        ],
+    )
+
+    mamba_groups = get_mamba_groups(kv_cache_config)
+    assert mamba_groups == {gdn_spec: [0], short_conv_spec: [1]}
+
+    model_state = object.__new__(MambaHybridModelState)
+    model_state._mamba_group_ids = []
+    model_state._mamba_spec = None
+    group_ids, representative_spec = model_state._get_mamba_group_info(kv_cache_config)
+    assert group_ids == [0, 1]
+    assert representative_spec is gdn_spec
+
+    cfg = _TestConfig()
+    copy_bufs = _make_copy_bufs(cfg, kv_cache_config, torch.device("cpu"))
+    assert copy_bufs.src_ptrs.cpu.numel() == cfg.max_num_reqs * 5
+    assert copy_bufs.dst_ptrs.cpu.numel() == cfg.max_num_reqs * 5
+    assert copy_bufs.sizes.cpu.numel() == cfg.max_num_reqs * 5
+
+    forward_context = {}
+    gdn_spec_layer_names = ["gdn.0", "gdn.1"]
+    for layer_name in gdn_spec_layer_names:
+        attention = MagicMock(use_flashinfer_replayssm=False)
+        attention.kv_cache = (
+            torch.empty(8, 4, 4, dtype=torch.float16),
+            torch.empty(8, 2, 4, 4, dtype=torch.float32),
+        )
+        forward_context[layer_name] = attention
+    ple_attention = MagicMock(use_flashinfer_replayssm=False)
+    ple_attention.kv_cache = (torch.empty(8, 12, 8, dtype=torch.float16),)
+    forward_context["ple.0"] = ple_attention
+    assert gdn_spec_layer_names == kv_cache_config.kv_cache_groups[0].layer_names
+
+    block_tables = [
+        torch.zeros(4, 8, dtype=torch.int32),
+        torch.zeros(4, 8, dtype=torch.int32),
+    ]
+    ctx = _make_gpu_ctx(cfg, kv_cache_config, torch.device("cpu"), forward_context)
+    assert ctx.num_states == 5
+    ctx.initialize_from_forward_context(
+        kv_cache_config,
+        forward_context,
+        _COPY_FUNCS,
+        block_tables,
+    )
+    assert ctx.is_initialized
+    assert ctx.state_group_indices.tolist() == [0, 0, 0, 0, 1]
+    assert ctx.state_conv_widths.tolist() == [4, 0, 4, 0, 12]
+
+
+def test_mamba_groups_support_mixed_specs_in_uniform_group():
+    gdn_spec = MambaSpec(
+        block_size=16,
+        shapes=((4, 4), (2, 4, 4)),
+        dtypes=(torch.float16, torch.float32),
+        mamba_type=MambaAttentionBackendEnum.GDN_ATTN,
+        mamba_cache_mode="align",
+        num_speculative_blocks=3,
+    )
+    short_conv_spec = MambaSpec(
+        block_size=16,
+        shapes=((12, 8),),
+        dtypes=(torch.float16,),
+        mamba_type=MambaAttentionBackendEnum.SHORT_CONV,
+        mamba_cache_mode="align",
+        num_speculative_blocks=3,
+    )
+    layer_specs = {
+        "gdn.0": gdn_spec,
+        "gdn.1": gdn_spec,
+        "ple.0": short_conv_spec,
+    }
+    kv_cache_config = KVCacheConfig(
+        num_blocks=8,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                list(layer_specs),
+                UniformTypeKVCacheSpecs(
+                    block_size=16,
+                    kv_cache_specs=layer_specs,
+                ),
+            )
+        ],
+    )
+
+    assert kv_cache_config.has_mamba_layers
+    assert get_mamba_groups(kv_cache_config) == {
+        gdn_spec: [0],
+        short_conv_spec: [0],
+    }
+
+    # The group is listed once per spec, so its id must not be repeated.
+    model_state = object.__new__(MambaHybridModelState)
+    model_state._mamba_group_ids = []
+    model_state._mamba_spec = None
+    group_ids, representative_spec = model_state._get_mamba_group_info(kv_cache_config)
+    assert group_ids == [0]
+    assert representative_spec is gdn_spec
+
+    cfg = _TestConfig()
+    copy_bufs = _make_copy_bufs(cfg, kv_cache_config, torch.device("cpu"))
+    assert copy_bufs.mamba_group_ids == [0]
+    assert copy_bufs.src_ptrs.cpu.numel() == cfg.max_num_reqs * 5
+
+    forward_context = {
+        "gdn.0": MagicMock(
+            use_flashinfer_replayssm=False,
+            kv_cache=(
+                torch.empty(8, 4, 4, dtype=torch.float16),
+                torch.empty(8, 2, 4, 4, dtype=torch.float32),
+            ),
+        ),
+        "gdn.1": MagicMock(
+            use_flashinfer_replayssm=False,
+            kv_cache=(
+                torch.empty(8, 4, 4, dtype=torch.float16),
+                torch.empty(8, 2, 4, 4, dtype=torch.float32),
+            ),
+        ),
+        "ple.0": MagicMock(
+            use_flashinfer_replayssm=False,
+            kv_cache=(torch.empty(8, 12, 8, dtype=torch.float16),),
+        ),
+    }
+    ctx = _make_gpu_ctx(cfg, kv_cache_config, torch.device("cpu"), forward_context)
+    assert ctx.mamba_group_ids == [0]
+    assert ctx.num_states == 5
+    ctx.initialize_from_forward_context(
+        kv_cache_config,
+        forward_context,
+        _COPY_FUNCS,
+        [torch.zeros(4, 8, dtype=torch.int32)],
+    )
+    assert ctx.state_group_indices.tolist() == [0, 0, 0, 0, 0]
+    assert ctx.state_conv_widths.tolist() == [4, 0, 4, 0, 12]
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
+def test_v2_align_ctx_binds_request_slot_tables_for_state_copies():
+    """V2 state copies may run steps after their batch (PP), so they must read
+    the per-request-slot tables; aligned state indices are computed for the
+    current batch and keep reading the gathered tables."""
+    cfg = _TestConfig(num_layers=1)
+    device = torch.device("cuda")
+    kv_cache_config = _make_kv_cache_config(cfg, ["layer_0"])
+    forward_context = {
+        "layer_0": _make_mock_attention(
+            torch.empty(cfg.num_blocks, cfg.conv_width, cfg.conv_inner_dim),
+            torch.empty(cfg.num_blocks, cfg.temporal_state_dim),
+        )
+    }
+    block_tables = BlockTables(
+        block_sizes=[cfg.block_size],
+        max_num_reqs=cfg.max_num_reqs,
+        max_num_batched_tokens=64,
+        max_num_blocks_per_group=[4],
+        device=device,
+    )
+
+    state = object.__new__(MambaHybridModelState)
+    state.cache_config = CacheConfig(mamba_cache_mode="align")
+    state._align_mode = True
+    state._use_flashinfer_replayssm = False
+    state._mamba_group_ids = []
+    state._mamba_spec = None
+    state._mamba_state_copy_funcs = _COPY_FUNCS
+    state.max_num_reqs = cfg.max_num_reqs
+    state.device = device
+    state.vllm_config = MagicMock()
+    state.vllm_config.compilation_config.static_forward_context = forward_context
+
+    state.initialize_kv_cache(kv_cache_config, block_tables)
+
+    ctx = state._mamba_ctx
+    assert ctx is not None and ctx.is_initialized
+    assert ctx.block_table_ptrs.tolist() == [
+        block_tables.block_tables[0].gpu.data_ptr()
+    ]
+    assert ctx.aligned_index_block_table_ptrs.tolist() == [
+        block_tables.input_block_tables[0].data_ptr()
+    ]
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
+@pytest.mark.parametrize(
+    ("num_spec", "cache_mode"), [(0, "none"), (3, "align")], ids=["stp", "mtp3"]
+)
+def test_replayssm_resumed_prefill_resets_history_before_decode(num_spec, cache_mode):
+    """A resumed prefill replaces the SSM state, so decode must ignore old rings."""
+    from vllm.v1.worker.replayssm_utils import (
+        ReplaySSMModelContext,
+        _postprocess_replayssm_kernel,
+    )
+
+    device = torch.device("cuda")
+    heads, dim, dstate = 2, 4, 8
+    tokens = num_spec + 1
+    ring_len = 16 + tokens
+    # Prefill has already written a complete state into live slot 1.
+    state = torch.full((3, heads, dim, dstate), 0.1, device=device)
+    x_ring = torch.ones(3, heads, ring_len, dim, dtype=torch.bfloat16, device=device)
+    B_ring = torch.ones(3, 1, ring_len, dstate, dtype=torch.bfloat16, device=device)
+    dt_ring = torch.full((3, heads, ring_len), 0.05, device=device)
+    starts = torch.full((3,), 7, dtype=torch.int32, device=device)
+    committed = torch.full((3,), 3, dtype=torch.int32, device=device)
+    cache = (state, x_ring, B_ring, dt_ring, starts, committed)
+    original_cache = tuple(tensor.clone() for tensor in cache)
+    mixer = SimpleNamespace(
+        kv_cache=[torch.empty(3, 1, device=device), state, x_ring, dt_ring, B_ring],
+        A=-torch.ones(heads, device=device),
+        _replayssm_ring_start=starts,
+        _replayssm_prev_num_accepted=committed,
+        replayssm_buffer_len=16,
+        mamba_config=MambaConfig(),
+    )
+    spec = MambaSpec(
+        block_size=128,
+        shapes=tuple(tensor.shape[1:] for tensor in mixer.kv_cache),
+        dtypes=tuple(tensor.dtype for tensor in mixer.kv_cache),
+        mamba_cache_mode=cache_mode,
+    )
+    replay = ReplaySSMModelContext.create(
+        [([mixer], spec, torch.tensor([[1]], dtype=torch.int32, device=device))],
+        max_num_reqs=1,
+    )
+    _postprocess_replayssm_kernel[(1, 1)](
+        None,
+        torch.tensor([8], dtype=torch.int32, device=device),  # num_scheduled
+        torch.tensor([64], dtype=torch.int32, device=device),  # num_computed
+        torch.ones(1, dtype=torch.int32, device=device),
+        torch.ones(1, dtype=torch.bool, device=device),  # is_prefilling
+        None,
+        replay.block_table_ptrs,
+        replay.ring_start_ptrs,
+        replay.num_committed_ptrs,
+        replay.src_slots_ptrs,
+        replay.dst_slots_ptrs,
+        replay.plan_ring_start,
+        replay.plan_flush_count,
+        replay.block_table_strides,
+        replay.num_layers,
+        MAX_NUM_REQS=1,
+        MAMBA_BLOCK_SIZE=128,
+        LOGICAL_WINDOW=16,
+        RING_BUFFER_LEN=ring_len,
+        PAD_SLOT_ID=0,
+        QUERY_METADATA_IS_CUMULATIVE=False,
+        NUM_COMPUTED_IS_POST_STEP=False,
+        HAS_IDX_MAPPING=False,
+        MATERIALIZE_PREFIXES=cache_mode == "align",
+        LIVE_COL_IS_ZERO=True,
+    )
+    assert starts.tolist() == [7, 0, 7]
+    assert committed.tolist() == [3, 0, 3]
+    for actual, original in zip(cache[:4], original_cache[:4]):
+        torch.testing.assert_close(actual, original, rtol=0, atol=0)
+    for actual, original in zip(cache[4:], original_cache[4:]):
+        torch.testing.assert_close(actual[[0, 2]], original[[0, 2]], rtol=0, atol=0)
+
+
+def test_gpu_context_ignores_auxiliary_cache_tensors() -> None:
+    device = torch.device("cpu")
+    config = _TestConfig(num_layers=1)
+    layer_names = ["layer_0"]
+    kv_cache_config = _make_kv_cache_config(config, layer_names)
+    conv_state = torch.empty(
+        config.num_blocks,
+        config.conv_width,
+        config.conv_inner_dim,
+        dtype=config.dtype,
+    )
+    temporal_state = torch.empty(
+        config.num_blocks, config.temporal_state_dim, dtype=config.dtype
+    )
+    attention = MagicMock(use_flashinfer_replayssm=False)
+    attention.kv_cache = [
+        conv_state,
+        temporal_state,
+        *(torch.empty(config.num_blocks, 1) for _ in range(4)),
+    ]
+    context = _make_gpu_ctx(config, kv_cache_config, device, {"layer_0": attention})
+
+    context.initialize_from_forward_context(
+        kv_cache_config,
+        {"layer_0": attention},
+        _COPY_FUNCS,
+        [torch.zeros(1, 1, dtype=torch.int32)],
+    )
+
+    assert context.is_initialized
+    assert context.state_base_addrs.tolist() == [
+        conv_state.data_ptr(),
+        temporal_state.data_ptr(),
+    ]
 
 
 def _run_gpu_postprocess(
@@ -376,7 +1095,7 @@ def _run_gpu_postprocess(
     *,
     kv_cache_config: KVCacheConfig,
     forward_context: dict[str, Any],
-    copy_funcs: tuple,
+    copy_funcs: MambaStateCopyFuncsByType,
     block_table: torch.Tensor,
     req_ids: list[str],
     num_accepted_tokens: list[int],
@@ -385,9 +1104,8 @@ def _run_gpu_postprocess(
     num_computed_tokens: list[int],
     num_draft_tokens: dict[str, int],
     device: torch.device,
-) -> None:
-    """Initialize the GPU context against `block_table`, run the fused
-    postprocess kernel for `req_ids`, and synchronize."""
+) -> torch.Tensor:
+    """Run the fused postprocess kernel and return normalized accepted counts."""
 
     def t(values):
         return torch.tensor(values, dtype=torch.int32, device=device)
@@ -395,15 +1113,36 @@ def _run_gpu_postprocess(
     gpu_ctx.initialize_from_forward_context(
         kv_cache_config, forward_context, copy_funcs, [block_table]
     )
-    gpu_ctx.run_fused_postprocess(
-        num_reqs=len(req_ids),
-        num_accepted_tokens_gpu=t(num_accepted_tokens),
-        mamba_state_idx_gpu=t(mamba_state_idx),
-        num_scheduled_tokens_gpu=t([num_scheduled_tokens[r] for r in req_ids]),
-        num_computed_tokens_gpu=t(num_computed_tokens),
-        num_draft_tokens_gpu=t([num_draft_tokens.get(r, 0) for r in req_ids]),
+    accepted_gpu = t(num_accepted_tokens)
+    num_reqs = len(req_ids)
+    gpu_ctx.num_accepted_tokens_snapshot[:num_reqs].copy_(accepted_gpu)
+    postprocess_mamba_fused_kernel[(num_reqs, gpu_ctx.num_states, _TEMPORAL_TILES)](
+        gpu_ctx.num_accepted_tokens_snapshot,
+        t(mamba_state_idx),
+        t([num_scheduled_tokens[r] for r in req_ids]),
+        t(num_computed_tokens),
+        t([num_draft_tokens.get(r, 0) for r in req_ids]),
+        gpu_ctx.block_table_ptrs,
+        gpu_ctx.block_table_stride_req,
+        gpu_ctx.state_base_addrs,
+        gpu_ctx.state_block_strides,
+        gpu_ctx.state_elem_sizes,
+        gpu_ctx.state_inner_sizes,
+        gpu_ctx.state_conv_widths,
+        gpu_ctx.state_group_indices,
+        gpu_ctx.state_dim_row_count,
+        gpu_ctx.state_dim_row_stride,
+        accepted_gpu,
+        None,  # idx_mapping: these decision arrays are already in req order
+        num_reqs,
+        block_size=gpu_ctx.block_size,
+        COPY_BLOCK_SIZE=1024,
+        CONV_STATE_DIM_FIRST=is_conv_state_dim_first(),
+        SKIP_TEMPORAL_STATE_COPY=gpu_ctx.replayssm is not None,
+        TEMPORAL_TILES=_TEMPORAL_TILES,
     )
     torch.accelerator.synchronize()
+    return accepted_gpu
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
@@ -419,8 +1158,7 @@ class TestPostprocessMambaFusedKernel:
         return _TestConfig()
 
     def test_matches_python_postprocess_mamba(self, device, test_config):
-        """
-        Golden test: GPU kernel produces identical results to Python impl.
+        """Golden test: GPU kernel produces identical results to Python impl.
 
         This test:
         1. Sets up identical initial state for both paths
@@ -494,7 +1232,7 @@ class TestPostprocessMambaFusedKernel:
         torch.accelerator.synchronize()
 
         # --- Run GPU path ---
-        gpu_ctx = _make_gpu_ctx(cfg, kv_cache_config, device)
+        gpu_ctx = _make_gpu_ctx(cfg, kv_cache_config, device, forward_context_gpu)
 
         num_reqs = len(req_ids)
         max_blocks = max(len(b) for b in block_ids_per_req)
@@ -505,7 +1243,7 @@ class TestPostprocessMambaFusedKernel:
             block_table_gpu[i, : len(block_ids)] = torch.tensor(
                 block_ids, dtype=torch.int32
             )
-        _run_gpu_postprocess(
+        accepted_gpu = _run_gpu_postprocess(
             gpu_ctx,
             kv_cache_config=kv_cache_config,
             forward_context=forward_context_gpu,
@@ -541,7 +1279,7 @@ class TestPostprocessMambaFusedKernel:
             device=device,
         )
         torch.testing.assert_close(
-            gpu_ctx.num_accepted_tokens_out[:num_reqs],
+            accepted_gpu[:num_reqs],
             expected_accepted,
             msg="num_accepted_tokens mismatch",
         )
@@ -582,7 +1320,7 @@ class TestPostprocessMambaFusedKernel:
 
         forward_context = {"layer_0": _make_mock_attention(conv_state, temporal_state)}
 
-        gpu_ctx = _make_gpu_ctx(cfg, kv_cache_config, device)
+        gpu_ctx = _make_gpu_ctx(cfg, kv_cache_config, device, forward_context)
 
         num_reqs = len(req_ids)
         block_table_gpu = torch.zeros(num_reqs, 8, dtype=torch.int32, device=device)
@@ -663,7 +1401,7 @@ class TestPostprocessMambaFusedKernel:
         torch.accelerator.synchronize()
 
         # Run GPU path
-        gpu_ctx = _make_gpu_ctx(cfg, kv_cache_config, device)
+        gpu_ctx = _make_gpu_ctx(cfg, kv_cache_config, device, forward_context_gpu)
 
         max_blocks_per_req = 8
         block_table_gpu = torch.zeros(
@@ -698,8 +1436,7 @@ class TestPostprocessMambaFusedKernel:
         )
 
     def test_block_table_with_realistic_stride(self, device, test_config):
-        """
-        Test kernel with realistic block table strides.
+        """Test kernel with realistic block table strides.
 
         In real usage, the block table is pre-allocated with shape
         [max_num_reqs, max_num_blocks_per_req] and then sliced to
@@ -769,7 +1506,7 @@ class TestPostprocessMambaFusedKernel:
         torch.accelerator.synchronize()
 
         # Run GPU path with REALISTIC block table stride
-        gpu_ctx = _make_gpu_ctx(cfg, kv_cache_config, device)
+        gpu_ctx = _make_gpu_ctx(cfg, kv_cache_config, device, forward_context_gpu)
 
         # KEY DIFFERENCE: Create a large block table like real code does
         # Real system has max_num_blocks_per_req >> blocks actually used
@@ -827,8 +1564,7 @@ class TestPostprocessMambaFusedKernel:
     def test_src_addr_equals_dst_addr_skips_copy_and_sets_accepted_to_1(
         self, device, test_config
     ):
-        """
-        Test the ``src_addr == dst_addr`` early-return path in
+        """Test the `src_addr == dst_addr` early-return path in
         postprocess_mamba_fused_kernel matches Python behavior.
 
         When src_addr == dst_addr (source and destination memory addresses are
@@ -907,13 +1643,13 @@ class TestPostprocessMambaFusedKernel:
         torch.accelerator.synchronize()
 
         # --- Run GPU path ---
-        gpu_ctx = _make_gpu_ctx(cfg, kv_cache_config, device)
+        gpu_ctx = _make_gpu_ctx(cfg, kv_cache_config, device, forward_context_gpu)
 
         num_reqs = len(req_ids)
         block_table_gpu = torch.zeros(num_reqs, 8, dtype=torch.int32, device=device)
         block_table_gpu[0, :8] = torch.tensor(block_ids_per_req[0], dtype=torch.int32)
 
-        _run_gpu_postprocess(
+        accepted_gpu = _run_gpu_postprocess(
             gpu_ctx,
             kv_cache_config=kv_cache_config,
             forward_context=forward_context_gpu,
@@ -963,7 +1699,7 @@ class TestPostprocessMambaFusedKernel:
             device=device,
         )
         torch.testing.assert_close(
-            gpu_ctx.num_accepted_tokens_out[:num_reqs],
+            accepted_gpu[:num_reqs],
             expected_accepted,
             msg="GPU num_accepted_tokens should match Python",
         )
@@ -971,8 +1707,7 @@ class TestPostprocessMambaFusedKernel:
     def test_same_block_idx_with_offset_copies_then_sets_accepted_to_1(
         self, device, test_config
     ):
-        """
-        Test the ``src_block_idx == dest_block_idx`` post-copy update in
+        """Test the `src_block_idx == dest_block_idx` post-copy update in
         postprocess_mamba_fused_kernel matches Python behavior.
 
         When src_block_idx == dest_block_idx but accept_token_bias > 0, both
@@ -1048,13 +1783,13 @@ class TestPostprocessMambaFusedKernel:
         torch.accelerator.synchronize()
 
         # --- Run GPU path ---
-        gpu_ctx = _make_gpu_ctx(cfg, kv_cache_config, device)
+        gpu_ctx = _make_gpu_ctx(cfg, kv_cache_config, device, forward_context_gpu)
 
         num_reqs = len(req_ids)
         block_table_gpu = torch.zeros(num_reqs, 8, dtype=torch.int32, device=device)
         block_table_gpu[0, :8] = torch.tensor(block_ids_per_req[0], dtype=torch.int32)
 
-        _run_gpu_postprocess(
+        accepted_gpu = _run_gpu_postprocess(
             gpu_ctx,
             kv_cache_config=kv_cache_config,
             forward_context=forward_context_gpu,
@@ -1072,12 +1807,27 @@ class TestPostprocessMambaFusedKernel:
         # --- Verify Python behavior (ground truth) ---
         dest_block_id = block_ids_per_req[0][1]  # dest_block_idx = 1
 
-        # Conv state should be modified (shifted copy within block)
-        conv_changed = not torch.allclose(
-            conv_state_py[dest_block_id], conv_state_orig[dest_block_id]
+        # This is an overlapping in-place left shift, so comparing only the
+        # Python and fused paths can hide the same memcpy race in both. Build
+        # the memmove result from the untouched snapshot and check each path
+        # independently.
+        expected_conv_state = conv_state_orig.clone()
+        expected_conv_state[dest_block_id, :-1].copy_(
+            conv_state_orig[dest_block_id, 1:]
         )
-        assert conv_changed, (
-            "Python: Conv state should be modified when accept_token_bias > 0"
+        torch.testing.assert_close(
+            conv_state_py,
+            expected_conv_state,
+            rtol=0,
+            atol=0,
+            msg="Python: overlapping conv copy should have memmove semantics",
+        )
+        torch.testing.assert_close(
+            conv_state_gpu,
+            expected_conv_state,
+            rtol=0,
+            atol=0,
+            msg="GPU: overlapping conv copy should have memmove semantics",
         )
 
         # Temporal state should be modified (copy from different block)
@@ -1112,7 +1862,7 @@ class TestPostprocessMambaFusedKernel:
             device=device,
         )
         torch.testing.assert_close(
-            gpu_ctx.num_accepted_tokens_out[:num_reqs],
+            accepted_gpu[:num_reqs],
             expected_accepted,
             msg="GPU num_accepted_tokens should match Python",
         )
@@ -1120,8 +1870,7 @@ class TestPostprocessMambaFusedKernel:
     def test_different_block_idx_copies_without_setting_accepted_to_1(
         self, device, test_config
     ):
-        """
-        Test that neither special-case path triggers when
+        """Test that neither special-case path triggers when
         src_block_idx != dest_block_idx, and GPU matches Python behavior.
 
         When copying between different blocks:
@@ -1129,8 +1878,8 @@ class TestPostprocessMambaFusedKernel:
         2. src_block_idx != dest_block_idx
 
         Therefore:
-        - The ``src_addr == dst_addr`` early-return does NOT trigger
-        - The ``src_block_idx == dest_block_idx`` post-copy update does NOT trigger
+        - The `src_addr == dst_addr` early-return does NOT trigger
+        - The `src_block_idx == dest_block_idx` post-copy update does NOT trigger
         - Copy happens normally
         - num_accepted_tokens remains UNCHANGED
 
@@ -1192,13 +1941,13 @@ class TestPostprocessMambaFusedKernel:
         torch.accelerator.synchronize()
 
         # --- Run GPU path ---
-        gpu_ctx = _make_gpu_ctx(cfg, kv_cache_config, device)
+        gpu_ctx = _make_gpu_ctx(cfg, kv_cache_config, device, forward_context_gpu)
 
         num_reqs = len(req_ids)
         block_table_gpu = torch.zeros(num_reqs, 8, dtype=torch.int32, device=device)
         block_table_gpu[0, :8] = torch.tensor(block_ids_per_req[0], dtype=torch.int32)
 
-        _run_gpu_postprocess(
+        accepted_gpu = _run_gpu_postprocess(
             gpu_ctx,
             kv_cache_config=kv_cache_config,
             forward_context=forward_context_gpu,
@@ -1245,7 +1994,7 @@ class TestPostprocessMambaFusedKernel:
             device=device,
         )
         torch.testing.assert_close(
-            gpu_ctx.num_accepted_tokens_out[:num_reqs],
+            accepted_gpu[:num_reqs],
             expected_accepted,
             msg="GPU num_accepted_tokens should match Python",
         )
@@ -1253,8 +2002,7 @@ class TestPostprocessMambaFusedKernel:
     def test_prefix_caching_shared_block_does_not_set_accepted_to_1(
         self, device, test_config
     ):
-        """
-        Regression test: with prefix caching, different logical block indices
+        """Regression test: with prefix caching, different logical block indices
         can map to the same physical block. The kernel must NOT set
         num_accepted_tokens to 1 in that case.
 
@@ -1325,12 +2073,12 @@ class TestPostprocessMambaFusedKernel:
         torch.accelerator.synchronize()
 
         # --- Run GPU path ---
-        gpu_ctx = _make_gpu_ctx(cfg, kv_cache_config, device)
+        gpu_ctx = _make_gpu_ctx(cfg, kv_cache_config, device, forward_context_gpu)
         num_reqs = len(req_ids)
         block_table_gpu = torch.zeros(num_reqs, 8, dtype=torch.int32, device=device)
         block_table_gpu[0, :8] = torch.tensor(block_ids_per_req[0], dtype=torch.int32)
 
-        _run_gpu_postprocess(
+        accepted_gpu = _run_gpu_postprocess(
             gpu_ctx,
             kv_cache_config=kv_cache_config,
             forward_context=forward_context_gpu,
@@ -1380,14 +2128,13 @@ class TestPostprocessMambaFusedKernel:
             device=device,
         )
         torch.testing.assert_close(
-            gpu_ctx.num_accepted_tokens_out[:num_reqs],
+            accepted_gpu[:num_reqs],
             expected_accepted,
             msg="GPU num_accepted_tokens should match Python (must NOT be 1)",
         )
 
     def test_prefix_caching_nonsequential_block_ids_boundary(self, device, test_config):
-        """
-        Regression test: non-sequential physical block IDs under prefix caching
+        """Regression test: non-sequential physical block IDs under prefix caching
         with the needs_copy boundary at exact equality.
 
         Under PC, the block allocator assigns physical block IDs in arbitrary
@@ -1479,7 +2226,7 @@ class TestPostprocessMambaFusedKernel:
         torch.accelerator.synchronize()
 
         # --- Run GPU path ---
-        gpu_ctx = _make_gpu_ctx(local_cfg, kv_cache_config, device)
+        gpu_ctx = _make_gpu_ctx(local_cfg, kv_cache_config, device, forward_context_gpu)
         num_reqs = len(req_ids)
         max_blocks = max(len(b) for b in block_ids_per_req)
         block_table_gpu = torch.zeros(
@@ -1490,7 +2237,7 @@ class TestPostprocessMambaFusedKernel:
                 block_ids, dtype=torch.int32
             )
 
-        _run_gpu_postprocess(
+        accepted_gpu = _run_gpu_postprocess(
             gpu_ctx,
             kv_cache_config=kv_cache_config,
             forward_context=forward_context_gpu,
@@ -1527,7 +2274,7 @@ class TestPostprocessMambaFusedKernel:
             device=device,
         )
         torch.testing.assert_close(
-            gpu_ctx.num_accepted_tokens_out[:num_reqs],
+            accepted_gpu[:num_reqs],
             expected_accepted,
             msg="num_accepted_tokens mismatch with non-sequential block IDs",
         )
@@ -1537,8 +2284,7 @@ class TestPostprocessMambaFusedKernel:
         assert input_batch_py.num_accepted_tokens_cpu[1] == num_accepted_tokens[1]
 
     def test_prefix_caching_mixed_shared_and_distinct_blocks(self, device, test_config):
-        """
-        Regression test: mixed batch under prefix caching where some requests
+        """Regression test: mixed batch under prefix caching where some requests
         have shared physical blocks (aliased) and others have distinct blocks,
         with the needs_copy boundary at various positions.
 
@@ -1633,7 +2379,7 @@ class TestPostprocessMambaFusedKernel:
         torch.accelerator.synchronize()
 
         # --- Run GPU path ---
-        gpu_ctx = _make_gpu_ctx(local_cfg, kv_cache_config, device)
+        gpu_ctx = _make_gpu_ctx(local_cfg, kv_cache_config, device, forward_context_gpu)
         num_reqs = len(req_ids)
         max_blocks = max(len(b) for b in block_ids_per_req)
         block_table_gpu = torch.zeros(
@@ -1644,7 +2390,7 @@ class TestPostprocessMambaFusedKernel:
                 block_ids, dtype=torch.int32
             )
 
-        _run_gpu_postprocess(
+        accepted_gpu = _run_gpu_postprocess(
             gpu_ctx,
             kv_cache_config=kv_cache_config,
             forward_context=forward_context_gpu,
@@ -1685,7 +2431,7 @@ class TestPostprocessMambaFusedKernel:
             device=device,
         )
         torch.testing.assert_close(
-            gpu_ctx.num_accepted_tokens_out[:num_reqs],
+            accepted_gpu[:num_reqs],
             expected_accepted,
             msg="num_accepted_tokens mismatch in mixed PC batch",
         )
@@ -1703,8 +2449,7 @@ class TestPostprocessMambaFusedKernel:
     def test_pc_aliased_blocks_skip_must_use_logical_idx_not_addr(
         self, device, test_config
     ):
-        """
-        Regression test for 6466ce0d vs 959ca0fd: the kernel's early-return
+        """Regression test for 6466ce0d vs 959ca0fd: the kernel's early-return
         guard must compare logical block indices, not physical addresses.
 
         Under prefix caching, different logical blocks (src_block_idx=0,
@@ -1787,12 +2532,12 @@ class TestPostprocessMambaFusedKernel:
         )
 
         # --- Run GPU path ---
-        gpu_ctx = _make_gpu_ctx(cfg, kv_cache_config, device)
+        gpu_ctx = _make_gpu_ctx(cfg, kv_cache_config, device, forward_context_gpu)
         num_reqs = len(req_ids)
         block_table_gpu = torch.zeros(num_reqs, 8, dtype=torch.int32, device=device)
         block_table_gpu[0, :8] = torch.tensor(block_ids_per_req[0], dtype=torch.int32)
 
-        _run_gpu_postprocess(
+        accepted_gpu = _run_gpu_postprocess(
             gpu_ctx,
             kv_cache_config=kv_cache_config,
             forward_context=forward_context_gpu,
@@ -1814,7 +2559,7 @@ class TestPostprocessMambaFusedKernel:
         # Old kernel (959ca0fd): `if src_addr == dst_addr` -> FAILS here (sets 1)
         # Fixed kernel (6466ce0d): `if src_block_idx == dest_block_idx and
         #   accept_token_bias == 0` -> PASSES (preserves 3)
-        kernel_accepted = gpu_ctx.num_accepted_tokens_out[0].item()
+        kernel_accepted = accepted_gpu[0].item()
         assert kernel_accepted == 3, (
             f"Kernel set num_accepted_tokens to {kernel_accepted} but expected 3. "
             f"The early-return guard likely compared physical addresses "
@@ -1836,11 +2581,10 @@ class TestPostprocessMambaFusedKernel:
         )
 
     def test_as_strided_temporal_copy_size(self, device, test_config):
-        """
-        Regression test for 240723d46: temporal copy_size must be
+        """Regression test for 240723d46: temporal copy_size must be
         inner_size * elem_size, not state_block_stride.
 
-        In production (gpu_model_runner.py), conv and temporal states share
+        In production (the model runner), conv and temporal states share
         a raw buffer via torch.as_strided where stride(0) equals
         page_size_bytes / elem_size — larger than either state's natural
         element count.  Using stride(0) as copy_size for temporal states
@@ -1875,7 +2619,7 @@ class TestPostprocessMambaFusedKernel:
         layer_names = ["layer_0"]
         kv_cache_config = _make_kv_cache_config(cfg, layer_names)
 
-        # --- Production-like packed layout (mirrors gpu_model_runner.py) ---
+        # --- Production-like packed layout (mirrors the model runner) ---
         conv_shape = (cfg.conv_width, cfg.conv_inner_dim)
         temporal_shape = (cfg.temporal_state_dim,)
         dtype = cfg.dtype
@@ -1945,12 +2689,12 @@ class TestPostprocessMambaFusedKernel:
         torch.accelerator.synchronize()
 
         # --- GPU fused kernel ---
-        gpu_ctx = _make_gpu_ctx(cfg, kv_cache_config, device)
+        gpu_ctx = _make_gpu_ctx(cfg, kv_cache_config, device, fwd_gpu)
         num_reqs = 1
         block_table = torch.zeros(num_reqs, 8, dtype=torch.int32, device=device)
         block_table[0, :8] = torch.tensor(block_ids_per_req[0], dtype=torch.int32)
 
-        _run_gpu_postprocess(
+        accepted_gpu = _run_gpu_postprocess(
             gpu_ctx,
             kv_cache_config=kv_cache_config,
             forward_context=fwd_gpu,
@@ -1989,28 +2733,24 @@ class TestPostprocessMambaFusedKernel:
             device=device,
         )
         torch.testing.assert_close(
-            gpu_ctx.num_accepted_tokens_out[:num_reqs],
+            accepted_gpu[:num_reqs],
             expected_accepted,
             msg="num_accepted_tokens mismatch",
         )
 
     def test_temporal_copy_with_bias_ge_2(self, device, test_config):
-        """
-        Coverage test for the temporal-state block-table stride arithmetic
-        when ``accept_token_bias >= 2``.
+        """Coverage test for the temporal-state block-table stride arithmetic
+        when `accept_token_bias >= 2`.
 
         The kernel computes, for temporal (non-conv) states::
 
             actual_src_block_idx = src_block_idx + accept_token_bias
             actual_src_block_id = block_table[req, actual_src_block_idx]
 
-        All prior regression tests exercise only ``bias == 1``, i.e. they
-        only ever read one slot ahead of ``src_block_idx`` in the block
-        table. An off-by-one (or missing scale) in the address computation
-        on line 143 of ``mamba_utils.py`` would be invisible to every
-        existing test but would silently read the wrong physical block on
-        any speculative-decode cycle that accepts multiple tokens across a
-        block boundary, feeding a stale hidden state forward one step.
+        A `bias == 1` case only reads one slot ahead of `src_block_idx`
+        in the block table. This test isolates the larger-stride case, where
+        an off-by-one would read the wrong physical block after multiple
+        tokens are accepted across a block boundary.
 
         Setup (block_size=16):
         - running   = 28 + 2 - 0 = 30
@@ -2023,8 +2763,7 @@ class TestPostprocessMambaFusedKernel:
 
         With identity block_ids = [0,1,2,3,...], an off-by-one that used
         bias=1 would copy from block_ids[2]=2 instead of block_ids[3]=3,
-        producing a clear state-value mismatch against the Python
-        reference.
+        producing a clear mismatch against the untouched snapshot.
         """
         cfg = test_config
         torch.manual_seed(7002)
@@ -2048,6 +2787,7 @@ class TestPostprocessMambaFusedKernel:
             fwd_py,
             fwd_gpu,
         ) = _make_dual_layer_state(cfg, device)
+        conv_state_orig = conv_state_py.clone()
         temporal_state_orig = temporal_state_py.clone()
 
         # --- Python reference ---
@@ -2074,12 +2814,12 @@ class TestPostprocessMambaFusedKernel:
         torch.accelerator.synchronize()
 
         # --- GPU fused kernel ---
-        gpu_ctx = _make_gpu_ctx(cfg, kv_cache_config, device)
+        gpu_ctx = _make_gpu_ctx(cfg, kv_cache_config, device, fwd_gpu)
         num_reqs = 1
         block_table = torch.zeros(num_reqs, 8, dtype=torch.int32, device=device)
         block_table[0, :8] = torch.tensor(block_ids_per_req[0], dtype=torch.int32)
 
-        _run_gpu_postprocess(
+        accepted_gpu = _run_gpu_postprocess(
             gpu_ctx,
             kv_cache_config=kv_cache_config,
             forward_context=fwd_gpu,
@@ -2094,12 +2834,22 @@ class TestPostprocessMambaFusedKernel:
             device=device,
         )
 
-        # --- Ground truth: Python must have sourced temporal from block 3 ---
+        # --- Ground truth from untouched snapshots ---
         actual_src_block_id = block_ids_per_req[0][3]  # == 3
         dest_block_id = block_ids_per_req[0][1]  # == 1
+        expected_conv_state = conv_state_orig.clone()
+        expected_conv_state[dest_block_id, :-2].copy_(
+            conv_state_orig[dest_block_id, 2:]
+        )
+        torch.testing.assert_close(conv_state_py, expected_conv_state, rtol=0, atol=0)
+        torch.testing.assert_close(conv_state_gpu, expected_conv_state, rtol=0, atol=0)
+
+        # Python must have sourced temporal from block 3.
         torch.testing.assert_close(
             temporal_state_py[dest_block_id],
             temporal_state_orig[actual_src_block_id],
+            rtol=0,
+            atol=0,
             msg=(
                 "Python reference did not copy from block_ids[src+bias]=3; "
                 "test preconditions are wrong"
@@ -2128,26 +2878,49 @@ class TestPostprocessMambaFusedKernel:
             device=device,
         )
         torch.testing.assert_close(
-            gpu_ctx.num_accepted_tokens_out[:num_reqs],
+            accepted_gpu[:num_reqs],
             expected_accepted,
             msg="num_accepted_tokens mismatch at accept_token_bias=2",
         )
 
-    def test_ds_conv_layout_bias_gt_0_byte_equal_to_sd(
-        self, device, test_config, monkeypatch
+    @pytest.mark.parametrize(
+        "same_physical_block", [True, False], ids=["same", "distinct"]
+    )
+    @pytest.mark.parametrize("accept_token_bias", [1, 2, 3])
+    @pytest.mark.parametrize(
+        "dtype",
+        [torch.float16, torch.float32, torch.float64],
+        ids=["fp16", "fp32", "fp64"],
+    )
+    def test_sd_and_ds_conv_layouts_match_snapshot(
+        self,
+        device,
+        test_config,
+        monkeypatch,
+        accept_token_bias,
+        same_physical_block,
+        dtype,
     ):
-        """DS conv postprocess should match SD when accept_token_bias > 0."""
+        """SD and DS copies should independently match memmove semantics."""
         from vllm.model_executor.layers.mamba import mamba_utils as model_mamba_utils
 
         cfg = test_config
+        cfg.dtype = dtype
         torch.manual_seed(38898)
 
         req_ids = ["req_0"]
-        num_computed_tokens = [30]
-        num_scheduled_tokens = {"req_0": 1}
+        # Keep new_num_computed on an aligned boundary while varying how far
+        # below it the running state starts. This makes the copy bias exactly
+        # ``accept_token_bias`` for each case. The 32 boundary keeps source and
+        # destination in logical block 1; the 64 boundary copies block 2 -> 3.
+        aligned_boundary = 32 if same_physical_block else 64
+        num_computed_tokens = [aligned_boundary - 2 * accept_token_bias]
+        num_scheduled_tokens = {"req_0": accept_token_bias}
         num_draft_tokens: dict[str, int] = {}
-        num_accepted_tokens = [2]  # Results in accept_token_bias = 1
-        mamba_state_idx = [1]  # src_block_idx = 1 = dest_block_idx
+        num_accepted_tokens = [accept_token_bias + 1]
+        dest_block_idx = aligned_boundary // cfg.block_size - 1
+        src_block_idx = dest_block_idx if same_physical_block else dest_block_idx - 1
+        mamba_state_idx = [src_block_idx]
         block_ids_per_req = [list(range(8))]
 
         layer_names = ["layer_0"]
@@ -2170,15 +2943,16 @@ class TestPostprocessMambaFusedKernel:
             cfg.num_blocks, cfg.temporal_state_dim, dtype=cfg.dtype, device=device
         )
 
-        # SD GPU path. Default layout is SD.
+        # SD GPU path.
+        monkeypatch.delenv("VLLM_SSM_CONV_STATE_LAYOUT", raising=False)
         model_mamba_utils.get_conv_state_layout.cache_clear()
         sd_conv = sd_source_conv.clone()
         sd_temporal = sd_source_temporal.clone()
         forward_context_sd = {
             "layer_0": _make_mock_attention(sd_conv, sd_temporal),
         }
-        gpu_ctx_sd = _make_gpu_ctx(cfg, kv_cache_config, device)
-        _run_gpu_postprocess(
+        gpu_ctx_sd = _make_gpu_ctx(cfg, kv_cache_config, device, forward_context_sd)
+        accepted_gpu_sd = _run_gpu_postprocess(
             gpu_ctx_sd,
             kv_cache_config=kv_cache_config,
             forward_context=forward_context_sd,
@@ -2194,9 +2968,32 @@ class TestPostprocessMambaFusedKernel:
         )
         torch.accelerator.synchronize()
 
-        # Sanity: SD path actually modified the state (copy was performed).
-        assert not torch.equal(sd_conv, sd_source_conv), (
-            "SD baseline did not modify conv state; test setup is wrong"
+        src_block_id = block_ids_per_req[0][src_block_idx]
+        dest_block_id = block_ids_per_req[0][dest_block_idx]
+        expected_conv = sd_source_conv.clone()
+        expected_conv[dest_block_id, :-accept_token_bias].copy_(
+            sd_source_conv[src_block_id, accept_token_bias:]
+        )
+        torch.testing.assert_close(
+            sd_conv,
+            expected_conv,
+            rtol=0,
+            atol=0,
+            msg="SD conv copy did not match the untouched source snapshot",
+        )
+
+        actual_temporal_src_idx = src_block_idx + accept_token_bias
+        actual_temporal_src_id = block_ids_per_req[0][actual_temporal_src_idx]
+        expected_temporal = sd_source_temporal.clone()
+        expected_temporal[dest_block_id].copy_(
+            sd_source_temporal[actual_temporal_src_id]
+        )
+        torch.testing.assert_close(
+            sd_temporal,
+            expected_temporal,
+            rtol=0,
+            atol=0,
+            msg="SD temporal copy did not match the untouched source snapshot",
         )
 
         # DS GPU path on the DS twin.
@@ -2208,8 +3005,8 @@ class TestPostprocessMambaFusedKernel:
             forward_context_ds = {
                 "layer_0": _make_mock_attention(ds_conv, ds_temporal),
             }
-            gpu_ctx_ds = _make_gpu_ctx(cfg, kv_cache_config, device)
-            _run_gpu_postprocess(
+            gpu_ctx_ds = _make_gpu_ctx(cfg, kv_cache_config, device, forward_context_ds)
+            accepted_gpu_ds = _run_gpu_postprocess(
                 gpu_ctx_ds,
                 kv_cache_config=kv_cache_config,
                 forward_context=forward_context_ds,
@@ -2228,22 +3025,39 @@ class TestPostprocessMambaFusedKernel:
             # Reset the lru cache so other tests see the default layout again.
             model_mamba_utils.get_conv_state_layout.cache_clear()
 
-        # DS bytes, un-permuted, should match the SD result.
+        # Validate DS independently against the snapshot; otherwise a shared
+        # SD/DS bug would remain invisible.
+        ds_conv_sd_layout = ds_conv.permute(0, 2, 1).contiguous()
         torch.testing.assert_close(
-            ds_conv.permute(0, 2, 1).contiguous(),
-            sd_conv,
-            msg=(
-                "DS conv post-kernel does not match SD baseline; the DS "
-                "row-loop in postprocess_mamba_fused_kernel is wrong."
-            ),
+            ds_conv_sd_layout,
+            expected_conv,
+            rtol=0,
+            atol=0,
+            msg="DS conv copy did not match the untouched source snapshot",
         )
         torch.testing.assert_close(
             ds_temporal,
-            sd_temporal,
-            msg="DS temporal state diverged from SD",
+            expected_temporal,
+            rtol=0,
+            atol=0,
+            msg="DS temporal copy did not match the untouched source snapshot",
+        )
+
+        expected_accepted = 1 if same_physical_block else accept_token_bias + 1
+        expected_accepted_tensor = torch.tensor(
+            [expected_accepted], dtype=torch.int32, device=device
         )
         torch.testing.assert_close(
-            gpu_ctx_ds.num_accepted_tokens_out[:num_reqs],
-            gpu_ctx_sd.num_accepted_tokens_out[:num_reqs],
-            msg="DS num_accepted_tokens diverged from SD",
+            accepted_gpu_sd[:num_reqs],
+            expected_accepted_tensor,
+            rtol=0,
+            atol=0,
+            msg="SD num_accepted_tokens result is wrong",
+        )
+        torch.testing.assert_close(
+            accepted_gpu_ds[:num_reqs],
+            expected_accepted_tensor,
+            rtol=0,
+            atol=0,
+            msg="DS num_accepted_tokens result is wrong",
         )

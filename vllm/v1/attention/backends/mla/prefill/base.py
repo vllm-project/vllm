@@ -49,12 +49,22 @@ class MLAPrefillBackend(ABC):
         raise NotImplementedError
 
     @classmethod
-    def supports_compute_capability(cls, device_capability: "DeviceCapability") -> bool:
+    def supports_compute_capability(
+        cls,
+        device_capability: "DeviceCapability | None",
+    ) -> bool:
         return True
 
     @classmethod
     def supports_dtype(cls, dtype: torch.dtype) -> bool:
         return dtype in cls.supported_dtypes
+
+    @classmethod
+    def supports_mla_dimensions(cls, mla_dimensions: MLADimensions) -> bool:
+        return (
+            not cls.supported_mla_dimensions
+            or mla_dimensions in cls.supported_mla_dimensions
+        )
 
     @classmethod
     def is_available(cls) -> bool:
@@ -66,19 +76,36 @@ class MLAPrefillBackend(ABC):
         pass. Overridden by backends that support it."""
         return False
 
+    def supports_out(self) -> bool:
+        """Whether `run_prefill_new_tokens` and `run_prefill_context_chunk` honor
+        a caller-provided `out` tensor of shape
+        `[num_tokens, num_heads, v_head_dim]`, writing the result into it in place
+        and returning it.
+
+        When True, callers may pass `out` and skip the post-hoc
+        slice/flatten/copy -- and, for context chunks, size the accumulating
+        partial before running any chunk. False for backends that ignore `out` or
+        emit a padded (`qk_head_dim`) output. Overridden by backends that support
+        it.
+        """
+        return False
+
     @classmethod
     def validate_configuration(
         cls,
-        device_capability: "DeviceCapability",
+        device_capability: "DeviceCapability | None",
         selector_config: "MLAPrefillSelectorConfig",
     ) -> list[str]:
         invalid_reasons: list[str] = []
 
         if not cls.supports_compute_capability(device_capability):
-            invalid_reasons.append(
-                f"compute capability {device_capability.major}."
-                f"{device_capability.minor} not supported"
-            )
+            if device_capability is None:
+                invalid_reasons.append("device capability not available")
+            else:
+                invalid_reasons.append(
+                    f"compute capability {device_capability.major}."
+                    f"{device_capability.minor} not supported"
+                )
 
         if not cls.supports_dtype(selector_config.dtype):
             invalid_reasons.append(f"dtype {selector_config.dtype} not supported")
@@ -86,15 +113,20 @@ class MLAPrefillBackend(ABC):
         if not cls.is_available():
             invalid_reasons.append("required dependencies not available")
 
-        if (
-            cls.supported_mla_dimensions
-            and selector_config.mla_dimensions not in cls.supported_mla_dimensions
-        ):
-            supported = ", ".join(str(dims) for dims in cls.supported_mla_dimensions)
-            invalid_reasons.append(
-                "Model does not have supported MLA dimensions "
-                f"(got {selector_config.mla_dimensions}; supported: {supported})"
+        mla_dimensions = selector_config.mla_dimensions
+        if not cls.supports_mla_dimensions(mla_dimensions):
+            reason = (
+                f"Model does not have supported MLA dimensions (got {mla_dimensions}"
             )
+            if (
+                cls.supported_mla_dimensions
+                and mla_dimensions not in cls.supported_mla_dimensions
+            ):
+                supported = ", ".join(
+                    str(dims) for dims in cls.supported_mla_dimensions
+                )
+                reason += f"; supported: {supported}"
+            invalid_reasons.append(reason + ")")
 
         return invalid_reasons
 
@@ -152,9 +184,10 @@ class MLAPrefillBackend(ABC):
     @abstractmethod
     def run_prefill_context_chunk(
         self,
-        chunk_idx: int,
+        chunk: "MLACommonPrefillMetadata.ContextChunk",
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
+        out: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         raise NotImplementedError

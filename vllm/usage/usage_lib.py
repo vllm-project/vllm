@@ -7,7 +7,7 @@ import logging
 import os
 import platform
 import time
-from enum import Enum
+from enum import StrEnum
 from pathlib import Path
 from threading import Thread
 from typing import Any
@@ -19,7 +19,6 @@ import requests
 import torch
 
 import vllm.envs as envs
-from vllm.connections import global_http_connection
 from vllm.logger import init_logger
 from vllm.utils.platform_utils import cuda_get_device_properties
 from vllm.version import __version__ as VLLM_VERSION
@@ -70,7 +69,7 @@ def is_usage_stats_enabled():
 
 
 def _get_current_timestamp_ns() -> int:
-    return int(datetime.datetime.now(datetime.timezone.utc).timestamp() * 1e9)
+    return int(datetime.datetime.now(datetime.UTC).timestamp() * 1e9)
 
 
 def _detect_cloud_provider() -> str:
@@ -109,7 +108,7 @@ def _detect_cloud_provider() -> str:
     return "UNKNOWN"
 
 
-class UsageContext(str, Enum):
+class UsageContext(StrEnum):
     UNKNOWN_CONTEXT = "UNKNOWN_CONTEXT"
     LLM_CLASS = "LLM_CLASS"
     API_SERVER = "API_SERVER"
@@ -265,8 +264,8 @@ class UsageMessage:
 
     def _send_to_server(self, data: dict[str, Any]) -> None:
         try:
-            global_http_client = global_http_connection.get_sync_client()
-            global_http_client.post(_USAGE_STATS_SERVER, json=data)
+            with requests.Session() as client:
+                client.post(_USAGE_STATS_SERVER, json=data)
         except requests.exceptions.RequestException:
             # silently ignore unless we are using debug log
             logging.debug("Failed to send usage data to server")

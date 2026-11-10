@@ -1,20 +1,26 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{Value, json};
 
+use crate::EffortValue;
 use crate::event::{AssistantContentBlock, AssistantToolCall};
 use crate::request::{
     ChatContent, ChatContentPart, ChatMessage, ChatRequest, ChatTool, ChatToolChoice,
-    GenerationPromptMode, ReasoningEffort,
+    GenerationPromptMode, ResolvedToolContext,
 };
 
 /// Options for constructing a [`ChatRequest`] from a fixture file.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct FixtureRequestOptions {
-    /// Whether to set the template kwarg `[enable_]thinking=true`.
-    pub enable_thinking: bool,
+    /// Optional thinking toggle applied only when the fixture does not already
+    /// set `thinking` / `enable_thinking` in [`FixtureRequest::template_kwargs`].
+    pub enable_thinking: Option<bool>,
     /// Whether fixtures ending in an assistant message should omit the
     /// trailing generation prompt.
     pub no_generation_prompt_when_last_assistant: bool,
@@ -42,7 +48,16 @@ pub(crate) struct FixtureRequest {
     tools: Vec<FixtureTool>,
     messages: Vec<FixtureMessage>,
     add_generation_prompt: Option<bool>,
-    reasoning_effort: Option<ReasoningEffort>,
+    reasoning_effort: Option<EffortValue>,
+    /// Standard response format passed to model-specific renderers.
+    #[serde(default)]
+    response_format: Option<Value>,
+    /// Extra chat-template kwargs (thinking, preserve_thinking, …).
+    #[serde(default)]
+    template_kwargs: HashMap<String, Value>,
+    /// When omitted, defaults to `auto` if tools are present, otherwise `none`.
+    #[serde(default)]
+    tool_choice: Option<ChatToolChoice>,
 }
 
 impl FixtureFile {
@@ -54,6 +69,9 @@ impl FixtureFile {
                 messages,
                 add_generation_prompt: None,
                 reasoning_effort: None,
+                response_format: None,
+                template_kwargs: HashMap::new(),
+                tool_choice: None,
             },
         }
     }
@@ -66,6 +84,7 @@ pub(crate) enum FixtureMessage {
         content: FixtureContent,
     },
     Developer {
+        #[serde(default)]
         content: FixtureContent,
         #[serde(default)]
         tools: Vec<FixtureTool>,
@@ -95,11 +114,19 @@ pub(crate) enum FixtureContent {
     Parts(Vec<FixtureContentPart>),
 }
 
+impl Default for FixtureContent {
+    fn default() -> Self {
+        Self::Text(String::new())
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum FixtureContentPart {
     Text { text: String },
     ImageUrl { image_url: String },
+    InputAudio { data: String },
+    AudioUrl { audio_url: String },
 }
 
 #[derive(Debug, Deserialize)]
@@ -131,20 +158,21 @@ struct FixtureToolCallFunction {
 
 impl FixtureRequest {
     fn into_chat_request(self, options: FixtureRequestOptions) -> ChatRequest {
+        let tools = to_chat_tools(&self.tools);
+
+        let messages = self
+            .messages
+            .into_iter()
+            .enumerate()
+            .map(|(index, message)| fixture_message_to_chat_message(index, message))
+            .collect::<Vec<_>>();
+        let tool_context = ResolvedToolContext::new(&messages, tools, self.tool_choice, true)
+            .expect("fixture tool context should resolve");
+
         let mut request = ChatRequest {
             request_id: "renderer-fixture".to_string(),
-            messages: self
-                .messages
-                .into_iter()
-                .enumerate()
-                .map(|(index, message)| fixture_message_to_chat_message(index, message))
-                .collect(),
-            tools: to_chat_tools(&self.tools),
-            tool_choice: if self.tools.is_empty() {
-                ChatToolChoice::None
-            } else {
-                ChatToolChoice::Auto
-            },
+            messages,
+            tool_context,
             ..ChatRequest::for_test()
         };
 
@@ -157,9 +185,15 @@ impl FixtureRequest {
             request.chat_options.generation_prompt_mode = GenerationPromptMode::NoGenerationPrompt;
         }
         request.chat_options.reasoning_effort = self.reasoning_effort;
-        if options.enable_thinking {
-            for key in ["thinking", "enable_thinking"] {
-                request.chat_options.template_kwargs.insert(key.to_string(), Value::Bool(true));
+        request.chat_options.response_format = self.response_format;
+        request.chat_options.template_kwargs.extend(self.template_kwargs);
+
+        // Options supply a default thinking toggle only when the fixture did not.
+        if let Some(thinking) = options.enable_thinking {
+            let kwargs = &mut request.chat_options.template_kwargs;
+            if !kwargs.contains_key("thinking") && !kwargs.contains_key("enable_thinking") {
+                kwargs.insert("thinking".to_string(), Value::Bool(thinking));
+                kwargs.insert("enable_thinking".to_string(), Value::Bool(thinking));
             }
         }
 
@@ -223,6 +257,15 @@ fn to_chat_content(content: FixtureContent) -> ChatContent {
                     FixtureContentPart::ImageUrl { image_url } => {
                         ChatContentPart::image_url(image_url)
                     }
+                    FixtureContentPart::InputAudio { data } => ChatContentPart::InputAudio {
+                        data,
+                        format: None,
+                        uuid: None,
+                    },
+                    FixtureContentPart::AudioUrl { audio_url } => ChatContentPart::AudioUrl {
+                        audio_url,
+                        uuid: None,
+                    },
                 })
                 .collect(),
         ),
@@ -237,6 +280,71 @@ fn to_chat_tools(tools: &[FixtureTool]) -> Vec<ChatTool> {
             description: tool.function.description.clone(),
             parameters: tool.function.parameters.clone(),
             strict: tool.function.strict,
+            defer_loading: None,
         })
         .collect()
+}
+
+/// One tool with a description, optionally deferred.
+pub(crate) fn tool(
+    name: &str,
+    description: &str,
+    parameters: Value,
+    defer_loading: bool,
+) -> ChatTool {
+    ChatTool {
+        name: name.to_string(),
+        description: Some(description.to_string()),
+        parameters,
+        strict: None,
+        defer_loading: defer_loading.then_some(true),
+    }
+}
+
+/// A DeepSeek tool search turn with thinking off: `tool_search` and two
+/// deferred tools, and a search result referencing `references`, followed by
+/// user text. Matches the Messages request of the deepseek-recipe goldens.
+pub(crate) fn tool_search_request(references: &[&str]) -> ChatRequest {
+    let messages = vec![
+        ChatMessage::user("weather in Paris?"),
+        ChatMessage::assistant_blocks(vec![AssistantContentBlock::ToolCall(AssistantToolCall {
+            id: "call_1".to_string(),
+            name: "tool_search".to_string(),
+            arguments: r#"{"query": "weather"}"#.to_string(),
+        })]),
+        ChatMessage::tool_response(
+            references
+                .iter()
+                .map(|name| ChatContentPart::tool_reference(*name))
+                .collect::<Vec<_>>(),
+            "call_1",
+        ),
+        ChatMessage::user("go on"),
+    ];
+    let tools = vec![
+        tool(
+            "tool_search",
+            "Search tools",
+            json!({"type": "object", "properties": {"query": {"type": "string"}}}),
+            false,
+        ),
+        tool(
+            "get_weather",
+            "Weather",
+            json!({"type": "object", "properties": {"city": {"type": "string"}}}),
+            true,
+        ),
+        tool("get_time", "Time", json!({"type": "object"}), true),
+    ];
+    let tool_context = ResolvedToolContext::new(&messages, tools, None, true).unwrap();
+    let mut request = ChatRequest {
+        messages,
+        tool_context,
+        ..ChatRequest::for_test()
+    };
+    request
+        .chat_options
+        .template_kwargs
+        .insert("thinking".into(), Value::Bool(false));
+    request
 }

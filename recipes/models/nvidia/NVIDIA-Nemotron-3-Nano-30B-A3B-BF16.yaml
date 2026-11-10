@@ -1,0 +1,233 @@
+meta:
+  title: "NVIDIA Nemotron-3-Nano-30B-A3B"
+  slug: "nemotron-3-nano-30b-a3b"
+  provider: "NVIDIA"
+  description: "NVIDIA Nemotron-3-Nano Mamba-hybrid MoE (30B total / ~3B active) with BF16 and FP8 variants"
+  date_added: 2026-01-08
+  date_updated: 2026-09-10
+  tasks:
+    - text
+  related_recipes:
+    - nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-BF16
+  hardware:
+    h100: verified
+    h200: verified
+    arc_pro_b60: verified
+    arc_pro_b70: verified
+
+model:
+  model_id: "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16"
+  min_vllm_version: "0.17.0"
+  architecture: moe
+  parameter_count: "30B"
+  active_parameters: "3B"
+  context_length: 262144
+  base_args:
+    - "--trust-remote-code"
+    - "--async-scheduling"
+  base_env: {}
+
+features:
+  tool_calling:
+    description: "Qwen3 Coder tool-call parser with automatic tool choice"
+    args:
+      - "--enable-auto-tool-choice"
+      - "--tool-call-parser"
+      - "qwen3_coder"
+  reasoning:
+    description: "Custom Nano v3 reasoning parser (download plugin: nano_v3_reasoning_parser.py)"
+    args:
+      - "--reasoning-parser-plugin"
+      - "nano_v3_reasoning_parser.py"
+      - "--reasoning-parser"
+      - "nano_v3"
+  long_context:
+    description: "Raise the context window from the default 256K to the model's full 1M tokens. Needs a large KV-cache budget — lower --max-model-len if you are memory-constrained."
+    args:
+      - "--max-model-len"
+      - "1048576"
+    env:
+      VLLM_ALLOW_LONG_MAX_MODEL_LEN: "1"
+
+opt_in_features:
+  - long_context
+
+variants:
+  default:
+    precision: bf16
+    vram_minimum_gb: 72
+    description: "BF16 weights"
+    extra_args:
+      - "--kv-cache-dtype"
+      - "auto"
+
+  fp8:
+    model_id: "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-FP8"
+    precision: fp8
+    vram_minimum_gb: 35
+    description: "FP8 weights + FP8 KV cache"
+    extra_args:
+      - "--kv-cache-dtype"
+      - "fp8"
+    hardware_overrides:
+      nvidia:
+        extra_args:
+          - "--moe-backend"
+          - "flashinfer_cutlass"
+
+compatible_strategies:
+  - single_node_tp
+  - multi_node_tp
+  - multi_node_tp_pp
+  - multi_node_tep
+  - multi_node_dep
+
+
+kv_offload_support:
+  offloading_cpu: verified
+  offloading_fs: verified
+
+hardware_overrides:
+  xpu:
+    extra_args:
+      - "--enforce-eager"
+
+strategy_overrides: {}
+
+guide: |
+  ## Overview
+
+  NVIDIA Nemotron-3-Nano-30B-A3B is a hybrid-Mamba MoE model (30B total, ~3B active) with
+  FP8 and BF16 variants. It supports DGX Spark and Jetson Thor in addition to standard
+  Hopper/Blackwell servers.
+
+  ## Prerequisites
+
+  - Hardware: 1x H100/H200 or comparable; DGX Spark, Jetson Thor, and Intel Arc Pro B60/B70 supported
+  - vLLM >= 0.17.0 (0.28.0 recommended for full support)
+  - Docker with NVIDIA Container Toolkit (recommended)
+
+  ### Pull Docker Image
+
+  ```bash
+  docker pull --platform linux/amd64 vllm/vllm-openai:v0.28.0
+  docker tag vllm/vllm-openai:v0.28.0 vllm/vllm-openai:deploy
+  ```
+
+  DGX Spark users can build from source (see README) or use the NGC image:
+
+  ```bash
+  docker pull nvcr.io/nvidia/vllm:25.12.post1-py3
+  ```
+
+  Jetson Thor:
+
+  ```bash
+  docker pull ghcr.io/nvidia-ai-iot/vllm:latest-jetson-thor
+  ```
+
+  Intel XPU (B60 / B70):
+
+  ```bash
+  docker pull vllm/vllm-openai-xpu:latest
+  ```
+
+  ## Launch commands
+
+  FP8 with FlashInfer MoE backend (Blackwell/Hopper):
+
+  ```bash
+  vllm serve nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-FP8 \
+    --trust-remote-code \
+    --async-scheduling \
+    --kv-cache-dtype fp8 \
+    --tensor-parallel-size 1 \
+    --moe-backend flashinfer_cutlass
+  ```
+
+  BF16 (with reasoning + tool parsers — typical for Spark/Thor):
+
+  ```bash
+  wget https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/resolve/main/nano_v3_reasoning_parser.py
+
+  vllm serve nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 \
+    --max-num-seqs 8 \
+    --tensor-parallel-size 1 \
+    --max-model-len 262144 \
+    --trust-remote-code \
+    --enable-auto-tool-choice \
+    --tool-call-parser qwen3_coder \
+    --reasoning-parser-plugin nano_v3_reasoning_parser.py \
+    --reasoning-parser nano_v3
+  ```
+
+  ### Intel XPU (B60, B70)
+
+  Validated on 4× Intel Arc Pro B60 / B70 (B60 24 GB, B70 32 GB per card) with the
+  official vLLM XPU image `vllm/vllm-openai-xpu:latest`.
+
+  FP8:
+  ```bash
+  docker run --device /dev/dri \
+    -v /dev/dri/by-path:/dev/dri/by-path --shm-size=16g \
+    --privileged --ipc=host -p 8000:8000 \
+    -v ~/.cache/huggingface:/root/.cache/huggingface \
+    vllm/vllm-openai-xpu:latest \
+    nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-FP8 \
+    --trust-remote-code \
+    --async-scheduling \
+    --kv-cache-dtype fp8 \
+    --tensor-parallel-size 4 \
+    --enforce-eager \
+    --max-model-len 8192
+  ```
+
+  BF16:
+  ```bash
+  docker run --device /dev/dri \
+    -v /dev/dri/by-path:/dev/dri/by-path --shm-size=16g \
+    --privileged --ipc=host -p 8000:8000 \
+    -v ~/.cache/huggingface:/root/.cache/huggingface \
+    vllm/vllm-openai-xpu:latest \
+    nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 \
+    --trust-remote-code \
+    --async-scheduling \
+    --kv-cache-dtype auto \
+    --tensor-parallel-size 4 \
+    --enforce-eager \
+    --enable-auto-tool-choice \
+    --tool-call-parser qwen3_coder \
+    --reasoning-parser-plugin nano_v3_reasoning_parser.py \
+    --reasoning-parser nano_v3 \
+    --max-model-len 8192
+  ```
+
+  Key flags:
+  - `kv-cache-dtype fp8` for FP8 variant, `auto` for BF16
+  - `async-scheduling` reduces host overhead between decode steps
+  - `mamba-ssm-cache-dtype float32` for best accuracy, `float16` for speed
+  - `max-num-seqs` cap to match client concurrency for lower per-user latency
+
+  ## Benchmarking
+
+  ```bash
+  vllm bench serve \
+    --model nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-FP8 \
+    --trust-remote-code \
+    --dataset-name random \
+    --random-input-len 1024 --random-output-len 1024 \
+    --num-warmups 20 \
+    --ignore-eos \
+    --max-concurrency 1024 \
+    --num-prompts 2048
+  ```
+
+  ## Troubleshooting
+
+  - Use `--kv-cache-dtype fp8` only with the FP8 checkpoint.
+  - Balance TP and `--max-num-seqs` for throughput vs. per-user latency.
+
+  ## References
+
+  - [Nemotron-3-Nano-30B-A3B-BF16](https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16)
+  - [Nemotron-3-Nano-30B-A3B-FP8](https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-FP8)

@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Ensures all fields in a config dataclass have default values
+"""Ensures all fields in a config dataclass have default values
 and that each field has a docstring.
 """
 
@@ -14,13 +13,11 @@ import regex as re
 
 
 def get_attr_docs(cls_node: ast.ClassDef) -> dict[str, str]:
-    """
-    Get any docstrings placed after attribute assignments in a class body.
+    """Get any docstrings placed after attribute assignments in a class body.
 
     Adapted from https://davidism.com/attribute-docstrings/
     https://davidism.com/mit-license/
     """
-
     out = {}
 
     # Consider each pair of nodes.

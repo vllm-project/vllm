@@ -12,7 +12,7 @@ import pytest
 import pytest_asyncio
 import requests
 
-from tests.utils import ROCM_ENV_OVERRIDES, RemoteOpenAIServer
+from tests.utils import RemoteOpenAIServer
 from tests.v1.utils import check_request_balancing
 from vllm.platforms import current_platform
 
@@ -184,9 +184,11 @@ class MultinodeInternalLBServerManager:
                         self.model_name,
                         sargs,
                         auto_port=False,
+                        max_wait_seconds=int(
+                            os.getenv("VLLM_ENGINE_READY_TIMEOUT_S", "480")
+                        ),
                         env_dict={
                             "VLLM_SERVER_DEV_MODE": "1",
-                            **ROCM_ENV_OVERRIDES,
                             current_platform.device_control_env_var: ",".join(
                                 str(current_platform.device_id_to_physical_device_id(i))
                                 for i in range(r, r + gpus_per_node)
@@ -259,7 +261,6 @@ class APIOnlyServerManager:
 
     def __enter__(self) -> list[tuple[RemoteOpenAIServer, list[str]]]:
         """Start API-only server and headless engines server."""
-
         # Start API-only server (Node 0) - no engines, only API server
         api_server_args = self.base_server_args.copy()
         api_server_args.extend(
@@ -308,7 +309,6 @@ class APIOnlyServerManager:
                     auto_port=False,
                     env_dict={
                         "VLLM_SERVER_DEV_MODE": "1",
-                        **ROCM_ENV_OVERRIDES,
                         # No GPUs needed for API-only server
                     },
                 )
@@ -329,7 +329,6 @@ class APIOnlyServerManager:
                     engines_server_args,
                     auto_port=False,
                     env_dict={
-                        **ROCM_ENV_OVERRIDES,
                         current_platform.device_control_env_var: ",".join(
                             str(current_platform.device_id_to_physical_device_id(i))
                             for i in range(self.dp_size * self.tp_size)
@@ -607,7 +606,6 @@ async def test_api_only_multinode_dp_completion(
     model_name: str,
 ) -> None:
     """Test API-only server with all engines on separate headless server."""
-
     # Test single request
     result = await _make_completion_request(api_only_client, model_name)
     assert result is not None

@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Set up this example by starting a vLLM OpenAI-compatible server.
+"""Set up this example by starting a vLLM OpenAI-compatible server.
 Reasoning models can be used through the Responses API as seen here
 https://platform.openai.com/docs/api-reference/responses
 For example:

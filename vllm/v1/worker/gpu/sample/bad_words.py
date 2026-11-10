@@ -1,49 +1,54 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import numpy as np
+from typing import TYPE_CHECKING
+
 import torch
 
+import vllm.envs as envs
 from vllm.sampling_params import SamplingParams
 from vllm.triton_utils import tl, triton
 from vllm.v1.worker.gpu.buffer_utils import StagedWriteTensor, UvaBackedTensor
-from vllm.v1.worker.gpu.states import RequestState
+from vllm.v1.worker.gpu.sample.logits_processor.interface import (
+    LogitsContext,
+    LogitsProcessor,
+    LogitsProcRequestState,
+)
 
-MAX_BAD_WORDS_TOTAL_TOKENS = 1024  # Max total tokens for all bad words per request
-MAX_NUM_BAD_WORDS = 128  # Max number of bad words per request
+if TYPE_CHECKING:
+    from vllm.config import VllmConfig
 
 
-class BadWordsState:
-    def __init__(self, req_states: RequestState):
+class BadWordsState(LogitsProcessor):
+    def __init__(self, vllm_config: "VllmConfig", req_states: LogitsProcRequestState):
         self.req_states = req_states
-        self.max_num_reqs = req_states.max_num_reqs
-        self.device = req_states.device
+        max_num_reqs = req_states.max_num_reqs
+        device = req_states.device
 
-        # flattened bad word tokens: [max_num_reqs, MAX_BAD_WORDS_TOTAL_TOKENS]
+        max_total_tokens = envs.VLLM_MAX_BAD_WORDS_TOTAL_TOKENS
+        max_num_bad_words = envs.VLLM_MAX_NUM_BAD_WORDS
+        # flattened bad word tokens: [max_num_reqs, VLLM_MAX_BAD_WORDS_TOTAL_TOKENS]
         self.bad_word_token_ids = StagedWriteTensor(
-            (self.max_num_reqs, MAX_BAD_WORDS_TOTAL_TOKENS),
-            dtype=torch.int32,
-            device=self.device,
+            (max_num_reqs, max_total_tokens), dtype=torch.int32, device=device
         )
-        # cumulative offsets of bad words: [max_num_reqs, MAX_NUM_BAD_WORDS + 1]
+        # cumulative offsets of bad words: [max_num_reqs, VLLM_MAX_NUM_BAD_WORDS + 1]
         self.bad_word_offsets = StagedWriteTensor(
-            (self.max_num_reqs, MAX_NUM_BAD_WORDS + 1),
-            dtype=torch.int32,
-            device=self.device,
+            (max_num_reqs, max_num_bad_words + 1), dtype=torch.int32, device=device
         )
         # number of bad words per request
-        self.num_bad_words = UvaBackedTensor(self.max_num_reqs, dtype=torch.int32)
+        self.num_bad_words = UvaBackedTensor(max_num_reqs, dtype=torch.int32)
 
-    def add_request(self, req_idx: int, sampling_params: SamplingParams) -> None:
+    def add_request(self, req_idx: int, sampling_params: SamplingParams) -> bool:
         bad_words_token_ids = sampling_params.bad_words_token_ids
         if not bad_words_token_ids:
             self.num_bad_words.np[req_idx] = 0
-            return
+            return False
 
         num_bad_words = len(bad_words_token_ids)
-        if num_bad_words > MAX_NUM_BAD_WORDS:
+        max_num_bad_words = envs.VLLM_MAX_NUM_BAD_WORDS
+        if num_bad_words > max_num_bad_words:
             raise ValueError(
                 f"Too many bad words: {num_bad_words}. "
-                f"The max number is {MAX_NUM_BAD_WORDS}."
+                f"The max number is {max_num_bad_words}."
             )
 
         # Flatten bad words and compute offsets
@@ -53,48 +58,44 @@ class BadWordsState:
             flattened_tokens.extend(bad_word)
             offsets.append(len(flattened_tokens))
 
-        if len(flattened_tokens) > MAX_BAD_WORDS_TOTAL_TOKENS:
+        max_total_tokens = envs.VLLM_MAX_BAD_WORDS_TOTAL_TOKENS
+        if len(flattened_tokens) > max_total_tokens:
             raise ValueError(
                 f"Too many total bad word tokens: {len(flattened_tokens)}. "
-                f"The max is {MAX_BAD_WORDS_TOTAL_TOKENS}."
+                f"The max is {max_total_tokens}."
             )
 
         # Stage writes
         self.bad_word_token_ids.stage_write(req_idx, 0, flattened_tokens)
         self.bad_word_offsets.stage_write(req_idx, 0, offsets)
         self.num_bad_words.np[req_idx] = num_bad_words
+        return True
 
     def apply_staged_writes(self) -> None:
         self.num_bad_words.copy_to_uva()
         self.bad_word_token_ids.apply_write()
         self.bad_word_offsets.apply_write()
 
-    def apply_bad_words(
-        self,
-        logits: torch.Tensor,
-        expanded_idx_mapping: torch.Tensor,
-        idx_mapping_np: np.ndarray,
-        input_ids: torch.Tensor,
-        expanded_local_pos: torch.Tensor,
-    ) -> None:
-        max_num_bad_words = int(self.num_bad_words.np[idx_mapping_np].max())
+    def apply(self, logits: torch.Tensor, ctx: LogitsContext) -> torch.Tensor:
+        max_num_bad_words = int(self.num_bad_words.np[ctx.idx_mapping_np].max())
         if max_num_bad_words == 0:
             # No request uses bad words. Skip the kernel launch.
-            return
+            return logits
 
         apply_bad_words(
             logits,
-            expanded_idx_mapping,
+            ctx.expanded_idx_mapping,
             self.bad_word_token_ids.gpu,
             self.bad_word_offsets.gpu,
             self.num_bad_words.gpu,
             self.req_states.all_token_ids.gpu,
             self.req_states.prompt_len.gpu,
             self.req_states.total_len.gpu,
-            input_ids,
-            expanded_local_pos,
+            ctx.input_ids,
+            ctx.expanded_local_pos,
             max_num_bad_words,
         )
+        return logits
 
 
 @triton.jit
@@ -151,8 +152,10 @@ def _bad_words_kernel(
 
         from_spec_input = actual_pos >= output_len
         if from_spec_input:
+            # input_ids at local position 0 is the last committed token;
+            # draft tokens start at local position 1.
             spec_offset = actual_pos - output_len
-            actual = tl.load(input_ids_ptr + cur_req_first_pos + spec_offset)
+            actual = tl.load(input_ids_ptr + cur_req_first_pos + spec_offset + 1)
         else:
             actual = tl.load(output_base + actual_pos)
 

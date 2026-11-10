@@ -3,22 +3,21 @@
 """MSA (SM100/Blackwell) indexer impl for MiniMax M3.
 
 Both sides write block scores into one unified token-major buffer
-``[total_q, H, max_k_tiles]``, then a single ``fmha_sm100.sparse_topk_select``
-selects the top-k blocks for the whole batch (decode ``[:nd]`` + prefill
-``[nd:]``) into the shared ``topk_indices_buffer``. It bounds each row by its
+`[total_q, H, max_k_tiles]`, then a single `fmha_sm100.sparse_topk_select`
+selects the top-k blocks for the whole batch (decode `[:nd]` + prefill
+`[nd:]`) into the shared `topk_indices_buffer`. It bounds each row by its
 causal page count and force-includes the init/local blocks, so the unwritten
-tail of the buffer is pre-filled with ``-inf``.
+tail of the buffer is pre-filled with `-inf`.
 
-Prefill scores with ``fmha_sm100``'s score-only (``OnlyScore``) path (much faster
+Prefill scores with `fmha_sm100`'s score-only (`OnlyScore`) path (much faster
 than Triton for the wide prefill score, benchmarked ~3-5x), writing its
-``max_score`` straight into the buffer's prefill region (stride-aware, no copy).
+`max_score` straight into the buffer's prefill region (stride-aware, no copy).
 
-Decode scores with the Triton split-K ``minimax_m3_index_decode_score`` (a
-purpose-built vector x matrix score, no wasted tensor-core tiles, 256-way
-split-K, cudagraph-safe by shape-constant grids), writing into the decode
-region. Its tuning heuristics are kept; only the top-k is shared with prefill.
+Decode scores with CuteDSL when the flattened query tile is supported and fall
+back to Triton otherwise, writing into the decode region. Only the top-k is
+shared with prefill.
 
-``fmha_sm100`` imports are function-local so this module is import-safe on
+`fmha_sm100` imports are function-local so this module is import-safe on
 AMD / non-SM100.
 """
 
@@ -39,6 +38,7 @@ from vllm.models.minimax_m3.common.indexer import (
 from vllm.models.minimax_m3.common.ops.index_topk import (
     minimax_m3_index_decode_score,
 )
+from vllm.models.minimax_m3.nvidia.ops import minimax_m3_index_decode_score_cutedsl
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -83,9 +83,9 @@ class MiniMaxM3IndexerMSAPrefillMetadata:
 
 @dataclass
 class MiniMaxM3IndexerMSAMetadata(MiniMaxM3IndexerMetadata):
-    """Decode reuses the inherited base ``decode`` field (the Triton decode
-    metadata); ``prefill_msa`` carries the fmha score plan for the prefill side
-    (the base ``prefill`` field is unused on this path)."""
+    """Decode reuses the inherited base `decode` field (the Triton decode
+    metadata); `prefill_msa` carries the fmha score plan for the prefill side
+    (the base `prefill` field is unused on this path)."""
 
     prefill_msa: MiniMaxM3IndexerMSAPrefillMetadata | None = None
     # Per-forward view (``[:num_tokens]``) of the builder's persistent unified
@@ -257,7 +257,7 @@ class MiniMaxM3IndexerMSAMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
 
 
 class MiniMaxM3IndexerMSAImpl(MiniMaxM3IndexerImpl):
-    """Decode: Triton fused score+top-k. Prefill: fmha_sm100 OnlyScore + top-k."""
+    """Decode: CuteDSL/Triton score. Prefill: fmha_sm100 OnlyScore + top-k."""
 
     indexer_backend_cls: ClassVar[type[AttentionBackend]] = MiniMaxM3IndexerMSABackend
 
@@ -296,7 +296,14 @@ class MiniMaxM3IndexerMSAImpl(MiniMaxM3IndexerImpl):
         # writes by strides). Top-k is deferred to the single unified call below.
         if md.decode is not None:
             d = md.decode
-            minimax_m3_index_decode_score(
+            # max_decode_query_len avoids recompiles across runtime decode sizes.
+            # Fall back when the flattened Q tile gets too wide for this kernel.
+            decode_score = (
+                minimax_m3_index_decode_score_cutedsl
+                if self.num_index_heads * d.max_decode_query_len <= 32
+                else minimax_m3_index_decode_score
+            )
+            decode_score(
                 index_q[:nd],
                 kv,
                 d.block_table,

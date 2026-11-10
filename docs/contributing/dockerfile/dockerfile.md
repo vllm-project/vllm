@@ -17,6 +17,43 @@ The edges of the build graph represent:
 
 - `RUN --mount=(.\*)from=...` dependencies (with a dotted line and an empty diamond arrow head)
 
+The `test-deps` stage branches from `vllm-runtime-base` so Git and the test
+requirements remain cached independently of per-commit vLLM wheels and source.
+
+The `vllm-runtime-base` stage explicitly installs the current Ubuntu
+`ca-certificates` package so clients using the system trust store receive
+certificate removals when the image is rebuilt. This complements the Python
+`certifi` bundle used by other HTTP clients.
+
+The `extensions-build` stage can also produce an optional source-built Triton
+wheel. `vllm-openai-base` installs that wheel after its other Python
+dependencies so dependency resolution cannot restore an older Triton version.
+
+When `INSTALL_KV_CONNECTORS=true`, `vllm-openai-base` also installs a minimal
+AWS EFA userspace (libfabric, aws-ofi-nccl and hwloc), which NIXL's LIBFABRIC
+backend and Mooncake's EFA transport load at runtime. Kernel modules and host
+limits remain host-managed.
+
+The release pipeline publishes the CUDA 13.0 EFA image to DockerHub as
+`vllm/vllm-openai:latest-efa` and `vllm/vllm-openai:v<version>-efa` for releases,
+and as `vllm/vllm-openai:efa-nightly` and `vllm/vllm-openai:efa-nightly-<commit>`
+for nightly builds.
+
+The image does not change vLLM's Mooncake protocol default (`rdma`). To use
+EFA, set it per connector:
+
+- `MooncakeConnector`: `"mooncake_protocol": "efa"` in `kv_connector_extra_config`.
+- `MooncakeStoreConnector`: `"protocol": "efa"` in the JSON file at `MOONCAKE_CONFIG_PATH`.
+
+`docker/Dockerfile.efa` builds the `-efa` images on top of such a
+`vllm-openai` image. It replaces DeepEP with the amazon-contributing fork for
+NCCL GIN over EFA and sets `NCCL_NET_PLUGIN=ofi` and `NCCL_TUNER_PLUGIN=ofi`.
+
+```bash
+docker build -f docker/Dockerfile.efa \
+    --build-arg BASE_IMAGE=vllm/vllm-openai:latest -t vllm:openai-efa docker/
+```
+
   > <figure markdown="span">
   >   ![](../../assets/contributing/dockerfile-stages-dependency.png){ align="center" alt="query" width="100%" }
   > </figure>
@@ -28,6 +65,7 @@ The edges of the build graph represent:
   > ```bash
   > dockerfilegraph \
   >   -o png \
+  >   --concentrate \
   >   --legend \
   >   --dpi 200 \
   >   --max-label-length 50 \
@@ -47,6 +85,7 @@ The edges of the build graph represent:
   >    --dpi 200 \
   >    --max-label-length 50 \
   >    --filename docker/Dockerfile \
+  >    --concentrate \
   >    --legend
   > ```
   >
