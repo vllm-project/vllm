@@ -405,3 +405,33 @@ def test_unspaced_v4_wrapper_name_opens_tool_block(thinking, chunk_size):
         == [json.loads(call.arguments) for call in calls]
         == [{"city": "杭州", "count": 42}, {"x": 1.5, "y": 2.25}]
     )
+
+
+@pytest.mark.parametrize("chunk_size", [1, 7, 10000])
+def test_invoke_less_block_after_call_stays_dropped(chunk_size):
+    """An invoke-less block after a completed call is post-call output:
+    both paths keep the turn-end drop contract instead of falling it back
+    to content."""
+    text = CALLS + "Mid turn." + INVOKE_LESS_BLOCK + "Tail."
+    tokenizer, tokens = tokenizer_for(text, False)
+    output = collect_output(
+        replay_streaming(
+            parser_for(tokenizer, {"thinking": False}),
+            tokens,
+            chunk_size=chunk_size,
+            finished_on_last=True,
+            tools=DUMMY_TOOLS,
+            prompt_token_ids=[51],
+        )
+    )
+    reasoning, content, calls = parser_for(tokenizer, {"thinking": False}).parse(
+        text,
+        _test_request(tools=DUMMY_TOOLS),
+        enable_auto_tools=True,
+        model_output_token_ids=[tid for tid, _ in tokens],
+    )
+    assert [t["name"] for t in output.tool_calls] == ["get_weather", "add"]
+    assert output.content == (content or "") == ""
+    assert calls
+    assert [c.name for c in calls] == ["get_weather", "add"]
+    assert [t["arguments"] for t in output.tool_calls] == [c.arguments for c in calls]
