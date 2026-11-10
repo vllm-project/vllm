@@ -615,6 +615,8 @@ def test_sizing_warmup_requests_prompt_logprobs_on_its_prefill(max_logprobs):
         (2, None, [MAX_MODEL_LEN - 1]),
         # 1 decode + 64 prefill blocks fit; a second 64-block prompt does not.
         (4, 100, [MAX_MODEL_LEN - 1]),
+        # A single-request runner measures the prefill alone.
+        (1, None, [MAX_MODEL_LEN - 1]),
     ],
 )
 def test_sizing_warmup_fills_token_budget_beyond_max_model_len(
@@ -636,8 +638,10 @@ def test_sizing_warmup_fills_token_budget_beyond_max_model_len(
         runner, outputs.append, lambda grammar_output: None
     )
 
-    mixed = next(o for o in outputs if o.scheduled_cached_reqs.req_ids)
-    prefill_lens = [len(r.prompt_token_ids) for r in mixed.scheduled_new_reqs]
+    step = max(outputs, key=lambda o: o.total_num_scheduled_tokens)
+    prefill_lens = [len(r.prompt_token_ids) for r in step.scheduled_new_reqs]
     assert prefill_lens == expected_prefill_lens
-    assert mixed.total_num_scheduled_tokens == 1 + sum(expected_prefill_lens)
-    assert mixed.total_num_scheduled_tokens == sum(mixed.num_scheduled_tokens.values())
+    num_decode_reqs = len(step.scheduled_cached_reqs.req_ids)
+    assert num_decode_reqs == (1 if max_num_reqs > 1 else 0)
+    assert step.total_num_scheduled_tokens == num_decode_reqs + sum(prefill_lens)
+    assert step.total_num_scheduled_tokens == sum(step.num_scheduled_tokens.values())
