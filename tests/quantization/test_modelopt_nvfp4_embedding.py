@@ -104,3 +104,36 @@ def test_nvfp4_embedding_rejects_tied_lm_head(dist_init):
             quant_config=_mixed_precision_config(),
             prefix="model.embed_tokens",
         )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Triton path needs a GPU")
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("hidden", [64, 2080])
+def test_nvfp4_embedding_triton_matches_torch(dist_init, dtype, hidden):
+    torch.manual_seed(0)
+    vocab = 300
+    layer = VocabParallelEmbedding(
+        vocab,
+        hidden,
+        params_dtype=dtype,
+        quant_config=_mixed_precision_config(),
+        prefix="model.embed_tokens",
+    )
+    weight = torch.randint(0, 256, (vocab, hidden // 2), dtype=torch.uint8)
+    # Every finite non-negative e4m3 code, subnormals included.
+    scale = torch.randint(0, 0x7F, (vocab, hidden // 16), dtype=torch.uint8)
+    scale = scale.view(torch.float8_e4m3fn)
+    for name, value in (
+        ("weight", weight),
+        ("weight_scale", scale),
+        ("weight_scale_2", torch.tensor(0.03)),
+    ):
+        layer.weight_loader(getattr(layer, name), value)
+    with set_default_torch_dtype(dtype):
+        layer.quant_method.process_weights_after_loading(layer)
+
+    ids = torch.randint(0, vocab, (3, 41))
+    expected = layer(ids)  # torch path on CPU
+    layer.cuda()
+    torch.testing.assert_close(layer(ids.cuda()).cpu(), expected, rtol=0, atol=0)
+    assert layer(ids[:0].cuda()).shape == (0, 41, hidden)

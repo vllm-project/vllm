@@ -133,6 +133,7 @@ from vllm.model_executor.utils import (
     set_weight_attrs,
 )
 from vllm.platforms import current_platform
+from vllm.triton_utils import HAS_TRITON, tl, triton
 from vllm.utils.b12x import B12X_BLOCK_CODECS
 from vllm.utils.math_utils import cdiv
 
@@ -1748,6 +1749,68 @@ class ModelOptInt8Config(ModelOptQuantConfigBase):
 ModelOptInt8Config.KVCacheMethodCls = ModelOptKVCacheMethod
 
 
+@triton.jit
+def _nvfp4_embedding_kernel(
+    ids_ptr,
+    packed_ptr,
+    scale_ptr,
+    global_scale_ptr,
+    out_ptr,
+    hidden,
+    packed_stride,
+    scale_stride,
+    BLOCK: tl.constexpr,
+):
+    """Gather NVFP4 rows by token id and dequantize them in one pass."""
+    row = tl.program_id(0)
+    col = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
+    mask = col < hidden
+    tid = tl.load(ids_ptr + row).to(tl.int64)
+
+    byte = tl.load(packed_ptr + tid * packed_stride + col // 2, mask=mask, other=0)
+    code = (byte.to(tl.int32) >> ((col % 2) * 4)) & 0xF
+    # e2m1: exponent bits 2:1, mantissa bit 0, bias 1; exponent 0 is subnormal.
+    exp = (code >> 1) & 0x3
+    man = (code & 0x1).to(tl.float32)
+    pow2 = ((exp + 126) << 23).to(tl.float32, bitcast=True)
+    value = tl.where(exp == 0, man * 0.5, (1.0 + man * 0.5) * pow2)
+    value = tl.where(code >= 8, -value, value)
+
+    # e4m3fn block scale, decoded by hand so pre-fp8 GPUs work too.
+    s = tl.load(scale_ptr + tid * scale_stride + col // 16, mask=mask, other=0)
+    s = s.to(tl.int32)
+    s_exp = (s >> 3) & 0xF
+    s_man = (s & 0x7).to(tl.float32)
+    s_pow2 = ((s_exp + 120) << 23).to(tl.float32, bitcast=True)
+    scale = tl.where(s_exp == 0, s_man * 0.001953125, (1.0 + s_man * 0.125) * s_pow2)
+    scale = tl.where((s & 0x80) != 0, -scale, scale)
+
+    scale = scale * tl.load(global_scale_ptr)
+    out = value * scale
+    tl.store(out_ptr + row * hidden + col, out.to(out_ptr.dtype.element_ty), mask=mask)
+
+
+def _nvfp4_embedding_triton(
+    layer: torch.nn.Module, ids: torch.Tensor, hidden: int
+) -> torch.Tensor:
+    out = torch.empty(ids.numel(), hidden, dtype=layer.output_dtype, device=ids.device)
+    if ids.numel() == 0:
+        return out
+    block = min(triton.next_power_of_2(hidden), 1024)
+    _nvfp4_embedding_kernel[(ids.numel(), triton.cdiv(hidden, block))](
+        ids,
+        layer.weight,
+        layer.weight_scale.view(torch.uint8),
+        layer.weight_scale_2,
+        out,
+        hidden,
+        layer.weight.stride(0),
+        layer.weight_scale.stride(0),
+        BLOCK=block,
+    )
+    return out
+
+
 _NVFP4_EMBEDDING_TIED = (
     "NVFP4 embeddings cannot be tied to an LM head; quantize the LM head separately"
 )
@@ -1815,6 +1878,11 @@ class ModelOptNvFp4EmbeddingMethod(QuantizeMethodBase):
         raise NotImplementedError(_NVFP4_EMBEDDING_TIED)
 
     def embedding(self, layer: torch.nn.Module, input_: torch.Tensor) -> torch.Tensor:
+        if HAS_TRITON and input_.device.type != "cpu":
+            hidden = layer.weight.shape[1] * 2
+            ids = input_.reshape(-1).contiguous()
+            out = _nvfp4_embedding_triton(layer, ids, hidden)
+            return out.view(*input_.shape, hidden)
         packed = layer.weight[input_]
         scale = layer.weight_scale[input_].float() * layer.weight_scale_2
         codes = torch.stack((packed & 0x0F, packed >> 4), dim=-1).flatten(-2)
