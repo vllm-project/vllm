@@ -226,8 +226,8 @@ def split_group_contract_worker():
 )
 def test_split_group_contract_same_split_ranks_on_all_ranks():
     """All parent ranks must call torch.distributed.split_group with the same
-    ``split_ranks`` argument. This catches the bug where each rank passed
-    only its own subgroup (``split_ranks=[ranks]``), which NCCL forgives for
+    `split_ranks` argument. This catches the bug where each rank passed
+    only its own subgroup (`split_ranks=[ranks]`), which NCCL forgives for
     disjoint partitions but is a documented contract violation.
     """
     distributed_run(split_group_contract_worker, 4)

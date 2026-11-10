@@ -63,7 +63,7 @@ what may differ.
 
 <sup>2</sup> Cross-layer contiguity is achieved by using a `BLHNC` layout (set via `VLLM_KV_CACHE_LAYOUT=BLHNC`).
 
-<sup>3</sup> Supported only when HMA is **not** required (i.e., non-hybrid models). Block IDs are remapped automatically. Only P block size < D block size is supported.
+<sup>3</sup> Supported only when HMA is **not** required (i.e., non-hybrid models). Block IDs are remapped automatically. Only P block size < D block size is supported with pull (`NixlPullConnector`); push (`NixlPushConnector`) requires identical P/D block sizes.
 
 <sup>4</sup> MLA KV cache is replicated across TP workers, so heterogeneous TP works but there is no head-splitting. When P TP > D TP, only a single read is executed (redundant ranks are skipped). D TP > P TP also works.
 
@@ -108,11 +108,10 @@ By default, a **compatibility hash** is checked during handshake. P and D instan
 
 The default (pull) NixlConnector does **not** support
 `pipeline-parallel-size > 1` together with a hybrid KV cache (HMA)
-layout: region indices are not a stable identity across the
-prefill/decode layer split, so the connector raises at startup. Use the
-push connector (`NixlPushConnector`) for pipeline parallelism with
-hybrid KV caches — it routes transfers by layer-name (member) identity,
-so a PP-sharded prefiller can write into a `PP=1` decoder. See
+layout and raises at startup. Use the push connector
+(`NixlPushConnector`) for pipeline parallelism with hybrid KV caches.
+Both connectors pair KV regions with a peer's by the layers each region
+holds, so a PP-sharded prefiller can write into a `PP=1` decoder. See
 [NIXL push-mode KV transfer](../design/nixl_kv_push_connector.md).
 
 Current push PP + HMA limitations:
@@ -120,7 +119,7 @@ Current push PP + HMA limitations:
 - Only the prefiller (producer) may be PP-sharded; decode-side PP is not supported.
 - Hybrid SSM/Mamba layouts are not supported under PP.
 - HMA requires the same block size on P and D.
-- Non-MLA attention-HMA layer routing requires decode TP to be no greater than prefill TP.
+- Non-MLA attention under HMA requires decode TP to be no greater than prefill TP.
 - Packed layouts under PP require MLA caches. Local and remote packed block strides may differ; layer pages must have equal sizes. MLA supports decode TP greater than prefill TP because its KV is replicated.
 
 ### Quantized KV cache

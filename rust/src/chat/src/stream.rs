@@ -8,8 +8,11 @@ use std::task::{Context, Poll};
 use futures::Stream;
 use trait_set::trait_set;
 use vllm_engine_core_client::protocol::output::RequestSpecDecodeMetrics;
+use vllm_engine_core_client::protocol::tensor::WireNdArray;
 use vllm_llm::{RequestTimestamps, WeightVersionSpan};
-use vllm_text::{DecodedLogprobs, DecodedPositionLogprobs, DecodedPromptLogprobs};
+use vllm_text::{
+    DecodedLogprobs, DecodedPositionLogprobs, DecodedPromptLogprobs, EffectiveSampling,
+};
 
 use crate::FinishReason;
 use crate::error::{Error, Result};
@@ -20,6 +23,8 @@ use crate::event::{AssistantContentBlock, AssistantMessage, ChatEvent, ChatToken
 pub struct CollectedAssistantMessage {
     pub message: AssistantMessage,
     pub prompt_token_ids: Arc<[u32]>,
+    /// See [`ChatEventStream::prompt_text`].
+    pub prompt_text: Option<String>,
     pub prompt_logprobs: Option<DecodedPromptLogprobs>,
     pub logprobs: Option<DecodedLogprobs>,
     pub token_ids: Vec<u32>,
@@ -35,25 +40,61 @@ pub struct CollectedAssistantMessage {
     pub ec_transfer_params: Option<serde_json::Value>,
     /// Weight-version spans over all generated token positions.
     pub weight_versions: Option<Vec<WeightVersionSpan>>,
+    /// Routed-expert rows for the whole request, when the engine returned any.
+    pub routed_experts: Option<WireNdArray>,
 }
 
 /// Per-request stream of chat events.
 pub struct ChatEventStream {
     request_id: String,
+    prompt_text: Option<String>,
+    sampling: EffectiveSampling,
     inner: Pin<Box<dyn Stream<Item = Result<ChatEvent>> + Send>>,
 }
 
 impl ChatEventStream {
-    pub(crate) fn new(request_id: String, inner: impl crate::output::ChatEventStream) -> Self {
+    pub(crate) fn new(
+        request_id: String,
+        sampling: EffectiveSampling,
+        inner: impl crate::output::ChatEventStream,
+    ) -> Self {
         Self {
             request_id,
+            prompt_text: None,
+            sampling,
             inner: Box::pin(inner),
         }
+    }
+
+    /// Attach the rendered prompt text reported by [`Self::prompt_text`].
+    pub(crate) fn with_prompt_text(mut self, prompt_text: Option<String>) -> Self {
+        self.prompt_text = prompt_text;
+        self
     }
 
     /// Return the request ID associated with this stream.
     pub fn request_id(&self) -> &str {
         &self.request_id
+    }
+
+    /// Return the prompt text rendered from the chat template, when requested
+    /// with [`ChatRequest::return_prompt_text`](crate::ChatRequest::return_prompt_text)
+    /// and the renderer produced text rather than token IDs. With multimodal
+    /// content, placeholders are not expanded yet.
+    pub fn prompt_text(&self) -> Option<&str> {
+        self.prompt_text.as_deref()
+    }
+
+    /// Take the rendered prompt text out of the stream, so a streaming
+    /// consumer can move it into its first chunk without a copy.
+    pub fn take_prompt_text(&mut self) -> Option<String> {
+        self.prompt_text.take()
+    }
+
+    /// Return the sampling values the engine uses for this request, after
+    /// model defaults are applied.
+    pub fn sampling(&self) -> EffectiveSampling {
+        self.sampling
     }
 
     /// Collect the stream to completion and return the final assembled
@@ -64,6 +105,7 @@ impl ChatEventStream {
         let mut message = AssistantMessage::default();
         let mut prompt_logprobs = None;
         let mut prompt_token_ids: Arc<[u32]> = Arc::from([]);
+        let prompt_text = self.prompt_text.take();
         let mut logprob_positions: Vec<DecodedPositionLogprobs> = Vec::new();
         let mut token_ids: Vec<u32> = Vec::new();
         while let Some(event) = self.next().await.transpose()? {
@@ -94,10 +136,12 @@ impl ChatEventStream {
                     kv_transfer_params,
                     ec_transfer_params,
                     weight_versions,
+                    routed_experts,
                 } => {
                     return Ok(CollectedAssistantMessage {
                         message: done,
                         prompt_token_ids,
+                        prompt_text,
                         prompt_logprobs,
                         logprobs: (!logprob_positions.is_empty()).then_some(DecodedLogprobs {
                             positions: logprob_positions,
@@ -110,6 +154,7 @@ impl ChatEventStream {
                         kv_transfer_params: kv_transfer_params.map(|value| *value),
                         ec_transfer_params: ec_transfer_params.map(|value| *value),
                         weight_versions,
+                        routed_experts: routed_experts.map(|rows| *rows),
                     });
                 }
                 ChatEvent::ToolCallEnd { call, .. } => {
@@ -152,14 +197,25 @@ mod tests {
         DecodedLogprobs, DecodedPositionLogprobs, DecodedPromptLogprobs, DecodedTokenLogprob,
     };
 
-    use super::{ChatEventStream, CollectedAssistantMessage};
+    use super::{ChatEventStream, CollectedAssistantMessage, EffectiveSampling};
     use crate::error::Error;
     use crate::event::{ChatEvent, ChatTokenUsage};
+
+    fn test_sampling() -> EffectiveSampling {
+        EffectiveSampling {
+            temperature: 1.0,
+            top_p: 1.0,
+            max_tokens: 16,
+            presence_penalty: 0.0,
+            frequency_penalty: 0.0,
+        }
+    }
 
     #[tokio::test]
     async fn collect_message_requires_terminal_done_event() {
         let stream = ChatEventStream::new(
             "chat-missing-done".to_string(),
+            test_sampling(),
             stream::iter([Ok(ChatEvent::Start {
                 prompt_token_ids: vec![].into(),
                 prompt_logprobs: None,
@@ -178,6 +234,7 @@ mod tests {
     async fn collect_message_retains_prompt_and_sample_logprobs() {
         let stream = ChatEventStream::new(
             "chat-logprobs".to_string(),
+            test_sampling(),
             stream::iter(vec![
                 Ok(ChatEvent::Start {
                     prompt_token_ids: vec![10, 11].into(),
@@ -225,16 +282,19 @@ mod tests {
                     kv_transfer_params: None,
                     ec_transfer_params: None,
                     weight_versions: None,
+                    routed_experts: None,
                 }),
             ]),
         );
 
+        let stream = stream.with_prompt_text(Some("user: hi\nassistant:".to_string()));
         let collected = stream.collect_message().await.unwrap();
         assert_eq!(
             collected,
             CollectedAssistantMessage {
                 message: Default::default(),
                 prompt_token_ids: vec![10, 11].into(),
+                prompt_text: Some("user: hi\nassistant:".to_string()),
                 prompt_logprobs: Some(DecodedPromptLogprobs {
                     first_token_id: 0,
                     first_token: "o".to_string(),
@@ -274,6 +334,7 @@ mod tests {
                 kv_transfer_params: None,
                 ec_transfer_params: None,
                 weight_versions: None,
+                routed_experts: None,
             }
         );
     }
