@@ -322,6 +322,14 @@ QWEN_MTP_CASE = ModelCase(
     ],
 )
 
+# The engine builds the draft as the only pipeline stage on the last PP rank;
+# the warm runs map it only if the draft daemon builds and keys it that way.
+QWEN_MTP_PP2_CASE = replace(
+    QWEN_MTP_CASE,
+    llm_kwargs={**QWEN_MTP_CASE.llm_kwargs, "pipeline_parallel_size": 2},
+    daemon_args=[*QWEN_MTP_CASE.daemon_args, "--pipeline-parallel-size", "2"],
+)
+
 
 DSV2_EP_CASE = ModelCase(
     model="deepseek-ai/DeepSeek-V2-Lite-Chat",
@@ -543,6 +551,13 @@ def test_ipc_cache_cold_start_and_warm_restart_tp2_ep(vllm_runner, tmp_path):
     # No capfd: a CaptureFixture does not survive the cloudpickle into the
     # child, and this case never reaches the check_flashinfer_cache branch.
     run_cold_start_and_warm_restart(vllm_runner, DSV2_EP_CASE, tmp_path)
+
+
+@create_new_process_for_each_test()
+@pytest.mark.distributed(num_gpus=2)
+def test_ipc_cache_cold_start_and_warm_restart_pp2_mtp(vllm_runner, tmp_path):
+    """Same as above at pp=2, with an MTP draft model."""
+    run_cold_start_and_warm_restart(vllm_runner, QWEN_MTP_PP2_CASE, tmp_path)
 
 
 @create_new_process_for_each_test()
@@ -921,39 +936,6 @@ def test_daemon_sets_its_rank_like_engine_workers(monkeypatch):
             vllm_config, global_rank, global_rank, "tcp://127.0.0.1:0"
         )
         assert server.vllm_config.parallel_config.rank == global_rank
-
-
-def test_daemon_keys_draft_as_the_only_pipeline_stage(monkeypatch):
-    """Under PP the engine builds a draft model as the only pipeline stage, so
-    the draft daemon must key it that way or no engine can map it."""
-    from types import SimpleNamespace
-
-    from vllm.model_executor.model_loader.weight_cache import daemon
-
-    pp_keys = []
-    monkeypatch.setattr(
-        daemon.WeightCacheKey,
-        "from_model_config",
-        lambda *args, **kwargs: pp_keys.append((kwargs["pp_size"], kwargs["pp_rank"])),
-    )
-    for is_draft in (False, True):
-        vllm_config = SimpleNamespace(
-            parallel_config=_parallel(
-                pipeline_parallel_size=2,
-                enable_eplb=False,
-                enable_expert_parallel=False,
-                expert_placement_strategy="linear",
-                rank=0,
-            ),
-            model_config=SimpleNamespace(is_moe=False),
-            speculative_config=SimpleNamespace(draft_model_config=SimpleNamespace()),
-            cache_config=None,
-            kernel_config=None,
-        )
-        daemon.WeightCacheDaemon(
-            vllm_config, 1, 1, "tcp://127.0.0.1:0", is_draft=is_draft
-        )
-    assert pp_keys == [(2, 1), (1, 0)]
 
 
 def test_weight_cache_key_distinguishes_dp_ranks():
