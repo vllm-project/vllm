@@ -34,7 +34,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_engine import (
 )
 from vllm.v1.request import RequestStatus
 
-from .utils import make_moriio_writer
+from ..utils import make_moriio_writer
 
 pytestmark = pytest.mark.cpu_test
 
