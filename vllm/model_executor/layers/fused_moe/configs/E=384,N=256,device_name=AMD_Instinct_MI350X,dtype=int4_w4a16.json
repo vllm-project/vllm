@@ -181,12 +181,12 @@
     },
     "8192": {
         "BLOCK_SIZE_M": 256,
-        "BLOCK_SIZE_N": 256,
+        "BLOCK_SIZE_N": 128,
         "BLOCK_SIZE_K": 32,
         "GROUP_SIZE_M": 2,
         "SPLIT_K": 1,
         "num_warps": 8,
-        "num_stages": 2,
+        "num_stages": 1,
         "matrix_instr_nonkdim": 32
     }
 }
