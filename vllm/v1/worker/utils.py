@@ -979,6 +979,10 @@ def clear_layer_kv_caches(layers: Iterable[Any]) -> None:
                 layer.impl._k_scale_cache = None
             if hasattr(layer.impl, "_v_scale_cache"):
                 layer.impl._v_scale_cache = None
+            # Clean up cached K/V cache views (Triton) so the
+            # profiling KV cache tensor is actually freed below.
+            if hasattr(layer.impl, "_kv_view_cache"):
+                layer.impl._kv_view_cache = None
         for name in ("_replayssm_ring_start", "_replayssm_prev_num_accepted"):
             if hasattr(layer, name):
                 setattr(layer, name, torch.empty(0, dtype=torch.int32))
