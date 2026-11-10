@@ -32,6 +32,7 @@ from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu import cp_utils as gpu_cp_utils
 from vllm.v1.worker.gpu import cudagraph_utils, dp_utils
+from vllm.v1.worker.gpu import ubatch_utils as gpu_ubatch_utils
 from vllm.v1.worker.gpu.cudagraph_utils import (
     BatchExecutionDescriptor,
     CudaGraphManager,
@@ -363,6 +364,57 @@ def test_all_padding_microbatch_has_no_work_to_do():
     torch.testing.assert_close(
         last.seq_lens_cpu_upper_bound, torch.tensor([64], dtype=torch.int32)
     )
+
+
+@pytest.mark.parametrize("cg_mode", [CUDAGraphMode.NONE, CUDAGraphMode.FULL])
+def test_all_padding_microbatch_skips_attention(monkeypatch, cg_mode):
+    """An eager microbatch wholly in the DP padding is run like a dummy run that
+    skips attention: no attention metadata and no slot mappings, so no backend
+    sees a batch with a request but no tokens. A FULL CUDA graph replay still
+    needs metadata for every microbatch it captured."""
+    input_batch = _make_input_batch(
+        [1] * 6, [64] * 6, _make_buffers(), num_tokens_padded=16
+    )
+    built: list[int] = []
+    runner = UBatchRunner.__new__(UBatchRunner)
+    runner.num_ubatches = 2
+    runner.ubatch_query_start_loc, runner.ubatch_seq_lens = (
+        list(b) for b in zip(*_make_ubatch_buffers())
+    )
+    runner.ubatch_dcp_local_seq_lens = [None, None]
+    runner.dcp_size, runner.dcp_rank, runner.cp_interleave = 1, 0, 1
+    runner.attn_groups, runner.kv_cache_config = [], None
+    runner.model_state = cast(
+        ModelState,
+        SimpleNamespace(
+            prepare_attn=lambda ubatch, *args, **kwargs: (
+                built.append(ubatch.num_tokens) or {"attn": ubatch.num_tokens}
+            )
+        ),
+    )
+    runner._make_forward_contexts = lambda slices, attn, slots, padding: list(
+        zip(attn, slots)
+    )
+    monkeypatch.setattr(
+        gpu_ubatch_utils,
+        "build_slot_mappings_by_layer",
+        lambda slot_mappings, kv_cache_config: {"attn": slot_mappings},
+    )
+
+    contexts = runner.prepare(
+        input_batch,
+        (torch.zeros(6, 4, dtype=torch.int32),),
+        torch.zeros(1, 16, dtype=torch.int64),
+        SimpleNamespace(cg_mode=cg_mode, uniform_token_count=None),
+    ).forward_contexts
+
+    if cg_mode == CUDAGraphMode.FULL:
+        assert built == [6, 0]
+        assert all(attn is not None and slots is not None for attn, slots in contexts)
+    else:
+        assert built == [6]
+        assert contexts[0][0] == {"attn": 6} and contexts[0][1] is not None
+        assert contexts[1] == (None, None)
 
 
 def test_microbatching_off_when_a_rank_does_not_allow_it():

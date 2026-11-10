@@ -382,9 +382,9 @@ class UBatchRunner:
             input_batch, self.num_ubatches, uniform_token_count
         )
 
-        attn_metadata = []
-        slot_mappings_by_layer = []
-        is_padding = []
+        attn_metadata: list[dict[str, Any] | None] = []
+        slot_mappings_by_layer: list[dict[str, torch.Tensor] | None] = []
+        is_padding: list[torch.Tensor | None] = []
         for i, ubatch_slice in enumerate(ubatch_slices):
             ubatch = _slice_input_batch(
                 input_batch,
@@ -396,6 +396,14 @@ class UBatchRunner:
                 dcp_rank=self.dcp_rank,
                 cp_interleave=self.cp_interleave,
             )
+            if ubatch.num_tokens == 0 and cg_mode != CUDAGraphMode.FULL:
+                # A microbatch wholly in the DP padding has no tokens to attend
+                # or cache: run it like a dummy run that skips attention, rather
+                # than hand every attention backend a zero-token batch.
+                attn_metadata.append(None)
+                slot_mappings_by_layer.append(None)
+                is_padding.append(ubatch.is_padding)
+                continue
             ubatch_slot_mappings = slot_mappings[:, ubatch_slice.token_slice]
             ubatch_block_tables = tuple(
                 block_table[ubatch_slice.request_slice] for block_table in block_tables
@@ -427,8 +435,8 @@ class UBatchRunner:
     def _make_forward_contexts(
         self,
         ubatch_slices: UBatchSlices,
-        attn_metadata: list[dict[str, Any]],
-        slot_mappings_by_layer: list[dict[str, torch.Tensor]],
+        attn_metadata: list[dict[str, Any] | None],
+        slot_mappings_by_layer: list[dict[str, torch.Tensor] | None],
         is_padding: list[torch.Tensor | None],
     ) -> list[ForwardContext]:
         """Build one forward context per microbatch.
