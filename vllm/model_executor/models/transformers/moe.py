@@ -40,6 +40,7 @@ from vllm.model_executor.models.transformers.fuser import get_fuser
 from vllm.model_executor.models.transformers.fusers.glu import GLUFuser
 from vllm.model_executor.models.transformers.fusers.moe import MoEBlockFuser
 from vllm.model_executor.models.utils import extract_layer_index, maybe_prefix
+from vllm.model_executor.offloader import get_offloader
 from vllm.transformers_utils.config import CONFIG_FIELD_ALIASES
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, direct_register_custom_op
 
@@ -460,6 +461,10 @@ class MoEMixin(MixtureOfExperts, Base):
                     fused_experts = FusedMoEFactory(**kwargs)
                     moe_block.experts = fused_experts
                     log_replacement(qual_name, experts, fused_experts)
+                    # Offload experts as they are built, before the decoder layers
+                    if (offloader := get_offloader()).supports_tower_offload:
+                        modules = (m for m in [fused_experts])
+                        offloader.wrap_modules(modules, prefix=qual_name)
                     # Update MixtureOfExperts mixin state
                     self.mlp_layers.append(moe_block)
                     self.moe_layers.append(fused_experts)
