@@ -162,7 +162,6 @@ class EngineCoreSentinel:
             for request in scheduler.requests.values():
                 request.num_in_flight_tokens = 0
                 request.num_stale_output_tokens = 0
-            scheduler.prev_step_scheduled_req_ids.clear()
         else:
             aborted = scheduler.finish_requests(None, RequestStatus.FINISHED_ABORTED)
             engine._send_abort_outputs(aborted)

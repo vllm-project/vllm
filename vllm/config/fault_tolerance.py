@@ -26,7 +26,7 @@ class FaultToleranceConfig:
     'recompute': preempt requests back to the waiting queue to recompute their
     KV cache and continue generation after recovery, without abort notifications.
     'fail': abort unfinished requests immediately (default).
-    Passing ``params={"abort": true}`` to the ``retry`` instruction discards
+    Passing `params={"abort": true}` to the `retry` instruction discards
     queued requests even when the policy is 'recompute'.
     """
 
