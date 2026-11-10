@@ -313,6 +313,10 @@ Only deployments whose API clients are trusted should start the server with
 `--trust-request-mm-kwargs` to restore per-request overrides. Do not enable
 this option on an endpoint exposed to untrusted clients.
 
+The Rust frontend's gRPC `GenerateRequest` accepts `media_io_kwargs` without
+this option, because the [gRPC interface](#grpc-interface) serves only trusted
+callers. It supports only `video.fps`, and the per-video frame cap still applies.
+
 ### P2P KV-Offload Peer Session Limits
 
 Deployments that enable the P2P secondary tier (`OffloadingConnector` with `TieringOffloadingSpec` and a `p2p` secondary tier) accept peer addresses from `kv_transfer_params` in API requests. Without limits, an attacker with API access could submit many unique non-listening peer addresses, each consuming ZeroMQ sockets until the context quota is exhausted, crashing the EngineCore.
