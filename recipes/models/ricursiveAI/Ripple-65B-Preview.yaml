@@ -5,12 +5,13 @@ meta:
   provider: "Ricursive Intelligence"
   description: "Ricursive's Ripple-65B Preview, a dense 65B model for reasoning and agentic coding with hybrid sliding-window and NoPE full attention, tool calling, and a DFlash2 speculative drafter."
   date_added: 2026-11-04
-  date_updated: 2026-11-06
+  date_updated: 2026-11-10
   tasks:
     - text
   related_recipes: []
   hardware:
     b300: verified
+    mi350x: verified
     mi355x: verified
   default_hardware: b300
 
@@ -81,7 +82,7 @@ guide: |
   is a dense 65B model from Ricursive Intelligence. Its 80 layers alternate four
   1024-token sliding-window layers with one NoPE full-attention layer, and it
   supports a 2M-token context. The NVFP4 checkpoint fits on one B200/B300, and
-  the BF16 checkpoint fits on one MI355X.
+  the BF16 checkpoint fits on one MI350X/MI355X.
 
   Ripple decides per turn whether to reason, so `reasoning_content` is empty
   when it answers directly.
