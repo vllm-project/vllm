@@ -1251,10 +1251,17 @@ class MiniMaxM3DecoderLayer(nn.Module):
             from vllm.triton_utils.tp_synced_autotune import install
 
             install()
-        if self.replicate_attn and _use_sequence_parallel(vllm_config):
+        parallel_config = vllm_config.parallel_config
+        if self.replicate_attn and (
+            parallel_config.enable_expert_parallel
+            or parallel_config.decode_context_parallel_size > 1
+            or parallel_config.prefill_context_parallel_size > 1
+        ):
+            # These layouts turn the TP-synced autotune off, and replicated
+            # attention would then drift across ranks.
             raise NotImplementedError(
-                "VLLM_MINIMAX_M3_REPLICATE_ATTN is not supported with the "
-                "sequence-parallel (MegaMoE + expert parallel) layout."
+                "VLLM_MINIMAX_M3_REPLICATE_ATTN is not supported with expert "
+                "parallelism or decode/prefill context parallelism."
             )
         if is_mtp_block:
             assert vllm_config.speculative_config is not None
