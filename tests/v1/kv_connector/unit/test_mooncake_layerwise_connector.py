@@ -215,7 +215,7 @@ async def test_layerwise_batch_copies_each_request_and_layer(source_blocks):
 async def test_layerwise_interval_batches_layers_and_flushes_each_chunk(interval):
     """Batch real copies across layers/requests, including a partial final batch."""
     names = tuple(f"model.layers.{i}.self_attn" for i in range(5))
-    writes = []
+    writes: list[tuple[int, ...]] = []
     with _layerwise_copy_worker(
         names=names, extra={"layerwise_transfer_interval": interval}, writes=writes
     ) as worker:

@@ -3994,6 +3994,7 @@ class MooncakeConnectorWorker:
         )
 
     def _init_layerwise_state(self) -> None:
+        assert self.vllm_config.kv_transfer_config is not None
         self._layerwise_transfer_interval = _get_layerwise_transfer_interval(
             self.vllm_config.kv_transfer_config
         )
