@@ -113,7 +113,6 @@ class ECTieringScheduler(ECCPUScheduler):
         ec_config = vllm_config.ec_transfer_config
         assert ec_config is not None
         widths = tuple(sorted(ec_config.mm_encoder_output_widths.items()))
-        parallel_config = vllm_config.parallel_config
         return ECCacheNamespace(
             model_id=str(model_config.model),
             model_revision=model_config.revision,
@@ -121,10 +120,6 @@ class ECTieringScheduler(ECCPUScheduler):
             hidden_dim=model_config.get_inputs_embeds_size(),
             encoder_output_widths=widths,
             element_size=model_config.dtype.itemsize,
-            tensor_parallel_size=parallel_config.tensor_parallel_size,
-            prefill_context_parallel_size=(
-                parallel_config.prefill_context_parallel_size
-            ),
         )
 
     def update_state_after_alloc(self, request: Request, index: int) -> None:

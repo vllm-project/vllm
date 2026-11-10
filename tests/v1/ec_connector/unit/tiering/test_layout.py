@@ -21,8 +21,6 @@ def _namespace() -> ECCacheNamespace:
         hidden_dim=3584,
         encoder_output_widths=(("image", 3584),),
         element_size=2,
-        tensor_parallel_size=2,
-        prefill_context_parallel_size=1,
     )
 
 
@@ -35,10 +33,13 @@ def test_namespace_is_deterministic_and_compatibility_scoped() -> None:
     )
     assert namespace.digest() != replace(namespace, dtype="float16").digest()
     assert namespace.digest() != replace(namespace, hidden_dim=4096).digest()
-    assert namespace.digest() != replace(
-        namespace,
-        encoder_output_widths=(("image", 4096),),
-    ).digest()
+    assert (
+        namespace.digest()
+        != replace(
+            namespace,
+            encoder_output_widths=(("image", 4096),),
+        ).digest()
+    )
 
 
 def test_cache_key_includes_item_shape_and_identity() -> None:

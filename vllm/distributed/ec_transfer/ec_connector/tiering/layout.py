@@ -53,8 +53,6 @@ class ECCacheNamespace:
     hidden_dim: int
     encoder_output_widths: tuple[tuple[str, int], ...]
     element_size: int
-    tensor_parallel_size: int
-    prefill_context_parallel_size: int
     model_revision: str | None = None
     tensor_layout: str = "token-major-contiguous"
 
@@ -72,8 +70,7 @@ class ECCacheNamespace:
         if len(set(modalities)) != len(modalities):
             raise ValueError("encoder_output_widths modalities must be unique")
         if any(
-            not modality or width <= 0
-            for modality, width in self.encoder_output_widths
+            not modality or width <= 0 for modality, width in self.encoder_output_widths
         ):
             raise ValueError(
                 "encoder_output_widths entries must be non-empty and positive"
@@ -81,8 +78,6 @@ class ECCacheNamespace:
         for field_name in (
             "hidden_dim",
             "element_size",
-            "tensor_parallel_size",
-            "prefill_context_parallel_size",
         ):
             if getattr(self, field_name) <= 0:
                 raise ValueError(f"{field_name} must be positive")
