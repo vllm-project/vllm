@@ -1651,8 +1651,6 @@ class MLADCPManager:
         self.padded_num_heads = padded_num_heads
         # Set when the combine can merge W_UV-projected outputs instead.
         self.v_up_proj_combine: Callable[..., None] | None = None
-        # Head count of the storage the decode kernel reads the gathered query
-        # from; None keeps the default gather
         self.query_storage_heads = query_storage_heads
 
         self.combine = self._init_combine(
@@ -1816,12 +1814,9 @@ class MLADCPManager:
         return query
 
     def _gather_query_into_storage(self, query: torch.Tensor) -> torch.Tensor:
-        """Gather [B, H, D] local heads to a [B, W * H, D] view of
-        [B, query_storage_heads, D] storage with one copy."""
         assert self.query_storage_heads is not None
         world_size = self.group.world_size
         num_tokens, num_heads, head_dim = query.shape
-        # A dim-0 gather is rank-major and needs no reorder
         gathered = self.group.all_gather(query.contiguous(), dim=0)
         out = query.new_empty((num_tokens, self.query_storage_heads, head_dim))
         out = out[:, : world_size * num_heads]

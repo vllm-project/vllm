@@ -117,8 +117,6 @@ class GDNAttentionMetadata:
     spec_sequence_masks_cpu: torch.Tensor | None = None  # shape: [batch,]
     spec_token_indx: torch.Tensor | None = None
     non_spec_token_indx: torch.Tensor | None = None
-    # Set when the spec-decode tokens are rows [0, num_spec_tokens) of a mixed
-    # batch, so a layer can split it with slices instead of the token indices
     num_spec_tokens: int | None = None
 
     num_accepted_tokens: torch.Tensor | None = None  # shape: [batch,]
@@ -484,8 +482,6 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 num_non_spec_tokens = num_prefill_tokens + num_decode_tokens
                 non_spec_token_indx = index[:num_non_spec_tokens]
                 spec_token_indx = index[num_non_spec_tokens:]
-                # Decodes are reordered to the front, so the spec rows are
-                # usually a prefix of the batch
                 if bool(spec_sequence_masks_cpu[:num_spec_decodes].all()):
                     num_spec_tokens = int(query_start_loc_cpu[num_spec_decodes])
 

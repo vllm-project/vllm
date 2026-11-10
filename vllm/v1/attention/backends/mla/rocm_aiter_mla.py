@@ -2661,8 +2661,6 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
     # base-2 segment statistics with LOGE2. Stated rather than inherited because
     # the DCP combine silently corrupts the softmax denominator if it disagrees.
     lse_base_on_e: bool = True
-    # Head count of the storage the cprr asm decode reads the DCP-gathered
-    # query from (e.g. 96 -> 128); None keeps the default DCP gather
     dcp_query_storage_heads: int | None = None
 
     @property

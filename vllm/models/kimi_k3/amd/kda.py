@@ -721,13 +721,14 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                 # peel cannot apply and the chunk kernel takes them.
                 core_attn_out_decode = None
                 split_non_spec = spec_sequence_masks is None and m.num_decodes > 0
-                # The non-spec tokens are core_attn_out[:, ns0:num_actual_tokens]
-                # in order when there is no spec split (ns0 = 0) or the spec
-                # tokens lead the batch (ns0 = num_spec_tokens), so both kernels
-                # can write their slice straight into it. Otherwise the tokens
-                # are interleaved and have to be scattered by index afterwards.
+                # The non-spec tokens are core_attn_out[:, non_spec_start:
+                # num_actual_tokens] in order when there is no spec split
+                # (non_spec_start = 0) or the spec tokens lead the batch
+                # (non_spec_start = num_spec_tokens), so both kernels can write
+                # their slice straight into it. Otherwise the tokens are
+                # interleaved and have to be scattered by index afterwards.
                 direct = spec_sequence_masks is None or num_spec_tokens is not None
-                ns0 = num_spec_tokens or 0
+                non_spec_start = num_spec_tokens or 0
                 if split_non_spec:
                     assert non_spec_query_start_loc is not None
                     nd_tok = m.num_decode_tokens
@@ -806,7 +807,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                         "fused" if checkpoint is not None else self.kda_prefill_backend
                     ),
                     out=(
-                        core_attn_out[:, ns0 + nd_tok : num_actual_tokens]
+                        core_attn_out[:, non_spec_start + nd_tok : num_actual_tokens]
                         if direct
                         else None
                     ),
@@ -819,7 +820,9 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
 
                 if direct:
                     # Both slices already landed in core_attn_out.
-                    core_attn_out_non_spec = core_attn_out[:, ns0:num_actual_tokens]
+                    core_attn_out_non_spec = core_attn_out[
+                        :, non_spec_start:num_actual_tokens
+                    ]
                 elif split_non_spec:
                     # Restore decode-first token order for the merge below.
                     core_attn_out_non_spec = torch.cat(
