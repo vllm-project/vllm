@@ -44,6 +44,7 @@ from .utils import (
     make_nixl_scheduler,
     maybe_update_block_size,
     region_pairs_by_index,
+    remote_stage,
 )
 
 
@@ -84,10 +85,13 @@ def region_pull_worker():
     )
     worker._group_spec_types = (MLAAttentionSpec, MLAAttentionSpec)
     worker.region_group_ids = [0, 1]
-    worker.dst_region_group_ids = {"P": [0, 0]}
-    worker._remote_pp_stages = {}
-    worker._dst_pairs = {
-        "P": region_pairs_by_index(2, groups=[0, 1], groups_match=False)
+    worker._remote_stages = {
+        "P": remote_stage(
+            region_pairs_by_index(2, groups=[0, 1], groups_match=False),
+            region_num_blocks=[100, 100],
+            region_group_ids=[0, 0],
+            xfer_side_handles={0: 3},
+        )
     }
     worker.num_regions = 2
     worker.block_len_per_layer = [1024, 1024]
@@ -104,9 +108,8 @@ def region_pull_worker():
     worker._mixed_mem_types = True
     worker.src_xfer_handles_by_block_size = {64: 1}
     worker._dram_src_handles_by_block_size = {64: 2}
-    worker.dst_xfer_side_handles = {"P": {0: 3}}
     worker.dst_num_blocks = {"P": 100, "D": 100}
-    worker.dst_region_num_blocks = {"P": [100, 100], "D": [100, 100]}
+    worker.region_num_blocks = [100, 100]
     worker._remote_agents = {"P": {(0, 0): "P-rank0"}}
     worker._engine_by_address = {("localhost", 1): "P"}
     worker._read_blocks_mixed = MagicMock()  # type: ignore[method-assign]
@@ -195,24 +198,23 @@ def test_dcp_region_pull(region_pull_worker, num_pages, region_groups):
     worker = region_pull_worker
     worker.region_group_ids = list(region_groups)
     worker.num_regions = len(region_groups)
-    worker.dst_region_group_ids = {"P": [0] * worker.num_regions}
-    worker._remote_pp_stages = {}
-    worker._dst_pairs = {
-        "P": region_pairs_by_index(
-            worker.num_regions, groups=region_groups, groups_match=False
+    ranks = tuple(range(8))
+    worker._remote_stages = {
+        "P": remote_stage(
+            region_pairs_by_index(
+                worker.num_regions, groups=region_groups, groups_match=False
+            ),
+            region_num_blocks=[100] * worker.num_regions,
+            xfer_side_handles={r: 1000 + r for r in ranks},
         )
     }
-    worker.dst_region_num_blocks = {
-        engine: [100] * worker.num_regions for engine in ("P", "D")
-    }
+    worker.region_num_blocks = [100] * worker.num_regions
     worker.block_len_per_layer = [1024] * worker.num_regions
     worker.dcp_rank = 0
     remote = worker.transfer_topo.get_engine_info.return_value
     remote.remote_tp_size = remote.remote_dcp_size = 8
     remote.remote_physical_blocks_per_logical = 1
-    ranks = tuple(range(8))
     worker.tp_mappings["P"] = TPMapping((ranks, ranks), ranks, {r: r for r in ranks}, 8)
-    worker.dst_xfer_side_handles = {"P": {r: 1000 + r for r in ranks}}
     worker._remote_agents = {"P": {(0, r): f"P-rank{r}" for r in ranks}}
     # Two regions with different prefix hits, plus one padding page each.
     local = (
@@ -729,11 +731,11 @@ def test_read_blocks_for_req_expands_remote_ids(
 
     remote_engine_id = "remote-engine"
     worker.region_group_ids = list(range(len(resolved_types)))
-    worker.dst_region_group_ids = {remote_engine_id: list(worker.region_group_ids)}
-    worker._remote_pp_stages = {}
-    worker._dst_pairs = {
-        remote_engine_id: region_pairs_by_index(
-            len(resolved_types), groups=worker.region_group_ids
+    worker._remote_stages = {
+        remote_engine_id: remote_stage(
+            region_pairs_by_index(len(resolved_types), groups=worker.region_group_ids),
+            region_num_blocks=[100] * len(resolved_types),
+            region_group_ids=worker.region_group_ids,
         )
     }
 
@@ -2386,13 +2388,17 @@ def test_push_write_hybrid_mla_replicates_attention():
             rank_offset_factor=0,
         )
     }
-    worker.dst_xfer_side_handles = defaultdict(dict, {engine_id: {0: 100, 1: 101}})
     worker.src_xfer_handles_by_tp_ratio = {(-2, 4): [200, 201]}
     worker.src_xfer_handles_by_block_size = {4: 300}
     worker.region_group_ids = [0, 1]
-    worker.dst_region_group_ids = {engine_id: [0, 1]}
-    worker._remote_pp_stages = {}
-    worker._dst_pairs = {engine_id: region_pairs_by_index(2, groups=[0, 1])}
+    worker._remote_stages = {
+        engine_id: remote_stage(
+            region_pairs_by_index(2, groups=[0, 1]),
+            region_num_blocks=[100, 100],
+            region_group_ids=[0, 1],
+            xfer_side_handles={0: 100, 1: 101},
+        )
+    }
     worker._sending_transfers = defaultdict(list)
     worker._sending_transfers_lock = threading.Lock()
     worker.kv_cache_config = _make_hybrid_mla_kv_cache_config()

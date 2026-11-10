@@ -11,7 +11,6 @@ from vllm.distributed.kv_transfer.kv_connector.utils import BlockIds, EngineId
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
     NixlBaseConnectorWorker,
     _RegionPairs,
-    _RemotePPStage,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     NixlConnectorMetadata,
@@ -214,11 +213,8 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
             # Seed the entry so this rank still reports completion.
             self._recving_transfers.setdefault(req_id, [])
 
-        remote_region_groups = self.dst_region_group_ids[engine_id]
-        local_region_groups = self.region_group_ids or remote_region_groups
-        # None for a PP-sharded remote, whose stages pair the local cache groups.
-        pairs = self._dst_pairs.get(engine_id)
-        pp_stages = self._remote_pp_stages.get(engine_id)
+        # One stage per PP rank of the remote; a PP=1 remote is a single stage.
+        stages = self._remote_stages[engine_id]
         num_groups = len(meta.local_block_ids)
 
         def group_ids(block_ids: BlockIds, rank: int) -> list[list[int]]:
@@ -234,9 +230,13 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 ReadSpec(remote_rank=rank, local_block_ids=[], remote_block_ids=[])
                 for rank in plan.all_source_ranks
             ]
-        elif pairs is not None and not pairs.groups_match:
+        elif not all(stage.pairs.groups_match for stage in stages.values()):
             # The two sides put some layer in different cache groups: read each
-            # region at its own blocks.
+            # region at its own blocks. PP remotes must match cache groups.
+            stage = self._single_remote_stage(engine_id)
+            pairs = stage.pairs
+            remote_region_groups = stage.region_group_ids
+            local_region_groups = self.region_group_ids or remote_region_groups
             if pairs.remote != pairs.local or len(pairs.local) != self.num_regions:
                 raise NotImplementedError(
                     "Different NIXL cache-group layouts need the same KV regions "
@@ -426,33 +426,9 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                     else None
                 )
 
-            # Destination handles: remote_engine_id -> remote_rank -> handle, or
-            # one per stage of a PP-sharded remote.
-            remote_reads: list[tuple[int, _RemotePPStage | None]]
-            if pp_stages:
-                remote_reads = [
-                    (stage.xfer_side_handles[spec.remote_rank], stage)
-                    for stage in pp_stages.values()
-                ]
-            else:
-                remote_reads = [
-                    (self.dst_xfer_side_handles[engine_id][spec.remote_rank], None)
-                ]
-            for remote_xfer_side_handle, pp_stage in remote_reads:
-                remote_region_num_blocks: list[int] | None
-                if pp_stage:
-                    region_pairs = pp_stage.pairs
-                    remote_region_num_blocks = pp_stage.remote_num_blocks
-                    remote_pp_rank = pp_stage.pp_rank
-                else:
-                    region_pairs = self._dst_pairs[engine_id]
-                    remote_region_num_blocks = (
-                        self.dst_region_num_blocks.get(engine_id) or None
-                    )
-                    remote_pp_rank = 0
-                remote_agent = self._remote_agents[engine_id][
-                    (remote_pp_rank, spec.remote_rank)
-                ]
+            # Read every stage of the remote rank; each holds a slice of the
+            # layers when the remote is pipeline-parallel.
+            for stage in stages.values():
                 # Once a read routes the request to failure reporting, the
                 # scheduler may free and reuse its blocks, so no sibling READs
                 # may be posted (and P must not be notified).
@@ -463,12 +439,14 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                     remote_request_id=meta.remote.request_id,
                     local_xfer_side_handle=local_xfer_side_handle,
                     local_dram_handle=local_dram_handle,
-                    remote_xfer_side_handle=remote_xfer_side_handle,
+                    remote_xfer_side_handle=stage.xfer_side_handles[spec.remote_rank],
                     expected_consumers=plan.local_consumers,
                     awaiting_kvs=meta.awaiting_kvs,
-                    region_pairs=region_pairs,
-                    remote_region_num_blocks=remote_region_num_blocks,
-                    remote_agent=remote_agent,
+                    region_pairs=stage.pairs,
+                    remote_region_num_blocks=stage.region_num_blocks,
+                    remote_agent=self._remote_agents[engine_id][
+                        (stage.pp_rank, spec.remote_rank)
+                    ],
                 ):
                     return
 
@@ -509,7 +487,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         expected_consumers: int,
         awaiting_kvs: bool,
         region_pairs: _RegionPairs,
-        remote_region_num_blocks: list[int] | None,
+        remote_region_num_blocks: list[int],
         remote_agent: str,
     ) -> bool:
         """Post a READ point-to-point xfer request from a single local worker to
@@ -617,7 +595,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
             dst_num_blocks=self.dst_num_blocks[self.engine_id],
             block_size_ratio=block_size_ratio,
             physical_blocks_per_logical=self._physical_blocks_per_logical_kv_block,
-            region_num_blocks=(self.dst_region_num_blocks.get(self.engine_id) or None),
+            region_num_blocks=self.region_num_blocks or None,
             pairs=(pairs.local, pairs.local if by_region else pairs.group),
         )
 

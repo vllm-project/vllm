@@ -310,13 +310,14 @@ def test_packed_mla_pp_pairs_asymmetric_strides_and_overlapping_layers(
         producer.add_remote_agent(metadata, remote_tp_rank=rank, remote_tp_size=2)
         assert metadata.region_num_blocks == [d_num_blocks] * 3
         assert metadata.region_names == ["L2", "L2.swa", "L3"]
-        pairs = producer._dst_pairs[consumer.engine_id]
+        stage = producer._single_remote_stage(consumer.engine_id)
+        pairs = stage.pairs
         local_ids = producer._compute_desc_ids(
             [[1], [2], [3]],
             producer.num_blocks,
             None,
             1,
-            region_num_blocks=producer.dst_region_num_blocks[producer.engine_id],
+            region_num_blocks=producer.region_num_blocks,
             pairs=(pairs.local, pairs.group),
         )
         local_descs = expand_strided_descs(producer.src_blocks_data)
@@ -330,10 +331,10 @@ def test_packed_mla_pp_pairs_asymmetric_strides_and_overlapping_layers(
             metadata.num_blocks,
             None,
             1,
-            region_num_blocks=producer.dst_region_num_blocks[consumer.engine_id],
+            region_num_blocks=stage.region_num_blocks,
             pairs=(pairs.remote, pairs.group),
         )
-        handle = producer.dst_xfer_side_handles[consumer.engine_id][rank]
+        handle = stage.xfer_side_handles[rank]
         remote_descs = producer.nixl_wrapper.dlists[handle]
         assert len(remote_descs) == 3 * d_num_blocks
         assert remote_descs[remote_ids].tolist() == [
@@ -431,10 +432,7 @@ def _register_overlaid_mla_worker(
     worker.nixl_wrapper = _RecordingNixl()
     worker._registered_descs = []
     worker.dst_num_blocks = {}
-    worker.dst_region_num_blocks = {}
-    worker.dst_region_group_ids = {}
-    worker._dst_pairs = {}
-    worker.dst_region_mem_types = {}
+    worker._remote_stages = {}
     worker._desc_is_dram_by_block_size = {}
     worker._desc_pos_by_block_size = {}
     worker._dram_src_handles_by_block_size = {}
@@ -521,7 +519,7 @@ def test_overlaid_transfer_groups_share_region_geometry(push_pp):
     local_descs = expand_strided_descs(worker.src_blocks_data)
     assert local_descs[:, 0].tolist() == expected_addrs
     assert worker.num_descs == num_blocks
-    assert worker.dst_region_num_blocks[worker.engine_id] == [num_blocks]
+    assert worker.region_num_blocks == [num_blocks]
 
     metadata = msgspec.msgpack.decode(
         worker.xfer_handshake_metadata.agent_metadata_bytes,
@@ -2655,14 +2653,10 @@ def _pull_page_pairs(
     decode.start_load_kv(metadata)
 
     nixl = decode.nixl_wrapper
-    handles = (
-        [
-            decode._remote_pp_stages["prefill"][pp_rank].xfer_side_handles[0]
-            for pp_rank in range(len(stages))
-        ]
-        if len(stages) > 1
-        else [decode.dst_xfer_side_handles["prefill"][0]]
-    )
+    handles = [
+        decode._remote_stages["prefill"][pp_rank].xfer_side_handles[0]
+        for pp_rank in range(len(stages))
+    ]
     pairs = set()
     for _, local_handle, local_descs, remote_handle, remote_descs in nixl.xfers:
         pp_rank = handles.index(remote_handle)
@@ -2850,8 +2844,7 @@ def test_pull_pp_failure_releases_blocks_after_all_workers_finish(
     _add_prefill_stages(worker, stages)
     nixl = worker.nixl_wrapper
     remote_handles = [
-        worker._remote_pp_stages["prefill"][rank].xfer_side_handles[0]
-        for rank in range(2)
+        worker._remote_stages["prefill"][rank].xfer_side_handles[0] for rank in range(2)
     ]
     for rank, (stage, handle) in enumerate(zip(stages, remote_handles)):
         nixl.peers[handle] = nixl.peers[f"prefill-pp{rank}"] = stage.nixl_wrapper

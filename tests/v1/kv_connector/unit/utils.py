@@ -53,6 +53,7 @@ from vllm.v1.structured_output import StructuredOutputManager
 if TYPE_CHECKING:
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
         _RegionPairs,
+        _RemoteStage,
     )
 
 EOS_TOKEN_ID = 50256
@@ -753,3 +754,33 @@ def region_pairs_by_index(
         partner=regions,
         groups_match=groups_match,
     )
+
+
+def remote_stage(
+    pairs: "_RegionPairs",
+    region_num_blocks: Sequence[int],
+    region_group_ids: Sequence[int] | None = None,
+    xfer_side_handles: dict[int, int] | None = None,
+) -> dict[int, "_RemoteStage"]:
+    """The stages of a PP=1 remote engine: one stage 0 pairing `pairs`.
+
+    `region_num_blocks` and `region_group_ids` describe the paired remote
+    regions; groups default to 0. `xfer_side_handles` maps remote TP rank to
+    its prepped dst handle."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
+        _RemoteStage,
+    )
+
+    num_regions = len(pairs.remote_regions)
+    return {
+        0: _RemoteStage(
+            pp_rank=0,
+            pairs=pairs,
+            layers=[],
+            region_num_blocks=list(region_num_blocks),
+            region_group_ids=list(region_group_ids)
+            if region_group_ids is not None
+            else [0] * num_regions,
+            xfer_side_handles=dict(xfer_side_handles or {}),
+        )
+    }
