@@ -8,6 +8,7 @@ import operator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, ClassVar
 
+import torch
 from torch import fx, nn
 from transformers.activations import ACT2CLS
 
@@ -48,12 +49,24 @@ for _act_name, _act_cls in ACT2CLS.items():
 ACT_AND_MUL_NAMES = frozenset(_ACTIVATION_AND_MUL_REGISTRY.keys())
 
 
+class ActAndMulQuant(nn.Module):
+    """`act` that can fuse with the input quantization of the linear it feeds."""
+
+    def __init__(self, act: nn.Module):
+        super().__init__()
+        self.act = act
+
+    def forward(self, x: torch.Tensor, linear: nn.Module):
+        return maybe_fused_act_quant(self.act, x, linear)
+
+
 @dataclass
 class GLUFuser(MergedColumnParallelFuser):
     """Fuser for the GLU pattern `act(gate(x)) * up(x)`."""
 
     act_name: str
     down_name: str | None
+    fuses_act_quant: bool = False
     merged_name: ClassVar[str] = "gate_up_proj"
 
     @property
@@ -159,16 +172,13 @@ class GLUFuser(MergedColumnParallelFuser):
         assert isinstance(gate_call.func, ast.Attribute)
         gate_call.func.attr = self.merged_name
         replace_expr(funcdef, muls[0], act_call)
-        # down(act(y)) -> down(maybe_fused_act_quant(act, y, down))
+        # down(act(y)) -> down(act(y, down)), see `ActAndMulQuant`
         if self.down_name is not None:
             down_call = single_self_call(funcdef, self.down_name)
             if down_call.args == [act_call]:
-                down = copy.deepcopy(down_call.func)
-                fused_args = [act_call.func, *act_call.args, down]
-                fused_fn = ast.Name(maybe_fused_act_quant.__name__, ast.Load())
-                down_call.args = [ast.Call(fused_fn, fused_args, [])]
-        extra_globals = {maybe_fused_act_quant.__name__: maybe_fused_act_quant}
-        self.fused_forward = compile_forward(funcdef, fn, extra_globals)
+                act_call.args.append(copy.deepcopy(down_call.func))
+                self.fuses_act_quant = True
+        self.fused_forward = compile_forward(funcdef, fn)
 
     def validate(self, module: nn.Module, vllm_config: "VllmConfig") -> bool:
         if not super().validate(module, vllm_config):
@@ -190,6 +200,8 @@ class GLUFuser(MergedColumnParallelFuser):
     ) -> None:
         super().update_attrs(module, prefix, vllm_config)
         act_fn = self._get_act_and_mul(module.get_submodule(self.act_name))
+        if self.fuses_act_quant:
+            act_fn = ActAndMulQuant(act_fn)
         setattr(module, self.act_name, act_fn)
         # If there is a down projection, we know it must be rowwise.
         if self.down_name is not None:

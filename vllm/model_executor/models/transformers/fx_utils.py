@@ -325,17 +325,14 @@ def forward_input_count(cls: type[nn.Module]) -> int:
     return sum(1 for p in params[1:] if p.kind in fixed)
 
 
-def compile_forward(
-    funcdef: ast.FunctionDef, fn: Callable, extra_globals: dict | None = None
-) -> Callable:
+def compile_forward(funcdef: ast.FunctionDef, fn: Callable) -> Callable:
     """Compile `funcdef` in `fn`'s module so tracebacks point at the source."""
     module = ast.Module(body=[funcdef], type_ignores=[])
     ast.fix_missing_locations(module)
     ast.increment_lineno(module, fn.__code__.co_firstlineno - 1)
     code = compile(module, fn.__code__.co_filename, "exec")
     namespace: dict = {}
-    fn_globals = fn.__globals__ | extra_globals if extra_globals else fn.__globals__
-    exec(code, fn_globals, namespace)
+    exec(code, fn.__globals__, namespace)
     return namespace[funcdef.name]
 
 
