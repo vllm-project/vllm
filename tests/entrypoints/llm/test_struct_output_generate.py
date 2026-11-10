@@ -1073,3 +1073,23 @@ def test_structured_output_with_structural_tag(backend: str, vllm_runner):
             assert "hello_flag" in generated_text, (
                 f"Expected 'hello_flag' to be in generated text, but got: {generated_text}"
             )
+
+
+def test_structured_output_lark_grammar_with_special_token(vllm_runner):
+    """A Lark grammar may name a special token, which request validation
+    resolves with the tokenizer as the backend does when compiling."""
+    with vllm_runner(
+        "Qwen/Qwen2.5-1.5B-Instruct",
+        structured_outputs_config=StructuredOutputsConfig(backend="xgrammar"),
+    ) as runner:
+        sampling_params = SamplingParams(
+            temperature=0.0,
+            max_tokens=10,
+            structured_outputs=StructuredOutputsParams(
+                grammar='start: "ok" <|im_end|>'
+            ),
+        )
+        outputs = runner.llm.generate("Say ok.", sampling_params=sampling_params)
+    output = outputs[0].outputs[0]
+    assert output.text == "ok"
+    assert output.finish_reason == "stop"

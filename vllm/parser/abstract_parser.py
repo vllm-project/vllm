@@ -336,6 +336,10 @@ def _xgrammar_supports(structured_outputs: StructuredOutputsParams) -> bool:
 
     try:
         # validate_xgrammar_grammar rewrites `choice` into `grammar` in place.
+        # No tokenizer: the composed tag is validated without one, and
+        # xgrammar's Python `Grammar.from_structural_tag` takes no
+        # `tokenizer_info`, so a Lark grammar naming a special token must not
+        # be composed. TODO: pass the tokenizer once it does.
         validate_xgrammar_grammar(
             SamplingParams(structured_outputs=replace(structured_outputs))
         )

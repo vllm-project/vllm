@@ -40,6 +40,8 @@ NUMBER: /[0-9]+/
 
 EBNF_GRAMMAR = 'root ::= "id=" [0-9]+'
 
+SPECIAL_TOKEN_LARK = 'start: "ok" <|endoftext|>'
+
 
 def _validate(
     grammar: str,
@@ -114,13 +116,32 @@ def test_validation_rejects_invalid_lark(grammar: str):
 
 
 @pytest.fixture(scope="module")
-def backend() -> XgrammarBackend:
+def tokenizer():
+    return AutoTokenizer.from_pretrained(TOKENIZER)
+
+
+@pytest.mark.parametrize("backend", ["xgrammar", "auto"])
+def test_validation_resolves_special_tokens_with_tokenizer(
+    backend: StructuredOutputsBackend, tokenizer
+):
+    """A named special token resolves with the tokenizer, as when compiling;
+    `auto` keeps the grammar on xgrammar instead of falling back."""
+    assert _validate(SPECIAL_TOKEN_LARK, backend, tokenizer)._backend == "xgrammar"
+
+
+def test_validation_rejects_unknown_special_token(tokenizer):
+    with pytest.raises(VLLMValidationError, match="Invalid grammar specification"):
+        _validate('start: "ok" <|no_such_token|>', "xgrammar", tokenizer)
+
+
+@pytest.fixture(scope="module")
+def backend(tokenizer) -> XgrammarBackend:
     vllm_config = VllmConfig(
         structured_outputs_config=StructuredOutputsConfig(backend="xgrammar")
     )
     return XgrammarBackend(
         vllm_config,
-        tokenizer=AutoTokenizer.from_pretrained(TOKENIZER),
+        tokenizer=tokenizer,
         vocab_size=VOCAB_SIZE,
     )
 

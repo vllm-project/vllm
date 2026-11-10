@@ -1338,7 +1338,7 @@ class SamplingParams(
 
         if backend.startswith("xgrammar"):
             # xgrammar with no fallback
-            validate_xgrammar_grammar(self)
+            validate_xgrammar_grammar(self, tokenizer)
         elif backend.startswith("guidance"):
             if _is_non_tekken_mistral(tokenizer=tokenizer):
                 raise VLLMValidationError(
@@ -1398,7 +1398,7 @@ class SamplingParams(
             # this setting. We include fallback behavior here, but not with any
             # other setting where a specific backend was specified.
             try:
-                validate_xgrammar_grammar(self)
+                validate_xgrammar_grammar(self, tokenizer)
                 self.structured_outputs._backend = "xgrammar"
             except VLLMValidationError:
                 # The request either failed validation
