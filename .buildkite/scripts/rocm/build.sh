@@ -189,7 +189,6 @@ keys_at() {
         requirements/common.txt \
         requirements/rocm.txt \
         requirements/test/rocm.txt \
-        requirements/test/quantization_deps_rocm.txt \
         rust-toolchain.toml \
         tests/vllm_test_utils \
         tools/install_torchcodec_rocm.sh
