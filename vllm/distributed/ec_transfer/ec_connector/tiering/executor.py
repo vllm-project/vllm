@@ -60,6 +60,7 @@ class _PendingJob:
     file_size_bytes: int
     submit_time: float
     start_time: float | None = None
+    transfer_time: float = 0.0
     error: str | None = None
 
 
@@ -175,18 +176,27 @@ class ECFileIOExecutor:
 
             def task() -> None:
                 with self._lock:
-                    self._pending[job_id].start_time = time.monotonic()
+                    if job_id not in self._pending:
+                        return
+                    job.start_time = time.monotonic()
                 try:
                     task_factory()
                 except Exception as exc:
                     with self._lock:
-                        self._pending[job_id].error = f"{type(exc).__name__}: {exc}"
+                        job.error = f"{type(exc).__name__}: {exc}"
                     raise
+                finally:
+                    job.transfer_time = time.monotonic() - job.start_time
 
-            if operation == "read":
-                self._pool.enqueue_load(job_id, 1, [task])
-            else:
-                self._pool.enqueue_store(job_id, 1, [task])
+            try:
+                if operation == "read":
+                    self._pool.enqueue_load(job_id, 1, [task])
+                else:
+                    self._pool.enqueue_store(job_id, 1, [task])
+            except Exception:
+                del self._pending[job_id]
+                self._decrement_pending(operation, file_size_bytes)
+                raise
             return job_id
 
     def poll_completed(self) -> list[ECFileIOCompletion]:
@@ -231,8 +241,10 @@ class ECFileIOExecutor:
             self._shutdown = True
 
     def _collect_completed(self) -> None:
-        for job_id, success, transfer_time in self._pool.get_finished():
-            job = self._pending.pop(job_id)
+        for job_id, success, _ in self._pool.get_finished():
+            job = self._pending.pop(job_id, None)
+            if job is None:
+                continue
             self._decrement_pending(job.operation, job.file_size_bytes)
             assert job.start_time is not None
             self._completed.append(
@@ -244,7 +256,7 @@ class ECFileIOExecutor:
                     file_size_bytes=job.file_size_bytes,
                     submit_time=job.submit_time,
                     queue_time=job.start_time - job.submit_time,
-                    transfer_time=transfer_time,
+                    transfer_time=job.transfer_time,
                     error=job.error,
                 )
             )
