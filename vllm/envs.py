@@ -227,6 +227,7 @@ if TYPE_CHECKING:
     VLLM_KIMI_SD_DSA_FOLD: bool = True
     VLLM_KIMI_SD_DSA_PART_FP32: bool = False
     VLLM_KIMI_SD_DSA_VERIFY: bool = False
+    VLLM_K3_KDA_FB_STRIDED: bool = True
     VLLM_ENABLE_GEMM_RS: bool = False
     VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER: bool = True
     VLLM_USE_FLASHINFER_MOE_INT4: bool = False
@@ -1763,6 +1764,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # log how the query, KV write, top-k and o_proj input differ.
     "VLLM_KIMI_SD_DSA_VERIFY": lambda: bool(
         int(os.getenv("VLLM_KIMI_SD_DSA_VERIFY", "0"))
+    ),
+    # Kimi-K3 KDA on ROCm: run f_b_proj as a Triton GEMM that reads the
+    # row-strided f_a slice of the fused in_proj output in place, instead of
+    # the generic unquantized GEMM, which copies it to a contiguous buffer first.
+    "VLLM_K3_KDA_FB_STRIDED": lambda: bool(
+        int(os.getenv("VLLM_K3_KDA_FB_STRIDED", "1"))
     ),
     # Fuse eligible sequence-parallel row-parallel projections with their TP
     # reduce-scatter using the SM100 BF16/MXFP8 GEMM-RS kernel (Kimi-K3
