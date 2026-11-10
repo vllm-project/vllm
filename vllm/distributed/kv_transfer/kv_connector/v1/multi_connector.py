@@ -250,6 +250,17 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         )
 
     @classmethod
+    def only_restores_canonical_kv(cls, kv_transfer_config: "KVTransferConfig") -> bool:
+        children = [
+            KVTransferConfig(**{"engine_id": kv_transfer_config.engine_id, **c})
+            for c in kv_transfer_config.kv_connector_extra_config.get("connectors", [])
+        ]
+        return bool(children) and all(
+            KVConnectorFactory.get_connector_class(c).only_restores_canonical_kv(c)
+            for c in children
+        )
+
+    @classmethod
     def _get_connector_classes_and_configs(
         cls, vllm_config: "VllmConfig"
     ) -> list[tuple[type[KVConnectorBaseType], "VllmConfig"]]:
@@ -514,6 +525,9 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
     def on_new_request(self, request: "Request") -> None:
         for c in self._connectors:
             c.on_new_request(request)
+
+    def may_load_async(self, request: "Request") -> bool:
+        return any(c.may_load_async(request) for c in self._connectors)
 
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput

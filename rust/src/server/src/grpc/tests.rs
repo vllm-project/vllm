@@ -48,9 +48,12 @@ use vllm_engine_core_client::protocol::output::{
 use vllm_engine_core_client::protocol::request::EngineCoreRequest;
 use vllm_engine_core_client::protocol::tensor::WireTensor;
 use vllm_engine_core_client::protocol::utility::{UtilityOutput, UtilityResultEnvelope};
-use vllm_engine_core_client::test_utils::{IpcNamespace, spawn_mock_engine_task_with_ready};
+use vllm_engine_core_client::test_utils::{
+    IpcNamespace, decode_add_request, decode_prompt_token_ids, spawn_mock_engine_task_with_ready,
+};
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig, EngineId, TransportMode};
-use vllm_llm::Llm;
+use vllm_llm::EngineCoreLlm;
+use vllm_metrics::METRICS;
 use vllm_text::tokenizer::DynTokenizer;
 use vllm_text::{Prompt, TextBackend};
 use vllm_tokenizer::test_utils::{PanickingTokenizer, TestTokenizer};
@@ -388,8 +391,7 @@ where
         move |dealer, push| {
             boxed_test_future(async move {
                 let add = recv_engine_message(dealer).await;
-                let request: EngineCoreRequest =
-                    rmp_serde::from_slice(&add[1]).expect("decode request");
+                let request = decode_add_request(&add);
                 check_request(&request);
                 send_outputs(
                     push,
@@ -438,9 +440,10 @@ where
     )
     .await
     .expect("connect client");
-    let engine_health = EngineHealth::subscribe(&client);
+    let llm = EngineCoreLlm::new(client);
+    let engine_health = EngineHealth::subscribe(&llm);
 
-    let chat = ChatLlm::from_shared_backend(Llm::new(client), backend);
+    let chat = ChatLlm::from_shared_backend(llm, backend).with_served_model_name("test-model");
     let state = Arc::new(AppState::new(vec!["test-model".to_string()], chat));
     (
         InferenceServer::new(InferenceServiceImpl::new(state.clone()))
@@ -680,6 +683,7 @@ async fn h2_unresponsive_peer_closed_within(addr: &str, wait: Duration) -> bool 
 async fn unary_generate_returns_collected_text() {
     let (mut client, server_task, engine_task) =
         grpc_test_server(b"engine-grpc-unary", default_stream_output_specs()).await;
+    let before = render_duration_count();
 
     let response = client
         .generate(pb::GenerateRequest {
@@ -715,8 +719,23 @@ async fn unary_generate_returns_collected_text() {
     let prompt = response.prompt_info.expect("prompt_info present");
     assert_eq!(prompt.num_prompt_tokens, 5); // "hello" = 5 bytes
 
+    // The text facade records the render, as for `/v1/completions`.
+    assert_eq!(render_duration_count() - before, 1.0);
+
     engine_task.await.expect("mock engine task");
     server_task.abort();
+}
+
+/// `vllm:request_render_duration_seconds` observations of `completion`
+/// renders for the test model.
+fn render_duration_count() -> f64 {
+    let rendered = METRICS.render().expect("render metrics");
+    let prefix = "vllm:request_render_duration_seconds_count{model_name=\"test-model\",\
+                  request_type=\"completion\"} ";
+    rendered
+        .lines()
+        .find_map(|line| line.strip_prefix(prefix))
+        .map_or(0.0, |value| value.parse().expect("numeric sample"))
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -905,7 +924,7 @@ async fn unary_generate_prepares_multimodal_input_for_engine_core() {
             default_stream_output_specs(),
             multimodal_backend(),
             |request| {
-                let token_ids = request.prompt_token_ids.as_ref().expect("prompt token ids");
+                let token_ids = decode_prompt_token_ids(request).expect("prompt token ids");
                 let features = request.mm_features.as_ref().expect("multimodal features");
                 assert_eq!(features.len(), 2);
 
@@ -1024,7 +1043,7 @@ async fn generate_forwards_preprocessed_multimodal_features() {
                 multimodal_backend(),
                 move |request| {
                     assert_eq!(
-                        request.prompt_token_ids.as_deref(),
+                        decode_prompt_token_ids(request).as_deref(),
                         Some(&[11, 99, 99, 12][..])
                     );
                     let features = request.mm_features.as_ref().expect("multimodal features");
@@ -2027,8 +2046,7 @@ async fn dropping_generate_stream_aborts_before_engine_output() {
                 boxed_test_future(async move {
                     let add = recv_engine_message(dealer).await;
                     assert_eq!(add[0].as_ref(), &[0x00]);
-                    let request: EngineCoreRequest =
-                        rmp_serde::from_slice(&add[1]).expect("decode request");
+                    let request = decode_add_request(&add);
                     submitted_tx.send(()).expect("signal submitted request");
 
                     // A queued request produces no output before cancellation.
@@ -2424,6 +2442,7 @@ async fn control_sleep_rejects_unknown_level() {
         .sleep(pb::SleepRequest {
             level: Some(3),
             mode: pb::PauseMode::Unspecified.into(),
+            reset_connector: None,
         })
         .await
         .expect_err("level 3 should be rejected");
@@ -2567,7 +2586,7 @@ async fn control_aggregates_multi_engine_capacity() {
         }
         let client = client_task.await.unwrap().expect("connect multi-engine client");
         let chat = ChatLlm::from_shared_backend(
-            Llm::new(client),
+            EngineCoreLlm::new(client),
             Arc::new(FakeTextBackend::default()) as Arc<dyn ChatTextBackend>,
         );
         let state = AppState::new(vec!["test-model".to_string()], chat);

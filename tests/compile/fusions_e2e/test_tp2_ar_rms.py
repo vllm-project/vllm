@@ -96,8 +96,8 @@ def test_tp2_ar_rms_fp8_fusions(
     block_fp8 = "qwen" in model_name_lower or "deepseek" in model_name_lower
     if rocm_static_fp8_mla:
         block_fp8 = False
-        if custom_ops != "-quant_fp8,-rms_norm":
-            pytest.skip("ROCm static-FP8 MLA parity uses native quant and RMSNorm")
+        if "+quant_fp8" in custom_ops:
+            pytest.skip("ROCm static-FP8 MLA parity uses native quant")
         # AITER's MoE GEMM rejects this reduced dummy model shape; keep AITER
         # for MLA and the all-reduce, and let the MoE run on Triton.
         monkeypatch.setenv("VLLM_ROCM_USE_AITER_MOE", "0")
