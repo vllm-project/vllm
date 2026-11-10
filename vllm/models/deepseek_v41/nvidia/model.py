@@ -13,7 +13,6 @@ import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.config.kernel import MEGA_MOE_BACKENDS, NATIVE_MEGA_MOE_BACKENDS
 from vllm.distributed import (
-    get_engram_dp_size,
     get_pcp_group,
     get_pp_group,
     get_tensor_model_parallel_world_size,
@@ -36,6 +35,7 @@ from vllm.model_executor.layers.fused_moe import (
 )
 from vllm.model_executor.layers.fused_moe.experts.trtllm_mxfp4_moe import (
     TrtLlmMxfp4ExpertsModular,
+    TrtLlmMxfp4Mxfp8ExpertsModular,
 )
 from vllm.model_executor.layers.fused_moe.moe_output import (
     MoEOutput,
@@ -55,7 +55,6 @@ from vllm.model_executor.model_loader.weight_utils import (
 )
 from vllm.model_executor.models.interfaces import (
     EagleModelMixin,
-    MixtureOfExperts,
     SupportsEagle3,
     SupportsLoRA,
     SupportsPP,
@@ -75,13 +74,15 @@ from vllm.models.common.ops.sequence_parallel import (
     sp_reduce_scatter,
     sp_shard,
 )
+from vllm.models.deepseek_v4.common.spec_decode import needs_mtp_hidden_buffer
 from vllm.models.deepseek_v4.nvidia.model import (
-    DeepseekV4MoE as DeepseekV4MoEBase,
-)
-from vllm.models.deepseek_v4.nvidia.model import (
+    DeepseekV4MixtureOfExperts,
     MegaGateRoutingMetadata,
     make_deepseek_v4_expert_params_mapping,
     prepare_mega_gate_routing_metadata,
+)
+from vllm.models.deepseek_v4.nvidia.model import (
+    DeepseekV4MoE as DeepseekV4MoEBase,
 )
 from vllm.models.deepseek_v41.attention import DeepseekV4Attention
 from vllm.models.deepseek_v41.decoder_replay_layers import DecoderReplayLayers
@@ -110,6 +111,7 @@ from ..common.engram import (
 from ..common.mm_preprocess import IMAGE_SENTINEL_BASE_ID, image_sentinel_mask
 from .ops.mhc import (
     MHC_OVERLAP_MAX_TOKENS,
+    hc_expand,
     init_mhc_all_reduce,
     mhc_pre_delayed_overlap,
     mhc_shifted_post_pre,
@@ -166,7 +168,7 @@ class DeepseekV4MoE(DeepseekV4MoEBase):
             self.experts.routed_experts.quant_method, "experts_cls", None
         )
         if (
-            experts_cls is TrtLlmMxfp4ExpertsModular
+            experts_cls in (TrtLlmMxfp4ExpertsModular, TrtLlmMxfp4Mxfp8ExpertsModular)
             and self.experts.routed_scaling_factor == 1.0
         ):
             moe_config.defer_moe_finalize(MHC_OVERLAP_MAX_TOKENS)
@@ -186,7 +188,7 @@ class DeepseekV4MoE(DeepseekV4MoEBase):
     def forward_unfinalized(
         self, hidden_states: torch.Tensor, input_ids: torch.Tensor | None
     ) -> MoEOutput:
-        """``forward`` with the routed top-k reduction and all-reduce left open."""
+        """`forward` with the routed top-k reduction and all-reduce left open."""
         # The runner's custom op returns tensors only, so run its body directly.
         shared_output, routed = _unpack(
             self.experts._forward_impl(
@@ -237,6 +239,12 @@ def _select_dsv4_attn_cls(vllm_config: VllmConfig) -> type[DeepseekV4Attention]:
             return DeepseekV4FlashInferSM120Attention
         return DeepseekV4FlashInferMLAAttention
     if backend is AttentionBackendEnum.FLASHMLA_MEGA_ATTN_DSV41:
+        # FlashMLA mega attention reads the grouped ``wo_a`` weight directly
+        # from its fused quantized output. LoRA wraps that layer after model
+        # construction, so use the split-KV path whose grouped projection
+        # explicitly applies the adapter delta.
+        if vllm_config.lora_config is not None:
+            return DeepseekV4FlashMLAAttention
         return DeepseekV4MegaAttnAttention
     if backend in (
         AttentionBackendEnum.FLASHMLA_SPARSE,
@@ -253,7 +261,9 @@ def _select_dsv4_attn_cls(vllm_config: VllmConfig) -> type[DeepseekV4Attention]:
     # implementation itself stores. It declines topologies it cannot serve
     # (non-SM100, TP that leaves fewer than WV_GROUP_SIZE heads per wo_a
     # group, a build without the kernel), which then fall through to FlashMLA.
-    if DeepseekV4MegaAttnAttention.is_available_for(vllm_config):
+    if vllm_config.lora_config is None and DeepseekV4MegaAttnAttention.is_available_for(
+        vllm_config
+    ):
         return DeepseekV4MegaAttnAttention
     return DeepseekV4FlashMLAAttention
 
@@ -264,8 +274,7 @@ def _use_sequence_parallel(vllm_config: VllmConfig) -> bool:
         vllm_config.kernel_config.moe_backend in MEGA_MOE_BACKENDS
     )
     return (
-        parallel_config.pipeline_parallel_size == 1
-        and parallel_config.enable_expert_parallel
+        parallel_config.enable_expert_parallel
         and parallel_config.tensor_parallel_size > 1
         and (moe_needs_token_sharded_input or parallel_config.data_parallel_size > 1)
     )
@@ -287,15 +296,21 @@ def _shard_fused_wqa_wkv(vllm_config: VllmConfig) -> bool:
 
 
 def maybe_init_gemm_rs(vllm_config: VllmConfig, use_sequence_parallel: bool) -> bool:
-    """Set up the fused ``wo_b`` GEMM + reduce-scatter when opted in.
+    """Set up the fused `wo_b` GEMM + reduce-scatter when opted in.
 
-    Sequence parallel is the only topology where ``wo_b`` ends in a
+    Sequence parallel is the only topology where `wo_b` ends in a
     reduce-scatter, so the kernel is bound to RS mode. The workspace is a
     process-wide singleton shared with any other model code in this worker
     (the DSpark drafter reuses it), and its NVLink multicast rendezvous is
     collective, so every TP rank must take the same decision here.
     """
     if not (use_sequence_parallel and envs.VLLM_ENABLE_GEMM_RS):
+        return False
+    if vllm_config.lora_config is not None:
+        # The fused kernel reads wo_b's base weight and has no LoRA epilogue.
+        logger.warning_once(
+            "DeepSeek-V4.1 GEMM-RS is disabled because LoRA is enabled."
+        )
         return False
 
     # The kernel module pulls in cute_dsl, so import it only once opted in.
@@ -528,7 +543,7 @@ class DeepseekV4DecoderLayer(nn.Module):
                 # First layer: the stream is the embedding broadcast to hc
                 # copies and the identity pre-mix selects copy 0.
                 assert self.hc_attn_fn_broadcast is not None
-                residual = x.unsqueeze(1).expand(-1, self.hc_mult, -1).contiguous()
+                residual = hc_expand(x, self.hc_mult)
                 post_mix, res_mix, x, attn_pre = mhc_pre(
                     residual,
                     self.hc_attn_fn_broadcast,
@@ -582,6 +597,7 @@ class DeepseekV4DecoderLayer(nn.Module):
                 engram_hashes[:, self.engram.layer_hash_index],
                 engram_mask,
             )
+            del previous_post
             post_mix, res_mix, x, attn_pre = mhc_pre(
                 residual,
                 self.hc_attn_fn,
@@ -671,7 +687,7 @@ class DeepseekV4DecoderLayer(nn.Module):
         res_mix: torch.Tensor,
         residual: torch.Tensor,
     ) -> None:
-        """Write the KV ``forward`` would for the replay layers' inputs, skipping
+        """Write the KV `forward` would for the replay layers' inputs, skipping
         the rest of the layer; the replay batch then reruns its rows."""
         # The replay batch rules out Engram and sequence parallel here.
         assert self.engram is None and not self.use_sequence_parallel
@@ -706,14 +722,13 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         self.quant_config = quant_config
         self.parallel_config = vllm_config.parallel_config
         if self.parallel_config.prefill_context_parallel_size > 1 and (
-            self.parallel_config.pipeline_parallel_size != 1
-            or self.parallel_config.data_parallel_size != 1
-            or self.parallel_config.decode_context_parallel_size != 1
+            self.parallel_config.decode_context_parallel_size != 1
             or self.parallel_config.use_ubatching
             or (
                 vllm_config.speculative_config is not None
                 and (
-                    not vllm_config.speculative_config.use_dspark()
+                    self.parallel_config.pipeline_parallel_size > 1
+                    or not vllm_config.speculative_config.use_dspark()
                     or vllm_config.speculative_config.enable_adaptive_verification
                 )
             )
@@ -725,9 +740,9 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             or vllm_config.kernel_config.moe_backend in MEGA_MOE_BACKENDS
         ):
             raise NotImplementedError(
-                "DeepSeek-V4.1 PCP currently requires PP=DP=DCP=1, with no "
+                "DeepSeek-V4.1 PCP currently requires DCP=1, with no "
                 "microbatching, KV transfer, or MegaMoE. "
-                "Speculative decoding requires fixed-length DSpark. "
+                "Speculative decoding requires fixed-length DSpark with PP=1. "
                 "Prefix caching requires SWA bounded replay."
             )
         self.use_native_mega_moe = (
@@ -869,6 +884,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             cut < self.end_layer - 1
             and self._decoder_replay_supported(vllm_config, cut)
             and self.layers[cut].attn.swa_cache_layer.bounded_replay
+            and vllm_config.lora_config is None
         ):
             assert self.layers[cut].attn.compress_ratio <= 1
             # The last KV source writes every row's KV, then replays.
@@ -888,6 +904,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 self.layers[cut].write_kv,
                 metadata_prefixes,
                 self.layers[cut].attn.swa_cache_layer.prefix,
+                lambda: any(i < cut for i in self.aux_hidden_state_layers),
             )
             logger.info_once(
                 "Decoder SWA bounded replay: in eager prefill steps, layer %d "
@@ -936,10 +953,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             self.norm = PPMissingLayer()
 
         spec_config = vllm_config.speculative_config
-        needs_mtp_hidden_states = spec_config is not None and (
-            spec_config.use_eagle() or spec_config.uses_draft_model()
-        )
-        if get_pp_group().is_last_rank and needs_mtp_hidden_states:
+        if get_pp_group().is_last_rank and needs_mtp_hidden_buffer(spec_config):
             self._mtp_hidden_buffer = torch.empty(
                 vllm_config.scheduler_config.max_num_batched_tokens,
                 self.hc_dim,
@@ -987,9 +1001,19 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         lookback_token_ids: torch.Tensor | None = None,
         decode_step: "DecodeStep | None" = None,
     ) -> torch.Tensor | IntermediateTensors:
+        # A specialized decode step embeds from the executor's copy of the
+        # table, which writes the first layer's hc streams too.
+        embedding = (
+            decode_step.executor.embedding
+            if decode_step is not None and not self.use_sequence_parallel
+            else None
+        )
+        streams: torch.Tensor | None = None
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
+            elif embedding is not None and embedding.accepts(input_ids):
+                hidden_states, streams = embedding(input_ids)
             else:
                 hidden_states = self.embed_input_ids(input_ids)
         else:
@@ -1001,8 +1025,8 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
 
         # Engram n-gram hashes for the whole (flattened) batch, computed once
         # on the full token stream — before any sequence-parallel sharding —
-        # and consumed by the engram layers (1 and 14) below. Skipped on
-        # profile runs (KV cache unbound).
+        # and consumed by the engram layers (1 and 14) below. Profile runs
+        # (KV cache unbound) look up dead rows instead.
         engram_hashes: torch.Tensor | None = None
         engram_mask: torch.Tensor | None = None
         if (
@@ -1024,14 +1048,8 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 image_mask = image_sentinel_mask(input_ids)
                 engram_mask = ~image_mask
                 if lookback_token_ids is None:
-                    if not self.engram_hash.use_slot_cache:
-                        raise NotImplementedError(
-                            "engram needs `lookback_token_ids` from the model "
-                            "runner (the DBO/ubatch wrapper drops model kwargs)"
-                        )
-                    num_reqs = swa_metadata.num_decodes + swa_metadata.num_prefills
-                    lookback_token_ids = input_ids.new_full(
-                        (num_reqs, self.engram_hash.lookback_depth), -1
+                    raise NotImplementedError(
+                        "engram needs `lookback_token_ids` from the model runner"
                     )
                 engram_hashes = self.engram_hash(
                     input_ids,
@@ -1040,12 +1058,11 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                     image_mask,
                     lookback_token_ids,
                     image_sentinel_mask(lookback_token_ids),
-                    swa_metadata.slot_mapping,
-                    swa_metadata.block_table,
                 )
-            elif not self.engram_dp_shared_memory and get_engram_dp_size() > 1:
+            else:
                 # DP-sharded lookups are collective, so a replica skipping the
-                # hash still has to reach them.
+                # hash still has to reach them; the memory profile also has to
+                # see the Engram activations.
                 engram_hashes, engram_mask = self.engram_hash.dummy_hashes(input_ids)
             if engram_hashes is not None:
                 # Gather all Engram rows before entering the decoder layers.
@@ -1083,7 +1100,12 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
 
         if decode_step is not None:
             return decode_step.run(
-                hidden_states, positions, input_ids, engram_hashes, engram_mask
+                hidden_states,
+                positions,
+                input_ids,
+                engram_hashes,
+                engram_mask,
+                streams=streams,
             )
 
         residual, post_mix, res_mix = None, None, None
@@ -1091,6 +1113,8 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         if not get_pp_group().is_first_rank:
             assert intermediate_tensors is not None
             pre_mix = intermediate_tensors["pre_mix"]
+            if self.use_sequence_parallel:
+                pre_mix = sp_shard(pre_mix)
         aux_hidden_by_layer: dict[int, torch.Tensor] = {}
         hidden_states, residual, post_mix, res_mix, pre_mix = self._run_layers(
             range(self.start_layer, self.decoder_replay_start),
@@ -1135,6 +1159,10 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         ] + late_aux
 
         if not get_pp_group().is_last_rank:
+            # PP transport expects tensors replicated across TP ranks.
+            if self.use_sequence_parallel:
+                hidden_states = sp_all_gather(hidden_states)[:full_num_tokens]
+                pre_mix = sp_all_gather(pre_mix)[:full_num_tokens]
             return IntermediateTensors(
                 {"hidden_states": hidden_states, "pre_mix": pre_mix}
             )
@@ -1252,7 +1280,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         res_mix: torch.Tensor,
         residual: torch.Tensor,
     ) -> tuple[torch.Tensor, ...]:
-        """Layers ``decoder_replay_start``.. on the given rows; returns their output,
+        """Layers `decoder_replay_start`.. on the given rows; returns their output,
         the last FFN's pre-mix and the aux hidden states they capture."""
         assert self.decoder_replay_layers is not None
         if (
@@ -1293,7 +1321,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         )
 
     def _decoder_replay_supported(self, vllm_config: VllmConfig, cut: int) -> bool:
-        """Whether this rank may replay from layer ``cut`` on; warns when not."""
+        """Whether this rank may replay from layer `cut` on; warns when not."""
         parallel_config = vllm_config.parallel_config
         spec_config = vllm_config.speculative_config
         draft_config = spec_config.draft_model_config if spec_config else None
@@ -1400,6 +1428,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                         and loaded_weight.dtype == torch.float8_e8m0fnu
                     ):
                         loaded_weight = loaded_weight.view(torch.uint8)
+                    name_mapped = None
                     for mapping in expert_mapping:
                         param_name, weight_name, expert_id, expert_shard_id = mapping
                         if weight_name not in name:
@@ -1425,7 +1454,8 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                         if success:
                             name = name_mapped
                             break
-                    loaded_params.add(name_mapped)
+                    if name_mapped is not None:
+                        loaded_params.add(name_mapped)
                     continue
                 else:
                     if is_pp_missing_parameter(name, self):
@@ -1509,8 +1539,8 @@ def _linear_scale_param_name(vllm_config: VllmConfig, expert_dtype: str) -> str:
     """Parameter name the linear quant method registers for weight scales.
 
     Native MXFP8 checkpoints ([32, 32] blocks with MXFP4 experts) route linear
-    layers through ModelOptLinearMethod, which registers ``weight_scale``;
-    block-FP8 linear layers register ``weight_scale_inv``.
+    layers through ModelOptLinearMethod, which registers `weight_scale`;
+    block-FP8 linear layers register `weight_scale_inv`.
     """
     use_mxfp8 = (
         getattr(vllm_config.quant_config, "weight_block_size", None) == [32, 32]
@@ -1574,43 +1604,6 @@ def _make_deepseek_v4_weights_mapper(
             "image_": None,
         },
     )
-
-
-class DeepseekV4MixtureOfExperts(MixtureOfExperts):
-    moe_mlp_layers: list["DeepseekV4MoE"]
-
-    def extract_moe_parameters(self, example_moe: "DeepseekV4MoE | None") -> None:
-        if example_moe is None:
-            self.num_moe_layers = 0
-            self.num_expert_groups = 0
-            self.num_logical_experts = 0
-            self.num_physical_experts = 0
-            self.num_local_physical_experts = 0
-            self.num_routed_experts = 0
-            self.num_shared_experts = 0
-            self.num_redundant_experts = 0
-            return
-        self.num_logical_experts = example_moe.n_logical_experts
-        self.num_physical_experts = example_moe.n_physical_experts
-        self.num_local_physical_experts = example_moe.n_local_physical_experts
-        self.num_routed_experts = example_moe.n_routed_experts
-        self.num_shared_experts = example_moe.n_shared_experts
-        self.num_redundant_experts = example_moe.n_redundant_experts
-
-    def update_physical_experts_metadata(
-        self,
-        num_physical_experts: int,
-        num_local_physical_experts: int,
-    ) -> None:
-        assert self.num_local_physical_experts == num_local_physical_experts
-        self.num_physical_experts = num_physical_experts
-        self.num_local_physical_experts = num_local_physical_experts
-        self.num_redundant_experts = num_physical_experts - self.num_logical_experts
-        for moe in self.moe_mlp_layers:
-            moe.n_local_physical_experts = num_local_physical_experts
-            moe.n_physical_experts = num_physical_experts
-            moe.n_redundant_experts = self.num_redundant_experts
-            moe.experts.update_expert_map()
 
 
 class DeepseekV41LLMForCausalLM(
@@ -1710,7 +1703,9 @@ class DeepseekV41LLMForCausalLM(
         self.specialized_decode = SpecializedDecode.for_target(
             self.model, self.specialized_decode_config, self.lm_head
         )
-        self.logits_processor = SpecializedDecodeLogitsProcessor(self.config.vocab_size)
+        self.logits_processor = SpecializedDecodeLogitsProcessor(
+            self.config.vocab_size, self.specialized_decode.all_gather
+        )
         return self.specialized_decode
 
     def get_model_state_cls(self):
@@ -1763,8 +1758,10 @@ class DeepseekV41LLMForCausalLM(
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
-        loaded_params = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
-        self.process_weights_after_loading()
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+
+    def process_weights_after_loading(self) -> None:
+        self.model.finalize_mhc_broadcast_weights()
         config = self.model.vllm_config
         if config.engram_config and config.engram_config.use_thp:
             # Loading weights refills the file cache; release it before MADV_COLLAPSE.
@@ -1779,10 +1776,6 @@ class DeepseekV41LLMForCausalLM(
             ):
                 if layer.engram is not None:
                     layer.engram.embed_tokens.collapse_huge_pages()
-        return loaded_params
-
-    def process_weights_after_loading(self) -> None:
-        self.model.finalize_mhc_broadcast_weights()
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         return self.model.get_expert_mapping()

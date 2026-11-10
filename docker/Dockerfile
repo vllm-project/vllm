@@ -33,6 +33,9 @@ ARG TRITON_INSTALL_FROM_SOURCE_REVISION=
 # runtime NCCL versions compatible.
 # DeepEPv2 GDA over EFA requires NCCL 2.31.x or later.
 ARG NCCL_VERSION=2.31.2
+# AWS EFA userspace (libfabric, aws-ofi-nccl), installed with the KV connectors.
+ARG EFA_INSTALLER_VERSION=1.51.0
+ARG EFA_INSTALLER_SHA256=83993044fa4df3dc2f8b5c2f7051d61b9689441be023a2c92ea51d3f53f2465c
 
 # By parameterizing the base images, we allow third-party to use their own
 # base images. One use case is hermetic builds with base images stored in
@@ -92,11 +95,6 @@ ARG UV_KEYRING_PROVIDER=${PIP_KEYRING_PROVIDER}
 
 # Flag enables built-in KV-connector dependency libs into docker images
 ARG INSTALL_KV_CONNECTORS=false
-
-# Flag builds NIXL, including its NIXL EP extension for the installed PyTorch,
-# from source and installs it in place of the nixl packages from the KV-connector
-# requirements
-ARG BUILD_NIXL=false
 
 #################### BASE BUILD IMAGE ####################
 # prepare basic build environment
@@ -253,8 +251,13 @@ RUN --mount=type=cache,target=/opt/uv/cache \
         && uv pip install --python /opt/venv/bin/python3 -r requirements/cuda.txt \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/nightly/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
     else \
+        # Keep the CUDA-specific PyTorch index first. Using it as an extra
+        # index with unsafe-best-match can select a higher, incompatible
+        # torch build from the base image (for example cu130 in a cu129 image).
         uv pip install --python /opt/venv/bin/python3 -r requirements/cuda.txt \
-        --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
+        --index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') \
+        --extra-index-url https://pypi.org/simple \
+        --index-strategy unsafe-first-match; \
     fi
 
 # Track PyTorch lib versions used during build and match in downstream instances.
@@ -372,7 +375,9 @@ RUN --mount=type=cache,target=/opt/uv/cache \
     else \
         echo "Installing build requirements..." \
         && uv pip install --python /opt/venv/bin/python3 -r requirements/build/cuda.txt \
-        --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
+        --index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') \
+        --extra-index-url https://pypi.org/simple \
+        --index-strategy unsafe-first-match; \
     fi
 
 WORKDIR /workspace
@@ -491,8 +496,9 @@ WORKDIR /workspace
 
 # Build DeepEP wheels
 COPY tools/ep_kernels/install_python_libraries.sh /tmp/install_python_libraries.sh
+COPY tools/ep_kernels/patches /tmp/patches
 # Defaults moved here from tools/ep_kernels/install_python_libraries.sh for centralized version management
-ARG DEEPEP_COMMIT_HASH=d4f41e4e93
+ARG DEEPEP_COMMIT_HASH=a56d6156febcd9976e55adc85b5155bfac9f28f8
 ARG NVSHMEM_VER
 ARG NCCL_VERSION
 RUN --mount=type=cache,target=/opt/uv/cache \
@@ -560,24 +566,6 @@ RUN --mount=type=cache,target=/opt/uv/cache \
         printf '%s\n' disabled > "${TRITON_WORKSPACE}/dist/build-state"; \
         (cd "${TRITON_WORKSPACE}/dist" \
             && sha256sum build-state > wheel.sha256); \
-    fi
-
-# Build NIXL and its NIXL EP extension against the PyTorch installed here when
-# requested. The wheels are installed by the final image, which has no compiler.
-ARG BUILD_NIXL
-COPY tools/build_nixl_with_torch215_for_rubin.py /tmp/build_nixl_for_rubin.py
-RUN --mount=type=bind,source=requirements,target=/tmp/vllm-requirements,ro \
-    set -eux; \
-    NIXL_WORKSPACE=/tmp/nixl_workspace; \
-    mkdir -p "${NIXL_WORKSPACE}/dist"; \
-    if [ "${BUILD_NIXL}" = "true" ]; then \
-        dnf install -y --setopt=install_weak_deps=False autoconf automake libtool; \
-        dnf clean all; \
-        rm -rf /var/cache/dnf; \
-        NIXL_REQUIREMENTS_FILE=/tmp/vllm-requirements/kv_connectors.txt \
-        WHEELS_CACHE_HOME="${NIXL_WORKSPACE}/dist" \
-        MAX_JOBS="${max_jobs:-}" \
-            python3 /tmp/build_nixl_for_rubin.py --skip-system-deps --build-only; \
     fi
 #################### EXTENSIONS BUILD IMAGE ####################
 
@@ -724,7 +712,7 @@ RUN --mount=type=cache,target=/opt/uv/cache \
         echo "Installing dev requirements plus torch nightly..." \
         && python3 tools/use_existing_torch.py --prefix \
         && cat torch_lib_versions.txt >> requirements/test/cuda.in \
-        && uv pip compile requirements/test/cuda.in -o requirements/test/cuda.txt --index-strategy unsafe-best-match \
+        && uv pip compile --generate-hashes requirements/test/cuda.in -o requirements/test/cuda.txt --index-strategy unsafe-best-match \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/nightly/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') \
         && uv pip install --python /opt/venv/bin/python3 $(cat torch_lib_versions.txt | xargs) --pre \
         -r requirements/dev.txt \
@@ -732,7 +720,9 @@ RUN --mount=type=cache,target=/opt/uv/cache \
     else \
         echo "Installing dev requirements..." \
         && uv pip install --python /opt/venv/bin/python3 -r requirements/dev.txt \
-        --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
+        --index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') \
+        --extra-index-url https://pypi.org/simple \
+        --index-strategy unsafe-first-match; \
     fi
 
 #################### DEV IMAGE ####################
@@ -941,7 +931,9 @@ RUN --mount=type=cache,target=/opt/uv/cache \
     else \
         uv pip install --system \
             -r /tmp/requirements-cuda.txt \
-            --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
+            --index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') \
+            --extra-index-url https://pypi.org/simple \
+            --index-strategy unsafe-first-match; \
     fi && \
     rm /tmp/requirements-cuda.txt /tmp/common.txt
 
@@ -976,7 +968,7 @@ RUN set -eux; \
 # From versions.json: .openai_server_extras.timm, .openai_server_extras.runai_model_streamer,
 # .openai_server_extras.gguf (NVFP4 GGUF checkpoints, e.g. RecursiveSI/flint-nvfp4-gguf)
 ARG TIMM_VERSION=">=1.0.17"
-ARG RUNAI_MODEL_STREAMER_VERSION=">=0.15.7"
+ARG RUNAI_MODEL_STREAMER_VERSION=">=0.17.1"
 ARG GGUF_VERSION=">=0.19.0"
 RUN --mount=type=cache,target=/opt/uv/cache \
     uv pip install --system accelerate 'modelscope<1.38' \
@@ -1017,7 +1009,9 @@ RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist
     else \
         echo "Installing vLLM..." \
         && uv pip install --system dist/*.whl --verbose \
-        --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
+        --index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') \
+        --extra-index-url https://pypi.org/simple \
+        --index-strategy unsafe-first-match; \
     fi
 
 # Expose the Rust frontend bundled in the wheel on the container's PATH.
@@ -1093,7 +1087,7 @@ RUN --mount=type=cache,target=/opt/uv/cache \
             echo "Installing dev requirements plus torch nightly..." \
             && python3 tools/use_existing_torch.py --prefix \
             && cat torch_lib_versions.txt >> requirements/test/cuda.in \
-            && uv pip compile requirements/test/cuda.in -o requirements/test/cuda.txt --index-strategy unsafe-best-match \
+            && uv pip compile --generate-hashes requirements/test/cuda.in -o requirements/test/cuda.txt --index-strategy unsafe-best-match \
             --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/nightly/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') \
             && uv pip install --system $(cat torch_lib_versions.txt | xargs) --pre \
             -r requirements/dev.txt \
@@ -1102,7 +1096,7 @@ RUN --mount=type=cache,target=/opt/uv/cache \
             echo "Installing dev requirements..." \
             && if [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
                 echo "Recompiling test requirements for arm64..." \
-                && uv pip compile requirements/test/cuda.in -o requirements/test/cuda.txt --index-strategy unsafe-best-match \
+                && uv pip compile --generate-hashes requirements/test/cuda.in -o requirements/test/cuda.txt --index-strategy unsafe-best-match \
                 --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
             fi \
             && uv pip install --system -r requirements/dev.txt \
@@ -1110,11 +1104,35 @@ RUN --mount=type=cache,target=/opt/uv/cache \
         fi \
     fi
 
+# KV connectors for the P/D and connector suites, so CI jobs never install them
+# at runtime. Lock entries the image lacks are installed hash-verified, and the
+# install must not change any preinstalled package. The test stage checks the
+# finished environment against the lock. Targets the stable x86_64 CUDA 13 image.
+COPY requirements/test/kv_connectors_cuda.txt requirements/test/kv_connectors_cuda.txt
+COPY tools/kv_connector_lock.py tools/kv_connector_lock.py
+RUN --mount=type=cache,target=/opt/uv/cache \
+    if [ "${CUDA_VERSION%%.*}" = "13" ] && [ "${PYTORCH_NIGHTLY}" != "1" ] \
+        && [ "$TARGETPLATFORM" != "linux/arm64" ]; then \
+        uv pip freeze --system | sort > /tmp/kv-before.txt \
+        && python3 tools/kv_connector_lock.py plan \
+            requirements/test/kv_connectors_cuda.txt /tmp/kv-new.txt \
+        # The NCCL UV_OVERRIDE would enter --require-hashes as an unhashed requirement.
+        && env -u UV_OVERRIDE uv pip install --system --require-hashes --no-deps \
+            -r /tmp/kv-new.txt \
+        && uv pip freeze --system | sort > /tmp/kv-after.txt \
+        && if comm -23 /tmp/kv-before.txt /tmp/kv-after.txt | grep .; then \
+            echo "kv_connectors_cuda.txt changed the packages above; recompile it" >&2; \
+            exit 1; \
+        fi \
+        && rm -f /tmp/kv-before.txt /tmp/kv-after.txt /tmp/kv-new.txt; \
+    fi
+
 # image to run unit testing suite
 # note that this uses vllm installed by `pip`
 FROM test-deps AS test
 
 ARG PYTHON_VERSION
+ARG TARGETPLATFORM
 
 ARG PIP_INDEX_URL UV_INDEX_URL
 ARG PIP_EXTRA_INDEX_URL UV_EXTRA_INDEX_URL
@@ -1140,7 +1158,9 @@ RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist
     else \
         echo "Installing vLLM..." \
         && uv pip install --system dist/*.whl --verbose \
-        --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
+        --index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') \
+        --extra-index-url https://pypi.org/simple \
+        --index-strategy unsafe-first-match; \
     fi
 
 # Pytorch now installs NVSHMEM, setting LD_LIBRARY_PATH
@@ -1150,7 +1170,9 @@ COPY --from=build /tmp/ep_kernels_workspace/dist/wheels.sha256 /tmp/ep-kernels-w
 RUN --mount=type=bind,from=build,src=/tmp/ep_kernels_workspace/dist,target=/vllm-workspace/ep_kernels/dist \
     --mount=type=cache,target=/opt/uv/cache \
     uv pip install --system ep_kernels/dist/*.whl --verbose \
-        --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
+        --index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') \
+        --extra-index-url https://pypi.org/simple \
+        --index-strategy unsafe-first-match
 
 # See the matching comment in the vllm-base stage.
 ENV LD_LIBRARY_PATH=/usr/local/nvidia/lib64:${LD_LIBRARY_PATH}
@@ -1160,6 +1182,12 @@ ADD . /vllm-workspace/
 # install development dependencies (for testing)
 RUN --mount=type=cache,target=/opt/uv/cache \
     uv pip install --system -e tests/vllm_test_utils
+
+# The installs above may move packages the KV connector layer relied on.
+RUN if [ "${CUDA_VERSION%%.*}" = "13" ] && [ "${PYTORCH_NIGHTLY}" != "1" ] \
+        && [ "$TARGETPLATFORM" != "linux/arm64" ]; then \
+        python3 tools/kv_connector_lock.py verify requirements/test/kv_connectors_cuda.txt; \
+    fi
 
 # enable fast downloads from hf (for testing)
 ENV HF_XET_HIGH_PERFORMANCE 1
@@ -1185,6 +1213,8 @@ RUN mv vllm src/vllm
 FROM vllm-base AS vllm-openai-base
 ARG TARGETPLATFORM
 ARG INSTALL_KV_CONNECTORS=false
+ARG EFA_INSTALLER_VERSION
+ARG EFA_INSTALLER_SHA256
 ARG INSTALL_RUBIN_PRERELEASE
 ARG TRITON_INSTALL_FROM_SOURCE_REPO
 ARG CUDA_VERSION
@@ -1234,7 +1264,7 @@ RUN --mount=type=cache,target=/opt/uv/cache \
         ); \
         # The default mooncake wheel links libcudart.so.12, so on CUDA 13 swap in the
         # cuda13 variant. Uninstall first; both ship the `mooncake` package.
-        # Mirrors .buildkite/scripts/install-kv-connectors.sh.
+        # The CI image does the same via requirements/test/kv_connectors_cuda.in.
         MOONCAKE_VERSION=$(python3 -c "import importlib.metadata as m; print(m.version('mooncake-transfer-engine'))" 2>/dev/null || true) && \
         if [ "${CUDA_MAJOR}" = "13" ] && [ -n "${MOONCAKE_VERSION}" ]; then \
             uv pip uninstall --system mooncake-transfer-engine 2>/dev/null || true; \
@@ -1243,6 +1273,37 @@ RUN --mount=type=cache,target=/opt/uv/cache \
         rm -f /tmp/kv-installed.txt /tmp/kv-constraints.txt; \
     fi
 
+# Install the AWS EFA userspace with the KV connectors: NIXL's LIBFABRIC plugin
+# and Mooncake's EFA transport load libfabric at runtime.
+RUN if [ "$INSTALL_KV_CONNECTORS" = "true" ]; then \
+        set -eux; \
+        EFA_INSTALLER_ARCHIVE="/tmp/aws-efa-installer-${EFA_INSTALLER_VERSION}.tar.gz"; \
+        curl -fsSL --retry 3 --retry-all-errors \
+            "https://efa-installer.amazonaws.com/aws-efa-installer-${EFA_INSTALLER_VERSION}.tar.gz" \
+            -o "${EFA_INSTALLER_ARCHIVE}"; \
+        echo "${EFA_INSTALLER_SHA256}  ${EFA_INSTALLER_ARCHIVE}" | sha256sum -c -; \
+        tar -xzf "${EFA_INSTALLER_ARCHIVE}" -C /tmp; \
+        # The installer apt-installs dependencies; earlier layers purged the lists.
+        apt-get update -y; \
+        # Minimal install: libfabric, aws-ofi-nccl and hwloc only. --build-ngc
+        # implies --skip-kmod --skip-limit-conf --no-verify.
+        (cd /tmp/aws-efa-installer && \
+            ./efa_installer.sh --skip-mpi --skip-rdma-core --build-ngc); \
+        test -x /opt/amazon/efa/bin/fi_info; \
+        /opt/amazon/efa/bin/fi_info --version; \
+        # `-l` lists providers without EFA hardware, so this works in a build.
+        /opt/amazon/efa/bin/fi_info -l | grep -q '^efa:'; \
+        EFA_NIXL_PLUGIN=$(find /usr/local/lib -name libplugin_LIBFABRIC.so \
+            -print -quit); \
+        test -n "${EFA_NIXL_PLUGIN}"; \
+        ldd "${EFA_NIXL_PLUGIN}" | grep -q 'libfabric\.so\.1 => /opt/amazon/efa/lib/'; \
+        # Plugins that NCCL_NET_PLUGIN=ofi and NCCL_TUNER_PLUGIN=ofi resolve to.
+        ldconfig -p | grep -q '/opt/amazon/ofi-nccl/lib/libnccl-net-ofi\.so$'; \
+        ldconfig -p | grep -q '/opt/amazon/ofi-nccl/lib/libnccl-tuner-ofi\.so$'; \
+        apt-get clean; \
+        rm -rf "${EFA_INSTALLER_ARCHIVE}" /tmp/aws-efa-installer \
+            /var/lib/apt/lists/*; \
+    fi
 # Mooncake registers GPU memory for RDMA via nvidia-peermem by default. Hosts
 # without that module loaded (e.g. GB200) must pass WITH_NVIDIA_PEERMEM=0 at run
 # time; see docs/features/mooncake_connector_usage.md. Deliberately not an ENV
@@ -1292,25 +1353,6 @@ RUN --mount=type=cache,target=/opt/uv/cache \
     && rm -f \
         /tmp/install_triton_from_source.sh \
         /tmp/triton-source-wheel.sha256
-
-# Install source-built NIXL last, replacing the nixl packages installed above, so
-# the image has a NIXL EP build for its PyTorch version. There is no GPU driver
-# at build time, so check for the extension instead of importing it.
-ARG BUILD_NIXL
-RUN --mount=type=cache,target=/opt/uv/cache \
-    --mount=type=bind,from=extensions-build,source=/tmp/nixl_workspace/dist,target=/tmp/nixl-dist,ro \
-    set -eu; \
-    if [ "${BUILD_NIXL}" = "true" ]; then \
-        ls /tmp/nixl-dist/*.whl; \
-        uv pip uninstall --system nixl nixl-cu12 nixl-cu13; \
-        uv pip install --system --no-deps /tmp/nixl-dist/*.whl; \
-        python3 -c "import glob, importlib.util as u, os, torch; \
-            spec = u.find_spec('nixl_ep_cu' + os.environ['CUDA_VERSION'].split('.')[0]); \
-            mm = ''.join(torch.__version__.split('.')[:2]); \
-            ext = glob.glob(os.path.join(spec.submodule_search_locations[0], 'nixl_ep_cpp_torch' + mm + '.*')) if spec else []; \
-            assert ext, 'NIXL EP has no build for torch ' + torch.__version__; \
-            print('NIXL EP extension:', ext[0])"; \
-    fi
 
 ENV VLLM_USAGE_SOURCE production-docker-image
 ENV VLLM_BUILD_COMMIT=${VLLM_BUILD_COMMIT:-unknown} \

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Shared helpers for the MuseSpark1x MoE runner tests."""
+"""Shared helpers for the Muse Spark MoE runner tests."""
 
 from collections.abc import Callable
 
@@ -19,8 +19,8 @@ from vllm.model_executor.layers.quantization.modelopt import ModelOptNvFp4Config
 from vllm.models.muse_spark.nvidia.muse_moe_runner import (
     MuseMoERunner,
     MusePostExpertFinalize,
-    MuseSpark1xRouter,
     MuseSparkRoutedExperts,
+    MuseSparkRouter,
 )
 
 # route_scale must be 1.0 and scoring sigmoid for the routing to classify as
@@ -49,14 +49,14 @@ def make_runner(
     intermediate_size: int,
     top_k: int,
 ):
-    """Build a MuseSpark runner, load ``ckpt`` and finalize its weights."""
+    """Build a MuseSpark runner, load `ckpt` and finalize its weights."""
     num_experts = expert_bias.numel()
     vllm_config = VllmConfig(
         parallel_config=ParallelConfig(),
         kernel_config=KernelConfig(moe_backend="auto"),
     )
     with set_current_vllm_config(vllm_config):
-        router = MuseSpark1xRouter(
+        router = MuseSparkRouter(
             top_k=top_k,
             num_experts=num_experts,
             expert_bias=expert_bias,
@@ -133,7 +133,7 @@ def swiglu_moe_ref(
     norm_fn: Callable[[torch.Tensor], torch.Tensor],
     act_quant: Callable[[torch.Tensor], torch.Tensor] | None = None,
 ) -> torch.Tensor:
-    """fp32 SwiGLU MoE with ``norm_fn`` applied to each BF16 expert output."""
+    """fp32 SwiGLU MoE with `norm_fn` applied to each BF16 expert output."""
     out = torch.zeros(x.shape, dtype=torch.float32, device=x.device)
     for e in range(w13.shape[0]):
         token_idx, slot = (topk_ids == e).nonzero(as_tuple=True)
