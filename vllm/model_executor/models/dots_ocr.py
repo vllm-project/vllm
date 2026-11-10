@@ -651,11 +651,14 @@ class DotsOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA
                 prefix=maybe_prefix(prefix, "vision_tower"),
             )
 
+        # `DotsOCRConfig` isn't a Transformers `Qwen2Config`. Recompute `layer_types`
+        # so it can't disagree with an overridden `num_hidden_layers`
+        config_dict = self.config.to_dict() | {"layer_types": None}
+        text_config = Qwen2Config.from_dict(config_dict)
         with self._mark_language_model(vllm_config):
             self.language_model = init_vllm_registered_model(
                 vllm_config=vllm_config,
-                # `DotsOCRConfig` isn't a Transformers `Qwen2Config`
-                hf_config=Qwen2Config.from_dict(self.config.to_dict()),
+                hf_config=text_config,
                 prefix=maybe_prefix(prefix, "language_model"),
                 architectures=["Qwen2ForCausalLM"],
             )
