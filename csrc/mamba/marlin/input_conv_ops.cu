@@ -4,9 +4,7 @@
 // preserves its original Neural Magic / Elias Frantar / IST-DASLab notices.
 
 #include "../../quantization/marlin/kernel.h"
-
-#include "input_conv_epilogue.cuh"
-#include "input_conv_kernel.cuh"
+#include "input_conv_params.h"
 
 #include "torch_utils.h"
 
@@ -70,47 +68,6 @@ void matrix(const Tensor& tensor, const Tensor& input, ScalarType dtype,
   STD_TORCH_CHECK(tensor.dim() == 2 && tensor.size(0) == rows &&
                       tensor.size(1) == columns && tensor.is_contiguous(),
                   "Mamba Marlin operand shape/contiguity mismatch");
-}
-
-template <int Tokens, vllm_mamba_input_conv::ConvFamily Family, bool Small>
-cudaError_t launch_input(const Tensor& input, Tensor& projected,
-                         const Tensor& weight, const Tensor& scales,
-                         const Tensor& global_scale, ConvParams conv) {
-  constexpr auto kernel = marlin::MarlinMambaInputConv<Tokens, Family, Small>;
-  constexpr int shared = Small ? 16896 : 19968;
-  auto status = cudaFuncSetAttribute(
-      kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, shared);
-  if (status != cudaSuccess) return status;
-  kernel<<<145, 128, shared,
-           get_current_cuda_stream(input.get_device_index())>>>(
-      reinterpret_cast<const int4*>(input.const_data_ptr()),
-      reinterpret_cast<const int4*>(weight.const_data_ptr()),
-      reinterpret_cast<int4*>(projected.mutable_data_ptr()),
-      reinterpret_cast<const int4*>(scales.const_data_ptr()),
-      reinterpret_cast<const float*>(global_scale.const_data_ptr()),
-      static_cast<int>(input.size(0)), conv);
-  return cudaGetLastError();
-}
-
-template <int Tokens>
-cudaError_t launch_input_shape(const Tensor& input, Tensor& projected,
-                               const Tensor& weight, const Tensor& scales,
-                               const Tensor& global_scale, ConvParams conv,
-                               int batches) {
-  using vllm_mamba_input_conv::ConvFamily;
-  if (batches == 1)
-    return launch_input<Tokens, ConvFamily::Single, true>(
-        input, projected, weight, scales, global_scale, conv);
-  if (input.size(0) <= 8) {
-    if constexpr (Tokens <= 4)
-      return launch_input<Tokens, ConvFamily::Batched, true>(
-          input, projected, weight, scales, global_scale, conv);
-  } else {
-    if constexpr (Tokens >= 3)
-      return launch_input<Tokens, ConvFamily::Wide, false>(
-          input, projected, weight, scales, global_scale, conv);
-  }
-  return cudaErrorInvalidValue;
 }
 
 }  // namespace
@@ -231,23 +188,16 @@ void mamba_marlin_input_conv(Tensor& input, Tensor& projected, Tensor& weight,
                             << vllm_mamba_input_conv::kBatchHistoryBits) |
                            history_len)};
   if (batches == 1) conv.reserved = tokens < 8 ? history_len : 0;
-  cudaError_t status = cudaErrorInvalidValue;
-#define VLLM_MAMBA_TOKENS(T)                                         \
-  case T:                                                            \
-    status = launch_input_shape<T>(input, projected, weight, scales, \
-                                   global_scale, conv, batches);     \
-    break
-  switch (tokens) {
-    VLLM_MAMBA_TOKENS(1);
-    VLLM_MAMBA_TOKENS(2);
-    VLLM_MAMBA_TOKENS(3);
-    VLLM_MAMBA_TOKENS(4);
-    VLLM_MAMBA_TOKENS(5);
-    VLLM_MAMBA_TOKENS(6);
-    VLLM_MAMBA_TOKENS(7);
-    VLLM_MAMBA_TOKENS(8);
-  }
-#undef VLLM_MAMBA_TOKENS
+  const auto launch = batches == 1 ? vllm_mamba_input_conv::launch_single
+                      : rows <= 8  ? vllm_mamba_input_conv::launch_batch_small
+                                   : vllm_mamba_input_conv::launch_batch_wide;
+  auto status = launch(
+      tokens, rows, reinterpret_cast<const int4*>(input.const_data_ptr()),
+      reinterpret_cast<const int4*>(weight.const_data_ptr()),
+      reinterpret_cast<int4*>(projected.mutable_data_ptr()),
+      reinterpret_cast<const int4*>(scales.const_data_ptr()),
+      reinterpret_cast<const float*>(global_scale.const_data_ptr()), conv,
+      get_current_cuda_stream(input.get_device_index()));
   STD_TORCH_CHECK(status == cudaSuccess, cudaGetErrorString(status));
 }
 

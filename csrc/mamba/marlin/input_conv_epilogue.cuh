@@ -274,20 +274,10 @@ __device__ __forceinline__ void epilogue_short(void* shared_b, int slice_col,
 // Batched request selection reuses the original short-convolution arithmetic.
 // Its causal-conv attribution remains in mamba_input_conv_short_epilogue.cuh.
 
-#include <limits>
 
 
 namespace vllm_mamba_input_conv {
 
-// Only the new .batched overload interprets reserved this way. Keep the
-// original 80-byte descriptor and every B1 caller unchanged: low4 bits are
-// physical H, the remaining positive bits are the first-column cache-index
-// stride.
-constexpr int kBatchHistoryBits = 4;
-constexpr int kBatchIndexStrideMax =
-    std::numeric_limits<int32_t>::max() >> kBatchHistoryBits;
-static_assert(kBatchIndexStrideMax * 16 + 10 <=
-              std::numeric_limits<int32_t>::max());
 
 template <int Tokens>
 __device__ __forceinline__ void epilogue_batch(void* shared_b, int slice_col,
