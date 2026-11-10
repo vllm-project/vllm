@@ -971,25 +971,27 @@ class TestTritonTopkTopp:
         return logits
 
     @pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="GPU-only path")
+    @pytest.mark.parametrize("max_top_k", [1, 4, 32, 64])
     @pytest.mark.parametrize("use_p", [True, False])
-    def test_split_topk_matches_exact_cut(self, use_p: bool):
+    def test_split_topk_matches_exact_cut(self, use_p: bool, max_top_k: int):
         """The split top-k pipeline keeps exactly the sort-based cut."""
         from vllm.v1.sample.ops.topk_topp_triton import _apply_topk_split
 
         logits = torch.randn(8, 151936, generator=self.generator) * 4
         logits = logits.bfloat16().float()
-        logits[3, ::997] = torch.topk(logits[3], 20).values[-1]
+        k = torch.tensor([1, 64, 17, 20, 20, 20, 20, 20], dtype=torch.int32)
+        k = k.clamp(max=max_top_k)
+        logits[3, ::997] = torch.topk(logits[3], int(k[3])).values[-1]
         logits[4] = self._tied_topp_cut(1, 151936)[0]
         logits[5, 7] = 150.0
         logits[6] = float("-inf")
         logits[6, [0, 7, 300]] = torch.tensor([1.0, 3.0, 2.0])
         logits[7] = float("nan")
-        k = torch.tensor([1, 64, 17, 20, 20, 20, 20, 20], dtype=torch.int32)
         p = torch.tensor([0.9, 0.999999, 1e-6, 0.95, 0.5, 1.0, 0.95, 0.95])
         p = p if use_p else None
 
         out = logits.clone()
-        _apply_topk_split(out, k, p, 64, float("-inf"))
+        _apply_topk_split(out, k, p, max_top_k, float("-inf"))
         expected = self._exact_cut(logits[:7], k[:7], None if p is None else p[:7])
         assert torch.equal(out[:7], expected)
         assert torch.isneginf(out[7]).all()
@@ -1011,7 +1013,8 @@ class TestTritonTopkTopp:
         "rows,max_top_k,vocab_size,taken",
         [
             (1, 20, 151936, True),
-            (5, 64, 151936, False),
+            (32, 64, 151936, True),
+            (33, 64, 151936, False),
             (2, None, 151936, False),
             (2, 20, 149999, False),
         ],

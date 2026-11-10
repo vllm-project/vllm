@@ -1624,7 +1624,7 @@ _TOPK_SPLIT_MAX_K = 64
 # More chunks widen the merge faster than they shorten each chunk's sweep.
 _TOPK_SPLIT_CHUNKS = 64
 # (bound on k, rows): the most rows the split still wins at for that bound.
-_TOPK_SPLIT_MAX_ROWS = ((24, 64), (32, 32), (40, 16), (48, 8), (_TOPK_SPLIT_MAX_K, 4))
+_TOPK_SPLIT_MAX_ROWS = ((20, 128), (24, 96), (32, 64), (_TOPK_SPLIT_MAX_K, 32))
 # Below this the monolithic kernel is cheap enough to beat the split.
 _TOPK_SPLIT_MIN_VOCAB = 150_000
 
@@ -1637,6 +1637,30 @@ def _topk_split_supported() -> bool:
     from vllm.platforms.rocm import get_cdna_version
 
     return get_cdna_version() in (3, 4)
+
+
+# Below every key of a real logit, -inf included.
+_TOPK_SPLIT_NO_KEY = tl.constexpr(-(2**63))
+
+
+@triton.jit
+def _topk_split_key(vals, idxs, live):
+    """int64 key whose max is the largest logit, ties to the lowest index."""
+    # + 0.0 turns -0.0 into +0.0 so they tie, as floats do; NaN never wins.
+    bits = (vals + 0.0).to(tl.int32, bitcast=True)
+    ordered = bits ^ ((bits >> 31) & 0x7FFFFFFF)
+    key = (ordered.to(tl.int64) << 32) | (0xFFFFFFFF - idxs.to(tl.int64))
+    return tl.where(live & (vals == vals), key, _TOPK_SPLIT_NO_KEY)
+
+
+@triton.jit
+def _topk_split_unkey(key, VOCAB):
+    """(logit, index) of a key; (-inf, VOCAB) for _TOPK_SPLIT_NO_KEY."""
+    ordered = (key >> 32).to(tl.int32)
+    vals = (ordered ^ ((ordered >> 31) & 0x7FFFFFFF)).to(tl.float32, bitcast=True)
+    idxs = (0xFFFFFFFF - (key & 0xFFFFFFFF)).to(tl.int32)
+    found = key > _TOPK_SPLIT_NO_KEY
+    return tl.where(found, vals, float("-inf")), tl.where(found, idxs, VOCAB)
 
 
 @triton.jit(do_not_specialize=["K_MAX"])
@@ -1656,9 +1680,10 @@ def _topk_split_chunk_kernel(
     """Each chunk's own top-K_MAX logits and their indices, ties by lowest
     index, then masks the chunk.
 
-    Grid is (rows, CHUNKS). Writes the first K_MAX of every KTILE slots of
-    [rows, CHUNKS * KTILE]. Exact: fewer than k elements of a row precede a
-    global top-k element, so fewer than k precede it within its chunk.
+    Grid is (rows, CHUNKS). Writes the first K_MAX (all KTILE once KTILE is
+    64) of every KTILE slots of [rows, CHUNKS * KTILE]. Exact: fewer than k
+    elements of a row precede a global top-k element, so fewer than k precede
+    it within its chunk.
     """
     row = tl.program_id(0)
     chunk = tl.program_id(1)
@@ -1670,19 +1695,26 @@ def _topk_split_chunk_kernel(
     live = (lane < CHUNK) & (offs < VOCAB)
     row_logits = LOGITS + row.to(tl.int64) * LOGITS_STRIDE_0
     vals = tl.load(row_logits + offs, mask=live, other=float("-inf"))
-    # VOCAB doubles as the "no such index" sentinel: it sorts above every real
-    # index under tl.min, so a tie is won by the lowest real index.
-    idxs = tl.where(live, offs, VOCAB)
 
     out = (row * CHUNKS + chunk) * KTILE
-    for i in range(K_MAX):
-        best = tl.max(vals, 0)
-        at = tl.min(tl.where(vals == best, idxs, VOCAB), 0)
-        tl.store(CAND_V + out + i, best)
-        tl.store(CAND_I + out + i, at)
-        # Retire by index rather than by value, so duplicates are emitted once
-        # each instead of vanishing together.
-        vals = tl.where(idxs == at, float("-inf"), vals)
+    if KTILE >= 64:
+        top_v, top_i = _topk_split_unkey(
+            tl.topk(_topk_split_key(vals, offs, live), KTILE), VOCAB
+        )
+        tl.store(CAND_V + out + tl.arange(0, KTILE), top_v)
+        tl.store(CAND_I + out + tl.arange(0, KTILE), top_i)
+    else:
+        # VOCAB doubles as the "no such index" sentinel: it sorts above every
+        # real index under tl.min, so a tie is won by the lowest real index.
+        idxs = tl.where(live, offs, VOCAB)
+        for i in range(K_MAX):
+            best = tl.max(vals, 0)
+            at = tl.min(tl.where(vals == best, idxs, VOCAB), 0)
+            tl.store(CAND_V + out + i, best)
+            tl.store(CAND_I + out + i, at)
+            # Retire by index rather than by value, so duplicates are emitted
+            # once each instead of vanishing together.
+            vals = tl.where(idxs == at, float("-inf"), vals)
 
     # Not before the loop: small tiles replicate elements across waves.
     tl.store(row_logits + offs, tl.full((BLOCK,), MASK_VALUE, tl.float32), mask=live)
@@ -1702,6 +1734,7 @@ def _topk_split_combine_kernel(
     KTILE: tl.constexpr,
     BLOCK: tl.constexpr,
     TOPP_ENABLED: tl.constexpr,
+    LOOP_MAX_K: tl.constexpr,
 ):
     """Merge the per-chunk candidates, cut at the row's k, then apply top-p.
 
@@ -1713,22 +1746,34 @@ def _topk_split_combine_kernel(
     live = (lane < NUM_CAND) & (lane % KTILE < K_MAX)
     vals = tl.load(CAND_V + row * NUM_CAND + lane, mask=live, other=float("-inf"))
     idxs = tl.load(CAND_I + row * NUM_CAND + lane, mask=live, other=VOCAB)
-
     k = tl.minimum(tl.load(K + row), K_MAX)
+    out = LOGITS + row.to(tl.int64) * LOGITS_STRIDE_0
 
-    # Triton cannot index a register tile with a loop variable, so each
-    # extracted element is placed by a predicate.
-    sorted_v = tl.full((BLOCK,), float("-inf"), tl.float32)
-    sorted_i = tl.full((BLOCK,), VOCAB, tl.int32)
-    # Unrolled with a runtime guard; a plain loop to K_MAX is slower here.
-    for i in tl.static_range(KTILE):
-        if i < K_MAX:
-            best = tl.max(vals, 0)
-            at = tl.min(tl.where(vals == best, idxs, VOCAB), 0)
-            sorted_v = tl.where(lane == i, best, sorted_v)
-            sorted_i = tl.where(lane == i, at, sorted_i)
-            vals = tl.where(idxs == at, float("-inf"), vals)
+    if K_MAX <= LOOP_MAX_K:
+        # Triton cannot index a register tile with a loop variable, so each
+        # extracted element is placed by a predicate.
+        sorted_v = tl.full((BLOCK,), float("-inf"), tl.float32)
+        sorted_i = tl.full((BLOCK,), VOCAB, tl.int32)
+        for i in tl.static_range(LOOP_MAX_K):
+            if i < K_MAX:
+                best = tl.max(vals, 0)
+                at = tl.min(tl.where(vals == best, idxs, VOCAB), 0)
+                sorted_v = tl.where(lane == i, best, sorted_v)
+                sorted_i = tl.where(lane == i, at, sorted_i)
+                vals = tl.where(idxs == at, float("-inf"), vals)
+        _topk_split_cut(sorted_v, sorted_i, lane, k, P, row, out, TOPP_ENABLED)
+    else:
+        top_v, top_i = _topk_split_unkey(
+            tl.topk(_topk_split_key(vals, idxs, live), KTILE), VOCAB
+        )
+        _topk_split_cut(top_v, top_i, tl.arange(0, KTILE), k, P, row, out, TOPP_ENABLED)
 
+
+@triton.jit
+def _topk_split_cut(
+    sorted_v, sorted_i, lane, k, P, row, out, TOPP_ENABLED: tl.constexpr
+):
+    """Keeps the first k sorted candidates, then the top-p prefix of them."""
     head = (lane < k) & (sorted_v > float("-inf"))
     v = tl.where(head, sorted_v, float("-inf"))
 
@@ -1744,9 +1789,7 @@ def _topk_split_combine_kernel(
         kept = head
 
     keep = (kept | (lane == 0)) & (sorted_v > float("-inf"))
-    tl.store(
-        LOGITS + row.to(tl.int64) * LOGITS_STRIDE_0 + sorted_i, sorted_v, mask=keep
-    )
+    tl.store(out + sorted_i, sorted_v, mask=keep)
 
 
 def _topk_split_chunk_warmup_inputs(vllm_config: Any) -> dict[str, Any]:
@@ -1827,6 +1870,8 @@ def _topk_split_combine(
         NUM_CAND=num_cand,
         BLOCK=next_power_of_2(num_cand),
         TOPP_ENABLED=p is not None,
+        # Largest k_max that serial extraction still merges faster than tl.topk.
+        LOOP_MAX_K=1 if p is not None else 5,
         num_warps=8,
     )
 
@@ -1924,8 +1969,8 @@ def apply_top_k_top_p_triton(
         return logits
 
     # Rows with an active top-k are latency-bound in the monolithic kernel
-    # for the same reason. Measured on gfx942 and gfx950. The cached
-    # architecture check is first so other platforms skip the row-cap scan.
+    # for the same reason. The cached architecture check is first so other
+    # platforms skip the row-cap scan.
     if (
         _topk_split_supported()
         and topk_enabled
