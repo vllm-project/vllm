@@ -1257,10 +1257,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
         os.environ.get("VLLM_TRITON_FORCE_FIRST_CONFIG", "0").strip().lower()
         in ("1", "true")
     ),
-    # If set, Triton autotune uses tensor-parallel rank 0's benchmark timings on
-    # every rank (inside model forward passes), so all TP ranks pick the same
-    # config. Needed when ranks compute the same tensors without an all-reduce
-    # after them; plain TP does not need it.
+    # If set, every tensor-parallel rank adopts rank 0's Triton autotune choice
+    # (inside model forward passes), so all TP ranks run the same config. Needed
+    # when ranks compute the same tensors without an all-reduce after them; plain
+    # TP does not need it. Covers kernels decorated with triton.autotune only.
     "VLLM_TRITON_SYNC_AUTOTUNE_TP": lambda: (
         os.environ.get("VLLM_TRITON_SYNC_AUTOTUNE_TP", "0").strip().lower()
         in ("1", "true")
