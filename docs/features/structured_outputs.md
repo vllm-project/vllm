@@ -196,7 +196,7 @@ You can also use structured outputs with <project:#reasoning-outputs> for reason
 vllm serve deepseek-ai/DeepSeek-R1-Distill-Qwen-7B --reasoning-parser deepseek_r1
 ```
 
-Note that you can use reasoning with any provided structured outputs feature. The constraint applies to the answer after the reasoning ends. The newline that chat templates put after the reasoning end (`</think>\n\n` for Qwen3 and DeepSeek-R1) is not part of the answer and is not returned in `content`. A structural tag describes all the text after the reasoning, so it has to allow that newline itself. The following uses JSON schema:
+Note that you can use reasoning with any provided structured outputs feature. The constraint applies to the answer after the reasoning ends. The newline that chat templates put after the reasoning end (`</think>\n\n` for Qwen3 and DeepSeek-R1) is not part of the answer and is not returned in `content`. Offline `LLM.generate` and `LLM.chat` return the raw generated text instead, which keeps the reasoning and this newline. A structural tag describes all the text after the reasoning, so it has to allow that newline itself. The following uses JSON schema:
 
 ??? code
 
