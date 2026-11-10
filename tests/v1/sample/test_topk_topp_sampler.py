@@ -1046,9 +1046,9 @@ def _make_param(kind, batch: int, vocab: int, gen: Generator, dtype: torch.dtype
     reason="CUDA top-k/top-p filter requires SM90 or SM100",
 )
 class TestCudaTopkToppExact:
-    """Exact selection on every kernel path: row clusters (small batches),
-    candidates, a second gather and a value window for large nuclei, and the
-    full-row radix fallback (large k, heavy ties)."""
+    """Exact selection on every kernel path: row clusters (small batches) and
+    one CTA per row, the top-p tiers, the value-bin fallback for large nuclei,
+    and the full-row radix fallback (large k, heavy ties)."""
 
     @pytest.fixture(autouse=True)
     def setup(self):
@@ -1070,6 +1070,8 @@ class TestCudaTopkToppExact:
             ("huge", 4, 131072, None, 0.95),
             ("huge", 1, 248320, None, 0.95),
             ("normal", 3, 65537, "mixed", "mixed"),
+            ("normal", 300, 248320, 20, 0.95),
+            ("normal", 300, 524287, 1000, 0.9),
         ],
     )
     def test_exact_selection(self, kind, batch, vocab, k, p):
@@ -1080,7 +1082,7 @@ class TestCudaTopkToppExact:
         _assert_exact_filter(source, actual, k, p)
 
     def test_cuda_graph_replay(self):
-        """Device k/p are read at replay time, and the workspace is reused."""
+        """Device k/p are read at replay time."""
         batch, vocab = 4, 65536
         source = torch.randn(batch, vocab, generator=self.generator)
         k = torch.tensor([1, 20, 256, vocab], dtype=torch.int32)

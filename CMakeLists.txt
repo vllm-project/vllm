@@ -498,7 +498,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
 
     endif()
 
-    # Top-k/top-p filter: TMA bulk copies, clusters and ~227 KB of shared memory.
+    # Top-k/top-p filter: thread block clusters with distributed shared memory.
     if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
       cuda_archs_loose_intersection(TOPK_TOPP_FILTER_ARCHS
         "9.0a;10.0f;10.3f" "${CUDA_ARCHS}")

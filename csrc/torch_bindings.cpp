@@ -656,10 +656,7 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
 
 #ifdef VLLM_ENABLE_TOPK_TOPP_FILTER
   // In-place top-k/top-p masking of FP32 logits with per-row device k and p.
-  ops.def(
-      "top_k_top_p_filter(Tensor! logits, Tensor? k, Tensor? p, "
-      "Tensor! workspace) -> ()");
-  ops.def("top_k_top_p_filter_workspace_size(int device) -> int");
+  ops.def("top_k_top_p_filter(Tensor! logits, Tensor? k, Tensor? p) -> ()");
 #endif
 
   // Activation ops
@@ -1023,10 +1020,6 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CompositeExplicitAutograd, ops) {
            TORCH_BOX(&cutlass_scaled_mm_supports_block_fp8));
   ops.impl("cutlass_scaled_mm_supports_fp4",
            TORCH_BOX(&cutlass_scaled_mm_supports_fp4));
-#endif
-#ifdef VLLM_ENABLE_TOPK_TOPP_FILTER
-  ops.impl("top_k_top_p_filter_workspace_size",
-           TORCH_BOX(&top_k_top_p_filter_workspace_size));
 #endif
 }
 

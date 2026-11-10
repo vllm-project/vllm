@@ -176,7 +176,6 @@ from vllm.v1.pool.metadata import PoolingMetadata, PoolingStates
 from vllm.v1.sample.logits_processor import LogitsProcessors, build_logitsprocs
 from vllm.v1.sample.logits_processor.interface import LogitsProcessor
 from vllm.v1.sample.metadata import SamplingMetadata
-from vllm.v1.sample.ops.topk_topp_cuda import reserve_topk_topp_cuda_workspace
 from vllm.v1.sample.rejection_sampler import RejectionSampler
 from vllm.v1.sample.sampler import Sampler
 from vllm.v1.spec_decode.custom_class_proposer import create_custom_proposer
@@ -5977,7 +5976,6 @@ class GPUModelRunner(
 
         logits = self.model.compute_logits(hidden_states)
         num_reqs = logits.size(0)
-        reserve_topk_topp_cuda_workspace(logits.device, logits.shape[-1])
 
         dummy_tensors = lambda v: torch.full((num_reqs,), v, device=self.device)
 

@@ -554,10 +554,7 @@ void cooperative_topk(const torch::stable::Tensor& logits,
 #ifdef VLLM_ENABLE_TOPK_TOPP_FILTER
 void top_k_top_p_filter(torch::stable::Tensor& logits,
                         const std::optional<torch::stable::Tensor>& k,
-                        const std::optional<torch::stable::Tensor>& p,
-                        torch::stable::Tensor& workspace);
-
-int64_t top_k_top_p_filter_workspace_size(int64_t device);
+                        const std::optional<torch::stable::Tensor>& p);
 #endif
 
 void selective_scan_fwd(
