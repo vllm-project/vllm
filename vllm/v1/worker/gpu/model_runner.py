@@ -73,6 +73,7 @@ from vllm.tasks import SupportedTask
 from vllm.utils.gc_utils import freeze_gc_for_cudagraph_capture
 from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, async_tensor_h2d
+from vllm.v1.conf_compute_utils import install as install_conf_compute_copy_patches
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
@@ -99,6 +100,7 @@ from vllm.v1.worker.gpu.async_utils import (
     AsyncOutput,
     AsyncPoolingOutput,
     StepTimingCollector,
+    new_d2h_stream,
 )
 from vllm.v1.worker.gpu.attn_utils import (
     FastPrefillHelper,
@@ -235,7 +237,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.max_num_reqs = self.scheduler_config.max_num_seqs
         self.is_encoder_decoder = self.model_config.is_encoder_decoder
 
-        self.output_copy_stream = torch.cuda.Stream(self.device)
+        self.output_copy_stream = new_d2h_stream(self.device)
+        if current_platform.is_confidential_compute():
+            install_conf_compute_copy_patches()
 
         # Pipeline parallelism.
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
@@ -423,7 +427,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 if self.pp_handler is not None:
                     self.pp_handler.configure_aux_hidden_state_relay(self.model)
             if isinstance(self.speculator, DraftModelSpeculator):
-                with use_workspace_lane(self._draft_workspace_lane):
+                with (
+                    use_workspace_lane(self._draft_workspace_lane),
+                    self.jit_warmup_registry.activate(),
+                ):
                     self.speculator.load_model(self.model)
                     eplb_models_added = self.eplb.maybe_register_speculator(
                         self.speculator, self.speculative_config, load_dummy_weights
@@ -2088,10 +2095,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             assert intermediate_tensors is not None
             assert self.intermediate_tensors is not None
             n = input_batch.num_tokens_after_padding
+            received = intermediate_tensors.tensors
             new_tensors = {
                 k: v[:n]
-                if dummy_run
-                else v[:n].copy_(intermediate_tensors.tensors[k][:n])
+                # Some PP transports receive into the persistent tensors.
+                if dummy_run or received[k].data_ptr() == v.data_ptr()
+                else v[:n].copy_(received[k][:n])
                 for k, v in self.intermediate_tensors.tensors.items()
             }
             model_inputs["intermediate_tensors"] = IntermediateTensors(new_tensors)
