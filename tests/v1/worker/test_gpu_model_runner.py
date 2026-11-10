@@ -11,10 +11,7 @@ import vllm.model_executor.model_loader.reload.inplace as reload_inplace_module
 from vllm.lora.layers import LoRAMappingType
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.mamba.abstract import (
-    MambaBase,
-    fit_mamba_blocks_to_attention,
-)
+from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.multimodal.inputs import MultiModalFeatureSpec, PlaceholderRange
 from vllm.platforms import current_platform
 from vllm.platforms.interface import Platform
@@ -24,6 +21,7 @@ from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
     ROCMAiterMLASparseBackend,
 )
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
+from vllm.v1.hisparse.binding import fit_mamba_blocks_to_attention
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheSpec,

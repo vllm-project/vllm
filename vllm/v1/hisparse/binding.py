@@ -5,12 +5,15 @@
 from collections.abc import Callable, Mapping
 from copy import copy
 from dataclasses import replace
+from math import gcd, lcm
 from typing import TYPE_CHECKING, Any
 
 import torch
 
 from vllm.config import VllmConfig
-from vllm.model_executor.layers.mamba.abstract import fit_mamba_blocks_to_attention
+from vllm.model_executor.layers.mamba.abstract import (
+    get_mamba_prefill_checkpoint_alignment,
+)
 from vllm.v1.hisparse.backend import get_hisparse_backend
 from vllm.v1.hisparse.layout import (
     HISPARSE_HOT_SUFFIX,
@@ -32,6 +35,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheLayout,
     KVCacheSpec,
     KVCacheTensor,
+    MambaSpec,
     MLAAttentionSpec,
     SparseCacheRole,
     UniformTypeKVCacheSpecs,
@@ -125,6 +129,56 @@ def _largest_exact_kernel_block_size(
     return max(
         (size for size in sizes or () if size % block_size == 0), default=block_size
     )
+
+
+def fit_mamba_blocks_to_attention(
+    vllm_config: VllmConfig,
+    kv_cache_spec: dict[str, KVCacheSpec],
+    layers: Mapping[str, "AttentionLayerBase"],
+) -> dict[str, KVCacheSpec]:
+    """Shrink align-mode Mamba blocks that would grow the scheduler block.
+
+    Mamba blocks start at `cache_config.block_size`, which resized attention
+    specs may no longer use. Rebuilds the Mamba specs at the largest size up to
+    it that divides the attention blocks' lcm.
+    """
+    if not any(isinstance(spec, MambaSpec) for spec in kv_cache_spec.values()):
+        return kv_cache_spec
+    cache_config = vllm_config.cache_config
+    if cache_config.mamba_cache_mode != "align":
+        return kv_cache_spec
+    attn_block_sizes = [
+        spec.block_size
+        for spec in kv_cache_spec.values()
+        if not isinstance(spec, MambaSpec) and spec.prefix_cacheable
+    ]
+    if not attn_block_sizes:
+        return kv_cache_spec
+    scheduler_block_size = lcm(*attn_block_sizes)
+    step = lcm(
+        gcd(*attn_block_sizes),
+        get_mamba_prefill_checkpoint_alignment(vllm_config) or 1,
+    )
+    block_size = max(
+        (
+            size
+            for size in range(
+                step, min(cache_config.block_size, scheduler_block_size) + 1, step
+            )
+            if scheduler_block_size % size == 0
+        ),
+        default=cache_config.mamba_block_size,
+    )
+    if block_size == cache_config.mamba_block_size:
+        return kv_cache_spec
+    cache_config.mamba_block_size = block_size
+    resized = dict(kv_cache_spec)
+    for name, spec in kv_cache_spec.items():
+        if isinstance(spec, MambaSpec):
+            new_spec = layers[name].get_kv_cache_spec(vllm_config)
+            assert isinstance(new_spec, MambaSpec)
+            resized[name] = replace(new_spec, is_draft=spec.is_draft)
+    return resized
 
 
 def allocate_hisparse_kv_caches(
