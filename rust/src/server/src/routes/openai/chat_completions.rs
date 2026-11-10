@@ -51,6 +51,7 @@ use crate::routes::openai::utils::validated_json::ValidatedJson;
 use crate::routes::openai::utils::{validate_max_output_tokens, validate_n_limit};
 use crate::routes::output_log::{LoggedOutput, chat_output_text};
 use crate::state::AppState;
+use crate::utils::npy_base64;
 use crate::utils::{ResolvedRequestContext, resolve_request_context, sse_response, unix_timestamp};
 
 pub(crate) fn lower_chat_request(
@@ -247,7 +248,9 @@ async fn collect_chat_completion(
         kv_transfer_params,
         ec_transfer_params,
         weight_versions,
+        routed_experts,
     } = collected;
+    let routed_experts = routed_experts.as_ref().map(npy_base64).transpose()?;
     let stop_reason = finish_reason.as_stop_reason().map(stop_reason_to_json);
     let saw_tool_calls = message.tool_calls().next().is_some();
     let reasoning = message.reasoning();
@@ -355,7 +358,7 @@ async fn collect_chat_completion(
             finish_reason: Some(finish_reason),
             stop_reason,
             token_ids: (return_token_ids && include_output_metadata).then_some(token_ids),
-            routed_experts: None,
+            routed_experts,
             weight_versions: weight_versions.filter(|_| return_weight_versions),
         }],
         service_tier: None,
@@ -1327,6 +1330,7 @@ mod tests {
                 kv_transfer_params: None,
                 ec_transfer_params: None,
                 weight_versions: None,
+                routed_experts: None,
             }),
         ]);
 
@@ -1425,6 +1429,7 @@ mod tests {
                 kv_transfer_params: None,
                 ec_transfer_params: None,
                 weight_versions: None,
+                routed_experts: None,
             }),
         ]);
 
@@ -1476,6 +1481,7 @@ mod tests {
                 timestamps: Default::default(),
                 spec_decode_metrics: None,
                 weight_versions: None,
+                routed_experts: None,
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: Some(Box::new(json!({"remote_block_ids": [1, 2]}))),
                 ec_transfer_params: None,
@@ -1546,6 +1552,7 @@ mod tests {
                 kv_transfer_params: None,
                 ec_transfer_params: None,
                 weight_versions: None,
+                routed_experts: None,
             }),
         ]);
 
@@ -1632,6 +1639,7 @@ mod tests {
                 kv_transfer_params: None,
                 ec_transfer_params: None,
                 weight_versions: None,
+                routed_experts: None,
             }),
         ]);
 
@@ -1770,6 +1778,7 @@ mod tests {
                 kv_transfer_params: None,
                 ec_transfer_params: None,
                 weight_versions: None,
+                routed_experts: None,
             }),
         ]);
 
@@ -1854,6 +1863,7 @@ mod tests {
                 kv_transfer_params: None,
                 ec_transfer_params: None,
                 weight_versions: None,
+                routed_experts: None,
             }),
         ]);
 
@@ -1921,6 +1931,7 @@ mod tests {
                 kv_transfer_params: None,
                 ec_transfer_params: None,
                 weight_versions: None,
+                routed_experts: None,
             }),
         ]);
 
@@ -2006,6 +2017,7 @@ mod tests {
                 kv_transfer_params: None,
                 ec_transfer_params: None,
                 weight_versions: None,
+                routed_experts: None,
             }),
         ]);
 
@@ -2083,6 +2095,7 @@ mod tests {
                 kv_transfer_params: None,
                 ec_transfer_params: None,
                 weight_versions: None,
+                routed_experts: None,
             }),
         ]);
 
@@ -2149,6 +2162,7 @@ mod tests {
                     kv_transfer_params: None,
                     ec_transfer_params: None,
                     weight_versions: None,
+                    routed_experts: None,
                 }),
             ]);
 
