@@ -6,6 +6,7 @@ import torch
 import torch.distributed as dist
 from torch.distributed import ProcessGroup
 
+import vllm.envs as envs
 from vllm.logger import init_logger
 
 from .base_device_communicator import DeviceCommunicatorBase
@@ -27,9 +28,15 @@ class XpuCommunicator(DeviceCommunicatorBase):
         )
         self.ca_comm: None = None
         if self.use_all2all:
-            if self.all2all_backend in ("naive", "allgather_reducescatter"):
+            if self.all2all_backend in (
+                "naive",
+                "allgather_reducescatter",
+                "alltoall_batched",
+            ):
                 from .all2all import AgRsAll2AllManager
 
+                # alltoall_batched dispatches via all_to_all_single directly and
+                # only needs this manager for group metadata.
                 self.all2all_manager = AgRsAll2AllManager(self.cpu_group)
                 logger.info("Using AgRs manager on XPU device.")
 
@@ -45,7 +52,25 @@ class XpuCommunicator(DeviceCommunicatorBase):
                 self.all2all_manager = AgRsAll2AllManager(self.cpu_group)
                 logger.info("Using AgRs manager on XPU device.")
 
+    def _fixed_rank_sum(self, input_: torch.Tensor) -> torch.Tensor:
+        flat_input = input_.reshape(-1)
+        gathered = torch.empty(
+            (self.world_size, flat_input.numel()),
+            dtype=input_.dtype,
+            device=input_.device,
+        )
+        dist.all_gather_single(gathered.view(-1), flat_input, group=self.device_group)
+        output = gathered[0].clone()
+        for rank in range(1, self.world_size):
+            output.add_(gathered[rank])
+        return output.view(input_.shape)
+
     def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
+        if envs.VLLM_BATCH_INVARIANT:
+            # XCCL changes its reduction order with message size. Gather first
+            # and accumulate in rank order, independent of the token batch.
+            return self._fixed_rank_sum(input_)
+
         output = input_.clone()
         dist.all_reduce(output, group=self.device_group)
         return output
@@ -69,7 +94,12 @@ class XpuCommunicator(DeviceCommunicatorBase):
             output_shape, dtype=input_tensor.dtype, device=input_tensor.device
         )
 
-        dist.reduce_scatter_tensor(output, input_tensor, group=self.device_group)
+        if envs.VLLM_BATCH_INVARIANT:
+            reduced = self._fixed_rank_sum(input_tensor)
+            start = self.rank_in_group * chunk_size
+            output.copy_(reduced.narrow(0, start, chunk_size))
+        else:
+            dist.reduce_scatter_tensor(output, input_tensor, group=self.device_group)
 
         # Reshape before returning
         return output.movedim(0, dim).contiguous()
@@ -99,7 +129,15 @@ class XpuCommunicator(DeviceCommunicatorBase):
         output = torch.empty(
             output_shape, dtype=input_tensor.dtype, device=input_tensor.device
         )
-        if sizes is None or sizes.count(sizes[0]) == len(sizes):
+        if envs.VLLM_BATCH_INVARIANT:
+            reduced = self._fixed_rank_sum(input_tensor)
+            start = (
+                self.rank_in_group * chunk_size
+                if sizes is None
+                else sum(sizes[: self.rank_in_group])
+            )
+            output.copy_(reduced.narrow(0, start, chunk_size))
+        elif sizes is None or sizes.count(sizes[0]) == len(sizes):
             dist.reduce_scatter_tensor(output, input_tensor, group=self.device_group)
         elif torch.xpu.device_count() < self.world_size:
             # uneven reduce_scatter is not supported when the
@@ -191,7 +229,7 @@ class XpuCommunicator(DeviceCommunicatorBase):
             (self.world_size,) + input_size, dtype=input_.dtype, device=input_.device
         )
         # All-gather.
-        dist.all_gather_into_tensor(output_tensor, input_, group=self.device_group)
+        dist.all_gather_single(output_tensor, input_, group=self.device_group)
         if self.rank_in_group == dst:
             # Reshape
             output_tensor = output_tensor.movedim(0, dim)

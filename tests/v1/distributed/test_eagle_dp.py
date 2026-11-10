@@ -16,7 +16,7 @@ from vllm.v1.engine.async_llm import AsyncLLM
 DP_SIZE = int(os.getenv("DP_SIZE", 2))
 
 if current_platform.is_rocm():
-    ATTN_BACKENDS = ["ROCM_ATTN", "TRITON_ATTN", "FLEX_ATTENTION"]
+    ATTN_BACKENDS = ["TRITON_ATTN", "FLEX_ATTENTION"]
 else:
     ATTN_BACKENDS = ["FLASH_ATTN"]
 
@@ -28,29 +28,18 @@ IS_DEVICE_CAPABILITY_BELOW_90 = not current_platform.has_device_capability(90)
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("attn_backend", ATTN_BACKENDS)
-@pytest.mark.xfail(
-    current_platform.is_rocm(),
-    reason="Test may fail on ROCm until batch invariance is enabled. "
-    "See: https://github.com/vllm-project/vllm/issues/27433",
-    strict=False,
-)
 async def test_run_eagle_dp(monkeypatch: pytest.MonkeyPatch, attn_backend: str):
-    if not current_platform.is_rocm() and not current_platform.is_xpu():
+    if not current_platform.is_xpu():
         # This test checks that running a model with and without eagle
         # leads to identical tokens.
         #
         # NOTE: This is only true in batch invariant mode
         # (because the target model verifies all draft tokens in one big
         # forward pass)
-        #
-        # TODO[ROCm]: Test is passing on ROCm CI but may break in future.
-        # Enable batch invariance for ROCm when possible. See:
-        # https://github.com/vllm-project/vllm/issues/27433
-
         monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
 
     target_model = "meta-llama/Llama-3.1-8B-Instruct"
-    draft_model = "yuhuili/EAGLE-LLaMA3.1-Instruct-8B"
+    draft_model = "vllm-project/EAGLE-LLaMA3.1-Instruct-8B"
 
     engine_args = AsyncEngineArgs(
         model=target_model,
@@ -61,7 +50,7 @@ async def test_run_eagle_dp(monkeypatch: pytest.MonkeyPatch, attn_backend: str):
         data_parallel_backend="mp",  # ray takes more time
         trust_remote_code=True,
         max_model_len=16384,
-        attention_config={"backend": attn_backend},  # type: ignore[arg-type]
+        attention_config={"backend": attn_backend},
     )
 
     eagle_engine_args = replace(

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Check API Compat"
+  short_description: "Check vLLM's OpenAI/Anthropic-compatible API against the upstream spec."
+  default_prompt: "Use the vLLM API compatibility skill to check this endpoint or field against the upstream OpenAI or Anthropic spec."

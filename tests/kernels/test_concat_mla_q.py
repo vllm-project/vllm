@@ -156,7 +156,11 @@ def test_concat_mla_q_fp8_nope_and_rope(rope_dim, transposed, enabled):
     """FP8 query packing preserves values with empty RoPE and strided BMM output."""
     from vllm.config import CompilationConfig, VllmConfig, set_current_vllm_config
     from vllm.model_executor.layers.attention.mla_attention import _DecodeConcatQuantFP8
-    from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
+    from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        GroupShape,
+        get_fp8_min_max,
+    )
+    from vllm.platforms import current_platform
 
     torch.manual_seed(42)
     shape = (8, 17, 512) if transposed else (17, 8, 512)
@@ -166,8 +170,9 @@ def test_concat_mla_q_fp8_nope_and_rope(rope_dim, transposed, enabled):
     qp = torch.randn(17, 8, rope_dim, dtype=torch.bfloat16, device="cuda") * 128
     scale = torch.tensor(0.3, device="cuda", dtype=torch.float32)
     joined = torch.cat((ql, qp), dim=-1)
-    expected = (joined.float() * scale.reciprocal()).clamp(-448, 448)
-    expected = expected.to(torch.float8_e4m3fn)
+    fp8_min, fp8_max = get_fp8_min_max()
+    expected = (joined.float() * scale.reciprocal()).clamp(fp8_min, fp8_max)
+    expected = expected.to(current_platform.fp8_dtype())
     custom_ops = ["none"] + (["+mla_decode_concat_quant_fp8"] if enabled else [])
     config = VllmConfig(
         compilation_config=CompilationConfig(mode=0, custom_ops=custom_ops)
@@ -175,5 +180,6 @@ def test_concat_mla_q_fp8_nope_and_rope(rope_dim, transposed, enabled):
     with set_current_vllm_config(config):
         quant = _DecodeConcatQuantFP8(static=True, group_shape=GroupShape.PER_TENSOR)
         actual = quant(ql, qp, scale)
+    assert actual.dtype == current_platform.fp8_dtype()
     torch.testing.assert_close(actual.float(), expected.float(), atol=0, rtol=0)
     assert actual.is_contiguous()

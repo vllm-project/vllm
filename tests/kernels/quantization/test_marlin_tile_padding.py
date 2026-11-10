@@ -11,6 +11,7 @@ import pytest
 import torch
 
 from vllm import _custom_ops as ops
+from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     GPTQ_MARLIN_TILE,
     apply_gptq_marlin_linear,
@@ -408,7 +409,9 @@ def test_fp8_block_marlin_padded_round_trip(shape):
     _gpu_marlin_unsupported() or not is_fp8_marlin_supported(),
     reason="FP8 Marlin is not supported on this GPU type.",
 )
-@pytest.mark.parametrize("shape", [(200, 288), (4640, 512)])
+@pytest.mark.parametrize(
+    "shape", [(32, 256), (96, 256), (130, 256), (200, 288), (4640, 512)]
+)
 def test_mxfp8_marlin_padded_round_trip(shape):
     """MXFP8 exercises the e8m0 scale path, where padded 0.0 scales clamp to
     2^-127 instead of zero and must still contribute nothing."""
@@ -522,7 +525,7 @@ def test_check_marlin_supports_layer_allow_tile_padding():
     )
 
     # Tile-misaligned but group-aligned: rejected strictly, allowed w/ padding
-    layer = _FakeLinear(4640, 512, input_size=2048)
+    layer: LinearBase = _FakeLinear(4640, 512, input_size=2048)
     assert not check_marlin_supports_layer(layer, 128)
     assert check_marlin_supports_layer(layer, 128, allow_tile_padding=True)
     assert check_marlin_supports_layer(layer, -1, allow_tile_padding=True)

@@ -57,19 +57,25 @@ class LogprobsLists(NamedTuple):
 
 
 class SamplingMaskLists(NamedTuple):
-    """CSR sampling masks; a step slice holds one position (``offsets=None``)."""
+    """CSR sampling masks; a request slice may contain multiple positions."""
 
     # [num_kept_tokens]
     token_ids: np.ndarray
     # [num_positions + 1], or None for a single position
     offsets: np.ndarray | None = None
-    # Unused with one position per request; kept for the wire layout.
+    # [num_requests + 1] for multi-position request batches.
     cu_num_generated_tokens: list[int] | None = None
 
     def slice_request(self, req_idx: int, num_positions: int) -> "SamplingMaskLists":
-        assert num_positions == 1 and self.offsets is not None
+        assert self.offsets is not None
+        cu = self.cu_num_generated_tokens
+        start = req_idx if cu is None else cu[req_idx]
+        end = start + num_positions
+        lo, hi = self.offsets[start], self.offsets[end]
+        if num_positions == 1:
+            return SamplingMaskLists(self.token_ids[lo:hi])
         return SamplingMaskLists(
-            self.token_ids[self.offsets[req_idx] : self.offsets[req_idx + 1]]
+            self.token_ids[lo:hi], self.offsets[start : end + 1] - lo
         )
 
     def to_nested_list(self) -> list[list[int]]:
@@ -261,8 +267,6 @@ class ECConnectorOutput:
 class ModelRunnerOutput:
     # [num_reqs]
     req_ids: list[str]
-    # req_id -> index
-    req_id_to_index: dict[str, int]
 
     # num_reqs x num_generated_tokens
     # num_generated_tokens is the number of tokens
@@ -282,6 +286,9 @@ class ModelRunnerOutput:
     prompt_logprobs_dict: dict[str, LogprobsTensors | None] = field(
         default_factory=dict
     )
+
+    # req_id -> [num_scored_rows, num_token_ids] prompt_logprob_token_ids scores.
+    prompt_token_id_logprobs_dict: dict[str, torch.Tensor] = field(default_factory=dict)
 
     # [num_reqs, hidden_size]
     pooler_output: list[torch.Tensor | None] | None = None
@@ -353,6 +360,15 @@ class AsyncModelRunnerOutput(ABC):
         """
         pass
 
+    @abstractmethod
+    def get_kv_connector_output(self) -> KVConnectorOutput | None:
+        """Get the underlying kv_connector_output.
+
+        When get_output() fails, this is used to salvage the step's KV
+        output instead of losing it with the failure.
+        """
+        pass
+
 
 @dataclass
 class DraftTokenIds:
@@ -374,9 +390,6 @@ def make_empty_encoder_model_runner_output(
     # Convert to list so we get a deterministic, indexable sequence
     req_ids: list[str] = list(scheduler_output.num_scheduled_tokens.keys())
 
-    # Give every request its own contiguous index
-    req_id_to_index: dict[str, int] = {rid: idx for idx, rid in enumerate(req_ids)}
-
     # An encoder instance never samples, so it emits no tokens at all. The
     # scheduler finishes these requests once their prompt is fully encoded
     # (see `Scheduler.update_from_output`).
@@ -387,10 +400,9 @@ def make_empty_encoder_model_runner_output(
 
     return ModelRunnerOutput(
         req_ids=req_ids,
-        req_id_to_index=req_id_to_index,
         sampled_token_ids=sampled_token_ids,
         pooler_output=pooler_output,
     )
 
 
-EMPTY_MODEL_RUNNER_OUTPUT = ModelRunnerOutput(req_ids=[], req_id_to_index={})
+EMPTY_MODEL_RUNNER_OUTPUT = ModelRunnerOutput(req_ids=[])

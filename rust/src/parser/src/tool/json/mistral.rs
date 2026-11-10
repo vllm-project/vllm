@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use vllm_tokenizer::{DecodedText, DynTokenizer};
+
 use super::{JsonToolCallConfig, JsonToolCallParser, JsonToolCallWhitespace};
 use crate::tool::{Result, Tool, ToolParser, ToolParserOutput};
 
@@ -39,14 +41,14 @@ impl MistralToolParser {
 }
 
 impl ToolParser for MistralToolParser {
-    fn create(tools: &[Tool]) -> Result<Box<dyn ToolParser>>
+    fn create(tools: &[Tool], _tokenizer: DynTokenizer) -> Result<Box<dyn ToolParser>>
     where
         Self: Sized + 'static,
     {
         Ok(Box::new(Self::new(tools)))
     }
 
-    fn parse_into(&mut self, chunk: &str, output: &mut ToolParserOutput) -> Result<()> {
+    fn parse_into(&mut self, chunk: DecodedText, output: &mut ToolParserOutput) -> Result<()> {
         self.inner.parse_into(chunk, output)
     }
 
@@ -232,8 +234,7 @@ mod tests {
 
         let error = parser.finish().unwrap_err();
 
-        expect!["tool parser parsing failed: incomplete Mistral tool call"]
-            .assert_eq(&error.to_report_string());
+        expect!["incomplete Mistral tool call"].assert_eq(&error.to_report_string());
     }
 
     #[test]

@@ -12,23 +12,15 @@ from vllm import _custom_ops as ops
 from vllm.config import VllmConfig
 from vllm.forward_context import in_piecewise_cudagraph
 from vllm.utils.torch_utils import current_stream
+from vllm.v1.attention.backend import max_decode_query_len
 from vllm.v1.attention.backends.mla.sparse_utils import (
     triton_convert_req_index_to_global_index,
 )
 from vllm.v1.hisparse.runtime import (
-    FP8_DS_MLA_ROW_BYTES,
     HiSparseCacheHandle,
     HiSparsePrefillStagingPlan,
     create_hisparse_cache_handle,
 )
-
-
-def _create_side_stream(device: torch.device) -> torch.Stream:
-    return torch.Stream(device=device)
-
-
-def _create_event() -> torch.Event:
-    return torch.Event()
 
 
 @dataclass
@@ -38,18 +30,20 @@ class SparseMLAIndexGroup:
     logical_topk_indices: torch.Tensor
     physical_topk_indices: torch.Tensor
     valid_topk_counts: torch.Tensor
-    request_ids: torch.Tensor
     side_stream: torch.Stream
     logical_topk_ready: torch.Event
     physical_topk_ready: torch.Event
     has_indexer: bool
     num_layers: int = 0
 
+    def _current_stream(self) -> Any:
+        return current_stream()
+
     def register_layer(
         self,
         vllm_config: VllmConfig | None = None,
         *,
-        head_size: int | None = None,
+        row_width: int | None = None,
         kv_cache_dtype: str | None = None,
     ) -> int:
         layer_index = self.num_layers
@@ -66,7 +60,7 @@ class SparseMLAIndexGroup:
         # touches this event), so skip the record as well.
         if in_piecewise_cudagraph():
             return
-        self.logical_topk_ready.record(current_stream())
+        self.logical_topk_ready.record(self._current_stream())
 
     def prepare_for_batch(self, layer_index: int, attn_metadata: Any | None) -> None:
         pass
@@ -121,6 +115,7 @@ class SparseMLAIndexGroup:
         *,
         block_stride_rows: int | None,
         return_valid_counts: bool,
+        idx_mapping: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         num_tokens = logical_topk_indices.shape[0]
         if num_tokens > self.physical_topk_indices.shape[0]:
@@ -132,11 +127,12 @@ class SparseMLAIndexGroup:
                 BLOCK_STRIDE_ROWS=block_stride_rows,
                 NUM_TOPK_TOKENS=logical_topk_indices.shape[1],
                 return_valid_counts=return_valid_counts,
+                idx_mapping=idx_mapping,
             )
 
         physical_topk_indices = self.physical_topk_indices[:num_tokens]
         valid_topk_counts = self.valid_topk_counts[:num_tokens]
-        compute_stream = current_stream()
+        compute_stream = self._current_stream()
         if layer_index == 0:
             if self.has_indexer and not in_piecewise_cudagraph():
                 self.side_stream.wait_event(self.logical_topk_ready)
@@ -155,6 +151,7 @@ class SparseMLAIndexGroup:
                     valid_counts_out=(
                         valid_topk_counts if return_valid_counts else None
                     ),
+                    idx_mapping=idx_mapping,
                 )
                 self.physical_topk_ready.record(self.side_stream)
         compute_stream.wait_event(self.physical_topk_ready)
@@ -173,26 +170,27 @@ class HiSparseMLAIndexGroup(SparseMLAIndexGroup):
     prefill_stream: torch.Stream | None = None
     prefill_ready_events: list[torch.Event] = field(default_factory=list)
 
+    def _current_stream(self) -> Any:
+        return torch.accelerator.current_stream()
+
     def register_layer(
         self,
         vllm_config: VllmConfig | None = None,
         *,
-        head_size: int | None = None,
+        row_width: int | None = None,
         kv_cache_dtype: str | None = None,
     ) -> int:
         assert vllm_config is not None
-        assert head_size is not None
+        assert row_width is not None
         assert kv_cache_dtype is not None
         layer_index = super().register_layer()
         if self.prefill_stream is None:
-            self.prefill_stream = _create_side_stream(self.logical_topk_indices.device)
+            self.prefill_stream = torch.Stream(device=self.logical_topk_indices.device)
         if kv_cache_dtype == "fp8_ds_mla":
-            row_width = FP8_DS_MLA_ROW_BYTES
             kv_dtype = torch.uint8
         else:
             from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
 
-            row_width = head_size
             kv_dtype = kv_cache_dtype_str_to_dtype(
                 kv_cache_dtype, vllm_config.model_config
             )
@@ -207,7 +205,7 @@ class HiSparseMLAIndexGroup(SparseMLAIndexGroup):
         assert cache is not None
         self.caches.append(cache)
         cache.index_group_caches = self.caches
-        self.prefill_ready_events.append(_create_event())
+        self.prefill_ready_events.append(torch.Event())
         return layer_index
 
     def cache(self, layer_index: int) -> HiSparseCacheHandle:
@@ -229,13 +227,14 @@ class HiSparseMLAIndexGroup(SparseMLAIndexGroup):
         *,
         block_stride_rows: int | None,
         return_valid_counts: bool,
-        req_id_per_token: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         cache = self.cache(layer_index)
         num_tokens = logical_topk_indices.shape[0]
-        if req_id_per_token is None:
-            req_id_per_token = attn_metadata.req_id_per_token[:num_tokens]
-        if num_tokens > self.physical_topk_indices.shape[0]:
+        req_id_per_token = attn_metadata.req_id_per_token[:num_tokens]
+        if num_tokens > cache.runtime.max_swap_rows or (
+            cache.all_context_pages_resident
+            and cache.num_decode_tokens < cache.num_actual_tokens
+        ):
             # Prefill-sized batches do not fit the decode residency workspace.
             # Non-resident prefills are staged before reaching this path.
             assert cache.all_context_pages_resident
@@ -249,6 +248,7 @@ class HiSparseMLAIndexGroup(SparseMLAIndexGroup):
                 leader.view.block_size,
                 block_stride_rows=leader.view.attention_block_stride,
                 return_valid_counts=return_valid_counts,
+                idx_mapping=leader.runtime.request_state_indices,
             )
         source_block_table = cache.source_block_table
         assert source_block_table is not None
@@ -258,106 +258,8 @@ class HiSparseMLAIndexGroup(SparseMLAIndexGroup):
             logical_topk_indices=logical_topk_indices,
             block_size=attn_metadata.block_size,
             return_valid_counts=return_valid_counts,
+            num_valid_rows=attn_metadata.query_start_loc[-1:],
         )
-
-    def convert_decode_logical_to_physical_topk(
-        self,
-        layer_index: int,
-        logical_topk_indices: torch.Tensor,
-        attn_metadata: Any,
-        *,
-        return_valid_counts: bool,
-        num_decodes: int | None = None,
-        decode_query_len: int | None = None,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        num_tokens = logical_topk_indices.shape[0]
-        if num_decodes is None:
-            num_decodes = attn_metadata.num_decodes
-        if decode_query_len is None:
-            decode_query_len = attn_metadata.decode_max_query_len
-        if decode_query_len == 1:
-            return self.convert_logical_to_physical_topk(
-                layer_index,
-                logical_topk_indices,
-                attn_metadata,
-                block_stride_rows=None,
-                return_valid_counts=return_valid_counts,
-                req_id_per_token=self.request_ids[:num_decodes],
-            )
-
-        if num_tokens != num_decodes * decode_query_len:
-            query_start_loc = attn_metadata.query_start_loc[: num_decodes + 1]
-            physical_topk_indices = self.physical_topk_indices[: num_tokens + 1]
-            valid_topk_counts = self.valid_topk_counts[: num_tokens + 1]
-            request_ids = self.request_ids[:num_decodes]
-            cache = self.cache(layer_index)
-            source_block_table = cache.source_block_table
-            assert source_block_table is not None
-            for step in range(decode_query_len):
-                token_indices = query_start_loc[:-1] + step
-                active = (token_indices < query_start_loc[1:]) & (
-                    token_indices < num_tokens
-                )
-                output_indices = torch.where(
-                    active, token_indices, torch.full_like(token_indices, num_tokens)
-                ).long()
-                token_indices = token_indices.clamp(0, num_tokens - 1).long()
-                step_topk = logical_topk_indices.index_select(
-                    0, token_indices
-                ).masked_fill(~active.unsqueeze(1), -1)
-                step_result = cache.swap_in(
-                    request_ids,
-                    block_table=source_block_table,
-                    logical_topk_indices=step_topk,
-                    block_size=attn_metadata.block_size,
-                    return_valid_counts=return_valid_counts,
-                )
-                if layer_index == 0:
-                    if return_valid_counts:
-                        step_indices, step_counts = step_result
-                        valid_topk_counts.index_copy_(0, output_indices, step_counts)
-                    else:
-                        step_indices = step_result
-                    physical_topk_indices.index_copy_(0, output_indices, step_indices)
-            physical_topk_indices = physical_topk_indices[:num_tokens]
-            if return_valid_counts:
-                return physical_topk_indices, valid_topk_counts[:num_tokens]
-            return physical_topk_indices
-
-        assert num_tokens == num_decodes * decode_query_len
-        logical_topk_by_request = logical_topk_indices.view(
-            num_decodes, decode_query_len, -1
-        )
-        physical_topk_by_request = self.physical_topk_indices[:num_tokens].view(
-            num_decodes, decode_query_len, -1
-        )
-        valid_topk_by_request = self.valid_topk_counts[:num_tokens].view(
-            num_decodes, decode_query_len
-        )
-        request_ids = self.request_ids[:num_decodes]
-        for step in range(decode_query_len):
-            cache = self.cache(layer_index)
-            source_block_table = cache.source_block_table
-            assert source_block_table is not None
-            cache.swap_in(
-                request_ids,
-                block_table=source_block_table,
-                logical_topk_indices=logical_topk_by_request[:, step],
-                block_size=attn_metadata.block_size,
-                return_valid_counts=return_valid_counts,
-                attention_indices_out=(
-                    physical_topk_by_request[:, step] if layer_index == 0 else None
-                ),
-                valid_counts_out=(
-                    valid_topk_by_request[:, step]
-                    if layer_index == 0 and return_valid_counts
-                    else None
-                ),
-            )
-        physical_topk_indices = physical_topk_by_request.view(num_tokens, -1)
-        if return_valid_counts:
-            return physical_topk_indices, valid_topk_by_request.view(num_tokens)
-        return physical_topk_indices
 
     def stage_prefill_rows(
         self, layer_index: int, kv_cache: torch.Tensor, attn_metadata: Any
@@ -368,8 +270,11 @@ class HiSparseMLAIndexGroup(SparseMLAIndexGroup):
         assert staging_plan is not None
         resident_cache = None
         if cache.view is not None and cache.block_table is not None:
+            state_indices = cache.runtime.request_state_indices
+            assert state_indices is not None
             staging_plan.ensure_gpu_sources(
-                cache.block_table[attn_metadata.num_decodes :],
+                cache.block_table,
+                state_indices[attn_metadata.num_decodes :],
                 cache.view.block_size,
             )
             resident_cache = cache.view.cache
@@ -391,8 +296,11 @@ class HiSparseMLAIndexGroup(SparseMLAIndexGroup):
         plan = prefill.host_staging_plan if prefill is not None else None
         assert plan is not None
         assert cache.view is not None and cache.block_table is not None
+        state_indices = cache.runtime.request_state_indices
+        assert state_indices is not None
         plan.ensure_gpu_sources(
-            cache.block_table[attn_metadata.num_decodes :],
+            cache.block_table,
+            state_indices[attn_metadata.num_decodes :],
             cache.view.block_size,
         )
         assert plan.gpu_row_ids is not None
@@ -416,7 +324,7 @@ class HiSparseMLAIndexGroup(SparseMLAIndexGroup):
         prefill_stream = self.prefill_stream
         assert prefill_stream is not None
         block_table = plan.block_table[request_start : request_start + batch_size]
-        prefill_stream.wait_stream(current_stream())
+        prefill_stream.wait_stream(torch.accelerator.current_stream())
         with prefill_stream:
             ops.cp_gather_and_upconvert_fp8_kv_cache(
                 cache.view.cache,
@@ -452,7 +360,7 @@ class SparseMLAIndexGroupBuilder:
         is_index_producing_layer: bool,
         vllm_config: VllmConfig | None = None,
         *,
-        head_size: int | None = None,
+        row_width: int | None = None,
         kv_cache_dtype: str | None = None,
     ) -> tuple[SparseMLAIndexGroup, int]:
         if is_index_producing_layer or self.current_group is None:
@@ -476,37 +384,23 @@ class SparseMLAIndexGroupBuilder:
                     dtype=torch.int32,
                     device=self.logical_topk_indices.device,
                 ),
-                request_ids=torch.arange(
-                    workspace_rows,
-                    dtype=torch.int32,
-                    device=self.logical_topk_indices.device,
-                ),
-                side_stream=_create_side_stream(self.logical_topk_indices.device),
-                logical_topk_ready=_create_event(),
-                physical_topk_ready=_create_event(),
+                side_stream=torch.Stream(device=self.logical_topk_indices.device),
+                logical_topk_ready=torch.Event(),
+                physical_topk_ready=torch.Event(),
                 has_indexer=is_index_producing_layer,
             )
         group = self.current_group
         group_index = group.register_layer(
             vllm_config,
-            head_size=head_size,
+            row_width=row_width,
             kv_cache_dtype=kv_cache_dtype,
         )
         return group, group_index
 
 
 def get_sparse_mla_index_group_max_rows(vllm_config: VllmConfig) -> int:
-    max_query_len = 1
-    speculative_config = vllm_config.speculative_config
-    if (
-        speculative_config is not None
-        and speculative_config.num_speculative_tokens is not None
-    ):
-        max_query_len += speculative_config.num_speculative_tokens * (
-            2 if speculative_config.parallel_drafting else 1
-        )
     scheduler_config = vllm_config.scheduler_config
     return min(
         scheduler_config.max_num_batched_tokens,
-        scheduler_config.max_num_seqs * max_query_len,
+        scheduler_config.max_num_seqs * max_decode_query_len(vllm_config),
     )

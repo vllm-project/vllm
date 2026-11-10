@@ -6,6 +6,7 @@ mod coordinator;
 mod error;
 mod metrics;
 pub mod mock_engine;
+mod prompt_block_hasher;
 pub mod protocol;
 pub mod runtime;
 #[cfg(any(test, feature = "test-util"))]
@@ -14,7 +15,7 @@ mod transport;
 
 pub use client::{
     AbortCause, CoordinatorMode, EngineCoreClient, EngineCoreClientConfig, EngineCoreOutputStream,
-    EngineCoreStreamOutput, TransportMode,
+    EngineCoreStreamDelivery, EngineCoreStreamOutput, TransportMode,
 };
 pub use error::{Error, Result};
 pub use transport::{ENGINE_CORE_DEAD_SENTINEL, EngineId};

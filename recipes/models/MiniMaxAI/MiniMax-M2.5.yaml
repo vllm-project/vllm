@@ -1,0 +1,249 @@
+meta:
+  title: "MiniMax-M2.5"
+  slug: "minimax-m2.5"
+  provider: "MiniMax"
+  description: "MiniMax M2.5 MoE language model (230B total / 10B active) for coding, agent toolchains, and long-context reasoning — native FP8 checkpoint"
+  date_added: 2026-02-13
+  date_updated: 2026-09-14
+  tasks:
+    - text
+  performance_headline: "Refreshed M2 series MoE with strong SWE-Bench and Terminal-Bench performance, 196K context"
+  related_recipes: []
+  hardware:
+    h100: verified
+    h200: verified
+    mi300x: verified
+    mi325x: verified
+    mi355x: verified
+
+model:
+  model_id: "MiniMaxAI/MiniMax-M2.5"
+  min_vllm_version: "0.20.2"
+  default_frontend: rust
+  docker_image: "vllm/vllm-openai:v0.28.0"
+  architecture: moe
+  parameter_count: "230B"
+  active_parameters: "10B"
+  context_length: 196608
+  base_args:
+    - "--trust-remote-code"
+  base_env: {}
+
+features:
+  tool_calling:
+    description: "MiniMax M2 tool call parser with automatic tool choice"
+    args:
+      - "--tool-call-parser"
+      - "minimax_m2"
+      - "--enable-auto-tool-choice"
+  reasoning:
+    description: "MiniMax M2 reasoning parser for chain-of-thought extraction"
+    args:
+      - "--reasoning-parser"
+      - "minimax_m2"
+
+opt_in_features: []
+
+variants:
+  default:
+    precision: fp8
+    vram_minimum_gb: 276
+    description: "Native FP8 checkpoint — 4x H200/H20/H100 or 4x A100/A800 for weights, plus KV cache headroom"
+  nvfp4:
+    model_id: "nvidia/MiniMax-M2.5-NVFP4"
+    precision: nvfp4
+    vram_minimum_gb: 138
+    description: "NVIDIA NVFP4 quantized weights for Blackwell GPUs"
+    extra_args:
+      - "--kv-cache-dtype"
+      - "fp8"
+
+  redhat_nvfp4:
+    model_id: "RedHatAI/MiniMax-M2.5-NVFP4"
+    precision: nvfp4
+    label: "NVFP4 (RedHat)"
+    vram_minimum_gb: 146
+    description: "RedHatAI NVFP4 quantization"
+
+compatible_strategies:
+  - single_node_tp
+  - single_node_tep
+  - single_node_dep
+  - multi_node_tp
+  - multi_node_tp_pp
+  - multi_node_tep
+  - multi_node_dep
+  - pd_cluster
+
+kv_offload_support:
+  offloading_cpu: verified
+  offloading_fs: verified
+
+hardware_overrides:
+  nvidia:
+    extra_args:
+      - "--compilation-config"
+      - '{"cudagraph_mode":"PIECEWISE"}'
+  hopper:
+    extra_args:
+      - "--compilation-config"
+      - '{"cudagraph_mode":"PIECEWISE"}'
+      - "--max-num-seqs"
+      - "512"
+      - "--max-num-batched-tokens"
+      - "32768"
+      - "--kv-cache-dtype"
+      - "fp8"
+      - "--moe-backend"
+      - "triton"
+      - "--attention-backend"
+      - "FLASHINFER"
+      - "--enable-flashinfer-autotune"
+    extra_env:
+      PYTHONNOUSERSITE: "1"
+      VLLM_USE_DEEP_GEMM: "0"
+      VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER: "0"
+      VLLM_FLOAT32_MATMUL_PRECISION: "high"
+  amd:
+    extra_args:
+      - "--tensor-parallel-size"
+      - "2"
+      - "--attention-backend"
+      - "ROCM_AITER_FA"
+    extra_env:
+      VLLM_ROCM_USE_AITER: "1"
+      VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT: "1"
+
+strategy_overrides:
+  single_node_tp:
+    # Pure TP=8 fails on the FP8 block-quantized gate_up weights:
+    # intermediate_size / 8 = 192 is not divisible by block_n = 128.
+    # Pin TP=4 on 8-GPU nodes; for full-node utilization use
+    # single_node_tep (TP+EP) or single_node_dep (DP+EP).
+    tp: 4
+
+guide: |
+  ## Overview
+
+  [MiniMax-M2.5](https://huggingface.co/MiniMaxAI/MiniMax-M2.5) is part of the MiniMax
+  M2 series of advanced MoE language models. It retains the M2 architecture (10B active,
+  230B total) and a 196K context per sequence.
+
+  ## Prerequisites
+
+  - **OS:** Linux
+  - **Python:** 3.10 - 3.13
+  - **NVIDIA:** compute capability >= 7.0; ~220 GB for weights + 240 GB per 1M context tokens
+  - **AMD:** MI300X / MI325X / MI350X / MI355X with ROCm 7.0+
+
+  ### Install vLLM (NVIDIA)
+
+  ```bash
+  uv venv
+  source .venv/bin/activate
+  uv pip install -U vllm --torch-backend auto
+  ```
+
+  ### Docker (dedicated M2-series image)
+
+  ```bash
+  docker run --gpus all \
+    -p 8000:8000 \
+    --ipc=host \
+    -v ~/.cache/huggingface:/root/.cache/huggingface \
+    -e PYTHONNOUSERSITE=1 \
+    -e VLLM_USE_DEEP_GEMM=0 \
+    -e VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER=0 \
+    -e VLLM_FLOAT32_MATMUL_PRECISION=high \
+    vllm/vllm-openai:v0.28.0 MiniMaxAI/MiniMax-M2.5 \
+        --tensor-parallel-size 4 \
+        --max-num-seqs 512 \
+        --max-num-batched-tokens 32768 \
+        --kv-cache-dtype fp8 \
+        --moe-backend triton \
+        --attention-backend FLASHINFER \
+        --enable-flashinfer-autotune \
+        --tool-call-parser minimax_m2 \
+        --reasoning-parser minimax_m2 \
+        --enable-auto-tool-choice \
+        --compilation-config '{"cudagraph_mode":"PIECEWISE"}' \
+        --trust-remote-code
+  ```
+
+  ## Launching the Server
+
+  ### NVIDIA H200 — TP4
+
+  ```bash
+  PYTHONNOUSERSITE=1 \
+  VLLM_USE_DEEP_GEMM=0 \
+  VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER=0 \
+  VLLM_FLOAT32_MATMUL_PRECISION=high \
+  vllm serve MiniMaxAI/MiniMax-M2.5 \
+    --tensor-parallel-size 4 \
+    --max-num-seqs 512 \
+    --max-num-batched-tokens 32768 \
+    --kv-cache-dtype fp8 \
+    --moe-backend triton \
+    --attention-backend FLASHINFER \
+    --enable-flashinfer-autotune \
+    --tool-call-parser minimax_m2 \
+    --reasoning-parser minimax_m2 \
+    --compilation-config '{"cudagraph_mode":"PIECEWISE"}' \
+    --enable-auto-tool-choice \
+    --trust-remote-code
+  ```
+
+  For H200 FP8, choose the attention backend by sequence length for best performance:
+  shorter sequences (e.g. 1024) should keep the command above with `--attention-backend FLASHINFER`
+  and `--enable-flashinfer-autotune`, while longer input sequences (e.g. 8192)
+  should remove those flags to use the auto-selected FlashAttention backend.
+
+  Pure TP8 is not supported. For >4 GPUs use DP+EP or TP+EP.
+
+  ### TP4+EP (recommended for H100)
+
+  ```bash
+  vllm serve MiniMaxAI/MiniMax-M2.5 \
+    --tensor-parallel-size 4 \
+    --enable-expert-parallel \
+    --tool-call-parser minimax_m2 \
+    --reasoning-parser minimax_m2 \
+    --compilation-config '{"cudagraph_mode":"PIECEWISE"}' \
+    --enable-auto-tool-choice
+  ```
+
+  ### AMD ROCm — TP2
+
+  ```bash
+  VLLM_ROCM_USE_AITER=1 vllm serve MiniMaxAI/MiniMax-M2.5 \
+    --tensor-parallel-size 2 \
+    --tool-call-parser minimax_m2 \
+    --reasoning-parser minimax_m2 \
+    --enable-auto-tool-choice \
+    --trust-remote-code
+  ```
+
+  ## Benchmarking
+
+  ```bash
+  vllm bench serve \
+    --backend vllm \
+    --model MiniMaxAI/MiniMax-M2.5 \
+    --endpoint /v1/completions \
+    --dataset-name random \
+    --random-input 2048 \
+    --random-output 1024 \
+    --max-concurrency 10 \
+    --num-prompt 100
+  ```
+
+  ## Troubleshooting
+
+  - See [MiniMax-M2](./MiniMax-M2.yaml) for shared troubleshooting notes
+    (latest vLLM fusion behavior, nightly vs stable, DeepGEMM, AITER).
+
+  ## References
+
+  - [Model card](https://huggingface.co/MiniMaxAI/MiniMax-M2.5)
+  - [MiniMax](https://www.minimax.io/)

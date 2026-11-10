@@ -5,6 +5,7 @@ from typing import Any
 import torch
 import torch.nn as nn
 
+from vllm.compilation.breakable_cudagraph import is_breakable_cudagraph_enabled
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import BatchDescriptor, set_forward_context
@@ -96,8 +97,11 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
         )
 
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
-        # TODO(TheEpicDolphin): Support piecewise cudagraph for multi-module MTP.
-        if cudagraph_mode.has_piecewise_cudagraphs():
+        # Compiled piecewise graphs do not specialize the Python module index.
+        if (
+            cudagraph_mode.has_piecewise_cudagraphs()
+            and not is_breakable_cudagraph_enabled(self.vllm_config.compilation_config)
+        ):
             cudagraph_mode = (
                 CUDAGraphMode.FULL_DECODE_ONLY
                 if cudagraph_mode.has_full_cudagraphs()
@@ -107,7 +111,9 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
             self.vllm_config,
             self.device,
             cudagraph_mode,
-            self.num_speculative_steps + 1,
+            self.vllm_config.get_decode_cudagraph_query_lens(
+                self.num_speculative_steps + 1
+            ),
         )
 
     def capture(self) -> None:
@@ -117,7 +123,11 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
         self.last_token_indices.zero_()
         assert self.cudagraph_manager is not None
         if self.cudagraph_manager.use_breakable_cg:
-            self.cudagraph_manager.init_breakable_cg_runner(self.model)
+            num_layers = self.speculative_config.num_mtp_modules()
+            self.cudagraph_manager.init_breakable_cg_runner(
+                self.model,
+                key_fn=lambda **kwargs: kwargs["spec_step_idx"] % num_layers,
+            )
         self.cudagraph_manager.capture(
             self._generate_drafts,
             self.model_state,
@@ -127,6 +137,10 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
             self.kv_cache_config,
             progress_bar_desc="Capturing multi-module MTP CUDA graphs",
         )
+
+    def supports_batch_sharded_draft_logits(self) -> bool:
+        # Every draft logits write goes through sample_draft.
+        return True
 
     @torch.inference_mode()
     def propose(
@@ -150,11 +164,12 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
         temperature: torch.Tensor,
         # [max_num_reqs]
         seeds: torch.Tensor,
-        dp_sync: DPSyncState | None = None,
+        dp_sync_state: DPSyncState | None = None,
         dummy_run: bool = False,
         skip_attn_for_dummy_run: bool = False,
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
         is_profile: bool = False,
+        num_speculative_tokens: int | None = None,
     ) -> torch.Tensor:
         num_reqs = input_batch.num_reqs
         seq_lens_cpu_upper_bound = input_batch.seq_lens_cpu_upper_bound
@@ -190,7 +205,7 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
         # When all requests are decoding (no true prefills), each has
         # num_speculative_steps + 1 tokens, enabling FULL graph replay.
         uniform_token_count = get_uniform_decode_token_count(
-            num_reqs, num_tokens, max_query_len, input_batch.has_prefill
+            num_reqs, num_tokens, max_query_len, input_batch.decode_graph_eligible
         )
         batch_desc, batch_sync = dispatch_cg_and_sync_dp(
             self.cudagraph_manager,
@@ -200,7 +215,8 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
             dp_size=self.dp_size,
             dp_rank=self.dp_rank,
             need_eager=is_profile,
-            dp_sync=dp_sync,
+            dp_sync_state=dp_sync_state,
+            parallel_config=self.vllm_config.parallel_config,
         )
         num_tokens_across_dp = (
             batch_sync.num_tokens_across_dp if batch_sync is not None else None
@@ -252,6 +268,17 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
                 cudagraph_runtime_mode=batch_desc.cg_mode,
             )
         return self.draft_tokens[:num_reqs]
+
+    # Each MTP module may carry its own LM head, selected by spec_step_idx.
+    def compute_draft_logits(
+        self, hidden_states: torch.Tensor, spec_step_idx: int
+    ) -> torch.Tensor:
+        return self.model.compute_logits(hidden_states, spec_step_idx=spec_step_idx)
+
+    def get_draft_top_tokens(
+        self, hidden_states: torch.Tensor, spec_step_idx: int
+    ) -> torch.Tensor:
+        return self.model.get_top_tokens(hidden_states, spec_step_idx=spec_step_idx)
 
     @torch.inference_mode()
     def _run_model(
@@ -427,6 +454,7 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
                 self.seeds,
                 self.current_draft_step,
                 self.draft_logits,
+                spec_step_idx=step,
             )
 
             self.draft_tokens[:num_reqs, step] = draft_tokens

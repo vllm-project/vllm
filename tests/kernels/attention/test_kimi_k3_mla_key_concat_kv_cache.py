@@ -197,11 +197,6 @@ def test_decode_concat_ignores_negative_slots_for_cache(cache_format: str) -> No
     mixed_cache = initial_cache.clone()
     reference_cache = _reference_cache(cache_format, inputs, initial_cache, slots)
     scale_inv = torch.ones(1, device="cuda", dtype=torch.float32)
-    kwargs = {
-        "ds_mla": cache_format == "fp8_ds_mla",
-        "q_scale_inv": scale_inv if cache_format == "fp8" else None,
-        "cache_scale_inv": scale_inv if cache_format == "fp8" else None,
-    }
 
     output = fused_mla_decode_q_concat_kv_cache_insert(
         inputs["ql_nope"],
@@ -210,7 +205,9 @@ def test_decode_concat_ignores_negative_slots_for_cache(cache_format: str) -> No
         inputs["k_pe"],
         mixed_cache,
         slots,
-        **kwargs,
+        ds_mla=cache_format == "fp8_ds_mla",
+        q_scale_inv=scale_inv if cache_format == "fp8" else None,
+        cache_scale_inv=scale_inv if cache_format == "fp8" else None,
     )
 
     expected = _latent_query(inputs["ql_nope"], inputs["q_pe"])

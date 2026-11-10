@@ -48,6 +48,7 @@ from vllm.model_executor.layers.attention.mm_encoder_attention import (
     MMEncoderAttention,
 )
 from vllm.model_executor.layers.conv import Conv2dLayer
+from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     QKVParallelLinear,
@@ -71,6 +72,7 @@ from vllm.model_executor.models.glm4_1v import (
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.utils.torch_utils import PIN_MEMORY
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from .utils import (
     maybe_prefix,
@@ -169,6 +171,7 @@ class GlmOcrVisionAttention(nn.Module):
         rotary_pos_emb_cos: torch.Tensor,
         rotary_pos_emb_sin: torch.Tensor,
         max_seqlen: torch.Tensor | None = None,  # Only used for Flash Attention
+        sequence_lengths: torch.Tensor | None = None,  # Only used for FlashInfer
     ) -> torch.Tensor:
         # [s, b, c] --> [s, b, head * 3 * head_dim]
         x, _ = self.qkv(x)
@@ -181,7 +184,9 @@ class GlmOcrVisionAttention(nn.Module):
         q = self.q_norm(q.reshape(-1, self.head_dim)).view(q_shape)
         k = self.k_norm(k.reshape(-1, self.head_dim)).view(k_shape)
 
-        q, k, v = (rearrange(x, "s b ... -> b s ...").contiguous() for x in (q, k, v))
+        q, k = (rearrange(x, "s b ... -> b s ...").contiguous() for x in (q, k))
+        # Keep v a view into qkv, as FlashInfer's cu_seqlens expect.
+        v = rearrange(v, "s b ... -> b s ...")
         if rotary_pos_emb_cos is not None and rotary_pos_emb_sin is not None:
             # [2 * b, s, heads, head_dim]
             qk_concat = torch.cat([q, k], dim=0)
@@ -198,6 +203,7 @@ class GlmOcrVisionAttention(nn.Module):
             value=v,
             cu_seqlens=cu_seqlens,
             max_seqlen=max_seqlen,
+            sequence_lengths=sequence_lengths,
         )
         context_layer = rearrange(context_layer, "b s h d -> s b (h d)").contiguous()
 
@@ -254,9 +260,17 @@ class GlmOcrVisionTransformer(Glm4vVisionTransformer):
         vision_config: "GlmOcrVisionConfig",
         norm_eps: float = 1e-5,
         quant_config: QuantizationConfig | None = None,
+        input_norm: nn.Module | None = None,
         prefix: str = "",
     ) -> None:
-        super().__init__(text_config, vision_config, norm_eps, quant_config, prefix)
+        super().__init__(
+            text_config,
+            vision_config,
+            norm_eps,
+            quant_config,
+            input_norm,
+            prefix,
+        )
 
         del self.post_conv_layernorm
         del self.embeddings
@@ -334,7 +348,7 @@ class GlmOcrVisionTransformer(Glm4vVisionTransformer):
             grid_thw = torch.tensor(grid_thw, dtype=torch.int32)
 
         # patchify
-        x = x.to(device=self.device, dtype=self.dtype)
+        x = self.input_norm(x.to(device=self.device), self.dtype)
         x = self.patch_embed(x)
 
         # compute position embedding
@@ -349,10 +363,28 @@ class GlmOcrVisionTransformer(Glm4vVisionTransformer):
         cu_seqlens = torch.cat(
             [cu_seqlens.new_zeros(1), cu_seqlens],
             out=cu_seqlens.new_empty(cu_seqlens.numel() + 1, pin_memory=PIN_MEMORY),
-        ).to(self.device, non_blocking=True)
-
-        # pre-compute max_seqlen for attn mask to reduce cuMemcpy operations
-        max_seqlen = self.compute_attn_mask_seqlen(cu_seqlens)
+        )
+        sequence_lengths = None
+        if self.attn_backend == AttentionBackendEnum.FLASHINFER:
+            cu_seqlens_np = cu_seqlens.numpy()
+            sequence_lengths = MMEncoderAttention.maybe_compute_seq_lens(
+                self.attn_backend, cu_seqlens_np, self.device
+            )
+            max_seqlen = torch.tensor(
+                MMEncoderAttention.compute_max_seqlen(self.attn_backend, cu_seqlens_np),
+                dtype=torch.int32,
+            )
+            cu_seqlens = MMEncoderAttention.maybe_recompute_cu_seqlens(
+                self.attn_backend,
+                cu_seqlens_np,
+                self.hidden_size,
+                self.tp_size,
+                self.device,
+            )
+        else:
+            cu_seqlens = cu_seqlens.to(self.device, non_blocking=True)
+            # pre-compute max_seqlen for attn mask to reduce cuMemcpy operations
+            max_seqlen = self.compute_attn_mask_seqlen(cu_seqlens)
 
         # transformers
         x = x.unsqueeze(1)
@@ -363,6 +395,7 @@ class GlmOcrVisionTransformer(Glm4vVisionTransformer):
                 rotary_pos_emb_cos=rotary_pos_emb_cos,
                 rotary_pos_emb_sin=rotary_pos_emb_sin,
                 max_seqlen=max_seqlen,
+                sequence_lengths=sequence_lengths,
             )
 
         # adapter
@@ -393,5 +426,6 @@ class GlmOcrForConditionalGeneration(Glm4vForConditionalGeneration):
                 config.vision_config,
                 norm_eps=getattr(config, "rms_norm_eps", 1e-5),
                 quant_config=quant_config,
+                input_norm=build_mm_input_norm(self.model_config),
                 prefix=maybe_prefix(prefix, "visual"),
             )

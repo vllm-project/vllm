@@ -10,7 +10,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from transformers import BatchFeature, PretrainedConfig
+from transformers import BatchFeature, PreTrainedConfig
 from transformers.models.qwen2_vl.image_processing_qwen2_vl import smart_resize
 from typing_extensions import TypedDict
 
@@ -69,7 +69,10 @@ from .qwen2_5_vl import (
     Qwen2_5_VLVideoInputs,
     Qwen2_5_VLVideoPixelInputs,
 )
-from .qwen2_vl import _create_qwen2vl_field_factory
+from .qwen2_vl import (
+    Qwen2VLMultiModalDataParser,
+    _create_qwen2vl_field_factory,
+)
 from .utils import AutoWeightsLoader, IntermediateTensors, WeightsMapper, maybe_prefix
 
 
@@ -159,7 +162,12 @@ class MiMoVisionAttention(nn.Module):
             if use_data_parallel
             else parallel_state.get_tensor_model_parallel_world_size()
         )
-        self.tp_rank = parallel_state.get_tensor_model_parallel_rank()
+        # Data parallel runs the whole encoder on every rank, so the rank has to
+        # collapse with the size: otherwise the per-head slices below start past
+        # the end of the head range on ranks > 0.
+        self.tp_rank = (
+            0 if use_data_parallel else parallel_state.get_tensor_model_parallel_rank()
+        )
 
         self.num_heads = num_heads
         self.num_kv_heads = num_kv_heads
@@ -231,7 +239,7 @@ class MiMoVisionAttention(nn.Module):
     ) -> torch.Tensor:
         """Window attention with the per-head sink applied to key 0.
 
-        The reference adds ``sinks[h]`` to the logit of each sequence's first
+        The reference adds `sinks[h]` to the logit of each sequence's first
         key, which the Triton prefill kernel supports directly, so the softmax
         normalizes over the biased scores in one pass.
         """
@@ -418,7 +426,7 @@ class MiMoVisionTransformer(nn.Module):
 
     def __init__(
         self,
-        vision_cfg: PretrainedConfig,
+        vision_cfg: PreTrainedConfig,
         *,
         norm_eps: float = 1e-6,
         quant_config: QuantizationConfig | None = None,
@@ -670,6 +678,14 @@ class MiMoVisionTransformer(nn.Module):
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
+class MiMoV2OmniMultiModalDataParser(Qwen2VLMultiModalDataParser):
+    # Video stays raw: get_video_replacement also reads second_per_grid_ts and
+    # video_start_times, which a metadata-only rewrite would not carry.
+    embedding_fields = {
+        "image": Qwen2VLMultiModalDataParser.embedding_fields["image"],
+    }
+
+
 class MiMoV2OmniProcessingInfo(BaseProcessingInfo):
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"audio": None, "image": None, "video": None}
@@ -689,9 +705,14 @@ class MiMoV2OmniProcessingInfo(BaseProcessingInfo):
         return self.get_hf_processor(**kwargs).image_processor
 
     def get_data_parser(self):
-        from vllm.multimodal.parse import MultiModalDataParser
-
-        return MultiModalDataParser(target_sr=24000.0)
+        # Without embedding_fields the EC producer publishes no metadata and
+        # the EPD proxy never rewrites the media item.
+        return MiMoV2OmniMultiModalDataParser(
+            self.get_hf_config().vision_config.spatial_merge_size,
+            target_sr=24000.0,
+            expected_hidden_size=self._get_expected_hidden_size(),
+            allow_missing_mm_embeddings=self.allow_missing_mm_embeddings,
+        )
 
     def get_mm_max_tokens_per_item(
         self,
@@ -890,9 +911,9 @@ class MiMoV2OmniMultiModalProcessor(BaseMultiModalProcessor[MiMoV2OmniProcessing
 
     Key differences from Qwen2.5-VL:
     - Videos use timestamp tokens between temporal grid positions.
-    - The HF processor expects ``(TCHW_tensor, timestamps_T_tensor)`` video
+    - The HF processor expects `(TCHW_tensor, timestamps_T_tensor)` video
       tuples rather than plain numpy arrays.
-    - ``video_start_times`` is tracked so prompt-update reconstruction can
+    - `video_start_times` is tracked so prompt-update reconstruction can
       regenerate the exact same timestamp token IDs.
     """
 
@@ -1108,7 +1129,7 @@ class MiMoV2OmniMultiModalProcessor(BaseMultiModalProcessor[MiMoV2OmniProcessing
                     full.extend(ts_ids)
                     is_embed_mask.extend([False] * len(ts_ids))
                     # Vision tokens for all frames in this group
-                    for f in range(frames_per_group):
+                    for _ in range(frames_per_group):
                         full.append(vision_start_id)
                         is_embed_mask.append(False)
                         full.extend([video_pad_id] * n_per_grid)
@@ -1213,6 +1234,8 @@ class MiMoV2OmniDummyInputsBuilder(BaseDummyInputsBuilder[MiMoV2OmniProcessingIn
 class MiMoV2OmniForCausalLM(
     nn.Module, SupportsMultiModal, SupportsPP, SupportsQuant, SupportsEagle3
 ):
+    supports_encoder_tp_data = True
+
     # To ensure correct weight loading and mapping.
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={

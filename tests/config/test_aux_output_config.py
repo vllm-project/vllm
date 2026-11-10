@@ -7,6 +7,8 @@ from typing import Any
 import pytest
 
 from vllm.config import AuxOutputConfig, VllmConfig
+from vllm.config.kv_transfer import KVRole, KVTransferConfig
+from vllm.config.utils import hash_config
 from vllm.engine.arg_utils import EngineArgs
 
 pytestmark = pytest.mark.cpu_test
@@ -14,11 +16,11 @@ pytestmark = pytest.mark.cpu_test
 
 def _config(
     *,
-    use_v2: bool = True,
     pp: int = 1,
     dcp: int = 1,
     pcp: int = 1,
     connector: str | None = None,
+    kv_role: KVRole = "kv_both",
     runner_type: str = "generate",
     is_moe: bool = True,
     sliding_window: int | None = None,
@@ -33,7 +35,6 @@ def _config(
             get_sliding_window=lambda: sliding_window,
             attention_chunk_size=attention_chunk_size,
         ),
-        use_v2_model_runner=use_v2,
         parallel_config=SimpleNamespace(
             pipeline_parallel_size=pp,
             decode_context_parallel_size=dcp,
@@ -51,9 +52,9 @@ def _config(
         kv_transfer_config=(
             None
             if connector is None
-            else SimpleNamespace(
-                is_kv_transfer_instance=True,
+            else KVTransferConfig(
                 kv_connector=connector,
+                kv_role=kv_role,
             )
         ),
     )
@@ -71,7 +72,7 @@ def test_aux_output_capture_changes_compilation_hash():
     disabled = AuxOutputConfig()
     enabled = AuxOutputConfig(enable_return_routed_experts=True)
 
-    assert disabled.compute_hash() != enabled.compute_hash()
+    assert hash_config(disabled) != hash_config(enabled)
 
 
 def test_legacy_routed_experts_flag_updates_aux_output_config():
@@ -84,7 +85,6 @@ def test_legacy_routed_experts_flag_updates_aux_output_config():
 @pytest.mark.parametrize(
     ("kwargs", "error"),
     [
-        ({"use_v2": False}, "requires Model Runner V2"),
         ({"runner_type": "pooling"}, "only supports generate runners"),
         ({"is_moe": False}, "only supports MoE models"),
         ({"enable_prefix_caching": False}, "requires prefix caching"),
@@ -95,12 +95,50 @@ def test_legacy_routed_experts_flag_updates_aux_output_config():
         ({"pp": 2}, "pipeline parallelism"),
         ({"dcp": 2}, "context parallelism"),
         ({"pcp": 2}, "context parallelism"),
-        ({"connector": "MooncakeConnector"}, "incompatible with KV connectors"),
     ],
 )
 def test_aux_output_connector_rejects_unsupported_configuration(kwargs, error):
     with pytest.raises(ValueError, match=error):
         VllmConfig._verify_aux_output_compatibility(_config(**kwargs))
+
+
+@pytest.mark.parametrize(
+    ("connector", "blocked"),
+    [
+        ("NixlConnector", True),
+        ("NixlPullConnector", True),
+        ("NixlPushConnector", True),
+        ("MoRIIOConnector", True),
+        ("MooncakeConnector", True),
+        ("MooncakeStoreConnector", False),
+        ("OffloadingConnector", False),
+        ("LMCacheConnectorV1", False),
+        ("LMCacheMPConnector", False),
+        ("SimpleCPUOffloadConnector", False),
+    ],
+)
+@pytest.mark.parametrize("kv_role", ["kv_both", "kv_producer", "kv_consumer"])
+@pytest.mark.parametrize("multi", [False, True])
+def test_aux_output_connector_policy_is_independent_of_role(
+    connector, blocked, kv_role, multi
+):
+    config = _config(connector=connector, kv_role=kv_role)
+    if multi:
+        config.kv_transfer_config = KVTransferConfig(
+            kv_connector="MultiConnector",
+            kv_role=kv_role,
+            kv_connector_extra_config={
+                "connectors": [
+                    {"kv_connector": "OffloadingConnector", "kv_role": "kv_both"},
+                    {"kv_connector": connector, "kv_role": kv_role},
+                ]
+            },
+        )
+    if blocked:
+        with pytest.raises(ValueError, match=f"incompatible with {connector}"):
+            VllmConfig._verify_aux_output_compatibility(config)
+    else:
+        VllmConfig._verify_aux_output_compatibility(config)
 
 
 @pytest.mark.parametrize(

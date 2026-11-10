@@ -19,9 +19,6 @@ from vllm.model_executor.layers.fused_moe import (
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.model_loader.mtp_validation import (
-    is_mtp_completeness_check_enabled,
-)
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
@@ -152,10 +149,8 @@ class DeepseekV32MultiTokenPredictorLayer(nn.Module):
         # the draft-logits hidden (compute_logits applies the LM head only) and
         # the recycled previous_hidden_states. Recycling the pre-final-norm
         # hidden mismatches the draft model's hnorm and lowers MTP acceptance;
-        # post-norm recycle matches deepseek_mtp.py (PR #45895). The tuple form
-        # is understood by both the V2 speculator (isinstance-tuple check) and
-        # the legacy proposer (model_returns_tuple is True for the
-        # DeepSeekMTPModel architecture).
+        # post-norm recycle matches deepseek_mtp.py (PR #45895). The speculator
+        # recognizes the tuple form with an isinstance check.
         if is_sequence_parallel:
             hidden_states, _ = self.shared_head.norm(hidden_states, residual)
             hidden_states = sp_all_gather(hidden_states)[: positions.shape[0]]
@@ -204,7 +199,7 @@ class DeepseekV32MultiTokenPredictor(nn.Module):
                 self_attn.skip_topk = skip
 
     def compact_topk_indices(self, slot_ids: torch.Tensor):
-        """Gather the top-k index rows at ``slot_ids`` to the front of the buffer."""
+        """Gather the top-k index rows at `slot_ids` to the front of the buffer."""
         num_slots = slot_ids.numel()
         for layer in self.layers.values():
             self_attn = getattr(layer.mtp_block, "self_attn", None)
@@ -260,9 +255,9 @@ class DeepseekV32MultiTokenPredictor(nn.Module):
     ) -> torch.Tensor:
         """Greedy draft token ids via per-rank argmax over the vocab shard.
 
-        Saves the full-vocab all-gather ``compute_logits`` does; same tokens.
+        Saves the full-vocab all-gather `compute_logits` does; same tokens.
         Name is fixed by the protocol the proposer probes for
-        (``use_local_argmax_reduction``).
+        (`use_local_argmax_reduction`).
         """
         current_step_idx = spec_step_idx % self.num_mtp_layers
         mtp_layer = self.layers[str(self.mtp_start_layer_idx + current_step_idx)]
@@ -328,7 +323,7 @@ class DeepseekV32MTP(nn.Module, DeepseekV2MixtureOfExperts, SupportsPP):
         hidden_states: torch.Tensor,
         spec_step_idx: int = 0,
     ) -> torch.Tensor:
-        """See ``DeepseekV32MultiTokenPredictor.get_top_tokens``."""
+        """See `DeepseekV32MultiTokenPredictor.get_top_tokens`."""
         return self.model.get_top_tokens(hidden_states, spec_step_idx)
 
     def _rewrite_spec_layer_name(self, spec_layer: int, name: str) -> str:
@@ -356,6 +351,12 @@ class DeepseekV32MTP(nn.Module, DeepseekV2MixtureOfExperts, SupportsPP):
             name = name.replace(f"model.layers.{spec_layer}.", "model.")
         return name
 
+    def is_unused_checkpoint_weight(self, name: str) -> bool:
+        return (
+            get_spec_layer_idx_from_weight_name(self.config, name) is None
+            and "embed_tokens" not in name
+        )
+
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             ("gate_up_proj", "gate_proj", 0),
@@ -376,9 +377,14 @@ class DeepseekV32MTP(nn.Module, DeepseekV2MixtureOfExperts, SupportsPP):
         pp_missing_layer_names = get_pp_missing_layer_names(self)
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
-        _pending_wk_fp8: dict = {}
+        # Reordering loaders (e.g. runai_streamer) can split an FP8 indexer wk
+        # weight/scale pair across load_weights() calls; keep the pending
+        # buffer on the model so pairs survive the call boundary.
+        _pending_wk_fp8 = getattr(self, "_pending_indexer_wk_fp8", None)
+        if _pending_wk_fp8 is None:
+            self._pending_indexer_wk_fp8 = _pending_wk_fp8 = {}
         for name, loaded_weight in weights:
-            if "rotary_emb.inv_freq" in name:
+            if "rotary_emb.inv_freq" in name or self.is_unused_checkpoint_weight(name):
                 continue
             spec_layer = get_spec_layer_idx_from_weight_name(self.config, name)
             if spec_layer is None:
@@ -425,7 +431,7 @@ class DeepseekV32MTP(nn.Module, DeepseekV2MixtureOfExperts, SupportsPP):
             else:
                 num_chunks = 1
 
-                for j in range(num_chunks):
+                for _ in range(num_chunks):
                     chunk_name = name
                     weight_to_load = loaded_weight
 
@@ -470,19 +476,4 @@ class DeepseekV32MTP(nn.Module, DeepseekV2MixtureOfExperts, SupportsPP):
                         )
                         weight_loader(param, loaded_weight)
             loaded_params.add(name)
-
-        loaded_layers: set[int] = set()
-        for param_name in loaded_params:
-            spec_layer = get_spec_layer_idx_from_weight_name(self.config, param_name)
-            if spec_layer is not None:
-                loaded_layers.add(spec_layer)
-        for layer_idx in range(
-            self.model.mtp_start_layer_idx,
-            self.model.mtp_start_layer_idx + self.model.num_mtp_layers,
-        ):
-            if layer_idx not in loaded_layers and is_mtp_completeness_check_enabled():
-                raise ValueError(
-                    f"MTP speculative decoding layer {layer_idx} weights "
-                    f"missing from checkpoint."
-                )
         return loaded_params

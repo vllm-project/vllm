@@ -26,7 +26,7 @@ import torch
 import torch.nn as nn
 from torch import Tensor
 from torch.nn.functional import gumbel_softmax, pad, softmax
-from transformers import BatchFeature, PretrainedConfig
+from transformers import BatchFeature, PreTrainedConfig
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import MultiModalDummyOptions
@@ -93,7 +93,7 @@ def st_argmax(y_soft: torch.Tensor, dim: int):  # straight-through softmax
 class VisualTokenizer(torch.nn.Module):
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
@@ -120,12 +120,12 @@ class VisualTokenizer(torch.nn.Module):
 
     def _init_backbone(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> nn.Module:
         model_type = config.backbone_config.model_type
-        if model_type == "aimv2":
+        if model_type == "aimv2_vision_model":
             # No post rms_norm in Ovis2's AIMv2 ViT.
             return AIMv2Model(
                 config=config.backbone_config,
@@ -419,7 +419,7 @@ class Ovis(nn.Module, SupportsMultiModal, SupportsPP):
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
 
-        self.config: PretrainedConfig = config
+        self.config: PreTrainedConfig = config
 
         with self._mark_language_model(vllm_config):
             self.llm = init_vllm_registered_model(
