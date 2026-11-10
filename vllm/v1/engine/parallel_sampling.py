@@ -33,9 +33,9 @@ class ParentRequest:
     # To efficiently obtain child sampling params
     cached_child_sampling_params: SamplingParams | None
 
-    # Fewest cached prompt tokens across children: siblings share the prompt,
-    # so a later child also hits the blocks an earlier one just computed
+    # Prefill stats of the child with the fewest cached tokens
     num_cached_tokens: int | None
+    num_cache_creation_tokens: int
 
     def __init__(self, request: EngineCoreRequest) -> None:
         assert request.external_req_id is not None
@@ -53,6 +53,7 @@ class ParentRequest:
         self.max_num_generation_tokens = 0
         self.cached_child_sampling_params = None
         self.num_cached_tokens = None
+        self.num_cache_creation_tokens = 0
 
     def _get_child_sampling_params(
         self,
@@ -132,9 +133,12 @@ class ParentRequest:
         finished = not self.child_requests
         return outputs, finished
 
-    def observe_num_cached_tokens(self, num_cached_tokens: int) -> None:
+    def observe_prefill(
+        self, num_cached_tokens: int, num_cache_creation_tokens: int
+    ) -> None:
         if self.num_cached_tokens is None or num_cached_tokens < self.num_cached_tokens:
             self.num_cached_tokens = num_cached_tokens
+            self.num_cache_creation_tokens = num_cache_creation_tokens
 
     def observe_num_generation_tokens(self, num_generation_tokens: int):
         self.max_num_generation_tokens = max(

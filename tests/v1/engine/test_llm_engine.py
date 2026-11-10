@@ -257,18 +257,20 @@ def test_parallel_sampling(vllm_model, example_prompts) -> None:
 
 
 def test_parallel_sampling_num_cached_tokens(vllm_runner) -> None:
-    """Siblings share the prompt, so a later child hits the blocks an earlier
-    one just computed; that is not a prefix cache hit for the request."""
-    prompt = TokensPrompt(prompt_token_ids=list(range(100, 164)))
+    """An `n>1` request reports prompt cache usage like an `n=1` request: a
+    child hitting blocks its sibling just wrote is not a prefix cache hit."""
+    prompt = TokensPrompt(prompt_token_ids=list(range(100, 220)))
+    params = SamplingParams(n=4, temperature=1.0, seed=0, max_tokens=1)
     with _vllm_model(True, vllm_runner) as vllm_model:
         llm: LLM = vllm_model.llm
-        params = SamplingParams(n=4, temperature=0.95, max_tokens=1)
         [cold] = llm.generate(prompt, params)
         [warm] = llm.generate(prompt, params)
         [warm_n1] = llm.generate(prompt, SamplingParams(max_tokens=1))
 
+    assert warm_n1.num_cached_tokens > 0
     assert cold.num_cached_tokens == 0
-    assert warm.num_cached_tokens == warm_n1.num_cached_tokens > 0
+    assert cold.num_cache_creation_tokens == warm_n1.num_cached_tokens
+    assert warm.num_cached_tokens == warm_n1.num_cached_tokens
 
 
 def test_engine_metrics(vllm_runner, example_prompts):
