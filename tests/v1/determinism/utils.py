@@ -145,7 +145,7 @@ _FILLER_TOKENIZER = None
 
 
 def _prompt_with_tokens(target_tokens: int) -> str:
-    """Build a prompt of exactly ``target_tokens`` tokens.
+    """Build a prompt of exactly `target_tokens` tokens.
 
     An attention backend can only be shown to be batch-invariant over a KV
     length spanning several kernel blocks. `_random_prompt` tops out at a few
@@ -153,10 +153,10 @@ def _prompt_with_tokens(target_tokens: int) -> str:
     there regardless of how it reduces across blocks.
 
     Args:
-        target_tokens: Prompt length, in tokens of ``TEST_MODEL``'s tokenizer.
+        target_tokens: Prompt length, in tokens of `TEST_MODEL`'s tokenizer.
 
     Returns:
-        A prompt tokenizing to exactly ``target_tokens`` tokens.
+        A prompt tokenizing to exactly `target_tokens` tokens.
 
     """
     global _FILLER_TOKENIZER
