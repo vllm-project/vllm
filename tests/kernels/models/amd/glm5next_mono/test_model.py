@@ -71,6 +71,9 @@ ENV = {
     # AITER tuned GEMMs reduce in a run-dependent order
     "VLLM_ROCM_USE_SKINNY_GEMM": "0",
     "VLLM_ROCM_USE_AITER_LINEAR": "0",
+    # the engine core in this process: every request is added before the first
+    # step, so prefills group alike in every run
+    "VLLM_ENABLE_V1_MULTIPROCESSING": "0",
 }
 
 pytestmark = pytest.mark.skipif(not _on_cdna4(), reason="needs CDNA4 GPUs")
@@ -403,8 +406,8 @@ def _mono(vllm_runner, model_dir, tp, graphs, kv="auto", capture=None):
     print(f"MonoKernel steps per rank: {steps}")
     # eager plans every decode step in Python (all of a batch's but the first,
     # which may share a step with another request's prefill); FULL graphs plan
-    # at capture and replay the captured launches
-    least = 1 if graphs else len(_batches(tp)) * (STEPS - 2)
+    # once per captured size and replay the launches, at least one per batch size
+    least = len(_batches(tp)) if graphs else len(_batches(tp)) * (STEPS - 2)
     assert len(set(steps)) == 1 and steps[0] >= least, steps
     return logprobs
 
@@ -420,6 +423,7 @@ def _assert_layers_close(got: str, want: str, tp: int) -> None:
     batches = _batches(tp)
     for rank in range(tp):
         same, flipped, seen = 0, [], {"residual": 0.0, "moe": 0.0, "last": 0.0}
+        requests = set()  # (batch, prompt length): a batch's lengths all differ
         for b in range(len(batches)):
             g, _, kernel_layers = torch.load(f"{got}.b{b}.rank{rank}")
             w, gaps, _ = torch.load(f"{want}.b{b}.rank{rank}")
@@ -434,6 +438,7 @@ def _assert_layers_close(got: str, want: str, tp: int) -> None:
                 ):
                     continue
                 same += 1
+                requests.add((b, k[0]))
                 for i in KERNEL_LAYERS:
                     (x, res), (x_ref, res_ref) = g[(i, *k)], w[(i, *k)]
                     err = _rel(res, res_ref)
@@ -454,7 +459,7 @@ def _assert_layers_close(got: str, want: str, tp: int) -> None:
             f"near-tie flips {flipped}"
         )
         # at least one equal-input token a request, and few flips
-        assert same >= sum(batches), (rank, same)
+        assert len(requests) == sum(batches), (rank, sorted(requests))
         assert len(flipped) <= same // 4, (rank, flipped)
 
 
