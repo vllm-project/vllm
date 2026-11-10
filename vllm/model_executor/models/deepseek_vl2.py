@@ -763,9 +763,9 @@ class DeepseekVLV2ForCausalLM(
     ) -> None:
         """Assemble per-image embeddings from raw per-tile projector output.
 
-        ``outputs["default"]`` has shape ``[N_tiles_captured, hw, n_embed]``.
+        `outputs["default"]` has shape `[N_tiles_captured, hw, n_embed]`.
         This method re-applies newlines and the view-separator that the
-        eager ``_pixel_values_to_embedding`` path inserts in-line.
+        eager `_pixel_values_to_embedding` path inserts in-line.
         """
         assert batch_mm_kwargs is not None
         output = outputs["default"]

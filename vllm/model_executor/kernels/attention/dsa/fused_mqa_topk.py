@@ -112,7 +112,7 @@ def fused_mqa_topk_chunk(
 def get_fused_mqa_topk_workspaces(
     device: torch.device, rows: int
 ) -> list[torch.Tensor]:
-    """The workspaces of one fused_mqa_topk call over ``rows`` query rows, in the
+    """The workspaces of one fused_mqa_topk call over `rows` query rows, in the
     op's argument order (see fused_mqa_topk.cu), all fresh: the zeroed block
     counter, then the scratch."""
     index = (
@@ -139,7 +139,7 @@ def fused_mqa_topk_key_scales(scales: torch.Tensor) -> torch.Tensor:
     """Per-key fp32 scales from the gathered indexer K-cache scales.
 
     scales: [keys, 4] uint8. SM100 caches store each power-of-two scale as four
-    equal UE8M0 bytes; the fp32 value 2**(e - 127) has bit pattern ``e << 23``.
+    equal UE8M0 bytes; the fp32 value 2**(e - 127) has bit pattern `e << 23`.
     """
     exponents = scales.view(torch.int32).squeeze(-1) & 0xFF
     return (exponents << 23).view(torch.float32)
@@ -154,17 +154,17 @@ def fused_mqa_topk_prefill(
     ends: torch.Tensor,
     output: torch.Tensor,
 ) -> None:
-    """Fused replacement of ``fp8_fp4_mqa_logits`` + ``top_k_per_row_prefill``.
+    """Fused replacement of `fp8_fp4_mqa_logits` + `top_k_per_row_prefill`.
 
     q: [rows, 32, 128] fp8 e4m3; k: [keys, 128] fp8 e4m3 (keys <=
     FUSED_MQA_TOPK_MAX_KEYS); scales: [keys] fp32; weights: [rows, 32] fp32;
-    starts/ends: [rows] int32, the visible key range ``[start, end)`` of each
+    starts/ends: [rows] int32, the visible key range `[start, end)` of each
     row; output: [rows, k] int32 with k (the top-k) 512, 1024 or 2048. All
     contiguous; q, k, scales, weights and output 16-byte aligned (the op checks
     the contract).
 
-    Writes the same convention as ``ops.top_k_per_row_prefill``: indices
-    relative to the row's ``start`` (i.e. ``key - start``), unordered, ``-1``
+    Writes the same convention as `ops.top_k_per_row_prefill`: indices
+    relative to the row's `start` (i.e. `key - start`), unordered, `-1`
     padded when fewer than k keys are visible.
     """
     logger.info_once(

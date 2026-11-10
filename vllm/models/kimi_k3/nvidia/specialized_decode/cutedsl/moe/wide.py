@@ -1,20 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Wide MoE: the MoE layer of decode steps past the prepared batches (65 to
-``WIDE_ROWS`` rows, e.g. 13-204 DSpark verify requests of 5 tokens), at TP8/TP16.
+`WIDE_ROWS` rows, e.g. 13-204 DSpark verify requests of 5 tokens), at TP8/TP16.
 
-One layer (spec engine, ``ROUTING`` "sharded"):
+One layer (spec engine, `ROUTING` "sharded"):
   side stream   shared expert (gate/up, SiTU, down; the stock module) -> BF16
                 partial [b, 7168]
   front         one FP32-out GEMM over this rank's router rows and latent down shard
-                (``providers.pack_front``: 1/TP of the replicated 51 MB latent down),
-                ``WidePublish`` multicasts both into every rank's mailbox row, then
-                ``WideRouteSharded``: exact top16 from the polled logits, each pair
+                (`providers.pack_front`: 1/TP of the replicated 51 MB latent down),
+                `WidePublish` multicasts both into every rank's mailbox row, then
+                `WideRouteSharded`: exact top16 from the polled logits, each pair
                 appended to its expert's routing list, and the polled latent row
                 written as the experts' MXFP8 plan
   experts       the listed wide grouped engine (unit windows built from the routing
                 lists: every touched expert streams once per 8 of its tokens) and the
-                routing-weighted top16 sum (``Finalize``); past ``ENGINES``' spec
+                routing-weighted top16 sum (`Finalize`); past `ENGINES`' spec
                 range the stock TRTLLM-Gen MXFP4 experts (routing inside), finalized,
                 behind the replicated router and latent down GEMMs
   tail          the latent all-reduce with the RMSNorm fused (the stock FlashInfer
@@ -74,7 +74,7 @@ from .front import WIDTH, RouteSitu, compile_route
 
 
 def wide_batches(batches):
-    """The wide MoE's batches among ``batches``: past the prepared 64, at most
+    """The wide MoE's batches among `batches`: past the prepared 64, at most
     WIDE_ROWS."""
     return tuple(b for b in batches if 64 < b <= WIDE_ROWS)
 
@@ -103,19 +103,19 @@ ROUTING = "65-1024:sharded"
 
 
 def engine(batch, defers):
-    """'spec' or 'trtllm' for ``batch`` (``defers``: the stock experts would leave
+    """'spec' or 'trtllm' for `batch` (`defers`: the stock experts would leave
     this batch unfinalized)."""
     name = batch_table(ENGINES).get(batch, "spec")
     return "spec" if defers else name
 
 
 class WideRoute(RouteSitu):
-    """The listed wide engine's front: CTA t routes token t (``RouteSitu``'s exact
+    """The listed wide engine's front: CTA t routes token t (`RouteSitu`'s exact
     top16 and renormalized weights) and appends its 16 (token, slot) pairs to their
     experts' routing lists (relaxed GPU-scope counter claims; this call's parity is
     the experts workspace's grouped-call generation & 1); CTA b + t writes token t's
-    MXFP8 plan row from the BF16 latent (``plan_chunk``: bit-identical to
-    ``ExpertsPlanKernel``). The experts release at the end (late: they must not take
+    MXFP8 plan row from the BF16 latent (`plan_chunk`: bit-identical to
+    `ExpertsPlanKernel`). The experts release at the end (late: they must not take
     SMs from routing)."""
 
     def __init__(self, batch, renorm, tp):
@@ -155,9 +155,9 @@ class WideRoute(RouteSitu):
 
 
 class WideRouteSharded(WideRoute):
-    """``WideRoute`` over the sharded front: every rank's ``WidePublish`` left its
+    """`WideRoute` over the sharded front: every rank's `WidePublish` left its
     router logits (FP32 words) and latent shard (BF16) in this rank's mailbox row of
-    each token. The routing CTAs poll the logits (``RouteSitu``'s polled routing), the
+    each token. The routing CTAs poll the logits (`RouteSitu`'s polled routing), the
     plan CTAs poll the latent row and write the MXFP8 plan; both re-arm what they
     read (Lamport: no dependency wait on the data)."""
 
@@ -353,7 +353,7 @@ class WideScratch:
             self.events = [torch.cuda.Event() for _ in range(4)]
 
     def reserve(self, batch):
-        """Size the spec engine's expanded rows for ``batch`` (the widest batch the
+        """Size the spec engine's expanded rows for `batch` (the widest batch the
         layers' spec engines take), before any engine binds them."""
         if self.expanded.shape[0] < batch * 16:
             if self.bound:
@@ -367,11 +367,11 @@ class WideScratch:
 
 class WideMoE:
     """One MoE layer's wide provider over the stock module's weights and the layer's
-    ``PersistentExperts`` (prepared here for its wide batches)."""
+    `PersistentExperts` (prepared here for its wide batches)."""
 
     def __init__(self, module, experts, state, beta, linear_beta, packed=None):
-        """``packed``: this rank's [router rows; latent down shard] (``providers.
-        pack_front``, shared with the narrow front), else packed here."""
+        """`packed`: this rank's [router rows; latent down shard] (`providers.
+        pack_front`, shared with the narrow front), else packed here."""
         self.module, self.experts, self.state = module, experts, state
         h = module.shared_experts.gate_up_proj.weight.shape[0] // 2
         tp, rank = (
@@ -448,11 +448,11 @@ class WideMoE:
             self.plans[b] = name, route, args + scalars, finalize, out, ids
 
     def serves(self, batch):
-        """Whether this layer's wide MoE is prepared for ``batch`` rows."""
+        """Whether this layer's wide MoE is prepared for `batch` rows."""
         return batch in self.plans
 
     def run(self, x):
-        """[b, 7168] BF16 MoE output of the hidden rows ``x`` (all-reduced)."""
+        """[b, 7168] BF16 MoE output of the hidden rows `x` (all-reduced)."""
         state, b, module = self.state, x.shape[0], self.module
         plan = self.plans[b]
         main = torch.cuda.current_stream(state.device)

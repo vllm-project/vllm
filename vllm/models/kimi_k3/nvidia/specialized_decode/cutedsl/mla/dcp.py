@@ -81,13 +81,13 @@ PARTIALS_DEFAULT = {"mla": "1-64:bf16,65-320:proj", "dsa": "1-159:bf16,160-320:p
 
 
 def resolve_partials(spec, kind):
-    """The DcpBox policy of a ``spec`` ("default": PARTIALS_DEFAULT of the layer
-    ``kind``, "mla" or "dsa"; anything else as given)."""
+    """The DcpBox policy of a `spec` ("default": PARTIALS_DEFAULT of the layer
+    `kind`, "mla" or "dsa"; anything else as given)."""
     return PARTIALS_DEFAULT[kind] if spec in (None, "default") else spec
 
 
 def partials_for(spec, batch):
-    """The partials format of a ``batch`` of rows under the ``spec`` policy: a format
+    """The partials format of a `batch` of rows under the `spec` policy: a format
     ("bf16", "proj") or a batch table of formats."""
     if spec in FORMATS:
         return spec
@@ -119,12 +119,12 @@ class DcpMailbox:
 
 
 class DcpBox:
-    """Model-owned DCP state over ``group``, Lamport mailboxes (sentinel-filled,
+    """Model-owned DCP state over `group`, Lamport mailboxes (sentinel-filled,
     re-armed by their reader): q [2, CAP, DCP*H, 576] FP8 bytes (multicast stores),
     one DcpMailbox of partial rows and LSE (peer stores) per partials format the
-    ``partials`` policy uses (see partials_for: "bf16" latent rows; "proj": value
+    `partials` policy uses (see partials_for: "bf16" latent rows; "proj": value
     rows), and the local tokenspeed rows / LSE.
-    Parity alternates by layer. ``interleave``: the KV cache's DCP interleave (global
+    Parity alternates by layer. `interleave`: the KV cache's DCP interleave (global
     masking of spec verify rows)."""
 
     def __init__(
@@ -165,7 +165,7 @@ class DcpBox:
         torch.distributed.barrier(group=group)
 
     def mailbox(self, batch):
-        """The DcpMailbox a ``batch`` of rows exchanges its partials through."""
+        """The DcpMailbox a `batch` of rows exchanges its partials through."""
         return self.mailboxes[partials_for(self.partials, batch)]
 
     @property
@@ -196,7 +196,7 @@ class DcpBox:
         return gathered, to_cute(gathered)
 
     def mc(self, parity):
-        """The q mailbox multicast address of ``parity``."""
+        """The q mailbox multicast address of `parity`."""
         return Int64(self.q_mc + parity * self.q[0].numel() * self.q.element_size())
 
 
@@ -210,14 +210,14 @@ class DcpValue:
     polled rows in FP32 (one BF16 rounding, re-arming what it read) into shared
     memory, and W_UV (BF16 MMA, FP32 accumulation) and the sigmoid gate follow as in
     MlaValue: warp w owns outputs 32 (w // 4) + 8 (w % 4) .. + 7. Rows are tokens,
-    ``q`` per request. Above 64 rows a merging CTA owns every ``grid[1]``-th 16-row
+    `q` per request. Above 64 rows a merging CTA owns every `grid[1]`-th 16-row
     tile: at most one CTA per SM, so every CTA's pushes land while the merging CTAs
     poll.
 
-    ``per_row``: the emptiness test reads ``lens`` per row (a sparse decode's valid
+    `per_row`: the emptiness test reads `lens` per row (a sparse decode's valid
     counts of the local shard), else per request (the local lengths).
 
-    ``partials`` "proj" (``w_uv``: the gathered [DCP * H, 512, 128] W_UV, see
+    `partials` "proj" (`w_uv`: the gathered [DCP * H, 512, 128] W_UV, see
     DcpBox.gather_heads): CTA (h, d < DCP) projects the local rows of gathered head
     d * H + h through its W_UV (steps of up to PROJ_ROWS rows staged in shared
     memory, the BF16 MMAs of the merge; the next step's latents and LSEs load while
@@ -251,12 +251,12 @@ class DcpValue:
         preprojected=False,
         pushed=False,
     ):
-        """``q_chunks``: 16 B chunks per q mailbox head row (36 FP8, 72 BF16);
-        ``q_heads``: q mailbox rows per token (default DCP * H); ``lse_scale``: to
-        base 2 (LOG2E for a natural-log LSE). ``preprojected`` ("proj" only): the
+        """`q_chunks`: 16 B chunks per q mailbox head row (36 FP8, 72 BF16);
+        `q_heads`: q mailbox rows per token (default DCP * H); `lse_scale`: to
+        base 2 (LOG2E for a natural-log LSE). `preprojected` ("proj" only): the
         W_UV argument holds the value rows [DCP * H, B, 128] BF16 a batched GEMM
         already projected (the stock W_UV bmm over the gathered heads), so the
-        projecting CTAs only push them. ``pushed`` ("bf16" only): the sparse
+        projecting CTAs only push them. `pushed` ("bf16" only): the sparse
         decode before pushed every rank's rows and LSEs and re-armed the q mailbox
         (dsa.attn_sparse), so DcpValue only merges."""
         self.heads, self.size, self.batch = heads, size, batch
@@ -302,7 +302,7 @@ class DcpValue:
     @cute.jit
     def rearm(self, mailbox, me, threads):
         """Re-arm this parity's q mailbox (the sparse decode has read it): thread
-        ``me`` of ``threads`` stores the sentinel into every threads-th 16 B chunk of
+        `me` of `threads` stores the sentinel into every threads-th 16 B chunk of
         the published rows."""
         H, D, B = self.heads, self.size, self.batch
         C, P = self.q_chunks, self.q_heads
@@ -373,7 +373,7 @@ class DcpValue:
 
     @cute.kernel
     def kernel_projected(self, args):
-        """``partials`` "proj": the projecting CTAs (y < DCP) and the merging CTAs
+        """`partials` "proj": the projecting CTAs (y < DCP) and the merging CTAs
         (y >= DCP). The projecting CTAs come first in launch order and never wait
         on another CTA (only griddepcontrol_wait on the sparse decode before them),
         so every rank's projections finish however many merging CTAs are
@@ -419,9 +419,9 @@ class DcpValue:
 
     @cute.jit
     def push_values(self, args, gh, tid):
-        """``preprojected``: push gathered head ``gh``'s value rows (the W_UV
+        """`preprojected`: push gathered head `gh`'s value rows (the W_UV
         argument, [DCP * H, B, 128] BF16) and every row's LSE to the head's owner,
-        a row with nothing to merge only its LSE (as ``project``). Thread tid
+        a row with nothing to merge only its LSE (as `project`). Thread tid
         takes 16 B chunk tid % 16 of rows tid // 16, + 32, ..: four rows' loads in
         flight per thread."""
         rows_lse, lens, box, _, peers, lpeers = args[1:7]
@@ -456,7 +456,7 @@ class DcpValue:
     @cute.jit
     def load_tile(self, args, gh, t0, tid):
         """This thread's 16 B chunks of the BF16 latent rows t0.. t0 + prows - 1 of
-        gathered head ``gh`` (chunk tid + 512 j: row // 64, 8 (chunk % 64)); zeros
+        gathered head `gh` (chunk tid + 512 j: row // 64, 8 (chunk % 64)); zeros
         beyond the batch), led by the LSEs of the rows it pushes ((tid + 512 j)
         // 16; sent_lse, EMPTY_LSE beyond the batch)."""
         rows, rows_lse, lens = args[0:3]
@@ -480,7 +480,7 @@ class DcpValue:
 
     @cute.jit
     def project(self, args, latent, values, wb, gh, t0, tid, tile):
-        """Rows t0.. t0 + prows - 1 of gathered head ``gh`` (``tile``: this
+        """Rows t0.. t0 + prows - 1 of gathered head `gh` (`tile`: this
         thread's latent chunks and LSE of them, load_tile): stage the BF16 latents,
         issue the next step's loads, W_UV (BF16 MMA, FP32 accumulation, rounded to
         BF16; one 16-row block per accumulator set) and push the [prows, 128] value
@@ -717,7 +717,7 @@ class DcpValue:
     @cute.jit
     def poll_pair(self, source, words, w, merged):
         """Polls a BF16 partial chunk (8 values) until published, re-arms it and adds
-        it, weighted by ``w``, to ``merged``."""
+        it, weighted by `w`, to `merged`."""
         while not published(words):
             words = load_volatile(source, count=4)
         store_words(source, (Uint32(PAIR_SENT),) * 4)
@@ -745,12 +745,12 @@ def compile_value(
     preprojected=False,
     pushed=False,
 ):
-    """DcpValue of one batch (``q`` rows per request); ``uv``: the (shape, stride,
-    dtype) of W_UV, ``pitch``: the projected rows' (the gate follows the 2112 query /
-    KV columns). ``dsa_heads``: DSA layout, its padded head count: q mailbox rows
+    """DcpValue of one batch (`q` rows per request); `uv`: the (shape, stride,
+    dtype) of W_UV, `pitch`: the projected rows' (the gate follows the 2112 query /
+    KV columns). `dsa_heads`: DSA layout, its padded head count: q mailbox rows
     (BF16 for FlashMLA sparse, else FP8), rows / LSE as the sparse decode returns
-    them (``lse_base_e``: natural-log, else base 2) and ``lens`` the sparse decode's
-    per-row valid counts. ``partials``: the format of its DcpMailbox."""
+    them (`lse_base_e`: natural-log, else base 2) and `lens` the sparse decode's
+    per-row valid counts. `partials`: the format of its DcpMailbox."""
     f32, i32 = torch.float32, torch.int32
     w_uv, gate = fake(*uv), fake((batch, heads * 128), (pitch, 1))
     rows = fake((batch, 1, size * heads, 512))
@@ -801,7 +801,7 @@ _WORKSPACE: dict[tuple[torch.device, int], torch.Tensor] = {}
 
 
 def split_plan(batch, q_len, heads, device, max_seq, min_split, pack):
-    """tokenspeed_mla_decode's FP8 schedule of ``batch`` requests of ``q_len`` rows:
+    """tokenspeed_mla_decode's FP8 schedule of `batch` requests of `q_len` rows:
     (tiler, pack, fold, SMs, split count, workspace bytes)."""
     from tokenspeed_mla import mla_decode as md
 
@@ -860,11 +860,11 @@ def stock_decode(
     totals=None,
     pack=False,
 ):
-    """tokenspeed_mla_decode's FP8 path with caller-owned ``out`` and ``lse`` (log2)
+    """tokenspeed_mla_decode's FP8 path with caller-owned `out` and `lse` (log2)
     buffers and no per-call allocation: the split count follows from (B, max_seq,
-    min_split); ``lengths`` bound the work, empty splits are skipped by its reducer.
-    The q rows of a request mask causally; under DCP in global positions (``cp``:
-    world, rank, interleave; ``totals``: the global lengths). ``pack``: M128 tiles hold
+    min_split); `lengths` bound the work, empty splits are skipped by its reducer.
+    The q rows of a request mask causally; under DCP in global positions (`cp`:
+    world, rank, interleave; `totals`: the global lengths). `pack`: M128 tiles hold
     consecutive (query row, head) rows across the q rows."""
     import tvm_ffi
     from tokenspeed_mla import mla_decode as md
@@ -921,5 +921,5 @@ def fill_splits(batch, device):
 
 
 def local_max(max_context, size):
-    """Longest local shard of a ``max_context`` sequence (block-interleaved)."""
+    """Longest local shard of a `max_context` sequence (block-interleaved)."""
     return math.ceil(max_context / (size * 64)) * 64

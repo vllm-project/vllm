@@ -2,24 +2,24 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The DSpark draft's residual boundary, bitwise equal to the eager chain.
 
-One boundary is the eager post -> connection -> pre chain: ``post_norm(branch)``
-rounded to BF16, the gated FP32 residual ``alpha * stream + beta * branch``
+One boundary is the eager post -> connection -> pre chain: `post_norm(branch)`
+rounded to BF16, the gated FP32 residual `alpha * stream + beta * branch`
 with each product rounded, then the next pre-norm of the stream rounded to
 BF16. The norms use the stock single-tile norm's order and roundings
-(``row_norm.py``). The branch is read as is (-0.0, subnormals, NaN and
+(`row_norm.py`). The branch is read as is (-0.0, subnormals, NaN and
 infinities included).
 
-``boundary_fragments`` is that arithmetic over one thread's 8-column
+`boundary_fragments` is that arithmetic over one thread's 8-column
 fragments, with the row sums supplied by the caller. Two kernels use it:
 
-- ``DraftBoundary`` here, for an already all-reduced branch: one CTA of 256
+- `DraftBoundary` here, for an already all-reduced branch: one CTA of 256
   threads per row, each thread holding four fragments;
 - the boundary with the branch's all-reduce fused in
-  (``cutedsl/oproj/draft_all_reduce_boundary.py``), one fragment per thread
+  (`cutedsl/oproj/draft_all_reduce_boundary.py`), one fragment per thread
   over a cluster of 8 CTAs.
 
 Gates and norm weights load before the PDL wait for up to one row per SM, and
-after it above that (``late_gates``). With PDL, every CTA releases its
+after it above that (`late_gates`). With PDL, every CTA releases its
 dependents right after the wait; the next kernel waits for this grid's end
 before it reads the output.
 """
@@ -102,8 +102,8 @@ WEIGHT_DTYPES = (torch.bfloat16, torch.float32, torch.float16)
 
 
 def draft_boundary_constants(post, connection, pre) -> DraftBoundaryConstants:
-    """The constants of the stock draft boundary ``post`` -> ``connection`` ->
-    ``pre`` (MuseSparkRMSNorm or its input-scaled variant,
+    """The constants of the stock draft boundary `post` -> `connection` ->
+    `pre` (MuseSparkRMSNorm or its input-scaled variant,
     MuseSparkNormPreservingResidualConnection), or ValueError where the
     kernels do not reproduce it."""
     if not getattr(connection, "_coefficients_ready", True):
@@ -130,7 +130,7 @@ def draft_boundary_constants(post, connection, pre) -> DraftBoundaryConstants:
 
 
 class BoundaryGates(NamedTuple):
-    """One fragment's gates and norm gains (``[]`` where a norm has no
+    """One fragment's gates and norm gains (`[]` where a norm has no
     weight), each 8 FP32."""
 
     alpha: list
@@ -147,7 +147,7 @@ def load_gates(
     pre_weight: cute.Tensor,
     column: Int64,
 ) -> BoundaryGates:
-    """The gates and gains of the 8 columns from ``column`` (traced inline)."""
+    """The gates and gains of the 8 columns from `column` (traced inline)."""
 
     def gamma(weight, center, fp32, fp16) -> list:
         if center is None:
@@ -185,9 +185,9 @@ def boundary_fragments(
     row_sum: RowSum,
     store_stream: Callable[[int, Any], None] | None,
 ) -> list:
-    """One thread's fragments of a boundary: ``x`` (the BF16 branch) and
-    ``stream`` as lists of 8 FP32 per fragment, ``gates`` a ``BoundaryGates``
-    per fragment. ``store_stream(k, values)`` stores fragment k's new stream
+    """One thread's fragments of a boundary: `x` (the BF16 branch) and
+    `stream` as lists of 8 FP32 per fragment, `gates` a `BoundaryGates`
+    per fragment. `store_stream(k, values)` stores fragment k's new stream
     (None: not stored). Returns per fragment the output as 4 BF16x2 words."""
     post_weight = constants.post_gain_center is not None
     pre_weight = constants.pre_gain_center is not None
@@ -251,7 +251,7 @@ def boundary_fragments(
 
 @dataclass(frozen=True)
 class _CtaRowSum:
-    """``RowSum`` of a CTA that holds the row: ``sums`` 2 * WARPS FP32 of
+    """`RowSum` of a CTA that holds the row: `sums` 2 * WARPS FP32 of
     shared memory (one round each)."""
 
     sums: cute.Pointer
@@ -269,7 +269,7 @@ class _CtaRowSum:
 
 @dataclass(frozen=True)
 class _StreamStore:
-    """Stores fragment k of the new stream (FP32 rows) of row offset ``row``."""
+    """Stores fragment k of the new stream (FP32 rows) of row offset `row`."""
 
     stream_out: cute.Tensor
     row: Int64
@@ -390,8 +390,8 @@ def compile_draft_boundary(
     """cute.compile one kernel; the row count is a runtime argument. Call:
     (branch, stream_in, alpha, beta, post_weight, pre_weight, stream_out,
     out, m, stream), a weight None where its norm has none and
-    ``stream_out`` None without ``store_stream``; ``pdl``: launched with
-    programmatic dependent launch (``host.pdl_supported``). Call before CUDA
+    `stream_out` None without `store_stream`; `pdl`: launched with
+    programmatic dependent launch (`host.pdl_supported`). Call before CUDA
     graph capture."""
     assert_not_capturing("the draft boundary")
     gate = make_fake_compact_tensor(Float32, (H,), assumed_align=32)
@@ -439,7 +439,7 @@ def fake_weights(constants: DraftBoundaryConstants) -> tuple:
 
 class BoundaryOperands:
     """A boundary's constant operands, checked and viewed once: the gates
-    (``alpha``, ``beta`` FP32 [8192]) and the norm weights, where the
+    (`alpha`, `beta` FP32 [8192]) and the norm weights, where the
     constants have a gain center (else None: the kernels take none)."""
 
     def __init__(
@@ -485,10 +485,10 @@ class BoundaryOperands:
 
 class DraftBoundary:
     """One draft boundary of an all-reduced branch, bound at build: its
-    constants and its constant operands (``BoundaryOperands``), and its
+    constants and its constant operands (`BoundaryOperands`), and its
     kernel of each variant by (stream BF16, store stream, late gates: rows
     above the device's SM count), compiled once per process and variant
-    (``prepare`` them before CUDA graph capture)."""
+    (`prepare` them before CUDA graph capture)."""
 
     def __init__(
         self,
@@ -514,7 +514,7 @@ class DraftBoundary:
 
     def prepare(self, stream_bf16: bool, store_stream: bool, late_gates: bool = False):
         """The kernel of one variant, kept for the calls that launch it
-        (``compile_draft_boundary``: compiled on its first use in the
+        (`compile_draft_boundary`: compiled on its first use in the
         process)."""
         key = (stream_bf16, store_stream, late_gates)
         kernel = self._kernels.get(key)
@@ -546,9 +546,9 @@ class DraftBoundary:
     def run(
         self, branch: torch.Tensor, stream: torch.Tensor, store_stream: bool
     ) -> tuple[torch.Tensor | None, torch.Tensor]:
-        """``(new_stream or None, out)``: the FP32 ``alpha * stream + beta *
-        post_norm(branch)`` and the BF16 ``pre_norm(new_stream.to(bf16))`` of
-        rows ``takes`` accepts. Graph-capturable once prepared."""
+        """`(new_stream or None, out)`: the FP32 `alpha * stream + beta *
+        post_norm(branch)` and the BF16 `pre_norm(new_stream.to(bf16))` of
+        rows `takes` accepts. Graph-capturable once prepared."""
         if not self.takes(branch, stream):
             raise ValueError(
                 f"the draft boundary takes a dense BF16 [m, {H}] branch and an "
@@ -559,8 +559,8 @@ class DraftBoundary:
     def launch(
         self, branch: torch.Tensor, stream: torch.Tensor, store_stream: bool
     ) -> tuple[torch.Tensor | None, torch.Tensor]:
-        """``run`` without its operand check, for rows the caller has
-        checked with ``takes``."""
+        """`run` without its operand check, for rows the caller has
+        checked with `takes`."""
         m = branch.shape[0]
         kernel = self.prepare(
             stream.dtype == torch.bfloat16, store_stream, m > self.late_rows

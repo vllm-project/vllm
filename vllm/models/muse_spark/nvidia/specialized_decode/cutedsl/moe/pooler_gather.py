@@ -12,27 +12,27 @@
 """The pooler of the Muse Spark specialized decode.
 
 Each TP rank projects the replicated tokens onto its contiguous block of the
-pooler's output columns, ``[b, P / tp] = x [b, H] @ W[rank block].T`` (the
+pooler's output columns, `[b, P / tp] = x [b, H] @ W[rank block].T` (the
 pooler GEMM), multicasts that block into a Lamport mailbox and gathers the
-full ``[b, P]`` rows from every rank straight into the expert input:
+full `[b, P]` rows from every rank straight into the expert input:
 
-- NVFP4 layers (``ExpertsInput``): ``pre_expert_norm`` and NVFP4 quantization
+- NVFP4 layers (`ExpertsInput`): `pre_expert_norm` and NVFP4 quantization
   fused into the gather::
 
       y = bf16(x * rsqrt(mean(x**2) + eps) * (weight + gain_center))
       a, a_sf = nvfp4(y, global_scale, block 16)
 
-  ``a`` is uint8 ``[b, P / 2]`` (two e2m1 codes per byte, the even column in
-  the low nibble) and ``a_sf`` float8_e4m3fn ``[b, P / 16]``, not swizzled.
+  `a` is uint8 `[b, P / 2]` (two e2m1 codes per byte, the even column in
+  the low nibble) and `a_sf` float8_e4m3fn `[b, P / 16]`, not swizzled.
   These are the bytes the stock all-gather + norm + quantize hands the routed
   experts, bit for bit.
-- BF16 edge layers (``ExpertsInputBf16``): the gathered rows, then ``pre_expert_norm``
-  (``expert_norm.ExpertNorm``), bit for bit the stock gather + norm except for
+- BF16 edge layers (`ExpertsInputBf16`): the gathered rows, then `pre_expert_norm`
+  (`expert_norm.ExpertNorm`), bit for bit the stock gather + norm except for
   the sign of zero: publishers store BF16 -0.0 as +0.0 (-0.0 is the mailbox
   sentinel).
 
 The pooler GEMM is vLLM's in-tree skinny GEMM (BF16 in and out, FP32
-accumulation) at the launch shape ``POOLER_GEMM``. One mailbox serves every
+accumulation) at the launch shape `POOLER_GEMM`. One mailbox serves every
 layer; calls must run in the same order on every rank.
 """
 
@@ -75,9 +75,9 @@ _NVFP4_BLOCK = 16
 
 
 class PoolerGemmShape(NamedTuple):
-    """Launch shape of the pooler GEMM (the in-tree skinny GEMM): ``block_size``
-    threads per CTA over K, ``outputs_per_block`` columns per CTA, the K loop
-    unrolled ``k_unroll`` times."""
+    """Launch shape of the pooler GEMM (the in-tree skinny GEMM): `block_size`
+    threads per CTA over K, `outputs_per_block` columns per CTA, the K loop
+    unrolled `k_unroll` times."""
 
     block_size: int
     outputs_per_block: int
@@ -170,7 +170,7 @@ def cvt_f32_to_e4m3(a: Float32, *, loc=None, ip=None) -> Uint32:
 def nvfp4_compute_output_scale(
     fp8_val: Uint32, global_scale: Float32, *, loc=None, ip=None
 ) -> Float32:
-    """The NVFP4 output scale ``rcp(float(sf) * rcp(global_scale))``, 0 when the
+    """The NVFP4 output scale `rcp(float(sf) * rcp(global_scale))`, 0 when the
     E4M3 scale is zero (the E4M3 byte widened through the hardware f16x2 path)."""
     return Float32(
         llvm.inline_asm(
@@ -405,7 +405,7 @@ class _AllGatherNormQuantDeviceKernel:
 class _AllGatherDeviceKernel:
     """The plain column all-gather of the BF16 edge layers: one thread per 8
     global columns of one row, read from the rank that owns them and stored
-    into ``output`` ``[m, hidden]`` BF16. Grid (m, hidden / (128 * 8))."""
+    into `output` `[m, hidden]` BF16. Grid (m, hidden / (128 * 8))."""
 
     def __init__(
         self, *, hidden: int, tp: int, capacity_m: int, enable_pdl: bool
@@ -479,8 +479,8 @@ def compile_norm_quant(
     gain_center: float,
     enable_pdl: bool = True,
 ) -> Any:
-    """The gather + norm + NVFP4 consumer over a ``[3, tp, capacity_m,
-    hidden / tp]`` mailbox. Call: (mailbox, weight [hidden] BF16, global_scale
+    """The gather + norm + NVFP4 consumer over a `[3, tp, capacity_m,
+    hidden / tp]` mailbox. Call: (mailbox, weight [hidden] BF16, global_scale
     [1] FP32, packed [m, hidden / 2] u8, scales [m, hidden / 16] u8, stage
     state, m, stream) as CuTe views."""
     _check_gather_shape(hidden, tp)
@@ -534,10 +534,10 @@ def compile_gather(
 def compile_pooler_gemm(
     rows: int, shape: PoolerGemmShape, *, enable_pdl: bool = True
 ) -> Any:
-    """The in-tree skinny GEMM ``c [rows, N] = a [rows, K] @ b [N, K].T`` (BF16,
+    """The in-tree skinny GEMM `c [rows, N] = a [rows, K] @ b [N, K].T` (BF16,
     N and K dynamic), compiled as the in-tree wrapper compiles it but called
     with a caller-owned output. Call: (a, b, residual, c, stream) with torch
-    tensors; ``residual`` is ignored (pass ``c``)."""
+    tensors; `residual` is ignored (pass `c`)."""
     from quack.compile_utils import make_fake_tensor
 
     from vllm.model_executor.kernels.linear.cute_dsl._skinny_gemm import (
@@ -627,9 +627,9 @@ class Pooler:
     publish of this rank's column block and the gather into the NVFP4 expert
     input (NVFP4 layers) or the normed BF16 rows (BF16 edge layers).
 
-    Construction is collective over ``group`` (the mailbox rendezvous) and
-    compiles every kernel; ``warm_up`` runs each form once and must run on
-    every rank alike. ``run`` is graph-capturable and allocates nothing; its
+    Construction is collective over `group` (the mailbox rendezvous) and
+    compiles every kernel; `warm_up` runs each form once and must run on
+    every rank alike. `run` is graph-capturable and allocates nothing; its
     outputs are views of scratch the next call overwrites.
     """
 
@@ -734,14 +734,14 @@ class Pooler:
         )
 
     def project(self, layer: int, x: torch.Tensor) -> torch.Tensor:
-        """The pooler GEMM: this rank's ``[b, P / tp]`` columns into scratch."""
+        """The pooler GEMM: this rank's `[b, P / tp]` columns into scratch."""
         b = x.shape[0]
         out = self.shard[:b]
         self._gemms[b](x, self.layers[layer].weight, out, out, current_cu_stream())
         return out
 
     def publish(self, b: int) -> None:
-        """Multicast the first ``b`` rows of the projected block."""
+        """Multicast the first `b` rows of the projected block."""
         self._publisher(
             self._shard_view,
             self._stage_view,
@@ -753,7 +753,7 @@ class Pooler:
     def gather(
         self, layer: int, b: int
     ) -> tuple[torch.Tensor, torch.Tensor] | torch.Tensor:
-        """Consume the published blocks: the NVFP4 expert input ``(a, a_sf)``
+        """Consume the published blocks: the NVFP4 expert input `(a, a_sf)`
         for an NVFP4 layer, the normed BF16 rows for an edge layer."""
         spec = self.layers[layer]
         norm_weight, global_scale = self._layer_views[layer]
@@ -781,7 +781,7 @@ class Pooler:
     def run(
         self, layer: int, x: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor] | torch.Tensor:
-        """``x`` BF16 [b, H] (the pre_ffn_norm output) -> the expert input."""
+        """`x` BF16 [b, H] (the pre_ffn_norm output) -> the expert input."""
         b = x.shape[0]
         self.project(layer, x)
         self.publish(b)

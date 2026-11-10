@@ -68,7 +68,7 @@ logger = init_logger(__name__)
 
 def _use_column_parallel_fc(enabled: bool, hidden_size: int, tp_size: int) -> bool:
     """Whether to try the column-parallel draft fc, which the specialized
-    decode (``enabled``) selects."""
+    decode (`enabled`) selects."""
     if not enabled:
         return False
     if tp_size == 1 or hidden_size % tp_size != 0:
@@ -98,7 +98,7 @@ def _keep_column_parallel_fc(fc: ColumnParallelLinear) -> bool:
 
 def _uses_specialized_decode(vllm_config: VllmConfig) -> bool:
     """Whether the deployment selects the Muse Spark specialized decode
-    (``additional_config={"decode_backend": "latency_specialized"}``) for the
+    (`additional_config={"decode_backend": "latency_specialized"}`) for the
     draft. Not supported on ROCm, where the draft keeps the stock path."""
     if decode_backend(vllm_config) != "latency_specialized":
         return False
@@ -114,7 +114,7 @@ def _uses_specialized_decode(vllm_config: VllmConfig) -> bool:
 def _draft_logits_values(speculator: "DSparkSpeculator") -> torch.Tensor | None:
     """The speculator's draft logits cache, [max_num_reqs, steps, vocab], or
     None. Replicated: the speculator shards it only for a draft without the
-    ``sample_sequential`` hook."""
+    `sample_sequential` hook."""
     cache = speculator.draft_logits
     if cache is None:
         return None
@@ -468,11 +468,11 @@ class MuseSparkDSparkForCausalLM(Qwen3DSparkForCausalLM):
         return logits
 
     def output_logit_transform_params(self) -> tuple[float, float | None]:
-        """``(multiplier, soft_cap)`` of ``apply_output_logit_transform``.
+        """`(multiplier, soft_cap)` of `apply_output_logit_transform`.
 
         The fused DSpark Markov loop computes the transform from these values
-        (``logits * multiplier``, then ``soft_cap * tanh(x / soft_cap)`` unless
-        ``soft_cap`` is None) instead of calling it, so a subclass that changes
+        (`logits * multiplier`, then `soft_cap * tanh(x / soft_cap)` unless
+        `soft_cap` is None) instead of calling it, so a subclass that changes
         the transform must override this too.
         """
         return self.output_multiplier, self.output_soft_cap_temp
@@ -483,7 +483,7 @@ class MuseSparkDSparkForCausalLM(Qwen3DSparkForCausalLM):
         num_reqs: int,
         head_hidden: torch.Tensor,
     ) -> bool:
-        """The ``sample_sequential`` hook under the specialized decode, which
+        """The `sample_sequential` hook under the specialized decode, which
         DSparkSpeculator._sample_sequential asks first: the fused Markov
         sampling loop samples the drafts, and this returns True."""
         if self._markov_sampler is None:
