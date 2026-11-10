@@ -412,6 +412,10 @@ class KVCacheManager:
         reserved_blocks: int = 0,
         has_scheduled_reqs: bool = True,
         skip_zeroing_group_ids: tuple[int, ...] = (),
+        lifecycle_main_tokens: int | None = None,
+        lifecycle_slot_tokens: int | None = None,
+        lifecycle_reserved_blocks: int = 0,
+        lifecycle_encoder_tokens: int = 0,
     ) -> KVCacheBlocks | None:
         """Add slots for a request with new tokens to append.
 
@@ -444,6 +448,15 @@ class KVCacheManager:
                 blocks an already in-flight (prefilling) sequence is relying on.
             has_scheduled_reqs: Whether any requests are already scheduled to run
                 this step, controls whether watermark is applied.
+            lifecycle_main_tokens: When set, also require the request's sampling
+                cap (prompt + max_tokens) to fit. Unlike `full_sequence_must_fit`,
+                this is compared against free blocks minus `lifecycle_reserved_blocks`.
+            lifecycle_slot_tokens: Token count used for that peak block estimate,
+                including speculative headroom. Required when
+                `lifecycle_main_tokens` is set.
+            lifecycle_reserved_blocks: Blocks still promised to requests already
+                in the pool, so this admission cannot spend them.
+            lifecycle_encoder_tokens: Cross-attention tokens included in the peak.
             skip_zeroing_group_ids: Groups whose external-token blocks will be
                 written by an async load and must not be zeroed concurrently.
 
@@ -566,6 +579,27 @@ class KVCacheManager:
             )
             required_blocks = num_blocks_to_allocate + watermark_blocks
             if required_blocks > self.block_pool.get_num_free_blocks():
+                return None
+
+        if lifecycle_main_tokens is not None:
+            # Free blocks do not yet reflect growth already promised to
+            # running and parked requests. Reject before touching the pool.
+            assert lifecycle_slot_tokens is not None
+            life_blocks = self.coordinator.get_num_blocks_to_allocate(
+                request_id=request.request_id,
+                num_tokens=lifecycle_slot_tokens,
+                new_computed_blocks=new_computed_block_list,
+                num_encoder_tokens=lifecycle_encoder_tokens,
+                total_computed_tokens=total_computed_tokens,
+                num_local_computed_tokens=num_local_computed_tokens,
+                num_tokens_main_model=min(lifecycle_main_tokens, self.max_model_len),
+                apply_admission_cap=True,
+                prefill_end=prefill_end,
+            )
+            if (
+                life_blocks + watermark_blocks + lifecycle_reserved_blocks
+                > self.block_pool.get_num_free_blocks()
+            ):
                 return None
 
         num_tokens_main_model = total_computed_tokens + num_new_tokens

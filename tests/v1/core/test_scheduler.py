@@ -2372,6 +2372,102 @@ def test_preempt_during_execution():
     assert requests[1].output_token_ids[0] == 42
 
 
+def _step_scheduler(scheduler: Scheduler) -> SchedulerOutput:
+    """Run one scheduler step, sampling one token when the step is not a chunk."""
+    scheduler_output = scheduler.schedule()
+    if scheduler_output.total_num_scheduled_tokens == 0:
+        return scheduler_output
+    req_ids = list(scheduler_output.num_scheduled_tokens)
+    sampled_token_ids: list[list[int]] = []
+    for req_id in req_ids:
+        request = scheduler.requests[req_id]
+        if request.is_prefill_chunk:
+            sampled_token_ids.append([])
+        else:
+            sampled_token_ids.append([7])
+    scheduler.update_from_output(
+        scheduler_output,
+        ModelRunnerOutput(
+            req_ids=req_ids,
+            sampled_token_ids=sampled_token_ids,
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+    return scheduler_output
+
+
+@pytest.mark.parametrize("reserve_lifecycle", [False, True])
+def test_lifecycle_kv_admission_stops_preemption_churn(reserve_lifecycle: bool):
+    """ISL admission fits prompts that cannot all reach max_tokens.
+
+    Pool: 7 blocks, 1 null, so 6 usable. block_size=4.
+    Each request is 8 prompt + 8 max_tokens = 16 tokens = 4 blocks.
+    Two peaks are 8 blocks > 6, but two prompts are 4 blocks <= 6.
+    After the first prompt is allocated (2 blocks), 4 blocks are free, which
+    is exactly the second request's peak — a check against free blocks alone
+    would admit it, while the running request still needs 2 more blocks.
+    """
+    block_size = 4
+    num_prompt_tokens = 8
+    max_tokens = 8
+    peak_blocks = (num_prompt_tokens + max_tokens + block_size - 1) // block_size
+    scheduler = create_scheduler(
+        max_num_seqs=4,
+        max_num_batched_tokens=32,
+        max_model_len=64,
+        block_size=block_size,
+        num_blocks=7,
+        enable_prefix_caching=False,
+        scheduler_reserve_full_lifecycle=reserve_lifecycle,
+    )
+    assert scheduler.scheduler_reserve_full_lifecycle is reserve_lifecycle
+    assert scheduler.kv_cache_manager.block_pool.get_num_free_blocks() == 6, (
+        "block 0 is the null block"
+    )
+    requests = create_requests(
+        num_requests=2,
+        num_tokens=num_prompt_tokens,
+        max_tokens=max_tokens,
+        block_size=block_size,
+    )
+    for request in requests:
+        scheduler.add_request(request)
+
+    _step_scheduler(scheduler)
+    free_blocks = scheduler.kv_cache_manager.block_pool.get_num_free_blocks()
+    if reserve_lifecycle:
+        assert len(scheduler.running) == 1
+        assert len(scheduler.waiting) == 1
+        # The second peak fits in the free pool; the ledger is what rejects it.
+        assert free_blocks >= peak_blocks
+        max_running = 1
+        for _ in range(40):
+            if all(request.is_finished() for request in requests):
+                break
+            _step_scheduler(scheduler)
+            max_running = max(max_running, len(scheduler.running))
+        assert all(request.is_finished() for request in requests)
+        assert [request.num_output_tokens for request in requests] == [
+            max_tokens,
+            max_tokens,
+        ]
+        assert sum(request.num_preemptions for request in requests) == 0
+        assert max_running == 1
+    else:
+        assert len(scheduler.running) == 2
+        preempted = False
+        for _ in range(40):
+            if any(request.num_preemptions for request in requests):
+                preempted = True
+                break
+            output = _step_scheduler(scheduler)
+            if output.total_num_scheduled_tokens == 0 and not scheduler.running:
+                break
+        assert preempted
+
+
 def test_pending_hisparse_reclamation_defers_preemption(monkeypatch):
     """Pending reclamation must stall rather than preempt its owning request."""
     scheduler = create_scheduler(enable_prefix_caching=False)

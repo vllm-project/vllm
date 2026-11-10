@@ -86,6 +86,7 @@ def create_scheduler(
     per_request_spec_decode_metrics: str = "none",
     cache_aware_admission_window: int = 0,
     cache_aware_admission_threshold: float = 0.5,
+    scheduler_reserve_full_lifecycle: bool = False,
     scheduling_policy: SchedulerPolicy = "fcfs",
     diffusion_canvas_length: int | None = None,
     scheduler_cls: type[Scheduler] | None = None,
@@ -139,6 +140,7 @@ def create_scheduler(
         is_encoder_decoder=model_config.is_encoder_decoder,
         cache_aware_admission_window=cache_aware_admission_window,
         cache_aware_admission_threshold=cache_aware_admission_threshold,
+        scheduler_reserve_full_lifecycle=scheduler_reserve_full_lifecycle,
         # Ensure admission/preemption mechanics are deterministic
         watermark=0.0,
         policy=scheduling_policy,

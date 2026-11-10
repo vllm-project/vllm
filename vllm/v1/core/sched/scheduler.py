@@ -394,6 +394,17 @@ class Scheduler(SchedulerInterface):
         self.scheduler_reserve_full_isl = (
             self.scheduler_config.scheduler_reserve_full_isl
         )
+        self.scheduler_reserve_full_lifecycle = (
+            self.scheduler_config.scheduler_reserve_full_lifecycle
+        )
+        if self.scheduler_reserve_full_lifecycle:
+            logger.info_once(
+                "Lifecycle KV admission is enabled. A waiting request is "
+                "admitted only when its prompt + max_tokens, plus the "
+                "unallocated peak of requests already in the pool, fits in "
+                "the free KV blocks. Generous max_tokens reserves idle "
+                "capacity."
+            )
         # Cache-aware admission needs a prefix cache to consult, and reorders by
         # position, which only a FCFS queue has.
         self.cache_aware_window = (
@@ -473,6 +484,10 @@ class Scheduler(SchedulerInterface):
         self._inflight_prefills: set[Request] = set()
         self._parked_reservations: dict[Request, int] = {}
         self._parked_reserved_blocks = 0
+        # Peak (prompt + max_tokens) reservations for parked loads. Separate
+        # from `_parked_reserved_blocks`, which tracks the current sequence.
+        self._parked_lifecycle_reservations: dict[Request, int] = {}
+        self._parked_lifecycle_blocks = 0
 
         # Requests with an async KV load, by stage (KV_FETCH_STAGES).
         # None when not tracked (no KV connector, or no stats or load cap).
@@ -1446,6 +1461,23 @@ class Scheduler(SchedulerInterface):
                         + self._spec_decode_step_blocks
                     )
 
+                lifecycle_main_tokens = None
+                lifecycle_slot_tokens = None
+                lifecycle_reserved_blocks = 0
+                lifecycle_encoder_tokens = 0
+                if self.scheduler_reserve_full_lifecycle:
+                    # Same spec headroom as `_request_remaining_blocks`.
+                    lifecycle_main_tokens = self._lifecycle_main_tokens(request)
+                    lifecycle_slot_tokens = lifecycle_main_tokens
+                    if self.num_spec_tokens:
+                        lifecycle_slot_tokens += (
+                            1 + self.num_spec_tokens + self.num_lookahead_tokens
+                        )
+                    lifecycle_reserved_blocks = self._lifecycle_reserved_blocks(
+                        excluding=request
+                    )
+                    lifecycle_encoder_tokens = self._lifecycle_encoder_tokens(request)
+
                 # Replayed tokens are already counted in the adopted hit; a
                 # chunk that ends inside the replayed range needs no new slots.
                 num_tokens_past_hit = max(num_new_tokens - num_replay_tokens, 0)
@@ -1466,6 +1498,10 @@ class Scheduler(SchedulerInterface):
                     full_sequence_must_fit=self.scheduler_reserve_full_isl,
                     reserved_blocks=reserved_blocks,
                     has_scheduled_reqs=bool(self.running),
+                    lifecycle_main_tokens=lifecycle_main_tokens,
+                    lifecycle_slot_tokens=lifecycle_slot_tokens,
+                    lifecycle_reserved_blocks=lifecycle_reserved_blocks,
+                    lifecycle_encoder_tokens=lifecycle_encoder_tokens,
                 )
 
                 if new_blocks is None:
@@ -3471,9 +3507,21 @@ class Scheduler(SchedulerInterface):
             )
         return delay_free or partial_tail_delay, kv_xfer_params
 
-    def _request_remaining_blocks(self, request: Request) -> int:
-        """Blocks `request` still needs to hold its full sequence and be promoted."""
-        full_num_tokens = min(request.num_tokens, self.max_model_len)
+    def _request_remaining_blocks(
+        self,
+        request: Request,
+        full_num_tokens: int | None = None,
+        num_encoder_tokens: int = 0,
+    ) -> int:
+        """Blocks `request` still needs to hold `full_num_tokens` and be promoted.
+
+        `full_num_tokens` defaults to the tokens the request currently has
+        (the prompt, until decode appends output). Callers that reserve a
+        lifecycle peak pass prompt + max_tokens instead.
+        """
+        if full_num_tokens is None:
+            full_num_tokens = request.num_tokens
+        full_num_tokens = min(full_num_tokens, self.max_model_len)
         num_tokens = full_num_tokens
         if self.num_spec_tokens:
             num_tokens += 1 + self.num_spec_tokens + self.num_lookahead_tokens
@@ -3481,13 +3529,74 @@ class Scheduler(SchedulerInterface):
             request_id=request.request_id,
             num_tokens=num_tokens,
             new_computed_blocks=self.kv_cache_manager.empty_kv_cache_blocks.blocks,
-            num_encoder_tokens=0,
+            num_encoder_tokens=num_encoder_tokens,
             total_computed_tokens=request.num_computed_tokens,
             num_local_computed_tokens=request.num_computed_tokens,
             num_tokens_main_model=full_num_tokens,
             apply_admission_cap=True,
             prefill_end=max(request.num_prompt_tokens, request.num_tokens - 1),
         )
+
+    def _lifecycle_main_tokens(self, request: Request) -> int:
+        """Sampling cap for `request`: prompt + max_tokens, at least the tokens
+        it already holds, and never past max_model_len."""
+        return min(
+            max(request.num_prompt_tokens + request.max_tokens, request.num_tokens),
+            self.max_model_len,
+        )
+
+    def _lifecycle_encoder_tokens(self, request: Request) -> int:
+        if not (self.is_encoder_decoder and request.has_encoder_inputs):
+            return 0
+        return sum(
+            request.get_num_encoder_embeds(i) for i in range(request.num_encoder_inputs)
+        )
+
+    def _lifecycle_reserved_blocks(self, excluding: Request | None = None) -> int:
+        """Blocks still required for other requests already in the pool to reach
+        prompt + max_tokens. Each request is counted once. Parked async loads
+        use the reservation cached when they were parked.
+
+        `excluding` is the request being admitted. A parked load is still in
+        the cache until allocation succeeds, and its own peak is computed
+        separately inside `allocate_slots`.
+        """
+        reserved = self._parked_lifecycle_blocks
+        if excluding is not None:
+            reserved -= self._parked_lifecycle_reservations.get(excluding, 0)
+        seen: set[str] = set()
+        for request in self.running:
+            if request is excluding:
+                continue
+            seen.add(request.request_id)
+            reserved += self._request_remaining_blocks(
+                request,
+                full_num_tokens=self._lifecycle_main_tokens(request),
+                num_encoder_tokens=self._lifecycle_encoder_tokens(request),
+            )
+        for request in self._inflight_prefills:
+            if (
+                request is excluding
+                or request.request_id in seen
+                or request in self._parked_reservations
+            ):
+                continue
+            reserved += self._request_remaining_blocks(
+                request,
+                full_num_tokens=self._lifecycle_main_tokens(request),
+                num_encoder_tokens=self._lifecycle_encoder_tokens(request),
+            )
+        return reserved
+
+    def _cache_parked_lifecycle(self, request: Request) -> None:
+        blocks = self._request_remaining_blocks(
+            request,
+            full_num_tokens=self._lifecycle_main_tokens(request),
+            num_encoder_tokens=self._lifecycle_encoder_tokens(request),
+        )
+        cached = self._parked_lifecycle_reservations.get(request, 0)
+        self._parked_lifecycle_blocks += blocks - cached
+        self._parked_lifecycle_reservations[request] = blocks
 
     def _set_kv_fetch_stage(self, request: Request, stage: str | None) -> None:
         kv_fetch_stages = self._kv_fetch_stages
@@ -3516,9 +3625,14 @@ class Scheduler(SchedulerInterface):
         cached = self._parked_reservations.get(request, 0)
         self._parked_reserved_blocks += blocks - cached
         self._parked_reservations[request] = blocks
+        if self.scheduler_reserve_full_lifecycle:
+            self._cache_parked_lifecycle(request)
 
     def _unreserve_parked(self, request: Request) -> None:
         self._parked_reserved_blocks -= self._parked_reservations.pop(request, 0)
+        self._parked_lifecycle_blocks -= self._parked_lifecycle_reservations.pop(
+            request, 0
+        )
 
     def _load_restores_replay_window(self, request: Request) -> bool:
         """Whether the KV connector's load for `request` restores every DSV41

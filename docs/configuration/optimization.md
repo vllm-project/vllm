@@ -39,6 +39,7 @@ If you frequently encounter preemptions, consider the following actions:
 
 - Increase `gpu_memory_utilization`. vLLM pre-allocates GPU cache using this percentage of memory. By increasing utilization, you can provide more KV cache space.
 - Decrease `max_num_seqs` or `max_num_batched_tokens`. This reduces the number of concurrent requests in a batch, thereby requiring less KV cache space.
+- Enable `--scheduler-reserve-full-lifecycle` when `max_tokens` is close to the real output length. By default, admission (`--scheduler-reserve-full-isl`) reserves the prompt only, so a `max_num_seqs` above the number of prompt-plus-output sequences the KV pool can hold admits extra requests that preempt each other as they decode. The lifecycle check refuses that admission: the new request's prompt + `max_tokens`, plus the blocks running requests still need to reach their own prompt + `max_tokens`, must fit in the free pool. It is off by default because `max_tokens` is an upper bound — clients that omit it may generate until `max_model_len` — and reserving that bound can leave the pool idle.
 - Increase `tensor_parallel_size`. This shards model weights across GPUs, allowing each GPU to have more memory available for KV cache. However, increasing this value may cause excessive synchronization overhead.
 - Increase `pipeline_parallel_size`. This distributes model layers across GPUs, reducing the memory needed for model weights on each GPU, indirectly leaving more memory available for KV cache. However, increasing this value may cause latency penalties.
 
