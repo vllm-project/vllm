@@ -95,7 +95,7 @@ def _inputs(rows=M):
 @pytest.fixture
 def run(monkeypatch):
     """Call the mono path for one layer under a forward context built from
-    ``mode`` and ``metadata``; returns (result, runner calls). ``run.built``
+    `mode` and `metadata`; returns (result, runner calls). `run.built`
     records the runner's build arguments."""
     built: list = []
 

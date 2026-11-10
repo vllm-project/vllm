@@ -871,9 +871,7 @@ class Moondream3TextModel(nn.Module):
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
 
-        for i, layer in enumerate(
-            islice(self.blocks, self.start_layer, self.end_layer)
-        ):
+        for layer in islice(self.blocks, self.start_layer, self.end_layer):
             hidden_states = layer(positions, hidden_states)
 
         if not pp_group.is_last_rank:

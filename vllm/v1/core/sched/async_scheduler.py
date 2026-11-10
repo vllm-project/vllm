@@ -40,9 +40,6 @@ class AsyncScheduler(Scheduler):
             # We will update the actual spec token ids in the worker process.
             request.spec_token_ids = spec_token_placeholders
 
-            if self.use_v2_model_runner:
-                # Set the next step index in which this request is eligible to be
-                # scheduled for decode (for PP microbatching).
-                request.next_decode_eligible_step = (
-                    self.current_step + self.decode_stagger
-                )
+            # Set the next step index in which this request is eligible to be
+            # scheduled for decode (for PP microbatching).
+            request.next_decode_eligible_step = self.current_step + self.decode_stagger

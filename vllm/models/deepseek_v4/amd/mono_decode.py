@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""DeepSeek-V4-Pro mono decode layer on ROCm CDNA4 (``--monokernel``).
+"""DeepSeek-V4-Pro mono decode layer on ROCm CDNA4 (`--monokernel`).
 
 A decode step's backbone layer -- the attention seam, the attention, its TP
 all-reduce, the FFN seam, the MoE and its all-reduce -- runs as two persistent
-FlyDSL launches (``mono``, this directory) on the layer's loaded weights, the
+FlyDSL launches (`mono`, this directory) on the layer's loaded weights, the
 TP reductions inside the kernels. Every layer takes the whole layer: between
 its two launches vLLM's compressor runs on K1's normed input (and on a CSA
 layer its indexer, from K1's qr, selects the top-k), then K2 builds the key
@@ -12,7 +12,7 @@ table -- the CSA layer's top-k through the block table, the HCA layer's every
 compressed row (its metadata's slots). The first three layers route by hash:
 their tokens' experts are gathered here and handed to the MoE.
 
-A step takes the kernels when it is decode only, at most ``MAX_TOKENS`` rows
+A step takes the kernels when it is decode only, at most `MAX_TOKENS` rows
 (eager or a FULL CUDA graph: the model is not torch.compiled), with causal SWA
 windows. Anything else runs the layer as before; the paths share every tensor
 at the layer boundary, so they interleave freely. Every TP rank must take the
@@ -62,7 +62,7 @@ _runner = None
 
 def _mono_runner(device: torch.device, max_topk: int):
     """The process's mono runner (one a TP rank, shared by every layer;
-    ``max_topk``: its widest key table). Its peer-memory handshake is collective
+    `max_topk`: its widest key table). Its peer-memory handshake is collective
     over the TP group: every rank builds it at the same layer of the same
     step."""
     global _runner
@@ -125,7 +125,7 @@ def _block_scale(lin) -> torch.Tensor:
 
 def _hca_width(vllm_config) -> int:
     """The HCA layers' key table width: vLLM's c128a table's, every compressed
-    row of the longest context (``sparse_mla``)."""
+    row of the longest context (`sparse_mla`)."""
     from vllm.models.deepseek_v4.sparse_mla import _C128A_TOPK_ALIGNMENT
 
     n = -(-vllm_config.model_config.max_model_len // HCA)
@@ -200,7 +200,7 @@ def _select(layer: "DeepseekV4DecoderLayer", positions, normed, qr) -> None:
 
 
 class MonoDecodeLayer:
-    """One DeepSeek-V4-Pro decoder layer's mono path (``create``: None when the
+    """One DeepSeek-V4-Pro decoder layer's mono path (`create`: None when the
     layer is not eligible). Its weights are taken from the layer at the first
     call, after loading and vLLM's preshuffle."""
 

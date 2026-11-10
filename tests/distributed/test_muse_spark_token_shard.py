@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""MuseSpark1x ROCm token-sharded residual stream: row ownership and collectives."""
+"""Muse Spark ROCm token-sharded residual stream: row ownership and collectives."""
 
 import pytest
 import torch
@@ -16,7 +16,7 @@ from ..utils import multi_gpu_test
 from .eplb_utils import distributed_run, set_env_vars_and_device
 
 pytestmark = pytest.mark.skipif(
-    not current_platform.is_rocm(), reason="MuseSpark1x ROCm model path"
+    not current_platform.is_rocm(), reason="Muse Spark ROCm model path"
 )
 
 

@@ -496,7 +496,7 @@ def test_extract_tool_calls_streaming_incremental(
     # Should have multiple chunks
     assert len(chunks) >= 3
 
-    # Should have a chunk with tool header (id, name, type) for the first tool call # noqa: E501
+    # Should have a chunk with tool header (id, name, type) for the first tool call
     header_found = False
     expected_first_tool = expected_tool_calls[0]
     for chunk in chunks:

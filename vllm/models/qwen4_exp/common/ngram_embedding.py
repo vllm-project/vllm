@@ -274,7 +274,7 @@ class Qwen4ExpPLEEmbeddingMethod(QuantizeMethodBase):
         ids: torch.Tensor,
         output: torch.Tensor,
     ) -> None:
-        """Copy the ETP-owned rows for ``ids`` from pinned host memory."""
+        """Copy the ETP-owned rows for `ids` from pinned host memory."""
         row_bytes = layer.embedding_dim * layer.weight.element_size()
         _lookup_ple_embedding_from_pinned_kernel[(ids.numel(),)](
             layer._uva_weight,

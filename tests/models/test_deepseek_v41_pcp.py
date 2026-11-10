@@ -40,7 +40,7 @@ def test_pcp_generates_with_pipeline_or_data_parallelism(pp_size, dp_size):
         --enable-chunked-prefill --no-enable-prefix-caching --no-swa-bounded-replay
         --enforce-eager --no-async-scheduling
     """.split()
-    env = {"VLLM_USE_V2_MODEL_RUNNER": "1"}
+    env: dict[str, str] = {}
     if pp_size > 1:
         env["VLLM_PP_LAYER_PARTITION"] = "14,26"
     with (

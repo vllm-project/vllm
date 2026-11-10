@@ -1,20 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for the draft ``max_position_embeddings`` override (#48894, #57941).
+"""Tests for the draft `max_position_embeddings` override (#48894, #57941).
 
-Every draft except an independent ``draft_model`` (EAGLE, DFlash, DSpark,
+Every draft except an independent `draft_model` (EAGLE, DFlash, DSpark,
 MTP, ...) shares the target's positional space, but a
-draft checkpoint can ship a ``max_position_embeddings`` smaller than the
-context the target is served with: ``vllm-project/EAGLE3-LLaMA3.1-Instruct-8B`` has
+draft checkpoint can ship a `max_position_embeddings` smaller than the
+context the target is served with: `vllm-project/EAGLE3-LLaMA3.1-Instruct-8B` has
 2048, and any DFlash or DSpark draft falls short once the target's context is
 extended past the draft's training length. That value sizes the draft's rotary
-``cos_sin_cache`` while the proposer feeds positions up to the target's
-``max_model_len``, so the cache gather goes out of bounds — a device-side
+`cos_sin_cache` while the proposer feeds positions up to the target's
+`max_model_len`, so the cache gather goes out of bounds — a device-side
 assert under torch.compile, silent garbage reads or an illegal memory
-access in eager mode. ``SpeculativeConfig`` must raise the draft's value to
-the target's ``max_model_len``, with a log, for every method but draft_model,
+access in eager mode. `SpeculativeConfig` must raise the draft's value to
+the target's `max_model_len`, with a log, for every method but draft_model,
 and only when the draft's RoPE type uses that value purely to size the cache;
-otherwise the V2 model runner limits ``max_model_len`` to the draft's instead.
+otherwise the V2 model runner limits `max_model_len` to the draft's instead.
 """
 
 import logging
