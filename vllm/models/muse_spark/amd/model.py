@@ -10,7 +10,6 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-import vllm.envs as envs
 from vllm.compilation.decorators import ignore_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (
@@ -42,7 +41,8 @@ from vllm.model_executor.models.utils import (
     extract_layer_index,
     sequence_parallel_chunk,
 )
-from vllm.models.common.amd.ops.fused_allreduce_norm_residual_norm import (
+from vllm.models.amd.muse_spark.fused_allreduce_norm_residual_norm import (
+    fuse_allreduce_norm_residual,
     fused_allreduce_norm_residual_then_norm,
 )
 from vllm.models.muse_spark.common.layers import (
@@ -507,7 +507,7 @@ class MuseSparkAttention(nn.Module):
         )
         # The attention boundary sums these partials inside the norm kernel.
         self.fuse_ar_boundary = (
-            envs.VLLM_ROCM_MUSE_FUSED_AR_BOUNDARY
+            fuse_allreduce_norm_residual()
             and get_tensor_model_parallel_world_size() > 1
         )
         if self.fuse_ar_boundary:

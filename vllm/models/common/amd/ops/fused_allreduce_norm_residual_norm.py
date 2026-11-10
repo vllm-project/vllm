@@ -1,17 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""All-reduce plus Muse Spark's post-norm / gated residual / pre-norm.
+"""All-reduce plus a post-norm, gated residual blend, and pre-norm.
 
-AITER's fused QuickReduce epilogue
-(``QuickAllReduceInt4.allreduce_rmsnorm``) computes
-``rmsnorm(allreduce(x) + residual)`` on a bf16 residual. Muse Spark's
-boundary is a different function: post-norm the reduced branch, blend it
-with the fp32 stream, then pre-norm that sum. This kernel does the sum and
-that boundary in one launch, so the reduced branch is never stored.
+One launch sums each rank's bf16 partial in fp32 and computes::
 
-The sum is a bf16 partial sum in fp32. It is not the INT4 QuickReduce codec,
-and publishing the partials is a synchronous copy plus a host barrier, so
-the op stays off unless ``VLLM_ROCM_MUSE_FUSED_AR_BOUNDARY`` is set.
+    new_stream = alpha * stream + beta * post_norm(sum)
+    out = pre_norm(new_stream)
+
+The reduced branch is not stored. The sum is not the INT4 QuickReduce
+codec, and publishing the partials is a synchronous copy plus a host
+barrier. Model code decides when to call it.
 """
 
 from __future__ import annotations
@@ -21,19 +19,12 @@ import ctypes
 import torch
 import torch.distributed as dist
 
-import vllm.envs as envs
 from vllm.distributed import get_tp_group
 from vllm.distributed.device_communicators.cuda_wrapper import (
     CudaRTLibrary,
     cudaIpcMemHandle_t,
 )
 from vllm.logger import init_logger
-from vllm.models.muse_spark.common.layers import (
-    MuseSparkNormPreservingResidualConnection,
-    MuseSparkResidualStream,
-    MuseSparkRMSNorm,
-)
-from vllm.models.muse_spark.common.ops.fused_rmsnorm import supports_norm_residual_norm
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
@@ -332,72 +323,59 @@ def _peers_for(partial: torch.Tensor) -> _PeerPartials:
     return _peers
 
 
-def _boundary_ready(
-    boundary: MuseSparkResidualStream, pre_norm: MuseSparkRMSNorm
-) -> bool:
-    post_norm, connection = boundary.post_norm, boundary.connection
-    return (
-        isinstance(connection, MuseSparkNormPreservingResidualConnection)
-        and getattr(connection, "_coefficients_ready", False)
-        and post_norm.supports_fused_kernel(boundary.branch)
-        and pre_norm.supports_fused_kernel(boundary.stream)
-        and supports_norm_residual_norm(boundary.branch, boundary.stream)
-        and boundary.branch.dtype is torch.bfloat16
-        and triton.next_power_of_2(boundary.branch.shape[-1]) <= _BOUNDARY_TILE_ELEMS
-    )
-
-
-def fused_allreduce_norm_residual_then_norm(
-    boundary: MuseSparkResidualStream,
-    pre_norm: MuseSparkRMSNorm,
+def fused_allreduce_norm_residual_norm(
+    partial: torch.Tensor,
+    stream: torch.Tensor,
+    post_weight: torch.Tensor | None,
+    pre_weight: torch.Tensor | None,
+    post_eps: float,
+    pre_eps: float,
     *,
-    out_dtype: torch.dtype,
+    alpha: torch.Tensor | float,
+    beta: torch.Tensor,
+    post_gain_center: float = 0.0,
+    pre_gain_center: float = 0.0,
+    post_input_scale: bool = False,
+    pre_input_scale: bool = False,
+    out_dtype: torch.dtype | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor] | None:
-    """Sum this rank's o_proj partial with its peers and apply the boundary.
+    """Sum this rank's bf16 partial with its tensor-parallel peers, then the boundary.
 
-    Returns ``None`` when the fused collective cannot run. The caller
-    all-reduces the partial and uses the unfused boundary.
+    ``partial`` and ``stream`` are ``[rows, hidden]``. Returns ``None`` when
+    the fused collective cannot run, including during CUDA-graph capture.
+    The caller all-reduces and runs the boundary separately.
     """
-    if not _boundary_ready(boundary, pre_norm):
+    if (
+        partial.dtype is not torch.bfloat16
+        or stream.dtype is not torch.float32
+        or partial.shape != stream.shape
+        or partial.ndim != 2
+        or not partial.is_cuda
+        or torch.cuda.is_current_stream_capturing()
+        or triton.next_power_of_2(partial.shape[-1]) > _BOUNDARY_TILE_ELEMS
+    ):
         return None
-    # Decode steps are CUDA-graphed and too small for the host barrier.
-    # Prefill and mixed steps (the 8k rows this is aimed at) are eager.
-    if boundary.branch.shape[0] < 1024 or torch.cuda.is_current_stream_capturing():
-        return None
-    partial = boundary.branch
     if not partial.is_contiguous():
         partial = partial.contiguous()
-    stream = boundary.stream.reshape(-1, partial.shape[-1])
-    partial = partial.reshape(-1, partial.shape[-1])
     try:
         peers = _peers_for(partial)
         peers.publish(partial)
     except Exception:
         logger.exception("Fused all-reduce boundary unavailable; using all-reduce")
         return None
-    post_norm = boundary.post_norm
-    connection = boundary.connection
-    out, new_stream = _launch_boundary(
+    return _launch_boundary(
         peers.peer_ptrs,
         peers.peer_ptrs.numel(),
         stream,
-        post_norm.weight if post_norm.has_weight else None,
-        pre_norm.weight,
-        post_norm.variance_epsilon,
-        pre_norm.variance_epsilon,
-        alpha=connection.alpha,
-        beta=connection.beta,
-        post_gain_center=post_norm.fused_gain_center,
-        pre_gain_center=pre_norm.fused_gain_center,
-        post_input_scale=(
-            post_norm.applies_weight_before_norm and post_norm.has_weight
-        ),
-        pre_input_scale=(pre_norm.applies_weight_before_norm and pre_norm.has_weight),
+        post_weight,
+        pre_weight,
+        post_eps,
+        pre_eps,
+        alpha=alpha,
+        beta=beta,
+        post_gain_center=post_gain_center,
+        pre_gain_center=pre_gain_center,
+        post_input_scale=post_input_scale,
+        pre_input_scale=pre_input_scale,
         out_dtype=out_dtype,
     )
-    return out.view(boundary.branch.shape), new_stream.view(boundary.stream.shape)
-
-
-def fuse_allreduce_norm_residual() -> bool:
-    """Whether Muse should skip ``o_proj``'s all-reduce and use this op."""
-    return envs.VLLM_ROCM_MUSE_FUSED_AR_BOUNDARY
