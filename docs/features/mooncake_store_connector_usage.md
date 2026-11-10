@@ -332,10 +332,22 @@ Strict isolation requires a Mooncake master started with `--enable_multi_tenants
   `"NVLINK"` is used in the [EGM deployment example](#standalone-egm-over-nvlink);
   `"BAREX"` selects the BAR-exposed allocator. Unset by default. Both are
   incompatible with sleep mode and the CuMem allocator.
-- `cache_prefix` (str): Namespace prepended to every store key. Lets separate deployments share one Mooncake master without polluting each other — instances configured with different prefixes never see each other's cached blocks, even for identical prompts. All instances that should share a prefix cache must use the same value. Default: `""` (no prefix; keys are byte-identical to the unprefixed format).
+- `cache_prefix` (str): Namespace prepended to every store key. Different prefixes isolate cached blocks, even for identical prompts. Set to `"auto"` to derive a deployment fingerprint automatically (see below). Other strings remain literal custom prefixes. Default: `""` (no prefix; existing key format).
 - `save_decode_cache` (bool): Enable offloading decode tokens' KV cache. A `kv_consumer` does not save during prefill; when decode starts, it fills any missing block-aligned prompt prefix before appending completed decode blocks. Default: `false`.
 - `store_tp_size` (int): Common Store TP for divisible heterogeneous-TP
   sharing. See [Sharing one Store across multiple Prefill TP sizes](#sharing-one-store-across-multiple-prefill-tp-sizes).
+
+#### Automatic cache prefix
+
+Set `"cache_prefix": "auto"` in `kv_connector_extra_config` to derive the prefix
+from the deployment identity: `VLLM_IMAGE_TAG` (or `VLLM_BUILD_COMMIT`), the
+model configuration (path, revision, dtype, quantization) and the KV cache
+configuration (e.g. KV dtype, block size). Changing any of these isolates new
+blocks from previously cached ones; identically configured replicas share the
+prefix. Official release images set both build identity variables; custom builds
+must pass `--build-arg VLLM_IMAGE_TAG=<immutable-tag>`, otherwise startup fails.
+Environment flags and weight files are not hashed: use a custom prefix if they
+change while the image and model configuration stay the same.
 
 LBHNC/HND is strongly recommended for TP-sharded Store when supported. LBNHC/NHD
 creates many transfer segments and may significantly reduce PUT/GET performance.

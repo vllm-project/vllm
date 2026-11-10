@@ -179,7 +179,9 @@ def test_kda_recoverssm_startup_metadata_flow_without_model(monkeypatch):
             use_kda_recoverssm=True,
         ),
         parallel_config=SimpleNamespace(tensor_parallel_size=1),
-        speculative_config=SimpleNamespace(num_speculative_tokens=2),
+        speculative_config=SimpleNamespace(
+            num_speculative_tokens=2, max_num_new_slots_for_drafting=0
+        ),
     )
     kv_cache_spec = MambaSpec(
         block_size=BLOCK_SIZE,
@@ -217,6 +219,7 @@ def test_kda_recoverssm_startup_metadata_flow_without_model(monkeypatch):
         speculative_config=SimpleNamespace(
             num_speculative_tokens=2,
             parallel_drafting=False,
+            max_num_new_slots_for_drafting=0,
             enable_adaptive_verification=False,
             use_eagle_block_drop=Mock(return_value=False),
         ),

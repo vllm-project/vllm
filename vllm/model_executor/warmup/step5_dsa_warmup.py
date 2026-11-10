@@ -57,7 +57,8 @@ def run_step5_scored_prefill_warmup(worker: "Worker", topk: int) -> bool:
     """Run one mixed step whose prefill row scores more than ``topk`` regions."""
     runner = worker.model_runner
     # One region past "select every region" (top-k x 8 tokens), plus the
-    # decode token of the mixed step.
+    # decode token of the mixed step. The 16-token margin also covers one
+    # correction slot for each of the mixed step's two requests.
     num_tokens = topk * 8 + 17
     if num_tokens > worker.scheduler_config.max_num_batched_tokens or (
         num_tokens > runner.max_model_len

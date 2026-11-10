@@ -107,10 +107,7 @@ class FlashInferMoeEpExperts(mk.FusedMoEExpertsModular):
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
-        return (
-            moe_parallel_config.use_ep
-            and not moe_parallel_config.use_batched_activation_format
-        )
+        return moe_parallel_config.use_ep
 
     @property
     def expects_unquantized_inputs(self) -> bool:

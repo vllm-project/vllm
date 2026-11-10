@@ -23,6 +23,22 @@ Rejected at startup: adaptive speculative verification, PP > 1, DCP/PCP > 1, and
 
 Routing is stored by the aux output connector (`vllm/distributed/aux_output_connector/`, configured via `--aux-output-config`), keyed by KV block hash and shared with prefix caching, which is why prefix caching is required. `max_bytes` is its host-memory LRU capacity (default: derived from KV cache capacity). If a prefix-cache hit needs evicted rows, the worker raises `BlockObjectStoreError`; increase `max_bytes`.
 
+### Backend row restoration
+
+A backend's `MoERunner` or `RoutedExpertsCaptureSource` can optionally implement
+`restore_routed_experts_rows(topk_ids, ctx) -> Tensor`. During binding, the capturer
+selects the first such module in `model.modules()` order and uses its callback
+for every captured layer. Without a provider, the existing DP/TP recovery is used.
+Existing capture sources need no changes.
+
+The callback must restore this DP rank's token-ordered logical expert IDs for all
+captured layers, using the supplied `ForwardContext` rather than the provider's
+layer-specific state. It must preserve the input, device, dtype and top-k width,
+and keep collective participation consistent across ranks, including empty
+ranks. Operations must support graph replay. Models requiring different per-layer
+restorers cannot use this hook. Repeated layer IDs do not select a different
+restorer; the existing buffer-write semantics are unchanged.
+
 ## Output format
 
 | API | Field |

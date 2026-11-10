@@ -405,23 +405,20 @@ def has_flashinfer_packed_fused_kda_decode() -> bool:
 
 @functools.cache
 def has_flashinfer_nvlink_two_sided() -> bool:
-    """Return `True` if FlashInfer mnnvl all2all is available."""
+    """Return whether FlashInfer exposes the NVLink two-sided MoE EP wrapper."""
     if not has_flashinfer_comm():
         return False
-
-    # Check if all required functions are available
-    required_functions = [
-        ("flashinfer.comm", "Mapping"),
-        ("flashinfer.comm.mnnvl", "MnnvlMemory"),
-        ("flashinfer.comm.trtllm_alltoall", "MnnvlMoe"),
-        ("flashinfer.comm.trtllm_alltoall", "MoEAlltoallInfo"),
-    ]
-
-    for module_name, attr_name in required_functions:
-        mod = _get_submodule(module_name)
-        if not mod or not hasattr(mod, attr_name):
-            return False
-    return True
+    mod = _get_submodule("flashinfer.moe_ep")
+    return mod is not None and all(
+        hasattr(mod, name)
+        for name in (
+            "BootstrapConfig",
+            "MoEEpCommParams",
+            "NVLinkTwoSidedAlltoAll",
+            "NVLinkTwoSidedConfig",
+            "create_communication",
+        )
+    )
 
 
 @functools.cache

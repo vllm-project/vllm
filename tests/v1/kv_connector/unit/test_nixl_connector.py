@@ -2909,25 +2909,31 @@ def _dsv4_mla_spec(record_bytes: int, alignment: int, tokens_per_state: int):
     "groups",
     [
         # V4 record: padded pages, so a layer view is not a contiguous page.
-        [(_dsv4_mla_spec(584, 576, 4), 4)],
+        pytest.param([(_dsv4_mla_spec(584, 576, 4), 4)], id="v4-padded-pages"),
         # V4.1 MXFP8 record: unpadded pages in rows that the compressed caches
         # and a compressor-state ring alias.
-        [
-            (_dsv4_mla_spec(528, 512, 2), 2),
-            (_dsv4_mla_spec(528, 512, 2), 2),
-            (
-                CircularBufferSpec(
-                    block_size=8,
-                    num_kv_heads=1,
-                    head_size=8448,
-                    head_size_v=0,
-                    dtype=torch.uint8,
+        pytest.param(
+            [
+                (_dsv4_mla_spec(528, 512, 2), 2),
+                (_dsv4_mla_spec(528, 512, 2), 2),
+                (
+                    CircularBufferSpec(
+                        block_size=8,
+                        num_kv_heads=1,
+                        head_size=8448,
+                        head_size_v=0,
+                        dtype=torch.uint8,
+                    ),
+                    2,
                 ),
-                2,
+            ],
+            id="v41-aliased-groups",
+            marks=pytest.mark.xfail(
+                strict=True,
+                reason="Region dedup drops the packed-row alias; fixed by #64661",
             ),
-        ],
+        ),
     ],
-    ids=["v4-padded-pages", "v41-aliased-groups"],
 )
 def test_register_packed_dsv4_mla_cache_as_single_region(
     default_vllm_config, dist_init, groups

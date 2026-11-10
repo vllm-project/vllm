@@ -24,10 +24,6 @@ pub(super) fn validate_request_compat(
         );
     }
 
-    if request.n.unwrap_or(1) > 1 {
-        bail_invalid_request!(param = "n", "Only n=1 is supported.");
-    }
-
     if request.max_tokens == Some(0) && !request.echo {
         bail_invalid_request!(
             param = "max_tokens",
@@ -105,7 +101,7 @@ pub(super) fn validate_request_compat(
             "spaces_between_special_tokens is not supported."
         );
     }
-    validate_generation_prompt_truncation(request.truncate_prompt_tokens, request.echo)?;
+    validate_generation_prompt_truncation(request.truncate_prompt_tokens)?;
 
     Ok(())
 }

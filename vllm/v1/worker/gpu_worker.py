@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """A GPU worker class."""
 
+import copy
 import gc
 import os
 import time
@@ -71,6 +72,7 @@ from vllm.model_executor.layers.quantization.online.lm_head import (
 )
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader.reload.direct import direct_reload_enabled
+from vllm.model_executor.model_loader.weight_cache.utils import ExternalWeightCharges
 from vllm.model_executor.model_loader.weight_checksum import (
     compute_tensor_digests,
     zero_weights,
@@ -239,6 +241,7 @@ class Worker(WorkerBase):
             distributed_init_method=distributed_init_method,
             is_driver_worker=is_driver_worker,
         )
+        self._external_weight_charges = ExternalWeightCharges()
 
         # configure float32 matmul precision according to vLLM env.
         precision = envs.VLLM_FLOAT32_MATMUL_PRECISION
@@ -250,10 +253,6 @@ class Worker(WorkerBase):
         self.worker_sentinel: WorkerSentinel | None = None
         if self.parallel_config.enable_fault_tolerance:
             self.worker_sentinel = WorkerSentinel(worker=self)
-        # Buffers saved before sleep
-        self._sleep_saved_buffers: dict[str, torch.Tensor] = {}
-        self._sleep_saved_parameters: dict[str, torch.Tensor] = {}
-        self._sleep_saved_draft_buffers: dict[str, torch.Tensor] = {}
 
         # Weight transfer engine is created in `load_model` once the model
         # is available, since the engine needs a reference to the model.
@@ -304,47 +303,29 @@ class Worker(WorkerBase):
             )
         return parameters
 
-    def _save_sleep_parameters(self, model: nn.Module) -> None:
-        patterns = self.model_config.sleep_preserve_parameter_names
-        if not patterns:
-            self._sleep_saved_parameters = {}
-            return
-        parameters = self._get_sleep_parameters(model)
-        names: set[str] = set()
-        for pattern in patterns:
-            matches = fnmatch_filter(parameters, pattern)
+    def _discardable_parameters(self, model: nn.Module) -> set[int]:
+        """Storage of the parameters the weight update rewrites."""
+        storage = {
+            name: parameter.untyped_storage().data_ptr()
+            for name, parameter in self._get_sleep_parameters(model).items()
+        }
+        preserved: set[int] = set()
+        for pattern in self.model_config.sleep_preserve_parameter_names:
+            matches = fnmatch_filter(storage, pattern)
             if not matches and pattern != "draft.*":
                 raise ValueError(f"No parameter matches sleep retention: {pattern}")
-            names.update(matches)
-        self._sleep_saved_parameters = {
-            name: param.detach().to("cpu")
-            for name, param in parameters.items()
-            if name in names and not param.is_cpu
-        }
-
-    @torch.no_grad()
-    def _restore_sleep_parameters(self, model: nn.Module) -> None:
-        parameters = self._get_sleep_parameters(model)
-        for name, value in self._sleep_saved_parameters.items():
-            parameters[name].copy_(value)
-        self._sleep_saved_parameters.clear()
+            preserved.update(storage[name] for name in matches)
+        return set(storage.values()) - preserved
 
     def sleep(self, level: int = 1) -> None:
         torch.accelerator.synchronize()
         free_bytes_before_sleep = torch.accelerator.get_memory_info()[0]
-
-        # Save the buffers before level 2 sleep
-        if level == 2:
-            model = self.model_runner.model
-            self._save_sleep_parameters(model)
-            self._sleep_saved_buffers = {
-                name: buffer.cpu().clone() for name, buffer in model.named_buffers()
-            }
-            draft = self.get_draft_model()
-            if draft is not None:
-                self._sleep_saved_draft_buffers = {
-                    name: buffer.cpu().clone() for name, buffer in draft.named_buffers()
-                }
+        # Level 2 keeps everything the weight update doesn't rewrite.
+        discardable = (
+            self._discardable_parameters(self.model_runner.model)
+            if level == 2
+            else set()
+        )
 
         if has_kv_transfer_group():
             get_kv_transfer_group().unregister_kv_caches()
@@ -353,7 +334,7 @@ class Worker(WorkerBase):
         extensible_kv_cache = getattr(self.model_runner, "extensible_kv_cache", None)
         if extensible_kv_cache is not None:
             extensible_kv_cache.release_physical()
-        self.sleep_mode_backend.suspend(level)
+        self.sleep_mode_backend.suspend(discardable)
         if self.vllm_config.model_config.enable_nccl_comm_suspend:
             suspend_device_comms()
 
@@ -385,25 +366,6 @@ class Worker(WorkerBase):
             get_kv_transfer_group().restore_kv_caches()
         if self.vllm_config.model_config.enable_nccl_comm_suspend:
             resume_device_comms()
-
-        # Restore the buffers after level 2 sleep
-        wake_weights = tags is None or "weights" in tags
-        if wake_weights and self._sleep_saved_parameters:
-            self._restore_sleep_parameters(self.model_runner.model)
-        if wake_weights and len(self._sleep_saved_buffers):
-            model = self.model_runner.model
-            for name, buffer in model.named_buffers():
-                if name in self._sleep_saved_buffers:
-                    buffer.data.copy_(self._sleep_saved_buffers[name].data)
-            self._sleep_saved_buffers = {}
-
-        if wake_weights and len(self._sleep_saved_draft_buffers):
-            draft = self.get_draft_model()
-            if draft is not None:
-                for name, buffer in draft.named_buffers():
-                    if name in self._sleep_saved_draft_buffers:
-                        buffer.data.copy_(self._sleep_saved_draft_buffers[name].data)
-            self._sleep_saved_draft_buffers = {}
 
         self.synchronize_device()
 
@@ -585,14 +547,15 @@ class Worker(WorkerBase):
             torch.accelerator.empty_cache()
 
             # Weights from external model loader process
-            self.external_weight_memory = get_model_loader(
-                self.load_config
-            ).get_external_weight_memory(self.vllm_config)
+            with self._external_weight_charges.track():
+                external_weight_memory = get_model_loader(
+                    self.load_config
+                ).get_external_weight_memory(self.vllm_config)
 
             # take current memory snapshot after external weights are ready
             self.init_snapshot = init_snapshot = MemorySnapshot(device=self.device)
             self.requested_memory = request_memory(
-                init_snapshot, self.cache_config, self.external_weight_memory
+                init_snapshot, self.cache_config, external_weight_memory
             )
             logger.debug("worker init memory snapshot: %r", self.init_snapshot)
             logger.debug(
@@ -649,8 +612,16 @@ class Worker(WorkerBase):
             set_current_vllm_config(self.vllm_config),
             # 20 MiB is the minimum PyTorch allows for max_split_size_mb.
             self._scoped_allocator_max_split(max_split_size_mb=20),
+            self._external_weight_charges.track(),
         ):
             self.model_runner.load_model(load_dummy_weights=load_dummy_weights)
+
+        if self._external_weight_charges.fallback_bytes:
+            self.requested_memory = self._resolve_requested_memory()
+            logger.info(
+                "Updated engine memory budget after disk fallback: %s GiB",
+                format_gib(self.requested_memory),
+            )
 
         if has_ec_transfer():
             get_ec_transfer().start_worker_services()
@@ -957,12 +928,12 @@ class Worker(WorkerBase):
         # related to kv cache connector (e.g. kv cache sharing layers).
         allocation_context = self._maybe_get_memory_pool_context(tag="kv_cache")
         if self.cache_config.enable_extensible_kv_cache:
-            if registers_kv_cache_memory(self.vllm_config):
-                kv_cache_config = pad_kv_cache_segments(
-                    kv_cache_config,
-                    self.cache_config.get_resolved_kv_cache_layout(),
-                    granule_size(torch.accelerator.current_device_index()),
-                )
+            kv_cache_config = pad_kv_cache_segments(
+                kv_cache_config,
+                self.cache_config.get_resolved_kv_cache_layout(),
+                granule_size(torch.accelerator.current_device_index()),
+                registers_memory=registers_kv_cache_memory(self.vllm_config),
+            )
             # The connector is created in `extend_kv_cache`, once the
             # memory it registers is final.
             self._kv_cache_config = kv_cache_config
@@ -1037,8 +1008,21 @@ class Worker(WorkerBase):
 
     def disable_extensible_kv_cache(self) -> None:
         self.cache_config.enable_extensible_kv_cache = False
-        self.requested_memory = request_memory(
-            self.init_snapshot, self.cache_config, self.external_weight_memory
+        self.requested_memory = self._resolve_requested_memory()
+
+    def _resolve_requested_memory(self) -> int:
+        fallback_bytes = self._external_weight_charges.fallback_bytes
+        snapshot = self.init_snapshot
+        if fallback_bytes:
+            # init_snapshot was taken while the daemon still held the
+            # fallen-back weights; a removed charge means that memory is
+            # free again, so count it as available for the validation.
+            snapshot = copy.copy(snapshot)
+            snapshot.free_memory += fallback_bytes
+        return request_memory(
+            snapshot,
+            self.cache_config,
+            self._external_weight_charges.current_bytes,
         )
 
     def _v2_model_runner(self) -> "GPUModelRunnerV2":

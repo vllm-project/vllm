@@ -151,7 +151,7 @@ def get_humming_moe_quant_config(
         and weight_schema.hadamard_block_size <= 1
         and input_schema.input_quant_mode in (None, "dynamic_group")
     ):
-        q_dtype = humming_schema._HUMMING_TO_QUANT_DTYPE.get(
+        q_dtype = humming_schema._humming_to_quant_dtype().get(
             input_schema.a_dtype, FP8_DTYPE
         )
         activation_group_shape = GroupShape(row=1, col=input_scale_group_size)
@@ -221,11 +221,7 @@ def select_humming_moe_experts(
     # NOTE(rob): We need to peak into the P/F selection to determine
     # if we are using the batched or standard expert format, which
     # if not ideal. Once we unify TP + DP/EP, we can select P/F first.
-    activation_format = (
-        mk.FusedMoEActivationFormat.BatchedExperts
-        if config.moe_parallel_config.use_batched_activation_format
-        else mk.FusedMoEActivationFormat.Standard
-    )
+    activation_format = config.activation_format
 
     def _make_log_backend(experts_cls: type[mk.FusedMoEExperts]):
         return f"Using {experts_cls.__name__} Humming MoE backend."
@@ -280,7 +276,7 @@ def make_humming_moe_kernel(
     logger.info_once("Using %s", prepare_finalize.__class__.__name__)
 
     # Create Experts.
-    if prepare_finalize.activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
+    if prepare_finalize.activation_format.is_batched:
         max_num_tokens = prepare_finalize.max_num_tokens_per_rank()
         assert max_num_tokens is not None
         experts = experts_cls(

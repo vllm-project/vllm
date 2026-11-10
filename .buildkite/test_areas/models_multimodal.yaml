@@ -72,6 +72,7 @@ steps:
 - label: ":nvidia: (H200 MIG 35GB) Unlimited-OCR-2"
   device: h200_35gb
   key: unlimited-ocr2-generation
+  automatic_shard: true
   timeout_in_minutes: 30
   source_file_dependencies:
   - vllm/
@@ -220,6 +221,7 @@ steps:
 - label: ":nvidia: (H200 MIG 35GB) [Nightly] Multimodal Models (PPL)"
   device: h200_35gb
   key: multi-modal-models-extended-ppl
+  automatic_shard: true
   optional: true
   source_file_dependencies:
   - vllm/
@@ -229,6 +231,7 @@ steps:
     - pytest -v -s models/multimodal/generation_ppl_test/
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI355 DPX) Multimodal Models (PPL)"
       dind: false
       device: mi355_dpx
@@ -278,11 +281,11 @@ steps:
       depends_on:
       - image-build-amd
 
-- label: ":nvidia: (H200 MIG 18GB) [Nightly] Multimodal Models (Extended Pooling)"
+- label: ":nvidia: (H200 MIG 35GB) [Nightly] Multimodal Models (Extended Pooling)"
   key: multi-modal-models-extended-pooling
   automatic_shard: true
   optional: true
-  device: h200_18gb
+  device: h200_35gb
   source_file_dependencies:
   - vllm/
   - "!vllm/distributed/kv_transfer/"

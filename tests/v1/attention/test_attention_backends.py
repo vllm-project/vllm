@@ -1402,6 +1402,7 @@ def test_flashinfer_varlen_cudagraph_capability(
             enable_adaptive_verification=adaptive,
             num_speculative_tokens=7,
             parallel_drafting=True,
+            max_num_new_slots_for_drafting=0,
         )
         if adaptive is not None
         else None,
@@ -1438,19 +1439,25 @@ def test_flashinfer_varlen_cudagraph_capability(
 
 
 @pytest.mark.parametrize(
-    "use_v2_model_runner,parallel_drafting,expected",
+    "use_v2_model_runner,parallel_drafting,drafting_slots,expected",
     [
-        (True, None, 1),
-        (True, False, 8),
-        (True, True, 8),
-        (False, False, 8),
-        (False, True, 15),
+        (True, None, 0, 1),
+        (True, False, 0, 8),
+        (True, True, 0, 8),
+        (False, False, 0, 8),
+        (False, True, 0, 15),
+        # Standalone draft model: its prefill adds a correction token.
+        (True, False, 1, 9),
+        (False, False, 1, 8),
+        # V1 parallel drafting does not also add the drafting slots.
+        (False, True, 7, 15),
     ],
 )
 def test_spec_as_decode_width_follows_model_runner(
-    use_v2_model_runner, parallel_drafting, expected
+    use_v2_model_runner, parallel_drafting, drafting_slots, expected
 ):
-    """Only model runner V1's parallel drafter widens decode requests."""
+    """V2 widens decode requests by the drafter's extra slots; V1 only for its
+    parallel drafter."""
 
     class Builder(AttentionMetadataBuilder):
         def __init__(self, vllm_config):
@@ -1463,7 +1470,9 @@ def test_spec_as_decode_width_follows_model_runner(
         speculative_config=None
         if parallel_drafting is None
         else SimpleNamespace(
-            num_speculative_tokens=7, parallel_drafting=parallel_drafting
+            num_speculative_tokens=7,
+            parallel_drafting=parallel_drafting,
+            max_num_new_slots_for_drafting=drafting_slots,
         ),
         parallel_config=SimpleNamespace(decode_context_parallel_size=1),
         use_v2_model_runner=use_v2_model_runner,
@@ -1551,6 +1560,7 @@ def test_flashinfer_varlen_decode_graph_replays_changed_layout(
         num_speculative_tokens=7,
         enable_adaptive_verification=True,
         parallel_drafting=False,
+        max_num_new_slots_for_drafting=0,
     )
     spec = create_standard_kv_cache_spec(config)
     scale = head_size**-0.5

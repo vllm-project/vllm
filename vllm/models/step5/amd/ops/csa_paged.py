@@ -155,12 +155,15 @@ def sparse_attention_paged(
     """Attention over each query's selected regions of the paged K/V, into
     ``output``. ``key_cache``/``value_cache`` are ``[pages, page_tokens, kv_heads,
     head_dim]`` views; ``token_req`` and ``positions`` locate every query row."""
+    from vllm.platforms.rocm import get_cdna_version
+
     tokens, heads, head_dim = query.shape
     if tokens == 0:
         return
     groups = key_cache.shape[2]
     heads_per_group = heads // groups
     fp8 = key_cache.dtype in (torch.float8_e4m3fn, torch.float8_e4m3fnuz)
+    cdna = get_cdna_version()
     assert value_cache.dtype == key_cache.dtype
     assert not fp8 or (k_scale is not None and v_scale is not None)
     _attention_paged_kernel[(tokens, groups)](
@@ -197,6 +200,9 @@ def sparse_attention_paged(
         BLOCK_D=triton.next_power_of_2(head_dim),
         # 8 regions x 8 tokens x 256 padded dims fits gfx942's 64 KiB LDS.
         BLOCK_S=8,
+        # One wave per KV group keeps softmax reductions in-wave. Measured faster
+        # on CDNA4 for all KV dtypes and on CDNA3 for FP8 KV (BF16 is slower).
+        num_warps=1 if cdna == 4 or (fp8 and cdna == 3) else 4,
         num_stages=1,
         FP8=fp8,
     )

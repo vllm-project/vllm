@@ -1,3 +1,5 @@
+#pragma once
+
 #include <torch/all.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
@@ -6,12 +8,12 @@
 #include <cuda_fp16.h>
 #include <cuda_bf16.h>
 
-#include <stdexcept>
 #include <algorithm>
 #include <type_traits>
 #include <utility>  // std::in_range
 
 #include "core/cuda_compat.h"
+#include "skinny_gemms_int4.h"
 
 // Combined RDNA macro (gfx11 + gfx12) - both use 32-wide wavefronts
 #if defined(__GFX11__) || defined(__GFX12__)
@@ -30,11 +32,13 @@
 
 static constexpr int get_lds_size_int4() { return 64 * 1024; }
 
-// K must be a multiple of this; checked host-side in wvSplitK_int4_g.
+// K must be a multiple of this; checked host-side in wvSplitK_int4_g_impl.
 static constexpr int kInt4KAlign = 16;
 
 // Host-side twin of __HIP__GFX115X__, for the tuple choices the dispatch makes.
-static bool on_gfx115x_int4() {
+// inline, not static: the five N_in units then share one cached answer, as they
+// did when this was a single translation unit.
+inline bool on_gfx115x_int4() {
   static const bool result = [] {
     const auto* dprops = at::cuda::getCurrentDeviceProperties();
     return std::string(dprops->gcnArchName).find("gfx115") != std::string::npos;
@@ -43,7 +47,7 @@ static bool on_gfx115x_int4() {
 }
 
 // Callers check it before on_gfx115x_int4(), which matches gfx1151 too.
-static bool on_gfx1151_int4() {
+inline bool on_gfx1151_int4() {
   static const bool result = [] {
     const auto* dprops = at::cuda::getCurrentDeviceProperties();
     return std::string(dprops->gcnArchName).find("gfx1151") !=
@@ -115,7 +119,7 @@ struct scalar<c10::BFloat16> {
                                          *((bf16x2_t*)(&(V3))), V0, false); \
   }
 
-// DPP-based wave32 reduction for GFX1X (matches skinny_gemms.cu).
+// DPP-based wave32 reduction for GFX1X (matches skinny_gemms.cuh).
 // row_shr within 16-lane rows, then cross-row __shfl_xor.
 // Result accumulates in lane (THRDS - 1).
 #if defined(__HIP__GFX1X__)
@@ -904,14 +908,13 @@ static int mindiv_int4(int N, int div1, int div2) {
 //   If absent, kernel dequants as (nibble - 8) * scale (symmetric uint4b8).
 // group_size: 32, 64, or 128
 
-torch::Tensor wvSplitK_int4_g(const at::Tensor& in_a, const at::Tensor& in_b,
-                              const at::Tensor& in_scale,
-                              const std::optional<at::Tensor>& in_zero_points,
-                              const std::optional<at::Tensor>& in_bias,
-                              const int64_t CuCount, const int64_t group_size) {
+template <int N>
+torch::Tensor wvSplitK_int4_g_impl(VLLM_SKINNY_INT4_SIG) {
   auto M_in = in_a.size(0);
   auto K_in = in_b.size(1);
   auto N_in = in_b.size(0);
+  // Internal tripwire: the API unit derives N from the same in_b.size(0).
+  TORCH_INTERNAL_ASSERT_DEBUG_ONLY(N_in == N);
   auto Bx_in =
       (in_bias.has_value() && in_bias->numel() > 0)
           ? (in_bias->sizes().size() == 2) ? in_bias->size(1) : in_bias->size(0)
@@ -1222,25 +1225,12 @@ torch::Tensor wvSplitK_int4_g(const at::Tensor& in_a, const at::Tensor& in_b,
     }                                                                          \
   }
 
-// Inner dispatch: shared by both symmetric and asymmetric paths
-#define WVSPLIT_INT4G_DISPATCH(_HAS_ZP)                    \
-  {                                                        \
-    int sYT = (M_in + CuCount * 4 - 1) / (CuCount * 4);    \
-    switch (N_in) {                                        \
-      case 1:                                              \
-        WVSPLIT_INT4G_TILE(sYT, 1, _HAS_ZP) break;         \
-      case 2:                                              \
-        WVSPLIT_INT4G_TILE(sYT, 2, _HAS_ZP) break;         \
-      case 3:                                              \
-        WVSPLIT_INT4G_TILE(sYT, 3, _HAS_ZP) break;         \
-      case 4:                                              \
-        WVSPLIT_INT4G_TILE(sYT, 4, _HAS_ZP) break;         \
-      case 5:                                              \
-        WVSPLIT_INT4G_TILE(sYT, 5, _HAS_ZP) break;         \
-      default:                                             \
-        throw std::runtime_error("Unsupported N value: " + \
-                                 std::to_string(N_in));    \
-    }                                                      \
+// Inner dispatch: shared by both symmetric and asymmetric paths. N is the
+// template parameter of this unit, so the tower instantiates one width only.
+#define WVSPLIT_INT4G_DISPATCH(_HAS_ZP)                 \
+  {                                                     \
+    int sYT = (M_in + CuCount * 4 - 1) / (CuCount * 4); \
+    WVSPLIT_INT4G_TILE(sYT, N, _HAS_ZP)                 \
   }
 
   AT_DISPATCH_REDUCED_FLOATING_TYPES(

@@ -638,7 +638,7 @@ def test_mamba_block_size_not_scaled() -> None:
 
     raw_hash = make_request(num_blocks=1).block_hashes[0]
     mamba_hash = make_block_hash_with_group_id(raw_hash, group_id=1)
-    gpu_blk._block_hash = mamba_hash  # type: ignore[attr-defined]
+    gpu_blk.block_hash = mamba_hash
 
     sched._process_store_completion(
         gpu_block_ids=[gpu_blk.block_id],
@@ -682,9 +682,7 @@ def test_multi_group_fa_block_stored_group_idx() -> None:
     for gidx in (0, 1):
         cpu_blk = cpu_pool.get_new_blocks(1)[0]
         gpu_blk = gpu_pool.get_new_blocks(1)[0]
-        gpu_blk._block_hash = make_block_hash_with_group_id(  # type: ignore
-            raw_hash, group_id=gidx
-        )
+        gpu_blk.block_hash = make_block_hash_with_group_id(raw_hash, group_id=gidx)
         sched._process_store_completion(
             gpu_block_ids=[gpu_blk.block_id],
             cpu_block_ids=[cpu_blk.block_id],

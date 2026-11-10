@@ -471,7 +471,7 @@ class ServingTokens(GenerateBaseServing):
         sampling_params: SamplingParams = request.sampling_params
         derender_mode = request.output_mode == "derender"
         text_mode = request.output_mode == "text" or derender_mode
-        tokenizer = self._logprobs_tokenizer(text_mode)
+        tokenizer = self._logprobs_tokenizer(request, text_mode)
         num_logprobs, top_limit = self._logprob_settings(sampling_params, derender_mode)
 
         try:
@@ -693,7 +693,7 @@ class ServingTokens(GenerateBaseServing):
         derender_mode = request.output_mode == "derender"
         assert derender_mode == (processors is not None)
         text_mode = request.output_mode == "text" or derender_mode
-        tokenizer = self._logprobs_tokenizer(text_mode)
+        tokenizer = self._logprobs_tokenizer(request, text_mode)
         num_logprobs, top_limit = self._logprob_settings(sampling_params, derender_mode)
         response_cls = _STREAM_RESPONSE_CLS[request.output_mode]
         role_sent = [False] * sampling_params.n
@@ -902,13 +902,16 @@ class ServingTokens(GenerateBaseServing):
             )
         return sampling_params.logprobs, None
 
-    def _logprobs_tokenizer(self, text_mode: bool) -> TokenizerLike | None:
-        """Tokenizer that resolves logprob tokens, or None for placeholders.
-
-        ``--return-tokens-as-token-ids`` keeps placeholders at every level, as
-        it does on ``/v1/completions``.
-        """
-        if not text_mode or self.return_tokens_as_token_ids:
+    def _logprobs_tokenizer(
+        self, request: GenerateRequest, text_mode: bool
+    ) -> TokenizerLike | None:
+        """Tokenizer that resolves logprob tokens, or None for placeholders."""
+        return_tokens_as_token_ids = self.return_tokens_as_token_ids
+        if request.output_mode == "derender" and request.parse_context is not None:
+            override = request.parse_context.return_tokens_as_token_ids
+            if override is not None:
+                return_tokens_as_token_ids = override
+        if not text_mode or return_tokens_as_token_ids:
             return None
         return self.renderer.tokenizer
 

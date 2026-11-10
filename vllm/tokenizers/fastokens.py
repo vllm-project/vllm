@@ -14,7 +14,7 @@ from importlib.metadata import PackageNotFoundError, version
 
 from packaging.version import Version
 
-_MIN_FASTOKENS_VERSION = "0.2.0"
+_MIN_FASTOKENS_VERSION = "0.3.5"
 
 
 def apply_fastokens_patch() -> None:

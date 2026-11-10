@@ -301,6 +301,9 @@ class DeepSeekV4MultiTokenPredictor(nn.Module):
 
 
 class DeepSeekV4MTP(nn.Module):
+    # The checkpoint has no MTP embedding, so always reuse the target's.
+    has_own_embed_tokens = False
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         self.config = vllm_config.model_config.hf_config

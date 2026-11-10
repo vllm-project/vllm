@@ -5,6 +5,7 @@
 
 mod config;
 mod error;
+mod fingerprint;
 mod grpc;
 mod listener;
 mod lora;
@@ -31,9 +32,11 @@ use axum::extract::ConnectInfo;
 use axum::http::Request;
 pub use config::{
     AccessLogConfig, ApiServerOptions, Config, CoordinatorMode, CorsConfig,
-    DEFAULT_KEEP_ALIVE_TIMEOUT, DEFAULT_LOG_STATS_INTERVAL, DEFAULT_REQUEST_BODY_LIMIT_BYTES,
-    HttpListenerMode, LoraModulePath, OutputLogConfig, OutputLogging, TlsConfig,
+    DEFAULT_KEEP_ALIVE_TIMEOUT, DEFAULT_LOG_STATS_INTERVAL, DEFAULT_MAX_N_SEQUENCES,
+    DEFAULT_REQUEST_BODY_LIMIT_BYTES, HttpListenerMode, LoraModulePath, OutputLogConfig,
+    OutputLogging, TlsConfig,
 };
+pub use fingerprint::FingerprintMode;
 use hyper::body::Incoming;
 use hyper::server::conn::http1;
 use hyper_util::rt::{TokioIo, TokioTimer};
@@ -136,6 +139,9 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
     .await
     .context("failed to connect to engine core")?;
     let server_info = ServerInfoSnapshot::new(config, &client);
+    let system_fingerprint = config
+        .fingerprint_mode
+        .fingerprint(&client.ready_responses(), client.data_parallel_size());
 
     let llm = EngineCoreLlm::new(client)
         .with_log_stats(config.log_stats_interval.filter(|_| !config.disable_log_stats))
@@ -162,6 +168,7 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
         AppState::new(served_model_names, chat)
             .with_model_path(config.model.clone())
             .with_api_server_options(config.api_server_options)
+            .with_system_fingerprint(system_fingerprint)
             .with_server_info(server_info)
             .with_api_keys(config.api_keys.clone())
             .with_cors(config.cors.clone())

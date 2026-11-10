@@ -63,6 +63,7 @@ mod request;
 mod stream;
 
 use std::collections::HashMap;
+use std::num::NonZeroU32;
 
 use tracing::warn;
 use vllm_engine_core_client::protocol::dtype::ModelDtype;
@@ -281,33 +282,42 @@ impl ChatRequestProcessor {
 
     /// Prepare one chat request without submitting it to an engine.
     ///
-    /// The returned text request is already tokenized: the output processor
-    /// is initialized from the final prompt token IDs and its grammar, if any,
-    /// is applied to the request before it is handed to `text_processor` again
-    /// for lowering.
+    /// The returned text request is already tokenized: the output processors
+    /// are initialized from the final prompt token IDs and their grammar, if
+    /// any, is applied to the request before it is handed to `text_processor`
+    /// again for lowering. The prompt is rendered once; each of the `n`
+    /// samples gets its own output processor, since parsing is stateful.
     pub async fn prepare(
         &self,
         mut request: ChatRequest,
+        n: NonZeroU32,
         text_processor: &TextRequestProcessor,
     ) -> Result<PreparedChatRequest> {
         request.validate()?;
         self.map_reasoning_effort(&mut request);
 
-        let mut output_processor = self.backend.new_chat_output_processor(
-            &mut request,
-            NewChatOutputProcessorOptions {
-                tool_call_parser: &self.tool_call_parser,
-                reasoning_parser: &self.reasoning_parser,
-                tool_strict_level: self.tool_strict_level,
-            },
-        )?;
+        let mut output_processors = (0..n.get())
+            .map(|_| {
+                self.backend.new_chat_output_processor(
+                    &mut request,
+                    NewChatOutputProcessorOptions {
+                        tool_call_parser: &self.tool_call_parser,
+                        reasoning_parser: &self.reasoning_parser,
+                        tool_strict_level: self.tool_strict_level,
+                    },
+                )
+            })
+            .collect::<Result<Vec<_>>>()?;
         let (mut text_request, prompt_text) = self.prepare_text_request(request).await?;
 
-        // Initialize the output processor from the final prompt token IDs and apply
-        // the output grammar to the request, if any.
+        // Initialize the output processors from the final prompt token IDs and
+        // apply the output grammar to the request, if any. The processors of
+        // one request build the same grammar, so the first one's is applied.
         let prompt_token_ids = text_processor.tokenize_in_place(&mut text_request)?;
-        output_processor.initialize(prompt_token_ids)?;
-        let grammar = output_processor.build_output_grammar()?;
+        for output_processor in &mut output_processors {
+            output_processor.initialize(prompt_token_ids)?;
+        }
+        let grammar = output_processors[0].build_output_grammar()?;
         // Output grammars are xgrammar structural tags. With another backend the
         // request keeps its own constraint and parsing runs unconstrained.
         match text_processor.structured_outputs_backend() {
@@ -327,7 +337,7 @@ impl ChatRequestProcessor {
 
         Ok(PreparedChatRequest {
             text_request,
-            output_processor,
+            output_processors,
             prompt_text,
         })
     }
@@ -337,8 +347,8 @@ impl ChatRequestProcessor {
 pub struct PreparedChatRequest {
     /// The tokenized text request, with any output grammar applied.
     pub text_request: TextRequest,
-    /// Request-scoped processor for the decoded output.
-    pub output_processor: DynChatOutputProcessor,
+    /// Request-scoped processors for the decoded output, one per sample.
+    pub output_processors: Vec<DynChatOutputProcessor>,
     /// The rendered prompt text, when the request asked for it and the
     /// renderer produced text.
     pub prompt_text: Option<String>,
@@ -466,23 +476,39 @@ impl ChatLlm {
 
     /// Render, tokenize, and submit one chat request.
     pub async fn chat(&self, request: ChatRequest) -> Result<ChatEventStream> {
+        let mut streams = self.chat_n(request, NonZeroU32::MIN).await?;
+        Ok(streams.pop().expect("one event stream per sample"))
+    }
+
+    /// Render and tokenize one chat request once, submit it as `n` parallel
+    /// samples, and return one event stream per sample, in index order.
+    pub async fn chat_n(
+        &self,
+        request: ChatRequest,
+        n: NonZeroU32,
+    ) -> Result<Vec<ChatEventStream>> {
         let PreparedChatRequest {
             text_request,
-            output_processor,
+            output_processors,
             prompt_text,
-        } = self.processor.prepare(request, self.text.request_processor()).await?;
+        } = self.processor.prepare(request, n, self.text.request_processor()).await?;
         let request_id = text_request.request_id.clone();
         let prepared = self.text.request_processor().prepare(text_request)?;
         let sampling = prepared.effective_sampling();
-        let decoded_stream =
-            self.text.generate_prepared(prepared).await?.map_err(Error::from).boxed();
+        let decoded_streams = self.text.generate_prepared_n(prepared, n).await?;
 
-        let structured_stream = output_processor.process(decoded_stream)?;
-
-        Ok(
-            ChatEventStream::new(request_id, sampling, structured_stream)
-                .with_prompt_text(prompt_text),
-        )
+        output_processors
+            .into_iter()
+            .zip(decoded_streams)
+            .map(|(output_processor, decoded_stream)| {
+                let structured_stream =
+                    output_processor.process(decoded_stream.map_err(Error::from).boxed())?;
+                Ok(
+                    ChatEventStream::new(request_id.clone(), sampling, structured_stream)
+                        .with_prompt_text(prompt_text.clone()),
+                )
+            })
+            .collect()
     }
 
     /// Abort in-flight requests by their external (user-supplied) request ids.

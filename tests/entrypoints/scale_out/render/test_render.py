@@ -1184,3 +1184,19 @@ async def test_messages_render_tool_search_result_for_deepseek_v41(
         "<｜User｜><tool_result>get_weather</tool_result>\n\n"
         "<tool_result>notes</tool_result><｜Assistant｜>"
     ) in detokenize.json()["prompt"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("override", ["omitted", None, False, True])
+async def test_render_omits_null_token_id_override(client, override):
+    """Default requests must not send a new field to older generate nodes."""
+    body = {"model": MODEL_NAME, "messages": [{"role": "user", "content": "Hi"}]}
+    if override != "omitted":
+        body["return_tokens_as_token_ids"] = override
+    response = await client.post("/v1/chat/completions/render", json=body)
+    response.raise_for_status()
+    context = response.json()["parse_context"]
+    if override is None or override == "omitted":
+        assert "return_tokens_as_token_ids" not in context
+    else:
+        assert context["return_tokens_as_token_ids"] is override

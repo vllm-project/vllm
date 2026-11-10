@@ -22,10 +22,6 @@ pub(super) fn validate_request_compat(
         );
     }
 
-    if request.n.unwrap_or(1) > 1 {
-        bail_invalid_request!(param = "n", "Only n=1 is supported.");
-    }
-
     if request.top_logprobs.is_some_and(|n| n != 0) && !request.logprobs {
         bail_invalid_request!(
             param = "top_logprobs",
@@ -57,13 +53,6 @@ pub(super) fn validate_request_compat(
     }
 
     if let Some(tools) = request.tools.as_ref() {
-        // Like OpenAI, an empty list is an error rather than "no tools".
-        if tools.is_empty() {
-            bail_invalid_request!(
-                param = "tools",
-                "`tools` must not be an empty array. Either provide at least one tool or omit the field entirely."
-            );
-        }
         validate_function_tools(tools, "tools")?;
     }
 
@@ -98,7 +87,7 @@ pub(super) fn validate_request_compat(
             "spaces_between_special_tokens is not supported."
         );
     }
-    validate_generation_prompt_truncation(request.truncate_prompt_tokens, request.echo)?;
+    validate_generation_prompt_truncation(request.truncate_prompt_tokens)?;
     reject_non_default(
         request.media_io_kwargs.as_ref(),
         "media_io_kwargs",

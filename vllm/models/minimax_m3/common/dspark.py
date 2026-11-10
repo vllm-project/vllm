@@ -327,6 +327,21 @@ class MiniMaxM3DSparkModel(Qwen3DSparkModel):
         hidden_size, eps = self.config.hidden_size, self.config.rms_norm_eps
         self.hidden_norm = _gemma_rms_norm(hidden_size, eps=eps)
         self.norm = _gemma_rms_norm(hidden_size, eps=eps)
+        self._mono_drafter = None
+        if current_platform.is_rocm() and vllm_config.kernel_config.monokernel:
+            from vllm.models.minimax_m3.amd.mono.drafter.dispatch import (
+                DrafterDecode,
+            )
+
+            self._mono_drafter = DrafterDecode(self, vllm_config)
+
+    def __call__(self, *args, **kwargs):
+        # ahead of torch.compile's wrapper: the kernels launch outside the graph
+        if self._mono_drafter is not None:
+            out = self._mono_drafter.maybe_forward(*args, **kwargs)
+            if out is not None:
+                return out
+        return super().__call__(*args, **kwargs)
 
     def _normalize_context_states(self, context_states: torch.Tensor) -> torch.Tensor:
         return self.hidden_norm(context_states)

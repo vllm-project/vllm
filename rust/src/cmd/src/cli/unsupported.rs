@@ -426,15 +426,6 @@ pub struct ServerUnsupportedArgs {
     )]
     pub tokens_only: Option<Unsupported>,
 
-    /// Controls the `system_fingerprint` field on responses: `full`, `hash`,
-    /// `custom`, or `none`.
-    #[arg(long)]
-    pub fingerprint_mode: Option<Unsupported>,
-
-    /// Literal fingerprint string used when `--fingerprint-mode=custom`.
-    #[arg(long)]
-    pub fingerprint_value: Option<Unsupported>,
-
     /// Log level for uvicorn.
     #[arg(long)]
     pub uvicorn_log_level: Option<Unsupported>,
