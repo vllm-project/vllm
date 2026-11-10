@@ -1226,6 +1226,70 @@ def test_aiter_fused_moe_mi350_mxfp4_w4a16_determinism():
     _assert_deterministic(run_mxfp4_moe, n_runs=4)
 
 
+@pytest.mark.skipif(not on_gfx950(), reason="gfx950 ROCm only")
+def test_aiter_mxfp4_w4a16_mxfp8_dispatch_input_matches_bf16():
+    """Above AITER's fused quant + sort cut-over, feeding the experts the
+    MXFP8 rows and scales the naive DP dispatch gathers matches feeding them
+    BF16, within the experts' own rerun noise."""
+    from aiter import dtypes
+    from aiter.ops.quant import per_1x32_mx_quant_hip
+
+    from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
+        AiterMxfp4Experts,
+        AiterQuantType,
+        mxfp4_w4a16_extra_kwargs,
+        rocm_aiter_fused_experts,
+    )
+
+    _assert_aiter_supported()
+    topk = 6
+    cut_over = 8 * 256 // topk
+    case = _make_aiter_mxfp4_moe_case(
+        num_tokens=cut_over + 1,
+        hidden_dim=512,
+        intermediate_dim=1024,
+        num_experts=8,
+        topk=topk,
+        seed=17,
+    )
+    experts = AiterMxfp4Experts(case.moe_config, case.quant_config)
+    assert not experts.quantizes_input_to_mxfp8(cut_over)
+    assert experts.quantizes_input_to_mxfp8(cut_over + 1)
+
+    def run(hidden_states, a1q_scale):
+        return rocm_aiter_fused_experts(
+            hidden_states=hidden_states,
+            w1=case.w1_kernel,
+            w2=case.w2_kernel,
+            topk_weights=case.topk_weights,
+            topk_ids=case.topk_ids,
+            activation=case.moe_config.activation,
+            quant_config=case.quant_config,
+            moe_config=case.moe_config,
+            quant_type=AiterQuantType.BLOCK_1X32,
+            expert_mask=None,
+            a1q_scale=a1q_scale,
+            output_dtype=torch.bfloat16,
+            **mxfp4_w4a16_extra_kwargs(case.quant_config, case.moe_config),
+        )
+
+    a1q, a1q_scale = per_1x32_mx_quant_hip(
+        case.hidden_states,
+        None,
+        quant_dtype=dtypes.fp8,
+        scale_type=dtypes.fp8_e8m0,
+        shuffle=False,
+    )
+    ref = run(case.hidden_states, None)
+    # The atomic stage-2 kernel is not run-to-run deterministic, so bound the
+    # difference by the BF16 path's own rerun spread.
+    noise = max(
+        (run(case.hidden_states, None).float() - ref.float()).abs().max().item()
+        for _ in range(2)
+    )
+    torch.testing.assert_close(run(a1q, a1q_scale), ref, atol=2 * noise, rtol=0)
+
+
 # FP8 group-quant tests ---------------------------------------------------
 
 

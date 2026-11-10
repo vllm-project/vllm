@@ -780,3 +780,36 @@ class AiterMxfp4Experts(AiterExperts):
 
     def _extra_fused_moe_kwargs(self) -> dict:
         return mxfp4_w4a16_extra_kwargs(self.quant_config, self.moe_config)
+
+    def quantizes_input_to_mxfp8(self, num_tokens: int) -> bool:
+        """Whether `apply` on `num_tokens` BF16 rows quantizes them to MXFP8
+        with `per_1x32_mx_quant_hip` (unshuffled scales) before sorting, so
+        that a dispatch may run that quant itself and pass FP8 rows plus
+        their E8M0 scales, which AITER then only sorts."""
+        moe_config = self.moe_config
+        if (
+            not self.quant_config.use_mxfp4_w4a16
+            or moe_config.use_mxfp4_w4a4_dsv4
+            or moe_config.activation == MoEActivation.SITU
+            or moe_config.hidden_dim % 32 != 0
+            # AITER's fused quant + sort, not the per-row kernel, up to here.
+            or num_tokens <= 8 * 256 / moe_config.experts_per_token
+        ):
+            return False
+
+        from aiter import QuantType, dtypes
+        from aiter.fused_moe import resolve_activation_dtype
+        from aiter.ops.flydsl.moe_common import GateMode
+
+        activation_method, _ = _resolve_aiter_activation(moe_config.activation)
+        gate_mode = GateMode(self._extra_fused_moe_kwargs()["gate_mode_override"])
+        return (
+            resolve_activation_dtype(
+                QuantType.per_1x32,
+                dtypes.fp4x2,
+                activation=activation_method,
+                gate_mode=gate_mode,
+                M=num_tokens,
+            )
+            == dtypes.fp8
+        )

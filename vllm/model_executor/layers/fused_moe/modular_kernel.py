@@ -1210,6 +1210,20 @@ class FusedMoEKernelModularImpl:
             and hasattr(prepare_finalize, "defer_globalize")
         ):
             prepare_finalize.defer_globalize = True
+        if current_platform.is_rocm() and envs.VLLM_ROCM_MOE_MXFP8_DISPATCH:
+            from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
+                AiterMxfp4Experts,
+            )
+            from vllm.model_executor.layers.fused_moe.prepare_finalize import (
+                MoEPrepareAndFinalizeNaiveDPEPModular,
+            )
+
+            if isinstance(fused_experts, AiterMxfp4Experts) and isinstance(
+                prepare_finalize, MoEPrepareAndFinalizeNaiveDPEPModular
+            ):
+                prepare_finalize.quantizes_input_to_mxfp8 = (
+                    fused_experts.quantizes_input_to_mxfp8
+                )
         self.shared_experts: SharedExperts | None = None
         moe_parallel_config = fused_experts.moe_config.moe_parallel_config
         self.moe_parallel_config = moe_parallel_config
