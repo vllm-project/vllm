@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests online quantization."""
 
+import importlib
+import inspect
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -33,6 +35,8 @@ from vllm.config.quantization import (
 )
 from vllm.config.vllm import VllmConfig
 from vllm.forward_context import set_forward_context
+from vllm.model_executor.kernels import linear as linear_kernels
+from vllm.model_executor.kernels.linear import LinearKernelOracle
 from vllm.model_executor.kernels.linear.mxfp8.emulation import (
     EmulationMxfp8LinearKernel,
 )
@@ -40,12 +44,17 @@ from vllm.model_executor.kernels.linear.mxfp8.humming import HummingMxfp8LinearK
 from vllm.model_executor.kernels.linear.mxfp8.marlin import (
     MarlinMxfp8LinearKernel,
 )
+from vllm.model_executor.kernels.linear.requantization_source import (
+    FakeFp8LinearKernel,
+    FakeMxFp8LinearKernel,
+)
 from vllm.model_executor.kernels.linear.scaled_mm import (
     MarlinFP8ScaledMMLinearKernel,
 )
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory, RoutedExperts
 from vllm.model_executor.layers.fused_moe.oracle import nvfp4 as nvfp4_oracle
+from vllm.model_executor.layers.fused_moe.oracle.base import RequantizationSourceExperts
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     Mxfp4MoeBackend,
     _backend_activation_key,
@@ -58,6 +67,10 @@ from vllm.model_executor.layers.linear import (
     UnquantizedLinearMethod,
 )
 from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
+from vllm.model_executor.layers.quantization.base_config import (
+    QuantizationConfig,
+    resolve_quant_method,
+)
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
     CompressedTensorsConfig,
     CompressedTensorsLinearMethod,
@@ -102,6 +115,10 @@ from vllm.model_executor.layers.quantization.online.mxfp8 import (
 from vllm.model_executor.layers.quantization.online.nvfp4 import (
     Nvfp4OnlineMoEMethod,
     _quantize_moe_weight_to_nvfp4,
+)
+from vllm.model_executor.layers.quantization.online.requantization import (
+    is_requantization_source,
+    requantization_source_scope,
 )
 from vllm.model_executor.layers.quantization.quark.quark import (
     QuarkConfig,
@@ -3057,8 +3074,6 @@ def test_online_quant_load_format_dummy(
 
 def _required_selector_args(selector):
     """Use sentinels to detect config access, without duplicating signatures."""
-    import inspect
-
     return {
         name: object()
         for name, param in inspect.signature(selector).parameters.items()
@@ -3069,9 +3084,6 @@ def _required_selector_args(selector):
 @pytest.fixture
 def source_construction(monkeypatch, default_vllm_config):
     """Set up single-rank source allocation and observe target-only dispatch."""
-    from vllm.model_executor.layers.quantization.online.requantization import (
-        is_requantization_source,
-    )
 
     def setup(target_path, target_result):
         default_vllm_config.model_config = ModelConfig()
@@ -3122,15 +3134,6 @@ def test_moe_oracles_skip_dispatch_for_requantization_source(
     source_construction,
 ) -> None:
     """Selectors and source construction skip the checkpoint compute backend."""
-    import importlib
-
-    from vllm.model_executor.layers.fused_moe.oracle.base import (
-        RequantizationSourceExperts,
-    )
-    from vllm.model_executor.layers.quantization.online.requantization import (
-        requantization_source_scope,
-    )
-
     module = {"wna16": "int_wna16", "deepseek_v4_mxfp4": "mxfp4"}.get(kind, kind)
     oracle_cls, backend_enum = {
         "fp8": ("Fp8MoEKernelOracle", "Fp8MoeBackend"),
@@ -3167,14 +3170,6 @@ def test_moe_oracles_skip_dispatch_for_requantization_source(
                 RequantizationSourceExperts,
             )
         return
-
-    from vllm.model_executor.layers.quantization.base_config import (
-        QuantizationConfig,
-        resolve_quant_method,
-    )
-    from vllm.model_executor.layers.quantization.online.requantization import (
-        is_requantization_source,
-    )
 
     target_dispatch = source_construction(
         "vllm.model_executor.layers.quantization.online.mxfp4.select_mxfp4_moe_backend",
@@ -3260,11 +3255,6 @@ def test_linear_dispatch_skipped_for_requantization_source(
     source_construction,
 ) -> None:
     """Requantization sources get a placeholder linear kernel, without dispatch."""
-    from vllm.model_executor.kernels import linear as linear_kernels
-    from vllm.model_executor.kernels.linear import LinearKernelOracle
-    from vllm.model_executor.layers.quantization.online.requantization import (
-        requantization_source_scope,
-    )
 
     def fail(*args, **kwargs):
         raise AssertionError("Kernel dispatch must be skipped.")
@@ -3283,18 +3273,6 @@ def test_linear_dispatch_skipped_for_requantization_source(
             select = getattr(linear_kernels, f"init_{kind}_linear_kernel")
             kernel = select(**_required_selector_args(select))
     else:
-        from vllm.model_executor.kernels.linear.requantization_source import (
-            FakeFp8LinearKernel,
-            FakeMxFp8LinearKernel,
-        )
-        from vllm.model_executor.layers.quantization.base_config import (
-            QuantizationConfig,
-            resolve_quant_method,
-        )
-        from vllm.model_executor.layers.quantization.online.requantization import (
-            is_requantization_source,
-        )
-
         target_dispatch = source_construction(
             "vllm.model_executor.layers.quantization.online.fp8.init_fp8_linear_kernel",
             FakeFp8LinearKernel(),
