@@ -33,6 +33,40 @@ from vllm.models.minimax_m3.amd.mono.runner import (  # noqa: E402
     dense_prefix,
     token_rows,
 )
+from vllm.models.minimax_m3.amd.mono.selection import (  # noqa: E402
+    enabled_monokernels,
+)
+
+
+def _selection_config(monokernel: bool = True, **extra):
+    return SimpleNamespace(
+        kernel_config=SimpleNamespace(monokernel=monokernel), additional_config=extra
+    )
+
+
+@pytest.mark.parametrize(
+    "names, want",
+    [
+        (None, {"decode", "drafter"}),
+        (["drafter"], {"drafter"}),
+        ("decode", {"decode"}),
+        (["decode", "drafter"], {"decode", "drafter"}),
+    ],
+)
+def test_enabled_monokernels(names, want):
+    extra = {} if names is None else {"minimax_m3_monokernel": names}
+    assert enabled_monokernels(_selection_config(**extra)) == want
+
+
+def test_enabled_monokernels_is_empty_without_the_flag():
+    cfg = _selection_config(monokernel=False, minimax_m3_monokernel=["drafter"])
+    assert enabled_monokernels(cfg) == frozenset()
+
+
+@pytest.mark.parametrize("names", [[], ["mono"], ["decode", "draft"]])
+def test_enabled_monokernels_rejects_unknown_names(names):
+    with pytest.raises(ValueError, match="minimax_m3_monokernel"):
+        enabled_monokernels(_selection_config(minimax_m3_monokernel=names))
 
 
 def _linear(dtype: torch.dtype):

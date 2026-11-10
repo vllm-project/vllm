@@ -326,11 +326,17 @@ class MiniMaxM3DSparkModel(Qwen3DSparkModel):
         self.norm = _gemma_rms_norm(hidden_size, eps=eps)
         self._mono_drafter = None
         if current_platform.is_rocm() and vllm_config.kernel_config.monokernel:
-            from vllm.models.minimax_m3.amd.mono.drafter.dispatch import (
-                DrafterDecode,
+            from vllm.models.minimax_m3.amd.mono.selection import (
+                DRAFTER,
+                enabled_monokernels,
             )
 
-            self._mono_drafter = DrafterDecode(self, vllm_config)
+            if DRAFTER in enabled_monokernels(vllm_config):
+                from vllm.models.minimax_m3.amd.mono.drafter.dispatch import (
+                    DrafterDecode,
+                )
+
+                self._mono_drafter = DrafterDecode(self, vllm_config)
 
     def __call__(self, *args, **kwargs):
         # ahead of torch.compile's wrapper: the kernels launch outside the graph

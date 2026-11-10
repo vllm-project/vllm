@@ -1887,10 +1887,42 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             self._init_monokernel(vllm_config)
 
     def _init_monokernel(self, vllm_config: VllmConfig) -> None:
-        """Use the whole-layer mono decode if the deployment fits it, else the
-        FFN-only specialized decode. If neither fits, the decode runs stock and
-        only the DSpark drafter kernels (`common/dspark.py`) can run; a
-        deployment that fits none of the three is refused."""
+        """Run the selected MiniMax-M3 monokernels (`mono/selection.py`) that fit:
+        the decode kernels here, the DSpark drafter kernels in `common/dspark.py`.
+        A deployment that fits none of them is refused."""
+        from vllm.models.minimax_m3.amd.mono.selection import (
+            DECODE,
+            DRAFTER,
+            enabled_monokernels,
+        )
+
+        kernels = enabled_monokernels(vllm_config)
+        reasons: list[str] = []
+        if DECODE in kernels:
+            why = self._init_mono_decode(vllm_config)
+            if why is None:
+                return
+            reasons.append(why)
+        if DRAFTER in kernels:
+            from vllm.models.minimax_m3.amd.mono.drafter.dispatch import (
+                config_refusal as drafter_refusal,
+            )
+
+            drafter_why = drafter_refusal(vllm_config)
+            if drafter_why is None:
+                logger.info(
+                    "MiniMax-M3 --monokernel: DSpark drafter kernels only (%s)",
+                    "; ".join(reasons) or "decode kernels not selected",
+                )
+                return
+            reasons.append(
+                f"MiniMax-M3 DSpark drafter kernels unsupported: {drafter_why}"
+            )
+        raise ValueError("--monokernel: " + "; ".join(reasons))
+
+    def _init_mono_decode(self, vllm_config: VllmConfig) -> str | None:
+        """Set up the whole-layer mono decode if the deployment fits it, else the
+        FFN-only specialized decode. Returns why neither fits, or None."""
         why: str | None
         try:
             from vllm.models.minimax_m3.amd.mono.dispatch import (
@@ -1904,30 +1936,17 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             if why is None:
                 logger.info("MiniMax-M3 --monokernel: whole-layer mono decode")
                 self._mono = MonoDecode(self, vllm_config)
-                return
+                return None
         try:
             self.specialized_decode_config = specialized_decode_config(vllm_config)
         except ValueError as err:
-            from vllm.models.minimax_m3.amd.mono.drafter.dispatch import (
-                config_refusal as drafter_refusal,
-            )
-
-            reasons = f"MiniMax-M3 whole-layer mono decode unsupported: {why}; {err}"
-            drafter_why = drafter_refusal(vllm_config)
-            if drafter_why is not None:
-                raise ValueError(
-                    f"--monokernel: {reasons}; MiniMax-M3 DSpark drafter kernels "
-                    f"unsupported: {drafter_why}"
-                ) from None
-            logger.info(
-                "MiniMax-M3 --monokernel: DSpark drafter kernels only (%s)", reasons
-            )
-            return
+            return f"MiniMax-M3 whole-layer mono decode unsupported: {why}; {err}"
         logger.info(
             "MiniMax-M3 --monokernel: FFN-only specialized decode (whole-layer "
             "mono decode unsupported: %s)",
             why,
         )
+        return None
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
