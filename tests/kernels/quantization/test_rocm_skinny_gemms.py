@@ -460,7 +460,6 @@ def test_rocm_swmmac_gemm_kernel(n, k, m, bias_mode, dtype, seed):
     torch.testing.assert_close(out, ref_out, atol=2e-2, rtol=2e-2)
 
 
-@pytest.mark.parametrize("xnorm", [False, True])
 @pytest.mark.parametrize("n,k,m", NKM_FACTORS_WVSPLITK_FP8)
 @pytest.mark.parametrize(
     "dtype,padded_a,padded_b,biased,xnorm",

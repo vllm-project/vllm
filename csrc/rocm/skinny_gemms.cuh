@@ -962,7 +962,7 @@ __global__ void __launch_bounds__(WV_PER_GROUP* THREADS_PER_WAVE)
     swmmacGemmRegular(const int, const int, const int, const int, const int,
                       const scalar_t*, const scalar_t*, const scalar_t*,
                       scalar_t*) {
-  UNREACHABLE_CODE
+  UNREACHABLE_CODE;
 }
 
 template <typename scalar_t, int N, bool HAS_BIAS, int SPLIT_K, int LOAD_GROUP,
@@ -971,7 +971,9 @@ template <typename scalar_t, int N, bool HAS_BIAS, int SPLIT_K, int LOAD_GROUP,
 __global__ void __launch_bounds__(WV_PER_GROUP* THREADS_PER_WAVE)
     swmmacGemmSplitK(const int, const int, const int, const int, const int,
                      const scalar_t*, const scalar_t*, const scalar_t*,
-                     scalar_t*){UNREACHABLE_CODE}
+                     scalar_t*) {
+  UNREACHABLE_CODE;
+}
 
 #endif
 
