@@ -15,7 +15,11 @@ from vllm.v1.core.kv_cache_coordinator import (
 )
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import KVCacheBlock, KVCacheBlockCopy, trim_null_head
-from vllm.v1.core.single_type_kv_cache_manager import MambaManager
+from vllm.v1.core.single_type_kv_cache_manager import (
+    FullAttentionManager,
+    MambaManager,
+    SlidingWindowManager,
+)
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     CrossAttentionSpec,
@@ -197,6 +201,14 @@ class KVCacheManager:
                     manager.shared_prefix_checkpoint = True
         self.num_kv_cache_groups = len(kv_cache_config.kv_cache_groups)
         self.block_pool = self.coordinator.block_pool
+        # Full and sliding-window groups let a running request's decode step
+        # skip the coordinator when no group frees, allocates or caches a block.
+        self.decode_fast_path = enable_caching and all(
+            type(manager) in (FullAttentionManager, SlidingWindowManager)
+            and manager.kv_cache_spec.prefix_cacheable
+            and manager.block_size == self.block_pool.hash_block_size
+            for manager in self.coordinator.single_type_managers
+        )
         self.retained_hit_group_ids = tuple(
             manager.kv_cache_group_id
             for manager in self.coordinator.single_type_managers
@@ -511,6 +523,20 @@ class KVCacheManager:
                 "computed tokens to adopt"
             )
 
+        if (
+            self.decode_fast_path
+            and new_computed_blocks is None
+            and not num_new_computed_tokens
+            and not num_external_computed_tokens
+            and not num_encoder_tokens
+            and not full_sequence_must_fit
+            and not reserved_blocks
+            and not delay_cache_blocks
+            and request.status == RequestStatus.RUNNING
+            and self._is_decode_noop(request, num_new_tokens, num_lookahead_tokens)
+        ):
+            return self.empty_kv_cache_blocks
+
         if new_computed_blocks is not None:
             new_computed_block_list = new_computed_blocks.blocks
             if self.retained_hit_group_ids:
@@ -572,29 +598,6 @@ class KVCacheManager:
         num_tokens_need_slot = min(
             num_tokens_main_model + num_lookahead_tokens, self.max_model_len
         )
-        num_processed_tokens = max(
-            0, total_computed_tokens - request.num_in_flight_tokens
-        )
-
-        if (
-            request.status == RequestStatus.RUNNING
-            and new_computed_blocks is None
-            and num_new_computed_tokens == 0
-            and num_external_computed_tokens == 0
-            and num_encoder_tokens == 0
-            and reserved_blocks == 0
-            and not delay_cache_blocks
-            and not full_sequence_must_fit
-            and not self.coordinator.has_running_step_work(
-                request,
-                num_tokens_need_slot,
-                num_processed_tokens,
-                min(num_tokens_main_model, request.num_tokens),
-            )
-        ):
-            # Most decode steps stay inside the request's blocks: none of the
-            # passes below would change state.
-            return self.empty_kv_cache_blocks
 
         # Free the blocks that are skipped during the attention computation
         # (e.g., tokens outside the sliding window).
@@ -607,7 +610,7 @@ class KVCacheManager:
         # tokens can roll it back.
         self.coordinator.remove_skipped_blocks(
             request.request_id,
-            num_processed_tokens,
+            max(0, total_computed_tokens - request.num_in_flight_tokens),
             num_prompt_tokens=request.num_prompt_tokens,
         )
 
@@ -669,6 +672,51 @@ class KVCacheManager:
         self.coordinator.cache_blocks(request, num_tokens_to_cache)
 
         return self.create_kv_cache_blocks(new_blocks)
+
+    def _is_decode_noop(
+        self, request: Request, num_new_tokens: int, num_lookahead_tokens: int
+    ) -> bool:
+        """Whether `allocate_slots` would free, allocate and cache nothing
+        for this running request in any group (full / sliding window only)."""
+        request_id = request.request_id
+        num_computed_tokens = min(request.num_computed_tokens, self.max_model_len)
+        num_tokens_need_slot = min(
+            num_computed_tokens + num_new_tokens + num_lookahead_tokens,
+            self.max_model_len,
+        )
+        num_tokens_to_cache = min(
+            num_computed_tokens + num_new_tokens, request.num_tokens
+        )
+        num_hashed_tokens = len(request.block_hashes) * self.block_pool.hash_block_size
+        num_processed_tokens = max(
+            0, num_computed_tokens - request.num_in_flight_tokens
+        )
+        coordinator = self.coordinator
+        for group_id, manager in enumerate(coordinator.single_type_managers):
+            num_cached_blocks = manager.num_cached_block.get(request_id)
+            if num_cached_blocks is None or request_id in manager._partial_hit_reqs:
+                return False
+            blocks = manager.req_to_blocks[request_id]
+            block_size = manager.block_size
+            if num_tokens_need_slot > len(blocks) * block_size:
+                return False
+            num_cacheable_tokens = coordinator.get_num_cacheable_tokens(
+                num_tokens_to_cache, group_id
+            )
+            if (
+                min(num_cacheable_tokens, num_hashed_tokens) // block_size
+                > num_cached_blocks
+            ):
+                return False
+            num_skipped_blocks = min(
+                manager.get_num_skipped_tokens(num_processed_tokens) // block_size,
+                len(blocks),
+            )
+            if num_skipped_blocks and blocks[num_skipped_blocks - 1] is not (
+                manager._null_block
+            ):
+                return False
+        return True
 
     def free(self, request: Request) -> None:
         """Free the blocks allocated for the request.

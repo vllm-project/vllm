@@ -1058,10 +1058,13 @@ def _running_step_layout(name: str, block_size: int) -> list[KVCacheSpec]:
     swa = SlidingWindowSpec(**kw(), sliding_window=2 * block_size - 1)
     return {
         "full": [FullAttentionSpec(**kw())],
+        "full_swa": [FullAttentionSpec(**kw()), swa],
         # Cache blocks of 2 hash blocks register a partial tail.
         "full_coarse": [FullAttentionSpec(**kw(2 * block_size)), swa],
         "swa": [swa],
         "swa_mtp": [replace(swa, extra_retained_tokens=3)],
+        # RSWAManager is a FullAttentionManager subclass with gap eviction.
+        "rswa": [RSWASpec(**kw(), rswa_window=2 * block_size)],
         "chunked_local": [
             ChunkedLocalAttentionSpec(**kw(), attention_chunk_size=2 * block_size)
         ],
@@ -1080,11 +1083,25 @@ def _group_state(manager: KVCacheManager, request_id: str) -> list:
             m.num_cached_block.get(request_id),
         )
         for m in manager.coordinator.single_type_managers
-    ] + [manager.block_pool.get_num_free_blocks()]
+    ] + [
+        manager.block_pool.get_num_free_blocks(),
+        [(block.ref_cnt, block.block_hash) for block in manager.block_pool.blocks],
+        manager.block_pool.cached_block_hashes_by_block,
+    ]
 
 
 @pytest.mark.parametrize(
-    "layout", ["full", "full_coarse", "swa", "swa_mtp", "chunked_local", "hybrid"]
+    "layout",
+    [
+        "full",
+        "full_swa",
+        "full_coarse",
+        "swa",
+        "swa_mtp",
+        "rswa",
+        "chunked_local",
+        "hybrid",
+    ],
 )
 @pytest.mark.parametrize(
     "num_spec_tokens,async_scheduling,enable_caching,num_hash_lookahead_tokens",
@@ -1117,6 +1134,8 @@ def test_skipped_running_steps_change_no_state(
         )
 
     manager, reference = new_manager(), new_manager()
+    eligible = enable_caching and layout in ("full", "full_swa", "swa", "swa_mtp")
+    assert manager.decode_fast_path == eligible
     sampling_params = SamplingParams(max_tokens=max_model_len)
     sampling_params.update_from_generation_config({}, eos_token_id=100)
     request = Request(
@@ -1136,9 +1155,14 @@ def test_skipped_running_steps_change_no_state(
 
     rng = random.Random(0)
     in_flight = 0
+    num_noop_steps = 0
     while request.num_computed_tokens + 1 + num_spec_tokens < max_model_len:
         num_new_tokens = 1 + num_spec_tokens
         request.num_in_flight_tokens = in_flight
+        if eligible:
+            num_noop_steps += manager._is_decode_noop(
+                request, num_new_tokens, num_spec_tokens
+            )
         actual = manager.allocate_slots(
             request, num_new_tokens, num_lookahead_tokens=num_spec_tokens
         )
@@ -1161,14 +1185,5 @@ def test_skipped_running_steps_change_no_state(
         # With async scheduling one step stays in flight while the next one
         # is scheduled.
         in_flight = num_new_tokens if async_scheduling else 0
-
-
-def test_running_step_fast_path_is_not_inherited():
-    """A subclass may change what a running step does, so it opts in itself."""
-
-    class DerivedManager(SlidingWindowManager):
-        pass
-
-    assert SlidingWindowManager.running_step_uses_base_conditions
-    assert not DerivedManager.running_step_uses_base_conditions
-    assert not RSWAManager.running_step_uses_base_conditions
+    if eligible:
+        assert num_noop_steps > 0

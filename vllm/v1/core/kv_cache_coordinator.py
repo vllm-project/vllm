@@ -180,6 +180,10 @@ class KVCacheCoordinator(ABC):
             )
             for i, kv_cache_group in enumerate(self.kv_cache_config.kv_cache_groups)
         )
+        self.is_cross_attention = tuple(
+            isinstance(manager, CrossAttentionManager)
+            for manager in self.single_type_managers
+        )
         # Match Mamba checkpoints to Eagle's attention replay boundary.
         if use_eagle:
             for manager in self.single_type_managers:
@@ -243,7 +247,7 @@ class KVCacheCoordinator(ABC):
         if self.retention_interval != 0:
             prefill_end = 0
         for i, manager in enumerate(self.single_type_managers):
-            if isinstance(manager, CrossAttentionManager):
+            if self.is_cross_attention[i]:
                 # For cross-attention, we issue a single static allocation
                 # of blocks based on the number of encoder input tokens.
                 num_blocks_to_allocate += manager.get_num_blocks_to_allocate(
@@ -345,12 +349,12 @@ class KVCacheCoordinator(ABC):
         return tuple(
             manager.allocate_new_blocks(
                 request_id,
-                num_encoder_tokens
-                if isinstance(manager, CrossAttentionManager)
-                else num_tokens,
+                num_encoder_tokens if is_cross_attention else num_tokens,
                 num_tokens_main_model,
             )
-            for manager in self.single_type_managers
+            for manager, is_cross_attention in zip(
+                self.single_type_managers, self.is_cross_attention
+            )
         )
 
     def get_num_cacheable_tokens(
@@ -459,27 +463,6 @@ class KVCacheCoordinator(ABC):
             manager.remove_skipped_blocks(
                 request_id, processed_computed_tokens, num_prompt_tokens
             )
-
-    def has_running_step_work(
-        self,
-        request: Request,
-        num_tokens: int,
-        processed_computed_tokens: int,
-        num_tokens_to_cache: int,
-    ) -> bool:
-        """Whether any group has work in a running request's step (see
-        ``SingleTypeKVCacheManager.has_running_step_work``)."""
-        for group_id, manager in enumerate(self.single_type_managers):
-            num_cacheable_tokens = (
-                self.get_num_cacheable_tokens(num_tokens_to_cache, group_id)
-                if manager.enable_caching
-                else 0
-            )
-            if manager.has_running_step_work(
-                request, num_tokens, processed_computed_tokens, num_cacheable_tokens
-            ):
-                return True
-        return False
 
     def get_blocks(self, request_id: str) -> tuple[list[KVCacheBlock], ...]:
         """Get the blocks for the request."""
