@@ -7,20 +7,10 @@ logger = init_logger(__name__)
 
 
 try:
-    from vllm_jax.platforms import (
-        TpuPlatform as TpuInferencePlatform,
-    )
-
-    TpuPlatform = TpuInferencePlatform  # type: ignore
-    USE_TPU_INFERENCE = True
+    from vllm_jax.platforms import TpuPlatform  # noqa: F401
 except ImportError:
     try:
-        from tpu_inference.platforms import (
-            TpuPlatform as TpuInferencePlatform,
-        )
-
-        TpuPlatform = TpuInferencePlatform  # type: ignore
-        USE_TPU_INFERENCE = True
+        from tpu_inference.platforms import TpuPlatform  # noqa: F401
     except ImportError:
         logger.error(
             "vllm_jax not found, please install vllm-jax-core to run vLLM on TPU"

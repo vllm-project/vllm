@@ -172,7 +172,7 @@ class UsageMessage:
         self._report_usage_once(model_architecture, usage_context, extra_kvs)
         self._report_continuous_usage()
 
-    def _report_tpu_inference_usage(self) -> bool:
+    def _report_vllm_jax_usage(self) -> bool:
         try:
             try:
                 from vllm_jax import tpu_info, utils
@@ -213,7 +213,7 @@ class UsageMessage:
             self.gpu_type = torch.xpu.get_device_name(0)
             self.gpu_memory_per_device = torch.xpu.get_device_properties(0).total_memory
         if current_platform.is_tpu():  # noqa: SIM102
-            if not self._report_tpu_inference_usage():
+            if not self._report_vllm_jax_usage():
                 logger.exception("Failed to collect TPU information")
         self.provider = _detect_cloud_provider()
         self.architecture = platform.machine()
