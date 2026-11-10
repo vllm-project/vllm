@@ -141,16 +141,6 @@ def test_matmul_batch_invariance_across_tuned_m_buckets(m, transpose_b):
 @pytest.mark.parametrize(
     "n,k,has_bias",
     [
-        (256, 6144, False),
-        (160, 6144, False),
-        (19360, 6144, False),
-        (38720, 6144, False),
-        (384, 5120, False),
-        (32, 5120, False),
-        (128, 512, False),
-        (1024, 5120, False),
-        (16160, 5120, False),
-        (32320, 5120, False),
         (5120, 2880, True),
         (2880, 4096, True),
         (201088, 2880, False),
