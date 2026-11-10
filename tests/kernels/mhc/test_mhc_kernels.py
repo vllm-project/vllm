@@ -572,6 +572,7 @@ def test_deepseek_v41_decoder_mixes_match_torch(
     decoder.hc_post_alpha = 2.0
     decoder.use_sequence_parallel = False
     decoder.fuse_mhc_all_reduce = False
+    decoder.hc_attn_boundary_weight = decoder.hc_ffn_boundary_weight = None
     decoder.mhc_stream = None
     if mhc_mode != "disabled":
         from vllm.utils.deep_gemm import is_deep_gemm_supported
@@ -673,6 +674,7 @@ def test_deepseek_v41_decoder_mixes_match_torch(
         capture_aux=False,
         stream=None,
         reduce_results=False,
+        boundary_weight=None,
         **kw,
     ):
         residual = mhc_post_torch(x, residual, post_mix, res_mix)
@@ -715,6 +717,7 @@ def test_deepseek_v41_capture_previous_aux(entry, monkeypatch, default_vllm_conf
     decoder.hc_post_alpha = 2.0
     decoder.use_sequence_parallel = False
     decoder.fuse_mhc_all_reduce = False
+    decoder.hc_attn_boundary_weight = decoder.hc_ffn_boundary_weight = None
     decoder.mhc_stream = None
     decoder.engram = None
     from vllm.model_executor.layers.layernorm import RMSNorm
