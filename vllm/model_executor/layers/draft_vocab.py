@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
@@ -132,6 +133,11 @@ class _Rows(ReplicatedLinear):
     weight: nn.Parameter
 
     def __init__(self, weight: torch.Tensor, quantization: str | None):
+        num_rows = weight.shape[0]
+        # Weight-only kernels can require aligned output rows. The token map
+        # and dynamic candidates need not be aligned, e.g. after adding EOS.
+        if quantization is not None and (padding := -num_rows % 8):
+            weight = F.pad(weight, (0, 0, 0, padding))
         with torch.device(weight.device):
             super().__init__(
                 weight.shape[1],
@@ -141,6 +147,7 @@ class _Rows(ReplicatedLinear):
                 return_bias=False,
                 disable_tp=True,
             )
+        self.num_rows = num_rows
         self.kernel: FP8ScaledMMLinearKernel | NvFp4LinearKernel | None = None
         if quantization is None:
             self.weight_loader(self.weight, weight)
@@ -182,7 +189,7 @@ class _Rows(ReplicatedLinear):
     def forward(self, x: torch.Tensor) -> torch.Tensor:  # type: ignore[override]
         if self.kernel is None:
             return self.quant_method.apply(self, x)
-        return self.kernel.apply_weights(self, x)
+        return self.kernel.apply_weights(self, x)[..., : self.num_rows]
 
 
 # The two kernels below compute `x[n] @ weight[ids[n, j]]` for the dynamic
