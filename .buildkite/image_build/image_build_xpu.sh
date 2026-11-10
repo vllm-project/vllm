@@ -29,19 +29,19 @@ if [[ "$kernel_nightly" == "1" ]]; then
     curl --fail --show-error --silent --location --retry 3 \
       https://astral.sh/uv/0.11.1/install.sh | sh
   fi
-  kernel_dir="$(mktemp -d)"
+  kernel_tmp_dir="$(mktemp -d)"
   cleanup_kernel_nightly() {
     status=$?
-    if [[ -f "$kernel_dir/xpu.txt" ]]; then
-      cp "$kernel_dir/xpu.txt" requirements/xpu.txt
+    if [[ -f "$kernel_tmp_dir/xpu.txt" ]]; then
+      cp "$kernel_tmp_dir/xpu.txt" requirements/xpu.txt
     fi
-    rm -f "$kernel_dir/report.json" "$kernel_dir/selection.txt" "$kernel_dir/xpu.txt"
-    rmdir "$kernel_dir"
+    rm -f "$kernel_tmp_dir/report.json" "$kernel_tmp_dir/selection.txt" "$kernel_tmp_dir/xpu.txt"
+    rmdir "$kernel_tmp_dir"
     return "$status"
   }
   trap cleanup_kernel_nightly EXIT
   uv run --isolated --no-project --python 3.12 --with pip --with packaging \
-    python - "$kernel_dir" "${VLLM_XPU_KERNEL_VERSION:-}" <<'PY'
+    python - "$kernel_tmp_dir" "${VLLM_XPU_KERNEL_VERSION:-}" <<'PY'
 import json
 import re
 import subprocess
@@ -62,6 +62,7 @@ if requested:
 subprocess.run(
     [sys.executable, "-m", "pip", "--isolated", "install", "--dry-run",
      "--ignore-installed", "--pre", "--no-deps", "--only-binary=:all:",
+     "--retries", "10", "--timeout", "120",
      "--index-url",
      "https://vllm-project.github.io/vllm-xpu-kernels/whl/nightly/",
      "--report", str(directory / "report.json"), requirement],
@@ -81,20 +82,16 @@ if (name != "vllm-xpu-kernels" or not version.is_devrelease
         or urlsplit(url).scheme != "https"
         or not re.fullmatch(r"[0-9a-f]{64}", sha256)):
     sys.exit("Invalid kernel nightly wheel metadata")
-commit = re.search(r"(?:^|\.)g([0-9a-f]+)(?:\.|$)", version.local or "")
-if not commit:
-    sys.exit("Kernel nightly version is missing its commit")
 (directory / "selection.txt").write_text(
-    "\n".join([wheel, str(version), url, sha256, commit[1]]) + "\n"
+    "\n".join([wheel, str(version), url, sha256]) + "\n"
 )
 PY
-  mapfile -t selection < "$kernel_dir/selection.txt"
+  mapfile -t selection < "$kernel_tmp_dir/selection.txt"
   wheel_name="${selection[0]}"
   kernel_version="${selection[1]}"
   wheel_url="${selection[2]}"
   wheel_sha256="${selection[3]}"
-  kernel_sha="${selection[4]}"
-  IMAGE="$REGISTRY/$REPO:${BUILDKITE_COMMIT}-kernel-${kernel_sha}-${BUILDKITE_JOB_ID}-xpu"
+  IMAGE="$REGISTRY/$REPO:${BUILDKITE_COMMIT}-kernel-${wheel_sha256:0:12}-${BUILDKITE_JOB_ID}-xpu"
   mkdir -p build/xpu-kernel-wheel
   info_file="build/xpu-kernel-wheel/kernel-wheel-info.txt"
   printf 'wheel=%s\nversion=%s\nurl=%s\nsha256=%s\nimage=%s\n' \
@@ -107,7 +104,7 @@ PY
       | buildkite-agent annotate --style info --context "kernel-nightly-${BUILDKITE_JOB_ID}"
   }
   annotate_kernel_wheel "selected; image not yet published"
-  cp requirements/xpu.txt "$kernel_dir/xpu.txt"
+  cp requirements/xpu.txt "$kernel_tmp_dir/xpu.txt"
   if [[ "$(grep -Ec '^vllm[-_]xpu[-_]kernels==' requirements/xpu.txt)" != "1" ]]; then
     echo "Expected exactly one vllm-xpu-kernels pin in requirements/xpu.txt" >&2
     exit 1
