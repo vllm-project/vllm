@@ -19,6 +19,8 @@
 import os
 from collections.abc import Callable, Iterable
 from contextlib import contextmanager
+from copy import deepcopy
+from dataclasses import replace
 from functools import cached_property
 from itertools import chain
 from operator import attrgetter
@@ -31,11 +33,13 @@ from packaging.version import Version
 from torch import nn
 from transformers import AutoModel, PreTrainedConfig
 from transformers.conversion_mapping import (
+    WeightConverter,
     WeightRenaming,
     WeightTransform,
     get_checkpoint_conversion_mapping,
     get_model_conversion_mapping,
 )
+from transformers.core_model_loading import MergeModulelist
 
 from vllm.compilation.decorators import DynamicArgDims, support_torch_compile
 from vllm.config.utils import getattr_iter
@@ -119,6 +123,7 @@ class Base(
     EagleModelMixin,
 ):
     hf_to_vllm_mapper: WeightsMapper
+    weight_converters: list[WeightConverter]
     supports_aux_hidden_states_over_pp = True
 
     def __init__(self, *, vllm_config: "VllmConfig", prefix: str = ""):
@@ -324,18 +329,23 @@ class Base(
         This handles:
 
         - Transformers weight renaming from `WeightRenaming`
+        - Transformers weight conversion from `WeightConverter`, kept separately in
+          `weight_converters` and applied in `load_weights`
         - Checkpoints saved with a base model prefix that is not `model`
         - Checkpoints saved with no base model prefix
         - Any quantization config specific mappings
         """
         orig_to_new_renaming: list[WeightRenaming] = []
         orig_to_new_regex: dict[re.Pattern, str | None] = {}
+        self.weight_converters = []
 
         for mapping in self._weight_conversions():
             # Handle weights which have been renamed in Transformers
             if isinstance(mapping, WeightRenaming):
                 orig_to_new_renaming.append(mapping)
-            # TODO: Handle WeightConverter to enable layer merging
+            # Handle weights which have been split or merged in Transformers
+            elif isinstance(mapping, WeightConverter):
+                self.weight_converters.append(mapping)
 
         # Handle unexpected weights which should be ignored
         if self.model._keys_to_ignore_on_load_unexpected is not None:
@@ -854,7 +864,67 @@ class Base(
             ignore_unexpected_prefixes=self.ignore_unexpected_prefixes,
             ignore_unexpected_suffixes=self.ignore_unexpected_suffixes,
         )
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        if not self.weight_converters:
+            return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        # As in Transformers, the converters act on the renamed checkpoint names. Their
+        # outputs are named like the Transformers module, so they still need stacking
+        mapper = self.hf_to_vllm_mapper
+        rename_mapper = replace(
+            mapper, orig_to_new_stacked={}, orig_to_new_prefix={}, orig_to_new_suffix={}
+        )
+        stack_mapper = WeightsMapper(
+            orig_to_new_stacked=mapper.orig_to_new_stacked,
+            orig_to_new_prefix=mapper.orig_to_new_prefix,
+            orig_to_new_suffix=mapper.orig_to_new_suffix,
+        )
+        weights = self._convert_weights(rename_mapper.apply(weights), stack_mapper)
+        return loader.load_weights(weights, mapper=stack_mapper)
+
+    def _convert_weights(
+        self, weights: Iterable[tuple[str, torch.Tensor]], stack_mapper: WeightsMapper
+    ) -> Iterable[tuple[str, torch.Tensor]]:
+        """Apply the Transformers `WeightConverter`s to renamed checkpoint weights.
+
+        A converter is only applied if its output is a parameter of this model. Others,
+        e.g. ones that merge experts which vLLM loads into its own MoE layers, are
+        skipped and their weights passed through unchanged, as before."""
+        params = dict(self.named_parameters())
+        pattern_to_converter = {
+            pattern: converter
+            for converter in self.weight_converters
+            for pattern in converter.source_patterns
+        }
+        # Converters waiting for more of their source tensors, by their first target
+        pending: dict[str, WeightConverter] = {}
+
+        def convert(target: str, converter: WeightConverter):
+            converted = converter.convert(target, model=self, config=self.config)
+            for name, tensor in converted.items():
+                yield name, tensor[0] if isinstance(tensor, list) else tensor
+
+        for name, tensor in weights:
+            # At most one converter applies to each weight, as in Transformers
+            for converter in self.weight_converters:
+                target, source_pattern = converter.rename_source_key(name)
+                if source_pattern is not None:
+                    break
+            if source_pattern is None or stack_mapper.map_name(target) not in params:
+                yield name, tensor
+                continue
+            if target not in pending:
+                pending[target] = deepcopy(pattern_to_converter[source_pattern])
+            converter = pending[target]
+            converter.add_tensor(target, name, source_pattern, tensor)
+            # Convert as soon as every source is collected, unless sources are lists
+            # of unknown length, e.g. experts to merge
+            collected = converter.collected_tensors
+            if all(pattern in collected for pattern in converter.source_patterns) and (
+                not any(isinstance(op, MergeModulelist) for op in converter.operations)
+            ):
+                yield from convert(target, pending.pop(target))
+
+        for target, converter in pending.items():
+            yield from convert(target, converter)
 
     @staticmethod
     def check_version(min_version: str, feature: str):
