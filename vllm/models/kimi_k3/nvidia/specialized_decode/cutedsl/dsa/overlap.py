@@ -47,6 +47,7 @@ from ..mla.query import Q_SENT, tiled_from
 # wait: MlaQuery (q_c, publish) -> wq_b -> ... -> QueryWait -> core (one stream).
 # front: as fork, with a fused index front for QueryNorm -> wq_b -> DsaIndex: the
 #   cluster IndexFront (front.py) up to 40 rows, then IndexFrontMma (front_mma.py).
+#   Under DCP the fork may follow the index front (QUERY_AFTER_FRONT).
 # late (TP, fused indexer): QueryNorm -> wq_b -> ... -> IndexerSelect -> MlaQuery ->
 #   core on one stream: MlaQuery reads none of the indexer's outputs, so it starts
 #   with the select (PDL) and waits for it only at its end (MlaQuery(late=True)).
@@ -95,6 +96,22 @@ FRONT = ("front", "late_front")  # IndexFront
 
 # The modes of the split query (TP1): QueryNorm ahead of it, or forked beside it.
 WIDE_MODES = ("serial", "fork")
+
+# DCP "front": MlaQuery forked after IndexFront instead of before it, launched
+# without PDL, per DCP size ("rows:1"; other sizes and rows fork before IndexFront).
+# Forked before, MlaQuery runs beside IndexFront and then beside the persistent
+# scorer that follows it; forked after IndexFront without PDL, it starts once
+# IndexFront completes, beside the scorer only (with PDL it would start early
+# again). Only the launch order changes, not what any kernel computes. Chosen by an
+# end-to-end A/B at c = 1 (TP16 + DCP16, DSpark k = 7), together with the local
+# top-k cluster policy (indexer.LOCAL_CLUSTER); other DCP sizes were not measured.
+QUERY_AFTER_FRONT = {16: "6-8:1"}
+
+
+def query_after_front(batch, dcp):
+    """Whether the "front" mode's MlaQuery of `batch` rows under DCP `dcp`
+    forks after IndexFront (QUERY_AFTER_FRONT)."""
+    return batch_table(QUERY_AFTER_FRONT.get(dcp, "")).get(batch, 0) == 1
 
 
 def overlap_for(batch, policy=None, dcp=False, wide=False, split=False):

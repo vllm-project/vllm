@@ -268,3 +268,220 @@ def test_sparse_push_into_value_mailbox():
     assert torch.all(rearmed == 0xFF)
     assert torch.equal(pushed_q[:batch, HEADS:], query[:batch, HEADS:])
     assert torch.equal(pushed_q[batch:], query[batch:])
+
+
+# DCP16 (TP16 + DCP16): 6 owner heads of the 96 gathered heads, 16 sources.
+DCP16_OWNERS, DCP16 = 6, 16
+LAYOUT_COUNTS = {
+    "dcp16": [128, 117, 139, 104, 145, 122, 131, 110],
+    "full": [192] * 8,
+    "chunks": [520, 300, 0, 1, 257, 128, 2048, 64],
+}
+
+
+def test_sparse_layout_policy():
+    """Two head tiles per CTA and the bulk exchange only for the pushing DCP16
+    decode at 7-8 rows (one wave of clusters instead of two); every other shape
+    keeps the one-tile kernel."""
+    from vllm.models.kimi_k3.nvidia.specialized_decode.cutedsl.dsa.attn_sparse import (
+        sparse_layout,
+    )
+
+    for batch in range(1, 9):
+        wide = (2, True) if batch >= 7 else (1, False)
+        assert sparse_layout(batch, HEADS, (DCP16_OWNERS, DCP16)) == wide
+        assert sparse_layout(batch, HEADS, (12, 8)) == (1, False)
+        assert sparse_layout(batch, HEADS, None) == (1, False)
+    assert sparse_layout(8, 80, (5, DCP16)) == (1, True)  # 80 % 32: one tile
+
+
+def _pushed_mailboxes(counts, tiles, bulk, seed):
+    """The DCP16 pushing decode of `counts` rows with `tiles` / `bulk`: every
+    owner's partial and LSE mailbox and the q mailbox after it."""
+    from types import SimpleNamespace
+
+    from vllm.models.kimi_k3.nvidia.specialized_decode.cutedsl.dsa.attn_sparse import (
+        compile_sparse,
+        run_sparse,
+    )
+    from vllm.models.kimi_k3.nvidia.specialized_decode.cutedsl.mla.dcp import PAIR_SENT
+
+    owners, dcp, parity, rank = DCP16_OWNERS, DCP16, 1, 5
+    query, kv, rows, valid = _inputs(counts, seed=seed)
+    batch = len(counts)
+    shape = (dcp, 2, dcp, CAP, owners, LATENT)
+    boxes = torch.empty(shape, dtype=torch.int16, device="cuda")
+    boxes.view(torch.int32).fill_(PAIR_SENT - (1 << 32))
+    lboxes = torch.full((dcp, 2, dcp, CAP, owners), -1, dtype=torch.int32).cuda()
+    i64 = dict(dtype=torch.int64, device="cuda")
+    mail = SimpleNamespace(
+        peers=torch.tensor([boxes[o].data_ptr() for o in range(dcp)], **i64),
+        lse_peers=torch.tensor([lboxes[o].data_ptr() for o in range(dcp)], **i64),
+    )
+    push = (owners, dcp)
+    kernel = compile_sparse(
+        batch, HEADS, PADDED, WIDTH, CAP, 0, push=push, tiles=tiles, bulk=bulk
+    )
+    out = torch.zeros(batch, PADDED, LATENT, dtype=torch.bfloat16, device="cuda")
+    out_lse = torch.zeros(batch, PADDED, device="cuda")
+    scale_log2 = SOFTMAX * Q_SCALE * K_SCALE * math.log2(math.e)
+    args = (query, kv, rows, valid, out, out_lse, scale_log2, K_SCALE)
+    run_sparse(kernel, *args, push=(mail, parity, rank))
+    torch.accelerator.synchronize()
+    return boxes, lboxes, query
+
+
+@pytest.mark.parametrize("counts", list(LAYOUT_COUNTS))
+@pytest.mark.parametrize("batch", [7, 8])
+@pytest.mark.parametrize(
+    "tiles,bulk", [(2, False), (1, True), (2, True)], ids=["tiles2", "bulk", "both"]
+)
+def test_sparse_layouts_match_one_tile(tiles, bulk, batch, counts):
+    """Two head tiles per CTA and the bulk cluster exchange change only which CTA
+    and warp computes a head and how the partials move: the pushed rows, LSEs and
+    the q mailbox re-arm match the one-tile kernel byte for byte (DCP16 shapes;
+    rows of one chunk, full rows, several chunks and empty rows)."""
+    seed = 3 + batch
+    want = _pushed_mailboxes(LAYOUT_COUNTS[counts][:batch], 1, False, seed)
+    got = _pushed_mailboxes(LAYOUT_COUNTS[counts][:batch], tiles, bulk, seed)
+    for tensor, ref in zip(got, want):
+        assert torch.equal(tensor.view(torch.uint8), ref.view(torch.uint8))
+
+
+@pytest.mark.parametrize("batch", [4, 8])
+def test_sparse_layouts_match_one_tile_latent(batch):
+    """The same for the latent / LSE outputs of the non-pushing decode."""
+    from vllm.models.kimi_k3.nvidia.specialized_decode.cutedsl.dsa.attn_sparse import (
+        compile_sparse,
+        run_sparse,
+    )
+
+    counts = LAYOUT_COUNTS["chunks"][:batch]
+    query, kv, rows, valid = _inputs(counts, seed=9)
+    scale_log2 = SOFTMAX * Q_SCALE * K_SCALE * math.log2(math.e)
+    outs = []
+    for tiles, bulk in ((1, False), (2, True), (2, False)):
+        kernel = compile_sparse(
+            batch, HEADS, PADDED, WIDTH, CAP, 0, tiles=tiles, bulk=bulk
+        )
+        latent = torch.full((batch, PADDED, LATENT), float("nan"), device="cuda")
+        latent = latent.bfloat16()
+        lse = torch.full((batch, PADDED), float("nan"), device="cuda")
+        run_sparse(kernel, query, kv, rows, valid, latent, lse, scale_log2, K_SCALE)
+        torch.accelerator.synchronize()
+        outs.append((latent[:, :HEADS], lse[:, :HEADS]))
+    for latent, lse in outs[1:]:
+        assert torch.equal(latent.view(torch.int16), outs[0][0].view(torch.int16))
+        assert torch.equal(lse.view(torch.int32), outs[0][1].view(torch.int32))
+
+
+def test_dcp_value_rows_policy():
+    """DcpValue `pushed` merges with one CTA per (head, 2 rows) only for DCP16 at
+    7-8 rows; every other shape keeps one CTA per (head, 16 rows)."""
+    from vllm.models.kimi_k3.nvidia.specialized_decode.cutedsl.mla.dcp import DcpValue
+
+    def value(size, batch, pushed=True, **kw):
+        args = (DCP16_OWNERS, size, batch, 148, 1, 36, PADDED, 1.0, True, "bf16")
+        return DcpValue(*args, False, pushed, **kw)
+
+    for batch in range(1, 9):
+        rows = 2 if batch >= 7 else 0
+        dcp16 = value(DCP16, batch)
+        assert dcp16.rows_per_cta == rows
+        assert dcp16.grid == ((6, -(-batch // 2), 1) if rows else (6, 1, 1))
+        assert value(8, batch).rows_per_cta == 0
+        assert value(DCP16, batch, pushed=False).rows_per_cta == 0
+    assert value(DCP16, 8, rows_per_cta=1).grid == (6, 8, 1)
+
+
+def _value_outputs(batch, rows_per_cta, seed=4):
+    """DcpValue `pushed` (DCP16, owner of 6 heads) over a filled "bf16" mailbox of
+    16 sources (source 3 of row 2 empty: LSE only; row 1 inactive): the gated
+    output and the mailbox after the merge (re-armed)."""
+    from vllm.models.kimi_k3.nvidia.specialized_decode.cutedsl.common.host import (
+        layout,
+        stream,
+        to_cute,
+    )
+    from vllm.models.kimi_k3.nvidia.specialized_decode.cutedsl.mla.dcp import (
+        EMPTY_LSE,
+        PAIR_SENT,
+        compile_value,
+    )
+
+    g = torch.Generator(device="cuda").manual_seed(seed)
+    heads, size, gathered = DCP16_OWNERS, DCP16, DCP16_OWNERS * DCP16
+    pitch = 2112 + heads * 128 + 160
+    w_uv = (torch.randn(heads, 128, 512, generator=g, device="cuda") / 20).bfloat16()
+    w_uv = w_uv.transpose(1, 2)
+    projected = torch.randn(batch, pitch, generator=g, device="cuda").bfloat16()
+    part = torch.randn(size, batch, heads, LATENT, generator=g, device="cuda") / 2
+    part = part.bfloat16()
+    part = torch.where(part == 0, torch.full_like(part, 0.5), part)  # no sentinels
+    lse = torch.randn(size, batch, heads, generator=g, device="cuda") + 20.0
+    box = torch.empty(size, CAP, heads, LATENT, dtype=torch.bfloat16, device="cuda")
+    box.view(torch.int32).fill_(PAIR_SENT - (1 << 32))
+    box[:, :batch] = part
+    lbox = torch.full((size, CAP, heads), -1, dtype=torch.int32, device="cuda")
+    lbox = lbox.view(torch.float32)
+    lbox[:, :batch] = lse
+    if batch > 2:
+        lbox[3, 2] = EMPTY_LSE
+        box[3, 2].view(torch.int32).fill_(PAIR_SENT - (1 << 32))
+    totals = torch.full((batch,), 4096, dtype=torch.int32, device="cuda")
+    if batch > 1:
+        totals[1] = 0
+    # The sparse decode's padded-head rows / LSE as run_value views them (unread).
+    latent = torch.zeros(batch, PADDED, LATENT, dtype=torch.bfloat16, device="cuda")
+    view = (batch, 1, gathered, LATENT), (PADDED * LATENT, 0, LATENT, 1)
+    latent = latent.as_strided(*view)
+    rows_lse = torch.zeros(batch, PADDED, device="cuda")
+    rows_lse = rows_lse.as_strided((batch, 1, gathered), (PADDED, 0, 1))
+    counts = torch.full((batch,), 128, dtype=torch.int32, device="cuda")
+    peers = torch.zeros(size, dtype=torch.int64, device="cuda")
+    mailbox = torch.zeros(CAP, PADDED, ROW, dtype=torch.uint8, device="cuda")
+    out = torch.full((batch, heads * 128), float("nan"), device="cuda").bfloat16()
+    gate = projected[:, 2112:]
+    args = heads, size, batch, CAP, layout(w_uv), pitch, 0, 148, 1, PADDED
+    kernel = compile_value(
+        *args, False, False, "bf16", False, True, rows_per_cta=rows_per_cta
+    )
+    kernel(
+        to_cute(latent),
+        to_cute(rows_lse, 4),
+        to_cute(counts, 4),
+        to_cute(box),
+        to_cute(lbox, 4),
+        to_cute(peers, 8),
+        to_cute(peers, 8),
+        to_cute(mailbox),
+        to_cute(w_uv),
+        to_cute(gate),
+        to_cute(totals, 4),
+        to_cute(out),
+        cutlass_int(0),
+        cutlass_int(0),
+        stream(out.device),
+    )
+    torch.accelerator.synchronize()
+    return out, box, lbox
+
+
+def cutlass_int(value):
+    import cutlass
+
+    return cutlass.Int32(value)
+
+
+@pytest.mark.parametrize("rows_per_cta", [1, 2, 3, 4])
+@pytest.mark.parametrize("batch", [3, 8])
+def test_dcp_value_rows_match_tiles(batch, rows_per_cta):
+    """DcpValue `pushed` with one CTA per (head, rows_per_cta rows) merges every
+    value with the operations and order of one CTA per (head, 16 rows): the gated
+    output and the re-armed mailbox match byte for byte."""
+    want = _value_outputs(batch, 0)
+    got = _value_outputs(batch, rows_per_cta)
+    assert torch.equal(got[0].view(torch.int16), want[0].view(torch.int16))
+    assert torch.all(got[0][1] == 0)  # the inactive row
+    for tensor, ref in zip(got[1:], want[1:]):
+        assert torch.equal(tensor.view(torch.int32), ref.view(torch.int32))
