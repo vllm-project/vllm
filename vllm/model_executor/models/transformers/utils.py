@@ -415,7 +415,7 @@ def infer_dynamic_arg_dims(cls: type[nn.Module]) -> "DynamicArgDims":
         if name == "self" or param.kind in {param.VAR_POSITIONAL, param.VAR_KEYWORD}:
             continue
         annotation = param.annotation
-        is_union = get_origin(annotation) in (Union, UnionType)
+        is_union = get_origin(annotation) in {Union, UnionType}
         members = get_args(annotation) if is_union else (annotation,)
         if annotation is param.empty or any(map(_is_tensor_type, members)):
             dims[name] = 0
