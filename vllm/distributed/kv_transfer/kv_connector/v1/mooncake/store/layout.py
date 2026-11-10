@@ -248,18 +248,23 @@ class RankLocalStoreLayout(StoreLayout):
                 cache = cache.unflatten(0, (num_blocks, -1))
             append_regions(cache)
 
-        # A full-page alias can cover K and scale views of the same page.
-        unique: list[_TensorRegion] = []
-        for index, region in enumerate(regions):
-            if any(
-                region.stride == other.stride
-                and other.base <= region.base
-                and region.base + region.length <= other.base + other.length
-                and (other.length > region.length or other_index < index)
-                for other_index, other in enumerate(regions)
-            ):
-                continue
-            unique.append(region)
+        # Sort an auxiliary index so enclosing intervals precede covered aliases.
+        # Stable sorting retains the first identical alias. Emit in input order.
+        ordered = sorted(
+            range(len(regions)),
+            key=lambda i: (regions[i].stride, regions[i].base, -regions[i].length),
+        )
+        keep = [False] * len(regions)
+        previous_stride: int | None = None
+        covered_end = 0
+        for index in ordered:
+            region = regions[index]
+            end = region.base + region.length
+            if region.stride != previous_stride or end > covered_end:
+                keep[index] = True
+                previous_stride = region.stride
+                covered_end = end
+        unique = [region for index, region in enumerate(regions) if keep[index]]
         if not unique:
             raise ValueError("KV cache group has no non-empty components")
 

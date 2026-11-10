@@ -350,6 +350,32 @@ def test_component_layout_deduplicates_full_page_aliases_and_skips_empty_views()
     )
 
 
+def test_component_layout_deduplicates_aliases_in_input_order():
+    raw = torch.arange(512).to(torch.uint8)
+    regions = [
+        (64, 8, 128),  # Keep the first of two identical aliases.
+        (8, 8, 128),  # Covered by a later, larger region.
+        (0, 16, 128),  # Same start as the larger region.
+        (0, 32, 128),
+        (64, 8, 128),
+        (16, 24, 128),  # Partial overlap must survive.
+        (8, 8, 64),  # Different stride must survive.
+        (4, 28, 128),  # Same end as the larger region.
+    ]
+    views = [
+        raw.as_strided((4, length), (stride, 1), offset)
+        for offset, length, stride in regions
+    ]
+    layout = RankLocalStoreLayout(KeyMetadata("test-model", 0, 0, 0, 0), 16, 16)
+    layout.register_kv_caches(views, 4)
+    survivors = [views[i] for i in (0, 3, 5, 6)]
+    assert layout.prepare_values([(0, 16)], [3], [0]) == (
+        [[view[3].data_ptr() for view in survivors]],
+        [[view.shape[1] for view in survivors]],
+        [3],
+    )
+
+
 @pytest.mark.parametrize(
     "regions,expected_sizes",
     [
