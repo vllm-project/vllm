@@ -244,14 +244,9 @@ def _copy_mamba_state_block(
     # Widen block ids to int64 before they reach `block_id * state_block_stride`
     # below: state_block_stride can exceed 2**31 bytes for large mamba caches,
     # and Triton would otherwise do the multiply in int32 and wrap.
-    # The block-table columns below are derived from per-request
-    # accepted-token counts. A wrong count walks the read past this request's
-    # row; the loaded int32 is then multiplied by state_block_stride and
-    # dereferenced, so an out-of-range column becomes a wild (and possibly
-    # misaligned) address rather than merely a wrong copy. Bound the columns to
-    # the row: an out-of-range column loads the ``other=-1`` sentinel, and the
-    # ``<= 0`` guards below reject both that sentinel and ``NULL_BLOCK_ID`` (0,
-    # the unallocated-slot marker), so neither reaches the address math.
+    # The block-table columns derive from per-request accepted-token counts, so
+    # bound them to the row: an out-of-row column loads the `other=-1` sentinel,
+    # and the `<= 0` guards below reject it along with NULL_BLOCK_ID (0).
     dst_col_ok = (dst_col >= 0) & (dst_col < block_table_stride_req)
     dest_block_id = tl.load(block_table_base + dst_col, mask=dst_col_ok, other=-1).to(
         tl.int64

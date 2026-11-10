@@ -348,13 +348,9 @@ def _selective_scan_update_kernel(
     if HAS_STATE_BATCH_INDICES:
         if IS_SPEC_DECODING:
             num_accepted = tl.load(num_accepted_tokens_ptr + pid_b).to(tl.int64)
-            # Preserve the existing zero-count clamp while bounding the
-            # accepted-token-derived state lookup to this request's row.
-            # The bound is the ROW stride (elements per batch row), matching
-            # fused_recurrent.py's i_t < stride_indices_seq: for a contiguous
-            # [batch, T] tensor stride(0) == T. stride(1) would be 1 there,
-            # which rejects every accepted count > 1 (and a padded row keeps
-            # any overshoot inside this request's allocated slack).
+            # Bound the lookup by the row stride (columns per request), not
+            # stride_state_indices_T, which is 1 for a contiguous [batch, T]
+            # tensor and would reject every accepted count > 1.
             init_token_idx = tl.maximum(num_accepted - 1, 0)
             valid_initial_token = init_token_idx < stride_state_indices_batch
         else:

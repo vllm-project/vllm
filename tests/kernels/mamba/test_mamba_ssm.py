@@ -1239,15 +1239,11 @@ def test_selective_state_update_rejects_accepted_count_past_state_row():
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @torch.inference_mode()
 def test_selective_state_update_accepts_valid_accepted_count_within_row():
-    """A VALID accepted count > 1 must still compute, not fail closed.
+    """A valid accepted count > 1 must compute and update state, not fail closed.
 
-    Discriminating half of the bounds regression above: the first version of
-    the bound compared against stride(1) (== 1 when contiguous), which
-    rejected every accepted count > 1 and zeroed legitimate speculative
-    decode output while leaving state untouched. Guarding only the invalid
-    side cannot catch that (an oversized count fails closed under both the
-    right and the wrong bound), so this test pins the valid side: real
-    output, state mutation.
+    Pins the valid side of the bound: an oversized count fails closed under a
+    row-stride bound and a column-stride bound alike, so only this case tells
+    them apart.
     """
     dim, dstate, seq_len = 64, 16, 3
     total_state_slots = 12
