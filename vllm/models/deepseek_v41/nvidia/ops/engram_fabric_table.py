@@ -1,11 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Engram tables in cuMem shared by FABRIC handle.
+"""Engram tables in cuMem, shared between processes by FABRIC handle.
 
-Host tables live in host-NUMA memory shared across DP ranks: GPUs map cuMem host
-memory with 2M pages instead of the 64K pages of a registered /dev/shm mapping, so
-random row lookups miss the TLB far less. Peer tables split their rows over the
-HBM of several engines' GPUs.
+Host tables: one copy in host-NUMA memory per node-local DP group, which GPUs map
+with 2M pages instead of /dev/shm's 64K pages, so row lookups miss the TLB less.
+Peer tables: rows split over the HBM of several engines' GPUs.
 """
 
 import ctypes
@@ -30,14 +29,14 @@ from vllm.utils.math_utils import round_up
 logger = init_logger(__name__)
 
 FABRIC_HANDLE = cu.CUmemAllocationHandleType.CU_MEM_HANDLE_TYPE_FABRIC
-# Tables are created in chunks, so the creator can stop before draining its node.
+# Host tables are created in chunks, so the creator stops before draining its node.
 CHUNK_BYTES = 2 << 30
 # Fraction of the NUMA node left to other allocations.
 NUMA_RESERVE_FRACTION = 0.05
 
 
 class ExportedHostTable(NamedTuple):
-    """What a peer needs to map a table."""
+    """What another rank needs to map a host table."""
 
     numa_node: int
     padded_bytes: int
@@ -125,7 +124,7 @@ def fabric_host_memory_supported() -> bool:
 
 
 def _create_table(num_bytes: int) -> tuple[list, ExportedHostTable]:
-    """Allocate and export a table on this GPU's host NUMA node.
+    """Allocate and export a host table on this GPU's NUMA node.
 
     Stops once the node would drop below its reserve. The kernel compacts to
     find 2M pages and fails the chunk, rather than OOM-killing, if it cannot.
@@ -155,7 +154,7 @@ def _create_table(num_bytes: int) -> tuple[list, ExportedHostTable]:
 def _map_table(
     table: ExportedHostTable, num_bytes: int, handles: list
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Map a table, importing its handles unless given, and release the handles.
+    """Map a host table, importing its handles unless given, and release them.
 
     Returns CPU and GPU uint8 views; either keeps the mapping alive.
     """

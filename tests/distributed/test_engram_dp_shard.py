@@ -419,10 +419,10 @@ def _check_shared_storage_lifetime_and_failures(failure):
 
     with pytest.MonkeyPatch.context() as patch:
         if current_platform.is_cuda():
-            from vllm.models.deepseek_v41.nvidia.ops import engram_host_table
+            from vllm.models.deepseek_v41.nvidia.ops import engram_fabric_table
 
             # Exercise the /dev/shm path even where cuMem tables are used.
-            patch.setattr(engram_host_table, "share_host_table", lambda *args: None)
+            patch.setattr(engram_fabric_table, "share_host_table", lambda *args: None)
         patch.setattr(
             engram_ops,
             "tempfile",
@@ -476,24 +476,24 @@ def _check_cumem_host_table(failure):
     import on any rank falls back to /dev/shm on all of them."""
     if not current_platform.is_cuda():
         return
-    from vllm.models.deepseek_v41.nvidia.ops import engram_host_table
+    from vllm.models.deepseek_v41.nvidia.ops import engram_fabric_table
 
-    if not engram_host_table.fabric_host_memory_supported():
+    if not engram_fabric_table.fabric_host_memory_supported():
         return
 
     group = get_engram_dp_group()
     # Three 2 MiB chunks, the last one partial.
     rows = 5 * (1 << 20) // DIM
     with pytest.MonkeyPatch.context() as patch:
-        patch.setattr(engram_host_table, "CHUNK_BYTES", 2 << 20)
+        patch.setattr(engram_fabric_table, "CHUNK_BYTES", 2 << 20)
         if failure == "create" and group.rank_in_group == 0:
-            patch.setattr(engram_host_table, "NUMA_RESERVE_FRACTION", 1.0)
+            patch.setattr(engram_fabric_table, "NUMA_RESERVE_FRACTION", 1.0)
         if failure == "import" and group.rank_in_group == 1:
             patch.setattr(
-                engram_host_table.cu,
+                engram_fabric_table.cu,
                 "cuMemImportFromShareableHandle",
                 lambda *args: (
-                    engram_host_table.cu.CUresult.CUDA_ERROR_INVALID_VALUE,
+                    engram_fabric_table.cu.CUresult.CUDA_ERROR_INVALID_VALUE,
                     None,
                 ),
             )

@@ -780,9 +780,9 @@ class DPSharedEngramStorage:
 
         views = None
         if current_platform.is_cuda():
-            from vllm.models.deepseek_v41.nvidia.ops import engram_host_table
+            from vllm.models.deepseek_v41.nvidia.ops import engram_fabric_table
 
-            views = engram_host_table.share_host_table(num_bytes, group)
+            views = engram_fabric_table.share_host_table(num_bytes, group)
         # The GPU maps cuMem host memory with 2M pages, /dev/shm with 64K pages.
         self.huge_pages = views is not None
         host, gpu = views or self._allocate_shm(num_bytes)
@@ -1099,7 +1099,7 @@ class ParallelEngramEmbedding(nn.Module):
             if isinstance(peers, EngramPeerGroup):
                 # Symmetric memory cannot span engines: its rendezvous rejects
                 # equal device ordinals on one node, and each engine's start at 0.
-                from vllm.models.deepseek_v41.nvidia.ops.engram_host_table import (
+                from vllm.models.deepseek_v41.nvidia.ops.engram_fabric_table import (
                     share_peer_table,
                 )
 
