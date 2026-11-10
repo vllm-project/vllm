@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """XPU DeepSeek-V4 attention subclass.
 
-Subclasses the shared ``DeepseekV4Attention`` ABC and provides XPU-native
+Subclasses the shared `DeepseekV4Attention` ABC and provides XPU-native
 Triton kernels for decode (FP8 dequant + BF16 attention) and prefill
 (BF16 gathered KV + sparse attention).
 """
