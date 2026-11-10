@@ -153,6 +153,26 @@ def _rope_only_sizes_cache(hf_config: PreTrainedConfig) -> bool:
     )
 
 
+# RoPE types whose cos_sin_cache holds original_max_position_embeddings * factor
+# positions, whatever max_position_embeddings is.
+_YARN_ROPE_TYPES = frozenset({"yarn", "deepseek_yarn", "deepseek_llama_scaling"})
+
+
+def _yarn_cache_positions(hf_config: PreTrainedConfig) -> int | None:
+    positions = []
+    for params in iter_rope_parameters(hf_config):
+        original = params.get("original_max_position_embeddings")
+        factor = params.get("factor")
+        if (
+            params.get("rope_type") not in _YARN_ROPE_TYPES
+            or not original
+            or not factor
+        ):
+            return None
+        positions.append(int(original * factor))
+    return min(positions, default=None)
+
+
 _MINIMAX_M3_MODEL_TYPES = ("minimax_m3_vl", "minimax_m3_text")
 _MINIMAX_M3_DSPARK_SUBFOLDER = "dspark"
 
