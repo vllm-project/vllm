@@ -24,6 +24,30 @@ Beyond the optimization levels, three mechanisms reduce time-to-first-token on r
 - **Skip memory profiling with `--kv-cache-memory`.** On startup, vLLM logs the exact `--kv-cache-memory` value that reproduces the current allocation. Passing it back on the next boot skips the memory-profiling measurement and the CUDA-graph memory estimation pass. Note that this has performance implications: the KV cache is sized to exactly the given value instead of being measured, so a conservative value caps batch concurrency (and therefore throughput), while an optimistic one fails at allocation time. The value is only valid on the same GPU with the same initial free memory; if a boot OOMs after hardware or co-tenant changes, remove the flag to re-profile.
 - **Serve without CUDA graphs using `--enforce-eager`.** Skips both compilation and CUDA-graph capture for the fastest possible startup, at the cost of steady-state decode performance. Useful for development loops and for measuring how much of a boot is compile/capture.
 
+### FlashInfer autotune caches
+
+FlashInfer autotuning is enabled by default except at `-O0`; use
+`--enable-flashinfer-autotune` to enable it explicitly. With the pinned
+FlashInfer installation, fixed-topology deployments use its managed v2 cache,
+including tensor, pipeline and expert parallelism across one or more nodes.
+Elastic EP and multi-rank `vllm preload` / `--load-format ipc_cache` retain
+the legacy cache because their cache-transfer protocols require legacy
+serialization. Older FlashInfer installations without the managed-cache API
+also use the legacy path. There is no separate v1/v2 selection flag.
+
+Multi-rank deployments using v2 persist a separate managed cache for each model
+configuration, data-parallel rank and world rank. Set
+`VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR` to choose the parent directory; it can be
+node-local or shared. Without an override, multi-rank managed caches use
+`$VLLM_CACHE_ROOT/flashinfer_autotune_cache/`, while single-rank managed caches
+retain FlashInfer's default cache location.
+
+Every rank executes startup warmup. Within each tuning group, a missing or
+disagreeing cached selection makes all ranks retune that operation together.
+Pipeline stages tune within their tensor-parallel groups. Serving retains the
+agreed in-memory selections even if persistence fails; a failed write can cause
+retuning on the next startup. Measurement policy is unchanged.
+
 ## Preemption
 
 Due to the autoregressive nature of transformer architecture, there are times when KV cache space is insufficient to handle all batched requests.

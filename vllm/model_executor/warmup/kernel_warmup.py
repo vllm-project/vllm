@@ -504,7 +504,9 @@ def _load_shared_autotune_cache(cache_path: Path, tuner, tune_group) -> bool:
     return loaded
 
 
-def flashinfer_autotune(runner: "GPUModelRunner", *, skip_attn: bool = False) -> None:
+def flashinfer_autotune(
+    runner: "GPUModelRunner", *, skip_attn: bool = False, legacy_cache: bool = False
+) -> None:
     """Autotune FlashInfer operations.
     FlashInfer have many implementations for the same operation,
     autotuning runs benchmarks for each implementation and stores
@@ -516,17 +518,15 @@ def flashinfer_autotune(runner: "GPUModelRunner", *, skip_attn: bool = False) ->
     Args:
         runner: The model runner to tune.
         skip_attn: Additionally skip attention in the tuning dummy runs.
+        legacy_cache: Require the legacy format for cache export.
 
     With PP > 1, stages run different layers and may profile different ops,
     so each stage's TP group tunes separately with its own cache file;
     otherwise the world group tunes together. Per-tactic timings are
     averaged over the tuning group so all its ranks select the same tactic.
 
-    Legacy results are persisted per rank: FlashInfer keys MoE entries by tp/ep rank
-    (`MoERunner.get_cache_key_extras`), so one rank's file only hits on that
-    rank. A rank with a cache hit skips the per-tactic reduce the others block
-    in, so ranks keep loaded configs only if every rank in the tuning group
-    has a matching file and successfully loads it.
+    Managed caches coordinate hits and winners per operation. Legacy caches
+    skip the entire sweep only when every rank loads the same valid file.
 
     """
     from flashinfer.autotuner import AutoTuner, set_autotune_process_group
@@ -553,12 +553,12 @@ def flashinfer_autotune(runner: "GPUModelRunner", *, skip_attn: bool = False) ->
         )
         autotune_kwargs["skip_ops"] = skip_ops
 
-    use_autotune_v2 = use_flashinfer_autotune_v2(runner)
+    use_autotune_v2 = not legacy_cache and use_flashinfer_autotune_v2(runner)
     cache_hit = False
     if use_autotune_v2:
-        from flashinfer import autotune_v2, autotune_v2_reload
+        from flashinfer import autotune_v2
 
-        cache_root = resolve_flashinfer_autotune_v2_root()
+        cache_root = resolve_flashinfer_autotune_v2_root(runner)
         if is_leader:
             logger.info_once(
                 "Using FlashInfer managed autotune cache (root=%s). Pass "
@@ -601,10 +601,7 @@ def flashinfer_autotune(runner: "GPUModelRunner", *, skip_attn: bool = False) ->
 
     if world.world_size > 1:
         world.barrier()
-    if use_autotune_v2:
-        if world.world_size > 1:
-            # All ranks serve the shared store's final state after publishing.
-            autotune_v2_reload()
-            world.barrier()
-    elif tuner._dirty:
+    # Keep the group's agreed in-memory winners, including when a local cache
+    # write failed. Reloading independent stores could discard that agreement.
+    if not use_autotune_v2 and tuner._dirty:
         tuner.save_configs(str(cache_path))

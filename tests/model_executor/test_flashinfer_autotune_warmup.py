@@ -16,6 +16,7 @@ import torch
 
 import vllm.model_executor.warmup.kernel_warmup as warmup
 import vllm.utils.flashinfer as fi_utils
+from vllm.config import LoadConfig
 from vllm.config.utils import hash_config
 from vllm.model_executor.warmup.kernel_warmup import (
     _flashinfer_autotune_token_counts,
@@ -47,6 +48,7 @@ def _make_runner(modules, *, max_tokens: int = 8192):
     return SimpleNamespace(
         scheduler_config=SimpleNamespace(max_num_batched_tokens=max_tokens),
         vllm_config=SimpleNamespace(
+            load_config=LoadConfig(),
             attention_config=SimpleNamespace(hisparse_config=None),
             parallel_config=SimpleNamespace(
                 enable_elastic_ep=False,
@@ -142,9 +144,16 @@ def test_flashinfer_autotune_uses_token_buckets_for_each_dummy_run(skip_attn):
 
 
 @pytest.mark.parametrize(
-    "has_v2,elastic_ep,node_count",
-    [(False, False, 1), (True, False, 1), (True, True, 1), (True, False, 2)],
-    ids=["v1", "v2", "elastic-v1", "multi-node-v1"],
+    "has_v2,elastic_ep,node_count,load_format,legacy_cache",
+    [
+        (False, False, 1, "auto", False),
+        (True, False, 1, "auto", False),
+        (True, True, 1, "auto", False),
+        (True, False, 2, "auto", False),
+        (True, False, 1, "ipc_cache", False),
+        (True, False, 1, "auto", True),
+    ],
+    ids=["v1", "v2", "elastic-v1", "multi-node-v2", "ipc", "cache-export"],
 )
 @pytest.mark.parametrize(
     "hisparse,world_size,rank,skip_ops,failure",
@@ -164,14 +173,22 @@ def test_flashinfer_autotune_lifecycle(
     has_v2,
     elastic_ep,
     node_count,
+    load_format,
+    legacy_cache,
     hisparse,
     world_size,
     rank,
     skip_ops,
     failure,
 ):
-    use_v2 = has_v2 and not elastic_ep and node_count == 1 and world_size == 1
+    use_v2 = (
+        has_v2
+        and not elastic_ep
+        and not legacy_cache
+        and not (world_size > 1 and load_format == "ipc_cache")
+    )
     runner = _make_runner([])
+    runner.vllm_config.load_config = LoadConfig(load_format=load_format)
     runner.vllm_config.parallel_config.enable_elastic_ep = elastic_ep
     runner.vllm_config.attention_config.hisparse_config = object() if hisparse else None
     model = runner.get_model()
@@ -248,16 +265,16 @@ def test_flashinfer_autotune_lifecycle(
     )
 
     if failure is None:
-        warmup.flashinfer_autotune(runner)
+        warmup.flashinfer_autotune(runner, legacy_cache=legacy_cache)
     else:
         with pytest.raises(RuntimeError, match="warmup failed"):
-            warmup.flashinfer_autotune(runner)
+            warmup.flashinfer_autotune(runner, legacy_cache=legacy_cache)
 
     kwargs = {"skip_ops": set(skip_ops)} if skip_ops else {}
     expected = []
     if use_v2:
         resolve_file.assert_not_called()
-        resolve_root.assert_called_once_with()
+        resolve_root.assert_called_once_with(runner)
         expected.append(call.autotune(mode="tune", cache_root=str(tmp_path), **kwargs))
     else:
         resolve_root.assert_not_called()
@@ -285,9 +302,7 @@ def test_flashinfer_autotune_lifecycle(
     if failure is None:
         if world_size > 1:
             expected.append(call.barrier())
-        if use_v2 and world_size > 1:
-            expected.extend([call.reload(), call.barrier()])
-        elif not use_v2:
+        if not use_v2:
             expected.append(call.tuner.save_configs(str(rank_cache_path)))
     assert events.mock_calls == expected
 
@@ -324,6 +339,7 @@ def test_sparse_autotune_respects_cache_selection(
     world = SimpleNamespace(
         rank_in_group=rank,
         world_size=world_size,
+        cpu_group=object(),
         broadcast_object=Mock(return_value=b"cached"),
         barrier=Mock(),
     )
@@ -339,7 +355,10 @@ def test_sparse_autotune_respects_cache_selection(
     monkeypatch.setitem(
         sys.modules,
         "flashinfer.autotuner",
-        SimpleNamespace(AutoTuner=SimpleNamespace(get=lambda: tuner)),
+        SimpleNamespace(
+            AutoTuner=SimpleNamespace(get=lambda: tuner),
+            set_autotune_process_group=Mock(),
+        ),
     )
     monkeypatch.setattr(
         "vllm.distributed.parallel_state.get_world_group", lambda: world
@@ -347,6 +366,11 @@ def test_sparse_autotune_respects_cache_selection(
     monkeypatch.setattr(
         "vllm.distributed.parallel_state.get_node_count", lambda: node_count
     )
+    monkeypatch.setattr(
+        "vllm.distributed.parallel_state.get_pp_group",
+        lambda: SimpleNamespace(world_size=pp_size),
+    )
+    monkeypatch.setattr("vllm.distributed.parallel_state.get_tp_group", lambda: world)
     monkeypatch.setattr(fi_utils, "has_flashinfer_autotune_v2", lambda: True)
     monkeypatch.setattr(sparse, "has_flashinfer", lambda: True)
     monkeypatch.setattr(
@@ -355,7 +379,9 @@ def test_sparse_autotune_respects_cache_selection(
     monkeypatch.setattr(
         sparse, "_flashinfer_sparse_mla_decode_label", lambda *_: "DSv3.2"
     )
-    monkeypatch.setattr(sparse, "resolve_flashinfer_autotune_v2_root", lambda: tmp_path)
+    monkeypatch.setattr(
+        sparse, "resolve_flashinfer_autotune_v2_root", lambda _: tmp_path
+    )
     cache_path = tmp_path / "autotune.json"
     cache_path.write_bytes(b"cached")
     monkeypatch.setattr(
@@ -375,13 +401,13 @@ def test_sparse_autotune_respects_cache_selection(
     monkeypatch.setattr(sparse, "run_mixed_prefill_decode_warmup", mixed)
     assert sparse._run_flashinfer_sparse_mla_decode_autotune(worker, 16, frozenset())
 
-    if node_count == 1 and not elastic_ep and pp_size == 1 and world_size == 1:
+    if not elastic_ep:
         managed.assert_called_once_with(mode="tune", cache_root=tmp_path)
         legacy.assert_not_called()
         world.broadcast_object.assert_not_called()
         tuner.load_configs.assert_not_called()
         reload.assert_not_called()
-        world.barrier.assert_not_called()
+        assert world.barrier.call_count == (1 if world_size > 1 else 0)
     else:
         managed.assert_not_called()
         reload.assert_not_called()
@@ -546,7 +572,7 @@ def autotune_run(monkeypatch, tmp_path):
 
     def make_run(*, pp=2, tp=4):
         run = _AutotuneRun(pp, tp, tmp_path)
-        monkeypatch.setattr(fi_utils, "has_flashinfer_autotune_v2", lambda: pp > 1)
+        monkeypatch.setattr(fi_utils, "has_flashinfer_autotune_v2", lambda: False)
         monkeypatch.setattr(parallel_state, "get_node_count", lambda: 1)
         autotuner = ModuleType("flashinfer.autotuner")
         monkeypatch.setattr(

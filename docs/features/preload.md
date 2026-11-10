@@ -24,8 +24,7 @@ Key benefits:
 
 !!! note
     Weight preloading is only supported on CUDA and ROCm platforms. Tensor,
-    expert and data parallelism are supported, including across nodes;
-    pipeline parallelism is rejected when launching the daemon.
+    expert, pipeline and data parallelism are supported, including across nodes.
 
 ## Quick start
 
@@ -54,8 +53,7 @@ The daemon itself must load from disk; passing `--load-format ipc_cache` to
 
 FlashInfer has several implementations of each operation and chooses between
 them by benchmarking. vLLM runs that pass during kernel warmup and persists the
-result per rank in the on-disk FlashInfer autotune cache (under
-`VLLM_CACHE_ROOT`, or `VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR`), so a later engine
+result in the on-disk [FlashInfer autotune cache](../configuration/optimization.md#flashinfer-autotune-caches), so a later engine
 with the same configuration loads the tuned configs instead of profiling again.
 Normally the first serving engine pays for the pass, and on a large MoE model it
 dominates what is left of the startup time once the weights come from the
@@ -289,9 +287,10 @@ Socket paths are derived from the GPU UUID, so they are stable regardless of
   passes, and a table tuned on the draft model would key on the draft's
   config, which no engine looks up), so those deployments' first engine
   tunes and fills the cache instead.
-- **Warmup cache seeding**: only the v1 per-rank FlashInfer autotune cache is
-  seeded; single-rank daemons use FlashInfer's managed v2 store and always
-  tune in place. Seeding requires a trusted network — the TCP channel is
+- **Warmup cache seeding**: multi-rank daemons and IPC engines retain the v1
+  per-rank FlashInfer autotune cache for seeding. Single-rank daemons use
+  FlashInfer's managed v2 store when available and tune in place. Seeding
+  requires a trusted network — the TCP channel is
   authenticated by a shared token but unencrypted. The optional shared
   stores (`--warmup-cache-stores`) serve the same tables without a live
   source daemon.

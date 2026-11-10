@@ -570,8 +570,7 @@ def test_d2d_warmup_cache_seeding(vllm_runner, tmp_path):
     log_file = (
         (lambda name: os.path.join(log_dir, name)) if log_dir else lambda name: None
     )
-    # The v1 per-rank cache path needs a multi-rank tuning group (v2 is gated
-    # to single-rank), so both daemons run at tp=2.
+    # Multi-rank preload daemons retain the legacy tables used by seeding.
     with WeightCacheDaemon(
         case.model,
         tp_size=2,

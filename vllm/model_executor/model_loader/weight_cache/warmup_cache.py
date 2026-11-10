@@ -102,7 +102,11 @@ class FlashInferWarmupCache(WarmupCache):
             if not self._adopt_from_stores(runner):
                 transport.adopt(self, runner)
             # The runner requires skip_attn when no KV cache exists
-            flashinfer_autotune(runner, skip_attn=True)
+            flashinfer_autotune(
+                runner,
+                skip_attn=True,
+                legacy_cache=get_world_group().world_size > 1,
+            )
             logger.info(
                 "Weight cache %s daemon rank %d tuned FlashInfer; the tuned "
                 "configs are in the on-disk autotune cache",
@@ -147,7 +151,9 @@ class FlashInferWarmupCache(WarmupCache):
     def _adopt_from_stores(self, runner: "GPUModelRunner") -> bool:
         """Pull this rank's table from the shared stores; True skips D2D."""
         shared = self.store_sources[1:]
-        if not shared or use_flashinfer_autotune_v2(runner):
+        if not shared or (
+            use_flashinfer_autotune_v2(runner) and get_world_group().world_size == 1
+        ):
             return False
         key, filename = self._runner_key(runner)
         if self.store_sources[0].get(key) is not None:
