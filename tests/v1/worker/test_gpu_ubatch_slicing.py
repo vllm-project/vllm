@@ -1,16 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Dual batch overlap (DBO) in the V2 model runner.
+"""Dual batch overlap (DBO) in the model runner.
 
-The V2 runner slices the batch *before* building attention metadata, where V1
-builds metadata for the whole batch and slices it afterwards. Both must describe
-the same microbatches, so the main test here pins V2's slicing against V1's
-`split_attn_metadata`. The rest covers the decision to microbatch and the
-threaded execution of the microbatches.
+The runner slices the batch *before* building attention metadata. These tests
+cover that slicing, the decision to microbatch and the threaded execution of
+the microbatches.
 """
 
 import threading
-from contextlib import nullcontext
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any, cast
@@ -20,7 +17,6 @@ import numpy as np
 import pytest
 import torch
 
-from tests.v1.attention.utils import BatchSpec, create_common_attn_metadata
 from vllm.config import (
     CompilationConfig,
     CUDAGraphMode,
@@ -34,7 +30,6 @@ from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
 )
 from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 from vllm.v1.kv_cache_interface import KVCacheConfig
-from vllm.v1.worker import gpu_ubatch_wrapper as legacy_gpu_ubatch_wrapper
 from vllm.v1.worker.gpu import cp_utils as gpu_cp_utils
 from vllm.v1.worker.gpu import cudagraph_utils, dp_utils
 from vllm.v1.worker.gpu.cudagraph_utils import (
@@ -54,7 +49,6 @@ from vllm.v1.worker.gpu.ubatch_utils import (
 from vllm.v1.worker.ubatch_utils import (
     UBatchSlice,
     maybe_create_ubatch_slices,
-    split_attn_metadata,
 )
 from vllm.v1.worker.ubatching import (
     dbo_current_ubatch_id,
@@ -151,50 +145,6 @@ BATCHES = {
     # the last request, so the second microbatch holds nothing else.
     "trailing_prefill_spans_boundary": ([2, 20], [64, 300]),
 }
-
-
-@pytest.mark.parametrize("batch_name", list(BATCHES))
-def test_slicing_matches_v1_split_attn_metadata(batch_name: str):
-    """V2's pre-sliced inputs describe the same microbatches as V1's."""
-    query_lens, seq_lens = BATCHES[batch_name]
-    num_scheduled_tokens = np.array(query_lens, dtype=np.int32)
-    num_tokens = int(num_scheduled_tokens.sum())
-
-    ubatch_slices, _ = maybe_create_ubatch_slices(
-        True, num_scheduled_tokens, num_tokens, len(query_lens), num_ubatches=2
-    )
-    assert ubatch_slices is not None
-
-    v1_metadata = create_common_attn_metadata(
-        BatchSpec(seq_lens=seq_lens, query_lens=query_lens),
-        block_size=16,
-        device=torch.device("cpu"),
-    )
-    v1_ubatches = split_attn_metadata(ubatch_slices, v1_metadata)
-
-    buffers = _make_buffers()
-    ubatch_buffers = _make_ubatch_buffers()
-    input_batch = _make_input_batch(query_lens, seq_lens, buffers)
-
-    for i, (ubatch_slice, v1_ubatch) in enumerate(zip(ubatch_slices, v1_ubatches)):
-        v2_ubatch = _slice_input_batch(input_batch, ubatch_slice, *ubatch_buffers[i])
-
-        assert v2_ubatch.num_reqs == v1_ubatch.num_reqs
-        assert v2_ubatch.num_tokens == v1_ubatch.num_actual_tokens
-        assert int(v2_ubatch.num_scheduled_tokens.max()) == v1_ubatch.max_query_len
-        torch.testing.assert_close(v2_ubatch.query_start_loc, v1_ubatch.query_start_loc)
-        torch.testing.assert_close(v2_ubatch.seq_lens, v1_ubatch.seq_lens)
-        torch.testing.assert_close(
-            torch.from_numpy(v2_ubatch.query_start_loc_np),
-            v1_ubatch.query_start_loc_cpu,
-        )
-        # `prepare_attn` derives max_seq_len from the upper bound. Compare the
-        # bound itself rather than V1's max_seq_len: V1 floors it with the full
-        # batch's max_seq_len to keep the value CUDA-graph capture installed,
-        # which V2 gets from `prepare_attn(for_capture=True)` instead.
-        torch.testing.assert_close(
-            v2_ubatch.seq_lens_cpu_upper_bound, v1_ubatch.seq_lens_cpu_upper_bound
-        )
 
 
 def test_microbatches_do_not_share_buffers():
@@ -435,94 +385,6 @@ def test_slice_model_inputs_handles_mrope_positions():
     assert sliced["intermediate_tensors"] is None
 
 
-@pytest.mark.parametrize(
-    ("cudagraph_runtime_mode", "execution_method"),
-    [
-        (CUDAGraphMode.FULL, "_capture_ubatches"),
-        (CUDAGraphMode.NONE, "_run_ubatches"),
-    ],
-)
-def test_legacy_ubatch_contexts_slice_padding_mask(
-    cudagraph_runtime_mode: CUDAGraphMode, execution_method: str
-):
-    """Replacement contexts preserve each microbatch's padding rows."""
-    ubatch_slices = [
-        UBatchSlice(slice(0, 2), slice(0, 3)),
-        UBatchSlice(slice(2, 4), slice(3, 6)),
-    ]
-    is_padding = torch.tensor([False, True, False, True, False, True])
-    forward_context = SimpleNamespace(
-        batch_descriptor=object(),
-        ubatch_slices=ubatch_slices,
-        cudagraph_runtime_mode=cudagraph_runtime_mode,
-        attn_metadata=[{}, {}],
-        slot_mapping={},
-        dp_metadata=object(),
-        is_padding=is_padding,
-    )
-
-    wrapper = object.__new__(legacy_gpu_ubatch_wrapper.UBatchWrapper)
-    wrapper.vllm_config = SimpleNamespace(
-        parallel_config=SimpleNamespace(data_parallel_size=2)
-    )
-    wrapper.comm_stream = object()
-    wrapper.ready_barrier = object()
-    wrapper.cudagraphs = {}
-    wrapper.sm_control = nullcontext()
-    wrapper.runnable = object()
-
-    def make_contexts(*, forward_contexts, **kwargs):
-        return [
-            SimpleNamespace(id=i, forward_context=context)
-            for i, context in enumerate(forward_contexts)
-        ]
-
-    def create_context(attn_metadata, vllm_config, **kwargs):
-        return SimpleNamespace(attn_metadata=attn_metadata, **kwargs)
-
-    model_inputs = {
-        "input_ids": torch.arange(6),
-        "positions": torch.arange(6),
-        "inputs_embeds": None,
-        "intermediate_tensors": None,
-    }
-    expected = object()
-    with (
-        patch.object(
-            legacy_gpu_ubatch_wrapper,
-            "get_forward_context",
-            return_value=forward_context,
-        ),
-        patch.object(
-            legacy_gpu_ubatch_wrapper.torch.cuda,
-            "current_stream",
-            return_value=object(),
-        ),
-        patch.object(
-            legacy_gpu_ubatch_wrapper.DPMetadata, "make", return_value=object()
-        ),
-        patch.object(
-            legacy_gpu_ubatch_wrapper,
-            "create_forward_context",
-            side_effect=create_context,
-        ),
-        patch.object(
-            legacy_gpu_ubatch_wrapper,
-            "make_ubatch_contexts",
-            side_effect=make_contexts,
-        ),
-        patch.object(wrapper, execution_method, return_value=expected) as execute,
-    ):
-        result = wrapper(**model_inputs)
-
-    assert result is expected
-    contexts = [
-        metadata.context.forward_context for metadata in execute.call_args.args[0]
-    ]
-    torch.testing.assert_close(contexts[0].is_padding, is_padding[:3])
-    torch.testing.assert_close(contexts[1].is_padding, is_padding[3:])
-
-
 def _make_dbo_config() -> VllmConfig:
     return VllmConfig(
         model_config=ModelConfig(model="facebook/opt-125m", dtype="float16", seed=0),
@@ -624,6 +486,7 @@ def _make_capturer(num_tokens: int, device: torch.device) -> RoutedExpertsCaptur
     capturer = RoutedExpertsCapturer.__new__(RoutedExpertsCapturer)
     capturer.dp_rank = 0
     capturer.tp_size = 1
+    capturer.restore_rows = capturer._restore_local_topk_ids
     capturer.device_buffer = torch.full(
         (num_tokens, 1, 1), -1, dtype=torch.int32, device=device
     )
@@ -969,7 +832,7 @@ def _make_cudagraph_manager(capture_sizes: list[int]) -> CudaGraphManager:
             vllm_config,
             torch.device("cuda:0"),
             CUDAGraphMode.FULL,
-            decode_query_len=1,
+            decode_query_lens={1: vllm_config.scheduler_config.max_num_seqs},
             ubatch_runner=cast(UBatchRunner, object()),
         )
     manager._graphs_captured = True

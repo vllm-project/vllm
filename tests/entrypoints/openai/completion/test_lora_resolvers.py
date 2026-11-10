@@ -37,6 +37,7 @@ class MockModelConfig:
     """Minimal mock ModelConfig for testing."""
 
     model: str = MODEL_NAME
+    served_model_name: str = MODEL_NAME
     runner_type = "generate"
     tokenizer: str = MODEL_NAME
     trust_remote_code: bool = False

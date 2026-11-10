@@ -12,7 +12,7 @@ use thiserror_ext::AsReport as _;
 
 use super::writer::Glm5PromptWriter;
 use crate::error::{Error, Result, bail_chat_template_thrown, chat_template_thrown};
-use crate::renderer::MediaPartSource;
+use crate::renderer::{MediaPartSource, tool_call_arguments_or_empty};
 use crate::request::{ChatContent, ChatContentPart, ChatMessage, ChatTool, GenerationPromptMode};
 use crate::{AssistantContentBlock, AssistantMessageExt};
 
@@ -414,7 +414,7 @@ fn render_inner(
     Ok(())
 }
 
-// TODO: Expose tool_reference and bundled outputs in ChatContentPart.
+// TODO: Expose bundled outputs in ChatContentPart.
 
 fn content(value: &ChatContent, message_index: usize) -> Value {
     match value {
@@ -430,6 +430,7 @@ fn content(value: &ChatContent, message_index: usize) -> Value {
                     ChatContentPart::InputAudio { .. } | ChatContentPart::AudioUrl { .. } => {
                         json!({"type": "audio", "message_index": message_index, "content_part_index": content_part_index})
                     }
+                    ChatContentPart::ToolReference { name } => json!({"type": "tool_reference", "name": name}),
                 })
                 .collect(),
         ),
@@ -454,8 +455,10 @@ pub(super) fn messages(messages: &[ChatMessage]) -> Vec<Value> {
                 }).collect::<String>());
             }
             if content.has_tool_calls() {
+                // The template needs a mapping; the request carries a string.
                 message["tool_calls"] = Value::Array(content.tool_calls().map(|call| {
-                    json!({"id": call.id, "function": {"name": call.name, "arguments": call.arguments}})
+                    let arguments = Value::Object(tool_call_arguments_or_empty(&call.arguments));
+                    json!({"id": call.id, "function": {"name": call.name, "arguments": arguments}})
                 }).collect());
             }
             message

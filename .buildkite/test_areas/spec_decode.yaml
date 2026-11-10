@@ -193,7 +193,7 @@ steps:
       - tests/v1/e2e/spec_decode/
       - vllm/platforms/rocm.py
 
-- label: ":nvidia: (H200 MIG 35GB) Spec Decode MTP DeepSeek + MiMo"
+- label: ":nvidia: (H200 MIG 35GB) Spec Decode MTP DeepSeek + MiMo + GLM"
   key: spec-decode-mtp-deepseek-mimo
   automatic_shard: true
   timeout_in_minutes: 30
@@ -203,14 +203,18 @@ steps:
     - vllm/v1/worker/gpu/spec_decode/
     - vllm/v1/attention/backends/
     - vllm/transformers_utils/configs/speculators/
+    - vllm/model_executor/models/glm4_moe_mtp.py
+    - vllm/model_executor/models/glm4_moe_lite_mtp.py
+    - vllm/model_executor/models/glm_ocr_mtp.py
     - tests/v1/e2e/spec_decode/
   commands:
     - pytest -v -s v1/e2e/spec_decode/mtp/deepseek/
     - pytest -v -s v1/e2e/spec_decode/mtp/mimo/
+    - pytest -v -s v1/e2e/spec_decode/mtp/glm/
   mirror:
     amd:
       automatic_shard: true
-      label: ":amd: (MI355 DPX) Spec Decode MTP DeepSeek + MiMo"
+      label: ":amd: (MI355 DPX) Spec Decode MTP DeepSeek + MiMo + GLM"
       dind: false
       device: mi355_dpx
       timeout_in_minutes: 40
@@ -223,6 +227,9 @@ steps:
       - vllm/v1/sample/
       - vllm/model_executor/layers/
       - vllm/transformers_utils/configs/speculators/
+      - vllm/model_executor/models/glm4_moe_mtp.py
+      - vllm/model_executor/models/glm4_moe_lite_mtp.py
+      - vllm/model_executor/models/glm_ocr_mtp.py
       - tests/v1/e2e/spec_decode/
       - vllm/platforms/rocm.py
 
@@ -312,10 +319,8 @@ steps:
     - vllm/v1/spec_decode/
     - vllm/v1/worker/gpu/spec_decode/
     - tests/v1/e2e/spec_decode/
-    - tests/spec_decode/
   commands:
     - pytest -v -s v1/e2e/spec_decode/ngram_suffix/
-    - python3 spec_decode/test_custom_proposer.py
   mirror:
     amd:
       automatic_shard: true
@@ -374,6 +379,8 @@ steps:
     - vllm/v1/worker/gpu/spec_decode/
     - tests/v1/e2e/spec_decode/
     - vllm/model_executor/models/qwen3_dflash.py
+    - vllm/model_executor/model_loader/reload/
+    - vllm/model_executor/utils.py
     - tests/models/test_qwen3_dflash_mxfp8_context_kv.py
   commands:
     - pytest -v -s v1/e2e/spec_decode/draft_model/
@@ -381,6 +388,7 @@ steps:
   mirror:
     amd:
       label: ":amd: (MI355) Spec Decode Draft Model Nightly"
+      automatic_shard: true
       dind: false
       device: mi355_1
       num_devices: 1
@@ -436,8 +444,6 @@ steps:
   optional: true
   num_devices: 2
   source_file_dependencies:
-    - vllm/v1/spec_decode/llm_base_proposer.py
-    - vllm/v1/spec_decode/eagle.py
     - vllm/v1/worker/gpu/spec_decode/eagle/
     - vllm/model_executor/models/deepseek_mtp.py
     - vllm/model_executor/models/deepseek_v2.py
@@ -463,7 +469,6 @@ steps:
       - vllm/v1/engine/
       - vllm/v1/spec_decode/
       - vllm/v1/worker/gpu/spec_decode/
-      - vllm/v1/worker/gpu_model_runner.py
       - tests/v1/e2e/spec_decode/test_mtp_parallel_load.py
       - vllm/platforms/rocm.py
 
@@ -577,6 +582,7 @@ steps:
 
 - label: ":nvidia: (H200 MIG 35GB) [Nightly] Spec Decode AL DSpark"
   key: spec-decode-dspark-nightly
+  automatic_shard: true
   timeout_in_minutes: 60
   device: h200_35gb
   optional: true
@@ -591,6 +597,7 @@ steps:
   mirror:
     amd:
       label: ":amd: (MI355 DPX) Spec Decode AL DSpark Nightly"
+      automatic_shard: true
       dind: false
       device: mi355_dpx
       timeout_in_minutes: 90
@@ -617,32 +624,22 @@ steps:
 
 - label: ":nvidia: (H200 MIG 35GB) [Nightly] Spec Decode AL MTP + Other Acceptance"
   key: spec-decode-mtp-other-acceptance-nightly
+  automatic_shard: true
   timeout_in_minutes: 35
   device: h200_35gb
   optional: true
-  parallelism: 3
   source_file_dependencies:
     - vllm/v1/spec_decode/
     - vllm/v1/worker/gpu/spec_decode/
     - tests/v1/e2e/spec_decode/conftest.py
     - tests/v1/e2e/spec_decode/
   commands:
-    # Each Gemma4 parametrization is an indivisible ~23m floor. Keep them in
-    # separate shards and put the remaining tests in shard 0, where new tests
-    # land by default.
-    - >-
-      if [ "$$BUILDKITE_PARALLEL_JOB" = "0" ]; then
-      pytest -v -s
-      v1/e2e/spec_decode/acceptance_rates/mtp_other/
-      --deselect "tests/v1/e2e/spec_decode/acceptance_rates/mtp_other/test_mtp.py::test_gemma4_mtp_acceptance_lengths[False]"
-      --deselect "tests/v1/e2e/spec_decode/acceptance_rates/mtp_other/test_mtp.py::test_gemma4_mtp_acceptance_lengths[True]";
-      fi
-    - if [ "$$BUILDKITE_PARALLEL_JOB" = "1" ]; then pytest -v -s "v1/e2e/spec_decode/acceptance_rates/mtp_other/test_mtp.py::test_gemma4_mtp_acceptance_lengths[False]"; fi
-    - if [ "$$BUILDKITE_PARALLEL_JOB" = "2" ]; then pytest -v -s "v1/e2e/spec_decode/acceptance_rates/mtp_other/test_mtp.py::test_gemma4_mtp_acceptance_lengths[True]"; fi
+    - pytest -v -s v1/e2e/spec_decode/acceptance_rates/mtp_other
   mirror:
     amd:
       label: ":amd: (MI355 DPX) Spec Decode AL MTP + Other Acceptance Nightly"
       dind: false
+      automatic_shard: true
       device: mi355_dpx
       timeout_in_minutes: 55
       depends_on:
@@ -652,7 +649,6 @@ steps:
       - vllm/v1/spec_decode/
       - vllm/v1/sample/
       - vllm/v1/worker/gpu/
-      - vllm/v1/worker/gpu_model_runner.py
       - vllm/v1/worker/gpu_worker.py
       - vllm/model_executor/model_loader/
       - vllm/model_executor/models/gemma4.py
