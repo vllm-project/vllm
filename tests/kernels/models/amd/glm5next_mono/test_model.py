@@ -36,6 +36,7 @@ from vllm.models.glm5next.amd.specialized_decode.runtime.spec import (
 from vllm.utils.torch_utils import set_random_seed
 
 from ._ffn import _on_cdna4
+from ._moe import _exact_moe
 
 MODEL = "amd/GLM-5.3-Flash-Quark-MXFP4"
 LOAD_FORMAT = "glm5next_mono_random"
@@ -56,7 +57,10 @@ LAST_BOUND = 0.02
 # - the MoE output of layers 3 and 4: vLLM quantizes expert inputs to MXFP4, the
 #   kernels to MXFP8, which puts vLLM 0.21 and the kernels 0.047 from an fp32
 #   MoE (test_ffn_matches_glm5next_moe), so the two differ by 0.22-0.28 a token;
+#   the kernels' own error is checked apart: each token's fp32 MoE on vLLM's
+#   input to it, the kernels at most EXACT_RATIO of vLLM's distance from it
 MOE_BOUND = 0.3
+EXACT_RATIO = 0.5
 # - past MOE_BOUND only a token whose 8th and 9th routing scores on vLLM's path
 #   are within TIE: the residual streams' 0.1-0.4% difference moves scores by
 #   about 1e-3, so it may pick another expert (seen: 0.33-0.43 at gaps up to
@@ -134,9 +138,31 @@ class RandomWeightLoader(DummyModelLoader):
     are near zero and leave the E8M0 scales zero)."""
 
     def load_weights(self, model, model_config) -> None:
+        from vllm.models.glm5next.amd.specialized_decode.mono.config import N_EXPERTS
+        from vllm.models.glm5next.common.model import Glm5NextModel
+
         super().load_weights(model, model_config)
         for name, t in model.state_dict().items():
             _fill(name, t)
+        # the kernel layers' raw expert shards, for the fp32 MoE: post-load
+        # processing shuffles them for AITER
+        backbone = next(m for m in model.modules() if isinstance(m, Glm5NextModel))
+        raw = {}
+        for idx in KERNEL_LAYERS:
+            moe = backbone.layers[idx].mlp
+            e = moe.experts.routed_experts
+            names = ("w13_weight", "w13_weight_scale", "w2_weight", "w2_weight_scale")
+            shards = [getattr(e, n).data.view(torch.uint8).clone() for n in names]
+            shared = N_EXPERTS
+            if moe.shared_experts is not None:
+                sh = moe.shared_experts
+                shared = tuple(
+                    t.data.view(torch.uint8).clone()
+                    for lin in (sh.gate_up_proj, sh.down_proj)
+                    for t in (lin.weight, lin.weight_scale)
+                )
+            raw[idx] = (*shards, shared)
+        backbone.raw_moe = raw
 
 
 class Probe:
@@ -167,6 +193,7 @@ class Probe:
 
         self._captured: dict = {}
         self._gaps: dict = {}
+        self._exact: dict = {}
         self._kernel_layers: set = set()
         self._lens = sorted(lens)
         if getattr(self, "_hooked", False):
@@ -207,6 +234,12 @@ class Probe:
             gap = (top[:, top_k - 1] - top[:, top_k]).tolist()
             for row, key in keys(idx, positions[0]):
                 self._gaps.setdefault(key, gap[row])
+            if idx in backbone.raw_moe:
+                # this rank's intermediate shard of the fp32 MoE on vLLM's input
+                bias = gate.e_score_correction_bias
+                exact = _exact_moe(h, gate.weight, bias, *backbone.raw_moe[idx])
+                for row, key in keys(idx, positions[0]):
+                    self._exact.setdefault(key, exact[row].cpu())
 
         model = self.model_runner.model  # type: ignore[attr-defined]
         backbone = next(m for m in model.modules() if isinstance(m, Glm5NextModel))
@@ -252,7 +285,12 @@ class Probe:
         decode.plan = capturing_plan
 
     def save_capture(self, path: str) -> None:
-        captured = (self._captured, self._gaps, sorted(self._kernel_layers))
+        captured = (
+            self._captured,
+            self._gaps,
+            sorted(self._kernel_layers),
+            self._exact,
+        )
         torch.save(captured, f"{path}.rank{self.rank}")  # type: ignore[attr-defined]
 
 
@@ -419,14 +457,21 @@ def _rel(a: torch.Tensor, b: torch.Tensor) -> float:
 def _assert_layers_close(got: str, want: str, tp: int) -> None:
     """Every decoder layer's outputs on every rank, token by token, kernels
     (`got`) against vLLM's layers (`want`), for the decode tokens whose
-    input to layer 3 is the same in both runs (see RESIDUAL_BOUND)."""
+    input to layer 3 is the same in both runs (see RESIDUAL_BOUND), and both
+    kernel layers' MoE outputs against an fp32 MoE (see MOE_BOUND)."""
     batches = _batches(tp)
+    # the fp32 MoE: every rank holds its intermediate shard's share
+    exact = []
+    for b in range(len(batches)):
+        parts = [torch.load(f"{want}.b{b}.rank{r}")[3] for r in range(tp)]
+        exact.append({k: sum(p[k] for p in parts) for k in parts[0]})
     for rank in range(tp):
         same, flipped, seen = 0, [], {"residual": 0.0, "moe": 0.0, "last": 0.0}
+        to_exact = {"kernel": 0.0, "vllm": 1.0, "ratio": 0.0}
         requests = set()  # (batch, prompt length): a batch's lengths all differ
         for b in range(len(batches)):
-            g, _, kernel_layers = torch.load(f"{got}.b{b}.rank{rank}")
-            w, gaps, _ = torch.load(f"{want}.b{b}.rank{rank}")
+            g, _, kernel_layers, _ = torch.load(f"{got}.b{b}.rank{rank}")
+            w, gaps, _, _ = torch.load(f"{want}.b{b}.rank{rank}")
             assert kernel_layers == list(KERNEL_LAYERS), (rank, kernel_layers)
             tokens = sorted({k[1:] for k in g} & {k[1:] for k in w})
             for k in tokens:
@@ -450,12 +495,20 @@ def _assert_layers_close(got: str, want: str, tp: int) -> None:
                         flipped.append((i, *k, round(err, 3), gaps[(i, *k)]))
                         break  # its residual stream differs from here on
                     seen["moe"] = max(seen["moe"], err)
+                    if gaps[(i, *k)] >= TIE:  # both route alike
+                        ref = exact[b][(i, *k)]
+                        e_k, e_v = _rel(x, ref), _rel(x_ref, ref)
+                        to_exact["kernel"] = max(to_exact["kernel"], e_k)
+                        to_exact["vllm"] = min(to_exact["vllm"], e_v)
+                        to_exact["ratio"] = max(to_exact["ratio"], e_k / e_v)
+                        assert e_k < EXACT_RATIO * e_v, (rank, i, k, "exact", e_k, e_v)
                 else:
                     err = _rel(g[(LAYERS - 1, *k)][0], w[(LAYERS - 1, *k)][0])
                     seen["last"] = max(seen["last"], err)
                     assert err < LAST_BOUND, (rank, k, "last layer", err)
         print(
             f"rank {rank}: {same} tokens with equal inputs, worst {seen}, "
+            f"MoE to fp32 (kernel max, vLLM min, worst ratio) {to_exact}, "
             f"near-tie flips {flipped}"
         )
         # at least one equal-input token a request, and few flips
