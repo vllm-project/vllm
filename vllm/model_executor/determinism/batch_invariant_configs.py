@@ -506,6 +506,21 @@ _BATCH_INVARIANT_MATMUL_TUNED_CONFIGS: dict[
                 (2048, _MatmulMConfig(16, 32, 4, 5)),
             ),
         ),
+        (128, 2880): _MatmulShapeConfig(  # gpt-oss-120b MoE router
+            block_k=128,
+            m_buckets=(
+                (1, _MatmulMConfig(16, 32, 4, 4)),
+                (4, _MatmulMConfig(16, 32, 4, 5)),
+                (8, _MatmulMConfig(16, 32, 4, 5)),
+                (16, _MatmulMConfig(16, 32, 4, 5)),
+                (32, _MatmulMConfig(16, 32, 4, 5)),
+                (64, _MatmulMConfig(16, 32, 4, 5)),
+                (256, _MatmulMConfig(16, 32, 4, 5)),
+                (512, _MatmulMConfig(16, 32, 4, 5)),
+                (1024, _MatmulMConfig(64, 32, 4, 5)),
+                (2048, _MatmulMConfig(64, 32, 4, 5)),
+            ),
+        ),
     },
     "blackwell": {
         (12288, 2048): _MatmulShapeConfig(

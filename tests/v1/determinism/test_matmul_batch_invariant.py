@@ -155,6 +155,7 @@ def test_matmul_batch_invariance_across_tuned_m_buckets(m, transpose_b):
         (2880, 4096, True),
         (201088, 2880, False),
         (32, 2880, True),
+        (128, 2880, True),
     ],
 )
 def test_hopper_tuned_linear_batch_invariance(n, k, has_bias):
