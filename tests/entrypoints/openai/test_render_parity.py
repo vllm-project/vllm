@@ -269,28 +269,28 @@ def serving_responses(
     )
 
 
-def _render_duration_count() -> float:
-    return (
+def _render_duration_counts() -> tuple[float, float]:
+    return tuple(
         REGISTRY.get_sample_value(
             "vllm:request_render_duration_seconds_count",
-            {"model_name": _MODEL, "request_type": "chat"},
+            {"model_name": _MODEL, "request_type": request_type},
         )
         or 0
+        for request_type in ("chat", "responses")
     )
 
 
 @pytest.mark.asyncio
 async def test_render_duration_metric(online_renderer, serving_responses, monkeypatch):
-    """Responses renders are observed like Chat Completions renders."""
-    before = _render_duration_count()
+    chat, responses = _render_duration_counts()
 
     chat_req = ChatCompletionRequest(model=_MODEL, messages=_USER)
     await _capture_chat(online_renderer, chat_req, monkeypatch)
-    assert _render_duration_count() == before + 1
+    assert _render_duration_counts() == (chat + 1, responses)
 
     responses_req = ResponsesRequest(model=_MODEL, input=_USER)
     await _capture_responses(serving_responses, responses_req, monkeypatch)
-    assert _render_duration_count() == before + 2
+    assert _render_duration_counts() == (chat + 1, responses + 1)
 
 
 @pytest.mark.asyncio
