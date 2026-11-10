@@ -591,12 +591,13 @@ class MambaMixer2(MambaBase, PluggableLayer):
             # num_decodes.
             spec = self.get_kv_cache_spec(vllm_config)
             assert spec is not None and isinstance(spec, MambaSpec)
+            self._state_indices_stride = 1 + spec.num_speculative_blocks
             scatter_states.register_warmup(
                 state_shape=spec.shapes[1],
                 state_dtype=spec.dtypes[1],
                 indices_dtype=torch.int32,
                 max_num_tokens=vllm_config.scheduler_config.max_num_seqs,
-                indices_stride=1 + spec.num_speculative_blocks,
+                indices_stride=self._state_indices_stride,
                 may_be_unaligned_indices=True,
             )
 
@@ -753,6 +754,15 @@ class MambaMixer2(MambaBase, PluggableLayer):
                     write_final_states,
                     exc_info=True,
                 )
+
+        state = torch.zeros(
+            1, nheads, headdim, dstate, device=device, dtype=ssm_state_dtype
+        )
+        stride = self._state_indices_stride
+        indices = torch.zeros(1 + stride, device=device, dtype=torch.int32)
+        has_initial_states = torch.ones(1, device=device, dtype=torch.bool)
+        for start in (0, 1):
+            gather_initial_states(state, indices[start::stride][:1], has_initial_states)
 
         logger.debug("Mamba2 SSD kernel warmup completed for layer %s", self.prefix)
         torch.accelerator.empty_cache()
