@@ -173,7 +173,7 @@ def _scores(q, w, keys):
 
 
 def _assert_topk(row, scores, k):
-    """``row`` is a top-k of the entries of ``scores`` above -inf, up to the
+    """`row` is a top-k of the entries of `scores` above -inf, up to the
     fp32 reduce order."""
     valid = scores > float("-inf")
     want = min(k, int(valid.sum()))
@@ -575,7 +575,7 @@ def _topk_indices(q, weights, keys, ends, k):
 
 
 def _recall(selected, reference):
-    """Per row, the fraction of the reference top-k that ``selected`` picked."""
+    """Per row, the fraction of the reference top-k that `selected` picked."""
     return (selected[:, :, None] == reference[:, None, :]).any(1).float().mean(1)
 
 

@@ -399,9 +399,9 @@ def test_decode_attention_int64_logits_offset(B, H_Q, H_KV, D_QK, D_V, is_mla):
 
 
 def _verify_reference(q, cache, block_table, seq_lens, real_seq_lens, qlen, scale):
-    """Causal MLA verify in the dtype of ``cache``: row t of a request attends
+    """Causal MLA verify in the dtype of `cache`: row t of a request attends
     its first min(L - qlen + 1 + t, L_real) tokens; a row with none comes back
-    zero. A bf16 ``cache`` also rounds P to bf16 before the PV product, as the
+    zero. A bf16 `cache` also rounds P to bf16 before the PV product, as the
     kernel does."""
     kv_lora_rank = 512
     page_size = cache.shape[1]
@@ -601,7 +601,7 @@ def test_decode_attention_fwd_verify_int64_page_offset(num_heads):
 )
 @pytest.mark.parametrize("sliding_window", [5, 64, 2055])
 def test_decode_attention_sliding_window(H_Q, H_KV, D_QK, D_V, is_mla, sliding_window):
-    """Each row attends to its last ``sliding_window`` keys only, also when the
+    """Each row attends to its last `sliding_window` keys only, also when the
     window splits unevenly over the KV splits (stage 2 must skip the same empty
     splits as stage 1)."""
     PAGE_SIZE = 16
