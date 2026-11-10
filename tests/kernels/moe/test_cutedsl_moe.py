@@ -540,11 +540,6 @@ def test_flashinfer_cutedsl_moe_masked(
     )
 
 
-def quant_dequant_mxfp8(x: torch.Tensor) -> torch.Tensor:
-    x_q, x_s = mxfp8_e4m3_quantize(x)
-    return dequant_mxfp8_to_bf16(x_q, x_s.view(*x.shape[:-1], -1))
-
-
 @pytest.mark.parametrize(
     "num_experts, max_m, hidden_dim, inter_dim",
     [(8, 64, 256, 128), (16, 128, 512, 384)],
@@ -597,10 +592,12 @@ def test_flashinfer_cutedsl_mxfp8_moe_masked(
     for i, m in enumerate(masked_m.tolist()):
         if m == 0:
             continue
-        gate_up = quant_dequant_mxfp8(hidden_states[i, :m]).float() @ w1_ref[i].T
+        x_q, x_s = mxfp8_e4m3_quantize(hidden_states[i, :m])
+        gate_up = dequant_mxfp8_to_bf16(x_q, x_s.view(m, -1)).float() @ w1_ref[i].T
         gate_up = gate_up.to(torch.bfloat16)
         act = F.silu(gate_up[:, :inter_dim].float()) * gate_up[:, inter_dim:]
-        ref = quant_dequant_mxfp8(act.to(torch.bfloat16)).float() @ w2_ref[i].T
+        act_q, act_s = mxfp8_e4m3_quantize(act.to(torch.bfloat16))
+        ref = dequant_mxfp8_to_bf16(act_q, act_s.view(m, -1)).float() @ w2_ref[i].T
         torch.testing.assert_close(out[i, :m], ref.to(out.dtype), atol=3e-2, rtol=5e-2)
 
 
