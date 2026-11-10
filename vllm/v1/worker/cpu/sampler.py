@@ -456,30 +456,32 @@ class CPUSamplingMaskTensors(NamedTuple):
             device=logits.device,
         )
         counts = torch.zeros(num_output_rows, dtype=torch.int32, device=logits.device)
-        bit_weights = 1 << torch.arange(8, dtype=torch.int16, device=logits.device)
+        token_ids_np = token_ids.numpy()
+        packed_mask_np = packed_mask.numpy()
+        counts_np = counts.numpy()
+        cu_num_logits_np = cu_num_logits.numpy()
+        num_sampled_tokens_np = num_sampled_tokens.numpy()
+        logits_np = (
+            logits.numpy()
+            if logits.dtype in (torch.float16, torch.float32, torch.float64)
+            else None
+        )
 
         for output_row in range(num_output_rows):
             req_idx, slot_idx = divmod(output_row, rows_per_request)
-            if slot_idx >= int(num_sampled_tokens[req_idx]):
+            if slot_idx >= num_sampled_tokens_np[req_idx]:
                 continue
-            source_row = int(cu_num_logits[req_idx]) + slot_idx
-            support = torch.isfinite(logits[source_row])
-            kept_ids = torch.nonzero(support).flatten()
-            counts[output_row] = kept_ids.numel()
-            num_compact = min(kept_ids.numel(), max_num_kept)
-            token_ids[output_row, :num_compact] = kept_ids[:num_compact]
-
-            padded = torch.zeros(
-                packed_mask.shape[1] * 8,
-                dtype=torch.bool,
-                device=logits.device,
+            source_row = int(cu_num_logits_np[req_idx]) + slot_idx
+            support = (
+                np.isfinite(logits_np[source_row])
+                if logits_np is not None
+                else torch.isfinite(logits[source_row]).numpy()
             )
-            padded[:vocab_size] = support
-            packed_mask[output_row] = (
-                (padded.view(-1, 8).to(torch.int16) * bit_weights)
-                .sum(dim=1)
-                .to(torch.uint8)
-            )
+            kept_ids = np.flatnonzero(support)
+            counts_np[output_row] = kept_ids.size
+            num_compact = min(kept_ids.size, max_num_kept)
+            token_ids_np[output_row, :num_compact] = kept_ids[:num_compact]
+            packed_mask_np[output_row] = np.packbits(support, bitorder="little")
 
         return cls(
             token_ids,
