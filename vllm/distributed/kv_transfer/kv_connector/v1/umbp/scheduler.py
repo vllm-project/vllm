@@ -1130,8 +1130,12 @@ class UMBPStoreConnectorScheduler:
         candidates: Sequence[_LazyCandidate],
         hits: Sequence[bool | None],
     ) -> tuple[list[BlockTransferPlan], bool]:
-        rank_count = self.topology.rank_count
-        expected = len(candidates) * rank_count
+        assert self.codec is not None
+        widths = [
+            self.codec.keys_per_object(self.topology, group_id)
+            for _, _, group_id, _ in candidates
+        ]
+        expected = sum(widths)
         if len(hits) != expected or any(hit is None for hit in hits):
             # Unreachable is not absent. Storing the window on it would
             # resubmit every block each step while the pool is down.
@@ -1142,8 +1146,13 @@ class UMBPStoreConnectorScheduler:
             )
             return [], False
         plans: list[BlockTransferPlan] = []
-        for index, (block, key, group_id, block_hash) in enumerate(candidates):
-            if all(hits[index * rank_count : (index + 1) * rank_count]):
+        offset = 0
+        for (block, key, group_id, block_hash), width in zip(
+            candidates, widths, strict=True
+        ):
+            start = offset
+            offset += width
+            if all(hits[start : start + width]):
                 self._lazy_confirmed[key] = (block.block_id, block_hash)
                 continue
             self._lazy_confirmed.pop(key, None)
