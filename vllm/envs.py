@@ -146,7 +146,6 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_LINEAR: bool = True
     VLLM_ROCM_USE_AITER_LINEAR_HIPBMM: bool = False
     VLLM_ROCM_USE_AITER_MOE: bool = True
-    VLLM_ROCM_MOE_MXFP8_DISPATCH: bool = False
     VLLM_ROCM_AITER_MOE_DISPATCH_POLICY: int = 0
     VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4: bool | None = None
     VLLM_ROCM_USE_AITER_MOE_SITUV2: Literal["auto", "a4w4", "a8w4", "a16w4"] = "auto"
@@ -1364,16 +1363,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # By default is enabled.
     "VLLM_ROCM_USE_AITER_MOE": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_MOE", "True").lower() in ("true", "1")
-    ),
-    # ROCm, default off. With data parallelism and the default
-    # allgather_reducescatter all2all backend, AITER MXFP4 MoE experts (e.g.
-    # DeepSeek-V4.1 on MI355X) quantize the dispatch input to MXFP8
-    # before the all-gather instead of gathering BF16, wherever AITER would
-    # quantize the gathered batch to MXFP8 with the same per-row kernel. The
-    # experts get the same input either way; the all-gather moves about half
-    # the bytes. Eager (prefill) steps only.
-    "VLLM_ROCM_MOE_MXFP8_DISPATCH": lambda: (
-        os.getenv("VLLM_ROCM_MOE_MXFP8_DISPATCH", "0").lower() in ("true", "1")
     ),
     # Activation dtype for the Kimi-K3 SiTU MXFP4 MoE (AITER FlyDSL SiTUv2):
     # auto (= a4w4), a4w4, a8w4 or a16w4. Legacy 1/0 mean a4w4/a16w4.

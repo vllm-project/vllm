@@ -1227,7 +1227,7 @@ def test_aiter_fused_moe_mi350_mxfp4_w4a16_determinism():
 
 
 @pytest.mark.skipif(not on_gfx950(), reason="gfx950 ROCm only")
-def test_aiter_mxfp4_w4a16_mxfp8_dispatch_input_matches_bf16(monkeypatch):
+def test_aiter_mxfp4_w4a16_mxfp8_dispatch_input_matches_bf16():
     """Above AITER's fused quant + sort cut-over, feeding the experts the
     MXFP8 rows and scales the naive DP dispatch gathers matches feeding them
     BF16, within the experts' own rerun noise."""
@@ -1255,10 +1255,9 @@ def test_aiter_mxfp4_w4a16_mxfp8_dispatch_input_matches_bf16(monkeypatch):
     experts = AiterMxfp4Experts(case.moe_config, case.quant_config)
     assert not experts.quantizes_input_to_mxfp8(cut_over, topk)
     assert experts.quantizes_input_to_mxfp8(cut_over + 1, topk)
-    monkeypatch.setenv("VLLM_ROCM_MOE_MXFP8_DISPATCH", "0")
-    assert experts.mxfp8_dispatch_predicate() is None
-    monkeypatch.setenv("VLLM_ROCM_MOE_MXFP8_DISPATCH", "1")
     assert experts.mxfp8_dispatch_predicate() == experts.quantizes_input_to_mxfp8
+    with mock.patch("vllm.platforms.rocm.get_cdna_version", return_value=5):
+        assert experts.mxfp8_dispatch_predicate() is None
 
     def run(hidden_states, a1q_scale):
         return rocm_aiter_fused_experts(

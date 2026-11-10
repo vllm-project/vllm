@@ -7,7 +7,6 @@ from typing import TYPE_CHECKING
 
 import torch
 
-import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
@@ -784,7 +783,9 @@ class AiterMxfp4Experts(AiterExperts):
         return mxfp4_w4a16_extra_kwargs(self.quant_config, self.moe_config)
 
     def mxfp8_dispatch_predicate(self) -> Callable[[int, int], bool] | None:
-        if not envs.VLLM_ROCM_MOE_MXFP8_DISPATCH:
+        from vllm.platforms.rocm import get_cdna_version
+
+        if get_cdna_version() != 4:
             return None
         return self.quantizes_input_to_mxfp8
 
