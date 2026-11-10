@@ -270,11 +270,14 @@ def reset_eplb_async_state(model_runner: GPUModelRunner) -> None:
     if eplb_state is None:
         return
 
-    # Increment the epoch first, so an async worker that publishes a result
-    # after this point sees the change and discards it.
-    eplb_state.ft_reset_epoch += 1
+    # Stop first, so a cycle that starts after the epoch change transfers
+    # nothing.
     for ms in eplb_state.model_states.values():
         ms.rebalanced = False
+    # Increment the epoch before the sweep, so an async worker that publishes
+    # a result after this point sees the change and discards it.
+    eplb_state.ft_reset_epoch += 1
+    for ms in eplb_state.model_states.values():
         result = ms.pending_result
         ms.pending_result = None
         if result is not None:
