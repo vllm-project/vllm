@@ -97,9 +97,6 @@ class IterationMetricsCollector:
         ready, self._ready = self._ready, []
         return ready
 
-    def has_pending_timing(self) -> bool:
-        return bool(self._pending)
-
     def discard_pending(self) -> None:
         """Drop idle-tail records; late samples cannot attach to a new iteration.
 

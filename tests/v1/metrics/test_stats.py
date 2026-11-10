@@ -88,7 +88,6 @@ def test_iteration_timing_keeps_original_batch_when_results_arrive_late(timing_f
     else:
         collector.complete_iteration(output, model_output)
     assert not collector.take_ready()
-    assert collector.has_pending_timing()
     if timing_first:
         collector.complete_iteration(output, model_output)
     else:
@@ -102,13 +101,11 @@ def test_iteration_timing_keeps_original_batch_when_results_arrive_late(timing_f
     assert record.num_encoder_output_tokens == 392
     assert record.elapsed_ms == 12
     assert record.timing_scope == "model_step_cuda"
-    assert not collector.has_pending_timing()
 
 
 def test_dummy_tail_timings_survive_more_than_batch_queue_depth():
     collector = IterationMetricsCollector()
     indices = [collector.begin_dummy_iteration() for _ in range(64)]
-    assert collector.has_pending_timing()
     assert not collector.take_ready()
     output = SchedulerOutput.make_empty()
     collector.complete_iteration(
@@ -123,7 +120,6 @@ def test_dummy_tail_timings_survive_more_than_batch_queue_depth():
     assert all(
         record.num_ctx_tokens == record.num_generation_tokens == 0 for record in records
     )
-    assert not collector.has_pending_timing()
 
 
 @pytest.mark.parametrize("dummy", [False, True])
@@ -132,7 +128,6 @@ def test_idle_tail_is_discarded_without_losing_ready_or_resumed_records(dummy):
     old_ids = [collector.begin_dummy_iteration() for _ in range(3)]
     collector.complete_timing_samples(((old_ids[0], 10.0),))
     collector.discard_pending()
-    assert not collector.has_pending_timing()
     if dummy:
         iteration_id = collector.begin_dummy_iteration()
     else:
@@ -155,7 +150,6 @@ def test_idle_tail_is_discarded_without_losing_ready_or_resumed_records(dummy):
         iteration_id,
     ]
     assert [record.elapsed_ms for record in records] == [10, 20]
-    assert not collector.has_pending_timing()
 
 
 @pytest.mark.parametrize("stats_owner", [None, 0, 3])

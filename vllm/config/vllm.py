@@ -3413,15 +3413,6 @@ class VllmConfig:
 
         return unsupported
 
-    def _iteration_timing_unsupported_reason(self) -> str | None:
-        if self.device_config.device_type != "cuda":
-            return "Iteration GPU timing requires a CUDA device"
-        if self.model_config is None or self.model_config.runner_type != "generate":
-            return "Iteration GPU timing supports generative models only"
-        if self.parallel_config.distributed_executor_backend not in (None, "uni", "mp"):
-            return "Iteration GPU timing supports uni and mp executors only"
-        return None
-
     def resolve_iteration_timing(
         self, log_stats: bool, multiprocess_mode: bool
     ) -> None:
@@ -3429,11 +3420,19 @@ class VllmConfig:
         observability.iteration_timing_enabled = False
         if not log_stats or not observability.enable_logging_iteration_details:
             return
-        reason = (
-            self._iteration_timing_unsupported_reason()
-            if multiprocess_mode
-            else "Iteration GPU timing requires an out-of-process EngineCore"
-        )
+        reason = None
+        if not multiprocess_mode:
+            reason = "Iteration GPU timing requires an out-of-process EngineCore"
+        elif self.device_config.device_type != "cuda":
+            reason = "Iteration GPU timing requires a CUDA device"
+        elif self.model_config is None or self.model_config.runner_type != "generate":
+            reason = "Iteration GPU timing supports generative models only"
+        elif self.parallel_config.distributed_executor_backend not in (
+            None,
+            "uni",
+            "mp",
+        ):
+            reason = "Iteration GPU timing supports uni and mp executors only"
         if reason is None:
             observability.iteration_timing_enabled = True
         else:

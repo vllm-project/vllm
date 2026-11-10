@@ -41,53 +41,49 @@ def make_fake_engine(
 
 
 @pytest.mark.parametrize(
-    "logging,stats,mp,device,runner,pp,executor,previously_enabled,expected",
+    "overrides,expected",
     [
-        (True, True, True, "cuda", "generate", 1, "uni", False, True),
-        (False, True, True, "cuda", "generate", 1, "mp", False, False),
-        (True, False, True, "cuda", "generate", 1, "mp", False, False),
-        (True, True, False, "cuda", "generate", 1, "uni", False, False),
-        (True, True, True, "cpu", "generate", 1, "uni", False, False),
-        (True, True, True, "cuda", "pooling", 1, "uni", False, False),
-        (True, True, True, "cuda", "generate", 2, "mp", False, True),
-        (True, True, True, "cuda", "generate", 1, "ray", False, False),
-        (True, False, True, "cuda", "generate", 1, "mp", True, False),
-    ],
-    ids=[
-        "supported-uni",
-        "logging-off",
-        "stats-off",
-        "in-process",
-        "non-cuda",
-        "pooling",
-        "supported-pp2",
-        "ray",
-        "clear-stale-state",
+        pytest.param({}, True, id="supported-uni"),
+        pytest.param({"logging": False, "executor": "mp"}, False, id="logging-off"),
+        pytest.param({"stats": False, "executor": "mp"}, False, id="stats-off"),
+        pytest.param({"multiprocessing": False}, False, id="in-process"),
+        pytest.param({"device": "cpu"}, False, id="non-cuda"),
+        pytest.param({"runner": "pooling"}, False, id="pooling"),
+        pytest.param(
+            {"pipeline_parallel_size": 2, "executor": "mp"},
+            True,
+            id="supported-pp2",
+        ),
+        pytest.param({"executor": "ray"}, False, id="ray"),
+        pytest.param(
+            {"stats": False, "executor": "mp", "previously_enabled": True},
+            False,
+            id="clear-stale-state",
+        ),
     ],
 )
-def test_iteration_logging_enables_supported_timing_only(
-    logging,
-    stats,
-    mp,
-    device,
-    runner,
-    pp,
-    executor,
-    previously_enabled,
-    expected,
-    caplog,
-):
+def test_iteration_logging_enables_supported_timing_only(overrides, expected, caplog):
+    logging = overrides.get("logging", True)
+    stats = overrides.get("stats", True)
     config = VllmConfig()
-    config.model_config = SimpleNamespace(runner_type=runner)
-    config.device_config.device_type = device
-    config.parallel_config.pipeline_parallel_size = pp
-    config.parallel_config.distributed_executor_backend = executor
+    config.model_config = SimpleNamespace(
+        runner_type=overrides.get("runner", "generate")
+    )
+    config.device_config.device_type = overrides.get("device", "cuda")
+    config.parallel_config.pipeline_parallel_size = overrides.get(
+        "pipeline_parallel_size", 1
+    )
+    config.parallel_config.distributed_executor_backend = overrides.get(
+        "executor", "uni"
+    )
     config.observability_config = ObservabilityConfig(
         enable_logging_iteration_details=logging
     )
-    config.observability_config.iteration_timing_enabled = previously_enabled
+    config.observability_config.iteration_timing_enabled = overrides.get(
+        "previously_enabled", False
+    )
 
-    config.resolve_iteration_timing(stats, mp)
+    config.resolve_iteration_timing(stats, overrides.get("multiprocessing", True))
 
     assert config.observability_config.iteration_timing_enabled is expected
     if logging and stats and not expected:

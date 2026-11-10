@@ -28,10 +28,9 @@ def test_ready_events_are_reused_without_waiting_for_pending_or_contended_drains
     assert timer.drain_samples() == ()
     events[0].elapsed_time.assert_not_called()
     events[1].query.return_value = True
-    with timer._drain_lock:
-        assert timer.drain_samples() == ()
 
     def append_during_query():
+        assert timer.drain_samples() == ()
         events[1].query.side_effect = None
         timer.start(5)
         timer.finish()
