@@ -85,6 +85,7 @@ def _make_speculative_config(
     hf_config = SpeculativeConfig.hf_config_override(_make_hf_config(**hf_kwargs))
     draft = MagicMock(
         hf_config=hf_config,
+        hf_text_config=hf_config,
         architectures=hf_config.architectures,
         max_model_len=128,
         # Self-contained DSpark draft models declare their speculator.
@@ -401,6 +402,7 @@ def _make_mtp_speculative_config(
     draft_model_config = MagicMock(
         model="draft",
         hf_config=draft_hf_config,
+        hf_text_config=draft_hf_config,
         architectures=draft_hf_config.architectures,
         max_model_len=128,
         speculator_config_class=None,
