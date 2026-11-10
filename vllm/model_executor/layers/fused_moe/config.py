@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass, field
 from enum import IntEnum
-from typing import Union
+from typing import TYPE_CHECKING, Union
 
 import torch
 
@@ -23,6 +23,11 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import get_triton_kernels_version
 from vllm.utils.math_utils import cdiv
+
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.fused_moe.modular_kernel import (
+        FusedMoEActivationFormat,
+    )
 
 logger = init_logger(__name__)
 
@@ -315,6 +320,28 @@ class FusedMoEQuantConfig:
     @property
     def is_block_quantized(self) -> bool:
         return self.block_shape is not None
+
+    def act_scale_is_tensor_wide(self, scale: torch.Tensor | None) -> bool:
+        """Whether `scale` is a runtime-reduced, tensor-wide act scale.
+
+        Only native fp8/int8 per-tensor quantization derives its scale from
+        every element of the activation, so only that scheme is affected by
+        rows that hold no route (e.g. `PaddedStandard` padding) and must be
+        masked out of the reduction. Per-token and block scales are row-local,
+        and a static scale does not depend on the data at all.
+
+        Args:
+            scale: Configured a1 or a2 activation scale.
+
+        Returns:
+            True if the scale has to be computed over routed rows only.
+
+        """
+        return (
+            scale is None
+            and self.is_per_tensor
+            and (self.use_fp8_w8a8 or self.use_int8_w8a8)
+        )
 
     @property
     def a1_scale(self) -> torch.Tensor | None:
@@ -1029,6 +1056,7 @@ class FusedMoEParallelConfig:
     use_ep: bool  # whether to use EP or not
     all2all_backend: str  # all2all backend for MoE communication
     enable_eplb: bool  # whether to enable expert load balancing
+    mori_ep_v2: bool = False  # whether the "mori" all2all backend runs EPv2
 
     @property
     def is_sequence_parallel(self) -> bool:
@@ -1066,10 +1094,6 @@ class FusedMoEParallelConfig:
         )
 
     @property
-    def use_batched_activation_format(self):
-        return self.use_deepep_ll_kernels or self.use_nixl_ep_kernels
-
-    @property
     def needs_round_robin_routing_tables(self):
         return self.use_deepep_ll_kernels or self.use_nixl_ep_kernels
 
@@ -1087,10 +1111,24 @@ class FusedMoEParallelConfig:
         return self.all2all_backend == "passthrough"
 
     @property
-    def use_mori_kernels(self):
+    def use_alltoall_batched_kernels(self):
+        return self.use_all2all_kernels and self.all2all_backend == "alltoall_batched"
+
+    @property
+    def use_mori_epv1_kernels(self):
+        if self.all2all_backend == "mori":
+            return self.use_all2all_kernels and not self.mori_ep_v2
         return self.use_all2all_kernels and self.all2all_backend in (
             "mori_high_throughput",
             "mori_low_latency",
+        )
+
+    @property
+    def use_mori_epv2_kernels(self):
+        return (
+            self.use_all2all_kernels
+            and self.all2all_backend == "mori"
+            and self.mori_ep_v2
         )
 
     @property
@@ -1225,6 +1263,7 @@ class FusedMoEParallelConfig:
                 use_ep=False,
                 all2all_backend=vllm_parallel_config.all2all_backend,
                 enable_eplb=vllm_parallel_config.enable_eplb,
+                mori_ep_v2=bool(vllm_parallel_config.mori_ep_v2),
             )
         # DP + EP / TP + EP / DP + TP + EP
         assert use_ep
@@ -1245,6 +1284,7 @@ class FusedMoEParallelConfig:
             use_ep=True,
             all2all_backend=vllm_parallel_config.all2all_backend,
             enable_eplb=vllm_parallel_config.enable_eplb,
+            mori_ep_v2=bool(vllm_parallel_config.mori_ep_v2),
         )
 
     @classmethod
@@ -1407,10 +1447,11 @@ class FusedMoEConfig:
                 )
             self.use_mxfp4_w4a4_dsv4 = True
 
-        if self.use_mori_kernels:
+        if self.use_mori_epv1_kernels:
             assert self.rocm_aiter_fmoe_enabled, (
-                "Mori needs to be used with aiter fused_moe for now."
+                "MoRI EPv1 needs to be used with aiter fused_moe for now."
             )
+        if self.use_mori_epv1_kernels or self.use_mori_epv2_kernels:
             assert not self.is_fused_shared_expert_requested, (
                 "Mori does not support fusion shared expert now. "
                 "Turn it off by setting VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=0"
@@ -1422,6 +1463,30 @@ class FusedMoEConfig:
             raise NotImplementedError(
                 "is_act_and_mul=False is supported only for CUDA, XPU and ROCm for now"
             )
+
+    @property
+    def use_batched_activation_format(self):
+        return self.activation_format.is_batched
+
+    @property
+    def activation_format(self) -> "FusedMoEActivationFormat":
+        """The all2all activation format."""
+        from vllm.model_executor.layers.fused_moe.modular_kernel import (
+            FusedMoEActivationFormat,
+        )
+
+        conf = self.moe_parallel_config
+        if (
+            conf.use_deepep_ll_kernels
+            or conf.use_nixl_ep_kernels
+            or conf.use_alltoall_batched_kernels
+            or self.moe_backend == "batched_triton"
+        ):
+            return FusedMoEActivationFormat.BatchedExperts
+        elif conf.use_deepep_v2_kernels:
+            return FusedMoEActivationFormat.PaddedStandard
+        else:
+            return FusedMoEActivationFormat.Standard
 
     @property
     def is_act_and_mul(self) -> bool:
@@ -1480,8 +1545,8 @@ class FusedMoEConfig:
     def use_deferred_moe_finalize(self) -> bool:
         """Whether experts may return an unfinalized output on this deployment.
 
-        Evaluated on read rather than in ``__post_init__`` because deferral is
-        requested after construction, like ``skip_final_all_reduce``.
+        Evaluated on read rather than in `__post_init__` because deferral is
+        requested after construction, like `skip_final_all_reduce`.
         """
         # The consumer fuses a TP all-reduce. Other parallel modes require a
         # combine or reduce-scatter after the experts and cannot defer it, and
@@ -1502,23 +1567,23 @@ class FusedMoEConfig:
         A layer whose consumer can fuse the top-k reduction (e.g. into its TP
         all-reduce) calls this once while the model is built, and only when its
         experts are TRTLLM-Gen ones that can stop after GEMM2 (the
-        ``do_finalize=False`` path). Other experts ignore the request and
-        always finalize, which ``should_defer_moe_finalize`` can't see, so the
-        layer checks the quant method's ``experts_cls`` first, as Kimi-K3 does.
+        `do_finalize=False` path). Other experts ignore the request and
+        always finalize, which `should_defer_moe_finalize` can't see, so the
+        layer checks the quant method's `experts_cls` first, as Kimi-K3 does.
         From then on:
 
-        - The experts return an ``UnfinalizedMoEOutput`` instead of finalized
-          states for every call ``should_defer_moe_finalize`` accepts.
-        - ``should_defer_moe_finalize(num_tokens)`` is the answer for a call:
+        - The experts return an `UnfinalizedMoEOutput` instead of finalized
+          states for every call `should_defer_moe_finalize` accepts.
+        - `should_defer_moe_finalize(num_tokens)` is the answer for a call:
           it requires a TP-only deployment without hidden-dim padding
-          (``use_deferred_moe_finalize``), a non-empty call and at most
-          ``defer_moe_finalize_max_num_tokens`` tokens. The cap starts at
-          ``max_num_tokens`` and only ever goes down: experts that would split a
+          (`use_deferred_moe_finalize`), a non-empty call and at most
+          `defer_moe_finalize_max_num_tokens` tokens. The cap starts at
+          `max_num_tokens` and only ever goes down: experts that would split a
           larger call across kernel launches lower it to their single-launch
           size when they are built, since each launch permutes into its own
           buffer.
-        - The model asks ``should_defer_moe_finalize`` before each call and takes
-          the matching path. A deferred call runs the runner's ``_forward_impl``
+        - The model asks `should_defer_moe_finalize` before each call and takes
+          the matching path. A deferred call runs the runner's `_forward_impl`
           directly, since the MoE custom op returns tensors only, and the
           consumer then owns the top-k reduction, the shared-expert add and the
           all-reduce.
@@ -1541,7 +1606,7 @@ class FusedMoEConfig:
         )
 
     def limit_deferred_moe_finalize(self, max_num_tokens: int) -> None:
-        """Finalize calls above ``max_num_tokens`` even when deferring.
+        """Finalize calls above `max_num_tokens` even when deferring.
 
         Negative means no limit, and leaves the current one in place.
         """
@@ -1562,8 +1627,12 @@ class FusedMoEConfig:
         return self.moe_parallel_config.use_passthrough_all2all
 
     @property
-    def use_mori_kernels(self):
-        return self.moe_parallel_config.use_mori_kernels
+    def use_mori_epv1_kernels(self):
+        return self.moe_parallel_config.use_mori_epv1_kernels
+
+    @property
+    def use_mori_epv2_kernels(self):
+        return self.moe_parallel_config.use_mori_epv2_kernels
 
     @property
     def use_fi_nvl_two_sided_kernels(self):
@@ -1576,6 +1645,10 @@ class FusedMoEConfig:
     @property
     def use_ag_rs_all2all_kernels(self):
         return self.moe_parallel_config.use_ag_rs_all2all_kernels
+
+    @property
+    def use_alltoall_batched_kernels(self):
+        return self.moe_parallel_config.use_alltoall_batched_kernels
 
     @property
     def use_nixl_ep_kernels(self):

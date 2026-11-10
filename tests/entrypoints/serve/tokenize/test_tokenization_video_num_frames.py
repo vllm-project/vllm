@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Regression test: an explicit video ``num_frames`` must take effect for
+"""Regression test: an explicit video `num_frames` must take effect for
 models whose video loader samples by fps (Qwen2-VL here), not be ignored.
 """
 

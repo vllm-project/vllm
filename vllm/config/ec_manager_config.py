@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from abc import ABC
 from dataclasses import field
 from typing import Any
 
@@ -28,11 +27,3 @@ class EncoderCacheManagerConfig:
         if cls_path is None:
             return None
         return resolve_obj_by_qualname(cls_path)
-
-
-class EncoderCacheManagerMetadata(ABC):  # noqa: B024
-    """Abstract Metadata used to communicate between the
-    Scheduler EncoderCacheManager and Worker EncoderCacheManager.
-    """
-
-    pass
