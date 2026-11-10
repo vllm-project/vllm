@@ -63,21 +63,14 @@ class EngramConfig:
 
     peer_group_size: int = 0
     """Split each GPU table's rows over this many GPUs of several engines in one
-    NVLink domain, such as every prefill engine of a deployment, instead of over
-    one engine's DP ranks. Lookups read rows from the owning GPU's HBM, so no
-    engine's step waits on another's. The GPU counts of the engines in the group
-    must add up to this value, and every engine passes the same value and
-    `peer_group_store`. The engines wait at startup until all of them have
-    loaded their rows, and restarting one means restarting all of them. Requires
-    CUDA FABRIC memory handles (an IMEX channel), tables in HBM and TP=1."""
+    NVLink domain (the sum of their GPU counts); lookups read rows from the
+    owning GPU's HBM. Every engine passes the same value and `peer_group_store`.
+    Requires CUDA FABRIC handles (an IMEX channel), tables in HBM and TP=1."""
 
     peer_group_store: str | None = None
-    """Path of a file through which the engines of a peer group meet at startup
-    to take ranks and exchange memory handles; nothing reads it afterwards.
-    Required with `peer_group_size`. Pass every engine the same path, one that
-    all of them can open (on a shared filesystem when they span nodes, e.g.
-    `<job log dir>/engram-peers`) and that does not exist yet: use a fresh path
-    per launch. The first engine to start creates the file and its directory."""
+    """File through which a peer group's engines meet once at startup. Required
+    with `peer_group_size`: the same path for every engine, reachable by all of
+    them and fresh per launch (e.g. under a per-job directory)."""
 
     @model_validator(mode="after")
     def _validate_shared_memory(self) -> Self:

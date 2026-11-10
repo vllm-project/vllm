@@ -174,49 +174,23 @@ IPC namespace across the co-located replicas.
 
 ## Splitting GPU tables across engines (DeepSeek V4.1)
 
-Deployments that run several engines in one NVLink domain, such as the prefill
-engines of a disaggregated deployment, can keep the tables in HBM and split
-their rows over the GPUs of all those engines. Each GPU then holds
-1/`peer_group_size` of every table, and lookups read the other rows straight
-from the owning GPU's HBM, so no engine's step waits on another's. This frees
-the host memory that a CPU-offloaded copy per engine or node takes, e.g. for
-a host KV cache tier:
+Engines in one NVLink domain, such as the prefill engines of a disaggregated
+deployment, can split each GPU table's rows over all of their GPUs instead of
+keeping a host copy per engine. Each GPU holds 1/`peer_group_size` of every
+table and reads the other rows from their owner's HBM:
 
 ```bash
-# On every engine of the group, e.g. 9 DEP2 prefill engines (18 GPUs):
-vllm serve deepseek-ai/DeepSeek-V4.1-Flash \
-  --data-parallel-size 2 --enable-expert-parallel \
-  --engram-config '{"cpu_offload": false, "peer_group_size": 18,
-                    "peer_group_store": "/shared/job-logs/engram-peers"}'
-```
-
-`peer_group_size` counts GPUs: the GPU counts of the engines in the group must
-add up to it. Each engine waits until all of them have loaded their rows, for
-at most 30 minutes.
-
-`peer_group_store` is required with `peer_group_size`. The engines meet once
-at startup through this file to take ranks and exchange memory handles;
-nothing reads it afterwards. To set it:
-
-- Pass every engine of the group the same path.
-- Every engine must be able to open it: when the engines span nodes, put it
-  on a shared filesystem, e.g. in the job's log directory.
-- It must not exist yet, so use a fresh path per launch, e.g. one under a
-  per-job directory. The first engine to start creates the file and its
-  directory.
-
-For example, under Slurm with a shared home directory, give every engine
-(field by field, so the shell expands the path):
-
-```bash
+# Every engine of the group, e.g. 9 DEP2 prefill engines (18 GPUs):
 --engram-config.cpu_offload false \
---engram-config.peer_group_size 8 \
+--engram-config.peer_group_size 18 \
 --engram-config.peer_group_store "$HOME/engram-peers/$SLURM_JOB_ID/store"
 ```
 
-Requirements: CUDA with FABRIC memory handles (an IMEX channel, as on NVL72
-systems), TP=1, and `cpu_offload` disabled. Restarting one engine means
-restarting the whole group, because its peers keep reading its rows.
+`peer_group_size` is the sum of the engines' GPU counts. `peer_group_store` is
+a file the engines meet through once at startup: give every engine the same
+path, reachable by all of them (a shared filesystem across nodes) and fresh per
+launch. Requires CUDA FABRIC handles (an IMEX channel, as on NVL72), TP=1 and
+`cpu_offload` disabled; restarting one engine means restarting the group.
 
 ## Limitations
 
