@@ -151,8 +151,13 @@ With MoE data parallelism the ranks step in lockstep, so a step in which any ran
 
 ```bash
 vllm serve deepseek-ai/DeepSeek-V3 --data-parallel-size 8 --enable-expert-parallel \
+    --max-num-batched-tokens 16384 \
     --prefill-schedule-policy delayer --prefill-schedule-interval 10 \
     --prefill-max-wait-ms 5000
 ```
 
-The delayer trades time to first token for fewer, fuller prefill steps and longer uninterrupted decode, so it suits high-concurrency serving; at low concurrency the ranks rarely align and prompts wait longer. `--prefill-max-wait-ms` releases held prefill once the oldest waiting request has queued that long since arrival. It is not a hard TTFT limit: queueing under load and the protected decode steps add to it. The `delayer` policy applies only to MoE data parallelism (other engines use `cadence`) and does not support elastic EP, `--enable-fault-tolerance` or a custom `--scheduler-cls`.
+The delayer trades time to first token for fewer, fuller prefill steps and longer uninterrupted decode, so it suits high-concurrency serving; at low concurrency the ranks rarely align and prompts wait longer. `--prefill-max-wait-ms` releases held prefill, including during the protected decode steps, once the oldest waiting request has queued that long since arrival. It is not a hard TTFT limit: queueing under load and the prefill itself add to it.
+
+Each released step prefills at most `--max-num-batched-tokens` per rank, so the token budget decides how much TTFT the delayer costs. A small budget (e.g. 8192) needs more prefill steps per prompt and can leave prefill behind arrivals; a very large one makes each prefill step long and gives back most of the decode gain. 16384 worked well for multi-turn agentic traffic on DeepSeek-V4.1-Flash.
+
+The `delayer` policy applies only to MoE data parallelism (other engines use `cadence`) and does not support elastic EP, `--enable-fault-tolerance` or a custom `--scheduler-cls`.
