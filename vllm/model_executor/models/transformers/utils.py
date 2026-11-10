@@ -408,14 +408,11 @@ def infer_dynamic_arg_dims(cls: type[nn.Module]) -> "DynamicArgDims":
 
     The 0-th dimension is dynamic for every argument which is either unannotated
     or annotated with a tensor type, optionally in a union with other types.
+    String annotations are not resolved.
     """
-    try:
-        sig = inspect.signature(cls.forward, eval_str=True)
-    except NameError:
-        sig = inspect.signature(cls.forward)
     dims: DynamicArgDims = {}
-    for name, param in sig.parameters.items():
-        if name == "self" or param.kind in (param.VAR_POSITIONAL, param.VAR_KEYWORD):
+    for name, param in inspect.signature(cls.forward).parameters.items():
+        if name == "self" or param.kind in {param.VAR_POSITIONAL, param.VAR_KEYWORD}:
             continue
         annotation = param.annotation
         is_union = get_origin(annotation) in (Union, UnionType)

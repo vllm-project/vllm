@@ -31,7 +31,7 @@ class NonTensorEncoder(nn.Module):
 
     def forward(
         self,
-        pixel_values: "torch.Tensor",
+        pixel_values: torch.Tensor,
         grid_sizes: tuple[int, int],
         tiles: list[torch.Tensor] | None = None,
         *args,
