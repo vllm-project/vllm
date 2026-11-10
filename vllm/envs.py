@@ -1164,8 +1164,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ADAPTIVE_VERIFICATION_PROFILE_CONTEXT_LEN": lambda: int(
         os.getenv("VLLM_ADAPTIVE_VERIFICATION_PROFILE_CONTEXT_LEN", "8192")
     ),
-    # If set, the OpenAI API server will stay alive even after the underlying
-    # AsyncLLMEngine errors and stops serving requests
+    # If set, the OpenAI API server and the `--grpc` server will stay alive even
+    # after the underlying AsyncLLMEngine errors and stops serving requests
     "VLLM_KEEP_ALIVE_ON_ENGINE_DEATH": lambda: bool(
         int(os.getenv("VLLM_KEEP_ALIVE_ON_ENGINE_DEATH", "0"))
     ),
