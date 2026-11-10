@@ -88,6 +88,35 @@ Next, make a request to the model that should return the reasoning content in th
 
 The `reasoning` field contains the reasoning steps that led to the final conclusion, while the `content` field contains the final conclusion.
 
+## Rust frontend thinking controls
+
+The Rust frontend accepts an optional top-level `thinking` object on Chat
+Completions requests and `/v1/chat/completions/render`. For example, pass
+`extra_body={"thinking": {"type": "disabled"}}` with the OpenAI Python client to
+select the model's non-thinking mode. This controls prompt rendering; it is
+different from `include_reasoning=false`, which only hides reasoning in the
+response.
+
+`type` accepts `enabled` or `disabled` and takes precedence over the
+`thinking` and `enable_thinking` aliases in `chat_template_kwargs`. The optional
+`effort` accepts the same names as top-level `reasoning_effort` and takes
+precedence over it; supported effort values still depend on the model. With
+native Kimi rendering, explicit disabling discards effort, while explicit enabling
+can inherit effort from deployment or model defaults. An object with only `effort`
+retains the existing thinking-toggle precedence. Other models retain their existing
+reasoning-control semantics. For Hugging Face templates, the
+selected controls are passed to the template using both toggle aliases and
+`reasoning_effort`.
+
+Omitting the object, passing `null`, or using an empty object preserves existing
+behavior. The native Kimi renderer also accepts `keep="all"`: earlier reasoning
+remains in the prompt when thinking is enabled, and is omitted when thinking is
+disabled. Other renderers reject an explicit `keep` policy. Unsupported modes
+such as `adaptive`, history policies other than `all`, and options such as
+`budget_tokens` return HTTP 400 rather than being ignored.
+This top-level object is a Rust frontend extension; Python frontend users should
+continue using the model's documented `chat_template_kwargs` controls.
+
 ## Streaming chat completions
 
 Streaming chat completions are also supported for reasoning models. The `reasoning` field is available in the `delta` field in [chat completion response chunks](https://platform.openai.com/docs/api-reference/chat/streaming).

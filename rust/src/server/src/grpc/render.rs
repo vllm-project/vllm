@@ -202,6 +202,7 @@ fn to_chat_request(chat: pb::ChatRequest) -> Result<ChatRequest, Status> {
             generation_prompt_mode,
             chat_template: chat.chat_template,
             reasoning_effort: chat.reasoning_effort.as_deref().map(Into::into),
+            reasoning_history: None,
             response_format: None,
             template_kwargs: chat
                 .chat_template_kwargs
