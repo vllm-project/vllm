@@ -560,3 +560,27 @@ def test_nonretriable_restore_failure_enters_failed(tmp_path, sleeping_child):
         assert (snapshot_dir / "restore-attempt.json").is_file()
     finally:
         manager.close()
+
+
+@pytest.mark.parametrize(
+    ("snapshot_id", "expected_state"),
+    [
+        (None, SnapshotState.FAILED),
+        ("snapshot-1", SnapshotState.HIBERNATED),
+    ],
+)
+def test_fail_restore_requires_a_snapshot_to_retry(
+    tmp_path, sleeping_child, snapshot_id, expected_state
+):
+    manager = EngineSnapshotManager(
+        str(tmp_path / "control.sock"),
+        str(tmp_path / "snapshots"),
+        sleeping_child,
+    )
+    manager.status.root_pid = None
+    manager.status.state = SnapshotState.ATTACHING
+    manager.status.snapshot_id = snapshot_id
+
+    status = manager.fail_restore("reattach failed")
+
+    assert status["state"] == expected_state

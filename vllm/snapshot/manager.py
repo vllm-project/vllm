@@ -573,9 +573,12 @@ class EngineSnapshotManager:
         except BaseException as exc:
             cleanup_error = exc
         with self._state_lock:
+            # HIBERNATED promises a snapshot that restore can retry.
             self.status.state = (
                 SnapshotState.HIBERNATED
-                if self.provider.restore_is_retriable and cleanup_error is None
+                if self.provider.restore_is_retriable
+                and cleanup_error is None
+                and self.status.snapshot_id is not None
                 else SnapshotState.FAILED
             )
             self.status.root_pid = (
