@@ -12,6 +12,9 @@ from vllm.distributed.parallel_state import (
     init_distributed_environment,
     initialize_model_parallel,
 )
+from vllm.model_executor.models.kimi_k25_vit import (
+    Learnable2DInterpPosEmbDivided_fixed,
+)
 from vllm.model_executor.models.vision import (
     get_load_balance_assignment,
     resolve_visual_encoder_outputs,
@@ -21,7 +24,7 @@ from vllm.model_executor.models.vision import (
 from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_open_port
 from vllm.utils.system_utils import update_environment_variables
-from vllm.utils.torch_utils import set_random_seed
+from vllm.utils.torch_utils import set_default_torch_dtype, set_random_seed
 
 pytestmark = pytest.mark.cpu_test
 
@@ -487,3 +490,28 @@ def test_simple_mrope_vision_model_spatial_merge(spatial_merge_size: int):
 
     assert output.shape[0] == expected_output_patches
     assert output.shape[1] == vision_model.out_hidden_size
+
+
+@pytest.mark.parametrize("t", [1, 2, 4])
+def test_pos_emb_keeps_dtype_for_video_chunks(t: int):
+    """Video chunks (t > 1) add the float32 `time_weight` buffer; the output
+    must keep the tower's dtype even when the tower is not cast after
+    construction (e.g. ModelOpt-quantized checkpoints)."""
+    height, width, dim = 4, 4, 8
+    # Built the way vLLM builds the tower: default dtype set to the model dtype
+    # and no `.to(dtype)` afterwards.
+    with set_default_torch_dtype(torch.bfloat16):
+        pos_emb = Learnable2DInterpPosEmbDivided_fixed(
+            height=height, width=width, num_frames=4, dim=dim
+        )
+    assert pos_emb.weight.dtype == torch.bfloat16
+    assert pos_emb.time_weight.dtype == torch.float32
+
+    x = torch.zeros(t * height * width, dim, dtype=torch.bfloat16)
+    out = pos_emb(x, [[t, height, width]])
+
+    assert out.dtype == torch.bfloat16
+    expected = pos_emb.weight.flatten(end_dim=1).unsqueeze(0).repeat(t, 1, 1)
+    if t > 1:
+        expected = expected + pos_emb.time_weight[0:t].to(torch.bfloat16)
+    torch.testing.assert_close(out, expected.reshape(-1, dim), rtol=0, atol=0)
