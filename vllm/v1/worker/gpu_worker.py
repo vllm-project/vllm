@@ -1692,10 +1692,11 @@ class Worker(WorkerBase):
                 f"{type(self.weight_transfer_engine).__name__} does not support "
                 "draft model weight updates."
             )
+        speculative_config = self.vllm_config.speculative_config
         if (
             is_draft
-            and self.speculative_config is not None
-            and self.speculative_config.prefill_context_kv_only
+            and speculative_config is not None
+            and speculative_config.prefill_context_kv_only
         ):
             raise RuntimeError(
                 "Draft model weight updates are not supported with "
