@@ -508,13 +508,14 @@ def test_store_load_roundtrip_without_o_direct(tmp_path, monkeypatch):
 
 @pytest.mark.skipif(not hasattr(os, "fork"), reason="needs POSIX rlimits")
 @pytest.mark.parametrize("use_c_ext", [True, False])
-def test_store_short_write_reports_real_errno(tmp_path, use_c_ext):
-    """A store that runs out of space partway through a block raises the real
-    errno, not EIO or an OSError without one.
+def test_store_short_write_names_likely_cause(tmp_path, use_c_ext):
+    """A store that runs out of space partway through a block raises an error
+    that says it was a short write and that the filesystem may be full, rather
+    than EIO, which reads as a device error.
 
-    RLIMIT_FSIZE below the block size makes write(2) return a short count and
-    the next write fail with EFBIG, as a full disk does with ENOSPC. Runs in a
-    subprocess so the rlimit does not affect the test runner.
+    RLIMIT_FSIZE below the block size makes write(2) return a short count, as a
+    nearly full filesystem does. Runs in a subprocess so the rlimit does not
+    affect the test runner.
     """
     import vllm.v1.kv_offload.tiering.fs.io as io_mod
 
@@ -534,7 +535,7 @@ def test_store_short_write_reports_real_errno(tmp_path, use_c_ext):
                 [sys.argv[1]], buf, [0], {block}, use_o_direct=False
             )
         except OSError as exc:
-            print(exc.errno)
+            print(exc.errno, exc)
         else:
             print("stored")
         """
@@ -547,7 +548,11 @@ def test_store_short_write_reports_real_errno(tmp_path, use_c_ext):
         timeout=120,
     )
 
-    assert out.stdout.strip().splitlines()[-1] == str(errno.EFBIG), out.stderr
+    dest = tmp_path / "block.bin"
+    assert out.stdout.strip().splitlines()[-1] == (
+        f"None Short write to {dest}: wrote {64 * 1024} of {block} bytes; "
+        "the filesystem may be full (ENOSPC)"
+    ), out.stderr
     # Neither the block nor its temp file is left behind.
     assert os.listdir(tmp_path) == []
 

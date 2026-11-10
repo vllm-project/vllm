@@ -33,41 +33,18 @@ inline int ensure_parent_dirs(const std::string& path) {
   return ec ? ec.value() : 0;
 }
 
-// Returns 0, or the errno of the failing write(2). A short write is retried so
-// the next write reports the cause (ENOSPC, EDQUOT, EFBIG) instead of EIO.
-inline int write_fully(int fd, const char* src, size_t size,
-                       bool use_o_direct) {
-  size_t total = 0;
-  while (total < size) {
-    const ssize_t n = write(fd, src + total, size - total);
-    if (n > 0) {
-      total += static_cast<size_t>(n);
-      continue;
-    }
-    if (n < 0 && errno == EINTR) {
-      continue;
-    }
-    if (n == 0) {
-      // write(2) returning 0 is not an error, so errno is not set and may be
-      // stale or 0 (which callers read as success). Report it as EIO.
-      return EIO;
-    }
-    const int err = errno;
-    // An unaligned O_DIRECT remainder fails with EINVAL; report it as before.
-    if (err == EINVAL && use_o_direct && total > 0) {
-      return EIO;
-    }
-    return err;
-  }
-  return 0;
-}
+// Returned by _store_block when write(2) stored only part of a block. It is
+// not an errno: a short write sets none, so there is no real one to report.
+constexpr int kShortWrite = -1;
 
 // Core single-block store: src/size are raw pointer + byte count. Returns 0
-// on success, or the errno of the failing step on failure -- captured
-// before any subsequent cleanup call can overwrite it. On failure, the temp
-// file is removed.
+// on success, kShortWrite on a short write (with *written set to the bytes
+// written), or the errno of the failing step on failure -- captured before
+// any subsequent cleanup call can overwrite it. On failure, the temp file is
+// removed.
 inline int _store_block(const char* tmp_path, const char* dest_path,
-                        const char* src, size_t size, bool use_o_direct) {
+                        const char* src, size_t size, bool use_o_direct,
+                        ssize_t* written) {
   if (access(dest_path, F_OK) == 0) {
     return 0;  // Already present.
   }
@@ -83,7 +60,10 @@ inline int _store_block(const char* tmp_path, const char* dest_path,
     return errno;
   }
 
-  if (const int err = write_fully(fd, src, size, use_o_direct); err != 0) {
+  const ssize_t n = write(fd, src, size);
+  if (n < 0 || static_cast<size_t>(n) != size) {
+    const int err = n < 0 ? errno : kShortWrite;
+    *written = n;
     close(fd);  // Best-effort cleanup; the real error is already captured.
     unlink(tmp_path);
     return err;
@@ -264,13 +244,14 @@ static PyObject* batch_store_block(PyObject* /*self*/, PyObject* args) {
 
   Py_ssize_t failed_index = -1;
   int failure_errno = 0;
+  ssize_t written = 0;
 
   {
     Py_BEGIN_ALLOW_THREADS for (Py_ssize_t i = 0; i < n; i++) {
       const char* buf = static_cast<const char*>(buffers[i].buf);
-      const int err =
-          _store_block(tmp_paths[i], dest_paths[i], buf,
-                       static_cast<size_t>(buffers[i].len), use_o_direct);
+      const int err = _store_block(tmp_paths[i], dest_paths[i], buf,
+                                   static_cast<size_t>(buffers[i].len),
+                                   use_o_direct, &written);
       if (err != 0) {
         failed_index = i;
         failure_errno = err;
@@ -280,8 +261,17 @@ static PyObject* batch_store_block(PyObject* /*self*/, PyObject* args) {
     Py_END_ALLOW_THREADS
   }
 
+  const Py_ssize_t failed_len =
+      failed_index >= 0 ? buffers[failed_index].len : 0;
   release_buffer_list(buffers);
 
+  if (failure_errno == kShortWrite) {
+    // Keep in sync with the message in fs/io.py.
+    return PyErr_Format(PyExc_OSError,
+                        "Short write to %s: wrote %zd of %zd bytes; the "
+                        "filesystem may be full (ENOSPC)",
+                        dest_paths[failed_index], written, failed_len);
+  }
   if (failed_index >= 0) {
     // PyErr_SetFromErrnoWithFilename() reads the errno to format exception.
     errno = failure_errno;
