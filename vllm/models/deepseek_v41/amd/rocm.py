@@ -59,6 +59,7 @@ from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
     rocm_inv_rope_einsum,
     rocm_inverse_rope_mxfp8_rows,
     rocm_inverse_rope_rows_,
+    rocm_mxfp8_o_proj,
     rocm_mxfp8_wo_a_bmm,
     rocm_sparse_attn_decode,
     rocm_sparse_attn_prefill,
@@ -930,10 +931,42 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
             quant_key=kMxfp8Dynamic,
         )
 
+    def _wo_b_takes_fused_quant(self) -> bool:
+        """wo_b is the block32 MXFP8 GEMM, so wo_a may hand it a quantized input.
+
+        The aiter preshuffle path (`_wo_b_scale`) quantizes inside its own GEMM
+        and is left alone. The token-count choice stays inside `rocm_mxfp8_o_proj`.
+        """
+        wo_b = self.wo_b
+        weight_scale = getattr(wo_b, "weight_scale", None)
+        weight = wo_b.weight
+        return (
+            self._wo_b_scale is None
+            and weight_scale is not None
+            and weight.element_size() == 1
+            and weight_scale.shape[0] != weight.shape[0]
+            and wo_b.input_is_parallel
+            and wo_b.bias is None
+        )
+
     def _o_proj(
         self, attn_out: torch.Tensor | QuantizedActivation, positions: torch.Tensor
     ) -> torch.Tensor:
         if isinstance(attn_out, QuantizedActivation):
+            if self._wo_b_takes_fused_quant():
+                out = rocm_mxfp8_o_proj(
+                    attn_out.data,
+                    attn_out.scale,
+                    self.wo_a,
+                    self.n_local_groups,
+                    self.o_lora_rank,
+                    self.wo_b.weight,
+                    self.wo_b.weight_scale,
+                    attn_out.orig_dtype,
+                )
+                if self.wo_b.reduce_results and self.wo_b.tp_size > 1:
+                    out = tensor_model_parallel_all_reduce(out)
+                return out
             z = rocm_mxfp8_wo_a_bmm(
                 attn_out.data,
                 attn_out.scale,

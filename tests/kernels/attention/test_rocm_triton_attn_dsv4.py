@@ -1650,6 +1650,92 @@ def test_rocm_mxfp8_wo_a_bmm(
 
 
 @requires_gfx950
+@pytest.mark.parametrize(
+    "num_tokens, n_groups",
+    # Both sides of the narrowest wo_a tile that quantizes (T * G > 128),
+    # plus the conc-64 rank shapes.
+    [(1, 8), (16, 8), (17, 8), (224, 8), (8, 4), (32, 4), (33, 4)],
+)
+@torch.inference_mode()
+def test_rocm_mxfp8_wo_a_bmm_o_proj_matches_separate(
+    num_tokens: int, n_groups: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Wide tiles quantize in wo_a's epilogue; narrow tiles keep wo_b's quant.
+
+    Either way the GEMM output matches wo_a in bf16 followed by wo_b's own
+    linear, and the dispatch is the block32 GEMM or its quantizing variant.
+    """
+    import vllm.model_executor.kernels.linear.mxfp8.rocm_block32_gemm as block32
+    from vllm.model_executor.kernels.linear.mxfp8.rocm_native import (
+        _as_block32_scale,
+    )
+    from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+        _mxfp8_e4m3_quantize_torch,
+        mxfp8_e4m3_quantize,
+    )
+    from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+        rocm_mxfp8_o_proj,
+        rocm_mxfp8_wo_a_bmm,
+    )
+
+    device = torch.device("cuda")
+    torch.manual_seed(7)
+    group_dim, o_lora_rank, n = 2048, 128, 512
+
+    def block_scaled(rows: int, cols: int) -> SimpleNamespace:
+        w, w_scale = _mxfp8_e4m3_quantize_torch(torch.randn(rows, cols, device=device))
+        w_scale = _as_block32_scale(w_scale[::32].repeat_interleave(32, dim=0))
+        assert w_scale is not None
+        return SimpleNamespace(weight=w, weight_scale=w_scale)
+
+    a, a_scale = _mxfp8_e4m3_quantize_torch(
+        torch.randn(num_tokens, n_groups * group_dim, device=device)
+    )
+    wo_a = block_scaled(n_groups * o_lora_rank, group_dim)
+    wo_b = block_scaled(n, n_groups * o_lora_rank)
+    bf16 = rocm_mxfp8_wo_a_bmm(a, a_scale, wo_a, n_groups, o_lora_rank)
+    wide = num_tokens * n_groups > 128
+    if wide:
+        q_ref, scale_ref = mxfp8_e4m3_quantize(bf16, is_sf_swizzled_layout=False)
+        expected = block32.rocm_mxfp8_block32_gemm(
+            q_ref, scale_ref, wo_b.weight, wo_b.weight_scale, torch.bfloat16
+        )
+    else:
+        expected = block32.rocm_mxfp8_block32_gemm_quant(
+            bf16, wo_b.weight, wo_b.weight_scale, torch.bfloat16
+        )
+
+    calls: list[str] = []
+
+    def counted(name: str):
+        fn = getattr(block32, name)
+
+        def wrapper(*args):
+            calls.append(name)
+            return fn(*args)
+
+        return wrapper
+
+    for name in ("rocm_mxfp8_block32_gemm", "rocm_mxfp8_block32_gemm_quant"):
+        monkeypatch.setattr(block32, name, counted(name))
+    out = rocm_mxfp8_o_proj(
+        a,
+        a_scale,
+        wo_a,
+        n_groups,
+        o_lora_rank,
+        wo_b.weight,
+        wo_b.weight_scale,
+        torch.bfloat16,
+    )
+
+    assert calls == [
+        "rocm_mxfp8_block32_gemm" if wide else "rocm_mxfp8_block32_gemm_quant"
+    ]
+    torch.testing.assert_close(out, expected, rtol=0, atol=0)
+
+
+@requires_gfx950
 @pytest.mark.parametrize("extra_len", [0, 1, 31, 32, 33, 63, 64, 65])
 @torch.inference_mode()
 def test_sparse_attn_decode_gfx950_outer64_boundaries(

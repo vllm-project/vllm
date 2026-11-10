@@ -2026,12 +2026,15 @@ def _mxfp8_wo_a_bmm_kernel(
     stride_wn,
     stride_wsn,
     stride_out,
+    out_scale_ptr,
+    stride_out_scale,
     R: tl.constexpr,
     K: tl.constexpr,
     SCALE_ROWS: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
+    QUANT_OUT: tl.constexpr,
 ):
     # Output columns are group-major, so a BLOCK_N tile never straddles two
     # groups (R % BLOCK_N == 0) and picks its group's K slice of A.
@@ -2063,11 +2066,30 @@ def _mxfp8_wo_a_bmm_kernel(
         w_ptrs += BLOCK_K
         ws_ptrs += BLOCK_K // 32
 
-    tl.store(
-        out_ptr + offs_m[:, None] * stride_out + offs_n[None, :],
-        acc.to(out_ptr.dtype.element_ty),
-        mask=m_mask[:, None],
-    )
+    if QUANT_OUT:
+        # Round through bf16 first, matching the materialized wo_a output that
+        # mxfp8_e4m3_quantize reads. BLOCK_N is a multiple of 32 here, so each
+        # tile owns whole MX blocks of the wo_b K axis.
+        quantized, sb = _mxfp8_quantize_rows(
+            acc.to(tl.bfloat16).to(tl.float32), BLOCK_M, BLOCK_N
+        )
+        tl.store(
+            out_ptr + offs_m[:, None] * stride_out + offs_n[None, :],
+            quantized.to(out_ptr.dtype.element_ty),
+            mask=m_mask[:, None],
+        )
+        scale_cols = (pid_n * BLOCK_N) // 32 + tl.arange(0, BLOCK_N // 32)
+        tl.store(
+            out_scale_ptr + offs_m[:, None] * stride_out_scale + scale_cols[None, :],
+            sb.to(tl.uint8),
+            mask=m_mask[:, None],
+        )
+    else:
+        tl.store(
+            out_ptr + offs_m[:, None] * stride_out + offs_n[None, :],
+            acc.to(out_ptr.dtype.element_ty),
+            mask=m_mask[:, None],
+        )
 
 
 def _mxfp8_wo_a_bmm_config(num_tokens: int, n_groups: int) -> tuple[int, ...]:
@@ -2132,12 +2154,15 @@ def _rocm_mxfp8_wo_a_bmm_impl(
         weight.stride(0),
         weight_scale.stride(0),
         out.stride(0),
+        out,  # scale pointer is unread when QUANT_OUT is false
+        0,
         R=o_lora_rank,
         K=group_dim,
         SCALE_ROWS=weight.shape[0] // weight_scale.shape[0],
         BLOCK_M=block_m,
         BLOCK_N=block_n,
         BLOCK_K=block_k,
+        QUANT_OUT=False,
         num_warps=num_warps,
         num_stages=num_stages,
     )
@@ -2182,6 +2207,150 @@ def rocm_mxfp8_wo_a_bmm(
     """
     return torch.ops.vllm.rocm_dsv41_mxfp8_wo_a_bmm(
         a, a_scale, wo_a.weight, wo_a.weight_scale, n_groups, o_lora_rank
+    )
+
+
+def _rocm_mxfp8_wo_a_bmm_quant_impl(
+    a: torch.Tensor,
+    a_scale: torch.Tensor,
+    weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+    n_groups: int,
+    o_lora_rank: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """wo_a with the MXFP8 epilogue. The tile's N must be a multiple of 32."""
+    num_tokens = a.shape[0]
+    group_dim = a.shape[1] // n_groups
+    k_out = n_groups * o_lora_rank
+    out = torch.empty((num_tokens, k_out), dtype=torch.float8_e4m3fn, device=a.device)
+    out_scale = torch.empty(
+        (num_tokens, k_out // 32), dtype=torch.uint8, device=a.device
+    )
+    if num_tokens == 0:
+        return out, out_scale
+    block_m, block_n, block_k, num_warps, num_stages = _mxfp8_wo_a_bmm_config(
+        num_tokens, n_groups
+    )
+    if block_n % 32:
+        raise ValueError(
+            f"wo_a MXFP8 epilogue needs BLOCK_N divisible by 32, got {block_n}"
+        )
+    grid = (k_out // block_n, triton.cdiv(num_tokens, block_m))
+    _mxfp8_wo_a_bmm_kernel[grid](
+        a,
+        a_scale,
+        weight,
+        weight_scale,
+        out,
+        num_tokens,
+        a.stride(0),
+        a_scale.stride(0),
+        weight.stride(0),
+        weight_scale.stride(0),
+        out.stride(0),
+        out_scale,
+        out_scale.stride(0),
+        R=o_lora_rank,
+        K=group_dim,
+        SCALE_ROWS=weight.shape[0] // weight_scale.shape[0],
+        BLOCK_M=block_m,
+        BLOCK_N=block_n,
+        BLOCK_K=block_k,
+        QUANT_OUT=True,
+        num_warps=num_warps,
+        num_stages=num_stages,
+    )
+    return out, out_scale
+
+
+def _rocm_mxfp8_o_proj_impl(
+    a: torch.Tensor,
+    a_scale: torch.Tensor,
+    weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+    n_groups: int,
+    o_lora_rank: int,
+    wo_b_weight: torch.Tensor,
+    wo_b_weight_scale: torch.Tensor,
+    out_dtype: torch.dtype,
+) -> torch.Tensor:
+    from vllm.model_executor.kernels.linear.mxfp8.rocm_block32_gemm import (
+        rocm_mxfp8_block32_gemm,
+        rocm_mxfp8_block32_gemm_quant,
+    )
+
+    num_tokens = a.shape[0]
+    if num_tokens == 0:
+        return a.new_empty((0, wo_b_weight.shape[0]), dtype=out_dtype)
+    _block_m, block_n, _block_k, _warps, _stages = _mxfp8_wo_a_bmm_config(
+        num_tokens, n_groups
+    )
+    if block_n % 32:
+        # A tile narrower than one MX block cannot quantize in its epilogue.
+        # wo_b quantizes the bf16 output, inside the GEMM at M <= 8.
+        out = _rocm_mxfp8_wo_a_bmm_impl(
+            a, a_scale, weight, weight_scale, n_groups, o_lora_rank
+        )
+        return rocm_mxfp8_block32_gemm_quant(
+            out, wo_b_weight, wo_b_weight_scale, out_dtype
+        )
+    q, q_scale = _rocm_mxfp8_wo_a_bmm_quant_impl(
+        a, a_scale, weight, weight_scale, n_groups, o_lora_rank
+    )
+    return rocm_mxfp8_block32_gemm(
+        q, q_scale, wo_b_weight, wo_b_weight_scale, out_dtype
+    )
+
+
+def _rocm_mxfp8_o_proj_fake(
+    a: torch.Tensor,
+    a_scale: torch.Tensor,
+    weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+    n_groups: int,
+    o_lora_rank: int,
+    wo_b_weight: torch.Tensor,
+    wo_b_weight_scale: torch.Tensor,
+    out_dtype: torch.dtype,
+) -> torch.Tensor:
+    return a.new_empty((a.shape[0], wo_b_weight.shape[0]), dtype=out_dtype)
+
+
+# Opaque op: whether the wo_a tile can quantize depends on the token count,
+# which a compiled o_proj must not freeze.
+direct_register_custom_op(
+    op_name="rocm_dsv41_mxfp8_o_proj",
+    op_func=_rocm_mxfp8_o_proj_impl,
+    fake_impl=_rocm_mxfp8_o_proj_fake,
+)
+
+
+def rocm_mxfp8_o_proj(
+    a: torch.Tensor,
+    a_scale: torch.Tensor,
+    wo_a: torch.nn.Module,
+    n_groups: int,
+    o_lora_rank: int,
+    wo_b_weight: torch.Tensor,
+    wo_b_weight_scale: torch.Tensor,
+    out_dtype: torch.dtype,
+) -> torch.Tensor:
+    """`wo_b(wo_a(a))` for a block32 MXFP8 `wo_b`.
+
+    Where the wo_a tile is at least 32 columns wide, its epilogue writes the
+    row-major MXFP8 activation `wo_b` reads, so the separate quant launch
+    disappears. Below that, `wo_b` quantizes the bf16 wo_a output itself.
+    """
+    return torch.ops.vllm.rocm_dsv41_mxfp8_o_proj(
+        a,
+        a_scale,
+        wo_a.weight,
+        wo_a.weight_scale,
+        n_groups,
+        o_lora_rank,
+        wo_b_weight,
+        wo_b_weight_scale,
+        out_dtype,
     )
 
 
