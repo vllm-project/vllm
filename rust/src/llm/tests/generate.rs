@@ -443,18 +443,24 @@ async fn generate_merges_outputs_by_stream_interval() {
             Some(vec![span("v7", 0, 2), span("v8", 2, 5), span("v7", 5, 7)])
         ]
     );
-    let routed_experts: Vec<_> =
-        outputs.iter().map(|output| output.routed_experts.clone()).collect();
+    // Each output carries the rows of its own tokens, merged like the tokens.
+    let routed_rows = |token_ids: &[u32]| {
+        WireNdArray::from_raw(
+            TensorDtype::U8,
+            vec![token_ids.len(), 1, 2],
+            token_ids.iter().flat_map(|&id| [id as u8, 0]).collect(),
+        )
+    };
+    let routed_experts: Vec<_> = outputs
+        .iter()
+        .map(|output| output.routed_experts.clone().concat().unwrap())
+        .collect();
     assert_eq!(
         routed_experts,
         [
-            None,
-            None,
-            Some(Box::new(WireNdArray::from_raw(
-                TensorDtype::U8,
-                vec![7, 1, 2],
-                vec![1, 0, 2, 0, 3, 0, 4, 0, 5, 0, 6, 0, 7, 0],
-            )))
+            Some(routed_rows(&[1])),
+            Some(routed_rows(&[2, 3, 4, 5])),
+            Some(routed_rows(&[6, 7])),
         ]
     );
     let last_token_timestamps: Vec<_> =
@@ -584,7 +590,7 @@ async fn collect_output_rejects_partial_sampling_mask() {
         }),
         spec_decode_metrics: None,
         weight_versions: None,
-        routed_experts: None,
+        routed_experts: Default::default(),
         timestamps: Default::default(),
     };
 
