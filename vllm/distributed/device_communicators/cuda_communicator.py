@@ -207,6 +207,23 @@ class CudaCommunicator(DeviceCommunicatorBase):
             # an MI300 series.
             self.qr_comm = QuickAllReduce(group=self.cpu_group, device=self.device)
 
+        # Quantized reduce-scatterv for the eager MoE combine of the
+        # allgather_reducescatter all2all backend.
+        self.qr_coll_comm: QuickAllReduce | None = None
+        if (
+            "dp" in unique_name
+            and tcp_store_group is None
+            and self.world_size > 1
+            and current_platform.is_rocm()
+            and not envs.VLLM_BATCH_INVARIANT
+            and envs.VLLM_ROCM_QUICK_REDUCE_COLL_MAX_SIZE_MB > 0
+        ):
+            self.qr_coll_comm = QuickAllReduce(
+                group=self.cpu_group, device=self.device, coll_only=True
+            )
+            if self.qr_coll_comm.disabled:
+                self.qr_coll_comm = None
+
         if self.world_size > 1:
             self._log_all_reduce_backend_selection()
 
@@ -656,6 +673,20 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 return output.copy_(result)
             return result.movedim(0, dim).contiguous()
 
+        qr_coll = self.qr_coll_comm
+        if (
+            qr_coll is not None
+            and dim == 0
+            and qr_coll.should_quick_reduce_scatter(input_tensor)
+        ):
+            result = qr_coll.quick_reduce_scatterv(
+                input_tensor,
+                sizes if sizes is not None else [chunk_size] * world_size,
+                out=output,
+            )
+            if result is not None:
+                return result
+
         if self._can_use_aiter_ag_rs(sizes):
             aiter_comm = self.aiter_ar_comm
             assert aiter_comm is not None
@@ -868,6 +899,9 @@ class CudaCommunicator(DeviceCommunicatorBase):
         if self.aiter_ar_comm is not None:
             self.aiter_ar_comm.close()
             self.aiter_ar_comm = None
+        if self.qr_coll_comm is not None:
+            self.qr_coll_comm.close()
+            self.qr_coll_comm = None
         if self.fi_ar_comm is not None:
             self.fi_ar_comm.destroy()
             self.fi_ar_comm = None

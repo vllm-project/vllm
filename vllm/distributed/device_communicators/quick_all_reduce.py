@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import math
 from enum import Enum
 from typing import Any
 
@@ -63,7 +64,12 @@ class QuickAllReduce:
         ],
     }
 
-    def __init__(self, group: ProcessGroup, device: int | str | torch.device) -> None:
+    def __init__(
+        self,
+        group: ProcessGroup,
+        device: int | str | torch.device,
+        coll_only: bool = False,
+    ) -> None:
         """Custom allreduce provides non-destructive acceleration and is
         available for CUDA and ROCm MI300 series.
 
@@ -87,9 +93,14 @@ class QuickAllReduce:
         It is the caller's responsibility to make sure each communicator
         is bind to a unique device, and all communicators in this group
         are in the same node.
+            coll_only: only serve `quick_reduce_scatterv`, from a region of
+                VLLM_ROCM_QUICK_REDUCE_COLL_MAX_SIZE_MB (the all-reduce
+                buffers stay minimal and FlyDSL is skipped).
 
         """
         self.disabled = True
+        self.coll_only = coll_only
+        self.coll_max_size = 0
         self._flydsl_int4: Any = None
         if not self._rocm_arch_available():
             logger.debug(
@@ -241,11 +252,16 @@ class QuickAllReduce:
                     "lead to error or degradation to custom allreduce or rccl."
                 )
             qr_max_size = qr_max_size * MB
+        if self.coll_only:
+            qr_max_size = MB
+            self.coll_max_size = envs.VLLM_ROCM_QUICK_REDUCE_COLL_MAX_SIZE_MB * MB
         effective_qr_max_size = (
             qr_max_size if qr_max_size is not None else ops.qr_max_size()
         )
         qr_min_size = self._get_qr_min_size(effective_qr_max_size)
-        self._ptr = ops.init_custom_qr(self.rank, self.world_size, qr_max_size)
+        self._ptr = ops.init_custom_qr(
+            self.rank, self.world_size, qr_max_size, self.coll_max_size or None
+        )
         self.qr_max_size = effective_qr_max_size
         self.qr_min_size = qr_min_size
         if qr_min_size is not None:
@@ -259,7 +275,8 @@ class QuickAllReduce:
                 self.qr_quantization_min_size // KB,
             )
         self.create_shared_buffer()
-        self._flydsl_int4 = self._init_flydsl_int4(vllm_config)
+        if not self.coll_only:
+            self._flydsl_int4 = self._init_flydsl_int4(vllm_config)
         self.disabled = False
 
     def _init_flydsl_int4(self, vllm_config) -> Any:
@@ -385,6 +402,50 @@ class QuickAllReduce:
         ops.qr_all_reduce(
             self._ptr, inp, out, self._get_qr_quant_level(inp), self.use_fp16_kernels
         )
+        return out
+
+    def should_quick_reduce_scatter(self, inp: torch.Tensor) -> bool:
+        """Whether a dim-0 reduce-scatter of `inp` may try
+        `quick_reduce_scatterv`. Eager only: the kernel's two slot regions
+        alternate on a host-side call counter."""
+        if self.disabled or self.coll_max_size == 0:
+            return False
+        if inp.dtype not in self._SUPPORTED_DTYPES or inp.dim() < 2:
+            return False
+        if torch.cuda.is_current_stream_capturing() or not inp.is_contiguous():
+            return False
+        return math.prod(inp.shape[1:]) * inp.element_size() % 16 == 0
+
+    def quick_reduce_scatterv(
+        self,
+        inp: torch.Tensor,
+        sizes: list[int],
+        out: torch.Tensor | None = None,
+    ) -> torch.Tensor | None:
+        """Reduce-scatter `inp` along dim 0 with the configured codec.
+
+        Args:
+            inp: This rank's contribution, `sum(sizes)` rows.
+            sizes: Rows each rank receives, in rank order.
+            out: Optional `[sizes[rank], ...]` output.
+
+        Returns:
+            The sum over ranks of rows `[sum(sizes[:rank]), +sizes[rank])`, or
+            None (and nothing launched, on every rank) if the call does not
+            fit the region.
+        """
+        row = math.prod(inp.shape[1:])
+        if out is None:
+            out = inp.new_empty((sizes[self.rank],) + tuple(inp.shape[1:]))
+        if not ops.qr_reduce_scatterv(
+            self._ptr,
+            inp,
+            out,
+            [s * row for s in sizes],
+            self.qr_quant_level.value,
+            self.use_fp16_kernels,
+        ):
+            return None
         return out
 
     def _use_flydsl_int4(self, inp: torch.Tensor) -> bool:
