@@ -34,7 +34,7 @@ Parameters: {{ tool.function.parameters | tojson }}
 {%- set args = args | fromjson -%}
 {%- endif -%}
 {%- for key, value in args.items() -%}
-{{ key }}:<escape>{{ value }}<escape>{% if not loop.last %},{% endif %}
+{{ key }}:{% if value is string %}<escape>{{ value }}<escape>{% else %}{{ value | tojson }}{% endif %}{% if not loop.last %},{% endif %}
 {%- endfor -%}
 }<end_function_call>
 {%- endfor %}
