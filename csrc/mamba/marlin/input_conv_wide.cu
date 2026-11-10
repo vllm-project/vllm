@@ -2,11 +2,10 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 // Wider uniform batches retain one complete-M, full-K Marlin weight stream.
 // Original Marlin/Neural Magic/IST-DASLab attribution remains in the template.
-#include "kernel.h"
-#include "mamba_input_conv_batch_launch.h"
-#include "mamba_input_conv_wide_epilogue.cuh"
-#define VLLM_MAMBA_INPUT_CONV_WIDE
-#include "mamba_input_conv_template.h"
+#include "../../quantization/marlin/kernel.h"
+
+ #include "input_conv_epilogue.cuh"
+#include "input_conv_kernel.cuh"
 #undef VLLM_MAMBA_INPUT_CONV_WIDE
 
 namespace vllm_mamba_input_conv {
@@ -19,18 +18,18 @@ cudaError_t launch(const int4* input, const int4* weight, int4* projected,
   static_assert((TileRows == 16 && Tokens >= 3 && Tokens <= 8) ||
                 (TileRows == 32 && Tokens >= 5 && Tokens <= 8));
   constexpr auto kernel =
-      marlin::MarlinMambaInputConvWide<vllm::kBFloat16.id(), vllm::kFE2M1f.id(),
+      marlin::MarlinMambaInputConv<vllm::kBFloat16.id(), vllm::kFE2M1f.id(),
                                        vllm::kBFloat16.id(),
                                        vllm::kFE4M3fn.id(), 128, TileRows / 16,
-                                       8, 4, false, 3, 1, false, Tokens>;
+                                       8, 4, false, 3, 1, false, Tokens, ConvFamily::Wide>;
   constexpr int shared = 12288 + 1536 + 3 * TileRows * 64 * 2;
   static_assert(shared == (TileRows == 16 ? 19968 : 26112));
   auto status = cudaFuncSetAttribute(
       kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, shared);
   if (status != cudaSuccess) return status;
-  marlin::MarlinMambaInputConvWide<
+  marlin::MarlinMambaInputConv<
       vllm::kBFloat16.id(), vllm::kFE2M1f.id(), vllm::kBFloat16.id(),
-      vllm::kFE4M3fn.id(), 128, TileRows / 16, 8, 4, false, 3, 1, false, Tokens>
+      vllm::kFE4M3fn.id(), 128, TileRows / 16, 8, 4, false, 3, 1, false, Tokens, ConvFamily::Wide>
       <<<145, 128, shared, stream>>>(input, weight, projected, scratch, nullptr,
                                      scales, global_scale, nullptr, rows, 18560,
                                      4096, 4096, locks, false, false, true,

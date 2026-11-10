@@ -1272,6 +1272,25 @@ if hasattr(torch.ops._C, "marlin_mamba_input_conv") and hasattr(
         return None
 
 
+def mamba_marlin_output(
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    scales: torch.Tensor,
+    global_scale: torch.Tensor,
+    workspace: torch.Tensor,
+) -> torch.Tensor:
+    return torch.ops._C.mamba_marlin_output(
+        input, weight, scales, global_scale, workspace
+    )
+
+
+if hasattr(torch.ops._C, "mamba_marlin_output"):
+
+    @register_fake("_C::mamba_marlin_output")
+    def _mamba_marlin_output_fake(input, weight, scales, global_scale, workspace):
+        return input.new_empty((input.shape[0], 4096))
+
+
 def marlin_gemm(
     a: torch.Tensor,
     c: torch.Tensor | None,

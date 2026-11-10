@@ -1,12 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""GB10 small-token input/conv for an explicitly Marlin-owned layer."""
+"""GB10 Mamba projection ownership and specialized projection/conv launches."""
 
 import torch
 
 from vllm import _custom_ops as ops
+from vllm import envs
+from vllm.model_executor.kernels.linear import is_supported_and_can_implement_kernel
+from vllm.model_executor.kernels.linear.nvfp4.base import NvFp4LinearLayerConfig
 from vllm.model_executor.kernels.linear.nvfp4.marlin import MarlinNvFp4LinearKernel
-from vllm.model_executor.layers.linear import MergedColumnParallelLinear
+from vllm.model_executor.layers.fusion.quant_activation import expose_input_quant_key
+from vllm.model_executor.layers.linear import (
+    MergedColumnParallelLinear,
+    RowParallelLinear,
+)
 from vllm.model_executor.layers.quantization.modelopt import (
     FormatScheme,
     ModelOptLinearMethod,
@@ -16,9 +23,55 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     get_marlin_workspace,
     should_use_atomic_add_reduce,
 )
+from vllm.model_executor.layers.quantization.utils.quant_utils import kNvfp4Static
+from vllm.model_executor.utils import is_weights_pre_processed
+from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadata
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID, PAD_SLOT_ID
+
+
+def select_mamba_marlin_ownership(layer, config) -> None:
+    """Choose only Mamba2's projection kernels before normal weight packing.
+
+    The current quantization API stores the per-layer kernel on its method.
+    Canonical checkpoint parameters already exist here; post-load packing has
+    not run. Other linears, MoE kernels and the shared configuration are untouched.
+    """
+    if (
+        not current_platform.is_cuda()
+        or envs.VLLM_BATCH_INVARIANT
+        or config.lora_config is not None
+        or is_weights_pre_processed()
+    ):
+        return
+    capability = current_platform.get_device_capability()
+    if capability is None or capability.to_int() != 121:
+        return
+    for projection in (layer.in_proj, layer.out_proj):
+        method = projection.quant_method
+        if type(getattr(method, "kernel", None)) is MarlinNvFp4LinearKernel:
+            continue
+        if not (
+            type(method) is ModelOptLinearMethod
+            and method.spec.weight == kNvfp4Static
+            and method.spec.activation is None
+            and method.akey is None
+            and projection.params_dtype in (torch.float16, torch.bfloat16)
+            and isinstance(
+                getattr(method.kernel, "config", None), NvFp4LinearLayerConfig
+            )
+        ):
+            continue
+        supported, _ = is_supported_and_can_implement_kernel(
+            MarlinNvFp4LinearKernel, method.kernel.config, 121
+        )
+        if not supported:
+            continue
+        method.kernel = MarlinNvFp4LinearKernel(method.kernel.config)
+        if hasattr(projection, "_input_quant_key"):
+            del projection._input_quant_key
+        expose_input_quant_key(projection, method.kernel)
 
 
 # Qualified GB10 component measurements cover all B1–4/T1–8 shapes with M<=16.
@@ -42,14 +95,7 @@ def _unmodified(module, methods: tuple[str, ...]) -> bool:
     )
 
 
-def can_use_marlin_input_conv(layer, hidden_states, mup_vector) -> bool:
-    """Static route admission; wrapped/adapter/other-backend forwards are kept.
-
-    Hardware, LoRA and capture-policy admission is cached during construction.
-    No GPU metadata is read on the host and no backend or packed owner changes.
-    """
-    # Reading packed parameters would also bypass public *global* Module hooks.
-    # If Torch changes these registries, conservatively preserve its forward.
+def _global_hooks_unmodified() -> bool:
     for name in (
         "_global_forward_hooks",
         "_global_forward_pre_hooks",
@@ -59,6 +105,13 @@ def can_use_marlin_input_conv(layer, hidden_states, mup_vector) -> bool:
         hooks = getattr(torch.nn.modules.module, name, None)
         if hooks is None or hooks:
             return False
+    return True
+
+
+def can_use_marlin_input_conv(layer, hidden_states, mup_vector) -> bool:
+    """Keep hardware/LoRA admission cached and preserve ordinary module hooks."""
+    if not _global_hooks_unmodified():
+        return False
     linear = layer.in_proj
     if not (
         layer._marlin_input_conv_allowed
@@ -107,6 +160,67 @@ def can_use_marlin_input_conv(layer, hidden_states, mup_vector) -> bool:
         and linear.weight_global_scale.dtype == torch.float32
         and linear.weight_global_scale.numel() == 1
         and linear.weight_global_scale.is_contiguous()
+    )
+
+
+def can_use_marlin_output(layer, hidden_states, *, check_rows: bool = True) -> bool:
+    """Select only the measured Mamba output launch, without changing ownership."""
+    if not layer._marlin_output_profile_allowed or not _global_hooks_unmodified():
+        return False
+    linear = layer.out_proj
+    if not (
+        type(linear) is RowParallelLinear
+        and _unmodified(linear, ("forward", "__call__", "_call_impl"))
+        and linear.bias is None
+        and linear.tp_size == 1
+        and linear.return_bias
+        and linear.input_size_per_partition == 8192
+        and linear.output_size_per_partition == 4096
+        and hidden_states.dtype == torch.bfloat16
+        and hidden_states.is_cuda
+        and hidden_states.ndim == 2
+        and hidden_states.shape[1] == 8192
+        and (not check_rows or hidden_states.shape[0] == 8)
+        and hidden_states.is_contiguous()
+    ):
+        return False
+    method = linear.quant_method
+    if not (
+        type(method) is ModelOptLinearMethod
+        and _unmodified(method, ("apply",))
+        and method.spec.activation is None
+        and method.akey is None
+        and getattr(linear, "is_w4a16_nvfp4", False)
+        and type(method.kernel) is MarlinNvFp4LinearKernel
+        and _unmodified(method.kernel, ("apply_weights",))
+        and "apply" not in method.fmt.__dict__
+        and type(method.fmt).apply is FormatScheme.apply
+    ):
+        return False
+    return (
+        linear.weight.dtype == torch.int32
+        and linear.weight.shape == (512, 8192)
+        and linear.weight.is_contiguous()
+        and linear.weight.device == hidden_states.device
+        and linear.weight_scale.dtype == torch.float8_e4m3fn
+        and linear.weight_scale.shape == (512, 4096)
+        and linear.weight_scale.is_contiguous()
+        and linear.weight_scale.device == hidden_states.device
+        and linear.weight_global_scale.dtype == torch.float32
+        and linear.weight_global_scale.numel() == 1
+        and linear.weight_global_scale.is_contiguous()
+        and linear.weight_global_scale.device == hidden_states.device
+    )
+
+
+def run_marlin_output(layer, hidden_states):
+    linear = layer.out_proj
+    return ops.mamba_marlin_output(
+        hidden_states,
+        linear.weight,
+        linear.weight_scale,
+        linear.weight_global_scale,
+        get_marlin_workspace(hidden_states.device),
     )
 
 

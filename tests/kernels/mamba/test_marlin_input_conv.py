@@ -144,6 +144,48 @@ def _assert_bytes_equal(actual, expected):
     assert torch.equal(actual.view(torch.int16), expected.view(torch.int16))
 
 
+def test_mamba_output_uses_stock_marlin_kernel_and_graph(operands):
+    """The Mamba-owned launch retains stock packing and exact graph replay."""
+    device = operands["input"].device
+    with torch.random.fork_rng(devices=[device.index]):
+        torch.manual_seed(711)
+        x = torch.randn(8, 8192, device=device, dtype=torch.bfloat16) * 0.1
+        weight = torch.randn(4096, 8192, device=device, dtype=x.dtype) / 64
+        _reference_weight, packed, scales, global_scale = rand_marlin_weight_nvfp4_like(
+            weight, 16
+        )
+    workspace = operands["workspace"]
+    actual = ops.mamba_marlin_output(x, packed, scales, global_scale, workspace)
+    stock = ops.marlin_gemm(
+        x,
+        None,
+        packed,
+        None,
+        scales,
+        global_scale,
+        None,
+        workspace,
+        scalar_types.float4_e2m1f,
+        8,
+        4096,
+        8192,
+        use_atomic_add=False,
+        use_fp32_reduce=True,
+    )
+    _assert_nrmse(actual, stock)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured = ops.mamba_marlin_output(x, packed, scales, global_scale, workspace)
+    for _ in range(3):
+        x.add_(0.01)
+        graph.replay()
+        eager = ops.mamba_marlin_output(x, packed, scales, global_scale, workspace)
+        _assert_bytes_equal(captured, eager)
+    assert torch.count_nonzero(workspace) == 0
+    with pytest.raises(RuntimeError, match="shape/contiguity"):
+        ops.mamba_marlin_output(x[:7], packed, scales, global_scale, workspace)
+
+
 def _batched_arguments(operands, batches, tokens, *, regular=False, inactive=False):
     args, _ = _arguments(operands, 1, 1, 1)
     history_len = 3 if regular else HISTORY
@@ -437,9 +479,7 @@ def test_short_query_preserves_physical_history(operands, tokens, configured, pr
     accepted = 1 if previous == "first" else history_len - 2
     backing = operands["pristine"][:, : history_len + 1].clone()
     before = backing.clone()
-    args = {
-        k: v for k, v in operands.items() if k not in ("pristine", "batch_input")
-    }
+    args = {k: v for k, v in operands.items() if k not in ("pristine", "batch_input")}
     args.update(
         input=operands["input"][:tokens].clone(),
         projected=torch.full(
@@ -464,9 +504,7 @@ def test_regular_one_token_accepts_none(operands):
     """The real non-speculative convolution has H3 and no acceptance tensor."""
     backing = operands["pristine"][:, :4].clone()
     before = backing.clone()
-    args = {
-        k: v for k, v in operands.items() if k not in ("pristine", "batch_input")
-    }
+    args = {k: v for k, v in operands.items() if k not in ("pristine", "batch_input")}
     args.update(
         input=operands["input"][:1].clone(),
         projected=torch.full((1, N), 91, dtype=torch.bfloat16, device=backing.device),

@@ -100,7 +100,10 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
   // conditionally compiled so impl registrations are in source file
 
   #ifdef VLLM_MARLIN_MAMBA_INPUT_CONV
-  // Exact Marlin-owned SM121 M8 Mamba input projection + convolution.
+  // Mamba-owned SM121 projection specializations; ordinary Marlin is unchanged.
+  ops.def(
+      "mamba_marlin_output(Tensor input, Tensor weight, Tensor scales, "
+      "Tensor global_scale, Tensor workspace) -> Tensor");
   ops.def(
       "marlin_mamba_input_conv(Tensor input, Tensor(a!) projected, "
       "Tensor weight, Tensor scales, Tensor global_scale, Tensor workspace, "

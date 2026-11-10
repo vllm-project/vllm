@@ -1,11 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 // Short-T instantiations reuse the same attributed Marlin template core.
-#include "kernel.h"
-#include "mamba_input_conv_short_epilogue.cuh"
-#include "mamba_input_conv_short_launch.h"
-#define VLLM_MAMBA_INPUT_CONV_SHORT
-#include "mamba_input_conv_template.h"
+#include "../../quantization/marlin/kernel.h"
+ #include "input_conv_epilogue.cuh"
+
+#include "input_conv_kernel.cuh"
 #undef VLLM_MAMBA_INPUT_CONV_SHORT
 
 namespace vllm_mamba_input_conv {
@@ -14,7 +13,7 @@ template <int Tokens>
 cudaError_t launch(const int4* input, const int4* weight, int4* projected,
                    int4* scratch, const int4* scales, const float* global_scale,
                    int* locks, ConvParams conv, cudaStream_t stream) {
-  constexpr auto kernel = marlin::MarlinMambaInputConvShort<
+  constexpr auto kernel = marlin::MarlinMambaInputConv<
       vllm::kBFloat16.id(), vllm::kFE2M1f.id(), vllm::kBFloat16.id(),
       vllm::kFE4M3fn.id(), 128, 1, 8, 4, true, 3, 1, false, Tokens>;
   constexpr int shared = 16896;
@@ -22,7 +21,7 @@ cudaError_t launch(const int4* input, const int4* weight, int4* projected,
   auto status = cudaFuncSetAttribute(
       kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, shared);
   if (status != cudaSuccess) return status;
-  marlin::MarlinMambaInputConvShort<vllm::kBFloat16.id(), vllm::kFE2M1f.id(),
+  marlin::MarlinMambaInputConv<vllm::kBFloat16.id(), vllm::kFE2M1f.id(),
                                     vllm::kBFloat16.id(), vllm::kFE4M3fn.id(),
                                     128, 1, 8, 4, true, 3, 1, false, Tokens>
       <<<145, 128, shared, stream>>>(input, weight, projected, scratch, nullptr,

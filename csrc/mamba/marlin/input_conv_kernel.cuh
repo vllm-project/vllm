@@ -25,12 +25,12 @@
 
 // Adapted from vLLM csrc/quantization/marlin/marlin_template.h at
 // cb95d994f4ec066b75672035ca3ae7e1c9745e84.
-// Modified: fixed full-K145 M8/S3 ownership, dead raw conv stores elided,
+// Modified: full-K ownership for M8/M16/M32 tiles, dead raw conv stores elided,
 // CTA BF16 convolution writes those dead slots using C0 as the sole base.
-#include "marlin.cuh"
-#include "marlin_dtypes.cuh"
-#include "dequant.h"
-#include "marlin_mma.h"
+#include "../../quantization/marlin/marlin.cuh"
+#include "../../quantization/marlin/marlin_dtypes.cuh"
+#include "../../quantization/marlin/dequant.h"
+#include "../../quantization/marlin/marlin_mma.h"
 #include "core/scalar_type.hpp"
 
 #define STATIC_ASSERT_SCALAR_TYPE_VALID(scalar_t)               \
@@ -217,20 +217,10 @@ template <const vllm::ScalarTypeId a_type_id,  // A ScalarType id
           const int group_blocks,  // number of consecutive 16x16 blocks
                                    // with a separate quantization scale
           const bool is_zp_float   // is zero point of float16 type?
-  #if defined(VLLM_MAMBA_INPUT_CONV_SHORT) || defined(VLLM_MAMBA_INPUT_CONV_BATCH) || defined(VLLM_MAMBA_INPUT_CONV_WIDE)
-          ,
-          const int conv_tokens
-  #endif
-          >
-  #ifdef VLLM_MAMBA_INPUT_CONV_WIDE
-__global__ void MarlinMambaInputConvWide(
-  #elif defined(VLLM_MAMBA_INPUT_CONV_BATCH)
-__global__ void MarlinMambaInputConvBatch(
-  #elif defined(VLLM_MAMBA_INPUT_CONV_SHORT)
-__global__ void MarlinMambaInputConvShort(
-  #else
+, const int conv_tokens = 8,
+          const vllm_mamba_input_conv::ConvFamily conv_family =
+              vllm_mamba_input_conv::ConvFamily::Single>
 __global__ void MarlinMambaInputConv(
-  #endif
     const int4* __restrict__ A0,  // fp16 input matrix of shape mxk
     const int4* __restrict__ B,   // 4bit quantized weight matrix of shape kxn
     int4* __restrict__ C0,        // fp16 output buffer of shape mxn
@@ -336,7 +326,7 @@ __global__ void MarlinMambaInputConv(
   static_assert(group_blocks != 0,
                 "runtime activation ordering is not supported");
   constexpr int m_block_size = m_block_size_8 ? 8 : (16 * thread_m_blocks);
-  #ifdef VLLM_MAMBA_INPUT_CONV_WIDE
+  if constexpr (conv_family == vllm_mamba_input_conv::ConvFamily::Wide) {
   // One whole M tile, one N tile per CTA, full K. Never enter generic parallel-M
   // partitioning or start a second pipeline while epilogue scratch is live.
   static_assert(!m_block_size_8 && (thread_m_blocks == 1 || thread_m_blocks == 2));
@@ -353,7 +343,7 @@ __global__ void MarlinMambaInputConv(
       max_shared_mem != full_pipeline_bytes) {
     asm volatile("trap;");
   }
-  #endif
+  }
 
   extern __shared__ int4 sh[];
   constexpr int pack_factor = 32 / b_type.size_bits();
@@ -1376,34 +1366,34 @@ __global__ void MarlinMambaInputConv(
       }
     }
     __syncthreads();
-  #ifdef VLLM_MAMBA_INPUT_CONV_WIDE
+    if constexpr (conv_family == vllm_mamba_input_conv::ConvFamily::Wide) {
     static_assert(
         a_type_id == vllm::kBFloat16.id() && b_type_id == vllm::kFE2M1f.id() &&
         c_type_id == vllm::kBFloat16.id() && s_type_id == vllm::kFE4M3fn.id() &&
         threads == 128 && !m_block_size_8 &&
         (thread_m_blocks == 1 || thread_m_blocks == 2) && thread_n_blocks == 8 &&
         thread_k_blocks == 4 && stages == 3 && group_blocks == 1 && !is_zp_float);
-  #else
+    } else {
     static_assert(
         a_type_id == vllm::kBFloat16.id() && b_type_id == vllm::kFE2M1f.id() &&
         c_type_id == vllm::kBFloat16.id() && s_type_id == vllm::kFE4M3fn.id() &&
         threads == 128 && thread_m_blocks == 1 && thread_n_blocks == 8 &&
         thread_k_blocks == 4 && m_block_size_8 && stages == 3 &&
         group_blocks == 1 && !is_zp_float);
-  #endif
-  #ifdef VLLM_MAMBA_INPUT_CONV_WIDE
+    }
+    if constexpr (conv_family == vllm_mamba_input_conv::ConvFamily::Wide) {
     vllm_mamba_input_conv::epilogue_wide<16 * thread_m_blocks, conv_tokens>(
         sh_red, slice_col, conv, reinterpret_cast<uint16_t*>(C0), prob_m);
-  #elif defined(VLLM_MAMBA_INPUT_CONV_BATCH)
+    } else if constexpr (conv_family == vllm_mamba_input_conv::ConvFamily::Batched) {
     vllm_mamba_input_conv::epilogue_batch<conv_tokens>(
         sh_red, slice_col, conv, reinterpret_cast<uint16_t*>(C0), prob_m);
-  #elif defined(VLLM_MAMBA_INPUT_CONV_SHORT)
+    } else if constexpr (conv_tokens < 8) {
     vllm_mamba_input_conv::epilogue_short<conv_tokens>(
         sh_red, slice_col, conv, reinterpret_cast<uint16_t*>(C0));
-  #else
+    } else {
     vllm_mamba_input_conv::epilogue(sh_red, slice_col, conv,
                                     reinterpret_cast<uint16_t*>(C0));
-  #endif
+    }
   };
 
   // Start global fetch and register load pipelines.

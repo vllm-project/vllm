@@ -524,6 +524,11 @@ class MambaMixer2(MambaBase, PluggableLayer):
         )
 
         vllm_config = get_current_vllm_config()
+        from vllm.model_executor.layers.mamba.ops.marlin_input_conv import (
+            select_mamba_marlin_ownership,
+        )
+
+        select_mamba_marlin_ownership(self, vllm_config)
         compilation_config = vllm_config.compilation_config
         splitting_ops = compilation_config.splitting_ops
         # Existing capture choices remain authoritative. Explicit lists must
@@ -630,6 +635,10 @@ class MambaMixer2(MambaBase, PluggableLayer):
         self._gb10_replayssm_profile_allowed = (
             self.use_flashinfer_replayssm and self._marlin_input_conv_allowed
         )
+        self._marlin_output_profile_allowed = (
+            self._gb10_replayssm_profile_allowed
+            and hasattr(torch.ops._C, "mamba_marlin_output")
+        )
 
     def forward(
         self,
@@ -683,7 +692,17 @@ class MambaMixer2(MambaBase, PluggableLayer):
         hidden_states = self.norm(ssm_output, gate)
 
         # 5. Final linear projection
-        output, _ = self.out_proj(hidden_states)
+        from vllm.model_executor.layers.mamba.ops.marlin_input_conv import (
+            can_use_marlin_output,
+        )
+
+        if can_use_marlin_output(self, hidden_states, check_rows=False):
+            # Keep M dynamic in Dynamo; choose the measured M8 launch at runtime.
+            output = torch.ops.vllm.mamba_mixer2_output_projection(
+                hidden_states, _encode_layer_name(self.prefix)
+            )
+        else:
+            output, _ = self.out_proj(hidden_states)
 
         return output
 
@@ -1347,4 +1366,33 @@ direct_register_custom_op(
     op_name="mamba_mixer2",
     op_func=mamba_mixer2,
     mutates_args=["output"],
+)
+
+
+def mamba_mixer2_output_projection(
+    hidden_states: torch.Tensor, layer_name: LayerNameType
+) -> torch.Tensor:
+    from vllm.model_executor.layers.mamba.ops.marlin_input_conv import (
+        can_use_marlin_output,
+        run_marlin_output,
+    )
+
+    layer = get_forward_context().no_compile_layers[_resolve_layer_name(layer_name)]
+    if can_use_marlin_output(layer, hidden_states):
+        return run_marlin_output(layer, hidden_states)
+    output, _ = layer.out_proj(hidden_states)
+    return output
+
+
+def mamba_mixer2_output_projection_fake(
+    hidden_states: torch.Tensor, layer_name: LayerNameType
+) -> torch.Tensor:
+    return hidden_states.new_empty((hidden_states.shape[0], 4096))
+
+
+direct_register_custom_op(
+    op_name="mamba_mixer2_output_projection",
+    op_func=mamba_mixer2_output_projection,
+    mutates_args=[],
+    fake_impl=mamba_mixer2_output_projection_fake,
 )

@@ -752,10 +752,10 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
       endif()
       if(MARLIN_MAMBA_INPUT_CONV_ARCHS)
         set(MARLIN_MAMBA_INPUT_CONV_SRC
-          "csrc/quantization/marlin/mamba_input_conv.cu"
-          "csrc/quantization/marlin/mamba_input_conv_short.cu"
-          "csrc/quantization/marlin/mamba_input_conv_batch.cu"
-          "csrc/quantization/marlin/mamba_input_conv_wide.cu")
+          "csrc/mamba/marlin/input_conv_ops.cu"
+          "csrc/mamba/marlin/input_conv_short.cu"
+          "csrc/mamba/marlin/input_conv_batch.cu"
+          "csrc/mamba/marlin/input_conv_wide.cu")
         set_gencode_flags_for_srcs(
           SRCS "${MARLIN_MAMBA_INPUT_CONV_SRC}"
           CUDA_ARCHS "${MARLIN_MAMBA_INPUT_CONV_ARCHS}")

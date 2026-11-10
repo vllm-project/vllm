@@ -22,7 +22,11 @@ from vllm.config import (
 )
 from vllm.config.mamba import MambaBackendEnum, MambaConfig
 from vllm.forward_context import get_forward_context, set_forward_context
+from vllm.model_executor.kernels.linear.nvfp4.b12x import (
+    B12xNvFp4W4A16LinearKernel,
+)
 from vllm.model_executor.kernels.linear.nvfp4.marlin import MarlinNvFp4LinearKernel
+from vllm.model_executor.layers.linear import MergedColumnParallelLinear
 from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
 from vllm.model_executor.layers.mamba.mamba_utils import get_conv_state_layout
 from vllm.model_executor.layers.mamba.ops.marlin_input_conv import (
@@ -64,9 +68,11 @@ pytestmark = pytest.mark.skipif(
 
 
 @pytest.fixture
-def owned_mamba(tmp_path, dist_init, request):
+def owned_mamba(tmp_path, dist_init, request, monkeypatch):
     options = getattr(request, "param", 8)
     options = options if isinstance(options, dict) else {"configured_tokens": options}
+    if options.get("disable_marlin", False):
+        monkeypatch.setenv("VLLM_DISABLED_KERNELS", "MarlinNvFp4LinearKernel")
     configured_tokens = options.get("configured_tokens", 8)
     capture_mode = options.get("capture_mode", CUDAGraphMode.NONE)
     expected_admission = options.get("expected_admission", True)
@@ -151,7 +157,13 @@ def owned_mamba(tmp_path, dist_init, request):
             max_cudagraph_capture_size=capture_tokens,
             decode_cudagraph_capture_request_sizes=options.get("decode_request_sizes"),
         ),
-        kernel_config=KernelConfig(linear_backend_per_quant={"nvfp4_w4a16": "marlin"}),
+        kernel_config=KernelConfig(
+            linear_backend=options.get("linear_backend", "auto"),
+            moe_backend=options.get("moe_backend", "auto"),
+            linear_backend_per_quant=(
+                None if "linear_backend" in options else {"nvfp4_w4a16": "marlin"}
+            ),
+        ),
     )
     quant = ModelOptNvFp4Config(
         quant_method="W4A16_NVFP4", is_checkpoint_nvfp4_serialized=True
@@ -183,9 +195,12 @@ def owned_mamba(tmp_path, dist_init, request):
                 for projection in (layer.in_proj, layer.out_proj):
                     if options.get("nonzero_weights", False):
                         projection.weight.fill_(0x11)
-                    assert (
-                        type(projection.quant_method.kernel) is MarlinNvFp4LinearKernel
+                    expected_kernel = (
+                        B12xNvFp4W4A16LinearKernel
+                        if options.get("disable_marlin", False)
+                        else MarlinNvFp4LinearKernel
                     )
+                    assert type(projection.quant_method.kernel) is expected_kernel
                     projection.quant_method.process_weights_after_loading(projection)
                     assert projection.input_scale.retired
                     assert torch.isnan(projection.input_scale).all()
@@ -222,6 +237,47 @@ def owned_mamba(tmp_path, dist_init, request):
             yield config, layer, pages, starts, history, builder, hidden
         finally:
             clear_layer_kv_caches([layer])
+
+
+@pytest.mark.parametrize(
+    "owned_mamba",
+    [dict(linear_backend="b12x", moe_backend="b12x", nonzero_weights=True)],
+    indirect=True,
+)
+def test_gb10_mamba_ownership_does_not_change_attention_or_global_backend(owned_mamba):
+    """Only Mamba's two methods select Marlin before their single post-load pack."""
+    config, layer, *_ = owned_mamba
+    assert type(layer.in_proj.quant_method.kernel) is MarlinNvFp4LinearKernel
+    assert type(layer.out_proj.quant_method.kernel) is MarlinNvFp4LinearKernel
+    quant = ModelOptNvFp4Config(
+        quant_method="W4A16_NVFP4", is_checkpoint_nvfp4_serialized=True
+    )
+    with set_current_vllm_config(config), torch.device("cuda"):
+        attention = MergedColumnParallelLinear(
+            input_size=4096,
+            output_sizes=[4096],
+            params_dtype=torch.bfloat16,
+            quant_config=quant,
+            prefix="model.layers.1.attention.q_proj",
+        )
+    assert type(attention.quant_method.kernel) is B12xNvFp4W4A16LinearKernel
+    assert config.kernel_config.linear_backend == "b12x"
+    assert config.kernel_config.moe_backend == "b12x"
+    assert config.kernel_config.linear_backend_per_quant is None
+
+
+@pytest.mark.parametrize(
+    "owned_mamba",
+    [dict(linear_backend="b12x", disable_marlin=True, expected_admission=False)],
+    indirect=True,
+)
+def test_gb10_mamba_respects_disabled_marlin_kernel(owned_mamba):
+    """A disabled kernel keeps each real Mamba projection on its selected backend."""
+    config, layer, *_ = owned_mamba
+    assert type(layer.in_proj.quant_method.kernel) is B12xNvFp4W4A16LinearKernel
+    assert type(layer.out_proj.quant_method.kernel) is B12xNvFp4W4A16LinearKernel
+    assert config.kernel_config.linear_backend == "b12x"
+    assert config.kernel_config.linear_backend_per_quant is None
 
 
 @pytest.mark.parametrize(
@@ -299,7 +355,17 @@ def test_fused_layer_uses_bound_checkpoint_and_scale_cache(
                 )
                 layer.conv_ssm_forward(projected, ssm_output)
                 normalized = layer.norm(ssm_output, projected[:, :8192])
-                output, _ = layer.out_proj(normalized)
+                # Hold the independently selected output policy common while
+                # comparing fused versus separate input/convolution paths.
+                from vllm.model_executor.layers.mamba.ops.marlin_input_conv import (
+                    can_use_marlin_output,
+                    run_marlin_output,
+                )
+
+                if can_use_marlin_output(layer, normalized):
+                    output = run_marlin_output(layer, normalized)
+                else:
+                    output, _ = layer.out_proj(normalized)
         torch.cuda.synchronize()
         assert torch.isfinite(output).all() and output.any()
         return output.clone(), pages.clone(), starts.clone(), history.clone()
@@ -383,6 +449,8 @@ def test_dynamic_tokens_keep_real_marlin_mamba_dispatch(owned_mamba, trace_token
         counts = {event.key: event.count for event in prof.key_averages()}
         assert counts.get("vllm::mamba_mixer2_with_input_projection", 0) == 1
         assert counts.get("_C::marlin_mamba_input_conv", 0) == 1
+        assert counts.get("vllm::mamba_mixer2_output_projection", 0) == 1
+        assert counts.get("_C::mamba_marlin_output", 0) == (tokens == 8)
 
 
 @pytest.mark.parametrize("owned_mamba", range(1, 9), indirect=True)

@@ -57,20 +57,6 @@ other dispatch paths retain their backend-specific behavior.
 Set `VLLM_MOE_SKIP_PADDING=0` before starting the engine to disable this
 optimization for comparisons.
 
-## Small-batch NVFP4 Marlin profile on GB10
-
-When Marlin W4A16 is already selected, a 48-SM GB10 (SM121) uses a specialized
-host launch for BF16 inputs with `M=8`, `K=8192` and `N=4096`, NVFP4 weights,
-and group size 16. The profile uses the existing stock Marlin device kernel with 32 full-K
-output tiles and 45,056 bytes of shared memory per CTA. Other shapes, dtypes
-and devices use the existing dispatcher. Weight packing and backend selection
-are unchanged.
-
-Use the existing `linear_backend_per_quant` setting for `nvfp4_w4a16`, or
-`--linear-backend marlin`, to select Marlin explicitly. These options affect
-all matching dense layers and prefill calls, not only Mamba output projections;
-model-wide performance should be validated separately.
-
 ## Benchmarking with dummy weights
 
 For performance experiments with random weights, use `--load-format dummy`.
@@ -193,10 +179,20 @@ metadata and padded-layout checks to pass. Inactive cache slots remain
 protected. Unsupported or unproven geometry, metadata, wrappers and backends
 retain the original projection and convolution path.
 
-This does not select Marlin automatically or create a second weight pack.
-Existing explicit Marlin backend selection still applies to other dense
-linears and prefill as configured. The fusion preserves ReplaySSM state
-and stochastic-rounding seed handling.
+On SM121, supported ModelOpt NVFP4 weight-only Mamba2 input/output projections
+select Marlin locally before normal post-load weight packing, including shapes
+that have not been tuned and may be slower. Attention,
+other linears, MoE and the shared backend configuration are unchanged; only one
+weight pack is created. Unsupported codecs/dtypes, LoRA, batch-invariant mode
+and explicitly disabled Marlin kernels retain their configured owners.
+The fused operators require those existing Marlin packs and never convert
+another backend's packed weights at runtime. Unmatched token/batch shapes use
+ordinary Marlin for the same Mamba-owned weights. The fusion preserves ReplaySSM
+state and stochastic-rounding seed handling.
+
+Only the matching Mamba output callsite selects the tuned existing Marlin
+kernel for BF16 `M=8, K=8192, N=4096` with NVFP4 group16 weights. The generic
+Marlin operator and its dispatcher keep their stock behavior.
 
 For compatible FP16 ReplaySSM calls, this GB10 path applies measured launch
 profiles to 29 combinations of uniform batch/token shape and caller-selected
