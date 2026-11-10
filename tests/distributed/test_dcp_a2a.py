@@ -1042,6 +1042,45 @@ def _distributed_dcp_manager_worker(env: dict[str, str]) -> None:
             _assert_packed_a2a_close(actual, reference(output, lse), dtype)
 
         if backend == "fi_a2a_fused":
+            # Only the first call with a layout runs the checks; repeats take
+            # the host fast path and must give the same result.
+            dense_output, dense_lse = output.contiguous(), lse.contiguous()
+            expected = reference(dense_output, dense_lse)
+            assert fi_workspace is not None
+            checked = fi_workspace._checked_lse_reduce
+            checked_calls: list[tuple] = []
+
+            def counting_checked_lse_reduce(*args):
+                checked_calls.append(args)
+                return checked(*args)
+
+            fi_workspace._checked_lse_reduce = counting_checked_lse_reduce
+            try:
+                for _ in range(2):
+                    actual = combine(
+                        dense_output, dense_lse, **all_valid_kwargs(num_tokens)
+                    )
+                    torch.accelerator.synchronize()
+                    _assert_packed_a2a_close(actual, expected, dtype)
+            finally:
+                del fi_workspace._checked_lse_reduce
+            assert len(checked_calls) == 1
+
+            # Contiguous destination-major producers are views; strided or
+            # unaligned storage is copied in logical order, never reinterpreted.
+            as_fi_input = type(fi_workspace)._as_fi_input
+            dense = torch.empty(
+                2, world_size, heads_per_rank, head_dim, device=device, dtype=dtype
+            )
+            assert as_fi_input(dense, "O") is dense
+            strided_view = output.unflatten(1, (world_size, heads_per_rank))
+            copied = as_fi_input(strided_view, "O")
+            assert copied.is_contiguous() and torch.equal(copied, strided_view)
+            storage = torch.empty(dense.numel() + 1, device=device, dtype=dtype)
+            unaligned = storage[1:].view(dense.shape)
+            assert unaligned.is_contiguous() and unaligned.data_ptr() % 16
+            assert as_fi_input(unaligned, "O").data_ptr() % 16 == 0
+
             oversized = torch.empty(
                 max_num_tokens + 1, total_heads, head_dim, device=device, dtype=dtype
             )
@@ -1242,6 +1281,20 @@ def _distributed_dcp_manager_worker(env: dict[str, str]) -> None:
                 fi_workspace._workspaces[capture_id][0].data_ptr()
                 != first_workspace.data_ptr()
             )
+            # A rank loading other FlashInfer DCP sources fails on every rank
+            # before any workspace collective.
+            import vllm.v1.attention.ops.flashinfer_dcp as fi_dcp
+
+            identity = fi_dcp._fi_source_identity
+            if local_rank == 0:
+                fi_dcp._fi_source_identity = lambda module: ("other",)
+            try:
+                with pytest.raises(RuntimeError, match="differ across ranks"):
+                    type(fi_workspace)(
+                        group, device, 2, heads_per_rank, head_dim, dtype, 1
+                    )
+            finally:
+                fi_dcp._fi_source_identity = identity
     finally:
         if graph is not None:
             torch.accelerator.synchronize()

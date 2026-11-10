@@ -54,7 +54,7 @@ Decode context parallel is supported in vLLM, for both MLA and GQA models. Some 
 ### FlashInfer fused DCP combine
 
 `--dcp-comm-backend fi_a2a_fused` enables FlashInfer's NCCL-based
-[fused output exchange and LSE reduction with mask/stride support (#6483)](https://github.com/flashinfer-ai/flashinfer/pull/6483)
+[fused output exchange and LSE reduction with destination-major inputs and token masks (#6483)](https://github.com/flashinfer-ai/flashinfer/pull/6483)
 for MLA DCP and GQA/MQA decode with `--attention-backend FLASHINFER`.
 Existing defaults and GQA/MQA prefill remain unchanged. GQA/MQA initially
 requires an unquantized KV cache and no attention sinks; existing TP/KV-head
@@ -67,9 +67,13 @@ PyTorch must expose `NCCL_HAS_DEVCOMM` and
 `NCCLSymmetricMemory::get_window_offset`; the pinned Torch 2.13.0 build lacks them.
 
 The minimum supported FI release will be set once #6483 is released; until then,
-use its source changes in a compatible environment. FI reads O/LSE strided views
-and a token mask prepared by the metadata builder and shared across its layers;
-no O/LSE layout copy is needed.
+use its source changes in a compatible environment. FI reads contiguous
+destination-major O `[tokens, DCP, heads, D]` and FP32 LSE views, plus a token
+mask prepared by the metadata builder and shared across its layers. The
+FLASHINFER GQA/MQA decode and most MLA decode outputs are passed as views.
+Strided producer outputs, such as FlashAttention MLA's transposed LSE or
+CUTLASS MLA's padded heads below 128 total heads, are copied once per layer
+before the exchange.
 
 FI uses the process-wide NCCL symmetric-memory backend, so the following
 collective opt-outs are required:
