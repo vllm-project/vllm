@@ -106,19 +106,14 @@ class SamplingStates:
         self,
         expanded_idx_mapping: torch.Tensor,
         idx_mapping_np: np.ndarray,
-        vocab_size: int,
-    ) -> tuple[torch.Tensor | None, torch.Tensor | None, bool]:
-        """Returns (top_k, top_p, has_topp_only_rows)."""
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
         top_k_np = self.top_k.np[idx_mapping_np]
         top_p_np = self.top_p.np[idx_mapping_np]
         do_top_k = np.any(top_k_np != self.vocab_size)
         do_top_p = np.any(top_p_np != 1.0)
         top_k = self.top_k.gpu[expanded_idx_mapping] if do_top_k else None
         top_p = self.top_p.gpu[expanded_idx_mapping] if do_top_p else None
-        has_topp_only_rows = bool(
-            do_top_p and np.any((top_k_np >= vocab_size) & (top_p_np < 1.0))
-        )
-        return top_k, top_p, has_topp_only_rows
+        return top_k, top_p
 
     def apply_top_k_top_p(
         self,
@@ -126,14 +121,10 @@ class SamplingStates:
         expanded_idx_mapping: torch.Tensor,
         idx_mapping_np: np.ndarray,
     ) -> torch.Tensor:
-        top_k, top_p, has_topp_only_rows = self.get_top_k_top_p(
-            expanded_idx_mapping, idx_mapping_np, logits.shape[-1]
-        )
+        top_k, top_p = self.get_top_k_top_p(expanded_idx_mapping, idx_mapping_np)
         if top_k is None and top_p is None:
             return logits
-        return apply_top_k_top_p(
-            logits, top_k, top_p, has_topp_only_rows=has_topp_only_rows
-        )
+        return apply_top_k_top_p(logits, top_k, top_p)
 
     def masks_logits(self, req_idx: int) -> bool:
         """Whether min-p, top-k or top-p can set some of this request's logits

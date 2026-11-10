@@ -58,7 +58,6 @@ class GPUWatermarkSampler(Sampler):
         pos: torch.Tensor,
         top_k: torch.Tensor | None,
         top_p: torch.Tensor | None,
-        has_topp_only_rows: bool,
         use_fused_sampler: bool,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         enabled = self.watermarking.np[idx_mapping_np] & (
@@ -72,13 +71,10 @@ class GPUWatermarkSampler(Sampler):
                 pos,
                 top_k,
                 top_p,
-                has_topp_only_rows,
                 use_fused_sampler,
             )
 
-        processed_logits = apply_top_k_top_p(
-            processed_logits, top_k, top_p, has_topp_only_rows=has_topp_only_rows
-        )
+        processed_logits = apply_top_k_top_p(processed_logits, top_k, top_p)
         contexts = self._get_contexts(expanded_idx_mapping)
         repeated_contexts = None
         if self.deduplicate_contexts != "none":

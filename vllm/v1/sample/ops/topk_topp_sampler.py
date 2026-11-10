@@ -17,15 +17,9 @@ from vllm.utils.flashinfer import has_flashinfer
 
 if HAS_TRITON:
     from vllm.v1.sample.ops.topk_topp_triton import (
-        _topk_topp,
-        _topp_split_mask,
-        _topp_split_stats,
-        _topp_split_step,
         apply_top_k_top_p_triton,
-    )
-    from vllm.v1.sample.ops.topk_topp_triton_hier import (
-        apply_top_k_top_p_triton_hier,
-        can_use_top_k_top_p_triton_hier,
+        can_use_top_k_top_p_triton,
+        register_warmups,
     )
 
 logger = init_logger(__name__)
@@ -34,11 +28,7 @@ logger = init_logger(__name__)
 def register_top_k_top_p_warmups() -> None:
     """Register every native accelerator sampling kernel used at runtime."""
     if HAS_TRITON and not current_platform.is_cpu():
-        _topk_topp.register_warmup()
-        if current_platform.is_cuda_alike():
-            _topp_split_stats.register_warmup()
-            _topp_split_step.register_warmup()
-            _topp_split_mask.register_warmup()
+        register_warmups()
 
 
 def _aiter_temp_gumbel_sample(
@@ -509,22 +499,13 @@ def apply_top_k_top_p(
     logits: torch.Tensor,
     k: torch.Tensor | None,
     p: torch.Tensor | None,
-    has_topp_only_rows: bool = True,
 ) -> torch.Tensor:
-    """Apply top-k and/or top-p masking to logits.
-
-    has_topp_only_rows must be True if any row has p < 1 and
-    k >= logits.shape[-1] (no active top-k).
-    """
+    """Apply top-k and/or top-p masking to logits."""
     if p is None and k is None:
         return logits
 
-    if HAS_TRITON:
-        if can_use_top_k_top_p_triton_hier(logits):
-            return apply_top_k_top_p_triton_hier(logits, k, p)
-        return apply_top_k_top_p_triton(
-            logits, k, p, has_topp_only_rows=has_topp_only_rows
-        )
+    if HAS_TRITON and can_use_top_k_top_p_triton(logits):
+        return apply_top_k_top_p_triton(logits, k, p)
 
     is_cpu = current_platform.is_cpu()
     return apply_top_k_top_p_pytorch(logits, k, p, allow_cpu_sync=is_cpu)

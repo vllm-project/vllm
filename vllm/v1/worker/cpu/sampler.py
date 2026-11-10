@@ -377,19 +377,14 @@ class CPUSamplingStates:
         self,
         expanded_idx_mapping: torch.Tensor,
         idx_mapping_np: np.ndarray,
-        vocab_size: int,
-    ) -> tuple[torch.Tensor | None, torch.Tensor | None, bool]:
-        """Returns (top_k, top_p, has_topp_only_rows)."""
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
         top_k_np = self.top_k_np[idx_mapping_np]
         top_p_np = self.top_p_np[idx_mapping_np]
         do_top_k = np.any(top_k_np != self.vocab_size)
         do_top_p = np.any(top_p_np != 1.0)
         top_k = self.top_k[expanded_idx_mapping] if do_top_k else None
         top_p = self.top_p[expanded_idx_mapping] if do_top_p else None
-        has_topp_only_rows = bool(
-            do_top_p and np.any((top_k_np >= vocab_size) & (top_p_np < 1.0))
-        )
-        return top_k, top_p, has_topp_only_rows
+        return top_k, top_p
 
     def apply_top_k_top_p(
         self,
@@ -397,14 +392,10 @@ class CPUSamplingStates:
         expanded_idx_mapping: torch.Tensor,
         idx_mapping_np: np.ndarray,
     ) -> torch.Tensor:
-        top_k, top_p, has_topp_only_rows = self.get_top_k_top_p(
-            expanded_idx_mapping, idx_mapping_np, logits.shape[-1]
-        )
+        top_k, top_p = self.get_top_k_top_p(expanded_idx_mapping, idx_mapping_np)
         if top_k is None and top_p is None:
             return logits
-        return apply_top_k_top_p(
-            logits, top_k, top_p, has_topp_only_rows=has_topp_only_rows
-        )
+        return apply_top_k_top_p(logits, top_k, top_p)
 
     def any_greedy(self, idx_mapping_np: np.ndarray) -> bool:
         return bool(np.any(self.temperature_np[idx_mapping_np] == 0.0))
@@ -771,8 +762,8 @@ class CPUSampler:
             seq_lens_upper_bound_np,
             skip_top_k_top_p=True,
         )
-        top_k, top_p, has_topp_only_rows = self.sampling_states.get_top_k_top_p(
-            expanded_idx_mapping, idx_mapping_np, logits.shape[-1]
+        top_k, top_p = self.sampling_states.get_top_k_top_p(
+            expanded_idx_mapping, idx_mapping_np
         )
         return self._sample_random(
             processed_logits,
@@ -781,7 +772,6 @@ class CPUSampler:
             pos,
             top_k,
             top_p,
-            has_topp_only_rows,
             use_fused_sampler=False,
         )
 
@@ -793,18 +783,12 @@ class CPUSampler:
         pos: torch.Tensor,
         top_k: torch.Tensor | None,
         top_p: torch.Tensor | None,
-        has_topp_only_rows: bool,
         use_fused_sampler: bool,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         assert not use_fused_sampler
 
         # TODO (fadara01): Add C++ fused ops for top-p / top-k sampling.
-        processed_logits = apply_top_k_top_p(
-            processed_logits,
-            top_k,
-            top_p,
-            has_topp_only_rows=has_topp_only_rows,
-        )
+        processed_logits = apply_top_k_top_p(processed_logits, top_k, top_p)
 
         sampled = gumbel_sample(
             processed_logits,
@@ -896,7 +880,6 @@ class CPUWatermarkSampler(CPUSampler):
         pos: torch.Tensor,
         top_k: torch.Tensor | None,
         top_p: torch.Tensor | None,
-        has_topp_only_rows: bool,
         use_fused_sampler: bool,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         enabled = self.watermarking_np[idx_mapping_np] & (
@@ -910,16 +893,10 @@ class CPUWatermarkSampler(CPUSampler):
                 pos,
                 top_k,
                 top_p,
-                has_topp_only_rows,
                 use_fused_sampler,
             )
 
-        processed_logits = apply_top_k_top_p(
-            processed_logits,
-            top_k,
-            top_p,
-            has_topp_only_rows=has_topp_only_rows,
-        )
+        processed_logits = apply_top_k_top_p(processed_logits, top_k, top_p)
         contexts = self._get_contexts(expanded_idx_mapping)
         repeated_contexts = None
         if self.deduplicate_contexts != "none":

@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from types import SimpleNamespace
+
 import pytest
 import torch
 from torch import Generator
@@ -227,7 +229,18 @@ def test_flashinfer_sampler_fallback_when_flashinfer_disabled(monkeypatch):
 # =============================================================================
 
 
-@pytest.mark.skipif(not HAS_TRITON, reason="Triton not available on this platform")
+def _triton_kernel_available() -> bool:
+    if not HAS_TRITON:
+        return False
+    from vllm.v1.sample.ops.topk_topp_triton import _supported_device
+
+    return _supported_device()
+
+
+TRITON_KERNEL_AVAILABLE = _triton_kernel_available()
+
+
+@pytest.mark.skipif(not TRITON_KERNEL_AVAILABLE, reason="requires CUDA SM80+")
 class TestTritonTopkTopp:
     """Tests for the Triton top-k/top-p kernel."""
 
@@ -823,38 +836,6 @@ class TestTritonTopkTopp:
             f"{kept_topk_topp.tolist()}"
         )
 
-    @pytest.mark.parametrize("batch_size", [8, 48])
-    def test_skip_split_without_topp_only_rows(
-        self, batch_size: int, monkeypatch: pytest.MonkeyPatch
-    ):
-        """has_topp_only_rows=False skips the split pipeline; the result must
-        not change when every top-p row also has a top-k, grammar rows
-        (k >= #finite logits) included."""
-        import vllm.v1.sample.ops.topk_topp_triton as tt
-
-        vocab_size = 32000
-        logits = torch.randn(
-            batch_size, vocab_size, generator=self.generator, dtype=torch.float32
-        )
-        logits[1] = float("-inf")
-        idx = torch.randperm(vocab_size, generator=self.generator)[:30]
-        logits[1, idx] = torch.randn(30, generator=self.generator)
-        k = torch.randint(
-            50, 100, (batch_size,), generator=self.generator, dtype=torch.int32
-        )
-        p = torch.rand(batch_size, generator=self.generator) * 0.9 + 0.1
-        k[::4] = vocab_size
-        p[::4] = 1.0
-
-        expected = tt.apply_top_k_top_p_triton(logits.clone(), k, p)
-        monkeypatch.setattr(
-            tt, "_apply_topp_split", lambda *args: pytest.fail("split launched")
-        )
-        actual = tt.apply_top_k_top_p_triton(
-            logits.clone(), k, p, has_topp_only_rows=False
-        )
-        assert torch.equal(actual, expected)
-
     def test_topp_tie_break_deterministic(self):
         """Boundary-duplicate trimming must be deterministic across calls.
 
@@ -951,43 +932,6 @@ class TestTritonTopkTopp:
         assert torch.equal(kept_ties, torch.arange(num_ties) < num_kept_ties)
 
 
-# =============================================================================
-# Group-maxima Triton kernel tests
-# =============================================================================
-
-
-def _triton_hier_available() -> bool:
-    if not HAS_TRITON:
-        return False
-    from vllm.v1.sample.ops.topk_topp_triton_hier import _supported_device
-
-    return _supported_device()
-
-
-TRITON_HIER_AVAILABLE = _triton_hier_available()
-
-
-@pytest.mark.skipif(not TRITON_HIER_AVAILABLE, reason="requires CUDA SM90+")
-class TestTritonHierTopkTopp(TestTritonTopkTopp):
-    """Runs the Triton kernel's regression suite against the group-maxima kernel."""
-
-    @pytest.fixture(autouse=True)
-    def use_hier_kernel(self, monkeypatch: pytest.MonkeyPatch):
-        import vllm.v1.sample.ops.topk_topp_triton as tt
-        from vllm.v1.sample.ops.topk_topp_triton_hier import (
-            apply_top_k_top_p_triton_hier,
-        )
-
-        monkeypatch.setattr(
-            tt,
-            "apply_top_k_top_p_triton",
-            lambda logits, k, p, **kwargs: apply_top_k_top_p_triton_hier(logits, k, p),
-        )
-
-    def test_skip_split_without_topp_only_rows(self, *args, **kwargs):
-        pytest.skip("Triton split-pipeline dispatch only")
-
-
 def _assert_exact_filter(
     source: torch.Tensor,
     actual: torch.Tensor,
@@ -1036,6 +980,10 @@ def _make_logits(kind: str, batch: int, vocab: int, gen: Generator) -> torch.Ten
     return logits.bfloat16().float() if kind == "bf16" else logits
 
 
+def _num_compiled(kernel) -> int:
+    return sum(len(cache[0]) for cache in kernel.device_caches.values())
+
+
 def _make_param(kind, batch: int, vocab: int, gen: Generator, dtype: torch.dtype):
     if kind is None:
         return None
@@ -1050,8 +998,8 @@ def _make_param(kind, batch: int, vocab: int, gen: Generator, dtype: torch.dtype
     return value
 
 
-@pytest.mark.skipif(not TRITON_HIER_AVAILABLE, reason="requires CUDA SM90+")
-class TestTritonHierTopkToppExact:
+@pytest.mark.skipif(not TRITON_KERNEL_AVAILABLE, reason="requires CUDA SM80+")
+class TestTritonTopkToppExact:
     """Exact selection on every kernel path: the 32 to 256 logit tiers, the
     histogram path with a shared gather or refinement (large k, huge nuclei,
     ties at the cut), and the radix last resort (heavy ties)."""
@@ -1085,20 +1033,20 @@ class TestTritonHierTopkToppExact:
         ],
     )
     def test_exact_selection(self, kind, batch, vocab, k, p):
-        from vllm.v1.sample.ops.topk_topp_triton_hier import (
-            apply_top_k_top_p_triton_hier,
+        from vllm.v1.sample.ops.topk_topp_triton import (
+            apply_top_k_top_p_triton,
         )
 
         source = _make_logits(kind, batch, vocab, self.generator)
         k = _make_param(k, batch, vocab, self.generator, torch.int32)
         p = _make_param(p, batch, vocab, self.generator, torch.float32)
-        actual = apply_top_k_top_p_triton_hier(source.clone(), k, p)
+        actual = apply_top_k_top_p_triton(source.clone(), k, p)
         _assert_exact_filter(source, actual, k, p)
 
     def test_cuda_graph_replay(self):
         """Device k/p are read at replay time, and the grid barrier resets."""
-        from vllm.v1.sample.ops.topk_topp_triton_hier import (
-            apply_top_k_top_p_triton_hier,
+        from vllm.v1.sample.ops.topk_topp_triton import (
+            apply_top_k_top_p_triton,
         )
 
         batch, vocab = 4, 65536
@@ -1106,10 +1054,10 @@ class TestTritonHierTopkToppExact:
         k = torch.tensor([1, 20, 2000, vocab], dtype=torch.int32)
         p = torch.tensor([0.1, 0.5, 0.8, 1.0])
         logits = source.clone()
-        apply_top_k_top_p_triton_hier(logits, k, p)
+        apply_top_k_top_p_triton(logits, k, p)
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph):
-            apply_top_k_top_p_triton_hier(logits, k, p)
+            apply_top_k_top_p_triton(logits, k, p)
         for _ in range(4):
             k.copy_(k.roll(1))
             p.copy_(p.roll(-1))
@@ -1117,25 +1065,46 @@ class TestTritonHierTopkToppExact:
             graph.replay()
             _assert_exact_filter(source, logits, k, p)
 
-    @pytest.mark.parametrize("enabled", ["1", "0"])
-    def test_sampler_dispatches_to_hier_kernel(
-        self, monkeypatch: pytest.MonkeyPatch, enabled: str
-    ):
-        monkeypatch.setenv("VLLM_USE_TRITON_HIER_TOPK_TOPP", enabled)
+    def test_warmup_covers_runtime_launch(self):
+        """The startup warmup compiles the variant that every call launches, so
+        no request pays a compile."""
+        import vllm.v1.sample.ops.topk_topp_triton as tt
+
+        kernels = (tt._levels_kernel, tt._filter_kernel)
+        for kernel in kernels:
+            kernel.device_caches.clear()
+        tt.reset_buffer_cache()
+        vocab = 65536
+        config = SimpleNamespace(
+            model_config=SimpleNamespace(get_vocab_size=lambda: vocab)
+        )
+        for owner in (tt._levels_warmup, tt._filter_warmup):
+            owner.compile_many(owner.get_warmup_keys(vllm_config=config))
+        warmed = [_num_compiled(kernel) for kernel in kernels]
+        assert warmed == [1, 1]
+        for k, p in ((20, 0.9), (None, 0.95), (3000, None)):
+            batch = 8
+            logits = torch.randn(batch, vocab, generator=self.generator)
+            k_rows = None if k is None else torch.full((batch,), k, dtype=torch.int64)
+            p_rows = None if p is None else torch.full((batch,), p)
+            tt.apply_top_k_top_p_triton(logits, k_rows, p_rows)
+        assert [_num_compiled(kernel) for kernel in kernels] == warmed
+
+    def test_sampler_dispatches_to_triton_kernel(self, monkeypatch: pytest.MonkeyPatch):
         import vllm.v1.sample.ops.topk_topp_sampler as sampler_ops
 
         calls = []
-        real = sampler_ops.apply_top_k_top_p_triton_hier
+        real = sampler_ops.apply_top_k_top_p_triton
 
         def spy(logits, k, p):
             calls.append(logits.shape)
             return real(logits, k, p)
 
-        monkeypatch.setattr(sampler_ops, "apply_top_k_top_p_triton_hier", spy)
+        monkeypatch.setattr(sampler_ops, "apply_top_k_top_p_triton", spy)
         logits = torch.randn(8, 32000, generator=self.generator)
         k = torch.full((8,), 50, dtype=torch.int32)
         apply_top_k_top_p(logits, k, None)
-        assert calls == ([logits.shape] if enabled == "1" else [])
+        assert calls == [logits.shape]
 
 
 # =============================================================================
