@@ -35,8 +35,8 @@ ends with an error, a non-streaming request returns HTTP 500 instead of a partia
 transcript. When the server aborts the request, for example during shutdown, it
 returns HTTP 503, which is safe to retry. A streaming request has already returned
 HTTP 200, so on an error it sends an error event with code 500 followed by
-`data: [DONE]`. An aborted streaming request ends with a final chunk whose
-`finish_reason` is `abort`; when long audio is split into chunks, the remaining
+`data: [DONE]`. In an aborted streaming request, the last transcription chunk
+has `finish_reason` `abort` (a usage chunk may follow); when long audio is split into chunks, the remaining
 chunks are not transcribed.
 
 ### Uploading Audio Files
