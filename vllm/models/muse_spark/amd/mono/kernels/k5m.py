@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # mypy: ignore-errors
-# ruff: noqa: B008, E501, SIM102
+# ruff: noqa: B008, B023, E501, SIM102
+# (B023: the task-loop lambdas of a virtual-CTA pass run within that pass)
 
 # Vendored from AMD's Muse Spark FlyDSL monokernel kernels (mk/k5m.py):
 # SPDX-License-Identifier: MIT
@@ -50,7 +51,7 @@ from dataclasses import dataclass
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from aiter.ops.flydsl.kernels.kernels_common import LOG2E
-from flydsl.expr import gpu, range_constexpr, rocdl
+from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr.typing import Int32, Int64
 
 from . import k5
@@ -102,13 +103,17 @@ REGION = {"a": 31, "z": 32, "ss": 33, "rs": 34}
 class BuildM:
     S: int = 32  # rows (32 / 64 / 96 / 128)
     W: int = 8  # ranks in the TP = EP group (8, or 4 at S = 32)
+    # physical CTAs (256: one a CU of an MI355X; 128: an MI350P, S = 32 only): each runs
+    # BLOCKS / grid virtual CTAs bid + grid v of the BLOCKS-CTA layout, phase by phase
+    grid: int = BLOCKS
 
 
-def build_vllm(S, W=8):
-    """The HM build vLLM launches for S rows of a TP = EP = W group."""
-    assert S in (32, 64, 96, 128) and W in (4, 8), (S, W)
+def build_vllm(S, W=8, grid=BLOCKS):
+    """The HM build vLLM launches for S rows of a TP = EP = W group on `grid` CTAs."""
+    assert S in (32, 64, 96, 128) and W in (4, 8) and grid in k5.GRIDS, (S, W, grid)
     assert W == 8 or S == 32, (S, W)
-    return BuildM(S=S, W=W)
+    assert grid == BLOCKS or S == 32, (S, grid)
+    return BuildM(S=S, W=W, grid=grid)
 
 
 def scratch_layout(S):
@@ -133,6 +138,8 @@ def build(key: BuildM):
     S = key.S
     assert S in (32, 64, 96, 128), S
     W = key.W  # shadows the module-level defaults for every closure below
+    GRID = key.grid
+    VC = BLOCKS // GRID  # virtual CTAs a physical CTA (V is the virtual expert count)
     EL = E // W
     CPR = BLOCKS // W  # 16-column blocks a rank owns in the EP reduce-scatter
     P = TOPK * S
@@ -158,8 +165,10 @@ def build(key: BuildM):
         ve_off: fx.Array[fx.Int32, VMAX, 16]
         nve: fx.Array[fx.Int32, 4, 16]
         pinfo: fx.Array[fx.Int32, P, 16]
-        pk: fx.Array[fx.Int32, 2 * 16, 16]
-        ssacc: fx.Array[fx.Float32, 2 * 16, 16]
+        # [pass][2 virtual experts][16]: the picks tables of every virtual CTA, built
+        # before gate_up overwrites the pick lists (an LDS union)
+        pk: fx.Array[fx.Int32, VC * 2 * 16, 16]
+        ssacc: fx.Array[fx.Float32, VC * 2 * 16, 16]
         rsl: fx.Array[fx.Float32, P, 16]
         pad: fx.Array[fx.Int64, 8, 16]  # unused: keeps the tuned LDS offsets
 
@@ -183,7 +192,7 @@ def build(key: BuildM):
         g_: MGu
         d_: MDn
 
-    name = f"muse_k5m_s{S}_w{W}"
+    name = f"muse_k5m_s{S}_w{W}" + (f"_g{GRID}" if VC > 1 else "")
 
     # ------------------------------------------------------------ tables
     @traced
@@ -459,11 +468,13 @@ def build(key: BuildM):
                         )
 
     @traced
-    def stage_final(scratch, sc, part_out, pl, tag, health, rt, tid, bid, rank):
+    def stage_final(
+        scratch, sc, part_out, pl, tag, health, rt, tid, bid, rank, poll_rs=True
+    ):
         tid = fresh(tid)
         par = tag_par(tag)
-        # rstd of every local pick (polled), then CTA b's 16 columns of every token
-        for q in range_constexpr((P + THREADS - 1) // THREADS):
+        # rstd of every local pick (polled; once a CTA), then CTA b's 16 columns of every token
+        for q in range_constexpr((P + THREADS - 1) // THREADS if poll_rs else 0):
             p = tid + THREADS * q
             if p < P:
                 if fx.ptr_load(rt["pinfo"] + p) >= 0:
@@ -582,67 +593,94 @@ def build(key: BuildM):
         tag = (ep & 0x1FFFFFF) * 64 + layer + 1
         setup(ids, rank, tid, lane, wave, rt, ms.lists.ptr, nrows)
         V = uniform(fx.ptr_load(rt["nve"] + 0))
-        t0 = bid * V
-        t1 = t0 + V
-        v0 = t0 >> 8
-        v1 = (fx.max(t1, 1) - 1) >> 8
-        gu_ld = lambda t: gu_loads(w13, w13s, rt, t, lane, wave, t < t1)
-        q = [gu_ld(t0 + d) for d in range(PF_GU)]
-        own_picks(rt, ms.lists.ptr, v0, v1, tid)
-        # gate_up over virtual expert v0, then (if the range crosses) v1
-        load_rows_h(h, rt, 0, mg.h.ptr, tid)
-        tsplit = fx.min(t1, (v0 + 1) << 8)
-        gu_c = lambda ops, t, i, v: gu_compute(
-            ops, t, i, v, scratch, tag, rt, tid, lane, wave, mg.h.ptr, mg.red.ptr
-        )
-        q, task, it = task_ring(gu_ld, gu_c, q, t0, fx.Int32(0), tsplit, False, 0)
-        if task < t1:
+        # this CTA's virtual CTAs (phase passes): bid + GRID c, each with its picks tables
+        vbs, rts = [bid], [rt]
+        for c in range_constexpr(1, VC):
+            vbs.append(bid + GRID * c)
+            rts.append(dict(rt, pk=rl.pk.ptr + 32 * c, ssacc=rl.ssacc.ptr + 32 * c))
+
+        # every pass's tasks t0 .. t1 and its virtual experts v0, v1
+        spans = []
+        for c in range_constexpr(VC):
+            t0 = vbs[c] * V
+            t1 = t0 + V
+            spans.append((t0, t1, t0 >> 8, (fx.max(t1, 1) - 1) >> 8))
+
+        # gate_up of every pass, then the down of every pass: a down task reads the a rows
+        # of any CTA
+        for c in range_constexpr(VC):
+            rtc = rts[c]
+            t0, t1, v0, v1 = spans[c]
+            if const_expr(c > 0):
+                gpu.barrier()  # h / red of the previous pass
+            gu_ld = lambda t: gu_loads(w13, w13s, rtc, t, lane, wave, t < t1)
+            q = [gu_ld(t0 + d) for d in range(PF_GU)]
+            if const_expr(c == 0):
+                for c2 in range_constexpr(VC):
+                    own_picks(rts[c2], ms.lists.ptr, spans[c2][2], spans[c2][3], tid)
+            # gate_up over virtual expert v0, then (if the range crosses) v1
+            load_rows_h(h, rtc, 0, mg.h.ptr, tid)
+            tsplit = fx.min(t1, (v0 + 1) << 8)
+            gu_c = lambda ops, t, i, v: gu_compute(
+                ops, t, i, v, scratch, tag, rtc, tid, lane, wave, mg.h.ptr, mg.red.ptr
+            )
+            q, task, it = task_ring(gu_ld, gu_c, q, t0, fx.Int32(0), tsplit, False, 0)
+            if task < t1:
+                gpu.barrier()
+                load_rows_h(h, rtc, 1, mg.h.ptr, tid)
+            task_ring(gu_ld, gu_c, q, task, it, t1, False, 1)
+        for c in range_constexpr(VC):
+            rtc = rts[c]
+            vb = vbs[c]
+            t0, t1, v0, v1 = spans[c]
+            tsplit = fx.min(t1, (v0 + 1) << 8)
+            # down: same tasks
+            dn_ld = lambda t: dn_loads(
+                w2,
+                w2s,
+                w_post,
+                rtc["ve_u"],
+                t,
+                lane,
+                wave,
+                t < t1,
+                VMAX,
+                W2_BYTES,
+                W2S_BYTES,
+            )
+            dq = [dn_ld(t0 + d) for d in range(PF_DN)]
             gpu.barrier()
-            load_rows_h(h, rt, 1, mg.h.ptr, tid)
-        task_ring(gu_ld, gu_c, q, task, it, t1, False, 1)
-        # down: same tasks
-        dn_ld = lambda t: dn_loads(
-            w2,
-            w2s,
-            w_post,
-            rt["ve_u"],
-            t,
-            lane,
-            wave,
-            t < t1,
-            VMAX,
-            W2_BYTES,
-            W2S_BYTES,
-        )
-        dq = [dn_ld(t0 + d) for d in range(PF_DN)]
-        gpu.barrier()
-        load_rows_a(scratch, tag, health, rt, 0, md.a.ptr, tid)
-        dn_c = lambda ops, t, i, v: dn_compute(
-            ops, t, i, v, scratch, tag, rt, tid, lane, wave, md.a.ptr, md.red.ptr
-        )
-        dq, task, it = task_ring(dn_ld, dn_c, dq, t0, fx.Int32(0), tsplit, UNR, 0)
-        if task < t1:
+            load_rows_a(scratch, tag, health, rtc, 0, md.a.ptr, tid)
+            dn_c = lambda ops, t, i, v: dn_compute(
+                ops, t, i, v, scratch, tag, rtc, tid, lane, wave, md.a.ptr, md.red.ptr
+            )
+            dq, task, it = task_ring(dn_ld, dn_c, dq, t0, fx.Int32(0), tsplit, UNR, 0)
+            if task < t1:
+                gpu.barrier()
+                load_rows_a(scratch, tag, health, rtc, 1, md.a.ptr, tid)
+            task_ring(dn_ld, dn_c, dq, task, it, t1, UNR, 1)
             gpu.barrier()
-            load_rows_a(scratch, tag, health, rt, 1, md.a.ptr, tid)
-        task_ring(dn_ld, dn_c, dq, task, it, t1, UNR, 1)
-        gpu.barrier()
-        # per-CTA sums of squares of the picks of v0 / v1 -> slot (b - first CTA of the virtual expert)
-        # (the down's epilogue: ssacc is the down's CTA-local sum)
-        if (tid < 32) & (V > 0):
-            hs = tid // 16
-            pk = fx.ptr_load(rt["pk"] + tid)
-            v = (hs == 0).select(v0, v1)
-            okh = (pk >= 0) & ((hs == 0) | (v1 != v0))
-            cf = (v * 256) // fx.max(V, 1)
-            if okh:
-                mb_put(
-                    tag,
-                    scratch + fx.Int64(lay["ss"][0]),
-                    pk * SSN + (bid - cf),
-                    fx.ptr_load(rt["ssacc"] + tid),
-                )
-        stage_rstd(scratch, tag, health, rt, tid, bid)
-        stage_final(scratch, sc, part_out, pl, tag, health, rt, tid, bid, rank)
+            # per-CTA sums of squares of the picks of v0 / v1 -> slot (b - first CTA of the virtual
+            # expert) (the down's epilogue: ssacc is the down's CTA-local sum)
+            if (tid < 32) & (V > 0):
+                hs = tid // 16
+                pk = fx.ptr_load(rtc["pk"] + tid)
+                v = (hs == 0).select(v0, v1)
+                okh = (pk >= 0) & ((hs == 0) | (v1 != v0))
+                cf = (v * 256) // fx.max(V, 1)
+                if okh:
+                    mb_put(
+                        tag,
+                        scratch + fx.Int64(lay["ss"][0]),
+                        pk * SSN + (vb - cf),
+                        fx.ptr_load(rtc["ssacc"] + tid),
+                    )
+        for c in range_constexpr(VC):
+            stage_rstd(scratch, tag, health, rt, tid, vbs[c])
+        for c in range_constexpr(VC):
+            stage_final(
+                scratch, sc, part_out, pl, tag, health, rt, tid, vbs[c], rank, c == 0
+            )
 
     @flyc.jit
     def launch(
@@ -708,7 +746,7 @@ def build(key: BuildM):
             w2r,
             w2sr,
             eptab,
-        ).launch(grid=(BLOCKS,), block=(THREADS,), stream=stream)
+        ).launch(grid=(GRID,), block=(THREADS,), stream=stream)
 
     _BUILDS[key] = launch
     return launch

@@ -1,6 +1,6 @@
-# Muse Spark decode monokernel (MI355X, FlyDSL)
+# Muse Spark decode monokernel (MI355X / MI350P, FlyDSL)
 
-`--monokernel` for `MuseSparkForCausalLM` on MI355X: decoder layers 1-60 of
+`--monokernel` for `MuseSparkForCausalLM` on MI355X and MI350P: decoder layers 1-60 of
 a speculative verify step run as persistent FlyDSL launches, from one layer's
 attention output to the next layer's q, o-gate and KV insert. vLLM's own
 attention op runs between the launches, except where a launch runs the
@@ -10,7 +10,8 @@ cover run vLLM's stock path.
 ## Scope
 
 - Deployment (checked at startup; a deployment that cannot run the kernels
-  raises): gfx950 with 256 CUs, tensor parallel size 8 or 4 with
+  raises): gfx950 with 256 CUs (MI355X) and tensor parallel size 8 or 4, or
+  with 128 CUs (MI350P) and tensor parallel size 4 (see Grids), with
   `--enable-expert-parallel` (linear placement, 32 or 64 experts a rank, no
   EPLB),
   no PP / DP / DCP / PCP, Quark OCP-MXFP4 W4A4 experts on `AITER_MXFP4_MXFP4`
@@ -27,6 +28,26 @@ cover run vLLM's stock path.
   tile; the post-expert projection splits K in two instead of four.
   8 / 16 rows run K3 (S = 8 / 16); 24-128 rows run HA + HM + HB with the rows
   padded up to S = 32 / 64 / 96 / 128 (`nrows` = the real rows).
+
+## Grids
+
+Every launch is persistent and its CTAs wait on each other, so all of them
+must be resident: one CTA a CU, the grid = the device's CU count. The stage
+layouts are built for 256 CTAs. On a 128-CU MI350P each CTA runs two of
+them, virtual CTAs `bid` and `bid + 128`, as two passes of every stage; the
+math, the reduction order, the peer and scratch layouts and the launch
+arguments are those of the 256-CTA build, so the 128-CU and 256-CU builds
+of a TP size compute the same results. The passes run stage by stage, and
+the waits inside a stage stay within one pass: the CTA groups that wait on
+each other inside a stage (K parts, 32-CTA token groups, block owners) are
+contiguous and aligned, so `bid + 128 v` keeps each group in pass v. Where a
+stage reduces over all 256 CTAs (the token norms of K3's boundaries) or
+reads the output of other blocks (the column-block owners of the 32-row
+HA), every pass puts its partials before any pass waits. HM builds the pick
+tables of both passes before the gate-up overwrites its pick lists. The
+fused attention splits over 256 CTAs and is TP 8 only, so the 128-CTA
+builds do not have it. On a 256-CU device the builds compile to the code
+objects of the 256-CTA layout (no passes).
 
 ## Launches (layer i, 1 <= i <= 60)
 

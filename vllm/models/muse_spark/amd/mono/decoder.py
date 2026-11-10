@@ -40,7 +40,10 @@ K5_ROWS = (32, 64, 96, 128)
 # HA + HM + HB builds and the fused attention at 8.
 WORLD_SIZES = (4, 8)
 MAX_ROWS = {4: 32, 8: K5_ROWS[-1]}
-NUM_CUS = 256
+# Launch grids: one CTA a CU, all resident (the CTAs wait on each other), so the grid
+# is the device's CU count. The kernels lay their work out for 256 CTAs; on 128 CUs
+# (MI350P) each CTA runs two of them in turn. CU count -> the TP sizes built for it.
+GRID_WORLD_SIZES = {256: (4, 8), 128: (4,)}
 KV_BLOCK_SIZE = 16
 HEALTH_POLL_INTERVAL = 64
 # Attention types whose verify attention runs inside the launch, per build.
@@ -234,6 +237,16 @@ def config_refusals(config: Any) -> list[str]:
     return reasons
 
 
+def grid_refusals(cus: int, tp_size: int) -> list[str]:
+    """The launch grid (= `cus`) the builds cover at this TP size."""
+    sizes = GRID_WORLD_SIZES.get(cus)
+    if sizes is None:
+        return [f"{cus} CUs (kernel: {', '.join(map(str, GRID_WORLD_SIZES))})"]
+    if tp_size not in sizes:
+        return [f"tensor_parallel_size={tp_size} on {cus} CUs (kernel: {sizes})"]
+    return []
+
+
 def deployment_refusals(
     vllm_config: Any, tp_rank: int, tp_size: int, moe_parallel: Any
 ) -> list[str]:
@@ -412,14 +425,19 @@ def attention_type(layer: nn.Module) -> str | None:
 
 
 def fused_attention_layers(
-    layers: Sequence[nn.Module], max_model_len: int, max_keys: int, world_size: int = 8
+    layers: Sequence[nn.Module],
+    max_model_len: int,
+    max_keys: int,
+    world_size: int = 8,
+    grid: int = 256,
 ) -> dict[int, str]:
     """Layers whose attention the launches can fuse: `{i: type}`.
 
     Empty when a request may hold more keys than a build stages block ids for,
-    and at TP 4 (the fragment is built for 2 kv heads a rank).
+    at TP 4 (the fragment is built for 2 kv heads a rank) and on a grid other
+    than 256 CTAs (the fragment splits the attention over 256 CTAs).
     """
-    if max_model_len > max_keys or world_size != 8:
+    if max_model_len > max_keys or world_size != 8 or grid != 256:
         return {}
     fused = {}
     for i in range(FIRST_LAYER + 1, LAST_LAYER + 1):
@@ -650,6 +668,7 @@ class _K3Bucket(_Bucket):
         fa: _FusedAttention | None = None,
         fused_kinds: Sequence[tuple[bool, str]] = (),
         kv_fp8: bool = False,
+        grid: int = 256,
     ) -> None:
         w = dims.world_size
         super().__init__(k3, k3.peer_layout(rows, w)[1], dims, device, group)
@@ -657,7 +676,12 @@ class _K3Bucket(_Bucket):
         def build(next_rope: bool, attn: str = ""):
             return k3.build(
                 k3.build_vllm(
-                    S=rows, W=w, next_rope=next_rope, attn=attn, kv_fp8=kv_fp8
+                    S=rows,
+                    W=w,
+                    next_rope=next_rope,
+                    attn=attn,
+                    kv_fp8=kv_fp8,
+                    grid=grid,
                 )
             )
 
@@ -732,9 +756,10 @@ class _K5Bucket(_Bucket):
         fa: _FusedAttention | None = None,
         fused_kinds: Sequence[str] = (),
         kv_fp8: bool = False,
+        grid: int = 256,
     ) -> None:
         w = dims.world_size
-        key = k5.build_vllm(S=rows, W=w, next_rope=True, kv_fp8=kv_fp8)
+        key = k5.build_vllm(S=rows, W=w, next_rope=True, kv_fp8=kv_fp8, grid=grid)
         super().__init__(k5, k5.peer_layout(rows, w, key.bnd)[1], dims, device, group)
         self.bnd = key.bnd
         self.launch_a, launch_b = k5.build(key)
@@ -742,7 +767,7 @@ class _K5Bucket(_Bucket):
             True: launch_b,
             False: k5.build(dataclasses.replace(key, next_rope=False))[1],
         }
-        self.launch_m = k5m.build(k5m.build_vllm(S=rows, W=w))
+        self.launch_m = k5m.build(k5m.build_vllm(S=rows, W=w, grid=grid))
         self.fa = fa
         self.fused_launch_a = {
             kind: k5.build(dataclasses.replace(key, attn=kind))[0]
@@ -864,10 +889,12 @@ class MuseSparkMono:
         buckets: Sequence[int],
         fused_attention: dict[int, str],
         kv_fp8: bool = False,
+        grid: int = 256,
     ) -> None:
         self.rank = rank
         self.dims = dims
         self.kv_fp8 = kv_fp8
+        self.grid = grid
         self.refresh_weights(model)
         self.buckets: dict[int, _Bucket] = {}
         for b in buckets:
@@ -884,7 +911,7 @@ class MuseSparkMono:
                     {(self.weights[i].next_rope, t) for i, t in layers.items()}
                 )
                 self.buckets[b] = _K3Bucket(
-                    kernels.k3, b, dims, device, group, fa, k3_kinds, kv_fp8
+                    kernels.k3, b, dims, device, group, fa, k3_kinds, kv_fp8, grid
                 )
             else:
                 self.buckets[b] = _K5Bucket(
@@ -897,6 +924,7 @@ class MuseSparkMono:
                     fa,
                     sorted(set(layers.values())),
                     kv_fp8,
+                    grid,
                 )
         self._validated: set[int] = set()
         self._fallbacks: set[str] = set()

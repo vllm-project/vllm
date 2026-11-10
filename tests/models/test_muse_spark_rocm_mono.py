@@ -46,6 +46,7 @@ from vllm.models.muse_spark.amd.mono.decoder import (
     config_refusals,
     deployment_refusals,
     fused_attention_layers,
+    grid_refusals,
     kv_cache_refusal,
     layer_refusals,
 )
@@ -273,6 +274,13 @@ def test_buckets_pad_rows_up_to_the_next_build() -> None:
     # TP 4 has the builds up to 32 rows: larger steps run stock.
     assert built_buckets(1, 4) == [8]
     assert built_buckets(3, 4) == built_buckets(128, 4) == [8, 16, 32]
+
+
+def test_grid_guard_accepts_256_cus_and_tp4_on_128_cus() -> None:
+    assert grid_refusals(256, 8) == grid_refusals(256, 4) == []
+    assert grid_refusals(128, 4) == []
+    assert grid_refusals(128, 8) == ["tensor_parallel_size=8 on 128 CUs (kernel: (4,))"]
+    assert grid_refusals(80, 4) == ["80 CUs (kernel: 256, 128)"]
 
 
 def test_kv_cache_guard_accepts_only_dense_lbhnc_of_the_configured_dtype() -> None:
@@ -569,6 +577,7 @@ class StockLaunches:
     def __init__(self, model, dims: MonoDims, bnd: int) -> None:
         self.model, self.dims, self.bnd = model, dims, bnd
         self.calls: list[tuple[str, dict]] = []
+        self.built: list[tuple[str, _Key]] = []
         self.pending: dict[int, dict] = {}
         self.kernels = MonoKernels(
             *(_Kernel(self, name) for name in ("k3", "k5", "k5m")), _AttnFrag()
@@ -652,6 +661,7 @@ class _Key:
     attn: str = ""
     bnd: int = 0
     kv_fp8: bool = False
+    grid: int = 256
 
 
 class _Kernel:
@@ -670,12 +680,13 @@ class _Kernel:
     def scratch_layout(self, S, W=1, bnd=0):
         return {}, 4096
 
-    def build_vllm(self, S, W, next_rope=True, attn="", kv_fp8=False):
+    def build_vllm(self, S, W, next_rope=True, attn="", kv_fp8=False, grid=256):
         bnd = self.owner.bnd if self.name == "k5" else 0
-        return _Key(S, W, next_rope, attn, bnd, kv_fp8)
+        return _Key(S, W, next_rope, attn, bnd, kv_fp8, grid)
 
     def build(self, key: _Key):
         o = self.owner
+        o.built.append((self.name, key))
         if self.name == "k3":
             params = _params(_K3_HEAD, "layer rank g_stride" + _REPLICAS)
             return o.launcher("k3", params, lambda a: _run_k3(o, key, a))
@@ -819,7 +830,12 @@ class Step:
 
 
 def _run_mono(
-    tiny: TinyModel, step: Step, bnd: int, buckets: list[int], mode=CUDAGraphMode.NONE
+    tiny: TinyModel,
+    step: Step,
+    bnd: int,
+    buckets: list[int],
+    mode=CUDAGraphMode.NONE,
+    grid: int = 256,
 ):
     """The step with the monokernel attached, on the stock launches."""
     from vllm.distributed import get_tp_group
@@ -834,8 +850,9 @@ def _run_mono(
         dims=tiny.dims,
         buckets=buckets,
         fused_attention=fused_attention_layers(
-            tiny.layers, 4096, _AttnFrag.VLLM_MAX_KEYS
+            tiny.layers, 4096, _AttnFrag.VLLM_MAX_KEYS, grid=grid
         ),
+        grid=grid,
     )
     try:
         return launches, step.run(tiny, mode)
@@ -885,6 +902,24 @@ def test_mono_step_matches_the_stock_loop(
     assert kernels == ({"k3"} if num_reqs <= 2 else {"ha", "hm", "hb"})
     assert [a["layer"] for name, a in launches.calls if name in ("k3", "hb")] == list(
         range(FIRST_LAYER, LAST_LAYER + 1)
+    )
+    _assert_same_step(stock, mono)
+
+
+@requires_gfx950
+@pytest.mark.parametrize(("num_reqs", "bnd"), [(1, 0), (2, 0), (4, 3)])
+def test_mono_step_on_a_128_cta_grid(tiny_model, num_reqs, bnd) -> None:
+    """On 128 CUs (MI350P) every build is the 128-CTA one and the fused
+    attention is off; the launches and their arguments are the same."""
+    tiny_model.lm.set_aux_hidden_state_layers((14, 30, 46, 58, 62))
+    step = Step(tiny_model, [ROWS_PER_REQUEST] * num_reqs, seed=num_reqs)
+    stock = step.run(tiny_model)
+    launches, mono = _run_mono(tiny_model, step, bnd, [8, 16, 32], grid=128)
+    assert launches.built
+    assert {key.grid for _, key in launches.built} == {128}
+    assert not any(key.attn for _, key in launches.built)
+    assert {name for name, _ in launches.calls} == (
+        {"k3"} if num_reqs <= 2 else {"ha", "hm", "hb"}
     )
     _assert_same_step(stock, mono)
 

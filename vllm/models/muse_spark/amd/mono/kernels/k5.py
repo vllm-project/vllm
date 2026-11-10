@@ -96,7 +96,15 @@ from .dev import (
     wave_sum,
     xred,
 )
-from .k3 import _lay, bf_mma_operand, bf_tile_load, o_gate, route_token, sel_peer
+from .k3 import (
+    GRIDS,
+    _lay,
+    bf_mma_operand,
+    bf_tile_load,
+    o_gate,
+    route_token,
+    sel_peer,
+)
 
 W = 8  # ranks in the TP = EP group of the module-level defaults (builds take key.W)
 HID = 8192
@@ -150,6 +158,7 @@ class Dims:
 
 
 _DIMS = {w: Dims(w) for w in (4, 8)}
+
 # loads of peer-written data (after its system-scope flag): device scope = past the per-XCD L2,
 # served by the memory-side cache, which every write to this memory passes
 XCM = CM_DEV
@@ -192,6 +201,9 @@ class Build:
     # this layer's verify attention fused at the HA head ("swa" / "full")
     attn: str = ""
     kv_fp8: bool = False  # e4m3 KV cache (HB insert, HA fused attention); else bf16
+    # physical CTAs (256: one a CU of an MI355X; 128: an MI350P, S = 32 only): each runs
+    # BLOCKS / grid virtual CTAs bid + grid v of the BLOCKS-CTA layout, stage by stage
+    grid: int = BLOCKS
 
     @property
     def bnd(self):
@@ -297,6 +309,10 @@ def build(key: Build):
     QROWS, QKV_ROWS, QKVG_ROWS = d.QROWS, d.QKV_ROWS, d.QKVG_ROWS
     OK_K, NQTILES, NQT = d.OK_K, d.NQTILES, d.NQT
     assert W == 8 or S == 32, (S, W)
+    GRID = key.grid
+    assert GRID in GRIDS, GRID
+    V = BLOCKS // GRID  # virtual CTAs a physical CTA (passes of every stage)
+    assert V == 1 or (key.bnd and not key.attn), key
     NT = S // 16
     TS = S // W  # tokens a rank owns in the token-owner boundaries
     CO = OK_K // KCH // WAVES  # o_proj chunks a wave
@@ -382,8 +398,9 @@ def build(key: Build):
         pr: fx.Array[fx.Float32, 512 + 64 if BND else 8, 16]
         red4: fx.Array[fx.Float32, 32, 16]
 
-    name_a = f"muse_k5a_s{S}_w{W}" + (f"_fa{key.attn}" if key.attn else "")
-    name_b = f"muse_k5b_s{S}_w{W}_r{int(key.next_rope)}"
+    gsuf = f"_g{GRID}" if V > 1 else ""
+    name_a = f"muse_k5a_s{S}_w{W}" + (f"_fa{key.attn}" if key.attn else "") + gsuf
+    name_b = f"muse_k5b_s{S}_w{W}_r{int(key.next_rope)}" + gsuf
 
     # ------------------------------------------------------------ shared helpers
     def red_at(red, base_tile, rr, tt):
@@ -1084,7 +1101,6 @@ def build(key: Build):
         tq = tid // 128
         return fx.ptr_load(pr + (512 + 32 + tq)), fx.ptr_load(pr + (512 + 36 + tq))
 
-    @traced
     def stage_ab_c(
         own_peer,
         pl,
@@ -1097,7 +1113,7 @@ def build(key: Build):
         tag,
         health,
         tid,
-        bid,
+        bids,
         lane,
         wave,
         rank,
@@ -1105,9 +1121,21 @@ def build(key: Build):
     ):
         """The attention boundary with the column-group mapping: the block owners (b / 32 == rank, block
         b = 32 columns, all tokens) reduce the o_proj partials and all-gather the result; CTA (tg, cb) then
-        does the boundary of tokens 4 tg .. x columns 256 cb .."""
+        does the boundary of tokens 4 tg .. x columns 256 cb .. bids: this CTA's virtual CTAs; every
+        owner pass runs first (CTA (tg, cb) reads the columns of the owners 8 cb .. 8 cb + 8)."""
         tid = fresh(tid)
         par = tag_par(tag)
+        for vi in range_constexpr(len(bids)):
+            abc_owner(own_peer, pl, tag, health, tid, bids[vi], rank, par)
+        for vi in range_constexpr(len(bids)):
+            abc_rest(
+                own_peer, scratch, stream_in, nrows, alpha_a, beta_a, w_pffn, tag, health,
+                tid, bids[vi], lane, wave, pr, par,
+            )  # fmt: skip
+
+    @traced
+    def abc_owner(own_peer, pl, tag, health, tid, bid, rank, par):
+        """Block owner b: the W partials in rank order -> bf16 -> every rank's orb."""
         if (
             bid // CPR
         ) == rank:  # the block owner: 8 partials in rank order -> bf16 -> every rank
@@ -1134,6 +1162,13 @@ def build(key: Build):
                     (par * S + tt_) * (HID // 2) + bid * 16 + pp_,
                     bf16_pair(a0, a1),
                 )
+
+    @traced
+    def abc_rest(
+        own_peer, scratch, stream_in, nrows, alpha_a, beta_a, w_pffn, tag, health, tid,
+        bid, lane, wave, pr, par,
+    ):  # fmt: skip
+        """CTA (tg, cb): the boundary of tokens 4 tg .. x columns 256 cb .. (orb polled)."""
         tg = bid // 32
         cb = bid % 32
         tt = 4 * tg + tid // 128
@@ -2123,6 +2158,10 @@ def build(key: Build):
         own_peer = sel_peer(pl, rank)
         ep = uniform(ld_i32(epoch, 0, CM_DEV))
         tag = (ep & 0x1FFFFFF) * 64 + layer + 1
+        # this CTA's virtual CTAs (stage passes): bid + GRID v
+        vbs = [bid]
+        for v in range_constexpr(1, V):
+            vbs.append(bid + GRID * v)
         ao = None
         if const_expr(FA is None):
             o_ops = o_loads(w_o, bid, lane, wave)
@@ -2133,8 +2172,24 @@ def build(key: Build):
             )
             ao = (ao_t, health)
             o_ops = o_loads(w_o, bid, lane, wave)
-        stage_ng(attn_o, attn_g, g_stride, scratch, tag, tid, bid, nrows, ao)
-        stage_o(o_ops, scratch, pl, tag, health, tid, bid, lane, wave, rank, so.red.ptr)
+        for v in range_constexpr(V):
+            stage_ng(attn_o, attn_g, g_stride, scratch, tag, tid, vbs[v], nrows, ao)
+        for v in range_constexpr(V):
+            if const_expr(v > 0):
+                o_ops = o_loads(w_o, vbs[v], lane, wave)
+            stage_o(
+                o_ops,
+                scratch,
+                pl,
+                tag,
+                health,
+                tid,
+                vbs[v],
+                lane,
+                wave,
+                rank,
+                so.red.ptr,
+            )
         wr, wp = a_loads(w_r, w_pre, bid, tid, lane, wave)
         if const_expr(BND):  # all 256 CTAs, column groups
             stage_ab_c(
@@ -2149,7 +2204,7 @@ def build(key: Build):
                 tag,
                 health,
                 tid,
-                bid,
+                vbs,
                 lane,
                 wave,
                 rank,
@@ -2176,41 +2231,48 @@ def build(key: Build):
                     rank,
                     misc.red4.ptr,
                 )
-        stage_a(
-            wr,
-            wp,
-            own_peer,
-            pl,
-            scratch,
-            tag,
-            health,
-            tid,
-            bid,
-            lane,
-            wave,
-            rank,
-            sa.red.ptr,
-            sa.tok.ptr,
-            sa.own.ptr,
-            sa.x.ptr,
-        )
-        if bid < S:
-            stage_route_h(
+        for v in range_constexpr(V):
+            if const_expr(v > 0):
+                gpu.barrier()  # the LDS of stage A is rewritten by the next pass
+                wr, wp = a_loads(w_r, w_pre, vbs[v], tid, lane, wave)
+            stage_a(
+                wr,
+                wp,
                 own_peer,
-                bias,
-                w_pren,
-                h_out,
-                ids_out,
-                sc_out,
+                pl,
+                scratch,
                 tag,
                 health,
                 tid,
-                bid,
+                vbs[v],
                 lane,
                 wave,
-                rt,
+                rank,
+                sa.red.ptr,
                 sa.tok.ptr,
+                sa.own.ptr,
+                sa.x.ptr,
             )
+        for v in range_constexpr(V):
+            if const_expr(v > 0):
+                gpu.barrier()  # route / tok LDS of the previous pass
+            if vbs[v] < S:
+                stage_route_h(
+                    own_peer,
+                    bias,
+                    w_pren,
+                    h_out,
+                    ids_out,
+                    sc_out,
+                    tag,
+                    health,
+                    tid,
+                    vbs[v],
+                    lane,
+                    wave,
+                    rt,
+                    sa.tok.ptr,
+                )
 
     @flyc.kernel(name=name_b, known_block_size=[THREADS, 1, 1])
     def hb(
@@ -2263,34 +2325,43 @@ def build(key: Build):
         own_peer = sel_peer(pl, rank)
         ep = uniform(ld_i32(epoch, 0, CM_DEV))
         tag = (ep & 0x1FFFFFF) * 64 + layer + 1
+        vbs = [bid]
+        for v in range_constexpr(1, V):
+            vbs.append(bid + GRID * v)
         ppo = pp_loads(w_pp, bid, lane, wave)
-        if bid // CPR == rank:
-            stage_ar(own_peer, pl, tag, health, tid, bid, rank)
-        stage_post(
-            ppo, pl, scratch, tag, health, tid, bid, lane, wave, rank, sf.red.ptr
-        )
+        for v in range_constexpr(V):
+            if vbs[v] // CPR == rank:
+                stage_ar(own_peer, pl, tag, health, tid, vbs[v], rank)
+        for v in range_constexpr(V):
+            if const_expr(v > 0):
+                gpu.barrier()  # the LDS of stage F is rewritten by the next pass
+                ppo = pp_loads(w_pp, vbs[v], lane, wave)
+            stage_post(
+                ppo, pl, scratch, tag, health, tid, vbs[v], lane, wave, rank, sf.red.ptr
+            )
         qo = q_loads(w_qkvg, bid, lane, wave, 0, QPF)
         if const_expr(BND):  # all 256 CTAs, column groups
-            stage_g_c(
-                own_peer,
-                scratch,
-                w_pff,
-                alpha,
-                beta,
-                w_in,
-                stream_out,
-                so_stride,
-                so_off,
-                sfull_out,
-                gather,
-                tag,
-                health,
-                tid,
-                bid,
-                lane,
-                wave,
-                misc.pr.ptr,
-            )
+            for v in range_constexpr(V):
+                stage_g_c(
+                    own_peer,
+                    scratch,
+                    w_pff,
+                    alpha,
+                    beta,
+                    w_in,
+                    stream_out,
+                    so_stride,
+                    so_off,
+                    sfull_out,
+                    gather,
+                    tag,
+                    health,
+                    tid,
+                    vbs[v],
+                    lane,
+                    wave,
+                    misc.pr.ptr,
+                )
         else:
             if bid < TS:
                 stage_g(
@@ -2315,36 +2386,41 @@ def build(key: Build):
                     misc.red4.ptr,
                 )
         qo = qo + q_loads(w_qkvg, bid, lane, wave, QPF, NQT)
-        stage_qkv(
-            qo,
-            own_peer,
-            scratch,
-            g_out,
-            tag,
-            health,
-            tid,
-            bid,
-            lane,
-            wave,
-            sq.red.ptr,
-            sq.own.ptr,
-        )
-        head_finish(
-            scratch,
-            q_out,
-            k_cache,
-            v_cache,
-            slots,
-            cos_sin,
-            pos,
-            k_scale,
-            v_scale,
-            tag,
-            health,
-            tid,
-            bid,
-            nrows,
-        )
+        for v in range_constexpr(V):
+            if const_expr(v > 0):
+                gpu.barrier()  # the LDS of stage QKV is rewritten by the next pass
+                qo = q_loads(w_qkvg, vbs[v], lane, wave, 0, NQT)
+            stage_qkv(
+                qo,
+                own_peer,
+                scratch,
+                g_out,
+                tag,
+                health,
+                tid,
+                vbs[v],
+                lane,
+                wave,
+                sq.red.ptr,
+                sq.own.ptr,
+            )
+        for v in range_constexpr(V):
+            head_finish(
+                scratch,
+                q_out,
+                k_cache,
+                v_cache,
+                slots,
+                cos_sin,
+                pos,
+                k_scale,
+                v_scale,
+                tag,
+                health,
+                tid,
+                vbs[v],
+                nrows,
+            )
         if const_expr(not BND):  # the column-block G wrote sfull_out itself
             if (gather != 0) & (bid < nrows):
                 stage_gather(own_peer, sfull_out, tag, health, tid, bid)
@@ -2417,7 +2493,7 @@ def build(key: Build):
             g_stride,
             s_full,
             nrows,
-        ).launch(grid=(BLOCKS,), block=(THREADS,), stream=stream)
+        ).launch(grid=(GRID,), block=(THREADS,), stream=stream)
 
     @flyc.jit
     def launch_b(
@@ -2497,16 +2573,25 @@ def build(key: Build):
             so_off,
             gather,
             nrows,
-        ).launch(grid=(BLOCKS,), block=(THREADS,), stream=stream)
+        ).launch(grid=(GRID,), block=(THREADS,), stream=stream)
 
     _BUILDS[key] = (launch_a, launch_b)
     return _BUILDS[key]
 
 
-def build_vllm(S=32, W=8, next_rope=True, attn="", kv_fp8=False):
+def build_vllm(S=32, W=8, next_rope=True, attn="", kv_fp8=False, grid=BLOCKS):
     """The HA / HB build vLLM launches for S rows (32 / 64 / 96 / 128) of a TP = EP = W group
     (W = 4: S = 32 only); next_rope: the next layer has RoPE (HB); attn = "swa" / "full": this
-    layer's verify attention fused at the HA head (W = 8 only); kv_fp8: e4m3 KV cache."""
-    assert W in (4, 8) and S in (32, 64, 96, 128), (S, W)
+    layer's verify attention fused at the HA head (W = 8 only); kv_fp8: e4m3 KV cache; grid:
+    the CTAs a launch (256 on an MI355X; 128 on an MI350P: S = 32, no fused attention)."""
+    assert W in (4, 8) and S in (32, 64, 96, 128) and grid in GRIDS, (S, W, grid)
     assert (W == 8 or S == 32) and (not attn or W == 8), (S, W, attn)
-    return Build(S=S, W=W, next_rope=bool(next_rope), attn=attn, kv_fp8=bool(kv_fp8))
+    assert grid == BLOCKS or (S == 32 and not attn), (S, attn, grid)
+    return Build(
+        S=S,
+        W=W,
+        next_rope=bool(next_rope),
+        attn=attn,
+        kv_fp8=bool(kv_fp8),
+        grid=grid,
+    )

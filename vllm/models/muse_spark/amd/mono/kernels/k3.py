@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # mypy: ignore-errors
-# ruff: noqa: B008, E501
+# ruff: noqa: B008, B023, E501
+# (B023: the task-loop lambdas of a virtual-CTA pass run within that pass)
 
 # Vendored from AMD's Muse Spark FlyDSL monokernel kernels (mk/k3.py):
 # SPDX-License-Identifier: MIT
@@ -176,6 +177,12 @@ class Dims:
 
 
 _DIMS = {w: Dims(w) for w in (4, 8)}
+# physical grid sizes (CTAs a launch): the stage layouts are built for BLOCKS CTAs; a
+# smaller grid runs BLOCKS / grid of them a CTA, as passes of every stage. The waits
+# inside a stage stay within a pass for any grid that holds the largest contiguous
+# group of CTAs that wait on each other (32: a token group of the 32-row HA / HB).
+# 256: MI355X, 128: MI350P; 64 / 32 fit several ranks on one device (tests).
+GRIDS = (256, 128, 64, 32)
 
 
 def bf_tile_load_mma(wbase, row16, ldk, k, lane, cm=CM_NT):
@@ -452,6 +459,9 @@ class Build:
     next_rope: bool = True  # the next layer has RoPE (SWA) or not (full, NoPE)
     attn: str = ""  # this layer's verify attention fused at the head ("swa" / "full"); "" = run before the launch
     kv_fp8: bool = False  # e4m3 KV cache (insert and fused attention); else bf16
+    # physical CTAs (256: one a CU of an MI355X; 128: an MI350P): each runs
+    # BLOCKS / grid virtual CTAs bid + grid v of the BLOCKS-CTA layout, stage by stage
+    grid: int = BLOCKS
 
 
 def _lay(items):
@@ -536,6 +546,10 @@ def build(key: Build):
     S = key.S
     assert S in (8, 16), S
     d = _DIMS[key.W]
+    GRID = key.grid
+    assert GRID in GRIDS, GRID
+    V = BLOCKS // GRID  # virtual CTAs a physical CTA (passes of every stage)
+    assert not (key.attn and V > 1), "the fused attention runs on BLOCKS CTAs"
     W, EL, KQ, NG, XQ, XQROW = d.W, d.EL, d.KQ, d.NG, d.XQ, d.XQROW
     HQ, HKV, QROWS = d.HQ, d.HKV, d.QROWS
     QKV_ROWS, QKVG_ROWS, OK_K = d.QKV_ROWS, d.QKVG_ROWS, d.OK_K
@@ -669,8 +683,10 @@ def build(key: Build):
         pad: fx.Array[fx.Int64, TL_POINTS, 16]
 
     UNR = S == 8  # gate_up / down task loops as a ring (unroll 3, fixed slots)
-    name = f"muse_k3_s{S}_w{W}_r{int(key.next_rope)}" + (
-        f"_fa{key.attn}" if key.attn else ""
+    name = (
+        f"muse_k3_s{S}_w{W}_r{int(key.next_rope)}"
+        + (f"_fa{key.attn}" if key.attn else "")
+        + (f"_g{GRID}" if V > 1 else "")
     )
 
     # ------------------------------------------------------------ stage A (sharded)
@@ -1510,7 +1526,7 @@ def build(key: Build):
         rs_out,
         eps1,
         eps2,
-        bid,
+        bids,
         red,
         pbase=None,
         pcm=CM_DEV,
@@ -1519,10 +1535,41 @@ def build(key: Build):
         ((t * BLOCKS + CTA) * 4 + j): P1 = sum o^2, P2 = sum (a s)^2, P3 = sum (a s)(b o),
         P4 = sum (b o)^2 for s' = a s + b (o r1). Reducer CTA 255 - t sums the 256 CTAs in a
         fixed order: r1 = rsqrt(P1 / HID + eps1), r2 = rsqrt((P2 + 2 r1 P3 + r1^2 P4) / HID + eps2)
-        (r2 from the unrounded o r1). rs_out[t] = r1, rs_out[S + t] = r2 on every CTA."""
+        (r2 from the unrounded o r1). rs_out[t] = r1, rs_out[S + t] = r2 on every CTA.
+        bids: this CTA's virtual CTAs (all of them put their partials before this call)."""
         rbase = scratch + fx.Int64(lay[region][0])
         # stage AB: the partials come from the own peer buffer (the block owners)
         prb = rbase if pbase is None else pbase
+        for vi in range_constexpr(len(bids)):
+            if const_expr(vi > 0):
+                gpu.barrier()  # red is rewritten by the next virtual CTA's reduction
+            tok_reduce(
+                prb,
+                rbase,
+                region,
+                tag,
+                health,
+                tid,
+                lane,
+                eps1,
+                eps2,
+                bids[vi],
+                red,
+                pcm,
+            )
+        if tid < S:
+            got2 = mb_poll(
+                tag, health, [(rbase, 4 * S * BLOCKS + 2 * tid, 2)], REGION_IDS[region]
+            )
+            fx.ptr_store(got2[0][0].bitcast(fx.Float32), rs_out + tid)
+            fx.ptr_store(got2[0][1].bitcast(fx.Float32), rs_out + (S + tid))
+        gpu.barrier()
+
+    @traced
+    def tok_reduce(
+        prb, rbase, region, tag, health, tid, lane, eps1, eps2, bid, red, pcm
+    ):
+        """Reducer CTA 255 - t (bid, virtual): token t's r1, r2 from the 256 CTAs' partials."""
         tred = bid >= BLOCKS - S
         if tred:
             t = BLOCKS - 1 - bid
@@ -1555,13 +1602,6 @@ def build(key: Build):
                 r2 = hw_rsq(q * fx.Float32(1.0 / HID) + fx.Float32(eps2))
                 mb_put(tag, rbase, 4 * S * BLOCKS + 2 * t, r1)
                 mb_put(tag, rbase, 4 * S * BLOCKS + 2 * t + 1, r2)
-        if tid < S:
-            got2 = mb_poll(
-                tag, health, [(rbase, 4 * S * BLOCKS + 2 * tid, 2)], REGION_IDS[region]
-            )
-            fx.ptr_store(got2[0][0].bitcast(fx.Float32), rs_out + tid)
-            fx.ptr_store(got2[0][1].bitcast(fx.Float32), rs_out + (S + tid))
-        gpu.barrier()
 
     def put4(tag, scratch, region, tt, bid, q1, q2, q3, q4):
         base = scratch + fx.Int64(lay[region][0])
@@ -1583,7 +1623,6 @@ def build(key: Build):
             cache_modifier=CM_DEV,
         )
 
-    @traced
     def stage_g(
         peer,
         scratch,
@@ -1597,12 +1636,39 @@ def build(key: Build):
         tag,
         health,
         tid,
-        bid,
+        bids,
         lane,
         rsl,
     ):
+        """Post-FFN norm, gated residual and the next layer's input norm of CTA b's columns;
+        bids: this CTA's virtual CTAs (all put their partials before the token reduction)."""
         tid = fresh(tid)  # no cross-stage CSE of tid-derived offsets (S=16 spills)
         par = tag_par(tag)
+        pre = [
+            g_pre(
+                peer, scratch, w_pff, alpha, beta, w_in, tag, health, tid, bids[vi], par
+            )
+            for vi in range_constexpr(len(bids))
+        ]
+        tok_rstd2(
+            scratch,
+            "ssg4",
+            tag,
+            health,
+            tid,
+            lane,
+            rsl,
+            POST_EPS,
+            PRE_EPS,
+            bids,
+            rsl + 2 * S,
+        )
+        for vi in range_constexpr(len(bids)):
+            g_post(scratch, stream_out, xn_out, tag, tid, bids[vi], rsl, *pre[vi])
+
+    @traced
+    def g_pre(peer, scratch, w_pff, alpha, beta, w_in, tag, health, tid, bid, par):
+        """Stage G up to the token reduction: y (this CTA's columns), the norm partials."""
         pp = tid % 16
         tt = fx.min(tid // 16, S - 1)
         live = tid < 16 * S
@@ -1642,19 +1708,28 @@ def build(key: Build):
         q4 = butterfly(b0 * b0 + b1 * b1, (1, 2, 4, 8))
         if live & (pp == 0):
             put4(tag, scratch, "ssg4", tt, bid, q1, q2, q3, q4)
-        tok_rstd2(
-            scratch,
-            "ssg4",
-            tag,
-            health,
-            tid,
-            lane,
-            rsl,
-            POST_EPS,
-            PRE_EPS,
-            bid,
-            rsl + 2 * S,
-        )
+        return tt, live, c, be, wi, z0, z1, a0, a1
+
+    @traced
+    def g_post(
+        scratch,
+        stream_out,
+        xn_out,
+        tag,
+        tid,
+        bid,
+        rsl,
+        tt,
+        live,
+        c,
+        be,
+        wi,
+        z0,
+        z1,
+        a0,
+        a1,
+    ):
+        """Stage G after the token reduction: the stream, the next attention input + flag."""
         r1 = fx.ptr_load(rsl + tt)
         m0 = bf16_round(z0 * r1)
         m1 = bf16_round(z1 * r1)
@@ -1711,16 +1786,18 @@ def build(key: Build):
         yl,
         red,
         ao=None,
+        fill=True,
     ):
         """Y = bf16(o rms(o) sigmoid(g)) per 64-wide head (the gated o-norm: fp32,
         one rounding) into LDS for every CTA, then o_proj rows 32b.. (this rank's K slice),
-        the bf16 partial pushed into slot [par][rank] of the block owner's OP."""
+        the bf16 partial pushed into slot [par][rank] of the block owner's OP. fill=False:
+        Y is already in LDS (a later virtual CTA of the same CTA)."""
         tid = fresh(tid)  # no cross-stage CSE of tid-derived offsets (S=16 spills)
         lane = fresh(lane)
         par = tag_par(tag)
         g = lane // 16
         npc = S * OK_K // 8
-        for i in range_constexpr((npc + THREADS - 1) // THREADS):
+        for i in range_constexpr((npc + THREADS - 1) // THREADS if fill else 0):
             e = tid + THREADS * i
             t = fx.min(e // (OK_K // 8), S - 1)
             kk = (e % (OK_K // 8)) * 8
@@ -1788,7 +1865,6 @@ def build(key: Build):
             )
 
     # ------------------------------------------------------------ stage AB: attention boundary
-    @traced
     def stage_ab(
         peer,
         scratch,
@@ -1799,7 +1875,7 @@ def build(key: Build):
         tag,
         health,
         tid,
-        bid,
+        bids,
         lane,
         rsl,
         pl=None,
@@ -1807,9 +1883,56 @@ def build(key: Build):
     ):
         """CTA b's hidden columns 32b ..: the W o_proj partials in rank order (fp32 -> bf16,
         the all-reduce output), post_attn_norm (weightless, 1e-8), gated residual on the
-        fp32 stream, pre_feedforward_layernorm -> ffn_in (local, + flag) and the mid stream."""
+        fp32 stream, pre_feedforward_layernorm -> ffn_in (local, + flag) and the mid stream.
+        bids: this CTA's virtual CTAs; all of them put their norm partials before the token
+        reduction (its reducers wait for every CTA's)."""
         tid = fresh(tid)  # no cross-stage CSE of tid-derived offsets (S=16 spills)
         par = tag_par(tag)
+        pre = [
+            ab_pre(
+                peer, stream_pre, alpha_a, beta_a, w_pffn, tag, health, tid, bids[vi],
+                lane, pl, rank, par,
+            )
+            for vi in range_constexpr(len(bids))
+        ]  # fmt: skip
+        tok_rstd2(
+            scratch,
+            "ssa4",
+            tag,
+            health,
+            tid,
+            lane,
+            rsl,
+            POST_EPS,
+            PRE_EPS,
+            bids,
+            rsl + 2 * S,
+            pbase=peer
+            + fx.Int64(play["ssa4p"][0])
+            + fx.Int64(par * S * BLOCKS * 4 * 8),
+            pcm=CM_SYS,
+        )
+        for vi in range_constexpr(len(bids)):
+            ab_post(scratch, tag, tid, bids[vi], rsl, *pre[vi])
+
+    @traced
+    def ab_pre(
+        peer,
+        stream_pre,
+        alpha_a,
+        beta_a,
+        w_pffn,
+        tag,
+        health,
+        tid,
+        bid,
+        lane,
+        pl,
+        rank,
+        par,
+    ):
+        """Stage AB up to the token reduction: the owner's reduce + all-gather, this CTA's
+        columns of the reduced o and the norm operands."""
         pp = tid % 16
         tt = fx.min(tid // 16, S - 1)
         live = tid < 16 * S
@@ -1894,23 +2017,11 @@ def build(key: Build):
             o1 = bf_hi(got[0][0])
         a0 = al[0].bitcast(fx.Float32) * st[0].bitcast(fx.Float32)
         a1 = al[1].bitcast(fx.Float32) * st[1].bitcast(fx.Float32)
-        tok_rstd2(
-            scratch,
-            "ssa4",
-            tag,
-            health,
-            tid,
-            lane,
-            rsl,
-            POST_EPS,
-            PRE_EPS,
-            bid,
-            rsl + 2 * S,
-            pbase=peer
-            + fx.Int64(play["ssa4p"][0])
-            + fx.Int64(par * S * BLOCKS * 4 * 8),
-            pcm=CM_SYS,
-        )
+        return tt, live, c, be, wf, o0, o1, a0, a1
+
+    @traced
+    def ab_post(scratch, tag, tid, bid, rsl, tt, live, c, be, wf, o0, o1, a0, a1):
+        """Stage AB after the token reduction: the mid stream and ffn_in + this CTA's flag."""
         r1 = fx.ptr_load(rsl + tt)
         n0 = bf16_round(o0 * r1)
         n1 = bf16_round(o1 * r1)
@@ -2208,7 +2319,72 @@ def build(key: Build):
             gu_loads(w13, w13s, rt, t0 + d, lane, wave, (t0 + d) < t1)
             for d in range(1, PF_GU)
         ]
-        return q, hv, wv, t0, t1, last
+        return q, hv, wv, t0, t1, last, nu
+
+    @traced
+    def down_pass(
+        w2,
+        w2s,
+        w_post,
+        scratch,
+        tag,
+        health,
+        rt,
+        tid,
+        lane,
+        wave,
+        al,
+        red,
+        bid,
+        t0,
+        t1,
+        last,
+    ):
+        """The down tasks t0 .. t1 of (virtual) CTA bid, then its per-pick sums of squares."""
+        dn_ld = lambda t: dn_loads(
+            w2,
+            w2s,
+            w_post,
+            rt["uexp"],
+            t,
+            lane,
+            wave,
+            t < t1,
+            None,
+            W2_BYTES,
+            W2S_BYTES,
+        )
+        dq = [dn_ld(t0)]
+        gpu.barrier()
+        u0 = t0 >> 8
+        u1 = last >> 8
+        dn_build_picks(rt, u0, u1, tid)
+        load_ac(scratch, tag, health, rt, False, al, tid)
+        dq = dq + [dn_ld(t0 + d) for d in range(1, PF_DN)]
+        if tid < 2 * S:
+            fx.ptr_store(fx.Float32(0.0), rt["ssacc"] + tid)
+        gpu.barrier()
+        tsplit = fx.min(t1, (u0 + 1) << 8)
+        dn_c = lambda ops, t, i: dn_compute_c(
+            ops, t, i, u0, scratch, tag, rt, tid, lane, wave, al, red
+        )
+        dq, task, it = task_ring(dn_ld, dn_c, dq, t0, fx.Int32(0), tsplit, UNR)
+        dn_switch(scratch, tag, health, rt, tsplit, u0, u1, al, tid)
+        task_ring(dn_ld, dn_c, dq, task, it, t1, UNR)
+        gpu.barrier()
+        if tid < 2 * S:
+            h2 = tid // S
+            tt = tid % S
+            u = u0 + h2
+            k = fx.ptr_load(rt["kof"] + (fx.min(u, EL - 1) * S + tt))
+            if ((h2 == 0) | (u1 != u0)) & (k >= 0):
+                cf = (u * 256) // (t1 - t0)
+                mb_put(
+                    tag,
+                    scratch + fx.Int64(lay["ss2"][0]),
+                    (tt * TOPK + k) * 256 + (bid - cf),
+                    fx.ptr_load(rt["ssacc"] + tid),
+                )
 
     # The kernel and its launcher. tl (a timeline buffer) and w13r .. eptab (expert replicas) are
     # part of the launch signature the decoder passes; this build does not read them.
@@ -2315,6 +2491,10 @@ def build(key: Build):
                 attn_o, tag, health, tid, bid, lane, wave, sl.fa_.peek()
             )
             ao = (ao_t, health)
+        # this CTA's virtual CTAs (stage passes): bid + GRID v
+        vbs = [bid]
+        for v in range_constexpr(1, V):
+            vbs.append(bid + GRID * v)
         o_ops = o_loads(w_o, bid, lane, wave)
         stage_o(
             o_ops,
@@ -2332,6 +2512,24 @@ def build(key: Build):
             so.red.ptr,
             ao,
         )
+        for v in range_constexpr(1, V):
+            stage_o(
+                o_loads(w_o, vbs[v], lane, wave),
+                attn_o,
+                attn_g,
+                g_stride,
+                pl,
+                tag,
+                tid,
+                vbs[v],
+                lane,
+                wave,
+                rank,
+                so.y.ptr,
+                so.red.ptr,
+                ao,
+                False,
+            )
         stage_ab(
             own_peer,
             scratch,
@@ -2342,33 +2540,36 @@ def build(key: Build):
             tag,
             health,
             tid,
-            bid,
+            vbs,
             lane,
             rl.rs.ptr,
             pl,
             rank,
         )
-        bias_v = stage_a(
-            0,
-            w_r,
-            bias,
-            w_pre,
-            scratch,
-            own_peer,
-            pl,
-            tag,
-            health,
-            tid,
-            bid,
-            lane,
-            wave,
-            rank,
-            sa.x.ptr,
-            sa.red.ptr,
-            sa.own.ptr,
-            tok,
-        )
-        q, hv, wv, t0, t1, last = front2(
+        for v in range_constexpr(V):
+            if const_expr(v > 0):
+                gpu.barrier()  # the LDS of stage A is rewritten by the next pass
+            bias_v = stage_a(
+                0,
+                w_r,
+                bias,
+                w_pre,
+                scratch,
+                own_peer,
+                pl,
+                tag,
+                health,
+                tid,
+                vbs[v],
+                lane,
+                wave,
+                rank,
+                sa.x.ptr,
+                sa.red.ptr,
+                sa.own.ptr,
+                tok,
+            )
+        q, hv, wv, t0, t1, last, nu = front2(
             own_peer,
             bias_v,
             w13,
@@ -2390,72 +2591,56 @@ def build(key: Build):
             ops, t, i, scratch, tag, rt, tid, lane, wave, sc_.h.ptr, sc_.red.ptr
         )
         task_ring(gu_ld, gu_c, q, t0, fx.Int32(0), t1, UNR)
-        dn_ld = lambda t: dn_loads(
-            w2,
-            w2s,
-            w_post,
-            rt["uexp"],
-            t,
-            lane,
-            wave,
-            t < t1,
-            None,
-            W2_BYTES,
-            W2S_BYTES,
-        )
-        dq = [dn_ld(t0)]
-        gpu.barrier()
-        u0 = t0 >> 8
-        u1 = last >> 8
-        dn_build_picks(rt, u0, u1, tid)
-        load_ac(scratch, tag, health, rt, False, sd.a.ptr, tid)
-        dq = dq + [dn_ld(t0 + d) for d in range(1, PF_DN)]
-        if tid < 2 * S:
-            fx.ptr_store(fx.Float32(0.0), rt["ssacc"] + tid)
-        gpu.barrier()
-        tsplit = fx.min(t1, (u0 + 1) << 8)
-        dn_c = lambda ops, t, i: dn_compute_c(
-            ops, t, i, u0, scratch, tag, rt, tid, lane, wave, sd.a.ptr, sd.red.ptr
-        )
-        dq, task, it = task_ring(dn_ld, dn_c, dq, t0, fx.Int32(0), tsplit, UNR)
-        dn_switch(scratch, tag, health, rt, tsplit, u0, u1, sd.a.ptr, tid)
-        task_ring(dn_ld, dn_c, dq, task, it, t1, UNR)
-        gpu.barrier()
-        if tid < 2 * S:
-            h2 = tid // S
-            tt = tid % S
-            u = u0 + h2
-            k = fx.ptr_load(rt["kof"] + (fx.min(u, EL - 1) * S + tt))
-            if ((h2 == 0) | (u1 != u0)) & (k >= 0):
-                cf = (u * 256) // (t1 - t0)
-                mb_put(
-                    tag,
-                    scratch + fx.Int64(lay["ss2"][0]),
-                    (tt * TOPK + k) * 256 + (bid - cf),
-                    fx.ptr_load(rt["ssacc"] + tid),
-                )
+        # every pass's gate_up before any down: a down task reads the a rows of any CTA
+        for v in range_constexpr(1, V):
+            t0v = vbs[v] * nu
+            t1v = t0v + nu
+            gpu.barrier()  # red is double buffered within a pass only
+            gu_ldv = lambda t: gu_loads(w13, w13s, rt, t, lane, wave, t < t1v)
+            task_ring(
+                gu_ldv, gu_c, [gu_ldv(t0v + d) for d in range(PF_GU)], t0v,
+                fx.Int32(0), t1v, UNR,
+            )  # fmt: skip
+        down_pass(
+            w2, w2s, w_post, scratch, tag, health, rt, tid, lane, wave, sd.a.ptr,
+            sd.red.ptr, bid, t0, t1, last,
+        )  # fmt: skip
+        for v in range_constexpr(1, V):
+            t0v = vbs[v] * nu
+            down_pass(
+                w2, w2s, w_post, scratch, tag, health, rt, tid, lane, wave, sd.a.ptr,
+                sd.red.ptr, vbs[v], t0v, t0v + nu, t0v + nu - 1,
+            )  # fmt: skip
         # post_expert_proj weights in flight before the all-reduce wait (pp_early: before
         # the final stage's polls too)
         ppo = pp_loads(w_pp, bid, lane, wave)
         gpu.barrier()
-        stage_final(scratch, part_out, tag, health, rt, tid, bid, lane, se.z.ptr)
-        final_push(scratch, part_out, pl, tag, rt, tid, bid, lane, se.z.ptr, rank)
-        ar_reduce(scratch, own_peer, tag, health, tid, bid, pl, rank)
-        post_proj(
-            ppo,
-            scratch,
-            own_peer,
-            pl,
-            tag,
-            health,
-            tid,
-            bid,
-            lane,
-            wave,
-            rank,
-            sf.mm.ptr,
-            sf.red.ptr,
-        )
+        for v in range_constexpr(V):
+            if const_expr(v > 0):
+                gpu.barrier()  # z (LDS) is rewritten by the next pass
+            vb = vbs[v]
+            stage_final(scratch, part_out, tag, health, rt, tid, vb, lane, se.z.ptr)
+            final_push(scratch, part_out, pl, tag, rt, tid, vb, lane, se.z.ptr, rank)
+            ar_reduce(scratch, own_peer, tag, health, tid, vb, pl, rank)
+        for v in range_constexpr(V):
+            if const_expr(v > 0):
+                gpu.barrier()  # the LDS of stage F is rewritten by the next pass
+                ppo = pp_loads(w_pp, vbs[v], lane, wave)
+            post_proj(
+                ppo,
+                scratch,
+                own_peer,
+                pl,
+                tag,
+                health,
+                tid,
+                vbs[v],
+                lane,
+                wave,
+                rank,
+                sf.mm.ptr,
+                sf.red.ptr,
+            )
         qo = q8_loads(w_qkvg, bid, lane, wave, 0, QPF)
         stage_g(
             own_peer,
@@ -2470,33 +2655,37 @@ def build(key: Build):
             tag,
             health,
             tid,
-            bid,
+            vbs,
             lane,
             rl.rs.ptr,
         )
         qo = qo + q8_loads(w_qkvg, bid, lane, wave, QPF, NQT)
-        stage_qkv8(
-            qo,
-            scratch,
-            q_out,
-            g_out,
-            k_cache,
-            v_cache,
-            slots,
-            cos_sin,
-            pos,
-            k_scale,
-            v_scale,
-            tag,
-            health,
-            tid,
-            bid,
-            lane,
-            wave,
-            sq.xq.ptr,
-            sq.red.ptr,
-            sq.own.ptr,
-        )
+        for v in range_constexpr(V):
+            if const_expr(v > 0):
+                gpu.barrier()  # the LDS of stage QKV is rewritten by the next pass
+                qo = q8_loads(w_qkvg, vbs[v], lane, wave, 0, NQT)
+            stage_qkv8(
+                qo,
+                scratch,
+                q_out,
+                g_out,
+                k_cache,
+                v_cache,
+                slots,
+                cos_sin,
+                pos,
+                k_scale,
+                v_scale,
+                tag,
+                health,
+                tid,
+                vbs[v],
+                lane,
+                wave,
+                sq.xq.ptr,
+                sq.red.ptr,
+                sq.own.ptr,
+            )
         if (bid == 0) & (tid < P):
             bo.buffer_store(
                 fx.ptr_load(rt["rid"] + tid),
@@ -2623,16 +2812,24 @@ def build(key: Build):
             w2r,
             w2sr,
             eptab,
-        ).launch(grid=(BLOCKS,), block=(THREADS,), stream=stream)
+        ).launch(grid=(GRID,), block=(THREADS,), stream=stream)
 
     _BUILDS[key] = launch
     return launch
 
 
-def build_vllm(S=8, W=8, next_rope=True, attn="", kv_fp8=False):
+def build_vllm(S=8, W=8, next_rope=True, attn="", kv_fp8=False, grid=BLOCKS):
     """The K3 build vLLM launches for S rows (8 / 16) of a TP = EP = W (8 / 4) group;
     next_rope: the next layer has RoPE; attn = "swa" / "full": this layer's verify attention
-    fused at the head (W = 8 only); kv_fp8: e4m3 KV cache."""
-    assert W in (4, 8) and S in (8, 16), (S, W)
-    assert not attn or W == 8, (attn, W)
-    return Build(S=S, W=W, next_rope=bool(next_rope), attn=attn, kv_fp8=bool(kv_fp8))
+    fused at the head (W = 8 only); kv_fp8: e4m3 KV cache; grid: the CTAs a launch (one a
+    CU: 256 on an MI355X, 128 on an MI350P)."""
+    assert W in (4, 8) and S in (8, 16) and grid in GRIDS, (S, W, grid)
+    assert not attn or (W == 8 and grid == BLOCKS), (attn, W, grid)
+    return Build(
+        S=S,
+        W=W,
+        next_rope=bool(next_rope),
+        attn=attn,
+        kv_fp8=bool(kv_fp8),
+        grid=grid,
+    )

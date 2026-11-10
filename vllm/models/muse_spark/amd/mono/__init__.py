@@ -18,7 +18,6 @@ from .decoder import (
     FIRST_LAYER,
     FP8_KV_DTYPES,
     LAST_LAYER,
-    NUM_CUS,
     MonoDims,
     MonoKernels,
     MuseSparkMono,
@@ -27,6 +26,7 @@ from .decoder import (
     config_refusals,
     deployment_refusals,
     fused_attention_layers,
+    grid_refusals,
     layer_refusals,
 )
 
@@ -56,6 +56,13 @@ def _load_kernels() -> tuple[MonoKernels | None, str | None]:
     return MonoKernels(**modules), None
 
 
+def device_cus() -> int:
+    """This rank's CU count: the launch grid (one CTA a CU)."""
+    return torch.cuda.get_device_properties(
+        torch.accelerator.current_device_index()
+    ).multi_processor_count
+
+
 def static_refusals(lm: nn.Module, tp_rank: int, tp_size: int) -> list[str]:
     """Every reason this deployment cannot run the monokernel; empty = supported."""
     if not current_platform.is_rocm():
@@ -63,11 +70,7 @@ def static_refusals(lm: nn.Module, tp_rank: int, tp_size: int) -> list[str]:
     from vllm.platforms.rocm import on_gfx950
 
     reasons = [] if on_gfx950() else ["not gfx950"]
-    cus = torch.cuda.get_device_properties(
-        torch.accelerator.current_device_index()
-    ).multi_processor_count
-    if cus != NUM_CUS:
-        reasons.append(f"{cus} CUs (kernel: {NUM_CUS})")
+    reasons += grid_refusals(device_cus(), tp_size)
     text_config = lm.vllm_config.model_config.hf_text_config
     reasons += config_refusals(text_config)
     if reasons:
@@ -113,16 +116,18 @@ def maybe_attach_mono(lm: nn.Module) -> None:
     assert kernels is not None
     buckets = built_buckets(lm.vllm_config.scheduler_config.max_num_seqs, world_size)
     max_model_len = lm.vllm_config.model_config.max_model_len
+    grid = device_cus()
     fused = fused_attention_layers(
-        model.layers, max_model_len, kernels.attn_frag.VLLM_MAX_KEYS, world_size
+        model.layers, max_model_len, kernels.attn_frag.VLLM_MAX_KEYS, world_size, grid
     )
     if not fused:
         logger.info(
             "Muse Spark monokernel: verify attention unfused (max_model_len %d, "
-            "fused builds cover %d at TP 8; TP %d)",
+            "fused builds cover %d at TP 8 on 256 CTAs; TP %d, %d CTAs)",
             max_model_len,
             kernels.attn_frag.VLLM_MAX_KEYS,
             world_size,
+            grid,
         )
     model.mono = MuseSparkMono(
         model,
@@ -134,15 +139,17 @@ def maybe_attach_mono(lm: nn.Module) -> None:
         buckets=buckets,
         fused_attention=fused,
         kv_fp8=lm.vllm_config.cache_config.cache_dtype in FP8_KV_DTYPES,
+        grid=grid,
     )
     logger.info(
         "Muse Spark monokernel attached: layers %d-%d of verify steps with "
-        "up to %d rows run as FlyDSL launches (builds S=%s; MoE activations "
-        "in bf16; %s KV cache)",
+        "up to %d rows run as FlyDSL launches (builds S=%s on %d CTAs; MoE "
+        "activations in bf16; %s KV cache)",
         FIRST_LAYER,
         LAST_LAYER,
         buckets[-1],
         ",".join(map(str, buckets)),
+        model.mono.grid,
         "fp8 e4m3" if model.mono.kv_fp8 else "bf16",
     )
 
