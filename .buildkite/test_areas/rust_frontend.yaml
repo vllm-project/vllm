@@ -182,10 +182,12 @@ steps:
   - vllm/entrypoints/openai/
   - tests/utils.py
   - tests/entrypoints/openai/correctness/test_lmeval.py
+  - tests/v1/core/prefix_cache/test_hybrid_prefix_cache_hit_rate.py
   commands:
   - export VLLM_USE_RUST_FRONTEND=1
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -s entrypoints/openai/correctness/test_lmeval.py::test_lm_eval_accuracy_v1_engine
+  - pytest -v -s v1/core/prefix_cache/test_hybrid_prefix_cache_hit_rate.py
   mirror:
     amd:
       automatic_shard: true
@@ -200,6 +202,7 @@ steps:
       - vllm/entrypoints/openai/
       - tests/utils.py
       - tests/entrypoints/openai/correctness/test_lmeval.py
+      - tests/v1/core/prefix_cache/test_hybrid_prefix_cache_hit_rate.py
       - vllm/platforms/rocm.py
 
 - label: ":nvidia: (H200 MIG 35GB) Rust Frontend Tool Use"
