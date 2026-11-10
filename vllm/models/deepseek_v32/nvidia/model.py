@@ -231,9 +231,15 @@ class DeepseekV32Model(torch.nn.Module):
             ),
             prefix=f"{prefix}.layers",
         )
+        speculative_config = vllm_config.speculative_config
+        # Preserve LoRA's global row mapping and auxiliary-state layouts.
         self.shardq_sequence_parallel = (
             parallel_config.pipeline_parallel_size == 1
-            and vllm_config.speculative_config is None
+            and vllm_config.lora_config is None
+            and (
+                speculative_config is None
+                or not speculative_config.uses_aux_hidden_states
+            )
             and not envs.VLLM_BATCH_INVARIANT
             and all(layer.self_attn.use_shardq for layer in self.layers)
         )
