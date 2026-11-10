@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Which MiniMax-M3 forwards take the mono path (``--monokernel``).
+"""Which MiniMax-M3 forwards take the mono path (`--monokernel`).
 
-The deployment is checked once (``config_refusal``); a step is routed to the
+The deployment is checked once (`config_refusal`); a step is routed to the
 kernels only when it is a pure decode of 1..MAX_TOKENS tokens whose tables the
-kernels can read (``_step_refusal``). Every per-step condition is decided from
+kernels can read (`_step_refusal`). Every per-step condition is decided from
 TP-replicated state: the kernels all-reduce in-kernel, so ranks that disagreed
 would wait on each other forever.
 
@@ -46,7 +46,7 @@ def _dense_prefix_ok(layers) -> bool:
 
 def _separate_shared_ok(layers) -> bool:
     """Every MoE layer keeps its shared expert as a separate MLP (the kernels then
-    run it from that MLP's MXFP8 weights, ``weights.mxfp8_a_tiles``)."""
+    run it from that MLP's MXFP8 weights, `weights.mxfp8_a_tiles`)."""
     moes = [lyr.block_sparse_moe for lyr in layers if lyr.is_moe_layer]
     return bool(moes) and all(
         not m.is_fused_shared_expert_enabled
@@ -93,6 +93,13 @@ def config_refusal(vllm_config: VllmConfig, model) -> str | None:
             or _separate_shared_ok(model.layers),
             "shared expert neither fused nor a separate MLP",
         ),
+        (
+            not any(
+                getattr(layer.self_attn, "skip_index_topk", False)
+                for layer in model.layers
+            ),
+            "index sharing",
+        ),
         (_dense_prefix_ok(model.layers), "layer mix"),
         (_mxfp8_attention_ok(model.layers), "attention projections not MXFP8"),
     )
@@ -138,8 +145,8 @@ def _step_refusal(
 
 
 class MonoDecode:
-    """Routes supported decode steps of one ``MiniMaxM3Model`` to the kernels.
-    Built only for a deployment ``config_refusal`` accepts."""
+    """Routes supported decode steps of one `MiniMaxM3Model` to the kernels.
+    Built only for a deployment `config_refusal` accepts."""
 
     def __init__(self, model, vllm_config: VllmConfig) -> None:
         self._model = model

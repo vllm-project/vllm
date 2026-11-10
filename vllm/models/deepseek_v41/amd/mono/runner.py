@@ -2,12 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """DeepSeek-V4.1-Flash mono decode layer: host side.
 
-One ``DSV41MonoLayer`` a TP rank runs every mono layer of a decode step (M <= 48
-rows): two persistent launches a layer (``layer``) from the layer's
+One `DSV41MonoLayer` a TP rank runs every mono layer of a decode step (M <= 48
+rows): two persistent launches a layer (`layer`) from the layer's
 inputs at the attention seam to its outputs at the next one -- the MoE's
 reduced output, the residual after the FFN seam and that seam's mixes -- with
 both TP all-reduces inside the kernels (symmetric peer memory). A layer whose
-attention vLLM runs (``ffn``) takes one launch from its unreduced attention
+attention vLLM runs (`ffn`) takes one launch from its unreduced attention
 output on. Every argument is a device pointer: the launches can be captured in a
 HIP graph. The kernels move their mailbox epoch on themselves; every rank runs
 the same launches, so the ranks' epochs agree.
@@ -60,7 +60,7 @@ def _ensure_writable_flydsl_cache() -> None:
 
 
 def _check_tensors(owner, tag: str, want: dict) -> None:
-    """Each named tensor of ``owner`` has the (shape, dtype) the kernels read,
+    """Each named tensor of `owner` has the (shape, dtype) the kernels read,
     contiguous: their buffer loads are unbounded, so a mismatch would read
     garbage rather than fault."""
     for name, (shape, dtype) in want.items():
@@ -110,7 +110,7 @@ class AttnWeights:
 
 @dataclass
 class MonoLayerWeights:
-    """One layer's tensors on this rank, in vLLM's loaded layout (``attn``:
+    """One layer's tensors on this rank, in vLLM's loaded layout (`attn`:
     None for a layer whose attention vLLM runs)."""
 
     attn: AttnWeights | None
@@ -134,7 +134,7 @@ class MonoLayerWeights:
     sw2_s: torch.Tensor
 
     def check(self, tp: int, experts: int = EXPERTS) -> None:
-        """The MoE's tensors: ``experts`` routed experts (384; the DSpark draft's
+        """The MoE's tensors: `experts` routed experts (384; the DSpark draft's
         128), TP-sharded intermediates (the routed one padded as the loader pads
         it), AITER's A8W4 layout, 32 x 32 E8M0 blocks for the shared expert."""
         d, fp4, e4m3, u8 = (
@@ -159,10 +159,10 @@ class MonoLayerWeights:
 
     def check_942(self, experts: int) -> None:
         """The MoE's tensors on gfx942, TP4, which are the copies that
-        ``weights942`` makes. The routed experts have their real intermediate
-        width without the loader's padding, as FP4 bytes in ``fp4_tile_major``
+        `weights942` makes. The routed experts have their real intermediate
+        width without the loader's padding, as FP4 bytes in `fp4_tile_major`
         order and E8M0 codes a row each. The shared expert is FNUZ bytes from
-        ``linear_copy``, with K padded to a multiple of 128. ``experts`` is 384
+        `linear_copy`, with K padded to a multiple of 128. `experts` is 384
         for the target layers and 128 for the DSpark draft layers."""
         d, u8 = MoeDims(4), torch.uint8
         inter, kp = d.inter_real, -(-d.sh_inter // 128) * 128
@@ -182,7 +182,7 @@ class MonoLayerWeights:
 
 
 class DSV41MonoLayer:
-    """The mono decode runner of one TP rank (``group``: its TP group, for the
+    """The mono decode runner of one TP rank (`group`: its TP group, for the
     peer-memory handle exchange; a gloo / CPU group)."""
 
     def __init__(
@@ -219,7 +219,7 @@ class DSV41MonoLayer:
         self.generic = generic  # every build generic (``MonoBuild.generic``)
         self.d = Dims(tp)
         dev = self.device = torch.device(device)
-        self._scratch: dict[tuple[int, bool], torch.Tensor] = {}
+        self._scratch: dict[tuple[int, bool, bool], torch.Tensor] = {}
         # [epoch, -, -, -, a mark per CTA, the MoE's counters]
         self.epoch = torch.zeros(EPOCH_WORDS, dtype=torch.int32, device=dev)
         self.q = torch.zeros(
@@ -250,14 +250,17 @@ class DSV41MonoLayer:
             .item()
         )
         self._kernels: dict = {}
-        self._tuned_flags: dict = {}  # (width, ratio) -> ``MonoBuild.tuned``
+        self._builds: dict[tuple[int, int], MonoBuild] = {}
 
-    def scratch(self, tokens: int, tuned: bool = False) -> torch.Tensor:
-        """Step width ``tokens``'s scratch: a width's layout has memory of its own
-        (``layer.scratch_layout``), and so has a tuned build's. Allocated at the
+    def scratch(
+        self, tokens: int, tuned: bool = False, front: bool = False
+    ) -> torch.Tensor:
+        """Step width `tokens`'s scratch: a width's layout has memory of its own
+        (`layer.scratch_layout`), and so has a tuned build's. Allocated at the
         width's first step, which is eager: vLLM runs every graph's batch
         eagerly before capturing it."""
-        buf = self._scratch.get((tokens, tuned))
+        key = (tokens, tuned, front)
+        buf = self._scratch.get(key)
         if buf is None:
             if torch.cuda.is_current_stream_capturing():
                 raise RuntimeError(
@@ -266,12 +269,12 @@ class DSV41MonoLayer:
                 )
             buf = torch.zeros(
                 scratch_bytes(
-                    tokens, self.tp, self.experts, self.topk, self.ug_groups, tuned
+                    tokens, self.tp, self.experts, self.topk, self.ug_groups, *key[1:]
                 ),
                 dtype=torch.uint8,
                 device=self.device,
             )
-            self._scratch[(tokens, tuned)] = buf
+            self._scratch[key] = buf
         return buf
 
     def first_pre_mix(self, tokens: int) -> torch.Tensor:
@@ -281,13 +284,10 @@ class DSV41MonoLayer:
     def supports(tokens: int) -> bool:
         return 1 <= tokens <= MAX_TOKENS
 
-    def tuned(self, tokens: int, ratio: int) -> bool:
-        """Whether this runner's layer builds are tuned (``MonoBuild.tuned``),
-        looked up once per (width, ratio) and cached: ``forward`` calls it on
-        every step, the runners that are never tuned included."""
+    def build(self, tokens: int, ratio: int) -> MonoBuild:
         key = (tokens, ratio)
-        if key not in self._tuned_flags:
-            self._tuned_flags[key] = MonoBuild(
+        if key not in self._builds:
+            self._builds[key] = MonoBuild(
                 tokens,
                 self.tp,
                 ratio,
@@ -296,8 +296,8 @@ class DSV41MonoLayer:
                 ug_groups=self.ug_groups,
                 swa_width=self.swa_width,
                 generic=self.generic,
-            ).tuned
-        return self._tuned_flags[key]
+            )
+        return self._builds[key]
 
     def kernels(self, tokens: int, ratio: int, fold: bool = True, index: bool = False):
         key = (tokens, ratio, fold, index)
@@ -370,8 +370,8 @@ class DSV41MonoLayer:
         select: Callable[[torch.Tensor, torch.Tensor], None] | None = None,
     ):
         """-> (out, residual, post_mix, res_mix, pre_mix): the layer's outputs
-        (``outs``: buffers to write them into). ``select(normed, qr)``: an index
-        source's top-k selection into ``topk_indices``, run between the
+        (`outs`: buffers to write them into). `select(normed, qr)`: an index
+        source's top-k selection into `topk_indices`, run between the
         kernels on K1's normed input and qr."""
         M = x.shape[0]
         assert self.supports(M), M
@@ -381,7 +381,8 @@ class DSV41MonoLayer:
         index = select is not None
         assert not index or ratio
         k1, k2 = self.kernels(M, ratio, fold, index)
-        scratch = self.scratch(M, self.tuned(M, ratio))
+        b = self.build(M, ratio)
+        scratch = self.scratch(M, b.tuned, b.tuned_front)
         st = torch.cuda.current_stream()
         if outs is None:
             outs = self._outs(M, residual)
@@ -553,7 +554,7 @@ class DSV41MonoLayer:
         """-> (out, residual, post_mix, res_mix, pre_mix) of a layer whose
         attention vLLM ran: the attention's TP reduce, the FFN seam, the MoE and
         its all-reduce in one launch. The routed expert count is the gate
-        weight's row count, and ``topk`` is the layer's picks a token: 384 / 6
+        weight's row count, and `topk` is the layer's picks a token: 384 / 6
         for the target, 128 / 3 for a DSpark draft layer."""
         M = part.shape[0]
         assert self.supports(M), M
