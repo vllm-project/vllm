@@ -11,6 +11,7 @@ from vllm.exceptions import VLLMValidationError
 from vllm.inputs.engine import MultiModalInput
 from vllm.multimodal.inputs import MultiModalKwargsItems, PlaceholderRange
 from vllm.renderers.chat_utils import ConversationMessage, load_chat_template
+from vllm.renderers.params import TokenizeParams
 from vllm.renderers.hf import (
     HfRenderer,
     _build_prompt_embeds_updates,
@@ -1158,3 +1159,77 @@ class TestConsolidateSystemMessages:
         assert len(conversation) == original_len
         assert conversation[0]["role"] == "user"
         assert conversation[1]["role"] == "system"
+
+def test_recipe_backend_gating(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`--tokenize-backend recipe` routes plain chat prompts through the recipe
+    helper and keeps specials and the builtin backend on the default path. The
+    helper is spied on so this test runs without the optional `deepseek_recipe`
+    package."""
+    model = "facebook/opt-125m"
+    recipe_renderer = HfRenderer(
+        VllmConfig(model_config=ModelConfig(model, tokenize_backend="recipe")),
+        get_tokenizer(model),
+    )
+    builtin_renderer = HfRenderer(
+        VllmConfig(model_config=ModelConfig(model, tokenize_backend="builtin")),
+        get_tokenizer(model),
+    )
+    prompt = {"prompt": "The transformer architecture processes sequences."}
+    recipe_calls = []
+
+    def fake_recipe(prompt_str, tokenizer):
+        recipe_calls.append(prompt_str)
+        return [1, 2, 3]
+
+    monkeypatch.setattr("vllm.renderers.hf._encode_prompt_with_recipe",
+                        fake_recipe)
+
+    # recipe + default chat path -> recipe helper, ids built from its output.
+    tokens = recipe_renderer._tokenize_prompt(
+        prompt, TokenizeParams(max_total_tokens=None, add_special_tokens=False))
+    assert recipe_calls == [prompt["prompt"]]
+    assert tokens["prompt_token_ids"] == [1, 2, 3]
+
+    # recipe + add_special_tokens=True -> builtin path, helper untouched.
+    recipe_calls.clear()
+    recipe_renderer._tokenize_prompt(prompt,
+                                     TokenizeParams(max_total_tokens=None, add_special_tokens=True))
+    assert recipe_calls == []
+
+    # builtin backend -> builtin path regardless of add_special_tokens.
+    builtin_renderer._tokenize_prompt(prompt,
+                                      TokenizeParams(max_total_tokens=None, add_special_tokens=False))
+    assert recipe_calls == []
+
+    # recipe helper returning None (slow-only fallback) -> builtin path.
+    def none_recipe(prompt_str, tokenizer):
+        return None
+
+    monkeypatch.setattr("vllm.renderers.hf._encode_prompt_with_recipe",
+                        none_recipe)
+    recipe_ids = recipe_renderer._tokenize_prompt(
+        prompt, TokenizeParams(max_total_tokens=None, add_special_tokens=False))["prompt_token_ids"]
+    builtin_ids = builtin_renderer._tokenize_prompt(
+        prompt, TokenizeParams(max_total_tokens=None, add_special_tokens=False))["prompt_token_ids"]
+    assert recipe_ids == builtin_ids
+
+
+def test_recipe_backend_matches_builtin() -> None:
+    """End-to-end: with deepseek_recipe installed, recipe ids are identical to
+    the builtin encoder on a chat-shaped prompt. Skipped in CI where the
+    optional package is absent; validated on the x86_64/aarch64 test hosts."""
+    pytest.importorskip("deepseek_recipe")
+    model = "facebook/opt-125m"
+    recipe_renderer = HfRenderer(
+        VllmConfig(model_config=ModelConfig(model, tokenize_backend="recipe")),
+        get_tokenizer(model),
+    )
+    builtin_renderer = HfRenderer(
+        VllmConfig(model_config=ModelConfig(model, tokenize_backend="builtin")),
+        get_tokenizer(model),
+    )
+    prompt = {"prompt": ("<|im_start|>user\nHello! " * 200)}
+    params = TokenizeParams(max_total_tokens=None, add_special_tokens=False)
+    assert recipe_renderer._tokenize_prompt(
+        prompt, params)["prompt_token_ids"] == builtin_renderer._tokenize_prompt(
+            prompt, params)["prompt_token_ids"]

@@ -1,5 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
 
 from vllm.config import VllmConfig
 from vllm.renderers.chat_utils import (
@@ -13,9 +16,14 @@ from vllm.tokenizers.deepseek_v4 import DeepseekV4Tokenizer
 from vllm.utils.async_utils import make_async
 
 from .base import BaseRenderer
+from .hf import _encode_prompt_with_recipe
 from .inputs import DictPrompt
 from .inputs.preprocess import parse_dec_only_prompt
 from .params import ChatParams
+
+if TYPE_CHECKING:
+    from vllm.inputs import TextPrompt, TokensPrompt
+    from vllm.renderers.params import TokenizeParams
 
 _FIM_BEGIN = "<｜fim▁begin｜>"
 _FIM_HOLE = "<｜fim▁hole｜>"
@@ -36,6 +44,27 @@ class DeepseekV4Renderer(BaseRenderer[DeepseekV4Tokenizer]):
 
     def _apply_chat_template(self, *args, **kwargs):
         return self.get_tokenizer().apply_chat_template(*args, **kwargs), None
+
+    def _tokenize_prompt(
+        self,
+        prompt: TextPrompt,
+        params: TokenizeParams,
+    ) -> TokensPrompt:
+        # Same hook as HfRenderer: route the string prompt through the recipe
+        # backend when enabled (add_special_tokens=False default chat path),
+        # falling back to the builtin encoder otherwise. DeepseekV41Renderer
+        # inherits this.
+        if (
+            not params.add_special_tokens
+            and not self._wants_offsets(prompt, params)
+            and self.model_config.tokenize_backend == "recipe"
+        ):
+            token_ids = _encode_prompt_with_recipe(
+                prompt["prompt"], self.get_tokenizer()
+            )
+            if token_ids is not None:
+                return self._build_tokens_prompt(token_ids, prompt)
+        return super()._tokenize_prompt(prompt, params)
 
     def _build_prompt(self, rendered, mm_data, mm_uuids) -> DictPrompt:
         prompt_raw, image_order = rendered

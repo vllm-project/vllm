@@ -1138,3 +1138,42 @@ def test_get_batch_defaults_gb10_stays_on_small_tier(
     tokens, seqs = EngineArgs.get_batch_defaults(1)
     assert tokens[UsageContext.OPENAI_API_SERVER] == expected_api_tokens
     assert seqs[UsageContext.OPENAI_API_SERVER] == expected_api_seqs
+
+def test_tokenize_backend_cli() -> None:
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    # Use a cloud storage URI so EngineArgs.from_cli_args skips model
+    # resolution (get_model_path) in both online and HF_HUB_OFFLINE=1 runs.
+    args = parser.parse_args(["--model", "s3://dummy/model"])
+    assert EngineArgs.from_cli_args(args).tokenize_backend == "builtin"
+    args = parser.parse_args(
+        ["--model", "s3://dummy/model", "--tokenize-backend", "recipe"])
+    assert EngineArgs.from_cli_args(args).tokenize_backend == "recipe"
+    args = parser.parse_args(
+        ["--model", "s3://dummy/model", "--tokenize-backend", "builtin"])
+    assert EngineArgs.from_cli_args(args).tokenize_backend == "builtin"
+    # vLLM registers str-union fields with `metavar` (no parse-time choices),
+    # so an invalid backend parses cleanly and is rejected later by
+    # ModelConfig validation.
+    args = parser.parse_args(
+        ["--model", "s3://dummy/model", "--tokenize-backend", "bogus"])
+    with pytest.raises(ValueError, match="tokenize_backend"):
+        EngineArgs.from_cli_args(args).create_model_config()
+
+
+def test_tokenize_backend_plumbing() -> None:
+    engine_args = EngineArgs(model="facebook/opt-125m", tokenize_backend="recipe")
+    assert engine_args.create_model_config().tokenize_backend == "recipe"
+    # The ModelConfig validator lowercases the choice.
+    engine_args = EngineArgs(model="facebook/opt-125m", tokenize_backend="RECIPE")
+    assert engine_args.create_model_config().tokenize_backend == "recipe"
+    with pytest.raises(ValueError, match="tokenize_backend must be"):
+        EngineArgs(model="facebook/opt-125m",
+                   tokenize_backend="bogus").create_model_config()
+
+def test_tokenize_backend_validator() -> None:
+    # Directly exercise the ModelConfig field validator (no model needed).
+    assert ModelConfig._validate_tokenize_backend("RECIPE") == "recipe"
+    assert ModelConfig._validate_tokenize_backend("builtin") == "builtin"
+    with pytest.raises(ValueError, match="tokenize_backend must be"):
+        ModelConfig._validate_tokenize_backend("bogus")
+

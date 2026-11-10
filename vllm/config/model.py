@@ -104,6 +104,7 @@ TokenizerMode = Literal[
     "kimi_k3",
     "cohere",
 ]
+TokenizeBackend = Literal["builtin", "recipe"]
 ModelDType = Literal["auto", "half", "float16", "bfloat16", "float", "float32"]
 LogprobsMode = Literal[
     "raw_logits", "raw_logprobs", "processed_logits", "processed_logprobs"
@@ -205,6 +206,21 @@ class ModelConfig:
     [fastokens](https://github.com/crusoecloud/fastokens) implementation, set
     `VLLM_USE_FASTOKENS=1` instead — that override applies to any mode that
     loads an HF fast tokenizer (`hf`, `deepseek_v32`, `deepseek_v4`, …)."""
+    tokenize_backend: TokenizeBackend | str = "builtin"
+    """Chat-prompt tokenization backend for models using the HF fast tokenizer
+    (Qwen / GLM) or the DeepSeek-V4 / V4.1 renderer (`--tokenizer-mode
+    deepseek_v4` / `deepseek_v41`):
+
+    - "builtin" tokenizes the rendered prompt as one string with the model's
+      tokenizer (the default).
+    - "recipe" segments the rendered prompt at added-vocabulary special-token
+      spellings (aho-corasick) and encodes the plain regions in parallel with
+      `deepseek_recipe.encode_prompt`, using the served fast tokenizer's own
+      vocabulary. Token IDs match "builtin" for the default chat path
+      (`add_special_tokens=False`), so KV-cache prefix reuse is unchanged;
+      requests that opt into extra special tokens or token offsets, and models
+      without a fast tokenizer backend, fall back to "builtin". Requires the
+      `deepseek-recipe` package."""
     trust_remote_code: bool = False
     """Trust remote code (e.g., from HuggingFace) when downloading the model
     and tokenizer."""
@@ -487,6 +503,7 @@ class ModelConfig:
             "convert",
             "tokenizer",
             "tokenizer_mode",
+            "tokenize_backend",
             "seed",
             "hf_config_path",
             "allowed_local_media_path",
@@ -1073,6 +1090,16 @@ class ModelConfig:
     @field_validator("tokenizer_mode", mode="after")
     def _lowercase_tokenizer_mode(cls, tokenizer_mode: str) -> str:
         return tokenizer_mode.lower()
+
+    @field_validator("tokenize_backend", mode="after")
+    def _validate_tokenize_backend(cls, tokenize_backend: str) -> str:
+        backend = tokenize_backend.lower()
+        if backend not in ("builtin", "recipe"):
+            raise ValueError(
+                "tokenize_backend must be 'builtin' or 'recipe', "
+                f"got {tokenize_backend!r}"
+            )
+        return backend
 
     @field_validator("quantization", mode="before")
     @classmethod

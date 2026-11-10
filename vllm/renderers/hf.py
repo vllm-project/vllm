@@ -61,7 +61,12 @@ if TYPE_CHECKING:
     from collections.abc import Set
 
     from vllm.config import ModelConfig, VllmConfig
-    from vllm.inputs import MultiModalDataDict, MultiModalUUIDDict, TokensPrompt
+    from vllm.inputs import (
+        MultiModalDataDict,
+        MultiModalUUIDDict,
+        TextPrompt,
+        TokensPrompt,
+    )
     from vllm.inputs.engine import TokensInput
     from vllm.multimodal.processing.processor import (
         MultiModalPromptUpdates,
@@ -75,7 +80,7 @@ if TYPE_CHECKING:
     )
 
     from .inputs import DictPrompt
-    from .params import ChatParams
+    from .params import ChatParams, TokenizeParams
 
 logger = init_logger(__name__)
 
@@ -1037,6 +1042,57 @@ def replace_vision_chunk_video_placeholder(
     return prompt_raw
 
 
+# --- Recipe-style segmented parallel tokenization -------------------------
+#
+# `--tokenize-backend recipe` routes the rendered string prompt through
+# deepseek_recipe.encode_prompt: split at added-vocabulary special-token
+# spellings (aho-corasick) and encode the plain regions in parallel via
+# encode_batch_fast. Token IDs match the builtin encoder for the default
+# chat path (add_special_tokens=False), keeping KV-cache prefix reuse
+# unchanged. The Rust tokenizer is built from the served fast tokenizer's
+# own serialized vocabulary (deepseek-recipe does not resolve HF repo ids),
+# so no separate model path is needed; models without a fast tokenizer
+# backend fall back to builtin encoding.
+
+_recipe_tokenizer_cache: dict[int, Any] = {}
+
+
+def _tokenizer_backend(tokenizer: Any):
+    """The served fast tokenizer's tokenizers backend, or None for slow ones."""
+    inner = getattr(tokenizer, "tokenizer", tokenizer)
+    return getattr(inner, "backend_tokenizer", None)
+
+
+def _get_recipe_tokenizer(backend_tokenizer: Any):
+    """Lazily build and cache the Rust tokenizer for a tokenizers backend."""
+    key = id(backend_tokenizer)
+    recipe_tokenizer = _recipe_tokenizer_cache.get(key)
+    if recipe_tokenizer is None:
+        import deepseek_recipe as _dr
+
+        recipe_tokenizer = _dr.Tokenizer.from_str(backend_tokenizer.to_str())
+        _recipe_tokenizer_cache[key] = recipe_tokenizer
+    return recipe_tokenizer
+
+
+def _encode_prompt_with_recipe(
+    prompt_str: str, tokenizer: Any
+) -> list[int] | None:
+    """Token ids for ``prompt_str`` via the recipe backend, or None to fall
+    back to builtin encoding when the served tokenizer has no fast backend."""
+    backend_tokenizer = _tokenizer_backend(tokenizer)
+    if backend_tokenizer is None:
+        logger.warning_once(
+            "--tokenize-backend recipe requires a fast tokenizer "
+            "(tokenizer.json); falling back to builtin encoding."
+        )
+        return None
+
+    import deepseek_recipe as _dr
+
+    return _dr.encode_prompt(prompt_str, _get_recipe_tokenizer(backend_tokenizer))
+
+
 class HfRenderer(BaseRenderer[HfTokenizer]):
     def __init__(
         self,
@@ -1107,6 +1163,26 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
     def _can_produce_offsets(self) -> bool:
         # Only fast tokenizers expose offset_mapping.
         return self.tokenizer is not None and self.tokenizer.is_fast
+
+    def _tokenize_prompt(
+        self,
+        prompt: TextPrompt,
+        params: TokenizeParams,
+    ) -> TokensPrompt:
+        # The default chat path tokenizes with add_special_tokens=False; the
+        # recipe backend replicates exactly that. Requests that opt into extra
+        # specials or token offsets keep the builtin encoder.
+        if (
+            not params.add_special_tokens
+            and not self._wants_offsets(prompt, params)
+            and self.model_config.tokenize_backend == "recipe"
+        ):
+            token_ids = _encode_prompt_with_recipe(
+                prompt["prompt"], self.get_tokenizer()
+            )
+            if token_ids is not None:
+                return self._build_tokens_prompt(token_ids, prompt)
+        return super()._tokenize_prompt(prompt, params)
 
     def render_messages(
         self,

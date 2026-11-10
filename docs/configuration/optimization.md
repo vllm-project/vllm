@@ -351,6 +351,35 @@ Tokenizer-bound workloads — long shared prefixes, bursty short prompts,
 batch detokenization — see the largest wins. If your bottleneck is GPU
 prefill/decode, the tokenizer change is unlikely to be visible end-to-end.
 
+### recipe Backend for Prompt Tokenization
+
+For long prompts, vLLM's default prompt tokenization is single-threaded Python
+string encoding. `--tokenize-backend recipe` (opt-in; the default remains
+`builtin`) routes the rendered prompt string through the optional
+[deepseek-recipe](https://github.com/deepseek-ai/deepseek-recipe) Rust backend,
+which segments the prompt at added-vocabulary special tokens and encodes the
+plain regions in parallel across CPU threads:
+
+```console
+pip install deepseek_recipe
+vllm serve Qwen/Qwen3-8B --tokenize-backend recipe
+```
+
+The `deepseek_recipe` package must be installed; if it is missing and the flag
+is enabled, vLLM raises a clear `ImportError` at the first tokenize call.
+Models without a fast tokenizer (`tokenizer.json`) fall back to `builtin`
+encoding with a warning. Token IDs are identical to the `builtin` path for the
+default chat encoding (`add_special_tokens=False`), so KV-cache prefix reuse
+is unchanged; requests that opt into extra special tokens or token offsets
+keep the builtin encoder.
+
+Recipe helps most on long prompts (tens of thousands of characters) with spare
+CPU threads; the Rayon pool honors `RAYON_NUM_THREADS` (32 is the recommended
+setting on typical hosts). For short prompts (<8K characters) or vocabularies
+with very large added-special-token sets (for example DeepSeek-V4's ~1,230
+specials), the fixed special-token scan overhead can make recipe slower than
+`builtin`, so measure before enabling it fleet-wide.
+
 ### Parallel Processing
 
 You can run input processing in parallel via [API server scale-out](../serving/data_parallel_deployment.md#internal-load-balancing).
