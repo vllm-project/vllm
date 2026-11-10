@@ -255,7 +255,7 @@ class EncoderCudaGraphManager:
         Quarter-octave steps up to 1024 tokens, steps of 128 up to 2560, then
         1/8-octave steps (rounded up to 128), so a replay pads at most ~25%
         below 1024, ~12% up to 2560 and ~9% above. Capture buffers are shared
-        across budgets (see ``_capture_budget_graph``), so extra graphs cost
+        across budgets (see `_capture_budget_graph`), so extra graphs cost
         no buffer memory. Batches above the largest budget run eagerly.
         """
         if cap is not None:

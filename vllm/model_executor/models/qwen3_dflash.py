@@ -99,7 +99,7 @@ def _dflash_layer_causal(config: Qwen3Config, layer_idx: int) -> bool:
 
 def dflash_has_any_non_causal(config: Qwen3Config) -> bool:
     """Whether the draft needs a non-causal-capable backend, resolved from config
-    (config mirror of the model's ``get_draft_attn_causal``, usable pre-build)."""
+    (config mirror of the model's `get_draft_attn_causal`, usable pre-build)."""
     return not all(
         _dflash_layer_causal(config, i) for i in range(config.num_hidden_layers)
     )
@@ -127,21 +127,21 @@ def _get_dflash_fc_input_size(vllm_config: VllmConfig) -> int:
 def _resolve_layer_attention(
     config: Qwen3Config, layer_idx: int
 ) -> tuple[int | None, bool]:
-    """Resolve ``(sliding_window, causal)`` for one DFlash draft layer.
+    """Resolve `(sliding_window, causal)` for one DFlash draft layer.
 
     +----------------------+-------------------------+--------------------------------+
-    | Config               | ``layer_type``          | *``causal``                    |
+    | Config               | `layer_type`          | *`causal`                    |
     +======================+=========================+================================+
-    | ``layer_types``      | SWA if ``use_swa``      | True if ``layer_types[i]=SWA`` |
-    |                      | else ``layer_types[i]`` | else False                     |
+    | `layer_types`      | SWA if `use_swa`      | True if `layer_types[i]=SWA` |
+    |                      | else `layer_types[i]` | else False                     |
     +----------------------+-------------------------+--------------------------------+
-    | ``layer_types=None`` | SWA                     | False                          |
-    | + ``use_swa=True``   |                         |                                |
+    | `layer_types=None` | SWA                     | False                          |
+    | + `use_swa=True`   |                         |                                |
     +----------------------+-------------------------+--------------------------------+
-    | ``layer_types=None`` | Full                    | False                          |
-    | + ``use_swa=False``  |                         |                                |
+    | `layer_types=None` | Full                    | False                          |
+    | + `use_swa=False`  |                         |                                |
     +----------------------+-------------------------+--------------------------------+
-    * If ``dflash_config.causal`` is set, its value overrides ``causal`` for all layers.
+    * If `dflash_config.causal` is set, its value overrides `causal` for all layers.
 
     This is to support a varied ecosystem of checkpoints, including:
     - XiaomiMiMo/MiMo-V2.5-Pro-FP4-DFlash (sets "use_swa", assumes non-causal)
@@ -673,7 +673,7 @@ class DFlashQwen3Model(nn.Module):
         num_kv_heads: int,
         head_dim: int,
     ) -> torch.Tensor:
-        """Context K/V of every layer, ``[num_ctx, L, 2, nkv, hd]``."""
+        """Context K/V of every layer, `[num_ctx, L, 2, nkv, hd]`."""
         # --- Fused KV projection (one GEMM for all layers) ---
         normed_context_states = self._normalize_context_states(context_states)
         if self._fused_kv_weight is not None:

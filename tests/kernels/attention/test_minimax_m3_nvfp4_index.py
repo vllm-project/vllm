@@ -47,7 +47,7 @@ SPECIAL_LENS = [0, 1, 2, 3, 127, 128, 129, 1024]  # padding, short and edge rows
 
 
 def _index_cache(num_blocks: int, page_step: int = 1) -> torch.Tensor:
-    """Random NVFP4 index pages ``page_step`` pages apart (a view of a larger
+    """Random NVFP4 index pages `page_step` pages apart (a view of a larger
     cache)."""
     n = num_blocks * page_step
     cache = torch.randint(0, 256, (n, BLOCK * 72), device="cuda").to(torch.uint8)
@@ -67,7 +67,7 @@ def _fp8_keys(cache: torch.Tensor) -> torch.Tensor:
 
 
 def _block_table(seq_lens, share=False):
-    """Shuffled pages per request; ``share``: some requests start with another
+    """Shuffled pages per request; `share`: some requests start with another
     request's pages (a shared prefix)."""
     widths = [(s + BLOCK - 1) // BLOCK for s in seq_lens]
     num_blocks = sum(widths) + 2
@@ -180,7 +180,7 @@ def test_index_decode_matches_reference(
     num_heads, query_len, num_reqs, init_blocks, local_blocks, buffered, monkeypatch
 ):
     """Request chunks, shared prefixes, padding requests, sequences shorter
-    than the query; ``buffered`` forces the LDS-buffered variant."""
+    than the query; `buffered` forces the LDS-buffered variant."""
     if buffered:
         monkeypatch.setattr(decode_host, "BUFFER_MIN_BYTES", 0)
         monkeypatch.setattr(decode_host, "UNITS_PER_SLOT", 1)
@@ -322,7 +322,7 @@ def test_index_decode_cp_push_all_padding(grid):
 @pytest.mark.parametrize("grid", [3, 768])
 def test_index_decode_cp_push_split_requests(num_reqs, grid):
     """DSpark 7 (8 rows a request) scored as two 4-row CP requests
-    (``indexer_nvfp4._cp_requests``): the four ranks' blocks of every row's
+    (`indexer_nvfp4._cp_requests`): the four ranks' blocks of every row's
     visible context match the single-head scorer bit for bit, and so do the
     top-k ids."""
     from vllm.models.minimax_m3.amd.indexer_msa import _score_width
@@ -465,8 +465,8 @@ def test_index_prefill_matches_aiter_fp8(num_heads, q_lens, seq_lens_list, page_
 def test_index_prefill_matches_reference(
     q_lens, seq_lens_list, init_blocks, local_blocks, num_heads, monkeypatch
 ):
-    """Every kernel the host can pick (``kernel_shared.py`` with 128- and
-    256-row tiles, ``kernel.py``) bit for bit alike, and against an fp32
+    """Every kernel the host can pick (`kernel_shared.py` with 128- and
+    256-row tiles, `kernel.py`) bit for bit alike, and against an fp32
     reference."""
     table, seq_lens, cu, cache, q = _prefill_case(
         q_lens, seq_lens_list, num_heads, page_step=2 if num_heads == 2 else 1
@@ -523,7 +523,7 @@ def test_index_prefill_matches_reference(
     ],
 )
 def test_decode_cp_gate(monkeypatch, num_decodes, query_len, scores_with_cp):
-    """DSpark 7 steps with fewer than ``CP_MIN_REQS`` requests score locally."""
+    """DSpark 7 steps with fewer than `CP_MIN_REQS` requests score locally."""
     from types import SimpleNamespace
 
     from vllm.models.minimax_m3.amd.ops.index_cp import host as index_cp

@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""K1 ``front``: one attention layer (the counts below are TP8's) from its
+"""K1 `front`: one attention layer (the counts below are TP8's) from its
 normed input row to the rotated query and the step's KV rows in the
 sliding-window cache.
 
-One launch a layer and rank, ``BLOCKS`` CTAs x ``THREADS`` threads, S rows.
+One launch a layer and rank, `BLOCKS` CTAs x `THREADS` threads, S rows.
 Every CTA issues its weight loads (its wqkv part and its wq_b tasks) at the
 kernel start, before it waits on anything; the stages:
 
@@ -21,10 +21,10 @@ kernel start, before it waits on anything; the stages:
            ``global_keys``, every compressed slot of vLLM's c128a table), then
            window slots -> KT
 
-Each elementwise step follows vLLM's ROCm path (``mxfp8_quantize``,
-``FusedQKVRMSNorm``, ``fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert``);
+Each elementwise step follows vLLM's ROCm path (`mxfp8_quantize`,
+`FusedQKVRMSNorm`, `fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert`);
 the GEMV reductions differ from the Triton GEMMs' only in their order.
-Adapted from ATOM's V4.1 ``attn_pre`` (K1), less its mHC seam.
+Adapted from ATOM's V4.1 `attn_pre` (K1), less its mHC seam.
 """
 
 from dataclasses import dataclass
@@ -118,7 +118,7 @@ def publish(c, region, i):
 
 @traced
 def await_flags(c, region, n, index):
-    """Thread u < n polls flag ``index(u)``; then the CTA proceeds."""
+    """Thread u < n polls flag `index(u)`; then the CTA proceeds."""
     tid = c["tid"]
     if tid < n:
         c["mb"].poll([(region, index(fx.min(tid, n - 1)), 1)])
@@ -130,7 +130,7 @@ def await_flags(c, region, n, index):
 
 @traced
 def _kt_round(c, t, k, ntopk, kv_len, width, req, cm):
-    """``stage_kt``'s key k of token t."""
+    """`stage_kt`'s key k of token t."""
     a, ratio, d = c["args"], c["ratio"], c["d"]
     sidx = fx.min(fx.max(k - ntopk, 0), WINDOW - 1)
     s_slot = ld_i32(a["swa_idx"], t * WINDOW + sidx)
@@ -152,12 +152,12 @@ def _kt_round(c, t, k, ntopk, kv_len, width, req, cm):
 
 @traced
 def stage_kt(c, t):
-    """Token t's keys for K2: ``KT[t][k] = slot | 1 << 31`` for its top-k compressed
+    """Token t's keys for K2: `KT[t][k] = slot | 1 << 31` for its top-k compressed
     rows (k < ntopk), the window slot for k in [ntopk, kv_len), -1 for an
     invalid or absent key; KLEN[t] = kv_len (0 for a pad row), KLEN[S + t] =
     ntopk. The top-k table holds request-local compressed indices (through the
-    block table) or, ``global_keys``, the slots themselves (a row of the
-    runtime width ``bt_stride``: vLLM's every compressed key of a C128 layer)."""
+    block table) or, `global_keys`, the slots themselves (a row of the
+    runtime width `bt_stride`: vLLM's every compressed key of a C128 layer)."""
     tid = c["tid"]
     a, ratio = c["args"], c["ratio"]
     d, glob = c["d"], c.get("global_keys", False)
@@ -193,8 +193,8 @@ def stage_kt(c, t):
 
 @traced
 def stage_wqkv(c, task, part, ops, t0, n, live):
-    """Rows 16 task .. of wqkv over K half ``part`` against tokens t0 .. t0 + n
-    -> fp32 partials QKVP[part] (``live``: a CTA with a wqkv part)."""
+    """Rows 16 task .. of wqkv over K half `part` against tokens t0 .. t0 + n
+    -> fp32 partials QKVP[part] (`live`: a CTA with a wqkv part)."""
     tid, red = c["tid"], c["red"]
     gemv_mfmas(c, HIDDEN, c["xl"], c["xsl"], red, ops, rows=n, nsteps=KSTEPS)
     gpu.barrier()
@@ -353,8 +353,8 @@ def stage_qkv(c, t):
 
 
 def wqb_rope(c, task0, pos_t, n):
-    """(cos, sin) of this thread's pair in ``stage_wqb``'s epilogue over a tile
-    of n rows (``pos_t``: its token's position; every task of the CTA shares
+    """(cos, sin) of this thread's pair in `stage_wqb`'s epilogue over a tile
+    of n rows (`pos_t`: its token's position; every task of the CTA shares
     the pair's dims: tasks BLOCKS apart are whole heads apart)."""
     a = c["args"]
     rp = c["tid"] % (ROWS // 2)
@@ -366,7 +366,7 @@ def wqb_rope(c, task0, pos_t, n):
 
 
 def wqb_pos(c, t0, n):
-    """This thread's token position for ``stage_wqb``'s epilogue of tile
+    """This thread's token position for `stage_wqb`'s epilogue of tile
     t0 .. t0 + n."""
     per = ROWS * n // 2
     tl = fx.min((c["tid"] % per) // (ROWS // 2), n - 1)
@@ -428,8 +428,8 @@ def front_lds(s: int, d: Dims):
 
 
 def front_context(key, lds, args: dict, scratch, tag, layout=None) -> dict:
-    """The front stages' context: LDS views, mailbox (tag ``tag``), scratch
-    regions, arguments (``args``: the kernel's, by name)."""
+    """The front stages' context: LDS views, mailbox (tag `tag`), scratch
+    regions, arguments (`args`: the kernel's, by name)."""
     s, d = key.tokens, Dims(key.tp, key.topk)
     tid = fx.thread_idx.x
     c = {
@@ -460,9 +460,9 @@ def front_context(key, lds, args: dict, scratch, tag, layout=None) -> dict:
 def run_front(c, key, bid, before_wqkv=None, after_wqkv=None):
     """The front's stages on this CTA, from the input's MXFP8 X8 / XRDY that a
     stage before them (the mono layer's seam norm) publishes for every token.
-    ``before_wqkv()`` runs ahead of the wqkv weights' loads (a latency-critical
-    stage of the caller's), ``after_wqkv()`` right after. The step's key table
-    is K2's (``stage_kt``): an index source's top-k comes after this launch."""
+    `before_wqkv()` runs ahead of the wqkv weights' loads (a latency-critical
+    stage of the caller's), `after_wqkv()` right after. The step's key table
+    is K2's (`stage_kt`): an index source's top-k comes after this launch."""
     s = key.tokens
     d = c["d"]
     wqb_tasks = d.wqb_tasks
