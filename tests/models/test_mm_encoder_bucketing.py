@@ -386,3 +386,20 @@ def test_firered_spec_buckets_tensor_shaped_features():
     for indices, kw in rungs:
         assert kw["speech_lengths"].shape == (len(indices),)
         assert kw["fake_token_lengths"].shape == (len(indices),)
+
+
+def test_cohere_spec_buckets_on_dim2_time_axis():
+    from vllm.model_executor.models.cohere_asr import CohereASRBucketingSpec
+
+    feats = torch.randn(3, 80, 3000)  # [B, mel, T], time on dim 2
+    length = torch.tensor([500, 2000, 1200])
+    batch = {"input_features": feats, "length": length}
+    bucketer = EncoderBucketing(
+        CohereASRBucketingSpec(), LengthBucketingConfig((800, 1600, 3000))
+    )
+    rungs = bucketer.bucket(batch, 3)
+    # windows (margin 8): 500->800, 2000->3000, 1200->1600
+    got = {r[1]["input_features"].shape[-1]: r[0] for r in rungs}
+    assert got == {800: [0], 3000: [1], 1600: [2]}
+    for indices, kw in rungs:
+        assert kw["length"].shape == (len(indices),)

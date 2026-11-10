@@ -82,6 +82,7 @@ _VERIFIED_FOR_BUCKETING: dict[str, str] = {
     "qwen2_audio": LOSSLESS_BIT_EXACT,
     "canary": LOSSLESS_BIT_EXACT,
     "fireredasr2": LOSSLESS_BIT_EXACT,
+    "cohere_asr": LOSSLESS_BIT_EXACT,
 }
 
 
