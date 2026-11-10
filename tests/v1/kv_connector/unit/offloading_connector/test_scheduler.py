@@ -282,6 +282,7 @@ def test_swa_offload_window_covers_unaligned_hit(
         assert not load_async
         return
     assert external == boundary and load_async
+    load_keys = sched.lookup_request(state.req_context)
     pool = BlockPool(256, enable_caching=True, hash_block_size=8)
     managers = []
     for i, group in enumerate(groups):
@@ -301,6 +302,7 @@ def test_swa_offload_window_covers_unaligned_hit(
     sched.update_state_after_alloc(request, blocks, external)
     assert len(sched._jobs) == 1
     job = next(iter(sched._jobs.values()))
+    assert job.keys == tuple(load_keys)
     if needs_left:
         assert {left_key, swa[end - 1]} <= set(job.keys)
     manager.complete_load(job.keys, state.req_context)
@@ -587,6 +589,7 @@ def test_partial_lookup_returns_exact_boundary_and_group_load_keys():
     assert scheduler._lookup(req_status) == 28
 
     assert req_status.partial_tail_boundary == 28
+    load_keys = scheduler.lookup_request(req_status.req_context)
 
     scheduler.update_state_after_alloc(
         request,
@@ -605,6 +608,8 @@ def test_partial_lookup_returns_exact_boundary_and_group_load_keys():
     assert dst_spec.group_sizes == [2, 1]
     assert dst_spec.block_indices == [0, 1]
     assert req_status.partial_tail_boundary is None
+    [job_status] = scheduler._jobs.values()
+    assert job_status.keys == tuple(load_keys)
 
 
 def test_partial_tail_lookup_delays_duplicate_inflight_load():
@@ -706,7 +711,11 @@ def test_lookup_cap_stops_at_authoritative_prefix_boundary():
     )
 
     assert (tokens, load_async) == (20, True)
-    assert scheduler._req_status["req"].partial_tail_boundary == 20
+    req_status = scheduler._req_status["req"]
+    assert req_status.partial_tail_boundary == 20
+    # A later lookup_request() keeps the cap of the poll.
+    assert scheduler.lookup_request(req_status.req_context) is not None
+    assert req_status.load_end == 20
 
 
 def test_max_load_tokens_zero_skips_partial_tail_lookup():

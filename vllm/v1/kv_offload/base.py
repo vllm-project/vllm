@@ -184,6 +184,23 @@ class ScheduleEndContext(NamedTuple):
     preempted_req_ids: Collection[str]
 
 
+class SchedulerView(ABC):
+    """Request-level view of the scheduler-side offloading state.
+
+    Implemented by the offloading connector and handed to its manager with
+    `OffloadingManager.bind_scheduler_view()`. Callers hold the manager lock.
+    """
+
+    @abstractmethod
+    def lookup_request(self, req_context: ReqContext) -> Collection[OffloadKey] | None:
+        """Look the request up now and return the keys its load would read.
+
+        Keys below the GPU-cached prefix and keys looked up only for
+        verification are excluded. Returns None if the lookup cannot be
+        resolved yet.
+        """
+
+
 class LoadStoreSpec:
     """Metadata that encapsulates information allowing a worker
     to load, and optionally also to store, blocks of KV data.
@@ -331,6 +348,10 @@ class OffloadingManager(ABC):
         since a real lock need not be reentrant.
         """
         return nullcontext()
+
+    def bind_scheduler_view(self, view: SchedulerView) -> None:
+        """Called once by the connector, after it is constructed."""
+        return
 
     @abstractmethod
     def lookup(self, key: OffloadKey, req_context: ReqContext) -> LookupResult:
