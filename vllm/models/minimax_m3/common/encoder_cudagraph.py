@@ -34,6 +34,7 @@ class MiniMaxM3EncoderCudaGraphMixin(SupportsEncoderCudaGraph):
     multimodal_config: "MultiModalConfig | None"
 
     def get_encoder_cudagraph_config(self) -> "EncoderCudaGraphConfig":
+        from vllm.model_executor.layers.attention import MMEncoderAttention
         from vllm.v1.attention.backends.registry import AttentionBackendEnum
         from vllm.v1.worker.encoder_cudagraph_defs import EncoderCudaGraphConfig
 
@@ -89,6 +90,9 @@ class MiniMaxM3EncoderCudaGraphMixin(SupportsEncoderCudaGraph):
             ],
             out_hidden_size=self.vision_tower.out_hidden_size,
             padding_logics={
+                **MMEncoderAttention.get_cu_seqlens_padding_logics(
+                    backend, "cu_seqlens"
+                ),
                 "rotary_cos": pad_rope_planes,
                 "rotary_sin": pad_rope_planes,
             },
