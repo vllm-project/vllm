@@ -11,7 +11,6 @@ import regex as re
 import torch
 from torch import nn
 from torch.nn.parameter import Parameter
-from typing_extensions import TypeIs
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
@@ -59,6 +58,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
+from vllm.model_executor.model_loader.reload import weight_update_active
 from vllm.model_executor.models.interfaces import (
     MixtureOfExperts,
     SupportsLoRA,
@@ -86,7 +86,7 @@ from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.v1.attention.backend import AttentionBackend, AttentionType
 
-from .config import (
+from ..common.config import (
     Step5SparseConfig,
     checkpoint_has_step5_sparse_config,
     get_step5_sparse_config,
@@ -477,6 +477,7 @@ class Step5FusedQKVIndexerLinear(QKVParallelLinear):
     """
 
     INDEXER_SHARD_IDS = ("index_q", "index_k", "index_z", "index_g")
+    shard_ids = ("q", "k", "v", *INDEXER_SHARD_IDS)
 
     def __init__(
         self,
@@ -574,7 +575,6 @@ class Step5FusedQKVIndexerLinear(QKVParallelLinear):
         )
         self.register_parameter("weight", weight)
         self.update_param_tp_status()
-        self._loaded_shards: set[str] = set()
 
     @property
     def local_index_q_size(self) -> int:
@@ -587,11 +587,6 @@ class Step5FusedQKVIndexerLinear(QKVParallelLinear):
     @property
     def local_index_z_size(self) -> int:
         return self.local_index_kv_heads * self.proxy_dim
-
-    def validate_shard_id(self, loaded_shard_id: Any) -> TypeIs[str | None]:
-        if loaded_shard_id in self.INDEXER_SHARD_IDS:
-            return True
-        return super().validate_shard_id(loaded_shard_id)
 
     def _indexer_source_offset(self, shard_id: str) -> tuple[int, int]:
         if shard_id == "index_q":
@@ -634,16 +629,13 @@ class Step5FusedQKVIndexerLinear(QKVParallelLinear):
                 "tensors; a pre-fused qkv_indexer_proj weight is not supported."
             )
         if loaded_shard_id in self.INDEXER_SHARD_IDS:
+            self.validate_shard_id(loaded_shard_id, param)
             src_offset, shard_size = self._indexer_source_offset(loaded_shard_id)
             dst_offset = self._indexer_dest_offset(loaded_shard_id)
             shard = loaded_weight.narrow(0, src_offset, shard_size)
             param.data.narrow(0, dst_offset, shard_size).copy_(shard)
         else:
             super().weight_loader_v2(param, loaded_weight, loaded_shard_id)
-        self._loaded_shards.add(loaded_shard_id)
-
-    def required_shard_ids(self) -> set[str]:
-        return {"q", "k", "v", "index_q", "index_k", "index_z", "index_g"}
 
     def assert_fully_loaded(self, prefix: str) -> None:
         """Fail unless this load covered every shard, then forget the record.
@@ -653,17 +645,17 @@ class Step5FusedQKVIndexerLinear(QKVParallelLinear):
         storage for the whole parameter, so a shard the new weight stream omits
         would otherwise silently become garbage.
         """
-        required = self.required_shard_ids()
-        missing = sorted(required - self._loaded_shards)
+        loaded = self.loaded_shard_ids.pop("weight", set())
+        self.loaded_shard_ids.clear()
+        missing = [shard for shard in self.shard_ids if shard not in loaded]
         if missing:
             raise ValueError(
                 f"Incomplete fused qkv+indexer weight for {prefix}: "
                 f"missing shards {missing}."
             )
-        self._loaded_shards.clear()
 
     def reset_load_state(self) -> None:
-        self._loaded_shards.clear()
+        self.loaded_shard_ids.clear()
 
     def forward(  # type: ignore[override]
         self,
@@ -758,8 +750,7 @@ class Step5SparseIndexerIndexTPLinear(ColumnParallelLinear):
 def _step5_use_sequence_parallel(vllm_config: VllmConfig) -> bool:
     parallel = vllm_config.parallel_config
     return (
-        parallel.pipeline_parallel_size == 1
-        and parallel.enable_expert_parallel
+        parallel.enable_expert_parallel
         and parallel.tensor_parallel_size > 1
         and vllm_config.kernel_config.moe_backend == "deep_gemm_mega_moe"
     )
@@ -1208,8 +1199,8 @@ class Step5Attention(nn.Module):
             **sparse_impl_args,
         )
         if self.use_dsa_backend:
-            from .csa_tail_ring import Step5CSATailRing
-            from .sparse_summary_cache import Step5SparseSummaryCacheLayer
+            from ..common.csa_tail_ring import Step5CSATailRing
+            from ..common.sparse_summary_cache import Step5SparseSummaryCacheLayer
 
             sparse_config = typing.cast(Step5SparseConfig, sparse_config)
             proxy_dim = int(sparse_config.proxy_dim)
@@ -1644,7 +1635,7 @@ class Step5SparseAttention:
         torch.Tensor,
         bool,
     ]:
-        from .ops.indexer_norm_rope import indexer_norm_rope
+        from ..common.ops.indexer_norm_rope import indexer_norm_rope
 
         owner = self.owner
         index_q, index_k, index_z, extra_dims = owner.qkv_indexer_proj.split_indexer(
@@ -2342,13 +2333,6 @@ class Step5ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts, SupportsLoRA):
         prefix: str = "",
     ):
         super().__init__()
-        if (
-            vllm_config.lora_config is not None
-            and vllm_config.kernel_config.moe_backend == "deep_gemm_mega_moe"
-        ):
-            raise ValueError(
-                "Step5 LoRA is not supported with moe_backend='deep_gemm_mega_moe'"
-            )
         self.vllm_config = vllm_config
         model_config = vllm_config.model_config
         config = model_config.hf_config
@@ -2444,11 +2428,7 @@ class Step5ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts, SupportsLoRA):
             moe.experts.update_expert_map()
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        from vllm.model_executor.model_loader.mtp_validation import (
-            is_mtp_completeness_check_enabled,
-        )
-
-        validate_completeness = is_mtp_completeness_check_enabled()
+        validate_completeness = not weight_update_active()
         if validate_completeness:
             _reset_fused_qkv_indexer_load_state(self.model)
         skip_prefixes = ["vision_model."]

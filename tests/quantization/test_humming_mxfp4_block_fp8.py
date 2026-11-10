@@ -124,3 +124,32 @@ def test_default_activation_quant_config_defers_to_humming():
     )
     assert not qc.is_block_quantized
     assert qc.per_act_token_quant
+
+
+@pytest.mark.skipif(not has_humming(), reason="humming is not installed")
+@pytest.mark.parametrize(
+    "capability,user_override,expected_group_size",
+    [
+        (90, None, 128),
+        (90, kMxfp8Dynamic, 32),
+        (100, None, 32),
+    ],
+)
+def test_checkpoint_mxfp8_runs_as_block_fp8_on_hopper(
+    monkeypatch, capability, user_override, expected_group_size
+):
+    """A checkpoint's MXFP8 MoE activations (e.g. DeepSeek V4) run as block
+    FP8 on Humming's SM90 kernels; an explicit user request is honored."""
+    from vllm.model_executor.layers.fused_moe.oracle import mxfp4
+    from vllm.platforms import current_platform
+
+    monkeypatch.setattr(
+        current_platform, "is_device_capability_family", lambda cap: cap == capability
+    )
+    monkeypatch.setattr(mxfp4, "_user_moe_activation_override", lambda: user_override)
+    monkeypatch.delenv("VLLM_HUMMING_INPUT_QUANT_CONFIG", raising=False)
+
+    schema = mxfp4._humming_input_schema(kMxfp8Dynamic)
+
+    assert str(schema.a_dtype) == "float8e4m3"
+    assert schema.input_scale_group_size == expected_group_size

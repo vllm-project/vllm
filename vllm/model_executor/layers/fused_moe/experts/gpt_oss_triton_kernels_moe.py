@@ -46,10 +46,11 @@ def _triton_kernel_moe_supports_current_device() -> bool:
     p = current_platform
     if p.is_cuda():
         cap = p.get_device_capability()
-        # Hopper SM90, datacenter Blackwell SM100/103 and consumer Blackwell
-        # SM120/121. SM12x needs the opt-flag constraints applied by
-        # `_swizzle_mxfp4` and `_constrain_sm12x_block_m` to fit its 99KB of
-        # shared memory; it is still ordered after MARLIN by the selector.
+        # Hopper SM90, datacenter Blackwell SM100/103, Jetson Thor SM110 and
+        # consumer Blackwell SM120/121. SM110 and SM12x need the opt-flag
+        # constraints applied by `_swizzle_mxfp4` (SM12x also
+        # `_constrain_sm12x_block_m` to fit its 99KB of shared memory); both
+        # are still ordered after MARLIN by the selector.
         return cap is not None and (9, 0) <= (cap.major, cap.minor) < (13, 0)
     if p.is_rocm():
         from vllm.platforms.rocm import on_gfx1x, on_gfx9
@@ -245,16 +246,16 @@ def _patch_legacy_routing_for_nonpow2_topk() -> None:
     """Monkey-patch the legacy (v3.5.1) triton_kernels routing path to support
     non-power-of-2 top_k (e.g. DeepSeek-V4 top_k=6).
 
-    The bundled ``_routing_compute_indx`` does ``tl.arange(0, N_EXPTS_ACT *
-    BLOCK_M)``, which fails to compile when ``N_EXPTS_ACT`` (top_k) is not a
+    The bundled `_routing_compute_indx` does `tl.arange(0, N_EXPTS_ACT *
+    BLOCK_M)`, which fails to compile when `N_EXPTS_ACT` (top_k) is not a
     power of 2 (6 * 32 = 192). This installs a pow2-safe variant that pads the
-    ``tl.arange`` to the next power of 2, strides by the real per-block size,
+    `tl.arange` to the next power of 2, strides by the real per-block size,
     and masks the padded tail so it neither loads the next block's gates nor
     writes any output. For power-of-2 top_k it is identical to the original.
 
-    A matching ``sort_tokens`` is installed that threads the padded size into
+    A matching `sort_tokens` is installed that threads the padded size into
     the patched kernel. Only needed on the legacy path; the v3.6+ SparseMatrix
-    path is handled by ``_patch_make_bitmatrix_metadata``.
+    path is handled by `_patch_make_bitmatrix_metadata`.
     """
     import triton
     import triton.language as tl
@@ -938,11 +939,11 @@ def routing_data_from_sparse_topk(
     sparse_topk,  # SparseMatrix
     n_expts: int,
 ) -> tuple["RoutingData", "GatherIndx", "ScatterIndx"]:
-    """Build routing structures from the ``SparseMatrix`` returned by
-    ``triton_kernels.topk``, reusing its precomputed bitmatrix metadata.
+    """Build routing structures from the `SparseMatrix` returned by
+    `triton_kernels.topk`, reusing its precomputed bitmatrix metadata.
 
-    ``make_routing_data`` re-packs a bitmatrix from the topk ids and
-    constructs a second ``SparseMatrix``, recomputing metadata the topk
+    `make_routing_data` re-packs a bitmatrix from the topk ids and
+    constructs a second `SparseMatrix`, recomputing metadata the topk
     call already produced; when the topk ids are used as-is (no expert-map
     remapping) that work is redundant.
     """
