@@ -1050,26 +1050,15 @@ class VllmConfig:
         if (
             speculative_config is None
             or speculative_config.num_speculative_tokens_under_prefill_load is None
+            or self.parallel_config.data_parallel_size <= 1
         ):
             return
 
-        if self.parallel_config.data_parallel_size > 1:
-            reason = (
-                "data parallelism, because ranks schedule prefills independently "
-                "and would pick different speculative-token counts"
-            )
-        elif self.model_config is not None and self.model_config.is_diffusion:
-            reason = (
-                "diffusion models, because narrowing the canvas mid-denoise "
-                "discards denoised positions"
-            )
-        else:
-            return
-
         logger.warning_once(
-            "num_speculative_tokens_under_prefill_load is not supported with %s. "
-            "Disabling it and falling back to static num_speculative_tokens=%d.",
-            reason,
+            "num_speculative_tokens_under_prefill_load is not supported with data "
+            "parallelism, because ranks schedule prefills independently and would "
+            "pick different speculative-token counts. Disabling it and falling "
+            "back to static num_speculative_tokens=%d.",
             speculative_config.num_speculative_tokens,
         )
         speculative_config.num_speculative_tokens_under_prefill_load = None
