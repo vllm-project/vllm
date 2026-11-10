@@ -22,12 +22,16 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory, GateLinear
 from vllm.model_executor.layers.linear import (
+    LinearBase,
     QKVParallelLinear,
     ReplicatedLinear,
     RowParallelLinear,
     UnquantizedLinearMethod,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.quantization.online.base import (
+    OnlineQuantizationConfig,
+)
 from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.rotary_embedding.base import RotaryEmbedding
@@ -871,6 +875,23 @@ class MuseSparkDecoderLayer(nn.Module):
         )
 
 
+def _reject_online_quantized_linears(model: nn.Module) -> None:
+    """Online quantization of a BF16 checkpoint may only target the routed
+    experts."""
+    linears = [
+        name
+        for name, module in model.named_modules()
+        if isinstance(module, LinearBase)
+        and not isinstance(module.quant_method, UnquantizedLinearMethod)
+    ]
+    if linears:
+        raise NotImplementedError(
+            "Muse Spark on ROCm supports online quantization of BF16 "
+            "checkpoints only on the routed experts; it also matched "
+            f"{len(linears)} linear layers, e.g. {linears[0]}."
+        )
+
+
 def _drop_gate_up_stacking(base: WeightsMapper) -> WeightsMapper:
     """Keep Quark's per-expert gate/up names unstacked for `RoutedExperts`."""
     return WeightsMapper(
@@ -1011,8 +1032,12 @@ class MuseSparkForCausalLM(LlamaForCausalLM, SupportsLoRA, MixtureOfExperts):
     decoder_layer_cls = MuseSparkDecoderLayer
     supported_quantization_configs: tuple[type[QuantizationConfig], ...] = (
         QuarkConfig,
+        OnlineQuantizationConfig,
     )
-    supported_quantization_description = "Quark W8A8 FP8 or OCP-MXFP4 W4A4"
+    supported_quantization_description = (
+        "Quark W8A8 FP8 or OCP-MXFP4 W4A4, or online quantization (routed "
+        "experts: W4A4 'mxfp4')"
+    )
 
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
@@ -1048,6 +1073,8 @@ class MuseSparkForCausalLM(LlamaForCausalLM, SupportsLoRA, MixtureOfExperts):
             layer_type = self.decoder_layer_cls
 
         super().__init__(vllm_config=vllm_config, prefix=prefix, layer_type=layer_type)
+        if isinstance(vllm_config.quant_config, OnlineQuantizationConfig):
+            _reject_online_quantized_linears(self)
         self.vllm_config = vllm_config
 
         # qkv_proj fuses Q+K+V+OG, so LoRA must treat it as one module.

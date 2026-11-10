@@ -181,6 +181,13 @@ vllm serve amd/Qwen3.5-35B-A3B-MXFP4 \
 
 adds MXFP8 quantization to the dense linear layers of a Quark checkpoint where only MOE experts are quantized.
 
+Similarly, the Quark MXFP4 checkpoint of Muse Spark Open keeps the routed experts of layers 0 and 61 in BF16. On ROCm, this rounds them to OCP MXFP4 at load, so every MoE layer runs the same AITER W4A4 experts (an opt-in numerics change):
+
+```bash
+vllm serve amd/Muse-Spark-Open-816B-A42B-Quark-MXFP4 \
+  --quantization-config '{"targets":{"*layers.0.feed_forward.experts*":"mxfp4","*layers.61.feed_forward.experts*":"mxfp4"}}'
+```
+
 !!! info
     `quantization_config.ignore` is an online-only exclusion: the original `quant_method` relies solely on its own ignore implementation and on the ignored layers specified in `config.json`.
 
