@@ -263,6 +263,8 @@ class SimpleCPUOffloadScheduler:
             )
         else:
             self._target_free = 0
+        # GPU blocks with a CPU copy that the last lazy walk covered.
+        self._walked_cpu_held: set[int] = set()
         self._store_event_to_blocks: dict[int, TransferMeta] = {}
         self._abandoned_store_event_to_blocks: dict[int, TransferMeta] = {}
         # Eager mode only
@@ -430,6 +432,19 @@ class SimpleCPUOffloadScheduler:
                 blk for grp in cpu_hit_blocks for blk in grp if not blk.is_null
             ]
             self.cpu_block_pool.touch(pin_blocks)
+            gpu_pool = self._gpu_block_pool
+            if (
+                self._lazy_mode
+                and gpu_pool is not None
+                and gpu_pool.get_num_free_blocks() >= len(pin_blocks)
+            ):
+                # The load allocates all its blocks at once, past what the last
+                # walk covered: offload what that allocation may evict.
+                gpu_ids, cpu_ids = self._offload_eviction_end(
+                    len(pin_blocks) + self._target_free
+                )
+                if gpu_ids:
+                    self._pending_finished_stores.append(TransferMeta(gpu_ids, cpu_ids))
             self._pending_cpu_hits[request.request_id] = (
                 cpu_hit_blocks,
                 hit_length,
@@ -649,45 +664,52 @@ class SimpleCPUOffloadScheduler:
         list[str],
         list[dict[BlockHashWithGroupId, BlockStoreMeta]] | None,
     ]:
-        """Offload cached GPU blocks near eviction.
+        """Offload cached GPU blocks near eviction."""
+        if self._gpu_block_pool is None or self._target_free <= 0:
+            return [], [], [], None
+        gpu_ids, cpu_ids = self._offload_eviction_end(self._target_free)
+        return gpu_ids, cpu_ids, [], None
 
-        Walks the GPU free queue from its head, counting blocks that are
-        free-or-offloaded (safe for the allocator to evict). Stops when
-        target_free blocks are covered or CPU capacity is reached.
+    def _offload_eviction_end(self, num_blocks: int) -> tuple[list[int], list[int]]:
+        """Walk the GPU free queue from its head, storing cached blocks that
+        have no CPU copy, until `num_blocks` blocks safe for the allocator to
+        evict (uncached or held on CPU) are covered or CPU capacity is reached.
         """
         gpu_pool = self._gpu_block_pool
-        if gpu_pool is None or self._target_free <= 0:
-            return [], [], [], None
-
-        free_queue = gpu_pool.free_block_queue
+        assert gpu_pool is not None
         cpu_pool = self.cpu_block_pool
+        cpu_map = cpu_pool.cached_block_hash_to_block
         num_cpu_free = cpu_pool.get_num_free_blocks()
 
         gpu_ids: list[int] = []
-
-        for covered, node in enumerate(free_queue.iter_blocks_after(None)):
-            if covered >= self._target_free or len(gpu_ids) >= num_cpu_free:
-                break
-
-            bhash = node.block_hash
-
+        cpu_held: set[int] = set()
+        new_cpu_held: list[KVCacheBlock] = []
+        covered = 0
+        for node in gpu_pool.free_block_queue.iter_blocks_after(None):
             if (
-                bhash is not None
-                and not node.is_null
-                and cpu_pool.cached_block_hash_to_block.get_one_block(bhash) is None
+                covered >= num_blocks
+                or len(gpu_ids) + len(new_cpu_held) >= num_cpu_free
             ):
+                break
+            if node.block_hash is None or node.is_null:
+                covered += 1
+            elif (cpu_block := cpu_map.get_one_block(node.block_hash)) is None:
                 gpu_ids.append(node.block_id)
+            else:
+                covered += 1
+                cpu_held.add(node.block_id)
+                if node.block_id not in self._walked_cpu_held:
+                    new_cpu_held.append(cpu_block)
+        self._walked_cpu_held = cpu_held
 
-        # Batch-allocate CPU blocks.
-        if gpu_ids:
-            cpu_blocks = cpu_pool.get_new_blocks(len(gpu_ids))
-            cpu_ids = [blk.block_id for blk in cpu_blocks]
-            # Touch GPU blocks to prevent eviction during async copy.
-            gpu_pool.touch([gpu_pool.blocks[bid] for bid in gpu_ids])
-        else:
-            cpu_ids = []
-
-        return gpu_ids, cpu_ids, [], None
+        # The CPU copies become the only ones once the GPU evicts these blocks:
+        # keep them out of this allocation, then make them most recent.
+        cpu_pool.touch(new_cpu_held)
+        cpu_ids = [blk.block_id for blk in cpu_pool.get_new_blocks(len(gpu_ids))]
+        cpu_pool.free_blocks(new_cpu_held)
+        # Touch GPU blocks to prevent eviction during async copy.
+        gpu_pool.touch([gpu_pool.blocks[bid] for bid in gpu_ids])
+        return gpu_ids, cpu_ids
 
     def _prepare_eager_store_specs(
         self, scheduler_output: SchedulerOutput
@@ -1432,11 +1454,17 @@ class SimpleCPUOffloadScheduler:
                     self._load_event_to_reqs.pop(state.load_event, None)
 
         if state.transfer_meta is not None:
-            # Free CPU touch refs
-            self.cpu_block_pool.free_blocks(
+            cpu_blocks = [
                 self.cpu_block_pool.blocks[bid]
                 for bid in state.transfer_meta.cpu_block_ids
-            )
+            ]
+            # Lazy: the GPU now holds these blocks and the walk saves them again
+            # before evicting them, so their CPU copies go first, suffix first.
+            loaded = state.load_event is not None and not state.finished
+            if self._lazy_mode and loaded:
+                self.cpu_block_pool.free_blocks(reversed(cpu_blocks), evict_first=True)
+            else:
+                self.cpu_block_pool.free_blocks(cpu_blocks)
             # Free GPU touch refs
             assert self._gpu_block_pool is not None
             self._gpu_block_pool.free_blocks(

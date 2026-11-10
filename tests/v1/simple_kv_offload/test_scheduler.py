@@ -1368,6 +1368,9 @@ def test_lazy_store_returns_blocks_to_eviction_end() -> None:
     fillers = _flush_old_blocks_to_lru_head(
         gpu_pool, num_filler_blocks=gpu_pool.get_num_free_blocks() - 2 * target
     )
+    # The newer request is already on CPU.
+    cpu_pool = sched.cpu_block_pool
+    cpu_pool.free_blocks(_allocate_gpu_blocks(cpu_pool, req, target))
 
     # The scan offloads the older request's blocks.
     meta = sched.build_connector_meta(make_scheduler_output({}))
@@ -1400,6 +1403,65 @@ def test_lazy_walk_does_not_offload_past_eviction_window() -> None:
         meta = sched.build_connector_meta(make_scheduler_output({}))
         assert not meta.store_gpu_blocks
     gpu_pool.free_blocks(fillers)
+
+
+# ---------------------------------------------------------------------------
+# Test 2g: Lazy CPU loads stay recoverable
+# ---------------------------------------------------------------------------
+def test_lazy_lookup_offloads_what_the_load_allocation_evicts() -> None:
+    """Lazy: a CPU hit allocates all of its blocks at once, past the walk
+    window, so the lookup first offloads the cached blocks it may evict."""
+    fix = make_scheduler(num_cpu_blocks=32, num_gpu_blocks=32, lazy=True)
+    sched, gpu_pool = fix.scheduler, fix.gpu_block_pool
+    num_blocks = sched._target_free + 2
+    req = make_request(num_blocks=num_blocks)
+    cpu_pool = sched.cpu_block_pool
+    cpu_pool.free_blocks(_allocate_gpu_blocks(cpu_pool, req, num_blocks))
+    # Only cached blocks without a CPU copy are free on the GPU.
+    blocks = _allocate_gpu_blocks(gpu_pool, make_request(num_blocks), num_blocks)
+    _flush_old_blocks_to_lru_head(gpu_pool, gpu_pool.get_num_free_blocks())
+    gpu_pool.free_blocks(blocks)
+
+    hit, _ = sched.get_num_new_matched_tokens(req, num_computed_tokens=0)
+    assert hit == num_blocks * BLOCK_SIZE
+    assert all(b.ref_cnt == 1 for b in blocks), "not stored before allocation"
+
+
+def test_lazy_walk_keeps_cpu_copy_of_block_near_eviction() -> None:
+    """Lazy: storing a block must not evict the CPU copy of a block the GPU
+    is about to evict, or neither tier keeps it."""
+    fix = make_scheduler(num_cpu_blocks=3, num_gpu_blocks=16, lazy=True)
+    sched, gpu_pool = fix.scheduler, fix.gpu_block_pool
+    cpu_pool = sched.cpu_block_pool
+    held, new = make_request(num_blocks=1), make_request(num_blocks=1)
+    # The CPU is full and `held`'s copy is its LRU block.
+    for req in (held, make_request(num_blocks=1)):
+        cpu_pool.free_blocks(_allocate_gpu_blocks(cpu_pool, req, 1))
+    blocks = [_allocate_gpu_blocks(gpu_pool, r, 1)[0] for r in (held, new)]
+    _flush_old_blocks_to_lru_head(gpu_pool, gpu_pool.get_num_free_blocks())
+    gpu_pool.free_blocks(blocks)
+
+    meta = sched.build_connector_meta(make_scheduler_output({}))
+    assert meta.store_gpu_blocks == [blocks[1].block_id]
+    assert cpu_pool.cached_block_hash_to_block.get_one_block(blocks[0].block_hash)
+
+
+def test_lazy_load_evicts_cpu_copy_first() -> None:
+    """Lazy: once loaded, the GPU holds the blocks, so their CPU copies are
+    evicted first, suffix first to keep the CPU prefix whole."""
+    fix = make_scheduler(num_cpu_blocks=8, num_gpu_blocks=16, lazy=True)
+    sched, gpu_pool = fix.scheduler, fix.gpu_block_pool
+    cpu_pool = sched.cpu_block_pool
+    req = make_request(num_blocks=2)
+    cpu_pool.free_blocks(_allocate_gpu_blocks(cpu_pool, req, 2))
+
+    hit, _ = sched.get_num_new_matched_tokens(req, num_computed_tokens=0)
+    gpu_blocks = KVCacheBlocks(blocks=(gpu_pool.get_new_blocks(2),))
+    sched.update_state_after_alloc(req, gpu_blocks, hit)
+    meta = sched.build_connector_meta(make_scheduler_output({}))
+    simulate_load_completion(sched, {req.request_id})
+    evicted = cpu_pool.get_new_blocks(2)
+    assert [b.block_id for b in evicted] == meta.load_cpu_blocks[::-1]
 
 
 # ---------------------------------------------------------------------------
