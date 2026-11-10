@@ -546,8 +546,9 @@ class FusedMoEQuantConfig:
           "mxfp6_e3m2", "mxfp6_e2m3" are the only valid string values
           for quant_dtype.
         - per_act_token_quant: Activations have per token quantization.
-        - per_out_ch_quant: Outputs have per channel quantization. (only
-          for cutlass).
+        - per_out_ch_quant: Weights have per output channel scales. It controls
+          how the MoE kernels (Triton, CUTLASS, AITER) index the weight scales,
+          independently of the activation scale layout.
         - block_shape: Optional block size for block-wise quantization.
           Incompatible with per_act_token and per_out_ch quant.
         - w1_scale: Optional scale to be used for w1.
@@ -670,6 +671,7 @@ def int8_w8a8_moe_quant_config(
     w1_bias: torch.Tensor | None = None,
     w2_bias: torch.Tensor | None = None,
     per_act_token_quant: bool = False,
+    per_out_ch_quant: bool = False,
 ) -> FusedMoEQuantConfig:
     """Construct a quant config for int8 activations and int8 weights."""
     return FusedMoEQuantConfig.make(
@@ -681,7 +683,7 @@ def int8_w8a8_moe_quant_config(
         w1_bias=w1_bias,
         w2_bias=w2_bias,
         per_act_token_quant=per_act_token_quant,
-        per_out_ch_quant=False,
+        per_out_ch_quant=per_out_ch_quant,
         block_shape=None,
     )
 
