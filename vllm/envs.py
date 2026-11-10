@@ -143,7 +143,6 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_CUSTOM_AR: bool = True
     VLLM_ROCM_MUSE_MOE_REDUCE_DTYPE: str = "fp32"
     VLLM_ROCM_MUSE_MOE_ONLINE_QUANT: str = ""
-    VLLM_ROCM_DCP_AITER_ALLGATHER: bool = False
     VLLM_ROCM_USE_AITER_LINEAR: bool = True
     VLLM_ROCM_USE_AITER_LINEAR_HIPBMM: bool = False
     VLLM_ROCM_USE_AITER_MOE: bool = True
@@ -1352,12 +1351,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ROCM_MUSE_MOE_ONLINE_QUANT": lambda: os.getenv(
         "VLLM_ROCM_MUSE_MOE_ONLINE_QUANT", ""
     ).lower(),
-    # Route DCP-group all_gathers through the TP group's AITER IPC all-gather
-    # when the DCP and TP groups span the same ranks. Falls back to RCCL for
-    # inputs AITER cannot take (e.g. large prefill gathers).
-    "VLLM_ROCM_DCP_AITER_ALLGATHER": lambda: (
-        os.getenv("VLLM_ROCM_DCP_AITER_ALLGATHER", "0").lower() in ("true", "1")
-    ),
     # use aiter linear op if aiter ops are enabled
     # The following list of related ops
     # - scaled_mm (per-tensor / rowwise)
