@@ -719,15 +719,19 @@ mod tests {
                 input_send,
                 send_runtime.handle().clone(),
                 "test-model".to_string(),
+                0,
                 false,
-                &[],
+                &[ConnectedEngine {
+                    engine_id: engine_id.clone(),
+                    ready_response: default_ready_response(),
+                }],
             );
             let (abort_tx, mut abort_rx) = mpsc::unbounded_channel();
             let (_output_tx, output_rx) = output_channel(NonZeroU32::MIN);
             let stream = EngineCoreOutputStream::new("req-1".to_string(), 0, abort_tx, output_rx);
             let request = EngineCoreRequest {
                 request_id: "req-1".to_string(),
-                prompt_token_ids: Some(vec![1]),
+                prompt_token_ids: Some(vec![1].into()),
                 sampling_params: Some(EngineCoreSamplingParams::for_test()),
                 ..Default::default()
             };
