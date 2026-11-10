@@ -4,12 +4,13 @@ meta:
   provider: "OpenAI"
   description: "Whisper Large v3 speech recognition model, validated for Intel Xeon 6 CPU serving."
   date_added: 2026-08-19
-  date_updated: 2026-09-12
+  date_updated: 2026-10-30
   tasks:
     - multimodal
   performance_headline: "Audio transcription validated on Intel Xeon 6"
   hardware:
     xeon6: verified
+    h100: supported
 
 model:
   model_id: "openai/whisper-large-v3"
@@ -32,6 +33,13 @@ variants:
     description: "BF16 serving configuration validated on Intel Xeon 6"
     supported_hardware:
       - xeon6
+  redhat_fp8_dynamic:
+    model_id: "RedHatAI/whisper-large-v3-FP8-dynamic"
+    precision: fp8
+    label: "FP8 Dynamic (RedHatAI)"
+    vram_minimum_gb: 4
+    description: "RedHatAI FP8 Dynamic checkpoint"
+    supported_hardware: [arch:sm90, arch:sm100, arch:sm103]
 
 compatible_strategies:
   - single_node_tp
@@ -95,5 +103,6 @@ guide: |
   ## References
 
   - [Model card](https://huggingface.co/openai/whisper-large-v3)
+  - [RedHatAI FP8 Dynamic checkpoint](https://huggingface.co/RedHatAI/whisper-large-v3-FP8-dynamic)
   - [vLLM Whisper implementation](https://docs.vllm.ai/en/latest/api/vllm/model_executor/models/whisper/)
   - [vLLM CPU installation](https://docs.vllm.ai/en/latest/getting_started/installation/cpu/)

@@ -4,7 +4,7 @@ meta:
   provider: "Poolside"
   description: "Poolside's 118B total / 8B activated MoE coding model with mixed sliding-window + global attention, native interleaved reasoning, and 256K context — the larger sibling of Laguna XS-2.1, tuned for agentic coding."
   date_added: 2026-07-21
-  date_updated: 2026-07-22
+  date_updated: 2026-10-30
   tasks:
     - text
   performance_headline: "118B/8B-A MoE for agentic coding with interleaved thinking and tool use"
@@ -14,6 +14,7 @@ meta:
   hardware:
     h200: verified
     mi325x: verified
+    h100: supported
 
 model:
   model_id: "poolside/Laguna-S-2.1"
@@ -84,6 +85,20 @@ variants:
     precision: int4
     vram_minimum_gb: 86
     description: "INT4 (W4A16) weights + FP8 KV cache (~72GB) — fits a single 96GB+ GPU (H200/B200)"
+  redhat_fp8:
+    model_id: "RedHatAI/Laguna-S-2.1-FP8"
+    precision: fp8
+    label: "FP8 (RedHatAI)"
+    vram_minimum_gb: 145
+    description: "RedHatAI FP8 checkpoint for Laguna S-2.1"
+    supported_hardware: [h100, h200]
+  redhat_nvfp4:
+    model_id: "RedHatAI/Laguna-S-2.1-NVFP4"
+    precision: nvfp4
+    label: "NVFP4 (RedHatAI)"
+    vram_minimum_gb: 86
+    description: "RedHatAI NVFP4 checkpoint for Blackwell GPUs"
+    supported_hardware: [arch:sm100, arch:sm103]
 
 compatible_strategies:
   - single_node_tp
@@ -253,6 +268,8 @@ guide: |
   ## References
 
   - [Model card](https://huggingface.co/poolside/Laguna-S-2.1)
+  - [RedHatAI FP8 checkpoint](https://huggingface.co/RedHatAI/Laguna-S-2.1-FP8)
+  - [RedHatAI NVFP4 checkpoint](https://huggingface.co/RedHatAI/Laguna-S-2.1-NVFP4)
   - [DFlash draft model](https://huggingface.co/poolside/Laguna-S-2.1-DFlash)
   - [vLLM DFlash spec-decoding PR #46853](https://github.com/vllm-project/vllm/pull/46853)
   - [Laguna XS-2.1 recipe](https://huggingface.co/poolside/Laguna-XS-2.1)
