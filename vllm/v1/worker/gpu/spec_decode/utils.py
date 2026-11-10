@@ -90,7 +90,7 @@ class DraftTokensHandler:
         self._next_copy_barrier = 0
 
         # Latest drafts per live request: a row view into an async-copied
-        # pinned array and associated barrier, or just the draft width when
+        # pinned array and pending copy event, or just the draft width when
         # the scheduler doesn't need the token ids.
         self._draft_tokens_by_req: dict[str, DraftTokens | int] = {}
         # Requests whose drafts the scheduler will fetch for the latest step's
@@ -125,8 +125,8 @@ class DraftTokensHandler:
         )
         copy_event = copy_barrier.event
 
-        # Wait on previous copy if it's still pending.
-        # Only occurs if we have more than max_concurrent_batches in-flight.
+        # Wait on previous copy if it's still pending. Only rarely occurs
+        # if we have more than max_concurrent_batches in-flight.
         copy_pending_container = copy_barrier.pending
         if copy_pending_container.pending:
             with gpu_sync_allowed():
