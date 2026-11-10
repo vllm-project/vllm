@@ -15,7 +15,6 @@ constexpr int kPackedDomainError = 2048;
 __global__ void prepare_kernel(const __grid_constant__ Args a, uint32_t* record,
                                int* admitted, BitmapArgs page,
                                const int32_t* live_nk) {
-  int nk = a.nk;
   const int group = blockIdx.x, t = threadIdx.x;
   const int qr = t >> 5, lane = t & 31, row = group * 4 + qr;
   if (group >= a.nq / 4) return;
@@ -26,12 +25,10 @@ __global__ void prepare_kernel(const __grid_constant__ Args a, uint32_t* record,
     admitted[group] = 14;
   }
   const int logical_nk = __ldg(live_nk);
-  if (logical_nk < a.seed || logical_nk > nk) {
+  if (logical_nk < a.seed || logical_nk > a.nk) {
     if (t < 4) atomicOr(a.error + group * 4 + t, 1);
     return;  // Initial flags/routes are already safe; no original plan read.
   }
-  nk =
-      logical_nk;  // The original a.ends<=NK domain, not the physical capacity.
 
   if (old_budget != kHighPaid) {
     if (t < 4 && !dosa_geometry::valid_certificate_budget(old_budget))
@@ -69,7 +66,7 @@ __global__ void prepare_kernel(const __grid_constant__ Args a, uint32_t* record,
                  isfinite(c) && c >= 0.f && c <= 0x1p16f && isfinite(rv) &&
                  rv >= 0.f && rv <= 0x1p16f && isfinite(ov) && ov >= 0.f &&
                  ov <= 0x1p16f && isfinite(tv) && sv >= 0 && sv <= ev &&
-                 ev <= nk;
+                 ev <= logical_nk;
 #pragma unroll
     for (int j = 0; j < 2; ++j) {
       const float value = a.fine_scale[uint64_t(row) * kScanHeads + j];
@@ -140,83 +137,96 @@ struct alignas(1024) PackedStorage {
       empty_umma[2];
   uint32_t tmem;
 };
-__device__ __forceinline__ float2 load_decoded_pair(const uint2* value) {
-  uint32_t lo, hi;
-  uint32_t address = uint32_t(__cvta_generic_to_shared(value));
-  asm volatile("ld.shared.v2.b32 {%0,%1},[%2];"
-               : "=r"(lo), "=r"(hi)
-               : "r"(address)
-               : "memory");
-  return make_float2(__uint_as_float(lo), __uint_as_float(hi));
+// First binary32 x for which RN(x + offset) is not below tau.
+__device__ float addition_boundary(float tau, float offset) {
+  if (isnan(tau) || isnan(offset) || tau == -INFINITY || offset == INFINITY)
+    return -INFINITY;
+  if (offset == -INFINITY) return INFINITY;
+  const float prev = nextafterf(tau, -INFINITY);
+  // Adjacent floats (including the virtual overflow neighbours) have an exact
+  // double midpoint. Successive upward roundings give its true float ceiling.
+  const double lo = isinf(prev) ? -0x1p128 : double(prev);
+  const double hi = isinf(tau) ? 0x1p128 : double(tau);
+  const float cut =
+      __double2float_ru(__dsub_ru((lo + hi) * 0.5, double(offset)));
+  return __fadd_rn(cut, offset) < tau ? nextafterf(cut, INFINITY) : cut;
 }
-template <int Q>
-__device__ __forceinline__ uint32_t consume_packed_query(
-    const uint32_t start, int buf, PackedStorage& s, const uint32_t (&dd)[2],
-    const uint32_t (&end_delta)[2], const float (&tau)[4],
-    const float (&guard)[4], float raw, float out, int visible_start,
-    int end_base, float scale, float rho, int key, int nk) {
-  float2 current_weights[kWeightPairs];
-#pragma unroll
-  for (int h = 0; h < kWeightPairs; ++h)
-    current_weights[h] =
-        load_decoded_pair(s.decoded_weights + Q * kWeightPairs + h);
-  float acc[kScanHeads];
-  uint32_t address = start + Q * kScanHeads;
-  load_tmem<16>(address, acc);
-  cutlass::arch::fence_view_async_tmem_load();
-  if constexpr (kScanHeads == 30) {
-    load_tmem<8>(address + 16, acc + 16);
-    cutlass::arch::fence_view_async_tmem_load();
-    load_tmem<4>(address + 24, acc + 24);
-    cutlass::arch::fence_view_async_tmem_load();
-    load_tmem<2>(address + 28, acc + 28);
-    cutlass::arch::fence_view_async_tmem_load();
-  } else {
-    load_tmem<4>(address + 16, acc + 16);
-    cutlass::arch::fence_view_async_tmem_load();
-    load_tmem<2>(address + 20, acc + 20);
-    cutlass::arch::fence_view_async_tmem_load();
+// Stream across query boundaries, keeping only one pair of accumulation
+// chains live. The four original per-head RN chains remain in the same order.
+struct QuadFold {
+  PackedStorage& s;
+  const uint32_t (&dd)[2], (&span)[4];
+  const float (&tau)[4], (&guard)[4];
+  float raw, scale, rho;
+  uint32_t delta, mask = 0;
+  float2 sum0{}, sum1{}, next_weight{};
+  float neg = 0;
+
+  template <int Pos>
+  __device__ __forceinline__ void pair(float a, float b) {
+    constexpr int q = Pos / kScanHeads, head = Pos % kScanHeads;
+    if constexpr (head == 0) {
+      const uint32_t ex = dd[q / 2] >> ((q % 2) * 16);
+      const float lo = __fmul_rn(a, __uint_as_float((ex & 255u) << 23));
+      neg = __fadd_rn(
+          0.0f, __fmaf_rn(b, __uint_as_float(((ex >> 8) & 255u) << 23), lo));
+      sum0 = sum1 = make_float2(0.f, 0.f);
+    } else {
+      constexpr int h = (head - 2) / 2;
+      const float2 v =
+          __fadd2_rn(make_float2(a, b), make_float2(fabsf(a), fabsf(b)));
+      if constexpr (h % 2 == 0) {
+        const uint4 w =
+            deep_gemm::ptx::ld_shared(reinterpret_cast<const uint4*>(
+                s.decoded_weights + q * kWeightPairs + h));
+        const float2 first =
+            make_float2(__uint_as_float(w.x), __uint_as_float(w.y));
+        next_weight = make_float2(__uint_as_float(w.z), __uint_as_float(w.w));
+        sum0 = __ffma2_rn(v, first, sum0);
+      } else {
+        sum1 = __ffma2_rn(v, next_weight, sum1);
+      }
+      if constexpr (head + 2 == kScanHeads) {
+        const float2 total = __fadd2_rn(sum0, sum1);
+        const float paid = __fmul_rn(__fadd_rn(total.x, total.y), 0.5f);
+        const float signed_score = __fadd_rn(paid, -fmaxf(neg, 0.f));
+        const float tail =
+            __fadd_rn(__fadd_rn(signed_score, raw), __fmul_rn(rho, guard[q]));
+        const float u = __fmul_rn(scale, tail);
+        const bool admitted = scale > 0.f && scale <= 0x1p64f;
+        mask |= delta < span[q] && (!admitted || !(u < tau[q])) ? 1u << q : 0u;
+      }
+    }
   }
-  if constexpr (Q == 3) {
+  template <int Start, int Width>
+  __device__ __forceinline__ void absorb(const float (&v)[Width]) {
+    [&]<size_t... I>(cute::index_sequence<I...>) {
+      (pair<Start + 2 * I>(v[2 * I], v[2 * I + 1]), ...);
+    }(cute::make_index_sequence<Width / 2>{});
+  }
+  template <int Start>
+  __device__ __forceinline__ void full(uint32_t base) {
+    float v[16];
+    load_tmem<16>(base + Start, v);
+    cutlass::arch::fence_view_async_tmem_load();
+    absorb<Start>(v);
+  }
+  __device__ __forceinline__ uint32_t run(uint32_t base, int buf) {
+    constexpr int tail_at = kTileColumns - 24;
+    static_assert(tail_at % 16 == 0);
+    [&]<size_t... I>(cute::index_sequence<I...>) {
+      (full<16 * I>(base), ...);
+    }(cute::make_index_sequence<tail_at / 16>{});
+    float tail[24];
+    load_tmem<16>(base + tail_at, tail);
+    load_tmem<8>(base + tail_at + 16, tail + 16);
+    cutlass::arch::fence_view_async_tmem_load();
     deep_gemm::ptx::tcgen05_before_thread_sync();
     s.empty_umma[buf].arrive();
+    absorb<tail_at>(tail);
+    return mask;
   }
-  float2 s0 = make_float2(0, 0), s1 = make_float2(0, 0);
-#pragma unroll
-  for (int h = 0; h < kHighPaid; h += 4) {
-    float2 w0 = current_weights[h / 2];
-    s0 = __ffma2_rn(
-        __fadd2_rn(make_float2(acc[h + 2], acc[h + 3]),
-                   make_float2(fabsf(acc[h + 2]), fabsf(acc[h + 3]))),
-        w0, s0);
-    float2 w1 = current_weights[h / 2 + 1];
-    s1 = __ffma2_rn(
-        __fadd2_rn(make_float2(acc[h + 4], acc[h + 5]),
-                   make_float2(fabsf(acc[h + 4]), fabsf(acc[h + 5]))),
-        w1, s1);
-  }
-  float2 pair = __fadd2_rn(s0, s1);
-  float paid = __fmul_rn(__fadd_rn(pair.x, pair.y), 0.5f);
-  uint32_t ex = dd[Q / 2] >> ((Q % 2) * 16);
-  float lo_scale0 = __uint_as_float((ex & 255u) << 23),
-        lo_scale1 = __uint_as_float(((ex >> 8) & 255u) << 23);
-  float lo0 = __fmul_rn(acc[0], lo_scale0);
-  float neg = __fadd_rn(0.0f, __fmaf_rn(acc[1], lo_scale1, lo0));
-  float signed_score = __fadd_rn(paid, -fmaxf(neg, 0.0f));
-  float guard_term = __fmul_rn(rho, guard[Q]);
-  float u = __fadd_rn(
-      __fmul_rn(scale, __fadd_rn(__fadd_rn(signed_score, raw), guard_term)),
-      out);
-  int visible_end =
-      end_base + int((end_delta[Q / 2] >> ((Q % 2) * 16)) & 65535u);
-  bool visible = key < nk && key >= visible_start && key < visible_end;
-  // RU-BF16 monotonicity uses this finite keyscale domain. Domain failure
-  // keeps the visible pair; all TMEM/slot lifecycle remains unconditional.
-  bool scale_admitted = isfinite(scale) && scale > 0.f && scale <= 0x1p64f;
-  return !scale_admitted
-             ? (visible ? (1u << Q) : 0u)
-             : trusted_keep_mask(u, tau[Q], uint32_t(visible), 1u << Q);
-}
+};
 __global__ __launch_bounds__(384, 2) void packed_kernel(
     const __grid_constant__ Args a,
     const __grid_constant__ cute::TmaDescriptor mq,
@@ -227,14 +237,12 @@ __global__ __launch_bounds__(384, 2) void packed_kernel(
     const __grid_constant__ BitmapArgs page, const uint32_t* records,
     const int32_t* live_nk) {
   int t = threadIdx.x, g = blockIdx.x, warp = t / 32, lane = t & 31;
-  int logical_nk = a.nk, active_word_count = page.word_count;
-  logical_nk = __ldg(live_nk);
+  const int logical_nk = __ldg(live_nk);
   if (logical_nk < a.seed || logical_nk > a.nk) {
     if (blockIdx.x == 0 && blockIdx.y == 0)
       for (int r = t; r < a.nq; r += blockDim.x) atomicOr(a.error + r, 1);
     return;
   }
-  active_word_count = (logical_nk - a.seed + 31) / 32;
 
   if (a.budget[g] != kHighPaid) return;
   if (records[uint64_t(g) * kRecordWords + kWeightWords + 16] != 1u) {
@@ -263,21 +271,31 @@ __global__ __launch_bounds__(384, 2) void packed_kernel(
         cutlass::float_e4m3_t, cutlass::float_e4m3_t, float, 128, kTileColumns,
         cute::UMMA::Major::K, cute::UMMA::Major::K>();
     auto runtime = cute::UMMA::make_runtime_instr_desc(instruction);
+    const bool leader = cute::elect_one_sync();
     s.full_q.wait(0);
     for (int block = 0; block < blocks; ++block) {
       int stage = block % 2, phase = (block / 2) & 1, up = block & 1;
       s.full_kv[stage].wait(phase);
       s.empty_umma[wg].wait(up ^ 1);
       deep_gemm::ptx::tcgen05_after_thread_sync();
-      issue_screen_mma(s.raw_k[stage], s.fine, wg * 128,
+      if (leader) {
+        issue_four_d32(s.raw_k[stage], s.fine, wg * 128,
                        s.tmem + wg * kTileColumns, runtime);
-      cutlass::arch::umma_arrive(reinterpret_cast<uint64_t*>(&s.full_umma[wg]));
+        deep_gemm::ptx::umma_arrive_no_elect(s.full_umma[wg]);
+      }
+      __syncwarp();
     }
   } else if (warp == 11) {
     s.full_q.wait(0);
     for (int i = lane; i < kWeightWords; i += 32) {
       uint32_t bits = deep_gemm::ptx::ld_shared(s.record + i);
       s.decoded_weights[i] = make_uint2(bits << 16, bits & 0xffff0000u);
+    }
+    if (lane < 4) {
+      const float tau = __uint_as_float(s.record[kWeightWords + 8 + lane]);
+      const float out = __uint_as_float(s.record[kWeightWords + 3]);
+      s.record[kWeightWords + 17 + lane] =
+          __float_as_uint(addition_boundary(tau, out));
     }
     __syncwarp();
     if (cute::elect_one_sync()) s.full_coeff.arrive();
@@ -305,16 +323,23 @@ __global__ __launch_bounds__(384, 2) void packed_kernel(
 #pragma unroll
     for (int i = 0; i < 4; ++i) {
       tau[i] = __uint_as_float(
-          deep_gemm::ptx::ld_shared(s.record + kWeightWords + 8 + i));
+          deep_gemm::ptx::ld_shared(s.record + kWeightWords + 17 + i));
       guard[i] = __uint_as_float(
           deep_gemm::ptx::ld_shared(s.record + kWeightWords + 12 + i));
     }
-    float raw = __uint_as_float(
-              deep_gemm::ptx::ld_shared(s.record + kWeightWords + 2)),
-          out = __uint_as_float(
-              deep_gemm::ptx::ld_shared(s.record + kWeightWords + 3));
+    float raw =
+        __uint_as_float(deep_gemm::ptx::ld_shared(s.record + kWeightWords + 2));
     int start = int(deep_gemm::ptx::ld_shared(s.record + kWeightWords + 4)),
         end_base = int(deep_gemm::ptx::ld_shared(s.record + kWeightWords + 5));
+    uint32_t visible_span[4];
+#pragma unroll
+    for (int q = 0; q < 4; ++q) {
+      // The packed record validates the common start and all four end offsets.
+      const int end =
+          min(math_nk,
+              end_base + int((end_delta[q / 2] >> ((q % 2) * 16)) & 65535u));
+      visible_span[q] = end > start ? uint32_t(end) - uint32_t(start) : 0u;
+    }
     for (int block = 0; block < blocks; ++block) {
       int stage = block % 2, phase = (block / 2) & 1, up = block & 1;
       s.full_kv[stage].wait(phase);
@@ -327,22 +352,10 @@ __global__ __launch_bounds__(384, 2) void packed_kernel(
           static_cast<__nv_fp8_storage_t>(code), __NV_E4M3);
       float rho = __half2float(static_cast<__half>(half));
       int key = a.seed + (first + block) * 256 + t;
-      uint32_t address = math_tmem_base, m = 0;
-      m |= consume_packed_query<0>(address, wg, s, dd, end_delta, tau, guard,
-                                   raw, out, start, end_base, scale, rho, key,
-                                   math_nk);
-      asm volatile("" : "+r"(m)::"memory");
-      m |= consume_packed_query<1>(address, wg, s, dd, end_delta, tau, guard,
-                                   raw, out, start, end_base, scale, rho, key,
-                                   math_nk);
-      asm volatile("" : "+r"(m)::"memory");
-      m |= consume_packed_query<2>(address, wg, s, dd, end_delta, tau, guard,
-                                   raw, out, start, end_base, scale, rho, key,
-                                   math_nk);
-      asm volatile("" : "+r"(m)::"memory");
-      m |= consume_packed_query<3>(address, wg, s, dd, end_delta, tau, guard,
-                                   raw, out, start, end_base, scale, rho, key,
-                                   math_nk);
+      const uint32_t key_delta = uint32_t(key) - uint32_t(start);
+      QuadFold fold{s,   dd,    visible_span, tau,      guard,
+                    raw, scale, rho,          key_delta};
+      const uint32_t m = fold.run(math_tmem_base, wg);
       int word = (first + block) * 8 + warp;
       unsigned value = 0;
 #pragma unroll

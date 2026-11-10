@@ -7,6 +7,8 @@ a position the chunk kernel will actually write, and the conv window saved
 there must be the one a resumed prefill would have left.
 """
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 
@@ -54,6 +56,7 @@ class _StubSpeculativeConfig:
     method = "dspark"
     parallel_drafting = False
     enable_adaptive_verification = False
+    speculator_config = SimpleNamespace(speculator_class="DSparkSpeculator")
 
     def __init__(self, num_speculative_tokens: int) -> None:
         self.num_speculative_tokens = num_speculative_tokens
@@ -508,12 +511,30 @@ def test_opt_in_publishes_chunk_walk_alignment(monkeypatch) -> None:
     [
         ("use_prefill_checkpoint", False),
         ("kda_prefill_backend", "triton"),
-        ("kda_prefill_backend", "gluon"),
         ("use_safe_gate", False),
     ],
 )
 def test_paths_that_cannot_export_stay_opted_out(monkeypatch, attr, value) -> None:
     spec = _spec_for(monkeypatch, **{attr: value})
+
+    assert spec.num_prefill_checkpoint_blocks == 0
+    assert spec.prefill_checkpoint_alignment is None
+
+
+def test_gluon_backend_keeps_the_checkpoint(monkeypatch) -> None:
+    # AITER's chunk_kda cannot export the snapshot, but the steps that carry
+    # one run on the fused kernel, which this module already requires.
+    spec = _spec_for(monkeypatch, kda_prefill_backend="gluon")
+
+    assert spec.num_prefill_checkpoint_blocks == 1
+    assert spec.prefill_checkpoint_alignment == KDA_CHECKPOINT_ALIGNMENT
+
+
+def test_gluon_backend_opts_out_without_the_fused_kernel(monkeypatch) -> None:
+    import vllm.models.kimi_k3.amd.kda as kda
+
+    monkeypatch.setattr(kda, "is_fused_kda_chunk_supported", lambda: False)
+    spec = _spec_for(monkeypatch, kda_prefill_backend="gluon")
 
     assert spec.num_prefill_checkpoint_blocks == 0
     assert spec.prefill_checkpoint_alignment is None

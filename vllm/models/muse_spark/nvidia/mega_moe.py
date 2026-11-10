@@ -38,6 +38,9 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+_TRTLLM_TOKEN_THRESHOLD_TEP4 = 128
+_TRTLLM_TOKEN_THRESHOLD_TEP8 = 256
+
 
 @functools.cache
 def _get_deep_gemm():
@@ -60,26 +63,19 @@ def _get_deep_gemm():
 
 def get_trtllm_token_threshold(vllm_config: VllmConfig) -> int:
     parallel = vllm_config.parallel_config
-    default_threshold = (
-        16
-        if vllm_config.kernel_config.moe_backend == "deep_gemm_mega_moe"
+    if (
+        vllm_config.kernel_config.moe_backend == "deep_gemm_mega_moe"
         and isinstance(vllm_config.quant_config, ModelOptNvFp4Config)
-        and parallel.enable_expert_parallel
         and parallel.tensor_parallel_size in (4, 8)
         and parallel.data_parallel_size == 1
         and parallel.pipeline_parallel_size == 1
-        else 0
-    )
-    additional_config = vllm_config.additional_config
-    assert isinstance(additional_config, dict)
-    threshold = additional_config.get(
-        "muse_spark_trtllm_token_threshold", default_threshold
-    )
-    if type(threshold) is not int or not 0 <= threshold <= 256:
-        raise ValueError(
-            "Muse Spark TRT-LLM token threshold must be an integer in [0, 256]"
+    ):
+        return (
+            _TRTLLM_TOKEN_THRESHOLD_TEP4
+            if parallel.tensor_parallel_size == 4
+            else _TRTLLM_TOKEN_THRESHOLD_TEP8
         )
-    return threshold
+    return 0
 
 
 def _shard_padding_mask(is_padding: torch.Tensor, num_tokens: int) -> torch.Tensor:

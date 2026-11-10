@@ -79,6 +79,7 @@ from vllm.entrypoints.openai.responses.utils import (
     custom_tool_names,
     decode_custom_tool_input,
     decode_custom_tool_input_prefix,
+    extend_custom_tool_input_prefix,
     resolve_responses_tool_call_name,
 )
 from vllm.outputs import CompletionOutput
@@ -829,6 +830,9 @@ class SimpleStreamingState:
     tool_call_index: int | None = None
     tool_call_is_custom: bool = False
     tool_call_payload: str = ""
+    # End of the custom-tool arguments decoded into tool_call_payload, or -1
+    # once they need a full decode.
+    tool_call_payload_end: int = 0
     current_state: _StateType = field(default_factory=lambda: _StateType.NONE)
 
 
@@ -1062,6 +1066,7 @@ def emit_simple_tool_call_open(
     state.tool_call_index = index
     state.tool_call_is_custom = is_custom
     state.tool_call_payload = ""
+    state.tool_call_payload_end = 0
     state.accumulated_text = ""
     item: ResponseOutputItem
     if is_custom:
@@ -1114,15 +1119,27 @@ def _emit_custom_tool_input_delta(
     ]
 
 
+def _custom_tool_input_prefix(state: SimpleStreamingState) -> str:
+    if state.tool_call_payload_end >= 0:
+        result = extend_custom_tool_input_prefix(
+            state.accumulated_text,
+            state.tool_call_payload,
+            state.tool_call_payload_end,
+        )
+        if result is not None:
+            payload, state.tool_call_payload_end = result
+            return payload
+        state.tool_call_payload_end = -1
+    return decode_custom_tool_input_prefix(state.accumulated_text)
+
+
 def emit_simple_tool_call_delta(
     state: SimpleStreamingState,
     delta: str,
 ) -> list[StreamingResponsesResponse]:
     state.accumulated_text += delta
     if state.tool_call_is_custom:
-        return _emit_custom_tool_input_delta(
-            state, decode_custom_tool_input_prefix(state.accumulated_text)
-        )
+        return _emit_custom_tool_input_delta(state, _custom_tool_input_prefix(state))
     return [
         ResponseFunctionCallArgumentsDeltaEvent(
             type="response.function_call_arguments.delta",

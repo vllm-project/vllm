@@ -609,6 +609,7 @@ def test_beam_dflash2_loads_every_checkpoint_tensor(monkeypatch):
     checkpoint = {name: torch.randn(shape) for name, shape in shapes.items()}
 
     loaded = model.load_weights(iter(checkpoint.items()))
+    model.process_weights_after_loading()  # builds the context K/V weights
 
     assert loaded == {name for name, _ in model.named_parameters()}
     context_kv = [
@@ -765,6 +766,7 @@ def test_context_kv_uses_quantized_projection_fallback(monkeypatch):
     model = SimpleNamespace(
         hidden_norm=SimpleNamespace(weight=nn.Parameter(torch.ones(2))),
         _rms_norm_eps=1e-6,
+        _context_kv_proj=None,  # no MXFP8 context projection
     )
     model._normalize_context_states = MethodType(
         qwen3_dflash.DFlashQwen3Model._normalize_context_states, model

@@ -101,3 +101,73 @@ def test_mtp_sharded_sampling_equivalence(monkeypatch: pytest.MonkeyPatch):
                 f"{name}: {len(divergent)}/{len(ref_outputs)} prompts diverged "
                 f"at {divergent}, beyond near-tie noise"
             )
+
+
+def _dspark_sharding_state(worker) -> tuple[bool, bool]:
+    speculator = worker.model_runner.speculator
+    draft_logits = speculator.draft_logits
+    sharded = draft_logits is not None and draft_logits.row_mapping is not None
+    return sharded, speculator._sharded_sequential_comm is not None
+
+
+def test_dspark_sharded_sampling_equivalence(monkeypatch: pytest.MonkeyPatch):
+    """Batch-sharded sampling, including the sharded draft logits cache and
+    the batch-sharded DSpark sequential sampling loop, must match replicated
+    sampling up to near-tie noise."""
+    tp_size = 2
+    _skip_if_insufficient_gpus_for_tp(tp_size)
+    test_prompts = get_test_prompts(mm_enabled=False, num_prompts=32)
+
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+        m.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+        m.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+
+        def run(disable_sharding: bool):
+            llm = LLM(
+                model="Qwen/Qwen3-4B-FP8",
+                tensor_parallel_size=tp_size,
+                enable_batch_sharded_sampling=not disable_sharding,
+                speculative_config={
+                    "method": "dspark",
+                    "model": "deepseek-ai/dspark_qwen3_4b_block7",
+                    "num_speculative_tokens": 7,
+                    "draft_sample_method": "probabilistic",
+                },
+                max_model_len=2048,
+                max_num_seqs=len(test_prompts),
+                enable_flashinfer_autotune=False,
+            )
+            try:
+                states = llm.llm_engine.collective_rpc(_dspark_sharding_state)
+                for state in states:
+                    # (draft logits cache sharded, sequential loop sharded)
+                    assert state == (not disable_sharding, not disable_sharding)
+                greedy = llm.chat(test_prompts, greedy_sampling())
+                seeded = llm.chat(
+                    test_prompts,
+                    SamplingParams(temperature=1.0, seed=33, max_tokens=32),
+                )
+                return greedy, seeded
+            finally:
+                del llm
+                torch.accelerator.empty_cache()
+                cleanup_dist_env_and_memory()
+                wait_for_memory_to_settle()
+
+        ref_greedy, ref_seeded = run(disable_sharding=True)
+        shard_greedy, shard_seeded = run(disable_sharding=False)
+
+        for name, ref_outputs, shard_outputs in (
+            ("greedy", ref_greedy, shard_greedy),
+            ("seeded", ref_seeded, shard_seeded),
+        ):
+            divergent = [
+                i
+                for i, (ref, out) in enumerate(zip(ref_outputs, shard_outputs))
+                if list(ref.outputs[0].token_ids) != list(out.outputs[0].token_ids)
+            ]
+            assert len(divergent) <= MAX_DIVERGENT_PROMPTS, (
+                f"{name}: {len(divergent)}/{len(ref_outputs)} prompts diverged "
+                f"at {divergent}, beyond near-tie noise"
+            )

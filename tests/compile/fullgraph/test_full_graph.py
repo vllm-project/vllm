@@ -98,17 +98,6 @@ def test_full_graph(
         for model_info in models_list(keywords=["FP8-dynamic"])
     ]
     + [
-        # Test depyf integration works
-        (
-            CompilationConfig(
-                mode=CompilationMode.VLLM_COMPILE,
-                debug_dump_path=Path(tempfile.gettempdir()),
-            ),
-            "facebook/opt-125m",
-            {},
-        ),
-    ]
-    + [
         # graph inductor partition
         (
             CompilationConfig(
@@ -153,6 +142,23 @@ def test_custom_compile_config(
 
     print(f"MODEL={model}")
     run_model(compilation_config, model, **model_kwargs)
+
+
+@create_new_process_for_each_test()
+def test_depyf_integration(disable_vllm_compile_cache):
+    """Compile with depyf's debugging hooks installed.
+
+    ``disable_vllm_compile_cache`` is what makes this a test rather than a
+    formality: depyf only ever sees a compilation that actually runs, so served
+    from a warm cache this exercises none of its hooks.
+    """
+    run_model(
+        CompilationConfig(
+            mode=CompilationMode.VLLM_COMPILE,
+            debug_dump_path=Path(tempfile.gettempdir()),
+        ),
+        "facebook/opt-125m",
+    )
 
 
 def run_model(

@@ -67,6 +67,7 @@ from vllm.model_executor.layers.quantization.online.lm_head import (
     share_source_lm_heads,
 )
 from vllm.model_executor.model_loader import get_model_loader
+from vllm.model_executor.model_loader.reload.direct import direct_reload_enabled
 from vllm.model_executor.model_loader.weight_checksum import (
     compute_tensor_digests,
     zero_weights,
@@ -123,7 +124,9 @@ def _num_workspace_lanes(vllm_config: VllmConfig, use_v2_model_runner: bool) -> 
     spec_config = vllm_config.speculative_config
     return (
         2
-        if use_v2_model_runner and spec_config is not None and spec_config.use_dspark()
+        if use_v2_model_runner
+        and spec_config is not None
+        and spec_config.uses_separate_workspace_lane
         else 1
     )
 
@@ -204,7 +207,11 @@ class Worker(WorkerBase):
         is_driver_worker: bool = False,
     ):
         self.use_v2_model_runner = vllm_config.use_v2_model_runner
-        if self.use_v2_model_runner and not HAS_TRITON:
+        if (
+            self.use_v2_model_runner
+            and not HAS_TRITON
+            and not current_platform.uses_standalone_cpu_model_runner()
+        ):
             raise ValueError("Model Runner V2 requires Triton.")
 
         super().__init__(
@@ -1625,13 +1632,17 @@ class Worker(WorkerBase):
                     local_update_info = update_info
                 self.weight_transfer_engine.update_weights(local_update_info)
             except BaseException:
-                self._weight_update_active = False
-                self.weight_transfer_engine.reset_weight_update_target()
-                if self._weight_update_is_draft and (
-                    (draft_model := self.get_draft_model()) is not None
-                ):
-                    restore_quantized_lm_heads(draft_model, refresh=False)
+                self._end_weight_update(refresh=False)
                 raise
+
+    def _end_weight_update(self, refresh: bool) -> None:
+        assert self.weight_transfer_engine is not None
+        self._weight_update_active = False
+        self.weight_transfer_engine.reset_weight_update_target()
+        if self._weight_update_is_draft and (
+            (draft_model := self.get_draft_model()) is not None
+        ):
+            restore_quantized_lm_heads(draft_model, refresh=refresh)
 
     def finish_weight_update(self) -> None:
         """Finish the current weight update session."""
@@ -1644,13 +1655,15 @@ class Worker(WorkerBase):
             )
 
         with set_current_vllm_config(self.vllm_config):
-            self.weight_transfer_engine.finish_weight_update()
-            self.weight_transfer_engine.reset_weight_update_target()
-            self._weight_update_active = False
-            if self._weight_update_is_draft and (
-                (draft_model := self.get_draft_model()) is not None
-            ):
-                restore_quantized_lm_heads(draft_model)
+            try:
+                self.weight_transfer_engine.finish_weight_update()
+            except BaseException:
+                if direct_reload_enabled():
+                    # a failed direct finish cannot be retried: end the
+                    # session so that a new full update can start
+                    self._end_weight_update(refresh=False)
+                raise
+            self._end_weight_update(refresh=True)
 
         # Weight transfer bypasses GPUModelRunner.reload_weights().
         if not self._weight_update_is_draft:

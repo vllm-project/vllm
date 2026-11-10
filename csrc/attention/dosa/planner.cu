@@ -72,6 +72,13 @@ __device__ float da_scale(double m, int* valid) {
   return __uint_as_float(unsigned(se + 127) << 23);
 }
 
+// da_scale always returns a normal power of two: its reciprocal has exponent
+// 254 - E.
+__device__ double da_normalize(double value, float scale) {
+  return __dmul_rn(
+      value, double(__uint_as_float(0x7f000000u - __float_as_uint(scale))));
+}
+
 #endif
 
 // Outward interval for a_h = w_h (q_h - beta_h q_paid), where w_h > 0.
@@ -121,8 +128,8 @@ __global__ void quotient_plan(const uint8_t* q, const float* weights,
   int b = blockIdx.x, t = threadIdx.x, lane = t & 31, warp = t / 32;
   if (budget_tags && budget_tags[b / 8] != Paid) return;
   constexpr int Width = Paid + 2, MetaStride = Paid <= 16 ? 64 : 96;
-  __shared__ HeadMask negative_bits, paid_bits, omitted_bits, selected_mask,
-      bestid[8];
+  __shared__ HeadMask positive_bits, negative_bits, paid_bits, omitted_bits,
+      selected_mask, bestid[8];
   __shared__ int valid, paid[Paid], positive_count, fill_count, no_cone;
   __shared__ float strength[ScoreHeads], paid_weight[Paid],
       cone_beta[ScoreHeads];
@@ -155,26 +162,27 @@ __global__ void quotient_plan(const uint8_t* q, const float* weights,
   if (t < MetaStride) meta[t] = 0;
   if (t < Width) scales[t] = 1;
   __syncthreads();
-  if (t == 0) {
-    valid = capture[128] == 0;
-    negative_bits = 0;
-    paid_bits = 0;
-    int np = 0, nn = 0;
-    for (int h = 0; h < ScoreHeads; ++h) {
-      if (!isfinite(w[h])) valid = 0;
-      if (w[h] > 0) {
-        paid_bits |= HeadMask(1) << h;
-        ++np;
-      } else if (w[h] < 0) {
-        negative_bits |= HeadMask(1) << h;
-        ++nn;
-      } else
-        valid = 0;
+  if (warp == 0) {
+    constexpr unsigned Full = 0xffffffffu;
+    HeadMask positive = 0, negative = 0;
+    bool finite = true;
+#pragma unroll
+    for (int j = 0; j < ScoreHeads / 32; ++j) {
+      const float value = w[32 * j + lane];
+      positive |= HeadMask(__ballot_sync(Full, value > 0)) << (32 * j);
+      negative |= HeadMask(__ballot_sync(Full, value < 0)) << (32 * j);
+      finite &= __all_sync(Full, isfinite(value));
     }
-    positive_count = np;
-    fill_count = np <= Paid ? Paid - np : Paid;
-    if (np > Paid) paid_bits = 0;
-    if (np < 1 || nn != ScoreHeads - np) valid = 0;
+    if (lane == 0) {
+      const int np = head_count(positive);
+      valid = capture[128] == 0 && finite && np > 0 &&
+              head_count(negative) == ScoreHeads - np;
+      negative_bits = negative;
+      positive_bits = positive;
+      positive_count = np;
+      paid_bits = np <= Paid ? positive : HeadMask(0);
+      fill_count = np <= Paid ? Paid - np : Paid;
+    }
   }
   __syncthreads();
   for (int i = t; i < ScoreHeads * 128; i += 256) {
@@ -210,62 +218,82 @@ __global__ void quotient_plan(const uint8_t* q, const float* weights,
     }
   }
   __syncthreads();
-  if (t == 0) {
+  if (warp == 0 && fill_count) {
+    constexpr unsigned Full = 0xffffffffu;
+    // Nonnegative priorities and strengths have unsigned float-bit order.
+    // Rank zero means ineligible; ascending head ID is the final tie break.
+    uint64_t rank[ScoreHeads / 32];
+#pragma unroll
+    for (int j = 0; j < ScoreHeads / 32; ++j) {
+      const int h = lane + j * 32;
+      const bool positive = positive_count > Paid;
+      const int votes = minority_votes[h];
+      const float priority =
+          positive ? strength[h]
+                   : __fmul_rn(strength[h], float(min(votes, 128 - votes)));
+      const bool eligible =
+          (positive ? w[h] > 0 : w[h] < 0) && !((paid_bits >> h) & 1u);
+      rank[j] = eligible && isfinite(priority)
+                    ? (uint64_t((__float_as_uint(priority) & 0x7fffffffu) + 1)
+                       << 32) |
+                          (__float_as_uint(strength[h]) & 0x7fffffffu)
+                    : 0;
+    }
+    HeadMask selected = 0;
     for (int f = 0; f < fill_count; ++f) {
-      int pick = -1;
-      float best = -1, best_strength = -1;
-      for (int h = 0; h < ScoreHeads; ++h)
-        if ((positive_count > Paid ? w[h] > 0 : w[h] < 0) &&
-            !((paid_bits >> h) & 1u)) {
-          float priority = strength[h];
-          {
-            if (positive_count <= Paid) {
-              int votes = minority_votes[h];
-              priority = __fmul_rn(strength[h], float(min(votes, 128 - votes)));
-            }
-          }
-          // Ascending head ID breaks equal priority/strength ties.
-          bool take = isfinite(priority) && (priority > best);
-          {
-            if (positive_count <= Paid)
-              take = isfinite(priority) &&
-                     (priority > best ||
-                      (priority == best && strength[h] > best_strength));
-          }
-          if (take) {
-            best = priority;
-            best_strength = strength[h];
-            pick = h;
-          }
+      uint64_t key = rank[0];
+      int head = lane;
+      if constexpr (ScoreHeads == 64) {
+        if (rank[1] > key) {
+          key = rank[1];
+          head += 32;
         }
-      if (pick < 0) {
-        valid = 0;
+      }
+      const unsigned hi = uint32_t(key >> 32), lo = uint32_t(key);
+      const unsigned best = __reduce_max_sync(Full, hi);
+      if (!best) {
+        if (lane == 0) valid = 0;
         break;
       }
-      paid_bits |= HeadMask(1) << pick;
+      const unsigned tie = __reduce_max_sync(Full, hi == best ? lo : 0u);
+      const int pick =
+          __reduce_min_sync(Full, hi == best && lo == tie ? head : ScoreHeads);
+      selected |= HeadMask(1) << pick;
+#pragma unroll
+      for (int j = 0; j < ScoreHeads / 32; ++j)
+        if (pick == lane + 32 * j) rank[j] = 0;
     }
-    negative_bits &= ~paid_bits;
-    int count = 0;
-    for (int h = 0; h < ScoreHeads; ++h)
-      if ((paid_bits >> h) & 1u) {
-        if (count < Paid) paid[count] = h;
-        ++count;
+    if (lane == 0) paid_bits |= selected;
+  }
+  if (warp == 0) {
+    __syncwarp();
+    const HeadMask chosen = paid_bits;
+    const HeadMask omitted = positive_bits & ~chosen;
+    const int count = head_count(chosen);
+#pragma unroll
+    for (int j = 0; j < ScoreHeads / 32; ++j) {
+      const int h = 32 * j + lane;
+      const HeadMask bit = HeadMask(1) << h;
+      if (chosen & bit) {
+        const int at = head_count(chosen & (bit - 1));
+        if (at < Paid) paid[at] = h;
       }
-    if (count != Paid ||
-        head_count(negative_bits) != (positive_count > Paid
-                                          ? ScoreHeads - positive_count
-                                          : ScoreHeads - Paid))
-      valid = 0;
-    omitted_bits = 0;
-    omitted_count = 0;
-    for (int h = 0; h < ScoreHeads; ++h)
-      if (w[h] > 0 && !((paid_bits >> h) & 1u)) {
-        omitted_bits |= HeadMask(1) << h;
-        if constexpr (ScoreHeads == 64 && Paid == 28)
-          omitted_ids[omitted_count++] = h;
-      }
-    for (int j = count; j < Paid; ++j) paid[j] = 0;
-    no_cone = (valid && omitted_bits == 0);
+      if constexpr (ScoreHeads == 64 && Paid == 28)
+        if (omitted & bit) omitted_ids[head_count(omitted & (bit - 1))] = h;
+    }
+    if (lane >= count && lane < Paid) paid[lane] = 0;
+    if (lane == 0) {
+      negative_bits &= ~chosen;
+      if (count != Paid ||
+          head_count(negative_bits) != (positive_count > Paid
+                                            ? ScoreHeads - positive_count
+                                            : ScoreHeads - Paid))
+        valid = 0;
+      omitted_bits = omitted;
+      if constexpr (ScoreHeads == 64 && Paid == 28)
+        omitted_count = head_count(omitted);
+      no_cone = valid && omitted == 0;
+    }
   }
   __syncthreads();
   // Fixed CTA-uniform fast branch. Do not re-read mutable valid later:
@@ -446,7 +474,7 @@ __global__ void quotient_plan(const uint8_t* q, const float* weights,
     }
     __syncthreads();
     if (t < 128) {
-      uint8_t code = encode_e4(__ddiv_rn(ideal[0][t], double(hs[0])));
+      uint8_t code = encode_e4(da_normalize(ideal[0][t], hs[0]));
       fine[t] = code;
       eff[0][t] = __dmul_rn(double(decode_e4(code)), double(hs[0]));
       double m = wmax(fabs(__dadd_rn(ideal[0][t], -eff[0][t])));
@@ -461,8 +489,8 @@ __global__ void quotient_plan(const uint8_t* q, const float* weights,
     }
     __syncthreads();
     if (t < 128) {
-      uint8_t code = encode_e4(
-          __ddiv_rn(__dadd_rn(ideal[0][t], -eff[0][t]), double(hs[1])));
+      uint8_t code =
+          encode_e4(da_normalize(__dadd_rn(ideal[0][t], -eff[0][t]), hs[1]));
       fine[128 + t] = code;
       eff[1][t] = __dmul_rn(double(decode_e4(code)), double(hs[1]));
       double pm = 0., tm = 0.;

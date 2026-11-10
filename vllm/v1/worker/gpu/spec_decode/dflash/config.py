@@ -1,0 +1,43 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from typing import TYPE_CHECKING
+
+from vllm.v1.worker.gpu.spec_decode.eagle.config import wrap_eagle_hf_config
+from vllm.v1.worker.gpu.spec_decode.speculator_config import (
+    DraftModelSpeculatorConfig,
+)
+
+if TYPE_CHECKING:
+    from vllm.config import SpeculativeConfig
+
+
+class DFlashSpeculatorConfig(DraftModelSpeculatorConfig):
+    base_method = "dflash"
+    speculator_class = (
+        "vllm.v1.worker.gpu.spec_decode.dflash.speculator.DFlashSpeculator"
+    )
+    uses_target_hidden_states = True
+    supports_watermarking = True
+
+    @classmethod
+    def matches(cls, spec: "SpeculativeConfig") -> bool:
+        return "dflash" in spec.draft_model_config.model.lower()
+
+    @classmethod
+    def adapt_draft_model_config(cls, spec: "SpeculativeConfig") -> None:
+        assert cls.base_method is not None
+        wrap_eagle_hf_config(spec, cls.base_method)
+        spec.parallel_drafting = True
+
+    @property
+    def uses_aux_hidden_states(self) -> bool:
+        return True
+
+    @property
+    def num_lookahead_tokens(self) -> int:
+        # Fill-in drafting uses a bonus query plus one query per draft token.
+        return self.num_speculative_tokens + 1
+
+    def max_num_draft_seqs(self, max_num_batched_tokens: int) -> int:
+        # The draft pass has num_lookahead_tokens queries for every request.
+        return max_num_batched_tokens // self.num_lookahead_tokens

@@ -264,8 +264,7 @@ def _use_sequence_parallel(vllm_config: VllmConfig) -> bool:
         vllm_config.kernel_config.moe_backend in MEGA_MOE_BACKENDS
     )
     return (
-        parallel_config.pipeline_parallel_size == 1
-        and parallel_config.enable_expert_parallel
+        parallel_config.enable_expert_parallel
         and parallel_config.tensor_parallel_size > 1
         and (moe_needs_token_sharded_input or parallel_config.data_parallel_size > 1)
     )
@@ -707,14 +706,13 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         self.quant_config = quant_config
         self.parallel_config = vllm_config.parallel_config
         if self.parallel_config.prefill_context_parallel_size > 1 and (
-            self.parallel_config.pipeline_parallel_size != 1
-            or self.parallel_config.data_parallel_size != 1
-            or self.parallel_config.decode_context_parallel_size != 1
+            self.parallel_config.decode_context_parallel_size != 1
             or self.parallel_config.use_ubatching
             or (
                 vllm_config.speculative_config is not None
                 and (
-                    not vllm_config.speculative_config.use_dspark()
+                    self.parallel_config.pipeline_parallel_size > 1
+                    or not vllm_config.speculative_config.use_dspark()
                     or vllm_config.speculative_config.enable_adaptive_verification
                 )
             )
@@ -726,9 +724,9 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             or vllm_config.kernel_config.moe_backend in MEGA_MOE_BACKENDS
         ):
             raise NotImplementedError(
-                "DeepSeek-V4.1 PCP currently requires PP=DP=DCP=1, with no "
+                "DeepSeek-V4.1 PCP currently requires DCP=1, with no "
                 "microbatching, KV transfer, or MegaMoE. "
-                "Speculative decoding requires fixed-length DSpark. "
+                "Speculative decoding requires fixed-length DSpark with PP=1. "
                 "Prefix caching requires SWA bounded replay."
             )
         self.use_native_mega_moe = (
@@ -1091,6 +1089,8 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         if not get_pp_group().is_first_rank:
             assert intermediate_tensors is not None
             pre_mix = intermediate_tensors["pre_mix"]
+            if self.use_sequence_parallel:
+                pre_mix = sp_shard(pre_mix)
         aux_hidden_by_layer: dict[int, torch.Tensor] = {}
         hidden_states, residual, post_mix, res_mix, pre_mix = self._run_layers(
             range(self.start_layer, self.decoder_replay_start),
@@ -1135,6 +1135,10 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         ] + late_aux
 
         if not get_pp_group().is_last_rank:
+            # PP transport expects tensors replicated across TP ranks.
+            if self.use_sequence_parallel:
+                hidden_states = sp_all_gather(hidden_states)[:full_num_tokens]
+                pre_mix = sp_all_gather(pre_mix)[:full_num_tokens]
             return IntermediateTensors(
                 {"hidden_states": hidden_states, "pre_mix": pre_mix}
             )
@@ -1763,8 +1767,10 @@ class DeepseekV41LLMForCausalLM(
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
-        loaded_params = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
-        self.process_weights_after_loading()
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+
+    def process_weights_after_loading(self) -> None:
+        self.model.finalize_mhc_broadcast_weights()
         config = self.model.vllm_config
         if config.engram_config and config.engram_config.use_thp:
             # Loading weights refills the file cache; release it before MADV_COLLAPSE.
@@ -1779,10 +1785,6 @@ class DeepseekV41LLMForCausalLM(
             ):
                 if layer.engram is not None:
                     layer.engram.embed_tokens.collapse_huge_pages()
-        return loaded_params
-
-    def process_weights_after_loading(self) -> None:
-        self.model.finalize_mhc_broadcast_weights()
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         return self.model.get_expert_mapping()

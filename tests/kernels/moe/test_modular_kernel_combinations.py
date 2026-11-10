@@ -1430,12 +1430,12 @@ def test_aiter_moe_padding_matrix_mxfp4(mode: str, quant_config: TestMoEQuantCon
             _PADDING_N_UNPADDED_MXFP4 if pad_intermediate else None
         ),
     )
-    assert config.is_valid()[0]
     if not config.fe_supports_quant_scheme():
         pytest.skip(
             f"AiterMxfp4Experts does not support quant scheme {quant_config} "
             "on this GPU (gfx950-only, not gfx1250)."
         )
+    assert config.is_valid()[0]
 
     weights = _make_padding_matrix_weights(config)
     vllm_config, env_dict = config.make_env_data()
@@ -1682,12 +1682,12 @@ def test_aiter_moe_token_padding_garbage_rows_mxfp4(
         fused_experts_type=_padding_matrix_fe_cls(quant_config),
         world_size=1,
     )
-    assert config.is_valid()[0]
     if not config.fe_supports_quant_scheme():
         pytest.skip(
             f"AiterMxfp4Experts does not support quant scheme {quant_config} "
             "on this GPU (gfx950-only, not gfx1250)."
         )
+    assert config.is_valid()[0]
 
     weights = WeightTensors.make(config)
     vllm_config, env_dict = config.make_env_data()

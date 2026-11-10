@@ -220,6 +220,45 @@ def test_fused_post_conv_l0():
     assert g.shape == (0, HV)
 
 
+def test_fused_post_conv_int64_token_offset():
+    """Rows past 2^31 // qkv_dim need int64 offsets."""
+    device = "cuda"
+    H, HV, K, V = 16, 32, 128, 128
+    qkv_dim = 2 * H * K + HV * V
+    L = 2**31 // qkv_dim + 16
+    # conv_output plus the q, k and v outputs, all bf16.
+    need = L * (qkv_dim + 2 * H * K + HV * V) * 2
+    free, _ = current_platform.mem_get_info()
+    if free < need + (1 << 30):
+        pytest.skip("not enough free device memory")
+
+    torch.manual_seed(0)
+    conv_output = torch.randn(L, qkv_dim, dtype=torch.bfloat16, device=device)
+    a = torch.randn(L, HV, dtype=torch.bfloat16, device=device)
+    b = torch.randn(L, HV, dtype=torch.bfloat16, device=device)
+    A_log = torch.randn(HV, dtype=torch.float32, device=device) - 2.0
+    dt_bias = torch.randn(HV, dtype=torch.float32, device=device) * 0.1
+
+    fused = fused_post_conv_prep(
+        conv_output,
+        a,
+        b,
+        A_log,
+        dt_bias,
+        num_k_heads=H,
+        head_k_dim=K,
+        head_v_dim=V,
+    )
+
+    # Reference on the first row and the last rows, past the int32 boundary.
+    rows = torch.tensor([0, *range(L - 16, L)], device=device)
+    ref = reference_post_conv(
+        conv_output[rows], a[rows], b[rows], A_log, dt_bias, H, K, V
+    )
+    for out, expected in zip(fused, ref):
+        torch.testing.assert_close(out[rows], expected, atol=1e-3, rtol=1e-3)
+
+
 @pytest.mark.parametrize(
     "head_ratio,tp_size,query_lengths,state_dtype,norm_dtype",
     [

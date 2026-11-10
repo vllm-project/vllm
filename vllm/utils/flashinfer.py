@@ -1208,7 +1208,8 @@ def flashinfer_scaled_fp8_mm(
         scale_a,
         scale_b,
         out_dtype,
-        "auto",
+        # Autotuned "auto" can switch backends between M buckets.
+        "cutlass" if envs.VLLM_BATCH_INVARIANT else "auto",
     ).view(a.shape[0], b.shape[1])
 
     if bias is not None:

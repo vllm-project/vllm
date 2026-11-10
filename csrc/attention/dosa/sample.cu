@@ -1,43 +1,46 @@
 #include "common.cuh"
+#include "../../fused_mqa_topk/deep_gemm_compat.cuh"
 
 namespace DOSA_NAMESPACE {
 namespace prefill_stream_ballots {
 using namespace certicascade_streaming_exact;
-// sgl-deep-gemm v0.2.2 non-MX layout; retain unused SFQ padding/alignment.
-struct Storage {
-  using Barrier = cutlass::arch::ClusterTransactionBarrier;
-  static constexpr int kSwizzleAlignment = 1024;
-  alignas(1024) __nv_fp8_e4m3 smem_q[2][4 * kHeads * 128];
-  alignas(1024) __nv_fp8_e4m3 smem_kv[2][256 * 128];
-  alignas(128) float smem_sf_q[2][1];
-  alignas(128) float smem_sf_kv[2][256];
-  alignas(128) float smem_weights[2][4 * kHeads];
-  Barrier full_q_barriers[2], empty_q_barriers[2];
-  Barrier full_kv_barriers[2], empty_kv_barriers[2];
-  Barrier full_tmem_barriers[2], empty_tmem_barriers[2];
-  uint32_t tmem_ptr_in_smem;
-};
+using Storage =
+    fused_mqa_topk::dg::MQALogitsSharedStorage<kHeads, 128, 4, 256, 2, 2, 2,
+                                               __nv_fp8_e4m3, float>;
 using dosa_geometry::HeadMask;
 using dosa_geometry::UnsignedHeadMask;
+struct PackedWeightSlots {
+  __nv_bfloat162 pairs[2][4 * kHeads / 2];
+  Storage::Barrier ready[2];
+  int unit_safe[2];
+};
+// Keep the qualified reservation and use part of its tail for the score path.
+constexpr size_t kSharedBytes =
+    sizeof(Storage) + 8 * 4 * kHeads * (sizeof(float) + sizeof(HeadMask));
+static_assert(sizeof(PackedWeightSlots) <= kSharedBytes - sizeof(Storage));
+
 struct RecoveryOutput {
   const int *state, *rows, *starts, *ends, *logical_nk;
   int sms;
 };
+template <class Score>
 struct SeedOutput {
-  float* scores;
+  Score* scores;
   HeadMask* masks;
   int64_t stride;
   RecoveryOutput recovery;
 };
-template <bool EmitMasks, bool Recovery = false>
+template <bool EmitMasks, bool Recovery = false, class Score = float>
 CUTLASS_GLOBAL void __launch_bounds__(384, 2)
     dense_seed_kernel(int nq, int nk, int splits,
                       const __grid_constant__ cute::TmaDescriptor mq,
                       const __grid_constant__ cute::TmaDescriptor mk,
                       const __grid_constant__ cute::TmaDescriptor ms,
                       const __grid_constant__ cute::TmaDescriptor mw,
-                      SeedOutput out) {
+                      SeedOutput<Score> out) {
   using S = Storage;
+  constexpr bool Seed =
+      !EmitMasks && !Recovery && std::is_same_v<Score, __nv_bfloat16>;
   constexpr int H = kHeads, BQ = 4, N = BQ * H, cols = 2 * N, FW = H,
                 QStages = 2, TStages = 2;
   if constexpr (Recovery) {
@@ -54,6 +57,7 @@ CUTLASS_GLOBAL void __launch_bounds__(384, 2)
                 sizeof(S::smem_weights[0][0]) == 4);
   extern __shared__ __align__(S::kSwizzleAlignment) uint8_t buf[];
   auto& s = *reinterpret_cast<S*>(buf);
+  auto& packed = *reinterpret_cast<PackedWeightSlots*>(buf + sizeof(S));
   int warp = cutlass::canonical_warp_idx_sync(),
       lane = deep_gemm::ptx::get_lane_idx();
   int tid = warp * 32 + lane, works = nq / BQ * splits;
@@ -68,7 +72,9 @@ CUTLASS_GLOBAL void __launch_bounds__(384, 2)
   if (warp == 9 && cute::elect_one_sync()) {
     for (int i = 0; i < QStages; i++) {
       s.full_q_barriers[i].init(1);
-      s.empty_q_barriers[i].init(288);
+      // The math and MMA readers are joined by the score-path packer.
+      s.empty_q_barriers[i].init(288 + (EmitMasks ? 0 : 32));
+      if constexpr (!EmitMasks) packed.ready[i].init(32);
     }
     for (int i = 0; i < TStages; i++) {
       s.full_tmem_barriers[i].init(1);
@@ -163,6 +169,28 @@ CUTLASS_GLOBAL void __launch_bounds__(384, 2)
       s.empty_q_barriers[qs].arrive();
     }
   } else if (warp == 11) {
+    if constexpr (!EmitMasks) {
+      for (int work = blockIdx.x; work < works; work += gridDim.x) {
+        CUTE_TIE_DECL(qp.advance(), qs, qphase);
+        s.full_q_barriers[qs].wait(qphase);
+        asm volatile("" ::: "memory");
+        bool safe = true;
+        for (int i = lane; i < N / 2; i += 32) {
+          const float2 pair = deep_gemm::ptx::ld_shared(
+              reinterpret_cast<const float2*>(s.smem_weights[qs] + 2 * i));
+          if constexpr (Seed)
+            safe &= bounded_weight(pair.x) && bounded_weight(pair.y);
+          packed.pairs[qs][i] = __floats2bfloat162_rn(pair.x, pair.y);
+        }
+        if constexpr (Seed) {
+          const int all_safe = __all_sync(0xffffffffu, safe);
+          if (lane == 0) packed.unit_safe[qs] = all_safe;
+        }
+        asm volatile("" ::: "memory");
+        packed.ready[qs].arrive();
+        s.empty_q_barriers[qs].arrive();
+      }
+    }
   } else {
     cutlass::arch::warpgroup_reg_alloc<96>();
     tp.advance(warp / 4);
@@ -170,9 +198,14 @@ CUTLASS_GLOBAL void __launch_bounds__(384, 2)
       int query = work / splits, group = work % splits,
           tiles = (nk + 255) / 256;
       CUTE_TIE_DECL(qp.advance(), qs, qphase);
-      s.full_q_barriers[qs].wait(qphase);
+      if constexpr (EmitMasks)
+        s.full_q_barriers[qs].wait(qphase);
+      else
+        packed.ready[qs].wait(qphase);
       asm volatile("" ::: "memory");
 
+      bool bounded = false;
+      if constexpr (Seed) bounded = packed.unit_safe[qs] != 0;
       const int tile_begin = tiles * group / splits,
                 tile_end = tiles * (group + 1) / splits;
 
@@ -184,6 +217,10 @@ CUTLASS_GLOBAL void __launch_bounds__(384, 2)
         float scale = 0;
         if constexpr (!EmitMasks)
           scale = deep_gemm::ptx::ld_shared(s.smem_sf_kv[ks] + tid);
+        bool rescale = false;
+        if constexpr (Seed)
+          rescale = bounded &&
+                    __all_sync(0xffffffffu, key >= nk || bounded_power(scale));
         CUTE_TIE_DECL(tp.advance(2), ts, tphase);
         s.full_tmem_barriers[ts].wait(tphase);
         deep_gemm::ptx::tcgen05_after_thread_sync();
@@ -218,21 +255,17 @@ CUTLASS_GLOBAL void __launch_bounds__(384, 2)
               out.masks[uint64_t(row) * out.stride + key] =
                   static_cast<HeadMask>(mask);
           } else {
-            float weights[H];
-#pragma unroll
-            for (int h = 0; h < H; h += 4) {
-              const float4 v =
-                  deep_gemm::ptx::ld_shared(reinterpret_cast<const float4*>(
-                      s.smem_weights[qs] + t * FW + h));
-              weights[h] = v.x;
-              weights[h + 1] = v.y;
-              weights[h + 2] = v.z;
-              weights[h + 3] = v.w;
+            const float value = native_bf16_reduce(
+                accum, packed.pairs[qs] + t * (H / 2), scale, rescale);
+            if (key < nk && key < end) {
+              const auto offset = uint64_t(row) * out.stride + key;
+              if constexpr (std::is_same_v<Score, __nv_bfloat16>)
+                out.scores[offset] = __ushort_as_bfloat16(
+                    uint16_t(__float_as_uint(value) >> 16));
+              else
+                out.scores[offset] =
+                    Recovery && key < begin ? -INFINITY : value;
             }
-            const float value = native_bf16_reduce(accum, weights, scale);
-            if (key < nk && key < end)
-              out.scores[uint64_t(row) * out.stride + key] =
-                  Recovery && key < begin ? -INFINITY : value;
           }
         }
       }
@@ -250,7 +283,7 @@ CUTLASS_GLOBAL void __launch_bounds__(384, 2)
 
 }  // namespace prefill_stream_ballots
 
-template <bool EmitMasks, bool Recovery = false>
+template <bool EmitMasks, bool Recovery = false, class Score = float>
 void launch_scores(Tensor q, Tensor k, Tensor scale, Tensor weights,
                    Tensor scores, Tensor masks, int64_t sms,
                    prefill_stream_ballots::RecoveryOutput recovery = {}) {
@@ -273,18 +306,18 @@ void launch_scores(Tensor q, Tensor k, Tensor scale, Tensor weights,
                   {kHeads, (cuuint64_t)nq}, {kHeads * sizeof(float)},
                   {kHeads, 4}, CU_TENSOR_MAP_SWIZZLE_NONE);
   }
-  // Preserve the qualified dynamic-shared reservation, including SFQ padding.
-  constexpr size_t bytes =
-      sizeof(Storage) + 8 * 4 * kHeads * (sizeof(float) + sizeof(HeadMask));
-  SeedOutput output{nullptr, nullptr, 0, recovery};
+  SeedOutput<Score> output{nullptr, nullptr, 0, recovery};
   if constexpr (EmitMasks) {
     output.masks = masks.mutable_data_ptr<HeadMask>();
     output.stride = masks.stride(0);
   } else {
-    output.scores = scores.mutable_data_ptr<float>();
+    if constexpr (std::is_same_v<Score, float>)
+      output.scores = scores.mutable_data_ptr<float>();
+    else
+      output.scores = static_cast<Score*>(scores.data_ptr());
     output.stride = scores.stride(0);
   }
-  launch<dense_seed_kernel<EmitMasks, Recovery>, 384, bytes>(
+  launch<dense_seed_kernel<EmitMasks, Recovery, Score>, 384, kSharedBytes>(
       std::min<int>(2 * sms, nq / 4 * splits), nq, nk, splits, mq, mk, ms, mw,
       output);
 }
@@ -294,7 +327,11 @@ void sign_masks(Tensor q, Tensor k, Tensor masks, int64_t sms) {
 }
 void dense_score(Tensor q, Tensor k, Tensor scale, Tensor weights,
                  Tensor scores, int64_t sms) {
-  launch_scores<false>(q, k, scale, weights, scores, Tensor(), sms);
+  if (scores.scalar_type() == torch::headeronly::ScalarType::BFloat16)
+    launch_scores<false, false, __nv_bfloat16>(q, k, scale, weights, scores,
+                                               Tensor(), sms);
+  else
+    launch_scores<false>(q, k, scale, weights, scores, Tensor(), sms);
 }
 void recover_score(Tensor q, Tensor k, Tensor scale, Tensor weights,
                    Tensor scores, Tensor state, Tensor rows, Tensor starts,

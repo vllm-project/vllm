@@ -15,7 +15,7 @@ failures recover exhaustively; equal-score ties may choose different valid IDs.
 The workspace manager owns scratch and private graphs before KV-cache sizing.
 Bootstrap and carry state belong to one invocation.
 
-GLM-5.2 TTFT uses SQLite 3.53.4 prefixes, eight SM100 GPUs, FP8 KV and TP8/EP8.
+Historical GLM-5.2 TTFT uses SQLite 3.53.4 prefixes, eight SM100 GPUs, FP8 KV and TP8/EP8.
 Each cell is the median of 3 formal runs after 1 warmup. Both arms run on the
 same eight GPUs with the same client and communication settings. Here 1K = 1024 tokens.
 
@@ -32,11 +32,11 @@ The [published LongBench-v2 reproduction](https://github.com/llm-sys/dosa-vllm/b
 reports stock 54/100, DoSA 58/100 and stock A/A 55/100 on 100 fixed requests.
 [Earlier DeepSeek TTFT results](https://github.com/llm-sys/dosa-vllm/blob/33f5da8eabdd8f77a1733ab322312f7a4653e23e/docs/features/dosa.md#measured-results)
 
-## TTFT reproduction
+## Historical TTFT reproduction (`24cf7e16`, shared base `8a2a5e4c`)
 
 Use CUDA 13, PyTorch 2.14.0+cu130 and FlashInfer 0.7.2.post1 on two four-GPU nodes.
-Use the shared-fixes prerequisite for stock and this feature revision for DoSA.
-On the feature revision, install the matching core and build the extension:
+Use shared-fixes commit `df80a82c` for stock and `24cf7e16` for DoSA.
+On that historical feature revision, install the matching core and build the extension:
 
 ```bash
 uv venv --python 3.12

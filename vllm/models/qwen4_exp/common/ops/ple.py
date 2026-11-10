@@ -199,7 +199,7 @@ def _ple_gate_kernel(
     BLOCK_H: tl.constexpr,
     launch_pdl: tl.constexpr,
 ):
-    t = tl.program_id(0)
+    t = tl.program_id(0).to(tl.int64)
     s = tl.program_id(1)
     lanes = tl.arange(0, BLOCK_H)
     mask = lanes < H

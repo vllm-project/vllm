@@ -1,4 +1,5 @@
 #include "common.cuh"
+#include "../../fused_mqa_topk/common.cuh"
 
 namespace DOSA_NAMESPACE::record_selection {
 constexpr int Top = 2048, Threads = 256, Bins = 4096, IdMask = 0xFFFFF;
@@ -12,12 +13,15 @@ struct Args {
   const int *counts, *starts, *ends, *permutation;
   int *words, *error, *output, *partition;
   int rows, cap, nk;
+  int64_t low_stride, word_stride;
 };
 
-__device__ void fail(const Args& a, int row) {
+__device__ bool failed(const Args& a, int row, unsigned bad) {
+  if (!bad) return false;
   if (threadIdx.x == 0) atomicOr(a.error + row, 1);
   for (int j = threadIdx.x; j < Top; j += Threads)
     a.output[a.order[row] * Top + j] = -1;
+  return true;
 }
 
 struct Boundary {
@@ -38,12 +42,7 @@ __device__ __forceinline__ Boundary find_boundary(const unsigned* hist,
       seen += chunk;
       continue;
     }
-    unsigned inclusive = value;
-#pragma unroll
-    for (int offset = 1; offset < 32; offset <<= 1) {
-      const unsigned other = __shfl_up_sync(Full, inclusive, offset);
-      if (lane >= offset) inclusive += other;
-    }
+    const unsigned inclusive = fused_mqa_topk::warp_inclusive_scan(value, lane);
     const int winner = __ffs(__ballot_sync(Full, inclusive >= rank)) - 1;
     return {part * 32 + winner,
             int(seen + __shfl_sync(Full, inclusive - value, winner)),
@@ -55,7 +54,7 @@ __device__ __forceinline__ Boundary find_boundary(const unsigned* hist,
 // Warp-compact B/E; coarse mode caches low8 and builds the fine histogram.
 template <bool Coarse = false>
 __device__ __forceinline__ void publish_partition(
-    const Args& a, int row, int slot, unsigned id, bool is_b, bool is_e,
+    const Args& a, int row, unsigned payload, bool is_b, bool is_e,
     unsigned* boundary, unsigned* fine_hist, int& written_b, int& written_e,
     unsigned& bad) {
   const int lane = threadIdx.x % 32;
@@ -73,29 +72,24 @@ __device__ __forceinline__ void publish_partition(
   if (is_b) {
     const int at = bbase + __popc(bm & lower);
     if (at < Top)
-      a.output[a.order[row] * Top + at] = int(id);
+      a.output[a.order[row] * Top + at] = int(payload);
     else
       atomicOr(&bad, 16u);
   }
   if (is_e) {
-    unsigned word = id, low = 0;
-    if constexpr (Coarse) {
-      low = unsigned(a.low[int64_t(row) * a.cap + slot]);
-      word |= low << 20;
-    }
     const int at = ebase + __popc(em & lower);
     if (at < Bins)
-      boundary[at] = word;
+      boundary[at] = payload;
     else
       atomicOr(&bad, 16u);
-    if constexpr (Coarse) atomicAdd(fine_hist + low, 1u);
+    if constexpr (Coarse) atomicAdd(fine_hist + (payload >> 20), 1u);
   }
 }
 
 template <int Items>
 __device__ void finish(Args a, int row, int certain, int uncertain,
                        void* storage) {
-  const int* boundary = a.words + int64_t(row) * a.cap;
+  const int* boundary = a.words + int64_t(row) * a.word_stride;
   int keys[Items], values[Items];
 #pragma unroll
   for (int i = 0; i < Items; ++i) {
@@ -114,18 +108,19 @@ __device__ void finish(Args a, int row, int certain, int uncertain,
   }
 }
 
+template <bool Large>
 __global__ void complete(Args a) {
   const int row = blockIdx.x;
   const unsigned partition = uint32_t(a.partition[row]);
   const int certain = partition >> 13, uncertain = partition & 8191;
-  if (uncertain == 0) return;
+  if (!uncertain || (uncertain > 512) != Large) return;
   extern __shared__ __align__(16) uint8_t storage[];
-  if (uncertain <= 128)
-    finish<1>(a, row, certain, uncertain, storage);
-  else if (uncertain <= 512)
-    finish<4>(a, row, certain, uncertain, storage);
-  else
+  if constexpr (Large)
     finish<32>(a, row, certain, uncertain, storage);
+  else if (uncertain <= 128)
+    finish<1>(a, row, certain, uncertain, storage);
+  else
+    finish<4>(a, row, certain, uncertain, storage);
 }
 
 __global__ __launch_bounds__(Threads) void select(Args a) {
@@ -152,59 +147,39 @@ __global__ __launch_bounds__(Threads) void select(Args a) {
   }
   for (int bin = t; bin < Bins; bin += Threads) hist[bin] = 0;
   __syncthreads();
-  if (bad) {
-    fail(a, row);
-    return;
-  }
+  if (failed(a, row, bad)) return;
 
-  const int64_t base = int64_t(row) * a.cap;
+  int* const words = a.words + int64_t(row) * a.word_stride;
+  const uint8_t* const low = a.low + int64_t(row) * a.low_stride;
   // Row bounds stay live until reads drain, before prefix reuse.
   const unsigned row_start = unsigned(a.starts[row]);
   const unsigned row_end = unsigned(a.ends[row]);
   {
-    int scalar_begin = t;
-    if ((reinterpret_cast<uintptr_t>(a.words + base) & 15u) == 0) {
-      const int vectors = count / 4;
-      for (int vector = t; vector < vectors; vector += Threads) {
-        const uint4 quad =
-            reinterpret_cast<const uint4*>(a.words + base)[vector];
+    auto count_word = [&](unsigned word) {
+      const unsigned cp = word >> 20, id = word & IdMask;
+      if (cp < 0x8u || cp > 0xFF7u)
+        atomicOr(&bad, 2u);
+      else if (id >= unsigned(a.nk) || id < row_start || id >= row_end)
+        atomicOr(&bad, 4u);
+      else
+        atomicAdd(hist + cp, 1u);
+    };
+    int64_t scalar_begin = t;
+    if ((reinterpret_cast<uintptr_t>(words) & 15u) == 0) {
+      const int64_t vectors = count / 4;
+      for (int64_t vector = t; vector < vectors; vector += Threads) {
+        const uint4 quad = *reinterpret_cast<const uint4*>(words + vector * 4);
         const unsigned values[4] = {quad.x, quad.y, quad.z, quad.w};
 #pragma unroll
-        for (int item = 0; item < 4; ++item) {
-          const unsigned word = values[item];
-          const unsigned cp = word >> 20, id = word & IdMask;
-          if (cp < 0x8u || cp > 0xFF7u) {
-            atomicOr(&bad, 2u);
-            continue;
-          }
-          if (id >= unsigned(a.nk) || id < row_start || id >= row_end) {
-            atomicOr(&bad, 4u);
-            continue;
-          }
-          atomicAdd(hist + cp, 1u);
-        }
+        for (int item = 0; item < 4; ++item) count_word(values[item]);
       }
       scalar_begin = vectors * 4 + t;
     }
-    for (int slot = scalar_begin; slot < count; slot += Threads) {
-      const unsigned word = unsigned(a.words[base + slot]);
-      const unsigned cp = word >> 20, id = word & IdMask;
-      if (cp < 0x8u || cp > 0xFF7u) {
-        atomicOr(&bad, 2u);
-        continue;
-      }
-      if (id >= unsigned(a.nk) || id < row_start || id >= row_end) {
-        atomicOr(&bad, 4u);
-        continue;
-      }
-      atomicAdd(hist + cp, 1u);
-    }
+    for (int64_t slot = scalar_begin; slot < count; slot += Threads)
+      count_word(unsigned(words[slot]));
   }
   __syncthreads();
-  if (bad) {
-    fail(a, row);
-    return;
-  }
+  if (failed(a, row, bad)) return;
 
   unsigned local = 0;
 #pragma unroll
@@ -226,10 +201,7 @@ __global__ __launch_bounds__(Threads) void select(Args a) {
     if (winning_warp < 0) bad |= 16;
   }
   __syncthreads();
-  if (bad) {
-    fail(a, row);
-    return;
-  }
+  if (failed(a, row, bad)) return;
 
   if (warp == winning_warp) {
     const auto found = find_boundary<16>(hist + warp * 512, Top - group_before);
@@ -252,37 +224,38 @@ __global__ __launch_bounds__(Threads) void select(Args a) {
     __syncthreads();
     const unsigned coarse = unsigned(pivot);
     if (winning_warp) {
-      auto collect = [&](unsigned word, int slot, bool live) {
+      auto collect = [&](unsigned word, int64_t slot, bool live) {
         const unsigned hi = word >> 20, id = word & IdMask;
         const bool is_b = live && hi < coarse, is_e = live && hi == coarse;
-        publish_partition<true>(a, row, slot, id, is_b, is_e, hist, fine_hist,
+        // Only cached E entries carry their low score byte above the key ID.
+        const unsigned payload = is_e ? id | (unsigned(low[slot]) << 20) : id;
+        publish_partition<true>(a, row, payload, is_b, is_e, hist, fine_hist,
                                 written_b, written_e, bad);
       };
-      int scalar_first = 0;
-      if ((reinterpret_cast<uintptr_t>(a.words + base) & 15u) == 0) {
+      int64_t scalar_first = 0;
+      if ((reinterpret_cast<uintptr_t>(words) & 15u) == 0) {
         scalar_first = (count / 128) * 128;
-        for (int begin = warp * 128; begin < scalar_first;
+        for (int64_t begin = warp * 128; begin < scalar_first;
              begin += Threads * 4) {
-          const int slot = begin + lane * 4;
-          const uint4 quad =
-              *reinterpret_cast<const uint4*>(a.words + base + slot);
+          const int64_t slot = begin + lane * 4;
+          const uint4 quad = *reinterpret_cast<const uint4*>(words + slot);
           const unsigned values[4] = {quad.x, quad.y, quad.z, quad.w};
 #pragma unroll
           for (int item = 0; item < 4; ++item)
             collect(values[item], slot + item, true);
         }
       }
-      for (int begin = scalar_first + warp * 32; begin < count;
+      for (int64_t begin = scalar_first + warp * 32; begin < count;
            begin += Threads) {
-        const int slot = begin + lane;
+        const int64_t slot = begin + lane;
         const bool live = slot < count;
-        collect(live ? unsigned(a.words[base + slot]) : 0u, slot, live);
+        collect(live ? unsigned(words[slot]) : 0u, slot, live);
       }
     } else {
-      for (int slot = t; slot < count; slot += Threads) {
-        const unsigned word = unsigned(a.words[base + slot]);
+      for (int64_t slot = t; slot < count; slot += Threads) {
+        const unsigned word = unsigned(words[slot]);
         if ((word >> 20) == coarse)
-          atomicAdd(fine_hist + unsigned(a.low[base + slot]), 1u);
+          atomicAdd(fine_hist + unsigned(low[slot]), 1u);
       }
     }
     __syncthreads();
@@ -290,10 +263,7 @@ __global__ __launch_bounds__(Threads) void select(Args a) {
         (written_b != certain || written_e != group_before))
       bad |= 16;
     __syncthreads();
-    if (bad) {
-      fail(a, row);
-      return;
-    }
+    if (failed(a, row, bad)) return;
     if (warp == 0) {
       const auto found = find_boundary<8>(fine_hist, Top - certain);
       if (lane == 0) {
@@ -313,26 +283,19 @@ __global__ __launch_bounds__(Threads) void select(Args a) {
     if (uncertain > Bins) bad |= 32;
   }
   __syncthreads();
-  if (bad) {
-    fail(a, row);
-    return;
-  }
+  if (failed(a, row, bad)) return;
 
   if (!winning_warp) {
-    for (int begin = warp * 32; begin < count; begin += Threads) {
-      const int slot = begin + lane;
+    for (int64_t begin = warp * 32; begin < count; begin += Threads) {
+      const int64_t slot = begin + lane;
       const bool live = slot < count;
-      const unsigned word = live ? unsigned(a.words[base + slot]) : 0u;
+      const unsigned word = live ? unsigned(words[slot]) : 0u;
       const unsigned coarse = word >> 20, id = word & IdMask;
-      unsigned cp = coarse;
-      {
-        cp = coarse << 8;
-        if (live && coarse == (unsigned(pivot) >> 8))
-          cp |= unsigned(a.low[base + slot]);
-      }
+      unsigned cp = coarse << 8;
+      if (live && coarse == (unsigned(pivot) >> 8)) cp |= unsigned(low[slot]);
       const bool is_b = live && cp < unsigned(pivot),
                  is_e = live && cp == unsigned(pivot);
-      publish_partition(a, row, slot, id, is_b, is_e, hist, nullptr, written_b,
+      publish_partition(a, row, id, is_b, is_e, hist, nullptr, written_b,
                         written_e, bad);
     }
   }
@@ -345,23 +308,19 @@ __global__ __launch_bounds__(Threads) void select(Args a) {
       const unsigned code = word >> 20, id = word & IdMask;
       const bool is_b = live && code < (unsigned(pivot) & 255u);
       const bool is_e = live && code == (unsigned(pivot) & 255u);
-      publish_partition(a, row, at, id, is_b, is_e,
-                        reinterpret_cast<unsigned*>(a.words + base), nullptr,
-                        written_b, written_e, bad);
+      publish_partition(a, row, id, is_b, is_e,
+                        reinterpret_cast<unsigned*>(words), nullptr, written_b,
+                        written_e, bad);
     }
   }
 
   __syncthreads();
   if (t == 0 && (written_b != certain || written_e != uncertain)) bad |= 16;
   __syncthreads();
-  if (bad) {
-    fail(a, row);
-    return;
-  }
+  if (failed(a, row, bad)) return;
   // Both paths joined after all input reads before the prefix becomes E.
   if (!winning_warp)
-    for (int at = t; at < uncertain; at += Threads)
-      a.words[base + at] = int(hist[at]);
+    for (int at = t; at < uncertain; at += Threads) words[at] = int(hist[at]);
   if (t == 0) a.partition[row] = (certain << 13) | uncertain;
 }
 }  // namespace DOSA_NAMESPACE::record_selection
@@ -372,6 +331,9 @@ void select_dense5(Tensor low, Tensor packed, Tensor counts, Tensor starts,
                    Tensor permutation, Tensor partition, int64_t nk) {
   using namespace record_selection;
   DeviceGuard guard(packed.get_device_index());
+  const int cap = record5::checked_capacity(low, packed);
+  STD_TORCH_CHECK(low.size(0) >= packed.size(0),
+                  "Record5 low plane has insufficient query rows");
   Args args{low.const_data_ptr<uint8_t>(),
             order.const_data_ptr<int64_t>(),
             counts.const_data_ptr<int>(),
@@ -383,19 +345,19 @@ void select_dense5(Tensor low, Tensor packed, Tensor counts, Tensor starts,
             output.mutable_data_ptr<int>(),
             partition.mutable_data_ptr<int>(),
             int(packed.size(0)),
-            int(packed.size(1)),
-            int(nk)};
-  constexpr size_t bytes = Bins * sizeof(unsigned);
-  DOSA_CUDA_CHECK(
-      cudaFuncSetAttribute(record_selection::select,
-                           cudaFuncAttributeMaxDynamicSharedMemorySize, bytes));
-  record_selection::
-      select<<<args.rows, Threads, bytes, get_current_cuda_stream()>>>(args);
-  constexpr size_t finish_bytes =
+            cap,
+            int(nk),
+            low.stride(0),
+            packed.stride(0)};
+  launch<record_selection::select, Threads, Bins * sizeof(unsigned)>(args.rows,
+                                                                     args);
+  // A small boundary does not need the 32-items/thread sort's register pool.
+  constexpr size_t small_bytes =
       std::max(sizeof(typename Sort<1>::TempStorage),
-               std::max(sizeof(typename Sort<4>::TempStorage),
-                        sizeof(typename Sort<32>::TempStorage)));
-  launch<complete, FinishThreads, finish_bytes>(args.rows, args);
+               sizeof(typename Sort<4>::TempStorage));
+  launch<complete<false>, FinishThreads, small_bytes>(args.rows, args);
+  launch<complete<true>, FinishThreads, sizeof(typename Sort<32>::TempStorage)>(
+      args.rows, args);
 }
 namespace native_seed {
 constexpr int Threads = 256, Seed = 12288, Top = 2048;
@@ -407,9 +369,22 @@ struct Output {
   int64_t low_stride, word_stride;
 };
 
-__global__ void prepare(const float* scores, int64_t stride, Output a) {
+__device__ __forceinline__ uint32_t score_bits(float v) {
+  return __float_as_uint(v);
+}
+__device__ __forceinline__ uint32_t score_bits(__nv_bfloat16 v) {
+  return uint32_t(__bfloat16_as_ushort(v)) << 16;
+}
+
+// On the canonical native BF16 bits this descending-order transform is its own
+// inverse.
+__device__ __forceinline__ unsigned ordered16(unsigned bits) {
+  return bits < 0x8000u ? bits ^ 0x7fffu : bits;
+}
+template <class Score>
+__global__ void prepare(const Score* scores, int64_t stride, Output a) {
   const int row = blockIdx.x, t = threadIdx.x;
-  const float* input = scores + int64_t(row) * stride;
+  const Score* input = scores + int64_t(row) * stride;
   __shared__ unsigned hist[4 * 256], pivot, before, written;
   if (t == 0) {
     a.counts[row] = a.status[row] = 0;
@@ -418,8 +393,8 @@ __global__ void prepare(const float* scores, int64_t stride, Output a) {
   }
   bool bad = false;
   for (int j = t; j < Seed; j += Threads) {
-    float value = input[j];
-    bad |= !isfinite(value) || (__float_as_uint(value) & 0xFFFFu) != 0;
+    const uint32_t bits = score_bits(input[j]);
+    bad |= (bits & 0x7f800000u) == 0x7f800000u || (bits & 0xffffu) != 0;
   }
   if (__syncthreads_or(bad)) {
     if (t == 0) {
@@ -428,13 +403,17 @@ __global__ void prepare(const float* scores, int64_t stride, Output a) {
     }
     return;
   }
+  auto key = [](Score value) {
+    const unsigned b = score_bits(value) >> 16;
+    return ordered16((b & 0x7fffu) ? b : 0u);
+  };
   for (int pass = 0; pass < 2; ++pass) {
     for (int j = t; j < 4 * 256; j += Threads) hist[j] = 0;
     __syncthreads();
-    const int shift = pass == 0 ? 12 : 4;
+    const int shift = pass == 0 ? 8 : 0;
     for (int j = t; j < Seed; j += Threads) {
-      const unsigned code = h32_record5::encode(input[j]);
-      if (pass == 0 || (code >> 12) == (pivot >> 12))
+      const unsigned code = key(input[j]);
+      if (pass == 0 || (code >> 8) == (pivot >> 8))
         atomicAdd(hist + (t / 64) * 256 + ((code >> shift) & 255u), 1u);
     }
     __syncthreads();
@@ -443,47 +422,37 @@ __global__ void prepare(const float* scores, int64_t stride, Output a) {
     __syncthreads();
     hist[t] = count;
     __syncthreads();
-    if (t == 0) {
-      unsigned total = pass == 0 ? 0u : before;
-      for (unsigned bin = 0; bin < 256; ++bin) {
-        if (total < Top && Top <= total + hist[bin]) {
-          pivot = (pass == 0 ? 0u : pivot & 0xFF000u) | (bin << shift);
-          before = total;
-          break;
-        }
-        total += hist[bin];
+    if (t < 32) {
+      const unsigned previous = pass == 0 ? 0u : before;
+      const auto boundary =
+          record_selection::find_boundary<8>(hist, Top - previous);
+      if (t == 0) {
+        pivot = (pass ? pivot : 0u) | (unsigned(boundary.bin) << shift);
+        before = previous + unsigned(boundary.before);
       }
     }
     __syncthreads();
   }
-  if (t == 0) {
-    // Positive ordered cells end in 0xF; negative cells end in zero.
-    pivot |= (pivot & 0x80000u) ? 0u : 15u;
-    hist[0] = 0;
-  }
+  if (t == 0) hist[0] = 0;
   __syncthreads();
   const unsigned needed = Top - before;
   // Seed ties affect only the witness subset: every chosen score is >=tau.
   for (int j = t; j < Seed; j += Threads) {
-    const float value = input[j];
-    const unsigned code = h32_record5::encode(value);
-    unsigned slot = Top;
-    if (code < pivot) slot = atomicAdd(&written, 1u);
-    if (code == pivot) {
-      const unsigned rank = atomicAdd(hist, 1u);
-      if (rank < needed) slot = atomicAdd(&written, 1u);
-    }
+    const unsigned code = key(input[j]);
+    const bool chosen =
+        code < pivot || (code == pivot && atomicAdd(hist, 1u) < needed);
+    if (!chosen) continue;
+    const unsigned slot = atomicAdd(&written, 1u);
     if (slot < Top) {
-      a.low[int64_t(row) * a.low_stride + slot] = uint8_t(code);
+      const unsigned record = (code << 4) | (code < 0x8000u ? 15u : 0u);
+      a.low[int64_t(row) * a.low_stride + slot] = uint8_t(record);
       a.words[int64_t(row) * a.word_stride + slot] =
-          int32_t(h32_record5::pack_word(code, unsigned(j)));
+          int32_t(record5::pack_word(record, unsigned(j)));
     }
   }
   __syncthreads();
   if (t == 0) {
-    unsigned ordered = ~(pivot << 12);
-    unsigned bits = ordered & 0x80000000u ? ordered ^ 0x80000000u : ~ordered;
-    a.tau[row] = __uint_as_float(bits & 0xFFFF0000u);
+    a.tau[row] = __uint_as_float(ordered16(pivot) << 16);
     a.counts[row] = int(written);
     if (written != Top) atomicOr(a.error + row, 1);
   }
@@ -493,6 +462,9 @@ __global__ void prepare(const float* scores, int64_t stride, Output a) {
 void prepare5(Tensor scores, Tensor low, Tensor words, Tensor counts,
               Tensor tau, Tensor error, Tensor status) {
   DeviceGuard guard(scores.get_device_index());
+  STD_TORCH_CHECK(record5::checked_capacity(low, words) >= native_seed::Top &&
+                      std::min(low.size(0), words.size(0)) >= scores.size(0),
+                  "Record5 seed outputs must hold 2048 entries per input row");
   native_seed::Output output{low.mutable_data_ptr<uint8_t>(),
                              words.mutable_data_ptr<int>(),
                              counts.mutable_data_ptr<int>(),
@@ -501,8 +473,14 @@ void prepare5(Tensor scores, Tensor low, Tensor words, Tensor counts,
                              status.mutable_data_ptr<int>(),
                              low.stride(0),
                              words.stride(0)};
-  launch<native_seed::prepare, 256>(
-      scores.size(0), scores.const_data_ptr<float>(), scores.stride(0), output);
+  if (scores.scalar_type() == torch::headeronly::ScalarType::BFloat16)
+    launch<native_seed::prepare<__nv_bfloat16>, 256>(
+        scores.size(0), static_cast<const __nv_bfloat16*>(scores.data_ptr()),
+        scores.stride(0), output);
+  else
+    launch<native_seed::prepare<float>, 256>(scores.size(0),
+                                             scores.const_data_ptr<float>(),
+                                             scores.stride(0), output);
 }
 __global__ void set_if_any(cudaGraphConditionalHandle handle,
                            const int32_t* values, int count, int inactive) {

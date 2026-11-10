@@ -1207,6 +1207,18 @@ class RocmPlatform(Platform):
 
         _maybe_default_dsv4_mxfp4_indexer(vllm_config)
 
+        if parallel_config.all2all_backend == "mori":
+            from vllm.config.parallel import resolve_mori_all2all
+
+            resolve_mori_all2all(
+                parallel_config,
+                model_config,
+                vllm_config.kernel_config.moe_backend,
+                lsa_spans_hosts=on_gfx1250(),
+                sdma_picks_epv1=not on_gfx1250(),
+                validated_arch=on_gfx950() or on_gfx1250(),
+            )
+
     @classmethod
     def verify_model_arch(cls, model_arch: str) -> None:
         if model_arch in _ROCM_UNSUPPORTED_MODELS:

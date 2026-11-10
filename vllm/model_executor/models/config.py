@@ -56,18 +56,11 @@ class AliceAIForCausalLMConfig(VerifyAndUpdateConfig):
             )
 
         speculative_config = vllm_config.speculative_config
-        speculative_method = (
-            speculative_config.method if speculative_config is not None else None
-        )
-        if speculative_method in {
-            "dflash",
-            "dspark",
-            "eagle3",
-            "extract_hidden_states",
-        }:
+        if speculative_config is not None and speculative_config.uses_aux_hidden_states:
             raise NotImplementedError(
                 "AliceAI does not support speculative method "
-                f"{speculative_method!r} because it requires auxiliary hidden states"
+                f"{speculative_config.method!r} because it requires auxiliary "
+                "hidden states"
             )
 
 
@@ -126,7 +119,7 @@ class GlmMoeDsaForCausalLM(VerifyAndUpdateConfig):
             spec_config = vllm_config.speculative_config
             if (
                 spec_config is not None
-                and spec_config.method not in ("mtp", "dspark")
+                and spec_config.method not in ("mtp", "dspark", "dflash")
                 and spec_config.kv_cache_dtype is None
             ):
                 spec_config.kv_cache_dtype = "auto"

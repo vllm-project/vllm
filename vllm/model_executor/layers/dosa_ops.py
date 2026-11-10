@@ -6,6 +6,65 @@ from vllm.triton_utils import tl, triton
 from vllm.triton_utils import tldevice as ld
 
 
+@triton.jit(do_not_specialize=["N"])
+def rank_query_tiles(
+    W, RANK, N, ROWS: tl.constexpr, H: tl.constexpr, HIGH: tl.constexpr
+):
+    PLAN, COUNTS = RANK
+    row = tl.program_id(0) * 128 + tl.arange(0, 128)
+    valid = row < ROWS
+    src = tl.minimum(row, N - 1)
+    w = tl.load(W + src[:, None] * H + tl.arange(0, H)[None, :], valid[:, None], 0)
+    npos = tl.sum((w > 0).to(tl.int32), 1)
+    tier = (
+        (npos > 14).to(tl.int32) + (npos > 16).to(tl.int32) + (npos > HIGH).to(tl.int32)
+    )
+    # At most128 rows contribute: no byte carries into the adjacent class.
+    one = tl.where(valid, tl.full((), 1, tl.uint32) << (8 * tier), 0)
+    prefix = tl.cumsum(one, 0).to(tl.uint32)
+    local = ((prefix >> (8 * tier)) & 255).to(tl.int32) - 1
+    tl.store(PLAN + row, (tier << 7) | local, valid)
+    packed_count = tl.sum(one, 0).to(tl.uint32)
+    tl.store(COUNTS + tl.program_id(0), packed_count.to(tl.int32, bitcast=True))
+
+
+@triton.jit(do_not_specialize=["N", "OFFSET"])
+def stage_queries(
+    INPUTS,
+    OUTPUTS,
+    RANK,
+    N,
+    OFFSET,
+    ROWS: tl.constexpr,
+    H: tl.constexpr,
+    HIGH: tl.constexpr,
+    B: tl.constexpr,
+):
+    PLAN, COUNTS, ORDER = RANK
+    q, w, start, end = INPUTS
+    out_q, out_w, out_start, out_end, BUDGET8, BUDGET4 = OUTPUTS
+    row = tl.program_id(0)
+    code = tl.load(PLAN + row)
+    tier, local = code >> 7, code & 127
+    tiles = tl.arange(0, B)
+    totals = tl.load(COUNTS + tiles, 128 * tiles < ROWS, 0).to(tl.uint32, bitcast=True)
+    before = tl.where(tiles < row // 128, (totals >> (8 * tier)) & 255, 0)
+    for k in tl.static_range(3):
+        before += tl.where(tier > k, (totals >> (8 * k)) & 255, 0)
+    dest = tl.sum(before.to(tl.int32), 0) + local
+    tl.store(ORDER + dest, row)
+    src = tl.minimum(row, N - 1)
+    d, h = tl.arange(0, H * 128), tl.arange(0, H)
+    tl.store(out_q + dest * H * 128 + d, tl.load(q + src * H * 128 + d))
+    tl.store(out_w + dest * H + h, tl.load(w + src * H + h))
+    tl.store(out_start + dest, tl.load(start + src) - OFFSET)
+    tl.store(out_end + dest, tl.load(end + src) - OFFSET)
+    if dest % 8 == 7:
+        paid = tl.where(tier == 0, 14, tl.where(tier == 1, 16, HIGH))
+        tl.store(BUDGET8 + dest // 8, paid)
+        tl.store(BUDGET4 + 2 * (dest // 8) + tl.arange(0, 2), paid)
+
+
 @triton.jit
 def add_up(x, y):
     return ld.add_ru(x, y)
@@ -30,7 +89,9 @@ def query_check(
     SB,
     TAU,
     ERR,
+    CAPTURE_FLAG,
     SAFE,
+    CAPTURE_STRIDE: tl.constexpr,
     GROUP: tl.constexpr,
     DOT: tl.constexpr,
     G: tl.constexpr,
@@ -43,6 +104,13 @@ def query_check(
     valid_family = (b == 14) | (b == 16) | (b == HIGH)
     hp = tl.where(b == 14, H14, tl.where(b == 16, H16, H20))
     hint = tl.load(hp + row)
+    incoming = tl.load(ERR + row)
+    if incoming != 0:
+        # The original selected planner starts invalid on a seed/extent error.
+        tl.store(CAPTURE_FLAG + row * CAPTURE_STRIDE, incoming)
+        if valid_family:
+            hint = 1
+            tl.store(hp + row, hint)
     h = tl.arange(0, HEADS)
     w = tl.load(W + row * HEADS + h)
     mag = w.to(tl.int32, bitcast=True) & 0x7FFFFFFF
@@ -75,21 +143,31 @@ def query_check(
     )
     if bad:
         tl.atomic_or(ERR + row, 1024)
-    tl.store(SAFE + row, tl.where(bad | (tl.load(ERR + row) != 0), -float("inf"), tau))
+    tl.store(SAFE + row, tl.where(bad | (incoming != 0), -float("inf"), tau))
 
 
 @triton.jit
-def check_live_extent(
-    ERROR,
+def begin_slab(
+    STATE,
+    SNAPSHOT,
     LIVE,
-    Q: tl.constexpr,
+    ROWS: tl.constexpr,
     CAP: tl.constexpr,
     SEED: tl.constexpr,
-    BLOCK: tl.constexpr,
+    STRIDE: tl.constexpr,
 ):
-    row = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    """Initialize the flags and queues before the seed and plan branches."""
+    error, pool, solo, common = STATE
+    row = tl.program_id(0) * 256 + tl.arange(0, 256)
     nk = tl.load(LIVE)
-    tl.atomic_or(ERROR + row, 1, (row < Q) & ((nk < SEED) | (nk > CAP)))
+    bad = ((nk < SEED) | (nk > CAP)).to(tl.int32)
+    tl.store(error + row, bad, row < ROWS)
+    tl.store(SNAPSHOT + row * STRIDE, bad, row < ROWS)
+    if tl.program_id(0) == 0:
+        i = tl.arange(0, 2)
+        tl.store(pool, 0)
+        tl.store(solo + i, 0)
+        tl.store(common + i, 0)
 
 
 @triton.jit
@@ -150,14 +228,19 @@ def _spread_queries(Q, W, OQ, OW, NQ, HEADS: tl.constexpr):
     tl.store(OW + anchor * HEADS + i, weight, i < HEADS)
 
 
+@triton.jit
+def _decoded_ue8m0(exponent):
+    bits = tl.where(exponent == 0, 0x00400000, exponent << 23)
+    bits = tl.where(exponent == 255, 0x7FC00000, bits)
+    return bits.to(tl.float32, bitcast=True)
+
+
 @triton.jit(do_not_specialize=["N"])
 def decode_ue8m0(SOURCE, OUTPUT, N, BLOCK: tl.constexpr):
     """Decode the repeated UE8M0 byte of each FP8 index-K scale losslessly."""
     i = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
     exponent = tl.load(SOURCE + i * 4, i < N, 127).to(tl.int32)
-    bits = tl.where(exponent == 0, 0x00400000, exponent << 23)
-    bits = tl.where(exponent == 255, 0x7FC00000, bits)
-    tl.store(OUTPUT + i, bits.to(tl.float32, bitcast=True), i < N)
+    tl.store(OUTPUT + i, _decoded_ue8m0(exponent), i < N)
 
 
 @triton.jit(do_not_specialize=["KEYS"])
@@ -221,13 +304,24 @@ def recovery_classify_errors(SAFE, ERROR, START, END, LIVE, FAST, SLOW, ROWS, CA
     tl.store(SLOW + row, tl.where(fast, 0, error), active)
 
 
-@triton.jit(do_not_specialize=["ROWS"])
-def recovery_merge_errors(ERROR, FAST, SLOW, ROWS):
+@triton.jit
+def finish_slab(ERRORS, COUNTS, ORDER, ORIGINAL, ROWS: tl.constexpr):
+    """Join recovery flags and publish both summaries in original query order."""
+    error, fast, slow = ERRORS
+    counts_out, error_out = ORIGINAL
     row = tl.program_id(0) * 128 + tl.arange(0, 128)
     active = row < ROWS
-    error = tl.load(ERROR + row, active, 0)
-    merged = error | tl.load(FAST + row, active, 0) | tl.load(SLOW + row, active, 0)
-    tl.store(ERROR + row, merged, active)
+    dest = tl.load(ORDER + row, active, 0)
+    valid = (dest >= 0) & (dest < ROWS)
+    _trap_if(tl.sum((active & ~valid).to(tl.int32), 0) != 0)
+    merged = (
+        tl.load(error + row, active, 0)
+        | tl.load(fast + row, active, 0)
+        | tl.load(slow + row, active, 0)
+    )
+    tl.store(error + row, merged, active)
+    tl.store(error_out + dest, merged, active & valid)
+    tl.store(counts_out + dest, tl.load(COUNTS + row, active, 0), active & valid)
 
 
 @triton.jit(do_not_specialize=["ROWS"])
@@ -413,9 +507,19 @@ def _exact_rho(square, kappa, live):
     return result
 
 
-@triton.jit(do_not_specialize=["N", "epoch"])
+@triton.jit(do_not_specialize=["N", "PREVIOUS", "epoch"])
 def _publish_gather(
-    K, SCALE, DK, DS, RHO, STATE, N, SIZE: tl.constexpr, epoch, TILE_ROWS: tl.constexpr
+    K,
+    SCALE,
+    DK,
+    DS,
+    RHO,
+    STATE,
+    N,
+    PREVIOUS,
+    SIZE: tl.constexpr,
+    epoch,
+    TILE_ROWS: tl.constexpr,
 ):
     """Publish pair swaps while gathering raw K/scales and integer-certified rho."""
     EPOCH, RANK, PERM, A, B, C = STATE
@@ -436,21 +540,29 @@ def _publish_gather(
     source = tl.where(endpoint, opposite, rows)
     source_ok = (source >= 0) & (source < N)
     _trap_if(tl.sum((live & ~source_ok).to(tl.int32)) != 0)
-    tl.store(PERM + rows, source, live)
+    update = live
+    if PREVIOUS > 0:
+        old = tl.load(PERM + rows, live & (rows < PREVIOUS), -1)
+        update = live & ((rows >= PREVIOUS) | (source != old))
+        if tl.sum(update.to(tl.int32)) == 0:
+            return
+    tl.store(PERM + rows, source, update)
     dims = tl.arange(0, 128)
-    gather_live = live & source_ok
+    gather_live = update & source_ok
     raw = tl.load(K + source[:, None] * 128 + dims[None, :], gather_live[:, None], 0)
-    tl.store(DK + rows[:, None] * 128 + dims[None, :], raw, live[:, None])
+    tl.store(DK + rows[:, None] * 128 + dims[None, :], raw, update[:, None])
     scale = tl.load(SCALE + source, gather_live, 0)
-    tl.store(DS + rows, scale, live)
+    if SCALE.dtype.element_ty == tl.int32:
+        scale = _decoded_ue8m0(scale.to(tl.uint32) & 255)
+    tl.store(DS + rows, scale, update)
     bits = scale.to(tl.uint32, bitcast=True)
     codes = (raw & 127).to(tl.int32)
     units = _magnitude_unit(codes).to(tl.int64)
     units = tl.where(codes == 127, 0, units)
     square, kappa = tl.sum(units * units, 1), tl.max(codes, 1)
     bad = ((bits - 1).to(tl.uint32) >= 0x5F800000) | (kappa == 127)
-    rho = _exact_rho(square, kappa, live & ~bad)
-    tl.store(RHO + rows, tl.where(bad, 127, rho), live)
+    rho = _exact_rho(square, kappa, update & ~bad)
+    tl.store(RHO + rows, tl.where(bad, 127, rho), update)
 
 
 @triton.jit(do_not_specialize=["TOTAL", "ROWS", "MAP_SIZE", "VOTE_SIZE", "RECENT"])
@@ -524,39 +636,27 @@ def compact_groups(BUDGET, IDS, INV, N, PAID: tl.constexpr, B: tl.constexpr):
 
 
 @triton.jit
-def exact_parts(count, tiles, sms: tl.constexpr, grid):
-    # The callers bound tiles <= 8192 before using the exact256 breakpoints.
+def choose_parts(count, tiles, sms: tl.constexpr, grid, EXACT: tl.constexpr):
+    """Minimize full waves times tiles per part, then break ties by part count."""
     groups = tl.maximum(count, 1)
     t = tl.maximum(tiles, 1)
     cap = tl.maximum(1, tl.minimum(t, grid // groups))
-    chosen = tl.full((), 1, tl.int32)
-    if (count > 0) & (tiles > 0):
+    if EXACT:
+        # ceil(t/p) changes at these breakpoints for t <= 8192.
         j = tl.arange(0, 256)
         d = j % 128 + 1
         p = tl.where(j < 128, d, (t - 1) // d + 1)
-        valid = p <= cap
-        pe = tl.minimum(p, cap)
-        cost = ((groups * pe + sms - 1) // sms) * ((t + pe - 1) // pe)
-        best = tl.min(tl.where(valid, cost, 2147483647), 0)
-        chosen = tl.min(tl.where(valid & (cost == best), p, 2147483647), 0)
-    return chosen
-
-
-@triton.jit
-def eight_wave_parts(count, tiles, sms: tl.constexpr, grid):
-    groups = tl.maximum(count, 1)
-    minwaves = (groups + sms - 1) // sms
-    maxparts = tl.maximum(1, tl.minimum(tl.maximum(tiles, 1), grid // groups))
-    chosen = tl.full((), 1, tl.int32)
-    best = tl.full((), 2147483647, tl.int32)
-    for delta in tl.static_range(8):
-        wave = minwaves + delta
-        p = tl.maximum(1, tl.minimum(maxparts, (wave * sms) // groups))
-        cost = ((groups * p + sms - 1) // sms) * ((tiles + p - 1) // p)
-        better = (cost < best) | ((cost == best) & (p < chosen))
-        chosen = tl.where(better, p, chosen)
-        best = tl.minimum(best, cost)
-    return chosen
+    else:
+        wave = tl.cdiv(groups, sms) + tl.arange(0, 8)
+        p = tl.maximum(1, tl.minimum(cap, (wave * sms) // groups))
+    legal = p <= cap
+    step = tl.minimum(p, cap)
+    cost = tl.cdiv(groups * step, sms) * tl.cdiv(t, step)
+    best = tl.min(tl.where(legal, cost, 2147483647), 0)
+    winner = tl.min(tl.where(legal & (cost == best), p, 2147483647), 0)
+    if EXACT:
+        return tl.where((count > 0) & (tiles > 0), winner, 1)
+    return winner
 
 
 @triton.jit(do_not_specialize=["N", "GRID"])
@@ -574,6 +674,7 @@ def prepare_live(
     TILE: tl.constexpr,
     PAID: tl.constexpr,
     B: tl.constexpr,
+    WHOLE_WAVES: tl.constexpr = False,
 ):
     tl.static_assert(SMS > 0)
     tl.static_assert((PAID == 14 and TILE == 256) or (PAID == 16 and TILE == 128))
@@ -591,9 +692,9 @@ def prepare_live(
     tiles = (safe_nk - SEED + TILE - 1) // TILE
     chosen = tl.full((), 1, tl.int32)
     if valid:
-        if PAID == 14:
-            chosen = exact_parts(count, tiles, SMS, GRID)
-        else:
-            chosen = eight_wave_parts(count, tiles, SMS, GRID)
+        # Whole resident waves need only one K span per query group. Divide
+        # just the remaining groups using the same tile/wave objective.
+        bulk = count // SMS * SMS if WHOLE_WAVES else 0
+        chosen = choose_parts(count - bulk, tiles, SMS, GRID - bulk, PAID == 14)
     tl.store(CONFIG, tl.where(valid, count, -1))
     tl.store(CONFIG + 1, chosen)

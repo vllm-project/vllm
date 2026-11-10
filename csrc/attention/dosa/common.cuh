@@ -100,15 +100,11 @@ inline void launch(dim3 grid, Args... args) {
 // Pipeline portions adapted from sgl-deep-gemm v0.1.5.post3 (SM100 H32).
 
 namespace dosa_score_emit {
-template <uint32_t M, uint32_t N, typename Fp8>
-__device__ __forceinline__ void issue_h32_mma(Fp8* keys, Fp8* queries,
-                                              uint32_t key_row, uint32_t tmem,
-                                              uint32_t completion_barrier) {
-  auto instruction =
-      cute::UMMA::make_instr_desc<cutlass::float_e4m3_t, cutlass::float_e4m3_t,
-                                  float, M, N, cute::UMMA::Major::K,
-                                  cute::UMMA::Major::K>();
-  auto runtime = cute::UMMA::make_runtime_instr_desc(instruction);
+// The elected caller issues and commits all operations from the same thread.
+template <typename Fp8, class Descriptor>
+__device__ __forceinline__ void issue_four_d32(Fp8* keys, Fp8* queries,
+                                               uint32_t key_row, uint32_t tmem,
+                                               Descriptor runtime) {
 #pragma unroll
   for (uint32_t k = 0; k < 128 / 32; ++k) {
     auto ad =
@@ -119,6 +115,17 @@ __device__ __forceinline__ void issue_h32_mma(Fp8* keys, Fp8* queries,
                                               128>(queries, 0, k * 32);
     deep_gemm::ptx::SM100_MMA_F8F6F4_SS::fma(ad, bd, tmem, k, runtime);
   }
+}
+template <uint32_t M, uint32_t N, typename Fp8>
+__device__ __forceinline__ void issue_h32_mma(Fp8* keys, Fp8* queries,
+                                              uint32_t key_row, uint32_t tmem,
+                                              uint32_t completion_barrier) {
+  auto instruction =
+      cute::UMMA::make_instr_desc<cutlass::float_e4m3_t, cutlass::float_e4m3_t,
+                                  float, M, N, cute::UMMA::Major::K,
+                                  cute::UMMA::Major::K>();
+  auto runtime = cute::UMMA::make_runtime_instr_desc(instruction);
+  issue_four_d32(keys, queries, key_row, tmem, runtime);
   asm volatile(
       "tcgen05.commit.cta_group::1.mbarrier::arrive::one."
       "shared::cluster.b64 [%0];" ::"r"(completion_barrier));
@@ -134,42 +141,50 @@ __device__ __forceinline__ void named_sync(uint32_t threads, uint32_t id) {
 }
 template <int Count>
 __device__ __forceinline__ void load_tmem(const uint32_t address, float* out) {
-  using Loader = std::conditional_t<
-      Count == 64, cute::SM100_TMEM_LOAD_32dp32b64x,
-      std::conditional_t<
-          Count == 32, cute::SM100_TMEM_LOAD_32dp32b32x,
-          std::conditional_t<
-              Count == 16, cute::SM100_TMEM_LOAD_32dp32b16x,
-              std::conditional_t<
-                  Count == 8, cute::SM100_TMEM_LOAD_32dp32b8x,
-                  std::conditional_t<Count == 4,
-                                     cute::SM100_TMEM_LOAD_32dp32b4x,
-                                     cute::SM100_TMEM_LOAD_32dp32b2x>>>>>;
-  [&]<size_t... I>(cute::index_sequence<I...>) {
-    Loader::copy(address, reinterpret_cast<uint32_t*>(out)[I]...);
-  }(cute::make_index_sequence<Count>{});
+  deep_gemm::ptx::tmem_load_32dp32b<Count>(address,
+                                           reinterpret_cast<uint32_t*>(out));
 }
 // DG727 BF16 epilogue: promoted BF16 weights, repeated UE8M0 scales[-108,100].
 // Raw/MX dot equivalence is qualified; other domains recover natively.
-__device__ __forceinline__ float native_bf16_reduce(const float* accum,
-                                                    const float* weights,
-                                                    float scale) {
+template <bool ScaleDots = true>
+__device__ __forceinline__ float native_bf16_reduce(
+    const float* accum, const __nv_bfloat162* weights, float scale) {
   auto sum0 = __floats2bfloat162_rn(0.0f, 0.0f);
   auto sum1 = __floats2bfloat162_rn(0.0f, 0.0f);
 #pragma unroll
   for (uint32_t h = 0; h < kHeads; h += 4) {
-    const float2 dot0 =
-        make_float2(__fmul_rn(accum[h], scale), __fmul_rn(accum[h + 1], scale));
-    const float2 dot1 = make_float2(__fmul_rn(accum[h + 2], scale),
-                                    __fmul_rn(accum[h + 3], scale));
-    const auto w0 = __floats2bfloat162_rn(weights[h], weights[h + 1]);
-    const auto w1 = __floats2bfloat162_rn(weights[h + 2], weights[h + 3]);
-    sum0 = __hfma2(deep_gemm::ptx::cvt_relu_bf16x2_f32(dot0), w0, sum0);
-    sum1 = __hfma2(deep_gemm::ptx::cvt_relu_bf16x2_f32(dot1), w1, sum1);
+    float2 dot0 = make_float2(accum[h], accum[h + 1]);
+    float2 dot1 = make_float2(accum[h + 2], accum[h + 3]);
+    if constexpr (ScaleDots) {
+      const float2 factor = make_float2(scale, scale);
+      dot0 = __fmul2_rn(dot0, factor);
+      dot1 = __fmul2_rn(dot1, factor);
+    }
+    sum0 = __hfma2(deep_gemm::ptx::cvt_relu_bf16x2_f32(dot0), weights[h / 2],
+                   sum0);
+    sum1 = __hfma2(deep_gemm::ptx::cvt_relu_bf16x2_f32(dot1),
+                   weights[h / 2 + 1], sum1);
   }
   const auto pair = __hadd2_rn(sum0, sum1);
   const auto score = __hadd2_rn(__low2bfloat162(pair), __high2bfloat162(pair));
   return __bfloat162float(__low2bfloat16(score));
+}
+
+// In these bands a finite BF16 weighted term is on the 2^-57 lattice.
+// Shifting by the key scale commutes with every normal BF16 rounding step.
+__device__ __forceinline__ bool bounded_weight(float x) {
+  return x == 0.f || (fabsf(x) >= 0x1p-32f && fabsf(x) <= 0x1p32f);
+}
+__device__ __forceinline__ bool bounded_power(float scale) {
+  return (__float_as_uint(scale) & 0x7fffffu) == 0 && scale >= 0x1p-60f &&
+         scale <= 0x1p60f;
+}
+__device__ __forceinline__ float native_bf16_reduce(
+    const float* accum, const __nv_bfloat162* weights, float scale,
+    bool rescale) {
+  return rescale
+             ? __fmul_rn(native_bf16_reduce<false>(accum, weights, 1.f), scale)
+             : native_bf16_reduce(accum, weights, scale);
 }
 
 using dosa_score_emit::issue_h32_mma;
@@ -203,15 +218,20 @@ inline CUtensorMap fp8_map(const Tensor& tensor, cuuint32_t tile) {
 
 namespace record5 {
 inline constexpr uint32_t Invalid = 0xFFFFFu;
+inline int checked_capacity(const Tensor& low, const Tensor& words) {
+  for (const Tensor* p : {&low, &words}) {
+    STD_TORCH_CHECK(p->dim() == 2 && p->stride(1) == 1 &&
+                        (p->size(0) <= 1 || p->stride(0) >= p->size(1)) &&
+                        p->size(0) <= INT_MAX && p->size(1) <= INT_MAX,
+                    "Record5 requires nonoverlapping unit-column rows");
+  }
+  return int(std::min(low.size(1), words.size(1)));
+}
 // Record5 stores low8/high12 score bits and exact20-bit key IDs.
 __device__ __forceinline__ uint32_t pack_word(uint32_t code, uint32_t id) {
   return ((code >> 8) << 20) | (id & 0xFFFFFu);
 }
-}  // namespace record5
-
-namespace h32_record5 {
 inline constexpr uint32_t Min = 0x00800u, Max = 0xFF7FFu;
-inline constexpr uint32_t Invalid = record5::Invalid;
 
 __device__ __forceinline__ uint32_t encode(float score) {
   uint32_t bits = __float_as_uint(score);
@@ -220,8 +240,7 @@ __device__ __forceinline__ uint32_t encode(float score) {
   return (~ordered) >> 12;
 }
 
-using record5::pack_word;
-}  // namespace h32_record5
+}  // namespace record5
 
 namespace dosa_screen {
 using certicascade_streaming_exact::fp8_map;
@@ -312,39 +331,8 @@ __device__ __forceinline__ void produce_keys(Storage& s,
   }
 }
 
-template <class Descriptor>
-__device__ __forceinline__ void issue_screen_mma(uint8_t* keys,
-                                                 uint8_t* queries,
-                                                 uint32_t key_row,
-                                                 uint32_t tmem,
-                                                 Descriptor runtime) {
-#pragma unroll
-  for (int k = 0; k < 4; ++k) {
-    auto ad = deep_gemm::mma::sm100::make_umma_desc<cute::UMMA::Major::K, 0,
-                                                    128, 128>(
-        reinterpret_cast<cutlass::float_e4m3_t*>(keys), key_row, k * 32);
-    auto bd = deep_gemm::mma::sm100::make_umma_desc<cute::UMMA::Major::K, 0,
-                                                    128, 128>(
-        reinterpret_cast<cutlass::float_e4m3_t*>(queries), 0, k * 32);
-    cute::SM100_MMA_F8F6F4_SS::fma(ad, bd, tmem, k, runtime);
-  }
-}
+using dosa_score_emit::issue_four_d32;
 
-__device__ __forceinline__ uint32_t trusted_keep_mask(float value, float tau,
-                                                      uint32_t eligible,
-                                                      uint32_t bit) {
-  uint32_t mask;
-  asm volatile(
-      "{.reg .pred finite,below,active,keep; .reg .f32 magnitude; "
-      "abs.f32 magnitude,%1; setp.lt.f32 finite,magnitude,0f7f800000; "
-      "setp.lt.f32 below,%1,%2; and.pred keep,finite,below; not.pred "
-      "keep,keep; "
-      "setp.ne.u32 active,%3,0; and.pred keep,keep,active; selp.u32 "
-      "%0,%4,0,keep;}"
-      : "=r"(mask)
-      : "f"(value), "f"(tau), "r"(eligible), "r"(bit));
-  return mask;
-}
 using certicascade_streaming_exact::load_tmem;
 }  // namespace dosa_screen
 

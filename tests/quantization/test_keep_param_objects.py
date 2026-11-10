@@ -10,6 +10,7 @@ import torch
 from vllm.config.model import ModelConfig
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory
 from vllm.model_executor.layers.linear import ReplicatedLinear
+from vllm.model_executor.layers.quantization.auto_gptq import AutoGPTQConfig
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
     CompressedTensorsConfig,
@@ -244,3 +245,19 @@ def test_forced_backend_keeps_param_objects(
     default_vllm_config.kernel_config.linear_backend = backend
     default_vllm_config.kernel_config.moe_backend = backend
     _check_keeps_param_objects(build, default_vllm_config)
+
+
+def test_marlin_bias_keeps_its_address(default_vllm_config, dist_init) -> None:
+    """Captured CUDA graphs read the bias at its startup address (direct reload
+    writes the checkpoint bias there before rerunning post-load processing)."""
+    default_vllm_config.model_config = ModelConfig()
+    default_vllm_config.kernel_config.linear_backend = "marlin"
+    gptq = AutoGPTQConfig.from_config(
+        dict(bits=4, group_size=128, desc_act=False, sym=True)
+    )
+    with torch.device("cuda"):
+        layer = ReplicatedLinear(SIZE, SIZE, bias=True, quant_config=gptq)
+        _load(layer)
+        ptr = layer.bias.data_ptr()
+        layer.quant_method.process_weights_after_loading(layer)
+    assert layer.bias.data_ptr() == ptr

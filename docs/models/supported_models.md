@@ -732,6 +732,13 @@ Some models are supported only via the [Transformers modeling backend](#transfor
     on `transformers>=5.18.0`; older versions still require the flag.
 
 !!! note
+    On ROCm, `Step5ForConditionalGeneration` runs its MoE layers on Triton. With
+    `VLLM_ROCM_USE_AITER=1`, also pass `--moe-backend triton`: AITER's MoE does not
+    apply Step-5's SwiGLU clamp. An FP8 KV cache (`--kv-cache-dtype fp8`) needs
+    `--block-size 32`. The checkpoint ships three MTP layers, enabled with
+    `--speculative-config '{"method":"mtp","num_speculative_tokens":3}'`.
+
+!!! note
     The official `openbmb/MiniCPM-V-2` doesn't work yet, so we need to use a fork (`HwwwH/MiniCPM-V-2`) for now.
     For more details, please see: <https://github.com/vllm-project/vllm/pull/4087#issuecomment-2250397630>
 
@@ -741,6 +748,7 @@ Speech2Text models trained specifically for Automatic Speech Recognition.
 
 | Architecture | Models | Example HF Models | [LoRA](../features/lora.md) | [PP](../serving/parallelism_scaling.md) |
 | ------------ | ------ | ----------------- | -------------------- | ------------------------- |
+| `CanaryForConditionalGeneration` | Canary | `nvidia/canary-1b-v2` | | |
 | `CohereAsrForConditionalGeneration` | Cohere-Transcribe | `CohereLabs/cohere-transcribe-03-2026` | | |
 | `FireRedASR2ForConditionalGeneration` | FireRedASR2 | `allendou/FireRedASR2-LLM-vllm`, etc. | | |
 | `FunASRForConditionalGeneration` | FunASR | `FunAudioLLM/Fun-ASR-Nano-2512-vllm`, etc. | | |

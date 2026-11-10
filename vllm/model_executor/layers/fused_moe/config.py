@@ -1029,6 +1029,7 @@ class FusedMoEParallelConfig:
     use_ep: bool  # whether to use EP or not
     all2all_backend: str  # all2all backend for MoE communication
     enable_eplb: bool  # whether to enable expert load balancing
+    mori_ep_v2: bool = False  # whether the "mori" all2all backend runs EPv2
 
     @property
     def is_sequence_parallel(self) -> bool:
@@ -1087,10 +1088,20 @@ class FusedMoEParallelConfig:
         return self.all2all_backend == "passthrough"
 
     @property
-    def use_mori_kernels(self):
+    def use_mori_epv1_kernels(self):
+        if self.all2all_backend == "mori":
+            return self.use_all2all_kernels and not self.mori_ep_v2
         return self.use_all2all_kernels and self.all2all_backend in (
             "mori_high_throughput",
             "mori_low_latency",
+        )
+
+    @property
+    def use_mori_epv2_kernels(self):
+        return (
+            self.use_all2all_kernels
+            and self.all2all_backend == "mori"
+            and self.mori_ep_v2
         )
 
     @property
@@ -1225,6 +1236,7 @@ class FusedMoEParallelConfig:
                 use_ep=False,
                 all2all_backend=vllm_parallel_config.all2all_backend,
                 enable_eplb=vllm_parallel_config.enable_eplb,
+                mori_ep_v2=bool(vllm_parallel_config.mori_ep_v2),
             )
         # DP + EP / TP + EP / DP + TP + EP
         assert use_ep
@@ -1245,6 +1257,7 @@ class FusedMoEParallelConfig:
             use_ep=True,
             all2all_backend=vllm_parallel_config.all2all_backend,
             enable_eplb=vllm_parallel_config.enable_eplb,
+            mori_ep_v2=bool(vllm_parallel_config.mori_ep_v2),
         )
 
     @classmethod
@@ -1407,10 +1420,11 @@ class FusedMoEConfig:
                 )
             self.use_mxfp4_w4a4_dsv4 = True
 
-        if self.use_mori_kernels:
+        if self.use_mori_epv1_kernels:
             assert self.rocm_aiter_fmoe_enabled, (
-                "Mori needs to be used with aiter fused_moe for now."
+                "MoRI EPv1 needs to be used with aiter fused_moe for now."
             )
+        if self.use_mori_epv1_kernels or self.use_mori_epv2_kernels:
             assert not self.is_fused_shared_expert_requested, (
                 "Mori does not support fusion shared expert now. "
                 "Turn it off by setting VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=0"
@@ -1562,8 +1576,12 @@ class FusedMoEConfig:
         return self.moe_parallel_config.use_passthrough_all2all
 
     @property
-    def use_mori_kernels(self):
-        return self.moe_parallel_config.use_mori_kernels
+    def use_mori_epv1_kernels(self):
+        return self.moe_parallel_config.use_mori_epv1_kernels
+
+    @property
+    def use_mori_epv2_kernels(self):
+        return self.moe_parallel_config.use_mori_epv2_kernels
 
     @property
     def use_fi_nvl_two_sided_kernels(self):

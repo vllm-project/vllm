@@ -1960,6 +1960,44 @@ class TestClientErrorResponses:
 
 
 # ======================================================================
+# tool definitions
+# ======================================================================
+
+
+class TestToolDefinitions:
+    @pytest.mark.parametrize(
+        "tool",
+        [
+            {"type": "web_search_20250305", "name": "web_search", "max_uses": 8},
+            {"type": "bash_20250124", "name": "bash"},
+        ],
+    )
+    def test_anthropic_defined_tool_is_rejected_by_type(self, tool):
+        with pytest.raises(ValidationError) as exc_info:
+            _make_request([{"role": "user", "content": "Hi"}], tools=[tool])
+
+        errors = exc_info.value.errors()
+        assert len(errors) == 1
+        assert f"{tool['type']!r} is not supported" in errors[0]["msg"]
+
+    @pytest.mark.parametrize("extra", [{}, {"type": "custom"}])
+    def test_custom_tool_is_accepted(self, extra):
+        request = _make_request(
+            [{"role": "user", "content": "Hi"}],
+            tools=[{"name": "get_weather", "input_schema": {}, **extra}],
+        )
+        assert request.tools is not None
+        assert request.tools[0].input_schema == {"type": "object"}
+
+    def test_custom_tool_still_requires_input_schema(self):
+        with pytest.raises(ValidationError, match="input_schema"):
+            _make_request(
+                [{"role": "user", "content": "Hi"}],
+                tools=[{"type": "custom", "name": "get_weather"}],
+            )
+
+
+# ======================================================================
 # thinking configuration pass-through
 # ======================================================================
 

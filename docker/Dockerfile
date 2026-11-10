@@ -987,7 +987,7 @@ RUN set -eux; \
 # From versions.json: .openai_server_extras.timm, .openai_server_extras.runai_model_streamer,
 # .openai_server_extras.gguf (NVFP4 GGUF checkpoints, e.g. RecursiveSI/flint-nvfp4-gguf)
 ARG TIMM_VERSION=">=1.0.17"
-ARG RUNAI_MODEL_STREAMER_VERSION=">=0.15.7"
+ARG RUNAI_MODEL_STREAMER_VERSION=">=0.17.1"
 ARG GGUF_VERSION=">=0.19.0"
 RUN --mount=type=cache,target=/opt/uv/cache \
     uv pip install --system accelerate 'modelscope<1.38' \

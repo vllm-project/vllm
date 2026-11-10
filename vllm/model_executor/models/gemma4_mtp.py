@@ -45,6 +45,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.sequence import IntermediateTensors
+from vllm.v1.worker.gpu.spec_decode.gemma4.config import Gemma4MTPSpeculatorConfig
 
 from .gemma4 import Gemma4MLP, _get_text_config
 from .utils import (
@@ -446,6 +447,9 @@ class Gemma4MTP(nn.Module):
     hidden-state feedback buffer.
     """
 
+    # The speculator this is a draft model of (see SpeculativeDraftModel).
+    speculator_config_class = Gemma4MTPSpeculatorConfig
+
     has_own_lm_head = True
 
     hf_to_vllm_mapper = WeightsMapper(
@@ -516,7 +520,7 @@ class Gemma4MTP(nn.Module):
         draft_cfg = speculative_config.draft_model_config
         gen_cfg = draft_cfg.try_get_generation_config()
         self._suppress_token_ids = gen_cfg.get("suppress_tokens") if gen_cfg else None
-        # Materialized on-device in load_weights: compute_logits runs under CUDA
+        # Materialized on-device after loading: compute_logits runs under CUDA
         # graph capture in the V2 speculator, where indexing with a Python list
         # would issue an unpinned H2D copy (illegal during capture).
         self._suppress_idx: torch.Tensor | None = None
@@ -588,13 +592,14 @@ class Gemma4MTP(nn.Module):
         )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        self._stable_full_lm_head_weight = None
         loader = AutoWeightsLoader(self)
-        loaded = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+
+    def process_weights_after_loading(self) -> None:
+        self._stable_full_lm_head_weight = None
         if self._suppress_token_ids:
             self._suppress_idx = torch.tensor(
                 self._suppress_token_ids,
                 dtype=torch.long,
                 device=next(self.parameters()).device,
             )
-        return loaded

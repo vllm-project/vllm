@@ -7,9 +7,22 @@ struct IndexedFamilyWork {
   int group, logical_nk, active_word_count, first_block, blocks;
 };
 
+// Full resident waves have one CTA per active Q8 group. Only the residual
+// groups are split over K. width=0 denotes the ordinary rectangular schedule.
+__device__ __forceinline__ int whole_groups(int count, int64_t width) {
+  return width > 0 && width <= count ? count - count % int(width) : 0;
+}
+__device__ __forceinline__ int3 locate_work(int index, int bulk, int count,
+                                            int parts) {
+  if (index < bulk) return make_int3(index, 0, 1);
+  const int i = index - bulk, tail = count - bulk;
+  return make_int3(bulk + i % tail, i / tail, parts);
+}
+
 template <int Paid, int Tile, class ValidBudget>
-__device__ __forceinline__ IndexedFamilyWork admit_indexed_family(
-    const Args& a, const int32_t* live_nk, ValidBudget valid_budget) {
+__device__ __forceinline__ IndexedFamilyWork
+admit_indexed_family(const Args& a, const int32_t* live_nk, int64_t width,
+                     ValidBudget valid_budget) {
   int t = threadIdx.x, logical_nk = __ldg(live_nk);
   if (logical_nk < a.seed || logical_nk > a.nk) {
     if (blockIdx.x == 0)
@@ -19,9 +32,10 @@ __device__ __forceinline__ IndexedFamilyWork admit_indexed_family(
   int active_word_count = (logical_nk - a.seed + 31) / 32;
   int total_blocks = (logical_nk - a.seed + Tile - 1) / Tile;
   int count = __ldg(a.counts), parts = __ldg(a.counts + 1), groups = a.nq / 8;
+  const int bulk = whole_groups(count, width);
+  const int64_t tasks = bulk + (int64_t(count) - bulk) * parts;
   bool malformed = count < 0 || count > groups || parts < 1 ||
-                   parts > max(total_blocks, 1) ||
-                   int64_t(count) * parts > gridDim.x;
+                   parts > max(total_blocks, 1) || tasks > gridDim.x;
   if (malformed) {
     if (blockIdx.x == 0)
       for (int r = t; r < a.nq; r += blockDim.x) atomicOr(a.error + r, 1);
@@ -49,8 +63,11 @@ __device__ __forceinline__ IndexedFamilyWork admit_indexed_family(
       for (int r = t; r < a.nq; r += blockDim.x) atomicOr(a.error + r, 1);
   }
   int work = blockIdx.x;
-  if (work >= count * parts) return {};
-  int pos = work / parts, part = work % parts;
+  if (work >= tasks) return {};
+  // Adjacent CTAs stream the same key partition for distinct query groups.
+  const int3 loc = locate_work(work, bulk, count, parts);
+  const int pos = loc.x, part = loc.y;
+  parts = loc.z;
   int g = __ldg(a.ids + pos);
   if (g < 0 || g >= groups) {
     for (int r = t; r < a.nq; r += blockDim.x) atomicOr(a.error + r, 1);
@@ -71,8 +88,7 @@ __device__ __forceinline__ IndexedFamilyWork admit_indexed_family(
     }
     eligible |= b == Paid;
   }
-  if (!eligible) return {};
-  if (total_blocks == 0) return {};
+  if (!eligible || !total_blocks) return {};
   return {.admitted = true,
           .group = g,
           .logical_nk = logical_nk,
@@ -80,27 +96,59 @@ __device__ __forceinline__ IndexedFamilyWork admit_indexed_family(
           .first_block = first_block,
           .blocks = blocks};
 }
+// Both indexed families advance the same RAW/MMA credit pipeline. An F1 tile
+// contains two K128 halves; H18 contains one.
+template <int Columns, int Epochs, class Storage>
+__device__ __forceinline__ void issue_indexed_blocks(Storage& s, int blocks) {
+  constexpr int RawSlots = std::extent_v<decltype(Storage::raw_k)>;
+  constexpr int Halves = sizeof(s.raw_k[0]) / (128 * 128);
+  auto instruction =
+      cute::UMMA::make_instr_desc<cutlass::float_e4m3_t, cutlass::float_e4m3_t,
+                                  float, 128, Columns, cute::UMMA::Major::K,
+                                  cute::UMMA::Major::K>();
+  auto runtime = cute::UMMA::make_runtime_instr_desc(instruction);
+  const bool leader = cute::elect_one_sync();
+  s.full_q.wait(0);
+  for (int block = 0; block < blocks; ++block) {
+    const int stage = block % RawSlots, u = block % Epochs;
+    s.full_kv[stage].wait((block / RawSlots) & 1);
+    s.empty_umma[u].wait(((block / Epochs) & 1) ^ 1);
+    deep_gemm::ptx::tcgen05_after_thread_sync();
+    if (leader) {
+#pragma unroll
+      for (int h = 0; h < Halves; ++h)
+        issue_four_d32(s.raw_k[stage], s.fine, h * 128,
+                       s.tmem + (u * Halves + h) * Columns, runtime);
+      deep_gemm::ptx::umma_arrive_no_elect(s.full_umma[u]);
+    }
+    __syncwarp();
+  }
+}
+// All lanes vote. A finite owner-published SAFE implies the fixed plan and
+// live keys have been validated. A failed owner row has SAFE=-infinity.
+template <bool Prepared>
+__device__ __forceinline__ uint32_t keep_ballot(float value, float tau,
+                                                bool visible, bool valid) {
+  if constexpr (Prepared) {
+    return __ballot_sync(0xffffffffu, visible && !(value < tau));
+  } else {
+    uint32_t ballot;
+    asm volatile(
+        "{.reg .pred finite,below,active,valid,keep; .reg .f32 magnitude; "
+        "abs.f32 magnitude,%1; setp.lt.f32 finite,magnitude,0f7f800000; "
+        "setp.lt.f32 below,%1,%2; and.pred keep,finite,below; "
+        "setp.ne.u32 valid,%4,0; and.pred keep,keep,valid; not.pred keep,keep; "
+        "setp.ne.u32 active,%3,0; and.pred keep,keep,active; "
+        "vote.ballot.sync.b32 %0,keep,0xffffffff;}"
+        : "=r"(ballot)
+        : "f"(value), "f"(tau), "r"(uint32_t(visible)), "r"(uint32_t(valid)));
+    return ballot;
+  }
+}
 }  // namespace dosa_screen
 
 namespace f1_abs_qfma {
 using namespace dosa_screen;
-// All32 lanes participate, including inactive/invisible keys.
-__device__ __forceinline__ uint32_t qualified_keep_ballot(float value,
-                                                          float tau,
-                                                          uint32_t eligible,
-                                                          uint32_t qualified) {
-  uint32_t ballot;
-  asm volatile(
-      "{.reg .pred finite,below,active,valid,keep; .reg .f32 magnitude; "
-      "abs.f32 magnitude,%1; setp.lt.f32 finite,magnitude,0f7f800000; "
-      "setp.lt.f32 below,%1,%2; and.pred keep,finite,below; "
-      "setp.ne.u32 valid,%4,0; and.pred keep,keep,valid; not.pred keep,keep; "
-      "setp.ne.u32 active,%3,0; and.pred keep,keep,active; "
-      "vote.ballot.sync.b32 %0,keep,0xffffffff;}"
-      : "=r"(ballot)
-      : "f"(value), "f"(tau), "r"(eligible), "r"(qualified));
-  return ballot;
-}
 struct alignas(1024) K256FourWGStorage {
   alignas(1024) uint8_t fine[8 * 16 * 128];
   alignas(16) float fw[8][16];
@@ -110,6 +158,7 @@ struct alignas(1024) K256FourWGStorage {
   Param row[8];
   Barrier full_q, full_kv[4], empty_kv[4], full_umma[2], empty_umma[2];
   uint32_t tmem;
+  uint32_t span_blocks;
 };
 
 // Four RN chains are covered by the direct planner's 80-round envelope.
@@ -139,6 +188,7 @@ __device__ __forceinline__ void h16_abs_core(const float* acc,
     core[qr] = __fadd_rn(pair.x, pair.y);
   }
 }
+template <bool Prepared>
 __global__ __launch_bounds__(640, 1) void k256_four_math_kernel(
     const __grid_constant__ Args a,
     const __grid_constant__ cute::TmaDescriptor mq,
@@ -146,11 +196,12 @@ __global__ __launch_bounds__(640, 1) void k256_four_math_kernel(
     const __grid_constant__ cute::TmaDescriptor mk,
     const __grid_constant__ cute::TmaDescriptor ms,
     const __grid_constant__ cute::TmaDescriptor mr,
-    const __grid_constant__ BitmapArgs page, const int32_t* live_nk) {
+    const __grid_constant__ BitmapArgs page, const int32_t* live_nk,
+    int64_t width) {
   constexpr int H = 16;
   int t = threadIdx.x, warp = t / 32, lane = t & 31;
-  auto work =
-      admit_indexed_family<14, 256>(a, live_nk, [] __device__(int budget) {
+  auto work = admit_indexed_family<14, 256>(
+      a, live_nk, width, [] __device__(int budget) {
         return budget == 12 || dosa_geometry::valid_certificate_budget(budget);
       });
   if (!work.admitted) return;
@@ -158,6 +209,7 @@ __global__ __launch_bounds__(640, 1) void k256_four_math_kernel(
       first_block = work.first_block, blocks = work.blocks;
   extern __shared__ __align__(1024) uint8_t memory[];
   auto& s = *reinterpret_cast<K256FourWGStorage*>(memory);
+  if (t == 0) s.span_blocks = blocks;
   if (t < 8) s.row[t] = row_parameters<16, false>(a, g * 8 + t);
   initialize_screen<16, 512, 512, 512>(s, warp, mq, mw, mk, ms, mr);
   if (warp >= 16) cutlass::arch::warpgroup_reg_dealloc<32>();
@@ -169,24 +221,7 @@ __global__ __launch_bounds__(640, 1) void k256_four_math_kernel(
       produce_keys<256>(s, mk, ms, mr, a.seed, first_block, blocks);
     }
   } else if (warp == 17) {
-    auto instruction = cute::UMMA::make_instr_desc<
-        cutlass::float_e4m3_t, cutlass::float_e4m3_t, float, 128, 128,
-        cute::UMMA::Major::K, cute::UMMA::Major::K>();
-    auto runtime = cute::UMMA::make_runtime_instr_desc(instruction);
-    s.full_q.wait(0);
-    for (int block = 0; block < blocks; ++block) {
-      int stage = block % 4, phase = (block / 4) & 1, u = block % 2,
-          up = (block / 2) & 1;
-      s.full_kv[stage].wait(phase);
-      s.empty_umma[u].wait(up ^ 1);
-      deep_gemm::ptx::tcgen05_after_thread_sync();
-#pragma unroll
-      for (int kh = 0; kh < 2; ++kh) {
-        issue_screen_mma(s.raw_k[stage], s.fine, kh * 128,
-                         s.tmem + u * 256 + kh * 128, runtime);
-      }
-      cutlass::arch::umma_arrive(reinterpret_cast<uint64_t*>(&s.full_umma[u]));
-    }
+    issue_indexed_blocks<128, 2>(s, blocks);
   } else if (warp >= 18) {
   } else {
     cutlass::arch::warpgroup_reg_alloc<112>();
@@ -201,12 +236,19 @@ __global__ __launch_bounds__(640, 1) void k256_four_math_kernel(
         channel = (wg & 1) * 2;
     float weights[2][16];
     Param resident[2];
-    bool eligible_q[2];
+    uint32_t visible_start[2], visible_span[2];
     s.full_q.wait(0);
+    const bool eligible = a.budget[group] == 14;
 #pragma unroll
     for (int qr = 0; qr < 2; ++qr) {
-      resident[qr] = s.row[wg * 2 + qr];
-      eligible_q[qr] = a.budget[group] == 14;
+      Param& p = resident[qr];
+      p = s.row[wg * 2 + qr];
+      const int end = min(p.end, math_nk);
+      visible_start[qr] = uint32_t(p.start);
+      // Unsigned subtraction represents even the full signed endpoint span.
+      visible_span[qr] =
+          eligible && end > p.start ? uint32_t(end) - visible_start[qr] : 0u;
+      p.tau = p.hint == 2 ? p.tau : -INFINITY;
 #pragma unroll
       for (int h = 0; h < 16; ++h)
         weights[qr][h] =
@@ -220,13 +262,8 @@ __global__ __launch_bounds__(640, 1) void k256_four_math_kernel(
                              uint64_t(first_block) * 8u + uint64_t(warp & 3)) *
                                 16u +
                             uint64_t(channel + lane) * 4u;
-    // Rebuild the loop extent after setmaxnreg.
-    int math_blocks = (math_nk - a.seed + 255) / 256;
-    {
-      int math_parts = __ldg(a.counts + 1), math_part = blockIdx.x % math_parts;
-      math_blocks = math_blocks * (math_part + 1) / math_parts -
-                    math_blocks * math_part / math_parts;
-    }
+    // Read the admitted span after register donation.
+    const int math_blocks = deep_gemm::ptx::ld_shared(&s.span_blocks);
 #pragma unroll 2
     for (int block = 0; block < math_blocks; ++block) {
       int stage = block % 4, phase = (block / 4) & 1, u = block % 2,
@@ -268,7 +305,7 @@ __global__ __launch_bounds__(640, 1) void k256_four_math_kernel(
             static_cast<__nv_fp8_storage_t>(code), __NV_E4M3);
         float rho = __half2float(static_cast<__half>(half));
         int key = a.seed + (first_block + block) * 256 + kh * 128 + kt;
-        bool keyvalid = key < math_nk && code < 127u;
+        const uint32_t qualified = code < 127u;
         uint32_t ballots[2];
 #pragma unroll
         for (int qr = 0; qr < 2; ++qr) {
@@ -276,15 +313,13 @@ __global__ __launch_bounds__(640, 1) void k256_four_math_kernel(
           float signed_score = core[qr];
           float tail = __fmaf_ru(rho, p.guard, __fadd_ru(signed_score, p.raw));
           float value = __fmaf_ru(scale, tail, p.out);
-          bool visible = key < math_nk && key >= p.start && key < p.end;
-          uint32_t qualified = uint32_t(keyvalid && p.hint == 2);
-          ballots[qr] = qualified_keep_ballot(
-              value, p.tau, uint32_t(eligible_q[qr]) & uint32_t(visible),
-              qualified);
+          const bool visible =
+              uint32_t(key) - visible_start[qr] < visible_span[qr];
+          ballots[qr] = keep_ballot<Prepared>(value, p.tau, visible, qualified);
         }
         int word = (first_block + block) * 8 + kh * 4 + (warp & 3);
         unsigned value = lane == 0 ? ballots[0] : ballots[1];
-        if (lane < 2 && eligible_q[0] && word < math_word_count)
+        if (lane < 2 && eligible && word < math_word_count)
           *reinterpret_cast<uint32_t*>(word_address + uint64_t(kh) * 64u) =
               value;
       }
@@ -296,10 +331,12 @@ __global__ __launch_bounds__(640, 1) void k256_four_math_kernel(
 }
 
 }  // namespace f1_abs_qfma
-template <int Heads, int Tile, int Threads, class Storage, auto Kernel>
+template <int Heads, int Tile, int Threads, class Storage, auto Raw,
+          auto Checked>
 void emit_indexed(std::vector<Tensor> x, Tensor error, int64_t seed,
                   Tensor words, Tensor work_ids, Tensor work_inverse,
-                  Tensor work_config, int64_t launch_grid, Tensor live_nk) {
+                  Tensor work_config, int64_t launch_grid, Tensor live_nk,
+                  int64_t width, bool prepared) {
   auto [a, pg] = dosa_emit_host::bind(x, error, seed, words);
   const int nq = a.nq;
   DeviceGuard guard(x[0].get_device_index());
@@ -311,27 +348,19 @@ void emit_indexed(std::vector<Tensor> x, Tensor error, int64_t seed,
       x[7].data_ptr(), CU_TENSOR_MAP_DATA_TYPE_FLOAT32, {64, (cuuint64_t)nq},
       {256}, {(Heads + 3) / 4 * 4, 8}, CU_TENSOR_MAP_SWIZZLE_NONE);
   auto maps = dosa_emit_host::key_maps(x, Tile);
-  launch<Kernel, Threads, sizeof(Storage), Threads == 640>(
-      int(launch_grid), a, mq, mw, maps.keys, maps.scales, maps.rho, pg,
-      live_nk.mutable_data_ptr<int32_t>());
+  auto invoke = [&]<auto Kernel>() {
+    launch<Kernel, Threads, sizeof(Storage), Threads == 640>(
+        int(launch_grid), a, mq, mw, maps.keys, maps.scales, maps.rho, pg,
+        live_nk.mutable_data_ptr<int32_t>(), width);
+  };
+  if (prepared)
+    invoke.template operator()<Checked>();
+  else
+    invoke.template operator()<Raw>();
 }
 
 namespace f2_live_h18 {
 using namespace dosa_screen;
-__device__ __forceinline__ uint32_t h18_keep_ballot(float value, float tau,
-                                                    uint32_t eligible) {
-  uint32_t mask;
-  asm volatile(
-      "{.reg .pred finite,below,active,keep; .reg .f32 magnitude; "
-      "abs.f32 magnitude,%1; setp.lt.f32 finite,magnitude,0f7f800000; "
-      "setp.lt.f32 below,%1,%2; and.pred keep,finite,below; not.pred "
-      "keep,keep; "
-      "setp.ne.u32 active,%3,0; and.pred keep,keep,active; "
-      "vote.ballot.sync.b32 %0,keep,0xffffffff;}"
-      : "=r"(mask)
-      : "f"(value), "f"(tau), "r"(eligible));
-  return mask;
-}
 struct alignas(1024) F2LiveH18Storage {
   static constexpr int H = 18;
   static constexpr int W = (H + 3) / 4 * 4;
@@ -344,6 +373,7 @@ struct alignas(1024) F2LiveH18Storage {
   Barrier full_q, full_kv[8], empty_kv[8], full_umma[4], empty_umma[4];
   uint32_t tmem;
 };
+template <bool Prepared>
 __global__ __launch_bounds__(384, 1) void f2_live_h18_kernel(
     const __grid_constant__ Args a,
     const __grid_constant__ cute::TmaDescriptor mq,
@@ -351,11 +381,12 @@ __global__ __launch_bounds__(384, 1) void f2_live_h18_kernel(
     const __grid_constant__ cute::TmaDescriptor mk,
     const __grid_constant__ cute::TmaDescriptor ms,
     const __grid_constant__ cute::TmaDescriptor mr,
-    const __grid_constant__ BitmapArgs page, const int32_t* live_nk) {
+    const __grid_constant__ BitmapArgs page, const int32_t* live_nk,
+    int64_t width) {
   constexpr int H = 18, N = 8 * H, W = (H + 3) / 4 * 4, Stages = 3;
   int t = threadIdx.x, warp = t / 32, lane = t & 31;
-  auto work =
-      admit_indexed_family<16, 128>(a, live_nk, [] __device__(int budget) {
+  auto work = admit_indexed_family<16, 128>(
+      a, live_nk, width, [] __device__(int budget) {
         return dosa_geometry::valid_certificate_budget(budget);
       });
   if (!work.admitted) return;
@@ -376,20 +407,7 @@ __global__ __launch_bounds__(384, 1) void f2_live_h18_kernel(
     }
   } else if (warp == 9) {
     cutlass::arch::warpgroup_reg_dealloc<40>();
-    auto instruction = cute::UMMA::make_instr_desc<
-        cutlass::float_e4m3_t, cutlass::float_e4m3_t, float, 128, N,
-        cute::UMMA::Major::K, cute::UMMA::Major::K>();
-    auto runtime = cute::UMMA::make_runtime_instr_desc(instruction);
-    s.full_q.wait(0);
-    for (int block = 0; block < blocks; ++block) {
-      int stage = block % 8, phase = (block / 8) & 1, u = block % Stages,
-          up = (block / Stages) & 1;
-      s.full_kv[stage].wait(phase);
-      s.empty_umma[u].wait(up ^ 1);
-      deep_gemm::ptx::tcgen05_after_thread_sync();
-      issue_screen_mma(s.raw_k[stage], s.fine, 0, s.tmem + u * N, runtime);
-      cutlass::arch::umma_arrive(reinterpret_cast<uint64_t*>(&s.full_umma[u]));
-    }
+    issue_indexed_blocks<N, Stages>(s, blocks);
   } else if (warp >= 10) {
     cutlass::arch::warpgroup_reg_dealloc<40>();
   } else {
@@ -458,11 +476,10 @@ __global__ __launch_bounds__(384, 1) void f2_live_h18_kernel(
         float signed_score = __fmaf_rn(paid_sum, 0.5f, -neg);
         float tail = __fmaf_ru(rho, p.guard, __fadd_ru(signed_score, p.raw));
         float value = __fmaf_ru(scale, tail, p.out);
-        if (!(code < 127u && isfinite(neg)))
-          value = __uint_as_float(0x7f800000u);
-        bool visible = key < logical_nk && key >= p.start && key < p.end;
-        unsigned ballot = h18_keep_ballot(
-            value, p.tau, uint32_t(eligible_q[qr]) & uint32_t(visible));
+        const bool visible =
+            eligible_q[qr] && key < logical_nk && key >= p.start && key < p.end;
+        const unsigned ballot = keep_ballot<Prepared>(
+            value, p.tau, visible, code < 127u && isfinite(neg));
         if (lane == qr) word_value = ballot;
       }
       {
@@ -485,14 +502,18 @@ __global__ __launch_bounds__(384, 1) void f2_live_h18_kernel(
 DOSA_REGISTER("emit_h16_indexed_trusted_live_k",
               "(Tensor[] x, Tensor! error, int seed, Tensor! words, Tensor "
               "work_ids, Tensor work_inverse, "
-              "Tensor work_config, int grid, Tensor live_nk) -> ()",
+              "Tensor work_config, int grid, Tensor live_nk, int "
+              "resident_width=0, bool validated_plan=False) -> ()",
               CUDA,
               emit_indexed<16, 256, 640, f1_abs_qfma::K256FourWGStorage,
-                           f1_abs_qfma::k256_four_math_kernel>)
+                           f1_abs_qfma::k256_four_math_kernel<false>,
+                           f1_abs_qfma::k256_four_math_kernel<true>>)
 DOSA_REGISTER("emit_h18_indexed_trusted_live_k",
               "(Tensor[] x, Tensor! error, int seed, Tensor! words, Tensor "
               "work_ids, Tensor work_inverse, "
-              "Tensor work_config, int grid, Tensor live_nk) -> ()",
+              "Tensor work_config, int grid, Tensor live_nk, int "
+              "resident_width=0, bool validated_plan=False) -> ()",
               CUDA,
               emit_indexed<18, 128, 384, f2_live_h18::F2LiveH18Storage,
-                           f2_live_h18::f2_live_h18_kernel>)
+                           f2_live_h18::f2_live_h18_kernel<false>,
+                           f2_live_h18::f2_live_h18_kernel<true>>)

@@ -84,6 +84,7 @@ __global__ void compact(const __grid_constant__ Args a, const int* budget,
   __shared__ typename Scan::TempStorage scan;
   __shared__ uint2 output_word[8][256];
   __shared__ int thread_end[256];
+  __shared__ uint8_t warp_start_owner[2049];
   __shared__ int current_base[5], used[5], task_index[5], failed[5];
   __shared__ int aggregate, old_base, old_used, old_take;
   __shared__ int new_base, new_chunks, new_task, valid;
@@ -122,6 +123,9 @@ __global__ void compact(const __grid_constant__ Args a, const int* budget,
       }
       Scan(scan).ExclusiveSum(n, offset, total);
       if (n) {
+        // Publish the source owner of each aligned 32-output interval start.
+        for (int rank = (offset + 31) & ~31; rank < offset + n; rank += 32)
+          warp_start_owner[rank / 32] = uint8_t(t);
         int word_end = offset;
 #pragma unroll
         for (int j = 0; j < 8; ++j) {
@@ -132,6 +136,7 @@ __global__ void compact(const __grid_constant__ Args a, const int* budget,
       thread_end[t] = offset + n;
       if (t == 0) {
         aggregate = total;
+        warp_start_owner[(total + 31) / 32] = 255;
         old_base = current_base[stream];
         old_used = used[stream];
         old_take = old_base < 0 ? 0 : min(total, ChunkIds - old_used);
@@ -181,10 +186,15 @@ __global__ void compact(const __grid_constant__ Args a, const int* budget,
             stream == 4 ? row : row * 4 + stream, new_base + chunk * ChunkIds,
             min(ChunkIds, aggregate - old_take - chunk * ChunkIds)};
       for (int rank = t; rank < aggregate; rank += 256) {
-        int owner = 0;
-#pragma unroll
-        for (int step = 128; step; step >>= 1)
-          if (rank >= thread_end[owner + step - 1]) owner += step;
+        int owner = warp_start_owner[rank / 32],
+            hi = warp_start_owner[rank / 32 + 1];
+        while (owner < hi) {
+          int mid = (owner + hi) / 2;
+          if (rank >= thread_end[mid])
+            owner = mid + 1;
+          else
+            hi = mid;
+        }
         int word = 0;
 #pragma unroll
         for (int step = 4; step; step >>= 1)

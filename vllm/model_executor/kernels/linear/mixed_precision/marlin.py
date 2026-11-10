@@ -178,8 +178,10 @@ class MarlinLinearKernel(MPLinearKernel):
         self._transform_param(layer, self.w_s_name, transform_w_s)
 
         if hasattr(layer, "bias") and layer.bias is not None:
-            layer.bias.data = marlin_permute_bias(
-                marlin_pad_dim(layer.bias, size_n, padded_n)
+            replace_parameter(
+                layer,
+                "bias",
+                marlin_permute_bias(marlin_pad_dim(layer.bias, size_n, padded_n)),
             )
 
     def apply_weights(

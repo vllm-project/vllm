@@ -1,18 +1,94 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
+from pathlib import Path
+
 import pytest
+import torch
+from safetensors import safe_open
+from safetensors.torch import save_file
 
 from tests.utils import single_gpu_only
 from vllm import SamplingParams
+from vllm.model_executor.model_loader.weight_utils import download_weights_from_hf
 from vllm.platforms import current_platform
+from vllm.v1.metrics.reader import Vector
 
 from ...utils import (
     assert_request_outputs_match,
     compute_acceptance_len,
+    get_spec_decode_metric_value,
     get_test_prompts,
 )
 from .._correctness import check_mtp_correctness
+
+
+def _add_random_mtp_module(model_name: str, path: Path) -> Path:
+    """Copy of `model_name` with a second MTP module of random weights."""
+    src = Path(download_weights_from_hf(model_name, None, allow_patterns=["*"]))
+    for file in src.iterdir():
+        if file.name not in ("config.json", "model.safetensors.index.json"):
+            (path / file.name).symlink_to(file)
+    config = json.loads((src / "config.json").read_text())
+    config["text_config"]["mtp_num_hidden_layers"] = 2
+    (path / "config.json").write_text(json.dumps(config))
+
+    index = json.loads((src / "model.safetensors.index.json").read_text())
+    generator = torch.Generator().manual_seed(0)
+    module_1 = {}
+    for name, shard in index["weight_map"].items():
+        if name.startswith("mtp.layers.0."):
+            with safe_open(src / shard, framework="pt") as f:
+                weight = f.get_tensor(name)
+            module_1[name.replace("layers.0.", "layers.1.")] = torch.randn(
+                weight.shape, generator=generator
+            ).to(weight.dtype)
+    save_file(module_1, path / "mtp_module_1.safetensors")
+    index["weight_map"].update(dict.fromkeys(module_1, "mtp_module_1.safetensors"))
+    (path / "model.safetensors.index.json").write_text(json.dumps(index))
+    return path
+
+
+@single_gpu_only
+def test_mtp_draft_steps_use_their_own_module(
+    monkeypatch: pytest.MonkeyPatch,
+    sampling_config: SamplingParams,
+    tmp_path: Path,
+    vllm_runner,
+):
+    """With two MTP modules, draft step 2 must run module 1, also with the
+    default drafter CUDA graphs. Module 1 has random weights, so its drafts are
+    rejected while module 0's are still accepted."""
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    model = _add_random_mtp_module("Qwen/Qwen3.5-0.8B-Base", tmp_path)
+    with vllm_runner(
+        str(model),
+        block_size=None,
+        enable_chunked_prefill=None,
+        max_model_len=2048,
+        limit_mm_per_prompt={"image": 0, "video": 0},
+        speculative_config={
+            "method": "mtp",
+            "num_speculative_tokens": 2,
+            # Also covers get_top_tokens(..., spec_step_idx) on this path.
+            "use_local_argmax_reduction": True,
+        },
+        disable_log_stats=False,
+    ) as runner:
+        runner.llm.chat(get_test_prompts(mm_enabled=False), sampling_config)
+        metrics = runner.llm.get_metrics()
+
+    num_drafts = get_spec_decode_metric_value(metrics, "vllm:spec_decode_num_drafts")
+    accepted_per_pos = next(
+        m.values
+        for m in metrics
+        if isinstance(m, Vector)
+        and m.name == "vllm:spec_decode_num_accepted_tokens_per_pos"
+    )
+    step_1, step_2 = (accepted / num_drafts for accepted in accepted_per_pos)
+    assert step_1 > 0.3, f"module 0 acceptance {step_1:.3f}"
+    assert step_2 < 0.05, f"module 1 acceptance {step_2:.3f}: module 0 was reused"
 
 
 @pytest.mark.parametrize(

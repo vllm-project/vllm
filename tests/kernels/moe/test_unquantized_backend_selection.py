@@ -380,6 +380,7 @@ def test_select_cuda_flashinfer_trtllm_modular_backend(
     [
         "mori_high_throughput",
         "mori_low_latency",
+        "mori",
         "flashinfer_nvlink_two_sided",
         "flashinfer_nvlink_one_sided",
     ],

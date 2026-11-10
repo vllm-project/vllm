@@ -133,11 +133,28 @@ class AnthropicMessage(BaseModel):
 class AnthropicTool(BaseModel):
     """Tool definition."""
 
+    type: Literal["custom"] | None = None
     name: str
     description: str | None = None
     input_schema: dict[str, Any]
     strict: bool | None = None
     defer_loading: bool | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_anthropic_defined_tools(cls, data: Any) -> Any:
+        # Anthropic-defined tools (web_search_*, code_execution_*, bash_*,
+        # text_editor_*, ...) carry a versioned ``type`` and no input_schema.
+        # Reject them by name here, before field validation would report a
+        # missing input_schema and point the client at the wrong problem.
+        if isinstance(data, dict):
+            tool_type = data.get("type")
+            if tool_type not in (None, "custom"):
+                raise ValueError(
+                    f"tool type {tool_type!r} is not supported; only custom "
+                    "tools with an input_schema are supported"
+                )
+        return data
 
     @field_validator("input_schema")
     @classmethod
