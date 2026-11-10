@@ -74,7 +74,7 @@ def dsa_indexer_uses_fp4(vllm_config: VllmConfig) -> bool:
         )
     use_fp4 = kv_dtype == "mxfp4"
     if use_fp4 and current_platform.is_rocm():
-        from vllm._aiter_ops import rocm_aiter_ops
+        from vllm._aiter_ops import IS_AITER_FOUND
         from vllm.platforms.rocm import get_cdna_version
 
         # Only DeepSeek-V4 and V4.1 are wired to the ROCm MXFP4 cache; other
@@ -95,10 +95,12 @@ def dsa_indexer_uses_fp4(vllm_config: VllmConfig) -> bool:
             raise ValueError(
                 "indexer_kv_dtype='mxfp4' on ROCm requires CDNA4 (MI350X/MI355X)."
             )
-        if not rocm_aiter_ops.is_enabled():
+        # The MXFP4 indexer calls aiter's kernels directly, not through
+        # rocm_aiter_ops, so it needs the package but not VLLM_ROCM_USE_AITER.
+        if not IS_AITER_FOUND:
             raise ValueError(
-                "indexer_kv_dtype='mxfp4' on ROCm runs on aiter's kernels; enable "
-                "aiter with VLLM_ROCM_USE_AITER=1."
+                "indexer_kv_dtype='mxfp4' on ROCm runs on aiter's kernels; "
+                "install aiter."
             )
         return True
     if use_fp4 and not current_platform.is_device_capability_family(100):
