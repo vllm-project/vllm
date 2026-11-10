@@ -108,9 +108,9 @@ def _kvgather_rows_kernel(
     Out,
     d0,
     rank_rows,
-    lloc,
-    il,
-    w,
+    local_rows,
+    interleave,
+    world,
     K: tl.constexpr,
     B: tl.constexpr,
 ):
@@ -120,8 +120,8 @@ def _kvgather_rows_kernel(
     m = j < K
     p = tl.load(Pos + t * pos_stride + j, mask=m, other=-1).to(tl.int64)
     r = (tl.load(Req + t) - d0).to(tl.int64)
-    owner, lp = dcp_global_to_local_index(p, w, il)
-    row = owner * rank_rows + r * lloc + lp
+    owner, local_pos = dcp_global_to_local_index(p, world, interleave)
+    row = owner * rank_rows + r * local_rows + local_pos
     tl.store(Out + t * K + j, tl.where(p >= 0, row, -1).to(tl.int32), mask=m)
 
 
@@ -1480,9 +1480,11 @@ class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
         if rows <= 0:
             return False
         w, il = self.dcp_world_size, md.cp_kv_cache_interleave_size
-        lloc = cdiv(md.prefill_max_seq_len, il * w) * il
-        kv_bytes = w * md.num_prefills * lloc * DS_MLA_STATE_CONTENT_BYTES["fp8_ds_mla"]
-        # bf16 query all-gather in + all-heads output all-to-all out
+        local_rows = cdiv(md.prefill_max_seq_len, il * w) * il
+        kv_bytes = (
+            w * md.num_prefills * local_rows * DS_MLA_STATE_CONTENT_BYTES["fp8_ds_mla"]
+        )
+        # The bf16 query all-gather and the all-heads output all-to-all.
         q_bytes = (
             rows
             * self.num_heads
@@ -1513,16 +1515,16 @@ class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
         dev = q.device
         rows_u8, stride_rows = flat_kv_row_view(kv_c_and_k_pe_cache, bs)
         rows_u8 = rows_u8.view(torch.uint8)
-        lloc = cdiv(md.prefill_max_seq_len, il * w) * il
+        local_rows = cdiv(md.prefill_max_seq_len, il * w) * il
 
-        # This rank's local rows of each prefill request at a fixed stride lloc.
-        # They depend only on the step's metadata, which every sparse MLA
-        # layer of the group shares: build them once per metadata object.
+        # Cache slots of this rank's rows of each prefill request, padded to
+        # local_rows per request. Shared by the group's layers: built once per
+        # metadata object.
         slots = getattr(md, "_dcp_kvgather_slots", None)
         if slots is None:
             seq = cast(torch.Tensor, md.seq_lens)[d0 : d0 + n_req]
             local_len = get_dcp_local_seq_lens(seq, w, me, il)
-            lp = torch.arange(lloc, device=dev, dtype=torch.int64)
+            lp = torch.arange(local_rows, device=dev, dtype=torch.int64)
             bt = md.block_table[d0 : d0 + n_req]
             blk = torch.gather(
                 bt, 1, (lp // bs).clamp(max=bt.shape[1] - 1).expand(n_req, -1)
@@ -1531,7 +1533,7 @@ class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
             slots = torch.where(lp[None, :] < local_len[:, None], slots, 0).flatten()
             md._dcp_kvgather_slots = slots  # type: ignore[attr-defined]
         local = rows_u8.index_select(0, slots)
-        gathered = get_dcp_group().all_gather(local, dim=0)  # [w*n_req*lloc, B]
+        gathered = get_dcp_group().all_gather(local, dim=0)  # [w*n_req*local_rows, B]
 
         # Global top-k positions -> rows of the gathered buffer.
         pos = self.topk_indices_buffer[row0 : row0 + t, : md.topk_tokens]
@@ -1543,8 +1545,8 @@ class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
                 md.req_id_per_token[row0:],
                 idx,
                 d0,
-                n_req * lloc,
-                lloc,
+                n_req * local_rows,
+                local_rows,
                 il,
                 w,
                 md.topk_tokens,
@@ -1729,8 +1731,7 @@ class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
                 # The packed DSA record is 656 bytes wide, not the 576 of a
                 # plain QK row, so aiter only recognises it as a 3-D block
                 # cache. One record per block keeps the slot numbering the
-                # index stream already uses. The DCP branch above does the
-                # same.
+                # index stream already uses.
                 kv_c_and_k_pe_cache.view(torch.uint8).unsqueeze(1),
                 output,
                 self.scale,

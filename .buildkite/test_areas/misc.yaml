@@ -199,30 +199,6 @@ steps:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s -rs v1/kv_connector/unit/moriio
 
-- label: ":amd: (MI355 DPX) MoRIIO Hybrid Transfer Unit Tests"
-  key: amd-moriio-hybrid-transfer-unit-mi355
-  dind: false
-  device: mi355_dpx
-  num_devices: 1
-  timeout_in_minutes: 15
-  working_dir: /vllm-workspace/tests
-  depends_on:
-  - image-build-amd
-  source_file_dependencies:
-  - vllm/distributed/kv_transfer/kv_connector/v1/moriio/
-  - vllm/v1/kv_cache_interface.py
-  - tests/v1/kv_connector/unit/test_moriio_hma_scheduler.py
-  - tests/v1/kv_connector/unit/test_moriio_transfer_completion.py
-  - tests/v1/kv_connector/unit/test_moriio_tp_ack.py
-  commands:
-  - python -c 'import mori.io'
-  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - >-
-    pytest -v -s
-    v1/kv_connector/unit/test_moriio_hma_scheduler.py
-    v1/kv_connector/unit/test_moriio_transfer_completion.py
-    v1/kv_connector/unit/test_moriio_tp_ack.py
-
 # UMBP is built on mori, so its tests skip on CUDA. Run them on MI355 whenever
 # the connector or its tests change.
 - label: ":amd: (MI355 DPX) UMBP Connector Unit Tests"
@@ -540,38 +516,21 @@ steps:
 - label: ":nvidia: (H200 MIG 35GB) Examples"
   device: h200_35gb
   key: examples
+  automatic_shard: true
   timeout_in_minutes: 40
-  working_dir: "/vllm-workspace/examples"
+  working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/entrypoints
   - vllm/multimodal
   - examples/
+  - tests/examples/
   commands:
     - pip install --no-deps tensorizer # for tensorizer test
-     # for basic
-    - python3 basic/offline_inference/chat.py
-    - python3 basic/offline_inference/generate.py --model facebook/opt-125m
-    - python3 basic/offline_inference/generate.py --model meta-llama/Llama-2-13b-chat-hf --cpu-offload-gb 10
-    - python3 basic/offline_inference/classify.py
-    - python3 basic/offline_inference/embed.py
-    - python3 basic/offline_inference/score.py
-    # for multi-modal models
-    - python3 generate/multimodal/audio_language_offline.py --seed 0
-    - python3 generate/multimodal/vision_language_offline.py --seed 0
-    - python3 generate/multimodal/vision_language_multi_image_offline.py --seed 0
-    - python3 generate/multimodal/encoder_decoder_multimodal_offline.py --model-type whisper --seed 0
-     # for pooling models
-    - python3 pooling/embed/vision_embedding_offline.py --seed 0
-    # for features demo
-    - python3 features/automatic_prefix_caching/prefix_caching_offline.py
-    - python3 deployment/llm_engine_example.py
-    - python3 features/tensorize_vllm_model.py --model facebook/opt-125m serialize --serialized-directory /tmp/ --suffix v1 && python3 features/tensorize_vllm_model.py --model facebook/opt-125m deserialize --path-to-tensors /tmp/vllm/facebook/opt-125m/v1/model.tensors
-    - python3 features/speculative_decoding/spec_decode_offline.py --test --method eagle --num_spec_tokens 3 --dataset-name hf --dataset-path philschmid/mt-bench --num-prompts 80 --temp 0 --top-p 1.0 --top-k -1 --tp 1 --enable-chunked-prefill --max-model-len 2048
-    # https://github.com/vllm-project/vllm/pull/26682 uses slightly more memory in PyTorch 2.9+ causing this test to OOM in 1xL4 GPU
-    - python3 features/speculative_decoding/spec_decode_offline.py --test --method eagle3 --num_spec_tokens 3 --dataset-name hf --dataset-path philschmid/mt-bench --num-prompts 80 --temp 0 --top-p 1.0 --top-k -1 --tp 1 --enable-chunked-prefill --max-model-len 1536
+    - pytest -v -s examples/test_offline_examples.py
   mirror:
     amd:
       label: ":amd: (MI355 DPX) Examples"
+      automatic_shard: true
       dind: false
       device: mi355_dpx
       timeout_in_minutes: 75
@@ -579,6 +538,7 @@ steps:
       - vllm/entrypoints
       - vllm/multimodal
       - examples/
+      - tests/examples/
       - vllm/platforms/rocm.py
       depends_on:
       - image-build-amd

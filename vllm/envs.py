@@ -143,7 +143,6 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_CUSTOM_AR: bool = True
     VLLM_ROCM_MUSE_MOE_REDUCE_DTYPE: str = "fp32"
     VLLM_ROCM_MUSE_MOE_ONLINE_QUANT: str = ""
-    VLLM_ROCM_DCP_AITER_ALLGATHER: bool = False
     VLLM_ROCM_USE_AITER_LINEAR: bool = True
     VLLM_ROCM_USE_AITER_LINEAR_HIPBMM: bool = False
     VLLM_ROCM_USE_AITER_MOE: bool = True
@@ -1355,12 +1354,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ROCM_MUSE_MOE_ONLINE_QUANT": lambda: os.getenv(
         "VLLM_ROCM_MUSE_MOE_ONLINE_QUANT", ""
     ).lower(),
-    # Route DCP-group all_gathers through the TP group's AITER IPC all-gather
-    # when the DCP and TP groups span the same ranks. Falls back to RCCL for
-    # inputs AITER cannot take (e.g. large prefill gathers).
-    "VLLM_ROCM_DCP_AITER_ALLGATHER": lambda: (
-        os.getenv("VLLM_ROCM_DCP_AITER_ALLGATHER", "0").lower() in ("true", "1")
-    ),
     # use aiter linear op if aiter ops are enabled
     # The following list of related ops
     # - scaled_mm (per-tensor / rowwise)
@@ -1438,12 +1431,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
         os.getenv("VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA", "False").lower()
         in ("true", "1")
     ),
-    # Whether rocm_aiter_ops.triton_sparse_mla_fwd hands the calls the FlyDSL
-    # sparse MLA kernel accepts (bf16 q, fp8_ds_mla cache, no scales, sinks or
-    # extra segment: Kimi-K3.1 DSA) to that kernel instead of the Triton one.
-    # The kernel is vLLM's own (vllm/models/kimi_k3/amd/ops), with aiter's copy
-    # as a fallback. Falls back to the Triton kernel when neither imports or
-    # when the kernel rejects the call. gfx950 only. By default is disabled.
+    # Run the sparse MLA calls the FlyDSL kernel accepts (bf16 q, fp8_ds_mla
+    # cache, no sinks: Kimi-K3.1 DSA) on it instead of Triton; others stay on
+    # Triton. gfx950 only. Disabled by default.
     "VLLM_ROCM_USE_AITER_FLYDSL_SPARSE_MLA": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_FLYDSL_SPARSE_MLA", "False").lower()
         in ("true", "1")

@@ -351,7 +351,7 @@ def _mamba_hetero_tp_segments(
     local_offset = 0
     if tp_ratio > 0:
         # Several producer ranks fill one consumer page; this rank owns slot
-        # ``local_tp_rank % tp_ratio`` of every part.
+        # `local_tp_rank % tp_ratio` of every part.
         assert local_tp_rank // tp_ratio == remote_tp_rank
         slot = local_tp_rank % tp_ratio
         for size in parts:
@@ -2134,7 +2134,7 @@ class MooncakeConnectorWorker:
         # while the matching Mamba/GDN state block remains k. Only attention
         # groups need logical block ids expanded to kernel block ids; Mamba/GDN
         # state block ids stay in the logical/page-id space.
-        # ``physical_blocks_per_logical`` is the owner's ratio (the consumer's
+        # `physical_blocks_per_logical` is the owner's ratio (the consumer's
         # for its block ids); defaults to ours.
         ratio = (
             physical_blocks_per_logical or self._physical_blocks_per_logical_kv_block
