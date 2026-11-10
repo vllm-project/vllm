@@ -35,8 +35,12 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.platforms import current_platform
 
-# Above this many tokens the weight reuse of the Triton GEMMs wins.
-RDNA3_W4A8_MAX_TOKENS = 8
+# Per-layer sweep on gfx1151 (eager, weights not in cache, M = 1..64) on the
+# Qwen3.6-35B-A3B and Qwen3.8-Flash-Next MoE shapes: the decode kernel is
+# faster than the Triton WNA16 GEMMs at every M measured, 1.1-1.3x on
+# Flash-Next and 2.0-7.5x on Qwen3.6. Not measured above 64; larger steps
+# (prefill chunks, more than 64 decoding requests) use the Triton kernels.
+RDNA3_W4A8_MAX_TOKENS = 64
 
 
 def _align16(nbytes: int) -> int:

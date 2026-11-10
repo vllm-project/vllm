@@ -58,7 +58,7 @@ SHAPES = [
     pytest.param(16, 2048, 768, 8, 32, id="qwen3-30b-a3b-g32"),
     pytest.param(8, 256, 128, 2, 64, id="small-g64"),
 ]
-NUM_TOKENS = [1, 2, 4, 8]
+NUM_TOKENS = [1, 2, 4, 8, 16, 64]
 
 
 def _pack_k(codes: torch.Tensor) -> torch.Tensor:
@@ -173,7 +173,7 @@ def test_matches_w4a8_reference(E, K, N, top_k, group, M, dtype, with_zp):
 
 
 @pytest.mark.parametrize("E,K,N,top_k,group", SHAPES)
-@pytest.mark.parametrize("M", [1, 8])
+@pytest.mark.parametrize("M", [1, 8, 64])
 @pytest.mark.parametrize("with_zp", [False, True])
 def test_close_to_triton_wna16(E, K, N, top_k, group, M, with_zp):
     """Same weight tensors through the Triton W4A16 path."""
