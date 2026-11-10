@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from subprocess import CalledProcessError
+from typing import TYPE_CHECKING
 
 import torch
 import torch.nn as nn
@@ -20,7 +21,11 @@ if HAS_TRITON:
         apply_top_k_top_p_triton,
         can_use_top_k_top_p_triton,
         register_warmups,
+        reserve_workspace,
     )
+
+if TYPE_CHECKING:
+    from vllm.config import VllmConfig
 
 logger = init_logger(__name__)
 
@@ -29,6 +34,21 @@ def register_top_k_top_p_warmups() -> None:
     """Register every native accelerator sampling kernel used at runtime."""
     if HAS_TRITON and not current_platform.is_cpu():
         register_warmups()
+
+
+def reserve_top_k_top_p_workspace(
+    vllm_config: "VllmConfig", logits: torch.Tensor
+) -> None:
+    """Spec-decode verification filters 1 + K rows per request, more than the dummy
+    sampler run does, so allocate the Triton filter's workspace for them while
+    memory profiling counts it."""
+    spec = vllm_config.speculative_config
+    if spec is None or not HAS_TRITON or current_platform.is_cpu():
+        return
+    scheduler = vllm_config.scheduler_config
+    rows_per_req = 1 + spec.num_speculative_tokens
+    rows = min(scheduler.max_num_batched_tokens, scheduler.max_num_seqs * rows_per_req)
+    reserve_workspace(logits.device, rows, logits.shape[-1])
 
 
 def _aiter_temp_gumbel_sample(

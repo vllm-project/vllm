@@ -97,7 +97,7 @@ def apply_top_k_top_p_triton(
         contiguous.
 
     """
-    if k is None and p is None:
+    if (k is None and p is None) or logits.shape[0] == 0:
         return logits
     if logits.stride(1) != 1:
         logits = logits.contiguous()
@@ -124,6 +124,13 @@ def apply_top_k_top_p_triton(
         )
         args[at_logits] = args[at_p] = None  # do not keep the caller's tensors alive
     return logits
+
+
+def reserve_workspace(device: torch.device, rows: int, vocab: int) -> None:
+    """Allocate the workspace for rows rows now, e.g. while memory profiling counts
+    it, so that serving does not grow it."""
+    if vocab < _MAX_VOCAB_SIZE and _supported_device():
+        buffers(device, rows, vocab)
 
 
 def register_warmups() -> None:
@@ -188,6 +195,7 @@ WORKSPACE = [
     "more",
     "span",
     "above",
+    "queue",
     "sync",
 ]
 
@@ -279,9 +287,10 @@ def buffers(device: torch.device, rows: int, vocab: int) -> dict[str, torch.Tens
 def allocate(device: torch.device, rows: int, vocab: int) -> dict[str, torch.Tensor]:
     """Level 1 and 2 maxima, (max, sum of exp) per split and per row, row states, kept
     keys, histograms, per-row gather scratch, windows, gather counts and masses, spans
-    (top, floor, scale, flag) with the count and mass above (and mass below) them, and
-    the grid barrier (barrier count, exit count, histogram rows per round from 2, rows
-    to cut per round from 8), which is zeroed once and reset by each call."""
+    (top, floor, scale, flag) with the count and mass above (and mass below) them, the
+    rows queued for the histogram path, and the grid barrier (barrier count, exit
+    count, histogram rows per round from 2, rows to cut per round from 8), which is
+    zeroed once and reset by each call."""
     empty = functools.partial(torch.empty, device=device)
     if device not in _SYNC:
         _SYNC[device] = torch.zeros(16, dtype=torch.int32, device=device)
@@ -299,6 +308,7 @@ def allocate(device: torch.device, rows: int, vocab: int) -> dict[str, torch.Ten
         more=empty(rows * 2, dtype=torch.float64),
         span=empty(rows * 4, dtype=torch.float32),
         above=empty(rows * 4, dtype=torch.float64),
+        queue=empty(rows, dtype=torch.int32),
         sync=_SYNC[device],
     )
 
@@ -395,6 +405,7 @@ def _filter_kernel(
     more_ptr,
     span_ptr,
     above_ptr,
+    queue_ptr,
     sync_ptr,
     rows,
     vocab,
@@ -434,6 +445,7 @@ def _filter_kernel(
             scratch_ptr,
             span_ptr,
             above_ptr,
+            queue_ptr,
             sync_ptr,
             row,
             vocab,
@@ -458,12 +470,15 @@ def _filter_kernel(
     r = 0
     syncs = 1  # barriers so far
     hist_rows = tl.load(sync_ptr + 2, volatile=True)  # rows on the histogram path
+    # Histogram, plan and gather go over the rows the select queued, so their items
+    # spread over the programs wherever those rows sit in the batch.
+    queued = hist_rows
     while hist_rows != 0:
         # Split those rows until there are about HIST_ITEMS items per program.
         hsplits = tl.minimum(MAX_SPLITS, tl.cdiv(HIST_ITEMS * programs, hist_rows))
         hchunk = tl.cdiv(tl.cdiv(vocab, hsplits), BLOCK) * BLOCK
-        for item in range(pid, rows * hsplits, programs):
-            row = item // hsplits
+        for item in range(pid, queued * hsplits, programs):
+            row = tl.load(queue_ptr + item // hsplits, volatile=True)
             if tl.load(state_ptr + row, volatile=True) == HIST_C:
                 _histogram(
                     logits_ptr + row.to(tl.int64) * stride,
@@ -483,7 +498,8 @@ def _filter_kernel(
         _grid_sync(sync_ptr, syncs * programs)
         next_rows = sync_ptr + 3 + r
         last = r + 1 == ROUNDS
-        for row in range(pid, rows, programs):
+        for i in range(pid, queued, programs):
+            row = tl.load(queue_ptr + i, volatile=True)
             if tl.load(state_ptr + row, volatile=True) == HIST_C:
                 k, p = _row_params(k_ptr, p_ptr, row, vocab, has_k, has_p)
                 _plan_row(
@@ -512,8 +528,8 @@ def _filter_kernel(
         # Rows to gather or cut (else the round skips these phases), and for next round.
         cut_rows = tl.load(sync_ptr + 8 + r, volatile=True)
         next_hist_rows = tl.load(next_rows, volatile=True)
-        for item in range(pid, tl.where(cut_rows != 0, rows * hsplits, 0), programs):
-            row = item // hsplits
+        for item in range(pid, tl.where(cut_rows != 0, queued * hsplits, 0), programs):
+            row = tl.load(queue_ptr + item // hsplits, volatile=True)
             if tl.load(state_ptr + row, volatile=True) == GATHER_C:
                 _gather_part(
                     logits_ptr + row.to(tl.int64) * stride,
@@ -593,6 +609,7 @@ def _select_row(
     scratch_ptr,
     span_ptr,
     above_ptr,
+    queue_ptr,
     sync_ptr,
     row,
     vocab,
@@ -653,7 +670,8 @@ def _select_row(
                 0.0,
                 BINS,
             )
-            tl.atomic_add(sync_ptr + 2, 1, sem="relaxed", scope="gpu")
+            slot = tl.atomic_add(sync_ptr + 2, 1, sem="relaxed", scope="gpu")
+            tl.store(queue_ptr + slot, row)
     tl.store(
         state_ptr + row,
         tl.where(done, kept, tl.where(no_k & (p >= 1.0), NOOP_C, HIST_C)),

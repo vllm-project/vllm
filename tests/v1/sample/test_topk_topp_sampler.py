@@ -1028,6 +1028,28 @@ class TestTritonTopkToppExact:
             tt.apply_top_k_top_p_triton(logits, k_rows, p_rows)
         assert [_num_compiled(kernel) for kernel in kernels] == warmed
 
+    def test_empty_batch(self):
+        """Steps with no rows to filter (e.g. no drafts to verify) return as is."""
+        from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton
+
+        logits = torch.empty(0, 32000)
+        k = torch.empty(0, dtype=torch.int32)
+        assert apply_top_k_top_p_triton(logits, k, torch.empty(0)) is logits
+
+    def test_reserved_workspace_covers_the_call(self):
+        """Memory profiling reserves the workspace, so a call within the reserved
+        rows allocates nothing after the KV cache is sized."""
+        import vllm.v1.sample.ops.topk_topp_triton as tt
+
+        tt.reset_buffer_cache()
+        batch, vocab = 40, 65536
+        logits = torch.randn(batch, vocab, generator=self.generator)
+        k = torch.full((batch,), 20, dtype=torch.int32)
+        tt.reserve_workspace(logits.device, batch, vocab)
+        reserved = torch.accelerator.memory_allocated()
+        tt.apply_top_k_top_p_triton(logits, k, None)
+        assert torch.accelerator.memory_allocated() == reserved
+
     def test_sampler_dispatches_to_triton_kernel(self, monkeypatch: pytest.MonkeyPatch):
         import vllm.v1.sample.ops.topk_topp_sampler as sampler_ops
 

@@ -86,6 +86,7 @@ from vllm.v1.outputs import (
     ECConnectorOutput,
     ModelRunnerOutput,
 )
+from vllm.v1.sample.ops.topk_topp_sampler import reserve_top_k_top_p_workspace
 from vllm.v1.watermarking import create_watermarker
 from vllm.v1.watermarking.gpu_sampler import GPUWatermarkSampler
 from vllm.v1.watermarking.spec_decode import (
@@ -1046,6 +1047,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             return
         num_reqs = hidden_states.shape[0]
         logits = self.model.compute_logits(hidden_states)
+        reserve_top_k_top_p_workspace(self.vllm_config, logits)
         dummy_input_batch = InputBatch.make_dummy(
             num_reqs, num_reqs, self.input_buffers
         )
