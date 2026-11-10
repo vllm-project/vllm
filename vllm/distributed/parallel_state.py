@@ -761,11 +761,12 @@ class GroupCoordinator:
         # so compiled graphs reach it too; no-ops outside a microbatch.
         from vllm.v1.worker.ubatching import (
             dbo_switch_to_compute_sync,
+            dbo_tp_all_reduce,
             dbo_yield_and_switch_from_compute_to_comm,
         )
 
         dbo_yield_and_switch_from_compute_to_comm()
-        out = self.device_communicator.all_reduce(input_)
+        out = dbo_tp_all_reduce(self.device_communicator, input_)
         dbo_switch_to_compute_sync()
         return out
 

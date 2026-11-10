@@ -4,6 +4,7 @@ import threading
 
 import torch
 
+import vllm.envs as envs
 from vllm import forward_context
 from vllm.distributed import parallel_state
 from vllm.forward_context import ForwardContext
@@ -274,3 +275,26 @@ def dbo_comm_stream_priority() -> int:
     from vllm.platforms import current_platform
 
     return -1 if current_platform.is_rocm() else 0
+
+
+def dbo_tp_all_reduce(device_communicator, input_: torch.Tensor) -> torch.Tensor:
+    """The TP all-reduce of a microbatch, issued on the comm stream.
+
+    With VLLM_DBO_TP_QUICK_REDUCE set and ``input_`` in QuickReduce's window, it
+    runs QuickReduce, ahead of the other backends. Both microbatches share one
+    comm stream and only one microbatch thread runs at a time, so the calls are
+    issued in the same order on every rank and never overlap: QuickReduce's
+    single buffer is enough.
+    """
+    qr = getattr(device_communicator, "qr_comm", None)
+    if (
+        envs.VLLM_DBO_TP_QUICK_REDUCE
+        and qr is not None
+        and not qr.disabled
+        and qr.should_quick_allreduce(input_)
+    ):
+        logger.info_once(
+            "DBO: microbatch all-reduces in the QuickReduce window run QuickReduce"
+        )
+        return qr.quick_all_reduce(input_, out=torch.empty_like(input_))
+    return device_communicator.all_reduce(input_)
