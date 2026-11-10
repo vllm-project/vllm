@@ -457,9 +457,11 @@ ADD ./docs/mkdocs/gen_files/generate_argparse.py \
 ADD ./requirements/test/cuda.txt ./requirements/test/cuda.txt
 ADD ./requirements/build/hybrid-test-deps.txt ./requirements/build/hybrid-test-deps.txt
 # tests/v1/core/test_prompt_block_hash_vectors.py checks the engine against the
-# prompt block hash vectors that the Rust frontend's unit tests also use.
-ADD ./rust/src/engine-core-client/src/tests/prompt_block_hash_vectors.json \
-    ./rust/src/engine-core-client/src/tests/prompt_block_hash_vectors.json
+# prompt block hash vectors that the Rust frontend's unit tests also use, and
+# .buildkite/scripts/run-rust-engine-core-traces.sh replays traces recorded
+# from this install against the Rust engine core built from source.
+ADD ./rust/ ./rust/
+ADD ./rust-toolchain.toml ./rust-toolchain.toml
 
 # install development dependencies (for testing)
 RUN --mount=type=cache,target=/root/.cache/uv \
