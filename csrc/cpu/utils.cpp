@@ -118,6 +118,9 @@ void compute_slot_mapping_kernel_impl(const torch::Tensor query_start_loc,
                                       const torch::Tensor block_table,
                                       torch::Tensor slot_mapping,
                                       const int64_t block_size) {
+  TORCH_CHECK(query_start_loc.dim() == 1 && query_start_loc.size(0) >= 1,
+              "compute_slot_mapping_kernel_impl: query_start_loc must be a "
+              "non-empty 1-D tensor");
   const int32_t req_num = query_start_loc.size(0) - 1;
   const int64_t block_table_stride = block_table.stride(0);
 
@@ -126,6 +129,44 @@ void compute_slot_mapping_kernel_impl(const torch::Tensor query_start_loc,
   const int64_t* __restrict__ positions_ptr = positions.data_ptr<int64_t>();
   const int32_t* __restrict__ blocktable_ptr = block_table.data_ptr<int32_t>();
   int64_t* __restrict__ slot_mapping_ptr = slot_mapping.data_ptr<int64_t>();
+
+  // Validate every extent and index before the parallel region: an exception
+  // cannot propagate out of an OpenMP region, and a rejected call leaves
+  // slot_mapping untouched.
+  TORCH_CHECK(block_size > 0, "compute_slot_mapping_kernel_impl: block_size (",
+              block_size, ") must be positive");
+  TORCH_CHECK(query_start_loc_ptr[0] == 0,
+              "compute_slot_mapping_kernel_impl: query_start_loc[0] (",
+              query_start_loc_ptr[0], ") must be 0");
+  int64_t prev_loc = 0;
+  for (int32_t i = 0; i <= req_num; ++i) {
+    const int64_t loc = query_start_loc_ptr[i];
+    TORCH_CHECK(loc >= prev_loc && loc <= positions.numel(),
+                "compute_slot_mapping_kernel_impl: query_start_loc[", i,
+                "] = ", loc, " is out of range [", prev_loc, ", ",
+                positions.numel(), "]");
+    // Only a request that has tokens reads its block table row.
+    TORCH_CHECK(loc == prev_loc || i - 1 < block_table.size(0),
+                "compute_slot_mapping_kernel_impl: request ", i - 1,
+                " has tokens but block_table has only ", block_table.size(0),
+                " rows");
+    prev_loc = loc;
+  }
+  const int64_t num_tokens = prev_loc;
+  TORCH_CHECK(slot_mapping.numel() >= num_tokens,
+              "compute_slot_mapping_kernel_impl: query_start_loc[", req_num,
+              "] = ", num_tokens, " exceeds slot_mapping.numel() (",
+              slot_mapping.numel(), ")");
+  const int64_t num_block_columns = block_table.size(1);
+  for (int64_t token_idx = 0; token_idx < num_tokens; ++token_idx) {
+    const int64_t position = positions_ptr[token_idx];
+    TORCH_CHECK(position >= 0, "compute_slot_mapping_kernel_impl: positions[",
+                token_idx, "] = ", position, " is negative");
+    TORCH_CHECK(position / block_size < num_block_columns,
+                "compute_slot_mapping_kernel_impl: positions[", token_idx,
+                "] = ", position, " maps to block ", position / block_size,
+                ", out of range [0, ", num_block_columns, ")");
+  }
 
 #pragma omp parallel for
   for (int32_t req_idx = 0; req_idx < req_num; ++req_idx) {
