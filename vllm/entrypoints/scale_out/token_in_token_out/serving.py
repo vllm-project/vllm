@@ -44,7 +44,11 @@ from vllm.entrypoints.serve.engine.protocol import (
 )
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens, should_include_usage
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
-from vllm.exceptions import GenerationError, VLLMValidationError
+from vllm.exceptions import (
+    GenerationError,
+    PromptUpdateMismatchError,
+    VLLMValidationError,
+)
 from vllm.inputs import EngineInput, MultiModalInput, TokensPrompt, mm_input
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
@@ -341,7 +345,7 @@ class ServingTokens(GenerateBaseServing):
                 (engine_input,) = await self.online_renderer.renderer.render_cmpl_async(
                     [prompt]
                 )
-            except VLLMValidationError as e:
+            except PromptUpdateMismatchError as e:
                 if not features:
                     raise
                 raise VLLMValidationError(
