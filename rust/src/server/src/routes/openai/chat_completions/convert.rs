@@ -10,7 +10,7 @@ use vllm_chat::{
     GenerationPromptMode, ResolvedToolContext, SamplingParams,
 };
 
-use super::types::ChatCompletionRequest;
+use super::types::{ChatCompletionRequest, ThinkingMode};
 use super::validate;
 use crate::error::{ApiError, bail_invalid_request, chat_submit_error, text_submit_error};
 use crate::lora::LoraModelResolution;
@@ -100,7 +100,18 @@ pub(super) fn prepare_chat_request(
         &messages,
     )?;
 
-    let template_kwargs = request.chat_template_kwargs.unwrap_or_default();
+    let mut template_kwargs = request.chat_template_kwargs.unwrap_or_default();
+    let mut reasoning_effort = request.reasoning_effort;
+    let mut reasoning_history = None;
+    if let Some(thinking) = request.thinking {
+        reasoning_effort = thinking.effort.or(reasoning_effort);
+        reasoning_history = thinking.keep;
+        if let Some(mode) = thinking.mode {
+            let enabled = serde_json::Value::Bool(matches!(mode, ThinkingMode::Enabled));
+            template_kwargs.insert("thinking".to_string(), enabled.clone());
+            template_kwargs.insert("enable_thinking".to_string(), enabled);
+        }
+    }
     let response_format =
         request.response_format.as_ref().map(serde_json::to_value).transpose().map_err(
             |error| {
@@ -208,7 +219,8 @@ pub(super) fn prepare_chat_request(
         chat_options: ChatOptions {
             generation_prompt_mode,
             chat_template: request.chat_template,
-            reasoning_effort: request.reasoning_effort.map(|effort| effort.as_str().into()),
+            reasoning_effort: reasoning_effort.map(|effort| effort.as_str().into()),
+            reasoning_history,
             response_format,
             template_kwargs,
         },

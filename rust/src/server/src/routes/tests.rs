@@ -1998,6 +1998,211 @@ async fn render_chat_accepts_assistant_turn_without_content() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn render_chat_thinking_controls_preserve_native_reasoning_precedence() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("config.json"),
+        r#"{"model_type":"kimi_k3"}"#,
+    )
+    .unwrap();
+    fs::write(dir.path().join("tokenizer.json"), "{}").unwrap();
+    let files = vllm_text::backend::hf::ResolvedModelFiles::new(dir.path().to_str().unwrap(), None)
+        .await
+        .unwrap();
+    let mut tokenizer = TestTokenizer::new();
+    for (index, token) in [
+        "<|open|>",
+        "<|close|>",
+        "<|sep|>",
+        "<|end_of_msg|>",
+        "<|media_pad|>",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        tokenizer = tokenizer.with_special_token(token, 256 + index as u32);
+    }
+    let backend = Arc::new(
+        vllm_chat::HfChatBackend::from_resolved_model_files(
+            files,
+            "reasoning-model".into(),
+            vllm_chat::LoadModelBackendsOptions {
+                renderer: vllm_chat::RendererSelection::KimiK3,
+                language_model_only: true,
+                default_chat_template_kwargs: serde_json::from_value(json!({
+                    "thinking": true, "reasoning_effort": "high",
+                }))
+                .unwrap(),
+                ..Default::default()
+            },
+            Arc::new(tokenizer.clone()),
+        )
+        .unwrap(),
+    );
+    let mut app = build_render_router(Arc::new(RenderState {
+        model: "reasoning-model".into(),
+        served_model_names: ServedModelNames::new(vec!["reasoning-model".into()]),
+        max_model_len: Some(4096),
+        max_n_sequences: crate::DEFAULT_MAX_N_SEQUENCES,
+        text: TextRequestProcessor::new(Arc::new(FakeChatBackend::new()), 4096),
+        chat: ChatRequestProcessor::render_only(backend),
+    }));
+    let messages = json!([
+        {"role": "user", "content": "previous prompt"},
+        {"role": "assistant", "content": "previous answer", "reasoning_content": "previous reasoning"},
+        {"role": "user", "content": "hello"},
+    ]);
+    for (controls, effort) in [
+        (json!({}), "high"),
+        (json!({"thinking": null}), "high"),
+        (json!({"thinking": {}}), "high"),
+        (
+            json!({"chat_template_kwargs": {"thinking": false, "enable_thinking": true}}),
+            "none",
+        ),
+        (json!({"thinking": {"type": "disabled"}}), "none"),
+        (
+            json!({"thinking": {"type": "disabled", "keep": "all"}}),
+            "none",
+        ),
+        (
+            json!({"thinking": {"type": "disabled"}, "reasoning_effort": "high",
+            "chat_template_kwargs": {"thinking": true, "enable_thinking": false}}),
+            "none",
+        ),
+        (
+            json!({"thinking": {"type": "disabled", "effort": "medium"}}),
+            "none",
+        ),
+        (
+            json!({"thinking": {"type": "enabled", "effort": "low"},
+            "reasoning_effort": "max", "chat_template_kwargs": {
+                "thinking": false, "enable_thinking": true}}),
+            "low",
+        ),
+        (
+            json!({"thinking": {"effort": "low"}, "reasoning_effort": "high"}),
+            "low",
+        ),
+        (json!({"thinking": {"effort": "none"}}), "none"),
+        (
+            json!({"thinking": {"effort": "low"},
+            "chat_template_kwargs": {"thinking": false}}),
+            "none",
+        ),
+        (
+            json!({"thinking": {"type": "enabled"}, "reasoning_effort": "none"}),
+            "high",
+        ),
+        (
+            json!({"thinking": {"type": "enabled", "keep": "all"}}),
+            "high",
+        ),
+    ] {
+        let mut request = json!({
+            "model": "reasoning-model",
+            "messages": messages,
+        });
+        request.as_object_mut().unwrap().extend(controls.as_object().unwrap().clone());
+        let (status, rendered) = post_json(&mut app, "/v1/chat/completions/render", request).await;
+        assert_eq!(status, StatusCode::OK, "{controls}: {rendered}");
+        let (status, reference) = post_json(
+            &mut app,
+            "/v1/chat/completions/render",
+            json!({
+                "model": "reasoning-model",
+                "messages": messages,
+                "chat_template_kwargs": {"thinking": effort != "none", "reasoning_effort": effort},
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{reference}");
+        assert_eq!(rendered["token_ids"], reference["token_ids"], "{controls}");
+        assert_eq!(
+            rendered["reasoning_parser_kwargs"], reference["reasoning_parser_kwargs"],
+            "{controls}"
+        );
+        let ids: Vec<u32> = serde_json::from_value(rendered["token_ids"].clone()).unwrap();
+        let prompt = tokenizer.decode(&ids, false).unwrap();
+        if effort == "none" {
+            assert!(prompt.ends_with("<|open|>response<|sep|>"), "{prompt}");
+            assert!(!prompt.contains("thinking_effort"), "{prompt}");
+            assert!(!prompt.contains("previous reasoning"), "{prompt}");
+        } else {
+            assert!(prompt.ends_with("<|open|>think<|sep|>"), "{prompt}");
+            assert!(prompt.contains("previous reasoning"), "{prompt}");
+            assert!(
+                prompt.contains(&format!("thinking_effort={effort}")),
+                "{prompt}"
+            );
+        }
+    }
+
+    let (status, response) = post_json(
+        &mut app,
+        "/v1/chat/completions/render",
+        json!({
+            "model": "reasoning-model",
+            "messages": [{"role": "user", "content": "hello"}],
+            "thinking": {"type": "enabled", "effort": "medium"},
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn render_chat_rejects_unsupported_thinking_controls() {
+    let mut app = test_render_app();
+    for thinking in [
+        json!(true),
+        json!({"type": "adaptive"}),
+        json!({"type": false}),
+        json!({"effort": "custom"}),
+        json!({"type": "enabled", "budget_tokens": 1024}),
+        json!({"type": "enabled", "keep": "last"}),
+    ] {
+        let (status, response) = post_json(
+            &mut app,
+            "/v1/chat/completions/render",
+            json!({
+                "model": "render-model",
+                "messages": [{"role": "user", "content": "hello"}],
+                "thinking": thinking,
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{thinking}: {response}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn render_chat_thinking_controls_reject_unsupported_history() {
+    let mut app = test_render_app();
+    let (status, response) = post_json(
+        &mut app,
+        "/v1/chat/completions/render",
+        json!({
+            "model": "render-model",
+            "messages": [{"role": "user", "content": "hello"}],
+            "thinking": {"type": "enabled", "keep": "all"},
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
+    assert!(
+        response["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("reasoning history selection"),
+        "{response}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn render_glm_tools_for_none_follow_server_exclusion_setting() {
     let dir = tempfile::tempdir().unwrap();
     fs::write(

@@ -35,7 +35,7 @@ pub use parser::reasoning::{
 };
 pub use parser::tool::{ToolParser, ToolParserError, ToolParserFactory};
 pub use parser::{ParserSelection, ToolStrictLevel, validate_parser_overrides};
-pub use reasoning::EffortValue;
+pub use reasoning::{EffortValue, ReasoningHistory};
 pub use renderer::hf::ChatTemplateContentFormatOption;
 pub use renderer::{
     ChatRenderer, DeepSeekV4ChatRenderer, DeepSeekV32ChatRenderer, DeepSeekV41ChatRenderer,
@@ -239,6 +239,11 @@ impl ChatRequestProcessor {
         if request.chat_options.chat_template.is_some() && !renderer.renders_request_chat_template()
         {
             return Err(Error::UnsupportedRequestChatTemplate);
+        }
+        if request.chat_options.reasoning_history.is_some()
+            && !renderer.supports_reasoning_history()
+        {
+            return Err(Error::UnsupportedReasoningHistory);
         }
         let (mut rendered, request) = tokio::task::spawn_blocking(move || {
             renderer.render(&request).map(|rendered| (rendered, request))

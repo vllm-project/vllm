@@ -34,6 +34,8 @@ pub enum Error {
     UntrustedRequestChatTemplate,
     #[error("chat_template is not supported by this chat renderer")]
     UnsupportedRequestChatTemplate,
+    #[error("reasoning history selection is not supported by this chat renderer")]
+    UnsupportedReasoningHistory,
     #[error(
         "--chat-template is not supported by the `{renderer}` renderer; use --tokenizer-mode hf to render a Jinja chat template"
     )]
@@ -138,6 +140,7 @@ impl Error {
             | Self::UnsupportedChatRole { .. }
             | Self::UntrustedRequestChatTemplate
             | Self::UnsupportedRequestChatTemplate
+            | Self::UnsupportedReasoningHistory
             | Self::Tokenizer(vllm_tokenizer::TokenizerError::Unavailable) => true,
             Self::Text(error) => error.is_request_validation_error(),
             Self::UnsupportedMultimodalRenderer

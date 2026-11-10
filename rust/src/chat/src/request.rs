@@ -13,7 +13,7 @@ pub use vllm_text::{PromptTruncation, SamplingParams};
 
 use crate::error::{Error, Result};
 use crate::event::{AssistantContentBlock, AssistantMessage};
-use crate::{AssistantMessageExt, EffortValue};
+use crate::{AssistantMessageExt, EffortValue, ReasoningHistory};
 
 /// Role label for one text-only chat message.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -480,6 +480,10 @@ pub struct ChatOptions {
     /// are validated by the selected renderer or HF template.
     pub reasoning_effort: Option<EffortValue>,
 
+    /// Explicit reasoning-history policy, validated against renderer support.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_history: Option<ReasoningHistory>,
+
     /// Standard response format available to model-specific renderers.
     #[serde(default)]
     pub response_format: Option<Value>,
@@ -494,6 +498,7 @@ impl Default for ChatOptions {
             generation_prompt_mode: GenerationPromptMode::StartNewAssistant,
             chat_template: None,
             reasoning_effort: None,
+            reasoning_history: None,
             response_format: None,
             template_kwargs: HashMap::new(),
         }

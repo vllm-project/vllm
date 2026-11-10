@@ -257,6 +257,7 @@ pub(crate) fn prepare_responses_request(
             generation_prompt_mode,
             chat_template: None,
             reasoning_effort: reasoning_effort.map(|effort| effort.as_str().into()),
+            reasoning_history: None,
             response_format: response_format_value,
             template_kwargs: chat_template_kwargs.unwrap_or_default(),
         },

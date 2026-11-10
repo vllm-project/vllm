@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use serde_with::{DefaultOnNull, SerializeDisplay};
 use validator::Validate;
+use vllm_chat::ReasoningHistory;
 use vllm_engine_core_client::protocol::sampling::RepetitionDetectionParams;
 use vllm_llm::WeightVersionSpan;
 use vllm_text::TruncationSide;
@@ -189,6 +190,10 @@ pub struct ChatCompletionRequest {
     pub bad_words: Option<Vec<String>>,
 
     // -------- Extra vLLM Parameters --------
+    /// Rust frontend thinking controls. Omitted fields retain the existing
+    /// reasoning effort, template kwargs, and model defaults.
+    pub thinking: Option<Thinking>,
+
     /// Token budget for reasoning/thinking. Accepts a non-negative integer, or
     /// `-1` for unlimited (mirroring the Python frontend, which normalizes `-1`
     /// to "no budget").
@@ -311,6 +316,7 @@ impl Default for ChatCompletionRequest {
             tools: None,
             tool_choice: None,
             reasoning_effort: None,
+            thinking: None,
             thinking_token_budget: None,
             include_reasoning: true,
             parallel_tool_calls: None,
@@ -359,6 +365,24 @@ impl Default for ChatCompletionRequest {
             stream_interval: None,
         }
     }
+}
+
+/// Chat Completions thinking controls, lowered into the existing chat options.
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Thinking {
+    #[serde(rename = "type")]
+    pub mode: Option<ThinkingMode>,
+    pub effort: Option<ReasoningEffort>,
+    pub keep: Option<ReasoningHistory>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ThinkingMode {
+    Enabled,
+    Disabled,
 }
 
 impl Normalizable for ChatCompletionRequest {
