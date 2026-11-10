@@ -54,6 +54,16 @@ def test_invalid_field_is_reported_like_the_matching_endpoint(
     assert error == expected.json()["error"]
 
 
+def test_completion_request_rejected_by_chat_validator_is_served(generate_server):
+    """A chat-only validator error does not block a valid completion body."""
+    body = {**COMPLETION_BODY, "logprobs": 0, "logprob_token_ids": [1]}
+
+    response = requests.post(generate_server.url_for("invocations"), json=body)
+
+    assert response.status_code == 200, response.text
+    assert response.json()["object"] == "text_completion"
+
+
 def test_request_type_validator_error_is_reported(generate_server):
     body = {**CHAT_BODY, "stream_options": {"include_usage": True}}
 
