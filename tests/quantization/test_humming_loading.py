@@ -117,7 +117,7 @@ def test_humming_packed_experts_generate_with_real_weights(
     for convert in (True, False):
 
         def override(config, convert=convert):
-            if not convert:
+            if not convert and hasattr(config, "quantization_config"):
                 config.quantization_config["moe_convert_symmetric_integer"] = False
             return config
 
