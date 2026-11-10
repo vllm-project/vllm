@@ -47,7 +47,7 @@ WORKDIR /workspace/
 
 ARG PYTHON_VERSION=3.12
 ARG PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/xpu"
-ARG INTEL_OMIX_VERSION=0.4.1
+ARG INTEL_OMIX_VERSION=0.5.0
 
 RUN apt-get update -y && \
     apt-get install -y --no-install-recommends \
