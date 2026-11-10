@@ -8,12 +8,15 @@ QuickReduce would have handled the o_proj partial. No separate switch.
 
 import torch
 
+from vllm.logger import init_logger
 from vllm.models.muse_spark.common.layers import (
     MuseSparkNormPreservingResidualConnection,
     MuseSparkResidualStream,
     MuseSparkRMSNorm,
 )
 from vllm.models.muse_spark.common.ops.fused_rmsnorm import supports_norm_residual_norm
+
+logger = init_logger(__name__)
 
 
 def _qr_comm():
@@ -91,5 +94,6 @@ def fused_allreduce_norm_residual_then_norm(
     )
     if fused is None:
         return None
+    logger.info_once("Muse Spark attention boundary: FlyDSL QuickReduce epilogue")
     out, new_stream = fused
     return out.view(branch.shape), new_stream.view(stream.shape)
