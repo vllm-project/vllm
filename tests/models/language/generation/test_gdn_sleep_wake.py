@@ -4,12 +4,12 @@
 
 Hybrid Mamba / gated-delta-net (GDN) models (e.g. Qwen3-Next) keep a
 persisted conv + recurrent state cache. With sleep mode (the RLHF reuse
-pattern: ``sleep()`` -> weight update -> ``wake_up()``) the state-cache tag is
+pattern: `sleep()` -> weight update -> `wake_up()`) the state-cache tag is
 discarded on sleep and its device memory is re-created on wake. If a *new*
 sequence's state slot is consumed before being reset, the gated-delta-rule
 kernel faithfully propagates whatever is in that (now non-zeroed) memory; when
-it contains NaN/inf the output becomes NaN and ``argmax`` collapses every token
-to id 0 (which decodes to ``"!"``), giving ``reward=0`` / NaN log-probs in RL
+it contains NaN/inf the output becomes NaN and `argmax` collapses every token
+to id 0 (which decodes to `"!"`), giving `reward=0` / NaN log-probs in RL
 training.
 
 This test sleeps and wakes a small hybrid GDN model and asserts that

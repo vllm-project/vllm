@@ -3,12 +3,12 @@
 """DeepSeek V4.1 indexer backend for the DeepGEMM sparse MQA-logits path.
 
 Candidate-consuming indexer layers score only the candidate blocks published
-by the candidate-source layer (``fp8_fp4_(paged_)sparse_mqa_logits``) instead
+by the candidate-source layer (`fp8_fp4_(paged_)sparse_mqa_logits`) instead
 of dense logits over the whole context. This backend extends the dense
 indexer metadata with the per-row scratch that path needs, so the layer op
 allocates nothing per step, and lets all consumer layers of a step share one
 candidate expansion and DeepGEMM schedule (they all read the same candidate
-blocks). Opt in with ``AttentionConfig.indexer_sparse_logits``.
+blocks). Opt in with `AttentionConfig.indexer_sparse_logits`.
 """
 
 from dataclasses import dataclass, fields
@@ -40,9 +40,9 @@ class SparseMQARowsMetadata:
     """Per-row state for one sparse-logits call: the decode rows, or one
     prefill chunk. Buffers are builder-owned views sized to the rows.
 
-    ``kernel_metadata`` (the DeepGEMM schedule) is filled by the first
-    consumer indexer layer of the step together with ``sparse_indices`` /
-    ``end``; later consumer layers reuse all three.
+    `kernel_metadata` (the DeepGEMM schedule) is filled by the first
+    consumer indexer layer of the step together with `sparse_indices` /
+    `end`; later consumer layers reuse all three.
     """
 
     row_ks: torch.Tensor
@@ -67,7 +67,7 @@ class DeepseekV41SparseIndexerMetadata(DeepseekV32IndexerMetadata):
     sparse_block_kv: int = 0
     sparse_decode: SparseMQARowsMetadata | None = None
     sparse_prefill: list[SparseMQARowsMetadata] | None = None
-    """Parallel to ``prefill.chunks``."""
+    """Parallel to `prefill.chunks`."""
 
 
 class DeepseekV41SparseIndexerBackend(DeepseekV41IndexerBackend):
