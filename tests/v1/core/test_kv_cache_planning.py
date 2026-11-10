@@ -2104,25 +2104,18 @@ def test_warns_only_when_untagged_draft_meets_mamba(make_specs, warns, caplog_vl
 
 
 @pytest.mark.parametrize(
-    ("method", "use_v2_model_runner", "num_lookahead_tokens"),
-    [
-        ("dflash", True, 4),
-        ("dspark", True, 3),
-        ("dflash", False, None),
-        ("eagle", True, None),
-    ],
+    ("method", "num_lookahead_tokens"),
+    [("dflash", 4), ("dspark", 3), ("eagle", None)],
 )
 def test_dflash_drafter_sliding_window_layers_back_only_their_tail(
-    monkeypatch, method, use_v2_model_runner, num_lookahead_tokens
+    method, num_lookahead_tokens
 ):
     """Only a DFlash-family drafter's own sliding-window layers get the
-    tail-only spec, and only on Model Runner V2, whose speculator writes no
-    context KV into null blocks."""
+    tail-only spec."""
     from vllm.config import set_current_vllm_config
     from vllm.model_executor.layers.attention import Attention
     from vllm.v1.attention.backends.cpu_attn import CPUAttentionBackend
 
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", str(int(use_v2_model_runner)))
     config = VllmConfig(model_config=ModelConfig(max_model_len=1024))
     config.cache_config.kv_cache_layout = "BLHNC"
     config.speculative_config = fake_speculative_config(
@@ -2137,6 +2130,7 @@ def test_dflash_drafter_sliding_window_layers_back_only_their_tail(
         use_dspark=lambda: method == "dspark",
         use_multi_module_mtp=lambda: False,
         parallel_drafting=False,
+        prefill_context_kv_only=False,
     )
     with set_current_vllm_config(config):
         target = Attention(

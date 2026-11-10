@@ -708,9 +708,8 @@ class Attention(nn.Module, AttentionLayerBase):
                 self.is_draft_layer
                 and speculative_config is not None
                 and speculative_config.method in ("dflash", "dspark")
-                and vllm_config.use_v2_model_runner
             ):
-                # MRV2's context-KV writer skips null block-table entries.
+                # The DFlash context-KV writer skips null block-table entries.
                 return replace_as(
                     spec,
                     DFlashSlidingWindowSpec,
