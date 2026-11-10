@@ -1743,6 +1743,9 @@ class TestFlashInferCuSeqlensPadding:
         from vllm.model_executor.models.kimi_k25 import (
             KimiK25ForConditionalGeneration,
         )
+        from vllm.model_executor.models.qwen2_vl import (
+            Qwen2VLForConditionalGeneration,
+        )
         from vllm.model_executor.models.qwen3_vl import (
             Qwen3VLForConditionalGeneration,
         )
@@ -1763,6 +1766,7 @@ class TestFlashInferCuSeqlensPadding:
             )
         else:
             cls = {
+                "qwen2_vl": Qwen2VLForConditionalGeneration,
                 "qwen3_vl": Qwen3VLForConditionalGeneration,
                 "glm4v": Glm4vForConditionalGeneration,
             }[model]
@@ -1772,10 +1776,7 @@ class TestFlashInferCuSeqlensPadding:
                 visual=SimpleNamespace(attn_backend=backend, out_hidden_size=8),
             )
         config = cls.get_encoder_cudagraph_config(cast(Any, stub))
-        # Same lookup as EncoderCudaGraphManager replay.
-        return config.padding_logics.get(
-            "cu_seqlens", EncoderCudaGraphManager._copy_padded_buffer
-        )
+        return EncoderCudaGraphManager._get_padding_logic(config, "cu_seqlens")
 
     # (seq_lens, replay batch size, capture batch size). The FlashInfer batch
     # buckets are 8, 16, 32 and 64.
@@ -1787,8 +1788,17 @@ class TestFlashInferCuSeqlensPadding:
         ([49], 1, 9),  # Kimi-K2.5: unpadded replay into max_batch_size + 1
     ]
 
-    @pytest.mark.parametrize("model", ["qwen3_vl", "glm4v", "kimi_k25"])
-    @pytest.mark.parametrize("flashinfer", [True, False])
+    @pytest.mark.parametrize(
+        ("model", "flashinfer"),
+        [
+            *(
+                (m, fi)
+                for m in ("qwen3_vl", "glm4v", "kimi_k25")
+                for fi in (True, False)
+            ),
+            ("qwen2_vl", False),  # no FlashInfer ViT path
+        ],
+    )
     @pytest.mark.parametrize(("seq_lens", "replay_batch", "capture_batch"), CASES)
     def test_replay_padding_matches_capture_size_metadata(
         self,
