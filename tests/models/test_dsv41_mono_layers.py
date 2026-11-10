@@ -2,10 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The DeepSeek-V4.1 mono decode path through the real model: a five-layer
 DeepSeek-V4.1-Flash at TP2 and TP4 on CDNA4, and at TP4 on gfx942, served with
-``--monokernel`` on and off on the same random weights: every decoder layer's
+`--monokernel` on and off on the same random weights: every decoder layer's
 outputs at every decode step must match. Unlike
-``test_dsv41_mono_numerics.py``, which checks the kernels against vLLM's ops
-one stage at a time, this runs ``DeepseekV4DecoderLayer.forward`` as the engine
+`test_dsv41_mono_numerics.py`, which checks the kernels against vLLM's ops
+one stage at a time, this runs `DeepseekV4DecoderLayer.forward` as the engine
 does -- the model's hooks, the per-step path choice, the weights taken off the
 layer, the metadata and the indexer's top-k -- so a change to the decoder layer
 that the kernels do not follow fails here.
@@ -143,7 +143,7 @@ class RandomWeightLoader(DummyModelLoader):
 
 
 class MonoProbe:
-    """Worker extension (``worker_extension_cls``): it also brings this module,
+    """Worker extension (`worker_extension_cls`): it also brings this module,
     and so the loader, into the workers."""
 
     def _decoder_layers(self) -> dict:
@@ -161,7 +161,7 @@ class MonoProbe:
         token taken in a decode-only step (the steps the mono path takes),
         keyed by (layer, prompt length, position): a request's step and row
         can differ between engines (requests reach the engine core while it
-        runs), its prompt length and position cannot. ``lens``: the prompt
+        runs), its prompt length and position cannot. `lens`: the prompt
         lengths, all distinct; a row's request is the longest prompt not past
         its position."""
         from vllm.forward_context import get_forward_context
@@ -229,7 +229,7 @@ class MonoProbe:
 
         def copies(m) -> bool:
             """Whether the layer holds the gfx942 copies of its weights, which
-            the model makes when it loads them (``mono942``)."""
+            the model makes when it loads them (`mono942`)."""
             ffn = m.ffn
             held = [
                 ffn.experts.routed_experts,
@@ -260,10 +260,10 @@ class MonoProbe:
 def _decode(
     vllm_runner, monkeypatch, tp: int, mono: bool, prompts, path: str, arch: str
 ):
-    """Greedy decode of ``prompts`` with the mono path on or off: (each
+    """Greedy decode of `prompts` with the mono path on or off: (each
     prompt's output, the workers' mono layers); each decoder layer's outputs
     for the decode tokens of decode-only steps, and vLLM's routing margins,
-    saved under ``path``."""
+    saved under `path`."""
     from vllm import SamplingParams
     from vllm.inputs import TokensPrompt
 

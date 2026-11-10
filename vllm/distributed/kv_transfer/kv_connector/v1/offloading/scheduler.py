@@ -453,10 +453,10 @@ class RequestOffloadState:
         Once the request has finished, no further spec-token rejection can
         rewrite the tail, so the exclusion is lifted and the final chunk
         becomes storable (issue #52735). The exclusion must be applied
-        consistently everywhere ``next_stored_chunk_idx`` is derived:
+        consistently everywhere `next_stored_chunk_idx` is derived:
         otherwise the trailing chunk of each step is skipped on collection but
-        jumped over by ``next_stored_chunk_idx``, so it is never re-considered
-        and a permanent hole breaks prefix-reuse lookup. ``is_finished`` is
+        jumped over by `next_stored_chunk_idx`, so it is never re-considered
+        and a permanent hole breaks prefix-reuse lookup. `is_finished` is
         monotonic, so the finish-time calls all see the lifted exclusion.
         """
         num_chunks = num_offloadable_tokens // group_config.tokens_per_chunk
@@ -919,6 +919,12 @@ class OffloadingConnectorScheduler:
         """
         num_computed_tokens = req_status.num_locally_computed_tokens
         max_hit_size_tokens: int = req_status.req.num_tokens
+        if self._sliding_window_groups:
+            # the last prompt token has to be recomputed to get the logprobs
+            # for sliding window attention, we must reduce by 1 to make sure
+            # we still have a hit after reduction. Tighter caps below are
+            # already supported boundaries and are not reduced.
+            max_hit_size_tokens -= 1
         if max_num_new_tokens is not None:
             max_hit_size_tokens = min(
                 max_hit_size_tokens, num_computed_tokens + max_num_new_tokens
@@ -928,16 +934,11 @@ class OffloadingConnectorScheduler:
                 max_hit_size_tokens,
                 num_computed_tokens + req_status.max_load_tokens,
             )
-        if self._sliding_window_groups:
-            # the last prompt token has to be recomputed to get the logprobs
-            # for sliding window attention, we must reduce by 1 to make sure
-            # we still have a hit after reduction
-            max_hit_size_tokens -= 1
-            if self._mamba_align_size is not None:
-                # Constrain hit-window to the mamba block size.
-                max_hit_size_tokens = round_down(
-                    max_hit_size_tokens, self._mamba_align_size
-                )
+        if self._sliding_window_groups and self._mamba_align_size is not None:
+            # Constrain hit-window to the mamba block size.
+            max_hit_size_tokens = round_down(
+                max_hit_size_tokens, self._mamba_align_size
+            )
 
         num_hit_tokens: int = 0
         defer_lookup = False
@@ -1285,12 +1286,12 @@ class OffloadingConnectorScheduler:
         boundary: int,
         bridge_pending: bool,
     ) -> tuple[bool, bool]:
-        """Look up every key a partial-tail hit at ``boundary`` loads.
+        """Look up every key a partial-tail hit at `boundary` loads.
 
-        ``bridge_pending`` is True if a complete chunk that the hit also loads
+        `bridge_pending` is True if a complete chunk that the hit also loads
         is not ready yet.
-        Returns ``(hit, pending)``. ``hit`` is True only if every key is ready.
-        ``pending`` is True if a key looked up before the first miss is not
+        Returns `(hit, pending)`. `hit` is True only if every key is ready.
+        `pending` is True if a key looked up before the first miss is not
         ready yet.
         """
         req = req_status.req
@@ -1324,7 +1325,7 @@ class OffloadingConnectorScheduler:
         self, req_status: RequestOffloadState, boundary: int, num_hit_tokens: int
     ) -> None:
         """Pin a shared-prefix junction where a sparse group cut the hit, as
-        ``get_computed_blocks`` does for a local hit, so the recompute retains
+        `get_computed_blocks` does for a local hit, so the recompute retains
         the sliding-window/Mamba state at the full-attention hit boundary."""
         if self.config.retention_interval is None:
             return
@@ -1351,6 +1352,9 @@ class OffloadingConnectorScheduler:
         except Exception:
             del self._req_status[request.request_id]
             raise
+        self._events_tracker.on_new_request(
+            req_context, request, self.config.kv_group_configs
+        )
 
     def get_num_new_matched_tokens(
         self,
@@ -1396,6 +1400,10 @@ class OffloadingConnectorScheduler:
             )
             return None, False
 
+        if request.resumable and self.use_lookahead_block_hashes:
+            # Core may have recomputed block hashes after preemption.
+            for group_state in req_status.group_states:
+                group_state.offload_keys.clear()
         req_status.update_offload_keys()
         req_status.num_locally_computed_tokens = num_computed_tokens
 
@@ -1456,7 +1464,7 @@ class OffloadingConnectorScheduler:
         Attention keys cover only their loaded token ranges; recurrent state
         covers the whole reused prefix. Overlaps report the outermost tier.
         Uncovered tokens, including omitted sliding-window history, are
-        ``external_unspecified``.
+        `external_unspecified`.
         """
         sources: dict[CacheHitSource, int] = {}
         if num_external_tokens == 0:
@@ -2193,14 +2201,18 @@ class OffloadingConnectorScheduler:
                     )
 
                     gpu_block_idx = chunk_idx * blocks_per_chunk
+                    if start_gpu_block_idx is None:
+                        start_gpu_block_idx = gpu_block_idx
                     for i in range(blocks_per_chunk):
                         block_id = block_ids[gpu_block_idx + i]
-                        if block_id == 0:
-                            continue
-                        if start_gpu_block_idx is None:
-                            start_gpu_block_idx = gpu_block_idx + i
+                        # Keep null pages inside the chunk as placeholders so
+                        # later blocks retain their logical offsets in the CPU
+                        # chunk. The null GPU block is zeroed and can be copied
+                        # safely; it must not be fenced as a live allocation.
                         src_block_ids.append(block_id)
                         num_group_blocks += 1
+                        if block_id == 0:
+                            continue
                         if is_sliding_window:
                             fenced_block_ids.append(block_id)
                         else:
@@ -2579,8 +2591,8 @@ class OffloadingConnectorScheduler:
         the previous placeholder payload so consumers can ignore them.
 
         Yields:
-            ``BlockStored`` or ``BlockRemoved`` events corresponding to
-            the underlying :class:`OffloadingEvent` stream.
+            `BlockStored` or `BlockRemoved` events corresponding to
+            the underlying `OffloadingEvent` stream.
 
         """
         # Drain the manager eagerly, inside the region. manager.take_events() is
