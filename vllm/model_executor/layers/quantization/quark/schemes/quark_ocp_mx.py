@@ -130,8 +130,8 @@ class QuarkOCP_MX(QuarkScheme):
     def _expanding_scale_loader(self, weight_loader: Callable) -> Callable:
         """Expand a 2-D block scale to one row per weight row.
 
-        A ``block_size=[R, 32]`` export carries one e8m0 value per R weight
-        rows; the kernels want one per row. At ``R == 1`` the layouts already
+        A `block_size=[R, 32]` export carries one e8m0 value per R weight
+        rows; the kernels want one per row. At `R == 1` the layouts already
         coincide, so the loader is passed through untouched.
         """
         if self.scale_block_rows == 1:

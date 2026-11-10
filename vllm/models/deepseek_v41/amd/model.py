@@ -61,6 +61,7 @@ from vllm.models.common.ops.sequence_parallel import (
     sp_reduce_scatter,
     sp_shard,
 )
+from vllm.models.deepseek_v4.amd.mega_moe import finalize_mega_moe_weights
 from vllm.models.deepseek_v4.amd.model import (
     DeepseekV4MoE as DeepseekV4MoEBase,
 )
@@ -150,9 +151,9 @@ class DeepseekV4MoE(DeepseekV4MoEBase):
                 requires_grad=False,
             )
             self.image_sentinel_lo = IMAGE_SENTINEL_BASE_ID
-            self.experts.router.bias_vl = self.gate.bias_vl
-            self.experts.router.image_sentinel_lo = self.image_sentinel_lo
-        self.use_mega_moe = False
+            if not self.use_mega_moe:
+                self.experts.router.bias_vl = self.gate.bias_vl
+                self.experts.router.image_sentinel_lo = self.image_sentinel_lo
         # Expose the MixtureOfExperts protocol fields expected by the V4.1
         # outer model.  The current ROCm runner has no redundant EPLB copies,
         # so logical and physical expert counts are identical.
@@ -305,6 +306,10 @@ class DeepseekV4DecoderLayer(nn.Module):
             # A decode step hands wo_b's TP partial to the FFN launch; forward
             # reduces it on the others.
             self.attn.wo_b.reduce_results = False
+
+    def process_weights_after_loading(self) -> None:
+        if self.mono is not None:
+            self.mono.build_runner(self.attn_norm.weight.device)
 
     @staticmethod
     def _hc_collapse(x: torch.Tensor, pre_mix: torch.Tensor) -> torch.Tensor:
@@ -501,7 +506,7 @@ class DeepseekV4DecoderLayer(nn.Module):
         res_mix: torch.Tensor,
         residual: torch.Tensor,
     ) -> None:
-        """Write the KV ``forward`` would for the replay layers' inputs, skipping
+        """Write the KV `forward` would for the replay layers' inputs, skipping
         the rest of the layer; the replay batch then reruns its rows."""
         # The replay batch rules out Engram and sequence parallel here.
         assert self.engram is None and not self.use_sequence_parallel
@@ -537,7 +542,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         self.config = config
         self.quant_config = quant_config
         self.parallel_config = vllm_config.parallel_config
-        self.use_mega_moe = False
+        self.use_mega_moe = vllm_config.kernel_config.moe_backend == "aiter_mega_moe"
         self.use_sequence_parallel = _use_sequence_parallel(vllm_config)
         if self.use_mega_moe and not vllm_config.parallel_config.enable_expert_parallel:
             raise NotImplementedError(
@@ -613,16 +618,26 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             ),
             prefix=f"{prefix}.layers",
         )
+        engram = next(
+            (
+                layer.engram
+                for layer in islice(self.layers, self.start_layer, self.end_layer)
+                if getattr(layer, "engram", None) is not None
+            ),
+            None,
+        )
+        if engram is not None:
+            # Shared host tables and GPU peer reads look up only local tokens.
+            self.engram_dp_shared_memory = engram.embed_tokens.dp_size == 1
 
         # Config flag is the switch. On ROCm, attention forces
-        # swa_cache_layer.bounded_replay off only when the CDNA version is
-        # not 4. CDNA4 keeps the window in bounded replay.
+        # swa_cache_layer.bounded_replay off unless the CDNA version
+        # is compatible.
         self.decoder_replay_layers: DecoderReplayLayers | None = None
         self.decoder_replay_start = self.end_layer
         cut = max(config.kv_source_layer_ids)
         if (
             vllm_config.cache_config.swa_bounded_replay
-            and vllm_config.use_v2_model_runner
             and cut < self.end_layer - 1
             and self._decoder_replay_supported(vllm_config, cut)
         ):
@@ -741,9 +756,6 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
 
-        if self.use_mega_moe:
-            input_ids = input_ids.to(torch.int64)
-
         # Engram n-gram hashes for the whole (flattened) batch, computed once
         # on the full token stream — before any sequence-parallel sharding —
         # and consumed by the engram layers (1 and 14) below. Profile runs
@@ -769,14 +781,8 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 image_mask = image_sentinel_mask(input_ids)
                 engram_mask = ~image_mask
                 if lookback_token_ids is None:
-                    if not self.engram_hash.use_slot_cache:
-                        raise NotImplementedError(
-                            "engram needs `lookback_token_ids` from the model "
-                            "runner (the DBO/ubatch wrapper drops model kwargs)"
-                        )
-                    num_reqs = swa_metadata.num_decodes + swa_metadata.num_prefills
-                    lookback_token_ids = input_ids.new_full(
-                        (num_reqs, self.engram_hash.lookback_depth), -1
+                    raise NotImplementedError(
+                        "engram needs `lookback_token_ids` from the model runner"
                     )
                 engram_hashes = self.engram_hash(
                     input_ids,
@@ -785,8 +791,6 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                     image_mask,
                     lookback_token_ids,
                     image_sentinel_mask(lookback_token_ids),
-                    swa_metadata.slot_mapping,
-                    swa_metadata.block_table,
                 )
             else:
                 # DP-sharded lookups are collective, so a replica skipping the
@@ -967,8 +971,8 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
     ) -> tuple[torch.Tensor, ...]:
         """Layers past the last KV source, on the rows they are given.
 
-        The final ``mhc_post`` runs here, on this batch. The return is
-        ``(hidden_states, pre_mix, *aux)``.
+        The final `mhc_post` runs here, on this batch. The return is
+        `(hidden_states, pre_mix, *aux)`.
         """
         # Post of the layer before the cut. These rows are already trimmed,
         # and sequence parallel is unsupported while replay is on.
@@ -1011,7 +1015,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         return (hidden_states, pre_mix, *cut_aux, *aux)
 
     def _decoder_replay_supported(self, vllm_config: VllmConfig, cut: int) -> bool:
-        """Whether this rank may replay from layer ``cut`` on; warns when not."""
+        """Whether this rank may replay from layer `cut` on; warns when not."""
         parallel_config = vllm_config.parallel_config
         spec_config = vllm_config.speculative_config
         draft_config = spec_config.draft_model_config if spec_config else None
@@ -1210,10 +1214,12 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             ckpt_down_proj_name="w2",
             ckpt_up_proj_name="w3",
             num_experts=self.config.n_routed_experts,
+            routed_experts_prefix="" if self.use_mega_moe else "routed_experts",
         )
 
     def finalize_mega_moe_weights(self) -> None:
-        return
+        if self.use_mega_moe:
+            finalize_mega_moe_weights(self)
 
     def finalize_mhc_broadcast_weights(self) -> None:
         if not get_pp_group().is_first_rank or self.start_layer >= self.end_layer:
@@ -1235,8 +1241,8 @@ def _linear_scale_param_name(vllm_config: VllmConfig, expert_dtype: str) -> str:
     """Parameter name the linear quant method registers for weight scales.
 
     Native MXFP8 checkpoints ([32, 32] blocks with MXFP4 experts) route linear
-    layers through ModelOptLinearMethod, which registers ``weight_scale``;
-    block-FP8 linear layers register ``weight_scale_inv``.
+    layers through ModelOptLinearMethod, which registers `weight_scale`;
+    block-FP8 linear layers register `weight_scale_inv`.
     """
     use_mxfp8 = (
         getattr(vllm_config.quant_config, "weight_block_size", None) == [32, 32]

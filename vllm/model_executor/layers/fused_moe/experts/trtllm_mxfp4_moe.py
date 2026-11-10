@@ -348,8 +348,8 @@ class TrtLlmMxfp4ExpertsModularBase(TrtLlmMxfp4ExpertsBase, mk.FusedMoEExpertsMo
         """Max tokens per kernel call before the batched-GEMM grid overflows.
 
         The TRTLLM-Gen batched GEMM launches a static grid whose batch (Y)
-        dimension is ``getMaxNumCtasInBatchDim(num_tokens, top_k, num_experts,
-        tileTokensDim)`` and must stay <= 65535. Solving that for num_tokens
+        dimension is `getMaxNumCtasInBatchDim(num_tokens, top_k, num_experts,
+        tileTokensDim)` and must stay <= 65535. Solving that for num_tokens
         with the smallest tile the kernel may pick (tileTokensDim=8, the runner
         default) gives a bound that is safe regardless of the tactic selected.
         Without it, large batches (e.g. Kimi-K3 top_k=16, EP16 profiling with
@@ -375,7 +375,7 @@ class TrtLlmMxfp4ExpertsModularBase(TrtLlmMxfp4ExpertsBase, mk.FusedMoEExpertsMo
         local_expert_offset: int,
         topk: int,
     ) -> UnfinalizedMoEOutput | None:
-        """Finalize into ``output``, or stop after GEMM2 when it is None."""
+        """Finalize into `output`, or stop after GEMM2 when it is None."""
         from flashinfer import trtllm_fp4_block_scale_routed_moe
 
         flashinfer_output = trtllm_fp4_block_scale_routed_moe(
@@ -486,6 +486,8 @@ class TrtLlmMxfp4ExpertsModularBase(TrtLlmMxfp4ExpertsBase, mk.FusedMoEExpertsMo
 
 
 class TrtLlmMxfp4ExpertsModular(TrtLlmMxfp4ExpertsModularBase):
+    """Modular MXFP4 TRTLLM experts with unquantized activations."""
+
     @staticmethod
     def _supports_quant_scheme(
         weight_key: QuantKey | None,
@@ -498,6 +500,8 @@ class TrtLlmMxfp4ExpertsModular(TrtLlmMxfp4ExpertsModularBase):
 
 
 class TrtLlmMxfp4Mxfp8ExpertsModular(TrtLlmMxfp4ExpertsModularBase):
+    """Modular MXFP4 TRTLLM experts with dynamic MXFP8 activations."""
+
     @staticmethod
     def _supports_quant_scheme(
         weight_key: QuantKey | None,
