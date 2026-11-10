@@ -37,7 +37,7 @@ def supports_router_bf16x3(num_experts: int, hidden_size: int) -> bool:
 
 
 def split_fp32_to_bf16x3(weight: torch.Tensor) -> torch.Tensor:
-    """``[3, N, K]`` bf16 planes whose sum is ``weight`` (fp32) exactly."""
+    """`[3, N, K]` bf16 planes whose sum is `weight` (fp32) exactly."""
     assert weight.dtype == torch.float32
     hi = weight.to(torch.bfloat16)
     rest = weight - hi.float()
@@ -96,7 +96,7 @@ def _reduce_splits_kernel(
 
 
 def router_bf16x3_gemm(x: torch.Tensor, planes: torch.Tensor) -> torch.Tensor:
-    """``x @ (planes[0] + planes[1] + planes[2]).T`` in fp32."""
+    """`x @ (planes[0] + planes[1] + planes[2]).T` in fp32."""
     assert x.dtype == torch.bfloat16 and x.is_contiguous()
     m, k = x.shape
     n = planes.shape[1]

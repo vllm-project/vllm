@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The empty-shard mask fused into the DCP A2A pack kernel must be bit-exact
-with the eager ``mask_dcp_empty_shards_`` pass it replaces."""
+with the eager `mask_dcp_empty_shards_` pass it replaces."""
 
 import pytest
 import torch
@@ -30,12 +30,13 @@ def _pack(out, lse, world_size, h_per_rank, head_dim, seq_lens, query_start_loc)
         out,
         lse,
         send,
-        world_size,
-        h_per_rank,
-        head_dim,
-        lse_pack_dim,
-        seq_lens=seq_lens,
-        query_start_loc=query_start_loc,
+        seq_lens,
+        query_start_loc,
+        has_mask=seq_lens is not None,
+        world_size=world_size,
+        h_per_rank=h_per_rank,
+        head_dim=head_dim,
+        lse_pack_dim=lse_pack_dim,
     )
     return send
 
@@ -103,7 +104,7 @@ def test_fused_mask_matches_eager_ragged(dtype, seed):
     """Non-uniform per-request query lengths.
 
     The uniform-stride cases above never exercise an unequal gap between
-    consecutive ``query_start_loc`` entries, which is what the in-kernel
+    consecutive `query_start_loc` entries, which is what the in-kernel
     boundary search has to get right. MTP with partial acceptance produces
     exactly this: some requests contribute one row, others several, in the
     same batch.

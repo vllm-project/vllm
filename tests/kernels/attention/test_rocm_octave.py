@@ -127,7 +127,7 @@ def test_decode_matches_reference(
 ):
     """Covers MTP verification: up to 4 consecutive query tokens per request,
     each with its own causal length, plus a padded query with no request.
-    ``use_wmma=False`` forces the portable kernel every architecture runs."""
+    `use_wmma=False` forces the portable kernel every architecture runs."""
     torch.manual_seed(1)
     dev, fmt = "cuda", _format(cache_dtype)
     ksg = vsg = sq.sign_bits(HEAD).to(dev)
