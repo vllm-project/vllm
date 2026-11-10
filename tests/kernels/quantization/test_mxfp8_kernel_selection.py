@@ -136,17 +136,17 @@ def test_init_mxfp8_linear_kernel(capability, weight_shape, expected_kernel_cls)
     assert kernel.config == Mxfp8LinearLayerConfig(weight_shape=weight_shape)
 
 
-_AITER_TUNED_SHAPE = (2560, 6144)
-_AITER_UNTUNED_SHAPE = (4992, 6144)
+_AITER_FLYDSL_TUNED_SHAPE = (2560, 6144)
+_AITER_FLYDSL_UNTUNED_SHAPE = (4992, 6144)
 
 
 @contextmanager
 def _patch_rocm_gfx950(linear_backend: str = "auto"):
     """Patch the platform so kernel selection runs as on gfx950 with AITER
-    linear enabled and AITER MXFP8 configs tuned for `_AITER_TUNED_SHAPE`."""
+    linear enabled and AITER MXFP8 configs tuned for `_AITER_FLYDSL_TUNED_SHAPE`."""
     from vllm._aiter_ops import rocm_aiter_ops
     from vllm.model_executor.kernels.linear import (
-        AiterMxfp8LinearKernel,
+        AiterFlyDSLMxfp8LinearKernel,
         RocmDotScaledMxfp8LinearKernel,
     )
 
@@ -160,13 +160,13 @@ def _patch_rocm_gfx950(linear_backend: str = "auto"):
                 return_value=linear_backend,
             ),
             patch(
-                "vllm.model_executor.kernels.linear.mxfp8.aiter.current_platform"
+                "vllm.model_executor.kernels.linear.mxfp8.aiter_flydsl.current_platform"
             ) as aiter_platform,
             patch.object(rocm_aiter_ops, "is_linear_enabled", return_value=True),
             patch.object(
                 rocm_aiter_ops,
                 "is_mxfp8_bpreshuffle_gemm_tuned",
-                side_effect=lambda n, k: (n, k) == _AITER_TUNED_SHAPE,
+                side_effect=lambda n, k: (n, k) == _AITER_FLYDSL_TUNED_SHAPE,
             ),
             patch.object(
                 RocmDotScaledMxfp8LinearKernel,
@@ -177,19 +177,19 @@ def _patch_rocm_gfx950(linear_backend: str = "auto"):
             platform._enum = PlatformEnum.ROCM
             aiter_platform.is_rocm.return_value = True
             aiter_platform.supports_mx.return_value = True
-            yield AiterMxfp8LinearKernel, RocmDotScaledMxfp8LinearKernel
+            yield AiterFlyDSLMxfp8LinearKernel, RocmDotScaledMxfp8LinearKernel
     finally:
         torch.set_default_dtype(prev_dtype)
 
 
 @pytest.mark.parametrize("linear_backend", ["auto", "aiter"])
-def test_rocm_mxfp8_aiter_claims_only_tuned_shapes(monkeypatch, linear_backend):
+def test_rocm_mxfp8_aiter_flydsl_claims_only_tuned_shapes(monkeypatch, linear_backend):
     """AITER takes the tuned (N, K); an untuned one falls through to the
     Triton kernel, including under --linear-backend=aiter."""
     monkeypatch.delenv("VLLM_ROCM_MINIMAX_M3_MONO", raising=False)
     with _patch_rocm_gfx950(linear_backend) as (aiter_cls, triton_cls):
-        tuned = init_mxfp8_linear_kernel(weight_shape=_AITER_TUNED_SHAPE)
-        untuned = init_mxfp8_linear_kernel(weight_shape=_AITER_UNTUNED_SHAPE)
+        tuned = init_mxfp8_linear_kernel(weight_shape=_AITER_FLYDSL_TUNED_SHAPE)
+        untuned = init_mxfp8_linear_kernel(weight_shape=_AITER_FLYDSL_UNTUNED_SHAPE)
     assert type(tuned) is aiter_cls
     assert type(untuned) is triton_cls
 
@@ -197,24 +197,26 @@ def test_rocm_mxfp8_aiter_claims_only_tuned_shapes(monkeypatch, linear_backend):
 @pytest.mark.parametrize(
     "env", ["VLLM_ROCM_MINIMAX_M3_MONO", "VLLM_BATCH_INVARIANT"], ids=str
 )
-def test_rocm_mxfp8_aiter_steps_aside_under_env(monkeypatch, env):
+def test_rocm_mxfp8_aiter_flydsl_steps_aside_under_env(monkeypatch, env):
     monkeypatch.setenv(env, "1")
     with _patch_rocm_gfx950() as (_, triton_cls):
-        kernel = init_mxfp8_linear_kernel(weight_shape=_AITER_TUNED_SHAPE)
+        kernel = init_mxfp8_linear_kernel(weight_shape=_AITER_FLYDSL_TUNED_SHAPE)
     assert type(kernel) is triton_cls
 
 
-def test_rocm_mxfp8_aiter_rejects_non_bf16_and_bmm(monkeypatch):
+def test_rocm_mxfp8_aiter_flydsl_rejects_non_bf16_and_bmm(monkeypatch):
     monkeypatch.delenv("VLLM_ROCM_MINIMAX_M3_MONO", raising=False)
     with _patch_rocm_gfx950() as (aiter_cls, triton_cls):
-        bmm = Mxfp8LinearLayerConfig(weight_shape=_AITER_TUNED_SHAPE, bmm_batch_size=2)
+        bmm = Mxfp8LinearLayerConfig(
+            weight_shape=_AITER_FLYDSL_TUNED_SHAPE, bmm_batch_size=2
+        )
         assert not aiter_cls.can_implement(bmm)[0]
         torch.set_default_dtype(torch.float16)
-        kernel = init_mxfp8_linear_kernel(weight_shape=_AITER_TUNED_SHAPE)
+        kernel = init_mxfp8_linear_kernel(weight_shape=_AITER_FLYDSL_TUNED_SHAPE)
     assert type(kernel) is triton_cls
 
 
-def test_rocm_mxfp8_aiter_tuned_lookup_failure_is_untuned():
+def test_rocm_mxfp8_aiter_flydsl_tuned_lookup_failure_is_untuned():
     """A failing AITER tuned-config lookup reports the shape as untuned
     instead of failing kernel selection."""
     import sys
@@ -229,4 +231,4 @@ def test_rocm_mxfp8_aiter_tuned_lookup_failure_is_untuned():
         patch("vllm._aiter_ops.current_platform") as platform,
     ):
         platform.is_rocm.return_value = True
-        assert lookup(*_AITER_TUNED_SHAPE) is False
+        assert lookup(*_AITER_FLYDSL_TUNED_SHAPE) is False

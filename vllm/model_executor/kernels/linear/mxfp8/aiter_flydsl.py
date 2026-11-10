@@ -25,7 +25,7 @@ from vllm.platforms import current_platform
 from .Mxfp8LinearKernel import Mxfp8LinearKernel, Mxfp8LinearLayerConfig
 
 
-class AiterMxfp8LinearKernel(Mxfp8LinearKernel):
+class AiterFlyDSLMxfp8LinearKernel(Mxfp8LinearKernel):
     """MXFP8 linear on AITER's tuned FlyDSL GEMM (gfx950).
 
     Weights are (16, 16)-preshuffled once at load; activation and weight

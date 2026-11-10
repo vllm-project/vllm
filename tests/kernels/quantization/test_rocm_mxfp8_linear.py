@@ -709,12 +709,14 @@ def test_rocm_mxfp8_fused_quant_cuda_graph_capture(warm_counters):
 
 
 @pytest.fixture
-def aiter_mxfp8_kernel(monkeypatch):
-    """`AiterMxfp8LinearKernel` with AITER linear on and every shape treated
+def aiter_flydsl_mxfp8_kernel(monkeypatch):
+    """`AiterFlyDSLMxfp8LinearKernel` with AITER linear on and every shape treated
     as tuned (an untuned one runs AITER's heuristic kernel)."""
     pytest.importorskip("aiter.ops.flydsl.batched_gemm_a8w8")
     from vllm._aiter_ops import rocm_aiter_ops
-    from vllm.model_executor.kernels.linear.mxfp8.aiter import AiterMxfp8LinearKernel
+    from vllm.model_executor.kernels.linear.mxfp8.aiter_flydsl import (
+        AiterFlyDSLMxfp8LinearKernel,
+    )
 
     monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
     monkeypatch.delenv("VLLM_ROCM_MINIMAX_M3_MONO", raising=False)
@@ -724,7 +726,7 @@ def aiter_mxfp8_kernel(monkeypatch):
     )
     prev_dtype = torch.get_default_dtype()
     torch.set_default_dtype(torch.bfloat16)
-    yield AiterMxfp8LinearKernel
+    yield AiterFlyDSLMxfp8LinearKernel
     torch.set_default_dtype(prev_dtype)
     monkeypatch.undo()
     rocm_aiter_ops.refresh_env_variables()
@@ -733,8 +735,8 @@ def aiter_mxfp8_kernel(monkeypatch):
 @pytest.mark.parametrize("name,n,k", M31_TP4_SHAPES, ids=lambda v: str(v))
 @pytest.mark.parametrize("num_tokens", [1, 7, 32, 128, 1024])
 @torch.inference_mode()
-def test_aiter_mxfp8_linear_matches_dequant_reference(
-    aiter_mxfp8_kernel, name, n, k, num_tokens
+def test_aiter_flydsl_mxfp8_linear_matches_dequant_reference(
+    aiter_flydsl_mxfp8_kernel, name, n, k, num_tokens
 ):
     """Output matches an exact MXFP8 GEMM of the same inputs, and a
     pre-quantized activation gives the same bits as quantizing in the kernel."""
@@ -748,7 +750,7 @@ def test_aiter_mxfp8_linear_matches_dequant_reference(
     torch.manual_seed(num_tokens)
     layer = _make_layer(n, k, "cuda")
     w_q, w_scale = layer.weight.data.clone(), layer.weight_scale.data.clone()
-    kernel = aiter_mxfp8_kernel(Mxfp8LinearLayerConfig(weight_shape=(n, k)))
+    kernel = aiter_flydsl_mxfp8_kernel(Mxfp8LinearLayerConfig(weight_shape=(n, k)))
     kernel.process_weights_after_loading(layer)
 
     x = torch.randn(num_tokens, k, device="cuda", dtype=torch.bfloat16) * 0.5
@@ -769,10 +771,10 @@ def test_aiter_mxfp8_linear_matches_dequant_reference(
 
 
 @torch.inference_mode()
-def test_aiter_mxfp8_linear_cuda_graph_replay(aiter_mxfp8_kernel):
+def test_aiter_flydsl_mxfp8_linear_cuda_graph_replay(aiter_flydsl_mxfp8_kernel):
     n, k, m = 2560, 6144, 16
     layer = _make_layer(n, k, "cuda")
-    kernel = aiter_mxfp8_kernel(Mxfp8LinearLayerConfig(weight_shape=(n, k)))
+    kernel = aiter_flydsl_mxfp8_kernel(Mxfp8LinearLayerConfig(weight_shape=(n, k)))
     kernel.process_weights_after_loading(layer)
     x = torch.randn(m, k, device="cuda", dtype=torch.bfloat16)
     eager = kernel.apply_weights(layer, x)

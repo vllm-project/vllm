@@ -109,7 +109,9 @@ from vllm.model_executor.kernels.linear.mxfp8 import (
     Mxfp8LinearKernel,
     Mxfp8LinearLayerConfig,
 )
-from vllm.model_executor.kernels.linear.mxfp8.aiter import AiterMxfp8LinearKernel
+from vllm.model_executor.kernels.linear.mxfp8.aiter_flydsl import (
+    AiterFlyDSLMxfp8LinearKernel,
+)
 from vllm.model_executor.kernels.linear.mxfp8.b12x import (
     B12xMxfp8LinearKernel,
 )
@@ -583,7 +585,7 @@ _POSSIBLE_MXFP8_KERNELS: dict[PlatformEnum, list[type[Mxfp8LinearKernel]]] = {
         # AITER has tuned, the rest fall through to the next kernel. Kept out
         # of the "aiter" --linear-backend set, which would leave those shapes
         # without a kernel.
-        AiterMxfp8LinearKernel,
+        AiterFlyDSLMxfp8LinearKernel,
         # Native CDNA4 (gfx950) MX linear; is_supported() gates to gfx95x and
         # falls through to BF16 emulation (hipBLASLt) elsewhere / on regression.
         RocmDotScaledMxfp8LinearKernel,

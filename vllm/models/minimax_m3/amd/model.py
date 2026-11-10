@@ -37,7 +37,9 @@ from vllm.config import (
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
-from vllm.model_executor.kernels.linear.mxfp8.aiter import AiterMxfp8LinearKernel
+from vllm.model_executor.kernels.linear.mxfp8.aiter_flydsl import (
+    AiterFlyDSLMxfp8LinearKernel,
+)
 from vllm.model_executor.kernels.linear.mxfp8.rocm_native import (
     _FUSED_QUANT_MAX_M,
     RocmDotScaledMxfp8LinearKernel,
@@ -1583,7 +1585,7 @@ def _can_fuse_input_norm_mxfp8(qkv_proj: nn.Module) -> bool:
         return False
     kernel = _mxfp8_linear_kernel(qkv_proj)
     return isinstance(
-        kernel, (RocmDotScaledMxfp8LinearKernel, AiterMxfp8LinearKernel)
+        kernel, (RocmDotScaledMxfp8LinearKernel, AiterFlyDSLMxfp8LinearKernel)
     ) and kernel.supports_quantized_input(qkv_proj)
 
 
