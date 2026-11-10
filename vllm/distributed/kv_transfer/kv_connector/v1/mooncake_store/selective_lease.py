@@ -13,11 +13,11 @@ import time
 from collections.abc import Callable, Sequence
 from typing import Any, Protocol, cast
 
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (  # noqa: E501
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.data import (  # noqa: E501
     ChunkedTokenDatabase,
     MooncakeLookupResult,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.layout import (  # noqa: E501
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.layout import (  # noqa: E501
     PoolKey,
 )
 from vllm.logger import init_logger
