@@ -22,8 +22,12 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-@pytest.mark.parametrize(("hidden_size", "num_experts"), [(7168, 384), (4096, 256)])
-@pytest.mark.parametrize("num_tokens", [1, 7, 32, 33, 256, 4096])
+# DeepSeek-V4 Pro / Flash, DeepSeek-V4.1 Flash, Kimi-K3, GLM-5.
+@pytest.mark.parametrize(
+    ("hidden_size", "num_experts"),
+    [(7168, 384), (4096, 256), (5120, 384), (7168, 896), (6144, 256)],
+)
+@pytest.mark.parametrize("num_tokens", [0, 1, 7, 32, 33, 256, 4096])
 def test_gfx1250_router_gemm_matches_reference(
     hidden_size: int, num_experts: int, num_tokens: int
 ) -> None:
@@ -42,7 +46,11 @@ def test_gfx1250_router_gemm_matches_reference(
     out = torch.ops.vllm.fp32_router_gemm_dispatch(x, w, False)
     ref = x.double() @ w.double().T
     assert out.dtype == torch.float32
-    torch.testing.assert_close(out.double(), ref, atol=1e-3, rtol=1e-3)
+    assert out.shape == (num_tokens, num_experts)
+    if num_tokens == 0:
+        return
+    # Measured max error is ~1e-5; 1e-4 also catches a BF16-rounded result.
+    torch.testing.assert_close(out.double(), ref, atol=1e-4, rtol=1e-4)
     # The selected experts must not change, except on near-ties at the cutoff.
     ref_top = ref.topk(7, dim=-1).values
     clear = (ref_top[:, 5] - ref_top[:, 6]) > 1e-3

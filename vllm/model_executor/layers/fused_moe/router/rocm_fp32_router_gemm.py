@@ -115,6 +115,13 @@ def _validate_inputs(
 ) -> None:
     if not current_platform.is_rocm() or not (get_cdna_version() >= 4):
         raise RuntimeError("rocm_fp32_router_gemm requires ROCm gfx950 or gfx1250")
+    if get_cdna_version() >= 5:
+        # gfx1250 runs aiter tgemm, so it needs aiter; without it the caller
+        # falls back to torch.mm.
+        from vllm._aiter_ops import is_aiter_found_and_supported
+
+        if not is_aiter_found_and_supported():
+            raise RuntimeError("the gfx1250 router GEMM needs aiter")
     if hidden_states.dim() != 2 or router_weight.dim() != 2:
         raise ValueError("hidden_states and router_weight must be 2D tensors")
     if hidden_states.dtype not in (torch.bfloat16, torch.float32):
@@ -160,8 +167,14 @@ def rocm_fp32_router_gemm(
     """Compute ``hidden_states @ router_weight.T`` with FP32 accumulation."""
     _validate_inputs(hidden_states, router_weight)
     if get_cdna_version() >= 5:
+        if hidden_states.shape[0] == 0:
+            return hidden_states.new_empty(
+                (0, router_weight.shape[0]), dtype=torch.float32
+            )
         # Untuned shapes run aiter's Gluon a16w16 kernel, which beats both
-        # hipBLASLt and the native kernel below on gfx1250.
+        # hipBLASLt and the native kernel below on gfx1250. Needs aiter
+        # v0.1.26 or newer: older releases route gfx12 to a torch fallback
+        # that rounds the logits through BF16 before the FP32 upcast.
         from aiter.tuned_gemm import tgemm
 
         return tgemm.mm(hidden_states, router_weight, otype=torch.float32)

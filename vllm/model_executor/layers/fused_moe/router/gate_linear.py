@@ -128,7 +128,8 @@ class GateLinear(ReplicatedLinear):
                     and (is_hopper or is_blackwell)
                     and (input_size, output_size) in self.FP32_SUPPORTED_SHAPES
                 )
-                or cdna_version >= 4
+                # FP32 weights: gfx950 only. The gfx1250 path needs BF16 weights.
+                or cdna_version == 4
             )
         )
         self.allow_bf16x3_router_gemm = (
