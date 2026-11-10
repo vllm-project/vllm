@@ -147,6 +147,42 @@ def test_update_offload_keys_without_scanning_hash_prefix():
                 assert context.get_offload_key_position(key) == chunk_idx * stride * 16
 
 
+def test_streaming_resume_refreshes_recomputed_offload_keys():
+    scheduler = _make_partial_tail_scheduler()
+    scheduler.use_lookahead_block_hashes = True
+    request = _make_partial_tail_request(scheduler, num_tokens=160)
+    request.resumable = True
+    state = scheduler._req_status[request.request_id]
+    state.update_offload_keys()
+    old_keys = [list(group.offload_keys) for group in state.group_states]
+
+    # Core recomputes the hashes after the request loses its resident KV.
+    request.block_hashes[16:] = [
+        BlockHash(f"new{i}".encode()) for i in range(len(request.block_hashes) - 16)
+    ]
+    scheduler._lookup = MagicMock(return_value=0)
+    assert scheduler.get_num_new_matched_tokens(request, 0) == (0, False)
+
+    for config, group, old in zip(
+        scheduler.config.kv_group_configs, state.group_states, old_keys
+    ):
+        expected = [
+            make_offload_key(block_hash, config.group_idx)
+            for block_hash in request.block_hashes[
+                config.hashes_per_chunk - 1 :: config.hashes_per_chunk
+            ]
+        ]
+        unchanged_chunks = 16 // config.hashes_per_chunk
+        assert 0 < unchanged_chunks < len(old)
+        assert group.offload_keys[:unchanged_chunks] == old[:unchanged_chunks]
+        assert group.offload_keys[unchanged_chunks:] != old[unchanged_chunks:]
+        assert group.offload_keys == expected
+        for chunk_idx, key in enumerate(expected, 1):
+            assert state.req_context.get_offload_key_position(key) == (
+                chunk_idx * config.tokens_per_chunk
+            )
+
+
 @pytest.mark.parametrize(
     "window,extra_retained", [(128, 0), (128, 3), (256, 1), (256, 3)]
 )
@@ -700,7 +736,7 @@ def test_max_load_tokens_caps_tokens_beyond_gpu_prefix():
 
 def _hybrid_lookup(stored: set[OffloadKey]):
     """Full attention (group 0) holds every chunk; Mamba (group 1) only
-    the boundary states in ``stored``."""
+    the boundary states in `stored`."""
 
     def lookup(key: OffloadKey, req_context: ReqContext) -> LookupResult:
         if get_offload_group_idx(key) == 0:
@@ -1039,7 +1075,7 @@ def test_external_cache_hit_sources_range_boundaries(ranges, expected):
     request = _make_partial_tail_request(scheduler)
     state = scheduler._req_status[request.request_id]
     state.num_locally_computed_tokens = 4
-    for idx, (lo, hi, source) in enumerate(ranges):
+    for idx, (lo, hi, _) in enumerate(ranges):
         key = make_offload_key(str(idx).encode(), 0)
         state.load_key_ranges.append((lo, hi, key))
     _as_mock(scheduler.manager.get_load_source).side_effect = lambda key, ctx: ranges[
@@ -1687,7 +1723,7 @@ def test_eagle_partial_tail_round_trip_serves_mamba_checkpoint(cow_on_proof_step
     """Store, finish and resend a 30-token prompt with an EAGLE group.
 
     The resend hits the Mamba checkpoint at 24 only through the EAGLE
-    group's proof key at 28. With ``cow_on_proof_step``, the steps follow core:
+    group's proof key at 28. With `cow_on_proof_step`, the steps follow core:
     the prefill stops at 24, and the CoW hand-off arrives on the step that
     computes tokens 24-30. The producer models a turn that loaded its prefix
     from the offload tier, so that its tail is stored.
@@ -6056,6 +6092,7 @@ class TestEagle:
                 block_ids=(full_block_ids, swa_block_ids),
                 num_computed_tokens=0,
                 lora_request=None,
+                prefill_token_ids=[],
             )
         ]
         first_output.num_scheduled_tokens = {"req": 1000}
@@ -6946,8 +6983,8 @@ def test_lookahead_partial_store_uses_checkpoint_hash(lookahead):
         block_hasher=get_request_block_hasher(4, sha256, lookahead),
     )
     engine.add_request(request)
-    scheduler.manager.prepare_store.side_effect = (
-        lambda keys, ctx: generate_store_output(keys)
+    scheduler.manager.prepare_store.side_effect = lambda keys, ctx: (
+        generate_store_output(keys)
     )
     offered = set()
     for _ in range(5):
@@ -6961,7 +6998,6 @@ def test_lookahead_partial_store_uses_checkpoint_hash(lookahead):
             step,
             ModelRunnerOutput(
                 req_ids=[request.request_id],
-                req_id_to_index={request.request_id: 0},
                 sampled_token_ids=[[99] if final else []],
             ),
         )

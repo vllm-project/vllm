@@ -2030,7 +2030,7 @@ def _run_triton_experts(
     topk_ids,
     out_dtype,
 ):
-    """Drive ``TritonExperts.apply`` with caller-provided workspaces."""
+    """Drive `TritonExperts.apply` with caller-provided workspaces."""
     moe_config = experts.moe_config
     workspace13_shape, workspace2_shape, out_shape = experts.workspace_shapes(
         M=hidden_states.size(0),

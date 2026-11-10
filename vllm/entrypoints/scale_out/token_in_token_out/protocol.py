@@ -115,9 +115,14 @@ class PlaceholderRangeInfo(BaseModel):
     length: int = Field(gt=0)
     """Number of placeholder tokens."""
 
-    # TODO: add `is_embed: list[bool] | None` once the /generate side
-    # consumes features — some models (e.g. Qwen-VL) use sparse
-    # placeholder masks that cannot be recomputed from offset+length alone.
+    is_embed: list[bool] | None = None
+    """Positions in the span that receive embeddings; `None` means all."""
+
+    @model_validator(mode="after")
+    def _check_is_embed_length(self) -> "PlaceholderRangeInfo":
+        if self.is_embed is not None and len(self.is_embed) != self.length:
+            raise ValueError("is_embed must have `length` entries")
+        return self
 
 
 def _has_serialized_mm_items(
@@ -204,9 +209,7 @@ class MultiModalFeatures(BaseModel):
             )
 
         flattened_ranges.sort()
-        for (offset, end), (next_offset, _) in zip(
-            flattened_ranges, flattened_ranges[1:]
-        ):
+        for (_, end), (next_offset, _) in zip(flattened_ranges, flattened_ranges[1:]):
             if next_offset < end:
                 raise ValueError(
                     "mm_placeholders must be globally non-overlapping and sorted"
@@ -482,7 +485,7 @@ class GenerateLogProb(BaseModel):
 class GenerateLogProbsContent(GenerateLogProb):
     """The sampled token at one position, plus its top-k candidates.
 
-    ``top_logprobs`` is a list, not a dict: JSON turns dict keys into strings
+    `top_logprobs` is a list, not a dict: JSON turns dict keys into strings
     and the order would be implicit. It is in the engine's order: the sampled
     token first, then the remaining candidates in rank order.
     """
@@ -493,7 +496,7 @@ class GenerateLogProbsContent(GenerateLogProb):
 class GenerateLogProbs(BaseModel):
     """Output logprobs for one choice.
 
-    ``content`` holds one entry per generated token.
+    `content` holds one entry per generated token.
     """
 
     content: list[GenerateLogProbsContent] | None = None
@@ -891,13 +894,13 @@ class DerenderStreamState(BaseModel):
     """Trailing sampled token IDs carried across chunks so byte-fallback
     (U+FFFD) correction during logprob placeholder resolution has context
     at chunk boundaries. Bounded to the 4-token window that
-    ``_correct_decoded_token`` reads."""
+    `_correct_decoded_token` reads."""
 
     logprob_text_offset: int = Field(default=0, ge=0)
     """Cumulative length of reported logprob tokens, including special tokens.
-    Seeds ``text_offset`` for completion
+    Seeds `text_offset` for completion
     streaming logprobs so offsets stay absolute across chunks, mirroring
-    ``initial_text_offset`` in the generate streaming path."""
+    `initial_text_offset` in the generate streaming path."""
 
     output_token_ids: list[int] = Field(default_factory=list)
     """All output tokens seen so far. Parser path only.

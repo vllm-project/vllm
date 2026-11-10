@@ -113,6 +113,7 @@ from .ops.mhc import (
     MHC_OVERLAP_MAX_TOKENS,
     hc_expand,
     init_mhc_all_reduce,
+    mhc_boundary_weight,
     mhc_pre_delayed_overlap,
     mhc_shifted_post_pre,
     supports_mhc_all_reduce,
@@ -188,7 +189,7 @@ class DeepseekV4MoE(DeepseekV4MoEBase):
     def forward_unfinalized(
         self, hidden_states: torch.Tensor, input_ids: torch.Tensor | None
     ) -> MoEOutput:
-        """``forward`` with the routed top-k reduction and all-reduce left open."""
+        """`forward` with the routed top-k reduction and all-reduce left open."""
         # The runner's custom op returns tensors only, so run its body directly.
         shared_output, routed = _unpack(
             self.experts._forward_impl(
@@ -296,9 +297,9 @@ def _shard_fused_wqa_wkv(vllm_config: VllmConfig) -> bool:
 
 
 def maybe_init_gemm_rs(vllm_config: VllmConfig, use_sequence_parallel: bool) -> bool:
-    """Set up the fused ``wo_b`` GEMM + reduce-scatter when opted in.
+    """Set up the fused `wo_b` GEMM + reduce-scatter when opted in.
 
-    Sequence parallel is the only topology where ``wo_b`` ends in a
+    Sequence parallel is the only topology where `wo_b` ends in a
     reduce-scatter, so the kernel is bound to RS mode. The workspace is a
     process-wide singleton shared with any other model code in this worker
     (the DSpark drafter reuses it), and its NVLink multicast rendezvous is
@@ -497,6 +498,23 @@ class DeepseekV4DecoderLayer(nn.Module):
             ),
             requires_grad=False,
         )
+        # The mixer weights laid out for the CuTe DSL mHC boundary, filled after
+        # loading; None where that kernel cannot run.
+        for name in ("hc_attn_boundary_weight", "hc_ffn_boundary_weight"):
+            weight = mhc_boundary_weight(
+                self.hidden_size, self.hc_mult, self.hc_attn_fn.device
+            )
+            self.register_buffer(name, weight, persistent=False)
+
+    def process_weights_after_loading(self) -> None:
+        """Lay out the mHC mixer weights for the CuTe DSL boundary kernel (see
+        ops/mhc_boundary.py), in place so captured graphs see reloads."""
+        if self.hc_attn_boundary_weight is None:
+            return
+        from .ops.mhc_boundary import prepare_boundary_weight
+
+        self.hc_attn_boundary_weight.copy_(prepare_boundary_weight(self.hc_attn_fn))
+        self.hc_ffn_boundary_weight.copy_(prepare_boundary_weight(self.hc_ffn_fn))
 
     def forward(
         self,
@@ -634,6 +652,7 @@ class DeepseekV4DecoderLayer(nn.Module):
                 capture_aux=capture_previous_aux,
                 stream=mhc_stream,
                 reduce_results=self.fuse_mhc_all_reduce,
+                boundary_weight=self.hc_attn_boundary_weight,
             )
             if capture_previous_aux:
                 previous_aux = aux
@@ -667,6 +686,7 @@ class DeepseekV4DecoderLayer(nn.Module):
             norm_eps=self.ffn_norm.variance_epsilon,
             stream=mhc_stream,
             reduce_results=self.fuse_mhc_all_reduce,
+            boundary_weight=self.hc_ffn_boundary_weight,
         )
         if self.fuse_mhc_all_reduce and self.ffn.defers_finalize(x.shape[0]):
             # The next layer's first boundary finalizes it with the all-reduce.
@@ -687,7 +707,7 @@ class DeepseekV4DecoderLayer(nn.Module):
         res_mix: torch.Tensor,
         residual: torch.Tensor,
     ) -> None:
-        """Write the KV ``forward`` would for the replay layers' inputs, skipping
+        """Write the KV `forward` would for the replay layers' inputs, skipping
         the rest of the layer; the replay batch then reruns its rows."""
         # The replay batch rules out Engram and sequence parallel here.
         assert self.engram is None and not self.use_sequence_parallel
@@ -708,6 +728,7 @@ class DeepseekV4DecoderLayer(nn.Module):
             norm_weight=self.attn_norm.weight,
             norm_eps=self.attn_norm.variance_epsilon,
             reduce_results=self.fuse_mhc_all_reduce,
+            boundary_weight=self.hc_attn_boundary_weight,
         )
         self.attn.forward_kv(positions, x)
 
@@ -1048,14 +1069,8 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 image_mask = image_sentinel_mask(input_ids)
                 engram_mask = ~image_mask
                 if lookback_token_ids is None:
-                    if not self.engram_hash.use_slot_cache:
-                        raise NotImplementedError(
-                            "engram needs `lookback_token_ids` from the model "
-                            "runner (the DBO/ubatch wrapper drops model kwargs)"
-                        )
-                    num_reqs = swa_metadata.num_decodes + swa_metadata.num_prefills
-                    lookback_token_ids = input_ids.new_full(
-                        (num_reqs, self.engram_hash.lookback_depth), -1
+                    raise NotImplementedError(
+                        "engram needs `lookback_token_ids` from the model runner"
                     )
                 engram_hashes = self.engram_hash(
                     input_ids,
@@ -1064,8 +1079,6 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                     image_mask,
                     lookback_token_ids,
                     image_sentinel_mask(lookback_token_ids),
-                    swa_metadata.slot_mapping,
-                    swa_metadata.block_table,
                 )
             else:
                 # DP-sharded lookups are collective, so a replica skipping the
@@ -1288,7 +1301,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         res_mix: torch.Tensor,
         residual: torch.Tensor,
     ) -> tuple[torch.Tensor, ...]:
-        """Layers ``decoder_replay_start``.. on the given rows; returns their output,
+        """Layers `decoder_replay_start`.. on the given rows; returns their output,
         the last FFN's pre-mix and the aux hidden states they capture."""
         assert self.decoder_replay_layers is not None
         if (
@@ -1329,7 +1342,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         )
 
     def _decoder_replay_supported(self, vllm_config: VllmConfig, cut: int) -> bool:
-        """Whether this rank may replay from layer ``cut`` on; warns when not."""
+        """Whether this rank may replay from layer `cut` on; warns when not."""
         parallel_config = vllm_config.parallel_config
         spec_config = vllm_config.speculative_config
         draft_config = spec_config.draft_model_config if spec_config else None
@@ -1547,8 +1560,8 @@ def _linear_scale_param_name(vllm_config: VllmConfig, expert_dtype: str) -> str:
     """Parameter name the linear quant method registers for weight scales.
 
     Native MXFP8 checkpoints ([32, 32] blocks with MXFP4 experts) route linear
-    layers through ModelOptLinearMethod, which registers ``weight_scale``;
-    block-FP8 linear layers register ``weight_scale_inv``.
+    layers through ModelOptLinearMethod, which registers `weight_scale`;
+    block-FP8 linear layers register `weight_scale_inv`.
     """
     use_mxfp8 = (
         getattr(vllm_config.quant_config, "weight_block_size", None) == [32, 32]

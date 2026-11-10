@@ -354,8 +354,8 @@ def _register_overlaid_mla_worker(
 ):
     """Register two MLA layers overlaid on one allocation.
 
-    ``tail_bytes`` leaves spare bytes past the last block, the way an allocation
-    rounded up to a page boundary does. Clearing ``page_covers_view`` narrows
+    `tail_bytes` leaves spare bytes past the last block, the way an allocation
+    rounded up to a page boundary does. Clearing `page_covers_view` narrows
     each layer's view below its page, leaving the block interior non-contiguous.
     """
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl import base_worker as bw
@@ -563,9 +563,9 @@ def _make_mla_hybrid_worker(
     mamba=True,
 ):
     """Build a real worker (pull by default) with a hybrid MLA + 2xKDA HMA
-    layout, or a pure MLA one without ``mamba``.
+    layout, or a pure MLA one without `mamba`.
 
-    ``kda_only_tensor`` adds a third layer to the first KDA group in a tensor
+    `kda_only_tensor` adds a third layer to the first KDA group in a tensor
     no other group uses, as when a model has more SSM than MLA layers."""
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl import (
         base_worker as bw,
@@ -889,7 +889,7 @@ def _assert_local_writes_within(worker, owned_ranges):
     assert nixl.xfers, "no transfers were posted"
     violations = []
     total_descs = 0
-    for op, local_handle, local_ids, _, remote_ids in nixl.xfers:
+    for _, local_handle, local_ids, _, remote_ids in nixl.xfers:
         assert len(local_ids) == len(remote_ids)
         desc_arr = nixl.dlists[local_handle]
         for i in local_ids:
@@ -1079,9 +1079,9 @@ def _run_hetero_case(
 ):
     """Full pull-path run for one geometry; returns pairing records.
 
-    ``remote_kernel`` defaults to the local kernel block size; a smaller
-    value additionally exercises block_size_ratio > 1. Without ``mamba`` the
-    model is pure MLA, whose local prefix hit of ``cached`` blocks is not
+    `remote_kernel` defaults to the local kernel block size; a smaller
+    value additionally exercises block_size_ratio > 1. Without `mamba` the
+    model is pure MLA, whose local prefix hit of `cached` blocks is not
     pulled.
     """
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
@@ -1163,7 +1163,7 @@ def _run_hetero_case(
     desc_page = worker.block_len_per_layer[0] * unit // kernel
     meta_r_num_blocks_bytes = (meta_r.num_blocks // remote_ppl) * remote_unified
     covered_tokens = set()
-    for op, lh, lids, rh, rids in nixl.xfers:
+    for _, lh, lids, rh, rids in nixl.xfers:
         larr, rarr = nixl.dlists[lh], nixl.dlists[rh]
         for li, ri in zip(lids, rids):
             lreg, lkind, ltok = _resolve(
@@ -1219,7 +1219,7 @@ def _run_hetero_case(
     # those blocks must be either written by the transfer or zeroed by the
     # receive post-process. Stale bytes surface as mid-response garbage
     # once decode grows into the untransferred tail.
-    for op, lh, lids, rh, rids in nixl.xfers:
+    for _, lh, lids, _, _ in nixl.xfers:
         larr = nixl.dlists[lh]
         for li in lids:
             addr, length, _ = (int(x) for x in larr[int(li)])
@@ -1486,8 +1486,8 @@ def test_dcp_pull_with_block_size_ratio_writes_stay_within_request_blocks():
 def _make_csa_linear_ple_worker(
     scratch_aliases: str = "compressed", ple_page_size: int = 256
 ):
-    """``scratch_aliases`` selects which pages the compressor ring overlays;
-    ``ple_page_size`` widens the PLE page beyond the page it shares a region
+    """`scratch_aliases` selects which pages the compressor ring overlays;
+    `ple_page_size` widens the PLE page beyond the page it shares a region
     with (block-outer layout: both start at byte 0 of the block)."""
     from unittest.mock import MagicMock
 
