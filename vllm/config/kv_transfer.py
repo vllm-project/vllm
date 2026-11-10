@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import enum
 import uuid
 from dataclasses import field
 from typing import Any, Literal, get_args
 
-from vllm.config.utils import config
-from vllm.utils.hashing import safe_hash
+from vllm.config.utils import CompileFactors, config
 
 KVProducer = Literal["kv_producer", "kv_both"]
 KVConsumer = Literal["kv_consumer", "kv_both"]
@@ -47,11 +47,31 @@ def hisparse_host_pool_gib(
     return host_pool_gib
 
 
-# Connectors that register the device KV cache with an RDMA engine whatever
-# their buffer device; NIXL is checked separately as it can stage through host.
-_KV_CACHE_REGISTERING_CONNECTORS = frozenset(
-    {"MooncakeConnector", "MooncakeStoreConnector", "MoRIIOConnector"}
-)
+class KVCacheAccess(enum.IntFlag):
+    """How a KV connector accesses the device KV cache, as flags of what it
+    requires from the allocation; MultiConnector combines its children's."""
+
+    IN_PROCESS = 0
+    """In-process only (torch ops, copy kernels): any allocation works."""
+
+    REGISTERS = enum.auto()
+    """Registers it with UCX or RDMA: one physical allocation per segment."""
+
+    EXPORTS_FD = enum.auto()
+    """Another process imports it through POSIX file descriptors: one physical
+    allocation per segment, exportable (not yet implemented)."""
+
+    EXPORTS_FABRIC = enum.auto()
+    """Another process on the host imports it through FABRIC handles (UCX
+    cuda_ipc): one physical allocation per segment, and an IMEX channel."""
+
+    LEGACY_IPC = enum.auto()
+    """Shares it through legacy CUDA IPC: the extensible KV cache is unsupported."""
+
+    def needs_single_chunk(self) -> bool:
+        """Whether each segment must be backed by one physical allocation."""
+        exports = KVCacheAccess.EXPORTS_FD | KVCacheAccess.EXPORTS_FABRIC
+        return bool(self & (KVCacheAccess.REGISTERS | exports))
 
 
 def kv_buffer_device_default_factory() -> str:
@@ -77,7 +97,8 @@ class KVTransferConfig:
 
     kv_role: KVRole | None = None
     """Whether this vLLM instance produces, consumes KV cache, or both. Choices
-    are 'kv_producer', 'kv_consumer', and 'kv_both'."""
+    are 'kv_producer', 'kv_consumer', and 'kv_both'. With MultiConnector, the
+    roles of its connectors decide this instead."""
 
     kv_port: int = 14579
     """The KV connector port, used to build distributed connection."""
@@ -97,22 +118,14 @@ class KVTransferConfig:
     'recompute': reschedule the request to recompute failed blocks
     'fail': immediately fail the request with an error finish reason (default)"""
 
-    def compute_hash(self) -> str:
-        """WARNING: Whenever a new field is added to this config,
-        ensure that it is included in the factors list if
-        it affects the computation graph.
+    def compile_factors(self) -> CompileFactors:
+        """This config does not affect the compiled graph.
 
-        Provide a hash that uniquely identifies all the configs
-        that affect the structure of the computation
-        graph from input ids/embeddings to the final hidden states,
-        excluding anything before input ids/embeddings and after
-        the final hidden states.
+        If a field starts affecting it, return
+        `get_compile_factors(self, ignored_factors)` with every other field in
+        `ignored_factors`.
         """
-        # no factors to consider.
-        # this config will not affect the computation graph.
-        factors: list[Any] = []
-        hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()
-        return hash_str
+        return {}
 
     def __post_init__(self) -> None:
         if self.engine_id is None:
@@ -136,11 +149,23 @@ class KVTransferConfig:
 
     @property
     def is_kv_producer(self) -> bool:
-        return self.kv_connector is not None and self.kv_role in get_args(KVProducer)
+        return any(role in get_args(KVProducer) for role in self._connector_roles())
 
     @property
     def is_kv_consumer(self) -> bool:
-        return self.kv_connector is not None and self.kv_role in get_args(KVConsumer)
+        return any(role in get_args(KVConsumer) for role in self._connector_roles())
+
+    def _connector_roles(self) -> list[str | None]:
+        """The kv_role of each connector. MultiConnector does not pass its own
+        kv_role to its connectors, so only theirs count."""
+        if self.kv_connector is None:
+            return []
+        if self.kv_connector == "MultiConnector":
+            return [
+                child.get("kv_role")
+                for child in self.kv_connector_extra_config.get("connectors", [])
+            ]
+        return [self.kv_role]
 
     def get_from_extra_config(self, key, default) -> Any:
         return self.kv_connector_extra_config.get(key, default)
@@ -156,24 +181,31 @@ class KVTransferConfig:
             ]
         return any(config.get("custom_mem_pool") for config in configs)
 
-    def registers_kv_cache_memory(self) -> bool:
-        """Whether a connector registers the device KV cache itself with UCX or
-        RDMA (NIXL, Mooncake, MoRIIO), directly or in MultiConnector. NIXL with
-        a CPU kv_buffer_device registers only its host staging buffers."""
-        children = [{"kv_connector": self.kv_connector}]
+    def _connector_children(self) -> list[dict[str, Any]]:
         if self.kv_connector == "MultiConnector":
-            children = self.kv_connector_extra_config.get("connectors", [])
-        for child in children:
-            name = child.get("kv_connector") or ""
-            if name in _KV_CACHE_REGISTERING_CONNECTORS:
-                return True
-            buffer_device = child.get("kv_buffer_device", self.kv_buffer_device)
-            if name.startswith("Nixl") and buffer_device != "cpu":
-                return True
-        return False
+            return self.kv_connector_extra_config.get("connectors", [])
+        return [{"kv_connector": self.kv_connector}]
+
+    def kv_cache_access(self) -> KVCacheAccess:
+        """How the configured connectors reach the device KV cache, directly or
+        in MultiConnector. Imports the connector class to ask it, through
+        `KVConnectorBase_V1.kv_cache_access`."""
+        if self.kv_connector is None:
+            return KVCacheAccess.IN_PROCESS
+        from vllm.distributed.kv_transfer.kv_connector.factory import (
+            KVConnectorFactory,
+        )
+
+        return KVConnectorFactory.kv_cache_access(self)
+
+    def registers_kv_cache_memory(self) -> bool:
+        """Whether a connector registers the device KV cache with UCX or RDMA,
+        or another process imports it, directly or in MultiConnector: each
+        segment must then be backed by one physical allocation."""
+        return self.kv_cache_access().needs_single_chunk()
 
     def has_connector(self, connector_name: str) -> bool:
-        """Whether ``connector_name`` is configured, directly or in MultiConnector."""
+        """Whether `connector_name` is configured, directly or in MultiConnector."""
         if self.kv_connector == connector_name:
             return True
         return self.kv_connector == "MultiConnector" and any(

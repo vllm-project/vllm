@@ -69,10 +69,10 @@ def replay_boundaries(
 
     A hit is the shortest across all groups, so every group retains state
     at each position; EAGLE groups also keep the block above, which they
-    match and drop back from (see ``reachable_block_mask``).
+    match and drop back from (see `reachable_block_mask`).
 
     Two positions are reachable: a resend of the identical prompt is capped
-    at ``num_tokens - 1`` (its last token is recomputed for logits), a
+    at `num_tokens - 1` (its last token is recomputed for logits), a
     longer sibling matches the final aligned block. They differ only on a
     block-aligned prompt, where retaining just the higher one collapses the
     resend's hit to 0. The alignment is the scheduler block size, not the
@@ -478,11 +478,11 @@ class KVCacheCoordinator(ABC):
         num_request_tokens: int | None = None,
     ) -> tuple[tuple[list[KVCacheBlock], ...], int, int]:
         """Returns the per-group hit blocks, the hit length, and the number of
-        ``num_uncached_common_prefix_tokens`` (a shared prefix that a
+        `num_uncached_common_prefix_tokens` (a shared prefix that a
         sparse-retention group has not cached yet; 0 unless hybrid).
 
-        ``num_request_tokens`` is the request length in the coordinates of
-        ``block_hashes``. ``None`` means ``max_cache_hit_length + 1``, which is
+        `num_request_tokens` is the request length in the coordinates of
+        `block_hashes`. `None` means `max_cache_hit_length + 1`, which is
         at most the request length: an underestimate only asks for more blocks,
         while an overestimate could skip blocks a draft reads.
         """
@@ -623,7 +623,7 @@ class SpecGroup(NamedTuple):
     """KV cache groups that share one spec, batched together for a single
     cache-hit lookup.
 
-    ``use_eagle`` is True iff any member group is an EAGLE/MTP group. Members
+    `use_eagle` is True iff any member group is an EAGLE/MTP group. Members
     sharing a spec are cached and looked up jointly, so the EAGLE last-block drop
     is necessarily decided for the whole spec group.
     """
@@ -795,12 +795,12 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                     self.single_type_managers[gid].use_eagle = True
 
     def _align_cacheable(self, num_tokens: int) -> int:
-        """Largest prefix of ``num_tokens`` a future cache hit could match.
+        """Largest prefix of `num_tokens` a future cache hit could match.
 
-        Hits are ``scheduler_block_size``-aligned (see
-        ``find_longest_cache_hit``) unless fine-grained partial hash hits are
+        Hits are `scheduler_block_size`-aligned (see
+        `find_longest_cache_hit`) unless fine-grained partial hash hits are
         enabled, in which case no rounding applies -- rounding even to
-        ``hash_block_size`` would re-register a privatized Mamba tail.
+        `hash_block_size` would re-register a privatized Mamba tail.
         """
         if self.enable_partial_hash_hits:
             return num_tokens
@@ -845,7 +845,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
             A tuple containing:
                 - A tuple of the cache hit blocks for each single type manager.
                 - The number of tokens of the reconciled (combined) cache hit.
-                - ``num_uncached_common_prefix_tokens``: a shared prefix that a
+                - `num_uncached_common_prefix_tokens`: a shared prefix that a
                   sparse-retention group has not cached yet (0 unless hybrid).
 
         """

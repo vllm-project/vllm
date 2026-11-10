@@ -32,7 +32,11 @@ from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.rotary_embedding.common import ApplyRotaryEmb
 from vllm.model_executor.models.vision import is_vit_use_data_parallel
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargsItems
+from vllm.multimodal.inputs import (
+    MultiModalFieldConfig,
+    MultiModalKwargsItems,
+    VideoItem,
+)
 from vllm.multimodal.parse import ImageSize, MultiModalDataItems
 from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
@@ -239,7 +243,7 @@ class MiMoVisionAttention(nn.Module):
     ) -> torch.Tensor:
         """Window attention with the per-head sink applied to key 0.
 
-        The reference adds ``sinks[h]`` to the logit of each sequence's first
+        The reference adds `sinks[h]` to the logit of each sequence's first
         key, which the Triton prefill kernel supports directly, so the softmax
         normalizes over the biased scores in one pass.
         """
@@ -678,12 +682,36 @@ class MiMoVisionTransformer(nn.Module):
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
+def _video_timestamps(num_frames: int, metadata: dict | None) -> torch.Tensor:
+    """Media time of each sampled frame, or 1 s apart without frame timing.
+
+    Assume uniform sampling and space them evenly between the first and last
+    sampled frame.
+    """
+    indices = (metadata or {}).get("frames_indices")
+    fps = (metadata or {}).get("fps")
+    if (
+        indices is None
+        or not fps
+        or len(indices) != num_frames
+        or num_frames == 0
+        or (num_frames > 1 and indices[-1] <= indices[0])
+    ):
+        return torch.arange(num_frames, dtype=torch.float32)
+    return torch.linspace(indices[0] / fps, indices[-1] / fps, num_frames)
+
+
 class MiMoV2OmniMultiModalDataParser(Qwen2VLMultiModalDataParser):
     # Video stays raw: get_video_replacement also reads second_per_grid_ts and
     # video_start_times, which a metadata-only rewrite would not carry.
     embedding_fields = {
         "image": Qwen2VLMultiModalDataParser.embedding_fields["image"],
     }
+
+    def _get_video_with_metadata(self, video: VideoItem):
+        video, metadata = super()._get_video_with_metadata(video)
+        # Raw frames carry no metadata; they keep the 1 s frame spacing.
+        return video, {} if metadata is None else metadata
 
 
 class MiMoV2OmniProcessingInfo(BaseProcessingInfo):
@@ -710,6 +738,7 @@ class MiMoV2OmniProcessingInfo(BaseProcessingInfo):
         return MiMoV2OmniMultiModalDataParser(
             self.get_hf_config().vision_config.spatial_merge_size,
             target_sr=24000.0,
+            video_needs_metadata=True,
             expected_hidden_size=self._get_expected_hidden_size(),
             allow_missing_mm_embeddings=self.allow_missing_mm_embeddings,
         )
@@ -911,15 +940,14 @@ class MiMoV2OmniMultiModalProcessor(BaseMultiModalProcessor[MiMoV2OmniProcessing
 
     Key differences from Qwen2.5-VL:
     - Videos use timestamp tokens between temporal grid positions.
-    - The HF processor expects ``(TCHW_tensor, timestamps_T_tensor)`` video
+    - The HF processor expects `(TCHW_tensor, timestamps_T_tensor)` video
       tuples rather than plain numpy arrays.
-    - ``video_start_times`` is tracked so prompt-update reconstruction can
+    - `video_start_times` is tracked so prompt-update reconstruction can
       regenerate the exact same timestamp token IDs.
     """
 
-    # fps assumed for vllm-decoded video (numpy T,H,W,C arrays).
-    # The video loader samples ~32 frames; treat each frame as 1 s apart so
-    # MiMoVLProcessor sees 1 fps input and resamples internally.
+    # Frame rate assumed for video_audio frames, which carry no loader
+    # metadata (plain videos are stamped by _video_timestamps).
     _INPUT_FPS: float = 1.0
 
     def _get_mm_fields_config(
@@ -1005,6 +1033,9 @@ class MiMoV2OmniMultiModalProcessor(BaseMultiModalProcessor[MiMoV2OmniProcessing
             videos = mm_data["videos"]
             assert isinstance(videos, Sequence)
             for video in videos:
+                metadata = None
+                if isinstance(video, tuple) and isinstance(video[1], dict):
+                    video, metadata = video
                 if (
                     isinstance(video, tuple)
                     and len(video) == 2
@@ -1029,7 +1060,7 @@ class MiMoV2OmniMultiModalProcessor(BaseMultiModalProcessor[MiMoV2OmniProcessing
                         frames = frames.float()
 
                     T = frames.shape[0]
-                    timestamps = torch.arange(T, dtype=torch.float32) / self._INPUT_FPS
+                    timestamps = _video_timestamps(T, metadata)
                     converted.append((frames, timestamps))
 
             mm_data["videos"] = converted
@@ -1129,7 +1160,7 @@ class MiMoV2OmniMultiModalProcessor(BaseMultiModalProcessor[MiMoV2OmniProcessing
                     full.extend(ts_ids)
                     is_embed_mask.extend([False] * len(ts_ids))
                     # Vision tokens for all frames in this group
-                    for f in range(frames_per_group):
+                    for _ in range(frames_per_group):
                         full.append(vision_start_id)
                         is_embed_mask.append(False)
                         full.extend([video_pad_id] * n_per_grid)
