@@ -1058,7 +1058,7 @@ class RandomMultiModalDataset(RandomDataset):
             raise ValueError("num_mm_items_range_ratio must be in [0, 1].")
 
         # Ensure modalities to sample are in limit_mm_per_prompt
-        for k, v in bucket_config.items():
+        for k in bucket_config:
             # get modality from bucket config
             modality = self.map_config_to_modality(k)
             if modality not in limit_mm_per_prompt:
@@ -1165,7 +1165,7 @@ class RandomMultiModalDataset(RandomDataset):
             else:
                 # If the counter is greater than the limit per prompt
                 # set all multimodal items of this modality to 0
-                for k, v in bucket_config_copy.items():
+                for k in bucket_config_copy:
                     if self.map_config_to_modality(k) == modality:
                         bucket_config_copy[k] = 0
                 # If all configs are 0, break the loop
@@ -1629,7 +1629,8 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
     parser.add_argument(
         "--skip-chat-template",
         action="store_true",
-        help="Skip applying chat template to prompt for datasets that support it.",
+        help="Skip applying chat template to prompt for datasets that support it. "
+        "Always skipped for chat backends, which apply the template themselves.",
     )
     parser.add_argument(
         "--enable-multimodal-chat",
@@ -2038,15 +2039,19 @@ def add_random_multimodal_dataset_args(
 
 
 def _parse_range_ratio(value: str) -> RangeRatio:
-    """Parse a ``--random-range-ratio`` CLI string.
+    """Parse a `--random-range-ratio` CLI string.
 
-    Accepts either a plain float (``"0.3"``) or a JSON dict
-    (``'{"input": 0.3, "output": 0.5}'``).
+    Accepts either a plain float (`"0.3"`) or a JSON dict
+    (`'{"input": 0.3, "output": 0.5}'`).
     """
     try:
         return float(value)
     except ValueError:
         return json.loads(value)
+
+
+# Backends whose endpoint applies the chat template to the prompt it receives.
+CHAT_TEMPLATE_BACKENDS = ("openai-chat", "openai-responses", "vllm-chat")
 
 
 def get_samples(
@@ -2057,6 +2062,12 @@ def get_samples(
 ) -> list[SampleRequest]:
     if not hasattr(args, "request_id_prefix"):
         args.request_id_prefix = ""
+
+    # Chat backends render the chat template themselves (the server, or
+    # LLM.chat for throughput), so a client-side render would apply it twice.
+    skip_chat_template = getattr(args, "skip_chat_template", False) or (
+        getattr(args, "backend", None) in CHAT_TEMPLATE_BACKENDS
+    )
 
     if hasattr(args, "random_range_ratio") and isinstance(args.random_range_ratio, str):
         args.random_range_ratio = _parse_range_ratio(args.random_range_ratio)
@@ -2071,7 +2082,7 @@ def get_samples(
             num_requests=args.num_prompts,
             tokenizer=tokenizer,
             output_len=args.custom_output_len,
-            skip_chat_template=args.skip_chat_template,
+            skip_chat_template=skip_chat_template,
             chat_template_kwargs=getattr(args, "chat_template_kwargs", None),
             request_id_prefix=args.request_id_prefix,
             no_oversample=args.no_oversample,
@@ -2267,7 +2278,7 @@ def get_samples(
             enable_multimodal_chat=args.enable_multimodal_chat,
             request_id_prefix=args.request_id_prefix,
             no_oversample=args.no_oversample,
-            skip_chat_template=args.skip_chat_template,
+            skip_chat_template=skip_chat_template,
             **hf_kwargs,
         )
 
@@ -2296,6 +2307,7 @@ def get_samples(
                 num_requests=args.num_prompts,
                 tokenizer=tokenizer,
                 output_len=args.spec_bench_output_len,
+                skip_chat_template=skip_chat_template,
                 enable_multimodal_chat=args.enable_multimodal_chat,
                 request_id_prefix=args.request_id_prefix,
                 no_oversample=args.no_oversample,
@@ -2392,7 +2404,7 @@ def get_samples(
                 num_requests=args.num_prompts,
                 tokenizer=tokenizer,
                 output_len=args.speed_bench_output_len,
-                skip_chat_template=args.skip_chat_template,
+                skip_chat_template=skip_chat_template,
                 chat_template_kwargs=getattr(args, "chat_template_kwargs", None),
                 enable_multimodal_chat=args.enable_multimodal_chat,
                 request_id_prefix=args.request_id_prefix,
@@ -3695,7 +3707,7 @@ class BlazeditDataset(HuggingFaceDataset):
                 continue
 
             # template copied from
-            # https://github.com/ise-uiuc/blazedit/blob/7765137e656fd62de877422d2e4cf8de51228054/dataset/create_refined_dataset.py#L94-L105 # noqa: E501
+            # https://github.com/ise-uiuc/blazedit/blob/7765137e656fd62de877422d2e4cf8de51228054/dataset/create_refined_dataset.py#L94-L105
             prompt = f"""Given a code file, please apply the change requests and generate the new file.
 
 Original file:
@@ -4353,18 +4365,18 @@ class BFCLDataset(HuggingFaceDataset):
     https://huggingface.co/datasets/gorilla-llm/Berkeley-Function-Calling-Leaderboard
 
     BFCL ships one JSON-lines file per category at the repo root (e.g.
-    ``BFCL_v3_simple.json``, ``BFCL_v3_live_simple.json``) rather than a
-    single HuggingFace split. Each record has ``{id, question, function}``
-    where ``function`` uses a non-OpenAI schema dialect (``"type": "dict"``).
+    `BFCL_v3_simple.json`, `BFCL_v3_live_simple.json`) rather than a
+    single HuggingFace split. Each record has `{id, question, function}`
+    where `function` uses a non-OpenAI schema dialect (`"type": "dict"`).
 
     This dataset loader:
-      - downloads the selected per-category files via ``hf_hub_download``
+      - downloads the selected per-category files via `hf_hub_download`
         and interleaves rows round-robin so sampling is balanced
       - translates BFCL function schemas to OpenAI tool format
-      - sets :attr:`SampleRequest.chat_messages` directly and attaches
-        ``tools`` / ``tool_choice`` via :attr:`SampleRequest.request_overrides`,
+      - sets `SampleRequest.chat_messages` directly and attaches
+        `tools` / `tool_choice` via `SampleRequest.request_overrides`,
         producing production-alike tool calling traffic when used with an
-        ``openai-chat`` backend
+        `openai-chat` backend
     """
 
     DEFAULT_OUTPUT_LEN = 512
@@ -4385,7 +4397,7 @@ class BFCLDataset(HuggingFaceDataset):
     }
 
     def load_data(self) -> None:
-        """Defer loading to :meth:`sample` where categories are known."""
+        """Defer loading to `sample` where categories are known."""
         self.data = None
 
     def _resolve_categories(self, categories: list[str] | None) -> list[str]:

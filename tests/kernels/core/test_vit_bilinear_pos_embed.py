@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Accuracy tests for the fused Triton bilinear position-embedding kernel.
 
-Compares ``triton_pos_embed_interpolate`` against the pure-PyTorch
-``pos_embed_interpolate_native`` across a variety of grid shapes and dtypes.
+Compares `triton_pos_embed_interpolate` against the pure-PyTorch
+`pos_embed_interpolate_native` across a variety of grid shapes and dtypes.
 """
 
 import pytest

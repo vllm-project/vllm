@@ -18,7 +18,7 @@ from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.utils import CpuGpuBuffer
-from vllm.v1.worker.gpu.async_utils import StepTimingSample, stream
+from vllm.v1.worker.gpu.async_utils import StepTimingSample, new_d2h_stream, stream
 from vllm.v1.worker.gpu.attn_utils import (
     get_query_lens_mismatch_unsupported_backend,
     get_varlen_cudagraph_unsupported_backend,
@@ -236,7 +236,7 @@ class AdaptiveVerificationManager:
         self.req_states = req_states
         self.num_speculative_steps = req_states.num_speculative_steps
         device = req_states.device
-        self._copy_stream = torch.cuda.Stream(device)
+        self._copy_stream = new_d2h_stream(device)
 
         self.num_bonus_tokens = num_bonus_tokens
         # Rejection sampling verifies logits in one contiguous chunk; the
@@ -403,7 +403,7 @@ class AdaptiveVerificationManager:
     ) -> int:
         """Token count once the draft budget is trimmed to fit.
 
-        Stashes the chosen budget in ``_batch_budget`` for the compaction and
+        Stashes the chosen budget in `_batch_budget` for the compaction and
         reallocation that follow in the same step.
         """
         assert self.cost_tables is not None
