@@ -23,7 +23,6 @@ import vllm.envs as envs
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import CUDAGraphMode
 from vllm.forward_context import get_forward_context
-from vllm.logger import init_logger
 from vllm.model_executor.kernels.attention.dsa.candidate_blocks import (
     apply_candidate_mask,
 )
@@ -45,8 +44,6 @@ if TYPE_CHECKING:
         RocmMxfp4PrefillPlan,
         RocmMxfp4VarlenDecode,
     )
-
-logger = init_logger(__name__)
 
 MXFP4_BLOCK_SIZE = 32
 
@@ -557,11 +554,6 @@ def _dense_decode(layer: _Layer, logits_width: int, candidate_write: bool) -> No
         )
     elif varlen is not None:
         # The same for requests of 1 to next_n rows, as varlen sequences.
-        logger.info_once(
-            "DeepSeek V4.1 indexer: dense decode launches take the requests as "
-            "varlen sequences (%d rows a request at most)",
-            varlen.next_n,
-        )
         q, q_scale, weights = layer.q[:rows], layer.q_scale[:rows], layer.weights[:rows]
         context_lens, block_table, row_ends = (
             varlen.context_lens,

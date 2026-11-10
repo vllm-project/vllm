@@ -397,6 +397,12 @@ class RocmMxfp4IndexerMetadataBuilder(DeepseekV32IndexerMetadataBuilder):
         adaptive = spec_config is not None and spec_config.enable_adaptive_verification
         self.native_next_n = 1 if adaptive else self.num_speculative_tokens + 1
         self.varlen_next_n = self.num_speculative_tokens + 1 if adaptive else 1
+        if self.varlen_next_n > 1:
+            logger.info_once(
+                "ROCm MXFP4 indexer: adaptive-verification decode steps launch as "
+                "varlen sequences of up to %d rows a request",
+                self.varlen_next_n,
+            )
         # The indexer's logits width, which the decode schedule sizes slices by.
         max_model_len = vllm_config.model_config.max_model_len
         self.logits_width = max_model_len // self.compress_ratio
@@ -407,7 +413,7 @@ class RocmMxfp4IndexerMetadataBuilder(DeepseekV32IndexerMetadataBuilder):
                 num_heads,
                 head_dim,
                 self.page_entries,
-                max(self.native_next_n, self.varlen_next_n),
+                self.num_speculative_tokens + 1,
             ),
             dtype=torch.int32,
             device=device,
@@ -461,7 +467,7 @@ class RocmMxfp4IndexerMetadataBuilder(DeepseekV32IndexerMetadataBuilder):
                 self.native_next_n,
                 context_lens,
             )
-            if metadata.decode_native is None and self.varlen_next_n > 1:
+            if self.varlen_next_n > 1:
                 metadata.decode_varlen = RocmMxfp4VarlenDecode(
                     self.varlen_next_n,
                     cm.query_start_loc[: base.num_decodes + 1],
