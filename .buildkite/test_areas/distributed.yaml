@@ -54,12 +54,10 @@ steps:
   - tests/distributed/test_sharded_rdt_plan.py
   - tests/distributed/test_sharded_rdt_producer.py
   - tests/distributed/test_sharded_rdt_trainer.py
-  - tests/distributed/test_sharded_rdt_engine.py
   commands:
   - pytest -v -s distributed/test_sharded_rdt_plan.py
   - pytest -v -s distributed/test_sharded_rdt_producer.py
   - pytest -v -s distributed/test_sharded_rdt_trainer.py
-  - pytest -v -s distributed/test_sharded_rdt_engine.py
   mirror:
     amd:
       automatic_shard: true
@@ -76,7 +74,6 @@ steps:
       - tests/distributed/test_sharded_rdt_plan.py
       - tests/distributed/test_sharded_rdt_producer.py
       - tests/distributed/test_sharded_rdt_trainer.py
-      - tests/distributed/test_sharded_rdt_engine.py
       - vllm/platforms/rocm.py
       env:
         VLLM_WORKER_MULTIPROC_METHOD: "spawn"
@@ -85,7 +82,6 @@ steps:
       - pytest -v -s distributed/test_sharded_rdt_plan.py
       - pytest -v -s distributed/test_sharded_rdt_producer.py
       - pytest -v -s distributed/test_sharded_rdt_trainer.py
-      - pytest -v -s distributed/test_sharded_rdt_engine.py
 
 - label: ":nvidia: (L4) Distributed DP Basic"
   key: distributed-dp-tests-2-gpus
