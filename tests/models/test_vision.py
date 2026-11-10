@@ -487,3 +487,76 @@ def test_simple_mrope_vision_model_spatial_merge(spatial_merge_size: int):
 
     assert output.shape[0] == expected_output_patches
     assert output.shape[1] == vision_model.out_hidden_size
+
+
+class SimpleTemporalPoolVisionModel(torch.nn.Module):
+    """A `rope_2d` tower whose merger pools each grid over time (`sd2_tpool`).
+
+    Like Kimi's MoonViT3d, a `[t, h, w]` grid yields `h * w / 4` rows of
+    shape `(4, hidden)`: the t frames are averaged into one.
+    """
+
+    merge_kernel_size = (2, 2)
+    merge_type = "sd2_tpool"
+
+    def __init__(self, hidden_size: int = 8):
+        super().__init__()
+        self.linear = torch.nn.Linear(16, hidden_size)
+
+    def forward(self, pixel_values: torch.Tensor, grid_thws: torch.Tensor):
+        embeds = self.linear(pixel_values)
+        outputs, start = [], 0
+        for t, h, w in grid_thws.tolist():
+            item = embeds[start : start + t * h * w].view(t, h * w, -1).mean(0)
+            outputs.append(item.view(h * w // 4, 4, -1))
+            start += t * h * w
+        return outputs
+
+
+def test_run_dp_sharded_mrope_vision_model_temporal_pooling():
+    """Encoder DP over a temporal-pooling tower returns h*w/4 rows per grid.
+
+    Runs two ranks on CPU over gloo.
+    """
+    world_size = 2
+    mp.spawn(
+        run_dp_sharded_temporal_pooling_worker,
+        args=(world_size, get_open_port()),
+        nprocs=world_size,
+    )
+
+
+def run_dp_sharded_temporal_pooling_worker(
+    local_rank: int, world_size: int, master_port: int
+):
+    update_environment_variables(
+        {
+            "RANK": str(local_rank),
+            "LOCAL_RANK": str(local_rank),
+            "WORLD_SIZE": str(world_size),
+            "MASTER_ADDR": "localhost",
+            "MASTER_PORT": str(master_port),
+        }
+    )
+    init_distributed_environment(backend="gloo")
+    with ensure_current_vllm_config():
+        initialize_model_parallel(tensor_model_parallel_size=world_size)
+
+    set_random_seed(0)
+    model = SimpleTemporalPoolVisionModel()
+    # Images (t=1) mixed with 4-frame and 3-frame video chunks.
+    grid_thw_list = [[4, 8, 8], [1, 6, 4], [4, 4, 4], [3, 8, 4], [1, 2, 2]]
+    pixel_values = torch.randn(sum(math.prod(g) for g in grid_thw_list), 16)
+
+    with torch.inference_mode():
+        expected = model(pixel_values, torch.tensor(grid_thw_list))
+        output = run_dp_sharded_mrope_vision_model(
+            model, pixel_values, grid_thw_list, rope_type="rope_2d"
+        )
+
+    rows = [o.shape[0] for o in output]
+    expected_rows = [h * w // 4 for _, h, w in grid_thw_list]
+    # Assertion rewriting does not reach spawned workers; spell out the values.
+    assert rows == expected_rows, f"rows {rows} != {expected_rows}"
+    for actual, ref in zip(output, expected):
+        torch.testing.assert_close(actual, ref)

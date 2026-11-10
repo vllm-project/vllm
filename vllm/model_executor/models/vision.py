@@ -476,11 +476,35 @@ def run_dp_sharded_mrope_vision_model(
             vision_model.spatial_merge_size * vision_model.spatial_merge_size
         )
 
+    # Output rows per item. A temporal-pooling merger (Kimi "sd2_tpool")
+    # averages the t frames of a grid into one, so a video chunk yields
+    # h * w / merge_area rows, not t * h * w / merge_area. Using the patch
+    # count here would slice the gathered embeddings t times too long and
+    # hand back padding as features.
+    temporal_pooling = (
+        rope_type == "rope_2d"
+        and getattr(vision_model, "merge_type", None) == "sd2_tpool"
+    )
+    out_len_per_image = [
+        ((grid_thw[-2] * grid_thw[-1]) if temporal_pooling else math.prod(grid_thw))
+        // embed_dim_reduction_factor
+        for grid_thw in grid_thw_list
+    ]
+    out_len_per_rank = [
+        sum(
+            out_len_per_image[i]
+            for i in image_to_tp_rank[
+                cum_gpu_sample_counts[rank] : cum_gpu_sample_counts[rank + 1]
+            ]
+        )
+        for rank in range(tp_size)
+    ]
+
     # Find the max length across all ranks
     # The output embedding of every DP rank has to be
     # padded to this length for tensor_model_parallel_all_gather
     # to work
-    max_len_per_rank = max(grouped_pixel_values_len) // embed_dim_reduction_factor
+    max_len_per_rank = max(out_len_per_rank)
     local_grid_thw_list = [grid_thw_list[i] for i in image_idxs_local]
     # Ranks without images all-gather placeholders of this dtype, so it must
     # match the output dtype of ranks with images; the first parameter's dtype
@@ -547,14 +571,10 @@ def run_dp_sharded_mrope_vision_model(
     rank_embeddings = list[torch.Tensor]()
     for rank in range(tp_size):
         start_idx = rank * max_len_per_rank
-        end_idx = start_idx + (
-            grouped_pixel_values_len[rank] // embed_dim_reduction_factor
-        )
+        end_idx = start_idx + out_len_per_rank[rank]
         rank_embeddings.append(gathered_embeds[start_idx:end_idx])
 
-    patches_per_output_image = [
-        (patch_size // embed_dim_reduction_factor) for patch_size in patches_per_image
-    ]
+    patches_per_output_image = out_len_per_image
 
     # Reconstruct embeddings in the original order
     original_order_embeddings = [None] * len(grid_thw_list)

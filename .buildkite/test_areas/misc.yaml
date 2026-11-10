@@ -904,6 +904,18 @@ steps:
   commands:
   - pytest -v -s tool_parsers
 
+- label: ":computer: (CPU) Vision Encoder Helpers"
+  key: cpu-vision-encoder-helpers
+  depends_on:
+  - image-build-cpu
+  timeout_in_minutes: 15
+  source_file_dependencies:
+  - vllm/model_executor/models/vision.py
+  - tests/models/test_vision.py
+  device: cpu-small
+  commands:
+  - pytest -v -s models/test_vision.py -m cpu_test
+
 # Key kept from the former A100 step's mirror for job history and retries.
 - label: ":amd: (MI250) Batch Invariance"
   key: amd-batch-invariance-a100
