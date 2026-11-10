@@ -72,6 +72,7 @@ from vllm.model_executor.models.transformers.utils import (
     init_on_device_without_buffers,
     log_replacement,
     maybe_disable_dynamic_rope_update,
+    maybe_offload,
     named_state,
     replace_conv_class,
     replace_embedding_class,
@@ -553,7 +554,7 @@ class Base(
             for child_name, child_module in module.named_children():
                 new_module = child_module
                 qual_name = maybe_prefix(prefix, child_name)
-                if (
+                if is_decoder_layer := (
                     isinstance(module, nn.ModuleList)
                     and len(module) == self.text_config.num_hidden_layers
                 ):
@@ -607,6 +608,10 @@ class Base(
                 if new_module is not child_module:
                     setattr(module, child_name, new_module)
                     log_replacement(qual_name, child_module, new_module)
+
+                if is_decoder_layer:
+                    # Offload layer by layer as it's built, like `make_layers`
+                    maybe_offload(qual_name, new_module)
 
         _recursive_replace(self.model, prefix="model")
 

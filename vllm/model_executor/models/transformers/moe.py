@@ -44,7 +44,7 @@ from vllm.transformers_utils.config import CONFIG_FIELD_ALIASES
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, direct_register_custom_op
 
 from .base import Base
-from .utils import log_replacement, maybe_per_layer
+from .utils import log_replacement, maybe_offload, maybe_per_layer
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -460,6 +460,7 @@ class MoEMixin(MixtureOfExperts, Base):
                     fused_experts = FusedMoEFactory(**kwargs)
                     moe_block.experts = fused_experts
                     log_replacement(qual_name, experts, fused_experts)
+                    maybe_offload(qual_name, fused_experts)
                     # Update MixtureOfExperts mixin state
                     self.mlp_layers.append(moe_block)
                     self.moe_layers.append(fused_experts)

@@ -141,3 +141,39 @@ def test_tower_weight_offloading(vllm_runner, monkeypatch, disable_uva):
     finally:
         set_offloader(original_offloader)
         envs.disable_envs_cache()
+
+
+def test_transformers_backend_weight_offloading(vllm_runner, monkeypatch):
+    """`cpu_offload_gb` must reach decoder layers built by the Transformers
+    modeling backend, which does not use `make_layers`."""
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    envs.disable_envs_cache()
+    original_offloader = get_offloader()
+
+    try:
+        with vllm_runner(
+            "vllm-project/tiny-random-LlamaForCausalLM",
+            model_impl="transformers",
+            enforce_eager=True,
+            gpu_memory_utilization=0.03,
+            max_model_len=128,
+            max_num_seqs=1,
+            cpu_offload_gb=1,
+        ) as vllm_model:
+            engine_core = vllm_model.llm.llm_engine.engine_core.engine_core
+            model_runner = engine_core.model_executor.driver_worker.worker.model_runner
+
+            offloader = get_offloader()
+            assert isinstance(offloader, UVAOffloader)
+            assert offloader.cpu_offload_bytes > 0
+
+            model = model_runner.get_model()
+            assert model._layer_names
+            for name in model._layer_names.values():
+                layer = attrgetter(f"model.{name}")(model)
+                assert any(_is_offloaded(p) for p in layer.parameters()), name
+
+            vllm_model.generate_greedy(["Hello, my name is"], max_tokens=8)
+    finally:
+        set_offloader(original_offloader)
+        envs.disable_envs_cache()

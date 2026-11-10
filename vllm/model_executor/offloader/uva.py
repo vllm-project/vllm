@@ -61,10 +61,13 @@ class UVAOffloader(BaseOffloader):
         """Wrap modules with UVA offloading."""
         if prefix:
             prefix = f"{prefix}."
+        offloaded_bytes_before = self.cpu_offload_bytes
         modules = [
             self._maybe_offload_to_cpu(module, prefix) for module in modules_generator
         ]
-        if self.cpu_offload_bytes > 0:
+        # Callers may wrap modules one at a time (e.g. the Transformers modeling
+        # backend), so only log when this call offloaded something
+        if self.cpu_offload_bytes > offloaded_bytes_before:
             logger.info(
                 "Total CPU offloaded parameters: %s",
                 format_gib(self.cpu_offload_bytes),
@@ -96,7 +99,12 @@ class UVAOffloader(BaseOffloader):
             # Skip parameters an earlier wrap_modules call already offloaded.
             # The UVA path leaves p.device as the accelerator (a view of CPU
             # memory), so the marker is the only way to recognize those.
-            if p.device.type == "cpu" or getattr(p, "_vllm_is_uva_offloaded", False):
+            # Skip parameters that are not materialized yet (meta). Callers that
+            # wrap partially built modules (e.g. the Transformers modeling backend)
+            # may wrap them again once built; any still on meta stay on device.
+            if p.device.type in ("cpu", "meta") or getattr(
+                p, "_vllm_is_uva_offloaded", False
+            ):
                 continue
 
             if self.cpu_offload_params:

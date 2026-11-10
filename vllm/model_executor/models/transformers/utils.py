@@ -36,6 +36,7 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.models.utils import maybe_prefix
+from vllm.model_executor.offloader import NoopOffloader, get_offloader
 from vllm.transformers_utils.config import iter_rope_parameters
 
 if TYPE_CHECKING:
@@ -340,6 +341,25 @@ def named_state(module: nn.Module) -> Iterator[tuple[str, torch.Tensor]]:
 
 def log_replacement(name: str, old_module: nn.Module, new_module: nn.Module):
     logger.debug("%s: %s -> %s", name, old_module, new_module)
+
+
+def maybe_offload(name: str, module: nn.Module):
+    """Route a module the Transformers modeling backend just built through the
+    active offloader.
+
+    Native models are offloaded layer by layer in `make_layers`, which the
+    Transformers modeling backend does not use. Offloading each replacement as
+    soon as it is built keeps offloaded weights from ever being allocated on the
+    device all at once."""
+    offloader = get_offloader()
+    if offloader.supports_tower_offload:
+        offloader.wrap_modules(iter([module]), prefix=name)
+    elif not isinstance(offloader, NoopOffloader):
+        logger.warning_once(
+            "%s is not supported by the Transformers modeling backend, "
+            "weights will not be offloaded.",
+            type(offloader).__name__,
+        )
 
 
 def get_feature_request_tip(
