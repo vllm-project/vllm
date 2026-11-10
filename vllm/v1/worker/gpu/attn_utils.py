@@ -15,9 +15,11 @@ from vllm.config import (
     get_layers_from_vllm_config,
 )
 from vllm.config.compilation import CUDAGraphMode
+from vllm.config.kv_transfer import is_hs_store_cpu
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+from vllm.model_executor.models.extract_hidden_states import CacheOnlyAttentionLayer
 from vllm.platforms import current_platform
 from vllm.v1.attention.backend import (
     AttentionCGSupport,
@@ -142,7 +144,15 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
     kv_cache_spec: dict[str, KVCacheSpec] = {}
     layer_type = cast(type[Any], AttentionLayerBase)
     attn_layers = get_layers_from_vllm_config(vllm_config, layer_type)
+    hs_store_cpu = is_hs_store_cpu(vllm_config)
     for layer_name, attn_module in attn_layers.items():
+        if hs_store_cpu and isinstance(attn_module, CacheOnlyAttentionLayer):
+            # With hs_store_device=cpu the hidden states are streamed to
+            # per-request CPU pages by the connector (save_hs_batch*); the
+            # cache-only layer stays out of the device KV pool entirely (no
+            # spec, no group, no allocation). Mirrors the kv-sharing skip
+            # below: KV cache management acts as if this layer does not exist.
+            continue
         if attn_module.kv_sharing_target_layer_name:
             # This layer will use KV cache of the sharing target layer.
             continue

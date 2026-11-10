@@ -3,9 +3,12 @@
 
 import uuid
 from dataclasses import field
-from typing import Any, Literal, get_args
+from typing import TYPE_CHECKING, Any, Literal, get_args
 
 from vllm.config.utils import CompileFactors, config
+
+if TYPE_CHECKING:
+    from vllm.config import VllmConfig
 
 KVProducer = Literal["kv_producer", "kv_both"]
 KVConsumer = Literal["kv_consumer", "kv_both"]
@@ -154,6 +157,20 @@ class KVTransferConfig:
     def get_from_extra_config(self, key, default) -> Any:
         return self.kv_connector_extra_config.get(key, default)
 
+    def is_hs_store_cpu(self) -> bool:
+        """Whether hidden states are streamed to per-request CPU pages.
+
+        Single source of truth for the ``hs_store_device`` extra-config
+        key (default ``device``), read by the hidden-states connector, the
+        extract_hidden_states proposer/speculator, and the platform model
+        runners' kv-cache spec generation (which must skip the cache-only
+        layer's spec so the device pool is never allocated for it).
+        """
+        return (
+            str(self.get_from_extra_config("hs_store_device", "device")).lower()
+            == "cpu"
+        )
+
     def uses_custom_mem_pool(self) -> bool:
         """Whether a connector allocates the KV cache from its own memory pool
         (custom_mem_pool), directly or in MultiConnector."""
@@ -195,3 +212,14 @@ class KVTransferConfig:
             child.get("kv_connector") == connector_name
             for child in self.kv_connector_extra_config.get("connectors", [])
         )
+
+
+def is_hs_store_cpu(vllm_config: "VllmConfig") -> bool:
+    """Whether extract_hidden_states hidden states are stored on CPU.
+
+    None-safe wrapper around `KVTransferConfig.is_hs_store_cpu`: without
+    a kv_transfer_config there is no `hs_store_device` key, so hidden
+    states stay in the device KV cache pool.
+    """
+    kv_transfer_config = vllm_config.kv_transfer_config
+    return kv_transfer_config is not None and kv_transfer_config.is_hs_store_cpu()

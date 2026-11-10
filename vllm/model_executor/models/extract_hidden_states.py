@@ -291,6 +291,12 @@ class CacheOnlyAttentionLayer(nn.Module, AttentionLayerBase):
         # head_size to hidden_size for hidden states storage
         output = torch.empty(0, device=to_cache.device, dtype=to_cache.dtype)
 
+        # Empty placeholder kv_cache means this layer is not part of the
+        # device KV pool (hs_store_device=cpu); the proposer already
+        # streamed the hidden states to CPU pages.
+        if self.kv_cache.numel() == 0:
+            return output
+
         # Note: dummy_out is used to force torch.compile to preserve ordering between
         # cache update and attention op (which triggers kv_connector transfer)
         dummy_out = unified_kv_cache_update(to_cache, self.layer_name)

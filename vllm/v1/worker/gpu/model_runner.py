@@ -1304,6 +1304,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.adaptive_verification.add_request(req_index)
             if self.speculator is not None:
                 self.speculator.add_request(req_index)
+                self.speculator.on_new_request(req_id, new_req_data)
 
             if self.pooling_runner is not None:
                 assert new_req_data.pooling_params is not None

@@ -45,6 +45,7 @@ from vllm.v1.worker.gpu.spec_decode.draft_logits import DraftLogitsCache
 from vllm.v1.worker.utils import AttentionGroup
 
 if TYPE_CHECKING:
+    from vllm.v1.core.sched.output import NewRequestData
     from vllm.v1.worker.gpu.pcp_manager import PCPManager
     from vllm.v1.worker.gpu.sample.sampler import Sampler
 
@@ -129,6 +130,11 @@ class BaseSpeculator(ABC):
     def add_request(self, req_index: int) -> None:
         """A new request was assigned request-state slot `req_index`, e.g. to
         reset per-slot state. No-op by default."""
+        return
+
+    def on_new_request(self, req_id: str, new_req_data: "NewRequestData") -> None:
+        """A newly scheduled request was added, with its scheduler-side data.
+        No-op by default."""
         return
 
     def on_requests_finished(self, finished_req_ids: set[str]) -> None:
