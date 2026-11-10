@@ -3,7 +3,7 @@
 """The specialized decode of the hybrid decomposition: attention (KDA, DSA) and
 its BF16 linears TP-sharded over a TP group of G GPUs (with decode context
 parallel G over the same ranks), and the routed experts expert-parallel over all
-EP = G x DP GPUs (``-tp G -dp N --enable-expert-parallel`` [``-dcp G``] with
+EP = G x DP GPUs (`-tp G -dp N --enable-expert-parallel` [`-dcp G`] with
 MegaMoE; e.g. DCP8 x EP32 = -tp 8 -dcp 8 -dp 4).
 
 Stock serves this deployment with sequence parallelism: the residual stream is
@@ -16,10 +16,10 @@ layout) for attention, and runs the MLPs exactly as stock does:
 
   AttnRes            stock, on the group's rows (as the TP8 wide step)
   attention          the TP-G specialized input projection and core (KDA, DSA; the
-                     wide-step providers of ``providers.Attention``), the stock
+                     wide-step providers of `providers.Attention`), the stock
                      o_proj partial, one all-reduce
   MoE                the stock SP MoE module on this rank's row shard (stock
-                     ``sp_shard``, zero padding marked as padding for MegaMoE),
+                     `sp_shard`, zero padding marked as padding for MegaMoE),
                      all-gathered back to the group rows
   dense MLP          the stock (replicated) dense MLP on all rows
 
@@ -51,7 +51,7 @@ HYBRID_KINDS = ("dsa", "kda")
 
 
 class NoPrefetch:
-    """The hybrid step prefetches nothing (``Attention.run_core`` forks)."""
+    """The hybrid step prefetches nothing (`Attention.run_core` forks)."""
 
     def fork(self, *args):
         pass
@@ -62,7 +62,7 @@ class NoPrefetch:
 
 class HybridAttention(Attention):
     """One KDA / DSA layer's attention in a hybrid step: the TP-G specialized
-    input projection and core of ``Attention`` (its wide-step path), then the
+    input projection and core of `Attention` (its wide-step path), then the
     stock o_proj partial and one TP all-reduce."""
 
     output: DecodeProjection  # type: ignore[assignment]
@@ -116,7 +116,7 @@ class HybridAttention(Attention):
         self.output = DecodeProjection(attention.o_proj.weight, batches, {})
 
     def run_wide(self, x, caches, metadata, slot_mapping, q):
-        """The all-reduced attention output of the normalized group rows ``x``."""
+        """The all-reduced attention output of the normalized group rows `x`."""
         projected, local = self.storage[x.shape[0]]
         projected = self.projection.run(x, projected)
         self.run_core(projected, local, caches, metadata, slot_mapping, q)
@@ -141,7 +141,7 @@ def run_stock_moe(module, x):
 
 
 class HybridStep:
-    """Builds the hybrid providers on a ``SpecializedDecode`` and runs its steps."""
+    """Builds the hybrid providers on a `SpecializedDecode` and runs its steps."""
 
     def __init__(self, runtime, rounded):
         from .providers import ATTENTION_MAX, wide_caps

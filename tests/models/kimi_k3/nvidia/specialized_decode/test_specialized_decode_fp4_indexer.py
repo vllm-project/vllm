@@ -255,7 +255,7 @@ def order16(bits):
 
 
 def exact_topk(bits, k):
-    """Key indices of the top ``k`` of BF16 ``bits`` (ties to the lowest index),
+    """Key indices of the top `k` of BF16 `bits` (ties to the lowest index),
     in key order."""
     pos = torch.arange(bits.shape[0], device=bits.device)
     key = order16(bits.int()).long() << 32 | (2**32 - 1 - pos)

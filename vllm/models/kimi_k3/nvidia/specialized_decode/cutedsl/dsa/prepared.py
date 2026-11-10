@@ -137,17 +137,17 @@ def compile_core(
     release=True,
     pushed=False,
 ):
-    """CuTe kernels (query, index, value) of one batch of rows (``q`` per request).
-    ``specs``: the layouts of the weights, the MLA cache and the indexer cache.
-    Under DCP (``dcp``: its size, ``q_heads``: the gathered query's padded heads,
-    ``cap``: the DcpBox rows) the query also publishes into the q mailbox and the
-    value is DcpValue. ``fp8``: a per-tensor FP8 query [B, H, 576] and cache, and
+    """CuTe kernels (query, index, value) of one batch of rows (`q` per request).
+    `specs`: the layouts of the weights, the MLA cache and the indexer cache.
+    Under DCP (`dcp`: its size, `q_heads`: the gathered query's padded heads,
+    `cap`: the DcpBox rows) the query also publishes into the q mailbox and the
+    value is DcpValue. `fp8`: a per-tensor FP8 query [B, H, 576] and cache, and
     the value reads FlashInfer's [B, H, 512] latent (under DCP: an FP8 q mailbox,
     and an LSE in base e if
-    ``lse_base_e``, else base 2). ``nvfp4``: that FP8 query over an nvfp4_ds_mla
-    cache (FlashInfer prims_ts). ``overlap``: the query overlap mode (overlap.py).
-    ``partials``: the DcpBox's partial rows. ``release``: the query launches the
-    next kernel early (PDL). ``pushed``: DcpValue only merges (the sparse decode
+    `lse_base_e`, else base 2). `nvfp4`: that FP8 query over an nvfp4_ds_mla
+    cache (FlashInfer prims_ts). `overlap`: the query overlap mode (overlap.py).
+    `partials`: the DcpBox's partial rows. `release`: the query launches the
+    next kernel early (PDL). `pushed`: DcpValue only merges (the sparse decode
     pushes the rows, attn_sparse)."""
     qnorm, kvnorm, qb, uk, uv, kv, index_kv = (
         fake(shape, stride, dtype, 4 if dtype == torch.float32 else 16)
@@ -218,13 +218,13 @@ def kv_cache_blocks():
 
 
 class PreparedDsa:
-    """One K3.1 DSA layer. ``attention``: the KimiK3DSAAttention; ``pitches``: the
-    packed projection pitch per batch; ``queries``: the query lengths q (1 + the
+    """One K3.1 DSA layer. `attention`: the KimiK3DSAAttention; `pitches`: the
+    packed projection pitch per batch; `queries`: the query lengths q (1 + the
     draft length under DSpark verify) prepared for every batch divisible by q;
-    ``kernels``: the FlashInfer sparse MLA kernels to pick from per batch (default:
-    attn_fi.fi_kernels); ``prims_ts_rows``: the prims_ts plans' row capacities
+    `kernels`: the FlashInfer sparse MLA kernels to pick from per batch (default:
+    attn_fi.fi_kernels); `prims_ts_rows`: the prims_ts plans' row capacities
     (default: every batch on its own plan);
-    ``overlap``: a query overlap mode or "rows:mode" table (overlap.QUERY_OVERLAP).
+    `overlap`: a query overlap mode or "rows:mode" table (overlap.QUERY_OVERLAP).
     """
 
     def __init__(
@@ -467,14 +467,14 @@ class PreparedDsa:
 
     def pushes(self, batch, q):
         """Whether the sparse decode of (batch, q) pushes its rows into DcpValue's
-        "bf16" mailbox itself (DcpValue ``pushed``)."""
+        "bf16" mailbox itself (DcpValue `pushed`)."""
         if self.box is None or self.cores[batch, q] != "sparse":
             return False
         return self.box.mailbox(batch).format != PROJECTED
 
     def held(self, modes):
         """The shapes on a FlashInfer kernel (HELD_KERNELS) whose overlap mode is
-        one of ``modes``: the kernel right before their sparse decode (TP: the
+        one of `modes`: the kernel right before their sparse decode (TP: the
         fused indexer's select, or the late query) must not launch it early.
         prims_ts' split-KV decode launches with PDL but reads its query and rows
         before its PDL wait, so it would read the previous layer's; trtllm-gen
@@ -494,7 +494,7 @@ class PreparedDsa:
 
     def fused_core(self, cache, metadata, batch, q, join=None):
         """TP on FlashInfer: the fused decode indexer's physical rows, then the
-        sparse decode -> the [B, H, 512] latent. ``join``: what makes the sparse
+        sparse decode -> the [B, H, 512] latent. `join`: what makes the sparse
         decode wait for the query (run_query)."""
         from vllm.forward_context import get_forward_context
         from vllm.v1.attention.backends.mla.sparse_utils import flat_kv_row_view
@@ -524,10 +524,10 @@ class PreparedDsa:
         return flashmla_core(self.impl, query, cache, topk[:batch], metadata)
 
     def compile_overlap(self, batch, q, index_spec):
-        """The overlap kernels of a batch: (front, wait, norm). ``front``: the fused
+        """The overlap kernels of a batch: (front, wait, norm). `front`: the fused
         index front (IndexFront / IndexFrontMma from the packed rows under front /
         late_front, IndexFrontMma from q_c under serial up to FUSED_INDEX
-        rows) or None; ``wait``: QueryWait under DCP (else None); ``norm``:
+        rows) or None; `wait`: QueryWait under DCP (else None); `norm`:
         QueryNorm under fork / late (else None). Each kernel is compiled once per
         key and shared by every DSA layer (query_stage memoizes them)."""
         mode, pitch, device = self.overlaps[batch, q], self.pitches[batch], self.device
@@ -583,7 +583,7 @@ class PreparedDsa:
         return lambda: main.wait_stream(side)
 
     def run_index(self, kernel, projected, index_slots, q):
-        """The indexer inputs: wq_b and DsaIndex (``kernel``), or the fused index
+        """The indexer inputs: wq_b and DsaIndex (`kernel`), or the fused index
         front (from the packed rows, or under serial from q_c)."""
         shape = projected.shape[0], q
         mode, stage = self.overlaps[shape], self.query_stage
@@ -598,10 +598,10 @@ class PreparedDsa:
         """Sparse decode of every rank's query heads (the gathered q mailbox) over the
         local shard into the DcpValue rows, LSE and per-row valid counts: on a
         per-tensor FP8 cache FlashInfer over this rank's flat rows, on fp8_ds_mla
-        FlashMLA as the stock decode. ``topk``: the global ids, or None with
-        ``projected``: on FlashInfer the indexer stage's DCP merge (#63) gives this
+        FlashMLA as the stock decode. `topk`: the global ids, or None with
+        `projected`: on FlashInfer the indexer stage's DCP merge (#63) gives this
         rank's rows directly, else the stock op's global ids are filtered to them.
-        ``join``: what makes the sparse decode wait for the query (run_query)."""
+        `join`: what makes the sparse decode wait for the query (run_query)."""
         from vllm.v1.attention.backends.mla.flashmla_sparse import _fp8_kv_pages
 
         indexer, md = self.indexer, metadata
@@ -649,8 +649,8 @@ class PreparedDsa:
 
     def sparse_decode(self, kv, rows, valid, batch, q):
         """The specialized sparse decode (attn_sparse) of every rank's gathered query
-        heads over this rank's flat ``kv`` rows ``rows`` / ``valid``: into the
-        owners' DcpValue mailbox where it pushes (``pushes``), else into the
+        heads over this rank's flat `kv` rows `rows` / `valid`: into the
+        owners' DcpValue mailbox where it pushes (`pushes`), else into the
         FlashInfer core's latent [B, Q, 512] and natural-log LSE [B, Q] buffers."""
         fi, layer, box = self.fi, self.layer, self.box
         assert fi is not None and box is not None and fi.fmt == "native"
@@ -668,7 +668,7 @@ class PreparedDsa:
         return run_sparse(kernel, *args, layer._k_scale_float, push=push)
 
     def run_dcp(self, projected, out, cache, slots, index_slots, metadata, q):
-        """``run`` under DCP: the query publishes into the q mailbox and DcpValue
+        """`run` under DCP: the query publishes into the q mailbox and DcpValue
         merges every rank's partial rows of this rank's heads (global lengths)."""
         batch = projected.shape[0]
         reqs, box, p = batch // q, self.box, self.parity
@@ -687,8 +687,8 @@ class PreparedDsa:
         return run_value(*args, projected, out, w_uv)
 
     def run(self, projected, out, *, cache, slots, index_slots, metadata, q=1):
-        """``projected``: the packed projection rows; ``out`` [B, H * 128] gets the
-        gated attention output; ``slots`` / ``index_slots``: the MLA and indexer
+        """`projected`: the packed projection rows; `out` [B, H * 128] gets the
+        gated attention output; `slots` / `index_slots`: the MLA and indexer
         cache slots. Rows beyond the requests run as empty requests."""
         if self.box is not None:
             args = cache, slots, index_slots, metadata, q
