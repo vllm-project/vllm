@@ -343,6 +343,44 @@ def _consolidate_ignore_names(ignore: list[str]) -> list[str]:
     return consolidated
 
 
+def _consolidate_scheme_map(mapped: dict[str, Any]) -> dict[str, Any]:
+    """Fold concrete targets that share a path shape and a scheme.
+
+    ``re:`` entries and class names stay as written. Concrete names are
+    grouped only with other names that carry the same scheme, so two
+    layers quantized differently are not merged. A single name stays a
+    literal. The checkpoint is unchanged; this map is the loaded one.
+    """
+    groups: list[dict[str, Any]] = []
+    order: list[tuple[str, str | int]] = []
+    for name, scheme in mapped.items():
+        if name.startswith("re:") or "." not in name:
+            order.append(("keep", name))
+            continue
+        parts = tuple(name.split("."))
+        shape = _ignore_shape(parts)
+        found = None
+        for index, group in enumerate(groups):
+            if group["shape"] == shape and group["scheme"] == scheme:
+                found = index
+                break
+        if found is None:
+            groups.append({"shape": shape, "scheme": scheme, "parts": []})
+            found = len(groups) - 1
+            order.append(("group", found))
+        groups[found]["parts"].append(parts)
+
+    consolidated: dict[str, Any] = {}
+    for kind, value in order:
+        if kind == "keep":
+            consolidated[value] = mapped[value]
+            continue
+        group = groups[value]
+        pattern = _pattern_for_ignore_group(set(group["parts"]))
+        consolidated[pattern] = group["scheme"]
+    return consolidated
+
+
 SPARSITY_CONFIG_NAME: Literal["sparsity_config"] = "sparsity_config"
 QUANTIZATION_SCHEME_MAP_TYPE = dict[str, dict[str, QuantizationArgs] | None]
 
@@ -401,11 +439,12 @@ class CompressedTensorsConfig(QuantizationConfig):
           rewritten with the rename mapper's prefix, substring, and suffix
           rules. Stacked fusion (q_proj -> qkv_proj) is not applied.
 
-        Concrete ignore names are rewritten first. Names that then share a
-        path shape are folded into one anchored regex on this loaded config.
-        The checkpoint list is unchanged, so older vLLM still rewrites every
-        concrete name. Folding before the rewrite would hide those names from
-        the mapper.
+        Concrete ignore names and concrete scheme targets are rewritten
+        first. Names that then share a path shape are folded into one
+        anchored regex on this loaded config. Targets are folded only with
+        other targets that carry the same scheme. The checkpoint lists stay
+        concrete, so older vLLM still rewrites every name. Folding before
+        the rewrite would hide those names from the mapper.
         """
 
         def _map_target(target: str) -> str | None:
@@ -426,7 +465,9 @@ class CompressedTensorsConfig(QuantizationConfig):
         def _apply_list(lst: list) -> list:
             return [t for x in lst if (t := _map_target(x)) is not None]
 
-        self.target_scheme_map = _apply_dict(self.target_scheme_map)
+        self.target_scheme_map = _consolidate_scheme_map(
+            _apply_dict(self.target_scheme_map)
+        )
         self.ignore = _consolidate_ignore_names(_apply_list(self.ignore))
         if self.kv_cache_scheme is not None:
             self.kv_cache_scheme = _apply_dict(self.kv_cache_scheme)

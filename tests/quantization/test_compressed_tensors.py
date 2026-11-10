@@ -879,6 +879,35 @@ def test_apply_vllm_mapper_consolidates_ignore_after_rename():
     assert rectangle.ignore == [r"re:^model\.layers\.(?:0|1)\.experts\.(?:0|1)\.gate\Z"]
 
 
+def test_apply_vllm_mapper_folds_targets_with_the_same_scheme():
+    """Concrete targets are renamed, then folded per scheme.
+
+    A class name stays a class name. Two layers with different schemes stay
+    concrete so neither scheme covers the other layer.
+    """
+    gate = {"weights": "gate"}
+    other = {"weights": "other"}
+    linear = {"weights": "linear"}
+    config = CompressedTensorsConfig(
+        target_scheme_map={
+            "Linear": linear,
+            "model.layers.0.mlp.fc1.gate": gate,
+            "model.layers.1.mlp.fc1.gate": gate,
+            "model.layers.2.mlp.gate": other,
+            "model.layers.3.mlp.gate": {"weights": "third"},
+        },
+        ignore=[],
+        quant_format="pack-quantized",
+    )
+    config.apply_vllm_mapper(WeightsMapper(orig_to_new_substr={".mlp.fc1.": ".fc1."}))
+    folded = r"re:^model\.layers\.(?:0|1)\.fc1\.gate\Z"
+    assert config.target_scheme_map[folded] is gate
+    assert config.target_scheme_map["Linear"] is linear
+    assert "model.layers.0.mlp.fc1.gate" not in config.target_scheme_map
+    assert config.target_scheme_map["model.layers.2.mlp.gate"] is other
+    assert config.target_scheme_map["model.layers.3.mlp.gate"] == {"weights": "third"}
+
+
 # Test constants for activation quantization
 _STATIC_SYM_INT8_ACT = QuantizationArgs(
     num_bits=8,
