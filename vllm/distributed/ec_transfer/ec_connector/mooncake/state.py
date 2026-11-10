@@ -254,9 +254,9 @@ class SchedulerTransferTable:
         """Expire consumed local transfers after an encoder-cache reset.
 
         READY and RESIDENT records have already been loaded, so
-        ``ConsumerReservationManager.take()`` has consumed their Worker
+        `ConsumerReservationManager.take()` has consumed their Worker
         reservation. Leaving them in place would let a later request
-        treat a dead ``transfer_id`` as a remote cache hit. Unconsumed
+        treat a dead `transfer_id` as a remote cache hit. Unconsumed
         AVAILABLE reservations stay Load-able. In-flight WAITING_EVENT
         and LOADING records are left to the existing async flow; this
         does not claim in-flight reset concurrency safety.

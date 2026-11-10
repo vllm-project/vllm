@@ -558,12 +558,12 @@ class ECMooncakeScheduler:
     def reset(self) -> None:
         """Invalidate local encoder-cache bookkeeping after a cache reset.
 
-        ``reset_encoder_cache`` already clears EncoderCacheManager and the
-        worker encoder cache. ``_local_cache`` is only a mirror of that
-        cache; leaving it in place lets ``ensure_cache_available`` skip
+        `reset_encoder_cache` already clears EncoderCacheManager and the
+        worker encoder cache. `_local_cache` is only a mirror of that
+        cache; leaving it in place lets `ensure_cache_available` skip
         Load and hit an encoder cache miss. Consumed READY/RESIDENT
         records are expired so a later request cannot treat a consumed
-        ``transfer_id`` as a cache hit. Unconsumed AVAILABLE
+        `transfer_id` as a cache hit. Unconsumed AVAILABLE
         reservations remain Load-able. This does not make in-flight
         reset concurrency-safe.
         """
