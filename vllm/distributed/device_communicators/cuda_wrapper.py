@@ -66,7 +66,7 @@ class CudaRTLibrary:
             cudaError_t,
             [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t, cudaMemcpyKind],
         ),
-        # cudaError_t cudaIpcGetMemHandle ( cudaIpcMemHandle_t* handle, void* devPtr ) # noqa
+        # cudaError_t cudaIpcGetMemHandle ( cudaIpcMemHandle_t* handle, void* devPtr )
         Function(
             "cudaIpcGetMemHandle",
             cudaError_t,
@@ -78,6 +78,8 @@ class CudaRTLibrary:
             cudaError_t,
             [ctypes.POINTER(ctypes.c_void_p), cudaIpcMemHandle_t, ctypes.c_uint],
         ),
+        # cudaError_t cudaIpcCloseMemHandle ( void* devPtr )
+        Function("cudaIpcCloseMemHandle", cudaError_t, [ctypes.c_void_p]),
         # cudaError_t cudaHostRegister ( void* ptr, size_t size, unsigned int flags )
         Function(
             "cudaHostRegister",
@@ -90,7 +92,7 @@ class CudaRTLibrary:
         Function("cudaGetLastError", cudaError_t, []),
     ]
 
-    # https://rocm.docs.amd.com/projects/HIPIFY/en/latest/tables/CUDA_Runtime_API_functions_supported_by_HIP.html # noqa
+    # https://rocm.docs.amd.com/projects/HIPIFY/en/latest/tables/CUDA_Runtime_API_functions_supported_by_HIP.html
     cuda_to_hip_mapping = {
         "cudaSetDevice": "hipSetDevice",
         "cudaDeviceSynchronize": "hipDeviceSynchronize",
@@ -102,6 +104,7 @@ class CudaRTLibrary:
         "cudaMemcpy": "hipMemcpy",
         "cudaIpcGetMemHandle": "hipIpcGetMemHandle",
         "cudaIpcOpenMemHandle": "hipIpcOpenMemHandle",
+        "cudaIpcCloseMemHandle": "hipIpcCloseMemHandle",
         "cudaHostRegister": "hipHostRegister",
         "cudaHostUnregister": "hipHostUnregister",
         "cudaGetLastError": "hipGetLastError",
@@ -158,6 +161,21 @@ class CudaRTLibrary:
     def cudaSetDevice(self, device: int) -> None:
         self.CUDART_CHECK(self.funcs["cudaSetDevice"](device))
 
+    def cudaStreamCreateWithFlags(self, flags: int) -> int:
+        """Create a stream on the current device; returns its raw handle.
+
+        Only used under NVIDIA Confidential Computing, so unlike
+        `exported_functions` it is resolved on use: ROCm and non-CC processes
+        never look it up.
+        """
+        create = self.lib.cudaStreamCreateWithFlags
+        create.restype = cudaError_t
+        create.argtypes = [ctypes.POINTER(ctypes.c_void_p), ctypes.c_uint]
+        stream = ctypes.c_void_p()
+        self.CUDART_CHECK(create(ctypes.byref(stream), flags))
+        assert stream.value is not None
+        return stream.value
+
     def cudaDeviceSynchronize(self) -> None:
         self.CUDART_CHECK(self.funcs["cudaDeviceSynchronize"]())
 
@@ -198,6 +216,9 @@ class CudaRTLibrary:
             )
         )
         return devPtr
+
+    def cudaIpcCloseMemHandle(self, devPtr: ctypes.c_void_p) -> None:
+        self.CUDART_CHECK(self.funcs["cudaIpcCloseMemHandle"](devPtr))
 
     def cudaHostRegister(self, ptr: int, size: int, flags: int = 0) -> int:
         """Return the raw error code instead of raising, since callers can

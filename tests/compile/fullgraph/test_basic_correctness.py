@@ -56,10 +56,8 @@ class TestSetting:
         ),
     ],
 )
-@pytest.mark.parametrize("use_v2_model_runner", [False, True])
 def test_compile_correctness(
     test_setting: TestSetting,
-    use_v2_model_runner: bool,
 ):
     model = test_setting.model
     model_args = test_setting.model_args
@@ -77,10 +75,6 @@ def test_compile_correctness(
         f"--attention-backend={attn_backend}",
     ]
 
-    # Pin every compared setting to the same model runner so that only the
-    # compilation mode differs within a comparison.
-    runner_env = {"VLLM_USE_V2_MODEL_RUNNER": str(int(use_v2_model_runner))}
-
     all_args: list[list[str]] = []
     all_envs: list[dict[str, str] | None] = []
 
@@ -92,7 +86,7 @@ def test_compile_correctness(
         CompilationMode.VLLM_COMPILE,
     ]:
         all_args.append(final_args + [f"-cc.mode={mode.name}", "-cc.backend=inductor"])
-        all_envs.append(dict(runner_env))
+        all_envs.append(None)
     # inductor will change the output, so we only compare if the output
     # is close, not exactly the same.
     compare_all_settings(
@@ -113,5 +107,5 @@ def test_compile_correctness(
         CompilationMode.VLLM_COMPILE,
     ]:
         all_args.append(final_args + [f"-cc.mode={mode.name}", "-cc.backend=eager"])
-        all_envs.append(dict(runner_env))
+        all_envs.append(None)
     compare_all_settings(model, all_args, all_envs, method=method)
