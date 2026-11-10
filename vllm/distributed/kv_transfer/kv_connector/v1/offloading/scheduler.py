@@ -2161,6 +2161,8 @@ class OffloadingConnectorScheduler:
             # at its first withheld chunk, which is offered on a later step.
             max_chunks = self.manager.max_storable_chunks()
             if max_chunks is not None:
+                if max_chunks == 0 and not req.is_finished():
+                    continue
                 num_offered = max(max_chunks, 1)
                 for group_pos, chunk_idx in reversed(
                     new_offload_key_chunks[num_offered:]
