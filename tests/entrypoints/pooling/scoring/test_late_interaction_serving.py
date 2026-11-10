@@ -8,7 +8,7 @@ import pytest
 import torch
 
 from vllm.entrypoints.pooling.scoring.serving import ServingScores
-from vllm.entrypoints.pooling.typing import PoolingEngineInput, PoolingServeContext
+from vllm.entrypoints.pooling.types import PoolingEngineInput, PoolingServeContext
 from vllm.exceptions import GenerationError
 from vllm.inputs import tokens_input
 from vllm.outputs import PoolingOutput, PoolingRequestOutput, RequestError
