@@ -26,12 +26,15 @@ if not is_aiter_found_and_supported():
         allow_module_level=True,
     )
 
+from vllm.config import VllmConfig
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.mla import rocm_aiter_mla_sparse as sparse_mod
 
 
 class _FakeAiter(ModuleType):
     get_mla_metadata_v1: Mock
+    get_mla_metadata_info_v1: Mock
+    dtypes: SimpleNamespace
 
 
 @pytest.mark.parametrize("block_size", [16, 64, 128])
@@ -129,6 +132,13 @@ def test_rocm_index_conversion_respects_packed_valid_counts():
     torch.testing.assert_close(output, expected, rtol=0, atol=0)
 
 
+def _cpu_token_to_req(metadata):
+    return torch.repeat_interleave(
+        torch.arange(metadata.num_reqs, dtype=torch.int32),
+        metadata.query_start_loc_cpu.diff(),
+    )
+
+
 def _make_builder(max_num_batched_tokens: int = 8):
     builder = object.__new__(sparse_mod.ROCMAiterMLASparseMetadataBuilder)
     topk_tokens = 4
@@ -145,13 +155,7 @@ def _make_builder(max_num_batched_tokens: int = 8):
     builder.use_shardq = False
     builder._prefill_backend = None
 
-    def cpu_token_to_req(metadata):
-        return torch.repeat_interleave(
-            torch.arange(metadata.num_reqs, dtype=torch.int32),
-            metadata.query_start_loc_cpu.diff(),
-        )
-
-    builder._build_req_id_per_token = cpu_token_to_req  # type: ignore[method-assign]
+    builder._build_req_id_per_token = _cpu_token_to_req  # type: ignore[method-assign]
     builder.req_id_per_token_buffer = torch.zeros(
         max_num_batched_tokens, dtype=torch.int32, device="cpu"
     )
@@ -275,6 +279,99 @@ def test_build_populates_mixed_split_fields(monkeypatch):
     assert md.num_decode_tokens == 1
     assert md.prefill_max_seq_len == 0
     assert md.prefill is None
+
+
+def _construct_builder(monkeypatch, impl: SimpleNamespace, cache_dtype: str):
+    """Drive the real builder __init__ with a stubbed vllm_config and a fake
+    aiter module, so the production persistent-metadata selection runs."""
+    hf_text_config = SimpleNamespace(
+        index_topk=4,
+        q_lora_rank=None,
+        kv_lora_rank=512,
+        qk_nope_head_dim=448,
+        qk_rope_head_dim=64,
+        v_head_dim=512,
+    )
+    model_config = SimpleNamespace(
+        dtype=torch.bfloat16,
+        hf_text_config=hf_text_config,
+        max_model_len=64,
+        get_num_attention_heads=lambda parallel_config: 16,
+        model_arch_config=SimpleNamespace(total_num_attention_heads=16),
+    )
+    # Real default configs for everything but the model and the layer.
+    defaults = VllmConfig()
+    defaults.cache_config.cache_dtype = cache_dtype
+    defaults.cache_config.block_size = 1
+    vllm_config = SimpleNamespace(
+        model_config=model_config,
+        cache_config=defaults.cache_config,
+        parallel_config=defaults.parallel_config,
+        scheduler_config=defaults.scheduler_config,
+        attention_config=defaults.attention_config,
+        speculative_config=None,
+        compilation_config=SimpleNamespace(
+            static_forward_context={
+                "layers.0": SimpleNamespace(impl=impl, prefill_backend=None)
+            }
+        ),
+    )
+    fake_aiter = _FakeAiter("aiter")
+    fake_aiter.dtypes = SimpleNamespace(
+        bf16=torch.bfloat16,
+        fp8=current_platform.fp8_dtype(),
+        d_dtypes={"fp8": torch.uint8, "bf16": torch.bfloat16},
+    )
+    fake_aiter.get_mla_metadata_info_v1 = Mock(
+        return_value=tuple((1, torch.int32) for _ in range(6))
+    )
+    monkeypatch.setitem(sys.modules, "aiter", fake_aiter)
+    return sparse_mod.ROCMAiterMLASparseMetadataBuilder(
+        SimpleNamespace(block_size=1),
+        ["layers.0"],
+        vllm_config,
+        torch.device("cpu"),
+    )
+
+
+@pytest.mark.parametrize(
+    ("impl_kwargs", "expected"),
+    [
+        ({}, True),  # ordinary fp8 consumer: persistent metadata
+        ({"kv_cache_dtype": "fp8_ds_mla"}, False),  # Triton-only reader
+    ],
+)
+def test_persistent_metadata_selection_via_constructor(
+    monkeypatch, impl_kwargs, expected
+):
+    """fp8_ds_mla reads through aiter's Triton sparse_mla_fwd, which never
+    touches the persistent work metadata."""
+    fields = dict(sinks=None, use_aiter_sparse_mla=False, kv_cache_dtype="fp8")
+    fields.update(impl_kwargs)
+    impl = SimpleNamespace(**fields)
+    builder = _construct_builder(monkeypatch, impl, impl.kv_cache_dtype)
+    assert builder._use_persistent_metadata is expected
+
+
+def test_fp8_ds_mla_build_skips_persistent_planner_and_sync(monkeypatch):
+    """Constructor-selected fp8_ds_mla (Triton) reader: build() must not run
+    the persistent planner, its GPU->CPU seq-len copy, or the stream sync."""
+    impl = SimpleNamespace(
+        sinks=None, use_aiter_sparse_mla=False, kv_cache_dtype="fp8_ds_mla"
+    )
+    builder = _construct_builder(monkeypatch, impl, "fp8_ds_mla")
+    assert not builder._use_persistent_metadata
+    events: list[str] = []
+    fake_aiter = _patch_build_deps(monkeypatch, events)
+    builder._build_req_id_per_token = _cpu_token_to_req  # type: ignore[method-assign]
+
+    md = builder.build(
+        common_prefix_len=0, common_attn_metadata=_make_common_metadata()
+    )
+
+    fake_aiter.get_mla_metadata_v1.assert_not_called()
+    assert events == []
+    assert md.work_meta_data is None
 
 
 def test_build_fills_paged_kv_indptr_tail(monkeypatch):

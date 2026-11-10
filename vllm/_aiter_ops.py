@@ -3006,7 +3006,24 @@ class rocm_aiter_ops:
         seq_lens: torch.Tensor,
         topk_indices: torch.Tensor,
         topk_tokens: int,
+        *,
+        stable: bool = False,
+        values: torch.Tensor | None = None,
     ) -> None:
+        """Select each row's top-`topk_tokens` logits.
+
+        Args:
+            logits: Per-row scores of shape `[num_rows, max_model_len]`.
+            next_n: Query rows per request.
+            seq_lens: Valid width of each row.
+            topk_indices: Output buffer for the selected column indices.
+            topk_tokens: Number of entries selected per row.
+            stable: Emit in descending score order with a smallest-index
+                tie-break, so every rank selects and orders the same KV set.
+            values: Optional float32 buffer shaped like `topk_indices` that
+                receives the selected logits; short rows pad with `-inf`.
+
+        """
         from aiter.ops.topk import top_k_per_row_decode
 
         top_k_per_row_decode(
@@ -3018,6 +3035,8 @@ class rocm_aiter_ops:
             logits.stride(0),
             logits.stride(1),
             k=topk_tokens,
+            stable=stable,
+            values=values,
         )
 
     @staticmethod
