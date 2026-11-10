@@ -38,6 +38,21 @@ def _randn(*shape: int) -> torch.Tensor:
     return torch.randn(*shape, dtype=torch.bfloat16, device="cuda")
 
 
+def test_hc_padding_shard_is_not_expected_from_checkpoints(dist_init) -> None:
+    """Checkpoints carry only the down and block-inject rows, not the padding."""
+    from vllm.models.qwen4_exp.amd.hyperconnection import GatedResidual
+    from vllm.models.qwen4_exp.common.hyperconnection import HyperConnectionConfig
+
+    hc = GatedResidual(HyperConnectionConfig())
+    assert hc.pad_size > 0
+    linear = hc.input_mix_weight_down_block_inject
+    for shard_id, rows in ((0, hc.hc_lowrank), (1, hc.hc_count)):
+        weight = torch.ones(rows, hc.hyper_hidden_size)
+        weight.shard_id = shard_id
+        set(linear.load_weights([("weight", weight)]))
+    assert linear.pop_missing_shards() == []
+
+
 def _ref_grouped_gemma_rmsnorm(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
     grouped = x.float().unflatten(-1, (HC, HIDDEN_SIZE))
     variance = grouped.square().mean(-1, keepdim=True)

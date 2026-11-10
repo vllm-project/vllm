@@ -104,6 +104,8 @@ class GatedResidual(nn.Module):
                 return_bias=False,
                 disable_tp=True,
             )
+            # Checkpoints carry no padding rows, and their output is discarded.
+            self.input_mix_weight_down_block_inject.shard_ids = (0, 1)
         else:
             self.input_mix_weight_down = ReplicatedLinear(
                 self.hyper_hidden_size,
