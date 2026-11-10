@@ -27,7 +27,7 @@ on the renormalized top-k distribution, keeping the smallest prefix of the
 rounded to 2^-44 fixed point, so sums are deterministic.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 import cutlass
@@ -55,7 +55,8 @@ GL = 8192  # candidate groups
 MIN_CAP = 4096  # candidates in shared memory, at least
 STORE1 = 512  # candidates of the first top-p tier
 TIER_P, TIER_P2 = 64, 1024  # top-p-only rows try the nucleus among their best
-SECOND_SPLITS = 8  # rows of fewer CTAs also try TIER_P2
+MIN_WIDE = 8  # wide clusters bin the row early for the fallback, skip TIER_P2
+FINE, FINE_SCALE = 2048, 64.0  # fallback bins per row (the last open) and nat
 MAX_SPLITS = 16
 BIN_SCALE = 8.0  # level bins per nat below the row max
 LAST_BIN = 255  # open-ended
@@ -68,8 +69,6 @@ NEG_INF = float("-inf")
 TOTAL, PREFIX, COUNT_AT, FOUND, XTURN, KEPT = range(6)
 # A fixed-point mass (< 2^64) in 12-bit pieces: a bin sums at most 2^20 of each.
 LIMB_BITS, LIMBS = 12, 4
-COPIES, HIST = 4, (1 + LIMBS) * 256  # fallback histogram copies, words each
-assert COPIES * HIST <= 2 * MIN_CAP  # in the region
 BIG = 2 * STORE1  # offset of the region store in the candidate words
 
 
@@ -145,19 +144,21 @@ def filter_chunk(
 ):
     s.init()
     stream(s, c, use_p and not use_k, cl)
+    # Peers of wide clusters wait for the leader's selection: they bin the row
+    # meanwhile when the fallback is likely (top-p only, or k beyond half the
+    # store).
+    binned = Boolean(False)
+    if const_expr(cl):
+        binned = c.splits >= MIN_WIDE and (not use_k or kk > Uint32(s.cap // 2))
     if c.rank == 0:
         select_leader(s, c, use_k, kk, use_p, p, cl)
+    if const_expr(cl):  # noqa: SIM102 (peer_slice divides by splits - 1)
+        if binned and c.rank != 0:
+            bin_slice(s, peer_slice(c), leader_max(s, c), use_p)
     group_sync(cl)
-    cut_key, cut_idx, kept, off, fallback, maximum, total = s.published()
+    _, _, kept, off, fallback, maximum, total = s.published()
     if fallback:
-        done, cut_key, cut_idx = window_path(
-            s, c, use_k, kk, use_p, p, total, maximum, cl
-        )
-        if not done:
-            cut_key, cut_idx = global_path(
-                s, c, use_k, kk, use_p, p, total, maximum, cl
-            )
-        mask_row(c, cut_key, cut_idx)
+        fine_fallback(s, c, use_k, kk, use_p, p, total, maximum, binned, cl)
     else:
         fill(c)
         cute.arch.sync_threads()
@@ -313,10 +314,13 @@ def select_leader(
             fallback = Uint32(1)
         else:
             kept, cut_key, cut_idx, _ = sort_cut(
-                s, off, count, use_k, kk, use_p, p, goal, maximum, Uint32(0), Uint64(0)
+                s, off, count, use_k, kk, use_p, p, goal, maximum, Uint64(0), Uint64(0)
             )
             if const_expr(cl):
                 push_kept(s, c, off, kept)
+    if fallback != 0:  # the peers add their bins into the leader's
+        for i in range(tid, 2 * FINE, THREADS):
+            put(s.fine, i, Uint32(0))
     cute.arch.sync_threads()
     words = (
         Uint64(cut_key) | (Uint64(cut_idx) << 32),
@@ -345,7 +349,7 @@ def candidates(
     candidate). Returns their number (beyond the store for the fallback) and
     the store."""
     n, off = Uint64(TIER_P), Int32(STORE1)
-    if c.splits < SECOND_SPLITS:
+    if c.splits < MIN_WIDE:
         off = Int32(0)  # the region keeps the group maxima for TIER_P2
     if use_k:
         n, off = Uint64(kk), Int32(STORE1)
@@ -359,7 +363,7 @@ def candidates(
             if off == 0 and got > STORE1:  # the first tier's store overflows
                 count, _, _ = gather(s, c, Int32(STORE1), ng, bins, b1)
                 at = Int32(STORE1)
-        elif c.splits < SECOND_SPLITS:
+        elif c.splits < MIN_WIDE:
             unit = max(fixed_mass(low, bins.maximum), Uint64(1))
             second = Uint64(got) + (goal - mass + unit - 1) // unit <= TIER_P2 // 4
     if second:
@@ -490,13 +494,14 @@ def sort_cut(
     p: Float32,
     goal: Uint64,
     maximum: Float32,
-    above: Uint32,
     above_mass: Uint64,
+    between_mass: Uint64,
 ):
     """Sorts the m packed candidates (key desc, index asc) by a bitonic
-    network, then cuts at the k-th, then at the smallest prefix of the top-k
-    whose mass reaches p (goal for top-p only). `above` logits of mass
-    above_mass rank above the candidates. Returns (kept candidates, cut)."""
+    network, then cuts at the kk-th, then at the smallest prefix of the top-k
+    whose mass reaches p (goal for top-p only). Logits of mass above_mass rank
+    above the candidates, and the top-k also holds between_mass outside them.
+    Returns (kept candidates, cut)."""
     tid = cute.arch.thread_idx()[0]
     size = Int32(32)
     while size < Int32(m):
@@ -523,14 +528,14 @@ def sort_cut(
         k2 *= 2
     n = m
     if use_k:
-        n = min(kk - above, m)
+        n = min(kk, m)
     r = n - 1
     if use_p:
         if use_k:
             mass = Uint64(0)
             for i in range(tid, n, THREADS):
                 mass += fixed_mass(Uint32(s.cand[off + Int32(i)] >> 32), maximum)
-            mass = block_reduce(s, mass, add) + above_mass
+            mass = block_reduce(s, mass, add) + above_mass + between_mass
             goal = mass_target(p, Float64(mass))
         below, carry = Uint32(0), above_mass
         for i0 in range(0, n, THREADS):  # uniform: block_scan
@@ -622,12 +627,12 @@ def keeps(key: Uint32, idx: Uint32, cut_key: Uint32, cut_idx: Uint32):
     return key > cut_key or (key == cut_key and idx <= cut_idx)
 
 
-# ---------------------------------------------------------------------------
 # Exact fallback over the row by all CTAs.
+assert 2 * FINE * 4 <= GL * 2  # the fallback bins live in the lists
 
 
 @cute.jit
-def window_path(
+def fine_fallback(
     s,
     c,
     use_k: Boolean,
@@ -636,110 +641,37 @@ def window_path(
     p: Float32,
     total: Float64,
     maximum: Float32,
+    binned: Boolean,
     cl: cutlass.Constexpr[bool],
 ):
-    """Exact fallback in three passes over the row: a histogram of the row
-    by value bin (count and mass), combined over the cluster, gives the
-    window of bins holding the cut, from the bin of the k-th logit up to the
-    top-p boundary for the least mass the top-k can have. The leader gathers
-    and sorts the window's logits and cuts (sort_cut), then every CTA masks
-    its chunk. Returns (done, cut): larger windows take the radix path."""
+    """Exact fallback in a fixed number of passes over the row: a histogram
+    of fine value bins (counts, and in-bin offsets that bound the masses)
+    locates the top-k bin and a window of bins holding the top-p cut. One
+    read-modify-write pass then masks the bins below the window, sums the
+    exact mass above it and gathers the window and the top-k bin into the
+    leader, which cuts exactly among them. Windows beyond the leader's store
+    (heavy ties) take radix passes instead. binned: the peers binned the row
+    already, while the leader selected."""
     tid = cute.arch.thread_idx()[0]
-    bins = Bins(maximum)
-    if tid == 0:
-        put(s.sc, TOTAL, Uint32(0))
-    for i in range(tid, COPIES * HIST, THREADS):
-        put(s.words, BIG + i, Uint32(0))
+    if not binned:
+        bin_slice(s, c, maximum, use_p)
     if const_expr(cl):
-        open_bins(s, Int32(256))
-    cute.arch.sync_threads()
-    copy = BIG + (tid // (THREADS // COPIES)) * HIST
-    fold_row(c, BinHist(s, bins, copy), Int32(0))
-    cute.arch.sync_threads()
-    for w in cutlass.range_constexpr(1 + LIMBS):  # merge the copies
-        part = Uint32(0)
-        for k in cutlass.range_constexpr(COPIES):
-            part += Uint32(s.words[BIG + k * HIST + w * 256 + tid])
-        if const_expr(w == 0):
-            put(s.count, tid, part)
-        else:
-            put(s.limb, (w - 1) * 256 + tid, part)
-    cute.arch.sync_threads()
-    if const_expr(cl):
-        push_bins(s, Int32(256), True)
-    # Inclusive count and mass of the bins from the top, by bin.
-    counts, _ = block_scan(s, Uint32(s.bin_count(tid, cl)))
-    masses, _ = block_scan(s, s.weight(tid, True, cl))
-    put(s.gcount, tid, counts)
-    put(s.gwide, tid, masses)
-    cute.arch.sync_threads()
-    goal = mass_target(p, total * MASS_SCALE)
-    least = goal  # the top-p goal for the least top-k mass
-    bottom = Int32(LAST_BIN)
-    if use_k:
-        bottom = Int32(block_reduce(s, flag(counts < kk), add))
-        least = mass_target(p, Float64(before(s.gwide, bottom)))
-    top = bottom
-    if use_p:
-        top = min(Int32(block_reduce(s, flag(masses < least), add)), bottom)
-        if not use_k:
-            bottom = top
-    wide = window_count(s, top, bottom) > floor_pow2(s.cap)
-    if use_k and use_p and wide:  # the k-th's bin first
-        top = bottom
-    done = window_count(s, top, bottom) <= floor_pow2(s.cap)
-    cut_key, cut_idx = Uint32(0), Uint32(ALL_IDX)
-    if done:
-        cut_key, cut_idx, goal = window_cut(
-            s, c, bins, top, bottom, use_k, kk, use_p, p, goal, maximum, cl
-        )
-        if use_k and use_p:
-            tp = Int32(block_reduce(s, flag(masses < goal), add))
-            if tp < top:  # the nucleus ends above the window
-                done = window_count(s, tp, tp) <= floor_pow2(s.cap)
-                if done:
-                    cut_key, cut_idx, _ = window_cut(
-                        s, c, bins, tp, tp, False, kk, True, p, goal, maximum, cl
-                    )
-    return done, cut_key, cut_idx
-
-
-@cute.jit
-def window_count(s, top: Int32, bottom: Int32):
-    out = Uint32(ALL_IDX)
-    if top <= LAST_BIN:
-        out = Uint32(s.gcount[bottom]) - Uint32(before(s.gcount, top))
-    return out
-
-
-@cute.jit
-def window_cut(
-    s,
-    c,
-    bins,
-    top: Int32,
-    bottom: Int32,
-    use_k: Boolean,
-    kk: Uint32,
-    use_p: Boolean,
-    p: Float32,
-    goal: Uint64,
-    maximum: Float32,
-    cl: cutlass.Constexpr[bool],
-):
-    """The leader gathers the logits of bins [top, bottom], sorts them and
-    cuts (sort_cut). Returns the cut and the top-p goal, in every CTA."""
-    tid = cute.arch.thread_idx()[0]
-    above = Uint32(before(s.gcount, top))
-    above_mass = before(s.gwide, top)
-    m = Uint32(s.gcount[bottom]) - above
-    gather_window(s, c, bins, top, bottom, cl)
-    group_sync(cl)
+        if not binned:
+            cluster_sync()  # the leader's own bins are complete
+        if c.rank != 0:
+            for b in range(tid, 2 * FINE, THREADS):
+                if s.fine[b] != 0:
+                    red_add(s.fine.iterator + b, 0, Uint32(s.fine[b]))
+        cluster_sync()
     if c.rank == 0:
-        _, ck, ci, g = sort_cut(
-            s, Int32(STORE1), m, use_k, kk, use_p, p, goal, maximum, above, above_mass
-        )
-        words = (Uint64(ck) | (Uint64(ci) << 32), g)
+        lo, hi, kb, rank, count, keep_all = plan(s, use_k, kk, use_p, p, total)
+        if tid == 0:
+            put(s.sc, TOTAL, Uint32(0))
+        words = (
+            Uint64(lo) | (Uint64(hi) << 16) | (Uint64(kb) << 32)
+            | (Uint64(keep_all) << 48),
+            Uint64(rank) | (Uint64(count) << 32),
+        )  # fmt: skip
         for w in cutlass.range_constexpr(2):
             if const_expr(cl):
                 if tid < c.splits:
@@ -747,94 +679,309 @@ def window_cut(
             elif tid == 0:
                 put(s.pub, w, words[w])
     group_sync(cl)
-    w0 = Uint64(s.pub[0])
-    return Uint32(w0 & 0xFFFFFFFF), Uint32(w0 >> 32), Uint64(s.pub[1])
+    w0, w1 = Uint64(s.pub[0]), Uint64(s.pub[1])
+    lo, hi, kb = (
+        Int32(w0 & 0xFFFF),
+        Int32((w0 >> 16) & 0xFFFF),
+        Int32((w0 >> 32) & 0xFFFF),
+    )
+    rank, count = Uint32(w1 & 0xFFFFFFFF), Uint32(w1 >> 32)
+    if (w0 >> 48) == 0:  # else the cut lies beyond every logit
+        if count > floor_pow2(s.cap):
+            cut_key, cut_idx = global_path(
+                s, c, use_k, kk, use_p, p, total, maximum, cl
+            )
+            mask_row(c, cut_key, cut_idx)
+        else:
+            above, between = window_pass(s, c, lo, hi, kb, maximum, use_p, cl)
+            above = group_reduce(s, above, add, cl)
+            between = group_reduce(s, between, add, cl)
+            if c.rank == 0:
+                cut_window(
+                    s, c, count, use_k, rank, use_p, p, total, maximum, above, between
+                )
 
 
 @cute.jit
-def before(t: cute.Tensor, b: Int32):
-    """The inclusive scan t at bin b - 1 (0 above the first bin)."""
-    out = type(t[0])(0)
-    if b > 0:
-        out = t[b - 1]
-    return out
+def bin_slice(s, part, maximum: Float32, use_p: Boolean):
+    """The fine bin counts and sums of in-bin offsets (in 1/256 bin) of a part
+    of the row, in this CTA's s.fine."""
+    for i in range(cute.arch.thread_idx()[0], 2 * FINE, THREADS):
+        put(s.fine, i, Uint32(0))
+    cute.arch.sync_threads()
+    fold_row(part, FineCount(s, maximum, use_p), Int32(0))
+    cute.arch.sync_threads()
+
+
+def peer_slice(c):
+    """The peers' share of the whole row, binned while the leader selects."""
+    workers = c.splits - 1
+    per = (c.vocab + 4 * workers - 1) // (4 * workers) * 4
+    begin = cutlass.min(c.vocab, (c.rank - 1) * per)
+    return replace(c, begin=begin, end=cutlass.min(c.vocab, begin + per))
+
+
+@cute.jit
+def leader_max(s, c):
+    """The row max from the leader's per-CTA maxima."""
+    m = Float32(NEG_INF)
+    for r in range(c.splits):
+        w = ld_cluster_u64(remote_addr(s.rstat.iterator + 2 * r, 0))
+        m = cute.arch.fmax(m, unpack(w, Float32))
+    return m
 
 
 @dataclass(frozen=True)
-class BinHist:
-    """Row visitor adding each logit's count and mass to its value bin, in
-    the thread's copy of the histogram (count, then the mass limbs, in the
-    region words from `copy`): same-address atomics serialize."""
-
+class FineCount:
     s: Any
-    bins: Any
-    copy: Int32
+    maximum: Float32
+    use_p: Boolean
 
     @cute.jit
     def __call__(self, y: Float32, i: Int32, acc):
-        at = self.s.words.iterator + (self.copy + self.bins.of_value(y))
-        cute.arch.atomic_add(at, Uint32(1), scope="cta")
-        w = value_mass(y, self.bins.maximum)
-        for li in cutlass.range_constexpr(LIMBS):
-            piece = w >> (LIMB_BITS * li)
-            if const_expr(li < LIMBS - 1):
-                piece = piece & ((1 << LIMB_BITS) - 1)
-            if piece != 0:
-                cute.arch.atomic_add(at + (li + 1) * 256, Uint32(piece), scope="cta")
+        at = fine_at(y, self.maximum)
+        b = Int32(at >> 8)
+        cute.arch.atomic_add(self.s.fine.iterator + b, Uint32(1), scope="cta")
+        if self.use_p and (at & 255) != 0:
+            cute.arch.atomic_add(
+                self.s.fine.iterator + (FINE + b), at & 255, scope="cta"
+            )
         return acc
 
 
 @cute.jit
-def gather_window(s, c, bins, top: Int32, bottom: Int32, cl: cutlass.Constexpr[bool]):
-    """Appends the logits of bins [top, bottom] to the leader's region store:
-    each CTA's slots follow those of the lower ranks (counts from its local
-    histogram), with one shared atomic per warp and round."""
+def fine_at(y: Float32, maximum: Float32):
+    """Fallback bins of 1/FINE_SCALE nat below the row max, the last one open,
+    in 256 positions each: round(256 FINE_SCALE (maximum - y)) through the
+    float's mantissa, so bin b starts 1/512 before b."""
+    z = (maximum - y) * Float32(256 * FINE_SCALE) + Float32(8388608.0)
+    return min(bitcast(z, Uint32) - Uint32(0x4B000000), Uint32(256 * (FINE - 1)))
+
+
+@cute.jit
+def plan(s, use_k: Boolean, kk: Uint32, use_p: Boolean, p: Float32, total: Float64):
+    """The leader's plan from the combined bins, thread t holding bins PER t
+    to PER t + PER - 1: the top-k bin kb, and the top-p window [lo, hi] from
+    the first bin where the upper bounds of the cumulative mass reach the
+    target to the first where the lower bounds do. With top-k, the target is
+    bounded through the top-k bin. Returns (lo, hi, kb, the k-th logit's rank
+    among the gathered, their number, keep all)."""
+    per = FINE // THREADS
+    first = per * cute.arch.thread_idx()[0]
+    n = cute.make_rmem_tensor((per,), Uint64)
+    low = cute.make_rmem_tensor((per,), Uint64)
+    high = cute.make_rmem_tensor((per,), Uint64)
+    ns, ls, hs = Uint64(0), Uint64(0), Uint64(0)
+    for j in cutlass.range_constexpr(per):
+        n[j] = Uint64(s.fine[first + j])
+        low[j], high[j] = Uint64(0), Uint64(0)
+        if use_p:
+            offsets = Uint32(s.fine[FINE + first + j])
+            low[j] = mass_bound(Uint32(n[j]), offsets, first + j, False)
+            high[j] = mass_bound(Uint32(n[j]), offsets, first + j, True)
+        ns, ls, hs = ns + n[j], ls + low[j], hs + high[j]
+    incl, everything = block_scan(s, ns)
+    n0 = incl - ns
+    low0, _ = block_scan(s, ls)
+    high0, _ = block_scan(s, hs)
+    low0, high0 = low0 - ls, high0 - hs
+    acc = n0
+    for j in cutlass.range_constexpr(per):  # then the counts above each bin
+        put(s.fine, FINE + first + j, Uint32(acc))
+        acc += n[j]
+    cute.arch.sync_threads()
+    lo, hi, kb, keep_all = Int32(0), Int32(FINE - 1), Int32(FINE), Uint32(0)
+    if use_k:
+        kb = reach(s, n, n0, Uint64(kk), first)
+        lo, hi = kb, kb
+    if use_p:
+        least = mass_target(p, total * MASS_SCALE)
+        most = least
+        if use_k:
+            need = kk - count_above(s, kb, everything)
+            bottom = mass_bound(need, 255 * need, kb, False)
+            least = mass_target(p, Float64(sum_above(s, low, kb, first) + bottom))
+            top = sum_above(s, high, kb, first) + mass_bound(need, Uint32(0), kb, True)
+            most = mass_target(p, Float64(top))
+        lo = reach(s, high, high0, least, first)
+        hi = min(reach(s, low, low0, most, first), min(kb, FINE - 1))
+        if lo == FINE:
+            keep_all = Uint32(1)
+    lo_at = count_above(s, lo, everything)
+    count = count_above(s, hi + 1, everything) - lo_at
+    between = Uint32(0)
+    if kb > hi and kb < FINE:
+        between = count_above(s, kb, everything) - count_above(s, hi + 1, everything)
+        count += count_above(s, kb + 1, everything) - count_above(s, kb, everything)
+    return lo, hi, kb, kk - lo_at - between, count, keep_all
+
+
+@cute.jit
+def count_above(s, b: Int32, everything: Uint64):
+    """The logits in bins before b (planned counts)."""
+    out = Uint32(everything)
+    if b < FINE:
+        out = Uint32(s.fine[FINE + b])
+    return out
+
+
+@cute.jit
+def reach(s, w: cute.Tensor, start: Uint64, need: Uint64, first: Int32):
+    """The first bin where the cumulative weight reaches need (FINE if never)."""
+    hit, acc = Int32(FINE), start
+    for j in cutlass.range_constexpr(FINE // THREADS):
+        acc += w[j]
+        if hit == FINE and acc >= need:
+            hit = first + j
+    return block_reduce(s, hit, cutlass.min)
+
+
+@cute.jit
+def sum_above(s, w: cute.Tensor, b: Int32, first: Int32):
+    part = Uint64(0)
+    for j in cutlass.range_constexpr(FINE // THREADS):
+        if first + j < b:
+            part += w[j]
+    return block_reduce(s, part, add)
+
+
+@cute.jit
+def mass_bound(n: Uint32, offsets: Uint32, b: Int32, upper: cutlass.Constexpr[bool]):
+    """Bounds of the fixed-point mass of n logits in fine bin b (from b - 1/512
+    to b + 1 - 1/512) from the sum of their in-bin offsets: the chord of exp
+    above, Jensen at the mean below, with slack for the rounding of expf and
+    of the fixed point."""
+    out = Uint64(0)
+    if n != 0 and (const_expr(upper) or b != FINE - 1):
+        start = Float32(b) - Float32(1.0 / 512)
+        top = exp(-start / Float32(FINE_SCALE))
+        bottom = top
+        if b != FINE - 1:
+            bottom = exp(-(start + Float32(1.0)) / Float32(FINE_SCALE))
+        if const_expr(upper):
+            m = Float64(n) * Float64(top) - Float64(offsets) / 256.0 * Float64(
+                top - bottom
+            )
+            out = Uint64(m * (MASS_SCALE * 1.00001)) + Uint64(n)
+        else:
+            mean = (Float32(offsets) + Float32(n)) / (Float32(256.0) * Float32(n))
+            m = Float64(n) * Float64(exp(-(start + mean) / Float32(FINE_SCALE)))
+            m = m * (MASS_SCALE * 0.99999) - Float64(n)
+            if m > 0.0:
+                out = Uint64(m)
+    return out
+
+
+@cute.jit
+def window_pass(
+    s,
+    c,
+    lo: Int32,
+    hi: Int32,
+    kb: Int32,
+    maximum: Float32,
+    use_p: Boolean,
+    cl: cutlass.Constexpr[bool],
+):
+    """One read-modify-write of the chunk: -inf over the bins below the window
+    (bin kb included), the window and bin kb into the leader's region store.
+    Returns this thread's exact mass above the window, and that of the bins between it
+    and bin kb."""
     tid = cute.arch.thread_idx()[0]
-    local = Uint32(0)
-    if tid >= top and tid <= bottom:
-        local = s.count[tid]
-    local = block_reduce(s, local, add)
-    base = Int32(STORE1)
-    if const_expr(cl):
-        slot = group_gather(s, (Uint64(local),))
-        for r in range(c.rank):
-            base += Int32(s.xin[slot + r * 3])
-    cute.arch.sync_threads()
-    if tid == 0:
-        put(s.sc, TOTAL, Uint32(0))
-    cute.arch.sync_threads()
-    # Bins [top, bottom] are the depths in [top, bottom + 1).
-    near, far, open_end = Float32(top), Float32(bottom + 1), bottom == LAST_BIN
+    above, between = Uint64(0), Uint64(0)
+    apart = kb > hi and kb < FINE
     v = cute.make_rmem_tensor((16,), Float32)
     for i0 in range(c.begin, c.end, THREADS * 16):  # uniform over the warp
         for q in cutlass.range_constexpr(4):
             x0, x1, x2, x3 = load4(c, i0 + (q * THREADS + tid) * 4, c.end)
             v[4 * q], v[4 * q + 1], v[4 * q + 2], v[4 * q + 3] = x0, x1, x2, x3
-        take = Uint32(0)
+        take, cut = Uint32(0), Uint32(0)
         for e in cutlass.range_constexpr(16):
             i = i0 + ((e // 4) * THREADS + tid) * 4 + e % 4
-            d = bins.depth(v[e])
-            if i < c.end and d >= near and (d < far or open_end):
-                take |= Uint32(1 << e)
+            b = Int32(fine_at(v[e], maximum) >> 8)
+            if i < c.end:
+                if (b >= lo and b <= hi) or b == kb:
+                    take |= Uint32(1 << e)
+                if b > hi and v[e] != NEG_INF:
+                    cut |= Uint32(1 << e)
+                if use_p and b < lo:
+                    above += fixed_mass(ordered(v[e]), maximum)
+                if use_p and apart and b > hi and b < kb:
+                    between += fixed_mass(ordered(v[e]), maximum)
         if cute.arch.vote_any_sync(take != 0):
-            pos = Int32(append_n(s, Uint32(cute.arch.popc(take))))
+            pos = append_leader(s, Uint32(cute.arch.popc(take)), cl)
             for e in cutlass.range_constexpr(16):
                 if ((take >> e) & 1) != 0:
                     i = i0 + ((e // 4) * THREADS + tid) * 4 + e % 4
                     w = packed(ordered(v[e]), Uint32(i))
                     if const_expr(cl):
-                        st_cluster(s.cand.iterator + (base + pos), 0, w)
+                        st_cluster(s.cand.iterator + (STORE1 + pos), 0, w)
                     else:
-                        put(s.cand, base + pos, w)
+                        put(s.cand, STORE1 + pos, w)
                     pos += 1
+        for q in cutlass.range_constexpr(4):
+            if ((cut >> (4 * q)) & 15) != 0:
+                for e in cutlass.range_constexpr(4):
+                    if ((cut >> (4 * q + e)) & 1) != 0:
+                        v[4 * q + e] = Float32(NEG_INF)
+                i = i0 + (q * THREADS + tid) * 4
+                store4(c, i, c.end, v[4 * q], v[4 * q + 1], v[4 * q + 2], v[4 * q + 3])
+    return above, between  # per thread
 
 
 @cute.jit
-def flag(cond):
-    out = Uint32(0)
-    if cond:
-        out = Uint32(1)
-    return out
+def append_leader(s, n: Uint32, cl: cutlass.Constexpr[bool]):
+    """N slots of the leader's store for each thread, one atomic per warp."""
+    lane = cute.arch.lane_idx()
+    incl = warp_inclusive_scan(n)
+    base = Uint32(0)
+    if lane == 31 and incl != 0:
+        if const_expr(cl):
+            base = atom_cluster_add(s.sc.iterator + TOTAL, 0, incl)
+        else:
+            base = cute.arch.atomic_add(s.sc.iterator + TOTAL, incl, scope="cta")
+    return Int32(cute.arch.shuffle_sync(base, 31) + incl - n)
+
+
+@cute.jit
+def cut_window(
+    s,
+    c,
+    m: Uint32,
+    use_k: Boolean,
+    rank: Uint32,
+    use_p: Boolean,
+    p: Float32,
+    total: Float64,
+    maximum: Float32,
+    above: Uint64,
+    between: Uint64,
+):
+    """The leader's exact cut among the gathered logits, then -inf over those
+    it cuts."""
+    goal = mass_target(p, total * MASS_SCALE)
+    kept, _, _, _ = sort_cut(
+        s, Int32(STORE1), m, use_k, rank, use_p, p, goal, maximum, above, between
+    )
+    for i in range(kept + cute.arch.thread_idx()[0], m, THREADS):
+        idx = Int32(~Uint32(Uint64(s.cand[STORE1 + Int32(i)]) & 0xFFFFFFFF))
+        put(c.x, (c.row, idx), Float32(NEG_INF))
+
+
+@cute.jit
+def store4(c, i: Int32, end: Int32, a: Float32, b: Float32, d: Float32, z: Float32):
+    """Logits i to i + 3 of the row, up to end."""
+    if c.vec and i + 3 < end:
+        st_global_v4(c.addr(i), a, b, d, z)
+    else:
+        if i < end:
+            put(c.x, (c.row, i), a)
+        if i + 1 < end:
+            put(c.x, (c.row, i + 1), b)
+        if i + 2 < end:
+            put(c.x, (c.row, i + 2), d)
+        if i + 3 < end:
+            put(c.x, (c.row, i + 3), z)
 
 
 @cute.jit
@@ -1401,16 +1548,9 @@ class Bins:
 
     maximum: Float32
 
-    def of(self, key: Uint32):
-        return self.of_value(from_ordered(key))
-
-    def depth(self, y: Float32):
-        """Bin b holds the depths in [b, b + 1), the last one beyond."""
-        return (self.maximum - y) * Float32(BIN_SCALE)
-
     @cute.jit
-    def of_value(self, y: Float32):
-        d = self.depth(y)
+    def of(self, key: Uint32):
+        d = (self.maximum - from_ordered(key)) * Float32(BIN_SCALE)
         b = Int32(LAST_BIN)
         if d < Float32(LAST_BIN):
             b = Int32(d)
@@ -1595,6 +1735,7 @@ class Smem:
     l2all: cute.Tensor
     l2loc: cute.Tensor
     lists: cute.Tensor  # GL candidate groups, then the candidate supergroups
+    fine: cute.Tensor  # lists as the fallback bins: counts, then offsets
     words: cute.Tensor  # the first tier's store, then the region
     cand: Any  # words as packed candidates (key << 32 | ~index)
     l1: cute.Tensor  # the region before selection: the chunk's group maxima
@@ -1721,6 +1862,7 @@ def make_smem(c: Chunk, cl: bool) -> Smem:
         l2all=cute.make_tensor(f32 + l2all // 4, cute.make_layout(c.ns)),
         l2loc=cute.make_tensor(f32 + l2loc // 4, cute.make_layout(c.ns)),
         lists=cute.make_tensor(u16 + lists // 2, cute.make_layout(GL + c.ns)),
+        fine=cute.make_tensor(u32 + lists // 4, cute.make_layout(2 * FINE)),
         words=cute.make_tensor(u32 + words // 4, cute.make_layout(BIG + region)),
         cand=cute.make_tensor(u64 + words // 8, cute.make_layout((BIG + region) // 2)),
         l1=cute.make_tensor(f32 + words // 4 + BIG, cute.make_layout(region)),
@@ -1851,12 +1993,7 @@ def from_ordered(key: Uint32):
 
 @cute.jit
 def fixed_mass(key: Uint32, maximum: Float32):
-    return value_mass(from_ordered(key), maximum)
-
-
-@cute.jit
-def value_mass(y: Float32, maximum: Float32):
-    return f32_to_u64_rn(exp(y - maximum) * MASS_SCALE)
+    return f32_to_u64_rn(exp(from_ordered(key) - maximum) * MASS_SCALE)
 
 
 @cute.jit
@@ -1952,6 +2089,14 @@ def ld_shared_v4(addr: Int32):
     return cute.arch.inline_ptx(
         "ld.shared.v4.f32 {{$w0}, {$w1}, {$w2}, {$w3}}, [{$r0}];",
         write_only_types=[Float32] * 4,
+        read_only_args=[addr],
+    )
+
+
+def ld_cluster_u64(addr: Int32) -> Uint64:
+    return cute.arch.inline_ptx(
+        "ld.shared::cluster.u64 {$w0}, [{$r0}];",
+        write_only_types=[Uint64],
         read_only_args=[addr],
     )
 
