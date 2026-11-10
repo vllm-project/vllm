@@ -1435,12 +1435,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
         os.getenv("VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA", "False").lower()
         in ("true", "1")
     ),
-    # Whether rocm_aiter_ops.triton_sparse_mla_fwd hands the calls the FlyDSL
-    # sparse MLA kernel accepts (bf16 q, fp8_ds_mla cache, no scales, sinks or
-    # extra segment: Kimi-K3.1 DSA) to that kernel instead of the Triton one.
-    # The kernel is vLLM's own (vllm/models/kimi_k3/amd/ops), with aiter's copy
-    # as a fallback. Falls back to the Triton kernel when neither imports or
-    # when the kernel rejects the call. gfx950 only. By default is disabled.
+    # Run the sparse MLA calls the FlyDSL kernel accepts (bf16 q, fp8_ds_mla
+    # cache, no sinks: Kimi-K3.1 DSA) on it instead of Triton; others stay on
+    # Triton. gfx950 only. Disabled by default.
     "VLLM_ROCM_USE_AITER_FLYDSL_SPARSE_MLA": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_FLYDSL_SPARSE_MLA", "False").lower()
         in ("true", "1")

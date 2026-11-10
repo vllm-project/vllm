@@ -309,11 +309,8 @@ class FlashMLAImpl(MLACommonImpl[FlashMLAMetadata]):
             scheduler_metadata.num_splits = num_splits
 
         if self.kv_cache_dtype == "fp8_ds_mla":
-            # fp8_ds_mla: the 656B-per-token blob carries its own scales, so q
-            # stays in the model dtype and the kernel descales from the blob
-            # (unlike the scalar-descale fp8 path below). The vendored
-            # dense_decode_fwd fp8 mode reads exactly this blob layout and
-            # honors the cache tensor's block stride.
+            # The 656 B fp8_ds_mla record carries its own scales: q stays in
+            # the model dtype and the kernel reads the record layout directly.
             o, lse = flash_mla_with_kvcache(
                 q=q,
                 k_cache=kv_c_and_k_pe_cache.view(kv_c_and_k_pe_cache.shape[0], 1, -1),

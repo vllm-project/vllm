@@ -215,9 +215,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
             and self.world_size in (2, 4, 8)
             and self._dcp_ag_config_allows(config)
         )
-        # Log the first AITER gather and the first fall back to RCCL.
-        # info_once and warning_once check the rank on every call. DCP
-        # all_gather runs on every step, so call them only the first time.
+        # Log the first AITER gather and RCCL fallback without per-step cost.
         self._dcp_ag_logged_aiter = False
         self._dcp_ag_logged_fallback = False
 

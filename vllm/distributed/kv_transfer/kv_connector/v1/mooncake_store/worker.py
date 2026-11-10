@@ -1591,12 +1591,8 @@ class MooncakeStoreWorker:
         self.block_size, self.hash_block_size = resolve_kv_cache_block_sizes(
             kv_cache_config, vllm_config
         )
-        # Request.block_hashes use the engine core's hash unit, which it
-        # resolved from its own config and passes down here. Re-resolving from
-        # the worker's config can disagree: platform hooks that run only in
-        # worker processes may set prefix_match_unit (Kimi K3.1 sets 64 while
-        # the core hashes per 1088-token block), and every key and chunk
-        # boundary would then index the wrong hash.
+        # Use the engine core's hash unit: worker-only platform hooks may change
+        # prefix_match_unit, and keys would then index the wrong block hash.
         if kv_cache_config.hash_block_size is not None:
             self.hash_block_size = kv_cache_config.hash_block_size
         self.num_layers = model_config.get_num_layers(parallel_config)
