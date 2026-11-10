@@ -54,10 +54,9 @@ class ECCacheNamespace:
     encoder_output_widths: tuple[tuple[str, int], ...]
     element_size: int
     model_revision: str | None = None
-    tensor_layout: str = "token-major-contiguous"
 
     def __post_init__(self) -> None:
-        for field_name in ("model_id", "dtype", "tensor_layout"):
+        for field_name in ("model_id", "dtype"):
             if not getattr(self, field_name):
                 raise ValueError(f"{field_name} must not be empty")
         if self.model_revision is not None and not self.model_revision:
