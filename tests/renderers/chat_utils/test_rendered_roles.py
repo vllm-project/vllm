@@ -84,9 +84,27 @@ def test_role_filter_extracts_qwen_style_roles():
     )
 
 
-def test_chatml_template_does_not_filter_roles():
-    """ChatML prints ``message['role']`` for every turn, including typos."""
-    assert roles_rendered_by_chat_template(_CHATML_TEMPLATE) is None
+def test_chatml_inequality_guard_is_not_an_allow_list():
+    """ChatML's ``!= assistant`` guard must not skip the drop check.
+
+    The template still prints every role. The guard is a possible filter
+    with no literal allow-list, not a reason to trust ``assistant`` only.
+    """
+    assert roles_rendered_by_chat_template(_CHATML_TEMPLATE) == frozenset()
+
+
+def test_negated_role_comparisons_are_filters_without_an_allow_list():
+    """``not in``, ``!=``, and ``not (role == ...)`` do not name kept roles."""
+    not_in = "{% if message.role not in ['user', 'assistant'] %}skip{% endif %}"
+    unequal = (
+        "{% if message.role != 'user' and message.role != 'assistant' %}skip{% endif %}"
+    )
+    negated_eq = (
+        "{% if not (message.role == 'user' or message.role == 'assistant') %}"
+        "skip{% endif %}"
+    )
+    for template in (not_in, unequal, negated_eq):
+        assert roles_rendered_by_chat_template(template) == frozenset()
 
 
 def test_dynamic_role_allow_list_is_treated_as_a_filter():
@@ -599,6 +617,152 @@ def test_rejectattr_keeps_a_role_it_does_not_name():
     assert "tool" in str(warn.call_args)
 
 
+def _render_loop_template(template: str, messages) -> str:
+    """Render with ``{% continue %}`` enabled, matching HF's Jinja env."""
+    env = jinja2.sandbox.ImmutableSandboxedEnvironment(
+        trim_blocks=True,
+        lstrip_blocks=True,
+        extensions=["jinja2.ext.loopcontrols"],
+    )
+    return env.from_string(template).render(
+        messages=[dict(message) for message in messages],
+        add_generation_prompt=False,
+    )
+
+
+@pytest.mark.parametrize(
+    "template",
+    [
+        pytest.param(
+            """
+            {% for message in messages %}
+            {% if message.role not in ['user', 'assistant'] %}{% continue %}{% endif %}
+            {{ message.role }}:{{ message.content }}
+            {% endfor %}
+            """,
+            id="not-in",
+        ),
+        pytest.param(
+            """
+            {% for message in messages %}
+            {% if message.role != 'user' and message.role != 'assistant' %}
+            {% continue %}{% endif %}
+            {{ message.role }}:{{ message.content }}
+            {% endfor %}
+            """,
+            id="ne",
+        ),
+        pytest.param(
+            """
+            {% for message in messages %}
+            {% if not (message.role == 'user' or message.role == 'assistant') %}
+            {% continue %}{% endif %}
+            {{ message.role }}:{{ message.content }}
+            {% endfor %}
+            """,
+            id="not-eq",
+        ),
+    ],
+)
+def test_exclusion_template_rejects_a_dropped_custom_role(template):
+    """A ``continue`` on a negated role check must not accept ``usr``."""
+    dropped = [{"role": "usr", "content": "secret launch code"}]
+    rendered = _render_loop_template(template, dropped)
+    assert "secret launch code" not in rendered
+
+    def render_text(messages):
+        return _render_loop_template(template, messages)
+
+    with pytest.raises(VLLMValidationError, match="'usr'") as exc_info:
+        assert_chat_template_rendered_messages(dropped, template, render_text)
+    assert exc_info.value.parameter == "messages"
+    assert exc_info.value.value == "usr"
+
+    kept = [{"role": "user", "content": "hello"}]
+    assert "hello" in _render_loop_template(template, kept)
+    calls = 0
+
+    def render_kept(messages):
+        nonlocal calls
+        calls += 1
+        return _render_loop_template(template, messages)
+
+    assert_chat_template_rendered_messages(kept, template, render_kept)
+    assert calls == 0
+
+
+def test_negated_equality_rejects_the_named_role_when_content_is_dropped():
+    """``not (role == 'wizard')`` must not treat wizard as rendered."""
+    template = """
+    {% for message in messages %}
+    {% if not (message.role == 'wizard') %}
+    {{ message.content }}
+    {% endif %}
+    {% endfor %}
+    """
+    assert roles_rendered_by_chat_template(template) == frozenset()
+
+    def render_text(messages):
+        return _render_chat_template(template, messages)
+
+    rendered = render_text([{"role": "wizard", "content": "secret"}])
+    assert "secret" not in rendered
+    with pytest.raises(VLLMValidationError, match="'wizard'"):
+        assert_chat_template_rendered_messages(
+            [{"role": "wizard", "content": "secret"}],
+            template,
+            render_text,
+        )
+
+
+def test_selectattr_ne_rejects_a_role_also_named_by_equality():
+    """``selectattr('role', 'ne', ...)`` drops that role even if ``==`` names it."""
+    template = """
+    {% for message in messages %}
+    {% if message.role == 'wizard' %}{% endif %}
+    {% endfor %}
+    {% for message in messages | selectattr('role', 'ne', 'wizard') %}
+    {{ message.content }}
+    {% endfor %}
+    """
+    # The ``==`` still records wizard. The ``ne`` filter has to win, or the
+    # allow-list would skip the probe and the dropped turn would pass.
+    assert roles_rendered_by_chat_template(template) == frozenset({"wizard"})
+
+    def render_text(messages):
+        return _render_chat_template(template, messages)
+
+    with pytest.raises(VLLMValidationError, match="'wizard'"):
+        assert_chat_template_rendered_messages(
+            [{"role": "wizard", "content": "secret"}],
+            template,
+            render_text,
+        )
+
+
+def test_rejectattr_ne_rejects_every_other_role():
+    """``rejectattr('role', '!=', 'user')`` keeps user and drops ``usr``."""
+    template = """
+    {% for message in messages | rejectattr('role', '!=', 'user') %}
+    {{ message.content }}
+    {% endfor %}
+    """
+    assert roles_rendered_by_chat_template(template) == frozenset()
+
+    def render_text(messages):
+        return _render_chat_template(template, messages)
+
+    assert "hello" in render_text([{"role": "user", "content": "hello"}])
+    rendered = render_text([{"role": "usr", "content": "secret"}])
+    assert "secret" not in rendered
+    with pytest.raises(VLLMValidationError, match="'usr'"):
+        assert_chat_template_rendered_messages(
+            [{"role": "usr", "content": "secret"}],
+            template,
+            render_text,
+        )
+
+
 def test_rejectattr_still_rejects_a_nonstandard_role():
     template = (
         "{% for message in messages | rejectattr('role', 'equalto', 'wizard') %}"
@@ -845,8 +1009,10 @@ def test_llama31_tool_call_with_text_is_not_rejected():
         calls += 1
         return _render_chat_template(template, rendered_messages)
 
-    assert_chat_template_rendered_messages(messages, template, render_text)
-    assert calls == 0
+    with patch("vllm.renderers.chat_utils.rendered_roles.logger.warning_once") as warn:
+        assert_chat_template_rendered_messages(messages, template, render_text)
+    warn.assert_not_called()
+    assert 0 < calls <= 8
 
 
 def test_llama31_reasoning_with_tool_call_is_not_rejected():
@@ -871,8 +1037,10 @@ def test_llama31_reasoning_with_tool_call_is_not_rejected():
         calls += 1
         return _render_chat_template(template, rendered_messages)
 
-    assert_chat_template_rendered_messages(messages, template, render_text)
-    assert calls == 0
+    with patch("vllm.renderers.chat_utils.rendered_roles.logger.warning_once") as warn:
+        assert_chat_template_rendered_messages(messages, template, render_text)
+    warn.assert_not_called()
+    assert 0 < calls <= 8
 
 
 def test_reasoning_only_custom_role_is_not_rejected():
@@ -941,7 +1109,7 @@ def test_ignored_system_prompt_warns_and_is_not_a_400(template_path):
 
     with patch("vllm.renderers.chat_utils.rendered_roles.logger.warning_once") as warn:
         assert_chat_template_rendered_messages(messages, template, render_text)
-    assert calls == 0
+    assert 0 < calls <= 8
     warn.assert_called_once()
     assert "system" in str(warn.call_args)
 
@@ -961,7 +1129,7 @@ def test_ignored_developer_role_warns_and_is_not_a_400():
 
     with patch("vllm.renderers.chat_utils.rendered_roles.logger.warning_once") as warn:
         assert_chat_template_rendered_messages(messages, template, render_text)
-    assert calls == 0
+    assert 0 < calls <= 8
     warn.assert_called_once()
     assert "developer" in str(warn.call_args)
 
@@ -991,9 +1159,40 @@ def test_ignored_function_role_warns_and_is_not_a_400():
         assert_chat_template_rendered_messages(
             messages, _FILTERING_TEMPLATE, render_text
         )
-    assert calls == 0
+    assert 0 < calls <= 8
     warn.assert_called_once()
     assert "function" in str(warn.call_args)
+
+
+def test_formatting_only_assistant_check_does_not_warn():
+    """Checking assistant for a tag is not proof that user content was dropped."""
+    template = """
+    {% for message in messages %}
+    {% if message.role == 'assistant' %}
+    <assistant>{{ message.content }}</assistant>
+    {% else %}
+    {{ message.content }}
+    {% endif %}
+    {% endfor %}
+    """
+    messages = [
+        {"role": "user", "content": "hello from the user"},
+        {"role": "assistant", "content": "hi"},
+    ]
+    rendered = _render_chat_template(template, messages)
+    assert "hello from the user" in rendered
+    assert "<assistant>hi</assistant>" in rendered
+    calls = 0
+
+    def render_text(rendered_messages):
+        nonlocal calls
+        calls += 1
+        return _render_chat_template(template, rendered_messages)
+
+    with patch("vllm.renderers.chat_utils.rendered_roles.logger.warning_once") as warn:
+        assert_chat_template_rendered_messages(messages, template, render_text)
+    warn.assert_not_called()
+    assert 0 < calls <= 8
 
 
 def test_loop_controls_and_generation_still_parse():
