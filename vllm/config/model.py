@@ -406,7 +406,7 @@ class ModelConfig:
     checkpoint_prepare_on_startup: bool = False
     """Prepare each engine for a process checkpoint once it starts, as
     `/checkpoint/prepare` does. It serves only after `/checkpoint/restore`.
-    Requires sleep mode."""
+    Requires sleep mode and an engine core in its own process."""
     enable_cumem_allocator: bool = False
     """Enable the custom cumem allocator to leverage advanced GPU memory
     allocation features such as multi-node NVLink support.

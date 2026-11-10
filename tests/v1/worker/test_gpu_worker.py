@@ -4,7 +4,7 @@
 import json
 from contextlib import nullcontext
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
@@ -100,6 +100,27 @@ def test_sleep_preservation_allows_empty_draft_but_rejects_target_typo(
     worker.model_config.sleep_preserve_parameter_names = ["missing"]
     with pytest.raises(ValueError, match="No parameter matches sleep retention"):
         worker._discardable_parameters(target)
+
+
+def test_checkpoint_restore_sets_kv_engine_id_before_the_connector(monkeypatch):
+    """The KV connector restores under the engine id the engine sent."""
+    worker = object.__new__(gpu_worker.Worker)
+    kv_transfer_config = SimpleNamespace(engine_id="source")
+    worker.vllm_config = SimpleNamespace(kv_transfer_config=kv_transfer_config)
+    seen = []
+    connector = MagicMock()
+    connector.checkpoint_restore.side_effect = lambda: seen.append(
+        kv_transfer_config.engine_id
+    )
+    monkeypatch.setattr(
+        gpu_worker, "checkpoint_restore_distributed_state", lambda: None
+    )
+    monkeypatch.setattr(gpu_worker, "has_kv_transfer_group", lambda: True)
+    monkeypatch.setattr(gpu_worker, "get_kv_transfer_group", lambda: connector)
+
+    worker.checkpoint_restore("restored")
+
+    assert seen == ["restored"]
 
 
 def test_load_model_preserves_compiled_graphs_at_runtime(monkeypatch):

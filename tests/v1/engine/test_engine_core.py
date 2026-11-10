@@ -901,9 +901,8 @@ def _executor_calls(core: EngineCoreProc) -> list[str]:
 
 
 def test_checkpoint_prepare_then_restore_run_in_order():
-    """Preparing drains, then discards the KV cache and releases external
-    state. Restoring brings external state back before the KV cache wakes and
-    scheduling resumes. Repeating either is a no-op."""
+    """Preparing drains and releases the KV cache and external state. Restoring
+    takes a new KV engine id, then brings them back. Repeating is a no-op."""
     core = _pausable_engine_core_proc()
     core.vllm_config = MagicMock()
     core.model_executor.is_sleeping = False
@@ -912,7 +911,8 @@ def test_checkpoint_prepare_then_restore_run_in_order():
     kv_connector = MagicMock()
     kv_connector.supports_checkpoint.return_value = True
     core.scheduler.get_kv_connector.return_value = kv_connector
-    # Record the scheduler-side connector calls among the executor calls.
+    core.vllm_config.kv_transfer_config.engine_id = "source"
+    # Record the connector calls among the executor calls.
     core.model_executor.attach_mock(kv_connector, "kv_connector")
     core.model_executor.get_kv_connector_handshake_metadata.return_value = []
 
@@ -939,8 +939,30 @@ def test_checkpoint_prepare_then_restore_run_in_order():
         "wake_up",
         "get_kv_connector_handshake_metadata",
     ]
+    engine_id = core.vllm_config.kv_transfer_config.engine_id
+    assert engine_id.startswith("source_") and len(engine_id) == len("source_") + 16
+    core.model_executor.collective_rpc.assert_any_call(
+        "checkpoint_restore", None, (engine_id,), None
+    )
     core.scheduler.set_pause_state.assert_called_with(PauseState.UNPAUSED)
     assert not core.reject_new_requests
+
+
+def test_checkpoint_restore_without_kv_transfer_passes_no_engine_id():
+    """Workers whose `checkpoint_restore` takes no arguments keep working."""
+    core = _pausable_engine_core_proc()
+    core.vllm_config = MagicMock(kv_transfer_config=None)
+    core.model_executor.is_sleeping = False
+    core._reset_caches = MagicMock()
+    core.reject_new_requests = False
+    core.scheduler.get_kv_connector.return_value = None
+
+    assert core.checkpoint_prepare("wait") is None
+    core.checkpoint_restore()
+
+    core.model_executor.collective_rpc.assert_any_call(
+        "checkpoint_restore", None, (), None
+    )
 
 
 def test_checkpoint_prepare_refuses_unsupported_kv_connector():

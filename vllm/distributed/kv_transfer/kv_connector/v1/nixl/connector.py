@@ -137,11 +137,17 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
             )
 
         self.kv_cache_config = kv_cache_config
-        self.engine_id: EngineId = vllm_config.kv_transfer_config.engine_id
         self.kv_transfer_config = vllm_config.kv_transfer_config
         # Subclasses must set self.connector_scheduler and self.connector_worker
         self.connector_scheduler: NixlBaseConnectorScheduler | None = None
         self.connector_worker: NixlBaseConnectorWorker | None = None
+
+    @property
+    def engine_id(self) -> EngineId:
+        # Read from the config, which a checkpoint restore updates.
+        engine_id = self.kv_transfer_config.engine_id
+        assert engine_id is not None
+        return engine_id
 
     ############################################################
     # Class Methods
@@ -333,6 +339,18 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
         if self.connector_scheduler is not None:
             self.connector_scheduler.shutdown()
 
+    def checkpoint_prepare(self) -> None:
+        if self.connector_worker is not None:
+            self.connector_worker.checkpoint_prepare()
+        if self.connector_scheduler is not None:
+            self.connector_scheduler.checkpoint_prepare()
+
+    def checkpoint_restore(self) -> None:
+        if self.connector_worker is not None:
+            self.connector_worker.checkpoint_restore()
+        if self.connector_scheduler is not None:
+            self.connector_scheduler.checkpoint_restore()
+
     def get_handshake_metadata(self) -> KVConnectorHandshakeMetadata | None:
         """Get the KVConnector handshake metadata for this connector.
         This metadata is used for out-of-band connector handshake
@@ -378,6 +396,12 @@ class NixlPullConnector(NixlBaseConnector):
     def supports_sleep_mode(cls, kv_transfer_config: KVTransferConfig) -> bool:
         # Sleep mode is only validated with the UCX backend.
         return kv_transfer_config.get_from_extra_config("backends", ["UCX"]) == ["UCX"]
+
+    @classmethod
+    def supports_checkpoint(cls, vllm_config: VllmConfig) -> bool:
+        # UCX state from before the capture breaks the restore, so the agent
+        # must be created at restore.
+        return vllm_config.model_config.checkpoint_prepare_on_startup
 
     def unregister_kv_caches(self) -> None:
         assert self.connector_worker is not None

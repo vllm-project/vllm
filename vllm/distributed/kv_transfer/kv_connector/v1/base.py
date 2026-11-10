@@ -263,7 +263,8 @@ class KVConnectorBase_V1(ABC):
         return
 
     def checkpoint_restore(self) -> None:
-        """Bring back what `checkpoint_prepare` released."""
+        """Bring back what `checkpoint_prepare` released, under the new
+        `kv_transfer_config.engine_id`."""
         return
 
     # ==============================

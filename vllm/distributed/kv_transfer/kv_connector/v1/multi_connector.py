@@ -180,10 +180,11 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         )
 
         self._connectors: list[KVConnectorBase_V1] = []
-        self._ktc_kv_transfer_config = []
+        self._ktc_kv_transfer_config: list[KVTransferConfig] = []
         for connector_cls, temp_config in self._get_connector_classes_and_configs(
             vllm_config
         ):
+            assert temp_config.kv_transfer_config is not None
             self._connectors.append(connector_cls(temp_config, role, kv_cache_config))
             self._ktc_kv_transfer_config.append(temp_config.kv_transfer_config)
 
@@ -278,10 +279,12 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         assert ktcs is not None
         ret: list[tuple[type[KVConnectorBaseType], VllmConfig]] = []
         for ktc in ktcs:
+            # Children share the engine's id, so a restore updates them together.
+            if "engine_id" in ktc:
+                raise ValueError("MultiConnector connectors cannot set engine_id")
             temp_config = copy.copy(vllm_config)
-            engine_id = ktc.get("engine_id", vllm_config.kv_transfer_config.engine_id)
             temp_config.kv_transfer_config = KVTransferConfig(
-                **ktc, engine_id=engine_id
+                **ktc, engine_id=vllm_config.kv_transfer_config.engine_id
             )
             ret.append(
                 (
@@ -310,7 +313,11 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
             c.checkpoint_prepare()
 
     def checkpoint_restore(self) -> None:
-        for c in self._connectors:
+        assert self._vllm_config.kv_transfer_config is not None
+        engine_id = self._vllm_config.kv_transfer_config.engine_id
+        # Each connector has its own copy of the shared engine id.
+        for ktc, c in zip(self._ktc_kv_transfer_config, self._connectors):
+            ktc.engine_id = engine_id
             c.checkpoint_restore()
 
     def bind_kv_cache_manager(self, kv_cache_manager: "KVCacheManager") -> None:

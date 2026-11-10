@@ -85,6 +85,14 @@ def test_dp_step_runs_dummy_batch_when_no_forward(model_executed: bool):
     )
 
 
+def test_checkpoint_prepare_on_startup_requires_engine_core_process():
+    """An in-process engine core never prepares, so the flag is refused."""
+    vllm_config = MagicMock()
+    vllm_config.model_config.checkpoint_prepare_on_startup = True
+    with pytest.raises(ValueError, match="VLLM_ENABLE_V1_MULTIPROCESSING"):
+        LLMEngine(vllm_config, MagicMock(), log_stats=False)
+
+
 def test_duplicate_profile_start_rejected_before_engine_core_dispatch():
     engine = object.__new__(LLMEngine)
     engine.engine_core = MagicMock()

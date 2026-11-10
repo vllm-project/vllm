@@ -46,7 +46,7 @@ from vllm.outputs import RequestError
 from vllm.tasks import POOLING_TASKS, SupportedTask
 from vllm.tracing import instrument, maybe_init_worker_tracer
 from vllm.transformers_utils.config import maybe_register_config_serialize_by_value
-from vllm.utils import numa_utils
+from vllm.utils import numa_utils, random_uuid
 from vllm.utils.gc_utils import (
     freeze_gc_heap,
     maybe_attach_gc_debug_callback,
@@ -2532,7 +2532,13 @@ class EngineCoreProc(EngineCore):
         logger.info("Restoring from a process checkpoint")
         self._checkpoint_state = CheckpointState.RESTORING
         try:
-            self.collective_rpc("checkpoint_restore")
+            args: tuple[str, ...] = ()
+            if (kv_transfer_config := self.vllm_config.kv_transfer_config) is not None:
+                # Peers cache what they learn by KV engine id, so take a new one.
+                engine_id = f"{kv_transfer_config.engine_id}_{random_uuid()}"
+                kv_transfer_config.engine_id = engine_id
+                args = (engine_id,)
+            self.collective_rpc("checkpoint_restore", args=args)
             if (kv_connector := self.scheduler.get_kv_connector()) is not None:
                 kv_connector.checkpoint_restore()
             self.wake_up(["kv_cache"])

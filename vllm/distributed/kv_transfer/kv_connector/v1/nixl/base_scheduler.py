@@ -2,11 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Base scheduler-side logic for the NIXL connector."""
 
+import ipaddress
 import threading
 import time
 from typing import TYPE_CHECKING, Any
 
 import msgspec
+import psutil
 import zmq
 
 from vllm import envs
@@ -74,6 +76,8 @@ class NixlBaseConnectorScheduler:
         self.engine_id: EngineId = engine_id
         self.kv_cache_config = kv_cache_config
         self.side_channel_host = envs.VLLM_NIXL_SIDE_CHANNEL_HOST
+        # (interface, family) of the side-channel host, set by checkpoint prepare.
+        self._side_channel_interface: tuple[str, int] | None = None
         self.side_channel_port = (
             envs.VLLM_NIXL_SIDE_CHANNEL_PORT
             + vllm_config.parallel_config.data_parallel_index
@@ -199,6 +203,47 @@ class NixlBaseConnectorScheduler:
             self._nixl_handshake_listener_t.join()
             self._nixl_handshake_listener_t = None
 
+    def checkpoint_prepare(self) -> None:
+        # Stop the handshake listener, which is bound to this pod's address.
+        self.shutdown()
+        self._side_channel_interface = next(
+            (
+                (name, addr.family)
+                for name, addrs in psutil.net_if_addrs().items()
+                for addr in addrs
+                if addr.address.split("%")[0] == self.side_channel_host
+            ),
+            None,
+        )
+
+    def checkpoint_restore(self) -> None:
+        # The next handshake metadata restarts the listener.
+        kv_transfer_config = self.vllm_config.kv_transfer_config
+        assert kv_transfer_config is not None and kv_transfer_config.engine_id
+        self.engine_id = kv_transfer_config.engine_id
+        # An interface address moves to this pod's address on the same
+        # interface. A hostname is kept.
+        if self._side_channel_interface is not None:
+            name, family = self._side_channel_interface
+            addresses = [
+                addr.address.split("%")[0]
+                for addr in psutil.net_if_addrs().get(name, [])
+                if addr.family == family
+            ]
+            if self.side_channel_host not in addresses:
+                routable = [
+                    address
+                    for address in addresses
+                    if not (ip := ipaddress.ip_address(address)).is_link_local
+                    and not ip.is_loopback
+                ]
+                if not routable:
+                    raise RuntimeError(
+                        f"Side-channel interface {name} has no address after restore"
+                    )
+                self.side_channel_host = routable[0]
+        self._stop_event.clear()
+
     def on_new_request(self, request: "Request") -> None:
         """Track a request that may need heartbeats."""
         params = request.kv_transfer_params
@@ -322,7 +367,7 @@ class NixlBaseConnectorScheduler:
             )
 
         # Only start the listener when we have metadata to serve.
-        if self._nixl_handshake_listener_t is None:
+        if self._nixl_handshake_listener_t is None and self._handshake_data:
             ready_event = threading.Event()
             self._nixl_handshake_listener_t = threading.Thread(
                 target=self._nixl_handshake_listener,
@@ -337,7 +382,14 @@ class NixlBaseConnectorScheduler:
                 name="nixl_handshake_listener",
             )
             self._nixl_handshake_listener_t.start()
-            ready_event.wait()  # Wait for listener ZMQ socket to be ready.
+            # The thread exits if it cannot bind, so do not wait forever.
+            while not ready_event.wait(timeout=1):
+                if not self._nixl_handshake_listener_t.is_alive():
+                    self._nixl_handshake_listener_t = None
+                    raise RuntimeError(
+                        "NIXL handshake listener failed to bind "
+                        f"{self.side_channel_host}:{self.side_channel_port}"
+                    )
 
     @staticmethod
     def _nixl_handshake_listener(

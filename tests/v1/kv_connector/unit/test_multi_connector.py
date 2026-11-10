@@ -1151,6 +1151,39 @@ def test_multi_connector_children_use_configured_lookahead_hashes(
             )
 
 
+@pytest.mark.cpu_test
+def test_checkpoint_restore_refreshes_each_connector_engine_id(mc):
+    """Each connector restores under the engine's new id, in its own copy of
+    the KV transfer config."""
+    seen = []
+    for ktc, connector in zip(mc._ktc_kv_transfer_config, mc._connectors):
+        connector.checkpoint_restore.side_effect = lambda ktc=ktc: seen.append(
+            ktc.engine_id
+        )
+    mc._vllm_config.kv_transfer_config.engine_id = "restored"
+    mc.checkpoint_restore()
+
+    assert seen == ["restored"] * 2
+
+
+def test_connectors_cannot_set_engine_id():
+    """Connectors share the engine's id."""
+    vllm_config = create_vllm_config(
+        kv_connector="MultiConnector",
+        kv_connector_extra_config={
+            "connectors": [
+                {
+                    "kv_connector": "NixlConnector",
+                    "kv_role": "kv_both",
+                    "engine_id": "a",
+                }
+            ]
+        },
+    )
+    with pytest.raises(ValueError, match="cannot set engine_id"):
+        MultiConnector._get_connector_classes_and_configs(vllm_config)
+
+
 def test_multi_connector_worker_metadata(mc):
     class MockConnectorWorkerMetadata(KVConnectorWorkerMetadata):
         def __init__(self, data: set[str]):
