@@ -68,9 +68,9 @@ Default-deny, in three stages, each reporting every reason in one error
 PP, DP, EP, EPLB, DCP, PCP, DBO, MoE sequence parallelism, LoRA, KV
 connectors, routed-expert capture, speculative decoding, sleep mode, CPU
 weight offload, weight updates, GDN prefix caching, other GDN cache dtypes,
-an unfused shared expert, the V1 runner, `STOCK_TORCH_COMPILE`, other model
-shapes, no capture size in 1-128, a platform other than unpartitioned
-gfx950); the loaded model (every layer's modules, quantization methods,
+an unfused shared expert, `STOCK_TORCH_COMPILE`, other model shapes, no
+capture size in 1-128, a platform other than unpartitioned gfx950); the
+loaded model (every layer's modules, quantization methods,
 weight layouts and shapes); the GDN caches at every bind (dtypes, shapes,
 dense slots). The TP ranks agree on every stage.
 

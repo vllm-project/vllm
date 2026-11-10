@@ -139,11 +139,6 @@ def unsupported(vllm_config) -> list[str]:
                 "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=1)"
             ),
         ),
-        # the model state builds the executor and binds it to each KV cache
-        (
-            not vllm_config.use_v2_model_runner,
-            "the V1 model runner (set VLLM_USE_V2_MODEL_RUNNER=1)",
-        ),
         # plan() and the launches run in forward; a compiled forward would
         # trace them
         (
