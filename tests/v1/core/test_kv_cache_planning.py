@@ -2012,7 +2012,6 @@ def _spec_decode_kv_cache_groups(worker_specs, use_eagle_block_drop=True):
         use_eagle=lambda: True,
         use_eagle_block_drop=lambda: use_eagle_block_drop,
         use_multi_module_mtp=lambda: False,
-        parallel_drafting=False,
         draft_model_config=SimpleNamespace(architectures=[]),
     )
     configs = get_kv_cache_configs(config, worker_specs, [2**30] * len(worker_specs))

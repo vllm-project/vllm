@@ -178,6 +178,7 @@ steps:
 # MoRIIO suite on ROCm whenever the connector or its tests change.
 - label: ":amd: (MI355 DPX) MoRIIO Connector Unit Tests"
   key: amd-moriio-connector-unit-mi355
+  automatic_shard: true
   dind: false
   device: mi355_dpx
   num_devices: 1
@@ -190,13 +191,13 @@ steps:
   - vllm/distributed/kv_transfer/kv_connector/v1/base.py
   - vllm/distributed/kv_transfer/kv_connector/v1/ssm_conv_transfer_utils.py
   - examples/disaggregated/disaggregated_serving/moriio_toy_proxy_server.py
-  - tests/v1/kv_connector/unit/test_moriio_
+  - tests/v1/kv_connector/unit/moriio/
   - tests/v1/kv_connector/unit/utils.py
   - requirements/test/rocm.txt
   commands:
   - bash /vllm-workspace/.buildkite/scripts/check-kv-connectors.sh
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s -rs v1/kv_connector/unit/test_moriio_*.py
+  - pytest -v -s -rs v1/kv_connector/unit/moriio
 
 # UMBP is built on mori, so its tests skip on CUDA. Run them on MI355 whenever
 # the connector or its tests change.
@@ -309,6 +310,7 @@ steps:
 # TP1 <-> TP2), which needs 3 GPUs: 8 cases, ~36 min on MI355.
 - label: ":amd: (MI355) MoRIIO WRITE P/D Dummy-Weight Heterogeneous TP"
   key: amd-moriio-write-dummy-hetero-tp-mi355
+  automatic_shard: true
   dind: false
   device: mi355_4
   num_devices: 4
@@ -404,7 +406,6 @@ steps:
   device: h200_18gb
   working_dir: "/vllm-workspace"
   source_file_dependencies:
-    - vllm/v1/spec_decode/extract_hidden_states.py
     - vllm/model_executor/models/extract_hidden_states.py
     - vllm/transformers_utils/configs/extract_hidden_states.py
     - vllm/distributed/kv_transfer/kv_connector/v1/example_hidden_states_connector.py
@@ -424,7 +425,6 @@ steps:
       depends_on:
       - image-build-amd
       source_file_dependencies:
-      - vllm/v1/spec_decode/extract_hidden_states.py
       - vllm/model_executor/models/extract_hidden_states.py
       - vllm/transformers_utils/configs/extract_hidden_states.py
       - vllm/distributed/kv_transfer/kv_connector/v1/example_hidden_states_connector.py
@@ -443,7 +443,6 @@ steps:
   num_devices: 2
   working_dir: "/vllm-workspace"
   source_file_dependencies:
-    - vllm/v1/spec_decode/extract_hidden_states.py
     - vllm/model_executor/models/extract_hidden_states.py
     - vllm/transformers_utils/configs/extract_hidden_states.py
     - vllm/distributed/kv_transfer/kv_connector/v1/example_hidden_states_connector.py
@@ -477,8 +476,6 @@ steps:
       - vllm/v1/attention/backends/
       - vllm/v1/attention/selector.py
       - vllm/v1/kv_cache_interface.py
-      - vllm/v1/spec_decode/extract_hidden_states.py
-      - vllm/v1/worker/gpu_model_runner.py
       - vllm/_aiter_ops.py
       - tests/v1/kv_connector/extract_hidden_states_integration/
       - vllm/platforms/rocm.py

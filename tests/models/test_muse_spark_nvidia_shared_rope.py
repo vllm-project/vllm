@@ -15,7 +15,7 @@ def test_target_layers_share_fp32_rope_cache(monkeypatch, default_vllm_config):
     monkeypatch.setattr(rotary_embedding, "_ROPE_DICT", {})
     monkeypatch.setattr(nvidia_model, "get_tensor_model_parallel_world_size", lambda: 1)
     for name in (
-        "MuseSpark1xQKVOGateParallelLinear",
+        "MuseSparkQKVOGateParallelLinear",
         "QKVParallelLinear",
         "RowParallelLinear",
         "Attention",
@@ -35,7 +35,7 @@ def test_target_layers_share_fp32_rope_cache(monkeypatch, default_vllm_config):
         qk_scale_factor=1.0,
     )
     first, second = (
-        nvidia_model.MuseSpark1xAttention(
+        nvidia_model.MuseSparkAttention(
             config=config,
             max_position_embeddings=4096,
             prefix=f"model.layers.{i}.self_attn",
