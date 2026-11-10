@@ -2,14 +2,15 @@ group: C++
 depends_on:
   - image-build-cpu
 steps:
-- label: ":computer: (CPU) C++ Core"
-  key: cpu-cpp-core
+- label: ":computer: (CPU) AMD Architecture"
+  key: cpu-amd-arch
   timeout_in_minutes: 5
   device: cpu-small
   source_file_dependencies:
     - csrc/core/amd_arch.h
-    - tests/cpp/
+    - tests/cpp/core/test_amd_arch.cpp
+    - tests/cpp/core/test_amd_arch.py
     - CMakeLists.txt
     - docker/Dockerfile.cpu
   commands:
-    - pytest -v -s --confcutdir=cpp cpp
+    - pytest -v -s --confcutdir=cpp cpp/core/test_amd_arch.py

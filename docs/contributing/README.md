@@ -336,7 +336,7 @@ Run the [CPU-only tests](../../tests/cpp/core/test_amd_arch.py) from the reposit
 root with a C++17 compiler available:
 
 ```bash
-.venv/bin/python -m pytest -q --confcutdir=tests/cpp tests/cpp
+.venv/bin/python -m pytest -q --confcutdir=tests/cpp tests/cpp/core/test_amd_arch.py
 ```
 
 ### Notes for Large Changes
