@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import queue
+import threading
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -344,3 +345,36 @@ def test_fault_tolerance_recovers_async_eplb_after_worker_failure(
     assert not run.model_state.rebalanced
     assert run.state.async_worker_error is None
     assert len(run.failures) == 1
+
+
+def test_fault_tolerance_reset_refuses_a_running_async_eplb_cycle(
+    dist_init, monkeypatch
+):
+    """FT recovery must not reset EPLB state while a transfer cycle still runs.
+
+    A cycle blocked on a failed peer ends late with an error. If the reset had
+    already cleared the error by then, the recovered engine would fault again.
+    """
+    run = _start_ft_async_eplb(monkeypatch)
+    run.state.parallel_config.cpu_distributed_timeout_seconds = 0
+    blocked, release = threading.Event(), threading.Event()
+    failing_transfer = async_worker.transfer_layer
+
+    def blocked_transfer(**kwargs) -> None:
+        blocked.set()
+        release.wait()
+        failing_transfer(**kwargs)
+
+    monkeypatch.setattr(async_worker, "transfer_layer", blocked_transfer)
+    _signal_rearrangement(run.state)
+    assert blocked.wait(_WorkerProbe.HANG_TIMEOUT_S)
+
+    runner = SimpleNamespace(eplb_state=run.state)
+    with pytest.raises(RuntimeError, match="still in a transfer cycle"):
+        reset_eplb_async_state(runner)
+
+    release.set()
+    run.probe.expect("idle")
+    assert run.state.async_worker_error is run.failures[0]
+    reset_eplb_async_state(runner)
+    assert run.state.async_worker_error is None

@@ -88,14 +88,15 @@ def transfer_run_periodically(
             if not state.parallel_config.enable_fault_tolerance:
                 raise
             # step() raises this on every rank; the thread stays up for retry.
-            # TODO: FT recovery does not stop this thread, so a cycle still
-            # running at reset can set this error again after it is cleared.
-            # https://github.com/vllm-project/vllm/issues/66144#issuecomment-6693152754
             state.async_worker_error = exc
             logger.exception(
                 "async loop error (Rank %d); continuing under fault tolerance",
                 rank,
             )
+        finally:
+            with state.async_cycle_done:
+                state.async_cycles_pending -= 1
+                state.async_cycle_done.notify_all()
 
 
 def _transfer_cycle(

@@ -44,9 +44,9 @@ SCALE_DOWN_DEADLINE_S = 20
 # fault is gated on its own env var:
 # - VLLM_FT_TEST_INJECT_FAULT=rank=N: ``sync_cudagraph_and_dp_padding`` raises
 #   once on DP rank N after the test arms it (``arm_ft_fault_injection``).
-# - VLLM_FT_TEST_INJECT_EPLB_FAULT=1: the second async EPLB rebalance raises on
-#   every rank before the worker enters any collective, so every rank fails the
-#   same cycle and no collective is left to time out.
+# - VLLM_FT_TEST_INJECT_EPLB_FAULT=rank=N: the second async EPLB rebalance
+#   raises on EP rank N only. The other ranks' workers stay blocked in that
+#   cycle's first collective until the cpu group timeout.
 # ``ft_injection_state`` reports which patch targets are still missing and the
 # EPLB counters. The Worker methods are reachable through /collective_rpc.
 _FAULT_INJECT_SITECUSTOMIZE = """\
@@ -96,7 +96,9 @@ if _SPEC:
     )
     _WORKER_METHODS["arm_ft_fault_injection"] = _arm
 
-if os.environ.get("VLLM_FT_TEST_INJECT_EPLB_FAULT"):
+_EPLB_SPEC = os.environ.get("VLLM_FT_TEST_INJECT_EPLB_FAULT")
+if _EPLB_SPEC:
+    _EPLB_RANK = int(dict(kv.split("=", 1) for kv in _EPLB_SPEC.split(","))["rank"])
     _FAILING_REBALANCE = 2
     _COUNTS.update(rebalances=0, applied_rearrangements=0)
 
@@ -105,7 +107,8 @@ if os.environ.get("VLLM_FT_TEST_INJECT_EPLB_FAULT"):
 
         def _run_rebalance_experts(*args, **kwargs):
             _COUNTS["rebalances"] += 1
-            if _COUNTS["rebalances"] == _FAILING_REBALANCE:
+            rank = m.get_eplb_group().device_group.rank()
+            if _COUNTS["rebalances"] == _FAILING_REBALANCE and rank == _EPLB_RANK:
                 raise RuntimeError("FT test async EPLB fault injection")
             return _orig(*args, **kwargs)
 
@@ -166,12 +169,12 @@ def _install_fault_injection(
     tmp_path,
     *,
     dp_sync_rank: int | None = None,
-    async_eplb: bool = False,
+    async_eplb_rank: int | None = None,
 ) -> None:
     """Install the fault-injection sitecustomize for the servers.
 
     `dp_sync_rank` makes that DP rank raise once after `_arm_ft_injection`;
-    `async_eplb` makes the second async EPLB rebalance raise on every rank.
+    `async_eplb_rank` makes the second async EPLB rebalance raise on that rank.
     Also sets VLLM_SERVER_DEV_MODE so tests can reach /collective_rpc.
     """
     site_dir = tmp_path / "ft_inject"
@@ -184,8 +187,8 @@ def _install_fault_injection(
     )
     if dp_sync_rank is not None:
         monkeypatch.setenv("VLLM_FT_TEST_INJECT_FAULT", f"rank={dp_sync_rank}")
-    if async_eplb:
-        monkeypatch.setenv("VLLM_FT_TEST_INJECT_EPLB_FAULT", "1")
+    if async_eplb_rank is not None:
+        monkeypatch.setenv("VLLM_FT_TEST_INJECT_EPLB_FAULT", f"rank={async_eplb_rank}")
     monkeypatch.setenv("VLLM_SERVER_DEV_MODE", "1")
 
 
@@ -549,18 +552,17 @@ def _drive_until_rearranged(servers, min_applied: int) -> None:
         )
 
 
-# TODO: also cover a failure on one rank only, once FT recovery stops the async
-# worker. Today the peers' workers stay blocked in a collective across the
-# reset (the race noted in async_worker.py), so that test would be flaky.
 @pytest.mark.skipif(not has_nixl_ep(), reason="Requires nixl_ep all2all backend")
 @multi_gpu_test(num_gpus=2)
 def test_async_eplb_worker_fault_retry_resumes_rebalancing(monkeypatch, tmp_path):
-    """An async EPLB worker failure faults every rank, and retry resumes EPLB.
+    """An async EPLB worker failure on one rank faults every rank, and retry
+    resumes EPLB.
 
-    The second rebalance raises on every rank before the worker enters a
-    collective, so all ranks fail the same cycle without a collective timeout.
+    The second rebalance raises on rank 1 only, so rank 0's worker is still
+    blocked in that cycle's first collective when retry arrives. Retry waits
+    for it to time out, so its late error cannot fault the recovered engine.
     """
-    _install_fault_injection(monkeypatch, tmp_path, async_eplb=True)
+    _install_fault_injection(monkeypatch, tmp_path, async_eplb_rank=1)
     eplb_args = [
         "--enable-eplb",
         "--eplb-config.use_async",
@@ -581,7 +583,7 @@ def test_async_eplb_worker_fault_retry_resumes_rebalancing(monkeypatch, tmp_path
         _assert_injection_installed(all_servers)
 
         # 2. Drive: the first rearrangement applies, the second one fails on
-        #    every rank, and every engine goes UNHEALTHY.
+        #    rank 1, and every engine goes UNHEALTHY.
         faulted = _drive_to_faulted(servers_by_rank, match_values={"unhealthy"})
         for rank, engine_status in faulted.items():
             assert engine_status.get("fault_info"), (rank, engine_status)
