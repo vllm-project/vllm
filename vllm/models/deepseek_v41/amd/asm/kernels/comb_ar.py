@@ -11,25 +11,22 @@ pick order; picks with ids < 0 read 0) is split into 4 flat quarters as in ar2
 (n = M·160 granules of 16 B each); rank q owns quarter q. Grid ceil(n / 64)
 CTAs of 4 waves; wave w of CTA c takes granule x = 64 c + lane of quarter w:
 - every wave computes its granule of part; a non-owner wave (w ≠ R) pushes it
-  to rank w's `land` slot R (wire "bf16": 16 B; "fp8": MXFP8 codes, 8 B,
-  one E8M0 per lane quad = 32 elements, packed 16 per dword store) and flags
-  hop 0, then waits for rank w's hop-1 flag and copies its `land2` slot w
-  (bf16, or bf16(dequant)) to `out`;
+  (16 B) to rank w's `land` slot R and flags hop 0, then waits for rank w's
+  hop-1 flag and copies its `land2` slot w to `out`;
 - the owner wave (w = R) keeps its granule, waits for the 3 hop-0 flags, sums
-  the 4 partials in fp32 in rank order (its own exact), rounds (bf16 RNE, or
-  MXFP8 of the sum, vLLM's ceil rule, and bf16(dequant) everywhere), pushes the
+  the 4 partials in fp32 in rank order, rounds to bf16 (RNE), pushes the
   result to the peers' land2 slot R, writes its own `out` granule and flags
   hop 1.
-So "bf16" = bf16(((p0 + p1) + p2) + p3) (vLLM's custom all-reduce's sum).
+So `out` = bf16(((p0 + p1) + p2) + p3), vLLM's custom all-reduce's sum.
 
 Buffers (IPC, this rank's address space): land[d] / land2[d] as ar2's
-(`[4 slots][QMAX]`, codes at 8·x, scales at SCALE_OFF + x / 4), flags[d]:
+(`[4 slots][QMAX]`, granule x at 16·x), flags[d]:
 `[2 hops][4 sources][NC CTAs][4 waves]` dwords, ctr [NC·4], err [NC·4]. Seq per
 (CTA, wave) as in ar2 / wob_ar; every rank launches the same grids, so a
 CTA's counters move together on every rank even though the grid follows M.
 """
 
-from vllm.models.deepseek_v41.amd.asm.kernels.ar2 import POLLS, QMAX, SCALE_OFF
+from vllm.models.deepseek_v41.amd.asm.kernels.ar2 import POLLS, QMAX
 from vllm.models.deepseek_v41.amd.asm.kernels.kmod import KArgs, kernel_source, rsrc
 
 H, MAX_M = 5120, 256
@@ -58,24 +55,16 @@ def grid(m: int) -> int:
     return -(-m * 160 // 64)
 
 
-def source(R: int, wire: str = "bf16", name: str | None = None):
-    """Rank R's kernel for wire "bf16" or "fp8"; y bf16 [M·6, 5120] (moe_down1 y_bf16), one dwordx4 per
-    pick."""
-    assert wire in ("bf16", "fp8") and 0 <= R < 4
-    name = name or f"comb_ar_{wire}_r{R}_yb"
-    f8 = wire == "fp8"
+def source(R: int, name: str | None = None):
+    """Rank R's kernel; y bf16 [M·6, 5120] (moe_down1 y_bf16), one dwordx4 per pick."""
+    assert 0 <= R < 4
+    name = name or f"comb_ar_bf16_r{R}_yb"
     peers = [d for d in range(4) if d != R]
-    vA, vC, vS, vF = (
-        2,
-        3,
-        4,
-        5,
-    )  # 16 x, 8 x, x / 4, 16 f (flat byte offset in part / out)
+    vA, vF = 2, 5  # 16 x, 16 f (flat byte offset in part / out)
     I, Y, AD, B = 8, 16, 64, 68  # noqa: E741 ids 6, y 6 × 8, add 4, own granule (packed bf16) 4
     F, T = 72, 80  # 8 f32, temps 12
     L = 92  # received: 3 × 4
     SM = 104  # sum (8 f32)
-    QC = 112  # codes 2 + scale 1 (+1)
     FV = 120  # flag offset, value, 3 poll offsets, 3 polled
     LAND, LAND2, FLAGS = 20, 28, 36  # SGPR pairs (+2 d)
     c = []
@@ -83,11 +72,6 @@ def source(R: int, wire: str = "bf16", name: str | None = None):
 
     def pair(base, d):
         return f"s[{base + 2 * d}:{base + 2 * d + 1}]"
-
-    def nop(n):
-        while n > 0:
-            A(f"  s_nop {min(n, 8) - 1}")
-            n -= 8
 
     def unpack(src, f):
         for k in range(4):
@@ -97,71 +81,6 @@ def source(R: int, wire: str = "bf16", name: str | None = None):
     def pack(f, dst):
         for k in range(4):
             A(f"  v_cvt_pk_bf16_f32 v{dst + k}, v{f + 2 * k}, v{f + 2 * k + 1}")
-
-    def quant(f, codes, scale):
-        """8 f32 v[f..] (clobbered) → codes v[codes:codes+2], E8M0 byte in v[scale]; amax over the lane quad
-        (vLLM's ceil rule)."""
-        a, e, mt = T + 8, T + 9, T + 10
-        A(f"  v_max_f32 v{a}, |v{f}|, |v{f + 1}|")
-        for i in range(2, 8):
-            A(f"  v_max_f32 v{a}, v{a}, |v{f + i}|")
-        nop(2)
-        A(
-            f"  v_max_f32_dpp v{a}, v{a}, v{a} quad_perm:[1,0,3,2] row_mask:0xf bank_mask:0xf"
-        )
-        nop(2)
-        A(
-            f"  v_max_f32_dpp v{a}, v{a}, v{a} quad_perm:[2,3,0,1] row_mask:0xf bank_mask:0xf"
-        )
-        A(f"  v_max_f32 v{a}, 0x00800000, v{a}")
-        A(f"  v_frexp_exp_i32_f32 v{e}, v{a}")
-        A(f"  v_frexp_mant_f32 v{mt}, v{a}")
-        A(f"  v_cmp_lt_f32 vcc, 0x3f600000, v{mt}")
-        A(f"  v_addc_co_u32 v{e}, vcc, -9, v{e}, vcc")
-        A(f"  v_max_i32 v{e}, 0xffffff81, v{e}")
-        A(f"  v_min_i32 v{e}, 0x7f, v{e}")
-        A(f"  v_sub_u32 v{mt}, 0, v{e}")
-        for i in range(8):
-            A(f"  v_ldexp_f32 v{f + i}, v{f + i}, v{mt}")
-        for h in range(2):
-            A(f"  v_cvt_pk_fp8_f32 v{codes + h}, v{f + 4 * h}, v{f + 4 * h + 1}")
-            A(
-                f"  v_cvt_pk_fp8_f32 v{codes + h}, v{f + 4 * h + 2}, v{f + 4 * h + 3} op_sel:[0,0,1]"
-            )
-        A(f"  v_add_u32 v{scale}, 0x7f, v{e}")
-
-    def dequant(codes, scale, f):
-        sc = T + 11
-        A(f"  v_lshlrev_b32 v{sc}, 23, v{scale}")
-        for h in range(2):
-            A(
-                f"  v_cvt_scalef32_pk_f32_fp8 v[{f + 4 * h}:{f + 4 * h + 1}], v{codes + h}, v{sc}"
-            )
-            A(
-                f"  v_cvt_scalef32_pk_f32_fp8 v[{f + 4 * h + 2}:{f + 4 * h + 3}], v{codes + h}, v{sc} op_sel:[1,0,0]"
-            )
-
-    def scale_store(sv, base_pair):
-        """The wave's 16 quad scales (byte in v[sv] of lanes 4b) → 4 dwords from lanes 0..3 at SCALE_OFF + c·16;
-        exec ends as the valid mask s[8:9]."""
-        a, t = T, T + 1
-        A("  s_mov_b64 exec, -1")
-        A(f"  v_lshlrev_b32 v{a}, 6, v1")
-        for i in range(4):
-            A(f"  ds_bpermute_b32 v{t + i}, v{a}, v{sv} offset:{16 * i}")
-        A("  s_lshl_b32 s14, s2, 6")
-        A(f"  v_mad_u32_u24 v{a}, 16, v1, s14")  # granule of lane 16 k
-        A(f"  v_cmp_gt_u32 vcc, s7, v{a}")
-        A("  s_and_b64 exec, vcc, 0xf")
-        A("  s_waitcnt lgkmcnt(0)")
-        A(f"  v_and_b32 v{t}, 0xff, v{t}")
-        for i in range(1, 4):
-            A(f"  v_and_b32 v{t + i}, 0xff, v{t + i}")
-            A(f"  v_lshl_or_b32 v{t}, v{t + i}, {8 * i}, v{t}")
-        A(f"  v_lshlrev_b32 v{a}, 2, v1")
-        A(f"  v_add_u32 v{a}, v{vS}, v{a}")  # lanes 0..3: c·16 + 4 k
-        A(f"  global_store_dword v{a}, v{t}, {base_pair} sc1")
-        A("  s_mov_b64 exec, s[8:9]")
 
     def poll(offs, tag):
         """Wait until the dwords at flags[R] + the SGPR offsets all equal seq (sc1 polls)."""
@@ -206,8 +125,6 @@ def source(R: int, wire: str = "bf16", name: str | None = None):
     A(f"  v_cmp_gt_u32 s[8:9], s7, v{vA}")  # valid lanes
     A("  s_mul_i32 s15, s7, s74")
     A(f"  v_add_u32 v{vF}, s15, v{vA}")  # flat granule f
-    A(f"  v_lshlrev_b32 v{vC}, 3, v{vA}")
-    A(f"  v_lshrrev_b32 v{vS}, 2, v{vA}")
     A(f"  v_lshlrev_b32 v{vA}, 4, v{vA}")
     A("  s_lshl_b32 s16, s2, 2")
     A("  s_add_u32 s16, s16, s74")
@@ -277,15 +194,7 @@ def source(R: int, wire: str = "bf16", name: str | None = None):
         A(f"  s_cselect_b64 s[72:73], {pair(FLAGS, d)}, s[72:73]")
     A(f"  s_add_u32 s70, s70, {R * QMAX}")
     A("  s_addc_u32 s71, s71, 0")
-    if not f8:
-        A(f"  global_store_dwordx4 v{vA}, v[{B}:{B + 3}], s[70:71] sc1")
-    else:
-        unpack(B, F)
-        quant(F, QC, QC + 2)
-        A(f"  global_store_dwordx2 v{vC}, v[{QC}:{QC + 1}], s[70:71] sc1")
-        A(f"  s_add_u32 s70, s70, {SCALE_OFF}")
-        A("  s_addc_u32 s71, s71, 0")
-        scale_store(QC + 2, "s[70:71]")
+    A(f"  global_store_dwordx4 v{vA}, v[{B}:{B + 3}], s[70:71] sc1")
     A("  s_waitcnt vmcnt(0)")
     A(f"  s_add_u32 s17, s16, {(0 * 4 + R) * NW * 4}")
     flag_to("s[72:73]", "s17")
@@ -296,17 +205,8 @@ def source(R: int, wire: str = "bf16", name: str | None = None):
     A(f"  s_mul_i32 s17, s74, {QMAX}")  # land2[R] slot w
     A(f"  s_add_u32 s70, s{LAND2 + 2 * R}, s17")
     A(f"  s_addc_u32 s71, s{LAND2 + 2 * R + 1}, 0")
-    if not f8:
-        A(f"  global_load_dwordx4 v[{L}:{L + 3}], v{vA}, s[70:71] sc1")
-    else:
-        A(f"  global_load_dwordx2 v[{L}:{L + 1}], v{vC}, s[70:71] sc1")
-        A(f"  s_add_u32 s70, s70, {SCALE_OFF}")
-        A("  s_addc_u32 s71, s71, 0")
-        A(f"  global_load_ubyte v{L + 2}, v{vS}, s[70:71] sc1")
+    A(f"  global_load_dwordx4 v[{L}:{L + 3}], v{vA}, s[70:71] sc1")
     A("  s_waitcnt vmcnt(0)")
-    if f8:
-        dequant(L, L + 2, F)
-        pack(F, L)
     A(f"  global_store_dwordx4 v{vF}, v[{L}:{L + 3}], s[44:45]")
     A("  s_branch .Lbump")
 
@@ -319,43 +219,19 @@ def source(R: int, wire: str = "bf16", name: str | None = None):
         A(f"  s_add_u32 s70, s{LAND + 2 * R}, {s_ * QMAX}")
         A(f"  s_addc_u32 s71, s{LAND + 2 * R + 1}, 0")
         r = L + 4 * k
-        if not f8:
-            A(f"  global_load_dwordx4 v[{r}:{r + 3}], v{vA}, s[70:71] sc1")
-        else:
-            A(f"  global_load_dwordx2 v[{r}:{r + 1}], v{vC}, s[70:71] sc1")
-            A(f"  s_add_u32 s70, s70, {SCALE_OFF}")
-            A("  s_addc_u32 s71, s71, 0")
-            A(f"  global_load_ubyte v{r + 2}, v{vS}, s[70:71] sc1")
+        A(f"  global_load_dwordx4 v[{r}:{r + 3}], v{vA}, s[70:71] sc1")
     A("  s_waitcnt vmcnt(0)")
     for r in range(4):
         dst = SM if r == 0 else F
-        if r == R:
-            unpack(B, dst)
-        elif f8:
-            dequant(L + 4 * peers.index(r), L + 4 * peers.index(r) + 2, dst)
-        else:
-            unpack(L + 4 * peers.index(r), dst)
+        unpack(B if r == R else L + 4 * peers.index(r), dst)
         if r:
             for e in range(8):
                 A(f"  v_add_f32 v{SM + e}, v{SM + e}, v{F + e}")
-    if f8:
-        quant(SM, QC, QC + 2)
-        dequant(QC, QC + 2, F)
-        pack(F, B)
-    else:
-        pack(SM, B)
+    pack(SM, B)
     for d in peers:  # land2[d] slot R
         A(f"  s_add_u32 s70, s{LAND2 + 2 * d}, {R * QMAX}")
         A(f"  s_addc_u32 s71, s{LAND2 + 2 * d + 1}, 0")
-        if not f8:
-            A(f"  global_store_dwordx4 v{vA}, v[{B}:{B + 3}], s[70:71] sc1")
-        else:
-            A(f"  global_store_dwordx2 v{vC}, v[{QC}:{QC + 1}], s[70:71] sc1")
-    if f8:
-        for d in peers:
-            A(f"  s_add_u32 s70, s{LAND2 + 2 * d}, {R * QMAX + SCALE_OFF}")
-            A(f"  s_addc_u32 s71, s{LAND2 + 2 * d + 1}, 0")
-            scale_store(QC + 2, "s[70:71]")
+        A(f"  global_store_dwordx4 v{vA}, v[{B}:{B + 3}], s[70:71] sc1")
     A(f"  global_store_dwordx4 v{vF}, v[{B}:{B + 3}], s[44:45]")
     A("  s_waitcnt vmcnt(0)")
     A(f"  s_add_u32 s17, s16, {(1 * 4 + R) * NW * 4}")

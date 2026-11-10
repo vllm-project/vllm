@@ -124,16 +124,16 @@ def _ipc_check(rt, mine: dict, every: dict, rank: int, cpu_group, world: int) ->
 
 class WoBAllReduce:
     """K1's wo_b with all-reduce #1 folded in (kernels/wob_ar.py): one launch
-    from wo_a's z (MXFP8 frag) to the all-reduced [M, 5120] bf16; wire "bf16"
-    (the sum vLLM's custom all-reduce computes) or "fp8" (MXFP8 partials).
+    from wo_a's z (MXFP8 frag) to the all-reduced [M, 5120] bf16, the sum vLLM's
+    custom all-reduce computes.
 
         # once per process, outside graph capture
-        wob = WoBAllReduce(rank, cpu_group, wire="bf16")
+        wob = WoBAllReduce(rank, cpu_group)
         out = wob(w_frag, ws_frag, z, zs, m)
 
     Collective: every rank makes the same calls (same M) in the same order."""
 
-    def __init__(self, rank: int, cpu_group, world: int = 4, wire: str = "bf16"):
+    def __init__(self, rank: int, cpu_group, world: int = 4):
         from vllm.models.deepseek_v41.amd.asm.kernels import wob_ar
 
         assert world == 4, "wob_ar is written for TP4"
@@ -156,7 +156,7 @@ class WoBAllReduce:
             wob_ar.NW,
             (wob_ar.FLAG_BYTES, 2),
         )  # for IPC diagnostics
-        d = wob_ar.source(rank, wire)
+        d = wob_ar.source(rank)
         self.k = Kernel(d["name"], d["src"], d["ka"])
         self.dummy = torch.zeros(64, dtype=torch.uint8, device="cuda")
         torch.distributed.barrier(group=cpu_group)
@@ -202,9 +202,9 @@ class CombAllReduce:
     """K2's MoE combine with all-reduce #2 folded in (kernels/comb_ar.py): one launch
     from the weighted expert rows y [M·6, 5120] bf16 (K2Runner's), the picks' ids
     [M·6] and the shared expert's output add [M, 5120] bf16 to the all-reduced
-    bf16(bf16(Σ y) + add); wire as WoBAllReduce's. Collective like WoBAllReduce."""
+    bf16(bf16(Σ y) + add), summed as WoBAllReduce's. Collective like WoBAllReduce."""
 
-    def __init__(self, rank: int, cpu_group, world: int = 4, wire: str = "bf16"):
+    def __init__(self, rank: int, cpu_group, world: int = 4):
         from vllm.models.deepseek_v41.amd.asm.kernels import comb_ar
 
         assert world == 4, "comb_ar is written for TP4"
@@ -222,7 +222,7 @@ class CombAllReduce:
             )
         self.flags_mine = mine["flags"]
         self.flag_layout = (comb_ar.FLAG_BYTES, 2)  # for IPC diagnostics
-        d = comb_ar.source(rank, wire)
+        d = comb_ar.source(rank)
         self.k = Kernel(d["name"], d["src"], d["ka"])
         torch.distributed.barrier(group=cpu_group)
 

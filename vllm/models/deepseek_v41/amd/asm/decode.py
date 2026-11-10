@@ -17,9 +17,8 @@ Per decoder layer:
 - the Engram layers' wkv on the prefetch stream, their gate · value applied by
   the next attention seam (`engram.py`).
 
-The folded all-reduces sum in bf16 as vLLM's custom all-reduce does; with a
-quantized `VLLM_ROCM_QUICK_REDUCE_QUANTIZATION` (the user opted into a lossy
-all-reduce) they carry MXFP8 partials instead.
+The folded all-reduces compute what vLLM's custom all-reduce does: the four
+ranks' partials summed in fp32 in rank order, rounded once to bf16.
 
 The mono decode layer hands this layer the decoder layer's forward for steps of
 17-256 rows (`AsmDecodeLayer.__call__`, model.py's forward with our kernels
@@ -36,7 +35,6 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 
-import vllm.envs as envs
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.distributed import (
     get_tensor_model_parallel_world_size,
@@ -55,9 +53,6 @@ H, E = 5120, 384
 MAX_M = 256
 # the mono decode layer's rows (below ours)
 MONO_ROWS = 16
-# QuickReduce's quantized regimes: with one of them the folded all-reduces use
-# the MXFP8 wire
-QR_QUANTIZED = ("INT8", "INT6", "INT4", "INT3")
 # --kv-cache-dtype values DeepseekV4Attention turns into fp8_ds_mla (K1's cache)
 KV_DTYPES = ("auto", "fp8", "fp8_e4m3", "fp8_ds_mla")
 
@@ -105,18 +100,13 @@ def enabled(vllm_config) -> bool:
                 why = f"needs {missing}"
         _cfg["on"] = why is None
         _cfg["layers"] = config.num_hidden_layers
-        qr = envs.VLLM_ROCM_QUICK_REDUCE_QUANTIZATION
-        _cfg["wire"] = "fp8" if qr in QR_QUANTIZED else "bf16"
         if why is None:
             logger.info_once(
                 "DeepSeek-V4.1 asm decode: steps of %d..%d rows on the asm "
-                "kernels, up to %d on the mono decode layer; all-reduces on a "
-                "%s wire (VLLM_ROCM_QUICK_REDUCE_QUANTIZATION=%s)",
+                "kernels, up to %d on the mono decode layer",
                 MONO_ROWS + 1,
                 MAX_M,
                 MONO_ROWS,
-                "MXFP8" if _cfg["wire"] == "fp8" else "bf16",
-                qr,
                 scope="global",
             )
         elif vllm_config.kernel_config.monokernel:
@@ -147,9 +137,7 @@ def _wob_setup() -> None:
     from vllm.models.deepseek_v41.amd.asm.ar_runner import WoBAllReduce
 
     tp = get_tp_group()
-    _wob["wob"] = WoBAllReduce(
-        tp.rank_in_group, tp.cpu_group, tp.world_size, wire=_cfg["wire"]
-    )
+    _wob["wob"] = WoBAllReduce(tp.rank_in_group, tp.cpu_group, tp.world_size)
 
 
 def _comb_setup() -> None:
@@ -160,9 +148,7 @@ def _comb_setup() -> None:
     from vllm.models.deepseek_v41.amd.asm.ar_runner import CombAllReduce
 
     tp = get_tp_group()
-    _comb["car"] = CombAllReduce(
-        tp.rank_in_group, tp.cpu_group, tp.world_size, wire=_cfg["wire"]
-    )
+    _comb["car"] = CombAllReduce(tp.rank_in_group, tp.cpu_group, tp.world_size)
 
 
 class AsmDecodeLayer:
