@@ -69,11 +69,12 @@ def _apply_k3_thinking_kwargs(
         )
 
 
-def _normalize_k3_tool_messages(
+def _normalize_k3_messages(
     conversation: list[ConversationMessage],
 ) -> list[dict[str, Any]]:
-    """Reorder tool-result messages to match assistant tool_call order.
+    """Preserve instructions and order tool results for Kimi's native encoder.
 
+    Instruction text and dynamic tool declarations occupy separate messages.
     Supports matching by `tool_call_id` or by the synthetic
     `"{tool}:{zero_based_index}"` alias. When any tool message in a
     block cannot be resolved, the whole block is left in its original
@@ -85,9 +86,20 @@ def _normalize_k3_tool_messages(
     i = 0
 
     while i < len(conversation):
-        message = conversation[i]
-        normalized.append(dict(message))
+        message: dict[str, Any] = dict(conversation[i])
         i += 1
+
+        if message["role"] == "developer":
+            message["role"] = "system"
+        if (
+            message["role"] == "system"
+            and message.get("tools")
+            and message.get("content")
+        ):
+            normalized.append(
+                {"role": "system", "content": "", "tools": message.pop("tools")}
+            )
+        normalized.append(message)
 
         if message.get("role") != "assistant":
             continue
@@ -205,7 +217,7 @@ class KimiK3Renderer(BaseRenderer[HfTokenizer]):
             mm_processor_kwargs=params.mm_processor_kwargs,
         )
 
-        rendered_conversation = _normalize_k3_tool_messages(conversation)
+        rendered_conversation = _normalize_k3_messages(conversation)
         prompt = parse_dec_only_prompt(
             self._apply_chat_template(rendered_conversation, params)
         )
@@ -229,7 +241,7 @@ class KimiK3Renderer(BaseRenderer[HfTokenizer]):
             mm_processor_kwargs=params.mm_processor_kwargs,
         )
 
-        rendered_conversation = _normalize_k3_tool_messages(conversation)
+        rendered_conversation = _normalize_k3_messages(conversation)
         token_ids = await self._apply_chat_template_async(rendered_conversation, params)
         prompt = parse_dec_only_prompt(token_ids)
         if mm_data is not None:
