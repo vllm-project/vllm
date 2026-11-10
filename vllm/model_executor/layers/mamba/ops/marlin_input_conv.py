@@ -3,9 +3,6 @@
 """GB10 Mamba projection ownership and specialized projection/conv launches."""
 
 import torch
-
-from vllm import _custom_ops as ops
-from vllm import envs
 from vllm.model_executor.kernels.linear import is_supported_and_can_implement_kernel
 from vllm.model_executor.kernels.linear.nvfp4.base import NvFp4LinearLayerConfig
 from vllm.model_executor.kernels.linear.nvfp4.marlin import MarlinNvFp4LinearKernel
@@ -29,6 +26,9 @@ from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadata
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID, PAD_SLOT_ID
+
+from vllm import _custom_ops as ops
+from vllm import envs
 
 
 def select_mamba_marlin_ownership(layer, config) -> None:
@@ -262,7 +262,6 @@ def _runtime_metadata(layer, metadata):
     # A smaller aggregate M cannot prove uniformity without reading GPU lengths.
     batch_geometry = (
         2 <= batches <= 4
-        and layer._marlin_input_conv_batch_supported
         and metadata.num_decode_tokens == batches * (1 + layer.num_spec)
         and metadata.num_decode_tokens <= 32
     )
@@ -273,13 +272,7 @@ def _runtime_metadata(layer, metadata):
         and (
             batch_geometry
             if batched
-            else (
-                1 <= metadata.num_decode_tokens <= 1 + layer.num_spec
-                and (
-                    metadata.num_decode_tokens == 8
-                    or layer._marlin_input_conv_short_supported
-                )
-            )
+            else (1 <= metadata.num_decode_tokens <= 1 + layer.num_spec)
         )
         and layer.tp_size == 1
         and layer.num_heads == 128
@@ -353,7 +346,6 @@ def project_and_run(layer, hidden_states, projected, output, metadata):
     ):
         raise ValueError("Mamba projected and SSM outputs must be disjoint")
     linear = layer.in_proj
-    workspace = get_marlin_workspace(hidden_states.device)
     admitted = _runtime_metadata(layer, metadata)
     if admitted is not None and (
         metadata.num_decode_tokens != tokens
@@ -377,7 +369,7 @@ def project_and_run(layer, hidden_states, projected, output, metadata):
             b_scales=linear.weight_scale,
             global_scale=linear.weight_global_scale,
             b_zeros=None,
-            workspace=workspace,
+            workspace=get_marlin_workspace(hidden_states.device),
             b_q_type=scalar_types.float4_e2m1f,
             size_m=tokens,
             size_n=18560,
@@ -394,18 +386,12 @@ def project_and_run(layer, hidden_states, projected, output, metadata):
         layer.conv_ssm_forward(projected, output)
         return
     history, indices, accepted = admitted
-    operation = (
-        ops.marlin_mamba_input_conv_batched
-        if metadata.num_decodes > 1
-        else ops.marlin_mamba_input_conv
-    )
-    operation(
+    ops.mamba_marlin_input_conv(
         hidden_states,
         projected,
         linear.weight,
         linear.weight_scale,
         linear.weight_global_scale,
-        workspace,
         layer.conv_weights,
         layer.conv1d.bias,
         history,

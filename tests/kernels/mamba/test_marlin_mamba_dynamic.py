@@ -5,7 +5,6 @@
 import pytest
 import torch
 from transformers import NemotronHConfig
-
 from vllm.compilation.wrapper import compile_model_with_stock_torch
 from vllm.config import (
     CacheConfig,
@@ -67,6 +66,23 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+def _decode_metadata(query, seq, block_table, *, batches, tokens, max_query, physical):
+    """Keep every real-builder test on the same ordinary decode metadata ABI."""
+    return CommonAttentionMetadata(
+        query_start_loc=query.cuda(),
+        query_start_loc_cpu=query,
+        seq_lens=seq.cuda(),
+        num_reqs=batches,
+        num_actual_tokens=tokens,
+        max_query_len=max_query,
+        max_seq_len=256,
+        block_table_tensor=block_table,
+        slot_mapping=torch.full((physical,), -1, device="cuda", dtype=torch.int64),
+        is_prefilling=torch.zeros(batches, dtype=torch.bool),
+        seq_lens_cpu_upper_bound=seq,
+    )
+
+
 @pytest.fixture
 def owned_mamba(tmp_path, dist_init, request, monkeypatch):
     options = getattr(request, "param", 8)
@@ -86,7 +102,7 @@ def owned_mamba(tmp_path, dist_init, request, monkeypatch):
         pytest.skip("requires the supported SM121/48SM device")
     if get_conv_state_layout() != "SD":
         pytest.skip("requires SD convolution cache layout")
-    if not hasattr(torch.ops._C, "marlin_mamba_input_conv"):
+    if not hasattr(torch.ops._C, "mamba_marlin_input_conv"):
         pytest.skip("requires vLLM build with Marlin input-conv support")
     NemotronHConfig(
         architectures=["NemotronHForCausalLM"],
@@ -303,18 +319,14 @@ def test_fused_layer_uses_bound_checkpoint_and_scale_cache(
     slots = torch.arange(1, batches + 1, device="cuda", dtype=torch.int32)
     query = torch.arange(0, tokens + 1, query_tokens, dtype=torch.int32)
     seq = torch.full((batches,), 256, dtype=torch.int32)
-    common = CommonAttentionMetadata(
-        query_start_loc=query.cuda(),
-        query_start_loc_cpu=query,
-        seq_lens=seq.cuda(),
-        num_reqs=batches,
-        num_actual_tokens=tokens,
-        max_query_len=query_tokens,
-        max_seq_len=256,
-        block_table_tensor=slots[:, None],
-        slot_mapping=torch.full((tokens,), -1, device="cuda", dtype=torch.int64),
-        is_prefilling=torch.zeros(batches, dtype=torch.bool),
-        seq_lens_cpu_upper_bound=seq,
+    common = _decode_metadata(
+        query,
+        seq,
+        slots[:, None],
+        batches=batches,
+        tokens=tokens,
+        max_query=query_tokens,
+        physical=tokens,
     )
     metadata = builder.build(
         0,
@@ -379,7 +391,7 @@ def test_fused_layer_uses_bound_checkpoint_and_scale_cache(
         for expected, result in zip(reference, actual):
             torch.testing.assert_close(expected, result, rtol=0, atol=0)
         counts = {event.key: event.count for event in prof.key_averages()}
-        assert counts.get("_C::marlin_mamba_input_conv", 0) == 1
+        assert counts.get("_C::mamba_marlin_input_conv", 0) == 1
 
 
 @pytest.mark.parametrize("trace_tokens", [8, 16])
@@ -396,20 +408,16 @@ def test_dynamic_tokens_keep_real_marlin_mamba_dispatch(owned_mamba, trace_token
         history[1] = 9
         query = torch.arange(0, tokens + 1, 8, dtype=torch.int32)
         seq = torch.full((batch,), 256, dtype=torch.int32)
-        common = CommonAttentionMetadata(
-            query_start_loc=query.cuda(),
-            query_start_loc_cpu=query,
-            seq_lens=seq.cuda(),
-            num_reqs=batch,
-            num_actual_tokens=tokens,
-            max_query_len=8,
-            max_seq_len=256,
-            block_table_tensor=torch.arange(
-                1, batch + 1, device="cuda", dtype=torch.int32
-            ).reshape(batch, 1),
-            slot_mapping=torch.full((tokens,), -1, device="cuda", dtype=torch.int64),
-            is_prefilling=torch.zeros(batch, dtype=torch.bool),
-            seq_lens_cpu_upper_bound=seq,
+        common = _decode_metadata(
+            query,
+            seq,
+            torch.arange(1, batch + 1, device="cuda", dtype=torch.int32).reshape(
+                batch, 1
+            ),
+            batches=batch,
+            tokens=tokens,
+            max_query=8,
+            physical=tokens,
         )
         metadata = builder.build(
             0,
@@ -448,7 +456,7 @@ def test_dynamic_tokens_keep_real_marlin_mamba_dispatch(owned_mamba, trace_token
             torch.testing.assert_close(reference, candidate, rtol=0, atol=0)
         counts = {event.key: event.count for event in prof.key_averages()}
         assert counts.get("vllm::mamba_mixer2_with_input_projection", 0) == 1
-        assert counts.get("_C::marlin_mamba_input_conv", 0) == 1
+        assert counts.get("_C::mamba_marlin_input_conv", 0) == 1
         assert counts.get("vllm::mamba_mixer2_output_projection", 0) == 1
         assert counts.get("_C::mamba_marlin_output", 0) == (tokens == 8)
 
@@ -470,18 +478,14 @@ def test_configured_short_drafts_and_runtime_shorter_queries(owned_mamba):
         history.zero_()
         query = torch.tensor([0, tokens], dtype=torch.int32)
         seq = torch.tensor([256], dtype=torch.int32)
-        common = CommonAttentionMetadata(
-            query_start_loc=query.cuda(),
-            query_start_loc_cpu=query,
-            seq_lens=seq.cuda(),
-            num_reqs=1,
-            num_actual_tokens=tokens,
-            max_query_len=tokens,
-            max_seq_len=256,
-            block_table_tensor=torch.tensor([[1]], device="cuda", dtype=torch.int32),
-            slot_mapping=torch.full((tokens,), -1, device="cuda", dtype=torch.int64),
-            is_prefilling=torch.zeros(1, dtype=torch.bool),
-            seq_lens_cpu_upper_bound=seq,
+        common = _decode_metadata(
+            query,
+            seq,
+            torch.tensor([[1]], device="cuda", dtype=torch.int32),
+            batches=1,
+            tokens=tokens,
+            max_query=tokens,
+            physical=tokens,
         )
         accepted = (
             torch.tensor([maximum], device="cuda", dtype=torch.int32)
@@ -523,7 +527,7 @@ def test_configured_short_drafts_and_runtime_shorter_queries(owned_mamba):
             torch.testing.assert_close(reference, candidate, rtol=0, atol=0)
         counts = {event.key: event.count for event in prof.key_averages()}
         assert counts.get("vllm::mamba_mixer2_with_input_projection", 0) == 1
-        assert counts.get("_C::marlin_mamba_input_conv", 0) == 1
+        assert counts.get("_C::mamba_marlin_input_conv", 0) == 1
 
 
 @pytest.mark.parametrize(
@@ -566,18 +570,14 @@ def test_normal_constructor_capture_admission_and_padded_fallback(owned_mamba):
         history.zero_()
         query = torch.tensor([0, logical_tokens], dtype=torch.int32)
         seq = torch.tensor([256], dtype=torch.int32)
-        common = CommonAttentionMetadata(
-            query_start_loc=query.cuda(),
-            query_start_loc_cpu=query,
-            seq_lens=seq.cuda(),
-            num_reqs=1,
-            num_actual_tokens=logical_tokens,
-            max_query_len=logical_tokens,
-            max_seq_len=256,
-            block_table_tensor=torch.tensor([[1]], device="cuda", dtype=torch.int32),
-            slot_mapping=torch.full((8,), -1, device="cuda", dtype=torch.int64),
-            is_prefilling=torch.zeros(1, dtype=torch.bool),
-            seq_lens_cpu_upper_bound=seq,
+        common = _decode_metadata(
+            query,
+            seq,
+            torch.tensor([[1]], device="cuda", dtype=torch.int32),
+            batches=1,
+            tokens=logical_tokens,
+            max_query=logical_tokens,
+            physical=8,
         )
         metadata = builder.build(
             0,
@@ -614,7 +614,7 @@ def test_normal_constructor_capture_admission_and_padded_fallback(owned_mamba):
         for old, new in zip(reference, actual):
             torch.testing.assert_close(old, new, rtol=0, atol=0)
         counts = {event.key: event.count for event in prof.key_averages()}
-        assert counts.get("_C::marlin_mamba_input_conv", 0) == expected_fusion
+        assert counts.get("_C::mamba_marlin_input_conv", 0) == expected_fusion
         assert (
             counts.get("vllm::mamba_mixer2_with_input_projection", 0) == expected_fusion
         )
@@ -682,26 +682,22 @@ def test_batched_real_builder_admission_and_fallback(
 ):
     """Real owners/builders fuse only full uniform logical and physical rows."""
     config, layer, pages, starts, history, builder, hidden = owned_mamba
-    assert layer._marlin_input_conv_batch_supported
+    assert layer._marlin_input_conv_allowed
     total = sum(lengths)
     query = torch.tensor(
         [0, *torch.tensor(lengths).cumsum(0).tolist()], dtype=torch.int32
     )
     seq = torch.full((batches,), 256, dtype=torch.int32)
-    common = CommonAttentionMetadata(
-        query_start_loc=query.cuda(),
-        query_start_loc_cpu=query,
-        seq_lens=seq.cuda(),
-        num_reqs=batches,
-        num_actual_tokens=total,
-        max_query_len=max(lengths),
-        max_seq_len=256,
-        block_table_tensor=torch.arange(
-            1, batches + 1, device="cuda", dtype=torch.int32
-        ).reshape(batches, 1),
-        slot_mapping=torch.full((physical,), -1, device="cuda", dtype=torch.int64),
-        is_prefilling=torch.zeros(batches, dtype=torch.bool),
-        seq_lens_cpu_upper_bound=seq,
+    common = _decode_metadata(
+        query,
+        seq,
+        torch.arange(1, batches + 1, device="cuda", dtype=torch.int32).reshape(
+            batches, 1
+        ),
+        batches=batches,
+        tokens=total,
+        max_query=max(lengths),
+        physical=physical,
     )
     accepted = (
         torch.arange(1, batches + 1, device="cuda", dtype=torch.int32).clamp_max(
@@ -751,7 +747,7 @@ def test_batched_real_builder_admission_and_fallback(
     fused = sum(
         event.count
         for event in prof.key_averages()
-        if event.key.startswith("_C::marlin_mamba_input_conv")
+        if event.key.startswith("_C::mamba_marlin_input_conv")
     )
     assert fused == int(expected_fusion)
 
@@ -774,25 +770,19 @@ def test_batched_real_builder_admission_and_fallback(
 def test_batched_normal_graph_replay_reads_padded_null_requests(owned_mamba):
     """Full-capacity graph padding uses real builder buffers and null slots."""
     config, layer, pages, starts, history, builder, hidden = owned_mamba
-    assert layer._marlin_input_conv_batch_supported
+    assert layer._marlin_input_conv_allowed
     tokens = 1 + layer.num_spec
     rows = 4 * tokens
     query = torch.arange(0, rows + 1, tokens, dtype=torch.int32)
     seq = torch.full((4,), 256, dtype=torch.int32)
-    common = CommonAttentionMetadata(
-        query_start_loc=query.cuda(),
-        query_start_loc_cpu=query,
-        seq_lens=seq.cuda(),
-        num_reqs=4,
-        num_actual_tokens=rows,
-        max_query_len=tokens,
-        max_seq_len=256,
-        block_table_tensor=torch.arange(1, 5, device="cuda", dtype=torch.int32).reshape(
-            4, 1
-        ),
-        slot_mapping=torch.full((rows,), -1, device="cuda", dtype=torch.int64),
-        is_prefilling=torch.zeros(4, dtype=torch.bool),
-        seq_lens_cpu_upper_bound=seq,
+    common = _decode_metadata(
+        query,
+        seq,
+        torch.arange(1, 5, device="cuda", dtype=torch.int32).reshape(4, 1),
+        batches=4,
+        tokens=rows,
+        max_query=tokens,
+        physical=rows,
     )
     metadata = builder.build_for_cudagraph_capture(common)
     assert _runtime_metadata(layer, metadata) is not None
@@ -884,7 +874,7 @@ def test_batched_normal_graph_replay_reads_padded_null_requests(owned_mamba):
 def test_batched_normal_worker_preparation_replays_live_requests(owned_mamba):
     """Actual worker preparation pads liveB4→3→2 for one normal B4 graph."""
     config, layer, pages, starts, history, builder, hidden = owned_mamba
-    assert layer._marlin_input_conv_batch_supported
+    assert layer._marlin_input_conv_allowed
     assert config.cache_config.mamba_cache_mode != "align"
     tokens, rows = 1 + layer.num_spec, 4 * (1 + layer.num_spec)
     device = hidden.device
@@ -1008,7 +998,7 @@ def test_batched_normal_worker_preparation_replays_live_requests(owned_mamba):
         fused_calls = sum(
             event.count
             for event in prof.key_averages()
-            if event.key.startswith("_C::marlin_mamba_input_conv")
+            if event.key.startswith("_C::mamba_marlin_input_conv")
         )
         assert bool(fused_calls) == _batched_shape_is_profitable(4, tokens)
         assert len(manager.graphs) == 1

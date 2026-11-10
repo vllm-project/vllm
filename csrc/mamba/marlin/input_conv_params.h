@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 #pragma once
 
-#include <cuda_runtime_api.h>
 #include <cstddef>
 #include <cstdint>
+#include <cuda_runtime_api.h>
 #include <type_traits>
 
 namespace vllm_mamba_input_conv {
 
-// Explicit by-value native argument18. Projected output derives from C0.
+// Fixed full-K kernel argument; projected output derives from C0.
 struct alignas(8) ConvParams {
   const uint16_t* taps;
   const uint16_t* bias;
@@ -61,20 +61,6 @@ static_assert(kConvOffset == kHistoryOffset + kHistoryBytes);
 static_assert(kSharedReuseBytes == kConvOffset + kConvBytes);
 static_assert(kSharedReuseBytes <= kDepth3DeadBBytes);
 
-
 enum class ConvFamily { Single, Batched, Wide };
-
-cudaError_t launch_short(int tokens, const int4* input, const int4* weight,
-                        int4* projected, int4* scratch, const int4* scales,
-                        const float* global_scale, int* locks, ConvParams conv,
-                        cudaStream_t stream);
-cudaError_t launch_batch_small(int tokens, int rows, const int4* input,
-                              const int4* weight, int4* projected, int4* scratch,
-                              const int4* scales, const float* global_scale,
-                              int* locks, ConvParams conv, cudaStream_t stream);
-cudaError_t launch_batch_wide(int tokens, int rows, const int4* input,
-                             const int4* weight, int4* projected, int4* scratch,
-                             const int4* scales, const float* global_scale,
-                             int* locks, ConvParams conv, cudaStream_t stream);
 
 }  // namespace vllm_mamba_input_conv

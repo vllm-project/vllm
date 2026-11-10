@@ -4,7 +4,6 @@
 from typing import TYPE_CHECKING
 
 import torch
-
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
@@ -1164,13 +1163,12 @@ def awq_marlin_moe_repack(
     return output
 
 
-def marlin_mamba_input_conv(
+def mamba_marlin_input_conv(
     input: torch.Tensor,
     projected: torch.Tensor,
     weight: torch.Tensor,
     scales: torch.Tensor,
     global_scale: torch.Tensor,
-    workspace: torch.Tensor,
     taps: torch.Tensor,
     bias: torch.Tensor,
     history: torch.Tensor,
@@ -1179,13 +1177,12 @@ def marlin_mamba_input_conv(
     pad_slot_id: int,
     null_block_id: int,
 ) -> None:
-    torch.ops._C.marlin_mamba_input_conv(
+    torch.ops._C.mamba_marlin_input_conv(
         input,
         projected,
         weight,
         scales,
         global_scale,
-        workspace,
         taps,
         bias,
         history,
@@ -1196,71 +1193,15 @@ def marlin_mamba_input_conv(
     )
 
 
-if hasattr(torch.ops._C, "marlin_mamba_input_conv"):
+if hasattr(torch.ops._C, "mamba_marlin_input_conv"):
 
-    @register_fake("_C::marlin_mamba_input_conv")
-    def _marlin_mamba_input_conv_fake(
+    @register_fake("_C::mamba_marlin_input_conv")
+    def _mamba_marlin_input_conv_fake(
         input,
         projected,
         weight,
         scales,
         global_scale,
-        workspace,
-        taps,
-        bias,
-        history,
-        cache_indices,
-        accepted_tokens,
-        pad_slot_id,
-        null_block_id,
-    ) -> None:
-        return None
-
-
-def marlin_mamba_input_conv_batched(
-    input: torch.Tensor,
-    projected: torch.Tensor,
-    weight: torch.Tensor,
-    scales: torch.Tensor,
-    global_scale: torch.Tensor,
-    workspace: torch.Tensor,
-    taps: torch.Tensor,
-    bias: torch.Tensor,
-    history: torch.Tensor,
-    cache_indices: torch.Tensor,
-    accepted_tokens: torch.Tensor | None,
-    pad_slot_id: int,
-    null_block_id: int,
-) -> None:
-    torch.ops._C.marlin_mamba_input_conv.batched(
-        input,
-        projected,
-        weight,
-        scales,
-        global_scale,
-        workspace,
-        taps,
-        bias,
-        history,
-        cache_indices,
-        accepted_tokens,
-        pad_slot_id,
-        null_block_id,
-    )
-
-
-if hasattr(torch.ops._C, "marlin_mamba_input_conv") and hasattr(
-    torch.ops._C.marlin_mamba_input_conv, "batched"
-):
-
-    @register_fake("_C::marlin_mamba_input_conv.batched")
-    def _marlin_mamba_input_conv_batched_fake(
-        input,
-        projected,
-        weight,
-        scales,
-        global_scale,
-        workspace,
         taps,
         bias,
         history,

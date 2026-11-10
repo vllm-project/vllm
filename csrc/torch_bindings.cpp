@@ -105,14 +105,8 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "mamba_marlin_output(Tensor input, Tensor weight, Tensor scales, "
       "Tensor global_scale, Tensor workspace) -> Tensor");
   ops.def(
-      "marlin_mamba_input_conv(Tensor input, Tensor(a!) projected, "
-      "Tensor weight, Tensor scales, Tensor global_scale, Tensor workspace, "
-      "Tensor taps, Tensor bias, Tensor(b!) history, Tensor cache_indices, "
-      "Tensor? accepted_tokens, int pad_slot_id, int null_block_id) -> ()");
-  // Separate overload is the capability check for uniform batched ownership.
-  ops.def(
-      "marlin_mamba_input_conv.batched(Tensor input, Tensor(a!) projected, "
-      "Tensor weight, Tensor scales, Tensor global_scale, Tensor workspace, "
+      "mamba_marlin_input_conv(Tensor input, Tensor(a!) projected, "
+      "Tensor weight, Tensor scales, Tensor global_scale, "
       "Tensor taps, Tensor bias, Tensor(b!) history, Tensor cache_indices, "
       "Tensor? accepted_tokens, int pad_slot_id, int null_block_id) -> ()");
   #endif

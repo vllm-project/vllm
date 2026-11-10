@@ -4,9 +4,7 @@
 
 import pytest
 import torch
-
 from tests.kernels.utils import opcheck
-from vllm import _custom_ops as ops
 from vllm.model_executor.layers.mamba.ops.causal_conv1d import causal_conv1d_update
 from vllm.model_executor.layers.mamba.ops.marlin_input_conv import _first_cache_indices
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
@@ -18,11 +16,13 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 
+from vllm import _custom_ops as ops
+
 M, N, K = 8, 18560, 4096
 CONV_START, CONV_END = 8192, 18432
 CHANNELS, HISTORY = 10240, 10
 
-BATCHED_SHAPES = [(b, t) for b in range(2, 5) for t in range(1, 9)]
+BATCHED_SHAPES = [(b, t) for b in range(2, 5) for t in range(1, 9) if b * t <= 16]
 
 
 @pytest.fixture(scope="module")
@@ -37,7 +37,7 @@ def operands():
         48,
     ):
         pytest.skip("requires the supported SM121/48SM device")
-    if not hasattr(torch.ops._C, "marlin_mamba_input_conv"):
+    if not hasattr(torch.ops._C, "mamba_marlin_input_conv"):
         pytest.skip("requires vLLM build with Marlin input-conv support")
 
     with torch.random.fork_rng(devices=[device.index]):
@@ -79,7 +79,7 @@ def _arguments(operands, page, accepted, gap):
     args = {
         name: value
         for name, value in operands.items()
-        if name not in ("pristine", "batch_input")
+        if name not in ("pristine", "batch_input", "workspace")
     }
     args.update(
         projected=projected,
@@ -100,9 +100,8 @@ def _arguments(operands, page, accepted, gap):
     return args, backing
 
 
-def _reference(args, backing):
-    expected_backing = backing.clone()
-    expected = ops.marlin_gemm(
+def _project_reference(args):
+    return ops.marlin_gemm(
         a=args["input"],
         c=None,
         b_q_weight=args["weight"],
@@ -110,7 +109,7 @@ def _reference(args, backing):
         b_scales=args["scales"],
         global_scale=args["global_scale"],
         b_zeros=None,
-        workspace=args["workspace"],
+        workspace=marlin_make_workspace_new(args["input"].device),
         b_q_type=scalar_types.float4_e2m1f,
         size_m=args["input"].shape[0],
         size_n=N,
@@ -118,6 +117,11 @@ def _reference(args, backing):
         use_atomic_add=False,
         use_fp32_reduce=True,
     )
+
+
+def _reference(args, backing):
+    expected_backing = backing.clone()
+    expected = _project_reference(args)
     causal_conv1d_update(
         x=expected[:, CONV_START:CONV_END].T.unsqueeze(0),
         conv_state=expected_backing[:, : args["history"].shape[1]].transpose(1, 2),
@@ -220,22 +224,7 @@ def _batched_reference(args, backing, slots):
     expected_backing = backing.clone()
     rows, batches = args["input"].shape[0], len(slots)
     tokens = rows // batches
-    expected = ops.marlin_gemm(
-        args["input"],
-        None,
-        args["weight"],
-        None,
-        args["scales"],
-        args["global_scale"],
-        None,
-        args["workspace"],
-        scalar_types.float4_e2m1f,
-        rows,
-        N,
-        K,
-        use_atomic_add=False,
-        use_fp32_reduce=True,
-    )
+    expected = _project_reference(args)
     for batch, slot in enumerate(slots):
         block = expected[batch * tokens : (batch + 1) * tokens]
         if slot <= 0:
@@ -271,11 +260,11 @@ def _assert_batched_projection(actual, expected):
 @pytest.mark.parametrize("batches,tokens", BATCHED_SHAPES)
 def test_uniform_batched_projection_conv(operands, batches, tokens):
     """Each request uses its strided page and acceptance, in one whole M tile."""
-    assert hasattr(torch.ops._C.marlin_mamba_input_conv, "batched")
+    assert hasattr(torch.ops._C, "mamba_marlin_input_conv")
     args, backing, slots = _batched_arguments(operands, batches, tokens)
     before = backing.clone()
     expected, expected_backing = _batched_reference(args, backing, slots)
-    assert ops.marlin_mamba_input_conv_batched(**args) is None
+    assert ops.mamba_marlin_input_conv(**args) is None
     _assert_batched_projection(args["projected"], expected)
     for slot in range(backing.shape[0]):
         if slot in slots:
@@ -288,7 +277,19 @@ def test_uniform_batched_projection_conv(operands, batches, tokens):
 
 
 @pytest.mark.parametrize(
-    "regular,tokens", [(True, 1), (False, 2), (False, 5), (False, 8)]
+    "batches,tokens", [(b, t) for b in range(2, 5) for t in range(1, 9) if b * t > 16]
+)
+def test_m32_fusion_is_rejected_before_mutation(operands, batches, tokens):
+    args, backing, _ = _batched_arguments(operands, batches, tokens)
+    before, projected = backing.clone(), args["projected"].clone()
+    with pytest.raises(RuntimeError, match="1..16 actual rows"):
+        ops.mamba_marlin_input_conv(**args)
+    _assert_bytes_equal(backing, before)
+    _assert_bytes_equal(args["projected"], projected)
+
+
+@pytest.mark.parametrize(
+    "regular,tokens", [(True, 1), (False, 2), (False, 3), (False, 4)]
 )
 def test_batched_regular_or_inactive_requests(operands, regular, tokens):
     """None acceptance is regular T1/H3; null/pad skip poisoned acceptance."""
@@ -297,7 +298,7 @@ def test_batched_regular_or_inactive_requests(operands, regular, tokens):
     )
     before = backing.clone()
     expected, expected_backing = _batched_reference(args, backing, slots)
-    ops.marlin_mamba_input_conv_batched(**args)
+    ops.mamba_marlin_input_conv(**args)
     _assert_batched_projection(args["projected"], expected)
     _assert_nrmse(backing, expected_backing)
     for slot in range(backing.shape[0]):
@@ -323,12 +324,10 @@ def test_batched_rejects_invalid_metadata_before_mutation(operands, invalid):
         args["cache_indices"] = args["cache_indices"][:1].expand(2)
     else:
         # The strided index span includes the column padding between requests.
-        storage = torch.zeros((4, 16), dtype=torch.int32, device=backing.device)
-        args["cache_indices"] = storage[:2, 0]
-        args["workspace"] = storage.view(-1)
+        args["cache_indices"] = args["projected"].view(torch.int32).view(-1)[::16][:2]
     before, projected_before = backing.clone(), args["projected"].clone()
     with pytest.raises(RuntimeError, match="uniform|shape|overlaps"):
-        ops.marlin_mamba_input_conv_batched(**args)
+        ops.mamba_marlin_input_conv(**args)
     _assert_bytes_equal(backing, before)
     _assert_bytes_equal(args["projected"], projected_before)
 
@@ -357,7 +356,7 @@ def test_projection_conv_matches_separate_kernels(operands, accepted, page, gap)
     args, backing = _arguments(operands, page, accepted, gap)
     before = backing.clone()
     expected, expected_backing = _reference(args, backing)
-    assert ops.marlin_mamba_input_conv(**args) is None
+    assert ops.mamba_marlin_input_conv(**args) is None
     _assert_result(args, backing, expected, expected_backing, before, page)
 
 
@@ -371,13 +370,13 @@ def test_cuda_graph_replay_reads_current_metadata(operands, tokens):
     stream = torch.cuda.Stream(device=backing.device)
     stream.wait_stream(torch.cuda.current_stream())
     with torch.cuda.stream(stream):
-        ops.marlin_mamba_input_conv(**args)
+        ops.mamba_marlin_input_conv(**args)
     torch.cuda.current_stream().wait_stream(stream)
     backing.copy_(before)
     stream.wait_stream(torch.cuda.current_stream())
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph, stream=stream):
-        ops.marlin_mamba_input_conv(**args)
+        ops.mamba_marlin_input_conv(**args)
 
     for page, accepted in ((1, 1), (4, 8)):
         backing.copy_(before)
@@ -397,23 +396,8 @@ def test_inactive_page_preserves_history_and_dead_conv_slots(operands, page, tok
     args["input"] = args["input"][:tokens].clone()
     args["projected"] = args["projected"][:tokens].clone()
     before = backing.clone()
-    expected = ops.marlin_gemm(
-        args["input"],
-        None,
-        args["weight"],
-        None,
-        args["scales"],
-        args["global_scale"],
-        None,
-        args["workspace"],
-        scalar_types.float4_e2m1f,
-        tokens,
-        N,
-        K,
-        use_atomic_add=False,
-        use_fp32_reduce=True,
-    )
-    ops.marlin_mamba_input_conv(**args)
+    expected = _project_reference(args)
+    ops.mamba_marlin_input_conv(**args)
     _assert_bytes_equal(backing, before)
     _assert_bytes_equal(
         args["projected"][:, CONV_START:CONV_END],
@@ -423,7 +407,7 @@ def test_inactive_page_preserves_history_and_dead_conv_slots(operands, page, tok
     _assert_nrmse(args["projected"][:, CONV_END:], expected[:, CONV_END:])
 
 
-@pytest.mark.parametrize("alias", ["history", "input", "workspace"])
+@pytest.mark.parametrize("alias", ["history", "input", "global_scale"])
 def test_rejects_overlapping_operands_before_mutation(operands, alias):
     args, backing = _arguments(operands, 1, 4, 1)
     if alias == "history":
@@ -431,11 +415,11 @@ def test_rejects_overlapping_operands_before_mutation(operands, alias):
     elif alias == "input":
         args["input"] = args["projected"].view(-1)[: M * K].view(M, K)
     else:
-        args["workspace"] = args["weight"].view(-1)[:48]
+        args["global_scale"] = args["projected"].view(torch.float32).view(-1)[:1]
     before = backing.clone()
     projected_before = args["projected"].clone()
     with pytest.raises(RuntimeError, match="disjoint|overlaps"):
-        ops.marlin_mamba_input_conv(**args)
+        ops.mamba_marlin_input_conv(**args)
     _assert_bytes_equal(backing, before)
     _assert_bytes_equal(args["projected"], projected_before)
 
@@ -448,14 +432,14 @@ def test_rejects_unsupported_geometry_before_mutation(operands, invalid):
         match = "device/dtype mismatch"
     elif invalid == "batch":
         args["input"] = args["input"].repeat(2, 1)
-        match = r"requires 1\.\.8 actual rows"
+        match = "requires T1..8"
     else:
         args["history"] = args["history"].transpose(1, 2)
         match = "SD history view"
     before = backing.clone()
     projected_before = args["projected"].clone()
     with pytest.raises(RuntimeError, match=match):
-        ops.marlin_mamba_input_conv(**args)
+        ops.mamba_marlin_input_conv(**args)
     _assert_bytes_equal(backing, before)
     _assert_bytes_equal(args["projected"], projected_before)
 
@@ -463,7 +447,7 @@ def test_rejects_unsupported_geometry_before_mutation(operands, invalid):
 def test_mutation_schema_and_fake_tensor(operands):
     args, _ = _arguments(operands, 4, 4, 1)
     opcheck(
-        torch.ops._C.marlin_mamba_input_conv.default,
+        torch.ops._C.mamba_marlin_input_conv.default,
         (),
         kwargs=args,
         test_utils=("test_schema", "test_faketensor"),
@@ -479,7 +463,11 @@ def test_short_query_preserves_physical_history(operands, tokens, configured, pr
     accepted = 1 if previous == "first" else history_len - 2
     backing = operands["pristine"][:, : history_len + 1].clone()
     before = backing.clone()
-    args = {k: v for k, v in operands.items() if k not in ("pristine", "batch_input")}
+    args = {
+        k: v
+        for k, v in operands.items()
+        if k not in ("pristine", "batch_input", "workspace")
+    }
     args.update(
         input=operands["input"][:tokens].clone(),
         projected=torch.full(
@@ -494,7 +482,7 @@ def test_short_query_preserves_physical_history(operands, tokens, configured, pr
         null_block_id=0,
     )
     expected, expected_backing = _reference(args, backing)
-    ops.marlin_mamba_input_conv(**args)
+    ops.mamba_marlin_input_conv(**args)
     torch.cuda.synchronize()
     _assert_result(args, backing, expected, expected_backing, before, 1)
     _assert_bytes_equal(backing[1, tokens + 2 :], before[1, tokens + 2 :])
@@ -504,7 +492,11 @@ def test_regular_one_token_accepts_none(operands):
     """The real non-speculative convolution has H3 and no acceptance tensor."""
     backing = operands["pristine"][:, :4].clone()
     before = backing.clone()
-    args = {k: v for k, v in operands.items() if k not in ("pristine", "batch_input")}
+    args = {
+        k: v
+        for k, v in operands.items()
+        if k not in ("pristine", "batch_input", "workspace")
+    }
     args.update(
         input=operands["input"][:1].clone(),
         projected=torch.full((1, N), 91, dtype=torch.bfloat16, device=backing.device),
@@ -515,11 +507,11 @@ def test_regular_one_token_accepts_none(operands):
         null_block_id=0,
     )
     expected, expected_backing = _reference(args, backing)
-    ops.marlin_mamba_input_conv(**args)
+    ops.mamba_marlin_input_conv(**args)
     torch.cuda.synchronize()
     _assert_result(args, backing, expected, expected_backing, before, 4)
     opcheck(
-        torch.ops._C.marlin_mamba_input_conv.default,
+        torch.ops._C.mamba_marlin_input_conv.default,
         (),
         kwargs=args,
         test_utils=("test_schema", "test_faketensor"),

@@ -258,28 +258,6 @@ def marlin_generate_valid_test_cases():
             args = sub_case + (size_m, size_n, size_k) + case[4:]
             if is_invalid(*args):
                 cases.append(args)
-    # Exact GB10 output shape plus nearby unchanged dtype/shape routes.
-    for dtype, m, k in (
-        (scalar_types.bfloat16, 8, 8192),
-        (scalar_types.bfloat16, 16, 8192),
-        (scalar_types.bfloat16, 8, 4096),
-        (scalar_types.float16, 8, 8192),
-    ):
-        if dtype == scalar_types.bfloat16 and current_platform.is_device_capability(75):
-            continue
-        profile_case = (
-            dtype,
-            scalar_types.float4_e2m1f,
-            dtype,
-            1,
-            m,
-            4096,
-            k,
-            False,
-            True,
-        )
-        if profile_case not in cases:
-            cases.append(profile_case)
     return cases
 
 

@@ -7,7 +7,6 @@ from dataclasses import replace
 
 import torch
 from torch import nn
-
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import CacheConfig, ModelConfig, VllmConfig, get_current_vllm_config
 from vllm.config.compilation import CompilationMode, CUDAGraphMode
@@ -552,23 +551,13 @@ class MambaMixer2(MambaBase, PluggableLayer):
             and kernel_type.__name__ == "MarlinNvFp4LinearKernel"
         )
         self._marlin_input_conv_allowed = False
-        self._marlin_input_conv_short_supported = False
-        self._marlin_input_conv_batch_supported = False
         if (
             current_platform.is_cuda()
             and fusion_capture_allowed
             and uniform_capture_contract
             and marlin_owner_selected
-            and hasattr(torch.ops._C, "marlin_mamba_input_conv")
+            and hasattr(torch.ops._C, "mamba_marlin_input_conv")
         ):
-            # The optional-acceptance schema also serves as the short-family
-            # feature check when Python is used with an older optional build.
-            self._marlin_input_conv_short_supported = "Tensor? accepted_tokens" in str(
-                torch.ops._C.marlin_mamba_input_conv.default._schema
-            )
-            self._marlin_input_conv_batch_supported = hasattr(
-                torch.ops._C.marlin_mamba_input_conv, "batched"
-            )
             props = torch.cuda.get_device_properties(torch.cuda.current_device())
             self._marlin_input_conv_allowed = (
                 props.major == 12
