@@ -697,6 +697,12 @@ class Scheduler(SchedulerInterface):
                     eligible, self.kv_holding_waiting, self.waiting
                 )
             self.elastic_phase = self.elastic.select_phase(eligible, self.elastic_phase)
+        self.kv_cache_manager.new_step_starts()
+        return self._schedule(throttle_prefills)
+
+    def _schedule(
+        self, throttle_prefills: bool, *, allow_elastic_retry: bool = True
+    ) -> SchedulerOutput:
         # NOTE(woosuk) on the scheduling algorithm:
         # There's no "decoding phase" nor "prefill phase" in the scheduler.
         # Each request just has the num_computed_tokens and
@@ -745,8 +751,6 @@ class Scheduler(SchedulerInterface):
 
         # For logging.
         scheduled_timestamp = time.monotonic()
-
-        self.kv_cache_manager.new_step_starts()
 
         # DP prefill balancing: on a throttled (non-cadence-aligned) step, defer
         # all prefill compute unless saturated.
@@ -1050,9 +1054,12 @@ class Scheduler(SchedulerInterface):
             # Async loads started this step: newer than any block-holder.
             step_started_kv_loads: list[Request] = []
 
-            def skip_request(from_queue: RequestQueue) -> None:
+            def skip_request(from_queue: RequestQueue, *, width_delayed=False) -> None:
                 request_to_skip = from_queue.pop_request()
-                self.deferred_waiting.add(request_to_skip)
+                if width_delayed:
+                    self.deferred_waiting.discard(request_to_skip)
+                else:
+                    self.deferred_waiting.add(request_to_skip)
                 holds_blocks = self._holds_kv_blocks(request_to_skip)
                 if holds_blocks and from_queue is not self.kv_holding_waiting:
                     step_started_kv_loads.append(request_to_skip)
@@ -1098,18 +1105,18 @@ class Scheduler(SchedulerInterface):
                     break
 
                 request = request_queue.peek_request()
-                if (
-                    self.elastic is not None
-                    and self.elastic.request_phase(request) != self.elastic_phase
-                ):
-                    skip_request(request_queue)
-                    continue
-                request_id = request.request_id
-
                 ready_to_schedule = self._handle_blocked_waiting_request(request)
                 if not ready_to_schedule:
                     skip_request(request_queue)
                     continue
+
+                if (
+                    self.elastic is not None
+                    and self.elastic.request_phase(request) != self.elastic_phase
+                ):
+                    skip_request(request_queue, width_delayed=True)
+                    continue
+                request_id = request.request_id
 
                 if request.num_stale_output_tokens and not request.drop_stale_output:
                     # Deliverable stale output still in flight: resuming now
@@ -1670,6 +1677,20 @@ class Scheduler(SchedulerInterface):
             if not defer_prefills:
                 _, num_waiting = self.get_request_counts()
                 self.prefill_capacity_bound = num_waiting > len(self.deferred_waiting)
+
+        # A waiting cohort may not fit in KV while the other width can decode.
+        if (
+            self.elastic is not None
+            and allow_elastic_retry
+            and not num_scheduled_tokens
+            and not preempted_reqs
+            and self._pause_state != PauseState.PAUSED_ALL
+        ):
+            for request in self.running:
+                phase = self.elastic.request_phase(request)
+                if phase != self.elastic_phase:
+                    self.elastic_phase = phase
+                    return self._schedule(throttle_prefills, allow_elastic_retry=False)
 
         # Check if the scheduling constraints are satisfied.
         total_num_scheduled_tokens = sum(num_scheduled_tokens.values())

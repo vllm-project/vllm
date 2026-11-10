@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
 from vllm.config.compilation import CompilationMode, CUDAGraphMode
+from vllm.exceptions import VLLMValidationError
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -19,6 +20,19 @@ def elastic_phase(extra_args: dict | None) -> ElasticPhase:
     if phase not in ("full", "sliced", "auto"):
         raise ValueError("elastic_phase must be 'full', 'sliced', or 'auto'")
     return phase
+
+
+def validate_elastic_phase(extra_args: dict | None, enabled: bool) -> None:
+    if not extra_args or "elastic_phase" not in extra_args:
+        return
+    try:
+        elastic_phase(extra_args)
+    except ValueError as exc:
+        raise VLLMValidationError(str(exc), parameter="elastic_phase") from exc
+    if not enabled:
+        raise VLLMValidationError(
+            "elastic_phase requires an Elastic model", parameter="elastic_phase"
+        )
 
 
 @dataclass(frozen=True)

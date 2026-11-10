@@ -25,7 +25,7 @@ from vllm.entrypoints.openai.completion.protocol import CompletionRequest
 from vllm.exceptions import VLLMValidationError
 from vllm.model_executor.models.nemotron_h_elastic import _local_prefix_size
 from vllm.platforms.cpu import CpuPlatform
-from vllm.sampling_params import SamplingParams
+from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.utils.hashing import sha256
 from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
 from vllm.v1.core.sched.scheduler import Scheduler
@@ -95,7 +95,7 @@ def request(name, phase):
     )
 
 
-def make_scheduler(config, num_blocks=128):
+def make_scheduler(config, num_blocks=128, log_stats=False):
     config.cache_config.num_gpu_blocks = num_blocks
     spec = FullAttentionSpec(
         block_size=16, num_kv_heads=1, head_size=64, dtype=torch.bfloat16
@@ -105,6 +105,7 @@ def make_scheduler(config, num_blocks=128):
         KVCacheConfig(num_blocks, [], [KVCacheGroupSpec(["layer"], spec)]),
         StructuredOutputManager(config),
         block_size=16,
+        log_stats=log_stats,
     )
 
 
@@ -392,6 +393,68 @@ def test_interleaved_cohorts_and_full_capacity(elastic_config, sliced_count):
     assert set(second.num_scheduled_tokens) == (
         set(ids) if sliced_count == 2 else {"full"}
     )
+
+
+@pytest.mark.parametrize("running_phase", ["full", "sliced"])
+def test_kv_starved_width_does_not_stall_running_cohort(elastic_config, running_phase):
+    """Keep decoding when the other width cannot acquire its first KV block."""
+    scheduler = make_scheduler(elastic_config, num_blocks=2)
+    running = request("running", running_phase)
+    waiting_phase = "sliced" if running_phase == "full" else "full"
+    waiting = request("waiting", waiting_phase)
+    scheduler.add_request(running)
+    step(scheduler, [4])
+    scheduler.add_request(waiting)
+    for _ in range(3):
+        previous_step = scheduler.current_step
+        output = step(scheduler, [4])
+        assert scheduler.current_step == previous_step + 1
+        assert output.elastic_phase == running_phase
+        assert output.num_scheduled_tokens == {"running": 1}
+        assert waiting.status == RequestStatus.WAITING
+    scheduler.finish_requests([running.request_id], RequestStatus.FINISHED_ABORTED)
+    output = step(scheduler, [4])
+    assert output.elastic_phase == waiting_phase
+    assert output.num_scheduled_tokens == {"waiting": waiting.num_prompt_tokens}
+
+
+def test_width_delayed_request_is_counted_as_waiting(elastic_config):
+    scheduler = make_scheduler(elastic_config, log_stats=True)
+    scheduler.add_request(request("full", "full"))
+    delayed = request("sliced", "sliced")
+    scheduler.add_request(delayed)
+    assert step(scheduler, [4]).elastic_phase == "full"
+    stats = scheduler.make_stats()
+    assert stats.num_waiting_reqs == 1
+    assert stats.num_skipped_waiting_reqs == 0
+    assert delayed not in scheduler.deferred_waiting
+    scheduler.finish_requests([delayed.request_id], RequestStatus.FINISHED_ABORTED)
+    stats = scheduler.make_stats()
+    assert stats.num_waiting_reqs == stats.num_skipped_waiting_reqs == 0
+    assert step(scheduler, [4]).num_scheduled_tokens == {"full": 1}
+
+
+def test_other_width_with_pending_grammar_is_still_skipped(elastic_config):
+    scheduler = make_scheduler(elastic_config, log_stats=True)
+    scheduler.add_request(request("full", "full"))
+    blocked = Request(
+        "grammar",
+        [1, 2],
+        SamplingParams(
+            max_tokens=1,
+            extra_args={"elastic_phase": "sliced"},
+            structured_outputs=StructuredOutputsParams(regex="[0-9]+"),
+        ),
+        pooling_params=None,
+    )
+    scheduler.add_request(blocked)
+    assert step(scheduler, [4]).elastic_phase == "full"
+    stats = scheduler.make_stats()
+    assert stats.num_waiting_reqs == 0
+    assert stats.num_skipped_waiting_reqs == 1
+    assert blocked in scheduler.deferred_waiting
+    scheduler.finish_requests([blocked.request_id], RequestStatus.FINISHED_ABORTED)
+    assert not scheduler.deferred_waiting
 
 
 @pytest.mark.parametrize(

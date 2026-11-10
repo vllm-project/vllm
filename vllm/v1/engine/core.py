@@ -23,6 +23,7 @@ import zmq
 
 import vllm.envs as envs
 from vllm.config import ParallelConfig, VllmConfig
+from vllm.config.elastic import validate_elastic_phase
 from vllm.config.pooler import POOLER_CONFIG_LOG_FIELDS
 from vllm.config.utils import hash_config
 from vllm.config.watermarking import warn_watermarking_override
@@ -1276,6 +1277,15 @@ class EngineCore:
         This function could be directly used in input processing thread to allow
         request initialization running in parallel with Model forward
         """
+        if request.sampling_params is not None:
+            validate_elastic_phase(
+                request.sampling_params.extra_args,
+                getattr(
+                    self.vllm_config.model_config.hf_config,
+                    "elastic_use_lazy_slicing",
+                    False,
+                ),
+            )
         # Note on thread safety: no race condition.
         # `mm_receiver_cache` is reset at the end of LLMEngine init,
         # and will only be accessed in the input processing thread afterwards.

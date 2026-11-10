@@ -9,11 +9,17 @@ from copy import deepcopy
 from functools import partial
 from operator import attrgetter
 
+import httpx
 import pytest
 import torch
-from transformers import NemotronHConfig, NemotronHForCausalLM
+from tokenizers import Tokenizer
+from tokenizers.models import WordLevel
+from tokenizers.pre_tokenizers import Whitespace
+from transformers import NemotronHConfig, NemotronHForCausalLM, TokenizersBackend
 
+from tests.utils import RemoteOpenAIServer
 from vllm import SamplingParams
+from vllm.exceptions import VLLMValidationError
 from vllm.model_executor.models.nemotron_h_elastic import ElasticLinear
 from vllm.sampling_params import BeamSearchParams, RequestOutputKind
 from vllm.v1.core.kv_cache_utils import get_group_id
@@ -645,6 +651,100 @@ def test_elastic_isolation_and_cleanup(tiny_elastic_engine, record_property):
             }
         ),
     )
+
+
+@pytest.mark.hybrid_model
+def test_elastic_engine_rejects_malformed_wire_request(tiny_elastic_engine):
+    """Bypassing Python input validation must still reject only the bad request."""
+    llm, _ = tiny_elastic_engine
+    engine = llm.llm_engine
+    incoming = engine.input_processor.process_inputs(
+        "invalid-wire",
+        {"type": "token", "prompt_token_ids": [1, 2]},
+        SamplingParams(max_tokens=1),
+        ("generate",),
+    )
+    incoming.sampling_params.extra_args = {"elastic_phase": "bogus"}
+    core = engine.engine_core.engine_core
+    with pytest.raises(VLLMValidationError, match="elastic_phase"):
+        core.preprocess_add_request(incoming)
+    assert not core.scheduler.has_unfinished_requests()
+    output = llm.generate(
+        [{"prompt_token_ids": [1, 2]}],
+        SamplingParams(temperature=0, max_tokens=1),
+        use_tqdm=False,
+    )
+    assert len(output[0].outputs[0].token_ids) == 1
+
+
+@pytest.mark.hybrid_model
+@pytest.mark.parametrize("enforce_eager", [True, False], ids=["eager", "graphs"])
+def test_elastic_http_rejection_and_recovery(
+    tiny_elastic_checkpoint, tensor_parallel_size, enforce_eager
+):
+    """Both endpoints must remain usable after rejecting invalid phase inputs."""
+    path, _ = tiny_elastic_checkpoint
+    backend = Tokenizer(WordLevel({"<unk>": 0, "<s>": 1, "</s>": 2, "hello": 3}))
+    backend.pre_tokenizer = Whitespace()
+    tokenizer = TokenizersBackend(
+        tokenizer_object=backend, unk_token="<unk>", bos_token="<s>", eos_token="</s>"
+    )
+    tokenizer.chat_template = "{{ messages[0]['content'] }}"
+    tokenizer.save_pretrained(path)
+    args = [
+        "--dtype",
+        "bfloat16",
+        "--tensor-parallel-size",
+        str(tensor_parallel_size),
+        "--max-model-len",
+        "256",
+        "--max-num-seqs",
+        "2",
+        "--max-num-batched-tokens",
+        "80",
+        "--kv-cache-memory-bytes",
+        str(16 * 1024 * 1024),
+        "--gpu-memory-utilization",
+        "0.08",
+        "--no-async-scheduling",
+        "--moe-backend",
+        "triton",
+        "--generation-config",
+        "vllm",
+        "--compilation-config",
+        json.dumps(
+            {
+                "mode": 0,
+                "cudagraph_mode": "FULL_DECODE_ONLY",
+                "decode_cudagraph_capture_request_sizes": [1, 2],
+            }
+        ),
+    ]
+    if enforce_eager:
+        args.append("--enforce-eager")
+    with RemoteOpenAIServer(path, args) as server, httpx.Client(timeout=60) as client:
+        for endpoint, prompt in (
+            ("completions", {"prompt": [1, 3]}),
+            ("chat/completions", {"messages": [{"role": "user", "content": "hello"}]}),
+        ):
+            body = dict(
+                model=path, max_tokens=1, temperature=0, ignore_eos=True, **prompt
+            )
+            url = server.url_for("v1", endpoint)
+            for invalid in (
+                {"elastic_phase": "bogus"},
+                {"vllm_xargs": {"elastic_phase": "bogus"}},
+            ):
+                rejected = client.post(url, json={**body, **invalid})
+                assert rejected.status_code == 400, rejected.text
+                assert "elastic_phase" in rejected.text
+            for phase in (None, "full", "sliced", "auto"):
+                selected = {} if phase is None else {"elastic_phase": phase}
+                response = client.post(url, json={**body, **selected})
+                assert response.status_code == 200, response.text
+                result = response.json()
+                assert len(result["choices"]) == 1
+                assert result["usage"]["completion_tokens"] == 1
 
 
 @pytest.mark.parametrize("enforce_eager", [True, False])

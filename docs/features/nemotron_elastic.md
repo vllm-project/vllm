@@ -19,7 +19,9 @@ Set `elastic_phase` on each request:
 Omitting `elastic_phase` always uses `full`. A marker in the prompt or chat history
 does not trigger a switch. If an `auto` request never generates the marker, it
 stays sliced. Requests with different profiles can be active together; the
-scheduler alternates between their batches.
+scheduler alternates between their batches. If one width cannot acquire KV
+capacity, the other running width can continue decoding. Requests waiting for
+their width remain included in the waiting-request metric.
 
 This is an experimental implementation for BF16 Nemotron-H checkpoints
 trained for width slicing. It does not turn an ordinary Nemotron checkpoint into
@@ -76,7 +78,8 @@ curl http://localhost:8000/v1/chat/completions \
 precedence over an `elastic_phase` value in `vllm_xargs`. Automatic switching
 requires `elastic_phase: auto`; there is no configurable alternate default.
 Only `full`, `sliced`, and `auto` are accepted. Invalid values, or using the setting
-on a non-Elastic model, are rejected.
+on a non-Elastic model, are rejected before scheduler admission, including
+requests submitted through frontends that bypass Python input processing.
 Beam search and resumable input sessions are not supported. Streaming responses
 are supported.
 

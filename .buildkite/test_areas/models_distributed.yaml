@@ -50,6 +50,10 @@ steps:
   num_devices: 2
   source_file_dependencies:
   - vllm/config/elastic.py
+  - vllm/v1/core/sched/scheduler.py
+  - vllm/v1/engine/core.py
+  - vllm/v1/engine/input_processor.py
+  - vllm/v1/worker/gpu/cudagraph_utils.py
   - vllm/model_executor/model_loader/sharded_state_loader.py
   - vllm/model_executor/models/
   - vllm/v1/worker/gpu/model_states/default.py

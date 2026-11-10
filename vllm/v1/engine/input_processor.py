@@ -7,7 +7,7 @@ from typing import Any, Literal
 
 import vllm.envs as envs
 from vllm.config import VllmConfig
-from vllm.config.elastic import elastic_phase
+from vllm.config.elastic import validate_elastic_phase
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs import (
     EngineInput,
@@ -141,20 +141,10 @@ class InputProcessor:
         """
         watermarking: bool | None = None
         if isinstance(params, SamplingParams):
-            if params.extra_args and "elastic_phase" in params.extra_args:
-                try:
-                    elastic_phase(params.extra_args)
-                except ValueError as exc:
-                    raise VLLMValidationError(
-                        str(exc), parameter="elastic_phase"
-                    ) from exc
-                if not getattr(
-                    self.model_config.hf_config, "elastic_use_lazy_slicing", False
-                ):
-                    raise VLLMValidationError(
-                        "elastic_phase requires an Elastic model",
-                        parameter="elastic_phase",
-                    )
+            validate_elastic_phase(
+                params.extra_args,
+                getattr(self.model_config.hf_config, "elastic_use_lazy_slicing", False),
+            )
             supported_generation_tasks = [
                 task for task in supported_tasks if task in GENERATION_TASKS
             ]

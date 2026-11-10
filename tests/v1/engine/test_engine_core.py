@@ -22,6 +22,7 @@ from vllm.config import (
     VllmConfig,
 )
 from vllm.engine.arg_utils import EngineArgs
+from vllm.exceptions import VLLMValidationError
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_default_torch_num_threads
 from vllm.v1.core.sched.interface import PauseState
@@ -89,6 +90,14 @@ def test_engine_core():
             vllm_config=vllm_config, executor_class=executor_class, log_stats=True
         )
     """Test basic request lifecycle."""
+
+    # Wire requests can bypass InputProcessor (e.g. the Rust frontend).
+    for phase in ("bogus", "full", "sliced", "auto"):
+        invalid = make_request()
+        invalid.sampling_params.extra_args = {"elastic_phase": phase}
+        with pytest.raises(VLLMValidationError, match="elastic_phase"):
+            engine_core.preprocess_add_request(invalid)
+        assert not engine_core.scheduler.has_unfinished_requests()
 
     # First request.
     engine_core.add_request(*engine_core.preprocess_add_request(make_request()))
