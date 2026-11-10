@@ -128,6 +128,7 @@ def test_contexted_kv_attention(
     num_seqs: int = 10,
     cache_fill: float = 0.0,
     kv_range: float = 1e-3,
+    min_cache_blocks: int = 0,
 ) -> None:
     if "fp8" in kv_cache_dtype and not current_platform.has_device_capability(89):
         pytest.skip(
@@ -155,7 +156,7 @@ def test_contexted_kv_attention(
     BS = num_seqs
     max_block_per_request = (MAX_SEQ_LEN + MAX_CTX_LEN) // block_size
     # 640 keeps block size 544's KV cache over 2 GB (64-bit addressing).
-    cache_size = max(640, BS * max_block_per_request)
+    cache_size = max(640, BS * max_block_per_request, min_cache_blocks)
     query_lens = [random.randint(16, MAX_SEQ_LEN) for _ in range(BS)]
     # ensure one sequence in batch is a decode
     query_lens[-1] = 1
@@ -397,6 +398,34 @@ def test_contexted_kv_attention_window_shorter_than_context(
         num_seqs=num_seqs,
         cache_fill=float("nan"),
         kv_range=0.1,
+    )
+
+
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+@torch.inference_mode()
+def test_contexted_kv_attention_window_v_cache_over_2gb(device: str) -> None:
+    if not current_platform.is_rocm():
+        pytest.skip("Head sizes above 128 are only exercised on ROCm CI.")
+    block_size, num_heads, head_size = 16, 8, 256
+    block_bytes = block_size * num_heads * head_size * 2
+    test_contexted_kv_attention(
+        num_heads=num_heads,
+        num_queries_per_kv=1,
+        head_size=head_size,
+        sliding_window=256,
+        dtype=torch.float16,
+        kv_cache_dtype="auto",
+        device=device,
+        op=context_attention_fwd,
+        interleave_v=False,
+        block_size=block_size,
+        max_query_len=256,
+        min_ctx_len=16,
+        max_ctx_len=4096,
+        num_seqs=4,
+        cache_fill=float("nan"),
+        kv_range=0.1,
+        min_cache_blocks=2**31 // block_bytes + 1,
     )
 
 
