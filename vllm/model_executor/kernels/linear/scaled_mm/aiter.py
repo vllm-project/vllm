@@ -410,9 +410,11 @@ class AiterTritonPerTensorFp8ScaledMMLinearKernel(ROCmFP8ScaledMMLinearKernel):
         if not rocm_aiter_ops.is_linear_fp8_enabled():
             return (
                 False,
-                "requires setting `VLLM_ROCM_USE_AITER=1` "
-                "and `VLLM_ROCM_USE_AITER_LINEAR=1`. "
-                "`VLLM_ROCM_USE_AITER_LINEAR` default is True.",
+                (
+                    "requires setting `VLLM_ROCM_USE_AITER=1` "
+                    "and `VLLM_ROCM_USE_AITER_LINEAR=1`. "
+                    "`VLLM_ROCM_USE_AITER_LINEAR` default is True."
+                ),
             )
         try:
             import aiter  # noqa: F401
@@ -441,8 +443,10 @@ class AiterTritonPerTensorFp8ScaledMMLinearKernel(ROCmFP8ScaledMMLinearKernel):
         if not rocm_aiter_ops.is_triton_gemm_a8w8_tuned(N, K, cls.MAX_M):
             return (
                 False,
-                f"requires a tuned configuration for N: {N} and K: {K} "
-                f"up to M: {cls.MAX_M}.",
+                (
+                    f"requires a tuned configuration for N: {N} and K: {K} "
+                    f"up to M: {cls.MAX_M}."
+                ),
             )
         return True, None
 
