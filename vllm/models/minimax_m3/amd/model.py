@@ -35,11 +35,7 @@ from vllm.config import (
     VllmConfig,
     get_current_vllm_config,
 )
-from vllm.distributed import (
-    get_pp_group,
-    get_tensor_model_parallel_world_size,
-    tensor_model_parallel_all_reduce,
-)
+from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear.mxfp8.rocm_native import (
@@ -1724,14 +1720,26 @@ class MiniMaxM3DecoderLayer(nn.Module):
         if residual is None:
             residual = hidden_states
             return self.input_layernorm(hidden_states), residual
-        if self.fuse_input_allreduce and not self.fuse_input_norm_mxfp8:
+        if self.fuse_input_allreduce:
+            if self.fuse_input_norm_mxfp8:
+                # None when a fused all-reduce + norm kernel applies; qkv_proj
+                # then quantizes the bf16 output itself.
+                fused = allreduce_gemma_rms_norm_mxfp8(
+                    hidden_states, residual, self.input_layernorm
+                )
+                if fused is not None:
+                    x_q, x_scale, _, residual = fused
+                    return QuantizedActivation(
+                        x_q,
+                        x_scale,
+                        hidden_states.dtype,
+                        hidden_states.shape,
+                        kMxfp8Dynamic,
+                    ), residual
             return fused_allreduce_gemma_rms_norm(
                 hidden_states, residual, self.input_layernorm
             )
         if self.fuse_input_norm_mxfp8:
-            if self.fuse_input_allreduce:
-                # The MXFP8 norm has no all-reduce variant.
-                hidden_states = tensor_model_parallel_all_reduce(hidden_states)
             x_q, x_scale, residual = gemma_fused_add_rmsnorm_mxfp8(
                 hidden_states,
                 residual,
@@ -1912,17 +1920,14 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
         # Leave each FFN output un-reduced and fuse its all-reduce into the next
         # norm. PP ships hidden states across stages, and the mono and
         # specialized decode kernels expect reduced layer outputs.
-        # Mono decode only activates at TP4 without DP or EP; skip deferral
-        # only when it would actually run, not just when the env var is set.
-        mono_would_activate = (
-            mono_envs.MONO_ENABLE
-            and vllm_config.parallel_config.tensor_parallel_size == 4
-            and vllm_config.parallel_config.data_parallel_size == 1
-            and not vllm_config.parallel_config.enable_expert_parallel
-        )
+        mono_decode = False
+        if mono_envs.MONO_ENABLE:
+            from vllm.models.minimax_m3.amd.mono.dispatch import deployment_refusal
+
+            mono_decode = deployment_refusal(vllm_config) is None
         defer_ffn_all_reduce = (
             vllm_config.parallel_config.pipeline_parallel_size == 1
-            and not mono_would_activate
+            and not mono_decode
             and self.specialized_decode_config is None
         )
         self.start_layer, self.end_layer, self.layers = make_layers(
@@ -1992,9 +1997,13 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
         layer_idx: int,
         residual: torch.Tensor,
     ) -> None:
-        """Capture ``residual`` for EAGLE3 after the norm already completed any
-        deferred all-reduce.  Cloned because the norm may update it in place."""
-        if layer_idx in self.aux_hidden_state_layers:
+        """Capture the residual stream entering `layer_idx`, read after a norm
+        that has finished any deferred all-reduce. Cloned because the next
+        norm updates `residual` in place."""
+        if (
+            layer_idx >= self._aux_first_local_layer
+            and layer_idx in self.aux_hidden_state_layers
+        ):
             aux_hidden_states.append(residual.clone())
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
@@ -2032,10 +2041,6 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
 
         decode = self.specialized_decode
         aux_hidden_states: list[torch.Tensor] = []
-        if get_pp_group().is_first_rank:
-            self._maybe_add_hidden_state(
-                aux_hidden_states, self.start_layer, hidden_states, residual
-            )
         layers = self.layers[self.start_layer : self.end_layer]
         if decode is None:
             for idx, layer in enumerate(layers, start=self.start_layer):
@@ -2047,6 +2052,10 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
                     positions, hidden_states, residual
                 )
         else:
+            if get_pp_group().is_first_rank:
+                self._maybe_add_hidden_state(
+                    aux_hidden_states, self.start_layer, hidden_states, residual
+                )
             step = decode.plan(positions, intermediate_tensors)
             failure: Exception | None = None
             try:
@@ -2063,6 +2072,11 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             decode.after_step(step, failure)
 
         if not get_pp_group().is_last_rank:
+            if decode is None:
+                # PP turns deferral off, so no all-reduce is pending here.
+                self._maybe_add_hidden_state(
+                    aux_hidden_states, self.end_layer, hidden_states, residual
+                )
             return IntermediateTensors(
                 {
                     "hidden_states": hidden_states,
@@ -2077,8 +2091,8 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             )
         else:
             hidden_states, residual = self.norm(hidden_states, residual)
-        if self.end_layer in self.aux_hidden_state_layers:
-            aux_hidden_states.append(residual.clone())
+        if decode is None:
+            self._maybe_capture_aux(aux_hidden_states, self.end_layer, residual)
 
         if len(aux_hidden_states) > 0:
             return hidden_states, aux_hidden_states

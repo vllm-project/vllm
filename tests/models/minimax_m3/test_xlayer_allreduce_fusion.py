@@ -3,10 +3,11 @@
 """MiniMax-M3 (AMD) defers each FFN all-reduce into the next norm.
 
 Every deferred all-reduce must be finished exactly once, by the next layer's
-input norm or the final norm; an EAGLE3 capture must never record a per-rank
-partial sum; and mono decode, whose kernels expect reduced layer outputs, must
-turn deferral off. A tiny model on one rank checks the wiring, and at TP2 its
-final hidden states and captures must match the model that reduces every FFN.
+input norm (bf16 or MXFP8) or the final norm; each EAGLE3 capture must be
+recorded once and never as a per-rank partial sum; and mono decode, whose
+kernels expect reduced layer outputs, must turn deferral off exactly when it
+can run. At TP2 the deferred model's final hidden states and captures must
+match the model that reduces every FFN.
 """
 
 import os
@@ -32,13 +33,19 @@ pytestmark = pytest.mark.skipif(
 
 LAYERS = 5
 DENSE = 2
+# Capture 0 is the embedding and capture LAYERS the final norm's residual.
+AUX_LAYERS = tuple(range(LAYERS + 1))
 _CKPT_ENV = "VLLM_TEST_M3_XLAYER_CKPT"
+_MXFP8_ENV = "VLLM_TEST_M3_XLAYER_MXFP8"
 
 
-@pytest.fixture(scope="module")
-def checkpoint(tmp_path_factory):
-    path = tmp_path_factory.mktemp("minimax_m3_tiny")
+def _save_checkpoint(path, quantization_config=None) -> str:
     no_sparse = [0] * LAYERS
+    quant = (
+        {}
+        if quantization_config is None
+        else {"quantization_config": quantization_config}
+    )
     MiniMaxM3VLConfig(
         text_config=dict(
             vocab_size=256,
@@ -68,104 +75,225 @@ def checkpoint(tmp_path_factory):
         ),
         architectures=["MiniMaxM3SparseForCausalLM"],
         torch_dtype="bfloat16",
+        **quant,
     ).save_pretrained(path)
     return str(path)
 
 
-def _build(checkpoint, **config_overrides):
+@pytest.fixture(scope="module")
+def checkpoint(tmp_path_factory):
+    return _save_checkpoint(tmp_path_factory.mktemp("minimax_m3_tiny"))
+
+
+@pytest.fixture(scope="module")
+def mxfp8_checkpoint(tmp_path_factory):
+    # An MXFP8 qkv_proj sends every input norm down its MXFP8 branch. The FFN
+    # stays bf16: these shapes are below the MXFP8 MoE kernels' minimum.
+    return _save_checkpoint(
+        tmp_path_factory.mktemp("minimax_m3_tiny_mxfp8"),
+        {
+            "quant_method": "mxfp8",
+            "ignored_layers": ["lm_head", "mlp", "block_sparse_moe"],
+        },
+    )
+
+
+class _UnspecializedDecode:
+    """Runs the specialized decode layer loop with no layer specialized."""
+
+    def plan(self, positions, intermediate_tensors):
+        return None
+
+    def after_step(self, step, failure=None):
+        if failure is not None:
+            raise failure
+
+
+def _init_rank(tp_size, pp_size, rank, distributed_init_port) -> torch.device:
+    from vllm.v1.worker.workspace import init_workspace_manager
+
+    device = torch.device(f"cuda:{rank}")
+    torch.accelerator.set_device_index(device)
+    init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
+    ensure_model_parallel_initialized(tp_size, pp_size)
+    init_workspace_manager(device)
+    return device
+
+
+def _build_random_model(device, rank, pipeline_parallel_size=1):
     from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
+    from vllm.model_executor.model_loader.utils import process_weights_after_loading
     from vllm.models.minimax_m3.amd.model import MiniMaxM3Model
 
-    vllm_config = VllmConfig(model_config=ModelConfig(checkpoint, max_model_len=1024))
-    for key, val in config_overrides.items():
-        setattr(vllm_config.parallel_config, key, val)
+    model_config = ModelConfig(os.environ[_CKPT_ENV], max_model_len=1024)
+    vllm_config = VllmConfig(model_config=model_config)
+    vllm_config.parallel_config.pipeline_parallel_size = pipeline_parallel_size
     with (
         set_current_vllm_config(vllm_config),
         set_default_torch_dtype(torch.bfloat16),
-        torch.device("cuda"),
+        device,
     ):
-        return MiniMaxM3Model(vllm_config=vllm_config, prefix="model")
+        model = MiniMaxM3Model(vllm_config=vllm_config, prefix="model")
+    with torch.no_grad():
+        for name, p in model.named_parameters():
+            if p.ndim == 0:  # attention q/k/v scales keep their defaults
+                continue
+            if p.dtype == torch.uint8:  # E8M0 block scales; 127 is 2**0
+                p.fill_(127)
+                continue
+            g = torch.Generator(device=device).manual_seed(
+                zlib.crc32(f"{name}/{rank}".encode())
+            )
+            std = 0.1 if p.ndim == 1 else p.shape[-1] ** -0.5
+            p.copy_(torch.randn(p.shape, generator=g, device=device) * std)
+    process_weights_after_loading(model, model_config, device)
+    model._set_aux_hidden_state_layers(AUX_LAYERS)
+    return model, vllm_config
 
 
 @ray.remote(num_gpus=1, max_calls=1)
 def _run_deferred_matches_reduced(
     monkeypatch: pytest.MonkeyPatch, tp_size, pp_size, rank, distributed_init_port
 ):
-    from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
     from vllm.forward_context import set_forward_context
-    from vllm.model_executor.model_loader.utils import process_weights_after_loading
-    from vllm.models.minimax_m3.amd.model import MiniMaxM3Model
-    from vllm.v1.worker.workspace import init_workspace_manager
 
     with monkeypatch.context() as m:
         m.delenv("CUDA_VISIBLE_DEVICES", raising=False)
         m.delenv("HIP_VISIBLE_DEVICES", raising=False)
-        device = torch.device(f"cuda:{rank}")
-        torch.accelerator.set_device_index(device)
-        init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
-        ensure_model_parallel_initialized(tp_size, pp_size)
-        init_workspace_manager(device)
-
-        def build(defer: bool):
-            # PP > 1 disables deferral.  Faking pp_size=2 in the config
-            # builds non-deferred layers without needing mono or a real PP
-            # setup; the model still runs on one rank.
-            model_config = ModelConfig(os.environ[_CKPT_ENV], max_model_len=1024)
-            vllm_config = VllmConfig(model_config=model_config)
-            if not defer:
-                vllm_config.parallel_config.pipeline_parallel_size = 2
-            with (
-                set_current_vllm_config(vllm_config),
-                set_default_torch_dtype(torch.bfloat16),
-                device,
-            ):
-                model = MiniMaxM3Model(vllm_config=vllm_config, prefix="model")
-            assert model.fuse_final_norm_allreduce is defer
-            with torch.no_grad():
-                for name, p in model.named_parameters():
-                    g = torch.Generator(device=device).manual_seed(
-                        zlib.crc32(f"{name}/{rank}".encode())
-                    )
-                    std = 0.1 if p.ndim == 1 else p.shape[-1] ** -0.5
-                    p.copy_(torch.randn(p.shape, generator=g, device=device) * std)
-            process_weights_after_loading(model, model_config, device)
-            model._set_aux_hidden_state_layers(tuple(range(1, LAYERS + 1)))
-            return model, vllm_config
-
+        device = _init_rank(tp_size, pp_size, rank, distributed_init_port)
         input_ids = torch.arange(37, device=device) * 7 % 256
         positions = torch.arange(37, device=device)
-        outputs = []
-        for defer in (True, False):
-            model, vllm_config = build(defer)
+
+        def run(model, vllm_config):
             with torch.inference_mode(), set_forward_context(None, vllm_config):
-                outputs.append(model(input_ids, positions, None))
-        (got, got_aux), (ref, ref_aux) = outputs
-        for a, b in zip([got, *got_aux], [ref, *ref_aux], strict=True):
+                out, aux = model(input_ids, positions, None)
+                assert len(aux) == len(AUX_LAYERS)
+                torch.testing.assert_close(aux[0], model.embed_input_ids(input_ids))
+            return [out, *aux]
+
+        deferred, deferred_config = _build_random_model(device, rank)
+        assert deferred.fuse_final_norm_allreduce
+        mxfp8 = os.environ[_MXFP8_ENV] == "1"
+        assert all(layer.fuse_input_norm_mxfp8 is mxfp8 for layer in deferred.layers)
+        got = run(deferred, deferred_config)
+
+        # PP > 1 turns deferral off. Faking it in the config builds the
+        # reduce-every-FFN reference, which still runs as a single stage.
+        reduced, reduced_config = _build_random_model(
+            device, rank, pipeline_parallel_size=2
+        )
+        assert not reduced.fuse_final_norm_allreduce
+        ref = run(reduced, reduced_config)
+        for a, b in zip(got, ref, strict=True):
+            torch.testing.assert_close(a, b, rtol=2e-2, atol=2e-2)
+
+        # The specialized decode loop captures after each layer instead.
+        reduced.specialized_decode = _UnspecializedDecode()
+        for a, b in zip(run(reduced, reduced_config), ref, strict=True):
             torch.testing.assert_close(a, b, rtol=2e-2, atol=2e-2)
 
 
+@pytest.mark.parametrize("mxfp8", [False, True])
 @pytest.mark.parametrize("use_aiter", [False, True])
-def test_deferred_matches_reduced_at_tp2(checkpoint, monkeypatch, use_aiter):
-    """The final hidden states and every EAGLE3 capture match the all-reduce-
-    per-FFN model: a dropped or doubled deferred reduce is off by a TP factor."""
+def test_deferred_matches_reduced_at_tp2(
+    checkpoint, mxfp8_checkpoint, monkeypatch, use_aiter, mxfp8
+):
+    """A dropped or doubled deferred reduce is off by a TP factor, and a
+    doubled or missing capture shifts every later one."""
     pytest.importorskip("flydsl")
     tp_size = 2
     if torch.accelerator.device_count() < tp_size:
         pytest.skip(f"Need at least {tp_size} GPUs.")
+    if mxfp8 and not current_platform.supports_mx():
+        pytest.skip("The MXFP8 input norm needs native MX (gfx95x).")
     monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1" if use_aiter else "0")
-    monkeypatch.setenv(_CKPT_ENV, checkpoint)
+    monkeypatch.setenv(_CKPT_ENV, mxfp8_checkpoint if mxfp8 else checkpoint)
+    monkeypatch.setenv(_MXFP8_ENV, "1" if mxfp8 else "0")
     multi_process_parallel(monkeypatch, tp_size, 1, _run_deferred_matches_reduced)
 
 
-def test_mono_decode_keeps_every_ffn_reduced(dist_init, checkpoint, monkeypatch):
+@ray.remote(num_gpus=1, max_calls=1)
+def _run_pp2_captures(
+    monkeypatch: pytest.MonkeyPatch, tp_size, pp_size, rank, distributed_init_port
+):
+    from vllm.distributed import get_pp_group
+    from vllm.forward_context import set_forward_context
+    from vllm.sequence import IntermediateTensors
+
+    with monkeypatch.context() as m:
+        m.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+        m.delenv("HIP_VISIBLE_DEVICES", raising=False)
+        device = _init_rank(tp_size, pp_size, rank, distributed_init_port)
+        model, vllm_config = _build_random_model(
+            device, rank, pipeline_parallel_size=pp_size
+        )
+        positions = torch.arange(37, device=device)
+        intermediate_tensors = None
+        if not get_pp_group().is_first_rank:
+            hidden = torch.randn(37, 256, device=device, dtype=torch.bfloat16)
+            intermediate_tensors = IntermediateTensors(
+                {"hidden_states": hidden, "residual": hidden.clone()}
+            )
+        with torch.inference_mode(), set_forward_context(None, vllm_config):
+            out = model(positions * 7 % 256, positions, intermediate_tensors)
+        if get_pp_group().is_last_rank:
+            # This stage's start_layer capture belongs to the stage before.
+            _, aux = out
+            assert len(aux) == sum(i > model.start_layer for i in AUX_LAYERS)
+        else:
+            _, sends = model.aux_hidden_state_slot_keys()
+            assert set(sends) == set(out.tensors) - {"hidden_states", "residual"}
+
+
+def test_pp2_stage_boundary_captured_once(checkpoint, monkeypatch):
     pytest.importorskip("flydsl")
+    pp_size = 2
+    if torch.accelerator.device_count() < pp_size:
+        pytest.skip(f"Need at least {pp_size} GPUs.")
+    monkeypatch.setenv(_CKPT_ENV, checkpoint)
+    multi_process_parallel(monkeypatch, 1, pp_size, _run_pp2_captures)
+
+
+@pytest.mark.parametrize(
+    ("parallel", "mono_runs"),
+    [
+        ({"tensor_parallel_size": 4}, True),
+        ({"tensor_parallel_size": 2}, False),
+        ({"tensor_parallel_size": 4, "enable_expert_parallel": True}, False),
+    ],
+)
+def test_deferral_is_off_exactly_when_mono_decode_can_run(
+    dist_init, checkpoint, monkeypatch, parallel, mono_runs
+):
+    pytest.importorskip("flydsl")
+    from vllm.config import (
+        CUDAGraphMode,
+        ModelConfig,
+        VllmConfig,
+        set_current_vllm_config,
+    )
+    from vllm.models.minimax_m3.amd.model import MiniMaxM3Model
+    from vllm.models.minimax_m3.amd.mono.dispatch import deployment_refusal
     from vllm.models.minimax_m3.amd.mono.envs import envs
 
     monkeypatch.setattr(envs, "MONO_ENABLE", True)
-    # mono_would_activate needs TP4 + DP1 + no EP; fake TP4 in the config.
-    model = _build(checkpoint, tensor_parallel_size=4)
-    assert not any(
-        layer.ffn_all_reduce_deferred or layer.fuse_input_allreduce
-        for layer in model.layers
+    vllm_config = VllmConfig(model_config=ModelConfig(checkpoint, max_model_len=1024))
+    # A deployment mono serves, apart from the parallel layout under test.
+    vllm_config.cache_config.cache_dtype = "fp8"
+    vllm_config.cache_config.block_size = 128
+    vllm_config.attention_config.indexer_kv_dtype = "fp8"
+    vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.FULL_DECODE_ONLY
+    for key, val in parallel.items():
+        setattr(vllm_config.parallel_config, key, val)
+    assert (deployment_refusal(vllm_config) is None) is mono_runs
+    with (
+        set_current_vllm_config(vllm_config),
+        set_default_torch_dtype(torch.bfloat16),
+        torch.device("cuda"),
+    ):
+        model = MiniMaxM3Model(vllm_config=vllm_config, prefix="model")
+    # Under EP the MoE layers may reduce through all2all; the dense ones decide.
+    assert all(
+        layer.ffn_all_reduce_deferred is not mono_runs for layer in model.layers[:DENSE]
     )
-    assert not model.fuse_final_norm_allreduce
+    assert model.layers[1].fuse_input_allreduce is not mono_runs
