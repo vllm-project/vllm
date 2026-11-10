@@ -697,7 +697,20 @@ else()
     )
     target_compile_definitions(_C PRIVATE VLLM_STANDALONE_CPU_MRV2)
     if (VLLM_OPENBLAS_LIB)
-        target_compile_definitions(_C PRIVATE VLLM_HAS_OPENBLAS)
+        # The RISE torch wheel ships an OpenBLAS without sbgemm_ (bf16).
+        # Defining VLLM_HAS_OPENBLAS then makes _C fail to load.
+        execute_process(
+            COMMAND nm -D "${VLLM_OPENBLAS_LIB}"
+            OUTPUT_VARIABLE _vllm_ob_nm
+            RESULT_VARIABLE _vllm_ob_nm_rc
+        )
+        if(_vllm_ob_nm_rc EQUAL 0 AND _vllm_ob_nm MATCHES " T sbgemm_(
+|$)")
+            message(STATUS "OpenBLAS provides sbgemm_")
+            target_compile_definitions(_C PRIVATE VLLM_HAS_OPENBLAS)
+        else()
+            message(STATUS "OpenBLAS has no sbgemm_; BF16 GEMM uses the PyTorch BLAS path")
+        endif()
     endif()
 endif()
 
