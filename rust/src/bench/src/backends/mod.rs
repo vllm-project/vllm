@@ -46,16 +46,66 @@ pub struct ChatChoice {
 
 #[derive(Deserialize)]
 pub struct ChatDelta {
+    pub role: Option<String>,
     pub content: Option<String>,
+    pub reasoning: Option<String>,
+    /// Sent by SGLang, and by vLLM before vllm-project/vllm#27752.
+    pub reasoning_content: Option<String>,
+    pub tool_calls: Option<Vec<serde_json::Value>>,
+    pub function_call: Option<serde_json::Value>,
+}
+
+impl ChatDelta {
+    /// Whether this delta carries a generated token. Mirrors Python's
+    /// `_choice_has_streamed_output` (vllm-project/vllm#62341).
+    pub fn has_streamed_output(&self) -> bool {
+        let non_empty = |s: &Option<String>| s.as_deref().is_some_and(|s| !s.is_empty());
+        if non_empty(&self.content)
+            || non_empty(&self.reasoning)
+            || non_empty(&self.reasoning_content)
+            || self.tool_calls.as_ref().is_some_and(|t| !t.is_empty())
+            || self
+                .function_call
+                .as_ref()
+                .and_then(|f| f.as_object())
+                .is_some_and(|f| !f.is_empty())
+        {
+            return true;
+        }
+        // A generated token can decode to an empty string, e.g. a special token
+        // under skip_special_tokens. Those chunks carry `content` and no `role`.
+        // The opening metadata chunk carries `role`.
+        self.content.as_deref() == Some("") && self.role.is_none()
+    }
 }
 
 #[derive(Deserialize)]
 pub struct ChunkUsage {
     pub completion_tokens: Option<u64>,
+    pub prompt_tokens: Option<u64>,
+}
+
+impl ChunkUsage {
+    /// Record the server-reported token counts on `output`. A zero
+    /// `prompt_tokens` keeps the client estimate: some OpenAI-compatible
+    /// servers send placeholder zeros in usage chunks.
+    pub fn apply(&self, output: &mut RequestFuncOutput) {
+        if let Some(ct) = self.completion_tokens {
+            output.output_tokens = ct as usize;
+        }
+        if let Some(pt) = self.prompt_tokens.filter(|&pt| pt > 0) {
+            output.prompt_len = pt as usize;
+        }
+    }
 }
 
 use crate::cli::BackendKind;
 use crate::error::Result;
+
+/// Error for a 200 stream that never carried a token, shared by the streaming
+/// backends so they report it the same way.
+pub(crate) const NO_VALID_CHUNK_ERROR: &str =
+    "Never received a valid chunk to calculate TTFT. This response will be marked as failed!";
 
 /// Input for a single benchmark request.
 #[derive(Debug, Clone)]
@@ -245,6 +295,21 @@ pub fn build_headers(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A placeholder zero `prompt_tokens` must not replace the client estimate.
+    #[test]
+    fn chunk_usage_ignores_zero_prompt_tokens() {
+        let mut output = RequestFuncOutput {
+            prompt_len: 100,
+            ..Default::default()
+        };
+        ChunkUsage {
+            completion_tokens: Some(3),
+            prompt_tokens: Some(0),
+        }
+        .apply(&mut output);
+        assert_eq!((output.prompt_len, output.output_tokens), (100, 3));
+    }
 
     #[test]
     fn test_update_server_metrics_converts_ms_to_seconds() {

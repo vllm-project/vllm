@@ -24,7 +24,7 @@ def _get_minicpmv_chat_template_fallback(tokenizer_name_or_path: str) -> Path | 
 
 _MODEL_TYPE_TO_CHAT_TEMPLATE_FALLBACK: dict[str, ChatTemplatePath] = {
     "blip-2": CHAT_TEMPLATES_DIR / "template_blip2.jinja",
-    "clip": CHAT_TEMPLATES_DIR / "template_basic.jinja",
+    "clip": CHAT_TEMPLATES_DIR / "template_clip.jinja",
     "colpali": CHAT_TEMPLATES_DIR / "template_basic.jinja",
     "deepseek_ocr": CHAT_TEMPLATES_DIR / "template_deepseek_ocr.jinja",
     "deepseek_ocr2": CHAT_TEMPLATES_DIR / "template_deepseek_ocr.jinja",
@@ -35,8 +35,9 @@ _MODEL_TYPE_TO_CHAT_TEMPLATE_FALLBACK: dict[str, ChatTemplatePath] = {
     "minicpmv": _get_minicpmv_chat_template_fallback,
     "minicpmv4_6": _get_minicpmv_chat_template_fallback,
     "minicpmv4_7": _get_minicpmv_chat_template_fallback,
+    "openvla": CHAT_TEMPLATES_DIR / "template_openvla.jinja",
     "paligemma": CHAT_TEMPLATES_DIR / "template_basic.jinja",
-    "siglip": CHAT_TEMPLATES_DIR / "template_basic.jinja",
+    "siglip": CHAT_TEMPLATES_DIR / "template_siglip.jinja",
     "siglip2": CHAT_TEMPLATES_DIR / "template_basic.jinja",
 }
 
