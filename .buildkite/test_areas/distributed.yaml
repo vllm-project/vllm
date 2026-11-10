@@ -13,6 +13,7 @@ steps:
   - vllm/distributed
   - vllm/v1/attention/ops/cp_common.py
   - "!vllm/distributed/kv_transfer/"
+  - vllm/v1/worker/gpu/sample/
   - tests/distributed
   commands:
   - pytest -v -s distributed/test_localization.py
@@ -24,6 +25,7 @@ steps:
   - pytest -v -s distributed/test_shm_buffer.py
   - pytest -v -s distributed/test_shm_storage.py
   - pytest -v -s distributed/test_pipeline_partition.py
+  - pytest -v -s distributed/test_tp_sampler_consistency.py
   mirror:
     amd:
       automatic_shard: true
