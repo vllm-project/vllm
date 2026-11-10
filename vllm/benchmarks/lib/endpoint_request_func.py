@@ -252,6 +252,7 @@ async def async_request_openai_completions(
         async with session.post(url=api_url, json=payload, headers=headers) as response:
             if response.status == 200:
                 first_chunk_received = False
+                stream_error: str | None = None
                 handler = StreamedResponseHandler()
 
                 async for chunk_bytes in response.content.iter_any():
@@ -275,7 +276,9 @@ async def async_request_openai_completions(
                             # NOTE: Some completion API might have a last
                             # usage summary response without a token so we
                             # want to check a token was generated
-                            if choices := data.get("choices"):
+                            if error := data.get("error"):
+                                stream_error = json.dumps(error)
+                            elif choices := data.get("choices"):
                                 # Note that text could be empty here
                                 # e.g. for special tokens
                                 text = choices[0].get("text")
@@ -295,7 +298,10 @@ async def async_request_openai_completions(
                                 output.output_tokens = usage.get("completion_tokens")
                                 if (pt := usage.get("prompt_tokens")) is not None:
                                     output.prompt_len = pt
-                if first_chunk_received:
+                if stream_error is not None:
+                    output.success = False
+                    output.error = stream_error
+                elif first_chunk_received:
                     output.success = True
                 else:
                     output.success = False
@@ -395,7 +401,8 @@ def _choice_has_streamed_output(choice: dict[str, Any]) -> bool:
         return False
     if (
         delta.get("content")
-        or delta.get("reasoning")
+        or delta.get("reasoning")  # vLLM spec
+        or delta.get("reasoning_content")  # SGLang spec
         or delta.get("tool_calls")
         or delta.get("function_call")
     ):
@@ -447,6 +454,7 @@ async def async_request_openai_chat_completions(
         async with session.post(url=api_url, json=payload, headers=headers) as response:
             if response.status == 200:
                 first_chunk_received = False
+                stream_error: str | None = None
                 handler = StreamedResponseHandler()
                 async for chunk_bytes in response.content.iter_any():
                     if not chunk_bytes:
@@ -467,7 +475,9 @@ async def async_request_openai_chat_completions(
                             data = json.loads(chunk)
                             _update_server_metrics(output, data)
 
-                            if (
+                            if error := data.get("error"):
+                                stream_error = json.dumps(error)
+                            elif (
                                 choices := data.get("choices")
                             ) and _choice_has_streamed_output(choices[0]):
                                 content = choices[0]["delta"].get("content")
@@ -490,7 +500,10 @@ async def async_request_openai_chat_completions(
                                     output.prompt_len = pt
 
                 output.generated_text = generated_text
-                if first_chunk_received:
+                if stream_error is not None:
+                    output.success = False
+                    output.error = stream_error
+                elif first_chunk_received:
                     output.success = True
                 else:
                     output.success = False
@@ -513,11 +526,11 @@ async def async_request_openai_chat_completions(
 
 
 def _extract_sse_data(message: str) -> str | None:
-    """Extract the ``data`` payload of a single SSE message.
+    """Extract the `data` payload of a single SSE message.
 
-    The Responses API stream labels every message with an ``event:`` line
-    before its ``data:`` line, so the payload cannot be recovered by
-    stripping a leading ``data: `` the way the Completions and Chat
+    The Responses API stream labels every message with an `event:` line
+    before its `data:` line, so the payload cannot be recovered by
+    stripping a leading `data: ` the way the Completions and Chat
     Completions streams allow.
 
     Args:
@@ -525,7 +538,7 @@ def _extract_sse_data(message: str) -> str | None:
 
     Returns:
         The payload, with multi-line payloads joined by newlines as required
-        by the SSE spec, or None if the message carries no ``data:`` line.
+        by the SSE spec, or None if the message carries no `data:` line.
 
     """
     # NOTE: split on "\n" rather than using splitlines(), which also breaks on
@@ -544,11 +557,17 @@ def _extract_sse_data(message: str) -> str | None:
 
 # Responses events that carry generated tokens. Reasoning deltas are included
 # because the server is already decoding when it emits them, so excluding them
-# would report the whole reasoning phase as time to first token.
+# would report the whole reasoning phase as time to first token. Tool call
+# arguments and code are generated tokens too, as `tool_calls` deltas are on
+# `openai-chat`; a response that only calls a tool emits nothing else.
 _RESPONSES_TOKEN_DELTA_EVENTS = frozenset(
     {
         "response.output_text.delta",
         "response.reasoning_text.delta",
+        "response.function_call_arguments.delta",
+        "response.custom_tool_call_input.delta",
+        "response.mcp_call_arguments.delta",
+        "response.code_interpreter_call_code.delta",
     }
 )
 
@@ -749,6 +768,7 @@ async def async_request_openai_audio(
             ) as response:
                 if response.status == 200:
                     first_chunk_received = False
+                    stream_error: str | None = None
                     handler = StreamedResponseHandler()
 
                     async for chunk_bytes in response.content.iter_any():
@@ -764,7 +784,9 @@ async def async_request_openai_audio(
                                 timestamp = time.perf_counter()
                                 data = json.loads(chunk)
 
-                                if choices := data.get("choices"):
+                                if error := data.get("error"):
+                                    stream_error = json.dumps(error)
+                                elif choices := data.get("choices"):
                                     content = choices[0]["delta"].get("content")
                                     # First token
                                     if not first_chunk_received:
@@ -788,7 +810,10 @@ async def async_request_openai_audio(
                                     )
 
                     output.generated_text = generated_text
-                    if first_chunk_received:
+                    if stream_error is not None:
+                        output.success = False
+                        output.error = stream_error
+                    elif first_chunk_received:
                         output.success = True
                     else:
                         output.success = False

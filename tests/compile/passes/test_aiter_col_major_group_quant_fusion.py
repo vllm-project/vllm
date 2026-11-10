@@ -4,7 +4,7 @@
 and SiLU-mul + group-quant fusions.
 
 On gfx1250 QuantFP8.forward_hip asks aiter's group quant for M-major scales
-(``rocm_aiter_group_fp8_quant(x, 128, True)``) and re-views them for the
+(`rocm_aiter_group_fp8_quant(x, 128, True)`) and re-views them for the
 Gluon preshuffled block-scale GEMM. These patterns must still fuse that graph,
 and the fused op's scales must equal the unfused ones after the same re-view.
 """

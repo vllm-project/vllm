@@ -42,8 +42,7 @@ class MiniMaxVLPatchEmbed(nn.Module):
 
     def __init__(self, config: PreTrainedConfig) -> None:
         super().__init__()
-        compression = config.img_token_compression_config
-        temporal_patch_size = compression.get("temporal_patch_size", 2)
+        temporal_patch_size = config.temporal_patch_size
         patch_size = config.patch_size
         num_channels = config.num_channels
 
@@ -59,11 +58,12 @@ class MiniMaxVLPatchEmbed(nn.Module):
             stride=(temporal_patch_size, patch_size, patch_size),
             bias=False,
         )
+        # The checkpoint stores this weight in fp32 (the vision tower's only
+        # fp32 tensor); keep it that way so the conv runs at full precision.
+        self.patch_embedding.to(torch.float32)
 
     def forward(self, pixel_values: torch.Tensor) -> torch.Tensor:
         # pixel_values: (N, C * temporal_patch_size * patch_size²)
-        if self.patch_embedding.weight.dtype != pixel_values.dtype:
-            self.patch_embedding = self.patch_embedding.to(pixel_values.dtype)
         x = pixel_values.reshape(
             pixel_values.shape[0],
             self.num_channels,
@@ -71,13 +71,14 @@ class MiniMaxVLPatchEmbed(nn.Module):
             self.patch_size,
             self.patch_size,
         )
-        return self.patch_embedding(x).reshape(x.shape[0], -1)
+        out = self.patch_embedding(x.to(self.patch_embedding.weight.dtype))
+        return out.reshape(x.shape[0], -1).to(pixel_values.dtype)
 
 
 class MiniMaxVLAttention(nn.Module):
     """Multi-head attention with MiniMax's partial 3D RoPE.
 
-    Partial means only the first ``rot_dim`` (< head_dim) dimensions of
+    Partial means only the first `rot_dim` (< head_dim) dimensions of
     Q and K are rotated; the remaining dims are passed through unchanged.
     """
 
@@ -293,7 +294,7 @@ class MiniMaxVLEncoder(nn.Module):
 class MiniMaxVLVisionTransformer(nn.Module):
     """CLIP-based ViT with 3D RoPE (t/h/w decomposed).
 
-    Faithfully mirrors the reference ``MiniMaxVLVisionTransformer``.
+    Faithfully mirrors the reference `MiniMaxVLVisionTransformer`.
     FLASHINFER backend is not supported; standard flash-attn is used.
     """
 
@@ -306,9 +307,8 @@ class MiniMaxVLVisionTransformer(nn.Module):
         prefix: str = "",
     ) -> None:
         super().__init__()
-        compression = config.img_token_compression_config
-        self.spatial_merge_size: int = compression.get("spatial_merge_size", 2)
-        self.temporal_patch_size: int = compression.get("temporal_patch_size", 2)
+        self.spatial_merge_size: int = config.spatial_merge_size
+        self.temporal_patch_size: int = config.temporal_patch_size
         self.vision_segment_max_frames: int | None = getattr(
             config, "vision_segment_max_frames", None
         )
@@ -336,7 +336,7 @@ class MiniMaxVLVisionTransformer(nn.Module):
         self.w_dim = int(2 * ((rope_dims // 3) // 2))
         # rot_dim = t_dim + h_dim + w_dim (may be < head_dim)
 
-        rope_theta: float = getattr(config, "rope_theta", 10000.0)
+        rope_theta: float = config.rope_parameters["rope_theta"]
         inv_freq_t = 1.0 / (
             rope_theta
             ** (torch.arange(0, self.t_dim, 2, dtype=torch.float32) / self.t_dim)
@@ -620,8 +620,7 @@ class MiniMaxVLVisionModel(nn.Module):
         prefix: str = "",
     ) -> None:
         super().__init__()
-        compression = config.img_token_compression_config
-        spatial_merge_size: int = compression.get("spatial_merge_size", 2)
+        spatial_merge_size: int = config.spatial_merge_size
         self.spatial_merge_size = spatial_merge_size
         self.use_data_parallel = is_vit_use_data_parallel()
 
@@ -657,7 +656,9 @@ class MiniMaxVLVisionModel(nn.Module):
             prefix=maybe_prefix(prefix, "patch_merge_mlp"),
         )
 
-        self.dtype = self.vision_model.embeddings.patch_embedding.weight.dtype
+        # Tower compute dtype; the patch embedding weight stays fp32 (see
+        # MiniMaxVLPatchEmbed), so take it from the projector instead.
+        self.dtype = self.multi_modal_projector.linear_1.weight.dtype
         self.out_hidden_size = text_hidden_size
 
     def forward(
