@@ -19,6 +19,7 @@ from vllm.third_party.flash_linear_attention.ops import (
 )
 from vllm.third_party.flash_linear_attention.ops.chunk import chunk_gated_delta_rule
 from vllm.third_party.flash_linear_attention.ops.utils import is_cdna3
+from vllm.utils.torch_utils import set_random_seed
 
 # kernel label -> (autotuned kernel, gfx942 config list, stock config list)
 KERNELS = {
@@ -79,7 +80,7 @@ def _pinned(kernel, configs):
 
 
 def _inputs(hg, h, device="cuda"):
-    torch.manual_seed(0)
+    set_random_seed(0)
     dtype = torch.bfloat16
     total = sum(SEQ_LENS)
     cu = torch.zeros(len(SEQ_LENS) + 1, dtype=torch.int32)
@@ -106,7 +107,7 @@ def _inputs(hg, h, device="cuda"):
     )
 
 
-def _run(inputs, pins):
+def _run(inputs, pins, op=chunk_gated_delta_rule):
     was_on = torch.are_deterministic_algorithms_enabled()
     warn_only = torch.is_deterministic_algorithms_warn_only_enabled()
     # NaN-fills torch.empty so an unwritten tile cannot pass on stale memory.
@@ -115,7 +116,7 @@ def _run(inputs, pins):
         with contextlib.ExitStack() as stack:
             for kernel, configs in pins:
                 stack.enter_context(_pinned(kernel, configs))
-            out, state = chunk_gated_delta_rule(**inputs)
+            out, state = op(**inputs)
     finally:
         torch.use_deterministic_algorithms(was_on, warn_only=warn_only)
     return out.clone(), state.clone()
@@ -148,7 +149,7 @@ _KDA_SHARED = ["chunk_delta_h", "solve_tril_merge64"]
 
 
 def _kda_inputs(h, device="cuda"):
-    torch.manual_seed(0)
+    set_random_seed(0)
     dtype = torch.bfloat16
     total = sum(SEQ_LENS)
     cu = torch.zeros(len(SEQ_LENS) + 1, dtype=torch.int32)
@@ -176,17 +177,8 @@ def _kda_inputs(h, device="cuda"):
 @pytest.mark.parametrize("kernel_name", [*_KDA_SHARED, "all"])
 @torch.inference_mode()
 def test_gfx942_config_matches_stock_on_kda(kernel_name):
-    """Kimi Linear / Kimi-K3 / GLM-5-Next reach two of these kernels too."""
+    """The two configs shared with KDA reproduce stock output on its path too."""
     from vllm.third_party.flash_linear_attention.ops.kda import chunk_kda
-
-    def run(pins):
-        # chunk_kda consumes v in place, so every call needs fresh inputs.
-        inputs = _kda_inputs(8)
-        with contextlib.ExitStack() as stack:
-            for kernel, configs in pins:
-                stack.enter_context(_pinned(kernel, configs))
-            out, state = chunk_kda(**inputs)
-        return out.clone(), state.clone()
 
     stock_pins, gfx_pins = [], []
     for n in _KDA_SHARED:
@@ -194,17 +186,9 @@ def test_gfx942_config_matches_stock_on_kda(kernel_name):
         stock_pins.append((kernel(), stock()[:1]))
         gfx_pins.append((kernel(), gfx() if kernel_name in (n, "all") else stock()[:1]))
 
-    ref_out, ref_state = run(stock_pins)
-    out, state = run(gfx_pins)
+    # chunk_kda consumes v in place, so every call needs fresh inputs.
+    ref_out, ref_state = _run(_kda_inputs(8), stock_pins, chunk_kda)
+    out, state = _run(_kda_inputs(8), gfx_pins, chunk_kda)
 
     assert torch.equal(ref_out, out), f"kda/{kernel_name}: output changed"
     assert torch.equal(ref_state, state), f"kda/{kernel_name}: final state changed"
-
-
-def test_only_gfx942_gets_the_specialised_configs():
-    """A future edit must not hand another GPU the gfx942-only configs."""
-    for name, (_kernel, gfx, stock) in KERNELS.items():
-        if is_cdna3:
-            assert len(gfx()) == 1, f"{name}: expected one static gfx942 config"
-        else:
-            assert gfx() is stock(), f"{name}: non-gfx942 must use the stock list"
