@@ -234,6 +234,7 @@ __device__ __noinline__ overflow::MediumResume histogram_medium_topk(
             output_indices[output_pos] = idx;
           }
         });
+    topk_histogram_4096::trap_on_output_overflow(shared_output_count, TopK);
     __syncthreads();
     return {};
   }
@@ -300,6 +301,7 @@ __device__ __noinline__ overflow::MediumResume histogram_medium_topk(
           output_indices[output_pos] = idx;
         }
       }
+      topk_histogram_4096::trap_on_output_overflow(shared_output_count, TopK);
       __syncthreads();
       break;
     }
@@ -336,6 +338,7 @@ __device__ __noinline__ overflow::MediumResume histogram_medium_topk(
         }
       }
     }
+    topk_histogram_4096::trap_on_output_overflow(shared_output_count, TopK);
     __syncthreads();
   }
   return {};
@@ -582,6 +585,12 @@ __device__ void radix_topk(const InT* __restrict__ row_input,
     }
   }
   __syncthreads();
+  // Checked by all threads: a trap inside the tx == 0 branch slows the whole
+  // kernel on sm_100 and sm_120.
+  if (local_gt_count > 0) {
+    topk_histogram_4096::trap_on_output_overflow(
+        local_histogram[1] + local_gt_count, TopK);
+  }
 
   for (uint32_t i = tx; i < actual_chunk_size; i += kThreadsPerBlock) {
     if (shared_ordered[i] > ordered_pivot) {
@@ -1061,6 +1070,7 @@ __device__ __forceinline__ bool filtered_topk_row(
     }
   }
 
+  hist4096::trap_on_output_overflow(s_counter, top_k);
   // Output phase - mode-specific
 #pragma unroll 2
   for (int base = tx; base < static_cast<int>(top_k); base += BLOCK_SIZE) {

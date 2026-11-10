@@ -223,6 +223,7 @@ __device__ bool try_sampled_exact_topk(const DType* __restrict__ scores,
         output[equal_base + pos] = static_cast<IdType>(idx);
     }
   }
+  topk_histogram_4096::trap_on_output_overflow(*output_counter, top_k);
   __syncthreads();
   return true;
 }
