@@ -2750,6 +2750,7 @@ def _mxfp8_moe_config(
     hidden=256,
     intermediate=256,
     swiglu_beta=None,
+    routing_method=None,
 ):
     from vllm.model_executor.layers.fused_moe import FusedMoEConfig
     from vllm.model_executor.layers.fused_moe.config import (
@@ -2768,7 +2769,7 @@ def _mxfp8_moe_config(
         activation=activation,
         in_dtype=torch.bfloat16,
         device="cuda:0",
-        routing_method=RoutingMethodType.Renormalize,
+        routing_method=routing_method or RoutingMethodType.Renormalize,
         swiglu_beta=swiglu_beta,
     )
 
@@ -2800,7 +2801,9 @@ def _rocm_aiter(enabled: bool):
     return _enabled()
 
 
-def _select_mxfp8_backend(activation, use_aiter: bool, swiglu_beta=None):
+def _select_mxfp8_backend(
+    activation, use_aiter: bool, swiglu_beta=None, routing_method=None
+):
     from vllm.config import VllmConfig, set_current_vllm_config
     from vllm.config.model import ModelConfig
     from vllm.model_executor.layers.quantization.quark.quark_moe import (
@@ -2816,7 +2819,11 @@ def _select_mxfp8_backend(activation, use_aiter: bool, swiglu_beta=None):
         vllm_config.model_config = ModelConfig()
         with set_current_vllm_config(vllm_config):
             return QuarkOCP_MX_MoEMethod(
-                _mxfp8_moe_config(activation, swiglu_beta=swiglu_beta),
+                _mxfp8_moe_config(
+                    activation,
+                    swiglu_beta=swiglu_beta,
+                    routing_method=routing_method,
+                ),
                 kMxfp4Static,
                 kMxfp8Dynamic,
             )
@@ -2835,6 +2842,26 @@ def test_quark_mxfp4_mxfp8_selects_aiter_when_enabled(activation: str):
     from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import Mxfp4MoeBackend
 
     method = _select_mxfp8_backend(MoEActivation(activation), use_aiter=True)
+    assert method.mxfp4_backend is Mxfp4MoeBackend.AITER_MXFP4_MXFP8
+    assert method.experts_cls is AiterMxfp4Mxfp8ExpertsMonolithic
+
+
+@pytest.mark.skipif(not ROCM_AVAILABLE, reason="AITER MXFP8 backend targets ROCm")
+def test_quark_mxfp4_mxfp8_minimax2_routing_selects_aiter():
+    """MiniMax routes with sigmoid + correction bias; that must not fall back."""
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+    from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
+    from vllm.model_executor.layers.fused_moe.experts.aiter_mxfp4_mxfp8_moe import (
+        AiterMxfp4Mxfp8ExpertsMonolithic,
+    )
+    from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import Mxfp4MoeBackend
+
+    method = _select_mxfp8_backend(
+        MoEActivation.SWIGLUOAI_UNINTERLEAVE,
+        use_aiter=True,
+        swiglu_beta=1.0,
+        routing_method=RoutingMethodType.MiniMax2,
+    )
     assert method.mxfp4_backend is Mxfp4MoeBackend.AITER_MXFP4_MXFP8
     assert method.experts_cls is AiterMxfp4Mxfp8ExpertsMonolithic
 
@@ -2862,15 +2889,19 @@ def test_uninterleave_other_beta_stays_on_emulation():
 
 @pytest.mark.skipif(not ROCM_AVAILABLE, reason="AITER MXFP8 backend targets ROCm")
 @pytest.mark.parametrize(
-    "activation,beta",
+    "activation,beta,minimax2",
     [
-        ("swigluoai", 1.0),
-        ("swigluoai_uninterleave", 1.0),
-        ("swigluoai_uninterleave", 0.0),
+        ("swigluoai", 1.0, False),
+        ("swigluoai_uninterleave", 1.0, False),
+        ("swigluoai_uninterleave", 0.0, False),
+        # MiniMax: sigmoid scores, correction bias, routed scaling factor.
+        ("swigluoai_uninterleave", 1.0, True),
     ],
 )
 @torch.inference_mode()
-def test_aiter_mxfp4_mxfp8_matches_emulation(activation: str, beta: float):
+def test_aiter_mxfp4_mxfp8_matches_emulation(
+    activation: str, beta: float, minimax2: bool
+):
     """The fused GEMMs consume the checkpoint MXFP4 bytes, layout only."""
     from aiter.ops.triton.moe.moe_routing.routing import routing
 
@@ -2944,6 +2975,26 @@ def test_aiter_mxfp4_mxfp8_matches_emulation(activation: str, beta: float):
     torch.manual_seed(1)
     hidden_states = torch.randn(num_tokens, hidden_size, dtype=dtype, device=device)
     logits = torch.randn(num_tokens, num_experts, dtype=torch.float16, device=device)
+    if minimax2:
+        # Older AITER wheels only accept softmax/sqrtsoftplus in routing().
+        try:
+            routing(
+                torch.randn(2, num_experts, dtype=torch.float16, device=device),
+                topk,
+                score_mode="sigmoid",
+                bias=torch.zeros(num_experts, dtype=torch.float32, device=device),
+            )
+        except AssertionError:
+            pytest.skip("installed AITER routing() lacks score_mode='sigmoid'")
+        routing_method = RoutingMethodType.MiniMax2
+        score_mode = "sigmoid"
+        bias = torch.randn(num_experts, dtype=torch.float32, device=device)
+        scaling = 2.0
+    else:
+        routing_method = RoutingMethodType.Renormalize
+        score_mode = None
+        bias = None
+        scaling = None
     quant = ocp_mx_moe_quant_config(
         quant_dtype="mxfp8_e4m3",
         weight_dtype="mxfp4",
@@ -2963,9 +3014,22 @@ def test_aiter_mxfp4_mxfp8_matches_emulation(activation: str, beta: float):
         quant_config=quant,
         apply_router_weight_on_input=False,
         activation=activation_enum,
+        score_mode=score_mode,
+        e_score_correction_bias=bias,
+        routed_scaling_factor=scaling,
     )
 
-    routing_data, gather_idx, _ = routing(logits, topk, sm_first=False)
+    if minimax2:
+        routing_data, gather_idx, _ = routing(
+            logits,
+            topk,
+            score_mode=score_mode,
+            bias=bias,
+            renorm=True,
+            routed_scaling_factor=scaling,
+        )
+    else:
+        routing_data, gather_idx, _ = routing(logits, topk, sm_first=False)
     ids = torch.full((num_tokens, topk), -1, dtype=torch.int32, device=device)
     weights = torch.zeros(num_tokens, topk, dtype=dtype, device=device)
     slot = torch.zeros(num_tokens, dtype=torch.int64, device=device)
@@ -3001,7 +3065,7 @@ def test_aiter_mxfp4_mxfp8_matches_emulation(activation: str, beta: float):
         activation=activation_enum,
         in_dtype=dtype,
         device=device,
-        routing_method=RoutingMethodType.Renormalize,
+        routing_method=routing_method,
         swiglu_limit=limit,
         swiglu_alpha=alpha,
         swiglu_beta=beta,
@@ -3042,6 +3106,8 @@ def test_aiter_mxfp4_mxfp8_matches_emulation(activation: str, beta: float):
             global_num_experts=num_experts,
             expert_map=None,
             apply_router_weight_on_input=False,
+            e_score_correction_bias=bias,
+            routed_scaling_factor=scaling,
             routing_sink=None,
         )
     mono_rel = (mono_out.float() - aiter_out.float()).norm() / aiter_out.float().norm()

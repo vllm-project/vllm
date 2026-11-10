@@ -108,15 +108,36 @@ def aiter_mxfp4_mxfp8_moe_forward(
     quant_config: FusedMoEQuantConfig,
     apply_router_weight_on_input: bool,
     activation: MoEActivation,
+    score_mode: str | None = None,
+    e_score_correction_bias: torch.Tensor | None = None,
+    routed_scaling_factor: float | None = None,
 ) -> torch.Tensor:
     """Two ``moe_gemm_a8w4`` calls: SwiGLU writes MXFP8, the second GEMM consumes it."""
     from aiter.ops.triton.moe.moe_op_gemm_a8w4 import moe_gemm_a8w4
     from aiter.ops.triton.moe.moe_routing.routing import routing
     from aiter.ops.triton.quant import dynamic_mxfp8_quant
 
-    routing_data, gather_idx, scatter_idx = routing(
-        gating_output, topk, sm_first=not renormalize
-    )
+    if score_mode is None:
+        routing_data, gather_idx, scatter_idx = routing(
+            gating_output, topk, sm_first=not renormalize
+        )
+    else:
+        # Sigmoid scores plus a per-expert correction bias (MiniMax2). The
+        # bias only picks the experts; the returned weights stay unbiased.
+        routing_data, gather_idx, scatter_idx = routing(
+            gating_output,
+            topk,
+            score_mode=score_mode,
+            bias=(
+                e_score_correction_bias.float()
+                if e_score_correction_bias is not None
+                else None
+            ),
+            renorm=renormalize,
+            routed_scaling_factor=(
+                1.0 if routed_scaling_factor is None else routed_scaling_factor
+            ),
+        )
     gammas = routing_data.gate_scal
     alpha, limit, add_residual = _swiglu_args(quant_config, activation)
     w1_scale = quant_config.w1_scale
@@ -179,6 +200,7 @@ class AiterMxfp4Mxfp8ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
         self.renormalize = moe_config.routing_method in (
             RoutingMethodType.Renormalize,
             RoutingMethodType.RenormalizeNaive,
+            RoutingMethodType.MiniMax2,
         )
 
     @staticmethod
@@ -228,6 +250,7 @@ class AiterMxfp4Mxfp8ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
         return routing_method in (
             RoutingMethodType.Renormalize,
             RoutingMethodType.RenormalizeNaive,
+            RoutingMethodType.MiniMax2,
         )
 
     @staticmethod
@@ -288,8 +311,6 @@ class AiterMxfp4Mxfp8ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
             global_num_experts,
             a1q_scale,
             num_expert_group,
-            e_score_correction_bias,
-            routed_scaling_factor,
             topk_group,
             routing_replay_out,
             input_ids,
@@ -299,6 +320,12 @@ class AiterMxfp4Mxfp8ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
             raise NotImplementedError(
                 "Expert parallelism is not supported for AITER MXFP4 MXFP8 MoE."
             )
+        score_mode = None
+        if self.moe_config.routing_method == RoutingMethodType.MiniMax2:
+            assert e_score_correction_bias is not None, (
+                "MiniMax2 routing requires e_score_correction_bias"
+            )
+            score_mode = "sigmoid"
         return aiter_mxfp4_mxfp8_moe_forward(
             hidden_states=hidden_states,
             w1=w1,
@@ -309,4 +336,7 @@ class AiterMxfp4Mxfp8ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
             quant_config=self.quant_config,
             apply_router_weight_on_input=apply_router_weight_on_input,
             activation=activation,
+            score_mode=score_mode,
+            e_score_correction_bias=e_score_correction_bias,
+            routed_scaling_factor=routed_scaling_factor,
         )
