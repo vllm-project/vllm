@@ -30,7 +30,7 @@ KERNELS = {
     ),
     "chunk_delta_h": (
         lambda: chunk_delta_h.chunk_gated_delta_rule_fwd_kernel_h_blockdim64,
-        lambda: chunk_delta_h._FWD_H_CONFIGS,
+        lambda: list(chunk_delta_h._FWD_H_CDNA3),
         lambda: chunk_delta_h._FWD_H_STOCK,
     ),
     "chunk_scaled_dot_kkt": (
@@ -67,6 +67,16 @@ def _autotuner(kernel):
 
 @contextlib.contextmanager
 def _pinned(kernel, configs):
+    if kernel is chunk_delta_h.chunk_gated_delta_rule_fwd_kernel_h_blockdim64:
+        # Picked at launch on gfx942: pin one config, or keep the real choice.
+        pick = chunk_delta_h._fwd_h_cdna3_config
+        if len(configs) == 1:
+            chunk_delta_h._fwd_h_cdna3_config = lambda *_: configs[0]
+        try:
+            yield
+        finally:
+            chunk_delta_h._fwd_h_cdna3_config = pick
+        return
     tuner = _autotuner(kernel)
     saved_configs, saved_cache = tuner.configs, dict(tuner.cache)
     tuner.configs = list(configs)
@@ -174,9 +184,10 @@ def _kda_inputs(h, device="cuda"):
 
 
 @pytest.mark.skipif(not is_cdna3, reason="gfx942-specific configs")
+@pytest.mark.parametrize("h", [8, 32])
 @pytest.mark.parametrize("kernel_name", [*_KDA_SHARED, "all"])
 @torch.inference_mode()
-def test_gfx942_config_matches_stock_on_kda(kernel_name):
+def test_gfx942_config_matches_stock_on_kda(kernel_name, h):
     """The two configs shared with KDA reproduce stock output on its path too."""
     from vllm.third_party.flash_linear_attention.ops.kda import chunk_kda
 
@@ -187,8 +198,8 @@ def test_gfx942_config_matches_stock_on_kda(kernel_name):
         gfx_pins.append((kernel(), gfx() if kernel_name in (n, "all") else stock()[:1]))
 
     # chunk_kda consumes v in place, so every call needs fresh inputs.
-    ref_out, ref_state = _run(_kda_inputs(8), stock_pins, chunk_kda)
-    out, state = _run(_kda_inputs(8), gfx_pins, chunk_kda)
+    ref_out, ref_state = _run(_kda_inputs(h), stock_pins, chunk_kda)
+    out, state = _run(_kda_inputs(h), gfx_pins, chunk_kda)
 
-    assert torch.equal(ref_out, out), f"kda/{kernel_name}: output changed"
-    assert torch.equal(ref_state, state), f"kda/{kernel_name}: final state changed"
+    assert torch.equal(ref_out, out), f"kda/{kernel_name}/h{h}: output changed"
+    assert torch.equal(ref_state, state), f"kda/{kernel_name}/h{h}: final state changed"

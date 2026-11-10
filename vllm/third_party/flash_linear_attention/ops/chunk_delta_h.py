@@ -11,6 +11,7 @@
 import torch
 
 from vllm.triton_utils import tl, triton
+from vllm.utils.platform_utils import num_compute_units
 
 from .index import prepare_chunk_indices, prepare_chunk_offsets
 from .op import exp, exp2
@@ -27,18 +28,31 @@ _FWD_H_STOCK = [
     for BV in [32, 64]
 ]
 
-if is_cdna3:
-    _FWD_H_CONFIGS = [
-        triton.Config(
-            {"BV": 32, "matrix_instr_nonkdim": 16, "waves_per_eu": 2},
-            num_warps=8,
-            num_stages=2,
-        )
-    ]
-    _FWD_H_KEY: list[str] = []
-else:
-    _FWD_H_CONFIGS = _FWD_H_STOCK
-    _FWD_H_KEY = ["H", "K", "V", "BT"]
+# gfx942: the first config while its grid fits on the CUs, then the stock BV=64 one.
+_FWD_H_CDNA3 = (
+    triton.Config(
+        {"BV": 32, "matrix_instr_nonkdim": 16, "waves_per_eu": 2},
+        num_warps=8,
+        num_stages=2,
+    ),
+    triton.Config({"BV": 64}, num_warps=4, num_stages=2),
+)
+
+
+def _fwd_h_cdna3_config(V: int, num_seq_heads: int, device: int) -> triton.Config:
+    small, large = _FWD_H_CDNA3
+    programs = triton.cdiv(V, small.kwargs["BV"]) * num_seq_heads
+    return small if programs <= num_compute_units(device) else large
+
+
+def _autotune_unless_cdna3(fn):
+    if is_cdna3:
+        return fn
+    return triton.autotune(
+        configs=_FWD_H_STOCK,
+        key=["H", "K", "V", "BT"],
+        use_cuda_graph=use_cuda_graph,
+    )(fn)
 
 
 @triton.heuristics(
@@ -51,11 +65,7 @@ else:
         "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
     }
 )
-@triton.autotune(
-    configs=_FWD_H_CONFIGS,
-    key=_FWD_H_KEY,
-    use_cuda_graph=use_cuda_graph,
-)
+@_autotune_unless_cdna3
 @triton.jit(do_not_specialize=["T"])
 def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
     k,
@@ -335,6 +345,9 @@ def chunk_gated_delta_rule_fwd_h(
     def grid(meta):
         return (triton.cdiv(V, meta["BV"]), N * H)
 
+    launch = {}
+    if is_cdna3:
+        launch = _fwd_h_cdna3_config(V, N * H, k.device.index).all_kwargs()
     chunk_gated_delta_rule_fwd_kernel_h_blockdim64[grid](
         k=k,
         v=u,
@@ -354,5 +367,6 @@ def chunk_gated_delta_rule_fwd_h(
         V=V,
         BT=BT,
         USE_EXP2=use_exp2,
+        **launch,
     )
     return h, v_new, final_state
