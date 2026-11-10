@@ -72,6 +72,22 @@ We describe two example workloads, where APC can provide huge performance benefi
 - Long document query, where the user repeatedly queries the same long document (e.g. software manual or annual report) with different queries. In this case, instead of processing the long document again and again, APC allows vLLM to process this long document *only once*, and all future requests can avoid recomputing this long document by reusing its KV cache. This allows vLLM to serve future requests with much higher throughput and much lower latency.
 - Multi-round conversation, where the user may chat with the application multiple times in the same chatting session. In this case, instead of processing the whole chatting history again and again, APC allows vLLM to reuse the processing results of the chat history across all future rounds of conversation, allowing vLLM to serve future requests with much higher throughput and much lower latency.
 
+## Keeping the prefix cacheable
+
+APC reuses the KV cache only for the longest run of full blocks at the start of the prompt whose hashes are still cached. Each block's hash covers every token before it ([details](../design/prefix_caching.md)), so a request that differs at one token recomputes that block and every block after it, even if the later text is identical.
+
+In multi-turn and agent applications, these changes break the prefix:
+
+- Removing or summarizing an early message to fit the context window (context compaction).
+- Changing content near the start of the prompt between turns, such as a timestamp or per-request ID in the system prompt (see [Claude Code](../serving/integrations/claude_code.md)), or the tool list.
+- Reordering messages or tools.
+
+To keep the hit rate high, append new content at the end and keep earlier messages token-identical across turns. When the context must shrink, send the summarization request as the unchanged conversation with the summarization instruction appended, so it reuses the cache. Compact rarely and in large steps, not by dropping one old message every turn: the first request after compaction recomputes everything after the first changed token, and later turns hit the cache again.
+
+For example, with Llama-3.1-8B-Instruct on one A100 GPU, a 14.7K-token follow-up that dropped the oldest turn of a synthetic 16-turn conversation reused only the 1.3K-token system prompt (9.0% of prompt tokens, 1.27 s median time to first token). The same follow-up with the conversation kept intact (15.6K tokens) reused 99.2% (0.11 s).
+
+To measure the hit rate, divide the increase in `vllm:prefix_cache_hits` by the increase in `vllm:prefix_cache_queries` (both count tokens). For per-request counts, start the server with `--enable-prompt-tokens-details` to get `usage.prompt_tokens_details.cached_tokens` from `/v1/chat/completions` and `/v1/completions` (streaming needs `stream_options: {"include_usage": true}`); `/v1/responses` always reports `usage.input_tokens_details.cached_tokens`.
+
 ## Limits
 
 APC in general does not reduce the performance of vLLM. With that being said, APC only reduces the time of processing the queries (the prefilling phase) and does not reduce the time of generating new tokens (the decoding phase). So APC does not bring performance gain when vLLM spends most of the time generating answers to the queries (e.g. when the length of the answer is long), or new queries do not share the same prefix with any of existing queries (so that the computation cannot be reused).
