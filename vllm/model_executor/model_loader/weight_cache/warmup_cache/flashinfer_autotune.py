@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Daemon warmup caches, seeded daemon-to-daemon over the shared transport."""
+"""FlashInfer autotune warmup cache."""
 
 import gc
 import json
 from collections.abc import Iterable
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any
 
 import regex as re
 import torch
@@ -18,11 +18,11 @@ from vllm.model_executor.model_loader.weight_cache.artifact_store import (
     DiskArtifactStore,
     artifact_key,
 )
-from vllm.model_executor.model_loader.weight_cache.seed import Seedable
 from vllm.model_executor.model_loader.weight_cache.utils import (
     build_warmup_runner,
     is_draft_model_cacheable,
 )
+from vllm.model_executor.model_loader.weight_cache.warmup_cache.base import WarmupCache
 from vllm.model_executor.warmup.flashinfer_autotune_cache import (
     flashinfer_autotune_cache_hash,
     flashinfer_autotune_filename,
@@ -42,16 +42,7 @@ if TYPE_CHECKING:
     from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
 logger = init_logger(__name__)
-
 _CONFIG_HASH_RE = re.compile(r"[0-9a-f]{64}")
-
-
-class WarmupCache(Seedable, Protocol):
-    """One daemon warmup cache: its warmup pass and its cache's semantics."""
-
-    def warmup(self, daemon: "WeightCacheDaemon", transport: "SeedTransport") -> None:
-        """Run this rank's warmup pass against the cached model."""
-        ...
 
 
 class FlashInferWarmupCache(WarmupCache):
