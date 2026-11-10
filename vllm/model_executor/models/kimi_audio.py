@@ -9,7 +9,7 @@ from typing import Any, ClassVar, Literal
 import numpy as np
 import torch
 import torch.nn as nn
-from transformers import BatchFeature
+from transformers import BatchFeature, Qwen2Config
 from transformers import WhisperConfig as HFWhisperConfig
 
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
@@ -425,7 +425,9 @@ class KimiAudioForConditionalGeneration(
         with self._mark_language_model(vllm_config):
             self.language_model = init_vllm_registered_model(
                 vllm_config=vllm_config.with_hf_config(
-                    self.config, architectures=["Qwen2ForCausalLM"]
+                    # The remote config isn't a Transformers `Qwen2Config`
+                    Qwen2Config.from_dict(self.config.to_dict()),
+                    architectures=["Qwen2ForCausalLM"],
                 ),
                 prefix=maybe_prefix(prefix, "language_model"),
             )

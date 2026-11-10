@@ -37,8 +37,8 @@ from vllm.config import VllmConfig
 from vllm.distributed import get_pp_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.qwen2 import Qwen2ForCausalLM, Qwen2Model
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
-from vllm.model_executor.models.qwen2 import Qwen2ForCausalLM, Qwen2Model
 from vllm.sequence import IntermediateTensors
 
 from .utils import AutoWeightsLoader, PPMissingLayer, WeightsMapper, maybe_prefix

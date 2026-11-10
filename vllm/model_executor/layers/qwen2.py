@@ -54,11 +54,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.config import set_default_rope_theta
-from vllm.v1.attention.backend import AttentionType
-
-from .interfaces import (
+from vllm.model_executor.models.interfaces import (
     EagleModelMixin,
     SupportsEagle,
     SupportsEagle3,
@@ -66,7 +62,7 @@ from .interfaces import (
     SupportsPP,
     SupportsQuant,
 )
-from .utils import (
+from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     PPMissingLayer,
     WeightsMapper,
@@ -76,6 +72,9 @@ from .utils import (
     maybe_prefix,
     spec_decode_needs_target_embed,
 )
+from vllm.sequence import IntermediateTensors
+from vllm.transformers_utils.config import set_default_rope_theta
+from vllm.v1.attention.backend import AttentionType
 
 
 class Qwen2MLP(nn.Module):

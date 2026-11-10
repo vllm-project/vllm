@@ -810,6 +810,9 @@ class Base(
         if positions.ndim == 1:
             # [seq_len] -> [1, seq_len]
             positions = positions[None, ...]
+        elif self.model_config.uses_mrope:
+            # [3, seq_len] -> [3, 1, seq_len]
+            positions = positions[:, None].contiguous()
 
         # Transformers models expect either input_ids or inputs_embeds, but not both
         if input_ids is not None and inputs_embeds is not None:

@@ -34,7 +34,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.models.qwen2 import Qwen2DecoderLayer
+from vllm.model_executor.layers.qwen2 import Qwen2DecoderLayer
 from vllm.sequence import IntermediateTensors
 
 from .utils import AutoWeightsLoader, WeightsMapper, maybe_prefix

@@ -42,6 +42,8 @@ from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import QKVParallelLinear, RowParallelLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.qwen2 import Qwen2MLP as Qwen3MLP
+from vllm.model_executor.layers.qwen2 import Qwen2Model
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.sequence import IntermediateTensors
@@ -55,8 +57,6 @@ from .interfaces import (
     SupportsLoRA,
     SupportsPP,
 )
-from .qwen2 import Qwen2MLP as Qwen3MLP
-from .qwen2 import Qwen2Model
 from .utils import AutoWeightsLoader, PPMissingLayer, extract_layer_index, maybe_prefix
 
 logger = init_logger(__name__)

@@ -1062,10 +1062,6 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE, Base):
         inputs_embeds: torch.Tensor | None = None,
         **kwargs: object,
     ) -> torch.Tensor | IntermediateTensors:
-        # Positions shape handling for MRoPE models
-        if self.model_config.uses_mrope:
-            # [3, seq_len] -> [3, 1, seq_len]
-            positions = positions[:, None].contiguous()
         model_output = super().forward(
             input_ids, positions, intermediate_tensors, inputs_embeds
         )

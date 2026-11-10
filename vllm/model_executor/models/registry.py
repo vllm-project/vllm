@@ -195,7 +195,6 @@ _TEXT_GENERATION_MODELS = {
     "Param2MoEForCausalLM": ("param2moe", "Param2MoEForCausalLM"),
     "PhiMoEForCausalLM": ("phimoe", "PhiMoEForCausalLM"),
     "Plamo3ForCausalLM": ("plamo3", "Plamo3ForCausalLM"),
-    "Qwen2ForCausalLM": ("qwen2", "Qwen2ForCausalLM"),
     "Qwen2MoeForCausalLM": ("qwen2_moe", "Qwen2MoeForCausalLM"),
     "Qwen3ForCausalLM": ("qwen3", "Qwen3ForCausalLM"),
     "Qwen3MoeForCausalLM": ("qwen3_moe", "Qwen3MoeForCausalLM"),
@@ -242,8 +241,6 @@ _EMBEDDING_MODELS = {
     "MistralModel": ("llama", "LlamaForCausalLM"),
     "ModernBertModel": ("modernbert", "ModernBertModel"),
     "NomicBertModel": ("bert_with_rope", "NomicBertModel"),
-    "Qwen2Model": ("qwen2", "Qwen2ForCausalLM"),
-    "Qwen2ForCausalLM": ("qwen2", "Qwen2ForCausalLM"),
     "RobertaForMaskedLM": ("roberta", "RobertaEmbeddingModel"),
     "RobertaModel": ("roberta", "RobertaEmbeddingModel"),
     "TeleChat2ForCausalLM": ("telechat2", "TeleChat2ForCausalLM"),
@@ -790,11 +787,14 @@ _TRANSFORMERS_SUPPORTED_MODELS = {
     "OlmoeForCausalLM": ("transformers", "TransformersMoEForCausalLM"),
     "PhiForCausalLM": ("transformers", "TransformersForCausalLM"),
     "Phi3ForCausalLM": ("transformers", "TransformersForCausalLM"),
+    "Qwen2ForCausalLM": ("transformers", "TransformersForCausalLM"),
     "SeedOssForCausalLM": ("transformers", "TransformersForCausalLM"),
     "SmolLM3ForCausalLM": ("transformers", "TransformersForCausalLM"),
     "StableLmForCausalLM": ("transformers", "TransformersForCausalLM"),
     "Starcoder2ForCausalLM": ("transformers", "TransformersForCausalLM"),
     "VaultGemmaForCausalLM": ("transformers", "TransformersForCausalLM"),
+    # Embedding models
+    "Qwen2Model": ("transformers", "TransformersEmbeddingModel"),
     # Multimodal models
     "AriaForConditionalGeneration": (
         "transformers",

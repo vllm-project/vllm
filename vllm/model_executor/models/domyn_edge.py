@@ -23,7 +23,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.sequence import IntermediateTensors
 from vllm.v1.attention.backend import AttentionType
 
-from .qwen2 import Qwen2MLP, Qwen2Model
+from vllm.model_executor.layers.qwen2 import Qwen2MLP, Qwen2Model
 from .utils import AutoWeightsLoader, PPMissingLayer, extract_layer_index, maybe_prefix
 
 

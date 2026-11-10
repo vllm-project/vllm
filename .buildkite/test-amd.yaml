@@ -243,7 +243,7 @@ steps:
   - tests/models/language/generation_ppl_test
   - vllm/model_executor/models/qwen3_5.py
   - vllm/model_executor/models/qwen3_5_mtp.py
-  - vllm/model_executor/models/qwen2.py
+  - vllm/model_executor/layers/qwen2.py
   - vllm/model_executor/models/qwen3.py
   - vllm/model_executor/models/qwen3_next.py
   - vllm/model_executor/models/qwen3_next_mtp.py
@@ -3601,7 +3601,7 @@ steps:
   - vllm/models/qwen3_5/
   - vllm/model_executor/models/qwen3_5.py
   - vllm/model_executor/models/qwen3_5_mtp.py
-  - vllm/model_executor/models/qwen2.py
+  - vllm/model_executor/layers/qwen2.py
   - vllm/model_executor/models/qwen3.py
   - vllm/model_executor/models/qwen3_next.py
   - vllm/model_executor/models/qwen3_next_mtp.py
@@ -5131,7 +5131,7 @@ steps:
   - vllm/models/qwen3_5/
   - vllm/model_executor/models/qwen3_5.py
   - vllm/model_executor/models/qwen3_5_mtp.py
-  - vllm/model_executor/models/qwen2.py
+  - vllm/model_executor/layers/qwen2.py
   - vllm/model_executor/models/qwen3.py
   - vllm/model_executor/models/qwen3_next.py
   - vllm/model_executor/models/qwen3_next_mtp.py
@@ -6116,7 +6116,7 @@ steps:
   - vllm/v1/sample/
   - vllm/model_executor/model_loader/
   - vllm/model_executor/layers/
-  - vllm/model_executor/models/qwen2.py
+  - vllm/model_executor/layers/qwen2.py
   - vllm/model_executor/models/qwen3.py
   - vllm/model_executor/models/laguna.py
   - vllm/platforms/rocm.py
@@ -6140,7 +6140,7 @@ steps:
   - vllm/v1/sample/
   - vllm/model_executor/model_loader/
   - vllm/model_executor/layers/
-  - vllm/model_executor/models/qwen2.py
+  - vllm/model_executor/layers/qwen2.py
   - vllm/model_executor/models/qwen3.py
   - vllm/model_executor/models/qwen3_dflash.py
   - vllm/model_executor/models/gemma4.py

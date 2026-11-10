@@ -1476,6 +1476,7 @@ class Qwen2VLForConditionalGeneration(
             self.language_model = init_vllm_registered_model(
                 vllm_config=vllm_config,
                 prefix=maybe_prefix(prefix, "language_model"),
+                hf_config=config.text_config,
                 architectures=["Qwen2ForCausalLM"],
             )
 

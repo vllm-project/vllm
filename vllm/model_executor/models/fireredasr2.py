@@ -52,7 +52,7 @@ from .interfaces import (
     SupportsTranscription,
     _require_is_multimodal,
 )
-from .qwen2 import Qwen2ForCausalLM
+from vllm.model_executor.layers.qwen2 import Qwen2ForCausalLM
 from .utils import (
     AutoWeightsLoader,
     WeightsMapper,

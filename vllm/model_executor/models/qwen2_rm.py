@@ -16,11 +16,11 @@ from vllm.config import VllmConfig
 from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
 from vllm.model_executor.layers.pooler import Pooler
 from vllm.model_executor.layers.pooler.tokwise import pooler_for_token_classify
+from vllm.model_executor.layers.qwen2 import Qwen2Model
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsLoRA, SupportsPP
 from .interfaces_base import default_pooling_type
-from .qwen2 import Qwen2Model
 from .utils import AutoWeightsLoader, maybe_prefix
 
 

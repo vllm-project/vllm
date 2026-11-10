@@ -7,6 +7,7 @@ from typing import Annotated, Literal, TypeAlias
 import torch
 import torch.nn as nn
 from torch.nn import LayerNorm
+from transformers import Qwen2Config
 from transformers.models.qwen2_vl import Qwen2VLProcessor
 
 from vllm.config import VllmConfig
@@ -40,7 +41,6 @@ from vllm.model_executor.models.interfaces import (
     SupportsPP,
 )
 from vllm.model_executor.models.module_mapping import MultiModelKeys
-from vllm.model_executor.models.qwen2 import Qwen2ForCausalLM
 from vllm.model_executor.models.qwen2_vl import (
     Qwen2VLDummyInputsBuilder,
     Qwen2VLMultiModalProcessor,
@@ -652,9 +652,10 @@ class DotsOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA
             )
 
         with self._mark_language_model(vllm_config):
-            self.language_model: Qwen2ForCausalLM = init_vllm_registered_model(
+            self.language_model = init_vllm_registered_model(
                 vllm_config=vllm_config,
-                hf_config=self.config,
+                # `DotsOCRConfig` isn't a Transformers `Qwen2Config`
+                hf_config=Qwen2Config.from_dict(self.config.to_dict()),
                 prefix=maybe_prefix(prefix, "language_model"),
                 architectures=["Qwen2ForCausalLM"],
             )
