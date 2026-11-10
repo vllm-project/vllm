@@ -194,6 +194,9 @@ class StreamingParserEngine:
         # block back to content; starts with the opener spelling.
         self._preamble_buffer: str = ""
         self._preamble_token_count: int = 0
+        # Fallback applies only while no tool call has started: after a call
+        # the model's turn has ended and later output stays dropped.
+        self._preamble_fallback_armed: bool = True
 
     def _reset_json_collection_state(self) -> None:
         # State shared by JSON-array and semicolon-separated tool bodies.
@@ -225,6 +228,7 @@ class StreamingParserEngine:
         self._message_header_token_count = 0
         self._preamble_buffer = ""
         self._preamble_token_count = 0
+        self._preamble_fallback_armed = True
         self._in_skipped_tool_span = False
         self._reset_args_state()
         self._reset_json_collection_state()
@@ -526,6 +530,7 @@ class StreamingParserEngine:
         if (
             self.state == ParserState.TOOL_PREAMBLE
             and self.config.preamble_fallback_to_content
+            and self._preamble_fallback_armed
             and text
         ):
             # Hold preamble text so an invoke-less block can fall back to
@@ -575,6 +580,18 @@ class StreamingParserEngine:
         message_header_token_count = 0
 
         if (
+            previous_state == ParserState.TOOL_PREAMBLE
+            and transition.next_state == ParserState.CONTENT
+            and self.config.preamble_fallback_to_content
+            and not self._preamble_fallback_armed
+        ):
+            # A tool call already started in this stream: the turn ended at
+            # it and the config's contract drops everything after. An
+            # invoke-less block here is post-call output, so keep the drop
+            # instead of exiting to CONTENT on the block's closer.
+            return []
+
+        if (
             self.state == ParserState.TOOL_ARGS
             and transition.next_state != ParserState.TOOL_ARGS
             and self._args_buffer
@@ -621,8 +638,12 @@ class StreamingParserEngine:
         ):
             # Start the fallback buffer with the opener spelling so an
             # invoke-less block falls back to the model output verbatim.
-            self._preamble_buffer = value
-            self._preamble_token_count = token_count
+            # Armed only before any call starts: the fallback is for prose
+            # turns that never became calls, not for post-call output.
+            self._preamble_fallback_armed = self.tool_index < 0
+            if self._preamble_fallback_armed:
+                self._preamble_buffer = value
+                self._preamble_token_count = token_count
 
         for event_type in transition.events:
             if event_type == EventType.TOOL_CALL_START:
