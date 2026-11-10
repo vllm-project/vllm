@@ -224,6 +224,9 @@ _REANCHOR_WINDOW = {
     "audio_config": {"sliding_window": 128},
 }
 _REANCHOR_TEST_MML = 300
+# Small blocks keep the minimum max_model_len (window + margin + one block) under
+# the length of the clip.
+_REANCHOR_BLOCK_SIZE = 16
 
 
 async def _stream_transcribe(engine_args, tokenizer, audio_asset) -> list[int]:
@@ -278,6 +281,7 @@ async def test_voxtral_realtime_reanchor_parity(monkeypatch, audio_assets, token
         **{
             **ENGINE_CONFIG,
             "max_model_len": 2048,
+            "block_size": _REANCHOR_BLOCK_SIZE,
             "enable_prefix_caching": False,
             "hf_overrides": _REANCHOR_WINDOW,
         }
@@ -288,6 +292,7 @@ async def test_voxtral_realtime_reanchor_parity(monkeypatch, audio_assets, token
         **{
             **ENGINE_CONFIG,
             "max_model_len": _REANCHOR_TEST_MML,
+            "block_size": _REANCHOR_BLOCK_SIZE,
             "enable_unbounded_streaming_input": True,
             "unbounded_streaming_input_margin_tokens": 24,
             "enable_prefix_caching": False,
