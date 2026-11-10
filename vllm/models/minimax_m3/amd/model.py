@@ -53,6 +53,7 @@ from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
     GateLinear,
     RoutedExperts,
+    RoutedScaleMode,
     fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.fused_moe.utils import (
@@ -534,7 +535,9 @@ class MiniMaxM3MoE(nn.Module):
             swiglu_alpha=config.swiglu_alpha,
             swiglu_beta=1.0,
             routed_scaling_factor=self.routed_scaling_factor,
-            apply_routed_scale_to_output=not self.use_aiter_moe_fse,
+            routed_scale_mode=RoutedScaleMode.ROUTER
+            if self.use_aiter_moe_fse
+            else RoutedScaleMode.OUTPUT,
             router_logits_dtype=self.gate.out_dtype,
             shared_experts=self.shared_experts,
             n_shared_experts=(
