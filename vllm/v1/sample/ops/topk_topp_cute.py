@@ -2,9 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Top-k/top-p masking with the CuTe DSL filter kernel (topk_topp_cute_kernel).
 
-A JIT port of the core path of the CUDA filter kernel, with the same contract
-as apply_top_k_top_p_cuda: FP32 logits, per-row device k and p, exactly k
-tokens with ties broken by the lowest index, SM90 and SM100.
+A JIT kernel over hierarchical maxima with the contract of
+apply_top_k_top_p_cuda: FP32 logits, per-row device k and p, exactly k tokens
+with ties broken by the lowest index, SM90 and SM100.
 """
 
 import functools
@@ -64,81 +64,73 @@ def apply_top_k_top_p_cute(
         flags |= 4
     k = state.unused_k if k is None else k.to(torch.int32).contiguous()
     p = state.unused_p if p is None else p.to(torch.float32).contiguous()
-    cluster, grid, splits, depth = state.plan.launch(batch, vocab)
-    state.kernels[cluster](logits, k, p, state.workspace, flags, grid, splits, depth)
+    splits = state.plan.choose_splits(batch, vocab)
+    state.kernels[splits > 1](logits, k, p, flags, splits, _smem(vocab, splits))
     return logits
 
 
 def reserve_topk_topp_cute_workspace(device: torch.device) -> None:
-    """Compile the kernels and allocate the workspace before CUDA graph
-    capture, during memory profiling."""
+    """Compile the kernels before CUDA graph capture."""
     _state(device)
 
 
 # Kernel constants, without importing the CuTe DSL (checked in _DeviceState).
-STAGE, SHALLOW = 4096, 3
+ROUND, MAX_SPLITS = 8192, 16
 
 
 @dataclass(frozen=True)
 class _Plan:
     sms: int
-    clusters: dict[int, int]  # co-resident clusters per cluster size
-    max_splits: int
-    deep: int  # ring stages of one CTA per SM
-
-    def launch(self, batch: int, vocab: int) -> tuple[bool, int, int, int]:
-        """(cluster, grid, splits, ring stages). Both kernels are persistent
-        over rows, and each CTA owns workspace slot blockIdx.x, so the grid
-        stays within the 2 * SMs slots."""
-        splits = self.choose_splits(batch, vocab)
-        deep = batch * splits <= self.sms
-        ctas = self.sms if deep else 2 * self.sms
-        grid = min(batch, ctas // splits) * splits
-        return splits > 1, grid, splits, self.deep if deep else SHALLOW
+    clusters: dict[int, int]  # co-resident clusters per size, one CTA per SM
+    smem_per_sm: int
+    max_smem: int
 
     def choose_splits(self, batch: int, vocab: int) -> int:
-        """Splits per row: clusters stay co-resident and keep a stage per CTA."""
-
-        def fits(splits: int) -> bool:
-            return splits <= self.max_splits and vocab // splits >= STAGE
-
-        # Deep rings while the CTAs fill at most half the SMs.
+        """CTAs per row: clusters while all CTAs stay resident at two per SM,
+        all clusters fit at once (else a second wave doubles the time), and
+        each CTA streams a round at least."""
         splits = 1
         while (
-            fits(splits * 2)
-            and batch <= self.clusters[splits * 2]
-            and batch * splits * 2 <= self.sms // 2
+            splits < MAX_SPLITS
+            and batch * splits * 2 <= 2 * self.sms
+            and vocab // (splits * 2) >= ROUND
+            and batch <= self.active(vocab, splits * 2)
         ):
             splits *= 2
-        # Up to one row per SM, small clusters with shallow rings still cut
-        # the per-row latency of long rows.
-        if splits == 1 and vocab >= 16 * STAGE and fits(2) and batch <= self.sms:
-            splits = 4 if fits(4) and batch * 4 * 8 <= 2 * self.sms * 7 else 2
+        while _smem(vocab, splits) > self.max_smem and splits < MAX_SPLITS:
+            splits *= 2
         return splits
+
+    def active(self, vocab: int, splits: int) -> int:
+        per_sm = 2 if 2 * (_smem(vocab, splits) + 1024) <= self.smem_per_sm else 1
+        return self.clusters.get(splits, 0) * per_sm
+
+
+@functools.cache
+def _smem(vocab: int, splits: int) -> int:
+    import vllm.v1.sample.ops.topk_topp_cute_kernel as kn
+
+    return kn.layout(vocab, splits, splits > 1)[-1]
 
 
 class _DeviceState:
     def __init__(self, device: torch.device):
         import vllm.v1.sample.ops.topk_topp_cute_kernel as kn
 
-        assert (STAGE, SHALLOW) == (kn.STAGE, kn.SHALLOW)
+        assert (ROUND, MAX_SPLITS) == (kn.ROUND, kn.MAX_SPLITS)
         self.unused_k = torch.zeros(1, dtype=torch.int32, device=device)
         self.unused_p = torch.ones(1, dtype=torch.float32, device=device)
         props = torch.cuda.get_device_properties(device)
-        sms = props.multi_processor_count
-        smem = props.shared_memory_per_block_optin - kn.RING_OFFSET
-        deep = min(kn.MAX_STAGES, smem // (kn.STAGE * 4))
-        self.plan = _plan(_index(device), sms, deep)
-        self.kernels = {cluster: _compile(cluster) for cluster in (False, True)}
-        # At most two CTAs per SM run at once, each with its own overflow store.
-        self.workspace = torch.empty(
-            2 * sms * 2 * kn.GCAP, dtype=torch.uint32, device=device
+        self.plan = _plan(
+            _index(device),
+            props.multi_processor_count,
+            props.shared_memory_per_multiprocessor,
+            props.shared_memory_per_block_optin,
         )
+        self.kernels = {cluster: _compile(cluster) for cluster in (False, True)}
 
 
-def _plan(device_index: int, sms: int, deep: int) -> _Plan:
-    """Co-resident clusters of each size, for CTAs with deep rings (one per
-    SM)."""
+def _plan(device_index: int, sms: int, smem_per_sm: int, max_smem: int) -> _Plan:
     from cutlass.utils import HardwareInfo
 
     hw = HardwareInfo(device_index)
@@ -148,30 +140,26 @@ def _plan(device_index: int, sms: int, deep: int) -> _Plan:
         if active <= 0:
             break
         clusters[splits] = active
-    return _Plan(sms, clusters, max(clusters), deep)
+    return _Plan(sms, clusters, smem_per_sm, max_smem)
 
 
 def _compile(cluster: bool):
     import cutlass.cute as cute
-    from cutlass import Float32, Int32, Uint32
+    from cutlass import Float32, Int32
     from quack.compile_utils import make_fake_tensor
 
     import vllm.v1.sample.ops.topk_topp_cute_kernel as kn
 
-    batch = cute.sym_int()
-    x = make_fake_tensor(Float32, (batch, cute.sym_int()), divisibility=1)
+    x = make_fake_tensor(Float32, (cute.sym_int(), cute.sym_int()), divisibility=1)
     ks = make_fake_tensor(Int32, (cute.sym_int(),), divisibility=1)
     ps = make_fake_tensor(Float32, (cute.sym_int(),), divisibility=1)
-    ws = make_fake_tensor(Uint32, (cute.sym_int(),), divisibility=4)
     stream = cute.runtime.make_fake_stream(use_tvm_ffi_env_stream=True)
     return cute.compile(
         kn.launch,
         x,
         ks,
         ps,
-        ws,
         Int32(0),
-        Int32(1),
         Int32(1),
         Int32(1),
         cluster,
