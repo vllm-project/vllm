@@ -221,6 +221,7 @@ if TYPE_CHECKING:
     VLLM_STEP5_SHARD_SP_SHARED_EXPERT: bool = False
     VLLM_KIMI_K3_SHARD_SP_SHARED_EXPERT: bool = False
     VLLM_KIMI_K3_AUX_ATTN_RES_STREAM: bool = False
+    VLLM_K3_ATTN_RES_REGTILE: bool = True
     VLLM_KIMI_K3_GEMM_AR: bool = True
     VLLM_KIMI_SD_DSA: Literal["off", "split", "fused", "auto"] = "auto"
     VLLM_KIMI_SD_DSA_SPLITS: int = 16
@@ -1738,6 +1739,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # speculator sees, so it is off by default while the effect is measured.
     "VLLM_KIMI_K3_AUX_ATTN_RES_STREAM": lambda: bool(
         int(os.getenv("VLLM_KIMI_K3_AUX_ATTN_RES_STREAM", "0"))
+    ),
+    # Kimi-K3 on ROCm: run the AttnRes mixture as one register tile of all
+    # bank rows (single-pass softmax) instead of the online-softmax kernel,
+    # where that is faster. Set to 0 to always use the online-softmax kernel.
+    "VLLM_K3_ATTN_RES_REGTILE": lambda: bool(
+        int(os.getenv("VLLM_K3_ATTN_RES_REGTILE", "1"))
     ),
     # Use the SM100 BF16 GEMM-AR kernel for eligible Kimi-K3 row-parallel
     # attention projections. All TP ranks must belong to one NVLink domain.
