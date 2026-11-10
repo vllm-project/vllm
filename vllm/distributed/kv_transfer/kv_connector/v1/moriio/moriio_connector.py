@@ -990,6 +990,7 @@ class MoRIIOConnectorScheduler:
         block_notify_list: list,
         host=None,
         port=None,
+        num_skip_blocks: int = 0,
     ):
         path = make_zmq_path("tcp", host, port)
         if path not in self.paths:
@@ -1011,6 +1012,8 @@ class MoRIIOConnectorScheduler:
             "decode_rank": self._global_dp_rank,
             "type": "remote_blocks",
         }
+        if num_skip_blocks:
+            data["num_skip_blocks"] = num_skip_blocks
         serialized_data = msgpack.dumps(data)
         self.paths[path].send(serialized_data)
 
@@ -1346,6 +1349,7 @@ class MoRIIOConnectorScheduler:
                             )
 
                     block_notify_list: list[int] | list[list[int]]
+                    num_skip_blocks = 0
                     if self._has_mamba or self._is_hma_required:
                         block_notify_list = list(
                             self._clamp_to_prompt_blocks(
@@ -1354,6 +1358,11 @@ class MoRIIOConnectorScheduler:
                         )
                     else:
                         block_notify_list = blocks.get_block_ids()[0]
+                        # The hashed leading blocks are the local prefix-cache
+                        # hit and already hold this KV; P writes the rest.
+                        num_skip_blocks = len(block_notify_list) - len(
+                            blocks.get_unhashed_block_ids_all_groups()[0]
+                        )
 
                     # Wide-EP multi-pod: a pod binds notify sockets only for
                     # its LOCAL ranks, so the port offset must use the per-pod
@@ -1386,6 +1395,7 @@ class MoRIIOConnectorScheduler:
                             block_notify_list=block_notify_list,
                             host=_notify_host,
                             port=target_port,
+                            num_skip_blocks=num_skip_blocks,
                         )
 
             # Only trigger 1 KV transfer per request.
