@@ -125,10 +125,6 @@ class FlashInferCuteDSLBatchedExperts(mk.FusedMoEExpertsModular):
             kMxfp8Dynamic,
         ):
             return supported, reason
-        # Only the DeepEP low-latency dispatch hands over unquantized MXFP8
-        # activations.
-        if not moe_config.use_deepep_ll_kernels:
-            return False, "kernel requires DeepEP low-latency dispatch for mxfp8"
         # The MXFP8 path applies plain SiLU-and-mul without expert biases.
         if (
             moe_config.has_bias
