@@ -32,12 +32,13 @@ import torch
 from torch import nn
 
 import vllm.envs as envs
-from vllm.config import CUDAGraphMode
+from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.model_executor.kernels.mhc.triton import hc_collapse_triton
 from vllm.model_executor.layers.sparse_mqa_indexer import SparseMQAIndexer
 from vllm.models.deepseek_v41.common.engram import Engram
 from vllm.models.deepseek_v41.common.ops.query_quant import can_fuse_query_quant
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
 from ...flashinfer_sparse import DeepseekV4FlashInferMLAAttention
@@ -178,7 +179,7 @@ class SpecializedDecode:
         # The row-sharded indexers' gathers, and the logits gather of the
         # model's specialized logits processor; NVLink multicast is there,
         # since the fused all-reduce needs it too.
-        self.all_gather = LamportAllGather(
+        self.all_gather: LamportAllGather | None = LamportAllGather(
             rank_capacity_bytes=ALL_GATHER_RANK_BYTES,
             device=torch.device("cuda", torch.accelerator.current_device_index()),
         )
@@ -257,8 +258,18 @@ class SpecializedDecode:
     def for_target(
         cls, backbone: "DeepseekV4Model", config: DecodeConfig, lm_head: nn.Module
     ) -> "SpecializedDecode":
-        """The executor of the target model's backbone."""
+        """The executor of the target model's backbone, for this GPU."""
+        if current_platform.is_device_capability(90):
+            from ..hopper.decode import HopperSpecializedDecode
+
+            return HopperSpecializedDecode(backbone, config, lm_head)
         return cls(backbone, config, lm_head)
+
+    def warm_up(self, vllm_config: VllmConfig) -> None:
+        """Tune and compile the executor's kernels, before memory profiling."""
+        from .warmup import warm_up
+
+        warm_up(self, vllm_config)
 
     def plan(
         self,

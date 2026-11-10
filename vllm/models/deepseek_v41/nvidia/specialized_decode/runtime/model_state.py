@@ -33,7 +33,6 @@ from vllm.v1.worker.utils import AttentionGroup
 
 from ...model_state import DeepseekV41ModelState
 from .metadata_graphs import AttnMetadataCudaGraphs, GraphKey
-from .warmup import warm_up
 
 
 def padded_decode_batch(
@@ -78,7 +77,7 @@ class DeepseekV41SpecializedDecodeModelState(DeepseekV41ModelState):
             else model
         )
         self.decode = language_model.build_specialized_decode()
-        warm_up(self.decode, vllm_config)
+        self.decode.warm_up(vllm_config)
         self.graphs = AttnMetadataCudaGraphs(
             vllm_config,
             vllm_config.num_speculative_tokens + self.num_new_sampled_tokens_per_step,
