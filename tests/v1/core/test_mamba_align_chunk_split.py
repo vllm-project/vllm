@@ -155,6 +155,7 @@ def _split(
         mamba_shared_prefix_checkpoint=False,
         hash_block_size=ATTN_BLOCK_SIZE,
         mamba_has_prefill_checkpoint_blocks=(num_prefill_checkpoint_blocks > 0),
+        mamba_checkpoints=None,
         mamba_prefill_checkpoint_alignment=(
             16 if num_prefill_checkpoint_blocks > 0 else None
         ),

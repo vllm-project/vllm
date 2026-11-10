@@ -3,7 +3,7 @@
 import itertools
 from abc import ABC, abstractmethod
 from collections import defaultdict
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, ClassVar
 
 from vllm.distributed.kv_events import MEDIUM_CPU
@@ -12,10 +12,12 @@ from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import (
+    BlockHash,
     BlockHashList,
     BlockHashListWithBlockSize,
     BlockHashWithGroupId,
     KVCacheBlock,
+    get_block_hash,
     resolve_block_hashes,
     trim_null_head,
 )
@@ -432,6 +434,13 @@ class SingleTypeKVCacheManager(ABC):
         pending_copies = self._pending_cow_copies
         self._pending_cow_copies = []
         return pending_copies
+
+    def queue_block_copy(self, source: KVCacheBlock, target: KVCacheBlock) -> None:
+        """Copy `source` into `target` before the next forward. Both take a
+        reference that is released once the copy has run."""
+        source.ref_cnt += 1
+        target.ref_cnt += 1
+        self._pending_cow_copies.append((source, target))
 
     def take_pending_boundary_state_offloads(
         self,
@@ -1189,9 +1198,20 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
 
 
 class CircularBufferManager(FullAttentionManager):
-    """Claims the ring's single block per request; prefix caching disabled."""
+    """Claims the ring's single block per request; prefix caching disabled.
+
+    With `takes_frontier_hits`, the one hit this group takes is a Mamba
+    frontier checkpoint's ring block, copied into the request's own ring when
+    that is claimed.
+    """
 
     supports_fine_grained_hash_lookup: ClassVar[bool] = False
+
+    def __init__(self, kv_cache_spec: CircularBufferSpec, **kwargs) -> None:
+        super().__init__(kv_cache_spec, **kwargs)
+        # Set when Mamba frontier checkpoints are on.
+        self.takes_frontier_hits = False
+        self._ring_hits: dict[str, KVCacheBlock] = {}
 
     def _claim_ring_block(
         self, request_id: str, record_for_zeroing: bool = True
@@ -1203,6 +1223,12 @@ class CircularBufferManager(FullAttentionManager):
         req_blocks.extend(new_blocks)
         if self._record_new_block_ids and record_for_zeroing:
             self.new_block_ids.extend(block.block_id for block in new_blocks)
+        source = self._ring_hits.pop(request_id, None)
+        if source is not None:
+            # The hit's reference moves to the copy; the worker zeroes new
+            # blocks before it applies copies.
+            self._pending_cow_copies.append((source, new_blocks[0]))
+            new_blocks[0].ref_cnt += 1
         return new_blocks
 
     def get_num_blocks_to_allocate(
@@ -1216,7 +1242,11 @@ class CircularBufferManager(FullAttentionManager):
         apply_admission_cap: bool = False,
         prefill_end: int = 0,
     ) -> int:
-        return 0 if self.req_to_blocks.get(request_id) else 1
+        if self.req_to_blocks.get(request_id):
+            return 0
+        if not self.takes_frontier_hits:
+            return 1
+        return 1 + self._get_num_evictable_blocks(new_computed_blocks)
 
     def allocate_new_blocks(
         self, request_id: str, num_tokens: int, num_tokens_main_model: int
@@ -1264,7 +1294,17 @@ class CircularBufferManager(FullAttentionManager):
         num_local_computed_tokens: int,
         num_external_computed_tokens: int,
     ) -> None:
-        return
+        if self.takes_frontier_hits and new_computed_blocks:
+            (source,) = new_computed_blocks
+            self.block_pool.touch([source])
+            self._ring_hits[request_id] = source
+
+    def pop_blocks_for_free(self, request_id: str) -> list[KVCacheBlock]:
+        blocks = super().pop_blocks_for_free(request_id)
+        source = self._ring_hits.pop(request_id, None)
+        if source is not None:
+            blocks.append(source)
+        return blocks
 
     def remove_skipped_blocks(
         self,
@@ -1455,6 +1495,18 @@ class MambaManager(SingleTypeKVCacheManager):
         # Mamba checkpoints follow Eagle's global replay boundary.
         self.drop_eagle_checkpoint_block = False
         self.cached_blocks_this_step: set[BlockHashWithGroupId] = set()
+        # Set by HybridCheckpointManager: called with each state this group
+        # caches, its token count and the request that cached it.
+        self.state_cached_listener: (
+            Callable[[BlockHash, int, Request | None], None] | None
+        ) = None
+        # Owned by HybridCheckpointManager: request -> scratch block holding
+        # the running state copied at a block boundary the output crossed,
+        # and the request's computed tokens then.
+        self.decode_boundary_scratch: dict[str, tuple[KVCacheBlock, int]] = {}
+        # Set by HybridCheckpointManager: a frontier resume can start inside a
+        # block and its chunk can run past that block's end.
+        self.track_unwritten_blocks = False
         if self.mamba_cache_mode == "align":
             # Mapping from request ID to the index of the block
             # allocated in the previous step
@@ -1465,6 +1517,9 @@ class MambaManager(SingleTypeKVCacheManager):
             # checkpoint position and reserved block index for the current
             # allocation.
             self._checkpoints: dict[str, tuple[int, int]] = {}
+            # Block a chunk of the current allocation starts inside and runs
+            # past: its state column still holds the chunk's start state.
+            self._unwritten_blocks: dict[str, int] = {}
             # Requests that registered their own last-prompt-boundary partial
             # tail (producers). A later CoW hands its private copy to the
             # connector; a request that finishes first hands off this table
@@ -1787,6 +1842,15 @@ class MambaManager(SingleTypeKVCacheManager):
                     )
                 else:
                     self._checkpoints.pop(request_id, None)
+                start_block = total_computed_tokens // self.block_size
+                if (
+                    self.track_unwritten_blocks
+                    and total_computed_tokens % self.block_size
+                    and num_tokens > (start_block + 1) * self.block_size
+                ):
+                    self._unwritten_blocks[request_id] = start_block
+                else:
+                    self._unwritten_blocks.pop(request_id, None)
             if num_new_blocks > 0:
                 blocks_allocated = request_id in self._allocated_block_reqs
                 physical_block_cap = 1 + int(has_partial_hit) + checkpoint_block
@@ -1960,6 +2024,7 @@ class MambaManager(SingleTypeKVCacheManager):
             self.last_state_block_idx.pop(request_id, None)
             self._num_retired_blocks.pop(request_id, None)
             self._checkpoints.pop(request_id, None)
+            self._unwritten_blocks.pop(request_id, None)
             self._producer_partial_tail_reqs.pop(request_id, None)
             # An offer is only guaranteed to hold committed bytes until the end
             # of the pass that made it. This request's blocks are going back to
@@ -1971,7 +2036,11 @@ class MambaManager(SingleTypeKVCacheManager):
                 for entry in self._pending_boundary_state_offloads
                 if entry[0] != request_id
             ]
-        return super().pop_blocks_for_free(request_id)
+        blocks = super().pop_blocks_for_free(request_id)
+        scratch = self.decode_boundary_scratch.pop(request_id, None)
+        if scratch is not None:
+            blocks.append(scratch[0])
+        return blocks
 
     def get_num_skipped_tokens(self, num_computed_tokens: int) -> int:
         """Get the number of tokens whose mamba state are not needed anymore. Mamba only
@@ -1988,6 +2057,8 @@ class MambaManager(SingleTypeKVCacheManager):
         *,
         replay_boundaries: Sequence[int],
     ) -> None:
+        listener = self.state_cached_listener
+        cached_before = set(self.cached_blocks_this_step) if listener else None
         num_cached_blocks_before = self.num_cached_block.get(request.request_id, 0)
         super().cache_blocks(
             request,
@@ -1997,6 +2068,16 @@ class MambaManager(SingleTypeKVCacheManager):
         )
         num_cached_blocks_after = self.num_cached_block.get(request.request_id, 0)
         if self.mamba_cache_mode == "align":
+            unwritten = self._unwritten_blocks.pop(request.request_id, None)
+            if (
+                unwritten is not None
+                and num_cached_blocks_before <= unwritten < num_cached_blocks_after
+            ):
+                # Its full-block hash would promise the state at the block's
+                # end, which no step wrote into this column.
+                block = self.req_to_blocks[request.request_id][unwritten]
+                if not block.is_null and block.block_hash is not None:
+                    self.block_pool._maybe_evict_cached_block(block)
             partial_hash = self._cache_partial_tail_block(
                 request, num_tokens, retention_interval=retention_interval
             )
@@ -2026,6 +2107,14 @@ class MambaManager(SingleTypeKVCacheManager):
                             block.block_hash_num_tokens,
                         )
                     )
+        if listener is not None and cached_before is not None:
+            cached = self.block_pool.cached_block_hash_to_block
+            for key in self.cached_blocks_this_step - cached_before:
+                state_block = cached.get_one_block(key)
+                num_tokens = 0
+                if state_block is not None and state_block.block_hash_num_tokens:
+                    num_tokens = state_block.block_hash_num_tokens
+                listener(get_block_hash(key), num_tokens, request)
 
     def new_step_starts(self) -> None:
         self.cached_blocks_this_step.clear()

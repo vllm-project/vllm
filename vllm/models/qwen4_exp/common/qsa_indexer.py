@@ -863,6 +863,8 @@ class QSARawKeyCache(_QSAIndexerCache):
             head_size=self.head_size,
             head_size_v=0,
             dtype=self.dtype,
+            # The prefill path reads the open group's keys from the ring.
+            resume_catchup="prefill",
         )
 
 

@@ -2808,6 +2808,7 @@ def test_hybrid_cache_mamba_align_shared_prefix_detection():
         mamba_partial_cache_hit=False,
         mamba_shared_prefix_checkpoint=False,
         mamba_has_prefill_checkpoint_blocks=False,
+        mamba_checkpoints=None,
     )
     req_2.shared_prefix_boundary = shared_prefix_boundary
     num_new_tokens_adjusted = Scheduler._mamba_block_aligned_split(
@@ -3833,6 +3834,60 @@ def test_maybe_evict_cached_block():
     # Evict block3
     pool._maybe_evict_cached_block(block3)
     assert cache._cache == {}
+
+
+def test_block_pool_reports_removed_keys():
+    """The key-removal listener sees every key a block loses, its own hash and
+    extra keys alike, once the eviction is complete."""
+    pool = BlockPool(num_gpu_blocks=4, enable_caching=True, hash_block_size=16)
+    removed: list[list[BlockHashWithGroupId]] = []
+    pool.key_removal_listener = removed.append
+    block = pool.get_new_blocks(1)[0]
+    own = make_block_hash_with_group_id(BlockHash(b"10"), 0)
+    extra = make_block_hash_with_group_id(BlockHash(b"11"), 0)
+    pool.cache_block_under_key(block, own, 16)
+    pool.cache_block_under_key(block, extra, 16)
+    assert block.block_hash == own
+    assert pool.cached_block_hash_to_block.get_all_blocks(extra) == [block]
+    pool.free_blocks([block])
+
+    assert pool._maybe_evict_cached_block(block)
+    assert removed == [[own, extra]]
+    assert pool.cached_block_hash_to_block.get_all_blocks(extra) == []
+
+
+class _RecordingEvictionPolicy:
+    def __init__(self, pool: BlockPool) -> None:
+        self.pool = pool
+        self.freed: list[list[int]] = []
+
+    def on_blocks_freed(self, blocks: list[KVCacheBlock]) -> None:
+        self.freed.append([b.block_id for b in blocks])
+
+    def prepare_eviction(self, num_blocks: int) -> None:
+        # Evict the most recently freed cached block first.
+        queue = self.pool.free_block_queue
+        newest = queue.fake_free_list_tail.prev_free_block
+        queue.remove(newest)
+        queue.prepend_n([newest])
+
+
+def test_block_pool_eviction_policy_reorders_the_free_queue():
+    """A policy sees cached blocks as they are freed and decides which cached
+    block the next allocation takes; uncached frees are not reported."""
+    pool = BlockPool(num_gpu_blocks=4, enable_caching=True, hash_block_size=16)
+    policy = _RecordingEvictionPolicy(pool)
+    pool.eviction_policy = policy
+    first, second, plain = pool.get_new_blocks(3)
+    for i, block in enumerate((first, second)):
+        key = make_block_hash_with_group_id(BlockHash(bytes([i])), 0)
+        pool.cache_block_under_key(block, key, 16)
+    pool.free_blocks([first, second, plain])
+    assert policy.freed == [[first.block_id, second.block_id]]
+
+    assert pool.get_new_blocks(1) == [second]
+    assert second.block_hash is None
+    assert first.block_hash is not None
 
 
 @pytest.mark.parametrize("blocks_to_cache", [2, 3, 10])

@@ -19,6 +19,7 @@ from vllm.v1.metrics.buckets import (
 )
 from vllm.v1.metrics.loggers import PrometheusStatLogger
 from vllm.v1.metrics.prometheus import unregister_vllm_metrics
+from vllm.v1.metrics.stats import PrefixCacheStats, SchedulerStats
 
 pytestmark = pytest.mark.cpu_test
 
@@ -329,5 +330,26 @@ def test_watermark_requests_counter_registration(with_config: bool):
         PrometheusStatLogger(config)
         names = {m.name for m in prometheus_client.REGISTRY.collect()}
         assert ("vllm:watermark_requests" in names) == with_config
+    finally:
+        unregister_vllm_metrics()
+
+
+@pytest.mark.parametrize("frontier", [True, False])
+def test_prefix_cache_frontier_hits_counter(frontier: bool):
+    """The frontier hit counter exists only with Mamba frontier checkpoints
+    and counts the prefix cache stats' frontier hits."""
+    config = build_logger_config(ObservabilityConfig())
+    config.cache_config.mamba_frontier_checkpoint = frontier
+    stats = PrefixCacheStats()
+    stats.record(num_tokens=200, num_hits=159, preempted=False, frontier_hits=31)
+    try:
+        PrometheusStatLogger(config).record(
+            SchedulerStats(prefix_cache_stats=stats), None
+        )
+        value = prometheus_client.REGISTRY.get_sample_value(
+            "vllm:prefix_cache_frontier_hits_total",
+            {"model_name": TEST_MODEL, "engine": "0"},
+        )
+        assert value == (31 if frontier else None)
     finally:
         unregister_vllm_metrics()

@@ -684,6 +684,21 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             counter_prefix_cache_hits, per_engine_labelvalues
         )
 
+        self.counter_prefix_cache_frontier_hits: dict[int, Counter] | None = None
+        if vllm_config.cache_config.mamba_frontier_checkpoint:
+            counter_prefix_cache_frontier_hits = self._counter_cls(
+                name="vllm:prefix_cache_frontier_hits",
+                documentation=(
+                    "Prefix cache hits, in terms of number of cached tokens, "
+                    "that Mamba frontier checkpoints served past the "
+                    "block-aligned hit. Part of vllm:prefix_cache_hits."
+                ),
+                labelnames=labelnames,
+            )
+            self.counter_prefix_cache_frontier_hits = create_metric_per_engine(
+                counter_prefix_cache_frontier_hits, per_engine_labelvalues
+            )
+
         #
         # External - KV connector prefix cache
         #
@@ -1176,6 +1191,10 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             self.counter_prefix_cache_hits[engine_idx].inc(
                 scheduler_stats.prefix_cache_stats.hits
             )
+            if self.counter_prefix_cache_frontier_hits is not None:
+                self.counter_prefix_cache_frontier_hits[engine_idx].inc(
+                    scheduler_stats.prefix_cache_stats.frontier_hits
+                )
 
             labelvalues = self.per_engine_labelvalues[engine_idx]
             self.counter_prompt_tokens_cached_by_source.labels(
