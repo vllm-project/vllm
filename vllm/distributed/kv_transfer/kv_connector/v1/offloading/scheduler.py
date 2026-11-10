@@ -1450,7 +1450,6 @@ class OffloadingConnectorScheduler:
         reservation = self._current_batch_sync_loads.get(req_id)
         if reservation is not None and reservation.committed:
             return True
-        self._release_sync_load_budget(req_id)
         # Keep at least one token to compute, or the request can't be scheduled.
         if (
             not self.config.sync_load_budget_bytes
@@ -1549,11 +1548,7 @@ class OffloadingConnectorScheduler:
         req_status.loaded_from_offload = True
         reservation = self._current_batch_sync_loads.get(request.request_id)
         sync_load = reservation is not None
-        if reservation is not None and not reservation.committed:
-            actual_bytes = num_external_tokens * self.config.kv_bytes_per_token
-            assert actual_bytes <= reservation.num_bytes
-            self._current_batch_sync_load_bytes -= reservation.num_bytes - actual_bytes
-            reservation.num_bytes = actual_bytes
+        if reservation is not None:
             reservation.committed = True
 
         num_locally_computed_tokens = req_status.num_locally_computed_tokens
