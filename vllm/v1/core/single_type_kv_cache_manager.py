@@ -225,7 +225,14 @@ class SingleTypeKVCacheManager(ABC):
             and self.max_admission_blocks_per_request is not None
             and blocks
         ):
-            held = sum(not b.is_null and b.ref_cnt == 1 for b in blocks)
+            # Live blocks are a suffix. The skipped prefix is null, so stop
+            # at the first null instead of scanning a long external-load prefix
+            # on every admission.
+            held = 0
+            for block in reversed(blocks):
+                if block.is_null:
+                    break
+                held += block.ref_cnt == 1
             uncapped = self.get_num_blocks_to_allocate(
                 request_id, num_tokens, new_computed_blocks,
                 total_computed_tokens, num_local_computed_tokens,
