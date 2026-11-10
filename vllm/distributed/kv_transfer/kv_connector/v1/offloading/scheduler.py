@@ -991,6 +991,7 @@ class OffloadingConnectorScheduler:
                 sliding_window_size_in_chunks = (
                     group_config.sliding_window_size_in_chunks
                 )
+                # Zero cannot pin a junction, so a later confirmed hit may replace it.
                 if (
                     sliding_window_size_in_chunks is not None
                     and not full_attention_hit_boundary
