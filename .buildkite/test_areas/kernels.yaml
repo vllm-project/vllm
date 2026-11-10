@@ -559,6 +559,14 @@ steps:
       - vllm/platforms/rocm.py
       - vllm/_aiter_ops.py
       - tests/kernels/attention/test_rocm_triton_attn_dsv4.py
+      - tests/kernels/attention/test_kimi_mxfp4_indexer.py
+      - vllm/models/kimi_k3/amd/ops/fp4_indexer.py
+      - vllm/models/kimi_k3/amd/dsa.py
+      - vllm/models/kimi_k3/amd/ops/fp4_indexer_prefill.py
+      - vllm/models/kimi_k3/common/dsa_cache.py
+      - vllm/v1/attention/backends/mla/rocm_aiter_mla_sparse.py
+      - vllm/model_executor/layers/sparse_attn_indexer.py
+      - vllm/v1/kv_cache_interface.py
       - tests/kernels/attention/test_rocm_aiter_mla_decode.py
       - tests/kernels/attention/test_rocm_aiter_mla_decode_metadata.py
       - tests/kernels/attention/test_rocm_aiter_mla_fp8_support.py
@@ -570,6 +578,7 @@ steps:
       - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_fp8_support.py
       - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_op_registration.py
       - pytest -v -s tests/kernels/attention/test_rocm_triton_attn_dsv4.py::test_dsv41_adaptive_mla_swa_metadata_graph_replay
+      - pytest -v -s tests/kernels/attention/test_kimi_mxfp4_indexer.py
       - pytest -v -s tests/kernels/attention/test_rocm_triton_attn_dsv4.py -k "wo_a_bmm or wo_b_takes_wo_a_mxfp8_gate"
 
 - label: ":nvidia: (L4) Quantization Kernels"
@@ -717,6 +726,43 @@ steps:
     - pytest -v -s kernels/moe/test_batched_deepgemm.py
     - pytest -v -s kernels/attention/test_deepgemm_attention.py
     - pytest -v -s quantization/test_cutlass_w4a16.py
+  mirror:
+    amd:
+      automatic_shard: true
+      label: ":amd: (MI355) AITER FP8 GEMM and MoE, MQA Logits and W4A16 Kernels"
+      dind: false
+      device: mi355_1
+      timeout_in_minutes: 35
+      working_dir: "/vllm-workspace/tests"
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/_aiter_ops.py
+      - vllm/platforms/rocm.py
+      - vllm/envs.py
+      - vllm/model_executor/layers/fused_moe/
+      - vllm/model_executor/layers/quantization/
+      - vllm/model_executor/kernels/linear/
+      - vllm/v1/attention/ops/rocm_aiter_mla_sparse.py
+      - tests/kernels/moe/test_rocm_aiter_moe.py
+      - tests/kernels/moe/test_block_fp8.py
+      - tests/kernels/quant_utils.py
+      - tests/kernels/quantization/test_rocm_aiter_grouped_quant.py
+      - tests/kernels/quantization/test_block_fp8.py
+      - tests/kernels/attention/test_rocm_triton_attn_dsv4.py
+      - tests/kernels/quantization/test_w4a16_kernel_selection.py
+      - tests/kernels/quantization/test_triton_w4a16.py
+      - tests/kernels/quantization/test_rocm_compressed_tensors_w4a16.py
+      commands:
+      - pytest -v -s kernels/moe/test_rocm_aiter_moe.py
+      - pytest -v -s kernels/quantization/test_block_fp8.py
+      - pytest -v -s kernels/quantization/test_rocm_aiter_grouped_quant.py
+      - pytest -v -s kernels/attention/test_rocm_triton_attn_dsv4.py -k mqa_logits
+      - >-
+        pytest -v -s
+        kernels/quantization/test_w4a16_kernel_selection.py
+        kernels/quantization/test_triton_w4a16.py
+        kernels/quantization/test_rocm_compressed_tensors_w4a16.py
 
 - label: ":nvidia: (B200) MiniMax-M3 Attention Kernels"
   key: kernels-minimax-m3-attention-b200
@@ -1075,13 +1121,11 @@ steps:
       - vllm/platforms/rocm.py
       - vllm/envs.py
       - vllm/config/
-      - tests/kernels/moe/test_rocm_aiter_moe.py
       - tests/kernels/moe/test_ocp_mx_moe.py
       - tests/kernels/moe/test_flydsl_moe.py
       - tests/kernels/moe/utils.py
       - tests/kernels/utils.py
       commands:
-      - pytest -v -s kernels/moe/test_rocm_aiter_moe.py -k 'mi350_mxfp4 or quant_scheme_support_matches_gfx950'
       - pytest -v -s kernels/moe/test_ocp_mx_moe.py::test_rocm_mxfp4_moe_oracle -k AITER_MXFP4
       - pytest -v -s kernels/moe/test_flydsl_moe.py
 
@@ -1305,3 +1349,23 @@ steps:
     tests/kernels/models/amd/test_dsv41_gfx942_fused_markov.py
     tests/kernels/models/amd/test_dsv41_gfx942_draft_lm_head.py
     tests/kernels/models/amd/test_dsv41_mono_gfx942.py
+
+- label: ":amd: (MI355) Mamba SSM Kernels"
+  key: amd-mamba-ssm-kernels-mi355
+  dind: false
+  device: mi355_1
+  num_devices: 1
+  timeout_in_minutes: 30
+  working_dir: /vllm-workspace/tests
+  depends_on:
+  - image-build-amd
+  source_file_dependencies:
+  - vllm/config/mamba.py
+  - vllm/model_executor/layers/mamba/ops/mamba_ssm.py
+  - vllm/model_executor/layers/mamba/ops/selective_state_update_replayssm_output_only.py
+  - vllm/platforms/rocm.py
+  - tests/kernels/mamba/test_mamba_ssm.py
+  - tests/kernels/mamba/test_replayssm_standard_decode_mamba2.py
+  - tests/kernels/mamba/utils.py
+  commands:
+  - pytest -v -s kernels/mamba/test_mamba_ssm.py kernels/mamba/test_replayssm_standard_decode_mamba2.py
