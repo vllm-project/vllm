@@ -52,7 +52,7 @@ from vllm.v1.kv_cache_interface import (
     compute_layer_kv_cache_shape_bytes,
 )
 
-from .utils import create_request, create_scheduler
+from ..utils import create_request, create_scheduler
 
 
 def _find_free_port() -> int:
