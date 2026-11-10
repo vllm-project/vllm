@@ -37,8 +37,8 @@ def moe_server():
 
 
 def test_moe_no_false_positive(moe_server):
-    """An idle rank inside a wave keeps counting as progressing, and probes
-    racing with wave starts do not flap."""
+    """Probes on an idle rank inside a wave, and probes racing with wave
+    starts, do not flap."""
     with moe_server.busy(dp_ranks=(0,)):
         assert moe_server.stays_ready(PROBE_TIMEOUT_S + 3)
     for i in range(10):
