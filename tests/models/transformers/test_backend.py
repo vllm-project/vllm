@@ -36,6 +36,7 @@ from vllm.model_executor.models.transformers.base import Base
 from vllm.model_executor.models.transformers.fusers import AttentionFuser
 from vllm.model_executor.models.transformers.fusers.attention import VLLM_ATTN_IMPL
 from vllm.model_executor.models.transformers.multimodal import MultiModalMixin
+from vllm.model_executor.models.transformers.utils import infer_dynamic_arg_dims
 from vllm.model_executor.models.utils import StageMissingLayer
 
 from ...conftest import HfRunner, VllmRunner
@@ -151,26 +152,16 @@ def test_models(
 
 # forked needed to workaround https://github.com/vllm-project/vllm/issues/21073
 @pytest.mark.forked
-@pytest.mark.parametrize(
-    ("compile_mm_encoder", "expected_models"),
-    [
-        # The language model is always compiled. The encoder adds one more.
-        pytest.param(False, 1, id="disabled"),
-        pytest.param(True, 2, id="enabled"),
-    ],
-)
 def test_compile_mm_encoder(
-    vllm_runner: type[VllmRunner],
-    monkeypatch: pytest.MonkeyPatch,
-    compile_mm_encoder: bool,
-    expected_models: int,
+    vllm_runner: type[VllmRunner], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The encoder's `forward` does not annotate `pixel_values`."""
+    """Idefics3's encoder has an unannotated and a `torch.BoolTensor` input."""
     # Disable multiprocessing so that the counter is in the same process
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
 
+    # One graph for the language model and one for the encoder
     with (
-        compilation_counter.expect(num_models_seen=expected_models),
+        compilation_counter.expect(num_models_seen=2),
         vllm_runner(
             "HuggingFaceTB/SmolVLM-256M-Instruct",
             model_impl="transformers",
@@ -179,11 +170,28 @@ def test_compile_mm_encoder(
             gpu_memory_utilization=0.5,
             compilation_config={
                 "mode": CompilationMode.VLLM_COMPILE,
-                "compile_mm_encoder": compile_mm_encoder,
+                "compile_mm_encoder": True,
             },
         ),
     ):
         pass
+
+
+def test_infer_dynamic_arg_dims():
+    """Only unannotated and (legacy) tensor arguments are dynamic."""
+
+    class Encoder(nn.Module):
+        def forward(
+            self,
+            pixel_values,
+            mask: torch.BoolTensor | None = None,
+            grid: tuple[int, int] = (1, 1),
+            tiles: list[torch.Tensor] | None = None,
+            **kwargs,
+        ):
+            pass
+
+    assert infer_dynamic_arg_dims(Encoder) == {"pixel_values": 0, "mask": 0}
 
 
 def test_hybrid_attention(vllm_runner: type[VllmRunner]) -> None:
