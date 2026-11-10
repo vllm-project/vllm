@@ -368,16 +368,18 @@ class AutoGPTQLinearMethod(LinearMethodBase):
         if self.use_batch_invariant:
             # Only Humming honors VLLM_BATCH_INVARIANT; the other candidates
             # tile on the token count, so any other selection (or none) keeps
-            # the dequantize fallback.
+            # the dequantize fallback. 4-bit only: W8A16's Humming-side
+            # correctness is not validated.
             kernel_type: type[MPLinearKernel] | None = None
-            try:
-                if (
-                    choose_mp_linear_kernel(mp_linear_kernel_config)
-                    is HummingLinearKernel
-                ):
-                    kernel_type = HummingLinearKernel
-            except ValueError:
-                pass  # no kernel implements this layer; the fallback does
+            if self.quant_type.size_bits == 4:
+                try:
+                    if (
+                        choose_mp_linear_kernel(mp_linear_kernel_config)
+                        is HummingLinearKernel
+                    ):
+                        kernel_type = HummingLinearKernel
+                except ValueError:
+                    pass  # no kernel implements this layer; the fallback does
             backend_name = (
                 kernel_type.__name__
                 if kernel_type is not None

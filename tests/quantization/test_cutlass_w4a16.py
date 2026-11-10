@@ -167,6 +167,26 @@ def test_batch_invariant_gptq_follows_humming_selection(
         assert isinstance(method.kernel, expected_kernel)
 
 
+@pytest.mark.skipif(not has_humming(), reason="requires humming-kernels")
+def test_batch_invariant_int8_gptq_keeps_fallback(monkeypatch, dist_init):
+    """W8A16 GPTQ is outside the validated scope: even when kernel selection
+    resolves to Humming, batch-invariant mode must keep the dequant fallback."""
+    monkeypatch.setattr("vllm.envs.VLLM_DISABLED_KERNELS", ["MacheteLinearKernel"])
+    monkeypatch.setattr("vllm.envs.VLLM_BATCH_INVARIANT", True)
+
+    method = AutoGPTQLinearMethod(AutoGPTQConfig(8, 128, False, True, False, {}, {}))
+    method.create_weights(
+        torch.nn.Module(),
+        input_size_per_partition=4096,
+        output_partition_sizes=[4096],
+        input_size=4096,
+        output_size=4096,
+        params_dtype=torch.float16,
+        weight_loader=lambda *args, **kwargs: None,
+    )
+    assert method.kernel is None
+
+
 @pytest.mark.parametrize(
     "model_name",
     [

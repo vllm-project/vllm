@@ -14,7 +14,9 @@ from utils import (
 
 import vllm.envs as envs
 from vllm import LLM, SamplingParams
+from vllm.model_executor.kernels.linear import HummingLinearKernel
 from vllm.platforms import current_platform
+from vllm.utils.import_utils import has_humming
 
 # FLASH_ATTN is CUDA-only.
 E2E_BACKENDS = ["TRITON_ATTN"] if current_platform.is_rocm() else ["FLASH_ATTN"]
@@ -53,6 +55,7 @@ def test_dense_gptq_generation_is_deterministic_across_batch_sizes_e2e(
     already avoids Machete and disabling it is a no-op. The env var can be
     dropped once Humming outranks Machete (#63265).
     """
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
     monkeypatch.setenv("VLLM_DISABLED_KERNELS", "MacheteLinearKernel")
     monkeypatch.setattr(envs, "VLLM_DISABLED_KERNELS", ["MacheteLinearKernel"])
 
@@ -79,6 +82,17 @@ def test_dense_gptq_generation_is_deterministic_across_batch_sizes_e2e(
     baseline_logprobs = None
     try:
         llm = _make_llm(max_num_seqs=max_batch_size, backend=backend)
+        if current_platform.has_device_capability(90) and has_humming():
+            # The Humming path is the point of this test; on SM90 with
+            # humming installed it must not silently degrade to the fallback.
+            def check_kernel(model):
+                method = model.model.layers[0].self_attn.qkv_proj.quant_method
+                assert isinstance(method.kernel, HummingLinearKernel), (
+                    "Expected HummingLinearKernel under VLLM_BATCH_INVARIANT "
+                    f"on SM90, got {method.kernel!r}"
+                )
+
+            llm.apply_model(check_kernel)
         baseline_output = llm.generate([needle_prompt], sampling, use_tqdm=False)[0]
         baseline_completion = baseline_output.outputs[0]
         baseline_logprobs, baseline_token_ids = _extract_step_logprobs(baseline_output)
@@ -106,7 +120,11 @@ def test_dense_gptq_generation_is_deterministic_across_batch_sizes_e2e(
             assert baseline_logprobs is not None
             assert needle_completion.token_ids == baseline_completion.token_ids
             assert needle_completion.text == baseline_completion.text
-            torch.testing.assert_close(needle_logprobs, baseline_logprobs)
+            # The batch-invariance contract is exact: identical logprobs, no
+            # tolerance.
+            torch.testing.assert_close(
+                needle_logprobs, baseline_logprobs, rtol=0, atol=0
+            )
     finally:
         if llm is not None:
             with contextlib.suppress(Exception):
