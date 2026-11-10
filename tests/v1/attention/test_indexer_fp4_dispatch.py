@@ -7,7 +7,7 @@ from types import ModuleType, SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import AttentionConfig
@@ -75,7 +75,7 @@ def _config(dtype=None, *, dcp=1, pcp=1):
     return SimpleNamespace(
         attention_config=attention,
         model_config=SimpleNamespace(
-            hf_config=PretrainedConfig(model_type="deepseek_v41")
+            hf_config=PreTrainedConfig(model_type="deepseek_v41")
         ),
         parallel_config=SimpleNamespace(
             decode_context_parallel_size=dcp,
