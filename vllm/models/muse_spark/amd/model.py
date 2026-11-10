@@ -42,8 +42,8 @@ from vllm.model_executor.models.utils import (
     sequence_parallel_chunk,
 )
 from vllm.models.amd.muse_spark.fused_allreduce_norm_residual_norm import (
-    fuse_allreduce_norm_residual,
     fused_allreduce_norm_residual_then_norm,
+    o_proj_skips_reduce,
 )
 from vllm.models.muse_spark.common.layers import (
     MulTanhSoftCap,
@@ -505,13 +505,6 @@ class MuseSparkAttention(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.o_proj",
         )
-        # The attention boundary sums these partials inside the norm kernel.
-        self.fuse_ar_boundary = (
-            fuse_allreduce_norm_residual()
-            and get_tensor_model_parallel_world_size() > 1
-        )
-        if self.fuse_ar_boundary:
-            self.o_proj.reduce_results = False
 
         # GPT-J style: rotates interleaved adjacent channel pairs.
         self.rotary_emb: RotaryEmbedding | None = None
@@ -857,6 +850,15 @@ class MuseSparkDecoderLayer(nn.Module):
             )
         assert stream.dtype == self.residual_dtype
 
+        # Skip o_proj's all-reduce when FlyDSL QuickReduce would take the
+        # partial, so the boundary epilogue can sum it. Otherwise o_proj
+        # reduces exactly as before.
+        self.self_attn.o_proj.reduce_results = not o_proj_skips_reduce(
+            stream.numel() // self.hidden_size,
+            self.hidden_size,
+            stream_dtype=stream.dtype,
+            out_dtype=self.default_dtype,
+        )
         attn_out = self.self_attn(positions=positions, hidden_states=attn_input)
         return self.after_attention(stream, attn_out)
 
@@ -866,7 +868,10 @@ class MuseSparkDecoderLayer(nn.Module):
         """Attention boundary and FFN; the FFN boundary is returned unblended."""
         branch = attn_out
         fused = None
-        if self.self_attn.fuse_ar_boundary:
+        if (
+            not self.self_attn.o_proj.reduce_results
+            and self.self_attn.o_proj.tp_size > 1
+        ):
             fused = fused_allreduce_norm_residual_then_norm(
                 MuseSparkResidualStream(
                     stream=stream,

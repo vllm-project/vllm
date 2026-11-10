@@ -400,6 +400,105 @@ class QuickAllReduce:
         """Whether `all_reduce` runs `inp` through FlyDSL QuickReduce."""
         return self.should_quick_allreduce(inp) and self._use_flydsl_int4(inp)
 
+    def _flydsl_int4_bf16_nbytes(self, nbytes: int) -> bool:
+        """Whether a contiguous 16-byte-aligned bf16 buffer of this many bytes
+        would take FlyDSL INT4 QuickReduce."""
+        if self.disabled or self._flydsl_int4 is None or nbytes % 16 != 0:
+            return False
+        dtype = torch.float16 if self.use_fp16_kernels else torch.bfloat16
+        try:
+            table_min = self._QR_MIN_SIZE[(dtype, self.world_size)][
+                self.qr_quant_level.value
+            ]
+        except KeyError:
+            return False
+        min_size = table_min if self.qr_min_size is None else self.qr_min_size
+        if nbytes < min_size or nbytes > self.qr_max_size:
+            return False
+        quant = self.qr_quant_level.value
+        if (
+            self.qr_quantization_min_size is not None
+            and nbytes < self.qr_quantization_min_size
+        ):
+            quant = QuickReduceRegime.FP.value
+        return quant == QuickReduceRegime.INT4.value
+
+    def flydsl_boundary_bf16(self, rows: int, hidden: int) -> bool:
+        """Whether a bf16 ``rows x hidden`` partial would take the fused
+        FlyDSL norm/residual/norm boundary."""
+        nbytes = int(rows) * int(hidden) * 2
+        if not self._flydsl_int4_bf16_nbytes(nbytes):
+            return False
+        fly = self._flydsl_int4
+        supports = getattr(fly, "supports_boundary", None)
+        if supports is None or not hasattr(fly, "allreduce_norm_residual_norm"):
+            return False
+        return bool(supports(int(hidden), nbytes))
+
+    def allreduce_norm_residual_norm(
+        self,
+        partial: torch.Tensor,
+        residual_stream: torch.Tensor,
+        post_weight: torch.Tensor | None,
+        pre_weight: torch.Tensor | None,
+        post_eps: float,
+        pre_eps: float,
+        *,
+        alpha: torch.Tensor | float,
+        beta: torch.Tensor,
+        post_gain_center: float = 0.0,
+        pre_gain_center: float = 0.0,
+        post_input_scale: bool = False,
+        pre_input_scale: bool = False,
+        out_dtype: torch.dtype = torch.bfloat16,
+    ) -> tuple[torch.Tensor, torch.Tensor] | None:
+        """FlyDSL INT4 all-reduce fused with the two-norm residual boundary.
+
+        Returns ``None`` when this partial would not take FlyDSL QuickReduce,
+        or when the installed AITER has no such epilogue. A CUDA graph capture
+        that arrives before an eager call has compiled the build also returns
+        ``None``; the caller all-reduces instead.
+        """
+        if out_dtype is not torch.bfloat16 or not self.uses_flydsl_int4(partial):
+            return None
+        fly = self._flydsl_int4
+        op = getattr(fly, "allreduce_norm_residual_norm", None)
+        prepared = getattr(fly, "boundary_prepared", None)
+        if op is None or prepared is None:
+            return None
+        hidden = int(partial.shape[-1])
+        if not fly.supports_boundary(hidden, partial.numel() * partial.element_size()):
+            return None
+        flags = {
+            "post_has_weight": post_weight is not None,
+            "pre_has_weight": pre_weight is not None,
+            "post_input_scale": bool(post_input_scale),
+            "pre_input_scale": bool(pre_input_scale),
+            "gate_stream": isinstance(alpha, torch.Tensor),
+            "per_channel": beta.numel() > 1,
+        }
+        if torch.cuda.is_current_stream_capturing() and not prepared(hidden, **flags):
+            return None
+        out = torch.empty(partial.shape, dtype=torch.bfloat16, device=partial.device)
+        new_stream = torch.empty_like(residual_stream)
+        op(
+            partial,
+            residual_stream,
+            post_weight,
+            pre_weight,
+            post_eps,
+            pre_eps,
+            out,
+            new_stream,
+            alpha=alpha,
+            beta=beta,
+            post_gain_center=post_gain_center,
+            pre_gain_center=pre_gain_center,
+            post_input_scale=post_input_scale,
+            pre_input_scale=pre_input_scale,
+        )
+        return out, new_stream
+
     def _get_qr_quant_level(self, inp: torch.Tensor) -> int:
         quantization_min_size = self.qr_quantization_min_size
         if (

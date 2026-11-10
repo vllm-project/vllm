@@ -1,30 +1,44 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Muse Spark's attention all-reduce, folded into the residual boundary."""
+"""Muse Spark's attention all-reduce, fused into the residual boundary.
+
+The kernel is AITER's FlyDSL QuickReduce epilogue. It runs when that
+QuickReduce would have handled the o_proj partial. No separate switch.
+"""
 
 import torch
 
-import vllm.envs as envs
-from vllm.models.common.amd.ops.fused_allreduce_norm_residual_norm import (
-    fused_allreduce_norm_residual_norm,
-)
 from vllm.models.muse_spark.common.layers import (
     MuseSparkNormPreservingResidualConnection,
     MuseSparkResidualStream,
     MuseSparkRMSNorm,
 )
 from vllm.models.muse_spark.common.ops.fused_rmsnorm import supports_norm_residual_norm
-from vllm.triton_utils import triton
-
-# Decode steps are CUDA-graphed and too small for the host barrier in the
-# common op. Prefill and mixed steps are eager and sit above this.
-_MIN_ROWS = 1024
-_MAX_HIDDEN = 8192
 
 
-def fuse_allreduce_norm_residual() -> bool:
-    """Whether to skip ``o_proj``'s all-reduce and sum the partials here."""
-    return envs.VLLM_ROCM_MUSE_FUSED_AR_BOUNDARY
+def _qr_comm():
+    from vllm.distributed import get_tp_group
+
+    group = get_tp_group()
+    if group.world_size <= 1:
+        return None
+    comm = getattr(group, "device_communicator", None)
+    qr = getattr(comm, "qr_comm", None) if comm is not None else None
+    if qr is None or getattr(qr, "disabled", True):
+        return None
+    return qr
+
+
+def o_proj_skips_reduce(rows: int, hidden: int, *, stream_dtype, out_dtype) -> bool:
+    """Whether o_proj should return its partial for the fused boundary."""
+    if stream_dtype is not torch.float32 or out_dtype is not torch.bfloat16:
+        return False
+    if rows < 1:
+        return False
+    qr = _qr_comm()
+    if qr is None or not hasattr(qr, "flydsl_boundary_bf16"):
+        return False
+    return bool(qr.flydsl_boundary_bf16(rows, hidden))
 
 
 def fused_allreduce_norm_residual_then_norm(
@@ -33,34 +47,41 @@ def fused_allreduce_norm_residual_then_norm(
     *,
     out_dtype: torch.dtype,
 ) -> tuple[torch.Tensor, torch.Tensor] | None:
-    """Sum this rank's o_proj partial with its peers and apply the boundary.
+    """All-reduce the o_proj partial inside the residual boundary.
 
-    Returns ``None`` when the fused collective cannot run. The caller
-    all-reduces the partial and uses the unfused boundary.
+    Returns ``None`` when FlyDSL QuickReduce would not take the partial, or
+    the installed AITER has no boundary epilogue. The caller all-reduces and
+    uses the unfused boundary.
     """
     post_norm, connection = boundary.post_norm, boundary.connection
     branch, stream = boundary.branch, boundary.stream
+    if not isinstance(connection, MuseSparkNormPreservingResidualConnection):
+        return None
+    alpha, beta = connection.alpha, connection.beta
     if not (
-        isinstance(connection, MuseSparkNormPreservingResidualConnection)
-        and getattr(connection, "_coefficients_ready", False)
+        getattr(connection, "_coefficients_ready", False)
         and post_norm.supports_fused_kernel(branch)
         and pre_norm.supports_fused_kernel(stream)
         and supports_norm_residual_norm(branch, stream)
-        and branch.shape[0] >= _MIN_ROWS
-        and triton.next_power_of_2(branch.shape[-1]) <= _MAX_HIDDEN
+        and isinstance(beta, torch.Tensor)
+        and beta.is_cuda
+        and (not isinstance(alpha, torch.Tensor) or alpha.is_cuda)
     ):
+        return None
+    qr = _qr_comm()
+    if qr is None or not hasattr(qr, "allreduce_norm_residual_norm"):
         return None
     flat_branch = branch.reshape(-1, branch.shape[-1])
     flat_stream = stream.reshape(-1, stream.shape[-1])
-    fused = fused_allreduce_norm_residual_norm(
+    fused = qr.allreduce_norm_residual_norm(
         flat_branch,
         flat_stream,
         post_norm.weight if post_norm.has_weight else None,
-        pre_norm.weight,
+        pre_norm.weight if pre_norm.has_weight else None,
         post_norm.variance_epsilon,
         pre_norm.variance_epsilon,
-        alpha=connection.alpha,
-        beta=connection.beta,
+        alpha=alpha,
+        beta=beta,
         post_gain_center=post_norm.fused_gain_center,
         pre_gain_center=pre_norm.fused_gain_center,
         post_input_scale=(
