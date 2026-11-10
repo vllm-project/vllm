@@ -91,7 +91,7 @@ def test_humming_packed_experts_avoid_integer_expansion(
 def test_humming_packed_experts_generate_with_real_weights(
     vllm_runner, record_property, enable_pickle
 ):
-    """The public loading option reaches MoE experts and preserves generation."""
+    """The option reaches MoE experts and preserves top-five same-prefix choices."""
     model_name = "RedHatAI/Qwen3-30B-A3B-quantized.w4a16"
     revision = "1c842a5000febac4b335c94a04789a9d4756a18e"
     prompts = [
@@ -167,10 +167,16 @@ def test_humming_packed_experts_generate_with_real_weights(
             )
             outputs.append(result)
 
-    check_logprobs_close(
-        outputs_0_lst=outputs[0],
-        outputs_1_lst=outputs[1],
-        name_0="default",
-        name_1="packed",
-        always_check_logprobs=True,
-    )
+    for reference, packed in zip(*outputs):
+        assert len(reference[0]) == len(packed[0]) == 32
+        for index, (expected, actual) in enumerate(zip(reference[0], packed[0])):
+            # The helper stops at its first comparison. Check each shared prefix.
+            check_logprobs_close(
+                outputs_0_lst=[([expected], "", [reference[2][index]])],
+                outputs_1_lst=[([actual], "", [packed[2][index]])],
+                name_0="default",
+                name_1="packed",
+                always_check_logprobs=True,
+            )
+            if expected != actual:
+                break  # Later predictions have different input histories.
