@@ -133,3 +133,34 @@ def test_transformers_audio_generation(
         name_0="hf",
         name_1="vllm",
     )
+
+
+def test_transformers_audio_mixed_lengths(vllm_runner: type[VllmRunner]):
+    """Audios of different lengths encoded in one batch are split into items, whose
+    ragged fields must each stay a batch of one. One prompt holds both audios, as
+    separate requests may not reach the encoder in the same step."""
+    model_id = "microsoft/VibeVoice-ASR-HF"
+    settings = AUDIO_MODEL_SETTINGS[model_id]
+    target_sr = settings["sampling_rate"]
+    resampler = AudioResampler(target_sr=target_sr)
+
+    assets = [AudioAsset("mary_had_lamb"), AudioAsset("winning_call")]
+    audios = [
+        (resampler.resample(audio, orig_sr=sr), target_sr)
+        for audio, sr in (asset.audio_and_sample_rate for asset in assets)
+    ]
+    placeholder = "<|object_ref_start|><|box_start|><|object_ref_end|>"
+    prompt = settings["prompt"].replace(placeholder, placeholder * 2)
+
+    with vllm_runner(
+        model_id,
+        model_impl="transformers",
+        dtype="bfloat16",
+        max_model_len=2048,
+        enforce_eager=True,
+        limit_mm_per_prompt={"audio": 2},
+        **settings["vllm_runner_kwargs"],
+    ) as vllm_model:
+        [(_, text)] = vllm_model.generate_greedy([prompt], 256, audios=[audios])
+
+    assert "lamb" in text

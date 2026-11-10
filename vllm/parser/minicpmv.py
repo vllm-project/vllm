@@ -2,13 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """MiniCPM-V family parser.
 
-Wraps the Qwen3 grammar (``<think>`` reasoning + XML tool calls) with two
+Wraps the Qwen3 grammar (`<think>` reasoning + XML tool calls) with two
 MiniCPM-V specifics:
 
-- ``<|im_end|>`` and the reserved marker tokens are passthrough terminals,
-  so they never leak into ``content``.
-- The tokenizer decodes a newline as the two characters ``\\`` and ``n``
-  (e.g. token id 1639) instead of ``\\n``, so the decoded text is recovered
+- `<|im_end|>` and the reserved marker tokens are passthrough terminals,
+  so they never leak into `content`.
+- The tokenizer decodes a newline as the two characters `\\` and `n`
+  (e.g. token id 1639) instead of `\\n`, so the decoded text is recovered
   before it reaches the client. Code blocks, inline code and LaTeX are left
   alone, as are tool call arguments.
 """
@@ -47,7 +47,7 @@ def minicpmv_config(thinking: bool) -> ParserEngineConfig:
     """MiniCPM-V grammar: the qwen3 grammar plus MiniCPM-V markers.
 
     Both modes keep the qwen3 tool call terminals and transitions, so
-    ``<tool_call>`` output is parsed whether or not thinking is enabled.
+    `<tool_call>` output is parsed whether or not thinking is enabled.
     """
     name = "minicpmv" if thinking else "minicpmv_no_thinking"
     base = qwen3_config(thinking=thinking, name=name)
@@ -92,7 +92,7 @@ class EscapedNewlineNormalizer:
 
     Scans character by character so that a backslash inside a code block,
     inline code, LaTeX span or a doubled escape is left untouched. A trailing
-    half of an escape is held in ``_pending`` until the next chunk arrives,
+    half of an escape is held in `_pending` until the next chunk arrives,
     which keeps streaming output identical to the non-streaming result.
     """
 
@@ -204,7 +204,7 @@ def recover_newlines(text: str | None) -> str | None:
 
 
 class MiniCPMVOutputNormalizer:
-    """Apply :class:`EscapedNewlineNormalizer` to a whole stream.
+    """Apply `EscapedNewlineNormalizer` to a whole stream.
 
     Reasoning and content are tracked separately so that a half-written escape
     at the end of a reasoning chunk does not swallow the first characters of
@@ -349,9 +349,9 @@ class MiniCPMVParser(Qwen3Parser):
 class MiniCPMVUnifiedParser(DelegatingParser):
     """MiniCPM-V serving parser: the adapters plus newline recovery.
 
-    Recovery cannot live in :class:`MiniCPMVParser`: the serving stack drives
-    the reasoning/tool adapters, never ``ParserEngine.parse`` /
-    ``ParserEngine.parse_delta``, so a rewrite applied there would only be
+    Recovery cannot live in `MiniCPMVParser`: the serving stack drives
+    the reasoning/tool adapters, never `ParserEngine.parse` /
+    `ParserEngine.parse_delta`, so a rewrite applied there would only be
     visible to callers that construct the engine directly.
     """
 

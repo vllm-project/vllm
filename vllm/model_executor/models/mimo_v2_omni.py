@@ -239,7 +239,7 @@ class MiMoVisionAttention(nn.Module):
     ) -> torch.Tensor:
         """Window attention with the per-head sink applied to key 0.
 
-        The reference adds ``sinks[h]`` to the logit of each sequence's first
+        The reference adds `sinks[h]` to the logit of each sequence's first
         key, which the Triton prefill kernel supports directly, so the softmax
         normalizes over the biased scores in one pass.
         """
@@ -911,9 +911,9 @@ class MiMoV2OmniMultiModalProcessor(BaseMultiModalProcessor[MiMoV2OmniProcessing
 
     Key differences from Qwen2.5-VL:
     - Videos use timestamp tokens between temporal grid positions.
-    - The HF processor expects ``(TCHW_tensor, timestamps_T_tensor)`` video
+    - The HF processor expects `(TCHW_tensor, timestamps_T_tensor)` video
       tuples rather than plain numpy arrays.
-    - ``video_start_times`` is tracked so prompt-update reconstruction can
+    - `video_start_times` is tracked so prompt-update reconstruction can
       regenerate the exact same timestamp token IDs.
     """
 

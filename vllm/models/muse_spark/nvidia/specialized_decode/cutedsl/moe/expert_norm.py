@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The BF16 edge layers' ``pre_expert_norm`` of the pooler's gathered
-``[b, 4096]`` BF16 rows as one CuTe kernel, bit for bit the stock norm
-(``fused_rmsnorm_fwd`` with the layer's weight after the norm).
+"""The BF16 edge layers' `pre_expert_norm` of the pooler's gathered
+`[b, 4096]` BF16 rows as one CuTe kernel, bit for bit the stock norm
+(`fused_rmsnorm_fwd` with the layer's weight after the norm).
 
-It is the row norm of ``common/row_norm.py`` at 4096 columns, one CTA of 256
+It is the row norm of `common/row_norm.py` at 4096 columns, one CTA of 256
 threads per row; the weight loads before the PDL wait and the dependents
 launch at the grid's end.
 """
@@ -24,9 +24,9 @@ def rows_view(tensor: torch.Tensor) -> cute.Tensor:
 
 
 class ExpertNorm:
-    """One BF16 edge layer's ``pre_expert_norm`` (its weight applied after the
-    norm), compiled and bound at construction: ``launch(rows, out, m)``
-    writes ``out = norm(rows)`` for the first ``m`` rows, the stock norm's
+    """One BF16 edge layer's `pre_expert_norm` (its weight applied after the
+    norm), compiled and bound at construction: `launch(rows, out, m)`
+    writes `out = norm(rows)` for the first `m` rows, the stock norm's
     bits. Graph-capturable; allocates nothing."""
 
     def __init__(
@@ -44,6 +44,6 @@ class ExpertNorm:
         self.norm = RowNorm(constants, weight)
 
     def launch(self, rows: cute.Tensor, out: cute.Tensor, m: int) -> None:
-        """The norm of the first ``m`` rows of ``rows`` into ``out`` (views
-        from ``rows_view``, bound by the caller, at least ``m`` rows each)."""
+        """The norm of the first `m` rows of `rows` into `out` (views
+        from `rows_view`, bound by the caller, at least `m` rows each)."""
         self.norm.launch(rows, out, m)

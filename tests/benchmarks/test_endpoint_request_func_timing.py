@@ -115,9 +115,9 @@ def _build_stream(
     usage_delay: float = 0.0,
     metrics: dict[str, Any] | None = None,
 ) -> list[tuple[float, bytes]]:
-    """Build ``(delay_before_chunk, payload)`` pairs for one streamed response.
+    """Build `(delay_before_chunk, payload)` pairs for one streamed response.
 
-    ``vllm bench serve`` always requests ``stream_options.include_usage``, so a
+    `vllm bench serve` always requests `stream_options.include_usage`, so a
     choice-less usage chunk always trails the final token.
     """
     chunks = [
@@ -181,9 +181,9 @@ _STREAM_ERROR_MESSAGE = "internal server error during generation"
 def _error_chunk(message: str = _STREAM_ERROR_MESSAGE) -> bytes:
     """The error envelope the server sends inside an HTTP 200 stream.
 
-    The stream generators dump an ``ErrorResponse`` through
-    ``create_streaming_error_response``, so the event carries an ``error``
-    object and no ``choices``. A dead engine, a failed tool parser and a
+    The stream generators dump an `ErrorResponse` through
+    `create_streaming_error_response`, so the event carries an `error`
+    object and no `choices`. A dead engine, a failed tool parser and a
     generation error all arrive this way, so the message itself is arbitrary.
     """
     return _sse(
@@ -519,7 +519,7 @@ def test_error_event_stream_is_not_reported_as_success(
 
     Generation that fails after the response has started cannot change the
     HTTP 200 already sent, so the server reports the failure as an error event
-    before ``[DONE]``. Counting that request as complete hides the failure and
+    before `[DONE]`. Counting that request as complete hides the failure and
     feeds its truncated token count and short latency into the aggregates.
     """
     n_tokens = 2
@@ -862,8 +862,8 @@ def test_chat_reasoning_chunk_is_streamed_output(
 ) -> None:
     """Reasoning deltas count toward TTFT under either field name.
 
-    vLLM streams ``reasoning``; SGLang streams ``reasoning_content`` and omits
-    ``content`` from reasoning deltas.
+    vLLM streams `reasoning`; SGLang streams `reasoning_content` and omits
+    `content` from reasoning deltas.
     """
     tick = 1.0
     clock = _ScriptedClock(tick=tick)
