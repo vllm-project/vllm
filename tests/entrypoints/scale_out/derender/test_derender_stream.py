@@ -359,7 +359,7 @@ def test_non_streaming_derender_initializes_parser_prefix(
         tools=_WEATHER_TOOLS,
     )
 
-    choices, _ = derenderer._derender_chat(response, request)
+    choices, _, _ = derenderer._derender_chat(response, request)
 
     parser.set_prompt_token_ids.assert_called_once_with([11, 12])
     assert choices[0].message.tool_calls[0].function.name == "tool"
@@ -808,7 +808,7 @@ class TestPromptSeededLeadingSpace:
         self, derenderer, leading_space_ids
     ):
         prompt_ids, output_ids, expected = leading_space_ids
-        choices, _ = await derenderer.derender_chat(
+        choices, _, _ = await derenderer.derender_chat(
             GenerateTokensResponse(
                 request_id="t",
                 choices=[
@@ -826,7 +826,7 @@ class TestPromptSeededLeadingSpace:
         self, derenderer, leading_space_ids
     ):
         prompt_ids, output_ids, expected = leading_space_ids
-        choices, _ = await derenderer.derender_chat(
+        choices, _, _ = await derenderer.derender_chat(
             GenerateTokensResponse(
                 request_id="t",
                 choices=[
@@ -845,7 +845,7 @@ class TestPromptSeededLeadingSpace:
     ):
         prompt_ids, output_ids, expected = leading_space_ids
         wrong_ids = tokenizer.encode("a different prompt", add_special_tokens=False)
-        choices, _ = await derenderer.derender_chat(
+        choices, _, _ = await derenderer.derender_chat(
             GenerateTokensResponse(
                 request_id="t",
                 choices=[
@@ -864,7 +864,7 @@ class TestPromptSeededLeadingSpace:
         self, derenderer, leading_space_ids
     ):
         _, output_ids, _ = leading_space_ids
-        choices, _ = await derenderer.derender_chat(
+        choices, _, _ = await derenderer.derender_chat(
             GenerateTokensResponse(
                 request_id="t",
                 choices=[
@@ -1168,7 +1168,7 @@ class TestStreamLogprobs:
         last_chunk = None
         # One token per chunk: every entry after the first needs cross-chunk
         # context to resolve without U+FFFD.
-        for i, tid in enumerate(token_ids):
+        for tid in token_ids:
             last_chunk, state = await derenderer.derender_chat_stream(
                 model=MODEL_NAME,
                 generate_chunk=_make_stream_chunk(
@@ -1582,8 +1582,8 @@ class TestDerenderChatStreamParsed:
     async def test_finish_reason_rewritten_to_tool_calls(
         self, parsed_derenderer, engine_finish_reason, expected_finish_reason
     ):
-        """A streamed tool call is reported as ``tool_calls`` only at a
-        natural stop; a ``length`` cut must stay visible."""
+        """A streamed tool call is reported as `tool_calls` only at a
+        natural stop; a `length` cut must stay visible."""
         chat_request = _chat_request(
             tools=[{"type": "function", "function": {"name": "get_weather"}}],
             tool_choice="auto",
@@ -1955,7 +1955,7 @@ class TestDerenderChatStreamHarmony:
         reasoning = "".join(d.reasoning or "" for d in deltas)
         content = "".join(d.content or "" for d in deltas)
 
-        batch_choices, _ = await harmony_derenderer.derender_chat(
+        batch_choices, _, _ = await harmony_derenderer.derender_chat(
             GenerateTokensResponse(
                 request_id="test-harmony-batch",
                 choices=[
@@ -2263,8 +2263,9 @@ class TestServingDerenderStreamValidation:
 
 
 @pytest.fixture(scope="module")
-def server():
-    with RemoteLaunchRenderServer(MODEL_NAME, []) as remote_server:
+def server(request):
+    args = getattr(request, "param", [])
+    with RemoteLaunchRenderServer(MODEL_NAME, args) as remote_server:
         yield remote_server
 
 
@@ -2788,6 +2789,132 @@ async def test_stream_parsed_include_reasoning_false(parser_client, parser_token
 
 
 @pytest.mark.asyncio
+async def test_stream_parsed_usage_details(parser_client, parser_tokenizer):
+    """The usage only final chunk reports `reasoning_tokens` counted by the
+    reasoning parser over the streamed tokens and passes the generate
+    usage's `prompt_tokens_details` through, as the coupled chat endpoint
+    does."""
+    messages = [{"role": "user", "content": "What is 2+3?"}]
+    gen_req = await _render_parser_chat(parser_client, messages)
+    output_ids = _require_parser_markers(
+        parser_tokenizer, "<think>Two plus three.</think>Five.", "<think>", "</think>"
+    )
+    think_start = parser_tokenizer.convert_tokens_to_ids("<think>")
+    think_end = parser_tokenizer.convert_tokens_to_ids("</think>")
+    reasoning_tokens = output_ids.index(think_end) - output_ids.index(think_start) - 1
+    assert reasoning_tokens > 0
+    prompt_tokens = len(gen_req["token_ids"])
+    chat_request = {"model": PARSER_MODEL, "messages": messages}
+
+    r1 = await parser_client.post(
+        "/v1/chat/completions/derender",
+        json={
+            "stream": True,
+            "model": PARSER_MODEL,
+            "generate_chunk": {
+                "request_id": "usage-test",
+                "choices": [
+                    {"index": 0, "token_ids": output_ids, "finish_reason": "stop"}
+                ],
+            },
+            "prompt_tokens": prompt_tokens,
+            "prompt_token_ids": gen_req["token_ids"],
+            "chat_request": chat_request,
+        },
+    )
+    assert r1.status_code == 200, r1.text
+
+    r2 = await parser_client.post(
+        "/v1/chat/completions/derender",
+        json={
+            "stream": True,
+            "model": PARSER_MODEL,
+            "generate_chunk": {
+                "request_id": "usage-test",
+                "choices": [],
+                "usage": {
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": len(output_ids),
+                    "total_tokens": prompt_tokens + len(output_ids),
+                    "prompt_tokens_details": {"cached_tokens": 4},
+                },
+            },
+            "stream_state": r1.json()["stream_state"],
+            "prompt_tokens": prompt_tokens,
+            "prompt_token_ids": gen_req["token_ids"],
+            "chat_request": chat_request,
+        },
+    )
+    assert r2.status_code == 200, r2.text
+    usage = r2.json()["chunk"]["usage"]
+    assert usage["completion_tokens"] == len(output_ids)
+    assert usage["completion_tokens_details"]["reasoning_tokens"] == reasoning_tokens
+    assert usage["prompt_tokens_details"]["cached_tokens"] == 4
+
+
+@pytest.mark.asyncio
+async def test_stream_parsed_usage_details_n_gt_1_no_reasoning_tokens(
+    parser_client, parser_tokenizer
+):
+    """With `n > 1` the usage only chunk arrives with one index's
+    `stream_state`, so `reasoning_tokens` can't cover every choice the way
+    `completion_tokens` does and `completion_tokens_details` stays `null`.
+    `prompt_tokens_details` still passes through."""
+    messages = [{"role": "user", "content": "What is 2+3?"}]
+    gen_req = await _render_parser_chat(parser_client, messages)
+    output_ids = _require_parser_markers(
+        parser_tokenizer, "<think>Two plus three.</think>Five.", "<think>", "</think>"
+    )
+    prompt_tokens = len(gen_req["token_ids"])
+    chat_request = {"model": PARSER_MODEL, "messages": messages, "n": 2}
+
+    r1 = await parser_client.post(
+        "/v1/chat/completions/derender",
+        json={
+            "stream": True,
+            "model": PARSER_MODEL,
+            "generate_chunk": {
+                "request_id": "usage-n2",
+                "choices": [
+                    {"index": 0, "token_ids": output_ids, "finish_reason": "stop"}
+                ],
+            },
+            "prompt_tokens": prompt_tokens,
+            "prompt_token_ids": gen_req["token_ids"],
+            "chat_request": chat_request,
+        },
+    )
+    assert r1.status_code == 200, r1.text
+
+    r2 = await parser_client.post(
+        "/v1/chat/completions/derender",
+        json={
+            "stream": True,
+            "model": PARSER_MODEL,
+            "generate_chunk": {
+                "request_id": "usage-n2",
+                "choices": [],
+                "usage": {
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": 2 * len(output_ids),
+                    "total_tokens": prompt_tokens + 2 * len(output_ids),
+                    "prompt_tokens_details": {"cached_tokens": 4},
+                },
+            },
+            "stream_state": r1.json()["stream_state"],
+            "prompt_tokens": prompt_tokens,
+            "prompt_token_ids": gen_req["token_ids"],
+            "chat_request": chat_request,
+        },
+    )
+    assert r2.status_code == 200, r2.text
+    usage = r2.json()["chunk"]["usage"]
+    assert usage["completion_tokens"] == 2 * len(output_ids)
+    assert usage["completion_tokens_details"] is None
+    assert usage["prompt_tokens_details"]["cached_tokens"] == 4
+
+
+@pytest.mark.asyncio
 async def test_stream_parsed_missing_chat_request_rejected(parser_client):
     """Parser configured + no chat_request on the streaming endpoint -> 400
     (the live-server counterpart to the mocked
@@ -2833,3 +2960,66 @@ async def test_stream_parsed_missing_prompt_token_ids_rejected(parser_client):
     )
     assert resp.status_code == 400
     assert "prompt_token_ids" in resp.json()["error"]["message"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("endpoint", "server", "server_flag"),
+    [
+        (endpoint, args, flag)
+        for endpoint in ("chat", "parsed", "completion")
+        for flag in (False, True)
+        for args in [
+            (["--return-tokens-as-token-ids"] if flag else [])
+            + (
+                ["--tool-call-parser", "hermes", "--enable-auto-tool-choice"]
+                if endpoint == "parsed"
+                else []
+            )
+        ]
+    ],
+    indirect=["server"],
+    scope="module",
+)
+@pytest.mark.parametrize("override", [None, False, True])
+async def test_streaming_derender_logprob_override(
+    client, tokenizer, server_flag, endpoint, override
+):
+    """Plain/parsed chat and completion chunks honor the request override."""
+    token_id = tokenizer.convert_tokens_to_ids("▁true")
+    logprobs = _generate_logprobs([token_id])
+    logprobs["content"][0]["top_logprobs"] = [{"token_id": token_id, "logprob": -0.5}]
+    chunk = _make_stream_chunk(
+        [token_id], finish_reason="length", logprobs=logprobs
+    ).model_dump(mode="json")
+    chat = endpoint != "completion"
+    original = (
+        {"messages": [], "logprobs": True, "top_logprobs": 1}
+        if chat
+        else {"prompt": "Hi", "logprobs": 1}
+    )
+    if override is not None:
+        original["return_tokens_as_token_ids"] = override
+    response = await client.post(
+        f"/v1/{'chat/completions' if chat else 'completions'}/derender",
+        json={
+            "stream": True,
+            "prompt_token_ids": tokenizer.encode("Hi"),
+            "generate_chunk": chunk,
+            "chat_request" if chat else "completion_request": original,
+        },
+    )
+    response.raise_for_status()
+    placeholders = server_flag if override is None else override
+    expected = f"token_id:{token_id}" if placeholders else " true"
+    choice = response.json()["chunk"]["choices"][0]
+    if chat:
+        entry = choice["logprobs"]["content"][0]
+        assert (entry["token"], entry["bytes"]) == (
+            expected,
+            None if placeholders else list(b" true"),
+        )
+        assert entry["top_logprobs"][0]["token"] == expected
+    else:
+        assert choice["logprobs"]["tokens"] == [expected]
+        assert choice["logprobs"]["top_logprobs"] == [{expected: -0.5}]

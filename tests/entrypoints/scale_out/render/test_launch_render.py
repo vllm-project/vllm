@@ -73,6 +73,27 @@ async def test_chat_render_multi_turn(client):
     assert len(data["token_ids"]) > 0
 
 
+@pytest.mark.asyncio
+async def test_chat_render_multiple_chat_templates():
+    # Ships chat_template.jinja and additional_chat_templates/reranker.jinja
+    model = "Qwen/Qwen3-VL-Reranker-2B"
+    with RemoteLaunchRenderServer(model, [], max_wait_seconds=120) as srv:
+        async with httpx.AsyncClient(
+            base_url=srv.url_for(""), timeout=30.0
+        ) as http_client:
+            response = await http_client.post(
+                "/v1/chat/completions/render",
+                json={
+                    "model": model,
+                    "messages": [{"role": "user", "content": "Hello"}],
+                },
+            )
+
+    assert response.status_code == 200
+    token_ids = response.json()["token_ids"]
+    assert token_ids == [151644, 872, 198, 9707, 151645, 198, 151644, 77091, 198]
+
+
 # -- Completion Render --
 
 

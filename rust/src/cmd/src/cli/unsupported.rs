@@ -407,15 +407,6 @@ pub struct ServerUnsupportedArgs {
     )]
     pub enable_server_load_tracking: Option<Noop>,
 
-    /// If set to True, including usage on every request.
-    #[arg(
-        long,
-        visible_alias = "no-enable-force-include-usage",
-        default_missing_value = "true",
-        num_args = 0..=1
-    )]
-    pub enable_force_include_usage: Option<Unsupported>,
-
     /// If set to True, only enable the Tokens In<>Out endpoint.
     /// This is intended for use in a Disaggregated Everything setup.
     #[arg(
@@ -425,15 +416,6 @@ pub struct ServerUnsupportedArgs {
         num_args = 0..=1
     )]
     pub tokens_only: Option<Unsupported>,
-
-    /// Controls the `system_fingerprint` field on responses: `full`, `hash`,
-    /// `custom`, or `none`.
-    #[arg(long)]
-    pub fingerprint_mode: Option<Unsupported>,
-
-    /// Literal fingerprint string used when `--fingerprint-mode=custom`.
-    #[arg(long)]
-    pub fingerprint_value: Option<Unsupported>,
 
     /// Log level for uvicorn.
     #[arg(long)]
