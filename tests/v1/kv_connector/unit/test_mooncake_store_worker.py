@@ -2976,24 +2976,6 @@ def test_worker_reuse_requires_pd_engine(tmp_path, monkeypatch):
     store.setup.assert_not_called()
 
 
-@pytest.mark.parametrize(
-    ("extra_config", "expected"),
-    [
-        ({"reuse_pd_transfer_engine": True}, True),
-        ({"reuse_pd_transfer_engine": "true"}, True),
-        ({"reuse_pd_transfer_engine": " TRUE "}, True),
-        ({"reuse_pd_transfer_engine": False}, False),
-        ({"reuse_pd_transfer_engine": "false"}, False),
-        ({}, False),
-    ],
-)
-def test_reuse_flag_parsing(extra_config, expected):
-    assert (
-        transfer_engine_registry.reuse_pd_transfer_engine_requested(extra_config)
-        is expected
-    )
-
-
 def test_supports_sleep_mode_with_reused_engine_ignores_store_json(
     tmp_path, monkeypatch
 ):

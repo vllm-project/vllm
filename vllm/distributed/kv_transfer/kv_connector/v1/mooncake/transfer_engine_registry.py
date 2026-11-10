@@ -11,19 +11,12 @@ serialized, so no locking is needed.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
-
-
-def reuse_pd_transfer_engine_requested(extra_config: Mapping[str, Any]) -> bool:
-    """Whether `kv_connector_extra_config` asks the store to borrow the PD engine."""
-    value = extra_config.get("reuse_pd_transfer_engine", False)
-    return str(value).strip().lower() == "true"
 
 
 @dataclass(frozen=True)

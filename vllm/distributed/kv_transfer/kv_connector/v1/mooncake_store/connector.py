@@ -39,9 +39,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     PromMetric,
     PromMetricT,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.transfer_engine_registry import (  # noqa: E501
-    reuse_pd_transfer_engine_requested,
-)
 from vllm.distributed.mooncake_store import MooncakeStoreConfig
 from vllm.forward_context import ForwardContext
 from vllm.logger import init_logger
@@ -140,8 +137,8 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
 
     @classmethod
     def supports_sleep_mode(cls, kv_transfer_config: KVTransferConfig) -> bool:
-        if reuse_pd_transfer_engine_requested(
-            kv_transfer_config.kv_connector_extra_config
+        if kv_transfer_config.kv_connector_extra_config.get(
+            "reuse_pd_transfer_engine", False
         ):
             # The store holds no device regions on a borrowed engine; whether the
             # engine itself can sleep is validated by MooncakeConnector.

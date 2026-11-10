@@ -45,7 +45,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.transfer_engine_registry import (  # noqa: E501
     SharedMooncakeTransferEngine,
     get_shared_transfer_engine,
-    reuse_pd_transfer_engine_requested,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store import rdma_utils
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.coordinator import (  # noqa: E501
@@ -82,10 +81,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.protocol import
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.selective_lease import (  # noqa: E501
     SelectiveLookupLease,
 )
-from vllm.distributed.mooncake_store import (
-    MooncakeStoreConfig,
-    setup_mooncake_store,
-)
+from vllm.distributed.mooncake_store import MooncakeStoreConfig, setup_mooncake_store
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
 from vllm.utils.network_utils import get_ip, make_zmq_socket
@@ -1623,8 +1619,8 @@ class MooncakeStoreWorker:
         # Validate and create the custom memory pool before initializing the
         # store so failures cannot leak a partially initialized store handle.
         self._mem_pool = self._create_mem_pool(extra_config, model_config)
-        self._reuse_pd_transfer_engine = reuse_pd_transfer_engine_requested(
-            extra_config
+        self._reuse_pd_transfer_engine = extra_config.get(
+            "reuse_pd_transfer_engine", False
         )
         shared_engine: Any | None = None
         if self._reuse_pd_transfer_engine:
