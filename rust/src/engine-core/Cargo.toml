@@ -1,0 +1,24 @@
+[package]
+name = "vllm-engine-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Rust port of the vLLM v1 engine core (KV cache management, scheduling)."
+
+[dependencies]
+indexmap = { workspace = true }
+libc = { workspace = true }
+rustc-hash = { workspace = true }
+sha2 = { workspace = true }
+smallvec = { workspace = true }
+thiserror = { workspace = true }
+xxhash-rust = { workspace = true }
+
+[dev-dependencies]
+expect-test = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Without `asm`, sha2 0.10 doesn't use the Armv8 SHA-2 instructions.
+[target.'cfg(target_arch = "aarch64")'.dependencies]
+sha2 = { workspace = true, features = ["asm"] }

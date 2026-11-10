@@ -5,7 +5,9 @@ members = [
     "src/build-info",
     "src/chat",
     "src/cmd",
+    "src/engine-core",
     "src/engine-core-client",
+    "src/engine-core-py",
     "src/llm",
     "src/managed-engine",
     "src/metrics",
@@ -76,6 +78,7 @@ paste = "1.0.15"
 prometheus-client = "0.24.0"
 prometheus-client-derive-encode = "0.5.0"
 prost = "0.14.3"
+pyo3 = { version = "0.28.3", features = ["extension-module", "abi3-py310"] }
 prost-types = "0.14.3"
 protox = "0.9.1"
 rand = "0.9.3"
@@ -143,6 +146,7 @@ validator = { version = "0.20.0", features = ["derive"] }
 vllm-bench = { path = "src/bench" }
 vllm-build-info = { path = "src/build-info" }
 vllm-chat = { path = "src/chat" }
+vllm-engine-core = { path = "src/engine-core" }
 vllm-engine-core-client = { path = "src/engine-core-client" }
 vllm-llm = { path = "src/llm" }
 vllm-managed-engine = { path = "src/managed-engine" }
@@ -155,6 +159,7 @@ vllm-tokenizer = { path = "src/tokenizer" }
 vllm-tracing = { path = "src/tracing" }
 winnow = { version = "1.0.2", features = ["simd"] }
 xgrammar-structural-tag = "0.4.1"
+xxhash-rust = { version = "0.8.18", features = ["xxh3"] }
 zeromq = { git = "https://github.com/zeromq/zmq.rs", rev = "67dcba97559ebe8e8206dab753710d8b9cb07591", default-features = false, features = [
     "tokio-runtime",
     "all-transport",
@@ -176,3 +181,4 @@ tokenizers = { opt-level = 3 }
 [profile.release]
 lto = "thin"
 panic = "abort"
+
