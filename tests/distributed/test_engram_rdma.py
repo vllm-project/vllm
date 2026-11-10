@@ -10,6 +10,8 @@ from pathlib import Path
 
 import pytest
 
+from vllm.distributed.engram_share.provider import get_provider
+from vllm.distributed.engram_share.rdma import provider as rdma_provider
 from vllm.distributed.engram_share.rdma.owner import (
     MAX_COPY_CHUNK,
     _copy_and_sample_row264,
@@ -25,6 +27,64 @@ from vllm.distributed.engram_share.rdma.runtime import (
     OwnerClient,
     OwnerServer,
 )
+
+
+def test_external_provider_is_initialized_only_by_the_loader(tmp_path, monkeypatch):
+    """Loading the interface does not open a remote reader or acquire a lease."""
+    (tmp_path / "test_engram_provider.py").write_text(
+        "reader = None\n"
+        "def get_reader(checkpoint_path=None):\n"
+        "    global reader\n"
+        "    if reader is None:\n"
+        "        if checkpoint_path is None: raise RuntimeError('not initialized')\n"
+        "        reader = checkpoint_path\n"
+        "    return reader\n"
+        "def close_reader():\n"
+        "    global reader\n"
+        "    reader = None\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    provider = get_provider("test_engram_provider")
+    with pytest.raises(RuntimeError, match="not initialized"):
+        provider.get_reader()
+    assert provider.get_reader("checkpoint") == "checkpoint"
+    assert provider.get_reader() == "checkpoint"
+    provider.close_reader()
+    with pytest.raises(RuntimeError, match="not initialized"):
+        provider.get_reader()
+
+
+@pytest.mark.parametrize("retirement_fails", [False, True])
+def test_reader_setup_failure_retires_or_quarantines_runtime(
+    tmp_path, monkeypatch, retirement_fails
+):
+    """A CUDA event failure must not release unsafe registered resources."""
+    runtimes = []
+
+    class Runtime:
+        storage_layout = "row264"
+
+        def __init__(self, checkpoint_path):
+            self.closed = False
+            runtimes.append(self)
+
+        def close(self):
+            if retirement_fails:
+                raise RuntimeError("retirement failed")
+            self.closed = True
+
+    def fail_event():
+        raise RuntimeError("event creation failed")
+
+    quarantined = []
+    monkeypatch.setattr(rdma_provider, "verify_checkpoint_samples", lambda path: None)
+    monkeypatch.setattr(rdma_provider, "ReaderRuntime", Runtime)
+    monkeypatch.setattr(rdma_provider.torch.cuda, "Event", fail_event)
+    monkeypatch.setattr(rdma_provider, "_quarantined", quarantined)
+    with pytest.raises(RuntimeError, match="event creation failed"):
+        rdma_provider.VllmRemoteReader(tmp_path)
+    assert runtimes[0].closed is not retirement_fails
+    assert quarantined == ([runtimes[0]] if retirement_fails else [])
 
 
 class OwnerControlTests(unittest.TestCase):
@@ -324,7 +384,9 @@ def test_engine_checkpoint_must_match_owner_directory(tmp_path, monkeypatch):
     content = bytearray(shard.read_bytes())
     content[-1] ^= 1
     shard.write_bytes(content)
-    assert inspect_checkpoint(b)["checkpoint_identity"] == manifest["checkpoint_identity"]
+    assert (
+        inspect_checkpoint(b)["checkpoint_identity"] == manifest["checkpoint_identity"]
+    )
     total = sum(spec["nbytes"] for spec in manifest["specs"])
     _, samples = _copy_and_sample_row264(manifest, memoryview(bytearray(total)), 528)
     ready = tmp_path / "ready.json"

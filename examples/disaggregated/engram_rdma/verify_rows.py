@@ -114,7 +114,7 @@ def main():
             queued.append((layer, rows, values, ids, output))
     finally:
         # Retire queued work before returning the lease; no preceding CUDA sync.
-        reader.runtime.close()
+        reader.close()
     for layer, rows, values, _, output in queued:
         expected = torch.stack(
             [

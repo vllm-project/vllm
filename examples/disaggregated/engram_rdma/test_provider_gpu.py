@@ -92,7 +92,7 @@ def main():
         def close(self):
             raise RuntimeError("retirement failed")
 
-    retained = SimpleNamespace(runtime=FailingClose())
+    retained = FailingClose()
     vllm_rdma_provider._reader = retained
     try:
         vllm_rdma_provider.close_reader()

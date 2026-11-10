@@ -143,6 +143,10 @@ See the [setup and verification example](../../examples/disaggregated/engram_rdm
 An alternative provider must expose `get_reader(checkpoint_path=None)` and
 `close_reader()` and implement the Engram lookup contract. The model loader
 initializes the reader with its checkpoint path before lookups use it.
+The provider contract is defined in `vllm.distributed.engram_share.provider`.
+The provider owns a worker-local reader: it validates the checkpoint and owns
+the remote lease, registered buffers and lookup ordering. The worker closes the
+reader during shutdown; a failed retirement keeps the reader and lease alive.
 
 The engine model and `ENGRAM_SHARED_MODEL` must resolve to the same local
 checkpoint directory. Remote table readers do not support online weight

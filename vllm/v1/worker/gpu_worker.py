@@ -1890,9 +1890,9 @@ class Worker(WorkerBase):
 
         engram_config = self.vllm_config.engram_config
         if engram_config is not None and engram_config.rdma_provider:
-            import importlib
+            from vllm.distributed.engram_share.provider import get_provider
 
-            importlib.import_module(engram_config.rdma_provider).close_reader()
+            get_provider(engram_config.rdma_provider).close_reader()
 
         # Release kept-alive cumem pools while the pluggable allocator wrappers
         # and callbacks are still alive, so MemPool teardown is not deferred to

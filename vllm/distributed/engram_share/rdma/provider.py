@@ -14,6 +14,7 @@ import torch.nn.functional as F
 import triton
 import triton.language as tl
 
+from vllm.distributed.engram_share.provider import EngramTable
 from vllm.distributed.engram_share.rdma.runtime import Context, OwnerClient
 
 
@@ -211,21 +212,35 @@ class ReaderRuntime:
 
 
 class VllmRemoteReader:
+    """Own the RDMA runtime, scratch and lookup ordering for one worker."""
+
     def __init__(self, checkpoint_path):
         if os.environ.get("ENGRAM_SHARED_PREFETCH") == "1":
             raise RuntimeError("vLLM prototype requires ENGRAM_SHARED_PREFETCH=0")
         verify_checkpoint_samples(checkpoint_path)
         self.checkpoint_path = Path(checkpoint_path).resolve(strict=True)
         self.runtime = ReaderRuntime(self.checkpoint_path)
-        if self.runtime.storage_layout != "row264":
-            self.runtime.close()
-            raise RuntimeError("vLLM prototype requires packed row264 tables")
-        self.consumed = torch.cuda.Event()
+        try:
+            if self.runtime.storage_layout != "row264":
+                raise RuntimeError("vLLM prototype requires packed row264 tables")
+            self.consumed = torch.cuda.Event()
+        except BaseException:
+            try:
+                self.runtime.close()
+            except BaseException:
+                _quarantined.append(self.runtime)
+            raise
         self.inflight = False
         self.last_stream = None
         self.captured_stream = None
 
-    def lookup(self, table, indices, out, background=False):
+    def lookup(
+        self,
+        table: EngramTable,
+        indices: torch.Tensor,
+        out: torch.Tensor,
+        background: bool = False,
+    ) -> None:
         capturing = torch.cuda.is_current_stream_capturing()
         if capturing and not getattr(table, "rdma_full_decode_graph", False):
             raise RuntimeError("remote lookup must run at a vLLM eager boundary")
@@ -251,7 +266,9 @@ class VllmRemoteReader:
             self.captured_stream is not None
             and self.captured_stream != stream.cuda_stream
         ):
-            raise RuntimeError("captured remote reader must stay on its prefetch stream")
+            raise RuntimeError(
+                "captured remote reader must stay on its prefetch stream"
+            )
         if self.inflight:
             if capturing and self.last_stream != stream.cuda_stream:
                 raise RuntimeError("warm remote reader on capture stream")
@@ -284,6 +301,10 @@ class VllmRemoteReader:
         if capturing:
             self.captured_stream = stream.cuda_stream
 
+    def close(self) -> None:
+        """Retire GPU and NIC work before returning the owner lease."""
+        self.runtime.close()
+
 
 _reader = None
 
@@ -305,5 +326,5 @@ def close_reader():
     """Retire GPU/NIC work before releasing the owner lease."""
     global _reader
     if _reader is not None:
-        _reader.runtime.close()
+        _reader.close()
         _reader = None

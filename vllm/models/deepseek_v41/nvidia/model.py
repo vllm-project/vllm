@@ -1750,11 +1750,9 @@ class DeepseekV41LLMForCausalLM(
         if self.model.vllm_config.engram_config and (
             self.model.vllm_config.engram_config.rdma_provider
         ):
-            import importlib
+            from vllm.distributed.engram_share.provider import get_provider
 
-            provider = importlib.import_module(
-                self.model.vllm_config.engram_config.rdma_provider
-            )
+            provider = get_provider(self.model.vllm_config.engram_config.rdma_provider)
             # Validate the owner and establish the registered reader before
             # accepting externally backed parameters as loaded.
             provider.get_reader(self.model.vllm_config.model_config.model)

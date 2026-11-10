@@ -65,6 +65,7 @@ from vllm.distributed.device_communicators.shm_broadcast import (
     SHM_PATH,
     check_shm_free_space,
 )
+from vllm.distributed.engram_share.provider import get_provider
 from vllm.distributed.parallel_state import GroupCoordinator, in_the_same_node_as
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
@@ -97,8 +98,10 @@ def _validate_remote_graph_mode(
         mode == CUDAGraphMode.FULL_DECODE_ONLY
         or (mode == CUDAGraphMode.FULL_AND_PIECEWISE and breakable)
     )
-    if not enforce_eager and not allowed_full and (
-        mode != CUDAGraphMode.PIECEWISE or not breakable
+    if (
+        not enforce_eager
+        and not allowed_full
+        and (mode != CUDAGraphMode.PIECEWISE or not breakable)
     ):
         raise ValueError(
             "rdma_provider requires enforce_eager, breakable PIECEWISE, or "
@@ -1315,9 +1318,7 @@ class ParallelEngramEmbedding(nn.Module):
             return
         if self.rdma_provider:
             if self._rdma_reader is None:
-                import importlib
-
-                provider = importlib.import_module(self.rdma_provider)
+                provider = get_provider(self.rdma_provider)
                 self._rdma_reader = provider.get_reader()
             self._rdma_reader.lookup(self, indices, out, background)
             return
