@@ -399,6 +399,19 @@ class XPUPlatform(Platform):
                 "XPU Graph is not compatible with sleep mode, disabling cudagraph_mode."
             )
 
+        if (
+            vllm_config.parallel_config.enable_expert_parallel
+            and vllm_config.parallel_config.all2all_backend == "mooncake"
+            and compilation_config.cudagraph_mode != CUDAGraphMode.NONE
+        ):
+            # Serving hangs once the Mooncake EP XPU dispatch and combine are
+            # recorded into XPU graphs; eager and compiled runs are fine.
+            compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+            logger.warning_once(
+                "XPU Graph is not compatible with the mooncake all2all "
+                "backend, disabling cudagraph_mode."
+            )
+
         # Disable fusion passes not yet supported on XPU.
         from vllm.config.compilation import CompilationMode
 
