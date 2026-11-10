@@ -176,9 +176,15 @@ def maybe_rocm_profiling_fallback(profile_result: MemoryProfilingResult) -> int 
 
 if TYPE_CHECKING:
     from vllm.device_allocator.sleep_mode_backend import SleepModeBackend
+    from vllm.distributed.pp_transport import PPTransport
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
     from vllm.v1.worker.gpu.model_runner import GPUModelRunner
-    from vllm.v1.worker.gpu.pp_transport import PPTransport, PPTransportMode
+    from vllm.v1.worker.gpu.pp_transport import (
+        PPTransport as RocmPPTransport,
+    )
+    from vllm.v1.worker.gpu.pp_transport import (
+        PPTransportMode,
+    )
 
 
 class AsyncIntermediateTensors(IntermediateTensors):
@@ -264,9 +270,11 @@ class Worker(WorkerBase):
         self.profiler_config = vllm_config.profiler_config
         validate_worker_profiler_config(self.profiler_config)
 
-        self._pp_transport: PPTransport | None = None
+        self._rocm_pp_transport: RocmPPTransport | None = None
         # Device handles of the previous step's PP intermediate-tensor send.
         self._pp_send_work: list[Handle] = []
+        # Chosen by VLLM_PP_TRANSPORT in load_model; None sends over NCCL.
+        self._pp_transport: PPTransport | None = None
 
         # Resolved lazily on first sleep/wake; persists worker-process state.
         self._sleep_mode_backend: SleepModeBackend | None = None
@@ -319,8 +327,8 @@ class Worker(WorkerBase):
         return set(storage.values()) - preserved
 
     def sleep(self, level: int = 1) -> None:
-        if self._pp_transport is not None:
-            self._pp_transport.drain()
+        if self._rocm_pp_transport is not None:
+            self._rocm_pp_transport.drain()
         torch.accelerator.synchronize()
         free_bytes_before_sleep = torch.accelerator.get_memory_info()[0]
         # Level 2 keeps everything the weight update doesn't rewrite.
@@ -616,6 +624,18 @@ class Worker(WorkerBase):
                 format_gib(self.requested_memory),
             )
 
+        if (
+            envs.VLLM_PP_TRANSPORT != "nccl"
+            and self._pp_transport is None
+            and self._rocm_pp_transport is None
+        ):
+            # After init_device, so memory profiling counts its buffers.
+            from vllm.distributed.pp_transport import create_pp_transport
+
+            self._pp_transport = create_pp_transport(
+                self.vllm_config, self.model_runner.intermediate_tensors
+            )
+
         if has_ec_transfer():
             get_ec_transfer().start_worker_services()
 
@@ -651,7 +671,7 @@ class Worker(WorkerBase):
                     "FP8 PP transport requires VLLM_ROCM_USE_AITER and AITER"
                 )
 
-        from vllm.v1.worker.gpu.pp_transport import PPTransport
+        from vllm.v1.worker.gpu.pp_transport import PPTransport as RocmPPTransport
 
         chunk_tokens = self.scheduler_config.max_num_batched_tokens
         model = self.model_runner.get_model()
@@ -660,7 +680,7 @@ class Worker(WorkerBase):
             dtype=self.model_config.dtype,
             device=self.device,
         )
-        self._pp_transport = PPTransport(
+        self._rocm_pp_transport = RocmPPTransport(
             mode=cast("PPTransportMode", mode),
             schema=schema,
             chunk_tokens=chunk_tokens,
@@ -1214,11 +1234,9 @@ class Worker(WorkerBase):
 
             maybe_save_startup_plan(self, kv_cache_memory_bytes_to_requested_limit)
 
-        if get_pp_group().is_last_rank and not self.model_runner.is_pooling_model:
-            # Warm up the sampler and keep its max-batch buffers (e.g. the
-            # fp32 logits copy) cached after the empty_cache() in
-            # capture_model(), so later steps reuse them instead of reserving
-            # a new, larger block at each new batch size.
+        if not self.model_runner.is_pooling_model:
+            # Every PP rank runs an attention-bearing forward here, so lazily
+            # built attention state is ready before the sync check below.
             max_num_reqs = min(
                 self.scheduler_config.max_num_seqs,
                 self.scheduler_config.max_num_batched_tokens,
@@ -1228,7 +1246,13 @@ class Worker(WorkerBase):
             _, sample_hidden_states = self.model_runner._dummy_run(
                 num_tokens=max_num_reqs, skip_eplb=True
             )
-            self.model_runner._dummy_sampler_run(hidden_states=sample_hidden_states)
+            if get_pp_group().is_last_rank:
+                # Warm up the sampler and keep its max-batch buffers (e.g. the
+                # fp32 logits copy) cached after the empty_cache() in
+                # capture_model(), so later steps reuse them instead of
+                # reserving a new, larger block at each new batch size.
+                assert sample_hidden_states is not None
+                self.model_runner._dummy_sampler_run(hidden_states=sample_hidden_states)
             del sample_hidden_states
 
         # Reset the seed to ensure that the random state is not affected by
@@ -1499,14 +1523,16 @@ class Worker(WorkerBase):
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         use_fixed_pp_transport = (
             forward_pass
-            and self._pp_transport is not None
-            and self._pp_transport.can_transfer(num_scheduled_tokens)
+            and self._rocm_pp_transport is not None
+            and self._rocm_pp_transport.can_transfer(num_scheduled_tokens)
         )
-        if forward_pass and not get_pp_group().is_first_rank:
+        if forward_pass and self._pp_transport and not get_pp_group().is_first_rank:
+            intermediate_tensors = self._pp_transport.recv(get_pp_group())
+        elif forward_pass and not get_pp_group().is_first_rank:
             if use_fixed_pp_transport:
-                assert self._pp_transport is not None
+                assert self._rocm_pp_transport is not None
                 tensor_dict, comm_handles, comm_postprocess = (
-                    self._pp_transport.receive()
+                    self._rocm_pp_transport.receive()
                 )
             else:
                 tensor_dict, comm_handles, comm_postprocess = (
@@ -1540,19 +1566,24 @@ class Worker(WorkerBase):
         )
 
         if use_fixed_pp_transport:
-            assert self._pp_transport is not None
+            assert self._rocm_pp_transport is not None
             if set(output.tensors) != {"hidden_states"}:
                 raise ValueError(
                     "Fixed PP transport requires a single hidden_states tensor"
                 )
-            self._pp_transport.send(output.tensors["hidden_states"])
-        elif self._pp_transport is not None:
-            self._pp_transport.send_generic(
+            self._rocm_pp_transport.send(output.tensors["hidden_states"])
+        elif self._rocm_pp_transport is not None:
+            self._rocm_pp_transport.send_generic(
                 output.tensors,
                 all_gather_group=get_tp_group(),
                 all_gather_tensors={},
             )
+        elif self._pp_transport is not None:
+            self._pp_transport.send(output.tensors, get_pp_group())
         else:
+            # Non-blocking send of the intermediate tensors. The metadata handle
+            # is reaped lazily by the GroupCoordinator; the device handles are
+            # waited at the top of the next step.
             handles = get_pp_group().isend_tensor_dict(
                 output.tensors,
                 all_gather_group=get_tp_group(),
@@ -1854,8 +1885,8 @@ class Worker(WorkerBase):
     def shutdown(self) -> None:
         gc.unfreeze()
 
-        if self._pp_transport is not None:
-            self._pp_transport.drain()
+        if self._rocm_pp_transport is not None:
+            self._rocm_pp_transport.drain()
 
         # has_kv_transfer_group can be None during interpreter shutdown.
         if ensure_kv_transfer_shutdown is not None:

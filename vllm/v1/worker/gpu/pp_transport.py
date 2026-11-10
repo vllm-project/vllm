@@ -105,9 +105,7 @@ class PPTransport:
         self._generic_send_work: list[list[Handle]] = []
         self._ready_events = [torch.cuda.Event() for _ in range(ring_size)]
 
-        self._recv_buffer = (
-            None if self._group.is_first_rank else hidden_states
-        )
+        self._recv_buffer = None if self._group.is_first_rank else hidden_states
         self._recv_quant: torch.Tensor | None = None
         self._recv_scale: torch.Tensor | None = None
         self._send_scale_ring: list[torch.Tensor] = []
