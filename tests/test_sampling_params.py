@@ -112,6 +112,7 @@ def test_diffusion_canvas_width_is_accepted_with_either_scheduler(
         diffusion_config=DiffusionConfig(canvas_length=8),
         tokenizer=None,
         validate_logits_processors_params=lambda params: None,
+        resolve_watermarking=lambda params: False,
     )
     params = SamplingParams(extra_args=extra_args)
     InputProcessor._validate_params(processor, params, ("generate",))

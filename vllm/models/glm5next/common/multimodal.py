@@ -46,6 +46,7 @@ from vllm.model_executor.models.vision import (
 )
 from vllm.models.common.ops import fused_q_kv_rmsnorm
 from vllm.multimodal.parse import ImageSize, MultiModalDataItems
+from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 
@@ -192,6 +193,7 @@ class Glm5NextVisionAttention(nn.Module):
         rotary_pos_emb_cos: torch.Tensor,
         rotary_pos_emb_sin: torch.Tensor,
         max_seqlen: torch.Tensor | None = None,
+        sequence_lengths: torch.Tensor | None = None,  # Only used for FlashInfer
     ) -> torch.Tensor:
         x, _ = self.qkv(x)
         q, k, v = self.split_qkv(x)
@@ -210,7 +212,9 @@ class Glm5NextVisionAttention(nn.Module):
         q = q.view(q_shape)
         k = k.view(k_shape)
 
-        q, k, v = (rearrange(t, "s b ... -> b s ...").contiguous() for t in (q, k, v))
+        q, k = (rearrange(t, "s b ... -> b s ...").contiguous() for t in (q, k))
+        # Keep v a view into qkv, as FlashInfer's cu_seqlens expect.
+        v = rearrange(v, "s b ... -> b s ...")
         if rotary_pos_emb_cos is not None and rotary_pos_emb_sin is not None:
             qk_concat = torch.cat([q, k], dim=0)
             qk_rotated = self.apply_rotary_emb(
@@ -226,6 +230,7 @@ class Glm5NextVisionAttention(nn.Module):
             value=v,
             cu_seqlens=cu_seqlens,
             max_seqlen=max_seqlen,
+            sequence_lengths=sequence_lengths,
         )
         context_layer = rearrange(context_layer, "b s h d -> s b (h d)").contiguous()
 
@@ -272,6 +277,7 @@ class Glm5NextVisionBlock(nn.Module):
         rotary_pos_emb_cos: torch.Tensor,
         rotary_pos_emb_sin: torch.Tensor,
         max_seqlen: int | None = None,
+        sequence_lengths: torch.Tensor | None = None,  # Only used for FlashInfer
     ) -> torch.Tensor:
         x_attn = self.attn(
             self.norm1(x),
@@ -279,6 +285,7 @@ class Glm5NextVisionBlock(nn.Module):
             rotary_pos_emb_cos=rotary_pos_emb_cos,
             rotary_pos_emb_sin=rotary_pos_emb_sin,
             max_seqlen=max_seqlen,
+            sequence_lengths=sequence_lengths,
         )
         x_fused_norm, residual = self.norm2(x, residual=x_attn)
         x = residual + self.mlp(x_fused_norm)
@@ -395,7 +402,7 @@ class Glm5NextVisionTransformer(nn.Module):
         head_dim = self.hidden_size // self.num_heads
         self.rotary_pos_emb = get_rope(
             head_size=head_dim,
-            max_position=8192,
+            max_position=text_config.max_position_embeddings,
             is_neox_style=True,
             rope_parameters={"partial_rotary_factor": 0.5},
         )
@@ -479,7 +486,7 @@ class Glm5NextVisionTransformer(nn.Module):
 
         cos, sin = self.rotary_pos_emb.get_cos_sin(max_grid_size)
 
-        pos_ids = pos_ids.to(cos.device, non_blocking=True)
+        pos_ids = async_tensor_h2d(pos_ids, device=cos.device)
         cos_combined = cos[pos_ids].flatten(1)
         sin_combined = sin[pos_ids].flatten(1)
         return cos_combined, sin_combined, pos_ids
@@ -573,6 +580,17 @@ class Glm5NextVisionTransformer(nn.Module):
         x = self.input_norm(x.to(device=self.device), self.dtype)
         x = self.patch_embed(x)
 
+        if (
+            encoder_metadata is None
+            and self.attn_backend == AttentionBackendEnum.FLASHINFER
+        ):
+            # FlashInfer needs the backend-specific cu_seqlens and
+            # sequence_lengths.
+            if not isinstance(grid_thw, list):
+                grid_thw = grid_thw.tolist()
+            encoder_metadata = self.prepare_encoder_metadata(grid_thw)
+
+        sequence_lengths = None
         if encoder_metadata is not None:
             # Encoder CUDA-graph path (PR #49852): rotary/cu_seqlens/max_seqlen are
             # precomputed by prepare_encoder_metadata (which uses rot_pos_emb exactly
@@ -582,6 +600,7 @@ class Glm5NextVisionTransformer(nn.Module):
             rotary_pos_emb_sin = encoder_metadata["rotary_pos_emb_sin"]
             cu_seqlens = encoder_metadata["cu_seqlens"]
             max_seqlen = encoder_metadata["max_seqlen"]
+            sequence_lengths = encoder_metadata["sequence_lengths"]
         else:
             if isinstance(grid_thw, list):
                 grid_thw = torch.tensor(grid_thw, dtype=torch.int32)
@@ -590,7 +609,7 @@ class Glm5NextVisionTransformer(nn.Module):
                 grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]
             ).cumsum(dim=0, dtype=torch.int32)
             cu_seqlens = torch.cat([cu_seqlens.new_zeros(1), cu_seqlens])
-            cu_seqlens = cu_seqlens.to(self.device, non_blocking=True)
+            cu_seqlens = async_tensor_h2d(cu_seqlens, device=self.device)
             max_seqlen = self.compute_attn_mask_seqlen(cu_seqlens)
 
         # transformers
@@ -602,6 +621,7 @@ class Glm5NextVisionTransformer(nn.Module):
                 rotary_pos_emb_cos=rotary_pos_emb_cos,
                 rotary_pos_emb_sin=rotary_pos_emb_sin,
                 max_seqlen=max_seqlen,
+                sequence_lengths=sequence_lengths,
             )
 
         # adapter
@@ -623,9 +643,9 @@ _MAX_VIDEO_TOKENS = 30000
 class Glm5NextProcessingInfo(Glm4vProcessingInfo):
     """Token-budget geometry for the multimodal checkpoint.
 
-    This checkpoint's ``processor_config.json`` ships the token-budget style
-    (``min_image_tokens`` / ``max_image_tokens``) with no ``size`` key, so the
-    inherited Glm4v ``size.longest_edge`` path does not apply.
+    This checkpoint's `processor_config.json` ships the token-budget style
+    (`min_image_tokens` / `max_image_tokens`) with no `size` key, so the
+    inherited Glm4v `size.longest_edge` path does not apply.
     """
 
     def get_hf_processor(self, **kwargs: object):
@@ -639,13 +659,13 @@ class Glm5NextProcessingInfo(Glm4vProcessingInfo):
 
     @staticmethod
     def _alignment_factor(proc) -> int:
-        """Spatial factor canvases align to, as ``smart_resize`` takes it."""
+        """Spatial factor canvases align to, as `smart_resize` takes it."""
         return proc.patch_size * proc.merge_size * proc.patch_expand_factor
 
     @classmethod
     def _pixels_per_token(cls, proc) -> int:
-        """Pixels one vision token covers, matching ``smart_resize``'s own
-        ``temporal_factor * factor ** 2``."""
+        """Pixels one vision token covers, matching `smart_resize`'s own
+        `temporal_factor * factor ** 2`."""
         return proc.temporal_patch_size * cls._alignment_factor(proc) ** 2
 
     def _processor_pixel_budget(self, proc) -> tuple[int, int]:
@@ -702,23 +722,25 @@ class Glm5NextProcessingInfo(Glm4vProcessingInfo):
         """Timestamps for the video placeholder, from the pixel path's sampler.
 
         The inherited GLM-4.6V timestamp sampling uses different constants
-        than this checkpoint's ``Glm5NextVideoProcessor`` pixel sampling, so
-        placeholder count and ``video_grid_thw`` disagree outside 30-300s
+        than this checkpoint's `Glm5NextVideoProcessor` pixel sampling, so
+        placeholder count and `video_grid_thw` disagree outside 30-300s
         durations. Sampling with the pixel path's own policy makes one
-        timestamp per temporal patch == ``grid_t``.
+        timestamp per temporal patch == `grid_t`.
         """
         video_processor = self.get_video_processor()
         temporal_patch_size = int(
             getattr(video_processor, "temporal_patch_size", 1) or 1
         )
         video_fps = float(metadata["fps"])
+        do_sample_frames = metadata.get("do_sample_frames", True)
 
-        if not metadata.get("do_sample_frames", True):
-            # The loader already picked the frames and the processor keeps them
-            # as they are, so the frame count is what was handed in and
-            # ``frames_indices`` only supplies the timestamp values.
+        if not do_sample_frames:
+            # Loader or HF write-back already picked the frames; use those
+            # indices for timestamps. After HF write-back, do_sample_frames is
+            # cleared so the count is len(frames_indices); a pre-sampled loader
+            # hands in frames whose count matches frames_indices.
             frame_indices = [int(idx) for idx in metadata["frames_indices"]]
-            num_frames = int(total_frames)
+            num_frames = len(frame_indices)
         else:
             frame_indices = [
                 int(idx)
@@ -766,9 +788,9 @@ class Glm5NextProcessingInfo(Glm4vProcessingInfo):
         """GLM-5.3-Flash canvas geometry for token budgeting and dummy inputs.
 
         The inherited Glm4v path resolves the pixel budget from
-        ``size.longest_edge`` and resizes with GLM-4V's ``smart_resize``. This
+        `size.longest_edge` and resizes with GLM-4V's `smart_resize`. This
         checkpoint ships token bounds instead, and the alignment factor carries
-        ``patch_expand_factor`` — resolve both from the processor so profiling
+        `patch_expand_factor` — resolve both from the processor so profiling
         matches runtime geometry.
         """
         from transformers.models.glm5_next.image_processing_glm5_next import (
@@ -817,12 +839,9 @@ class Glm5NextProcessingInfo(Glm4vProcessingInfo):
 
 
 class Glm5NextMultiModalProcessor(Glm4vMultiModalProcessor):
-    """``Glm5NextProcessor`` extracts image/video features
+    """`Glm5NextProcessor` extracts image/video features
     only and passes the prompt text through unchanged, so prompt expansion
-    (image token repeat, video frame/timestamp structure) is owned by vLLM's
-    prompt-update machinery — the inherited ``_get_prompt_updates`` builds
-    the replacement content and the placeholder scan validates against
-    exactly that."""
+    is owned by the inherited GLM-4V prompt-update machinery."""
 
     def _hf_processor_applies_updates(
         self,

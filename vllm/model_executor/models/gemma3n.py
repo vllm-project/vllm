@@ -350,17 +350,7 @@ class Gemma3nAttention(nn.Module):
         is_sliding = layer_type == "sliding_attention"
         self.sliding_window = config.sliding_window if is_sliding else None
 
-        # Initialize the rotary embedding.
-        if layer_type in config.rope_parameters:
-            # Transformers v5 rope config.
-            rope_parameters = config.rope_parameters[layer_type]
-        else:
-            # Transformers v4 rope config.
-            # Global attention. Use the values in config.json.
-            rope_parameters = config.rope_parameters.copy()
-            # Local attention. Override the values in config.json.
-            if is_sliding:
-                rope_parameters["rope_theta"] = config.rope_local_base_freq
+        rope_parameters = config.rope_parameters[layer_type]
 
         kv_sharing_target_layer_name = None
         if self.is_kv_shared_layer:
@@ -480,7 +470,7 @@ class Gemma3nDecoderLayer(nn.Module):
         )
         self.mlp = Gemma3nMLP(
             hidden_size=config.hidden_size,
-            # NOTE: Matformer https://github.com/huggingface/transformers/blob/a52478253bbe522a420e88ea3940d4d98a935300/src/transformers/models/gemma3n/modular_gemma3n.py#L258 # noqa: E501
+            # NOTE: Matformer https://github.com/huggingface/transformers/blob/a52478253bbe522a420e88ea3940d4d98a935300/src/transformers/models/gemma3n/modular_gemma3n.py#L258
             intermediate_size=config.intermediate_size[extract_layer_index(prefix)],
             hidden_activation=config.hidden_activation,
             quant_config=quant_config,

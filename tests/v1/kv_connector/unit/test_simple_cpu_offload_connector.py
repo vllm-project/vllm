@@ -4,8 +4,11 @@
 
 from __future__ import annotations
 
+from unittest.mock import MagicMock
+
 import pytest
 
+from tests.v1.kv_connector.unit.test_multi_connector import _lookahead_connector_config
 from tests.v1.kv_connector.unit.utils import create_vllm_config
 from tests.v1.simple_kv_offload.test_scheduler import (
     _BYTES_PER_BLOCK,
@@ -13,11 +16,15 @@ from tests.v1.simple_kv_offload.test_scheduler import (
     DTYPE,
     HEAD_SIZE,
     NUM_KV_HEADS,
+    _make_lookahead_config,
 )
+from vllm.config import KVTransferConfig
+from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
 from vllm.distributed.kv_transfer.kv_connector.v1.simple_cpu_offload_connector import (
     SimpleCPUOffloadConnector,
 )
+from vllm.v1.engine import core as engine_core_module
 from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
     FullAttentionSpec,
@@ -74,6 +81,49 @@ def _make_connector(
         kv_cache_config=kv_cache_config,
     )
     return connector
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("supported", [False, True])
+def test_multi_cpu_coordinator_uses_parent_hash_protocol(supported):
+    num_lookahead = 5
+    config = _make_lookahead_config(num_lookahead)
+    children = [
+        {
+            "kv_connector": "SimpleCPUOffloadConnector",
+            "kv_role": "kv_both",
+            "kv_connector_extra_config": {"num_cpu_blocks": 8},
+        },
+        {
+            "kv_connector": "SimpleCPUOffloadConnector",
+            "kv_role": "kv_both",
+            "kv_connector_extra_config": {"num_cpu_blocks": 8},
+        }
+        if supported
+        else _lookahead_connector_config(False),
+    ]
+    children[0] = {
+        "kv_connector": "MultiConnector",
+        "kv_role": "kv_both",
+        "kv_connector_extra_config": {"connectors": [children[0]]},
+    }
+    config.kv_transfer_config = KVTransferConfig(
+        kv_connector="MultiConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={"connectors": children},
+    )
+    config.scheduler_config.disable_hybrid_kv_cache_manager = True
+    config.num_hash_lookahead_tokens = config._resolve_num_hash_lookahead_tokens()
+    connector = KVConnectorFactory.create_connector(
+        config, KVConnectorRole.SCHEDULER, _make_kv_cache_config()
+    )
+    child = connector.sub_connectors[0].sub_connectors[0]
+    expected = num_lookahead if supported else 0
+    assert config.num_hash_lookahead_tokens == expected
+    assert not config.speculative_config.disable_lookahead_block_hashes
+    coord = child.scheduler_manager.cpu_coordinator
+    assert coord.block_pool.num_hash_lookahead_tokens == expected
+    assert coord.drop_eagle_group_ids == (set() if supported else {0})
 
 
 def test_disk_mode_rejects_non_positive_capacity() -> None:
@@ -147,3 +197,64 @@ def test_ring_scratch_group_is_accepted_and_never_offloaded() -> None:
     # Only the paged group takes part in CPU-side hit lookup.
     attention_groups = scheduler.cpu_coordinator.attention_groups
     assert [g.group_ids for g in attention_groups] == [[0]]
+
+
+@pytest.mark.parametrize(
+    "connector, prefix_caching, worker_blocks, expected_blocks",
+    [
+        (None, True, 37, None),
+        ("NixlConnector", True, 37, None),
+        ("SimpleCPUOffloadConnector", False, 37, None),
+        ("SimpleCPUOffloadConnector", True, 37, 37),
+        ("MultiConnector", True, 37, 37),
+        ("SimpleCPUOffloadConnector", True, None, None),
+    ],
+)
+@pytest.mark.parametrize("extensible", [False, True])
+def test_engine_queries_offload_blocks_only_when_enabled(
+    monkeypatch, connector, prefix_caching, worker_blocks, expected_blocks, extensible
+) -> None:
+    """Only active offload queries workers, which must return a block count.
+
+    An extensible KV cache creates the connector in `extend_kv_cache`, so the
+    query must follow it.
+    """
+    config = create_vllm_config(
+        kv_connector=connector or "SimpleCPUOffloadConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={
+            "connectors": [
+                {"kv_connector": "SimpleCPUOffloadConnector", "kv_role": "kv_both"}
+            ]
+        },
+    )
+    if connector is None:
+        config.kv_transfer_config = None
+    config.cache_config.enable_prefix_caching = prefix_caching
+    config.cache_config.enable_extensible_kv_cache = extensible
+    kv_config = KVCacheConfig(num_blocks=16, kv_cache_tensors=[], kv_cache_groups=[])
+    executor = MagicMock()
+    executor.get_kv_cache_specs.return_value = [{}]
+    executor.get_simple_cpu_offload_num_blocks.return_value = worker_blocks
+    engine = object.__new__(engine_core_module.EngineCore)
+    engine.model_executor = executor
+    monkeypatch.setattr(
+        engine_core_module, "get_kv_cache_configs", lambda *args: [kv_config]
+    )
+
+    if worker_blocks is None:
+        with pytest.raises(AssertionError, match="workers must report"):
+            engine._initialize_kv_caches(config)
+        return
+    engine._initialize_kv_caches(config)
+
+    assert executor.get_simple_cpu_offload_num_blocks.call_count == (
+        expected_blocks is not None
+    )
+    assert config.cache_config.simple_cpu_offload_num_blocks == expected_blocks
+    calls = [name for name, _, _ in executor.mock_calls]
+    assert ("extend_kv_cache" in calls) == extensible
+    if extensible and expected_blocks is not None:
+        assert calls.index("extend_kv_cache") < calls.index(
+            "get_simple_cpu_offload_num_blocks"
+        )

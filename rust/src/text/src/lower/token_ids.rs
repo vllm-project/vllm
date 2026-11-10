@@ -8,10 +8,27 @@ use vllm_engine_core_client::protocol::sampling::EngineCoreSamplingParams;
 
 use crate::SamplingLimits;
 
+const MAX_NUM_BAD_WORDS_ENV: &str = "VLLM_MAX_NUM_BAD_WORDS";
+const DEFAULT_MAX_NUM_BAD_WORDS: usize = 128;
+const MAX_BAD_WORDS_TOTAL_TOKENS_ENV: &str = "VLLM_MAX_BAD_WORDS_TOTAL_TOKENS";
+const DEFAULT_MAX_BAD_WORDS_TOTAL_TOKENS: usize = 1024;
+
 #[derive(Debug, Error)]
 pub enum TokenIdsError {
     #[error("allowed_token_ids should not be empty")]
     EmptyAllowedTokenIds,
+    #[error("bad_words_token_ids must not contain empty sequences")]
+    EmptyBadWordSequence,
+    #[error("bad_words cannot contain an empty string.")]
+    EmptyBadWord,
+    #[error("bad_words entries must tokenize to at least one token.")]
+    EmptyBadWordTokenization,
+    #[error("Too many bad words: {count}. The max number is {max}.")]
+    TooManyBadWords { count: usize, max: usize },
+    #[error("Too many bad words after tokenization: {count}. The max number is {max}.")]
+    TooManyTokenizedBadWords { count: usize, max: usize },
+    #[error("Too many total bad word tokens: {count}. The max is {max}.")]
+    TooManyBadWordTokens { count: usize, max: usize },
     #[error(
         "token_id(s) {token_ids:?} in {parameter} are out of vocabulary. \
          Vocabulary size: {vocab_size}"
@@ -41,6 +58,36 @@ fn validate_param(
         token_ids: invalid_token_ids,
         vocab_size,
     })
+}
+
+fn env_limit(name: &str, default: usize) -> usize {
+    std::env::var(name).ok().and_then(|value| value.parse().ok()).unwrap_or(default)
+}
+
+/// The per-request cap on bad-word sequences.
+pub(super) fn max_num_bad_words() -> usize {
+    env_limit(MAX_NUM_BAD_WORDS_ENV, DEFAULT_MAX_NUM_BAD_WORDS)
+}
+
+/// Mirrors Model Runner V2's per-request bad-words buffer limits:
+/// <https://github.com/vllm-project/vllm/blob/a956a8126e6bd184cb0a6b8f7318fe4717675c2f/vllm/v1/worker/gpu/sample/bad_words.py#L40-L66>
+fn validate_bad_words_limits(bad_words_token_ids: &[Vec<u32>]) -> Result<(), TokenIdsError> {
+    let count = bad_words_token_ids.len();
+    let max = max_num_bad_words();
+    if count > max {
+        return Err(TokenIdsError::TooManyBadWords { count, max });
+    }
+
+    let count = bad_words_token_ids.iter().map(Vec::len).sum();
+    let max = env_limit(
+        MAX_BAD_WORDS_TOTAL_TOKENS_ENV,
+        DEFAULT_MAX_BAD_WORDS_TOTAL_TOKENS,
+    );
+    if count > max {
+        return Err(TokenIdsError::TooManyBadWordTokens { count, max });
+    }
+
+    Ok(())
 }
 
 /// Validate that pre-tokenized prompt IDs are within the engine-visible prompt
@@ -95,15 +142,11 @@ pub(crate) fn validate_vocab_range(
         )?;
     }
 
-    if let Some(token_ids) = params.prompt_logprob_token_ids.as_deref() {
-        validate_param(
-            "prompt_logprob_token_ids",
-            token_ids.iter().copied(),
-            limits.model_vocab_size,
-        )?;
-    }
-
     if let Some(bad_words_token_ids) = params.bad_words_token_ids.as_deref() {
+        if bad_words_token_ids.iter().any(Vec::is_empty) {
+            return Err(TokenIdsError::EmptyBadWordSequence);
+        }
+        validate_bad_words_limits(bad_words_token_ids)?;
         validate_param(
             "bad_words",
             bad_words_token_ids.iter().flatten().copied(),

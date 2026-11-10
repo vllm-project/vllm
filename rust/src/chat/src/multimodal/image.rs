@@ -69,7 +69,10 @@ impl MultimodalModelInfo {
         preprocessing_context: VisionPreprocessingContext,
     ) -> Result<PreprocessedEncoderInputs> {
         let processor = Arc::clone(&support.processor);
-        let images = image_frames.iter().map(|frame| frame.data().clone()).collect::<Vec<_>>();
+        let images = image_frames
+            .iter()
+            .map(|frame| frame.image().cloned())
+            .collect::<std::result::Result<Vec<_>, _>>()?;
 
         // TODO: is it still necessary given that we've already in a dedicated runtime?
         tokio::task::spawn_blocking(move || {

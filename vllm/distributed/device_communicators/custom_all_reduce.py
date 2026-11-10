@@ -106,10 +106,7 @@ def _supports_mnnvl_multimem_reduce_scatter(
     return (
         world_size in _MNNVL_MULTIMEM_REDUCE_SCATTER_WORLD_SIZES
         and device.index is not None
-        and (
-            current_platform.is_device_capability((10, 0), device.index)
-            or current_platform.is_device_capability((10, 3), device.index)
-        )
+        and current_platform.is_device_capability_family(100, device.index)
         and _has_local_multicast_support(device)
     )
 
@@ -147,18 +144,23 @@ class CustomAllreduce:
             _DEFAULT_MNNVL_MULTIMEM_REDUCE_SCATTER_MAX_SIZE
         ),
         symm_mem_enabled=False,
+        *,
+        register_graph_buffers: bool = True,
     ) -> None:
         """Args:
             group: the process group to work on. If None, it will use the
                 default process group.
             device: the device to bind the CustomAllreduce to. If None,
                 it will be bound to f"cuda:{local_rank}".
+            register_graph_buffers: whether graph capture IPC-registers its buffers.
         It is the caller's responsibility to make sure each communicator
-        is bind to a unique device, and all communicators in this group
-        are in the same node.
+        is bound to a unique device. CUDA IPC collectives require all ranks
+        to be on the same node; cross-node groups only support MNNVL
+        all-gather and reduce-scatter.
 
         """
         self._IS_CAPTURING = False
+        self._capture_registered = register_graph_buffers
         self._ptr = 0
         self.disabled = True
         self.mnnvl_buffer = None
@@ -474,6 +476,9 @@ class CustomAllreduce:
                 self.register_graph_buffers()
 
     def register_graph_buffers(self):
+        if self.mnnvl_only:
+            # MNNVL collectives use pre-registered symmetric memory, not CUDA IPC.
+            return
         handle, offset = ops.get_graph_buffer_ipc_meta(self._ptr)
         logger.debug("Registering %d cuda graph addresses", len(offset))
         # We cannot directly use `dist.all_gather_object` here
@@ -493,7 +498,7 @@ class CustomAllreduce:
         ops.register_graph_buffers(self._ptr, handles, offsets)
 
     def should_custom_ar(self, inp: torch.Tensor):
-        if self.disabled or self.world_size > 8:
+        if self.disabled or self.mnnvl_only or self.world_size > 8:
             return False
         if inp.dtype not in (torch.float32, torch.float16, torch.bfloat16):
             return False
@@ -549,7 +554,7 @@ class CustomAllreduce:
             return None
         if self._IS_CAPTURING:
             if torch.cuda.is_current_stream_capturing():
-                return self.all_reduce(input, registered=True)
+                return self.all_reduce(input, registered=self._capture_registered)
             else:
                 # If warm up, mimic the allocation pattern since custom
                 # allreduce is out-of-place.

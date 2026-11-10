@@ -2,8 +2,16 @@
 // https://github.com/sgl-project/sglang/tree/main/sgl-kernel/csrc/cpu
 //
 // Synced from
-// https://github.com/sgl-project/sglang/tree/7c248dde7fe1f3b5100966f8143f97a9932c22a4/sgl-kernel/csrc/cpu
-// Sync date: 2026-07-29
+// https://github.com/sgl-project/sglang/tree/c4870d98cfefa80f5cbf83de2ff6a6745032f86c/python/sglang/kernels/aot/csrc/cpu
+// Sync date: 2026-10-16
+//
+// Partial sync: only moe.cpp, moe.h, moe_fp8.cpp, vec.h and gemm.h were merged
+// (3-way, on top of the prior sync at
+// 7c248dde7fe1f3b5100966f8143f97a9932c22a4). decode.cpp, extend.cpp,
+// gemm_fp8.cpp, topk.cpp and vec_pack.h still match the prior sync: upstream
+// changed them for fp8 packed KV-cache attention (new signatures that need
+// op-schema plumbing) and a topk.cpp rewrite that conflicts with the local
+// DeepSeek-V4 biased-topk. Reconcile them together in a full sync.
 
 // clang-format off
 

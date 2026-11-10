@@ -1,0 +1,161 @@
+meta:
+  title: "QwQ-32B"
+  slug: "qwq-32b"
+  provider: "Qwen"
+  description: "Qwen's 32B dense reasoning model, validated for Intel Xeon 6 CPU execution."
+  date_added: 2026-08-17
+  date_updated: 2026-09-12
+  tasks:
+    - text
+  performance_headline: "Validated for Intel Xeon 6 CPU execution"
+  related_recipes:
+    - "Qwen/Qwen3-32B"
+  hardware:
+    xeon6: verified
+
+model:
+  model_id: "Qwen/QwQ-32B"
+  min_vllm_version: "0.7.3"
+  architecture: dense
+  parameter_count: "32B"
+  active_parameters: "32B"
+  context_length: 40960
+  base_args: []
+  base_env: {}
+
+features:
+  tool_calling:
+    description: "Enable automatic tool choice with the Hermes parser"
+    args:
+      - "--enable-auto-tool-choice"
+      - "--tool-call-parser"
+      - "hermes"
+  reasoning:
+    description: "Extract QwQ reasoning content with the DeepSeek-R1 reasoning parser"
+    args:
+      - "--reasoning-parser"
+      - "deepseek_r1"
+  long_context:
+    description: "YaRN RoPE scaling to the full 131,072-token context, which the model card requires for prompts over 8,192 tokens. Static YaRN holds the scaling factor constant regardless of input length, so leave this off unless you actually serve long prompts."
+    args:
+      - "--hf-overrides"
+      - '{"max_position_embeddings":131072,"rope_parameters":{"rope_type":"yarn","factor":4.0,"original_max_position_embeddings":32768}}'
+      - "--max-model-len"
+      - "131072"
+
+opt_in_features:
+  - long_context
+
+variants:
+  default:
+    precision: bf16
+    vram_minimum_gb: 77
+    description: "Full precision BF16"
+    supported_hardware:
+      - xeon6
+  w8a8_int8:
+    model_id: "RedHatAI/QwQ-32B-quantized.w8a8"
+    precision: int8
+    vram_minimum_gb: 39
+    description: "Red Hat AI INT8 W8A8 compressed-tensors checkpoint"
+    supported_hardware:
+      - xeon6
+  awq:
+    model_id: "Qwen/QwQ-32B-AWQ"
+    precision: int4
+    vram_minimum_gb: 20
+    description: "Qwen official AWQ 4-bit checkpoint"
+    supported_hardware:
+      - xeon6
+    extra_args:
+      - "--quantization"
+      - "awq"
+
+compatible_strategies:
+  - single_node_tp
+  - multi_node_tp
+
+kv_offload_support:
+  offloading_cpu: verified
+  offloading_fs: verified
+
+hardware_overrides: {}
+
+strategy_overrides: {}
+
+guide: |
+  ## Overview
+
+  QwQ-32B is Qwen's 32B dense reasoning model. The CPU model validation table
+  marks it supported on Intel Xeon 6.
+
+  ## Prerequisites
+
+  - Hardware: Intel Xeon 6 CPUs
+  - vLLM CPU >= 0.8.5 for this validated Xeon 6 configuration
+
+  ### pip (Intel Xeon 6 CPUs)
+
+  For Intel and AMD x86 CPUs, follow the
+  [CPU pre-built wheels](https://docs.vllm.ai/en/latest/getting_started/installation/cpu/#pre-built-wheels)
+  installation instructions.
+
+  ### Docker (Intel Xeon 6 CPUs)
+
+  ```bash
+  docker pull vllm/vllm-openai-cpu:latest-x86_64
+  ```
+
+  ## Intel Xeon 6
+
+  ```bash
+  vllm serve Qwen/QwQ-32B \
+    --tensor-parallel-size 1 \
+    --enable-auto-tool-choice \
+    --tool-call-parser hermes \
+    --reasoning-parser deepseek_r1
+  ```
+
+  Docker (the image entrypoint is `vllm serve`):
+
+  ```bash
+  docker run \
+    --privileged --ipc=host -p 8000:8000 \
+    -v ~/.cache/huggingface:/root/.cache/huggingface \
+    vllm/vllm-openai-cpu:latest-x86_64 Qwen/QwQ-32B \
+    --tensor-parallel-size 1 \
+    --enable-auto-tool-choice \
+    --tool-call-parser hermes \
+    --reasoning-parser deepseek_r1
+  ```
+
+  W8A8 INT8:
+
+  ```bash
+  vllm serve RedHatAI/QwQ-32B-quantized.w8a8
+  ```
+
+  The example uses TP=1. Adjust tensor parallelism based on system topology;
+  topology-specific CPU binding is intentionally not hard-coded.
+
+  ## Runtime and Platform Tuning
+
+  The following settings are intentionally not prescribed as portable CPU model
+  defaults because they depend on the workload, hardware, or runtime environment:
+
+  - `--max-num-batched-tokens`: scheduler/throughput tuning.
+  - `--max-num-seqs`: concurrency and scheduler-capacity tuning.
+  - `--gpu-memory-utilization`: platform memory-budget tuning.
+  - `--no-enable-prefix-caching`: workload/benchmark cache-policy tuning.
+  - `VLLM_ENGINE_ITERATION_TIMEOUT_S`: operational runtime timeout.
+
+  These settings may still appear in validated hardware-specific overrides. Tune
+  them at deployment time based on platform resources, workload shape, and
+  latency/throughput goals.
+
+  ## References
+
+  - [Model card](https://huggingface.co/Qwen/QwQ-32B)
+  - [W8A8 variant](https://huggingface.co/RedHatAI/QwQ-32B-quantized.w8a8)
+  - [vLLM reasoning outputs](https://docs.vllm.ai/en/latest/features/reasoning_outputs.html)
+  - [vLLM tool calling](https://docs.vllm.ai/en/latest/features/tool_calling.html)

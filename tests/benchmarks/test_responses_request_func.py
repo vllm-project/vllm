@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for the ``openai-responses`` backend of ``vllm bench serve``.
+"""Tests for the `openai-responses` backend of `vllm bench serve`.
 
 The Responses stream differs from Chat Completions in ways the benchmark client
-has to get right: every SSE message is labelled with an ``event:`` line,
+has to get right: every SSE message is labelled with an `event:` line,
 reasoning and output text arrive as separate token-bearing events, and a
-request ends with ``response.completed`` rather than with its last token. These
+request ends with `response.completed` rather than with its last token. These
 tests drive the real request function against a local SSE server so the
 resulting latency and usage numbers are covered end to end.
 """
@@ -40,10 +40,10 @@ GAP_FINALIZE = 0.3
 
 
 def sse(event_type: str, payload: dict) -> bytes:
-    """Frame one event the way ``/v1/responses`` does, with an ``event:`` line.
+    """Frame one event the way `/v1/responses` does, with an `event:` line.
 
-    ``ensure_ascii=False`` matches the server, whose pydantic
-    ``model_dump_json`` emits non-ASCII characters unescaped.
+    `ensure_ascii=False` matches the server, whose pydantic
+    `model_dump_json` emits non-ASCII characters unescaped.
     """
     data = json.dumps({"type": event_type, **payload}, ensure_ascii=False)
     return f"event: {event_type}\ndata: {data}\n\n".encode()
@@ -108,7 +108,7 @@ async def _serve(
     seen: dict | None = None,
     **request_kwargs,
 ) -> RequestFuncOutput:
-    """Run the request function against a server replaying ``script``.
+    """Run the request function against a server replaying `script`.
 
     Args:
         script: Byte strings to write, interleaved with floats to sleep for.
@@ -116,14 +116,14 @@ async def _serve(
         chunk_size: If set, split every write into chunks of this many bytes to
             emulate fragmented transport.
         seen: If given, populated with the request payload.
-        request_kwargs: Extra fields for the ``RequestFuncInput``.
+        request_kwargs: Extra fields for the `RequestFuncInput`.
 
     """
 
     async def handler(request: web.Request) -> web.StreamResponse:
         if seen is not None:
             seen["payload"] = await request.json()
-            seen["headers"] = dict(request.headers)
+            seen["headers"] = request.headers.copy()
         if status != 200:
             return web.Response(status=status, reason="Bad Request")
 
@@ -183,6 +183,7 @@ def test_request_payload_is_accepted_by_the_server_schema():
         "temperature": 0.7,
         "top_p": 0.9,
         "top_k": 20,
+        "min_p": 0.05,
         "frequency_penalty": 0.2,
         "presence_penalty": 0.1,
         "repetition_penalty": 1.05,
@@ -216,9 +217,6 @@ def test_request_payload_is_accepted_by_the_server_schema():
     }
     assert set(seen["payload"]) <= set(ResponsesRequest.model_fields)
     ResponsesRequest.model_validate(seen["payload"])
-
-    # `vllm bench serve` rejects --min-p for this backend for the same reason.
-    assert "min_p" not in ResponsesRequest.model_fields
 
 
 def test_latency_accounting_matches_the_other_endpoints():
@@ -277,6 +275,82 @@ def test_usage_is_taken_from_the_terminal_event():
     assert output.success
     assert output.prompt_len == 17
     assert output.output_tokens == 4
+
+
+def tool_delta(delta: str, event_type: str = "response.function_call_arguments.delta"):
+    return sse(event_type, {"output_index": 0, "item_id": "fc_1", "delta": delta})
+
+
+def test_tool_call_only_response_is_timed_and_counted():
+    """A forced tool call streams only argument deltas, no output text.
+
+    These are generated tokens, as `tool_calls` deltas are on `openai-chat`.
+    Counting only text deltas would fail every such request.
+    """
+    output = run(
+        [
+            sse("response.created", {"response": {"status": "in_progress"}}),
+            sse("response.output_item.added", {"item": {"type": "function_call"}}),
+            GAP_PREFILL,
+            tool_delta('{"city": '),
+            GAP_TOKEN,
+            tool_delta('"Paris"'),
+            tool_delta("}"),
+            sse("response.function_call_arguments.done", {"arguments": "{}"}),
+            sse("response.output_item.done", {"output_index": 0}),
+            GAP_FINALIZE,
+            usage_event(20, 6),
+        ]
+    )
+
+    assert output.success, output.error
+    # Tool arguments are not output text, as on `openai-chat`.
+    assert output.generated_text == ""
+    assert output.output_tokens == 6
+    assert GAP_PREFILL * 0.8 <= output.ttft < GAP_PREFILL + GAP_TOKEN * 0.5
+    assert len(output.itl) == 2
+    assert output.itl[0] >= GAP_TOKEN * 0.5
+    assert output.latency - output.ttft == pytest.approx(sum(output.itl), abs=1e-9)
+
+
+@pytest.mark.parametrize(
+    "event_type",
+    [
+        "response.function_call_arguments.delta",
+        "response.custom_tool_call_input.delta",
+        "response.mcp_call_arguments.delta",
+        "response.code_interpreter_call_code.delta",
+    ],
+)
+def test_every_tool_delta_event_starts_the_clock(event_type: str):
+    """Each tool delta event the server can emit carries generated tokens."""
+    output = run(
+        [
+            PREAMBLE,
+            tool_delta("a", event_type),
+            tool_delta("b", event_type),
+            usage_event(5, 2),
+        ]
+    )
+
+    assert output.success, output.error
+    assert len(output.itl) == 1
+
+
+def test_text_then_tool_call_times_both():
+    """Text before a tool call starts the clock; argument deltas add ITL."""
+    output = run(
+        [
+            PREAMBLE,
+            text_delta("Checking."),
+            tool_delta('{"city": "Paris"}'),
+            usage_event(5, 9),
+        ]
+    )
+
+    assert output.success, output.error
+    assert output.generated_text == "Checking."
+    assert len(output.itl) == 1
 
 
 @pytest.mark.parametrize("event_type", ["response.completed", "response.incomplete"])
@@ -355,9 +429,11 @@ def test_multi_line_data_payload_is_joined_with_newlines():
     """The SSE spec allows one payload to span several `data:` lines."""
     script: list[bytes | float] = [
         PREAMBLE,
-        b"event: response.output_text.delta\n"
-        b'data: {"type": "response.output_text.delta",\n'
-        b'data:  "delta": "ok"}\n\n',
+        (
+            b"event: response.output_text.delta\n"
+            b'data: {"type": "response.output_text.delta",\n'
+            b'data:  "delta": "ok"}\n\n'
+        ),
         usage_event(5, 1),
     ]
     output = run(script)
@@ -427,7 +503,7 @@ def test_mid_stream_error_is_not_reported_as_success():
 
 
 def test_data_only_framing_is_still_parsed():
-    """Some proxies drop the ``event:`` line and forward only ``data:``."""
+    """Some proxies drop the `event:` line and forward only `data:`."""
     script: list[bytes | float] = [
         b'data: {"type": "response.output_text.delta", "delta": "ok"}\n\n',
         usage_event(5, 1),

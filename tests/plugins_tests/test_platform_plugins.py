@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import subprocess
+import sys
+
 import pytest
 import torch
 
@@ -31,6 +34,20 @@ def test_platform_plugins():
     )
 
 
+def test_import_vllm_does_not_resolve_platform():
+    # Platform plugins must be loaded after `import vllm` completes; resolving
+    # current_platform during it runs plugins against a half-imported vLLM.
+    # Needs a fresh interpreter, since vllm is already imported here.
+    code = (
+        "import sys, vllm\n"
+        "p = sys.modules.get('vllm.platforms')\n"
+        "assert p is None or p._current_platform is None, p._init_trace\n"
+        "from vllm.platforms import current_platform\n"
+        "assert current_platform.device_name == 'DummyDevice'\n"
+    )
+    subprocess.run([sys.executable, "-c", code], check=True)
+
+
 def test_oot_custom_op(default_vllm_config, monkeypatch: pytest.MonkeyPatch):
     # simulate workload by running an example
     load_general_plugins()
@@ -44,4 +61,21 @@ def test_oot_custom_op(default_vllm_config, monkeypatch: pytest.MonkeyPatch):
     assert hasattr(layer, "addition_config"), (
         "Expected DummyRotaryEmbedding to have an 'addition_config' attribute, "
         "which is set by the custom op."
+    )
+
+
+def test_oot_pluggable_layer(default_vllm_config):
+    load_general_plugins()
+    from vllm.model_executor.layers.rotary_embedding.mrope_vit_setup import (
+        VitMropeSetup,
+    )
+
+    layer = VitMropeSetup()
+    assert layer.__class__.__name__ == "DummyVitMropeSetup", (
+        f"Expected DummyVitMropeSetup, got {layer.__class__.__name__}, "
+        "possibly because the pluggable layer is not registered correctly."
+    )
+    assert hasattr(layer, "addition_config"), (
+        "Expected DummyVitMropeSetup to have an 'addition_config' attribute, "
+        "which is set by the OOT pluggable layer."
     )

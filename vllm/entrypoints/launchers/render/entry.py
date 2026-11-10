@@ -87,9 +87,14 @@ async def run_launch_fastapi(args: argparse.Namespace) -> None:
     # cache space warning from CpuPlatform.check_and_update_config.
     envs.VLLM_CPU_KVCACHE_SPACE = 0
 
+    # Merge frontend parser flags (e.g. --reasoning-parser) into the
+    # structured outputs config, mirroring `create_engine_config`, which this
+    # GPU-less entrypoint bypasses. Model-specific defaults are then applied
+    # by `verify_and_update_config` during VllmConfig construction.
     vllm_config = VllmConfig(
         model_config=model_config,
         logging_config=engine_args.create_logging_config(),
+        structured_outputs_config=engine_args.create_structured_outputs_config(),
     )
     shutdown_task = await build_and_serve_renderer(
         vllm_config, listen_address, sock, args
@@ -103,13 +108,12 @@ async def run_launch_fastapi(args: argparse.Namespace) -> None:
 if __name__ == "__main__":
     import uvloop
 
-    from vllm.entrypoints.serve.utils.api_utils import cli_env_setup
-    from vllm.utils.argparse_utils import FlexibleArgumentParser
-
-    from ..cli_args import (
+    from vllm.entrypoints.common.cli_args import (
         make_arg_parser,
         validate_parsed_serve_args,
     )
+    from vllm.entrypoints.common.startup import cli_env_setup
+    from vllm.utils.argparse_utils import FlexibleArgumentParser
 
     cli_env_setup()
     parser = FlexibleArgumentParser(

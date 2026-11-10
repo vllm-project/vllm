@@ -1,0 +1,375 @@
+meta:
+  title: "Macaron-V1-Coding-Venti"
+  slug: "macaron-v1-coding-venti"
+  provider: "MindLab Research"
+  description: "Macaron-V1-Coding-Venti — MindLab's coding-specialist checkpoint: the Macaron-V1-Venti L2 Coding LoRA merged into the GLM-5.2 BF16 base. Same MoE architecture and launch as GLM-5.2 (~743B total, 39B active), no runtime adapter."
+  date_added: 2026-07-28
+  date_updated: 2026-07-23
+  tasks:
+    - text
+  performance_headline: "Coding-specialist merged-LoRA on GLM-5.2 — tuned for SWE Verified, TerminalBench, DeepSWE, and agentic coding"
+  related_recipes:
+    - "zai-org/GLM-5.2"
+  hardware:
+    b300: verified
+
+model:
+  model_id: "mindlab-research/Macaron-V1-Coding-Venti"
+  min_vllm_version: "0.25.0"
+  docker_image:
+    nvidia: "vllm/vllm-openai:v0.28.0"
+    amd: "vllm/vllm-openai-rocm:nightly"
+  architecture: moe
+  parameter_count: "743B"
+  active_parameters: "39B"
+  context_length: 1048576
+  base_args:
+    - "--kv-cache-dtype"
+    - "fp8_e4m3"
+  base_env: {}
+
+features:
+  tool_calling:
+    description: "GLM-4.7 tool call parser with automatic tool choice"
+    args:
+      - "--tool-call-parser"
+      - "glm47"
+      - "--enable-auto-tool-choice"
+  reasoning:
+    description: "GLM-4.5 reasoning parser — thinking mode enabled by default on requests"
+    args:
+      - "--reasoning-parser"
+      - "glm45"
+  spec_decoding:
+    description: "Multi-Token Prediction speculative decoding (up to 5 draft tokens)"
+    default_mode: mtp
+    modes:
+      mtp:
+        label: "MTP"
+        description: "Built-in Multi-Token Prediction inherited from the GLM-5.2 base, 5 draft tokens."
+        variants:
+          - default
+          - fp8
+        args:
+          - "--speculative-config"
+          - '{"method":"mtp","num_speculative_tokens":5}'
+      dspark:
+        label: "DSpark"
+        description: "DSpark drafting with the externally trained GLM-5.2 7-token draft model; the served Macaron checkpoint is unchanged."
+        variants:
+          - default
+        args:
+          - "--speculative-config"
+          - '{"model": "RedHatAI/GLM-5.2-speculator.dspark","num_speculative_tokens": 7,"method": "dspark"}'
+
+opt_in_features:
+  - spec_decoding
+
+variants:
+  default:
+    precision: bf16
+    vram_minimum_gb: 1786
+    description: "Full-precision BF16 merged checkpoint — requires multi-node (≈1786 GB weights + KV; a single 8xH200/8xB200 node does not fit)."
+    hardware_overrides:
+      amd:
+        extra_args:
+          - "--linear-backend"
+          - "aiter"
+      mi355x:
+        extra_args:
+          - "--max-model-len"
+          - "262144"
+  fp8:
+    precision: fp8
+    label: "FP8 (on-the-fly)"
+    vram_minimum_gb: 893
+    description: "Same BF16 checkpoint, quantized to FP8 at load time via --quantization fp8 — not a native FP8 weight set. Halves weight memory so it fits a single node; on a B300 node it leaves ~2.7× the GPU KV-cache space of BF16 (≈3.07M vs 1.12M). Slower startup; on GSM8K (5-shot, exact-match) it matches native BF16 within noise (0.9424 vs 0.9431, ±0.0064)."
+    extra_args:
+      - "--quantization"
+      - "fp8"
+    hardware_overrides:
+      amd:
+        extra_args:
+          - "--quantization"
+          - "fp8_per_channel"
+
+compatible_strategies:
+  - single_node_tp
+  - single_node_tep
+  - multi_node_tp
+  - multi_node_tp_pp
+  - multi_node_tep
+  - multi_node_dep
+  - pd_cluster
+
+hardware_overrides:
+  hopper:
+    # H100/H200 use plain fp8 KV cache; Blackwell keeps base_args' fp8_e4m3, H20 do not use kvcache fp8.
+    # The synthesizer's last-wins dedupe lets this shadow --kv-cache-dtype.
+    extra_args:
+      - "--kv-cache-dtype"
+      - "fp8"
+  amd:
+    extra_args:
+      - "--moe-backend"
+      - "aiter"
+    extra_env:
+      VLLM_ROCM_USE_AITER: "1"
+      VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: "1"
+
+strategy_overrides: {}
+
+guide: |
+  ## Overview
+
+  **Macaron-V1-Coding-Venti** is MindLab Research's coding-specialist checkpoint in the
+  Macaron-V1 family. It is produced by **merging the Macaron-V1-Venti L2 Coding LoRA
+  specialist into the GLM-5.2 BF16 base**, yielding a single merged checkpoint — no PEFT
+  adapter or Mixture-of-LoRA (MoL) router is needed at runtime. It targets code
+  understanding, repository-level software engineering, terminal use, and coding-agent
+  workflows, and reports strong coding/terminal slices (SWE Verified 85.6, TerminalBench 2.1
+  87.6, DeepSWE 58.4) on the Macaron evaluation suite.
+
+  Because it is a weight-level merge of a LoRA onto GLM-5.2, the runtime architecture is
+  **identical to GLM-5.2** — same `GlmMoeDsaForCausalLM` MoE (~743B total / 39B active), same
+  1M native context, same MTP indexer. **Launch it with the same serving stack as [GLM-5.2 recipe](/zai-org/GLM-5.2).**
+
+  This model ships **BF16 only** (no native FP8 / NVFP4 checkpoint). At full BF16 precision
+  (≈1786 GB) it needs multi-node; the **FP8 (on-the-fly)** variant loads the same weights as
+  FP8 (`--quantization fp8`, ≈893 GB) to fit a single 8×H200 / 8×B200 node — or to free VRAM
+  on larger trays.
+
+  ## Prerequisites
+
+  - **vLLM 0.25.0** (stable) — the `GlmMoeDsaForCausalLM` handler is the same one GLM-5.2 uses.
+  - **GPU:** at full **BF16** precision (≈1786 GB) a single 8×H200 / 8×B200 node does not fit —
+    run **multi-node** (e.g. 2× 8-GPU nodes, tensor-parallel 16), or pick the **FP8 (on-the-fly)**
+    variant (≈893 GB, `--quantization fp8`; `fp8_per_channel` on AMD) to run single-node. The native FP8/NVFP4 GLM-5.2
+    checkpoints are a calibrated-quant alternative.
+
+  ## Installation
+
+  ### Docker
+
+  The BF16 variant needs two nodes (the FP8 (on-the-fly) variant fits one — see Launching
+  below). Run one container per node (each `--gpus all`, 8 local GPUs); both pass
+  `--tensor-parallel-size 16 --nnodes 2`, varying `--node-rank`. This is the head node —
+  node 1 repeats with `--node-rank 1 --headless`.
+
+  ```bash
+  docker run --gpus all \
+    -p 8000:8000 \
+    --ipc=host \
+    --network host \
+    -v ~/.cache/huggingface:/root/.cache/huggingface \
+    vllm/vllm-openai:v0.28.0 mindlab-research/Macaron-V1-Coding-Venti \
+      --tensor-parallel-size 16 \
+      --nnodes 2 \
+      --node-rank 0 \
+      --master-addr $HEAD_IP \
+      --kv-cache-dtype fp8 \
+      --tool-call-parser glm47 \
+      --reasoning-parser glm45 \
+      --enable-auto-tool-choice \
+      --served-model-name macaron-v1-coding-venti
+  ```
+
+  ### From source
+
+  ```bash
+  uv venv
+  source .venv/bin/activate
+  uv pip install "vllm==0.25.0" --torch-backend=auto
+  uv pip install "transformers>=5.9.0"
+  ```
+
+  ## Launching the server
+
+  Pick the **Variant** that matches your hardware: **BF16** for full precision on multi-node,
+  or **FP8 (on-the-fly)** to fit a single node (or free VRAM on a larger tray). The builder
+  renders the exact flags per your Variant / Strategy / Nodes picks.
+
+  ### BF16 — 2× 8xH200 (multi-node TP)
+
+  Full-precision BF16 (≈1786 GB) needs multi-node. The command below is a 2-node
+  tensor-parallel example (16 GPUs). Run the head command on node 0 and the worker on node 1,
+  pointing `--master-addr` at the head's IP. Pick the **Multi-node TP** strategy in the
+  builder to render both tabs.
+
+  ```bash
+  # Node 0 (head)
+  vllm serve mindlab-research/Macaron-V1-Coding-Venti \
+    --kv-cache-dtype fp8 \
+    --tensor-parallel-size 16 \
+    --tool-call-parser glm47 \
+    --reasoning-parser glm45 \
+    --enable-auto-tool-choice \
+    --served-model-name macaron-v1-coding-venti
+
+  # Node 1
+  vllm serve mindlab-research/Macaron-V1-Coding-Venti \
+    --kv-cache-dtype fp8 \
+    --tensor-parallel-size 16 \
+    --tool-call-parser glm47 \
+    --reasoning-parser glm45 \
+    --enable-auto-tool-choice \
+    --served-model-name macaron-v1-coding-venti
+  ```
+
+  > The builder emits the exact multi-node multiprocessing args (`--nnodes`,
+  > `--node-rank`, `--master-addr` for TP) when you select **Multi-node TP**.
+
+  ### FP8 (on-the-fly) on a single node
+
+  Pick the **FP8 (on-the-fly)** variant to load the same BF16 checkpoint as FP8 via
+  `--quantization fp8` (runtime quantization — not a native FP8 weight set). At ≈893 GB it
+  fits a single 8×H200 / 8×B200 node, and on larger trays (e.g. B300) it frees VRAM for
+  longer context or more concurrent sequences. Startup is slower while the quantization pass
+  runs at load; the accuracy / KV-cache trade-off is small (see the B300 numbers below).
+
+  ```bash
+  vllm serve mindlab-research/Macaron-V1-Coding-Venti \
+    --quantization fp8 \
+    --tensor-parallel-size 8 \
+    --kv-cache-dtype fp8 \
+    --tool-call-parser glm47 \
+    --reasoning-parser glm45 \
+    --enable-auto-tool-choice \
+    --served-model-name macaron-v1-coding-venti
+  ```
+
+  - **`--max-model-len`** — raise toward the 1M window when KV-cache headroom allows; lower on OOM.
+  - **`--max-num-seqs 32`** — the main knob for fitting long context under concurrency.
+  - **`--gpu-memory-utilization 0.80`** — leaves ROCm runtime headroom for MTP graph capture.
+
+  On a **B300** node, on-the-fly FP8 trades a negligible accuracy drop for a large KV-cache
+  headroom gain:
+
+  | Variant | GSM8K 5-shot (exact-match) | B300 GPU KV-cache size |
+  |---|---:|---:|
+  | BF16 | 0.9431 (±0.0064) | ≈1.12M |
+  | FP8 (on-the-fly) | 0.9424 (±0.0064) | ≈3.07M |
+
+  The GSM8K scores sit within stderr of each other, while FP8 leaves ~2.7× the KV-cache space
+  — so on B300 (where BF16 already fits) FP8 buys far more concurrency / context at almost no
+  accuracy cost.
+
+  ### Speculative decoding (MTP)
+
+  The merged weights inherit GLM-5.2's built-in Multi-Token Prediction head, so MTP works
+  exactly as on GLM-5.2 — on both the BF16 and FP8 (on-the-fly) variants. Toggle
+  **spec_decoding → MTP** in the builder:
+
+  ```bash
+  vllm serve mindlab-research/Macaron-V1-Coding-Venti \
+    --kv-cache-dtype fp8 \
+    --tensor-parallel-size 16 \
+    --speculative-config '{"method":"mtp","num_speculative_tokens":5}' \
+    --tool-call-parser glm47 \
+    --reasoning-parser glm45 \
+    --enable-auto-tool-choice \
+    --served-model-name macaron-v1-coding-venti
+  ```
+
+  ### AMD MI300X / MI355X
+
+  Use the AITER backends under ROCm, same as GLM-5.2. On AMD the FP8 (on-the-fly) variant
+  uses `--quantization fp8_per_channel`.
+
+  FP8 (on-the-fly):
+
+  ```bash
+  VLLM_ROCM_USE_AITER=1 \
+  VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=1 \
+  vllm serve mindlab-research/Macaron-V1-Coding-Venti \
+    --kv-cache-dtype fp8_e4m3 \
+    --tensor-parallel-size 8 \
+    --quantization fp8_per_channel \
+    --moe-backend aiter \
+    --tool-call-parser glm47 \
+    --enable-auto-tool-choice \
+    --reasoning-parser glm45
+  ```
+
+  BF16:
+
+  ```bash
+  VLLM_ROCM_USE_AITER=1 \
+  VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=1 \
+  vllm serve mindlab-research/Macaron-V1-Coding-Venti \
+    --kv-cache-dtype fp8_e4m3 \
+    --tensor-parallel-size 8 \
+    --max-model-len 262144 \
+    --linear-backend aiter \
+    --moe-backend aiter \
+    --tool-call-parser glm47 \
+    --enable-auto-tool-choice \
+    --reasoning-parser glm45
+  ```
+
+  On 8×MI355X, GSM8K 5-shot (strict-match) is 0.9469 for both BF16 and FP8 (on-the-fly).
+
+  ## Reasoning modes
+
+  Thinking is **on by default** and reuses the GLM/DeepSeek-V4 `reasoning_effort` mechanism,
+  identical to GLM-5.2. The chat template resolves effort to **`max` unless
+  `reasoning_effort` is explicitly `"high"`**.
+
+  | Mode | How to request | Behavior |
+  |------|----------------|----------|
+  | **Think Max** (default) | omit `reasoning_effort`, or set `"max"` | Deepest reasoning — hard math, multi-step planning, agentic tasks. |
+  | **Think High** | `"reasoning_effort": "high"` | Balanced depth and latency. |
+  | **Non-think** | `chat_template_kwargs.enable_thinking: false` | Fast, no chain-of-thought. |
+
+  ## Client usage
+
+  ```python
+  from openai import OpenAI
+
+  client = OpenAI(api_key="EMPTY", base_url="http://localhost:8000/v1")
+  msgs = [{"role": "user", "content": "Refactor this function to handle empty input."}]
+
+  # Think Max (default) — just omit reasoning_effort
+  client.chat.completions.create(model="macaron-v1-coding-venti", messages=msgs, max_tokens=4096)
+
+  # Think High
+  client.chat.completions.create(
+      model="macaron-v1-coding-venti",
+      messages=msgs,
+      max_tokens=4096,
+      extra_body={"chat_template_kwargs": {"reasoning_effort": "high"}},
+  )
+
+  # Non-think
+  client.chat.completions.create(
+      model="macaron-v1-coding-venti",
+      messages=msgs,
+      max_tokens=4096,
+      extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+  )
+  ```
+
+  ## Benchmarking
+
+  Add `--no-enable-prefix-caching` to the server command for a clean measurement.
+
+  ```bash
+  vllm bench serve \
+    --model mindlab-research/Macaron-V1-Coding-Venti \
+    --dataset-name random \
+    --random-input 8000 \
+    --random-output 1024 \
+    --request-rate 10 \
+    --num-prompts 32 \
+    --ignore-eos
+  ```
+
+  > **Note:** pure throughput benchmarks tend to under-report real speed, because MTP's
+  > acceptance rate is usually low in synthetic runs.
+
+  ## References
+
+  - [Model card](https://huggingface.co/mindlab-research/Macaron-V1-Coding-Venti)
+  - [Base model: GLM-5.2 recipe](/zai-org/GLM-5.2)
+  - [Introducing Macaron-V1 (blog)](https://macaron.im/mindlab/research/introducing-macaron-v1)
+  - [Macaron Artifacts (GitHub)](https://github.com/MindLab-Research/macaron-artifacts)

@@ -76,7 +76,8 @@ mod tests {
     use std::sync::Arc;
 
     use serde_json::json;
-    use vllm_tokenizer::{DecodedText, Tokenizer, test_utils::TestTokenizer};
+    use vllm_tokenizer::Tokenizer;
+    use vllm_tokenizer::test_utils::{TestTokenizer, decode_chunks};
     use xgrammar_structural_tag::{StructuralTag, ToolChoice};
 
     use super::{HyV3UnifiedParser, UnifiedParser};
@@ -114,6 +115,7 @@ mod tests {
                 "properties": { "city": { "type": "string" } },
             }),
             strict: None,
+            defer_loading: None,
         }]
     }
 
@@ -121,7 +123,7 @@ mod tests {
     fn parses_suffixed_reasoning_and_tool_call_as_one_stream() {
         let tokenizer = Arc::new(tokenizer());
         let think_start_id = tokenizer.token_to_id("<think:opensource>").unwrap();
-        let mut parser = HyV3UnifiedParser::new(&tools(), tokenizer).unwrap();
+        let mut parser = HyV3UnifiedParser::new(&tools(), tokenizer.clone()).unwrap();
         parser.initialize(&[think_start_id]).unwrap();
 
         let chunks = [
@@ -132,20 +134,22 @@ mod tests {
             "</tool_call:opensource></tool_calls:opensource>",
         ];
         let mut output = UnifiedParserOutput::default();
-        for chunk in chunks {
-            parser.parse_into(DecodedText::unattributed(chunk), &mut output).unwrap();
+        for chunk in decode_chunks(tokenizer.as_ref(), &chunks) {
+            parser.parse_into(chunk, &mut output).unwrap();
         }
         output.append(parser.finish().unwrap());
 
         assert_eq!(
             output.events,
             vec![
-                UnifiedParserEvent::Reasoning(DecodedText::unattributed("reasoning")),
+                UnifiedParserEvent::Reasoning(
+                    decode_chunks(tokenizer.as_ref(), &["reasoning"]).remove(0),
+                ),
                 UnifiedParserEvent::Text("answer".to_string()),
                 UnifiedParserEvent::ToolCall(crate::tool::ToolCallDelta {
                     tool_index: 0,
                     name: Some("get_weather".to_string()),
-                    arguments: r#"{"city":"Beijing"}"#.to_string(),
+                    arguments: r#"{"city": "Beijing"}"#.to_string(),
                 }),
             ]
         );
@@ -163,6 +167,7 @@ mod tests {
                 tools: &tools,
                 tool_strict_level: Default::default(),
                 parallel_tool_calls: true,
+                answer: None,
                 tool_choice: &ToolChoice::required(),
             })
             .unwrap()
@@ -181,10 +186,10 @@ mod tests {
         let tools = tools();
         let tokenizer = Arc::new(tokenizer());
         let mut parser = HyV3UnifiedParser::new(&tools, tokenizer.clone()).unwrap();
-        for (prompt, inside) in [
-            ("<think:opensource>", true),
-            ("</think:opensource>", false),
-            ("", false),
+        for (prompt, state) in [
+            ("<think:opensource>", "inside"),
+            ("</think:opensource>", "closed"),
+            ("", "outside"),
         ] {
             parser.initialize(&tokenizer.encode(prompt, false).unwrap()).unwrap();
             let grammar = parser
@@ -193,17 +198,23 @@ mod tests {
                     tool_choice: &ToolChoice::required(),
                     tool_strict_level: Default::default(),
                     parallel_tool_calls: true,
+                    answer: None,
                 })
                 .unwrap()
                 .unwrap();
             let value = serde_json::to_value(grammar.format).unwrap();
             let root = &value["elements"][0];
-            if inside {
-                assert_eq!(root["begin"], "");
-                assert_eq!(root["end"], "</think:opensource>");
-            } else {
-                assert_eq!(root["type"], "optional");
-                assert_eq!(root["content"]["begin"], "<think:opensource>");
+            match state {
+                "inside" => {
+                    assert_eq!(root["begin"], "");
+                    assert_eq!(root["end"], "</think:opensource>");
+                }
+                // A prompt that closed reasoning starts with the tool calls.
+                "closed" => assert_eq!(root["value"], "<tool_calls:opensource>\n"),
+                _ => {
+                    assert_eq!(root["type"], "optional");
+                    assert_eq!(root["content"]["begin"], "<think:opensource>");
+                }
             }
         }
     }
